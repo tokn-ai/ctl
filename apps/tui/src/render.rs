@@ -116,6 +116,21 @@ impl Frame {
       self.columns,
       height,
     );
+    self.canvas_at(view, panes, copies, focused, (offset_x, offset_y));
+  }
+
+  pub fn canvas_at(
+    &mut self,
+    view: &ViewInfo,
+    panes: &BTreeMap<String, Pane>,
+    copies: &BTreeMap<String, CopyMode>,
+    focused: &str,
+    (offset_x, offset_y): (u16, u16),
+  ) {
+    let height = self.rows.saturating_sub(1);
+    if height == 0 || self.columns == 0 {
+      return;
+    }
     // Only cells not covered by a pane become dividers; no border reduces PTY space.
     let mut covered = vec![false; usize::from(self.columns) * usize::from(height)];
     for rect in &view.visible_panes() {
@@ -436,7 +451,7 @@ pub fn pane_position(
   ))
 }
 
-fn viewport_offset(
+pub(crate) fn viewport_offset(
   view: &ViewInfo,
   pane: Option<&Pane>,
   copy: Option<&CopyMode>,

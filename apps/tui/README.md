@@ -189,9 +189,17 @@ and desktop see the same rectangles; canvas changes, detach, and reconnect
 retain the proportions. Daemon restart still ends these in-memory views.
 Clients selecting an earlier contract can view unequal panes and rearrange
 compatible layouts without resetting proportions, but cannot resize dividers.
-Desktop mouse dragging requires `1.1.17`; the TUI receives the same confirmed
-geometry. TUI resizing uses the keyboard bindings above. If this
-client does not own resize, **Ctrl+B R** requests the available view lease.
+In both the TUI and desktop, drag a divider with the left mouse button to resize
+its adjacent panes. Mouse dragging requires `1.1.17` and the view resize lease;
+**Ctrl+B R** requests that lease when it is available. Dragging a divider keeps
+the current pane focused and preserves its copy selection. A drag that starts
+inside a pane continues to select text or report mouse input to its application.
+
+The TUI waits for each resize confirmation and combines intervening pointer
+movements, including the final mouseup position. Output and routine view refreshes
+keep the drag active. Esc cancels remaining movement; disconnecting, changing the
+view, losing resize ownership, or resizing the host terminal also ends the drag.
+Already confirmed pane sizes remain in effect.
 
 Each pane has its own bounded VT emulator. The renderer uses authoritative pane
 rectangles and the server's reserved separator cells, without taking rows or
@@ -216,8 +224,7 @@ authentication is required, detach and reconnect to answer the prompt. Detaching
 releases leases without terminating the session. Normal exit, errors, and Unix
 termination/hangup signals restore the host terminal mode and alternate screen.
 
-TUI pane border dragging, extended keyboard protocols,
-and a command prompt remain unimplemented. Rendering shares the
+Extended keyboard protocols and a command prompt remain unimplemented. Rendering shares the
 daemon's `avt` terminal emulation capabilities; it is not full tmux feature parity.
 
 ## Validate
@@ -235,7 +242,10 @@ handler tests check shared sizing, read-only viewing, reconnect, and input lease
 `terminal_process` launches the real `ctmux-tui` binary inside a host PTY on
 Linux and macOS. It sends terminal bytes through crossterm and checks the rendered
 screen, covering modifier handling, repeated pane navigation, paste, copy mode,
-mouse scrolling, the bottom status row, shared pane resizing, detach, and host terminal loss.
+mouse scrolling, the bottom status row, shared pane resizing, divider dragging,
+detach, and host terminal loss. Drag cases check nested splits, held gestures
+across view refreshes, frozen copy selections, mouseup targets, cancellation,
+ownership, and actual PTY dimensions.
 Reconnect cases cut live streams repeatedly, stall metadata requests, expire
 resume tokens, and check controls, actual shell input, and released leases.
 These tests need permission to bind local Unix sockets and open PTYs.

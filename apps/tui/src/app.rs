@@ -2,11 +2,12 @@ use crate::{
   Result,
   actions::{Action, Direction},
   copy::{Action as CopyAction, BottomBehavior, CopyMode},
+  divider::{Divider, Drag},
   input::{self, Prefix},
   keys::{Dispatch, KeyState},
   maintenance::{Maintenance, Reconnect, Snapshot},
   pane::{Pane, ReconnectLeases, identity},
-  render::{Frame, Renderer, pane_at, pane_position},
+  render::{Frame, Renderer, pane_at, pane_position, viewport_offset},
   transport::{LocalTransport, Transport},
 };
 use crossterm::event::{
@@ -76,6 +77,7 @@ pub struct App<'a> {
   copies: BTreeMap<String, CopyMode>,
   archive_copy: Option<CopyMode>,
   mouse_capture: Option<MouseCapture>,
+  divider_drag: Option<Drag>,
   copy_buffer: Option<String>,
   message: String,
   message_until: Instant,
@@ -110,6 +112,7 @@ impl App<'_> {
       copies: BTreeMap::new(),
       archive_copy: None,
       mouse_capture: None,
+      divider_drag: None,
       copy_buffer: None,
       message: String::new(),
       message_until: Instant::now(),
@@ -594,6 +597,13 @@ impl App<'_> {
                 .any(|terminal| terminal.terminal_id == id)
             }) =>
         {
+          if self
+            .divider_drag
+            .as_ref()
+            .is_some_and(|drag| drag.owner == id)
+          {
+            self.divider_drag = None;
+          }
           self.panes.insert(id, pane);
           self.clear_connection_notice();
         }
@@ -644,8 +654,10 @@ impl App<'_> {
   async fn drain(&mut self) {
     let mut notices = Vec::new();
     let mut view_update: Option<ViewInfo> = None;
+    let mut resize_results = Vec::new();
+    let mut drag_disconnected = false;
     let current = self.view.as_ref();
-    for pane in self.panes.values_mut() {
+    for (id, pane) in &mut self.panes {
       // A closed transport may still have a final SessionEnded event queued.
       match pane.drain().await {
         Ok(Some(message)) => notices.push((NoticeKind::Action, message)),
@@ -667,6 +679,28 @@ impl App<'_> {
       {
         view_update = Some(view);
       }
+      resize_results.extend(pane.resize_results.drain(..));
+      if !pane.connected
+        && self
+          .divider_drag
+          .as_ref()
+          .is_some_and(|drag| &drag.owner == id)
+      {
+        drag_disconnected = true;
+      }
+    }
+    if drag_disconnected {
+      self.divider_drag = None;
+    }
+    // Only correlated replies advance the drag's revision. A view broadcast
+    // can repaint the confirmed geometry before that reply reaches this loop.
+    for (request_id, outcome) in resize_results {
+      if let Some(drag) = &mut self.divider_drag
+        && let Err(error) = drag.acknowledge(&request_id, &outcome)
+      {
+        self.divider_drag = None;
+        notices.push((NoticeKind::Action, error));
+      }
     }
     if let Some(view) = view_update
       && let Err(error) = self.adopt_view(view).await
@@ -683,6 +717,9 @@ impl App<'_> {
       if let Err(error) = self.resize().await {
         notices.push((NoticeKind::Action, error.to_string()));
       }
+    }
+    if let Err(error) = self.flush_divider_drag().await {
+      notices.push((NoticeKind::Action, error.to_string()));
     }
     for (kind, message) in notices {
       match kind {
@@ -704,6 +741,13 @@ impl App<'_> {
     }
     if current.zoomed_terminal_id != view.zoomed_terminal_id {
       self.release_mouse().await?;
+    }
+    if self
+      .divider_drag
+      .as_ref()
+      .is_some_and(|drag| !drag.accepts_view(&view))
+    {
+      self.divider_drag = None;
     }
     let missing = self.panes.keys().any(|id| {
       !view
@@ -801,10 +845,12 @@ impl App<'_> {
       }
       Event::Key(key) => return self.key(key).await,
       Event::Resize(columns, rows) => {
+        self.divider_drag = None;
         self.size = (columns, rows);
         self.resize().await?;
       }
       Event::Paste(text) => {
+        self.divider_drag = None;
         self.keys.cancel_repeat();
         if self.active_copy().is_none()
           && matches!(self.overlay, Overlay::None)
@@ -923,6 +969,7 @@ impl App<'_> {
   }
 
   async fn release_mouse(&mut self) -> Result<()> {
+    self.divider_drag = None;
     if let Some(MouseCapture::Application {
       terminal_id,
       button,
@@ -1005,6 +1052,9 @@ impl App<'_> {
   }
 
   async fn mouse(&mut self, mouse: MouseEvent) -> Result<()> {
+    if self.drag_mouse(mouse).await? {
+      return Ok(());
+    }
     if matches!(mouse.kind, MouseEventKind::Drag(_) | MouseEventKind::Up(_))
       && let Some(capture) = self.mouse_capture.take()
     {
@@ -1016,25 +1066,11 @@ impl App<'_> {
     if mouse.column >= self.size.0 || mouse.row >= self.size.1.saturating_sub(1) {
       return Ok(());
     }
-    let target = if self.archive_copy.is_some() {
-      CopyTarget::Archive
-    } else {
-      if !matches!(self.overlay, Overlay::None) {
-        return Ok(());
-      }
-      let Some(id) = self.view.as_ref().and_then(|view| {
-        pane_at(
-          view,
-          &self.panes,
-          &self.copies,
-          &self.focused,
-          self.size,
-          (mouse.column, mouse.row),
-        )
-      }) else {
-        return Ok(());
-      };
-      CopyTarget::Pane(id.to_owned())
+    if self.begin_divider_drag(mouse) {
+      return Ok(());
+    }
+    let Some(target) = self.mouse_target(mouse) else {
+      return Ok(());
     };
     // Capture coordinates before focus can shift a clipped shared viewport.
     let Some(position) = self.mouse_position(&target, mouse) else {
@@ -1104,6 +1140,123 @@ impl App<'_> {
     Ok(())
   }
 
+  fn mouse_target(&self, mouse: MouseEvent) -> Option<CopyTarget> {
+    if self.archive_copy.is_some() {
+      return Some(CopyTarget::Archive);
+    }
+    if !matches!(self.overlay, Overlay::None) {
+      return None;
+    }
+    let id = pane_at(
+      self.view.as_ref()?,
+      &self.panes,
+      &self.copies,
+      &self.focused,
+      self.size,
+      (mouse.column, mouse.row),
+    )?;
+    Some(CopyTarget::Pane(id.to_owned()))
+  }
+
+  async fn drag_mouse(&mut self, mouse: MouseEvent) -> Result<bool> {
+    let Some(drag) = &mut self.divider_drag else {
+      return Ok(false);
+    };
+    if !drag.released()
+      && matches!(
+        mouse.kind,
+        MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left)
+      )
+    {
+      drag.move_to(
+        (mouse.column, mouse.row),
+        mouse.kind == MouseEventKind::Up(MouseButton::Left),
+      );
+      self.flush_divider_drag().await?;
+    }
+    // Keep the final mouseup local while its target waits for confirmation.
+    Ok(true)
+  }
+
+  fn begin_divider_drag(&mut self, mouse: MouseEvent) -> bool {
+    if mouse.kind == MouseEventKind::Down(MouseButton::Left)
+      && self.mouse_capture.is_none()
+      && matches!(self.overlay, Overlay::None)
+      && self.archive_copy.is_none()
+      && let Some(view) = &self.view
+    {
+      let offset = viewport_offset(
+        view,
+        self.panes.get(&self.focused),
+        self.copies.get(&self.focused),
+        &self.focused,
+        self.size.0,
+        self.size.1.saturating_sub(1),
+      );
+      let position = (
+        mouse.column.saturating_add(offset.0),
+        mouse.row.saturating_add(offset.1),
+      );
+      if let Some(divider) = Divider::hit(view, position) {
+        if self.read_only {
+          self.notice("This attachment is read only".into());
+          return true;
+        }
+        let Some((id, owner)) = self.panes.iter().find(|(_, pane)| {
+          pane.connected
+            && pane.ended.is_none()
+            && pane.control.state().leases().layout.owned_by_client
+        }) else {
+          self.notice(format!("{} R to take resize control", self.prefix.label));
+          return true;
+        };
+        if !owner.control.supports_divider_resize() {
+          self.notice("Divider dragging requires ctmux 1.1.17".into());
+          return true;
+        }
+        self.mouse_capture = None;
+        self.divider_drag = Some(Drag::new(view, divider, offset, id.clone()));
+        return true;
+      }
+    }
+    false
+  }
+
+  async fn flush_divider_drag(&mut self) -> Result<()> {
+    let Some(drag) = &self.divider_drag else {
+      return Ok(());
+    };
+    if !self.panes.get(&drag.owner).is_some_and(|pane| {
+      pane.connected && pane.ended.is_none() && pane.control.state().leases().layout.owned_by_client
+    }) || self
+      .view
+      .as_ref()
+      .is_none_or(|view| !drag.accepts_view(view))
+    {
+      self.divider_drag = None;
+      return Ok(());
+    }
+    self.resize_sequence = self.resize_sequence.wrapping_add(1);
+    let request_id = format!("tui-divider-resize-{}", self.resize_sequence);
+    let drag = self.divider_drag.as_mut().expect("checked drag");
+    let owner = drag.owner.clone();
+    if let Some(divider) = drag.next(request_id.clone())
+      && let Err(error) = self
+        .panes
+        .get_mut(&owner)
+        .expect("connected resize owner")
+        .resize_divider(divider, request_id)
+        .await
+    {
+      self.divider_drag = None;
+      return Err(error);
+    }
+    if self.divider_drag.as_ref().is_some_and(Drag::finished) {
+      self.divider_drag = None;
+    }
+    Ok(())
+  }
+
   async fn paste(&self, text: String) -> Result<()> {
     if let Some(pane) = self.panes.get(&self.focused) {
       let data = if pane.model.bracketed_paste {
@@ -1129,6 +1282,9 @@ impl App<'_> {
 
   async fn key(&mut self, key: KeyEvent) -> Result<bool> {
     if key.kind == KeyEventKind::Release {
+      return Ok(false);
+    }
+    if self.divider_drag.take().is_some() && key.code == KeyCode::Esc {
       return Ok(false);
     }
     if self.archive_copy.is_some() {
@@ -1581,7 +1737,17 @@ impl App<'_> {
           mode.fit(usize::from(rect.columns), usize::from(rect.rows));
         }
       }
-      frame.canvas(view, &self.panes, &self.copies, &self.focused);
+      if let Some(drag) = &self.divider_drag {
+        frame.canvas_at(
+          view,
+          &self.panes,
+          &self.copies,
+          &self.focused,
+          drag.viewport_offset(),
+        );
+      } else {
+        frame.canvas(view, &self.panes, &self.copies, &self.focused);
+      }
       frame.overlay(&self.overlay_lines());
     } else {
       let instructions = if let Some(ended) = &self.ended {
@@ -1781,6 +1947,7 @@ impl App<'_> {
         "%: split right    \": split below".into(),
         "Arrows: focus pane    o: next pane    z: zoom    x: terminate (confirm)".into(),
         "Ctrl/Alt arrows resize panes by 1/5 cells after prefix.".into(),
+        "Mouse: drag dividers to resize; Esc cancels remaining movement.".into(),
         "Focus/resize arrows repeat for 500 ms; other commands need a fresh prefix.".into(),
         "c: new session    n/p: next/previous session    s/w: session list".into(),
         "[: history/copy mode    ]: paste copied text    A: archives".into(),

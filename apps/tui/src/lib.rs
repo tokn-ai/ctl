@@ -2,6 +2,7 @@
 mod actions;
 mod app;
 mod copy;
+mod divider;
 mod input;
 mod keys;
 mod maintenance;

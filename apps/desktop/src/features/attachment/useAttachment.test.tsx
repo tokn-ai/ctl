@@ -299,7 +299,7 @@ describe("divider ownership through live attachments", () => {
     }
   });
 
-  async function connectFixture(owned: boolean, held = false) {
+  async function connectFixture(owned: boolean, held = false, auto_resize = false) {
     const open = api.openAttachment.getMockImplementation()!;
     api.openAttachment.mockImplementation(async (...args) => {
       const response = await open(...args);
@@ -315,12 +315,45 @@ describe("divider ownership through live attachments", () => {
     render(<NotificationProvider store={store}>
       <DividerAttachmentFixture actions={actions} observer_renderer={observer_renderer} />
     </NotificationProvider>);
-    await act(async () => { await actions.owner!.connect(first, { resize_with_window: false, resize_control: owned }); });
+    await act(async () => { await actions.owner!.connect(first, { ...(auto_resize ? {} : { resize_with_window: false }), resize_control: owned }); });
     if (owned) await emit({ event_type: "lease_status", attachment_id: actions.owner!.state.attachment_id!,
       lease: "layout", status: { held: true, owned_by_client: true } });
     await act(async () => { await actions.observer!.connect(sibling, { resize_with_window: false, terminal_id: sibling.terminal_id }); });
     return { actions, store };
   }
+
+  it("defers pending default auto sizing through a held divider drag and resumes the newest canvas afterward", async () => {
+    let measure!: (dimensions: { columns: number; rows: number }) => void;
+    vi.spyOn(renderer, "observeDimensions").mockImplementation((listener) => { measure = listener; return () => {}; });
+    const { actions } = await connectFixture(true, false, true);
+    const owner_id = actions.owner!.state.attachment_id!;
+    expect(actions.owner!.state.resize_with_window).toBe(true);
+    const handle = screen.getByRole("separator");
+    // This proposal is already in the owner's 80ms queue when the drag begins.
+    act(() => measure({ columns: 79, rows: 24 }));
+    fireEvent.pointerDown(handle, { pointerId: 1, button: 0, clientX: 324, clientY: 100 });
+    fireEvent.pointerMove(handle, { pointerId: 1, clientX: 332, clientY: 100 });
+    await waitFor(() => expect(api.resizeAttachmentDivider).toHaveBeenCalledTimes(1));
+    const next = dividerView(41, "2");
+    const request_id = api.resizeAttachmentDivider.mock.lastCall![0].request_id;
+    await emit({ event_type: "pane_resize_result", attachment_id: owner_id, request_id, view: next, error: null });
+    await emit({ event_type: "view_changed", attachment_id: owner_id, view: next });
+    const resized_checkpoint = checkpoint(owner_id, "resized shell");
+    resized_checkpoint.checkpoint.terminal_size = { ...size, columns: 41 };
+    await emit(resized_checkpoint);
+    act(() => { measure({ columns: 81, rows: 24 }); measure({ columns: 82, rows: 25 }); });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 110)); });
+    expect(captured.get(handle)).toBe(1);
+    expect(api.resizeAttachment).not.toHaveBeenCalled();
+    expect(actions.owner!.state).toMatchObject({ resize_with_window: true,
+      layout_lease: { held: true, owned_by_client: true } });
+    fireEvent.pointerUp(handle, { pointerId: 1, clientX: 332, clientY: 100 });
+    expect(captured.has(handle)).toBe(false);
+    await waitFor(() => expect(api.resizeAttachment).toHaveBeenCalledExactlyOnceWith({ attachment_id: owner_id,
+      terminal_size: { ...size, columns: 82, rows: 25 } }));
+    expect(api.releaseAttachmentLease).not.toHaveBeenCalled();
+    expect(actions.owner!.state.resize_with_window).toBe(true);
+  });
 
   it("keeps the local owner and observer stable when pointer capture begins and the first move is confirmed", async () => {
     const { actions, store } = await connectFixture(true);

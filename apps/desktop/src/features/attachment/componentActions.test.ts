@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ComponentSessionsReset, DividerResize, LeaseStatus, SessionSummary, SessionView, TerminalSize } from "../../lib/types";
-import { componentResetMatches, proposeSessionViewportSize, publishPaneResizeResult, publishSessionView, reconnectComponentAttachments, registerAttachmentControl, requestSessionResizeControl, resetComponentAttachments, resizeSessionDivider, resizeSessionPane, resizeSessionViewport, sessionResizeControlStatus, sessionResizeWithWindow, setSessionViewZoom, toggleSessionResizeWithWindow } from "./componentActions";
+import { componentResetMatches, proposeSessionViewportSize, publishLayoutOwnerChange, publishPaneResizeResult, publishSessionView, reconnectComponentAttachments, registerAttachmentControl, requestSessionResizeControl, resetComponentAttachments, resizeSessionDivider, resizeSessionPane, resizeSessionViewport, sessionResizeControlStatus, sessionResizeWithWindow, setSessionViewZoom, suspendSessionViewportResize, toggleSessionResizeWithWindow } from "./componentActions";
 
 const stops: (() => void)[] = [];
 afterEach(() => { for (const stop of stops.splice(0)) stop(); });
@@ -17,6 +17,7 @@ function register(id: string, current: SessionSummary) {
     requestResizeControl: vi.fn(async (_acquire: boolean) => {}),
     resizeWithWindow: vi.fn(() => false), toggleResizeWithWindow: vi.fn(async () => {}),
     enqueueViewportResize: vi.fn(), proposeViewportSize: vi.fn((): TerminalSize | null => null),
+    suspendViewportResize: vi.fn(() => () => {}),
     setViewZoom: vi.fn(async (_terminal_id: string | null) => {}),
     resizePane: vi.fn(async (_terminal_id: string, _direction: string, _amount: number, _request_id: string) => {}),
   };
@@ -26,6 +27,56 @@ function register(id: string, current: SessionSummary) {
 const baseline = { view_id: "view", revision: "1", zoomed_terminal_id: null };
 
 describe("component attachment actions", () => {
+  it("keeps verified alias owners suspended through a local transfer until the gesture ends", () => {
+    const visible_session = session("visible", "one-daemon");
+    const visible = register("visible", visible_session);
+    const owner = register("hidden-owner", session("hidden", "one-daemon"));
+    owner.layoutOwned.mockReturnValue(true);
+    const resume = vi.fn();
+    const resume_visible = vi.fn();
+    owner.suspendViewportResize.mockReturnValue(resume);
+    visible.suspendViewportResize.mockReturnValue(resume_visible);
+    const release = suspendSessionViewportResize(visible_session);
+    expect(owner.suspendViewportResize).toHaveBeenCalledOnce();
+    expect(visible.suspendViewportResize).not.toHaveBeenCalled();
+    owner.layoutOwned.mockReturnValue(false);
+    visible.layoutOwned.mockReturnValue(true);
+    publishLayoutOwnerChange(); publishLayoutOwnerChange();
+    expect(visible.suspendViewportResize).toHaveBeenCalledOnce();
+    expect(resume).not.toHaveBeenCalled();
+    expect(resume_visible).not.toHaveBeenCalled();
+    release(); release();
+    expect(resume).toHaveBeenCalledOnce();
+    expect(resume_visible).toHaveBeenCalledOnce();
+    publishLayoutOwnerChange();
+    expect(visible.suspendViewportResize).toHaveBeenCalledOnce();
+    expect(owner.requestResizeControl).not.toHaveBeenCalled();
+    expect(owner.toggleResizeWithWindow).not.toHaveBeenCalled();
+  });
+
+  it("releases nested suspension tokens independently and idempotently", () => {
+    const owner = register("owner", session());
+    owner.layoutOwned.mockReturnValue(true);
+    const first_resume = vi.fn();
+    const second_resume = vi.fn();
+    owner.suspendViewportResize.mockReturnValueOnce(first_resume).mockReturnValueOnce(second_resume);
+    const first_release = suspendSessionViewportResize(session());
+    const second_release = suspendSessionViewportResize(session());
+    expect(owner.suspendViewportResize).toHaveBeenCalledTimes(2);
+    first_release(); first_release();
+    expect(first_resume).toHaveBeenCalledOnce();
+    expect(second_resume).not.toHaveBeenCalled();
+    second_release(); second_release();
+    expect(second_resume).toHaveBeenCalledOnce();
+  });
+
+  it("ignores suspension requests without a matching live owner", () => {
+    const unrelated = register("unrelated", session("other-daemon"));
+    unrelated.layoutOwned.mockReturnValue(true);
+    expect(() => suspendSessionViewportResize(session())()).not.toThrow();
+    expect(unrelated.suspendViewportResize).not.toHaveBeenCalled();
+  });
+
   it("reports a sibling owner as owned here and routes release and auto resizing through it", async () => {
     const root = register("root", session());
     root.layoutLease.mockReturnValue({ held: true, owned_by_client: false });

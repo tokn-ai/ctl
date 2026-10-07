@@ -1238,6 +1238,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
     requestResizeControl,
     toggleResizeWithWindow: (initial_size) => resize_actions.current.toggleResizeWithWindow(initial_size),
     enqueueViewportResize: queueResize,
+    suspendViewportResize: () => resizeCoordinatorRef.current!.suspend(),
     proposeViewportSize: () => {
       const proposed = view_resize_ref.current && stateRef.current.phase === "attached" ? rendererRef.current?.proposeDimensions() : null;
       return proposed ? terminalSize(proposed.columns, proposed.rows) : null;

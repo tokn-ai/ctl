@@ -37,6 +37,7 @@ let owned = true;
 let captured: WeakMap<HTMLElement, number>;
 let frames: Map<number, FrameRequestCallback>;
 let next_frame: number;
+let viewport_holds: number;
 
 function Fixture({ view = initial, cell = { width: 8, height: 16 }, enabled = true, current_session = session }: {
   view?: SessionView; cell?: { width: number; height: number }; enabled?: boolean; current_session?: SessionSummary;
@@ -80,6 +81,7 @@ beforeEach(() => {
   captured = new WeakMap();
   frames = new Map();
   next_frame = 0;
+  viewport_holds = 0;
   vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
     const id = ++next_frame;
     frames.set(id, callback);
@@ -93,16 +95,61 @@ beforeEach(() => {
   stops.push(registerAttachmentControl({ attachmentId: () => "owner", session: () => session, layoutOwned: () => owned,
     layoutLease: () => ({ held: owned, owned_by_client: owned }), requestResizeControl: async () => {},
     resizeWithWindow: () => false, toggleResizeWithWindow: async () => {},
+    suspendViewportResize: () => { viewport_holds++; return () => { viewport_holds--; }; },
     enqueueViewportResize: () => {}, proposeViewportSize: () => null,
     resizeDivider: resize, resizePane: async () => {}, setViewZoom: async () => {}, reconnect: async () => null, reset: () => {} }));
 });
 afterEach(() => {
   cleanup(); for (const stop of stops.splice(0)) stop();
+  expect(viewport_holds).toBe(0);
   for (const method of ["setPointerCapture", "hasPointerCapture", "releasePointerCapture"]) Reflect.deleteProperty(HTMLElement.prototype, method);
   vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.clearAllMocks();
 });
 
 describe("GUI divider dragging", () => {
+  it.each(["horizontal", "vertical"] as const)("keeps capture and its original cell scale across %s resize refreshes", async (axis) => {
+    const base = { width: 7.825, height: 16.625 };
+    const vertical: SessionView = { ...initial,
+      layout: { kind: "split", axis: "vertical", children: [leaf("a"), leaf("b")] },
+      panes: [{ ...initial.panes[0], columns: 80, rows: 12 }, { ...initial.panes[1], left: 0, top: 13, columns: 80, rows: 11 }],
+    };
+    const original = axis === "horizontal" ? initial : vertical;
+    const position = axis === "horizontal" ? 40 : 12;
+    const unit = axis === "horizontal" ? base.width : base.height;
+    const anchor = (position + 0.5) * unit;
+    const point = (amount: number) => axis === "horizontal"
+      ? { x: anchor + amount * unit, y: 100 }
+      : { x: 100, y: anchor + amount * unit };
+    const nextView = (amount: number, revision: string): SessionView => axis === "horizontal" ? resized(position + amount, revision) : {
+      ...vertical, revision, layout: { ...vertical.layout, ...{ weights: [position + amount, 23 - position - amount] } },
+      panes: [{ ...vertical.panes[0], rows: position + amount }, { ...vertical.panes[1], top: position + amount + 1, rows: 23 - position - amount }],
+    };
+    const mounted = render(<Fixture view={original} cell={base} />);
+    const start = point(0);
+    const handle = down(undefined, start.x, start.y);
+    const first = point(1);
+    move(handle, first.x, first.y);
+    await acknowledge(nextView(1, "2"));
+    // The same font produces different per-cell averages after xterm rounds
+    // the resized screen to whole pixels. A DOM refresh is still this drag.
+    mounted.rerender(<Fixture view={nextView(1, "2")} cell={{ width: 352 / 45, height: 199 / 12 }} />);
+    expect(captured.get(handle)).toBe(1);
+    expect(viewport_holds).toBe(1);
+    expect(screen.getByTestId("busy").textContent).toBe("true");
+    expect(screen.getByRole("separator")).toBe(handle);
+    const second = point(4);
+    move(handle, second.x, second.y);
+    expect(resize).toHaveBeenCalledTimes(2);
+    expect(resize.mock.calls[1][0]).toMatchObject({ position: position + 4, expected_revision: "2" });
+    await acknowledge(nextView(4, "3"));
+    expect(captured.get(handle)).toBe(1);
+    fireEvent.pointerUp(handle, { pointerId: 1, clientX: second.x, clientY: second.y });
+    expect(captured.has(handle)).toBe(false);
+    expect(viewport_holds).toBe(0);
+    expect(screen.getByTestId("busy").textContent).toBe("false");
+    expect(resize).toHaveBeenCalledTimes(2);
+  });
+
   it("coalesces pointer moves and preview updates into one target per paint", async () => {
     render(<Fixture />);
     const handle = down();
@@ -125,6 +172,23 @@ describe("GUI divider dragging", () => {
     expect(resize.mock.calls[1][0]).toMatchObject({ position: 45, expected_revision: "2" });
     await acknowledge(resized(45, "3"));
     fireEvent.pointerUp(handle, { pointerId: 1, clientX: 364, clientY: 100 });
+    expect(screen.getByTestId("busy").textContent).toBe("false");
+  });
+
+  it("anchors a held pointer to its starting scale and uses refreshed measurements for the next gesture", async () => {
+    const mounted = render(<Fixture />);
+    const handle = down();
+    mounted.rerender(<Fixture cell={{ width: 16, height: 32 }} />);
+    move(handle, 340);
+    expect(resize.mock.calls[0][0]).toMatchObject({ position: 42, expected_revision: "1" });
+    await acknowledge(resized(42));
+    fireEvent.pointerUp(handle, { pointerId: 1, clientX: 340, clientY: 100 });
+    expect(screen.getByTestId("busy").textContent).toBe("false");
+    down(handle, 680);
+    move(handle, 696);
+    expect(resize.mock.calls[1][0]).toMatchObject({ position: 43, expected_revision: "2" });
+    await acknowledge(resized(43, "3"));
+    fireEvent.pointerUp(handle, { pointerId: 1, clientX: 696, clientY: 100 });
     expect(screen.getByTestId("busy").textContent).toBe("false");
   });
 
@@ -276,13 +340,13 @@ describe("GUI divider dragging", () => {
     await acknowledge(resized(42, "3"));
   });
 
-  it.each(["view", "topology", "canvas", "font", "zoom", "disabled", "session", "lease"])("cancels a gesture on %s changes without applying stale callbacks", async (change) => {
+  it.each(["view", "topology", "canvas", "zoom", "disabled", "session", "lease"])("cancels a gesture on %s changes without applying stale callbacks", async (change) => {
     const mounted = render(<Fixture />);
     const handle = down(); move(handle, 332); move(handle, 340);
     if (change === "lease") { owned = false; await act(async () => publishLayoutOwnerChange()); }
     else mounted.rerender(<Fixture
       current_session={change === "session" ? { ...session, session_id: "other" } : session}
-      cell={change === "font" ? { width: 9, height: 18 } : undefined} enabled={change !== "disabled"}
+      enabled={change !== "disabled"}
       view={change === "view" ? { ...initial, view_id: "replacement" }
         : change === "topology" ? { ...initial, layout: { kind: "split", axis: "vertical", children: [leaf("a"), leaf("b")] } }
         : change === "canvas" ? { ...initial, canvas_size: { ...size, columns: 100 } }

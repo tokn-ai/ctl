@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { KeyboardEvent, PointerEvent } from "react";
 import type { SessionSummary, SessionView } from "../../lib/types";
 import { errorMessage } from "../../lib/errors";
-import { resizeSessionDivider, sessionLayoutOwned, subscribeLayoutOwners } from "../attachment/componentActions";
+import { resizeSessionDivider, sessionLayoutOwned, subscribeLayoutOwners, suspendSessionViewportResize } from "../attachment/componentActions";
 import { sessionKey } from "../targets/targets";
 import { layoutTopology, type ViewDivider } from "./viewLayout";
 
@@ -31,6 +31,8 @@ interface Drag {
   pending: number | null;
   running: boolean;
   frame: number | null;
+  cell: { width: number; height: number };
+  resume_viewport(): void;
 }
 
 function currentView(options: Options): SessionView | null {
@@ -38,10 +40,10 @@ function currentView(options: Options): SessionView | null {
 }
 
 function signature(options: Options): string {
-  const { session, cell, enabled } = options;
+  const { session, enabled } = options;
   const view = currentView(options);
   return JSON.stringify([session && sessionKey(session), view?.view_id, view && layoutTopology(view.layout),
-    view?.canvas_size.columns, view?.canvas_size.rows, view?.zoomed_terminal_id, cell.width, cell.height, enabled]);
+    view?.canvas_size.columns, view?.canvas_size.rows, view?.zoomed_terminal_id, enabled]);
 }
 
 /** Capture one divider interaction and send only the latest unsent grid target. */
@@ -75,6 +77,7 @@ export function useDividerDrag(options: Options) {
     cancelFrame(worker);
     worker.pending = null;
     release(worker);
+    worker.resume_viewport();
     setPreview(null);
     if (in_flight.current !== worker) latest.current.on_busy(false);
   }
@@ -155,6 +158,8 @@ export function useDividerDrag(options: Options) {
     const worker: Drag = {
       divider, baseline: view, session, signature: signature(latest.current), element,
       pointer_id: null, coordinate: 0, initial_position: position, latest_position: position, pending: null, running: false, frame: null,
+      cell: { ...latest.current.cell },
+      resume_viewport: suspendSessionViewportResize(session),
     };
     drag.current = worker;
     latest.current.on_error(null);
@@ -188,7 +193,9 @@ export function useDividerDrag(options: Options) {
   }
 
   function move(event: PointerEvent<HTMLElement>, worker: Drag) {
-    const cell = latest.current.cell;
+    // xterm rounds each resized screen to pixels, so its measured cell average
+    // can change on our own checkpoint. Keep the pointer's original grid scale.
+    const cell = worker.cell;
     const coordinate = worker.divider.vertical ? event.clientX : event.clientY;
     const size = worker.divider.vertical ? cell.width : cell.height;
     schedule(worker, worker.initial_position + Math.round((coordinate - worker.coordinate) / size), true);

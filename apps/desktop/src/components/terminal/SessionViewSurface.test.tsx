@@ -39,9 +39,13 @@ const initial: SessionView = { session_id: "root", session_name: "Root", view_id
 const split: SessionView = { ...initial, revision: "1", panes: [{ terminal_id: "a", left: 0, top: 0, columns: 40, rows: 24 }, { terminal_id: "b", left: 41, top: 0, columns: 39, rows: 24 }], layout: { kind: "split", axis: "horizontal", children: [{ kind: "terminal", terminal_id: "a" }, { kind: "terminal", terminal_id: "b" }] }, terminals: [terminal("a"), terminal("b")] };
 const props = () => ({ session, on_promoted: vi.fn(), on_select_terminal: vi.fn(), phase: "attached" as const, hasSession: true, has_cached_content: true, onInput: vi.fn(), onReady: vi.fn() });
 let stop_control: () => void;
+let captured: WeakMap<HTMLElement, number>;
 beforeEach(() => {
+  captured = new WeakMap();
   vi.stubGlobal("PointerEvent", class extends MouseEvent { readonly pointerId = 1; readonly isPrimary = true; });
-  Object.defineProperty(HTMLElement.prototype, "setPointerCapture", { configurable: true, value() {} });
+  Object.defineProperty(HTMLElement.prototype, "setPointerCapture", { configurable: true, value(this: HTMLElement, pointer_id: number) { captured.set(this, pointer_id); } });
+  Object.defineProperty(HTMLElement.prototype, "hasPointerCapture", { configurable: true, value(this: HTMLElement, pointer_id: number) { return captured.get(this) === pointer_id; } });
+  Object.defineProperty(HTMLElement.prototype, "releasePointerCapture", { configurable: true, value(this: HTMLElement) { captured.delete(this); } });
   mocks.zoom.mockImplementation(async (terminal_id: string | null) => {
     publishSessionView({ session, attachment_id: "primary-owner", view: { ...split, revision: terminal_id ? "2" : "3", zoomed_terminal_id: terminal_id } });
   });
@@ -62,9 +66,56 @@ beforeEach(() => {
   });
 });
 
-afterEach(() => { cleanup(); stop_control(); Reflect.deleteProperty(HTMLElement.prototype, "setPointerCapture"); vi.unstubAllGlobals(); vi.clearAllMocks(); mocks.attachment_state = null; mocks.mounted_inputs = []; vi.useRealTimers(); });
+afterEach(() => {
+  cleanup(); stop_control();
+  for (const method of ["setPointerCapture", "hasPointerCapture", "releasePointerCapture"]) Reflect.deleteProperty(HTMLElement.prototype, method);
+  vi.unstubAllGlobals(); vi.clearAllMocks(); mocks.attachment_state = null; mocks.mounted_inputs = []; vi.useRealTimers();
+});
 
 describe("session compositor", () => {
+  it("continues a held drag through confirmed views and renderer cell measurement refreshes", async () => {
+    mocks.request.mockResolvedValue(split);
+    const cell = { width: 313 / 40, height: 399 / 24 };
+    let measure!: (next: typeof cell) => void;
+    const renderer = {
+      setViewport: vi.fn(),
+      observeCellDimensions: (listener: typeof measure) => { measure = listener; listener(cell); return () => {}; },
+    } as unknown as XtermRenderer;
+    render(<SessionViewSurface {...props()} renderer={renderer} />);
+    await waitFor(() => expect(screen.getAllByLabelText("Terminal input")).toHaveLength(2));
+    const handle = screen.getByRole("separator");
+    const inputs = screen.getAllByLabelText("Terminal input");
+    const point = (position: number) => (position + 0.5) * cell.width;
+    const nextView = (position: number, revision: string): SessionView => ({ ...split, revision,
+      layout: { ...split.layout, ...{ weights: [position, 79 - position] } },
+      panes: [{ ...split.panes[0], columns: position }, { ...split.panes[1], left: position + 1, columns: 79 - position }],
+    });
+    fireEvent.pointerDown(handle, { button: 0, clientX: point(40), clientY: 100 });
+    fireEvent.pointerMove(handle, { clientX: point(41), clientY: 100 });
+    await waitFor(() => expect(mocks.divider).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      publishPaneResizeResult({ session, attachment_id: "primary-owner", request_id: mocks.divider.mock.lastCall![1], view: nextView(41, "2"), error: null });
+      measure({ width: 321 / 41, height: 399 / 24 });
+    });
+    expect(screen.getByRole("separator")).toBe(handle);
+    expect(captured.get(handle)).toBe(1);
+    fireEvent.pointerMove(handle, { clientX: point(43), clientY: 100 });
+    await waitFor(() => expect(mocks.divider).toHaveBeenCalledTimes(2));
+    expect(mocks.divider.mock.lastCall![0]).toMatchObject({ expected_revision: "2", position: 43 });
+    await act(async () => {
+      publishPaneResizeResult({ session, attachment_id: "primary-owner", request_id: mocks.divider.mock.lastCall![1], view: nextView(43, "3"), error: null });
+      measure({ width: 336 / 43, height: 399 / 24 });
+      publishSessionView({ session, attachment_id: "observer", view: nextView(43, "3") });
+    });
+    expect(captured.get(handle)).toBe(1);
+    expect(screen.getAllByLabelText("Terminal input")).toEqual(inputs);
+    expect(mocks.unmount).not.toHaveBeenCalled();
+    fireEvent.pointerUp(handle, { clientX: point(43), clientY: 100 });
+    expect(captured.has(handle)).toBe(false);
+    expect(screen.getByRole("button", { name: "Split right" }).hasAttribute("disabled")).toBe(false);
+    expect(mocks.divider).toHaveBeenCalledTimes(2);
+  });
+
   it("drags the server divider without remounting panes or blocking terminal input, and keeps keyboard resize serialized after Escape", async () => {
     mocks.request.mockResolvedValue(split);
     const actions = props();

@@ -12,6 +12,7 @@ interface AttachmentControl {
   resizeWithWindow(): boolean;
   toggleResizeWithWindow(initial_size?: TerminalSize): Promise<void>;
   enqueueViewportResize(size: TerminalSize): void;
+  suspendViewportResize?(): () => void;
   proposeViewportSize(): TerminalSize | null;
   setViewZoom(terminal_id: string | null): Promise<void>;
   resizeDivider(divider: DividerResize, request_id: string): Promise<void>;
@@ -94,6 +95,29 @@ export function resizeSessionViewport(session: SessionSummary, size: TerminalSiz
   if (!owner?.resizeWithWindow()) return false;
   owner.enqueueViewportResize(size);
   return true;
+}
+
+/** Suspend the actual owner's pending auto sizing without changing its lease. */
+export function suspendSessionViewportResize(session: SessionSummary): () => void {
+  const releases = new Map<AttachmentControl, () => void>();
+  const suspendOwner = () => {
+    const owner = layoutOwner(session);
+    if (owner?.suspendViewportResize && !releases.has(owner)) {
+      releases.set(owner, owner.suspendViewportResize());
+    }
+  };
+  // Local aliases may transfer ownership while this view's gesture stays held.
+  // Each encountered coordinator remains paused until the gesture finishes.
+  const stop = subscribeLayoutOwners(suspendOwner);
+  suspendOwner();
+  let active = true;
+  return () => {
+    if (!active) return;
+    active = false;
+    stop();
+    for (const release of releases.values()) release();
+    releases.clear();
+  };
 }
 
 export function proposeSessionViewportSize(session: SessionSummary, preferred_attachment_id?: string | null): TerminalSize | null {

@@ -22,6 +22,7 @@ impl Drop for Home {
 
 #[tokio::test]
 async fn compatible_different_build_is_imported_without_selecting_or_running_it() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let home = Home::new();
   let candidate = Fixture::new("0.0.9", &"b".repeat(40)).bundle();
   let target = "aarch64-apple-darwin";
@@ -118,6 +119,7 @@ fn local_provenance_is_complete_and_retains_a_legacy_agent_identity() {
 #[tokio::test]
 async fn local_import_queries_four_components_without_starting_services_or_selecting() {
   use std::os::unix::fs::PermissionsExt as _;
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let home = Home::new();
   let candidate = Fixture::new("0.0.9", &"b".repeat(40)).bundle();
   let outer = crate::remote_bundle::BundleSet::parse_intrinsic(&candidate.manifest).unwrap();

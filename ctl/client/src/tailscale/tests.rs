@@ -228,18 +228,14 @@ mod processes {
 
   use super::*;
 
-  // Keep file creation through execution serialized; concurrent fork/exec can
-  // inherit a fixture's writable descriptor before fs::write closes it.
-  static FIXTURE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
   struct Fixture {
     directory: PathBuf,
-    _guard: tokio::sync::MutexGuard<'static, ()>,
+    _guard: ctl_core::test_fixtures::ProcessGuard,
   }
 
   impl Fixture {
     async fn new(script: &str) -> Self {
-      let guard = FIXTURE_LOCK.lock().await;
+      let guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
       let directory =
         std::env::temp_dir().join(format!("ctmux tailscale {}", uuid::Uuid::new_v4()));
       let executable = mac_app_candidates(&directory).remove(0);

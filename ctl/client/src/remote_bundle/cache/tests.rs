@@ -453,6 +453,7 @@ fn symlinks_special_files_and_unsafe_permissions_are_never_followed() {
 #[cfg(unix)]
 #[test]
 fn fifo_cache_payloads_are_rejected_without_opening_or_blocking() {
+  let _guard = ctl_core::test_fixtures::ProcessGuard::acquire_blocking();
   let fixture = Fixture::new();
   fixture.cache.store(&Fixture::bundle()).unwrap();
   let path = fixture.cache.directory.join(BUNDLE_SET_FILE);

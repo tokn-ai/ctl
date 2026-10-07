@@ -26,6 +26,7 @@ const TEST_NAME: &str = "workspace::remote_test::docker_workspace_survives_clien
 #[tokio::test]
 #[ignore = "requires the explicit local Docker SSH fixture and CTMUX_WORKSPACE_TEST_IDENTITY"]
 async fn docker_workspace_survives_client_restart() -> Result<(), String> {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let identity_file = std::env::var("CTMUX_WORKSPACE_TEST_IDENTITY").map_err(
     |_| "Set CTMUX_WORKSPACE_TEST_IDENTITY to the development container's SSH identity path.",
   )?;

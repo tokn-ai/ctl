@@ -431,6 +431,7 @@ fn reused_bundle_cannot_poison_current_or_follow_a_symlink() {
 
 #[test]
 fn cached_marker_fifo_is_rejected_without_waiting_for_a_writer() {
+  let _guard = ctl_core::test_fixtures::ProcessGuard::acquire_blocking();
   let home = Home::new();
   let bytes = compressed(&contents(None));
   let manifest = release(&bytes);

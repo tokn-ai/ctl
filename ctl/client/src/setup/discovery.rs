@@ -232,6 +232,7 @@ mod tests {
 
   #[tokio::test]
   async fn missing_selection_does_not_create_an_installation() {
+    let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
     let home = super::super::tests::Home::new();
     assert!(discover(&home.0).await.unwrap().is_none());
     assert!(
@@ -246,6 +247,7 @@ mod tests {
   #[tokio::test]
   async fn selected_unsigned_helper_is_rejected_before_metadata_execution() {
     use super::super::tests::{Home, compressed, contents, release};
+    let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
     let home = Home::new();
     let bytes = compressed(&contents(None));
     let mut manifest = release(&bytes);

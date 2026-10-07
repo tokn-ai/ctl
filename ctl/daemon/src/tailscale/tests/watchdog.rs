@@ -1,7 +1,6 @@
 //! Run the real container entrypoint with fixture services and a failed watchdog.
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::net::UnixListener;
 
 use super::*;
@@ -26,19 +25,12 @@ impl Fixture {
       root.display(),
       root.display(),
     );
-    fs::write(root.join("bin/tailscaled"), daemon).unwrap();
-    fs::write(
+    ctl_core::test_fixtures::shell_command(root.join("bin/tailscaled"), daemon).unwrap();
+    ctl_core::test_fixtures::shell_command(
       root.join("bin/tailscale"),
       "#!/bin/sh\nprintf '%s\\n' '{\"BackendState\":\"Running\"}'\n",
     )
     .unwrap();
-    for command in ["tailscaled", "tailscale"] {
-      fs::set_permissions(
-        root.join("bin").join(command),
-        fs::Permissions::from_mode(0o700),
-      )
-      .unwrap();
-    }
     fs::write(root.join("watchdog.sh"), vpn_container::WATCHDOG_SCRIPT).unwrap();
     fs::write(root.join("clock"), "100.00 0.00\n").unwrap();
     let entrypoint = ENTRYPOINT

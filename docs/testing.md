@@ -42,3 +42,43 @@ Test synchronization rules:
   when parallel fork/exec could inherit an open writable descriptor.
 - Prefer protocol readiness to socket/file existence. Preserve bounded waits
   and useful failure diagnostics rather than increasing timeouts globally.
+
+## Executable fixtures
+
+Fake Unix commands should use `ctl_core::test_fixtures::shell_command`. Enable
+`ctl-core`'s `test-fixtures` feature in **dev-dependencies**. The command is a
+symlink to the checked-in launcher; its script lives in `<command>.script` and
+is read by `/bin/sh`. No test writes the executable inode, even when another
+child inherits a writable script descriptor. `$0`, arguments, stdin, environment,
+and exit status retain their usual command semantics. Never chmod this symlink,
+use it to test canonical executable paths, or overwrite the shared launcher.
+
+Tests that need actual executable files use the shared `ProcessGuard` instead:
+`ProcessGuard::acquire().await` for async tests and `acquire_blocking()` for
+synchronous tests. Acquire before writing or copying, and retain the guard until
+children finish. Native copies use `guard.copy(source, destination)`. Other tests
+that launch subprocesses in that same test binary must acquire the same guard,
+even when launching an immutable system command: fork can inherit another test's
+writable executable descriptor before exec. This coordinates one OS process;
+separate Cargo integration-test executables do not share file descriptors.
+Do not nest acquisitions or block a Tokio runtime with `acquire_blocking()`.
+
+The fixture audit keeps real files for these reasons:
+
+| Fixtures | Reason |
+| --- | --- |
+| CLI skills, agent sibling discovery, daemon proxy helper, desktop bundle discovery | Copy a native executable into an installation layout; test sibling discovery and selected paths. |
+| Core executable inspection; ctl, ctmux, and task lifecycle; credential preflight; app-bundle Tailscale discovery | Test canonical paths, executable hashes, selected-file replacement, or bundle layout. |
+| CLI remote repair/VPN, daemon lifecycle, local component import | Exercise real installed archive contents or executable selection. |
+| Docker forced command | Change executable permissions to verify rejection. |
+
+Ordinary SSH/SCP, remote VPN, agent restart, container-engine, and Tailscale
+watchdog fake commands use immutable launchers. Data-only copies (registry JSON,
+Keychain revision records, archive validation bytes) are not executable fixtures.
+The bundle-download fake `gh` already uses an immutable `/bin/sh` launcher.
+
+Core regressions force an open writable descriptor: the fake-command launcher
+must still execute; a native launch must remain pending until the writer and
+guard are released. On Linux, bypassing coordination must produce `ETXTBSY`.
+These tests use an explicitly polled pending acquisition rather than sleeps to
+establish ordering; a timeout only detects a launch that never resumes.

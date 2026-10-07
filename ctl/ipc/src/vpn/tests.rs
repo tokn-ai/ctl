@@ -271,7 +271,7 @@ mod endpoints {
 
   #[tokio::test]
   async fn helper_preparation_does_not_consume_the_vpn_exchange_deadline() {
-    let _execution_guard = crate::tests::SUBPROCESS_FIXTURE_LOCK.lock().await;
+    let _execution_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
     let fixture = Fixture::new();
     let executable = fixture.0.join("ctld");
     std::fs::write(
@@ -583,7 +583,7 @@ mod endpoints {
   async fn missing_or_stale_explicit_endpoint_does_not_start_a_daemon() {
     // A concurrently forked child can retain this listener until exec even
     // after the parent closes it, making a supposedly stale endpoint connect.
-    let _execution_guard = crate::tests::SUBPROCESS_FIXTURE_LOCK.lock().await;
+    let _execution_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
     let fixture = Fixture::new();
     for stale in [false, true] {
       let selected = fixture

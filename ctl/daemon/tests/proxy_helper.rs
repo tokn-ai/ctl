@@ -7,11 +7,6 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
-// A concurrent fork can inherit a writable fixture descriptor until exec,
-// making Linux reject another test's executable with ETXTBSY. Keep fixture
-// writes and child launches serialized within this test process.
-static EXECUTABLE_FIXTURE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
 struct BrokerFixture {
   socket_path: PathBuf,
   task: tokio::task::JoinHandle<SshTarget>,
@@ -74,10 +69,10 @@ impl Fixture {
     Self(path)
   }
 
-  fn selected_executable(&self) -> PathBuf {
+  fn selected_executable(&self, guard: &ctl_core::test_fixtures::ProcessGuard) -> PathBuf {
     // Spaces and quotes exercise shell escaping in OpenSSH's ProxyCommand.
     let executable = self.0.join("selected ' ctld");
-    std::fs::copy(env!("CARGO_BIN_EXE_ctld"), &executable).unwrap();
+    guard.copy(env!("CARGO_BIN_EXE_ctld"), &executable).unwrap();
     executable.canonicalize().unwrap()
   }
 
@@ -140,7 +135,7 @@ fn encoded(route: &[SshGateway]) -> String {
 
 #[tokio::test]
 async fn an_explicit_broker_socket_is_pinned_on_its_ssh_children() {
-  let _fixture_guard = EXECUTABLE_FIXTURE_LOCK.lock().await;
+  let _fixture_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = Fixture::new();
   std::fs::set_permissions(&fixture.0, std::fs::Permissions::from_mode(0o700)).unwrap();
   let socket = fixture.0.join("owner.sock");
@@ -244,9 +239,9 @@ async fn an_explicit_broker_socket_is_pinned_on_its_ssh_children() {
 
 #[tokio::test]
 async fn nested_ssh_proxy_uses_the_executing_helper_without_rediscovery() {
-  let _fixture_guard = EXECUTABLE_FIXTURE_LOCK.lock().await;
+  let fixture_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = Fixture::new();
-  let executable = fixture.selected_executable();
+  let executable = fixture.selected_executable(&fixture_guard);
   let ssh = fixture.0.join("ssh");
   std::fs::write(
     &ssh,
@@ -349,9 +344,9 @@ fn remote_vpn_bridge(fixture: &Fixture) -> PathBuf {
 
 #[tokio::test]
 async fn remote_vpn_uses_its_ssh_owner_and_preserves_the_remote_dns_destination() {
-  let _fixture_guard = EXECUTABLE_FIXTURE_LOCK.lock().await;
+  let fixture_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = Fixture::new();
-  let executable = fixture.selected_executable();
+  let executable = fixture.selected_executable(&fixture_guard);
   let response_path = remote_vpn_bridge(&fixture);
   let prefix = [gateway(GatewayKind::Socks5, "proxy.example.invalid")];
   let mut owner = gateway(GatewayKind::Ssh, "jump-a");
@@ -485,7 +480,7 @@ fn vpn_route(fixture: &Fixture) -> (Vec<SshGateway>, SshTarget) {
 
 #[tokio::test]
 async fn unavailable_or_different_vpn_owner_never_starts_ssh_or_authenticates() {
-  let _fixture_guard = EXECUTABLE_FIXTURE_LOCK.lock().await;
+  let _fixture_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   for scenario in [
     "missing_broker",
     "not_authenticated",
@@ -555,7 +550,7 @@ async fn unavailable_or_different_vpn_owner_never_starts_ssh_or_authenticates() 
 
 #[tokio::test]
 async fn ssh_and_remote_vpn_deliver_output_eof_before_input_closes() {
-  let _fixture_guard = EXECUTABLE_FIXTURE_LOCK.lock().await;
+  let _fixture_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   for remote_vpn in [false, true] {
     let fixture = Fixture::new();
     let response_path = remote_vpn_bridge(&fixture);

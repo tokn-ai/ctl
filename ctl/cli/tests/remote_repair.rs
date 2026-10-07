@@ -542,6 +542,7 @@ impl Drop for Terminal {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn matching_legacy_identity_offers_repair_and_declining_does_not_install() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = Fixture::new(EXPECTED_ID);
   let original = fs::read(fixture.0.join("hosts.json")).unwrap();
   let broker = fixture.broker();
@@ -564,6 +565,7 @@ async fn matching_legacy_identity_offers_repair_and_declining_does_not_install()
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mismatched_legacy_identity_fails_before_offer_or_remote_changes() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = Fixture::new("0c9247af-580a-4e90-9a88-45a4f76c0ca7");
   let original = fs::read(fixture.0.join("hosts.json")).unwrap();
   let broker = fixture.broker();
@@ -584,6 +586,7 @@ async fn mismatched_legacy_identity_fails_before_offer_or_remote_changes() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn accepted_repair_detects_platform_but_rejects_unverified_local_bundles_before_upload() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = Fixture::new(EXPECTED_ID);
   let original = fs::read(fixture.0.join("hosts.json")).unwrap();
   let broker = fixture.broker();
@@ -615,16 +618,19 @@ async fn accepted_repair_detects_platform_but_rejects_unverified_local_bundles_b
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn accepted_repair_activates_verified_components_and_retries_once() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   verify_successful_repair(false).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn accepted_repair_uses_the_managed_home_cache_and_retries_without_downloads() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   verify_successful_repair(true).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn compatible_older_cached_components_repair_a_development_cli_and_preserve_identity() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   // Unlike legacy exact-source fixtures, this test must also exercise a CLI
   // compiled from a dirty checkout or without a recorded source revision.
   let build = ctl_core::component::ComponentBuildInfo {

@@ -772,7 +772,7 @@ export function SshHostFlow({
     case "auth":
       title = selectedProviderTargetRef.current ? "Authentication · 5/5" : "Authentication · 4/4";
       description =
-        "OpenSSH authenticates this host. On macOS, you can choose whether to save a verified password or key passphrase in Keychain for Touch ID access.";
+        "OpenSSH authenticates this host. On macOS, you can save a verified password or key passphrase in Keychain, protected by Touch ID or your macOS account password.";
       mode = {
         kind: "pick",
         choices: [

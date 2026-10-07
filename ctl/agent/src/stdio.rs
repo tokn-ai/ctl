@@ -7,6 +7,7 @@ mod tests {
 
   #[tokio::test]
   async fn connect_child() {
+    let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
     let Some(socket) = std::env::var_os("CTL_AGENT_CONNECT_TEST_SOCKET") else {
       return;
     };
@@ -17,6 +18,7 @@ mod tests {
 
   #[tokio::test]
   async fn daemon_eof_finishes_connect_without_waiting_for_stdin() {
+    let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
     let socket = std::env::temp_dir().join(format!("ccs-{}.s", uuid::Uuid::new_v4().simple()));
     let daemon = tokio::net::UnixListener::bind(&socket).unwrap();
     let relay = tokio::spawn(async move {

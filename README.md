@@ -198,8 +198,9 @@ and `ctld_helper` API versions. The helper's build identity must match its own
 manifest; it does not have to match the CLI's commit, fingerprint, or release
 version. Discovery verifies the selected app instead of choosing a cache entry
 by its directory name or modification time. Credential operations also require
-their explicit helper contract: initial operations use `1.0.1`, clearing uses
-`1.1.3`, and exhaustive discovery uses `1.1.4`. A valid shared helper lacking that
+their explicit helper contract: initial metadata operations use `1.0.1`,
+exhaustive discovery uses `1.1.4`, and secret removal, clearing, or identity
+save/forget require revocation-aware `1.1.5`. A valid shared helper lacking that
 contract can fall back to a verified embedded release helper. `CTLD_BIN` remains
 authoritative for every build; shared discovery also retains explicit
 complete component selections and reports missing capabilities. Unsafe or invalid selected
@@ -261,8 +262,11 @@ cargo run -p ctmux-cli
 ```
 
 Use Ctrl+B then `?` for help, `%` to split right, `z` to zoom/unzoom the
-focused pane, and `d` to detach. Shared zoom requires the view resize lease
-and ctmux contract `1.1.15`.
+focused pane, and `d` to detach. Prefix + Ctrl arrows resizes by one cell;
+Alt arrows resizes by five. Shared zoom and resizing require the view resize
+lease. Zoom supports ctmux contracts `1.1.15`, `1.1.16`, and `1.1.17`;
+keyboard resizing supports `1.1.16` and `1.1.17`. Desktop divider dragging
+requires `1.1.17`.
 See [apps/tui](apps/tui/README.md) for controls and shared-view behavior.
 
 For the Windows local CLI and daemon slice:
@@ -543,11 +547,14 @@ watchdog, and Escape cancels the installation.
 Each row and tab carries its host; create, attach, reconnect, and kill
 operations use that host's selected connection method without changing session
 identity.
-It renders one terminal pane and exposes input and layout ownership separately.
-Selecting a session does not resize its PTY. **Resize with window** explicitly
-acquires layout ownership and continuously matches the PTY to the window;
-turning it off releases layout ownership. A session created in the GUI starts
-with this mode enabled because that window establishes its initial layout.
+It renders shared terminal panes and exposes input and resize ownership separately.
+**Take resize control** enables dragging pane dividers and zooming without changing
+the canvas size. **Auto resize** follows the visible window's canvas; **Fixed size**
+stops following it while retaining manual control. **Release resize control**
+releases ownership and stops auto resizing. Ownership status includes background
+attachments in the same GUI window, including verified SSH aliases of the same
+remote environment. A session created in the GUI starts with auto resizing enabled
+because that window establishes its initial layout.
 GUI-created shells receive a daemon-assigned name. **Disconnect** closes the
 active tab and detaches its view while leaving the daemon-owned shell running;
 **Terminate session** explicitly terminates the session for every attached client. Closing
@@ -713,7 +720,8 @@ names are also accepted.
 `ctl passwords remove ID` confirms removal of one saved entry, or opens a picker
 when no ID is given. `ctl passwords clear` previews known entries and confirms
 clearing all owned SSH passwords and passphrases, including unindexed older
-copies. These commands require helper contract `1.1.4`. Removal requires an interactive
+copies. List/show require helper contract `1.1.4`; remove/clear require `1.1.5`
+to revoke reconnect approvals before changing saved secrets. Removal requires an interactive
 terminal and preserves key files, host/VPN settings, and never-save preferences.
 See [saved credentials](docs/credentials.md) for the shared store's behavior.
 
@@ -1034,3 +1042,8 @@ sidebar, use **Ctrl+B A** in the TUI, or run `ctmux archives` followed by
 Paged history uses published contract `1.1.14`; peers selecting `1.0.13`
 continue to receive complete inline history.
 Reading existing local archives does not require a connection or upgrade.
+
+### Tests and CI
+
+See [the testing guide](docs/testing.md) for the shared local/CI check command,
+pinned toolchains, platform coverage, and integration-test synchronization rules.

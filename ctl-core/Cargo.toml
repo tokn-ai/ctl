@@ -24,6 +24,7 @@ rustix = { workspace = true, optional = true }
 
 [features]
 development = ["dep:sha2"]
+test-fixtures = ["dep:tokio", "dep:uuid"]
 executable = ["dep:serde_json", "dep:sha2", "dep:tokio", "bundles"]
 bundles = ["dep:serde_json", "dep:sha2", "dep:uuid", "dep:rustix"]
 
@@ -32,6 +33,7 @@ sha2.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
+tokio.workspace = true
 uuid.workspace = true
 sha2.workspace = true
 serde_json.workspace = true

@@ -11,3 +11,6 @@ pub mod development;
 pub mod executable;
 pub mod paths;
 pub mod protocol;
+
+#[cfg(any(test, feature = "test-fixtures"))]
+pub mod test_fixtures;

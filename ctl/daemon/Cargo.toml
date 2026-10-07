@@ -23,7 +23,7 @@ ctl-proto.workspace = true
 sha2.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["fs"] }
 uuid.workspace = true
 url = "2.5.8"
 zeroize.workspace = true
@@ -37,3 +37,6 @@ security-framework = { version = "3.7", features = ["OSX_10_15"] }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+ctl-core = { workspace = true, features = ["test-fixtures"] }

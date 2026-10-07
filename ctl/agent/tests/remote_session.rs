@@ -323,14 +323,13 @@ async fn confirmed_restart_ends_sessions_and_starts_the_installed_companion() ->
   // replacement endpoint without depending on a separately built ctmuxd binary.
   let marker = directory.path.join("started");
   let executable = directory.path.join("ctmuxd");
-  std::fs::write(
+  ctl_core::test_fixtures::shell_command(
     &executable,
     format!(
       "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
       marker.display()
     ),
   )?;
-  std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
   let mut config = ctl_agent::ConnectConfig::new(socket.clone());
   config.ctmuxd_bin = Some(executable);
 

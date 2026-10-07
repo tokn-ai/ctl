@@ -50,7 +50,9 @@ pub(super) trait Unlocker: Send + Sync {
   ) -> UnlockFuture;
 }
 
-struct KeychainUnlocker;
+struct KeychainUnlocker {
+  authorization: Option<crate::keychain::approval::Attempt>,
+}
 
 struct CancelRead(Arc<AtomicBool>);
 
@@ -67,12 +69,22 @@ impl Unlocker for KeychainUnlocker {
     context: String,
     canceled: Arc<AtomicBool>,
   ) -> UnlockFuture {
+    let authorization = self.authorization.clone();
     Box::pin(async move {
       // A blocking Keychain worker may outlive cancellation of this future.
       // Prevent a worker waiting for the operation lock from opening new UI.
       let selected = Arc::clone(&snapshot);
       let secret = tokio::task::spawn_blocking(move || {
-        identities::saved_passphrase_cancellable(&selected, Some(&context), &canceled)
+        if let Some(authorization) = authorization {
+          crate::keychain::identity::load_for_connection(
+            &selected,
+            &context,
+            &canceled,
+            &authorization,
+          )
+        } else {
+          identities::saved_passphrase_cancellable(&selected, Some(&context), &canceled)
+        }
       })
       .await
       .map_err(|_| Reason::WorkerFailed)?
@@ -118,8 +130,14 @@ impl LazyIdentities {
     candidates: Vec<Candidate>,
     context: String,
     fallbacks: Arc<Fallbacks>,
+    authorization: Option<crate::keychain::approval::Attempt>,
   ) -> Self {
-    Self::with_unlocker_and_fallbacks(candidates, context, Arc::new(KeychainUnlocker), fallbacks)
+    Self::with_unlocker_and_fallbacks(
+      candidates,
+      context,
+      Arc::new(KeychainUnlocker { authorization }),
+      fallbacks,
+    )
   }
 
   #[cfg(test)]

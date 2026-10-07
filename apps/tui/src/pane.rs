@@ -4,8 +4,14 @@ use ctmux_client::{
   AttachmentControllerOptions, AttachmentEvent, AttachmentEvents, ClientIdentity,
   DEFAULT_PRESENTATION_WINDOW_BYTES,
 };
-use ctmux_proto::{ErrorCode, LeaseKind, TerminalSize, ViewInfo};
-use std::collections::VecDeque;
+use ctmux_proto::{
+  ErrorCode, LeaseKind, ResizeDirection, TerminalCheckpoint, TerminalHistoryRow, TerminalSize,
+  ViewInfo,
+};
+use std::{
+  collections::{BTreeMap, VecDeque},
+  time::Duration,
+};
 use tokio::task::JoinHandle;
 
 /// Fresh-attachment preferences and explicit changes made before reconnect.
@@ -52,6 +58,7 @@ pub struct Pane {
   pub connected: bool,
   pub ended: Option<String>,
   pub view_update: Option<ViewInfo>,
+  pending_resizes: BTreeMap<String, tokio::time::Instant>,
   events: AttachmentEvents,
   pub token: String,
   pub reconnect_leases: ReconnectLeases,
@@ -178,6 +185,7 @@ impl Pane {
       connected: true,
       ended: None,
       view_update: None,
+      pending_resizes: BTreeMap::new(),
       events,
       token,
       reconnect_leases: leases,
@@ -273,7 +281,42 @@ impl Pane {
       }
     }
     self.publish_ready_history().await;
+    if self.connected {
+      let count = self.pending_resizes.len();
+      self
+        .pending_resizes
+        .retain(|_, queued| queued.elapsed() < Duration::from_secs(5));
+      if self.pending_resizes.len() != count {
+        message.get_or_insert_with(|| "Pane resize acknowledgement timed out".into());
+      }
+    } else {
+      self.pending_resizes.clear();
+    }
     Ok(message)
+  }
+
+  pub async fn resize_pane(
+    &mut self,
+    terminal_id: String,
+    direction: ResizeDirection,
+    amount: u16,
+    request_id: String,
+  ) -> Result<()> {
+    if self.pending_resizes.len() >= 32 {
+      return Err("Waiting for earlier pane resize requests".into());
+    }
+    tokio::time::timeout(
+      Duration::from_millis(100),
+      self
+        .control
+        .resize_pane(terminal_id, direction, amount, request_id.clone()),
+    )
+    .await
+    .map_err(|_| "Pane resize command queue is busy")??;
+    self
+      .pending_resizes
+      .insert(request_id, tokio::time::Instant::now());
+    Ok(())
   }
 
   async fn apply_event(&mut self, event: AttachmentEvent) -> Result<Option<String>> {
@@ -338,30 +381,15 @@ impl Pane {
         history_gap,
         ..
       } => {
-        if self.history_snapshot_id.as_deref() != Some(snapshot_id.as_str())
-          || checkpoint.sequence != self.history_boundary
-        {
-          return Ok(None);
-        }
-        let chunks = self.replay.iter().cloned().collect();
-        if let Some(job) = self.history_job.take() {
-          job.abort();
-        }
-        self.history_job = Some(tokio::task::spawn_blocking(move || {
-          let vt = ctmux_client::history::restore_projection(&checkpoint, &rows, scrollback_limit)?;
-          replay_history(
-            PreparedHistory {
-              snapshot_id,
-              sequence: checkpoint.sequence,
-              vt,
-              pending: checkpoint.input_prefix,
-              history_gap,
-            },
-            chunks,
-          )
-        }));
+        self.start_history_transfer(snapshot_id, checkpoint, rows, scrollback_limit, history_gap);
       }
       AttachmentEvent::ViewChanged { view } => self.queue_view_update(view),
+      AttachmentEvent::PaneResizeResult {
+        request_id,
+        outcome,
+      } => {
+        return Ok(self.apply_resize_result(&request_id, outcome));
+      }
       AttachmentEvent::ServerError { message: error, .. } => return Ok(Some(error)),
       AttachmentEvent::SessionEnded { exit_code, .. } => {
         self.connected = false;
@@ -374,6 +402,53 @@ impl Pane {
       _ => {}
     }
     Ok(None)
+  }
+
+  fn start_history_transfer(
+    &mut self,
+    snapshot_id: String,
+    checkpoint: TerminalCheckpoint,
+    rows: Vec<TerminalHistoryRow>,
+    scrollback_limit: u64,
+    history_gap: bool,
+  ) {
+    if self.history_snapshot_id.as_deref() != Some(snapshot_id.as_str())
+      || checkpoint.sequence != self.history_boundary
+    {
+      return;
+    }
+    let chunks = self.replay.iter().cloned().collect();
+    if let Some(job) = self.history_job.take() {
+      job.abort();
+    }
+    self.history_job = Some(tokio::task::spawn_blocking(move || {
+      let vt = ctmux_client::history::restore_projection(&checkpoint, &rows, scrollback_limit)?;
+      replay_history(
+        PreparedHistory {
+          snapshot_id,
+          sequence: checkpoint.sequence,
+          vt,
+          pending: checkpoint.input_prefix,
+          history_gap,
+        },
+        chunks,
+      )
+    }));
+  }
+
+  fn apply_resize_result(
+    &mut self,
+    request_id: &str,
+    outcome: ctmux_proto::PaneResizeOutcome,
+  ) -> Option<String> {
+    self.pending_resizes.remove(request_id)?;
+    match outcome {
+      ctmux_proto::PaneResizeOutcome::Applied { view } => {
+        self.queue_view_update(*view);
+        None
+      }
+      ctmux_proto::PaneResizeOutcome::Rejected { message, .. } => Some(message),
+    }
   }
 
   async fn reply_to_terminal(&self, reply: Vec<u8>) -> Result<()> {
@@ -507,5 +582,69 @@ impl Drop for Pane {
     if let Some(runner) = &self.runner {
       runner.abort();
     }
+  }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+  use super::*;
+  use crate::test_daemon;
+
+  #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+  async fn resize_results_require_a_pending_id_and_expire_without_disconnect() -> Result<()> {
+    let mut daemon = test_daemon::TestDaemon::start().await?;
+    let session = daemon
+      .create_echo_session("resize-correlation", "first", TerminalSize::default())
+      .await?;
+    let transport = crate::transport::LocalTransport(daemon.socket.clone());
+    let mut pane = Pane::open(
+      &transport,
+      &session,
+      TerminalSize::default(),
+      ReconnectLeases::new(true, true),
+      None,
+    )
+    .await?;
+    let rejected = ctmux_proto::PaneResizeOutcome::Rejected {
+      code: ErrorCode::InvalidRequest,
+      message: "no matching divider".into(),
+    };
+    assert!(
+      pane
+        .apply_event(AttachmentEvent::PaneResizeResult {
+          request_id: "unknown".into(),
+          outcome: rejected.clone()
+        })
+        .await?
+        .is_none()
+    );
+    pane
+      .pending_resizes
+      .insert("expected".into(), tokio::time::Instant::now());
+    assert_eq!(
+      pane
+        .apply_event(AttachmentEvent::PaneResizeResult {
+          request_id: "expected".into(),
+          outcome: rejected
+        })
+        .await?,
+      Some("no matching divider".into())
+    );
+    assert!(pane.connected);
+    assert!(pane.pending_resizes.is_empty());
+    pane.pending_resizes.insert(
+      "expired".into(),
+      tokio::time::Instant::now() - Duration::from_secs(6),
+    );
+    assert_eq!(
+      pane.drain().await?,
+      Some("Pane resize acknowledgement timed out".into())
+    );
+    assert!(pane.pending_resizes.is_empty());
+    assert!(pane.connected);
+    pane.close().await;
+    drop(pane);
+    daemon.shutdown().await?;
+    Ok(())
   }
 }

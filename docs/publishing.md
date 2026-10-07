@@ -103,7 +103,7 @@ install `ctl-cli` for the `ctl task` command.
 
 On macOS, `cargo install ctld` builds an unsigned source executable. It does not
 acquire the Developer ID signature, provisioning profile, or Keychain entitlement
-needed for Touch ID-protected saved credentials. `ctl setup` installs the complete
+needed for saved credentials protected by macOS user presence. `ctl setup` installs the complete
 signed and notarized helper from the GitHub release matching the CLI's Cargo
 version and architecture. That release must be published before setup can
 succeed; a draft or an Actions artifact is not an installation source.
@@ -137,8 +137,9 @@ Selections use
 `~/.tokn/ctl/components/ctld/selected/<target>-ctld1-lifecycle1-helper1`.
 Discovery requires the native target and compatible `ctld`, `ctld_lifecycle`, and
 `ctld_helper` APIs. Credential operations additionally require an explicitly
-advertised operation contract (`1.0.1` for initial operations, `1.1.3` for clear,
-and `1.1.4` for discovery). A valid managed helper lacking that contract permits
+advertised operation contract (`1.0.1` for initial metadata operations, `1.1.4`
+for discovery, and `1.1.5` for secret removal/clear and identity save/forget with
+reconnect revocation). A valid managed helper lacking that contract permits
 bundled release preparation. `CTLD_BIN` remains authoritative for every build;
 shared discovery also retains explicit complete selections.
 It checks the helper against its own installation manifest,

@@ -42,6 +42,7 @@ async fn fresh_proxy_routes_propagate_preparation_failure_before_starting_ssh() 
       let _ = std::fs::remove_dir_all(&self.0);
     }
   }
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let directory = std::env::temp_dir().join(format!("ctl-proxy-provider-{}", uuid::Uuid::new_v4()));
   std::fs::create_dir(&directory).unwrap();
   std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -80,6 +81,7 @@ async fn proxy_preparation_child() {
       ))
     })
   }
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   if std::env::var_os("CTL_PROXY_PROVIDER_TEST").is_none() {
     return;
   }
@@ -206,6 +208,7 @@ async fn multiplexed_ssh_command(options: &SshConnectionOptions, control_path: P
 #[cfg(unix)]
 #[tokio::test]
 async fn multiplexed_missing_master_never_contacts_the_host_or_gateway() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   for gateway_kind in [
     None,
     Some(ctl_ipc::GatewayKind::Ssh),
@@ -249,6 +252,7 @@ async fn multiplexed_missing_master_never_contacts_the_host_or_gateway() {
 #[cfg(unix)]
 #[tokio::test]
 async fn openssh_gateway_options_preserve_master_only_precedence() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let options = SshConnectionOptions {
     hostname: Some("127.0.0.1".into()),
     gateways: vec![loopback_gateway(2222)],
@@ -326,6 +330,7 @@ fn fixture(unix: &str, windows_script: &str) -> Command {
 
 #[tokio::test]
 async fn transport_consumes_marker_and_preserves_binary_io() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   timeout(TEST_TIMEOUT, async {
     let mut command = fixture(
       "printf '%s' \"$CTL_TEST_STARTUP_NOISE\"; printf 'ctl-ssh-v1\n'; cat",
@@ -349,6 +354,7 @@ async fn transport_consumes_marker_and_preserves_binary_io() {
 
 #[tokio::test]
 async fn startup_reports_missing_markers_and_retains_stderr() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   timeout(TEST_TIMEOUT, async {
     let noisy = fixture(
       "printf 'unexpected startup output\n'; printf 'remote wrapper failed\n' >&2",
@@ -375,6 +381,7 @@ async fn startup_reports_missing_markers_and_retains_stderr() {
 #[cfg(unix)]
 #[tokio::test]
 async fn cancelled_startup_reaps_the_ssh_child_without_waiting_for_readiness() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let path = std::env::temp_dir().join(format!("ctl-startup-pid-{}", uuid::Uuid::new_v4()));
   let mut command = Command::new("sh");
   command
@@ -420,6 +427,7 @@ async fn cancelled_startup_reaps_the_ssh_child_without_waiting_for_readiness() {
 #[cfg(windows)]
 #[tokio::test]
 async fn windows_openssh_reports_connection_failure() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   timeout(TEST_TIMEOUT, async {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let options = SshConnectionOptions {
@@ -444,6 +452,7 @@ async fn windows_openssh_reports_connection_failure() {
 
 #[tokio::test]
 async fn identified_transport_consumes_metadata_and_preserves_binary_io() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   timeout(TEST_TIMEOUT, async {
     let identity = ctl_proto::RemoteIdentity {
       protocols: ctl_proto::agent_protocols(),
@@ -525,6 +534,7 @@ fn identified_fixture(json: &str) -> Command {
 
 #[tokio::test]
 async fn legacy_inspection_reads_only_identity_after_startup_noise() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   timeout(TEST_TIMEOUT, async {
     let json = serde_json::json!({
       "remote_id": uuid::Uuid::new_v4().to_string(),
@@ -554,6 +564,7 @@ async fn legacy_inspection_reads_only_identity_after_startup_noise() {
 
 #[tokio::test]
 async fn legacy_inspection_rejects_invalid_and_oversized_metadata() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   timeout(TEST_TIMEOUT, async {
     for json in ["{}".to_owned(), " ".repeat(8193)] {
       let mut command = identified_fixture(&json);
@@ -570,6 +581,7 @@ async fn legacy_inspection_rejects_invalid_and_oversized_metadata() {
 
 #[tokio::test]
 async fn legacy_v3_identity_is_inspected_without_claiming_a_published_contract() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let json = serde_json::json!({
     "remote_id": uuid::Uuid::new_v4().to_string(),
     "agent_version": "0.1.0",
@@ -588,6 +600,7 @@ async fn legacy_v3_identity_is_inspected_without_claiming_a_published_contract()
 
 #[tokio::test]
 async fn identified_service_startup_failure_retains_agent_diagnostics() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let json = serde_json::json!({
     "remote_id": uuid::Uuid::new_v4().to_string(),
     "agent_version": "0.1.0",
@@ -612,6 +625,7 @@ async fn identified_service_startup_failure_retains_agent_diagnostics() {
 
 #[tokio::test]
 async fn legacy_inspection_rejects_other_reserved_markers() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   timeout(TEST_TIMEOUT, async {
     for marker in ["ctl-ssh-v99", "ctl-ssh-nf"] {
       let mut command = identified_fixture("{}");
@@ -629,6 +643,7 @@ async fn legacy_inspection_rejects_other_reserved_markers() {
 #[cfg(unix)]
 #[tokio::test]
 async fn legacy_inspection_reaps_its_child_without_sending_service_input() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let directory = std::env::temp_dir().join(format!(
     "ctl-legacy-inspection-{}",
     uuid::Uuid::new_v4().simple()
@@ -672,6 +687,7 @@ async fn legacy_inspection_reaps_its_child_without_sending_service_input() {
 
 #[tokio::test]
 async fn unsupported_transport_versions_offer_an_update_instead_of_blaming_the_shell() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   timeout(TEST_TIMEOUT, async {
     for marker in ["ctl-ssh-v2", "ctl-ssh-v99"] {
       let mut command = fixture(
@@ -696,6 +712,7 @@ async fn unsupported_transport_versions_offer_an_update_instead_of_blaming_the_s
 
 #[tokio::test]
 async fn authentication_hook_does_not_run_when_the_wrapper_skips_its_marker() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let identity = serde_json::json!({
     "remote_id": uuid::Uuid::new_v4().to_string(),
     "agent_version": "0.1.0",
@@ -723,6 +740,7 @@ async fn authentication_hook_does_not_run_when_the_wrapper_skips_its_marker() {
 
 #[tokio::test]
 async fn identified_transport_rejects_old_agents_and_invalid_metadata() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   timeout(TEST_TIMEOUT, async {
     let legacy = fixture("printf 'ctl-ssh-v1\n'; cat", "echo-transport.ps1");
     assert!(matches!(
@@ -741,6 +759,7 @@ async fn identified_transport_rejects_old_agents_and_invalid_metadata() {
 
 #[tokio::test]
 async fn authentication_hook_runs_when_the_remote_agent_is_missing() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   timeout(TEST_TIMEOUT, async {
     let command = fixture(
       "printf 'ctl-ssh-auth-v1\nctl-ssh-nf\n'; printf 'bash: ctl-agent: 未找到\n' >&2; exit 127",
@@ -762,6 +781,7 @@ async fn authentication_hook_runs_when_the_remote_agent_is_missing() {
 
 #[tokio::test]
 async fn transport_recognizes_the_missing_agent_protocol_marker() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   timeout(TEST_TIMEOUT, async {
     let command = fixture(
       "printf 'ctl-ssh-nf\n'; printf 'bash: ctl-agent: 未找到\n' >&2; exit 127",
@@ -780,6 +800,7 @@ async fn transport_recognizes_the_missing_agent_protocol_marker() {
 #[cfg(unix)]
 #[tokio::test]
 async fn fixed_command_closes_stdin_before_waiting_for_response() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   for input in [
     b"".as_slice(),
     b"{\"expected_remote_id\":\"test\"}".as_slice(),
@@ -803,6 +824,7 @@ async fn fixed_command_closes_stdin_before_waiting_for_response() {
 #[cfg(unix)]
 #[tokio::test]
 async fn fixed_command_strips_startup_noise_but_keeps_response_strict_and_reports_ssh_failures() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   for (marker, response) in [
     ("ctl-platform-v1\n", "Linux\nx86_64\n"),
     ("ctl-command-v1\n", "{\"terminated_sessions\":0}\n"),

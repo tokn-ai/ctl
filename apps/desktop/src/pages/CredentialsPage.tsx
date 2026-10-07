@@ -56,7 +56,7 @@ export function CredentialsPage({ visible, targets, on_close, on_dialog_change, 
       <div className="credentials-content">
         <div className="credentials-refresh-row"><p>{model.snapshot ? `Last checked ${new Date(model.snapshot.checked_at_ms).toLocaleTimeString()}` : "Saved credentials have not been checked."}</p><button type="button" disabled={model.loading || interactions_disabled} onClick={() => void model.refresh()}><Icon name="refresh" />{model.loading ? "Checking…" : "Refresh"}</button></div>
         {model.metadata_import_required ? <div className="credentials-import" role="region" aria-label="Saved credential metadata import">
-          <p id="credential-import-description">A one-time import needs Touch ID to read names and metadata from older protected SSH entries in Keychain. Password contents are never displayed. Refresh does not request Touch ID.</p>
+          <p id="credential-import-description">A one-time import needs macOS authorization to read names and metadata from older protected SSH entries in Keychain. Password contents are never displayed. Refresh does not request authentication.</p>
           <button type="button" aria-describedby="credential-import-description" disabled={model.loading || interactions_disabled} onClick={() => void model.importMetadata()}>{model.metadata_importing ? "Importing metadata…" : "Import saved credential metadata"}</button>
         </div> : null}
         {model.error ? <p className="credentials-error" role="alert">Could not refresh credentials: {model.error}{model.snapshot ? " Showing the last successful check." : ""}</p> : null}
@@ -81,13 +81,13 @@ export function CredentialsPage({ visible, targets, on_close, on_dialog_change, 
         </section>
         {!model.metadata_import_required ? <div className="credentials-reimport">
           <button type="button" aria-describedby="credential-reimport-description" disabled={model.loading || interactions_disabled} onClick={() => void model.importMetadata()}>{model.metadata_importing ? "Importing metadata…" : "Reimport saved credential metadata"}</button>
-          <p id="credential-reimport-description">Import again if credentials were saved using an older ctld. Touch ID allows access to their names and metadata.</p>
+          <p id="credential-reimport-description">Import again if credentials were saved using an older ctld. macOS may ask you to authorize access to their names and metadata.</p>
         </div> : null}
         <p className="credentials-footnote">Identity files include configured paths and keys discovered in ~/.ssh. “Used by” lists recorded host references. Keychain contains saved SSH passwords and key passphrases. VPN passwords use private VPN settings; Tailscale sign-in belongs to its container volume. Tailscale entries identify saved profiles; sign-in data has not been verified.</p>
       </div>
     </section>
     {visible && model.pending ? createPortal(<QuickInput title={`Forget ${model.pending.name}`} description="Remove this saved credential from Keychain. Active connections stay connected. A future connection may ask for the password or passphrase again." mode={{ kind: "confirm", confirm_label: "Forget credential", destructive: true }} onCancel={model.cancelForget} onSubmit={model.confirmForget} />, document.body) : null}
-    {visible && model.metadata_importing ? createPortal(<QuickInput title="Import saved credential metadata" description="Accessing names and metadata for older saved SSH passwords and key passphrases in Keychain." mode={{ kind: "progress", message: "Use Touch ID to allow metadata import…", detail: "Password contents are never displayed. This operation continues if you leave Credentials." }} cancel_disabled onCancel={() => {}} onSubmit={() => {}} />, document.body) : null}
+    {visible && model.metadata_importing ? createPortal(<QuickInput title="Import saved credential metadata" description="Accessing names and metadata for older saved SSH passwords and key passphrases in Keychain." mode={{ kind: "progress", message: "Authorize metadata import in macOS…", detail: "Password contents are never displayed. This operation continues if you leave Credentials." }} cancel_disabled onCancel={() => {}} onSubmit={() => {}} />, document.body) : null}
     {visible && model.identity_dialog ? createPortal(<IdentityFileDialog {...model.identity_dialog} on_save={model.confirmIdentitySave} on_forget={model.confirmIdentityForget} on_cancel={model.cancelDialog} />, document.body) : null}
   </>;
 }

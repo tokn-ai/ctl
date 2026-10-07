@@ -109,14 +109,14 @@ function layoutStatus(state: AttachmentViewState): StatusItem | null {
     return item(
       "layout",
       "WINDOW",
-      "This window owns layout and resizes the PTY with its terminal pane.",
+      "This window owns resize control and sizes the shared view to its full canvas viewport.",
     );
   }
   if (state.layout_lease.held && !state.layout_lease.owned_by_client) {
     return item(
       "layout",
       "OTHER SIZE",
-      "Another attachment owns the PTY layout.",
+      "Another client owns shared view resize control.",
       { priority: "medium" },
     );
   }
@@ -131,7 +131,9 @@ function layoutStatus(state: AttachmentViewState): StatusItem | null {
   return item(
     "layout",
     "FIXED",
-    "The PTY keeps its current size until a client takes layout ownership.",
+    state.layout_lease.owned_by_client
+      ? "This window owns resize control; the shared view stays fixed until you resize it or enable auto resize."
+      : "The shared view keeps its current size until a client resizes it.",
     { priority: "medium" },
   );
 }

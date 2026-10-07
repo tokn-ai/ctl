@@ -56,6 +56,7 @@ import { useWorkbenchNotifications } from "../features/notifications/useWorkbenc
 import { TerminalTabs } from "../components/tabs/TerminalTabs";
 import { SessionViewSurface } from "../components/terminal/SessionViewSurface";
 import { TerminalToolbar } from "../components/terminal/TerminalToolbar";
+import { useResizeControl, useResizeWithWindow } from "../features/attachment/useResizeControl";
 import { useSessionAttachments } from "../features/attachment/useSessionAttachments";
 import { ManualReconnectProvider, useManualReconnectHandler } from "../features/attachment/ManualReconnect";
 import { restartFailurePreservesLocalState } from "../features/daemon/restartFailurePolicy";
@@ -203,6 +204,11 @@ function TerminalWorkbench() {
   const [dispatcher] = useState(() => new CommandDispatcher());
   const [pane_commands, setPaneCommands] = useState<AppCommand[]>([]);
   const attachment = useSessionAttachments(renderer);
+  const resize_control_status = useResizeControl(attachment.state.session,
+    attachment.state.phase === "attached" ? attachment.state.layout_lease : null);
+  const resize_with_window = useResizeWithWindow(attachment.state.session, attachment.state.resize_with_window);
+  const resize_display_state = { ...attachment.state, resize_with_window,
+    layout_lease: { held: resize_control_status === "owned" || resize_control_status === "held_elsewhere", owned_by_client: resize_control_status === "owned" } };
   const taskWorkspace = useTaskWorkspace(
     workspace,
     async (session) => {
@@ -1504,7 +1510,8 @@ function TerminalWorkbench() {
       attachmentSessionKey: attachedSessionKey,
       phase: attachment.state.phase,
       inputOwned: attachment.state.input_lease.owned_by_client,
-      resizeWithWindow: attachment.state.resize_with_window,
+      resizeWithWindow: resize_with_window,
+      resizeControlStatus: resize_control_status,
       listLoading: loading,
       creating,
       newShellOpen,
@@ -1549,8 +1556,11 @@ function TerminalWorkbench() {
       },
       toggleResizeWithWindow: () => {
         if (!daemonRestartBlocksInteractions()) {
-          void attachment.toggleResizeWithWindow();
+          return attachment.toggleResizeWithWindow();
         }
+      },
+      requestResizeControl: (acquire) => {
+        if (!daemonRestartBlocksInteractions()) return attachment.requestResizeControl(acquire);
       },
       reconnect: () => {
         if (!daemonRestartBlocksInteractions()) {
@@ -2035,7 +2045,9 @@ function TerminalWorkbench() {
               >
                 <TerminalToolbar
                   showInputControl={false}
-                  state={attachment.state}
+                  state={resize_display_state}
+                  resize_control_status={resize_control_status}
+                  onRequestResizeControl={() => executeCommandById(COMMAND_IDS.toggleResizeControl)}
                   onToggleInput={() => executeCommandById(COMMAND_IDS.toggleInput)}
                   onToggleResizeWithWindow={() =>
                     executeCommandById(COMMAND_IDS.toggleResize)
@@ -2122,7 +2134,7 @@ function TerminalWorkbench() {
             />
           </main>
           <StatusBar
-            state={attachment.state}
+            state={resize_display_state}
             show_terminal={!utility_page && (!taskWorkspace.active || (
               taskWorkspace.activeTask?.definition.execution_mode === "interactive" && !!taskWorkspace.activeTask.active_run
             ))}

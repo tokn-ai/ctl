@@ -136,14 +136,15 @@ async fn modified_terminal_keys_do_not_alias_detach_or_plain_pane_arrows() -> Re
     let expected = format!("first:{marker}");
     let screen = tui
       .wait_screen(
-        "modified prefix key is consumed and input stays in pane one",
+        "modified prefix key preserves focus and input stays in pane one",
         |screen| screen.contains(&expected),
       )
       .await?;
     assert!(!screen.contains(&format!("second:{marker}")));
   }
 
-  // A real unmodified prefix command still works after each unknown binding.
+  // Control/Alt arrows resize rather than aliasing focus; Ctrl+D remains unbound.
+  // The unmodified detach command still works after those modified keys.
   tui.send(b"\x02d")?;
   assert!(tui.wait_exit().await?.success());
   drop(tui);

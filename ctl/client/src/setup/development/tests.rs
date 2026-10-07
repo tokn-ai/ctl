@@ -292,6 +292,7 @@ fn valid_checkout_helpers_still_require_the_exact_operation_contract() {
 #[cfg(target_os = "macos")]
 #[tokio::test]
 async fn unsigned_checkout_helper_is_rejected_before_metadata_execution() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = Fixture::new();
   let marker = fixture.home.0.join("metadata-executed");
   let executable = fixture.directory.join("ctld.app/Contents/MacOS/ctld");

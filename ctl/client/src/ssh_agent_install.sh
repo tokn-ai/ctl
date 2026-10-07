@@ -33,7 +33,7 @@ temporary=$(mktemp -d "$versions/.install-XXXXXX")
 archive="$temporary/agent.tar.gz"
 payload="$temporary/payload"
 mkdir "$payload"
-# Progress polling can run before the background receiver opens the file.
+# The counter must see a file even before the background receiver runs.
 : > "$archive"
 printf 'ctl-install-progress-v1 receiving 0\n'
 exec 3<&0

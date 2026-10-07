@@ -131,6 +131,7 @@ mod tests {
 
   #[tokio::test]
   async fn stdio_child() {
+    let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
     if std::env::var_os("CTL_AGENT_STDIO_TEST").is_none() {
       return;
     }
@@ -144,6 +145,7 @@ mod tests {
 
   #[tokio::test]
   async fn owned_stdout_delivers_eof_while_stdin_remains_open() {
+    let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
     let mut child = tokio::process::Command::new(std::env::current_exe().unwrap())
       .args(["--exact", "stdio::tests::stdio_child", "--nocapture"])
       .env("CTL_AGENT_STDIO_TEST", "1")
@@ -175,6 +177,7 @@ mod tests {
 
   #[tokio::test]
   async fn socketpair_output_eof_preserves_the_input_direction() {
+    let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
     let (local, peer) = std::os::unix::net::UnixStream::pair().unwrap();
     peer.set_nonblocking(true).unwrap();
     let mut peer = tokio::net::UnixStream::from_std(peer).unwrap();
@@ -198,6 +201,7 @@ mod tests {
 
   #[tokio::test]
   async fn an_empty_read_never_waits_for_input() {
+    let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
     let (local, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
     let mut input = Input::new(local).unwrap();
     tokio::time::timeout(Duration::from_secs(3), input.read(&mut []))
@@ -208,6 +212,7 @@ mod tests {
 
   #[tokio::test]
   async fn null_input_is_eof_without_registering_a_character_device() {
+    let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
     let mut input = Input::new(std::fs::File::open("/dev/null").unwrap()).unwrap();
     assert_eq!(input.read(&mut [0]).await.unwrap(), 0);
   }

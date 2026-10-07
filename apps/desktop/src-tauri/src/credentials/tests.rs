@@ -75,6 +75,7 @@ fn metadata_import_state_is_preserved_alongside_available_credentials() {
 #[cfg(unix)]
 #[tokio::test]
 async fn old_helpers_are_reported_as_unsupported_for_noninteractive_inventory() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let mut command = tokio::process::Command::new("/bin/sh");
   command.args(["-c", "cat >/dev/null; printf '%s' '{\"type\":\"error\",\"code\":\"credential_request_invalid\",\"message\":\"private-fixture-canary\"}'", "legacy-helper"]);
   let error = helper::exchange(
@@ -343,6 +344,7 @@ fn command(script: &str) -> tokio::process::Command {
 #[cfg(unix)]
 #[tokio::test]
 async fn helper_receives_fixed_argument_and_eof_without_askpass_context() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let response = Response::Inventory {
     inventory: inventory(vec![stored("scope")]),
   };
@@ -372,6 +374,7 @@ async fn helper_receives_fixed_argument_and_eof_without_askpass_context() {
 #[cfg(unix)]
 #[tokio::test]
 async fn helper_errors_and_stderr_are_sanitized() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let mut fixture = command(
     "cat >/dev/null; printf '%s' 'stderr-secret' >&2; printf '%s' \"$CREDENTIAL_FIXTURE_OUTPUT\"",
   );
@@ -435,6 +438,7 @@ fn a_broken_input_pipe_does_not_mask_helper_failure_or_confirm_success() {
 #[cfg(unix)]
 #[tokio::test]
 async fn helper_output_and_lifetime_are_bounded() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let error = helper::exchange(
     command(
       "cat >/dev/null; i=0; while [ \"$i\" -lt 1025 ]; do printf '%01024d' 0; i=$((i+1)); done; exec sleep 30",

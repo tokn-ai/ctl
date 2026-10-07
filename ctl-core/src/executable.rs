@@ -190,11 +190,10 @@ mod tests {
   const NEW: ProtocolVersion = ProtocolVersion::new(1, 1, 15);
 
   static NEXT: AtomicUsize = AtomicUsize::new(0);
-  static SCRIPTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
   #[tokio::test]
   async fn metadata_query_ignores_inherited_askpass_modes() {
-    let _guard = SCRIPTS.lock().await;
+    let _guard = crate::test_fixtures::ProcessGuard::acquire().await;
     let directory = std::env::temp_dir().join(format!(
       "component-metadata-environment-{}-{}",
       std::process::id(),
@@ -238,6 +237,7 @@ mod tests {
 
   #[tokio::test]
   async fn metadata_query_child() {
+    let _guard = crate::test_fixtures::ProcessGuard::acquire().await;
     let Some(executable) = std::env::var_os("CTL_METADATA_TEST_EXECUTABLE") else {
       return;
     };
@@ -250,7 +250,7 @@ mod tests {
 
   #[tokio::test]
   async fn recheck_detects_changed_contents_even_with_identical_reported_build() {
-    let _guard = SCRIPTS.lock().await;
+    let _guard = crate::test_fixtures::ProcessGuard::acquire().await;
     let root = std::env::temp_dir().join(format!(
       "component-executable-{}-{}",
       std::process::id(),
@@ -284,7 +284,7 @@ mod tests {
 
   #[tokio::test]
   async fn helper_inspection_negotiates_explicit_supported_contracts() {
-    let _guard = SCRIPTS.lock().await;
+    let _guard = crate::test_fixtures::ProcessGuard::acquire().await;
     let root = std::env::temp_dir().join(format!(
       "component-contracts-{}-{}",
       std::process::id(),

@@ -217,6 +217,7 @@ mod preface_tests {
 
   #[tokio::test]
   async fn idle_timeout_starts_after_stdout_and_excludes_authentication_waiting() {
+    let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
     let (reader, mut writer) = tokio::io::duplex(4096);
     let task = tokio::spawn(async move {
       tokio::time::sleep(Duration::from_millis(40)).await;
@@ -253,6 +254,7 @@ mod preface_tests {
 
   #[tokio::test]
   async fn startup_noise_and_read_ahead_leave_binary_payload_untouched() {
+    let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
     for (index, marker) in MARKERS.iter().enumerate() {
       let noise = b"\xff\x1b[32mWelcome\x1b[0m\r\nctl-sshctl-sshno final newline: ";
       let payload = b"\x00\xff\x80\nctl-ssh-nf\n\x1b";
@@ -274,6 +276,7 @@ mod preface_tests {
 
   #[tokio::test]
   async fn fragmented_markers_are_recognized_without_consuming_service_bytes() {
+    let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
     let (reader, mut writer) = tokio::io::duplex(1);
     let task = tokio::spawn(async move {
       for byte in b"bannerctl-ssh-v3\n\x00\xff" {
@@ -296,6 +299,7 @@ mod preface_tests {
 
   #[tokio::test]
   async fn startup_budget_is_shared_across_authentication_and_service_markers() {
+    let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
     let half = vec![b'x'; MAX_STARTUP_BYTES / 2];
     let output = [
       half.as_slice(),
@@ -321,6 +325,7 @@ mod preface_tests {
 
   #[tokio::test]
   async fn failed_startup_preview_escapes_terminal_controls_and_is_bounded() {
+    let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
     let mut output = b"\x1b]52;c;secret\x07\xff".to_vec();
     output.extend(vec![b'x'; 4096]);
     let error = Preface::default()
@@ -344,6 +349,7 @@ mod tests {
 
   #[tokio::test]
   async fn preserves_ssh_diagnostics_instead_of_only_reporting_eof() {
+    let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
     let mut child = Command::new("sh")
       .args([
         "-c",
@@ -359,6 +365,7 @@ mod tests {
 
   #[tokio::test]
   async fn drains_large_diagnostics_without_unbounded_retention() {
+    let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
     let mut child = Command::new("sh")
       .args([
         "-c",

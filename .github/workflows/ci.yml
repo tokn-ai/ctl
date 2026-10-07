@@ -39,7 +39,7 @@ jobs:
           node-version: 24
 
       - name: Test development and release scripts
-        run: node --experimental-strip-types --disable-warning=ExperimentalWarning --test scripts/dev/*.test.mts scripts/ci/*.test.mts
+        run: node scripts/ci/check.mts scripts
 
   rust-quality:
     name: Rust quality
@@ -59,19 +59,21 @@ jobs:
             libwebkit2gtk-4.1-dev \
             libxdo-dev
 
+      - name: Install Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.99.0
         with:
           components: clippy, rustfmt
 
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@v2
 
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-
-      - name: Run Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Check formatting and Clippy
+        run: node scripts/ci/check.mts quality
 
   rust-tests:
     name: Rust tests (${{ matrix.os }})
@@ -98,14 +100,19 @@ jobs:
             libwebkit2gtk-4.1-dev \
             libxdo-dev
 
+      - name: Install Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.99.0
 
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@v2
 
       - name: Run workspace tests
-        run: cargo test --workspace
+        run: node scripts/ci/check.mts rust
 
   cargo-packages:
     name: Cargo packages (Rust 1.97)
@@ -127,7 +134,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Package and test published sources
-        run: node --experimental-strip-types scripts/ci/verify-cargo-packages.mts
+        run: node scripts/ci/check.mts packages
 
   windows-check:
     name: Windows tasks and terminals
@@ -141,7 +148,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.99.0
         with:
           targets: x86_64-pc-windows-msvc
 
@@ -191,11 +198,8 @@ jobs:
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
 
-      - name: Install frontend dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Check types
-        run: pnpm check
+      - name: Check frontend
+        run: node scripts/ci/check.mts frontend
 
       - name: Check workspace command entry points
         run: |
@@ -205,9 +209,3 @@ jobs:
           pnpm ctld:build --help
           pnpm ctld:provision --help
           pnpm bundles:sync --help
-
-      - name: Run frontend tests
-        run: pnpm desktop:test
-
-      - name: Build frontend
-        run: pnpm --filter ctmux-app build

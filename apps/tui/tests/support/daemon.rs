@@ -80,19 +80,37 @@ impl TestDaemon {
       task: Some(task),
       completed,
     };
-    let control = ctmux_ipc::control_socket_path(&daemon.socket)?;
     timeout(REQUEST_TIMEOUT, async {
-      while !daemon.socket.exists() || !control.exists() {
+      loop {
         if daemon.task.as_ref().is_some_and(JoinHandle::is_finished) {
-          return Err("fixture daemon exited before its sockets became ready");
+          return Result::<()>::Err("fixture daemon exited before becoming ready".into());
         }
-        sleep(Duration::from_millis(10)).await;
+        // bind creates the path before listen makes it connectable. A complete
+        // request proves readiness; path existence alone can race with startup.
+        match tokio::net::UnixStream::connect(&daemon.socket).await {
+          Ok(stream) => {
+            let response = Self::exchange(stream, ClientMessage::ListSessions).await?;
+            return match response {
+              ServerMessage::SessionList { .. } => Ok(()),
+              response => {
+                Err(format!("unexpected fixture readiness response: {response:?}").into())
+              }
+            };
+          }
+          Err(error)
+            if matches!(
+              error.kind(),
+              std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+            ) =>
+          {
+            sleep(Duration::from_millis(10)).await;
+          }
+          Err(error) => return Err(error.into()),
+        }
       }
-      Ok(())
     })
     .await
-    .map_err(|_| "fixture daemon sockets did not become ready")??;
-    daemon.request(ClientMessage::ListSessions).await?;
+    .map_err(|_| "fixture daemon did not become ready")??;
     Ok(daemon)
   }
 
@@ -100,19 +118,23 @@ impl TestDaemon {
     timeout(REQUEST_TIMEOUT, async {
       // Never fall back to starting the user's installed daemon.
       let stream = ctmux_ipc::connect_existing_daemon(&self.socket).await?;
-      ctmux_client::request(
-        stream,
-        &ctmux_client::ClientIdentity {
-          name: "tui-process-test".into(),
-          version: "test".into(),
-        },
-        message,
-      )
-      .await
-      .map_err(Into::into)
+      Self::exchange(stream, message).await
     })
     .await
     .map_err(|_| "fixture daemon request timed out")?
+  }
+
+  async fn exchange(stream: ctmux_ipc::Stream, message: ClientMessage) -> Result<ServerMessage> {
+    ctmux_client::request(
+      stream,
+      &ctmux_client::ClientIdentity {
+        name: "tui-process-test".into(),
+        version: "test".into(),
+      },
+      message,
+    )
+    .await
+    .map_err(Into::into)
   }
 
   pub async fn create_echo_session(

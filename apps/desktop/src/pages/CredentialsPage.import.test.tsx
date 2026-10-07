@@ -40,7 +40,7 @@ describe("Saved credential metadata import", () => {
     render(<CredentialsPage {...props()} />);
     await screen.findByRole("button", { name: "Import saved credential metadata" });
     const region = screen.getByRole("region", { name: "Saved credential metadata import" });
-    expect(within(region).getByText(/Touch ID to read names and metadata from older protected SSH entries in Keychain/)).toBeTruthy();
+    expect(within(region).getByText(/macOS authorization to read names and metadata from older protected SSH entries in Keychain/)).toBeTruthy();
     expect(importButton().getAttribute("aria-describedby")).toBe("credential-import-description");
     expect(api.import_metadata).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Refresh" }));

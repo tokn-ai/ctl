@@ -103,7 +103,8 @@ async fn answer_request(mut stream: tokio::net::UnixStream, prompt: usize) {
   .unwrap();
   assert!(matches!(
     ctl_ipc::read_frame::<_, ClientMessage>(&mut stream).await.unwrap(),
-    Some(ClientMessage::EnsureMaster { target }) if target.destination == "fixture"
+    Some(ClientMessage::EnsureMaster { target } | ClientMessage::EnsureMasterQuiet { target })
+      if target.destination == "fixture"
   ));
   if prompt == 0 {
     ctl_ipc::write_frame(

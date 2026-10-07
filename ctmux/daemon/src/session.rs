@@ -1,5 +1,6 @@
 mod topology;
 
+use crate::history_snapshot::PhysicalHistory;
 use crate::process_monitor::ProcessMonitor;
 #[cfg(unix)]
 use crate::shell_reporter::{ShellReport, ShellReporter, ShellReporterError};
@@ -12,7 +13,6 @@ use ctmux_proto::{
   SessionStatus, ShellProcessState, ShellState, TERMINAL_CHECKPOINT_FORMAT,
   TERMINAL_CHECKPOINT_FORMAT_VERSION, TERMINAL_HISTORY_FORMAT, TERMINAL_HISTORY_FORMAT_VERSION,
   TerminalCheckpoint, TerminalHistoryRow, TerminalHistorySnapshot, TerminalSize, TuiHint,
-  normalize_history_rows,
 };
 #[cfg(unix)]
 use portable_pty::ChildKiller;
@@ -80,6 +80,7 @@ pub struct Terminal {
   lifecycle: Mutex<SessionLifecycle>,
   shell_state_publisher: ShellStatePublisher,
   view_updates: watch::Sender<Option<ctmux_proto::ViewInfo>>,
+  layout_lease_updates: watch::Sender<()>,
   #[cfg(unix)]
   shell_reporter: Mutex<Option<ShellReporter>>,
   process_observation_enabled: AtomicBool,
@@ -113,11 +114,11 @@ struct TerminalState {
   history_clear_pending: bool,
   history_alternate_screen: bool,
   primary_reflow_pending: bool,
-  primary_history_rows: Vec<TerminalHistoryRow>,
+  primary_history_rows: Arc<PhysicalHistory>,
   history: TerminalHistory,
   /// History captured at exactly the same raw-output boundary as `checkpoint`.
   checkpoint_history: TerminalHistorySnapshot,
-  checkpoint_history_rows: Vec<TerminalHistoryRow>,
+  checkpoint_history_rows: Arc<PhysicalHistory>,
   pending_input: Vec<u8>,
   journal: OutputJournal,
   checkpoint: TerminalCheckpoint,
@@ -165,9 +166,9 @@ impl TerminalState {
       history_clear_pending: false,
       history_alternate_screen: false,
       primary_reflow_pending: false,
-      primary_history_rows: Vec::new(),
+      primary_history_rows: Arc::default(),
       checkpoint_history: history.snapshot(0),
-      checkpoint_history_rows: Vec::new(),
+      checkpoint_history_rows: Arc::default(),
       history,
       pending_input: Vec::new(),
       journal: OutputJournal::new(journal_capacity_bytes),
@@ -206,23 +207,25 @@ impl TerminalHistory {
     }
   }
 
-  fn replace(&mut self, lines: Vec<String>, source_truncated: bool) {
+  fn replace(&mut self, lines: &[String], source_truncated: bool) {
     let mut retained_bytes = lines.iter().map(|line| line.len() + 1).sum::<usize>();
-    let mut lines = VecDeque::from(lines);
+    let mut first_line = 0;
     let mut truncated = self.truncated || source_truncated;
     while retained_bytes > self.capacity_bytes {
-      let Some(line) = lines.pop_front() else {
-        retained_bytes = 0;
-        break;
-      };
+      let line = &lines[first_line];
+      first_line += 1;
       retained_bytes = retained_bytes.saturating_sub(line.len() + 1);
       truncated = true;
     }
+    let retained = &lines[first_line..];
 
-    if self.lines == lines && self.truncated == truncated {
+    let lines_changed = self.lines.iter().ne(retained);
+    if !lines_changed && self.truncated == truncated {
       return;
     }
-    self.lines = lines;
+    if lines_changed {
+      self.lines = retained.iter().cloned().collect();
+    }
     self.retained_bytes = retained_bytes;
     self.truncated = truncated;
     self.revision = self
@@ -264,7 +267,7 @@ impl TerminalHistory {
 struct GeometryCheckpoint {
   checkpoint: TerminalCheckpoint,
   history: TerminalHistorySnapshot,
-  history_rows: Vec<TerminalHistoryRow>,
+  history_rows: Arc<PhysicalHistory>,
   geometry_revision: u64,
 }
 
@@ -282,7 +285,7 @@ pub struct AttachSnapshot {
   /// Normalized logical lines that are completely outside the live grid.
   /// Present whenever the attachment also receives a replacing checkpoint.
   pub history: Option<TerminalHistorySnapshot>,
-  pub history_rows: Option<Vec<TerminalHistoryRow>>,
+  pub(crate) history_rows: Option<Arc<PhysicalHistory>>,
   pub scrollback_limit: u64,
   /// The internal, unredacted state observed atomically with the journal.
   /// Callers must apply their own attachment visibility policy before sending
@@ -335,7 +338,20 @@ impl ShellStatePublication<'_> {
 }
 
 impl Terminal {
-  fn with_view_leases<T: Default>(
+  fn with_view_leases<T: Default>(&self, action: impl FnOnce(&AttachmentLeaseRegistry) -> T) -> T {
+    let Some(manager) = self.manager.upgrade() else {
+      return T::default();
+    };
+    let registry = lock(&manager.registry);
+    let owner = lock(&self.owner).session_id.clone();
+    registry
+      .sessions
+      .get(&owner)
+      .map(|root| action(&root.view.leases))
+      .unwrap_or_default()
+  }
+
+  fn change_view_leases<T: Default>(
     &self,
     action: impl FnOnce(&mut AttachmentLeaseRegistry) -> T,
   ) -> T {
@@ -344,11 +360,13 @@ impl Terminal {
     };
     let mut registry = lock(&manager.registry);
     let owner = lock(&self.owner).session_id.clone();
-    registry
+    let result = registry
       .sessions
       .get_mut(&owner)
       .map(|root| action(&mut root.view.leases))
-      .unwrap_or_default()
+      .unwrap_or_default();
+    registry.publish_layout_leases(&owner);
+    result
   }
 
   pub fn info(&self) -> SessionInfo {
@@ -391,6 +409,14 @@ impl Terminal {
 
   pub fn subscribe_view(&self) -> watch::Receiver<Option<ctmux_proto::ViewInfo>> {
     self.view_updates.subscribe()
+  }
+
+  pub fn subscribe_layout_leases(&self) -> watch::Receiver<()> {
+    self.layout_lease_updates.subscribe()
+  }
+
+  pub fn layout_lease_status(&self, attachment_id: &str) -> LeaseStatus {
+    self.with_view_leases(|leases| leases.status(attachment_id, LeaseKind::Layout))
   }
 
   /// Returns the latest state without live command metadata.
@@ -458,7 +484,7 @@ impl Terminal {
     let leases = lock(&self.leases).request_initial(&attachment_id, request_input_lease, false);
     let leases = AttachmentLeases {
       input: leases.input,
-      layout: self.with_view_leases(|leases| {
+      layout: self.change_view_leases(|leases| {
         leases
           .request_initial(&attachment_id, false, request_layout_lease)
           .layout
@@ -531,7 +557,7 @@ impl Terminal {
     };
     if let Some(attachment_id) = attachment_id {
       lock(&self.leases).release_attachment(&attachment_id);
-      self.with_view_leases(|leases| leases.release_attachment(&attachment_id));
+      self.change_view_leases(|leases| leases.release_attachment(&attachment_id));
     }
   }
 
@@ -551,20 +577,20 @@ impl Terminal {
     };
     if let Some(attachment_id) = attachment_id {
       lock(&self.leases).release_attachment(&attachment_id);
-      self.with_view_leases(|leases| leases.release_attachment(&attachment_id));
+      self.change_view_leases(|leases| leases.release_attachment(&attachment_id));
     }
   }
 
   pub fn acquire_lease(&self, attachment_id: &str, lease: LeaseKind) -> LeaseStatus {
     if lease == LeaseKind::Layout {
-      return self.with_view_leases(|leases| leases.acquire(attachment_id, lease));
+      return self.change_view_leases(|leases| leases.acquire(attachment_id, lease));
     }
     lock(&self.leases).acquire(attachment_id, lease)
   }
 
   pub fn release_lease(&self, attachment_id: &str, lease: LeaseKind) -> LeaseStatus {
     if lease == LeaseKind::Layout {
-      return self.with_view_leases(|leases| leases.release(attachment_id, lease));
+      return self.change_view_leases(|leases| leases.release(attachment_id, lease));
     }
     lock(&self.leases).release(attachment_id, lease)
   }
@@ -735,6 +761,132 @@ impl Terminal {
     registry.resize_view(&owner, terminal_size)
   }
 
+  /// Moves a split divider under view layout ownership, restoring saved splits first.
+  pub fn resize_pane(
+    &self,
+    attachment_id: &str,
+    terminal_id: &str,
+    direction: ctmux_proto::ResizeDirection,
+    amount: u16,
+  ) -> Result<ctmux_proto::ViewInfo, SessionControlError> {
+    self.resize_layout(attachment_id, |view, registry| {
+      if !view
+        .layout
+        .terminal_ids()
+        .iter()
+        .any(|id| id == terminal_id)
+      {
+        return Err(SessionControlError::InvalidView(
+          "resize terminal must belong to the attached view".into(),
+        ));
+      }
+      if !matches!(
+        *lock(&registry.terminals[terminal_id].lifecycle),
+        SessionLifecycle::Running
+      ) {
+        return Err(SessionControlError::InvalidView(
+          "resize terminal has ended".into(),
+        ));
+      }
+      let mut layout = view.layout.clone();
+      let changed = layout
+        .resize_pane(terminal_id, direction, amount, &view.canvas_size)
+        .map_err(SessionControlError::InvalidView)?;
+      Ok((layout, changed))
+    })
+  }
+
+  /// Moves an exact divider only while the observed view identity/revision still holds.
+  pub fn resize_divider(
+    &self,
+    attachment_id: &str,
+    divider: &ctmux_proto::DividerResize,
+  ) -> Result<ctmux_proto::ViewInfo, SessionControlError> {
+    self.resize_layout(attachment_id, |view, _registry| {
+      if view.id != divider.view_id || view.revision != divider.expected_revision {
+        return Err(SessionControlError::InvalidView(
+          "view changed; reload before dragging a divider".into(),
+        ));
+      }
+      let mut layout = view.layout.clone();
+      let changed = layout
+        .resize_divider(
+          &divider.split_path,
+          divider.boundary,
+          divider.position,
+          &view.canvas_size,
+        )
+        .map_err(SessionControlError::InvalidView)?;
+      Ok((layout, changed))
+    })
+  }
+
+  fn resize_layout(
+    &self,
+    attachment_id: &str,
+    change: impl FnOnce(
+      &View,
+      &SessionRegistry,
+    ) -> Result<(ctmux_proto::ViewLayout, bool), SessionControlError>,
+  ) -> Result<ctmux_proto::ViewInfo, SessionControlError> {
+    let manager = self
+      .manager
+      .upgrade()
+      .ok_or_else(|| SessionControlError::InvalidView("view has closed".into()))?;
+    let mut registry = lock(&manager.registry);
+    let owner = lock(&self.owner).session_id.clone();
+    let root = registry
+      .sessions
+      .get(&owner)
+      .ok_or_else(|| SessionControlError::InvalidView("view has closed".into()))?;
+    if !root
+      .view
+      .leases
+      .status(attachment_id, LeaseKind::Layout)
+      .owned_by_client
+    {
+      return Err(SessionControlError::LayoutLeaseRequired);
+    }
+    if root.closing {
+      return Err(SessionControlError::InvalidView(
+        "session is terminating".into(),
+      ));
+    }
+    let (layout, changed) = change(&root.view, &registry)?;
+    if !changed {
+      return registry
+        .view_info(&owner)
+        .map_err(|error| SessionControlError::InvalidView(error.to_string()));
+    }
+    let old_layout = root.view.layout.clone();
+    let old_zoom = root.view.zoomed_terminal_id.clone();
+    let old_revision = root.view.revision;
+    let previous_geometry = registry.capture_view_geometry(&owner);
+    let view = &mut registry
+      .sessions
+      .get_mut(&owner)
+      .expect("validated view")
+      .view;
+    view.layout = layout;
+    view.zoomed_terminal_id = None;
+    view.revision += 1;
+    if let Err(error) = registry.reflow_view(&owner) {
+      let view = &mut registry
+        .sessions
+        .get_mut(&owner)
+        .expect("validated view")
+        .view;
+      view.layout = old_layout;
+      view.zoomed_terminal_id = old_zoom;
+      view.revision = old_revision;
+      registry.restore_view_geometry(&owner, &previous_geometry);
+      return Err(error);
+    }
+    registry
+      .view_info(&owner)
+      .map_err(|error| SessionControlError::InvalidView(error.to_string()))
+  }
+
   /// Changes view zoom under the same attachment lease that owns PTY resize.
   pub fn set_view_zoom(
     &self,
@@ -786,6 +938,7 @@ impl Terminal {
     }
     let old_zoom = root.view.zoomed_terminal_id.clone();
     let old_revision = root.view.revision;
+    let previous_geometry = registry.capture_view_geometry(&owner);
     if let Some(previous) = &old_zoom
       && terminal_id.is_some()
     {
@@ -820,9 +973,7 @@ impl Terminal {
         .view;
       view.zoomed_terminal_id = old_zoom;
       view.revision = old_revision;
-      // A retarget may already have restored the previous pane before the new
-      // PTY resize failed. Restore its authoritative geometry as well.
-      let _restore = registry.reflow_view(&owner);
+      registry.restore_view_geometry(&owner, &previous_geometry);
       return Err(error);
     }
     registry
@@ -1301,6 +1452,7 @@ impl SessionManager {
       lifecycle: Mutex::new(SessionLifecycle::Running),
       shell_state_publisher: ShellStatePublisher::new(shell_state),
       view_updates: watch::channel(None).0,
+      layout_lease_updates: watch::channel(()).0,
       #[cfg(unix)]
       shell_reporter: Mutex::new(Some(shell_reporter)),
       process_observation_enabled: AtomicBool::new(process_inspector.is_some()),
@@ -2055,10 +2207,11 @@ fn refresh_history(terminal: &mut TerminalState) {
     let limit = terminal_scrollback_rows(&terminal.terminal_size);
     if terminal.primary_history_rows.len() > limit {
       let evicted = terminal.primary_history_rows.len() - limit;
-      terminal.primary_history_rows.drain(..evicted);
+      let rows = terminal.primary_history_rows[evicted..].to_vec();
+      PhysicalHistory::replace(&mut terminal.primary_history_rows, rows);
       terminal
         .history
-        .replace(normalize_history_rows(&terminal.primary_history_rows), true);
+        .replace(terminal.primary_history_rows.lines(), true);
     }
     return;
   }
@@ -2085,9 +2238,10 @@ fn refresh_history(terminal: &mut TerminalState) {
       wrapped: unwrapper.push(line).is_none(),
     })
     .collect();
-  let lines = normalize_history_rows(&rows);
-  terminal.primary_history_rows = rows;
-  terminal.history.replace(lines, source_truncated);
+  PhysicalHistory::replace(&mut terminal.primary_history_rows, rows);
+  terminal
+    .history
+    .replace(terminal.primary_history_rows.lines(), source_truncated);
 }
 
 fn terminal_emulator(terminal_size: &TerminalSize) -> avt::Vt {
@@ -2207,7 +2361,7 @@ fn feed_terminal_character(terminal: &mut TerminalState, ch: char) -> Option<Tui
     return tui_hint;
   };
   terminal.history.clear();
-  terminal.primary_history_rows.clear();
+  PhysicalHistory::replace(&mut terminal.primary_history_rows, Vec::new());
   if terminal_already_reset {
     terminal.history_alternate_screen = false;
     terminal.history_clear_pending = false;
@@ -2262,6 +2416,210 @@ mod tests {
   use std::sync::mpsc;
   use std::sync::{Arc, Barrier};
   use std::thread;
+
+  #[cfg(unix)]
+  struct PtyViewFixture {
+    manager: SessionManager,
+    terminals: Vec<Arc<Terminal>>,
+    directory: std::path::PathBuf,
+  }
+
+  #[cfg(unix)]
+  impl PtyViewFixture {
+    fn new() -> Self {
+      use std::os::unix::fs::PermissionsExt as _;
+      let directory =
+        std::env::temp_dir().join(format!("ctmux-resize-rollback-{}", Uuid::new_v4()));
+      std::fs::create_dir(&directory).unwrap();
+      std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+      let manager = SessionManager::new(directory.clone(), 64 * 1024, 4 * 1024);
+      let mut fixture = Self {
+        manager,
+        terminals: Vec::new(),
+        directory,
+      };
+      let command = CommandSpec {
+        program: "/bin/sh".into(),
+        arguments: vec!["-c".into(), "IFS= read -r line".into()],
+      };
+      let root = fixture
+        .manager
+        .create(
+          Some("rollback".into()),
+          Some(command.clone()),
+          None,
+          TerminalSize::default(),
+        )
+        .unwrap();
+      fixture.terminals.push(root.clone());
+      let secondary = fixture
+        .manager
+        .split_terminal(
+          root.id.clone(),
+          ctmux_proto::SplitAxis::Horizontal,
+          Some(command.clone()),
+          None,
+          TerminalSize::default(),
+        )
+        .unwrap();
+      fixture.terminals.push(secondary.clone());
+      let third = fixture
+        .manager
+        .split_terminal(
+          secondary.id.clone(),
+          ctmux_proto::SplitAxis::Vertical,
+          Some(command),
+          None,
+          TerminalSize::default(),
+        )
+        .unwrap();
+      fixture.terminals.push(third);
+      fixture
+    }
+  }
+
+  #[cfg(unix)]
+  impl Drop for PtyViewFixture {
+    fn drop(&mut self) {
+      for terminal in &self.terminals {
+        let _killed = terminal.kill();
+      }
+      let _removed = std::fs::remove_dir_all(&self.directory);
+    }
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn failed_pane_reflow_restores_zoom_layout_revision_and_previous_pty_size() {
+    let fixture = PtyViewFixture::new();
+    let root = &fixture.terminals[0];
+    let secondary = &fixture.terminals[1];
+    let third = &fixture.terminals[2];
+    let secondary_size = secondary.info().terminal_size;
+    let attachment = root.create_attachment(true, true);
+    root
+      .set_view_zoom(&attachment.attachment_id, Some(root.id.clone()))
+      .unwrap();
+    let before = fixture.manager.view(&root.info().session_id).unwrap();
+    // Keep the live PTY handle outside its terminal so the child stays running,
+    // but fail its geometry request after the first sibling has already resized.
+    let master = lock(&third.master).take();
+    let result = root.resize_pane(
+      &attachment.attachment_id,
+      &root.id,
+      ctmux_proto::ResizeDirection::Right,
+      5,
+    );
+    *lock(&third.master) = master;
+    assert!(matches!(result, Err(SessionControlError::Pty(_))));
+    assert_eq!(fixture.manager.view(&before.session_id).unwrap(), before);
+    assert_eq!(root.info().terminal_size, TerminalSize::default());
+    assert_eq!(secondary.info().terminal_size, secondary_size);
+    let master = lock(&third.master).take();
+    let result = root.resize_divider(
+      &attachment.attachment_id,
+      &ctmux_proto::DividerResize {
+        view_id: before.view_id.clone(),
+        expected_revision: before.revision,
+        split_path: Vec::new(),
+        boundary: 0,
+        position: 45,
+      },
+    );
+    *lock(&third.master) = master;
+    assert!(matches!(result, Err(SessionControlError::Pty(_))));
+    assert_eq!(fixture.manager.view(&before.session_id).unwrap(), before);
+    assert_eq!(root.info().terminal_size, TerminalSize::default());
+    assert_eq!(secondary.info().terminal_size, secondary_size);
+    root
+      .resize(
+        &attachment.attachment_id,
+        TerminalSize {
+          columns: 100,
+          ..TerminalSize::default()
+        },
+      )
+      .unwrap();
+    let before = fixture.manager.view(&root.info().session_id).unwrap();
+    let master = lock(&third.master).take();
+    let result = root.set_view_zoom(&attachment.attachment_id, None);
+    *lock(&third.master) = master;
+    assert!(matches!(result, Err(SessionControlError::Pty(_))));
+    assert_eq!(fixture.manager.view(&before.session_id).unwrap(), before);
+    assert_eq!(secondary.info().terminal_size, secondary_size);
+  }
+
+  #[test]
+  fn failed_topology_reflow_notifies_current_layout_ownership() {
+    let fixture = PtyViewFixture::new();
+    let moved = &fixture.terminals[0];
+    let remaining = &fixture.terminals[1];
+    let failed = &fixture.terminals[2];
+    let original_session = moved.info().session_id;
+    let owner = moved.create_attachment(true, true);
+    let observer = remaining.create_attachment(false, false);
+    let mut old_view_updates = remaining.subscribe_view();
+    let mut old_lease_updates = remaining.subscribe_layout_leases();
+    old_view_updates.borrow_and_update();
+    old_lease_updates.borrow_and_update();
+
+    // Promotion changes ownership even when resizing the surviving view fails.
+    let master = lock(&failed.master).take();
+    let promoted = fixture
+      .manager
+      .promote_terminal(&moved.id, Some("moved".into()))
+      .unwrap();
+    *lock(&failed.master) = master;
+    assert!(!old_view_updates.has_changed().unwrap());
+    assert!(old_lease_updates.has_changed().unwrap());
+    assert_eq!(
+      remaining.layout_lease_status(&observer.attachment_id),
+      LeaseStatus::default()
+    );
+    assert_eq!(
+      moved.layout_lease_status(&owner.attachment_id),
+      LeaseStatus::default()
+    );
+
+    assert!(
+      moved
+        .acquire_lease(&owner.attachment_id, LeaseKind::Layout)
+        .owned_by_client
+    );
+    assert!(
+      remaining
+        .acquire_lease(&observer.attachment_id, LeaseKind::Layout)
+        .owned_by_client
+    );
+    let mut moved_view_updates = moved.subscribe_view();
+    let mut moved_lease_updates = moved.subscribe_layout_leases();
+    moved_view_updates.borrow_and_update();
+    moved_lease_updates.borrow_and_update();
+
+    // The source registry is discarded before destination PTY reflow. Its
+    // former owner must learn that the destination's owner now controls it.
+    let master = lock(&failed.master).take();
+    let merged = fixture
+      .manager
+      .merge_sessions(&promoted.session_id, &original_session);
+    *lock(&failed.master) = master;
+    assert!(matches!(merged, Err(SessionManagerError::Pty(_))));
+    assert_eq!(moved.info().session_id, original_session);
+    assert!(!moved_view_updates.has_changed().unwrap());
+    assert!(moved_lease_updates.has_changed().unwrap());
+    assert_eq!(
+      moved.layout_lease_status(&owner.attachment_id),
+      LeaseStatus {
+        held: true,
+        owned_by_client: false
+      }
+    );
+    assert!(
+      remaining
+        .layout_lease_status(&observer.attachment_id)
+        .owned_by_client
+    );
+  }
 
   #[test]
   fn automatic_names_are_monotonic_and_safe_under_concurrent_reservations() {
@@ -2483,8 +2841,8 @@ mod tests {
     feed_terminal_bytes(&mut terminal, b"abcdefghi\x1b[?1049hUI");
     refresh_checkpoint(&mut terminal);
     assert_eq!(
-      terminal.checkpoint_history_rows,
-      vec![TerminalHistoryRow {
+      &terminal.checkpoint_history_rows[..],
+      &[TerminalHistoryRow {
         text: "abc".into(),
         wrapped: true,
       }]
@@ -2532,17 +2890,50 @@ mod tests {
     let mut terminal = terminal_state_with_size(8, 2, 1024);
     feed_terminal_bytes(&mut terminal, b"history\r\nprimary\r\nlive");
     refresh_checkpoint(&mut terminal);
-    assert_ne!(
-      terminal.checkpoint_history_rows,
-      Vec::<TerminalHistoryRow>::new()
-    );
+    assert!(!terminal.checkpoint_history_rows.is_empty());
+    let captured = Arc::clone(&terminal.checkpoint_history_rows);
+    let captured_bytes = Arc::clone(&captured.encoded().unwrap().data);
     feed_terminal_bytes(&mut terminal, b"\x1b[3J");
     refresh_checkpoint(&mut terminal);
-    assert_eq!(
-      terminal.checkpoint_history_rows,
-      Vec::<TerminalHistoryRow>::new()
-    );
+    assert!(terminal.checkpoint_history_rows.is_empty());
     assert_eq!(terminal.checkpoint_history.generation, 1);
+    assert!(!Arc::ptr_eq(&terminal.checkpoint_history_rows, &captured));
+    assert_ne!(
+      terminal
+        .checkpoint_history_rows
+        .encoded()
+        .unwrap()
+        .content_hash,
+      captured.encoded().unwrap().content_hash
+    );
+    assert_eq!(&*captured_bytes, &*captured.encoded().unwrap().data);
+  }
+
+  #[test]
+  fn physical_history_cache_changes_for_reflow_even_when_logical_revision_does_not() {
+    let mut terminal = terminal_state_with_size(4, 2, 1024);
+    feed_terminal_bytes(&mut terminal, b"abcdefghijkl\r\none\r\ntwo");
+    refresh_checkpoint(&mut terminal);
+    let captured = Arc::clone(&terminal.checkpoint_history_rows);
+    let captured_history = terminal.checkpoint_history.clone();
+    let captured_bytes = Arc::clone(&captured.encoded().unwrap().data);
+    refresh_checkpoint(&mut terminal);
+    assert!(Arc::ptr_eq(&terminal.checkpoint_history_rows, &captured));
+    terminal.terminal.resize(6, 2);
+    terminal.terminal_size.columns = 6;
+    refresh_checkpoint(&mut terminal);
+    assert_eq!(terminal.checkpoint_history.lines, captured_history.lines);
+    assert_eq!(
+      terminal.checkpoint_history.revision,
+      captured_history.revision
+    );
+    assert!(!Arc::ptr_eq(&terminal.checkpoint_history_rows, &captured));
+    let changed = terminal.checkpoint_history_rows.encoded().unwrap();
+    assert_ne!(
+      changed.content_hash,
+      captured.encoded().unwrap().content_hash
+    );
+    assert_eq!(&*captured_bytes, &*captured.encoded().unwrap().data);
   }
 
   #[test]
@@ -2551,6 +2942,8 @@ mod tests {
     feed_terminal_bytes(&mut terminal, "row\r\n".repeat(300).as_bytes());
     feed_terminal_bytes(&mut terminal, b"\x1b[?1049hUI");
     assert!(terminal.primary_history_rows.len() > 250);
+    let captured = Arc::clone(&terminal.primary_history_rows);
+    let captured_bytes = Arc::clone(&captured.encoded().unwrap().data);
     terminal.terminal.resize(4000, 2);
     terminal.terminal_size.columns = 4000;
     refresh_checkpoint(&mut terminal);
@@ -2558,6 +2951,16 @@ mod tests {
     assert_eq!(terminal.checkpoint_history_rows.len(), 250);
     assert!(terminal.checkpoint_history.truncated);
     assert_eq!(terminal.checkpoint_history.generation, 0);
+    assert!(!Arc::ptr_eq(&terminal.checkpoint_history_rows, &captured));
+    assert_ne!(
+      terminal
+        .checkpoint_history_rows
+        .encoded()
+        .unwrap()
+        .content_hash,
+      captured.encoded().unwrap().content_hash
+    );
+    assert_eq!(&*captured_bytes, &*captured.encoded().unwrap().data);
     assert!(
       terminal
         .checkpoint_history_rows
@@ -2589,10 +2992,7 @@ mod tests {
         terminal.checkpoint_history.generation,
         previous_generation + 1
       );
-      assert_eq!(
-        terminal.checkpoint_history_rows,
-        Vec::<TerminalHistoryRow>::new()
-      );
+      assert!(terminal.checkpoint_history_rows.is_empty());
       assert_eq!(terminal.geometry_revision, 1);
       assert_eq!(
         terminal.last_geometry_change_sequence,
@@ -2618,10 +3018,7 @@ mod tests {
     refresh_checkpoint_after_output(&mut terminal, 1, u64::MAX);
     assert!(!terminal.primary_reflow_pending);
     assert_eq!(terminal.geometry_revision, 2);
-    assert_eq!(
-      terminal.checkpoint_history_rows,
-      Vec::<TerminalHistoryRow>::new()
-    );
+    assert!(terminal.checkpoint_history_rows.is_empty());
   }
 
   #[test]
@@ -2662,13 +3059,13 @@ mod tests {
   fn bounded_history_discards_whole_oldest_lines() {
     let mut history = TerminalHistory::new(8);
 
-    history.replace(vec!["one".into(), "two".into(), "three".into()], false);
+    history.replace(&["one".into(), "two".into(), "three".into()], false);
     let first = history.snapshot(0);
     assert_eq!(first.lines, vec!["three"]);
     assert_eq!(first.retained_bytes, 6);
     assert!(first.truncated);
 
-    history.replace(vec!["three".into()], false);
+    history.replace(&["three".into()], false);
     assert_eq!(history.snapshot(0), first);
 
     history.clear();
@@ -2958,10 +3355,10 @@ mod tests {
       history_clear_pending: false,
       history_alternate_screen: false,
       primary_reflow_pending: false,
-      primary_history_rows: Vec::new(),
+      primary_history_rows: Arc::default(),
       history: TerminalHistory::new(TERMINAL_HISTORY_CAPACITY_BYTES),
       checkpoint_history: TerminalHistory::new(TERMINAL_HISTORY_CAPACITY_BYTES).snapshot(0),
-      checkpoint_history_rows: Vec::new(),
+      checkpoint_history_rows: Arc::default(),
       pending_input: checkpoint.input_prefix.clone(),
       journal: OutputJournal::new(1024),
       terminal_size: checkpoint.terminal_size.clone(),

@@ -802,6 +802,7 @@ mod tests {
 
   #[tokio::test]
   async fn development_unsigned_bundle_is_rejected_without_a_staple_or_production_selection() {
+    let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
     for selection in [Selection::Shared, Selection::Private] {
       let home = Home::new();
       let (bytes, manifest) = development_bundle();
@@ -833,6 +834,7 @@ mod tests {
 
   #[tokio::test]
   async fn development_profile_expiration_and_certificate_data_are_validated() {
+    let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
     verify_profile_expiration("2099-01-01T00:00:00Z")
       .await
       .unwrap();
@@ -857,6 +859,7 @@ mod tests {
 
   #[tokio::test]
   async fn native_codesign_treats_certificate_prefix_as_its_optional_argument() {
+    let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
     let home = Home::new();
     let prefix = home.0.join("requested certificate prefix-");
     // Display a native signed tool without executing it or using a signing
@@ -975,6 +978,7 @@ mod tests {
 
   #[tokio::test]
   async fn bundled_helper_requires_the_cli_version_and_target() {
+    let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
     let mut version = super::super::manifest::fixture();
     version.app_version = "0.2.0".into();
     let mut target = super::super::manifest::fixture();
@@ -993,6 +997,7 @@ mod tests {
 
   #[tokio::test]
   async fn bundled_archive_checksum_failure_never_reaches_signature_checks_or_activation() {
+    let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
     let home = Home::new();
     let bytes = compressed(&contents(None));
     let manifest = release(&bytes);
@@ -1024,6 +1029,7 @@ mod tests {
 
   #[tokio::test]
   async fn bundled_reuse_still_verifies_apple_identity_before_executing_the_helper() {
+    let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
     let home = Home::new();
     let bytes = compressed(&contents(None));
     let manifest = release(&bytes);
@@ -1079,6 +1085,7 @@ mod tests {
 
   #[tokio::test]
   async fn apple_requirement_compiler_accepts_literal_developer_id_policy() {
+    let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
     let output = File::new();
     let requirement = developer_id_requirement("ABCDEFGHIJ");
     assert!(requirement.starts_with("=anchor "));
@@ -1099,6 +1106,7 @@ mod tests {
 
   #[tokio::test]
   async fn native_plutil_extracts_authorization_without_converting_profile_dates_or_data() {
+    let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
     let profile = File::new();
     std::fs::write(
       &profile.0,
@@ -1127,6 +1135,7 @@ mod tests {
 
   #[tokio::test]
   async fn excessive_tool_output_terminates_the_process_without_waiting_for_its_timeout() {
+    let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
     let result = tokio::time::timeout(Duration::from_secs(3), tool("/usr/bin/yes", &[]))
       .await
       .unwrap();

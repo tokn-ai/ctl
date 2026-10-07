@@ -117,8 +117,11 @@ its OpenSSH control master authenticates on macOS, a newly entered reusable
 secret gets an explicit Yes, No, or Never save choice before any remote
 environment identity comparison. This also works when remote components are
 not installed because authentication belongs to the master rather than the
-`ctl-agent` channel. Yes stores the secret device-locally in Keychain and
-requires Touch ID when OpenSSH requests it again; Never suppresses future save
+`ctl-agent` channel. Yes stores the secret device-locally in Keychain under
+user-presence protection, allowing Touch ID or the macOS account password.
+A successful connection can reuse authorization for a fixed 24-hour window,
+ending on lock/sleep or explicit disconnect; reconnects do not extend it.
+Never suppresses future save
 offers for that destination without retaining the secret. Only `ctld` accesses
 Keychain, and Linux discards newly entered reusable secrets after authentication.
 

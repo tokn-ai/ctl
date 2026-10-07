@@ -8,6 +8,9 @@ use core_foundation::dictionary::CFDictionary;
 use core_foundation::error::{CFError, CFErrorRef};
 use core_foundation::number::CFNumber;
 use core_foundation::string::{CFString, CFStringRef};
+use objc2::msg_send;
+use objc2::rc::Retained;
+use objc2::runtime::{AnyClass, AnyObject, Bool};
 use security_framework::access_control::{ProtectionMode, SecAccessControl};
 use security_framework::passwords::AccessControlOptions;
 use security_framework_sys::item::{
@@ -21,7 +24,8 @@ use security_framework_sys::keychain_item::{
 };
 use std::collections::HashMap;
 use std::ptr;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 use zeroize::Zeroizing;
 
 // Public Security.framework symbols absent from security-framework-sys 2.17.
@@ -30,6 +34,7 @@ unsafe extern "C" {
   static kSecUseOperationPrompt: CFStringRef;
   static kSecUseAuthenticationUIFail: CFStringRef;
   static kSecUseAuthenticationUIAllow: CFStringRef;
+  static kSecUseAuthenticationContext: CFStringRef;
   // SecTaskRef is an opaque Core Foundation object; CFType owns its lifetime.
   fn SecTaskCreateFromSelf(allocator: CFAllocatorRef) -> CFTypeRef;
   fn SecTaskCopyValueForEntitlement(
@@ -39,6 +44,9 @@ unsafe extern "C" {
   ) -> CFTypeRef;
 }
 
+#[link(name = "LocalAuthentication", kind = "framework")]
+unsafe extern "C" {}
+
 const NOT_FOUND: i32 = -25_300;
 const NOT_AVAILABLE: i32 = -25_291;
 const INTERACTION_NOT_ALLOWED: i32 = -25_308;
@@ -46,6 +54,106 @@ const MISSING_ENTITLEMENT: i32 = -34_018;
 const PARAM: i32 = -50;
 const MAX_RESULTS: usize = 8193;
 type Parameters = Vec<(CFString, CFType)>;
+
+/// An owned macOS authorization context. Contains no application-supplied secret.
+///
+/// Keychain operations using this context are serialized, including configuration
+/// and the entire synchronous Security call. Invalidating it cancels outstanding
+/// authentication immediately and permanently prevents further operations.
+pub struct AuthenticationContext {
+  context: Retained<AnyObject>,
+  operations: Mutex<()>,
+  invalidated: AtomicBool,
+}
+
+// SAFETY: LAContext can be used off the main thread. We serialize all mutable
+// configuration and Keychain operations. The only concurrent method is invalidate,
+// whose documented purpose is to cancel an outstanding authentication evaluation.
+// No Objective-C reference escapes this wrapper or its operation guard.
+unsafe impl Send for AuthenticationContext {}
+unsafe impl Sync for AuthenticationContext {}
+
+impl AuthenticationContext {
+  /// Create an unauthenticated context. Does not inspect Keychain or display UI.
+  ///
+  /// # Errors
+  /// Returns `errSecNotAvailable` if the native context cannot be constructed.
+  pub fn new() -> Result<Self, Error> {
+    let class = AnyClass::get(c"LAContext").ok_or(Error(NOT_AVAILABLE))?;
+    // SAFETY: the explicitly linked framework exports LAContext. NSObject's new
+    // returns an owned object; Option handles an allocation failure without panic.
+    let context: Option<Retained<AnyObject>> = unsafe { msg_send![class, new] };
+    Ok(Self {
+      context: context.ok_or(Error(NOT_AVAILABLE))?,
+      operations: Mutex::new(()),
+      invalidated: AtomicBool::new(false),
+    })
+  }
+
+  /// Cancel any in-flight authorization and revoke this context permanently.
+  pub fn invalidate(&self) {
+    if !self.invalidated.swap(true, Ordering::AcqRel) {
+      // SAFETY: LAContext.invalidate is explicitly designed to terminate an
+      // existing evaluation. Waiting for operations would leave a dialog live.
+      unsafe {
+        let _: () = msg_send![&*self.context, invalidate];
+      }
+    }
+  }
+
+  #[must_use]
+  pub fn is_invalidated(&self) -> bool {
+    self.invalidated.load(Ordering::Acquire)
+  }
+
+  fn authorize(&self, reason: &str, allow_ui: bool) -> Result<MutexGuard<'_, ()>, Error> {
+    validate_reason(reason)?;
+    let guard = self.operations.lock().map_err(|_| Error(NOT_AVAILABLE))?;
+    if self.is_invalidated() {
+      return Err(Error(INTERACTION_NOT_ALLOWED));
+    }
+    let reason = CFString::new(reason);
+    // SAFETY: CFString is toll-free bridged with NSString; LAContext copies the
+    // reason. These property mutations occur only under the operation mutex.
+    unsafe {
+      let _: () = msg_send![&*self.context, setLocalizedReason: reason.as_concrete_TypeRef().cast::<AnyObject>()];
+      let _: () = msg_send![&*self.context, setInteractionNotAllowed: Bool::new(!allow_ui)];
+    }
+    Ok(guard)
+  }
+
+  fn as_cf_type(&self) -> CFType {
+    // SAFETY: the live LAContext is an Objective-C object accepted by Core
+    // Foundation collection callbacks. The Get-rule wrapper retains it until the
+    // Security dictionary is released; it does not reinterpret its layout.
+    unsafe { CFType::wrap_under_get_rule(Retained::as_ptr(&self.context).cast()) }
+  }
+}
+
+impl Drop for AuthenticationContext {
+  fn drop(&mut self) {
+    self.invalidate();
+  }
+}
+
+fn validate_reason(reason: &str) -> Result<(), Error> {
+  if reason.is_empty() || reason.len() > 4096 || reason.chars().any(char::is_control) {
+    Err(Error(PARAM))
+  } else {
+    Ok(())
+  }
+}
+
+fn authorization(authentication: Authentication<'_>) -> Result<Option<MutexGuard<'_, ()>>, Error> {
+  match authentication {
+    Authentication::Context {
+      reason,
+      context,
+      allow_ui,
+    } => context.authorize(reason, allow_ui).map(Some),
+    Authentication::Allow { .. } | Authentication::Forbid => Ok(None),
+  }
+}
 
 // All callers supply immutable, process-lifetime Security.framework constants.
 fn constant(value: CFStringRef) -> CFString {
@@ -95,9 +203,7 @@ fn selector(
       )
     }),
     Authentication::Allow { reason } => {
-      if reason.is_empty() || reason.len() > 4096 || reason.chars().any(char::is_control) {
-        return Err(Error(PARAM));
-      }
+      validate_reason(reason)?;
       parameters.extend(unsafe {
         [
           (
@@ -109,6 +215,31 @@ fn selector(
             CFString::new(reason).into_CFType(),
           ),
         ]
+      });
+    }
+    Authentication::Context {
+      reason,
+      context,
+      allow_ui,
+    } => {
+      validate_reason(reason)?;
+      parameters.push((
+        unsafe { constant(kSecUseAuthenticationContext) },
+        context.as_cf_type(),
+      ));
+      // Keep the query's UI policy explicit as well as the context property.
+      // This fails closed even when a context's backing authorization service
+      // is unavailable or changes state while configuring the native context.
+      parameters.push(unsafe {
+        (
+          constant(kSecUseAuthenticationUI),
+          constant(if allow_ui {
+            kSecUseAuthenticationUIAllow
+          } else {
+            kSecUseAuthenticationUIFail
+          })
+          .into_CFType(),
+        )
       });
     }
   }
@@ -174,10 +305,11 @@ fn copy(parameters: &Parameters) -> Result<Option<CFType>, Error> {
 /// # Errors
 /// Returns an `OSStatus` if access is denied or the response is malformed.
 pub fn search(query: &Query<'_>) -> Result<Vec<Record>, Error> {
+  let _authorization = authorization(query.authentication)?;
   let Some(value) = copy(&search_parameters(query, true)?)? else {
     return Ok(Vec::new());
   };
-  if let Some(array) = value.downcast::<CFArray>() {
+  let records = if let Some(array) = value.downcast::<CFArray>() {
     if usize::try_from(array.len()).map_err(|_| Error(PARAM))? > query.limit {
       return Err(Error(PARAM));
     }
@@ -190,10 +322,18 @@ pub fn search(query: &Query<'_>) -> Result<Vec<Record>, Error> {
           query.secret,
         )
       })
-      .collect()
+      .collect::<Result<Vec<_>, _>>()?
   } else {
-    Ok(vec![record(&value, query.secret)?])
+    vec![record(&value, query.secret)?]
+  };
+  if let Authentication::Context { context, .. } = query.authentication
+    && context.is_invalidated()
+  {
+    // Revocation may race a successful Security call. Do not hand its returned
+    // secret to the caller after observing revocation; owned buffers zeroize here.
+    return Err(Error(INTERACTION_NOT_ALLOWED));
   }
+  Ok(records)
 }
 
 fn scan_parameters(authentication: Authentication<'_>) -> Result<Parameters, Error> {
@@ -238,6 +378,7 @@ pub fn scan_attributes(
   authentication: Authentication<'_>,
   include: impl Fn(&str) -> bool,
 ) -> Result<Vec<Record>, Error> {
+  let _authorization = authorization(authentication)?;
   let Some(value) = copy(&scan_parameters(authentication)?)? else {
     return Ok(Vec::new());
   };
@@ -412,11 +553,13 @@ fn with_application_identifier(
   }
 }
 
-/// Atomically update data and metadata, retaining an existing item's ACL.
+/// Atomically update data, metadata, and the requested access-control policy.
 ///
 /// # Errors
-/// Returns an `OSStatus` if the update/add or biometric authorization fails.
+/// Returns an `OSStatus` if the update/add or user authorization fails. A failed
+/// update leaves the existing item intact; it never deletes an item to change ACL.
 pub fn upsert(write: &Write<'_>) -> Result<(), Error> {
+  let _authorization = authorization(write.authentication)?;
   if write.data.len() > 128 * 1024 {
     return Err(Error(PARAM));
   }
@@ -425,7 +568,32 @@ pub fn upsert(write: &Write<'_>) -> Result<(), Error> {
     Some(write.account),
     write.authentication,
   )?;
-  let updates = unsafe {
+  let updates = write_parameters(write)?;
+  let selector = CFDictionary::from_CFType_pairs(&query);
+  let update = CFDictionary::from_CFType_pairs(&updates);
+  // SAFETY: both dictionaries own their values for this synchronous operation.
+  let status =
+    unsafe { SecItemUpdate(selector.as_concrete_TypeRef(), update.as_concrete_TypeRef()) };
+  if status != NOT_FOUND {
+    return status_result(status);
+  }
+  query.extend(updates);
+  let query = CFDictionary::from_CFType_pairs(&query);
+  // SAFETY: dictionary is live; no output is requested.
+  status_result(unsafe { SecItemAdd(query.as_concrete_TypeRef(), ptr::null_mut()) })
+}
+
+fn write_parameters(write: &Write<'_>) -> Result<Parameters, Error> {
+  let control = SecAccessControl::create_with_protection(
+    Some(ProtectionMode::AccessibleWhenUnlockedThisDeviceOnly),
+    if write.user_presence {
+      AccessControlOptions::USER_PRESENCE.bits()
+    } else {
+      0
+    },
+  )
+  .map_err(|error| Error(error.code()))?;
+  Ok(unsafe {
     vec![
       (
         constant(kSecValueData),
@@ -441,34 +609,9 @@ pub fn upsert(write: &Write<'_>) -> Result<(), Error> {
         constant(kSecAttrLabel),
         CFString::new(write.label).into_CFType(),
       ),
+      (constant(kSecAttrAccessControl), control.into_CFType()),
     ]
-  };
-  let selector = CFDictionary::from_CFType_pairs(&query);
-  let update = CFDictionary::from_CFType_pairs(&updates);
-  // SAFETY: both dictionaries own their values for this synchronous operation.
-  let status =
-    unsafe { SecItemUpdate(selector.as_concrete_TypeRef(), update.as_concrete_TypeRef()) };
-  if status != NOT_FOUND {
-    return status_result(status);
-  }
-  let flags = if write.biometric {
-    AccessControlOptions::BIOMETRY_CURRENT_SET.bits()
-  } else {
-    0
-  };
-  let control = SecAccessControl::create_with_protection(
-    Some(ProtectionMode::AccessibleWhenUnlockedThisDeviceOnly),
-    flags,
-  )
-  .map_err(|error| Error(error.code()))?;
-  query.push((
-    unsafe { constant(kSecAttrAccessControl) },
-    control.into_CFType(),
-  ));
-  query.extend(updates);
-  let query = CFDictionary::from_CFType_pairs(&query);
-  // SAFETY: dictionary is live; no output is requested.
-  status_result(unsafe { SecItemAdd(query.as_concrete_TypeRef(), ptr::null_mut()) })
+  })
 }
 
 /// Delete exactly one item, or all accounts in an explicitly supplied service.
@@ -480,6 +623,7 @@ pub fn delete(
   account: Option<&str>,
   authentication: Authentication<'_>,
 ) -> Result<(), Error> {
+  let _authorization = authorization(authentication)?;
   let parameters = selector(Some(service), account, authentication)?;
   let dictionary = CFDictionary::from_CFType_pairs(&parameters);
   // SAFETY: dictionary is live for the synchronous call.
@@ -648,6 +792,162 @@ mod tests {
         .to_string(),
       "Read SSH password for alice@example.invalid"
     );
+  }
+
+  #[test]
+  fn reusable_context_is_attached_without_implicit_authentication_ui() {
+    let context = AuthenticationContext::new().unwrap();
+    let authentication = Authentication::Context {
+      reason: "Read synthetic credential",
+      context: &context,
+      allow_ui: false,
+    };
+    let _authorization = authorization(authentication).unwrap();
+    let parameters = CFDictionary::from_CFType_pairs(
+      &selector(Some("fixture"), Some("account"), authentication).unwrap(),
+    )
+    .into_untyped();
+    let value = dictionary_value(&parameters, "u_AuthCtx").unwrap();
+    assert_eq!(
+      value.as_CFTypeRef(),
+      Retained::as_ptr(&context.context).cast()
+    );
+    assert_eq!(
+      dictionary_value(&parameters, "u_AuthUI")
+        .unwrap()
+        .downcast::<CFString>()
+        .unwrap()
+        .to_string(),
+      "u_AuthUIF",
+    );
+    assert!(dictionary_value(&parameters, "u_OpPrompt").is_none());
+  }
+
+  #[test]
+  fn invalidation_cancels_without_waiting_for_the_operation_guard() {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<AuthenticationContext>();
+    let context = AuthenticationContext::new().unwrap();
+    let guard = context
+      .authorize("Read synthetic credential", true)
+      .unwrap();
+    context.invalidate();
+    context.invalidate();
+    assert!(context.is_invalidated());
+    drop(guard);
+    assert!(matches!(
+      context.authorize("Read synthetic credential", true),
+      Err(Error(INTERACTION_NOT_ALLOWED))
+    ));
+  }
+
+  #[test]
+  fn updating_a_secret_includes_the_requested_access_control() {
+    let write = Write {
+      service: "fixture",
+      account: "account",
+      label: "Synthetic credential",
+      comment: "Synthetic metadata",
+      data: b"synthetic secret",
+      user_presence: true,
+      authentication: Authentication::Forbid,
+    };
+    let parameters =
+      CFDictionary::from_CFType_pairs(&write_parameters(&write).unwrap()).into_untyped();
+    let actual = dictionary_value(&parameters, "accc").unwrap();
+    let expected = SecAccessControl::create_with_protection(
+      Some(ProtectionMode::AccessibleWhenUnlockedThisDeviceOnly),
+      AccessControlOptions::USER_PRESENCE.bits(),
+    )
+    .unwrap()
+    .into_CFType();
+    // Compare native policy objects, including protection and constraints, rather
+    // than just checking that the application selected a particular flag.
+    assert_eq!(actual, expected);
+    assert!(dictionary_value(&parameters, "u_AuthCtx").is_none());
+    assert!(dictionary_value(&parameters, "v_Data").is_some());
+  }
+
+  #[test]
+  #[ignore = "manual macOS test: requires an entitled signed binary and authentication of a synthetic item"]
+  fn synthetic_item_upgrades_acl_and_reuses_authorization_without_retaining_secret() {
+    const SERVICE: &str = "dev.tokn-ai.ctl.keychain-authorization-test";
+    struct Cleanup<'a>(&'a str);
+    impl Drop for Cleanup<'_> {
+      fn drop(&mut self) {
+        let _ = delete(SERVICE, Some(self.0), Authentication::Forbid);
+      }
+    }
+    let account = format!(
+      "synthetic-{}-{}",
+      std::process::id(),
+      std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos(),
+    );
+    let mut write = Write {
+      service: SERVICE,
+      account: &account,
+      label: "ctl synthetic authorization test",
+      comment: "Synthetic test item; contains no user credential",
+      data: b"synthetic secret",
+      user_presence: false,
+      authentication: Authentication::Allow {
+        reason: "Update a synthetic test item",
+      },
+    };
+    upsert(&write).unwrap();
+    let _cleanup = Cleanup(&account);
+    // Exercise SecItemUpdate's policy replacement, not merely the add path.
+    write.user_presence = true;
+    upsert(&write).unwrap();
+    let context = AuthenticationContext::new().unwrap();
+    let query = |authentication| Query {
+      service: Some(SERVICE),
+      account: Some(account.as_str()),
+      limit: 1,
+      secret: true,
+      authentication,
+    };
+    assert!(matches!(
+      search(&query(Authentication::Forbid)),
+      Err(Error(INTERACTION_NOT_ALLOWED))
+    ));
+    for allow_ui in [true, false] {
+      // The first query prompts; the second forbids UI and must use OS context
+      // authorization. Each returned buffer is zeroized before the next read.
+      let records = search(&query(Authentication::Context {
+        reason: "Read a synthetic test item",
+        context: &context,
+        allow_ui,
+      }))
+      .unwrap();
+      assert_eq!(records.len(), 1);
+      assert_eq!(
+        records[0].secret.as_ref().unwrap().as_slice(),
+        b"synthetic secret"
+      );
+      drop(records);
+    }
+    context.invalidate();
+    assert!(matches!(
+      search(&query(Authentication::Context {
+        reason: "Read a synthetic test item",
+        context: &context,
+        allow_ui: false,
+      })),
+      Err(Error(INTERACTION_NOT_ALLOWED))
+    ));
+    let fresh_context = AuthenticationContext::new().unwrap();
+    assert!(matches!(
+      search(&query(Authentication::Context {
+        reason: "Read a synthetic test item",
+        context: &fresh_context,
+        allow_ui: false,
+      })),
+      Err(Error(INTERACTION_NOT_ALLOWED))
+    ));
   }
 
   #[test]

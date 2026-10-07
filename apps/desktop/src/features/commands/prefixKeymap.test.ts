@@ -1,9 +1,17 @@
 import { describe, expect, it } from "vitest";
 import { resolveKeymap } from "./keymap";
-import { prefixStroke, resolvePrefix } from "./prefixKeymap";
+import { prefixActionKey, prefixEventKey, prefixStroke, resolvePrefix } from "./prefixKeymap";
 import type { KeybindingsDocument } from "../../lib/types";
 const document: KeybindingsDocument = { schema_version: 1, overrides: [] };
 describe("terminal prefix settings", () => {
+  it("normalizes modified arrows and reserves their modifiers", () => {
+    expect(prefixActionKey("ctrl+left")).toBe("Ctrl+ArrowLeft");
+    expect(prefixActionKey("ALT+Right")).toBe("Alt+ArrowRight");
+    expect(prefixEventKey({ key: "ArrowLeft", ctrlKey: true, altKey: false, shiftKey: false, metaKey: false })).toBe("Ctrl+ArrowLeft");
+    expect(prefixEventKey({ key: "ArrowLeft", ctrlKey: true, altKey: true, shiftKey: false, metaKey: false })).toBeNull();
+    expect(() => prefixActionKey("Shift+Left")).toThrow();
+    expect(() => resolvePrefix({ ...document, prefix: { key: "Ctrl+B", bindings: [{ command_id: "pane.zoom", key: "ctrl+left" }] } }, new Map(), "other")).toThrow(/already assigned/);
+  });
   it("keeps legacy documents and generates literal Ctrl bytes on either platform", () => {
     for (const platform of ["macos", "other"] as const) {
       expect(resolvePrefix(document, resolveKeymap(document, platform), platform).stroke?.bytes).toEqual(new Uint8Array([2]));

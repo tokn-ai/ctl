@@ -116,7 +116,7 @@ export function KeybindingsFlow({
       description={
         selected
           ? selected.startsWith("prefix.")
-            ? (selected === "prefix.key" ? "Enter Ctrl+letter or Alt+letter. Press it twice to send it to the terminal. Blank disables; default restores Ctrl+B." : "Enter a letter, digit, arrow name, !, :, %, or a double quote. Escape cancels a sequence. Blank disables; default restores the binding.")
+            ? (selected === "prefix.key" ? "Enter Ctrl+letter or Alt+letter. Press it twice to send it to the terminal. Blank disables; default restores Ctrl+B." : "Enter a letter, digit, arrow name (optionally Ctrl+ or Alt+), !, :, %, or a double quote. Escape cancels a sequence. Blank disables; default restores the binding.")
             : "Enter Primary+Shift+E, Alt+F2, etc. Primary means Cmd on macOS and Ctrl elsewhere. Blank disables the shortcut; default restores it."
           : `Choose an app command to change its shortcut. Native editing/window shortcuts are reserved.${path ? ` Saved in ${path}.` : ""}`
       }

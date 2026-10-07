@@ -15,8 +15,6 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 // A parallel fork can inherit the copied executable's writable descriptor and
 // cause ETXTBSY on Linux. Serialize copying against task child-process lifetimes.
-static SUBPROCESS_FIXTURE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
 struct TestDirectory(PathBuf);
 
 impl TestDirectory {
@@ -127,7 +125,7 @@ async fn reject_incompatible_handshake(config: &ConnectConfig) {
 
 #[tokio::test]
 async fn task_handshake_requests_and_log_disconnect_preserve_the_running_task() {
-  let _execution_guard = SUBPROCESS_FIXTURE_LOCK.lock().await;
+  let _execution_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let directory = TestDirectory::new();
   let mut config = directory.config();
   // A running task endpoint must be reused without attempting to start either
@@ -236,6 +234,7 @@ async fn task_handshake_requests_and_log_disconnect_preserve_the_running_task() 
 
 #[tokio::test]
 async fn missing_task_endpoint_does_not_fall_back_to_ctmux_or_emit_readiness() {
+  let _execution_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let directory = TestDirectory::new();
   let config = directory.config();
   let _ctmux = tokio::net::UnixListener::bind(&config.ctmux_socket).unwrap();
@@ -250,10 +249,12 @@ async fn missing_task_endpoint_does_not_fall_back_to_ctmux_or_emit_readiness() {
 
 #[test]
 fn cli_requires_an_installed_sibling_and_ignores_taskd_bin_override() {
-  let _execution_guard = SUBPROCESS_FIXTURE_LOCK.blocking_lock();
+  let execution_guard = ctl_core::test_fixtures::ProcessGuard::acquire_blocking();
   let directory = TestDirectory::new();
   let executable = directory.0.join("ctl-agent");
-  std::fs::copy(env!("CARGO_BIN_EXE_ctl-agent"), &executable).unwrap();
+  execution_guard
+    .copy(env!("CARGO_BIN_EXE_ctl-agent"), &executable)
+    .unwrap();
   let output = std::process::Command::new(&executable)
     .args(["connect", "--service", "task"])
     .env("CTL_TASKD_RUNTIME_DIR", &directory.0)

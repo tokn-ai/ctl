@@ -1,5 +1,23 @@
 use super::*;
 
+#[test]
+fn current_binary_advertises_the_revocation_helper_and_all_historical_contracts() {
+  let info = DaemonBinaryInfo::current();
+  assert!(info.is_valid());
+  assert_eq!(info.protocol_version, crate::CONTRACT_V1_1_14);
+  assert_eq!(info.lifecycle_protocol_version, CONTRACT_V1_0_1);
+  let helper = info
+    .protocols
+    .iter()
+    .find(|entry| entry.name == "ctld_helper")
+    .unwrap();
+  assert_eq!(helper.version, crate::HELPER_API_CONTRACT_V1_1_5);
+  assert_eq!(helper.build, 5);
+  for contract in crate::SUPPORTED_HELPER_API_VERSIONS {
+    assert!(helper.supports(*contract));
+  }
+}
+
 #[cfg(unix)]
 mod unix {
   use super::*;
@@ -13,14 +31,14 @@ mod unix {
     directory: PathBuf,
     socket: PathBuf,
     executable: PathBuf,
-    _execution_guard: tokio::sync::MutexGuard<'static, ()>,
+    execution_guard: ctl_core::test_fixtures::ProcessGuard,
   }
 
   impl Fixture {
     async fn new() -> Self {
       // Share the protocol fixtures' lock: concurrent child creation can inherit
       // a writable script descriptor before exec and cause ETXTBSY on Linux.
-      let execution_guard = crate::tests::SUBPROCESS_FIXTURE_LOCK.lock().await;
+      let execution_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
       let directory = std::env::temp_dir().join(format!(
         "ctld-lifecycle-{}-{}",
         std::process::id(),
@@ -31,7 +49,7 @@ mod unix {
         socket: directory.join("ctld.sock"),
         executable: directory.join("ctld"),
         directory,
-        _execution_guard: execution_guard,
+        execution_guard,
       };
       fixture.binary(&DaemonBinaryInfo::current());
       fixture
@@ -246,7 +264,10 @@ mod unix {
   async fn retargeting_the_staged_helper_rejects_restart_even_with_identical_metadata() {
     let fixture = Fixture::new().await;
     let next_executable = fixture.directory.join("ctld-next");
-    std::fs::copy(&fixture.executable, &next_executable).unwrap();
+    fixture
+      .execution_guard
+      .copy(&fixture.executable, &next_executable)
+      .unwrap();
     let staged_executable = fixture.directory.join("current-ctld");
     std::os::unix::fs::symlink(&fixture.executable, &staged_executable).unwrap();
     let client =

@@ -4,6 +4,7 @@ const VALID_PROGRESS: &[u8] = b"ctl-install-progress-v1 receiving 0\nctl-install
 
 #[test]
 fn bundle_ids_cannot_change_the_fixed_script_or_installation_path() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire_blocking();
   for bundle_id in ["", "../escape", "v1/release", "line\nbreak", "$(whoami)"] {
     assert!(matches!(
       install_script(bundle_id, 12),
@@ -16,6 +17,7 @@ fn bundle_ids_cannot_change_the_fixed_script_or_installation_path() {
 #[tokio::test]
 async fn progress_requires_monotonic_receiver_bytes_and_complete_upload() {
   use std::sync::Mutex;
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let events = Mutex::new(Vec::new());
   read_progress(VALID_PROGRESS, 10, &|event| {
     events.lock().unwrap().push(event);
@@ -51,6 +53,7 @@ async fn progress_requires_monotonic_receiver_bytes_and_complete_upload() {
 #[tokio::test]
 async fn progress_accepts_startup_output_only_before_the_initial_marker() {
   use std::sync::Mutex;
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   for startup in [
     b"Welcome to the server\n".as_slice(),
     b"\x1b[32mstartup without a final newline\x1b[0m".as_slice(),
@@ -88,6 +91,7 @@ async fn progress_accepts_startup_output_only_before_the_initial_marker() {
 
 #[tokio::test]
 async fn progress_rejects_missing_or_unsupported_initial_markers() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   for invalid in [
     b"ctl-install-progress-v1 receiving 5\n".as_slice(),
     b"ctl-install-progress-v2 receiving 0\n".as_slice(),
@@ -108,6 +112,7 @@ async fn progress_rejects_missing_or_unsupported_initial_markers() {
 #[tokio::test]
 async fn progress_drains_output_after_the_startup_limit_is_exceeded() {
   use tokio::io::AsyncWriteExt as _;
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let (mut writer, reader) = tokio::io::duplex(64);
   let write = tokio::spawn(async move {
     writer.write_all(&vec![b'x'; 128 * 1024]).await.unwrap();
@@ -223,57 +228,62 @@ impl BundleFixture {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn agent_installer_reports_progress_before_the_receiver_opens_the_archive() {
-  use crate::remote_bundle::compatibility::tests::Fixture;
-  use ctl_core::bundles::Source;
-  use std::sync::Mutex;
-
-  let fixture = BundleFixture::new();
-  let bundle = crate::components::import_remote(
-    &fixture.directory.join("import-home"),
-    &Fixture::new("0.0.9", &"b".repeat(40)).bundle(),
-    "aarch64-apple-darwin",
-    Source::Ci,
-  )
-  .unwrap();
-  let archive = crate::component_update::agent_archive(&bundle).unwrap();
-  // Hold the background receiver until the first foreground size poll. This
-  // reproduces the CI scheduling order without relying on a timing delay.
-  let script = agent_script(&archive, None)
-    .unwrap()
-    .replace(
-      "cat <&3 > \"$archive\" &",
-      "( while [ ! -e \"$temporary/polled\" ]; do sleep 0.01; done; cat <&3 > \"$archive\" ) &",
-    )
-    .replace(
-      "  received=$(wc -c < \"$archive\" | tr -d '[:space:]')",
-      "  received=$(wc -c < \"$archive\" | tr -d '[:space:]')\n  : > \"$temporary/polled\"",
-    );
-  let mut command = Command::new("sh");
-  command
-    .args(["-c", &script])
-    .env("HOME", fixture.directory.join("home"));
-  let events = Mutex::new(Vec::new());
-  tokio::time::timeout(
-    std::time::Duration::from_secs(10),
-    run_package_install(command, &archive, true, |event| {
-      events.lock().unwrap().push(event);
-    }),
-  )
-  .await
-  .unwrap()
-  .unwrap();
-  let events = events.into_inner().unwrap();
-  assert_eq!(
-    events[1],
-    RemoteInstallEvent::Receiving { received_bytes: 0 }
-  );
-  assert_eq!(events.last(), Some(&RemoteInstallEvent::Complete));
+async fn receiver_progress_is_valid_before_the_background_writer_starts() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
+  for script in [
+    install_script("0.1.0-test", 5).unwrap(),
+    AGENT_INSTALL_COMMAND.replace("__BUNDLE_TARGET__", ctl_core::paths::native_target()),
+  ] {
+    for create_first in [true, false] {
+      let fixture = BundleFixture::new();
+      // Hold the receiver until the first count has been read. This deliberately
+      // exercises the parent running before the child opens its output file.
+      let transfer = script
+      .split("test \"$received\" -eq")
+      .next()
+      .unwrap()
+      .replace(
+        "cat <&3 > \"$archive\" &",
+        "(while [ ! -f \"$temporary/counted\" ]; do sleep 0.01; done; cat <&3 > \"$archive\") &",
+      )
+      .replace(
+        "  printf 'ctl-install-progress-v1 receiving %s\\n' \"$received\"",
+        "  : > \"$temporary/counted\"\n  printf 'ctl-install-progress-v1 receiving %s\\n' \"$received\"",
+      );
+      let script = format!(
+        "{transfer}\nprintf 'ctl-install-progress-v1 receiving %s\\n' \"$received\"\nprintf 'ctl-install-progress-v1 extracting\\nctl-install-progress-v1 checking ctl-agent\\nctl-install-progress-v1 activating\\nctl-install-v1\\n'"
+      );
+      let script = if create_first {
+        script
+      } else {
+        // Negative control: the original race must fail, not pass accidentally.
+        script.replace(": > \"$archive\"", ":")
+      };
+      let mut command = Command::new("sh");
+      command
+        .args(["-c", &script])
+        .env("HOME", fixture.directory.join("home"));
+      let result = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        run_package_install(command, b"hello", true, |_| {}),
+      )
+      .await
+      .unwrap();
+      if create_first {
+        result.unwrap();
+      } else {
+        assert!(
+          matches!(result, Err(CoreError::ReadSshCommand(error)) if error.kind() == io::ErrorKind::InvalidData)
+        );
+      }
+    }
+  }
 }
 
 #[cfg(unix)]
 #[tokio::test]
 async fn installer_activates_components_despite_shell_startup_output() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = BundleFixture::new();
   tokio::time::timeout(
     std::time::Duration::from_secs(10),
@@ -306,6 +316,7 @@ impl Drop for BundleFixture {
 #[cfg(unix)]
 #[tokio::test]
 async fn installer_replaces_an_existing_current_directory_symlink() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = BundleFixture::new();
   let base = fixture.directory.join("home/.tokn/ctl");
   let old = base.join("versions/0.1.0-old");
@@ -331,6 +342,7 @@ async fn installer_replaces_an_existing_current_directory_symlink() {
 #[tokio::test]
 async fn installer_reuses_identical_existing_components_without_replacing_files() {
   use std::os::unix::fs::MetadataExt as _;
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   for manifest in [None, Some("matching manifest")] {
     let mut fixture = BundleFixture::new();
     if let Some(manifest) = manifest {
@@ -372,6 +384,7 @@ async fn installer_reuses_identical_existing_components_without_replacing_files(
 async fn installer_rejects_differing_same_id_components_without_activation() {
   use std::os::unix::fs::MetadataExt as _;
   use std::sync::Mutex;
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   for binary in ["ctl-agent", "ctmuxd", "ctl-taskd", "ctld"] {
     let mut fixture = BundleFixture::new();
     fixture.install("0.1.0-test").await.unwrap();
@@ -425,6 +438,7 @@ async fn installer_rejects_differing_same_id_components_without_activation() {
 #[cfg(unix)]
 #[tokio::test]
 async fn installer_rejects_differing_or_missing_same_id_manifests() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   for (original, replacement) in [
     (Some("original manifest"), Some("different manifest")),
     (Some("original manifest"), None),
@@ -467,6 +481,7 @@ async fn installer_rejects_differing_or_missing_same_id_manifests() {
 async fn installer_reports_receiver_progress_and_activates_executable_components() {
   use std::os::unix::fs::PermissionsExt as _;
   use std::sync::Mutex;
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = BundleFixture::new();
   let events = Mutex::new(Vec::new());
   let identity_path = fixture.directory.join("home/.tokn/ctl/remote-id");
@@ -521,6 +536,7 @@ async fn installer_reports_receiver_progress_and_activates_executable_components
 #[cfg(unix)]
 #[tokio::test]
 async fn truncated_upload_does_not_activate_and_cleans_temporary_files() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = BundleFixture::new();
   let result = tokio::time::timeout(
     std::time::Duration::from_secs(10),
@@ -545,6 +561,7 @@ async fn truncated_upload_does_not_activate_and_cleans_temporary_files() {
 #[cfg(unix)]
 #[tokio::test]
 async fn early_remote_failure_preserves_diagnostics_instead_of_broken_pipe() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let mut command = Command::new("sh");
   command.args(["-c", "printf 'Permission denied by fixture' >&2; exit 1"]);
   let result = run_install_command(command, &vec![0; 1024 * 1024], |_| {}).await;
@@ -556,6 +573,7 @@ async fn early_remote_failure_preserves_diagnostics_instead_of_broken_pipe() {
 #[cfg(unix)]
 #[tokio::test]
 async fn silent_installer_failure_has_a_nonempty_diagnostic() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let mut command = Command::new("sh");
   command.args(["-c", "exit 1"]);
   let result = run_install_command(command, &vec![0; 1024 * 1024], |_| {}).await;
@@ -571,6 +589,7 @@ async fn both_installers_use_posix_permissions_from_a_zsh_login_shell() {
   use crate::remote_bundle::compatibility::tests::Fixture;
   use ctl_core::bundles::Source;
   use std::os::unix::fs::PermissionsExt as _;
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = BundleFixture::new();
   let import_home = fixture.directory.join("import-home");
   let bundle = crate::components::import_remote(
@@ -632,6 +651,7 @@ async fn both_installers_explain_writable_storage_without_activating() {
   use crate::remote_bundle::compatibility::tests::Fixture;
   use ctl_core::bundles::Source;
   use std::os::unix::fs::PermissionsExt as _;
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = BundleFixture::new();
   let import_home = fixture.directory.join("import-home");
   let bundle = crate::components::import_remote(
@@ -675,11 +695,71 @@ async fn both_installers_explain_writable_storage_without_activating() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn agent_installer_reports_progress_before_the_receiver_opens_its_archive() {
+  use crate::remote_bundle::compatibility::tests::Fixture;
+  use ctl_core::bundles::Source;
+  use std::sync::Mutex;
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
+  let fixture = BundleFixture::new();
+  let import_home = fixture.directory.join("import-home");
+  std::fs::create_dir(&import_home).unwrap();
+  let source = crate::components::import_remote(
+    &import_home,
+    &Fixture::new("0.0.9", &"b".repeat(40)).bundle(),
+    "aarch64-apple-darwin",
+    Source::Ci,
+  )
+  .unwrap();
+  let archive = crate::component_update::agent_archive(&source).unwrap();
+  // Force the first progress poll to finish before the background receiver
+  // opens the archive. The installer must report zero, not an empty count.
+  let receiver = "cat <&3 > \"$archive\" &";
+  let poll = "  received=$(wc -c < \"$archive\" | tr -d '[:space:]')";
+  let script = agent_script(&archive, None).unwrap();
+  assert!(script.contains(receiver));
+  assert!(script.contains(poll));
+  let script = script
+    .replace(
+      receiver,
+      "{ while [ ! -e \"$temporary/poll-started\" ]; do [ -d \"$temporary\" ] || exit 1; sleep 0.01; done; cat <&3 > \"$archive\"; } &",
+    )
+    .replace(
+      poll,
+      "  received=$(wc -c < \"$archive\" | tr -d '[:space:]')\n  : > \"$temporary/poll-started\"",
+    );
+  let mut command = Command::new("sh");
+  command
+    .args(["-c", &script])
+    .env("HOME", fixture.directory.join("home"));
+  let events = Mutex::new(Vec::new());
+  tokio::time::timeout(
+    std::time::Duration::from_secs(10),
+    run_package_install(command, &archive, true, |event| {
+      events.lock().unwrap().push(event);
+    }),
+  )
+  .await
+  .unwrap()
+  .unwrap();
+  let events = events.into_inner().unwrap();
+  assert_eq!(
+    &events[..2],
+    [RemoteInstallEvent::Receiving { received_bytes: 0 }; 2]
+  );
+  assert!(events.contains(&RemoteInstallEvent::Receiving {
+    received_bytes: archive.len() as u64,
+  }));
+  assert_eq!(events.last(), Some(&RemoteInstallEvent::Complete));
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn managed_installer_uses_the_shared_store_and_preserves_selection_on_damage() {
   use crate::components;
   use crate::remote_bundle::compatibility::tests::Fixture;
   use ctl_core::bundles::{Source, Store};
   use std::os::unix::fs::MetadataExt as _;
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = BundleFixture::new();
   let import_home = fixture.directory.join("import-home");
   std::fs::create_dir(&import_home).unwrap();
@@ -761,6 +841,7 @@ async fn managed_installer_rejects_symlinked_storage_and_an_active_sync() {
   use crate::components;
   use crate::remote_bundle::compatibility::tests::Fixture;
   use ctl_core::bundles::Source;
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = BundleFixture::new();
   let home = fixture.directory.join("home");
   std::fs::create_dir(&home).unwrap();

@@ -62,6 +62,7 @@ fn only_exact_unique_connected_loopback_endpoints_are_accepted() {
 #[cfg(unix)]
 #[tokio::test]
 async fn unsupported_contracts_never_send_identity_or_open_the_vpn_daemon() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let socket =
     std::env::temp_dir().join(format!("ctl-vpn-negotiation-{}.sock", uuid::Uuid::new_v4()));
   let client =
@@ -131,6 +132,7 @@ async fn select_contract(writer: &mut (impl AsyncWrite + Unpin)) {
 #[cfg(unix)]
 #[tokio::test(start_paused = true)]
 async fn delayed_selection_and_request_use_the_supported_startup_budget() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let (mut channel, server) = negotiation_channel();
   read_offer(&mut channel).await;
   tokio::time::advance(Duration::from_secs(20)).await;
@@ -161,6 +163,7 @@ async fn delayed_selection_and_request_use_the_supported_startup_budget() {
 #[cfg(unix)]
 #[tokio::test(start_paused = true)]
 async fn a_peer_that_never_selects_a_contract_expires_without_identity() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let (mut channel, server) = negotiation_channel();
   read_offer(&mut channel).await;
   tokio::time::advance(STARTUP_TIMEOUT.checked_sub(Duration::from_secs(1)).unwrap()).await;
@@ -181,6 +184,7 @@ async fn a_peer_that_never_selects_a_contract_expires_without_identity() {
 #[cfg(unix)]
 #[tokio::test(start_paused = true)]
 async fn the_first_request_has_only_the_remaining_startup_budget() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let (mut channel, server) = negotiation_channel();
   read_offer(&mut channel).await;
   tokio::time::advance(STARTUP_TIMEOUT.checked_sub(Duration::from_secs(5)).unwrap()).await;
@@ -203,6 +207,7 @@ async fn the_first_request_has_only_the_remaining_startup_budget() {
 #[cfg(unix)]
 #[tokio::test]
 async fn remote_connect_resolves_remote_status_preserves_hostname_and_relays_bytes() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let socket = std::env::temp_dir().join(format!(
     "ctl-agent-vpn-{}.sock",
     uuid::Uuid::new_v4().simple()
@@ -338,6 +343,7 @@ async fn socks_destination(
 #[cfg(unix)]
 #[tokio::test]
 async fn stdio_vpn_child() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let Some(socket) = std::env::var_os("CTL_AGENT_VPN_TEST_SOCKET") else {
     return;
   };
@@ -351,6 +357,7 @@ async fn stdio_vpn_child() {
 async fn socketpair_stdio_negotiates_a_fragmented_selection_before_the_request() {
   use std::os::fd::OwnedFd;
   use std::process::Stdio;
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
 
   let socket = std::env::temp_dir().join(format!("cvs-{}.s", uuid::Uuid::new_v4().simple()));
   let (local, peer) = std::os::unix::net::UnixStream::pair().unwrap();
@@ -412,6 +419,7 @@ async fn socketpair_stdio_negotiates_a_fragmented_selection_before_the_request()
 #[cfg(unix)]
 #[tokio::test]
 async fn stdio_vpn_delivers_target_eof_before_client_finishes_uploading() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let socket = std::env::temp_dir().join(format!("cvs-{}.s", uuid::Uuid::new_v4().simple()));
   let daemon = tokio::net::UnixListener::bind(&socket).unwrap();
   let socks = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -492,6 +500,7 @@ async fn stdio_vpn_delivers_target_eof_before_client_finishes_uploading() {
 #[cfg(unix)]
 #[tokio::test]
 async fn list_on_absent_owner_never_starts_the_companion_and_full_broker_requests_are_rejected() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let socket = std::env::temp_dir().join(format!(
     "ctl-agent-absent-{}.sock",
     uuid::Uuid::new_v4().simple()

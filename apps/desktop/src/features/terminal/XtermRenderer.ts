@@ -193,6 +193,9 @@ export class XtermRenderer {
     }
     this.active = terminal;
     terminal.container.hidden = false;
+    // Cached checkpoints can paint while hidden. Refresh after showing so
+    // widths unavailable under display:none are measured with the real font.
+    terminal.presenter.refresh();
     this.scheduleCellMeasurement();
   }
 
@@ -388,12 +391,27 @@ export class XtermRenderer {
     const mount = document.createElement("div");
     mount.style.width = "100%";
     mount.style.height = "100%";
+    // xterm's DOM renderer measures glyph widths while opening and painting.
+    // Detached or display:none stages measure zero and retain an extra cell of
+    // letter spacing after activation. Keep them laid out outside cached tabs.
+    const measurement_host = document.createElement("div");
+    measurement_host.className = "terminal-measurement";
+    measurement_host.setAttribute("aria-hidden", "true");
+    Object.assign(measurement_host.style, {
+      position: "fixed", left: "-100000px", top: "0", width: "1px", height: "1px",
+      visibility: "hidden", pointerEvents: "none", overflow: "hidden",
+    });
+    measurement_host.append(mount);
+    document.body.append(measurement_host);
     const activate = (scrollback_offset = 0) => {
       const restore_focus = container.contains(document.activeElement);
-      container.querySelectorAll(".xterm-screen").forEach((screen) => this.cellObserver?.unobserve(screen));
-      container.replaceChildren(mount);
-      const screen = mount.querySelector(".xterm-screen");
-      if (screen) this.cellObserver?.observe(screen);
+      if (mount.parentElement !== container) {
+        container.querySelectorAll(".xterm-screen").forEach((screen) => this.cellObserver?.unobserve(screen));
+        container.replaceChildren(mount);
+        measurement_host.remove();
+        const screen = mount.querySelector(".xterm-screen");
+        if (screen) this.cellObserver?.observe(screen);
+      }
       if (scrollback_offset > 0) terminal.scrollToLine(Math.max(0, terminal.buffer.active.baseY - scrollback_offset));
       this.scheduleCellMeasurement();
       if (restore_focus) terminal.focus();
@@ -446,6 +464,7 @@ export class XtermRenderer {
 
     return {
       activate,
+      refresh: () => terminal.refresh(0, terminal.rows - 1),
       viewportOffset: () => terminal.buffer.active.baseY - terminal.buffer.active.viewportY,
       copyPrimaryRows: () => {
         const buffer = terminal.buffer.normal;
@@ -466,6 +485,7 @@ export class XtermRenderer {
         mount.querySelectorAll(".xterm-screen").forEach((screen) => this.cellObserver?.unobserve(screen));
         terminal.dispose();
         mount.remove();
+        measurement_host.remove();
       },
       focus: () => terminal.focus(),
       cellDimensions: () => {

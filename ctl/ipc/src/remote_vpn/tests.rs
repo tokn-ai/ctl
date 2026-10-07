@@ -48,6 +48,7 @@ fn recovery_retries_transport_interruptions_and_known_timeouts_only() {
 
 #[tokio::test]
 async fn a_closed_negotiation_channel_is_not_a_contract_mismatch() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let error = negotiate_contract(&mut &[][..], &mut Vec::new())
     .await
     .unwrap_err();
@@ -67,6 +68,7 @@ async fn a_closed_negotiation_channel_is_not_a_contract_mismatch() {
 #[tokio::test]
 async fn negotiation_peer_child() {
   use tokio::io::AsyncWriteExt as _;
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let Some(mode) = std::env::var_os("CTL_REMOTE_VPN_NEGOTIATION_TEST") else {
     return;
   };
@@ -148,6 +150,7 @@ fn fixture_target() -> SshTarget {
 #[cfg(unix)]
 #[tokio::test]
 async fn headless_startup_captures_bounded_diagnostics_and_preserves_recovery_policy() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   for pinned in [false, true] {
     let mut client = Client::new(fixture_target(), None).with_terminal_interaction(false);
     if pinned {
@@ -183,6 +186,7 @@ async fn headless_startup_captures_bounded_diagnostics_and_preserves_recovery_po
 #[cfg(unix)]
 #[tokio::test]
 async fn headless_live_channels_continue_draining_after_the_diagnostic_limit() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let client = Client::new(fixture_target(), None).with_terminal_interaction(false);
   tokio::time::timeout(Duration::from_secs(5), async {
     let mut stream = client
@@ -206,6 +210,7 @@ async fn headless_live_channels_continue_draining_after_the_diagnostic_limit() {
 #[cfg(unix)]
 #[tokio::test]
 async fn headless_clients_disable_ssh_terminal_authentication_without_a_master() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let command = Client::new(fixture_target(), None)
     .with_terminal_interaction(false)
     .command()
@@ -222,6 +227,7 @@ async fn headless_clients_disable_ssh_terminal_authentication_without_a_master()
 #[cfg(unix)]
 #[tokio::test]
 async fn cancelling_diagnostic_collection_keeps_the_drain_owned_until_drop() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let mut command = negotiation_command("hold_diagnostics");
   command
     .stdin(Stdio::null())
@@ -251,6 +257,7 @@ async fn cancelling_diagnostic_collection_keeps_the_drain_owned_until_drop() {
 #[cfg(unix)]
 #[tokio::test]
 async fn channel_loss_after_selection_or_request_remains_recoverable() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let target = SshTarget {
     destination: "vpn-owner".into(),
     ssh_config_alias: None,
@@ -292,6 +299,7 @@ async fn channel_loss_after_selection_or_request_remains_recoverable() {
 
 #[tokio::test]
 async fn preface_discards_startup_noise_and_preserves_identity_and_stream_bytes() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let identity = ctl_proto::RemoteIdentity {
     remote_id: "a060a4f4-2225-4d3c-8c8b-c9c8c2b3bc69".into(),
     agent_version: "0.1.0".into(),
@@ -327,6 +335,7 @@ async fn preface_discards_startup_noise_and_preserves_identity_and_stream_bytes(
 
 #[tokio::test]
 async fn bounded_frames_reject_unknown_operations_and_oversized_requests() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let mut bytes = Vec::new();
   crate::write_frame(&mut bytes, &serde_json::json!({ "type": "ensure_master" }))
     .await
@@ -362,6 +371,7 @@ async fn bounded_frames_reject_unknown_operations_and_oversized_requests() {
 
 #[tokio::test]
 async fn old_or_missing_agent_prefaces_produce_an_update_instruction() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   for output in [
     b"".as_slice(),
     b"ctl-ssh-nf\n",
@@ -379,6 +389,7 @@ async fn old_or_missing_agent_prefaces_produce_an_update_instruction() {
 #[tokio::test]
 async fn negotiation_selects_only_explicit_published_contracts_before_any_vpn_input() {
   use ctl_core::protocol::{ProtocolOffer, ProtocolVersion};
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let newer = ProtocolVersion::new(1, 1, 3);
   let mut bytes = Vec::new();
   crate::write_frame(
@@ -421,6 +432,7 @@ async fn negotiation_selects_only_explicit_published_contracts_before_any_vpn_in
 
 #[tokio::test]
 async fn malformed_offers_and_unpublished_selections_are_rejected_before_identity() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let mut malformed = Vec::new();
   crate::write_frame(
     &mut malformed,
@@ -487,6 +499,7 @@ fn remote_requests_do_not_accept_arbitrary_paths_or_invalid_tcp_destinations() {
 
 #[tokio::test]
 async fn pinned_master_is_batch_and_cannot_fall_back_to_network() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let target = SshTarget {
     destination: "vpn-owner".into(),
     ssh_config_alias: None,
@@ -517,6 +530,7 @@ async fn pinned_master_is_batch_and_cannot_fall_back_to_network() {
 #[cfg(unix)]
 #[tokio::test]
 async fn identity_mismatch_closes_the_child_before_a_profile_can_be_sent() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let directory = std::env::temp_dir().join(format!("remote-vpn-identity-{}", std::process::id()));
   std::fs::create_dir_all(&directory).unwrap();
   let payload = directory.join("payload");
@@ -573,6 +587,7 @@ async fn identity_mismatch_closes_the_child_before_a_profile_can_be_sent() {
 #[cfg(unix)]
 #[tokio::test]
 async fn failed_ssh_startup_is_not_reported_as_missing_vpn_support() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let target = SshTarget {
     destination: "vpn-owner".into(),
     ssh_config_alias: None,
@@ -599,6 +614,7 @@ async fn failed_ssh_startup_is_not_reported_as_missing_vpn_support() {
 #[cfg(unix)]
 #[tokio::test]
 async fn a_disappeared_pinned_master_can_be_reprepared_after_failed_startup() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let target = SshTarget {
     destination: "vpn-owner".into(),
     ssh_config_alias: None,
@@ -641,6 +657,7 @@ async fn a_disappeared_pinned_master_can_be_reprepared_after_failed_startup() {
 #[tokio::test]
 async fn successful_setup_keeps_buffered_tcp_bytes_and_half_close_reaps_the_ssh_process() {
   use tokio::io::AsyncWriteExt as _;
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let directory = std::env::temp_dir().join(format!("remote-vpn-stream-{}", std::process::id()));
   std::fs::create_dir_all(&directory).unwrap();
   let payload = directory.join("payload");

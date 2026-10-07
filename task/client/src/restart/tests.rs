@@ -4,19 +4,16 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::net::UnixListener;
 
 static NEXT: AtomicUsize = AtomicUsize::new(0);
-// Avoid a parallel fork inheriting writable helper descriptors before exec.
-static SCRIPTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
 struct Fixture {
   root: PathBuf,
   client: Client,
   info: ComponentInfo,
-  _guard: tokio::sync::MutexGuard<'static, ()>,
+  _guard: ctl_core::test_fixtures::ProcessGuard,
 }
 
 impl Fixture {
   async fn new() -> Self {
-    let guard = SCRIPTS.lock().await;
+    let guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
     let root = std::env::temp_dir().join(format!(
       "task-lifecycle-{}-{}",
       std::process::id(),

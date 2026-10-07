@@ -26,11 +26,15 @@ impl Fixture {
     executable
   }
 
-  fn command(&self, mode: &str) -> tokio::process::Command {
+  fn command(
+    &self,
+    mode: &str,
+    guard: &ctl_core::test_fixtures::ProcessGuard,
+  ) -> tokio::process::Command {
     let shared = self.helper("shared/ctld.app/Contents/MacOS/ctld", "shared");
     let app = self.0.join("ctmux.app/Contents/MacOS/tests");
     fs::create_dir_all(app.parent().unwrap()).unwrap();
-    fs::copy(std::env::current_exe().unwrap(), &app).unwrap();
+    guard.copy(std::env::current_exe().unwrap(), &app).unwrap();
     self.helper("ctmux.app/Contents/MacOS/ctld", "loose");
     if mode == "bundle" {
       self.helper(
@@ -111,6 +115,7 @@ static PROVIDER_READY: AtomicBool = AtomicBool::new(false);
 #[tokio::test]
 async fn desktop_operations_discover_shared_helpers_and_preserve_bundle_overrides_and_passive_use()
 {
+  let process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   for mode in [
     "credentials",
     "identities",
@@ -128,7 +133,7 @@ async fn desktop_operations_discover_shared_helpers_and_preserve_bundle_override
     let provider_marker = fixture.0.join("provider");
     let output = tokio::time::timeout(
       std::time::Duration::from_secs(10),
-      fixture.command(mode).output(),
+      fixture.command(mode, &process_guard).output(),
     )
     .await
     .unwrap()
@@ -166,6 +171,7 @@ async fn desktop_operations_discover_shared_helpers_and_preserve_bundle_override
 
 #[tokio::test]
 async fn desktop_operation_child() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let Ok(mode) = std::env::var("CTMUX_HELPER_TEST_MODE") else {
     return;
   };

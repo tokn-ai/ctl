@@ -125,6 +125,7 @@ fn pending_import_does_not_hide_an_independent_file_discovery_failure() {
 #[cfg(unix)]
 #[tokio::test]
 async fn old_identity_helpers_cannot_silently_run_interactive_inventory() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let mut command = tokio::process::Command::new("/bin/sh");
   command.args(["-c", "cat >/dev/null; printf '%s' '{\"type\":\"error\",\"code\":\"identity_invalid_request\",\"message\":\"private-fixture-canary\"}'", "legacy-identity-helper"]);
   let error = exchange_with(command, Request::ListMetadata { paths: Vec::new() })
@@ -137,6 +138,7 @@ async fn old_identity_helpers_cannot_silently_run_interactive_inventory() {
 
 #[tokio::test]
 async fn invalid_mutations_are_rejected_before_spawning_a_helper() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let request = SaveRequest {
     path: "/fixture/key".into(),
     file_version: "invalid".into(),
@@ -173,6 +175,7 @@ fn request_budget_leaves_room_for_json_escaping() {
 #[cfg(unix)]
 #[tokio::test]
 async fn secret_bearing_requests_use_stdin_and_errors_remain_sanitized() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let mut command = tokio::process::Command::new("/bin/sh");
   command.args(["-c", concat!(
     "test \"$1\" = --identity-request || exit 2; ",

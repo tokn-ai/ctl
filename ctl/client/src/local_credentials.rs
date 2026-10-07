@@ -182,19 +182,25 @@ fn validate_completion(output: &Output) -> Result<(), Error> {
 fn credential_contract(request: &credentials::Request) -> ProtocolVersion {
   match request {
     credentials::Request::Discover {} => ctl_ipc::HELPER_API_CONTRACT_V1_1_4,
-    credentials::Request::Clear {} => ctl_ipc::HELPER_API_CONTRACT_V1_1_3,
+    // Mutators must notify independently running brokers before changing any
+    // owned secret. Earlier helpers implement the wire shape without revoking
+    // cached authorization contexts in those other processes.
+    credentials::Request::Clear {} | credentials::Request::Forget { .. } => {
+      ctl_ipc::HELPER_API_CONTRACT_V1_1_5
+    }
     credentials::Request::List
     | credentials::Request::ListMetadata
-    | credentials::Request::ImportMetadata
-    | credentials::Request::Forget { .. } => ctl_ipc::HELPER_API_CONTRACT_V1_0_1,
+    | credentials::Request::ImportMetadata => ctl_ipc::HELPER_API_CONTRACT_V1_0_1,
   }
 }
 
 fn identity_contract(request: &identities::Request) -> ProtocolVersion {
   match request {
-    identities::Request::List { .. }
-    | identities::Request::ListMetadata { .. }
-    | identities::Request::Save { .. }
-    | identities::Request::Forget { .. } => ctl_ipc::HELPER_API_CONTRACT_V1_0_1,
+    identities::Request::List { .. } | identities::Request::ListMetadata { .. } => {
+      ctl_ipc::HELPER_API_CONTRACT_V1_0_1
+    }
+    identities::Request::Save { .. } | identities::Request::Forget { .. } => {
+      ctl_ipc::HELPER_API_CONTRACT_V1_1_5
+    }
   }
 }

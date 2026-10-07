@@ -33,6 +33,7 @@ temporary=$(mktemp -d "$versions/.install-XXXXXX")
 archive="$temporary/agent.tar.gz"
 payload="$temporary/payload"
 mkdir "$payload"
+: > "$archive"
 printf 'ctl-install-progress-v1 receiving 0\n'
 exec 3<&0
 cat <&3 > "$archive" &

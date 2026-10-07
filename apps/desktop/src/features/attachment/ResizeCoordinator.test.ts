@@ -101,4 +101,57 @@ describe("ResizeCoordinator", () => {
 
     expect(sent).toEqual([desired]);
   });
+
+  it("holds queued resizes until every suspension ends and resumes only the latest desired grid", async () => {
+    vi.useFakeTimers();
+    const sent: TerminalSize[] = [];
+    const coordinator = createTestCoordinator(async (size) => { sent.push(size); });
+    coordinator.reset(terminalSize(80, 24));
+    coordinator.setEnabled(true);
+    coordinator.setDesired(terminalSize(90, 24));
+    await vi.advanceTimersByTimeAsync(40);
+    const first = coordinator.suspend();
+    const second = coordinator.suspend();
+    coordinator.setDesired(terminalSize(100, 30));
+    coordinator.setAuthoritative(terminalSize(79, 24));
+    coordinator.setDesired(terminalSize(120, 36));
+    await vi.advanceTimersByTimeAsync(100);
+    expect(sent).toEqual([]);
+    first(); first();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(sent).toEqual([]);
+    second(); second();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(sent).toEqual([terminalSize(120, 36)]);
+  });
+
+  it.each(["disable", "stop"])("does not restart automatic sizing after %s during a suspension", async (change) => {
+    vi.useFakeTimers();
+    const sent: TerminalSize[] = [];
+    const coordinator = createTestCoordinator(async (size) => { sent.push(size); });
+    coordinator.reset(terminalSize(80, 24));
+    coordinator.setEnabled(true);
+    const release = coordinator.suspend();
+    coordinator.setDesired(terminalSize(120, 36));
+    if (change === "disable") coordinator.setEnabled(false);
+    else coordinator.stop();
+    release();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(sent).toEqual([]);
+  });
+
+  it("retains active suspensions across coordinator reset", async () => {
+    vi.useFakeTimers();
+    const sent: TerminalSize[] = [];
+    const coordinator = createTestCoordinator(async (size) => { sent.push(size); });
+    const release = coordinator.suspend();
+    coordinator.reset(terminalSize(80, 24));
+    coordinator.setDesired(terminalSize(100, 30));
+    coordinator.setEnabled(true);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(sent).toEqual([]);
+    release();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(sent).toEqual([terminalSize(100, 30)]);
+  });
 });

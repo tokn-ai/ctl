@@ -4,6 +4,8 @@
 mod cleanup;
 #[path = "cases/reconnect.rs"]
 mod reconnect;
+#[path = "cases/resizing.rs"]
+mod resizing;
 mod support;
 #[path = "cases/workflows.rs"]
 mod workflows;

@@ -6,16 +6,48 @@ use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 /// Internal protocol build; incrementing this does not publish a new contract.
-pub const PROTOCOL_BUILD: u16 = 15;
+pub const PROTOCOL_BUILD: u16 = 17;
 /// First published wire contract. Keep this identity immutable.
 pub const CONTRACT_V1_0_13: ProtocolVersion = ProtocolVersion::new(1, 0, 13);
 /// Published compatible addition: paged history and checkpoint recovery.
 pub const CONTRACT_V1_1_14: ProtocolVersion = ProtocolVersion::new(1, 1, 14);
 /// Server-owned view zoom with attachment layout ownership.
 pub const CONTRACT_V1_1_15: ProtocolVersion = ProtocolVersion::new(1, 1, 15);
-pub const PROTOCOL_VERSION: ProtocolVersion = CONTRACT_V1_1_15;
-pub const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] =
-  &[CONTRACT_V1_0_13, CONTRACT_V1_1_14, CONTRACT_V1_1_15];
+/// Proportional split geometry and leased pane resizing.
+pub const CONTRACT_V1_1_16: ProtocolVersion = ProtocolVersion::new(1, 1, 16);
+/// Exact divider targeting and marked unsolicited layout ownership updates.
+pub const CONTRACT_V1_1_17: ProtocolVersion = ProtocolVersion::new(1, 1, 17);
+pub const PROTOCOL_VERSION: ProtocolVersion = CONTRACT_V1_1_17;
+pub const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[
+  CONTRACT_V1_0_13,
+  CONTRACT_V1_1_14,
+  CONTRACT_V1_1_15,
+  CONTRACT_V1_1_16,
+  CONTRACT_V1_1_17,
+];
+
+#[must_use]
+pub const fn supports_view_zoom(version: ProtocolVersion) -> bool {
+  matches!(
+    version,
+    CONTRACT_V1_1_15 | CONTRACT_V1_1_16 | CONTRACT_V1_1_17
+  )
+}
+
+#[must_use]
+pub const fn supports_pane_resize(version: ProtocolVersion) -> bool {
+  matches!(version, CONTRACT_V1_1_16 | CONTRACT_V1_1_17)
+}
+
+#[must_use]
+pub const fn supports_divider_resize(version: ProtocolVersion) -> bool {
+  matches!(version, CONTRACT_V1_1_17)
+}
+
+#[must_use]
+pub const fn supports_layout_lease_notifications(version: ProtocolVersion) -> bool {
+  matches!(version, CONTRACT_V1_1_17)
+}
 
 #[must_use]
 pub fn protocol_offer() -> ProtocolOffer {
@@ -52,6 +84,7 @@ pub const MAX_NORMALIZED_HISTORY_BYTES: usize = 4 * 1024 * 1024;
 /// This is intentionally much smaller than the editable command-line bound:
 /// it is presentation metadata for titles, not an alternate command buffer.
 pub const MAX_RUNNING_COMMAND_BYTES: usize = 256;
+pub const MAX_PANE_RESIZE_REQUEST_ID_BYTES: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalSize {
@@ -557,6 +590,26 @@ pub enum SplitAxis {
   Vertical,
 }
 
+/// Direction in which to move the nearest matching split divider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResizeDirection {
+  Left,
+  Right,
+  Up,
+  Down,
+}
+
+/// Exact split divider target and absolute gap-cell position within its canvas.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DividerResize {
+  pub view_id: String,
+  pub expected_revision: u64,
+  pub split_path: Vec<u16>,
+  pub boundary: u16,
+  pub position: u16,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", from = "LegacyViewLayout")]
 pub enum ViewLayout {
@@ -566,6 +619,9 @@ pub enum ViewLayout {
   Split {
     axis: SplitAxis,
     children: Vec<ViewLayout>,
+    /// Positive relative child extents; omitted weights retain equal splits.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    weights: Vec<u32>,
   },
 }
 
@@ -579,6 +635,8 @@ enum LegacyViewLayout {
   Split {
     axis: SplitAxis,
     children: Vec<ViewLayout>,
+    #[serde(default)]
+    weights: Vec<u32>,
   },
   Tabs {
     children: Vec<ViewLayout>,
@@ -589,10 +647,19 @@ impl From<LegacyViewLayout> for ViewLayout {
   fn from(layout: LegacyViewLayout) -> Self {
     match layout {
       LegacyViewLayout::Terminal { terminal_id } => Self::Terminal { terminal_id },
-      LegacyViewLayout::Split { axis, children } => Self::Split { axis, children },
+      LegacyViewLayout::Split {
+        axis,
+        children,
+        weights,
+      } => Self::Split {
+        axis,
+        children,
+        weights,
+      },
       LegacyViewLayout::Tabs { children } => Self::Split {
         axis: SplitAxis::Horizontal,
         children,
+        weights: Vec::new(),
       },
     }
   }
@@ -634,6 +701,19 @@ pub enum ClientMessage {
   /// `None` restores the saved split geometry.
   SetViewZoom {
     terminal_id: Option<String>,
+  },
+  /// Attached-only shared divider movement requiring this view's layout lease.
+  ResizePane {
+    request_id: String,
+    terminal_id: String,
+    direction: ResizeDirection,
+    amount: u16,
+  },
+  /// Attached-only pointer resize of an exact divider in a previously observed view.
+  ResizeDivider {
+    request_id: String,
+    #[serde(flatten)]
+    divider: DividerResize,
   },
   PromoteTerminal {
     terminal_id: String,
@@ -743,9 +823,21 @@ pub enum ErrorCode {
   Internal,
 }
 
+/// Correlated pane resize acknowledgement, including unchanged boundary results.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PaneResizeOutcome {
+  Applied { view: Box<ViewInfo> },
+  Rejected { code: ErrorCode, message: String },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerMessage {
+  PaneResizeResult {
+    request_id: String,
+    outcome: PaneResizeOutcome,
+  },
   HandshakeAccepted {
     protocol_version: ProtocolVersion,
     protocols: Vec<ctl_core::component::ProtocolInfo>,
@@ -795,6 +887,10 @@ pub enum ServerMessage {
   LeaseStatus {
     lease: LeaseKind,
     status: LeaseStatus,
+    /// Contract 17 unsolicited state refresh. Direct replies omit this field
+    /// to preserve the historical response-only wire shape.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    notification: bool,
   },
   /// Echoes an attached client's heartbeat nonce.
   HeartbeatAck {
@@ -1163,6 +1259,7 @@ mod tests {
         held: true,
         owned_by_client: false,
       },
+      notification: false,
     };
     let (mut server, mut client) = tokio::io::duplex(1024);
 
@@ -1178,7 +1275,39 @@ mod tests {
           held: true,
           owned_by_client: false,
         },
+        notification: false,
       }
+    );
+  }
+
+  #[test]
+  fn lease_notifications_are_distinct_from_historical_replies() {
+    let reply = serde_json::json!({
+      "type": "lease_status", "lease": "layout",
+      "status": { "held": false, "owned_by_client": false }
+    });
+    let status: ServerMessage = serde_json::from_value(reply.clone()).unwrap();
+    assert!(matches!(
+      status,
+      ServerMessage::LeaseStatus {
+        notification: false,
+        ..
+      }
+    ));
+    assert_eq!(serde_json::to_value(status).unwrap(), reply);
+    let notification = ServerMessage::LeaseStatus {
+      lease: LeaseKind::Layout,
+      status: LeaseStatus {
+        held: false,
+        owned_by_client: false,
+      },
+      notification: true,
+    };
+    let value = serde_json::to_value(&notification).unwrap();
+    assert_eq!(value["notification"], true);
+    assert_eq!(
+      serde_json::from_value::<ServerMessage>(value).unwrap(),
+      notification
     );
   }
 
@@ -1336,9 +1465,32 @@ mod tests {
   }
 
   #[test]
-  fn view_zoom_uses_current_protocol_version() {
-    assert_eq!(PROTOCOL_VERSION, ProtocolVersion::new(1, 1, 15));
-    assert_eq!(PROTOCOL_BUILD, 15);
+  fn divider_contract_retains_historical_keyboard_resizing() {
+    assert_eq!(PROTOCOL_VERSION, ProtocolVersion::new(1, 1, 17));
+    assert_eq!(PROTOCOL_BUILD, 17);
+    assert_eq!(
+      SUPPORTED_PROTOCOL_VERSIONS,
+      &[
+        CONTRACT_V1_0_13,
+        CONTRACT_V1_1_14,
+        CONTRACT_V1_1_15,
+        CONTRACT_V1_1_16,
+        CONTRACT_V1_1_17,
+      ]
+    );
+    for (version, zoom, pane, divider) in [
+      (CONTRACT_V1_0_13, false, false, false),
+      (CONTRACT_V1_1_14, false, false, false),
+      (CONTRACT_V1_1_15, true, false, false),
+      (CONTRACT_V1_1_16, true, true, false),
+      (CONTRACT_V1_1_17, true, true, true),
+      (ProtocolVersion::new(1, 1, 18), false, false, false),
+    ] {
+      assert_eq!(supports_view_zoom(version), zoom);
+      assert_eq!(supports_pane_resize(version), pane);
+      assert_eq!(supports_divider_resize(version), divider);
+      assert_eq!(supports_layout_lease_notifications(version), divider);
+    }
   }
 
   #[test]
@@ -1346,6 +1498,7 @@ mod tests {
     let canvas_size = TerminalSize::default();
     let layout = ViewLayout::Split {
       axis: SplitAxis::Horizontal,
+      weights: Vec::new(),
       children: vec![
         ViewLayout::Terminal {
           terminal_id: "first".into(),
@@ -1410,6 +1563,64 @@ mod tests {
     }))
     .unwrap();
     assert_eq!(clear, ClientMessage::SetViewZoom { terminal_id: None });
+  }
+
+  #[test]
+  fn pane_resize_request_and_correlated_rejection_use_snake_case_fields() {
+    let request = ClientMessage::ResizePane {
+      request_id: "resize-1".into(),
+      terminal_id: "pane".into(),
+      direction: ResizeDirection::Left,
+      amount: 5,
+    };
+    let value = serde_json::to_value(&request).unwrap();
+    assert_eq!(
+      value,
+      serde_json::json!({
+        "type": "resize_pane", "request_id": "resize-1", "terminal_id": "pane",
+        "direction": "left", "amount": 5,
+      })
+    );
+    assert_eq!(request, serde_json::from_value(value).unwrap());
+    let reply = ServerMessage::PaneResizeResult {
+      request_id: "resize-1".into(),
+      outcome: PaneResizeOutcome::Rejected {
+        code: ErrorCode::LayoutLeaseRequired,
+        message: "Resize lease required".into(),
+      },
+    };
+    let value = serde_json::to_value(&reply).unwrap();
+    assert_eq!(
+      value,
+      serde_json::json!({
+        "type": "pane_resize_result", "request_id": "resize-1",
+        "outcome": { "kind": "rejected", "code": "layout_lease_required", "message": "Resize lease required" },
+      })
+    );
+    assert_eq!(reply, serde_json::from_value(value).unwrap());
+  }
+
+  #[test]
+  fn exact_divider_resize_has_flat_snake_case_identity_revision_and_cell_position() {
+    let request = ClientMessage::ResizeDivider {
+      request_id: "drag-1".into(),
+      divider: DividerResize {
+        view_id: "view".into(),
+        expected_revision: 9,
+        split_path: vec![1, 0],
+        boundary: 2,
+        position: 64,
+      },
+    };
+    let value = serde_json::to_value(&request).unwrap();
+    assert_eq!(
+      value,
+      serde_json::json!({
+        "type": "resize_divider", "request_id": "drag-1", "view_id": "view", "expected_revision": 9,
+        "split_path": [1, 0], "boundary": 2, "position": 64,
+      })
+    );
+    assert_eq!(request, serde_json::from_value(value).unwrap());
   }
 
   #[test]

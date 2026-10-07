@@ -1,5 +1,6 @@
 #[cfg(any(windows, test))]
 mod conpty;
+mod history_snapshot;
 mod process_monitor;
 mod server;
 mod session;

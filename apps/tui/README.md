@@ -59,6 +59,8 @@ The default prefix is **Ctrl+B**. Change it with `--prefix Ctrl+a` or
 | `%` | Split right |
 | `"` | Split below |
 | Arrow keys | Focus an adjacent pane; repeat without a prefix for 500 ms |
+| Ctrl + Arrow | Move the adjacent divider by one cell; repeat for 500 ms |
+| Alt + Arrow | Move the adjacent divider by five cells; repeat for 500 ms |
 | `o` | Cycle to the next pane |
 | `z` | Zoom/unzoom the focused pane; requires the view resize lease |
 | `c` | Create and select a session |
@@ -83,11 +85,13 @@ Press the prefix twice to send it to the active pane. Other keys, including
 Ctrl+C, are forwarded to the active PTY. The TUI supports conventional xterm
 keys, modified arrows, function keys, Unicode input, and bracketed paste.
 
-After a prefix plus an arrow, further plain arrows keep changing pane focus
-when pressed within 500 ms of the previous focus key. Any other key ends
+After a prefix plus an arrow, further focus or resize arrows repeat
+when pressed within 500 ms of the previous repeatable key. Any other key ends
 repetition and follows ordinary input handling, including copy mode keys.
 Commands such as detach and split always require a fresh prefix. Ctrl, Alt,
-and Shift remain part of the binding: modified arrows do not focus panes.
+and Shift remain part of the binding: Ctrl/Alt arrows resize, while Shift arrows
+have no prefix binding. Outside a prefix or repeat window, modified arrows go
+to the active PTY.
 
 ## Scrollback and copy mode
 
@@ -167,8 +171,27 @@ the layout clears zoom, and exiting the zoomed pane clears zoom. Its final
 screen remains visible until dismissed, as with other ended panes.
 Zoom survives detach and reconnect, and the status row shows `ZOOM`.
 
-Zoom requires negotiated ctmux contract `1.1.15`. Older daemons remain usable
-with their existing split controls; attempting zoom reports that it is unavailable.
+Zoom supports negotiated ctmux contracts `1.1.15`, `1.1.16`, and `1.1.17`.
+Older daemons remain usable with their existing split controls; attempting zoom
+reports that it is unavailable.
+
+**Ctrl+B Ctrl+Arrow** moves a divider by one cell; **Ctrl+B Alt+Arrow** moves it
+by five. The daemon chooses the nearest split in that direction's axis, using
+the divider after the focused child or the preceding divider for the last child.
+Left/up moves the divider left/up, and right/down moves it right/down. This can
+shrink the focused pane when it is the last child. Subtree minimum sizes limit
+movement; a divider at its limit stays put.
+
+Resizing requires the view resize lease and negotiated ctmux contract `1.1.16`
+or `1.1.17`.
+A successful movement unzooms the view and saves its new proportions. The TUI
+and desktop see the same rectangles; canvas changes, detach, and reconnect
+retain the proportions. Daemon restart still ends these in-memory views.
+Clients selecting an earlier contract can view unequal panes and rearrange
+compatible layouts without resetting proportions, but cannot resize dividers.
+Desktop mouse dragging requires `1.1.17`; the TUI receives the same confirmed
+geometry. TUI resizing uses the keyboard bindings above. If this
+client does not own resize, **Ctrl+B R** requests the available view lease.
 
 Each pane has its own bounded VT emulator. The renderer uses authoritative pane
 rectangles and the server's reserved separator cells, without taking rows or
@@ -193,7 +216,7 @@ authentication is required, detach and reconnect to answer the prompt. Detaching
 releases leases without terminating the session. Normal exit, errors, and Unix
 termination/hangup signals restore the host terminal mode and alternate screen.
 
-Pane border dragging, pane resizing commands, extended keyboard protocols,
+TUI pane border dragging, extended keyboard protocols,
 and a command prompt remain unimplemented. Rendering shares the
 daemon's `avt` terminal emulation capabilities; it is not full tmux feature parity.
 
@@ -212,7 +235,7 @@ handler tests check shared sizing, read-only viewing, reconnect, and input lease
 `terminal_process` launches the real `ctmux-tui` binary inside a host PTY on
 Linux and macOS. It sends terminal bytes through crossterm and checks the rendered
 screen, covering modifier handling, repeated pane navigation, paste, copy mode,
-mouse scrolling, the bottom status row, resize, detach, and host terminal loss.
+mouse scrolling, the bottom status row, shared pane resizing, detach, and host terminal loss.
 Reconnect cases cut live streams repeatedly, stall metadata requests, expire
 resume tokens, and check controls, actual shell input, and released leases.
 These tests need permission to bind local Unix sockets and open PTYs.

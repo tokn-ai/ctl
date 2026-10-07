@@ -8,6 +8,7 @@ import { sessionKey, targetKey, targetLabel } from "../targets/targets";
 
 import { COMMAND_IDS } from "./commandIds";
 import { defaultKeybindings } from "./keymap";
+import type { ResizeControlStatus } from "../attachment/componentActions";
 export { COMMAND_IDS } from "./commandIds";
 
 interface TerminalCommandContext {
@@ -21,6 +22,7 @@ interface TerminalCommandContext {
   phase: ConnectionPhase;
   inputOwned: boolean;
   resizeWithWindow: boolean;
+  resizeControlStatus: ResizeControlStatus;
   listLoading: boolean;
   creating: boolean;
   newShellOpen: boolean;
@@ -50,7 +52,8 @@ interface TerminalCommandActions {
   requestCloseSession(session: SessionSummary): void;
   confirmCloseSession(session: SessionSummary): void | Promise<void>;
   toggleInput(): void;
-  toggleResizeWithWindow(): void;
+  toggleResizeWithWindow(): void | Promise<void>;
+  requestResizeControl(acquire: boolean): void | Promise<void>;
   reconnect(): void;
   focusTerminal(): void;
   requestDaemonRestart(): void;
@@ -358,12 +361,25 @@ export function buildTerminalCommands(
       run: actions.toggleInput,
     },
     {
+      id: COMMAND_IDS.toggleResizeControl,
+      category: "Terminal",
+      title: context.resizeControlStatus === "owned" ? "Release Resize Control" : "Take Resize Control",
+      detail: context.resizeControlStatus === "held_elsewhere" ? "The current owner must release resize control first." : undefined,
+      keywords: ["layout", "lease", "ownership", "panes", "zoom"],
+      enabled: activeTabAttached && !daemonRestartInteractionBlocked &&
+        context.resizeControlStatus !== "unavailable",
+      disabledReason: daemonRestartInteractionBlocked ? daemonRestartInteractionDisabledReason
+        : "Attach to a running session first.",
+      focusTerminalAfterRun: false,
+      run: () => actions.requestResizeControl(context.resizeControlStatus !== "owned"),
+    },
+    {
       id: COMMAND_IDS.toggleResize,
       category: "Terminal",
       title: context.resizeWithWindow
         ? "Stop Resizing with Window"
         : "Resize with Window",
-      keywords: ["layout", "lease", "ownership"],
+      keywords: ["layout", "window", "automatic", "fixed"],
       enabled: activeTabAttached && !daemonRestartInteractionBlocked,
       disabledReason: daemonRestartInteractionBlocked
         ? daemonRestartInteractionDisabledReason

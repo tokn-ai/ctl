@@ -69,7 +69,7 @@ describe("TerminalPresenter", () => {
     presenter.dispose();
   });
 
-  it("recreates a clean renderer for a checkpoint", async () => {
+  it("resets the live renderer in place for a checkpoint", async () => {
     const instances: Terminal[] = [];
     const presenter = new TerminalPresenter(headlessFactory(instances), terminalSize(12, 3));
     await presenter.write(new TextEncoder().encode("dirty state"));
@@ -81,10 +81,10 @@ describe("TerminalPresenter", () => {
       new Uint8Array(),
     );
 
-    expect(instances).toHaveLength(2);
-    expect(instances[1].cols).toBe(8);
-    expect(instances[1].rows).toBe(2);
-    expect(visibleLine(instances[1], 0)).toBe("restored");
+    expect(instances).toHaveLength(1);
+    expect(instances[0].cols).toBe(8);
+    expect(instances[0].rows).toBe(2);
+    expect(visibleLine(instances[0], 0)).toBe("restored");
   });
 
   it("keeps one byte decoder across checkpoint prefix and later output", async () => {
@@ -99,7 +99,79 @@ describe("TerminalPresenter", () => {
     );
     await presenter.write(new Uint8Array([0xac]));
 
-    expect(visibleLine(instances[1], 0)).toBe("amount: €");
+    expect(visibleLine(instances[0], 0)).toBe("amount: €");
+  });
+
+  it.each([
+    ["UTF-8", new Uint8Array([0xe2, 0x82])],
+    ["CSI", new TextEncoder().encode("\u001b[?1049")],
+    ["OSC", new TextEncoder().encode("\u001b]0;unfinished")],
+    ["OSC escape", new TextEncoder().encode("\u001b]0;unfinished\u001b")],
+    ["DCS", new TextEncoder().encode("\u001bP1;2|unfinished")],
+    ["DCS escape", new TextEncoder().encode("\u001bP1;2|unfinished\u001b")],
+  ])("cancels an old partial %s before restoring a new decoder prefix", async (_kind, pending) => {
+    const instances: Terminal[] = [];
+    const presenter = new TerminalPresenter(headlessFactory(instances), terminalSize(20, 2));
+    await presenter.write(new TextEncoder().encode("old screen"));
+    await presenter.write(pending);
+    await presenter.restoreCheckpoint(terminalSize(20, 2), [], new TextEncoder().encode("amount: "), new Uint8Array([0xe2, 0x82]), "2", "new");
+    await presenter.write(new Uint8Array([0xac]), "3", "2");
+    expect(instances).toHaveLength(1);
+    expect(await presenter.copyLines()).toEqual(["amount: €", ""]);
+    expect(instances[0].buffer.active.type).toBe("normal");
+    presenter.dispose();
+  });
+
+  it("resets old terminal modes and restores primary and alternate checkpoints in place", async () => {
+    const instances: Terminal[] = [];
+    const size = terminalSize(20, 2);
+    const presenter = new TerminalPresenter(headlessFactory(instances), size);
+    await presenter.write(new TextEncoder().encode("old\r\nhistory\r\nprimary\u001b[?1049halternate\u001b[?1h\u001b=\u001b[?2004h\u001b[?1000h\u001b[?1004h\u001b[4h\u001b[?6h\u001b[?7l"));
+    await presenter.restoreCheckpoint(size, ["confirmed"], new TextEncoder().encode("new primary"), new Uint8Array());
+    const terminal = instances[0];
+    expect(terminal.buffer.active.type).toBe("normal");
+    expect(terminal.modes).toMatchObject({ applicationCursorKeysMode: false, applicationKeypadMode: false,
+      bracketedPasteMode: false, insertMode: false, mouseTrackingMode: "none", originMode: false,
+      sendFocusMode: false, wraparoundMode: true });
+    expect(await presenter.copyLines()).toEqual(["confirmed", "new primary", ""]);
+    await presenter.restoreCheckpoint(size, [], new TextEncoder().encode("primary\u001b[?1049h\u001b[Halternate"), new Uint8Array());
+    expect(terminal.buffer.active.type).toBe("alternate");
+    expect(visibleLine(terminal, 0)).toBe("alternate");
+    expect(terminal.buffer.normal.getLine(0)?.translateToString(true)).toBe("primary");
+    expect(instances).toHaveLength(1);
+    presenter.dispose();
+  });
+
+  it("preserves distance from live output across a replacing checkpoint", async () => {
+    const instances: Terminal[] = [];
+    const size = terminalSize(20, 2);
+    const presenter = new TerminalPresenter(headlessFactory(instances), size);
+    const history = Array.from({ length: 20 }, (_, index) => `history ${index}`);
+    await presenter.restoreCheckpoint(size, history, new TextEncoder().encode("live"), new Uint8Array(), "0", "first");
+    const terminal = instances[0];
+    terminal.scrollToLine(3);
+    const distance = terminal.buffer.active.baseY - terminal.buffer.active.viewportY;
+    await presenter.restoreCheckpoint(terminalSize(18, 2), history, new TextEncoder().encode("new live"), new Uint8Array(), "8", "next");
+    expect(terminal.buffer.active.baseY - terminal.buffer.active.viewportY).toBe(distance);
+    expect(visibleLine(terminal, terminal.buffer.active.viewportY)).toBe("history 3");
+    expect(instances).toHaveLength(1);
+    presenter.dispose();
+  });
+
+  it("applies the reset, history, screen and decoder prefix in one ordered write", async () => {
+    const writes: Uint8Array[] = [];
+    const resize = vi.fn();
+    const dispose = vi.fn();
+    const presenter = new TerminalPresenter(() => ({
+      write: (data, callback) => { writes.push(data); callback(); }, resize, dispose,
+    }), terminalSize(20, 2));
+    await presenter.restoreCheckpoint(terminalSize(18, 2), ["history"], new TextEncoder().encode("screen"), new Uint8Array([0xe2, 0x82]));
+    expect(resize).toHaveBeenCalledWith(18, 2);
+    expect(writes).toHaveLength(1);
+    expect(new TextDecoder().decode(writes[0].subarray(0, writes[0].length - 2))).toBe("\u0018\u001bchistory\r\n\r\n\u001b[0m\u001b[Hscreen");
+    expect([...writes[0].slice(-2)]).toEqual([0xe2, 0x82]);
+    expect(dispose).not.toHaveBeenCalled();
+    presenter.dispose();
   });
 
   it("restores normalized history above the live checkpoint", async () => {
@@ -113,7 +185,7 @@ describe("TerminalPresenter", () => {
       new Uint8Array(),
     );
 
-    const buffer = instances[1].buffer.normal;
+    const buffer = instances[0].buffer.normal;
     expect(buffer.baseY).toBe(2);
     expect(buffer.getLine(0)?.translateToString(true)).toBe("old-one");
     expect(buffer.getLine(1)?.translateToString(true)).toBe("old-two");
@@ -173,7 +245,7 @@ describe("TerminalPresenter", () => {
     const instances: Terminal[] = [];
     const presenter = new TerminalPresenter(headlessFactory(instances), terminalSize(20, 2));
     await presenter.restoreCheckpoint(terminalSize(20, 2), [], new TextEncoder().encode("live"), new Uint8Array(), "0", "snapshot");
-    const live = instances[1];
+    const live = instances[0];
     const syncing = presenter.syncHistory(historySnapshot("live"));
     await presenter.write(new TextEncoder().encode(" newer"), "6", "0");
     expect(visibleLine(live, 0)).toBe("live newer");
@@ -189,8 +261,8 @@ describe("TerminalPresenter", () => {
     const presenter = new TerminalPresenter(headlessFactory(instances), terminalSize(20, 2));
     const recent = Array.from({ length: 20 }, (_, index) => `history ${80 + index}`);
     await presenter.restoreCheckpoint(terminalSize(20, 2), recent, new TextEncoder().encode("live"), new Uint8Array(), "0", "snapshot");
-    instances[1].scrollToLine(3);
-    expect(instances[1].buffer.active.viewportY).toBe(3);
+    instances[0].scrollToLine(3);
+    expect(instances[0].buffer.active.viewportY).toBe(3);
     const rows = Array.from({ length: 100 }, (_, index) => ({ text: `history ${index}`, wrapped: false }));
     expect(await presenter.syncHistory(historySnapshot("live", { rows }))).toBe(true);
     const restored = instances[instances.length - 1];
@@ -285,7 +357,7 @@ describe("TerminalPresenter", () => {
     const presenter = new TerminalPresenter(headlessFactory(instances), terminalSize(20, 2));
     await presenter.restoreCheckpoint(terminalSize(20, 2), [], new TextEncoder().encode("live"), new Uint8Array(), "0", "snapshot");
     expect(await presenter.syncHistory(historySnapshot("old", { snapshot_id: "stale" }))).toBe(false);
-    expect(instances).toHaveLength(2);
+    expect(instances).toHaveLength(1);
     expect(await presenter.syncHistory(historySnapshot("old", { rows: [{ text: "\u001b[2Jinjected", wrapped: false }] }))).toBe(false);
     expect(await presenter.copyLines()).toEqual(["live", ""]);
     presenter.dispose();
@@ -339,7 +411,7 @@ describe("TerminalPresenter", () => {
     const output = new Uint8Array(1024 * 1024 + 1);
     await presenter.write(output, String(output.length), "0");
     expect(await presenter.syncHistory(historySnapshot("old"))).toBe(false);
-    expect(factory).toHaveBeenCalledTimes(2);
+    expect(factory).toHaveBeenCalledTimes(1);
     presenter.dispose();
   });
 
@@ -350,7 +422,7 @@ describe("TerminalPresenter", () => {
     const create = vi.fn((size: TerminalSize, options?: TerminalAdapterOptions) => {
       const adapter = factory(size, options);
       return { ...adapter, write: (data: Uint8Array, callback: () => void) => adapter.write(data, () => {
-        if (new TextDecoder().decode(data) === "live") finish = callback;
+        if (new TextDecoder().decode(data).endsWith("live")) finish = callback;
         else callback();
       }) };
     });
@@ -361,7 +433,7 @@ describe("TerminalPresenter", () => {
     finish();
     await restoring;
     expect(await presenter.syncHistory(historySnapshot("live"))).toBe(false);
-    expect(create).toHaveBeenCalledTimes(2);
+    expect(create).toHaveBeenCalledTimes(1);
     presenter.dispose();
   });
 });

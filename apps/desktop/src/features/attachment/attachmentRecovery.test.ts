@@ -37,6 +37,7 @@ function attachedState(
     history_gap: false,
     terminal_size_mismatch: false,
     resize_with_window: true,
+    resize_control_desired: true,
     message: null,
     ...overrides,
   };

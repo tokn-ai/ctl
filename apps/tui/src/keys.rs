@@ -130,15 +130,15 @@ mod tests {
   }
 
   #[test]
-  fn nonrepeatable_bindings_and_modified_arrows_return_to_root_input() {
+  fn nonrepeatable_bindings_and_unbound_modifiers_return_to_root_input() {
     let prefix = input::parse_prefix("Ctrl+b").unwrap();
     let now = Instant::now();
     for key in [
       key(KeyCode::Char('d')),
       key(KeyCode::Char('o')),
       key(KeyCode::Char('c')),
-      KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL),
-      KeyEvent::new(KeyCode::Left, KeyModifiers::ALT),
+      KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT),
+      KeyEvent::new(KeyCode::Left, KeyModifiers::ALT | KeyModifiers::CONTROL),
     ] {
       let mut state = KeyState::Repeat {
         until: now + REPEAT_TIME,
@@ -154,6 +154,34 @@ mod tests {
         now
       ),
       Dispatch::Unknown
+    );
+    assert_eq!(state, KeyState::Root);
+  }
+
+  #[test]
+  fn resize_keys_repeat_and_return_to_input_at_the_deadline() {
+    let prefix = input::parse_prefix("Ctrl+b").unwrap();
+    let now = Instant::now();
+    let mut state = KeyState::Prefix;
+    for (modifiers, amount) in [(KeyModifiers::CONTROL, 1), (KeyModifiers::ALT, 5)] {
+      assert_eq!(
+        state.resolve(KeyEvent::new(KeyCode::Right, modifiers), &prefix, now),
+        Dispatch::Action(Binding {
+          action: Action::ResizePane {
+            direction: ctmux_proto::ResizeDirection::Right,
+            amount
+          },
+          repeatable: true,
+        })
+      );
+    }
+    assert_eq!(
+      state.resolve(
+        KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL),
+        &prefix,
+        now + REPEAT_TIME
+      ),
+      Dispatch::Forward
     );
     assert_eq!(state, KeyState::Root);
   }

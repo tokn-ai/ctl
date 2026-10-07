@@ -587,6 +587,7 @@ mod tests {
   fn dividers_use_reserved_cells_and_leave_the_status_row_free() {
     use ctmux_proto::{SplitAxis, TerminalSize, ViewLayout};
     let layout = ViewLayout::Split {
+      weights: Vec::new(),
       axis: SplitAxis::Horizontal,
       children: vec![
         ViewLayout::Terminal {
@@ -674,6 +675,7 @@ mod tests {
   fn pane_copies_keep_dividers_footer_and_focused_cursor_and_share_hit_test_geometry() {
     use ctmux_proto::{SplitAxis, TerminalSize, ViewLayout};
     let layout = ViewLayout::Split {
+      weights: Vec::new(),
       axis: SplitAxis::Horizontal,
       children: vec![
         ViewLayout::Terminal {
@@ -768,6 +770,7 @@ mod tests {
   fn zoom_hit_testing_excludes_hidden_panes_and_the_status_row() {
     use ctmux_proto::{SplitAxis, TerminalSize, ViewLayout};
     let layout = ViewLayout::Split {
+      weights: Vec::new(),
       axis: SplitAxis::Horizontal,
       children: vec![
         ViewLayout::Terminal {

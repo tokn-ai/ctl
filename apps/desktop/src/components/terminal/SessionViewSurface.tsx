@@ -2,17 +2,18 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import type { ComponentProps, ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { useAttachment } from "../../features/attachment/useAttachment";
-import { setSessionViewZoom, subscribeSessionViews } from "../../features/attachment/componentActions";
+import { resizeSessionPane, setSessionViewZoom, subscribeSessionViews } from "../../features/attachment/componentActions";
 import { useAttachmentNotifications } from "../../features/notifications/useAttachmentNotifications";
 import { attachmentPhaseLabel } from "../../features/attachment/attachmentState";
-import { adjacentPane, swapPanes, viewDividers } from "../../features/terminal/viewLayout";
+import { adjacentPane, swapPanes } from "../../features/terminal/viewLayout";
 import type { XtermRenderer } from "../../features/terminal/XtermRenderer";
 import { sessionKey } from "../../features/targets/targets";
 import { errorCode, errorMessage } from "../../lib/errors";
 import { sessionView } from "../../lib/tauri";
-import type { SessionSummary, SessionView, ShellStateSummary, ViewAction } from "../../lib/types";
+import type { ResizeDirection, SessionSummary, SessionView, ShellStateSummary, ViewAction } from "../../lib/types";
 import { terminalPaneTitle } from "../../lib/shellState";
 import { TerminalSurface } from "./TerminalSurface";
+import { ViewDividers } from "./ViewDividers";
 import "./sessionView.css";
 import { resolvePrefix, prefixActionMode, PREFIX_ACTIONS } from "../../features/commands/prefixKeymap";
 import { useTerminalPrefix } from "../../features/commands/useTerminalPrefix";
@@ -85,6 +86,10 @@ export function SessionViewSurface({ session, open_session_keys, shell_state, re
   const [action_error, setActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const busy_ref = useRef(false);
+  const resize_worker = useRef<{
+    generation: number;
+    pending: { terminal_id: string; direction: ResizeDirection; amount: number }[];
+  } | null>(null);
   const pane_detachers = useRef(new Map<string, () => Promise<void>>());
   const session_ref = useRef(session);
   session_ref.current = session;
@@ -127,6 +132,13 @@ export function SessionViewSurface({ session, open_session_keys, shell_state, re
       });
     }
   }), []);
+
+  useEffect(() => {
+    if (!resize_worker.current) return;
+    resize_worker.current = null;
+    busy_ref.current = false;
+    setBusy(false);
+  }, [key, connected, surface.phase, surface.ended_message, ended_ids]);
 
   useEffect(() => {
     const current = ++generation.current;
@@ -264,6 +276,45 @@ export function SessionViewSurface({ session, open_session_keys, shell_state, re
   }
   const focused_ended = ended_ids.has(focused ?? "") || (focused === primary_id && primary_ended.current);
   const can_split = connected && Boolean(current_view && focused) && !busy && ended_ids.size === 0 && !primary_ended.current;
+  const can_resize = connected && panes.length > 1 && Boolean(focused) && (!busy || resize_worker.current !== null) && ended_ids.size === 0 && !primary_ended.current;
+  const resize_focused = useRef<(direction: ResizeDirection, amount: number) => void>(() => {});
+  resize_focused.current = (direction, amount) => {
+    if (!can_resize || !focused || !session || busy_ref.current && !resize_worker.current) return;
+    const running = resize_worker.current;
+    const worker = running ?? { generation: generation.current, pending: [] };
+    const last = worker.pending[worker.pending.length - 1];
+    if (last?.terminal_id === focused && last.direction === direction) last.amount = Math.min(65535, last.amount + amount);
+    else if (worker.pending.length < 128) worker.pending.push({ terminal_id: focused, direction, amount });
+    if (running) return;
+    resize_worker.current = worker;
+    busy_ref.current = true;
+    ++sequence.current;
+    setBusy(true);
+    setActionError(null);
+    void (async () => {
+      const is_current = () => resize_worker.current === worker && worker.generation === generation.current;
+      try {
+        while (is_current() && worker.pending.length) {
+          const action = worker.pending.shift()!;
+          const next = await resizeSessionPane(session, action.terminal_id, action.direction, action.amount);
+          if (!is_current()) return;
+          ++sequence.current;
+          storeView(next);
+        }
+      } catch (failure) {
+        if (is_current()) {
+          worker.pending = [];
+          setActionError(errorMessage(failure));
+        }
+      } finally {
+        if (resize_worker.current === worker) {
+          resize_worker.current = null;
+          busy_ref.current = false;
+          setBusy(false);
+        }
+      }
+    })();
+  };
   const split_focused = useRef<(axis: "horizontal" | "vertical") => Promise<void>>(async () => {});
   split_focused.current = async (axis) => {
     if (!can_split || !focused || !session) return;
@@ -279,15 +330,21 @@ export function SessionViewSurface({ session, open_session_keys, shell_state, re
   useEffect(() => {
     on_pane_commands?.([
       { id: "terminal.toggle_input", category: "Pane", title: "Toggle pane input", enabled: can_split, focusTerminalAfterRun: false, run: () => toggle_focused.current() },
+      ...(["left", "right", "up", "down"] as const).map((direction) => ({
+        id: `pane.resize_${direction}`, category: "Pane", title: `Resize pane ${direction}`,
+        keywords: ["resize", "divider"], enabled: can_resize, focusTerminalAfterRun: false,
+        run: () => resize_focused.current(direction, 1),
+      })),
       { id: "pane.split_right", category: "Pane", title: "Split pane right", keywords: ["split right", "horizontal"], enabled: can_split, focusTerminalAfterRun: false, run: () => split_focused.current("horizontal") },
       { id: "pane.split_below", category: "Pane", title: "Split pane below", keywords: ["split below", "vertical"], enabled: can_split, focusTerminalAfterRun: false, run: () => split_focused.current("vertical") },
     ]);
-  }, [on_pane_commands, can_split]);
+  }, [on_pane_commands, can_split, can_resize]);
   useEffect(() => () => on_pane_commands?.([]), [on_pane_commands]);
   const prefix_map = resolvePrefix(prefix_settings?.document ?? { schema_version: 1, overrides: [], prefix: { key: null, bindings: [] } }, prefix_settings?.bindings ?? new Map(), prefix_settings?.platform ?? "other");
   const prefix = useTerminalPrefix({
     enabled: input_enabled && shortcuts_enabled && connected && Boolean(current_view) && !focused_ended,
     context: `${key}:${focused ?? ""}`,
+    repeat_context: key,
     keymap: prefix_map,
     on_input: (data) => {
       if (focused === primary_id) handlePrimaryInput(data);
@@ -295,7 +352,10 @@ export function SessionViewSurface({ session, open_session_keys, shell_state, re
     },
     on_action: (action) => {
       if (!focused || !current_view) return;
-      if (action.startsWith("pane.focus_") || action.startsWith("pane.move_")) {
+      if (action.startsWith("pane.resize_")) {
+        const direction = action.slice("pane.resize_".length).replace(/_large$/, "") as ResizeDirection;
+        resize_focused.current(direction, action.endsWith("_large") ? 5 : 1);
+      } else if (action.startsWith("pane.focus_") || action.startsWith("pane.move_")) {
         const neighbor = adjacentPane(panes, focused, action.slice(action.lastIndexOf("_") + 1));
         if (!neighbor) return;
         void (async () => {
@@ -368,10 +428,12 @@ export function SessionViewSurface({ session, open_session_keys, shell_state, re
     </div>
     <div className="view-viewport" ref={setViewport}>
     <div className="view-panes" style={current_view ? { width: current_view.canvas_size.columns * cell.width, height: current_view.canvas_size.rows * cell.height } : session ? { width: session.terminal_size.columns * cell.width, height: session.terminal_size.rows * cell.height } : { width: "100%", height: "100%" }}>
-      {current_view && !active_zoom && viewDividers(current_view.layout, panes).map((divider) => <div
-        key={divider.path} className="view-divider" aria-hidden="true"
-        style={{ left: Math.round(divider.left * cell.width), top: Math.round(divider.top * cell.height), width: divider.vertical ? 1 : divider.length * cell.width, height: divider.vertical ? divider.length * cell.height : 1 }}
-      />)}
+      <ViewDividers session={session} view={current_view} cell={cell}
+        enabled={connected && !active_zoom && !primary_ended.current && !ended_ids.size && input_enabled}
+        current_view={() => view_ref.current}
+        can_begin={() => !busy_ref.current}
+        on_busy={(next) => { busy_ref.current = next; setBusy(next); if (next) { ++sequence.current; prefix.cancel(); } }}
+        on_error={setActionError} on_confirm={(next) => { ++sequence.current; storeView(next); }} />
       <div className="view-pane" data-active={focused === primary_id} ref={paneRef(primary_id)} onFocusCapture={() => setFocusedId(primary_id ?? null)} style={{ ...paneStyle(primary_rect), ...(takeover_id ? { visibility: "hidden" } : {}) }}>
         <TerminalSurface {...surface} onInput={handlePrimaryInput} ended_message={surface.ended_message ?? (surface.phase === "ended" ? "Terminal exited" : surface.phase !== "attached" && ended_ids.has(primary_id ?? "") ? "Terminal no longer exists" : null)} on_dismiss={() => void dismissPane(primary_id)} />
       </div>

@@ -5,6 +5,7 @@ export class ResizeCoordinator {
   private authoritative: TerminalSize | null = null;
   private desired: TerminalSize | null = null;
   private enabled = false;
+  private suspensions = 0;
 
   constructor(
     private readonly schedule: (terminalSize: TerminalSize) => void,
@@ -39,9 +40,23 @@ export class ResizeCoordinator {
     this.reconcile();
   }
 
+  /** Hold automatic canvas resizing while a pane gesture owns its geometry. */
+  suspend(): () => void {
+    this.suspensions++;
+    this.reconcile();
+    let active = true;
+    return () => {
+      if (!active) return;
+      active = false;
+      this.suspensions--;
+      this.reconcile();
+    };
+  }
+
   private reconcile(): void {
     if (
       !this.enabled ||
+      this.suspensions > 0 ||
       !this.desired ||
       sameGrid(this.authoritative, this.desired)
     ) {

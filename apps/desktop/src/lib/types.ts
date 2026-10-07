@@ -841,6 +841,27 @@ export interface AttachmentResizeRequest extends AttachmentIdRequest {
   terminal_size: TerminalSize;
 }
 
+export type ResizeDirection = "left" | "right" | "up" | "down";
+
+export interface DividerResize {
+  view_id: string;
+  expected_revision: string;
+  split_path: number[];
+  boundary: number;
+  position: number;
+}
+
+export interface AttachmentDividerResizeRequest extends AttachmentIdRequest, DividerResize {
+  request_id: string;
+}
+
+export interface AttachmentPaneResizeRequest extends AttachmentIdRequest {
+  request_id: string;
+  terminal_id: string;
+  direction: ResizeDirection;
+  amount: number;
+}
+
 export interface AttachmentViewZoomRequest extends AttachmentIdRequest {
   terminal_id: string | null;
 }
@@ -935,7 +956,14 @@ export interface LeaseStatusEvent extends AttachmentEventBase {
   event_type: "lease_status";
   lease: LeaseKind;
   status: LeaseStatus;
+  /** An unsolicited observation, not a reply to a local lease request. */
+  notification?: boolean;
 }
+
+export type PaneResizeResultEvent = AttachmentEventBase & {
+  event_type: "pane_resize_result";
+  request_id: string;
+} & ({ view: SessionView; error: null } | { view: null; error: { code: string; message: string } });
 
 export interface ViewChangedEvent extends AttachmentEventBase {
   event_type: "view_changed";
@@ -990,6 +1018,7 @@ export type AttachmentEvent =
   | PtyGeometryChangedEvent
   | LeaseStatusEvent
   | ViewChangedEvent
+  | PaneResizeResultEvent
   | ShellStateChangedEvent
   | SessionObservedEvent
   | ServerErrorEvent
@@ -1022,6 +1051,8 @@ export interface AttachmentViewState {
   history_gap: boolean;
   terminal_size_mismatch: boolean;
   resize_with_window: boolean;
+  /** Manual layout-control preference, independent of automatic canvas sizing. */
+  resize_control_desired: boolean;
   message: string | null;
 }
 
@@ -1099,7 +1130,7 @@ export type TaskLogEvent =
 
 export type ViewLayout =
   | { kind: "terminal"; terminal_id: string }
-  | { kind: "split"; axis: "horizontal" | "vertical"; children: ViewLayout[] };
+  | { kind: "split"; axis: "horizontal" | "vertical"; children: ViewLayout[]; weights?: number[] };
 
 export interface SessionView {
   session_name: string;

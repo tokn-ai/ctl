@@ -36,6 +36,7 @@ function state(overrides: Partial<AttachmentViewState> = {}): AttachmentViewStat
     history_gap: false,
     terminal_size_mismatch: false,
     resize_with_window: false,
+    resize_control_desired: false,
     message: null,
     ...overrides,
   };
@@ -49,6 +50,12 @@ function labels(items: ReturnType<typeof createStatusGroups>) {
 }
 
 describe("createStatusGroups", () => {
+  it("describes a manually owned fixed canvas without implying ownership is missing", () => {
+    const groups = createStatusGroups(state({ layout_lease: { held: true, owned_by_client: true } }));
+    const fixed = groups.indicators.find((entry) => entry.label === "FIXED");
+    expect(fixed?.title).toContain("owns resize control");
+    expect(fixed?.title).toContain("stays fixed");
+  });
   it("shows control and geometry state without raw sequence numbers", () => {
     expect(labels(createStatusGroups(state()))).toEqual({
       context: [],

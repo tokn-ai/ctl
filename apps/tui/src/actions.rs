@@ -1,5 +1,5 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use ctmux_proto::{LeaseKind, SplitAxis};
+use ctmux_proto::{LeaseKind, ResizeDirection, SplitAxis};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
@@ -13,6 +13,10 @@ pub enum Direction {
 pub enum Action {
   Split(SplitAxis),
   Focus(Direction),
+  ResizePane {
+    direction: ResizeDirection,
+    amount: u16,
+  },
   NextPane,
   ToggleZoom,
   CreateSession,
@@ -21,7 +25,9 @@ pub enum Action {
   Sessions,
   Refresh,
   Archives,
-  History { page_back: bool },
+  History {
+    page_back: bool,
+  },
   Paste,
   ToggleLease(LeaseKind),
   KillPane,
@@ -44,6 +50,25 @@ pub struct Binding {
 pub fn resolve(key: KeyEvent) -> Option<Binding> {
   if key.kind == KeyEventKind::Release {
     return None;
+  }
+  if let Some(direction) = match key.code {
+    KeyCode::Up => Some(ResizeDirection::Up),
+    KeyCode::Down => Some(ResizeDirection::Down),
+    KeyCode::Left => Some(ResizeDirection::Left),
+    KeyCode::Right => Some(ResizeDirection::Right),
+    _ => None,
+  } {
+    let amount = match key.modifiers {
+      KeyModifiers::CONTROL => Some(1),
+      KeyModifiers::ALT => Some(5),
+      _ => None,
+    };
+    if let Some(amount) = amount {
+      return Some(Binding {
+        action: Action::ResizePane { direction, amount },
+        repeatable: true,
+      });
+    }
   }
   let code = if key.modifiers.is_empty() {
     key.code
@@ -83,8 +108,8 @@ pub fn resolve(key: KeyEvent) -> Option<Binding> {
   };
   Some(Binding {
     action,
-    // Match tmux's repeatable pane-focus arrows; session changes and mutations
-    // still require their own prefix so an ordinary subsequent key stays input.
+    // Pane focus and resizing share tmux's repeat table. Other commands still
+    // require their own prefix so an ordinary subsequent key stays input.
     repeatable: matches!(action, Action::Focus(_)),
   })
 }
@@ -151,14 +176,32 @@ mod tests {
       );
       for modifiers in [
         KeyModifiers::SHIFT,
-        KeyModifiers::ALT,
-        KeyModifiers::CONTROL,
         KeyModifiers::ALT | KeyModifiers::CONTROL,
       ] {
         assert_eq!(
           resolve(key(code, modifiers)),
           None,
           "{code:?} {modifiers:?}"
+        );
+      }
+    }
+  }
+
+  #[test]
+  fn control_and_alt_arrows_resize_with_repeatable_cell_steps() {
+    for (code, direction) in [
+      (KeyCode::Up, ResizeDirection::Up),
+      (KeyCode::Down, ResizeDirection::Down),
+      (KeyCode::Left, ResizeDirection::Left),
+      (KeyCode::Right, ResizeDirection::Right),
+    ] {
+      for (modifiers, amount) in [(KeyModifiers::CONTROL, 1), (KeyModifiers::ALT, 5)] {
+        assert_eq!(
+          resolve(key(code, modifiers)),
+          Some(Binding {
+            action: Action::ResizePane { direction, amount },
+            repeatable: true,
+          })
         );
       }
     }

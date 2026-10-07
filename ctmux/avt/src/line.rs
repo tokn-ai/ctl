@@ -1,3 +1,4 @@
+// Modified for ctmux: safely clip physical rows without leaving half-wide cells.
 use unicode_width::UnicodeWidthChar;
 
 use crate::cell::{Cell, Occupancy};
@@ -239,6 +240,16 @@ impl Line {
         } else {
             (false, None)
         }
+    }
+
+    pub(crate) fn resize_preserving_wrap(&mut self, cols: usize) {
+        self.cells.truncate(cols);
+        if let Some(cell) = self.cells.last_mut() {
+            if cell.occupancy() == Occupancy::WideHead {
+                *cell = Cell::blank(*cell.pen());
+            }
+        }
+        self.expand(cols, &Pen::default());
     }
 
     pub(crate) fn expand(&mut self, len: usize, pen: &Pen) {

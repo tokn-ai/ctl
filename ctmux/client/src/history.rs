@@ -64,6 +64,7 @@ pub fn restore_projection(
     })
     .collect();
   let mut vt = avt::Vt::builder()
+    .reflow_cursor_line(false)
     .size(dimensions.0, dimensions.1)
     .scrollback_limit(usize::try_from(scrollback_limit).map_err(io::Error::other)?)
     .build();

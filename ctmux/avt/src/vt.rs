@@ -1,3 +1,4 @@
+// Modified for ctmux: expose the primary cursor-line resize policy on Builder.
 use crate::line::Line;
 use crate::parser::{self, Parser};
 use crate::terminal::{Cursor, Terminal};
@@ -84,6 +85,7 @@ impl Vt {
 pub struct Builder {
     size: (usize, usize),
     scrollback_limit: Option<usize>,
+    reflow_cursor_line: bool,
 }
 
 impl Builder {
@@ -99,10 +101,25 @@ impl Builder {
         self
     }
 
+    /// Whether width changes reflow the primary logical line containing the cursor.
+    ///
+    /// Defaults to `true`, retaining upstream resize behavior. Disable this for
+    /// interactive shells that redraw their editable line after a size change.
+    /// The retained physical rows are clipped or padded, and unused rows below
+    /// the cursor absorb newly wrapped output before it enters scrollback.
+    /// Alternate-buffer resizing is unchanged. Same-width resizes preserve a
+    /// pending wrap at the right edge.
+    pub fn reflow_cursor_line(&mut self, enabled: bool) -> &mut Self {
+        self.reflow_cursor_line = enabled;
+        self
+    }
+
     pub fn build(&self) -> Vt {
+        let mut terminal = Terminal::new(self.size, self.scrollback_limit);
+        terminal.set_reflow_cursor_line(self.reflow_cursor_line);
         Vt {
             parser: Parser::new(),
-            terminal: Terminal::new(self.size, self.scrollback_limit),
+            terminal,
         }
     }
 }
@@ -112,6 +129,7 @@ impl Default for Builder {
         Builder {
             size: (80, 24),
             scrollback_limit: None,
+            reflow_cursor_line: true,
         }
     }
 }

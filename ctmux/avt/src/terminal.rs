@@ -1,3 +1,4 @@
+// Modified for ctmux: support an opt-in primary cursor-line resize policy.
 mod cursor;
 mod dirty_lines;
 
@@ -40,6 +41,7 @@ pub struct Terminal {
     alternate_saved_ctx: SavedCtx,
     dirty_lines: DirtyLines,
     xtwinops: bool,
+    reflow_cursor_line: bool,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq)]
@@ -119,7 +121,12 @@ impl Terminal {
             alternate_saved_ctx: SavedCtx::default(),
             dirty_lines,
             xtwinops: false,
+            reflow_cursor_line: true,
         }
+    }
+
+    pub(crate) fn set_reflow_cursor_line(&mut self, enabled: bool) {
+        self.reflow_cursor_line = enabled;
     }
 
     pub fn size(&self) -> (usize, usize) {
@@ -563,9 +570,14 @@ impl Terminal {
     }
 
     fn reflow(&mut self) {
+        let cursor = (self.cursor.col, self.cursor.row);
         (self.cursor.col, self.cursor.row) =
-            self.buffer
-                .resize(self.cols, self.rows, (self.cursor.col, self.cursor.row));
+            if !self.reflow_cursor_line && self.active_buffer_type == BufferType::Primary {
+                self.buffer
+                    .resize_preserving_cursor(self.cols, self.rows, cursor)
+            } else {
+                self.buffer.resize(self.cols, self.rows, cursor)
+            };
 
         self.dirty_lines.resize(self.rows);
         self.dirty_lines.extend(0..self.rows);
@@ -2476,7 +2488,8 @@ mod tests {
         term.execute(El(ElScope::ToRight));
 
         assert_eq!(text(&term), "abcd\nef|\nij");
-        assert_eq!(wrapped(&term), vec![true, false, false]);
+        // Partial line erase preserves both neighboring wrap links.
+        assert_eq!(wrapped(&term), vec![true, true, false]);
 
         let mut term = Terminal::new((4, 3), None);
 
@@ -2494,7 +2507,8 @@ mod tests {
         term.execute(El(ElScope::All));
 
         assert_eq!(text(&term), "abcd\n  |\nij");
-        assert_eq!(wrapped(&term), vec![true, false, false]);
+        // Whole line erase detaches this row from its preceding row only.
+        assert_eq!(wrapped(&term), vec![false, true, false]);
     }
 
     #[test]
@@ -2585,7 +2599,8 @@ mod tests {
         term.execute(Ech(10));
 
         assert_eq!(text(&term), "abc|\nijkl");
-        assert_eq!(wrapped(&term), vec![false, false]);
+        // Character erase leaves wrapping unchanged, including at the edge.
+        assert_eq!(wrapped(&term), vec![true, false]);
 
         term.execute(Cuf(3));
         term.execute(Ech(0));

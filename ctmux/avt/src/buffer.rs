@@ -1,3 +1,4 @@
+// Modified for ctmux: preserve interactive cursor lines and erase wrap links correctly.
 use std::cmp::Ordering;
 use std::collections::VecDeque;
 use std::ops::{Index, IndexMut, Range};
@@ -108,16 +109,13 @@ impl Buffer {
             NextChars(mut n) => {
                 n = n.min(self.cols - col);
                 let end = col + n;
-                let clear_wrap = end == self.cols;
-                let line = &mut self[row];
-                line.clear(col..end, pen);
-
-                if clear_wrap {
-                    line.wrapped = false;
-                }
+                self[row].clear(col..end, pen);
             }
 
             FromCursorToEndOfView => {
+                if col == 0 {
+                    self.clear_incoming_wrap(row);
+                }
                 let range = col..self.cols;
                 let line = &mut self[row];
                 line.wrapped = false;
@@ -126,20 +124,26 @@ impl Buffer {
             }
 
             FromStartOfViewToCursor => {
+                self.clear_incoming_wrap(row);
                 let range = 0..(col + 1).min(self.cols);
                 self[row].clear(range, pen);
+                if col + 1 >= self.cols {
+                    self[row].wrapped = false;
+                }
                 self.clear(0..row, pen);
             }
 
             WholeView => {
+                self.clear_incoming_wrap(0);
                 self.clear(0..self.rows, pen);
             }
 
             FromCursorToEndOfLine => {
+                if col == 0 {
+                    self.clear_incoming_wrap(row);
+                }
                 let range = col..self.cols;
-                let line = &mut self[row];
-                line.clear(range, pen);
-                line.wrapped = false;
+                self[row].clear(range, pen);
             }
 
             FromStartOfLineToCursor => {
@@ -148,11 +152,18 @@ impl Buffer {
             }
 
             WholeLine => {
+                self.clear_incoming_wrap(row);
                 let range = 0..self.cols;
-                let line = &mut self[row];
-                line.clear(range, pen);
-                line.wrapped = false;
+                self[row].clear(range, pen);
             }
+        }
+    }
+
+    // A line's wrapped flag links it to the following physical row. Erasing
+    // an entire row removes its incoming link without changing the next row.
+    fn clear_incoming_wrap(&mut self, row: usize) {
+        if let Some(previous) = (self.view_offset() + row).checked_sub(1) {
+            self.lines[previous].wrapped = false;
         }
     }
 
@@ -226,6 +237,76 @@ impl Buffer {
             }
         }
 
+        self.resize_rows(new_cols, new_rows, old_rows, cursor)
+    }
+
+    // Keep the cursor's whole logical line in physical rows. The application
+    // owns its redraw after SIGWINCH, so changing that row count would make its
+    // relative cursor movements overwrite completed output.
+    pub fn resize_preserving_cursor(
+        &mut self,
+        new_cols: usize,
+        new_rows: usize,
+        mut cursor: VisualPosition,
+    ) -> VisualPosition {
+        let mut old_rows = self.rows;
+        let old_count = self.lines.len();
+        let old_cursor_absolute = old_count - old_rows + cursor.1;
+        if new_cols != self.cols {
+            let mut start = old_cursor_absolute;
+            while start > 0 && self.lines[start - 1].wrapped {
+                start -= 1;
+            }
+            let mut end = old_cursor_absolute + 1;
+            while end < old_count && self.lines[end - 1].wrapped {
+                end += 1;
+            }
+            // Consume only unused default cells after the protected logical line.
+            // Blank continuation rows still belong to the application-owned redraw.
+            // Colored or populated rows remain part of the screen.
+            let bottom_padding = self
+                .lines
+                .iter()
+                .rev()
+                .take(old_count - end)
+                .take_while(|line| line.is_blank() && !line.wrapped)
+                .count();
+            let after = self.lines.split_off(end);
+            let mut active_line = self.lines.split_off(start);
+            let mut result = reflow(self.lines.drain(..), new_cols);
+            let new_cursor_absolute = result.len() + old_cursor_absolute - start;
+            for line in active_line.iter_mut() {
+                line.resize_preserving_wrap(new_cols);
+            }
+            result.append(&mut active_line);
+            result.extend(reflow(after.into_iter(), new_cols));
+            let padding_to_consume = result.len().saturating_sub(old_count).min(bottom_padding);
+            result.truncate(result.len() - padding_to_consume);
+            self.lines = result;
+            if self.lines.len() < old_rows {
+                self.extend(old_rows - self.lines.len(), new_cols, &Pen::default());
+            }
+            cursor.0 = cursor.0.min(new_cols - 1);
+            let view_offset = self.lines.len() - old_rows;
+            if new_cursor_absolute >= view_offset {
+                cursor.1 = new_cursor_absolute - view_offset;
+            } else {
+                // Populated rows below the cursor can expand beyond the new view.
+                // Keep its physical row visible through the shared height adjustment.
+                cursor.1 = 0;
+                old_rows += view_offset - new_cursor_absolute;
+            }
+        }
+        self.resize_rows(new_cols, new_rows, old_rows, cursor)
+    }
+
+    fn resize_rows(
+        &mut self,
+        new_cols: usize,
+        new_rows: usize,
+        old_rows: usize,
+        mut cursor: VisualPosition,
+    ) -> VisualPosition {
         let line_count = self.lines.len();
 
         match new_rows.cmp(&old_rows) {

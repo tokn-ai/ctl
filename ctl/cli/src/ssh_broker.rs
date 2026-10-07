@@ -46,7 +46,16 @@ where
 {
   let protocol = handshake(stream).await?;
   validate_route(&target, protocol)?;
-  ctl_ipc::write_frame(stream, &ClientMessage::EnsureMaster { target }).await?;
+  let request = if interactive {
+    ClientMessage::EnsureMaster { target }
+  } else if ctl_ipc::quiet_master_supported(protocol) {
+    ClientMessage::EnsureMasterQuiet { target }
+  } else {
+    // Earlier brokers cannot suppress their native Keychain UI. Passive reuse
+    // is safe; starting a fresh connection must wait for an interactive action.
+    ClientMessage::MasterStatus { target }
+  };
+  ctl_ipc::write_frame(stream, &request).await?;
   loop {
     match ctl_ipc::read_frame::<_, ServerMessage>(stream).await? {
       Some(ServerMessage::Prompt {
@@ -143,6 +152,12 @@ fn validate_request_contract(
   protocol: ProtocolVersion,
 ) -> Result<(), Error> {
   match message {
+    ClientMessage::EnsureMasterQuiet { target } => {
+      if !ctl_ipc::quiet_master_supported(protocol) {
+        return Err(Error::UnsupportedQuietMaster(protocol));
+      }
+      validate_route(target, protocol)
+    }
     ClientMessage::EnsureMaster { target }
     | ClientMessage::MasterStatus { target }
     | ClientMessage::ConnectionStatus { target }
@@ -241,6 +256,10 @@ pub enum Error {
   )]
   UnsupportedGatewayRoute(ProtocolVersion),
   #[error(
+    "Quiet SSH connection requires local protocol 1.1.14, but ctld selected {0}. Rebuild or update ctld, then restart ctld."
+  )]
+  UnsupportedQuietMaster(ProtocolVersion),
+  #[error(
     "SSH authentication is required. Detach and reconnect to answer the authentication prompt."
   )]
   AuthenticationRequired,
@@ -262,7 +281,7 @@ mod tests {
       .unwrap()
   }
 
-  async fn accept_master_request(server: &mut tokio::io::DuplexStream) {
+  async fn accept_master_request(server: &mut tokio::io::DuplexStream, interactive: bool) {
     let Some(ClientMessage::Handshake { protocol }) =
       ctl_ipc::read_frame::<_, ClientMessage>(server)
         .await
@@ -279,10 +298,18 @@ mod tests {
     )
     .await
     .unwrap();
-    assert!(matches!(
-      ctl_ipc::read_frame::<_, ClientMessage>(server).await.unwrap(),
-      Some(ClientMessage::EnsureMaster { target }) if target == fixture_target()
-    ));
+    match ctl_ipc::read_frame::<_, ClientMessage>(server)
+      .await
+      .unwrap()
+    {
+      Some(ClientMessage::EnsureMaster { target }) if interactive => {
+        assert_eq!(target, fixture_target());
+      }
+      Some(ClientMessage::EnsureMasterQuiet { target }) if !interactive => {
+        assert_eq!(target, fixture_target());
+      }
+      _ => panic!("expected master request matching interaction policy"),
+    }
   }
 
   async fn send_prompt(
@@ -319,7 +346,7 @@ mod tests {
       for kind in [PromptKind::Secret, PromptKind::Confirm] {
         let (mut client, mut server) = tokio::io::duplex(4096);
         let daemon = tokio::spawn(async move {
-          accept_master_request(&mut server).await;
+          accept_master_request(&mut server, false).await;
           assert!(send_prompt(&mut server, kind).await.is_none());
         });
         let result = tokio::time::timeout(
@@ -345,7 +372,7 @@ mod tests {
   async fn headless_credential_notifications_preserve_a_successful_master() {
     let (mut client, mut server) = tokio::io::duplex(4096);
     let daemon = tokio::spawn(async move {
-      accept_master_request(&mut server).await;
+      accept_master_request(&mut server, false).await;
       assert_eq!(
         send_prompt(&mut server, PromptKind::CredentialSave)
           .await
@@ -382,7 +409,7 @@ mod tests {
   async fn interactive_master_requests_still_forward_the_prompt_and_warning() {
     let (mut client, mut server) = tokio::io::duplex(4096);
     let daemon = tokio::spawn(async move {
-      accept_master_request(&mut server).await;
+      accept_master_request(&mut server, true).await;
       assert_eq!(
         send_prompt(&mut server, PromptKind::Confirm)
           .await
@@ -414,6 +441,82 @@ mod tests {
     .unwrap();
     assert_eq!(result, PathBuf::from("/tmp/fixture-control"));
     daemon.await.unwrap();
+  }
+
+  #[tokio::test]
+  async fn older_brokers_only_receive_passive_status_during_background_reconnect() {
+    for selected in [ctl_ipc::CONTRACT_V1_0_12, ctl_ipc::CONTRACT_V1_1_13] {
+      for ready in [false, true] {
+        let (mut client, mut server) = tokio::io::duplex(4096);
+        let daemon = tokio::spawn(async move {
+          assert!(matches!(
+            ctl_ipc::read_frame::<_, ClientMessage>(&mut server).await.unwrap(),
+            Some(ClientMessage::Handshake { protocol }) if protocol.accepts(selected)
+          ));
+          ctl_ipc::write_frame(
+            &mut server,
+            &ServerMessage::HandshakeAccepted {
+              protocol_version: selected,
+            },
+          )
+          .await
+          .unwrap();
+          assert!(matches!(
+            ctl_ipc::read_frame::<_, ClientMessage>(&mut server).await.unwrap(),
+            Some(ClientMessage::MasterStatus { target }) if target == fixture_target()
+          ));
+          let response = if ready {
+            ServerMessage::MasterReady {
+              control_path: PathBuf::from("/tmp/fixture-control"),
+            }
+          } else {
+            ServerMessage::AuthenticationRequired
+          };
+          ctl_ipc::write_frame(&mut server, &response).await.unwrap();
+        });
+        let result = ensure_master_on(&mut client, fixture_target(), false, |_, _, _| {
+          std::future::ready(Err(Error::PromptWorkerStopped))
+        })
+        .await;
+        if ready {
+          assert_eq!(result.unwrap(), PathBuf::from("/tmp/fixture-control"));
+        } else {
+          assert!(matches!(result, Err(Error::AuthenticationRequired)));
+        }
+        daemon.await.unwrap();
+      }
+    }
+  }
+
+  #[tokio::test]
+  async fn quiet_broker_can_require_approval_without_sending_a_prompt() {
+    let (mut client, mut server) = tokio::io::duplex(4096);
+    let daemon = tokio::spawn(async move {
+      accept_master_request(&mut server, false).await;
+      ctl_ipc::write_frame(&mut server, &ServerMessage::AuthenticationRequired)
+        .await
+        .unwrap();
+    });
+    let result = ensure_master_on(&mut client, fixture_target(), false, |_, _, _| {
+      std::future::ready(Err(Error::PromptWorkerStopped))
+    })
+    .await;
+    assert!(matches!(result, Err(Error::AuthenticationRequired)));
+    daemon.await.unwrap();
+  }
+
+  #[test]
+  fn explicit_quiet_requests_require_the_selected_contract() {
+    let request = ClientMessage::EnsureMasterQuiet {
+      target: fixture_target(),
+    };
+    for selected in [ctl_ipc::CONTRACT_V1_0_12, ctl_ipc::CONTRACT_V1_1_13] {
+      assert!(matches!(
+        validate_request_contract(&request, selected),
+        Err(Error::UnsupportedQuietMaster(actual)) if actual == selected
+      ));
+    }
+    validate_request_contract(&request, ctl_ipc::CONTRACT_V1_1_14).unwrap();
   }
 
   #[tokio::test]
@@ -460,7 +563,7 @@ mod tests {
     .unwrap();
     let ssh = serde_json::json!({"destination":"bastion", "hostname":null, "user":null, "port":null, "identity_file":null, "mode":"automatic"});
     let vpn = serde_json::json!({"kind":"vpn", "destination":"work", "hostname":null, "user":null, "port":null, "identity_file":null, "mode":"automatic", "vpn":{"connection_id":"work", "socket_path":"/tmp/test-vpn.sock"}});
-    for selected in [ctl_ipc::CONTRACT_V1_0_12, ctl_ipc::CONTRACT_V1_1_13] {
+    for selected in ctl_ipc::SUPPORTED_PROTOCOL_VERSIONS.iter().copied() {
       let (mut client, mut server) = tokio::io::duplex(4096);
       let daemon = tokio::spawn(async move {
         assert!(

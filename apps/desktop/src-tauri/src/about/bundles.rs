@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use tauri::ipc::Channel;
 
 use crate::error::{CommandErrorDto, CommandResult};
+#[cfg(unix)]
+use ctl_client::components::inventory::load_selection;
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -163,134 +165,47 @@ fn selection_error(error: impl std::fmt::Display) -> CommandErrorDto {
 
 #[cfg(unix)]
 fn snapshot(home: &std::path::Path, directories: &[std::path::PathBuf]) -> BundleSnapshot {
-  snapshot_with(home, |target| {
-    included_bundle(directories, target).map(|bundle| bundle.map(|bundle| bundle.manifest))
-  })
+  from_inventory(ctl_client::components::inventory::snapshot(
+    home,
+    None,
+    directories,
+  ))
 }
 
-#[cfg(unix)]
-struct IncludedBundle {
-  archive: ctl_client::remote_bundle::VerifiedBundle,
-  manifest: ctl_core::bundles::Manifest,
-}
-
-#[cfg(unix)]
-fn included_bundle(
-  directories: &[std::path::PathBuf],
-  target: &str,
-) -> Result<Option<IncludedBundle>, ctl_client::remote_bundle::Error> {
-  use ctl_core::bundles::Source;
-  if !ctl_client::components::upload_target(target) {
-    return Ok(None);
-  }
-  let Some(bundle) = ctl_client::remote_bundle::read_compatible_bundle(directories, target)? else {
-    return Ok(None);
-  };
-  let source = if bundle.bundle_id == bundle.app_version {
-    Source::Release
-  } else {
-    Source::Ci
-  };
-  let manifest = ctl_client::components::inspect_remote(&bundle, target, source)?;
-  Ok(Some(IncludedBundle {
-    archive: bundle,
-    manifest,
-  }))
-}
-
-#[cfg(unix)]
-fn load_selection(
-  home: &std::path::Path,
-  directories: &[std::path::PathBuf],
-  target: &str,
-  id: &str,
-) -> std::io::Result<ctl_core::bundles::Bundle> {
-  use ctl_core::bundles::Store;
-  match Store::new(home).get(target, id) {
-    Ok(bundle) => return Ok(bundle),
-    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-    Err(error) => return Err(error),
-  }
-  let included = included_bundle(directories, target)
-    .map_err(std::io::Error::other)?
-    .filter(|bundle| bundle.manifest.bundle_id == id)
-    .ok_or_else(|| {
-      std::io::Error::other(
-        "This included build changed or is unavailable. Refresh bundles and choose again.",
-      )
-    })?;
-  ctl_client::components::import_remote(home, &included.archive, target, included.manifest.source)
-    .map_err(std::io::Error::other)
-}
-
-#[cfg(unix)]
+#[cfg(all(test, unix))]
 fn snapshot_with(
   home: &std::path::Path,
-  mut included: impl FnMut(
+  included: impl FnMut(
     &str,
-  ) -> Result<
-    Option<ctl_core::bundles::Manifest>,
-    ctl_client::remote_bundle::Error,
-  >,
+  )
+    -> Result<Option<ctl_core::bundles::Manifest>, ctl_client::remote_bundle::Error>,
 ) -> BundleSnapshot {
-  use ctl_core::bundles::{Purpose, Store};
-  let targets: std::collections::BTreeSet<_> = [
-    ctl_core::paths::native_target(),
-    "x86_64-unknown-linux-musl",
-    "aarch64-unknown-linux-musl",
-    "x86_64-unknown-linux-gnu",
-    "aarch64-unknown-linux-gnu",
-    "x86_64-apple-darwin",
-    "aarch64-apple-darwin",
-  ]
-  .into_iter()
-  .collect();
-  let store = Store::new(home);
-  let mut snapshot = BundleSnapshot::default();
-  for target in targets {
-    let mut selected = |purpose| match store.selected(purpose, target) {
-      Ok(bundle) => bundle.map(|bundle| bundle.manifest.bundle_id),
-      Err(error) => {
-        snapshot
-          .errors
-          .push(format!("{target} {purpose:?} selection: {error}"));
-        None
-      }
-    };
-    let local = selected(Purpose::Local);
-    let upload = selected(Purpose::Upload);
-    match store.list(target) {
-      Ok(bundles) => snapshot.bundles.extend(
-        bundles
-          .iter()
-          .map(|bundle| summary(&bundle.manifest, local.as_deref(), upload.as_deref(), false)),
-      ),
-      Err(error) => snapshot.errors.push(format!("{target}: {error}")),
-    }
-    match included(target) {
-      Ok(Some(manifest)) => {
-        if let Some(stored) = snapshot
-          .bundles
-          .iter_mut()
-          .find(|bundle| bundle.target_triple == target && bundle.bundle_id == manifest.bundle_id)
-        {
-          stored.included = true;
-        } else {
-          snapshot.bundles.push(summary(
-            &manifest,
-            local.as_deref(),
-            upload.as_deref(),
-            true,
-          ));
-        }
-      }
-      Ok(None) => {}
-      Err(error) => snapshot
-        .errors
-        .push(format!("Included {target} bundle: {error}")),
-    }
+  from_inventory(ctl_client::components::inventory::scan(
+    home, None, included,
+  ))
+}
+
+#[cfg(unix)]
+fn from_inventory(inventory: ctl_client::components::inventory::Snapshot) -> BundleSnapshot {
+  BundleSnapshot {
+    bundles: inventory
+      .bundles
+      .iter()
+      .map(|bundle| {
+        summary(
+          &bundle.manifest,
+          bundle
+            .selected_local
+            .then_some(bundle.manifest.bundle_id.as_str()),
+          bundle
+            .selected_upload
+            .then_some(bundle.manifest.bundle_id.as_str()),
+          bundle.availability.included(),
+        )
+      })
+      .collect(),
+    errors: inventory.errors,
   }
-  snapshot
 }
 
 #[cfg(unix)]

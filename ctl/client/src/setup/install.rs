@@ -206,27 +206,11 @@ impl Session {
 
   // Called only after platform signature checks and the bounded metadata query.
   pub fn activate(self) -> Result<SetupOutcome, Error> {
-    if self.verification_app.is_some() {
-      return Err(Error::Verification(
-        "a passive package verification cannot activate a helper".into(),
-      ));
-    }
     if self.manifest.development.is_none() {
       ctl_ipc::managed::validate_current_selection(&self.home)?;
     }
     ctl_ipc::managed::validate_compatible_selection(&self.home, &self.manifest.target)?;
-    self.executable()?;
-    if !self.reused {
-      let marker = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(self.payload().join("installation.json"))?;
-      serde_json::to_writer(&marker, &self.manifest).map_err(std::io::Error::other)?;
-      marker.sync_all()?;
-      fs::rename(self.payload(), &self.destination)?;
-    }
-    let executable = self.executable_after_activation()?;
+    let executable = self.publish()?;
     if self.manifest.development.is_some() {
       self.select_compatible()?;
       return Ok(self.outcome(executable));
@@ -242,6 +226,38 @@ impl Session {
     }
     self.select_compatible()?;
     Ok(self.outcome(executable))
+  }
+
+  // Automatic development preparation pins its immutable bundle without
+  // changing the helper selected by another CLI or checkout.
+  pub fn cache(self) -> Result<SetupOutcome, Error> {
+    if self.manifest.development.is_none() {
+      return Err(Error::Verification(
+        "private helper preparation requires a development package".into(),
+      ));
+    }
+    let executable = self.publish()?;
+    Ok(self.outcome(executable))
+  }
+
+  fn publish(&self) -> Result<PathBuf, Error> {
+    if self.verification_app.is_some() {
+      return Err(Error::Verification(
+        "a passive package verification cannot publish a helper".into(),
+      ));
+    }
+    self.executable()?;
+    if !self.reused {
+      let marker = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(self.payload().join("installation.json"))?;
+      serde_json::to_writer(&marker, &self.manifest).map_err(std::io::Error::other)?;
+      marker.sync_all()?;
+      fs::rename(self.payload(), &self.destination)?;
+    }
+    self.executable_after_activation()
   }
 
   fn select_compatible(&self) -> Result<(), Error> {

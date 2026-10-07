@@ -489,8 +489,8 @@ describe("workspace-backed terminal page", () => {
     });
     render(<TerminalPage />);
     fireEvent.click(await screen.findByRole("button", { name: "Update remote components" }));
-    await screen.findByRole("dialog", { name: "Update remote components" });
-    expect(screen.getByRole("option", { name: /Update remote components/ })).toBeTruthy();
+    await screen.findByRole("dialog", { name: "Update components" });
+    expect(screen.getByRole("radio", { name: /Full bundle/ })).toBeTruthy();
     expect(api.probeSshHost).not.toHaveBeenCalled();
     expect(api.restartLocalDaemon).not.toHaveBeenCalled();
   });

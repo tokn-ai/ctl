@@ -1,6 +1,7 @@
 //! Immutable complete builds shared by local execution and remote upload.
 //! Selection is an explicit transaction; discovery never searches for a newer build.
 
+pub mod agent;
 mod filesystem;
 #[cfg(test)]
 mod tests;

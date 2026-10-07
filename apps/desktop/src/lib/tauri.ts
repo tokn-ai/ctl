@@ -12,6 +12,9 @@ import type {
   AttachmentViewZoomRequest,
   CreateSessionRequest,
   ConnectionTarget,
+  ComponentUpdateRequest,
+  ComponentUpdateProgress,
+  ComponentUpdateHostResult,
   SshConnectionTarget,
   KillSessionRequest,
   OpenAttachmentRequest,
@@ -290,6 +293,22 @@ export async function installRemoteAgent(
     on_prompt: channel,
     on_progress: progress_channel,
   });
+}
+
+export async function updateComponents(
+  request: ComponentUpdateRequest,
+  onPrompt: (prompt: SshPrompt) => void,
+  onProgress: (progress: ComponentUpdateProgress) => void,
+): Promise<ComponentUpdateHostResult[]> {
+  const on_prompt = new Channel<SshPrompt>();
+  on_prompt.onmessage = onPrompt;
+  const on_progress = new Channel<ComponentUpdateProgress>();
+  on_progress.onmessage = onProgress;
+  return invoke("update_components", { request, on_prompt, on_progress });
+}
+
+export async function cancelComponentUpdate(attempt_id: string): Promise<void> {
+  return invoke("cancel_component_update", { request: { attempt_id } });
 }
 
 export async function checkRemoteCtmuxRestart(

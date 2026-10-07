@@ -16,6 +16,12 @@ use tokio::process::Command;
 const RELEASE_ROOT: &str = "https://github.com/tokn-ai/ctl/releases/download";
 const MAX_COMMAND_OUTPUT: u64 = 256 * 1024;
 
+#[derive(Clone, Copy)]
+enum Selection {
+  Shared,
+  Private,
+}
+
 pub(super) async fn install(
   on_progress: impl Fn(SetupEvent) + Send + Sync,
 ) -> Result<SetupOutcome, Error> {
@@ -60,7 +66,7 @@ pub(super) async fn install(
     .await?;
     unpack(session, archive, &on_progress).await?
   };
-  verify_and_activate(session, &on_progress).await
+  verify_and_publish(session, &on_progress, Selection::Shared).await
 }
 
 pub(super) async fn install_bundled(
@@ -71,7 +77,7 @@ pub(super) async fn install_bundled(
   on_progress(SetupEvent::Manifest);
   let manifest = Manifest::parse(manifest, env!("CARGO_PKG_VERSION"), release_target()?)?;
   let home = dirs::home_dir().ok_or(Error::HomeDirectory)?;
-  install_archive(&home, manifest, archive, &on_progress).await
+  install_archive(&home, manifest, archive, &on_progress, Selection::Shared).await
 }
 
 pub(super) async fn install_bundled_development(
@@ -79,11 +85,28 @@ pub(super) async fn install_bundled_development(
   archive: &'static [u8],
   on_progress: impl Fn(SetupEvent) + Send + Sync,
 ) -> Result<SetupOutcome, Error> {
+  prepare_development(manifest, archive, on_progress, Selection::Shared).await
+}
+
+pub(super) async fn prepare_bundled_development(
+  manifest: &[u8],
+  archive: &'static [u8],
+  on_progress: impl Fn(SetupEvent) + Send + Sync,
+) -> Result<SetupOutcome, Error> {
+  prepare_development(manifest, archive, on_progress, Selection::Private).await
+}
+
+async fn prepare_development(
+  manifest: &[u8],
+  archive: &'static [u8],
+  on_progress: impl Fn(SetupEvent) + Send + Sync,
+  selection: Selection,
+) -> Result<SetupOutcome, Error> {
   on_progress(SetupEvent::Manifest);
   let manifest =
     Manifest::parse_development(manifest, env!("CARGO_PKG_VERSION"), release_target()?)?;
   let home = dirs::home_dir().ok_or(Error::HomeDirectory)?;
-  install_archive(&home, manifest, archive, &on_progress).await
+  install_archive(&home, manifest, archive, &on_progress, selection).await
 }
 
 pub(super) fn release_target() -> Result<&'static str, Error> {
@@ -99,6 +122,7 @@ async fn install_archive(
   manifest: Manifest,
   archive: impl AsRef<[u8]> + Send + 'static,
   on_progress: &impl Fn(SetupEvent),
+  selection: Selection,
 ) -> Result<SetupOutcome, Error> {
   let session = Session::begin(home, manifest)?;
   let session = if session.reused {
@@ -106,7 +130,7 @@ async fn install_archive(
   } else {
     unpack(session, archive, on_progress).await?
   };
-  verify_and_activate(session, on_progress).await
+  verify_and_publish(session, on_progress, selection).await
 }
 
 async fn unpack(
@@ -122,9 +146,10 @@ async fn unpack(
     .map_err(io::Error::other)?
 }
 
-async fn verify_and_activate(
+async fn verify_and_publish(
   session: Session,
   on_progress: &impl Fn(SetupEvent),
+  selection: Selection,
 ) -> Result<SetupOutcome, Error> {
   on_progress(SetupEvent::Verifying);
   let prepared = verify_helper(&session).await?;
@@ -133,8 +158,13 @@ async fn verify_and_activate(
       "helper does not provide the required broker, lifecycle, and helper APIs".into(),
     ));
   }
-  on_progress(SetupEvent::Activating);
-  session.activate()
+  match selection {
+    Selection::Shared => {
+      on_progress(SetupEvent::Activating);
+      session.activate()
+    }
+    Selection::Private => session.cache(),
+  }
 }
 
 pub(super) async fn verify_helper(session: &Session) -> Result<PreparedExecutable, Error> {
@@ -772,16 +802,18 @@ mod tests {
 
   #[tokio::test]
   async fn development_unsigned_bundle_is_rejected_without_a_staple_or_production_selection() {
-    let home = Home::new();
-    let (bytes, manifest) = development_bundle();
-    let result = install_archive(&home.0, manifest, bytes, &|_| {}).await;
-    assert!(matches!(result, Err(Error::Verification(_))));
-    assert!(
-      ctl_ipc::managed::resolve_executable(&home.0)
-        .unwrap()
-        .is_none()
-    );
-    assert_staging_clean(&home.0);
+    for selection in [Selection::Shared, Selection::Private] {
+      let home = Home::new();
+      let (bytes, manifest) = development_bundle();
+      let result = install_archive(&home.0, manifest, bytes, &|_| {}, selection).await;
+      assert!(matches!(result, Err(Error::Verification(_))));
+      assert!(
+        ctl_ipc::managed::resolve_executable(&home.0)
+          .unwrap()
+          .is_none()
+      );
+      assert_staging_clean(&home.0);
+    }
   }
 
   #[test]
@@ -854,13 +886,19 @@ mod tests {
     .unwrap();
     let archive = std::fs::read(directory.join(&manifest.archive)).unwrap();
     let home = Home::new();
-    let installed = install_archive(&home.0, manifest.clone(), archive.clone(), &|_| {})
-      .await
-      .unwrap();
+    let installed = install_archive(
+      &home.0,
+      manifest.clone(),
+      archive.clone(),
+      &|_| {},
+      Selection::Shared,
+    )
+    .await
+    .unwrap();
     assert!(!installed.reused);
     assert!(installed.executable.is_file());
     assert_staging_clean(&home.0);
-    let reused = install_archive(&home.0, manifest, archive, &|_| {})
+    let reused = install_archive(&home.0, manifest, archive, &|_| {}, Selection::Shared)
       .await
       .unwrap();
     assert!(reused.reused);
@@ -882,6 +920,57 @@ mod tests {
         .kind(),
       io::ErrorKind::NotFound
     );
+  }
+
+  #[tokio::test]
+  #[ignore = "requires a provisioned signed development helper"]
+  async fn provisioned_development_helper_is_cached_without_selecting_shared_defaults() {
+    let directory = std::path::PathBuf::from(
+      std::env::var_os("CTL_TEST_BUNDLED_CTLD_DIR")
+        .expect("set CTL_TEST_BUNDLED_CTLD_DIR to a signed development payload directory"),
+    );
+    let target = release_target().unwrap();
+    let manifest = Manifest::parse_development(
+      &std::fs::read(directory.join(format!("ctld-{target}.json"))).unwrap(),
+      env!("CARGO_PKG_VERSION"),
+      target,
+    )
+    .unwrap();
+    let archive = std::fs::read(directory.join(&manifest.archive)).unwrap();
+    let home = Home::new();
+    let first = install_archive(
+      &home.0,
+      manifest.clone(),
+      archive.clone(),
+      &|_| {},
+      Selection::Private,
+    )
+    .await
+    .unwrap();
+    let second = install_archive(&home.0, manifest, archive, &|_| {}, Selection::Private)
+      .await
+      .unwrap();
+    assert!(!first.reused);
+    assert!(second.reused);
+    assert_eq!(first.executable, second.executable);
+    assert!(first.executable.is_file());
+    assert!(
+      super::super::discovery::discover(&home.0)
+        .await
+        .unwrap()
+        .is_none()
+    );
+    assert!(
+      !ctl_ipc::managed::component_directory(&home.0)
+        .join("selected")
+        .exists()
+    );
+    assert!(
+      !ctl_ipc::managed::component_directory(&home.0)
+        .join("current")
+        .exists()
+    );
+    assert_staging_clean(&home.0);
   }
 
   #[tokio::test]
@@ -910,9 +999,15 @@ mod tests {
     let mut corrupt = bytes;
     corrupt[0] ^= 1;
     let events = Mutex::new(Vec::new());
-    let result = install_archive(&home.0, manifest, corrupt, &|event| {
-      events.lock().unwrap().push(event);
-    })
+    let result = install_archive(
+      &home.0,
+      manifest,
+      corrupt,
+      &|event| {
+        events.lock().unwrap().push(event);
+      },
+      Selection::Shared,
+    )
     .await;
     assert!(matches!(result, Err(Error::InvalidRelease(_))));
     assert!(matches!(
@@ -945,9 +1040,15 @@ mod tests {
     )
     .unwrap();
     let events = Mutex::new(Vec::new());
-    let result = install_archive(&home.0, manifest, bytes, &|event| {
-      events.lock().unwrap().push(event);
-    })
+    let result = install_archive(
+      &home.0,
+      manifest,
+      bytes,
+      &|event| {
+        events.lock().unwrap().push(event);
+      },
+      Selection::Shared,
+    )
     .await;
     assert!(matches!(result, Err(Error::Verification(_))));
     assert!(matches!(

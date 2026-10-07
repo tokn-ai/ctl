@@ -68,7 +68,8 @@ determine which saved entries are listed.
 omit the ID to choose an entry interactively. A full ID from JSON, a unique
 full-ID prefix, or an exact unique name also works. `ctl passwords clear` previews
 known entries and clears all owned SSH credentials and passphrases after confirmation,
-including unindexed older copies. These commands require helper contract `1.1.4`. Both
+including unindexed older copies. Listing/show require helper contract `1.1.4`;
+remove/clear require revocation-aware `1.1.5`. Both
 actions preserve key files, host/VPN settings, and never-save preferences, and
 require an interactive terminal. These commands have no create, update, import,
 reveal, or copy action; omit `-H`, `--method`, and `--remote-platform`.

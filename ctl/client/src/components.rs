@@ -1,5 +1,7 @@
 //! Explicit complete-bundle import, selection and packaging for either purpose.
 
+pub mod inventory;
+
 use ctl_core::bundles::{
   Bundle, COMPONENTS, MANIFEST_FILE, MAX_FILE_BYTES, Manifest, Purpose, Source, Store,
 };
@@ -259,10 +261,17 @@ pub async fn initialize_upload(home: &Path, bundle: &Bundle) -> io::Result<Bundl
 /// # Errors
 /// Rejects changed bytes, incompatible contracts or an oversized archive.
 pub fn upload_bundle(bundle: &Bundle) -> io::Result<crate::remote_bundle::VerifiedBundle> {
-  if !upload_target(&bundle.manifest.target_triple) || !compatible(&bundle.manifest.components) {
+  if !upload_target(&bundle.manifest.target_triple) {
     return Err(invalid(
       "selected upload bundle is incompatible with this client",
     ));
+  }
+  package_bundle(bundle)
+}
+
+pub(crate) fn package_bundle(bundle: &Bundle) -> io::Result<crate::remote_bundle::VerifiedBundle> {
+  if !compatible(&bundle.manifest.components) {
+    return Err(invalid("bundle is incompatible with this client"));
   }
   let files = bundle.read_files()?;
   let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
@@ -313,6 +322,20 @@ pub fn compatible(components: &BTreeMap<String, ComponentInfo>) -> bool {
 /// # Errors
 /// Rejects unsafe, excessive or checksum-invalid managed payloads.
 pub(crate) fn inspect_upload_archive(bytes: &[u8]) -> io::Result<Option<Manifest>> {
+  let mut files = read_archive(bytes)?;
+  let Some(bytes) = files.remove(MANIFEST_FILE) else {
+    return Ok(None);
+  };
+  if bytes.len() > ctl_core::bundles::MAX_MANIFEST_BYTES {
+    return Err(invalid("component manifest exceeds its size limit"));
+  }
+  let manifest: Manifest = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+  manifest.validate()?;
+  manifest.verify_files(&files)?;
+  Ok(Some(manifest))
+}
+
+pub(crate) fn read_archive(bytes: &[u8]) -> io::Result<BTreeMap<String, Vec<u8>>> {
   if bytes.len() > MAX_FILE_BYTES {
     return Err(invalid("component archive exceeds its size limit"));
   }
@@ -320,7 +343,6 @@ pub(crate) fn inspect_upload_archive(bytes: &[u8]) -> io::Result<Option<Manifest
     .take(ctl_core::bundles::MAX_TOTAL_BYTES as u64 + 1024 * 1024);
   let mut archive = tar::Archive::new(decoder);
   let mut files = BTreeMap::new();
-  let mut manifest = None;
   let mut total = 0usize;
   for entry in archive.entries()?.raw(true) {
     let mut entry = entry?;
@@ -340,12 +362,14 @@ pub(crate) fn inspect_upload_archive(bytes: &[u8]) -> io::Result<Option<Manifest
     if total > ctl_core::bundles::MAX_TOTAL_BYTES + ctl_core::bundles::MAX_MANIFEST_BYTES {
       return Err(invalid("component archive exceeds its payload limit"));
     }
-    if name == MANIFEST_FILE {
-      if manifest.is_some() || payload.len() > ctl_core::bundles::MAX_MANIFEST_BYTES {
-        return Err(invalid("invalid or duplicate component bundle manifest"));
-      }
-      manifest = Some(serde_json::from_slice::<Manifest>(&payload).map_err(io::Error::other)?);
-    } else if files.insert(name, payload).is_some() {
+    if name.contains(['\\', '\0'])
+      || name
+        .split('/')
+        .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+      return Err(invalid("unsafe component archive path"));
+    }
+    if files.insert(name, payload).is_some() {
       return Err(invalid("duplicate component archive entry"));
     }
   }
@@ -363,14 +387,10 @@ pub(crate) fn inspect_upload_archive(bytes: &[u8]) -> io::Result<Option<Manifest
   if padding.limit() == 0 {
     return Err(invalid("component archive exceeds its expanded limit"));
   }
-  if let Some(manifest) = &manifest {
-    manifest.validate()?;
-    manifest.verify_files(&files)?;
-  }
-  Ok(manifest)
+  Ok(files)
 }
 
-fn append<W: io::Write>(
+pub(crate) fn append<W: io::Write>(
   archive: &mut tar::Builder<W>,
   name: &str,
   bytes: &[u8],
@@ -383,7 +403,7 @@ fn append<W: io::Write>(
   archive.append_data(&mut header, name, bytes)
 }
 
-fn read_input(path: &Path, maximum: usize) -> io::Result<Vec<u8>> {
+pub(crate) fn read_input(path: &Path, maximum: usize) -> io::Result<Vec<u8>> {
   let metadata = std::fs::symlink_metadata(path)?;
   if !metadata.is_file() || metadata.mode() & 0o022 != 0 {
     return Err(invalid(

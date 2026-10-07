@@ -1,4 +1,5 @@
 mod bundle_build;
+mod development_build;
 
 fn main() {
   println!("cargo:rustc-check-cfg=cfg(ctl_repository_tui_tests)");
@@ -14,8 +15,22 @@ fn main() {
   println!("cargo:rerun-if-env-changed=CTL_BUNDLED_CTLD_MODE");
   println!("cargo:rerun-if-changed=build.rs");
   println!("cargo:rerun-if-changed=bundle_build.rs");
+  println!("cargo:rerun-if-changed=development_build.rs");
   let output = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
   let source = std::env::var_os("CTL_BUNDLED_CTLD_DIR").map(std::path::PathBuf::from);
+  let target = std::env::var("TARGET").unwrap();
+  let development = if source.is_none() {
+    development_build::context(
+      &std::path::PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap()),
+      &output,
+      &target,
+    )
+    .expect("could not determine local development helper provenance")
+  } else {
+    None
+  };
+  development_build::write(&output, development.as_ref())
+    .expect("could not write local development helper provenance");
   let (mode, generated_mode) = match std::env::var("CTL_BUNDLED_CTLD_MODE") {
     Err(std::env::VarError::NotPresent) => (bundle_build::Mode::Signed, "Signed"),
     Ok(value) if value == "signed" => (bundle_build::Mode::Signed, "Signed"),
@@ -27,7 +42,7 @@ fn main() {
       &source,
       &output,
       &std::env::var("CARGO_PKG_VERSION").unwrap(),
-      &std::env::var("TARGET").unwrap(),
+      &target,
       mode,
     )
     .expect("invalid bundled ctld payload");

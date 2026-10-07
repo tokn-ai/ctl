@@ -488,13 +488,14 @@ mod tests {
       .unwrap(),
       serde_json::json!({"type":"cleared", "credential_count":2, "identity_count":3}),
     );
-    assert_eq!(crate::HELPER_API_BUILD, 4);
-    assert_eq!(crate::HELPER_API_VERSION, crate::HELPER_API_CONTRACT_V1_1_4,);
+    assert_eq!(crate::HELPER_API_BUILD, 5);
+    assert_eq!(crate::HELPER_API_VERSION, crate::HELPER_API_CONTRACT_V1_1_5);
     for supported in [
       crate::HELPER_API_CONTRACT_V1_0_1,
       crate::HELPER_API_CONTRACT_V1_1_2,
       crate::HELPER_API_CONTRACT_V1_1_3,
       crate::HELPER_API_CONTRACT_V1_1_4,
+      crate::HELPER_API_CONTRACT_V1_1_5,
     ] {
       assert!(crate::SUPPORTED_HELPER_API_VERSIONS.contains(&supported));
     }

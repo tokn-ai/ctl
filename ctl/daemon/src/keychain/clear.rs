@@ -41,7 +41,7 @@ impl Store for Keychain {
   }
 
   fn begin_mutation(&mut self) -> Result<(), Error> {
-    index::begin_mutation().map(|_| ())
+    index::begin_secret_mutation().map(|_| ())
   }
 
   fn delete(&mut self, item: &Item) -> Result<(), Error> {

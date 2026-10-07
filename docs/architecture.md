@@ -211,14 +211,28 @@ metadata through its local-control handshake, with a data-handshake fallback for
 legacy owners. ctl-taskd accepts a passive control metadata query. Standalone
 `--component-info` prints JSON for helper executables without starting services.
 
-ctld metadata reports data contract `1.1.13` (and retained `1.0.12`), lifecycle
-contract `1.0.1`, and helper contract `1.1.3` (and retained `1.0.1` and `1.1.2`). Remote VPN
+ctld metadata reports data contract `1.1.14` (and retained `1.0.12` and `1.1.13`), lifecycle
+contract `1.0.1`, and helper contract `1.1.5` (and retained `1.0.1`, `1.1.2`, `1.1.3`, and `1.1.4`). Remote VPN
 routes are gated by the selected broker contract and the helper advertisement.
 The helper API covers credential, identity, askpass, and proxy helper modes.
-Standalone macOS CLI discovery first honors `CTLD_BIN`, then verifies a shared
+Standalone macOS CLI discovery first honors `CTLD_BIN`. Signed development builds
+then verify and cache their matching embedded helper without changing the shared
+selection; explicit setup remains able to select it for other CLIs. Ordinary
+macOS debug Cargo builds first verify the provisioned helper selected under
+their target directory for their canonical checkout identity. Build provenance
+keeps discovery independent of the current directory and isolates worktrees
+sharing a target directory. Missing or valid incompatible local helpers permit
+shared discovery; malformed or untrusted local selections fail verification.
+Release builds and Cargo builds without a local helper verify a shared
 managed app selected for the native target and all three API versions. It falls
 back to its own bundled helper and then loose executable discovery when no
-compatible shared app is selected. The desktop keeps its own bundled helper
+compatible shared app supporting the operation is selected. Credential helper
+operations require their exact advertised contract before request bytes are sent:
+`1.0.1` for initial metadata operations, `1.1.4` for discovery, and `1.1.5` for
+secret removal, clearing, and identity save/forget with reconnect revocation.
+`CTLD_BIN` remains authoritative for every build; shared discovery also
+preserve explicit complete selections.
+The desktop keeps its own bundled helper
 first. Release and provisioned development installations use immutable caches
 and atomic `selected/<target>-ctld1-lifecycle1-helper1` links; development
 selection leaves the release `current` link intact. Verification checks the
@@ -457,9 +471,10 @@ command, `ctld` asks the initiating client to present Yes, No, and Never choices
 for a newly entered reusable credential. Identity-file passphrases are eligible
 only after a trusted local unlock verifies the configured key snapshot; success
 of the SSH connection alone is not sufficient. Yes stores eligible credentials
-in the device-local Data Protection Keychain under `biometryCurrentSet`;
-retrieval requires Touch ID and changing the enrolled fingerprints invalidates
-the item. No discards the candidate, while Never stores only a device-local
+in the device-local Data Protection Keychain under `userPresence`, allowing
+Touch ID or the macOS account password while the device is unlocked. Explicit
+resaves atomically update existing items to this policy; reads preserve an older
+item's biometric-only protection. No discards the candidate, while Never stores only a device-local
 suppression marker for the connection scope.
 
 Only `ctld` links Keychain code. Password entries retain their host-route/prompt
@@ -473,8 +488,9 @@ before the temporary agent signs. Existing agent connections retain their
 session bindings, and lazy local connections replay their own binding history;
 the temporary agent and unlock state live only for that connection attempt.
 Cancellation and unlock timeouts mark pending blocking reads before they can
-start authenticated Keychain access after acquiring the operation lock; they do
-not dismiss an already-open OS authentication dialog. The passphrase is never
+start authenticated Keychain access after acquiring the operation lock. Revocation
+also invalidates per-connection native authorization contexts; system dialogs
+remain under macOS control. The passphrase is never
 returned to an SSH password prompt or client. Replacing or
 re-encrypting the file invalidates reuse. Legacy prompt-scoped key entries are
 not silently promoted to verified identity entries. Host removal cleans up
@@ -483,6 +499,23 @@ actions so removing one host cannot remove a key shared by others. Native
 plaintext buffers are zeroized after use. On Linux, newly entered reusable
 secrets are discarded after authentication. Other interactive responses are
 not stored.
+
+Successful connections may retain only their macOS authorization contexts for a
+fixed 24-hour reconnect window. Reconnects do not renew it. Password values,
+passphrases, and unlocked private keys are not retained by this cache. Approval
+matches the effective SSH account, endpoint, route/configuration, known-hosts
+trust snapshot, exact protected-item selector, and identity-file contents. Lock,
+sleep, logout/session changes, broker restart, explicit disconnect, and owned
+credential mutations revoke approval, including pending authorization reads.
+Updated one-shot writers publish a nonsecret revision under the shared operation
+lock before changing a secret, so an independently running updated broker
+invalidates its contexts. New mutating clients require helper `1.1.5`; older
+running writers must be updated or restarted for that guarantee. Contexts remain
+process-local even though all signed helpers share the credential store.
+Broker contract `1.1.14` adds quiet establishment for background reconnects:
+unavailable authorization returns `authentication_required` without displaying
+UI. Earlier broker contracts permit only passive master reuse during background
+recovery, while ordinary interactive connection requests retain their behavior.
 
 The desktop **Credentials** page lists identity-file metadata and saved ctmux
 credential attributes. Its bounded one-shot `ctld --credential-request` and

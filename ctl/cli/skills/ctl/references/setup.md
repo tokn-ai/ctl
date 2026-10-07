@@ -24,7 +24,9 @@ the user's request includes setup or the work requires an authorized setup.
 
 Keep terminal/task companion versions aligned with the client. `CTLD_BIN`,
 `CTMUXD_BIN`, and `CTL_TASKD_BIN` select explicit daemon executables; an override names an
-executable, not a directory. On macOS, a standalone CLI otherwise prefers a
+executable, not a directory. Ordinary macOS debug CLI builds first prefer their
+checkout's provisioned signed helper; signed development CLIs prefer their own
+matching embedded helper. Shared discovery then prefers a
 verified compatible shared `ctld.app`, then its own bundled helper, then beside
 the client or on PATH, with a nearby desktop bundle taking precedence over loose
 executables. The desktop continues to prefer its own bundled helper.
@@ -58,7 +60,8 @@ Shared discovery requires the native architecture and compatible published ctld,
 lifecycle, and one-shot helper contracts. It verifies the app's build identity against
 its own installation manifest; its release version and source fingerprint need
 not match the CLI's. Signed development apps retain provisioning expiry and
-certificate checks, use `development/<archive-sha256>/`, and update
+certificate checks and use `development/<archive-sha256>/`. Explicit development
+setup updates
 `selected/<target>-ctld1-lifecycle1-helper1` without changing release `current`.
 All standalone CLI builds, including ordinary Cargo builds, can reuse them.
 `ctl passwords` commands require helper contract `1.1.4` for authoritative
@@ -70,7 +73,8 @@ it locally when no compatible shared app is selected and a command starts a
 daemon or creates a fresh SOCKS/VPN proxy route; `ctl setup` uses the embedded
 payload too. No helper download occurs. Existing
 daemon/master reuse and passive status reads do not install a helper. Ordinary
-Cargo builds contain no embedded helper and use shared discovery or explicit setup.
+Cargo builds contain no embedded helper. Debug builds can discover a provisioned
+checkout helper before shared discovery; release builds use shared discovery.
 
 When working from the ctl source checkout, a local CLI/service build is:
 
@@ -81,6 +85,22 @@ cargo build -p ctl-cli -p ctld -p ctmuxd -p ctl-taskd -p ctl-agent
 
 This builds artifacts; it does not install anything on a remote host. `ctl host
 connect HOST` authenticates SSH without installing components.
+
+For saved credentials during authorized macOS source development, provision the
+Xcode target once and prepare the signed helper separately:
+
+```sh
+node scripts/dev/ctl-signed.mts --provision
+# Choose your team and build the ctld-provisioning target once in Xcode.
+node scripts/dev/ctl-signed.mts --helper-only
+cargo run -p ctl-cli -- passwords
+```
+
+The unsigned debug CLI verifies the selected helper under Cargo's target
+directory using its checkout identity, regardless of the current directory.
+Repeat preparation after helper changes or provisioning expiry. Ordinary CLI
+edits need only a Cargo rebuild. Shared selections and running brokers are
+preserved.
 
 ## Diagnose by the failing boundary
 

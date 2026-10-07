@@ -3,6 +3,7 @@
 #[cfg(all(feature = "bundles", unix))]
 pub mod bundles;
 pub mod component;
+pub mod component_update;
 pub mod connection;
 #[cfg(feature = "executable")]
 pub mod executable;

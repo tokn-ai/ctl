@@ -44,6 +44,183 @@ async fn concurrent_preparation_reuses_one_successful_executable() {
 }
 
 #[tokio::test]
+async fn operation_preparation_is_cached_separately_from_the_default_helper() {
+  let calls = Arc::new(AtomicUsize::new(0));
+  let observed = calls.clone();
+  let provider = DaemonProvider::with_contract_policy(
+    move |required| {
+      observed.fetch_add(1, Ordering::Relaxed);
+      Box::pin(async move {
+        sleep(Duration::from_millis(10)).await;
+        let path = if required == Some(HELPER_API_CONTRACT_V1_1_4) {
+          "discovery-capable-helper"
+        } else {
+          "older-shared-helper"
+        };
+        Ok(Some(PathBuf::from(path)))
+      })
+    },
+    DaemonDiscoveryPolicy::Shared,
+  );
+  let default = provider.prepare().await.unwrap();
+  let (first, second) = tokio::join!(
+    provider.prepare_for(Some(HELPER_API_CONTRACT_V1_1_4)),
+    provider.prepare_for(Some(HELPER_API_CONTRACT_V1_1_4))
+  );
+  assert_eq!(
+    first.unwrap(),
+    Some(PathBuf::from("discovery-capable-helper"))
+  );
+  assert_eq!(
+    second.unwrap(),
+    Some(PathBuf::from("discovery-capable-helper"))
+  );
+  assert_eq!(provider.prepare().await.unwrap(), default);
+  assert_eq!(prepared_daemon(Some(&provider)), default);
+  assert_eq!(calls.load(Ordering::Relaxed), 2);
+}
+
+#[tokio::test]
+async fn preferred_operation_preparation_also_caches_verified_default_discovery() {
+  let calls = Arc::new(AtomicUsize::new(0));
+  let observed = calls.clone();
+  let provider = DaemonProvider::with_contract_policy(
+    move |required| {
+      assert_eq!(required, Some(HELPER_API_CONTRACT_V1_1_4));
+      observed.fetch_add(1, Ordering::Relaxed);
+      Box::pin(async { Ok(Some(PathBuf::from("verified-local-helper"))) })
+    },
+    DaemonDiscoveryPolicy::Preferred,
+  );
+  let preferred = provider
+    .prepare_for(Some(HELPER_API_CONTRACT_V1_1_4))
+    .await
+    .unwrap();
+  assert_eq!(provider.prepare().await.unwrap(), preferred);
+  assert_eq!(preferred_daemon(Some(&provider)), preferred);
+  assert_eq!(calls.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn preferred_local_discovery_precedes_selected_bundles_and_preserves_fallback() {
+  let fixture = Fixture::new();
+  let current = fixture.0.join("bin/ctl");
+  std::fs::create_dir_all(current.parent().unwrap()).unwrap();
+  let sibling = current.with_file_name("ctld");
+  std::fs::write(&sibling, "ordinary sibling helper").unwrap();
+  let selection = ctl_core::bundles::Store::new(&fixture.0)
+    .root()
+    .join("selected");
+  std::fs::create_dir_all(&selection).unwrap();
+  let checkpoint = selection.join(format!("local-{}.json", ctl_core::paths::native_target()));
+  std::fs::write(
+    &checkpoint,
+    "an unrelated checkout's invalid global selection",
+  )
+  .unwrap();
+  let local = fixture.0.join("verified-local-helper");
+  let expected = local.clone();
+  let provider = DaemonProvider::with_contract_policy(
+    move |_| {
+      let local = local.clone();
+      Box::pin(async move { Ok(Some(local)) })
+    },
+    DaemonDiscoveryPolicy::Preferred,
+  );
+  assert_eq!(
+    prepare_default_daemon(&current, Some(&fixture.0), Some(&provider))
+      .await
+      .unwrap(),
+    expected,
+  );
+  assert_eq!(preferred_daemon(Some(&provider)), Some(expected));
+  std::fs::remove_file(checkpoint).unwrap();
+  let calls = Arc::new(AtomicUsize::new(0));
+  let observed = calls.clone();
+  let absent = DaemonProvider::with_contract_policy(
+    move |_| {
+      observed.fetch_add(1, Ordering::Relaxed);
+      Box::pin(async { Ok(None) })
+    },
+    DaemonDiscoveryPolicy::Preferred,
+  );
+  assert_eq!(
+    prepare_default_daemon(&current, Some(&fixture.0), Some(&absent))
+      .await
+      .unwrap(),
+    sibling,
+  );
+  assert_eq!(calls.load(Ordering::Relaxed), 1);
+  let invalid = DaemonProvider::with_contract_policy(
+    |_| Box::pin(async { Err(io::Error::other("invalid local signature")) }),
+    DaemonDiscoveryPolicy::Preferred,
+  );
+  assert!(matches!(
+    prepare_default_daemon(&current, Some(&fixture.0), Some(&invalid)).await,
+    Err(ConnectError::PrepareDaemon(_)),
+  ));
+}
+
+#[tokio::test]
+async fn development_preparation_ignores_other_selections_and_never_falls_back() {
+  let fixture = Fixture::new();
+  let current = fixture.0.join("bin/ctl");
+  std::fs::create_dir_all(current.parent().unwrap()).unwrap();
+  let sibling = current.with_file_name("ctld");
+  std::fs::write(&sibling, "unrelated source-built helper").unwrap();
+  let selected = ctl_core::bundles::Store::new(&fixture.0)
+    .root()
+    .join("selected");
+  std::fs::create_dir_all(&selected).unwrap();
+  std::fs::write(
+    selected.join(format!("local-{}.json", ctl_core::paths::native_target())),
+    "another checkout's invalid global selection",
+  )
+  .unwrap();
+  let matching = fixture.0.join("matching-signed-development-helper");
+  let expected = matching.clone();
+  let provider = DaemonProvider::with_contract_policy(
+    move |required| {
+      assert_eq!(required, Some(HELPER_API_CONTRACT_V1_1_4));
+      let path = matching.clone();
+      Box::pin(async move { Ok(Some(path)) })
+    },
+    DaemonDiscoveryPolicy::Embedded,
+  );
+  assert_eq!(
+    prepare_default_daemon_for_contract(
+      &current,
+      Some(&fixture.0),
+      Some(&provider),
+      Some(HELPER_API_CONTRACT_V1_1_4)
+    )
+    .await
+    .unwrap(),
+    expected,
+  );
+  for absent in [false, true] {
+    let provider = DaemonProvider::with_contract_policy(
+      move |_| {
+        Box::pin(async move {
+          if absent {
+            Ok(None)
+          } else {
+            Err(io::Error::other(
+              "matching bundle failed signature verification",
+            ))
+          }
+        })
+      },
+      DaemonDiscoveryPolicy::Embedded,
+    );
+    assert!(matches!(
+      prepare_default_daemon(&current, Some(&fixture.0), Some(&provider)).await,
+      Err(ConnectError::PrepareDaemon(_)),
+    ));
+  }
+}
+
+#[tokio::test]
 async fn failed_or_cancelled_preparation_can_be_retried() {
   for cancelled in [false, true] {
     let calls = Arc::new(AtomicUsize::new(0));
@@ -93,7 +270,7 @@ async fn absent_provider_payload_preserves_sibling_discovery() {
   std::fs::write(&sibling, "source-built helper").unwrap();
   let provider = DaemonProvider::with_policy(
     || Box::pin(async { Ok(None) }),
-    DaemonDiscoveryPolicy::SharedFirst,
+    DaemonDiscoveryPolicy::Shared,
   );
   assert_eq!(
     prepare_default_daemon(&current, None, Some(&provider))
@@ -121,7 +298,7 @@ async fn standalone_shared_helper_precedes_bundle_after_verified_preparation() {
       let executable = verified.clone();
       Box::pin(async move { Ok(Some(executable)) })
     },
-    DaemonDiscoveryPolicy::SharedFirst,
+    DaemonDiscoveryPolicy::Shared,
   );
 
   // Synchronous discovery cannot verify or install shared helpers.
@@ -186,7 +363,7 @@ async fn standalone_absent_payload_does_not_select_unverified_legacy_installatio
   );
   let standalone = DaemonProvider::with_policy(
     || Box::pin(async { Ok(None) }),
-    DaemonDiscoveryPolicy::SharedFirst,
+    DaemonDiscoveryPolicy::Shared,
   );
   assert_eq!(
     default_macos_daemon(&current, Some(&fixture.0), Some(&standalone)).unwrap(),
@@ -315,7 +492,7 @@ async fn lazy_provider_covers_startup_availability_overrides_and_passive_queries
     "#!/bin/sh\ncase \"$1\" in\n--protocol-version) echo {PROTOCOL_VERSION};;\n--component-info) printf '%s\\n' '{metadata}';;\n*) /usr/bin/touch \"$CTLD_PROVIDER_TEST_STARTED\";;\nesac\n"
   )).unwrap();
   std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
-  for policy in ["desktop", "standalone"] {
+  for policy in ["desktop", "standalone", "development", "preferred"] {
     for mode in [
       "existing",
       "passive",
@@ -385,14 +562,19 @@ async fn registered_provider_child() {
   let _endpoint = Endpoint(socket.clone());
   let executable = PathBuf::from(env::var_os("CTLD_PROVIDER_TEST_EXECUTABLE").unwrap());
   let started = PathBuf::from(env::var_os("CTLD_PROVIDER_TEST_STARTED").unwrap());
-  let register = match env::var("CTLD_PROVIDER_TEST_POLICY").unwrap().as_str() {
-    "desktop" => register_daemon_executable_provider,
-    "standalone" => register_standalone_daemon_executable_provider,
+  let policy = env::var("CTLD_PROVIDER_TEST_POLICY").unwrap();
+  let registered = match policy.as_str() {
+    "desktop" => register_daemon_executable_provider(test_provider),
+    "standalone" => register_standalone_daemon_executable_provider(test_provider),
+    "development" => register_development_daemon_executable_provider(|_| test_provider()),
+    "preferred" => register_preferred_contract_daemon_executable_provider(|_| test_provider()),
     policy => panic!("unexpected provider policy {policy}"),
   };
-  register(test_provider).unwrap();
+  registered.unwrap();
   assert_eq!(
-    register(test_provider).unwrap_err().kind(),
+    register_daemon_executable_provider(test_provider)
+      .unwrap_err()
+      .kind(),
     io::ErrorKind::AlreadyExists
   );
   if mode == "existing" {
@@ -420,6 +602,19 @@ async fn registered_provider_child() {
       executable.canonicalize().unwrap()
     );
     assert_eq!(prepare_daemon_executable().await.unwrap(), executable);
+    if policy == "preferred" {
+      let home = PathBuf::from(env::var_os("HOME").unwrap());
+      let selected = ctl_core::bundles::Store::new(&home).root().join("selected");
+      std::fs::create_dir_all(&selected).unwrap();
+      let checkpoint = selected.join(format!("local-{}.json", ctl_core::paths::native_target()));
+      std::fs::write(
+        &checkpoint,
+        "invalid global selection after local preparation",
+      )
+      .unwrap();
+      assert_eq!(default_daemon_executable().unwrap(), executable);
+      std::fs::remove_file(checkpoint).unwrap();
+    }
   } else if mode == "busy" {
     for _ in 0..2 {
       assert!(

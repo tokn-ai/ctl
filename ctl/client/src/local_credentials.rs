@@ -6,10 +6,12 @@
 
 use std::time::Duration;
 
+use ctl_core::protocol::ProtocolVersion;
 use ctl_ipc::{credentials, identities};
 use tokio::process::Command;
 use zeroize::Zeroizing;
 
+mod compatibility;
 mod errors;
 mod process;
 #[cfg(all(test, unix))]
@@ -35,7 +37,7 @@ pub async fn request_credentials(
   if !cfg!(target_os = "macos") {
     return Err(credential_error("credential_store_unsupported"));
   }
-  let executable = executable().await?;
+  let executable = executable(credential_contract(&request)).await?;
   let deadline = if matches!(request, credentials::Request::ListMetadata) {
     METADATA_TIMEOUT
   } else {
@@ -55,7 +57,7 @@ pub async fn request_identity(request: identities::Request) -> Result<identities
   if !cfg!(unix) {
     return Err(identity_error("identity_unsupported"));
   }
-  let executable = executable().await?;
+  let executable = executable(identity_contract(&request)).await?;
   let deadline = if matches!(request, identities::Request::ListMetadata { .. }) {
     METADATA_TIMEOUT
   } else {
@@ -64,8 +66,11 @@ pub async fn request_identity(request: identities::Request) -> Result<identities
   exchange_identity(Command::new(executable), request, deadline).await
 }
 
-async fn executable() -> Result<std::path::PathBuf, Error> {
-  tokio::time::timeout(PREPARATION_TIMEOUT, ctl_ipc::prepare_daemon_executable())
+async fn executable(required: ProtocolVersion) -> Result<std::path::PathBuf, Error> {
+  tokio::time::timeout(
+    PREPARATION_TIMEOUT,
+    ctl_ipc::prepare_daemon_executable_for_helper_contract(required),
+  )
     .await
     .map_err(|_| Error::new("credential_helper_timeout", PREPARATION_TIMEOUT_MESSAGE))?
     .map_err(|error| {
@@ -82,6 +87,7 @@ async fn exchange_credentials(
   request: credentials::Request,
   deadline: Duration,
 ) -> Result<credentials::Response, Error> {
+  let (command, helper) = compatibility::check(command, credential_contract(&request)).await?;
   let requires_supported_operation = matches!(
     request,
     credentials::Request::ListMetadata
@@ -100,15 +106,17 @@ async fn exchange_credentials(
     credentials::MAX_RESPONSE_BYTES,
     deadline,
   )
-  .await?;
-  let response: credentials::Response = parse_response(&output)?;
+  .await
+  .map_err(|error| helper.transport_failure(error))?;
+  let response: credentials::Response =
+    parse_response(&output).map_err(|error| helper.transport_failure(error))?;
   if let credentials::Response::Error { code, .. } = response {
     if requires_supported_operation && code == "credential_request_invalid" {
-      return Err(errors::unsupported());
+      return Err(helper.rejected_operation());
     }
     return Err(credential_error(&code));
   }
-  validate_completion(&output)?;
+  validate_completion(&output).map_err(|error| helper.transport_failure(error))?;
   Ok(response)
 }
 
@@ -117,7 +125,12 @@ async fn exchange_identity(
   request: identities::Request,
   deadline: Duration,
 ) -> Result<identities::Response, Error> {
-  let requires_metadata_support = matches!(request, identities::Request::ListMetadata { .. });
+  let (command, helper) = compatibility::check(command, identity_contract(&request)).await?;
+  // An invalid nonempty path list may be rejected for its contents, rather than
+  // for the operation itself. Only the fixed, valid empty discovery request
+  // proves rejection of metadata support.
+  let requires_metadata_support =
+    matches!(&request, identities::Request::ListMetadata { paths } if paths.is_empty());
   let bytes = Zeroizing::new(
     serde_json::to_vec(&request).map_err(|_| identity_error("identity_invalid_request"))?,
   );
@@ -132,15 +145,17 @@ async fn exchange_identity(
     identities::MAX_RESPONSE_BYTES,
     deadline,
   )
-  .await?;
-  let response: identities::Response = parse_response(&output)?;
+  .await
+  .map_err(|error| helper.transport_failure(error))?;
+  let response: identities::Response =
+    parse_response(&output).map_err(|error| helper.transport_failure(error))?;
   if let identities::Response::Error { code, .. } = response {
     if requires_metadata_support && code == "identity_invalid_request" {
-      return Err(errors::unsupported());
+      return Err(helper.rejected_operation());
     }
     return Err(identity_error(&code));
   }
-  validate_completion(&output)?;
+  validate_completion(&output).map_err(|error| helper.transport_failure(error))?;
   Ok(response)
 }
 
@@ -149,14 +164,43 @@ fn parse_response<T: serde::de::DeserializeOwned>(output: &Output) -> Result<T, 
     if output.success {
       errors::invalid_response()
     } else {
-      errors::unsupported()
+      errors::failed()
     }
   })
 }
 
 fn validate_completion(output: &Output) -> Result<(), Error> {
-  if !output.success || output.input_result.is_err() {
+  if !output.success {
+    return Err(errors::failed());
+  }
+  if output.input_result.is_err() {
     return Err(errors::invalid_response());
   }
   Ok(())
+}
+
+fn credential_contract(request: &credentials::Request) -> ProtocolVersion {
+  match request {
+    credentials::Request::Discover {} => ctl_ipc::HELPER_API_CONTRACT_V1_1_4,
+    // Mutators must notify independently running brokers before changing any
+    // owned secret. Earlier helpers implement the wire shape without revoking
+    // cached authorization contexts in those other processes.
+    credentials::Request::Clear {} | credentials::Request::Forget { .. } => {
+      ctl_ipc::HELPER_API_CONTRACT_V1_1_5
+    }
+    credentials::Request::List
+    | credentials::Request::ListMetadata
+    | credentials::Request::ImportMetadata => ctl_ipc::HELPER_API_CONTRACT_V1_0_1,
+  }
+}
+
+fn identity_contract(request: &identities::Request) -> ProtocolVersion {
+  match request {
+    identities::Request::List { .. } | identities::Request::ListMetadata { .. } => {
+      ctl_ipc::HELPER_API_CONTRACT_V1_0_1
+    }
+    identities::Request::Save { .. } | identities::Request::Forget { .. } => {
+      ctl_ipc::HELPER_API_CONTRACT_V1_1_5
+    }
+  }
 }

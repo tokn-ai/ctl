@@ -28,6 +28,7 @@ const MAX_IDENTITIES: usize = 32;
 /// Dropping it terminates its agent and all proxy clients, including cancellation.
 #[derive(Default)]
 pub(super) struct PreparedIdentities {
+  authorization: Option<crate::keychain::approval::Attempt>,
   snapshots: Vec<Arc<IdentitySnapshot>>,
   agent: Option<LocalAgent>,
   proxy: Option<AgentProxy>,
@@ -53,7 +54,16 @@ impl VerifiedPassphrase {
 }
 
 impl PreparedIdentities {
-  pub(super) async fn prepare(target: &SshTarget) -> Self {
+  /// Authentication has finished. Stop all decrypted-key agents before any
+  /// credential-save UI or later verification of the reconnect scope.
+  pub(super) fn authentication_finished(&mut self) {
+    self.proxy.take();
+    self.agent.take();
+  }
+  pub(super) async fn prepare(
+    target: &SshTarget,
+    authorization: crate::keychain::approval::Attempt,
+  ) -> Self {
     let Ok(configurations) = resolve_configurations(target).await else {
       return Self::default();
     };
@@ -64,6 +74,7 @@ impl PreparedIdentities {
         .iter()
         .any(|gateway| gateway.inherits_agent && gateway.mutates_agent);
     let mut prepared = Self {
+      authorization: Some(authorization),
       fallback_files: configuration.identity_files,
       ..Self::default()
     };
@@ -160,7 +171,12 @@ impl PreparedIdentities {
       .map(|candidate| candidate.snapshot.identity_id.clone())
       .collect();
     match AgentProxy::with_identities(
-      lazy::LazyIdentities::new(candidates, context, Arc::clone(&self.fallbacks)),
+      lazy::LazyIdentities::new(
+        candidates,
+        context,
+        Arc::clone(&self.fallbacks),
+        self.authorization.clone(),
+      ),
       existing,
     ) {
       Ok(proxy) => self.proxy = Some(proxy),
@@ -312,6 +328,7 @@ impl PreparedIdentities {
       .filter_map(|prompt| captured.remove(&prompt).map(|secret| (prompt, secret)))
       .collect();
     let mut verified = Vec::new();
+    let mut agent = self.agent.take();
     let mut seen = HashSet::new();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     for (prompt, secret) in candidates {
@@ -323,13 +340,13 @@ impl PreparedIdentities {
       if snapshots.is_empty() {
         continue;
       }
-      if self.agent.is_none() {
-        self.agent = tokio::time::timeout_at(deadline, LocalAgent::start())
+      if agent.is_none() {
+        agent = tokio::time::timeout_at(deadline, LocalAgent::start())
           .await
           .ok()
           .and_then(Result::ok);
       }
-      let Some(agent) = &mut self.agent else { break };
+      let Some(agent) = &mut agent else { break };
       let path = prompt_path(&prompt);
       let paths: Vec<_> = snapshots
         .iter()

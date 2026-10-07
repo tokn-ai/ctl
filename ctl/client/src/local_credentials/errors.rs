@@ -1,16 +1,28 @@
 //! Categorized failures that never expose helper diagnostics or parser data.
 
+use std::borrow::Cow;
+
 /// A stable credential-helper error suitable for CLI or desktop presentation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{message}")]
 pub struct Error {
   pub code: &'static str,
-  pub message: &'static str,
+  pub message: Cow<'static, str>,
 }
 
 impl Error {
   pub(crate) const fn new(code: &'static str, message: &'static str) -> Self {
-    Self { code, message }
+    Self {
+      code,
+      message: Cow::Borrowed(message),
+    }
+  }
+
+  pub(crate) fn with_message(code: &'static str, message: String) -> Self {
+    Self {
+      code,
+      message: Cow::Owned(message),
+    }
   }
 }
 
@@ -28,10 +40,10 @@ pub(crate) fn unavailable() -> Error {
   )
 }
 
-pub(crate) fn unsupported() -> Error {
+pub(crate) fn failed() -> Error {
   Error::new(
-    "credential_helper_unsupported",
-    "The credential helper could not complete this request. Update or rebuild ctld and try again.",
+    "credential_helper_failed",
+    "The credential helper exited unsuccessfully without a valid response. Check or rebuild the selected ctld helper and try again.",
   )
 }
 

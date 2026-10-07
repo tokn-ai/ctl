@@ -21,6 +21,8 @@ import {
 } from "react";
 import { QuickInput } from "../components/commands/QuickInput";
 import { HostSettingsDialog } from "../components/sessions/HostSettingsDialog";
+import { UpdateComponentsDialog } from "../components/components/UpdateComponentsDialog";
+import type { ComponentUpdateContext } from "../lib/types";
 import { SshHostFlow } from "../components/sessions/SshHostFlow";
 import { ConnectHostFlow } from "../components/sessions/ConnectHostFlow";
 import { PortForwardingDialog } from "../components/sessions/PortForwardingDialog";
@@ -250,6 +252,7 @@ function TerminalWorkbench() {
   const [listError, setListError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [newShellOpen, setNewShellOpen] = useState(false);
+  const [component_update_context, setComponentUpdateContext] = useState<ComponentUpdateContext | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [pendingForget, setPendingForget] = useState<SessionSummary | null>(
@@ -1631,6 +1634,21 @@ function TerminalWorkbench() {
     else commands.push(command);
   }
   commands.push({
+    id: COMMAND_IDS.updateComponents,
+    category: "App",
+    title: "Update components…",
+    detail: "Install ctl-agent or a full bundle on local and remote hosts.",
+    keywords: ["bundle", "install", "sync", "upgrade", "ctld", "ctmuxd"],
+    enabled: workspace.ready,
+    keybinding: keybindings.bindings.get(COMMAND_IDS.updateComponents),
+    focusTerminalAfterRun: false,
+    run: (args) => {
+      const target = args?.target_key ? connectionTargets.find((target) => targetKey(target) === args.target_key) : activeTab?.target;
+      setPaletteOpen(false);
+      setComponentUpdateContext(target ? { targets: [target] } : {});
+    },
+  });
+  commands.push({
     id: COMMAND_IDS.about,
     category: "App",
     title: "About ctmux",
@@ -1671,7 +1689,7 @@ function TerminalWorkbench() {
     run: (args) => {
       const session = attachmentNotifications.recoverySession(args?.value);
       if (!session) return;
-      if (session.target.kind === "ssh") setHostFlow({ target: session.target, update_required: true });
+      if (session.target.kind === "ssh") setComponentUpdateContext({ targets: [session.target] });
       else requestDaemonRestart();
     },
   }, {
@@ -1758,7 +1776,7 @@ function TerminalWorkbench() {
   const paletteShortcutLabel = shortcutLabel(COMMAND_IDS.showPalette);
   const closeShortcutLabel = shortcutLabel(COMMAND_IDS.close);
   const [archives_open, setArchivesOpen] = useState(false);
-  const dialogOpen = archives_open ||
+  const dialogOpen = component_update_context !== null || archives_open ||
     about_dialog_open || credentials_dialog_open ||
     vpn.editor !== null ||
     taskWorkspace.editorId !== null ||
@@ -2235,6 +2253,7 @@ function TerminalWorkbench() {
           />
         ) : addHostOpen ? (
           <SshHostFlow
+            update_targets={connectionTargets}
             suggestions={hostSuggestions}
             tailscaleDevices={tailscaleDevices}
             discoveryLoading={workspace.discoveryLoading}
@@ -2264,6 +2283,7 @@ function TerminalWorkbench() {
           />
         ) : methodDraft ? (
           <SshHostFlow
+            update_targets={connectionTargets}
             suggestions={hostSuggestions}
             warning={discoveryWarning}
             gateways={workspace.ssh_gateways}
@@ -2293,10 +2313,16 @@ function TerminalWorkbench() {
             onAddMethod={() => editMethod(settingsHost)}
             onEditMethod={(method) => editMethod(settingsHost, method)}
             onConnect={(method) => connectHostMethod(hostTarget(settingsHost, workspace.ssh_gateways, method.method_id, workspace.hosts), method.method_id)}
+            on_update_components={() => {
+              const target = hostTarget(settingsHost, workspace.ssh_gateways, undefined, workspace.hosts);
+              setHostSettingsId(null);
+              setComponentUpdateContext({ targets: [target] });
+            }}
             onClose={() => setHostSettingsId(null)}
           />
         ) : hostFlow !== null ? (
           <ConnectHostFlow
+            update_targets={connectionTargets}
             key={hostFlow.manual_reconnect_id ?? "connect-host"}
             suggestions={hostSuggestions}
             warning={discoveryWarning}
@@ -2379,6 +2405,8 @@ function TerminalWorkbench() {
             onCancel={cancelDaemonRestart}
             onSubmit={confirmDaemonRestart}
           />
+        ) : component_update_context ? (
+          <UpdateComponentsDialog targets={connectionTargets} context={component_update_context} on_updated={() => { void hostConnections.refresh(); void vpn.refresh(); }} on_close={() => setComponentUpdateContext(null)} />
         ) : paletteOpen ? (
           <CommandPalette
             commands={commands}

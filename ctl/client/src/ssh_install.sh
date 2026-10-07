@@ -1,5 +1,9 @@
 set -eu
 umask 077
+fail() {
+  printf 'ctl install: %s\n' "$1" >&2
+  exit 1
+}
 base="$HOME/.tokn/ctl"
 versions="$base/versions"
 destination="$versions/__BUNDLE_ID__"
@@ -11,17 +15,17 @@ if [ "$managed" = yes ]; then
   versions="$base/components/bundles/$target"
   destination="$versions/$store_id"
   for directory in "$HOME" "$HOME/.tokn" "$base" "$base/components" "$base/components/bundles" "$versions" "$base/components/selected"; do
-    test ! -L "$directory"
+    test ! -L "$directory" || fail "storage path is a symbolic link: $directory"
     mkdir -p "$directory"
-    test -d "$directory"
+    test -d "$directory" || fail "storage path is not a directory: $directory"
     case "$(uname -s)" in
       Linux) metadata=$(stat -c '%u %a' "$directory") ;;
       Darwin) metadata=$(stat -f '%u %Lp' "$directory") ;;
-      *) exit 1 ;;
+      *) fail 'unsupported installation platform' ;;
     esac
-    test "${metadata%% *}" -eq "$(id -u)"
+    test "${metadata%% *}" -eq "$(id -u)" || fail "storage directory is not owned by this account: $directory"
     mode=$((0${metadata#* }))
-    test "$((mode & 022))" -eq 0
+    test "$((mode & 022))" -eq 0 || fail "storage directory is writable by group or others: $directory"
   done
 fi
 temporary="$versions/.install-__BUNDLE_ID__-$$"
@@ -57,7 +61,7 @@ done
 wait "$receiver"
 receiver=""
 received=$(wc -c < "$archive" | tr -d '[:space:]')
-test "$received" -eq __ARCHIVE_BYTES__
+test "$received" -eq __ARCHIVE_BYTES__ || fail 'incomplete component upload; previous installation was kept'
 expected_sha256="__ARCHIVE_SHA256__"
 if [ -n "$expected_sha256" ]; then
   if command -v sha256sum >/dev/null 2>&1; then
@@ -65,7 +69,7 @@ if [ -n "$expected_sha256" ]; then
   else
     actual_sha256=$(shasum -a 256 "$archive")
   fi
-  test "${actual_sha256%% *}" = "$expected_sha256"
+  test "${actual_sha256%% *}" = "$expected_sha256" || fail 'archive checksum mismatch; previous installation was kept'
 fi
 printf 'ctl-install-progress-v1 receiving %s\n' "$received"
 printf 'ctl-install-progress-v1 extracting\n'

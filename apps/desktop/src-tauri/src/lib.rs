@@ -1,6 +1,7 @@
 mod about;
 mod command_menu;
 mod commands;
+mod component_update;
 mod credentials;
 mod daemon_helper;
 mod dto;
@@ -53,6 +54,8 @@ pub fn run() {
     .on_window_event(cleanup_destroyed_window)
     .invoke_handler(tauri::generate_handler![
       about::get_component_versions,
+      component_update::update_components,
+      component_update::cancel_component_update,
       about::bundles::get_component_bundles,
       about::bundles::select_component_bundle,
       about::restart::preflight_component_action,
@@ -137,6 +140,7 @@ fn cleanup_destroyed_window(window: &tauri::Window, event: &tauri::WindowEvent) 
     use tauri::Manager as _;
     let streams = window.state::<tasks::TaskStreams>().inner().clone();
     let label = window.label().to_owned();
+    component_update::close_window(&label);
     tauri::async_runtime::spawn(async move {
       tokio::join!(
         streams.close_window(&label),

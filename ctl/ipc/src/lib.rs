@@ -15,6 +15,7 @@ use ctl_core::component::ComponentInfo;
 #[cfg(test)]
 use ctl_core::component::ProtocolInfo;
 use ctl_core::protocol::{ProtocolOffer, ProtocolVersion};
+use std::collections::HashMap;
 use std::env;
 use std::future::Future;
 use std::io;
@@ -45,51 +46,77 @@ const MAX_COMPONENT_INFO_BYTES: usize = 16 * 1024;
 /// Lazy discovery and preparation supplied by a daemon client.
 pub type DaemonExecutableFuture = Pin<Box<dyn Future<Output = io::Result<Option<PathBuf>>> + Send>>;
 pub type DaemonExecutableProvider = fn() -> DaemonExecutableFuture;
+/// A provider that can select a helper for a specific advertised contract.
+pub type ContractDaemonExecutableProvider = fn(Option<ProtocolVersion>) -> DaemonExecutableFuture;
 
 static DAEMON_PROVIDER: OnceLock<DaemonProvider> = OnceLock::new();
 
 struct DaemonProvider {
-  callback: Box<dyn Fn() -> DaemonExecutableFuture + Send + Sync>,
-  #[cfg(target_os = "macos")]
+  callback: Box<dyn Fn(Option<ProtocolVersion>) -> DaemonExecutableFuture + Send + Sync>,
   policy: DaemonDiscoveryPolicy,
   executable: OnceLock<PathBuf>,
-  preparing: tokio::sync::Mutex<()>,
+  preparing: tokio::sync::Mutex<HashMap<Option<ProtocolVersion>, PathBuf>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DaemonDiscoveryPolicy {
-  DesktopFirst,
-  SharedFirst,
+  Desktop,
+  Shared,
+  Embedded,
+  Preferred,
 }
 
 impl DaemonProvider {
   fn new(callback: impl Fn() -> DaemonExecutableFuture + Send + Sync + 'static) -> Self {
-    Self::with_policy(callback, DaemonDiscoveryPolicy::DesktopFirst)
+    Self::with_policy(callback, DaemonDiscoveryPolicy::Desktop)
   }
 
   fn with_policy(
     callback: impl Fn() -> DaemonExecutableFuture + Send + Sync + 'static,
     policy: DaemonDiscoveryPolicy,
   ) -> Self {
-    #[cfg(not(target_os = "macos"))]
-    let _ = policy;
+    Self::with_contract_policy(move |_| callback(), policy)
+  }
+
+  fn with_contract_policy(
+    callback: impl Fn(Option<ProtocolVersion>) -> DaemonExecutableFuture + Send + Sync + 'static,
+    policy: DaemonDiscoveryPolicy,
+  ) -> Self {
     Self {
       callback: Box::new(callback),
-      #[cfg(target_os = "macos")]
       policy,
       executable: OnceLock::new(),
-      preparing: tokio::sync::Mutex::const_new(()),
+      preparing: tokio::sync::Mutex::new(HashMap::new()),
     }
   }
 
+  #[cfg(all(test, unix))]
   async fn prepare(&self) -> io::Result<Option<PathBuf>> {
-    let _preparing = self.preparing.lock().await;
-    if let Some(executable) = self.executable.get() {
+    self.prepare_for(None).await
+  }
+
+  async fn prepare_for(&self, required: Option<ProtocolVersion>) -> io::Result<Option<PathBuf>> {
+    let mut prepared = self.preparing.lock().await;
+    if let Some(executable) = prepared.get(&required) {
       return Ok(Some(executable.clone()));
     }
-    let executable = (self.callback)().await?;
+    if required.is_none()
+      && self.policy == DaemonDiscoveryPolicy::Preferred
+      && let Some(executable) = self.executable.get()
+    {
+      let executable = executable.clone();
+      prepared.insert(required, executable.clone());
+      return Ok(Some(executable));
+    }
+    let executable = (self.callback)(required).await?;
     if let Some(executable) = &executable {
-      let _ = self.executable.set(executable.clone());
+      prepared.insert(required, executable.clone());
+      // Release/desktop operation helpers cannot replace their default broker.
+      // Preferred discovery verifies every returned path's broker/lifecycle
+      // contracts too, so its first verified helper can serve sync lookup.
+      if required.is_none() || self.policy == DaemonDiscoveryPolicy::Preferred {
+        let _ = self.executable.set(executable.clone());
+      }
     }
     Ok(executable)
   }
@@ -122,7 +149,55 @@ pub fn register_standalone_daemon_executable_provider(
 ) -> io::Result<()> {
   register_provider(DaemonProvider::with_policy(
     provider,
-    DaemonDiscoveryPolicy::SharedFirst,
+    DaemonDiscoveryPolicy::Shared,
+  ))
+}
+
+/// Registers standalone discovery that receives each operation's helper contract.
+/// The provider must verify both trust and the requested capability. Existing
+/// daemon owners and explicit `CTLD_BIN` overrides retain their priority.
+///
+/// # Errors
+/// Returns an error if another provider is already registered.
+pub fn register_contract_daemon_executable_provider(
+  provider: ContractDaemonExecutableProvider,
+) -> io::Result<()> {
+  register_provider(DaemonProvider::with_contract_policy(
+    provider,
+    DaemonDiscoveryPolicy::Shared,
+  ))
+}
+
+/// Registers a verified local preference before shared and desktop selections.
+/// Unlike an embedded development payload, returning `None` permits ordinary
+/// fallback. Trust failures remain errors. Explicit `CTLD_BIN` overrides retain
+/// priority, and successful default preparation is reused by synchronous lookup.
+/// Every returned helper must also satisfy the broker and lifecycle contracts,
+/// allowing a capability-specific preparation to populate default discovery.
+///
+/// # Errors
+/// Returns an error if another provider is already registered.
+pub fn register_preferred_contract_daemon_executable_provider(
+  provider: ContractDaemonExecutableProvider,
+) -> io::Result<()> {
+  register_provider(DaemonProvider::with_contract_policy(
+    provider,
+    DaemonDiscoveryPolicy::Preferred,
+  ))
+}
+
+/// Registers a signed development CLI's matching embedded helper. Preparation
+/// takes precedence over shared and desktop selections; failure never falls
+/// back to another build. Explicit `CTLD_BIN` overrides still take priority.
+///
+/// # Errors
+/// Returns an error if another provider is already registered.
+pub fn register_development_daemon_executable_provider(
+  provider: ContractDaemonExecutableProvider,
+) -> io::Result<()> {
+  register_provider(DaemonProvider::with_contract_policy(
+    provider,
+    DaemonDiscoveryPolicy::Embedded,
   ))
 }
 
@@ -136,11 +211,13 @@ fn register_provider(provider: DaemonProvider) -> io::Result<()> {
 }
 
 /// Internal evolution counter; advancing it alone does not publish a contract.
-pub const PROTOCOL_BUILD: u16 = 13;
+pub const PROTOCOL_BUILD: u16 = 14;
 pub const CONTRACT_V1_0_12: ProtocolVersion = ProtocolVersion::new(1, 0, 12);
 pub const CONTRACT_V1_1_13: ProtocolVersion = ProtocolVersion::new(1, 1, 13);
-pub const PROTOCOL_VERSION: ProtocolVersion = CONTRACT_V1_1_13;
-pub const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[CONTRACT_V1_0_12, CONTRACT_V1_1_13];
+pub const CONTRACT_V1_1_14: ProtocolVersion = ProtocolVersion::new(1, 1, 14);
+pub const PROTOCOL_VERSION: ProtocolVersion = CONTRACT_V1_1_14;
+pub const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] =
+  &[CONTRACT_V1_0_12, CONTRACT_V1_1_13, CONTRACT_V1_1_14];
 
 #[must_use]
 pub fn protocol_offer() -> ProtocolOffer {
@@ -153,17 +230,19 @@ pub fn protocol_offer() -> ProtocolOffer {
 
 /// Internal build of the one-shot credential, identity, askpass, and proxy APIs.
 /// Published helper contracts are independent of the broker and lifecycle APIs.
-pub const HELPER_API_BUILD: u16 = 4;
+pub const HELPER_API_BUILD: u16 = 5;
 pub const HELPER_API_CONTRACT_V1_0_1: ProtocolVersion = ProtocolVersion::new(1, 0, 1);
 pub const HELPER_API_CONTRACT_V1_1_2: ProtocolVersion = ProtocolVersion::new(1, 1, 2);
 pub const HELPER_API_CONTRACT_V1_1_3: ProtocolVersion = ProtocolVersion::new(1, 1, 3);
 pub const HELPER_API_CONTRACT_V1_1_4: ProtocolVersion = ProtocolVersion::new(1, 1, 4);
-pub const HELPER_API_VERSION: ProtocolVersion = HELPER_API_CONTRACT_V1_1_4;
+pub const HELPER_API_CONTRACT_V1_1_5: ProtocolVersion = ProtocolVersion::new(1, 1, 5);
+pub const HELPER_API_VERSION: ProtocolVersion = HELPER_API_CONTRACT_V1_1_5;
 pub const SUPPORTED_HELPER_API_VERSIONS: &[ProtocolVersion] = &[
   HELPER_API_CONTRACT_V1_0_1,
   HELPER_API_CONTRACT_V1_1_2,
   HELPER_API_CONTRACT_V1_1_3,
   HELPER_API_CONTRACT_V1_1_4,
+  HELPER_API_CONTRACT_V1_1_5,
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -305,6 +384,12 @@ pub fn has_remote_vpn(gateways: &[SshGateway]) -> bool {
 pub fn gateway_route_supported(gateways: &[SshGateway], protocol: ProtocolVersion) -> bool {
   SUPPORTED_PROTOCOL_VERSIONS.contains(&protocol)
     && (!has_remote_vpn(gateways) || protocol >= CONTRACT_V1_1_13)
+}
+
+/// Quiet SSH establishment never opens authentication or credential-save UI.
+#[must_use]
+pub fn quiet_master_supported(protocol: ProtocolVersion) -> bool {
+  SUPPORTED_PROTOCOL_VERSIONS.contains(&protocol) && protocol >= CONTRACT_V1_1_14
 }
 
 /// Resolve a remote VPN's SSH owner using the exact prefix that reaches it.
@@ -515,6 +600,11 @@ pub enum ClientMessage {
     protocol: ProtocolOffer,
   },
   EnsureMaster {
+    target: SshTarget,
+  },
+  /// Reuse an authenticated master or establish one without displaying UI.
+  /// Only a negotiated contract supporting quiet establishment may send this.
+  EnsureMasterQuiet {
     target: SshTarget,
   },
   PromptResponse {
@@ -1050,30 +1140,85 @@ pub fn daemon_executable() -> Result<PathBuf, ConnectError> {
 
 /// Resolves the selected daemon, lazily discovering or preparing a helper.
 /// Explicit overrides retain priority. Desktop clients prefer their signed
-/// bundle; standalone providers verify shared installations first. On macOS,
-/// unsafe managed selections fail before provider preparation. This function
+/// bundle; release providers verify shared installations first. Signed
+/// development providers prepare their matching embedded helper first. On macOS,
+/// unsafe managed selections fail before release provider preparation. This function
 /// never starts or stops a daemon.
 ///
 /// # Errors
 /// Returns discovery, unsafe managed selection, or provider preparation errors.
 pub async fn prepare_daemon_executable() -> Result<PathBuf, ConnectError> {
+  prepare_daemon_with_contract(None).await
+}
+
+/// Selects a helper for an operation requiring one advertised helper contract.
+/// Capability-aware providers may prepare their verified bundled helper when a
+/// shared installation is too old. Explicit `CTLD_BIN` overrides remain
+/// authoritative; release clients also preserve explicit complete selections.
+/// Callers must inspect the returned executable before sending the operation.
+/// This never starts, stops, or restarts a broker.
+///
+/// # Errors
+/// Returns discovery, trust, or preparation errors.
+pub async fn prepare_daemon_executable_for_helper_contract(
+  required: ProtocolVersion,
+) -> Result<PathBuf, ConnectError> {
+  prepare_daemon_with_contract(Some(required)).await
+}
+
+async fn prepare_daemon_with_contract(
+  required: Option<ProtocolVersion>,
+) -> Result<PathBuf, ConnectError> {
   if let Some(executable) = env::var_os(DAEMON_EXECUTABLE_ENV) {
     return Ok(PathBuf::from(executable));
   }
   let current_executable = env::current_exe().map_err(ConnectError::CurrentExecutable)?;
-  prepare_default_daemon(
+  prepare_default_daemon_for_contract(
     &current_executable,
     dirs::home_dir().as_deref(),
     DAEMON_PROVIDER.get(),
+    required,
   )
   .await
 }
 
+#[cfg(all(test, unix))]
 async fn prepare_default_daemon(
   current_executable: &Path,
   home: Option<&Path>,
   provider: Option<&DaemonProvider>,
 ) -> Result<PathBuf, ConnectError> {
+  prepare_default_daemon_for_contract(current_executable, home, provider, None).await
+}
+
+async fn prepare_default_daemon_for_contract(
+  current_executable: &Path,
+  home: Option<&Path>,
+  provider: Option<&DaemonProvider>,
+  required: Option<ProtocolVersion>,
+) -> Result<PathBuf, ConnectError> {
+  if let Some(provider) =
+    provider.filter(|provider| provider.policy == DaemonDiscoveryPolicy::Preferred)
+    && let Some(executable) = provider
+      .prepare_for(required)
+      .await
+      .map_err(ConnectError::PrepareDaemon)?
+  {
+    return Ok(executable);
+  }
+  if let Some(provider) =
+    provider.filter(|provider| provider.policy == DaemonDiscoveryPolicy::Embedded)
+  {
+    return provider
+      .prepare_for(required)
+      .await
+      .map_err(ConnectError::PrepareDaemon)?
+      .ok_or_else(|| {
+        ConnectError::PrepareDaemon(io::Error::other(
+          "the signed development CLI has no matching embedded ctld helper",
+        ))
+      });
+  }
   #[cfg(unix)]
   if let Some(executable) = selected_bundle_daemon(home)? {
     #[cfg(target_os = "macos")]
@@ -1084,7 +1229,9 @@ async fn prepare_default_daemon(
         ))
       })?;
       let _preparing = provider.preparing.lock().await;
-      let verified = (provider.callback)()
+      // A complete build selection is explicit. Verify that exact build;
+      // operation preflight reports missing capabilities without replacing it.
+      let verified = (provider.callback)(None)
         .await
         .map_err(ConnectError::PrepareDaemon)?;
       if verified.as_ref() != Some(&executable) {
@@ -1105,9 +1252,10 @@ async fn prepare_default_daemon(
     }
     validate_managed_selection(home)?;
   }
-  if let Some(provider) = provider
+  if let Some(provider) =
+    provider.filter(|provider| provider.policy != DaemonDiscoveryPolicy::Preferred)
     && let Some(executable) = provider
-      .prepare()
+      .prepare_for(required)
       .await
       .map_err(ConnectError::PrepareDaemon)?
   {
@@ -1134,6 +1282,19 @@ async fn prepare_default_daemon(
 /// Returns an error if the current executable path cannot be determined or a
 /// managed macOS installation is invalid.
 pub fn default_daemon_executable() -> Result<PathBuf, ConnectError> {
+  if let Some(provider) = DAEMON_PROVIDER
+    .get()
+    .filter(|provider| provider.policy == DaemonDiscoveryPolicy::Embedded)
+  {
+    return prepared_daemon(Some(provider)).ok_or_else(|| {
+      ConnectError::PrepareDaemon(io::Error::other(
+        "the signed development helper must be prepared before synchronous discovery",
+      ))
+    });
+  }
+  if let Some(executable) = preferred_daemon(DAEMON_PROVIDER.get()) {
+    return Ok(executable);
+  }
   #[cfg(unix)]
   if let Some(executable) = selected_bundle_daemon(dirs::home_dir().as_deref())? {
     return Ok(executable);
@@ -1162,6 +1323,10 @@ fn prepared_daemon(provider: Option<&DaemonProvider>) -> Option<PathBuf> {
     .cloned()
 }
 
+fn preferred_daemon(provider: Option<&DaemonProvider>) -> Option<PathBuf> {
+  prepared_daemon(provider.filter(|provider| provider.policy == DaemonDiscoveryPolicy::Preferred))
+}
+
 #[cfg(unix)]
 fn selected_bundle_daemon(home: Option<&Path>) -> Result<Option<PathBuf>, ConnectError> {
   let Some(home) = home else {
@@ -1181,7 +1346,12 @@ fn selected_bundle_daemon(home: Option<&Path>) -> Result<Option<PathBuf>, Connec
 
 #[cfg(target_os = "macos")]
 fn shared_first(provider: Option<&DaemonProvider>) -> bool {
-  provider.is_some_and(|provider| provider.policy == DaemonDiscoveryPolicy::SharedFirst)
+  provider.is_some_and(|provider| {
+    matches!(
+      provider.policy,
+      DaemonDiscoveryPolicy::Shared | DaemonDiscoveryPolicy::Preferred
+    )
+  })
 }
 
 fn sibling_or_path_daemon(current_executable: &Path) -> PathBuf {
@@ -1198,6 +1368,9 @@ fn default_macos_daemon(
   home: Option<&Path>,
   provider: Option<&DaemonProvider>,
 ) -> Result<PathBuf, ConnectError> {
+  if let Some(executable) = preferred_daemon(provider) {
+    return Ok(executable);
+  }
   if shared_first(provider) {
     validate_managed_selection(home)?;
     if let Some(executable) = prepared_daemon(provider) {
@@ -1501,6 +1674,32 @@ mod tests {
     assert_eq!(
       protocol_offer().negotiate(&[CONTRACT_V1_0_12]),
       Some(CONTRACT_V1_0_12)
+    );
+  }
+
+  #[test]
+  fn quiet_master_contract_is_explicit_and_retains_historical_requests() {
+    assert!(!quiet_master_supported(CONTRACT_V1_0_12));
+    assert!(!quiet_master_supported(CONTRACT_V1_1_13));
+    assert!(quiet_master_supported(CONTRACT_V1_1_14));
+    assert!(!quiet_master_supported(ProtocolVersion::new(1, 2, 15)));
+    for contract in SUPPORTED_PROTOCOL_VERSIONS {
+      assert_eq!(protocol_offer().negotiate(&[*contract]), Some(*contract));
+    }
+    let historical = serde_json::json!({
+      "type": "ensure_master",
+      "target": { "destination": "fixture", "hostname": null, "user": null,
+        "port": null, "identity_file": null }
+    });
+    let request: ClientMessage = serde_json::from_value(historical.clone()).unwrap();
+    assert!(matches!(request, ClientMessage::EnsureMaster { .. }));
+    let mut quiet = historical;
+    quiet["type"] = serde_json::json!("ensure_master_quiet");
+    let request: ClientMessage = serde_json::from_value(quiet).unwrap();
+    assert!(matches!(request, ClientMessage::EnsureMasterQuiet { .. }));
+    assert_eq!(
+      serde_json::to_value(request).unwrap()["type"],
+      "ensure_master_quiet"
     );
   }
 

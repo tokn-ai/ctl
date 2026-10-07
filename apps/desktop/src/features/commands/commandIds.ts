@@ -1,5 +1,6 @@
 export const COMMAND_IDS = {
   about: "app.about",
+  updateComponents: "app.update_components",
   credentials: "app.credentials",
   showPalette: "view.show_command_palette",
   showNotifications: "view.show_notifications",

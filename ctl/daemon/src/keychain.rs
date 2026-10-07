@@ -9,6 +9,8 @@ use zeroize::Zeroizing;
 
 use crate::credential_metadata::{self, Attributes, Metadata, SERVICE_PREFIX};
 
+pub(crate) mod approval;
+pub(crate) mod approval_scope;
 mod availability;
 mod clear;
 mod discovery;
@@ -73,22 +75,34 @@ pub(crate) fn credential_name(target: &SshTarget, prompt: &str) -> String {
   purpose::credential(target, prompt)
 }
 
-pub fn load(target: &SshTarget, prompt: &str) -> Result<Option<Zeroizing<String>>, Error> {
-  let _operation = operation::acquire()?;
+pub(crate) fn load_for_connection(
+  target: &SshTarget,
+  prompt: &str,
+  authorization: &approval::Attempt,
+) -> Result<Option<Zeroizing<String>>, Error> {
+  let operation = operation::acquire()?;
   let reason = format!(
     "Read {} to authenticate this SSH connection",
     credential_name(target, prompt)
   );
   let account = digest(prompt.as_bytes());
   lookup_scopes(target, |scope| {
-    let records = ctl_keychain_client::search(&Query {
-      service: Some(&format!("{KEYCHAIN_SERVICE_PREFIX}.{scope}")),
-      account: Some(&account),
-      limit: 1,
-      secret: true,
-      authentication: Authentication::Allow { reason: &reason },
-    })?;
-    records.into_iter().next().map(secret_string).transpose()
+    let service = format!("{KEYCHAIN_SERVICE_PREFIX}.{scope}");
+    authorization.read(
+      &operation,
+      &format!("{service}:{account}"),
+      &reason,
+      |authentication| {
+        let records = ctl_keychain_client::search(&Query {
+          service: Some(&service),
+          account: Some(&account),
+          limit: 1,
+          secret: true,
+          authentication,
+        })?;
+        records.into_iter().next().map(secret_string).transpose()
+      },
+    )
   })
 }
 
@@ -151,7 +165,7 @@ pub fn save(target: &SshTarget, secrets: &HashMap<String, Zeroizing<String>>) ->
       "Save {} in Keychain for future SSH connections",
       credential_name(target, prompt)
     );
-    let pending = index::begin_mutation()?;
+    let pending = index::begin_secret_mutation()?;
     replace_scopes(
       target,
       |scope| {
@@ -162,7 +176,7 @@ pub fn save(target: &SshTarget, secrets: &HashMap<String, Zeroizing<String>>) ->
           label: &metadata.name(),
           comment: &comment,
           data: secret.as_bytes(),
-          biometric: true,
+          user_presence: true,
           authentication: Authentication::Allow { reason: &reason },
         })?;
         let now = SystemTime::now()
@@ -230,7 +244,7 @@ pub fn never_save(target: &SshTarget) -> Result<(), Error> {
     label: "ctmux credential save preference",
     comment: "",
     data: NEVER_SAVE,
-    biometric: false,
+    user_presence: false,
     authentication: Authentication::Forbid,
   })?;
   Ok(())
@@ -243,7 +257,7 @@ pub fn delete(target: &SshTarget) -> Result<(), Error> {
 
 fn delete_inner(target: &SshTarget) -> Result<(), Error> {
   let (credentials, _, _) = index::list()?;
-  let pending = index::begin_mutation()?;
+  let pending = index::begin_secret_mutation()?;
   let reason = format!(
     "Remove saved SSH credentials for {} from Keychain",
     purpose::connection(target)
@@ -330,7 +344,7 @@ pub fn forget(credential_id: &str) -> Result<(), Error> {
     purpose::stored_credential,
   );
   let reason = format!("Remove {name} from Keychain");
-  let pending = index::begin_mutation()?;
+  let pending = index::begin_secret_mutation()?;
   ctl_keychain_client::delete(
     &service,
     Some(account_id),

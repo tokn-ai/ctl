@@ -149,6 +149,12 @@ async fn run(arguments: Arguments) -> Result<(), MainError> {
 
 fn companion_binary(name: &str) -> Option<PathBuf> {
   let current = env::current_exe().ok()?;
+  if name == "ctld" {
+    let app = current.parent()?.join("ctld.app/Contents/MacOS/ctld");
+    if app.is_file() {
+      return Some(app);
+    }
+  }
   let sibling = current.with_file_name(format!("{name}{}", env::consts::EXE_SUFFIX));
   (sibling.is_absolute() && sibling.is_file()).then_some(sibling)
 }

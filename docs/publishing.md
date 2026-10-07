@@ -125,7 +125,7 @@ immutable version when its release metadata matches.
 
 `CTLD_BIN` continues to override discovery. Ordinary debug CLI and GUI builds
 first check this checkout's provisioned signed helper under the configured
-target directory. Prepare it with `pnpm ctld:signed` from the repository root;
+target directory. Prepare it with `pnpm ctld:build` from the repository root;
 neither consumer needs signing. Checkout selections are isolated from shared
 defaults. Without a compatible local helper, the standalone macOS CLI
 prefers a verified compatible managed app, then its own bundled helper, then a

@@ -98,14 +98,18 @@ For local macOS CLI and GUI development, run the shared provisioning commands
 from the repository root:
 
 ```sh
-pnpm provision
+pnpm ctld:provision
 # In Xcode, choose your team in Signing & Capabilities and build once.
-pnpm ctld:signed
+pnpm ctld:build
 cargo run -p ctl-cli -- passwords
-pnpm desktop:dev
 ```
 
-The build detects the native Rust target and workspace version, finds or
+For GUI development, `pnpm desktop:dev` automatically builds and stages signed
+helpers on macOS. Its managed worktree daemon survives app reloads; running
+`ctld:build` first is unnecessary. The standard Tauri command can also launch a
+direct debug GUI build that discovers the same selected helper as the CLI.
+
+The `ctld:build` command detects the native Rust target and workspace version, finds or
 refreshes the provisioning profile, and chooses its matching Keychain
 certificate. The component command compiles `ctld`, signs the complete app,
 and atomically publishes its checkout selection under
@@ -117,7 +121,7 @@ independently of the current directory. Worktrees sharing a target directory hav
 separate selections. Repeat this preparation after helper changes; ordinary CLI
 edits need only a Cargo rebuild.
 
-One `pnpm ctld:signed` output supplies both consumers; no development CLI
+One `pnpm ctld:build` output supplies both consumers; no development CLI
 embedding or signing step is needed. It allows local source changes and needs
 no notarization credentials. Its receipt binds the helper's revision, source
 fingerprint, and dirty flag. Preparation leaves shared component selections and

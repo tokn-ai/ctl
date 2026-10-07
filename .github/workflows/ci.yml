@@ -197,8 +197,16 @@ jobs:
       - name: Check types
         run: pnpm check
 
+      - name: Check workspace command entry points
+        run: |
+          pnpm desktop:dev --help
+          pnpm desktop:build --help
+          pnpm ctld:build --help
+          pnpm ctld:provision --help
+          pnpm bundles:sync --help
+
       - name: Run frontend tests
-        run: pnpm test:frontend
+        run: pnpm desktop:test
 
       - name: Build frontend
-        run: pnpm build
+        run: pnpm --filter ctmux-app build

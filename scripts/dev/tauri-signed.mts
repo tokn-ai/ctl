@@ -8,24 +8,40 @@ import {
   rm,
 } from "node:fs/promises";
 import path from "node:path";
+import { constants } from "node:os";
 import { serveAppSupervisor } from "./signed-app-supervisor.mts";
 import { SignedDaemon } from "./signed-daemon.mts";
 import { createSignedSupervisorDirectory, prepareSignedRuntime } from "./signed-runtime.mts";
-import { getCargoTargetDirectory, openProvisioningProject, prepareProvisioningProfile } from "./macos-provisioning.mts";
+import { getCargoTargetDirectory, prepareProvisioningProfile } from "./macos-provisioning.mts";
 
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = path.resolve(scriptDirectory, "../..");
 const appDirectory = path.join(repositoryRoot, "apps/desktop");
 async function main(): Promise<void> {
-  if (process.platform !== "darwin") {
-    throw new Error("signed Tauri development is only available on macOS");
+  const args = process.argv.slice(2);
+  const separator = args.indexOf("--");
+  const tauriArgs = separator < 0 ? args : args.slice(0, separator);
+  if (process.platform !== "darwin" || tauriArgs.includes("--help") || tauriArgs.includes("-h")) {
+    // Use the CLI's Node entry point so Windows needs no shell or .cmd wrapper.
+    // Help must also work before a developer has provisioned their Mac.
+    const tauri = spawn(process.execPath, [
+      path.join(appDirectory, "node_modules/@tauri-apps/cli/tauri.js"), "dev", ...args,
+    ], { cwd: appDirectory, stdio: "inherit" });
+    const interrupt = () => tauri.kill("SIGINT");
+    const terminate = () => tauri.kill("SIGTERM");
+    process.on("SIGINT", interrupt);
+    process.on("SIGTERM", terminate);
+    try {
+      const { code, signal } = await waitForExit(tauri);
+      process.exitCode = code ?? (signal ? 128 + constants.signals[signal] : 1);
+    } finally {
+      process.off("SIGINT", interrupt);
+      process.off("SIGTERM", terminate);
+    }
+    return;
   }
 
   const targetDirectory = await getCargoTargetDirectory(repositoryRoot);
-  if (process.argv.slice(2).includes("--provision")) {
-    await openProvisioningProject({ repository_root: repositoryRoot, target_directory: targetDirectory });
-    return;
-  }
 
   let supervisorDirectory: string | undefined;
   let daemon: SignedDaemon | undefined;
@@ -45,7 +61,7 @@ async function main(): Promise<void> {
   try {
     const profile = await prepareProvisioningProfile({
       repository_root: repositoryRoot, target_directory: targetDirectory,
-      provision_command: "pnpm provision",
+      provision_command: "pnpm ctld:provision",
     });
     const tauriConfig = JSON.parse(
       await readFile(path.join(appDirectory, "src-tauri/tauri.conf.json"), "utf8"),

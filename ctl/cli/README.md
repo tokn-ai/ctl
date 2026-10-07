@@ -46,7 +46,7 @@ identified CLI and match that source revision. Compatible cache entries work
 offline and can serve any host with that platform.
 Interrupted downloads never publish a partial entry; damaged cache entries are
 downloaded again. Explicit bundle overrides still reject invalid contents.
-Source developers can prepare their exact bundles with `pnpm agents:sync` from
+Source developers can prepare their exact bundles with `pnpm bundles:sync` from
 `apps/desktop`. Windows remote companions must be installed manually. On macOS,
 Touch ID-protected credential storage
 requires the signed, provisioned `ctld` helper; Cargo installation alone does

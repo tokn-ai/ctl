@@ -165,7 +165,7 @@ fn bundle_error(error: remote_bundle::Error) -> CommandErrorDto {
     remote_bundle::Error::Invalid(message) => bundle_invalid(message),
     remote_bundle::Error::Stale(_) => CommandErrorDto::new(
       "remote_agent_bundle_stale",
-      "The remote component bundle does not match this app build. Commit component changes, run `pnpm agents:sync` from the repository root for that exact revision, and rebuild the app before updating this host.",
+      "The remote component bundle does not match this app build. Commit component changes, run `pnpm bundles:sync` from the repository root for that exact revision, and rebuild the app before updating this host.",
     ),
     remote_bundle::Error::UnsupportedTarget(target) => CommandErrorDto::new(
       "unsupported_remote_agent_target",
@@ -183,7 +183,7 @@ fn bundle_invalid(message: impl Into<String>) -> CommandErrorDto {
 
 fn bundle_unavailable() -> CommandErrorDto {
   let message = if cfg!(debug_assertions) {
-    "No remote bundle set is available for development. Run `pnpm agents:sync` from the repository root."
+    "No remote bundle set is available for development. Run `pnpm bundles:sync` from the repository root."
   } else {
     "The app package does not include its remote component bundle set."
   };
@@ -305,7 +305,7 @@ mod tests {
       )
       .unwrap_err();
       assert_eq!(error.code, "remote_agent_bundle_unavailable");
-      assert!(error.message.contains("pnpm agents:sync"));
+      assert!(error.message.contains("pnpm bundles:sync"));
     }
   }
 

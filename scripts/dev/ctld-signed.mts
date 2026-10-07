@@ -172,11 +172,17 @@ function shellQuote(value: string): string {
 }
 
 async function main(): Promise<void> {
-  if (process.platform !== "darwin") throw new Error("signed helper development is only available on macOS");
   const args = process.argv.slice(2);
-  if (args.length > 1 || (args.length === 1 && args[0] !== "--provision")) {
-    throw new Error("usage: pnpm provision | pnpm ctld:signed");
+  if (args.includes("--help") || args.includes("-h")) {
+    console.log("usage: pnpm ctld:provision | pnpm ctld:build");
+    console.log("  ctld:provision  open the shared Xcode provisioning project");
+    console.log("  ctld:build      build and select a signed development ctld.app");
+    return;
   }
+  if (args.length > 1 || (args.length === 1 && args[0] !== "--provision")) {
+    throw new Error("usage: pnpm ctld:provision | pnpm ctld:build");
+  }
+  if (process.platform !== "darwin") throw new Error("signed helper development is only available on macOS");
   if (args[0] === "--provision") {
     await openProvisioningProject({ repository_root, target_directory: await getCargoTargetDirectory(repository_root) });
   } else {

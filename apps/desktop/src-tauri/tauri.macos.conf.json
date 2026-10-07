@@ -1,6 +1,6 @@
 {
   "build": {
     "runner": "../../../scripts/dev/tauri-cargo.sh",
-    "beforeDevCommand": "pnpm --workspace-root dev"
+    "beforeDevCommand": "pnpm --workspace-root bundles:check && pnpm --workspace-root --filter ctmux-app dev"
   }
 }

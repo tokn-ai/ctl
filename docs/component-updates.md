@@ -135,7 +135,7 @@ inspection `errors`; `target_triple` is null for an unfiltered inventory.
 Listing is read-only. Selecting a listed included build imports its exact
 verified content before changing the requested selection.
 
-`pnpm agents:sync` also imports and selects all four CI upload targets in this
+`pnpm bundles:sync` also imports and selects all four CI upload targets in this
 shared store, after copying the verified resources needed to package the desktop.
 Use `--source release` when importing a release bundle-set. Schema-2 manifests
 must advertise all four components; legacy schema-1 artifacts cannot become a

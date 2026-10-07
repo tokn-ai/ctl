@@ -223,6 +223,56 @@ impl BundleFixture {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn agent_installer_reports_progress_before_the_receiver_opens_the_archive() {
+  use crate::remote_bundle::compatibility::tests::Fixture;
+  use ctl_core::bundles::Source;
+  use std::sync::Mutex;
+
+  let fixture = BundleFixture::new();
+  let bundle = crate::components::import_remote(
+    &fixture.directory.join("import-home"),
+    &Fixture::new("0.0.9", &"b".repeat(40)).bundle(),
+    "aarch64-apple-darwin",
+    Source::Ci,
+  )
+  .unwrap();
+  let archive = crate::component_update::agent_archive(&bundle).unwrap();
+  // Hold the background receiver until the first foreground size poll. This
+  // reproduces the CI scheduling order without relying on a timing delay.
+  let script = agent_script(&archive, None)
+    .unwrap()
+    .replace(
+      "cat <&3 > \"$archive\" &",
+      "( while [ ! -e \"$temporary/polled\" ]; do sleep 0.01; done; cat <&3 > \"$archive\" ) &",
+    )
+    .replace(
+      "  received=$(wc -c < \"$archive\" | tr -d '[:space:]')",
+      "  received=$(wc -c < \"$archive\" | tr -d '[:space:]')\n  : > \"$temporary/polled\"",
+    );
+  let mut command = Command::new("sh");
+  command
+    .args(["-c", &script])
+    .env("HOME", fixture.directory.join("home"));
+  let events = Mutex::new(Vec::new());
+  tokio::time::timeout(
+    std::time::Duration::from_secs(10),
+    run_package_install(command, &archive, true, |event| {
+      events.lock().unwrap().push(event);
+    }),
+  )
+  .await
+  .unwrap()
+  .unwrap();
+  let events = events.into_inner().unwrap();
+  assert_eq!(
+    events[1],
+    RemoteInstallEvent::Receiving { received_bytes: 0 }
+  );
+  assert_eq!(events.last(), Some(&RemoteInstallEvent::Complete));
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn installer_activates_components_despite_shell_startup_output() {
   let fixture = BundleFixture::new();
   tokio::time::timeout(

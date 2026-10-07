@@ -1,10 +1,9 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import { chooseDesktopDevPort } from "./dev/server-options";
 
-// @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;
-const devPort = 1430;
-const hmrPort = 1431;
+const dynamicPort = process.env.CTL_DESKTOP_DYNAMIC_PORT === "1";
 
 // https://vite.dev/config/
 export default defineConfig(async () => ({
@@ -14,16 +13,16 @@ export default defineConfig(async () => ({
   //
   // 1. prevent Vite from obscuring rust errors
   clearScreen: false,
-  // 2. tauri expects a fixed port, fail if that port is not available
+  // Raw `tauri dev` uses its template URL. The root launcher overrides this
+  // with an already-bound port; browser previews can also select a free port.
   server: {
-    port: devPort,
-    strictPort: true,
+    port: dynamicPort ? chooseDesktopDevPort() : 1430,
+    strictPort: !dynamicPort,
     host: host || false,
     hmr: host
       ? {
           protocol: "ws",
           host,
-          port: hmrPort,
         }
       : undefined,
     watch: {

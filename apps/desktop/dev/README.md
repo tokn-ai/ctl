@@ -1,7 +1,7 @@
 # Browser visual preview
 
 From the repository root, run `pnpm desktop:preview` and open
-`http://127.0.0.1:1430/preview.html`.
+`/preview.html` at the URL Vite prints. Each launch selects an available port.
 
 This renders the real application and xterm components with a sample workspace
 using the official Tauri IPC and window mocks. It creates no shell processes,

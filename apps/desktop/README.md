@@ -135,6 +135,9 @@ pnpm desktop:dev
 On macOS, this uses the signed helper launcher by default. Complete the
 [local provisioning setup](../../README.md#build) once before launching.
 Linux and Windows use ordinary native Tauri development.
+The root launcher starts Vite on an available port and gives Tauri the actual
+URL. Hot reload uses the same port, and Vite keeps it through config reloads.
+An existing frontend does not block another launch.
 
 On macOS and Linux, Tauri builds `ctld`, `ctmuxd`, and `ctl-taskd` before every native
 launch, including Rust hot reloads. The Cargo runner preserves the selected
@@ -148,8 +151,9 @@ All commands below run from the repository root. The desktop package keeps
 the standard Tauri/Vite scripts: `dev` starts Vite, `build` builds the frontend,
 `preview` previews that build, and `tauri` invokes the Tauri CLI. Provisioning,
 signing, daemon and bundle commands, checks, and tests live at the root.
-Root `pnpm desktop:dev` wraps `tauri dev` with macOS helper signing and
-supervision; other platforms delegate directly to the Tauri CLI.
+Root `pnpm desktop:dev` starts the frontend and configures `tauri dev` on every
+platform, adding helper signing and supervision on macOS. Direct
+`pnpm --filter ctmux-app tauri dev` retains the template's fixed port.
 
 Development startup also performs a local-only bundle preflight. It warns but does
 not block local or already-provisioned SSH work when remote install bundles are
@@ -585,7 +589,7 @@ bottom of the activity bar opens shortcut configuration. Closing a tab keeps its
 session running; **Terminate session** is the separate destructive action.
 
 For a browser preview with sample data, run `pnpm desktop:preview`
-and open `http://127.0.0.1:1430/preview.html`. This development-only entry renders
+and open `/preview.html` at the URL Vite prints. This development-only entry renders
 the actual UI using in-memory Tauri mocks. It cannot execute terminal commands
 or open SSH connections. See [preview details](dev/README.md).
 

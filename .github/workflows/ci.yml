@@ -200,6 +200,7 @@ jobs:
       - name: Check workspace command entry points
         run: |
           pnpm desktop:dev --help
+          pnpm desktop:preview --help
           pnpm desktop:build --help
           pnpm ctld:build --help
           pnpm ctld:provision --help

@@ -12,7 +12,7 @@
     "test": "pnpm scripts:test && pnpm desktop:test",
     "desktop:dev": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/dev/tauri-signed.mts",
     "desktop:build": "pnpm --filter ctmux-app tauri build",
-    "desktop:preview": "pnpm --filter ctmux-app exec vite --host 127.0.0.1",
+    "desktop:preview": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/dev/desktop-preview.mts",
     "desktop:check": "pnpm --filter ctmux-app exec tsc --noEmit",
     "desktop:test": "pnpm --filter ctmux-app exec vitest run",
     "ctld:provision": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/dev/ctld-signed.mts --provision",

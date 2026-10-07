@@ -134,8 +134,11 @@ Root commands use `<scope>:<action>`. Signing is part of `ctld:build` and macOS
 
 The desktop package's standard scripts can also be invoked from the root with
 `pnpm --filter ctmux-app dev` or `pnpm --filter ctmux-app build`.
-Native startup checks staged bundles before starting the frontend; frontend-only
+Native startup checks staged bundles before launching the app; frontend-only
 development and the sample preview do not require remote bundles.
+`desktop:dev` and `desktop:preview` select an available port, starting at a random
+port. The native launcher passes Vite's actual URL to Tauri and its development
+security policy; hot reload shares that port. Parallel launches can coexist.
 Arguments pass through, for example `pnpm desktop:dev --release` or
 `pnpm bundles:sync --main`. Signing commands keep their existing selection and
 restart behavior: preparing a helper never restarts an existing daemon.

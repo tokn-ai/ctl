@@ -1,3 +1,4 @@
+use crate::history_snapshot::PhysicalHistory;
 use crate::session::{
   AttachSnapshot, AttachmentRegistration, SessionControlError, SessionEvent, SessionManager,
   SessionManagerError, Terminal,
@@ -10,10 +11,8 @@ use ctmux_ipc::{
 use ctmux_proto::{
   ClientMessage, CodecError, ErrorCode, FrameReader, LeaseKind, MAX_HISTORY_PAGE_BYTES,
   PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS, ServerMessage, ShellState,
-  TerminalHistoryManifest, TerminalHistoryRow, TerminalHistorySnapshot, normalize_history_rows,
-  read_frame, write_frame,
+  TerminalHistoryManifest, TerminalHistorySnapshot, read_frame, write_frame,
 };
-use sha2::{Digest, Sha256};
 use std::collections::VecDeque;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -46,7 +45,6 @@ const MAX_PRESENTATION_WINDOW_BYTES: u64 = 8 * 1024 * 1024;
 const MIN_OUTPUT_FRAME_CHARGE_BYTES: u64 = 4 * 1024;
 const MAX_OUTPUT_FRAME_BYTES: usize = 64 * 1024;
 const HISTORY_SNAPSHOT_IDLE_TTL: Duration = Duration::from_mins(2);
-const MAX_PINNED_HISTORY_BYTES: usize = 16 * 1024 * 1024;
 const MAX_RECENT_HISTORY_BYTES: usize = 16 * 1024;
 const MAX_RECENT_HISTORY_LINES: usize = 64;
 const LOCAL_CONTROL_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(3);
@@ -894,6 +892,15 @@ async fn handle_view_request(
       expected_revision,
       layout,
     } => {
+      if !ctmux_proto::supports_pane_resize(protocol_version) && layout.has_weights() {
+        send_error(
+          &mut stream,
+          ErrorCode::InvalidRequest,
+          "split weights require contract 1.1.16",
+        )
+        .await?;
+        return Ok(());
+      }
       let result = tokio::task::spawn_blocking(move || {
         sessions.update_view(&session, expected_revision, layout)
       })
@@ -974,14 +981,25 @@ async fn write_view_result(
   protocol_version: ctl_core::protocol::ProtocolVersion,
 ) -> Result<(), CodecError> {
   match result {
-    Ok(mut view) => {
-      if protocol_version != ctmux_proto::CONTRACT_V1_1_15 {
-        view.zoomed_terminal_id = None;
-      }
+    Ok(view) => {
+      let view = view_for_contract(view, protocol_version);
       write_frame(stream, &ServerMessage::ViewSnapshot { view }).await
     }
     Err(error) => send_session_manager_error(stream, &error).await,
   }
+}
+
+fn view_for_contract(
+  mut view: ctmux_proto::ViewInfo,
+  protocol_version: ctl_core::protocol::ProtocolVersion,
+) -> ctmux_proto::ViewInfo {
+  if !ctmux_proto::supports_view_zoom(protocol_version) {
+    view.zoomed_terminal_id = None;
+  }
+  if !ctmux_proto::supports_pane_resize(protocol_version) {
+    view.layout.clear_weights();
+  }
+  view
 }
 
 async fn handle_kill_session_request(
@@ -1210,6 +1228,7 @@ struct PreparedAttachment {
   events: broadcast::Receiver<SessionEvent>,
   shell_state_updates: watch::Receiver<ShellState>,
   view_updates: watch::Receiver<Option<ctmux_proto::ViewInfo>>,
+  layout_lease_updates: watch::Receiver<()>,
 }
 
 impl PreparedAttachment {
@@ -1279,9 +1298,12 @@ fn prepared_attachment(
   shell_state_updates: watch::Receiver<ShellState>,
 ) -> PreparedAttachment {
   let mut view_updates = session.subscribe_view();
+  let mut layout_lease_updates = session.subscribe_layout_leases();
   // Deliver the current view even when this attachment does not resize it.
   // Subscription precedes initial PTY work, so later mutations cannot be lost.
   view_updates.mark_changed();
+  // Admission can race a lease change before the initial attached reply.
+  layout_lease_updates.mark_changed();
   PreparedAttachment {
     session,
     attachment_id: registration.attachment_id,
@@ -1293,6 +1315,7 @@ fn prepared_attachment(
     events,
     shell_state_updates,
     view_updates,
+    layout_lease_updates,
   }
 }
 
@@ -1302,24 +1325,13 @@ async fn handle_attach(
   request: AttachParameters,
 ) -> Result<(), ConnectionError> {
   let mut attachment_guard = attachment.guard(request.attachment_liveness_timeout);
-  let PreparedAttachment {
-    session,
-    attachment_id,
-    attachment_token,
-    attachment_leases,
-    superseded,
-    events,
-    shell_state_updates,
-    view_updates,
-    ..
-  } = attachment;
   let initial_delivery_deadline = initial_attachment_delivery_deadline();
 
-  if attachment_leases.layout.owned_by_client
+  if attachment.attachment_leases.layout.owned_by_client
     && !apply_initial_resize(
       &mut stream,
-      Arc::clone(&session),
-      attachment_id.clone(),
+      Arc::clone(&attachment.session),
+      attachment.attachment_id.clone(),
       request.client_terminal_size.clone(),
       initial_delivery_deadline,
     )
@@ -1330,7 +1342,7 @@ async fn handle_attach(
 
   let Some(mut snapshot) = take_initial_snapshot(
     &mut stream,
-    Arc::clone(&session),
+    Arc::clone(&attachment.session),
     request.resume_from,
     initial_delivery_deadline,
   )
@@ -1340,41 +1352,39 @@ async fn handle_attach(
   };
   let initial_shell_state = shell_state_for_attachment(
     snapshot.shell_state.clone(),
-    request.request_command_line && attachment_leases.input.owned_by_client,
-    request.request_running_command && attachment_leases.input.owned_by_client,
+    request.request_command_line && attachment.attachment_leases.input.owned_by_client,
+    request.request_running_command && attachment.attachment_leases.input.owned_by_client,
   );
   let checkpoint_geometry_revision = snapshot.checkpoint_geometry_revision;
   let sent_sequence = snapshot.journal.replay_from;
   let applied_sequence = snapshot.checkpoint.is_none().then_some(sent_sequence);
   let pinned_history = pin_snapshot_history(&mut snapshot, request.protocol_version)?;
   let (reader, mut writer) = tokio::io::split(stream);
-  match timeout_at(
+  if !send_initial_attachment(
+    &mut writer,
+    snapshot,
+    &request,
+    &attachment,
+    initial_shell_state.clone(),
+    pinned_history
+      .as_ref()
+      .map(|history| history.manifest.clone()),
     initial_delivery_deadline,
-    send_attached(
-      &mut writer,
-      snapshot,
-      request.client_terminal_size,
-      attachment_leases,
-      attachment_token,
-      initial_shell_state.clone(),
-      pinned_history
-        .as_ref()
-        .map(|history| history.manifest.clone()),
-    ),
   )
-  .await
+  .await?
   {
-    Ok(result) => result?,
-    Err(_) => return Ok(()),
+    return Ok(());
   }
   attachment_guard.preserve_on_drop = true;
 
-  let attachment = LiveAttachment {
+  let live_attachment = LiveAttachment {
     reader: FrameReader::new(reader),
     writer,
-    events,
-    shell_state_updates,
-    view_updates,
+    events: attachment.events,
+    shell_state_updates: attachment.shell_state_updates,
+    view_updates: attachment.view_updates,
+    layout_lease_updates: attachment.layout_lease_updates,
+    layout_lease_status: attachment.attachment_leases.layout,
     sent_sequence,
     checkpoint_geometry_revision,
     shell_state_revision: initial_shell_state.revision,
@@ -1384,16 +1394,16 @@ async fn handle_attach(
     in_flight_charge_bytes: 0,
     request_command_line: request.request_command_line,
     request_running_command: request.request_running_command,
-    superseded,
+    superseded: attachment.superseded,
     pinned_history,
     pending_history: None,
     pending_checkpoint: false,
     protocol_version: request.protocol_version,
   };
   let exit = drive_attachment(
-    attachment,
-    session,
-    attachment_id,
+    live_attachment,
+    attachment.session,
+    attachment.attachment_id,
     request.attachment_liveness_timeout,
     Instant::now() + request.attachment_liveness_timeout,
   )
@@ -1402,6 +1412,34 @@ async fn handle_attach(
     attachment_guard.close_now();
   }
   Ok(())
+}
+
+async fn send_initial_attachment(
+  writer: &mut OwnedWriteHalf,
+  snapshot: AttachSnapshot,
+  request: &AttachParameters,
+  attachment: &PreparedAttachment,
+  shell_state: ShellState,
+  history_manifest: Option<TerminalHistoryManifest>,
+  deadline: Instant,
+) -> Result<bool, ConnectionError> {
+  match timeout_at(
+    deadline,
+    send_attached(
+      writer,
+      snapshot,
+      request.client_terminal_size.clone(),
+      attachment.attachment_leases.clone(),
+      attachment.attachment_token.clone(),
+      shell_state,
+      history_manifest,
+    ),
+  )
+  .await
+  {
+    Ok(result) => result.map(|()| true),
+    Err(_) => Ok(false),
+  }
 }
 
 async fn apply_initial_resize(
@@ -1456,6 +1494,8 @@ struct LiveAttachment {
   events: broadcast::Receiver<SessionEvent>,
   shell_state_updates: watch::Receiver<ShellState>,
   view_updates: watch::Receiver<Option<ctmux_proto::ViewInfo>>,
+  layout_lease_updates: watch::Receiver<()>,
+  layout_lease_status: ctmux_proto::LeaseStatus,
   sent_sequence: u64,
   /// Internal ordering for geometry changes represented by the last checkpoint.
   checkpoint_geometry_revision: Option<u64>,
@@ -1481,7 +1521,7 @@ struct HistoryRequest {
 /// One bounded immutable transfer snapshot, not a persistent history log.
 struct PinnedHistory {
   manifest: TerminalHistoryManifest,
-  data: Vec<u8>,
+  data: Arc<Vec<u8>>,
   last_access: Instant,
   served_end: usize,
 }
@@ -1489,24 +1529,12 @@ struct PinnedHistory {
 impl PinnedHistory {
   fn new(
     history: &TerminalHistorySnapshot,
-    rows: &[TerminalHistoryRow],
+    rows: &PhysicalHistory,
     scrollback_limit: u64,
   ) -> Result<(Self, TerminalHistorySnapshot), ConnectionError> {
-    let mut data = Vec::new();
-    for row in rows {
-      serde_json::to_writer(&mut data, row).map_err(io::Error::other)?;
-      data.push(b'\n');
-      if data.len() > MAX_PINNED_HISTORY_BYTES {
-        return Err(
-          io::Error::new(
-            io::ErrorKind::InvalidData,
-            "history snapshot exceeds its byte bound",
-          )
-          .into(),
-        );
-      }
-    }
-    let lines = normalize_history_rows(rows);
+    let encoded = rows.encoded()?;
+    let data = Arc::clone(&encoded.data);
+    let lines = rows.lines();
     let mut first_line = lines.len();
     let mut recent_bytes = 0;
     while first_line > 0 && lines.len() - first_line < MAX_RECENT_HISTORY_LINES {
@@ -1530,11 +1558,19 @@ impl PinnedHistory {
       total_lines: lines.len() as u64,
       first_line: first_line as u64,
       truncated: history.truncated,
-      content_hash: format!("{:x}", Sha256::digest(&data)),
+      content_hash: encoded.content_hash.clone(),
       scrollback_limit,
     };
-    let mut recent = history.clone();
-    recent.lines = lines[first_line..].to_vec();
+    let recent = TerminalHistorySnapshot {
+      format: history.format.clone(),
+      format_version: history.format_version,
+      sequence: history.sequence,
+      generation: history.generation,
+      revision: history.revision,
+      retained_bytes: history.retained_bytes,
+      truncated: history.truncated,
+      lines: lines[first_line..].to_vec(),
+    };
     Ok((
       Self {
         manifest,
@@ -1592,7 +1628,8 @@ fn pin_snapshot_history(
   let Some(history) = snapshot.history.as_ref() else {
     return Ok(None);
   };
-  let rows = snapshot.history_rows.as_deref().unwrap_or_default();
+  let empty = PhysicalHistory::default();
+  let rows = snapshot.history_rows.as_deref().unwrap_or(&empty);
   let (pinned, recent) = PinnedHistory::new(history, rows, snapshot.scrollback_limit)?;
   snapshot.history = Some(recent);
   Ok(Some(pinned))
@@ -1656,15 +1693,7 @@ async fn drive_attachment(
     }
     // Like terminal events, shared view metadata gets one bounded turn even
     // while presentation acknowledgements or history requests stay ready.
-    if driver.attachment.protocol_version == ctmux_proto::CONTRACT_V1_1_15
-      && driver.pending_session_end.is_none()
-      && driver
-        .attachment
-        .view_updates
-        .has_changed()
-        .unwrap_or(false)
-      && !driver.send_view_update().await?
-    {
+    if !driver.send_pending_metadata().await? {
       return Ok(AttachmentExit::Disconnected);
     }
     if driver.send_session_end_if_drained().await? {
@@ -1718,8 +1747,13 @@ async fn drive_attachment(
           return Ok(AttachmentExit::Disconnected);
         }
       }
-      changed = driver.attachment.view_updates.changed(), if driver.attachment.protocol_version == ctmux_proto::CONTRACT_V1_1_15 && driver.pending_session_end.is_none() => {
+      changed = driver.attachment.view_updates.changed(), if ctmux_proto::supports_view_zoom(driver.attachment.protocol_version) && driver.pending_session_end.is_none() => {
         if changed.is_err() || !driver.send_view_update().await? {
+          return Ok(AttachmentExit::Disconnected);
+        }
+      }
+      changed = driver.attachment.layout_lease_updates.changed(), if ctmux_proto::supports_layout_lease_notifications(driver.attachment.protocol_version) && driver.pending_session_end.is_none() => {
+        if changed.is_err() || !driver.send_layout_lease_update().await? {
           return Ok(AttachmentExit::Disconnected);
         }
       }
@@ -1743,11 +1777,94 @@ struct PendingSessionEnd {
 }
 
 impl AttachmentDriver {
+  async fn send_pending_metadata(&mut self) -> Result<bool, ConnectionError> {
+    if self.pending_session_end.is_some() {
+      return Ok(true);
+    }
+    if ctmux_proto::supports_view_zoom(self.attachment.protocol_version)
+      && self.attachment.view_updates.has_changed().unwrap_or(false)
+      && !self.send_view_update().await?
+    {
+      return Ok(false);
+    }
+    if ctmux_proto::supports_layout_lease_notifications(self.attachment.protocol_version)
+      && self
+        .attachment
+        .layout_lease_updates
+        .has_changed()
+        .unwrap_or(false)
+      && !self.send_layout_lease_update().await?
+    {
+      return Ok(false);
+    }
+    Ok(true)
+  }
+
+  async fn send_layout_lease_update(&mut self) -> Result<bool, ConnectionError> {
+    self.attachment.layout_lease_updates.borrow_and_update();
+    let status = self.session.layout_lease_status(&self.attachment_id);
+    if status == self.attachment.layout_lease_status {
+      return Ok(true);
+    }
+    let written = write_before_deadline(
+      &mut self.attachment.writer,
+      &ServerMessage::LeaseStatus {
+        lease: LeaseKind::Layout,
+        status: status.clone(),
+        notification: true,
+      },
+      self.deadline,
+    )
+    .await?;
+    if written.is_some() {
+      self.attachment.layout_lease_status = status;
+    }
+    Ok(written.is_some())
+  }
+
+  async fn process_lease_change(
+    &mut self,
+    lease: LeaseKind,
+    acquire: bool,
+  ) -> Result<bool, ConnectionError> {
+    let previously_owned_input =
+      lease == LeaseKind::Input && self.session.owns_input_lease(&self.attachment_id);
+    let status = if acquire {
+      self.session.acquire_lease(&self.attachment_id, lease)
+    } else {
+      self.session.release_lease(&self.attachment_id, lease)
+    };
+    let owns_input = status.owned_by_client;
+    if lease == LeaseKind::Layout {
+      // The requester receives this direct reply. Its watch notification must
+      // not look like a second acknowledgement to clients with queued intents.
+      self.attachment.layout_lease_status = status.clone();
+    }
+    let written = write_before_deadline(
+      &mut self.attachment.writer,
+      &ServerMessage::LeaseStatus {
+        lease,
+        status,
+        notification: false,
+      },
+      self.deadline,
+    )
+    .await?;
+    if lease == LeaseKind::Input
+      && (self.attachment.request_command_line || self.attachment.request_running_command)
+      && previously_owned_input != owns_input
+    {
+      self.session.refresh_shell_state_for_visibility();
+    }
+    Ok(written.is_some())
+  }
+
   async fn send_view_update(&mut self) -> Result<bool, ConnectionError> {
     let view = self.attachment.view_updates.borrow_and_update().clone();
     let Some(view) = view else {
       return Ok(true);
     };
+    let view = view_for_contract(view, self.attachment.protocol_version);
     write_before_deadline(
       &mut self.attachment.writer,
       &ServerMessage::ViewSnapshot { view },
@@ -1781,6 +1898,14 @@ impl AttachmentDriver {
       return self.send_available_output().await;
     }
     match message {
+      ClientMessage::AcquireLease { lease } => {
+        self.renew_liveness();
+        return self.process_lease_change(lease, true).await;
+      }
+      ClientMessage::ReleaseLease { lease } => {
+        self.renew_liveness();
+        return self.process_lease_change(lease, false).await;
+      }
       ClientMessage::RequestCheckpoint | ClientMessage::HistoryRequest { .. }
         if self.attachment.protocol_version == ctmux_proto::CONTRACT_V1_0_13 =>
       {
@@ -1836,8 +1961,6 @@ impl AttachmentDriver {
         &mut self.attachment.writer,
         Arc::clone(&self.session),
         &self.attachment_id,
-        self.attachment.request_command_line,
-        self.attachment.request_running_command,
         self.attachment.protocol_version,
         message,
       ),
@@ -2269,8 +2392,6 @@ async fn process_attach_input<W>(
   writer: &mut W,
   session: Arc<Terminal>,
   attachment_id: &str,
-  request_command_line: bool,
-  request_running_command: bool,
   protocol_version: ctl_core::protocol::ProtocolVersion,
   message: ClientMessage,
 ) -> Result<bool, ConnectionError>
@@ -2295,49 +2416,17 @@ where
       }
     }
     ClientMessage::SetViewZoom { terminal_id } => {
-      if protocol_version == ctmux_proto::CONTRACT_V1_1_15 {
-        let attachment_id = attachment_id.to_owned();
-        let result =
-          tokio::task::spawn_blocking(move || session.set_view_zoom(&attachment_id, terminal_id))
-            .await?;
-        match result {
-          Ok(view) => write_frame(writer, &ServerMessage::ViewSnapshot { view }).await?,
-          Err(error) => send_control_error(writer, &error).await?,
-        }
-      } else {
-        send_error(
-          writer,
-          ErrorCode::InvalidRequest,
-          "view zoom requires contract 1.1.15",
-        )
-        .await?;
-      }
+      process_view_zoom(
+        writer,
+        session,
+        attachment_id,
+        protocol_version,
+        terminal_id,
+      )
+      .await?;
     }
-    ClientMessage::AcquireLease { lease } => {
-      let already_owned_input =
-        lease == LeaseKind::Input && session.owns_input_lease(attachment_id);
-      let status = session.acquire_lease(attachment_id, lease);
-      let acquired_input = status.owned_by_client;
-      write_frame(writer, &ServerMessage::LeaseStatus { lease, status }).await?;
-      if lease == LeaseKind::Input
-        && (request_command_line || request_running_command)
-        && !already_owned_input
-        && acquired_input
-      {
-        session.refresh_shell_state_for_visibility();
-      }
-    }
-    ClientMessage::ReleaseLease { lease } => {
-      let already_owned_input =
-        lease == LeaseKind::Input && session.owns_input_lease(attachment_id);
-      let status = session.release_lease(attachment_id, lease);
-      write_frame(writer, &ServerMessage::LeaseStatus { lease, status }).await?;
-      if lease == LeaseKind::Input
-        && (request_command_line || request_running_command)
-        && already_owned_input
-      {
-        session.refresh_shell_state_for_visibility();
-      }
+    request @ (ClientMessage::ResizePane { .. } | ClientMessage::ResizeDivider { .. }) => {
+      process_pane_resize(writer, session, attachment_id, protocol_version, request).await?;
     }
     ClientMessage::Heartbeat { nonce } => {
       write_frame(writer, &ServerMessage::HeartbeatAck { nonce }).await?;
@@ -2355,12 +2444,161 @@ where
   Ok(true)
 }
 
+async fn process_view_zoom<W>(
+  writer: &mut W,
+  session: Arc<Terminal>,
+  attachment_id: &str,
+  protocol_version: ctl_core::protocol::ProtocolVersion,
+  terminal_id: Option<String>,
+) -> Result<(), ConnectionError>
+where
+  W: tokio::io::AsyncWrite + Unpin,
+{
+  if !ctmux_proto::supports_view_zoom(protocol_version) {
+    send_error(
+      writer,
+      ErrorCode::InvalidRequest,
+      "view zoom requires contract 1.1.15",
+    )
+    .await?;
+    return Ok(());
+  }
+  let attachment_id = attachment_id.to_owned();
+  let result =
+    tokio::task::spawn_blocking(move || session.set_view_zoom(&attachment_id, terminal_id)).await?;
+  match result {
+    Ok(view) => {
+      write_frame(
+        writer,
+        &ServerMessage::ViewSnapshot {
+          view: view_for_contract(view, protocol_version),
+        },
+      )
+      .await?;
+    }
+    Err(error) => send_control_error(writer, &error).await?,
+  }
+  Ok(())
+}
+
+struct PaneResizeRequest {
+  request_id: String,
+  action: PaneResizeAction,
+}
+
+enum PaneResizeAction {
+  Pane {
+    terminal_id: String,
+    direction: ctmux_proto::ResizeDirection,
+    amount: u16,
+  },
+  Divider(ctmux_proto::DividerResize),
+}
+
+async fn process_pane_resize<W>(
+  writer: &mut W,
+  session: Arc<Terminal>,
+  attachment_id: &str,
+  protocol_version: ctl_core::protocol::ProtocolVersion,
+  request: ClientMessage,
+) -> Result<(), ConnectionError>
+where
+  W: tokio::io::AsyncWrite + Unpin,
+{
+  let request = match request {
+    ClientMessage::ResizePane {
+      request_id,
+      terminal_id,
+      direction,
+      amount,
+    } => PaneResizeRequest {
+      request_id,
+      action: PaneResizeAction::Pane {
+        terminal_id,
+        direction,
+        amount,
+      },
+    },
+    ClientMessage::ResizeDivider {
+      request_id,
+      divider,
+    } => PaneResizeRequest {
+      request_id,
+      action: PaneResizeAction::Divider(divider),
+    },
+    _ => {
+      send_error(
+        writer,
+        ErrorCode::InvalidRequest,
+        "expected pane or divider resize",
+      )
+      .await?;
+      return Ok(());
+    }
+  };
+  if !ctmux_proto::supports_pane_resize(protocol_version) {
+    send_error(
+      writer,
+      ErrorCode::InvalidRequest,
+      "pane resize requires contract 1.1.16",
+    )
+    .await?;
+    return Ok(());
+  }
+  let outcome = if matches!(&request.action, PaneResizeAction::Divider(_))
+    && !ctmux_proto::supports_divider_resize(protocol_version)
+  {
+    ctmux_proto::PaneResizeOutcome::Rejected {
+      code: ErrorCode::InvalidRequest,
+      message: "divider resize requires contract 1.1.17".into(),
+    }
+  } else if request.request_id.is_empty()
+    || request.request_id.len() > ctmux_proto::MAX_PANE_RESIZE_REQUEST_ID_BYTES
+  {
+    ctmux_proto::PaneResizeOutcome::Rejected {
+      code: ErrorCode::InvalidRequest,
+      message: "pane resize request_id must contain 1 to 256 bytes".into(),
+    }
+  } else {
+    let attachment_id = attachment_id.to_owned();
+    let result = tokio::task::spawn_blocking(move || match request.action {
+      PaneResizeAction::Pane {
+        terminal_id,
+        direction,
+        amount,
+      } => session.resize_pane(&attachment_id, &terminal_id, direction, amount),
+      PaneResizeAction::Divider(divider) => session.resize_divider(&attachment_id, &divider),
+    })
+    .await?;
+    match result {
+      Ok(view) => ctmux_proto::PaneResizeOutcome::Applied {
+        view: Box::new(view),
+      },
+      Err(error) => ctmux_proto::PaneResizeOutcome::Rejected {
+        code: control_error_code(&error),
+        message: error.to_string(),
+      },
+    }
+  };
+  write_frame(
+    writer,
+    &ServerMessage::PaneResizeResult {
+      request_id: request.request_id,
+      outcome,
+    },
+  )
+  .await?;
+  Ok(())
+}
+
 fn renews_attachment_liveness(message: &ClientMessage) -> bool {
   matches!(
     message,
     ClientMessage::Input { .. }
       | ClientMessage::Resize { .. }
       | ClientMessage::SetViewZoom { .. }
+      | ClientMessage::ResizePane { .. }
+      | ClientMessage::ResizeDivider { .. }
       | ClientMessage::AcquireLease { .. }
       | ClientMessage::ReleaseLease { .. }
       | ClientMessage::Heartbeat { .. }
@@ -2474,13 +2712,17 @@ async fn send_control_error<W>(
 where
   W: tokio::io::AsyncWrite + Unpin,
 {
-  let code = match error {
+  let code = control_error_code(error);
+  send_error(writer, code, &error.to_string()).await
+}
+
+fn control_error_code(error: &SessionControlError) -> ErrorCode {
+  match error {
     SessionControlError::InvalidView(_) => ErrorCode::InvalidRequest,
     SessionControlError::InputLeaseRequired => ErrorCode::InputLeaseRequired,
     SessionControlError::LayoutLeaseRequired => ErrorCode::LayoutLeaseRequired,
     SessionControlError::Io(_) | SessionControlError::Pty(_) => ErrorCode::Internal,
-  };
-  send_error(writer, code, &error.to_string()).await
+  }
 }
 
 async fn send_error<W>(writer: &mut W, code: ErrorCode, message: &str) -> Result<(), CodecError>
@@ -2668,7 +2910,8 @@ impl Drop for SocketGuard {
 mod tests {
   use super::*;
   use ctmux_core::JournalSnapshot;
-  use ctmux_proto::{LeaseStatus, SessionStatus};
+  use ctmux_proto::{LeaseStatus, SessionStatus, TerminalHistoryRow, normalize_history_rows};
+  use sha2::{Digest, Sha256};
   use tokio::time::timeout;
 
   fn history_fixture(rows: &[TerminalHistoryRow]) -> TerminalHistorySnapshot {
@@ -2682,6 +2925,46 @@ mod tests {
       retained_bytes: lines.iter().map(|line| (line.len() + 1) as u64).sum(),
       truncated: false,
       lines,
+    }
+  }
+
+  #[test]
+  fn cached_history_body_keeps_transfer_metadata_and_progress_independent() {
+    for rows in [
+      Vec::new(),
+      vec![TerminalHistoryRow {
+        text: "unchanged".into(),
+        wrapped: false,
+      }],
+    ] {
+      let physical = PhysicalHistory::new(rows.clone());
+      let original_history = history_fixture(&rows);
+      let (mut old, _) = PinnedHistory::new(&original_history, &physical, 10_000).unwrap();
+      let mut new_history = original_history.clone();
+      new_history.sequence += 1;
+      new_history.generation += 1;
+      new_history.revision += 1;
+      new_history.truncated = true;
+      let (new, _) = PinnedHistory::new(&new_history, &physical, 250).unwrap();
+      assert!(Arc::ptr_eq(&old.data, &new.data));
+      assert_eq!(old.manifest.content_hash, new.manifest.content_hash);
+      assert_ne!(old.manifest.snapshot_id, new.manifest.snapshot_id);
+      assert_eq!(new.manifest.sequence, new_history.sequence);
+      assert_eq!(new.manifest.generation, new_history.generation);
+      assert_eq!(new.manifest.revision, new_history.revision);
+      assert!(new.manifest.truncated);
+      assert_eq!(new.manifest.scrollback_limit, 250);
+      old
+        .page(&HistoryRequest {
+          snapshot_id: old.manifest.snapshot_id.clone(),
+          offset: 0,
+          max_bytes: 5,
+        })
+        .unwrap();
+      assert_eq!(new.served_end, 0);
+      old.last_access = Instant::now() - HISTORY_SNAPSHOT_IDLE_TTL;
+      assert!(old.expired());
+      assert!(!new.expired());
     }
   }
 
@@ -2701,7 +2984,9 @@ mod tests {
         wrapped: true,
       },
     ];
-    let (mut pinned, recent) = PinnedHistory::new(&history_fixture(&rows), &rows, 10_000).unwrap();
+    let physical = PhysicalHistory::new(rows.clone());
+    let (mut pinned, recent) =
+      PinnedHistory::new(&history_fixture(&rows), &physical, 10_000).unwrap();
     assert_eq!(pinned.manifest.total_rows, 3);
     assert_eq!(pinned.manifest.total_lines, 1);
     assert!(
@@ -2756,7 +3041,9 @@ mod tests {
         wrapped: false,
       })
       .collect();
-    let (mut pinned, recent) = PinnedHistory::new(&history_fixture(&rows), &rows, 10_000).unwrap();
+    let physical = PhysicalHistory::new(rows.clone());
+    let (mut pinned, recent) =
+      PinnedHistory::new(&history_fixture(&rows), &physical, 10_000).unwrap();
     assert_eq!(recent.lines.len(), MAX_RECENT_HISTORY_LINES);
     assert_eq!(pinned.manifest.first_line, 36);
     let mut request = HistoryRequest {
@@ -2802,7 +3089,8 @@ mod tests {
       text: "last".into(),
       wrapped: false,
     }];
-    let (mut pinned, _) = PinnedHistory::new(&history_fixture(&rows), &rows, 10_000).unwrap();
+    let physical = PhysicalHistory::new(rows.clone());
+    let (mut pinned, _) = PinnedHistory::new(&history_fixture(&rows), &physical, 10_000).unwrap();
     let request = HistoryRequest {
       snapshot_id: pinned.manifest.snapshot_id.clone(),
       offset: pinned.manifest.total_bytes - 1,

@@ -815,13 +815,19 @@ async fn forward_event(
         observed_sequence,
       )
     }
+    AttachmentEvent::PaneResizeResult {
+      request_id,
+      outcome,
+    } => AttachmentEventDto::pane_resize_result(&actor.attachment_id, request_id, outcome),
     AttachmentEvent::ViewChanged { view } => AttachmentEventDto::ViewChanged {
       attachment_id: actor.attachment_id.clone(),
       view: view.into(),
     },
-    AttachmentEvent::LeaseStatus { lease, status } => {
-      AttachmentEventDto::lease_status(&actor.attachment_id, lease, status)
-    }
+    AttachmentEvent::LeaseStatus {
+      lease,
+      status,
+      notification,
+    } => AttachmentEventDto::lease_status(&actor.attachment_id, lease, status, notification),
     AttachmentEvent::ShellStateChanged { state } => {
       AttachmentEventDto::shell_state_changed(&actor.attachment_id, state)
     }
@@ -1036,6 +1042,88 @@ mod tests {
       assert!(!actor.has_pending_presentation().await);
       assert!(actor.closed.load(Ordering::Acquire));
     }
+  }
+
+  #[tokio::test]
+  async fn pane_resize_results_keep_operation_ids_and_errors_without_presentation_acks() {
+    let (client, _peer, attached) = buffered_test_attachment().await;
+    let (_controller, control, _events) = ctmux_client::AttachmentController::new(
+      client,
+      &attached,
+      ctmux_client::AttachmentControllerOptions::default(),
+    )
+    .unwrap();
+    let actor = AttachmentActor::new(
+      "owner".into(),
+      "main".into(),
+      ConnectionTargetDto::Local,
+      control,
+    );
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let channel = Channel::new(move |body| {
+      sender
+        .send(body.deserialize::<serde_json::Value>().unwrap())
+        .unwrap();
+      Ok(())
+    });
+    forward_event(
+      &actor,
+      &channel,
+      AttachmentEvent::PaneResizeResult {
+        request_id: "rejected-operation".into(),
+        outcome: ctmux_proto::PaneResizeOutcome::Rejected {
+          code: ctmux_proto::ErrorCode::LayoutLeaseRequired,
+          message: "Take resize control.".into(),
+        },
+      },
+    )
+    .await
+    .unwrap();
+    let rejected = receiver.try_recv().unwrap();
+    assert_eq!(rejected["event_type"], "pane_resize_result");
+    assert_eq!(rejected["request_id"], "rejected-operation");
+    assert_eq!(rejected["error"]["code"], "layout_lease_required");
+    assert!(rejected["view"].is_null());
+    let view = ctmux_proto::ViewInfo {
+      session_id: "session".into(),
+      session_name: "shell".into(),
+      view_id: "view".into(),
+      revision: u64::MAX,
+      canvas_size: ctmux_proto::TerminalSize::default(),
+      zoomed_terminal_id: None,
+      panes: vec![],
+      terminals: vec![],
+      layout: ctmux_proto::ViewLayout::Split {
+        axis: ctmux_proto::SplitAxis::Horizontal,
+        weights: vec![2, 1],
+        children: ["first", "second"]
+          .map(|id| ctmux_proto::ViewLayout::Terminal {
+            terminal_id: id.into(),
+          })
+          .into(),
+      },
+    };
+    forward_event(
+      &actor,
+      &channel,
+      AttachmentEvent::PaneResizeResult {
+        request_id: "applied-operation".into(),
+        outcome: ctmux_proto::PaneResizeOutcome::Applied {
+          view: Box::new(view),
+        },
+      },
+    )
+    .await
+    .unwrap();
+    let applied = receiver.try_recv().unwrap();
+    assert_eq!(applied["request_id"], "applied-operation");
+    assert_eq!(applied["view"]["revision"], u64::MAX.to_string());
+    assert_eq!(
+      applied["view"]["layout"]["weights"],
+      serde_json::json!([2, 1])
+    );
+    assert!(applied["error"].is_null());
+    assert!(!actor.has_pending_presentation().await);
   }
 
   #[test]

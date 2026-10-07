@@ -433,6 +433,41 @@ pub struct ResizeAttachmentRequestDto {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ResizeAttachmentDividerRequestDto {
+  pub attachment_id: String,
+  pub request_id: String,
+  pub view_id: String,
+  pub expected_revision: String,
+  pub split_path: Vec<u16>,
+  pub boundary: u16,
+  pub position: u16,
+}
+
+impl ResizeAttachmentDividerRequestDto {
+  pub fn divider(&self) -> CommandResult<ctmux_proto::DividerResize> {
+    Ok(ctmux_proto::DividerResize {
+      view_id: self.view_id.clone(),
+      expected_revision: self
+        .expected_revision
+        .parse()
+        .map_err(CommandErrorDto::backend)?,
+      split_path: self.split_path.clone(),
+      boundary: self.boundary,
+      position: self.position,
+    })
+  }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ResizeAttachmentPaneRequestDto {
+  pub attachment_id: String,
+  pub request_id: String,
+  pub terminal_id: String,
+  pub direction: ctmux_proto::ResizeDirection,
+  pub amount: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct SetAttachmentViewZoomRequestDto {
   pub attachment_id: String,
   pub terminal_id: Option<String>,
@@ -564,6 +599,12 @@ pub enum AttachmentExitReasonDto {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "event_type", rename_all = "snake_case")]
 pub enum AttachmentEventDto {
+  PaneResizeResult {
+    attachment_id: String,
+    request_id: String,
+    view: Option<crate::commands::views::ViewDto>,
+    error: Option<crate::error::CommandErrorDto>,
+  },
   ViewChanged {
     attachment_id: String,
     view: crate::commands::views::ViewDto,
@@ -607,6 +648,7 @@ pub enum AttachmentEventDto {
     attachment_id: String,
     lease: LeaseKindDto,
     status: LeaseStatusDto,
+    notification: bool,
   },
   ShellStateChanged {
     attachment_id: String,
@@ -637,6 +679,26 @@ pub enum AttachmentEventDto {
 }
 
 impl AttachmentEventDto {
+  pub fn pane_resize_result(
+    attachment_id: &str,
+    request_id: String,
+    outcome: ctmux_proto::PaneResizeOutcome,
+  ) -> Self {
+    let (view, error) = match outcome {
+      ctmux_proto::PaneResizeOutcome::Applied { view } => (Some((*view).into()), None),
+      ctmux_proto::PaneResizeOutcome::Rejected { code, message } => (
+        None,
+        Some(CommandErrorDto::new(protocol_error_code(&code), message)),
+      ),
+    };
+    Self::PaneResizeResult {
+      attachment_id: attachment_id.into(),
+      request_id,
+      view,
+      error,
+    }
+  }
+
   pub fn checkpoint(
     attachment_id: &str,
     event_id: String,
@@ -685,11 +747,17 @@ impl AttachmentEventDto {
     }
   }
 
-  pub fn lease_status(attachment_id: &str, lease: LeaseKind, status: LeaseStatus) -> Self {
+  pub fn lease_status(
+    attachment_id: &str,
+    lease: LeaseKind,
+    status: LeaseStatus,
+    notification: bool,
+  ) -> Self {
     Self::LeaseStatus {
       attachment_id: attachment_id.into(),
       lease: lease.into(),
       status: status.into(),
+      notification,
     }
   }
 
@@ -1154,5 +1222,101 @@ mod tests {
 
     assert_eq!(safe["next_sequence"], u64::MAX.to_string());
     assert!(pending["next_sequence"].is_null());
+  }
+}
+
+#[cfg(test)]
+mod pane_resize_tests {
+  use super::*;
+
+  #[test]
+  fn lease_status_preserves_notification_origin_for_frontend_intent_matching() {
+    for notification in [true, false] {
+      let value = serde_json::to_value(AttachmentEventDto::lease_status(
+        "owner",
+        LeaseKind::Layout,
+        LeaseStatus {
+          held: true,
+          owned_by_client: false,
+        },
+        notification,
+      ))
+      .unwrap();
+      assert_eq!(value["event_type"], "lease_status");
+      assert_eq!(value["notification"], notification);
+      assert_eq!(value["status"]["owned_by_client"], false);
+    }
+  }
+
+  fn divider_request() -> serde_json::Value {
+    serde_json::json!({
+      "attachment_id": "owner", "request_id": "operation", "view_id": "view",
+      "expected_revision": u64::MAX.to_string(), "split_path": [0, u16::MAX],
+      "boundary": 0, "position": u16::MAX,
+    })
+  }
+
+  #[test]
+  fn divider_request_preserves_string_revision_and_exact_split_path() {
+    let request: ResizeAttachmentDividerRequestDto =
+      serde_json::from_value(divider_request()).unwrap();
+    assert_eq!(request.attachment_id, "owner");
+    assert_eq!(request.request_id, "operation");
+    assert_eq!(
+      request.divider().unwrap(),
+      ctmux_proto::DividerResize {
+        view_id: "view".into(),
+        expected_revision: u64::MAX,
+        split_path: vec![0, u16::MAX],
+        boundary: 0,
+        position: u16::MAX,
+      }
+    );
+  }
+
+  #[test]
+  fn divider_request_rejects_invalid_or_out_of_range_revisions() {
+    for revision in ["-1", "invalid", "18446744073709551616"] {
+      let mut value = divider_request();
+      value["expected_revision"] = revision.into();
+      let request: ResizeAttachmentDividerRequestDto = serde_json::from_value(value).unwrap();
+      assert!(request.divider().is_err());
+    }
+    let mut value = divider_request();
+    value["expected_revision"] = serde_json::json!(1);
+    assert!(serde_json::from_value::<ResizeAttachmentDividerRequestDto>(value).is_err());
+  }
+
+  #[test]
+  fn divider_request_bounds_split_indices_boundary_and_position() {
+    for (field, value) in [
+      ("split_path", serde_json::json!([65536])),
+      ("split_path", serde_json::json!([-1])),
+      ("boundary", serde_json::json!(65536)),
+      ("position", serde_json::json!(65536)),
+    ] {
+      let mut request = divider_request();
+      request[field] = value;
+      assert!(serde_json::from_value::<ResizeAttachmentDividerRequestDto>(request).is_err());
+    }
+  }
+
+  #[test]
+  fn resize_request_uses_stable_snake_case_fields_and_bounded_amount() {
+    let request: ResizeAttachmentPaneRequestDto = serde_json::from_value(serde_json::json!({
+      "attachment_id": "owner", "request_id": "operation", "terminal_id": "secondary",
+      "direction": "left", "amount": 5,
+    }))
+    .unwrap();
+    assert_eq!(request.request_id, "operation");
+    assert_eq!(request.direction, ctmux_proto::ResizeDirection::Left);
+    assert_eq!(request.amount, 5);
+    assert!(
+      serde_json::from_value::<ResizeAttachmentPaneRequestDto>(serde_json::json!({
+        "attachment_id": "owner", "request_id": "operation", "terminal_id": "secondary",
+        "direction": "left", "amount": 65536,
+      }))
+      .is_err()
+    );
   }
 }

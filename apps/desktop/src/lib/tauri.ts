@@ -3,9 +3,11 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import type {
   AttachmentAckRequest,
   AttachmentEvent,
+  AttachmentDividerResizeRequest,
   AttachmentIdRequest,
   AttachmentInputRequest,
   AttachmentLeaseRequest,
+  AttachmentPaneResizeRequest,
   AttachmentResizeRequest,
   AttachmentViewZoomRequest,
   CreateSessionRequest,
@@ -480,7 +482,12 @@ export async function openAttachment(
     return {
       attached: {
         ...attached,
-        session: { ...attached.session, target: request.target },
+        session: {
+          ...attached.session,
+          target: request.target.kind === "ssh" && attached.session.target?.kind === "ssh"
+            ? { ...request.target, remote_info: attached.session.target.remote_info ?? request.target.remote_info }
+            : request.target,
+        },
       },
       channel,
     };
@@ -505,6 +512,18 @@ export async function acquireAttachmentLease(
   request: AttachmentLeaseRequest,
 ): Promise<void> {
   await invoke("acquire_attachment_lease", { request });
+}
+
+export async function resizeAttachmentDivider(
+  request: AttachmentDividerResizeRequest,
+): Promise<void> {
+  await invoke("resize_attachment_divider", { request });
+}
+
+export async function resizeAttachmentPane(
+  request: AttachmentPaneResizeRequest,
+): Promise<void> {
+  await invoke("resize_attachment_pane", { request });
 }
 
 export async function setAttachmentViewZoom(

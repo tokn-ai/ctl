@@ -187,18 +187,28 @@ mod tests {
     let path = std::env::temp_dir().join(format!("ctmux-about-shared-{}.sock", std::process::id()));
     let control_path = control_socket_path(&path).unwrap();
     let listener = UnixListener::bind(&control_path).unwrap();
-    let data_latest = ProtocolVersion::new(1, 1, 16);
-    let control_latest = ProtocolVersion::new(1, 1, 2);
+    let data_current = ctmux_proto::PROTOCOL_VERSION;
+    let data_latest = ProtocolVersion::new(
+      data_current.major,
+      data_current.minor + 1,
+      data_current.build + 1,
+    );
+    let control_current = crate::LOCAL_CONTROL_PROTOCOL_VERSION;
+    let control_latest = ProtocolVersion::new(
+      control_current.major,
+      control_current.minor + 1,
+      control_current.build + 1,
+    );
     let protocols = vec![
       ProtocolInfo::new(
         "ctmux",
-        16,
+        data_latest.build,
         data_latest,
         &[ctmux_proto::PROTOCOL_VERSION, data_latest],
       ),
       ProtocolInfo::new(
         "ctmux_control",
-        2,
+        control_latest.build,
         control_latest,
         &[crate::LOCAL_CONTROL_PROTOCOL_VERSION, control_latest],
       ),

@@ -695,6 +695,65 @@ async fn both_installers_explain_writable_storage_without_activating() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn agent_installer_reports_progress_before_the_receiver_opens_its_archive() {
+  use crate::remote_bundle::compatibility::tests::Fixture;
+  use ctl_core::bundles::Source;
+  use std::sync::Mutex;
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
+  let fixture = BundleFixture::new();
+  let import_home = fixture.directory.join("import-home");
+  std::fs::create_dir(&import_home).unwrap();
+  let source = crate::components::import_remote(
+    &import_home,
+    &Fixture::new("0.0.9", &"b".repeat(40)).bundle(),
+    "aarch64-apple-darwin",
+    Source::Ci,
+  )
+  .unwrap();
+  let archive = crate::component_update::agent_archive(&source).unwrap();
+  // Force the first progress poll to finish before the background receiver
+  // opens the archive. The installer must report zero, not an empty count.
+  let receiver = "cat <&3 > \"$archive\" &";
+  let poll = "  received=$(wc -c < \"$archive\" | tr -d '[:space:]')";
+  let script = agent_script(&archive, None).unwrap();
+  assert!(script.contains(receiver));
+  assert!(script.contains(poll));
+  let script = script
+    .replace(
+      receiver,
+      "{ while [ ! -e \"$temporary/poll-started\" ]; do [ -d \"$temporary\" ] || exit 1; sleep 0.01; done; cat <&3 > \"$archive\"; } &",
+    )
+    .replace(
+      poll,
+      "  received=$(wc -c < \"$archive\" | tr -d '[:space:]')\n  : > \"$temporary/poll-started\"",
+    );
+  let mut command = Command::new("sh");
+  command
+    .args(["-c", &script])
+    .env("HOME", fixture.directory.join("home"));
+  let events = Mutex::new(Vec::new());
+  tokio::time::timeout(
+    std::time::Duration::from_secs(10),
+    run_package_install(command, &archive, true, |event| {
+      events.lock().unwrap().push(event);
+    }),
+  )
+  .await
+  .unwrap()
+  .unwrap();
+  let events = events.into_inner().unwrap();
+  assert_eq!(
+    &events[..2],
+    [RemoteInstallEvent::Receiving { received_bytes: 0 }; 2]
+  );
+  assert!(events.contains(&RemoteInstallEvent::Receiving {
+    received_bytes: archive.len() as u64,
+  }));
+  assert_eq!(events.last(), Some(&RemoteInstallEvent::Complete));
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn managed_installer_uses_the_shared_store_and_preserves_selection_on_damage() {
   use crate::components;
   use crate::remote_bundle::compatibility::tests::Fixture;

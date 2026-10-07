@@ -1,21 +1,24 @@
 use super::*;
 use crate::actions::Action;
 use crate::keys::KeyState;
+use crate::test_daemon::TestDaemon as Daemon;
 use ctmux_proto::CommandSpec;
-#[path = "../tests/support/daemon.rs"]
-// Process tests also use this fixture's echo and explicit shutdown helpers.
-#[allow(dead_code)]
-mod daemon;
-use daemon::TestDaemon as Daemon;
 
 struct RelayTransport {
   socket: PathBuf,
   connections: std::sync::atomic::AtomicUsize,
+  fail_next: std::sync::atomic::AtomicBool,
 }
 
 impl crate::Transport for RelayTransport {
   fn connect(&self) -> crate::ConnectFuture<'_> {
     Box::pin(async move {
+      if self
+        .fail_next
+        .swap(false, std::sync::atomic::Ordering::AcqRel)
+      {
+        return Err(io::Error::from(io::ErrorKind::BrokenPipe).into());
+      }
       let mut daemon = tokio::net::UnixStream::connect(&self.socket).await?;
       self
         .connections
@@ -41,6 +44,7 @@ async fn transported_shell_scrolls_frozen_history_and_reconnects() -> Result<()>
   let transport = RelayTransport {
     socket: daemon.directory.join("ctmux.sock"),
     connections: std::sync::atomic::AtomicUsize::new(0),
+    fail_next: std::sync::atomic::AtomicBool::new(false),
   };
   // Every operation must use the supplied transport, never this absent socket.
   let mut app = App::new(
@@ -118,6 +122,65 @@ async fn transported_shell_scrolls_frozen_history_and_reconnects() -> Result<()>
       > 3
   );
   assert_eq!(app.archive_key(), "remote-fixture");
+  app.detach().await;
+  Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn successful_refresh_restores_control_status_without_clearing_action_notices() -> Result<()>
+{
+  let daemon = Daemon::start().await?;
+  let transport = RelayTransport {
+    socket: daemon.directory.join("ctmux.sock"),
+    connections: std::sync::atomic::AtomicUsize::new(0),
+    fail_next: std::sync::atomic::AtomicBool::new(false),
+  };
+  let mut app = daemon.app(false);
+  app.transport = Some(&transport);
+  let session = create_shell(&app).await?;
+  app.start(Some(session)).await?;
+  transport
+    .fail_next
+    .store(true, std::sync::atomic::Ordering::Release);
+  app.schedule_refresh();
+  timeout(Duration::from_secs(2), async {
+    while app.notice_kind != NoticeKind::Connection {
+      app.poll_maintenance().await;
+      tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+  })
+  .await?;
+  assert!(app.status().contains("Disconnected:"));
+  assert!(!app.status().contains("pane 1"));
+  let previous_deadline = app.message_until;
+  app.schedule_refresh();
+  timeout(Duration::from_secs(2), async {
+    while app.notice_kind == NoticeKind::Connection {
+      app.poll_maintenance().await;
+      tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+  })
+  .await?;
+  assert!(
+    Instant::now() < previous_deadline,
+    "recovery must clear the notice before its six-second expiry"
+  );
+  assert!(app.status().contains("pane 1"));
+  assert!(!app.status().contains("Disconnected:"));
+
+  app.notice("Copied selection".into());
+  let action_deadline = app.message_until;
+  app.sessions.clear();
+  app.schedule_refresh();
+  timeout(Duration::from_secs(2), async {
+    while app.sessions.is_empty() {
+      app.poll_maintenance().await;
+      tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+  })
+  .await?;
+  assert!(app.status().contains("Copied selection"));
+  assert_eq!(app.message_until, action_deadline);
   app.detach().await;
   Ok(())
 }
@@ -875,8 +938,7 @@ async fn modified_prefix_bindings_do_not_detach_or_change_pane_focus() -> Result
 
   for (code, modifiers) in [
     (KeyCode::Char('d'), KeyModifiers::CONTROL),
-    (KeyCode::Right, KeyModifiers::CONTROL),
-    (KeyCode::Right, KeyModifiers::ALT),
+    (KeyCode::Right, KeyModifiers::CONTROL | KeyModifiers::ALT),
     (KeyCode::Right, KeyModifiers::SHIFT),
     (KeyCode::PageUp, KeyModifiers::SHIFT),
   ] {

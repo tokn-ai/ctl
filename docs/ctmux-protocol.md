@@ -1,4 +1,4 @@
-# ctmux published protocol 1.1.15
+# ctmux published protocol 1.1.17
 
 The protocol is independent of local IPC and future remote transport. Internal build
 11 introduced length-prefixed JSON frames for debuggability. Each frame begins with a
@@ -91,7 +91,9 @@ layout, canvas size, or membership, including exit. Layout nodes use `kind`:
 ```
 
 `horizontal` places children side by side and `vertical` stacks them.
-Splits divide space equally. Sessions provide tab-like navigation; views contain
+Splits without weights divide space equally. Contract `1.1.16` adds optional
+positive `weights`, one per child, for proportional allocation (see below).
+Sessions provide tab-like navigation; views contain
 only terminals and splits. Legacy `tabs` input decodes recursively into horizontal
 splits, preserving terminal IDs and child order. The server
 validates unique and complete membership, at most 64 terminals, and at most 16
@@ -127,7 +129,8 @@ attachment:
 - daemon to client: `attached` (including a complete `shell_state` snapshot),
   an optional checkpoint/history pair, replayed `output`, then live `output`,
   replacing `checkpoint`, requested `history_page`, and `shell_state_changed`;
-- client to daemon: `input`, `resize`, lease acquire/release, `heartbeat`,
+- client to daemon: `input`, `resize`, `set_view_zoom`, `resize_pane`,
+  `resize_divider`, lease acquire/release, `heartbeat`,
   `presentation_applied`, `history_request`, `request_checkpoint`, or `detach`;
 - daemon to client: `heartbeat_ack`, `detached` after an explicit detach is
   processed, and `session_ended` when the child exits.
@@ -229,6 +232,13 @@ separate attachment-bound leases:
 - `acquire_lease` and `release_lease` adjust one capability after attaching.
   The daemon replies with `lease_status`, whose `owned_by_client` field is
   relative to that attachment; other attachment identities are not exposed.
+- Contract `1.1.17` also sends changed layout ownership to affected attachments
+  after acquire/release, detach, reconnect-grace expiry, and topology changes.
+  These unsolicited `lease_status` frames contain `notification: true`.
+  Direct replies omit this field (default `false`), so an ownership notification
+  cannot acknowledge a pending lease request. Earlier contracts receive only
+  direct replies. Clients resolve the status against the terminal's current view;
+  notifications can coalesce intermediate changes.
 - `attached` contains the initial input and layout lease statuses.
 - `input` requires the input lease, and `resize` requires the layout lease.
   An unauthorized command receives a structured error but does not terminate
@@ -587,3 +597,101 @@ They retain the ordinary split grid and all terminal membership; while a newer
 owner has zoomed a PTY, older viewers clip that PTY's output to its split region.
 They cannot request zoom. New clients disable zoom after negotiating an older
 contract.
+
+## Shared pane sizing (published contract 1.1.16)
+
+Internal build 16 adds split `weights` and the attached `resize_pane` request.
+Keyboard resizing uses `resize_pane { request_id, terminal_id, direction, amount }`.
+Weights are relative
+positive integers; an omitted or empty list retains the historical equal split.
+A nonempty list must match the number of children. For example:
+
+```json
+{
+  "kind": "split",
+  "axis": "horizontal",
+  "weights": [30, 69],
+  "children": [
+    { "kind": "terminal", "terminal_id": "terminal-a" },
+    { "kind": "terminal", "terminal_id": "terminal-b" }
+  ]
+}
+```
+
+Allocation reserves one cell per divider, clamps children at their recursive
+minimum sizes, and divides the remaining cells proportionally. Integer residual
+cells go to earlier children deterministically. Pane rectangles are authoritative
+for every client; clients do not allocate from weights themselves. Canvas resizing
+retains the saved ratios, subject to minimum sizes and integer rounding.
+
+`request_id` is a client-generated opaque string of 1–256 UTF-8 bytes.
+`direction` is `left`, `right`, `up`, or `down`; `amount` is a positive `u16` cell
+count. The attachment must own the view-wide layout lease, and `terminal_id` must
+identify a live member of that view. The nearest ancestor split with the requested
+axis supplies the divider after the selected child, or the preceding divider if
+that child is last. Left/up moves that divider negatively; right/down moves it
+positively. The two adjacent subtree minima limit movement. Other siblings keep
+their current extents. A layout with no matching divider, or a divider already at
+its limit, produces an unchanged successful result.
+
+A changed resize atomically clears zoom, reflows all member PTYs, and increments
+the view revision. Invalid requests and unchanged movements retain layout and
+zoom. Reflow failure restores the previous layout and zoom. Proportions survive
+split, terminal removal, session merge, and reconnect within the daemon lifetime;
+new splits begin equal and redundant one-child nodes still collapse.
+
+The reply is `pane_resize_result { request_id, outcome }`, where `outcome` is
+`{ "kind": "applied", "view": ... }` or
+`{ "kind": "rejected", "code": ..., "message": ... }`. Applied includes the
+current snapshot for an unchanged movement. Clients correlate the request ID
+instead of treating unrelated view broadcasts as acknowledgements. Rejection is
+nonfatal. Shared view broadcasts continue to notify other attached viewers.
+
+Contracts `1.0.13`, `1.1.14`, and `1.1.15` remain supported. Their view snapshots
+omit weights while retaining authoritative unequal pane rectangles. Contract
+`1.1.15` retains zoom and view broadcasts. Earlier contracts cannot request pane
+resizing or supply weights. New clients disable resizing after negotiating an
+earlier contract.
+
+One-shot `update_view` remains an arrangement operation, not a resize path. Updates
+with matching split axes and child counts preserve the existing positional weights,
+including updates from clients that cannot send them. Changing explicit weights or
+restructuring a weighted node ambiguously is rejected; clients must use the attached
+resize operations to change proportions. This prevents arrangement updates from
+bypassing resize ownership or silently restoring equal sizes.
+
+### Exact divider dragging (published contract 1.1.17)
+
+Internal build 17 adds `resize_divider` and unsolicited layout lease notifications.
+Clients require negotiated `1.1.17` before sending a divider request. Connections
+selecting `1.1.16` retain keyboard pane resizing and receive only direct lease
+replies; they never send the new operation to a build-16 daemon. Unsupported
+dragging is rejected locally without disconnecting or changing ownership.
+
+Mouse dragging uses `resize_divider { request_id, view_id, expected_revision,
+split_path, boundary, position }` on the layout-owner attachment. The same
+`pane_resize_result` acknowledges it. `split_path` is a list of child indices
+from the layout root to a split; an empty path selects the root split. `boundary`
+selects the gap after that split's child, from zero through `children.length - 2`.
+The path is limited to the existing 16-level nesting bound. View identity and
+revision must match before mutation; this also prevents a moved attachment from
+editing a different view whose revision happens to match.
+
+`position` is the absolute canvas cell coordinate of the gap: x for a horizontal
+split, y for a vertical split. It identifies the gap cell, not its visual center
+at an additional half cell. The daemon clamps movement at adjacent subtree
+minimum sizes and preserves other sibling extents. An unchanged position returns
+the current view and retains zoom; actual movement uses the same atomic reflow
+and rollback as keyboard resizing. Invalid paths, boundaries, stale snapshots,
+and denied ownership are nonfatal rejections.
+
+Clients serialize drag requests with at most one in flight and coalesce pending
+motion into the latest absolute position. They advance the expected revision
+from correlated confirmations. Changed topology, canvas, view identity, or zoom
+cancels the gesture; clients must not retry an old path against a new topology.
+All pane geometry remains daemon-confirmed. A local pointer preview does not
+resize PTYs or alter another client's rendering.
+
+The divider directions and default Ctrl-arrow/Alt-arrow increments follow tmux's
+[resize command](https://github.com/tmux/tmux/blob/master/cmd-resize-pane.c) and
+[key bindings](https://github.com/tmux/tmux/blob/master/key-bindings.c).

@@ -9,24 +9,36 @@ export interface PaneRect {
   visible: boolean;
 }
 
-// Derive decorative separators from the server's rectangles, including nested
-// splits. This never changes terminal geometry.
+export interface ViewDivider {
+  path: string;
+  split_path: number[];
+  boundary: number;
+  vertical: boolean;
+  left: number;
+  top: number;
+  length: number;
+}
+
+// Derive separators from server rectangles, including nested splits. The path
+// identifies the exact split; geometry remains authoritative on the daemon.
 export function viewDividers(layout: ViewLayout, panes: readonly PaneRect[]) {
-  const dividers: { path: string; vertical: boolean; left: number; top: number; length: number }[] = [];
-  function visit(node: ViewLayout, path: string): Omit<PaneRect, "terminal_id" | "visible"> | undefined {
+  const dividers: ViewDivider[] = [];
+  function visit(node: ViewLayout, split_path: number[]): Omit<PaneRect, "terminal_id" | "visible"> | undefined {
     if (node.kind === "terminal") return panes.find((pane) => pane.terminal_id === node.terminal_id && pane.visible);
-    const children = node.children.map((child, index) => visit(child, `${path}.${index}`)).filter((rect) => rect !== undefined);
-    if (!children.length) return;
-    const left = Math.min(...children.map((rect) => rect.left));
-    const top = Math.min(...children.map((rect) => rect.top));
-    const width = Math.max(...children.map((rect) => rect.left + rect.width)) - left;
-    const height = Math.max(...children.map((rect) => rect.top + rect.height)) - top;
+    const children = node.children.map((child, index) => visit(child, [...split_path, index]));
+    const visible = children.filter((rect) => rect !== undefined);
+    if (!visible.length) return;
+    const left = Math.min(...visible.map((rect) => rect.left));
+    const top = Math.min(...visible.map((rect) => rect.top));
+    const width = Math.max(...visible.map((rect) => rect.left + rect.width)) - left;
+    const height = Math.max(...visible.map((rect) => rect.top + rect.height)) - top;
     if (node.kind === "split") {
       const vertical = node.axis === "horizontal";
       children.slice(1).forEach((next, index) => {
         const previous = children[index];
+        if (!previous || !next) return;
         dividers.push({
-          path: `${path}.${index}`, vertical,
+          path: `root.${[...split_path, index].join(".")}`, split_path, boundary: index, vertical,
           left: vertical ? (previous.left + previous.width + next.left) / 2 : left,
           top: vertical ? top : (previous.top + previous.height + next.top) / 2,
           length: vertical ? height : width,
@@ -35,7 +47,7 @@ export function viewDividers(layout: ViewLayout, panes: readonly PaneRect[]) {
     }
     return { left, top, width, height };
   }
-  visit(layout, "root");
+  visit(layout, []);
   return dividers;
 }
 
@@ -58,4 +70,10 @@ export function adjacentPane(panes: readonly PaneRect[], terminal_id: string, di
 export function swapPanes(layout: ViewLayout, first: string, second: string): ViewLayout {
   if (layout.kind === "terminal") return { ...layout, terminal_id: layout.terminal_id === first ? second : layout.terminal_id === second ? first : layout.terminal_id };
   return { ...layout, children: layout.children.map((child) => swapPanes(child, first, second)) };
+}
+
+/** Structure only: resizing weights must not invalidate an active drag. */
+export function layoutTopology(layout: ViewLayout): string {
+  const shape = (node: ViewLayout): unknown => node.kind === "terminal" ? node.terminal_id : [node.axis, ...node.children.map(shape)];
+  return JSON.stringify(shape(layout));
 }

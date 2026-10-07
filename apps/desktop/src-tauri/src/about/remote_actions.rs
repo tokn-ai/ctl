@@ -374,12 +374,12 @@ mod tests {
       ],
     };
     assert!(require_compatible_replacement(&info).is_ok());
-    info.protocols[0] = ctl_core::component::ProtocolInfo::new(
-      "ctmux",
-      16,
-      ctl_core::protocol::ProtocolVersion::new(1, 1, 16),
-      &[ctl_core::protocol::ProtocolVersion::new(1, 1, 16)],
-    );
+    let future = ctl_core::protocol::ProtocolVersion {
+      build: ctmux_proto::PROTOCOL_BUILD + 1,
+      ..ctmux_proto::PROTOCOL_VERSION
+    };
+    info.protocols[0] =
+      ctl_core::component::ProtocolInfo::new("ctmux", future.build, future, &[future]);
     assert!(require_compatible_replacement(&info).is_err());
   }
 }

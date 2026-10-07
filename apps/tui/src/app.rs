@@ -31,6 +31,12 @@ enum Overlay {
   ArchiveTerminals(Box<ctmux_client::archive::SessionArchive>, usize),
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NoticeKind {
+  Action,
+  Connection,
+}
+
 #[derive(Clone)]
 enum CopyTarget {
   Pane(String),
@@ -73,10 +79,12 @@ pub struct App<'a> {
   copy_buffer: Option<String>,
   message: String,
   message_until: Instant,
+  notice_kind: NoticeKind,
   renderer: Renderer,
   layout_owner: Option<String>,
   maintenance: Maintenance<'a>,
   runtime: bool,
+  resize_sequence: u64,
 }
 
 impl App<'_> {
@@ -105,10 +113,12 @@ impl App<'_> {
       copy_buffer: None,
       message: String::new(),
       message_until: Instant::now(),
+      notice_kind: NoticeKind::Action,
       renderer: Renderer::default(),
       layout_owner: None,
       maintenance: Maintenance::default(),
       runtime: false,
+      resize_sequence: 0,
     }
   }
 
@@ -562,9 +572,11 @@ impl App<'_> {
         Ok(snapshot) => {
           if let Err(error) = self.adopt_snapshot(snapshot).await {
             self.notice(error.to_string());
+          } else {
+            self.clear_connection_notice();
           }
         }
-        Err(error) => self.notice(format!("Disconnected: {error}; retrying")),
+        Err(error) => self.connection_notice(&error.to_string()),
       }
     }
     for (id, opened) in ready.panes {
@@ -583,6 +595,7 @@ impl App<'_> {
             }) =>
         {
           self.panes.insert(id, pane);
+          self.clear_connection_notice();
         }
         Ok(_) => {}
         Err(error) if session_not_found(&error) => {
@@ -590,7 +603,7 @@ impl App<'_> {
             pane.ended = Some("Terminal no longer exists".into());
           }
         }
-        Err(error) => self.notice(format!("Disconnected: {error}; retrying")),
+        Err(error) => self.connection_notice(&error.to_string()),
       }
     }
     if let Some(view) = &self.view {
@@ -635,11 +648,11 @@ impl App<'_> {
     for pane in self.panes.values_mut() {
       // A closed transport may still have a final SessionEnded event queued.
       match pane.drain().await {
-        Ok(Some(message)) => notices.push(message),
+        Ok(Some(message)) => notices.push((NoticeKind::Action, message)),
         Ok(None) => {}
         Err(error) => {
           pane.connected = false;
-          notices.push(format!("Disconnected: {error}; retrying"));
+          notices.push((NoticeKind::Connection, error.to_string()));
         }
       }
       if let Some(view) = pane.view_update.take()
@@ -658,7 +671,7 @@ impl App<'_> {
     if let Some(view) = view_update
       && let Err(error) = self.adopt_view(view).await
     {
-      notices.push(error.to_string());
+      notices.push((NoticeKind::Action, error.to_string()));
     }
     let owner = self
       .panes
@@ -668,11 +681,14 @@ impl App<'_> {
     if owner != self.layout_owner {
       self.layout_owner = owner;
       if let Err(error) = self.resize().await {
-        notices.push(error.to_string());
+        notices.push((NoticeKind::Action, error.to_string()));
       }
     }
-    for message in notices {
-      self.notice(message);
+    for (kind, message) in notices {
+      match kind {
+        NoticeKind::Connection => self.connection_notice(&message),
+        NoticeKind::Action => self.notice(message),
+      }
     }
   }
 
@@ -747,6 +763,25 @@ impl App<'_> {
   fn notice(&mut self, message: String) {
     self.message = message;
     self.message_until = Instant::now() + Duration::from_secs(6);
+    self.notice_kind = NoticeKind::Action;
+  }
+
+  fn connection_notice(&mut self, error: &str) {
+    self.notice(format!("Disconnected: {error}; retrying"));
+    self.notice_kind = NoticeKind::Connection;
+  }
+
+  fn clear_connection_notice(&mut self) {
+    if self.notice_kind == NoticeKind::Connection
+      && !self.panes.is_empty()
+      && self
+        .panes
+        .values()
+        .all(|pane| pane.connected || pane.ended.is_some())
+    {
+      self.message_until = Instant::now();
+      self.notice_kind = NoticeKind::Action;
+    }
   }
 
   async fn event(&mut self, event: Event) -> Result<bool> {
@@ -1235,6 +1270,21 @@ impl App<'_> {
         });
         self.set_zoom(target).await?;
       }
+      Action::ResizePane { direction, amount } if !self.read_only => {
+        self.release_mouse().await?;
+        self.resize_sequence = self.resize_sequence.wrapping_add(1);
+        let request_id = format!("tui-pane-resize-{}", self.resize_sequence);
+        let owner = self
+          .panes
+          .values_mut()
+          .find(|pane| pane.connected && pane.control.state().leases().layout.owned_by_client)
+          .ok_or("Resize lease required to resize panes")?;
+        // The daemon moves the divider and clears zoom in one mutation. The
+        // regular event drain adopts its view; input and rendering keep running.
+        owner
+          .resize_pane(self.focused.clone(), direction, amount, request_id)
+          .await?;
+      }
       Action::Help => self.overlay = Overlay::Help,
       Action::Sessions => self.overlay = Overlay::Sessions(self.session_index()),
       Action::NextSession => self.next_session(1).await?,
@@ -1251,6 +1301,7 @@ impl App<'_> {
       Action::Paste
       | Action::CreateSession
       | Action::Split(_)
+      | Action::ResizePane { .. }
       | Action::KillPane
       | Action::ToggleLease(_) => {
         self.notice("This attachment is read only".into());
@@ -1729,7 +1780,8 @@ impl App<'_> {
         format!("Commands after {} — any key closes help", self.prefix.label),
         "%: split right    \": split below".into(),
         "Arrows: focus pane    o: next pane    z: zoom    x: terminate (confirm)".into(),
-        "Focus arrows repeat for 500 ms; other commands need a fresh prefix.".into(),
+        "Ctrl/Alt arrows resize panes by 1/5 cells after prefix.".into(),
+        "Focus/resize arrows repeat for 500 ms; other commands need a fresh prefix.".into(),
         "c: new session    n/p: next/previous session    s/w: session list".into(),
         "[: history/copy mode    ]: paste copied text    A: archives".into(),
         "r: redraw    I: take/release input    R: take/release resize".into(),

@@ -49,15 +49,30 @@ impl LayoutExt for ViewLayout {
   fn remove_terminal(self, id: &str) -> Option<Self> {
     match self {
       Self::Terminal { ref terminal_id } => (terminal_id != id).then_some(self),
-      Self::Split { axis, children } => {
-        let mut children: Vec<_> = children
-          .into_iter()
-          .filter_map(|child| child.remove_terminal(id))
-          .collect();
+      Self::Split {
+        axis,
+        children,
+        weights,
+      } => {
+        let mut remaining = Vec::new();
+        let mut remaining_weights = Vec::new();
+        for (index, child) in children.into_iter().enumerate() {
+          if let Some(child) = child.remove_terminal(id) {
+            remaining.push(child);
+            if !weights.is_empty() {
+              remaining_weights.push(weights[index]);
+            }
+          }
+        }
+        let mut children = remaining;
         match children.len() {
           0 => None,
           1 => children.pop(),
-          _ => Some(Self::Split { axis, children }),
+          _ => Some(Self::Split {
+            axis,
+            children,
+            weights: remaining_weights,
+          }),
         }
       }
     }
@@ -68,6 +83,7 @@ impl LayoutExt for ViewLayout {
       Self::Terminal { terminal_id } if terminal_id == id => {
         *self = Self::Split {
           axis,
+          weights: Vec::new(),
           children: vec![
             self.clone(),
             Self::Terminal {
@@ -87,6 +103,36 @@ impl LayoutExt for ViewLayout {
 }
 
 impl SessionRegistry {
+  pub(super) fn capture_view_geometry(
+    &self,
+    id: &str,
+  ) -> Vec<(Arc<Terminal>, ctmux_proto::TerminalSize)> {
+    self.sessions[id]
+      .view
+      .layout
+      .terminal_ids()
+      .iter()
+      .map(|id| {
+        let terminal = Arc::clone(&self.terminals[id]);
+        let size = terminal.info().terminal_size;
+        (terminal, size)
+      })
+      .collect()
+  }
+
+  pub(super) fn restore_view_geometry(
+    &self,
+    id: &str,
+    geometry: &[(Arc<Terminal>, ctmux_proto::TerminalSize)],
+  ) {
+    // Continue after a failed PTY: later hidden panes may already have adopted
+    // tentative unzoom geometry and also need their original dimensions back.
+    for (terminal, size) in geometry {
+      let _restore = terminal.resize_pty(size.clone());
+    }
+    self.publish_view(id);
+  }
+
   pub(super) fn resize_view(
     &mut self,
     id: &str,
@@ -137,6 +183,22 @@ impl SessionRegistry {
           *current = Some(view.clone());
           true
         });
+      }
+    }
+    // A terminal can move between views without replacing its attachment.
+    // Refresh ownership against its current view after every topology update.
+    self.publish_layout_leases(id);
+  }
+
+  pub(super) fn publish_layout_leases(&self, id: &str) {
+    let Some(root) = self.sessions.get(id) else {
+      return;
+    };
+    for terminal_id in root.view.layout.terminal_ids() {
+      if let Some(terminal) = self.terminals.get(&terminal_id) {
+        // This watch is an invalidation signal, independent of canonical PTY
+        // events. Drivers query current ownership and suppress unchanged state.
+        terminal.layout_lease_updates.send_replace(());
       }
     }
   }
@@ -252,6 +314,8 @@ impl SessionRegistry {
         self.sessions.remove(&owner_id);
       }
     }
+    // Lease changes are committed independently of fallible PTY reflow.
+    self.publish_layout_leases(&owner_id);
     let _ = self.reflow_view(&owner_id);
   }
 
@@ -270,7 +334,7 @@ impl SessionManager {
     &self,
     selector: &str,
     expected_revision: u64,
-    layout: ViewLayout,
+    mut layout: ViewLayout,
   ) -> Result<ViewInfo, SessionManagerError> {
     validate_layout(&layout, 0)?;
     let mut registry = lock(&self.inner.registry);
@@ -280,6 +344,7 @@ impl SessionManager {
         "view changed; reload before editing".into(),
       ));
     }
+    preserve_layout_weights(&mut layout, &root.view.layout)?;
     let expected: HashSet<_> = root.view.layout.terminal_ids().into_iter().collect();
     let ids = layout.terminal_ids();
     if ids.len() != expected.len()
@@ -368,6 +433,7 @@ impl SessionManager {
     );
     registry.pending_names.remove(&reservation.name);
     reservation.active = false;
+    registry.publish_layout_leases(&owner.session_id);
     registry.publish_view(&owner.session_id);
     registry.view_info(&owner.session_id)
   }
@@ -401,6 +467,7 @@ impl SessionManager {
     }
     let merged_layout = ViewLayout::Split {
       axis: SplitAxis::Horizontal,
+      weights: Vec::new(),
       children: vec![
         registry.sessions[&destination_id].view.layout.clone(),
         registry.sessions[&source_id].view.layout.clone(),
@@ -439,6 +506,9 @@ impl SessionManager {
     for id in moved_ids {
       *lock(&registry.terminals[&id].owner) = owner.clone();
     }
+    // Source attachments now consult the destination registry even if its
+    // geometry update fails before a view snapshot can be published.
+    registry.publish_layout_leases(&destination_id);
     registry
       .reflow_view(&destination_id)
       .map_err(|error| SessionManagerError::Pty(error.to_string()))?;
@@ -479,10 +549,17 @@ pub(super) fn validate_layout(
   }
   match layout {
     ViewLayout::Terminal { .. } => Ok(()),
-    ViewLayout::Split { children, .. } => {
+    ViewLayout::Split {
+      children, weights, ..
+    } => {
       if children.len() < 2 || children.len() > 64 {
         return Err(SessionManagerError::InvalidView(
           "layout groups require 2 to 64 children".into(),
+        ));
+      }
+      if !weights.is_empty() && (weights.len() != children.len() || weights.contains(&0)) {
+        return Err(SessionManagerError::InvalidView(
+          "split weights must have one positive value per child".into(),
         ));
       }
       for child in children {
@@ -490,6 +567,44 @@ pub(super) fn validate_layout(
       }
       Ok(())
     }
+  }
+}
+
+/// Arrangement edits cannot bypass the attachment lease used for pane sizing.
+/// Missing weights preserve slot proportions, including when older clients swap leaves.
+fn preserve_layout_weights(
+  next: &mut ViewLayout,
+  previous: &ViewLayout,
+) -> Result<(), SessionManagerError> {
+  let ambiguous = || {
+    SessionManagerError::InvalidView(
+    "weighted layout cannot be restructured by update_view; resize panes through an owned attachment".into(),
+  )
+  };
+  match (next, previous) {
+    (
+      ViewLayout::Split {
+        axis,
+        children,
+        weights,
+      },
+      ViewLayout::Split {
+        axis: old_axis,
+        children: old_children,
+        weights: old_weights,
+      },
+    ) if axis == old_axis && children.len() == old_children.len() => {
+      if !weights.is_empty() && weights != old_weights {
+        return Err(ambiguous());
+      }
+      weights.clone_from(old_weights);
+      for (child, previous) in children.iter_mut().zip(old_children) {
+        preserve_layout_weights(child, previous)?;
+      }
+      Ok(())
+    }
+    (next, previous) if next.has_weights() || previous.has_weights() => Err(ambiguous()),
+    _ => Ok(()),
   }
 }
 
@@ -508,5 +623,84 @@ pub(super) fn pane_size(
       (u32::from(canvas.pixel_height) * u32::from(pane.rows)) / u32::from(canvas.rows),
     )
     .expect("pane is bounded by canvas"),
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  fn leaf(id: &str) -> ViewLayout {
+    ViewLayout::Terminal {
+      terminal_id: id.into(),
+    }
+  }
+  fn split(children: Vec<ViewLayout>, weights: &[u32]) -> ViewLayout {
+    ViewLayout::Split {
+      axis: SplitAxis::Horizontal,
+      children,
+      weights: weights.to_vec(),
+    }
+  }
+
+  #[test]
+  fn arrangement_edits_preserve_existing_slot_weights_and_reject_lease_bypasses() {
+    let original = split(
+      vec![leaf("a"), split(vec![leaf("b"), leaf("c")], &[1, 3])],
+      &[2, 5],
+    );
+    let mut next = split(vec![leaf("c"), split(vec![leaf("a"), leaf("b")], &[])], &[]);
+    preserve_layout_weights(&mut next, &original).unwrap();
+    assert_eq!(
+      next,
+      split(
+        vec![leaf("c"), split(vec![leaf("a"), leaf("b")], &[1, 3])],
+        &[2, 5]
+      )
+    );
+    let mut forged = split(
+      vec![leaf("a"), split(vec![leaf("b"), leaf("c")], &[1, 3])],
+      &[1, 1],
+    );
+    assert!(preserve_layout_weights(&mut forged, &original).is_err());
+    let mut flattened = split(vec![leaf("a"), leaf("b"), leaf("c")], &[]);
+    assert!(preserve_layout_weights(&mut flattened, &original).is_err());
+    let mut new_weighted = split(vec![leaf("a"), leaf("b")], &[1, 3]);
+    assert!(
+      preserve_layout_weights(&mut new_weighted, &split(vec![leaf("a"), leaf("b")], &[])).is_err()
+    );
+  }
+
+  #[test]
+  fn topology_changes_keep_surviving_split_weights_aligned() {
+    let original = split(
+      vec![
+        leaf("a"),
+        split(vec![leaf("b"), leaf("c")], &[1, 3]),
+        leaf("d"),
+      ],
+      &[2, 5, 1],
+    );
+    assert_eq!(
+      original.clone().remove_terminal("b").unwrap(),
+      split(vec![leaf("a"), leaf("c"), leaf("d")], &[2, 5, 1])
+    );
+    assert_eq!(
+      original.clone().remove_terminal("a").unwrap(),
+      split(
+        vec![split(vec![leaf("b"), leaf("c")], &[1, 3]), leaf("d")],
+        &[5, 1]
+      )
+    );
+    let mut divided = original;
+    divided.split_terminal("a", "new", SplitAxis::Vertical);
+    let ViewLayout::Split {
+      weights, children, ..
+    } = divided
+    else {
+      panic!("split expected");
+    };
+    assert_eq!(weights, [2, 5, 1]);
+    assert!(matches!(&children[0], ViewLayout::Split { weights, .. } if weights.is_empty()));
   }
 }

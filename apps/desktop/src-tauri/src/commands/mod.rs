@@ -20,11 +20,11 @@ use tokio::time::timeout;
 use crate::dto::{
   AcknowledgeAttachmentEventRequestDto, AttachmentEventDto, AttachmentLeaseRequestDto,
   AttachmentRequestDto, ConnectionTargetDto, CreateSessionRequestDto, KillSessionRequestDto,
-  OpenAttachmentRequestDto, OpenAttachmentResponseDto, ResizeAttachmentRequestDto,
-  RestartLocalDaemonResponseDto, SaveSshConfigHostRequestDto, SaveSshConfigHostResponseDto,
-  SendInputRequestDto, SessionDto, SessionListDto, SetAttachmentViewZoomRequestDto, ShellStateDto,
-  SshConfigHostCatalogDto, SshConfigHostDto, TargetRequestDto, decode_input,
-  observation_timestamp_ms, parse_sequence,
+  OpenAttachmentRequestDto, OpenAttachmentResponseDto, ResizeAttachmentDividerRequestDto,
+  ResizeAttachmentPaneRequestDto, ResizeAttachmentRequestDto, RestartLocalDaemonResponseDto,
+  SaveSshConfigHostRequestDto, SaveSshConfigHostResponseDto, SendInputRequestDto, SessionDto,
+  SessionListDto, SetAttachmentViewZoomRequestDto, ShellStateDto, SshConfigHostCatalogDto,
+  SshConfigHostDto, TargetRequestDto, decode_input, observation_timestamp_ms, parse_sequence,
 };
 use crate::error::{CommandErrorDto, CommandResult};
 use crate::local_transport;
@@ -363,6 +363,12 @@ async fn open_reserved_attachment(
     }
     ctl_client::Transport::Local(_) => None,
   };
+  // Transport verification has completed. Expose the actual environment to
+  // the GUI so separate saved SSH aliases can recognize their shared owner.
+  let target = verified_attachment_target(
+    target,
+    remote_observation.as_ref().map(|remote| &remote.identity),
+  );
   let (controller, control, events) =
     AttachmentController::new(stream, &attached, options).map_err(CommandErrorDto::client)?;
   let response = OpenAttachmentResponseDto::new(attachment_id.clone(), &attached, target.clone());
@@ -397,6 +403,16 @@ async fn open_reserved_attachment(
   Ok(response)
 }
 
+fn verified_attachment_target(
+  mut target: ConnectionTargetDto,
+  identity: Option<&ctl_proto::RemoteIdentity>,
+) -> ConnectionTargetDto {
+  if let (ConnectionTargetDto::Ssh { remote_info, .. }, Some(identity)) = (&mut target, identity) {
+    *remote_info = Some(Box::new(identity.clone()));
+  }
+  target
+}
+
 #[tauri::command]
 pub async fn send_input(
   window: WebviewWindow,
@@ -423,6 +439,51 @@ pub async fn resize_attachment(
   actor
     .control
     .resize(terminal_size)
+    .await
+    .map_err(CommandErrorDto::backend)
+}
+
+#[tauri::command]
+pub async fn resize_attachment_divider(
+  window: WebviewWindow,
+  state: State<'_, AppState>,
+  request: ResizeAttachmentDividerRequestDto,
+) -> CommandResult<()> {
+  let actor = state.actor(window.label(), &request.attachment_id).await?;
+  if !actor.control.supports_divider_resize() {
+    return Err(CommandErrorDto::new(
+      "divider_resize_unsupported",
+      "Divider dragging requires ctmux contract 1.1.17. Update the running ctmuxd daemon and reconnect to use it.",
+    ));
+  }
+  actor
+    .control
+    .resize_divider(request.divider()?, request.request_id)
+    .await
+    .map_err(CommandErrorDto::backend)
+}
+
+#[tauri::command]
+pub async fn resize_attachment_pane(
+  window: WebviewWindow,
+  state: State<'_, AppState>,
+  request: ResizeAttachmentPaneRequestDto,
+) -> CommandResult<()> {
+  let actor = state.actor(window.label(), &request.attachment_id).await?;
+  if !actor.control.supports_pane_resize() {
+    return Err(CommandErrorDto::new(
+      "pane_resize_unsupported",
+      "This server does not support pane resizing. Upgrade ctmuxd to use it.",
+    ));
+  }
+  actor
+    .control
+    .resize_pane(
+      request.terminal_id,
+      request.direction,
+      request.amount,
+      request.request_id,
+    )
     .await
     .map_err(CommandErrorDto::backend)
 }
@@ -529,6 +590,40 @@ fn unexpected_response(expected: &str, _actual: &ServerMessage) -> CommandErrorD
 mod tests {
   use super::*;
   use crate::dto::{ConnectionTargetDto, TerminalSizeDto};
+
+  #[test]
+  fn attachment_targets_preserve_the_route_and_publish_the_verified_environment() {
+    let identity = ctl_proto::RemoteIdentity {
+      protocols: ctl_proto::agent_protocols(),
+      remote_id: "verified-environment".into(),
+      agent_version: "0.1.0".into(),
+      build: None,
+      ctmux_restart_supported: false,
+      bundle: None,
+    };
+    let original = ConnectionTargetDto::ssh("saved-alias");
+    let enriched = verified_attachment_target(original.clone(), Some(&identity));
+    let ConnectionTargetDto::Ssh {
+      destination,
+      remote_info,
+      ..
+    } = &enriched
+    else {
+      panic!("SSH attachment must retain its route");
+    };
+    assert_eq!(destination, "saved-alias");
+    assert_eq!(remote_info.as_deref(), Some(&identity));
+    let mut route = enriched;
+    if let ConnectionTargetDto::Ssh { remote_info, .. } = &mut route {
+      *remote_info = None;
+    }
+    assert_eq!(route, original);
+    assert_eq!(verified_attachment_target(original.clone(), None), original);
+    assert_eq!(
+      verified_attachment_target(ConnectionTargetDto::Local, Some(&identity)),
+      ConnectionTargetDto::Local
+    );
+  }
 
   /// Exercises the public command functions invoked by Tauri without a
   /// `WebView`. The caller supplies an OpenSSH destination and may supply the

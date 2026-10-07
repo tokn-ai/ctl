@@ -20,4 +20,10 @@
 .view-pane .xterm-viewport { scrollbar-width: none; }
 .view-pane .xterm-viewport::-webkit-scrollbar { display: none; }
 
-.view-divider { position: absolute; pointer-events: none; background: var(--border-subtle, #333); }
+.view-divider-handle { position: absolute; z-index: 4; touch-action: none; user-select: none; cursor: row-resize; outline: none; }
+.view-divider-handle[data-vertical="true"] { cursor: col-resize; }
+.view-divider-handle::after { content: ""; position: absolute; left: 0; right: 0; top: 50%; height: 1px; background: var(--border-subtle, #333); }
+.view-divider-handle[data-vertical="true"]::after { top: 0; bottom: 0; left: 50%; width: 1px; height: auto; }
+.view-divider-handle:hover::after, .view-divider-handle:focus-visible::after, .view-divider-handle[data-active="true"]::after { background: var(--accent, #7897c5); }
+.view-divider-handle[aria-disabled="true"] { cursor: default; }
+.view-divider-preview { position: absolute; z-index: 4; pointer-events: none; background: var(--accent, #7897c5); }

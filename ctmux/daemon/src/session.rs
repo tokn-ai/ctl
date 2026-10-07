@@ -2248,6 +2248,7 @@ fn terminal_emulator(terminal_size: &TerminalSize) -> avt::Vt {
   // ctmuxd owns a bounded authoritative scrollback in addition to its live
   // checkpoint. Raw output remains a short delta journal, not history state.
   avt::Vt::builder()
+    .reflow_cursor_line(false)
     .size(
       usize::from(terminal_size.columns),
       usize::from(terminal_size.rows),
@@ -2817,6 +2818,33 @@ mod tests {
     terminal.terminal_size.columns = 10;
     refresh_history(&mut terminal);
     assert_eq!(terminal.history.snapshot(0).lines, vec!["abcdefghij"]);
+  }
+
+  #[test]
+  fn prompt_resize_redraw_retains_previous_output_and_checkpoint_cursor() {
+    let mut terminal = terminal_state_with_size(60, 8, 1024);
+    let restored = "Restored session: Wed Oct 7 19:23:45 CST 2026";
+    let prompt = "\x1b[34mclouds\x1b[39m@Clouds-MacbookM2 ~ % ";
+    feed_terminal_bytes(&mut terminal, format!("{restored}\r\n{prompt}").as_bytes());
+    // Actual zsh SIGWINCH redraws: narrow the prompt to two physical rows,
+    // then move up from its last row when repainting at the wider size.
+    for (columns, prefix) in [(22, "\r\r"), (60, "\r\r\x1b[A")] {
+      terminal.terminal.resize(columns, 8);
+      terminal.terminal_size.columns = u16::try_from(columns).unwrap();
+      feed_terminal_bytes(
+        &mut terminal,
+        format!("{prefix}\x1b[0m\x1b[27m\x1b[24m\x1b[J{prompt}").as_bytes(),
+      );
+      refresh_checkpoint(&mut terminal);
+    }
+    let mut projection = terminal_state_from_checkpoint(terminal.checkpoint.clone());
+    for state in [&mut terminal, &mut projection] {
+      feed_terminal_bytes(state, b"cccclc");
+      let rows: Vec<_> = state.terminal.view().map(avt::Line::text).collect();
+      assert_eq!(rows[0].trim_end(), restored);
+      assert_eq!(rows[1].trim_end(), "clouds@Clouds-MacbookM2 ~ % cccclc");
+      assert_eq!(state.terminal.cursor(), (34, 1));
+    }
   }
 
   #[test]

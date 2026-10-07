@@ -501,6 +501,7 @@ fn archive_screen_lines(current: &Current) -> Vec<String> {
 
 fn emulator(size: &TerminalSize) -> avt::Vt {
   avt::Vt::builder()
+    .reflow_cursor_line(false)
     .size(usize::from(size.columns), usize::from(size.rows))
     .scrollback_limit(0)
     .build()

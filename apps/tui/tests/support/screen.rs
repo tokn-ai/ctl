@@ -60,6 +60,7 @@ impl Capture {
   pub fn new(columns: u16, rows: u16) -> Self {
     Self {
       vt: avt::Vt::builder()
+        .reflow_cursor_line(false)
         .size(usize::from(columns.max(1)), usize::from(rows.max(1)))
         .scrollback_limit(0)
         .build(),

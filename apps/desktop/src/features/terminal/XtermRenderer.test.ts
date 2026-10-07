@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { Terminal } from "@xterm/xterm";
 import { XtermRenderer } from "./XtermRenderer";
 import type { SessionSummary, TerminalSize } from "../../lib/types";
 
@@ -16,6 +17,7 @@ const size: TerminalSize = { columns: 20, rows: 2, pixel_width: null, pixel_heig
 const encoder = new TextEncoder();
 let container: HTMLElement;
 let renderer: XtermRenderer;
+let terminals: Terminal[];
 
 function measurable(element: HTMLElement): boolean {
   return element.isConnected && !element.closest("[hidden]") &&
@@ -29,6 +31,12 @@ function ancestors(element: HTMLElement): HTMLElement[] {
 }
 
 beforeEach(() => {
+  terminals = [];
+  const open = Terminal.prototype.open;
+  vi.spyOn(Terminal.prototype, "open").mockImplementation(function (this: Terminal, parent: HTMLElement) {
+    terminals.push(this);
+    open.call(this, parent);
+  });
   // Exercise xterm's real DOM renderer. Canvas glyph metrics remain available
   // while DOM WidthCache measurements require a connected, laid-out element.
   vi.stubGlobal("OffscreenCanvas", class {
@@ -60,6 +68,52 @@ afterEach(async () => {
 function rowContainer(): HTMLElement {
   return container.querySelector<HTMLElement>(".xterm-rows")!;
 }
+
+function activeTerminal(): Terminal {
+  return terminals.find((terminal) => terminal.element && container.contains(terminal.element))!;
+}
+
+function expectVisibleRows(): void {
+  const terminal = activeTerminal();
+  const buffer = terminal.buffer.active;
+  expect([...rowContainer().children].map((row) => row.textContent?.trimEnd())).toEqual(
+    Array.from({ length: terminal.rows }, (_, index) => (buffer.getLine(buffer.viewportY + index)?.translateToString(true) ?? "").trimEnd()),
+  );
+}
+
+describe("resizing with history", () => {
+  it("paints the current viewport after repeated checkpoints, history activation and wheel scrolling", async () => {
+    const history = Array.from({ length: 50 }, (_, index) => ({ text: `older ${index}`, wrapped: false }));
+    const sizes = [{ columns: 60, rows: 6 }, { columns: 32, rows: 3 }, { columns: 80, rows: 8 }, { columns: 24, rows: 2 }];
+    for (const [index, geometry] of sizes.entries()) {
+      const current_size = { ...size, ...geometry };
+      const prompt = `\u001b[2J\u001b[HRestored session: Wed Oct 7\u001b[2;1H\u001b[34mclouds\u001b[0m@host ~ % `;
+      const payload = encoder.encode(prompt);
+      const snapshot_id = `snapshot-${index}`;
+      await renderer.restoreCheckpoint(current_size, history.map((row) => row.text), payload, new Uint8Array(), "0", snapshot_id);
+      expect(await renderer.syncHistory({ terminal_size: current_size, rows: history, payload, input_prefix: new Uint8Array(),
+        sequence: "0", snapshot_id, scrollback_limit: "10000" })).toBe(true);
+      await vi.waitFor(expectVisibleRows);
+      let terminal = activeTerminal();
+      const screen = container.querySelector<HTMLElement>(".xterm-screen")!;
+      screen.dispatchEvent(new WheelEvent("wheel", { bubbles: true, cancelable: true, deltaY: -120 }));
+      await vi.waitFor(() => {
+        expect(terminal.buffer.active.viewportY).toBeLessThan(terminal.buffer.active.baseY);
+        expectVisibleRows();
+      });
+      await renderer.write(encoder.encode("cccclc"), "6", "0");
+      await vi.waitFor(expectVisibleRows);
+      terminal.scrollToBottom();
+      await vi.waitFor(() => {
+        expect(terminal.buffer.active.viewportY).toBe(terminal.buffer.active.baseY);
+        expectVisibleRows();
+        expect(rowContainer().children[1].textContent?.trimEnd()).toBe("clouds@host ~ % cccclc");
+      });
+      terminal.scrollLines(-3);
+      await vi.waitFor(() => expect(terminal.buffer.active.viewportY).toBeLessThan(terminal.buffer.active.baseY));
+    }
+  });
+});
 
 describe("terminal font measurement", () => {
   it("opens the live terminal with measurable glyph widths", async () => {

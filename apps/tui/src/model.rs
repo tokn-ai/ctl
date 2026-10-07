@@ -26,6 +26,7 @@ impl Model {
   pub fn new(size: &TerminalSize) -> Self {
     Self {
       vt: avt::Vt::builder()
+        .reflow_cursor_line(false)
         .size(
           usize::from(size.columns.max(2)),
           usize::from(size.rows.max(1)),

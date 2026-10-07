@@ -233,8 +233,11 @@ test("overlapping signed builds serialize compilation and signing in their dedic
   assert.equal(helper_builds, 1);
   release_first();
   const [first_output, second_output] = await Promise.all([first, second]);
-  assert.equal(first_output, (await readCheckpoint(input)).executable);
-  assert.equal(second_output, first_output);
+  // Archives include file timestamps, so separate valid builds can have
+  // different hashes. The last build is selected and both remain usable.
+  assert.equal(second_output, (await readCheckpoint(input)).executable);
+  assert.equal(await readFile(first_output, "utf8"), "fixture locally compiled ctld");
+  assert.equal(await readFile(second_output, "utf8"), "fixture locally compiled ctld");
   assert.equal(helper_builds, 2);
   const packages = input.calls.filter((call) => call.command === "cargo" && call.args[0] === "build")
     .map((call) => call.args[call.args.indexOf("-p") + 1]);

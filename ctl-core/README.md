@@ -6,6 +6,8 @@ Shared foundations for ctl and ctmux components:
 - `protocol`: canonical `major.minor.build` contracts and explicit-set negotiation.
 - `executable`: bounded inspection and verification of replacement executables,
   enabled by the `executable` feature.
+- `observability`: typed local diagnostic/audit records, bounded rotation, and
+  coordinated multi-process storage, enabled by the `observability` feature.
 - `paths`: the shared `~/.tokn/ctl` storage directory on every platform.
   Resolving it does not create files or import data from former locations.
 

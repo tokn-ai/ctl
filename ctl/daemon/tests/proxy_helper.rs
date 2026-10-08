@@ -76,6 +76,17 @@ impl Fixture {
     executable.canonicalize().unwrap()
   }
 
+  fn assert_only_history(&self) {
+    // Proxying must not rediscover/install another helper or component store.
+    assert_eq!(
+      std::fs::read_dir(self.0.join(".tokn/ctl"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect::<Vec<_>>(),
+      [std::ffi::OsString::from("history")]
+    );
+  }
+
   fn command(
     &self,
     route: &[SshGateway],
@@ -92,6 +103,7 @@ impl Fixture {
         "2200",
       ])
       .env("PATH", &self.0)
+      .env("HOME", &self.0)
       .env("CTLD_SOCKET_PATH", broker_socket)
       .env_remove("CTLD_ASKPASS")
       .env_remove("CTLD_IDENTITY_ASKPASS")
@@ -160,6 +172,7 @@ async fn an_explicit_broker_socket_is_pinned_on_its_ssh_children() {
     .arg("--socket")
     .arg(&socket)
     .env("PATH", &fixture.0)
+    .env("HOME", &fixture.0)
     // This may happen when a broker is launched directly rather than through
     // connect(). Its children must still address the socket actually bound.
     .env("CTLD_SOCKET_PATH", fixture.0.join("unrelated.sock"))
@@ -267,6 +280,7 @@ async fn nested_ssh_proxy_uses_the_executing_helper_without_rediscovery() {
       ])
       .env("PATH", &fixture.0)
       .env("HOME", &fixture.0)
+      .env("HOME", &fixture.0)
       .env("CTLD_TEST_PROXY_ARGS", &marker)
       .env_remove("CTLD_BIN")
       .env_remove("CTLD_ASKPASS")
@@ -305,7 +319,7 @@ async fn nested_ssh_proxy_uses_the_executing_helper_without_rediscovery() {
       arguments.lines().any(|argument| argument == expected),
       "{arguments}"
     );
-    assert!(!fixture.0.join(".tokn").exists());
+    fixture.assert_only_history();
   }
 }
 
@@ -387,6 +401,7 @@ async fn remote_vpn_uses_its_ssh_owner_and_preserves_the_remote_dns_destination(
     ])
     .env("PATH", &fixture.0)
     .env("HOME", &fixture.0)
+    .env("HOME", &fixture.0)
     .env("CTLD_BIN", fixture.0.join("wrong-helper"))
     .env("CTLD_SOCKET_PATH", &broker.socket_path)
     .env("CTLD_TEST_PROXY_ARGS", &arguments_path)
@@ -442,7 +457,7 @@ async fn remote_vpn_uses_its_ssh_owner_and_preserves_the_remote_dns_destination(
     })
   );
   assert_eq!(&request[4 + size..], b"destination-input");
-  assert!(!fixture.0.join(".tokn").exists());
+  fixture.assert_only_history();
 }
 
 fn vpn_route(fixture: &Fixture) -> (Vec<SshGateway>, SshTarget) {

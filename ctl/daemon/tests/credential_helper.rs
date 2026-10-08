@@ -3,10 +3,13 @@ use std::io::Write as _;
 use std::process::{Command, Stdio};
 
 fn request(bytes: &[u8]) -> std::process::Output {
+  let directory = std::env::temp_dir().join(format!("credential-history-{}", uuid::Uuid::new_v4()));
+  std::fs::create_dir(&directory).unwrap();
   let socket =
     std::env::temp_dir().join(format!("credential-helper-{}.sock", uuid::Uuid::new_v4()));
   let mut child = Command::new(env!("CARGO_BIN_EXE_ctld"))
     .arg("--credential-request")
+    .env("HOME", &directory)
     .env_remove("CTLD_ASKPASS")
     .env("CTLD_SOCKET_PATH", &socket)
     .stdin(Stdio::piped())
@@ -17,6 +20,7 @@ fn request(bytes: &[u8]) -> std::process::Output {
   child.stdin.take().unwrap().write_all(bytes).unwrap();
   let output = child.wait_with_output().unwrap();
   assert!(!socket.exists(), "one-shot helper started a daemon socket");
+  std::fs::remove_dir_all(directory).unwrap();
   output
 }
 

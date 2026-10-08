@@ -88,7 +88,7 @@ async fn restart_replaces_only_an_isolated_owner_and_verifies_the_new_build() {
   let executable = owner.0.join("ctld");
   std::fs::write(
     &executable,
-    "#!/bin/sh\nfixture_dir=${0%/*}\nPATH=\"$fixture_dir:$PATH\"\nexport PATH\nexec \"$fixture_dir/daemon-bin\" \"$@\"\n",
+    "#!/bin/sh\nfixture_dir=${0%/*}\nHOME=\"$fixture_dir\"\nexport HOME\nPATH=\"$fixture_dir:$PATH\"\nexport PATH\nexec \"$fixture_dir/daemon-bin\" \"$@\"\n",
   )
   .unwrap();
   std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -97,6 +97,7 @@ async fn restart_replaces_only_an_isolated_owner_and_verifies_the_new_build() {
   let mut child = tokio::process::Command::new(executable)
     .arg("--socket")
     .arg(owner.socket())
+    .env("HOME", &owner.0)
     .env_remove("CTLD_ASKPASS")
     .stdin(Stdio::null())
     .stdout(Stdio::null())
@@ -147,6 +148,7 @@ async fn vpn_status_observes_shared_inventory_once_per_request() {
     .arg("--socket")
     .arg(owner.socket())
     .env("PATH", &owner.0)
+    .env("HOME", &owner.0)
     .env_remove("CTLD_ASKPASS")
     .stdin(Stdio::null())
     .stdout(Stdio::null())

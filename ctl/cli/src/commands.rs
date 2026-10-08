@@ -26,6 +26,7 @@ fn validate_local_command_target(arguments: &Arguments) -> Result<(), CliError> 
     Command::Setup(_) => CliError::SetupTarget,
     Command::Skill(_) => CliError::SkillTarget,
     Command::Passwords { .. } => CliError::PasswordsTarget,
+    Command::Logs(_) | Command::Audit(_) => CliError::HistoryTarget,
     _ => return Ok(()),
   };
   if arguments.host.is_some() || arguments.method.is_some() || arguments.remote_platform.is_some() {
@@ -58,6 +59,10 @@ pub async fn run(arguments: Arguments) -> Result<i32, CliError> {
     && matches!(arguments.remote_platform, Some(RemotePlatform::Windows))
   {
     return Err(CliError::RemoteVpnUnsupported);
+  }
+  if let Some(result) = crate::history::dispatch(&arguments.command) {
+    result.map_err(CliError::History)?;
+    return Ok(0);
   }
   match arguments.command {
     #[cfg(unix)]
@@ -146,7 +151,9 @@ async fn run_selected(
     }
     #[cfg(unix)]
     Command::Port { command } => crate::port::run(&connector.settings, command).await?,
-    Command::Setup(_)
+    Command::Logs(_)
+    | Command::Audit(_)
+    | Command::Setup(_)
     | Command::Skill(_)
     | Command::Host { .. }
     | Command::Passwords { .. }
@@ -406,6 +413,10 @@ enum CtlConnectError {
 
 #[derive(Debug, Error)]
 pub enum CliError {
+  #[error("History is local; omit --host, --method, and --remote-platform.")]
+  HistoryTarget,
+  #[error("Could not read local history: {0}")]
+  History(std::io::Error),
   #[cfg(unix)]
   #[error(
     "Components manage the local bundle store; omit --host, --method, and --remote-platform."

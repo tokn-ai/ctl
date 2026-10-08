@@ -60,6 +60,27 @@ fn error_response(error: IdentityError) -> Response {
 }
 
 async fn handle(request: Request) -> Result<Response, IdentityError> {
+  use ctl_core::observability::{Event, Operation, Outcome};
+  let (event, subject) = match &request {
+    Request::Save { path, .. } => (Event::IdentitySave, Some(path.as_str())),
+    Request::Forget { identity_id } => (Event::IdentityRemove, Some(identity_id.as_str())),
+    _ => (Event::IdentityInventory, None),
+  };
+  let operation = Operation::start(event, subject);
+  let result = handle_inner(request).await;
+  operation.finish(
+    if result.is_ok() {
+      Outcome::Succeeded
+    } else {
+      Outcome::Failed
+    },
+    result.as_ref().err().map(|error| error.code()),
+    None,
+  );
+  result
+}
+
+async fn handle_inner(request: Request) -> Result<Response, IdentityError> {
   match request {
     Request::List { paths } | Request::ListMetadata { paths } => Ok(Response::Inventory {
       inventory: inventory::list(&paths)?,

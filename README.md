@@ -669,6 +669,13 @@ it does not establish a protocol mismatch. Component updates preserve running
 daemons, so an older daemon may still need a manual restart when its sessions
 can be ended.
 
+### Local diagnostics and audit
+
+Use `ctl logs` for daemon diagnostics and `ctl audit` for connection and credential
+activity. Both accept `--failed`, `--limit`, `--json`, and `--path` and read the
+shared local history without connecting. See [logging and audit](docs/logging-audit.md)
+for record contents, privacy, rotation, and failure behavior.
+
 ### Saved SSH passwords
 
 On macOS, `ctl passwords` lists saved SSH credentials and key passphrases.

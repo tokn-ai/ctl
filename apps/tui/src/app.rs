@@ -486,7 +486,8 @@ impl App<'_> {
 
   pub async fn run(&mut self, mut events: mpsc::Receiver<io::Result<Event>>) -> Result<()> {
     self.runtime = true;
-    let result = self.run_loop(&mut events).await;
+    // Keep event-loop state out of the futures owned by CLI callers.
+    let result = Box::pin(self.run_loop(&mut events)).await;
     self.runtime = false;
     self.maintenance.cancel();
     result

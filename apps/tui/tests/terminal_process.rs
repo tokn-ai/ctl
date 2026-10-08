@@ -2,6 +2,8 @@
 
 #[path = "cases/cleanup.rs"]
 mod cleanup;
+#[path = "cases/commands.rs"]
+mod commands;
 #[path = "cases/reconnect.rs"]
 mod reconnect;
 #[path = "cases/resizing.rs"]

@@ -33,6 +33,7 @@ pub enum Action {
   KillPane,
   Detach,
   Help,
+  CommandPrompt,
   Cancel,
 }
 
@@ -103,6 +104,7 @@ pub fn resolve(key: KeyEvent) -> Option<Binding> {
     KeyCode::Char('x') => Action::KillPane,
     KeyCode::Char('d') => Action::Detach,
     KeyCode::Char('?') => Action::Help,
+    KeyCode::Char(':') => Action::CommandPrompt,
     KeyCode::Esc => Action::Cancel,
     _ => return None,
   };
@@ -144,6 +146,7 @@ mod tests {
       (KeyCode::Char('x'), Action::KillPane),
       (KeyCode::Char('d'), Action::Detach),
       (KeyCode::Char('?'), Action::Help),
+      (KeyCode::Char(':'), Action::CommandPrompt),
       (KeyCode::Esc, Action::Cancel),
     ];
     for (code, action) in bindings {

@@ -97,6 +97,17 @@ impl Frame {
     }
   }
 
+  pub fn command_prompt(&mut self, prompt: &crate::prompt::Prompt) {
+    if self.columns == 0 || self.rows == 0 {
+      self.cursor = None;
+      return;
+    }
+    let (text, cursor_column) = prompt.display(self.columns);
+    let row = self.rows - 1;
+    self.text(0, row, &text, true);
+    self.cursor = Some((cursor_column.min(self.columns - 1), row));
+  }
+
   pub fn canvas(
     &mut self,
     view: &ViewInfo,
@@ -585,6 +596,110 @@ fn style(output: &mut impl Write, pen: &avt::Pen) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn command_prompt_replaces_only_status_and_moves_the_host_cursor_to_the_footer() {
+    let mut before = Frame::new(24, 4);
+    before.text(0, 0, "saved output", false);
+    before.text(0, 1, "$ echo ready", false);
+    before.text(0, 2, "ready", false);
+    before.text(0, 3, "connected / history ready", true);
+    before.cursor = Some((5, 2));
+    let content = before.text_rows()[..3].to_vec();
+    let mut bytes = Vec::new();
+    Renderer::default().write(&mut bytes, &before).unwrap();
+    let mut host = avt::Vt::new(24, 4);
+    host.feed_str(std::str::from_utf8(&bytes).unwrap());
+
+    let mut frame = Frame {
+      columns: before.columns,
+      rows: before.rows,
+      cells: before.cells.clone(),
+      cursor: before.cursor,
+    };
+    let mut prompt = crate::prompt::Prompt::default();
+    prompt.open();
+    prompt.paste("display-panes");
+    frame.command_prompt(&prompt);
+
+    assert_eq!(frame.text_rows()[..3], content);
+    assert!(frame.text_rows()[3].contains("display-panes"));
+    assert!(!frame.text_rows()[3].contains("connected"));
+    assert!(frame.cells[72..].iter().all(|pixel| pixel.pen.is_inverse()));
+    let cursor_column = prompt.display(24).1;
+    assert_eq!(frame.cursor, Some((cursor_column, 3)));
+
+    bytes.clear();
+    Renderer {
+      previous: Some(before),
+    }
+    .write(&mut bytes, &frame)
+    .unwrap();
+    host.feed_str(std::str::from_utf8(&bytes).unwrap());
+    assert_eq!(host.cursor().col, usize::from(cursor_column));
+    assert_eq!(host.cursor().row, 3);
+    assert!(host.cursor().visible);
+    let rows: Vec<_> = host.view().map(avt::Line::text).collect();
+    assert_eq!(rows[..3], content);
+    assert!(rows[3].contains("display-panes"));
+
+    let previous = Frame {
+      columns: frame.columns,
+      rows: frame.rows,
+      cells: frame.cells.clone(),
+      cursor: frame.cursor,
+    };
+    let _ = prompt.key(crossterm::event::KeyEvent::new(
+      crossterm::event::KeyCode::Left,
+      crossterm::event::KeyModifiers::NONE,
+    ));
+    frame.command_prompt(&prompt);
+    assert_eq!(frame.text_rows(), previous.text_rows());
+    assert_eq!(frame.cursor, Some((cursor_column - 1, 3)));
+    bytes.clear();
+    Renderer {
+      previous: Some(previous),
+    }
+    .write(&mut bytes, &frame)
+    .unwrap();
+    host.feed_str(std::str::from_utf8(&bytes).unwrap());
+    assert_eq!(host.cursor().col, usize::from(cursor_column - 1));
+    assert_eq!(host.cursor().row, 3);
+  }
+
+  #[test]
+  fn command_prompt_handles_tiny_hosts_and_unicode_without_an_extra_terminal_row() {
+    let mut prompt = crate::prompt::Prompt::default();
+    prompt.open();
+    prompt.paste("界界界abcdefgh");
+    for (columns, rows) in [(0, 0), (0, 3), (3, 0), (1, 1), (3, 1), (5, 2)] {
+      let mut frame = Frame::new(columns, rows);
+      frame.text(0, 0, "PTY", false);
+      let content = frame.text_rows();
+      frame.command_prompt(&prompt);
+      assert_eq!(frame.cells.len(), usize::from(columns) * usize::from(rows));
+      if columns == 0 || rows == 0 {
+        assert_eq!(frame.cursor, None);
+        continue;
+      }
+      let (column, row) = frame.cursor.expect("prompt has a host cursor");
+      assert!(column < columns);
+      assert_eq!(row, rows - 1);
+      let footer = &frame.cells[usize::from(row) * usize::from(columns)..];
+      assert!(footer.iter().all(|pixel| pixel.pen.is_inverse()));
+      if rows > 1 {
+        assert_eq!(frame.text_rows()[0], content[0]);
+      }
+      let mut bytes = Vec::new();
+      Renderer::default().write(&mut bytes, &frame).unwrap();
+      let mut host = avt::Vt::new(usize::from(columns), usize::from(rows));
+      host.feed_str(std::str::from_utf8(&bytes).unwrap());
+      assert_eq!(host.cursor().row, usize::from(rows - 1));
+      assert_eq!(host.cursor().col, usize::from(column));
+      assert!(host.cursor().visible);
+    }
+  }
+
   #[test]
   fn status_text_cannot_inject_terminal_controls() {
     let mut frame = Frame::new(40, 3);

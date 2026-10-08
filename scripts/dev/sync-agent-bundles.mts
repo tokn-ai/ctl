@@ -181,7 +181,7 @@ async function checkBundles(repoRoot: string): Promise<void> {
   const revision = git(["rev-parse", "HEAD"], repoRoot);
   if (!existsSync(join(destination, BUNDLE_SET_FILE))) {
     console.warn("Remote install bundles have not been synchronized for development.");
-    console.warn("Run `pnpm agents:sync` from apps/desktop when testing remote installation.");
+    console.warn("Run `pnpm bundles:sync` from the repository root when testing remote installation.");
     return;
   }
   try {
@@ -189,7 +189,7 @@ async function checkBundles(repoRoot: string): Promise<void> {
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     console.warn(`Remote install bundles are not current: ${detail}`);
-    console.warn("Run `pnpm agents:sync` from apps/desktop when testing remote installation.");
+    console.warn("Run `pnpm bundles:sync` from the repository root when testing remote installation.");
   }
 }
 
@@ -320,10 +320,10 @@ async function syncBundles(repoRoot: string, useMain: boolean): Promise<void> {
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   if (args.length > 1 || (args[0] && !["--check", "--main", "--help"].includes(args[0]))) {
-    throw new Error("usage: pnpm agents:sync [--main]");
+    throw new Error("usage: pnpm bundles:sync [--main]");
   }
   if (args[0] === "--help") {
-    console.log("usage: pnpm agents:sync [--main]");
+    console.log("usage: pnpm bundles:sync [--main]");
     console.log("  default  sync or build bundles for the exact pushed commit");
     console.log("  --main   use the latest successful main-branch bundle set");
     return;

@@ -7,6 +7,15 @@ settings:
 importers:
 
   .:
+    devDependencies:
+      '@types/node':
+        specifier: ^24.13.6
+        version: 24.13.6
+      typescript:
+        specifier: ~5.8.3
+        version: 5.8.3
+
+  apps/desktop:
     dependencies:
       '@tauri-apps/api':
         specifier: ^2

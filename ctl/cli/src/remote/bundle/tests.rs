@@ -79,7 +79,7 @@ fn recovery_falls_back_only_when_the_release_is_absent_or_stale() {
   .to_string();
   assert!(error.contains("unpublished"));
   assert!(error.contains("gh unavailable"));
-  assert!(error.contains("pnpm agents:sync"));
+  assert!(error.contains("pnpm bundles:sync"));
 }
 
 #[tokio::test]

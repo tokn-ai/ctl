@@ -92,43 +92,50 @@ ID, `signing_mode: "signed"`, `notarized: true`, archive filename, SHA-256 hash,
 and archive size. The draft updater validates the complete asset set and each
 checksum before changing release attachments.
 
-## Build a CLI with ctld embedded
+## Signed ctld for local development
 
-For local macOS development, use the shared Tauri provisioning flow:
+For local macOS CLI and GUI development, run the shared provisioning commands
+from the repository root:
 
 ```sh
-node scripts/dev/ctl-signed.mts --provision
+pnpm ctld:provision
 # In Xcode, choose your team in Signing & Capabilities and build once.
-node scripts/dev/ctl-signed.mts --helper-only
+pnpm ctld:build
 cargo run -p ctl-cli -- passwords
 ```
 
-The build detects the native Rust target and workspace version, finds or
+For GUI development, `pnpm desktop:dev` automatically builds and stages signed
+helpers on macOS. Its managed worktree daemon survives app reloads; running
+`ctld:build` first is unnecessary. The standard Tauri command can also launch a
+direct debug GUI build that discovers the same selected helper as the CLI.
+
+The `ctld:build` command detects the native Rust target and workspace version, finds or
 refreshes the provisioning profile, and chooses its matching Keychain
-certificate. The helper-only command compiles `ctld`, signs the complete app,
+certificate. The component command compiles `ctld`, signs the complete app,
 and atomically publishes its checkout selection under
-`<target-dir>/ctl-dev/helpers/<checkout-id>/`. Ordinary macOS debug CLI builds
-reuse it before shared discovery; the CLI itself can remain unsigned. Cargo's
+`<target-dir>/ctl-dev/helpers/<checkout-id>/`. Ordinary macOS debug CLI and GUI builds
+reuse the same verified app before shared discovery; both consumers can remain
+unsigned. Cargo's
 configured target directory and canonical checkout identity determine discovery,
 independently of the current directory. Worktrees sharing a target directory have
 separate selections. Repeat this preparation after helper changes; ordinary CLI
 edits need only a Cargo rebuild.
 
-Without `--helper-only`, the command also embeds the helper in `ctl`, signs the
-CLI, and atomically replaces `target/ctl-dev/ctl`. It allows local source changes
-and needs no notarization credentials. Its manifest binds the helper's revision,
-source fingerprint, and dirty flag. Embedded development preparation uses
-`~/.tokn/ctl/components/ctld/development/<archive-sha256>/` without changing shared
-selections. Explicit `target/ctl-dev/ctl setup` updates the shared architecture/API
-selection while leaving the release `current` symlink intact.
+One `pnpm ctld:build` output supplies both consumers; no development CLI
+embedding or signing step is needed. It allows local source changes and needs
+no notarization credentials. Its receipt binds the helper's revision, source
+fingerprint, and dirty flag. Preparation leaves shared component selections and
+running services unchanged.
 The runtime still checks signature, provisioning expiry,
 certificate identity, source metadata against the app's own manifest, and API
 compatibility. Rebuild after a profile expires. An existing compatible daemon is
 never restarted automatically.
 
-Local signing explicitly uses `--timestamp=none` for both the helper and CLI,
+Local component signing explicitly uses `--timestamp=none`,
 so an unavailable Apple timestamp service does not block development. Release
 signing retains `--timestamp`; it fails if a secure timestamp cannot be obtained.
+
+## Build a CLI with ctld embedded
 
 For distributable releases, use the following command.
 
@@ -223,14 +230,13 @@ sorting directories by hash or modification time. Setup never starts, stops,
 or restarts a daemon. Existing compatible connections continue using their
 running daemon until it is stopped explicitly.
 
-An explicit `CTLD_BIN` executable override has highest priority. Otherwise the
-signed development CLI prepares its own matching embedded helper and leaves
-global selections unchanged. Ordinary macOS debug Cargo builds first verify this
-checkout's provisioned helper under its target directory. With no compatible
+An explicit `CTLD_BIN` executable override has highest priority. Ordinary macOS debug
+CLI and GUI builds first verify this checkout's provisioned helper under its
+target directory without changing global selections. With no compatible
 local helper, a standalone macOS CLI prefers a
 verified compatible selected managed app supporting the requested operation, then its
 own bundled helper, then a nearby desktop bundle, sibling executable, or `PATH`.
-The desktop continues to prefer its own bundled helper. Unsafe or invalid selected
+Packaged desktop releases continue to prefer their own bundled helper. Unsafe or invalid selected
 installations produce a verification error. `ctl setup --json` prints the result with
 `component`, `version`, `executable`, and `reused` fields.
 

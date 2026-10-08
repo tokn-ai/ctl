@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { chmod, copyFile, lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, copyFile, lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseHelperComponent, sameProtocols, type ProtocolInfo } from "../shared/protocol-contract.mts";
@@ -17,7 +17,6 @@ const architectures = new Map([
   ["aarch64-apple-darwin", "arm64"], ["x86_64-apple-darwin", "x86_64"],
 ]);
 const helper_identifier = "dev.tokn-ai.ctl.ctld";
-const cli_identifier = "dev.tokn-ai.ctl.cli";
 
 export interface DevelopmentHelperManifest {
   schema_version: 1;
@@ -43,28 +42,14 @@ export interface DevelopmentBuildOptions {
   home_directory?: string;
 }
 
-
 async function regularFile(path: string): Promise<void> {
   const info = await lstat(path);
   if (!info.isFile() || info.size === 0) throw new Error(`expected a nonempty regular file: ${path}`);
 }
 
-/** Compile and locally sign a self-contained native CLI using Xcode provisioning. */
-export async function buildSignedDevelopmentCli(
-  options: DevelopmentBuildOptions = {}, run: MacosCommandRunner = runMacosCommand,
-): Promise<string> {
-  return buildSignedDevelopment("cli", options, run);
-}
-
-/** Provision a signed helper for ordinary Cargo CLIs without bundling or signing ctl. */
+/** Compile and sign the ctld component consumed by debug CLI and GUI builds. */
 export async function buildSignedDevelopmentHelper(
   options: DevelopmentBuildOptions = {}, run: MacosCommandRunner = runMacosCommand,
-): Promise<string> {
-  return buildSignedDevelopment("helper", options, run);
-}
-
-async function buildSignedDevelopment(
-  mode: "cli" | "helper", options: DevelopmentBuildOptions, run: MacosCommandRunner,
 ): Promise<string> {
   const root = await realpath(options.repository_root ?? repository_root);
   const env: NodeJS.ProcessEnv = {
@@ -84,11 +69,10 @@ async function buildSignedDevelopment(
   if (!host || !architecture) throw new Error("signed development builds require a native macOS Rust target");
   const metadata = JSON.parse((await invoke("cargo", ["metadata", "--no-deps", "--format-version", "1", "--locked"], {}, false, 30_000)).stdout);
   const helper_version = metadata.packages?.find((pkg: { name: string }) => pkg.name === "ctld")?.version;
-  const cli_version = metadata.packages?.find((pkg: { name: string }) => pkg.name === "ctl-cli")?.version;
-  if (typeof helper_version !== "string" || helper_version !== cli_version ||
+  if (typeof helper_version !== "string" ||
     !/^\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?(?:\+[a-zA-Z0-9.-]+)?$/.test(helper_version) ||
     typeof metadata.target_directory !== "string" || !isAbsolute(metadata.target_directory)) {
-    throw new Error("Cargo must report matching ctl-cli/ctld versions and an absolute target directory");
+    throw new Error("Cargo must report a valid ctld version and an absolute target directory");
   }
   const target_directory = metadata.target_directory as string;
   const profile = await prepareProvisioningProfile({
@@ -101,7 +85,7 @@ async function buildSignedDevelopment(
     const temporary = await mkdtemp(join(output_directory, ".build-"));
     try {
       console.log("Building ctld…");
-      // Keep embedded and ordinary Cargo builds in separate caches. The preparation
+      // Keep signed component and ordinary Cargo builds in separate caches. The preparation
       // lock also covers signing and snapshotting for overlapping signed builds.
       const buildArgs = [
         "build", "--locked", "--target", host, "--target-dir", join(output_directory, "cargo"),
@@ -154,25 +138,6 @@ async function buildSignedDevelopment(
       const receipt = `${JSON.stringify(manifest, null, 2)}\n`;
       if (Buffer.byteLength(receipt) > 16 * 1024) throw new Error("ctld development receipt exceeds the install limit");
       await writeFile(join(payload, `ctld-${host}.json`), receipt, { mode: 0o600 });
-      let output: string | undefined;
-      if (mode === "cli") {
-        console.log("Building ctl with ctld embedded…");
-        const cli_artifact = binaryArtifact((await invoke("cargo", [...buildArgs, "-p", "ctl-cli"], {
-          CTL_BUNDLED_CTLD_DIR: payload, CTL_BUNDLED_CTLD_MODE: "development",
-        })).stdout, "ctl");
-        await regularFile(cli_artifact);
-        const cli = join(temporary, "ctl");
-        await copyFile(cli_artifact, cli);
-        await chmod(cli, 0o755);
-        await invoke("lipo", [cli, "-verify_arch", architecture]);
-        await invoke("codesign", ["--force", "--timestamp=none", "--options", "runtime", "--identifier", cli_identifier, "--sign", identity, cli], {}, true);
-        const requirement = `=anchor apple generic and identifier "${cli_identifier}" and certificate leaf[subject.OU] = "${team}"`;
-        await invoke("codesign", ["--verify", "--strict", "--test-requirement", requirement, cli]);
-        output = join(output_directory, "ctl");
-        // Atomic replacement leaves the previous CLI usable if building,
-        // signing, or architecture verification failed.
-        await rename(cli, output);
-      }
       const helper = await publishDevelopmentHelper({
         repository_root: root, target_directory, app, manifest,
       }, async (published_app, receipt) => {
@@ -194,8 +159,8 @@ async function buildSignedDevelopment(
       });
       console.log(`Signed development helper: ${helper}`);
       console.log(`From ${root}: cargo run -p ctl-cli --target-dir ${shellQuote(target_directory)} -- passwords`);
-      if (output) console.log(`Signed development CLI: ${output}`);
-      return output ?? helper;
+      console.log(`From ${root}: pnpm desktop:dev`);
+      return helper;
     } finally {
       await rm(temporary, { recursive: true, force: true });
     }
@@ -207,17 +172,21 @@ function shellQuote(value: string): string {
 }
 
 async function main(): Promise<void> {
-  if (process.platform !== "darwin") throw new Error("signed helper development is only available on macOS");
   const args = process.argv.slice(2);
-  if (args.length > 1 || (args.length === 1 && !["--provision", "--helper-only"].includes(args[0]!))) {
-    throw new Error("usage: node scripts/dev/ctl-signed.mts [--provision | --helper-only]");
+  if (args.includes("--help") || args.includes("-h")) {
+    console.log("usage: pnpm ctld:provision | pnpm ctld:build");
+    console.log("  ctld:provision  open the shared Xcode provisioning project");
+    console.log("  ctld:build      build and select a signed development ctld.app");
+    return;
   }
+  if (args.length > 1 || (args.length === 1 && args[0] !== "--provision")) {
+    throw new Error("usage: pnpm ctld:provision | pnpm ctld:build");
+  }
+  if (process.platform !== "darwin") throw new Error("signed helper development is only available on macOS");
   if (args[0] === "--provision") {
     await openProvisioningProject({ repository_root, target_directory: await getCargoTargetDirectory(repository_root) });
-  } else if (args[0] === "--helper-only") {
-    await buildSignedDevelopmentHelper();
   } else {
-    await buildSignedDevelopmentCli();
+    await buildSignedDevelopmentHelper();
   }
 }
 

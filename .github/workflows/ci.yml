@@ -184,24 +184,28 @@ jobs:
     name: Frontend
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    defaults:
-      run:
-        working-directory: apps/desktop
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
 
       - name: Install pnpm
         uses: pnpm/action-setup@v6
-        with:
-          version: 10
 
       - name: Install Node.js
         uses: actions/setup-node@v6
         with:
           node-version: 24
           cache: pnpm
-          cache-dependency-path: apps/desktop/pnpm-lock.yaml
+          cache-dependency-path: pnpm-lock.yaml
 
       - name: Check frontend
-        run: node ../../scripts/ci/check.mts frontend
+        run: node scripts/ci/check.mts frontend
+
+      - name: Check workspace command entry points
+        run: |
+          pnpm desktop:dev --help
+          pnpm desktop:preview --help
+          pnpm desktop:build --help
+          pnpm ctld:build --help
+          pnpm ctld:provision --help
+          pnpm bundles:sync --help

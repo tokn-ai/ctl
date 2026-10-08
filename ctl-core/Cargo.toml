@@ -23,6 +23,7 @@ uuid = { workspace = true, optional = true }
 rustix = { workspace = true, optional = true }
 
 [features]
+development = ["dep:sha2"]
 observability = ["dep:serde_json", "dep:sha2", "dep:uuid", "uuid/serde", "dep:rustix"]
 test-fixtures = ["dep:tokio", "dep:uuid"]
 executable = ["dep:serde_json", "dep:sha2", "dep:tokio", "bundles"]

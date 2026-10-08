@@ -1,5 +1,5 @@
 mod bundle_build;
-mod development_build;
+use ctl_core::development as development_build;
 
 fn main() {
   println!("cargo:rustc-check-cfg=cfg(ctl_repository_tui_tests)");
@@ -15,13 +15,13 @@ fn main() {
   println!("cargo:rerun-if-env-changed=CTL_BUNDLED_CTLD_MODE");
   println!("cargo:rerun-if-changed=build.rs");
   println!("cargo:rerun-if-changed=bundle_build.rs");
-  println!("cargo:rerun-if-changed=development_build.rs");
   let output = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
   let source = std::env::var_os("CTL_BUNDLED_CTLD_DIR").map(std::path::PathBuf::from);
   let target = std::env::var("TARGET").unwrap();
   let development = if source.is_none() {
     development_build::context(
       &std::path::PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap()),
+      std::path::Path::new("ctl/cli"),
       &output,
       &target,
     )

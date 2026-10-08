@@ -76,6 +76,7 @@ The default prefix is **Ctrl+B**. Change it with `--prefix Ctrl+a` or
 | `x` | Terminate the active pane; `y` confirms |
 | `d` | Detach and exit; sessions keep running |
 | `?` | Help |
+| `:` | Open the command prompt |
 | Esc | Cancel prefix |
 
 Sessions take the place of tmux windows for `c`, `n`, `p`, and `w`; ctmux
@@ -92,6 +93,51 @@ Commands such as detach and split always require a fresh prefix. Ctrl, Alt,
 and Shift remain part of the binding: Ctrl/Alt arrows resize, while Shift arrows
 have no prefix binding. Outside a prefix or repeat window, modified arrows go
 to the active PTY.
+
+## Command prompt
+
+Press **Ctrl+B :** to enter a command in the existing bottom row. The pane grid
+keeps its full height, and output and history synchronization continue. Prompt
+input stays local, including while a pane is in copy mode or reconnecting.
+Enter submits; Esc, Ctrl+C, or Ctrl+G cancels. Cancelling preserves the focused
+pane and its frozen copy selection.
+
+Left/Right, Home/End, Backspace, and Delete edit the line. Ctrl+A/E moves to the
+start/end, Ctrl+B/F moves left/right, Ctrl+U/K clears before/after the cursor,
+and Ctrl+W deletes the preceding word. Up/Down recalls commands from this
+invocation's history; Tab completes a command name. Pasted text edits the line
+without submitting it, and terminal control characters are filtered.
+
+The first command set uses familiar tmux names and aliases:
+
+| Command | Action |
+| --- | --- |
+| `split-window` / `splitw [-h\|-v]` | Split right with `-h`; default or `-v` splits below |
+| `select-pane` / `selectp -L\|-R\|-U\|-D` | Focus an adjacent pane |
+| `resize-pane` / `resizep -L\|-R\|-U\|-D [N]` | Move the adjacent divider by `N` cells, default 1 |
+| `resize-pane -Z` | Toggle shared pane zoom |
+| `new-session` / `new [-s NAME]` | Create and select a session |
+| `switch-client` / `switchc -n\|-p\|-t NAME` | Next/previous session, or select an exact name or ID |
+| `list-sessions` / `ls` | Open the session picker |
+| `kill-pane` / `killp` | Open the existing pane termination confirmation; `y` confirms |
+| `copy-mode [-u]` | Open history, optionally one page back |
+| `paste-buffer` / `pasteb` | Paste the local copy buffer into the focused pane |
+| `refresh-client` / `refresh` | Redraw the terminal |
+| `detach-client` / `detach` | Detach this client |
+| `list-keys` / `lsk` | Open help |
+| `take-input` / `release-input` | Request or release the focused pane's input ownership |
+| `take-resize` / `release-resize` | Request or release the view's resize ownership |
+
+Ownership commands are idempotent: repeating `take-resize` keeps ownership,
+and repeating `release-resize` keeps it released. Requests never displace another
+client. Read-only attachments can use local navigation, copy, and help commands;
+mutating commands retain their existing ownership and read-only checks.
+
+For example, enter `resize-pane -R 5` or `new-session -s "build-logs"`.
+Each submission accepts one command with literal quoted or escaped arguments.
+Unsupported commands, flags, command sequences, and shell expansion syntax
+report a local error. The prompt does not execute a shell fallback. Sessions
+remain flat, as with the prefix controls above.
 
 ## Scrollback and copy mode
 
@@ -224,7 +270,7 @@ authentication is required, detach and reconnect to answer the prompt. Detaching
 releases leases without terminating the session. Normal exit, errors, and Unix
 termination/hangup signals restore the host terminal mode and alternate screen.
 
-Extended keyboard protocols and a command prompt remain unimplemented. Rendering shares the
+Extended keyboard protocols remain unimplemented. Rendering shares the
 daemon's `avt` terminal emulation capabilities; it is not full tmux feature parity.
 
 ## Validate
@@ -246,6 +292,8 @@ mouse scrolling, the bottom status row, shared pane resizing, divider dragging,
 detach, and host terminal loss. Drag cases check nested splits, held gestures
 across view refreshes, frozen copy selections, mouseup targets, cancellation,
 ownership, and actual PTY dimensions.
+Command cases check the fixed footer, local editing and paste, frozen copy
+selections, pane/session operations, ownership, errors, and reconnect controls.
 Reconnect cases cut live streams repeatedly, stall metadata requests, expire
 resume tokens, and check controls, actual shell input, and released leases.
 These tests need permission to bind local Unix sockets and open PTYs.

@@ -304,6 +304,62 @@ async fn create_shell(app: &App<'_>) -> Result<String> {
   Ok(session.session_id)
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn prompt_errors_and_ended_session_cancel_preserve_frozen_copy_state() -> Result<()> {
+  let daemon = Daemon::start().await?;
+  let mut app = daemon.app(false);
+  let session = create_shell(&app).await?;
+  app.start(Some(session.clone())).await?;
+  let pane = app.focused.clone();
+  app.panes[&pane]
+    .control
+    .input(b"COPY_MARK\n".to_vec())
+    .await?;
+  wait_for_text(&mut app, &pane, "echo:COPY_MARK").await?;
+  app.execute(Action::History { page_back: false }).await?;
+  let frozen = app.copies[&pane].lines.clone();
+
+  for (command, notice) in [
+    ("switch-client -t missing-session", "Session not found:"),
+    ("unknown-command", "Unknown command:"),
+  ] {
+    app.execute(Action::CommandPrompt).await?;
+    app.event(Event::Paste(command.into())).await?;
+    assert!(
+      !app
+        .key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .await?
+    );
+    assert!(!app.prompt.is_active());
+    assert!(app.ended.is_none());
+    assert_eq!(app.focused, pane);
+    assert_eq!(app.selected_id, session);
+    assert_eq!(app.copies[&pane].lines, frozen);
+    assert!(app.message.starts_with(notice), "{}", app.message);
+    assert!(app.status().contains(notice));
+    assert!(app.status().contains("COPY"));
+  }
+
+  app.ended = Some("Session ended — press any key to exit".into());
+  app.key(app.prefix.key).await?;
+  assert!(
+    !app
+      .key(KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE))
+      .await?
+  );
+  assert!(app.prompt.is_active());
+  assert!(
+    !app
+      .key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+      .await?
+  );
+  assert!(!app.prompt.is_active());
+  assert_eq!(app.copies[&pane].lines, frozen);
+  assert!(app.panes.contains_key(&pane));
+  app.detach().await;
+  Ok(())
+}
+
 async fn wait_for_text(app: &mut App<'_>, id: &str, text: &str) -> Result<()> {
   timeout(Duration::from_secs(5), async {
     loop {

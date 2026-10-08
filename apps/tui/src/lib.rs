@@ -8,6 +8,7 @@ mod keys;
 mod maintenance;
 mod model;
 mod pane;
+mod prompt;
 mod render;
 mod terminal;
 mod transport;

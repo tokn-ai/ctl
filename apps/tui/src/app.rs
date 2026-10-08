@@ -7,6 +7,7 @@ use crate::{
   keys::{Dispatch, KeyState},
   maintenance::{Maintenance, Reconnect, Snapshot},
   pane::{Pane, ReconnectLeases, identity},
+  prompt::{self, Command as PromptCommand, Event as PromptEvent, Prompt},
   render::{Frame, Renderer, pane_at, pane_position, viewport_offset},
   transport::{LocalTransport, Transport},
 };
@@ -78,6 +79,7 @@ pub struct App<'a> {
   archive_copy: Option<CopyMode>,
   mouse_capture: Option<MouseCapture>,
   divider_drag: Option<Drag>,
+  prompt: Prompt,
   copy_buffer: Option<String>,
   message: String,
   message_until: Instant,
@@ -113,6 +115,7 @@ impl App<'_> {
       archive_copy: None,
       mouse_capture: None,
       divider_drag: None,
+      prompt: Prompt::default(),
       copy_buffer: None,
       message: String::new(),
       message_until: Instant::now(),
@@ -258,9 +261,13 @@ impl App<'_> {
   }
 
   async fn create(&mut self) -> Result<()> {
+    self.create_named(None).await
+  }
+
+  async fn create_named(&mut self, name: Option<String>) -> Result<()> {
     let response = self
       .request(ClientMessage::CreateSession {
-        name: None,
+        name,
         command: None,
         working_directory: std::env::current_dir()
           .ok()
@@ -853,7 +860,9 @@ impl App<'_> {
       Event::Paste(text) => {
         self.divider_drag = None;
         self.keys.cancel_repeat();
-        if self.active_copy().is_none()
+        if self.prompt.is_active() {
+          self.prompt.paste(&text);
+        } else if self.active_copy().is_none()
           && matches!(self.overlay, Overlay::None)
           && !self.keys.is_prefix()
         {
@@ -1053,6 +1062,9 @@ impl App<'_> {
   }
 
   async fn mouse(&mut self, mouse: MouseEvent) -> Result<()> {
+    if self.prompt.is_active() {
+      return Ok(());
+    }
     if self.drag_mouse(mouse).await? {
       return Ok(());
     }
@@ -1285,6 +1297,9 @@ impl App<'_> {
     if key.kind == KeyEventKind::Release {
       return Ok(false);
     }
+    if self.prompt.is_active() {
+      return self.prompt_key(key).await;
+    }
     if self.divider_drag.take().is_some() && key.code == KeyCode::Esc {
       return Ok(false);
     }
@@ -1372,6 +1387,55 @@ impl App<'_> {
     Ok(false)
   }
 
+  async fn prompt_key(&mut self, key: KeyEvent) -> Result<bool> {
+    let PromptEvent::Submit(line) = self.prompt.key(key) else {
+      return Ok(false);
+    };
+    if self.notice_kind == NoticeKind::Action {
+      self.message_until = Instant::now();
+    }
+    let command = match prompt::parse(&line) {
+      Ok(command) => command,
+      Err(error) => {
+        self.notice(error);
+        return Ok(false);
+      }
+    };
+    match self.execute_command(command).await {
+      Ok(detach) => Ok(detach),
+      Err(error) => {
+        self.notice(error.to_string());
+        Ok(false)
+      }
+    }
+  }
+
+  async fn execute_command(&mut self, command: PromptCommand) -> Result<bool> {
+    match command {
+      PromptCommand::Action(action) => return self.execute(action).await,
+      PromptCommand::NewSession(name) if !self.read_only => self.create_named(name).await?,
+      PromptCommand::SwitchSession(target) => {
+        // Validate before selection clears the current pane's frozen copy state.
+        self.list().await?;
+        let session = self
+          .sessions
+          .iter()
+          .find(|session| session.session_id == target || session.name == target)
+          .ok_or_else(|| format!("Session not found: {target}"))?
+          .session_id
+          .clone();
+        self.select(&session).await?;
+      }
+      PromptCommand::Lease { kind, requested } if !self.read_only => {
+        self.change_lease(kind, Some(requested)).await?;
+      }
+      PromptCommand::NewSession(_) | PromptCommand::Lease { .. } => {
+        self.notice("This attachment is read only".into());
+      }
+    }
+    Ok(false)
+  }
+
   async fn send_key(&self, key: KeyEvent) -> Result<()> {
     if let Some(pane) = self.panes.get(&self.focused) {
       let data = input::encode(key, pane.model.vt.cursor_key_app_mode());
@@ -1384,6 +1448,11 @@ impl App<'_> {
 
   async fn execute(&mut self, action: Action) -> Result<bool> {
     match action {
+      Action::CommandPrompt => {
+        self.release_mouse().await?;
+        self.keys = KeyState::Root;
+        self.prompt.open();
+      }
       Action::Archives => {
         self.archives = self.local_archives()?;
         self.overlay = Overlay::Archives(0);
@@ -1523,6 +1592,10 @@ impl App<'_> {
   }
 
   async fn toggle_lease(&mut self, lease: LeaseKind) -> Result<()> {
+    self.change_lease(lease, None).await
+  }
+
+  async fn change_lease(&mut self, lease: LeaseKind, requested: Option<bool>) -> Result<()> {
     // Layout belongs to the view, so release its owner regardless of focus.
     let owner = self
       .panes
@@ -1560,6 +1633,7 @@ impl App<'_> {
       } else {
         pane.reconnect_leases.intended_ownership(lease, observed)
       };
+      let requested = requested.unwrap_or(!held_by_client);
       let control = pane.control.clone();
       let connected = pane.connected;
       // A release is also the user's reconnect preference. Keep that intent
@@ -1570,17 +1644,17 @@ impl App<'_> {
         }
       }
       if let Some(pane) = self.panes.get_mut(&id) {
-        pane.request_lease(lease, !held_by_client);
+        pane.request_lease(lease, requested);
       }
       self.maintenance.cancel_reconnects();
-      if !connected {
-        // Reconnect preparation applies this intent to the resumed controller.
+      if !connected || held_by_client == requested {
+        // Preserve reconnect intent even when no wire change is needed now.
         return Ok(());
       }
-      if held_by_client {
-        control.release_lease(lease).await?;
-      } else {
+      if requested {
         control.acquire_lease(lease).await?;
+      } else {
+        control.release_lease(lease).await?;
       }
     }
     Ok(())
@@ -1767,6 +1841,9 @@ impl App<'_> {
     if self.size.1 > 0 {
       frame.text(0, self.size.1 - 1, &self.status(), true);
     }
+    if self.prompt.is_active() {
+      frame.command_prompt(&self.prompt);
+    }
     frame
   }
 
@@ -1779,6 +1856,22 @@ impl App<'_> {
   fn status(&self) -> String {
     if let Some(mode) = &self.archive_copy {
       return format!(" archive | {}", mode.status());
+    }
+    if self.notice_kind == NoticeKind::Action
+      && Instant::now() < self.message_until
+      && matches!(self.overlay, Overlay::None)
+      && !self.keys.is_prefix()
+    {
+      let copy = if self.copies.contains_key(&self.focused) {
+        " | COPY"
+      } else {
+        ""
+      };
+      return format!(
+        " {}{copy} | {}",
+        self.connection_history_status(),
+        self.message
+      );
     }
     if let Some(mode) = self.copies.get(&self.focused)
       && matches!(self.overlay, Overlay::None)
@@ -1805,7 +1898,7 @@ impl App<'_> {
     }
     if self.keys.is_prefix() {
       return format!(
-        " {} | PREFIX  % split right  \" split below  arrows focus  c new  s sessions  d detach  ? help",
+        " {} | PREFIX  % split right  \" split below  arrows focus  c new  s sessions  : commands  d detach  ? help",
         self.connection_history_status()
       );
     }
@@ -1951,6 +2044,10 @@ impl App<'_> {
         "Mouse: drag dividers to resize; Esc cancels remaining movement.".into(),
         "Focus/resize arrows repeat for 500 ms; other commands need a fresh prefix.".into(),
         "c: new session    n/p: next/previous session    s/w: session list".into(),
+        ": command prompt (pane, session, and ownership commands)".into(),
+        "Prompt panes: split-window, select-pane, resize-pane, kill-pane".into(),
+        "Prompt sessions: new-session, switch-client, list-sessions".into(),
+        "Prompt ownership: take-input/release-input, take-resize/release-resize".into(),
         "[: history/copy mode    ]: paste copied text    A: archives".into(),
         "r: redraw    I: take/release input    R: take/release resize".into(),
         "d: detach (sessions keep running)    Esc: cancel prefix".into(),

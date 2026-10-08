@@ -49,9 +49,11 @@ function check(scope: Scope): void {
       run("cargo", ["test", "--locked", "--workspace"]);
       break;
     case "frontend": {
-      const desktop = resolve(root, "apps/desktop");
-      for (const args of [["install", "--frozen-lockfile"], ["check"], ["test"], ["build"]]) {
-        run("pnpm", args, desktop);
+      for (const args of [
+        ["install", "--frozen-lockfile"], ["check"], ["desktop:test"],
+        ["--filter", "ctmux-app", "build"],
+      ]) {
+        run("pnpm", args);
       }
       break;
     }

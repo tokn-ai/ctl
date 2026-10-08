@@ -220,7 +220,7 @@ The agent advertises restart support in identity metadata; older agents default
 to unsupported, and the desktop checks this before offering confirmation and
 again before sending the command. Remote installation rejects bundles from a
 different source revision or an app built with uncommitted component changes.
-For development, commit and push the changes, run `pnpm agents:sync`, and rebuild
+For development, commit and push the changes, run `pnpm bundles:sync`, and rebuild
 the app so its bundled components and source revision agree.
 After confirmation, the fixed `ctl-agent restart-ctmux` operation checks the remote
 identity, requests shutdown through the owner-only control endpoint, starts the
@@ -335,7 +335,7 @@ checkpoint; no old attachment token or keyboard input is replayed.
 Run the frontend suite and native persistence/transport tests:
 
 ```sh
-pnpm --dir apps/desktop test
+pnpm desktop:test
 cargo test -p ctmux-app -p ctl-agent
 ```
 

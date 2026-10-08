@@ -5,6 +5,8 @@ pub mod bundles;
 pub mod component;
 pub mod component_update;
 pub mod connection;
+#[cfg(feature = "development")]
+pub mod development;
 #[cfg(feature = "executable")]
 pub mod executable;
 pub mod paths;

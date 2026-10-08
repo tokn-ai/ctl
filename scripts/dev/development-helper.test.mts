@@ -4,7 +4,7 @@ import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink,
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test, { type TestContext } from "node:test";
-import type { DevelopmentHelperManifest } from "./ctl-signed.mts";
+import type { DevelopmentHelperManifest } from "./ctld-signed.mts";
 import { publishDevelopmentHelper, type DevelopmentHelperSelection } from "./development-helper.mts";
 
 async function fixture(t: TestContext) {

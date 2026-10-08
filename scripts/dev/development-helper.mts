@@ -3,7 +3,7 @@ import { createReadStream } from "node:fs";
 import { chmod, cp, lstat, mkdtemp, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import type { DevelopmentHelperManifest } from "./ctl-signed.mts";
+import type { DevelopmentHelperManifest } from "./ctld-signed.mts";
 import { ensurePrivateDirectory } from "./signed-runtime.mts";
 
 export interface DevelopmentHelperSelection {

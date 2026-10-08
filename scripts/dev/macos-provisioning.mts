@@ -168,7 +168,7 @@ export async function prepareProvisioningProfile(options: ProvisioningOptions): 
   if (!profile) {
     throw new Error(
       `No unexpired provisioning profile authorizes ${bundle_identifier}. ` +
-      `Run \`${options.provision_command ?? "node scripts/dev/ctl-signed.mts --provision"}\`, ` +
+      `Run \`${options.provision_command ?? "pnpm ctld:provision"}\`, ` +
       "select your Personal Team under Signing & Capabilities, and build the target once. " +
       "Free Personal Team profiles expire after seven days.",
     );

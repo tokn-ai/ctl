@@ -4,21 +4,38 @@ use sha2::{Digest as _, Sha256};
 use std::io;
 use std::path::{Path, PathBuf};
 
+/// Canonical checkout identity and candidates in the Cargo target directory.
 pub struct Context {
   pub repository_root: PathBuf,
   pub checkpoints: Vec<PathBuf>,
 }
 
-pub fn context(manifest: &Path, output: &Path, target: &str) -> io::Result<Option<Context>> {
+/// Captures checkout provenance for one repository package at Cargo build time.
+///
+/// # Errors
+/// Returns filesystem errors while resolving the package and output paths.
+pub fn context(
+  manifest: &Path,
+  repository_package: &Path,
+  output: &Path,
+  target: &str,
+) -> io::Result<Option<Context>> {
   if !target.ends_with("-apple-darwin") {
     return Ok(None);
   }
-  let repository_root = manifest.join("../..").canonicalize()?;
-  // Packaged crates are no longer in the ctl/cli workspace layout. They retain
+  let Some(root) = manifest
+    .ancestors()
+    .nth(repository_package.components().count())
+  else {
+    return Ok(None);
+  };
+  let repository_root = root.canonicalize()?;
+  // Packaged crates are no longer in the repository package layout. They retain
   // ordinary shared discovery rather than borrowing unrelated registry paths.
   if !repository_root.join("Cargo.toml").is_file()
     || repository_root
-      .join("ctl/cli/Cargo.toml")
+      .join(repository_package)
+      .join("Cargo.toml")
       .canonicalize()
       .ok()
       != Some(manifest.join("Cargo.toml").canonicalize()?)
@@ -63,6 +80,10 @@ pub fn context(manifest: &Path, output: &Path, target: &str) -> io::Result<Optio
   }))
 }
 
+/// Writes debug-only runtime provenance shared by CLI and GUI consumers.
+///
+/// # Errors
+/// Rejects non-UTF-8 paths and returns errors writing the generated Rust source.
 pub fn write(output: &Path, context: Option<&Context>) -> io::Result<()> {
   let invalid = || {
     io::Error::new(
@@ -85,7 +106,7 @@ pub fn write(output: &Path, context: Option<&Context>) -> io::Result<()> {
         })
         .collect::<io::Result<Vec<_>>>()?;
       format!(
-        "Some(DevelopmentContext {{ repository_root: {repository:?}, checkpoints: &[{}] }})",
+        "Some(ctl_client::setup::DevelopmentContext {{ repository_root: {repository:?}, checkpoints: &[{}] }})",
         checkpoints.join(", "),
       )
     }
@@ -95,7 +116,7 @@ pub fn write(output: &Path, context: Option<&Context>) -> io::Result<()> {
   std::fs::write(
     output.join("development_ctld.rs"),
     format!(
-      "#[cfg(all(debug_assertions, target_os = \"macos\"))]\nconst LOCAL_DEVELOPMENT: Option<DevelopmentContext> = {selected};\n#[cfg(not(all(debug_assertions, target_os = \"macos\")))]\nconst LOCAL_DEVELOPMENT: Option<DevelopmentContext> = None;\n",
+      "#[cfg(all(debug_assertions, target_os = \"macos\"))]\nconst LOCAL_DEVELOPMENT: Option<ctl_client::setup::DevelopmentContext> = {selected};\n#[cfg(not(all(debug_assertions, target_os = \"macos\")))]\nconst LOCAL_DEVELOPMENT: Option<ctl_client::setup::DevelopmentContext> = None;\n",
     ),
   )
 }

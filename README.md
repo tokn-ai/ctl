@@ -103,6 +103,46 @@ runtime sockets continue to use private OS-specific runtime directories.
 Remote identity and component bundles already use this root as `remote-id`,
 `versions/`, and `current`.
 
+## Repository commands
+
+Use Node 24 or newer and the pinned pnpm version from `package.json`.
+Run `pnpm install` at the repository root. The pnpm workspace includes
+`apps/desktop` and uses one root lockfile; repository scripts are checked and
+run from the root. The desktop package keeps the standard Tauri/Vite scripts
+(`dev`, `build`, `preview`, and `tauri`); project-specific commands live at the root.
+Root commands use `<scope>:<action>`. Signing is part of `ctld:build` and macOS
+`desktop:dev`; it does not require a separate `:signed` command.
+
+| Command | Purpose |
+| --- | --- |
+| `pnpm ctld:provision` | Open the shared macOS Xcode provisioning project |
+| `pnpm ctld:build` | Build and select one signed ctld component for CLI and GUI development |
+| `pnpm desktop:dev` | Start native development; macOS automatically stages a signed helper |
+| `pnpm desktop:build` | Build native desktop packages |
+| `pnpm desktop:preview` | Start the browser preview with sample data |
+| `pnpm desktop:check` | Check desktop TypeScript types |
+| `pnpm desktop:test` | Run desktop UI tests |
+| `pnpm daemons:build` | Build local Rust daemons |
+| `pnpm bundles:check` | Check staged remote bundles without fetching or changing selections |
+| `pnpm bundles:sync` | Fetch, verify, and select CI upload bundles for the current commit |
+| `pnpm scripts:check` | Check repository-script types |
+| `pnpm scripts:test` | Run development and CI/release script tests |
+| `pnpm scripts:test:dev` | Run only development script tests |
+| `pnpm scripts:test:ci` | Run only CI/release script tests |
+| `pnpm check` | Run desktop and repository-script type checks |
+| `pnpm test` | Run repository-script and desktop UI tests |
+
+The desktop package's standard scripts can also be invoked from the root with
+`pnpm --filter ctmux-app dev` or `pnpm --filter ctmux-app build`.
+Native startup checks staged bundles before launching the app; frontend-only
+development and the sample preview do not require remote bundles.
+`desktop:dev` and `desktop:preview` select an available port, starting at a random
+port. The native launcher passes Vite's actual URL to Tauri and its development
+security policy; hot reload shares that port. Parallel launches can coexist.
+Arguments pass through, for example `pnpm desktop:dev --release` or
+`pnpm bundles:sync --main`. Signing commands keep their existing selection and
+restart behavior: preparing a helper never restarts an existing daemon.
+
 ## Build
 
 Rust 1.97 or newer is required. The Rust packages use the MIT license.
@@ -134,11 +174,10 @@ prints the installed version, executable path, and whether the installation was
 reused.
 
 `CTLD_BIN` selects an explicit executable. Ordinary macOS debug CLI builds prefer
-this checkout's provisioned signed helper; signed development CLI builds prefer
-their own matching embedded helper. Without a development helper, a standalone
-macOS CLI prefers a verified, compatible managed `ctld.app`, then its own bundled
-helper, then a nearby desktop bundle, sibling executable, or `PATH`. The desktop
-continues to prefer its own bundled helper. On other Unix platforms, install
+this checkout's provisioned signed helper, as do debug desktop builds. Without a
+development helper, a standalone macOS CLI prefers a verified, compatible managed `ctld.app`, then its own bundled
+helper, then a nearby desktop bundle, sibling executable, or `PATH`.
+Packaged desktop releases continue to prefer their own bundled helper. On other Unix platforms, install
 `ctld` from Cargo alongside the CLI; `ctl setup` is a macOS-only command. Source-built macOS
 `ctld` remains useful for development but does not acquire our Apple signing
 identity or Keychain entitlement through Cargo.
@@ -167,50 +206,49 @@ authoritative for every build; shared discovery also retains explicit
 complete component selections and reports missing capabilities. Unsafe or invalid selected
 installations produce a verification error.
 
-For macOS CLI development, provision once with the same
+For macOS CLI and GUI development, provision once with the same
 Xcode project used by Tauri:
 
 ```sh
-node scripts/dev/ctl-signed.mts --provision
+pnpm ctld:provision
 ```
 
 In Xcode, select the `ctld-provisioning` target, choose your team under
-**Signing & Capabilities**, and build once. Then prepare the signed helper and
-use the ordinary Cargo CLI:
+**Signing & Capabilities**, and build once. For CLI development, prepare the
+signed component and start the CLI:
 
 ```sh
-node scripts/dev/ctl-signed.mts --helper-only
+pnpm ctld:build
 cargo run -p ctl-cli -- passwords
 # Or: cargo build -p ctl-cli && target/debug/ctl passwords
 ```
 
-The build discovers your profile and matching Keychain certificate, refreshing
-the profile through Xcode when needed. It compiles and signs `ctld.app` and
-publishes an immutable helper under
+For native GUI development, run `pnpm desktop:dev`. On macOS its launcher
+builds and stages signed helpers automatically, including on native reloads,
+and preserves the worktree's running daemon. It does not require a separate
+`ctld:build` first. Linux and Windows use ordinary native Tauri development.
+
+The `ctld:build` command discovers your profile and matching Keychain certificate,
+refreshing the profile through Xcode when needed. It compiles and signs `ctld.app` and
+publishes the complete signed app and verification receipt under
 `target/ctl-dev/helpers/<checkout-id>/build-<archive-sha256>/`. Debug CLI builds
-discover its verified selection using their build location and checkout identity,
-independently of the current working directory. The CLI can remain unsigned.
-Repeat the helper-only command after changing daemon code or its contracts;
+and GUI builds launched directly with the standard Tauri command discover the
+same verified selection using their build location and checkout identity,
+independently of the current working directory. The CLI and GUI can remain unsigned.
+Repeat `pnpm ctld:build` after changing daemon code or its contracts;
 ordinary CLI edits need only a Cargo rebuild. No signing
 environment variables or notarization credentials are required. The output
 follows Cargo's configured target directory.
 
-For a self-contained signed development CLI, run `node scripts/dev/ctl-signed.mts`
-and use `target/ctl-dev/ctl`. This also publishes the checkout helper for Cargo builds.
-
 Development signing explicitly disables timestamps, so it does not depend on
 Apple's timestamp service. Distributable releases still require secure timestamps.
 
-The signed development CLI always prepares and pins the helper embedded by that
-checkout's build, ahead of shared or nearby desktop helpers. Development helpers live under
-`~/.tokn/ctl/components/ctld/development/<archive-sha256>/ctld.app`. They retain
-their signature and provisioning checks and use a separate immutable cache.
-Automatic preparation leaves shared selections unchanged. Checkout helper
-selections are isolated even when worktrees share a Cargo target directory.
-`target/ctl-dev/ctl setup` explicitly selects this helper for other standalone
-CLI builds while leaving the release `current` symlink intact.
-Expired profiles require rebuilding. Existing compatible daemons keep
-running until you explicitly restart them.
+Checkout helper selections remain separate from shared production selections,
+even when worktrees share a Cargo target directory. The CLI and GUI both verify
+the helper's signature, provisioning profile, receipt, and compatible contracts
+before using it. Expired profiles require rebuilding. Component preparation
+preserves existing daemons and sessions; restart explicitly when ready to use a
+new build.
 
 ```sh
 cargo build --workspace
@@ -275,15 +313,13 @@ cargo install --path task/daemon
 cargo install --path ctl/cli
 ```
 
-The desktop app uses pnpm and Tauri 2. Build its local daemons into the shared
-Cargo target directory before starting it so the app can auto-start the
-sibling executables:
+The desktop app uses pnpm and Tauri 2. Start it from the repository root;
+native development builds its local daemons into the shared Cargo target
+directory so the app can auto-start the sibling executables:
 
 ```sh
-cargo build -p ctld -p ctmuxd -p ctl-taskd
-cd apps/desktop
 pnpm install
-pnpm tauri dev
+pnpm desktop:dev
 ```
 
 Tauri development starts even without remote install bundles and prints the
@@ -292,16 +328,16 @@ installation, commit and push the current branch, then download or build the
 bundle set for that exact commit:
 
 ```sh
-pnpm agents:sync
+pnpm bundles:sync
 ```
 
-`pnpm agents:sync --main` deliberately uses the latest successful `main`
+`pnpm bundles:sync --main` deliberately uses the latest successful `main`
 bundle set when exact source parity is not required.
 
 The `Desktop, control daemon, and remote-agent bundles` workflow builds static
 Linux and native macOS remote bundles and desktop packages for x86-64 and ARM64. Main-branch
 pushes and manual runs build both; `build_desktop=false` keeps a manual run
-remote-only, as used by `pnpm agents:sync`. Each desktop package contains all
+remote-only, as used by `pnpm bundles:sync`. Each desktop package contains all
 four remote targets and matching local `ctld`, `ctmuxd`, and `ctl-taskd` helpers.
 Release bundle IDs are semantic versions; other runs include the source
 revision so different development builds never share a remote install
@@ -734,7 +770,7 @@ development clients. The exact current source cache is preferred; other compatib
 entries use stable revision order. Older schema-1 bundles and new downloads still
 require the exact clean client source. Installing a cached bundle leaves running
 daemon owners in place; ordinary connections negotiate with those owners.
-For source development, run `pnpm agents:sync` from `apps/desktop` at the same
+For source development, run `pnpm bundles:sync` from the repository root at the same
 clean pushed revision before rebuilding. See [remote setup](docs/remote-mvp.md).
 
 `ssh` and `scp` accept the system OpenSSH command syntax. A destination such as

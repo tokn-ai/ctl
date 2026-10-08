@@ -146,7 +146,7 @@ fn unavailable_after_release(
   artifact_error: &remote_bundle::Error,
 ) -> remote_bundle::Error {
   remote_bundle::Error::NotAvailable(format!(
-    "{release_error}. Existing CI bundles could not be used: {artifact_error}. Run `pnpm agents:sync` from apps/desktop at this clean, pushed revision, then retry; or set CTL_REMOTE_BUNDLES_DIR to its matching bundle set",
+    "{release_error}. Existing CI bundles could not be used: {artifact_error}. Run `pnpm bundles:sync` from the repository root at this clean, pushed revision, then retry; or set CTL_REMOTE_BUNDLES_DIR to its matching bundle set",
   ))
 }
 

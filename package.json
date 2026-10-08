@@ -1,0 +1,32 @@
+{
+  "name": "ctl-workspace",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.30.3",
+  "engines": {
+    "node": ">=24",
+    "pnpm": ">=10.30.3 <11"
+  },
+  "scripts": {
+    "check": "pnpm scripts:check && pnpm desktop:check",
+    "test": "pnpm scripts:test && pnpm desktop:test",
+    "desktop:dev": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/dev/tauri-signed.mts",
+    "desktop:build": "pnpm --filter ctmux-app tauri build",
+    "desktop:preview": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/dev/desktop-preview.mts",
+    "desktop:check": "pnpm --filter ctmux-app exec tsc --noEmit",
+    "desktop:test": "pnpm --filter ctmux-app exec vitest run",
+    "ctld:provision": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/dev/ctld-signed.mts --provision",
+    "ctld:build": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/dev/ctld-signed.mts",
+    "daemons:build": "cargo build --locked -p ctld -p ctmuxd -p ctl-taskd",
+    "bundles:check": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/dev/sync-agent-bundles.mts --check",
+    "bundles:sync": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/dev/sync-agent-bundles.mts",
+    "scripts:check": "tsc -p tsconfig.scripts.json",
+    "scripts:test": "node --experimental-strip-types --disable-warning=ExperimentalWarning --test scripts/dev/*.test.mts scripts/ci/*.test.mts",
+    "scripts:test:dev": "node --experimental-strip-types --disable-warning=ExperimentalWarning --test scripts/dev/*.test.mts",
+    "scripts:test:ci": "node --experimental-strip-types --disable-warning=ExperimentalWarning --test scripts/ci/*.test.mts"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.6",
+    "typescript": "~5.8.3"
+  }
+}

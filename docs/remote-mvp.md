@@ -145,7 +145,7 @@ target and stays stable until Sync/Update changes it. If there is no selection,
 repair can initialize one from a verified schema-2 local resource bundle, an
 existing legacy cache, the matching official release, or an existing GitHub
 bundle artifact for the client revision. It never starts a workflow. Development
-`pnpm agents:sync` explicitly imports and selects all four CI targets.
+`pnpm bundles:sync` explicitly imports and selects all four CI targets.
 
 Each bundle contains `ctl-agent`, `ctmuxd`, `ctl-taskd`, and `ctld`. Import verifies
 archive and binary checksums, a common identified build, and agreement between

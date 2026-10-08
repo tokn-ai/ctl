@@ -65,7 +65,7 @@ test("an explicit profile override is exclusive rather than replaced by a discov
   await addProfile(input, "new.profile", { application: identifier, expiration: "2099-01-01T00:00:00Z" });
   input.options.env = { CTLD_PROVISIONING_PROFILE: join(input.options.repository_root, "missing.profile") };
   assert.equal(await findProvisioningProfile(input.options), undefined);
-  await assert.rejects(prepareProvisioningProfile(input.options), /--provision/);
+  await assert.rejects(prepareProvisioningProfile(input.options), /pnpm ctld:provision/);
   assert.equal(input.calls.some((call) => call[0] === "xcodebuild"), false);
 });
 

@@ -82,7 +82,12 @@ function client(data: Fixture, request = data.request): { socket: Socket; next: 
 }
 
 async function records(data: Fixture): Promise<Record[]> {
-  try { return (await readFile(path.join(data.root, "events.jsonl"), "utf8")).trim().split("\n").map((line) => JSON.parse(line)); }
+  try {
+    // Polling can observe an empty file or an append still in progress. Only
+    // parse complete newline-terminated records, as the socket reader does.
+    const lines = (await readFile(path.join(data.root, "events.jsonl"), "utf8")).split("\n");
+    return lines.slice(0, -1).map((line) => JSON.parse(line));
+  }
   catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
 }
 

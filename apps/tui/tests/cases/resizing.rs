@@ -7,6 +7,7 @@ use ctmux_proto::{
   ClientMessage, CommandSpec, DividerResize, PaneGeometry, PaneResizeOutcome, ServerMessage,
   SplitAxis, TerminalSize, ViewInfo,
 };
+use portable_pty::CommandBuilder;
 use std::time::Duration;
 use tokio::time::{Instant, sleep};
 
@@ -156,6 +157,276 @@ async fn actual_size(
 async fn detach(tui: &mut Tui) -> Result<()> {
   tui.send(b"\x02d")?;
   assert!(tui.wait_exit().await?.success());
+  Ok(())
+}
+
+fn mouse(tui: &mut Tui, code: u8, point: (u16, u16), release: bool) -> Result<()> {
+  let suffix = if release { 'm' } else { 'M' };
+  tui.send(format!("\x1b[<{code};{};{}{suffix}", point.0 + 1, point.1 + 1).as_bytes())
+}
+
+fn vertical_divider(screen: &Screen, column: u16) -> bool {
+  screen.rows[..usize::from(ROWS - 1)]
+    .iter()
+    .all(|row| row.chars().nth(usize::from(column)) == Some('│'))
+}
+
+async fn read_only_tui(daemon: &TestDaemon, session: &str) -> Result<Tui> {
+  let program = option_env!("CARGO_BIN_EXE_ctmux-tui").ok_or("missing TUI binary")?;
+  let mut command = CommandBuilder::new(program);
+  command.arg("--socket");
+  command.arg(&daemon.socket);
+  command.args(["--read-only", session]);
+  command.env_clear();
+  command.env("HOME", daemon.directory.join("home"));
+  command.env("PATH", "/usr/bin:/bin");
+  command.env("SHELL", "/bin/sh");
+  command.env("TERM", "xterm-256color");
+  command.env("LANG", "C.UTF-8");
+  command.cwd(&daemon.directory);
+  let mut tui = Tui::spawn(command, COLUMNS, ROWS)?;
+  tui
+    .wait_screen("read-only client has both panes", |screen| {
+      footer(screen).starts_with(" connected |")
+        && screen.contains("first:ready")
+        && screen.contains("second:ready")
+    })
+    .await?;
+  Ok(tui)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn mouse_drag_moves_the_outer_gap_and_preserves_frozen_selection_and_focus() -> Result<()> {
+  let mut daemon = TestDaemon::start().await?;
+  let (session, first, second) = fixture(&daemon, "mouse-outer-divider").await?;
+  let third = split(&daemon, &session, &first, SplitAxis::Horizontal, "third").await?;
+  let mut tui = Tui::start(&daemon, &session, COLUMNS, ROWS).await?;
+  tui
+    .wait_screen("three nested panes are ready", |screen| {
+      screen.contains("first:ready")
+        && screen.contains("second:ready")
+        && screen.contains("third:ready")
+    })
+    .await?;
+  tui.send(b"\x02[gvll")?;
+  tui
+    .wait_screen("first pane selection is frozen", |screen| {
+      footer(screen).contains("COPY") && screen.cursor == (2, 0)
+    })
+    .await?;
+  let original = view(&daemon, &session).await?;
+  let gap = pane(&original, &second).left - 1;
+  mouse(&mut tui, 0, (gap, 4), false)?;
+  mouse(&mut tui, 32, (gap + 8, 4), false)?;
+  let held = wait_view(&daemon, &session, |view| {
+    pane(view, &second).left == gap + 9
+  })
+  .await?;
+  let selected = tui
+    .wait_screen(
+      "confirmed outer drag retains the selected first pane",
+      |screen| {
+        vertical_divider(screen, gap + 8)
+          && footer(screen).contains("COPY")
+          && screen.cursor == (2, 0)
+      },
+    )
+    .await?;
+  assert!(selected.contains("first:ready") && selected.contains("third:ready"));
+  // Keep the button held across the periodic metadata refresh, which runs
+  // every two seconds, before moving again and releasing at a newer target.
+  sleep(Duration::from_millis(2200)).await;
+  mouse(&mut tui, 32, (gap + 10, 4), false)?;
+  mouse(&mut tui, 0, (gap + 12, 4), true)?;
+  let released = wait_view(&daemon, &session, |view| {
+    pane(view, &second).left == gap + 13
+  })
+  .await?;
+  assert!(released.revision > held.revision);
+  assert_eq!(
+    pane(&released, &first).columns,
+    pane(&original, &first).columns + 6
+  );
+  assert_eq!(
+    pane(&released, &third).columns,
+    pane(&original, &third).columns + 6
+  );
+  assert_eq!(
+    pane(&released, &second).columns,
+    pane(&original, &second).columns - 12
+  );
+  tui
+    .wait_screen("mouseup keeps copy mode and its cursor", |screen| {
+      vertical_divider(screen, gap + 12)
+        && footer(screen).contains("COPY")
+        && screen.cursor == (2, 0)
+    })
+    .await?;
+  tui.send(b"y\x02]\r")?;
+  tui
+    .wait_screen(
+      "the preserved selection pastes to the original focused pane",
+      |screen| screen.contains("first:fir"),
+    )
+    .await?;
+  actual_size(&mut tui, "first", "mouse-outer", pane(&released, &first)).await?;
+  detach(&mut tui).await?;
+  drop(tui);
+  daemon.shutdown().await?;
+  Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn mouse_drag_resizes_a_vertical_subtree_without_changing_pane_focus() -> Result<()> {
+  let mut daemon = TestDaemon::start().await?;
+  let (session, first, second) = fixture(&daemon, "mouse-vertical-divider").await?;
+  let third = split(&daemon, &session, &second, SplitAxis::Vertical, "third").await?;
+  let mut tui = Tui::start(&daemon, &session, COLUMNS, ROWS).await?;
+  tui
+    .wait_screen("three shells are ready", |screen| {
+      screen.contains("first:ready")
+        && screen.contains("second:ready")
+        && screen.contains("third:ready")
+    })
+    .await?;
+  tui.send(b"\x02\x1b[C")?;
+  let original = view(&daemon, &session).await?;
+  tui
+    .wait_screen("second pane has focus", |screen| {
+      screen.cursor.0 == usize::from(pane(&original, &second).left)
+    })
+    .await?;
+  let gap = pane(&original, &third).top - 1;
+  let column = pane(&original, &second).left + 4;
+  mouse(&mut tui, 0, (column, gap), false)?;
+  mouse(&mut tui, 32, (column, gap + 2), false)?;
+  mouse(&mut tui, 0, (column, gap + 4), true)?;
+  let changed = wait_view(&daemon, &session, |view| pane(view, &third).top == gap + 5).await?;
+  assert_eq!(pane(&changed, &first), pane(&original, &first));
+  assert_eq!(
+    pane(&changed, &second).rows,
+    pane(&original, &second).rows + 4
+  );
+  assert_eq!(
+    pane(&changed, &third).rows,
+    pane(&original, &third).rows - 4
+  );
+  tui
+    .wait_screen(
+      "confirmed horizontal separator is rendered above the status",
+      |screen| {
+        screen
+          .row(usize::from(gap + 4))
+          .chars()
+          .skip(usize::from(column))
+          .all(|ch| ch == '─')
+          && screen.cursor.0 == usize::from(pane(&changed, &second).left)
+          && !footer(screen).contains('─')
+      },
+    )
+    .await?;
+  actual_size(
+    &mut tui,
+    "second",
+    "mouse-vertical",
+    pane(&changed, &second),
+  )
+  .await?;
+  detach(&mut tui).await?;
+  drop(tui);
+  daemon.shutdown().await?;
+  Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn mouse_drag_refuses_foreign_resize_ownership_and_read_only_clients() -> Result<()> {
+  let mut daemon = TestDaemon::start().await?;
+  let (session, first, second) = fixture(&daemon, "mouse-resize-ownership").await?;
+  let mut owner = Tui::start(&daemon, &session, COLUMNS, ROWS).await?;
+  owner
+    .wait_screen("owner holds resize", |screen| {
+      footer(screen).contains("resize owner")
+    })
+    .await?;
+  let mut observer = Tui::start(&daemon, &session, COLUMNS, ROWS).await?;
+  let original = view(&daemon, &session).await?;
+  let gap = pane(&original, &second).left - 1;
+  for (code, column, released) in [(0, gap, false), (32, gap + 5, false), (0, gap + 8, true)] {
+    mouse(&mut observer, code, (column, 4), released)?;
+  }
+  observer
+    .wait_screen(
+      "observer is told to request available resize control",
+      |screen| footer(screen).contains("take resize control"),
+    )
+    .await?;
+  assert_eq!(view(&daemon, &session).await?, original);
+  let mut read_only = read_only_tui(&daemon, &session).await?;
+  for (code, column, released) in [(0, gap, false), (32, gap + 5, false), (0, gap + 8, true)] {
+    mouse(&mut read_only, code, (column, 4), released)?;
+  }
+  read_only
+    .wait_screen("read-only client cannot begin a divider drag", |screen| {
+      footer(screen).contains("This attachment is read only")
+    })
+    .await?;
+  assert_eq!(view(&daemon, &session).await?, original);
+  // A refused gesture never acquires or releases another client's ownership.
+  mouse(&mut owner, 0, (gap, 4), false)?;
+  mouse(&mut owner, 0, (gap + 2, 4), true)?;
+  let changed = wait_view(&daemon, &session, |view| {
+    pane(view, &first).columns == pane(&original, &first).columns + 2
+  })
+  .await?;
+  actual_size(&mut owner, "first", "still-owner", pane(&changed, &first)).await?;
+  detach(&mut read_only).await?;
+  drop(read_only);
+  detach(&mut observer).await?;
+  drop(observer);
+  detach(&mut owner).await?;
+  drop(owner);
+  daemon.shutdown().await?;
+  Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn escape_cancels_mouse_capture_without_reverting_confirmed_geometry() -> Result<()> {
+  let mut daemon = TestDaemon::start().await?;
+  let (session, first, second) = fixture(&daemon, "mouse-resize-cancel").await?;
+  let mut tui = Tui::start(&daemon, &session, COLUMNS, ROWS).await?;
+  tui
+    .wait_screen("both panes are ready", |screen| {
+      screen.contains("first:ready") && screen.contains("second:ready")
+    })
+    .await?;
+  let original = view(&daemon, &session).await?;
+  let gap = pane(&original, &second).left - 1;
+  mouse(&mut tui, 0, (gap, 4), false)?;
+  mouse(&mut tui, 32, (gap + 3, 4), false)?;
+  let confirmed = wait_view(&daemon, &session, |view| {
+    pane(view, &first).columns == pane(&original, &first).columns + 3
+  })
+  .await?;
+  tui
+    .wait_screen("first movement is rendered before cancellation", |screen| {
+      vertical_divider(screen, gap + 3)
+    })
+    .await?;
+  tui.send(b"\x1b")?;
+  // Deliver Escape separately so the terminal decoder cannot mistake it for
+  // the following SGR mouse report's leading escape.
+  sleep(Duration::from_millis(50)).await;
+  mouse(&mut tui, 32, (gap + 7, 4), false)?;
+  mouse(&mut tui, 0, (gap + 9, 4), true)?;
+  actual_size(&mut tui, "first", "after-escape", pane(&confirmed, &first)).await?;
+  let cancelled = view(&daemon, &session).await?;
+  assert_eq!(cancelled.revision, confirmed.revision);
+  assert_eq!(cancelled.layout, confirmed.layout);
+  assert_eq!(cancelled.panes, confirmed.panes);
+  assert!(!footer(&tui.screen()).contains("COPY"));
+  detach(&mut tui).await?;
+  drop(tui);
+  daemon.shutdown().await?;
   Ok(())
 }
 

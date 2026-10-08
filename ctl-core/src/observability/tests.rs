@@ -157,9 +157,17 @@ fn process_writer_child() {
   };
   let store = Store::new(directory.into());
   for _ in 0..10 {
-    store
-      .append(Stream::Audit, &record(Outcome::Succeeded))
-      .unwrap();
+    let record = record(Outcome::Succeeded);
+    let deadline = Instant::now() + std::time::Duration::from_secs(10);
+    // A busy store is an expected, bounded result under concurrent fsyncs.
+    // Retry only before-write contention; all other failures remain fatal.
+    loop {
+      match store.append(Stream::Audit, &record) {
+        Ok(()) => break,
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock && Instant::now() < deadline => {}
+        Err(error) => panic!("history writer failed: {error}"),
+      }
+    }
   }
 }
 

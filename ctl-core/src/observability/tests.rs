@@ -174,13 +174,20 @@ fn multiple_processes_append_complete_records_without_losing_events() {
       std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "observability::tests::process_writer_child"])
         .env("CTL_HISTORY_WRITER_TEST", store.directory())
-        .stdout(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap(),
     );
   }
-  for mut child in children {
-    assert!(child.wait().unwrap().success());
+  // Reap every writer before checking results, and preserve child failures
+  // instead of discarding the only useful diagnostic on Windows.
+  let outputs: Vec<_> = children
+    .into_iter()
+    .map(|child| child.wait_with_output().unwrap())
+    .collect();
+  for output in outputs {
+    assert!(output.status.success(), "{output:?}");
   }
   let history = store.read(Stream::Audit, 100, false).unwrap();
   assert!(history.complete);

@@ -262,6 +262,7 @@ describe("session compositor", () => {
     const actions = props();
     const mounted = render(<SessionViewSurface {...actions} prefix_settings={prefix_settings} />);
     await waitFor(() => expect(screen.getAllByLabelText("Terminal input")).toHaveLength(2));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Split right" }).hasAttribute("disabled")).toBe(false));
     const input = screen.getAllByLabelText("Terminal input")[0];
     fireEvent.keyDown(input, { key: "b", code: "KeyB", ctrlKey: true });
     fireEvent.keyDown(input, { key: "ArrowRight", ctrlKey: true });

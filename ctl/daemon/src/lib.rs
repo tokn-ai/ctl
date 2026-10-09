@@ -827,63 +827,14 @@ async fn ensure_master_with_interaction_inner(
     &target_key(&target),
     history_endpoint(&target),
   );
-  let result = async {
-    let token = uuid::Uuid::new_v4().to_string();
-    let (prompt_tx, mut prompt_rx) = mpsc::channel(1);
-    state
-      .attempts
-      .lock()
-      .unwrap()
-      .insert(token.clone(), Attempt { prompts: prompt_tx });
-    let _attempt_guard = AttemptGuard {
-      token: token.clone(),
-      state: Arc::clone(&state),
-    };
-    let mut authentication = attempt
-      .run(ConnectionAuthentication::prepare(
-        &state,
-        &target,
-        interactive,
-      ))
-      .await??;
-    let mut child = start_master(
-      &target,
-      &endpoint,
-      &token,
-      state
-        .socket_path
-        .as_deref()
-        .unwrap_or(&ctl_ipc::socket_path()),
-      #[cfg(target_os = "macos")]
-      Some(&authentication.identities),
-    )?;
-    let result = attempt
-      .run(wait_for_master(
-        stream,
-        &state,
-        &target,
-        &endpoint,
-        &mut child,
-        &mut prompt_rx,
-        &mut authentication,
-      ))
-      .await;
-    #[cfg(target_os = "macos")]
-    if matches!(result, Ok(Ok(()))) {
-      attempt.run(authentication.connected(&target)).await?;
-    }
-    if endpoint.shared {
-      if matches!(result, Ok(Ok(()))) {
-        state.remember_endpoint(&target, &endpoint, child.stdin.take());
-      }
-      // A configured master can already serve other applications. End only our
-      // anchor session; killing this process could terminate their channels.
-      release_shared_process(child);
-    } else if !matches!(result, Ok(Ok(()))) {
-      let _ = child.kill().await;
-    }
-    result.and_then(|result| result)
-  }
+  let result = establish_master(
+    stream,
+    &state,
+    &target,
+    &endpoint,
+    &mut attempt,
+    interactive,
+  )
   .await;
   operation.finish(
     if result.is_ok() {
@@ -895,6 +846,71 @@ async fn ensure_master_with_interaction_inner(
     None,
   );
   result
+}
+
+async fn establish_master(
+  stream: &mut ctl_ipc::Stream,
+  state: &Arc<State>,
+  target: &SshTarget,
+  endpoint: &MasterEndpoint,
+  attempt: &mut target_lifecycle::TargetAttempt,
+  interactive: bool,
+) -> Result<(), RequestError> {
+  let token = uuid::Uuid::new_v4().to_string();
+  let (prompt_tx, mut prompt_rx) = mpsc::channel(1);
+  state
+    .attempts
+    .lock()
+    .unwrap()
+    .insert(token.clone(), Attempt { prompts: prompt_tx });
+  let _attempt_guard = AttemptGuard {
+    token: token.clone(),
+    state: Arc::clone(state),
+  };
+  let mut authentication = attempt
+    .run(ConnectionAuthentication::prepare(
+      state,
+      target,
+      interactive,
+    ))
+    .await??;
+  let mut child = start_master(
+    target,
+    endpoint,
+    &token,
+    state
+      .socket_path
+      .as_deref()
+      .unwrap_or(&ctl_ipc::socket_path()),
+    #[cfg(target_os = "macos")]
+    Some(&authentication.identities),
+  )?;
+  let result = attempt
+    .run(wait_for_master(
+      stream,
+      state,
+      target,
+      endpoint,
+      &mut child,
+      &mut prompt_rx,
+      &mut authentication,
+    ))
+    .await;
+  #[cfg(target_os = "macos")]
+  if matches!(result, Ok(Ok(()))) {
+    attempt.run(authentication.connected(target)).await?;
+  }
+  if endpoint.shared {
+    if matches!(result, Ok(Ok(()))) {
+      state.remember_endpoint(target, endpoint, child.stdin.take());
+    }
+    // A configured master can already serve other applications. End only our
+    // anchor session; killing this process could terminate their channels.
+    release_shared_process(child);
+  } else if !matches!(result, Ok(Ok(()))) {
+    let _ = child.kill().await;
+  }
+  result.and_then(|result| result)
 }
 
 /// Per-connection authentication state. It owns temporary secrets and agents;

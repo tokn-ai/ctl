@@ -54,6 +54,15 @@ impl Daemon {
     }
   }
 
+  fn has_executable_override(self) -> bool {
+    let variable = match self {
+      Self::Ctld => "CTLD_BIN",
+      Self::Ctmuxd => "CTMUXD_BIN",
+      Self::CtlTaskd => "CTL_TASKD_BIN",
+    };
+    std::env::var_os(variable).is_some()
+  }
+
   fn executable(self) -> io::Result<PathBuf> {
     match self {
       Self::Ctld => ctl_ipc::daemon_executable().map_err(io::Error::other),

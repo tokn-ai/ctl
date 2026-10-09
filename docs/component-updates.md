@@ -211,7 +211,10 @@ ctl -H work components restart ctmuxd
 with the installed replacement selected for this CLI. Release versions alone do not
 identify builds or protocol compatibility. Human output shows a short source fingerprint;
 `--json` preserves complete build and protocol metadata. Unknown or legacy metadata is
-not treated as an up-to-date build. Inspection failures are reported for each component,
+not treated as an up-to-date build. Missing automatically discovered replacements are shown as `not installed` and do not
+fail status; the running owner is still inspected independently. An explicit missing
+executable override or a damaged selected installation remains an error. Inspection
+failures are reported for each component,
 with a nonzero exit status, while successful rows remain visible.
 
 Local status only probes existing service endpoints and runs bounded `--component-info`

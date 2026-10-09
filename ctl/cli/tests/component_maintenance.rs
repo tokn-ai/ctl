@@ -14,7 +14,10 @@ impl Fixture {
     Self(path)
   }
   fn command(&self, args: &[&str]) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_ctl"));
+    self.command_at(std::path::Path::new(env!("CARGO_BIN_EXE_ctl")), args)
+  }
+  fn command_at(&self, executable: &std::path::Path, args: &[&str]) -> Command {
+    let mut command = Command::new(executable);
     command
       .args(args)
       .env("HOME", &self.0)
@@ -188,5 +191,33 @@ async fn status_reads_a_running_owner_without_sending_restart() {
     .unwrap()
     .unwrap();
   std::fs::remove_file(socket).unwrap();
+  fixture.assert_untouched();
+}
+
+#[test]
+fn default_missing_replacements_are_reported_without_failing_status() {
+  // Discovery depends on the actual CLI location. A guarded native copy isolates
+  // siblings from the shared Cargo target without introducing fake executables.
+  let guard = ctl_core::test_fixtures::ProcessGuard::acquire_blocking();
+  let fixture = Fixture::new();
+  let executable = fixture.0.join("ctl");
+  guard.copy(env!("CARGO_BIN_EXE_ctl"), &executable).unwrap();
+  let mut command = fixture.command_at(&executable, &["components", "status", "--json"]);
+  command
+    .env_remove("CTLD_BIN")
+    .env_remove("CTMUXD_BIN")
+    .env_remove("CTL_TASKD_BIN")
+    .env("PATH", &fixture.0);
+  let output = command.output().unwrap();
+  assert!(output.status.success(), "{output:?}");
+  let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+  for row in value["components"].as_array().unwrap() {
+    assert_eq!(row["state"], "not_running");
+    assert_eq!(row["available_missing"], true);
+    assert_eq!(row["errors"], serde_json::json!([]));
+    assert_eq!(row["warnings"].as_array().unwrap().len(), 1);
+    assert!(row["restart_needed"].is_null());
+  }
+  std::fs::remove_file(executable).unwrap();
   fixture.assert_untouched();
 }

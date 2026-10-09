@@ -185,7 +185,7 @@ async fn terminal_ownership_disables_broker_prompts_through_repeated_reconnects(
     let cancelled = broker.cancelled.load(Ordering::Acquire);
     broker.prompt.store(1 + cycle % 2, Ordering::Release);
     proxy.interrupt();
-    broker.wait_cancelled(cancelled + 2).await?;
+    broker.wait_cancelled(cancelled + 1).await?;
     tui
       .wait_screen("controlled authentication notice in the footer", |screen| {
         footer(screen).contains("authentication") && screen.contains("shell:ready")
@@ -201,8 +201,21 @@ async fn terminal_ownership_disables_broker_prompts_through_repeated_reconnects(
       })
       .await?;
     tui.send(b"\x1b")?;
+    // Authentication is nonretryable: periodic refresh and pane maintenance
+    // must stop opening broker sockets until an explicit session retry.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let cancelled = broker.cancelled.load(Ordering::Acquire);
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(broker.cancelled.load(Ordering::Acquire), cancelled);
     broker.prompt.store(0, Ordering::Release);
     proxy.resume();
+    tui.send(b"\x02s")?;
+    tui
+      .wait_screen("session picker for explicit reconnect", |screen| {
+        screen.contains("broker-reconnect")
+      })
+      .await?;
+    tui.send(b"\r")?;
     proxy.wait_attachments(attachments + 1).await?;
     tui
       .wait_screen("connected screen after cancelling prompts", |screen| {

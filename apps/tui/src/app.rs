@@ -350,6 +350,9 @@ impl App<'_> {
       .as_ref()
       .is_some_and(|current| current.session_id == view.session_id)
     {
+      // Explicitly selecting the current session is also a retry after the
+      // user has resolved an authentication/configuration failure.
+      self.maintenance.cancel();
       self.adopt_view(view).await?;
       if session != self.selected_id
         && self

@@ -1856,6 +1856,14 @@ pub enum SessionControlError {
   Pty(String),
 }
 
+#[derive(Debug, Error)]
+pub enum PaneMoveError {
+  #[error(transparent)]
+  Control(#[from] SessionControlError),
+  #[error(transparent)]
+  Manager(#[from] SessionManagerError),
+}
+
 fn build_command(
   command: Option<CommandSpec>,
   working_directory: Option<String>,
@@ -2577,6 +2585,244 @@ mod tests {
     assert!(matches!(result, Err(SessionControlError::Pty(_))));
     assert_eq!(fixture.manager.view(&before.session_id).unwrap(), before);
     assert_eq!(secondary.info().terminal_size, secondary_size);
+  }
+
+  fn pane_target(view: &ctmux_proto::ViewInfo, terminal: &str) -> ctmux_proto::PaneTarget {
+    ctmux_proto::PaneTarget {
+      session_id: view.session_id.clone(),
+      view_id: view.view_id.clone(),
+      expected_revision: view.revision,
+      terminal_id: terminal.into(),
+    }
+  }
+
+  #[test]
+  fn attached_pane_moves_recheck_lease_and_observed_source_before_mutation() {
+    let fixture = PtyViewFixture::new();
+    let root = &fixture.terminals[0];
+    let owner = root.create_attachment(true, true);
+    let other = fixture.terminals[1].create_attachment(false, false);
+    let before = fixture.manager.view(&root.info().session_id).unwrap();
+    let target = pane_target(&before, &fixture.terminals[2].id);
+    for stale in [
+      ctmux_proto::PaneTarget {
+        session_id: "foreign".into(),
+        ..target.clone()
+      },
+      ctmux_proto::PaneTarget {
+        view_id: "foreign".into(),
+        ..target.clone()
+      },
+      ctmux_proto::PaneTarget {
+        expected_revision: before.revision + 1,
+        ..target.clone()
+      },
+      ctmux_proto::PaneTarget {
+        terminal_id: "foreign".into(),
+        ..target.clone()
+      },
+    ] {
+      assert!(matches!(
+        root.swap_pane(&owner.attachment_id, &stale, true),
+        Err(SessionControlError::InvalidView(_))
+      ));
+      assert!(matches!(
+        root.break_pane(&owner.attachment_id, &stale, None),
+        Err(PaneMoveError::Control(SessionControlError::InvalidView(_)))
+      ));
+      assert_eq!(fixture.manager.view(&before.session_id).unwrap(), before);
+    }
+    assert!(matches!(
+      root.swap_pane(&other.attachment_id, &target, true),
+      Err(SessionControlError::LayoutLeaseRequired)
+    ));
+    root.release_lease(&owner.attachment_id, LeaseKind::Layout);
+    fixture.terminals[1].acquire_lease(&other.attachment_id, LeaseKind::Layout);
+    assert!(matches!(
+      root.swap_pane(&owner.attachment_id, &target, false),
+      Err(SessionControlError::LayoutLeaseRequired)
+    ));
+    assert!(matches!(
+      root.break_pane(&owner.attachment_id, &target, None),
+      Err(PaneMoveError::Control(
+        SessionControlError::LayoutLeaseRequired
+      ))
+    ));
+    assert_eq!(fixture.manager.view(&before.session_id).unwrap(), before);
+  }
+
+  #[test]
+  fn attached_swap_wraps_leaf_order_and_preserves_weighted_slots() {
+    use super::topology::LayoutExt as _;
+    fn swap(layout: &mut ctmux_proto::ViewLayout, left: &str, right: &str) {
+      match layout {
+        ctmux_proto::ViewLayout::Terminal { terminal_id } if terminal_id == left => {
+          right.clone_into(terminal_id);
+        }
+        ctmux_proto::ViewLayout::Terminal { terminal_id } if terminal_id == right => {
+          left.clone_into(terminal_id);
+        }
+        ctmux_proto::ViewLayout::Split { children, .. } => {
+          for child in children {
+            swap(child, left, right);
+          }
+        }
+        ctmux_proto::ViewLayout::Terminal { .. } => {}
+      }
+    }
+    let fixture = PtyViewFixture::new();
+    let root = &fixture.terminals[0];
+    let owner = root.create_attachment(true, true);
+    root
+      .resize_pane(
+        &owner.attachment_id,
+        &root.id,
+        ctmux_proto::ResizeDirection::Right,
+        5,
+      )
+      .unwrap();
+    let before = fixture.manager.view(&root.info().session_id).unwrap();
+    assert!(before.layout.has_weights());
+    let target = pane_target(&before, &root.id);
+    let swapped = root.swap_pane(&owner.attachment_id, &target, true).unwrap();
+    let mut expected = before.layout.clone();
+    let last = before.layout.terminal_ids().last().unwrap().clone();
+    swap(&mut expected, &root.id, &last);
+    assert_eq!(swapped.layout, expected);
+    assert_eq!(swapped.revision, before.revision + 1);
+    assert_eq!(swapped.session_id, before.session_id);
+    for pane in &swapped.panes {
+      let terminal = fixture.manager.resolve(&pane.terminal_id).unwrap();
+      assert_eq!(terminal.info().terminal_size.columns, pane.columns);
+      assert_eq!(terminal.info().terminal_size.rows, pane.rows);
+    }
+    let restored = root
+      .swap_pane(
+        &owner.attachment_id,
+        &pane_target(&swapped, &root.id),
+        false,
+      )
+      .unwrap();
+    assert_eq!(restored.layout, before.layout);
+    assert!(root.owns_input_lease(&owner.attachment_id));
+  }
+
+  #[test]
+  fn attached_break_preserves_input_attachment_token_and_publishes_both_views() {
+    let fixture = PtyViewFixture::new();
+    let moved = &fixture.terminals[0];
+    let owner = moved.create_attachment(true, true);
+    let before = fixture.manager.view(&moved.info().session_id).unwrap();
+    let mut source_updates = fixture.terminals[1].subscribe_view();
+    let mut moved_updates = moved.subscribe_view();
+    source_updates.borrow_and_update();
+    moved_updates.borrow_and_update();
+    let sequence = moved.info().next_sequence;
+    let (promoted, source) = moved
+      .break_pane(
+        &owner.attachment_id,
+        &pane_target(&before, &moved.id),
+        Some("moved".into()),
+      )
+      .unwrap();
+    assert_ne!(promoted.session_id, before.session_id);
+    assert_eq!(promoted.session_name, "moved");
+    assert_eq!(promoted.revision, 0);
+    assert_eq!(promoted.terminals.len(), 1);
+    assert_eq!(promoted.terminals[0].terminal_id, moved.id);
+    assert_eq!(moved.info().session_id, promoted.session_id);
+    assert!(moved.info().next_sequence >= sequence);
+    assert_eq!(source.session_id, before.session_id);
+    assert_eq!(source.revision, before.revision + 1);
+    assert!(
+      !source
+        .terminals
+        .iter()
+        .any(|terminal| terminal.terminal_id == moved.id)
+    );
+    assert_eq!(moved_updates.borrow_and_update().as_ref(), Some(&promoted));
+    assert_eq!(source_updates.borrow_and_update().as_ref(), Some(&source));
+    assert!(moved.owns_input_lease(&owner.attachment_id));
+    assert_eq!(
+      moved.layout_lease_status(&owner.attachment_id),
+      LeaseStatus::default()
+    );
+    let resumed = moved
+      .resume_attachment(&owner.attachment_token)
+      .expect("same live token");
+    assert_eq!(resumed.attachment_id, owner.attachment_id);
+    assert_eq!(resumed.attachment_token, owner.attachment_token);
+    assert!(resumed.leases.input.owned_by_client);
+    assert!(!resumed.leases.layout.held);
+    moved
+      .write_input(&resumed.attachment_id, b"still-owned\n")
+      .unwrap();
+    assert!(
+      moved
+        .acquire_lease(&resumed.attachment_id, LeaseKind::Layout)
+        .owned_by_client
+    );
+    assert!(
+      !fixture.terminals[1]
+        .layout_lease_status(&resumed.attachment_id)
+        .held
+    );
+  }
+
+  #[test]
+  fn attached_moves_restore_weighted_layout_zoom_and_geometry_when_reflow_fails() {
+    let fixture = PtyViewFixture::new();
+    let root = &fixture.terminals[0];
+    let failed = &fixture.terminals[2];
+    let owner = root.create_attachment(true, true);
+    root
+      .resize_pane(
+        &owner.attachment_id,
+        &root.id,
+        ctmux_proto::ResizeDirection::Right,
+        5,
+      )
+      .unwrap();
+    root
+      .set_view_zoom(&owner.attachment_id, Some(root.id.clone()))
+      .unwrap();
+    let before = fixture.manager.view(&root.info().session_id).unwrap();
+    let sizes: Vec<_> = fixture
+      .terminals
+      .iter()
+      .map(|terminal| terminal.info().terminal_size)
+      .collect();
+    let master = lock(&failed.master).take();
+    let swap = root.swap_pane(&owner.attachment_id, &pane_target(&before, &root.id), true);
+    let breakout = root.break_pane(
+      &owner.attachment_id,
+      &pane_target(&before, &root.id),
+      Some("atomic-breakout".into()),
+    );
+    *lock(&failed.master) = master;
+    assert!(matches!(swap, Err(SessionControlError::Pty(_))));
+    assert!(
+      matches!(
+        breakout,
+        Err(PaneMoveError::Control(SessionControlError::Pty(_)))
+      ),
+      "{breakout:?}"
+    );
+    assert_eq!(fixture.manager.view(&before.session_id).unwrap(), before);
+    assert_eq!(root.info().session_id, before.session_id);
+    assert!(
+      root
+        .layout_lease_status(&owner.attachment_id)
+        .owned_by_client
+    );
+    assert!(root.owns_input_lease(&owner.attachment_id));
+    assert!(matches!(
+      fixture.manager.view("atomic-breakout"),
+      Err(SessionManagerError::NotFound { .. })
+    ));
+    for (terminal, size) in fixture.terminals.iter().zip(sizes) {
+      assert_eq!(terminal.info().terminal_size, size);
+    }
   }
 
   #[test]

@@ -6,6 +6,8 @@ mod cleanup;
 mod commands;
 #[path = "cases/keyboard.rs"]
 mod keyboard;
+#[path = "cases/moves.rs"]
+mod moves;
 #[path = "cases/reconnect.rs"]
 mod reconnect;
 #[path = "cases/resizing.rs"]

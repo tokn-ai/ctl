@@ -18,7 +18,12 @@ use ctmux_proto::{
   ClientMessage, LeaseKind, ServerMessage, SessionInfo, SessionStatus, SplitAxis, TerminalSize,
   ViewInfo,
 };
-use std::{collections::BTreeMap, io, path::PathBuf, time::Duration};
+use std::{
+  collections::{BTreeMap, BTreeSet},
+  io,
+  path::PathBuf,
+  time::Duration,
+};
 use tokio::{
   sync::mpsc,
   time::{Instant, timeout},
@@ -79,6 +84,8 @@ pub struct App<'a> {
   archive_copy: Option<CopyMode>,
   mouse_capture: Option<MouseCapture>,
   divider_drag: Option<Drag>,
+  pane_move: Option<moves::PendingMove>,
+  migrated_panes: BTreeSet<String>,
   prompt: Prompt,
   copy_buffer: Option<String>,
   message: String,
@@ -115,6 +122,8 @@ impl App<'_> {
       archive_copy: None,
       mouse_capture: None,
       divider_drag: None,
+      pane_move: None,
+      migrated_panes: BTreeSet::new(),
       prompt: Prompt::default(),
       copy_buffer: None,
       message: String::new(),
@@ -320,6 +329,8 @@ impl App<'_> {
   }
 
   async fn select(&mut self, session: &str) -> Result<()> {
+    self.cancel_pane_move();
+    self.migrated_panes.clear();
     self.maintenance.cancel();
     self.release_mouse().await?;
     self.copies.clear();
@@ -356,9 +367,6 @@ impl App<'_> {
     let Some(view) = &self.view else {
       return Ok(());
     };
-    if self.panes.values().any(|pane| pane.ended.is_some()) {
-      return Ok(());
-    }
     let response = self
       .request(ClientMessage::GetView {
         session: view.session_id.clone(),
@@ -375,25 +383,7 @@ impl App<'_> {
     let ServerMessage::ViewSnapshot { view } = response else {
       return Err("expected view snapshot".into());
     };
-    let mut missing = false;
-    for (id, pane) in &mut self.panes {
-      if !view
-        .terminals
-        .iter()
-        .any(|terminal| terminal.terminal_id == *id)
-      {
-        pane
-          .ended
-          .get_or_insert_with(|| "Terminal no longer exists".into());
-        pane.connected = false;
-        missing = true;
-      }
-    }
-    if missing {
-      return Ok(());
-    }
-    self.view = Some(view);
-    self.reconcile().await
+    self.adopt_view(view).await
   }
 
   async fn reconcile(&mut self) -> Result<()> {
@@ -467,6 +457,7 @@ impl App<'_> {
       .await?;
       match opened {
         Ok(opened) => {
+          self.cancel_replaced_move(id);
           self.panes.insert(id.clone(), opened);
         }
         Err(error) if session_not_found(&error) => {
@@ -484,6 +475,8 @@ impl App<'_> {
   }
 
   pub async fn detach(&mut self) {
+    self.cancel_pane_move();
+    self.migrated_panes.clear();
     self.maintenance.cancel();
     let panes = std::mem::take(&mut self.panes);
     for (_, mut pane) in panes {
@@ -612,6 +605,7 @@ impl App<'_> {
           {
             self.divider_drag = None;
           }
+          self.cancel_replaced_move(&id);
           self.panes.insert(id, pane);
           self.clear_connection_notice();
         }
@@ -636,13 +630,13 @@ impl App<'_> {
 
   async fn adopt_snapshot(&mut self, snapshot: Snapshot) -> Result<()> {
     self.sessions = snapshot.sessions;
-    if self.panes.values().any(|pane| pane.ended.is_some()) {
-      return Ok(());
-    }
     if let Some(view) = snapshot.view {
       // A sibling can publish a newer topology/zoom while GetView is pending.
       self.adopt_view(view).await
     } else {
+      if self.panes.values().any(|pane| pane.ended.is_some()) {
+        return Ok(());
+      }
       if self.view.is_some() {
         self.mark_session_ended();
       }
@@ -663,8 +657,9 @@ impl App<'_> {
     let mut notices = Vec::new();
     let mut view_update: Option<ViewInfo> = None;
     let mut resize_results = Vec::new();
+    let mut view_updates = Vec::new();
+    let mut migrations = Vec::new();
     let mut drag_disconnected = false;
-    let current = self.view.as_ref();
     for (id, pane) in &mut self.panes {
       // A closed transport may still have a final SessionEnded event queued.
       match pane.drain().await {
@@ -675,17 +670,11 @@ impl App<'_> {
           notices.push((NoticeKind::Connection, error.to_string()));
         }
       }
-      if let Some(view) = pane.view_update.take()
-        && current.is_some_and(|current| {
-          current.session_id == view.session_id
-            && current.view_id == view.view_id
-            && view.revision >= current.revision
-        })
-        && view_update
-          .as_ref()
-          .is_none_or(|pending| view.revision >= pending.revision)
-      {
-        view_update = Some(view);
+      if let Some(view) = pane.view_update.take() {
+        if let Some(pending) = &mut self.pane_move {
+          pending.observe_view(&view);
+        }
+        view_updates.push((id.clone(), view));
       }
       resize_results.extend(pane.resize_results.drain(..));
       if !pane.connected
@@ -710,6 +699,26 @@ impl App<'_> {
         notices.push((NoticeKind::Action, error));
       }
     }
+    // Settle an explicit identity handoff before classifying broadcasts. A
+    // later source/promoted snapshot must not be downgraded by the move reply.
+    if let Err(error) = self.poll_pane_move().await {
+      notices.push((NoticeKind::Action, error.to_string()));
+    }
+    for (id, view) in view_updates {
+      if self.view.as_ref().is_some_and(|current| {
+        current.session_id == view.session_id
+          && current.view_id == view.view_id
+          && view.revision >= current.revision
+      }) && view_update
+        .as_ref()
+        .is_none_or(|pending| view.revision >= pending.revision)
+      {
+        view_update = Some(view);
+      } else {
+        migrations.push((id, view));
+      }
+    }
+    self.observe_migrations(migrations);
     if let Some(view) = view_update
       && let Err(error) = self.adopt_view(view).await
     {
@@ -738,6 +747,9 @@ impl App<'_> {
   }
 
   async fn adopt_view(&mut self, view: ViewInfo) -> Result<()> {
+    if let Some(pending) = &mut self.pane_move {
+      pending.observe_view(&view);
+    }
     let Some(current) = &self.view else {
       return Ok(());
     };
@@ -757,6 +769,7 @@ impl App<'_> {
     {
       self.divider_drag = None;
     }
+    self.reconcile_migrations(&view).await?;
     let missing = self.panes.keys().any(|id| {
       !view
         .terminals
@@ -1414,6 +1427,9 @@ impl App<'_> {
     match command {
       PromptCommand::Action(action) => return self.execute(action).await,
       PromptCommand::NewSession(name) if !self.read_only => self.create_named(name).await?,
+      PromptCommand::BreakPane { name, detached } if !self.read_only => {
+        self.break_pane(name, detached).await?;
+      }
       PromptCommand::SwitchSession(target) => {
         // Validate before selection clears the current pane's frozen copy state.
         self.list().await?;
@@ -1429,7 +1445,9 @@ impl App<'_> {
       PromptCommand::Lease { kind, requested } if !self.read_only => {
         self.change_lease(kind, Some(requested)).await?;
       }
-      PromptCommand::NewSession(_) | PromptCommand::Lease { .. } => {
+      PromptCommand::NewSession(_)
+      | PromptCommand::BreakPane { .. }
+      | PromptCommand::Lease { .. } => {
         self.notice("This attachment is read only".into());
       }
     }
@@ -1521,6 +1539,10 @@ impl App<'_> {
       Action::PreviousSession => self.next_session(-1).await?,
       Action::CreateSession if !self.read_only => self.create().await?,
       Action::Split(axis) if !self.read_only => self.split(axis).await?,
+      Action::SwapPane { previous, stay } if !self.read_only => {
+        self.swap_pane(previous, stay).await?;
+      }
+      Action::BreakPane if !self.read_only => self.break_pane(None, false).await?,
       Action::KillPane if !self.read_only => self.overlay = Overlay::Kill(self.focused.clone()),
       Action::ToggleLease(lease) if !self.read_only => self.toggle_lease(lease).await?,
       Action::Focus(direction) => {
@@ -1531,6 +1553,8 @@ impl App<'_> {
       Action::Paste
       | Action::CreateSession
       | Action::Split(_)
+      | Action::SwapPane { .. }
+      | Action::BreakPane
       | Action::ResizePane { .. }
       | Action::KillPane
       | Action::ToggleLease(_) => {
@@ -2044,12 +2068,14 @@ impl App<'_> {
         format!("Commands after {} — any key closes help", self.prefix.label),
         "%: split right    \": split below".into(),
         "Arrows: focus pane    o: next pane    z: zoom    x: terminate (confirm)".into(),
+        "{/}: swap with previous/next pane    !: move pane to a new session".into(),
         "Ctrl/Alt arrows resize panes by 1/5 cells after prefix.".into(),
         "Mouse: drag dividers to resize; Esc cancels remaining movement.".into(),
         "Focus/resize arrows repeat for 500 ms; other commands need a fresh prefix.".into(),
         "c: new session    n/p: next/previous session    s/w: session list".into(),
         ": command prompt (pane, session, and ownership commands)".into(),
         "Prompt panes: split-window, select-pane, resize-pane, kill-pane".into(),
+        "Prompt moves: swap-pane -U/-D [-d], break-pane [-d] [-n NAME]".into(),
         "Prompt sessions: new-session, switch-client, list-sessions".into(),
         "Prompt ownership: take-input/release-input, take-resize/release-resize".into(),
         "[: history/copy mode    ]: paste copied text    A: archives".into(),
@@ -2109,3 +2135,9 @@ fn adjacent(
 #[cfg(all(test, unix))]
 #[path = "app_tests.rs"]
 mod tests;
+
+#[path = "moves.rs"]
+mod moves;
+
+#[path = "migration.rs"]
+mod migration;

@@ -1,7 +1,8 @@
 use super::{
-  SessionManager, SessionManagerError, SessionRegistry, Terminal, TerminalOwner, lock, unix_time_ms,
+  PaneMoveError, SessionControlError, SessionLifecycle, SessionManager, SessionManagerError,
+  SessionRegistry, Terminal, TerminalOwner, lock, unix_time_ms,
 };
-use ctmux_proto::{SplitAxis, TerminalInfo, ViewInfo, ViewLayout};
+use ctmux_proto::{LeaseKind, PaneTarget, SplitAxis, TerminalInfo, ViewInfo, ViewLayout};
 use std::collections::HashSet;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -99,6 +100,216 @@ impl LayoutExt for ViewLayout {
       }
       Self::Terminal { .. } => {}
     }
+  }
+}
+
+/// Validate the observed source and authority under the same lock as mutation.
+fn attached_pane_target<'a>(
+  registry: &'a SessionRegistry,
+  attached: &Terminal,
+  attachment_id: &str,
+  target: &PaneTarget,
+) -> Result<&'a Session, SessionControlError> {
+  let owner = lock(&attached.owner).session_id.clone();
+  let root = registry
+    .sessions
+    .get(&owner)
+    .ok_or_else(|| SessionControlError::InvalidView("view has closed".into()))?;
+  if !root
+    .view
+    .leases
+    .status(attachment_id, LeaseKind::Layout)
+    .owned_by_client
+  {
+    return Err(SessionControlError::LayoutLeaseRequired);
+  }
+  if root.closing {
+    return Err(SessionControlError::InvalidView(
+      "session is terminating".into(),
+    ));
+  }
+  if target.session_id != root.id
+    || target.view_id != root.view.id
+    || target.expected_revision != root.view.revision
+  {
+    return Err(SessionControlError::InvalidView(
+      "view changed; reload before moving panes".into(),
+    ));
+  }
+  if !root
+    .view
+    .layout
+    .terminal_ids()
+    .contains(&target.terminal_id)
+  {
+    return Err(SessionControlError::InvalidView(
+      "pane must belong to the attached view".into(),
+    ));
+  }
+  running_movable_terminal(registry, &target.terminal_id)?;
+  Ok(root)
+}
+
+fn running_movable_terminal(
+  registry: &SessionRegistry,
+  id: &str,
+) -> Result<(), SessionControlError> {
+  let terminal = registry
+    .terminals
+    .get(id)
+    .ok_or_else(|| SessionControlError::InvalidView("pane no longer exists".into()))?;
+  if terminal.managed {
+    return Err(SessionControlError::InvalidView(
+      "managed task terminals cannot be moved".into(),
+    ));
+  }
+  if !matches!(*lock(&terminal.lifecycle), SessionLifecycle::Running) {
+    return Err(SessionControlError::InvalidView("pane has ended".into()));
+  }
+  Ok(())
+}
+
+fn swap_terminal_ids(layout: &mut ViewLayout, left: &str, right: &str) {
+  match layout {
+    ViewLayout::Terminal { terminal_id } if terminal_id == left => {
+      right.clone_into(terminal_id);
+    }
+    ViewLayout::Terminal { terminal_id } if terminal_id == right => {
+      left.clone_into(terminal_id);
+    }
+    ViewLayout::Split { children, .. } => {
+      for child in children {
+        swap_terminal_ids(child, left, right);
+      }
+    }
+    ViewLayout::Terminal { .. } => {}
+  }
+}
+
+impl Terminal {
+  pub(super) fn swap_pane_inner(
+    &self,
+    attachment_id: &str,
+    target: &PaneTarget,
+    previous: bool,
+  ) -> Result<ViewInfo, SessionControlError> {
+    self.resize_layout(attachment_id, |view, registry| {
+      attached_pane_target(registry, self, attachment_id, target)?;
+      let ids = view.layout.terminal_ids();
+      if ids.len() < 2 {
+        return Err(SessionControlError::InvalidView(
+          "session has only one pane".into(),
+        ));
+      }
+      let index = ids
+        .iter()
+        .position(|id| id == &target.terminal_id)
+        .expect("validated pane");
+      let adjacent = if previous {
+        (index + ids.len() - 1) % ids.len()
+      } else {
+        (index + 1) % ids.len()
+      };
+      running_movable_terminal(registry, &ids[adjacent])?;
+      let mut layout = view.layout.clone();
+      swap_terminal_ids(&mut layout, &target.terminal_id, &ids[adjacent]);
+      Ok((layout, true))
+    })
+  }
+
+  pub(super) fn break_pane_inner(
+    &self,
+    attachment_id: &str,
+    target: &PaneTarget,
+    name: Option<String>,
+  ) -> Result<(ViewInfo, ViewInfo), PaneMoveError> {
+    let inner = self
+      .manager
+      .upgrade()
+      .ok_or_else(|| SessionControlError::InvalidView("view has closed".into()))?;
+    let manager = SessionManager { inner };
+    let mut reservation = manager.reserve_name(name)?;
+    let mut registry = lock(&manager.inner.registry);
+    let root = attached_pane_target(&registry, self, attachment_id, target)?;
+    let ids = root.view.layout.terminal_ids();
+    if ids.len() < 2 {
+      return Err(SessionControlError::InvalidView("session has only one pane".into()).into());
+    }
+    let source_id = root.id.clone();
+    let old_layout = root.view.layout.clone();
+    let old_zoom = root.view.zoomed_terminal_id.clone();
+    let old_revision = root.view.revision;
+    let remaining = old_layout
+      .clone()
+      .remove_terminal(&target.terminal_id)
+      .expect("remaining pane");
+    remaining
+      .pane_geometry(&root.view.canvas_size)
+      .map_err(SessionControlError::InvalidView)?;
+    let geometry = registry.capture_view_geometry(&source_id);
+    let view = &mut registry
+      .sessions
+      .get_mut(&source_id)
+      .expect("validated source")
+      .view;
+    view.layout = remaining;
+    view.zoomed_terminal_id = None;
+    view.revision += 1;
+    if let Err(error) = registry.reflow_view(&source_id) {
+      let view = &mut registry
+        .sessions
+        .get_mut(&source_id)
+        .expect("validated source")
+        .view;
+      view.layout = old_layout;
+      view.zoomed_terminal_id = old_zoom;
+      view.revision = old_revision;
+      registry.restore_view_geometry(&source_id, &geometry);
+      return Err(error.into());
+    }
+    let terminal = Arc::clone(&registry.terminals[&target.terminal_id]);
+    for record in lock(&terminal.attachments).values() {
+      registry
+        .sessions
+        .get_mut(&source_id)
+        .expect("validated source")
+        .view
+        .leases
+        .release_attachment(&record.attachment_id);
+    }
+    let owner = TerminalOwner {
+      created_at_ms: unix_time_ms(),
+      session_id: Uuid::new_v4().to_string(),
+      view_id: Uuid::new_v4().to_string(),
+      name: reservation.name.clone(),
+    };
+    *lock(&terminal.owner) = owner.clone();
+    registry.sessions.insert(
+      owner.session_id.clone(),
+      Session {
+        closing: false,
+        id: owner.session_id.clone(),
+        name: owner.name,
+        view: View {
+          id: owner.view_id,
+          revision: 0,
+          canvas_size: terminal.info().terminal_size,
+          zoomed_terminal_id: None,
+          leases: ctmux_core::AttachmentLeaseRegistry::default(),
+          layout: ViewLayout::Terminal {
+            terminal_id: target.terminal_id.clone(),
+          },
+        },
+      },
+    );
+    registry.pending_names.remove(&reservation.name);
+    reservation.active = false;
+    registry.publish_view(&source_id);
+    registry.publish_view(&owner.session_id);
+    Ok((
+      registry.view_info(&owner.session_id)?,
+      registry.view_info(&source_id)?,
+    ))
   }
 }
 

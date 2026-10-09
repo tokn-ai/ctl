@@ -838,7 +838,9 @@ async fn forward_event(
       session_id,
       exit_code,
     } => AttachmentEventDto::session_ended(&actor.attachment_id, session_id, exit_code),
-    AttachmentEvent::HeartbeatAck { .. } | AttachmentEvent::Exited { .. } => return Ok(()),
+    AttachmentEvent::PaneMoveResult { .. }
+    | AttachmentEvent::HeartbeatAck { .. }
+    | AttachmentEvent::Exited { .. } => return Ok(()),
   };
 
   channel

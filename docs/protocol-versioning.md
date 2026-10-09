@@ -120,9 +120,24 @@ in checkpoint payloads. No JSON message or field is added; `ctmux_vt_state`
 remains format version 1 and carries a standard ANSI keyboard-mode preamble.
 Earlier selected contracts omit only that generated preamble, retaining their
 existing payload and raw-output semantics. New TUI clients enable mode-aware
-encoding and mode-query replies only under `1.1.18`; older daemons remain usable
-with legacy input. Host Kitty keyboard negotiation is local to the TUI's host
-terminal and is separate from the named ctmux IPC contract.
+encoding and mode-query replies under `1.1.18` and later supported contracts;
+older daemons remain usable with legacy input. Host Kitty keyboard negotiation
+is local to the TUI's host terminal and is separate from the named ctmux IPC
+contract.
+
+Attached pane rearrangement advances ctmux from `1.1.18` (build 18) to
+`1.1.19` (build 19), retaining `1.0.13` and `1.1.14` through `1.1.18`.
+The additive `swap_pane` and `break_pane` operations carry a request ID and
+`target` with session ID, view ID, expected revision, and terminal ID. The daemon
+checks source view ownership and membership atomically with the edit. The
+correlated `pane_move_result` carries a swapped view, both promoted and source
+views after a break, or a rejection. The split tree and its weights remain fixed
+when swapping; promotion retains the running terminal and its input attachment,
+and releases that terminal's attachments from the source view resize lease.
+Clients require negotiated `1.1.19` before sending these operations. All earlier
+contracts, including existing stateless arrangement operations, retain their
+message shapes and behavior. Other named protocols and the product release
+version are unchanged.
 
 Storage schema versions are separate. Changing a protocol contract does not
 rename or migrate an on-disk schema.
@@ -134,9 +149,9 @@ The first handshake or control request contains an offer:
 ```json
 {
   "protocol": {
-    "build": 18,
-    "version": "1.1.18",
-    "supported_versions": ["1.0.13", "1.1.14", "1.1.15", "1.1.16", "1.1.17", "1.1.18"]
+    "build": 19,
+    "version": "1.1.19",
+    "supported_versions": ["1.0.13", "1.1.14", "1.1.15", "1.1.16", "1.1.17", "1.1.18", "1.1.19"]
   }
 }
 ```
@@ -150,7 +165,7 @@ older contract is selected; new servers preserve old-client messages and
 semantics. Optional features must be gated by that selected contract.
 
 Daemon status and session/task handshakes return actual advertisements, separately
-from the selected contract. A server can advertise `1.1.18` while one connection
+from the selected contract. A server can advertise `1.1.19` while one connection
 selects `1.0.13`; diagnostics must retain both facts.
 
 Every component's `--component-info` output declares the release mapping:

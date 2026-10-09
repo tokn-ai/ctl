@@ -69,7 +69,7 @@ pub async fn run(options: Options) -> Result<()> {
     options.read_only,
     input::parse_prefix(&options.prefix)?,
   );
-  run_app(&mut app, options.archive, options.session).await
+  Box::pin(run_app(&mut app, options.archive, options.session)).await
 }
 
 /// Run the same terminal UI over a caller-supplied local or remote transport.
@@ -84,7 +84,7 @@ pub async fn run_with_transport(
   ensure_terminal()?;
   let mut app = app::App::new(PathBuf::new(), read_only, input::parse_prefix("Ctrl+b")?);
   app.transport = Some(transport);
-  run_app(&mut app, None, session).await
+  Box::pin(run_app(&mut app, None, session)).await
 }
 
 async fn run_app(

@@ -264,10 +264,13 @@ cargo run -p ctmux-cli
 Use Ctrl+B then `?` for help, `%` to split right, `z` to zoom/unzoom the
 focused pane, and `d` to detach. Prefix + Ctrl arrows resizes by one cell;
 Alt arrows resizes by five. Shared zoom and resizing require the view resize
-lease. Zoom supports ctmux contracts `1.1.15` through `1.1.18`;
-keyboard resizing supports `1.1.16` through `1.1.18`. Desktop divider dragging
+lease. Zoom supports ctmux contracts `1.1.15` through `1.1.19`;
+keyboard resizing supports `1.1.16` through `1.1.19`. Desktop divider dragging
 requires `1.1.17`.
 TUI application-requested modified-key reporting requires `1.1.18`.
+Prefix + `{` / `}` swaps panes; `!` moves the focused pane into a new flat
+session. These TUI moves require `1.1.19` and the source view resize lease;
+split proportions, running terminals, and retained copy selections survive.
 See [apps/tui](apps/tui/README.md) for controls and shared-view behavior.
 
 For the Windows local CLI and daemon slice:

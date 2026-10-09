@@ -301,6 +301,11 @@ pub enum AttachmentEvent {
     request_id: String,
     outcome: ctmux_proto::PaneResizeOutcome,
   },
+  /// A correlated pane move result; the presenter decides which view to adopt.
+  PaneMoveResult {
+    request_id: String,
+    outcome: ctmux_proto::PaneMoveOutcome,
+  },
   LeaseStatus {
     lease: LeaseKind,
     status: LeaseStatus,
@@ -501,6 +506,16 @@ enum AttachmentCommand {
     divider: ctmux_proto::DividerResize,
     request_id: String,
   },
+  SwapPane {
+    target: ctmux_proto::PaneTarget,
+    previous: bool,
+    request_id: String,
+  },
+  BreakPane {
+    target: ctmux_proto::PaneTarget,
+    name: Option<String>,
+    request_id: String,
+  },
   AcquireLease {
     lease: LeaseKind,
   },
@@ -552,6 +567,8 @@ pub enum AttachmentCommandError {
   PaneResizeUnavailable,
   #[error("divider resizing requires ctmux contract 1.1.17")]
   DividerResizeUnavailable,
+  #[error("pane moves require ctmux contract 1.1.19")]
+  PaneMoveUnavailable,
   #[error("attachment controller is no longer running")]
   Closed,
 }
@@ -655,6 +672,70 @@ impl AttachmentControl {
   #[must_use]
   pub fn supports_extended_keys(&self) -> bool {
     ctmux_proto::supports_extended_keys(self.protocol_version)
+  }
+
+  /// Whether the negotiated contract supports atomic attached pane moves.
+  #[must_use]
+  pub fn supports_pane_moves(&self) -> bool {
+    ctmux_proto::supports_pane_moves(self.protocol_version)
+  }
+
+  /// Queues a swap with the previous or next pane in the source layout.
+  ///
+  /// The daemon validates source identity, revision, membership, and ownership
+  /// together. Results retain the request ID without adopting topology locally.
+  ///
+  /// # Errors
+  /// Returns an error when the contract lacks pane moves, layout is not owned,
+  /// or the controller has stopped.
+  pub async fn swap_pane(
+    &self,
+    target: ctmux_proto::PaneTarget,
+    previous: bool,
+    request_id: String,
+  ) -> Result<(), AttachmentCommandError> {
+    self.check_pane_move()?;
+    self
+      .send(AttachmentCommand::SwapPane {
+        target,
+        previous,
+        request_id,
+      })
+      .await
+  }
+
+  /// Queues promotion of a pane into a new flat session, retaining its process.
+  ///
+  /// The correlated result includes both the remaining source and new view.
+  /// The presenter decides whether to follow the promoted pane.
+  ///
+  /// # Errors
+  /// Returns an error when the contract lacks pane moves, layout is not owned,
+  /// or the controller has stopped. The daemon validates the requested name.
+  pub async fn break_pane(
+    &self,
+    target: ctmux_proto::PaneTarget,
+    name: Option<String>,
+    request_id: String,
+  ) -> Result<(), AttachmentCommandError> {
+    self.check_pane_move()?;
+    self
+      .send(AttachmentCommand::BreakPane {
+        target,
+        name,
+        request_id,
+      })
+      .await
+  }
+
+  fn check_pane_move(&self) -> Result<(), AttachmentCommandError> {
+    if !self.supports_pane_moves() {
+      return Err(AttachmentCommandError::PaneMoveUnavailable);
+    }
+    if !self.state.lease_status(LeaseKind::Layout).owned_by_client {
+      return Err(AttachmentCommandError::LayoutLeaseRequired);
+    }
+    Ok(())
   }
 
   /// Queues movement of the focused pane's nearest divider in cell units.
@@ -1492,20 +1573,10 @@ impl<S> AttachmentController<S> {
           .accept_geometry_change(terminal_size, observed_sequence, writer_statuses)
           .await
       }
-      ServerMessage::ViewSnapshot { view }
-        if ctmux_proto::supports_view_zoom(self.protocol_version) =>
-      {
-        self
-          .emit_event(AttachmentEvent::ViewChanged { view }, writer_statuses)
-          .await
-      }
-      ServerMessage::PaneResizeResult {
-        request_id,
-        outcome,
-      } if ctmux_proto::supports_pane_resize(self.protocol_version) => {
-        self
-          .process_resize_result(request_id, outcome, writer_statuses)
-          .await
+      message @ (ServerMessage::ViewSnapshot { .. }
+      | ServerMessage::PaneResizeResult { .. }
+      | ServerMessage::PaneMoveResult { .. }) => {
+        self.process_view_message(message, writer_statuses).await
       }
       ServerMessage::LeaseStatus {
         lease,
@@ -1542,6 +1613,42 @@ impl<S> AttachmentController<S> {
       }
       response => Err(unexpected(
         "output, checkpoint, pty_geometry_changed, shell_state_changed, lease_status, heartbeat_ack, detached, or session_ended",
+        &response,
+      )),
+    }
+  }
+
+  async fn process_view_message(
+    &mut self,
+    message: ServerMessage,
+    writer_statuses: &mut mpsc::UnboundedReceiver<WriterStatus>,
+  ) -> Result<ControllerAction, ClientError> {
+    match message {
+      ServerMessage::ViewSnapshot { view }
+        if ctmux_proto::supports_view_zoom(self.protocol_version) =>
+      {
+        self
+          .emit_event(AttachmentEvent::ViewChanged { view }, writer_statuses)
+          .await
+      }
+      ServerMessage::PaneResizeResult {
+        request_id,
+        outcome,
+      } if ctmux_proto::supports_pane_resize(self.protocol_version) => {
+        self
+          .process_resize_result(request_id, outcome, writer_statuses)
+          .await
+      }
+      ServerMessage::PaneMoveResult {
+        request_id,
+        outcome,
+      } if ctmux_proto::supports_pane_moves(self.protocol_version) => {
+        self
+          .process_move_result(request_id, outcome, writer_statuses)
+          .await
+      }
+      response => Err(unexpected(
+        "a view control result supported by the selected contract",
         &response,
       )),
     }
@@ -1784,6 +1891,32 @@ impl<S> AttachmentController<S> {
     self
       .emit_event(
         AttachmentEvent::PaneResizeResult {
+          request_id,
+          outcome,
+        },
+        writer_statuses,
+      )
+      .await
+  }
+
+  async fn process_move_result(
+    &mut self,
+    request_id: String,
+    outcome: ctmux_proto::PaneMoveOutcome,
+    writer_statuses: &mut mpsc::UnboundedReceiver<WriterStatus>,
+  ) -> Result<ControllerAction, ClientError> {
+    if matches!(
+      &outcome,
+      ctmux_proto::PaneMoveOutcome::Rejected {
+        code: ErrorCode::LayoutLeaseRequired,
+        ..
+      }
+    ) {
+      self.state.mark_lease_not_owned(LeaseKind::Layout);
+    }
+    self
+      .emit_event(
+        AttachmentEvent::PaneMoveResult {
           request_id,
           outcome,
         },
@@ -2222,6 +2355,24 @@ where
       divider,
       request_id,
     },
+    AttachmentCommand::SwapPane {
+      target,
+      previous,
+      request_id,
+    } => ClientMessage::SwapPane {
+      target,
+      previous,
+      request_id,
+    },
+    AttachmentCommand::BreakPane {
+      target,
+      name,
+      request_id,
+    } => ClientMessage::BreakPane {
+      target,
+      name,
+      request_id,
+    },
     AttachmentCommand::AcquireLease { lease } => ClientMessage::AcquireLease { lease },
     AttachmentCommand::ReleaseLease { lease } => ClientMessage::ReleaseLease { lease },
     AttachmentCommand::RequestCheckpoint => ClientMessage::RequestCheckpoint,
@@ -2644,6 +2795,7 @@ async fn present_interactive_events(
       AttachmentEvent::ShellStateChanged { .. }
       | AttachmentEvent::ViewChanged { .. }
       | AttachmentEvent::PaneResizeResult { .. }
+      | AttachmentEvent::PaneMoveResult { .. }
       | AttachmentEvent::HistorySynced { .. }
       | AttachmentEvent::HeartbeatAck { .. }
       | AttachmentEvent::Exited { .. } => {}
@@ -3091,6 +3243,166 @@ mod tests {
       boundary: 1,
       position: 32,
     }
+  }
+
+  fn pane_move_target() -> ctmux_proto::PaneTarget {
+    ctmux_proto::PaneTarget {
+      session_id: "session-test".into(),
+      view_id: "view-test".into(),
+      expected_revision: 9,
+      terminal_id: "terminal-test".into(),
+    }
+  }
+
+  fn pane_move_view(session_id: &str, revision: u64) -> ctmux_proto::ViewInfo {
+    let layout = ctmux_proto::ViewLayout::Terminal {
+      terminal_id: "terminal-test".into(),
+    };
+    let canvas_size = TerminalSize {
+      columns: 160,
+      rows: 50,
+      pixel_width: 0,
+      pixel_height: 0,
+    };
+    ctmux_proto::ViewInfo {
+      session_name: session_id.into(),
+      session_id: session_id.into(),
+      view_id: format!("{session_id}-view"),
+      revision,
+      panes: layout.pane_geometry(&canvas_size).unwrap(),
+      canvas_size,
+      zoomed_terminal_id: None,
+      layout,
+      terminals: Vec::new(),
+    }
+  }
+
+  #[tokio::test]
+  async fn pane_moves_are_refused_before_wire_on_all_previous_contracts() {
+    tokio::time::timeout(Duration::from_secs(3), async {
+      for &contract in ctmux_proto::SUPPORTED_PROTOCOL_VERSIONS.iter().filter(|version| **version != PROTOCOL_VERSION) {
+        let (client, mut peer) = tokio::io::duplex(4096);
+        let mut attached = attached_session(0, None, ShellState::default());
+        attached.handshake_info.protocol_version = contract;
+        attached.layout_lease = LeaseStatus { held: true, owned_by_client: true };
+        attached.input_lease = attached.layout_lease.clone();
+        let (controller, control, _events) = AttachmentController::new(client, &attached, controller_options()).unwrap();
+        let runner = tokio::spawn(controller.run());
+        assert!(!control.supports_pane_moves());
+        assert_eq!(control.swap_pane(pane_move_target(), true, "old-swap".into()).await, Err(AttachmentCommandError::PaneMoveUnavailable));
+        assert_eq!(control.break_pane(pane_move_target(), None, "old-break".into()).await, Err(AttachmentCommandError::PaneMoveUnavailable));
+        // A known command acts as a barrier: no unsupported move precedes it.
+        control.input(b"key".to_vec()).await.unwrap();
+        assert_eq!(read_non_heartbeat_request(&mut peer).await, ClientMessage::Input { data: b"key".to_vec() });
+        if contract == ctmux_proto::CONTRACT_V1_1_18 {
+          assert!(control.supports_extended_keys());
+          assert!(control.supports_pane_resize());
+          control.resize_pane("terminal-test".into(), ResizeDirection::Right, 1, "old-resize".into()).await.unwrap();
+          assert!(matches!(read_non_heartbeat_request(&mut peer).await, ClientMessage::ResizePane { request_id, .. } if request_id == "old-resize"));
+        }
+        control.detach().await.unwrap();
+        assert_eq!(read_non_heartbeat_request(&mut peer).await, ClientMessage::Detach);
+        write_frame(&mut peer, &ServerMessage::Detached).await.unwrap();
+        assert_eq!(runner.await.unwrap().unwrap().reason, AttachExitReason::Detached);
+      }
+    }).await.expect("older contracts must reject pane moves while input, resize, and detach stay responsive");
+  }
+
+  #[tokio::test]
+  async fn pane_moves_require_current_layout_ownership_before_queueing() {
+    for held in [false, true] {
+      let (client, _peer) = tokio::io::duplex(4096);
+      let mut attached = attached_session(0, None, ShellState::default());
+      attached.layout_lease = LeaseStatus {
+        held,
+        owned_by_client: false,
+      };
+      let (_controller, control, _events) =
+        AttachmentController::new(client, &attached, controller_options()).unwrap();
+      assert!(control.supports_pane_moves());
+      let capacity = control.commands.capacity();
+      assert_eq!(
+        control
+          .swap_pane(pane_move_target(), false, "unowned-swap".into())
+          .await,
+        Err(AttachmentCommandError::LayoutLeaseRequired)
+      );
+      assert_eq!(
+        control
+          .break_pane(
+            pane_move_target(),
+            Some("work".into()),
+            "unowned-break".into()
+          )
+          .await,
+        Err(AttachmentCommandError::LayoutLeaseRequired)
+      );
+      assert_eq!(control.commands.capacity(), capacity);
+    }
+  }
+
+  #[tokio::test]
+  async fn pane_move_commands_and_successes_are_correlated_without_adopting_geometry() {
+    tokio::time::timeout(Duration::from_secs(3), async {
+      let (client, mut peer) = tokio::io::duplex(4096);
+      let mut attached = attached_session(0, None, ShellState::default());
+      attached.layout_lease = LeaseStatus { held: true, owned_by_client: true };
+      attached.input_lease = attached.layout_lease.clone();
+      let (controller, control, mut events) = AttachmentController::new(client, &attached, AttachmentControllerOptions { event_queue_capacity: 1, ..controller_options() }).unwrap();
+      let runner = tokio::spawn(controller.run());
+      assert!(control.supports_view_zoom() && control.supports_divider_resize() && control.supports_extended_keys());
+      let initial_size = control.state().terminal_size();
+      let target = pane_move_target();
+      control.swap_pane(target.clone(), true, "swap".into()).await.unwrap();
+      assert_eq!(read_non_heartbeat_request(&mut peer).await, ClientMessage::SwapPane { target: target.clone(), previous: true, request_id: "swap".into() });
+      let outcome = ctmux_proto::PaneMoveOutcome::Swapped { view: Box::new(pane_move_view("session-test", 10)) };
+      write_frame(&mut peer, &ServerMessage::PaneMoveResult { request_id: "swap".into(), outcome: outcome.clone() }).await.unwrap();
+      assert_eq!(events.recv().await, Some(AttachmentEvent::PaneMoveResult { request_id: "swap".into(), outcome }));
+      control.break_pane(target.clone(), Some("build logs".into()), "break".into()).await.unwrap();
+      assert_eq!(read_non_heartbeat_request(&mut peer).await, ClientMessage::BreakPane { target, name: Some("build logs".into()), request_id: "break".into() });
+      let outcome = ctmux_proto::PaneMoveOutcome::Promoted { view: Box::new(pane_move_view("promoted", 0)), source_view: Box::new(pane_move_view("session-test", 11)) };
+      write_frame(&mut peer, &ServerMessage::PaneMoveResult { request_id: "break".into(), outcome: outcome.clone() }).await.unwrap();
+      assert_eq!(events.recv().await, Some(AttachmentEvent::PaneMoveResult { request_id: "break".into(), outcome }));
+      assert_eq!(control.state().terminal_size(), initial_size);
+      assert_eq!(control.state().received_sequence(), 0);
+      assert_eq!(control.state().resume_sequence(), Some(0));
+      assert_eq!(events.try_recv(), Err(mpsc::error::TryRecvError::Empty));
+      control.resize_pane("terminal-test".into(), ResizeDirection::Right, 1, "new-resize".into()).await.unwrap();
+      assert!(matches!(read_non_heartbeat_request(&mut peer).await, ClientMessage::ResizePane { request_id, .. } if request_id == "new-resize"));
+      control.input(b"key".to_vec()).await.unwrap();
+      assert_eq!(read_non_heartbeat_request(&mut peer).await, ClientMessage::Input { data: b"key".to_vec() });
+      control.detach().await.unwrap();
+      assert_eq!(read_non_heartbeat_request(&mut peer).await, ClientMessage::Detach);
+      write_frame(&mut peer, &ServerMessage::Detached).await.unwrap();
+      assert_eq!(runner.await.unwrap().unwrap().reason, AttachExitReason::Detached);
+    }).await.expect("correlated pane moves and ordinary controls must drain the bounded queue within three seconds");
+  }
+
+  #[tokio::test]
+  async fn pane_move_rejections_preserve_liveness_and_refresh_stale_ownership() {
+    tokio::time::timeout(Duration::from_secs(3), async {
+      let (client, mut peer) = tokio::io::duplex(4096);
+      let mut attached = attached_session(0, None, ShellState::default());
+      attached.layout_lease = LeaseStatus { held: true, owned_by_client: true };
+      let (controller, control, mut events) = AttachmentController::new(client, &attached, controller_options()).unwrap();
+      let runner = tokio::spawn(controller.run());
+      for (request_id, code) in [("stale", ErrorCode::InvalidRequest), ("lease-lost", ErrorCode::LayoutLeaseRequired)] {
+        control.swap_pane(pane_move_target(), false, request_id.into()).await.unwrap();
+        assert!(matches!(read_non_heartbeat_request(&mut peer).await, ClientMessage::SwapPane { request_id: actual, .. } if actual == request_id));
+        let keeps_layout = code != ErrorCode::LayoutLeaseRequired;
+        let outcome = ctmux_proto::PaneMoveOutcome::Rejected { code, message: "move rejected".into() };
+        write_frame(&mut peer, &ServerMessage::PaneMoveResult { request_id: request_id.into(), outcome: outcome.clone() }).await.unwrap();
+        assert_eq!(events.recv().await, Some(AttachmentEvent::PaneMoveResult { request_id: request_id.into(), outcome }));
+        assert_eq!(control.state().leases().layout.owned_by_client, keeps_layout);
+      }
+      assert_eq!(control.break_pane(pane_move_target(), None, "after-loss".into()).await, Err(AttachmentCommandError::LayoutLeaseRequired));
+      write_frame(&mut peer, &ServerMessage::HeartbeatAck { nonce: 9 }).await.unwrap();
+      assert_eq!(events.recv().await, Some(AttachmentEvent::HeartbeatAck { nonce: 9 }));
+      control.detach().await.unwrap();
+      assert_eq!(read_non_heartbeat_request(&mut peer).await, ClientMessage::Detach);
+      write_frame(&mut peer, &ServerMessage::Detached).await.unwrap();
+      assert_eq!(runner.await.unwrap().unwrap().reason, AttachExitReason::Detached);
+    }).await.expect("rejected pane moves must keep the controller and detach responsive");
   }
 
   async fn read_non_heartbeat_request(peer: &mut tokio::io::DuplexStream) -> ClientMessage {

@@ -12,6 +12,11 @@ pub enum Direction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
   Split(SplitAxis),
+  SwapPane {
+    previous: bool,
+    stay: bool,
+  },
+  BreakPane,
   Focus(Direction),
   ResizePane {
     direction: ResizeDirection,
@@ -84,6 +89,15 @@ pub fn resolve(key: KeyEvent) -> Option<Binding> {
   let action = match code {
     KeyCode::Char('%') => Action::Split(SplitAxis::Horizontal),
     KeyCode::Char('"') => Action::Split(SplitAxis::Vertical),
+    KeyCode::Char('{') => Action::SwapPane {
+      previous: true,
+      stay: false,
+    },
+    KeyCode::Char('}') => Action::SwapPane {
+      previous: false,
+      stay: false,
+    },
+    KeyCode::Char('!') => Action::BreakPane,
     KeyCode::Up => Action::Focus(Direction::Up),
     KeyCode::Down => Action::Focus(Direction::Down),
     KeyCode::Left => Action::Focus(Direction::Left),
@@ -129,6 +143,21 @@ mod tests {
     let bindings = [
       (KeyCode::Char('%'), Action::Split(SplitAxis::Horizontal)),
       (KeyCode::Char('"'), Action::Split(SplitAxis::Vertical)),
+      (
+        KeyCode::Char('{'),
+        Action::SwapPane {
+          previous: true,
+          stay: false,
+        },
+      ),
+      (
+        KeyCode::Char('}'),
+        Action::SwapPane {
+          previous: false,
+          stay: false,
+        },
+      ),
+      (KeyCode::Char('!'), Action::BreakPane),
       (KeyCode::Char('o'), Action::NextPane),
       (KeyCode::Char('z'), Action::ToggleZoom),
       (KeyCode::Char('c'), Action::CreateSession),
@@ -222,6 +251,21 @@ mod tests {
       ('?', Action::Help),
       ('"', Action::Split(SplitAxis::Vertical)),
       ('%', Action::Split(SplitAxis::Horizontal)),
+      (
+        '{',
+        Action::SwapPane {
+          previous: true,
+          stay: false,
+        },
+      ),
+      (
+        '}',
+        Action::SwapPane {
+          previous: false,
+          stay: false,
+        },
+      ),
+      ('!', Action::BreakPane),
     ] {
       assert_eq!(
         resolve(key(KeyCode::Char(ch), KeyModifiers::SHIFT)).map(|binding| binding.action),
@@ -245,7 +289,7 @@ mod tests {
       KeyModifiers::HYPER,
       KeyModifiers::META,
     ] {
-      for ch in ['d', 'x', 'c', '%', '"', 'I', 'R', '?'] {
+      for ch in ['d', 'x', 'c', '%', '"', '{', '}', '!', 'I', 'R', '?'] {
         assert_eq!(
           resolve(key(KeyCode::Char(ch), modifiers)),
           None,
@@ -275,5 +319,43 @@ mod tests {
         repeatable: true,
       })
     );
+  }
+
+  #[test]
+  fn pane_move_bindings_ignore_releases_and_never_enter_the_repeat_table() {
+    for (code, action) in [
+      (
+        '{',
+        Action::SwapPane {
+          previous: true,
+          stay: false,
+        },
+      ),
+      (
+        '}',
+        Action::SwapPane {
+          previous: false,
+          stay: false,
+        },
+      ),
+      ('!', Action::BreakPane),
+    ] {
+      for modifiers in [KeyModifiers::NONE, KeyModifiers::SHIFT] {
+        for kind in [
+          KeyEventKind::Press,
+          KeyEventKind::Repeat,
+          KeyEventKind::Release,
+        ] {
+          let event = KeyEvent::new_with_kind(KeyCode::Char(code), modifiers, kind);
+          assert_eq!(
+            resolve(event),
+            (kind != KeyEventKind::Release).then_some(Binding {
+              action,
+              repeatable: false
+            })
+          );
+        }
+      }
+    }
   }
 }

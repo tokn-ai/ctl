@@ -1,5 +1,5 @@
 //! Record operation boundaries outside the registry/PTY locks. Never log requests.
-use super::{SessionControlError, SessionManager, SessionManagerError, Terminal};
+use super::{PaneMoveError, SessionControlError, SessionManager, SessionManagerError, Terminal};
 use ctl_core::observability::{Context, Event, Lease, Level, Operation, Outcome};
 use ctmux_proto::{CommandSpec, LeaseKind, LeaseStatus, TerminalSize, ViewInfo, ViewLayout};
 use std::sync::Arc;
@@ -35,6 +35,15 @@ impl Failure for SessionManagerError {
       Self::ShellReporter(_) => ("shell_reporter_failed", Level::Error),
       Self::ReaderThread(_) => ("pane_reader_failed", Level::Error),
       Self::WaiterThread(_) => ("pane_waiter_failed", Level::Error),
+    }
+  }
+}
+
+impl Failure for PaneMoveError {
+  fn classification(&self) -> (&'static str, Level) {
+    match self {
+      Self::Control(error) => error.classification(),
+      Self::Manager(error) => error.classification(),
     }
   }
 }
@@ -228,6 +237,38 @@ impl Terminal {
       Level::Info,
       context,
       || self.set_view_zoom_inner(attachment_id, terminal_id),
+      |_| context,
+    )
+  }
+
+  pub fn swap_pane(
+    &self,
+    attachment_id: &str,
+    target: &ctmux_proto::PaneTarget,
+    previous: bool,
+  ) -> Result<ViewInfo, SessionControlError> {
+    let context = self.log_context(Some(attachment_id));
+    logged(
+      Event::ViewUpdate,
+      Level::Info,
+      context,
+      || self.swap_pane_inner(attachment_id, target, previous),
+      |_| context,
+    )
+  }
+
+  pub fn break_pane(
+    &self,
+    attachment_id: &str,
+    target: &ctmux_proto::PaneTarget,
+    name: Option<String>,
+  ) -> Result<(ViewInfo, ViewInfo), PaneMoveError> {
+    let context = self.log_context(Some(attachment_id));
+    logged(
+      Event::PanePromote,
+      Level::Info,
+      context,
+      || self.break_pane_inner(attachment_id, target, name),
       |_| context,
     )
   }

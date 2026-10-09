@@ -1,7 +1,7 @@
 use crate::history_snapshot::PhysicalHistory;
 use crate::session::{
-  AttachSnapshot, AttachmentRegistration, SessionControlError, SessionEvent, SessionManager,
-  SessionManagerError, Terminal,
+  AttachSnapshot, AttachmentRegistration, PaneMoveError, SessionControlError, SessionEvent,
+  SessionManager, SessionManagerError, Terminal,
 };
 use ctmux_core::{JournalError, OutputChunk};
 use ctmux_ipc::{
@@ -2498,6 +2498,9 @@ where
     request @ (ClientMessage::ResizePane { .. } | ClientMessage::ResizeDivider { .. }) => {
       process_pane_resize(writer, session, attachment_id, protocol_version, request).await?;
     }
+    request @ (ClientMessage::SwapPane { .. } | ClientMessage::BreakPane { .. }) => {
+      process_pane_move(writer, session, attachment_id, protocol_version, request).await?;
+    }
     ClientMessage::Heartbeat { nonce } => {
       write_frame(writer, &ServerMessage::HeartbeatAck { nonce }).await?;
     }
@@ -2506,7 +2509,7 @@ where
       send_error(
         writer,
         ErrorCode::InvalidRequest,
-        "only input, resize, zoom, lease control, and detach are valid while attached",
+        "only input, resize, pane moves, zoom, lease control, and detach are valid while attached",
       )
       .await?;
     }
@@ -2661,6 +2664,95 @@ where
   Ok(())
 }
 
+enum PaneMoveAction {
+  Swap { previous: bool },
+  Break { name: Option<String> },
+}
+
+async fn process_pane_move<W>(
+  writer: &mut W,
+  session: Arc<Terminal>,
+  attachment_id: &str,
+  protocol_version: ctl_core::protocol::ProtocolVersion,
+  request: ClientMessage,
+) -> Result<(), ConnectionError>
+where
+  W: tokio::io::AsyncWrite + Unpin,
+{
+  let (request_id, target, action) = match request {
+    ClientMessage::SwapPane {
+      request_id,
+      target,
+      previous,
+    } => (request_id, target, PaneMoveAction::Swap { previous }),
+    ClientMessage::BreakPane {
+      request_id,
+      target,
+      name,
+    } => (request_id, target, PaneMoveAction::Break { name }),
+    _ => {
+      send_error(writer, ErrorCode::InvalidRequest, "expected pane move").await?;
+      return Ok(());
+    }
+  };
+  if !ctmux_proto::supports_pane_moves(protocol_version) {
+    send_error(
+      writer,
+      ErrorCode::InvalidRequest,
+      "pane moves require contract 1.1.19",
+    )
+    .await?;
+    return Ok(());
+  }
+  let outcome =
+    if request_id.is_empty() || request_id.len() > ctmux_proto::MAX_PANE_MOVE_REQUEST_ID_BYTES {
+      ctmux_proto::PaneMoveOutcome::Rejected {
+        code: ErrorCode::InvalidRequest,
+        message: "pane move request_id must contain 1 to 256 bytes".into(),
+      }
+    } else {
+      let attachment_id = attachment_id.to_owned();
+      let result = tokio::task::spawn_blocking(move || match action {
+        PaneMoveAction::Swap { previous } => session
+          .swap_pane(&attachment_id, &target, previous)
+          .map(|view| ctmux_proto::PaneMoveOutcome::Swapped {
+            view: Box::new(view),
+          })
+          .map_err(PaneMoveError::from),
+        PaneMoveAction::Break { name } => {
+          session
+            .break_pane(&attachment_id, &target, name)
+            .map(
+              |(view, source_view)| ctmux_proto::PaneMoveOutcome::Promoted {
+                view: Box::new(view),
+                source_view: Box::new(source_view),
+              },
+            )
+        }
+      })
+      .await?;
+      match result {
+        Ok(outcome) => outcome,
+        Err(error) => ctmux_proto::PaneMoveOutcome::Rejected {
+          code: match &error {
+            PaneMoveError::Control(error) => control_error_code(error),
+            PaneMoveError::Manager(error) => session_manager_error_code(error),
+          },
+          message: error.to_string(),
+        },
+      }
+    };
+  write_frame(
+    writer,
+    &ServerMessage::PaneMoveResult {
+      request_id,
+      outcome,
+    },
+  )
+  .await?;
+  Ok(())
+}
+
 fn renews_attachment_liveness(message: &ClientMessage) -> bool {
   matches!(
     message,
@@ -2669,6 +2761,8 @@ fn renews_attachment_liveness(message: &ClientMessage) -> bool {
       | ClientMessage::SetViewZoom { .. }
       | ClientMessage::ResizePane { .. }
       | ClientMessage::ResizeDivider { .. }
+      | ClientMessage::SwapPane { .. }
+      | ClientMessage::BreakPane { .. }
       | ClientMessage::AcquireLease { .. }
       | ClientMessage::ReleaseLease { .. }
       | ClientMessage::Heartbeat { .. }
@@ -2752,7 +2846,16 @@ async fn send_session_manager_error(
   stream: &mut Stream,
   error: &SessionManagerError,
 ) -> Result<(), CodecError> {
-  let code = match error {
+  send_error(
+    stream,
+    session_manager_error_code(error),
+    &error.to_string(),
+  )
+  .await
+}
+
+fn session_manager_error_code(error: &SessionManagerError) -> ErrorCode {
+  match error {
     SessionManagerError::InvalidView(_) => ErrorCode::InvalidRequest,
     SessionManagerError::InvalidName { .. } => ErrorCode::InvalidSessionName,
     SessionManagerError::AlreadyExists { .. } => ErrorCode::SessionAlreadyExists,
@@ -2764,8 +2867,7 @@ async fn send_session_manager_error(
     | SessionManagerError::ReaderThread(_)
     | SessionManagerError::WaiterThread(_)
     | SessionManagerError::AutomaticNameExhausted => ErrorCode::Internal,
-  };
-  send_error(stream, code, &error.to_string()).await
+  }
 }
 
 async fn send_journal_error(stream: &mut Stream, error: &JournalError) -> Result<(), CodecError> {

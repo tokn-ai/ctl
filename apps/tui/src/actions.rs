@@ -23,10 +23,13 @@ pub enum Action {
     amount: u16,
   },
   NextPane,
+  LastPane,
+  DisplayPanes,
   ToggleZoom,
   CreateSession,
   NextSession,
   PreviousSession,
+  LastSession,
   Sessions,
   Refresh,
   Archives,
@@ -103,10 +106,13 @@ pub fn resolve(key: KeyEvent) -> Option<Binding> {
     KeyCode::Left => Action::Focus(Direction::Left),
     KeyCode::Right => Action::Focus(Direction::Right),
     KeyCode::Char('o') => Action::NextPane,
+    KeyCode::Char(';') => Action::LastPane,
+    KeyCode::Char('q') => Action::DisplayPanes,
     KeyCode::Char('z') => Action::ToggleZoom,
     KeyCode::Char('c') => Action::CreateSession,
     KeyCode::Char('n') => Action::NextSession,
     KeyCode::Char('p') => Action::PreviousSession,
+    KeyCode::Char('l' | 'L') => Action::LastSession,
     KeyCode::Char('s' | 'w') => Action::Sessions,
     KeyCode::Char('r') => Action::Refresh,
     KeyCode::Char('A') => Action::Archives,
@@ -159,10 +165,14 @@ mod tests {
       ),
       (KeyCode::Char('!'), Action::BreakPane),
       (KeyCode::Char('o'), Action::NextPane),
+      (KeyCode::Char(';'), Action::LastPane),
+      (KeyCode::Char('q'), Action::DisplayPanes),
       (KeyCode::Char('z'), Action::ToggleZoom),
       (KeyCode::Char('c'), Action::CreateSession),
       (KeyCode::Char('n'), Action::NextSession),
       (KeyCode::Char('p'), Action::PreviousSession),
+      (KeyCode::Char('l'), Action::LastSession),
+      (KeyCode::Char('L'), Action::LastSession),
       (KeyCode::Char('s'), Action::Sessions),
       (KeyCode::Char('w'), Action::Sessions),
       (KeyCode::Char('r'), Action::Refresh),
@@ -248,6 +258,8 @@ mod tests {
       ('i', Action::ToggleLease(LeaseKind::Input)),
       ('R', Action::ToggleLease(LeaseKind::Layout)),
       ('r', Action::ToggleLease(LeaseKind::Layout)),
+      ('L', Action::LastSession),
+      ('l', Action::LastSession),
       ('?', Action::Help),
       ('"', Action::Split(SplitAxis::Vertical)),
       ('%', Action::Split(SplitAxis::Horizontal)),
@@ -289,7 +301,9 @@ mod tests {
       KeyModifiers::HYPER,
       KeyModifiers::META,
     ] {
-      for ch in ['d', 'x', 'c', '%', '"', '{', '}', '!', 'I', 'R', '?'] {
+      for ch in [
+        'd', 'x', 'c', '%', '"', '{', '}', '!', 'I', 'R', '?', ';', 'l', 'L', 'q',
+      ] {
         assert_eq!(
           resolve(key(KeyCode::Char(ch), modifiers)),
           None,
@@ -357,5 +371,35 @@ mod tests {
         }
       }
     }
+  }
+
+  #[test]
+  fn navigation_bindings_ignore_releases_and_require_a_new_prefix() {
+    for (code, modifiers, action) in [
+      (';', KeyModifiers::NONE, Action::LastPane),
+      (';', KeyModifiers::SHIFT, Action::LastPane),
+      ('l', KeyModifiers::NONE, Action::LastSession),
+      ('L', KeyModifiers::NONE, Action::LastSession),
+      ('l', KeyModifiers::SHIFT, Action::LastSession),
+      ('L', KeyModifiers::SHIFT, Action::LastSession),
+      ('q', KeyModifiers::NONE, Action::DisplayPanes),
+    ] {
+      for kind in [
+        KeyEventKind::Press,
+        KeyEventKind::Repeat,
+        KeyEventKind::Release,
+      ] {
+        let event = KeyEvent::new_with_kind(KeyCode::Char(code), modifiers, kind);
+        assert_eq!(
+          resolve(event),
+          (kind != KeyEventKind::Release).then_some(Binding {
+            action,
+            repeatable: false
+          }),
+          "{event:?}"
+        );
+      }
+    }
+    assert_eq!(resolve(key(KeyCode::Char('q'), KeyModifiers::SHIFT)), None);
   }
 }

@@ -8,6 +8,8 @@ mod commands;
 mod keyboard;
 #[path = "cases/moves.rs"]
 mod moves;
+#[path = "cases/navigation.rs"]
+mod navigation;
 #[path = "cases/reconnect.rs"]
 mod reconnect;
 #[path = "cases/resizing.rs"]

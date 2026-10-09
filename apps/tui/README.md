@@ -62,11 +62,14 @@ The default prefix is **Ctrl+B**. Change it with `--prefix Ctrl+a` or
 | Ctrl + Arrow | Move the adjacent divider by one cell; repeat for 500 ms |
 | Alt + Arrow | Move the adjacent divider by five cells; repeat for 500 ms |
 | `o` | Cycle to the next pane |
+| `;` | Return to the last focused pane; repeat to toggle |
+| `q` | Show pane numbers for one second; `1`–`9` selects a pane |
 | `{` / `}` | Swap the focused pane with the previous / next pane, wrapping |
 | `!` | Move the focused pane into a new flat session and follow it |
 | `z` | Zoom/unzoom the focused pane; requires the view resize lease |
 | `c` | Create and select a session |
 | `n` / `p` | Next / previous session |
+| `l` / `L` | Return to the last session, restoring its remembered pane |
 | `s` / `w` | Session picker; arrows select, Enter opens, Esc cancels |
 | `r` | Redraw the terminal |
 | `A` | Browse retained session archives |
@@ -81,8 +84,19 @@ The default prefix is **Ctrl+B**. Change it with `--prefix Ctrl+a` or
 | `:` | Open the command prompt |
 | Esc | Cancel prefix |
 
-Sessions take the place of tmux windows for `c`, `n`, `p`, and `w`; ctmux
+Sessions take the place of tmux windows for `c`, `n`, `p`, `l`, and `w`; ctmux
 has no extra window layer. Uppercase `I` and `R` are ctmux-specific lease controls.
+
+Pane numbers start at **1**, matching the status row. While numbers are shown,
+digits select a pane and any other key or paste dismisses the overlay locally.
+Use `select-pane -t NUMBER` in the command prompt for panes above 9. Numbers do
+not resize PTYs or change history; ordinary geometry refreshes preserve the
+displayed mapping, while changed membership, order, or zoom visibility cancels it.
+Returning to a pane preserves its frozen copy selection. Returning to a session
+reattaches normally and restores its remembered pane when it still exists.
+Missing previous targets report an error without closing the current session.
+The session picker keeps the highlighted session by ID during background refresh;
+if it disappears, choose another session with the arrows before opening it.
 
 Press the prefix twice to send it to the active pane. Other keys, including
 Ctrl+C, are forwarded to the active PTY. The TUI supports conventional xterm
@@ -116,12 +130,15 @@ The first command set uses familiar tmux names and aliases:
 | --- | --- |
 | `split-window` / `splitw [-h\|-v]` | Split right with `-h`; default or `-v` splits below |
 | `select-pane` / `selectp -L\|-R\|-U\|-D` | Focus an adjacent pane |
+| `select-pane -t NUMBER` | Focus a one-based pane number in the current session |
+| `last-pane` / `lastp`, or `select-pane -l` | Return to the last focused pane |
+| `display-panes` / `displayp` | Show temporary pane numbers for selection |
 | `resize-pane` / `resizep -L\|-R\|-U\|-D [N]` | Move the adjacent divider by `N` cells, default 1 |
 | `resize-pane -Z` | Toggle shared pane zoom |
 | `swap-pane` / `swapp -U\|-D [-d]` | Swap with the previous / next pane; `-d` keeps focus in the original slot |
 | `break-pane` / `breakp [-d] [-n NAME]` | Move to a new flat session; `-d` stays in the original session |
 | `new-session` / `new [-s NAME]` | Create and select a session |
-| `switch-client` / `switchc -n\|-p\|-t NAME` | Next/previous session, or select an exact name or ID |
+| `switch-client` / `switchc -n\|-p\|-l\|-t NAME` | Next/previous/last session, or select an exact name or ID |
 | `list-sessions` / `ls` | Open the session picker |
 | `kill-pane` / `killp` | Open the existing pane termination confirmation; `y` confirms |
 | `copy-mode [-u]` | Open history, optionally one page back |
@@ -350,6 +367,9 @@ Command cases check the fixed footer, local editing and paste, frozen copy
 selections, pane/session operations, ownership, errors, and reconnect controls.
 Keyboard cases check application byte sequences, per-pane modes, checkpoint
 restoration, reconnects, and local controls with enhanced host input.
+Navigation cases check labelled pane selection, last-pane toggling with frozen
+copy selections, last-session focus restoration, vanished targets, and session
+picker identity during refresh.
 Reconnect cases cut live streams repeatedly, stall metadata requests, expire
 resume tokens, and check controls, actual shell input, and released leases.
 These tests need permission to bind local Unix sockets and open PTYs.

@@ -126,7 +126,7 @@ impl App<'_> {
         (Move::Swap { focus }, PaneMoveOutcome::Swapped { view }) => {
           self.adopt_view(*view).await?;
           if self.panes.contains_key(&focus) {
-            self.focused = focus;
+            self.focus_pane(focus);
           }
         }
         (Move::Break { terminal, detached }, PaneMoveOutcome::Promoted { view, source_view }) => {
@@ -235,6 +235,7 @@ impl App<'_> {
     detached: bool,
     terminal: String,
   ) -> Result<()> {
+    self.remember_session_switch(&view.session_id);
     self.release_mouse().await?;
     // A confirmed move changes membership without ending a PTY. Retain the
     // controllers and copy snapshots that belong to the displayed root.
@@ -242,6 +243,7 @@ impl App<'_> {
     self.divider_drag = None;
     self.layout_owner = None;
     self.overlay = Overlay::None;
+    self.pane_labels = None;
     self.keys = KeyState::Root;
     self.selected_id.clone_from(&view.session_id);
     if detached {

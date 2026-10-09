@@ -32,7 +32,7 @@ use tokio::{
 enum Overlay {
   None,
   Help,
-  Sessions(usize),
+  Sessions(Option<String>),
   Kill(String),
   Archives(usize),
   ArchiveTerminals(Box<ctmux_client::archive::SessionArchive>, usize),
@@ -78,6 +78,8 @@ pub struct App<'a> {
   view: Option<ViewInfo>,
   panes: BTreeMap<String, Pane>,
   focused: String,
+  navigation: navigation::Navigation,
+  pane_labels: Option<navigation::PaneLabels>,
   size: (u16, u16),
   overlay: Overlay,
   copies: BTreeMap<String, CopyMode>,
@@ -116,6 +118,8 @@ impl App<'_> {
       view: None,
       panes: BTreeMap::new(),
       focused: String::new(),
+      navigation: navigation::Navigation::default(),
+      pane_labels: None,
       size: crossterm::terminal::size().unwrap_or((80, 24)),
       overlay: Overlay::None,
       copies: BTreeMap::new(),
@@ -266,6 +270,7 @@ impl App<'_> {
     sessions.retain(|session| session.status == SessionStatus::Running);
     sessions.sort_by_key(|session| (session.created_at_ms, session.session_id.clone()));
     self.sessions = sessions;
+    self.retain_navigation();
     Ok(())
   }
 
@@ -329,6 +334,38 @@ impl App<'_> {
   }
 
   async fn select(&mut self, session: &str) -> Result<()> {
+    // Resolve the target before dropping live attachments or frozen copies.
+    // A remembered session can disappear while another session is active.
+    let view = match self.find_view(session).await {
+      Ok(view) => view,
+      Err(error) if session_not_found(&error) && self.view.is_none() => {
+        session.clone_into(&mut self.selected_id);
+        self.ended = Some("Session no longer exists — press any key to exit".into());
+        return Ok(());
+      }
+      Err(error) => return Err(error),
+    };
+    if self
+      .view
+      .as_ref()
+      .is_some_and(|current| current.session_id == view.session_id)
+    {
+      self.adopt_view(view).await?;
+      if session != self.selected_id
+        && self
+          .view
+          .as_ref()
+          .is_some_and(|view| view.panes.iter().any(|pane| pane.terminal_id == session))
+      {
+        if session != self.focused {
+          self.unzoom().await?;
+        }
+        self.focus_pane(session.into());
+      }
+      self.overlay = Overlay::None;
+      return Ok(());
+    }
+    self.remember_session_switch(&view.session_id);
     self.cancel_pane_move();
     self.migrated_panes.clear();
     self.maintenance.cancel();
@@ -336,23 +373,22 @@ impl App<'_> {
     self.copies.clear();
     self.archive_copy = None;
     self.mouse_capture = None;
-    session.clone_into(&mut self.selected_id);
-    let view = match self.find_view(session).await {
-      Ok(view) => view,
-      Err(error) if session_not_found(&error) => {
-        self.ended = Some("Session no longer exists — press any key to exit".into());
-        return Ok(());
-      }
-      Err(error) => return Err(error),
-    };
+    self.pane_labels = None;
     self.ended = None;
     self.archived_panes.clear();
     self.selected_id.clone_from(&view.session_id);
     self.detach().await;
+    let remembered = self.remembered_focus(&view.session_id);
     self.focused = view
       .terminals
       .iter()
-      .find(|pane| pane.terminal_id == session)
+      .find(|pane| session != view.session_id && pane.terminal_id == session)
+      .or_else(|| {
+        view
+          .terminals
+          .iter()
+          .find(|pane| Some(&pane.terminal_id) == remembered)
+      })
       .or_else(|| view.terminals.first())
       .map_or_else(String::new, |pane| pane.terminal_id.clone());
     self.view = Some(view);
@@ -427,6 +463,7 @@ impl App<'_> {
     if let Some(zoomed) = &view.zoomed_terminal_id {
       self.focused.clone_from(zoomed);
     }
+    self.remember_focus();
     if self.runtime {
       self.schedule_reconnects(&ids);
       return Ok(());
@@ -475,6 +512,7 @@ impl App<'_> {
   }
 
   pub async fn detach(&mut self) {
+    self.pane_labels = None;
     self.cancel_pane_move();
     self.migrated_panes.clear();
     self.maintenance.cancel();
@@ -630,6 +668,7 @@ impl App<'_> {
 
   async fn adopt_snapshot(&mut self, snapshot: Snapshot) -> Result<()> {
     self.sessions = snapshot.sessions;
+    self.retain_navigation();
     if let Some(view) = snapshot.view {
       // A sibling can publish a newer topology/zoom while GetView is pending.
       self.adopt_view(view).await
@@ -850,8 +889,22 @@ impl App<'_> {
   }
 
   async fn event(&mut self, event: Event) -> Result<bool> {
+    self.expire_pane_labels();
     match event {
       Event::Mouse(mouse) => {
+        if self.pane_labels.is_some() {
+          if matches!(
+            mouse.kind,
+            MouseEventKind::Down(_)
+              | MouseEventKind::ScrollUp
+              | MouseEventKind::ScrollDown
+              | MouseEventKind::ScrollLeft
+              | MouseEventKind::ScrollRight
+          ) {
+            self.pane_labels = None;
+          }
+          return Ok(false);
+        }
         if matches!(
           mouse.kind,
           MouseEventKind::Down(_)
@@ -871,6 +924,9 @@ impl App<'_> {
         self.resize().await?;
       }
       Event::Paste(text) => {
+        if self.pane_labels.take().is_some() {
+          return Ok(false);
+        }
         self.divider_drag = None;
         self.keys.cancel_repeat();
         if self.prompt.is_active() {
@@ -1081,10 +1137,13 @@ impl App<'_> {
     if self.drag_mouse(mouse).await? {
       return Ok(());
     }
-    if matches!(mouse.kind, MouseEventKind::Drag(_) | MouseEventKind::Up(_))
-      && let Some(capture) = self.mouse_capture.take()
-    {
-      return self.captured_mouse(mouse, capture).await;
+    if matches!(mouse.kind, MouseEventKind::Drag(_) | MouseEventKind::Up(_)) {
+      if let Some(capture) = self.mouse_capture.take() {
+        return self.captured_mouse(mouse, capture).await;
+      }
+      // A modal control may consume the press. Its drag/release must never
+      // reach an application that did not receive the corresponding press.
+      return Ok(());
     }
     if self.keys.is_prefix() {
       return Ok(());
@@ -1107,7 +1166,7 @@ impl App<'_> {
         mouse.kind,
         MouseEventKind::Down(_) | MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
       ) {
-        self.focused.clone_from(id);
+        self.focus_pane(id.clone());
       }
       let application = !self.copies.contains_key(id)
         && !mouse.modifiers.contains(KeyModifiers::SHIFT)
@@ -1313,6 +1372,9 @@ impl App<'_> {
     if self.prompt.is_active() {
       return self.prompt_key(key).await;
     }
+    if self.pane_label_key(key).await? {
+      return Ok(false);
+    }
     if self.divider_drag.take().is_some() && key.code == KeyCode::Esc {
       return Ok(false);
     }
@@ -1389,6 +1451,7 @@ impl App<'_> {
         return Ok(true);
       }
       self.focused = self.panes.keys().next().cloned().unwrap_or_default();
+      self.remember_focus();
       self.refresh().await?;
       return Ok(false);
     }
@@ -1426,6 +1489,7 @@ impl App<'_> {
   async fn execute_command(&mut self, command: PromptCommand) -> Result<bool> {
     match command {
       PromptCommand::Action(action) => return self.execute(action).await,
+      PromptCommand::SelectPane(number) => self.select_pane_number(number).await?,
       PromptCommand::NewSession(name) if !self.read_only => self.create_named(name).await?,
       PromptCommand::BreakPane { name, detached } if !self.read_only => {
         self.break_pane(name, detached).await?;
@@ -1509,6 +1573,9 @@ impl App<'_> {
         self.unzoom().await?;
         self.next_pane();
       }
+      Action::LastPane => self.last_pane().await?,
+      Action::LastSession => self.last_session().await?,
+      Action::DisplayPanes => self.display_panes().await?,
       Action::ToggleZoom => {
         let target = self.view.as_ref().and_then(|view| {
           view
@@ -1534,7 +1601,7 @@ impl App<'_> {
           .await?;
       }
       Action::Help => self.overlay = Overlay::Help,
-      Action::Sessions => self.overlay = Overlay::Sessions(self.session_index()),
+      Action::Sessions => self.open_sessions(),
       Action::NextSession => self.next_session(1).await?,
       Action::PreviousSession => self.next_session(-1).await?,
       Action::CreateSession if !self.read_only => self.create().await?,
@@ -1703,14 +1770,15 @@ impl App<'_> {
       })
       .await?;
     if let ServerMessage::ViewSnapshot { view } = response {
-      if let Some(pane) = view
+      let target = view
         .panes
         .iter()
         .find(|pane| !previous.contains(&pane.terminal_id))
-      {
-        self.focused.clone_from(&pane.terminal_id);
-      }
+        .map(|pane| pane.terminal_id.clone());
       self.view = Some(view);
+      if let Some(target) = target {
+        self.focus_pane(target);
+      }
       self.reconcile().await?;
     }
     Ok(())
@@ -1754,9 +1822,11 @@ impl App<'_> {
       .iter()
       .position(|pane| pane.terminal_id == self.focused)
       .unwrap_or(0);
-    self
-      .focused
-      .clone_from(&view.panes[(index + 1) % view.panes.len()].terminal_id);
+    self.focus_pane(
+      view.panes[(index + 1) % view.panes.len()]
+        .terminal_id
+        .clone(),
+    );
   }
 
   fn focus(&mut self, direction: Direction) {
@@ -1764,28 +1834,52 @@ impl App<'_> {
       return;
     };
     if let Some(id) = adjacent(&view.panes, &self.focused, direction) {
-      self.focused = id;
+      self.focus_pane(id);
     }
   }
 
   async fn overlay_key(&mut self, key: KeyEvent) -> Result<()> {
-    match &mut self.overlay {
-      Overlay::Sessions(index) => match key.code {
-        KeyCode::Up => *index = index.saturating_sub(1),
-        KeyCode::Down => *index = (*index + 1).min(self.sessions.len().saturating_sub(1)),
+    if let Overlay::Sessions(selected) = &self.overlay {
+      let selected = selected.clone();
+      match key.code {
+        KeyCode::Up | KeyCode::Down => {
+          let index = self.picker_index(selected.as_deref());
+          let index = if key.code == KeyCode::Up {
+            index.map_or_else(
+              || self.sessions.len().saturating_sub(1),
+              |index| index.saturating_sub(1),
+            )
+          } else {
+            index.map_or(0, |index| {
+              (index + 1).min(self.sessions.len().saturating_sub(1))
+            })
+          };
+          self.overlay = Overlay::Sessions(
+            self
+              .sessions
+              .get(index)
+              .map(|session| session.session_id.clone()),
+          );
+        }
         KeyCode::Enter => {
-          let selected = self
-            .sessions
-            .get(*index)
-            .map(|session| session.session_id.clone());
-          self.overlay = Overlay::None;
-          if let Some(selected) = selected {
+          if let Some(selected) = selected.filter(|id| {
+            self
+              .sessions
+              .iter()
+              .any(|session| &session.session_id == id)
+          }) {
             self.select(&selected).await?;
+          } else {
+            self.notice("Selected session no longer exists; choose another session".into());
           }
         }
         KeyCode::Esc => self.overlay = Overlay::None,
         _ => {}
-      },
+      }
+      return Ok(());
+    }
+    match &mut self.overlay {
+      Overlay::Sessions(_) => unreachable!("session picker handled above"),
       Overlay::Kill(id) => {
         let id = id.clone();
         self.overlay = Overlay::None;
@@ -1827,6 +1921,7 @@ impl App<'_> {
   }
 
   fn frame(&mut self) -> Frame {
+    self.expire_pane_labels();
     let mut frame = Frame::new(self.size.0, self.size.1);
     if let Some(mode) = &mut self.archive_copy {
       mode.fit(
@@ -1852,6 +1947,17 @@ impl App<'_> {
         frame.canvas(view, &self.panes, &self.copies, &self.focused);
       }
       frame.overlay(&self.overlay_lines());
+      if let Some(labels) = &self.pane_labels {
+        let offset = viewport_offset(
+          view,
+          self.panes.get(&self.focused),
+          self.copies.get(&self.focused),
+          &self.focused,
+          self.size.0,
+          self.size.1.saturating_sub(1),
+        );
+        frame.pane_numbers(view, &labels.labels, &self.focused, offset);
+      }
     } else {
       let instructions = if let Some(ended) = &self.ended {
         ended.clone()
@@ -1882,6 +1988,12 @@ impl App<'_> {
   }
 
   fn status(&self) -> String {
+    if self.pane_labels.is_some() {
+      return format!(
+        " {} | Pane numbers: 1–9 selects; any other key cancels",
+        self.connection_history_status()
+      );
+    }
     if let Some(mode) = &self.archive_copy {
       return format!(" archive | {}", mode.status());
     }
@@ -2047,10 +2159,14 @@ impl App<'_> {
       }
       Overlay::None => Vec::new(),
       Overlay::Kill(_) => vec!["Terminate active pane? y confirms; any other key cancels".into()],
-      Overlay::Sessions(index) => {
+      Overlay::Sessions(selected) => {
         let mut lines = vec!["Sessions — ↑/↓ choose, Enter opens, Esc cancels".into()];
+        let index = self.picker_index(selected.as_deref());
+        if index.is_none() {
+          lines.push("Selected session unavailable — arrows choose another".into());
+        }
         let capacity = usize::from(self.size.1.saturating_sub(2)).max(1);
-        let start = index.saturating_sub(capacity - 1);
+        let start = index.unwrap_or(0).saturating_sub(capacity - 1);
         lines.extend(
           self
             .sessions
@@ -2059,7 +2175,11 @@ impl App<'_> {
             .skip(start)
             .take(capacity)
             .map(|(i, session)| {
-              format!("{} {}", if i == *index { ">" } else { " " }, session.name)
+              format!(
+                "{} {}",
+                if Some(i) == index { ">" } else { " " },
+                session.name
+              )
             }),
         );
         lines
@@ -2068,13 +2188,15 @@ impl App<'_> {
         format!("Commands after {} — any key closes help", self.prefix.label),
         "%: split right    \": split below".into(),
         "Arrows: focus pane    o: next pane    z: zoom    x: terminate (confirm)".into(),
+        ";: last pane    q: pane numbers (1–9 selects)".into(),
         "{/}: swap with previous/next pane    !: move pane to a new session".into(),
         "Ctrl/Alt arrows resize panes by 1/5 cells after prefix.".into(),
         "Mouse: drag dividers to resize; Esc cancels remaining movement.".into(),
         "Focus/resize arrows repeat for 500 ms; other commands need a fresh prefix.".into(),
-        "c: new session    n/p: next/previous session    s/w: session list".into(),
+        "c: new session    n/p: next/previous    l/L: last    s/w: session list".into(),
         ": command prompt (pane, session, and ownership commands)".into(),
         "Prompt panes: split-window, select-pane, resize-pane, kill-pane".into(),
+        "Prompt navigation: last-pane, select-pane -t NUMBER, display-panes".into(),
         "Prompt moves: swap-pane -U/-D [-d], break-pane [-d] [-n NAME]".into(),
         "Prompt sessions: new-session, switch-client, list-sessions".into(),
         "Prompt ownership: take-input/release-input, take-resize/release-resize".into(),
@@ -2138,6 +2260,9 @@ mod tests;
 
 #[path = "moves.rs"]
 mod moves;
+
+#[path = "navigation.rs"]
+mod navigation;
 
 #[path = "migration.rs"]
 mod migration;

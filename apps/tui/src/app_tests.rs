@@ -1739,7 +1739,79 @@ async fn copy_stays_in_its_pane_while_other_panes_update_and_accept_input() -> R
   assert!(!app.copies.contains_key(&primary));
   assert!(app.copies.contains_key(&child));
   app.select(&session).await?;
-  assert!(app.copies.is_empty());
+  // Selecting the current root is a no-op for its live attachments and copies.
+  assert!(app.copies.contains_key(&child));
+  assert!(!app.copies.contains_key(&primary));
+  app.detach().await;
+  Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pane_labels_swallow_cancelled_mouse_gestures_and_allow_later_application_clicks()
+-> Result<()> {
+  let daemon = Daemon::start().await?;
+  let mut app = daemon.app(false);
+  app.size = (80, 10);
+  let session = create_shell(&app).await?;
+  app.start(Some(session)).await?;
+  let child = split_program(&mut app, "stty -echo -icanon; printf '\\033[?1002;1006hMOUSE_READY\\n'; IFS= read -r discarded; if test -z \"$discarded\"; then printf 'DISMISSAL_CLEAN\\n'; else printf 'DISMISSAL_INPUT\\n'; fi; dd bs=1 count=9 2>/dev/null | od -An -tx1; dd bs=1 count=10 2>/dev/null | od -An -tx1; dd bs=1 count=9 2>/dev/null | od -An -tx1; printf 'REPORTS_DONE\\n'; sleep 30").await?;
+  wait_for_text(&mut app, &child, "MOUSE_READY").await?;
+  let rect = app
+    .view
+    .as_ref()
+    .unwrap()
+    .panes
+    .iter()
+    .find(|rect| rect.terminal_id == child)
+    .unwrap()
+    .clone();
+  app.display_panes().await?;
+  for kind in [
+    MouseEventKind::Down(MouseButton::Left),
+    MouseEventKind::Drag(MouseButton::Left),
+    MouseEventKind::Up(MouseButton::Left),
+  ] {
+    app.event(mouse(kind, rect.left + 2, rect.top + 1)).await?;
+  }
+  assert!(app.pane_labels.is_none());
+  assert!(app.mouse_capture.is_none());
+  // This newline follows any mouse reports in the same ordered attachment.
+  // The child confirms the whole cancelled gesture delivered no bytes.
+  app.panes[&child].control.input(b"\n".to_vec()).await?;
+  wait_for_text(&mut app, &child, "DISMISSAL_").await?;
+  assert!(
+    app.panes[&child]
+      .model
+      .copy_lines()
+      .join("\n")
+      .contains("DISMISSAL_CLEAN")
+  );
+  for (kind, column) in [
+    (MouseEventKind::Down(MouseButton::Left), 5),
+    (MouseEventKind::Drag(MouseButton::Left), 6),
+    (MouseEventKind::Up(MouseButton::Left), 6),
+  ] {
+    app
+      .event(mouse(kind, rect.left + column, rect.top + 2))
+      .await?;
+  }
+  wait_for_text(&mut app, &child, "REPORTS_DONE").await?;
+  let received = app.panes[&child]
+    .model
+    .copy_lines()
+    .join("\n")
+    .split_whitespace()
+    .collect::<Vec<_>>()
+    .join(" ");
+  for report in [
+    "1b 5b 3c 30 3b 36 3b 33 4d",
+    "1b 5b 3c 33 32 3b 37 3b 33 4d",
+    "1b 5b 3c 30 3b 37 3b 33 6d",
+  ] {
+    assert!(received.contains(report), "{received}");
+  }
+  assert_eq!(app.focused, child);
+  assert!(app.mouse_capture.is_none());
   app.detach().await;
   Ok(())
 }

@@ -1438,7 +1438,11 @@ impl App<'_> {
 
   async fn send_key(&self, key: KeyEvent) -> Result<()> {
     if let Some(pane) = self.panes.get(&self.focused) {
-      let data = input::encode(key, pane.model.vt.cursor_key_app_mode());
+      let data = input::encode(
+        key,
+        pane.model.vt.cursor_key_app_mode(),
+        pane.model.modify_other_keys(),
+      );
       if !data.is_empty() {
         pane.control.input(data).await?;
       }

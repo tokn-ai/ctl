@@ -113,6 +113,17 @@ to false. A connection selecting `1.1.16` retains weighted keyboard resizing and
 response-only leases; the client rejects divider dragging before sending a frame.
 This protects running build-16 daemons that cannot decode the new operation.
 
+Application-requested modified keys advance ctmux from `1.1.17` (build 17) to
+`1.1.18` (build 18), retaining every earlier published contract. The selected
+contract now guarantees restoration of each pane's xterm `modifyOtherKeys` level
+in checkpoint payloads. No JSON message or field is added; `ctmux_vt_state`
+remains format version 1 and carries a standard ANSI keyboard-mode preamble.
+Earlier selected contracts omit only that generated preamble, retaining their
+existing payload and raw-output semantics. New TUI clients enable mode-aware
+encoding and mode-query replies only under `1.1.18`; older daemons remain usable
+with legacy input. Host Kitty keyboard negotiation is local to the TUI's host
+terminal and is separate from the named ctmux IPC contract.
+
 Storage schema versions are separate. Changing a protocol contract does not
 rename or migrate an on-disk schema.
 
@@ -123,9 +134,9 @@ The first handshake or control request contains an offer:
 ```json
 {
   "protocol": {
-    "build": 17,
-    "version": "1.1.17",
-    "supported_versions": ["1.0.13", "1.1.14", "1.1.15", "1.1.16", "1.1.17"]
+    "build": 18,
+    "version": "1.1.18",
+    "supported_versions": ["1.0.13", "1.1.14", "1.1.15", "1.1.16", "1.1.17", "1.1.18"]
   }
 }
 ```
@@ -139,7 +150,7 @@ older contract is selected; new servers preserve old-client messages and
 semantics. Optional features must be gated by that selected contract.
 
 Daemon status and session/task handshakes return actual advertisements, separately
-from the selected contract. A server can advertise `1.1.17` while one connection
+from the selected contract. A server can advertise `1.1.18` while one connection
 selects `1.0.13`; diagnostics must retain both facts.
 
 Every component's `--component-info` output declares the release mapping:

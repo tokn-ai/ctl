@@ -6,7 +6,7 @@ use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 /// Internal protocol build; incrementing this does not publish a new contract.
-pub const PROTOCOL_BUILD: u16 = 17;
+pub const PROTOCOL_BUILD: u16 = 18;
 /// First published wire contract. Keep this identity immutable.
 pub const CONTRACT_V1_0_13: ProtocolVersion = ProtocolVersion::new(1, 0, 13);
 /// Published compatible addition: paged history and checkpoint recovery.
@@ -17,36 +17,47 @@ pub const CONTRACT_V1_1_15: ProtocolVersion = ProtocolVersion::new(1, 1, 15);
 pub const CONTRACT_V1_1_16: ProtocolVersion = ProtocolVersion::new(1, 1, 16);
 /// Exact divider targeting and marked unsolicited layout ownership updates.
 pub const CONTRACT_V1_1_17: ProtocolVersion = ProtocolVersion::new(1, 1, 17);
-pub const PROTOCOL_VERSION: ProtocolVersion = CONTRACT_V1_1_17;
+/// Application-requested modified keys with checkpoint mode restoration.
+pub const CONTRACT_V1_1_18: ProtocolVersion = ProtocolVersion::new(1, 1, 18);
+pub const PROTOCOL_VERSION: ProtocolVersion = CONTRACT_V1_1_18;
 pub const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[
   CONTRACT_V1_0_13,
   CONTRACT_V1_1_14,
   CONTRACT_V1_1_15,
   CONTRACT_V1_1_16,
   CONTRACT_V1_1_17,
+  CONTRACT_V1_1_18,
 ];
 
 #[must_use]
 pub const fn supports_view_zoom(version: ProtocolVersion) -> bool {
   matches!(
     version,
-    CONTRACT_V1_1_15 | CONTRACT_V1_1_16 | CONTRACT_V1_1_17
+    CONTRACT_V1_1_15 | CONTRACT_V1_1_16 | CONTRACT_V1_1_17 | CONTRACT_V1_1_18
   )
 }
 
 #[must_use]
 pub const fn supports_pane_resize(version: ProtocolVersion) -> bool {
-  matches!(version, CONTRACT_V1_1_16 | CONTRACT_V1_1_17)
+  matches!(
+    version,
+    CONTRACT_V1_1_16 | CONTRACT_V1_1_17 | CONTRACT_V1_1_18
+  )
 }
 
 #[must_use]
 pub const fn supports_divider_resize(version: ProtocolVersion) -> bool {
-  matches!(version, CONTRACT_V1_1_17)
+  matches!(version, CONTRACT_V1_1_17 | CONTRACT_V1_1_18)
 }
 
 #[must_use]
 pub const fn supports_layout_lease_notifications(version: ProtocolVersion) -> bool {
-  matches!(version, CONTRACT_V1_1_17)
+  matches!(version, CONTRACT_V1_1_17 | CONTRACT_V1_1_18)
+}
+
+#[must_use]
+pub const fn supports_extended_keys(version: ProtocolVersion) -> bool {
+  matches!(version, CONTRACT_V1_1_18)
 }
 
 #[must_use]
@@ -1465,9 +1476,9 @@ mod tests {
   }
 
   #[test]
-  fn divider_contract_retains_historical_keyboard_resizing() {
-    assert_eq!(PROTOCOL_VERSION, ProtocolVersion::new(1, 1, 17));
-    assert_eq!(PROTOCOL_BUILD, 17);
+  fn extended_key_contract_retains_historical_features() {
+    assert_eq!(PROTOCOL_VERSION, ProtocolVersion::new(1, 1, 18));
+    assert_eq!(PROTOCOL_BUILD, 18);
     assert_eq!(
       SUPPORTED_PROTOCOL_VERSIONS,
       &[
@@ -1476,20 +1487,23 @@ mod tests {
         CONTRACT_V1_1_15,
         CONTRACT_V1_1_16,
         CONTRACT_V1_1_17,
+        CONTRACT_V1_1_18,
       ]
     );
-    for (version, zoom, pane, divider) in [
-      (CONTRACT_V1_0_13, false, false, false),
-      (CONTRACT_V1_1_14, false, false, false),
-      (CONTRACT_V1_1_15, true, false, false),
-      (CONTRACT_V1_1_16, true, true, false),
-      (CONTRACT_V1_1_17, true, true, true),
-      (ProtocolVersion::new(1, 1, 18), false, false, false),
+    for (version, zoom, pane, divider, keys) in [
+      (CONTRACT_V1_0_13, false, false, false, false),
+      (CONTRACT_V1_1_14, false, false, false, false),
+      (CONTRACT_V1_1_15, true, false, false, false),
+      (CONTRACT_V1_1_16, true, true, false, false),
+      (CONTRACT_V1_1_17, true, true, true, false),
+      (CONTRACT_V1_1_18, true, true, true, true),
+      (ProtocolVersion::new(1, 1, 19), false, false, false, false),
     ] {
       assert_eq!(supports_view_zoom(version), zoom);
       assert_eq!(supports_pane_resize(version), pane);
       assert_eq!(supports_divider_resize(version), divider);
       assert_eq!(supports_layout_lease_notifications(version), divider);
+      assert_eq!(supports_extended_keys(version), keys);
     }
   }
 

@@ -295,8 +295,11 @@ describe("session compositor", () => {
       const mounted = render(<SessionViewSurface {...actions} prefix_settings={prefix_settings} />);
       await waitFor(() => expect(screen.getAllByLabelText("Terminal input")).toHaveLength(2));
       let input = screen.getAllByLabelText("Terminal input")[0];
+      // Settle the initial view and prefix effects before sending the binding.
+      await act(async () => { input.focus(); });
       fireEvent.keyDown(input, { key: "b", code: "KeyB", ctrlKey: true });
       fireEvent.keyDown(input, { key: "ArrowRight", ctrlKey: true });
+      await waitFor(() => expect(mocks.resize).toHaveBeenCalledTimes(1));
       const stale_id = mocks.resize.mock.lastCall![3];
       mounted.rerender(<SessionViewSurface {...actions} session={other_session} prefix_settings={prefix_settings} />);
       await waitFor(() => expect(mocks.request).toHaveBeenLastCalledWith(other_session.target, { kind: "get", session_id: "other" }));

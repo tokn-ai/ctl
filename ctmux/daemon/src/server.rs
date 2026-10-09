@@ -1675,6 +1675,7 @@ fn pin_snapshot_history(
   snapshot: &mut AttachSnapshot,
   protocol_version: ctl_core::protocol::ProtocolVersion,
 ) -> Result<Option<PinnedHistory>, ConnectionError> {
+  project_checkpoint_for_contract(snapshot, protocol_version);
   if protocol_version == ctmux_proto::CONTRACT_V1_0_13 {
     // Preserve the complete inline history for the first published contract.
     return Ok(None);
@@ -1687,6 +1688,21 @@ fn pin_snapshot_history(
   let (pinned, recent) = PinnedHistory::new(history, rows, snapshot.scrollback_limit)?;
   snapshot.history = Some(recent);
   Ok(Some(pinned))
+}
+
+fn project_checkpoint_for_contract(
+  snapshot: &mut AttachSnapshot,
+  protocol_version: ctl_core::protocol::ProtocolVersion,
+) {
+  if ctmux_proto::supports_extended_keys(protocol_version) {
+    return;
+  }
+  // Remove only the captured keyboard preamble. Identical bytes in application
+  // strings and the emulator's incomplete parser state must remain untouched.
+  let prefix_bytes = std::mem::take(&mut snapshot.checkpoint_keyboard_prefix_bytes);
+  if let Some(checkpoint) = snapshot.checkpoint.as_mut() {
+    checkpoint.payload.drain(..prefix_bytes);
+  }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2997,6 +3013,66 @@ mod tests {
   }
 
   #[test]
+  fn historical_contracts_omit_only_the_captured_keyboard_preamble() {
+    let prefix = b"\x1b[>4;2m";
+    // The same bytes inside an OSC string or a pending CSI are application
+    // state, not the daemon's preamble, and must survive the projection.
+    let legacy = b"\x1b[?2004h\x1b]0;\x1b[>4;2m\x07\x1b[>4;";
+    let payload = [prefix.as_slice(), legacy.as_slice()].concat();
+    let base = AttachSnapshot {
+      session: ctmux_proto::SessionInfo {
+        view_id: "view".into(),
+        terminal_id: "terminal".into(),
+        session_id: "session".into(),
+        name: "work".into(),
+        status: SessionStatus::Running,
+        created_at_ms: 0,
+        next_sequence: 42,
+        terminal_size: ctmux_proto::TerminalSize::default(),
+      },
+      checkpoint: Some(ctmux_proto::TerminalCheckpoint {
+        format: ctmux_proto::TERMINAL_CHECKPOINT_FORMAT.into(),
+        format_version: ctmux_proto::TERMINAL_CHECKPOINT_FORMAT_VERSION,
+        sequence: 42,
+        terminal_size: ctmux_proto::TerminalSize::default(),
+        payload: payload.clone(),
+        input_prefix: vec![0xe2],
+      }),
+      checkpoint_keyboard_prefix_bytes: prefix.len(),
+      checkpoint_geometry_revision: Some(3),
+      journal: JournalSnapshot {
+        earliest_sequence: 0,
+        next_sequence: 42,
+        replay_from: 42,
+        history_gap: false,
+        chunks: Vec::new(),
+      },
+      history_gap: false,
+      history: None,
+      history_rows: None,
+      scrollback_limit: 2_000,
+      shell_state: ShellState::default(),
+    };
+    for &version in ctmux_proto::SUPPORTED_PROTOCOL_VERSIONS {
+      let mut snapshot = base.clone();
+      project_checkpoint_for_contract(&mut snapshot, version);
+      project_checkpoint_for_contract(&mut snapshot, version);
+      let checkpoint = snapshot.checkpoint.unwrap();
+      assert_eq!(
+        checkpoint.payload,
+        if ctmux_proto::supports_extended_keys(version) {
+          payload.as_slice()
+        } else {
+          legacy.as_slice()
+        },
+        "contract {version}"
+      );
+      assert_eq!(checkpoint.input_prefix, [0xe2]);
+      assert_eq!(checkpoint.sequence, 42);
+    }
+  }
+
+  #[test]
   fn cached_history_body_keeps_transfer_metadata_and_progress_independent() {
     for rows in [
       Vec::new(),
@@ -3230,6 +3306,7 @@ mod tests {
         terminal_size: ctmux_proto::TerminalSize::default(),
       },
       checkpoint: None,
+      checkpoint_keyboard_prefix_bytes: 0,
       checkpoint_geometry_revision: None,
       journal: JournalSnapshot {
         earliest_sequence: 0,

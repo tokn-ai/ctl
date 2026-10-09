@@ -1,4 +1,4 @@
-# ctmux published protocol 1.1.17
+# ctmux published protocol 1.1.18
 
 The protocol is independent of local IPC and future remote transport. Internal build
 11 introduced length-prefixed JSON frames for debuggability. Each frame begins with a
@@ -452,6 +452,24 @@ input_prefix:   raw bytes that must follow payload before later output
 `input_prefix` exists so an incomplete UTF-8 sequence at a checkpoint boundary
 is completed by later raw output without changing the checkpoint's parser
 state. It is part of the checkpoint format, not an additional output record.
+
+Contract `1.1.18` (build 18) guarantees each terminal's application-requested
+`modifyOtherKeys` level in this restore stream. Its bounded observer accepts
+levels 0, 1, and 2, tracks fragmented controls, and resets on RIS or keyboard
+mode reset. The daemon prepends `CSI > 4 ; level m` before mouse/paste restoration
+and the emulator dump, preserving any unfinished parser prefix at the end.
+Geometry checkpoints retain the level captured at that exact raw boundary.
+Earlier negotiated contracts omit only the captured generated keyboard preamble;
+the remaining checkpoint and raw-output bytes retain their historical meaning.
+The checkpoint format stays at version 1; no JSON field or operation is added.
+
+The TUI enables per-pane mode-aware key encoding and answers `CSI ? 4 m` with
+`CSI > 4 ; level m` only when `1.1.18` is selected. Mode 1 uses tmux's selective
+legacy policy; mode 2 encodes modified ordinary keys as
+`CSI 27 ; modifier ; codepoint ~`. Local prefix/prompt/copy commands are consumed
+before application input. Query replies still require the pane's input lease,
+and replayed checkpoint queries produce no replies. Host Kitty keyboard
+negotiation is client-local and does not enable an application's mode by itself.
 
 The version-1 terminal-history format is:
 

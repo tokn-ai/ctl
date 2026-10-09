@@ -1,4 +1,4 @@
-use ctmux_core::mouse::TerminalInputModes;
+use ctmux_core::mouse::{ModifyOtherKeys, TerminalInputModes};
 use ctmux_proto::{TerminalCheckpoint, TerminalHistoryRow, TerminalSize};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -14,6 +14,8 @@ pub struct Model {
   pub bracketed_paste: bool,
   pub history_gap: bool,
   pub input_modes: TerminalInputModes,
+  /// Negotiated daemon support, independent of the host terminal's keyboard.
+  pub extended_keys: bool,
   buffer_parser: avt::parser::Parser,
   buffer_state: avt::terminal::Terminal,
   history: Vec<String>,
@@ -36,6 +38,7 @@ impl Model {
       bracketed_paste: false,
       history_gap: false,
       input_modes: TerminalInputModes::default(),
+      extended_keys: false,
       buffer_parser: avt::parser::Parser::default(),
       buffer_state: avt::terminal::Terminal::new((2, 1), Some(0)),
       history: Vec::new(),
@@ -46,10 +49,20 @@ impl Model {
   }
 
   pub fn restore(&mut self, checkpoint: &TerminalCheckpoint) {
+    let extended_keys = self.extended_keys;
     *self = Self::new(&checkpoint.terminal_size);
+    self.extended_keys = extended_keys;
     // Restores must not answer historical terminal queries.
     self.feed(&checkpoint.payload);
     self.pending.extend_from_slice(&checkpoint.input_prefix);
+  }
+
+  pub fn modify_other_keys(&self) -> ModifyOtherKeys {
+    if self.extended_keys {
+      self.input_modes.modify_other_keys()
+    } else {
+      ModifyOtherKeys::Off
+    }
   }
 
   pub fn set_history(&mut self, history: Vec<String>) {
@@ -139,7 +152,9 @@ impl Model {
         for ch in text.chars() {
           self.vt.feed(ch);
           self.observe_buffer(ch);
-          self.input_modes.feed(ch);
+          if self.input_modes.feed(ch) && self.extended_keys {
+            replies.extend(format!("\x1b[>4;{}m", self.modify_other_keys().level()).into_bytes());
+          }
           self.bracketed_paste = self.input_modes.bracketed_paste();
           replies.extend(self.control(ch));
           batch += 1;
@@ -473,6 +488,50 @@ mod tests {
     model.feed(b"\x1bc");
     assert!(!model.input_modes.mouse().enabled());
     assert!(!model.bracketed_paste);
+  }
+
+  #[test]
+  fn modified_keys_require_negotiated_support_and_queries_report_pane_state() {
+    let mut legacy = model();
+    assert_eq!(legacy.feed(b"\x1b[>4;2m\x1b[?4m"), Vec::<u8>::new());
+    assert_eq!(legacy.modify_other_keys(), ModifyOtherKeys::Off);
+
+    let mut supported = model();
+    supported.extended_keys = true;
+    assert_eq!(supported.feed(b"\x1b[?4m"), b"\x1b[>4;0m");
+    assert_eq!(supported.feed(b"\x1b[>4;"), Vec::<u8>::new());
+    assert_eq!(supported.feed(b"2m\x1b[?4m"), b"\x1b[>4;2m");
+    assert_eq!(supported.modify_other_keys(), ModifyOtherKeys::Mode2);
+    assert_eq!(supported.feed(b"\x1b]0;[?4m\x07"), Vec::<u8>::new());
+    assert_eq!(supported.feed("\u{9b}?4m".as_bytes()), b"\x1b[>4;2m");
+    for terminator in ["\u{9c}", "\x18", "\x1a", "\x1b\\"] {
+      assert_eq!(supported.feed(b"\x1b]title"), Vec::<u8>::new());
+      assert_eq!(supported.feed(terminator.as_bytes()), Vec::<u8>::new());
+      assert_eq!(supported.feed(b"\x1b[?4m"), b"\x1b[>4;2m");
+    }
+    assert_eq!(
+      supported.feed("\u{9d}title ?4m\u{9c}".as_bytes()),
+      Vec::<u8>::new()
+    );
+    assert_eq!(supported.feed(b"\x1b[?4m"), b"\x1b[>4;2m");
+    assert_eq!(supported.feed(b"\x1b[>4n\x1b[?4m"), b"\x1b[>4;0m");
+  }
+
+  #[test]
+  fn checkpoint_preserves_keyboard_capability_without_replying_to_old_queries() {
+    let mut supported = model();
+    supported.extended_keys = true;
+    supported.restore(&TerminalCheckpoint {
+      format: ctmux_proto::TERMINAL_CHECKPOINT_FORMAT.into(),
+      format_version: ctmux_proto::TERMINAL_CHECKPOINT_FORMAT_VERSION,
+      sequence: 12,
+      terminal_size: TerminalSize::default(),
+      payload: b"\x1b[>4;2m\x1b[?4m".to_vec(),
+      input_prefix: Vec::new(),
+    });
+    assert!(supported.extended_keys);
+    assert_eq!(supported.modify_other_keys(), ModifyOtherKeys::Mode2);
+    assert_eq!(supported.feed(b"\x1b[?4m"), b"\x1b[>4;2m");
   }
 
   #[test]

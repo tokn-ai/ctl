@@ -3,6 +3,8 @@ mod actions;
 mod app;
 mod copy;
 mod divider;
+#[cfg(unix)]
+mod host_input;
 mod input;
 mod keys;
 mod maintenance;

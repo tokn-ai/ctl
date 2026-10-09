@@ -635,9 +635,12 @@ fn messages_are_readable_and_older_log_formats_remain_readable() {
 
 #[test]
 fn notice_child() {
-  if std::env::var_os("CTL_HISTORY_NOTICE_TEST").is_none() {
+  let Some(directory) = std::env::var_os("CTL_HISTORY_NOTICE_TEST") else {
     return;
-  }
+  };
+  // Windows resolves home through the OS profile API, not HOME/USERPROFILE.
+  // These tests exercise recording/sinks, so explicitly isolate their store.
+  STORE.set(Some(Store::new(directory.into()))).unwrap();
   match std::env::var("CTL_HISTORY_CONSOLE_TEST").as_deref() {
     Ok("foreground") => initialize_daemon(Component::Ctmuxd, false),
     Ok("detached") => initialize_daemon(Component::Ctmuxd, true),
@@ -662,16 +665,14 @@ fn notice_child() {
 fn instantaneous_events_and_invalid_configuration_are_saved_once() {
   let _process_guard = crate::test_fixtures::ProcessGuard::acquire_blocking();
   let fixture = Fixture::new();
+  let store = fixture.store();
   let output = std::process::Command::new(std::env::current_exe().unwrap())
     .args(["--exact", "observability::tests::notice_child"])
-    .env("CTL_HISTORY_NOTICE_TEST", "1")
+    .env("CTL_HISTORY_NOTICE_TEST", store.directory())
     .env("CTL_LOG_LEVEL", "private-invalid-level-canary")
-    .env("HOME", &fixture.0)
-    .env("USERPROFILE", &fixture.0)
     .output()
     .unwrap();
   assert!(output.status.success(), "{output:?}");
-  let store = Store::new(fixture.0.join(".tokn/ctl/history"));
   let logs = store.read(Stream::Logs, 100, false).unwrap();
   assert!(logs.complete);
   assert_eq!(logs.records.len(), 2);
@@ -697,17 +698,15 @@ fn foreground_redirected_stderr_matches_file_and_detached_is_file_only() {
   let _process_guard = crate::test_fixtures::ProcessGuard::acquire_blocking();
   for mode in ["foreground", "detached"] {
     let fixture = Fixture::new();
+    let store = fixture.store();
     let output = std::process::Command::new(std::env::current_exe().unwrap())
       .args(["--exact", "observability::tests::notice_child"])
-      .env("CTL_HISTORY_NOTICE_TEST", "1")
+      .env("CTL_HISTORY_NOTICE_TEST", store.directory())
       .env("CTL_HISTORY_CONSOLE_TEST", mode)
       .env("CTL_LOG_LEVEL", "info")
-      .env("HOME", &fixture.0)
-      .env("USERPROFILE", &fixture.0)
       .output()
       .unwrap();
     assert!(output.status.success(), "{output:?}");
-    let store = Store::new(fixture.0.join(".tokn/ctl/history"));
     let history = store.read(Stream::Logs, 100, false).unwrap();
     assert!(history.complete);
     assert_eq!(history.records.len(), 1);

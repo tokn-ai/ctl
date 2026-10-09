@@ -244,6 +244,20 @@ pub enum DaemonError {
   UnsupportedPlatform,
 }
 
+impl DaemonError {
+  /// Classify startup/runtime failure without exposing endpoint paths or raw errors.
+  #[must_use]
+  pub fn diagnostic(&self) -> (&'static str, Option<i32>) {
+    match self {
+      Self::RuntimeDirectory(error) => ("daemon_runtime_directory_failed", error.raw_os_error()),
+      Self::Bind { source, .. } => ("daemon_bind_failed", source.raw_os_error()),
+      Self::Accept(error) => ("daemon_accept_failed", error.raw_os_error()),
+      Self::ShutdownSignal(error) => ("daemon_shutdown_signal_failed", error.raw_os_error()),
+      Self::UnsupportedPlatform => ("daemon_platform_unsupported", None),
+    }
+  }
+}
+
 #[derive(Debug, thiserror::Error)]
 enum RequestError {
   #[error(

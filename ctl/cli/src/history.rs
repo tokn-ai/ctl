@@ -52,7 +52,19 @@ pub fn run(arguments: Arguments, stream: Stream) -> io::Result<()> {
   if arguments.json {
     println!(
       "{}",
-      serde_json::to_string(&history).map_err(io::Error::other)?
+      serde_json::to_string(&HistoryView {
+        records: history
+          .records
+          .iter()
+          .map(|record| RecordView {
+            record,
+            message: record.message()
+          })
+          .collect(),
+        complete: history.complete,
+        warning: history.warning,
+      })
+      .map_err(io::Error::other)?
     );
   } else {
     if history.records.is_empty() {
@@ -71,7 +83,7 @@ pub fn run(arguments: Arguments, stream: Stream) -> io::Result<()> {
             "RESULT",
             "SUBJECT",
             "DURATION",
-            "DETAIL"
+            "MESSAGE"
           ],
           history.records.iter().map(row)
         )
@@ -132,11 +144,20 @@ fn row(record: &Record) -> [String; 10] {
     } else {
       format!("{} ms", record.elapsed_ms)
     },
-    match (record.error_code.as_deref(), record.os_error) {
-      (Some(code), Some(os)) => format!("{code} ({os})"),
-      (Some(code), None) => code.into(),
-      (None, Some(os)) => os.to_string(),
-      (None, None) => "—".into(),
-    },
+    record.message(),
   ]
+}
+
+#[derive(serde::Serialize)]
+struct RecordView<'a> {
+  #[serde(flatten)]
+  record: &'a Record,
+  message: String,
+}
+
+#[derive(serde::Serialize)]
+struct HistoryView<'a> {
+  records: Vec<RecordView<'a>>,
+  complete: bool,
+  warning: Option<&'static str>,
 }

@@ -17,7 +17,7 @@ impl Record {
         .map_err(io::Error::other)?
         .format(&Rfc3339)
         .map_err(io::Error::other)?;
-    Ok(format!(
+    let metadata = format!(
       "{timestamp} {} {} {} {} session={} pane={} attachment={} exit_code={} lease={} duration_ms={} subject={} code={} os={} pid={} run={} operation={} event_id={} schema={}",
       name(self.level).to_ascii_uppercase(),
       name(self.component),
@@ -37,14 +37,32 @@ impl Record {
       self.operation_id,
       self.event_id,
       self.schema_version,
-    ))
+    );
+    if self.schema_version >= 4 {
+      let (prefix, fields) = metadata
+        .split_once(" session=")
+        .ok_or_else(|| io::Error::other("invalid metadata layout"))?;
+      Ok(format!(
+        "{prefix}\tmessage={}\tsession={fields}",
+        serde_json::to_string(&self.message()).map_err(io::Error::other)?
+      ))
+    } else {
+      Ok(metadata)
+    }
   }
 
   pub(super) fn from_log_line(line: &[u8]) -> Option<Self> {
     if !line.ends_with(b"\n") {
       return None;
     }
-    let fields: Vec<_> = std::str::from_utf8(line).ok()?.split_whitespace().collect();
+    let line = std::str::from_utf8(line).ok()?.strip_suffix('\n')?;
+    let (metadata, message) = if let Some((prefix, rest)) = line.split_once("\tmessage=") {
+      let (message, fields) = rest.split_once('\t')?;
+      (format!("{prefix} {fields}"), Some(message))
+    } else {
+      (line.to_owned(), None)
+    };
+    let fields: Vec<_> = metadata.split_whitespace().collect();
     if fields.len() != 19 {
       return None;
     }
@@ -75,6 +93,16 @@ impl Record {
       event_id: field(fields[17], "event_id")?.parse().ok()?,
       schema_version: field(fields[18], "schema")?.parse().ok()?,
     };
+    if record.schema_version >= 4 {
+      let message: String = serde_json::from_str(message?).ok()?;
+      // Wording may evolve independently of typed fields. Validate its framing,
+      // but readers derive display text from metadata rather than trusting it.
+      if message.len() > 512 || message.chars().any(char::is_control) {
+        return None;
+      }
+    } else if message.is_some() {
+      return None;
+    }
     record.valid().then_some(record)
   }
 }

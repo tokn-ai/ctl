@@ -101,6 +101,26 @@ pub enum DaemonError {
   EndpointStartupLock { path: PathBuf, source: io::Error },
 }
 
+impl DaemonError {
+  /// Classify startup/runtime failure without exposing endpoint paths or raw errors.
+  #[must_use]
+  pub fn diagnostic(&self) -> (&'static str, Option<i32>) {
+    match self {
+      Self::RuntimeDirectory(error) => ("daemon_runtime_directory_failed", error.raw_os_error()),
+      Self::AlreadyRunning(_) => ("daemon_already_running", None),
+      Self::Bind { source, .. } => ("daemon_bind_failed", source.raw_os_error()),
+      Self::ControlSocketPath { source, .. } => {
+        ("daemon_control_endpoint_failed", source.raw_os_error())
+      }
+      Self::Io(error) => ("daemon_io_failed", error.raw_os_error()),
+      Self::InvalidAttachmentLivenessTimeout { .. } => ("attachment_timeout_invalid", None),
+      Self::EndpointStartupLock { source, .. } => {
+        ("daemon_startup_lock_failed", source.raw_os_error())
+      }
+    }
+  }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct AttachmentLiveness {
   timeout: Duration,
@@ -162,17 +182,14 @@ pub async fn run(config: DaemonConfig) -> Result<(), DaemonError> {
         let data_connection_shutdown = restart.data_connection_shutdown_receiver();
         let connection_guard = connections.open();
         tokio::spawn(async move {
-          if let Err(error) = handle_connection(
+          let _recorded_result = handle_connection(
             stream,
             sessions,
             restart,
             data_connection_shutdown,
             attachment_liveness,
           )
-          .await
-          {
-            eprintln!("ctmuxd connection error: {error}");
-          }
+          .await;
           drop(connection_guard);
         });
       }
@@ -183,16 +200,13 @@ pub async fn run(config: DaemonConfig) -> Result<(), DaemonError> {
         let control_connection_shutdown = restart.control_connection_shutdown_receiver();
         let connection_guard = connections.open();
         tokio::spawn(async move {
-          if let Err(error) = handle_local_control_connection(
+          let _recorded_result = handle_local_control_connection(
             stream,
             sessions,
             restart,
             control_connection_shutdown,
           )
-          .await
-          {
-            eprintln!("ctmuxd local-control connection error: {error}");
-          }
+          .await;
           drop(connection_guard);
         });
       }
@@ -539,7 +553,7 @@ async fn handle_local_control_connection(
     } else {
       ctl_core::observability::Level::Warn
     },
-    result.as_ref().err().map(|_| "ctmux_transport_failed"),
+    result.as_ref().err().map(ConnectionError::diagnostic_code),
     None,
   );
   result
@@ -747,7 +761,7 @@ async fn handle_connection(
     } else {
       ctl_core::observability::Level::Warn
     },
-    result.as_ref().err().map(|_| "ctmux_transport_failed"),
+    result.as_ref().err().map(ConnectionError::diagnostic_code),
     None,
   );
   result
@@ -2795,6 +2809,20 @@ enum ConnectionError {
   Control(#[from] SessionControlError),
   #[error("blocking daemon task failed: {0}")]
   Task(#[from] tokio::task::JoinError),
+}
+
+impl ConnectionError {
+  fn diagnostic_code(&self) -> &'static str {
+    match self {
+      Self::History(_) => "history_io_failed",
+      Self::Codec(_) => "session_protocol_failed",
+      Self::LocalControl(_) => "control_protocol_failed",
+      Self::LocalControlTimeout => "control_request_timeout",
+      Self::Journal(_) => "terminal_journal_failed",
+      Self::Control(_) => "terminal_control_failed",
+      Self::Task(_) => "daemon_worker_failed",
+    }
+  }
 }
 
 #[derive(Default)]

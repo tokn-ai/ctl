@@ -119,12 +119,18 @@ fn populated_history_filters_failures_and_reports_omitted_records_in_json_and_ta
   let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
   assert_eq!(value["records"].as_array().unwrap().len(), 1);
   assert_eq!(value["records"][0]["outcome"], "interrupted");
+  assert_eq!(
+    value["records"][0]["message"],
+    "Host connection: interrupted"
+  );
   assert_eq!(value["complete"], false);
   assert!(value["warning"].is_string());
   let output = fixture.command(&["logs", "--failed"]).output().unwrap();
   assert!(output.status.success());
   let table = String::from_utf8(output.stdout).unwrap();
   assert!(table.contains("connection"));
+  assert!(table.contains("MESSAGE"));
+  assert!(table.contains("Host connection: interrupted"));
   assert!(table.contains("interrupted"));
   assert!(table.contains("123 ms"));
   assert!(!table.contains("succeeded"));

@@ -62,7 +62,7 @@ fn logged<T, E: Failure>(
 }
 
 fn notice(event: Event, level: Level, context: Context) {
-  Operation::diagnostic_at(event, level, context).finish(Outcome::Succeeded, None, None);
+  ctl_core::observability::diagnostic_event(event, level, context, Outcome::Succeeded, None, None);
 }
 
 fn view_context(view: &ViewInfo) -> Context {
@@ -146,18 +146,15 @@ impl Terminal {
 
   pub fn acquire_lease(&self, attachment_id: &str, lease: LeaseKind) -> LeaseStatus {
     let result = self.acquire_lease_inner(attachment_id, lease);
-    Operation::diagnostic_at(
+    ctl_core::observability::diagnostic_event(
       Event::LeaseAcquire,
       Level::Debug,
       self.lease_context(attachment_id, lease),
-    )
-    .finish_at(
       if result.owned_by_client {
         Outcome::Succeeded
       } else {
         Outcome::Failed
       },
-      Level::Debug,
       (!result.owned_by_client).then_some("lease_busy"),
       None,
     );

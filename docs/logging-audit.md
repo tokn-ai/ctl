@@ -31,18 +31,19 @@ timestamp order. Run UUID breaks ties between runs, and append order is retained
 within a run for equal timestamps. `--limit` accepts 1–10000. `--failed` selects
 failed and interrupted outcomes before applying the limit. Tables show UTC time,
 a short run ID, severity, component, short session/pane IDs, event, result,
-a short subject hash, duration, and a fixed error classification.
+a short subject hash, duration, and a human-readable message with a fixed error classification.
 JSON includes full run IDs, event/operation IDs, process IDs, timestamps, and
 completeness information.
 
 ## Contents and privacy
 
-The local record schema is version 3, adding severity, component, and typed context
+The local record schema is version 4, adding human-readable messages to diagnostic lines.
+Version 3 added severity, component, and typed context
 (session, pane, attachment IDs, exit code, and lease kind). Version 2 audit payloads
-remain readable with default context. Each process generates one `run_id` UUID;
+remain readable with default context, and version 2/3 log lines remain readable.
+Each process generates one `run_id` UUID;
 PID reuse cannot collide with a different run. All helper invocations and daemon
-runs get separate IDs. Each
-operation records `started` and a terminal
+runs get separate IDs. Each operation that spans work records `started` and a terminal
 outcome with the same `operation_id`; each record has its own `event_id`. Terminal
 outcomes are `succeeded`, `missing`, `failed`, or `interrupted`. Cancellation that
 drops an operation records interruption. A hard process kill can leave a start
@@ -78,17 +79,45 @@ contention stays at debug level. A terminal failure can therefore be saved even
 when its lower-severity start record was filtered out.
 
 Diagnostics are human-readable `.log` files. Every line starts with a UTC RFC 3339
-timestamp, uppercase severity, component, event, and outcome, followed by fixed
+timestamp, uppercase severity, component, event, and outcome, followed by a quoted message and fixed
 key/value metadata. An example prefix is:
 
 ```text
-2026-10-09T08:15:30.123Z INFO ctmuxd pane_split succeeded
+2026-10-09T08:15:30.123Z INFO ctmuxd pane_split succeeded  message="Split pane: completed"
 ```
 
 The full line also carries IDs, duration, exit status/lease kind where applicable,
 and fixed error codes. `ctl logs --json` reconstructs typed records from these
 lines. Partial/corrupt lines are reported as omitted instead of silently accepted.
 Diagnostic writes occur outside the session registry and PTY operation locks.
+
+## Call-site policy
+
+- Use a correlated `Operation` for work with a duration: connection, credential
+  access, session creation, resize, and transport lifetime. The owning boundary
+  records its result once; callers do not print a second raw error.
+- Use `diagnostic_event` for an observation that has already happened: pane exit,
+  attachment suspension/detachment/expiry, and lease state. It writes one record,
+  without an artificial `started` event. These observations are not audit events.
+- Messages are centrally derived from event, outcome, fixed error code, and safe
+  numeric context. No call site can attach a free-form request/error message.
+  Files carry a JSON-quoted `message` near the beginning of the line; `ctl logs`
+  tables and `--json` derive the same description, including for legacy records.
+  Wording may change without invalidating older lines; typed fields are canonical.
+- Foreground ctld/ctmuxd diagnostics mirror the same timestamped renderer to a
+  stderr, including redirected stderr, respecting `CTL_LOG_LEVEL`. Detached
+  daemons save files without mirroring; helper entry points mirror only to a terminal.
+  Persistent diagnostics remain available when auto-launch discards stderr.
+  Recorder failures use a minimal stderr fallback to avoid recursive logging.
+- CLI prompts, progress, command results, and final user-facing errors keep their
+  terminal output. Agent stdout remains a protocol channel. Frontend console
+  errors, task-daemon stderr, and container output remain separate producers;
+  they are not automatically captured by this recorder.
+
+Invalid `CTL_LOG_LEVEL` and failed VPN container monitoring are now persisted
+warnings. Startup failures retain typed classifications (bind, runtime directory,
+already-running endpoint, and so on) and numeric OS errors where available;
+transport errors distinguish timeout, framing/I/O, journal, and worker failures.
 
 ## Storage and failures
 
@@ -110,7 +139,7 @@ sidecars. SQLite is bundled at build time; users need no SQLite installation.
 All ctld processes share `audit.sqlite3`. Each event is inserted in a SQLite
 transaction, with a unique event ID and indexed time, run, subject, and outcome.
 Database schema version 1 is identified by SQLite `application_id` and
-`user_version`; it is separate from local record schema version 3 and named wire
+`user_version`; it is separate from local record schema version 4 and named wire
 protocols. Unsupported schemas and corrupt databases are refused without resetting
 or overwriting them. Full synchronous commits and rollback journaling make
 successful inserts durable and allow CLI queries without creating WAL sidecars.

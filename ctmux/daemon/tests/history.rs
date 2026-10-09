@@ -26,6 +26,7 @@ impl Daemon {
     let socket = directory.join("s");
     let mut command = Command::new(env!("CARGO_BIN_EXE_ctmuxd"));
     command
+      .arg("--detach-from-terminal")
       .args(["--startup-idle-seconds", "30"])
       .arg("--socket")
       .arg(&socket)
@@ -269,6 +270,14 @@ async fn sessions_and_panes_write_redacted_human_logs_with_default_and_trace_lev
         .any(|record| record.level == Level::Trace),
       level.is_some()
     );
+    for event in [Event::PaneExit, Event::AttachmentDetach] {
+      assert!(
+        !history
+          .records
+          .iter()
+          .any(|record| record.event == event && record.outcome == Outcome::Started)
+      );
+    }
     assert!(!store.directory().join("audit.sqlite3").exists());
     for entry in fs::read_dir(store.directory().join("logs")).unwrap() {
       let path = entry.unwrap().path();
@@ -279,6 +288,7 @@ async fn sessions_and_panes_write_redacted_human_logs_with_default_and_trace_lev
             .lines()
             .all(|line| line.contains('T') && line.contains("Z ") && !line.starts_with('{'))
         );
+        assert!(text.lines().all(|line| line.contains("\tmessage=")));
         assert!(!text.contains("log-private-canary"));
         assert!(!text.contains(&token));
         assert!(!text.contains("/bin/cat"));

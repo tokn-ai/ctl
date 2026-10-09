@@ -136,3 +136,36 @@ fn metadata_commands_do_not_create_history() {
   }
   assert!(fs::read_dir(&fixture.0).unwrap().next().is_none());
 }
+
+#[test]
+fn proxy_argument_failure_is_saved_with_a_safe_message_and_no_raw_route() {
+  let fixture = Fixture::new();
+  let output = fixture
+    .command()
+    .env_remove("CTL_LOG_LEVEL")
+    .args(["--proxy-route", "private-route-canary"])
+    .output()
+    .unwrap();
+  assert_eq!(output.status.code(), Some(2));
+  assert_eq!(output.stdout, Vec::<u8>::new());
+  let history = fixture.store().read(Stream::Logs, 100, false).unwrap();
+  assert!(history.complete);
+  assert_eq!(history.records.len(), 2);
+  let failure = &history.records[1];
+  assert_eq!(failure.event, Event::ProxyConnection);
+  assert_eq!(failure.outcome, Outcome::Failed);
+  assert_eq!(
+    failure.error_code.as_deref(),
+    Some("proxy_destination_missing")
+  );
+  assert_eq!(
+    failure.message(),
+    "Proxy connection: failed; proxy host and port are required"
+  );
+  assert!(
+    !serde_json::to_string(&history)
+      .unwrap()
+      .contains("private-route-canary")
+  );
+  assert!(!fixture.store().directory().join("audit.sqlite3").exists());
+}

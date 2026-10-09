@@ -56,7 +56,18 @@ fn main() {
   }
   let arguments = Arguments::parse();
   if !arguments.component_info && !arguments.protocol_build && !arguments.protocol_version {
-    ctl_core::observability::initialize();
+    if arguments.credential_request
+      || arguments.identity_request
+      || arguments.identity_agent_lifetime
+      || arguments.proxy_route.is_some()
+    {
+      ctl_core::observability::initialize();
+    } else {
+      ctl_core::observability::initialize_daemon(
+        ctl_core::observability::Component::Ctld,
+        arguments.detach_from_terminal,
+      );
+    }
   }
   if arguments.identity_agent_lifetime {
     if ctld::identities::run_lifetime().is_err() {
@@ -65,8 +76,7 @@ fn main() {
     return;
   }
   if arguments.identity_request || arguments.credential_request {
-    if let Err(error) = run_helper(arguments.identity_request) {
-      eprintln!("ctld: credential/identity helper I/O failed: {error}");
+    if run_helper(arguments.identity_request).is_err() {
       std::process::exit(1);
     }
     return;
@@ -83,17 +93,31 @@ fn main() {
     return;
   }
   if let Some(route) = arguments.proxy_route.as_deref() {
-    let (Some(host), Some(port)) = (arguments.proxy_host.as_deref(), arguments.proxy_port) else {
-      eprintln!("ctld: missing proxy destination");
-      std::process::exit(2);
-    };
-    let runtime = tokio::runtime::Builder::new_current_thread()
-      .enable_all()
-      .build()
-      .expect("proxy runtime");
     let operation = ctl_core::observability::Operation::diagnostic(
       ctl_core::observability::Event::ProxyConnection,
     );
+    let (Some(host), Some(port)) = (arguments.proxy_host.as_deref(), arguments.proxy_port) else {
+      operation.finish(
+        ctl_core::observability::Outcome::Failed,
+        Some("proxy_destination_missing"),
+        None,
+      );
+      std::process::exit(2);
+    };
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+      .enable_all()
+      .build()
+    {
+      Ok(runtime) => runtime,
+      Err(error) => {
+        operation.finish(
+          ctl_core::observability::Outcome::Failed,
+          Some("daemon_runtime_failed"),
+          error.raw_os_error(),
+        );
+        std::process::exit(1);
+      }
+    };
     let result = runtime.block_on(ctld::proxy_route::run(route, host, port));
     operation.finish(
       if result.is_ok() {
@@ -104,8 +128,7 @@ fn main() {
       result.as_ref().err().map(|_| "proxy_connection_failed"),
       None,
     );
-    if let Err(error) = result {
-      eprintln!("ctld: {error}");
+    if result.is_err() {
       std::process::exit(1);
     }
     return;
@@ -159,7 +182,6 @@ fn run_daemon(arguments: Arguments) {
       Some("daemon_detach_failed"),
       error.raw_os_error(),
     );
-    eprintln!("ctld: could not detach from the invoking terminal: {error}");
     std::process::exit(1);
   }
   let runtime = match tokio::runtime::Builder::new_multi_thread()
@@ -173,7 +195,6 @@ fn run_daemon(arguments: Arguments) {
         Some("daemon_runtime_failed"),
         error.raw_os_error(),
       );
-      eprintln!("ctld: could not initialize the async runtime: {error}");
       std::process::exit(1);
     }
   };
@@ -188,11 +209,10 @@ fn run_daemon(arguments: Arguments) {
     } else {
       ctl_core::observability::Outcome::Failed
     },
-    result.as_ref().err().map(|_| "daemon_failed"),
-    None,
+    result.as_ref().err().map(|error| error.diagnostic().0),
+    result.as_ref().err().and_then(|error| error.diagnostic().1),
   );
-  if let Err(error) = result {
-    eprintln!("ctld: {error}");
+  if result.is_err() {
     std::process::exit(1);
   }
 }

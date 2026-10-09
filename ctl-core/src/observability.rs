@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
-use std::io;
+use std::io::{self, IsTerminal as _, Write as _};
 use std::sync::{
   OnceLock,
   atomic::{AtomicBool, Ordering},
@@ -10,6 +10,7 @@ use std::sync::{
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
+mod message;
 mod storage;
 mod text;
 pub use storage::{History, Store};
@@ -110,6 +111,8 @@ pub enum Event {
   LeaseRelease,
   SessionTransport,
   ControlTransport,
+  LogConfiguration,
+  VpnMonitor,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -147,6 +150,7 @@ pub struct Record {
 
 static COMPONENT: OnceLock<Component> = OnceLock::new();
 static LOG_LEVEL: OnceLock<Level> = OnceLock::new();
+static CONSOLE: OnceLock<bool> = OnceLock::new();
 
 static RUN_ID: OnceLock<Uuid> = OnceLock::new();
 
@@ -164,15 +168,27 @@ pub fn initialize() {
 
 /// Enable one daemon's recorder, choosing its component and minimum log level.
 pub fn initialize_component(component: Component) {
+  initialize_recorder(component, io::stderr().is_terminal());
+}
+
+/// Foreground daemons write to stderr even when it is redirected. Auto-started,
+/// detached daemons use files; helper protocol entry points use `initialize`.
+pub fn initialize_daemon(component: Component, detached: bool) {
+  initialize_recorder(component, !detached);
+}
+
+fn initialize_recorder(component: Component, console: bool) {
+  CONSOLE.get_or_init(|| console);
   COMPONENT.get_or_init(|| component);
+  let mut invalid_level = false;
   LOG_LEVEL.get_or_init(|| match std::env::var("CTL_LOG_LEVEL") {
     Ok(value) => value.parse().unwrap_or_else(|_| {
-      eprintln!("Warning: invalid CTL_LOG_LEVEL; using info.");
+      invalid_level = true;
       Level::Info
     }),
     Err(std::env::VarError::NotPresent) => Level::Info,
     Err(std::env::VarError::NotUnicode(_)) => {
-      eprintln!("Warning: invalid CTL_LOG_LEVEL; using info.");
+      invalid_level = true;
       Level::Info
     }
   });
@@ -183,6 +199,16 @@ pub fn initialize_component(component: Component) {
       None
     }
   });
+  if invalid_level {
+    diagnostic_event(
+      Event::LogConfiguration,
+      Level::Warn,
+      Context::default(),
+      Outcome::Failed,
+      None,
+      None,
+    );
+  }
 }
 
 /// Resolve the shared store without creating files.
@@ -196,13 +222,28 @@ pub fn user_store() -> io::Result<Store> {
 
 fn warn(error: &io::Error) {
   if !WARNED.swap(true, Ordering::Relaxed) {
-    eprintln!("Warning: ctl logging/audit recording failed; the operation will continue: {error}");
+    let _ = writeln!(
+      io::stderr().lock(),
+      "Warning: ctl logging/audit recording failed; the operation will continue: {error}"
+    );
   }
 }
 
 fn emit(stream: Stream, record: &Record) {
+  if STORE.get().is_none() {
+    return;
+  }
   if stream == Stream::Logs && record.level < *LOG_LEVEL.get().unwrap_or(&Level::Info) {
     return;
+  }
+  // Foreground diagnostics share the file renderer; detached daemons still save
+  // records even when their launcher discards stderr. Never mirror audit twice.
+  if stream == Stream::Logs
+    && *CONSOLE.get().unwrap_or(&false)
+    && let Ok(line) = record.log_line()
+  {
+    // A closed console pipe must not turn a diagnostic into a daemon failure.
+    let _ = writeln!(io::stderr().lock(), "{line}");
   }
   if let Some(Some(store)) = STORE.get() {
     if let Err(error) = store.append(stream, record) {
@@ -210,6 +251,43 @@ fn emit(stream: Stream, record: &Record) {
     } else {
       WARNED.store(false, Ordering::Relaxed);
     }
+  }
+}
+
+/// Record an instantaneous diagnostic once, without an artificial start pair.
+/// Error codes must be fixed classifications, never raw error text.
+pub fn diagnostic_event(
+  event: Event,
+  level: Level,
+  context: Context,
+  outcome: Outcome,
+  error_code: Option<&'static str>,
+  os_error: Option<i32>,
+) {
+  let mut record = new_record(event, level, context, None);
+  record.outcome = outcome;
+  record.error_code = error_code.map(str::to_owned);
+  record.os_error = os_error;
+  emit(Stream::Logs, &record);
+}
+
+fn new_record(event: Event, level: Level, context: Context, subject: Option<&str>) -> Record {
+  Record {
+    schema_version: 4,
+    level,
+    context,
+    component: *COMPONENT.get().unwrap_or(&Component::Ctld),
+    run_id: run_id(),
+    event_id: Uuid::new_v4(),
+    operation_id: Uuid::new_v4(),
+    timestamp_ms: now(),
+    process_id: std::process::id(),
+    event,
+    outcome: Outcome::Started,
+    subject_id: subject.map(|value| format!("{:x}", Sha256::digest(value.as_bytes()))),
+    elapsed_ms: 0,
+    error_code: None,
+    os_error: None,
   }
 }
 
@@ -250,23 +328,7 @@ impl Operation {
     level: Level,
     context: Context,
   ) -> Self {
-    let record = Record {
-      schema_version: 3,
-      level,
-      context,
-      component: *COMPONENT.get().unwrap_or(&Component::Ctld),
-      run_id: run_id(),
-      event_id: Uuid::new_v4(),
-      operation_id: Uuid::new_v4(),
-      timestamp_ms: now(),
-      process_id: std::process::id(),
-      event,
-      outcome: Outcome::Started,
-      subject_id: subject.map(|value| format!("{:x}", Sha256::digest(value.as_bytes()))),
-      elapsed_ms: 0,
-      error_code: None,
-      os_error: None,
-    };
+    let record = new_record(event, level, context, subject);
     emit(Stream::Logs, &record);
     if audit {
       emit(Stream::Audit, &record);
@@ -344,7 +406,7 @@ fn now() -> u64 {
 
 impl Record {
   fn valid(&self) -> bool {
-    matches!(self.schema_version, 2 | 3)
+    matches!(self.schema_version, 2..=4)
       && i64::try_from(self.timestamp_ms).is_ok()
       && i64::try_from(self.elapsed_ms).is_ok()
       && self

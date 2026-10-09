@@ -535,7 +535,7 @@ fn human_logs_round_trip_and_reject_corrupt_metadata() {
     serde_json::to_value(&record).unwrap()
   );
   assert!(Record::from_log_line(line.trim_end().as_bytes()).is_none());
-  assert!(Record::from_log_line(line.replace("schema=3", "schema=99").as_bytes()).is_none());
+  assert!(Record::from_log_line(line.replace("schema=4", "schema=99").as_bytes()).is_none());
   assert!(
     Record::from_log_line(line.replace("pane_spawn_failed", "secret/body").as_bytes()).is_none()
   );
@@ -607,4 +607,115 @@ fn diagnostic_level_filter_never_suppresses_audit_and_keeps_escalated_errors() {
   assert_eq!(logs.records.len(), 1);
   assert_eq!(logs.records[0].event, Event::SessionTransport);
   assert_eq!(logs.records[0].level, Level::Error);
+}
+
+#[test]
+fn messages_are_readable_and_older_log_formats_remain_readable() {
+  let mut record = record(Outcome::Failed);
+  record.event = Event::PaneResize;
+  record.error_code = Some("layout_lease_required".into());
+  assert_eq!(
+    record.message(),
+    "Resize pane: failed; layout ownership is required"
+  );
+  let line = format!("{}\n", record.log_line().unwrap());
+  assert!(line.find("message=").unwrap() < line.find("session=").unwrap());
+  assert!(
+    Record::from_log_line(line.replace("Resize pane", "Older description").as_bytes()).is_some()
+  );
+  assert!(Record::from_log_line(line.replace("Resize pane", "Resize\\npane").as_bytes()).is_none());
+  for schema in [2, 3] {
+    record.schema_version = schema;
+    let legacy = format!("{}\n", record.log_line().unwrap());
+    assert!(!legacy.contains("message="));
+    let decoded = Record::from_log_line(legacy.as_bytes()).unwrap();
+    assert_eq!(decoded.message(), record.message());
+  }
+}
+
+#[test]
+fn notice_child() {
+  if std::env::var_os("CTL_HISTORY_NOTICE_TEST").is_none() {
+    return;
+  }
+  match std::env::var("CTL_HISTORY_CONSOLE_TEST").as_deref() {
+    Ok("foreground") => initialize_daemon(Component::Ctmuxd, false),
+    Ok("detached") => initialize_daemon(Component::Ctmuxd, true),
+    _ => initialize(),
+  }
+  // Initialization is idempotent, including the invalid-level notice.
+  initialize();
+  diagnostic_event(
+    Event::PaneExit,
+    Level::Info,
+    Context {
+      exit_code: Some(0),
+      ..Context::default()
+    },
+    Outcome::Succeeded,
+    None,
+    None,
+  );
+}
+
+#[test]
+fn instantaneous_events_and_invalid_configuration_are_saved_once() {
+  let _process_guard = crate::test_fixtures::ProcessGuard::acquire_blocking();
+  let fixture = Fixture::new();
+  let output = std::process::Command::new(std::env::current_exe().unwrap())
+    .args(["--exact", "observability::tests::notice_child"])
+    .env("CTL_HISTORY_NOTICE_TEST", "1")
+    .env("CTL_LOG_LEVEL", "private-invalid-level-canary")
+    .env("HOME", &fixture.0)
+    .env("USERPROFILE", &fixture.0)
+    .output()
+    .unwrap();
+  assert!(output.status.success(), "{output:?}");
+  let store = Store::new(fixture.0.join(".tokn/ctl/history"));
+  let logs = store.read(Stream::Logs, 100, false).unwrap();
+  assert!(logs.complete);
+  assert_eq!(logs.records.len(), 2);
+  assert_eq!(logs.records[0].event, Event::LogConfiguration);
+  assert_eq!(logs.records[0].level, Level::Warn);
+  assert_eq!(logs.records[1].event, Event::PaneExit);
+  assert!(
+    logs
+      .records
+      .iter()
+      .all(|record| record.outcome != Outcome::Started)
+  );
+  assert!(
+    !serde_json::to_string(&logs)
+      .unwrap()
+      .contains("private-invalid-level-canary")
+  );
+  assert!(!store.directory().join("audit.sqlite3").exists());
+}
+
+#[test]
+fn foreground_redirected_stderr_matches_file_and_detached_is_file_only() {
+  let _process_guard = crate::test_fixtures::ProcessGuard::acquire_blocking();
+  for mode in ["foreground", "detached"] {
+    let fixture = Fixture::new();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+      .args(["--exact", "observability::tests::notice_child"])
+      .env("CTL_HISTORY_NOTICE_TEST", "1")
+      .env("CTL_HISTORY_CONSOLE_TEST", mode)
+      .env("CTL_LOG_LEVEL", "info")
+      .env("HOME", &fixture.0)
+      .env("USERPROFILE", &fixture.0)
+      .output()
+      .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let store = Store::new(fixture.0.join(".tokn/ctl/history"));
+    let history = store.read(Stream::Logs, 100, false).unwrap();
+    assert!(history.complete);
+    assert_eq!(history.records.len(), 1);
+    let expected = if mode == "foreground" {
+      format!("{}\n", history.records[0].log_line().unwrap())
+    } else {
+      String::new()
+    };
+    assert_eq!(String::from_utf8(output.stderr).unwrap(), expected);
+  }
 }

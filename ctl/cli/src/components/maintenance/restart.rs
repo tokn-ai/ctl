@@ -102,11 +102,19 @@ async fn prepare_restart(
   } else {
     Ok(match component {
       Daemon::Ctld => {
-        let prepared = ctl_ipc::lifecycle::Client::new(ctl_ipc::socket_path())
-          .with_daemon_executable(component.executable()?)
-          .preflight_restart()
-          .await
-          .map_err(io::Error::other)?;
+        let client = ctl_ipc::lifecycle::Client::new(ctl_ipc::socket_path());
+        // Observe first so an absent owner does not prepare/install a helper.
+        // Preflight then uses the registered async signed-helper provider and
+        // pins the owner again; synchronous discovery would bypass that provider.
+        if matches!(
+          client.probe().await.map_err(io::Error::other)?,
+          ctl_ipc::lifecycle::DaemonStatus::Absent
+        ) {
+          return Err(io::Error::other(
+            "ctld is not running; restart does not start an absent owner",
+          ));
+        }
+        let prepared = client.preflight_restart().await.map_err(io::Error::other)?;
         if prepared.before.is_none() {
           return Err(io::Error::other(
             "ctld is not running; restart does not start an absent owner",
@@ -201,4 +209,124 @@ pub(crate) async fn run(
     }
   }
   Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+  use super::{Daemon, prepare_restart};
+  use std::io;
+  use std::sync::atomic::{AtomicUsize, Ordering};
+
+  static PROVIDER_CALLS: AtomicUsize = AtomicUsize::new(0);
+  const PROVIDER_ERROR: &str = "maintenance fixture signed-helper provider consulted";
+
+  #[tokio::test]
+  async fn ctld_restart_uses_provider_preserves_override_and_skips_preparation_when_absent() {
+    let _guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
+    for mode in ["provider", "override", "absent"] {
+      let directory = std::env::temp_dir().join(format!(
+        "cr-{}",
+        &uuid::Uuid::new_v4().simple().to_string()[..12]
+      ));
+      std::fs::create_dir(&directory).unwrap();
+      let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
+      command
+        .args([
+          "--exact",
+          "components::maintenance::restart::tests::provider_child",
+          "--nocapture",
+        ])
+        .env("CTL_MAINTENANCE_TEST_MODE", mode)
+        .env("CTLD_SOCKET_PATH", directory.join("ctld.sock"))
+        .env("HOME", &directory)
+        .env("PATH", &directory)
+        .env_remove("CTLD_BIN")
+        .kill_on_drop(true);
+      if mode == "override" {
+        command.env("CTLD_BIN", directory.join("explicit-missing-ctld"));
+      }
+      let output = tokio::time::timeout(std::time::Duration::from_secs(15), command.output())
+        .await
+        .unwrap()
+        .unwrap();
+      std::fs::remove_dir_all(directory).unwrap();
+      assert!(output.status.success(), "{mode}: {output:?}");
+    }
+  }
+
+  #[tokio::test]
+  async fn provider_child() {
+    let Ok(mode) = std::env::var("CTL_MAINTENANCE_TEST_MODE") else {
+      return;
+    };
+    // The registry is process-global. Each scenario runs in an isolated child,
+    // with a provider failure sentinel rather than executable/signing fixtures.
+    ctl_ipc::register_preferred_contract_daemon_executable_provider(|_| {
+      Box::pin(async {
+        PROVIDER_CALLS.fetch_add(1, Ordering::SeqCst);
+        Err(io::Error::other(PROVIDER_ERROR))
+      })
+    })
+    .unwrap();
+    let socket = ctl_ipc::socket_path();
+    let server = if mode == "absent" {
+      None
+    } else {
+      let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+      Some(tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        assert!(matches!(
+          ctl_ipc::read_frame::<_, ctl_ipc::lifecycle::Request>(&mut stream)
+            .await
+            .unwrap(),
+          Some(ctl_ipc::lifecycle::Request::CtldInspect { .. })
+        ));
+        ctl_ipc::write_frame(
+          &mut stream,
+          &ctl_ipc::lifecycle::Response::CtldInfo {
+            protocol_version: ctl_ipc::lifecycle::PROTOCOL_VERSION,
+            info: ctl_ipc::lifecycle::DaemonInfo {
+              instance_id: uuid::Uuid::new_v4().to_string(),
+              binary: ctl_ipc::lifecycle::DaemonBinaryInfo::current(),
+              active_vpn_count: 0,
+            },
+          },
+        )
+        .await
+        .unwrap();
+        assert!(
+          ctl_ipc::read_frame::<_, ctl_ipc::lifecycle::Request>(&mut stream)
+            .await
+            .unwrap()
+            .is_none()
+        );
+      }))
+    };
+    let error = prepare_restart(Daemon::Ctld, None, None)
+      .await
+      .err()
+      .expect("fixture must stop before mutation");
+    match mode.as_str() {
+      "provider" => {
+        assert!(error.to_string().contains(PROVIDER_ERROR), "{error}");
+        assert_eq!(PROVIDER_CALLS.load(Ordering::SeqCst), 1);
+      }
+      "override" => {
+        assert!(!error.to_string().contains(PROVIDER_ERROR), "{error}");
+        assert_eq!(PROVIDER_CALLS.load(Ordering::SeqCst), 0);
+      }
+      "absent" => {
+        assert!(error.to_string().contains("ctld is not running"), "{error}");
+        assert_eq!(PROVIDER_CALLS.load(Ordering::SeqCst), 0);
+        assert!(!socket.exists());
+      }
+      _ => panic!("unknown fixture mode"),
+    }
+    if let Some(server) = server {
+      tokio::time::timeout(std::time::Duration::from_secs(3), server)
+        .await
+        .unwrap()
+        .unwrap();
+    }
+  }
 }

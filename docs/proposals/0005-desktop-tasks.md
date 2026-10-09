@@ -1,7 +1,8 @@
 # Proposal 0005: Tasks in the desktop workspace
 
-- Status: Accepted
+- Status: Implemented
 - Created: 2026-09-04
+- Updated: 2026-10-09
 
 ## Summary
 
@@ -45,9 +46,10 @@ Tasks                 [+] +--------------------------------+
 - Selecting a saved definition opens its dialog. New drafts offer **Create definition**
   and **Create and run**; existing definitions offer **Save changes** and **Save and run**.
   Run remains available on saved definitions in the sidebar.
-- The editor contains name, executable, arguments, working directory, and
-  Background / Interactive mode. Arguments are entered as separate values;
-  the app does not infer shell quoting or execute a command through a shell.
+- The editor contains name, command line, executable, arguments, working
+  directory, and Background / Interactive mode. Command-line parsing and
+  generated names follow the update below. Published definitions contain an
+  executable and literal arguments; shell execution requires an explicit shell.
 - First Run registers and starts the default managed task. Run on an already
   active task focuses its tab; it never implicitly restarts the task. Run on a
   stopped task starts a new run. Restart is always an explicit action.
@@ -95,11 +97,11 @@ definition; an unavailable daemon is not treated as a missing task. Remote
 targets explain that task control is not yet supported and never execute locally
 as a fallback.
 
-## Command plan
+## Native commands
 
-Add async Tauri task commands in a dedicated backend module, with invocation
-wrappers in `src/lib/tauri.ts`. Use a reusable Rust task client speaking the
-existing framed protocol; do not execute and parse the human-readable ctl CLI.
+Async Tauri task commands live in a dedicated backend module, with invocation
+wrappers in `src/lib/tauri.ts`. They use the reusable Rust task client speaking
+the framed protocol rather than parsing the human-readable ctl CLI.
 
 - List and inspect managed tasks.
 - Register, start, stop, restart, and remove tasks.
@@ -111,23 +113,28 @@ existing framed protocol; do not execute and parse the human-readable ctl CLI.
   saved definitions, registration references, and presentation state.
 - Reuse existing ctmux inspection and attachment commands for interactive output.
 
-Registration must be idempotent before the app retries it after a lost response.
-Add a stable registration identity to ctl-taskd rather than using display names as
-identity. Persist a pending registration reference before dispatch. Concurrent
+Registration uses a stable registration identity rather than display names,
+so a retry after a lost response remains idempotent. The app persists a pending
+registration reference before dispatch. Concurrent
 windows must converge on the same registration or show a conflict; they must not
 create duplicate default tasks. Additional instances receive new identities.
 
 Changing a saved definition does not mutate a managed task. If they differ,
 show **Saved definition has changes** with an explicit Apply action available
 while stopped. Starting the registered command remains a separately labelled
-choice. Applying requires a ctl-taskd update operation and immutable definition
+choice. Applying uses the ctl-taskd `update_task` operation and immutable definition
 snapshots in run records so previous results are not relabelled with a new command.
 
 Use cancellable status refresh while the app is active. A slow or stale response
 must not replace newer action results, switch the selected tab, or attach a
 previous run. Errors from background subscriptions do not tear down unrelated tabs.
 
-## Data model plan
+## Original schema 2 data model
+
+The following records the implemented schema 1-to-2 transition. It is not the
+current workspace format: schema 3 moved definitions to shared catalogs, and
+the current workspace is schema 8 with a separate host catalog. See
+[workspace persistence](../ctmux-workspace.md) for subsequent migrations.
 
 Shared TypeScript types belong in `src/lib/types.ts`, with snake_case serialized
 fields and matching Rust DTOs. Taskd remains authoritative for live status,
@@ -177,7 +184,7 @@ rather than accumulate task protocol and persistence logic.
 
 ## Sidebar and draft storage update
 
-The current schema 3 update moves saved definitions into shared project/global
+The implemented schema 3 migration moves saved definitions into shared project/global
 catalogs. The Tasks sidebar selects Global or an explicit project directory;
 saves and deletes use native definition-store commands with the inspected
 revision. Drafts retain their source scope and original revision, including

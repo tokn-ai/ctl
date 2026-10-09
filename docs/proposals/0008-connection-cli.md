@@ -2,6 +2,7 @@
 
 - Status: Implemented
 - Created: 2026-10-01
+- Updated: 2026-10-09
 
 This extends the command scope of [Proposal 0002](0002-ctl.md) while retaining
 its fixed ctmux/task service protocols and remote authentication boundary.
@@ -26,9 +27,16 @@ cannot discover a private ctld SOCKS/VPN master from its destination alone.
   ordinary shell, execution, and copy semantics. They do not create ctmux sessions.
 
 - `ctl host list/show/status` inspect saved hosts and passive per-method ctld
-  state. `add/update/remove` edit the shared catalog; `method` manages alternate
+  state. `create/update/remove` edit the shared catalog; `method` manages alternate
   routes and the preferred method. Explicit `connect/disconnect` control SSH
   connections without opening a shell. Host removal only removes its definition.
+
+The interactive `host create` workflow replaces the earlier `host add` entry
+point ([PR #74](https://github.com/tokn-ai/ctl/pull/74)); alternate methods
+inherit the preferred SSH endpoint as their initial editable defaults
+([PR #72](https://github.com/tokn-ai/ctl/pull/72)). Linked host routes and remote VPNs extend
+this resolver in [Proposal 0010](0010-vpn-host-routes.md). Credential reuse
+follows [Proposal 0011](0011-credentials-reconnect.md).
 
 ## Shared resolution and transport
 

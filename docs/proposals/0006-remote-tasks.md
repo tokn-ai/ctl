@@ -2,6 +2,7 @@
 
 - Status: Implemented
 - Created: 2026-09-04
+- Updated: 2026-10-09
 
 ## Summary
 
@@ -27,8 +28,11 @@ use `ctl-agent.exe` with the default cmd.exe SSH shell. Each gateway connects to
 an existing daemon first and starts only the installed companion when needed.
 Windows daemon startup detaches and requests SSH job breakaway.
 
-Both services emit the existing `ctl-ssh-v1` readiness marker before relaying
-raw bytes. The client then validates the selected domain's protocol handshake.
+Both services retain `ctl-ssh-v1` for unidentified channels. Current identified
+channels use the stable `ctl-ssh-identity` marker, negotiate the published
+identity contract before daemon startup, and verify the account identity before
+service requests. The client then validates the selected domain's published
+protocol handshake. See [Proposal 0009](0009-protocol-contracts.md).
 The gateway does not parse requests, invent a multiplexing protocol, or accept
 an endpoint path. Ctmux's maintenance endpoint remains local-only; ctl-taskd uses it
 locally for managed interactive sessions.
@@ -75,8 +79,10 @@ ctl-taskd reconciles interrupted runs without automatically recreating them.
 ## Out of scope
 
 Desktop remote task UI, automatic task restart policies, persistent background
-logs, full run history, arbitrary gateway service registration, remote daemon
-maintenance, file synchronization, and custom Windows SSH shells.
+logs, full run history, arbitrary gateway service registration, task-daemon
+remote maintenance, file synchronization, and custom Windows SSH shells. Separate ctmux inspection/restart and complete-bundle updates are now
+implemented under [Proposal 0012](0012-component-maintenance.md); the task
+service relay still exposes no maintenance endpoint.
 
 ## Unresolved questions
 

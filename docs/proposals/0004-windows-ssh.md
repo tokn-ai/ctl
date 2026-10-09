@@ -2,6 +2,7 @@
 
 - Status: Implemented
 - Created: 2026-09-04
+- Updated: 2026-10-09
 
 [Proposal 0006](0006-remote-tasks.md) extends this command convention and daemon
 lifetime boundary to the fixed task service. The original scope below records
@@ -31,7 +32,8 @@ Failure to obtain permitted breakaway is an explicit startup error.
 
 ## Invariants
 
-1. OpenSSH owns authentication and host verification; no forwarding is enabled.
+1. OpenSSH owns authentication and host verification; service relay channels
+   disable forwarding.
 2. Platform selection accepts an enum, never an arbitrary remote command.
 3. ctmuxd owns every process and PTY in its sessions; ctl-agent owns only the relay.
 4. SSH disconnect must not terminate a daemon-owned session.
@@ -45,7 +47,8 @@ routing, and Windows shell metadata.
 
 ## Unresolved questions
 
-None for the CLI gateway boundary. Native CI verifies authenticated loopback
+None for the CLI gateway boundary. Identified service channels now use the
+published negotiation recorded in [Proposal 0009](0009-protocol-contracts.md). Native CI verifies authenticated loopback
 SSH through the Windows service, auto-start, attachment, disconnect/reconnect,
 resize, final output, exit status, and CLI routing. Different-machine network
 setups and custom SSH shells require additional validation.

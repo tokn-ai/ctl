@@ -19,6 +19,13 @@ Describe the main components, ownership boundaries, and user-facing behavior.
 
 List the properties an implementation must preserve.
 
+## Protocol impact
+
+State changed named contracts with previous/new versions and internal builds,
+operation or negotiation changes, and retained compatibility or an announced
+breaking change. Keep product releases and storage schemas separate. If none,
+write `Protocol changes: none.`
+
 ## Out of scope
 
 Identify nearby behavior that this proposal deliberately does not include.

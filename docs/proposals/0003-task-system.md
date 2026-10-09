@@ -2,6 +2,7 @@
 
 - Status: Proposed
 - Created: 2026-09-04
+- Updated: 2026-10-09
 
 ## Summary
 
@@ -189,24 +190,24 @@ scheduling, privileged system services, multi-user task sharing, containers,
 or arbitrary remote command execution. These features require separate design
 proposals if later needed.
 
+## Recorded decisions
+
+Registered-task names are unique within one ctl-taskd, and each task permits
+one active run. Task definitions and active/latest run records persist; logs
+are bounded and memory-backed. Interactive task/run UUIDs and the ctmuxd
+instance UUID support reliable creation and exit reconciliation, as described
+below. Definition changes use an explicit update on a stopped task; prior run
+snapshots remain immutable. Saved definitions use separate project/global
+catalogs rather than workspace-owned configuration.
+
 ## Unresolved questions
 
-1. Which task and run records are persisted, where they are stored, and what
-   atomicity and migration rules the storage format requires.
-2. Whether a keep-running task resumes automatically after ctl-taskd restart,
-   login, or machine reboot, and how platform service registration works.
-3. What happens to a background child when ctl-taskd crashes, and whether recovery
-   restarts it or supports adoption.
-4. How ctl-taskd receives reliable interactive-session exit events and reconciles
-   sessions that end while ctl-taskd is unavailable.
-5. How ctmux session metadata exposes task ID and run ID without turning ctmux
-   into the task authority.
-6. The restart-policy model, retry limits, backoff, and successful-exit
-   semantics.
-7. Background log retention, ordering, rotation, following, and redaction.
-8. Environment-variable storage, secret handling, and inheritance rules.
-9. Whether task names are unique globally within one ctl-taskd or may be grouped
-    into namespaces.
+1. Automatic restart policy, backoff, limits, and behavior after daemon restart,
+   login, or reboot; no automatic restart is implemented.
+2. Durable background logs and full run-history retention, rotation, and cleanup.
+3. Invocation environment, executable lookup, and secret/context persistence.
+4. Independent runs, directory policies, and local schedules beyond the current
+   singleton registration model. Proposal 0007 records these open decisions.
 
 ## Implementation status
 
@@ -242,9 +243,13 @@ SSH task routing is implemented through the explicit task service, with
 interactive attachment through ctmux on the same target. The desktop workspace
 has local task integration. Persistent background logs, full run history, and
 restart policies remain pending, so this proposal stays
-**Proposed**. Definition editing is not yet exposed; the stored definition is
-unchanged throughout each run. Task protocol version 2 adds interactive backend
-references and the new states; existing background state records remain readable.
+**Proposed**. The desktop exposes saved-definition editing and an explicit
+Apply action for stopped managed tasks through `update_task`. Saving alone
+does not alter a registration or its run snapshots. The current published
+`task` contract is `1.0.4` (internal build 4); `task_control` is `1.0.2`
+(internal build 2). Earlier integer-only protocols were unpublished; storage
+compatibility is separate from wire compatibility. See
+[Proposal 0009](0009-protocol-contracts.md).
 
 ## Detailed specifications
 

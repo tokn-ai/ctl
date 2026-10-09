@@ -118,6 +118,27 @@ impl Tui {
     lock(&self.capture).transcript_contains(bytes)
   }
 
+  /// Wait for terminal mode changes, including output drained after child exit.
+  pub async fn wait_transcript(&mut self, description: &str, bytes: &[u8]) -> Result<()> {
+    let deadline = Instant::now() + WAIT_LIMIT;
+    loop {
+      let changed = Arc::clone(&self.changed);
+      let notified = changed.notified();
+      tokio::pin!(notified);
+      notified.as_mut().enable();
+      if self.transcript_contains(bytes) {
+        return Ok(());
+      }
+      if self.screen().closed || Instant::now() >= deadline {
+        return Err(self.failure(&format!("waiting for {description}")).into());
+      }
+      tokio::select! {
+        () = &mut notified => {}
+        () = tokio::time::sleep_until(deadline) => {}
+      }
+    }
+  }
+
   pub fn process_id(&self) -> Option<u32> {
     self.child.process_id()
   }

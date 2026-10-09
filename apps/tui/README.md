@@ -217,7 +217,7 @@ the layout clears zoom, and exiting the zoomed pane clears zoom. Its final
 screen remains visible until dismissed, as with other ended panes.
 Zoom survives detach and reconnect, and the status row shows `ZOOM`.
 
-Zoom supports negotiated ctmux contracts `1.1.15`, `1.1.16`, and `1.1.17`.
+Zoom supports negotiated ctmux contracts `1.1.15` through `1.1.18`.
 Older daemons remain usable with their existing split controls; attempting zoom
 reports that it is unavailable.
 
@@ -229,7 +229,7 @@ shrink the focused pane when it is the last child. Subtree minimum sizes limit
 movement; a divider at its limit stays put.
 
 Resizing requires the view resize lease and negotiated ctmux contract `1.1.16`
-or `1.1.17`.
+through `1.1.18`.
 A successful movement unzooms the view and saves its new proportions. The TUI
 and desktop see the same rectangles; canvas changes, detach, and reconnect
 retain the proportions. Daemon restart still ends these in-memory views.
@@ -270,8 +270,31 @@ authentication is required, detach and reconnect to answer the prompt. Detaching
 releases leases without terminating the session. Normal exit, errors, and Unix
 termination/hangup signals restore the host terminal mode and alternate screen.
 
-Extended keyboard protocols remain unimplemented. Rendering shares the
-daemon's `avt` terminal emulation capabilities; it is not full tmux feature parity.
+## Modified keys
+
+On Unix, `ctmux-tui` and `ctl shell` request unambiguous key events from host
+terminals supporting the Kitty keyboard protocol, including shifted characters
+reported by the active keyboard layout. Other terminals keep their
+usual input. The request is local to the host alternate screen and is restored
+on detach, errors, and handled termination signals.
+
+With negotiated ctmux `1.1.18`, applications can request modified-key reporting
+per pane using `CSI > 4 ; 1 m` or `CSI > 4 ; 2 m`. Mode 1 follows tmux's selective
+policy and keeps familiar Ctrl-letter and Alt encodings. Mode 2 distinguishes
+modified ordinary keys, including Ctrl+I versus Tab, Ctrl+Shift+A versus Ctrl+A,
+and Ctrl+Enter versus Enter, using `CSI 27 ; modifier ; codepoint ~`.
+Cursor and function keys retain their existing xterm sequences. Applications
+query the level with `CSI ? 4 m` and reset it with `CSI > 4 ; 0 m`.
+Checkpoint restoration preserves the requested mode across attach, resizing,
+and reconnect. Shells that do not request it retain legacy input; older daemon
+contracts also keep legacy encoding and do not answer the new mode query.
+
+Host terminals must supply distinct events for these shortcuts to be distinct.
+The TUI consumes prefix, command-prompt, and copy-mode keys locally, ignores
+key releases, and does not implement full Kitty application reporting. GUI
+modified-key reporting and xterm-only host negotiation remain future work.
+Rendering shares the daemon's `avt` terminal emulation capabilities; it is not
+full tmux feature parity.
 
 ## Validate
 
@@ -286,7 +309,7 @@ Fast tests check the key state machine, pane models, and renderer. Daemon-backed
 handler tests check shared sizing, read-only viewing, reconnect, and input leases.
 
 `terminal_process` launches the real `ctmux-tui` binary inside a host PTY on
-Linux and macOS. It sends terminal bytes through crossterm and checks the rendered
+Linux and macOS. It sends terminal bytes through the input decoder and checks the rendered
 screen, covering modifier handling, repeated pane navigation, paste, copy mode,
 mouse scrolling, the bottom status row, shared pane resizing, divider dragging,
 detach, and host terminal loss. Drag cases check nested splits, held gestures
@@ -294,6 +317,8 @@ across view refreshes, frozen copy selections, mouseup targets, cancellation,
 ownership, and actual PTY dimensions.
 Command cases check the fixed footer, local editing and paste, frozen copy
 selections, pane/session operations, ownership, errors, and reconnect controls.
+Keyboard cases check application byte sequences, per-pane modes, checkpoint
+restoration, reconnects, and local controls with enhanced host input.
 Reconnect cases cut live streams repeatedly, stall metadata requests, expire
 resume tokens, and check controls, actual shell input, and released leases.
 These tests need permission to bind local Unix sockets and open PTYs.

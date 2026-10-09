@@ -30,7 +30,11 @@ async fn published_contract_handshakes_select_explicit_shared_versions() -> Test
   let directory = TestDirectory::new();
   let socket = directory.path.join("ctmux.sock");
   let daemon = spawn_daemon(&socket, 4096, 1024);
-  let future = ProtocolVersion::new(1, 1, 18);
+  let future = ProtocolVersion::new(
+    PROTOCOL_VERSION.major,
+    PROTOCOL_VERSION.minor,
+    PROTOCOL_VERSION.build + 1,
+  );
   let mut stream = connect_when_ready(&socket).await?;
   write_frame(
     &mut stream,

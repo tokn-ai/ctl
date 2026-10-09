@@ -1,5 +1,7 @@
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-use ctmux_core::mouse::{MouseEncoding, MouseModes, MouseTracking};
+use crossterm::event::{
+  KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
+use ctmux_core::mouse::{ModifyOtherKeys, MouseEncoding, MouseModes, MouseTracking};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Prefix {
@@ -34,15 +36,73 @@ pub fn matches_prefix(key: KeyEvent, prefix: &Prefix) -> bool {
   key.code == prefix.key.code && key.modifiers == prefix.key.modifiers
 }
 
-/// Encode conventional xterm input, including application cursor mode.
-pub fn encode(key: KeyEvent, application_cursor: bool) -> Vec<u8> {
+/// Encode xterm input using the focused application's requested keyboard mode.
+pub fn encode(key: KeyEvent, application_cursor: bool, mode: ModifyOtherKeys) -> Vec<u8> {
+  let supported = KeyModifiers::SHIFT | KeyModifiers::ALT | KeyModifiers::CONTROL;
+  if key.kind == KeyEventKind::Release || !(key.modifiers - supported).is_empty() {
+    // An unsupported modifier must not silently invoke an ordinary shortcut.
+    return Vec::new();
+  }
+  if let Some(data) = encode_other_key(key, mode) {
+    return data;
+  }
+  encode_xterm(key, application_cursor)
+}
+
+fn encode_other_key(key: KeyEvent, mode: ModifyOtherKeys) -> Option<Vec<u8>> {
+  if mode == ModifyOtherKeys::Off {
+    return None;
+  }
+  let mut modifiers = key.modifiers;
+  let codepoint = match key.code {
+    KeyCode::Char(ch) => u32::from(ch),
+    KeyCode::Enter => 13,
+    KeyCode::Tab => 9,
+    KeyCode::BackTab => {
+      modifiers.insert(KeyModifiers::SHIFT);
+      9
+    }
+    KeyCode::Backspace => 127,
+    KeyCode::Esc => 27,
+    _ => return None,
+  };
+  // Printable Shift-only input is already text. Crossterm can synthesize SHIFT
+  // from uppercase UTF-8, including Caps Lock and composed input.
+  if modifiers.is_empty()
+    || (modifiers == KeyModifiers::SHIFT && matches!(key.code, KeyCode::Char(ch) if ch != ' '))
+    || (mode == ModifyOtherKeys::Mode1 && legacy_mode1(key, modifiers))
+  {
+    return None;
+  }
+  Some(format!("\x1b[27;{};{codepoint}~", modifier_parameter(modifiers)).into_bytes())
+}
+
+fn legacy_mode1(key: KeyEvent, modifiers: KeyModifiers) -> bool {
+  if modifiers.intersects(KeyModifiers::ALT) && !modifiers.contains(KeyModifiers::CONTROL) {
+    return true;
+  }
+  // User mode preserves typing and well-known control combinations, while
+  // program mode reports every modified ordinary key in the extended form.
+  if modifiers == KeyModifiers::SHIFT {
+    return matches!(key.code, KeyCode::BackTab)
+      || matches!(key.code, KeyCode::Char(ch) if ch != ' ');
+  }
+  modifiers.contains(KeyModifiers::CONTROL)
+    && matches!(key.code, KeyCode::Char(' ' | '/' | '2'..='8' | '@'..='~'))
+}
+
+fn modifier_parameter(modifiers: KeyModifiers) -> u8 {
+  1 + u8::from(modifiers.contains(KeyModifiers::SHIFT))
+    + 2 * u8::from(modifiers.contains(KeyModifiers::ALT))
+    + 4 * u8::from(modifiers.contains(KeyModifiers::CONTROL))
+}
+
+/// Conventional xterm input, including application cursor mode.
+fn encode_xterm(key: KeyEvent, application_cursor: bool) -> Vec<u8> {
   let modifiers = key.modifiers;
   let modified =
     modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT | KeyModifiers::CONTROL);
-  let parameter = 1
-    + u8::from(modifiers.contains(KeyModifiers::SHIFT))
-    + 2 * u8::from(modifiers.contains(KeyModifiers::ALT))
-    + 4 * u8::from(modifiers.contains(KeyModifiers::CONTROL));
+  let parameter = modifier_parameter(modifiers);
   let cursor = match key.code {
     KeyCode::Up => Some('A'),
     KeyCode::Down => Some('B'),
@@ -95,9 +155,11 @@ pub fn encode(key: KeyEvent, application_cursor: bool) -> Vec<u8> {
     KeyCode::Char(ch) if modifiers.contains(KeyModifiers::CONTROL) => {
       let ch = ch.to_ascii_uppercase();
       match ch {
-        '@'..='_' => vec![u8::try_from(u32::from(ch)).expect("ASCII") & 0x1f],
+        '@'..='~' => vec![u8::try_from(u32::from(ch)).expect("ASCII") & 0x1f],
         ' ' | '2' => vec![0],
-        '?' => vec![127],
+        '3'..='7' => vec![u8::try_from(u32::from(ch)).expect("ASCII") - b'3' + 27],
+        '/' => vec![31],
+        '8' | '?' => vec![127],
         _ => Vec::new(),
       }
     }
@@ -189,28 +251,269 @@ mod tests {
   #[test]
   fn cursor_mode_modifiers_and_unicode_are_encoded() {
     assert_eq!(
-      encode(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), true),
+      encode(
+        KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+        true,
+        ModifyOtherKeys::Off
+      ),
       b"\x1bOA"
     );
     assert_eq!(
-      encode(KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL), true),
+      encode(
+        KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL),
+        true,
+        ModifyOtherKeys::Off
+      ),
       b"\x1b[1;5D"
     );
     assert_eq!(
       encode(
         KeyEvent::new(KeyCode::Char('界'), KeyModifiers::NONE),
-        false
+        false,
+        ModifyOtherKeys::Off
       ),
       "界".as_bytes()
     );
     assert_eq!(
       encode(
         KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
-        false
+        false,
+        ModifyOtherKeys::Off
       ),
       [3]
     );
   }
+
+  #[test]
+  fn mode1_preserves_typing_alt_keys_and_well_known_control_combinations() {
+    for (code, modifiers, expected) in [
+      (KeyCode::Char('A'), KeyModifiers::SHIFT, b"A".as_slice()),
+      (KeyCode::Char('x'), KeyModifiers::ALT, b"\x1bx".as_slice()),
+      (
+        KeyCode::Char('X'),
+        KeyModifiers::ALT | KeyModifiers::SHIFT,
+        b"\x1bX".as_slice(),
+      ),
+      (
+        KeyCode::Char('a'),
+        KeyModifiers::CONTROL,
+        b"\x01".as_slice(),
+      ),
+      (
+        KeyCode::Char('a'),
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        b"\x01".as_slice(),
+      ),
+      (KeyCode::Char(' '), KeyModifiers::CONTROL, b"\0".as_slice()),
+      (KeyCode::BackTab, KeyModifiers::SHIFT, b"\x1b[Z".as_slice()),
+      (
+        KeyCode::Tab,
+        KeyModifiers::CONTROL,
+        b"\x1b[27;5;9~".as_slice(),
+      ),
+      (
+        KeyCode::Enter,
+        KeyModifiers::SHIFT,
+        b"\x1b[27;2;13~".as_slice(),
+      ),
+      (
+        KeyCode::Char('.'),
+        KeyModifiers::CONTROL,
+        b"\x1b[27;5;46~".as_slice(),
+      ),
+    ] {
+      assert_eq!(
+        encode(
+          KeyEvent::new(code, modifiers),
+          false,
+          ModifyOtherKeys::Mode1
+        ),
+        expected,
+        "{code:?}, {modifiers:?}"
+      );
+    }
+  }
+
+  #[test]
+  fn mode2_distinguishes_modified_control_keys_and_reports_shifted_ascii() {
+    for (code, modifiers, expected) in [
+      (KeyCode::Char('A'), KeyModifiers::SHIFT, "A"),
+      (KeyCode::Char('a'), KeyModifiers::CONTROL, "\x1b[27;5;97~"),
+      (
+        KeyCode::Char('A'),
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        "\x1b[27;6;65~",
+      ),
+      (KeyCode::Tab, KeyModifiers::CONTROL, "\x1b[27;5;9~"),
+      (KeyCode::Char(' '), KeyModifiers::SHIFT, "\x1b[27;2;32~"),
+      (
+        KeyCode::BackTab,
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        "\x1b[27;6;9~",
+      ),
+      (KeyCode::BackTab, KeyModifiers::NONE, "\x1b[27;2;9~"),
+      (KeyCode::Enter, KeyModifiers::SHIFT, "\x1b[27;2;13~"),
+      (KeyCode::Enter, KeyModifiers::CONTROL, "\x1b[27;5;13~"),
+      (KeyCode::Backspace, KeyModifiers::CONTROL, "\x1b[27;5;127~"),
+      (KeyCode::Esc, KeyModifiers::ALT, "\x1b[27;3;27~"),
+    ] {
+      assert_eq!(
+        encode(
+          KeyEvent::new(code, modifiers),
+          false,
+          ModifyOtherKeys::Mode2
+        ),
+        expected.as_bytes(),
+        "{code:?}, {modifiers:?}"
+      );
+    }
+  }
+
+  #[test]
+  fn every_mode_preserves_unmodified_text_cursor_and_function_key_sequences() {
+    for mode in [
+      ModifyOtherKeys::Off,
+      ModifyOtherKeys::Mode1,
+      ModifyOtherKeys::Mode2,
+    ] {
+      for (code, modifiers, expected) in [
+        (KeyCode::Char('界'), KeyModifiers::NONE, "界"),
+        (KeyCode::Tab, KeyModifiers::NONE, "\t"),
+        (KeyCode::Enter, KeyModifiers::NONE, "\r"),
+        (KeyCode::Up, KeyModifiers::NONE, "\x1bOA"),
+        (KeyCode::Left, KeyModifiers::CONTROL, "\x1b[1;5D"),
+        (KeyCode::PageUp, KeyModifiers::SHIFT, "\x1b[5;2~"),
+        (KeyCode::F(1), KeyModifiers::NONE, "\x1bOP"),
+        (KeyCode::F(4), KeyModifiers::ALT, "\x1b[1;3S"),
+        (KeyCode::F(12), KeyModifiers::CONTROL, "\x1b[24;5~"),
+      ] {
+        assert_eq!(
+          encode(KeyEvent::new(code, modifiers), true, mode),
+          expected.as_bytes(),
+          "{mode:?}, {code:?}, {modifiers:?}"
+        );
+      }
+    }
+  }
+
+  #[test]
+  fn unsupported_modifiers_and_key_releases_never_alias_supported_shortcuts() {
+    for mode in [
+      ModifyOtherKeys::Off,
+      ModifyOtherKeys::Mode1,
+      ModifyOtherKeys::Mode2,
+    ] {
+      for code in [KeyCode::Char('c'), KeyCode::Enter, KeyCode::Up] {
+        for modifier in [KeyModifiers::SUPER, KeyModifiers::HYPER, KeyModifiers::META] {
+          assert_eq!(
+            encode(
+              KeyEvent::new(code, modifier | KeyModifiers::CONTROL),
+              false,
+              mode
+            ),
+            Vec::<u8>::new()
+          );
+        }
+        assert_eq!(
+          encode(
+            KeyEvent::new_with_kind(code, KeyModifiers::CONTROL, KeyEventKind::Release),
+            false,
+            mode
+          ),
+          Vec::<u8>::new()
+        );
+      }
+    }
+  }
+
+  #[test]
+  fn repeat_and_lock_state_do_not_change_the_xterm_modifier_parameter() {
+    use crossterm::event::KeyEventState;
+    let key = KeyEvent::new(
+      KeyCode::Char('A'),
+      KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    );
+    let expected = encode(key, false, ModifyOtherKeys::Mode2);
+    assert_eq!(expected, b"\x1b[27;6;65~");
+    for kind in [KeyEventKind::Press, KeyEventKind::Repeat] {
+      let mut reported = key;
+      reported.kind = kind;
+      reported.state = KeyEventState::CAPS_LOCK | KeyEventState::NUM_LOCK | KeyEventState::KEYPAD;
+      assert_eq!(encode(reported, false, ModifyOtherKeys::Mode2), expected);
+    }
+  }
+
+  #[test]
+  fn modified_unicode_preserves_the_reported_layout_character() {
+    assert_eq!(
+      encode(
+        KeyEvent::new(KeyCode::Char('界'), KeyModifiers::CONTROL),
+        false,
+        ModifyOtherKeys::Mode1
+      ),
+      b"\x1b[27;5;30028~"
+    );
+    let key = KeyEvent::new(KeyCode::Char('é'), KeyModifiers::SHIFT);
+    assert_eq!(encode(key, false, ModifyOtherKeys::Mode1), "é".as_bytes());
+    assert_eq!(encode(key, false, ModifyOtherKeys::Mode2), "é".as_bytes());
+  }
+
+  #[test]
+  fn legacy_control_symbols_cover_the_standard_digit_and_slash_aliases() {
+    for (ch, expected) in [
+      ('2', 0),
+      ('3', 27),
+      ('4', 28),
+      ('5', 29),
+      ('6', 30),
+      ('7', 31),
+      ('8', 127),
+      ('/', 31),
+      ('`', 0),
+      ('{', 27),
+      ('|', 28),
+      ('}', 29),
+      ('~', 30),
+    ] {
+      for mode in [ModifyOtherKeys::Off, ModifyOtherKeys::Mode1] {
+        assert_eq!(
+          encode(
+            KeyEvent::new(KeyCode::Char(ch), KeyModifiers::CONTROL),
+            false,
+            mode
+          ),
+          [expected]
+        );
+      }
+    }
+    let question = KeyEvent::new(KeyCode::Char('?'), KeyModifiers::CONTROL);
+    assert_eq!(encode(question, false, ModifyOtherKeys::Off), [127]);
+    assert_eq!(
+      encode(question, false, ModifyOtherKeys::Mode1),
+      b"\x1b[27;5;63~"
+    );
+  }
+
+  #[test]
+  fn printable_shift_only_input_stays_text_in_every_mode() {
+    for mode in [
+      ModifyOtherKeys::Off,
+      ModifyOtherKeys::Mode1,
+      ModifyOtherKeys::Mode2,
+    ] {
+      for (ch, expected) in [('a', "a"), ('A', "A"), ('!', "!"), ('É', "É")] {
+        assert_eq!(
+          encode(
+            KeyEvent::new(KeyCode::Char(ch), KeyModifiers::SHIFT),
+            false,
+            mode
+          ),
+          expected.as_bytes()
+        );
+      }
+    }
+  }
+
   #[test]
   fn prefix_is_configurable_and_validated() {
     let prefix = parse_prefix("Alt+a").unwrap();

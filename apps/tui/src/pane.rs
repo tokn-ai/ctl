@@ -179,7 +179,9 @@ impl Pane {
       Err(error) => return Err(error.into()),
     };
     let token = attached.attachment_token.clone();
-    let model = Model::new(&attached.session.terminal_size);
+    let mut model = Model::new(&attached.session.terminal_size);
+    model.extended_keys =
+      ctmux_proto::supports_extended_keys(attached.handshake_info.protocol_version);
     let (controller, control, events) =
       AttachmentController::new(stream, &attached, AttachmentControllerOptions::default())?;
     let runner = tokio::spawn(async move {

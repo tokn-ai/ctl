@@ -122,6 +122,8 @@ struct TerminalState {
   pending_input: Vec<u8>,
   journal: OutputJournal,
   checkpoint: TerminalCheckpoint,
+  /// Captured keyboard-mode preamble, projected out for older contracts.
+  checkpoint_keyboard_prefix_bytes: usize,
   /// The newest geometry event represented by `checkpoint`.
   checkpoint_geometry_revision: u64,
   terminal_size: TerminalSize,
@@ -181,6 +183,7 @@ impl TerminalState {
         input_prefix: Vec::new(),
       },
       checkpoint_geometry_revision: 0,
+      checkpoint_keyboard_prefix_bytes: 0,
       terminal_size,
       geometry_revision: 0,
       last_geometry_change_sequence: None,
@@ -266,6 +269,7 @@ impl TerminalHistory {
 #[derive(Debug, Clone)]
 struct GeometryCheckpoint {
   checkpoint: TerminalCheckpoint,
+  checkpoint_keyboard_prefix_bytes: usize,
   history: TerminalHistorySnapshot,
   history_rows: Arc<PhysicalHistory>,
   geometry_revision: u64,
@@ -278,6 +282,9 @@ pub struct AttachSnapshot {
   /// only as ordered stream events.
   pub session: SessionInfo,
   pub checkpoint: Option<TerminalCheckpoint>,
+  /// Byte length of the keyboard preamble in this exact checkpoint payload.
+  /// Older contracts omit it; raw output and the rest of the payload are kept.
+  pub checkpoint_keyboard_prefix_bytes: usize,
   /// Internal event ordering state for the checkpoint sent with this snapshot.
   pub checkpoint_geometry_revision: Option<u64>,
   pub journal: JournalSnapshot,
@@ -629,38 +636,46 @@ impl Terminal {
           .is_some_and(|boundary| sequence <= boundary)
       });
     let journal_checkpoint_required = requested.is_none_or(|sequence| sequence < earliest_sequence);
-    let (checkpoint, checkpoint_history, history_rows, checkpoint_geometry_revision) =
-      if journal_checkpoint_required {
-        (
-          Some(terminal.checkpoint.clone()),
-          Some(terminal.checkpoint_history.clone()),
-          Some(terminal.checkpoint_history_rows.clone()),
-          Some(terminal.checkpoint_geometry_revision),
-        )
-      } else if geometry_checkpoint_required {
-        // Prefer the checkpoint made at the resize boundary. It is valid only
-        // while the journal can still replay immediately after it; otherwise
-        // use the newer checkpoint that covers the compacted output as well.
-        let geometry_checkpoint = terminal
-          .last_geometry_checkpoint
-          .as_ref()
-          .filter(|checkpoint| checkpoint.checkpoint.sequence >= earliest_sequence)
-          .cloned()
-          .unwrap_or_else(|| GeometryCheckpoint {
-            checkpoint: terminal.checkpoint.clone(),
-            history: terminal.checkpoint_history.clone(),
-            history_rows: terminal.checkpoint_history_rows.clone(),
-            geometry_revision: terminal.checkpoint_geometry_revision,
-          });
-        (
-          Some(geometry_checkpoint.checkpoint),
-          Some(geometry_checkpoint.history),
-          Some(geometry_checkpoint.history_rows),
-          Some(geometry_checkpoint.geometry_revision),
-        )
-      } else {
-        (None, None, None, None)
-      };
+    let (
+      checkpoint,
+      checkpoint_keyboard_prefix_bytes,
+      checkpoint_history,
+      history_rows,
+      checkpoint_geometry_revision,
+    ) = if journal_checkpoint_required {
+      (
+        Some(terminal.checkpoint.clone()),
+        terminal.checkpoint_keyboard_prefix_bytes,
+        Some(terminal.checkpoint_history.clone()),
+        Some(terminal.checkpoint_history_rows.clone()),
+        Some(terminal.checkpoint_geometry_revision),
+      )
+    } else if geometry_checkpoint_required {
+      // Prefer the checkpoint made at the resize boundary. It is valid only
+      // while the journal can still replay immediately after it; otherwise
+      // use the newer checkpoint that covers the compacted output as well.
+      let geometry_checkpoint = terminal
+        .last_geometry_checkpoint
+        .as_ref()
+        .filter(|checkpoint| checkpoint.checkpoint.sequence >= earliest_sequence)
+        .cloned()
+        .unwrap_or_else(|| GeometryCheckpoint {
+          checkpoint: terminal.checkpoint.clone(),
+          checkpoint_keyboard_prefix_bytes: terminal.checkpoint_keyboard_prefix_bytes,
+          history: terminal.checkpoint_history.clone(),
+          history_rows: terminal.checkpoint_history_rows.clone(),
+          geometry_revision: terminal.checkpoint_geometry_revision,
+        });
+      (
+        Some(geometry_checkpoint.checkpoint),
+        geometry_checkpoint.checkpoint_keyboard_prefix_bytes,
+        Some(geometry_checkpoint.history),
+        Some(geometry_checkpoint.history_rows),
+        Some(geometry_checkpoint.geometry_revision),
+      )
+    } else {
+      (None, 0, None, None, None)
+    };
     let replay_from = checkpoint.as_ref().map_or_else(
       || requested.unwrap_or(earliest_sequence),
       |checkpoint| checkpoint.sequence,
@@ -689,6 +704,7 @@ impl Terminal {
         terminal_size: terminal.terminal_size.clone(),
       },
       checkpoint,
+      checkpoint_keyboard_prefix_bytes,
       checkpoint_geometry_revision,
       journal,
       // A geometry checkpoint may intentionally advance replay past retained
@@ -1013,6 +1029,7 @@ impl Terminal {
       terminal.last_geometry_change_sequence = Some(observed_sequence);
       terminal.last_geometry_checkpoint = Some(GeometryCheckpoint {
         checkpoint: terminal.checkpoint.clone(),
+        checkpoint_keyboard_prefix_bytes: terminal.checkpoint_keyboard_prefix_bytes,
         history: terminal.checkpoint_history.clone(),
         history_rows: terminal.checkpoint_history_rows.clone(),
         geometry_revision: terminal.geometry_revision,
@@ -2170,6 +2187,7 @@ fn refresh_checkpoint_after_output(
     terminal.last_geometry_change_sequence = Some(terminal.journal.next_sequence());
     terminal.last_geometry_checkpoint = Some(GeometryCheckpoint {
       checkpoint: terminal.checkpoint.clone(),
+      checkpoint_keyboard_prefix_bytes: terminal.checkpoint_keyboard_prefix_bytes,
       history: terminal.checkpoint_history.clone(),
       history_rows: terminal.checkpoint_history_rows.clone(),
       geometry_revision: terminal.geometry_revision,
@@ -2179,10 +2197,12 @@ fn refresh_checkpoint_after_output(
 
 fn refresh_checkpoint(terminal: &mut TerminalState) {
   refresh_history(terminal);
-  // AVT does not retain application mouse or bracketed-paste modes. Restore
+  // AVT does not retain application mouse, paste, or keyboard modes. Restore
   // them before its dump, which ends with a potentially incomplete parser
   // prefix that must remain the final bytes of the checkpoint payload.
-  let mut payload = terminal.input_modes.restore_sequences();
+  let mut payload = terminal.input_modes.restore_keyboard_sequence();
+  terminal.checkpoint_keyboard_prefix_bytes = payload.len();
+  payload.push_str(&terminal.input_modes.restore_sequences());
   payload.push_str(&terminal.terminal.dump());
   terminal.checkpoint = TerminalCheckpoint {
     format: TERMINAL_CHECKPOINT_FORMAT.into(),
@@ -2723,6 +2743,104 @@ mod tests {
     assert_eq!(restored.input_modes.mouse(), source.input_modes.mouse());
     assert!(!restored.input_modes.mouse().enabled());
     assert!(!restored.input_modes.bracketed_paste());
+  }
+
+  #[test]
+  fn checkpoint_restores_keyboard_mode_before_a_partial_mode_change() {
+    use ctmux_core::mouse::ModifyOtherKeys;
+    let mut source = terminal_state();
+    feed_terminal_bytes(&mut source, b"ready\x1b[>4;2m\x1b[?1002;2004h\x1b[>4;1");
+    refresh_checkpoint(&mut source);
+    let checkpoint = source.checkpoint.clone();
+    let prefix_bytes = source.checkpoint_keyboard_prefix_bytes;
+    assert_eq!(&checkpoint.payload[..prefix_bytes], b"\x1b[>4;2m");
+    let mut restored = terminal_state_from_checkpoint(checkpoint.clone());
+    assert_eq!(
+      restored.input_modes.modify_other_keys(),
+      ModifyOtherKeys::Mode2
+    );
+    assert_eq!(restored.terminal.dump(), source.terminal.dump());
+
+    // Older contracts remove only the captured preamble. The mouse/paste
+    // modes and AVT's incomplete CSI must remain byte-for-byte unchanged.
+    let mut legacy_checkpoint = checkpoint;
+    legacy_checkpoint.payload.drain(..prefix_bytes);
+    let mut legacy = terminal_state_from_checkpoint(legacy_checkpoint);
+    assert_eq!(legacy.input_modes.modify_other_keys(), ModifyOtherKeys::Off);
+    assert_eq!(legacy.input_modes.mouse(), source.input_modes.mouse());
+    assert!(legacy.input_modes.bracketed_paste());
+    assert_eq!(legacy.terminal.dump(), source.terminal.dump());
+
+    for state in [&mut source, &mut restored, &mut legacy] {
+      feed_terminal_bytes(state, b"m\r\nnext");
+      assert_eq!(
+        state.input_modes.modify_other_keys(),
+        ModifyOtherKeys::Mode1
+      );
+    }
+    assert_eq!(restored.terminal.dump(), source.terminal.dump());
+    assert_eq!(legacy.terminal.dump(), source.terminal.dump());
+    feed_terminal_bytes(&mut source, b"\x1b[>4n");
+    refresh_checkpoint(&mut source);
+    assert_eq!(
+      &source.checkpoint.payload[..source.checkpoint_keyboard_prefix_bytes],
+      b"\x1b[>4;0m"
+    );
+    assert_eq!(
+      terminal_state_from_checkpoint(source.checkpoint.clone())
+        .input_modes
+        .modify_other_keys(),
+      ModifyOtherKeys::Off
+    );
+  }
+
+  #[test]
+  fn delivery_uses_the_keyboard_preamble_from_its_geometry_checkpoint() {
+    let fixture = PtyViewFixture::new();
+    let terminal = &fixture.terminals[0];
+    let (captured, prefix_bytes, current_sequence) = {
+      let mut state = lock(&terminal.state);
+      let generation = state.history.generation;
+      let data = b"\x1b[>4;2m\x1b[3J";
+      feed_terminal_bytes(&mut state, data);
+      state.journal.append(data);
+      refresh_checkpoint_after_output(&mut state, generation, u64::MAX);
+      let captured = state
+        .last_geometry_checkpoint
+        .as_ref()
+        .unwrap()
+        .checkpoint
+        .clone();
+      let prefix_bytes = state
+        .last_geometry_checkpoint
+        .as_ref()
+        .unwrap()
+        .checkpoint_keyboard_prefix_bytes;
+      let later = b"\x1b[>4;0m";
+      feed_terminal_bytes(&mut state, later);
+      state.journal.append(later);
+      refresh_checkpoint(&mut state);
+      assert_eq!(
+        &state.checkpoint.payload[..state.checkpoint_keyboard_prefix_bytes],
+        later
+      );
+      (captured, prefix_bytes, state.journal.next_sequence())
+    };
+    let snapshot = terminal.snapshot_for_delivery(Some(0), None).unwrap();
+    assert_eq!(snapshot.checkpoint.as_ref(), Some(&captured));
+    assert_eq!(snapshot.checkpoint_keyboard_prefix_bytes, prefix_bytes);
+    assert_eq!(&captured.payload[..prefix_bytes], b"\x1b[>4;2m");
+    let latest = terminal.fresh_snapshot().unwrap();
+    let checkpoint = latest.checkpoint.unwrap();
+    assert_eq!(
+      &checkpoint.payload[..latest.checkpoint_keyboard_prefix_bytes],
+      b"\x1b[>4;0m"
+    );
+    let resumed = terminal
+      .snapshot_for_delivery(Some(current_sequence), Some(u64::MAX))
+      .unwrap();
+    assert!(resumed.checkpoint.is_none());
+    assert_eq!(resumed.checkpoint_keyboard_prefix_bytes, 0);
   }
 
   #[test]
@@ -3376,6 +3494,13 @@ mod tests {
     for ch in payload.chars() {
       input_modes.feed(ch);
     }
+    let keyboard_prefix = input_modes.restore_keyboard_sequence();
+    let checkpoint_keyboard_prefix_bytes =
+      if checkpoint.payload.starts_with(keyboard_prefix.as_bytes()) {
+        keyboard_prefix.len()
+      } else {
+        0
+      };
     TerminalState {
       terminal,
       input_modes,
@@ -3391,6 +3516,7 @@ mod tests {
       journal: OutputJournal::new(1024),
       terminal_size: checkpoint.terminal_size.clone(),
       checkpoint,
+      checkpoint_keyboard_prefix_bytes,
       checkpoint_geometry_revision: 0,
       geometry_revision: 0,
       last_geometry_change_sequence: None,

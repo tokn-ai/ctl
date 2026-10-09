@@ -1,15 +1,20 @@
 use base64::Engine as _;
+#[cfg(unix)]
+use crossterm::event::{
+  KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+};
 use crossterm::{
   cursor::{Hide, Show},
   event::{
-    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    Event,
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
   },
   execute,
   style::{Attribute, ResetColor, SetAttribute},
   terminal::{self, DisableLineWrap, EnableLineWrap, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use std::io::{self, IsTerminal, Write};
+#[cfg(not(unix))]
+use std::io::IsTerminal;
+use std::io::{self, Write};
 use std::sync::{
   Arc,
   atomic::{AtomicBool, Ordering},
@@ -21,6 +26,8 @@ pub struct Terminal {
   stop: Arc<AtomicBool>,
   reader: Option<std::thread::JoinHandle<()>>,
   events: Option<mpsc::Receiver<io::Result<Event>>>,
+  #[cfg(unix)]
+  keyboard_enhancement_attempted: bool,
 }
 
 impl Terminal {
@@ -30,6 +37,8 @@ impl Terminal {
       stop: Arc::new(AtomicBool::new(false)),
       reader: None,
       events: None,
+      #[cfg(unix)]
+      keyboard_enhancement_attempted: false,
     };
     execute!(
       io::stdout(),
@@ -39,10 +48,27 @@ impl Terminal {
       EnableMouseCapture,
       Hide
     )?;
+    #[cfg(unix)]
+    {
+      // Unsupported terminals ignore this request. Querying support would delay
+      // the first screen and compete with the event reader for terminal input.
+      // Mark the attempt before writing so a flush failure still restores it.
+      guard.keyboard_enhancement_attempted = true;
+      execute!(
+        io::stdout(),
+        PushKeyboardEnhancementFlags(
+          KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+            | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
+        )
+      )?;
+    }
     let (sender, receiver) = mpsc::channel(128);
     let stop = guard.stop.clone();
     guard.events = Some(receiver);
     guard.reader = Some(std::thread::spawn(move || {
+      #[cfg(unix)]
+      crate::host_input::read_events(&sender, &stop);
+      #[cfg(not(unix))]
       while !stop.load(Ordering::Acquire) {
         if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
           let _ = sender.try_send(Err(io::Error::new(
@@ -51,10 +77,10 @@ impl Terminal {
           )));
           return;
         }
-        match event::poll(Duration::from_millis(50)) {
+        match crossterm::event::poll(Duration::from_millis(50)) {
           Ok(false) => {}
           Ok(true) => {
-            let event = event::read();
+            let event = crossterm::event::read();
             let failed = event.is_err();
             // Keep the input thread bounded and responsive to terminal teardown.
             let mut pending = event;
@@ -103,6 +129,12 @@ impl Drop for Terminal {
       if reader.is_finished() {
         let _ = reader.join();
       }
+    }
+    #[cfg(unix)]
+    if self.keyboard_enhancement_attempted {
+      // The enhancement stack belongs to the active screen; pop before leaving
+      // it, including when entry failed after the request was written.
+      let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
     }
     let _ = execute!(
       io::stdout(),

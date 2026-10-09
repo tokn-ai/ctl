@@ -33,6 +33,26 @@ const SGR: u8 = 2;
 const URXVT: u8 = 4;
 const SGR_PIXELS: u8 = 8;
 
+/// The xterm modified-character reporting level requested by the application.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum ModifyOtherKeys {
+  #[default]
+  Off,
+  Mode1,
+  Mode2,
+}
+
+impl ModifyOtherKeys {
+  #[must_use]
+  pub fn level(self) -> u8 {
+    match self {
+      Self::Off => 0,
+      Self::Mode1 => 1,
+      Self::Mode2 => 2,
+    }
+  }
+}
+
 impl MouseModes {
   #[must_use]
   pub fn enabled(self) -> bool {
@@ -72,7 +92,7 @@ enum Control {
   },
 }
 
-/// A bounded observer for application mouse and bracketed-paste modes.
+/// A bounded observer for application mouse, paste, and keyboard modes.
 ///
 /// Feed decoded output characters, including incomplete controls. String
 /// payloads never change input modes; ESC and C1 controls cancel strings as
@@ -82,6 +102,7 @@ enum Control {
 pub struct TerminalInputModes {
   mouse: MouseModes,
   bracketed_paste: bool,
+  modify_other_keys: ModifyOtherKeys,
   control: Control,
 }
 
@@ -96,29 +117,36 @@ impl TerminalInputModes {
     self.bracketed_paste
   }
 
+  #[must_use]
+  pub fn modify_other_keys(&self) -> ModifyOtherKeys {
+    self.modify_other_keys
+  }
+
   /// Observe one decoded character from the application's terminal output.
-  pub fn feed(&mut self, ch: char) {
+  /// Returns true when a completed control queries the current keyboard level.
+  /// Observers that do not own input can ignore that query.
+  pub fn feed(&mut self, ch: char) -> bool {
     if matches!(ch, '\x18' | '\x1a' | '\u{80}'..='\u{8f}' | '\u{91}'..='\u{97}' | '\u{99}' | '\u{9a}' | '\u{9c}')
     {
       self.control = Control::Ground;
-      return;
+      return false;
     }
     match ch {
       '\x1b' => {
         self.control = Control::Escape;
-        return;
+        return false;
       }
       '\u{9b}' => {
         self.control = Control::Csi(String::new());
-        return;
+        return false;
       }
       '\u{9d}' => {
         self.control = Control::String { osc: true };
-        return;
+        return false;
       }
       '\u{90}' | '\u{98}' | '\u{9e}' | '\u{9f}' => {
         self.control = Control::String { osc: false };
-        return;
+        return false;
       }
       _ => {}
     }
@@ -126,7 +154,7 @@ impl TerminalInputModes {
       if osc && ch == '\x07' {
         self.control = Control::Ground;
       }
-      return;
+      return false;
     }
     let control = std::mem::take(&mut self.control);
     match control {
@@ -139,14 +167,20 @@ impl TerminalInputModes {
         'c' => {
           self.mouse = MouseModes::default();
           self.bracketed_paste = false;
+          self.modify_other_keys = ModifyOtherKeys::Off;
         }
         ch if ch.is_ascii_control() => self.control = Control::Escape,
         _ => {}
       },
       Control::Csi(mut parameters) => {
         if ('@'..='~').contains(&ch) || ch > '\u{9f}' {
+          if ch == 'm' && parameters == "?4" {
+            return true;
+          }
           if matches!(ch, 'h' | 'l') {
             self.private_modes(&parameters, ch == 'h');
+          } else if matches!(ch, 'm' | 'n') {
+            self.keyboard_modes(&parameters, ch);
           }
         } else if ch.is_ascii_control() {
           self.control = Control::Csi(parameters);
@@ -162,6 +196,7 @@ impl TerminalInputModes {
       }
       _ => {}
     }
+    false
   }
 
   /// Restore these modes on an initially reset terminal before its screen dump.
@@ -194,6 +229,43 @@ impl TerminalInputModes {
         .collect::<Vec<_>>()
         .join(";");
       format!("\x1b[?{parameters}h")
+    }
+  }
+
+  /// Restore keyboard reporting separately so older negotiated contracts can
+  /// retain their original checkpoint payload without examining screen bytes.
+  #[must_use]
+  pub fn restore_keyboard_sequence(&self) -> String {
+    format!("\x1b[>4;{}m", self.modify_other_keys.level())
+  }
+
+  fn keyboard_modes(&mut self, parameters: &str, final_byte: char) {
+    let Some(parameters) = parameters.strip_prefix('>') else {
+      return;
+    };
+    if parameters.is_empty() && final_byte == 'm' {
+      self.modify_other_keys = ModifyOtherKeys::Off;
+      return;
+    }
+    let mut values = parameters.split(';');
+    if values.next().and_then(|value| value.parse::<u16>().ok()) != Some(4) {
+      return;
+    }
+    let level = values.next();
+    if values.next().is_some() {
+      return;
+    }
+    match (final_byte, level) {
+      ('m', None | Some("")) | ('n', None) => {
+        self.modify_other_keys = ModifyOtherKeys::Off;
+      }
+      ('m', Some(value)) => match value.parse::<u16>() {
+        Ok(0) => self.modify_other_keys = ModifyOtherKeys::Off,
+        Ok(1) => self.modify_other_keys = ModifyOtherKeys::Mode1,
+        Ok(2) => self.modify_other_keys = ModifyOtherKeys::Mode2,
+        _ => {}
+      },
+      _ => {}
     }
   }
 
@@ -315,6 +387,71 @@ mod tests {
     assert_eq!(restored.mouse().encoding(), MouseEncoding::Urxvt);
     feed(&mut restored, "\x1b[?1015l");
     assert_eq!(restored.mouse().encoding(), MouseEncoding::Utf8);
+  }
+
+  #[test]
+  fn modified_key_levels_and_reset_controls_follow_xterm_requests() {
+    let mut modes = TerminalInputModes::default();
+    for (output, expected) in [
+      ("\x1b[>4;1m", ModifyOtherKeys::Mode1),
+      ("\x1b[>4;2m", ModifyOtherKeys::Mode2),
+      ("\x1b[>4;0m", ModifyOtherKeys::Off),
+      ("\x1b[>4;2m\x1b[>4m", ModifyOtherKeys::Off),
+      ("\x1b[>4;2m\x1b[>4;m", ModifyOtherKeys::Off),
+      ("\x1b[>4;2m\x1b[>m", ModifyOtherKeys::Off),
+      ("\x1b[>4;2m\x1b[>4n", ModifyOtherKeys::Off),
+      ("\x1b[>4;2m\x1bc", ModifyOtherKeys::Off),
+    ] {
+      feed(&mut modes, output);
+      assert_eq!(modes.modify_other_keys(), expected, "{output:?}");
+      assert_eq!(expected.level(), modes.modify_other_keys().level());
+    }
+  }
+
+  #[test]
+  fn keyboard_modes_ignore_queries_strings_and_invalid_parameters() {
+    let mut modes = TerminalInputModes::default();
+    feed(&mut modes, "\x1b[>4;1m");
+    for output in [
+      "\x1b[?4m",
+      "\x1b[4;2m",
+      "\x1b[>1;2m",
+      "\x1b[>4;3m",
+      "\x1b[>4;-1m",
+      "\x1b[>4;2;0m",
+      "\x1b[>4:2m",
+      "\x1b[>4;2n",
+      "\x1b[>4;2\x18m",
+      "\x1b]title >4;2m\x07",
+      "\x1bPdata >4;2m\x1b\\",
+      "\u{9d}title >4;2m\u{9c}",
+    ] {
+      feed(&mut modes, output);
+      assert_eq!(
+        modes.modify_other_keys(),
+        ModifyOtherKeys::Mode1,
+        "{output:?}"
+      );
+    }
+    feed(&mut modes, &format!("\x1b[>4;{}2m", "0".repeat(64)));
+    assert_eq!(modes.modify_other_keys(), ModifyOtherKeys::Mode1);
+  }
+
+  #[test]
+  fn keyboard_fragments_and_restore_leave_other_input_modes_independent() {
+    let mut modes = TerminalInputModes::default();
+    feed(&mut modes, "\x1b[?1002;1006;2004h\x1b[>4;");
+    assert_eq!(modes.modify_other_keys(), ModifyOtherKeys::Off);
+    feed(&mut modes, "2m");
+    let mut restored = TerminalInputModes::default();
+    feed(&mut restored, &modes.restore_keyboard_sequence());
+    feed(&mut restored, &modes.restore_sequences());
+    assert_eq!(restored, modes);
+    feed(&mut restored, "\u{9b}>4;");
+    feed(&mut restored, "1m");
+    assert_eq!(restored.modify_other_keys(), ModifyOtherKeys::Mode1);
+    assert_eq!(restored.mouse(), modes.mouse());
+    assert!(restored.bracketed_paste());
   }
 
   #[test]

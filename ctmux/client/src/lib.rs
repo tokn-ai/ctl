@@ -651,6 +651,12 @@ impl AttachmentControl {
     ctmux_proto::supports_divider_resize(self.protocol_version)
   }
 
+  /// Whether checkpoints retain application-requested modified-key modes.
+  #[must_use]
+  pub fn supports_extended_keys(&self) -> bool {
+    ctmux_proto::supports_extended_keys(self.protocol_version)
+  }
+
   /// Queues movement of the focused pane's nearest divider in cell units.
   ///
   /// The daemon validates membership and minimum pane sizes, atomically clears
@@ -2844,6 +2850,15 @@ mod tests {
   }
 
   #[tokio::test]
+  async fn an_older_daemon_selection_retains_legacy_keyboard_behavior() {
+    let previous = ctmux_proto::CONTRACT_V1_1_17;
+    let advertised = ctl_core::component::ProtocolInfo::new("ctmux", 17, previous, &[previous]);
+    let info = protocol_reply(previous, vec![advertised]).await.unwrap();
+    assert!(!ctmux_proto::supports_extended_keys(info.protocol_version));
+    assert!(ctmux_proto::supports_divider_resize(info.protocol_version));
+  }
+
+  #[tokio::test]
   async fn handshake_rejects_unoffered_or_unadvertised_selection() {
     let unoffered = ctl_core::protocol::ProtocolVersion::new(1, 0, 14);
     let advertisement =
@@ -3107,6 +3122,7 @@ mod tests {
       let runner = tokio::spawn(controller.run());
       assert!(control.supports_pane_resize());
       assert!(!control.supports_divider_resize());
+      assert!(!control.supports_extended_keys());
       assert_eq!(
         control
           .resize_divider(divider_request(), "unsupported".into())

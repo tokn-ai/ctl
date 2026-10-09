@@ -79,6 +79,50 @@ fn error(code: &str, message: &str) -> Response {
 }
 
 fn handle(request: &Request) -> Response {
+  use ctl_core::observability::{Event, Operation, Outcome};
+  let (event, subject) = match request {
+    Request::Forget { credential_id } => (Event::CredentialRemove, Some(credential_id.as_str())),
+    Request::Clear {} => (Event::CredentialClear, None),
+    _ => (Event::CredentialInventory, None),
+  };
+  let operation = Operation::start(event, subject);
+  let response = handle_inner(request);
+  operation.finish(
+    if matches!(response, Response::Error { .. }) {
+      Outcome::Failed
+    } else {
+      Outcome::Succeeded
+    },
+    match &response {
+      Response::Error { code, .. } => Some(audit_error_code(code)),
+      _ => None,
+    },
+    None,
+  );
+  response
+}
+
+// Never persist arbitrary error strings, even when they came from a helper.
+fn audit_error_code(code: &str) -> &'static str {
+  match code {
+    "credential_request_invalid" => "credential_request_invalid",
+    "credential_list_failed" => "credential_list_failed",
+    "credential_import_failed" => "credential_import_failed",
+    "credential_discovery_failed" => "credential_discovery_failed",
+    "credential_forget_failed" => "credential_forget_failed",
+    "credential_clear_failed" => "credential_clear_failed",
+    "credential_store_unsupported" => "credential_store_unsupported",
+    "credential_store_busy" => "credential_store_busy",
+    "credential_store_missing_entitlement" => "credential_store_missing_entitlement",
+    "credential_store_unavailable" => "credential_store_unavailable",
+    "credential_store_locked" => "credential_store_locked",
+    "credential_discovery_limit" => "credential_discovery_limit",
+    "credential_discovery_conflict" => "credential_discovery_conflict",
+    _ => "credential_request_failed",
+  }
+}
+
+fn handle_inner(request: &Request) -> Response {
   if let Request::Forget { credential_id } = request
     && crate::credential_metadata::item_identity(credential_id).is_none()
   {

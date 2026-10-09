@@ -133,6 +133,7 @@ async fn changed_file_is_rejected_before_import() {
 
 #[test]
 fn rejected_requests_never_reach_keychain_or_echo_secret_fields() {
+  let fixture = Fixture::new();
   for request in [
     br#"{"type":"forget","identity_id":"another-keychain-service"}"#.to_vec(),
     br#"{"type":"list","paths":[],"passphrase":"synthetic-secret-canary"}"#.to_vec(),
@@ -140,6 +141,7 @@ fn rejected_requests_never_reach_keychain_or_echo_secret_fields() {
   ] {
     let mut child = Command::new(helper_program())
       .arg("--identity-request")
+      .env("HOME", &fixture.0)
       .env_remove("CTLD_ASKPASS")
       .env_remove("CTLD_IDENTITY_ASKPASS")
       .stdin(Stdio::piped())

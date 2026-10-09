@@ -1,5 +1,9 @@
 //! Per-user owner of authenticated OpenSSH control masters and SSH credentials.
 
+use ctl_core::observability::{
+  Event as HistoryEvent, Operation as HistoryOperation, Outcome as HistoryOutcome,
+};
+
 mod credential_metadata;
 pub mod credentials;
 mod endpoint_registry;
@@ -722,6 +726,26 @@ async fn ensure_master_with_interaction(
   target: SshTarget,
   interactive: bool,
 ) -> Result<(), RequestError> {
+  let operation = HistoryOperation::start(HistoryEvent::Connection, Some(&target_key(&target)));
+  let result = ensure_master_with_interaction_inner(stream, state, target, interactive).await;
+  operation.finish(
+    if result.is_ok() {
+      HistoryOutcome::Succeeded
+    } else {
+      HistoryOutcome::Failed
+    },
+    result.as_ref().err().map(RequestError::code),
+    None,
+  );
+  result
+}
+
+async fn ensure_master_with_interaction_inner(
+  stream: &mut ctl_ipc::Stream,
+  state: Arc<State>,
+  target: SshTarget,
+  interactive: bool,
+) -> Result<(), RequestError> {
   validate_target(&target)?;
   let lifecycle = state.target(&target);
   let mut attempt = lifecycle.attempt();
@@ -1406,6 +1430,25 @@ async fn master_status(
 }
 
 async fn disconnect_master(
+  stream: &mut ctl_ipc::Stream,
+  state: &State,
+  target: &SshTarget,
+) -> Result<(), RequestError> {
+  let operation = HistoryOperation::start(HistoryEvent::Disconnect, Some(&target_key(target)));
+  let result = disconnect_master_inner(stream, state, target).await;
+  operation.finish(
+    if result.is_ok() {
+      HistoryOutcome::Succeeded
+    } else {
+      HistoryOutcome::Failed
+    },
+    result.as_ref().err().map(RequestError::code),
+    None,
+  );
+  result
+}
+
+async fn disconnect_master_inner(
   stream: &mut ctl_ipc::Stream,
   state: &State,
   target: &SshTarget,

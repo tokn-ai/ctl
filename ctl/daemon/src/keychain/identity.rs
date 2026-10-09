@@ -74,6 +74,29 @@ fn load_inner(
   canceled: Option<&AtomicBool>,
   authorization: Option<&super::approval::Attempt>,
 ) -> Result<Option<Zeroizing<String>>, IdentityError> {
+  use ctl_core::observability::{Event, Operation, Outcome};
+  let operation = Operation::start(Event::CredentialRead, Some(&snapshot.identity_id));
+  let result = load_unrecorded(snapshot, context, canceled, authorization);
+  operation.finish(
+    if matches!(&result, Ok(None)) {
+      Outcome::Missing
+    } else if result.is_ok() {
+      Outcome::Succeeded
+    } else {
+      Outcome::Failed
+    },
+    result.as_ref().err().map(|error| error.code()),
+    None,
+  );
+  result
+}
+
+fn load_unrecorded(
+  snapshot: &IdentitySnapshot,
+  context: Option<&str>,
+  canceled: Option<&AtomicBool>,
+  authorization: Option<&super::approval::Attempt>,
+) -> Result<Option<Zeroizing<String>>, IdentityError> {
   let reason = purpose::identity("Read", &snapshot.path, context);
   let records = with_authentication(
     canceled,
@@ -172,6 +195,26 @@ fn check_protected_binding(
 }
 
 pub(crate) fn save(
+  snapshot: &IdentitySnapshot,
+  verified: &VerifiedIdentity,
+  passphrase: &str,
+) -> Result<(), IdentityError> {
+  use ctl_core::observability::{Event, Operation, Outcome};
+  let operation = Operation::start(Event::CredentialSave, Some(&snapshot.identity_id));
+  let result = save_unrecorded(snapshot, verified, passphrase);
+  operation.finish(
+    if result.is_ok() {
+      Outcome::Succeeded
+    } else {
+      Outcome::Failed
+    },
+    result.as_ref().err().map(|error| error.code()),
+    None,
+  );
+  result
+}
+
+fn save_unrecorded(
   snapshot: &IdentitySnapshot,
   verified: &VerifiedIdentity,
   passphrase: &str,

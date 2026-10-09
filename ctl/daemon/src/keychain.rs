@@ -80,6 +80,28 @@ pub(crate) fn load_for_connection(
   prompt: &str,
   authorization: &approval::Attempt,
 ) -> Result<Option<Zeroizing<String>>, Error> {
+  use ctl_core::observability::{Event, Operation, Outcome};
+  let operation = Operation::start(Event::CredentialRead, Some(&crate::target_key(target)));
+  let result = load_for_connection_recorded_inner(target, prompt, authorization);
+  operation.finish(
+    if matches!(&result, Ok(None)) {
+      Outcome::Missing
+    } else if result.is_ok() {
+      Outcome::Succeeded
+    } else {
+      Outcome::Failed
+    },
+    result.as_ref().err().map(|_| "keychain_operation_failed"),
+    result.as_ref().err().map(|error| error.0.code()),
+  );
+  result
+}
+
+fn load_for_connection_recorded_inner(
+  target: &SshTarget,
+  prompt: &str,
+  authorization: &approval::Attempt,
+) -> Result<Option<Zeroizing<String>>, Error> {
   let operation = operation::acquire()?;
   let reason = format!(
     "Read {} to authenticate this SSH connection",
@@ -156,6 +178,25 @@ fn secret_string(mut record: ctl_keychain_client::Record) -> Result<Zeroizing<St
 }
 
 pub fn save(target: &SshTarget, secrets: &HashMap<String, Zeroizing<String>>) -> Result<(), Error> {
+  use ctl_core::observability::{Event, Operation, Outcome};
+  let operation = Operation::start(Event::CredentialSave, Some(&crate::target_key(target)));
+  let result = save_recorded_inner(target, secrets);
+  operation.finish(
+    if result.is_ok() {
+      Outcome::Succeeded
+    } else {
+      Outcome::Failed
+    },
+    result.as_ref().err().map(|_| "keychain_operation_failed"),
+    result.as_ref().err().map(|error| error.0.code()),
+  );
+  result
+}
+
+fn save_recorded_inner(
+  target: &SshTarget,
+  secrets: &HashMap<String, Zeroizing<String>>,
+) -> Result<(), Error> {
   let _operation = operation::acquire()?;
   for (prompt, secret) in secrets {
     let metadata = Metadata::from_prompt(target, prompt);
@@ -251,6 +292,22 @@ pub fn never_save(target: &SshTarget) -> Result<(), Error> {
 }
 
 pub fn delete(target: &SshTarget) -> Result<(), Error> {
+  use ctl_core::observability::{Event, Operation, Outcome};
+  let operation = Operation::start(Event::CredentialRemove, Some(&crate::target_key(target)));
+  let result = delete_recorded_inner(target);
+  operation.finish(
+    if result.is_ok() {
+      Outcome::Succeeded
+    } else {
+      Outcome::Failed
+    },
+    result.as_ref().err().map(|_| "keychain_operation_failed"),
+    result.as_ref().err().map(|error| error.0.code()),
+  );
+  result
+}
+
+fn delete_recorded_inner(target: &SshTarget) -> Result<(), Error> {
   let _operation = operation::acquire()?;
   delete_inner(target)
 }

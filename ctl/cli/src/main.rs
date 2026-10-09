@@ -3,6 +3,7 @@ mod commands;
 #[cfg(unix)]
 mod components;
 mod connection;
+mod history;
 mod host;
 mod openssh;
 mod passwords;
@@ -52,6 +53,10 @@ enum RemotePlatform {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+  /// Review local daemon diagnostics without starting ctld.
+  Logs(history::Arguments),
+  /// Review local connection and credential audit history.
+  Audit(history::Arguments),
   /// Inspect and explicitly sync complete component build bundles.
   #[cfg(unix)]
   Components {

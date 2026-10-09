@@ -42,6 +42,12 @@ struct Arguments {
 }
 
 fn main() {
+  if ["CTLD_ASKPASS", "CTLD_IDENTITY_ASKPASS"]
+    .iter()
+    .any(|name| std::env::var(name).as_deref() == Ok("1"))
+  {
+    ctl_core::observability::initialize();
+  }
   if let Some(code) = ctld::identities::askpass_exit_code() {
     std::process::exit(code);
   }
@@ -49,22 +55,18 @@ fn main() {
     std::process::exit(code);
   }
   let arguments = Arguments::parse();
+  if !arguments.component_info && !arguments.protocol_build && !arguments.protocol_version {
+    ctl_core::observability::initialize();
+  }
   if arguments.identity_agent_lifetime {
     if ctld::identities::run_lifetime().is_err() {
       std::process::exit(1);
     }
     return;
   }
-  if arguments.identity_request {
-    if ctld::identities::run(std::io::stdin().lock(), std::io::stdout().lock()).is_err() {
-      eprintln!("ctld: identity helper I/O failed");
-      std::process::exit(1);
-    }
-    return;
-  }
-  if arguments.credential_request {
-    if let Err(error) = ctld::credentials::run(std::io::stdin().lock(), std::io::stdout().lock()) {
-      eprintln!("ctld: credential helper I/O failed: {error}");
+  if arguments.identity_request || arguments.credential_request {
+    if let Err(error) = run_helper(arguments.identity_request) {
+      eprintln!("ctld: credential/identity helper I/O failed: {error}");
       std::process::exit(1);
     }
     return;
@@ -89,7 +91,20 @@ fn main() {
       .enable_all()
       .build()
       .expect("proxy runtime");
-    if let Err(error) = runtime.block_on(ctld::proxy_route::run(route, host, port)) {
+    let operation = ctl_core::observability::Operation::diagnostic(
+      ctl_core::observability::Event::ProxyConnection,
+    );
+    let result = runtime.block_on(ctld::proxy_route::run(route, host, port));
+    operation.finish(
+      if result.is_ok() {
+        ctl_core::observability::Outcome::Succeeded
+      } else {
+        ctl_core::observability::Outcome::Failed
+      },
+      result.as_ref().err().map(|_| "proxy_connection_failed"),
+      None,
+    );
+    if let Err(error) = result {
       eprintln!("ctld: {error}");
       std::process::exit(1);
     }
@@ -103,10 +118,47 @@ fn main() {
     println!("{}", ctl_ipc::PROTOCOL_VERSION);
     return;
   }
+  run_daemon(arguments);
+}
+
+fn run_helper(identity: bool) -> std::io::Result<()> {
+  use ctl_core::observability::{Event, Operation, Outcome};
+  let operation = Operation::diagnostic(Event::HelperRequest);
+  let result = if identity {
+    ctld::identities::run(std::io::stdin().lock(), std::io::stdout().lock())
+  } else {
+    ctld::credentials::run(std::io::stdin().lock(), std::io::stdout().lock())
+  };
+  operation.finish(
+    if result.is_ok() {
+      Outcome::Succeeded
+    } else {
+      Outcome::Failed
+    },
+    result.as_ref().err().map(|_| {
+      if identity {
+        "identity_helper_io_failed"
+      } else {
+        "credential_helper_io_failed"
+      }
+    }),
+    result.as_ref().err().and_then(std::io::Error::raw_os_error),
+  );
+  result
+}
+
+fn run_daemon(arguments: Arguments) {
+  let lifecycle =
+    ctl_core::observability::Operation::diagnostic(ctl_core::observability::Event::DaemonLifecycle);
   #[cfg(unix)]
   if arguments.detach_from_terminal
     && let Err(error) = detach_from_terminal()
   {
+    lifecycle.finish(
+      ctl_core::observability::Outcome::Failed,
+      Some("daemon_detach_failed"),
+      error.raw_os_error(),
+    );
     eprintln!("ctld: could not detach from the invoking terminal: {error}");
     std::process::exit(1);
   }
@@ -116,6 +168,11 @@ fn main() {
   {
     Ok(runtime) => runtime,
     Err(error) => {
+      lifecycle.finish(
+        ctl_core::observability::Outcome::Failed,
+        Some("daemon_runtime_failed"),
+        error.raw_os_error(),
+      );
       eprintln!("ctld: could not initialize the async runtime: {error}");
       std::process::exit(1);
     }
@@ -125,6 +182,15 @@ fn main() {
   let result = ctld::run_monitored(runtime, socket);
   #[cfg(not(target_os = "macos"))]
   let result = runtime.block_on(ctld::run(socket));
+  lifecycle.finish(
+    if result.is_ok() {
+      ctl_core::observability::Outcome::Succeeded
+    } else {
+      ctl_core::observability::Outcome::Failed
+    },
+    result.as_ref().err().map(|_| "daemon_failed"),
+    None,
+  );
   if let Err(error) = result {
     eprintln!("ctld: {error}");
     std::process::exit(1);

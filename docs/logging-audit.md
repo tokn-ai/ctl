@@ -31,16 +31,18 @@ timestamp order. Run UUID breaks ties between runs, and append order is retained
 within a run for equal timestamps. `--limit` accepts 1–10000. `--failed` selects
 failed and interrupted outcomes before applying the limit. Tables show UTC time,
 a short run ID, severity, component, short session/pane IDs, event, result,
-a short subject hash, duration, and a human-readable message with a fixed error classification.
+the submitted SSH endpoint when recorded, a short correlation hash, duration, and a human-readable message with a fixed error classification.
 JSON includes full run IDs, event/operation IDs, process IDs, timestamps, and
 completeness information.
 
 ## Contents and privacy
 
-The local record schema is version 4, adding human-readable messages to diagnostic lines.
+The local record schema is version 5, adding an optional structured SSH endpoint
+(destination, hostname, account, and port) to connection/disconnect records.
+Schema 4 added human-readable messages to diagnostic lines.
 Version 3 added severity, component, and typed context
 (session, pane, attachment IDs, exit code, and lease kind). Version 2 audit payloads
-remain readable with default context, and version 2/3 log lines remain readable.
+remain readable with default context, and version 2/3/4 log lines remain readable.
 Each process generates one `run_id` UUID;
 PID reuse cannot collide with a different run. All helper invocations and daemon
 runs get separate IDs. Each operation that spans work records `started` and a terminal
@@ -52,12 +54,22 @@ the separate credential operation records whether the requested action succeeded
 
 Only typed, allowlisted metadata is recorded. Subject IDs are SHA-256 hashes of
 connection identities or credential identifiers. They support correlation without
-putting hostnames, accounts, key paths, passwords, passphrases, private key bytes,
+putting key paths, passwords, passphrases, private key bytes,
 raw requests, or raw error messages in history. Hashes are deterministic, not
 anonymization against guessing. Error details are fixed codes and, where available,
 a numeric OS status. Only generated session, pane, and public attachment UUIDs
 are recorded: session names, working directories, commands, terminal input/output,
 and secret reconnect attachment tokens are excluded.
+
+Connection records deliberately include the submitted nonsecret endpoint in local
+history; SSH aliases are not claimed to be resolved network addresses. Older
+hash-only records show no host. The table's CORRELATION ID is a shortened hash,
+not a host name. It remains useful to distinguish routes to the same endpoint.
+
+Ensure-master requests and reuse are debug diagnostics, not new connection audit
+events. Info-level `Open SSH connection` records start only after checking that
+no existing master can be reused. Repeated reuse requests therefore do not imply
+repeated authentication. Errors before establishment remain diagnostic failures.
 
 ## Diagnostic levels and format
 
@@ -139,7 +151,7 @@ sidecars. SQLite is bundled at build time; users need no SQLite installation.
 All ctld processes share `audit.sqlite3`. Each event is inserted in a SQLite
 transaction, with a unique event ID and indexed time, run, subject, and outcome.
 Database schema version 1 is identified by SQLite `application_id` and
-`user_version`; it is separate from local record schema version 4 and named wire
+`user_version`; it is separate from local record schema version 5 and named wire
 protocols. Unsupported schemas and corrupt databases are refused without resetting
 or overwriting them. Full synchronous commits and rollback journaling make
 successful inserts durable and allow CLI queries without creating WAL sidecars.

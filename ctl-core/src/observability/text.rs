@@ -42,8 +42,16 @@ impl Record {
       let (prefix, fields) = metadata
         .split_once(" session=")
         .ok_or_else(|| io::Error::other("invalid metadata layout"))?;
+      let endpoint = if self.schema_version >= 5 {
+        format!(
+          "\tconnection_endpoint={}",
+          serde_json::to_string(&self.connection_endpoint).map_err(io::Error::other)?
+        )
+      } else {
+        String::new()
+      };
       Ok(format!(
-        "{prefix}\tmessage={}\tsession={fields}",
+        "{prefix}\tmessage={}{endpoint}\tsession={fields}",
         serde_json::to_string(&self.message()).map_err(io::Error::other)?
       ))
     } else {
@@ -62,6 +70,13 @@ impl Record {
     } else {
       (line.to_owned(), None)
     };
+    let (metadata, endpoint) =
+      if let Some((prefix, rest)) = metadata.split_once("connection_endpoint=") {
+        let (endpoint, fields) = rest.split_once('\t')?;
+        (format!("{prefix}{fields}"), Some(endpoint.to_owned()))
+      } else {
+        (metadata, None)
+      };
     let fields: Vec<_> = metadata.split_whitespace().collect();
     if fields.len() != 19 {
       return None;
@@ -85,6 +100,10 @@ impl Record {
       },
       elapsed_ms: field(fields[10], "duration_ms")?.parse().ok()?,
       subject_id: optional_text(field(fields[11], "subject")?),
+      connection_endpoint: match endpoint {
+        Some(value) => serde_json::from_str(&value).ok()?,
+        None => None,
+      },
       error_code: optional_text(field(fields[12], "code")?),
       os_error: parse_optional(field(fields[13], "os")?).ok()?,
       process_id: field(fields[14], "pid")?.parse().ok()?,

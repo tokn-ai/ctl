@@ -81,7 +81,8 @@ pub fn run(arguments: Arguments, stream: Stream) -> io::Result<()> {
             "SESSION/PANE",
             "EVENT",
             "RESULT",
-            "SUBJECT",
+            "HOST",
+            "CORRELATION ID",
             "DURATION",
             "MESSAGE"
           ],
@@ -96,7 +97,7 @@ pub fn run(arguments: Arguments, stream: Stream) -> io::Result<()> {
   Ok(())
 }
 
-fn row(record: &Record) -> [String; 10] {
+fn row(record: &Record) -> [String; 11] {
   let time = OffsetDateTime::from_unix_timestamp_nanos(i128::from(record.timestamp_ms) * 1_000_000)
     .ok()
     .and_then(|time| time.format(&Rfc3339).ok())
@@ -135,6 +136,10 @@ fn row(record: &Record) -> [String; 10] {
       .as_str()
       .unwrap()
       .to_owned(),
+    record
+      .connection_endpoint
+      .as_ref()
+      .map_or_else(|| "—".into(), |endpoint| endpoint.display()),
     record
       .subject_id
       .as_deref()

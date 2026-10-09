@@ -535,7 +535,7 @@ fn human_logs_round_trip_and_reject_corrupt_metadata() {
     serde_json::to_value(&record).unwrap()
   );
   assert!(Record::from_log_line(line.trim_end().as_bytes()).is_none());
-  assert!(Record::from_log_line(line.replace("schema=4", "schema=99").as_bytes()).is_none());
+  assert!(Record::from_log_line(line.replace("schema=5", "schema=99").as_bytes()).is_none());
   assert!(
     Record::from_log_line(line.replace("pane_spawn_failed", "secret/body").as_bytes()).is_none()
   );
@@ -717,4 +717,45 @@ fn foreground_redirected_stderr_matches_file_and_detached_is_file_only() {
     };
     assert_eq!(String::from_utf8(output.stderr).unwrap(), expected);
   }
+}
+
+#[test]
+fn connection_endpoints_roundtrip_and_legacy_records_stay_unknown() {
+  let mut record = record(Outcome::Succeeded);
+  record.event = Event::Connection;
+  record.connection_endpoint = Some(ConnectionEndpoint {
+    destination: "work".into(),
+    hostname: Some("2001:db8::1".into()),
+    user: Some("alice".into()),
+    port: Some(2222),
+  });
+  assert_eq!(
+    record.connection_endpoint.as_ref().unwrap().display(),
+    "alice@[2001:db8::1]:2222"
+  );
+  let line = format!("{}\n", record.log_line().unwrap());
+  let decoded = Record::from_log_line(line.as_bytes()).unwrap();
+  assert_eq!(decoded.connection_endpoint, record.connection_endpoint);
+  let fixture = Fixture::new();
+  let store = fixture.store();
+  for stream in [Stream::Logs, Stream::Audit] {
+    store.append(stream, &record).unwrap();
+    let history = store.read(stream, 10, false).unwrap();
+    assert!(history.complete);
+    assert_eq!(
+      history.records[0].connection_endpoint,
+      record.connection_endpoint
+    );
+  }
+  record.connection_endpoint.as_mut().unwrap().hostname = Some("host\nforged".into());
+  assert!(record.log_line().is_err());
+  record.connection_endpoint = None;
+  record.schema_version = 4;
+  let legacy = format!("{}\n", record.log_line().unwrap());
+  assert!(
+    Record::from_log_line(legacy.as_bytes())
+      .unwrap()
+      .connection_endpoint
+      .is_none()
+  );
 }

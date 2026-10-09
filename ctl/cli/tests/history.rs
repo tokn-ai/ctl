@@ -91,7 +91,16 @@ fn populated_history_filters_failures_and_reports_omitted_records_in_json_and_ta
       "event": "connection", "outcome": outcome, "subject_id": "a".repeat(64),
       "elapsed_ms": 123, "error_code": null, "os_error": null
     });
-    let record: ctl_core::observability::Record = serde_json::from_value(record).unwrap();
+    let mut record: ctl_core::observability::Record = serde_json::from_value(record).unwrap();
+    if outcome == "interrupted" {
+      record.schema_version = 5;
+      record.connection_endpoint = Some(ctl_core::observability::ConnectionEndpoint {
+        destination: "work".into(),
+        hostname: Some("example.test".into()),
+        user: Some("alice".into()),
+        port: Some(2222),
+      });
+    }
     writeln!(content, "{}", record.log_line().unwrap()).unwrap();
   }
   content.push_str("{bad record}\n");
@@ -121,7 +130,7 @@ fn populated_history_filters_failures_and_reports_omitted_records_in_json_and_ta
   assert_eq!(value["records"][0]["outcome"], "interrupted");
   assert_eq!(
     value["records"][0]["message"],
-    "Host connection: interrupted"
+    "Open SSH connection: interrupted"
   );
   assert_eq!(value["complete"], false);
   assert!(value["warning"].is_string());
@@ -130,7 +139,11 @@ fn populated_history_filters_failures_and_reports_omitted_records_in_json_and_ta
   let table = String::from_utf8(output.stdout).unwrap();
   assert!(table.contains("connection"));
   assert!(table.contains("MESSAGE"));
-  assert!(table.contains("Host connection: interrupted"));
+  assert!(table.contains("Open SSH connection: interrupted"));
+  assert!(table.contains("HOST"));
+  assert!(table.contains("alice@example.test:2222"));
+  assert!(table.contains("CORRELATION ID"));
+  assert!(!table.contains("SUBJECT"));
   assert!(table.contains("interrupted"));
   assert!(table.contains("123 ms"));
   assert!(!table.contains("succeeded"));

@@ -81,6 +81,8 @@ pub enum Event {
   HelperRequest,
   ProxyConnection,
   Connection,
+  ConnectionRequest,
+  ConnectionReuse,
   Disconnect,
   CredentialRead,
   CredentialSave,
@@ -125,6 +127,50 @@ pub enum Outcome {
   Interrupted,
 }
 
+/// Submitted SSH endpoint only; excludes keys, route configuration and credentials.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConnectionEndpoint {
+  pub destination: String,
+  pub hostname: Option<String>,
+  pub user: Option<String>,
+  pub port: Option<u16>,
+}
+
+impl ConnectionEndpoint {
+  #[must_use]
+  pub fn display(&self) -> String {
+    let host = self.hostname.as_deref().unwrap_or(&self.destination);
+    let host = if host.contains(':') {
+      format!("[{host}]")
+    } else {
+      host.to_owned()
+    };
+    let user = self
+      .user
+      .as_ref()
+      .map_or_else(String::new, |user| format!("{user}@"));
+    let port = self
+      .port
+      .map_or_else(String::new, |port| format!(":{port}"));
+    format!("{user}{host}{port}")
+  }
+
+  fn valid(&self) -> bool {
+    let valid_text = |value: &str| {
+      !value.is_empty()
+        && value.len() <= 1024
+        && !value
+          .chars()
+          .any(|value| value.is_control() || value.is_whitespace())
+    };
+    valid_text(&self.destination)
+      && self.hostname.as_deref().is_none_or(valid_text)
+      && self.user.as_deref().is_none_or(valid_text)
+      && self.port != Some(0)
+  }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Record {
@@ -143,6 +189,8 @@ pub struct Record {
   pub event: Event,
   pub outcome: Outcome,
   pub subject_id: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub connection_endpoint: Option<ConnectionEndpoint>,
   pub elapsed_ms: u64,
   pub error_code: Option<String>,
   pub os_error: Option<i32>,
@@ -271,9 +319,22 @@ pub fn diagnostic_event(
   emit(Stream::Logs, &record);
 }
 
+/// Reuse is an observation, not another authentication attempt or audit operation.
+pub fn connection_reused(subject: &str, endpoint: ConnectionEndpoint) {
+  let mut record = new_record(
+    Event::ConnectionReuse,
+    Level::Debug,
+    Context::default(),
+    Some(subject),
+  );
+  record.connection_endpoint = Some(endpoint);
+  record.outcome = Outcome::Succeeded;
+  emit(Stream::Logs, &record);
+}
+
 fn new_record(event: Event, level: Level, context: Context, subject: Option<&str>) -> Record {
   Record {
-    schema_version: 4,
+    schema_version: 5,
     level,
     context,
     component: *COMPONENT.get().unwrap_or(&Component::Ctld),
@@ -284,6 +345,7 @@ fn new_record(event: Event, level: Level, context: Context, subject: Option<&str
     process_id: std::process::id(),
     event,
     outcome: Outcome::Started,
+    connection_endpoint: None,
     subject_id: subject.map(|value| format!("{:x}", Sha256::digest(value.as_bytes()))),
     elapsed_ms: 0,
     error_code: None,
@@ -321,6 +383,31 @@ impl Operation {
     self.record.context = context;
   }
 
+  /// Record a connection operation with the submitted nonsecret endpoint.
+  #[must_use]
+  pub fn connection(event: Event, subject: &str, endpoint: ConnectionEndpoint) -> Self {
+    Self::begin_with_endpoint(
+      event,
+      Some(subject),
+      true,
+      Level::Info,
+      Context::default(),
+      Some(endpoint),
+    )
+  }
+
+  #[must_use]
+  pub fn connection_request(subject: &str, endpoint: ConnectionEndpoint) -> Self {
+    Self::begin_with_endpoint(
+      Event::ConnectionRequest,
+      Some(subject),
+      false,
+      Level::Debug,
+      Context::default(),
+      Some(endpoint),
+    )
+  }
+
   fn begin(
     event: Event,
     subject: Option<&str>,
@@ -328,7 +415,19 @@ impl Operation {
     level: Level,
     context: Context,
   ) -> Self {
-    let record = new_record(event, level, context, subject);
+    Self::begin_with_endpoint(event, subject, audit, level, context, None)
+  }
+
+  fn begin_with_endpoint(
+    event: Event,
+    subject: Option<&str>,
+    audit: bool,
+    level: Level,
+    context: Context,
+    endpoint: Option<ConnectionEndpoint>,
+  ) -> Self {
+    let mut record = new_record(event, level, context, subject);
+    record.connection_endpoint = endpoint;
     emit(Stream::Logs, &record);
     if audit {
       emit(Stream::Audit, &record);
@@ -406,7 +505,11 @@ fn now() -> u64 {
 
 impl Record {
   fn valid(&self) -> bool {
-    matches!(self.schema_version, 2..=4)
+    matches!(self.schema_version, 2..=5)
+      && self
+        .connection_endpoint
+        .as_ref()
+        .is_none_or(|endpoint| self.schema_version >= 5 && endpoint.valid())
       && i64::try_from(self.timestamp_ms).is_ok()
       && i64::try_from(self.elapsed_ms).is_ok()
       && self

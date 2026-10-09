@@ -740,13 +740,27 @@ async fn ensure_master_with_interaction(
   target: SshTarget,
   interactive: bool,
 ) -> Result<(), RequestError> {
-  let operation = HistoryOperation::start(HistoryEvent::Connection, Some(&target_key(&target)));
-  let result = ensure_master_with_interaction_inner(stream, state, target, interactive).await;
-  operation.finish(
+  let operation =
+    HistoryOperation::connection_request(&target_key(&target), history_endpoint(&target));
+  let mut connection_started = false;
+  let result = ensure_master_with_interaction_inner(
+    stream,
+    state,
+    target,
+    interactive,
+    &mut connection_started,
+  )
+  .await;
+  operation.finish_at(
     if result.is_ok() {
       HistoryOutcome::Succeeded
     } else {
       HistoryOutcome::Failed
+    },
+    if result.is_err() && !connection_started {
+      ctl_core::observability::Level::Error
+    } else {
+      ctl_core::observability::Level::Debug
     },
     result.as_ref().err().map(RequestError::code),
     None,
@@ -759,6 +773,7 @@ async fn ensure_master_with_interaction_inner(
   state: Arc<State>,
   target: SshTarget,
   interactive: bool,
+  connection_started: &mut bool,
 ) -> Result<(), RequestError> {
   validate_target(&target)?;
   let lifecycle = state.target(&target);
@@ -786,6 +801,7 @@ async fn ensure_master_with_interaction_inner(
   }
   let control_path = endpoint.control_path.clone();
   if reused {
+    ctl_core::observability::connection_reused(&target_key(&target), history_endpoint(&target));
     state.adopt(&target, &endpoint, None)?;
     attempt
       .run(async {
@@ -805,61 +821,80 @@ async fn ensure_master_with_interaction_inner(
       .await?
       .map_err(Into::into);
   }
-  let token = uuid::Uuid::new_v4().to_string();
-  let (prompt_tx, mut prompt_rx) = mpsc::channel(1);
-  state
-    .attempts
-    .lock()
-    .unwrap()
-    .insert(token.clone(), Attempt { prompts: prompt_tx });
-  let _attempt_guard = AttemptGuard {
-    token: token.clone(),
-    state: Arc::clone(&state),
-  };
-  let mut authentication = attempt
-    .run(ConnectionAuthentication::prepare(
-      &state,
-      &target,
-      interactive,
-    ))
-    .await??;
-  let mut child = start_master(
-    &target,
-    &endpoint,
-    &token,
+  *connection_started = true;
+  let operation = HistoryOperation::connection(
+    HistoryEvent::Connection,
+    &target_key(&target),
+    history_endpoint(&target),
+  );
+  let result = async {
+    let token = uuid::Uuid::new_v4().to_string();
+    let (prompt_tx, mut prompt_rx) = mpsc::channel(1);
     state
-      .socket_path
-      .as_deref()
-      .unwrap_or(&ctl_ipc::socket_path()),
-    #[cfg(target_os = "macos")]
-    Some(&authentication.identities),
-  )?;
-  let result = attempt
-    .run(wait_for_master(
-      stream,
-      &state,
+      .attempts
+      .lock()
+      .unwrap()
+      .insert(token.clone(), Attempt { prompts: prompt_tx });
+    let _attempt_guard = AttemptGuard {
+      token: token.clone(),
+      state: Arc::clone(&state),
+    };
+    let mut authentication = attempt
+      .run(ConnectionAuthentication::prepare(
+        &state,
+        &target,
+        interactive,
+      ))
+      .await??;
+    let mut child = start_master(
       &target,
       &endpoint,
-      &mut child,
-      &mut prompt_rx,
-      &mut authentication,
-    ))
-    .await;
-  #[cfg(target_os = "macos")]
-  if matches!(result, Ok(Ok(()))) {
-    attempt.run(authentication.connected(&target)).await?;
-  }
-  if endpoint.shared {
+      &token,
+      state
+        .socket_path
+        .as_deref()
+        .unwrap_or(&ctl_ipc::socket_path()),
+      #[cfg(target_os = "macos")]
+      Some(&authentication.identities),
+    )?;
+    let result = attempt
+      .run(wait_for_master(
+        stream,
+        &state,
+        &target,
+        &endpoint,
+        &mut child,
+        &mut prompt_rx,
+        &mut authentication,
+      ))
+      .await;
+    #[cfg(target_os = "macos")]
     if matches!(result, Ok(Ok(()))) {
-      state.remember_endpoint(&target, &endpoint, child.stdin.take());
+      attempt.run(authentication.connected(&target)).await?;
     }
-    // A configured master can already serve other applications. End only our
-    // anchor session; killing this process could terminate their channels.
-    release_shared_process(child);
-  } else if !matches!(result, Ok(Ok(()))) {
-    let _ = child.kill().await;
+    if endpoint.shared {
+      if matches!(result, Ok(Ok(()))) {
+        state.remember_endpoint(&target, &endpoint, child.stdin.take());
+      }
+      // A configured master can already serve other applications. End only our
+      // anchor session; killing this process could terminate their channels.
+      release_shared_process(child);
+    } else if !matches!(result, Ok(Ok(()))) {
+      let _ = child.kill().await;
+    }
+    result.and_then(|result| result)
   }
-  result?
+  .await;
+  operation.finish(
+    if result.is_ok() {
+      HistoryOutcome::Succeeded
+    } else {
+      HistoryOutcome::Failed
+    },
+    result.as_ref().err().map(RequestError::code),
+    None,
+  );
+  result
 }
 
 /// Per-connection authentication state. It owns temporary secrets and agents;
@@ -1448,7 +1483,11 @@ async fn disconnect_master(
   state: &State,
   target: &SshTarget,
 ) -> Result<(), RequestError> {
-  let operation = HistoryOperation::start(HistoryEvent::Disconnect, Some(&target_key(target)));
+  let operation = HistoryOperation::connection(
+    HistoryEvent::Disconnect,
+    &target_key(target),
+    history_endpoint(target),
+  );
   let result = disconnect_master_inner(stream, state, target).await;
   operation.finish(
     if result.is_ok() {
@@ -2142,6 +2181,15 @@ fn invalid_gateway(gateway: &SshGateway) -> bool {
     || gateway.identity_file.is_some()
     || gateway.mode == SshGatewayMode::AgentRelayOnly
     || (gateway.kind == GatewayKind::Socks5 && gateway.port.is_none())
+}
+
+fn history_endpoint(target: &SshTarget) -> ctl_core::observability::ConnectionEndpoint {
+  ctl_core::observability::ConnectionEndpoint {
+    destination: target.destination.clone(),
+    hostname: target.hostname.clone(),
+    user: target.user.clone(),
+    port: target.port,
+  }
 }
 
 fn target_key(target: &SshTarget) -> String {

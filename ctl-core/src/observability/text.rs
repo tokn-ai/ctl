@@ -1,6 +1,6 @@
 use super::{Component, Context, Event, Lease, Level, Outcome, Record};
 use serde::{Serialize, de::DeserializeOwned};
-use std::io;
+use std::{fmt::Write as _, io};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 impl Record {
@@ -17,7 +17,7 @@ impl Record {
         .map_err(io::Error::other)?
         .format(&Rfc3339)
         .map_err(io::Error::other)?;
-    let metadata = format!(
+    let mut metadata = format!(
       "{timestamp} {} {} {} {} session={} pane={} attachment={} exit_code={} lease={} duration_ms={} subject={} code={} os={} pid={} run={} operation={} event_id={} schema={}",
       name(self.level).to_ascii_uppercase(),
       name(self.component),
@@ -38,6 +38,15 @@ impl Record {
       self.event_id,
       self.schema_version,
     );
+    if self.schema_version >= 6 {
+      write!(
+        metadata,
+        " attempt={} correlation={}",
+        optional(self.attempt_id),
+        optional(self.correlation_id)
+      )
+      .expect("writing to a String cannot fail");
+    }
     if self.schema_version >= 4 {
       let (prefix, fields) = metadata
         .split_once(" session=")
@@ -78,7 +87,7 @@ impl Record {
         (metadata, None)
       };
     let fields: Vec<_> = metadata.split_whitespace().collect();
-    if fields.len() != 19 {
+    if !matches!(fields.len(), 19 | 21) {
       return None;
     }
     let timestamp = OffsetDateTime::parse(fields[0], &Rfc3339).ok()?;
@@ -109,9 +118,22 @@ impl Record {
       process_id: field(fields[14], "pid")?.parse().ok()?,
       run_id: field(fields[15], "run")?.parse().ok()?,
       operation_id: field(fields[16], "operation")?.parse().ok()?,
+      attempt_id: if fields.len() == 21 {
+        parse_optional(field(fields[19], "attempt")?).ok()?
+      } else {
+        None
+      },
+      correlation_id: if fields.len() == 21 {
+        parse_optional(field(fields[20], "correlation")?).ok()?
+      } else {
+        None
+      },
       event_id: field(fields[17], "event_id")?.parse().ok()?,
       schema_version: field(fields[18], "schema")?.parse().ok()?,
     };
+    if (record.schema_version >= 6) != (fields.len() == 21) {
+      return None;
+    }
     if record.schema_version >= 4 {
       let message: String = serde_json::from_str(message?).ok()?;
       // Wording may evolve independently of typed fields. Validate its framing,

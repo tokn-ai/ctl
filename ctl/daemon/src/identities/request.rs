@@ -66,7 +66,7 @@ async fn handle(request: Request) -> Result<Response, IdentityError> {
     Request::Forget { identity_id } => (Event::IdentityRemove, Some(identity_id.as_str())),
     _ => (Event::IdentityInventory, None),
   };
-  let operation = Operation::start(event, subject);
+  let operation = Operation::start("d3fffdb2-92d2-4bf5-b4ff-9280c5176e24", event, subject);
   let result = handle_inner(request).await;
   operation.finish(
     if result.is_ok() {

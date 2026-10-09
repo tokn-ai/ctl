@@ -314,6 +314,7 @@ async fn shared_disconnect_closes_only_our_anchor_and_preserves_external_socket(
       .is_some()
   );
   let (mut client, mut server) = ctl_ipc::Stream::pair().unwrap();
+  let correlation = state.correlation(&endpoint);
   disconnect_master(&mut server, &state, &configured)
     .await
     .unwrap();
@@ -325,6 +326,7 @@ async fn shared_disconnect_closes_only_our_anchor_and_preserves_external_socket(
   ));
   assert!(state.endpoint(&configured).is_none());
   assert!(state.target(&configured).is_paused());
+  assert_eq!(state.correlation(&endpoint), correlation);
   assert_eq!(std::fs::read_to_string(&path).unwrap(), "external owner");
   assert!(
     tokio::time::timeout(Duration::from_secs(2), anchor.wait())
@@ -503,4 +505,38 @@ fn disappearing_reuse_only_masters_do_not_authorize_shared_startup() {
       Err(RequestError::SshConfig(_))
     ));
   }
+}
+
+#[test]
+fn reused_endpoints_share_correlation_but_replacement_starts_a_new_one() {
+  let state = State::default();
+  let endpoint = MasterEndpoint::managed(&target(None));
+  let first = state.correlation(&endpoint);
+  assert_eq!(state.correlation(&endpoint), first);
+  let other = MasterEndpoint {
+    control_path: "/different/socket".into(),
+    ..endpoint.clone()
+  };
+  assert_ne!(state.correlation(&other), first);
+  state.forget_correlation(&endpoint);
+  assert_ne!(state.correlation(&endpoint), first);
+}
+
+#[cfg(unix)]
+#[test]
+fn replacing_a_socket_at_the_same_path_changes_connection_correlation() {
+  let path = std::env::temp_dir().join(format!("ctld-correlation-{}", uuid::Uuid::new_v4()));
+  let guard = SocketGuard(path);
+  let state = State::default();
+  let endpoint = MasterEndpoint {
+    control_path: guard.0.clone(),
+    ..MasterEndpoint::managed(&target(None))
+  };
+  let pending = state.correlation(&endpoint);
+  let socket = std::os::unix::net::UnixListener::bind(&guard.0).unwrap();
+  assert_eq!(state.correlation(&endpoint), pending);
+  std::fs::remove_file(&guard.0).unwrap();
+  let replacement = std::os::unix::net::UnixListener::bind(&guard.0).unwrap();
+  assert_ne!(state.correlation(&endpoint), pending);
+  drop((socket, replacement));
 }

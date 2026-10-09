@@ -93,7 +93,10 @@ fn populated_history_filters_failures_and_reports_omitted_records_in_json_and_ta
     });
     let mut record: ctl_core::observability::Record = serde_json::from_value(record).unwrap();
     if outcome == "interrupted" {
-      record.schema_version = 5;
+      record.schema_version = 6;
+      record.attempt_id = Some(uuid::Uuid::new_v4());
+      record.correlation_id =
+        Some(uuid::Uuid::parse_str("daf302e5-83c8-44e9-b956-c29ca3e86af7").unwrap());
       record.connection_endpoint = Some(ctl_core::observability::ConnectionEndpoint {
         destination: "work".into(),
         hostname: Some("example.test".into()),
@@ -143,6 +146,7 @@ fn populated_history_filters_failures_and_reports_omitted_records_in_json_and_ta
   assert!(table.contains("HOST"));
   assert!(table.contains("alice@example.test:2222"));
   assert!(table.contains("CORRELATION ID"));
+  assert!(table.contains("daf302e5"));
   assert!(!table.contains("SUBJECT"));
   assert!(table.contains("interrupted"));
   assert!(table.contains("123 ms"));

@@ -184,6 +184,10 @@ pub struct Record {
   pub run_id: Uuid,
   pub event_id: Uuid,
   pub operation_id: Uuid,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub attempt_id: Option<Uuid>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub correlation_id: Option<Uuid>,
   pub timestamp_ms: u64,
   pub process_id: u32,
   pub event: Event,
@@ -249,6 +253,7 @@ fn initialize_recorder(component: Component, console: bool) {
   });
   if invalid_level {
     diagnostic_event(
+      "19f3f37a-5c45-4dac-bb36-d25987124d3a",
       Event::LogConfiguration,
       Level::Warn,
       Context::default(),
@@ -305,6 +310,7 @@ fn emit(stream: Stream, record: &Record) {
 /// Record an instantaneous diagnostic once, without an artificial start pair.
 /// Error codes must be fixed classifications, never raw error text.
 pub fn diagnostic_event(
+  operation_id: &'static str,
   event: Event,
   level: Level,
   context: Context,
@@ -312,35 +318,52 @@ pub fn diagnostic_event(
   error_code: Option<&'static str>,
   os_error: Option<i32>,
 ) {
-  let mut record = new_record(event, level, context, None);
+  let mut record = new_record(operation_id, event, level, context, None);
   record.outcome = outcome;
+  record.attempt_id = None;
   record.error_code = error_code.map(str::to_owned);
   record.os_error = os_error;
   emit(Stream::Logs, &record);
 }
 
 /// Reuse is an observation, not another authentication attempt or audit operation.
-pub fn connection_reused(subject: &str, endpoint: ConnectionEndpoint) {
+pub fn connection_reused(
+  operation_id: &'static str,
+  subject: &str,
+  endpoint: ConnectionEndpoint,
+  correlation_id: Uuid,
+) {
   let mut record = new_record(
+    operation_id,
     Event::ConnectionReuse,
     Level::Debug,
     Context::default(),
     Some(subject),
   );
   record.connection_endpoint = Some(endpoint);
+  record.correlation_id = Some(correlation_id);
+  record.attempt_id = None;
   record.outcome = Outcome::Succeeded;
   emit(Stream::Logs, &record);
 }
 
-fn new_record(event: Event, level: Level, context: Context, subject: Option<&str>) -> Record {
+fn new_record(
+  operation_id: &'static str,
+  event: Event,
+  level: Level,
+  context: Context,
+  subject: Option<&str>,
+) -> Record {
   Record {
-    schema_version: 5,
+    schema_version: 6,
     level,
     context,
     component: *COMPONENT.get().unwrap_or(&Component::Ctld),
     run_id: run_id(),
     event_id: Uuid::new_v4(),
-    operation_id: Uuid::new_v4(),
+    operation_id: Uuid::parse_str(operation_id).expect("call-site operation ID is a UUID literal"),
+    attempt_id: Some(Uuid::new_v4()),
+    correlation_id: None,
     timestamp_ms: now(),
     process_id: std::process::id(),
     event,
@@ -353,7 +376,7 @@ fn new_record(event: Event, level: Level, context: Context, subject: Option<&str
   }
 }
 
-/// An operation's start and terminal outcome share a correlation ID.
+/// A stable call-site operation ID identifies the source; attempt ID pairs outcomes.
 /// Dropping an unfinished operation records interruption, never success.
 pub struct Operation {
   record: Record,
@@ -364,18 +387,30 @@ pub struct Operation {
 
 impl Operation {
   #[must_use]
-  pub fn start(event: Event, subject: Option<&str>) -> Self {
-    Self::begin(event, subject, true, Level::Info, Context::default())
+  pub fn start(operation_id: &'static str, event: Event, subject: Option<&str>) -> Self {
+    Self::begin(
+      operation_id,
+      event,
+      subject,
+      true,
+      Level::Info,
+      Context::default(),
+    )
   }
 
   #[must_use]
-  pub fn diagnostic(event: Event) -> Self {
-    Self::diagnostic_at(event, Level::Info, Context::default())
+  pub fn diagnostic(operation_id: &'static str, event: Event) -> Self {
+    Self::diagnostic_at(operation_id, event, Level::Info, Context::default())
   }
 
   #[must_use]
-  pub fn diagnostic_at(event: Event, level: Level, context: Context) -> Self {
-    Self::begin(event, None, false, level, context)
+  pub fn diagnostic_at(
+    operation_id: &'static str,
+    event: Event,
+    level: Level,
+    context: Context,
+  ) -> Self {
+    Self::begin(operation_id, event, None, false, level, context)
   }
 
   /// Add generated identifiers learned during an operation, before its outcome.
@@ -385,49 +420,67 @@ impl Operation {
 
   /// Record a connection operation with the submitted nonsecret endpoint.
   #[must_use]
-  pub fn connection(event: Event, subject: &str, endpoint: ConnectionEndpoint) -> Self {
+  pub fn connection(
+    operation_id: &'static str,
+    event: Event,
+    subject: &str,
+    endpoint: ConnectionEndpoint,
+    correlation_id: Option<Uuid>,
+  ) -> Self {
     Self::begin_with_endpoint(
+      operation_id,
       event,
       Some(subject),
       true,
       Level::Info,
       Context::default(),
-      Some(endpoint),
+      Some((endpoint, correlation_id)),
     )
   }
 
   #[must_use]
-  pub fn connection_request(subject: &str, endpoint: ConnectionEndpoint) -> Self {
+  pub fn connection_request(
+    operation_id: &'static str,
+    subject: &str,
+    endpoint: ConnectionEndpoint,
+    correlation_id: Option<Uuid>,
+  ) -> Self {
     Self::begin_with_endpoint(
+      operation_id,
       Event::ConnectionRequest,
       Some(subject),
       false,
       Level::Debug,
       Context::default(),
-      Some(endpoint),
+      Some((endpoint, correlation_id)),
     )
   }
 
   fn begin(
+    operation_id: &'static str,
     event: Event,
     subject: Option<&str>,
     audit: bool,
     level: Level,
     context: Context,
   ) -> Self {
-    Self::begin_with_endpoint(event, subject, audit, level, context, None)
+    Self::begin_with_endpoint(operation_id, event, subject, audit, level, context, None)
   }
 
   fn begin_with_endpoint(
+    operation_id: &'static str,
     event: Event,
     subject: Option<&str>,
     audit: bool,
     level: Level,
     context: Context,
-    endpoint: Option<ConnectionEndpoint>,
+    endpoint: Option<(ConnectionEndpoint, Option<Uuid>)>,
   ) -> Self {
-    let mut record = new_record(event, level, context, subject);
-    record.connection_endpoint = endpoint;
+    let mut record = new_record(operation_id, event, level, context, subject);
+    if let Some((endpoint, correlation_id)) = endpoint {
+      record.connection_endpoint = Some(endpoint);
+      record.correlation_id = correlation_id;
+    }
     emit(Stream::Logs, &record);
     if audit {
       emit(Stream::Audit, &record);
@@ -505,7 +558,8 @@ fn now() -> u64 {
 
 impl Record {
   fn valid(&self) -> bool {
-    matches!(self.schema_version, 2..=5)
+    matches!(self.schema_version, 2..=6)
+      && (self.schema_version < 6 || !self.operation_id.is_nil())
       && self
         .connection_endpoint
         .as_ref()

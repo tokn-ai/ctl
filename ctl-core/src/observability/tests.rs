@@ -25,7 +25,11 @@ impl Drop for Fixture {
 }
 
 fn record(outcome: Outcome) -> Record {
-  let operation = Operation::start(Event::CredentialSave, Some("private-password-marker"));
+  let operation = Operation::start(
+    "faa569c5-7252-45e6-8159-52e2fa982828",
+    Event::CredentialSave,
+    Some("private-password-marker"),
+  );
   let mut record = operation.record.clone();
   record.outcome = outcome;
   record
@@ -247,10 +251,15 @@ fn operation_child() {
   }
   initialize();
   drop(Operation::start(
+    "a32c5d22-37e7-48b6-9bb2-f7e810aab683",
     Event::Connection,
     Some("private-connection-canary"),
   ));
-  Operation::diagnostic(Event::DaemonLifecycle).finish(Outcome::Succeeded, None, None);
+  Operation::diagnostic(
+    "9d66b752-769c-40d8-9da0-5782d55fdda8",
+    Event::DaemonLifecycle,
+  )
+  .finish(Outcome::Succeeded, None, None);
 }
 
 #[cfg(unix)]
@@ -271,6 +280,9 @@ fn dropped_operations_are_interrupted_and_diagnostics_are_not_audit_events() {
   assert_eq!(audit.records[0].outcome, Outcome::Started);
   assert_eq!(audit.records[1].outcome, Outcome::Interrupted);
   assert_eq!(audit.records[0].operation_id, audit.records[1].operation_id);
+  assert!(audit.records[0].attempt_id.is_some());
+  assert_eq!(audit.records[0].attempt_id, audit.records[1].attempt_id);
+  assert_ne!(audit.records[0].event_id, audit.records[1].event_id);
   assert_eq!(
     store.read(Stream::Logs, 100, false).unwrap().records.len(),
     4
@@ -535,7 +547,7 @@ fn human_logs_round_trip_and_reject_corrupt_metadata() {
     serde_json::to_value(&record).unwrap()
   );
   assert!(Record::from_log_line(line.trim_end().as_bytes()).is_none());
-  assert!(Record::from_log_line(line.replace("schema=5", "schema=99").as_bytes()).is_none());
+  assert!(Record::from_log_line(line.replace("schema=6", "schema=99").as_bytes()).is_none());
   assert!(
     Record::from_log_line(line.replace("pane_spawn_failed", "secret/body").as_bytes()).is_none()
   );
@@ -567,21 +579,26 @@ fn level_child() {
     return;
   }
   initialize();
-  Operation::start(Event::CredentialRead, Some("credential-secret-canary")).finish(
-    Outcome::Succeeded,
-    None,
-    None,
-  );
-  Operation::diagnostic_at(Event::SessionTransport, Level::Trace, Context::default()).finish(
-    Outcome::Failed,
-    Some("transport_failed"),
-    None,
-  );
-  Operation::diagnostic_at(Event::PaneResize, Level::Debug, Context::default()).finish(
-    Outcome::Succeeded,
-    None,
-    None,
-  );
+  Operation::start(
+    "5329d82c-2449-4c59-a05f-a988a05506f7",
+    Event::CredentialRead,
+    Some("credential-secret-canary"),
+  )
+  .finish(Outcome::Succeeded, None, None);
+  Operation::diagnostic_at(
+    "8e0d0929-7eb0-46f2-abba-12a1155a684d",
+    Event::SessionTransport,
+    Level::Trace,
+    Context::default(),
+  )
+  .finish(Outcome::Failed, Some("transport_failed"), None);
+  Operation::diagnostic_at(
+    "721c2ea7-601d-4800-8efa-00b5bc6c1541",
+    Event::PaneResize,
+    Level::Debug,
+    Context::default(),
+  )
+  .finish(Outcome::Succeeded, None, None);
 }
 
 #[cfg(unix)]
@@ -649,6 +666,7 @@ fn notice_child() {
   // Initialization is idempotent, including the invalid-level notice.
   initialize();
   diagnostic_event(
+    "e8241ee7-c5d3-4f81-904c-7a8286915932",
     Event::PaneExit,
     Level::Info,
     Context {
@@ -758,4 +776,44 @@ fn connection_endpoints_roundtrip_and_legacy_records_stay_unknown() {
       .connection_endpoint
       .is_none()
   );
+}
+
+#[test]
+fn operation_ids_are_stable_while_concurrent_attempts_are_distinct() {
+  let make = || {
+    Operation::start(
+      "f50c6f2c-b0c1-4ca3-a41f-44292d6f94eb",
+      Event::Connection,
+      Some("target"),
+    )
+  };
+  let first = make();
+  let second = make();
+  assert_eq!(first.record.operation_id, second.record.operation_id);
+  assert_ne!(first.record.attempt_id, second.record.attempt_id);
+  assert_ne!(first.record.event_id, second.record.event_id);
+  let other = Operation::start(
+    "d4e1a8ea-1de1-455f-8f97-bf8efc89dc3f",
+    Event::Connection,
+    Some("target"),
+  );
+  assert_ne!(first.record.operation_id, other.record.operation_id);
+}
+
+#[test]
+fn attempt_and_connection_ids_roundtrip_without_reinterpreting_legacy_ids() {
+  let mut record = record(Outcome::Succeeded);
+  record.correlation_id = Some(Uuid::new_v4());
+  let line = format!("{}\n", record.log_line().unwrap());
+  let decoded = Record::from_log_line(line.as_bytes()).unwrap();
+  assert_eq!(decoded.attempt_id, record.attempt_id);
+  assert_eq!(decoded.correlation_id, record.correlation_id);
+  for version in [2, 3, 4, 5] {
+    record.schema_version = version;
+    let legacy = format!("{}\n", record.log_line().unwrap());
+    let decoded = Record::from_log_line(legacy.as_bytes()).unwrap();
+    assert_eq!(decoded.operation_id, record.operation_id);
+    assert!(decoded.attempt_id.is_none());
+    assert!(decoded.correlation_id.is_none());
+  }
 }

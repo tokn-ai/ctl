@@ -773,6 +773,7 @@ where
       Event::Exited(result) => {
         if result.is_err() {
           ctl_core::observability::diagnostic_event(
+            "4b96d310-88bf-45e1-9dfd-6ed911d56c1a",
             ctl_core::observability::Event::VpnMonitor,
             ctl_core::observability::Level::Warn,
             ctl_core::observability::Context::default(),

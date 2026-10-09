@@ -141,9 +141,8 @@ fn row(record: &Record) -> [String; 11] {
       .as_ref()
       .map_or_else(|| "—".into(), ConnectionEndpoint::display),
     record
-      .subject_id
-      .as_deref()
-      .map_or_else(|| "—".into(), |id| id[..12].into()),
+      .correlation_id
+      .map_or_else(|| "—".into(), |id| id.to_string()[..8].into()),
     if record.outcome == Outcome::Started {
       "—".into()
     } else {

@@ -11,6 +11,8 @@ const COMMAND_NAMES: &[&str] = &[
   "swap-pane",
   "break-pane",
   "select-pane",
+  "last-pane",
+  "display-panes",
   "resize-pane",
   "new-session",
   "switch-client",
@@ -334,6 +336,7 @@ pub(crate) enum Command {
   Action(Action),
   NewSession(Option<String>),
   SwitchSession(String),
+  SelectPane(usize),
   BreakPane {
     name: Option<String>,
     detached: bool,
@@ -366,19 +369,7 @@ pub(crate) fn parse(text: &str) -> Result<Command, String> {
       ["-h"] => Ok(Command::Action(Action::Split(SplitAxis::Horizontal))),
       _ => Err(usage("split-window [-h|-v]")),
     },
-    "select-pane" => {
-      if args.len() != 1 {
-        return Err(usage("select-pane -L|-R|-U|-D"));
-      }
-      let direction = match args[0].as_str() {
-        "-L" => Direction::Left,
-        "-R" => Direction::Right,
-        "-U" => Direction::Up,
-        "-D" => Direction::Down,
-        _ => return Err(usage("select-pane -L|-R|-U|-D")),
-      };
-      Ok(Command::Action(Action::Focus(direction)))
-    }
+    "select-pane" => select_pane_command(args),
     "resize-pane" => resize_command(args),
     "swap-pane" => swap_command(args),
     "break-pane" => break_command(args),
@@ -400,8 +391,9 @@ pub(crate) fn parse(text: &str) -> Result<Command, String> {
     {
       ["-n"] => Ok(Command::Action(Action::NextSession)),
       ["-p"] => Ok(Command::Action(Action::PreviousSession)),
+      ["-l"] => Ok(Command::Action(Action::LastSession)),
       ["-t", name] if !name.is_empty() => Ok(Command::SwitchSession((*name).into())),
-      _ => Err(usage("switch-client -n|-p|-t NAME")),
+      _ => Err(usage("switch-client -n|-p|-l|-t NAME")),
     },
     "copy-mode" => match args
       .iter()
@@ -423,6 +415,8 @@ fn command_name(name: &str) -> Option<&'static str> {
     "swap-pane" | "swapp" => "swap-pane",
     "break-pane" | "breakp" => "break-pane",
     "select-pane" | "selectp" => "select-pane",
+    "last-pane" | "lastp" => "last-pane",
+    "display-panes" | "displayp" => "display-panes",
     "resize-pane" | "resizep" => "resize-pane",
     "new-session" | "new" => "new-session",
     "switch-client" | "switchc" => "switch-client",
@@ -439,6 +433,39 @@ fn command_name(name: &str) -> Option<&'static str> {
     "release-resize" => "release-resize",
     _ => return None,
   })
+}
+
+fn select_pane_command(args: &[String]) -> Result<Command, String> {
+  let usage = || usage("select-pane -L|-R|-U|-D|-l|-t NUMBER");
+  match args
+    .iter()
+    .map(String::as_str)
+    .collect::<Vec<_>>()
+    .as_slice()
+  {
+    ["-l"] => Ok(Command::Action(Action::LastPane)),
+    ["-t", number] => {
+      let number = number
+        .chars()
+        .all(|ch| ch.is_ascii_digit())
+        .then(|| number.parse::<usize>().ok())
+        .flatten()
+        .filter(|number| *number > 0)
+        .ok_or("Pane number must be a positive integer")?;
+      Ok(Command::SelectPane(number))
+    }
+    [flag] => {
+      let direction = match *flag {
+        "-L" => Direction::Left,
+        "-R" => Direction::Right,
+        "-U" => Direction::Up,
+        "-D" => Direction::Down,
+        _ => return Err(usage()),
+      };
+      Ok(Command::Action(Action::Focus(direction)))
+    }
+    _ => Err(usage()),
+  }
 }
 
 fn resize_command(args: &[String]) -> Result<Command, String> {
@@ -510,6 +537,8 @@ fn no_argument_command(name: &str, args: &[String]) -> Result<Command, String> {
   }
   let action = match name {
     "list-sessions" => Action::Sessions,
+    "last-pane" => Action::LastPane,
+    "display-panes" => Action::DisplayPanes,
     "kill-pane" => Action::KillPane,
     "paste-buffer" => Action::Paste,
     "refresh-client" => Action::Refresh,
@@ -745,6 +774,68 @@ mod tests {
           .contains("integer")
       );
     }
+  }
+
+  #[test]
+  fn navigation_commands_share_actions_and_use_one_based_pane_numbers() {
+    for command in ["last-pane", "lastp", "select-pane -l", "selectp -l"] {
+      assert_eq!(parse(command), Ok(Command::Action(Action::LastPane)));
+    }
+    for command in ["switch-client -l", "switchc -l"] {
+      assert_eq!(parse(command), Ok(Command::Action(Action::LastSession)));
+    }
+    for command in ["display-panes", "displayp"] {
+      assert_eq!(parse(command), Ok(Command::Action(Action::DisplayPanes)));
+    }
+    for name in ["select-pane", "selectp"] {
+      for number in [1, 9, 10, usize::MAX] {
+        assert_eq!(
+          parse(&format!("{name} -t {number}")),
+          Ok(Command::SelectPane(number))
+        );
+      }
+      assert_eq!(
+        parse(&format!("{name} -t '01'")),
+        Ok(Command::SelectPane(1))
+      );
+    }
+  }
+
+  #[test]
+  fn navigation_commands_reject_conflicting_flags_and_invalid_numbers() {
+    for command in [
+      "last-pane -l",
+      "lastp extra",
+      "display-panes -d",
+      "displayp extra",
+      "select-pane -l -l",
+      "selectp -l -R",
+      "selectp -l -t 1",
+      "selectp -t 1 -l",
+      "selectp -t 1 -t 2",
+      "selectp -t",
+      "selectp -t 1 extra",
+      "selectp -t1",
+      "selectp -T 1",
+      "switch-client -l -l",
+      "switchc -l -n",
+      "switchc -l -p",
+      "switchc -l -t work",
+      "switchc -l extra",
+      "displayp; detach",
+      "lastp && detach",
+    ] {
+      assert!(parse(command).is_err(), "{command:?}");
+    }
+    for number in ["0", "-1", "+1", "1.5", "one", "%1", "١", "''"] {
+      assert!(
+        parse(&format!("selectp -t {number}"))
+          .unwrap_err()
+          .contains("positive integer"),
+        "{number:?}"
+      );
+    }
+    assert!(parse(&format!("selectp -t {}0", usize::MAX)).is_err());
   }
 
   #[test]
@@ -1006,6 +1097,27 @@ mod tests {
       prompt.key(key(KeyCode::Tab));
       assert_eq!(prompt.text, format!("{expected}-d"));
     }
+  }
+
+  #[test]
+  fn navigation_completion_accepts_canonical_names_and_explicit_aliases() {
+    let mut prompt = Prompt::default();
+    for (text, expected) in [
+      ("last", "last-pane "),
+      ("lastp", "lastp "),
+      ("disp", "display-panes "),
+      ("displayp", "displayp "),
+    ] {
+      prompt.open();
+      prompt.paste(text);
+      assert_eq!(prompt.key(key(KeyCode::Tab)), Event::Stay);
+      assert_eq!(prompt.text, expected);
+      assert!(prompt.is_active());
+    }
+    prompt.open();
+    prompt.paste("select-pane -t 1");
+    prompt.key(key(KeyCode::Tab));
+    assert_eq!(prompt.text, "select-pane -t 1");
   }
 
   #[test]

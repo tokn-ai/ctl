@@ -108,6 +108,80 @@ impl Frame {
     self.cursor = Some((cursor_column.min(self.columns - 1), row));
   }
 
+  /// Paint local number badges without replacing pane output or the footer.
+  pub fn pane_numbers(
+    &mut self,
+    view: &ViewInfo,
+    labels: &[(String, usize)],
+    focused: &str,
+    offset: (u16, u16),
+  ) {
+    if labels.is_empty() {
+      return;
+    }
+    self.cursor = None;
+    let mut palette = avt::Vt::new(2, 1);
+    palette.feed_str("\x1b[1;7;36mX\x1b[0;7mX");
+    for pane in view.visible_panes() {
+      let Some((_, number)) = labels.iter().find(|(id, _)| id == &pane.terminal_id) else {
+        continue;
+      };
+      let Some((left, top, right, bottom)) =
+        badge_bounds(&pane, offset, self.columns, self.rows.saturating_sub(1))
+      else {
+        continue;
+      };
+      let number = number.to_string();
+      let available = usize::from(right - left);
+      // A partial number could select a different pane. Omit labels that do
+      // not fit; a one-cell slice can still show an entire single-digit label.
+      if number.len() > available {
+        continue;
+      }
+      let badge = if number.len() + 2 <= available {
+        format!(" {number} ")
+      } else {
+        number
+      };
+      let width = u16::try_from(badge.len()).expect("badge fits visible pane");
+      let x = left + (right - left - width) / 2;
+      let y = top + (bottom - top - 1) / 2;
+      let pen = *palette.line(0).cells()[usize::from(pane.terminal_id != focused)].pen();
+      self.clear_badge_glyphs(x, y, width, (left, right));
+      for (column, ch) in badge.chars().enumerate() {
+        self.set(
+          x + u16::try_from(column).expect("bounded badge column"),
+          y,
+          Pixel { ch, width: 1, pen },
+        );
+      }
+    }
+  }
+
+  fn clear_badge_glyphs(&mut self, x: u16, y: u16, width: u16, bounds: (u16, u16)) {
+    let row = usize::from(y) * usize::from(self.columns);
+    for column in x..x + width {
+      let index = row + usize::from(column);
+      let neighbor = match self.cells[index].width {
+        0 if column > bounds.0 => Some(column - 1),
+        2 if column + 1 < bounds.1 => Some(column + 1),
+        _ => None,
+      };
+      if let Some(neighbor) = neighbor {
+        let pen = self.cells[row + usize::from(neighbor)].pen;
+        self.set(
+          neighbor,
+          y,
+          Pixel {
+            ch: ' ',
+            width: 1,
+            pen,
+          },
+        );
+      }
+    }
+  }
+
   pub fn canvas(
     &mut self,
     view: &ViewInfo,
@@ -392,6 +466,31 @@ impl Frame {
   }
 }
 
+fn badge_bounds(
+  pane: &ctmux_proto::PaneGeometry,
+  offset: (u16, u16),
+  columns: u16,
+  rows: u16,
+) -> Option<(u16, u16, u16, u16)> {
+  let (x, y) = (u32::from(offset.0), u32::from(offset.1));
+  let left = u32::from(pane.left).saturating_sub(x);
+  let top = u32::from(pane.top).saturating_sub(y);
+  let right = (u32::from(pane.left) + u32::from(pane.columns))
+    .saturating_sub(x)
+    .min(u32::from(columns));
+  let bottom = (u32::from(pane.top) + u32::from(pane.rows))
+    .saturating_sub(y)
+    .min(u32::from(rows));
+  (left < right && top < bottom).then(|| {
+    (
+      u16::try_from(left).expect("visible left edge"),
+      u16::try_from(top).expect("visible top edge"),
+      u16::try_from(right).expect("visible right edge"),
+      u16::try_from(bottom).expect("visible bottom edge"),
+    )
+  })
+}
+
 pub fn pane_at<'a>(
   view: &'a ViewInfo,
   panes: &BTreeMap<String, Pane>,
@@ -596,6 +695,170 @@ fn style(output: &mut impl Write, pen: &avt::Pen) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  fn number_view(columns: u16, rows: u16) -> ViewInfo {
+    use ctmux_proto::{SplitAxis, TerminalSize, ViewLayout};
+    let canvas_size = TerminalSize {
+      columns,
+      rows,
+      ..TerminalSize::default()
+    };
+    let layout = ViewLayout::Split {
+      axis: SplitAxis::Horizontal,
+      children: vec![
+        ViewLayout::Terminal {
+          terminal_id: "a".into(),
+        },
+        ViewLayout::Terminal {
+          terminal_id: "b".into(),
+        },
+      ],
+      weights: Vec::new(),
+    };
+    ViewInfo {
+      session_name: "numbers".into(),
+      session_id: "session".into(),
+      view_id: "view".into(),
+      revision: 0,
+      panes: layout.pane_geometry(&canvas_size).unwrap(),
+      canvas_size,
+      zoomed_terminal_id: None,
+      layout,
+      terminals: Vec::new(),
+    }
+  }
+
+  #[test]
+  fn pane_numbers_paint_only_compact_badges_with_distinct_focused_style() {
+    let view = number_view(20, 4);
+    let mut frame = Frame::new(20, 5);
+    for row in 0..4 {
+      frame.text(0, row, "abcdefghijklmnopqrst", false);
+    }
+    frame.text(0, 4, "connected | history ready", true);
+    frame.cursor = Some((0, 0));
+    let before = frame.cells.clone();
+    frame.pane_numbers(&view, &[("a".into(), 1), ("b".into(), 12)], "a", (0, 0));
+    assert_eq!(frame.cursor, None);
+    assert_eq!(frame.text_rows()[1], "abc 1 ghijklm 12 rst");
+    assert!(frame.cells[24].pen.is_bold());
+    assert!(frame.cells[24].pen.is_inverse());
+    assert_eq!(
+      frame.cells[24].pen.foreground(),
+      Some(avt::Color::Indexed(6))
+    );
+    assert!(!frame.cells[34].pen.is_bold());
+    assert!(frame.cells[34].pen.is_inverse());
+    for (index, pixel) in frame.cells.iter().enumerate() {
+      if !(23..26).contains(&index) && !(33..37).contains(&index) {
+        assert!(*pixel == before[index], "unrelated cell {index}");
+      }
+    }
+  }
+
+  #[test]
+  fn pane_numbers_clip_to_visible_intersections_and_never_paint_the_footer() {
+    let mut view = number_view(20, 4);
+    let labels = [("a".into(), 1), ("b".into(), 12)];
+    let mut frame = Frame::new(5, 3);
+    frame.text(0, 2, "saved", true);
+    let footer = frame.cells[10..].to_vec();
+    // Only the rightmost cell of a and three cells of b are visible.
+    frame.pane_numbers(&view, &labels, "b", (9, 2));
+    assert_eq!(frame.text_rows()[0], "1 12 ");
+    assert!(frame.cells[1].ch == ' ' && !frame.cells[1].pen.is_inverse());
+    assert!(frame.cells[3].pen.is_bold());
+    assert!(frame.cells[10..] == footer);
+    for (columns, rows, offset) in [
+      (0, 0, (0, 0)),
+      (0, 3, (0, 0)),
+      (1, 1, (0, 0)),
+      (4, 3, (30, 30)),
+    ] {
+      let mut empty = Frame::new(columns, rows);
+      let before = empty.cells.clone();
+      empty.pane_numbers(&view, &labels, "a", offset);
+      assert!(empty.cells == before);
+      assert_eq!(empty.cursor, None);
+    }
+    // A two-digit label in a one-cell slice must not look like pane one.
+    let mut narrow = Frame::new(1, 2);
+    narrow.pane_numbers(&view, &labels, "b", (19, 0));
+    assert_eq!(narrow.cells[0].ch, ' ');
+    view.panes[1].left = u16::MAX;
+    view.panes[1].columns = u16::MAX;
+    narrow.pane_numbers(&view, &labels, "b", (0, 0));
+    assert_eq!(narrow.cells[0].ch, '1');
+  }
+
+  #[test]
+  fn pane_numbers_obey_shared_zoom_and_ignore_hidden_or_unknown_labels() {
+    let mut view = number_view(20, 4);
+    view.zoomed_terminal_id = Some("b".into());
+    let mut frame = Frame::new(20, 5);
+    frame.pane_numbers(
+      &view,
+      &[("a".into(), 1), ("b".into(), 2), ("unknown".into(), 99)],
+      "b",
+      (0, 0),
+    );
+    assert_eq!(frame.text_rows()[1].trim(), "2");
+    assert!(
+      frame
+        .text_rows()
+        .iter()
+        .all(|row| !row.contains('1') && !row.contains('9'))
+    );
+    let before = frame.cells.clone();
+    frame.cursor = Some((3, 0));
+    frame.pane_numbers(&view, &[], "b", (0, 0));
+    assert!(frame.cells == before);
+    assert_eq!(frame.cursor, Some((3, 0)));
+  }
+
+  #[test]
+  fn pane_number_badges_clear_both_halves_of_intersected_wide_glyphs_and_restore_output() {
+    let view = number_view(11, 1);
+    let mut before = Frame::new(11, 2);
+    before.text(0, 0, "界a界│b界cd", false);
+    before.text(0, 1, "status", true);
+    let mut host = avt::Vt::new(11, 2);
+    let mut bytes = Vec::new();
+    Renderer::default().write(&mut bytes, &before).unwrap();
+    host.feed_str(std::str::from_utf8(&bytes).unwrap());
+    let original = host.text();
+    let mut after = Frame {
+      columns: before.columns,
+      rows: before.rows,
+      cells: before.cells.clone(),
+      cursor: before.cursor,
+    };
+    // a's padded badge overlaps the trailing half at its left edge and the
+    // leading half at its right edge. b is not labelled and stays unchanged.
+    after.pane_numbers(&view, &[("a".into(), 1)], "a", (0, 0));
+    assert!(after.cells[..5].iter().all(|pixel| pixel.width == 1));
+    assert_eq!(after.text_rows()[0], "  1  │b界cd");
+    assert!(after.cells[5..] == before.cells[5..]);
+    bytes.clear();
+    Renderer {
+      previous: Some(before),
+    }
+    .write(&mut bytes, &after)
+    .unwrap();
+    host.feed_str(std::str::from_utf8(&bytes).unwrap());
+    assert_eq!(host.text()[0], "  1  │b界cd");
+    let mut restored = Frame::new(11, 2);
+    restored.text(0, 0, "界a界│b界cd", false);
+    restored.text(0, 1, "status", true);
+    bytes.clear();
+    Renderer {
+      previous: Some(after),
+    }
+    .write(&mut bytes, &restored)
+    .unwrap();
+    host.feed_str(std::str::from_utf8(&bytes).unwrap());
+    assert_eq!(host.text(), original);
+  }
 
   #[test]
   fn command_prompt_replaces_only_status_and_moves_the_host_cursor_to_the_footer() {

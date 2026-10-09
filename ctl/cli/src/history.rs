@@ -1,5 +1,5 @@
 use clap::Args;
-use ctl_core::observability::{Outcome, Stream, user_store};
+use ctl_core::observability::{Level, Outcome, Record, Stream, user_store};
 use std::io;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
@@ -11,11 +11,17 @@ pub struct Arguments {
   /// Show only failures and interrupted operations.
   #[arg(long)]
   failed: bool,
+  /// Select one process run by its full UUID (shown in --json).
+  #[arg(long)]
+  run: Option<uuid::Uuid>,
+  /// Minimum severity to display (does not enable recording more detail).
+  #[arg(long)]
+  level: Option<Level>,
   /// Print records and completeness information as JSON.
   #[arg(long)]
   json: bool,
   /// Show the local history directory without creating it.
-  #[arg(long, conflicts_with_all = ["failed", "json"])]
+  #[arg(long, conflicts_with_all = ["failed", "json", "run", "level"])]
   path: bool,
 }
 
@@ -36,11 +42,29 @@ pub fn run(arguments: Arguments, stream: Stream) -> io::Result<()> {
     );
     return Ok(());
   }
-  let history = store.read(stream, arguments.limit as usize, arguments.failed)?;
+  let history = store.read_filtered(
+    stream,
+    arguments.limit as usize,
+    arguments.failed,
+    arguments.run,
+    arguments.level,
+  )?;
   if arguments.json {
     println!(
       "{}",
-      serde_json::to_string(&history).map_err(io::Error::other)?
+      serde_json::to_string(&HistoryView {
+        records: history
+          .records
+          .iter()
+          .map(|record| RecordView {
+            record,
+            message: record.message()
+          })
+          .collect(),
+        complete: history.complete,
+        warning: history.warning,
+      })
+      .map_err(io::Error::other)?
     );
   } else {
     if history.records.is_empty() {
@@ -51,48 +75,17 @@ pub fn run(arguments: Arguments, stream: Stream) -> io::Result<()> {
         crate::table::format(
           [
             "TIME (UTC)",
+            "RUN",
+            "LEVEL",
+            "COMPONENT",
+            "SESSION/PANE",
             "EVENT",
             "RESULT",
             "SUBJECT",
             "DURATION",
-            "DETAIL"
+            "MESSAGE"
           ],
-          history.records.iter().map(|record| {
-            let time = OffsetDateTime::from_unix_timestamp_nanos(
-              i128::from(record.timestamp_ms) * 1_000_000,
-            )
-            .ok()
-            .and_then(|time| time.format(&Rfc3339).ok())
-            .unwrap_or_else(|| record.timestamp_ms.to_string());
-            [
-              time,
-              serde_json::to_value(record.event)
-                .unwrap()
-                .as_str()
-                .unwrap()
-                .to_owned(),
-              serde_json::to_value(record.outcome)
-                .unwrap()
-                .as_str()
-                .unwrap()
-                .to_owned(),
-              record
-                .subject_id
-                .as_deref()
-                .map_or_else(|| "—".into(), |id| id[..12].into()),
-              if record.outcome == Outcome::Started {
-                "—".into()
-              } else {
-                format!("{} ms", record.elapsed_ms)
-              },
-              match (record.error_code.as_deref(), record.os_error) {
-                (Some(code), Some(os)) => format!("{code} ({os})"),
-                (Some(code), None) => code.into(),
-                (None, Some(os)) => os.to_string(),
-                (None, None) => "—".into(),
-              },
-            ]
-          })
+          history.records.iter().map(row)
         )
       );
     }
@@ -101,4 +94,70 @@ pub fn run(arguments: Arguments, stream: Stream) -> io::Result<()> {
     }
   }
   Ok(())
+}
+
+fn row(record: &Record) -> [String; 10] {
+  let time = OffsetDateTime::from_unix_timestamp_nanos(i128::from(record.timestamp_ms) * 1_000_000)
+    .ok()
+    .and_then(|time| time.format(&Rfc3339).ok())
+    .unwrap_or_else(|| record.timestamp_ms.to_string());
+  [
+    time,
+    record.run_id.to_string()[..8].to_owned(),
+    serde_json::to_value(record.level)
+      .unwrap()
+      .as_str()
+      .unwrap()
+      .to_owned(),
+    serde_json::to_value(record.component)
+      .unwrap()
+      .as_str()
+      .unwrap()
+      .to_owned(),
+    format!(
+      "{}/{}",
+      record
+        .context
+        .session_id
+        .map_or_else(|| String::from("—"), |id| id.to_string()[..8].to_owned()),
+      record
+        .context
+        .pane_id
+        .map_or_else(|| String::from("—"), |id| id.to_string()[..8].to_owned())
+    ),
+    serde_json::to_value(record.event)
+      .unwrap()
+      .as_str()
+      .unwrap()
+      .to_owned(),
+    serde_json::to_value(record.outcome)
+      .unwrap()
+      .as_str()
+      .unwrap()
+      .to_owned(),
+    record
+      .subject_id
+      .as_deref()
+      .map_or_else(|| "—".into(), |id| id[..12].into()),
+    if record.outcome == Outcome::Started {
+      "—".into()
+    } else {
+      format!("{} ms", record.elapsed_ms)
+    },
+    record.message(),
+  ]
+}
+
+#[derive(serde::Serialize)]
+struct RecordView<'a> {
+  #[serde(flatten)]
+  record: &'a Record,
+  message: String,
+}
+
+#[derive(serde::Serialize)]
+struct HistoryView<'a> {
+  records: Vec<RecordView<'a>>,
+  complete: bool,
+  warning: Option<&'static str>,
 }

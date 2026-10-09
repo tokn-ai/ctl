@@ -71,18 +71,41 @@ fn failed_credential_request_records_correlated_redacted_audit_without_changing_
   assert_eq!(history.records[0].event, Event::CredentialRemove);
   assert_eq!(history.records[0].outcome, Outcome::Started);
   assert_eq!(history.records[1].outcome, Outcome::Failed);
-  for stream in ["logs", "audit"] {
-    let path = fixture.store().directory().join(format!("{stream}.jsonl"));
+  let run = history.records[0].run_id;
+  assert_eq!(run, history.records[1].run_id);
+  for path in [
+    fixture.store().directory().join("audit.sqlite3"),
+    fixture
+      .store()
+      .directory()
+      .join("logs")
+      .join(format!("{run}.log")),
+  ] {
     assert!(
-      !fs::read_to_string(&path)
+      !fs::read(&path)
         .unwrap()
-        .contains("synthetic-private-canary")
+        .windows(b"synthetic-private-canary".len())
+        .any(|bytes| bytes == b"synthetic-private-canary")
     );
     assert_eq!(
       fs::metadata(path).unwrap().permissions().mode() & 0o777,
       0o600
     );
   }
+  let output = fixture.request();
+  assert!(output.status.success(), "{output:?}");
+  let history = fixture.store().read(Stream::Audit, 100, false).unwrap();
+  assert_eq!(history.records.len(), 4);
+  assert_ne!(history.records[2].run_id, run);
+  assert_eq!(
+    fixture
+      .store()
+      .read(Stream::Logs, 100, false)
+      .unwrap()
+      .records
+      .len(),
+    8
+  );
 }
 
 #[test]
@@ -112,4 +135,37 @@ fn metadata_commands_do_not_create_history() {
     assert_eq!(output.stderr, Vec::<u8>::new());
   }
   assert!(fs::read_dir(&fixture.0).unwrap().next().is_none());
+}
+
+#[test]
+fn proxy_argument_failure_is_saved_with_a_safe_message_and_no_raw_route() {
+  let fixture = Fixture::new();
+  let output = fixture
+    .command()
+    .env_remove("CTL_LOG_LEVEL")
+    .args(["--proxy-route", "private-route-canary"])
+    .output()
+    .unwrap();
+  assert_eq!(output.status.code(), Some(2));
+  assert_eq!(output.stdout, Vec::<u8>::new());
+  let history = fixture.store().read(Stream::Logs, 100, false).unwrap();
+  assert!(history.complete);
+  assert_eq!(history.records.len(), 2);
+  let failure = &history.records[1];
+  assert_eq!(failure.event, Event::ProxyConnection);
+  assert_eq!(failure.outcome, Outcome::Failed);
+  assert_eq!(
+    failure.error_code.as_deref(),
+    Some("proxy_destination_missing")
+  );
+  assert_eq!(
+    failure.message(),
+    "Proxy connection: failed; proxy host and port are required"
+  );
+  assert!(
+    !serde_json::to_string(&history)
+      .unwrap()
+      .contains("private-route-canary")
+  );
+  assert!(!fixture.store().directory().join("audit.sqlite3").exists());
 }

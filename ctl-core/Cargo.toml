@@ -13,9 +13,11 @@ publish = ["crates-io"]
 
 [dependencies]
 dirs.workspace = true
+rusqlite = { workspace = true, optional = true }
 serde.workspace = true
 serde_json = { workspace = true, optional = true }
 sha2 = { workspace = true, optional = true }
+time = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 uuid = { workspace = true, optional = true }
 
@@ -24,7 +26,7 @@ rustix = { workspace = true, optional = true }
 
 [features]
 development = ["dep:sha2"]
-observability = ["dep:serde_json", "dep:sha2", "dep:uuid", "uuid/serde", "dep:rustix"]
+observability = ["dep:time", "dep:rusqlite", "dep:serde_json", "dep:sha2", "dep:uuid", "uuid/serde", "dep:rustix"]
 test-fixtures = ["dep:tokio", "dep:uuid"]
 executable = ["dep:serde_json", "dep:sha2", "dep:tokio", "bundles"]
 bundles = ["dep:serde_json", "dep:sha2", "dep:uuid", "dep:rustix"]

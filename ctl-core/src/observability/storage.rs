@@ -1,5 +1,8 @@
-use super::{Outcome, Record, Stream};
+use super::{Level, Outcome, Record, Stream};
 use serde::Serialize;
+use uuid::Uuid;
+
+mod audit;
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, Read as _, Seek as _, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
@@ -36,15 +39,11 @@ impl Store {
     &self.directory
   }
 
-  fn path(&self, stream: Stream, index: usize) -> PathBuf {
-    let name = match stream {
-      Stream::Logs => "logs",
-      Stream::Audit => "audit",
-    };
-    self.directory.join(if index == 0 {
-      format!("{name}.jsonl")
+  pub(super) fn log_path(&self, run: Uuid, index: usize) -> PathBuf {
+    self.directory.join("logs").join(if index == 0 {
+      format!("{run}.log")
     } else {
-      format!("{name}.{index}.jsonl")
+      format!("{run}.{index}.log")
     })
   }
 
@@ -52,14 +51,18 @@ impl Store {
     if !record.valid() {
       return Err(io::Error::other("invalid history record"));
     }
-    let mut encoded = serde_json::to_vec(record).map_err(io::Error::other)?;
+    prepare_directory(&self.directory)?;
+    if stream == Stream::Audit {
+      return self.append_audit(record);
+    }
+    let mut encoded = record.log_line()?.into_bytes();
     encoded.push(b'\n');
     if encoded.len() > MAX_RECORD_BYTES {
       return Err(io::Error::other("history record exceeds size limit"));
     }
-    prepare_directory(&self.directory)?;
-    let _lock = self.lock(true)?;
-    let path = self.path(stream, 0);
+    prepare_directory(&self.directory.join("logs"))?;
+    let _lock = self.lock(record.run_id, true)?;
+    let path = self.log_path(record.run_id, 0);
     let mut file = open(&path, true)?;
     let size = file.metadata()?.len();
     if size > self.segment_bytes {
@@ -68,9 +71,9 @@ impl Store {
     // Reserve one byte to separate a potentially interrupted final record.
     if size + encoded.len() as u64 + 1 > self.segment_bytes {
       drop(file);
-      for index in (1..segments(stream)).rev() {
-        let previous = self.path(stream, index - 1);
-        let destination = self.path(stream, index);
+      for index in (1..4).rev() {
+        let previous = self.log_path(record.run_id, index - 1);
+        let destination = self.log_path(record.run_id, index);
         if exists(&previous)? {
           let _checked = open(&previous, false)?;
           if exists(&destination)? {
@@ -96,12 +99,41 @@ impl Store {
     file.sync_data()
   }
 
-  /// Read the newest matching records, returned in chronological file order.
+  /// Read the newest matching records in audit append order or diagnostic time order.
   /// Missing history is empty; corruption is reported rather than hidden.
   ///
   /// # Errors
   /// Returns errors for unsafe paths, unavailable locks, oversized files, or I/O.
   pub fn read(&self, stream: Stream, limit: usize, failed_only: bool) -> io::Result<History> {
+    self.read_run(stream, limit, failed_only, None)
+  }
+
+  /// Select one process run, or combine all runs. This never creates missing history.
+  ///
+  /// # Errors
+  /// Returns errors for invalid limits, unsafe paths, contention, or I/O.
+  pub fn read_run(
+    &self,
+    stream: Stream,
+    limit: usize,
+    failed_only: bool,
+    run: Option<Uuid>,
+  ) -> io::Result<History> {
+    self.read_filtered(stream, limit, failed_only, run, None)
+  }
+
+  /// Read stored records at or above a minimum severity, before applying the limit.
+  ///
+  /// # Errors
+  /// Returns errors for invalid limits, unsafe paths, contention, or I/O.
+  pub fn read_filtered(
+    &self,
+    stream: Stream,
+    limit: usize,
+    failed_only: bool,
+    run: Option<Uuid>,
+    level: Option<Level>,
+  ) -> io::Result<History> {
     if !(1..=10_000).contains(&limit) {
       return Err(io::Error::other(
         "history limit must be between 1 and 10000",
@@ -117,9 +149,81 @@ impl Store {
     }
     check_directory(&self.directory, true)?;
     check_ancestors(&self.directory)?;
-    let _lock = self.lock(false)?;
-    for index in 0..segments(stream) {
-      let path = self.path(stream, index);
+    if stream == Stream::Audit {
+      return self.read_audit(limit, failed_only, run, level);
+    }
+    for index in 0..4 {
+      let name = if index == 0 {
+        "logs.jsonl".into()
+      } else {
+        format!("logs.{index}.jsonl")
+      };
+      if exists(&self.directory.join(name))? {
+        history.complete = false;
+        history.warning = Some(
+          "Legacy diagnostic JSONL files remain in the history directory; they are not included in per-run logs.",
+        );
+      }
+    }
+    let directory = self.directory.join("logs");
+    if !exists(&directory)? {
+      return Ok(history);
+    }
+    check_directory(&directory, true)?;
+    let runs = if let Some(run) = run {
+      vec![run]
+    } else {
+      let mut runs = std::collections::BTreeSet::new();
+      for entry in fs::read_dir(directory)? {
+        let name = entry?.file_name();
+        let name = name.to_string_lossy();
+        if name.ends_with(".jsonl") {
+          history.complete = false;
+          history.warning = Some(
+            "Legacy per-run JSONL logs remain in the history directory; they are not included in human-readable logs.",
+          );
+        }
+        if let Some(id) = name
+          .strip_suffix(".log")
+          .and_then(|name| name.split('.').next())
+          .and_then(|id| Uuid::parse_str(id).ok())
+        {
+          runs.insert(id);
+        }
+      }
+      runs.into_iter().collect()
+    };
+    for run in runs {
+      self.read_log_run(run, limit, failed_only, level, &mut history)?;
+    }
+    newest(&mut history.records, limit);
+    history.records.reverse();
+    Ok(history)
+  }
+
+  fn read_log_run(
+    &self,
+    run: Uuid,
+    limit: usize,
+    failed_only: bool,
+    level: Option<Level>,
+    history: &mut History,
+  ) -> io::Result<()> {
+    // Acquire the run lock before inspecting segments: rotation may briefly
+    // remove the current filename. A selected run that never existed is empty.
+    let lock_path = self.directory.join("logs").join(format!("{run}.lock"));
+    if !exists(&lock_path)? {
+      let mut has_segments = false;
+      for index in 0..4 {
+        has_segments |= exists(&self.log_path(run, index))?;
+      }
+      if !has_segments {
+        return Ok(());
+      }
+    }
+    let _lock = self.lock(run, false)?;
+    for index in 0..4 {
+      let path = self.log_path(run, index);
       if !exists(&path)? {
         continue;
       }
@@ -127,23 +231,25 @@ impl Store {
       if file.metadata()?.len() > self.segment_bytes {
         return Err(io::Error::other("history segment exceeds size limit"));
       }
-      let mut records = Vec::new();
       let mut bytes = Vec::new();
       file.take(self.segment_bytes + 1).read_to_end(&mut bytes)?;
       if bytes.len() as u64 > self.segment_bytes {
         return Err(io::Error::other("history segment exceeds size limit"));
       }
-      for line in bytes.split_inclusive(|byte| *byte == b'\n') {
+      // Visit newest lines first, preserving append order for equal
+      // timestamps within a run when the stable sort merges process runs.
+      let lines: Vec<_> = bytes.split_inclusive(|byte| *byte == b'\n').collect();
+      for line in lines.into_iter().rev() {
         let record = if line.len() <= MAX_RECORD_BYTES && line.ends_with(b"\n") {
-          serde_json::from_slice::<Record>(line)
-            .ok()
-            .filter(Record::valid)
+          Record::from_log_line(line).filter(|record| record.valid() && record.run_id == run)
         } else {
           None
         };
         if let Some(record) = record {
-          if !failed_only || matches!(record.outcome, Outcome::Failed | Outcome::Interrupted) {
-            records.push(record);
+          if (!failed_only || matches!(record.outcome, Outcome::Failed | Outcome::Interrupted))
+            && level.is_none_or(|level| record.level >= level)
+          {
+            history.records.push(record);
           }
         } else {
           history.complete = false;
@@ -151,19 +257,14 @@ impl Store {
             "Some history records are malformed or use an unsupported schema; they were omitted.",
           );
         }
-      }
-      history.records.extend(
-        records
-          .into_iter()
-          .rev()
-          .take(limit - history.records.len()),
-      );
-      if history.records.len() == limit {
-        break;
+        // Keep memory bounded even when there are many process runs.
+        if history.records.len() >= limit * 2 {
+          newest(&mut history.records, limit);
+        }
       }
     }
-    history.records.reverse();
-    Ok(history)
+    newest(&mut history.records, limit);
+    Ok(())
   }
 
   #[cfg(test)]
@@ -174,8 +275,8 @@ impl Store {
     }
   }
 
-  fn lock(&self, create: bool) -> io::Result<File> {
-    let path = self.directory.join("history.lock");
+  fn lock(&self, run: Uuid, create: bool) -> io::Result<File> {
+    let path = self.directory.join("logs").join(format!("{run}.lock"));
     let file = open(&path, create)?;
     let deadline = Instant::now() + Duration::from_millis(250);
     loop {
@@ -196,11 +297,14 @@ impl Store {
   }
 }
 
-fn segments(stream: Stream) -> usize {
-  match stream {
-    Stream::Logs => 4,
-    Stream::Audit => 16,
-  }
+fn newest(records: &mut Vec<Record>, limit: usize) {
+  records.sort_by(|left, right| {
+    right
+      .timestamp_ms
+      .cmp(&left.timestamp_ms)
+      .then_with(|| right.run_id.cmp(&left.run_id))
+  });
+  records.truncate(limit);
 }
 
 fn exists(path: &Path) -> io::Result<bool> {
@@ -301,6 +405,14 @@ fn open(path: &Path, create: bool) -> io::Result<File> {
   #[cfg(unix)]
   {
     use std::os::unix::fs::MetadataExt as _;
+    // SQLite can unlink a journal between open and fstat. A removed file is
+    // absent, rather than an unsafe hardlink; callers decide whether absence is OK.
+    if metadata.nlink() == 0 {
+      return Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        "history file was removed while opening",
+      ));
+    }
     if metadata.uid() != rustix::process::getuid().as_raw()
       || metadata.mode() & 0o077 != 0
       || metadata.nlink() != 1

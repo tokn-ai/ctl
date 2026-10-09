@@ -772,7 +772,14 @@ where
       }
       Event::Exited(result) => {
         if result.is_err() {
-          eprintln!("Could not monitor the container; cleaning up its VPN connection.");
+          ctl_core::observability::diagnostic_event(
+            ctl_core::observability::Event::VpnMonitor,
+            ctl_core::observability::Level::Warn,
+            ctl_core::observability::Context::default(),
+            ctl_core::observability::Outcome::Failed,
+            None,
+            None,
+          );
         }
         self.entries.insert(id.clone(), entry);
         self.stop_entry(&id, None);

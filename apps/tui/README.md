@@ -62,6 +62,8 @@ The default prefix is **Ctrl+B**. Change it with `--prefix Ctrl+a` or
 | Ctrl + Arrow | Move the adjacent divider by one cell; repeat for 500 ms |
 | Alt + Arrow | Move the adjacent divider by five cells; repeat for 500 ms |
 | `o` | Cycle to the next pane |
+| `{` / `}` | Swap the focused pane with the previous / next pane, wrapping |
+| `!` | Move the focused pane into a new flat session and follow it |
 | `z` | Zoom/unzoom the focused pane; requires the view resize lease |
 | `c` | Create and select a session |
 | `n` / `p` | Next / previous session |
@@ -116,6 +118,8 @@ The first command set uses familiar tmux names and aliases:
 | `select-pane` / `selectp -L\|-R\|-U\|-D` | Focus an adjacent pane |
 | `resize-pane` / `resizep -L\|-R\|-U\|-D [N]` | Move the adjacent divider by `N` cells, default 1 |
 | `resize-pane -Z` | Toggle shared pane zoom |
+| `swap-pane` / `swapp -U\|-D [-d]` | Swap with the previous / next pane; `-d` keeps focus in the original slot |
+| `break-pane` / `breakp [-d] [-n NAME]` | Move to a new flat session; `-d` stays in the original session |
 | `new-session` / `new [-s NAME]` | Create and select a session |
 | `switch-client` / `switchc -n\|-p\|-t NAME` | Next/previous session, or select an exact name or ID |
 | `list-sessions` / `ls` | Open the session picker |
@@ -217,7 +221,7 @@ the layout clears zoom, and exiting the zoomed pane clears zoom. Its final
 screen remains visible until dismissed, as with other ended panes.
 Zoom survives detach and reconnect, and the status row shows `ZOOM`.
 
-Zoom supports negotiated ctmux contracts `1.1.15` through `1.1.18`.
+Zoom supports negotiated ctmux contracts `1.1.15` through `1.1.19`.
 Older daemons remain usable with their existing split controls; attempting zoom
 reports that it is unavailable.
 
@@ -229,7 +233,7 @@ shrink the focused pane when it is the last child. Subtree minimum sizes limit
 movement; a divider at its limit stays put.
 
 Resizing requires the view resize lease and negotiated ctmux contract `1.1.16`
-through `1.1.18`.
+through `1.1.19`.
 A successful movement unzooms the view and saves its new proportions. The TUI
 and desktop see the same rectangles; canvas changes, detach, and reconnect
 retain the proportions. Daemon restart still ends these in-memory views.
@@ -246,6 +250,33 @@ movements, including the final mouseup position. Output and routine view refresh
 keep the drag active. Esc cancels remaining movement; disconnecting, changing the
 view, losing resize ownership, or resizing the host terminal also ends the drag.
 Already confirmed pane sizes remain in effect.
+
+### Rearranging panes
+
+**Ctrl+B {** and **Ctrl+B }** swap the focused terminal with its previous or
+next neighbor in layout order, wrapping at either end. Split trees and slot
+proportions stay fixed, so the desktop sees the same rearrangement. Focus follows
+the terminal; `swap-pane -U -d` or `swap-pane -D -d` keeps focus in the original
+slot instead. Swapping clears shared zoom.
+
+**Ctrl+B !** moves the focused terminal into a new flat session and follows it.
+`break-pane -n "build-logs"` names that session; `break-pane -d` leaves this client
+in the original session. The running process, terminal identity, history, and
+input attachment survive the move. Following the pane also retains its copy
+selection. The client requests resize ownership in the session it keeps
+displaying; another client's ownership
+is never displaced. A session with one pane cannot be broken out.
+
+These TUI commands require ctmux `1.1.19` and the source view's resize lease.
+The daemon checks attachment ownership, view identity, revision, and pane
+membership together. Older daemons remain usable and report pane moves unavailable;
+no unsupported frame is sent. Existing CLI and desktop arrangement operations
+retain their previous behavior.
+
+Output, input, local controls, and resizing continue while a move awaits
+confirmation.
+Connected source observers remove a moved pane without treating it as an exit;
+actual exited panes still retain their final output until dismissed.
 
 Each pane has its own bounded VT emulator. The renderer uses authoritative pane
 rectangles and the server's reserved separator cells, without taking rows or

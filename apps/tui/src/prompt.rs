@@ -8,6 +8,8 @@ const MAX_TEXT_BYTES: usize = 4096;
 const MAX_HISTORY: usize = 100;
 const COMMAND_NAMES: &[&str] = &[
   "split-window",
+  "swap-pane",
+  "break-pane",
   "select-pane",
   "resize-pane",
   "new-session",
@@ -332,7 +334,14 @@ pub(crate) enum Command {
   Action(Action),
   NewSession(Option<String>),
   SwitchSession(String),
-  Lease { kind: LeaseKind, requested: bool },
+  BreakPane {
+    name: Option<String>,
+    detached: bool,
+  },
+  Lease {
+    kind: LeaseKind,
+    requested: bool,
+  },
 }
 
 pub(crate) fn parse(text: &str) -> Result<Command, String> {
@@ -371,6 +380,8 @@ pub(crate) fn parse(text: &str) -> Result<Command, String> {
       Ok(Command::Action(Action::Focus(direction)))
     }
     "resize-pane" => resize_command(args),
+    "swap-pane" => swap_command(args),
+    "break-pane" => break_command(args),
     "new-session" => match args
       .iter()
       .map(String::as_str)
@@ -409,6 +420,8 @@ pub(crate) fn parse(text: &str) -> Result<Command, String> {
 fn command_name(name: &str) -> Option<&'static str> {
   Some(match name {
     "split-window" | "splitw" => "split-window",
+    "swap-pane" | "swapp" => "swap-pane",
+    "break-pane" | "breakp" => "break-pane",
     "select-pane" | "selectp" => "select-pane",
     "resize-pane" | "resizep" => "resize-pane",
     "new-session" | "new" => "new-session",
@@ -453,6 +466,42 @@ fn resize_command(args: &[String]) -> Result<Command, String> {
     1
   };
   Ok(Command::Action(Action::ResizePane { direction, amount }))
+}
+
+fn swap_command(args: &[String]) -> Result<Command, String> {
+  let mut previous = None;
+  let mut stay = false;
+  for arg in args {
+    match arg.as_str() {
+      "-U" | "-D" if previous.is_none() => previous = Some(arg == "-U"),
+      "-d" if !stay => stay = true,
+      _ => return Err(usage("swap-pane -U|-D [-d]")),
+    }
+  }
+  let previous = previous.ok_or_else(|| usage("swap-pane -U|-D [-d]"))?;
+  Ok(Command::Action(Action::SwapPane { previous, stay }))
+}
+
+fn break_command(args: &[String]) -> Result<Command, String> {
+  let mut name = None;
+  let mut detached = false;
+  let mut args = args.iter();
+  while let Some(arg) = args.next() {
+    match arg.as_str() {
+      "-d" if !detached => detached = true,
+      "-n" if name.is_none() => {
+        name = Some(
+          args
+            .next()
+            .filter(|name| !name.is_empty() && !name.starts_with('-'))
+            .ok_or_else(|| usage("break-pane [-d] [-n NAME]"))?
+            .clone(),
+        );
+      }
+      _ => return Err(usage("break-pane [-d] [-n NAME]")),
+    }
+  }
+  Ok(Command::BreakPane { name, detached })
 }
 
 fn no_argument_command(name: &str, args: &[String]) -> Result<Command, String> {
@@ -699,6 +748,95 @@ mod tests {
   }
 
   #[test]
+  fn swap_aliases_require_a_direction_and_keep_detached_focus_intent() {
+    for name in ["swap-pane", "swapp"] {
+      for (direction, previous) in [("-U", true), ("-D", false)] {
+        assert_eq!(
+          parse(&format!("{name} {direction}")),
+          Ok(Command::Action(Action::SwapPane {
+            previous,
+            stay: false
+          }))
+        );
+        for suffix in [format!("{direction} -d"), format!("-d {direction}")] {
+          assert_eq!(
+            parse(&format!("{name} {suffix}")),
+            Ok(Command::Action(Action::SwapPane {
+              previous,
+              stay: true
+            }))
+          );
+        }
+      }
+    }
+  }
+
+  #[test]
+  fn break_aliases_accept_name_and_detach_flags_in_either_order() {
+    for command in ["break-pane", "breakp"] {
+      for (suffix, name, detached) in [
+        ("", None, false),
+        (" -d", None, true),
+        (" -n work", Some("work"), false),
+        (" -d -n 'build logs'", Some("build logs"), true),
+        (" -n 'build logs' -d", Some("build logs"), true),
+        (
+          " -n '编译日志; $literal'",
+          Some("编译日志; $literal"),
+          false,
+        ),
+      ] {
+        assert_eq!(
+          parse(&format!("{command}{suffix}")),
+          Ok(Command::BreakPane {
+            name: name.map(str::to_owned),
+            detached
+          })
+        );
+      }
+    }
+    assert_eq!(
+      parse("breakp -n my\\ session -d"),
+      Ok(Command::BreakPane {
+        name: Some("my session".into()),
+        detached: true
+      })
+    );
+  }
+
+  #[test]
+  fn pane_move_commands_reject_duplicate_flags_and_unsupported_targets() {
+    for command in [
+      "swap-pane",
+      "swap-pane -d",
+      "swapp -U -U",
+      "swapp -U -D",
+      "swapp -D -d -d",
+      "swapp -U -t other",
+      "swapp -U -s other",
+      "swapp -u",
+      "swapp -dU",
+      "swapp -U extra",
+      "breakp -d -d",
+      "breakp -n",
+      "breakp -n ''",
+      "breakp -n -d",
+      "breakp -n -n name",
+      "breakp -n one -n two",
+      "breakp -n name -d -n other",
+      "breakp -s other",
+      "breakp -t other",
+      "breakp -P",
+      "breakp -dn name",
+      "breakp name",
+      "breakp -d; detach",
+      "swapp -U && detach",
+    ] {
+      assert!(parse(command).is_err(), "{command:?}");
+    }
+  }
+
+  #[test]
   fn parser_accepts_literal_quoted_names_and_backslash_escapes() {
     for text in ["new -s 'my work'", "new -s \"my work\"", "new -s my\\ work"] {
       assert_eq!(parse(text), Ok(Command::NewSession(Some("my work".into()))));
@@ -854,6 +992,20 @@ mod tests {
     prompt.paste("-h");
     prompt.key(key(KeyCode::Tab));
     assert_eq!(prompt.text, "splitw -h");
+    for (text, expected) in [
+      ("swa", "swap-pane "),
+      ("bre", "break-pane "),
+      ("swapp", "swapp "),
+      ("breakp", "breakp "),
+    ] {
+      prompt.open();
+      prompt.paste(text);
+      prompt.key(key(KeyCode::Tab));
+      assert_eq!(prompt.text, expected);
+      prompt.paste("-d");
+      prompt.key(key(KeyCode::Tab));
+      assert_eq!(prompt.text, format!("{expected}-d"));
+    }
   }
 
   #[test]

@@ -1,6 +1,7 @@
 use super::{Result, TestDaemon};
 use ctmux_proto::{ClientMessage, ErrorCode, ServerMessage, read_frame, write_frame};
 use std::{
+  collections::VecDeque,
   os::unix::fs::PermissionsExt,
   path::PathBuf,
   sync::{
@@ -20,6 +21,7 @@ use tokio::{
 struct State {
   generation: u64,
   paused: bool,
+  hold_move_results: bool,
 }
 
 #[derive(Default)]
@@ -28,6 +30,7 @@ struct Progress {
   resumptions: AtomicUsize,
   stalled: AtomicUsize,
   resume_rejections: AtomicUsize,
+  held_move_results: AtomicUsize,
   changed: Notify,
 }
 
@@ -87,6 +90,31 @@ impl TestProxy {
 
   pub fn resumptions(&self) -> usize {
     self.progress.resumptions.load(Ordering::Acquire)
+  }
+
+  pub fn held_move_results(&self) -> usize {
+    self.progress.held_move_results.load(Ordering::Acquire)
+  }
+
+  /// Hold correlated move replies while forwarding view updates and live traffic.
+  pub fn hold_move_results(&self) {
+    self
+      .state
+      .send_modify(|state| state.hold_move_results = true);
+  }
+
+  pub fn release_move_results(&self) {
+    self
+      .state
+      .send_modify(|state| state.hold_move_results = false);
+  }
+
+  pub async fn wait_held_move_result(&self, previous: usize) -> Result<()> {
+    self
+      .wait_progress("a pane move reply held by the proxy", |progress| {
+        progress.held_move_results.load(Ordering::Acquire) > previous
+      })
+      .await
   }
 
   /// Close every active generation while holding replacement handshakes.
@@ -220,7 +248,66 @@ async fn forward(
     progress.resume_rejections.fetch_add(1, Ordering::Release);
     progress.changed.notify_waiters();
   }
-  tokio::io::copy_bidirectional(&mut stream, &mut daemon).await?;
+  relay_messages(stream, daemon, state, progress).await
+}
+
+async fn relay_messages(
+  stream: UnixStream,
+  daemon: UnixStream,
+  mut state: watch::Receiver<State>,
+  progress: Arc<Progress>,
+) -> Result<()> {
+  let (mut client_reader, mut client_writer) = stream.into_split();
+  let (mut daemon_reader, mut daemon_writer) = daemon.into_split();
+  let client_to_daemon = async move {
+    while let Some(message) = read_frame::<_, ClientMessage>(&mut client_reader).await? {
+      write_frame(&mut daemon_writer, &message).await?;
+    }
+    Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
+  };
+  let daemon_to_client = async move {
+    let mut held = VecDeque::new();
+    loop {
+      if !state.borrow().hold_move_results {
+        while let Some(message) = held.pop_front() {
+          write_frame(&mut client_writer, &message).await?;
+        }
+      }
+      // Keep an in-progress frame read alive when hold/release state changes;
+      // cancelling read_frame after its length prefix would corrupt the stream.
+      let reading = read_frame::<_, ServerMessage>(&mut daemon_reader);
+      tokio::pin!(reading);
+      let message = loop {
+        tokio::select! {
+          message = &mut reading => break message?,
+          changed = state.changed() => {
+            if changed.is_err() { return Ok(()); }
+            if !state.borrow().hold_move_results {
+              while let Some(message) = held.pop_front() {
+                write_frame(&mut client_writer, &message).await?;
+              }
+            }
+          }
+        }
+      };
+      let Some(message) = message else {
+        break;
+      };
+      if matches!(message, ServerMessage::PaneMoveResult { .. }) && state.borrow().hold_move_results
+      {
+        if held.len() >= 64 {
+          return Err("proxy held too many pane move replies".into());
+        }
+        held.push_back(message);
+        progress.held_move_results.fetch_add(1, Ordering::Release);
+        progress.changed.notify_waiters();
+      } else {
+        write_frame(&mut client_writer, &message).await?;
+      }
+    }
+    Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
+  };
+  tokio::try_join!(client_to_daemon, daemon_to_client)?;
   Ok(())
 }
 

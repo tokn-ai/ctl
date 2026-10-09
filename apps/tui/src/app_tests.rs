@@ -916,6 +916,509 @@ async fn foreign_view_revision_cannot_hide_a_current_view_zoom_update() -> Resul
   Ok(())
 }
 
+async fn split_migration_echo(daemon: &Daemon, app: &mut App<'_>) -> Result<String> {
+  let first = app.focused.clone();
+  let view = daemon
+    .split_echo(&first, SplitAxis::Horizontal, "moving", app.canvas_size())
+    .await?;
+  let second = view
+    .terminals
+    .iter()
+    .find(|terminal| terminal.terminal_id != first)
+    .ok_or("missing split pane")?
+    .terminal_id
+    .clone();
+  app.refresh().await?;
+  wait_for_text(app, &second, "moving:ready").await?;
+  Ok(second)
+}
+
+async fn external_break(app: &mut App<'_>, terminal: &str) -> Result<(ViewInfo, ViewInfo)> {
+  let view = app.view.as_ref().ok_or("missing source view")?;
+  let target = ctmux_proto::PaneTarget {
+    session_id: view.session_id.clone(),
+    view_id: view.view_id.clone(),
+    expected_revision: view.revision,
+    terminal_id: terminal.into(),
+  };
+  let owner = app
+    .panes
+    .iter()
+    .find(|(_, pane)| pane.control.state().leases().layout.owned_by_client)
+    .ok_or("missing layout owner")?
+    .0
+    .clone();
+  app
+    .panes
+    .get_mut(&owner)
+    .unwrap()
+    .break_pane(target, Some("promoted".into()), "migration-test".into())
+    .await?;
+  timeout(Duration::from_secs(5), async {
+    loop {
+      let pane = app.panes.get_mut(&owner).unwrap();
+      pane.drain().await?;
+      if let Some(outcome) = pane.move_result.take() {
+        return match outcome {
+          ctmux_proto::PaneMoveOutcome::Promoted { view, source_view } => Ok((*view, *source_view)),
+          outcome => Err(format!("unexpected pane move: {outcome:?}").into()),
+        };
+      }
+      tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+  })
+  .await?
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn observer_migration_removes_live_pane_without_archiving_or_remounting_siblings()
+-> Result<()> {
+  let daemon = Daemon::start().await?;
+  let mut owner = daemon.app(false);
+  let session = create_shell(&owner).await?;
+  owner.start(Some(session.clone())).await?;
+  let first = owner.focused.clone();
+  let moving = split_migration_echo(&daemon, &mut owner).await?;
+  let mut observer = daemon.app(true);
+  observer.start(Some(session.clone())).await?;
+  observer
+    .execute(Action::History { page_back: false })
+    .await?;
+  let frozen = observer.copies[&first].lines.clone();
+  let token = observer.panes[&first].token.clone();
+  observer.focused.clone_from(&moving);
+  observer
+    .execute(Action::History { page_back: false })
+    .await?;
+  let (promoted, source) = external_break(&mut owner, &moving).await?;
+  timeout(Duration::from_secs(5), async {
+    while observer.panes.contains_key(&moving) {
+      observer.drain().await;
+      observer.schedule_refresh();
+      observer.poll_maintenance().await;
+      tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    Result::<()>::Ok(())
+  })
+  .await??;
+  assert_eq!(observer.selected_id, session);
+  assert_eq!(observer.view.as_ref(), Some(&source));
+  assert_eq!(observer.focused, first);
+  assert_eq!(observer.panes[&first].token, token);
+  assert!(observer.panes[&first].connected);
+  assert_eq!(observer.copies[&first].lines, frozen);
+  assert!(!observer.copies.contains_key(&moving));
+  assert!(observer.migrated_panes.is_empty());
+  assert!(observer.archived_panes.is_empty());
+  assert!(observer.local_archives()?.is_empty());
+  assert_ne!(promoted.session_id, session);
+  assert_eq!(promoted.terminals[0].terminal_id, moving);
+  observer.detach().await;
+  owner.detach().await;
+  Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn migration_requires_foreign_membership_and_matching_source_omission() -> Result<()> {
+  let daemon = Daemon::start().await?;
+  let mut app = daemon.app(false);
+  let session = create_shell(&app).await?;
+  app.start(Some(session)).await?;
+  let moving = split_migration_echo(&daemon, &mut app).await?;
+  let current = app.view.as_ref().unwrap().clone();
+  let mut foreign = current.clone();
+  foreign.session_id = "another-session".into();
+  foreign.view_id = "another-view".into();
+  let mut invalid = foreign.clone();
+  invalid
+    .terminals
+    .retain(|terminal| terminal.terminal_id != moving);
+  let mut same_session = foreign.clone();
+  same_session.session_id.clone_from(&current.session_id);
+  let mut same_view = foreign.clone();
+  same_view.view_id.clone_from(&current.view_id);
+  app.observe_migrations(vec![
+    (moving.clone(), invalid),
+    (moving.clone(), same_session),
+    (moving.clone(), same_view),
+  ]);
+  assert!(app.migrated_panes.is_empty());
+  app.observe_migrations(vec![(moving.clone(), foreign.clone())]);
+  assert!(app.migrated_panes.contains(&moving));
+  app.reconcile_migrations(&current).await?;
+  assert!(app.panes.contains_key(&moving));
+  foreign
+    .terminals
+    .retain(|terminal| terminal.terminal_id != moving);
+  app.reconcile_migrations(&foreign).await?;
+  assert!(app.panes.contains_key(&moving));
+  let mut source = current.clone();
+  source
+    .terminals
+    .retain(|terminal| terminal.terminal_id != moving);
+  source.panes.retain(|pane| pane.terminal_id != moving);
+  source.layout = ctmux_proto::ViewLayout::Terminal {
+    terminal_id: app.focused.clone(),
+  };
+  source.revision += 1;
+  app.reconcile_migrations(&source).await?;
+  app.adopt_view(source.clone()).await?;
+  assert!(!app.panes.contains_key(&moving));
+  assert_eq!(app.view.as_ref(), Some(&source));
+  assert!(app.migrated_panes.is_empty());
+  assert!(app.local_archives()?.is_empty());
+  app.detach().await;
+  Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn migration_proof_survives_pending_break_until_acknowledgement_or_cancellation() -> Result<()>
+{
+  let daemon = Daemon::start().await?;
+  let mut app = daemon.app(false);
+  let session = create_shell(&app).await?;
+  app.start(Some(session.clone())).await?;
+  let moving = split_migration_echo(&daemon, &mut app).await?;
+  let current = app.view.as_ref().unwrap().clone();
+  app.focused.clone_from(&moving);
+  app.execute(Action::History { page_back: false }).await?;
+  let frozen = app.copies[&moving].lines.clone();
+  let token = app.panes[&moving].token.clone();
+  app.break_pane(Some("protected".into()), false).await?;
+  assert!(
+    app
+      .pane_move
+      .as_ref()
+      .is_some_and(|pending| pending.promoting(&moving))
+  );
+  let source = timeout(Duration::from_secs(5), async {
+    loop {
+      let ServerMessage::ViewSnapshot { view } = app
+        .request(ClientMessage::GetView {
+          session: session.clone(),
+        })
+        .await?
+      else {
+        return Err("expected source view".into());
+      };
+      if view
+        .terminals
+        .iter()
+        .all(|terminal| terminal.terminal_id != moving)
+      {
+        return Result::<ViewInfo>::Ok(view);
+      }
+      tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+  })
+  .await??;
+  let ServerMessage::ViewSnapshot { view: promoted } = app
+    .request(ClientMessage::GetView {
+      session: "protected".into(),
+    })
+    .await?
+  else {
+    return Err("expected promoted view".into());
+  };
+  app.observe_migrations(vec![(moving.clone(), promoted)]);
+  app.reconcile_migrations(&source).await?;
+  assert!(app.migrated_panes.contains(&moving));
+  assert_eq!(app.view.as_ref(), Some(&current));
+  assert_eq!(app.panes[&moving].token, token);
+  assert_eq!(app.copies[&moving].lines, frozen);
+  app.cancel_pane_move();
+  app.adopt_view(source.clone()).await?;
+  assert_eq!(app.view.as_ref(), Some(&source));
+  assert!(!app.panes.contains_key(&moving));
+  assert!(!app.copies.contains_key(&moving));
+  assert!(app.local_archives()?.is_empty());
+  app.detach().await;
+  Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn migration_removes_live_pane_while_retaining_an_exited_siblings_final_output() -> Result<()>
+{
+  let daemon = Daemon::start().await?;
+  let mut app = daemon.app(false);
+  let session = create_shell(&app).await?;
+  app.start(Some(session)).await?;
+  let first = app.focused.clone();
+  let moving = split_migration_echo(&daemon, &mut app).await?;
+  let exited = split_exit_shell(&mut app).await?;
+  app.execute(Action::History { page_back: false }).await?;
+  let frozen = app.copies[&exited].lines.clone();
+  app.panes[&exited]
+    .control
+    .input(b"finish\n".to_vec())
+    .await?;
+  timeout(Duration::from_secs(5), async {
+    while app.panes[&exited].ended.is_none() {
+      app.drain().await;
+      tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+  })
+  .await?;
+  let token = app.panes[&exited].token.clone();
+  // A remote controller uses the current authoritative revision, while this
+  // observer retains the exited sibling's final presentation and selection.
+  let ServerMessage::ViewSnapshot { view } = app
+    .request(ClientMessage::GetView {
+      session: app.selected_id.clone(),
+    })
+    .await?
+  else {
+    return Err("expected source view".into());
+  };
+  app.view.as_mut().unwrap().revision = view.revision;
+  let (promoted, source) = external_break(&mut app, &moving).await?;
+  app.observe_migrations(vec![(moving.clone(), promoted)]);
+  app.adopt_view(source).await?;
+  assert!(!app.panes.contains_key(&moving));
+  assert!(app.panes.contains_key(&first));
+  assert_eq!(app.panes[&exited].token, token);
+  assert_eq!(app.copies[&exited].lines, frozen);
+  assert!(
+    app.panes[&exited]
+      .model
+      .copy_lines()
+      .join("\n")
+      .contains("FINAL_CHILD")
+  );
+  assert!(
+    app
+      .view
+      .as_ref()
+      .unwrap()
+      .terminals
+      .iter()
+      .all(|terminal| terminal.terminal_id != moving)
+  );
+  assert!(app.migrated_panes.is_empty());
+  assert!(app.local_archives()?.is_empty());
+  app.detach().await;
+  Ok(())
+}
+
+async fn pending_break_snapshots(
+  app: &mut App<'_>,
+  moving: &str,
+  detached: bool,
+) -> Result<(String, ViewInfo, ViewInfo)> {
+  let owner = app
+    .panes
+    .iter()
+    .find(|(_, pane)| pane.control.state().leases().layout.owned_by_client)
+    .ok_or("missing layout owner")?
+    .0
+    .clone();
+  moving.clone_into(&mut app.focused);
+  app
+    .break_pane(Some("snapshot-promotion".into()), detached)
+    .await?;
+  let (promoted, source) = timeout(Duration::from_secs(5), async {
+    loop {
+      let pane = app.panes.get_mut(&owner).unwrap();
+      pane.drain().await?;
+      if let Some(outcome) = pane.move_result.take() {
+        return match outcome {
+          ctmux_proto::PaneMoveOutcome::Promoted { view, source_view } => {
+            Result::<(ViewInfo, ViewInfo)>::Ok((*view, *source_view))
+          }
+          outcome => Err(format!("unexpected pending break: {outcome:?}").into()),
+        };
+      }
+      tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+  })
+  .await??;
+  // The exact attachment reply has arrived, but the App has not consumed it.
+  // Keep it outside the regular drain while a later snapshot is observed.
+  assert!(app.pane_move.is_some());
+  Ok((owner, promoted, source))
+}
+
+async fn wait_for_view_columns(app: &App<'_>, session: &str, columns: u16) -> Result<ViewInfo> {
+  timeout(Duration::from_secs(5), async {
+    loop {
+      let ServerMessage::ViewSnapshot { view } = app
+        .request(ClientMessage::GetView {
+          session: session.into(),
+        })
+        .await?
+      else {
+        return Err("expected resized view".into());
+      };
+      if view.canvas_size.columns == columns {
+        return Result::<ViewInfo>::Ok(view);
+      }
+      tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+  })
+  .await?
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn detached_break_old_acknowledgement_keeps_newer_source_geometry_and_removes_moved_pane()
+-> Result<()> {
+  let daemon = Daemon::start().await?;
+  let mut app = daemon.app(false);
+  let session = create_shell(&app).await?;
+  app.start(Some(session.clone())).await?;
+  let first = app.focused.clone();
+  let moving = split_migration_echo(&daemon, &mut app).await?;
+  app.execute(Action::History { page_back: false }).await?;
+  let frozen = app.copies[&first].lines.clone();
+  let token = app.panes[&first].token.clone();
+  let (owner, promoted, source) = pending_break_snapshots(&mut app, &moving, true).await?;
+  app.panes[&owner]
+    .control
+    .resize(TerminalSize {
+      columns: 99,
+      rows: 29,
+      pixel_width: 0,
+      pixel_height: 0,
+    })
+    .await?;
+  let newer = wait_for_view_columns(&app, &session, 99).await?;
+  assert!(newer.revision > source.revision);
+  app.adopt_view(newer.clone()).await?;
+  assert!(app.panes.contains_key(&moving));
+  assert_eq!(app.view.as_ref().unwrap().revision, newer.revision);
+  app.panes.get_mut(&owner).unwrap().move_result = Some(ctmux_proto::PaneMoveOutcome::Promoted {
+    view: Box::new(promoted),
+    source_view: Box::new(source),
+  });
+  app.poll_pane_move().await?;
+  assert!(app.pane_move.is_none());
+  assert_eq!(app.selected_id, session);
+  assert_eq!(app.view.as_ref(), Some(&newer));
+  assert_eq!(app.focused, first);
+  assert!(!app.panes.contains_key(&moving));
+  assert_eq!(app.panes[&first].token, token);
+  assert_eq!(app.copies[&first].lines, frozen);
+  assert!(app.migrated_panes.is_empty());
+  assert!(app.local_archives()?.is_empty());
+  app.detach().await;
+  Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn following_break_old_acknowledgement_keeps_newer_promoted_geometry_and_copy_state()
+-> Result<()> {
+  let daemon = Daemon::start().await?;
+  let mut app = daemon.app(false);
+  let session = create_shell(&app).await?;
+  app.start(Some(session.clone())).await?;
+  let moving = split_migration_echo(&daemon, &mut app).await?;
+  app.focused.clone_from(&moving);
+  app.execute(Action::History { page_back: false }).await?;
+  let frozen = app.copies[&moving].lines.clone();
+  let token = app.panes[&moving].token.clone();
+  let (owner, promoted, source) = pending_break_snapshots(&mut app, &moving, false).await?;
+  // Another attachment can resize the newly created root before this App
+  // sees its delayed promotion reply. It owns only the available new lease.
+  let mut observer = daemon.app(false);
+  observer.size = (101, 31);
+  observer.start(Some(promoted.session_id.clone())).await?;
+  let newer = observer.view.as_ref().unwrap().clone();
+  assert!(newer.revision > promoted.revision);
+  assert_eq!(newer.canvas_size.columns, 101);
+  app.adopt_view(newer.clone()).await?;
+  assert_eq!(app.view.as_ref().unwrap().session_id, session);
+  app.panes.get_mut(&owner).unwrap().move_result = Some(ctmux_proto::PaneMoveOutcome::Promoted {
+    view: Box::new(promoted),
+    source_view: Box::new(source),
+  });
+  app.poll_pane_move().await?;
+  assert!(app.pane_move.is_none());
+  assert_eq!(app.view.as_ref(), Some(&newer));
+  assert_eq!(app.focused, moving);
+  assert_eq!(app.panes.len(), 1);
+  assert_eq!(app.panes[&moving].token, token);
+  assert_eq!(app.copies[&moving].lines, frozen);
+  assert!(
+    app.panes[&moving]
+      .control
+      .state()
+      .leases()
+      .input
+      .owned_by_client
+  );
+  assert!(app.local_archives()?.is_empty());
+  observer.detach().await;
+  app.detach().await;
+  Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn detached_break_preserves_an_exited_siblings_final_output_and_frozen_selection()
+-> Result<()> {
+  let daemon = Daemon::start().await?;
+  let mut app = daemon.app(false);
+  let session = create_shell(&app).await?;
+  app.start(Some(session.clone())).await?;
+  let moving = split_migration_echo(&daemon, &mut app).await?;
+  let exited = split_exit_shell(&mut app).await?;
+  app.execute(Action::History { page_back: false }).await?;
+  let frozen = app.copies[&exited].lines.clone();
+  app.panes[&exited]
+    .control
+    .input(b"finish\n".to_vec())
+    .await?;
+  timeout(Duration::from_secs(5), async {
+    while app.panes[&exited].ended.is_none() {
+      app.drain().await;
+      tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+  })
+  .await?;
+  let token = app.panes[&exited].token.clone();
+  let ServerMessage::ViewSnapshot { view } = app
+    .request(ClientMessage::GetView {
+      session: session.clone(),
+    })
+    .await?
+  else {
+    return Err("expected source view after exit".into());
+  };
+  app.adopt_view(view).await?;
+  let (owner, promoted, source) = pending_break_snapshots(&mut app, &moving, true).await?;
+  app.panes.get_mut(&owner).unwrap().move_result = Some(ctmux_proto::PaneMoveOutcome::Promoted {
+    view: Box::new(promoted),
+    source_view: Box::new(source),
+  });
+  app.poll_pane_move().await?;
+  assert_eq!(app.selected_id, session);
+  assert!(!app.panes.contains_key(&moving));
+  assert_eq!(app.panes[&exited].token, token);
+  assert_eq!(app.copies[&exited].lines, frozen);
+  assert!(
+    app.panes[&exited]
+      .model
+      .copy_lines()
+      .join("\n")
+      .contains("FINAL_CHILD")
+  );
+  assert!(app.local_archives()?.is_empty());
+  app.focused.clone_from(&exited);
+  app
+    .key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE))
+    .await?;
+  app
+    .key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+    .await?;
+  assert!(!app.panes.contains_key(&exited));
+  assert!(app.local_archives()?.iter().any(|archive| {
+    archive
+      .terminals
+      .iter()
+      .any(|pane| pane.terminal_id == exited && pane.lines.join("\n").contains("FINAL_CHILD"))
+  }));
+  app.detach().await;
+  Ok(())
+}
+
 #[tokio::test]
 async fn archived_output_opens_without_a_daemon() -> Result<()> {
   let directory = std::env::temp_dir().join(format!("rtui-archive-{}", uuid::Uuid::new_v4()));

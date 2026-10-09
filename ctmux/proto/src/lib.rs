@@ -6,7 +6,7 @@ use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 /// Internal protocol build; incrementing this does not publish a new contract.
-pub const PROTOCOL_BUILD: u16 = 18;
+pub const PROTOCOL_BUILD: u16 = 19;
 /// First published wire contract. Keep this identity immutable.
 pub const CONTRACT_V1_0_13: ProtocolVersion = ProtocolVersion::new(1, 0, 13);
 /// Published compatible addition: paged history and checkpoint recovery.
@@ -19,7 +19,9 @@ pub const CONTRACT_V1_1_16: ProtocolVersion = ProtocolVersion::new(1, 1, 16);
 pub const CONTRACT_V1_1_17: ProtocolVersion = ProtocolVersion::new(1, 1, 17);
 /// Application-requested modified keys with checkpoint mode restoration.
 pub const CONTRACT_V1_1_18: ProtocolVersion = ProtocolVersion::new(1, 1, 18);
-pub const PROTOCOL_VERSION: ProtocolVersion = CONTRACT_V1_1_18;
+/// Atomic attached pane moves guarded by layout ownership and view revision.
+pub const CONTRACT_V1_1_19: ProtocolVersion = ProtocolVersion::new(1, 1, 19);
+pub const PROTOCOL_VERSION: ProtocolVersion = CONTRACT_V1_1_19;
 pub const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[
   CONTRACT_V1_0_13,
   CONTRACT_V1_1_14,
@@ -27,13 +29,14 @@ pub const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[
   CONTRACT_V1_1_16,
   CONTRACT_V1_1_17,
   CONTRACT_V1_1_18,
+  CONTRACT_V1_1_19,
 ];
 
 #[must_use]
 pub const fn supports_view_zoom(version: ProtocolVersion) -> bool {
   matches!(
     version,
-    CONTRACT_V1_1_15 | CONTRACT_V1_1_16 | CONTRACT_V1_1_17 | CONTRACT_V1_1_18
+    CONTRACT_V1_1_15 | CONTRACT_V1_1_16 | CONTRACT_V1_1_17 | CONTRACT_V1_1_18 | CONTRACT_V1_1_19
   )
 }
 
@@ -41,23 +44,34 @@ pub const fn supports_view_zoom(version: ProtocolVersion) -> bool {
 pub const fn supports_pane_resize(version: ProtocolVersion) -> bool {
   matches!(
     version,
-    CONTRACT_V1_1_16 | CONTRACT_V1_1_17 | CONTRACT_V1_1_18
+    CONTRACT_V1_1_16 | CONTRACT_V1_1_17 | CONTRACT_V1_1_18 | CONTRACT_V1_1_19
   )
 }
 
 #[must_use]
 pub const fn supports_divider_resize(version: ProtocolVersion) -> bool {
-  matches!(version, CONTRACT_V1_1_17 | CONTRACT_V1_1_18)
+  matches!(
+    version,
+    CONTRACT_V1_1_17 | CONTRACT_V1_1_18 | CONTRACT_V1_1_19
+  )
 }
 
 #[must_use]
 pub const fn supports_layout_lease_notifications(version: ProtocolVersion) -> bool {
-  matches!(version, CONTRACT_V1_1_17 | CONTRACT_V1_1_18)
+  matches!(
+    version,
+    CONTRACT_V1_1_17 | CONTRACT_V1_1_18 | CONTRACT_V1_1_19
+  )
 }
 
 #[must_use]
 pub const fn supports_extended_keys(version: ProtocolVersion) -> bool {
-  matches!(version, CONTRACT_V1_1_18)
+  matches!(version, CONTRACT_V1_1_18 | CONTRACT_V1_1_19)
+}
+
+#[must_use]
+pub const fn supports_pane_moves(version: ProtocolVersion) -> bool {
+  matches!(version, CONTRACT_V1_1_19)
 }
 
 #[must_use]
@@ -96,6 +110,7 @@ pub const MAX_NORMALIZED_HISTORY_BYTES: usize = 4 * 1024 * 1024;
 /// it is presentation metadata for titles, not an alternate command buffer.
 pub const MAX_RUNNING_COMMAND_BYTES: usize = 256;
 pub const MAX_PANE_RESIZE_REQUEST_ID_BYTES: usize = 256;
+pub const MAX_PANE_MOVE_REQUEST_ID_BYTES: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalSize {
@@ -621,6 +636,15 @@ pub struct DividerResize {
   pub position: u16,
 }
 
+/// Pane identity and source topology observed before an attached move request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneTarget {
+  pub session_id: String,
+  pub view_id: String,
+  pub expected_revision: u64,
+  pub terminal_id: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", from = "LegacyViewLayout")]
 pub enum ViewLayout {
@@ -725,6 +749,18 @@ pub enum ClientMessage {
     request_id: String,
     #[serde(flatten)]
     divider: DividerResize,
+  },
+  /// Attached-only atomic adjacent swap with source identity/revision guards.
+  SwapPane {
+    request_id: String,
+    target: PaneTarget,
+    previous: bool,
+  },
+  /// Attached-only atomic promotion into a new flat session.
+  BreakPane {
+    request_id: String,
+    target: PaneTarget,
+    name: Option<String>,
   },
   PromoteTerminal {
     terminal_id: String,
@@ -842,9 +878,30 @@ pub enum PaneResizeOutcome {
   Rejected { code: ErrorCode, message: String },
 }
 
+/// Correlated move result. A presenter chooses whether to follow a promotion.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PaneMoveOutcome {
+  Swapped {
+    view: Box<ViewInfo>,
+  },
+  Promoted {
+    view: Box<ViewInfo>,
+    source_view: Box<ViewInfo>,
+  },
+  Rejected {
+    code: ErrorCode,
+    message: String,
+  },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerMessage {
+  PaneMoveResult {
+    request_id: String,
+    outcome: PaneMoveOutcome,
+  },
   PaneResizeResult {
     request_id: String,
     outcome: PaneResizeOutcome,
@@ -1476,9 +1533,9 @@ mod tests {
   }
 
   #[test]
-  fn extended_key_contract_retains_historical_features() {
-    assert_eq!(PROTOCOL_VERSION, ProtocolVersion::new(1, 1, 18));
-    assert_eq!(PROTOCOL_BUILD, 18);
+  fn pane_move_contract_retains_historical_features() {
+    assert_eq!(PROTOCOL_VERSION, ProtocolVersion::new(1, 1, 19));
+    assert_eq!(PROTOCOL_BUILD, 19);
     assert_eq!(
       SUPPORTED_PROTOCOL_VERSIONS,
       &[
@@ -1488,22 +1545,32 @@ mod tests {
         CONTRACT_V1_1_16,
         CONTRACT_V1_1_17,
         CONTRACT_V1_1_18,
+        CONTRACT_V1_1_19,
       ]
     );
-    for (version, zoom, pane, divider, keys) in [
-      (CONTRACT_V1_0_13, false, false, false, false),
-      (CONTRACT_V1_1_14, false, false, false, false),
-      (CONTRACT_V1_1_15, true, false, false, false),
-      (CONTRACT_V1_1_16, true, true, false, false),
-      (CONTRACT_V1_1_17, true, true, true, false),
-      (CONTRACT_V1_1_18, true, true, true, true),
-      (ProtocolVersion::new(1, 1, 19), false, false, false, false),
+    for (version, zoom, pane, divider, keys, moves) in [
+      (CONTRACT_V1_0_13, false, false, false, false, false),
+      (CONTRACT_V1_1_14, false, false, false, false, false),
+      (CONTRACT_V1_1_15, true, false, false, false, false),
+      (CONTRACT_V1_1_16, true, true, false, false, false),
+      (CONTRACT_V1_1_17, true, true, true, false, false),
+      (CONTRACT_V1_1_18, true, true, true, true, false),
+      (CONTRACT_V1_1_19, true, true, true, true, true),
+      (
+        ProtocolVersion::new(1, 1, 20),
+        false,
+        false,
+        false,
+        false,
+        false,
+      ),
     ] {
       assert_eq!(supports_view_zoom(version), zoom);
       assert_eq!(supports_pane_resize(version), pane);
       assert_eq!(supports_divider_resize(version), divider);
       assert_eq!(supports_layout_lease_notifications(version), divider);
       assert_eq!(supports_extended_keys(version), keys);
+      assert_eq!(supports_pane_moves(version), moves);
     }
   }
 
@@ -1635,6 +1702,108 @@ mod tests {
       })
     );
     assert_eq!(request, serde_json::from_value(value).unwrap());
+  }
+
+  #[test]
+  fn pane_move_requests_preserve_nested_source_identity_and_revision() {
+    let target = PaneTarget {
+      session_id: "source-session".into(),
+      view_id: "source-view".into(),
+      expected_revision: 42,
+      terminal_id: "pane".into(),
+    };
+    let target_json = serde_json::json!({
+      "session_id": "source-session", "view_id": "source-view",
+      "expected_revision": 42, "terminal_id": "pane",
+    });
+    for (request, expected) in [
+      (
+        ClientMessage::SwapPane {
+          request_id: "swap-1".into(),
+          target: target.clone(),
+          previous: true,
+        },
+        serde_json::json!({ "type": "swap_pane", "request_id": "swap-1", "target": target_json, "previous": true }),
+      ),
+      (
+        ClientMessage::BreakPane {
+          request_id: "break-1".into(),
+          target,
+          name: Some("build logs".into()),
+        },
+        serde_json::json!({ "type": "break_pane", "request_id": "break-1", "target": target_json, "name": "build logs" }),
+      ),
+    ] {
+      let encoded = serde_json::to_value(&request).unwrap();
+      assert_eq!(encoded, expected);
+      assert_eq!(
+        serde_json::from_value::<ClientMessage>(encoded).unwrap(),
+        request
+      );
+    }
+  }
+
+  #[test]
+  fn pane_move_results_round_trip_both_views_and_correlated_rejections() {
+    let source = pane_move_view("source", 8);
+    let promoted = pane_move_view("promoted", 0);
+    for (kind, outcome) in [
+      (
+        "swapped",
+        PaneMoveOutcome::Swapped {
+          view: Box::new(source.clone()),
+        },
+      ),
+      (
+        "promoted",
+        PaneMoveOutcome::Promoted {
+          view: Box::new(promoted),
+          source_view: Box::new(source),
+        },
+      ),
+      (
+        "rejected",
+        PaneMoveOutcome::Rejected {
+          code: ErrorCode::LayoutLeaseRequired,
+          message: "Resize lease required".into(),
+        },
+      ),
+    ] {
+      let reply = ServerMessage::PaneMoveResult {
+        request_id: "move-1".into(),
+        outcome,
+      };
+      let encoded = serde_json::to_value(&reply).unwrap();
+      assert_eq!(encoded["type"], "pane_move_result");
+      assert_eq!(encoded["request_id"], "move-1");
+      assert_eq!(encoded["outcome"]["kind"], kind);
+      if kind == "promoted" {
+        assert_eq!(encoded["outcome"]["view"]["session_id"], "promoted");
+        assert_eq!(encoded["outcome"]["source_view"]["session_id"], "source");
+      }
+      assert_eq!(
+        serde_json::from_value::<ServerMessage>(encoded).unwrap(),
+        reply
+      );
+    }
+  }
+
+  fn pane_move_view(session_id: &str, revision: u64) -> ViewInfo {
+    let canvas_size = TerminalSize::default();
+    let layout = ViewLayout::Terminal {
+      terminal_id: "pane".into(),
+    };
+    ViewInfo {
+      session_name: session_id.into(),
+      session_id: session_id.into(),
+      view_id: format!("{session_id}-view"),
+      revision,
+      panes: layout.pane_geometry(&canvas_size).unwrap(),
+      canvas_size,
+      zoomed_terminal_id: None,
+      layout,
+      terminals: Vec::new(),
+    }
   }
 
   #[test]

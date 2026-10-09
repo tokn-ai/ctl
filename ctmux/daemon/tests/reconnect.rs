@@ -3956,6 +3956,151 @@ fn assert_resize_rejected(outcome: ctmux_proto::PaneResizeOutcome, expected: &Er
   );
 }
 
+async fn assert_invalid_pane_move_ids(
+  stream: &mut UnixStream,
+  socket: &Path,
+  target: &ctmux_proto::PaneTarget,
+  before: &ctmux_proto::ViewInfo,
+) -> TestResult {
+  for request_id in [
+    String::new(),
+    "x".repeat(ctmux_proto::MAX_PANE_MOVE_REQUEST_ID_BYTES + 1),
+  ] {
+    write_frame(
+      stream,
+      &ClientMessage::SwapPane {
+        request_id: request_id.clone(),
+        target: target.clone(),
+        previous: false,
+      },
+    )
+    .await?;
+    loop {
+      match presented_message(stream).await? {
+        ServerMessage::PaneMoveResult {
+          request_id: received,
+          outcome,
+        } => {
+          assert_eq!(received, request_id);
+          assert!(matches!(
+            outcome,
+            ctmux_proto::PaneMoveOutcome::Rejected {
+              code: ErrorCode::InvalidRequest,
+              ..
+            }
+          ));
+          break;
+        }
+        ServerMessage::ViewSnapshot { .. }
+        | ServerMessage::ShellStateChanged { .. }
+        | ServerMessage::Output { .. }
+        | ServerMessage::Checkpoint { .. }
+        | ServerMessage::PtyGeometryChanged { .. }
+        | ServerMessage::LeaseStatus {
+          notification: true, ..
+        } => {}
+        message => {
+          return Err(format!("expected correlated pane move result, got {message:?}").into());
+        }
+      }
+    }
+    let after = topology_view(socket, &before.session_id).await?;
+    assert_eq!(after.layout, before.layout);
+    assert_eq!(after.panes, before.panes);
+    assert_eq!(after.revision, before.revision);
+  }
+  Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pane_moves_reject_old_contracts_and_invalid_ids_without_losing_input() -> TestResult {
+  let _guard = pty_test_lock().await;
+  let directory = TestDirectory::new();
+  let socket = directory.path.join("ctmux.sock");
+  let daemon = spawn_daemon(&socket, 64 * 1024, 4 * 1024);
+  let root = create_shell_session(
+    &socket,
+    "move-gates",
+    "stty -echo; while IFS= read -r line; do printf 'accepted:%s\\n' \"$line\"; done",
+  )
+  .await?;
+  split_topology_shell(&socket, &root).await?;
+  let mut old = historical_connection(&socket, ctmux_proto::CONTRACT_V1_1_18).await?;
+  write_frame(
+    &mut old,
+    &ClientMessage::AttachSession {
+      session: root.terminal_id.clone(),
+      resume_from: None,
+      terminal_size: TerminalSize::default(),
+      request_input_lease: true,
+      request_layout_lease: true,
+      request_command_line: false,
+      request_running_command: false,
+      presentation_window_bytes: DEFAULT_PRESENTATION_WINDOW_BYTES,
+    },
+  )
+  .await?;
+  let ServerMessage::Attached { checkpoint, .. } = required_message(&mut old).await? else {
+    panic!("attachment expected");
+  };
+  if let Some(checkpoint) = checkpoint {
+    acknowledge_output(&mut old, checkpoint.sequence).await?;
+  }
+  let before = topology_view(&socket, &root.session_id).await?;
+  let target = ctmux_proto::PaneTarget {
+    session_id: before.session_id.clone(),
+    view_id: before.view_id.clone(),
+    expected_revision: before.revision,
+    terminal_id: root.terminal_id.clone(),
+  };
+  for request in [
+    ClientMessage::SwapPane {
+      request_id: "old-swap".into(),
+      target: target.clone(),
+      previous: true,
+    },
+    ClientMessage::BreakPane {
+      request_id: "old-break".into(),
+      target: target.clone(),
+      name: None,
+    },
+  ] {
+    write_frame(&mut old, &request).await?;
+    // Contract 18 must receive its existing error variant, never the new result.
+    expect_error(&mut old, ErrorCode::InvalidRequest).await?;
+    let after = topology_view(&socket, &root.session_id).await?;
+    assert_eq!(after.layout, before.layout);
+    assert_eq!(after.panes, before.panes);
+    assert_eq!(after.revision, before.revision);
+  }
+  write_frame(
+    &mut old,
+    &ClientMessage::Input {
+      data: b"after-old-moves\n".to_vec(),
+    },
+  )
+  .await?;
+  read_output_until(&mut old, b"accepted:after-old-moves").await?;
+  write_frame(&mut old, &ClientMessage::Detach).await?;
+  wait_for_detached(&mut old).await?;
+
+  let (mut modern, _) = attach_session(&socket, &root.terminal_id, None, true, true).await?;
+  assert_invalid_pane_move_ids(&mut modern, &socket, &target, &before).await?;
+  write_frame(
+    &mut modern,
+    &ClientMessage::Input {
+      data: b"after-invalid-moves\n".to_vec(),
+    },
+  )
+  .await?;
+  read_output_until(&mut modern, b"accepted:after-invalid-moves").await?;
+  kill_shell_session(&socket, &root.session_id).await?;
+  wait_for_session_end(&mut modern).await?;
+  daemon.abort();
+  let _result = daemon.await;
+  Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pane_resize_is_shared_owned_and_persistent_across_resume() -> TestResult {
   use ctmux_proto::ResizeDirection;

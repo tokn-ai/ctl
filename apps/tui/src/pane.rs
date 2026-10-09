@@ -5,8 +5,8 @@ use ctmux_client::{
   DEFAULT_PRESENTATION_WINDOW_BYTES,
 };
 use ctmux_proto::{
-  DividerResize, ErrorCode, LeaseKind, PaneResizeOutcome, ResizeDirection, TerminalCheckpoint,
-  TerminalHistoryRow, TerminalSize, ViewInfo,
+  DividerResize, ErrorCode, LeaseKind, PaneMoveOutcome, PaneResizeOutcome, PaneTarget,
+  ResizeDirection, TerminalCheckpoint, TerminalHistoryRow, TerminalSize, ViewInfo,
 };
 use std::{
   collections::{BTreeMap, VecDeque},
@@ -60,6 +60,8 @@ pub struct Pane {
   pub view_update: Option<ViewInfo>,
   /// Results for locally queued requests, including acknowledgement timeouts.
   pub resize_results: VecDeque<(String, PaneResizeOutcome)>,
+  pub move_result: Option<PaneMoveOutcome>,
+  pending_move: Option<String>,
   pending_resizes: BTreeMap<String, tokio::time::Instant>,
   events: AttachmentEvents,
   pub token: String,
@@ -79,6 +81,17 @@ const MAX_PENDING_RESIZES: usize = 32;
 const RESIZE_QUEUE_TIMEOUT: Duration = Duration::from_millis(100);
 const RESIZE_ACK_TIMEOUT: Duration = Duration::from_secs(5);
 const RESIZE_TIMEOUT_MESSAGE: &str = "Pane resize acknowledgement timed out";
+
+async fn timeout_move_command(
+  command: impl std::future::Future<
+    Output = std::result::Result<(), ctmux_client::AttachmentCommandError>,
+  >,
+) -> Result<()> {
+  tokio::time::timeout(RESIZE_QUEUE_TIMEOUT, command)
+    .await
+    .map_err(|_| "Pane move command queue is busy")??;
+  Ok(())
+}
 
 fn accept_buffered_ack(
   result: std::result::Result<(), AttachmentAcknowledgementError>,
@@ -194,6 +207,8 @@ impl Pane {
       ended: None,
       view_update: None,
       resize_results: VecDeque::new(),
+      move_result: None,
+      pending_move: None,
       pending_resizes: BTreeMap::new(),
       events,
       token,
@@ -330,6 +345,57 @@ impl Pane {
       .await
   }
 
+  pub async fn swap_pane(
+    &mut self,
+    target: PaneTarget,
+    previous: bool,
+    request_id: String,
+  ) -> Result<()> {
+    let control = self.control.clone();
+    self
+      .queue_move(
+        request_id.clone(),
+        control.swap_pane(target, previous, request_id),
+      )
+      .await
+  }
+
+  pub async fn break_pane(
+    &mut self,
+    target: PaneTarget,
+    name: Option<String>,
+    request_id: String,
+  ) -> Result<()> {
+    let control = self.control.clone();
+    self
+      .queue_move(
+        request_id.clone(),
+        control.break_pane(target, name, request_id),
+      )
+      .await
+  }
+
+  async fn queue_move(
+    &mut self,
+    request_id: String,
+    command: impl std::future::Future<
+      Output = std::result::Result<(), ctmux_client::AttachmentCommandError>,
+    >,
+  ) -> Result<()> {
+    if self.pending_move.is_some() {
+      return Err("A pane move is already pending".into());
+    }
+    timeout_move_command(command).await?;
+    self.move_result = None;
+    self.pending_move = Some(request_id);
+    Ok(())
+  }
+
+  pub fn cancel_move(&mut self) {
+    self.pending_move = None;
+    self.move_result = None;
+  }
+
   pub async fn resize_divider(&mut self, divider: DividerResize, request_id: String) -> Result<()> {
     let control = self.control.clone();
     self
@@ -424,6 +490,15 @@ impl Pane {
         self.start_history_transfer(snapshot_id, checkpoint, rows, scrollback_limit, history_gap);
       }
       AttachmentEvent::ViewChanged { view } => self.queue_view_update(view),
+      AttachmentEvent::PaneMoveResult {
+        request_id,
+        outcome,
+      } => {
+        if self.pending_move.as_deref() == Some(request_id.as_str()) {
+          self.pending_move = None;
+          self.move_result = Some(outcome);
+        }
+      }
       AttachmentEvent::PaneResizeResult {
         request_id,
         outcome,
@@ -508,11 +583,11 @@ impl Pane {
   }
 
   fn queue_view_update(&mut self, view: ViewInfo) {
-    if self
-      .view_update
-      .as_ref()
-      .is_none_or(|pending| view.revision >= pending.revision)
-    {
+    if self.view_update.as_ref().is_none_or(|pending| {
+      pending.session_id != view.session_id
+        || pending.view_id != view.view_id
+        || view.revision >= pending.revision
+    }) {
       self.view_update = Some(view);
     }
   }
@@ -632,6 +707,66 @@ impl Drop for Pane {
 mod tests {
   use super::*;
   use crate::test_daemon;
+
+  #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+  async fn move_results_require_pending_ids_and_view_revisions_follow_identity() -> Result<()> {
+    let mut daemon = test_daemon::TestDaemon::start().await?;
+    let session = daemon
+      .create_echo_session("move-correlation", "first", TerminalSize::default())
+      .await?;
+    let transport = crate::transport::LocalTransport(daemon.socket.clone());
+    let mut pane = Pane::open(
+      &transport,
+      &session,
+      TerminalSize::default(),
+      ReconnectLeases::new(true, true),
+      None,
+    )
+    .await?;
+    let rejected = PaneMoveOutcome::Rejected {
+      code: ErrorCode::InvalidRequest,
+      message: "stale view".into(),
+    };
+    pane
+      .apply_event(AttachmentEvent::PaneMoveResult {
+        request_id: "unknown".into(),
+        outcome: rejected.clone(),
+      })
+      .await?;
+    assert!(pane.move_result.is_none());
+    pane.pending_move = Some("expected".into());
+    pane
+      .apply_event(AttachmentEvent::PaneMoveResult {
+        request_id: "expected".into(),
+        outcome: rejected.clone(),
+      })
+      .await?;
+    assert_eq!(pane.move_result.take(), Some(rejected));
+    assert!(pane.pending_move.is_none());
+    let ctmux_proto::ServerMessage::ViewSnapshot { mut view } = daemon
+      .request(ctmux_proto::ClientMessage::GetView { session })
+      .await?
+    else {
+      return Err("expected initial view".into());
+    };
+    view.revision = 10;
+    pane.queue_view_update(view.clone());
+    view.session_id = "promoted-session".into();
+    view.view_id = "promoted-view".into();
+    view.revision = 0;
+    pane.queue_view_update(view.clone());
+    assert_eq!(pane.view_update, Some(view.clone()));
+    view.revision = 1;
+    pane.queue_view_update(view.clone());
+    let mut stale = view.clone();
+    stale.revision = 0;
+    pane.queue_view_update(stale);
+    assert_eq!(pane.view_update, Some(view));
+    pane.close().await;
+    drop(pane);
+    daemon.shutdown().await?;
+    Ok(())
+  }
 
   #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
   async fn resize_results_require_a_pending_id_and_expire_without_disconnect() -> Result<()> {

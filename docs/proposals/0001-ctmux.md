@@ -2,6 +2,7 @@
 
 - Status: Implemented
 - Created: 2026-09-04
+- Updated: 2026-10-09
 
 ## Summary
 
@@ -25,7 +26,10 @@ client is attached. The current daemon and its journals are memory-backed.
 
 The `ctmux` CLI is the canonical local command surface. It can create, list,
 inspect, attach to, detach from, and terminate sessions. The desktop ctmux app is
-another client of the daemon rather than an embedded daemon.
+another client of the daemon rather than an embedded daemon. The current
+`ctmux` command opens the shared TUI by default; scripts use detached creation
+explicitly. Raw attachment remains available. See
+[Proposal 0014](0014-shared-panes-tui.md) for this CLI evolution and shared panes.
 
 An attachment is a viewer with two independently leased capabilities:
 
@@ -37,6 +41,11 @@ temporarily preserves a logical attachment and its leases so a replacement
 connection can resume it. Explicit detach releases the attachment immediately
 and does not terminate the session. Explicit kill terminates the session for
 all clients.
+
+The desktop remembers observed terminal dimensions and last-seen time for
+presentation ([PR #55](https://github.com/tokn-ai/ctl/pull/55)). Restoring these
+observations does not resize a PTY, authenticate a host, or prove that a session
+is alive.
 
 Raw PTY bytes are the canonical output record. Bounded checkpoints and logical
 history allow a renderer to recover without replaying an arbitrarily large
@@ -64,8 +73,11 @@ owned by `ctmuxd`.
 
 ## Unresolved questions
 
-None for the implemented boundary. Disk-backed terminal history and additional
-platform transports require separate proposals.
+None for the implemented boundary. Client-local persistence and paged daemon
+history are recorded in [Proposal 0013](0013-terminal-history.md); shared views
+and the terminal UI are recorded in [Proposal 0014](0014-shared-panes-tui.md).
+The daemon remains memory-backed. Windows transports are recorded below and in
+[Proposal 0004](0004-windows-ssh.md).
 
 ## Detailed specifications
 

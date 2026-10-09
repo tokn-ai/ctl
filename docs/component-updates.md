@@ -228,7 +228,10 @@ its impact and asking for confirmation. Use `--dry-run` to inspect the plan with
 mutation, or `--yes` to explicitly approve it in scripts. `--json` does not imply consent.
 Confirmation expires after 20 seconds; an expired plan must be prepared again. Restarts
 use cooperative shutdown and verify the successor, without force-killing or automatically
-retrying an uncertain mutation. An absent owner is not started by this command.
+retrying an uncertain mutation. An absent owner is not started by this command. ctld restart uses the same asynchronous
+signed-helper discovery/preparation as normal CLI connections, preserving explicit
+`CTLD_BIN` overrides. It checks that an owner exists before preparing a bundled helper;
+status continues to inspect installed binaries without provisioning them.
 
 Restarting **ctmuxd ends all of its sessions and panes**, including other clients and
 interactive tasks. Restarting ctld interrupts its clients and VPN connections. Taskd

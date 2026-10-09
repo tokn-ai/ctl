@@ -46,7 +46,11 @@ impl ForwardControl for SshForwardControl<'_> {
     let Ok(Some(endpoint)) = self.state.existing_endpoint(target) else {
       return false;
     };
-    control_master_is_ready(target, &endpoint.control_path).await
+    // Unknown health cannot authorize installing listeners. This observation
+    // does not start authentication or replace the master.
+    control_master_is_ready(target, &endpoint.control_path)
+      .await
+      .unwrap_or(false)
   }
 
   async fn change(

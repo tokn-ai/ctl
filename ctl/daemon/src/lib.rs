@@ -4,6 +4,8 @@ use ctl_core::observability::{
   Event as HistoryEvent, Operation as HistoryOperation, Outcome as HistoryOutcome,
 };
 
+#[cfg(unix)]
+mod client_lifetime;
 mod credential_metadata;
 pub mod credentials;
 mod endpoint_registry;
@@ -796,16 +798,30 @@ async fn ensure_master_with_interaction(
     None,
   );
   let mut connection_started = false;
-  let result = ensure_master_with_interaction_inner(
+  #[cfg(unix)]
+  let client = client_lifetime::Monitor::new(stream).map_err(ctl_ipc::CodecError::Io)?;
+  let work = ensure_master_with_interaction_inner(
     stream,
     state,
     target,
     interactive,
     &mut connection_started,
-  )
-  .await;
+  );
+  #[cfg(unix)]
+  let result = tokio::select! {
+    biased;
+    closed = client.closed() => {
+      closed.map_err(ctl_ipc::CodecError::Io)?;
+      Err(RequestError::ClientClosed)
+    }
+    result = work => result,
+  };
+  #[cfg(not(unix))]
+  let result = work.await;
   operation.finish_at(
-    if result.is_ok() {
+    if matches!(result, Err(RequestError::ClientClosed)) {
+      HistoryOutcome::Interrupted
+    } else if result.is_ok() {
       HistoryOutcome::Succeeded
     } else {
       HistoryOutcome::Failed
@@ -879,6 +895,9 @@ async fn ensure_master_with_interaction_inner(
       .await?
       .map_err(Into::into);
   }
+  if !interactive {
+    lifecycle.allow_background_connection()?;
+  }
   *connection_started = true;
   let operation = HistoryOperation::connection(
     "df38958b-ae41-4b9f-bc67-08d322058aae",
@@ -896,6 +915,9 @@ async fn ensure_master_with_interaction_inner(
     interactive,
   )
   .await;
+  if matches!(result, Err(RequestError::AuthenticationRequired)) {
+    lifecycle.require_authentication();
+  }
   operation.finish(
     if result.is_ok() {
       HistoryOutcome::Succeeded
@@ -1107,7 +1129,13 @@ async fn wait_for_master(
   let mut diagnostics = retain_diagnostics(child);
   let deadline = Instant::now() + MASTER_START_TIMEOUT;
   loop {
-    if control_master_is_ready(target, control_path).await {
+    // This is a master we have just started: socket publication can precede
+    // readiness. Retry observations within the startup deadline, without
+    // replacing any existing master or starting another authentication.
+    if control_master_is_ready(target, control_path)
+      .await
+      .unwrap_or(false)
+    {
       authentication.finish(stream, target).await?;
       state.adopt(target, endpoint, None)?;
       let mut forwards = state.forwards.lock().await;
@@ -1129,7 +1157,10 @@ async fn wait_for_master(
         .as_mut()
         .is_some_and(|ready| ready.try_recv().is_ok())
     {
-      if control_master_is_ready(target, control_path).await {
+      if control_master_is_ready(target, control_path)
+        .await
+        .unwrap_or(false)
+      {
         continue;
       }
       return Err(RequestError::SshConfig(format!(
@@ -1211,14 +1242,15 @@ async fn reuse_master_or_prepare(
   // listener tracking: configure may create a forward after the new master
   // is ready but before the credential save offer finishes.
   let mut forwards = state.forwards.lock().await;
-  let ready = control_master_is_ready(target, control_path).await;
+  let ready = control_master_is_ready(target, control_path).await?;
   if let Some(previous) = state.existing_endpoint(target)? {
     let changed = previous.control_path != *control_path || previous.shared != endpoint.shared;
     if changed || !ready {
       // Our shared listeners remain under ctld's control even when the master
       // dies. A dead private master instead needs stale-socket cleanup; asking
       // that socket to cancel a forward would prevent reconnection forever.
-      if previous.shared || changed && control_master_is_ready(target, &previous.control_path).await
+      if previous.shared
+        || changed && control_master_is_ready(target, &previous.control_path).await?
       {
         state.remember_endpoint(target, &previous, None);
         forwards
@@ -1761,7 +1793,7 @@ async fn list_remote_listeners(
   let control_path = endpoint.control_path;
   if !attempt
     .run(control_master_is_ready(target, &control_path))
-    .await?
+    .await??
   {
     ctl_ipc::write_frame(stream, &ServerMessage::AuthenticationRequired).await?;
     return Ok(());
@@ -2100,10 +2132,8 @@ fn prepare_control_path(control_path: &Path) -> Result<(), RequestError> {
   Ok(())
 }
 
-async fn control_master_is_ready(target: &SshTarget, path: &Path) -> bool {
-  master_observation::observe(target, path)
-    .await
-    .unwrap_or(false)
+async fn control_master_is_ready(target: &SshTarget, path: &Path) -> Result<bool, RequestError> {
+  master_observation::observe(target, path).await
 }
 
 fn append_target_arguments(command: &mut Command, target: &SshTarget) {

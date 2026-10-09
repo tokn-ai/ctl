@@ -55,6 +55,13 @@ shared nonsecret revision before mutation. Background reconnect uses quiet
 master establishment; it never opens authentication or save UI. Missing approval
 returns authentication-required for explicit interaction. `accept-new` host-key
 policy disables retained approval for new connections.
+The TUI applies the connector's retry classification to background refreshes
+and pane reconnects, stopping on authentication/configuration failures until
+maintenance is reset by session selection. The broker remembers a quiet
+authentication-required result until explicit Connect; it can still reuse a live
+master. Client EOF cancels pending connection work and releases queued requests.
+Unknown existing-master observations preserve the endpoint rather than initiating
+new authentication.
 
 ## Invariants
 

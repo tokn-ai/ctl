@@ -60,6 +60,12 @@ impl<C: Connector + Sync> ctmux_tui::Transport for TuiTransport<'_, C> {
     self.0.archive_key()
   }
 
+  fn is_retryable(&self, error: &ctmux_tui::Error) -> bool {
+    error
+      .downcast_ref::<C::Error>()
+      .is_none_or(|error| self.0.is_retryable(error))
+  }
+
   fn set_terminal_ui_active(&self, active: bool) {
     self.0.set_terminal_ui_active(active);
   }

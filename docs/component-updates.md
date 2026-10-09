@@ -193,3 +193,50 @@ manual restart after its work can be ended.
 If activation cannot be verified, ctl reports that installation may have
 completed and asks you to check the host. It does not retry a destructive action
 or stop a daemon automatically.
+
+## Inspect and restart from the CLI
+
+```sh
+ctl components status
+ctl components status --json
+ctl components restart ctld --dry-run
+ctl components restart ctld
+ctl components restart ctmuxd
+ctl components restart ctl-taskd
+ctl -H work components status
+ctl -H work components restart ctmuxd
+```
+
+`status` compares each running owner's full build identity and protocol advertisements
+with the installed replacement selected for this CLI. Release versions alone do not
+identify builds or protocol compatibility. Human output shows a short source fingerprint;
+`--json` preserves complete build and protocol metadata. Unknown or legacy metadata is
+not treated as an up-to-date build. Missing automatically discovered replacements are shown as `not installed` and do not
+fail status; the running owner is still inspected independently. An explicit missing
+executable override or a damaged selected installation remains an error. Inspection
+failures are reported for each component,
+with a nonzero exit status, while successful rows remain visible.
+
+Local status only probes existing service endpoints and runs bounded `--component-info`
+queries. It does not install embedded payloads or start a daemon. Remote status can
+establish the saved host's SSH/VPN route, verifies its machine identity, and inspects
+companions without starting those remote services. The remote agent is on demand;
+its inspection process does not describe every active terminal transport.
+
+`restart` verifies the selected replacement and pins the existing owner before showing
+its impact and asking for confirmation. Use `--dry-run` to inspect the plan without
+mutation, or `--yes` to explicitly approve it in scripts. `--json` does not imply consent.
+Confirmation expires after 20 seconds; an expired plan must be prepared again. Restarts
+use cooperative shutdown and verify the successor, without force-killing or automatically
+retrying an uncertain mutation. An absent owner is not started by this command.
+
+Restarting **ctmuxd ends all of its sessions and panes**, including other clients and
+interactive tasks. Restarting ctld interrupts its clients and VPN connections. Taskd
+refuses restart while tasks are active. Each local command addresses the CLI's selected
+endpoint (`CTLD_SOCKET_PATH`, `CTMUX_RUNTIME_DIR`, or `CTL_TASKD_RUNTIME_DIR`), rather than
+every daemon process on the machine. Remote restart currently supports only ctmuxd;
+ctld and ctl-taskd are rejected before connecting.
+
+Sync/import and update/install continue to preserve running owners. Restart is a separate,
+explicit step after selecting and installing a build. These CLI operations use existing
+lifecycle and remote maintenance contracts; they add no protocol version or build changes.

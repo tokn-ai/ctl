@@ -19,7 +19,10 @@ fn validate_local_command_target(arguments: &Arguments) -> Result<(), CliError> 
   let error = match &arguments.command {
     #[cfg(unix)]
     Command::Components {
-      command: crate::components::Command::Update { .. },
+      command:
+        crate::components::Command::Update { .. }
+        | crate::components::Command::Status { .. }
+        | crate::components::Command::Restart { .. },
     } => return Ok(()),
     #[cfg(unix)]
     Command::Components { .. } => CliError::ComponentsTarget,
@@ -423,7 +426,7 @@ pub enum CliError {
   )]
   ComponentsTarget,
   #[cfg(unix)]
-  #[error("Component sync failed: {0}")]
+  #[error("Component maintenance failed: {0}")]
   Components(std::io::Error),
   #[error("Remote repair cancelled.")]
   RepairCancelled,

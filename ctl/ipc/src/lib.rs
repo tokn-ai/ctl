@@ -211,13 +211,18 @@ fn register_provider(provider: DaemonProvider) -> io::Result<()> {
 }
 
 /// Internal evolution counter; advancing it alone does not publish a contract.
-pub const PROTOCOL_BUILD: u16 = 14;
+pub const PROTOCOL_BUILD: u16 = 15;
 pub const CONTRACT_V1_0_12: ProtocolVersion = ProtocolVersion::new(1, 0, 12);
 pub const CONTRACT_V1_1_13: ProtocolVersion = ProtocolVersion::new(1, 1, 13);
 pub const CONTRACT_V1_1_14: ProtocolVersion = ProtocolVersion::new(1, 1, 14);
-pub const PROTOCOL_VERSION: ProtocolVersion = CONTRACT_V1_1_14;
-pub const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] =
-  &[CONTRACT_V1_0_12, CONTRACT_V1_1_13, CONTRACT_V1_1_14];
+pub const CONTRACT_V1_1_15: ProtocolVersion = ProtocolVersion::new(1, 1, 15);
+pub const PROTOCOL_VERSION: ProtocolVersion = CONTRACT_V1_1_15;
+pub const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[
+  CONTRACT_V1_0_12,
+  CONTRACT_V1_1_13,
+  CONTRACT_V1_1_14,
+  CONTRACT_V1_1_15,
+];
 
 #[must_use]
 pub fn protocol_offer() -> ProtocolOffer {
@@ -390,6 +395,12 @@ pub fn gateway_route_supported(gateways: &[SshGateway], protocol: ProtocolVersio
 #[must_use]
 pub fn quiet_master_supported(protocol: ProtocolVersion) -> bool {
   SUPPORTED_PROTOCOL_VERSIONS.contains(&protocol) && protocol >= CONTRACT_V1_1_14
+}
+
+/// Sequential requests share a negotiated broker connection from 1.1.15.
+#[must_use]
+pub fn persistent_requests_supported(protocol: ProtocolVersion) -> bool {
+  SUPPORTED_PROTOCOL_VERSIONS.contains(&protocol) && protocol >= CONTRACT_V1_1_15
 }
 
 /// Resolve a remote VPN's SSH owner using the exact prefix that reaches it.
@@ -1682,6 +1693,12 @@ mod tests {
     assert!(!quiet_master_supported(CONTRACT_V1_0_12));
     assert!(!quiet_master_supported(CONTRACT_V1_1_13));
     assert!(quiet_master_supported(CONTRACT_V1_1_14));
+    assert!(quiet_master_supported(CONTRACT_V1_1_15));
+    assert!(!persistent_requests_supported(CONTRACT_V1_1_14));
+    assert!(persistent_requests_supported(CONTRACT_V1_1_15));
+    assert!(!persistent_requests_supported(ProtocolVersion::new(
+      1, 2, 16
+    )));
     assert!(!quiet_master_supported(ProtocolVersion::new(1, 2, 15)));
     for contract in SUPPORTED_PROTOCOL_VERSIONS {
       assert_eq!(protocol_offer().negotiate(&[*contract]), Some(*contract));

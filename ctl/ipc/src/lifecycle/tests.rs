@@ -4,7 +4,7 @@ use super::*;
 fn current_binary_advertises_the_revocation_helper_and_all_historical_contracts() {
   let info = DaemonBinaryInfo::current();
   assert!(info.is_valid());
-  assert_eq!(info.protocol_version, crate::CONTRACT_V1_1_14);
+  assert_eq!(info.protocol_version, crate::PROTOCOL_VERSION);
   assert_eq!(info.lifecycle_protocol_version, CONTRACT_V1_0_1);
   let helper = info
     .protocols

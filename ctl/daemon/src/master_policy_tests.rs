@@ -280,6 +280,7 @@ async fn an_explicit_default_and_omitted_preference_share_disconnect_state() {
             }
         )
       ));
+      drop(client);
       server.await.unwrap().unwrap();
     }
   }

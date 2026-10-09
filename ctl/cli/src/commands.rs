@@ -127,6 +127,8 @@ pub async fn run(arguments: Arguments) -> Result<i32, CliError> {
     settings: resolved.target,
     recovery: Arc::default(),
     terminal_ui_active: Arc::default(),
+    #[cfg(unix)]
+    broker: Arc::default(),
   };
   let operation = run_selected(arguments.command, &connector, platform);
   tokio::select! {
@@ -215,6 +217,8 @@ struct CtlConnector {
   settings: ctl_client::hosts::ConnectionTargetDto,
   recovery: Arc<crate::remote::Recovery>,
   terminal_ui_active: Arc<AtomicBool>,
+  #[cfg(unix)]
+  broker: Arc<crate::ssh_broker::MasterClient>,
 }
 
 impl CtlConnector {
@@ -270,6 +274,8 @@ impl CtlConnector {
       settings: self.settings.clone(),
       recovery: Arc::clone(&self.recovery),
       terminal_ui_active: Arc::clone(&self.terminal_ui_active),
+      #[cfg(unix)]
+      broker: Arc::clone(&self.broker),
       target: match &self.target {
         ConnectionTarget::Local { .. } => ConnectionTarget::Local {
           socket_path: ctmux_socket,
@@ -288,6 +294,8 @@ impl ctl_task_cli::Connector for CtlConnector {
     Box::pin(async {
       let interaction = ssh_interaction(
         &self.settings,
+        #[cfg(unix)]
+        &self.broker,
         !self.terminal_ui_active.load(Ordering::Acquire),
       )
       .await?;
@@ -325,6 +333,8 @@ impl Connector for CtlConnector {
     Box::pin(async {
       let interaction = ssh_interaction(
         &self.settings,
+        #[cfg(unix)]
+        &self.broker,
         !self.terminal_ui_active.load(Ordering::Acquire),
       )
       .await?;
@@ -376,14 +386,16 @@ impl Connector for CtlConnector {
 #[cfg(unix)]
 async fn ssh_interaction(
   target: &ctl_client::hosts::ConnectionTargetDto,
+  broker: &crate::ssh_broker::MasterClient,
   interactive: bool,
 ) -> Result<ctl_client::SshInteraction, CtlConnectError> {
   if target.is_local() {
     return Ok(ctl_client::SshInteraction::Inherit);
   }
   crate::target::ensure_vpn_with_interaction(target, interactive).await?;
-  let control_path =
-    crate::ssh_broker::ensure_master_with_interaction(target.to_ssh_target()?, interactive).await?;
+  let control_path = broker
+    .ensure_master(target.to_ssh_target()?, interactive)
+    .await?;
   Ok(ctl_client::SshInteraction::Multiplexed { control_path })
 }
 
@@ -664,10 +676,14 @@ mod tests {
       settings: ctl_client::hosts::ConnectionTargetDto::ssh("task-server"),
       recovery: Arc::default(),
       terminal_ui_active: Arc::default(),
+      #[cfg(unix)]
+      broker: Arc::default(),
     };
     let attachment = connector.for_interactive_session(PathBuf::from("/remote/ctmux.sock"));
     assert_eq!(attachment.target, target);
     assert!(Arc::ptr_eq(&attachment.recovery, &connector.recovery));
+    #[cfg(unix)]
+    assert!(Arc::ptr_eq(&attachment.broker, &connector.broker));
   }
 
   #[test]
@@ -676,6 +692,8 @@ mod tests {
       settings: ctl_client::hosts::ConnectionTargetDto::Local,
       recovery: Arc::default(),
       terminal_ui_active: Arc::default(),
+      #[cfg(unix)]
+      broker: Arc::default(),
       target: ConnectionTarget::Local {
         socket_path: PathBuf::from("/default/ctmux.sock"),
       },

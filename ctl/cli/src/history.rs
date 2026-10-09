@@ -1,5 +1,5 @@
 use clap::Args;
-use ctl_core::observability::{Level, Outcome, Record, Stream, user_store};
+use ctl_core::observability::{ConnectionEndpoint, Level, Outcome, Record, Stream, user_store};
 use std::io;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
@@ -139,7 +139,7 @@ fn row(record: &Record) -> [String; 11] {
     record
       .connection_endpoint
       .as_ref()
-      .map_or_else(|| "—".into(), |endpoint| endpoint.display()),
+      .map_or_else(|| "—".into(), ConnectionEndpoint::display),
     record
       .subject_id
       .as_deref()

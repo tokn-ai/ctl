@@ -713,6 +713,7 @@ dependencies = [
  "ctl-proto",
  "ctl-task-cli",
  "ctl-task-client",
+ "ctl-task-ipc",
  "ctl-task-proto",
  "ctmux-avt",
  "ctmux-cli",

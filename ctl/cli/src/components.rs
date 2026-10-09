@@ -4,6 +4,7 @@ use std::io;
 use std::path::PathBuf;
 
 mod list;
+mod maintenance;
 mod update;
 pub use update::UpdatePackage;
 
@@ -37,6 +38,24 @@ impl From<Origin> for Source {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+  /// Inspect running owners and installed replacements without starting services.
+  Status {
+    #[arg(long)]
+    json: bool,
+  },
+  /// Cooperatively restart a daemon after verifying its replacement.
+  Restart {
+    #[arg(value_enum)]
+    component: maintenance::Daemon,
+    /// Approve the displayed impact without an interactive prompt.
+    #[arg(long, conflicts_with = "dry_run")]
+    yes: bool,
+    /// Verify and display the restart plan without changing any service.
+    #[arg(long)]
+    dry_run: bool,
+    #[arg(long)]
+    json: bool,
+  },
   /// Update local and/or saved SSH hosts, preserving running services.
   Update {
     /// Saved host names, IDs or SSH aliases (repeat or separate with commas).
@@ -103,8 +122,19 @@ pub async fn run(
   method: Option<&str>,
   platform: Option<crate::RemotePlatform>,
 ) -> io::Result<()> {
+  match command {
+    Command::Status { json } => return maintenance::status(host, method, platform, json).await,
+    Command::Restart {
+      component,
+      yes,
+      dry_run,
+      json,
+    } => return maintenance::restart(component, host, method, platform, yes, dry_run, json).await,
+    _ => {}
+  }
   let home = dirs::home_dir().ok_or_else(|| io::Error::other("home directory is unavailable"))?;
   match command {
+    Command::Status { .. } | Command::Restart { .. } => unreachable!(),
     Command::Update {
       hosts,
       local,

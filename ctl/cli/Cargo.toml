@@ -28,6 +28,10 @@ dirs.workspace = true
 serde.workspace = true
 uuid.workspace = true
 ctmux-cli.workspace = true
+ctmux-ipc.workspace = true
+ctmux-proto.workspace = true
+ctl-task-ipc.workspace = true
+ctl-task-proto.workspace = true
 ctl-task-cli.workspace = true
 ctl-task-client.workspace = true
 serde_json.workspace = true
@@ -41,9 +45,6 @@ zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2
 [dev-dependencies]
 rusqlite.workspace = true
 ctl-core = { workspace = true, features = ["test-fixtures"] }
-ctl-task-proto.workspace = true
-ctmux-ipc.workspace = true
-ctmux-proto.workspace = true
 portable-pty.workspace = true
 unicode-width.workspace = true
 flate2 = "1.1.9"

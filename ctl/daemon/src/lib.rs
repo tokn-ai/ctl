@@ -552,47 +552,60 @@ async fn handle_connection(
     return lifecycle::handle(stream, &state, request).await;
   };
   let protocol = accept_handshake(&mut stream, Some(*handshake)).await?;
-  let mut request = ctl_ipc::read_frame::<_, ClientMessage>(&mut stream)
-    .await?
-    .ok_or(RequestError::ClientClosed)?;
+  loop {
+    let Some(request) = ctl_ipc::read_frame::<_, ClientMessage>(&mut stream).await? else {
+      return Ok(());
+    };
+    handle_request(&mut stream, &state, request, protocol).await?;
+    if !ctl_ipc::persistent_requests_supported(protocol) {
+      return Ok(());
+    }
+  }
+}
+
+#[cfg(unix)]
+async fn handle_request(
+  stream: &mut ctl_ipc::Stream,
+  state: &Arc<State>,
+  mut request: ClientMessage,
+  protocol: ProtocolVersion,
+) -> Result<(), RequestError> {
   normalize_request_target(&mut request);
   let result = async {
     validate_request_contract(&request, protocol)?;
     match request {
-      ClientMessage::EnsureMaster { target } => ensure_master(&mut stream, state, target).await,
+      ClientMessage::EnsureMaster { target } => {
+        ensure_master(stream, Arc::clone(state), target).await
+      }
       ClientMessage::EnsureMasterQuiet { target } => {
-        ensure_master_with_interaction(&mut stream, state, target, false).await
+        ensure_master_with_interaction(stream, Arc::clone(state), target, false).await
       }
-      ClientMessage::MasterStatus { target } => master_status(&mut stream, &state, &target).await,
-      ClientMessage::ConnectionStatus { target } => {
-        connection_status(&mut stream, &state, &target).await
-      }
-      ClientMessage::DisconnectMaster { target } => {
-        disconnect_master(&mut stream, &state, &target).await
-      }
-      ClientMessage::DeleteCredentials { target } => delete_credentials(&mut stream, &target).await,
+      ClientMessage::MasterStatus { target } => master_status(stream, state, &target).await,
+      ClientMessage::ConnectionStatus { target } => connection_status(stream, state, &target).await,
+      ClientMessage::DisconnectMaster { target } => disconnect_master(stream, state, &target).await,
+      ClientMessage::DeleteCredentials { target } => delete_credentials(stream, &target).await,
       ClientMessage::ConfigurePortForward {
         target,
         forward,
         enabled,
-      } => configure_port_forward(&mut stream, &state, target, forward, enabled).await,
+      } => configure_port_forward(stream, state, target, forward, enabled).await,
       ClientMessage::ListPortForwards { target } => {
-        list_port_forwards(&mut stream, &state, &target).await
+        list_port_forwards(stream, state, &target).await
       }
       ClientMessage::ListRemoteListeners { target } => {
-        list_remote_listeners(&mut stream, &state, &target).await
+        list_remote_listeners(stream, state, &target).await
       }
       request @ (ClientMessage::StartVpn { .. }
       | ClientMessage::StartVpnConnection { .. }
       | ClientMessage::StopVpnById { .. }
       | ClientMessage::ForgetTailscaleIdentity { .. }
       | ClientMessage::StopVpn
-      | ClientMessage::VpnStatus) => handle_vpn_request(&mut stream, &state, request).await,
+      | ClientMessage::VpnStatus) => handle_vpn_request(stream, state, request).await,
       ClientMessage::Askpass {
         token,
         message,
         confirm,
-      } => handle_askpass(&mut stream, &state, &token, message, confirm).await,
+      } => handle_askpass(stream, state, &token, message, confirm).await,
       ClientMessage::Handshake { .. } | ClientMessage::PromptResponse { .. } => {
         Err(RequestError::InvalidRequest("unexpected message"))
       }
@@ -601,11 +614,11 @@ async fn handle_connection(
   .await;
   if let Err(error) = &result {
     if matches!(error, RequestError::AuthenticationRequired) {
-      let _ = ctl_ipc::write_frame(&mut stream, &ServerMessage::AuthenticationRequired).await;
+      let _ = ctl_ipc::write_frame(stream, &ServerMessage::AuthenticationRequired).await;
       return result;
     }
     let _ = ctl_ipc::write_frame(
-      &mut stream,
+      stream,
       &ServerMessage::Error {
         code: error.code().to_owned(),
         message: error.to_string(),
@@ -2443,6 +2456,60 @@ impl Drop for SocketGuard {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[cfg(unix)]
+  #[tokio::test]
+  async fn negotiated_persistent_requests_reuse_the_socket_and_old_contracts_close_it() {
+    for protocol in [ctl_ipc::CONTRACT_V1_1_14, ctl_ipc::CONTRACT_V1_1_15] {
+      let (mut client, server) = ctl_ipc::Stream::pair().unwrap();
+      let worker = tokio::spawn(handle_connection(server, Arc::new(State::default())));
+      ctl_ipc::write_frame(
+        &mut client,
+        &ClientMessage::Handshake {
+          protocol: ctl_core::protocol::ProtocolOffer::new(protocol.build, protocol, &[protocol]),
+        },
+      )
+      .await
+      .unwrap();
+      assert!(
+        matches!(ctl_ipc::read_frame::<_, ServerMessage>(&mut client).await.unwrap(),
+        Some(ServerMessage::HandshakeAccepted { protocol_version }) if protocol_version == protocol)
+      );
+      let count = if ctl_ipc::persistent_requests_supported(protocol) {
+        4
+      } else {
+        1
+      };
+      for _ in 0..count {
+        ctl_ipc::write_frame(
+          &mut client,
+          &ClientMessage::MasterStatus { target: target() },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+          ctl_ipc::read_frame::<_, ServerMessage>(&mut client)
+            .await
+            .unwrap(),
+          Some(ServerMessage::AuthenticationRequired)
+        ));
+      }
+      if count == 1 {
+        assert!(
+          ctl_ipc::read_frame::<_, ServerMessage>(&mut client)
+            .await
+            .unwrap()
+            .is_none()
+        );
+      }
+      drop(client);
+      tokio::time::timeout(Duration::from_secs(1), worker)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    }
+  }
 
   #[cfg(unix)]
   #[tokio::test]

@@ -66,6 +66,15 @@ remote VPN routes are passed to them. Other helper operations retain `1.0.1`
 behavior. The independent remote VPN channel negotiates `1.0.1` before identity
 and credentials, using a stable marker rather than changing the marker per build.
 
+Sequential broker requests advance `ctld` from `1.1.14` (build 14) to
+`1.1.15` (build 15), retaining `1.0.12`, `1.1.13`, and `1.1.14`.
+After negotiating `1.1.15`, clients may send the next request after the previous
+request completes, without another handshake. Requests are never pipelined;
+prompt replies remain part of their current request. Request errors close the
+connection. Earlier contracts still close after one request. The CLI shares
+one broker connection across terminal and task channel preparation, discarding
+it on errors or cancellation. Wire message fields are unchanged.
+
 Quiet SSH establishment advances ctld from `1.1.13` (build 13) to `1.1.14`
 (build 14), retaining `1.0.12` and `1.1.13`. The additive `ensure_master_quiet`
 request may reuse a master or create one without Keychain authentication UI,

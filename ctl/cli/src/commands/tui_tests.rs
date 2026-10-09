@@ -96,7 +96,8 @@ async fn answer_request(mut stream: tokio::net::UnixStream, prompt: usize) {
   ctl_ipc::write_frame(
     &mut stream,
     &ServerMessage::HandshakeAccepted {
-      protocol_version: ctl_ipc::PROTOCOL_VERSION,
+      // This fixture implements the retained one-request contract.
+      protocol_version: ctl_ipc::CONTRACT_V1_1_14,
     },
   )
   .await
@@ -253,6 +254,8 @@ async fn terminal_fixture() {
     settings: ctl_client::hosts::ConnectionTargetDto::ssh("fixture"),
     recovery: Arc::default(),
     terminal_ui_active: Arc::default(),
+    #[cfg(unix)]
+    broker: Arc::default(),
   };
   ctmux_cli::run_tui(&connector, Some(session), false)
     .await

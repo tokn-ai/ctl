@@ -126,3 +126,13 @@ This foundation precedes new retry/cancel controls. Those controls must consume
 these transitions, preserve the session/cache, and keep cancellation separate
 from host-wide disconnect. Cancellation during backoff and native queueing must
 be resolved before exposing new cancellation actions.
+
+## Broker connection reuse
+
+The CLI shares a sequential local broker connection across channel preparation
+when `ctld` negotiates 1.1.15. TUI session/view refreshes and pane attachments
+still ask the broker to ensure the master, preserving manual pause and quiet
+authentication rules. They reuse the local socket rather than reopening it for
+each request. Older brokers retain one socket per request. Errors and cancelled
+requests discard the socket; a later retry negotiates a new connection.
+This does not change TUI polling frequency or reuse remote service streams.

@@ -211,7 +211,7 @@ metadata through its local-control handshake, with a data-handshake fallback for
 legacy owners. ctl-taskd accepts a passive control metadata query. Standalone
 `--component-info` prints JSON for helper executables without starting services.
 
-ctld metadata reports data contract `1.1.14` (and retained `1.0.12` and `1.1.13`), lifecycle
+ctld metadata reports data contract `1.1.15` (and retained `1.0.12`, `1.1.13`, and `1.1.14`), lifecycle
 contract `1.0.1`, and helper contract `1.1.5` (and retained `1.0.1`, `1.1.2`, `1.1.3`, and `1.1.4`). Remote VPN
 routes are gated by the selected broker contract and the helper advertisement.
 The helper API covers credential, identity, askpass, and proxy helper modes.

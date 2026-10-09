@@ -18,6 +18,42 @@ pub async fn ensure_master_with_interaction(
   ensure_master_on(&mut stream, target, interactive, interactive_prompt).await
 }
 
+/// One request at a time; taking the socket makes cancellation close it rather
+/// than returning a partially consumed response to the next caller.
+#[derive(Default)]
+pub struct MasterClient {
+  connection: tokio::sync::Mutex<Option<(ctl_ipc::Stream, ProtocolVersion)>>,
+}
+
+impl MasterClient {
+  pub async fn ensure_master(
+    &self,
+    target: SshTarget,
+    interactive: bool,
+  ) -> Result<PathBuf, Error> {
+    let mut slot = self.connection.lock().await;
+    let (mut stream, protocol) = if let Some(connection) = slot.take() {
+      connection
+    } else {
+      let mut stream = ctl_ipc::connect_or_start_daemon().await?;
+      let protocol = handshake(&mut stream).await?;
+      (stream, protocol)
+    };
+    let result = ensure_master_exchange(
+      &mut stream,
+      protocol,
+      target,
+      interactive,
+      interactive_prompt,
+    )
+    .await;
+    if result.is_ok() && ctl_ipc::persistent_requests_supported(protocol) {
+      *slot = Some((stream, protocol));
+    }
+    result
+  }
+}
+
 async fn interactive_prompt(
   kind: PromptKind,
   message: String,
@@ -37,7 +73,7 @@ async fn ensure_master_on<S, F, P>(
   stream: &mut S,
   target: SshTarget,
   interactive: bool,
-  mut ask: F,
+  ask: F,
 ) -> Result<PathBuf, Error>
 where
   S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -45,6 +81,21 @@ where
   P: std::future::Future<Output = Result<Option<Zeroizing<String>>, Error>>,
 {
   let protocol = handshake(stream).await?;
+  ensure_master_exchange(stream, protocol, target, interactive, ask).await
+}
+
+async fn ensure_master_exchange<S, F, P>(
+  stream: &mut S,
+  protocol: ProtocolVersion,
+  target: SshTarget,
+  interactive: bool,
+  mut ask: F,
+) -> Result<PathBuf, Error>
+where
+  S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+  F: FnMut(PromptKind, String, Option<String>) -> P,
+  P: std::future::Future<Output = Result<Option<Zeroizing<String>>, Error>>,
+{
   validate_route(&target, protocol)?;
   let request = if interactive {
     ClientMessage::EnsureMaster { target }
@@ -274,6 +325,102 @@ pub enum Error {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[tokio::test]
+  async fn shared_master_client_serializes_requests_without_new_sockets() {
+    let client = std::sync::Arc::new(MasterClient::default());
+    let (stream, mut server) = ctl_ipc::Stream::pair().unwrap();
+    *client.connection.lock().await = Some((stream, ctl_ipc::PROTOCOL_VERSION));
+    let worker = tokio::spawn(async move {
+      for _ in 0..32 {
+        assert!(matches!(
+          ctl_ipc::read_frame::<_, ClientMessage>(&mut server)
+            .await
+            .unwrap(),
+          Some(ClientMessage::EnsureMasterQuiet { .. })
+        ));
+        ctl_ipc::write_frame(
+          &mut server,
+          &ServerMessage::MasterReady {
+            control_path: PathBuf::from("/fixture/master"),
+          },
+        )
+        .await
+        .unwrap();
+      }
+    });
+    let mut requests = tokio::task::JoinSet::new();
+    for _ in 0..32 {
+      let client = std::sync::Arc::clone(&client);
+      requests.spawn(async move { client.ensure_master(fixture_target(), false).await });
+    }
+    while let Some(result) = requests.join_next().await {
+      assert_eq!(result.unwrap().unwrap(), PathBuf::from("/fixture/master"));
+    }
+    worker.await.unwrap();
+  }
+
+  #[tokio::test]
+  async fn master_client_cancellation_discards_the_socket_and_pending_response() {
+    let client = MasterClient::default();
+    let (stream, mut server) = ctl_ipc::Stream::pair().unwrap();
+    *client.connection.lock().await = Some((stream, ctl_ipc::PROTOCOL_VERSION));
+    assert!(
+      tokio::time::timeout(
+        std::time::Duration::from_millis(50),
+        client.ensure_master(fixture_target(), false)
+      )
+      .await
+      .is_err()
+    );
+    assert!(client.connection.lock().await.is_none());
+    assert!(matches!(
+      ctl_ipc::read_frame::<_, ClientMessage>(&mut server)
+        .await
+        .unwrap(),
+      Some(ClientMessage::EnsureMasterQuiet { .. })
+    ));
+    assert!(
+      ctl_ipc::read_frame::<_, ClientMessage>(&mut server)
+        .await
+        .unwrap()
+        .is_none()
+    );
+  }
+
+  #[tokio::test]
+  async fn master_client_retires_old_contract_sockets_and_failed_connections() {
+    for (protocol, successful) in [
+      (ctl_ipc::CONTRACT_V1_1_14, true),
+      (ctl_ipc::PROTOCOL_VERSION, false),
+    ] {
+      let client = MasterClient::default();
+      let (stream, mut server) = ctl_ipc::Stream::pair().unwrap();
+      *client.connection.lock().await = Some((stream, protocol));
+      let worker = tokio::spawn(async move {
+        ctl_ipc::read_frame::<_, ClientMessage>(&mut server)
+          .await
+          .unwrap()
+          .unwrap();
+        if successful {
+          ctl_ipc::write_frame(
+            &mut server,
+            &ServerMessage::MasterReady {
+              control_path: "/fixture/master".into(),
+            },
+          )
+          .await
+          .unwrap();
+        }
+      });
+      assert_eq!(
+        client.ensure_master(fixture_target(), false).await.is_ok(),
+        successful
+      );
+      assert!(client.connection.lock().await.is_none());
+      worker.await.unwrap();
+    }
+  }
 
   fn fixture_target() -> SshTarget {
     ctl_client::hosts::ConnectionTargetDto::ssh("fixture")

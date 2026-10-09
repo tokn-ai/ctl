@@ -81,6 +81,7 @@ struct State {
   targets: Mutex<HashMap<String, Arc<TargetLifecycle>>>,
   forwards: AsyncMutex<ForwardRegistry>,
   configured_connections: Mutex<HashMap<String, ConnectionLease>>,
+  connection_correlations: Mutex<HashMap<PathBuf, ConnectionCorrelation>>,
   endpoint_registry: endpoint_registry::Registry,
   shared_forwards: AsyncMutex<SharedForwardRegistry>,
   vpn_service: Option<vpn_service::VpnService>,
@@ -122,6 +123,25 @@ impl MasterEndpoint {
       SharedMasterStartup::PrivateFallback => Ok(Self::managed(target)),
       SharedMasterStartup::ExternalOnly => Err(ssh_config_master::external_master_required()),
     }
+  }
+}
+
+struct ConnectionCorrelation {
+  id: uuid::Uuid,
+  socket_identity: Option<(u64, u64)>,
+}
+
+fn socket_identity(path: &Path) -> Option<(u64, u64)> {
+  #[cfg(unix)]
+  {
+    std::fs::metadata(path)
+      .ok()
+      .map(|metadata| (metadata.dev(), metadata.ino()))
+  }
+  #[cfg(not(unix))]
+  {
+    let _ = path;
+    None
   }
 }
 
@@ -195,6 +215,35 @@ impl State {
         },
       );
     }
+  }
+
+  fn correlation(&self, endpoint: &MasterEndpoint) -> uuid::Uuid {
+    let socket_identity = socket_identity(&endpoint.control_path);
+    let mut correlations = self.connection_correlations.lock().unwrap();
+    let correlation = correlations
+      .entry(endpoint.control_path.clone())
+      .or_insert_with(|| ConnectionCorrelation {
+        id: uuid::Uuid::new_v4(),
+        socket_identity,
+      });
+    if correlation.socket_identity.is_some()
+      && socket_identity.is_some()
+      && correlation.socket_identity != socket_identity
+    {
+      correlation.id = uuid::Uuid::new_v4();
+    }
+    if socket_identity.is_some() {
+      correlation.socket_identity = socket_identity;
+    }
+    correlation.id
+  }
+
+  fn forget_correlation(&self, endpoint: &MasterEndpoint) {
+    self
+      .connection_correlations
+      .lock()
+      .unwrap()
+      .remove(&endpoint.control_path);
   }
 
   fn target(&self, target: &SshTarget) -> Arc<TargetLifecycle> {
@@ -740,13 +789,31 @@ async fn ensure_master_with_interaction(
   target: SshTarget,
   interactive: bool,
 ) -> Result<(), RequestError> {
-  let operation = HistoryOperation::start(HistoryEvent::Connection, Some(&target_key(&target)));
-  let result = ensure_master_with_interaction_inner(stream, state, target, interactive).await;
-  operation.finish(
+  let operation = HistoryOperation::connection_request(
+    "cb15a56b-b7bf-42aa-b314-a219d7873a15",
+    &target_key(&target),
+    history_endpoint(&target),
+    None,
+  );
+  let mut connection_started = false;
+  let result = ensure_master_with_interaction_inner(
+    stream,
+    state,
+    target,
+    interactive,
+    &mut connection_started,
+  )
+  .await;
+  operation.finish_at(
     if result.is_ok() {
       HistoryOutcome::Succeeded
     } else {
       HistoryOutcome::Failed
+    },
+    if result.is_err() && !connection_started {
+      ctl_core::observability::Level::Error
+    } else {
+      ctl_core::observability::Level::Debug
     },
     result.as_ref().err().map(RequestError::code),
     None,
@@ -759,6 +826,7 @@ async fn ensure_master_with_interaction_inner(
   state: Arc<State>,
   target: SshTarget,
   interactive: bool,
+  connection_started: &mut bool,
 ) -> Result<(), RequestError> {
   validate_target(&target)?;
   let lifecycle = state.target(&target);
@@ -786,6 +854,12 @@ async fn ensure_master_with_interaction_inner(
   }
   let control_path = endpoint.control_path.clone();
   if reused {
+    ctl_core::observability::connection_reused(
+      "021f9959-97bc-4610-83f8-56035ae15b50",
+      &target_key(&target),
+      history_endpoint(&target),
+      state.correlation(&endpoint),
+    );
     state.adopt(&target, &endpoint, None)?;
     attempt
       .run(async {
@@ -805,6 +879,43 @@ async fn ensure_master_with_interaction_inner(
       .await?
       .map_err(Into::into);
   }
+  *connection_started = true;
+  let operation = HistoryOperation::connection(
+    "df38958b-ae41-4b9f-bc67-08d322058aae",
+    HistoryEvent::Connection,
+    &target_key(&target),
+    history_endpoint(&target),
+    Some(state.correlation(&endpoint)),
+  );
+  let result = establish_master(
+    stream,
+    &state,
+    &target,
+    &endpoint,
+    &mut attempt,
+    interactive,
+  )
+  .await;
+  operation.finish(
+    if result.is_ok() {
+      HistoryOutcome::Succeeded
+    } else {
+      HistoryOutcome::Failed
+    },
+    result.as_ref().err().map(RequestError::code),
+    None,
+  );
+  result
+}
+
+async fn establish_master(
+  stream: &mut ctl_ipc::Stream,
+  state: &Arc<State>,
+  target: &SshTarget,
+  endpoint: &MasterEndpoint,
+  attempt: &mut target_lifecycle::TargetAttempt,
+  interactive: bool,
+) -> Result<(), RequestError> {
   let token = uuid::Uuid::new_v4().to_string();
   let (prompt_tx, mut prompt_rx) = mpsc::channel(1);
   state
@@ -814,18 +925,18 @@ async fn ensure_master_with_interaction_inner(
     .insert(token.clone(), Attempt { prompts: prompt_tx });
   let _attempt_guard = AttemptGuard {
     token: token.clone(),
-    state: Arc::clone(&state),
+    state: Arc::clone(state),
   };
   let mut authentication = attempt
     .run(ConnectionAuthentication::prepare(
-      &state,
-      &target,
+      state,
+      target,
       interactive,
     ))
     .await??;
   let mut child = start_master(
-    &target,
-    &endpoint,
+    target,
+    endpoint,
     &token,
     state
       .socket_path
@@ -837,9 +948,9 @@ async fn ensure_master_with_interaction_inner(
   let result = attempt
     .run(wait_for_master(
       stream,
-      &state,
-      &target,
-      &endpoint,
+      state,
+      target,
+      endpoint,
       &mut child,
       &mut prompt_rx,
       &mut authentication,
@@ -847,11 +958,11 @@ async fn ensure_master_with_interaction_inner(
     .await;
   #[cfg(target_os = "macos")]
   if matches!(result, Ok(Ok(()))) {
-    attempt.run(authentication.connected(&target)).await?;
+    attempt.run(authentication.connected(target)).await?;
   }
   if endpoint.shared {
     if matches!(result, Ok(Ok(()))) {
-      state.remember_endpoint(&target, &endpoint, child.stdin.take());
+      state.remember_endpoint(target, endpoint, child.stdin.take());
     }
     // A configured master can already serve other applications. End only our
     // anchor session; killing this process could terminate their channels.
@@ -859,7 +970,7 @@ async fn ensure_master_with_interaction_inner(
   } else if !matches!(result, Ok(Ok(()))) {
     let _ = child.kill().await;
   }
-  result?
+  result.and_then(|result| result)
 }
 
 /// Per-connection authentication state. It owns temporary secrets and agents;
@@ -1129,6 +1240,7 @@ async fn reuse_master_or_prepare(
   if ready {
     return Ok(true);
   }
+  state.forget_correlation(endpoint);
   if !endpoint.shared {
     prepare_control_path(control_path)?;
   }
@@ -1448,7 +1560,15 @@ async fn disconnect_master(
   state: &State,
   target: &SshTarget,
 ) -> Result<(), RequestError> {
-  let operation = HistoryOperation::start(HistoryEvent::Disconnect, Some(&target_key(target)));
+  let operation = HistoryOperation::connection(
+    "af8df1fa-7a96-4e3a-84f7-8c1c505b5453",
+    HistoryEvent::Disconnect,
+    &target_key(target),
+    history_endpoint(target),
+    state
+      .existing_endpoint(target)?
+      .map(|endpoint| state.correlation(&endpoint)),
+  );
   let result = disconnect_master_inner(stream, state, target).await;
   operation.finish(
     if result.is_ok() {
@@ -1493,6 +1613,9 @@ async fn disconnect_master_inner(
         .await?;
     } else {
       exit_master(target, &endpoint.control_path).await?;
+    }
+    if !endpoint.shared {
+      state.forget_correlation(&endpoint);
     }
   }
   state
@@ -2142,6 +2265,15 @@ fn invalid_gateway(gateway: &SshGateway) -> bool {
     || gateway.identity_file.is_some()
     || gateway.mode == SshGatewayMode::AgentRelayOnly
     || (gateway.kind == GatewayKind::Socks5 && gateway.port.is_none())
+}
+
+fn history_endpoint(target: &SshTarget) -> ctl_core::observability::ConnectionEndpoint {
+  ctl_core::observability::ConnectionEndpoint {
+    destination: target.destination.clone(),
+    hostname: target.hostname.clone(),
+    user: target.user.clone(),
+    port: target.port,
+  }
 }
 
 fn target_key(target: &SshTarget) -> String {

@@ -85,7 +85,7 @@ fn handle(request: &Request) -> Response {
     Request::Clear {} => (Event::CredentialClear, None),
     _ => (Event::CredentialInventory, None),
   };
-  let operation = Operation::start(event, subject);
+  let operation = Operation::start("57b8c5a5-f22c-478f-8c5f-e7d51b7876f2", event, subject);
   let response = handle_inner(request);
   operation.finish(
     if matches!(response, Response::Error { .. }) {

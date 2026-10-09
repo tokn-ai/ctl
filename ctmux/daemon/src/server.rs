@@ -533,6 +533,7 @@ async fn handle_local_control_connection(
   }
 
   let operation = ctl_core::observability::Operation::diagnostic_at(
+    "eb1f5e28-2b1b-442e-8b6a-121e5d4d46b8",
     ctl_core::observability::Event::ControlTransport,
     ctl_core::observability::Level::Trace,
     ctl_core::observability::Context::default(),
@@ -741,6 +742,7 @@ async fn handle_connection(
   // attachment liveness reads, but also a stalled raw handshake or a
   // backpressured response write.
   let operation = ctl_core::observability::Operation::diagnostic_at(
+    "5d106397-abcc-4dde-9b69-98bc63ac752e",
     ctl_core::observability::Event::SessionTransport,
     ctl_core::observability::Level::Trace,
     ctl_core::observability::Context::default(),

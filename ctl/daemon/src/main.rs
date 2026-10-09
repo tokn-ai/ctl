@@ -82,18 +82,12 @@ fn main() {
     return;
   }
   if arguments.component_info {
-    let metadata = ctl_core::component::ComponentInfo {
-      build: ctl_core::component::build_info(),
-      protocols: ctl_ipc::lifecycle::DaemonBinaryInfo::current().protocols,
-    };
-    println!(
-      "{}",
-      serde_json::to_string(&metadata).expect("component metadata")
-    );
+    print_component_info();
     return;
   }
   if let Some(route) = arguments.proxy_route.as_deref() {
     let operation = ctl_core::observability::Operation::diagnostic(
+      "718cbec3-56e7-4ac7-adba-6c67810105d6",
       ctl_core::observability::Event::ProxyConnection,
     );
     let (Some(host), Some(port)) = (arguments.proxy_host.as_deref(), arguments.proxy_port) else {
@@ -144,9 +138,21 @@ fn main() {
   run_daemon(arguments);
 }
 
+fn print_component_info() {
+  let metadata = ctl_core::component::ComponentInfo {
+    build: ctl_core::component::build_info(),
+    protocols: ctl_ipc::lifecycle::DaemonBinaryInfo::current().protocols,
+  };
+  println!(
+    "{}",
+    serde_json::to_string(&metadata).expect("component metadata")
+  );
+}
+
 fn run_helper(identity: bool) -> std::io::Result<()> {
   use ctl_core::observability::{Event, Operation, Outcome};
-  let operation = Operation::diagnostic(Event::HelperRequest);
+  let operation =
+    Operation::diagnostic("029181a0-f47e-488b-8d6a-c09dff63ac45", Event::HelperRequest);
   let result = if identity {
     ctld::identities::run(std::io::stdin().lock(), std::io::stdout().lock())
   } else {
@@ -171,8 +177,10 @@ fn run_helper(identity: bool) -> std::io::Result<()> {
 }
 
 fn run_daemon(arguments: Arguments) {
-  let lifecycle =
-    ctl_core::observability::Operation::diagnostic(ctl_core::observability::Event::DaemonLifecycle);
+  let lifecycle = ctl_core::observability::Operation::diagnostic(
+    "128fc95c-6bfa-47d8-b2aa-18d5278b5ada",
+    ctl_core::observability::Event::DaemonLifecycle,
+  );
   #[cfg(unix)]
   if arguments.detach_from_terminal
     && let Err(error) = detach_from_terminal()

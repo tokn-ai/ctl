@@ -1,6 +1,6 @@
 use super::{Component, Context, Event, Lease, Level, Outcome, Record};
 use serde::{Serialize, de::DeserializeOwned};
-use std::io;
+use std::{fmt::Write as _, io};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 impl Record {
@@ -17,7 +17,7 @@ impl Record {
         .map_err(io::Error::other)?
         .format(&Rfc3339)
         .map_err(io::Error::other)?;
-    let metadata = format!(
+    let mut metadata = format!(
       "{timestamp} {} {} {} {} session={} pane={} attachment={} exit_code={} lease={} duration_ms={} subject={} code={} os={} pid={} run={} operation={} event_id={} schema={}",
       name(self.level).to_ascii_uppercase(),
       name(self.component),
@@ -38,12 +38,29 @@ impl Record {
       self.event_id,
       self.schema_version,
     );
+    if self.schema_version >= 6 {
+      write!(
+        metadata,
+        " attempt={} correlation={}",
+        optional(self.attempt_id),
+        optional(self.correlation_id)
+      )
+      .expect("writing to a String cannot fail");
+    }
     if self.schema_version >= 4 {
       let (prefix, fields) = metadata
         .split_once(" session=")
         .ok_or_else(|| io::Error::other("invalid metadata layout"))?;
+      let endpoint = if self.schema_version >= 5 {
+        format!(
+          "\tconnection_endpoint={}",
+          serde_json::to_string(&self.connection_endpoint).map_err(io::Error::other)?
+        )
+      } else {
+        String::new()
+      };
       Ok(format!(
-        "{prefix}\tmessage={}\tsession={fields}",
+        "{prefix}\tmessage={}{endpoint}\tsession={fields}",
         serde_json::to_string(&self.message()).map_err(io::Error::other)?
       ))
     } else {
@@ -62,8 +79,15 @@ impl Record {
     } else {
       (line.to_owned(), None)
     };
+    let (metadata, endpoint) =
+      if let Some((prefix, rest)) = metadata.split_once("connection_endpoint=") {
+        let (endpoint, fields) = rest.split_once('\t')?;
+        (format!("{prefix}{fields}"), Some(endpoint.to_owned()))
+      } else {
+        (metadata, None)
+      };
     let fields: Vec<_> = metadata.split_whitespace().collect();
-    if fields.len() != 19 {
+    if !matches!(fields.len(), 19 | 21) {
       return None;
     }
     let timestamp = OffsetDateTime::parse(fields[0], &Rfc3339).ok()?;
@@ -85,14 +109,31 @@ impl Record {
       },
       elapsed_ms: field(fields[10], "duration_ms")?.parse().ok()?,
       subject_id: optional_text(field(fields[11], "subject")?),
+      connection_endpoint: match endpoint {
+        Some(value) => serde_json::from_str(&value).ok()?,
+        None => None,
+      },
       error_code: optional_text(field(fields[12], "code")?),
       os_error: parse_optional(field(fields[13], "os")?).ok()?,
       process_id: field(fields[14], "pid")?.parse().ok()?,
       run_id: field(fields[15], "run")?.parse().ok()?,
       operation_id: field(fields[16], "operation")?.parse().ok()?,
+      attempt_id: if fields.len() == 21 {
+        parse_optional(field(fields[19], "attempt")?).ok()?
+      } else {
+        None
+      },
+      correlation_id: if fields.len() == 21 {
+        parse_optional(field(fields[20], "correlation")?).ok()?
+      } else {
+        None
+      },
       event_id: field(fields[17], "event_id")?.parse().ok()?,
       schema_version: field(fields[18], "schema")?.parse().ok()?,
     };
+    if (record.schema_version >= 6) != (fields.len() == 21) {
+      return None;
+    }
     if record.schema_version >= 4 {
       let message: String = serde_json::from_str(message?).ok()?;
       // Wording may evolve independently of typed fields. Validate its framing,

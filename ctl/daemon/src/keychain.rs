@@ -81,7 +81,11 @@ pub(crate) fn load_for_connection(
   authorization: &approval::Attempt,
 ) -> Result<Option<Zeroizing<String>>, Error> {
   use ctl_core::observability::{Event, Operation, Outcome};
-  let operation = Operation::start(Event::CredentialRead, Some(&crate::target_key(target)));
+  let operation = Operation::start(
+    "403d4249-0cb2-4921-ba43-ae6ffb0ded6b",
+    Event::CredentialRead,
+    Some(&crate::target_key(target)),
+  );
   let result = load_for_connection_recorded_inner(target, prompt, authorization);
   operation.finish(
     if matches!(&result, Ok(None)) {
@@ -179,7 +183,11 @@ fn secret_string(mut record: ctl_keychain_client::Record) -> Result<Zeroizing<St
 
 pub fn save(target: &SshTarget, secrets: &HashMap<String, Zeroizing<String>>) -> Result<(), Error> {
   use ctl_core::observability::{Event, Operation, Outcome};
-  let operation = Operation::start(Event::CredentialSave, Some(&crate::target_key(target)));
+  let operation = Operation::start(
+    "50fb5c2f-2452-4f12-a22f-2dac1e66ea82",
+    Event::CredentialSave,
+    Some(&crate::target_key(target)),
+  );
   let result = save_recorded_inner(target, secrets);
   operation.finish(
     if result.is_ok() {
@@ -293,7 +301,11 @@ pub fn never_save(target: &SshTarget) -> Result<(), Error> {
 
 pub fn delete(target: &SshTarget) -> Result<(), Error> {
   use ctl_core::observability::{Event, Operation, Outcome};
-  let operation = Operation::start(Event::CredentialRemove, Some(&crate::target_key(target)));
+  let operation = Operation::start(
+    "a85ba442-f22f-4b58-8c01-525f82bd2e5f",
+    Event::CredentialRemove,
+    Some(&crate::target_key(target)),
+  );
   let result = delete_recorded_inner(target);
   operation.finish(
     if result.is_ok() {

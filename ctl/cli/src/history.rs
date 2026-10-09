@@ -1,5 +1,5 @@
 use clap::Args;
-use ctl_core::observability::{Level, Outcome, Record, Stream, user_store};
+use ctl_core::observability::{ConnectionEndpoint, Level, Outcome, Record, Stream, user_store};
 use std::io;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
@@ -81,7 +81,8 @@ pub fn run(arguments: Arguments, stream: Stream) -> io::Result<()> {
             "SESSION/PANE",
             "EVENT",
             "RESULT",
-            "SUBJECT",
+            "HOST",
+            "CORRELATION ID",
             "DURATION",
             "MESSAGE"
           ],
@@ -96,7 +97,7 @@ pub fn run(arguments: Arguments, stream: Stream) -> io::Result<()> {
   Ok(())
 }
 
-fn row(record: &Record) -> [String; 10] {
+fn row(record: &Record) -> [String; 11] {
   let time = OffsetDateTime::from_unix_timestamp_nanos(i128::from(record.timestamp_ms) * 1_000_000)
     .ok()
     .and_then(|time| time.format(&Rfc3339).ok())
@@ -136,9 +137,12 @@ fn row(record: &Record) -> [String; 10] {
       .unwrap()
       .to_owned(),
     record
-      .subject_id
-      .as_deref()
-      .map_or_else(|| "—".into(), |id| id[..12].into()),
+      .connection_endpoint
+      .as_ref()
+      .map_or_else(|| "—".into(), ConnectionEndpoint::display),
+    record
+      .correlation_id
+      .map_or_else(|| "—".into(), |id| id.to_string()[..8].into()),
     if record.outcome == Outcome::Started {
       "—".into()
     } else {

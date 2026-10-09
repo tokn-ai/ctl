@@ -75,7 +75,11 @@ fn load_inner(
   authorization: Option<&super::approval::Attempt>,
 ) -> Result<Option<Zeroizing<String>>, IdentityError> {
   use ctl_core::observability::{Event, Operation, Outcome};
-  let operation = Operation::start(Event::CredentialRead, Some(&snapshot.identity_id));
+  let operation = Operation::start(
+    "a56e822c-e651-4aeb-9b21-2d78d4439ea6",
+    Event::CredentialRead,
+    Some(&snapshot.identity_id),
+  );
   let result = load_unrecorded(snapshot, context, canceled, authorization);
   operation.finish(
     if matches!(&result, Ok(None)) {
@@ -200,7 +204,11 @@ pub(crate) fn save(
   passphrase: &str,
 ) -> Result<(), IdentityError> {
   use ctl_core::observability::{Event, Operation, Outcome};
-  let operation = Operation::start(Event::CredentialSave, Some(&snapshot.identity_id));
+  let operation = Operation::start(
+    "c77305d2-64f4-4998-b7a0-44b764b53a3a",
+    Event::CredentialSave,
+    Some(&snapshot.identity_id),
+  );
   let result = save_unrecorded(snapshot, verified, passphrase);
   operation.finish(
     if result.is_ok() {

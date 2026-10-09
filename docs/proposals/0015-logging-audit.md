@@ -2,6 +2,7 @@
 
 - Status: Implemented
 - Created: 2026-10-09
+- Updated: 2026-10-09
 - Implementation PRs: [#93](https://github.com/tokn-ai/ctl/pull/93),
   [#95](https://github.com/tokn-ai/ctl/pull/95)
 
@@ -20,13 +21,20 @@ terminal contents, or arbitrary request/error strings.
 ## Design
 
 Each process run has a UUID. Duration-bearing operations record a start and
-terminal outcome under one operation ID; each event also has a unique event ID.
+terminal outcome under one attempt ID; each event also has a unique event ID. Stable operation UUID literals identify
+recording call sites. Connection correlations use random UUIDs scoped to the
+broker's observation of an SSH master, retained for reuse and changed on
+replacement. The tracker is not persisted across broker restart. Older records
+retain their historical invocation-valued operation IDs without reinterpretation.
 Observations such as pane exits or attachment expiry record one diagnostic
 event. Cancellation can record interruption; hard termination may leave an
 operation without an outcome.
 
-Allowlisted metadata and centrally derived messages exclude hostnames, accounts,
-key paths, commands, cwd, terminal bytes, secrets, and reconnect tokens. Subject
+Allowlisted metadata and centrally derived messages exclude key paths, commands,
+cwd, terminal bytes, secrets, and reconnect tokens. Connection/disconnect records
+now include the submitted SSH endpoint (destination, hostname, account, port)
+in local history; legacy records remain hash-only. Ensure/reuse requests are
+debug diagnostics, while actual connection establishment is recorded at info. Subject
 hashes support correlation but are not anonymization against guessing. Generated
 session/pane/public attachment IDs and numeric statuses provide safe context.
 Session/pane activity is diagnostic only, not credential audit.
@@ -40,7 +48,7 @@ Each run has human-readable log files with four bounded 5 MiB segments. Audit
 uses shared SQLite transactions with unique event IDs, indexed query fields,
 full synchronous commits, and rollback journaling. Files live in private local
 history storage with bounded lock waits and unsafe-path checks. SQLite schema 1
-and record schema 4 are distinct; supported older payloads remain readable.
+and record schema 6 are distinct; supported older payloads remain readable.
 Legacy files are preserved and reported rather than silently imported.
 
 Queries report omitted malformed records and incomplete inspection. Read-only
@@ -60,7 +68,7 @@ daemons record on their own machine; the local CLI does not aggregate that data.
 
 ## Protocol impact
 
-Protocol changes: none. Local record schema 4 and SQLite database schema 1 are
+Protocol changes: none. Local record schema 6 and SQLite database schema 1 are
 storage formats, independent of product releases and named wire contracts.
 The leveled recorder replaces earlier unreleased storage without claiming to
 migrate every legacy file.

@@ -55,7 +55,12 @@ fn logged<T, E: Failure>(
   action: impl FnOnce() -> Result<T, E>,
   describe: impl FnOnce(&T) -> Context,
 ) -> Result<T, E> {
-  let mut operation = Operation::diagnostic_at(event, level, context);
+  let mut operation = Operation::diagnostic_at(
+    "d6931d87-23fb-4c9a-a005-a12c96ead139",
+    event,
+    level,
+    context,
+  );
   let result = action();
   match &result {
     Ok(value) => {
@@ -71,7 +76,15 @@ fn logged<T, E: Failure>(
 }
 
 fn notice(event: Event, level: Level, context: Context) {
-  ctl_core::observability::diagnostic_event(event, level, context, Outcome::Succeeded, None, None);
+  ctl_core::observability::diagnostic_event(
+    "4f31f52e-921f-4af6-88d9-2656f34edcf9",
+    event,
+    level,
+    context,
+    Outcome::Succeeded,
+    None,
+    None,
+  );
 }
 
 fn view_context(view: &ViewInfo) -> Context {
@@ -92,8 +105,12 @@ impl Terminal {
   }
 
   pub fn create_attachment(&self, input: bool, layout: bool) -> super::AttachmentRegistration {
-    let mut operation =
-      Operation::diagnostic_at(Event::AttachmentCreate, Level::Info, self.log_context(None));
+    let mut operation = Operation::diagnostic_at(
+      "8a84f0e8-15f0-420a-b4ff-c3af1bbe89b5",
+      Event::AttachmentCreate,
+      Level::Info,
+      self.log_context(None),
+    );
     let result = self.create_attachment_inner(input, layout);
     operation.set_context(self.log_context(Some(&result.attachment_id)));
     operation.finish(Outcome::Succeeded, None, None);
@@ -101,8 +118,12 @@ impl Terminal {
   }
 
   pub fn resume_attachment(&self, token: &str) -> Option<super::AttachmentRegistration> {
-    let mut operation =
-      Operation::diagnostic_at(Event::AttachmentResume, Level::Info, self.log_context(None));
+    let mut operation = Operation::diagnostic_at(
+      "333a1e67-62e7-4380-8acd-2430bdb974d1",
+      Event::AttachmentResume,
+      Level::Info,
+      self.log_context(None),
+    );
     let result = self.resume_attachment_inner(token);
     if let Some(registration) = &result {
       operation.set_context(self.log_context(Some(&registration.attachment_id)));
@@ -156,6 +177,7 @@ impl Terminal {
   pub fn acquire_lease(&self, attachment_id: &str, lease: LeaseKind) -> LeaseStatus {
     let result = self.acquire_lease_inner(attachment_id, lease);
     ctl_core::observability::diagnostic_event(
+      "a24e505a-52a6-4ea9-8705-ad193bb6ee88",
       Event::LeaseAcquire,
       Level::Debug,
       self.lease_context(attachment_id, lease),

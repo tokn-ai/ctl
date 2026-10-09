@@ -54,8 +54,10 @@ fn main() {
     ctl_core::observability::Component::Ctmuxd,
     arguments.detach_from_terminal,
   );
-  let lifecycle =
-    ctl_core::observability::Operation::diagnostic(ctl_core::observability::Event::DaemonLifecycle);
+  let lifecycle = ctl_core::observability::Operation::diagnostic(
+    "53150eae-6ffe-4ee8-b043-e5cec8ab5b83",
+    ctl_core::observability::Event::DaemonLifecycle,
+  );
   #[cfg(unix)]
   if arguments.detach_from_terminal
     && let Err(error) = detach_from_terminal()

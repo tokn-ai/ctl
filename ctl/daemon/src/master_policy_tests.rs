@@ -374,7 +374,33 @@ async fn an_external_socket_is_not_a_connection_until_adopted() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn a_stale_private_fallback_socket_does_not_block_reconnection_with_forwards() {
+async fn an_unknown_control_check_preserves_the_endpoint_and_correlation() {
+  let path = std::env::temp_dir().join(format!("ctld-unknown-{}", uuid::Uuid::new_v4()));
+  let _guard = SocketGuard(path.clone());
+  // OpenSSH cannot check this endpoint. Its failure must not authorize socket
+  // deletion or a new authentication attempt.
+  std::fs::write(&path, "do not replace").unwrap();
+  let state = State::default();
+  let configured = target(Some("builder"));
+  let endpoint = MasterEndpoint {
+    control_path: path.clone(),
+    shared: false,
+    startup: SharedMasterStartup::PrivateFallback,
+  };
+  state.adopt(&configured, &endpoint, None).unwrap();
+  let correlation = state.correlation(&endpoint);
+  let error = reuse_master_or_prepare(&state, &configured, &endpoint)
+    .await
+    .unwrap_err();
+  assert_eq!(error.code(), "ssh_status_unknown");
+  assert_eq!(std::fs::read_to_string(&path).unwrap(), "do not replace");
+  assert!(state.endpoint(&configured).is_some());
+  assert_eq!(state.correlation(&endpoint), correlation);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_missing_private_fallback_socket_does_not_block_reconnection_with_forwards() {
   struct ReadyControl;
   impl port_forwarding::ForwardControl for ReadyControl {
     fn is_ready(&self, _: &SshTarget) -> impl Future<Output = bool> + Send {
@@ -398,7 +424,6 @@ async fn a_stale_private_fallback_socket_does_not_block_reconnection_with_forwar
     shared: false,
     startup: SharedMasterStartup::PrivateFallback,
   };
-  std::fs::write(&endpoint.control_path, "stale socket").unwrap();
   let state = State::default();
   let configured = target(Some("builder"));
   state.adopt(&configured, &endpoint, None).unwrap();

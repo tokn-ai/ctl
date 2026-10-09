@@ -65,7 +65,7 @@ pub(super) async fn resolve(target: &SshTarget) -> Result<MasterEndpoint, Reques
   if let Some(path) = policy.path {
     // ControlMaster=no can still use a running master; it only disables
     // creation. A missing path or disabled creation uses ctmux's private master.
-    let ready = control_master_is_ready(target, &path).await;
+    let ready = control_master_is_ready(target, &path).await?;
     if policy.asks_permission && !ready {
       return Err(external_master_required());
     }

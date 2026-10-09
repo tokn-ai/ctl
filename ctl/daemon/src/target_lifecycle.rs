@@ -10,6 +10,7 @@ use super::RequestError;
 struct Revision {
   generation: u64,
   paused: bool,
+  authentication_required: bool,
 }
 
 pub(super) struct TargetLifecycle {
@@ -49,8 +50,9 @@ impl TargetLifecycle {
     let mut current = false;
     self.revision.send_if_modified(|revision| {
       current = revision.generation == attempt.generation;
-      if current && revision.paused {
+      if current && (revision.paused || revision.authentication_required) {
         revision.paused = false;
+        revision.authentication_required = false;
         true
       } else {
         false
@@ -68,11 +70,29 @@ impl TargetLifecycle {
   }
 
   pub(super) fn require_connected(&self) -> Result<(), RequestError> {
-    if self.is_paused() {
+    let revision = *self.revision.borrow();
+    if revision.paused {
       Err(RequestError::HostDisconnected)
     } else {
       Ok(())
     }
+  }
+
+  pub(super) fn allow_background_connection(&self) -> Result<(), RequestError> {
+    self.require_connected()?;
+    if self.revision.borrow().authentication_required {
+      Err(RequestError::AuthenticationRequired)
+    } else {
+      Ok(())
+    }
+  }
+
+  /// A quiet attempt cannot obtain fresh authorization. Do not let queued or
+  /// later background requests repeat it until an explicit connect resumes.
+  pub(super) fn require_authentication(&self) {
+    self
+      .revision
+      .send_modify(|revision| revision.authentication_required = true);
   }
 }
 
@@ -118,6 +138,27 @@ impl TargetAttempt {
 mod tests {
   use super::*;
   use std::sync::Arc;
+
+  #[tokio::test]
+  async fn authentication_required_stops_background_retries_until_explicit_connect() {
+    let lifecycle = TargetLifecycle::default();
+    lifecycle.require_authentication();
+    for _ in 0..3 {
+      assert!(matches!(
+        lifecycle.allow_background_connection(),
+        Err(RequestError::AuthenticationRequired)
+      ));
+    }
+    assert!(!lifecycle.is_paused());
+    lifecycle.resume(&lifecycle.attempt()).unwrap();
+    assert!(lifecycle.allow_background_connection().is_ok());
+    lifecycle.require_authentication();
+    lifecycle.pause();
+    assert!(matches!(
+      lifecycle.allow_background_connection(),
+      Err(RequestError::HostDisconnected)
+    ));
+  }
 
   #[tokio::test]
   async fn disconnect_cancels_unanswered_prompts_and_queued_connects() {

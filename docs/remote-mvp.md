@@ -121,6 +121,13 @@ not installed because authentication belongs to the master rather than the
 user-presence protection, allowing Touch ID or the macOS account password.
 A successful connection can reuse authorization for a fixed 24-hour window,
 ending on lock/sleep or explicit disconnect; reconnects do not extend it.
+Background TUI refreshes and pane reconnects use the connector's retry policy:
+authentication/configuration failures stop maintenance until a new session
+selection resets it. Connect the host explicitly before retrying. Quiet broker
+requests also stop new authentication attempts after authentication-required,
+while still permitting reuse of a live master. A failed existing-master control
+check reports unknown status rather than replacing the socket. Requests whose
+clients disconnect are cancelled, including work queued behind authentication.
 Never suppresses future save
 offers for that destination without retaining the secret. Only `ctld` accesses
 Keychain, and Linux discards newly entered reusable secrets after authentication.

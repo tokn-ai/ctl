@@ -17,7 +17,7 @@ const INITIAL_REVISION: &str = "none";
 const REVISION_FILE: &str = "credential-revision";
 
 pub(super) struct Guard {
-  _file: File,
+  file: File,
   directory: PathBuf,
 }
 
@@ -25,6 +25,14 @@ impl Guard {
   /// Read the revocation revision while this operation owns the shared lock.
   pub(super) fn revision(&self) -> Result<String, Error> {
     revision_at(&self.directory)
+  }
+}
+
+impl Drop for Guard {
+  fn drop(&mut self) {
+    // Closing only this descriptor can leave the lock held by a descriptor
+    // inherited during a concurrent fork, until the child execs or exits.
+    let _ = self.file.unlock();
   }
 }
 
@@ -177,7 +185,7 @@ fn acquire_at(directory: &Path, deadline: Duration) -> Result<Guard, Error> {
     match file.try_lock() {
       Ok(()) => {
         return Ok(Guard {
-          _file: file,
+          file,
           directory: directory.to_owned(),
         });
       }
@@ -227,6 +235,18 @@ mod tests {
     );
     drop(first);
     assert!(acquire_at(&fixture.0, Duration::ZERO).is_ok());
+  }
+
+  #[test]
+  fn releasing_the_owner_unlocks_even_with_a_duplicated_descriptor() {
+    let fixture = Fixture::new();
+    let owner = acquire_at(&fixture.0, Duration::ZERO).unwrap();
+    // A concurrent process spawn can briefly inherit this open file description.
+    let inherited = owner.file.try_clone().unwrap();
+    drop(owner);
+    let next = acquire_at(&fixture.0, Duration::ZERO).unwrap();
+    drop(inherited);
+    drop(next);
   }
 
   #[test]

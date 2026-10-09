@@ -1,3 +1,4 @@
+mod diagnostics;
 mod topology;
 
 use crate::history_snapshot::PhysicalHistory;
@@ -457,7 +458,7 @@ impl Terminal {
   ///
   /// The returned opaque token can rebind a replacement transport to this
   /// attachment during its bounded reconnect grace period.
-  pub fn create_attachment(
+  fn create_attachment_inner(
     &self,
     request_input_lease: bool,
     request_layout_lease: bool,
@@ -500,7 +501,7 @@ impl Terminal {
   }
 
   /// Rebinds a replacement transport and invalidates the previous generation.
-  pub fn resume_attachment(&self, attachment_token: &str) -> Option<AttachmentRegistration> {
+  fn resume_attachment_inner(&self, attachment_token: &str) -> Option<AttachmentRegistration> {
     let (attachment_id, generation, superseded) = {
       let mut attachments = lock(&self.attachments);
       let record = attachments.get_mut(attachment_token)?;
@@ -529,7 +530,7 @@ impl Terminal {
   /// Marks the current transport generation as temporarily disconnected.
   ///
   /// Returns `true` only when a grace timer should be scheduled.
-  pub fn suspend_attachment(&self, attachment_token: &str, generation: u64) -> bool {
+  fn suspend_attachment_inner(&self, attachment_token: &str, generation: u64) -> bool {
     let mut attachments = lock(&self.attachments);
     let Some(record) = attachments.get_mut(attachment_token) else {
       return false;
@@ -542,14 +543,14 @@ impl Terminal {
   }
 
   /// Releases a disconnected attachment when its reconnect grace expires.
-  pub fn expire_attachment(&self, attachment_token: &str, generation: u64) {
+  fn expire_attachment_inner(&self, attachment_token: &str, generation: u64) -> bool {
     let attachment_id = {
       let mut attachments = lock(&self.attachments);
       let Some(record) = attachments.get(attachment_token) else {
-        return;
+        return false;
       };
       if record.generation != generation || record.connected {
-        return;
+        return false;
       }
       attachments
         .remove(attachment_token)
@@ -558,18 +559,21 @@ impl Terminal {
     if let Some(attachment_id) = attachment_id {
       lock(&self.leases).release_attachment(&attachment_id);
       self.change_view_leases(|leases| leases.release_attachment(&attachment_id));
+      true
+    } else {
+      false
     }
   }
 
   /// Explicitly detaches the current generation without reconnect grace.
-  pub fn close_attachment(&self, attachment_token: &str, generation: u64) {
+  fn close_attachment_inner(&self, attachment_token: &str, generation: u64) -> bool {
     let attachment_id = {
       let mut attachments = lock(&self.attachments);
       let Some(record) = attachments.get(attachment_token) else {
-        return;
+        return false;
       };
       if record.generation != generation {
-        return;
+        return false;
       }
       attachments
         .remove(attachment_token)
@@ -578,17 +582,20 @@ impl Terminal {
     if let Some(attachment_id) = attachment_id {
       lock(&self.leases).release_attachment(&attachment_id);
       self.change_view_leases(|leases| leases.release_attachment(&attachment_id));
+      true
+    } else {
+      false
     }
   }
 
-  pub fn acquire_lease(&self, attachment_id: &str, lease: LeaseKind) -> LeaseStatus {
+  fn acquire_lease_inner(&self, attachment_id: &str, lease: LeaseKind) -> LeaseStatus {
     if lease == LeaseKind::Layout {
       return self.change_view_leases(|leases| leases.acquire(attachment_id, lease));
     }
     lock(&self.leases).acquire(attachment_id, lease)
   }
 
-  pub fn release_lease(&self, attachment_id: &str, lease: LeaseKind) -> LeaseStatus {
+  fn release_lease_inner(&self, attachment_id: &str, lease: LeaseKind) -> LeaseStatus {
     if lease == LeaseKind::Layout {
       return self.change_view_leases(|leases| leases.release(attachment_id, lease));
     }
@@ -728,7 +735,7 @@ impl Terminal {
     Ok(())
   }
 
-  pub fn resize(
+  fn resize_inner(
     &self,
     attachment_id: &str,
     mut terminal_size: TerminalSize,
@@ -762,7 +769,7 @@ impl Terminal {
   }
 
   /// Moves a split divider under view layout ownership, restoring saved splits first.
-  pub fn resize_pane(
+  fn resize_pane_inner(
     &self,
     attachment_id: &str,
     terminal_id: &str,
@@ -797,7 +804,7 @@ impl Terminal {
   }
 
   /// Moves an exact divider only while the observed view identity/revision still holds.
-  pub fn resize_divider(
+  fn resize_divider_inner(
     &self,
     attachment_id: &str,
     divider: &ctmux_proto::DividerResize,
@@ -888,7 +895,7 @@ impl Terminal {
   }
 
   /// Changes view zoom under the same attachment lease that owns PTY resize.
-  pub fn set_view_zoom(
+  fn set_view_zoom_inner(
     &self,
     attachment_id: &str,
     terminal_id: Option<String>,
@@ -1027,7 +1034,7 @@ impl Terminal {
     Ok(())
   }
 
-  pub fn kill(&self) -> Result<(), SessionControlError> {
+  fn kill_inner(&self) -> Result<(), SessionControlError> {
     #[cfg(unix)]
     lock(&self.killer).kill()?;
     #[cfg(windows)]
@@ -1103,6 +1110,8 @@ impl Terminal {
     }
     *lifecycle = SessionLifecycle::Ended { exit_code };
     let _ignored = self.events.send(SessionEvent::Ended { exit_code });
+    drop(lifecycle);
+    self.log_exit(exit_code);
   }
 
   #[cfg(unix)]
@@ -1340,7 +1349,7 @@ impl SessionManager {
     )
   }
 
-  pub fn split_terminal(
+  fn split_terminal_inner(
     &self,
     terminal_id: String,
     axis: ctmux_proto::SplitAxis,
@@ -1362,7 +1371,7 @@ impl SessionManager {
     )
   }
 
-  fn create_terminal(
+  fn create_terminal_inner(
     &self,
     requested_name: Option<String>,
     command: Option<CommandSpec>,

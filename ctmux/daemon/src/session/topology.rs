@@ -330,7 +330,7 @@ impl SessionManager {
     lock(&self.inner.registry).view_info(selector)
   }
 
-  pub fn update_view(
+  pub(super) fn update_view_inner(
     &self,
     selector: &str,
     expected_revision: u64,
@@ -369,7 +369,7 @@ impl SessionManager {
     registry.view_info(&id)
   }
 
-  pub fn promote_terminal(
+  pub(super) fn promote_terminal_inner(
     &self,
     terminal_id: &str,
     name: Option<String>,
@@ -438,7 +438,7 @@ impl SessionManager {
     registry.view_info(&owner.session_id)
   }
 
-  pub fn merge_sessions(
+  pub(super) fn merge_sessions_inner(
     &self,
     source: &str,
     destination: &str,
@@ -515,7 +515,7 @@ impl SessionManager {
     registry.view_info(&destination_id)
   }
 
-  pub fn begin_termination(
+  pub(super) fn begin_termination_inner(
     &self,
     selector: &str,
   ) -> Result<Vec<Arc<Terminal>>, SessionManagerError> {

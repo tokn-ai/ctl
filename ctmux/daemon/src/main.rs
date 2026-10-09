@@ -50,10 +50,18 @@ fn main() {
     );
     return;
   }
+  ctl_core::observability::initialize_component(ctl_core::observability::Component::Ctmuxd);
+  let lifecycle =
+    ctl_core::observability::Operation::diagnostic(ctl_core::observability::Event::DaemonLifecycle);
   #[cfg(unix)]
   if arguments.detach_from_terminal
     && let Err(error) = detach_from_terminal()
   {
+    lifecycle.finish(
+      ctl_core::observability::Outcome::Failed,
+      Some("daemon_detach_failed"),
+      error.raw_os_error(),
+    );
     eprintln!("ctmuxd: could not detach from the invoking terminal: {error}");
     std::process::exit(1);
   }
@@ -72,12 +80,27 @@ fn main() {
   {
     Ok(runtime) => runtime,
     Err(error) => {
+      lifecycle.finish(
+        ctl_core::observability::Outcome::Failed,
+        Some("daemon_runtime_failed"),
+        error.raw_os_error(),
+      );
       eprintln!("ctmuxd: could not initialize the async runtime: {error}");
       std::process::exit(1);
     }
   };
 
-  if let Err(error) = runtime.block_on(run(config)) {
+  let result = runtime.block_on(run(config));
+  lifecycle.finish(
+    if result.is_ok() {
+      ctl_core::observability::Outcome::Succeeded
+    } else {
+      ctl_core::observability::Outcome::Failed
+    },
+    result.as_ref().err().map(|_| "daemon_failed"),
+    None,
+  );
+  if let Err(error) = result {
     eprintln!("ctmuxd: {error}");
     std::process::exit(1);
   }

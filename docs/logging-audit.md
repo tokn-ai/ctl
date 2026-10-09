@@ -3,27 +3,46 @@
 `ctld` records connection attempts and explicit disconnects, saved password and
 passphrase reads/writes, and credential inventory/removal requests. Diagnostic
 history also includes daemon startup/shutdown, proxy connections, and helper I/O.
-This covers the CLI and desktop when they use this version of `ctld`. Rebuild and
-restart an older running daemon to enable recording.
+`ctmuxd` also records session creation/termination/merging, pane splitting,
+promotion, kill requests and process exits, view edits/zoom, and attachment
+creation/resume/suspension/detach/expiry. Pane, divider, and canvas resize operations
+and lease acquisition/release are debug diagnostics; transport lifetimes are trace
+diagnostics. Session/pane events are not added to audit.
+
+This covers the CLI and desktop when they use these daemon versions. Rebuild and
+restart older running daemons to enable recording. Remote ctmuxd records on the
+remote machine in that SSH user's home; `ctl logs` reads only the local machine.
 
 ```sh
 ctl logs
 ctl logs --failed --limit 50
+ctl logs --level warn
 ctl audit
 ctl audit --json --limit 1000
 ctl audit --path
+ctl logs --run <full-run-uuid>
+ctl audit --run <full-run-uuid>
 ```
 
 These commands read local history without starting a daemon or connecting to a
 host. They reject remote target options. The default is the newest 100 matching
-records, displayed in append order; `--limit` accepts 1–10000. `--failed` selects
+records, displayed oldest first. Audit uses committed append order; logs use
+timestamp order. Run UUID breaks ties between runs, and append order is retained
+within a run for equal timestamps. `--limit` accepts 1–10000. `--failed` selects
 failed and interrupted outcomes before applying the limit. Tables show UTC time,
-event, result, a short subject hash, duration, and a fixed error classification.
-JSON includes full IDs, process IDs, timestamps, and completeness information.
+a short run ID, severity, component, short session/pane IDs, event, result,
+a short subject hash, duration, and a fixed error classification.
+JSON includes full run IDs, event/operation IDs, process IDs, timestamps, and
+completeness information.
 
 ## Contents and privacy
 
-The JSON Lines schema is version 1. Each operation records `started` and a terminal
+The local record schema is version 3, adding severity, component, and typed context
+(session, pane, attachment IDs, exit code, and lease kind). Version 2 audit payloads
+remain readable with default context. Each process generates one `run_id` UUID;
+PID reuse cannot collide with a different run. All helper invocations and daemon
+runs get separate IDs. Each
+operation records `started` and a terminal
 outcome with the same `operation_id`; each record has its own `event_id`. Terminal
 outcomes are `succeeded`, `missing`, `failed`, or `interrupted`. Cancellation that
 drops an operation records interruption. A hard process kill can leave a start
@@ -35,26 +54,93 @@ connection identities or credential identifiers. They support correlation withou
 putting hostnames, accounts, key paths, passwords, passphrases, private key bytes,
 raw requests, or raw error messages in history. Hashes are deterministic, not
 anonymization against guessing. Error details are fixed codes and, where available,
-a numeric OS status.
+a numeric OS status. Only generated session, pane, and public attachment UUIDs
+are recorded: session names, working directories, commands, terminal input/output,
+and secret reconnect attachment tokens are excluded.
+
+## Diagnostic levels and format
+
+The levels are `trace`, `debug`, `info`, `warn`, and `error`. Daemons save `info`
+and above by default. Set `CTL_LOG_LEVEL` before starting a daemon to change its
+minimum severity; invalid values warn and fall back to `info`. For example:
+
+```sh
+CTL_LOG_LEVEL=debug ctmuxd --socket /path/to/private/runtime/ctmux.sock
+ctl logs --level warn
+```
+
+Changing the environment does not reconfigure an already running daemon.
+`--level` filters stored records before applying the display limit; it does not
+turn on additional recording. Diagnostic filtering never suppresses audit events.
+Expected rejected view operations are warnings, PTY/spawn/I/O failures are errors,
+nonzero pane exits and lost/expired attachments are warnings. Ordinary lease
+contention stays at debug level. A terminal failure can therefore be saved even
+when its lower-severity start record was filtered out.
+
+Diagnostics are human-readable `.log` files. Every line starts with a UTC RFC 3339
+timestamp, uppercase severity, component, event, and outcome, followed by fixed
+key/value metadata. An example prefix is:
+
+```text
+2026-10-09T08:15:30.123Z INFO ctmuxd pane_split succeeded
+```
+
+The full line also carries IDs, duration, exit status/lease kind where applicable,
+and fixed error codes. `ctl logs --json` reconstructs typed records from these
+lines. Partial/corrupt lines are reported as omitted instead of silently accepted.
+Diagnostic writes occur outside the session registry and PTY operation locks.
 
 ## Storage and failures
 
-Both signed desktop and standalone helpers share `~/.tokn/ctl/history`. On Unix,
+Local ctld and ctmuxd processes share `~/.tokn/ctl/history`. On Unix,
 new directories use mode 0700 and files 0600. Unsafe ownership/permissions,
-symlinks, hardlinked files, and non-regular files are refused. Processes coordinate
-appends and rotation with a file lock, with a bounded 250 ms wait per append.
-Each append is flushed to disk. Logging failures do not fail the connection or
-credential operation: ctld warns on stderr, suppressing consecutive recording
-failures. A launcher that redirects daemon stderr must retain it to make
-these warnings visible; this first implementation does not add desktop alerts.
+symlinks, hardlinked files, and non-regular files are refused, including SQLite
+sidecars. SQLite is bundled at build time; users need no SQLite installation.
 
-`logs.jsonl` retains four segments of up to 5 MiB each (20 MiB total);
-`audit.jsonl` retains sixteen (80 MiB total). The newest segment has no number;
-older segments use `.1.jsonl`, `.2.jsonl`, and so on. Rotation discards the oldest
-segment. There is no time-based retention guarantee. A record interrupted during
-writing is separated from the next append. Readers skip malformed/unsupported
-records and return `complete: false` with a warning. Completeness describes the
-segments scanned for the requested limit, not history already rotated away.
+```text
+~/.tokn/ctl/history/
+  audit.sqlite3
+  logs/
+    <run_id>.lock
+    <run_id>.log
+    <run_id>.1.log
+    ...
+```
+
+All ctld processes share `audit.sqlite3`. Each event is inserted in a SQLite
+transaction, with a unique event ID and indexed time, run, subject, and outcome.
+Database schema version 1 is identified by SQLite `application_id` and
+`user_version`; it is separate from local record schema version 3 and named wire
+protocols. Unsupported schemas and corrupt databases are refused without resetting
+or overwriting them. Full synchronous commits and rollback journaling make
+successful inserts durable and allow CLI queries without creating WAL sidecars.
+Concurrent writers wait up to 250 ms for SQLite locks. If a killed writer leaves
+a hot rollback journal, the next writer recovers it. A read-only CLI query can
+report recovery-required until that happens, rather than changing the database.
+Audit has no automatic
+age/size deletion in this version; its disk use grows with recorded activity.
+
+Diagnostic files are independent for each process run. A run retains four
+segments of up to 5 MiB each (20 MiB per run). Its newest segment has no number;
+older diagnostic segments use `.1.log`, `.2.log`, and `.3.log`. Rotation only discards
+that run's oldest segment. Threads and readers coordinate with that run's file
+lock, with a bounded 250 ms wait. One run cannot rotate or block another run's
+writes. Completed runs are retained; there is no automatic cleanup across runs.
+`ctl logs` combines their newest matching records; `--run` selects one full UUID
+from `--json`. Audit supports the same filter.
+
+Every diagnostic append is flushed to disk. An interrupted partial line is
+separated from the next append. Readers omit malformed/unsupported records and
+return `complete: false` with a warning. Completeness describes inspected retained
+records, not records rotated away, failed writes, or operations killed before
+recording. Legacy audit JSONL files are left untouched and explicitly reported
+as unimported. Legacy diagnostic files are also preserved and reported as omitted;
+this version does not migrate the earlier unreleased format.
+
+Recording failures do not fail connection or credential operations: ctld warns
+on stderr, suppressing consecutive recording failures. A launcher that redirects
+daemon stderr must retain it to make warnings visible; this implementation does
+not add desktop alerts. ctmuxd uses the same warning policy.
 
 History is best-effort local troubleshooting evidence, not a tamper-proof security
 ledger. The owning user can edit or remove it. `ctl passwords clear` removes saved

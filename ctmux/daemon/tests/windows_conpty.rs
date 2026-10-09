@@ -17,11 +17,17 @@ use uuid::Uuid;
 struct Daemon {
   child: Child,
   socket: PathBuf,
+  home: PathBuf,
 }
 impl Daemon {
   async fn start() -> Self {
     let socket = PathBuf::from(format!(r"\\.\pipe\ctmux-conpty-test-{}", Uuid::new_v4()));
+    let home = std::env::temp_dir().join(format!("ctmux-test-home-{}", Uuid::new_v4()));
+    std::fs::create_dir(&home).unwrap();
     let child = Command::new(env!("CARGO_BIN_EXE_ctmuxd"))
+      .env("HOME", &home)
+      .env("USERPROFILE", &home)
+      .env_remove("CTL_LOG_LEVEL")
       .arg("--socket")
       .arg(&socket)
       .arg("--startup-idle-seconds")
@@ -32,7 +38,11 @@ impl Daemon {
       .kill_on_drop(true)
       .spawn()
       .unwrap();
-    let daemon = Self { child, socket };
+    let daemon = Self {
+      child,
+      socket,
+      home,
+    };
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
       if connect_existing_daemon(&daemon.socket).await.is_ok() {
@@ -108,6 +118,7 @@ impl Daemon {
       .expect("daemon did not exit")
       .unwrap();
     assert!(status.success());
+    std::fs::remove_dir_all(&self.home).unwrap();
   }
 }
 fn size() -> TerminalSize {

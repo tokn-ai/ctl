@@ -518,11 +518,31 @@ async fn handle_local_control_connection(
     return Ok(());
   }
 
-  tokio::select! {
+  let operation = ctl_core::observability::Operation::diagnostic_at(
+    ctl_core::observability::Event::ControlTransport,
+    ctl_core::observability::Level::Trace,
+    ctl_core::observability::Context::default(),
+  );
+  let result = tokio::select! {
     biased;
     _changed = control_connection_shutdown.changed() => Ok(()),
     result = handle_active_local_control_connection(stream, sessions, restart) => result,
-  }
+  };
+  operation.finish_at(
+    if result.is_ok() {
+      ctl_core::observability::Outcome::Succeeded
+    } else {
+      ctl_core::observability::Outcome::Failed
+    },
+    if result.is_ok() {
+      ctl_core::observability::Level::Trace
+    } else {
+      ctl_core::observability::Level::Warn
+    },
+    result.as_ref().err().map(|_| "ctmux_transport_failed"),
+    None,
+  );
+  result
 }
 
 async fn accept_local_control_handshake(stream: &mut Stream) -> Result<bool, ConnectionError> {
@@ -706,11 +726,31 @@ async fn handle_connection(
   // the cancellation at the outermost level so it can interrupt not only
   // attachment liveness reads, but also a stalled raw handshake or a
   // backpressured response write.
-  tokio::select! {
+  let operation = ctl_core::observability::Operation::diagnostic_at(
+    ctl_core::observability::Event::SessionTransport,
+    ctl_core::observability::Level::Trace,
+    ctl_core::observability::Context::default(),
+  );
+  let result = tokio::select! {
     biased;
     _changed = data_connection_shutdown.changed() => Ok(()),
     result = handle_active_connection(stream, sessions, restart, attachment_liveness) => result,
-  }
+  };
+  operation.finish_at(
+    if result.is_ok() {
+      ctl_core::observability::Outcome::Succeeded
+    } else {
+      ctl_core::observability::Outcome::Failed
+    },
+    if result.is_ok() {
+      ctl_core::observability::Level::Trace
+    } else {
+      ctl_core::observability::Level::Warn
+    },
+    result.as_ref().err().map(|_| "ctmux_transport_failed"),
+    None,
+  );
+  result
 }
 
 async fn handle_active_connection(

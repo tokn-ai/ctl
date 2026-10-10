@@ -170,7 +170,10 @@ async fn observe(target: hosts::ConnectionTargetDto) -> Result<&'static str, Str
   let status = ctl_client::connection::ConnectionClient::default()
     .status(target.to_ssh_target().map_err(|error| error.to_string())?)
     .await
-    .map_err(|error| error.to_string())?;
+    .map_err(|error| match error {
+      ctl_client::connection::Error::Daemon { message, .. } => message,
+      error => error.to_string(),
+    })?;
   Ok(if status.manually_disconnected {
     "paused"
   } else if status.connected {

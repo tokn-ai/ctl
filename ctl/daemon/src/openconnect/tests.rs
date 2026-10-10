@@ -96,6 +96,82 @@ mod engine {
     executable: PathBuf,
     config: PathBuf,
   }
+  #[test]
+  #[cfg(ctld_repository_vpn_tests)]
+  fn tunnel_health_requires_stability_and_resets_on_reconnect() {
+    let fixture = FakeEngine::new();
+    let root = fixture.root.display().to_string();
+    let uptime = fixture.root.join("uptime");
+    fs::write(&uptime, "100.0 0\n").unwrap();
+    for name in ["ip", "ss"] {
+      let executable = fixture.root.join(name);
+      fs::write(
+        &executable,
+        format!("#!/bin/sh\nif [ -f '{root}/{name}-ready' ]; then printf 'ready\\n'; fi\n"),
+      )
+      .unwrap();
+      fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+      fs::write(fixture.root.join(format!("{name}-ready")), "").unwrap();
+    }
+    let health = fixture.root.join("health.sh");
+    let network = fixture.root.join("network.sh");
+    for (path, source) in [
+      (
+        &health,
+        include_str!(concat!(
+          env!("CARGO_MANIFEST_DIR"),
+          "/../../docker/openconnect/healthcheck.sh"
+        )),
+      ),
+      (
+        &network,
+        include_str!(concat!(
+          env!("CARGO_MANIFEST_DIR"),
+          "/../../docker/openconnect/vpn-network.sh"
+        )),
+      ),
+    ] {
+      fs::write(
+        path,
+        source
+          .replace("/run/openconnect", &root)
+          .replace("/proc/uptime", &uptime.display().to_string())
+          .replace("/usr/share/vpnc-scripts/vpnc-script", ":"),
+      )
+      .unwrap();
+    }
+    let run = |path: &Path, reason: &str| {
+      std::process::Command::new("/bin/sh")
+        .arg(path)
+        .env("PATH", format!("{root}:/usr/bin:/bin"))
+        .env("reason", reason)
+        .env("TUNDEV", "vpn0")
+        .status()
+        .unwrap()
+        .success()
+    };
+    assert!(!run(&health, ""));
+    assert!(run(&network, "connect"));
+    assert!(!run(&health, ""));
+    fs::write(&uptime, "104.9 0\n").unwrap();
+    assert!(!run(&health, ""));
+    fs::write(&uptime, "105.0 0\n").unwrap();
+    assert!(run(&health, ""));
+    assert!(run(&network, "attempt-reconnect"));
+    assert!(!run(&health, ""));
+    assert!(run(&network, "reconnect"));
+    assert!(!run(&health, ""));
+    fs::write(&uptime, "110.0 0\n").unwrap();
+    assert!(run(&health, ""));
+    fs::remove_file(fixture.root.join("ip-ready")).unwrap();
+    assert!(!run(&health, ""));
+    fs::write(fixture.root.join("ip-ready"), "").unwrap();
+    fs::remove_file(fixture.root.join("ss-ready")).unwrap();
+    assert!(!run(&health, ""));
+    assert!(run(&network, "disconnect"));
+    assert!(!fixture.root.join("vpn-ready").exists());
+  }
+
   impl FakeEngine {
     fn new() -> Self {
       let root = std::env::temp_dir().join(format!("ctld-vpn-test-{}", uuid::Uuid::new_v4()));

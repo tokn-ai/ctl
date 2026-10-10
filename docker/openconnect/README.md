@@ -204,7 +204,11 @@ docker exec CONTAINER_NAME /usr/local/bin/vpn-healthcheck
 docker exec CONTAINER_NAME /usr/local/bin/ssh-handshake
 ```
 
-Health checks track VPN setup and the SOCKS listener independently of `TARGET_IP`.
+Health checks require an up, addressed VPN interface, a SOCKS listener, and at
+least five seconds since the latest successful tunnel setup. Reconnection clears
+readiness and restarts this monotonic stability window, so rapid tunnel flapping
+cannot advertise a healthy connection. These checks remain independent of
+`TARGET_IP` and do not prove reachability of every destination.
 A manually requested SSH probe returns an error on failure. Host-key fingerprints
 are observations; the probe does not authenticate an SSH user or add keys to
 `known_hosts`.

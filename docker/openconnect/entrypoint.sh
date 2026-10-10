@@ -128,7 +128,7 @@ until /usr/local/bin/vpn-healthcheck; do
   kill -0 "$vpn_pid" 2>/dev/null || fail 'OpenConnect exited during proxy startup.'
   kill -0 "$socks_pid" 2>/dev/null || fail 'SOCKS5 proxy failed to start.'
   attempt=$((attempt + 1))
-  [ "$attempt" -lt 5 ] || fail 'SOCKS5 listener was not ready within 5 seconds.'
+  [ "$attempt" -lt 10 ] || fail 'VPN tunnel and SOCKS5 listener were not stable within 10 seconds.'
   sleep 1
 done
 printf '%s\n' 'SOCKS5 ready on container port 1080; outgoing traffic follows the container routes.'

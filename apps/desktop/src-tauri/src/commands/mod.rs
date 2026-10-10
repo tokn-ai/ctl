@@ -1,3 +1,4 @@
+use ctmux_client::session::{CreateSessionRequest, SessionClient, SessionId};
 pub mod archives;
 pub mod cache;
 pub mod inspection;
@@ -9,9 +10,9 @@ use std::time::Duration;
 
 use ctmux_client::{
   AttachRequest, AttachmentController, AttachmentControllerOptions, ClientIdentity,
-  DEFAULT_PRESENTATION_WINDOW_BYTES, begin_attach, get_shell_state, request as ctmux_request,
+  DEFAULT_PRESENTATION_WINDOW_BYTES, get_shell_state,
 };
-use ctmux_proto::{ClientMessage, ServerMessage};
+use ctmux_proto::ServerMessage;
 use tauri::ipc::Channel;
 use tauri::{State, WebviewWindow};
 use tokio::task::JoinSet;
@@ -107,26 +108,24 @@ pub async fn list_sessions(request: TargetRequestDto) -> CommandResult<SessionLi
 
 async fn discover_sessions(request: TargetRequestDto) -> CommandResult<SessionListDto> {
   let stream = transport::connect(&request.target).await?;
-  let response = ctmux_request(stream, &client_identity(), ClientMessage::ListSessions)
+  let sessions = SessionClient::new(stream, client_identity())
+    .list()
     .await
     .map_err(CommandErrorDto::client)?;
   let observed_at_ms = observation_timestamp_ms();
-  match response {
-    ServerMessage::SessionList { sessions } => Ok(SessionListDto {
-      // A large inventory or stalled metadata lookup must not prevent import.
-      shell_states: timeout(
-        Duration::from_secs(5),
-        inspect_session_shell_states(&request.target, &sessions),
-      )
-      .await
-      .unwrap_or_default(),
-      sessions: sessions
-        .into_iter()
-        .map(|session| SessionDto::observed_at(session, request.target.clone(), observed_at_ms))
-        .collect(),
-    }),
-    response => Err(unexpected_response("session_list", &response)),
-  }
+  Ok(SessionListDto {
+    // A large inventory or stalled metadata lookup must not prevent import.
+    shell_states: timeout(
+      Duration::from_secs(5),
+      inspect_session_shell_states(&request.target, &sessions),
+    )
+    .await
+    .unwrap_or_default(),
+    sessions: sessions
+      .into_iter()
+      .map(|session| SessionDto::observed_at(session, request.target.clone(), observed_at_ms))
+      .collect(),
+  })
 }
 
 /// Retrieves presentation metadata without making the session list fragile.
@@ -196,40 +195,25 @@ pub async fn create_session(request: CreateSessionRequestDto) -> CommandResult<S
     (None, false) => None,
   };
   let stream = transport::connect(&request.target).await?;
-  let response = ctmux_request(
-    stream,
-    &client_identity(),
-    ClientMessage::CreateSession {
+  let session = SessionClient::new(stream, client_identity())
+    .create(CreateSessionRequest {
       name: None,
-      command: None,
-      working_directory,
+      command: Vec::new(),
+      cwd: working_directory,
       terminal_size,
-    },
-  )
-  .await
-  .map_err(CommandErrorDto::client)?;
-  match response {
-    ServerMessage::SessionCreated { session } => Ok(SessionDto::new(session, request.target)),
-    response => Err(unexpected_response("session_created", &response)),
-  }
+    })
+    .await
+    .map_err(CommandErrorDto::client)?;
+  Ok(SessionDto::new(session, request.target))
 }
 
 #[tauri::command]
 pub async fn kill_session(request: KillSessionRequestDto) -> CommandResult<()> {
   let stream = transport::connect(&request.target).await?;
-  let response = ctmux_request(
-    stream,
-    &client_identity(),
-    ClientMessage::KillSession {
-      session: request.session_id,
-    },
-  )
-  .await
-  .map_err(CommandErrorDto::client)?;
-  match response {
-    ServerMessage::Success => Ok(()),
-    response => Err(unexpected_response("success", &response)),
-  }
+  SessionClient::new(stream, client_identity())
+    .terminate(SessionId(request.session_id))
+    .await
+    .map_err(CommandErrorDto::client)
 }
 
 /// Gracefully replaces the local `ctmuxd` process after terminating all of its
@@ -316,10 +300,8 @@ async fn open_reserved_attachment(
   let terminal_size = request.terminal_size.into_proto()?;
   let resume_from = parse_sequence(request.resume_from)?;
   let stream = transport::connect(&target).await?;
-  let (stream, attached) = begin_attach(
-    stream,
-    &client_identity(),
-    AttachRequest {
+  let (stream, attached) = SessionClient::new(stream, client_identity())
+    .attach(AttachRequest {
       session: request.session,
       resume_from,
       terminal_size,
@@ -328,10 +310,9 @@ async fn open_reserved_attachment(
       request_command_line: false,
       request_running_command: true,
       presentation_window_bytes: DEFAULT_PRESENTATION_WINDOW_BYTES,
-    },
-  )
-  .await
-  .map_err(CommandErrorDto::client)?;
+    })
+    .await
+    .map_err(CommandErrorDto::client)?;
 
   let options = AttachmentControllerOptions {
     // This bridge is paired with the GUI's xterm presenter, which always
@@ -517,7 +498,7 @@ pub async fn acquire_attachment_lease(
   let actor = state.actor(window.label(), &request.attachment_id).await?;
   actor
     .control
-    .acquire_lease(request.lease.into())
+    .request_lease(request.lease.into())
     .await
     .map_err(CommandErrorDto::backend)
 }
@@ -678,7 +659,7 @@ mod tests {
     let stream = transport::connect(&target)
       .await
       .expect("open remote attachment transport");
-    let (_stream, attached) = begin_attach(
+    let (_stream, attached) = ctmux_client::begin_attach(
       stream,
       &client_identity(),
       AttachRequest {

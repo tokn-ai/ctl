@@ -14,6 +14,7 @@ use crate::{
 use crossterm::event::{
   Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
+use ctmux_client::session::{CreateSessionRequest, SessionClient};
 use ctmux_proto::{
   ClientMessage, LeaseKind, ServerMessage, SessionInfo, SessionStatus, SplitAxis, TerminalSize,
   ViewInfo,
@@ -159,6 +160,12 @@ impl App<'_> {
     .await?
   }
 
+  async fn session_client(&self) -> Result<SessionClient<crate::transport::Stream>> {
+    let local = LocalTransport(self.socket.clone());
+    let stream = self.transport.unwrap_or(&local).connect().await?;
+    Ok(SessionClient::new(stream, identity()))
+  }
+
   fn archive_key(&self) -> String {
     self.transport.map_or_else(
       || self.socket.to_string_lossy().into_owned(),
@@ -262,11 +269,10 @@ impl App<'_> {
   }
 
   async fn list(&mut self) -> Result<()> {
-    let ServerMessage::SessionList { mut sessions } =
-      self.request(ClientMessage::ListSessions).await?
-    else {
-      return Err("expected session list".into());
-    };
+    let mut sessions = timeout(Duration::from_secs(5), async {
+      Ok::<_, crate::Error>(self.session_client().await?.list().await?)
+    })
+    .await??;
     sessions.retain(|session| session.status == SessionStatus::Running);
     sessions.sort_by_key(|session| (session.created_at_ms, session.session_id.clone()));
     self.sessions = sessions;
@@ -279,19 +285,23 @@ impl App<'_> {
   }
 
   async fn create_named(&mut self, name: Option<String>) -> Result<()> {
-    let response = self
-      .request(ClientMessage::CreateSession {
-        name,
-        command: None,
-        working_directory: std::env::current_dir()
-          .ok()
-          .map(|path| path.to_string_lossy().into_owned()),
-        terminal_size: self.canvas_size(),
-      })
-      .await?;
-    let ServerMessage::SessionCreated { session } = response else {
-      return Err("expected created session".into());
-    };
+    let session = timeout(Duration::from_secs(5), async {
+      Ok::<_, crate::Error>(
+        self
+          .session_client()
+          .await?
+          .create(CreateSessionRequest {
+            name,
+            command: Vec::new(),
+            cwd: std::env::current_dir()
+              .ok()
+              .map(|path| path.to_string_lossy().into_owned()),
+            terminal_size: self.canvas_size(),
+          })
+          .await?,
+      )
+    })
+    .await??;
     self.list().await?;
     self.select(&session.session_id).await
   }
@@ -1750,7 +1760,7 @@ impl App<'_> {
         return Ok(());
       }
       if requested {
-        control.acquire_lease(lease).await?;
+        control.request_lease(lease).await?;
       } else {
         control.release_lease(lease).await?;
       }

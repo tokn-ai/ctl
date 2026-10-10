@@ -167,28 +167,20 @@ fn print_rows(views: &[HostView<'_>]) {
 
 #[cfg(unix)]
 async fn observe(target: hosts::ConnectionTargetDto) -> Result<&'static str, String> {
-  use ctl_ipc::{ClientMessage, ServerMessage};
-  let response = crate::ssh_broker::request_existing(ClientMessage::ConnectionStatus {
-    target: target.to_ssh_target().map_err(|error| error.to_string())?,
+  let status = ctl_client::connection::ConnectionClient::default()
+    .status(target.to_ssh_target().map_err(|error| error.to_string())?)
+    .await
+    .map_err(|error| match error {
+      ctl_client::connection::Error::Daemon { message, .. } => message,
+      error => error.to_string(),
+    })?;
+  Ok(if status.manually_disconnected {
+    "paused"
+  } else if status.connected {
+    "connected"
+  } else {
+    "disconnected"
   })
-  .await
-  .map_err(|error| error.to_string())?;
-  match response {
-    Some(ServerMessage::ConnectionStatus {
-      manually_disconnected: true,
-      ..
-    }) => Ok("paused"),
-    Some(ServerMessage::ConnectionStatus {
-      connected: true, ..
-    }) => Ok("connected"),
-    None
-    | Some(ServerMessage::ConnectionStatus {
-      connected: false, ..
-    }) => Ok("disconnected"),
-    Some(ServerMessage::Error { code, .. }) if code == "ssh_host_disconnected" => Ok("paused"),
-    Some(ServerMessage::Error { message, .. }) => Err(message),
-    _ => Err("ctld returned an unexpected status response.".into()),
-  }
 }
 
 #[cfg(not(unix))]
@@ -227,7 +219,6 @@ pub(super) async fn disconnect(
   selector: &str,
   method: Option<&str>,
 ) -> Result<(), Error> {
-  use ctl_ipc::{ClientMessage, ServerMessage};
   let host = &catalog.hosts[host_index(catalog, selector)?];
   let selected = method
     .map(|method| method_index(host, Some(method)))
@@ -250,11 +241,11 @@ pub(super) async fn disconnect(
       targets.insert(resolved.target.to_ssh_target()?);
     }
   }
+  let client = ctl_client::connection::ConnectionClient::default();
   for target in targets {
     let destination = target.destination.clone();
-    match crate::ssh_broker::request(ClientMessage::DisconnectMaster { target }).await {
-      Ok(ServerMessage::MasterDisconnected) => {}
-      Ok(_) => failures.push(format!("{destination}: unexpected disconnect response")),
+    match client.disconnect(target).await {
+      Ok(()) => {}
       Err(error) => failures.push(format!("{destination}: {error}")),
     }
   }

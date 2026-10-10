@@ -536,14 +536,12 @@ async fn cancellation_removes_only_our_unstarted_immutable_reservation() {
     (false, "exited", "creator-test"),
     (false, "created", "foreign-creator"),
   ] {
-    fs::write(fixture.root.join("calls"), "").unwrap();
+    // Keep each container state isolated and await cleanup so a delayed task
+    // cannot observe the next case or outlive its assertion.
+    let fixture = Fixture::new();
     fixture.inspect(&name, &inspection(&metadata, ID, running, state));
-    drop(CreationGuard::new(
-      fixture.engine.clone(),
-      name.clone(),
-      token.into(),
-    ));
-    sleep(Duration::from_millis(100)).await;
+    let mut reservation = CreationGuard::new(fixture.engine.clone(), name.clone(), token.into());
+    reservation.cleanup().await;
     assert!(!fixture.calls().iter().any(|call| call.starts_with("rm ")));
   }
 }

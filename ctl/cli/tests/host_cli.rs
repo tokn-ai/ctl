@@ -455,7 +455,8 @@ mod unix {
     ctl_ipc::write_frame(
       &mut stream,
       &ServerMessage::HandshakeAccepted {
-        protocol_version: ctl_ipc::PROTOCOL_VERSION,
+        // This fixture handles one request per socket, matching this contract.
+        protocol_version: ctl_ipc::CONTRACT_V1_1_14,
       },
     )
     .await

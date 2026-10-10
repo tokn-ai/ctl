@@ -1,6 +1,6 @@
 # Logging and audit history
 
-`ctld` records connection attempts and explicit disconnects, saved password and
+`ctld` records connection attempts, explicit disconnects, authorization revocation, saved password and
 passphrase reads/writes, and credential inventory/removal requests. Diagnostic
 history also includes daemon startup/shutdown, proxy connections, and helper I/O.
 `ctmuxd` also records session creation/termination/merging, pane splitting,
@@ -37,7 +37,7 @@ completeness information.
 
 ## Contents and privacy
 
-The local record schema is version 6. Stable `operation_id` UUID literals identify
+The local record schema is version 7. Stable `operation_id` UUID literals identify
 recording call sites in source. Each invocation has a fresh `attempt_id` shared
 by its start and terminal outcome; `event_id` identifies one record.
 `correlation_id` is an optional random UUID for an observed SSH master lifetime.
@@ -46,12 +46,26 @@ The tracker is broker-local and not persisted, so broker restart starts a new
 observation identity even for an externally surviving master. Other events
 without connection ownership omit correlation rather than guessing it.
 
+Schema 7 adds optional authorization modes and revocation reasons, and SSH loss
+observations. Credential-read outcomes identify `fresh_interactive` (UI permitted),
+`fresh_quiet` (UI forbidden), or `retained_approval` (UI forbidden). The start of a
+read may precede that decision. Connection-scoped reads retain their credential
+subject while adding the host endpoint and connection correlation. Revocations
+include reasons such as session changes, changed or unavailable credential
+revision, changed scope/trust, expiry, disconnect, canceled work, and native
+read failure or a missing retained item. Global revocations omit a host when they affect multiple scopes.
+These records audit access policy and result, not actual Touch ID dialog display
+or which native authentication method succeeded.
+
 Schema 5 added an optional structured SSH endpoint
 (destination, hostname, account, and port) to connection/disconnect records.
 Schema 4 added human-readable messages to diagnostic lines.
 Version 3 added severity, component, and typed context
 (session, pane, attachment IDs, exit code, and lease kind). Version 2 audit payloads
 remain readable with default context, and version 2/3/4/5 log lines remain readable.
+Version 6 audit records and diagnostic lines also remain readable.
+Older readers may report schema 7 records as unsupported; update the CLI with
+the daemon to read the new fields.
 Each process generates one `run_id` UUID;
 PID reuse cannot collide with a different run. All helper invocations and daemon
 runs get separate IDs. Each operation that spans work records `started` and a terminal
@@ -82,6 +96,15 @@ Ensure-master requests and reuse are debug diagnostics, not new connection audit
 events. Info-level `Open SSH connection` records start only after checking that
 no existing master can be reused. Repeated reuse requests therefore do not imply
 repeated authentication. Errors before establishment remain diagnostic failures.
+
+For private SSH masters started by this broker, diagnostic history observes loss
+when the original control socket disappears or is replaced after SSH stderr
+closes. It distinguishes idle expiry, keepalive timeout, reset, broken pipe,
+remote closure, and unknown loss. The observer pins the original correlation and
+suppresses explicit disconnects. It retains at most 8 KiB of SSH debug output in
+memory and persists only fixed reason codes. A surviving socket, unavailable
+observation, older master, or externally configured master may leave no loss
+record; missing records do not prove that the transport stayed connected.
 
 ## Diagnostic levels and format
 
@@ -132,7 +155,7 @@ their own site ID even when their typed event varies.
 - Messages are centrally derived from event, outcome, fixed error code, and safe
   numeric context. No call site can attach a free-form request/error message.
   Files carry a JSON-quoted `message` near the beginning of the line; `ctl logs`
-  tables and `--json` derive the same description, including for legacy records.
+  output and `--json` derive the same description, including for legacy records.
   Wording may change without invalidating older lines; typed fields are canonical.
 - Foreground ctld/ctmuxd diagnostics mirror the same timestamped renderer to a
   stderr, including redirected stderr, respecting `CTL_LOG_LEVEL`. Detached
@@ -169,7 +192,7 @@ sidecars. SQLite is bundled at build time; users need no SQLite installation.
 All ctld processes share `audit.sqlite3`. Each event is inserted in a SQLite
 transaction, with a unique event ID and indexed time, run, subject, and outcome.
 Database schema version 1 is identified by SQLite `application_id` and
-`user_version`; it is separate from local record schema version 6 and named wire
+`user_version`; it is separate from local record schema version 7 and named wire
 protocols. Unsupported schemas and corrupt databases are refused without resetting
 or overwriting them. Full synchronous commits and rollback journaling make
 successful inserts durable and allow CLI queries without creating WAL sidecars.

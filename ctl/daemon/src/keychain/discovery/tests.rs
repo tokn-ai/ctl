@@ -156,7 +156,7 @@ fn failed_or_canceled_scan_cannot_claim_an_empty_inventory() {
   ] {
     let mut store = SyntheticStore::new(Vec::new());
     store.scan_error = Some(code);
-    assert_eq!(run_with(&mut store).unwrap_err().0.code(), code);
+    assert_eq!(run_with(&mut store).unwrap_err().os_error(), Some(code));
     assert!(!store.reconciled);
   }
 }
@@ -173,8 +173,8 @@ fn discovery_never_accepts_secret_values_or_ambiguous_selectors() {
     credential(&"b".repeat(64)),
   ]);
   assert_eq!(
-    run_with(&mut store).unwrap_err().0.code(),
-    ctl_keychain_client::ATTRIBUTE_SCAN_CONFLICT
+    run_with(&mut store).unwrap_err().os_error(),
+    Some(ctl_keychain_client::ATTRIBUTE_SCAN_CONFLICT)
   );
   assert!(!store.reconciled);
 }

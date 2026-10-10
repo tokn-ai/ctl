@@ -31,43 +31,58 @@ const NEVER_SAVE: &[u8] = b"never";
 pub const MISSING_ENTITLEMENT: i32 = -34_018;
 
 #[derive(Debug, Clone, Copy)]
-pub struct Error(pub security_framework::base::Error);
+pub enum Error {
+  Native(security_framework::base::Error),
+  ApprovalUnavailable,
+}
 
 impl std::fmt::Display for Error {
   fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    self.0.fmt(formatter)
+    match self {
+      Self::Native(error) => error.fmt(formatter),
+      Self::ApprovalUnavailable => formatter.write_str("saved credential approval is unavailable"),
+    }
   }
 }
 
 impl From<ctl_keychain_client::Error> for Error {
   fn from(error: ctl_keychain_client::Error) -> Self {
-    Self(security_framework::base::Error::from_code(error.0))
+    Self::Native(security_framework::base::Error::from_code(error.0))
   }
 }
 
 impl Error {
+  pub fn os_error(self) -> Option<i32> {
+    match self {
+      Self::Native(error) => Some(error.code()),
+      Self::ApprovalUnavailable => None,
+    }
+  }
+
   pub fn is_missing_entitlement(self) -> bool {
-    self.0.code() == MISSING_ENTITLEMENT
+    self.os_error() == Some(MISSING_ENTITLEMENT)
   }
 
   pub fn is_unavailable(self) -> bool {
-    self.is_missing_entitlement() || self.0.code() == -25_291
+    matches!(self, Self::ApprovalUnavailable)
+      || self.is_missing_entitlement()
+      || self.os_error() == Some(-25_291)
   }
 
   pub fn is_locked(self) -> bool {
-    matches!(self.0.code(), -25_308 | -25_315 | -25_293 | -128)
+    matches!(self.os_error(), Some(-25_308 | -25_315 | -25_293 | -128))
   }
 
   pub fn is_busy(self) -> bool {
-    self.0.code() == operation::BUSY
+    self.os_error() == Some(operation::BUSY)
   }
 
   pub fn is_scan_limit(self) -> bool {
-    self.0.code() == ctl_keychain_client::ATTRIBUTE_SCAN_LIMIT
+    self.os_error() == Some(ctl_keychain_client::ATTRIBUTE_SCAN_LIMIT)
   }
 
   pub fn is_scan_conflict(self) -> bool {
-    self.0.code() == ctl_keychain_client::ATTRIBUTE_SCAN_CONFLICT
+    self.os_error() == Some(ctl_keychain_client::ATTRIBUTE_SCAN_CONFLICT)
   }
 }
 
@@ -80,13 +95,13 @@ pub(crate) fn load_for_connection(
   prompt: &str,
   authorization: &approval::Attempt,
 ) -> Result<Option<Zeroizing<String>>, Error> {
-  use ctl_core::observability::{Event, Operation, Outcome};
-  let operation = Operation::start(
+  use ctl_core::observability::{Operation, Outcome};
+  let mut operation = Operation::credential_read(
     "403d4249-0cb2-4921-ba43-ae6ffb0ded6b",
-    Event::CredentialRead,
-    Some(&crate::target_key(target)),
+    &crate::target_key(target),
+    authorization.history(),
   );
-  let result = load_for_connection_recorded_inner(target, prompt, authorization);
+  let result = load_for_connection_recorded_inner(target, prompt, authorization, &mut operation);
   operation.finish(
     if matches!(&result, Ok(None)) {
       Outcome::Missing
@@ -96,7 +111,7 @@ pub(crate) fn load_for_connection(
       Outcome::Failed
     },
     result.as_ref().err().map(|_| "keychain_operation_failed"),
-    result.as_ref().err().map(|error| error.0.code()),
+    result.as_ref().err().and_then(|error| error.os_error()),
   );
   result
 }
@@ -105,6 +120,7 @@ fn load_for_connection_recorded_inner(
   target: &SshTarget,
   prompt: &str,
   authorization: &approval::Attempt,
+  history: &mut ctl_core::observability::Operation,
 ) -> Result<Option<Zeroizing<String>>, Error> {
   let operation = operation::acquire()?;
   let reason = format!(
@@ -118,7 +134,8 @@ fn load_for_connection_recorded_inner(
       &operation,
       &format!("{service}:{account}"),
       &reason,
-      |authentication| {
+      |authentication, decision| {
+        history.set_authorization_mode(authorization_mode(decision));
         let records = ctl_keychain_client::search(&Query {
           service: Some(&service),
           account: Some(&account),
@@ -130,6 +147,17 @@ fn load_for_connection_recorded_inner(
       },
     )
   })
+}
+
+fn authorization_mode(
+  decision: approval::ReadDecision,
+) -> ctl_core::observability::AuthorizationMode {
+  use ctl_core::observability::AuthorizationMode;
+  match decision {
+    approval::ReadDecision::FreshInteractive => AuthorizationMode::FreshInteractive,
+    approval::ReadDecision::FreshQuiet => AuthorizationMode::FreshQuiet,
+    approval::ReadDecision::RetainedApproval => AuthorizationMode::RetainedApproval,
+  }
 }
 
 // Only an absent exact item permits trying its legacy scope. Denied or failed
@@ -196,7 +224,7 @@ pub fn save(target: &SshTarget, secrets: &HashMap<String, Zeroizing<String>>) ->
       Outcome::Failed
     },
     result.as_ref().err().map(|_| "keychain_operation_failed"),
-    result.as_ref().err().map(|error| error.0.code()),
+    result.as_ref().err().and_then(|error| error.os_error()),
   );
   result
 }
@@ -314,7 +342,7 @@ pub fn delete(target: &SshTarget) -> Result<(), Error> {
       Outcome::Failed
     },
     result.as_ref().err().map(|_| "keychain_operation_failed"),
-    result.as_ref().err().map(|error| error.0.code()),
+    result.as_ref().err().and_then(|error| error.os_error()),
   );
   result
 }
@@ -424,7 +452,7 @@ pub fn forget(credential_id: &str) -> Result<(), Error> {
 }
 
 fn invalid_metadata() -> Error {
-  Error(security_framework::base::Error::from_code(-50))
+  Error::Native(security_framework::base::Error::from_code(-50))
 }
 
 fn policy_service(target: &SshTarget) -> String {

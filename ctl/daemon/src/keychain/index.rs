@@ -465,7 +465,7 @@ pub(super) fn imported_identity(record: &Record) -> Option<(String, SavedIdentit
 }
 
 fn invalid() -> Error {
-  Error(security_framework::base::Error::from_code(-50))
+  Error::Native(security_framework::base::Error::from_code(-50))
 }
 
 #[cfg(test)]

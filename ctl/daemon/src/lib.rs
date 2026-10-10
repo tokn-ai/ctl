@@ -17,6 +17,7 @@ mod identity_connection;
 mod keychain;
 #[cfg(unix)]
 mod lifecycle;
+mod master_diagnostics;
 mod master_observation;
 mod openconnect;
 mod port_forwarding;
@@ -383,9 +384,35 @@ pub fn run_monitored(
   socket_path: PathBuf,
 ) -> Result<(), DaemonError> {
   ctl_keychain_client::with_session_monitor(move |session| {
+    let recorder = runtime.handle().clone();
+    let observer: keychain::approval::ApprovalObserver = Arc::new(move |reason, connection| {
+      let connection = connection.cloned();
+      // Native session callbacks must revoke immediately without waiting for
+      // filesystem or SQLite I/O on the macOS main run loop.
+      recorder.spawn_blocking(move || {
+        use ctl_core::observability::AuthorizationReason;
+        use keychain::approval::ApprovalReason;
+        let reason = match reason {
+          ApprovalReason::SessionChanged => AuthorizationReason::SessionChanged,
+          ApprovalReason::CredentialChanged => AuthorizationReason::CredentialChanged,
+          ApprovalReason::RevisionUnavailable => AuthorizationReason::RevisionUnavailable,
+          ApprovalReason::Expired => AuthorizationReason::Expired,
+          ApprovalReason::ScopeChanged => AuthorizationReason::ScopeChanged,
+          ApprovalReason::Disconnect => AuthorizationReason::Disconnect,
+          ApprovalReason::HostConfirmation => AuthorizationReason::HostConfirmation,
+          ApprovalReason::CredentialReadFailed => AuthorizationReason::CredentialReadFailed,
+          ApprovalReason::Canceled => AuthorizationReason::Canceled,
+        };
+        ctl_core::observability::authorization_revoked(
+          "c94bf667-1d88-41b2-9fa7-3bdc2460e1f4",
+          reason,
+          connection.as_ref(),
+        );
+      });
+    });
     runtime.block_on(run_with_approvals(
       socket_path,
-      Some(keychain::approval::Approvals::new(session)),
+      Some(keychain::approval::Approvals::new(session, observer)),
     ))
   })
 }
@@ -966,6 +993,7 @@ async fn establish_master(
     .run(ConnectionAuthentication::prepare(
       state,
       target,
+      endpoint,
       interactive,
     ))
     .await??;
@@ -1026,9 +1054,18 @@ struct ConnectionAuthentication {
 
 impl ConnectionAuthentication {
   #[cfg(target_os = "macos")]
+  fn check_approval(&self) -> Result<(), RequestError> {
+    if self.authorization.reuse_failed() {
+      return Err(RequestError::AuthenticationRequired);
+    }
+    Ok(())
+  }
+
+  #[cfg(target_os = "macos")]
   async fn prepare(
     state: &State,
     target: &SshTarget,
+    endpoint: &MasterEndpoint,
     interactive: bool,
   ) -> Result<Self, RequestError> {
     let approval_scope = keychain::approval_scope::snapshot(target).await;
@@ -1038,8 +1075,13 @@ impl ConnectionAuthentication {
       let scope = approval_scope
         .as_ref()
         .map(|scope| format!("{prefix}{scope}"));
+      let history = ctl_core::observability::ConnectionContext {
+        subject: target_key(target),
+        endpoint: history_endpoint(target),
+        correlation_id: state.correlation(endpoint),
+      };
       tokio::task::spawn_blocking(move || {
-        keychain::approval::Attempt::begin(approvals.as_ref(), &prefix, scope, interactive)
+        keychain::approval::Attempt::begin(approvals.as_ref(), &prefix, scope, interactive, history)
       })
       .await
       .map_err(|_| RequestError::InvalidRequest("keychain worker stopped"))?
@@ -1064,6 +1106,7 @@ impl ConnectionAuthentication {
     stream: &mut ctl_ipc::Stream,
     target: &SshTarget,
   ) -> Result<(), RequestError> {
+    self.check_approval()?;
     self.identities.authentication_finished();
     if self.interactive {
       handle_save_offer(stream, target, &mut self.captured, &mut self.identities).await?;
@@ -1076,6 +1119,7 @@ impl ConnectionAuthentication {
   fn prepare(
     _state: &State,
     _target: &SshTarget,
+    _endpoint: &MasterEndpoint,
     interactive: bool,
   ) -> std::future::Ready<Result<Self, RequestError>> {
     std::future::ready(Ok(Self {
@@ -1142,6 +1186,8 @@ async fn wait_for_master(
   let mut diagnostics = retain_diagnostics(child);
   let deadline = Instant::now() + MASTER_START_TIMEOUT;
   loop {
+    #[cfg(target_os = "macos")]
+    authentication.check_approval()?;
     // This is a master we have just started: socket publication can precede
     // readiness. Retry observations within the startup deadline, without
     // replacing any existing master or starting another authentication.
@@ -1163,6 +1209,11 @@ async fn wait_for_master(
         },
       )
       .await?;
+      if !endpoint.shared
+        && let Some(diagnostics) = diagnostics.take()
+      {
+        master_diagnostics::watch(diagnostics, state, target, endpoint);
+      }
       return Ok(());
     }
     if endpoint.shared
@@ -1184,6 +1235,8 @@ async fn wait_for_master(
     if let Some(status) = child.try_wait().map_err(RequestError::StartMaster)?
       && (!status.success() || endpoint.shared)
     {
+      #[cfg(target_os = "macos")]
+      authentication.check_approval()?;
       let message = if let Some(task) = diagnostics.take() {
         tokio::time::timeout(Duration::from_secs(1), task)
           .await
@@ -1228,21 +1281,10 @@ async fn wait_for_master(
 }
 
 fn retain_diagnostics(child: &mut Child) -> Option<tokio::task::JoinHandle<String>> {
-  child.stderr.take().map(|mut stderr| {
-    tokio::spawn(async move {
-      use tokio::io::AsyncReadExt as _;
-      let mut retained = Vec::new();
-      let mut buffer = [0_u8; 1024];
-      while let Ok(count) = stderr.read(&mut buffer).await {
-        if count == 0 {
-          break;
-        }
-        let keep = count.min(MAX_DIAGNOSTICS.saturating_sub(retained.len()));
-        retained.extend_from_slice(&buffer[..keep]);
-      }
-      String::from_utf8_lossy(&retained).trim().to_owned()
-    })
-  })
+  child
+    .stderr
+    .take()
+    .map(|stderr| tokio::spawn(master_diagnostics::collect(stderr)))
 }
 
 async fn reuse_master_or_prepare(
@@ -1324,6 +1366,8 @@ async fn answer_prompt(
   warning: Option<String>,
   authentication: &mut ConnectionAuthentication,
 ) -> Result<(), RequestError> {
+  #[cfg(target_os = "macos")]
+  authentication.check_approval()?;
   let cacheable = !prompt.confirm && cacheable_prompt(&prompt.message);
   #[cfg(target_os = "macos")]
   let mut warning = warning;
@@ -1359,6 +1403,14 @@ async fn answer_prompt(
   }
   #[cfg(not(target_os = "macos"))]
   let _ = (target, &authentication.attempted_stored);
+
+  #[cfg(target_os = "macos")]
+  if let Err(error) = authentication.check_approval() {
+    // A previously approved credential must not switch to a native dialog,
+    // another selector, or a manual-password prompt during the same attempt.
+    let _ = prompt.response.send(None);
+    return Err(error);
+  }
 
   #[cfg(target_os = "macos")]
   if prompt.confirm {
@@ -1639,7 +1691,15 @@ async fn disconnect_master_inner(
   lifecycle.pause();
   #[cfg(target_os = "macos")]
   if let Some(approvals) = &state.approvals {
-    approvals.revoke_target(&format!("{}:", target_key(target)));
+    let connection =
+      state
+        .endpoint(target)
+        .map(|endpoint| ctl_core::observability::ConnectionContext {
+          subject: target_key(target),
+          endpoint: history_endpoint(target),
+          correlation_id: state.correlation(&endpoint),
+        });
+    approvals.revoke_target(&format!("{}:", target_key(target)), connection.as_ref());
   }
   let _target_guard = lifecycle.lock.lock().await;
   let mut forwards = state.forwards.lock().await;
@@ -2031,6 +2091,9 @@ fn master_command_with_identities(
   } else {
     command
       .args(["-f", "-M", "-N", "-T"])
+      // OpenSSH retains stderr after -f only in debug mode. Keep a bounded
+      // in-memory tail so later master loss can emit a fixed, nonsecret reason.
+      .arg("-v")
       .args(["-o", "ControlMaster=yes"])
       .args(["-o", &format!("ControlPersist={MASTER_IDLE_SECONDS}")])
       // A responsive local mux socket does not prove a live remote transport.
@@ -2982,6 +3045,105 @@ mod tests {
       ));
       assert!(answer.await.unwrap().is_none());
       assert_eq!(authentication.captured.len(), 0);
+      assert!(
+        tokio::time::timeout(
+          Duration::from_millis(20),
+          ctl_ipc::read_frame::<_, ServerMessage>(&mut client)
+        )
+        .await
+        .is_err()
+      );
+    }
+  }
+
+  #[cfg(target_os = "macos")]
+  fn failed_retained_authentication() -> ConnectionAuthentication {
+    let authorization = keychain::approval::Attempt::failed_retained_fixture();
+    ConnectionAuthentication {
+      _guard: authorization.guard(),
+      authorization,
+      ..ConnectionAuthentication::fresh(true)
+    }
+  }
+
+  #[cfg(target_os = "macos")]
+  #[tokio::test]
+  async fn retained_identity_failure_requires_authentication_without_an_askpass_request() {
+    let state = State::default();
+    let target = target();
+    let endpoint = MasterEndpoint {
+      control_path: std::env::temp_dir().join(format!("ctld-unpublished-{}", uuid::Uuid::new_v4())),
+      shared: false,
+      startup: SharedMasterStartup::PrivateFallback,
+    };
+    // Model public-key-only SSH exiting after its agent refuses a signature.
+    // This process never runs SSH, opens a host connection, or requests input.
+    let mut child = Command::new("/bin/sh")
+      .args(["-c", "exit 255"])
+      .stdin(Stdio::null())
+      .stdout(Stdio::null())
+      .stderr(Stdio::piped())
+      .kill_on_drop(true)
+      .spawn()
+      .unwrap();
+    assert_eq!(child.wait().await.unwrap().code(), Some(255));
+    let (mut client, mut server) = ctl_ipc::Stream::pair().unwrap();
+    let (_prompts, mut prompt_rx) = mpsc::channel(1);
+    let mut authentication = failed_retained_authentication();
+    assert!(matches!(
+      wait_for_master(
+        &mut server,
+        &state,
+        &target,
+        &endpoint,
+        &mut child,
+        &mut prompt_rx,
+        &mut authentication,
+      )
+      .await,
+      Err(RequestError::AuthenticationRequired)
+    ));
+    assert!(authentication.captured.is_empty());
+    assert!(
+      tokio::time::timeout(
+        Duration::from_millis(20),
+        ctl_ipc::read_frame::<_, ServerMessage>(&mut client)
+      )
+      .await
+      .is_err()
+    );
+  }
+
+  #[cfg(target_os = "macos")]
+  #[tokio::test]
+  async fn failed_retained_approval_blocks_password_key_and_trust_prompt_fallbacks() {
+    for (message, confirm) in [
+      ("alice@example.test's password:", false),
+      ("Enter passphrase for key '/keys/synthetic':", false),
+      ("Trust host?", true),
+    ] {
+      let (mut client, mut server) = ctl_ipc::Stream::pair().unwrap();
+      let (response, answer) = oneshot::channel();
+      let mut authentication = failed_retained_authentication();
+      assert!(matches!(
+        answer_prompt(
+          &mut server,
+          &target(),
+          PromptRequest {
+            message: message.into(),
+            confirm,
+            response,
+          },
+          None,
+          &mut authentication,
+        )
+        .await,
+        Err(RequestError::AuthenticationRequired)
+      ));
+      assert!(answer.await.unwrap_or(None).is_none());
+      assert!(authentication.authorization.reuse_failed());
+      assert!(authentication.attempted_stored.is_empty());
+      assert!(authentication.captured.is_empty());
       assert!(
         tokio::time::timeout(
           Duration::from_millis(20),

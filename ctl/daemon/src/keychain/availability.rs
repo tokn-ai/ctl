@@ -43,7 +43,7 @@ mod tests {
         || Err(error(code)),
         || panic!("unavailable Keychain must not offer credential saving"),
       );
-      assert_eq!(result.unwrap_err().0.code(), code);
+      assert_eq!(result.unwrap_err().os_error(), Some(code));
     }
   }
 
@@ -54,9 +54,8 @@ mod tests {
     assert_eq!(
       with_access_policy(|| Ok(()), || Err(error(-25_308)))
         .unwrap_err()
-        .0
-        .code(),
-      -25_308
+        .os_error(),
+      Some(-25_308)
     );
   }
 
@@ -75,9 +74,8 @@ mod tests {
     assert_eq!(
       with_access_policy(check, || panic!("locked Keychain must suppress saving"))
         .unwrap_err()
-        .0
-        .code(),
-      -25_308
+        .os_error(),
+      Some(-25_308)
     );
     assert_eq!(calls.get(), 2);
   }

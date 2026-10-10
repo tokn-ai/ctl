@@ -3,12 +3,34 @@
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use ctl_core::observability::ConnectionContext;
 use ctl_keychain_client::{
   Authentication, AuthenticationContext, SessionState, SessionSubscription,
 };
 
 use super::{Error, operation};
 use crate::reconnect_approval::{self, Windows};
+
+#[cfg(test)]
+mod tests;
+
+pub(crate) use crate::reconnect_approval::ReadDecision;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ApprovalReason {
+  SessionChanged,
+  CredentialChanged,
+  RevisionUnavailable,
+  Expired,
+  ScopeChanged,
+  Disconnect,
+  HostConfirmation,
+  CredentialReadFailed,
+  Canceled,
+}
+
+pub(crate) type ApprovalObserver =
+  Arc<dyn Fn(ApprovalReason, Option<&ConnectionContext>) + Send + Sync>;
 
 impl reconnect_approval::Context for AuthenticationContext {
   fn invalidate(&self) {
@@ -23,50 +45,73 @@ pub(crate) struct Approvals {
   windows: Arc<Windows<AuthenticationContext>>,
   session: Arc<SessionState>,
   revision: Mutex<Option<String>>,
+  observer: ApprovalObserver,
   _subscription: SessionSubscription,
 }
 
 impl Approvals {
-  pub(crate) fn new(session: Arc<SessionState>) -> Arc<Self> {
+  pub(crate) fn new(session: Arc<SessionState>, observer: ApprovalObserver) -> Arc<Self> {
     let windows = Arc::new(Windows::default());
     let weak = Arc::downgrade(&windows);
+    let session_observer = Arc::clone(&observer);
     let subscription = session.subscribe(Arc::new(move || {
-      if let Some(windows) = weak.upgrade() {
-        windows.revoke(None);
+      if let Some(windows) = weak.upgrade()
+        && windows.revoke(None)
+      {
+        session_observer(ApprovalReason::SessionChanged, None);
       }
     }));
     Arc::new(Self {
       windows,
       session,
       revision: Mutex::new(None),
+      observer,
       _subscription: subscription,
     })
   }
 
   fn check_revision(&self, revision: &str) {
     let mut previous = self.revision.lock().unwrap();
-    if previous.as_deref() != Some(revision) {
-      self.windows.revoke(None);
-      *previous = Some(revision.into());
+    if previous.as_deref() == Some(revision) {
+      return;
+    }
+    // Publish the observed revision only after old authorization is revoked.
+    // A concurrent begin must not match the new revision while old windows
+    // are still available to inherit.
+    let revoked = self.windows.revoke(None);
+    *previous = Some(revision.into());
+    drop(previous);
+    if revoked {
+      (self.observer)(ApprovalReason::CredentialChanged, None);
     }
   }
 
-  pub(crate) fn revoke(&self) {
-    self.windows.revoke(None);
+  fn revoke(&self, reason: ApprovalReason) {
+    if self.windows.revoke(None) {
+      (self.observer)(reason, None);
+    }
   }
 
-  pub(crate) fn revoke_target(&self, prefix: &str) {
-    self.windows.revoke_prefix(prefix);
+  pub(crate) fn revoke_target(&self, prefix: &str, connection: Option<&ConnectionContext>) {
+    if self.windows.revoke_prefix(prefix) {
+      (self.observer)(ApprovalReason::Disconnect, connection);
+    }
+  }
+
+  fn expire(&self) {
+    if self.windows.expire(Instant::now()) {
+      (self.observer)(ApprovalReason::Expired, None);
+    }
   }
 
   pub(crate) fn maintain(&self) {
-    self.windows.expire(Instant::now());
+    self.expire();
     if !self.session.is_unlocked() {
-      self.revoke();
+      self.revoke(ApprovalReason::SessionChanged);
     }
     match operation::revision() {
       Ok(revision) => self.check_revision(&revision),
-      Err(_) => self.revoke(),
+      Err(_) => self.revoke(ApprovalReason::RevisionUnavailable),
     }
   }
 }
@@ -78,6 +123,7 @@ pub(crate) struct Attempt {
   pending: Option<reconnect_approval::Attempt<AuthenticationContext>>,
   revision: Option<String>,
   session_generation: u64,
+  history: Option<Arc<ConnectionContext>>,
   pub(crate) interactive: bool,
 }
 
@@ -85,13 +131,37 @@ pub(crate) struct CancelOnDrop(Attempt);
 
 impl Drop for CancelOnDrop {
   fn drop(&mut self) {
-    if let Some(pending) = &self.0.pending {
-      pending.cancel();
+    if let Some(pending) = &self.0.pending
+      && pending.cancel()
+    {
+      self.0.observe(ApprovalReason::Canceled);
     }
   }
 }
 
 impl Attempt {
+  pub(crate) fn with_history(mut self, history: ConnectionContext) -> Self {
+    self.history = Some(Arc::new(history));
+    self
+  }
+
+  pub(crate) fn history(&self) -> Option<&ConnectionContext> {
+    self.history.as_deref()
+  }
+
+  fn observe(&self, reason: ApprovalReason) {
+    if let Some(approvals) = &self.approvals {
+      (approvals.observer)(reason, self.history());
+    }
+  }
+
+  pub(crate) fn reuse_failed(&self) -> bool {
+    self
+      .pending
+      .as_ref()
+      .is_some_and(reconnect_approval::Attempt::reuse_failed)
+  }
+
   pub(crate) fn guard(&self) -> CancelOnDrop {
     CancelOnDrop(self.clone())
   }
@@ -101,8 +171,14 @@ impl Attempt {
       pending: None,
       revision: None,
       session_generation: 0,
+      history: None,
       interactive,
     }
+  }
+
+  #[cfg(test)]
+  pub(crate) fn failed_retained_fixture() -> Self {
+    tests::failed_retained_attempt()
   }
 
   pub(crate) fn begin(
@@ -110,23 +186,28 @@ impl Attempt {
     prefix: &str,
     scope: Option<String>,
     interactive: bool,
+    history: ConnectionContext,
   ) -> Self {
-    if let Some(approvals) = approvals {
-      approvals.windows.select_scope(prefix, scope.as_deref());
+    if let Some(approvals) = approvals
+      && approvals.windows.select_scope(prefix, scope.as_deref())
+    {
+      (approvals.observer)(ApprovalReason::ScopeChanged, Some(&history));
     }
     let Some(approvals) = approvals.filter(|approvals| approvals.session.is_unlocked()) else {
-      return Self::fresh(interactive);
+      return Self::fresh(interactive).with_history(history);
     };
     let Some(scope) = scope else {
-      return Self::fresh(interactive);
+      return Self::fresh(interactive).with_history(history);
     };
     let Ok(guard) = operation::acquire() else {
-      return Self::fresh(interactive);
+      return Self::fresh(interactive).with_history(history);
     };
     let Ok(revision) = guard.revision() else {
-      return Self::fresh(interactive);
+      approvals.revoke(ApprovalReason::RevisionUnavailable);
+      return Self::fresh(interactive).with_history(history);
     };
     approvals.check_revision(&revision);
+    approvals.expire();
     let session_generation = approvals.session.generation();
     let pending = approvals.windows.begin(scope, Instant::now());
     Self {
@@ -134,6 +215,7 @@ impl Attempt {
       pending: Some(pending),
       revision: Some(revision),
       session_generation,
+      history: Some(Arc::new(history)),
       interactive,
     }
   }
@@ -142,18 +224,26 @@ impl Attempt {
     let Some(approvals) = &self.approvals else {
       return false;
     };
-    approvals.windows.expire(Instant::now());
+    approvals.expire();
     let revision = guard.revision();
     if let Ok(revision) = &revision {
       approvals.check_revision(revision);
     }
-    let session_valid = revision.as_ref().ok() == self.revision.as_ref()
-      && approvals.session.is_unlocked()
-      && approvals.session.generation() == self.session_generation;
-    if !session_valid {
-      approvals.revoke();
+    let revision_valid = revision.as_ref().ok() == self.revision.as_ref();
+    let session_valid =
+      approvals.session.is_unlocked() && approvals.session.generation() == self.session_generation;
+    if !revision_valid {
+      approvals.revoke(if revision.is_err() {
+        ApprovalReason::RevisionUnavailable
+      } else {
+        ApprovalReason::CredentialChanged
+      });
     }
-    session_valid
+    if !session_valid {
+      approvals.revoke(ApprovalReason::SessionChanged);
+    }
+    revision_valid
+      && session_valid
       && self
         .pending
         .as_ref()
@@ -167,49 +257,41 @@ impl Attempt {
     guard: &operation::Guard,
     selector: &str,
     reason: &str,
-    read: impl FnOnce(Authentication<'_>) -> Result<Option<T>, Error>,
+    read: impl FnOnce(Authentication<'_>, ReadDecision) -> Result<Option<T>, Error>,
   ) -> Result<Option<T>, Error> {
     let Some(pending) = &self.pending else {
-      let authentication = if self.interactive {
+      let decision = ReadDecision::fresh(self.interactive);
+      let authentication = if decision.allow_ui() {
         Authentication::Allow { reason }
       } else {
         Authentication::Forbid
       };
-      return read(authentication);
+      return read(authentication, decision);
     };
-    if !self.valid(guard) {
-      return Err(unavailable());
-    }
-    let context = pending
-      .context(selector, AuthenticationContext::new)?
-      .ok_or_else(unavailable)?;
-    if context.is_invalidated() {
-      pending.failed(selector);
-      return Err(unavailable());
-    }
-    let result = read(Authentication::Context {
-      reason,
-      context: &context,
-      allow_ui: self.interactive,
-    });
-    if !self.valid(guard) || context.is_invalidated() {
-      return Err(unavailable());
-    }
-    match result {
-      Ok(Some(value)) => {
-        if !pending.used(selector) {
-          return Err(unavailable());
+    pending
+      .read(
+        selector,
+        self.interactive,
+        || AuthenticationContext::new().map_err(Error::from),
+        || self.valid(guard),
+        unavailable,
+        |context, decision| {
+          read(
+            Authentication::Context {
+              reason,
+              context,
+              allow_ui: decision.allow_ui(),
+            },
+            decision,
+          )
+        },
+      )
+      .map_err(|failure| {
+        if failure.revoked {
+          self.observe(ApprovalReason::CredentialReadFailed);
         }
-        Ok(Some(value))
-      }
-      Ok(None) => Ok(None),
-      Err(error) => {
-        // An OS-invalidated or denied authorization is never retried through
-        // a fresh context within the same attempt.
-        pending.failed(selector);
-        Err(error)
-      }
-    }
+        failure.error
+      })
   }
 
   pub(crate) fn connected(&self) {
@@ -224,18 +306,22 @@ impl Attempt {
   }
 
   pub(crate) fn discard_cached(&self) {
-    if let Some(pending) = &self.pending {
-      pending.discard_cached();
+    if let Some(pending) = &self.pending
+      && pending.discard_cached()
+    {
+      self.observe(ApprovalReason::HostConfirmation);
     }
   }
 
   pub(crate) fn revoke(&self) {
-    if let Some(pending) = &self.pending {
-      pending.revoke();
+    if let Some(pending) = &self.pending
+      && pending.revoke()
+    {
+      self.observe(ApprovalReason::ScopeChanged);
     }
   }
 }
 
 fn unavailable() -> Error {
-  ctl_keychain_client::Error(-25_308).into()
+  Error::ApprovalUnavailable
 }

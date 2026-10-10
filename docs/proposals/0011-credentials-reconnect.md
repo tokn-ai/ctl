@@ -2,6 +2,7 @@
 
 - Status: Implemented
 - Created: 2026-10-09
+- Updated: 2026-10-11
 - Implementation PRs: [#47](https://github.com/tokn-ai/ctl/pull/47),
   [#53](https://github.com/tokn-ai/ctl/pull/53),
   [#77](https://github.com/tokn-ai/ctl/pull/77),
@@ -55,6 +56,12 @@ shared nonsecret revision before mutation. Background reconnect uses quiet
 master establishment; it never opens authentication or save UI. Missing approval
 returns authentication-required for explicit interaction. `accept-new` host-key
 policy disables retained approval for new connections.
+Retained reads forbid native UI even for interactive reconnects. A rejected
+context or missing retained item ends that attempt with authentication required,
+including lazy identity reads that fail without an OpenSSH password prompt.
+Fresh authorization requires another explicit connection. Audit records typed
+read modes and revocation reasons; it does not identify the native biometric
+method or record password/private-key material.
 The TUI applies the connector's retry classification to background refreshes
 and pane reconnects, stopping on authentication/configuration failures until
 maintenance is reset by session selection. The broker remembers a quiet
@@ -71,6 +78,7 @@ new authentication.
 4. Approval is bounded, process-local, scoped, and revocable; secrets are not its cache.
 5. Forgetting credentials does not remove key files or terminate existing connections.
 6. Background work cannot request interactive credential access.
+7. Reusing retained approval cannot silently fall back to fresh authentication UI.
 
 ## Protocol impact
 
@@ -90,7 +98,9 @@ non-macOS Keychain emulation, and guaranteed prompt-free reconnection.
 
 ## Unresolved questions
 
-None for the implemented macOS boundary.
+The observed macOS refusal of a previously authenticated context has not been
+explained. The broker now makes refusal visible and denies UI during reuse;
+24-hour retention still does not guarantee that macOS will honor the context.
 
 ## Detailed specifications
 

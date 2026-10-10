@@ -45,6 +45,87 @@ fn typed_records_hash_subjects_and_never_include_secret_bodies() {
 }
 
 #[test]
+fn authorization_metadata_roundtrips_and_legacy_context_stays_unknown() {
+  let fixture = Fixture::new();
+  let store = fixture.store();
+  for mode in [
+    AuthorizationMode::FreshInteractive,
+    AuthorizationMode::FreshQuiet,
+    AuthorizationMode::RetainedApproval,
+  ] {
+    let mut record = record(Outcome::Succeeded);
+    record.event = Event::CredentialRead;
+    record.context.authorization_mode = Some(mode);
+    record.context.authorization_reason = Some(AuthorizationReason::CredentialReadFailed);
+    for stream in [Stream::Logs, Stream::Audit] {
+      store.append(stream, &record).unwrap();
+      let history = store.read(stream, 1, false).unwrap();
+      assert!(history.complete);
+      assert_eq!(history.records[0].context, record.context);
+    }
+    let line = format!("{}\n", record.log_line().unwrap());
+    let untrusted = line.replace(
+      "authorization_reason=credential_read_failed",
+      "authorization_reason=private-canary",
+    );
+    assert!(Record::from_log_line(untrusted.as_bytes()).is_none());
+    record.schema_version = 6;
+    assert!(record.log_line().is_err());
+    record.context.authorization_mode = None;
+    record.context.authorization_reason = None;
+    let legacy =
+      Record::from_log_line(format!("{}\n", record.log_line().unwrap()).as_bytes()).unwrap();
+    assert!(legacy.context.authorization_mode.is_none());
+    assert!(legacy.context.authorization_reason.is_none());
+    let mut value = serde_json::to_value(&record).unwrap();
+    value["context"]
+      .as_object_mut()
+      .unwrap()
+      .remove("authorization_mode");
+    value["context"]
+      .as_object_mut()
+      .unwrap()
+      .remove("authorization_reason");
+    assert!(serde_json::from_value::<Record>(value).unwrap().valid());
+  }
+}
+
+#[test]
+fn credential_history_links_host_without_replacing_credential_identity() {
+  let connection = ConnectionContext {
+    subject: "host-identity".into(),
+    endpoint: ConnectionEndpoint {
+      destination: "server.example".into(),
+      hostname: None,
+      user: Some("alice".into()),
+      port: Some(22),
+    },
+    correlation_id: Uuid::new_v4(),
+  };
+  let mut operation = Operation::credential_read(
+    "c953b7c3-5d6c-4315-aa39-04ab720d34ac",
+    "credential-identity",
+    Some(&connection),
+  );
+  operation.set_authorization_mode(AuthorizationMode::RetainedApproval);
+  let record = &operation.record;
+  assert_eq!(
+    record.connection_endpoint.as_ref(),
+    Some(&connection.endpoint)
+  );
+  assert_eq!(record.correlation_id, Some(connection.correlation_id));
+  assert_eq!(
+    record.subject_id.as_deref(),
+    Some(format!("{:x}", Sha256::digest(b"credential-identity")).as_str())
+  );
+  assert!(record.message().contains("retained approval; UI forbidden"));
+  assert!(!record.message().contains("Touch ID succeeded"));
+  let json = serde_json::to_string(record).unwrap();
+  assert!(!json.contains("credential-identity"));
+  assert!(!json.contains("host-identity"));
+}
+
+#[test]
 fn missing_history_is_read_only_and_limits_are_validated() {
   let fixture = Fixture::new();
   let store = fixture.store();
@@ -547,7 +628,14 @@ fn human_logs_round_trip_and_reject_corrupt_metadata() {
     serde_json::to_value(&record).unwrap()
   );
   assert!(Record::from_log_line(line.trim_end().as_bytes()).is_none());
-  assert!(Record::from_log_line(line.replace("schema=6", "schema=99").as_bytes()).is_none());
+  assert!(
+    Record::from_log_line(
+      line
+        .replace(&format!("schema={}", record.schema_version), "schema=99")
+        .as_bytes()
+    )
+    .is_none()
+  );
   assert!(
     Record::from_log_line(line.replace("pane_spawn_failed", "secret/body").as_bytes()).is_none()
   );

@@ -13,6 +13,48 @@ pub(crate) trait Context: Send + Sync {
   fn is_valid(&self) -> bool;
 }
 
+/// A read's authorization policy, without credential or native context data.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ReadDecision {
+  FreshInteractive,
+  FreshQuiet,
+  RetainedApproval,
+}
+
+impl ReadDecision {
+  pub(crate) fn allow_ui(self) -> bool {
+    self == Self::FreshInteractive
+  }
+
+  pub(crate) fn fresh(interactive: bool) -> Self {
+    if interactive {
+      Self::FreshInteractive
+    } else {
+      Self::FreshQuiet
+    }
+  }
+}
+
+struct SelectedContext<C> {
+  context: Arc<C>,
+  retained_approval: bool,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct ReadError<E> {
+  pub(crate) error: E,
+  pub(crate) revoked: bool,
+}
+
+impl<E> ReadError<E> {
+  fn unchanged(error: E) -> Self {
+    Self {
+      error,
+      revoked: false,
+    }
+  }
+}
+
 struct Window<C> {
   expires: Instant,
   contexts: HashMap<String, Arc<C>>,
@@ -23,8 +65,10 @@ struct Pending<C> {
   valid: bool,
   expires: Option<Instant>,
   contexts: HashMap<String, Arc<C>>,
+  inherited: HashSet<String>,
   used: HashSet<String>,
   reading: HashSet<String>,
+  reuse_failed: bool,
   committed: bool,
 }
 
@@ -77,6 +121,7 @@ impl<C: Context> Windows<C> {
       || (None, HashMap::new()),
       |window| (Some(window.expires), window.contexts.clone()),
     );
+    let inherited = contexts.keys().cloned().collect();
     let id = registry.next;
     registry.next = registry.next.checked_add(1).expect("bounded attempt IDs");
     registry.pending.insert(
@@ -86,8 +131,10 @@ impl<C: Context> Windows<C> {
         valid: true,
         expires,
         contexts,
+        inherited,
         used: HashSet::new(),
         reading: HashSet::new(),
+        reuse_failed: false,
         committed: false,
       },
     );
@@ -97,22 +144,24 @@ impl<C: Context> Windows<C> {
     }))
   }
 
-  pub(crate) fn revoke(&self, scope: Option<&str>) {
-    self.revoke_matching(|name| scope.is_none_or(|scope| scope == name));
+  pub(crate) fn revoke(&self, scope: Option<&str>) -> bool {
+    self.revoke_matching(|name| scope.is_none_or(|scope| scope == name))
   }
 
-  pub(crate) fn revoke_prefix(&self, prefix: &str) {
-    self.revoke_matching(|name| name.starts_with(prefix));
+  pub(crate) fn revoke_prefix(&self, prefix: &str) -> bool {
+    self.revoke_matching(|name| name.starts_with(prefix))
   }
 
-  pub(crate) fn select_scope(&self, prefix: &str, current: Option<&str>) {
-    self.revoke_matching(|name| name.starts_with(prefix) && Some(name) != current);
+  pub(crate) fn select_scope(&self, prefix: &str, current: Option<&str>) -> bool {
+    self.revoke_matching(|name| name.starts_with(prefix) && Some(name) != current)
   }
 
-  fn revoke_matching(&self, matches: impl Fn(&str) -> bool) {
+  fn revoke_matching(&self, matches: impl Fn(&str) -> bool) -> bool {
     let mut registry = self.registry.lock().unwrap();
+    let mut revoked = false;
     registry.windows.retain(|name, window| {
       if matches(name) {
+        revoked |= window.contexts.values().any(|context| context.is_valid());
         invalidate(window.contexts.values());
         false
       } else {
@@ -121,20 +170,24 @@ impl<C: Context> Windows<C> {
     });
     for pending in registry.pending.values_mut() {
       if matches(&pending.scope) {
+        revoked |= pending.valid && pending.contexts.values().any(|context| context.is_valid());
         pending.valid = false;
         invalidate(pending.contexts.values());
       }
     }
+    revoked
   }
 
-  pub(crate) fn expire(&self, now: Instant) {
+  pub(crate) fn expire(&self, now: Instant) -> bool {
     let mut registry = self.registry.lock().unwrap();
+    let mut revoked = false;
     registry.windows.retain(|_, window| {
       window.contexts.retain(|_, context| context.is_valid());
       if window.contexts.is_empty() {
         return false;
       }
       if now >= window.expires {
+        revoked = true;
         invalidate(window.contexts.values());
         false
       } else {
@@ -143,10 +196,12 @@ impl<C: Context> Windows<C> {
     });
     for pending in registry.pending.values_mut() {
       if pending.expires.is_some_and(|expires| now >= expires) {
+        revoked |= pending.valid && pending.contexts.values().any(|context| context.is_valid());
         pending.valid = false;
         invalidate(pending.contexts.values());
       }
     }
+    revoked
   }
 }
 
@@ -159,11 +214,11 @@ fn invalidate<'a, C: Context + 'a>(contexts: impl Iterator<Item = &'a Arc<C>>) {
 impl<C: Context> Attempt<C> {
   /// Register a context before native authentication so revocation also cancels
   /// an in-flight query. The factory must not authenticate or retrieve data.
-  pub(crate) fn context<E>(
+  fn context<E>(
     &self,
     selector: &str,
     create: impl FnOnce() -> Result<C, E>,
-  ) -> Result<Option<Arc<C>>, E> {
+  ) -> Result<Option<SelectedContext<C>>, E> {
     let mut registry = self.0.owner.registry.lock().unwrap();
     let pending = registry.pending.get_mut(&self.0.id).expect("live attempt");
     if !pending.valid {
@@ -171,7 +226,10 @@ impl<C: Context> Attempt<C> {
     }
     if let Some(context) = pending.contexts.get(selector) {
       pending.reading.insert(selector.into());
-      return Ok(Some(Arc::clone(context)));
+      return Ok(Some(SelectedContext {
+        context: Arc::clone(context),
+        retained_approval: pending.inherited.contains(selector),
+      }));
     }
     if pending.contexts.len() >= MAX_CONTEXTS {
       return Ok(None);
@@ -181,7 +239,101 @@ impl<C: Context> Attempt<C> {
       .contexts
       .insert(selector.into(), Arc::clone(&context));
     pending.reading.insert(selector.into());
-    Ok(Some(context))
+    Ok(Some(SelectedContext {
+      context,
+      retained_approval: false,
+    }))
+  }
+
+  /// Reuse a committed approval without UI, including interactive reconnects.
+  /// A denied native read revokes the attempt and never tries a fresh context.
+  pub(crate) fn read<T, E>(
+    &self,
+    selector: &str,
+    interactive: bool,
+    create: impl FnOnce() -> Result<C, E>,
+    valid: impl Fn() -> bool,
+    unavailable: impl Fn() -> E,
+    read: impl FnOnce(&C, ReadDecision) -> Result<Option<T>, E>,
+  ) -> Result<Option<T>, ReadError<E>> {
+    if !valid() {
+      let inherited = self.0.owner.registry.lock().unwrap().pending[&self.0.id]
+        .inherited
+        .contains(selector);
+      self.mark_reuse_failed(inherited);
+      return Err(ReadError::unchanged(unavailable()));
+    }
+    let selected = self
+      .context(selector, create)
+      .map_err(ReadError::unchanged)?
+      .ok_or_else(|| ReadError::unchanged(unavailable()))?;
+    if !selected.context.is_valid() {
+      self.mark_reuse_failed(selected.retained_approval);
+      return Err(ReadError {
+        error: unavailable(),
+        revoked: self.failed(selector),
+      });
+    }
+    let decision = if selected.retained_approval {
+      ReadDecision::RetainedApproval
+    } else {
+      ReadDecision::fresh(interactive)
+    };
+    let result = read(&selected.context, decision);
+    if !valid() {
+      self.mark_reuse_failed(selected.retained_approval);
+      return Err(ReadError::unchanged(unavailable()));
+    }
+    if !selected.context.is_valid() {
+      self.mark_reuse_failed(selected.retained_approval);
+      return Err(ReadError {
+        error: unavailable(),
+        revoked: self.failed(selector),
+      });
+    }
+    match result {
+      Ok(Some(value)) => {
+        if !self.used(selector) {
+          self.mark_reuse_failed(selected.retained_approval);
+          return Err(ReadError::unchanged(unavailable()));
+        }
+        Ok(Some(value))
+      }
+      Ok(None) if !selected.retained_approval => Ok(None),
+      Ok(None) => {
+        self.mark_reuse_failed(true);
+        Err(ReadError {
+          error: unavailable(),
+          revoked: self.failed(selector),
+        })
+      }
+      Err(error) => {
+        self.mark_reuse_failed(selected.retained_approval);
+        Err(ReadError {
+          error,
+          revoked: self.failed(selector),
+        })
+      }
+    }
+  }
+
+  fn mark_reuse_failed(&self, retained_approval: bool) {
+    if retained_approval {
+      self
+        .0
+        .owner
+        .registry
+        .lock()
+        .unwrap()
+        .pending
+        .get_mut(&self.0.id)
+        .expect("live attempt")
+        .reuse_failed = true;
+    }
+  }
+
+  pub(crate) fn reuse_failed(&self) -> bool {
+    self.0.owner.registry.lock().unwrap().pending[&self.0.id].reuse_failed
   }
 
   pub(crate) fn used(&self, selector: &str) -> bool {
@@ -199,7 +351,7 @@ impl<C: Context> Attempt<C> {
     self.0.owner.registry.lock().unwrap().pending[&self.0.id].valid
   }
 
-  pub(crate) fn failed(&self, selector: &str) {
+  pub(crate) fn failed(&self, selector: &str) -> bool {
     self
       .0
       .owner
@@ -211,49 +363,56 @@ impl<C: Context> Attempt<C> {
       .expect("live attempt")
       .reading
       .remove(selector);
-    self.revoke();
+    self.revoke()
   }
 
   /// A host confirmation requires fresh native authorization. Clear reusable
   /// contexts atomically, without reviving a canceled connection attempt.
-  pub(crate) fn discard_cached(&self) {
+  pub(crate) fn discard_cached(&self) -> bool {
     let mut registry = self.0.owner.registry.lock().unwrap();
     let pending = &registry.pending[&self.0.id];
     if !pending.valid {
-      return;
+      return false;
     }
     let scope = pending.scope.clone();
+    let mut revoked = false;
     if let Some(window) = registry.windows.remove(&scope) {
+      revoked |= window.contexts.values().any(|context| context.is_valid());
       invalidate(window.contexts.values());
     }
     for pending in registry.pending.values_mut() {
       if pending.scope == scope {
+        revoked |= pending.valid && pending.contexts.values().any(|context| context.is_valid());
         invalidate(pending.contexts.values());
         pending.valid = false;
       }
     }
     let current = registry.pending.get_mut(&self.0.id).expect("live attempt");
     current.contexts.clear();
+    current.inherited.clear();
     current.used.clear();
     current.reading.clear();
+    current.reuse_failed = false;
     current.expires = None;
     current.committed = false;
     current.valid = true;
+    revoked
   }
 
-  pub(crate) fn revoke(&self) {
+  pub(crate) fn revoke(&self) -> bool {
     let scope = self.0.owner.registry.lock().unwrap().pending[&self.0.id]
       .scope
       .clone();
-    self.0.owner.revoke(Some(&scope));
+    self.0.owner.revoke(Some(&scope))
   }
 
-  pub(crate) fn cancel(&self) {
+  pub(crate) fn cancel(&self) -> bool {
     let mut registry = self.0.owner.registry.lock().unwrap();
     let pending = &registry.pending[&self.0.id];
     if pending.committed {
-      return;
+      return false;
     }
+    let mut revoked = false;
     for (name, context) in &pending.contexts {
       let retained = registry.windows.get(&pending.scope).is_some_and(|window| {
         window
@@ -262,6 +421,7 @@ impl<C: Context> Attempt<C> {
           .is_some_and(|saved| Arc::ptr_eq(saved, context))
       });
       if pending.reading.contains(name) || !retained {
+        revoked |= pending.valid && context.is_valid();
         context.invalidate();
       }
     }
@@ -270,6 +430,7 @@ impl<C: Context> Attempt<C> {
       .get_mut(&self.0.id)
       .expect("live attempt")
       .valid = false;
+    revoked
   }
 
   /// Only SSH success commits permission. Previously approved windows retain
@@ -322,11 +483,9 @@ impl<C: Context> Attempt<C> {
       }
     }
     registry.windows.insert(scope, Window { expires, contexts });
-    registry
-      .pending
-      .get_mut(&self.0.id)
-      .expect("live attempt")
-      .committed = true;
+    let current = registry.pending.get_mut(&self.0.id).expect("live attempt");
+    current.inherited.extend(current.used.iter().cloned());
+    current.committed = true;
   }
 }
 
@@ -351,6 +510,7 @@ impl<C: Context> Drop for Handle<C> {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use std::cell::Cell;
   use std::sync::atomic::{AtomicBool, Ordering};
 
   #[derive(Default)]
@@ -369,7 +529,223 @@ mod tests {
       .unwrap()
       .unwrap();
     assert!(attempt.used(selector));
-    context
+    context.context
+  }
+
+  fn decision(attempt: &Attempt<Fake>, selector: &str, interactive: bool) -> ReadDecision {
+    attempt
+      .read(
+        selector,
+        interactive,
+        || Ok::<_, ()>(Fake::default()),
+        || attempt.valid(),
+        || (),
+        |_, decision| Ok(Some(decision)),
+      )
+      .unwrap()
+      .unwrap()
+  }
+
+  #[test]
+  fn retained_host_approval_never_allows_ui_even_for_interactive_reads() {
+    let store = Arc::new(Windows::<Fake>::default());
+    let start = Instant::now();
+    let first = store.begin("host".into(), start);
+    assert_eq!(
+      decision(&first, "password", true),
+      ReadDecision::FreshInteractive
+    );
+    first.connected(start);
+    let retry = store.begin("host".into(), start);
+    let reused = decision(&retry, "password", true);
+    assert_eq!(reused, ReadDecision::RetainedApproval);
+    assert!(!reused.allow_ui());
+    assert_eq!(
+      decision(&first, "password", true),
+      ReadDecision::RetainedApproval
+    );
+    assert_eq!(
+      decision(&retry, "new-key", true),
+      ReadDecision::FreshInteractive
+    );
+  }
+
+  #[test]
+  fn quiet_reads_forbid_ui_for_both_fresh_and_retained_contexts() {
+    let store = Arc::new(Windows::<Fake>::default());
+    let start = Instant::now();
+    let first = store.begin("host".into(), start);
+    let fresh = decision(&first, "password", false);
+    assert_eq!(fresh, ReadDecision::FreshQuiet);
+    assert!(!fresh.allow_ui());
+    first.connected(start);
+    let retry = store.begin("host".into(), start);
+    let reused = decision(&retry, "password", false);
+    assert_eq!(reused, ReadDecision::RetainedApproval);
+    assert!(!reused.allow_ui());
+  }
+
+  #[test]
+  fn revoked_retained_attempt_requires_fresh_authorization_before_any_read() {
+    let store = Arc::new(Windows::<Fake>::default());
+    let start = Instant::now();
+    let first = store.begin("host".into(), start);
+    read(&first, "password");
+    first.connected(start);
+    let retry = store.begin("host".into(), start);
+    assert!(store.revoke(None));
+    let blocked: Result<Option<()>, _> = retry.read(
+      "password",
+      true,
+      || panic!("a revoked attempt must not create a context"),
+      || retry.valid(),
+      || "unavailable",
+      |_, _| panic!("a revoked attempt must not read"),
+    );
+    assert_eq!(blocked, Err(ReadError::unchanged("unavailable")));
+    assert!(retry.reuse_failed());
+  }
+
+  #[test]
+  fn failed_retained_native_read_is_not_retried_or_allowed_to_fall_back_to_ui() {
+    let store = Arc::new(Windows::<Fake>::default());
+    let start = Instant::now();
+    let first = store.begin("host".into(), start);
+    let context = read(&first, "password");
+    first.connected(start);
+    let retry = store.begin("host".into(), start);
+    let worker = retry.clone();
+    let creations = Cell::new(0);
+    let reads = Cell::new(0);
+    let result: Result<Option<()>, _> = retry.read(
+      "password",
+      true,
+      || {
+        creations.set(creations.get() + 1);
+        Ok(Fake::default())
+      },
+      || retry.valid(),
+      || "unavailable",
+      |_, decision| {
+        reads.set(reads.get() + 1);
+        assert!(!decision.allow_ui());
+        Err("native denied cached authorization")
+      },
+    );
+    assert_eq!(
+      result,
+      Err(ReadError {
+        error: "native denied cached authorization",
+        revoked: true,
+      })
+    );
+    assert_eq!(creations.get(), 0);
+    assert_eq!(reads.get(), 1);
+    assert!(worker.reuse_failed());
+    assert!(!context.is_valid());
+    assert!(!retry.valid());
+    let blocked: Result<Option<()>, _> = worker.read(
+      "legacy-password",
+      true,
+      || {
+        creations.set(creations.get() + 1);
+        Ok(Fake::default())
+      },
+      || worker.valid(),
+      || "unavailable",
+      |_, _| {
+        reads.set(reads.get() + 1);
+        Ok(Some(()))
+      },
+    );
+    assert_eq!(blocked, Err(ReadError::unchanged("unavailable")));
+    assert_eq!(creations.get(), 0);
+    assert_eq!(reads.get(), 1);
+  }
+
+  #[test]
+  fn missing_retained_credential_revokes_approval_instead_of_allowing_legacy_fallback() {
+    let store = Arc::new(Windows::<Fake>::default());
+    let start = Instant::now();
+    let first = store.begin("host".into(), start);
+    decision(&first, "password", true);
+    first.connected(start);
+    let retry = store.begin("host".into(), start);
+    let result: Result<Option<()>, _> = retry.read(
+      "password",
+      true,
+      || panic!("a retained read must not create a context"),
+      || retry.valid(),
+      || "unavailable",
+      |_, decision| {
+        assert_eq!(decision, ReadDecision::RetainedApproval);
+        Ok(None)
+      },
+    );
+    assert_eq!(
+      result,
+      Err(ReadError {
+        error: "unavailable",
+        revoked: true,
+      })
+    );
+    assert!(retry.reuse_failed());
+    assert!(!retry.valid());
+    let fresh = store.begin("host".into(), start);
+    let missing: Result<Option<()>, _> = fresh.read(
+      "password",
+      true,
+      || Ok(Fake::default()),
+      || fresh.valid(),
+      || "unavailable",
+      |_, _| Ok(None),
+    );
+    assert_eq!(missing, Ok(None));
+    assert_eq!(
+      decision(&fresh, "legacy-password", true),
+      ReadDecision::FreshInteractive
+    );
+  }
+
+  #[test]
+  fn revocation_and_expiry_only_report_changes_once() {
+    let store = Arc::new(Windows::<Fake>::default());
+    let start = Instant::now();
+    assert!(!store.revoke(None));
+    let first = store.begin("host".into(), start);
+    read(&first, "password");
+    first.connected(start);
+    assert!(store.revoke(None));
+    assert!(!store.revoke(None));
+    assert!(!first.cancel());
+    let next = store.begin("host".into(), start);
+    read(&next, "password");
+    next.connected(start);
+    assert!(store.expire(start + WINDOW));
+    assert!(!store.expire(start + WINDOW));
+    assert!(!next.revoke());
+  }
+
+  #[test]
+  fn revocation_during_a_native_read_rejects_late_success() {
+    let store = Arc::new(Windows::<Fake>::default());
+    let attempt = store.begin("host".into(), Instant::now());
+    let result = attempt.read(
+      "password",
+      true,
+      || Ok(Fake::default()),
+      || attempt.valid(),
+      || "unavailable",
+      |_, decision| {
+        assert!(decision.allow_ui());
+        store.revoke(None);
+        Ok(Some("must not escape"))
+      },
+    );
+    assert_eq!(result, Err(ReadError::unchanged("unavailable")));
+    assert!(!attempt.reuse_failed());
+    attempt.connected(Instant::now());
+    assert!(store.registry.lock().unwrap().windows.is_empty());
   }
 
   #[test]

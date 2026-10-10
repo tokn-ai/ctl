@@ -1,4 +1,6 @@
-use super::{Component, Context, Event, Lease, Level, Outcome, Record};
+use super::{
+  AuthorizationMode, AuthorizationReason, Component, Context, Event, Lease, Level, Outcome, Record,
+};
 use serde::{Serialize, de::DeserializeOwned};
 use std::{fmt::Write as _, io};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
@@ -47,6 +49,21 @@ impl Record {
       )
       .expect("writing to a String cannot fail");
     }
+    if self.schema_version >= 7 {
+      write!(
+        metadata,
+        " authorization_mode={} authorization_reason={}",
+        self
+          .context
+          .authorization_mode
+          .map_or_else(|| "-".into(), name),
+        self
+          .context
+          .authorization_reason
+          .map_or_else(|| "-".into(), name),
+      )
+      .expect("writing to a String cannot fail");
+    }
     if self.schema_version >= 4 {
       let (prefix, fields) = metadata
         .split_once(" session=")
@@ -87,7 +104,7 @@ impl Record {
         (metadata, None)
       };
     let fields: Vec<_> = metadata.split_whitespace().collect();
-    if !matches!(fields.len(), 19 | 21) {
+    if !matches!(fields.len(), 19 | 21 | 23) {
       return None;
     }
     let timestamp = OffsetDateTime::parse(fields[0], &Rfc3339).ok()?;
@@ -106,6 +123,22 @@ impl Record {
           "-" => None,
           value => Some(parse_name::<Lease>(value)?),
         },
+        authorization_mode: if fields.len() == 23 {
+          match field(fields[21], "authorization_mode")? {
+            "-" => None,
+            value => Some(parse_name::<AuthorizationMode>(value)?),
+          }
+        } else {
+          None
+        },
+        authorization_reason: if fields.len() == 23 {
+          match field(fields[22], "authorization_reason")? {
+            "-" => None,
+            value => Some(parse_name::<AuthorizationReason>(value)?),
+          }
+        } else {
+          None
+        },
       },
       elapsed_ms: field(fields[10], "duration_ms")?.parse().ok()?,
       subject_id: optional_text(field(fields[11], "subject")?),
@@ -118,12 +151,12 @@ impl Record {
       process_id: field(fields[14], "pid")?.parse().ok()?,
       run_id: field(fields[15], "run")?.parse().ok()?,
       operation_id: field(fields[16], "operation")?.parse().ok()?,
-      attempt_id: if fields.len() == 21 {
+      attempt_id: if fields.len() >= 21 {
         parse_optional(field(fields[19], "attempt")?).ok()?
       } else {
         None
       },
-      correlation_id: if fields.len() == 21 {
+      correlation_id: if fields.len() >= 21 {
         parse_optional(field(fields[20], "correlation")?).ok()?
       } else {
         None
@@ -131,7 +164,13 @@ impl Record {
       event_id: field(fields[17], "event_id")?.parse().ok()?,
       schema_version: field(fields[18], "schema")?.parse().ok()?,
     };
-    if (record.schema_version >= 6) != (fields.len() == 21) {
+    let expected_fields = match record.schema_version {
+      2..=5 => 19,
+      6 => 21,
+      7 => 23,
+      _ => return None,
+    };
+    if fields.len() != expected_fields {
       return None;
     }
     if record.schema_version >= 4 {

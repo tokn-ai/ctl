@@ -193,7 +193,9 @@ fn acquire_at(directory: &Path, deadline: Duration) -> Result<Guard, Error> {
         std::thread::sleep(Duration::from_millis(25));
       }
       Err(TryLockError::WouldBlock) => {
-        return Err(Error(security_framework::base::Error::from_code(BUSY)));
+        return Err(Error::Native(security_framework::base::Error::from_code(
+          BUSY,
+        )));
       }
       Err(TryLockError::Error(_)) => return Err(io_error()),
     }
@@ -201,7 +203,7 @@ fn acquire_at(directory: &Path, deadline: Duration) -> Result<Guard, Error> {
 }
 
 fn io_error() -> Error {
-  Error(security_framework::base::Error::from_code(IO_ERROR))
+  Error::Native(security_framework::base::Error::from_code(IO_ERROR))
 }
 
 #[cfg(test)]
@@ -228,7 +230,7 @@ mod tests {
     let fixture = Fixture::new();
     let first = acquire_at(&fixture.0, Duration::ZERO).unwrap();
     let error = acquire_at(&fixture.0, Duration::ZERO).err().unwrap();
-    assert_eq!(error.0.code(), BUSY);
+    assert_eq!(error.os_error(), Some(BUSY));
     assert_eq!(
       std::fs::read(fixture.0.join("operation.lock")).unwrap(),
       b""

@@ -162,6 +162,13 @@ the necessary credential from Keychain. Repeated reads and successful reconnects
 do not extend the original deadline. macOS may reject authorization earlier;
 the window is a maximum, not a guarantee of prompt-free access.
 
+Reads using retained approval always forbid native authentication UI, including
+interactive reconnect requests. If macOS refuses that context or its exact saved
+item is missing, the attempt ends with authentication required; it does not try a
+fresh context, another saved item, or a manual password dialog. A subsequent
+explicit Connect can obtain fresh authorization. Fresh interactive connections
+can still show authentication UI; background connections cannot.
+
 The cache contains authorization contexts, not password or passphrase values.
 Each credential value is retrieved only for authentication and its temporary
 owned credential buffers are zeroized afterward. Decrypted private keys remain in an
@@ -203,6 +210,12 @@ without ctld `1.1.14`, background clients use passive master status and require
 interactive connection if no reusable master remains.
 Metadata import, passive inventory, and discovery cache refresh do not revoke
 reconnect approval or change saved secret access controls.
+
+Local audit records credential reads with the authorization mode, host endpoint,
+and connection correlation when available. Revocation records describe session,
+credential revision, scope, deadline, cancellation, and native read failures.
+These describe ctld's access policy and result; they do not claim that a Touch ID
+dialog appeared or that a biometric rather than an account password was used.
 
 ## Forgetting credentials
 

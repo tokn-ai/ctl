@@ -56,7 +56,30 @@ pub enum Lease {
   Layout,
 }
 
-/// Only generated UUIDs are allowed in diagnostic context, never names or tokens.
+/// Describes permission to display authentication UI, not whether UI appeared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthorizationMode {
+  FreshInteractive,
+  FreshQuiet,
+  RetainedApproval,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthorizationReason {
+  SessionChanged,
+  CredentialChanged,
+  RevisionUnavailable,
+  Expired,
+  ScopeChanged,
+  Disconnect,
+  HostConfirmation,
+  CredentialReadFailed,
+  Canceled,
+}
+
+/// Typed identifiers and classifications only, never names, secrets, or tokens.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Context {
@@ -65,6 +88,10 @@ pub struct Context {
   pub attachment_id: Option<Uuid>,
   pub exit_code: Option<u32>,
   pub lease: Option<Lease>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub authorization_mode: Option<AuthorizationMode>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub authorization_reason: Option<AuthorizationReason>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -83,8 +110,10 @@ pub enum Event {
   Connection,
   ConnectionRequest,
   ConnectionReuse,
+  ConnectionLoss,
   Disconnect,
   CredentialRead,
+  AuthorizationRevoked,
   CredentialSave,
   CredentialRemove,
   CredentialClear,
@@ -169,6 +198,14 @@ impl ConnectionEndpoint {
       && self.user.as_deref().is_none_or(valid_text)
       && self.port != Some(0)
   }
+}
+
+/// Nonsecret host identity supplied by the owner of an SSH connection attempt.
+#[derive(Debug, Clone)]
+pub struct ConnectionContext {
+  pub subject: String,
+  pub endpoint: ConnectionEndpoint,
+  pub correlation_id: Uuid,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -347,6 +384,58 @@ pub fn connection_reused(
   emit(Stream::Logs, &record);
 }
 
+/// Record an observed SSH transition without starting another connection.
+pub fn connection_observed(
+  operation_id: &'static str,
+  event: Event,
+  connection: &ConnectionContext,
+  level: Level,
+  outcome: Outcome,
+  error_code: Option<&'static str>,
+  os_error: Option<i32>,
+) {
+  let mut record = new_record(
+    operation_id,
+    event,
+    level,
+    Context::default(),
+    Some(&connection.subject),
+  );
+  record.connection_endpoint = Some(connection.endpoint.clone());
+  record.correlation_id = Some(connection.correlation_id);
+  record.attempt_id = None;
+  record.outcome = outcome;
+  record.error_code = error_code.map(str::to_owned);
+  record.os_error = os_error;
+  emit(Stream::Logs, &record);
+}
+
+/// An approval transition is audited once; it does not claim a biometric event.
+pub fn authorization_revoked(
+  operation_id: &'static str,
+  reason: AuthorizationReason,
+  connection: Option<&ConnectionContext>,
+) {
+  let mut record = new_record(
+    operation_id,
+    Event::AuthorizationRevoked,
+    Level::Info,
+    Context {
+      authorization_reason: Some(reason),
+      ..Context::default()
+    },
+    connection.map(|connection| connection.subject.as_str()),
+  );
+  if let Some(connection) = connection {
+    record.connection_endpoint = Some(connection.endpoint.clone());
+    record.correlation_id = Some(connection.correlation_id);
+  }
+  record.attempt_id = None;
+  record.outcome = Outcome::Succeeded;
+  emit(Stream::Logs, &record);
+  emit(Stream::Audit, &record);
+}
+
 fn new_record(
   operation_id: &'static str,
   event: Event,
@@ -355,7 +444,7 @@ fn new_record(
   subject: Option<&str>,
 ) -> Record {
   Record {
-    schema_version: 6,
+    schema_version: 7,
     level,
     context,
     component: *COMPONENT.get().unwrap_or(&Component::Ctld),
@@ -416,6 +505,28 @@ impl Operation {
   /// Add generated identifiers learned during an operation, before its outcome.
   pub fn set_context(&mut self, context: Context) {
     self.record.context = context;
+  }
+
+  pub fn set_authorization_mode(&mut self, mode: AuthorizationMode) {
+    self.record.context.authorization_mode = Some(mode);
+  }
+
+  /// Keep credential identity distinct from its requesting host and connection.
+  #[must_use]
+  pub fn credential_read(
+    operation_id: &'static str,
+    subject: &str,
+    connection: Option<&ConnectionContext>,
+  ) -> Self {
+    Self::begin_with_endpoint(
+      operation_id,
+      Event::CredentialRead,
+      Some(subject),
+      true,
+      Level::Info,
+      Context::default(),
+      connection.map(|connection| (connection.endpoint.clone(), Some(connection.correlation_id))),
+    )
   }
 
   /// Record a connection operation with the submitted nonsecret endpoint.
@@ -558,12 +669,19 @@ fn now() -> u64 {
 
 impl Record {
   fn valid(&self) -> bool {
-    matches!(self.schema_version, 2..=6)
+    matches!(self.schema_version, 2..=7)
       && (self.schema_version < 6 || !self.operation_id.is_nil())
       && self
         .connection_endpoint
         .as_ref()
         .is_none_or(|endpoint| self.schema_version >= 5 && endpoint.valid())
+      && (self.schema_version >= 7
+        || (self.context.authorization_mode.is_none()
+          && self.context.authorization_reason.is_none()
+          && !matches!(
+            self.event,
+            Event::ConnectionLoss | Event::AuthorizationRevoked
+          )))
       && i64::try_from(self.timestamp_ms).is_ok()
       && i64::try_from(self.elapsed_ms).is_ok()
       && self

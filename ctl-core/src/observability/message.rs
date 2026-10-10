@@ -1,5 +1,5 @@
 //! Human descriptions are derived from typed metadata, never raw requests/errors.
-use super::{Event, Outcome, Record};
+use super::{AuthorizationMode, AuthorizationReason, Event, Outcome, Record};
 use std::fmt::Write as _;
 
 impl Event {
@@ -11,8 +11,10 @@ impl Event {
       Self::Connection => "Open SSH connection",
       Self::ConnectionRequest => "Ensure SSH connection",
       Self::ConnectionReuse => "Reuse existing SSH connection",
+      Self::ConnectionLoss => "SSH connection lost",
       Self::Disconnect => "Host disconnect",
       Self::CredentialRead => "Read saved credential",
+      Self::AuthorizationRevoked => "Credential approval revoked",
       Self::CredentialSave => "Save credential",
       Self::CredentialRemove => "Remove saved credential",
       Self::CredentialClear => "Clear saved credentials",
@@ -107,12 +109,38 @@ impl Record {
         "attachment_resume_rejected" => "attachment is no longer available for reconnect",
         "session_not_found" => "session was not found",
         "session_exists" => "session already exists",
+        "ssh_master_idle_expired" => "OpenSSH idle persistence expired",
+        "ssh_master_keepalive_timeout" => "server stopped responding to SSH keepalives",
+        "ssh_master_connection_reset" => "SSH transport was reset",
+        "ssh_master_broken_pipe" => "SSH transport reported a broken pipe",
+        "ssh_master_remote_closed" => "remote peer closed the SSH transport",
+        "ssh_master_closed_unknown" => "control endpoint disappeared; exit reason unknown",
         // Codes have a bounded ASCII format; no raw error text enters the log.
         _ => code,
       });
     }
     if let Some(code) = self.context.exit_code {
       let _ = write!(message, "; exit code {code}");
+    }
+    if let Some(mode) = self.context.authorization_mode {
+      message.push_str(match mode {
+        AuthorizationMode::FreshInteractive => "; fresh authorization; UI permitted",
+        AuthorizationMode::FreshQuiet => "; fresh authorization; UI forbidden",
+        AuthorizationMode::RetainedApproval => "; retained approval; UI forbidden",
+      });
+    }
+    if let Some(reason) = self.context.authorization_reason {
+      message.push_str(match reason {
+        AuthorizationReason::SessionChanged => "; console state changed or could not be verified",
+        AuthorizationReason::CredentialChanged => "; credential store changed",
+        AuthorizationReason::RevisionUnavailable => "; credential revision could not be verified",
+        AuthorizationReason::Expired => "; approval deadline reached",
+        AuthorizationReason::ScopeChanged => "; connection settings or trust changed",
+        AuthorizationReason::Disconnect => "; host explicitly disconnected",
+        AuthorizationReason::HostConfirmation => "; host trust confirmation required",
+        AuthorizationReason::CredentialReadFailed => "; credential could not be read",
+        AuthorizationReason::Canceled => "; authentication attempt canceled",
+      });
     }
     if let Some(code) = self.os_error {
       let _ = write!(message, "; OS error {code}");

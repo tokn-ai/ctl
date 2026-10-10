@@ -153,7 +153,8 @@ fn keychain_errors_do_not_appear_as_a_successful_empty_inventory() {
       "credential_discovery_conflict",
     ),
   ] {
-    let failure = crate::keychain::Error(security_framework::base::Error::from_code(status));
+    let failure =
+      crate::keychain::Error::Native(security_framework::base::Error::from_code(status));
     let response = keychain_error(failure, "credential_list_failed");
     assert!(matches!(response, Response::Error { code, .. } if code == expected));
   }

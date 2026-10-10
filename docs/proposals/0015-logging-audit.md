@@ -2,7 +2,7 @@
 
 - Status: Implemented
 - Created: 2026-10-09
-- Updated: 2026-10-09
+- Updated: 2026-10-11
 - Implementation PRs: [#93](https://github.com/tokn-ai/ctl/pull/93),
   [#95](https://github.com/tokn-ai/ctl/pull/95)
 
@@ -39,6 +39,14 @@ hashes support correlation but are not anonymization against guessing. Generated
 session/pane/public attachment IDs and numeric statuses provide safe context.
 Session/pane activity is diagnostic only, not credential audit.
 
+Credential reads now include authorization mode and, when connection-scoped,
+the host endpoint and connection correlation without changing credential subject
+identity. Approval revocations record typed reasons rather than assuming a
+biometric event. Managed SSH masters retain a bounded debug tail for socket-loss
+observations: idle expiry, timeout, reset, broken pipe, remote closure, or unknown.
+Only fixed reason codes reach disk; raw SSH output stays in memory. Explicit
+disconnects suppress automatic-loss observations.
+
 Diagnostics have trace/debug/info/warn/error levels, defaulting to info and above.
 `CTL_LOG_LEVEL` configures a process at startup; CLI filters only select stored
 records. Audit is independent of diagnostic severity. Foreground daemons mirror
@@ -48,7 +56,7 @@ Each run has human-readable log files with four bounded 5 MiB segments. Audit
 uses shared SQLite transactions with unique event IDs, indexed query fields,
 full synchronous commits, and rollback journaling. Files live in private local
 history storage with bounded lock waits and unsafe-path checks. SQLite schema 1
-and record schema 6 are distinct; supported older payloads remain readable.
+and record schema 7 are distinct; supported older payloads remain readable.
 Legacy files are preserved and reported rather than silently imported.
 
 Queries report omitted malformed records and incomplete inspection. Read-only
@@ -68,8 +76,9 @@ daemons record on their own machine; the local CLI does not aggregate that data.
 
 ## Protocol impact
 
-Protocol changes: none. Local record schema 6 and SQLite database schema 1 are
-storage formats, independent of product releases and named wire contracts.
+Protocol changes: none. Local record schema advances from 6 to 7 for
+authorization metadata and SSH loss events. SQLite database schema 1 is unchanged;
+these storage formats are independent of product releases and named wire contracts.
 The leveled recorder replaces earlier unreleased storage without claiming to
 migrate every legacy file.
 

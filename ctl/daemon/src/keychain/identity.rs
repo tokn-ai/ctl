@@ -74,13 +74,13 @@ fn load_inner(
   canceled: Option<&AtomicBool>,
   authorization: Option<&super::approval::Attempt>,
 ) -> Result<Option<Zeroizing<String>>, IdentityError> {
-  use ctl_core::observability::{Event, Operation, Outcome};
-  let operation = Operation::start(
+  use ctl_core::observability::{Operation, Outcome};
+  let mut operation = Operation::credential_read(
     "a56e822c-e651-4aeb-9b21-2d78d4439ea6",
-    Event::CredentialRead,
-    Some(&snapshot.identity_id),
+    &snapshot.identity_id,
+    authorization.and_then(super::approval::Attempt::history),
   );
-  let result = load_unrecorded(snapshot, context, canceled, authorization);
+  let result = load_unrecorded(snapshot, context, canceled, authorization, &mut operation);
   operation.finish(
     if matches!(&result, Ok(None)) {
       Outcome::Missing
@@ -100,6 +100,7 @@ fn load_unrecorded(
   context: Option<&str>,
   canceled: Option<&AtomicBool>,
   authorization: Option<&super::approval::Attempt>,
+  history: &mut ctl_core::observability::Operation,
 ) -> Result<Option<Zeroizing<String>>, IdentityError> {
   let reason = purpose::identity("Read", &snapshot.path, context);
   let records = with_authentication(
@@ -128,9 +129,14 @@ fn load_unrecorded(
             snapshot.identity_id, snapshot.file_version
           ),
           &reason,
-          read,
+          |authentication, decision| {
+            history.set_authorization_mode(super::authorization_mode(decision));
+            read(authentication)
+          },
         )
       } else {
+        history
+          .set_authorization_mode(ctl_core::observability::AuthorizationMode::FreshInteractive);
         read(Authentication::Allow { reason: &reason })
       };
       records.map_err(|error| map_error(error, IdentityError::KeychainUnavailable))

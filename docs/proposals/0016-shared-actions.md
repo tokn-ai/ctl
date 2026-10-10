@@ -8,6 +8,11 @@ specified below. Additional domains are incremental work; the
 [coverage table](../action-api.md#implemented-coverage) distinguishes shared
 actions, existing shared primitives, and adapter-owned work.
 
+Subsequent extractions share passive local component observation and six
+one-shot view/terminal actions: inspect, split, promote, merge, layout update,
+and terminal termination. The coverage table records their supported surfaces;
+attached pane controls retain their existing controller API and outcome events.
+
 ## Summary
 
 Define a shared, typed application API for ctl subcommands, desktop commands,
@@ -68,7 +73,9 @@ other domains incrementally after these establish the client API pattern.
 The initial implementation shares connection and session actions across CLI,
 desktop, and TUI, and retains the existing attachment controller as the shared
 streaming API. Its queued control outcomes remain events, as documented in the
-detailed specification. Other domains in the inventory remain future work.
+detailed specification. Local component observation and view/terminal actions
+now follow the same pattern. Task actions, forwarding, VPN profile persistence,
+and host mutation policy remain incremental work in the inventory.
 
 ## Invariants
 

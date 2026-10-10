@@ -1,9 +1,9 @@
 # Shared action API design
 
-This documents the initial shared Rust client API, not a new public wire
+This documents the shared Rust client API, not a new public wire
 contract. It supports [Proposal 0016](proposals/0016-shared-actions.md). The inventory below
 describes the current source on 2026-10-10. Semantic action IDs organize the
-design; the initial implemented APIs below use typed methods. Existing command
+design; the implemented APIs below use typed methods. Existing command
 syntax stays intact.
 
 ## Layers
@@ -55,20 +55,27 @@ command registry/parser; related UI flows may still use the operation.
 | `connection.ensure` | `host connect`; transport setup | `host.connect`; explicit connection flows | Transport setup | ctld |
 | `connection.disconnect` | `host disconnect` | Host disconnect flow | No direct command | ctld |
 | `port_forward.configure/list` | `port …` | `host.port_forwarding` opens management | No direct command | ctld |
+| `connection.list_remote_listeners` | No direct command | Remote listener inspection | No direct command | ctld |
 | `vpn.start/status/stop` | `vpn …` | VPN management flows | No direct command | Selected VPN runtime owner |
+| `vpn_profile.list/create/update/remove` | `vpn list/create/remove`; no update command | VPN profile settings | No direct command | Client catalog |
 | `session.list` | `ctmux list` | `session.refresh` | `list-sessions` opens session selection | ctmuxd |
 | `session.create` | `ctmux new`; `shell` composition | `session.new_shell`; `tab.new_shell_here` | `new-session` | ctmuxd |
 | `session.terminate` | `ctmux kill` | `session.close` | No direct command | ctmuxd |
 | `archive.list/read` | `ctmux archives/archive` | Retained session views | Archive picker via TUI controls | Client archive store; passive |
+| `layout.get` | `ctmux view`; archive capture before `ctmux kill` | View inspection | Session selection and refresh | ctmuxd |
+| `layout.update` | No direct command | Layout replacement with expected revision | No direct command | ctmuxd |
+| `layout.merge` | `ctmux merge` | Session merge | No direct command | ctmuxd |
 | `terminal.split` | `ctmux split` | Terminal controls | `split-window` | ctmuxd |
-| `terminal.promote` | `ctmux promote` | No direct command | `break-pane` | ctmuxd |
+| `terminal.promote` | `ctmux promote` | Terminal promotion | No direct command | ctmuxd |
 | `terminal.terminate` | `ctmux kill-terminal` | Terminal controls | `kill-pane` | ctmuxd |
-| `layout.swap/resize/zoom` | No direct subcommand | Pane controls | `swap-pane`; `resize-pane` including zoom | ctmuxd |
+| `layout.swap/break/resize/zoom` | No direct subcommand | Pane controls | `swap-pane`; `break-pane`; `resize-pane` including zoom | ctmuxd; attached controls |
+| `shell_state.inspect` | `ctmux state` | Session metadata inspection | No direct command; attachments receive state events | ctmuxd |
 | `attachment.open` | `ctmux attach`; `shell` composition | Session attachment flow | Session switching composes this | ctmuxd + client transport |
 | `attachment.detach` | Interactive detach | `session.disconnect` | `detach-client` | ctmuxd + client cleanup |
 | `attachment.reconnect` | Interactive recovery | `terminal.reconnect` | No direct command | Client transport + ctmuxd |
 | `attachment.lease.request/release` | Attachment options request leases | `terminal.toggle_input`; `terminal.toggle_resize_control` | `take-input/release-input`; `take-resize/release-resize` | ctmuxd |
 | `task.create/list/show/start/stop/restart/remove` | `task …` | Task views/flows; supported subset | No direct command | ctl-taskd |
+| `task.register/update` | No direct command | Run/recreate or apply a saved definition | No direct command | ctl-taskd |
 | `task.logs/attach` | `task logs/attach` | Task views/flows | No direct command | ctl-taskd + stream adapter |
 | `task_definition.save/list/remove` | `task save/definitions …` | Task definition editor | No direct command | Client catalog |
 | `component.inspect` | `components status` | Component versions/About | No direct command | Existing maintenance services; passive |
@@ -96,13 +103,23 @@ the proposal status.
 | --- | --- | --- |
 | `host status/connect/disconnect`; desktop connection flows | `ctl_client::connection::ConnectionClient` | Target selection, prompts, and presentation |
 | `ctmux list/new/kill/attach`; desktop and TUI session flows | `ctmux_client::session::SessionClient` | Target selection, UI session lifecycle, and presentation |
-| Attachment detach and input/layout leases | `ctmux_client::AttachmentControl` | Controller ownership and UI lease events |
+| `ctmux view/split/promote/merge/kill-terminal`; desktop view actions; TUI view refresh/split/kill | `ctmux_client::view::ViewClient` | Target selection, geometry/cwd policy, confirmations, and focus/reconciliation |
+| Attachment input, PTY resize, zoom, pane/divider resize, swap/break, detach, leases, and checkpoint recovery | `ctmux_client::AttachmentControl` | Controller ownership, presentation acknowledgements, and authoritative outcome events |
+| `ctmux state`; desktop session metadata | `ctmux_client::get_shell_state` | Target selection and presentation |
 | Local `components status`; desktop local About rows | `ctl_client::component_status::observe_local` passively inspects the chosen owner endpoint | Available-helper discovery, compatibility/status presentation, and desktop SSH/VPN owner selection |
 | Remote `components status` and remote `ctmuxd` restart | `ctl_client::maintenance` inspection and prepared restart | CLI target selection and confirmation; desktop remote observation and confirmation |
 | `components list/sync/select`; desktop bundle inventory and selection | `ctl_client::components` inventory, import, and selection | Source discovery, progress, and output |
 | `components update`; desktop component update | `ctl_client::component_update` prepare and install | Target orchestration, prompts, and progress |
 | Local `components restart`; desktop local component restart | Owner lifecycle preflight/restart APIs, called by each adapter | Shared typed local restart action; preserve pinned owner and confirmation semantics |
-| Host catalog, port forwarding, VPN, tasks, terminal/layout, archives, history, and other entries above | Existing domain-specific APIs vary | Inventory and migrate only where execution remains duplicated |
+| `vpn list/start/stop`; desktop VPN runtime operations | Typed local/remote clients in `ctl_ipc::vpn` and `ctl_ipc::remote_vpn` | Owner selection, enrollment UI, cancellation, and runtime coordination |
+| `vpn create/remove`; desktop VPN profile settings | Shared profile document model | Shared profile repository and mutations; CLI and desktop still persist independently |
+| Host catalog and connection methods | `ctl_client::hosts` models, validation, storage, and resolution | Named mutation API; preserve explicit catalog removal versus desktop resource cleanup |
+| `port add/list/remove`; desktop forwarding and remote listener queries | Generic broker transport | Typed list/configure/listener methods and response checks |
+| Task create/register/update/list/show/start/stop/restart/remove | Generic task transport; desktop forwards raw protocol variants | Typed task actions over selected local/remote streams |
+| Task logs and attachment | Existing task transport and ctmux attachment | Shared log decoder and task lookup; desktop owns delivery acknowledgements |
+| `task save/definitions …`; desktop definition editor | `ctl_task_store::Repository` | Scope selection, editing, and presentation |
+| `ctmux archives/archive`; desktop retained views; TUI archive picker | `ctmux_client::archive::ArchiveStore` and `cache::CacheStore` | Store precedence, paging fallback, and combined deletion in desktop |
+| History and other entries above | Existing domain-specific APIs vary | Inventory and migrate only where execution remains duplicated |
 
 `ctmux :` mode has no component or task commands. A shared client action does
 not add a command to another surface. The component status extraction does not
@@ -124,8 +141,9 @@ Existing desktop IDs remain stable for user keybindings and map to these actions
   owning store. Removing a saved host does not implicitly disconnect it.
 - **Reconnect** repairs an attachment transport, attempting supported resume;
   it does not mean force-replacing a healthy SSH master.
-- **Focus/select** changes this client's selection. Shared layout mutations are
-  separate actions requiring the existing layout lease.
+- **Focus/select** changes this client's selection. Attached swap, break,
+  resize, and zoom use the existing layout lease. One-shot view edits retain
+  their daemon validation and revision rules without acquiring attachment leases.
 
 Avoid domain-level `toggle` methods: translate UI toggles into explicit lease
 request/release or desired state. A request remains subject to the owner's
@@ -209,6 +227,55 @@ newly generated by the client API.
 `attach` reuses the existing `AttachRequest`, including replay position, input
 and layout lease requests, and presentation window settings. Reconnect uses
 existing attachment resume paths rather than forcing a new session or master.
+
+### View and terminal API in ctmux-client
+
+[ViewClient](../ctmux/client/src/view.rs) consumes a selected transport and
+client identity, following the session API's one-shot lifecycle. It implements
+six existing actions without adding commands or wire messages:
+
+```rust
+pub struct TerminalId(pub String);
+pub struct SplitTerminalRequest {
+  pub terminal_id: TerminalId,
+  pub axis: SplitAxis,
+  pub command: Vec<String>,
+  pub cwd: Option<String>,
+  pub terminal_size: TerminalSize,
+}
+pub struct UpdateViewRequest {
+  pub session_id: SessionId,
+  pub expected_revision: u64,
+  pub layout: ViewLayout,
+}
+
+// ViewClient<S> methods:
+fn new(stream: S, identity: ClientIdentity) -> Self;
+async fn get(self, session_id: SessionId) -> Result<ViewInfo, ClientError>;
+async fn split(self, request: SplitTerminalRequest) -> Result<ViewInfo, ClientError>;
+async fn update(self, request: UpdateViewRequest) -> Result<ViewInfo, ClientError>;
+async fn promote(self, terminal_id: TerminalId, name: Option<String>) -> Result<ViewInfo, ClientError>;
+async fn merge(self, source: SessionId, destination: SessionId) -> Result<ViewInfo, ClientError>;
+async fn terminate_terminal(self, terminal_id: TerminalId) -> Result<(), ClientError>;
+```
+
+The first five methods require a view snapshot; terminal termination requires
+success. An unexpected response is an error, and daemon error codes/messages
+are preserved. Split retains argv boundaries, cwd, axis, and geometry. Layout
+update retains the exact expected revision and complete layout, including split
+weights; existing negotiated-contract checks and owner validation remain in
+force. A stale revision is never retried against a newer snapshot.
+
+CLI uses the API for its view/terminal commands and the view lookup before
+session termination/archive capture. Desktop uses all six methods behind its
+existing `session_view` DTO contract. TUI uses get, split, and terminal
+termination, preserving its timeout, background cancellation, and focus policy.
+No method reconnects or replays a mutation after a lost reply.
+
+`terminal.promote` is distinct from attached `layout.break`: promotion uses the
+existing one-shot operation, while `AttachmentControl::break_pane` carries the
+attached request ID, guarded view/revision, and layout ownership. Swap, break,
+resize, and zoom continue through the existing controller and outcome events.
 
 ### Attachment API in ctmux-client
 
@@ -324,15 +391,18 @@ terminal contents, credentials, or reconnect tokens.
    in ctl-client, preserving passive/quiet policy and broker reuse. Disconnect
    may open a temporary socket to interrupt authentication on a busy shared
    socket. Attachment cleanup remains separate from SSH master teardown.
-4. Apply the pattern to the remaining domains as they are refined. Keep UI-only
+4. Extract local component observation and the six view/terminal actions,
+   preserving passive probes and operation-specific responses. Record both new
+   actions and existing shared controller/storage APIs in the coverage table.
+5. Apply the pattern to the remaining domains as they are refined. Keep UI-only
    commands in their client registries and defer task workflows from Proposal 0007.
 
 Verify meaningful cross-surface behavior: the same explicit target and action
 produce the same domain effect; detach leaves a session running; terminate
 targets only the selected session; local navigation performs no remote mutation;
-quiet/passive paths show no prompt; unsupported negotiated operations fail
-before sending a message; cancellation closes temporary streams without leaking
-handles or killing persistent work. Preserve tests of legacy parsing and desktop
+quiet/passive paths show no prompt; unsupported negotiated operations retain
+their capability checks and owner errors; cancellation closes temporary streams
+without leaking handles or killing persistent work. Preserve tests of legacy parsing and desktop
 keybinding IDs. No protocol bump is required for extraction alone.
 
 ## Current source entry points

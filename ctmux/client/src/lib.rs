@@ -3,6 +3,7 @@ pub mod cache;
 pub mod history;
 mod history_sync;
 pub mod session;
+pub mod view;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, size};
 pub use ctmux_proto::DEFAULT_PRESENTATION_WINDOW_BYTES;
 use ctmux_proto::{

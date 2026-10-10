@@ -272,7 +272,7 @@ impl App<'_> {
       if let Some(pane) = self.panes.get_mut(&self.focused) {
         pane.request_lease(LeaseKind::Layout, true);
         if pane.connected {
-          pane.control.acquire_lease(LeaseKind::Layout).await?;
+          pane.control.request_lease(LeaseKind::Layout).await?;
         }
       }
     }

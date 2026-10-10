@@ -178,7 +178,9 @@ impl Pane {
     let attached = if let Some(token) = token {
       ctmux_client::resume_attach(stream, &identity(), token, request.clone()).await
     } else {
-      ctmux_client::begin_attach(stream, &identity(), request.clone()).await
+      ctmux_client::session::SessionClient::new(stream, identity())
+        .attach(request.clone())
+        .await
     };
     let (stream, attached) = match attached {
       Ok(attached) => attached,
@@ -187,7 +189,9 @@ impl Pane {
         ..
       }) if resuming => {
         let stream = transport.connect().await?;
-        ctmux_client::begin_attach(stream, &identity(), request).await?
+        ctmux_client::session::SessionClient::new(stream, identity())
+          .attach(request)
+          .await?
       }
       Err(error) => return Err(error.into()),
     };
@@ -235,7 +239,7 @@ impl Pane {
       if !self.reconnect_leases.requested(lease) && status.owned_by_client {
         self.control.release_lease(lease).await?;
       } else if self.reconnect_leases.explicit_change(lease) == Some(true) && !status.held {
-        self.control.acquire_lease(lease).await?;
+        self.control.request_lease(lease).await?;
       }
     }
     while !self.checkpoint_ready || self.lease_intent_pending() {

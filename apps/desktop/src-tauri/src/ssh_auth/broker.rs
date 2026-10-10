@@ -1,3 +1,4 @@
+use ctl_client::connection::{ConnectionClient, Error as ConnectionError, InteractionPolicy};
 use ctl_core::protocol::ProtocolVersion;
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -21,50 +22,42 @@ pub(crate) async fn ensure_target_master(
   target: SshTarget,
   context: &PromptContext,
 ) -> CommandResult<PathBuf> {
-  let mut stream = connect(&target).await?;
-  ctl_ipc::write_frame(&mut stream, &ClientMessage::EnsureMaster { target })
+  connection_client()
+    .ensure(
+      target,
+      InteractionPolicy::Interactive,
+      |kind, message, warning| async move {
+        Ok(request_response(Some(context), prompt_kind(kind), message, warning).await)
+      },
+    )
     .await
-    .map_err(CommandErrorDto::backend)?;
-  loop {
-    match ctl_ipc::read_frame::<_, ServerMessage>(&mut stream)
-      .await
-      .map_err(CommandErrorDto::backend)?
-    {
-      Some(ServerMessage::Prompt {
-        prompt_id,
-        kind,
-        message,
-        warning,
-      }) => {
-        let response = request_response(Some(context), prompt_kind(kind), message, warning).await;
-        ctl_ipc::write_frame(
-          &mut stream,
-          &ClientMessage::PromptResponse {
-            prompt_id,
-            response,
-          },
-        )
-        .await
-        .map_err(CommandErrorDto::backend)?;
-      }
-      Some(ServerMessage::MasterReady { control_path }) => return Ok(control_path),
-      Some(ServerMessage::AuthenticationRequired) => return Err(authentication_required()),
-      Some(ServerMessage::Error { code, message }) => {
-        return Err(CommandErrorDto::new(code, message));
-      }
-      Some(_) => {
-        return Err(CommandErrorDto::new(
-          "ctld_protocol_error",
-          "ctld returned an unexpected response while connecting SSH.",
-        ));
-      }
-      None => {
-        return Err(CommandErrorDto::new(
-          "ctld_connection_closed",
-          "ctld closed the SSH authentication request.",
-        ));
-      }
+    .map(|ready| ready.control_path)
+    .map_err(connection_error)
+}
+
+fn connection_client() -> &'static ConnectionClient {
+  static CLIENT: std::sync::OnceLock<ConnectionClient> = std::sync::OnceLock::new();
+  CLIENT.get_or_init(ConnectionClient::default)
+}
+
+fn connection_error(error: ConnectionError) -> CommandErrorDto {
+  match error {
+    ConnectionError::Daemon { code, message } => CommandErrorDto::new(code, message),
+    ConnectionError::AuthenticationRequired => authentication_required(),
+    error @ ConnectionError::ConnectionClosed => {
+      CommandErrorDto::new("ctld_connection_closed", error.to_string())
     }
+    error @ ConnectionError::UnexpectedResponse => {
+      CommandErrorDto::new("ctld_protocol_error", error.to_string())
+    }
+    error @ (ConnectionError::UnsupportedGatewayRoute(_)
+    | ConnectionError::UnsupportedQuietMaster(_)) => {
+      CommandErrorDto::new("ctld_protocol_feature_unsupported", error.to_string())
+    }
+    error @ ConnectionError::UnsupportedBrokerProtocol(_) => {
+      CommandErrorDto::new("ctld_protocol_version_mismatch", error.to_string())
+    }
+    error => CommandErrorDto::backend(error),
   }
 }
 
@@ -93,47 +86,14 @@ pub async fn existing_master(target: &ConnectionTargetDto) -> CommandResult<Path
 pub async fn connection_status(
   target: &ConnectionTargetDto,
 ) -> CommandResult<SshConnectionStatusDto> {
-  let target = broker_target(target)?;
-  let Some(mut stream) = connect_existing(&target).await? else {
-    return Ok(SshConnectionStatusDto::default());
-  };
-  ctl_ipc::write_frame(&mut stream, &ClientMessage::ConnectionStatus { target })
+  let status = connection_client()
+    .status(broker_target(target)?)
     .await
-    .map_err(CommandErrorDto::backend)?;
-  let response = ctl_ipc::read_frame::<_, ServerMessage>(&mut stream)
-    .await
-    .map_err(CommandErrorDto::backend)?;
-  connection_status_response(response)
-}
-
-fn connection_status_response(
-  response: Option<ServerMessage>,
-) -> CommandResult<SshConnectionStatusDto> {
-  match response {
-    Some(ServerMessage::ConnectionStatus {
-      connected,
-      manually_disconnected,
-    }) => Ok(SshConnectionStatusDto {
-      connected,
-      manually_disconnected,
-    }),
-    Some(ServerMessage::MasterReady { .. }) => Ok(SshConnectionStatusDto {
-      connected: true,
-      manually_disconnected: false,
-    }),
-    Some(ServerMessage::AuthenticationRequired) => Ok(SshConnectionStatusDto::default()),
-    Some(ServerMessage::Error { code, .. }) if code == "ssh_host_disconnected" => {
-      Ok(SshConnectionStatusDto {
-        connected: false,
-        manually_disconnected: true,
-      })
-    }
-    Some(ServerMessage::Error { code, message }) => Err(CommandErrorDto::new(code, message)),
-    _ => Err(CommandErrorDto::new(
-      "ctld_protocol_error",
-      "ctld returned an unexpected SSH connection status.",
-    )),
-  }
+    .map_err(connection_error)?;
+  Ok(SshConnectionStatusDto {
+    connected: status.connected,
+    manually_disconnected: status.manually_disconnected,
+  })
 }
 
 pub async fn disconnect(targets: &[ConnectionTargetDto]) -> CommandResult<()> {
@@ -168,21 +128,10 @@ async fn disconnect_targets<F: std::future::Future<Output = CommandResult<()>>>(
 }
 
 async fn disconnect_master(target: SshTarget) -> CommandResult<()> {
-  let mut stream = connect(&target).await?;
-  ctl_ipc::write_frame(&mut stream, &ClientMessage::DisconnectMaster { target })
+  connection_client()
+    .disconnect(target)
     .await
-    .map_err(CommandErrorDto::backend)?;
-  match ctl_ipc::read_frame::<_, ServerMessage>(&mut stream)
-    .await
-    .map_err(CommandErrorDto::backend)?
-  {
-    Some(ServerMessage::MasterDisconnected) => Ok(()),
-    Some(ServerMessage::Error { code, message }) => Err(CommandErrorDto::new(code, message)),
-    _ => Err(CommandErrorDto::new(
-      "ctld_protocol_error",
-      "ctld returned an unexpected SSH disconnect response.",
-    )),
-  }
+    .map_err(connection_error)
 }
 
 pub async fn delete_credentials(target: &ConnectionTargetDto) -> CommandResult<()> {
@@ -481,38 +430,6 @@ mod tests {
       assert_eq!(target.ssh_config_alias.as_deref(), alias);
       assert_eq!(target.use_ssh_config_master, expected);
     }
-  }
-
-  #[test]
-  fn connection_status_preserves_actual_connectivity_and_manual_pause_independently() {
-    for connected in [false, true] {
-      for manually_disconnected in [false, true] {
-        assert_eq!(
-          connection_status_response(Some(ServerMessage::ConnectionStatus {
-            connected,
-            manually_disconnected,
-          }))
-          .unwrap(),
-          SshConnectionStatusDto {
-            connected,
-            manually_disconnected
-          }
-        );
-      }
-    }
-    let paused = connection_status_response(Some(ServerMessage::Error {
-      code: "ssh_host_disconnected".into(),
-      message: "manually paused".into(),
-    }))
-    .unwrap();
-    assert!(!paused.connected);
-    assert!(paused.manually_disconnected);
-    let error = connection_status_response(Some(ServerMessage::Error {
-      code: "ctld_protocol_error".into(),
-      message: "invalid target".into(),
-    }))
-    .unwrap_err();
-    assert_eq!(error.code, "ctld_protocol_error");
   }
 
   #[tokio::test]

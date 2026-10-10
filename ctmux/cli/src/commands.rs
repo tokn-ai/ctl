@@ -1,8 +1,9 @@
 use super::{Command, ShellCommand, command_spec, shell};
+use ctmux_client::session::{CreateSessionRequest, SessionClient, SessionId};
 use ctmux_client::{
   AttachExitReason, AttachRequest, ClientError as ProtocolError, ClientIdentity,
   DEFAULT_PRESENTATION_WINDOW_BYTES, InteractiveAttachOptions, attach_interactive_with_options,
-  begin_attach, current_terminal_size, get_shell_state, request, resume_attach,
+  current_terminal_size, get_shell_state, request, resume_attach,
 };
 use ctmux_ipc::Stream;
 use ctmux_proto::{
@@ -262,35 +263,33 @@ pub async fn new_session<C: Connector>(
   attach_if_exists: bool,
 ) -> Result<SessionInfo, CommandError> {
   let working_directory = target_working_directory(connector, working_directory)?;
-  let response = target_request(
-    connector,
-    ClientMessage::CreateSession {
+  let stream = connector.connect().await.map_err(connection_error)?;
+  let response = SessionClient::new(stream, client_identity(connector))
+    .create(CreateSessionRequest {
       name: name.clone(),
-      command: command_spec(command),
-      working_directory,
+      command,
+      cwd: working_directory,
       terminal_size: current_terminal_size(),
-    },
-  )
-  .await;
+    })
+    .await
+    .map_err(CommandError::Protocol);
   match response {
-    Ok(ServerMessage::SessionCreated { session }) => Ok(session),
+    Ok(session) => Ok(session),
     Err(
       error @ CommandError::Protocol(ProtocolError::Server {
         code: ErrorCode::SessionAlreadyExists,
         ..
       }),
     ) if attach_if_exists => {
-      let ServerMessage::SessionList { sessions } =
-        target_request(connector, ClientMessage::ListSessions).await?
-      else {
-        return Err(error);
-      };
+      let stream = connector.connect().await.map_err(connection_error)?;
+      let sessions = SessionClient::new(stream, client_identity(connector))
+        .list()
+        .await?;
       sessions
         .into_iter()
         .find(|session| Some(&session.name) == name.as_ref())
         .ok_or(error)
     }
-    Ok(response) => Err(unexpected("session_created", &response)),
     Err(error) => Err(error),
   }
 }
@@ -306,11 +305,10 @@ pub async fn resolve_session<C: Connector>(
   if let Some(selected) = selected {
     return Ok(selected);
   }
-  let ServerMessage::SessionList { sessions } =
-    target_request(connector, ClientMessage::ListSessions).await?
-  else {
-    return Err(CommandError::MissingSession);
-  };
+  let stream = connector.connect().await.map_err(connection_error)?;
+  let sessions = SessionClient::new(stream, client_identity(connector))
+    .list()
+    .await?;
   sessions
     .into_iter()
     .filter(|session| session.status == ctmux_proto::SessionStatus::Running)
@@ -335,21 +333,19 @@ fn show_archives(id: Option<&str>) -> Result<(), CommandError> {
 }
 
 async fn list_sessions<C: Connector>(connector: &C) -> Result<(), CommandError> {
-  match target_request(connector, ClientMessage::ListSessions).await? {
-    ServerMessage::SessionList { sessions } => {
-      if sessions.is_empty() {
-        println!("no sessions");
-        return Ok(());
-      }
-
-      println!("NAME\tID\tSTATUS\tSIZE\tNEXT_SEQUENCE");
-      for session in &sessions {
-        print_session(session);
-      }
-      Ok(())
-    }
-    response => Err(unexpected("session_list", &response)),
+  let stream = connector.connect().await.map_err(connection_error)?;
+  let sessions = SessionClient::new(stream, client_identity(connector))
+    .list()
+    .await?;
+  if sessions.is_empty() {
+    println!("no sessions");
+    return Ok(());
   }
+  println!("NAME\tID\tSTATUS\tSIZE\tNEXT_SEQUENCE");
+  for session in &sessions {
+    print_session(session);
+  }
+  Ok(())
 }
 
 async fn show_shell_state<C: Connector>(connector: &C, session: &str) -> Result<(), CommandError> {
@@ -408,44 +404,40 @@ async fn kill_session<C: Connector>(connector: &C, session: &str) -> Result<(), 
     Ok(ServerMessage::ViewSnapshot { view }) => Some(view),
     _ => None,
   };
-  match target_request(
-    connector,
-    ClientMessage::KillSession {
-      session: session.into(),
+  let stream = connector.connect().await.map_err(connection_error)?;
+  SessionClient::new(stream, client_identity(connector))
+    .terminate(SessionId(
+      view
+        .as_ref()
+        .map_or_else(|| session.to_owned(), |view| view.session_id.clone()),
+    ))
+    .await?;
+  ctmux_client::archive::ArchiveStore::for_client("tui")?.save(
+    ctmux_client::archive::SessionArchive {
+      session_id: view
+        .as_ref()
+        .map_or_else(|| session.to_owned(), |view| view.session_id.clone()),
+      name: view
+        .as_ref()
+        .map_or_else(|| session.to_owned(), |view| view.session_name.clone()),
+      host_key: connector.archive_key(),
+      archived_at_ms: 0,
+      expires_at_ms: 0,
+      terminals: view.map_or_else(Vec::new, |view| {
+        view
+          .terminals
+          .into_iter()
+          .map(|terminal| ctmux_client::archive::ArchivedPane {
+            terminal_id: terminal.terminal_id,
+            reason: "Session terminated".into(),
+            lines: Vec::new(),
+            history_gap: true,
+          })
+          .collect()
+      }),
     },
-  )
-  .await?
-  {
-    ServerMessage::Success => {
-      ctmux_client::archive::ArchiveStore::for_client("tui")?.save(
-        ctmux_client::archive::SessionArchive {
-          session_id: view
-            .as_ref()
-            .map_or_else(|| session.to_owned(), |view| view.session_id.clone()),
-          name: view
-            .as_ref()
-            .map_or_else(|| session.to_owned(), |view| view.session_name.clone()),
-          host_key: connector.archive_key(),
-          archived_at_ms: 0,
-          expires_at_ms: 0,
-          terminals: view.map_or_else(Vec::new, |view| {
-            view
-              .terminals
-              .into_iter()
-              .map(|terminal| ctmux_client::archive::ArchivedPane {
-                terminal_id: terminal.terminal_id,
-                reason: "Session terminated".into(),
-                lines: Vec::new(),
-                history_gap: true,
-              })
-              .collect()
-          }),
-        },
-      )?;
-      Ok(())
-    }
-    response => Err(unexpected("success", &response)),
-  }
+  )?;
+  Ok(())
 }
 
 async fn attach_session<C: Connector>(
@@ -484,7 +476,9 @@ async fn attach_session<C: Connector>(
     let attachment = if let Some(token) = attachment_token.clone() {
       resume_attach(stream, &identity, token, request).await
     } else {
-      begin_attach(stream, &identity, request).await
+      SessionClient::new(stream, identity.clone())
+        .attach(request)
+        .await
     };
     let (stream, attached) = match attachment {
       Ok(attachment) => attachment,

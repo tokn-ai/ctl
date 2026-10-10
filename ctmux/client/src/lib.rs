@@ -2,6 +2,7 @@ pub mod archive;
 pub mod cache;
 pub mod history;
 mod history_sync;
+pub mod session;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, size};
 pub use ctmux_proto::DEFAULT_PRESENTATION_WINDOW_BYTES;
 use ctmux_proto::{
@@ -803,6 +804,15 @@ impl AttachmentControl {
   ///
   /// Returns an error when the controller has already stopped.
   pub async fn acquire_lease(&self, lease: LeaseKind) -> Result<(), AttachmentCommandError> {
+    self.request_lease(lease).await
+  }
+
+  /// Request input or layout ownership; the outcome arrives as a lease event.
+  ///
+  /// Success means the command was queued, not that ownership was granted.
+  /// # Errors
+  /// Returns an error when the controller has already stopped.
+  pub async fn request_lease(&self, lease: LeaseKind) -> Result<(), AttachmentCommandError> {
     self.send(AttachmentCommand::AcquireLease { lease }).await
   }
 

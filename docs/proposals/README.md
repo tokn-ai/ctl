@@ -47,6 +47,7 @@ clarifications and links may update the existing document.
 | [0013](0013-terminal-history.md) | Paged terminal history without blocking live output | Implemented |
 | [0014](0014-shared-panes-tui.md) | Shared pane geometry and terminal client controls | Implemented |
 | [0015](0015-logging-audit.md) | Local diagnostic logs and credential audit history | Implemented |
+| [0016](0016-shared-actions.md) | Shared typed actions across ctl clients | Implemented |
 
 ## Current design and implementation history
 

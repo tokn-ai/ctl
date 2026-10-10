@@ -21,6 +21,8 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, R
 use tokio::process::{ChildStdin, ChildStdout, Command};
 use tokio::sync::watch;
 
+#[cfg(unix)]
+pub mod connection;
 pub mod hosts;
 pub mod local_credentials;
 pub mod maintenance;

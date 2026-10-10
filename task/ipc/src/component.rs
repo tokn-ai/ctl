@@ -21,7 +21,15 @@ pub struct ComponentStatus {
 /// # Errors
 /// Returns connection, timeout, and malformed-response errors.
 pub async fn component_status() -> io::Result<Option<ComponentStatus>> {
-  tokio::time::timeout(Duration::from_secs(3), probe(&super::socket_path()))
+  component_status_at(&super::socket_path()).await
+}
+
+/// Reads one selected task owner without starting it or listing/changing tasks.
+///
+/// # Errors
+/// Returns connection, timeout, and malformed-response errors.
+pub async fn component_status_at(path: &Path) -> io::Result<Option<ComponentStatus>> {
+  tokio::time::timeout(Duration::from_secs(3), probe(path))
     .await
     .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "ctl-taskd version check timed out"))?
 }
@@ -177,7 +185,7 @@ mod tests {
           .is_none()
       );
     });
-    let status = probe(&path).await.unwrap().unwrap();
+    let status = component_status_at(&path).await.unwrap().unwrap();
     assert!(!status.protocol_mismatch);
     assert_eq!(status.protocol_version, Some(data_latest));
     assert_eq!(

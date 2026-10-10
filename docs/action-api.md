@@ -71,7 +71,10 @@ command registry/parser; related UI flows may still use the operation.
 | `task.create/list/show/start/stop/restart/remove` | `task …` | Task views/flows; supported subset | No direct command | ctl-taskd |
 | `task.logs/attach` | `task logs/attach` | Task views/flows | No direct command | ctl-taskd + stream adapter |
 | `task_definition.save/list/remove` | `task save/definitions …` | Task definition editor | No direct command | Client catalog |
-| `component.inspect/update/restart` | `components …`; `taskd restart` | Component controls; `daemon.restart`; `ctl-taskd.restart` | No direct command | Existing maintenance services |
+| `component.inspect` | `components status` | Component versions/About | No direct command | Existing maintenance services; passive |
+| `component.update` | `components update` | Component update flow | No direct command | Existing maintenance services |
+| `component.restart` | `components restart`; `taskd restart` | Component controls; `daemon.restart`; `ctl-taskd.restart` | No direct command | Existing maintenance services |
+| `component_bundle.list/import/select` | `components list/sync/select` | Bundle inventory and selection | No direct command | Client bundle store |
 | `history.logs/audit.read` | `logs`; `audit` | Credential/audit UI | No direct command | Local history reader |
 | `ui.session.select` | Interactive selection | `session.select` | `switch-client` | Client UI |
 | `ui.pane.focus` | Interactive focus | `terminal.focus` and pane focus controls | `select-pane`; `last-pane` | Client UI |
@@ -81,6 +84,29 @@ command registry/parser; related UI flows may still use the operation.
 SSH/scp compatibility, exec, setup, credential management, and VPN enrollment
 remain separate existing flows. Inventory their typed APIs when migrating those
 domains; do not reinterpret arbitrary OpenSSH argv as generic action arguments.
+
+## Implemented coverage
+
+The table above maps commands to possible actions; it does not mean every row
+uses one shared action implementation. This table records the current boundary
+so a command's implementation status can be checked without inferring it from
+the proposal status.
+
+| Entry points | Shared execution today | Remaining adapter work |
+| --- | --- | --- |
+| `host status/connect/disconnect`; desktop connection flows | `ctl_client::connection::ConnectionClient` | Target selection, prompts, and presentation |
+| `ctmux list/new/kill/attach`; desktop and TUI session flows | `ctmux_client::session::SessionClient` | Target selection, UI session lifecycle, and presentation |
+| Attachment detach and input/layout leases | `ctmux_client::AttachmentControl` | Controller ownership and UI lease events |
+| Local `components status`; desktop local About rows | `ctl_client::component_status::observe_local` passively inspects the chosen owner endpoint | Available-helper discovery, compatibility/status presentation, and desktop SSH/VPN owner selection |
+| Remote `components status` and remote `ctmuxd` restart | `ctl_client::maintenance` inspection and prepared restart | CLI target selection and confirmation; desktop remote observation and confirmation |
+| `components list/sync/select`; desktop bundle inventory and selection | `ctl_client::components` inventory, import, and selection | Source discovery, progress, and output |
+| `components update`; desktop component update | `ctl_client::component_update` prepare and install | Target orchestration, prompts, and progress |
+| Local `components restart`; desktop local component restart | Owner lifecycle preflight/restart APIs, called by each adapter | Shared typed local restart action; preserve pinned owner and confirmation semantics |
+| Host catalog, port forwarding, VPN, tasks, terminal/layout, archives, history, and other entries above | Existing domain-specific APIs vary | Inventory and migrate only where execution remains duplicated |
+
+`ctmux :` mode has no component or task commands. A shared client action does
+not add a command to another surface. The component status extraction does not
+prepare a helper, start a service, or change how “Available build” is selected.
 
 ## Names and effects
 
@@ -105,7 +131,7 @@ Avoid domain-level `toggle` methods: translate UI toggles into explicit lease
 request/release or desired state. A request remains subject to the owner's
 current lease state; observing an enabled button does not grant ownership.
 
-## Initial implemented APIs
+## Implemented APIs
 
 These are concrete APIs in existing libraries, with no new daemon or crate.
 The signatures below omit implementation bodies; the linked Rust files are
@@ -209,6 +235,17 @@ proposal sketch, invoking it does not consume every clone or complete frontend
 cleanup synchronously. The owning frontend closes its controller and releases
 resources. Existing output, input, checkpoint, history, and layout interfaces
 remain intact.
+
+### Local component observation in ctl-client
+
+`ctl_client::component_status::observe_local(owner, socket)` takes a typed
+`LocalOwner` (`Ctld`, `Ctmuxd`, or `CtlTaskd`) and an explicit owner socket. It
+returns a `LocalObservation` with `Absent`, `Legacy`, or `Running` state,
+reported build and protocols, legacy protocols, protocol mismatch, and restart
+support. The CLI uses it for local `components status`; desktop About uses it
+for its selected SSH/VPN ctld owners and local ctmuxd/taskd. Observation only
+contacts an existing owner. Each frontend still discovers an available helper
+and computes its own display and restart policy.
 
 ### Adapter boundaries
 

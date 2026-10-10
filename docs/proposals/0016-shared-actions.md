@@ -3,6 +3,11 @@
 - Status: Implemented
 - Created: 2026-10-10
 
+“Implemented” covers the initial connection, session, and attachment APIs
+specified below. Additional domains are incremental work; the
+[coverage table](../action-api.md#implemented-coverage) distinguishes shared
+actions, existing shared primitives, and adapter-owned work.
+
 ## Summary
 
 Define a shared, typed application API for ctl subcommands, desktop commands,

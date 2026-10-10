@@ -1053,8 +1053,8 @@ struct ConnectionAuthentication {
 }
 
 impl ConnectionAuthentication {
+  #[cfg(target_os = "macos")]
   fn check_approval(&self) -> Result<(), RequestError> {
-    #[cfg(target_os = "macos")]
     if self.authorization.reuse_failed() {
       return Err(RequestError::AuthenticationRequired);
     }
@@ -1186,6 +1186,7 @@ async fn wait_for_master(
   let mut diagnostics = retain_diagnostics(child);
   let deadline = Instant::now() + MASTER_START_TIMEOUT;
   loop {
+    #[cfg(target_os = "macos")]
     authentication.check_approval()?;
     // This is a master we have just started: socket publication can precede
     // readiness. Retry observations within the startup deadline, without
@@ -1234,6 +1235,7 @@ async fn wait_for_master(
     if let Some(status) = child.try_wait().map_err(RequestError::StartMaster)?
       && (!status.success() || endpoint.shared)
     {
+      #[cfg(target_os = "macos")]
       authentication.check_approval()?;
       let message = if let Some(task) = diagnostics.take() {
         tokio::time::timeout(Duration::from_secs(1), task)
@@ -1364,6 +1366,7 @@ async fn answer_prompt(
   warning: Option<String>,
   authentication: &mut ConnectionAuthentication,
 ) -> Result<(), RequestError> {
+  #[cfg(target_os = "macos")]
   authentication.check_approval()?;
   let cacheable = !prompt.confirm && cacheable_prompt(&prompt.message);
   #[cfg(target_os = "macos")]
@@ -1401,6 +1404,7 @@ async fn answer_prompt(
   #[cfg(not(target_os = "macos"))]
   let _ = (target, &authentication.attempted_stored);
 
+  #[cfg(target_os = "macos")]
   if let Err(error) = authentication.check_approval() {
     // A previously approved credential must not switch to a native dialog,
     // another selector, or a manual-password prompt during the same attempt.

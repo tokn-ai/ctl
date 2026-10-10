@@ -1,5 +1,6 @@
 #![cfg(unix)]
 
+use ctmux_proto::{SplitAxis, ViewInfo, ViewLayout};
 use std::{
   os::unix::fs::PermissionsExt,
   path::PathBuf,
@@ -57,6 +58,10 @@ impl Daemon {
     );
     String::from_utf8(output.stdout).unwrap()
   }
+
+  fn view(&self, args: &[&str]) -> ViewInfo {
+    serde_json::from_str(&self.success(args)).unwrap()
+  }
 }
 
 impl Drop for Daemon {
@@ -100,4 +105,98 @@ async fn tmux_create_attach_existing_and_noninteractive_safety() {
   let archives = daemon.success(&["archives"]);
   assert!(archives.contains("work"));
   assert!(archives.contains("other"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn terminal_commands_preserve_layout_selectors_argv_and_cwd() {
+  let daemon = Daemon::start().await;
+  daemon.success(&["new", "-ds", "work", "--", "/bin/sh"]);
+  let original = daemon.view(&["view", "work"]);
+  assert_eq!(original.terminals.len(), 1);
+  let original_terminal = &original.terminals[0].terminal_id;
+
+  let cwd = daemon.directory.to_str().unwrap();
+  let split = daemon.view(&[
+    "split",
+    original_terminal,
+    "--vertical",
+    "--cwd",
+    cwd,
+    "--",
+    "/bin/sh",
+    "-c",
+    "printf '%s\\n' \"$1\" > split-argv.txt; exec /bin/sh",
+    "ctl-split",
+    "argument with spaces",
+  ]);
+  assert_eq!(split.session_id, original.session_id);
+  assert!(split.revision > original.revision);
+  assert_eq!(split.terminals.len(), 2);
+  assert!(matches!(
+    split.layout,
+    ViewLayout::Split {
+      axis: SplitAxis::Vertical,
+      ..
+    }
+  ));
+  timeout(Duration::from_secs(5), async {
+    while std::fs::read_to_string(daemon.directory.join("split-argv.txt"))
+      .ok()
+      .as_deref()
+      != Some("argument with spaces\n")
+    {
+      sleep(Duration::from_millis(10)).await;
+    }
+  })
+  .await
+  .expect("split command preserves its arguments and working directory");
+  let split_terminal = split
+    .terminals
+    .iter()
+    .find(|terminal| terminal.terminal_id != *original_terminal)
+    .unwrap()
+    .terminal_id
+    .clone();
+
+  let promoted = daemon.view(&["promote", &split_terminal, "--name", "other"]);
+  assert_eq!(promoted.session_name, "other");
+  assert_ne!(promoted.session_id, original.session_id);
+  assert_eq!(promoted.terminals.len(), 1);
+  assert_eq!(promoted.terminals[0].terminal_id, split_terminal);
+  assert_eq!(
+    daemon.view(&["view", &original.session_id]).terminals.len(),
+    1
+  );
+
+  let merged = daemon.view(&["merge", &promoted.session_id, "work"]);
+  assert_eq!(merged.session_id, original.session_id);
+  assert_eq!(merged.terminals.len(), 2);
+  assert!(
+    !daemon
+      .command(&["view", &promoted.session_id])
+      .status
+      .success()
+  );
+
+  assert_eq!(daemon.success(&["kill-terminal", &split_terminal]), "");
+  // Kill acknowledges the signal; the child waiter then updates the layout.
+  let remaining = timeout(Duration::from_secs(5), async {
+    loop {
+      let view = daemon.view(&["view", "work"]);
+      if view.terminals.len() == 1 {
+        break view;
+      }
+      sleep(Duration::from_millis(10)).await;
+    }
+  })
+  .await
+  .expect("terminated terminal leaves its siblings running");
+  assert_eq!(remaining.terminals.len(), 1);
+  assert_eq!(remaining.terminals[0].terminal_id, *original_terminal);
+  assert!(
+    !daemon
+      .command(&["kill-terminal", &split_terminal])
+      .status
+      .success()
+  );
 }

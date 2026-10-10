@@ -1,8 +1,10 @@
-use super::{client_identity, unexpected_response};
+use super::client_identity;
 use crate::dto::{ConnectionTargetDto, TerminalSizeDto};
 use crate::error::{CommandErrorDto, CommandResult};
 use crate::transport;
-use ctmux_proto::{ClientMessage, ServerMessage, SplitAxis, ViewLayout};
+use ctmux_client::session::SessionId;
+use ctmux_client::view::{SplitTerminalRequest, TerminalId, UpdateViewRequest, ViewClient};
+use ctmux_proto::{SplitAxis, ViewLayout};
 use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize)]
@@ -89,53 +91,90 @@ impl From<ctmux_proto::ViewInfo> for ViewDto {
 
 #[tauri::command]
 pub async fn session_view(request: ViewRequest) -> CommandResult<Option<ViewDto>> {
-  let message = match request.action {
-    ViewAction::Get { session_id } => ClientMessage::GetView {
-      session: session_id,
-    },
+  let result = match request.action {
+    ViewAction::Get { session_id } => view_client(&request.target)
+      .await?
+      .get(SessionId(session_id))
+      .await
+      .map(Some),
     ViewAction::Split {
       terminal_id,
       axis,
       terminal_size,
       working_directory,
-    } => ClientMessage::SplitTerminal {
-      terminal_id,
-      axis,
-      command: None,
-      working_directory,
-      terminal_size: terminal_size.into_proto()?,
-    },
+    } => {
+      // Validate DTO values before connecting or requesting authentication.
+      let parameters = SplitTerminalRequest {
+        terminal_id: TerminalId(terminal_id),
+        axis,
+        command: Vec::new(),
+        cwd: working_directory,
+        terminal_size: terminal_size.into_proto()?,
+      };
+      view_client(&request.target)
+        .await?
+        .split(parameters)
+        .await
+        .map(Some)
+    }
     ViewAction::Update {
       session_id,
       expected_revision,
       layout,
-    } => ClientMessage::UpdateView {
-      session: session_id,
-      expected_revision: expected_revision
-        .parse()
-        .map_err(CommandErrorDto::backend)?,
-      layout,
-    },
-    ViewAction::Promote { terminal_id, name } => {
-      ClientMessage::PromoteTerminal { terminal_id, name }
+    } => {
+      let parameters = UpdateViewRequest {
+        session_id: SessionId(session_id),
+        expected_revision: expected_revision
+          .parse()
+          .map_err(CommandErrorDto::backend)?,
+        layout,
+      };
+      view_client(&request.target)
+        .await?
+        .update(parameters)
+        .await
+        .map(Some)
     }
+    ViewAction::Promote { terminal_id, name } => view_client(&request.target)
+      .await?
+      .promote(TerminalId(terminal_id), name)
+      .await
+      .map(Some),
     ViewAction::Merge {
       source,
       destination,
-    } => ClientMessage::MergeSessions {
-      source,
-      destination,
-    },
-    ViewAction::KillTerminal { terminal_id } => ClientMessage::KillTerminal { terminal_id },
+    } => view_client(&request.target)
+      .await?
+      .merge(SessionId(source), SessionId(destination))
+      .await
+      .map(Some),
+    ViewAction::KillTerminal { terminal_id } => view_client(&request.target)
+      .await?
+      .terminate_terminal(TerminalId(terminal_id))
+      .await
+      .map(|()| None),
   };
-  let stream = transport::connect(&request.target).await?;
-  match ctmux_client::request(stream, &client_identity(), message)
-    .await
-    .map_err(CommandErrorDto::client)?
-  {
-    ServerMessage::ViewSnapshot { view } => Ok(Some(view.into())),
-    ServerMessage::Success => Ok(None),
-    response => Err(unexpected_response("view_snapshot", &response)),
+  result
+    .map(|view| view.map(ViewDto::from))
+    .map_err(view_error)
+}
+
+async fn view_client(
+  target: &ConnectionTargetDto,
+) -> CommandResult<ViewClient<ctl_client::Transport>> {
+  Ok(ViewClient::new(
+    transport::connect(target).await?,
+    client_identity(),
+  ))
+}
+
+fn view_error(error: ctmux_client::ClientError) -> CommandErrorDto {
+  match error {
+    ctmux_client::ClientError::UnexpectedResponse { expected, .. } => CommandErrorDto::new(
+      "unexpected_ctmux_response",
+      format!("expected {expected}, received another response type"),
+    ),
+    error => CommandErrorDto::client(error),
   }
 }
 
@@ -143,6 +182,27 @@ pub async fn session_view(request: ViewRequest) -> CommandResult<Option<ViewDto>
 mod tests {
   use super::*;
   use ctmux_proto::{PaneGeometry, TerminalInfo, TerminalSize, ViewInfo};
+
+  #[test]
+  fn view_errors_preserve_desktop_codes_without_exposing_response_contents() {
+    for expected in ["view_snapshot", "success"] {
+      let error = view_error(ctmux_client::ClientError::UnexpectedResponse {
+        expected,
+        actual: "private response contents".into(),
+      });
+      assert_eq!(error.code, "unexpected_ctmux_response");
+      assert_eq!(
+        error.message,
+        format!("expected {expected}, received another response type")
+      );
+    }
+    let error = view_error(ctmux_client::ClientError::Server {
+      code: ctmux_proto::ErrorCode::InvalidRequest,
+      message: "view revision changed".into(),
+    });
+    assert_eq!(error.code, "invalid_request");
+    assert_eq!(error.message, "view revision changed");
+  }
 
   #[test]
   fn view_event_keeps_hidden_members_and_base_geometry_while_reporting_zoom() {

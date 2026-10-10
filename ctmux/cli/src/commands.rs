@@ -1,13 +1,14 @@
-use super::{Command, ShellCommand, command_spec, shell};
+use super::{Command, ShellCommand, shell};
 use ctmux_client::session::{CreateSessionRequest, SessionClient, SessionId};
+use ctmux_client::view::{SplitTerminalRequest, TerminalId, ViewClient};
 use ctmux_client::{
   AttachExitReason, AttachRequest, ClientError as ProtocolError, ClientIdentity,
   DEFAULT_PRESENTATION_WINDOW_BYTES, InteractiveAttachOptions, attach_interactive_with_options,
-  current_terminal_size, get_shell_state, request, resume_attach,
+  current_terminal_size, get_shell_state, resume_attach,
 };
 use ctmux_ipc::Stream;
 use ctmux_proto::{
-  ClientMessage, CodecError, ErrorCode, PromptPhase, ServerMessage, SessionInfo, ShellType, TuiHint,
+  CodecError, ErrorCode, PromptPhase, SessionInfo, ShellType, SplitAxis, TuiHint, ViewInfo,
 };
 use std::error::Error;
 use std::future::Future;
@@ -158,54 +159,63 @@ where
       println!("{}\t{}", session.session_id, session.name);
       Ok(())
     }
-    Command::View { session } => show_view(connector, ClientMessage::GetView { session }).await,
+    Command::View { session } => {
+      print_view(
+        &view_client(connector)
+          .await?
+          .get(SessionId(session))
+          .await?,
+      );
+      Ok(())
+    }
     Command::Split {
       terminal_id,
       vertical,
       cwd,
       command,
     } => {
-      show_view(
-        connector,
-        ClientMessage::SplitTerminal {
-          terminal_id,
+      let view = view_client(connector)
+        .await?
+        .split(SplitTerminalRequest {
+          terminal_id: TerminalId(terminal_id),
           axis: if vertical {
-            ctmux_proto::SplitAxis::Vertical
+            SplitAxis::Vertical
           } else {
-            ctmux_proto::SplitAxis::Horizontal
+            SplitAxis::Horizontal
           },
-          command: command_spec(command),
-          working_directory: cwd,
+          command,
+          cwd,
           terminal_size: current_terminal_size(),
-        },
-      )
-      .await
+        })
+        .await?;
+      print_view(&view);
+      Ok(())
     }
     Command::Promote { terminal_id, name } => {
-      show_view(
-        connector,
-        ClientMessage::PromoteTerminal { terminal_id, name },
-      )
-      .await
+      let view = view_client(connector)
+        .await?
+        .promote(TerminalId(terminal_id), name)
+        .await?;
+      print_view(&view);
+      Ok(())
     }
     Command::Merge {
       source,
       destination,
     } => {
-      show_view(
-        connector,
-        ClientMessage::MergeSessions {
-          source,
-          destination,
-        },
-      )
-      .await
+      let view = view_client(connector)
+        .await?
+        .merge(SessionId(source), SessionId(destination))
+        .await?;
+      print_view(&view);
+      Ok(())
     }
     Command::KillTerminal { terminal_id } => {
-      match target_request(connector, ClientMessage::KillTerminal { terminal_id }).await? {
-        ServerMessage::Success => Ok(()),
-        response => Err(unexpected("success", &response)),
-      }
+      view_client(connector)
+        .await?
+        .terminate_terminal(TerminalId(terminal_id))
+        .await?;
+      Ok(())
     }
     Command::List => list_sessions(connector).await,
     Command::Archives => show_archives(None),
@@ -235,20 +245,16 @@ where
   }
 }
 
-async fn show_view<C: Connector>(
-  connector: &C,
-  message: ClientMessage,
-) -> Result<(), CommandError> {
-  match target_request(connector, message).await? {
-    ServerMessage::ViewSnapshot { view } => {
-      println!(
-        "{}",
-        serde_json::to_string_pretty(&view).expect("view serialization")
-      );
-      Ok(())
-    }
-    response => Err(unexpected("view_snapshot", &response)),
-  }
+async fn view_client<C: Connector>(connector: &C) -> Result<ViewClient<C::Stream>, CommandError> {
+  let stream = connector.connect().await.map_err(connection_error)?;
+  Ok(ViewClient::new(stream, client_identity(connector)))
+}
+
+fn print_view(view: &ViewInfo) {
+  println!(
+    "{}",
+    serde_json::to_string_pretty(view).expect("view serialization")
+  );
 }
 
 /// Create a session, or reuse an exact name when requested.
@@ -393,16 +399,9 @@ async fn show_shell_state<C: Connector>(connector: &C, session: &str) -> Result<
 }
 
 async fn kill_session<C: Connector>(connector: &C, session: &str) -> Result<(), CommandError> {
-  let view = match target_request(
-    connector,
-    ClientMessage::GetView {
-      session: session.into(),
-    },
-  )
-  .await
-  {
-    Ok(ServerMessage::ViewSnapshot { view }) => Some(view),
-    _ => None,
+  let view = match view_client(connector).await {
+    Ok(client) => client.get(SessionId(session.into())).await.ok(),
+    Err(_) => None,
   };
   let stream = connector.connect().await.map_err(connection_error)?;
   SessionClient::new(stream, client_identity(connector))
@@ -548,14 +547,6 @@ async fn attach_session<C: Connector>(
   }
 }
 
-async fn target_request<C: Connector>(
-  connector: &C,
-  message: ClientMessage,
-) -> Result<ServerMessage, CommandError> {
-  let stream = connect(connector).await?;
-  Ok(request(stream, &client_identity(connector), message).await?)
-}
-
 async fn connect<C: Connector>(connector: &C) -> Result<C::Stream, CommandError> {
   connector.connect().await.map_err(connection_error)
 }
@@ -649,13 +640,6 @@ async fn wait_to_reconnect(
   );
   sleep(*delay).await;
   *delay = delay.saturating_mul(2).min(MAX_RECONNECT_DELAY);
-}
-
-fn unexpected(expected: &'static str, response: &ServerMessage) -> CommandError {
-  CommandError::UnexpectedResponse {
-    expected,
-    actual: format!("{response:?}"),
-  }
 }
 
 fn connection_error(error: impl Error + Send + Sync + 'static) -> CommandError {

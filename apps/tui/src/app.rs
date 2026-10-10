@@ -14,11 +14,13 @@ use crate::{
 use crossterm::event::{
   Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
-use ctmux_client::session::{CreateSessionRequest, SessionClient};
-use ctmux_proto::{
-  ClientMessage, LeaseKind, ServerMessage, SessionInfo, SessionStatus, SplitAxis, TerminalSize,
-  ViewInfo,
+use ctmux_client::{
+  session::{CreateSessionRequest, SessionClient, SessionId},
+  view::{SplitTerminalRequest, TerminalId, ViewClient},
 };
+#[cfg(all(test, unix))]
+use ctmux_proto::{ClientMessage, ServerMessage};
+use ctmux_proto::{LeaseKind, SessionInfo, SessionStatus, SplitAxis, TerminalSize, ViewInfo};
 use std::{
   collections::{BTreeMap, BTreeSet},
   io,
@@ -151,6 +153,7 @@ impl App<'_> {
     }
   }
 
+  #[cfg(all(test, unix))]
   async fn request(&self, message: ClientMessage) -> Result<ServerMessage> {
     timeout(Duration::from_secs(5), async {
       let local = LocalTransport(self.socket.clone());
@@ -164,6 +167,25 @@ impl App<'_> {
     let local = LocalTransport(self.socket.clone());
     let stream = self.transport.unwrap_or(&local).connect().await?;
     Ok(SessionClient::new(stream, identity()))
+  }
+
+  async fn view_client(&self) -> Result<ViewClient<crate::transport::Stream>> {
+    let local = LocalTransport(self.socket.clone());
+    let stream = self.transport.unwrap_or(&local).connect().await?;
+    Ok(ViewClient::new(stream, identity()))
+  }
+
+  async fn get_view(&self, session: &str) -> Result<ViewInfo> {
+    timeout(Duration::from_secs(5), async {
+      Ok::<_, crate::Error>(
+        self
+          .view_client()
+          .await?
+          .get(SessionId(session.into()))
+          .await?,
+      )
+    })
+    .await?
   }
 
   fn archive_key(&self) -> String {
@@ -307,25 +329,15 @@ impl App<'_> {
   }
 
   async fn find_view(&self, selector: &str) -> Result<ViewInfo> {
-    let request = self
-      .request(ClientMessage::GetView {
-        session: selector.into(),
-      })
-      .await;
+    let request = self.get_view(selector).await;
     match request {
-      Ok(ServerMessage::ViewSnapshot { view }) => Ok(view),
-      Ok(_) => Err("expected view snapshot".into()),
+      Ok(view) => Ok(view),
       Err(error) if session_not_found(&error) => {
         // A terminal ID is also a valid attachment target. GetView itself takes
         // a root selector, so resolve membership without taking any leases.
         for root in &self.sessions {
-          match self
-            .request(ClientMessage::GetView {
-              session: root.session_id.clone(),
-            })
-            .await
-          {
-            Ok(ServerMessage::ViewSnapshot { view })
+          match self.get_view(&root.session_id).await {
+            Ok(view)
               if view
                 .terminals
                 .iter()
@@ -416,21 +428,13 @@ impl App<'_> {
     let Some(view) = &self.view else {
       return Ok(());
     };
-    let response = self
-      .request(ClientMessage::GetView {
-        session: view.session_id.clone(),
-      })
-      .await;
-    let response = match response {
-      Ok(response) => response,
+    let view = match self.get_view(&view.session_id).await {
+      Ok(view) => view,
       Err(error) if session_not_found(&error) => {
         self.ended = Some("Session no longer exists — press any key to exit".into());
         return Ok(());
       }
       Err(error) => return Err(error),
-    };
-    let ServerMessage::ViewSnapshot { view } = response else {
-      return Err("expected view snapshot".into());
     };
     self.adopt_view(view).await
   }
@@ -1773,27 +1777,32 @@ impl App<'_> {
       return Ok(());
     }
     let previous: Vec<_> = self.panes.keys().cloned().collect();
-    let response = self
-      .request(ClientMessage::SplitTerminal {
-        terminal_id: self.focused.clone(),
-        axis,
-        command: None,
-        working_directory: None,
-        terminal_size: self.canvas_size(),
-      })
-      .await?;
-    if let ServerMessage::ViewSnapshot { view } = response {
-      let target = view
-        .panes
-        .iter()
-        .find(|pane| !previous.contains(&pane.terminal_id))
-        .map(|pane| pane.terminal_id.clone());
-      self.view = Some(view);
-      if let Some(target) = target {
-        self.focus_pane(target);
-      }
-      self.reconcile().await?;
+    let view = timeout(Duration::from_secs(5), async {
+      Ok::<_, crate::Error>(
+        self
+          .view_client()
+          .await?
+          .split(SplitTerminalRequest {
+            terminal_id: TerminalId(self.focused.clone()),
+            axis,
+            command: Vec::new(),
+            cwd: None,
+            terminal_size: self.canvas_size(),
+          })
+          .await?,
+      )
+    })
+    .await??;
+    let target = view
+      .panes
+      .iter()
+      .find(|pane| !previous.contains(&pane.terminal_id))
+      .map(|pane| pane.terminal_id.clone());
+    self.view = Some(view);
+    if let Some(target) = target {
+      self.focus_pane(target);
     }
+    self.reconcile().await?;
     Ok(())
   }
 
@@ -1897,9 +1906,16 @@ impl App<'_> {
         let id = id.clone();
         self.overlay = Overlay::None;
         if key.code == KeyCode::Char('y') && !id.is_empty() {
-          self
-            .request(ClientMessage::KillTerminal { terminal_id: id })
-            .await?;
+          timeout(Duration::from_secs(5), async {
+            Ok::<_, crate::Error>(
+              self
+                .view_client()
+                .await?
+                .terminate_terminal(TerminalId(id))
+                .await?,
+            )
+          })
+          .await??;
           self.refresh().await?;
         }
       }

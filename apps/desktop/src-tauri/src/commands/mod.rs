@@ -12,7 +12,6 @@ use ctmux_client::{
   AttachRequest, AttachmentController, AttachmentControllerOptions, ClientIdentity,
   DEFAULT_PRESENTATION_WINDOW_BYTES, get_shell_state,
 };
-use ctmux_proto::ServerMessage;
 use tauri::ipc::Channel;
 use tauri::{State, WebviewWindow};
 use tokio::task::JoinSet;
@@ -558,13 +557,6 @@ fn client_identity() -> ClientIdentity {
     name: CLIENT_NAME.into(),
     version: CLIENT_VERSION.into(),
   }
-}
-
-fn unexpected_response(expected: &str, _actual: &ServerMessage) -> CommandErrorDto {
-  CommandErrorDto::new(
-    "unexpected_ctmux_response",
-    format!("expected {expected}, received another response type"),
-  )
 }
 
 #[cfg(test)]

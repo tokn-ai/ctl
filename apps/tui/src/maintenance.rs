@@ -3,9 +3,11 @@ use crate::{
   pane::{Pane, ReconnectLeases},
   transport::{LocalTransport, Transport},
 };
-use ctmux_proto::{
-  ClientMessage, ServerMessage, SessionInfo, SessionStatus, TerminalSize, ViewInfo,
+use ctmux_client::{
+  session::{SessionClient, SessionId},
+  view::ViewClient,
 };
+use ctmux_proto::{SessionInfo, SessionStatus, TerminalSize, ViewInfo};
 use std::{
   collections::BTreeMap, future::Future, path::PathBuf, pin::Pin, task::Poll, time::Duration,
 };
@@ -72,22 +74,31 @@ impl<'a> Maintenance<'a> {
       job: Box::pin(async move {
         let local = LocalTransport(socket);
         let transport = transport.unwrap_or(&local);
-        let ServerMessage::SessionList { mut sessions } =
-          request(transport, ClientMessage::ListSessions).await?
-        else {
-          return Err("expected session list".into());
-        };
+        let mut sessions = timeout(async {
+          let stream = transport.connect().await?;
+          Ok(
+            SessionClient::new(stream, crate::pane::identity())
+              .list()
+              .await?,
+          )
+        })
+        .await?;
         sessions.retain(|session| session.status == SessionStatus::Running);
         sessions.sort_by_key(|session| (session.created_at_ms, session.session_id.clone()));
         let view = if let Some(session) = session
           && sessions.iter().any(|root| root.session_id == session)
         {
-          let ServerMessage::ViewSnapshot { view } =
-            request(transport, ClientMessage::GetView { session }).await?
-          else {
-            return Err("expected view snapshot".into());
-          };
-          Some(view)
+          Some(
+            timeout(async {
+              let stream = transport.connect().await?;
+              Ok(
+                ViewClient::new(stream, crate::pane::identity())
+                  .get(SessionId(session))
+                  .await?,
+              )
+            })
+            .await?,
+          )
         } else {
           None
         };
@@ -206,14 +217,6 @@ fn needs_user_action<T>(transport: Option<&dyn Transport>, result: &Result<T>) -
 
 async fn timeout<T>(job: impl Future<Output = Result<T>>) -> Result<T> {
   tokio::time::timeout(REQUEST_TIMEOUT, job).await?
-}
-
-async fn request(transport: &dyn Transport, message: ClientMessage) -> Result<ServerMessage> {
-  timeout(async {
-    let stream = transport.connect().await?;
-    Ok(ctmux_client::request(stream, &crate::pane::identity(), message).await?)
-  })
-  .await
 }
 
 #[cfg(test)]

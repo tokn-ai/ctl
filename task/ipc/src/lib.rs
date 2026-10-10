@@ -1,6 +1,6 @@
 //! Per-user transport shared by ctl-taskd and its clients.
 mod component;
-pub use component::{ComponentStatus, component_status};
+pub use component::{ComponentStatus, component_status, component_status_at};
 use std::path::{Path, PathBuf};
 use std::{env, io};
 

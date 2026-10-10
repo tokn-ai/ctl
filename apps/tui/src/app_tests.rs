@@ -10,6 +10,128 @@ struct RelayTransport {
   fail_next: std::sync::atomic::AtomicBool,
 }
 
+struct ReplyTransport(std::sync::Mutex<Option<tokio::io::DuplexStream>>);
+
+impl crate::Transport for ReplyTransport {
+  fn connect(&self) -> crate::ConnectFuture<'_> {
+    Box::pin(async move {
+      let stream = self
+        .0
+        .lock()
+        .unwrap()
+        .take()
+        .ok_or("unexpected reconnect")?;
+      Ok(Box::new(stream) as crate::Stream)
+    })
+  }
+
+  fn archive_key(&self) -> String {
+    "reply-fixture".into()
+  }
+}
+
+fn reply_transport(
+  expected: ClientMessage,
+  reply: ServerMessage,
+) -> (ReplyTransport, tokio::task::JoinHandle<()>) {
+  let (stream, mut server) = tokio::io::duplex(4096);
+  let peer = tokio::spawn(async move {
+    assert!(matches!(
+      ctmux_proto::read_frame::<_, ClientMessage>(&mut server)
+        .await
+        .unwrap(),
+      Some(ClientMessage::Handshake { client_name, .. }) if client_name == "ctmux-tui"
+    ));
+    ctmux_proto::write_frame(
+      &mut server,
+      &ServerMessage::HandshakeAccepted {
+        protocol_version: ctmux_proto::PROTOCOL_VERSION,
+        protocols: vec![ctmux_proto::protocol_info()],
+        server_version: "test".into(),
+        build: None,
+        heartbeat_interval_ms: 1_000,
+        attachment_liveness_timeout_ms: 3_000,
+      },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+      ctmux_proto::read_frame::<_, ClientMessage>(&mut server)
+        .await
+        .unwrap(),
+      Some(expected)
+    );
+    ctmux_proto::write_frame(&mut server, &reply).await.unwrap();
+    assert!(
+      ctmux_proto::read_frame::<_, ClientMessage>(&mut server)
+        .await
+        .unwrap()
+        .is_none()
+    );
+  });
+  (ReplyTransport(std::sync::Mutex::new(Some(stream))), peer)
+}
+
+#[tokio::test]
+async fn split_rejects_generic_success_without_changing_focus_or_view() -> Result<()> {
+  let (transport, peer) = reply_transport(
+    ClientMessage::SplitTerminal {
+      terminal_id: "selected-terminal".into(),
+      axis: SplitAxis::Horizontal,
+      command: None,
+      working_directory: None,
+      terminal_size: TerminalSize::default(),
+    },
+    ServerMessage::Success,
+  );
+  let mut app = App::new(PathBuf::new(), false, input::parse_prefix("Ctrl+b")?);
+  app.size = (80, 25);
+  app.focused = "selected-terminal".into();
+  app.transport = Some(&transport);
+  let error = app.split(SplitAxis::Horizontal).await.unwrap_err();
+  assert!(matches!(
+    error.downcast_ref::<ctmux_client::ClientError>(),
+    Some(ctmux_client::ClientError::UnexpectedResponse {
+      expected: "view_snapshot",
+      ..
+    })
+  ));
+  assert_eq!(app.focused, "selected-terminal");
+  assert!(app.view.is_none());
+  assert!(app.panes.is_empty());
+  peer.await?;
+  Ok(())
+}
+
+#[tokio::test]
+async fn terminate_rejects_non_success_without_refreshing_or_replaying() -> Result<()> {
+  let (transport, peer) = reply_transport(
+    ClientMessage::KillTerminal {
+      terminal_id: "selected-terminal".into(),
+    },
+    ServerMessage::SessionList {
+      sessions: Vec::new(),
+    },
+  );
+  let mut app = App::new(PathBuf::new(), false, input::parse_prefix("Ctrl+b")?);
+  app.overlay = Overlay::Kill("selected-terminal".into());
+  app.transport = Some(&transport);
+  let error = app
+    .overlay_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE))
+    .await
+    .unwrap_err();
+  assert!(matches!(
+    error.downcast_ref::<ctmux_client::ClientError>(),
+    Some(ctmux_client::ClientError::UnexpectedResponse {
+      expected: "success",
+      ..
+    })
+  ));
+  assert!(matches!(app.overlay, Overlay::None));
+  peer.await?;
+  Ok(())
+}
+
 impl crate::Transport for RelayTransport {
   fn connect(&self) -> crate::ConnectFuture<'_> {
     Box::pin(async move {

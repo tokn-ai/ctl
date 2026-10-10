@@ -2,7 +2,9 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
-use ctl_ipc::lifecycle::{Client, DaemonBinaryInfo, DaemonStatus};
+use ctl_client::component_status::{LocalObservation, LocalOwner, OwnerState, observe_local};
+use ctl_core::component::{ComponentBuildInfo, ProtocolInfo};
+use ctl_ipc::lifecycle::{Client, DaemonBinaryInfo};
 use sha2::{Digest as _, Sha256};
 use tokio::io::AsyncReadExt as _;
 
@@ -86,10 +88,10 @@ pub(super) fn ctld_version(binary: DaemonBinaryInfo) -> ComponentVersionInfo {
 pub(super) async fn ctld(mut owner: Owner) -> ComponentVersionRow {
   let mut row = ComponentVersionRow::local("ctld", &owner.label);
   row.component_id = owner.id.clone();
-  let client = Client::new(owner.socket.clone());
+  let socket = owner.socket.clone();
   // This discovers an existing verified helper only; it never installs a
   // payload or replaces the owner observed by the separate passive probe.
-  let (running, available) = tokio::join!(client.probe(), async {
+  let (running, available) = tokio::join!(observe_local(LocalOwner::Ctld, &socket), async {
     owner.executable = crate::daemon_helper::executable()
       .await
       .map_err(|error| error.to_string());
@@ -123,28 +125,40 @@ pub(super) async fn ctld(mut owner: Owner) -> ComponentVersionRow {
     }
   }
   match running {
-    Ok(DaemonStatus::Absent) => {
+    Ok(LocalObservation {
+      state: OwnerState::Absent,
+      ..
+    }) => {
       row.status = VersionStatus::NotRunning;
       row.detail = Some("This owner is not running. Opening About does not start it.".into());
     }
-    Ok(DaemonStatus::Legacy { protocol_version }) => {
+    Ok(
+      observation @ LocalObservation {
+        state: OwnerState::Legacy,
+        ..
+      },
+    ) => {
+      let protocol_version = observation
+        .legacy_protocols
+        .iter()
+        .find(|protocol| protocol.name == "ctld")
+        .map(|protocol| protocol.version);
       row.running = Some(ComponentVersionInfo::default());
       row.observation = "legacy";
       row.status = VersionStatus::Incompatible;
-      row.legacy_protocols = protocol_version
-        .map(|version| ctl_core::component::LegacyProtocolInfo {
-          name: "ctld".into(),
-          version,
-        })
-        .into_iter()
-        .collect();
+      row.legacy_protocols = observation.legacy_protocols;
       row.detail = Some(protocol_version.map_or_else(
         || "This running ctld predates published contracts and safe restart. Restart it manually to upgrade.".into(),
         |build| format!("This running ctld uses unpublished protocol build {build} and predates safe restart. Restart it manually to upgrade."),
       ));
     }
-    Ok(DaemonStatus::Running { info }) => {
-      row.running = Some(ctld_version(info.binary));
+    Ok(
+      observation @ LocalObservation {
+        state: OwnerState::Running,
+        ..
+      },
+    ) => {
+      row.running = Some(observed_version(observation.build, observation.protocols));
       row.restart_supported = replacement_supported;
       row.action = replacement_supported.then_some(ComponentAction::Restart);
       row.compare();
@@ -178,8 +192,8 @@ fn append_error(row: &mut ComponentVersionRow, error: String) {
 
 pub(super) async fn ctmuxd() -> ComponentVersionRow {
   let mut row = ComponentVersionRow::local("ctmuxd", "ctmuxd");
-  let client = ctmux_ipc::lifecycle::Client::new(ctmux_ipc::socket_path());
-  let (running, available) = tokio::join!(client.observe(), async {
+  let socket = ctmux_ipc::socket_path();
+  let (running, available) = tokio::join!(observe_local(LocalOwner::Ctmuxd, &socket), async {
     read_binary(
       ctmux_ipc::daemon_executable().map_err(|error| error.to_string())?,
       "ctmuxd",
@@ -188,30 +202,27 @@ pub(super) async fn ctmuxd() -> ComponentVersionRow {
   });
   set_available(&mut row, available);
   match running {
-    Ok(Some(info)) => {
-      row.restart_supported = info.restart_supported && compatible_replacement(&row);
+    Ok(
+      observation @ LocalObservation {
+        state: OwnerState::Running | OwnerState::Legacy,
+        ..
+      },
+    ) => {
+      row.restart_supported = observation.restart_supported && compatible_replacement(&row);
       row.action = row.restart_supported.then_some(ComponentAction::Restart);
-      let protocols = info
-        .protocols
-        .into_iter()
-        .map(ProtocolVersion::from)
-        .collect();
-      row.running = Some(match info.build {
-        Some(build) => ComponentVersionInfo::from_build(build, protocols),
-        None => ComponentVersionInfo {
-          protocols,
-          ..ComponentVersionInfo::default()
-        },
-      });
+      row.legacy_protocols = observation.legacy_protocols;
+      row.running = Some(observed_version(observation.build, observation.protocols));
       row.compare();
-      row.legacy_protocols = info.legacy_protocols;
       if !row.legacy_protocols.is_empty() {
         row.status = VersionStatus::Incompatible;
         row.restart_required = true;
         row.detail = Some("The running ctmuxd does not support this app's protocol requirements. Update or restart the daemon with a matching helper.".into());
       }
     }
-    Ok(None) => row.status = VersionStatus::NotRunning,
+    Ok(LocalObservation {
+      state: OwnerState::Absent,
+      ..
+    }) => row.status = VersionStatus::NotRunning,
     Err(error) => {
       row.status = VersionStatus::Unavailable;
       append_error(&mut row, error.to_string());
@@ -226,7 +237,8 @@ pub(super) async fn ctmuxd() -> ComponentVersionRow {
 
 pub(super) async fn taskd() -> ComponentVersionRow {
   let mut row = ComponentVersionRow::local("ctl-taskd", "ctl-taskd");
-  let (running, available) = tokio::join!(ctl_task_ipc::component_status(), async {
+  let socket = ctl_task_ipc::socket_path();
+  let (running, available) = tokio::join!(observe_local(LocalOwner::CtlTaskd, &socket), async {
     read_binary(
       ctl_task_client::daemon_executable().map_err(|error| error.to_string())?,
       "ctl-taskd",
@@ -235,30 +247,28 @@ pub(super) async fn taskd() -> ComponentVersionRow {
   });
   set_available(&mut row, available);
   match running {
-    Ok(Some(info)) => {
+    Ok(
+      observation @ LocalObservation {
+        state: OwnerState::Running | OwnerState::Legacy,
+        ..
+      },
+    ) => {
       // Older ctl-taskd versions do not implement ComponentStatus, but can still
       // reject a cooperative restart safely when busy or unsupported.
       row.restart_supported = compatible_replacement(&row);
       row.action = row.restart_supported.then_some(ComponentAction::Restart);
-      let protocols = info
-        .protocols
-        .into_iter()
-        .map(ProtocolVersion::from)
-        .collect();
-      row.running = Some(match info.build {
-        Some(build) => ComponentVersionInfo::from_build(build, protocols),
-        None => ComponentVersionInfo {
-          protocols,
-          ..ComponentVersionInfo::default()
-        },
-      });
+      let protocol_mismatch = observation.protocol_mismatch;
+      row.running = Some(observed_version(observation.build, observation.protocols));
       row.compare();
-      if info.protocol_mismatch {
+      if protocol_mismatch {
         row.status = VersionStatus::Incompatible;
         row.detail = Some("The running ctl-taskd does not support this app's protocol requirements. Update or restart the daemon with a matching helper.".into());
       }
     }
-    Ok(None) => row.status = VersionStatus::NotRunning,
+    Ok(LocalObservation {
+      state: OwnerState::Absent,
+      ..
+    }) => row.status = VersionStatus::NotRunning,
     Err(error) => {
       row.status = VersionStatus::Unavailable;
       append_error(&mut row, error.to_string());
@@ -269,6 +279,20 @@ pub(super) async fn taskd() -> ComponentVersionRow {
   row.note_available_mismatch();
   row.note_unreported_build();
   with_purpose(row, "Task execution.")
+}
+
+fn observed_version(
+  build: Option<ComponentBuildInfo>,
+  protocols: Vec<ProtocolInfo>,
+) -> ComponentVersionInfo {
+  let protocols = protocols.into_iter().map(ProtocolVersion::from).collect();
+  match build {
+    Some(build) => ComponentVersionInfo::from_build(build, protocols),
+    None => ComponentVersionInfo {
+      protocols,
+      ..ComponentVersionInfo::default()
+    },
+  }
 }
 
 fn compatible_replacement(row: &ComponentVersionRow) -> bool {

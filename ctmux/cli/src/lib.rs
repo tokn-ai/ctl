@@ -4,7 +4,6 @@ mod commands;
 mod shell;
 
 use clap::{Subcommand, ValueEnum};
-use ctmux_proto::CommandSpec;
 
 pub use commands::{
   CommandError, ConnectFuture, Connector, LocalConnector, new_session, resolve_session, run,
@@ -136,15 +135,6 @@ pub enum ShellCommand {
 pub enum ShellKind {
   Bash,
   Zsh,
-}
-
-fn command_spec(command: Vec<String>) -> Option<CommandSpec> {
-  let mut command = command.into_iter();
-  let program = command.next()?;
-  Some(CommandSpec {
-    program,
-    arguments: command.collect(),
-  })
 }
 
 impl From<ShellKind> for shell::Shell {

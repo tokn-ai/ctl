@@ -1,4 +1,5 @@
 use super::{Daemon, build_label, compatible, flag, output, remote, validate_target};
+use ctl_client::component_status::{LocalOwner, OwnerState, observe_local};
 use ctl_core::component::ComponentInfo;
 use ctl_core::component::{LegacyProtocolInfo, ProtocolInfo, protocols_match};
 use serde::Serialize;
@@ -90,69 +91,30 @@ impl Row {
 }
 
 async fn observe(component: Daemon) -> io::Result<Row> {
+  let (owner, socket) = match component {
+    Daemon::Ctld => (LocalOwner::Ctld, ctl_ipc::socket_path()),
+    Daemon::Ctmuxd => (LocalOwner::Ctmuxd, ctmux_ipc::socket_path()),
+    Daemon::CtlTaskd => (LocalOwner::CtlTaskd, ctl_task_ipc::socket_path()),
+  };
+  let observation = observe_local(owner, &socket).await?;
   let mut row = Row::new(component.name());
-  row.state = "not_running".into();
-  match component {
-    Daemon::Ctld => match ctl_ipc::lifecycle::Client::new(ctl_ipc::socket_path())
-      .probe()
-      .await
-      .map_err(io::Error::other)?
-    {
-      ctl_ipc::lifecycle::DaemonStatus::Absent => {}
-      ctl_ipc::lifecycle::DaemonStatus::Legacy { protocol_version } => {
-        row.state = "legacy".into();
-        row
-          .legacy_protocols
-          .extend(protocol_version.map(|version| LegacyProtocolInfo {
-            name: "ctld".into(),
-            version,
-          }));
-      }
-      ctl_ipc::lifecycle::DaemonStatus::Running { info } => {
-        row.state = "running".into();
-        row.running = Some(ComponentInfo {
-          build: info.binary.build,
-          protocols: info.binary.protocols,
-        });
-        row.restart_supported = true;
-      }
-    },
-    Daemon::Ctmuxd => {
-      if let Some(info) = ctmux_ipc::lifecycle::Client::new(ctmux_ipc::socket_path())
-        .observe()
-        .await
-        .map_err(io::Error::other)?
-      {
-        row.state = if info.component_info().is_some() {
-          "running"
-        } else {
-          "legacy"
-        }
-        .into();
-        row.running = info.component_info();
-        row.running_protocols = info.protocols;
-        row.legacy_protocols = info.legacy_protocols;
-        row.restart_supported = info.restart_supported;
-      }
-    }
-    Daemon::CtlTaskd => {
-      if let Some(info) = ctl_task_ipc::component_status().await? {
-        row.state = if info.build.is_some() {
-          "running"
-        } else {
-          "legacy"
-        }
-        .into();
-        row.running_protocols.clone_from(&info.protocols);
-        row.running = info.build.map(|build| ComponentInfo {
-          build,
-          protocols: info.protocols,
-        });
-        row.protocol_mismatch = info.protocol_mismatch;
-        row.restart_supported = !info.protocol_mismatch;
-      }
-    }
+  row.state = match observation.state {
+    OwnerState::Absent => "not_running",
+    OwnerState::Legacy => "legacy",
+    OwnerState::Running => "running",
   }
+  .into();
+  row.running_protocols.clone_from(&observation.protocols);
+  row.running = observation
+    .build
+    .filter(|_| observation.state == OwnerState::Running)
+    .map(|build| ComponentInfo {
+      build,
+      protocols: observation.protocols,
+    });
+  row.legacy_protocols = observation.legacy_protocols;
+  row.protocol_mismatch = observation.protocol_mismatch;
+  row.restart_supported = observation.restart_supported;
   Ok(row)
 }
 

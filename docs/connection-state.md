@@ -129,6 +129,20 @@ be resolved before exposing new cancellation actions.
 
 ## Broker connection reuse
 
+Daemon autostart coordinates callers by the exact local endpoint, rechecks for an
+existing owner after helper preparation, and retains startup coordination until
+the endpoint is ready. Canceling one client's request does not abandon that
+startup. Spawned daemon children are reaped when they exit, including failed
+startup candidates.
+
+Canceling an unfinished private SSH connection keeps that target serialized until
+cleanup finishes. Cleanup reaps the startup process and requests termination of
+its forked master through the original control connection, protecting replacement
+sockets. Termination is bounded, and failures remain visible in diagnostics.
+Configured shared masters keep their external ownership; cancellation closes only
+the broker's anchor session. Authorization and ownership commit before the final
+readiness response, so closing a successful request cannot cancel that master.
+
 The CLI shares a sequential local broker connection across channel preparation
 when `ctld` negotiates 1.1.15. TUI session/view refreshes and pane attachments
 still ask the broker to ensure the master, preserving manual pause and quiet

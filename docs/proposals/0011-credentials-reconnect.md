@@ -66,7 +66,11 @@ The TUI applies the connector's retry classification to background refreshes
 and pane reconnects, stopping on authentication/configuration failures until
 maintenance is reset by session selection. The broker remembers a quiet
 authentication-required result until explicit Connect; it can still reuse a live
-master. Client EOF cancels pending connection work and releases queued requests.
+master. Client EOF cancels pending connection work. Private-master cleanup retains
+the target lock through bounded termination, using the original control connection
+to protect replacement sockets and reporting termination failures. Authorization
+and master ownership commit before the final readiness response. Shared masters
+retain their owner's lifetime; cancellation closes only the broker's anchor.
 Unknown existing-master observations preserve the endpoint rather than initiating
 new authentication.
 

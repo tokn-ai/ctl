@@ -1,6 +1,7 @@
 //! Owner-only local protocol between `ctld` and its clients.
 
 pub mod credentials;
+mod daemon_startup;
 pub mod identities;
 pub mod lifecycle;
 pub mod managed;
@@ -33,7 +34,9 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 #[cfg(unix)]
 pub use tokio::net::UnixStream as Stream;
-use tokio::time::{Instant, sleep, timeout};
+#[cfg(test)]
+use tokio::time::sleep;
+use tokio::time::timeout;
 use zeroize::{Zeroize, Zeroizing};
 
 const DAEMON_EXECUTABLE_ENV: &str = "CTLD_BIN";
@@ -731,6 +734,8 @@ pub enum ConnectError {
   CurrentExecutable(#[source] io::Error),
   #[error("could not prepare the bundled ctld: {0}")]
   PrepareDaemon(#[source] io::Error),
+  #[error("could not coordinate ctld startup: {0}")]
+  CoordinateDaemon(#[source] io::Error),
   #[error("could not start ctld using {}: {source}", executable.display())]
   StartDaemon {
     executable: PathBuf,
@@ -836,17 +841,13 @@ pub async fn connect_or_start_daemon_at_with_executable(
     Err(error) if retryable_connect_error(&error) => {}
     Err(error) => return Err(ConnectError::Connect(error)),
   }
-  start_daemon(path, executable).await?;
-  let deadline = Instant::now() + CONNECT_TIMEOUT;
-  loop {
-    match connect(path).await {
-      Ok(stream) => return Ok(stream),
-      Err(error) if retryable_connect_error(&error) && Instant::now() < deadline => {
-        sleep(CONNECT_RETRY_INTERVAL).await;
-      }
-      Err(error) => return Err(ConnectError::Connect(error)),
-    }
-  }
+  // Startup belongs to the endpoint, not to this disposable client request.
+  // Cancellation must not release its lock while the child is still starting.
+  let path = path.to_owned();
+  let executable = executable.map(Path::to_owned);
+  tokio::spawn(async move { daemon_startup::connect_or_start(&path, executable.as_deref()).await })
+    .await
+    .map_err(|error| ConnectError::CoordinateDaemon(io::Error::other(error)))?
 }
 
 /// Connects to an already-running per-user daemon.
@@ -930,40 +931,6 @@ async fn connect(path: &Path) -> io::Result<Stream> {
   {
     Stream::connect(path.to_fs_name::<GenericFilePath>()?).await
   }
-}
-
-async fn start_daemon(path: &Path, executable: Option<&Path>) -> Result<(), ConnectError> {
-  let selected = match executable {
-    Some(executable) => executable.to_path_buf(),
-    None => prepare_daemon_executable().await?,
-  };
-  // A staged symlink may change between the protocol query and startup. Pin
-  // both launches, and the helper's future children, to the same build.
-  let executable = resolve_executable(&selected).map_err(|source| ConnectError::StartDaemon {
-    executable: selected,
-    source,
-  })?;
-  check_daemon_protocol(&executable, PROTOCOL_QUERY_TIMEOUT).await?;
-  let mut command = std::process::Command::new(&executable);
-  #[cfg(windows)]
-  {
-    use std::os::windows::process::CommandExt as _;
-    command.creation_flags(0x0000_0008);
-  }
-  command
-    .arg("--socket")
-    .arg(path)
-    .arg("--detach-from-terminal")
-    // Broker children (including SSH askpass) must contact this same owner even
-    // when the caller selected a different endpoint from its environment.
-    .env("CTLD_SOCKET_PATH", path)
-    .env(DAEMON_EXECUTABLE_ENV, &executable)
-    .stdin(Stdio::null())
-    .stdout(Stdio::null())
-    .stderr(Stdio::null())
-    .spawn()
-    .map_err(|source| ConnectError::StartDaemon { executable, source })?;
-  Ok(())
 }
 
 fn resolve_executable(selected: &Path) -> io::Result<PathBuf> {

@@ -19,6 +19,7 @@ mod keychain;
 mod lifecycle;
 mod master_diagnostics;
 mod master_observation;
+mod master_ownership;
 mod openconnect;
 mod port_forwarding;
 pub mod proxy_route;
@@ -838,6 +839,7 @@ async fn ensure_master_with_interaction(
     None,
   );
   let mut connection_started = false;
+  let cleanup = master_ownership::CleanupBarrier::default();
   #[cfg(unix)]
   let client = client_lifetime::Monitor::new(stream).map_err(ctl_ipc::CodecError::Io)?;
   let work = ensure_master_with_interaction_inner(
@@ -846,18 +848,28 @@ async fn ensure_master_with_interaction(
     target,
     interactive,
     &mut connection_started,
+    &cleanup,
   );
   #[cfg(unix)]
   let result = tokio::select! {
     biased;
     closed = client.closed() => {
-      closed.map_err(ctl_ipc::CodecError::Io)?;
-      Err(RequestError::ClientClosed)
+      match closed {
+        Ok(()) => Err(RequestError::ClientClosed),
+        Err(error) => Err(ctl_ipc::CodecError::Io(error).into()),
+      }
     }
     result = work => result,
   };
   #[cfg(not(unix))]
   let result = work.await;
+  // EOF cancels the request future, but a private SSH process may already have
+  // forked. Wait for its owner to finish cleanup before replying or returning.
+  let result = cleanup
+    .wait()
+    .await
+    .map_err(|error| RequestError::DisconnectFailed(error.to_string()))
+    .and(result);
   operation.finish_at(
     if matches!(result, Err(RequestError::ClientClosed)) {
       HistoryOutcome::Interrupted
@@ -866,7 +878,9 @@ async fn ensure_master_with_interaction(
     } else {
       HistoryOutcome::Failed
     },
-    if result.is_err() && !connection_started {
+    if matches!(result, Err(RequestError::DisconnectFailed(_)))
+      || result.is_err() && !connection_started
+    {
       ctl_core::observability::Level::Error
     } else {
       ctl_core::observability::Level::Debug
@@ -883,11 +897,14 @@ async fn ensure_master_with_interaction_inner(
   target: SshTarget,
   interactive: bool,
   connection_started: &mut bool,
+  cleanup: &master_ownership::CleanupBarrier,
 ) -> Result<(), RequestError> {
   validate_target(&target)?;
   let lifecycle = state.target(&target);
   let mut attempt = lifecycle.attempt();
-  let _target_guard = attempt.run(lifecycle.lock.lock()).await?;
+  let target_guard = attempt
+    .run(Arc::clone(&lifecycle.lock).lock_owned())
+    .await?;
   if interactive {
     lifecycle.resume(&attempt)?;
   } else {
@@ -953,6 +970,7 @@ async fn ensure_master_with_interaction_inner(
     &endpoint,
     &mut attempt,
     interactive,
+    master_ownership::StartupOwner::new(target_guard, cleanup),
   )
   .await;
   if matches!(result, Err(RequestError::AuthenticationRequired)) {
@@ -977,6 +995,7 @@ async fn establish_master(
   endpoint: &MasterEndpoint,
   attempt: &mut target_lifecycle::TargetAttempt,
   interactive: bool,
+  ownership: master_ownership::StartupOwner<'_>,
 ) -> Result<(), RequestError> {
   let token = uuid::Uuid::new_v4().to_string();
   let (prompt_tx, mut prompt_rx) = mpsc::channel(1);
@@ -997,7 +1016,7 @@ async fn establish_master(
       interactive,
     ))
     .await??;
-  let mut child = start_master(
+  let child = start_master(
     target,
     endpoint,
     &token,
@@ -1008,32 +1027,71 @@ async fn establish_master(
     #[cfg(target_os = "macos")]
     Some(&authentication.identities),
   )?;
+  let mut process = ownership.attach(child, endpoint);
   let result = attempt
     .run(wait_for_master(
       stream,
       state,
       target,
       endpoint,
-      &mut child,
+      &mut process,
       &mut prompt_rx,
       &mut authentication,
     ))
     .await;
   #[cfg(target_os = "macos")]
-  if matches!(result, Ok(Ok(()))) {
+  if matches!(result, Ok(Ok(_))) {
     attempt.run(authentication.connected(target)).await?;
   }
-  if endpoint.shared {
-    if matches!(result, Ok(Ok(()))) {
-      state.remember_endpoint(target, endpoint, child.stdin.take());
+  let result = result.and_then(|result| result);
+  match result {
+    Ok(diagnostics) => {
+      if endpoint.shared {
+        state.remember_endpoint(target, endpoint, process.child().stdin.take());
+      }
+      attempt
+        .run(publish_master_ready(
+          stream,
+          state,
+          target,
+          endpoint,
+          process,
+          diagnostics,
+        ))
+        .await?
     }
-    // A configured master can already serve other applications. End only our
-    // anchor session; killing this process could terminate their channels.
-    release_shared_process(child);
-  } else if !matches!(result, Ok(Ok(()))) {
-    let _ = child.kill().await;
+    Err(error) => {
+      drop(process);
+      Err(error)
+    }
   }
-  result.and_then(|result| result)
+}
+
+async fn publish_master_ready(
+  stream: &mut ctl_ipc::Stream,
+  state: &State,
+  target: &SshTarget,
+  endpoint: &MasterEndpoint,
+  process: master_ownership::PendingMaster,
+  diagnostics: Option<tokio::task::JoinHandle<String>>,
+) -> Result<(), RequestError> {
+  // All authorization and connection work has committed. A normal client
+  // closes its request socket immediately after reading MasterReady; it must
+  // not cancel the committed master while response delivery finishes.
+  let _target_guard = process.connected();
+  if !endpoint.shared
+    && let Some(diagnostics) = diagnostics
+  {
+    master_diagnostics::watch(diagnostics, state, target, endpoint);
+  }
+  ctl_ipc::write_frame(
+    stream,
+    &ServerMessage::MasterReady {
+      control_path: endpoint.control_path.clone(),
+    },
+  )
+  .await?;
+  Ok(())
 }
 
 /// Per-connection authentication state. It owns temporary secrets and agents;
@@ -1177,13 +1235,13 @@ async fn wait_for_master(
   state: &State,
   target: &SshTarget,
   endpoint: &MasterEndpoint,
-  child: &mut Child,
+  process: &mut master_ownership::PendingMaster,
   prompt_rx: &mut mpsc::Receiver<PromptRequest>,
   authentication: &mut ConnectionAuthentication,
-) -> Result<(), RequestError> {
+) -> Result<Option<tokio::task::JoinHandle<String>>, RequestError> {
   let control_path = &endpoint.control_path;
-  let mut authenticated = shared_session_ready(child, endpoint.shared);
-  let mut diagnostics = retain_diagnostics(child);
+  let mut authenticated = shared_session_ready(process.child(), endpoint.shared);
+  let mut diagnostics = retain_diagnostics(process.child());
   let deadline = Instant::now() + MASTER_START_TIMEOUT;
   loop {
     #[cfg(target_os = "macos")]
@@ -1195,6 +1253,10 @@ async fn wait_for_master(
       .await
       .unwrap_or(false)
     {
+      // Pin this attempt's socket before waiting for a credential-save answer.
+      // Cancellation must terminate this master, even after ssh has forked.
+      #[cfg(unix)]
+      process.pin().await.map_err(RequestError::StartMaster)?;
       authentication.finish(stream, target).await?;
       state.adopt(target, endpoint, None)?;
       let mut forwards = state.forwards.lock().await;
@@ -1202,19 +1264,7 @@ async fn wait_for_master(
         .activate(&SshForwardControl { state }, target)
         .await;
       drop(forwards);
-      ctl_ipc::write_frame(
-        stream,
-        &ServerMessage::MasterReady {
-          control_path: control_path.clone(),
-        },
-      )
-      .await?;
-      if !endpoint.shared
-        && let Some(diagnostics) = diagnostics.take()
-      {
-        master_diagnostics::watch(diagnostics, state, target, endpoint);
-      }
-      return Ok(());
+      return Ok(diagnostics.take());
     }
     if endpoint.shared
       && authenticated
@@ -1232,7 +1282,10 @@ async fn wait_for_master(
         control_path.display()
       )));
     }
-    if let Some(status) = child.try_wait().map_err(RequestError::StartMaster)?
+    if let Some(status) = process
+      .child()
+      .try_wait()
+      .map_err(RequestError::StartMaster)?
       && (!status.success() || endpoint.shared)
     {
       #[cfg(target_os = "macos")]
@@ -2165,9 +2218,11 @@ fn release_shared_process(mut child: Child) {
   // Socket publication can race with cancellation. Even a missing path cannot
   // prove that killing this process is safe for other clients. Close only our
   // session and let OpenSSH apply its configured lifetime and network timeouts.
-  tokio::spawn(async move {
-    let _ = child.wait().await;
-  });
+  if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+    runtime.spawn(async move {
+      let _ = child.wait().await;
+    });
+  }
 }
 
 fn shared_session_ready(child: &mut Child, shared: bool) -> Option<oneshot::Receiver<()>> {
@@ -3087,6 +3142,13 @@ mod tests {
       .spawn()
       .unwrap();
     assert_eq!(child.wait().await.unwrap().code(), Some(255));
+    let cleanup = master_ownership::CleanupBarrier::default();
+    let mut process = master_ownership::PendingMaster::new(
+      child,
+      &endpoint,
+      Arc::clone(&state.target(&target).lock).lock_owned().await,
+      &cleanup,
+    );
     let (mut client, mut server) = ctl_ipc::Stream::pair().unwrap();
     let (_prompts, mut prompt_rx) = mpsc::channel(1);
     let mut authentication = failed_retained_authentication();
@@ -3096,7 +3158,7 @@ mod tests {
         &state,
         &target,
         &endpoint,
-        &mut child,
+        &mut process,
         &mut prompt_rx,
         &mut authentication,
       )

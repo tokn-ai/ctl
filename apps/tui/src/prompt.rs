@@ -396,7 +396,7 @@ pub(crate) fn parse(text: &str) -> Result<Command, String> {
       .as_slice()
     {
       [] => Ok(Command::NewSession(None)),
-      ["-s", name] if !name.is_empty() => Ok(Command::NewSession(Some((*name).into()))),
+      ["-s", name] => Ok(Command::NewSession(Some((*name).into()))),
       _ => Err(usage("new-session [-s NAME]")),
     },
     "switch-client" => match args
@@ -1008,7 +1008,6 @@ mod tests {
       "resizep -z",
       "resizep -R -L",
       "new -s",
-      "new -s ''",
       "switchc -n -p",
       "copy-mode -q",
       "ls -a",
@@ -1219,6 +1218,9 @@ mod tests {
 
   #[test]
   fn session_management_commands_accept_literal_names_and_exact_targets() {
+    for text in ["new-session -s ''", "new -s \"\""] {
+      assert_eq!(parse(text), Ok(Command::NewSession(Some(String::new()))));
+    }
     assert_eq!(
       parse("rename-session 'my work'"),
       Ok(Command::RenameSession {

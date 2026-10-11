@@ -57,6 +57,47 @@ async fn resume_lists_existing_work_without_attachment_and_empty_resume_creates_
 }
 
 #[tokio::test]
+async fn blank_creation_uses_daemon_names_while_blank_rename_keeps_the_existing_name() -> Result<()>
+{
+  let daemon = TestDaemon::start().await?;
+  let existing = create(&daemon, "existing").await?;
+  let mut manager = app(&daemon, false);
+  manager.start_resume().await?;
+  manager.session_overlay_key(key(KeyCode::Char('n'))).await?;
+  assert!(manager.session_overlay_lines()[0].contains("blank = automatic"));
+  manager.session_overlay_key(key(KeyCode::Enter)).await?;
+  let generated = manager.view.as_ref().unwrap().clone();
+  assert_ne!(generated.session_id, existing);
+  assert_ne!(generated.session_name.trim(), "");
+  manager.open_sessions();
+  manager.session_overlay_key(key(KeyCode::Char('r'))).await?;
+  manager
+    .session_overlay_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL))
+    .await?;
+  manager.session_overlay_key(key(KeyCode::Enter)).await?;
+  assert!(matches!(manager.overlay, Overlay::SessionName(_)));
+  assert!(manager.message.contains("Session name cannot be empty"));
+  assert_eq!(
+    manager.view.as_ref().unwrap().session_name,
+    generated.session_name
+  );
+  manager.session_overlay_key(key(KeyCode::Esc)).await?;
+  manager.session_overlay_key(key(KeyCode::Esc)).await?;
+  for command in ["new-session -s ''", "new-session -s '   '"] {
+    manager
+      .execute_command(crate::prompt::parse(command)?)
+      .await?;
+    let current = manager.view.as_ref().unwrap();
+    assert_ne!(current.session_name.trim(), "");
+    assert_ne!(current.session_name, generated.session_name);
+    assert_ne!(current.session_id, generated.session_id);
+  }
+  assert_eq!(manager.sessions.len(), 4);
+  manager.detach().await;
+  Ok(())
+}
+
+#[tokio::test]
 async fn manager_rejects_read_only_mutations_and_pins_disappeared_targets() -> Result<()> {
   let daemon = TestDaemon::start().await?;
   let existing = create(&daemon, "reused-name").await?;

@@ -2,11 +2,13 @@
 
 - Status: Implemented
 - Created: 2026-10-11
+- Updated: 2026-10-12
 
 ## Summary
 
 Make the existing shell session picker a session manager, and add
-`ctl shell --resume` to open that manager before attaching. Users can find,
+`ctl shell --resume`, `ctmux --resume`, and `ctl ctmux --resume` to open that
+manager before attaching. Users can find,
 open, create, rename, and explicitly terminate sessions on the selected host.
 This extends [Proposal 0014](0014-shared-panes-tui.md) and uses the shared Rust
 client API from [Proposal 0016](0016-shared-actions.md).
@@ -24,18 +26,24 @@ Keep ordinary `ctl shell` startup creating a session. The existing
 `--session NAME` option keeps its attach-or-create behavior, and `--plain`
 keeps opening an ordinary SSH or local shell.
 
-`ctl shell --resume` lists running sessions on the selected endpoint. When
+The resume entry points list running sessions on the selected endpoint. When
 sessions exist, it opens the manager without creating a session, attaching to
 one, or taking input or resize leases. When no sessions exist, it creates and
-attaches to one new shell. `--resume` is exclusive with `--session`, `--plain`,
+attaches to one new shell. `ctl shell --resume` is exclusive with `--session`, `--plain`,
 and `--cwd`; the latter describes the initial directory of a newly requested
-session.
+session. Ctmux resume is a shared typed startup action, also spelled `resume`,
+and is exclusive with another ctmux subcommand. Standalone endpoint and prefix
+options still apply.
 
 Inside a shell, Ctrl+B s/w and `:list-sessions` open the same manager. It shows
 session names, stable short IDs, status, and the current-session marker. Enter
 opens the selected session; creation, renaming, and whole-session termination
-are available in the manager. Names use the daemon's existing session-name
-validation. Cancellation returns to the current shell, or exits the unattached
+are available in the manager. Leaving a new session's name empty and pressing
+Enter requests a unique daemon-generated name, such as `session-1`. The shared
+Rust session client treats missing, empty, and whitespace-only creation names
+as omitted across CLI, desktop, and TUI callers. Other names remain literal
+and use the daemon's existing session-name validation; rename still requires
+a nonempty valid name. Cancellation returns to the current shell, or exits the unattached
 manager opened by `--resume`.
 
 Termination confirms the chosen name and ID and explains that all its panes
@@ -84,7 +92,8 @@ Attached name updates reuse the existing `view_snapshot` shape.
 `ctmux_control`, `ctld`, `ctld_helper`, and all other named contracts keep
 their versions and internal builds. Product release and storage schema
 versions are unchanged. Client session-management controls and `--resume`
-have no independent wire contract.
+have no independent wire contract. Blank creation names reuse the existing
+omitted-name request and daemon allocator; they do not alter wire validation.
 
 ## Out of scope
 

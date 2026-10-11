@@ -66,12 +66,36 @@ impl Daemon {
 
 impl Drop for Daemon {
   fn drop(&mut self) {
-    for name in ["work", "other"] {
-      let _ = self.command(&["kill-session", "-t", name]);
+    if !self.task.is_finished() {
+      let sessions = self.command(&["ls"]);
+      for id in String::from_utf8_lossy(&sessions.stdout)
+        .lines()
+        .skip(1)
+        .filter_map(|line| line.split('\t').nth(1))
+      {
+        let _ = self.command(&["kill-session", "-t", id]);
+      }
     }
     self.task.abort();
     let _ = std::fs::remove_dir_all(&self.directory);
   }
+}
+
+#[test]
+fn resume_requires_a_terminal_before_starting_a_missing_daemon() {
+  let directory =
+    std::env::temp_dir().join(format!("rcli-{}", &uuid::Uuid::new_v4().to_string()[..8]));
+  std::fs::create_dir(&directory).unwrap();
+  let socket = directory.join("ctmux.sock");
+  let output = Command::new(env!("CARGO_BIN_EXE_ctmux"))
+    .args(["--resume", "--prefix", "Alt+a", "-S"])
+    .arg(&socket)
+    .output()
+    .unwrap();
+  assert!(!output.status.success());
+  assert!(String::from_utf8_lossy(&output.stderr).contains("interactive terminal"));
+  assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 0);
+  std::fs::remove_dir(directory).unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -90,6 +114,7 @@ async fn tmux_create_attach_existing_and_noninteractive_safety() {
   // Interactive forms fail before creating any session when output is redirected.
   for args in [
     &[][..],
+    &["--resume"][..],
     &["new", "-s", "unwanted"][..],
     &["attach", "-t", "work"][..],
   ] {
@@ -105,6 +130,21 @@ async fn tmux_create_attach_existing_and_noninteractive_safety() {
   let archives = daemon.success(&["archives"]);
   assert!(archives.contains("work"));
   assert!(archives.contains("other"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn explicitly_empty_new_session_names_use_distinct_automatic_names() {
+  let daemon = Daemon::start().await;
+  let first = daemon.success(&["new", "-ds", "", "--", "/bin/sh"]);
+  let second = daemon.success(&["new", "-ds", "", "--", "/bin/sh"]);
+  let (first_id, first_name) = first.trim().split_once('\t').unwrap();
+  let (second_id, second_name) = second.trim().split_once('\t').unwrap();
+  assert_ne!(first_name, "");
+  assert_ne!(second_name, "");
+  assert_ne!(first_name, second_name);
+  assert_ne!(first_id, second_id);
+  daemon.success(&["kill", "-t", first_id]);
+  daemon.success(&["kill", "-t", second_id]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

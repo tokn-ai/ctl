@@ -104,6 +104,7 @@ the proposal status.
 | --- | --- | --- |
 | `host status/connect/disconnect`; desktop connection flows | `ctl_client::connection::ConnectionClient` | Target selection, prompts, and presentation |
 | `ctmux list/new/rename-session/kill/attach`; desktop and TUI session flows | `ctmux_client::session::SessionClient` | Target selection, UI session lifecycle, confirmations, and presentation; desktop has no rename entry |
+| `ctmux --resume`; `ctl ctmux --resume`; `ctl shell --resume` | Shared TUI `StartupMode::Resume`, using session list/create/attach APIs | Startup presentation and host/endpoint selection |
 | `ctmux view/split/promote/merge/kill-terminal`; desktop view actions; TUI view refresh/split/kill | `ctmux_client::view::ViewClient` | Target selection, geometry/cwd policy, confirmations, and focus/reconciliation |
 | Attachment input, PTY resize, zoom, pane/divider resize, swap/break, detach, leases, and checkpoint recovery | `ctmux_client::AttachmentControl` | Controller ownership, presentation acknowledgements, and authoritative outcome events |
 | `ctmux state`; desktop session metadata | `ctmux_client::get_shell_state` | Target selection and presentation |
@@ -219,7 +220,10 @@ async fn terminate(self, session_id: SessionId) -> Result<(), ClientError>;
 async fn attach(self, request: AttachRequest) -> Result<(S, AttachedSession), ClientError>;
 ```
 
-`create` preserves argv boundaries and explicit geometry. It does not attach,
+`create` preserves argv boundaries and explicit geometry. A missing, empty, or
+whitespace-only name requests a daemon-generated unique name; other names
+remain literal and use daemon validation. This normalization applies only to
+creation; rename requires a nonempty valid name. `create` does not attach,
 start a presenter, or open a tab. CLI/desktop/TUI retain their existing cwd
 selection policy before calling it. `terminate` ends persistent work and is
 never used for tab cleanup. Adapters resolve selectors within their target;
@@ -231,8 +235,9 @@ session. It preserves session/view/terminal identity and running work, uses
 existing daemon name validation and uniqueness rules, and requires negotiated
 ctmux 1.1.20. Clients reject rename before sending its request to older daemons.
 The shell manager and command prompt pin an exact root ID before editing or
-confirming mutations. `ctl shell --resume` opens the manager without attaching
-when existing sessions are present; startup presentation belongs to the TUI.
+confirming mutations. `ctmux --resume`, `ctl ctmux --resume`, and
+`ctl shell --resume` open the manager without attaching when existing sessions
+are present; startup presentation belongs to the TUI.
 
 `attach` reuses the existing `AttachRequest`, including replay position, input
 and layout lease requests, and presentation window settings. Reconnect uses

@@ -45,6 +45,7 @@ invent `--json` for list/state or a `send-keys` command.
 ```sh
 ctl -H work shell --session development
 ctl -H work shell --resume
+ctl -H work ctmux --resume
 ctl -H work ctmux attach development
 ctl -H work ctmux attach development --read-only
 ctl -H work ctmux attach development --resize
@@ -54,7 +55,9 @@ ctl -H work ctmux attach development --resize
 it creates a new session; a supplied name attaches if present or creates if
 absent. `--resume` opens a host-scoped manager without attaching or creating
 when sessions exist; an empty host creates one shell. It cannot be combined
-with `--session`, `--plain`, or `--cwd`. For
+with `--session`, `--plain`, or `--cwd`. `ctl ctmux --resume` and standalone
+`ctmux --resume` open the same manager and cannot be combined with another
+ctmux subcommand. For
 noninteractive agent work, use detached creation, `ctl exec`, or a managed
 background task instead of opening an interactive shell.
 
@@ -62,7 +65,10 @@ background task instead of opening an interactive shell.
 then **d**. `ctl ctmux attach` uses the single-terminal presenter and detaches
 with **Ctrl+]**. Detach leaves the session running and releases its attachment
 leases. Inside the TUI, **Ctrl+B s/w** opens the session manager: Enter opens,
-`n` creates, `r` renames, and `x` confirms whole-session termination. Mutations
+`n` creates, `r` renames, and `x` confirms whole-session termination. Leave the
+new-session name blank and press Enter for a unique daemon-generated name;
+blank or whitespace-only creation names are treated as omitted. Rename still
+requires a nonempty valid name. Mutations
 are unavailable in read-only mode. Renaming preserves running work and requires
 ctmux 1.1.20; cancellation never terminates work.
 

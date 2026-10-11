@@ -372,6 +372,25 @@ mod tests {
   }
 
   #[test]
+  fn host_scoped_ctmux_resume_requires_no_additional_command() {
+    let arguments = Arguments::try_parse_from(["ctl", "-H", "work", "ctmux", "--resume"]).unwrap();
+    assert_eq!(arguments.host.as_deref(), Some("work"));
+    assert!(matches!(
+      arguments.command,
+      Command::Ctmux {
+        command: CtmuxCommand::Resume
+      }
+    ));
+    for arguments in [
+      &["ctl", "ctmux"][..],
+      &["ctl", "ctmux", "--resume", "list"][..],
+      &["ctl", "ctmux", "list", "--resume"][..],
+    ] {
+      assert!(Arguments::try_parse_from(arguments).is_err());
+    }
+  }
+
+  #[test]
   fn remote_platform_requires_host_and_rejects_arbitrary_commands() {
     assert!(
       Arguments::try_parse_from(["ctl", "--remote-platform", "windows", "ctmux", "list"]).is_err()

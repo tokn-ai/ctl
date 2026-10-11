@@ -82,18 +82,7 @@ pub async fn attach_session<C: ctmux_cli::Connector>(
   session: String,
   connector: &C,
 ) -> Result<(), CommandError> {
-  ctmux_cli::run(
-    ctmux_cli::Command::Attach {
-      session: Some(session),
-      target: None,
-      raw: true,
-      resume_from: None,
-      read_only: false,
-      resize: true,
-    },
-    connector,
-  )
-  .await?;
+  ctmux_cli::attach_session(connector, &session, None, true, true).await?;
   Ok(())
 }
 

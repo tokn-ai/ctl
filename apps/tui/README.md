@@ -11,6 +11,7 @@ The main entry point is `ctmux`; it embeds this TUI as a library.
 ```sh
 cargo build -p ctmux-cli -p ctmuxd
 cargo run -p ctmux-cli                         # create a session and open the TUI
+cargo run -p ctmux-cli -- --resume             # pick existing work; create if empty
 cargo run -p ctmux-cli -- new -s work
 cargo run -p ctmux-cli -- new -As work         # attach if it exists, otherwise create
 cargo run -p ctmux-cli -- new -ds background   # create detached, including in scripts
@@ -46,10 +47,12 @@ transport-based presenter and detached creation behavior, including over SSH.
 the banner, pane controls, reconnect handling, and history browser. Use
 **Ctrl+B d** to detach. `ctl shell --plain` opens an ordinary shell.
 
-`ctl shell --resume` opens the session manager before attaching when running
-sessions exist on the chosen host. It creates one shell when the list is empty.
+`ctmux --resume`, `ctl ctmux --resume`, and `ctl shell --resume` open the session
+manager before attaching when running sessions exist on the chosen endpoint.
+They create one shell when the list is empty. Resume cannot be combined with
+another ctmux subcommand; standalone `--socket` and `--prefix` still apply.
 Ordinary `ctl shell` still creates a new session, and `--session NAME` retains
-attach-or-create behavior. `--resume` cannot be combined with `--session`,
+attach-or-create behavior. `ctl shell --resume` cannot be combined with `--session`,
 `--plain`, or `--cwd`.
 
 Migration: standalone `ctmux new` now attaches by default. Scripts that used it
@@ -111,6 +114,11 @@ every pane in that session for every viewer. Read-only clients can navigate
 but cannot create, rename, or terminate. Esc returns to the current shell;
 in the unattached `--resume` manager it exits. Terminating the active session
 returns to the manager without creating replacement work.
+
+When creating a session, leave the name empty and press Enter to let ctmuxd
+assign a unique name such as `session-1`. Blank or whitespace-only creation
+names, including `new-session -s ''`, use the same automatic naming. Rename
+still requires a nonempty valid name.
 
 Press the prefix twice to send it to the active pane. Other keys, including
 Ctrl+C, are forwarded to the active PTY. The TUI supports conventional xterm

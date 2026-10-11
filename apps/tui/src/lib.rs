@@ -70,19 +70,24 @@ pub fn ensure_terminal() -> Result<()> {
 ///
 /// # Errors
 /// Returns connection, protocol, prefix validation, or terminal I/O errors.
-pub async fn run(options: Options) -> Result<()> {
+pub async fn run(mut options: Options) -> Result<()> {
+  let session = options.session.take();
+  run_with_startup(options, StartupMode::Standard(session)).await
+}
+
+/// Run the local UI with explicit startup, retaining socket, prefix, and archive settings.
+/// The startup policy takes precedence over `options.session`.
+///
+/// # Errors
+/// Returns connection, protocol, prefix validation, or terminal I/O errors.
+pub async fn run_with_startup(options: Options, startup: StartupMode) -> Result<()> {
   ensure_terminal()?;
   let mut app = app::App::new(
     options.socket,
     options.read_only,
     input::parse_prefix(&options.prefix)?,
   );
-  Box::pin(run_app(
-    &mut app,
-    options.archive,
-    StartupMode::Standard(options.session),
-  ))
-  .await
+  Box::pin(run_app(&mut app, options.archive, startup)).await
 }
 
 /// Run the same terminal UI over a caller-supplied local or remote transport.

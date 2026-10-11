@@ -39,6 +39,19 @@ async fn run(arguments: Arguments) -> ctmux_tui::Result<()> {
     detached: false,
     attach_if_exists: false,
   });
+  if matches!(command, Command::Resume) {
+    return ctmux_tui::run_with_startup(
+      ctmux_tui::Options {
+        socket,
+        archive: None,
+        session: None,
+        read_only: false,
+        prefix: arguments.prefix,
+      },
+      ctmux_tui::StartupMode::Resume,
+    )
+    .await;
+  }
   if let Command::Archive { session_id } = command {
     return ctmux_tui::run(ctmux_tui::Options {
       socket,
@@ -159,6 +172,41 @@ mod tests {
       );
       assert!(Arguments::try_parse_from(["ctmux", command, "review"]).is_err());
       assert!(Arguments::try_parse_from(["ctmux", command, "-t", "work"]).is_err());
+    }
+  }
+
+  #[test]
+  fn resume_preserves_global_options_and_rejects_additional_commands() {
+    for arguments in [
+      &[
+        "ctmux",
+        "-S",
+        "/tmp/work.sock",
+        "--prefix",
+        "Alt+a",
+        "--resume",
+      ][..],
+      &[
+        "ctmux",
+        "--resume",
+        "--prefix",
+        "Alt+a",
+        "-S",
+        "/tmp/work.sock",
+      ][..],
+    ] {
+      let parsed = Arguments::try_parse_from(arguments).unwrap();
+      assert_eq!(parsed.socket, Some(PathBuf::from("/tmp/work.sock")));
+      assert_eq!(parsed.prefix, "Alt+a");
+      assert!(matches!(parsed.command, Some(Command::Resume)));
+    }
+    for arguments in [
+      &["ctmux", "--resume", "list"][..],
+      &["ctmux", "--resume", "new", "-d"][..],
+      &["ctmux", "new", "--resume"][..],
+      &["ctmux", "--resume", "--resume"][..],
+    ] {
+      assert!(Arguments::try_parse_from(arguments).is_err());
     }
   }
 }

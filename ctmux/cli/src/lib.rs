@@ -6,14 +6,18 @@ mod shell;
 use clap::{Subcommand, ValueEnum};
 
 pub use commands::{
-  CommandError, ConnectFuture, Connector, LocalConnector, new_session, resolve_session, run,
-  run_tui, run_tui_with_startup,
+  CommandError, ConnectFuture, Connector, LocalConnector, attach_session, new_session,
+  resolve_session, run, run_tui, run_tui_with_startup,
 };
 pub use ctmux_tui::StartupMode;
 
 /// Canonical ctmux commands, independent of how the daemon is reached.
 #[derive(Debug, Subcommand)]
 pub enum Command {
+  /// Pick an existing session, creating a shell only when none are running.
+  #[command(long_flag = "resume")]
+  Resume,
+
   /// Create a persistent terminal session.
   #[command(name = "new-session", visible_alias = "new")]
   New {

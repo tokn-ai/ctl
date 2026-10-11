@@ -468,3 +468,63 @@ async fn targeted_session_commands(tui: &mut Tui, daemon: &TestDaemon) -> Result
   assert_eq!(ordered_sessions(daemon).await?.len(), 2);
   Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn session_manager_blank_name_creates_an_automatically_named_session() -> Result<()> {
+  let mut daemon = TestDaemon::start().await?;
+  let existing = daemon
+    .create_echo_session("automatic-seed", "seed", canvas())
+    .await?;
+  let mut tui = Tui::start(&daemon, &existing, COLUMNS, ROWS).await?;
+  prefix(&mut tui, b"s").await?;
+  tui.send(b"n")?;
+  tui
+    .wait_screen("new session advertises optional name", |screen| {
+      screen.contains("blank = automatic") && footer(screen) == ":"
+    })
+    .await?;
+  tui.send(b"\r")?;
+  tui
+    .wait_screen("blank name attaches a generated session", |screen| {
+      footer(screen).contains("ctmux [") && !footer(screen).contains("ctmux [automatic-seed]")
+    })
+    .await?;
+  let sessions = ordered_sessions(&daemon).await?;
+  assert_eq!(sessions.len(), 2);
+  let generated = sessions
+    .iter()
+    .find(|session| session.session_id != existing)
+    .ok_or("missing automatically named session")?;
+  assert_ne!(generated.name.trim(), "");
+  prefix(&mut tui, b"s").await?;
+  tui.send(b"r")?;
+  tui
+    .wait_screen("rename starts from the generated name", |screen| {
+      screen.contains(&format!("Rename {}", generated.name))
+    })
+    .await?;
+  tui.send(b"\x15\r")?;
+  tui
+    .wait_screen(
+      "blank rename rejects without creating another session",
+      |screen| screen.contains("Session name cannot be empty") && footer(screen) == ":",
+    )
+    .await?;
+  assert_eq!(ordered_sessions(&daemon).await?.len(), 2);
+  tui.send(b"\x1b")?;
+  tui
+    .wait_screen("rename cancel returns to the manager", |screen| {
+      screen.contains("Sessions — local")
+    })
+    .await?;
+  tui.send(b"\x1b")?;
+  tui
+    .wait_screen("manager returns to generated attachment", |screen| {
+      !screen.contains("Sessions — local") && footer(screen).starts_with(" connected |")
+    })
+    .await?;
+  detach(&mut tui).await?;
+  drop(tui);
+  daemon.shutdown().await?;
+  Ok(())
+}

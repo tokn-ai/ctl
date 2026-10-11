@@ -1,4 +1,5 @@
 use super::*;
+use clap::Parser as _;
 use ctl_ipc::{ClientMessage, PromptKind, ServerMessage};
 use portable_pty::CommandBuilder;
 use std::sync::atomic::AtomicUsize;
@@ -331,6 +332,11 @@ async fn terminal_fixture() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn shell_resume_opens_the_picker_before_attaching_or_creating() -> Result<()> {
+  check_resume_picker("shell").await?;
+  check_resume_picker("ctmux").await
+}
+
+async fn check_resume_picker(entrypoint: &str) -> Result<()> {
   let mut daemon = TestDaemon::start().await?;
   let session = daemon
     .create_echo_session(
@@ -352,6 +358,7 @@ async fn shell_resume_opens_the_picker_before_attaching_or_creating() -> Result<
   command.env("TERM", "xterm-256color");
   command.env("LANG", "C.UTF-8");
   command.env("CTL_TUI_TEST_SOCKET_PATH", &proxy.socket);
+  command.env("CTL_TUI_TEST_ENTRYPOINT", entrypoint);
   command.cwd(&daemon.directory);
   let mut tui = Tui::spawn(command, 120, 13)?;
   tui
@@ -399,8 +406,14 @@ async fn resume_terminal_fixture() {
     },
     ctl_client::hosts::ConnectionTargetDto::Local,
   );
-  run_shell(&connector, None, true, false, None)
-    .await
-    .unwrap();
+  let entrypoint = std::env::var("CTL_TUI_TEST_ENTRYPOINT").expect("fixture entrypoint");
+  let arguments = Arguments::try_parse_from(["ctl", &entrypoint, "--resume"]).unwrap();
+  run_selected(
+    arguments.command,
+    &connector,
+    ctl_client::RemotePlatform::Unix,
+  )
+  .await
+  .unwrap();
   assert!(!connector.terminal_ui_active.load(Ordering::Acquire));
 }

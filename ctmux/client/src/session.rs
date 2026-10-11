@@ -12,6 +12,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 /// Creation parameters independent of CLI parsing and desktop DTOs.
 #[derive(Debug, Clone)]
 pub struct CreateSessionRequest {
+  /// Omitted or blank names request the daemon's automatic session name.
   pub name: Option<String>,
   pub cwd: Option<String>,
   pub command: Vec<String>,
@@ -88,7 +89,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SessionClient<S> {
       arguments: argv.collect(),
     });
     let message = ClientMessage::CreateSession {
-      name: parameters.name,
+      name: parameters.name.filter(|name| !name.trim().is_empty()),
       command,
       working_directory: parameters.cwd,
       terminal_size: parameters.terminal_size,
@@ -327,6 +328,93 @@ mod tests {
       .await
       .unwrap();
     assert_eq!(result.session_id, "session-id");
+    peer.await.unwrap();
+  }
+
+  #[tokio::test]
+  async fn create_blank_names_request_automatic_names_on_existing_contracts() {
+    for version in [
+      ctmux_proto::SUPPORTED_PROTOCOL_VERSIONS[0],
+      ctmux_proto::PROTOCOL_VERSION,
+    ] {
+      for name in [None, Some(""), Some(" \t\n"), Some("\u{2003}")] {
+        let (client, mut server) = tokio::io::duplex(4096);
+        let peer = tokio::spawn(async move {
+          accept_contract(&mut server, version).await;
+          assert!(matches!(
+            read_frame::<_, ClientMessage>(&mut server).await.unwrap(),
+            Some(ClientMessage::CreateSession { name: None, .. })
+          ));
+          let mut created = session();
+          created.name = "session-42".into();
+          write_frame(
+            &mut server,
+            &ServerMessage::SessionCreated { session: created },
+          )
+          .await
+          .unwrap();
+          assert!(
+            read_frame::<_, ClientMessage>(&mut server)
+              .await
+              .unwrap()
+              .is_none()
+          );
+        });
+        let created = SessionClient::new(client, identity())
+          .create(CreateSessionRequest {
+            name: name.map(str::to_owned),
+            cwd: None,
+            command: Vec::new(),
+            terminal_size: session().terminal_size,
+          })
+          .await
+          .unwrap();
+        assert_eq!(created.name, "session-42");
+        peer.await.unwrap();
+      }
+    }
+  }
+
+  #[tokio::test]
+  async fn create_nonblank_names_remain_literal_and_keep_domain_errors() {
+    let (client, mut server) = tokio::io::duplex(4096);
+    let peer = tokio::spawn(async move {
+      accept(&mut server).await;
+      assert!(matches!(
+        read_frame::<_, ClientMessage>(&mut server).await.unwrap(),
+        Some(ClientMessage::CreateSession { name: Some(name), .. })
+          if name == " example "
+      ));
+      write_frame(
+        &mut server,
+        &ServerMessage::Error {
+          code: ErrorCode::InvalidSessionName,
+          message: "invalid name".into(),
+        },
+      )
+      .await
+      .unwrap();
+      assert!(
+        read_frame::<_, ClientMessage>(&mut server)
+          .await
+          .unwrap()
+          .is_none()
+      );
+    });
+    assert!(matches!(
+      SessionClient::new(client, identity())
+        .create(CreateSessionRequest {
+          name: Some(" example ".into()),
+          cwd: None,
+          command: Vec::new(),
+          terminal_size: session().terminal_size,
+        })
+        .await,
+      Err(ClientError::Server {
+        code: ErrorCode::InvalidSessionName,
+        ..
+      })
+    ));
     peer.await.unwrap();
   }
 

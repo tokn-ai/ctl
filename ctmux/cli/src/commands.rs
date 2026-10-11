@@ -184,9 +184,10 @@ impl Connector for LocalConnector {
 /// fails, or local command input such as the current directory is invalid.
 pub async fn run<C>(command: Command, connector: &C) -> Result<(), CommandError>
 where
-  C: Connector,
+  C: Connector + Sync,
 {
   match command {
+    Command::Resume => run_tui_with_startup(connector, ctmux_tui::StartupMode::Resume, false).await,
     Command::New {
       name,
       cwd,
@@ -493,7 +494,11 @@ async fn kill_session<C: Connector>(connector: &C, session: &str) -> Result<(), 
   Ok(())
 }
 
-async fn attach_session<C: Connector>(
+/// Attach to a known session with the raw presenter and reconnect policy.
+///
+/// # Errors
+/// Returns transport, protocol, or terminal presentation errors.
+pub async fn attach_session<C: Connector>(
   connector: &C,
   session: &str,
   initial_resume_from: Option<u64>,

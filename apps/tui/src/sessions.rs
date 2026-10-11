@@ -286,7 +286,7 @@ impl App<'_> {
         let target = entry.target.clone();
         let selected = entry.selected.clone();
         self.message_until = Instant::now();
-        let result = if name.trim().is_empty() {
+        let result = if target.is_some() && name.trim().is_empty() {
           Err("Session name cannot be empty".into())
         } else if let Some(target) = &target {
           self.rename_session(target, name.clone()).await
@@ -371,7 +371,7 @@ impl App<'_> {
         lines
       }
       Overlay::SessionName(entry) => vec![entry.target.as_ref().map_or_else(
-        || "New session name — Enter creates, Esc returns".into(),
+        || "New session name (blank = automatic) — Enter creates, Esc returns".into(),
         |target| {
           format!(
             "Rename {} ({}) — Enter saves, Esc returns",

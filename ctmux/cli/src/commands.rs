@@ -38,6 +38,13 @@ pub trait Connector {
   fn set_terminal_ui_active(&self, _active: bool) {}
 
   fn is_retryable(&self, error: &Self::Error) -> bool;
+  /// Only a typed missing-authentication failure may resume after authorization.
+  fn is_authentication_required(&self, _error: &Self::Error) -> bool {
+    false
+  }
+  fn recovery_generation(&self) -> u64 {
+    0
+  }
   fn is_local(&self) -> bool;
   fn label(&self) -> &str;
   fn archive_key(&self) -> String {
@@ -66,6 +73,16 @@ impl<C: Connector + Sync> ctmux_tui::Transport for TuiTransport<'_, C> {
     error
       .downcast_ref::<C::Error>()
       .is_none_or(|error| self.0.is_retryable(error))
+  }
+
+  fn is_authentication_required(&self, error: &ctmux_tui::Error) -> bool {
+    error
+      .downcast_ref::<C::Error>()
+      .is_some_and(|error| self.0.is_authentication_required(error))
+  }
+
+  fn recovery_generation(&self) -> u64 {
+    self.0.recovery_generation()
   }
 
   fn set_terminal_ui_active(&self, active: bool) {

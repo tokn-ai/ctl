@@ -128,10 +128,10 @@ the page does not restart active SSH connections automatically.
 Authentication requests describe their purpose: the key file whose passphrase
 is being read or replaced, the SSH account and destination whose password is
 needed, or the explicit import of previously saved ctmux credential metadata.
-Connection setup discovers public identities without unlocking saved keys. Only
-an SSH signature request for a configured key can read its saved passphrase and
-protected binding together. Password-only connections therefore do not request
-identity-passphrase access; a gateway or server that actually requires both
+Connection setup discovers public identities without unlocking saved keys.
+During ordinary SSH establishment, a signature request for a configured key
+reads its saved passphrase and protected binding together. Password-only
+connections therefore do not request identity-passphrase access; a gateway or server that actually requires both
 credentials can still need separate authorizations.
 
 When OpenSSH needs manual password or key-passphrase entry, the authentication
@@ -167,7 +167,9 @@ interactive reconnect requests. If macOS refuses that context or its exact saved
 item is missing, the attempt ends with authentication required; it does not try a
 fresh context, another saved item, or a manual password dialog. A subsequent
 explicit Connect can obtain fresh authorization. Fresh interactive connections
-can still show authentication UI; background connections cannot.
+can still show authentication UI; quiet background connections cannot. Full wake
+has a separate grouped authorization policy for active `ctl` TUI shells,
+described below.
 
 The cache contains authorization contexts, not password or passphrase values.
 Each credential value is retrieved only for authentication and its temporary
@@ -180,8 +182,10 @@ Approval is scoped to the configured account, endpoint, gateway route, effective
 SSH configuration, and known-hosts trust snapshot. Each context is further bound
 to an exact Keychain selector; identity-passphrase approval includes the key's
 canonical path and file contents. Changed configuration, host trust, or key-file
-contents cannot reuse the previous approval. A failed or canceled connection
-does not grant approval for a later attempt.
+contents cannot reuse the previous approval. Shared and privately owned masters
+for the same effective SSH principal share the credential scope while keeping
+their independent master ownership and disconnect policy. A failed or canceled
+connection does not grant approval for a later attempt.
 
 `StrictHostKeyChecking=accept-new` disables retained approval for new connections.
 Interactive connections can still authorize Keychain normally. This prevents an
@@ -194,8 +198,54 @@ disconnect, and any owned-secret mutation end approval. The saved credential
 remains in Keychain. These revocations do not terminate other already established
 SSH connections; a later connection requiring the secret needs authorization.
 Background reconnects never open authentication or credential-save UI. When
-approval is unavailable, they report that authentication is required and wait
-for an explicit interactive connection.
+approval is unavailable, they report that authentication is required and pause.
+
+Active `ctl` TUI shells register their exact host routes with ctld using one
+dedicated socket per open TUI. After full macOS wake and unlock, ctld groups
+eligible routes that were already registered before sleep. DarkWake, inactive
+catalog hosts, and closed shells cannot start this authorization. Desktop
+embedded terminals currently retain their explicit Connect host flow.
+
+The broker prefers exact nonsecret Keychain selectors remembered from successful
+connections. If those are unavailable after a restart or expiry, it may passively
+discover exact configured password scopes and verified saved identity bindings
+for an already-open shell route. Unknown, legacy unbound, or unverifiable
+metadata is omitted. Discovery selects items for fresh wake consent and never
+authorizes their secret access by itself. Current effective SSH configuration,
+host trust, identity-file binding, credential revision, and console session fence
+the reads and grants; a changed scope receives fresh consent rather than an
+inherited grant. The group can include the SSH owner of a remote VPN route.
+The first required read may request native authorization; subsequent reads share
+that native context and forbid UI. This
+authorizes local access to saved passwords or passphrases. Any needed SSH
+authentication runs afterward through quiet reconnects. The batch refreshes
+approval even when a host's existing SSH master survived sleep. The native
+request names the group of open hosts whose saved credentials it covers.
+
+No password, passphrase, or decrypted key is cached by the wake batch. Its
+temporary secret buffers are zeroized after each read. Each host receives a
+separate grant, so disconnecting one host does not invalidate the others' grants
+to the shared context. Sleep, locking, session revocation, or a credential
+mutation invalidates the native context for all of them.
+
+Successful wake authorization resumes authentication-blocked TUI shells for
+their exact registered host. It never overrides a manual disconnect or resets a
+configuration failure. A failed or canceled native read stops the group without
+another automatic prompt until another sleep/wake cycle or an explicit Connect
+action. Routes with unavailable scope evidence or unverifiable saved bindings
+require explicit connection. macOS still determines the actual authorization
+method and may reject a context before its maximum deadline.
+
+A successful explicit `ctl` connection in another terminal also notifies live
+matching shells after SSH readiness commits, including reuse of an existing
+master. The exact route can retry through that ready master without reading a
+credential. Equivalent shared/private routes and remote VPN-owner dependents
+require current matching scoped approval. Notifications only permit quiet
+recovery; they never grant protected-item access or display authentication UI.
+Configuration blockers and manual pauses remain unchanged. The broker assigns
+each publication a distinct event revision independent of the console epoch,
+so successive manual successes remain observable. Explicit connections that
+fail or are canceled before readiness commits do not publish recovery success.
 
 Desktop and CLI helpers share saved credentials, but approval contexts exist
 only in the broker process that authenticated them. Clients using the same

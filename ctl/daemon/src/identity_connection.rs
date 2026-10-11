@@ -24,6 +24,73 @@ pub(super) use labels::{connection_context, save_offer_message};
 
 const MAX_IDENTITIES: usize = 32;
 
+fn overlay_disabled(configurations: &config::Configurations) -> bool {
+  configurations.destination.agent_disabled
+    || configurations
+      .gateways
+      .iter()
+      .any(|gateway| gateway.inherits_agent && gateway.mutates_agent)
+}
+
+fn candidate_paths(configurations: &config::Configurations) -> Vec<(String, bool, bool)> {
+  let destination = &configurations.destination;
+  let mut paths: Vec<_> = destination
+    .paths
+    .iter()
+    .map(|path| {
+      (
+        path.clone(),
+        true,
+        !destination.agent_disabled
+          && destination.publickey_authentication == PublicKeyAuthentication::Enabled,
+      )
+    })
+    .collect();
+  for gateway in &configurations.gateways {
+    let reusable = gateway.inherits_agent
+      && !gateway.agent_disabled
+      && gateway.publickey_authentication == PublicKeyAuthentication::Enabled;
+    paths.extend(
+      gateway
+        .paths
+        .iter()
+        .map(|path| (path.clone(), false, reusable)),
+    );
+  }
+  paths
+}
+
+/// Discover only exact saved bindings eligible for the ordinary lazy overlay.
+/// File inspection and saved public hints do not read a Keychain secret, decrypt
+/// a private key, start an agent, or display authentication UI.
+pub(crate) async fn wake_bindings(
+  target: &SshTarget,
+) -> Result<Vec<(String, String)>, crate::keychain::Error> {
+  let configurations = resolve_configurations(target)
+    .await
+    .map_err(|_| crate::keychain::Error::ApprovalUnavailable)?;
+  if overlay_disabled(&configurations) {
+    return Ok(Vec::new());
+  }
+  let mut prepared = PreparedIdentities::default();
+  let (_, reusable_ids) = prepared
+    .inspect_candidates(candidate_paths(&configurations))
+    .await;
+  Ok(
+    prepared
+      .saved_candidates(&reusable_ids)
+      .await
+      .into_iter()
+      .map(|candidate| {
+        (
+          candidate.snapshot.identity_id.clone(),
+          candidate.snapshot.file_version.clone(),
+        )
+      })
+      .collect(),
+  )
+}
+
 /// This state is created only after failing to reuse an authenticated master.
 /// Dropping it terminates its agent and all proxy clients, including cancellation.
 #[derive(Default)]
@@ -67,65 +134,15 @@ impl PreparedIdentities {
     let Ok(configurations) = resolve_configurations(target).await else {
       return Self::default();
     };
+    let overlay_disabled = overlay_disabled(&configurations);
+    let candidates = candidate_paths(&configurations);
     let configuration = configurations.destination;
-    let overlay_disabled = configuration.agent_disabled
-      || configurations
-        .gateways
-        .iter()
-        .any(|gateway| gateway.inherits_agent && gateway.mutates_agent);
     let mut prepared = Self {
       authorization: Some(authorization),
       fallback_files: configuration.identity_files,
       ..Self::default()
     };
-    let mut destination_ids = HashSet::new();
-    let mut reusable_ids = HashSet::new();
-    let mut candidates: Vec<_> = configuration
-      .paths
-      .into_iter()
-      .map(|path| {
-        (
-          path,
-          true,
-          !configuration.agent_disabled
-            && configuration.publickey_authentication == PublicKeyAuthentication::Enabled,
-        )
-      })
-      .collect();
-    for gateway in configurations.gateways {
-      let reusable = gateway.inherits_agent
-        && !gateway.agent_disabled
-        && gateway.publickey_authentication == PublicKeyAuthentication::Enabled;
-      candidates.extend(
-        gateway
-          .paths
-          .into_iter()
-          .map(|path| (path, false, reusable)),
-      );
-    }
-    for (path, destination, reusable) in candidates {
-      if prepared.snapshots.len() >= MAX_IDENTITIES {
-        break;
-      }
-      let Ok(Ok(snapshot)) =
-        tokio::task::spawn_blocking(move || identities::inspect_path(&path)).await
-      else {
-        continue;
-      };
-      if destination {
-        destination_ids.insert(snapshot.identity_id.clone());
-      }
-      if reusable {
-        reusable_ids.insert(snapshot.identity_id.clone());
-      }
-      if !prepared
-        .snapshots
-        .iter()
-        .any(|existing| existing.identity_id == snapshot.identity_id)
-      {
-        prepared.snapshots.push(Arc::new(snapshot));
-      }
-    }
+    let (destination_ids, reusable_ids) = prepared.inspect_candidates(candidates).await;
     // Explicit agent policy and mutation preferences retain native OpenSSH
     // behavior. Snapshots remain available for locally verified save offers.
     if overlay_disabled || reusable_ids.is_empty() {
@@ -158,6 +175,38 @@ impl PreparedIdentities {
       );
     }
     prepared
+  }
+
+  async fn inspect_candidates(
+    &mut self,
+    candidates: Vec<(String, bool, bool)>,
+  ) -> (HashSet<String>, HashSet<String>) {
+    let mut destination_ids = HashSet::new();
+    let mut reusable_ids = HashSet::new();
+    for (path, destination, reusable) in candidates {
+      if self.snapshots.len() >= MAX_IDENTITIES {
+        break;
+      }
+      let Ok(Ok(snapshot)) =
+        tokio::task::spawn_blocking(move || identities::inspect_path(&path)).await
+      else {
+        continue;
+      };
+      if destination {
+        destination_ids.insert(snapshot.identity_id.clone());
+      }
+      if reusable {
+        reusable_ids.insert(snapshot.identity_id.clone());
+      }
+      if !self
+        .snapshots
+        .iter()
+        .any(|existing| existing.identity_id == snapshot.identity_id)
+      {
+        self.snapshots.push(Arc::new(snapshot));
+      }
+    }
+    (destination_ids, reusable_ids)
   }
 
   fn start_proxy(

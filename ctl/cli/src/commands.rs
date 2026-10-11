@@ -11,6 +11,8 @@ use std::sync::{
 };
 use thiserror::Error;
 
+#[cfg(all(test, unix))]
+mod existing_master_tests;
 mod reconnect;
 #[cfg(all(test, unix, ctl_repository_tui_tests))]
 mod tui_tests;
@@ -122,14 +124,7 @@ pub async fn run(arguments: Arguments) -> Result<i32, CliError> {
   if let ConnectionTarget::Ssh { options, .. } = &mut target {
     options.remote_platform = platform;
   }
-  let connector = CtlConnector {
-    target,
-    settings: resolved.target,
-    recovery: Arc::default(),
-    terminal_ui_active: Arc::default(),
-    #[cfg(unix)]
-    broker: Arc::default(),
-  };
+  let connector = CtlConnector::new(target, resolved.target);
   let operation = run_selected(arguments.command, &connector, platform);
   tokio::select! {
     result = operation => result,
@@ -218,10 +213,25 @@ struct CtlConnector {
   recovery: Arc<crate::remote::Recovery>,
   terminal_ui_active: Arc<AtomicBool>,
   #[cfg(unix)]
+  recovery_watch: Arc<ctl_client::recovery::RecoveryClient>,
+  #[cfg(unix)]
   broker: Arc<crate::ssh_broker::MasterClient>,
 }
 
 impl CtlConnector {
+  fn new(target: ConnectionTarget, settings: ctl_client::hosts::ConnectionTargetDto) -> Self {
+    Self {
+      target,
+      settings,
+      recovery: Arc::default(),
+      terminal_ui_active: Arc::default(),
+      #[cfg(unix)]
+      recovery_watch: Arc::default(),
+      #[cfg(unix)]
+      broker: Arc::default(),
+    }
+  }
+
   async fn identified_remote(
     &self,
     interaction: &ctl_client::SshInteraction,
@@ -274,6 +284,8 @@ impl CtlConnector {
       settings: self.settings.clone(),
       recovery: Arc::clone(&self.recovery),
       terminal_ui_active: Arc::clone(&self.terminal_ui_active),
+      #[cfg(unix)]
+      recovery_watch: Arc::clone(&self.recovery_watch),
       #[cfg(unix)]
       broker: Arc::clone(&self.broker),
       target: match &self.target {
@@ -354,8 +366,27 @@ impl Connector for CtlConnector {
     reconnect::is_retryable(error)
   }
 
+  fn is_authentication_required(&self, error: &CtlConnectError) -> bool {
+    reconnect::is_authentication_required(error)
+  }
+
+  fn recovery_generation(&self) -> u64 {
+    #[cfg(unix)]
+    return self.recovery_watch.generation();
+    #[cfg(not(unix))]
+    0
+  }
+
   fn set_terminal_ui_active(&self, active: bool) {
     self.terminal_ui_active.store(active, Ordering::Release);
+    #[cfg(unix)]
+    if active {
+      if let Ok(target) = self.settings.to_ssh_target() {
+        self.recovery_watch.start(target);
+      }
+    } else {
+      self.recovery_watch.stop();
+    }
   }
 
   fn is_local(&self) -> bool {
@@ -392,10 +423,28 @@ async fn ssh_interaction(
   if target.is_local() {
     return Ok(ctl_client::SshInteraction::Inherit);
   }
+  let ssh_target = target.to_ssh_target()?;
+  match broker.existing_master(ssh_target.clone()).await {
+    Ok(Some(control_path)) => {
+      // An established transport already owns its route. Reusing it must not
+      // restart a VPN or authenticate a gateway before opening another channel.
+      // An explicit connection also publishes recovery to older blocked shells.
+      // Keep background activity passive, and propagate failed or canceled
+      // explicit requests without starting a second authentication attempt.
+      let control_path = if interactive {
+        broker.ensure_master(ssh_target, true).await?
+      } else {
+        control_path
+      };
+      return Ok(ctl_client::SshInteraction::Multiplexed { control_path });
+    }
+    Ok(None) => {}
+    Err(crate::ssh_broker::Error::Daemon { code, .. })
+      if interactive && code == "ssh_host_disconnected" => {}
+    Err(error) => return Err(error.into()),
+  }
   crate::target::ensure_vpn_with_interaction(target, interactive).await?;
-  let control_path = broker
-    .ensure_master(target.to_ssh_target()?, interactive)
-    .await?;
+  let control_path = broker.ensure_master(ssh_target, interactive).await?;
   Ok(ctl_client::SshInteraction::Multiplexed { control_path })
 }
 
@@ -677,6 +726,8 @@ mod tests {
       recovery: Arc::default(),
       terminal_ui_active: Arc::default(),
       #[cfg(unix)]
+      recovery_watch: Arc::default(),
+      #[cfg(unix)]
       broker: Arc::default(),
     };
     let attachment = connector.for_interactive_session(PathBuf::from("/remote/ctmux.sock"));
@@ -692,6 +743,8 @@ mod tests {
       settings: ctl_client::hosts::ConnectionTargetDto::Local,
       recovery: Arc::default(),
       terminal_ui_active: Arc::default(),
+      #[cfg(unix)]
+      recovery_watch: Arc::default(),
       #[cfg(unix)]
       broker: Arc::default(),
       target: ConnectionTarget::Local {

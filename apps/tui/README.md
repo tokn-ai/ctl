@@ -163,11 +163,14 @@ remain flat, as with the prefix controls above.
 ## Scrollback and copy mode
 
 The bottom status row shows the focused pane's connection and history state:
-`connected` or `reconnecting`, and `history syncing`, `history ready`, or
+`connected`, `reconnecting`, or `disconnected`, and `history syncing`, `history ready`, or
 `history incomplete`. Ready means the retained window is available, not that
 the remote keeps unlimited history. The row stays outside the PTY grid and
 scrollback. Copy mode keeps its frozen history and selection while connection
 status updates; reopening copy mode picks up newly synchronized history.
+When authentication or configuration requires user action, automatic retries
+stop. The pane shows `disconnected` and retains the error with `automatic retries
+stopped`, including after temporary local action notices expire.
 
 Press **Ctrl+B [** to inspect a frozen snapshot of the active pane's visible
 screen and its retained scrollback. The snapshot stays inside that pane; other
@@ -313,8 +316,31 @@ input handling, so stalled background requests do not block local controls.
 Switching sessions or detaching cancels pending recovery work. Topology and session lists
 refresh every two seconds and after local changes. While the TUI owns the host
 terminal, `ctl` connection preparation displays errors through the TUI rather
-than printing progress or asking for authentication in the terminal. If SSH
-authentication is required, detach and reconnect to answer the prompt. Detaching
+than printing progress or asking for authentication in the terminal. Sleep and
+screen locking revoke reusable Keychain approval. With ctld 1.1.16 on macOS,
+active `ctl` TUI shells register their exact host routes until the TUI closes.
+After full wake and unlock, ctld requests one grouped native authorization for
+exact saved-credential bindings of those live shells' configured routes, using
+remembered successful selectors or passive exact-binding discovery. Fresh native
+consent grants access; metadata alone does not. DarkWake and
+closed or inactive hosts do not start authentication. The native authorization
+runs independently of short pane and refresh request timeouts; successful
+authorization resumes authentication-blocked shells for that host automatically.
+
+A successful explicit `ctl` connection in another terminal also notifies matching
+open shells, including when the new connection reuses a ready master. The
+watching TUI then retries quietly without needing session reselection. Configuration
+failures and manual disconnects remain blocked; the notification grants no
+credential access or authentication UI.
+
+Quiet reconnects never open authentication prompts. A canceled or failed wake
+authorization stops without repeated prompts until another sleep/wake cycle or
+an explicit Connect action. Configuration failures and manually disconnected
+hosts remain blocked. For a host requiring explicit authentication, run
+`ctl host connect HOST` in another terminal and select the existing session
+again, or detach and reconnect to answer its prompt. Older brokers retain this
+explicit recovery path. The grouped wake policy applies to `ctl` TUI shells;
+desktop embedded terminals keep their own Connect host flow. Detaching
 releases leases without terminating the session. Normal exit, errors, and Unix
 termination/hangup signals restore the host terminal mode and alternate screen.
 

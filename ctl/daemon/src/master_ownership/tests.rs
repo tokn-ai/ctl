@@ -14,6 +14,8 @@ struct PendingRequest {
   client: ctl_ipc::Stream,
   worker: tokio::task::JoinHandle<Result<(), crate::RequestError>>,
   finalized: oneshot::Sender<()>,
+  recovery: tokio::sync::watch::Receiver<Option<u64>>,
+  _lease: crate::wake_recovery::Lease,
 }
 
 fn request(
@@ -23,6 +25,19 @@ fn request(
 ) -> PendingRequest {
   let (client, mut server) = ctl_ipc::Stream::pair().unwrap();
   let (finalized, finalization) = oneshot::channel();
+  let state = Arc::new(crate::State::default());
+  let target = ctl_ipc::SshTarget {
+    destination: "fixture.invalid".into(),
+    ssh_config_alias: None,
+    use_ssh_config_master: Some(false),
+    hostname: None,
+    user: None,
+    port: None,
+    identity_file: None,
+    gateways: vec![],
+  };
+  let (lease, recovery) = state.wake_recovery.register(target.clone(), 0).unwrap();
+  let capture = crate::manual_recovery::Capture::new(&state, &target);
   let worker = tokio::spawn(async move {
     let monitor = crate::client_lifetime::Monitor::new(&server).unwrap();
     let work = async move {
@@ -33,20 +48,12 @@ fn request(
         .map_err(|_| crate::RequestError::ClientClosed)?;
       crate::publish_master_ready(
         &mut server,
-        &crate::State::default(),
-        &ctl_ipc::SshTarget {
-          destination: "fixture.invalid".into(),
-          ssh_config_alias: None,
-          use_ssh_config_master: Some(false),
-          hostname: None,
-          user: None,
-          port: None,
-          identity_file: None,
-          gateways: vec![],
-        },
+        &state,
+        &target,
         &endpoint,
         owner,
         None,
+        Some(capture.prepare(&state).await),
       )
       .await
     };
@@ -62,6 +69,8 @@ fn request(
     client,
     worker,
     finalized,
+    recovery,
+    _lease: lease,
   }
 }
 
@@ -253,6 +262,7 @@ async fn eof_during_authorization_finalization_waits_for_private_cleanup() {
     request.worker.await.unwrap(),
     Err(crate::RequestError::ClientClosed)
   ));
+  assert_eq!(*request.recovery.borrow(), None);
   fixture.terminated().await;
   assert!(lock.try_lock().is_ok());
 }
@@ -273,6 +283,7 @@ async fn ready_waits_for_finalization_and_immediate_client_eof_keeps_the_master(
     .await
     .is_err()
   );
+  assert_eq!(*request.recovery.borrow(), None);
   request.finalized.send(()).unwrap();
   assert!(matches!(
     ctl_ipc::read_frame::<_, crate::ServerMessage>(&mut request.client)
@@ -280,6 +291,7 @@ async fn ready_waits_for_finalization_and_immediate_client_eof_keeps_the_master(
       .unwrap(),
     Some(crate::ServerMessage::MasterReady { .. })
   ));
+  assert_eq!(*request.recovery.borrow(), Some(1));
   drop(request.client);
   let _ = request.worker.await.unwrap();
   assert!(!fixture.directory.join("terminating").exists());

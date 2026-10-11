@@ -12,6 +12,8 @@ fn retryable(error: &CtlConnectError) -> bool {
     recovery: std::sync::Arc::default(),
     terminal_ui_active: std::sync::Arc::default(),
     #[cfg(unix)]
+    recovery_watch: std::sync::Arc::default(),
+    #[cfg(unix)]
     broker: std::sync::Arc::default(),
   };
   connector.is_retryable(error)
@@ -149,5 +151,36 @@ fn local_vpn_transport_interruptions_follow_the_same_reconnect_policy() {
     crate::target::Error::Vpn(ctl_ipc::vpn::VpnError::InvalidConnection(
       "Invalid saved VPN".into(),
     )),
+  )));
+}
+
+#[cfg(unix)]
+#[test]
+fn recovery_authorization_resumes_only_typed_ssh_authentication_blockers() {
+  assert!(is_authentication_required(&CtlConnectError::Broker(
+    crate::ssh_broker::Error::AuthenticationRequired,
+  )));
+  assert!(is_authentication_required(&CtlConnectError::Target(
+    crate::target::Error::Runtime(crate::vpn::Error::Preparation(Box::new(
+      crate::target::Error::Broker(crate::ssh_broker::Error::AuthenticationRequired),
+    ))),
+  )));
+  for code in [
+    "ssh_authentication_failed",
+    "ssh_host_disconnected",
+    "ssh_config_error",
+  ] {
+    assert!(!is_authentication_required(&CtlConnectError::Broker(
+      crate::ssh_broker::Error::Daemon {
+        code: code.into(),
+        message: "authentication required".into(),
+      },
+    )));
+  }
+  assert!(!is_authentication_required(&CtlConnectError::Target(
+    crate::target::Error::VpnAuthenticationRequired("https://sign-in.example".into()),
+  )));
+  assert!(!is_authentication_required(&CtlConnectError::Broker(
+    crate::ssh_broker::Error::Codec(CodecError::Io(ErrorKind::PermissionDenied.into())),
   )));
 }

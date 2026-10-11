@@ -2,6 +2,48 @@ use super::*;
 use std::fmt::Write as _;
 
 #[test]
+fn wake_identity_discovery_preserves_each_hosts_agent_and_publickey_policy() {
+  let configurations = config::Configurations {
+    destination: parse_configuration("identityfile /keys/destination\npubkeyauthentication no\n"),
+    gateways: vec![
+      parse_configuration("identityfile /keys/inherited\n"),
+      parse_configuration("identityfile /keys/separate\nidentityagent /private/agent\n"),
+      parse_configuration("identityfile /keys/disabled\nidentityagent none\n"),
+      parse_configuration("identityfile /keys/password\npreferredauthentications password\n"),
+    ],
+  };
+  assert!(!overlay_disabled(&configurations));
+  assert_eq!(
+    candidate_paths(&configurations),
+    vec![
+      ("/keys/destination".into(), true, false),
+      ("/keys/inherited".into(), false, true),
+      ("/keys/separate".into(), false, false),
+      ("/keys/disabled".into(), false, false),
+      ("/keys/password".into(), false, false),
+    ]
+  );
+}
+
+#[test]
+fn wake_identity_discovery_preserves_mutating_agent_and_destination_opt_out() {
+  let mut configurations = config::Configurations {
+    destination: parse_configuration("identityfile /keys/destination\n"),
+    gateways: vec![parse_configuration(
+      "identityfile /keys/gateway\naddkeystoagent yes\n",
+    )],
+  };
+  assert!(overlay_disabled(&configurations));
+  configurations.gateways[0] = parse_configuration(
+    "identityfile /keys/gateway\nidentityagent /private/agent\naddkeystoagent yes\n",
+  );
+  assert!(!overlay_disabled(&configurations));
+  configurations.destination =
+    parse_configuration("identityfile /keys/destination\nidentityagent none\n");
+  assert!(overlay_disabled(&configurations));
+}
+
+#[test]
 fn fallback_warnings_require_a_prompt_for_one_prepared_encrypted_identity() {
   struct Fixture(PathBuf);
   impl Drop for Fixture {

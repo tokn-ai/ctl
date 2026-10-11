@@ -313,11 +313,20 @@ esac
         )
         .await
         .unwrap();
-        let Some(ClientMessage::EnsureMaster { target }) =
+        let Some(ClientMessage::MasterStatus { target }) =
           ctl_ipc::read_frame(&mut stream).await.unwrap()
         else {
-          panic!("expected one managed master request");
+          panic!("expected a passive managed master observation");
         };
+        ctl_ipc::write_frame(&mut stream, &ServerMessage::AuthenticationRequired)
+          .await
+          .unwrap();
+        let Some(ClientMessage::EnsureMaster { target: requested }) =
+          ctl_ipc::read_frame(&mut stream).await.unwrap()
+        else {
+          panic!("expected one managed master request after observation");
+        };
+        assert_eq!(requested, target);
         ctl_ipc::write_frame(
           &mut stream,
           &ServerMessage::MasterReady {

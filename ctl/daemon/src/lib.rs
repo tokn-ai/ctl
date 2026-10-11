@@ -13,10 +13,13 @@ pub mod identities;
 #[cfg(target_os = "macos")]
 mod identity_connection;
 
+#[cfg(any(target_os = "macos", test))]
+mod approval_context;
 #[cfg(target_os = "macos")]
 mod keychain;
 #[cfg(unix)]
 mod lifecycle;
+mod manual_recovery;
 mod master_diagnostics;
 mod master_observation;
 mod master_ownership;
@@ -32,6 +35,9 @@ mod tailscale;
 mod target_lifecycle;
 mod vpn_container;
 mod vpn_service;
+#[cfg(target_os = "macos")]
+mod wake_authorization;
+mod wake_recovery;
 
 #[cfg(test)]
 mod master_policy_tests;
@@ -89,6 +95,7 @@ struct State {
   endpoint_registry: endpoint_registry::Registry,
   shared_forwards: AsyncMutex<SharedForwardRegistry>,
   vpn_service: Option<vpn_service::VpnService>,
+  wake_recovery: Arc<wake_recovery::Registry>,
   #[cfg(target_os = "macos")]
   approvals: Option<Arc<keychain::approval::Approvals>>,
 }
@@ -442,6 +449,8 @@ async fn run_with_approvals(
     approvals,
     ..State::default()
   });
+  #[cfg(target_os = "macos")]
+  let wake_recovery = wake_authorization::spawn(Arc::clone(&state));
   let mut connections = tokio::task::JoinSet::new();
   let mut restarting = None;
   #[cfg(target_os = "macos")]
@@ -489,6 +498,11 @@ async fn run_with_approvals(
   connections.shutdown().await;
   #[cfg(target_os = "macos")]
   approval_cleanup.abort();
+  #[cfg(target_os = "macos")]
+  {
+    wake_recovery.abort();
+    let _ = wake_recovery.await;
+  }
   let forwards_released = state
     .forwards
     .lock()
@@ -610,6 +624,7 @@ async fn handle_request(
       }
       ClientMessage::MasterStatus { target } => master_status(stream, state, &target).await,
       ClientMessage::ConnectionStatus { target } => connection_status(stream, state, &target).await,
+      ClientMessage::WatchRecovery { target } => wake_recovery::watch(stream, state, target).await,
       ClientMessage::DisconnectMaster { target } => disconnect_master(stream, state, &target).await,
       ClientMessage::DeleteCredentials { target } => delete_credentials(stream, &target).await,
       ClientMessage::ConfigurePortForward {
@@ -668,10 +683,18 @@ fn validate_request_contract(
       "quiet SSH connection requires ctld 1.1.14",
     ));
   }
+  if matches!(request, ClientMessage::WatchRecovery { .. })
+    && !ctl_ipc::recovery_watch_supported(protocol)
+  {
+    return Err(RequestError::InvalidRequest(
+      "recovery watches require ctld 1.1.16",
+    ));
+  }
   let (ClientMessage::EnsureMaster { target }
   | ClientMessage::EnsureMasterQuiet { target }
   | ClientMessage::MasterStatus { target }
   | ClientMessage::ConnectionStatus { target }
+  | ClientMessage::WatchRecovery { target }
   | ClientMessage::DisconnectMaster { target }
   | ClientMessage::DeleteCredentials { target }
   | ClientMessage::ConfigurePortForward { target, .. }
@@ -745,6 +768,7 @@ fn normalize_request_target(request: &mut ClientMessage) {
     | ClientMessage::EnsureMasterQuiet { target }
     | ClientMessage::MasterStatus { target }
     | ClientMessage::ConnectionStatus { target }
+    | ClientMessage::WatchRecovery { target }
     | ClientMessage::DisconnectMaster { target }
     | ClientMessage::DeleteCredentials { target }
     | ClientMessage::ConfigurePortForward { target, .. }
@@ -900,13 +924,14 @@ async fn ensure_master_with_interaction_inner(
   cleanup: &master_ownership::CleanupBarrier,
 ) -> Result<(), RequestError> {
   validate_target(&target)?;
+  let recovery = interactive.then(|| manual_recovery::Capture::new(&state, &target));
   let lifecycle = state.target(&target);
   let mut attempt = lifecycle.attempt();
   let target_guard = attempt
     .run(Arc::clone(&lifecycle.lock).lock_owned())
     .await?;
   if interactive {
-    lifecycle.resume(&attempt)?;
+    lifecycle.resume(&mut attempt)?;
   } else {
     lifecycle.require_connected()?;
   }
@@ -944,13 +969,19 @@ async fn ensure_master_with_interaction_inner(
           .await;
       })
       .await?;
+    let recovery = if let Some(recovery) = &recovery {
+      Some(attempt.run(recovery.prepare(&state)).await?)
+    } else {
+      None
+    };
     return attempt
-      .run(ctl_ipc::write_frame(
+      .run(publish_reused_master_ready(
         stream,
-        &ServerMessage::MasterReady { control_path },
+        &state,
+        control_path,
+        recovery,
       ))
-      .await?
-      .map_err(Into::into);
+      .await?;
   }
   if !interactive {
     lifecycle.allow_background_connection()?;
@@ -969,12 +1000,12 @@ async fn ensure_master_with_interaction_inner(
     &target,
     &endpoint,
     &mut attempt,
-    interactive,
     master_ownership::StartupOwner::new(target_guard, cleanup),
+    recovery.as_ref(),
   )
   .await;
   if matches!(result, Err(RequestError::AuthenticationRequired)) {
-    lifecycle.require_authentication();
+    lifecycle.require_authentication(&attempt);
   }
   operation.finish(
     if result.is_ok() {
@@ -994,9 +1025,10 @@ async fn establish_master(
   target: &SshTarget,
   endpoint: &MasterEndpoint,
   attempt: &mut target_lifecycle::TargetAttempt,
-  interactive: bool,
   ownership: master_ownership::StartupOwner<'_>,
+  recovery: Option<&manual_recovery::Capture>,
 ) -> Result<(), RequestError> {
+  let interactive = recovery.is_some();
   let token = uuid::Uuid::new_v4().to_string();
   let (prompt_tx, mut prompt_rx) = mpsc::channel(1);
   state
@@ -1046,6 +1078,11 @@ async fn establish_master(
   let result = result.and_then(|result| result);
   match result {
     Ok(diagnostics) => {
+      let recovery = if let Some(recovery) = recovery {
+        Some(attempt.run(recovery.prepare(state)).await?)
+      } else {
+        None
+      };
       if endpoint.shared {
         state.remember_endpoint(target, endpoint, process.child().stdin.take());
       }
@@ -1057,6 +1094,7 @@ async fn establish_master(
           endpoint,
           process,
           diagnostics,
+          recovery,
         ))
         .await?
     }
@@ -1074,11 +1112,15 @@ async fn publish_master_ready(
   endpoint: &MasterEndpoint,
   process: master_ownership::PendingMaster,
   diagnostics: Option<tokio::task::JoinHandle<String>>,
+  recovery: Option<manual_recovery::Ready>,
 ) -> Result<(), RequestError> {
   // All authorization and connection work has committed. A normal client
   // closes its request socket immediately after reading MasterReady; it must
   // not cancel the committed master while response delivery finishes.
   let _target_guard = process.connected();
+  if let Some(recovery) = recovery {
+    recovery.publish(state);
+  }
   if !endpoint.shared
     && let Some(diagnostics) = diagnostics
   {
@@ -1091,6 +1133,21 @@ async fn publish_master_ready(
     },
   )
   .await?;
+  Ok(())
+}
+
+async fn publish_reused_master_ready(
+  stream: &mut ctl_ipc::Stream,
+  state: &State,
+  control_path: PathBuf,
+  recovery: Option<manual_recovery::Ready>,
+) -> Result<(), RequestError> {
+  // The existing master and its adopted route are already committed. Publish
+  // before the response so a normal client EOF cannot cancel shell recovery.
+  if let Some(recovery) = recovery {
+    recovery.publish(state);
+  }
+  ctl_ipc::write_frame(stream, &ServerMessage::MasterReady { control_path }).await?;
   Ok(())
 }
 
@@ -1129,7 +1186,7 @@ impl ConnectionAuthentication {
     let approval_scope = keychain::approval_scope::snapshot(target).await;
     let authorization = {
       let approvals = state.approvals.clone();
-      let prefix = format!("{}:", target_key(target));
+      let prefix = keychain::approval_scope::prefix(target);
       let scope = approval_scope
         .as_ref()
         .map(|scope| format!("{prefix}{scope}"));
@@ -1752,7 +1809,10 @@ async fn disconnect_master_inner(
           endpoint: history_endpoint(target),
           correlation_id: state.correlation(&endpoint),
         });
-    approvals.revoke_target(&format!("{}:", target_key(target)), connection.as_ref());
+    approvals.revoke_target(
+      &keychain::approval_scope::prefix(target),
+      connection.as_ref(),
+    );
   }
   let _target_guard = lifecycle.lock.lock().await;
   let mut forwards = state.forwards.lock().await;
@@ -2950,7 +3010,7 @@ mod tests {
     };
     assert!(!state.target(&other).is_paused());
     let lifecycle = state.target(&target);
-    lifecycle.resume(&lifecycle.attempt()).unwrap();
+    lifecycle.resume(&mut lifecycle.attempt()).unwrap();
     master_status(&mut server, &state, &target).await.unwrap();
     assert!(matches!(
       ctl_ipc::read_frame::<_, ServerMessage>(&mut client)

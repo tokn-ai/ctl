@@ -23,6 +23,14 @@ pub async fn ensure_master_with_interaction(
 pub struct MasterClient(ConnectionClient);
 
 impl MasterClient {
+  pub async fn existing_master(&self, target: SshTarget) -> Result<Option<PathBuf>, Error> {
+    self
+      .0
+      .existing_master(target)
+      .await
+      .map(|ready| ready.map(|ready| ready.control_path))
+  }
+
   pub async fn ensure_master(
     &self,
     target: SshTarget,

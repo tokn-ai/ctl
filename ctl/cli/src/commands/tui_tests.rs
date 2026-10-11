@@ -17,6 +17,8 @@ const WARNING_TEXT: &str = "FORBIDDEN_BROKER_WARNING";
 struct Broker {
   prompt: Arc<AtomicUsize>,
   cancelled: Arc<AtomicUsize>,
+  watches: Arc<AtomicUsize>,
+  closed_watches: Arc<AtomicUsize>,
   changed: Arc<Notify>,
   task: tokio::task::JoinHandle<()>,
 }
@@ -26,10 +28,14 @@ impl Broker {
     let listener = UnixListener::bind(socket)?;
     let prompt = Arc::new(AtomicUsize::new(0));
     let cancelled = Arc::new(AtomicUsize::new(0));
+    let watches = Arc::new(AtomicUsize::new(0));
+    let closed_watches = Arc::new(AtomicUsize::new(0));
     let changed = Arc::new(Notify::new());
     let mode = Arc::clone(&prompt);
     let progress = Arc::clone(&cancelled);
     let notified = Arc::clone(&changed);
+    let registrations = Arc::clone(&watches);
+    let closed = Arc::clone(&closed_watches);
     let task = tokio::spawn(async move {
       let mut requests = JoinSet::new();
       loop {
@@ -39,13 +45,10 @@ impl Broker {
             let mode = Arc::clone(&mode);
             let progress = Arc::clone(&progress);
             let notified = Arc::clone(&notified);
+            let registrations = Arc::clone(&registrations);
+            let closed = Arc::clone(&closed);
             requests.spawn(async move {
-              let prompt = mode.load(Ordering::Acquire);
-              answer_request(stream, prompt).await;
-              if prompt != 0 {
-                progress.fetch_add(1, Ordering::Release);
-                notified.notify_one();
-              }
+              answer_request(stream, mode, progress, registrations, closed, notified).await;
             });
           }
           result = requests.join_next(), if !requests.is_empty() => {
@@ -57,26 +60,32 @@ impl Broker {
     Ok(Self {
       prompt,
       cancelled,
+      watches,
+      closed_watches,
       changed,
       task,
     })
   }
 
   async fn wait_cancelled(&self, expected: usize) -> Result<()> {
+    self.wait_counter(&self.cancelled, expected).await
+  }
+
+  async fn wait_counter(&self, counter: &AtomicUsize, expected: usize) -> Result<()> {
     timeout(Duration::from_secs(5), async {
       loop {
         let notified = self.changed.notified();
         tokio::pin!(notified);
         notified.as_mut().enable();
         assert!(!self.task.is_finished(), "fixture broker stopped");
-        if self.cancelled.load(Ordering::Acquire) >= expected {
+        if counter.load(Ordering::Acquire) >= expected {
           return;
         }
         notified.await;
       }
     })
     .await
-    .map_err(|_| "UI reconnect did not cancel the broker prompt".into())
+    .map_err(|_| "UI reconnect did not reach the expected broker state".into())
   }
 }
 
@@ -86,7 +95,14 @@ impl Drop for Broker {
   }
 }
 
-async fn answer_request(mut stream: tokio::net::UnixStream, prompt: usize) {
+async fn answer_request(
+  mut stream: tokio::net::UnixStream,
+  prompt: Arc<AtomicUsize>,
+  cancelled: Arc<AtomicUsize>,
+  watches: Arc<AtomicUsize>,
+  closed_watches: Arc<AtomicUsize>,
+  changed: Arc<Notify>,
+) {
   assert!(matches!(
     ctl_ipc::read_frame::<_, ClientMessage>(&mut stream)
       .await
@@ -96,20 +112,61 @@ async fn answer_request(mut stream: tokio::net::UnixStream, prompt: usize) {
   ctl_ipc::write_frame(
     &mut stream,
     &ServerMessage::HandshakeAccepted {
-      // This fixture implements the retained one-request contract.
-      protocol_version: ctl_ipc::CONTRACT_V1_1_14,
+      protocol_version: ctl_ipc::CONTRACT_V1_1_16,
     },
   )
   .await
   .unwrap();
+  while let Some(request) = ctl_ipc::read_frame::<_, ClientMessage>(&mut stream)
+    .await
+    .unwrap()
+  {
+    if let ClientMessage::WatchRecovery { target } = request {
+      assert_eq!(target.destination, "fixture");
+      watches.fetch_add(1, Ordering::Release);
+      changed.notify_one();
+      ctl_ipc::write_frame(&mut stream, &ServerMessage::RecoveryRegistered)
+        .await
+        .unwrap();
+      assert!(
+        ctl_ipc::read_frame::<_, ClientMessage>(&mut stream)
+          .await
+          .unwrap()
+          .is_none(),
+        "a recovery watch must stay passive until the terminal releases it"
+      );
+      closed_watches.fetch_add(1, Ordering::Release);
+      changed.notify_one();
+      return;
+    }
+    if answer_master(&mut stream, request, prompt.load(Ordering::Acquire)).await {
+      cancelled.fetch_add(1, Ordering::Release);
+      changed.notify_one();
+    }
+  }
+}
+
+async fn answer_master(
+  stream: &mut tokio::net::UnixStream,
+  request: ClientMessage,
+  prompt: usize,
+) -> bool {
+  let passive = matches!(&request, ClientMessage::MasterStatus { .. });
   assert!(matches!(
-    ctl_ipc::read_frame::<_, ClientMessage>(&mut stream).await.unwrap(),
-    Some(ClientMessage::EnsureMaster { target } | ClientMessage::EnsureMasterQuiet { target })
-      if target.destination == "fixture"
+    request,
+    ClientMessage::EnsureMaster { target }
+      | ClientMessage::EnsureMasterQuiet { target }
+      | ClientMessage::MasterStatus { target } if target.destination == "fixture"
   ));
+  if passive && prompt != 0 {
+    ctl_ipc::write_frame(&mut *stream, &ServerMessage::AuthenticationRequired)
+      .await
+      .unwrap();
+    return false;
+  }
   if prompt == 0 {
     ctl_ipc::write_frame(
-      &mut stream,
+      &mut *stream,
       &ServerMessage::MasterReady {
         control_path: PathBuf::from("/tmp/unused-fixture-master"),
       },
@@ -118,7 +175,7 @@ async fn answer_request(mut stream: tokio::net::UnixStream, prompt: usize) {
     .unwrap();
   } else {
     ctl_ipc::write_frame(
-      &mut stream,
+      &mut *stream,
       &ServerMessage::Prompt {
         prompt_id: "fixture-prompt".into(),
         kind: if prompt == 1 {
@@ -134,13 +191,14 @@ async fn answer_request(mut stream: tokio::net::UnixStream, prompt: usize) {
     .unwrap();
     assert!(
       matches!(
-        ctl_ipc::read_frame::<_, ClientMessage>(&mut stream).await.unwrap(),
+        ctl_ipc::read_frame::<_, ClientMessage>(&mut *stream).await.unwrap(),
         Some(ClientMessage::PromptResponse { prompt_id, response })
           if prompt_id == "fixture-prompt" && response.is_none()
       ),
       "the UI must cancel authentication without reading the host terminal"
     );
   }
+  !passive && prompt != 0
 }
 
 fn footer(screen: &Screen) -> &str {
@@ -181,6 +239,8 @@ async fn terminal_ownership_disables_broker_prompts_through_repeated_reconnects(
       screen.contains("shell:ready") && footer(screen).starts_with(" connected |")
     })
     .await?;
+  broker.wait_counter(&broker.watches, 1).await?;
+  assert_eq!(broker.cancelled.load(Ordering::Acquire), 0);
   for cycle in 0..3 {
     let attachments = proxy.attachments();
     let cancelled = broker.cancelled.load(Ordering::Acquire);
@@ -233,6 +293,9 @@ async fn terminal_ownership_disables_broker_prompts_through_repeated_reconnects(
   }
   tui.send(b"\x02d")?;
   assert!(tui.wait_exit().await?.success());
+  broker.wait_counter(&broker.closed_watches, 1).await?;
+  assert_eq!(broker.watches.load(Ordering::Acquire), 1);
+  assert_eq!(broker.closed_watches.load(Ordering::Acquire), 1);
   drop(tui);
   drop(broker);
   drop(proxy);
@@ -254,6 +317,8 @@ async fn terminal_fixture() {
     settings: ctl_client::hosts::ConnectionTargetDto::ssh("fixture"),
     recovery: Arc::default(),
     terminal_ui_active: Arc::default(),
+    #[cfg(unix)]
+    recovery_watch: Arc::default(),
     #[cfg(unix)]
     broker: Arc::default(),
   };

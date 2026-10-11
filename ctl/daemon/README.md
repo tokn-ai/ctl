@@ -5,6 +5,20 @@ Per-user SSH connection and credential broker for ctl.
 Installs `ctld`, the companion daemon used by `ctl` and the ctmux desktop app.
 It owns shared SSH connections, port forwards, and VPN container lifecycles.
 
+Active `ctl` TUI shells register their exact SSH routes through the ctld 1.1.16
+recovery-watch contract. On macOS, full wake and unlock can request one grouped
+native authorization for exact saved-credential bindings of those open shell
+routes. It prefers selectors remembered from successful connections and may
+passively rediscover configured bindings after restart or expiry. DarkWake and
+inactive hosts do not request it. Subsequent reads and SSH recovery are quiet;
+cancellation or failure does not start another prompt loop.
+Successful explicit `ctl` connections also notify matching open shells after
+SSH readiness commits, including reuse of a live master. Notifications allow
+quiet retries without granting credential access or opening native UI.
+The batch retains independently revocable host grants, without caching passwords,
+passphrases, or decrypted keys. Desktop embedded terminals keep their existing
+Connect host flow. See [credential approval](../../docs/credentials.md#reconnect-approval).
+
 On macOS, saved credentials and Touch ID require the signed helper with the
 `dev.tokn-ai.ctl.ctld` identity and matching Keychain entitlement/provisioning.
 `cargo install ctld` builds the executable but does not configure Apple signing.

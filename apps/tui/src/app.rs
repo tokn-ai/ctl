@@ -376,6 +376,7 @@ impl App<'_> {
       // user has resolved an authentication/configuration failure.
       self.maintenance.cancel();
       self.adopt_view(view).await?;
+      self.clear_connection_notice();
       if session != self.selected_id
         && self
           .view
@@ -421,7 +422,9 @@ impl App<'_> {
     self.keys = KeyState::Root;
     self.reconcile().await?;
     // The first attachment may have resized the shared canvas.
-    self.refresh_view().await
+    self.refresh_view().await?;
+    self.clear_connection_notice();
+    Ok(())
   }
 
   async fn refresh_view(&mut self) -> Result<()> {
@@ -888,7 +891,11 @@ impl App<'_> {
   }
 
   fn connection_notice(&mut self, error: &str) {
-    self.notice(format!("Disconnected: {error}; retrying"));
+    let message = self.maintenance.blocked_reason().map_or_else(
+      || format!("Disconnected: {error}; retrying"),
+      |reason| format!("Disconnected: {reason}; automatic retries stopped"),
+    );
+    self.notice(message);
     self.notice_kind = NoticeKind::Connection;
   }
 
@@ -2042,6 +2049,9 @@ impl App<'_> {
         self.message
       );
     }
+    if let Some(status) = self.blocked_status() {
+      return status;
+    }
     if let Some(mode) = self.copies.get(&self.focused)
       && matches!(self.overlay, Overlay::None)
       && !self.keys.is_prefix()
@@ -2111,10 +2121,36 @@ impl App<'_> {
     )
   }
 
+  fn blocked_status(&self) -> Option<String> {
+    let reason = self.maintenance.blocked_reason()?;
+    if self.ended.is_some()
+      || self
+        .panes
+        .get(&self.focused)
+        .is_some_and(|pane| pane.ended.is_some())
+      || !matches!(self.overlay, Overlay::None)
+      || self.keys.is_prefix()
+    {
+      return None;
+    }
+    let copy = if self.copies.contains_key(&self.focused) {
+      " | COPY"
+    } else {
+      ""
+    };
+    // Put the cause before history and retry details so narrow terminals
+    // retain the actionable error. Frame::text clips safely to one row.
+    Some(format!(
+      " {}{copy} | {reason} | automatic retries stopped",
+      self.connection_status(),
+    ))
+  }
+
   fn connection_status(&self) -> &'static str {
     match self.panes.get(&self.focused) {
       Some(pane) if pane.ended.is_some() => "ended",
       Some(pane) if pane.connected => "connected",
+      Some(_) if self.maintenance.blocked_reason().is_some() => "disconnected",
       Some(_) => "reconnecting",
       None => "no connection",
     }

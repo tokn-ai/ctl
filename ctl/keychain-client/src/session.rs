@@ -19,7 +19,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak, mpsc};
 use std::time::Duration;
 
+mod workspace;
+
 type Revoke = Arc<dyn Fn() + Send + Sync>;
+type Resume = Arc<dyn Fn(SessionResume) + Send + Sync>;
 type NotificationCenter = *mut c_void;
 type NotificationPort = *mut c_void;
 
@@ -93,6 +96,21 @@ const HAS_POWERED_ON: u32 = 0xe000_0300;
 const CONSOLE_SECURITY_CHANGE: u32 = 0xe000_0128;
 const DELIVER_IMMEDIATELY: isize = 4;
 
+/// A full wake with an unlocked, active console following a monitored sleep.
+///
+/// Scheduling work does not authorize credential access. Consumers must check
+/// `SessionState::resume_is_current` before acting on a queued event.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SessionResume {
+  pub generation: u64,
+}
+
+#[derive(Default)]
+struct WakeState {
+  pending: bool,
+  screens_awake: bool,
+}
+
 /// A non-secret console-state signal owned by the daemon's main run loop.
 pub struct SessionState {
   available: AtomicBool,
@@ -100,6 +118,8 @@ pub struct SessionState {
   generation: AtomicU64,
   next_subscription: AtomicU64,
   subscribers: Mutex<BTreeMap<u64, Revoke>>,
+  resume_subscribers: Mutex<BTreeMap<u64, Resume>>,
+  wake: Mutex<WakeState>,
 }
 
 impl SessionState {
@@ -110,6 +130,8 @@ impl SessionState {
       generation: AtomicU64::new(0),
       next_subscription: AtomicU64::new(0),
       subscribers: Mutex::new(BTreeMap::new()),
+      resume_subscribers: Mutex::new(BTreeMap::new()),
+      wake: Mutex::default(),
     }
   }
 
@@ -130,6 +152,20 @@ impl SessionState {
     self.generation.load(Ordering::Acquire)
   }
 
+  /// Recheck a queued resume event before beginning interactive recovery.
+  /// A display-only sleep also stops recovery, without revoking approval for
+  /// existing connections. This method never invokes subscription callbacks.
+  #[must_use]
+  pub fn resume_is_current(&self, event: SessionResume) -> bool {
+    self.generation() == event.generation
+      && self
+        .wake
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .screens_awake
+      && self.is_unlocked()
+  }
+
   /// Subscribe a fast revocation callback. It must not block on a connection,
   /// perform Keychain I/O, or panic: sleep waits for these callbacks to finish.
   pub fn subscribe(self: &Arc<Self>, revoke: Revoke) -> SessionSubscription {
@@ -142,6 +178,27 @@ impl SessionState {
     SessionSubscription {
       state: Arc::downgrade(self),
       id,
+      resume: false,
+    }
+  }
+
+  /// Subscribe to one full-wake event per monitored sleep epoch. A dark wake,
+  /// ordinary screen unlock, or initial monitor startup does not emit an event.
+  /// When screens wake while locked, the event waits for the subsequent unlock.
+  ///
+  /// Callbacks run on macOS's main run loop. They must only enqueue work; never
+  /// block, access Keychain, start connections, or display authentication UI.
+  pub fn subscribe_resume(self: &Arc<Self>, resume: Resume) -> SessionSubscription {
+    let id = self.next_subscription.fetch_add(1, Ordering::Relaxed);
+    self
+      .resume_subscribers
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .insert(id, resume);
+    SessionSubscription {
+      state: Arc::downgrade(self),
+      id,
+      resume: true,
     }
   }
 
@@ -167,7 +224,74 @@ impl SessionState {
     // not cancel the account-password dialog that authorizes a Keychain read.
     // The explicit distributed lock event remains unconditional; the kernel
     // notification is an additional early signal while the console is locked.
-    if !unlocked {
+    if unlocked {
+      self.console_available(unlocked);
+    } else {
+      self.revoke();
+    }
+  }
+
+  fn will_sleep(&self) {
+    *self
+      .wake
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner) = WakeState {
+      pending: true,
+      screens_awake: false,
+    };
+    self.revoke();
+  }
+
+  fn console_available(&self, unlocked: bool) {
+    self.unlocked.store(unlocked, Ordering::Release);
+    self.resume_if_ready(unlocked);
+  }
+
+  fn powered_on(&self, unlocked: bool) {
+    // Background maintenance wakes can leave the console unlocked. Only a
+    // separate display-wake event permits scheduling interactive recovery.
+    self.unlocked.store(unlocked, Ordering::Release);
+  }
+
+  fn screens_changed(&self, awake: bool, unlocked: bool) {
+    self
+      .wake
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .screens_awake = awake;
+    self.console_available(unlocked);
+  }
+
+  fn resume_if_ready(&self, unlocked: bool) {
+    if !unlocked || !self.available.load(Ordering::Acquire) {
+      return;
+    }
+    {
+      let mut wake = self
+        .wake
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+      if !wake.pending || !wake.screens_awake {
+        return;
+      }
+      wake.pending = false;
+    }
+    let event = SessionResume {
+      generation: self.generation(),
+    };
+    let callbacks: Vec<_> = self
+      .resume_subscribers
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .values()
+      .cloned()
+      .collect();
+    let mut failed = false;
+    for resume in callbacks {
+      failed |= catch_unwind(AssertUnwindSafe(|| resume(event))).is_err();
+    }
+    if failed {
+      self.available.store(false, Ordering::Release);
       self.revoke();
     }
   }
@@ -177,16 +301,25 @@ impl SessionState {
 pub struct SessionSubscription {
   state: Weak<SessionState>,
   id: u64,
+  resume: bool,
 }
 
 impl Drop for SessionSubscription {
   fn drop(&mut self) {
     if let Some(state) = self.state.upgrade() {
-      state
-        .subscribers
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .remove(&self.id);
+      if self.resume {
+        state
+          .resume_subscribers
+          .lock()
+          .unwrap_or_else(std::sync::PoisonError::into_inner)
+          .remove(&self.id);
+      } else {
+        state
+          .subscribers
+          .lock()
+          .unwrap_or_else(std::sync::PoisonError::into_inner)
+          .remove(&self.id);
+      }
     }
   }
 }
@@ -292,6 +425,7 @@ struct Monitor {
   console_notifier: u32,
   run_loop: CFRunLoop,
   source: Option<CFRunLoopSource>,
+  workspace: Option<workspace::Monitor>,
 }
 
 impl Monitor {
@@ -313,6 +447,7 @@ impl Monitor {
       console_notifier: 0,
       run_loop,
       source: None,
+      workspace: None,
     };
     let observer = (&raw mut *monitor.callback).cast::<c_void>();
     // SAFETY: the boxed callback is stable until observers are removed on this
@@ -340,6 +475,9 @@ impl Monitor {
       .run_loop
       .add_source(&source, unsafe { kCFRunLoopDefaultMode });
     monitor.source = Some(source);
+    // Display wake is distinct from background system wake. If unavailable,
+    // revocation still works but automatic resume remains disabled.
+    monitor.workspace = workspace::Monitor::start(Arc::clone(&monitor.callback.state));
     // Lock/unlock notification names are WindowServer conventions, rather than
     // public SDK constants. A delivery self-probe and strict current-state
     // verification make missing session/notification infrastructure fail closed.
@@ -415,6 +553,7 @@ impl Monitor {
 
 impl Drop for Monitor {
   fn drop(&mut self) {
+    self.workspace.take();
     self
       .callback
       .state
@@ -463,10 +602,7 @@ extern "C" fn distributed_event(
       .store(console_is_unlocked(), Ordering::Release);
     callback.state.available.store(true, Ordering::Release);
   } else if name == "com.apple.screenIsUnlocked" || name == "com.apple.sessionDidMoveOnConsole" {
-    callback
-      .state
-      .unlocked
-      .store(console_is_unlocked(), Ordering::Release);
+    callback.state.console_available(console_is_unlocked());
   } else {
     callback.state.revoke();
   }
@@ -496,13 +632,10 @@ extern "C" fn power_event(
   // SAFETY: IOKit delivers callbacks on our main run loop while this box lives.
   let callback = unsafe { &*context.cast::<CallbackState>() };
   if message == WILL_SLEEP {
-    callback.state.revoke();
+    callback.state.will_sleep();
   }
   if message == HAS_POWERED_ON {
-    callback
-      .state
-      .unlocked
-      .store(console_is_unlocked(), Ordering::Release);
+    callback.state.powered_on(console_is_unlocked());
   }
   if message == CAN_SLEEP || message == WILL_SLEEP {
     // Never prevent or postpone system sleep; revocation completes before ack.
@@ -513,85 +646,4 @@ extern "C" fn power_event(
 }
 
 #[cfg(test)]
-mod tests {
-  use super::*;
-
-  #[test]
-  fn unmonitored_state_fails_closed() {
-    let state = SessionState::new();
-    assert!(!state.is_unlocked());
-  }
-
-  #[test]
-  fn revocation_updates_generation_and_removes_subscriptions() {
-    let state = Arc::new(SessionState::new());
-    let revoked = Arc::new(AtomicU64::new(0));
-    let count = Arc::clone(&revoked);
-    let guard = state.subscribe(Arc::new(move || {
-      count.fetch_add(1, Ordering::Relaxed);
-    }));
-    state.revoke();
-    assert_eq!(state.generation(), 1);
-    assert_eq!(revoked.load(Ordering::Relaxed), 1);
-    drop(guard);
-    state.revoke();
-    assert_eq!(revoked.load(Ordering::Relaxed), 1);
-  }
-
-  #[test]
-  fn panicking_subscription_disables_monitor_and_preserves_other_revocations() {
-    let state = Arc::new(SessionState::new());
-    state.available.store(true, Ordering::Release);
-    let revoked = Arc::new(AtomicBool::new(false));
-    let count = Arc::clone(&revoked);
-    let _first = state.subscribe(Arc::new(|| panic!("subscriber failed")));
-    let _second = state.subscribe(Arc::new(move || count.store(true, Ordering::Relaxed)));
-    state.revoke();
-    assert!(!state.available.load(Ordering::Acquire));
-    assert!(revoked.load(Ordering::Relaxed));
-  }
-
-  #[test]
-  fn secure_input_metadata_changes_do_not_revoke_approval() {
-    let state = Arc::new(SessionState::new());
-    state.unlocked.store(true, Ordering::Release);
-    let revoked = Arc::new(AtomicU64::new(0));
-    let count = Arc::clone(&revoked);
-    let _guard = state.subscribe(Arc::new(move || {
-      count.fetch_add(1, Ordering::Relaxed);
-    }));
-    state.console_changed(true);
-    assert_eq!(state.generation(), 0);
-    assert_eq!(revoked.load(Ordering::Relaxed), 0);
-    state.console_changed(false);
-    assert_eq!(state.generation(), 1);
-    assert_eq!(revoked.load(Ordering::Relaxed), 1);
-  }
-
-  #[test]
-  fn delayed_lock_event_revokes_after_console_has_unlocked() {
-    let state = Arc::new(SessionState::new());
-    state.unlocked.store(true, Ordering::Release);
-    let revoked = Arc::new(AtomicU64::new(0));
-    let count = Arc::clone(&revoked);
-    let _guard = state.subscribe(Arc::new(move || {
-      count.fetch_add(1, Ordering::Relaxed);
-    }));
-    let mut callback = CallbackState {
-      state: Arc::clone(&state),
-      connection: 0,
-      probe: String::new(),
-    };
-    let name = CFString::new("com.apple.screenIsLocked");
-    distributed_event(
-      ptr::null_mut(),
-      (&raw mut callback).cast::<c_void>(),
-      name.as_concrete_TypeRef(),
-      ptr::null(),
-      ptr::null(),
-    );
-    assert_eq!(state.generation(), 1);
-    assert_eq!(revoked.load(Ordering::Relaxed), 1);
-    assert!(!state.unlocked.load(Ordering::Acquire));
-  }
-}
+mod tests;

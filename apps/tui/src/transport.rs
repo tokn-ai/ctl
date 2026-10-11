@@ -15,10 +15,18 @@ pub type ConnectFuture<'a> = Pin<Box<dyn Future<Output = Result<Stream>> + Send 
 pub trait Transport: Sync {
   fn connect(&self) -> ConnectFuture<'_>;
   fn archive_key(&self) -> String;
-  /// Authentication and configuration failures need explicit user action.
+  /// Authentication and configuration failures suspend automatic retries.
   /// Transports without a classification retain the existing retry behavior.
   fn is_retryable(&self, _error: &crate::Error) -> bool {
     true
+  }
+  /// Missing host authorization can resume after a broker recovery event.
+  /// Other permanent failures continue to require explicit user action.
+  fn is_authentication_required(&self, _error: &crate::Error) -> bool {
+    false
+  }
+  fn recovery_generation(&self) -> u64 {
+    0
   }
   /// Prevent connection prerequisites from reading or writing the host terminal
   /// while the TUI owns it. Startup authentication runs before this is enabled.

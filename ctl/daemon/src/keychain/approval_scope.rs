@@ -14,6 +14,12 @@ const MAX_KNOWN_HOSTS_BYTES: usize = 4 * 1024 * 1024;
 const MAX_PATH_TOKENS: usize = 16;
 const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(5);
 
+use crate::wake_recovery::principal;
+
+pub(crate) fn prefix(target: &SshTarget) -> String {
+  format!("{}:", crate::target_key(&principal(target)))
+}
+
 /// Failure disables authorization reuse without preventing ordinary connection.
 pub(crate) async fn snapshot(target: &SshTarget) -> Option<String> {
   tokio::time::timeout(SNAPSHOT_TIMEOUT, snapshot_inner(target))
@@ -23,8 +29,19 @@ pub(crate) async fn snapshot(target: &SshTarget) -> Option<String> {
 }
 
 async fn snapshot_inner(target: &SshTarget) -> Option<String> {
+  snapshot_using(
+    target,
+    |target| async move { effective_config(&target).await },
+  )
+  .await
+}
+
+async fn snapshot_using<F: std::future::Future<Output = Option<Vec<u8>>>>(
+  target: &SshTarget,
+  mut effective_config: impl FnMut(SshTarget) -> F,
+) -> Option<String> {
   crate::validate_target(target).ok()?;
-  let target_bytes = serde_json::to_vec(target).ok()?;
+  let target_bytes = serde_json::to_vec(&principal(target)).ok()?;
   if target_bytes.len() > MAX_CONFIG_BYTES {
     return None;
   }
@@ -34,7 +51,7 @@ async fn snapshot_inner(target: &SshTarget) -> Option<String> {
   let mut remaining = MAX_KNOWN_HOSTS_BYTES;
   let mut files = HashMap::new();
   for current in route_targets(target) {
-    let config = effective_config(&current).await?;
+    let config = effective_config(current.clone()).await?;
     let known_hosts = known_host_paths(&config, !current.gateways.is_empty())?;
     hash_part(&mut hash, &config);
     for path in known_hosts {
@@ -229,6 +246,78 @@ fn hash_part(hash: &mut Sha256, data: &[u8]) {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  fn target() -> SshTarget {
+    SshTarget {
+      destination: "fixture-alias".into(),
+      ssh_config_alias: None,
+      use_ssh_config_master: Some(false),
+      hostname: None,
+      user: None,
+      port: None,
+      identity_file: None,
+      gateways: Vec::new(),
+    }
+  }
+
+  #[tokio::test]
+  async fn shared_and_private_masters_share_approval_without_sharing_master_identity() {
+    let private = target();
+    let mut shared = private.clone();
+    shared.ssh_config_alias = Some(shared.destination.clone());
+    shared.use_ssh_config_master = Some(true);
+    assert_eq!(prefix(&private), prefix(&shared));
+    assert_ne!(crate::target_key(&private), crate::target_key(&shared));
+    let socket = Path::new("/fixture/daemon.sock");
+    assert_ne!(
+      crate::control_path_for_socket(&private, socket),
+      crate::control_path_for_socket(&shared, socket),
+    );
+    let arguments = |target: &SshTarget| {
+      let mut command = Command::new("ssh");
+      crate::append_target_arguments(&mut command, target);
+      command
+        .as_std()
+        .get_args()
+        .map(std::ffi::OsStr::to_owned)
+        .collect::<Vec<_>>()
+    };
+    assert_eq!(arguments(&private), arguments(&shared));
+    let config = || {
+      std::future::ready(Some(b"hostname fixture.invalid\nuser alice\nuserknownhostsfile none\nglobalknownhostsfile none\n".to_vec()))
+    };
+    let private_scope = snapshot_using(&private, |_| config()).await.unwrap();
+    let shared_scope = snapshot_using(&shared, |_| config()).await.unwrap();
+    assert_eq!(private_scope, shared_scope);
+  }
+
+  #[test]
+  fn explicit_credential_and_endpoint_overrides_keep_distinct_approval_principals() {
+    let original = target();
+    let mut alternatives = Vec::new();
+    let mut user = original.clone();
+    user.user = Some("different-account".into());
+    alternatives.push(user);
+    let mut hostname = original.clone();
+    hostname.hostname = Some("different.example.invalid".into());
+    alternatives.push(hostname);
+    let mut port = original.clone();
+    port.port = Some(2222);
+    alternatives.push(port);
+    let mut identity = original.clone();
+    identity.identity_file = Some("/fixture/different-key".into());
+    alternatives.push(identity);
+    // An alias with an explicit HostName still selects its own SSH configuration.
+    let mut configured = original.clone();
+    configured.hostname = Some("endpoint.example.invalid".into());
+    configured.ssh_config_alias = Some(configured.destination.clone());
+    let mut direct = configured.clone();
+    direct.ssh_config_alias = None;
+    assert_ne!(prefix(&configured), prefix(&direct));
+    for alternative in alternatives {
+      assert_ne!(prefix(&original), prefix(&alternative));
+    }
+  }
 
   fn config(extra: &str) -> Vec<u8> {
     format!("hostname fixture.invalid\nuser alice\nuserknownhostsfile /fixture/user_known_hosts\nglobalknownhostsfile /fixture/global_known_hosts /fixture/global_known_hosts2\n{extra}").into_bytes()

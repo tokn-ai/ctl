@@ -294,7 +294,7 @@ mod tests {
     let lifecycle = super::super::TargetLifecycle::default();
     let old = lifecycle.attempt();
     lifecycle.pause();
-    lifecycle.resume(&lifecycle.attempt()).unwrap();
+    lifecycle.resume(&mut lifecycle.attempt()).unwrap();
     assert!(
       await_loss(&path, None, "", &old, Duration::ZERO)
         .await

@@ -869,13 +869,24 @@ mod tests {
   }
 
   #[test]
-  #[ignore = "manual macOS test: requires an entitled signed binary and authentication of a synthetic item"]
+  #[ignore = "manual macOS test: requires an entitled signed binary and authentication of synthetic items"]
   fn synthetic_item_upgrades_acl_and_reuses_authorization_without_retaining_secret() {
     const SERVICE: &str = "dev.tokn-ai.ctl.keychain-authorization-test";
-    struct Cleanup<'a>(&'a str);
+    struct Cleanup<'a>([&'a str; 2]);
     impl Drop for Cleanup<'_> {
       fn drop(&mut self) {
-        let _ = delete(SERVICE, Some(self.0), Authentication::Forbid);
+        for account in self.0 {
+          let _ = delete(SERVICE, Some(account), Authentication::Forbid);
+        }
+      }
+    }
+    fn query<'a>(account: &'a str, authentication: Authentication<'a>) -> Query<'a> {
+      Query {
+        service: Some(SERVICE),
+        account: Some(account),
+        limit: 1,
+        secret: true,
+        authentication,
       }
     }
     let account = format!(
@@ -886,6 +897,9 @@ mod tests {
         .unwrap()
         .as_nanos(),
     );
+    let second_account = format!("{account}-second");
+    let accounts = [account.as_str(), second_account.as_str()];
+    let _cleanup = Cleanup(accounts);
     let mut write = Write {
       service: SERVICE,
       account: &account,
@@ -898,56 +912,60 @@ mod tests {
       },
     };
     upsert(&write).unwrap();
-    let _cleanup = Cleanup(&account);
     // Exercise SecItemUpdate's policy replacement, not merely the add path.
     write.user_presence = true;
     upsert(&write).unwrap();
+    upsert(&Write {
+      account: &second_account,
+      data: b"second synthetic secret",
+      ..write
+    })
+    .unwrap();
     let context = AuthenticationContext::new().unwrap();
-    let query = |authentication| Query {
-      service: Some(SERVICE),
-      account: Some(account.as_str()),
-      limit: 1,
-      secret: true,
-      authentication,
-    };
-    assert!(matches!(
-      search(&query(Authentication::Forbid)),
-      Err(Error(INTERACTION_NOT_ALLOWED))
-    ));
-    for allow_ui in [true, false] {
-      // The first query prompts; the second forbids UI and must use OS context
-      // authorization. Each returned buffer is zeroized before the next read.
-      let records = search(&query(Authentication::Context {
-        reason: "Read a synthetic test item",
-        context: &context,
-        allow_ui,
-      }))
+    for account in accounts {
+      assert!(matches!(
+        search(&query(account, Authentication::Forbid)),
+        Err(Error(INTERACTION_NOT_ALLOWED))
+      ));
+    }
+    for (account, allow_ui, expected) in [
+      (accounts[0], true, b"synthetic secret".as_slice()),
+      (accounts[0], false, b"synthetic secret".as_slice()),
+      (accounts[1], false, b"second synthetic secret".as_slice()),
+    ] {
+      // Only the first read permits UI. Both same-item reuse and a different
+      // protected item must use the shared OS context with UI forbidden.
+      // Each returned buffer is zeroized before the next read.
+      let records = search(&query(
+        account,
+        Authentication::Context {
+          reason: "Read synthetic test items with one authorization",
+          context: &context,
+          allow_ui,
+        },
+      ))
       .unwrap();
       assert_eq!(records.len(), 1);
-      assert_eq!(
-        records[0].secret.as_ref().unwrap().as_slice(),
-        b"synthetic secret"
-      );
+      assert_eq!(records[0].secret.as_ref().unwrap().as_slice(), expected);
       drop(records);
     }
     context.invalidate();
-    assert!(matches!(
-      search(&query(Authentication::Context {
-        reason: "Read a synthetic test item",
-        context: &context,
-        allow_ui: false,
-      })),
-      Err(Error(INTERACTION_NOT_ALLOWED))
-    ));
     let fresh_context = AuthenticationContext::new().unwrap();
-    assert!(matches!(
-      search(&query(Authentication::Context {
-        reason: "Read a synthetic test item",
-        context: &fresh_context,
-        allow_ui: false,
-      })),
-      Err(Error(INTERACTION_NOT_ALLOWED))
-    ));
+    for context in [&context, &fresh_context] {
+      for account in accounts {
+        assert!(matches!(
+          search(&query(
+            account,
+            Authentication::Context {
+              reason: "Read synthetic test items with one authorization",
+              context,
+              allow_ui: false,
+            },
+          )),
+          Err(Error(INTERACTION_NOT_ALLOWED))
+        ));
+      }
+    }
   }
 
   #[test]

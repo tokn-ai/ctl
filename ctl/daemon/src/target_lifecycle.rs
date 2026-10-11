@@ -1,6 +1,7 @@
 //! Orders explicit connect/disconnect requests without waiting for UI prompts.
 
 use std::future::Future;
+use std::sync::Arc;
 
 use tokio::sync::{Mutex, watch};
 
@@ -14,14 +15,14 @@ struct Revision {
 }
 
 pub(super) struct TargetLifecycle {
-  pub(super) lock: Mutex<()>,
+  pub(super) lock: Arc<Mutex<()>>,
   revision: watch::Sender<Revision>,
 }
 
 impl Default for TargetLifecycle {
   fn default() -> Self {
     Self {
-      lock: Mutex::new(()),
+      lock: Arc::new(Mutex::new(())),
       revision: watch::channel(Revision::default()).0,
     }
   }

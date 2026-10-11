@@ -202,6 +202,38 @@ async fn input(tui: &mut Tui, tag: &str, marker: &str) -> Result<()> {
   Ok(())
 }
 
+async fn input_in_pane(
+  tui: &mut Tui,
+  view: &ViewInfo,
+  tags: &[(&str, &str)],
+  tag: &str,
+  marker: &str,
+) -> Result<()> {
+  let terminal_id = tags
+    .iter()
+    .find(|(_, candidate)| *candidate == tag)
+    .expect("focused fixture tag exists")
+    .0;
+  let pane = view
+    .panes
+    .iter()
+    .find(|pane| pane.terminal_id == terminal_id)
+    .expect("input terminal remains in the confirmed view");
+  // Reordered cached rows can render before focus or transport recovery is
+  // ready. Input must target the live, owned attachment in its confirmed slot.
+  tui
+    .wait_screen("moved pane is ready for owned input", |screen| {
+      footer(screen).starts_with(" connected | history ready |")
+        && footer(screen).contains(" | input |")
+        && screen.cursor_visible
+        && (usize::from(pane.left)..usize::from(pane.left + pane.columns))
+          .contains(&screen.cursor.0)
+        && (usize::from(pane.top)..usize::from(pane.top + pane.rows)).contains(&screen.cursor.1)
+    })
+    .await?;
+  input(tui, tag, marker).await
+}
+
 fn assert_slots(original: &ViewInfo, moved: &ViewInfo, ids: [&str; 3]) {
   assert_eq!(moved.layout, nested_layout(ids, &[71, 48], &[9, 14]));
   assert_eq!(moved.canvas_size, original.canvas_size);
@@ -355,7 +387,7 @@ async fn swaps_preserve_nested_weighted_slots_and_focus_policy_across_reconnect(
     assert_slots(&original, &moved, ids.map(String::as_str));
     visible_slots(&mut owner, &moved, &tags).await?;
     visible_slots(&mut observer, &moved, &tags).await?;
-    input(&mut owner, tag, marker).await?;
+    input_in_pane(&mut owner, &moved, &tags, tag, marker).await?;
   }
 
   reconnect_panes(&proxy, &mut owner, original.panes.len()).await?;
@@ -374,7 +406,8 @@ async fn swaps_preserve_nested_weighted_slots_and_focus_policy_across_reconnect(
   assert_slots(&original, &after_reconnect, [&second, &third, &first]);
   visible_slots(&mut owner, &after_reconnect, &tags).await?;
   visible_slots(&mut observer, &after_reconnect, &tags).await?;
-  input(&mut owner, "second", "identity-after-reconnect").await?;
+  let marker = "identity-after-reconnect";
+  input_in_pane(&mut owner, &after_reconnect, &tags, "second", marker).await?;
   detach(&mut observer).await?;
   drop(observer);
   detach(&mut owner).await?;

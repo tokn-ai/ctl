@@ -71,19 +71,17 @@ impl Capture {
 
   /// Preparation observes committed grants and current configuration only.
   /// It neither authenticates nor obtains any credential value.
+  #[cfg(target_os = "macos")]
   pub(super) async fn prepare(&self, state: &std::sync::Arc<State>) -> Ready {
-    #[cfg(target_os = "macos")]
-    {
-      let (reusable, approval) = self.reusable_routes(state).await;
-      let mut ready = self.prepared(|route| reusable.contains(route));
-      ready.approval = approval;
-      ready
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-      let _ = state;
-      self.prepared(|_| false)
-    }
+    let (reusable, approval) = self.reusable_routes(state).await;
+    let mut ready = self.prepared(|route| reusable.contains(route));
+    ready.approval = approval;
+    ready
+  }
+
+  #[cfg(not(target_os = "macos"))]
+  pub(super) fn prepare(&self, _state: &std::sync::Arc<State>) -> std::future::Ready<Ready> {
+    std::future::ready(self.prepared(|_| false))
   }
 
   fn prepared(&self, reusable: impl Fn(&SshTarget) -> bool) -> Ready {

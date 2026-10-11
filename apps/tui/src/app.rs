@@ -36,6 +36,11 @@ enum Overlay {
   None,
   Help,
   Sessions(Option<String>),
+  SessionName(Box<sessions::NameEntry>),
+  KillSession {
+    target: sessions::Target,
+    return_to_picker: bool,
+  },
   Kill(String),
   Archives(usize),
   ArchiveTerminals(Box<ctmux_client::archive::SessionArchive>, usize),
@@ -315,9 +320,13 @@ impl App<'_> {
           .create(CreateSessionRequest {
             name,
             command: Vec::new(),
-            cwd: std::env::current_dir()
-              .ok()
-              .map(|path| path.to_string_lossy().into_owned()),
+            cwd: if self.transport.is_none_or(Transport::is_local) {
+              std::env::current_dir()
+                .ok()
+                .map(|path| path.to_string_lossy().into_owned())
+            } else {
+              None
+            },
             terminal_size: self.canvas_size(),
           })
           .await?,
@@ -360,6 +369,9 @@ impl App<'_> {
     // A remembered session can disappear while another session is active.
     let view = match self.find_view(session).await {
       Ok(view) => view,
+      Err(error) if session_not_found(&error) && matches!(self.overlay, Overlay::Sessions(_)) => {
+        return Err(error);
+      }
       Err(error) if session_not_found(&error) && self.view.is_none() => {
         session.clone_into(&mut self.selected_id);
         self.ended = Some("Session no longer exists — press any key to exit".into());
@@ -953,7 +965,9 @@ impl App<'_> {
         }
         self.divider_drag = None;
         self.keys.cancel_repeat();
-        if self.prompt.is_active() {
+        if let Overlay::SessionName(entry) = &mut self.overlay {
+          entry.input.paste(&text);
+        } else if self.prompt.is_active() {
           self.prompt.paste(&text);
         } else if self.active_copy().is_none()
           && matches!(self.overlay, Overlay::None)
@@ -1444,6 +1458,9 @@ impl App<'_> {
     } else {
       self.keys.cancel_repeat();
     }
+    if !matches!(self.overlay, Overlay::None) {
+      return self.overlay_key(key).await;
+    }
     if self.ended.is_some() {
       for pane in self.panes.values_mut() {
         pane.finish_ended_history().await;
@@ -1479,10 +1496,6 @@ impl App<'_> {
       self.refresh().await?;
       return Ok(false);
     }
-    if !matches!(self.overlay, Overlay::None) {
-      self.overlay_key(key).await?;
-      return Ok(false);
-    }
     self.send_key(key).await?;
     Ok(false)
   }
@@ -1515,6 +1528,17 @@ impl App<'_> {
       PromptCommand::Action(action) => return self.execute(action).await,
       PromptCommand::SelectPane(number) => self.select_pane_number(number).await?,
       PromptCommand::NewSession(name) if !self.read_only => self.create_named(name).await?,
+      PromptCommand::RenameSession { target, name } if !self.read_only => {
+        let target = self.resolve_session_target(target.as_deref()).await?;
+        self.rename_session(&target, name).await?;
+      }
+      PromptCommand::KillSession(target) if !self.read_only => {
+        let target = self.resolve_session_target(target.as_deref()).await?;
+        self.overlay = Overlay::KillSession {
+          target,
+          return_to_picker: false,
+        };
+      }
       PromptCommand::BreakPane { name, detached } if !self.read_only => {
         self.break_pane(name, detached).await?;
       }
@@ -1524,7 +1548,8 @@ impl App<'_> {
         let session = self
           .sessions
           .iter()
-          .find(|session| session.session_id == target || session.name == target)
+          .find(|session| session.session_id == target)
+          .or_else(|| self.sessions.iter().find(|session| session.name == target))
           .ok_or_else(|| format!("Session not found: {target}"))?
           .session_id
           .clone();
@@ -1534,6 +1559,8 @@ impl App<'_> {
         self.change_lease(kind, Some(requested)).await?;
       }
       PromptCommand::NewSession(_)
+      | PromptCommand::RenameSession { .. }
+      | PromptCommand::KillSession(_)
       | PromptCommand::BreakPane { .. }
       | PromptCommand::Lease { .. } => {
         self.notice("This attachment is read only".into());
@@ -1867,48 +1894,14 @@ impl App<'_> {
     }
   }
 
-  async fn overlay_key(&mut self, key: KeyEvent) -> Result<()> {
-    if let Overlay::Sessions(selected) = &self.overlay {
-      let selected = selected.clone();
-      match key.code {
-        KeyCode::Up | KeyCode::Down => {
-          let index = self.picker_index(selected.as_deref());
-          let index = if key.code == KeyCode::Up {
-            index.map_or_else(
-              || self.sessions.len().saturating_sub(1),
-              |index| index.saturating_sub(1),
-            )
-          } else {
-            index.map_or(0, |index| {
-              (index + 1).min(self.sessions.len().saturating_sub(1))
-            })
-          };
-          self.overlay = Overlay::Sessions(
-            self
-              .sessions
-              .get(index)
-              .map(|session| session.session_id.clone()),
-          );
-        }
-        KeyCode::Enter => {
-          if let Some(selected) = selected.filter(|id| {
-            self
-              .sessions
-              .iter()
-              .any(|session| &session.session_id == id)
-          }) {
-            self.select(&selected).await?;
-          } else {
-            self.notice("Selected session no longer exists; choose another session".into());
-          }
-        }
-        KeyCode::Esc => self.overlay = Overlay::None,
-        _ => {}
-      }
-      return Ok(());
+  async fn overlay_key(&mut self, key: KeyEvent) -> Result<bool> {
+    if let Some(exit) = self.session_overlay_key(key).await? {
+      return Ok(exit);
     }
     match &mut self.overlay {
-      Overlay::Sessions(_) => unreachable!("session picker handled above"),
+      Overlay::Sessions(_) | Overlay::SessionName(_) | Overlay::KillSession { .. } => {
+        unreachable!("session manager handled above")
+      }
       Overlay::Kill(id) => {
         let id = id.clone();
         self.overlay = Overlay::None;
@@ -1953,7 +1946,7 @@ impl App<'_> {
       Overlay::Help => self.overlay = Overlay::None,
       Overlay::None => {}
     }
-    Ok(())
+    Ok(false)
   }
 
   fn frame(&mut self) -> Frame {
@@ -2013,6 +2006,8 @@ impl App<'_> {
     }
     if self.prompt.is_active() {
       frame.command_prompt(&self.prompt);
+    } else if let Overlay::SessionName(entry) = &self.overlay {
+      frame.command_prompt(&entry.input);
     }
     frame
   }
@@ -2224,30 +2219,8 @@ impl App<'_> {
       }
       Overlay::None => Vec::new(),
       Overlay::Kill(_) => vec!["Terminate active pane? y confirms; any other key cancels".into()],
-      Overlay::Sessions(selected) => {
-        let mut lines = vec!["Sessions — ↑/↓ choose, Enter opens, Esc cancels".into()];
-        let index = self.picker_index(selected.as_deref());
-        if index.is_none() {
-          lines.push("Selected session unavailable — arrows choose another".into());
-        }
-        let capacity = usize::from(self.size.1.saturating_sub(2)).max(1);
-        let start = index.unwrap_or(0).saturating_sub(capacity - 1);
-        lines.extend(
-          self
-            .sessions
-            .iter()
-            .enumerate()
-            .skip(start)
-            .take(capacity)
-            .map(|(i, session)| {
-              format!(
-                "{} {}",
-                if Some(i) == index { ">" } else { " " },
-                session.name
-              )
-            }),
-        );
-        lines
+      Overlay::Sessions(_) | Overlay::SessionName(_) | Overlay::KillSession { .. } => {
+        self.session_overlay_lines()
       }
       Overlay::Help => vec![
         format!("Commands after {} — any key closes help", self.prefix.label),
@@ -2263,7 +2236,8 @@ impl App<'_> {
         "Prompt panes: split-window, select-pane, resize-pane, kill-pane".into(),
         "Prompt navigation: last-pane, select-pane -t NUMBER, display-panes".into(),
         "Prompt moves: swap-pane -U/-D [-d], break-pane [-d] [-n NAME]".into(),
-        "Prompt sessions: new-session, switch-client, list-sessions".into(),
+        "Prompt sessions: new-session, switch-client, list-sessions, rename-session, kill-session"
+          .into(),
         "Prompt ownership: take-input/release-input, take-resize/release-resize".into(),
         "[: history/copy mode    ]: paste copied text    A: archives".into(),
         "r: redraw    I: take/release input    R: take/release resize".into(),
@@ -2331,3 +2305,6 @@ mod navigation;
 
 #[path = "migration.rs"]
 mod migration;
+
+#[path = "sessions.rs"]
+mod sessions;

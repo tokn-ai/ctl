@@ -69,6 +69,14 @@ impl<C: Connector + Sync> ctmux_tui::Transport for TuiTransport<'_, C> {
     self.0.archive_key()
   }
 
+  fn label(&self) -> &str {
+    self.0.label()
+  }
+
+  fn is_local(&self) -> bool {
+    self.0.is_local()
+  }
+
   fn is_retryable(&self, error: &ctmux_tui::Error) -> bool {
     error
       .downcast_ref::<C::Error>()
@@ -100,6 +108,20 @@ pub async fn run_tui<C: Connector + Sync>(
   read_only: bool,
 ) -> Result<(), CommandError> {
   ctmux_tui::run_with_transport(&TuiTransport(connector), session, read_only)
+    .await
+    .map_err(CommandError::Tui)
+}
+
+/// Open the shared terminal UI using an explicit session startup policy.
+///
+/// # Errors
+/// Returns transport, protocol, or terminal presentation errors.
+pub async fn run_tui_with_startup<C: Connector + Sync>(
+  connector: &C,
+  startup: ctmux_tui::StartupMode,
+  read_only: bool,
+) -> Result<(), CommandError> {
+  ctmux_tui::run_with_transport_startup(&TuiTransport(connector), startup, read_only)
     .await
     .map_err(CommandError::Tui)
 }
@@ -162,9 +184,10 @@ impl Connector for LocalConnector {
 /// fails, or local command input such as the current directory is invalid.
 pub async fn run<C>(command: Command, connector: &C) -> Result<(), CommandError>
 where
-  C: Connector,
+  C: Connector + Sync,
 {
   match command {
+    Command::Resume => run_tui_with_startup(connector, ctmux_tui::StartupMode::Resume, false).await,
     Command::New {
       name,
       cwd,
@@ -253,6 +276,7 @@ where
       let session = target.or(session).ok_or(CommandError::MissingSession)?;
       kill_session(connector, &session).await
     }
+    Command::Rename { target, name } => rename_session(connector, target, name).await,
     Command::Shell {
       command: ShellCommand::Init { shell: shell_kind },
     } => {
@@ -260,6 +284,20 @@ where
       Ok(())
     }
   }
+}
+
+async fn rename_session<C: Connector>(
+  connector: &C,
+  target: String,
+  name: String,
+) -> Result<(), CommandError> {
+  let view = view_client(connector).await?.get(SessionId(target)).await?;
+  let stream = connector.connect().await.map_err(connection_error)?;
+  let session = SessionClient::new(stream, client_identity(connector))
+    .rename(SessionId(view.session_id), name)
+    .await?;
+  println!("{}\t{}", session.session_id, session.name);
+  Ok(())
 }
 
 async fn view_client<C: Connector>(connector: &C) -> Result<ViewClient<C::Stream>, CommandError> {
@@ -456,7 +494,11 @@ async fn kill_session<C: Connector>(connector: &C, session: &str) -> Result<(), 
   Ok(())
 }
 
-async fn attach_session<C: Connector>(
+/// Attach to a known session with the raw presenter and reconnect policy.
+///
+/// # Errors
+/// Returns transport, protocol, or terminal presentation errors.
+pub async fn attach_session<C: Connector>(
   connector: &C,
   session: &str,
   initial_resume_from: Option<u64>,

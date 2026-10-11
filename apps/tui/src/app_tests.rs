@@ -14,6 +14,10 @@ struct RelayTransport {
 struct ReplyTransport(std::sync::Mutex<Option<tokio::io::DuplexStream>>);
 
 impl crate::Transport for ReplyTransport {
+  fn label(&self) -> &'static str {
+    "fixture"
+  }
+
   fn connect(&self) -> crate::ConnectFuture<'_> {
     Box::pin(async move {
       let stream = self
@@ -134,6 +138,10 @@ async fn terminate_rejects_non_success_without_refreshing_or_replaying() -> Resu
 }
 
 impl crate::Transport for RelayTransport {
+  fn label(&self) -> &'static str {
+    "fixture"
+  }
+
   fn connect(&self) -> crate::ConnectFuture<'_> {
     Box::pin(async move {
       if self

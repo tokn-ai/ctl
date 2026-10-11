@@ -859,15 +859,6 @@ async fn handle_request(
       )
       .await?;
     }
-    ClientMessage::ListSessions => {
-      let response = ServerMessage::SessionList {
-        sessions: sessions.list(),
-      };
-      write_frame(&mut stream, &response).await?;
-    }
-    ClientMessage::GetShellState { session } => {
-      handle_shell_state_request(&mut stream, &sessions, session).await?;
-    }
     ClientMessage::AttachSession {
       session,
       resume_from,
@@ -925,10 +916,73 @@ async fn handle_request(
       handle_kill_session_request(&mut stream, &sessions, &session).await?;
     }
     request => {
-      return handle_view_request(stream, sessions, restart, request, protocol_version).await;
+      return handle_session_request(stream, sessions, restart, request, protocol_version).await;
     }
   }
 
+  Ok(())
+}
+
+async fn handle_session_request(
+  mut stream: Stream,
+  sessions: SessionManager,
+  restart: Arc<RestartCoordinator>,
+  request: ClientMessage,
+  protocol_version: ctl_core::protocol::ProtocolVersion,
+) -> Result<(), ConnectionError> {
+  match request {
+    ClientMessage::ListSessions => {
+      write_frame(
+        &mut stream,
+        &ServerMessage::SessionList {
+          sessions: sessions.list(),
+        },
+      )
+      .await?;
+    }
+    ClientMessage::RenameSession { session, name } => {
+      handle_rename_session_request(
+        &mut stream,
+        &sessions,
+        &restart,
+        &session,
+        name,
+        protocol_version,
+      )
+      .await?;
+    }
+    ClientMessage::GetShellState { session } => {
+      handle_shell_state_request(&mut stream, &sessions, session).await?;
+    }
+    request => {
+      return handle_view_request(stream, sessions, restart, request, protocol_version).await;
+    }
+  }
+  Ok(())
+}
+
+async fn handle_rename_session_request(
+  stream: &mut Stream,
+  sessions: &SessionManager,
+  restart: &RestartCoordinator,
+  session: &str,
+  name: String,
+  protocol_version: ctl_core::protocol::ProtocolVersion,
+) -> Result<(), ConnectionError> {
+  if !ctmux_proto::supports_session_rename(protocol_version) {
+    send_error(
+      stream,
+      ErrorCode::InvalidRequest,
+      "session rename requires contract 1.1.20",
+    )
+    .await?;
+    return Ok(());
+  }
+  match restart.run_while_accepting(|| sessions.rename(session, name)) {
+    Some(Ok(session)) => write_frame(stream, &ServerMessage::SessionRenamed { session }).await?,
+    Some(Err(error)) => send_session_manager_error(stream, &error).await?,
+    None => send_error(stream, ErrorCode::InvalidRequest, DAEMON_DRAINING_MESSAGE).await?,
+  }
   Ok(())
 }
 

@@ -43,6 +43,7 @@ fn validate_local_command_target(arguments: &Arguments) -> Result<(), CliError> 
 
 pub async fn run(arguments: Arguments) -> Result<i32, CliError> {
   validate_local_command_target(&arguments)?;
+  validate_terminal_command(&arguments.command)?;
   if arguments.host.is_some() {
     if matches!(arguments.command, Command::Taskd { .. }) {
       return Err(CliError::RemoteTaskDaemonRestartUnsupported);
@@ -143,9 +144,10 @@ async fn run_selected(
   match command {
     Command::Shell {
       session,
+      resume,
       plain,
       cwd,
-    } => return run_shell(connector, session, plain, cwd).await,
+    } => return run_shell(connector, session, resume, plain, cwd).await,
     Command::Exec { command } => {
       return Ok(crate::connection::execute(&connector.settings, command, platform).await?);
     }
@@ -190,21 +192,43 @@ async fn run_selected(
 async fn run_shell(
   connector: &CtlConnector,
   session: Option<String>,
+  resume: bool,
   plain: bool,
   cwd: Option<String>,
 ) -> Result<i32, CliError> {
-  use std::io::IsTerminal as _;
   if plain {
     return Ok(crate::connection::plain_shell(&connector.settings).await?);
   }
-  if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
-    return Err(CliError::TerminalRequired);
+  require_terminal()?;
+  if resume {
+    ctmux_cli::run_tui_with_startup(connector, ctmux_cli::StartupMode::Resume, false).await?;
+    return Ok(0);
   }
   let attach_if_exists = session.is_some();
   let session =
     ctmux_cli::new_session(connector, session, Vec::new(), cwd, attach_if_exists).await?;
   ctmux_cli::run_tui(connector, Some(session.session_id), false).await?;
   Ok(0)
+}
+
+fn validate_terminal_command(command: &Command) -> Result<(), CliError> {
+  if matches!(
+    command,
+    Command::Ctmux {
+      command: ctmux_cli::Command::Resume
+    }
+  ) {
+    require_terminal()?;
+  }
+  Ok(())
+}
+
+fn require_terminal() -> Result<(), CliError> {
+  use std::io::IsTerminal as _;
+  if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+    return Err(CliError::TerminalRequired);
+  }
+  Ok(())
 }
 
 struct CtlConnector {

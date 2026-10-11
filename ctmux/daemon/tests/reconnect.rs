@@ -3210,6 +3210,141 @@ async fn topology_view(socket: &Path, session: &str) -> TestResult<ctmux_proto::
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_rename_preserves_live_attachments_and_notifies_observers() -> TestResult {
+  let _guard = pty_test_lock().await;
+  let directory = TestDirectory::new();
+  let socket = directory.path.join("ctmux.sock");
+  let daemon = spawn_daemon(&socket, 64 * 1024, 4 * 1024);
+  let root = create_shell_session(
+    &socket,
+    "before",
+    "while IFS= read -r line; do printf 'root:%s\\n' \"$line\"; done",
+  )
+  .await?;
+  let before = split_topology_shell(&socket, &root).await?;
+  let (mut owner, _) = attach_session(&socket, &root.session_id, None, true, false).await?;
+  let (mut observer, _) = attach_session(
+    &socket,
+    &before.terminals[1].terminal_id,
+    None,
+    false,
+    false,
+  )
+  .await?;
+  let rejected = historical_view_request(
+    &socket,
+    ctmux_proto::CONTRACT_V1_1_19,
+    ClientMessage::RenameSession {
+      session: root.session_id.clone(),
+      name: "unsupported".into(),
+    },
+  )
+  .await?;
+  assert!(matches!(
+    rejected,
+    ServerMessage::Error {
+      code: ErrorCode::InvalidRequest,
+      ..
+    }
+  ));
+  assert_eq!(
+    topology_view(&socket, &root.session_id).await?.session_name,
+    "before"
+  );
+
+  let renamed = topology_request(
+    &socket,
+    ClientMessage::RenameSession {
+      session: root.session_id.clone(),
+      name: "after".into(),
+    },
+  )
+  .await?;
+  let ServerMessage::SessionRenamed { session: renamed } = renamed else {
+    panic!("expected renamed session");
+  };
+  assert_eq!(renamed.session_id, root.session_id);
+  assert_eq!(renamed.view_id, root.view_id);
+  assert_eq!(renamed.terminal_id, root.terminal_id);
+  assert_eq!(renamed.created_at_ms, root.created_at_ms);
+  let mut expected = before;
+  expected.session_name = "after".into();
+  expected.revision += 1;
+  assert_eq!(topology_view(&socket, "after").await?, expected);
+  assert_renamed_snapshot(&mut owner, &expected).await?;
+  assert_renamed_snapshot(&mut observer, &expected).await?;
+  assert_eq!(session_info(&socket, &root.session_id).await?.name, "after");
+  assert_rename_revision_guard_and_noop(&socket, &expected).await?;
+  write_frame(
+    &mut owner,
+    &ClientMessage::Input {
+      data: b"still-live\n".to_vec(),
+    },
+  )
+  .await?;
+  let (output, _) = read_output_until(&mut owner, b"root:still-live").await?;
+  assert!(contains_bytes(&output, b"root:still-live"));
+  kill_shell_session(&socket, &root.session_id).await?;
+  daemon.abort();
+  let _result = daemon.await;
+  Ok(())
+}
+
+async fn assert_rename_revision_guard_and_noop(
+  socket: &Path,
+  expected: &ctmux_proto::ViewInfo,
+) -> TestResult {
+  let stale_edit = topology_request(
+    socket,
+    ClientMessage::UpdateView {
+      session: expected.session_id.clone(),
+      expected_revision: expected.revision - 1,
+      layout: expected.layout.clone(),
+    },
+  )
+  .await?;
+  assert!(matches!(
+    stale_edit,
+    ServerMessage::Error {
+      code: ErrorCode::InvalidRequest,
+      ..
+    }
+  ));
+  let unchanged = topology_request(
+    socket,
+    ClientMessage::RenameSession {
+      session: expected.session_id.clone(),
+      name: expected.session_name.clone(),
+    },
+  )
+  .await?;
+  assert!(matches!(unchanged, ServerMessage::SessionRenamed { .. }));
+  assert_eq!(
+    &topology_view(socket, &expected.session_id).await?,
+    expected
+  );
+  Ok(())
+}
+
+async fn assert_renamed_snapshot(
+  stream: &mut UnixStream,
+  expected: &ctmux_proto::ViewInfo,
+) -> TestResult {
+  timeout(Duration::from_secs(3), async {
+    loop {
+      if let ServerMessage::ViewSnapshot { view } = presented_message(stream).await?
+        && view.session_name == expected.session_name
+      {
+        assert_eq!(&view, expected);
+        return Ok::<_, Box<dyn Error + Send + Sync>>(());
+      }
+    }
+  })
+  .await??;
+  Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn view_membership_moves_preserve_terminal_identity_and_live_attachments() -> TestResult {
   let _guard = pty_test_lock().await;
   let directory = TestDirectory::new();

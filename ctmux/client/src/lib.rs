@@ -2895,6 +2895,11 @@ pub enum ClientError {
   AttachmentControllerAlreadyRun,
   #[error("daemon error {code:?}: {message}")]
   Server { code: ErrorCode, message: String },
+  #[error("{operation} requires ctmux 1.1.20; daemon negotiated {protocol_version}")]
+  UnsupportedOperation {
+    operation: &'static str,
+    protocol_version: ctl_core::protocol::ProtocolVersion,
+  },
   #[error(transparent)]
   AttachmentCommand(#[from] AttachmentCommandError),
   #[error("unsupported terminal checkpoint format {format} version {format_version}")]
@@ -3289,9 +3294,9 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn pane_moves_are_refused_before_wire_on_all_previous_contracts() {
+  async fn pane_moves_are_refused_before_wire_on_contracts_without_support() {
     tokio::time::timeout(Duration::from_secs(3), async {
-      for &contract in ctmux_proto::SUPPORTED_PROTOCOL_VERSIONS.iter().filter(|version| **version != PROTOCOL_VERSION) {
+      for &contract in ctmux_proto::SUPPORTED_PROTOCOL_VERSIONS.iter().filter(|version| !ctmux_proto::supports_pane_moves(**version)) {
         let (client, mut peer) = tokio::io::duplex(4096);
         let mut attached = attached_session(0, None, ShellState::default());
         attached.handshake_info.protocol_version = contract;

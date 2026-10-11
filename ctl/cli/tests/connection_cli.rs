@@ -189,9 +189,18 @@ async fn exec_local_preserves_arguments_and_exit_status() {
 #[tokio::test]
 async fn persistent_shell_requires_a_terminal_before_creating_a_session() {
   let fixture = Fixture::new();
-  let output = fixture.command().args(["shell"]).output().await.unwrap();
-  assert!(!output.status.success());
-  assert!(String::from_utf8_lossy(&output.stderr).contains("requires a terminal"));
+  for arguments in [
+    &["shell"][..],
+    &["shell", "--resume"][..],
+    &["ctmux", "--resume"][..],
+    &["-H", "work", "ctmux", "--resume"][..],
+  ] {
+    let output = fixture.command().args(arguments).output().await.unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("requires a terminal"));
+  }
+  assert!(!fixture.0.join("ctld.sock").exists());
+  assert!(!fixture.0.join("args").exists());
 }
 
 #[tokio::test]

@@ -11,6 +11,7 @@ The main entry point is `ctmux`; it embeds this TUI as a library.
 ```sh
 cargo build -p ctmux-cli -p ctmuxd
 cargo run -p ctmux-cli                         # create a session and open the TUI
+cargo run -p ctmux-cli -- --resume             # pick existing work; create if empty
 cargo run -p ctmux-cli -- new -s work
 cargo run -p ctmux-cli -- new -As work         # attach if it exists, otherwise create
 cargo run -p ctmux-cli -- new -ds background   # create detached, including in scripts
@@ -46,6 +47,14 @@ transport-based presenter and detached creation behavior, including over SSH.
 the banner, pane controls, reconnect handling, and history browser. Use
 **Ctrl+B d** to detach. `ctl shell --plain` opens an ordinary shell.
 
+`ctmux --resume`, `ctl ctmux --resume`, and `ctl shell --resume` open the session
+manager before attaching when running sessions exist on the chosen endpoint.
+They create one shell when the list is empty. Resume cannot be combined with
+another ctmux subcommand; standalone `--socket` and `--prefix` still apply.
+Ordinary `ctl shell` still creates a new session, and `--session NAME` retains
+attach-or-create behavior. `ctl shell --resume` cannot be combined with `--session`,
+`--plain`, or `--cwd`.
+
 Migration: standalone `ctmux new` now attaches by default. Scripts that used it
 to create background sessions must add `-d`.
 
@@ -70,7 +79,7 @@ The default prefix is **Ctrl+B**. Change it with `--prefix Ctrl+a` or
 | `c` | Create and select a session |
 | `n` / `p` | Next / previous session |
 | `l` / `L` | Return to the last session, restoring its remembered pane |
-| `s` / `w` | Session picker; arrows select, Enter opens, Esc cancels |
+| `s` / `w` | Session manager; arrows select, Enter opens, `n` creates, `r` renames, `x` confirms whole-session termination |
 | `r` | Redraw the terminal |
 | `A` | Browse retained session archives |
 | `[` | Browse history and select text in copy mode |
@@ -95,8 +104,21 @@ displayed mapping, while changed membership, order, or zoom visibility cancels i
 Returning to a pane preserves its frozen copy selection. Returning to a session
 reattaches normally and restores its remembered pane when it still exists.
 Missing previous targets report an error without closing the current session.
-The session picker keeps the highlighted session by ID during background refresh;
-if it disappears, choose another session with the arrows before opening it.
+The session manager shows names, short IDs, status, and the current session.
+It keeps the highlighted session by ID during background refresh; if it
+disappears, choose another session with the arrows before opening it. Editing
+or confirmation pins that ID, so a changed list cannot redirect the mutation.
+Rename requires ctmux 1.1.20 and preserves running processes and every session,
+view, and terminal ID. Termination confirms the chosen name and ID and ends
+every pane in that session for every viewer. Read-only clients can navigate
+but cannot create, rename, or terminate. Esc returns to the current shell;
+in the unattached `--resume` manager it exits. Terminating the active session
+returns to the manager without creating replacement work.
+
+When creating a session, leave the name empty and press Enter to let ctmuxd
+assign a unique name such as `session-1`. Blank or whitespace-only creation
+names, including `new-session -s ''`, use the same automatic naming. Rename
+still requires a nonempty valid name.
 
 Press the prefix twice to send it to the active pane. Other keys, including
 Ctrl+C, are forwarded to the active PTY. The TUI supports conventional xterm
@@ -139,7 +161,9 @@ The first command set uses familiar tmux names and aliases:
 | `break-pane` / `breakp [-d] [-n NAME]` | Move to a new flat session; `-d` stays in the original session |
 | `new-session` / `new [-s NAME]` | Create and select a session |
 | `switch-client` / `switchc -n\|-p\|-l\|-t NAME` | Next/previous/last session, or select an exact name or ID |
-| `list-sessions` / `ls` | Open the session picker |
+| `list-sessions` / `ls` | Open the session manager |
+| `rename-session [-t NAME_OR_ID] NAME` | Rename the selected root, preserving running work; requires ctmux 1.1.20 |
+| `kill-session [-t NAME_OR_ID]` | Confirm termination of every pane in the selected root |
 | `kill-pane` / `killp` | Open the existing pane termination confirmation; `y` confirms |
 | `copy-mode [-u]` | Open history, optionally one page back |
 | `paste-buffer` / `pasteb` | Paste the local copy buffer into the focused pane |

@@ -122,6 +122,7 @@ pub enum Event {
   IdentityRemove,
   IdentityInventory,
   SessionCreate,
+  SessionRename,
   SessionTerminate,
   SessionMerge,
   PaneSplit,

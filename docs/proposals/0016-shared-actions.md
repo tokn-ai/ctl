@@ -13,6 +13,10 @@ one-shot view/terminal actions: inspect, split, promote, merge, layout update,
 and terminal termination. The coverage table records their supported surfaces;
 attached pane controls retain their existing controller API and outcome events.
 
+[Proposal 0017](0017-shell-session-management.md) adds authoritative session
+renaming to the shared session API and exposes session management in the TUI.
+The coverage table distinguishes that new action from desktop entry points.
+
 ## Summary
 
 Define a shared, typed application API for ctl subcommands, desktop commands,

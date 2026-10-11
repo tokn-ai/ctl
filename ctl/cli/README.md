@@ -3,6 +3,25 @@
 Installs the `ctl` command for local and remote terminal sessions, managed tasks,
 SSH, file copies, port forwards, and VPN connections.
 
+## Persistent shells
+
+```sh
+ctl -H work shell                         # create a new persistent shell
+ctl -H work shell --resume                # choose existing work; create if empty
+ctl -H work ctmux --resume                # the same picker through ctmux
+ctl -H work shell --session development   # attach by name, or create that name
+ctl -H work ctmux rename-session -t development build
+```
+
+Inside the shell, **Ctrl+B s/w** or `:list-sessions` opens the session manager.
+It can open, create, rename, or terminate sessions on the selected host.
+For a new session, leave the name empty and press Enter for an automatic name.
+Termination confirms the exact session and affects all its panes and viewers;
+**Ctrl+B d** only detaches this client. Renaming requires ctmux 1.1.20.
+`--resume` opens the manager without attaching or creating when sessions exist.
+`ctl shell --resume` cannot be combined with `--session`, `--plain`, or `--cwd`.
+`ctl ctmux --resume` cannot be combined with another ctmux subcommand.
+
 ## Install
 
 Once the packages are published:

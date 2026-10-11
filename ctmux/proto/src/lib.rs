@@ -6,7 +6,7 @@ use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 /// Internal protocol build; incrementing this does not publish a new contract.
-pub const PROTOCOL_BUILD: u16 = 19;
+pub const PROTOCOL_BUILD: u16 = 20;
 /// First published wire contract. Keep this identity immutable.
 pub const CONTRACT_V1_0_13: ProtocolVersion = ProtocolVersion::new(1, 0, 13);
 /// Published compatible addition: paged history and checkpoint recovery.
@@ -21,7 +21,9 @@ pub const CONTRACT_V1_1_17: ProtocolVersion = ProtocolVersion::new(1, 1, 17);
 pub const CONTRACT_V1_1_18: ProtocolVersion = ProtocolVersion::new(1, 1, 18);
 /// Atomic attached pane moves guarded by layout ownership and view revision.
 pub const CONTRACT_V1_1_19: ProtocolVersion = ProtocolVersion::new(1, 1, 19);
-pub const PROTOCOL_VERSION: ProtocolVersion = CONTRACT_V1_1_19;
+/// In-place session rename preserving terminals, attachments, and layout.
+pub const CONTRACT_V1_1_20: ProtocolVersion = ProtocolVersion::new(1, 1, 20);
+pub const PROTOCOL_VERSION: ProtocolVersion = CONTRACT_V1_1_20;
 pub const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[
   CONTRACT_V1_0_13,
   CONTRACT_V1_1_14,
@@ -30,13 +32,19 @@ pub const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[
   CONTRACT_V1_1_17,
   CONTRACT_V1_1_18,
   CONTRACT_V1_1_19,
+  CONTRACT_V1_1_20,
 ];
 
 #[must_use]
 pub const fn supports_view_zoom(version: ProtocolVersion) -> bool {
   matches!(
     version,
-    CONTRACT_V1_1_15 | CONTRACT_V1_1_16 | CONTRACT_V1_1_17 | CONTRACT_V1_1_18 | CONTRACT_V1_1_19
+    CONTRACT_V1_1_15
+      | CONTRACT_V1_1_16
+      | CONTRACT_V1_1_17
+      | CONTRACT_V1_1_18
+      | CONTRACT_V1_1_19
+      | CONTRACT_V1_1_20
   )
 }
 
@@ -44,7 +52,7 @@ pub const fn supports_view_zoom(version: ProtocolVersion) -> bool {
 pub const fn supports_pane_resize(version: ProtocolVersion) -> bool {
   matches!(
     version,
-    CONTRACT_V1_1_16 | CONTRACT_V1_1_17 | CONTRACT_V1_1_18 | CONTRACT_V1_1_19
+    CONTRACT_V1_1_16 | CONTRACT_V1_1_17 | CONTRACT_V1_1_18 | CONTRACT_V1_1_19 | CONTRACT_V1_1_20
   )
 }
 
@@ -52,7 +60,7 @@ pub const fn supports_pane_resize(version: ProtocolVersion) -> bool {
 pub const fn supports_divider_resize(version: ProtocolVersion) -> bool {
   matches!(
     version,
-    CONTRACT_V1_1_17 | CONTRACT_V1_1_18 | CONTRACT_V1_1_19
+    CONTRACT_V1_1_17 | CONTRACT_V1_1_18 | CONTRACT_V1_1_19 | CONTRACT_V1_1_20
   )
 }
 
@@ -60,18 +68,26 @@ pub const fn supports_divider_resize(version: ProtocolVersion) -> bool {
 pub const fn supports_layout_lease_notifications(version: ProtocolVersion) -> bool {
   matches!(
     version,
-    CONTRACT_V1_1_17 | CONTRACT_V1_1_18 | CONTRACT_V1_1_19
+    CONTRACT_V1_1_17 | CONTRACT_V1_1_18 | CONTRACT_V1_1_19 | CONTRACT_V1_1_20
   )
 }
 
 #[must_use]
 pub const fn supports_extended_keys(version: ProtocolVersion) -> bool {
-  matches!(version, CONTRACT_V1_1_18 | CONTRACT_V1_1_19)
+  matches!(
+    version,
+    CONTRACT_V1_1_18 | CONTRACT_V1_1_19 | CONTRACT_V1_1_20
+  )
 }
 
 #[must_use]
 pub const fn supports_pane_moves(version: ProtocolVersion) -> bool {
-  matches!(version, CONTRACT_V1_1_19)
+  matches!(version, CONTRACT_V1_1_19 | CONTRACT_V1_1_20)
+}
+
+#[must_use]
+pub const fn supports_session_rename(version: ProtocolVersion) -> bool {
+  matches!(version, CONTRACT_V1_1_20)
 }
 
 #[must_use]
@@ -715,6 +731,11 @@ pub enum ClientMessage {
     terminal_size: TerminalSize,
   },
   ListSessions,
+  /// Rename an existing root without replacing its terminals or layout.
+  RenameSession {
+    session: String,
+    name: String,
+  },
   GetView {
     session: String,
   },
@@ -921,6 +942,9 @@ pub enum ServerMessage {
     view: ViewInfo,
   },
   SessionCreated {
+    session: SessionInfo,
+  },
+  SessionRenamed {
     session: SessionInfo,
   },
   SessionList {
@@ -1533,9 +1557,9 @@ mod tests {
   }
 
   #[test]
-  fn pane_move_contract_retains_historical_features() {
-    assert_eq!(PROTOCOL_VERSION, ProtocolVersion::new(1, 1, 19));
-    assert_eq!(PROTOCOL_BUILD, 19);
+  fn session_rename_contract_retains_historical_features() {
+    assert_eq!(PROTOCOL_VERSION, ProtocolVersion::new(1, 1, 20));
+    assert_eq!(PROTOCOL_BUILD, 20);
     assert_eq!(
       SUPPORTED_PROTOCOL_VERSIONS,
       &[
@@ -1546,6 +1570,7 @@ mod tests {
         CONTRACT_V1_1_17,
         CONTRACT_V1_1_18,
         CONTRACT_V1_1_19,
+        CONTRACT_V1_1_20,
       ]
     );
     for (version, zoom, pane, divider, keys, moves) in [
@@ -1556,8 +1581,9 @@ mod tests {
       (CONTRACT_V1_1_17, true, true, true, false, false),
       (CONTRACT_V1_1_18, true, true, true, true, false),
       (CONTRACT_V1_1_19, true, true, true, true, true),
+      (CONTRACT_V1_1_20, true, true, true, true, true),
       (
-        ProtocolVersion::new(1, 1, 20),
+        ProtocolVersion::new(1, 1, 21),
         false,
         false,
         false,
@@ -1571,7 +1597,41 @@ mod tests {
       assert_eq!(supports_layout_lease_notifications(version), divider);
       assert_eq!(supports_extended_keys(version), keys);
       assert_eq!(supports_pane_moves(version), moves);
+      assert_eq!(
+        supports_session_rename(version),
+        version == CONTRACT_V1_1_20
+      );
     }
+  }
+
+  #[test]
+  fn session_rename_messages_have_snake_case_shapes() {
+    let request = ClientMessage::RenameSession {
+      session: "session-id".into(),
+      name: "renamed".into(),
+    };
+    let value = serde_json::to_value(&request).unwrap();
+    assert_eq!(
+      value,
+      serde_json::json!({"type": "rename_session", "session": "session-id", "name": "renamed"})
+    );
+    assert_eq!(request, serde_json::from_value(value).unwrap());
+    let session = SessionInfo {
+      view_id: "view-id".into(),
+      terminal_id: "terminal-id".into(),
+      session_id: "session-id".into(),
+      name: "renamed".into(),
+      status: SessionStatus::Running,
+      created_at_ms: 1,
+      next_sequence: 0,
+      terminal_size: TerminalSize::default(),
+    };
+    let response = ServerMessage::SessionRenamed { session };
+    let value = serde_json::to_value(&response).unwrap();
+    assert_eq!(value["type"], "session_renamed");
+    assert_eq!(value["session"]["session_id"], "session-id");
+    assert_eq!(value["session"]["name"], "renamed");
+    assert_eq!(response, serde_json::from_value(value).unwrap());
   }
 
   #[test]

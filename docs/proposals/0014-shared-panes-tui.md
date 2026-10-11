@@ -20,6 +20,9 @@ weighted sizing, divider dragging, and pane moves preserve terminal identity
 and explicit lease ownership. The TUI adds a flat session navigation model,
 pane-local copy mode, and a local command prompt. This extends Proposal 0001.
 
+[Proposal 0017](0017-shell-session-management.md) extends session navigation
+with a manager, explicit resume startup, and authoritative session renaming.
+
 ## Motivation
 
 A second client must see the same pane arrangement without imposing its window

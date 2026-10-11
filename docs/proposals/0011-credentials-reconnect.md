@@ -64,7 +64,9 @@ read modes and revocation reasons; it does not identify the native biometric
 method or record password/private-key material.
 The TUI applies the connector's retry classification to background refreshes
 and pane reconnects, stopping on authentication/configuration failures until
-maintenance is reset by session selection. The broker remembers a quiet
+maintenance is reset by successful session selection. A blocked pane shows
+`disconnected` and retains the reason retries stopped, rather than claiming it
+is reconnecting after automatic recovery has halted. The broker remembers a quiet
 authentication-required result until explicit Connect; it can still reuse a live
 master. Client EOF cancels pending connection work. Private-master cleanup retains
 the target lock through bounded termination, using the original control connection

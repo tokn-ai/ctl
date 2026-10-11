@@ -112,6 +112,13 @@ Cached output, shell activity, and session-list observations remain available
 while offline, with last-known wording and neutral status. An unreachable
 transport does not rewrite the last observed remote process as exited.
 
+The TUI shows `reconnecting` while automatic recovery remains enabled. A
+non-retryable authentication or configuration failure stops background recovery
+and shows `disconnected` with a persistent error and `automatic retries stopped`.
+Temporary local action notices do not erase that reason. Successful explicit session
+selection resets recovery; merely authenticating a host elsewhere does not reset
+a blocked TUI. Detaching releases attachment leases and preserves remote sessions.
+
 The attachment peer-silence deadline runs independently of outbound writes, so
 a blocked SSH pipe cannot suppress failure detection. A failed write closes the
 input path but still allows buffered output and a confirmed terminal-exit message

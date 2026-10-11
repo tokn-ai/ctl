@@ -42,7 +42,7 @@ pub struct Maintenance<'a> {
   refresh: Option<Pending<'a, Snapshot>>,
   reconnects: BTreeMap<String, Pending<'a, Pane>>,
   retry_after: BTreeMap<String, tokio::time::Instant>,
-  connection_blocked: bool,
+  blocked_reason: Option<String>,
 }
 
 pub struct Ready {
@@ -56,7 +56,11 @@ impl<'a> Maintenance<'a> {
     self.refresh = None;
     self.reconnects.clear();
     self.retry_after.clear();
-    self.connection_blocked = false;
+    self.blocked_reason = None;
+  }
+
+  pub fn blocked_reason(&self) -> Option<&str> {
+    self.blocked_reason.as_deref()
   }
 
   pub fn refresh(
@@ -65,7 +69,7 @@ impl<'a> Maintenance<'a> {
     socket: PathBuf,
     session: Option<String>,
   ) {
-    if self.connection_blocked || self.refresh.is_some() {
+    if self.blocked_reason.is_some() || self.refresh.is_some() {
       return;
     }
     self.refresh = Some(Pending {
@@ -113,7 +117,7 @@ impl<'a> Maintenance<'a> {
     socket: PathBuf,
     reconnect: Reconnect,
   ) {
-    if self.connection_blocked
+    if self.blocked_reason.is_some()
       || self.reconnects.contains_key(&reconnect.terminal_id)
       || self
         .retry_after
@@ -158,14 +162,14 @@ impl<'a> Maintenance<'a> {
 
   pub async fn poll(&mut self) -> Ready {
     std::future::poll_fn(|context| {
-      let mut blocked = false;
+      let mut blocked_reason = None;
       let snapshot =
         self
           .refresh
           .as_mut()
           .and_then(|pending| match pending.job.as_mut().poll(context) {
             Poll::Ready(result) => {
-              blocked |= needs_user_action(pending.transport, &result);
+              blocked_reason = blocking_reason(pending.transport, &result);
               Some((pending.generation, result))
             }
             Poll::Pending => None,
@@ -176,12 +180,12 @@ impl<'a> Maintenance<'a> {
       });
       let mut panes = Vec::new();
       self.reconnects.retain(|id, pending| {
-        if blocked {
+        if blocked_reason.is_some() {
           return false;
         }
         match pending.job.as_mut().poll(context) {
           Poll::Ready(result) => {
-            blocked |= needs_user_action(pending.transport, &result);
+            blocked_reason = blocking_reason(pending.transport, &result);
             if result.is_err() {
               self.retry_after.insert(
                 id.clone(),
@@ -196,8 +200,8 @@ impl<'a> Maintenance<'a> {
           Poll::Pending => true,
         }
       });
-      if blocked {
-        self.connection_blocked = true;
+      if blocked_reason.is_some() {
+        self.blocked_reason = blocked_reason;
         self.refresh = None;
         self.reconnects.clear();
         self.retry_after.clear();
@@ -208,11 +212,11 @@ impl<'a> Maintenance<'a> {
   }
 }
 
-fn needs_user_action<T>(transport: Option<&dyn Transport>, result: &Result<T>) -> bool {
-  result
-    .as_ref()
-    .err()
-    .is_some_and(|error| transport.is_some_and(|transport| !transport.is_retryable(error)))
+fn blocking_reason<T>(transport: Option<&dyn Transport>, result: &Result<T>) -> Option<String> {
+  let error = result.as_ref().err()?;
+  transport
+    .filter(|transport| !transport.is_retryable(error))
+    .map(|_| error.to_string())
 }
 
 async fn timeout<T>(job: impl Future<Output = Result<T>>) -> Result<T> {
@@ -273,7 +277,12 @@ mod tests {
       maintenance.poll().await;
     }
     assert_eq!(transport.calls.load(Ordering::Relaxed), 1);
+    assert_eq!(
+      maintenance.blocked_reason(),
+      Some("authentication required")
+    );
     maintenance.cancel();
+    assert!(maintenance.blocked_reason().is_none());
     maintenance.reconnect(
       Some(&transport),
       PathBuf::new(),
@@ -300,6 +309,7 @@ mod tests {
     for _ in 0..3 {
       maintenance.refresh(Some(&transport), PathBuf::new(), None);
       assert!(maintenance.poll().await.snapshot.unwrap().is_err());
+      assert!(maintenance.blocked_reason().is_none());
     }
     assert_eq!(transport.calls.load(Ordering::Relaxed), 3);
   }

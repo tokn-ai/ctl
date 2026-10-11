@@ -8,6 +8,7 @@ struct RelayTransport {
   socket: PathBuf,
   connections: std::sync::atomic::AtomicUsize,
   fail_next: std::sync::atomic::AtomicBool,
+  authentication_required: std::sync::atomic::AtomicBool,
 }
 
 struct ReplyTransport(std::sync::Mutex<Option<tokio::io::DuplexStream>>);
@@ -136,6 +137,18 @@ impl crate::Transport for RelayTransport {
   fn connect(&self) -> crate::ConnectFuture<'_> {
     Box::pin(async move {
       if self
+        .authentication_required
+        .load(std::sync::atomic::Ordering::Acquire)
+      {
+        return Err(
+          io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "SSH authentication is required",
+          )
+          .into(),
+        );
+      }
+      if self
         .fail_next
         .swap(false, std::sync::atomic::Ordering::AcqRel)
       {
@@ -156,6 +169,12 @@ impl crate::Transport for RelayTransport {
   fn archive_key(&self) -> String {
     "remote-fixture".into()
   }
+
+  fn is_retryable(&self, error: &crate::Error) -> bool {
+    error
+      .downcast_ref::<io::Error>()
+      .is_none_or(|error| error.kind() != io::ErrorKind::PermissionDenied)
+  }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -167,6 +186,7 @@ async fn transported_shell_scrolls_frozen_history_and_reconnects() -> Result<()>
     socket: daemon.directory.join("ctmux.sock"),
     connections: std::sync::atomic::AtomicUsize::new(0),
     fail_next: std::sync::atomic::AtomicBool::new(false),
+    authentication_required: std::sync::atomic::AtomicBool::new(false),
   };
   // Every operation must use the supplied transport, never this absent socket.
   let mut app = App::new(
@@ -249,6 +269,85 @@ async fn transported_shell_scrolls_frozen_history_and_reconnects() -> Result<()>
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn blocked_reconnect_keeps_its_cause_visible_until_explicit_reselection() -> Result<()> {
+  use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+  let daemon = Daemon::start().await?;
+  let transport = RelayTransport {
+    socket: daemon.directory.join("ctmux.sock"),
+    connections: AtomicUsize::new(0),
+    fail_next: AtomicBool::new(false),
+    authentication_required: AtomicBool::new(false),
+  };
+  let mut app = daemon.app(false);
+  app.transport = Some(&transport);
+  let session = create_shell(&app).await?;
+  app.start(Some(session.clone())).await?;
+  let pane = app.focused.clone();
+  app.panes[&pane].control.detach().await?;
+  timeout(Duration::from_secs(5), async {
+    while app.panes[&pane].connected {
+      app.drain().await;
+      tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+  })
+  .await
+  .map_err(|_| "fixture attachment did not finish detaching")?;
+  transport
+    .authentication_required
+    .store(true, Ordering::Release);
+  app.schedule_refresh();
+  timeout(Duration::from_secs(5), async {
+    while app.maintenance.blocked_reason().is_none() {
+      app.poll_maintenance().await;
+      tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+  })
+  .await
+  .map_err(|_| "fixture authentication failure did not block reconnects")?;
+  assert_eq!(app.connection_status(), "disconnected");
+  assert!(app.message.contains("automatic retries stopped"));
+  assert!(!app.message.contains("retrying"));
+  app.message_until = Instant::now();
+  assert!(app.status().contains("SSH authentication is required"));
+  assert!(!app.status().contains("reconnecting"));
+  app.size = (48, 10);
+  let frame = app.frame();
+  assert!(frame.text_rows()[9].starts_with(" disconnected | SSH authentication is required"));
+
+  app.execute(Action::History { page_back: false }).await?;
+  assert!(app.status().contains("COPY"));
+  assert!(app.status().contains("SSH authentication is required"));
+  app.notice("Copied selection".into());
+  assert!(app.status().contains("Copied selection"));
+  app.message_until = Instant::now();
+  assert!(app.status().contains("SSH authentication is required"));
+  app
+    .key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+    .await?;
+  app.connection_notice("a later connection error");
+  assert!(app.message.contains("SSH authentication is required"));
+  assert!(!app.message.contains("a later connection error"));
+
+  // Restoring authentication elsewhere cannot silently retry a blocked TUI.
+  transport
+    .authentication_required
+    .store(false, Ordering::Release);
+  let connections = transport.connections.load(Ordering::Relaxed);
+  app.schedule_refresh();
+  app.poll_maintenance().await;
+  assert_eq!(transport.connections.load(Ordering::Relaxed), connections);
+  assert_eq!(app.connection_status(), "disconnected");
+  app.select(&session).await?;
+  assert!(app.maintenance.blocked_reason().is_none());
+  assert_eq!(app.connection_status(), "connected");
+  assert!(!app.status().contains("SSH authentication is required"));
+  assert!(!app.status().contains("automatic retries stopped"));
+  app.detach().await;
+  Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn successful_refresh_restores_control_status_without_clearing_action_notices() -> Result<()>
 {
   let daemon = Daemon::start().await?;
@@ -256,6 +355,7 @@ async fn successful_refresh_restores_control_status_without_clearing_action_noti
     socket: daemon.directory.join("ctmux.sock"),
     connections: std::sync::atomic::AtomicUsize::new(0),
     fail_next: std::sync::atomic::AtomicBool::new(false),
+    authentication_required: std::sync::atomic::AtomicBool::new(false),
   };
   let mut app = daemon.app(false);
   app.transport = Some(&transport);

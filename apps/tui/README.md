@@ -163,11 +163,14 @@ remain flat, as with the prefix controls above.
 ## Scrollback and copy mode
 
 The bottom status row shows the focused pane's connection and history state:
-`connected` or `reconnecting`, and `history syncing`, `history ready`, or
+`connected`, `reconnecting`, or `disconnected`, and `history syncing`, `history ready`, or
 `history incomplete`. Ready means the retained window is available, not that
 the remote keeps unlimited history. The row stays outside the PTY grid and
 scrollback. Copy mode keeps its frozen history and selection while connection
 status updates; reopening copy mode picks up newly synchronized history.
+When authentication or configuration requires user action, automatic retries
+stop. The pane shows `disconnected` and retains the error with `automatic retries
+stopped`, including after temporary local action notices expire.
 
 Press **Ctrl+B [** to inspect a frozen snapshot of the active pane's visible
 screen and its retained scrollback. The snapshot stays inside that pane; other
@@ -314,7 +317,11 @@ Switching sessions or detaching cancels pending recovery work. Topology and sess
 refresh every two seconds and after local changes. While the TUI owns the host
 terminal, `ctl` connection preparation displays errors through the TUI rather
 than printing progress or asking for authentication in the terminal. If SSH
-authentication is required, detach and reconnect to answer the prompt. Detaching
+authentication is required, explicitly authenticate with `ctl host connect HOST`
+in another terminal and select the existing session again, or detach and reconnect
+to answer the prompt. Sleep and screen locking revoke reusable Keychain approval,
+so recovering a lost SSH connection afterward can require fresh authentication.
+Background recovery never opens authentication prompts. Detaching
 releases leases without terminating the session. Normal exit, errors, and Unix
 termination/hangup signals restore the host terminal mode and alternate screen.
 

@@ -2,7 +2,9 @@ use super::{
   PaneMoveError, SessionControlError, SessionLifecycle, SessionManager, SessionManagerError,
   SessionRegistry, Terminal, TerminalOwner, lock, unix_time_ms,
 };
-use ctmux_proto::{LeaseKind, PaneTarget, SplitAxis, TerminalInfo, ViewInfo, ViewLayout};
+use ctmux_proto::{
+  LeaseKind, PaneTarget, SessionInfo, SplitAxis, TerminalInfo, ViewInfo, ViewLayout,
+};
 use std::collections::HashSet;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -387,7 +389,9 @@ impl SessionRegistry {
       if let Some(terminal) = self.terminals.get(&terminal.terminal_id) {
         terminal.view_updates.send_if_modified(|current| {
           if current.as_ref().is_some_and(|previous| {
-            previous.view_id == view.view_id && previous.revision == view.revision
+            previous.view_id == view.view_id
+              && previous.revision == view.revision
+              && previous.session_name == view.session_name
           }) {
             return false;
           }
@@ -537,6 +541,54 @@ impl SessionRegistry {
 }
 
 impl SessionManager {
+  pub(super) fn rename_inner(
+    &self,
+    selector: &str,
+    name: String,
+  ) -> Result<SessionInfo, SessionManagerError> {
+    ctmux_core::validate_session_name(&name).map_err(|message| {
+      SessionManagerError::InvalidName {
+        message: message.into(),
+      }
+    })?;
+    let mut registry = lock(&self.inner.registry);
+    let root = registry.root(selector)?;
+    if root.closing {
+      return Err(SessionManagerError::InvalidView(
+        "session is terminating".into(),
+      ));
+    }
+    let root_id = root.id.clone();
+    let terminal_ids = root.view.layout.terminal_ids();
+    if terminal_ids.iter().any(|id| registry.terminals[id].managed) {
+      return Err(SessionManagerError::InvalidView(
+        "managed task sessions cannot be renamed".into(),
+      ));
+    }
+    if registry.sessions[&root_id].name == name {
+      return Ok(registry.terminals[&terminal_ids[0]].info());
+    }
+    if registry.pending_names.contains(&name)
+      || registry
+        .sessions
+        .values()
+        .any(|session| session.id != root_id && session.name == name)
+    {
+      return Err(SessionManagerError::AlreadyExists { name });
+    }
+    let root = registry.sessions.get_mut(&root_id).expect("validated root");
+    root.name.clone_from(&name);
+    root.view.revision += 1;
+    for id in &terminal_ids {
+      lock(&registry.terminals[id].owner).name.clone_from(&name);
+    }
+    // The revision orders every complete view snapshot, including metadata:
+    // older maintenance results must not overwrite the newly committed name.
+    // Actual layout, geometry, and ownership remain unchanged.
+    registry.publish_view(&root_id);
+    Ok(registry.terminals[&terminal_ids[0]].info())
+  }
+
   pub fn view(&self, selector: &str) -> Result<ViewInfo, SessionManagerError> {
     lock(&self.inner.registry).view_info(selector)
   }

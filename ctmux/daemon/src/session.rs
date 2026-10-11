@@ -2528,6 +2528,127 @@ mod tests {
 
   #[cfg(unix)]
   #[test]
+  fn session_rename_preserves_identity_layout_leases_and_updates_every_owner() {
+    let fixture = PtyViewFixture::new();
+    let root = &fixture.terminals[0];
+    let attachment = root.create_attachment(true, true);
+    let before = fixture.manager.view(&root.info().session_id).unwrap();
+    let root_info = root.info();
+    let mut updates = fixture.terminals[1].subscribe_view();
+    updates.borrow_and_update();
+    let renamed = fixture
+      .manager
+      .rename(&before.session_id, "renamed".into())
+      .unwrap();
+    assert_eq!(renamed.session_id, root_info.session_id);
+    assert_eq!(renamed.terminal_id, root_info.terminal_id);
+    assert_eq!(renamed.view_id, root_info.view_id);
+    assert_eq!(renamed.created_at_ms, root_info.created_at_ms);
+    assert_eq!(renamed.terminal_size, root_info.terminal_size);
+    assert_eq!(renamed.name, "renamed");
+    let after = fixture.manager.view("renamed").unwrap();
+    let mut expected = before.clone();
+    expected.session_name = "renamed".into();
+    expected.revision += 1;
+    assert_eq!(after, expected);
+    assert!(updates.has_changed().unwrap());
+    assert_eq!(updates.borrow_and_update().as_ref(), Some(&after));
+    for terminal in &fixture.terminals {
+      assert_eq!(terminal.info().name, "renamed");
+      assert!(matches!(
+        *lock(&terminal.lifecycle),
+        SessionLifecycle::Running
+      ));
+    }
+    assert!(root.owns_input_lease(&attachment.attachment_id));
+    assert!(
+      root
+        .layout_lease_status(&attachment.attachment_id)
+        .owned_by_client
+    );
+    assert!(fixture.manager.view("rollback").is_err());
+    assert_eq!(fixture.manager.list()[0].name, "renamed");
+    assert!(matches!(
+      fixture
+        .manager
+        .update_view(&before.session_id, before.revision, before.layout),
+      Err(SessionManagerError::InvalidView(_))
+    ));
+    fixture
+      .manager
+      .rename(&before.session_id, "renamed".into())
+      .unwrap();
+    assert!(!updates.has_changed().unwrap());
+    assert_eq!(fixture.manager.view("renamed").unwrap(), after);
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn session_rename_rejects_invalid_reserved_managed_and_closing_targets() {
+    let mut fixture = PtyViewFixture::new();
+    let root_id = fixture.terminals[0].info().session_id;
+    for name in ["", "has spaces", "../invalid"] {
+      assert!(matches!(
+        fixture.manager.rename(&root_id, name.into()),
+        Err(SessionManagerError::InvalidName { .. })
+      ));
+    }
+    let too_long = "a".repeat(65);
+    assert!(matches!(
+      fixture.manager.rename(&root_id, too_long),
+      Err(SessionManagerError::InvalidName { .. })
+    ));
+    let reserved = fixture
+      .manager
+      .reserve_name(Some("reserved".into()))
+      .unwrap();
+    assert!(matches!(
+      fixture.manager.rename(&root_id, "reserved".into()),
+      Err(SessionManagerError::AlreadyExists { .. })
+    ));
+    drop(reserved);
+    let managed = fixture
+      .manager
+      .create_terminal(
+        Some("managed".into()),
+        Some(CommandSpec {
+          program: "/bin/sh".into(),
+          arguments: vec!["-c".into(), "IFS= read -r line".into()],
+        }),
+        None,
+        TerminalSize::default(),
+        None,
+        true,
+      )
+      .unwrap();
+    fixture.terminals.push(managed.clone());
+    assert!(matches!(
+      fixture.manager.rename(&root_id, "managed".into()),
+      Err(SessionManagerError::AlreadyExists { .. })
+    ));
+    assert!(matches!(
+      fixture
+        .manager
+        .rename(&managed.info().session_id, "renamed-task".into()),
+      Err(SessionManagerError::InvalidView(_))
+    ));
+    assert!(matches!(
+      fixture.manager.rename("missing", "new-name".into()),
+      Err(SessionManagerError::NotFound { .. })
+    ));
+    fixture.manager.begin_termination(&root_id).unwrap();
+    assert!(matches!(
+      fixture.manager.rename(&root_id, "renamed".into()),
+      Err(SessionManagerError::InvalidView(_))
+    ));
+    assert_eq!(
+      fixture.manager.view(&root_id).unwrap().session_name,
+      "rollback"
+    );
+  }
+
+  #[cfg(unix)]
+  #[test]
   fn failed_pane_reflow_restores_zoom_layout_revision_and_previous_pty_size() {
     let fixture = PtyViewFixture::new();
     let root = &fixture.terminals[0];

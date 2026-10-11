@@ -1,9 +1,12 @@
 //! Typed session actions over an explicitly selected transport.
 
 use crate::{
-  AttachRequest, AttachedSession, ClientError, ClientIdentity, begin_attach, request, unexpected,
+  AttachRequest, AttachedSession, ClientError, ClientIdentity, begin_attach, handshake,
+  read_response, request, unexpected,
 };
-use ctmux_proto::{ClientMessage, CommandSpec, ServerMessage, SessionInfo, TerminalSize};
+use ctmux_proto::{
+  ClientMessage, CommandSpec, ServerMessage, SessionInfo, TerminalSize, write_frame,
+};
 use tokio::io::{AsyncRead, AsyncWrite};
 
 /// Creation parameters independent of CLI parsing and desktop DTOs.
@@ -42,6 +45,36 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SessionClient<S> {
     match request(self.stream, &self.identity, ClientMessage::ListSessions).await? {
       ServerMessage::SessionList { sessions } => Ok(sessions),
       response => Err(unexpected("session_list", &response)),
+    }
+  }
+
+  /// Rename existing persistent work without changing its identity or layout.
+  /// # Errors
+  /// Returns an unsupported-operation error before sending a mutation to an
+  /// older daemon, or a handshake, transport, or daemon response error. Never retries.
+  pub async fn rename(
+    mut self,
+    session_id: SessionId,
+    name: String,
+  ) -> Result<SessionInfo, ClientError> {
+    let handshake = handshake(&mut self.stream, &self.identity).await?;
+    if !ctmux_proto::supports_session_rename(handshake.protocol_version) {
+      return Err(ClientError::UnsupportedOperation {
+        operation: "session.rename",
+        protocol_version: handshake.protocol_version,
+      });
+    }
+    write_frame(
+      &mut self.stream,
+      &ClientMessage::RenameSession {
+        session: session_id.0,
+        name,
+      },
+    )
+    .await?;
+    match read_response(&mut self.stream).await? {
+      ServerMessage::SessionRenamed { session } => Ok(session),
+      response => Err(unexpected("session_renamed", &response)),
     }
   }
 
@@ -121,18 +154,25 @@ mod tests {
   }
 
   async fn accept(server: &mut tokio::io::DuplexStream) {
+    accept_contract(server, ctmux_proto::PROTOCOL_VERSION).await;
+  }
+
+  async fn accept_contract(
+    server: &mut tokio::io::DuplexStream,
+    version: ctl_core::protocol::ProtocolVersion,
+  ) {
     assert!(
       matches!(read_frame::<_, ClientMessage>(server).await.unwrap(), Some(ClientMessage::Handshake { client_name, .. }) if client_name == "api-test")
     );
     write_frame(
       server,
       &ServerMessage::HandshakeAccepted {
-        protocol_version: ctmux_proto::PROTOCOL_VERSION,
+        protocol_version: version,
         protocols: vec![ctl_core::component::ProtocolInfo::new(
           "ctmux",
-          ctmux_proto::PROTOCOL_VERSION.build,
-          ctmux_proto::PROTOCOL_VERSION,
-          &[ctmux_proto::PROTOCOL_VERSION],
+          version.build,
+          version,
+          &[version],
         )],
         server_version: "test".into(),
         build: None,
@@ -142,6 +182,106 @@ mod tests {
     )
     .await
     .unwrap();
+  }
+
+  #[tokio::test]
+  async fn rename_pins_id_and_returns_authoritative_metadata() {
+    let (client, mut server) = tokio::io::duplex(4096);
+    let peer = tokio::spawn(async move {
+      accept(&mut server).await;
+      assert!(matches!(
+        read_frame::<_, ClientMessage>(&mut server).await.unwrap(),
+        Some(ClientMessage::RenameSession { session, name })
+          if session == "selected-id" && name == "renamed"
+      ));
+      let mut renamed = session();
+      renamed.session_id = "selected-id".into();
+      renamed.name = "renamed".into();
+      write_frame(
+        &mut server,
+        &ServerMessage::SessionRenamed { session: renamed },
+      )
+      .await
+      .unwrap();
+      assert!(
+        read_frame::<_, ClientMessage>(&mut server)
+          .await
+          .unwrap()
+          .is_none()
+      );
+    });
+    let renamed = SessionClient::new(client, identity())
+      .rename(SessionId("selected-id".into()), "renamed".into())
+      .await
+      .unwrap();
+    assert_eq!(renamed.session_id, "selected-id");
+    assert_eq!(renamed.name, "renamed");
+    peer.await.unwrap();
+  }
+
+  #[tokio::test]
+  async fn rename_refuses_every_older_contract_without_sending_mutation() {
+    for version in ctmux_proto::SUPPORTED_PROTOCOL_VERSIONS
+      .iter()
+      .copied()
+      .filter(|version| !ctmux_proto::supports_session_rename(*version))
+    {
+      let (client, mut server) = tokio::io::duplex(4096);
+      let peer = tokio::spawn(async move {
+        accept_contract(&mut server, version).await;
+        assert!(
+          read_frame::<_, ClientMessage>(&mut server)
+            .await
+            .unwrap()
+            .is_none()
+        );
+      });
+      assert!(matches!(
+        SessionClient::new(client, identity())
+          .rename(SessionId("selected-id".into()), "renamed".into())
+          .await,
+        Err(ClientError::UnsupportedOperation { operation: "session.rename", protocol_version })
+          if protocol_version == version
+      ));
+      peer.await.unwrap();
+    }
+  }
+
+  #[tokio::test]
+  async fn rename_preserves_domain_errors_without_retry() {
+    let (client, mut server) = tokio::io::duplex(4096);
+    let peer = tokio::spawn(async move {
+      accept(&mut server).await;
+      assert!(matches!(
+        read_frame::<_, ClientMessage>(&mut server).await.unwrap(),
+        Some(ClientMessage::RenameSession { .. })
+      ));
+      write_frame(
+        &mut server,
+        &ServerMessage::Error {
+          code: ErrorCode::SessionAlreadyExists,
+          message: "taken".into(),
+        },
+      )
+      .await
+      .unwrap();
+      assert!(
+        read_frame::<_, ClientMessage>(&mut server)
+          .await
+          .unwrap()
+          .is_none()
+      );
+    });
+    assert!(matches!(
+      SessionClient::new(client, identity())
+        .rename(SessionId("selected-id".into()), "taken".into())
+        .await,
+      Err(ClientError::Server {
+        code: ErrorCode::SessionAlreadyExists,
+        ..
+      })
+    ));
+    peer.await.unwrap();
   }
 
   #[tokio::test]

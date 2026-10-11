@@ -7,8 +7,9 @@ use clap::{Subcommand, ValueEnum};
 
 pub use commands::{
   CommandError, ConnectFuture, Connector, LocalConnector, new_session, resolve_session, run,
-  run_tui,
+  run_tui, run_tui_with_startup,
 };
+pub use ctmux_tui::StartupMode;
 
 /// Canonical ctmux commands, independent of how the daemon is reached.
 #[derive(Debug, Subcommand)]
@@ -113,6 +114,16 @@ pub enum Command {
     session: Option<String>,
     #[arg(short = 't', long)]
     target: Option<String>,
+  },
+
+  /// Rename a session without replacing its terminals or attachments.
+  #[command(name = "rename-session", visible_alias = "rename")]
+  Rename {
+    /// Session name or ID on the selected host.
+    #[arg(short = 't', long)]
+    target: String,
+    /// New human-readable session name.
+    name: String,
   },
 
   /// Print shell integration helpers that do not require a daemon connection.

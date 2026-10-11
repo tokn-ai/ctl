@@ -72,6 +72,12 @@ impl<'a> Maintenance<'a> {
     self.authentication_block = None;
   }
 
+  /// Drop an observation that may predate an explicit session mutation without
+  /// changing pane recovery, retry deadlines, or authentication blocking.
+  pub fn cancel_refresh(&mut self) {
+    self.refresh = None;
+  }
+
   pub fn blocked_reason(&self) -> Option<&str> {
     self.blocked_reason.as_deref()
   }
@@ -276,6 +282,10 @@ mod tests {
   }
 
   impl Transport for FailedTransport {
+    fn label(&self) -> &'static str {
+      "fixture"
+    }
+
     fn connect(&self) -> ConnectFuture<'_> {
       self.calls.fetch_add(1, Ordering::Relaxed);
       Box::pin(async {
@@ -436,6 +446,10 @@ mod tests {
   }
 
   impl Transport for BlockedTransport {
+    fn label(&self) -> &'static str {
+      "fixture"
+    }
+
     fn connect(&self) -> ConnectFuture<'_> {
       self.calls.fetch_add(1, Ordering::Relaxed);
       Box::pin(Blocked(&self.cancelled))

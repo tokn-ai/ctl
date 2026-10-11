@@ -1,4 +1,4 @@
-# ctmux published protocol 1.1.18
+# ctmux published protocol 1.1.20
 
 The protocol is independent of local IPC and future remote transport. Internal build
 11 introduced length-prefixed JSON frames for debuggability. Each frame begins with a
@@ -37,6 +37,8 @@ output sequence describe the selected terminal, not an aggregate across a view.
 Listing selects the first leaf in each view; attachment and shell inspection
 select the requested terminal. The root name and creation time remain stable
 when terminals move or the first terminal exits.
+Contract 1.1.20 adds explicit root renaming; it preserves those identities and
+the creation time while changing the authoritative name.
 
 `attach_session`, `resume_attachment`, and `get_shell_state` accept a root name,
 root ID, or terminal ID. A root selector opens the first terminal in layout order.
@@ -67,6 +69,7 @@ One-shot topology requests are:
 | Request | Effect |
 | --- | --- |
 | `get_view { session }` | Return the root's complete `view_snapshot` |
+| `rename_session { session, name }` | Rename the root in place; requires negotiated 1.1.20 |
 | `split_terminal { terminal_id, axis, command, working_directory, terminal_size }` | Create a terminal beside the target in the same view |
 | `update_view { session, expected_revision, layout }` | Replace arrangement with exactly the same terminal membership; reject stale revisions |
 | `promote_terminal { terminal_id, name }` | Move one of a root's multiple terminals to a new session/view |
@@ -75,9 +78,17 @@ One-shot topology requests are:
 | `kill_session { session }` | Terminate every terminal owned by the root; prevent new splits or moves into it |
 
 Successful view operations return `view_snapshot { view }`; terminal termination
-returns `success`. A snapshot includes `session_id`, `session_name`, `view_id`,
+returns `success`. Rename returns `session_renamed { session }` with the updated
+`SessionInfo`. Names retain the existing 1–64 byte ASCII letters, digits,
+`-`, `_`, and `.` rule and must be unique. Closing and task-managed roots
+reject renaming. Clients pin the root ID before editing; a failed mutation is
+never automatically replayed. Attached observers receive the new name through
+existing `view_snapshot` events with an advanced view revision, allowing clients
+to reject snapshots from before the rename. Renaming to the current name is a
+no-op; it does not advance the revision.
+A snapshot includes `session_id`, `session_name`, `view_id`,
 `revision`, `layout`, `canvas_size`, cell-coordinate `panes`, and terminal metadata. Revisions increase on changes to
-layout, canvas size, or membership, including exit. Layout nodes use `kind`:
+layout, canvas size, membership (including exit), or root name. Layout nodes use `kind`:
 
 ```json
 {

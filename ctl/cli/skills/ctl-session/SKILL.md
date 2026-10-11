@@ -44,20 +44,27 @@ invent `--json` for list/state or a `send-keys` command.
 
 ```sh
 ctl -H work shell --session development
+ctl -H work shell --resume
 ctl -H work ctmux attach development
 ctl -H work ctmux attach development --read-only
 ctl -H work ctmux attach development --resize
 ```
 
-`ctl shell` requires terminal stdin and stdout. Without `--session` it creates
-a new session; a supplied name attaches if present or creates if absent. For
+`ctl shell` requires terminal stdin and stdout. Without `--session` or `--resume`
+it creates a new session; a supplied name attaches if present or creates if
+absent. `--resume` opens a host-scoped manager without attaching or creating
+when sessions exist; an empty host creates one shell. It cannot be combined
+with `--session`, `--plain`, or `--cwd`. For
 noninteractive agent work, use detached creation, `ctl exec`, or a managed
 background task instead of opening an interactive shell.
 
-Both `ctl shell` and `ctl ctmux attach` use the single-terminal presenter.
-Detach with **Ctrl+]**. Detach leaves the session running and releases its
-attachment leases. Standalone `ctmux` uses the TUI by default, where detachment
-is **Ctrl+B**, then **d**; do not apply that shortcut to ctl attachments.
+`ctl shell` and standalone `ctmux` use the shared TUI; detach with **Ctrl+B**,
+then **d**. `ctl ctmux attach` uses the single-terminal presenter and detaches
+with **Ctrl+]**. Detach leaves the session running and releases its attachment
+leases. Inside the TUI, **Ctrl+B s/w** opens the session manager: Enter opens,
+`n` creates, `r` renames, and `x` confirms whole-session termination. Mutations
+are unavailable in read-only mode. Renaming preserves running work and requires
+ctmux 1.1.20; cancellation never terminates work.
 
 Normal attachment requests input ownership without stealing another client's
 lease. `--read-only` requests no input lease. Layout ownership is separate:
@@ -80,7 +87,8 @@ ctl -H work ctmux split TERMINAL_ID --vertical
 ctl -H work ctmux promote TERMINAL_ID --name scratch
 ctl -H work ctmux merge scratch development
 ctl -H work ctmux kill-terminal TERMINAL_ID
-ctl -H work ctmux kill development
+ctl -H work ctmux rename-session -t development build
+ctl -H work ctmux kill build
 ```
 
 Split inherits the source terminal's known cwd unless overridden. Promotion and

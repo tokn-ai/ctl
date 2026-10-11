@@ -744,6 +744,7 @@ A named session attaches if it already exists, or is created if absent:
 ```sh
 ctl shell
 ctl -H work shell
+ctl -H work shell --resume
 ctl -H work shell --session development
 ctl -H work shell --plain
 ctl -H work exec -- uname -a
@@ -754,6 +755,15 @@ Persistent `ctl shell` uses the shared ctmux TUI over local or SSH connections.
 Its bottom banner shows connection and history status. Mouse wheel or trackpad
 scrolling opens retained history; Esc returns to live output, and Ctrl+B d
 detaches. The banner stays outside scrollback.
+
+Use `--resume` to choose a running session without creating another one. It
+opens the session manager before attaching; an empty host creates one new shell.
+The option is exclusive with `--session`, `--plain`, and `--cwd`.
+Inside a shell, Ctrl+B s/w or `:list-sessions` opens the same manager. Enter
+opens a session, `n` creates one, `r` renames it, and `x` confirms termination
+of the whole session for every viewer. Renaming requires ctmux 1.1.20 and
+preserves its IDs, panes, processes, and history. Use
+`ctl -H work ctmux rename-session -t development build` for a scripted rename.
 
 `--plain` opens an ordinary shell. `exec` runs once without allocating a PTY,
 streams stdin/stdout/stderr, and returns the command's exit status. Unix exec

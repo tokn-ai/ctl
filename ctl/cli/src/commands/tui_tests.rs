@@ -11,6 +11,7 @@ mod support;
 use support::{Result, Screen, TestDaemon, TestProxy, Tui};
 
 const CHILD_TEST: &str = "commands::tui_tests::terminal_fixture";
+const RESUME_CHILD_TEST: &str = "commands::tui_tests::resume_terminal_fixture";
 const PROMPT_TEXT: &str = "FORBIDDEN_BROKER_PROMPT";
 const WARNING_TEXT: &str = "FORBIDDEN_BROKER_WARNING";
 
@@ -323,6 +324,82 @@ async fn terminal_fixture() {
     broker: Arc::default(),
   };
   ctmux_cli::run_tui(&connector, Some(session), false)
+    .await
+    .unwrap();
+  assert!(!connector.terminal_ui_active.load(Ordering::Acquire));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shell_resume_opens_the_picker_before_attaching_or_creating() -> Result<()> {
+  let mut daemon = TestDaemon::start().await?;
+  let session = daemon
+    .create_echo_session(
+      "existing-work",
+      "resumed",
+      ctmux_proto::TerminalSize {
+        columns: 120,
+        rows: 12,
+        ..Default::default()
+      },
+    )
+    .await?;
+  let proxy = TestProxy::start(&daemon)?;
+  let mut command = CommandBuilder::new(std::env::current_exe()?);
+  command.args(["--ignored", "--exact", RESUME_CHILD_TEST, "--nocapture"]);
+  command.env_clear();
+  command.env("HOME", daemon.directory.join("home"));
+  command.env("PATH", "/usr/bin:/bin");
+  command.env("TERM", "xterm-256color");
+  command.env("LANG", "C.UTF-8");
+  command.env("CTL_TUI_TEST_SOCKET_PATH", &proxy.socket);
+  command.cwd(&daemon.directory);
+  let mut tui = Tui::spawn(command, 120, 13)?;
+  tui
+    .wait_screen("existing-session startup picker", |screen| {
+      screen.contains("existing-work")
+    })
+    .await?;
+  assert_eq!(proxy.attachments(), 0, "resume must wait for a selection");
+  let ctmux_proto::ServerMessage::SessionList { sessions } = daemon
+    .request(ctmux_proto::ClientMessage::ListSessions)
+    .await?
+  else {
+    return Err("expected session list".into());
+  };
+  assert_eq!(sessions.len(), 1, "resume must not create an extra session");
+  assert_eq!(sessions[0].session_id, session);
+  tui.send(b"\r")?;
+  tui
+    .wait_screen("selected persistent shell", |screen| {
+      screen.contains("resumed:ready") && footer(screen).starts_with(" connected |")
+    })
+    .await?;
+  proxy.wait_attachments(1).await?;
+  tui.send(b"still-running\r")?;
+  tui
+    .wait_screen("input goes to the resumed shell", |screen| {
+      screen.contains("resumed:still-running")
+    })
+    .await?;
+  tui.send(b"\x02d")?;
+  assert!(tui.wait_exit().await?.success());
+  drop(tui);
+  drop(proxy);
+  daemon.shutdown().await?;
+  Ok(())
+}
+
+#[tokio::test]
+#[ignore = "private real-terminal subprocess fixture"]
+async fn resume_terminal_fixture() {
+  let socket = std::env::var_os("CTL_TUI_TEST_SOCKET_PATH").expect("fixture socket");
+  let connector = CtlConnector::new(
+    ConnectionTarget::Local {
+      socket_path: socket.into(),
+    },
+    ctl_client::hosts::ConnectionTargetDto::Local,
+  );
+  run_shell(&connector, None, true, false, None)
     .await
     .unwrap();
   assert!(!connector.terminal_ui_active.load(Ordering::Acquire));

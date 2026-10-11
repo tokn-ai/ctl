@@ -1,7 +1,9 @@
 //! Record operation boundaries outside the registry/PTY locks. Never log requests.
 use super::{PaneMoveError, SessionControlError, SessionManager, SessionManagerError, Terminal};
 use ctl_core::observability::{Context, Event, Lease, Level, Operation, Outcome};
-use ctmux_proto::{CommandSpec, LeaseKind, LeaseStatus, TerminalSize, ViewInfo, ViewLayout};
+use ctmux_proto::{
+  CommandSpec, LeaseKind, LeaseStatus, SessionInfo, TerminalSize, ViewInfo, ViewLayout,
+};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -324,6 +326,19 @@ impl Terminal {
 }
 
 impl SessionManager {
+  pub fn rename(&self, selector: &str, name: String) -> Result<SessionInfo, SessionManagerError> {
+    logged(
+      Event::SessionRename,
+      Level::Info,
+      Context::default(),
+      || self.rename_inner(selector, name),
+      |session| Context {
+        session_id: Uuid::parse_str(&session.session_id).ok(),
+        ..Context::default()
+      },
+    )
+  }
+
   pub(super) fn create_terminal(
     &self,
     name: Option<String>,

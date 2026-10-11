@@ -200,3 +200,57 @@ async fn terminal_commands_preserve_layout_selectors_argv_and_cwd() {
       .success()
   );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rename_resolves_names_and_ids_without_replacing_persistent_work() {
+  let daemon = Daemon::start().await;
+  daemon.success(&["new", "-ds", "work", "--", "/bin/sh"]);
+  daemon.success(&["new", "-ds", "other", "--", "/bin/sh"]);
+  let original = daemon.view(&["view", "work"]);
+  let duplicate = daemon.command(&["rename-session", "-t", "work", "other"]);
+  assert!(!duplicate.status.success());
+  assert!(String::from_utf8_lossy(&duplicate.stderr).contains("already exists"));
+  daemon.success(&["kill", "other"]);
+  timeout(Duration::from_secs(5), async {
+    while daemon.success(&["ls"]).lines().count() != 2 {
+      sleep(Duration::from_millis(10)).await;
+    }
+  })
+  .await
+  .expect("terminated session releases its name before reuse");
+  assert_eq!(
+    daemon.success(&["rename-session", "-t", "work", "other"]),
+    format!("{}\tother\n", original.session_id)
+  );
+  let renamed = daemon.view(&["view", "other"]);
+  assert_eq!(renamed.session_id, original.session_id);
+  assert_eq!(renamed.layout, original.layout);
+  assert_eq!(renamed.terminals.len(), original.terminals.len());
+  assert_eq!(
+    renamed.terminals[0].terminal_id,
+    original.terminals[0].terminal_id
+  );
+  assert_eq!(
+    renamed.terminals[0].created_at_ms,
+    original.terminals[0].created_at_ms
+  );
+  assert!(!daemon.command(&["view", "work"]).status.success());
+  assert_eq!(
+    daemon.success(&["rename", "-t", &original.session_id, "work"]),
+    format!("{}\twork\n", original.session_id)
+  );
+  assert!(
+    !daemon
+      .command(&["rename", "-t", "missing", "other"])
+      .status
+      .success()
+  );
+  assert!(
+    !daemon
+      .command(&["rename", "-t", "work", ""])
+      .status
+      .success()
+  );
+  assert_eq!(daemon.success(&["ls"]).lines().count(), 2);
+  daemon.success(&["kill", "work"]);
+}

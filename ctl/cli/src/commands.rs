@@ -143,9 +143,10 @@ async fn run_selected(
   match command {
     Command::Shell {
       session,
+      resume,
       plain,
       cwd,
-    } => return run_shell(connector, session, plain, cwd).await,
+    } => return run_shell(connector, session, resume, plain, cwd).await,
     Command::Exec { command } => {
       return Ok(crate::connection::execute(&connector.settings, command, platform).await?);
     }
@@ -190,6 +191,7 @@ async fn run_selected(
 async fn run_shell(
   connector: &CtlConnector,
   session: Option<String>,
+  resume: bool,
   plain: bool,
   cwd: Option<String>,
 ) -> Result<i32, CliError> {
@@ -199,6 +201,10 @@ async fn run_shell(
   }
   if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
     return Err(CliError::TerminalRequired);
+  }
+  if resume {
+    ctmux_cli::run_tui_with_startup(connector, ctmux_cli::StartupMode::Resume, false).await?;
+    return Ok(0);
   }
   let attach_if_exists = session.is_some();
   let session =

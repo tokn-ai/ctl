@@ -341,3 +341,130 @@ async fn session_picker_preserves_selected_identity_when_an_earlier_row_disappea
   daemon.shutdown().await?;
   Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn session_manager_names_new_work_confirms_termination_and_resumes_existing_work()
+-> Result<()> {
+  let mut daemon = TestDaemon::start().await?;
+  let alpha = daemon
+    .create_echo_session("manager-alpha", "alpha", canvas())
+    .await?;
+  daemon
+    .create_echo_session("manager-beta", "beta", canvas())
+    .await?;
+  let mut tui = Tui::start(&daemon, &alpha, COLUMNS, ROWS).await?;
+  prefix(&mut tui, b"s").await?;
+  tui
+    .wait_screen("manager displays identity and current session", |screen| {
+      screen.contains("Sessions — local")
+        && screen.contains("manager-alpha [current]")
+        && screen.contains("created")
+        && screen.contains(&alpha[..8])
+    })
+    .await?;
+  tui.send(b"n")?;
+  tui
+    .wait_screen("new session uses literal name entry", |screen| {
+      screen.contains("New session name")
+    })
+    .await?;
+  tui.send(b"manager-created\r")?;
+  tui
+    .wait_screen("named new session is attached", |screen| {
+      footer(screen).contains("ctmux [manager-created]")
+    })
+    .await?;
+  let created = ordered_sessions(&daemon)
+    .await?
+    .into_iter()
+    .find(|session| session.name == "manager-created")
+    .ok_or("missing created session")?;
+  prefix(&mut tui, b"s").await?;
+  tui.send(b"r")?;
+  tui
+    .wait_screen("rename prefills the existing literal name", |screen| {
+      screen.contains("Rename manager-created") && footer(screen) == ":manager-created"
+    })
+    .await?;
+  tui.send(b"\x15manager-renamed\r")?;
+  tui
+    .wait_screen("rename preserves the selected current session", |screen| {
+      screen.contains("> manager-renamed [current]") && screen.contains(&created.session_id[..8])
+    })
+    .await?;
+  let renamed = ordered_sessions(&daemon)
+    .await?
+    .into_iter()
+    .find(|session| session.name == "manager-renamed")
+    .ok_or("missing renamed session")?;
+  assert_eq!(renamed.session_id, created.session_id);
+  assert_eq!(renamed.terminal_id, created.terminal_id);
+  tui.send(b"x")?;
+  tui
+    .wait_screen(
+      "termination names its target and warns about all clients",
+      |screen| {
+        screen.contains("Terminate session manager-renamed")
+          && screen.contains("ALL panes")
+          && screen.contains("every attached client")
+      },
+    )
+    .await?;
+  tui.send(b"\x1b")?;
+  tui
+    .wait_screen("cancel returns to the same selected session", |screen| {
+      screen.contains("> manager-renamed [current]")
+    })
+    .await?;
+  assert_eq!(ordered_sessions(&daemon).await?.len(), 3);
+  tui.send(b"x")?;
+  tui
+    .wait_screen("second termination confirmation", |screen| {
+      screen.contains("Terminate session manager-renamed")
+    })
+    .await?;
+  tui.send(b"y")?;
+  tui
+    .wait_screen(
+      "active termination returns to manager without creating",
+      |screen| {
+        screen.contains("Sessions — local")
+          && screen.contains("manager-alpha")
+          && screen.contains("manager-beta")
+          && !screen.contains("> manager-renamed")
+      },
+    )
+    .await?;
+  assert_eq!(ordered_sessions(&daemon).await?.len(), 2);
+  tui.send(b"\r")?;
+  input(&mut tui, "alpha", "existing-work-preserved").await?;
+  targeted_session_commands(&mut tui, &daemon).await?;
+  detach(&mut tui).await?;
+  drop(tui);
+  daemon.shutdown().await?;
+  Ok(())
+}
+
+async fn targeted_session_commands(tui: &mut Tui, daemon: &TestDaemon) -> Result<()> {
+  command(tui, "rename-session -t manager-beta beta-renamed").await?;
+  command(tui, "kill-session -t beta-renamed").await?;
+  tui
+    .wait_screen(
+      "command termination remains distinct from pane kill",
+      |screen| screen.contains("Terminate session beta-renamed") && screen.contains("ALL panes"),
+    )
+    .await?;
+  tui.send(b"\x1b")?;
+  tui
+    .wait_screen(
+      "targeted termination cancellation returns to attached shell",
+      |screen| {
+        !screen.contains("Terminate session beta-renamed")
+          && footer(screen).contains("ctmux [manager-alpha]")
+      },
+    )
+    .await?;
+  input_response(tui, "alpha", "targeted-kill-cancelled").await?;
+  assert_eq!(ordered_sessions(daemon).await?.len(), 2);
+  Ok(())
+}

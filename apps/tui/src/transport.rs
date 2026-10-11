@@ -15,6 +15,12 @@ pub type ConnectFuture<'a> = Pin<Box<dyn Future<Output = Result<Stream>> + Send 
 pub trait Transport: Sync {
   fn connect(&self) -> ConnectFuture<'_>;
   fn archive_key(&self) -> String;
+  /// Human-readable selected host or endpoint, shown in session management.
+  fn label(&self) -> &str;
+  /// Remote session creation leaves cwd unset so the remote shell uses its home.
+  fn is_local(&self) -> bool {
+    true
+  }
   /// Authentication and configuration failures suspend automatic retries.
   /// Transports without a classification retain the existing retry behavior.
   fn is_retryable(&self, _error: &crate::Error) -> bool {
@@ -36,6 +42,10 @@ pub trait Transport: Sync {
 pub struct LocalTransport(pub PathBuf);
 
 impl Transport for LocalTransport {
+  fn label(&self) -> &'static str {
+    "local"
+  }
+
   fn connect(&self) -> ConnectFuture<'_> {
     Box::pin(
       async move { Ok(Box::new(ctmux_ipc::connect_or_start_daemon(&self.0).await?) as Stream) },

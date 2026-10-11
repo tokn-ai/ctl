@@ -23,6 +23,7 @@ impl Event {
       Self::IdentityRemove => "Remove SSH identity",
       Self::IdentityInventory => "Inspect SSH identities",
       Self::SessionCreate => "Create session",
+      Self::SessionRename => "Rename session",
       Self::SessionTerminate => "Terminate session",
       Self::SessionMerge => "Merge sessions",
       Self::PaneSplit => "Split pane",

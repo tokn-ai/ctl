@@ -148,4 +148,17 @@ mod tests {
       Some(Command::Attach { session: Some(session), raw: true, .. }) if session == "work")
     );
   }
+
+  #[test]
+  fn rename_requires_an_explicit_target_and_a_new_name() {
+    for command in ["rename", "rename-session"] {
+      let arguments =
+        Arguments::try_parse_from(["ctmux", command, "-t", "work", "review"]).unwrap();
+      assert!(
+        matches!(arguments.command, Some(Command::Rename { target, name }) if target == "work" && name == "review")
+      );
+      assert!(Arguments::try_parse_from(["ctmux", command, "review"]).is_err());
+      assert!(Arguments::try_parse_from(["ctmux", command, "-t", "work"]).is_err());
+    }
+  }
 }

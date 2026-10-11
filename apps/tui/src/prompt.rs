@@ -17,6 +17,8 @@ const COMMAND_NAMES: &[&str] = &[
   "new-session",
   "switch-client",
   "list-sessions",
+  "rename-session",
+  "kill-session",
   "kill-pane",
   "copy-mode",
   "paste-buffer",
@@ -46,13 +48,21 @@ pub(crate) struct Prompt {
   history_index: Option<usize>,
   draft: String,
   draft_cursor: usize,
+  command_mode: bool,
 }
 
 impl Prompt {
   pub fn open(&mut self) {
+    self.open_text("");
+    self.command_mode = true;
+  }
+
+  /// Edit a literal name without command completion or command history.
+  pub fn open_text(&mut self, text: &str) {
     self.active = true;
-    self.text.clear();
-    self.cursor = 0;
+    self.text = text.into();
+    self.cursor = self.text.len();
+    self.command_mode = false;
     self.history_index = None;
     self.draft.clear();
     self.draft_cursor = 0;
@@ -86,9 +96,9 @@ impl Prompt {
         self.remove(previous, self.cursor);
       }
       KeyCode::Delete => self.remove(self.cursor, next_boundary(&self.text, self.cursor)),
-      KeyCode::Up => self.previous_history(),
-      KeyCode::Down => self.next_history(),
-      KeyCode::Tab => self.complete(),
+      KeyCode::Up if self.command_mode => self.previous_history(),
+      KeyCode::Down if self.command_mode => self.next_history(),
+      KeyCode::Tab if self.command_mode => self.complete(),
       KeyCode::Char(ch) if !ch.is_control() => self.insert(&ch.to_string()),
       _ => {}
     }
@@ -181,7 +191,8 @@ impl Prompt {
   fn submit(&mut self) -> Event {
     self.active = false;
     self.history_index = None;
-    if !self.text.trim().is_empty() && self.history.back() != Some(&self.text) {
+    if self.command_mode && !self.text.trim().is_empty() && self.history.back() != Some(&self.text)
+    {
       self.history.push_back(self.text.clone());
       if self.history.len() > MAX_HISTORY {
         self.history.pop_front();
@@ -336,6 +347,11 @@ pub(crate) enum Command {
   Action(Action),
   NewSession(Option<String>),
   SwitchSession(String),
+  RenameSession {
+    target: Option<String>,
+    name: String,
+  },
+  KillSession(Option<String>),
   SelectPane(usize),
   BreakPane {
     name: Option<String>,
@@ -395,6 +411,34 @@ pub(crate) fn parse(text: &str) -> Result<Command, String> {
       ["-t", name] if !name.is_empty() => Ok(Command::SwitchSession((*name).into())),
       _ => Err(usage("switch-client -n|-p|-l|-t NAME")),
     },
+    "rename-session" => match args
+      .iter()
+      .map(String::as_str)
+      .collect::<Vec<_>>()
+      .as_slice()
+    {
+      [name] if !name.is_empty() && !name.starts_with('-') => Ok(Command::RenameSession {
+        target: None,
+        name: (*name).into(),
+      }),
+      ["-t", target, name] if !target.is_empty() && !name.is_empty() => {
+        Ok(Command::RenameSession {
+          target: Some((*target).into()),
+          name: (*name).into(),
+        })
+      }
+      _ => Err(usage("rename-session [-t NAME_OR_ID] NAME")),
+    },
+    "kill-session" => match args
+      .iter()
+      .map(String::as_str)
+      .collect::<Vec<_>>()
+      .as_slice()
+    {
+      [] => Ok(Command::KillSession(None)),
+      ["-t", target] if !target.is_empty() => Ok(Command::KillSession(Some((*target).into()))),
+      _ => Err(usage("kill-session [-t NAME_OR_ID]")),
+    },
     "copy-mode" => match args
       .iter()
       .map(String::as_str)
@@ -421,6 +465,8 @@ fn command_name(name: &str) -> Option<&'static str> {
     "new-session" | "new" => "new-session",
     "switch-client" | "switchc" => "switch-client",
     "list-sessions" | "ls" => "list-sessions",
+    "rename-session" | "rename" => "rename-session",
+    "kill-session" | "kill" => "kill-session",
     "kill-pane" | "killp" => "kill-pane",
     "copy-mode" => "copy-mode",
     "paste-buffer" | "pasteb" => "paste-buffer",
@@ -1169,5 +1215,51 @@ mod tests {
     assert_eq!(prompt.history.len(), 1);
     prompt.paste("ignored");
     assert_eq!(prompt.text, "");
+  }
+
+  #[test]
+  fn session_management_commands_accept_literal_names_and_exact_targets() {
+    assert_eq!(
+      parse("rename-session 'my work'"),
+      Ok(Command::RenameSession {
+        target: None,
+        name: "my work".into(),
+      })
+    );
+    assert_eq!(
+      parse("rename -t old 'new work'"),
+      Ok(Command::RenameSession {
+        target: Some("old".into()),
+        name: "new work".into(),
+      })
+    );
+    assert_eq!(parse("kill-session"), Ok(Command::KillSession(None)));
+    assert_eq!(
+      parse("kill -t 'my work'"),
+      Ok(Command::KillSession(Some("my work".into())))
+    );
+    for command in [
+      "rename-session",
+      "rename -t target",
+      "rename one two",
+      "kill -a",
+      "kill -t",
+      "kill one",
+      "kill -t one two",
+    ] {
+      assert!(parse(command).is_err(), "{command}");
+    }
+  }
+
+  #[test]
+  fn literal_name_entry_does_not_complete_commands_or_reuse_their_history() {
+    let mut prompt = Prompt::default();
+    enter(&mut prompt, "list-sessions");
+    prompt.open_text("new");
+    prompt.key(key(KeyCode::Tab));
+    prompt.key(key(KeyCode::Up));
+    assert_eq!(prompt.text, "new");
+    assert_eq!(prompt.key(key(KeyCode::Enter)), Event::Submit("new".into()));
+    assert_eq!(prompt.history, ["list-sessions"]);
   }
 }

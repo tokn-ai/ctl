@@ -85,6 +85,9 @@ enum Command {
     /// Attach to this named session, creating it if absent.
     #[arg(long, short = 's', conflicts_with = "plain")]
     session: Option<String>,
+    /// Pick an existing session, creating one only when none are running.
+    #[arg(long, conflicts_with_all = ["session", "plain", "cwd"])]
+    resume: bool,
     /// Open an ordinary shell without ctmux.
     #[arg(long)]
     plain: bool,
@@ -300,6 +303,34 @@ mod tests {
   }
 
   #[test]
+  fn shell_resume_uses_the_selected_host_and_rejects_creation_flags() {
+    let arguments = Arguments::try_parse_from(["ctl", "-H", "work", "shell", "--resume"]).unwrap();
+    assert_eq!(arguments.host.as_deref(), Some("work"));
+    assert!(matches!(
+      arguments.command,
+      Command::Shell {
+        resume: true,
+        session: None,
+        plain: false,
+        cwd: None
+      }
+    ));
+    for conflicting in [
+      &["--session", "work"][..],
+      &["--plain"][..],
+      &["--cwd", "/tmp"][..],
+    ] {
+      let mut arguments = vec!["ctl", "shell", "--resume"];
+      arguments.extend_from_slice(conflicting);
+      assert!(Arguments::try_parse_from(arguments).is_err());
+    }
+    assert!(matches!(
+      Arguments::try_parse_from(["ctl", "shell"]).unwrap().command,
+      Command::Shell { resume: false, .. }
+    ));
+  }
+
+  #[test]
   fn host_flag_routes_the_same_ctmux_command_over_ssh() {
     let arguments = Arguments::try_parse_from([
       "ctl",
@@ -316,6 +347,27 @@ mod tests {
       Command::Ctmux {
         command: CtmuxCommand::Attach { session, .. }
       } if session.as_deref() == Some("development")
+    ));
+  }
+
+  #[test]
+  fn ctmux_rename_preserves_the_explicit_host_and_target() {
+    let arguments = Arguments::try_parse_from([
+      "ctl",
+      "-H",
+      "workstation",
+      "ctmux",
+      "rename",
+      "-t",
+      "development",
+      "review",
+    ])
+    .unwrap();
+    assert_eq!(arguments.host.as_deref(), Some("workstation"));
+    assert!(matches!(
+      arguments.command,
+      Command::Ctmux { command: CtmuxCommand::Rename { target, name } }
+        if target == "development" && name == "review"
     ));
   }
 

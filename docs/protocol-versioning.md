@@ -166,6 +166,20 @@ contracts, including existing stateless arrangement operations, retain their
 message shapes and behavior. Other named protocols and the product release
 version are unchanged.
 
+Session renaming advances `ctmux` from `1.1.19` (build 19) to `1.1.20`
+(build 20), retaining `1.0.13` and every published `1.1.14`–`1.1.19` contract.
+The additive one-shot `rename_session { session, name }` request returns
+`session_renamed { session }`. It changes the root name without changing the
+session/view/terminal IDs, running processes, layout, geometry, or leases. Name
+validation and uniqueness remain daemon-owned. Attached viewers receive the
+new name in the existing `view_snapshot` shape with an advanced view revision
+so delayed older snapshots cannot restore the old name. Renaming to the current
+name is a no-op. Clients require negotiated
+`1.1.20` before sending rename, and updated daemons reject rename on earlier
+selected contracts. Existing session operations keep their shapes and behavior.
+Other named protocols, product release versions, and storage schemas are
+unchanged.
+
 Storage schema versions are separate. Changing a protocol contract does not
 rename or migrate an on-disk schema.
 
@@ -176,9 +190,9 @@ The first handshake or control request contains an offer:
 ```json
 {
   "protocol": {
-    "build": 19,
-    "version": "1.1.19",
-    "supported_versions": ["1.0.13", "1.1.14", "1.1.15", "1.1.16", "1.1.17", "1.1.18", "1.1.19"]
+    "build": 20,
+    "version": "1.1.20",
+    "supported_versions": ["1.0.13", "1.1.14", "1.1.15", "1.1.16", "1.1.17", "1.1.18", "1.1.19", "1.1.20"]
   }
 }
 ```
@@ -192,7 +206,7 @@ older contract is selected; new servers preserve old-client messages and
 semantics. Optional features must be gated by that selected contract.
 
 Daemon status and session/task handshakes return actual advertisements, separately
-from the selected contract. A server can advertise `1.1.19` while one connection
+from the selected contract. A server can advertise `1.1.20` while one connection
 selects `1.0.13`; diagnostics must retain both facts.
 
 Every component's `--component-info` output declares the release mapping:

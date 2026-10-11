@@ -1,4 +1,8 @@
+pub mod alternate_screen;
 pub mod mouse;
+mod observer_state;
+
+pub use observer_state::ObserverStateError;
 
 use ctmux_proto::{LeaseKind, LeaseStatus, ServerMessage};
 use std::collections::VecDeque;

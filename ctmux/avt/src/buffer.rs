@@ -7,6 +7,8 @@ use crate::cell::Cell;
 use crate::line::Line;
 use crate::pen::Pen;
 
+pub(crate) mod state;
+
 #[derive(Debug)]
 pub(crate) struct Buffer {
     lines: VecDeque<Line>,

@@ -4,6 +4,14 @@ use std::ops::Range;
 pub struct DirtyLines(Vec<bool>);
 
 impl DirtyLines {
+    pub(super) fn export_state(&self) -> Vec<bool> {
+        self.0.clone()
+    }
+
+    pub(super) fn from_state(state: Vec<bool>) -> Self {
+        Self(state)
+    }
+
     pub fn new(len: usize) -> Self {
         DirtyLines(vec![true; len])
     }

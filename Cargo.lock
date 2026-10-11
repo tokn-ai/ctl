@@ -986,6 +986,8 @@ dependencies = [
  "proptest",
  "rand 0.7.3",
  "rgb",
+ "serde",
+ "serde_json",
  "tempfile",
  "unicode-width 0.1.14",
 ]
@@ -1027,6 +1029,8 @@ name = "ctmux-core"
 version = "0.1.0"
 dependencies = [
  "ctmux-proto",
+ "serde",
+ "serde_json",
  "thiserror 2.0.20",
 ]
 
@@ -1105,6 +1109,7 @@ dependencies = [
  "nix 0.29.0",
  "portable-pty",
  "rustix",
+ "serde",
  "serde_json",
  "sha2",
  "thiserror 2.0.20",

@@ -19,6 +19,10 @@ install verified complete builds locally or remotely, then reconnect or restart
 through separate explicit actions. This extends Proposal 0002's original
 maintenance exclusion with narrow commands, never an endpoint relay.
 
+[Proposal 0018](0018-daemon-hotreload.md) investigates full daemon replacement
+while preserving live work. It does not change this proposal's implemented,
+destructive restart behavior or make current owners support hotreload.
+
 ## Motivation
 
 A product version cannot identify a running development binary or prove wire

@@ -1,6 +1,7 @@
 // Modified for ctmux: support an opt-in primary cursor-line resize policy.
 mod cursor;
 mod dirty_lines;
+pub(crate) mod state;
 
 pub use self::cursor::Cursor;
 use self::dirty_lines::DirtyLines;
@@ -44,19 +45,22 @@ pub struct Terminal {
     reflow_cursor_line: bool,
 }
 
-#[derive(Debug, Copy, Clone, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum BufferType {
     Primary,
     Alternate,
 }
 
-#[derive(Debug, Copy, Clone, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum CursorKeysMode {
     Normal,
     Application,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SavedCtx {
     pub cursor_col: usize,
     pub cursor_row: usize,

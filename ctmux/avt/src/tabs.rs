@@ -2,6 +2,14 @@
 pub(crate) struct Tabs(Vec<usize>);
 
 impl Tabs {
+    pub(crate) fn export_state(&self) -> Vec<usize> {
+        self.0.clone()
+    }
+
+    pub(crate) fn from_state(state: Vec<usize>) -> Self {
+        Self(state)
+    }
+
     pub fn new(cols: usize) -> Self {
         let mut tabs = vec![];
 

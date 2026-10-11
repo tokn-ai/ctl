@@ -5,6 +5,9 @@ use crate::charset::Charset;
 use crate::color::Color;
 use std::fmt::Display;
 
+mod state;
+pub use self::state::ParserState;
+
 const PARAMS_LEN: usize = 32;
 
 #[derive(Debug, Default)]
@@ -15,7 +18,8 @@ pub struct Parser {
     intermediate: Option<char>,
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum State {
     #[default]
     Ground,

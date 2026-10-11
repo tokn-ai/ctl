@@ -114,6 +114,29 @@ impl<C: Context> Clone for Attempt<C> {
 }
 
 impl<C: Context> Windows<C> {
+  /// Nonsecret selectors from successful connections, for explicit wake consent.
+  pub(crate) fn approved_selectors(&self) -> Vec<(String, Instant, Vec<String>)> {
+    self
+      .registry
+      .lock()
+      .unwrap()
+      .windows
+      .iter()
+      .map(|(scope, window)| {
+        (
+          scope.clone(),
+          window.expires,
+          window
+            .contexts
+            .iter()
+            .filter(|(_, context)| context.is_valid())
+            .map(|(selector, _)| selector.clone())
+            .collect(),
+        )
+      })
+      .collect()
+  }
+
   pub(crate) fn begin(self: &Arc<Self>, scope: String, now: Instant) -> Attempt<C> {
     self.expire(now);
     let mut registry = self.registry.lock().unwrap();
@@ -433,7 +456,7 @@ impl<C: Context> Attempt<C> {
     revoked
   }
 
-  /// Only SSH success commits permission. Previously approved windows retain
+  /// SSH success or explicit wake consent commits permission. Approved windows retain
   /// their original deadline; neither reads nor successful reconnects renew it.
   pub(crate) fn connected(&self, now: Instant) {
     self.0.owner.expire(now);
@@ -512,6 +535,51 @@ mod tests {
   use super::*;
   use std::cell::Cell;
   use std::sync::atomic::{AtomicBool, Ordering};
+
+  #[test]
+  fn remembered_selectors_come_only_from_committed_used_contexts() {
+    let windows = Arc::new(Windows::<Fake>::default());
+    let now = Instant::now();
+    let attempt = windows.begin("host".into(), now);
+    for (selector, present) in [("used", true), ("missing", false)] {
+      attempt
+        .read(
+          selector,
+          true,
+          || Ok::<_, ()>(Fake::default()),
+          || true,
+          || (),
+          |_, _| Ok(present.then_some(())),
+        )
+        .unwrap();
+    }
+    assert_eq!(windows.approved_selectors(), Vec::new());
+    attempt.connected(now);
+    let remembered = windows.approved_selectors();
+    assert_eq!(
+      remembered,
+      vec![("host".into(), now + WINDOW, vec!["used".into()])]
+    );
+    windows.expire(now + WINDOW);
+    assert_eq!(windows.approved_selectors(), Vec::new());
+    // Keeping these selectors separately cannot extend the expired native grant.
+    assert_eq!(remembered[0].2, vec!["used"]);
+    assert!(
+      attempt
+        .read(
+          "used",
+          false,
+          || panic!("the expired context must not be replaced"),
+          || true,
+          || (),
+          |_, _| -> Result<Option<()>, ()> {
+            panic!("the expired context must not access a credential")
+          },
+        )
+        .is_err()
+    );
+    assert!(attempt.reuse_failed());
+  }
 
   #[derive(Default)]
   struct Fake(AtomicBool);

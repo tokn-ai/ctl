@@ -10,6 +10,7 @@ use super::RequestError;
 #[derive(Clone, Copy, Default)]
 struct Revision {
   generation: u64,
+  authorization: u64,
   paused: bool,
   authentication_required: bool,
 }
@@ -31,10 +32,11 @@ impl Default for TargetLifecycle {
 impl TargetLifecycle {
   pub(super) fn attempt(&self) -> TargetAttempt {
     let changes = self.revision.subscribe();
-    let generation = changes.borrow().generation;
+    let revision = *changes.borrow();
     TargetAttempt {
       changes,
-      generation,
+      generation: revision.generation,
+      authorization: revision.authorization,
     }
   }
 
@@ -47,13 +49,15 @@ impl TargetLifecycle {
 
   /// Only an explicit connect that arrived after the latest disconnect can
   /// resume this target. Queued older connects cannot undo the user's pause.
-  pub(super) fn resume(&self, attempt: &TargetAttempt) -> Result<(), RequestError> {
+  pub(super) fn resume(&self, attempt: &mut TargetAttempt) -> Result<(), RequestError> {
     let mut current = false;
     self.revision.send_if_modified(|revision| {
       current = revision.generation == attempt.generation;
-      if current && (revision.paused || revision.authentication_required) {
+      if current {
         revision.paused = false;
         revision.authentication_required = false;
+        revision.authorization = revision.authorization.wrapping_add(1);
+        attempt.authorization = revision.authorization;
         true
       } else {
         false
@@ -89,17 +93,46 @@ impl TargetLifecycle {
   }
 
   /// A quiet attempt cannot obtain fresh authorization. Do not let queued or
-  /// later background requests repeat it until an explicit connect resumes.
-  pub(super) fn require_authentication(&self) {
-    self
-      .revision
-      .send_modify(|revision| revision.authentication_required = true);
+  /// later background requests repeat it until connect or wake consent resumes.
+  /// A failure from before newer consent must not restore the old blocker.
+  pub(super) fn require_authentication(&self, attempt: &TargetAttempt) {
+    self.revision.send_if_modified(|revision| {
+      if !revision.paused
+        && revision.generation == attempt.generation
+        && revision.authorization == attempt.authorization
+        && !revision.authentication_required
+      {
+        revision.authentication_required = true;
+        true
+      } else {
+        false
+      }
+    });
+  }
+
+  /// Wake consent resumes quiet attempts, but never undoes an explicit pause.
+  #[cfg(any(target_os = "macos", test))]
+  pub(super) fn authorized(&self, attempt: &TargetAttempt) -> bool {
+    let mut current = false;
+    self.revision.send_if_modified(|revision| {
+      current = !revision.paused && revision.generation == attempt.generation;
+      if current {
+        revision.authentication_required = false;
+        revision.authorization = revision.authorization.wrapping_add(1);
+        true
+      } else {
+        false
+      }
+    });
+    current
   }
 }
 
+#[derive(Clone)]
 pub(super) struct TargetAttempt {
   changes: watch::Receiver<Revision>,
   generation: u64,
+  authorization: u64,
 }
 
 pub(super) enum AttemptStatus {
@@ -140,10 +173,60 @@ mod tests {
   use super::*;
   use std::sync::Arc;
 
+  #[test]
+  fn wake_consent_clears_authentication_without_resuming_a_manual_disconnect() {
+    let lifecycle = TargetLifecycle::default();
+    let attempt = lifecycle.attempt();
+    lifecycle.require_authentication(&attempt);
+    assert!(lifecycle.authorized(&attempt));
+    assert!(lifecycle.allow_background_connection().is_ok());
+    lifecycle.pause();
+    assert!(!lifecycle.authorized(&attempt));
+    assert!(!lifecycle.authorized(&lifecycle.attempt()));
+    assert!(lifecycle.is_paused());
+  }
+
+  #[test]
+  fn older_quiet_failure_cannot_revoke_newer_wake_consent() {
+    for initially_blocked in [false, true] {
+      let lifecycle = TargetLifecycle::default();
+      let old = lifecycle.attempt();
+      if initially_blocked {
+        lifecycle.require_authentication(&old);
+      }
+      assert!(lifecycle.authorized(&lifecycle.attempt()));
+      // The older startup can return after wake consent has been published.
+      lifecycle.require_authentication(&old);
+      assert!(lifecycle.allow_background_connection().is_ok());
+      // A genuinely new failure must still stop background retries.
+      lifecycle.require_authentication(&lifecycle.attempt());
+      assert!(matches!(
+        lifecycle.allow_background_connection(),
+        Err(RequestError::AuthenticationRequired)
+      ));
+    }
+  }
+
+  #[test]
+  fn explicit_connect_replaces_old_authorization_but_can_block_its_own_failure() {
+    let lifecycle = TargetLifecycle::default();
+    let old = lifecycle.attempt();
+    lifecycle.require_authentication(&old);
+    let mut fresh = lifecycle.attempt();
+    lifecycle.resume(&mut fresh).unwrap();
+    lifecycle.require_authentication(&old);
+    assert!(lifecycle.allow_background_connection().is_ok());
+    lifecycle.require_authentication(&fresh);
+    assert!(matches!(
+      lifecycle.allow_background_connection(),
+      Err(RequestError::AuthenticationRequired)
+    ));
+  }
+
   #[tokio::test]
   async fn authentication_required_stops_background_retries_until_explicit_connect() {
     let lifecycle = TargetLifecycle::default();
-    lifecycle.require_authentication();
+    lifecycle.require_authentication(&lifecycle.attempt());
     for _ in 0..3 {
       assert!(matches!(
         lifecycle.allow_background_connection(),
@@ -151,9 +234,9 @@ mod tests {
       ));
     }
     assert!(!lifecycle.is_paused());
-    lifecycle.resume(&lifecycle.attempt()).unwrap();
+    lifecycle.resume(&mut lifecycle.attempt()).unwrap();
     assert!(lifecycle.allow_background_connection().is_ok());
-    lifecycle.require_authentication();
+    lifecycle.require_authentication(&lifecycle.attempt());
     lifecycle.pause();
     assert!(matches!(
       lifecycle.allow_background_connection(),
@@ -179,7 +262,7 @@ mod tests {
     ));
     drop(guard);
     assert!(matches!(
-      lifecycle.resume(&queued),
+      lifecycle.resume(&mut queued),
       Err(RequestError::HostDisconnected)
     ));
     assert!(lifecycle.is_paused());
@@ -192,7 +275,7 @@ mod tests {
     lifecycle.pause();
     let mut fresh = lifecycle.attempt();
     let _guard = fresh.run(lifecycle.lock.lock()).await.unwrap();
-    lifecycle.resume(&fresh).unwrap();
+    lifecycle.resume(&mut fresh).unwrap();
     assert!(!lifecycle.is_paused());
     assert!(matches!(
       stale.run(async { true }).await,

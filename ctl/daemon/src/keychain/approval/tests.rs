@@ -12,19 +12,23 @@ fn unavailable_approval_is_a_policy_failure_without_an_os_status() {
 /// Exercise the real retained-approval policy without a Keychain query or
 /// authentication evaluation. Native context creation itself cannot display UI.
 pub(super) fn failed_retained_attempt() -> Attempt {
-  let windows = Arc::new(Windows::<AuthenticationContext>::default());
+  let windows = Arc::new(Windows::<Grant<AuthenticationContext>>::default());
   let now = Instant::now();
   let initial = windows.begin("fixture-host".into(), now);
   let authorized = initial
     .read(
       "fixture-identity",
       true,
-      || AuthenticationContext::new().map_err(Error::from),
+      || {
+        AuthenticationContext::new()
+          .map(|context| Grant::new(Arc::new(context), true))
+          .map_err(Error::from)
+      },
       || initial.valid(),
       unavailable,
       |context, decision| {
         assert_eq!(decision, ReadDecision::FreshInteractive);
-        assert!(!context.is_invalidated());
+        assert!(!context.native.is_invalidated());
         Ok(Some(()))
       },
     )

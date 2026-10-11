@@ -211,7 +211,7 @@ metadata through its local-control handshake, with a data-handshake fallback for
 legacy owners. ctl-taskd accepts a passive control metadata query. Standalone
 `--component-info` prints JSON for helper executables without starting services.
 
-ctld metadata reports data contract `1.1.15` (and retained `1.0.12`, `1.1.13`, and `1.1.14`), lifecycle
+ctld metadata reports data contract `1.1.16` (and retained `1.0.12`, `1.1.13`, `1.1.14`, and `1.1.15`), lifecycle
 contract `1.0.1`, and helper contract `1.1.5` (and retained `1.0.1`, `1.1.2`, `1.1.3`, and `1.1.4`). Remote VPN
 routes are gated by the selected broker contract and the helper advertisement.
 The helper API covers credential, identity, askpass, and proxy helper modes.
@@ -481,9 +481,9 @@ Only `ctld` links Keychain code. Password entries retain their host-route/prompt
 scope and are answered directly to the matching OpenSSH askpass process. New
 identity passphrases use a separate namespace bound to the canonical key path,
 file-content digest, and locally verified public identity. Preparation lists
-public identities without reading passphrases. Only a signature request for an
-eligible configured key triggers an exact protected-item read, current-file
-check, and local unlock. The resulting public key must match the requested key
+public identities without reading passphrases. During ordinary SSH establishment,
+a signature request for an eligible configured key triggers an exact protected-item
+read, current-file check, and local unlock. The resulting public key must match the requested key
 before the temporary agent signs. Existing agent connections retain their
 session bindings, and lazy local connections replay their own binding history;
 the temporary agent and unlock state live only for that connection attempt.
@@ -516,6 +516,21 @@ Broker contract `1.1.14` adds quiet establishment for background reconnects:
 unavailable authorization returns `authentication_required` without displaying
 UI. Earlier broker contracts permit only passive master reuse during background
 recovery, while ordinary interactive connection requests retain their behavior.
+
+Broker contract `1.1.16` adds a separate socket lease for each active `ctl` TUI
+shell route. After full wake and unlock, ctld requests one grouped native
+authorization for eligible live routes from before sleep. It selects exact saved
+bindings using remembered successful selectors or passive metadata discovery,
+then reads and immediately discards protected values without unlocking keys or
+starting SSH. One shared native context authorizes subsequent quiet reads, while
+each host retains its own revocable grant. Current session, credential revision,
+SSH configuration, identity files, and trust scope fence publication. A late
+failure from an older connection attempt cannot replace newer consent.
+Successful authorization resumes authentication-blocked TUI shells; cancellation
+ends the batch without another automatic prompt in that wake cycle. DarkWake,
+closed shells, configuration failures, and manual disconnects do not start or
+resume this flow. Desktop embedded terminals retain their existing Connect host
+flow.
 
 The desktop **Credentials** page lists identity-file metadata and saved ctmux
 credential attributes. Its bounded one-shot `ctld --credential-request` and

@@ -75,6 +75,20 @@ connection. Earlier contracts still close after one request. The CLI shares
 one broker connection across terminal and task channel preparation, discarding
 it on errors or cancellation. Wire message fields are unchanged.
 
+Live shell wake recovery advances `ctld` from `1.1.15` (build 15) to `1.1.16`
+(build 16), retaining `1.0.12`, `1.1.13`, `1.1.14`, and `1.1.15`. The additive
+`watch_recovery` request registers an exact SSH target for the lifetime of a
+dedicated streaming socket. The daemon acknowledges `recovery_registered` and
+later sends `recovery_authorized` with a `generation` after successful grouped
+wake authorization. This channel accepts no further requests and closes its
+registration on EOF. It is separate from sequential broker requests and carries
+neither saved secrets nor native authorization contexts. Clients require
+negotiated `1.1.16` before sending it; earlier brokers retain ordinary quiet
+reconnect behavior without automatic wake authorization. Existing operation
+shapes and semantics remain supported. The independent helper contract stays
+`1.1.5` (build 5), lifecycle stays `1.0.1` (build 1), and the product release
+version is unchanged by this protocol addition.
+
 Quiet SSH establishment advances ctld from `1.1.13` (build 13) to `1.1.14`
 (build 14), retaining `1.0.12` and `1.1.13`. The additive `ensure_master_quiet`
 request may reuse a master or create one without Keychain authentication UI,

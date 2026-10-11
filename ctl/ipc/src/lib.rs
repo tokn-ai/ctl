@@ -214,17 +214,19 @@ fn register_provider(provider: DaemonProvider) -> io::Result<()> {
 }
 
 /// Internal evolution counter; advancing it alone does not publish a contract.
-pub const PROTOCOL_BUILD: u16 = 15;
+pub const PROTOCOL_BUILD: u16 = 16;
 pub const CONTRACT_V1_0_12: ProtocolVersion = ProtocolVersion::new(1, 0, 12);
 pub const CONTRACT_V1_1_13: ProtocolVersion = ProtocolVersion::new(1, 1, 13);
 pub const CONTRACT_V1_1_14: ProtocolVersion = ProtocolVersion::new(1, 1, 14);
 pub const CONTRACT_V1_1_15: ProtocolVersion = ProtocolVersion::new(1, 1, 15);
-pub const PROTOCOL_VERSION: ProtocolVersion = CONTRACT_V1_1_15;
+pub const CONTRACT_V1_1_16: ProtocolVersion = ProtocolVersion::new(1, 1, 16);
+pub const PROTOCOL_VERSION: ProtocolVersion = CONTRACT_V1_1_16;
 pub const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[
   CONTRACT_V1_0_12,
   CONTRACT_V1_1_13,
   CONTRACT_V1_1_14,
   CONTRACT_V1_1_15,
+  CONTRACT_V1_1_16,
 ];
 
 #[must_use]
@@ -404,6 +406,12 @@ pub fn quiet_master_supported(protocol: ProtocolVersion) -> bool {
 #[must_use]
 pub fn persistent_requests_supported(protocol: ProtocolVersion) -> bool {
   SUPPORTED_PROTOCOL_VERSIONS.contains(&protocol) && protocol >= CONTRACT_V1_1_15
+}
+
+/// Live frontends can register for grouped wake authorization from 1.1.16.
+#[must_use]
+pub fn recovery_watch_supported(protocol: ProtocolVersion) -> bool {
+  SUPPORTED_PROTOCOL_VERSIONS.contains(&protocol) && protocol >= CONTRACT_V1_1_16
 }
 
 /// Resolve a remote VPN's SSH owner using the exact prefix that reaches it.
@@ -636,6 +644,10 @@ pub enum ClientMessage {
   ConnectionStatus {
     target: SshTarget,
   },
+  /// Register an active frontend until this dedicated streaming socket closes.
+  WatchRecovery {
+    target: SshTarget,
+  },
   DisconnectMaster {
     target: SshTarget,
   },
@@ -686,6 +698,10 @@ pub enum ServerMessage {
     control_path: PathBuf,
   },
   AuthenticationRequired,
+  RecoveryRegistered,
+  RecoveryAuthorized {
+    generation: u64,
+  },
   MasterDisconnected,
   ConnectionStatus {
     connected: bool,
@@ -1667,6 +1683,9 @@ mod tests {
       1, 2, 16
     )));
     assert!(!quiet_master_supported(ProtocolVersion::new(1, 2, 15)));
+    assert!(!recovery_watch_supported(CONTRACT_V1_1_15));
+    assert!(recovery_watch_supported(CONTRACT_V1_1_16));
+    assert!(!recovery_watch_supported(ProtocolVersion::new(1, 2, 16)));
     for contract in SUPPORTED_PROTOCOL_VERSIONS {
       assert_eq!(protocol_offer().negotiate(&[*contract]), Some(*contract));
     }

@@ -35,6 +35,20 @@ pub struct ConnectionClient {
 }
 
 impl ConnectionClient {
+  /// Find the exact target's existing SSH master without starting ctld, opening
+  /// an SSH connection, or preparing route prerequisites. Disconnects remain errors.
+  /// # Errors
+  /// Returns transport, negotiation, observation, or daemon errors.
+  pub async fn existing_master(&self, target: SshTarget) -> Result<Option<ConnectionReady>, Error> {
+    let response = tokio::time::timeout(
+      std::time::Duration::from_secs(15),
+      self.exchange(ClientMessage::MasterStatus { target }, true, false),
+    )
+    .await
+    .map_err(|_| Error::StatusTimeout)??;
+    existing_master_response(response)
+  }
+
   /// Observe SSH without starting ctld or establishing a master.
   /// # Errors
   /// Returns transport, negotiation, or invalid response errors.
@@ -158,6 +172,17 @@ impl ConnectionClient {
       *slot = Some((stream, protocol));
     }
     result.map(|control_path| ConnectionReady { control_path })
+  }
+}
+
+fn existing_master_response(
+  response: Option<ServerMessage>,
+) -> Result<Option<ConnectionReady>, Error> {
+  match response {
+    Some(ServerMessage::MasterReady { control_path }) => Ok(Some(ConnectionReady { control_path })),
+    None | Some(ServerMessage::AuthenticationRequired) => Ok(None),
+    Some(ServerMessage::Error { code, message }) => Err(Error::Daemon { code, message }),
+    _ => Err(Error::UnexpectedResponse),
   }
 }
 
@@ -388,6 +413,79 @@ pub enum Error {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[tokio::test]
+  async fn existing_master_observes_the_exact_route_on_every_supported_contract() {
+    for protocol in ctl_ipc::SUPPORTED_PROTOCOL_VERSIONS.iter().copied() {
+      let client = ConnectionClient::default();
+      let (stream, mut server) = ctl_ipc::Stream::pair().unwrap();
+      *client.connection.lock().await = Some((stream, protocol));
+      let mut target = fixture_target();
+      target.hostname = Some("selected.example.invalid".into());
+      target.user = Some("selected-account".into());
+      target.port = Some(2222);
+      let expected = target.clone();
+      let peer = tokio::spawn(async move {
+        assert!(matches!(
+          ctl_ipc::read_frame::<_, ClientMessage>(&mut server).await.unwrap(),
+          Some(ClientMessage::MasterStatus { target }) if target == expected
+        ));
+        ctl_ipc::write_frame(
+          &mut server,
+          &ServerMessage::MasterReady {
+            control_path: "/fixture/exact-selected-master".into(),
+          },
+        )
+        .await
+        .unwrap();
+        assert!(
+          ctl_ipc::read_frame::<_, ClientMessage>(&mut server)
+            .await
+            .unwrap()
+            .is_none()
+        );
+      });
+      let ready = client.existing_master(target).await.unwrap().unwrap();
+      assert_eq!(
+        ready.control_path,
+        PathBuf::from("/fixture/exact-selected-master")
+      );
+      drop(client);
+      peer.await.unwrap();
+    }
+  }
+
+  #[test]
+  fn existing_master_preserves_missing_pause_and_observation_errors() {
+    assert!(existing_master_response(None).unwrap().is_none());
+    assert!(
+      existing_master_response(Some(ServerMessage::AuthenticationRequired))
+        .unwrap()
+        .is_none()
+    );
+    for code in [
+      "ssh_host_disconnected",
+      "ssh_status_unknown",
+      "ssh_config_error",
+    ] {
+      assert!(matches!(
+        existing_master_response(Some(ServerMessage::Error {
+          code: code.into(),
+          message: "must not establish a connection".into(),
+        })),
+        Err(Error::Daemon { code: actual, .. }) if actual == code
+      ));
+    }
+    assert!(matches!(
+      existing_master_response(Some(ServerMessage::Prompt {
+        prompt_id: "unexpected".into(),
+        kind: PromptKind::Secret,
+        message: "must not prompt".into(),
+        warning: None,
+      })),
+      Err(Error::UnexpectedResponse)
+    ));
+  }
 
   #[tokio::test]
   async fn disconnect_can_reach_the_broker_while_authentication_owns_the_socket() {

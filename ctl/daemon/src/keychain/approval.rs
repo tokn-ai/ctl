@@ -1,6 +1,7 @@
 //! Reuse OS authorization, never passwords or decrypted private keys.
 
-use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Instant;
 
 use ctl_core::observability::ConnectionContext;
@@ -9,10 +10,13 @@ use ctl_keychain_client::{
 };
 
 use super::{Error, operation};
+use crate::approval_context::{Grant, Shared};
 use crate::reconnect_approval::{self, Windows};
 
+pub(crate) mod selectors;
 #[cfg(test)]
 mod tests;
+mod wake;
 
 pub(crate) use crate::reconnect_approval::ReadDecision;
 
@@ -42,7 +46,9 @@ impl reconnect_approval::Context for AuthenticationContext {
 }
 
 pub(crate) struct Approvals {
-  windows: Arc<Windows<AuthenticationContext>>,
+  windows: Arc<Windows<Grant<AuthenticationContext>>>,
+  native: Arc<Mutex<Vec<Weak<AuthenticationContext>>>>,
+  known: Mutex<HashMap<String, (Instant, Vec<String>)>>,
   session: Arc<SessionState>,
   revision: Mutex<Option<String>>,
   observer: ApprovalObserver,
@@ -52,17 +58,21 @@ pub(crate) struct Approvals {
 impl Approvals {
   pub(crate) fn new(session: Arc<SessionState>, observer: ApprovalObserver) -> Arc<Self> {
     let windows = Arc::new(Windows::default());
+    let native = Arc::new(Mutex::new(Vec::new()));
+    let session_native = Arc::clone(&native);
     let weak = Arc::downgrade(&windows);
     let session_observer = Arc::clone(&observer);
     let subscription = session.subscribe(Arc::new(move || {
-      if let Some(windows) = weak.upgrade()
-        && windows.revoke(None)
-      {
+      let revoked = weak.upgrade().is_some_and(|windows| windows.revoke(None));
+      invalidate_native(&session_native);
+      if revoked {
         session_observer(ApprovalReason::SessionChanged, None);
       }
     }));
     Arc::new(Self {
       windows,
+      native,
+      known: Mutex::default(),
       session,
       revision: Mutex::new(None),
       observer,
@@ -79,6 +89,8 @@ impl Approvals {
     // A concurrent begin must not match the new revision while old windows
     // are still available to inherit.
     let revoked = self.windows.revoke(None);
+    invalidate_native(&self.native);
+    self.known.lock().unwrap().clear();
     *previous = Some(revision.into());
     drop(previous);
     if revoked {
@@ -87,12 +99,22 @@ impl Approvals {
   }
 
   fn revoke(&self, reason: ApprovalReason) {
-    if self.windows.revoke(None) {
+    let revoked = self.windows.revoke(None);
+    invalidate_native(&self.native);
+    if !matches!(reason, ApprovalReason::SessionChanged) {
+      self.known.lock().unwrap().clear();
+    }
+    if revoked {
       (self.observer)(reason, None);
     }
   }
 
   pub(crate) fn revoke_target(&self, prefix: &str, connection: Option<&ConnectionContext>) {
+    self
+      .known
+      .lock()
+      .unwrap()
+      .retain(|scope, _| !scope.starts_with(prefix));
     if self.windows.revoke_prefix(prefix) {
       (self.observer)(ApprovalReason::Disconnect, connection);
     }
@@ -114,13 +136,73 @@ impl Approvals {
       Err(_) => self.revoke(ApprovalReason::RevisionUnavailable),
     }
   }
+
+  pub(crate) fn session(&self) -> &Arc<SessionState> {
+    &self.session
+  }
+
+  pub(crate) fn selectors(&self, scope: &str) -> Vec<String> {
+    self.expire();
+    self
+      .known
+      .lock()
+      .unwrap()
+      .get(scope)
+      .map_or_else(Vec::new, |(_, selectors)| selectors.clone())
+  }
+
+  fn remember(&self) {
+    let approved = self.windows.approved_selectors();
+    let mut known = self.known.lock().unwrap();
+    for (scope, expires, selectors) in approved {
+      if !selectors.is_empty() {
+        known.insert(scope, (expires, selectors));
+      }
+    }
+    // Keep the same bound as authorization windows even across sleep revocation.
+    while known.len() > 128 {
+      let oldest = known
+        .iter()
+        .min_by_key(|(_, (expires, _))| *expires)
+        .map(|(scope, _)| scope.clone())
+        .unwrap();
+      known.remove(&oldest);
+    }
+  }
+
+  fn context(&self) -> Result<Arc<AuthenticationContext>, Error> {
+    let context = Arc::new(AuthenticationContext::new()?);
+    let mut native = self.native.lock().unwrap();
+    native.retain(|context| context.strong_count() > 0);
+    native.push(Arc::downgrade(&context));
+    Ok(context)
+  }
+
+  pub(crate) fn wake_batch(&self) -> Result<Arc<Shared<AuthenticationContext>>, Error> {
+    let guard = operation::acquire()?;
+    self.check_revision(&guard.revision()?);
+    Ok(Shared::new(self.context()?))
+  }
+}
+
+fn invalidate_native(native: &Mutex<Vec<Weak<AuthenticationContext>>>) {
+  let mut native = native.lock().unwrap();
+  native.retain(|context| {
+    if let Some(context) = context.upgrade() {
+      context.invalidate();
+      true
+    } else {
+      false
+    }
+  });
 }
 
 /// Clones share one attempt, including late workers after an async cancellation.
 #[derive(Clone)]
 pub(crate) struct Attempt {
   approvals: Option<Arc<Approvals>>,
-  pending: Option<reconnect_approval::Attempt<AuthenticationContext>>,
+  pending: Option<reconnect_approval::Attempt<Grant<AuthenticationContext>>>,
+  wake: Option<Arc<Shared<AuthenticationContext>>>,
   revision: Option<String>,
   session_generation: u64,
   history: Option<Arc<ConnectionContext>>,
@@ -169,6 +251,7 @@ impl Attempt {
     Self {
       approvals: None,
       pending: None,
+      wake: None,
       revision: None,
       session_generation: 0,
       history: None,
@@ -213,11 +296,23 @@ impl Attempt {
     Self {
       approvals: Some(Arc::clone(approvals)),
       pending: Some(pending),
+      wake: None,
       revision: Some(revision),
       session_generation,
       history: Some(Arc::new(history)),
       interactive,
     }
+  }
+
+  pub(crate) fn for_wake(
+    mut self,
+    batch: Arc<Shared<AuthenticationContext>>,
+  ) -> Result<Self, Error> {
+    if self.pending.is_none() {
+      return Err(unavailable());
+    }
+    self.wake = Some(batch);
+    Ok(self)
   }
 
   fn valid(&self, guard: &operation::Guard) -> bool {
@@ -272,18 +367,38 @@ impl Attempt {
       .read(
         selector,
         self.interactive,
-        || AuthenticationContext::new().map_err(Error::from),
+        || {
+          if let Some(batch) = &self.wake {
+            Ok(Grant::new(Arc::clone(&batch.native), false))
+          } else {
+            Ok(Grant::new(
+              self.approvals.as_ref().ok_or_else(unavailable)?.context()?,
+              true,
+            ))
+          }
+        },
         || self.valid(guard),
         unavailable,
         |context, decision| {
-          read(
+          let decision = self.wake.as_ref().map_or(decision, |batch| {
+            batch.decision_for(&context.native, decision)
+          });
+          let result = read(
             Authentication::Context {
               reason,
-              context,
+              context: &context.native,
               allow_ui: decision.allow_ui(),
             },
             decision,
-          )
+          );
+          if let Some(batch) = &self.wake {
+            if matches!(&result, Ok(Some(_))) {
+              batch.succeeded_for(&context.native);
+            } else if !matches!(&result, Ok(Some(_))) {
+              batch.native.invalidate();
+            }
+          }
+          result
         },
       )
       .map_err(|failure| {
@@ -294,15 +409,20 @@ impl Attempt {
       })
   }
 
-  pub(crate) fn connected(&self) {
+  pub(crate) fn connected(&self) -> bool {
     let Ok(guard) = operation::acquire() else {
-      return;
+      return false;
     };
     if self.valid(&guard)
       && let Some(pending) = &self.pending
     {
       pending.connected(Instant::now());
+      if let Some(approvals) = &self.approvals {
+        approvals.remember();
+      }
+      return pending.valid();
     }
+    false
   }
 
   pub(crate) fn discard_cached(&self) {

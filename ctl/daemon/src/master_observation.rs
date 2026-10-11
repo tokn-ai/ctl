@@ -194,7 +194,7 @@ mod tests {
     let lifecycle = TargetLifecycle::default();
     let error = connection_status(&lifecycle, async {
       lifecycle.pause();
-      lifecycle.resume(&lifecycle.attempt()).unwrap();
+      lifecycle.resume(&mut lifecycle.attempt()).unwrap();
       Ok(true)
     })
     .await

@@ -27,6 +27,8 @@ pub mod connection;
 pub mod hosts;
 pub mod local_credentials;
 pub mod maintenance;
+#[cfg(unix)]
+pub mod recovery;
 pub mod remote_bundle;
 pub mod setup;
 mod ssh_install;

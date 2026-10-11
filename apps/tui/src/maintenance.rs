@@ -29,6 +29,7 @@ pub struct Reconnect {
 
 struct Pending<'a, T> {
   generation: u64,
+  recovery_generation: u64,
   transport: Option<&'a dyn Transport>,
   job: Job<'a, T>,
 }
@@ -43,6 +44,17 @@ pub struct Maintenance<'a> {
   reconnects: BTreeMap<String, Pending<'a, Pane>>,
   retry_after: BTreeMap<String, tokio::time::Instant>,
   blocked_reason: Option<String>,
+  authentication_block: Option<AuthenticationBlock<'a>>,
+}
+
+struct AuthenticationBlock<'a> {
+  transport: &'a dyn Transport,
+  generation: u64,
+}
+
+struct Block<'a> {
+  reason: String,
+  authentication: Option<AuthenticationBlock<'a>>,
 }
 
 pub struct Ready {
@@ -57,6 +69,7 @@ impl<'a> Maintenance<'a> {
     self.reconnects.clear();
     self.retry_after.clear();
     self.blocked_reason = None;
+    self.authentication_block = None;
   }
 
   pub fn blocked_reason(&self) -> Option<&str> {
@@ -69,11 +82,13 @@ impl<'a> Maintenance<'a> {
     socket: PathBuf,
     session: Option<String>,
   ) {
+    self.resume_authorized();
     if self.blocked_reason.is_some() || self.refresh.is_some() {
       return;
     }
     self.refresh = Some(Pending {
       generation: self.generation,
+      recovery_generation: transport.map_or(0, Transport::recovery_generation),
       transport,
       job: Box::pin(async move {
         let local = LocalTransport(socket);
@@ -117,6 +132,7 @@ impl<'a> Maintenance<'a> {
     socket: PathBuf,
     reconnect: Reconnect,
   ) {
+    self.resume_authorized();
     if self.blocked_reason.is_some()
       || self.reconnects.contains_key(&reconnect.terminal_id)
       || self
@@ -131,6 +147,7 @@ impl<'a> Maintenance<'a> {
       reconnect.terminal_id,
       Pending {
         generation: self.generation,
+        recovery_generation: transport.map_or(0, Transport::recovery_generation),
         transport,
         job: Box::pin(async move {
           timeout(Box::pin(async move {
@@ -161,6 +178,7 @@ impl<'a> Maintenance<'a> {
   }
 
   pub async fn poll(&mut self) -> Ready {
+    self.resume_authorized();
     std::future::poll_fn(|context| {
       let mut blocked_reason = None;
       let snapshot =
@@ -169,7 +187,7 @@ impl<'a> Maintenance<'a> {
           .as_mut()
           .and_then(|pending| match pending.job.as_mut().poll(context) {
             Poll::Ready(result) => {
-              blocked_reason = blocking_reason(pending.transport, &result);
+              blocked_reason = blocking_reason(pending, &result);
               Some((pending.generation, result))
             }
             Poll::Pending => None,
@@ -185,7 +203,7 @@ impl<'a> Maintenance<'a> {
         }
         match pending.job.as_mut().poll(context) {
           Poll::Ready(result) => {
-            blocked_reason = blocking_reason(pending.transport, &result);
+            blocked_reason = blocking_reason(pending, &result);
             if result.is_err() {
               self.retry_after.insert(
                 id.clone(),
@@ -200,8 +218,9 @@ impl<'a> Maintenance<'a> {
           Poll::Pending => true,
         }
       });
-      if blocked_reason.is_some() {
-        self.blocked_reason = blocked_reason;
+      if let Some(block) = blocked_reason {
+        self.blocked_reason = Some(block.reason);
+        self.authentication_block = block.authentication;
         self.refresh = None;
         self.reconnects.clear();
         self.retry_after.clear();
@@ -210,13 +229,33 @@ impl<'a> Maintenance<'a> {
     })
     .await
   }
+
+  fn resume_authorized(&mut self) {
+    if self
+      .authentication_block
+      .as_ref()
+      .is_some_and(|block| block.transport.recovery_generation() != block.generation)
+    {
+      self.blocked_reason = None;
+      self.authentication_block = None;
+    }
+  }
 }
 
-fn blocking_reason<T>(transport: Option<&dyn Transport>, result: &Result<T>) -> Option<String> {
+fn blocking_reason<'a, T>(pending: &Pending<'a, T>, result: &Result<T>) -> Option<Block<'a>> {
   let error = result.as_ref().err()?;
-  transport
+  pending
+    .transport
     .filter(|transport| !transport.is_retryable(error))
-    .map(|_| error.to_string())
+    .map(|transport| Block {
+      reason: error.to_string(),
+      authentication: transport
+        .is_authentication_required(error)
+        .then_some(AuthenticationBlock {
+          transport,
+          generation: pending.recovery_generation,
+        }),
+    })
 }
 
 async fn timeout<T>(job: impl Future<Output = Result<T>>) -> Result<T> {
@@ -227,11 +266,13 @@ async fn timeout<T>(job: impl Future<Output = Result<T>>) -> Result<T> {
 mod tests {
   use super::*;
   use crate::transport::{ConnectFuture, Stream};
-  use std::sync::atomic::{AtomicUsize, Ordering};
+  use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
   struct FailedTransport {
     calls: AtomicUsize,
     retryable: bool,
+    authentication_required: bool,
+    recovery_generation: AtomicU64,
   }
 
   impl Transport for FailedTransport {
@@ -253,6 +294,12 @@ mod tests {
     fn is_retryable(&self, _: &crate::Error) -> bool {
       self.retryable
     }
+    fn is_authentication_required(&self, _: &crate::Error) -> bool {
+      self.authentication_required
+    }
+    fn recovery_generation(&self) -> u64 {
+      self.recovery_generation.load(Ordering::Acquire)
+    }
   }
 
   #[tokio::test]
@@ -260,6 +307,8 @@ mod tests {
     let transport = FailedTransport {
       calls: AtomicUsize::new(0),
       retryable: false,
+      authentication_required: false,
+      recovery_generation: AtomicU64::new(0),
     };
     let mut maintenance = Maintenance::default();
     for _ in 0..5 {
@@ -304,6 +353,8 @@ mod tests {
     let transport = FailedTransport {
       calls: AtomicUsize::new(0),
       retryable: true,
+      authentication_required: false,
+      recovery_generation: AtomicU64::new(0),
     };
     let mut maintenance = Maintenance::default();
     for _ in 0..3 {
@@ -312,6 +363,54 @@ mod tests {
       assert!(maintenance.blocked_reason().is_none());
     }
     assert_eq!(transport.calls.load(Ordering::Relaxed), 3);
+  }
+
+  #[tokio::test]
+  async fn authorization_resumes_only_authentication_blockers_and_only_once_per_event() {
+    for authentication_required in [false, true] {
+      let transport = FailedTransport {
+        calls: AtomicUsize::new(0),
+        retryable: false,
+        authentication_required,
+        recovery_generation: AtomicU64::new(0),
+      };
+      let mut maintenance = Maintenance::default();
+      maintenance.refresh(Some(&transport), PathBuf::new(), None);
+      maintenance.poll().await;
+      assert!(maintenance.blocked_reason().is_some());
+      transport.recovery_generation.store(1, Ordering::Release);
+      maintenance.poll().await;
+      assert_eq!(
+        maintenance.blocked_reason().is_none(),
+        authentication_required
+      );
+      for _ in 0..3 {
+        maintenance.refresh(Some(&transport), PathBuf::new(), None);
+        maintenance.poll().await;
+      }
+      assert!(maintenance.blocked_reason().is_some());
+      assert_eq!(
+        transport.calls.load(Ordering::Relaxed),
+        if authentication_required { 2 } else { 1 }
+      );
+    }
+  }
+
+  #[tokio::test]
+  async fn authorization_racing_an_older_failure_resumes_the_blocked_attempt() {
+    let transport = FailedTransport {
+      calls: AtomicUsize::new(0),
+      retryable: false,
+      authentication_required: true,
+      recovery_generation: AtomicU64::new(0),
+    };
+    let mut maintenance = Maintenance::default();
+    maintenance.refresh(Some(&transport), PathBuf::new(), None);
+    transport.recovery_generation.store(1, Ordering::Release);
+    maintenance.poll().await;
+    assert!(maintenance.blocked_reason().is_some());
+    maintenance.poll().await;
+    assert!(maintenance.blocked_reason().is_none());
   }
 
   #[derive(Default)]

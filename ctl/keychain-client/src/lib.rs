@@ -19,7 +19,7 @@ pub use native::{
 };
 
 #[cfg(target_os = "macos")]
-pub use session::{SessionState, SessionSubscription, with_session_monitor};
+pub use session::{SessionResume, SessionState, SessionSubscription, with_session_monitor};
 
 /// Application-local error: the owned inventory exceeds the discovery budget.
 pub const ATTRIBUTE_SCAN_LIMIT: i32 = -1_000_002;

@@ -17,6 +17,34 @@ pub(super) fn is_retryable(error: &CtlConnectError) -> bool {
   }
 }
 
+pub(super) fn is_authentication_required(error: &CtlConnectError) -> bool {
+  match error {
+    CtlConnectError::Target(error) => target_requires_authentication(error),
+    #[cfg(unix)]
+    CtlConnectError::Broker(error) => broker_requires_authentication(error),
+    _ => false,
+  }
+}
+
+fn target_requires_authentication(error: &crate::target::Error) -> bool {
+  match error {
+    crate::target::Error::Runtime(error) => match error {
+      crate::vpn::Error::Preparation(error) => target_requires_authentication(error),
+      #[cfg(unix)]
+      crate::vpn::Error::Broker(error) => broker_requires_authentication(error),
+      _ => false,
+    },
+    #[cfg(unix)]
+    crate::target::Error::Broker(error) => broker_requires_authentication(error),
+    _ => false,
+  }
+}
+
+#[cfg(unix)]
+fn broker_requires_authentication(error: &crate::ssh_broker::Error) -> bool {
+  matches!(error, crate::ssh_broker::Error::AuthenticationRequired)
+}
+
 fn target_is_retryable(error: &crate::target::Error) -> bool {
   match error {
     crate::target::Error::Connect(error) => connect_is_retryable(error),

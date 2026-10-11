@@ -13,6 +13,8 @@ pub mod identities;
 #[cfg(target_os = "macos")]
 mod identity_connection;
 
+#[cfg(any(target_os = "macos", test))]
+mod approval_context;
 #[cfg(target_os = "macos")]
 mod keychain;
 #[cfg(unix)]
@@ -32,6 +34,9 @@ mod tailscale;
 mod target_lifecycle;
 mod vpn_container;
 mod vpn_service;
+#[cfg(target_os = "macos")]
+mod wake_authorization;
+mod wake_recovery;
 
 #[cfg(test)]
 mod master_policy_tests;
@@ -89,6 +94,7 @@ struct State {
   endpoint_registry: endpoint_registry::Registry,
   shared_forwards: AsyncMutex<SharedForwardRegistry>,
   vpn_service: Option<vpn_service::VpnService>,
+  wake_recovery: Arc<wake_recovery::Registry>,
   #[cfg(target_os = "macos")]
   approvals: Option<Arc<keychain::approval::Approvals>>,
 }
@@ -442,6 +448,8 @@ async fn run_with_approvals(
     approvals,
     ..State::default()
   });
+  #[cfg(target_os = "macos")]
+  let wake_recovery = wake_authorization::spawn(Arc::clone(&state));
   let mut connections = tokio::task::JoinSet::new();
   let mut restarting = None;
   #[cfg(target_os = "macos")]
@@ -489,6 +497,11 @@ async fn run_with_approvals(
   connections.shutdown().await;
   #[cfg(target_os = "macos")]
   approval_cleanup.abort();
+  #[cfg(target_os = "macos")]
+  {
+    wake_recovery.abort();
+    let _ = wake_recovery.await;
+  }
   let forwards_released = state
     .forwards
     .lock()
@@ -610,6 +623,7 @@ async fn handle_request(
       }
       ClientMessage::MasterStatus { target } => master_status(stream, state, &target).await,
       ClientMessage::ConnectionStatus { target } => connection_status(stream, state, &target).await,
+      ClientMessage::WatchRecovery { target } => wake_recovery::watch(stream, state, target).await,
       ClientMessage::DisconnectMaster { target } => disconnect_master(stream, state, &target).await,
       ClientMessage::DeleteCredentials { target } => delete_credentials(stream, &target).await,
       ClientMessage::ConfigurePortForward {
@@ -668,10 +682,18 @@ fn validate_request_contract(
       "quiet SSH connection requires ctld 1.1.14",
     ));
   }
+  if matches!(request, ClientMessage::WatchRecovery { .. })
+    && !ctl_ipc::recovery_watch_supported(protocol)
+  {
+    return Err(RequestError::InvalidRequest(
+      "recovery watches require ctld 1.1.16",
+    ));
+  }
   let (ClientMessage::EnsureMaster { target }
   | ClientMessage::EnsureMasterQuiet { target }
   | ClientMessage::MasterStatus { target }
   | ClientMessage::ConnectionStatus { target }
+  | ClientMessage::WatchRecovery { target }
   | ClientMessage::DisconnectMaster { target }
   | ClientMessage::DeleteCredentials { target }
   | ClientMessage::ConfigurePortForward { target, .. }
@@ -745,6 +767,7 @@ fn normalize_request_target(request: &mut ClientMessage) {
     | ClientMessage::EnsureMasterQuiet { target }
     | ClientMessage::MasterStatus { target }
     | ClientMessage::ConnectionStatus { target }
+    | ClientMessage::WatchRecovery { target }
     | ClientMessage::DisconnectMaster { target }
     | ClientMessage::DeleteCredentials { target }
     | ClientMessage::ConfigurePortForward { target, .. }
@@ -906,7 +929,7 @@ async fn ensure_master_with_interaction_inner(
     .run(Arc::clone(&lifecycle.lock).lock_owned())
     .await?;
   if interactive {
-    lifecycle.resume(&attempt)?;
+    lifecycle.resume(&mut attempt)?;
   } else {
     lifecycle.require_connected()?;
   }
@@ -974,7 +997,7 @@ async fn ensure_master_with_interaction_inner(
   )
   .await;
   if matches!(result, Err(RequestError::AuthenticationRequired)) {
-    lifecycle.require_authentication();
+    lifecycle.require_authentication(&attempt);
   }
   operation.finish(
     if result.is_ok() {
@@ -1129,7 +1152,7 @@ impl ConnectionAuthentication {
     let approval_scope = keychain::approval_scope::snapshot(target).await;
     let authorization = {
       let approvals = state.approvals.clone();
-      let prefix = format!("{}:", target_key(target));
+      let prefix = keychain::approval_scope::prefix(target);
       let scope = approval_scope
         .as_ref()
         .map(|scope| format!("{prefix}{scope}"));
@@ -1752,7 +1775,10 @@ async fn disconnect_master_inner(
           endpoint: history_endpoint(target),
           correlation_id: state.correlation(&endpoint),
         });
-    approvals.revoke_target(&format!("{}:", target_key(target)), connection.as_ref());
+    approvals.revoke_target(
+      &keychain::approval_scope::prefix(target),
+      connection.as_ref(),
+    );
   }
   let _target_guard = lifecycle.lock.lock().await;
   let mut forwards = state.forwards.lock().await;
@@ -2950,7 +2976,7 @@ mod tests {
     };
     assert!(!state.target(&other).is_paused());
     let lifecycle = state.target(&target);
-    lifecycle.resume(&lifecycle.attempt()).unwrap();
+    lifecycle.resume(&mut lifecycle.attempt()).unwrap();
     master_status(&mut server, &state, &target).await.unwrap();
     assert!(matches!(
       ctl_ipc::read_frame::<_, ServerMessage>(&mut client)

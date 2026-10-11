@@ -115,9 +115,28 @@ transport does not rewrite the last observed remote process as exited.
 The TUI shows `reconnecting` while automatic recovery remains enabled. A
 non-retryable authentication or configuration failure stops background recovery
 and shows `disconnected` with a persistent error and `automatic retries stopped`.
-Temporary local action notices do not erase that reason. Successful explicit session
-selection resets recovery; merely authenticating a host elsewhere does not reset
-a blocked TUI. Detaching releases attachment leases and preserves remote sessions.
+Temporary local action notices do not erase that reason. A successful broker
+wake-authorization event resumes authentication-blocked shells for their exact
+registered route, including all of that host's open TUI panes. It does not reset
+configuration errors or an explicit manual disconnect. Successful explicit
+session selection also resets recovery. Detaching releases attachment leases
+and preserves remote sessions.
+
+Active `ctl` TUI shells hold a separate, socket-owned registration of their
+exact SSH route. After full macOS wake and unlock, the broker takes eligible
+live routes from before sleep and requests one grouped native authorization.
+DarkWake does not start authentication. Saved catalog hosts, closed shells, and
+routes without exact verifiable saved-credential bindings are excluded. The
+broker prefers selectors remembered from successful connections; after restart
+or expiry it can passively discover exact configured bindings for those already
+opened shell routes. Discovery selects items but does not authorize reading them.
+Fresh native consent is fenced by current configuration, server trust,
+identity-file bindings, credential revision, and console session.
+The batch refreshes Keychain approval without restarting a master that survived
+sleep. Shell recovery then uses ordinary quiet SSH establishment. Canceling or
+failing the batch leaves recovery blocked, without another automatic prompt
+until another sleep/wake cycle or explicit Connect. Desktop embedded terminals
+retain their existing Connect host flow.
 
 The attachment peer-silence deadline runs independently of outbound writes, so
 a blocked SSH pipe cannot suppress failure detection. A failed write closes the
@@ -151,9 +170,19 @@ the broker's anchor session. Authorization and ownership commit before the final
 readiness response, so closing a successful request cannot cancel that master.
 
 The CLI shares a sequential local broker connection across channel preparation
-when `ctld` negotiates 1.1.15. TUI session/view refreshes and pane attachments
-still ask the broker to ensure the master, preserving manual pause and quiet
-authentication rules. They reuse the local socket rather than reopening it for
+when `ctld` negotiates 1.1.15 or later. TUI session/view refreshes and pane
+attachments first inspect the exact existing master, preserving manual pause
+and quiet authentication rules. Reusing a live master precedes VPN or gateway
+preparation, avoiding unnecessary authentication of its already established route.
+These requests reuse the local socket rather than reopening it for
 each request. Older brokers retain one socket per request. Errors and cancelled
 requests discard the socket; a later retry negotiates a new connection.
 This does not change TUI polling frequency or reuse remote service streams.
+
+With ctld 1.1.16, each active `ctl` TUI also holds one dedicated recovery-watch
+socket. Its lifetime registers the host's current shell intent; it is separate
+from sequential requests and their short timeouts. Closing the TUI closes the
+watch and removes that intent. If ctld exits, the watcher quietly reconnects to
+an existing owner with bounded backoff, without starting a daemon or opening UI.
+Older negotiated contracts receive no watch request and keep their existing
+quiet recovery behavior.

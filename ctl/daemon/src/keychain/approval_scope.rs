@@ -14,15 +14,7 @@ const MAX_KNOWN_HOSTS_BYTES: usize = 4 * 1024 * 1024;
 const MAX_PATH_TOKENS: usize = 16;
 const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Master ownership policy is separate from the SSH credential principal.
-fn principal(target: &SshTarget) -> SshTarget {
-  let mut target = target.clone();
-  target.use_ssh_config_master = None;
-  if target.hostname.is_none() && target.ssh_config_alias.as_deref() == Some(&target.destination) {
-    target.ssh_config_alias = None;
-  }
-  target
-}
+use crate::wake_recovery::principal;
 
 pub(crate) fn prefix(target: &SshTarget) -> String {
   format!("{}:", crate::target_key(&principal(target)))

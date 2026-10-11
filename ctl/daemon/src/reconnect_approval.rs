@@ -114,6 +114,19 @@ impl<C: Context> Clone for Attempt<C> {
 }
 
 impl<C: Context> Windows<C> {
+  /// Observe committed scoped permission without reading any credential.
+  pub(crate) fn reusable(&self, scope: &str, now: Instant) -> bool {
+    self
+      .registry
+      .lock()
+      .unwrap()
+      .windows
+      .get(scope)
+      .is_some_and(|window| {
+        now < window.expires && window.contexts.values().any(|context| context.is_valid())
+      })
+  }
+
   /// Nonsecret selectors from successful connections, for explicit wake consent.
   pub(crate) fn approved_selectors(&self) -> Vec<(String, Instant, Vec<String>)> {
     self
@@ -535,6 +548,27 @@ mod tests {
   use super::*;
   use std::cell::Cell;
   use std::sync::atomic::{AtomicBool, Ordering};
+
+  #[test]
+  fn reusable_observes_only_live_committed_scope_and_never_creates_a_grant() {
+    let windows = Arc::new(Windows::<Fake>::default());
+    let now = Instant::now();
+    let pending = windows.begin("host".into(), now);
+    let context = read(&pending, "saved-key");
+    assert!(!windows.reusable("host", now));
+    pending.connected(now);
+    assert!(windows.reusable("host", now));
+    assert!(!windows.reusable("other", now));
+    assert!(!windows.reusable("host", now + WINDOW));
+    assert!(
+      context.is_valid(),
+      "the observation never renews or mutates a grant"
+    );
+    context.invalidate();
+    assert!(!windows.reusable("host", now));
+    windows.revoke(Some("host"));
+    assert!(!windows.reusable("host", now));
+  }
 
   #[test]
   fn remembered_selectors_come_only_from_committed_used_contexts() {

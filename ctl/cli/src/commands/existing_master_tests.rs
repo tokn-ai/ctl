@@ -6,6 +6,7 @@ use tokio::net::UnixListener;
 
 const CHILD_TEST: &str = "commands::existing_master_tests::existing_master_fixture";
 const CONTROL_PATH: &str = "/fixture/existing-target-master";
+const CONFIRMED_PATH: &str = "/fixture/confirmed-target-master";
 const VPN_SOCKET: &str = "/fixture/vpn-must-not-start";
 
 struct Fixture(PathBuf);
@@ -84,22 +85,42 @@ async fn run_fixture(mode: &str) {
   .unwrap();
   let mut expected = settings().to_ssh_target().unwrap();
   expected.gateways[0].vpn.as_mut().unwrap().socket_path = VPN_SOCKET.into();
-  for _ in 0..if mode == "ready" { 2 } else { 1 } {
+  assert!(matches!(
+    ctl_ipc::read_frame::<_, ClientMessage>(&mut stream).await.unwrap(),
+    Some(ClientMessage::MasterStatus { target }) if target == expected
+  ));
+  let passive_error = mode.starts_with("ssh_");
+  let response = if passive_error {
+    ServerMessage::Error {
+      code: mode.into(),
+      message: "requires explicit user action".into(),
+    }
+  } else {
+    ServerMessage::MasterReady {
+      control_path: CONTROL_PATH.into(),
+    }
+  };
+  ctl_ipc::write_frame(&mut stream, &response).await.unwrap();
+  if !passive_error && mode != "quiet" {
     assert!(matches!(
       ctl_ipc::read_frame::<_, ClientMessage>(&mut stream).await.unwrap(),
-      Some(ClientMessage::MasterStatus { target }) if target == expected
+      Some(ClientMessage::EnsureMaster { target }) if target == expected
     ));
-    let response = if mode == "ready" {
-      ServerMessage::MasterReady {
-        control_path: CONTROL_PATH.into(),
-      }
-    } else {
-      ServerMessage::Error {
-        code: mode.into(),
-        message: "requires explicit user action".into(),
-      }
+    let response = match mode {
+      "interactive" => Some(ServerMessage::MasterReady {
+        control_path: CONFIRMED_PATH.into(),
+      }),
+      "ensure-error" => Some(ServerMessage::Error {
+        code: "ssh_connection_failed".into(),
+        message: "master disappeared after observation".into(),
+      }),
+      "ensure-authentication-required" => Some(ServerMessage::AuthenticationRequired),
+      "ensure-cancel" => None,
+      _ => panic!("unexpected fixture mode {mode}"),
     };
-    ctl_ipc::write_frame(&mut stream, &response).await.unwrap();
+    if let Some(response) = response {
+      ctl_ipc::write_frame(&mut stream, &response).await.unwrap();
+    }
   }
   let output = tokio::time::timeout(Duration::from_secs(5), child.wait_with_output())
     .await
@@ -116,13 +137,30 @@ async fn run_fixture(mode: &str) {
       .await
       .unwrap()
       .is_none(),
-    "passive reuse must not issue an EnsureMaster or VPN operation",
+    "reuse must not prepare a VPN or retry a failed or canceled request",
   );
 }
 
 #[tokio::test]
-async fn existing_master_bypasses_vpn_preparation_for_quiet_and_interactive_channels() {
-  run_fixture("ready").await;
+async fn quiet_existing_master_reuse_stays_passive_and_bypasses_vpn_preparation() {
+  run_fixture("quiet").await;
+}
+
+#[tokio::test]
+async fn interactive_existing_master_reuse_confirms_connection_without_vpn_preparation() {
+  run_fixture("interactive").await;
+}
+
+#[tokio::test]
+async fn interactive_reuse_propagates_failed_confirmation_without_retrying() {
+  for mode in ["ensure-error", "ensure-authentication-required"] {
+    run_fixture(mode).await;
+  }
+}
+
+#[tokio::test]
+async fn canceling_interactive_reuse_closes_its_request_without_retrying() {
+  run_fixture("ensure-cancel").await;
 }
 
 #[tokio::test]
@@ -137,19 +175,43 @@ async fn passive_reuse_preserves_manual_disconnect_and_unknown_observations() {
 async fn existing_master_fixture() {
   let mode = std::env::var("CTL_EXISTING_MASTER_TEST_MODE").unwrap();
   let broker = crate::ssh_broker::MasterClient::default();
-  if mode == "ready" {
-    for interactive in [false, true] {
+  match mode.as_str() {
+    "quiet" | "interactive" => {
+      let interactive = mode == "interactive";
+      let expected_path = if interactive {
+        CONFIRMED_PATH
+      } else {
+        CONTROL_PATH
+      };
       assert!(matches!(
         ssh_interaction(&settings(), &broker, interactive).await.unwrap(),
         ctl_client::SshInteraction::Multiplexed { control_path }
-          if control_path == std::path::Path::new(CONTROL_PATH)
+          if control_path == std::path::Path::new(expected_path)
       ));
     }
-  } else {
-    assert!(matches!(
+    "ensure-error" => assert!(matches!(
+      ssh_interaction(&settings(), &broker, true).await,
+      Err(CtlConnectError::Broker(crate::ssh_broker::Error::Daemon { code, .. }))
+        if code == "ssh_connection_failed"
+    )),
+    "ensure-authentication-required" => assert!(matches!(
+      ssh_interaction(&settings(), &broker, true).await,
+      Err(CtlConnectError::Broker(
+        crate::ssh_broker::Error::AuthenticationRequired
+      ))
+    )),
+    "ensure-cancel" => assert!(
+      tokio::time::timeout(
+        Duration::from_secs(1),
+        ssh_interaction(&settings(), &broker, true)
+      )
+      .await
+      .is_err()
+    ),
+    _ => assert!(matches!(
       ssh_interaction(&settings(), &broker, false).await,
       Err(CtlConnectError::Broker(crate::ssh_broker::Error::Daemon { code, .. }))
         if code == mode
-    ));
+    )),
   }
 }

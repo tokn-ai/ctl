@@ -532,6 +532,14 @@ closed shells, configuration failures, and manual disconnects do not start or
 resume this flow. Desktop embedded terminals retain their existing Connect host
 flow.
 
+An explicit successful `ctl` connection also notifies matching live TUI watches,
+even when it reuses an existing master. The exact route can retry through that
+master; equivalent master policies and remote VPN-owner dependents require a
+matching current credential approval. Publication follows committed SSH
+readiness, preserves captured lifecycle generations and manual pauses, and
+permits quiet retries without granting credential access. Each notification has
+a broker event revision separate from the console epoch used for wake eligibility.
+
 The desktop **Credentials** page lists identity-file metadata and saved ctmux
 credential attributes. Its bounded one-shot `ctld --credential-request` and
 `ctld --identity-request` helpers provide metadata, verified identity-passphrase

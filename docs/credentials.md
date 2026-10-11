@@ -128,10 +128,10 @@ the page does not restart active SSH connections automatically.
 Authentication requests describe their purpose: the key file whose passphrase
 is being read or replaced, the SSH account and destination whose password is
 needed, or the explicit import of previously saved ctmux credential metadata.
-Connection setup discovers public identities without unlocking saved keys. Only
-an SSH signature request for a configured key can read its saved passphrase and
-protected binding together. Password-only connections therefore do not request
-identity-passphrase access; a gateway or server that actually requires both
+Connection setup discovers public identities without unlocking saved keys.
+During ordinary SSH establishment, a signature request for a configured key
+reads its saved passphrase and protected binding together. Password-only
+connections therefore do not request identity-passphrase access; a gateway or server that actually requires both
 credentials can still need separate authorizations.
 
 When OpenSSH needs manual password or key-passphrase entry, the authentication
@@ -235,6 +235,17 @@ another automatic prompt until another sleep/wake cycle or an explicit Connect
 action. Routes with unavailable scope evidence or unverifiable saved bindings
 require explicit connection. macOS still determines the actual authorization
 method and may reject a context before its maximum deadline.
+
+A successful explicit `ctl` connection in another terminal also notifies live
+matching shells after SSH readiness commits, including reuse of an existing
+master. The exact route can retry through that ready master without reading a
+credential. Equivalent shared/private routes and remote VPN-owner dependents
+require current matching scoped approval. Notifications only permit quiet
+recovery; they never grant protected-item access or display authentication UI.
+Configuration blockers and manual pauses remain unchanged. The broker assigns
+each publication a distinct event revision independent of the console epoch,
+so successive manual successes remain observable. Explicit connections that
+fail or are canceled before readiness commits do not publish recovery success.
 
 Desktop and CLI helpers share saved credentials, but approval contexts exist
 only in the broker process that authenticated them. Clients using the same

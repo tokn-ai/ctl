@@ -428,6 +428,14 @@ async fn ssh_interaction(
     Ok(Some(control_path)) => {
       // An established transport already owns its route. Reusing it must not
       // restart a VPN or authenticate a gateway before opening another channel.
+      // An explicit connection also publishes recovery to older blocked shells.
+      // Keep background activity passive, and propagate failed or canceled
+      // explicit requests without starting a second authentication attempt.
+      let control_path = if interactive {
+        broker.ensure_master(ssh_target, true).await?
+      } else {
+        control_path
+      };
       return Ok(ctl_client::SshInteraction::Multiplexed { control_path });
     }
     Ok(None) => {}

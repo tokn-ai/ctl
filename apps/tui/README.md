@@ -327,6 +327,12 @@ closed or inactive hosts do not start authentication. The native authorization
 runs independently of short pane and refresh request timeouts; successful
 authorization resumes authentication-blocked shells for that host automatically.
 
+A successful explicit `ctl` connection in another terminal also notifies matching
+open shells, including when the new connection reuses a ready master. The
+watching TUI then retries quietly without needing session reselection. Configuration
+failures and manual disconnects remain blocked; the notification grants no
+credential access or authentication UI.
+
 Quiet reconnects never open authentication prompts. A canceled or failed wake
 authorization stops without repeated prompts until another sleep/wake cycle or
 an explicit Connect action. Configuration failures and manually disconnected

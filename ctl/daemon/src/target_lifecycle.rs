@@ -110,8 +110,7 @@ impl TargetLifecycle {
     });
   }
 
-  /// Wake consent resumes quiet attempts, but never undoes an explicit pause.
-  #[cfg(any(target_os = "macos", test))]
+  /// Committed recovery availability permits quiet attempts, without undoing a pause.
   pub(super) fn authorized(&self, attempt: &TargetAttempt) -> bool {
     let mut current = false;
     self.revision.send_if_modified(|revision| {

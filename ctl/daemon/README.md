@@ -12,6 +12,9 @@ routes. It prefers selectors remembered from successful connections and may
 passively rediscover configured bindings after restart or expiry. DarkWake and
 inactive hosts do not request it. Subsequent reads and SSH recovery are quiet;
 cancellation or failure does not start another prompt loop.
+Successful explicit `ctl` connections also notify matching open shells after
+SSH readiness commits, including reuse of a live master. Notifications allow
+quiet retries without granting credential access or opening native UI.
 The batch retains independently revocable host grants, without caching passwords,
 passphrases, or decrypted keys. Desktop embedded terminals keep their existing
 Connect host flow. See [credential approval](../../docs/credentials.md#reconnect-approval).

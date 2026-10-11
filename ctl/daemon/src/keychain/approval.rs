@@ -55,6 +55,13 @@ pub(crate) struct Approvals {
   _subscription: SessionSubscription,
 }
 
+/// A passive observation of a committed window, never an authorization grant.
+pub(crate) struct Reusable {
+  scope: String,
+  revision: String,
+  session_generation: u64,
+}
+
 impl Approvals {
   pub(crate) fn new(session: Arc<SessionState>, observer: ApprovalObserver) -> Arc<Self> {
     let windows = Arc::new(Windows::default());
@@ -149,6 +156,37 @@ impl Approvals {
       .unwrap()
       .get(scope)
       .map_or_else(Vec::new, |(_, selectors)| selectors.clone())
+  }
+
+  /// Check an already committed grant; this never reads a secret or requests UI.
+  pub(crate) fn reusable(&self, scope: &str) -> Option<Reusable> {
+    let Ok(revision) = operation::revision() else {
+      self.revoke(ApprovalReason::RevisionUnavailable);
+      return None;
+    };
+    self.check_revision(&revision);
+    if !self.session.is_unlocked() {
+      self.revoke(ApprovalReason::SessionChanged);
+      return None;
+    }
+    self
+      .windows
+      .reusable(scope, Instant::now())
+      .then(|| Reusable {
+        scope: scope.into(),
+        revision,
+        session_generation: self.session.generation(),
+      })
+  }
+
+  /// Recheck revocation and expiry at publication without Keychain I/O or locks
+  /// that wait for other credential operations. Quiet reads still recheck the
+  /// external credential revision and the current SSH/trust scope themselves.
+  pub(crate) fn still_reusable(&self, observed: &Reusable) -> bool {
+    self.session.generation() == observed.session_generation
+      && self.session.is_unlocked()
+      && self.revision.lock().unwrap().as_deref() == Some(&observed.revision)
+      && self.windows.reusable(&observed.scope, Instant::now())
   }
 
   fn remember(&self) {

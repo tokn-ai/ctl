@@ -11,11 +11,11 @@ use crate::{RequestError, State};
 const MAX_HOSTS: usize = 128;
 const MAX_LEASES: usize = 256;
 
-#[cfg_attr(
-  not(any(target_os = "macos", test)),
-  expect(dead_code, reason = "only macOS wake monitoring emits authorizations")
-)]
 struct Registration {
+  #[cfg_attr(
+    not(any(target_os = "macos", test)),
+    expect(dead_code, reason = "only macOS wake monitoring filters sleep epochs")
+  )]
   generation: u64,
   authorized: watch::Sender<Option<u64>>,
 }
@@ -23,6 +23,7 @@ struct Registration {
 #[derive(Default)]
 struct Registrations {
   next: u64,
+  event_revision: u64,
   count: usize,
   hosts: HashMap<SshTarget, HashMap<u64, Registration>>,
 }
@@ -38,6 +39,14 @@ pub(super) struct Lease {
 }
 
 impl Registry {
+  pub(super) fn active(&self) -> Vec<SshTarget> {
+    self.0.lock().unwrap().hosts.keys().cloned().collect()
+  }
+
+  pub(super) fn is_live(&self, target: &SshTarget) -> bool {
+    self.0.lock().unwrap().hosts.contains_key(target)
+  }
+
   pub(super) fn register(
     self: &Arc<Self>,
     target: SshTarget,
@@ -100,15 +109,64 @@ impl Registry {
 
   #[cfg(any(target_os = "macos", test))]
   pub(super) fn authorized(&self, target: &SshTarget, generation: u64) {
-    if let Some(watches) = self.0.lock().unwrap().hosts.get(target) {
-      for registration in watches
-        .values()
-        .filter(|watch| watch.generation < generation)
-      {
-        registration.authorized.send_replace(Some(generation));
+    self.notify(target, |watch| watch.generation < generation);
+  }
+
+  /// An interactive success permits currently open shells to retry quietly.
+  /// Its event revision is independent of the session epoch used for wake.
+  pub(super) fn connected(&self, target: &SshTarget) {
+    self.notify(target, |_| true);
+  }
+
+  fn notify(&self, target: &SshTarget, eligible: impl Fn(&Registration) -> bool) {
+    let mut registrations = self.0.lock().unwrap();
+    if !registrations
+      .hosts
+      .get(target)
+      .is_some_and(|watches| watches.values().any(&eligible))
+    {
+      return;
+    }
+    let Some(revision) = registrations.event_revision.checked_add(1) else {
+      // Never repeat a revision and let clients mistake a new grant for an old one.
+      return;
+    };
+    registrations.event_revision = revision;
+    if let Some(watches) = registrations.hosts.get(target) {
+      for registration in watches.values().filter(|watch| eligible(watch)) {
+        registration.authorized.send_replace(Some(revision));
       }
     }
   }
+}
+
+/// Credential principals retain the exact endpoint, account, identity, and route;
+/// OpenSSH master ownership is an independent connection policy.
+#[cfg(any(target_os = "macos", test))]
+pub(super) fn principal(target: &SshTarget) -> SshTarget {
+  let mut target = target.clone();
+  target.use_ssh_config_master = None;
+  if target.hostname.is_none() && target.ssh_config_alias.as_deref() == Some(&target.destination) {
+    target.ssh_config_alias = None;
+  }
+  target
+}
+
+#[cfg(any(target_os = "macos", test))]
+pub(super) fn route_targets(target: &SshTarget) -> Vec<SshTarget> {
+  let mut targets = vec![target.clone()];
+  targets.extend(
+    target
+      .gateways
+      .iter()
+      .enumerate()
+      .filter_map(|(index, gateway)| {
+        (gateway.kind == ctl_ipc::GatewayKind::Vpn)
+          .then(|| ctl_ipc::vpn_owner_target(&target.gateways, index))
+          .flatten()
+      }),
+  );
+  targets
 }
 
 impl Drop for Lease {
@@ -220,6 +278,29 @@ mod tests {
     drop(new);
     drop(after_sleep);
     assert!(registry.0.lock().unwrap().hosts.is_empty());
+  }
+
+  #[test]
+  fn manual_events_notify_same_epoch_watches_with_distinct_revisions_after_wake() {
+    let registry = Arc::new(Registry::default());
+    let selected = target("selected");
+    let (_old, mut old) = registry.register(selected.clone(), 49).unwrap();
+    let (_duplicate, mut duplicate) = registry.register(selected.clone(), 49).unwrap();
+    let (_current, mut current) = registry.register(selected.clone(), 50).unwrap();
+    registry.authorized(&selected, 50);
+    assert_eq!(*old.borrow_and_update(), Some(1));
+    assert_eq!(*duplicate.borrow_and_update(), Some(1));
+    assert_eq!(*current.borrow(), None);
+    registry.connected(&selected);
+    for updates in [&mut old, &mut duplicate, &mut current] {
+      assert_eq!(*updates.borrow_and_update(), Some(2));
+    }
+    registry.connected(&selected);
+    for updates in [&mut old, &mut duplicate, &mut current] {
+      assert_eq!(*updates.borrow_and_update(), Some(3));
+    }
+    // No event is persisted for inactive or newly registered historical hosts.
+    registry.connected(&target("inactive"));
   }
 
   #[test]

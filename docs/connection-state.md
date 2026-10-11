@@ -115,11 +115,11 @@ transport does not rewrite the last observed remote process as exited.
 The TUI shows `reconnecting` while automatic recovery remains enabled. A
 non-retryable authentication or configuration failure stops background recovery
 and shows `disconnected` with a persistent error and `automatic retries stopped`.
-Temporary local action notices do not erase that reason. A successful broker
-wake-authorization event resumes authentication-blocked shells for their exact
-registered route, including all of that host's open TUI panes. It does not reset
-configuration errors or an explicit manual disconnect. Successful explicit
-session selection also resets recovery. Detaching releases attachment leases
+Temporary local action notices do not erase that reason. Successful broker wake
+authorization or an explicit `ctl` connection can resume authentication-blocked
+shells for matching registered routes, including that host's open TUI panes. It
+does not reset configuration errors or an explicit manual disconnect. Successful
+explicit session selection also resets recovery. Detaching releases attachment leases
 and preserves remote sessions.
 
 Active `ctl` TUI shells hold a separate, socket-owned registration of their
@@ -137,6 +137,16 @@ sleep. Shell recovery then uses ordinary quiet SSH establishment. Canceling or
 failing the batch leaves recovery blocked, without another automatic prompt
 until another sleep/wake cycle or explicit Connect. Desktop embedded terminals
 retain their existing Connect host flow.
+
+A successful explicit connection in another terminal, such as
+`ctl -H clouds-modu shell` or `ctl host connect clouds-modu`, also publishes a
+recovery notification after SSH readiness and ownership commit. Reusing an
+existing master still confirms that explicit connection with the broker, without
+preparing its VPN again. Exact-route watchers can retry using the ready master;
+equivalent shared/private routes and remote VPN-owner dependents require current
+matching scoped approval. This notification permits a quiet retry, not new
+credential access or authentication UI. Connections that fail or are canceled
+before readiness commits publish no recovery success.
 
 The attachment peer-silence deadline runs independently of outbound writes, so
 a blocked SSH pipe cannot suppress failure detection. A failed write closes the
@@ -184,5 +194,8 @@ socket. Its lifetime registers the host's current shell intent; it is separate
 from sequential requests and their short timeouts. Closing the TUI closes the
 watch and removes that intent. If ctld exits, the watcher quietly reconnects to
 an existing owner with bounded backoff, without starting a daemon or opening UI.
+Each success carries a distinct broker authorization revision in `generation`,
+separate from the console epoch used to select pre-sleep registrations. Repeated
+manual successes in the same console session therefore remain observable.
 Older negotiated contracts receive no watch request and keep their existing
 quiet recovery behavior.

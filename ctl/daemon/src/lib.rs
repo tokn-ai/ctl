@@ -19,6 +19,7 @@ mod approval_context;
 mod keychain;
 #[cfg(unix)]
 mod lifecycle;
+mod manual_recovery;
 mod master_diagnostics;
 mod master_observation;
 mod master_ownership;
@@ -923,6 +924,7 @@ async fn ensure_master_with_interaction_inner(
   cleanup: &master_ownership::CleanupBarrier,
 ) -> Result<(), RequestError> {
   validate_target(&target)?;
+  let recovery = interactive.then(|| manual_recovery::Capture::new(&state, &target));
   let lifecycle = state.target(&target);
   let mut attempt = lifecycle.attempt();
   let target_guard = attempt
@@ -967,13 +969,19 @@ async fn ensure_master_with_interaction_inner(
           .await;
       })
       .await?;
+    let recovery = if let Some(recovery) = &recovery {
+      Some(attempt.run(recovery.prepare(&state)).await?)
+    } else {
+      None
+    };
     return attempt
-      .run(ctl_ipc::write_frame(
+      .run(publish_reused_master_ready(
         stream,
-        &ServerMessage::MasterReady { control_path },
+        &state,
+        control_path,
+        recovery,
       ))
-      .await?
-      .map_err(Into::into);
+      .await?;
   }
   if !interactive {
     lifecycle.allow_background_connection()?;
@@ -992,8 +1000,8 @@ async fn ensure_master_with_interaction_inner(
     &target,
     &endpoint,
     &mut attempt,
-    interactive,
     master_ownership::StartupOwner::new(target_guard, cleanup),
+    recovery.as_ref(),
   )
   .await;
   if matches!(result, Err(RequestError::AuthenticationRequired)) {
@@ -1017,9 +1025,10 @@ async fn establish_master(
   target: &SshTarget,
   endpoint: &MasterEndpoint,
   attempt: &mut target_lifecycle::TargetAttempt,
-  interactive: bool,
   ownership: master_ownership::StartupOwner<'_>,
+  recovery: Option<&manual_recovery::Capture>,
 ) -> Result<(), RequestError> {
+  let interactive = recovery.is_some();
   let token = uuid::Uuid::new_v4().to_string();
   let (prompt_tx, mut prompt_rx) = mpsc::channel(1);
   state
@@ -1069,6 +1078,11 @@ async fn establish_master(
   let result = result.and_then(|result| result);
   match result {
     Ok(diagnostics) => {
+      let recovery = if let Some(recovery) = recovery {
+        Some(attempt.run(recovery.prepare(state)).await?)
+      } else {
+        None
+      };
       if endpoint.shared {
         state.remember_endpoint(target, endpoint, process.child().stdin.take());
       }
@@ -1080,6 +1094,7 @@ async fn establish_master(
           endpoint,
           process,
           diagnostics,
+          recovery,
         ))
         .await?
     }
@@ -1097,11 +1112,15 @@ async fn publish_master_ready(
   endpoint: &MasterEndpoint,
   process: master_ownership::PendingMaster,
   diagnostics: Option<tokio::task::JoinHandle<String>>,
+  recovery: Option<manual_recovery::Ready>,
 ) -> Result<(), RequestError> {
   // All authorization and connection work has committed. A normal client
   // closes its request socket immediately after reading MasterReady; it must
   // not cancel the committed master while response delivery finishes.
   let _target_guard = process.connected();
+  if let Some(recovery) = recovery {
+    recovery.publish(state);
+  }
   if !endpoint.shared
     && let Some(diagnostics) = diagnostics
   {
@@ -1114,6 +1133,21 @@ async fn publish_master_ready(
     },
   )
   .await?;
+  Ok(())
+}
+
+async fn publish_reused_master_ready(
+  stream: &mut ctl_ipc::Stream,
+  state: &State,
+  control_path: PathBuf,
+  recovery: Option<manual_recovery::Ready>,
+) -> Result<(), RequestError> {
+  // The existing master and its adopted route are already committed. Publish
+  // before the response so a normal client EOF cannot cancel shell recovery.
+  if let Some(recovery) = recovery {
+    recovery.publish(state);
+  }
+  ctl_ipc::write_frame(stream, &ServerMessage::MasterReady { control_path }).await?;
   Ok(())
 }
 

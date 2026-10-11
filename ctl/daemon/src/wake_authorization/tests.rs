@@ -52,7 +52,7 @@ fn one_approval_scope_publishes_to_each_exact_shared_and_private_lifecycle() {
   assert!(state.target(&private).allow_background_connection().is_ok());
   assert!(state.target(&shared).allow_background_connection().is_ok());
   assert_eq!(*private_updates.borrow(), Some(1));
-  assert_eq!(*shared_updates.borrow(), Some(1));
+  assert_eq!(*shared_updates.borrow(), Some(2));
 }
 
 #[test]

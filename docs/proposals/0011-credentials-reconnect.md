@@ -7,7 +7,10 @@
   [#53](https://github.com/tokn-ai/ctl/pull/53),
   [#77](https://github.com/tokn-ai/ctl/pull/77),
   [#82](https://github.com/tokn-ai/ctl/pull/82),
-  [#88](https://github.com/tokn-ai/ctl/pull/88)
+  [#88](https://github.com/tokn-ai/ctl/pull/88),
+  [#108](https://github.com/tokn-ai/ctl/pull/108),
+  [#109](https://github.com/tokn-ai/ctl/pull/109),
+  [#110](https://github.com/tokn-ai/ctl/pull/110)
 
 ## Summary
 
@@ -80,11 +83,12 @@ the native biometric method or record password/private-key material.
 
 The TUI applies the connector's retry classification to background refreshes
 and pane reconnects, stopping on authentication/configuration failures. A
-successful wake authorization event resumes authentication-blocked shells for
-that exact registered route; configuration failures and manual disconnects stay
-blocked. Successful explicit session selection also resets maintenance. A
-blocked pane shows `disconnected` and retains the reason retries stopped, rather than claiming it
-is reconnecting after automatic recovery has halted. The broker remembers a quiet
+successful wake authorization or explicit `ctl` connection resumes
+authentication-blocked shells for matching registered routes; configuration
+failures and manual disconnects stay blocked. Successful explicit session
+selection also resets maintenance. A blocked pane shows `disconnected` and
+retains the reason retries stopped, rather than claiming it is reconnecting
+after automatic recovery has halted. The broker remembers a quiet
 authentication-required result until explicit Connect or successful wake
 authorization; it can still reuse a live master. Client EOF cancels pending
 connection work. Private-master cleanup retains the target lock through bounded
@@ -94,6 +98,16 @@ and master ownership commit before the final readiness response. Shared masters
 retain their owner's lifetime; cancellation closes only the broker's anchor.
 Unknown existing-master observations preserve the endpoint rather than initiating
 new authentication.
+
+Explicit connection success publishes recovery only after SSH readiness and
+ownership commit, including when a new TUI reuses an existing master. Exact-route
+watchers can use that master without a new Keychain grant. Equivalent master
+policies and remote VPN-owner dependents require current matching scoped
+approval before notification. The signal only permits a quiet retry; it cannot
+authorize a credential read or open UI. Every publication has a distinct broker
+event revision, so successive manual connections in one console session remain
+visible. Requests that fail or are canceled before readiness commits do not
+publish success.
 
 Each host has an independently revocable grant even when several hosts share
 the same native wake context. Disconnecting one host leaves the other grants
@@ -125,8 +139,9 @@ Older brokers support passive status rather than quiet creation.
 Live shell registration advances `ctld` from 1.1.15/build 15 to 1.1.16/build 16,
 retaining 1.0.12 and 1.1.13–1.1.15. `watch_recovery` owns a dedicated streaming
 socket lease and returns `recovery_registered`, then `recovery_authorized` with
-a generation after successful wake authorization. It carries no credentials or
-native contexts. Older negotiated contracts retain quiet reconnect behavior and
+a broker event generation after successful wake authorization or an explicit
+committed connection. It carries no credentials or native contexts. Older
+negotiated contracts retain quiet reconnect behavior and
 receive no watch request. The helper remains 1.1.5/build 5. The lifecycle
 contract remains 1.0.1/build 1. Older writers must be replaced before relying
 on cross-process approval revocation.

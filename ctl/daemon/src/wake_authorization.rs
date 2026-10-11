@@ -4,10 +4,11 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::sync::Arc;
 
-use ctl_ipc::{GatewayKind, SshTarget};
+use ctl_ipc::SshTarget;
 use ctl_keychain_client::AuthenticationContext;
 
 use crate::target_lifecycle::TargetAttempt;
+use crate::wake_recovery::route_targets;
 use crate::{State, approval_context::Shared, keychain::approval, keychain::approval_scope};
 
 #[cfg(test)]
@@ -57,22 +58,6 @@ fn current(state: &State, generation: u64) -> bool {
       .session()
       .resume_is_current(ctl_keychain_client::SessionResume { generation })
   })
-}
-
-fn route_targets(target: &SshTarget) -> Vec<SshTarget> {
-  let mut targets = vec![target.clone()];
-  targets.extend(
-    target
-      .gateways
-      .iter()
-      .enumerate()
-      .filter_map(|(index, gateway)| {
-        (gateway.kind == GatewayKind::Vpn)
-          .then(|| ctl_ipc::vpn_owner_target(&target.gateways, index))
-          .flatten()
-      }),
-  );
-  targets
 }
 
 async fn prepare(state: &State, hosts: &[SshTarget]) -> (Vec<SshTarget>, Vec<Scope>) {

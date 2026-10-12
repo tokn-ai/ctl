@@ -1,6 +1,7 @@
 # Cargo publishing
 
-The Rust package family starts at `0.1.0` and supports Rust 1.97 or newer.
+The Rust package family uses the workspace release version and supports
+Rust 1.97 or newer.
 Packages use MIT except `ctmux-avt`, which retains the upstream AVT Apache-2.0
 license. Public packages explicitly target crates.io. `ctmux-app` is a desktop
 bundle and stays unpublished; its release workflow is separate.

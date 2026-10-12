@@ -678,7 +678,7 @@ dependencies = [
 
 [[package]]
 name = "ctl-agent"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "clap",
  "ctl-client",
@@ -702,7 +702,7 @@ dependencies = [
 
 [[package]]
 name = "ctl-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "clap",
  "cliclack",
@@ -745,7 +745,7 @@ dependencies = [
 
 [[package]]
 name = "ctl-client"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
  "ctl-core",
@@ -773,7 +773,7 @@ dependencies = [
 
 [[package]]
 name = "ctl-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "dirs",
  "rusqlite",
@@ -788,7 +788,7 @@ dependencies = [
 
 [[package]]
 name = "ctl-ipc"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ctl-core",
  "ctl-proto",
@@ -808,7 +808,7 @@ dependencies = [
 
 [[package]]
 name = "ctl-keychain-client"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "block2",
  "core-foundation 0.10.1",
@@ -821,7 +821,7 @@ dependencies = [
 
 [[package]]
 name = "ctl-proto"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ctl-core",
  "serde",
@@ -832,7 +832,7 @@ dependencies = [
 
 [[package]]
 name = "ctl-task-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "clap",
  "ctl-core",
@@ -850,7 +850,7 @@ dependencies = [
 
 [[package]]
 name = "ctl-task-client"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ctl-core",
  "ctl-task-ipc",
@@ -862,7 +862,7 @@ dependencies = [
 
 [[package]]
 name = "ctl-task-ipc"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ctl-core",
  "ctl-task-proto",
@@ -876,7 +876,7 @@ dependencies = [
 
 [[package]]
 name = "ctl-task-proto"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ctl-core",
  "serde",
@@ -887,7 +887,7 @@ dependencies = [
 
 [[package]]
 name = "ctl-task-store"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ctl-core",
  "ctl-task-proto",
@@ -900,7 +900,7 @@ dependencies = [
 
 [[package]]
 name = "ctl-taskd"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "clap",
  "ctl-core",
@@ -923,7 +923,7 @@ dependencies = [
 
 [[package]]
 name = "ctld"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
  "clap",
@@ -947,7 +947,7 @@ dependencies = [
 
 [[package]]
 name = "ctmux-app"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
  "ctl-client",
@@ -982,7 +982,7 @@ dependencies = [
 
 [[package]]
 name = "ctmux-avt"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "pretty_assertions",
  "proptest",
@@ -996,7 +996,7 @@ dependencies = [
 
 [[package]]
 name = "ctmux-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "clap",
  "ctmux-client",
@@ -1012,7 +1012,7 @@ dependencies = [
 
 [[package]]
 name = "ctmux-client"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "crossterm",
  "ctl-core",
@@ -1028,7 +1028,7 @@ dependencies = [
 
 [[package]]
 name = "ctmux-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ctmux-proto",
  "serde",
@@ -1038,7 +1038,7 @@ dependencies = [
 
 [[package]]
 name = "ctmux-ipc"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ctl-core",
  "ctmux-proto",
@@ -1055,7 +1055,7 @@ dependencies = [
 
 [[package]]
 name = "ctmux-process-info"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "libc",
  "libproc",
@@ -1064,7 +1064,7 @@ dependencies = [
 
 [[package]]
 name = "ctmux-proto"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ctl-core",
  "serde",
@@ -1075,7 +1075,7 @@ dependencies = [
 
 [[package]]
 name = "ctmux-tui"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
  "clap",
@@ -1099,7 +1099,7 @@ dependencies = [
 
 [[package]]
 name = "ctmuxd"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "clap",
  "ctl-core",

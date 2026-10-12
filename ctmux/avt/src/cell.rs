@@ -3,7 +3,8 @@ use crate::pen::Pen;
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct Cell(char, Occupancy, Pen);
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum Occupancy {
     Single,
     WideHead,

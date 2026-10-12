@@ -1,6 +1,7 @@
 // Modified for ctmux: expose the primary cursor-line resize policy on Builder.
 use crate::line::Line;
 use crate::parser::{self, Parser};
+use crate::state::{StateError, StateLimits, VtState};
 use crate::terminal::{Cursor, Terminal};
 
 #[derive(Debug)]
@@ -10,6 +11,29 @@ pub struct Vt {
 }
 
 impl Vt {
+    /// Capture exact runtime state without draining changes or collecting history.
+    pub fn export_state(&self) -> VtState {
+        VtState::new(self.parser.export_state(), self.terminal.export_state())
+    }
+
+    /// Restore runtime state after validating default bounds and invariants.
+    pub fn from_state(state: VtState) -> Result<Self, StateError> {
+        Self::from_state_with_limits(state, StateLimits::default())
+    }
+
+    /// Restore runtime state with caller-selected bounds.
+    ///
+    /// All validation happens before reconstruction. The serialized input itself
+    /// must be byte bounded by the caller before serde deserialization.
+    pub fn from_state_with_limits(state: VtState, limits: StateLimits) -> Result<Self, StateError> {
+        state.validate(&limits)?;
+        let (parser, terminal) = state.into_parts();
+        Ok(Self {
+            parser: Parser::from_state(parser)?,
+            terminal: terminal.into_terminal(),
+        })
+    }
+
     pub fn builder() -> Builder {
         Builder::default()
     }

@@ -49,6 +49,7 @@ clarifications and links may update the existing document.
 | [0015](0015-logging-audit.md) | Local diagnostic logs and credential audit history | Implemented |
 | [0016](0016-shared-actions.md) | Shared typed actions across ctl clients | Implemented |
 | [0017](0017-shell-session-management.md) | Manage persistent sessions from ctl shell | Implemented |
+| [0018](0018-daemon-hotreload.md) | Replace daemon code while preserving live work | Proposed |
 
 ## Current design and implementation history
 

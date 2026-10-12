@@ -1,7 +1,14 @@
 //! Input modes not retained by the screen emulator's ANSI checkpoints.
 
+mod state;
+
+pub use state::TerminalInputModesState;
+
+use serde::{Deserialize, Serialize};
+
 /// Which pointer events an application requests.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MouseTracking {
   #[default]
   None,
@@ -32,9 +39,11 @@ const UTF8: u8 = 1;
 const SGR: u8 = 2;
 const URXVT: u8 = 4;
 const SGR_PIXELS: u8 = 8;
+const MAX_CSI_PARAMETER_BYTES: usize = 64;
 
 /// The xterm modified-character reporting level requested by the application.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ModifyOtherKeys {
   #[default]
   Off,
@@ -80,7 +89,8 @@ impl MouseModes {
   }
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 enum Control {
   #[default]
   Ground,
@@ -184,7 +194,7 @@ impl TerminalInputModes {
           }
         } else if ch.is_ascii_control() {
           self.control = Control::Csi(parameters);
-        } else if (' '..='?').contains(&ch) && parameters.len() < 64 {
+        } else if (' '..='?').contains(&ch) && parameters.len() < MAX_CSI_PARAMETER_BYTES {
           parameters.push(ch);
           self.control = Control::Csi(parameters);
         } else {

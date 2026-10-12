@@ -156,6 +156,23 @@ async fn ordered_sessions(daemon: &TestDaemon) -> Result<Vec<SessionInfo>> {
   Ok(sessions)
 }
 
+async fn wait_session_removed(daemon: &TestDaemon, session_id: &str) -> Result<Vec<SessionInfo>> {
+  let deadline = Instant::now() + Duration::from_secs(5);
+  loop {
+    let sessions = ordered_sessions(daemon).await?;
+    if !sessions
+      .iter()
+      .any(|session| session.session_id == session_id)
+    {
+      return Ok(sessions);
+    }
+    if Instant::now() >= deadline {
+      return Err(format!("terminated navigation session remains registered: {sessions:?}").into());
+    }
+    sleep(Duration::from_millis(10)).await;
+  }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pane_numbers_and_last_pane_preserve_frozen_copy_and_input_identity() -> Result<()> {
   let mut daemon = TestDaemon::start().await?;
@@ -435,7 +452,10 @@ async fn session_manager_names_new_work_confirms_termination_and_resumes_existin
       },
     )
     .await?;
-  assert_eq!(ordered_sessions(&daemon).await?.len(), 2);
+  // Termination acknowledges the kill request before the waiter reaps the
+  // process and removes its registry entry. The picker updates optimistically.
+  let remaining = wait_session_removed(&daemon, &created.session_id).await?;
+  assert_eq!(remaining.len(), 2);
   tui.send(b"\r")?;
   input(&mut tui, "alpha", "existing-work-preserved").await?;
   targeted_session_commands(&mut tui, &daemon).await?;

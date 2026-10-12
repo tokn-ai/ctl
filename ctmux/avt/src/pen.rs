@@ -1,6 +1,7 @@
 use crate::color::Color;
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Pen {
     pub(crate) foreground: Option<Color>,
     pub(crate) background: Option<Color>,
@@ -8,7 +9,8 @@ pub struct Pen {
     pub(crate) attrs: u8,
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Intensity {
     Normal,
     Bold,

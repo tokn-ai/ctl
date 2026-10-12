@@ -20,6 +20,17 @@ objc2 = "0.6.4"
 security-framework = { version = "3.7", features = ["OSX_10_15"] }
 security-framework-sys = { version = "2.17", features = ["OSX_10_15"] }
 
+[dev-dependencies]
+serde_json.workspace = true
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+block2 = "0.6.2"
+
+[[test]]
+name = "native_reuse_probe"
+path = "tests/native_reuse_probe.rs"
+harness = false
+
 [lints.rust]
 unsafe_code = "deny"
 

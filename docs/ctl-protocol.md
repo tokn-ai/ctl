@@ -70,8 +70,21 @@ the local OpenSSH control check. Shared endpoints remain externally owned, and
 Disconnect removes the hint before releasing ctld's listeners. Explicit Connect
 reevaluates configuration; passive checks keep using the previous selection.
 Connections established before this metadata support need one explicit Connect
-to register their endpoint. Private masters still expire after five idle minutes;
-configured masters retain their OpenSSH `ControlPersist` policy.
+to register their endpoint. A committed private master has one local mux-client
+lease held by ctld, so it does not expire merely because its application channels
+are idle. The lease opens no remote shell and performs no credential access.
+Explicit Disconnect, endpoint replacement, and daemon shutdown release it. If
+ctld crashes, the operating system closes the descriptor and OpenSSH's existing
+five-minute `ControlPersist` timeout resumes once no clients remain. Network
+keepalives still bound broken transports. Sleep or locking revokes credential
+approval without intentionally tearing down an established SSH connection.
+Configured shared masters retain their owner's OpenSSH lifetime and keepalive
+policy; passive status checks never acquire a lease.
+
+The lease relies on OpenSSH's local mux clients being counted as active channels
+by [channel_still_open](https://github.com/openssh/openssh-portable/blob/V_9_9_P1/channels.c#L841-L880),
+which suspends its [ControlPersist idle timer](https://github.com/openssh/openssh-portable/blob/V_9_9_P1/clientloop.c#L225-L251).
+This is a broker implementation detail; no ctl protocol messages or versions change.
 
 Without `--host`, transport-requiring `ctl ctmux` commands connect directly to
 the current user's owner-only local `ctmuxd` endpoint and do not start SSH or

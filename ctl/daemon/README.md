@@ -5,6 +5,13 @@ Per-user SSH connection and credential broker for ctl.
 Installs `ctld`, the companion daemon used by `ctl` and the ctmux desktop app.
 It owns shared SSH connections, port forwards, and VPN container lifecycles.
 
+Committed private SSH masters retain one local control-socket lease while
+ctld owns the connection, preventing idle expiry without a remote shell or
+credential read. Disconnect and shutdown release it; daemon death restores
+OpenSSH's five-minute idle cleanup once no clients remain. Configured shared
+masters keep their owner's lifetime policy. See the
+[lifetime and authorization investigation](../../docs/connection-authorization-reuse.md).
+
 Active `ctl` TUI shells register their exact SSH routes through the ctld 1.1.16
 recovery-watch contract. On macOS, full wake and unlock can request one grouped
 native authorization for exact saved-credential bindings of those open shell

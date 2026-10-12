@@ -454,8 +454,12 @@ connection method. Task references and port forwards also retain host ownership.
 A failed target reports its own error without hiding successful targets.
 OpenSSH remains responsible for key contents, proxies, host verification, and
 the encrypted transport. On macOS/Linux, the per-user `ctld` owns explicit
-OpenSSH control masters shared by the desktop and `ctl`; each master persists
-for five idle minutes. All logical service channels require the selected master
+OpenSSH control masters shared by the desktop and `ctl`. Ctld retains one local
+mux-client descriptor for each committed private master, keeping its transport
+alive while ctld owns the connection. Releasing that lease, including on daemon
+death, restores OpenSSH's five-minute idle cleanup once no clients remain.
+Configured shared masters retain their owner's lifetime policy. All logical
+service channels require the selected master
 with batch mode enabled, so they cannot race by independently prompting or
 using incidental user `ControlMaster` configuration. The daemon's owner-only
 Unix socket carries a random-capability askpass request to the initiating

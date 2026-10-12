@@ -21,6 +21,12 @@ pub use native::{
 #[cfg(target_os = "macos")]
 pub use session::{SessionResume, SessionState, SessionSubscription, with_session_monitor};
 
+// This bridge exists only in tests. The standalone manual target includes this
+// module so its main thread can service the native session monitor.
+#[cfg(all(target_os = "macos", test))]
+#[allow(unused_imports)] // Only the standalone manual target invokes this bridge.
+pub(crate) use native::run_delayed_reuse_probe;
+
 /// Application-local error: the owned inventory exceeds the discovery budget.
 pub const ATTRIBUTE_SCAN_LIMIT: i32 = -1_000_002;
 /// Owned source items have duplicate selectors and cannot be identified safely.

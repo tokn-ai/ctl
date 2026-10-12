@@ -2,7 +2,7 @@
 
 - Status: Implemented
 - Created: 2026-10-09
-- Updated: 2026-10-11
+- Updated: 2026-10-12
 - Implementation PRs: [#47](https://github.com/tokn-ai/ctl/pull/47),
   [#53](https://github.com/tokn-ai/ctl/pull/53),
   [#77](https://github.com/tokn-ai/ctl/pull/77),
@@ -156,9 +156,15 @@ non-macOS Keychain emulation, and guaranteed prompt-free reconnection.
 The observed macOS refusal of a previously authenticated context has not been
 explained. The broker now makes refusal visible and denies UI during reuse;
 24-hour retention still does not guarantee that macOS will honor the context.
+The October 12 wake trace confirmed that the same native context was retained
+until macOS refused the read. A separate OpenSSH idle expiry caused the
+unnecessary reconnect preceding that read. Private-master lifetime leases
+address the idle expiry; synthetic delayed-reuse studies cover both current
+and legacy item protection without claiming the native refusal is resolved.
 
 ## Detailed specifications
 
 - [Credentials, identity verification, and approval](../credentials.md)
 - [Connection transitions](../connection-state.md)
 - [Protocol versions and mutation compatibility](../protocol-versioning.md)
+- [Idle lifetime and native reuse investigation](../connection-authorization-reuse.md)

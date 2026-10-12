@@ -52,6 +52,14 @@ impl Control {
     Ok(())
   }
 
+  pub(super) fn matches(&self, endpoint: &MasterEndpoint) -> bool {
+    !endpoint.shared
+      && self.socket.is_some()
+      && self.path == endpoint.control_path
+      && self.identity.is_some()
+      && socket_identity(&self.path) == self.identity
+  }
+
   fn pin_for_cleanup(&mut self) -> io::Result<()> {
     if self.socket.is_some() {
       return Ok(());

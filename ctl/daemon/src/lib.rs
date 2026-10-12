@@ -69,7 +69,7 @@ use shared_forwarding::SharedForwardRegistry;
 use target_lifecycle::TargetLifecycle;
 
 const SSH_PROGRAM: &str = "ssh";
-const MASTER_IDLE_SECONDS: u64 = 300;
+const MASTER_ORPHAN_IDLE_SECONDS: u64 = 300;
 const MASTER_START_TIMEOUT: Duration = Duration::from_mins(3);
 const MASTER_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const MASTER_CHECK_TIMEOUT: Duration = Duration::from_secs(2);
@@ -91,6 +91,8 @@ struct State {
   targets: Mutex<HashMap<String, Arc<TargetLifecycle>>>,
   forwards: AsyncMutex<ForwardRegistry>,
   configured_connections: Mutex<HashMap<String, ConnectionLease>>,
+  #[cfg(unix)]
+  private_masters: Mutex<HashMap<String, master_ownership::PrivateMasterLease>>,
   connection_correlations: Mutex<HashMap<PathBuf, ConnectionCorrelation>>,
   endpoint_registry: endpoint_registry::Registry,
   shared_forwards: AsyncMutex<SharedForwardRegistry>,
@@ -164,6 +166,60 @@ struct ConnectionLease {
 }
 
 impl State {
+  #[cfg(unix)]
+  async fn private_lease_for_reuse(
+    &self,
+    target: &SshTarget,
+    endpoint: &MasterEndpoint,
+  ) -> Result<Option<master_ownership::PrivateMasterLease>, RequestError> {
+    if endpoint.shared
+      || self
+        .private_masters
+        .lock()
+        .unwrap()
+        .get(&target_key(target))
+        .is_some_and(|lease| lease.matches(endpoint))
+    {
+      return Ok(None);
+    }
+    master_ownership::PrivateMasterLease::attach(endpoint)
+      .await
+      .map(Some)
+      .map_err(RequestError::StartMaster)
+  }
+
+  #[cfg(unix)]
+  fn retain_private_master(
+    &self,
+    target: &SshTarget,
+    lease: Option<master_ownership::PrivateMasterLease>,
+  ) {
+    if let Some(lease) = lease {
+      self
+        .private_masters
+        .lock()
+        .unwrap()
+        .insert(target_key(target), lease);
+    }
+  }
+
+  fn release_private_master(&self, target: &SshTarget) {
+    #[cfg(unix)]
+    self
+      .private_masters
+      .lock()
+      .unwrap()
+      .remove(&target_key(target));
+    #[cfg(not(unix))]
+    let _ = target;
+  }
+
+  #[cfg(unix)]
+  fn release_master_leases(&self) {
+    self.private_masters.lock().unwrap().clear();
+    self.configured_connections.lock().unwrap().clear();
+  }
+
   fn endpoint(&self, target: &SshTarget) -> Option<MasterEndpoint> {
     if !target.uses_ssh_config_master() {
       return Some(MasterEndpoint::managed(target));
@@ -511,6 +567,10 @@ async fn run_with_approvals(
     .await;
   vpn_owner.shutdown().await;
   state.shared_forwards.lock().await.shutdown().await;
+  // Native authorization work may still hold an Arc<State> after its async
+  // waiter is canceled. Release connection leases before exposing the endpoint
+  // to a replacement owner, without waiting for those references to disappear.
+  state.release_master_leases();
   drop(state);
   drop(listener);
   drop(guard);
@@ -950,38 +1010,16 @@ async fn ensure_master_with_interaction_inner(
         .await??;
     }
   }
-  let control_path = endpoint.control_path.clone();
   if reused {
-    ctl_core::observability::connection_reused(
-      "021f9959-97bc-4610-83f8-56035ae15b50",
-      &target_key(&target),
-      history_endpoint(&target),
-      state.correlation(&endpoint),
-    );
-    state.adopt(&target, &endpoint, None)?;
-    attempt
-      .run(async {
-        state
-          .forwards
-          .lock()
-          .await
-          .activate(&SshForwardControl { state: &state }, &target)
-          .await;
-      })
-      .await?;
-    let recovery = if let Some(recovery) = &recovery {
-      Some(attempt.run(recovery.prepare(&state)).await?)
-    } else {
-      None
-    };
-    return attempt
-      .run(publish_reused_master_ready(
-        stream,
-        &state,
-        control_path,
-        recovery,
-      ))
-      .await?;
+    return reuse_ready_master(
+      stream,
+      &state,
+      &target,
+      &endpoint,
+      &mut attempt,
+      recovery.as_ref(),
+    )
+    .await;
   }
   if !interactive {
     lifecycle.allow_background_connection()?;
@@ -1017,6 +1055,53 @@ async fn ensure_master_with_interaction_inner(
     None,
   );
   result
+}
+
+async fn reuse_ready_master(
+  stream: &mut ctl_ipc::Stream,
+  state: &Arc<State>,
+  target: &SshTarget,
+  endpoint: &MasterEndpoint,
+  attempt: &mut target_lifecycle::TargetAttempt,
+  recovery: Option<&manual_recovery::Capture>,
+) -> Result<(), RequestError> {
+  #[cfg(unix)]
+  let private_lease = attempt
+    .run(state.private_lease_for_reuse(target, endpoint))
+    .await??;
+  ctl_core::observability::connection_reused(
+    "021f9959-97bc-4610-83f8-56035ae15b50",
+    &target_key(target),
+    history_endpoint(target),
+    state.correlation(endpoint),
+  );
+  state.adopt(target, endpoint, None)?;
+  attempt
+    .run(async {
+      state
+        .forwards
+        .lock()
+        .await
+        .activate(&SshForwardControl { state }, target)
+        .await;
+    })
+    .await?;
+  let recovery = if let Some(recovery) = recovery {
+    Some(attempt.run(recovery.prepare(state)).await?)
+  } else {
+    None
+  };
+  attempt
+    .run(publish_reused_master_ready(
+      stream,
+      state,
+      target,
+      endpoint,
+      #[cfg(unix)]
+      private_lease,
+      recovery,
+    ))
+    .await?
 }
 
 async fn establish_master(
@@ -1117,7 +1202,12 @@ async fn publish_master_ready(
   // All authorization and connection work has committed. A normal client
   // closes its request socket immediately after reading MasterReady; it must
   // not cancel the committed master while response delivery finishes.
-  let _target_guard = process.connected();
+  #[cfg(unix)]
+  let mut committed = process.connected();
+  #[cfg(not(unix))]
+  let _committed = process.connected();
+  #[cfg(unix)]
+  state.retain_private_master(target, committed.lease.take());
   if let Some(recovery) = recovery {
     recovery.publish(state);
   }
@@ -1139,15 +1229,27 @@ async fn publish_master_ready(
 async fn publish_reused_master_ready(
   stream: &mut ctl_ipc::Stream,
   state: &State,
-  control_path: PathBuf,
+  target: &SshTarget,
+  endpoint: &MasterEndpoint,
+  #[cfg(unix)] private_lease: Option<master_ownership::PrivateMasterLease>,
   recovery: Option<manual_recovery::Ready>,
 ) -> Result<(), RequestError> {
   // The existing master and its adopted route are already committed. Publish
   // before the response so a normal client EOF cannot cancel shell recovery.
+  #[cfg(unix)]
+  state.retain_private_master(target, private_lease);
+  #[cfg(not(unix))]
+  let _ = target;
   if let Some(recovery) = recovery {
     recovery.publish(state);
   }
-  ctl_ipc::write_frame(stream, &ServerMessage::MasterReady { control_path }).await?;
+  ctl_ipc::write_frame(
+    stream,
+    &ServerMessage::MasterReady {
+      control_path: endpoint.control_path.clone(),
+    },
+  )
+  .await?;
   Ok(())
 }
 
@@ -1411,6 +1513,7 @@ async fn reuse_master_or_prepare(
   if let Some(previous) = state.existing_endpoint(target)? {
     let changed = previous.control_path != *control_path || previous.shared != endpoint.shared;
     if changed || !ready {
+      state.release_private_master(target);
       // Our shared listeners remain under ctld's control even when the master
       // dies. A dead private master instead needs stale-socket cleanup; asking
       // that socket to cancel a forward would prevent reconnection forever.
@@ -1815,6 +1918,9 @@ async fn disconnect_master_inner(
     );
   }
   let _target_guard = lifecycle.lock.lock().await;
+  // Releasing our local client allows finite OpenSSH idle cleanup even if a
+  // later control command fails. Existing user channels remain unaffected.
+  state.release_private_master(target);
   let mut forwards = state.forwards.lock().await;
   forwards.pause(target);
   let endpoint = state.existing_endpoint(target)?;
@@ -2208,7 +2314,12 @@ fn master_command_with_identities(
       // in-memory tail so later master loss can emit a fixed, nonsecret reason.
       .arg("-v")
       .args(["-o", "ControlMaster=yes"])
-      .args(["-o", &format!("ControlPersist={MASTER_IDLE_SECONDS}")])
+      // The committed native lease suspends this timer while ctld owns the
+      // connection. Keep a finite fallback after shutdown or process death.
+      .args([
+        "-o",
+        &format!("ControlPersist={MASTER_ORPHAN_IDLE_SECONDS}"),
+      ])
       // A responsive local mux socket does not prove a live remote transport.
       // Bound silent network failures so existing channels can disconnect and
       // reconnect instead of indefinitely reusing a blackholed master.

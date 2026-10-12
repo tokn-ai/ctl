@@ -284,9 +284,16 @@ async fn reused_interactive_success_notifies_before_reply_but_quiet_reuse_does_n
     };
     let path = crate::control_path(&target);
     let (mut client, mut server) = ctl_ipc::Stream::pair().unwrap();
-    crate::publish_reused_master_ready(&mut server, &state, path.clone(), recovery)
-      .await
-      .unwrap();
+    crate::publish_reused_master_ready(
+      &mut server,
+      &state,
+      &target,
+      &crate::MasterEndpoint::managed(&target),
+      None,
+      recovery,
+    )
+    .await
+    .unwrap();
     assert_eq!(updates.borrow().is_some(), interactive);
     assert!(matches!(
       ctl_ipc::read_frame::<_, ctl_ipc::ServerMessage>(&mut client).await.unwrap(),

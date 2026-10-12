@@ -810,10 +810,12 @@ dependencies = [
 name = "ctl-keychain-client"
 version = "0.1.0"
 dependencies = [
+ "block2",
  "core-foundation 0.10.1",
  "objc2",
  "security-framework",
  "security-framework-sys",
+ "serde_json",
  "zeroize",
 ]
 

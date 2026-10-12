@@ -28,6 +28,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use zeroize::Zeroizing;
 
+#[cfg(test)]
+#[allow(dead_code)] // Executed by the standalone manual target, not lib tests.
+mod delayed_reuse_probe;
+
+#[cfg(test)]
+#[allow(dead_code)] // The standalone manual target includes this native wrapper.
+pub(crate) fn run_delayed_reuse_probe(session: Arc<super::SessionState>) -> Result<(), Error> {
+  delayed_reuse_probe::run(session)
+}
+
 // Public Security.framework symbols absent from security-framework-sys 2.17.
 #[link(name = "Security", kind = "framework")]
 unsafe extern "C" {

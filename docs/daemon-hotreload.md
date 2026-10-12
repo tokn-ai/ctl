@@ -25,7 +25,7 @@ and [Linux execve](https://www.man7.org/linux/man-pages/man2/execve.2.html).
 
 | Resource | Current owner or behavior | Required preservation |
 | --- | --- | --- |
-| Private SSH transport | External OpenSSH master; stable target-derived mux path | Same master, mux socket, endpoint policy, and connection correlation |
+| Private SSH transport | External OpenSSH master; stable target-derived mux path and ctld-held local mux-client lease | Same master, lease FD, mux socket identity, endpoint policy, and connection correlation |
 | Shared SSH master | External master plus optional ctld-held anchor pipe | Preserve anchor FD and lifetime semantics |
 | VPN tunnel and SOCKS sessions | Shared Docker/Podman container with renewed interest | Same immutable container ID and uninterrupted acknowledged heartbeat interest |
 | Private-master forwards | OpenSSH listeners, metadata tracked by ctld | Adopt definitions and listeners without cancel/re-add |
@@ -40,7 +40,10 @@ Ctld's [shutdown path](../ctl/daemon/src/lib.rs) aborts request tasks, cancels
 forwards, shuts down VPN renewal and shared relays, and drops anchors/listeners.
 The existing [ctld lifecycle](../ctl/daemon/src/lifecycle.rs) transfers a restart
 request to this destructive owner loop. Private master startup uses
-`ssh -f -M -N` and `ControlPersist=300`; [shared anchors](../ctl/daemon/src/ssh_config_master.rs)
+`ssh -f -M -N` and `ControlPersist=300`. A committed private master retains one
+local mux-client lease; this suspends idle expiry without opening a remote
+session. The lease must survive exec and retain the same socket identity;
+dropping it restores the finite orphan timeout. [Shared anchors](../ctl/daemon/src/ssh_config_master.rs)
 hold a remote `cat` channel open. Closing an anchor changes lifetime policy even
 when other channels temporarily keep the master alive.
 
@@ -118,7 +121,7 @@ the OS/adapter boundary, not complete daemon support.
 ## Complete checkpoint requirements
 
 For ctld, preserve endpoint mappings and socket identities, correlations,
-ownership policy, shared anchors, forwarding definitions and active relay
+ownership policy, private mux-client leases, shared anchors, forwarding definitions and active relay
 buffers, child identity, VPN descriptors/interests, and target pause/manual
 disconnect/authentication-required state and generations. Quiesce resource-bearing
 operations at an exportable boundary; finish or refuse protected credential reads,

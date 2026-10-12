@@ -12,6 +12,31 @@ use tokio::sync::{OwnedMutexGuard, oneshot};
 
 use super::MasterEndpoint;
 
+/// A local mux client keeps OpenSSH's finite `ControlPersist` timer suspended.
+/// Closing this descriptor (including on ctld crash) restores idle cleanup;
+/// no remote session, credential read, or additional SSH process is needed.
+#[cfg(unix)]
+pub(super) struct PrivateMasterLease(private_control::Control);
+
+#[cfg(unix)]
+impl PrivateMasterLease {
+  pub(super) async fn attach(endpoint: &MasterEndpoint) -> io::Result<Self> {
+    let mut control = private_control::Control::new(endpoint);
+    control.pin().await?;
+    Ok(Self(control))
+  }
+
+  pub(super) fn matches(&self, endpoint: &MasterEndpoint) -> bool {
+    self.0.matches(endpoint)
+  }
+}
+
+pub(super) struct ConnectedMaster {
+  _target_guard: OwnedMutexGuard<()>,
+  #[cfg(unix)]
+  pub(super) lease: Option<PrivateMasterLease>,
+}
+
 #[derive(Clone, Default)]
 pub(super) struct CleanupBarrier(Arc<Mutex<Option<oneshot::Receiver<io::Result<()>>>>>);
 
@@ -83,7 +108,7 @@ impl PendingMaster {
     Ok(())
   }
 
-  pub(super) fn connected(mut self) -> OwnedMutexGuard<()> {
+  pub(super) fn connected(mut self) -> ConnectedMaster {
     let child = self.child.take().expect("pending SSH process");
     if self.shared {
       super::release_shared_process(child);
@@ -95,7 +120,11 @@ impl PendingMaster {
         let _ = child.wait().await;
       });
     }
-    self.target_guard.take().expect("startup target lock")
+    ConnectedMaster {
+      _target_guard: self.target_guard.take().expect("startup target lock"),
+      #[cfg(unix)]
+      lease: (!self.shared).then(|| PrivateMasterLease(std::mem::take(&mut self.control))),
+    }
   }
 }
 

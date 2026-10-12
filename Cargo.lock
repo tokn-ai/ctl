@@ -682,7 +682,6 @@ version = "0.1.1"
 dependencies = [
  "clap",
  "ctl-client",
- "ctl-core",
  "ctl-ipc",
  "ctl-proto",
  "ctl-task-ipc",
@@ -697,6 +696,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
+ "tokn-ctl-core",
  "uuid",
 ]
 
@@ -708,7 +708,6 @@ dependencies = [
  "cliclack",
  "comfy-table",
  "ctl-client",
- "ctl-core",
  "ctl-ipc",
  "ctl-proto",
  "ctl-task-cli",
@@ -736,6 +735,7 @@ dependencies = [
  "thiserror 2.0.20",
  "time",
  "tokio",
+ "tokn-ctl-core",
  "unicode-width 0.1.14",
  "url",
  "uuid",
@@ -748,7 +748,6 @@ name = "ctl-client"
 version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
- "ctl-core",
  "ctl-ipc",
  "ctl-proto",
  "ctl-task-client",
@@ -767,30 +766,15 @@ dependencies = [
  "tar",
  "thiserror 2.0.20",
  "tokio",
+ "tokn-ctl-core",
  "uuid",
  "zeroize",
-]
-
-[[package]]
-name = "ctl-core"
-version = "0.1.1"
-dependencies = [
- "dirs",
- "rusqlite",
- "rustix",
- "serde",
- "serde_json",
- "sha2",
- "time",
- "tokio",
- "uuid",
 ]
 
 [[package]]
 name = "ctl-ipc"
 version = "0.1.1"
 dependencies = [
- "ctl-core",
  "ctl-proto",
  "dirs",
  "interprocess",
@@ -800,6 +784,7 @@ dependencies = [
  "sha2",
  "thiserror 2.0.20",
  "tokio",
+ "tokn-ctl-core",
  "url",
  "uuid",
  "widestring",
@@ -823,10 +808,10 @@ dependencies = [
 name = "ctl-proto"
 version = "0.1.1"
 dependencies = [
- "ctl-core",
  "serde",
  "serde_json",
  "tokio",
+ "tokn-ctl-core",
  "uuid",
 ]
 
@@ -835,7 +820,6 @@ name = "ctl-task-cli"
 version = "0.1.1"
 dependencies = [
  "clap",
- "ctl-core",
  "ctl-task-client",
  "ctl-task-ipc",
  "ctl-task-proto",
@@ -845,6 +829,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
+ "tokn-ctl-core",
  "uuid",
 ]
 
@@ -852,24 +837,24 @@ dependencies = [
 name = "ctl-task-client"
 version = "0.1.1"
 dependencies = [
- "ctl-core",
  "ctl-task-ipc",
  "ctl-task-proto",
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
+ "tokn-ctl-core",
 ]
 
 [[package]]
 name = "ctl-task-ipc"
 version = "0.1.1"
 dependencies = [
- "ctl-core",
  "ctl-task-proto",
  "dirs",
  "interprocess",
  "rustix",
  "tokio",
+ "tokn-ctl-core",
  "uuid",
  "widestring",
 ]
@@ -878,23 +863,23 @@ dependencies = [
 name = "ctl-task-proto"
 version = "0.1.1"
 dependencies = [
- "ctl-core",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
+ "tokn-ctl-core",
 ]
 
 [[package]]
 name = "ctl-task-store"
 version = "0.1.1"
 dependencies = [
- "ctl-core",
  "ctl-task-proto",
  "serde",
  "serde_json",
  "sha2",
  "thiserror 2.0.20",
+ "tokn-ctl-core",
  "uuid",
 ]
 
@@ -903,7 +888,6 @@ name = "ctl-taskd"
 version = "0.1.1"
 dependencies = [
  "clap",
- "ctl-core",
  "ctl-task-ipc",
  "ctl-task-proto",
  "ctmux-ipc",
@@ -917,6 +901,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
+ "tokn-ctl-core",
  "uuid",
  "windows 0.62.2",
 ]
@@ -927,7 +912,6 @@ version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
  "clap",
- "ctl-core",
  "ctl-ipc",
  "ctl-keychain-client",
  "ctl-proto",
@@ -940,6 +924,7 @@ dependencies = [
  "sha2",
  "thiserror 2.0.20",
  "tokio",
+ "tokn-ctl-core",
  "url",
  "uuid",
  "zeroize",
@@ -951,7 +936,6 @@ version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
  "ctl-client",
- "ctl-core",
  "ctl-ipc",
  "ctl-proto",
  "ctl-task-client",
@@ -976,6 +960,7 @@ dependencies = [
  "tauri-build",
  "thiserror 2.0.20",
  "tokio",
+ "tokn-ctl-core",
  "uuid",
  "zeroize",
 ]
@@ -1015,7 +1000,6 @@ name = "ctmux-client"
 version = "0.1.1"
 dependencies = [
  "crossterm",
- "ctl-core",
  "ctmux-avt",
  "ctmux-proto",
  "serde",
@@ -1023,6 +1007,7 @@ dependencies = [
  "sha2",
  "thiserror 2.0.20",
  "tokio",
+ "tokn-ctl-core",
  "uuid",
 ]
 
@@ -1040,7 +1025,6 @@ dependencies = [
 name = "ctmux-ipc"
 version = "0.1.1"
 dependencies = [
- "ctl-core",
  "ctmux-proto",
  "dirs",
  "interprocess",
@@ -1049,6 +1033,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
+ "tokn-ctl-core",
  "uuid",
  "widestring",
 ]
@@ -1066,11 +1051,11 @@ dependencies = [
 name = "ctmux-proto"
 version = "0.1.1"
 dependencies = [
- "ctl-core",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
+ "tokn-ctl-core",
 ]
 
 [[package]]
@@ -1102,7 +1087,6 @@ name = "ctmuxd"
 version = "0.1.1"
 dependencies = [
  "clap",
- "ctl-core",
  "ctmux-avt",
  "ctmux-core",
  "ctmux-ipc",
@@ -1116,6 +1100,7 @@ dependencies = [
  "sha2",
  "thiserror 2.0.20",
  "tokio",
+ "tokn-ctl-core",
  "uuid",
 ]
 
@@ -4962,6 +4947,21 @@ dependencies = [
  "futures-sink",
  "pin-project-lite",
  "tokio",
+]
+
+[[package]]
+name = "tokn-ctl-core"
+version = "0.1.1"
+dependencies = [
+ "dirs",
+ "rusqlite",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2",
+ "time",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]

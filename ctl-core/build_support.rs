@@ -73,7 +73,7 @@ fn fingerprint(root: &Path, files: &mut [PathBuf], packaged: bool) -> String {
   let mut hash = Sha256::new();
   if packaged {
     // A registry package hashes its own sources, not the unavailable workspace.
-    hash.update(b"ctl-core package\0");
+    hash.update(b"tokn-ctl-core package\0");
   }
   for path in files {
     println!("cargo:rerun-if-changed={}", path.display());

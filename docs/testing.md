@@ -46,7 +46,8 @@ Test synchronization rules:
 ## Executable fixtures
 
 Fake Unix commands should use `ctl_core::test_fixtures::shell_command`. Enable
-`ctl-core`'s `test-fixtures` feature in **dev-dependencies**. The command is a
+the `tokn-ctl-core` package's `test-fixtures` feature in **dev-dependencies**;
+the workspace dependency alias is `ctl-core`. The command is a
 symlink to the checked-in launcher; its script lives in `<command>.script` and
 is read by `/bin/sh`. No test writes the executable inode, even when another
 child inherits a writable script descriptor. `$0`, arguments, stdin, environment,

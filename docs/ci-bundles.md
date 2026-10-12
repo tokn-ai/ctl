@@ -149,7 +149,7 @@ export APPLE_API_KEY=YOUR_KEY_ID
 export APPLE_API_ISSUER=YOUR_ISSUER_ID
 
 node scripts/ci/build-ctl-bundle.mts \
-  aarch64-apple-darwin 0.1.0 "$(git rev-parse HEAD)" target/ctl-cli-assets
+  aarch64-apple-darwin 0.1.1 "$(git rev-parse HEAD)" target/ctl-cli-assets
 ```
 
 Install the requested Rust target first. The command builds `ctld`, signs its

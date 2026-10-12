@@ -240,7 +240,7 @@ selected app's signature, provisioning, and metadata against its own manifest,
 so different client release versions or source fingerprints do not prevent
 compatible reuse. Discovery and setup never restart an existing daemon.
 
-`ctl-core::component` embeds the release version, source revision, dirty flag,
+`ctl_core::component` embeds the release version, source revision, dirty flag,
 and a deterministic fingerprint of Rust component sources and dependency definitions.
 The fingerprint normalizes platform path separators and text line endings. It
 excludes credentials, runtime configuration, and build output. Equal release

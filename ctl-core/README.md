@@ -1,4 +1,12 @@
-# ctl-core
+# tokn-ctl-core
+
+The crates.io package is `tokn-ctl-core`; its Rust library name is `ctl_core`.
+Use the `ctl-core` dependency alias to keep existing imports:
+
+```toml
+[dependencies]
+ctl-core = { package = "tokn-ctl-core", version = "=0.1.1" }
+```
 
 Shared foundations for ctl and ctmux components:
 

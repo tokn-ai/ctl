@@ -678,11 +678,10 @@ dependencies = [
 
 [[package]]
 name = "ctl-agent"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "clap",
  "ctl-client",
- "ctl-core",
  "ctl-ipc",
  "ctl-proto",
  "ctl-task-ipc",
@@ -697,18 +696,18 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
+ "tokn-ctl-core",
  "uuid",
 ]
 
 [[package]]
 name = "ctl-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "clap",
  "cliclack",
  "comfy-table",
  "ctl-client",
- "ctl-core",
  "ctl-ipc",
  "ctl-proto",
  "ctl-task-cli",
@@ -736,6 +735,7 @@ dependencies = [
  "thiserror 2.0.20",
  "time",
  "tokio",
+ "tokn-ctl-core",
  "unicode-width 0.1.14",
  "url",
  "uuid",
@@ -745,10 +745,9 @@ dependencies = [
 
 [[package]]
 name = "ctl-client"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
- "ctl-core",
  "ctl-ipc",
  "ctl-proto",
  "ctl-task-client",
@@ -767,30 +766,15 @@ dependencies = [
  "tar",
  "thiserror 2.0.20",
  "tokio",
+ "tokn-ctl-core",
  "uuid",
  "zeroize",
 ]
 
 [[package]]
-name = "ctl-core"
-version = "0.1.0"
-dependencies = [
- "dirs",
- "rusqlite",
- "rustix",
- "serde",
- "serde_json",
- "sha2",
- "time",
- "tokio",
- "uuid",
-]
-
-[[package]]
 name = "ctl-ipc"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
- "ctl-core",
  "ctl-proto",
  "dirs",
  "interprocess",
@@ -800,6 +784,7 @@ dependencies = [
  "sha2",
  "thiserror 2.0.20",
  "tokio",
+ "tokn-ctl-core",
  "url",
  "uuid",
  "widestring",
@@ -808,7 +793,7 @@ dependencies = [
 
 [[package]]
 name = "ctl-keychain-client"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "block2",
  "core-foundation 0.10.1",
@@ -821,21 +806,20 @@ dependencies = [
 
 [[package]]
 name = "ctl-proto"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
- "ctl-core",
  "serde",
  "serde_json",
  "tokio",
+ "tokn-ctl-core",
  "uuid",
 ]
 
 [[package]]
 name = "ctl-task-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "clap",
- "ctl-core",
  "ctl-task-client",
  "ctl-task-ipc",
  "ctl-task-proto",
@@ -845,65 +829,65 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
+ "tokn-ctl-core",
  "uuid",
 ]
 
 [[package]]
 name = "ctl-task-client"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
- "ctl-core",
  "ctl-task-ipc",
  "ctl-task-proto",
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
+ "tokn-ctl-core",
 ]
 
 [[package]]
 name = "ctl-task-ipc"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
- "ctl-core",
  "ctl-task-proto",
  "dirs",
  "interprocess",
  "rustix",
  "tokio",
+ "tokn-ctl-core",
  "uuid",
  "widestring",
 ]
 
 [[package]]
 name = "ctl-task-proto"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
- "ctl-core",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
+ "tokn-ctl-core",
 ]
 
 [[package]]
 name = "ctl-task-store"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
- "ctl-core",
  "ctl-task-proto",
  "serde",
  "serde_json",
  "sha2",
  "thiserror 2.0.20",
+ "tokn-ctl-core",
  "uuid",
 ]
 
 [[package]]
 name = "ctl-taskd"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "clap",
- "ctl-core",
  "ctl-task-ipc",
  "ctl-task-proto",
  "ctmux-ipc",
@@ -917,17 +901,17 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
+ "tokn-ctl-core",
  "uuid",
  "windows 0.62.2",
 ]
 
 [[package]]
 name = "ctld"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
  "clap",
- "ctl-core",
  "ctl-ipc",
  "ctl-keychain-client",
  "ctl-proto",
@@ -940,6 +924,7 @@ dependencies = [
  "sha2",
  "thiserror 2.0.20",
  "tokio",
+ "tokn-ctl-core",
  "url",
  "uuid",
  "zeroize",
@@ -947,11 +932,10 @@ dependencies = [
 
 [[package]]
 name = "ctmux-app"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
  "ctl-client",
- "ctl-core",
  "ctl-ipc",
  "ctl-proto",
  "ctl-task-client",
@@ -976,13 +960,14 @@ dependencies = [
  "tauri-build",
  "thiserror 2.0.20",
  "tokio",
+ "tokn-ctl-core",
  "uuid",
  "zeroize",
 ]
 
 [[package]]
 name = "ctmux-avt"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "pretty_assertions",
  "proptest",
@@ -996,7 +981,7 @@ dependencies = [
 
 [[package]]
 name = "ctmux-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "clap",
  "ctmux-client",
@@ -1012,10 +997,9 @@ dependencies = [
 
 [[package]]
 name = "ctmux-client"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "crossterm",
- "ctl-core",
  "ctmux-avt",
  "ctmux-proto",
  "serde",
@@ -1023,12 +1007,13 @@ dependencies = [
  "sha2",
  "thiserror 2.0.20",
  "tokio",
+ "tokn-ctl-core",
  "uuid",
 ]
 
 [[package]]
 name = "ctmux-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ctmux-proto",
  "serde",
@@ -1038,9 +1023,8 @@ dependencies = [
 
 [[package]]
 name = "ctmux-ipc"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
- "ctl-core",
  "ctmux-proto",
  "dirs",
  "interprocess",
@@ -1049,13 +1033,14 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
+ "tokn-ctl-core",
  "uuid",
  "widestring",
 ]
 
 [[package]]
 name = "ctmux-process-info"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "libc",
  "libproc",
@@ -1064,18 +1049,18 @@ dependencies = [
 
 [[package]]
 name = "ctmux-proto"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
- "ctl-core",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
+ "tokn-ctl-core",
 ]
 
 [[package]]
 name = "ctmux-tui"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
  "clap",
@@ -1099,10 +1084,9 @@ dependencies = [
 
 [[package]]
 name = "ctmuxd"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "clap",
- "ctl-core",
  "ctmux-avt",
  "ctmux-core",
  "ctmux-ipc",
@@ -1116,6 +1100,7 @@ dependencies = [
  "sha2",
  "thiserror 2.0.20",
  "tokio",
+ "tokn-ctl-core",
  "uuid",
 ]
 
@@ -4962,6 +4947,21 @@ dependencies = [
  "futures-sink",
  "pin-project-lite",
  "tokio",
+]
+
+[[package]]
+name = "tokn-ctl-core"
+version = "0.1.1"
+dependencies = [
+ "dirs",
+ "rusqlite",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2",
+ "time",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]

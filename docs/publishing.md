@@ -1,6 +1,7 @@
 # Cargo publishing
 
-The Rust package family starts at `0.1.0` and supports Rust 1.97 or newer.
+The Rust package family uses the workspace release version and supports
+Rust 1.97 or newer.
 Packages use MIT except `ctmux-avt`, which retains the upstream AVT Apache-2.0
 license. Public packages explicitly target crates.io. `ctmux-app` is a desktop
 bundle and stays unpublished; its release workflow is separate.
@@ -43,7 +44,7 @@ For the first publication, publish packages in the following order, waiting
 until each package is available in the registry before its dependants:
 
 ```text
-ctl-core
+tokn-ctl-core
 ctl-keychain-client
 ctmux-process-info
 ctl-proto
@@ -167,7 +168,7 @@ notarization, and a stapled ticket. npm and PyPI installers can consume those
 same signed release archives; language-specific installers are not yet provided.
 
 Registry builds use Cargo's archive provenance and a fingerprint of the shared
-`ctl-core` package. Full checkout builds fingerprint the component
+`tokn-ctl-core` package. Full checkout builds fingerprint the component
 workspace, including embedded resources. Their fingerprints differ even for
 the same commit. These fingerprints verify a helper's own manifest and do not
 prevent reuse of a compatible selected `ctld.app` by a different CLI build. Other

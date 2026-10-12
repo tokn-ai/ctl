@@ -43,7 +43,7 @@ fn isolated_package_uses_archive_provenance_and_ignores_neighbours() {
   for name in ["ctl", "ctmux", "task", "ctmux-process-info"] {
     fixture.write(&format!("{name}/src/lib.rs"), "// enclosing source\n");
   }
-  fixture.write("ctl-core/Cargo.toml", "[package]\nname = 'ctl-core'\n");
+  fixture.write("ctl-core/Cargo.toml", "[package]\nname = 'tokn-ctl-core'\n");
   fixture.write("ctl-core/src/lib.rs", "// package source\n");
   fixture.write(
     "ctl-core/.cargo_vcs_info.json",
@@ -67,7 +67,7 @@ fn isolated_package_uses_archive_provenance_and_ignores_neighbours() {
 #[test]
 fn missing_invalid_and_dirty_provenance_never_claim_a_clean_release() {
   let fixture = Fixture::new();
-  fixture.write("Cargo.toml", "[package]\nname = 'ctl-core'\n");
+  fixture.write("Cargo.toml", "[package]\nname = 'tokn-ctl-core'\n");
   fixture.write("src/lib.rs", "// source\n");
   for provenance in [
     None,

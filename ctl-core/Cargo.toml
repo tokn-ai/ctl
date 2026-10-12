@@ -1,5 +1,5 @@
 [package]
-name = "ctl-core"
+name = "tokn-ctl-core"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,6 +10,9 @@ readme = "README.md"
 categories = ["development-tools"]
 keywords = ["ctl", "ctmux", "metadata", "storage"]
 publish = ["crates-io"]
+
+[lib]
+name = "ctl_core"
 
 [dependencies]
 dirs.workspace = true

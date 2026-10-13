@@ -198,6 +198,17 @@ status updates; reopening copy mode picks up newly synchronized history.
 When authentication or configuration requires user action, automatic retries
 stop. The pane shows `disconnected` and retains the error with `automatic retries
 stopped`, including after temporary local action notices expire.
+An inconclusive SSH control-master observation keeps retrying instead. A failed
+background check shows `Connection check failed` while pane streams remain
+connected; `Disconnected` describes an interrupted pane stream. A successful
+refresh or reattachment clears the connection notice.
+While the focused pane is disconnected, the footer shows `Enter to reconnect`
+before the error so the action stays visible in narrow terminals. Plain Enter
+retries attachment to the existing pane immediately, clearing this client's
+old retry blocker or backoff. It leaves an already pending attempt running and
+does not request authentication UI or undo an explicit host disconnect. Once
+connected, Enter goes to the running program. In copy mode, prompts, and pickers,
+Enter retains its existing copy or submit action.
 
 Press **Ctrl+B [** to inspect a frozen snapshot of the active pane's visible
 screen and its retained scrollback. The snapshot stays inside that pane; other

@@ -140,6 +140,34 @@ fn broker_restart_and_transport_failures_can_recover_without_hiding_authenticati
   )));
 }
 
+#[cfg(unix)]
+#[test]
+fn inconclusive_master_observations_retry_without_becoming_authentication() {
+  for message in [
+    "control command timed out",
+    "the SSH connection changed during the control check",
+    "could not inspect the control socket",
+    "arbitrary diagnostics",
+  ] {
+    let direct = CtlConnectError::Broker(crate::ssh_broker::Error::Daemon {
+      code: "ssh_status_unknown".into(),
+      message: message.into(),
+    });
+    assert!(retryable(&direct));
+    assert!(!is_authentication_required(&direct));
+    let nested = CtlConnectError::Target(crate::target::Error::Runtime(
+      crate::vpn::Error::Preparation(Box::new(crate::target::Error::Broker(
+        crate::ssh_broker::Error::Daemon {
+          code: "ssh_status_unknown".into(),
+          message: message.into(),
+        },
+      ))),
+    ));
+    assert!(retryable(&nested));
+    assert!(!is_authentication_required(&nested));
+  }
+}
+
 #[test]
 fn local_vpn_transport_interruptions_follow_the_same_reconnect_policy() {
   assert!(retryable(&CtlConnectError::Target(

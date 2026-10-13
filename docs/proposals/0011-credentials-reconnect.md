@@ -2,7 +2,7 @@
 
 - Status: Implemented
 - Created: 2026-10-09
-- Updated: 2026-10-12
+- Updated: 2026-10-13
 - Implementation PRs: [#47](https://github.com/tokn-ai/ctl/pull/47),
   [#53](https://github.com/tokn-ai/ctl/pull/53),
   [#77](https://github.com/tokn-ai/ctl/pull/77),
@@ -97,7 +97,20 @@ to protect replacement sockets and reporting termination failures. Authorization
 and master ownership commit before the final readiness response. Shared masters
 retain their owner's lifetime; cancellation closes only the broker's anchor.
 Unknown existing-master observations preserve the endpoint rather than initiating
-new authentication.
+new authentication. The shell retries passive observations and pane recovery
+after `ssh_status_unknown`, including control-command timeouts and observations
+superseded by a connection change. Uncertainty cannot grant permission to prepare
+a VPN or establish another master. Once observation succeeds, recovery continues
+without session reselection or an authorization event. A failed background check
+is shown separately from a disconnected pane stream. This client policy retains
+the existing ctld contract and error code.
+The disconnected live-pane footer puts `Enter to reconnect` before error details.
+Plain Enter retries the current pane through its quiet transport, without a
+session picker or replacement shell. It clears stale client blockers and retry
+deadlines while leaving an already pending attempt running. It does not override
+broker authorization or manual-disconnect policy; those errors can reappear.
+Copy mode, command prompts, session pickers, prefix commands, and connected or
+ended panes retain their existing Enter behavior.
 
 Explicit connection success publishes recovery only after SSH readiness and
 ownership commit, including when a new TUI reuses an existing master. Exact-route

@@ -11,6 +11,35 @@ struct RelayTransport {
   authentication_required: std::sync::atomic::AtomicBool,
 }
 
+struct PausedRelayTransport {
+  relay: RelayTransport,
+  paused: std::sync::atomic::AtomicBool,
+  attempts: std::sync::atomic::AtomicUsize,
+  resume: tokio::sync::Notify,
+}
+
+impl crate::Transport for PausedRelayTransport {
+  fn label(&self) -> &'static str {
+    "fixture"
+  }
+
+  fn connect(&self) -> crate::ConnectFuture<'_> {
+    Box::pin(async move {
+      self
+        .attempts
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+      if self.paused.load(std::sync::atomic::Ordering::Acquire) {
+        self.resume.notified().await;
+      }
+      self.relay.connect().await
+    })
+  }
+
+  fn archive_key(&self) -> String {
+    self.relay.archive_key()
+  }
+}
+
 struct ReplyTransport(std::sync::Mutex<Option<tokio::io::DuplexStream>>);
 
 impl crate::Transport for ReplyTransport {
@@ -277,7 +306,7 @@ async fn transported_shell_scrolls_frozen_history_and_reconnects() -> Result<()>
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn blocked_reconnect_keeps_its_cause_visible_until_explicit_reselection() -> Result<()> {
+async fn blocked_reconnect_keeps_its_cause_visible_until_enter_retries() -> Result<()> {
   use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
   let daemon = Daemon::start().await?;
@@ -314,6 +343,7 @@ async fn blocked_reconnect_keeps_its_cause_visible_until_explicit_reselection() 
   .await
   .map_err(|_| "fixture authentication failure did not block reconnects")?;
   assert_eq!(app.connection_status(), "disconnected");
+  assert!(app.message.starts_with("Disconnected:"));
   assert!(app.message.contains("automatic retries stopped"));
   assert!(!app.message.contains("retrying"));
   app.message_until = Instant::now();
@@ -321,7 +351,7 @@ async fn blocked_reconnect_keeps_its_cause_visible_until_explicit_reselection() 
   assert!(!app.status().contains("reconnecting"));
   app.size = (48, 10);
   let frame = app.frame();
-  assert!(frame.text_rows()[9].starts_with(" disconnected | SSH authentication is required"));
+  assert!(frame.text_rows()[9].starts_with(" disconnected | Enter to reconnect"));
 
   app.execute(Action::History { page_back: false }).await?;
   assert!(app.status().contains("COPY"));
@@ -346,11 +376,157 @@ async fn blocked_reconnect_keeps_its_cause_visible_until_explicit_reselection() 
   app.poll_maintenance().await;
   assert_eq!(transport.connections.load(Ordering::Relaxed), connections);
   assert_eq!(app.connection_status(), "disconnected");
-  app.select(&session).await?;
+  app
+    .key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+    .await?;
   assert!(app.maintenance.blocked_reason().is_none());
+  timeout(Duration::from_secs(5), async {
+    while !app.panes[&pane].connected {
+      app.poll_maintenance().await;
+      tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+  })
+  .await
+  .map_err(|_| "Enter did not retry the existing attachment")?;
   assert_eq!(app.connection_status(), "connected");
+  assert_eq!(app.view.as_ref().unwrap().session_id, session);
+  assert_eq!(app.focused, pane);
   assert!(!app.status().contains("SSH authentication is required"));
   assert!(!app.status().contains("automatic retries stopped"));
+  assert!(!app.status().contains("Enter to reconnect"));
+  app.detach().await;
+  Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn enter_reconnect_is_nonblocking_and_keeps_the_pending_attempt() -> Result<()> {
+  use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+  let daemon = Daemon::start().await?;
+  let transport = PausedRelayTransport {
+    relay: RelayTransport {
+      socket: daemon.directory.join("ctmux.sock"),
+      connections: AtomicUsize::new(0),
+      fail_next: AtomicBool::new(false),
+      authentication_required: AtomicBool::new(false),
+    },
+    paused: AtomicBool::new(false),
+    attempts: AtomicUsize::new(0),
+    resume: tokio::sync::Notify::new(),
+  };
+  let mut app = daemon.app(false);
+  app.transport = Some(&transport);
+  let session = create_shell(&app).await?;
+  app.start(Some(session.clone())).await?;
+  let pane = app.focused.clone();
+  app.panes[&pane].control.detach().await?;
+  timeout(Duration::from_secs(5), async {
+    while app.panes[&pane].connected {
+      app.drain().await;
+      tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+  })
+  .await?;
+  transport.paused.store(true, Ordering::Release);
+  let attempts = transport.attempts.load(Ordering::Relaxed);
+  let mut repeated_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+  repeated_enter.kind = KeyEventKind::Repeat;
+  app.key(repeated_enter).await?;
+  assert_eq!(transport.attempts.load(Ordering::Relaxed), attempts);
+
+  timeout(
+    Duration::from_millis(100),
+    app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+  )
+  .await
+  .map_err(|_| "Enter waited for a network connection")??;
+  timeout(Duration::from_millis(100), app.poll_maintenance())
+    .await
+    .map_err(|_| "reconnect maintenance blocked local input")?;
+  assert_eq!(transport.attempts.load(Ordering::Relaxed), attempts + 2);
+  assert!(app.status().contains("Enter to reconnect"));
+
+  for key in [
+    repeated_enter,
+    KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+  ] {
+    app.key(key).await?;
+    app.poll_maintenance().await;
+  }
+  assert_eq!(transport.attempts.load(Ordering::Relaxed), attempts + 2);
+  assert_eq!(app.view.as_ref().unwrap().session_id, session);
+  assert_eq!(app.focused, pane);
+
+  transport.paused.store(false, Ordering::Release);
+  transport.resume.notify_waiters();
+  timeout(Duration::from_secs(5), async {
+    while !app.panes[&pane].connected {
+      app.poll_maintenance().await;
+      tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+  })
+  .await?;
+  assert_eq!(app.connection_status(), "connected");
+  assert!(!app.status().contains("Enter to reconnect"));
+  app.detach().await;
+  Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn enter_keeps_live_input_and_disconnected_copy_mode_behavior() -> Result<()> {
+  use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+  let daemon = Daemon::start().await?;
+  let transport = RelayTransport {
+    socket: daemon.directory.join("ctmux.sock"),
+    connections: AtomicUsize::new(0),
+    fail_next: AtomicBool::new(false),
+    authentication_required: AtomicBool::new(false),
+  };
+  let mut app = daemon.app(false);
+  app.transport = Some(&transport);
+  let session = create_shell(&app).await?;
+  app.start(Some(session)).await?;
+  let pane = app.focused.clone();
+  let connections = transport.connections.load(Ordering::Relaxed);
+  for character in "LIVE_ENTER".chars() {
+    app
+      .key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+      .await?;
+  }
+  app
+    .key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+    .await?;
+  wait_for_text(&mut app, &pane, "echo:LIVE_ENTER").await?;
+  assert_eq!(transport.connections.load(Ordering::Relaxed), connections);
+
+  app.panes[&pane].control.detach().await?;
+  timeout(Duration::from_secs(5), async {
+    while app.panes[&pane].connected {
+      app.drain().await;
+      tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+  })
+  .await?;
+  app
+    .copies
+    .insert(pane.clone(), CopyMode::new(vec!["frozen selection".into()]));
+  app
+    .key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE))
+    .await?;
+  app
+    .key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE))
+    .await?;
+  app
+    .key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+    .await?;
+  assert_eq!(app.copy_buffer.as_deref(), Some("frozen selection"));
+  assert!(app.copies.contains_key(&pane));
+  app.poll_maintenance().await;
+  assert_eq!(transport.connections.load(Ordering::Relaxed), connections);
+  assert_eq!(app.connection_status(), "reconnecting");
+  assert!(!app.status().contains("Enter to reconnect"));
   app.detach().await;
   Ok(())
 }
@@ -380,7 +556,9 @@ async fn successful_refresh_restores_control_status_without_clearing_action_noti
     }
   })
   .await?;
-  assert!(app.status().contains("Disconnected:"));
+  assert_eq!(app.connection_status(), "connected");
+  assert!(app.status().contains("Connection check failed:"));
+  assert!(!app.status().contains("Disconnected:"));
   assert!(!app.status().contains("pane 1"));
   let previous_deadline = app.message_until;
   app.schedule_refresh();
@@ -396,7 +574,7 @@ async fn successful_refresh_restores_control_status_without_clearing_action_noti
     "recovery must clear the notice before its six-second expiry"
   );
   assert!(app.status().contains("pane 1"));
-  assert!(!app.status().contains("Disconnected:"));
+  assert!(!app.status().contains("Connection check failed:"));
 
   app.notice("Copied selection".into());
   let action_deadline = app.message_until;

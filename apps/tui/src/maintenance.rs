@@ -82,6 +82,10 @@ impl<'a> Maintenance<'a> {
     self.blocked_reason.as_deref()
   }
 
+  pub fn is_reconnecting(&self, terminal_id: &str) -> bool {
+    self.reconnects.contains_key(terminal_id)
+  }
+
   pub fn refresh(
     &mut self,
     transport: Option<&'a dyn Transport>,

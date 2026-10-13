@@ -905,9 +905,18 @@ impl App<'_> {
   }
 
   fn connection_notice(&mut self, error: &str) {
+    let state = if self
+      .panes
+      .values()
+      .any(|pane| !pane.connected && pane.ended.is_none())
+    {
+      "Disconnected"
+    } else {
+      "Connection check failed"
+    };
     let message = self.maintenance.blocked_reason().map_or_else(
-      || format!("Disconnected: {error}; retrying"),
-      |reason| format!("Disconnected: {reason}; automatic retries stopped"),
+      || format!("{state}: {error}; retrying"),
+      |reason| format!("{state}: {reason}; automatic retries stopped"),
     );
     self.notice(message);
     self.notice_kind = NoticeKind::Connection;
@@ -1523,8 +1532,49 @@ impl App<'_> {
       self.refresh().await?;
       return Ok(false);
     }
+    if self.reconnect_key(key) {
+      return Ok(false);
+    }
     self.send_key(key).await?;
     Ok(false)
+  }
+
+  fn reconnect_key(&mut self, key: KeyEvent) -> bool {
+    if key.code != KeyCode::Enter || !key.modifiers.is_empty() || !self.can_reconnect_focused() {
+      return false;
+    }
+    if key.kind == KeyEventKind::Press {
+      self.request_reconnect();
+    }
+    true
+  }
+
+  fn can_reconnect_focused(&self) -> bool {
+    self.ended.is_none()
+      && !self.prompt.is_active()
+      && self.pane_labels.is_none()
+      && self.archive_copy.is_none()
+      && self.active_copy().is_none()
+      && matches!(self.overlay, Overlay::None)
+      && !self.keys.is_prefix()
+      && self
+        .panes
+        .get(&self.focused)
+        .is_some_and(|pane| !pane.connected && pane.ended.is_none())
+  }
+
+  fn request_reconnect(&mut self) {
+    if self.maintenance.is_reconnecting(&self.focused) {
+      return;
+    }
+    // Retry existing work through its quiet transport. Clearing this client's
+    // blocker does not authorize credentials or resume a paused ctld target.
+    self.maintenance.cancel();
+    let focused = self.focused.clone();
+    self.schedule_reconnects(std::slice::from_ref(&focused));
+    self.schedule_refresh();
+    self.notice("Reconnecting…".into());
+    self.notice_kind = NoticeKind::Connection;
   }
 
   async fn prompt_key(&mut self, key: KeyEvent) -> Result<bool> {
@@ -2046,18 +2096,8 @@ impl App<'_> {
   }
 
   fn status(&self) -> String {
-    if self.pane_labels.is_some() {
-      return format!(
-        " {} | Pane numbers: 1–9 selects; any other key cancels",
-        self.connection_history_status()
-      );
-    }
-    if let Some(mode) = &self.archive_copy {
-      return format!(
-        " archive | {} | {}",
-        mode.history_status(0, usize::from(self.size.1.saturating_sub(1))),
-        mode.status()
-      );
+    if let Some(status) = self.mode_status() {
+      return status;
     }
     if self.notice_kind == NoticeKind::Action
       && Instant::now() < self.message_until
@@ -2144,6 +2184,46 @@ impl App<'_> {
       self.prefix.label,
       self.session_index() + usize::from(!self.sessions.is_empty()),
       self.sessions.len()
+    )
+  }
+
+  fn mode_status(&self) -> Option<String> {
+    if self.pane_labels.is_some() {
+      Some(format!(
+        " {} | Pane numbers: 1–9 selects; any other key cancels",
+        self.connection_history_status()
+      ))
+    } else if let Some(mode) = &self.archive_copy {
+      Some(format!(
+        " archive | {} | {}",
+        mode.history_status(0, usize::from(self.size.1.saturating_sub(1))),
+        mode.status()
+      ))
+    } else if self.can_reconnect_focused() {
+      Some(self.reconnect_status())
+    } else {
+      None
+    }
+  }
+
+  fn reconnect_status(&self) -> String {
+    let detail = if self.notice_kind == NoticeKind::Action && Instant::now() < self.message_until {
+      format!(" | {}", self.message)
+    } else if let Some(reason) = self.maintenance.blocked_reason() {
+      format!(" | {reason} | automatic retries stopped")
+    } else if Instant::now() < self.message_until {
+      format!(" | {}", self.message)
+    } else {
+      self.view.as_ref().map_or_else(String::new, |view| {
+        format!(" | ctmux [{}]", view.session_name)
+      })
+    };
+    let history = self
+      .active_history_status()
+      .map_or_else(String::new, |status| format!(" | {status}"));
+    format!(
+      " {} | Enter to reconnect{detail}{history}",
+      self.connection_status()
     )
   }
 

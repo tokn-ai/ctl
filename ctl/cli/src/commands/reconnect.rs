@@ -83,7 +83,12 @@ fn broker_is_retryable(error: &crate::ssh_broker::Error) -> bool {
     crate::ssh_broker::Error::Codec(error) => codec_is_retryable(error),
     crate::ssh_broker::Error::ConnectionClosed | crate::ssh_broker::Error::StatusTimeout => true,
     crate::ssh_broker::Error::Daemon { code, .. } => {
-      matches!(code.as_str(), "ssh_timeout" | "ssh_connection_failed")
+      // An inconclusive passive check neither proves disconnection nor permits
+      // authentication. Retry observation rather than blocking shell recovery.
+      matches!(
+        code.as_str(),
+        "ssh_timeout" | "ssh_connection_failed" | "ssh_status_unknown"
+      )
     }
     _ => false,
   }

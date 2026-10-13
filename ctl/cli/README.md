@@ -22,6 +22,15 @@ Termination confirms the exact session and affects all its panes and viewers;
 `ctl shell --resume` cannot be combined with `--session`, `--plain`, or `--cwd`.
 `ctl ctmux --resume` cannot be combined with another ctmux subcommand.
 
+An inconclusive SSH control-master check (`ssh_status_unknown`), including a
+control-command timeout, keeps background checks and pane recovery retrying.
+These checks remain passive: uncertainty does not start authentication, prepare
+a VPN, or replace a master. Authentication, invalid configuration, and explicit
+disconnects still suspend recovery until the corresponding user action.
+For a disconnected pane, the footer offers **Enter to reconnect**. This retries
+the existing session quietly; it does not create a replacement shell or request
+Touch ID. Host authentication and explicit disconnect policy remain with ctld.
+
 ## Install
 
 Once the packages are published:

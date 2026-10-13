@@ -58,10 +58,7 @@ pub fn restore_projection(
   let mut unwrapper = avt::util::TextUnwrapper::new();
   let live_rows: Vec<_> = primary
     .view()
-    .map(|line| TerminalHistoryRow {
-      text: line.text(),
-      wrapped: unwrapper.push(line).is_none(),
-    })
+    .map(|line| ctmux_core::history::capture_row(line, unwrapper.push(line).is_none()))
     .collect();
   let mut vt = avt::Vt::builder()
     .reflow_cursor_line(false)
@@ -70,10 +67,7 @@ pub fn restore_projection(
     .build();
   let mut seed = String::new();
   for (index, row) in rows.iter().chain(&live_rows).enumerate() {
-    if row.text.chars().any(char::is_control) {
-      return Err(invalid("History rows contain terminal controls"));
-    }
-    seed.push_str(&row.text);
+    seed.push_str(&ctmux_core::history::row_ansi(row)?);
     if !row.wrapped && index + 1 < rows.len() + live_rows.len() {
       seed.push_str("\r\n");
     }
@@ -145,10 +139,7 @@ pub fn projection_rows(mut vt: avt::Vt) -> Vec<TerminalHistoryRow> {
   let mut unwrapper = avt::util::TextUnwrapper::new();
   vt.lines()
     .take(count)
-    .map(|line| TerminalHistoryRow {
-      text: line.text(),
-      wrapped: unwrapper.push(line).is_none(),
-    })
+    .map(|line| ctmux_core::history::capture_row(line, unwrapper.push(line).is_none()))
     .collect()
 }
 
@@ -187,10 +178,7 @@ mod tests {
     let mut unwrapper = avt::util::TextUnwrapper::new();
     vt.lines()
       .take(count)
-      .map(|line| TerminalHistoryRow {
-        text: line.text(),
-        wrapped: unwrapper.push(line).is_none(),
-      })
+      .map(|line| ctmux_core::history::capture_row(line, unwrapper.push(line).is_none()))
       .collect()
   }
 
@@ -234,6 +222,7 @@ mod tests {
       "界界a界界bcdef\r\nnext",
       "a\r\n\r\n\r\nend",
       "prefix\r\n\x1b[31mred\x1b[0m\r\nlive",
+      "\x1b[1;3;4;38;2;13;29;47mé界\x1b[48;5;123m\x1b[K\r\n\x1b[0mnext\r\nlive",
     ] {
       let mut source = avt::Vt::builder().size(4, 2).scrollback_limit(4).build();
       drop(source.feed_str(initial));
@@ -241,6 +230,11 @@ mod tests {
       let mut restored = restore_projection(&checkpoint(&source, &size), &rows, 4)?;
       assert_eq!(restored.text(), source.text(), "initial {initial:?}");
       assert_eq!(restored.dump(), source.dump(), "screen {initial:?}");
+      assert_eq!(
+        history_rows(&restored, size.rows),
+        rows,
+        "styles {initial:?}"
+      );
       for output in ["Z", "\r\nnext", "\r\n\r\nlast"] {
         drop(source.feed_str(output));
         feed_projection(&mut restored, &mut Vec::new(), output.as_bytes())?;

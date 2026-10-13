@@ -1,4 +1,5 @@
 import type { TerminalHistoryRow, TerminalSize } from "../../lib/types";
+import { historyRowAnsi } from "./historyStyle";
 
 const HISTORY_BATCH_BYTES = 16 * 1024;
 const RECENT_HISTORY_BYTES = 16 * 1024;
@@ -282,7 +283,7 @@ export class TerminalPresenter {
       let batch = "";
       for (let index = 0; index < rows.length; index += 1) {
         const row = rows[index];
-        batch += literalRow(row.text) + (index + 1 < rows.length && !row.wrapped ? "\r\n" : "");
+        batch += historyRowAnsi(row) + (index + 1 < rows.length && !row.wrapped ? "\r\n" : "");
         if (batch.length >= 4096 || index + 1 === rows.length) {
           await this.writeStage(stage, encoder.encode(batch));
           batch = "";

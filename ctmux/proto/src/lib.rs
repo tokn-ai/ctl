@@ -1,12 +1,16 @@
 use ctl_core::protocol::{ProtocolOffer, ProtocolVersion};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+mod history_style;
 mod layout;
+pub use history_style::{
+  TerminalColor, TerminalHistoryStyleSpan, TerminalStyle, validate_history_row,
+};
 use std::io;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 /// Internal protocol build; incrementing this does not publish a new contract.
-pub const PROTOCOL_BUILD: u16 = 20;
+pub const PROTOCOL_BUILD: u16 = 21;
 /// First published wire contract. Keep this identity immutable.
 pub const CONTRACT_V1_0_13: ProtocolVersion = ProtocolVersion::new(1, 0, 13);
 /// Published compatible addition: paged history and checkpoint recovery.
@@ -23,7 +27,9 @@ pub const CONTRACT_V1_1_18: ProtocolVersion = ProtocolVersion::new(1, 1, 18);
 pub const CONTRACT_V1_1_19: ProtocolVersion = ProtocolVersion::new(1, 1, 19);
 /// In-place session rename preserving terminals, attachments, and layout.
 pub const CONTRACT_V1_1_20: ProtocolVersion = ProtocolVersion::new(1, 1, 20);
-pub const PROTOCOL_VERSION: ProtocolVersion = CONTRACT_V1_1_20;
+/// Typed foreground/background colors and attributes in paged history rows.
+pub const CONTRACT_V1_2_21: ProtocolVersion = ProtocolVersion::new(1, 2, 21);
+pub const PROTOCOL_VERSION: ProtocolVersion = CONTRACT_V1_2_21;
 pub const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[
   CONTRACT_V1_0_13,
   CONTRACT_V1_1_14,
@@ -33,6 +39,7 @@ pub const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[
   CONTRACT_V1_1_18,
   CONTRACT_V1_1_19,
   CONTRACT_V1_1_20,
+  CONTRACT_V1_2_21,
 ];
 
 #[must_use]
@@ -45,6 +52,7 @@ pub const fn supports_view_zoom(version: ProtocolVersion) -> bool {
       | CONTRACT_V1_1_18
       | CONTRACT_V1_1_19
       | CONTRACT_V1_1_20
+      | CONTRACT_V1_2_21
   )
 }
 
@@ -52,7 +60,12 @@ pub const fn supports_view_zoom(version: ProtocolVersion) -> bool {
 pub const fn supports_pane_resize(version: ProtocolVersion) -> bool {
   matches!(
     version,
-    CONTRACT_V1_1_16 | CONTRACT_V1_1_17 | CONTRACT_V1_1_18 | CONTRACT_V1_1_19 | CONTRACT_V1_1_20
+    CONTRACT_V1_1_16
+      | CONTRACT_V1_1_17
+      | CONTRACT_V1_1_18
+      | CONTRACT_V1_1_19
+      | CONTRACT_V1_1_20
+      | CONTRACT_V1_2_21
   )
 }
 
@@ -60,7 +73,7 @@ pub const fn supports_pane_resize(version: ProtocolVersion) -> bool {
 pub const fn supports_divider_resize(version: ProtocolVersion) -> bool {
   matches!(
     version,
-    CONTRACT_V1_1_17 | CONTRACT_V1_1_18 | CONTRACT_V1_1_19 | CONTRACT_V1_1_20
+    CONTRACT_V1_1_17 | CONTRACT_V1_1_18 | CONTRACT_V1_1_19 | CONTRACT_V1_1_20 | CONTRACT_V1_2_21
   )
 }
 
@@ -68,7 +81,7 @@ pub const fn supports_divider_resize(version: ProtocolVersion) -> bool {
 pub const fn supports_layout_lease_notifications(version: ProtocolVersion) -> bool {
   matches!(
     version,
-    CONTRACT_V1_1_17 | CONTRACT_V1_1_18 | CONTRACT_V1_1_19 | CONTRACT_V1_1_20
+    CONTRACT_V1_1_17 | CONTRACT_V1_1_18 | CONTRACT_V1_1_19 | CONTRACT_V1_1_20 | CONTRACT_V1_2_21
   )
 }
 
@@ -76,18 +89,26 @@ pub const fn supports_layout_lease_notifications(version: ProtocolVersion) -> bo
 pub const fn supports_extended_keys(version: ProtocolVersion) -> bool {
   matches!(
     version,
-    CONTRACT_V1_1_18 | CONTRACT_V1_1_19 | CONTRACT_V1_1_20
+    CONTRACT_V1_1_18 | CONTRACT_V1_1_19 | CONTRACT_V1_1_20 | CONTRACT_V1_2_21
   )
 }
 
 #[must_use]
 pub const fn supports_pane_moves(version: ProtocolVersion) -> bool {
-  matches!(version, CONTRACT_V1_1_19 | CONTRACT_V1_1_20)
+  matches!(
+    version,
+    CONTRACT_V1_1_19 | CONTRACT_V1_1_20 | CONTRACT_V1_2_21
+  )
 }
 
 #[must_use]
 pub const fn supports_session_rename(version: ProtocolVersion) -> bool {
-  matches!(version, CONTRACT_V1_1_20)
+  matches!(version, CONTRACT_V1_1_20 | CONTRACT_V1_2_21)
+}
+
+#[must_use]
+pub const fn supports_styled_history(version: ProtocolVersion) -> bool {
+  matches!(version, CONTRACT_V1_2_21)
 }
 
 #[must_use]
@@ -119,6 +140,8 @@ pub const TERMINAL_CHECKPOINT_FORMAT_VERSION: u16 = 1;
 pub const TERMINAL_HISTORY_FORMAT: &str = "ctmux_logical_lines";
 pub const TERMINAL_HISTORY_FORMAT_VERSION: u16 = 1;
 pub const MAX_HISTORY_PAGE_BYTES: usize = 16 * 1024;
+/// Maximum encoded physical history retained in a snapshot or local projection.
+pub const MAX_ENCODED_HISTORY_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_NORMALIZED_HISTORY_BYTES: usize = 4 * 1024 * 1024;
 /// Maximum UTF-8 byte length of a shell-reported running-command summary.
 ///
@@ -216,6 +239,9 @@ impl TerminalHistorySnapshot {
 pub struct TerminalHistoryRow {
   pub text: String,
   pub wrapped: bool,
+  /// Character-indexed styles, omitted for legacy contracts and plain rows.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub styles: Vec<TerminalHistoryStyleSpan>,
 }
 
 /// Identifies one frozen, bounded history window paired with a live checkpoint.
@@ -1170,18 +1196,22 @@ mod tests {
       TerminalHistoryRow {
         text: "abc".into(),
         wrapped: true,
+        styles: Vec::new(),
       },
       TerminalHistoryRow {
         text: "def   ".into(),
         wrapped: false,
+        styles: Vec::new(),
       },
       TerminalHistoryRow {
         text: "   ".into(),
         wrapped: false,
+        styles: Vec::new(),
       },
       TerminalHistoryRow {
         text: "partial".into(),
         wrapped: true,
+        styles: Vec::new(),
       },
     ];
     assert_eq!(normalize_history_rows(&rows), ["abcdef", ""]);
@@ -1193,10 +1223,12 @@ mod tests {
       TerminalHistoryRow {
         text: "x".repeat(MAX_NORMALIZED_HISTORY_BYTES),
         wrapped: false,
+        styles: Vec::new(),
       },
       TerminalHistoryRow {
         text: "tail".into(),
         wrapped: false,
+        styles: Vec::new(),
       },
     ];
     assert_eq!(normalize_history_rows(&rows), ["tail"]);
@@ -1557,9 +1589,9 @@ mod tests {
   }
 
   #[test]
-  fn session_rename_contract_retains_historical_features() {
-    assert_eq!(PROTOCOL_VERSION, ProtocolVersion::new(1, 1, 20));
-    assert_eq!(PROTOCOL_BUILD, 20);
+  fn styled_history_contract_retains_historical_features() {
+    assert_eq!(PROTOCOL_VERSION, ProtocolVersion::new(1, 2, 21));
+    assert_eq!(PROTOCOL_BUILD, 21);
     assert_eq!(
       SUPPORTED_PROTOCOL_VERSIONS,
       &[
@@ -1571,6 +1603,7 @@ mod tests {
         CONTRACT_V1_1_18,
         CONTRACT_V1_1_19,
         CONTRACT_V1_1_20,
+        CONTRACT_V1_2_21,
       ]
     );
     for (version, zoom, pane, divider, keys, moves) in [
@@ -1582,6 +1615,7 @@ mod tests {
       (CONTRACT_V1_1_18, true, true, true, true, false),
       (CONTRACT_V1_1_19, true, true, true, true, true),
       (CONTRACT_V1_1_20, true, true, true, true, true),
+      (CONTRACT_V1_2_21, true, true, true, true, true),
       (
         ProtocolVersion::new(1, 1, 21),
         false,
@@ -1599,7 +1633,11 @@ mod tests {
       assert_eq!(supports_pane_moves(version), moves);
       assert_eq!(
         supports_session_rename(version),
-        version == CONTRACT_V1_1_20
+        matches!(version, CONTRACT_V1_1_20 | CONTRACT_V1_2_21)
+      );
+      assert_eq!(
+        supports_styled_history(version),
+        version == CONTRACT_V1_2_21
       );
     }
   }

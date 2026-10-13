@@ -27,7 +27,7 @@ pub struct CacheIdentity {
 
 const MAX_REPLAY_BYTES: usize = 1024 * 1024;
 const MAX_PROJECTION_ROWS: u64 = 10_000;
-const MAX_HISTORY_FILE_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_PHYSICAL_HISTORY_BYTES: u64 = ctmux_proto::MAX_ENCODED_HISTORY_BYTES as u64;
 const ARCHIVE_ID_PREFIX: &str = "archive:";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -249,7 +249,11 @@ fn physical_rows(
   file.seek(SeekFrom::Start(physical.start))?;
   let rows: Vec<TerminalHistoryRow> = BufReader::new(file.take(physical.end - physical.start))
     .lines()
-    .map(|line| serde_json::from_str(&line?).map_err(io::Error::other))
+    .map(|line| {
+      let row = serde_json::from_str(&line?).map_err(io::Error::other)?;
+      ctmux_proto::validate_history_row(&row)?;
+      Ok(row)
+    })
     .collect::<io::Result<_>>()?;
   if u64::try_from(rows.len()).map_err(io::Error::other)? != physical.rows {
     return Err(invalid("Local history projection row count differs"));
@@ -310,11 +314,21 @@ fn replace_rows(
   if scrollback_limit > MAX_PROJECTION_ROWS || rows.len() as u64 > scrollback_limit {
     return Err(invalid("Unsupported history projection size"));
   }
-  let (file, end) = write_lines(directory, "rows", rows)?;
-  if end > MAX_HISTORY_FILE_BYTES {
-    let _ignored = fs::remove_file(directory.join(file));
-    return Err(invalid("History projection exceeds its storage bound"));
+  // A valid transfer can grow past its byte bound while replay catches up.
+  // Keep a complete suffix instead of failing the same checkpoint repeatedly.
+  let mut retained_bytes = 0;
+  let mut first = rows.len();
+  for row in rows.iter().rev() {
+    let bytes = serde_json::to_vec(row).map_err(io::Error::other)?.len() as u64 + 1;
+    if retained_bytes + bytes > MAX_PHYSICAL_HISTORY_BYTES {
+      break;
+    }
+    retained_bytes += bytes;
+    first -= 1;
   }
+  current.history_gap |= first > 0;
+  let rows = &rows[first..];
+  let (file, end) = write_lines(directory, "rows", rows)?;
   current.wrapped_prefix = crate::history::wrapped_history_prefix(rows);
   current.physical_history = Some(PhysicalHistory {
     file,
@@ -412,26 +426,31 @@ fn append_rows(
     };
   }
   file.sync_all()?;
-  let excess = physical.rows.saturating_sub(physical.scrollback_limit);
-  if excess > 0 {
+  if physical.rows > physical.scrollback_limit
+    || physical.end - physical.start > MAX_PHYSICAL_HISTORY_BYTES
+  {
     let partial_start = physical.rows - physical.partial_rows;
     file.seek(SeekFrom::Start(physical.start))?;
     let mut reader = BufReader::new(file.take(physical.end - physical.start));
     let mut dropped_prefix_bytes = 0;
-    for index in 0..excess {
+    let mut dropped_rows = 0;
+    while physical.rows > physical.scrollback_limit
+      || physical.end - physical.start > MAX_PHYSICAL_HISTORY_BYTES
+    {
       let mut line = String::new();
       let bytes = reader.read_line(&mut line)?;
       if bytes == 0 {
         return Err(invalid("Local history projection is incomplete"));
       }
       let row: TerminalHistoryRow = serde_json::from_str(&line).map_err(io::Error::other)?;
-      if index >= partial_start {
+      if dropped_rows >= partial_start {
         dropped_prefix_bytes += row.text.len();
       }
       physical.start += u64::try_from(bytes).map_err(io::Error::other)?;
+      physical.rows -= 1;
+      dropped_rows += 1;
     }
-    physical.rows -= excess;
-    physical.partial_rows -= excess.saturating_sub(partial_start);
+    physical.partial_rows -= dropped_rows.saturating_sub(partial_start);
     if !rebuild_prefix {
       if dropped_prefix_bytes > current.wrapped_prefix.len() {
         return Err(invalid("Cached wrapped history prefix differs"));
@@ -444,7 +463,9 @@ fn append_rows(
     current.wrapped_prefix =
       crate::history::wrapped_history_prefix(&physical_rows(directory, physical)?);
   }
-  if physical.end > MAX_HISTORY_FILE_BYTES {
+  // Amortize compaction: at most one window of discarded records remains on
+  // disk, rather than rewriting the whole retained window for every new row.
+  if physical.start >= MAX_PHYSICAL_HISTORY_BYTES {
     let limit = physical.scrollback_limit;
     let retained = physical_rows(directory, physical)?;
     replace_rows(directory, current, &retained, limit)?;
@@ -725,10 +746,7 @@ fn update_current(
       let mut unwrapper = avt::util::TextUnwrapper::new();
       appended.rows = rows
         .iter()
-        .map(|line| TerminalHistoryRow {
-          text: line.text(),
-          wrapped: unwrapper.push(line).is_none(),
-        })
+        .map(|line| ctmux_core::history::capture_row(line, unwrapper.push(line).is_none()))
         .collect();
       appended.lines = collect(rows.into_iter(), &mut current.wrapped_prefix).into();
       appended.line_bytes = appended.lines.iter().map(|line| line.len() + 1).sum();
@@ -808,12 +826,11 @@ fn update_output(
     for chunk in crate::history::projection_chunks(&text, vt.size().0) {
       let rows: Vec<_> = vt.feed_str(chunk).scrollback.collect();
       let mut unwrapper = avt::util::TextUnwrapper::new();
-      appended
-        .rows
-        .extend(rows.iter().map(|line| TerminalHistoryRow {
-          text: line.text(),
-          wrapped: unwrapper.push(line).is_none(),
-        }));
+      appended.rows.extend(
+        rows
+          .iter()
+          .map(|line| ctmux_core::history::capture_row(line, unwrapper.push(line).is_none())),
+      );
       let lines = collect(rows.into_iter(), &mut current.wrapped_prefix);
       appended.line_bytes += lines.iter().map(|line| line.len() + 1).sum::<usize>();
       appended.lines.extend(lines);
@@ -1522,10 +1539,7 @@ mod tests {
     let rows: Vec<_> = source
       .lines()
       .take(source.lines().count() - source.size().1)
-      .map(|line| TerminalHistoryRow {
-        text: line.text(),
-        wrapped: unwrapper.push(line).is_none(),
-      })
+      .map(|line| ctmux_core::history::capture_row(line, unwrapper.push(line).is_none()))
       .collect();
     let lines = ctmux_proto::normalize_history_rows(&rows);
     let history = ctmux_proto::TerminalHistorySnapshot {
@@ -2029,6 +2043,116 @@ mod tests {
     let after = fixture.presentation()?;
     assert_eq!(after.checkpoint, before.checkpoint);
     assert_eq!(after.history, before.history);
+    Ok(())
+  }
+
+  #[test]
+  fn synchronized_history_keeps_styles_on_disk_across_later_output() -> io::Result<()> {
+    let fixture = Fixture::new();
+    let initial = "\x1b[31mred界\x1b[44m\x1b[K\r\n\x1b[0mlive\r\nlast";
+    let mut source = avt::Vt::builder().size(20, 2).scrollback_limit(8).build();
+    drop(source.feed_str(initial));
+    let (checkpoint, synced) =
+      snapshot_events(&source, initial.len() as u64, "colors", 0, 1, 8, vec![])?;
+    fixture.store.apply(&fixture.identity, &checkpoint)?;
+    fixture.store.apply(&fixture.identity, &synced)?;
+    // CacheStore::apply reopens its manifest and physical JSONL on every call.
+    let next = "\r\n\x1b[38;2;12;34;56mnew\x1b[0m\r\nend";
+    fixture.output(initial.len() as u64, next)?;
+    drop(source.feed_str(next));
+    let rows = physical_rows(
+      &fixture.directory(false),
+      fixture.current()?.physical_history.as_ref().unwrap(),
+    )?;
+    assert_eq!(rows[0].styles.len(), 2);
+    assert_eq!(rows, crate::history::projection_rows(source));
+    Ok(())
+  }
+
+  #[test]
+  fn dense_styled_history_keeps_a_bounded_suffix_during_sync_and_later_output() -> io::Result<()> {
+    use std::fmt::Write as _;
+
+    const COLUMNS: u16 = 1024;
+    const ROW_LIMIT: u64 = 512;
+    let dense_rows = |first: usize, count: usize| {
+      let mut output = String::new();
+      for index in first..first + count {
+        let label = format!("{index:04}");
+        for column in 0..usize::from(COLUMNS) {
+          let character = label.as_bytes().get(column).copied().unwrap_or(b'x');
+          write!(output, "\x1b[{}m{}", 31 + column % 2, char::from(character)).unwrap();
+        }
+      }
+      output
+    };
+    let mut sample = avt::Vt::builder().size(usize::from(COLUMNS), 2).build();
+    drop(sample.feed_str(&dense_rows(0, 1)));
+    let row = ctmux_core::history::capture_row(sample.view().next().unwrap(), true);
+    let row_bytes = serde_json::to_vec(&row).map_err(io::Error::other)?.len() + 1;
+    let initial_count = 9 * 1024 * 1024 / row_bytes + 3;
+    let growth_count = 8 * 1024 * 1024 / row_bytes + 3;
+    for sync_before_output in [true, false] {
+      let mut fixture = Fixture::new();
+      fixture.identity.terminal_size.columns = COLUMNS;
+      let mut source = avt::Vt::builder()
+        .size(usize::from(COLUMNS), 2)
+        .scrollback_limit(usize::try_from(ROW_LIMIT).map_err(io::Error::other)?)
+        .build();
+      let initial = dense_rows(0, initial_count);
+      drop(source.feed_str(&initial));
+      let (checkpoint, synced) = snapshot_events(
+        &source,
+        initial.len() as u64,
+        "dense",
+        0,
+        1,
+        ROW_LIMIT,
+        vec![],
+      )?;
+      fixture.store.apply(&fixture.identity, &checkpoint)?;
+      let manifest = fixture.current()?.history_manifest.unwrap();
+      assert!(manifest.total_bytes > 8 * 1024 * 1024);
+      assert!(manifest.total_bytes <= MAX_PHYSICAL_HISTORY_BYTES);
+      if sync_before_output {
+        fixture.store.apply(&fixture.identity, &synced)?;
+        let current = fixture.current()?;
+        let physical = current.physical_history.as_ref().unwrap();
+        assert_eq!(physical.end - physical.start, manifest.total_bytes);
+        assert!(!current.history_gap);
+      }
+      let growth = dense_rows(initial_count, growth_count);
+      assert!(growth.len() <= MAX_REPLAY_BYTES);
+      let sequence = fixture.output(initial.len() as u64, &growth)?;
+      drop(source.feed_str(&growth));
+      if !sync_before_output {
+        fixture.store.apply(&fixture.identity, &synced)?;
+      }
+      // Continued output must still commit after crossing the bound; otherwise
+      // the cache writer repeatedly asks the daemon for the same checkpoint.
+      let tail = "\x1b[0mTAIL";
+      let sequence = fixture.output(sequence, tail)?;
+      drop(source.feed_str(tail));
+      let current = fixture.current()?;
+      let physical = current.physical_history.as_ref().unwrap();
+      let actual = physical_rows(&fixture.directory(false), physical)?;
+      assert!(physical.end - physical.start <= MAX_PHYSICAL_HISTORY_BYTES);
+      assert!(physical.end <= 2 * MAX_PHYSICAL_HISTORY_BYTES);
+      assert!(physical.rows < ROW_LIMIT);
+      assert_eq!(physical.partial_rows, physical.rows);
+      assert_eq!(current.sequence, sequence);
+      assert_eq!(current.payload, source.dump());
+      assert_eq!(current.history_manifest.as_ref(), Some(&manifest));
+      assert!(current.history_synced);
+      assert!(current.history_gap);
+      assert_eq!(
+        current.wrapped_prefix,
+        crate::history::wrapped_history_prefix(&actual)
+      );
+      let expected = crate::history::projection_rows(source);
+      assert!(actual.len() < expected.len());
+      assert_eq!(actual, expected[expected.len() - actual.len()..]);
+    }
     Ok(())
   }
 

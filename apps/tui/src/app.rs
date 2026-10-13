@@ -2026,7 +2026,11 @@ impl App<'_> {
       );
     }
     if let Some(mode) = &self.archive_copy {
-      return format!(" archive | {}", mode.status());
+      return format!(
+        " archive | {} | {}",
+        mode.history_status(0, usize::from(self.size.1.saturating_sub(1))),
+        mode.status()
+      );
     }
     if self.notice_kind == NoticeKind::Action
       && Instant::now() < self.message_until
@@ -2135,8 +2139,11 @@ impl App<'_> {
     };
     // Put the cause before history and retry details so narrow terminals
     // retain the actionable error. Frame::text clips safely to one row.
+    let history = self
+      .active_history_status()
+      .map_or_else(String::new, |status| format!(" | {status}"));
     Some(format!(
-      " {}{copy} | {reason} | automatic retries stopped",
+      " {}{copy} | {reason} | automatic retries stopped{history}",
       self.connection_status(),
     ))
   }
@@ -2153,9 +2160,9 @@ impl App<'_> {
 
   fn connection_history_status(&self) -> String {
     let connection = self.connection_status();
-    let status = self.panes.get(&self.focused).map_or_else(
+    let status = self.active_history_status().map_or_else(
       || connection.to_owned(),
-      |pane| format!("{connection} | {}", pane.history_status()),
+      |history| format!("{connection} | {history}"),
     );
     if self
       .view
@@ -2166,6 +2173,38 @@ impl App<'_> {
     } else {
       status
     }
+  }
+
+  fn active_history_status(&self) -> Option<String> {
+    let pane = self.panes.get(&self.focused);
+    let Some(mode) = self.copies.get(&self.focused) else {
+      return pane.map(Pane::history_status);
+    };
+    let height = self.size.1.saturating_sub(1);
+    let (first_visible, visible_height) = self
+      .view
+      .as_ref()
+      .and_then(|view| {
+        let rect = view
+          .visible_panes()
+          .into_iter()
+          .find(|rect| rect.terminal_id == self.focused)?;
+        let offset = self.divider_drag.as_ref().map_or_else(
+          || viewport_offset(view, pane, Some(mode), &self.focused, self.size.0, height),
+          Drag::viewport_offset,
+        );
+        let top = usize::from(rect.top).max(usize::from(offset.1));
+        let bottom = (usize::from(rect.top) + usize::from(rect.rows))
+          .min(usize::from(offset.1) + usize::from(height));
+        let first_visible = top - usize::from(rect.top);
+        Some((first_visible, bottom.saturating_sub(top)))
+      })
+      .unwrap_or((0, usize::from(height)));
+    let status = mode.history_status(first_visible, visible_height);
+    Some(match pane.and_then(Pane::history_state) {
+      Some(state) => format!("{status} | live history {state}"),
+      None => status,
+    })
   }
 
   fn overlay_lines(&self) -> Vec<String> {

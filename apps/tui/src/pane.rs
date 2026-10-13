@@ -662,13 +662,22 @@ impl Pane {
     self.model.history_gap || self.history_snapshot_id.is_some()
   }
 
-  pub fn history_status(&self) -> &'static str {
+  pub fn history_state(&self) -> Option<&'static str> {
     if self.history_snapshot_id.is_some() {
-      "history syncing"
+      Some("syncing")
     } else if self.model.history_gap {
-      "history incomplete"
+      Some("incomplete")
     } else {
-      "history ready"
+      None
+    }
+  }
+
+  pub fn history_status(&self) -> String {
+    let count = crate::copy::format_line_count(self.model.history_rows());
+    let status = format!("history {count} lines");
+    match self.history_state() {
+      Some(state) => format!("{status} ({state})"),
+      None => status,
     }
   }
 

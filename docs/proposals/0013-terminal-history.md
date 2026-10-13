@@ -63,10 +63,20 @@ checkpoint recovery. Local caches, archive repairs, and resize rendering fixes
 add no named protocol changes of their own. Later pane contracts retain this
 history boundary.
 
+The next release cycle adds styled physical history in `ctmux` `1.2.21`
+(build 21), following the frozen `1.1.20` (build 20) contract. Optional typed
+foreground/background colors and text attributes accompany literal history
+text. Earlier contracts still receive their original plain rows, while updated
+clients preserve styles through paged transfer, local projection, and copy-mode
+rendering. Existing text-only archives cannot recover discarded attributes.
+The TUI footer shows the active pane's retained physical scrollback count and
+the visible row range of a frozen copy snapshot; the latter includes the screen.
+
 ## Out of scope
 
-Unlimited daemon history, durable PTY/process recovery, styled logical-history
-runs, and treating archive completeness as proof of complete remote output.
+Unlimited daemon history, durable PTY/process recovery, retroactively coloring
+text-only archives, and treating archive completeness as proof of complete
+remote output.
 
 ## Unresolved questions
 

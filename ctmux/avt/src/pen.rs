@@ -32,6 +32,22 @@ impl Pen {
         self.background
     }
 
+    pub fn set_foreground(&mut self, color: Option<Color>) {
+        self.foreground = color;
+    }
+
+    pub fn set_background(&mut self, color: Option<Color>) {
+        self.background = color;
+    }
+
+    pub fn set_bold(&mut self) {
+        self.intensity = Intensity::Bold;
+    }
+
+    pub fn set_faint(&mut self) {
+        self.intensity = Intensity::Faint;
+    }
+
     pub fn is_bold(&self) -> bool {
         self.intensity == Intensity::Bold
     }

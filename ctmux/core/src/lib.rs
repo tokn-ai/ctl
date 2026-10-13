@@ -1,4 +1,5 @@
 pub mod alternate_screen;
+pub mod history;
 pub mod mouse;
 mod observer_state;
 

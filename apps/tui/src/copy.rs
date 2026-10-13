@@ -30,9 +30,10 @@ enum DragState {
   Selecting,
 }
 
-/// Immutable text rows: output and checkpoint replacement cannot move a selection.
+/// Immutable styled rows: output and checkpoint replacement cannot move a selection.
 pub struct CopyMode {
   pub lines: Vec<Vec<char>>,
+  pens: Vec<Vec<(std::ops::Range<usize>, avt::Pen)>>,
   soft_wrapped: Vec<bool>,
   pub cursor: Position,
   pub top: usize,
@@ -59,6 +60,7 @@ impl CopyMode {
         column: 0,
       },
       soft_wrapped: vec![false; lines.len()],
+      pens: vec![Vec::new(); lines.len()],
       lines,
       top: 0,
       left: 0,
@@ -107,11 +109,45 @@ impl CopyMode {
   ) -> Self {
     let mut mode = Self::new_wrapped(prefix, width);
     for row in rows {
+      let mut pens = Vec::new();
+      if !row.styles.is_empty() && ctmux_proto::validate_history_row(&row).is_ok() {
+        for span in &row.styles {
+          let start = span.start as usize;
+          let end = start + span.length as usize;
+          pens.push((start..end, ctmux_core::history::style_pen(&span.style)));
+        }
+      }
       mode.lines.push(row.text.chars().collect());
+      mode.pens.push(pens);
       mode.soft_wrapped.push(row.wrapped);
     }
     mode.cursor.row = mode.lines.len().saturating_sub(1);
     mode
+  }
+
+  pub fn pen(&self, position: Position) -> avt::Pen {
+    let Some(row) = self.pens.get(position.row) else {
+      return avt::Pen::default();
+    };
+    let index = row.partition_point(|(range, _)| range.end <= position.column);
+    row
+      .get(index)
+      .filter(|(range, _)| range.contains(&position.column))
+      .map_or_else(avt::Pen::default, |(_, pen)| *pen)
+  }
+
+  /// Visible physical rows in the frozen snapshot, including its live screen.
+  pub fn history_status(&self, first_visible: usize, height: usize) -> String {
+    let total = self.lines.len();
+    let start = self.top.saturating_add(first_visible).min(total);
+    let end = start.saturating_add(height).min(total);
+    let first = if end > start { start + 1 } else { 0 };
+    format!(
+      "history {}–{} / {}",
+      format_line_count(first),
+      format_line_count(if first == 0 { 0 } else { end }),
+      format_line_count(total)
+    )
   }
 
   pub fn width(ch: char) -> usize {
@@ -422,9 +458,54 @@ impl CopyMode {
   }
 }
 
+pub fn format_line_count(count: usize) -> String {
+  let digits = count.to_string();
+  let mut formatted = String::new();
+  for (index, digit) in digits.chars().enumerate() {
+    if index > 0 && (digits.len() - index).is_multiple_of(3) {
+      formatted.push(',');
+    }
+    formatted.push(digit);
+  }
+  formatted
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn history_range_counts_visible_rows_and_handles_empty_and_clipped_views() {
+    let mut mode = CopyMode::new((0..1240).map(|row| row.to_string()).collect());
+    mode.top = 200;
+    assert_eq!(mode.history_status(0, 40), "history 201–240 / 1,240");
+    assert_eq!(mode.history_status(5, 10), "history 206–215 / 1,240");
+    mode.top = 1235;
+    assert_eq!(mode.history_status(0, 40), "history 1,236–1,240 / 1,240");
+    assert_eq!(mode.history_status(0, 0), "history 0–0 / 1,240");
+    assert_eq!(
+      CopyMode::new(Vec::new()).history_status(0, 20),
+      "history 0–0 / 0"
+    );
+  }
+
+  #[test]
+  fn copying_styled_unicode_retains_text_without_ansi() {
+    let mut vt = avt::Vt::new(8, 1);
+    vt.feed_str("\x1b[38;2;1;2;3m界X\x1b[0m");
+    let row = ctmux_core::history::capture_row(vt.line(0), false);
+    let mut mode = CopyMode::from_rows(Vec::new(), vec![row], 8);
+    mode.begin_drag(0, 0);
+    mode.drag(2, 0);
+    let Action::Copy(text) = mode.finish_drag() else {
+      panic!("expected copied selection")
+    };
+    assert_eq!(text, "界X");
+    assert_eq!(
+      mode.pen(Position { row: 0, column: 1 }).foreground(),
+      Some(avt::Color::rgb(1, 2, 3))
+    );
+  }
 
   #[test]
   fn physical_rows_preserve_original_width_and_wrap_flags_after_a_logical_prefix() {
@@ -432,10 +513,12 @@ mod tests {
       vec!["older".into()],
       vec![
         ctmux_proto::TerminalHistoryRow {
+          styles: Vec::new(),
           text: "abcdef".into(),
           wrapped: true,
         },
         ctmux_proto::TerminalHistoryRow {
+          styles: Vec::new(),
           text: "界x".into(),
           wrapped: false,
         },
@@ -471,6 +554,7 @@ mod tests {
       ["ab", "", "", "cd"]
         .into_iter()
         .map(|text| ctmux_proto::TerminalHistoryRow {
+          styles: Vec::new(),
           text: text.into(),
           wrapped: false,
         })

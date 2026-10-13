@@ -1,6 +1,7 @@
 import { Terminal } from "@xterm/headless";
 import { describe, expect, it, vi } from "vitest";
 import type { TerminalSize } from "../../lib/types";
+import { captureHistoryRow } from "./historyStyle";
 import {
   TerminalPresenter,
   type TerminalAdapter,
@@ -37,7 +38,7 @@ function headlessFactory(instances: Terminal[]) {
       copyPrimaryRows: () => Array.from({ length: terminal.rows }, (_, index) => {
         const buffer = terminal.buffer.normal;
         const wrapped = buffer.getLine(buffer.baseY + index + 1)?.isWrapped ?? false;
-        return { text: buffer.getLine(buffer.baseY + index)?.translateToString(!wrapped) ?? "", wrapped };
+        return captureHistoryRow(buffer.getLine(buffer.baseY + index), wrapped);
       }),
       write: (data, callback) => terminal.write(data, callback),
       resize: (columns, rows) => terminal.resize(columns, rows),
@@ -268,6 +269,38 @@ describe("TerminalPresenter", () => {
     const restored = instances[instances.length - 1];
     expect(restored.buffer.active.viewportY).toBe(83);
     expect(visibleLine(restored, restored.buffer.active.viewportY)).toBe("history 83");
+    presenter.dispose();
+  });
+
+  it("keeps history colors, wide glyphs, attributes and blank backgrounds through catch-up", async () => {
+    const instances: Terminal[] = [];
+    const size = terminalSize(8, 2);
+    const presenter = new TerminalPresenter(headlessFactory(instances), size);
+    const payload = "\u001b[32mlive\u001b[0m";
+    await presenter.restoreCheckpoint(size, [], new TextEncoder().encode(payload), new Uint8Array(), "0", "snapshot");
+    const syncing = presenter.syncHistory(historySnapshot(payload, {
+      terminal_size: size,
+      rows: [{ text: "é界X    ", wrapped: false, styles: [
+        { start: 0, length: 2, style: { foreground: { kind: "rgb", red: 17, green: 34, blue: 51 }, bold: true, italic: true, underline: true } },
+        { start: 3, length: 4, style: { background: { kind: "indexed", index: 123 } } },
+      ] }],
+    }));
+    await presenter.write(new TextEncoder().encode("\r\nnext\r\nend"), "11", "0");
+    expect(await syncing).toBe(true);
+    const restored = instances[instances.length - 1];
+    const row = restored.buffer.normal.getLine(0)!;
+    expect(row.translateToString(true)).toBe("é界X    ");
+    expect(row.getCell(0)!.getFgColor()).toBe(0x112233);
+    expect(row.getCell(1)!.getFgColor()).toBe(0x112233);
+    expect(row.getCell(0)!.isBold()).toBeTruthy();
+    expect(row.getCell(0)!.isItalic()).toBeTruthy();
+    expect(row.getCell(0)!.isUnderline()).toBeTruthy();
+    expect(row.getCell(3)!.isFgDefault()).toBeTruthy();
+    expect(row.getCell(7)!.getBgColor()).toBe(123);
+    const live_history = restored.buffer.normal.getLine(1)!;
+    expect(live_history.translateToString(true)).toBe("live");
+    expect(live_history.getCell(0)!.getFgColor()).toBe(2);
+    expect(restored.buffer.normal.getLine(3)!.getCell(0)!.isFgDefault()).toBeTruthy();
     presenter.dispose();
   });
 

@@ -223,7 +223,8 @@ async fn input_in_pane(
   // ready. Input must target the live, owned attachment in its confirmed slot.
   tui
     .wait_screen("moved pane is ready for owned input", |screen| {
-      footer(screen).starts_with(" connected | history ready |")
+      footer(screen).starts_with(" connected | history ")
+        && footer(screen).contains(" lines |")
         && footer(screen).contains(" | input |")
         && screen.cursor_visible
         && (usize::from(pane.left)..usize::from(pane.left + pane.columns))

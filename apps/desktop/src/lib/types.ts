@@ -897,6 +897,29 @@ export interface TerminalHistorySnapshot {
 export interface TerminalHistoryRow {
   text: string;
   wrapped: boolean;
+  styles?: TerminalHistoryStyleSpan[];
+}
+
+export type TerminalColor =
+  | { kind: "indexed"; index: number }
+  | { kind: "rgb"; red: number; green: number; blue: number };
+
+export interface TerminalStyle {
+  foreground?: TerminalColor;
+  background?: TerminalColor;
+  bold?: boolean;
+  faint?: boolean;
+  italic?: boolean;
+  underline?: boolean;
+  strikethrough?: boolean;
+  blink?: boolean;
+  inverse?: boolean;
+}
+
+export interface TerminalHistoryStyleSpan {
+  start: number;
+  length: number;
+  style: TerminalStyle;
 }
 
 export interface TerminalHistoryManifest {

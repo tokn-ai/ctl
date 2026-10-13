@@ -157,10 +157,10 @@ fn validation_errors_identify_session_metadata_and_duplicate_references() {
     let mut document = populated();
     let session = &mut document.sessions[0];
     match field {
-      "session_id" => session.session_id = "".into(),
+      "session_id" => session.session_id = String::new(),
       "name" => session.name = "invalid\nname".into(),
       "last_known_cwd" => session.last_known_cwd = Some("invalid\0cwd".into()),
-      "last_known_cwd_display" => session.last_known_cwd_display = Some("".into()),
+      "last_known_cwd_display" => session.last_known_cwd_display = Some(String::new()),
       _ => unreachable!(),
     }
     let error = document.validate().unwrap_err();

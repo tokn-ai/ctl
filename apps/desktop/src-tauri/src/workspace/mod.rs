@@ -212,6 +212,13 @@ fn valid_workspace_text(text: &str) -> bool {
   !text.is_empty() && text.len() <= 4096 && !text.chars().any(char::is_control)
 }
 
+fn invalid_workspace_field(field: &str) -> CommandErrorDto {
+  CommandErrorDto::new(
+    "workspace_invalid",
+    format!("The workspace contains invalid or duplicate references in {field}."),
+  )
+}
+
 impl Default for WorkspaceDocument {
   fn default() -> Self {
     Self {
@@ -257,30 +264,26 @@ impl WorkspaceDocument {
         "Saved task definitions belong in the shared definition store.",
       ));
     }
-    let invalid = |field: &str| {
-      CommandErrorDto::new(
-        "workspace_invalid",
-        format!("The workspace contains invalid or duplicate references in {field}."),
-      )
-    };
     if !valid_workspace_text(&self.workspace_id) {
-      return Err(invalid("workspace_id"));
+      return Err(invalid_workspace_field("workspace_id"));
     }
     if self.hosts.len() > 1024 {
-      return Err(invalid("hosts: more than 1024 entries"));
+      return Err(invalid_workspace_field("hosts: more than 1024 entries"));
     }
     if self.sessions.len() > 10_000 {
-      return Err(invalid("sessions: more than 10000 entries"));
+      return Err(invalid_workspace_field("sessions: more than 10000 entries"));
     }
     let hosts = if self.schema_version < 8 {
       if !self.host_identities.is_empty() {
-        return Err(invalid("host_identities: unsupported in legacy workspaces"));
+        return Err(invalid_workspace_field(
+          "host_identities: unsupported in legacy workspaces",
+        ));
       }
-      let gateway_ids =
-        validated_gateway_ids(&self.ssh_gateways).ok_or_else(|| invalid("ssh_gateways"))?;
+      let gateway_ids = validated_gateway_ids(&self.ssh_gateways)
+        .ok_or_else(|| invalid_workspace_field("ssh_gateways"))?;
       self
         .validated_host_ids(&gateway_ids)
-        .ok_or_else(|| invalid("hosts"))?
+        .ok_or_else(|| invalid_workspace_field("hosts"))?
     } else {
       if !self.hosts.is_empty() || !self.ssh_gateways.is_empty() {
         return Err(CommandErrorDto::new(
@@ -304,43 +307,29 @@ impl WorkspaceDocument {
         .chain(std::iter::once("local"))
         .collect();
       if hosts.iter().any(|host_id| !valid_workspace_text(host_id)) {
-        return Err(invalid("host_id"));
+        return Err(invalid_workspace_field("host_id"));
       }
-      if self.host_identities.len() > 1024 {
-        return Err(invalid("host_identities: more than 1024 entries"));
-      }
-      // Gateway-only hosts are referenced by routes in the separate catalog.
-      // Keep their identity pins even without sessions, tasks, or forwards, and
-      // without depending on the current catalog's availability.
-      let mut identities = HashSet::new();
-      for (index, item) in self.host_identities.iter().enumerate() {
-        let field = format!("host_identities[{index}]");
-        if item.host_id == "local" || !valid_workspace_text(&item.host_id) {
-          return Err(invalid(&format!("{field}.host_id")));
-        }
-        if !identities.insert(item.host_id.as_str()) {
-          return Err(invalid(&format!("{field}.host_id: duplicate")));
-        }
-        if !item.remote_info.is_valid() {
-          return Err(invalid(&format!("{field}.remote_info")));
-        }
-      }
+      self.validate_host_identities()?;
       hosts
     };
     if !self.port_forwards_are_valid(&hosts) {
-      return Err(invalid("port_forwards"));
+      return Err(invalid_workspace_field("port_forwards"));
     }
     let mut sessions = HashSet::new();
     for (index, session) in self.sessions.iter().enumerate() {
       let field = format!("sessions[{index}]");
       if !hosts.contains(session.host_id.as_str()) {
-        return Err(invalid(&format!("{field}.host_id")));
+        return Err(invalid_workspace_field(&format!("{field}.host_id")));
       }
       if let Some(metadata_field) = session.invalid_metadata_field() {
-        return Err(invalid(&format!("{field}.{metadata_field}")));
+        return Err(invalid_workspace_field(&format!(
+          "{field}.{metadata_field}"
+        )));
       }
       if !sessions.insert(session.reference()) {
-        return Err(invalid(&format!("{field}: duplicate session reference")));
+        return Err(invalid_workspace_field(&format!(
+          "{field}: duplicate session reference"
+        )));
       }
     }
     self.validate_task_drafts()?;
@@ -348,7 +337,9 @@ impl WorkspaceDocument {
     let mut tabs = HashSet::new();
     for (index, tab) in self.tabs.iter().enumerate() {
       if !tabs.insert(tab) {
-        return Err(invalid(&format!("tabs[{index}]: duplicate")));
+        return Err(invalid_workspace_field(&format!(
+          "tabs[{index}]: duplicate"
+        )));
       }
     }
     if self
@@ -356,7 +347,34 @@ impl WorkspaceDocument {
       .as_ref()
       .is_some_and(|tab| !tabs.contains(tab))
     {
-      return Err(invalid("active_tab: absent from tabs"));
+      return Err(invalid_workspace_field("active_tab: absent from tabs"));
+    }
+    Ok(())
+  }
+
+  fn validate_host_identities(&self) -> CommandResult<()> {
+    if self.host_identities.len() > 1024 {
+      return Err(invalid_workspace_field(
+        "host_identities: more than 1024 entries",
+      ));
+    }
+    // Gateway-only hosts are referenced by routes in the separate catalog.
+    // Keep their identity pins even without sessions, tasks, or forwards, and
+    // without depending on the current catalog's availability.
+    let mut identities = HashSet::new();
+    for (index, item) in self.host_identities.iter().enumerate() {
+      let field = format!("host_identities[{index}]");
+      if item.host_id == "local" || !valid_workspace_text(&item.host_id) {
+        return Err(invalid_workspace_field(&format!("{field}.host_id")));
+      }
+      if !identities.insert(item.host_id.as_str()) {
+        return Err(invalid_workspace_field(&format!(
+          "{field}.host_id: duplicate"
+        )));
+      }
+      if !item.remote_info.is_valid() {
+        return Err(invalid_workspace_field(&format!("{field}.remote_info")));
+      }
     }
     Ok(())
   }

@@ -711,7 +711,7 @@ fn missing_host_references_and_identities_survive_without_persisting_definitions
     })
     .unwrap();
   assert_eq!(fixture.repository().load().unwrap(), saved);
-  document.host_identities[0].host_id = "".into();
+  document.host_identities[0].host_id = String::new();
   assert!(document.validate().is_err());
   document.host_identities[0].host_id = "local".into();
   assert!(document.validate().is_err());

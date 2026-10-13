@@ -13,7 +13,7 @@ use ctmux_proto::{
   CommandSpec, CwdSource, ForegroundProcess, LeaseKind, LeaseStatus, PromptPhase, SessionInfo,
   SessionStatus, ShellProcessState, ShellState, TERMINAL_CHECKPOINT_FORMAT,
   TERMINAL_CHECKPOINT_FORMAT_VERSION, TERMINAL_HISTORY_FORMAT, TERMINAL_HISTORY_FORMAT_VERSION,
-  TerminalCheckpoint, TerminalHistoryRow, TerminalHistorySnapshot, TerminalSize, TuiHint,
+  TerminalCheckpoint, TerminalHistorySnapshot, TerminalSize, TuiHint,
 };
 #[cfg(unix)]
 use portable_pty::ChildKiller;
@@ -2134,10 +2134,7 @@ fn refresh_history(terminal: &mut TerminalState) {
     .lines()
     .skip(history_rows - retained_rows)
     .take(retained_rows)
-    .map(|line| TerminalHistoryRow {
-      text: line.text(),
-      wrapped: unwrapper.push(line).is_none(),
-    })
+    .map(|line| ctmux_core::history::capture_row(line, unwrapper.push(line).is_none()))
     .collect();
   PhysicalHistory::replace(&mut terminal.primary_history_rows, rows);
   terminal
@@ -2315,6 +2312,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 #[cfg(all(test, unix))]
 mod tests {
   use super::*;
+  use ctmux_proto::TerminalHistoryRow;
   use std::sync::mpsc;
   use std::sync::{Arc, Barrier};
   use std::thread;
@@ -3231,12 +3229,44 @@ mod tests {
       &[TerminalHistoryRow {
         text: "abc".into(),
         wrapped: true,
+        styles: Vec::new(),
       }]
     );
     assert_eq!(terminal.checkpoint_history.lines, Vec::<String>::new());
     feed_terminal_bytes(&mut terminal, b"\x1b[?1049l\r\nnext\r\nlast");
     refresh_checkpoint(&mut terminal);
     assert_eq!(terminal.checkpoint_history.lines[0], "abcdefghi");
+  }
+
+  #[test]
+  fn physical_history_retains_colors_and_attributes_across_checkpoint_capture() {
+    use ctmux_proto::{TerminalColor, TerminalStyle};
+    let mut terminal = terminal_state_with_size(8, 2, 1024);
+    feed_terminal_bytes(
+      &mut terminal,
+      "\x1b[1;3;4;38;2;12;34;56;48;5;22m界R\x1b[0m\r\nnext\r\nlive".as_bytes(),
+    );
+    refresh_checkpoint(&mut terminal);
+    let row = &terminal.checkpoint_history_rows[0];
+    assert_eq!(row.text.trim_end(), "界R");
+    assert_eq!(row.styles.len(), 1);
+    assert_eq!(row.styles[0].start, 0);
+    assert_eq!(row.styles[0].length, 2);
+    assert_eq!(
+      row.styles[0].style,
+      TerminalStyle {
+        foreground: Some(TerminalColor::Rgb {
+          red: 12,
+          green: 34,
+          blue: 56
+        }),
+        background: Some(TerminalColor::Indexed { index: 22 }),
+        bold: true,
+        italic: true,
+        underline: true,
+        ..TerminalStyle::default()
+      }
+    );
   }
 
   #[test]
@@ -3278,7 +3308,7 @@ mod tests {
     refresh_checkpoint(&mut terminal);
     assert!(!terminal.checkpoint_history_rows.is_empty());
     let captured = Arc::clone(&terminal.checkpoint_history_rows);
-    let captured_bytes = Arc::clone(&captured.encoded().unwrap().data);
+    let captured_bytes = Arc::clone(&captured.encoded(true).unwrap().data);
     feed_terminal_bytes(&mut terminal, b"\x1b[3J");
     refresh_checkpoint(&mut terminal);
     assert!(terminal.checkpoint_history_rows.is_empty());
@@ -3287,12 +3317,12 @@ mod tests {
     assert_ne!(
       terminal
         .checkpoint_history_rows
-        .encoded()
+        .encoded(true)
         .unwrap()
         .content_hash,
-      captured.encoded().unwrap().content_hash
+      captured.encoded(true).unwrap().content_hash
     );
-    assert_eq!(&*captured_bytes, &*captured.encoded().unwrap().data);
+    assert_eq!(&*captured_bytes, &*captured.encoded(true).unwrap().data);
   }
 
   #[test]
@@ -3302,7 +3332,7 @@ mod tests {
     refresh_checkpoint(&mut terminal);
     let captured = Arc::clone(&terminal.checkpoint_history_rows);
     let captured_history = terminal.checkpoint_history.clone();
-    let captured_bytes = Arc::clone(&captured.encoded().unwrap().data);
+    let captured_bytes = Arc::clone(&captured.encoded(true).unwrap().data);
     refresh_checkpoint(&mut terminal);
     assert!(Arc::ptr_eq(&terminal.checkpoint_history_rows, &captured));
     terminal.terminal.resize(6, 2);
@@ -3314,12 +3344,12 @@ mod tests {
       captured_history.revision
     );
     assert!(!Arc::ptr_eq(&terminal.checkpoint_history_rows, &captured));
-    let changed = terminal.checkpoint_history_rows.encoded().unwrap();
+    let changed = terminal.checkpoint_history_rows.encoded(true).unwrap();
     assert_ne!(
       changed.content_hash,
-      captured.encoded().unwrap().content_hash
+      captured.encoded(true).unwrap().content_hash
     );
-    assert_eq!(&*captured_bytes, &*captured.encoded().unwrap().data);
+    assert_eq!(&*captured_bytes, &*captured.encoded(true).unwrap().data);
   }
 
   #[test]
@@ -3329,7 +3359,7 @@ mod tests {
     feed_terminal_bytes(&mut terminal, b"\x1b[?1049hUI");
     assert!(terminal.primary_history_rows.len() > 250);
     let captured = Arc::clone(&terminal.primary_history_rows);
-    let captured_bytes = Arc::clone(&captured.encoded().unwrap().data);
+    let captured_bytes = Arc::clone(&captured.encoded(true).unwrap().data);
     terminal.terminal.resize(4000, 2);
     terminal.terminal_size.columns = 4000;
     refresh_checkpoint(&mut terminal);
@@ -3341,12 +3371,12 @@ mod tests {
     assert_ne!(
       terminal
         .checkpoint_history_rows
-        .encoded()
+        .encoded(true)
         .unwrap()
         .content_hash,
-      captured.encoded().unwrap().content_hash
+      captured.encoded(true).unwrap().content_hash
     );
-    assert_eq!(&*captured_bytes, &*captured.encoded().unwrap().data);
+    assert_eq!(&*captured_bytes, &*captured.encoded(true).unwrap().data);
     assert!(
       terminal
         .checkpoint_history_rows

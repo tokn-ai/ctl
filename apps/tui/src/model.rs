@@ -19,6 +19,7 @@ pub struct Model {
   buffer_parser: avt::parser::Parser,
   buffer_state: avt::terminal::Terminal,
   history: Vec<String>,
+  legacy_history_rows: usize,
   pending: Vec<u8>,
   escape: String,
   string_control: StringControl,
@@ -42,6 +43,7 @@ impl Model {
       buffer_parser: avt::parser::Parser::default(),
       buffer_state: avt::terminal::Terminal::new((2, 1), Some(0)),
       history: Vec::new(),
+      legacy_history_rows: 0,
       pending: Vec::new(),
       escape: String::new(),
       string_control: StringControl::None,
@@ -67,6 +69,12 @@ impl Model {
 
   pub fn set_history(&mut self, history: Vec<String>) {
     self.history = history;
+    self.count_legacy_history_rows();
+  }
+
+  fn clear_history(&mut self) {
+    self.history.clear();
+    self.legacy_history_rows = 0;
   }
 
   pub fn adopt_history_projection(
@@ -80,7 +88,7 @@ impl Model {
     }
     self.vt = vt;
     self.pending = pending;
-    self.history.clear();
+    self.clear_history();
     self.history_gap = history_gap;
     true
   }
@@ -89,6 +97,37 @@ impl Model {
     let mut lines = self.history.clone();
     lines.extend(self.vt.text());
     lines
+  }
+
+  /// Retained physical scrollback rows; the live screen is counted only in copy mode.
+  pub fn history_rows(&self) -> usize {
+    if self.buffer_state.active_buffer_type() != avt::terminal::BufferType::Primary {
+      return 0;
+    }
+    self.legacy_history_rows + self.vt.lines().count().saturating_sub(self.vt.size().1)
+  }
+
+  // Legacy checkpoints contain logical text. Recount only when that text or
+  // the wrapping width changes, never on every status-line redraw.
+  fn count_legacy_history_rows(&mut self) {
+    let width = self.vt.size().0.max(1);
+    self.legacy_history_rows = self
+      .history
+      .iter()
+      .map(|line| {
+        let mut rows = 1;
+        let mut cells = 0;
+        for ch in line.chars() {
+          let character_width = crate::copy::CopyMode::width(ch);
+          if character_width > 0 && cells > 0 && cells + character_width > width {
+            rows += 1;
+            cells = 0;
+          }
+          cells += character_width;
+        }
+        rows
+      })
+      .sum();
   }
 
   /// Freeze the active buffer without reflowing its physical screen rows.
@@ -107,15 +146,17 @@ impl Model {
       .lines()
       .map(|line| {
         let wrapped = unwrapper.push(line).is_none();
-        let text = line.text();
-        TerminalHistoryRow {
-          text: if wrapped {
-            text
-          } else {
-            text.trim_end_matches(' ').to_owned()
-          },
-          wrapped,
+        let mut row = ctmux_core::history::capture_row(line, wrapped);
+        if !wrapped {
+          // Retain painted blank cells, but keep unpainted screen padding out
+          // of selections just as in the plain-text history browser.
+          let text_end = row.text.trim_end_matches(' ').chars().count();
+          let style_end = row.styles.last().map_or(0, |span| {
+            (span.start as usize).saturating_add(span.length as usize)
+          });
+          row.text = row.text.chars().take(text_end.max(style_end)).collect();
         }
+        row
       })
       .collect();
     (prefix, rows)
@@ -129,9 +170,10 @@ impl Model {
       .next()
       .is_some()
     {
-      self.history.clear();
+      self.clear_history();
       self.history_gap = true;
     }
+    self.count_legacy_history_rows();
   }
 
   pub fn feed(&mut self, bytes: &[u8]) -> Vec<u8> {
@@ -182,7 +224,7 @@ impl Model {
     if self.vt.feed_str("").scrollback.next().is_some() {
       // Once local rows are evicted, the checkpoint's older history is no
       // longer contiguous with this buffer. Keep only the retained suffix.
-      self.history.clear();
+      self.clear_history();
       self.history_gap = true;
     }
   }
@@ -195,9 +237,9 @@ impl Model {
       }
       Some(function @ Function::Ris) => {
         self.buffer_state.execute(function);
-        self.history.clear();
+        self.clear_history();
       }
-      Some(Function::Ed(EdScope::SavedLines)) => self.history.clear(),
+      Some(Function::Ed(EdScope::SavedLines)) => self.clear_history(),
       _ => {}
     }
   }
@@ -278,6 +320,75 @@ mod tests {
   }
 
   #[test]
+  fn history_count_tracks_physical_rows_and_excludes_alternate_screen() {
+    let mut model = Model::new(&TerminalSize {
+      columns: 4,
+      rows: 2,
+      ..TerminalSize::default()
+    });
+    assert_eq!(model.history_rows(), 0);
+    model.set_history(vec!["界界x".into(), String::new()]);
+    assert_eq!(model.history_rows(), 3);
+    model.feed(b"12345678x");
+    assert_eq!(model.history_rows(), 4);
+    model.feed(b"\x1b[?1049h");
+    assert_eq!(model.history_rows(), 0);
+    model.feed(b"\x1b[?1049l");
+    assert_eq!(model.history_rows(), 4);
+    model.feed(b"\x1b[3J");
+    // Saved-lines clear discards the legacy prefix immediately; the daemon
+    // replaces the physical projection with its authoritative checkpoint.
+    assert_eq!(model.history_rows(), 1);
+    model.restore(&TerminalCheckpoint {
+      format: ctmux_proto::TERMINAL_CHECKPOINT_FORMAT.into(),
+      format_version: ctmux_proto::TERMINAL_CHECKPOINT_FORMAT_VERSION,
+      sequence: 1,
+      terminal_size: TerminalSize {
+        columns: 4,
+        rows: 2,
+        ..TerminalSize::default()
+      },
+      payload: model.vt.dump().into_bytes(),
+      input_prefix: Vec::new(),
+    });
+    assert_eq!(model.history_rows(), 0);
+  }
+
+  #[test]
+  fn colored_snapshot_retains_painted_spaces_and_freezes_styles() {
+    let mut model = model();
+    model.feed(b"\x1b[31;44;1mRED  \x1b[0m\r\nplain");
+    let (prefix, rows) = model.copy_snapshot();
+    assert_eq!(rows[0].text, "RED  ");
+    assert_eq!(rows[1].text, "plain");
+    let frozen = crate::copy::CopyMode::from_rows(prefix, rows, 12);
+    let pen = frozen.pen(crate::copy::Position { row: 0, column: 4 });
+    assert_eq!(pen.foreground(), Some(avt::Color::Indexed(1)));
+    assert_eq!(pen.background(), Some(avt::Color::Indexed(4)));
+    assert!(pen.is_bold());
+    model.feed(b"\x1b[2J\x1b[H\x1b[32mnew");
+    assert_eq!(frozen.lines[0].iter().collect::<String>(), "RED  ");
+    assert_eq!(frozen.pen(crate::copy::Position { row: 0, column: 4 }), pen);
+  }
+
+  #[test]
+  fn legacy_count_is_recomputed_on_resize_and_cleared_with_its_text() {
+    let mut model = model();
+    model.set_history(vec!["界界a".into(), "abcdef".into()]);
+    assert_eq!(model.history_rows(), 2);
+    model.resize(&TerminalSize {
+      columns: 4,
+      rows: 3,
+      ..TerminalSize::default()
+    });
+    assert_eq!(model.history_rows(), 4);
+    model.set_history(vec!["x".into()]);
+    assert_eq!(model.history_rows(), 1);
+    model.feed(b"\x1b[3J");
+    assert_eq!(model.history_rows(), 0);
+  }
+
+  #[test]
   fn checkpoint_reset_retains_pending_utf8_and_resets_screen() {
     let mut model = model();
     model.feed(b"old");
@@ -331,6 +442,7 @@ mod tests {
     assert_eq!(
       rows[0],
       TerminalHistoryRow {
+        styles: Vec::new(),
         text: "ab  ".into(),
         wrapped: true
       }
@@ -338,6 +450,7 @@ mod tests {
     assert_eq!(
       rows[1],
       TerminalHistoryRow {
+        styles: Vec::new(),
         text: "c".into(),
         wrapped: false
       }
@@ -345,6 +458,7 @@ mod tests {
     assert_eq!(
       rows[2],
       TerminalHistoryRow {
+        styles: Vec::new(),
         text: String::new(),
         wrapped: false
       }
@@ -595,6 +709,7 @@ mod tests {
       input_prefix: Vec::new(),
     };
     let rows = [ctmux_proto::TerminalHistoryRow {
+      styles: Vec::new(),
       text: "old".into(),
       wrapped: false,
     }];

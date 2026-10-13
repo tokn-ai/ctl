@@ -54,8 +54,8 @@ ctmux-avt
 ctl-ipc
 ctl-task-ipc
 ctl-task-store
-ctmux-client
 ctmux-core
+ctmux-client
 ctmux-ipc
 ctl-task-client
 ctld

@@ -235,7 +235,17 @@ fn event_bytes(event: &AttachmentEvent) -> usize {
       .len()
       .saturating_add(checkpoint.input_prefix.len())
       .saturating_add(history.lines.iter().map(String::len).sum::<usize>())
-      .saturating_add(rows.iter().map(|row| row.text.len()).sum::<usize>()),
+      .saturating_add(
+        rows
+          .iter()
+          .fold(std::mem::size_of_val(rows.as_slice()), |bytes, row| {
+            // enqueue clones these vectors at their length, not source capacity.
+            // Dense styles can occupy far more memory than their literal text.
+            bytes
+              .saturating_add(row.text.len())
+              .saturating_add(std::mem::size_of_val(row.styles.as_slice()))
+          }),
+      ),
     _ => 1,
   }
 }
@@ -377,5 +387,76 @@ mod tests {
     });
     writer.finish().await.unwrap();
     assert_eq!(gaps.load(Ordering::SeqCst), 1);
+  }
+
+  #[tokio::test]
+  async fn styled_history_is_charged_for_cloned_spans_before_enqueue() {
+    use ctmux_proto::{TerminalColor, TerminalHistoryRow, TerminalHistoryStyleSpan, TerminalStyle};
+    for styled in [false, true] {
+      let AttachmentEvent::Checkpoint {
+        checkpoint,
+        history,
+        ..
+      } = checkpoint(0)
+      else {
+        unreachable!()
+      };
+      let event = AttachmentEvent::HistorySynced {
+        snapshot_id: "styles".into(),
+        checkpoint,
+        history,
+        rows: vec![TerminalHistoryRow {
+          text: "x".repeat(64),
+          wrapped: false,
+          styles: if styled {
+            (0..64)
+              .map(|start| TerminalHistoryStyleSpan {
+                start,
+                length: 1,
+                style: TerminalStyle {
+                  foreground: Some(TerminalColor::Indexed { index: 1 }),
+                  ..TerminalStyle::default()
+                },
+              })
+              .collect()
+          } else {
+            // Unused source capacity is not copied and must not reject a
+            // small plain snapshot which fits in the writer's byte budget.
+            Vec::with_capacity(4_096)
+          },
+        }],
+        scrollback_limit: 1,
+        history_gap: false,
+      };
+      let saved = Arc::new(AtomicUsize::new(0));
+      let gaps = Arc::new(AtomicUsize::new(0));
+      let requests = Arc::new(AtomicUsize::new(0));
+      let persist: Persist = Arc::new({
+        let saved = saved.clone();
+        move |_| {
+          saved.fetch_add(1, Ordering::SeqCst);
+          Box::pin(async { Ok(()) })
+        }
+      });
+      let gap: MarkGap = Arc::new({
+        let gaps = gaps.clone();
+        move || {
+          gaps.fetch_add(1, Ordering::SeqCst);
+          Box::pin(async { Ok(()) })
+        }
+      });
+      let request: Request = Arc::new({
+        let requests = requests.clone();
+        move || {
+          requests.fetch_add(1, Ordering::SeqCst);
+        }
+      });
+      let writer = CacheWriter::start(persist, gap, request, 1, 512);
+      writer.enqueue(&event);
+      writer.finish().await.unwrap();
+      assert_eq!(saved.load(Ordering::SeqCst), usize::from(!styled));
+      assert_eq!(requests.load(Ordering::SeqCst), usize::from(styled));
+      assert_eq!(gaps.load(Ordering::SeqCst), usize::from(styled));
+    }
   }
 }

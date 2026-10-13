@@ -391,7 +391,8 @@ async fn ready_named_session(tui: &mut Tui, name: &str) -> Result<()> {
   tui
     .wait_screen("named session connected with input ownership", |screen| {
       let status = footer(screen);
-      status.starts_with(" connected | history ready |")
+      status.starts_with(" connected | history ")
+        && status.contains(" lines |")
         && status.contains(&expected)
         && status.contains(" | input |")
     })

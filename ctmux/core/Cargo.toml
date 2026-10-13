@@ -12,6 +12,7 @@ keywords = ["ctmux", "terminal", "session"]
 publish = ["crates-io"]
 
 [dependencies]
+avt.workspace = true
 ctmux-proto.workspace = true
 serde.workspace = true
 thiserror.workspace = true

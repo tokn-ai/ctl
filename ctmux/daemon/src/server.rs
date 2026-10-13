@@ -1641,10 +1641,19 @@ impl PinnedHistory {
     history: &TerminalHistorySnapshot,
     rows: &PhysicalHistory,
     scrollback_limit: u64,
+    styled: bool,
   ) -> Result<(Self, TerminalHistorySnapshot), ConnectionError> {
-    let encoded = rows.encoded()?;
+    let encoded = rows.encoded(styled)?;
     let data = Arc::clone(&encoded.data);
-    let lines = rows.lines();
+    let retained = &rows[encoded.first_row..];
+    let bounded_lines;
+    let lines = if encoded.first_row == 0 {
+      rows.lines()
+    } else {
+      bounded_lines = ctmux_proto::normalize_history_rows(retained);
+      &bounded_lines
+    };
+    let truncated = history.truncated || encoded.first_row != 0;
     let mut first_line = lines.len();
     let mut recent_bytes = 0;
     while first_line > 0 && lines.len() - first_line < MAX_RECENT_HISTORY_LINES {
@@ -1663,11 +1672,11 @@ impl PinnedHistory {
       sequence: history.sequence,
       generation: history.generation,
       revision: history.revision,
-      total_rows: rows.len() as u64,
+      total_rows: retained.len() as u64,
       total_bytes: data.len() as u64,
       total_lines: lines.len() as u64,
       first_line: first_line as u64,
-      truncated: history.truncated,
+      truncated,
       content_hash: encoded.content_hash.clone(),
       scrollback_limit,
     };
@@ -1677,8 +1686,12 @@ impl PinnedHistory {
       sequence: history.sequence,
       generation: history.generation,
       revision: history.revision,
-      retained_bytes: history.retained_bytes,
-      truncated: history.truncated,
+      retained_bytes: if encoded.first_row == 0 {
+        history.retained_bytes
+      } else {
+        lines.iter().map(|line| line.len() as u64 + 1).sum()
+      },
+      truncated,
       lines: lines[first_line..].to_vec(),
     };
     Ok((
@@ -1741,7 +1754,12 @@ fn pin_snapshot_history(
   };
   let empty = PhysicalHistory::default();
   let rows = snapshot.history_rows.as_deref().unwrap_or(&empty);
-  let (pinned, recent) = PinnedHistory::new(history, rows, snapshot.scrollback_limit)?;
+  let (pinned, recent) = PinnedHistory::new(
+    history,
+    rows,
+    snapshot.scrollback_limit,
+    ctmux_proto::supports_styled_history(protocol_version),
+  )?;
   snapshot.history = Some(recent);
   Ok(Some(pinned))
 }
@@ -3171,12 +3189,15 @@ mod tests {
   }
 
   #[test]
-  fn historical_contracts_omit_only_the_captured_keyboard_preamble() {
+  fn historical_contracts_project_keyboard_modes_and_styled_history() {
     let prefix = b"\x1b[>4;2m";
     // The same bytes inside an OSC string or a pending CSI are application
     // state, not the daemon's preamble, and must survive the projection.
     let legacy = b"\x1b[?2004h\x1b]0;\x1b[>4;2m\x07\x1b[>4;";
     let payload = [prefix.as_slice(), legacy.as_slice()].concat();
+    let mut terminal = avt::Vt::new(8, 1);
+    terminal.feed_str("\x1b[31mred");
+    let rows = vec![ctmux_core::history::capture_row(terminal.line(0), false)];
     let base = AttachSnapshot {
       session: ctmux_proto::SessionInfo {
         view_id: "view".into(),
@@ -3206,14 +3227,27 @@ mod tests {
         chunks: Vec::new(),
       },
       history_gap: false,
-      history: None,
-      history_rows: None,
+      history: Some(history_fixture(&rows)),
+      history_rows: Some(Arc::new(PhysicalHistory::new(rows.clone()))),
       scrollback_limit: 2_000,
       shell_state: ShellState::default(),
     };
     for &version in ctmux_proto::SUPPORTED_PROTOCOL_VERSIONS {
       let mut snapshot = base.clone();
-      project_checkpoint_for_contract(&mut snapshot, version);
+      let pinned = pin_snapshot_history(&mut snapshot, version).unwrap();
+      if version == ctmux_proto::CONTRACT_V1_0_13 {
+        assert!(pinned.is_none());
+        assert_eq!(snapshot.history.as_ref().unwrap().lines, ["red"]);
+      } else {
+        let pinned = pinned.unwrap();
+        let decoded: TerminalHistoryRow = serde_json::from_slice(&pinned.data).unwrap();
+        assert_eq!(decoded.text, rows[0].text);
+        assert_eq!(
+          !decoded.styles.is_empty(),
+          ctmux_proto::supports_styled_history(version),
+          "contract {version}"
+        );
+      }
       project_checkpoint_for_contract(&mut snapshot, version);
       let checkpoint = snapshot.checkpoint.unwrap();
       assert_eq!(
@@ -3237,17 +3271,18 @@ mod tests {
       vec![TerminalHistoryRow {
         text: "unchanged".into(),
         wrapped: false,
+        styles: Vec::new(),
       }],
     ] {
       let physical = PhysicalHistory::new(rows.clone());
       let original_history = history_fixture(&rows);
-      let (mut old, _) = PinnedHistory::new(&original_history, &physical, 10_000).unwrap();
+      let (mut old, _) = PinnedHistory::new(&original_history, &physical, 10_000, true).unwrap();
       let mut new_history = original_history.clone();
       new_history.sequence += 1;
       new_history.generation += 1;
       new_history.revision += 1;
       new_history.truncated = true;
-      let (new, _) = PinnedHistory::new(&new_history, &physical, 250).unwrap();
+      let (new, _) = PinnedHistory::new(&new_history, &physical, 250, true).unwrap();
       assert!(Arc::ptr_eq(&old.data, &new.data));
       assert_eq!(old.manifest.content_hash, new.manifest.content_hash);
       assert_ne!(old.manifest.snapshot_id, new.manifest.snapshot_id);
@@ -3271,24 +3306,94 @@ mod tests {
   }
 
   #[test]
+  fn styled_history_is_negotiated_and_dense_colors_keep_a_bounded_recent_window() {
+    use ctmux_proto::{TerminalColor, TerminalHistoryStyleSpan, TerminalStyle};
+    let style = TerminalStyle {
+      foreground: Some(TerminalColor::Rgb {
+        red: 255,
+        green: 128,
+        blue: 64,
+      }),
+      background: Some(TerminalColor::Rgb {
+        red: 64,
+        green: 128,
+        blue: 255,
+      }),
+      bold: true,
+      italic: true,
+      underline: true,
+      strikethrough: true,
+      blink: true,
+      inverse: true,
+      ..TerminalStyle::default()
+    };
+    let row = TerminalHistoryRow {
+      text: "x".repeat(4096),
+      wrapped: false,
+      styles: (0..4096)
+        .map(|start| TerminalHistoryStyleSpan {
+          start,
+          length: 1,
+          style,
+        })
+        .collect(),
+    };
+    let row_bytes = serde_json::to_vec(&row).unwrap().len() + 1;
+    let limit = 16 * 1024 * 1024;
+    let rows = vec![row; limit / row_bytes + 2];
+    let physical = PhysicalHistory::new(rows.clone());
+    let history = history_fixture(&rows);
+    for &version in &ctmux_proto::SUPPORTED_PROTOCOL_VERSIONS[1..] {
+      let styled = ctmux_proto::supports_styled_history(version);
+      let (pinned, recent) = PinnedHistory::new(&history, &physical, 10_000, styled).unwrap();
+      assert_eq!(pinned.manifest.total_bytes, pinned.data.len() as u64);
+      assert!(pinned.data.len() <= limit);
+      let decoded: Vec<TerminalHistoryRow> = pinned
+        .data
+        .split(|byte| *byte == b'\n')
+        .filter(|record| !record.is_empty())
+        .map(|record| serde_json::from_slice(record).unwrap())
+        .collect();
+      assert_eq!(pinned.manifest.total_rows, decoded.len() as u64);
+      assert_eq!(pinned.manifest.total_lines, decoded.len() as u64);
+      assert_eq!(
+        pinned.manifest.first_line + recent.lines.len() as u64,
+        pinned.manifest.total_lines
+      );
+      assert_eq!(pinned.manifest.truncated, styled);
+      assert_eq!(recent.truncated, styled);
+      if styled {
+        assert_eq!(decoded, rows[rows.len() - limit / row_bytes..]);
+      } else {
+        assert_eq!(decoded.len(), rows.len());
+        assert!(decoded.iter().all(|row| row.styles.is_empty()));
+        assert!(!String::from_utf8_lossy(&pinned.data).contains("styles"));
+      }
+    }
+  }
+
+  #[test]
   fn history_pages_are_byte_bounded_and_preserve_long_unicode_wrapped_rows() {
     let rows = vec![
       TerminalHistoryRow {
         text: "界\"".repeat(20_000),
         wrapped: true,
+        styles: Vec::new(),
       },
       TerminalHistoryRow {
         text: "tail   ".into(),
         wrapped: false,
+        styles: Vec::new(),
       },
       TerminalHistoryRow {
         text: "partial".into(),
         wrapped: true,
+        styles: Vec::new(),
       },
     ];
     let physical = PhysicalHistory::new(rows.clone());
     let (mut pinned, recent) =
-      PinnedHistory::new(&history_fixture(&rows), &physical, 10_000).unwrap();
+      PinnedHistory::new(&history_fixture(&rows), &physical, 10_000, true).unwrap();
     assert_eq!(pinned.manifest.total_rows, 3);
     assert_eq!(pinned.manifest.total_lines, 1);
     assert!(
@@ -3341,11 +3446,12 @@ mod tests {
       .map(|index| TerminalHistoryRow {
         text: format!("line {index}"),
         wrapped: false,
+        styles: Vec::new(),
       })
       .collect();
     let physical = PhysicalHistory::new(rows.clone());
     let (mut pinned, recent) =
-      PinnedHistory::new(&history_fixture(&rows), &physical, 10_000).unwrap();
+      PinnedHistory::new(&history_fixture(&rows), &physical, 10_000, true).unwrap();
     assert_eq!(recent.lines.len(), MAX_RECENT_HISTORY_LINES);
     assert_eq!(pinned.manifest.first_line, 36);
     let mut request = HistoryRequest {
@@ -3390,9 +3496,11 @@ mod tests {
     let rows = vec![TerminalHistoryRow {
       text: "last".into(),
       wrapped: false,
+      styles: Vec::new(),
     }];
     let physical = PhysicalHistory::new(rows.clone());
-    let (mut pinned, _) = PinnedHistory::new(&history_fixture(&rows), &physical, 10_000).unwrap();
+    let (mut pinned, _) =
+      PinnedHistory::new(&history_fixture(&rows), &physical, 10_000, true).unwrap();
     let request = HistoryRequest {
       snapshot_id: pinned.manifest.snapshot_id.clone(),
       offset: pinned.manifest.total_bytes - 1,

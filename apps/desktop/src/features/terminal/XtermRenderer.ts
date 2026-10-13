@@ -4,6 +4,7 @@ import "@xterm/xterm/css/xterm.css";
 import { encodeTerminalBinary, encodeTerminalText } from "../../lib/bytes";
 import type { SessionSummary, TerminalSize } from "../../lib/types";
 import { sessionKey } from "../targets/targets";
+import { captureHistoryRow } from "./historyStyle";
 import {
   TerminalPresenter,
   type ProposedDimensions,
@@ -470,9 +471,7 @@ export class XtermRenderer {
         const buffer = terminal.buffer.normal;
         return Array.from({ length: terminal.rows }, (_, index) => {
           const wrapped = buffer.getLine(buffer.baseY + index + 1)?.isWrapped ?? false;
-          // Erased cells still occupy columns in a wrapped row. Keep that
-          // padding so the next row starts at the original wrap boundary.
-          return { text: buffer.getLine(buffer.baseY + index)?.translateToString(!wrapped) ?? "", wrapped };
+          return captureHistoryRow(buffer.getLine(buffer.baseY + index), wrapped);
         });
       },
       copyLines: () => {

@@ -4634,6 +4634,7 @@ mod tests {
   #[tokio::test]
   async fn history_waits_for_checkpoint_ack_and_never_advances_the_live_cursor() {
     let rows = [TerminalHistoryRow {
+      styles: Vec::new(),
       text: "retained".into(),
       wrapped: false,
     }];
@@ -4697,10 +4698,12 @@ mod tests {
   #[tokio::test]
   async fn late_pages_and_expiration_cannot_cancel_a_replacing_history_snapshot() {
     let old_rows = [TerminalHistoryRow {
+      styles: Vec::new(),
       text: "old".into(),
       wrapped: false,
     }];
     let new_rows = [TerminalHistoryRow {
+      styles: Vec::new(),
       text: "new".into(),
       wrapped: false,
     }];
@@ -4781,6 +4784,7 @@ mod tests {
   #[tokio::test]
   async fn current_history_expiration_requests_a_fresh_checkpoint_without_a_lease() {
     let rows = [TerminalHistoryRow {
+      styles: Vec::new(),
       text: "retained".into(),
       wrapped: false,
     }];

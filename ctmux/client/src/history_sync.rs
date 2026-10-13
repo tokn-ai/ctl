@@ -2,12 +2,10 @@
 //! The transfer position never advances the live renderer or its resume cursor.
 use crate::{AttachmentEvent, ClientError};
 use ctmux_proto::{
-  ClientMessage, MAX_HISTORY_PAGE_BYTES, TerminalCheckpoint, TerminalHistoryManifest,
-  TerminalHistoryRow, TerminalHistorySnapshot, normalize_history_rows,
+  ClientMessage, MAX_ENCODED_HISTORY_BYTES, MAX_HISTORY_PAGE_BYTES, TerminalCheckpoint,
+  TerminalHistoryManifest, TerminalHistoryRow, TerminalHistorySnapshot, normalize_history_rows,
 };
 use sha2::{Digest, Sha256};
-
-const MAX_SNAPSHOT_BYTES: u64 = 16 * 1024 * 1024;
 
 pub(crate) struct HistoryTransfer {
   manifest: TerminalHistoryManifest,
@@ -32,7 +30,7 @@ impl HistoryTransfer {
       || manifest.sequence != checkpoint.sequence
       || manifest.generation != history.generation
       || manifest.revision != history.revision
-      || manifest.total_bytes > MAX_SNAPSHOT_BYTES
+      || manifest.total_bytes > MAX_ENCODED_HISTORY_BYTES as u64
       || manifest.total_rows > manifest.scrollback_limit
       || manifest.scrollback_limit > 10_000
       || manifest.first_line.checked_add(history.lines.len() as u64) != Some(manifest.total_lines)
@@ -107,9 +105,8 @@ impl HistoryTransfer {
       }
       let row: TerminalHistoryRow = serde_json::from_slice(&record[..record.len() - 1])
         .map_err(|error| ClientError::InvalidHistorySnapshot(error.to_string()))?;
-      if row.text.chars().any(char::is_control) {
-        return Err(invalid("history row contains terminal control characters"));
-      }
+      ctmux_proto::validate_history_row(&row)
+        .map_err(|error| ClientError::InvalidHistorySnapshot(error.to_string()))?;
       rows.push(row);
     }
     if rows.len() as u64 != self.manifest.total_rows {
@@ -198,18 +195,22 @@ pub(crate) mod tests {
   fn byte_pages_can_split_utf8_and_preserve_repeated_lines() {
     let rows = vec![
       TerminalHistoryRow {
+        styles: Vec::new(),
         text: "界".into(),
         wrapped: false,
       },
       TerminalHistoryRow {
+        styles: Vec::new(),
         text: "same".into(),
         wrapped: false,
       },
       TerminalHistoryRow {
+        styles: Vec::new(),
         text: "same".into(),
         wrapped: false,
       },
       TerminalHistoryRow {
+        styles: Vec::new(),
         text: "partial".into(),
         wrapped: true,
       },
@@ -245,6 +246,7 @@ pub(crate) mod tests {
   #[test]
   fn missing_pages_and_bad_hashes_are_rejected() {
     let rows = [TerminalHistoryRow {
+      styles: Vec::new(),
       text: "retained".into(),
       wrapped: false,
     }];
@@ -281,6 +283,7 @@ pub(crate) mod tests {
   fn checksummed_control_characters_are_rejected() {
     for text in ["\x1b[3J", "\u{009b}3J"] {
       let rows = [TerminalHistoryRow {
+        styles: Vec::new(),
         text: text.into(),
         wrapped: false,
       }];
@@ -289,5 +292,26 @@ pub(crate) mod tests {
       transfer.accept_page(0, &bytes, None).unwrap();
       assert!(transfer.finish().is_err());
     }
+  }
+
+  #[test]
+  fn checksummed_style_ranges_are_validated_before_publication() {
+    use ctmux_proto::{TerminalHistoryStyleSpan, TerminalStyle};
+    let rows = [TerminalHistoryRow {
+      text: "界".into(),
+      wrapped: false,
+      styles: vec![TerminalHistoryStyleSpan {
+        start: 0,
+        length: 2,
+        style: TerminalStyle {
+          bold: true,
+          ..TerminalStyle::default()
+        },
+      }],
+    }];
+    let (manifest, checkpoint, history, bytes) = fixture(9, "snap", &rows);
+    let mut transfer = HistoryTransfer::new(manifest, checkpoint, history, false).unwrap();
+    transfer.accept_page(0, &bytes, None).unwrap();
+    assert!(transfer.finish().is_err());
   }
 }

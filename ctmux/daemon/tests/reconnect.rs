@@ -451,9 +451,8 @@ async fn checkpoint_restores_terminal_state_after_journal_compaction() -> TestRe
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn frozen_history_pages_survive_exit_and_geometry_replaces_the_snapshot() -> TestResult {
-  use sha2::{Digest as _, Sha256};
-
+async fn frozen_styled_history_pages_survive_exit_and_geometry_replaces_the_snapshot() -> TestResult
+{
   let _test_guard = pty_test_lock().await;
   let test_directory = TestDirectory::new();
   let socket_path = test_directory.path.join("ctmux.sock");
@@ -461,7 +460,7 @@ async fn frozen_history_pages_survive_exit_and_geometry_replaces_the_snapshot() 
     spawn_daemon_with_liveness(&socket_path, 64 * 1024, 4 * 1024, Duration::from_secs(5));
   let session = create_shell_session(
     &socket_path, "history-pages",
-    "i=0; while [ $i -lt 250 ]; do printf 'line-%03d\\n' \"$i\"; i=$((i + 1)); done; printf 'ready\\n'; IFS= read -r line",
+    "i=0; while [ $i -lt 250 ]; do printf '\\033[1;38;2;12;34;56;48;5;22mline-%03d\\033[0m\\n' \"$i\"; i=$((i + 1)); done; printf 'ready\\n'; IFS= read -r line",
   ).await?;
   let (mut owner, _) = attach_session(&socket_path, &session.session_id, None, true, true).await?;
   read_output_until(&mut owner, b"ready").await?;
@@ -547,9 +546,21 @@ async fn frozen_history_pages_survive_exit_and_geometry_replaces_the_snapshot() 
   // Exit must not discard the pending pinned history. Finish that transfer
   // before accepting SessionEnded; pages may split JSON strings and UTF-8.
   let bytes = read_history_bytes(&mut viewer, &manifest, 127).await?;
+  assert_colored_numbered_history(&bytes, &manifest)?;
+  wait_for_session_end(&mut viewer).await?;
+  drop(viewer);
+  wait_for_daemon_exit(daemon, "ctmuxd did not exit after history transfer").await
+}
+
+fn assert_colored_numbered_history(
+  bytes: &[u8],
+  manifest: &ctmux_proto::TerminalHistoryManifest,
+) -> TestResult {
+  use sha2::{Digest as _, Sha256};
+
   assert_eq!(bytes.len() as u64, manifest.total_bytes);
   assert_eq!(
-    format!("{:x}", Sha256::digest(&bytes)),
+    format!("{:x}", Sha256::digest(bytes)),
     manifest.content_hash
   );
   let rows: Vec<ctmux_proto::TerminalHistoryRow> = bytes
@@ -558,12 +569,31 @@ async fn frozen_history_pages_survive_exit_and_geometry_replaces_the_snapshot() 
     .map(serde_json::from_slice)
     .collect::<Result<_, _>>()?;
   assert_eq!(rows.len() as u64, manifest.total_rows);
+  let colored = rows.first().ok_or("expected retained colored history")?;
+  assert_eq!(
+    colored.styles,
+    vec![ctmux_proto::TerminalHistoryStyleSpan {
+      start: 0,
+      length: 8,
+      style: ctmux_proto::TerminalStyle {
+        foreground: Some(ctmux_proto::TerminalColor::Rgb {
+          red: 12,
+          green: 34,
+          blue: 56
+        }),
+        background: Some(ctmux_proto::TerminalColor::Indexed { index: 22 }),
+        bold: true,
+        ..ctmux_proto::TerminalStyle::default()
+      },
+    }]
+  );
+  for row in &rows {
+    ctmux_proto::validate_history_row(row)?;
+  }
   let lines = ctmux_proto::normalize_history_rows(&rows);
   assert_eq!(lines.len() as u64, manifest.total_lines);
   assert_eq!(lines.first().map(String::as_str), Some("line-000"));
-  wait_for_session_end(&mut viewer).await?;
-  drop(viewer);
-  wait_for_daemon_exit(daemon, "ctmuxd did not exit after history transfer").await
+  Ok(())
 }
 
 async fn attach_raw_viewer(

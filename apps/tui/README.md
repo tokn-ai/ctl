@@ -186,11 +186,14 @@ remain flat, as with the prefix controls above.
 
 ## Scrollback and copy mode
 
-The bottom status row shows the focused pane's connection and history state:
-`connected`, `reconnecting`, or `disconnected`, and `history syncing`, `history ready`, or
-`history incomplete`. Ready means the retained window is available, not that
-the remote keeps unlimited history. The row stays outside the PTY grid and
-scrollback. Copy mode keeps its frozen history and selection while connection
+The bottom status row shows the focused pane's connection and retained history:
+`connected | history 1,240 lines`, with `(syncing)` or `(incomplete)` when needed.
+The live count covers retained physical scrollback rows and excludes the current
+screen. In copy mode, `history 201–240 / 1,264` identifies the rows currently
+visible in the frozen snapshot, which also includes its captured screen. Soft
+wraps count as separate physical rows. The count describes the retained window;
+the remote does not keep unlimited history. The row stays outside the PTY grid
+and scrollback. Copy mode keeps its frozen history and selection while connection
 status updates; reopening copy mode picks up newly synchronized history.
 When authentication or configuration requires user action, automatic retries
 stop. The pane shows `disconnected` and retains the error with `automatic retries
@@ -204,6 +207,13 @@ It includes history supplied by the daemon on attachment/reconnection, plus up
 to 2,000 locally retained scrollback rows since the last checkpoint. Copy mode
 also works in a read-only attachment. If local retention evicts rows, the older
 checkpoint prefix is dropped too, keeping the displayed history contiguous.
+
+Copy mode preserves terminal foreground and background colors and text
+attributes, including painted blank cells. Selection reverses the selected
+cells while keeping their original colors; copied text contains no formatting
+codes. With ctmux contract `1.2.21`, paged history also retains these styles
+after attachment or reconnect, including in the desktop terminal. Older daemons
+and existing text-only archives remain readable using default text styling.
 
 - Arrows or `h/j/k/l` move; Page Up/Down move a page.
 - Mouse wheel or trackpad scrolling focuses the pane under the pointer and opens

@@ -375,9 +375,6 @@ impl Frame {
     offset: (u16, u16),
   ) {
     let height = usize::from(size.1);
-    let mut palette = avt::Vt::new(2, 1);
-    palette.feed_str("\x1b[7mX");
-    let selected_pen = *palette.line(0).cells()[0].pen();
     for (row, line) in mode.lines.iter().enumerate().skip(mode.top).take(height) {
       let mut column = 0;
       for (index, ch) in line.iter().enumerate() {
@@ -404,11 +401,15 @@ impl Frame {
           };
           let x = u16::try_from(x).expect("bounded column");
           let y = u16::try_from(y).expect("bounded row");
-          let pen = if mode.selected(Position { row, column: index }) {
-            selected_pen
-          } else {
-            avt::Pen::default()
-          };
+          let position = Position { row, column: index };
+          let mut pen = mode.pen(position);
+          if mode.selected(position) {
+            if pen.is_inverse() {
+              pen.unset_inverse();
+            } else {
+              pen.set_inverse();
+            }
+          }
           self.set(
             x,
             y,
@@ -1062,6 +1063,33 @@ mod tests {
     clipped.copy_mode(&mode);
     assert_eq!(clipped.cells[0].ch, ' ');
     assert_eq!(clipped.cells[1].ch, 'b');
+  }
+
+  #[test]
+  fn copy_view_preserves_colors_attributes_and_overlays_selection() {
+    let mut vt = avt::Vt::new(8, 1);
+    vt.feed_str("\x1b[38;2;12;34;56;48;5;123;1;3;4m界X \x1b[7mR\x1b[0m");
+    let row = ctmux_core::history::capture_row(vt.line(0), false);
+    let mut mode = CopyMode::from_rows(Vec::new(), vec![row], 8);
+    let mut frame = Frame::new(8, 2);
+    frame.copy_mode(&mode);
+    for column in 0..8 {
+      assert_eq!(frame.cells[column].pen, *vt.line(0).cells()[column].pen());
+    }
+    mode.begin_drag(0, 0);
+    mode.drag(4, 0);
+    frame.copy_mode(&mode);
+    for column in 0..5 {
+      let original = vt.line(0).cells()[column].pen();
+      let selected = frame.cells[column].pen;
+      assert_eq!(selected.foreground(), original.foreground());
+      assert_eq!(selected.background(), original.background());
+      assert_eq!(selected.is_bold(), original.is_bold());
+      assert_eq!(selected.is_italic(), original.is_italic());
+      assert_eq!(selected.is_underline(), original.is_underline());
+      assert_ne!(selected.is_inverse(), original.is_inverse());
+    }
+    assert_eq!(frame.cells[1].width, 0);
   }
 
   #[test]

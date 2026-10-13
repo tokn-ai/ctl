@@ -180,6 +180,20 @@ selected contracts. Existing session operations keep their shapes and behavior.
 Other named protocols, product release versions, and storage schemas are
 unchanged.
 
+Styled history starts the next release cycle, advancing `ctmux` from frozen
+`1.1.20` (build 20) to `1.2.21` (build 21), retaining `1.0.13` and every
+`1.1.14`–`1.1.20` contract. Paged physical history rows add optional typed style
+spans with character offsets, foreground/background colors, and terminal
+attributes. New clients validate these ranges before reconstructing history.
+The selected contract controls history encoding: previous contracts receive
+byte-identical plain rows; `1.2.21` hashes and pages styled rows. When style data
+exceeds the existing 16 MiB page-transfer bound, only the newest complete row
+suffix is retained and all manifest counts, logical tail, and truncation metadata
+are derived from that same window. The plain legacy history window is retained.
+Live checkpoints, raw output, and normalized logical-history format version 1
+are unchanged. Other named protocols and the product release version are
+unchanged by this addition.
+
 Storage schema versions are separate. Changing a protocol contract does not
 rename or migrate an on-disk schema.
 
@@ -190,9 +204,9 @@ The first handshake or control request contains an offer:
 ```json
 {
   "protocol": {
-    "build": 20,
-    "version": "1.1.20",
-    "supported_versions": ["1.0.13", "1.1.14", "1.1.15", "1.1.16", "1.1.17", "1.1.18", "1.1.19", "1.1.20"]
+    "build": 21,
+    "version": "1.2.21",
+    "supported_versions": ["1.0.13", "1.1.14", "1.1.15", "1.1.16", "1.1.17", "1.1.18", "1.1.19", "1.1.20", "1.2.21"]
   }
 }
 ```
@@ -206,7 +220,7 @@ older contract is selected; new servers preserve old-client messages and
 semantics. Optional features must be gated by that selected contract.
 
 Daemon status and session/task handshakes return actual advertisements, separately
-from the selected contract. A server can advertise `1.1.20` while one connection
+from the selected contract. A server can advertise `1.2.21` while one connection
 selects `1.0.13`; diagnostics must retain both facts.
 
 Every component's `--component-info` output declares the release mapping:

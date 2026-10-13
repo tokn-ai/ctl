@@ -1,4 +1,4 @@
-# ctmux published protocol 1.1.20
+# ctmux published protocol 1.2.21
 
 The protocol is independent of local IPC and future remote transport. Internal build
 11 introduced length-prefixed JSON frames for debuggability. Each frame begins with a
@@ -551,8 +551,41 @@ live grid include a partial wrapped prefix which still continues on screen;
 normalization excludes that prefix from completed logical history. Alternate
 screen checkpoints retain the primary rows captured before switching buffers.
 When alternate-screen resize reduces the physical row budget, only the newest
-captured primary rows remain and `truncated` becomes true. Historical styling
-is not retained.
+captured primary rows remain and `truncated` becomes true. Contracts through
+`1.1.20` retain plain text; `1.2.21` also preserves the styles described below.
+
+### Styled history (published contract 1.2.21)
+
+Each physical row may include a `styles` array. An absent or empty array means
+all-default styling, preserving the original `{text, wrapped}` encoding. Spans
+have `start` and `length` measured in Unicode scalar values in `text`, not UTF-8
+bytes or terminal cell columns. They are nonempty, ordered, nonoverlapping, and
+within the row; uncovered characters use default styling.
+
+```json
+{"text":"界red","wrapped":false,"styles":[{"start":1,"length":3,"style":{"foreground":{"kind":"indexed","index":1},"bold":true}}]}
+```
+
+A style has optional `foreground` and `background` colors. Colors are tagged
+`{"kind":"indexed","index":0..255}` or
+`{"kind":"rgb","red":0..255,"green":0..255,"blue":0..255}` objects. Boolean
+`bold`, `faint`, `italic`, `underline`, `strikethrough`, `blink`, and `inverse`
+attributes default to false and are omitted when false. Text remains
+control-free; clients validate the spans and
+generate only the SGR sequences needed to restore these typed attributes.
+Search and copied text contain no styling escape sequences.
+
+Style data participates in canonical JSONL bytes, byte count, and SHA-256. If
+styles exceed the 16 MiB encoded-history bound, this contract retains the newest
+contiguous suffix that fits and marks history truncated. The manifest's row
+count, logical lines, recent tail, and hash all describe this same suffix. Even
+an oversized newest row produces an empty truncated history window rather than
+blocking the live checkpoint. Earlier selected contracts retain their original
+plain row bytes and history window; the daemon caches their encoding separately.
+The inline logical tail remains plain text while physical history synchronizes.
+Live checkpoints, raw output, history format version 1, and other operations
+retain their existing shapes and semantics. All earlier major-1 contracts remain
+supported.
 
 The inline recent tail is bounded by 64 logical lines and 16 KiB of encoded
 line content. It does not imply that older history is missing. Clients display

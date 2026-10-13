@@ -534,6 +534,191 @@ async fn create_shell(app: &App<'_>) -> Result<String> {
   Ok(session.session_id)
 }
 
+#[test]
+fn history_status_reports_rows_visible_in_a_clipped_shared_canvas_and_archives() {
+  let canvas_size = TerminalSize {
+    columns: 120,
+    rows: 20,
+    ..TerminalSize::default()
+  };
+  let layout = ctmux_proto::ViewLayout::Terminal {
+    terminal_id: "pane".into(),
+  };
+  let mut app = App::new(
+    PathBuf::new(),
+    false,
+    input::parse_prefix("Ctrl+b").unwrap(),
+  );
+  app.size = (120, 6);
+  app.focused = "pane".into();
+  app.view = Some(ViewInfo {
+    session_id: "session".into(),
+    session_name: "history".into(),
+    view_id: "view".into(),
+    revision: 0,
+    zoomed_terminal_id: None,
+    panes: layout.pane_geometry(&canvas_size).unwrap(),
+    layout,
+    canvas_size,
+    terminals: Vec::new(),
+  });
+  let mut mode = CopyMode::new((1..=100).map(|row| format!("line{row}")).collect());
+  mode.fit(120, 20);
+  app.copies.insert("pane".into(), mode);
+
+  let rows = app.frame().text_rows();
+  assert_eq!(rows[0].trim(), "line96");
+  assert_eq!(rows[4].trim(), "line100");
+  assert!(rows[5].contains("history 96–100 / 100"));
+  assert!(rows[5].contains("COPY"));
+  app.copies.get_mut("pane").unwrap().scroll(true, 10, 20);
+  let rows = app.frame().text_rows();
+  assert_eq!(rows[0].trim(), "line86");
+  assert_eq!(rows[4].trim(), "line90");
+  assert!(rows[5].contains("history 86–90 / 100"));
+
+  app.archive_copy = app.copies.remove("pane");
+  let rows = app.frame().text_rows();
+  assert_eq!(rows[0].trim(), "line86");
+  assert!(rows[5].starts_with(" archive | history 86–90 / 100"));
+  app.size.1 = 1;
+  assert!(app.frame().text_rows()[0].contains("history 0–0 / 100"));
+}
+
+#[test]
+fn history_status_caps_the_visible_range_to_the_focused_split_pane() {
+  let canvas_size = TerminalSize {
+    columns: 120,
+    rows: 11,
+    ..TerminalSize::default()
+  };
+  let layout = ctmux_proto::ViewLayout::Split {
+    axis: SplitAxis::Vertical,
+    weights: Vec::new(),
+    children: ["first", "second"]
+      .map(|id| ctmux_proto::ViewLayout::Terminal {
+        terminal_id: id.into(),
+      })
+      .to_vec(),
+  };
+  let mut app = App::new(
+    PathBuf::new(),
+    false,
+    input::parse_prefix("Ctrl+b").unwrap(),
+  );
+  app.size = (120, 21);
+  app.focused = "first".into();
+  app.view = Some(ViewInfo {
+    session_id: "session".into(),
+    session_name: "history".into(),
+    view_id: "view".into(),
+    revision: 0,
+    zoomed_terminal_id: None,
+    panes: layout.pane_geometry(&canvas_size).unwrap(),
+    layout,
+    canvas_size,
+    terminals: Vec::new(),
+  });
+  for (id, top) in [("first", 60), ("second", 80)] {
+    let mut mode = CopyMode::new((1..=100).map(|row| format!("line{row}")).collect());
+    mode.top = top;
+    mode.cursor.row = top;
+    app.copies.insert(id.into(), mode);
+  }
+  let rows = app.frame().text_rows();
+  assert_eq!(rows[0].trim(), "line61");
+  assert_eq!(rows[4].trim(), "line65");
+  assert!(rows[20].contains("history 61–65 / 100"));
+  app.focus_pane("second".into());
+  let rows = app.frame().text_rows();
+  assert_eq!(rows[6].trim(), "line81");
+  assert_eq!(rows[10].trim(), "line85");
+  assert!(rows[20].contains("history 81–85 / 100"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn history_status_follows_focus_and_keeps_copy_counts_frozen_during_reconnect() -> Result<()>
+{
+  let daemon = Daemon::start().await?;
+  let mut app = daemon.app(false);
+  let session = create_shell(&app).await?;
+  app.start(Some(session)).await?;
+  let first = app.focused.clone();
+  app.split(SplitAxis::Horizontal).await?;
+  let second = app.focused.clone();
+  timeout(Duration::from_secs(5), async {
+    loop {
+      app.drain().await;
+      if app
+        .panes
+        .values()
+        .all(|pane| pane.history_state().is_none())
+      {
+        break;
+      }
+      tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+  })
+  .await?;
+  for (id, count) in [(&first, 1_240), (&second, 7)] {
+    let pane = app.panes.get_mut(id).unwrap();
+    let (columns, rows) = pane.model.vt.size();
+    pane.model = crate::model::Model::new(&TerminalSize {
+      columns: u16::try_from(columns).unwrap(),
+      rows: u16::try_from(rows).unwrap(),
+      ..TerminalSize::default()
+    });
+    pane.model.set_history(vec!["retained".into(); count]);
+  }
+  assert_eq!(
+    app.active_history_status().as_deref(),
+    Some("history 7 lines")
+  );
+  app.focus_pane(first.clone());
+  assert_eq!(
+    app.active_history_status().as_deref(),
+    Some("history 1,240 lines")
+  );
+  app.execute(Action::History { page_back: false }).await?;
+  assert_eq!(
+    app.active_history_status().as_deref(),
+    Some("history 1,241–1,264 / 1,264")
+  );
+  app.copies.get_mut(&first).unwrap().scroll(true, 24, 24);
+  assert_eq!(
+    app.active_history_status().as_deref(),
+    Some("history 1,217–1,240 / 1,264")
+  );
+
+  let pane = app.panes.get_mut(&first).unwrap();
+  pane.model.feed(&b"more output\r\n".repeat(80));
+  pane.connected = false;
+  pane.model.history_gap = true;
+  let status = app.status();
+  assert!(
+    status.starts_with(" reconnecting | history 1,217–1,240 / 1,264"),
+    "{status}"
+  );
+  assert!(status.contains("live history incomplete"));
+  assert!(!status.contains(" lines"));
+  app.focus_pane(second);
+  assert_eq!(
+    app.active_history_status().as_deref(),
+    Some("history 7 lines")
+  );
+  app.focus_pane(first.clone());
+  assert_eq!(app.copies[&first].lines.len(), 1_264);
+  app.copies.remove(&first);
+  assert_eq!(
+    app.active_history_status().as_deref(),
+    Some("history 1,297 lines (incomplete)")
+  );
+  // Restore the fixture's transport state so normal detach closes both attachments.
+  app.panes.get_mut(&first).unwrap().connected = true;
+  app.detach().await;
+  Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn prompt_errors_and_ended_session_cancel_preserve_frozen_copy_state() -> Result<()> {
   let daemon = Daemon::start().await?;

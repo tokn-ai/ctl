@@ -262,7 +262,7 @@ async fn mouse_drag_moves_the_outer_gap_and_preserves_frozen_selection_and_focus
         && screen.cursor == (2, 0)
     })
     .await?;
-  tui.send(b"y\x02]\r")?;
+  tui.send(b"yq\x02]\r")?;
   tui
     .wait_screen(
       "the preserved selection pastes to the original focused pane",

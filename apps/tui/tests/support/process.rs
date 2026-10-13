@@ -40,6 +40,22 @@ impl Tui {
     columns: u16,
     rows: u16,
   ) -> Result<Self> {
+    let config = daemon
+      .directory
+      .join(format!("ctmux-{}.json", uuid::Uuid::new_v4()));
+    std::fs::write(&config, "{}")?;
+    Self::start_socket_with_config(daemon, socket, session, columns, rows, &config).await
+  }
+
+  /// Load settings in this child only, without using or changing the user's config.
+  pub async fn start_socket_with_config(
+    daemon: &TestDaemon,
+    socket: &std::path::Path,
+    session: &str,
+    columns: u16,
+    rows: u16,
+    config: &std::path::Path,
+  ) -> Result<Self> {
     let program = option_env!("CARGO_BIN_EXE_ctmux-tui")
       .ok_or("ctmux-tui binary is required for this launcher")?;
     let mut command = CommandBuilder::new(program);
@@ -50,6 +66,7 @@ impl Tui {
     // files cannot read or alter the developer's normal state.
     command.env_clear();
     command.env("HOME", daemon.directory.join("home"));
+    command.env("CTMUX_CONFIG_FILE", config);
     command.env("PATH", "/usr/bin:/bin");
     command.env("SHELL", "/bin/sh");
     command.env("TERM", "xterm-256color");

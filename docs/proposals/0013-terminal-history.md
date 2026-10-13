@@ -45,6 +45,24 @@ independently of new output and reconnects. Ended or confirmed-missing sessions
 can be archived locally; transport failure alone is not an exit. TUI archives
 expire after seven days, and desktop archives use their own store.
 
+By default, TUI selection and copying preserve the frozen view. Releasing a
+mouse drag selects text without copying; `y`, Enter, Alt+W, or Ctrl+W explicitly
+copies without leaving history or archives. Retained mouse selections and
+copied keyboard selections keep fixed endpoints while navigating. Click or
+Ctrl+G clears the selection in place; Esc or `q` returns from pane history to
+live output.
+
+Client-local `~/.tokn/ctl/ctmux.json` persists selection preferences across TUI
+launchers, including remote shells and archives. `selection.mouse_release`
+chooses `select` (default) or `copy`; `selection.after_copy` chooses
+`keep-selection` (default), `clear-selection`, or `exit-copy-mode` for both
+explicit and automatic copies. Clearing stays scrolled, while exiting returns
+pane history to live output or closes an archive copy view. Clicks without a
+selection never copy or exit. `CTMUX_CONFIG_FILE` can override the path; invalid
+configuration fails before new session creation. These startup settings do not
+change the desktop native viewer, plain/raw presenters, detached commands, or
+outer-terminal Cmd+C handling.
+
 ## Invariants
 
 1. Raw PTY bytes remain canonical output; normalized history is a bounded projection.
@@ -71,6 +89,7 @@ clients preserve styles through paged transfer, local projection, and copy-mode
 rendering. Existing text-only archives cannot recover discarded attributes.
 The TUI footer shows the active pane's retained physical scrollback count and
 the visible row range of a frozen copy snapshot; the latter includes the screen.
+Selection and copy settings are client-local: `ctmux` remains `1.2.21` (build 21).
 
 ## Out of scope
 

@@ -224,22 +224,32 @@ and existing text-only archives remain readable using default text styling.
 - `g` / `G` jump to the first / last line; Home/End or `0` / `$` move within a line.
 - `/` searches forward, `?` backward; Enter runs a case-sensitive literal search.
   `n` repeats and `N` reverses direction, wrapping at the history boundary.
-- Emacs copy keys follow tmux: Ctrl+Space starts a selection, Ctrl+G clears it,
-  Alt+W or Ctrl+W copies and exits, and Ctrl+C cancels. Ctrl+B/F/P/N moves the
-  cursor (Ctrl+B remains the default prefix; a configurable prefix frees it),
+- Emacs copy keys: Ctrl+Space starts a selection, Ctrl+G clears it without
+  leaving history, Alt+W or Ctrl+W copies, and Ctrl+C cancels. Ctrl+B/F/P/N moves
+  the cursor (Ctrl+B remains the default prefix; a configurable prefix frees it),
   Ctrl+A/E moves within a line, Alt+V pages up, and Ctrl+V or Space pages
   down. Alt+`<`/`>` jumps to the top/bottom; Ctrl+R/S opens backward/forward search.
 - Existing vi shortcuts remain: `h/j/k/l`, `g/G`, `v` to select, and `y` or Enter
   to copy. Space follows the Emacs default and pages down.
 - Esc or `q` returns to the live view. Esc while entering a search cancels the prompt.
 
+By default, copying with `y`, Enter, Alt+W, or Ctrl+W keeps the highlight and
+scroll position.
+Keyboard navigation extends a selection started with `v` or Ctrl+Space until
+it is copied. A retained selection's endpoints stay fixed after copying or
+releasing a mouse drag, even while scrolling or moving the cursor. Click in
+history or press Ctrl+G to clear the selection without returning to live output.
+
 Live-pane snapshots preserve physical screen rows; copying and searching
 join soft wraps without adding newlines. Full-screen applications show their
 active alternate buffer without exposing the hidden shell screen. Archived logical lines scroll
 horizontally with the cursor. Click a live pane to focus it, or drag with the
-left button to select and copy on release. A drag stays with the pane where it
-started, even when the pointer crosses a divider. Dividers and the fixed status row are excluded
-from pane hit testing, including when a shared canvas is larger than the window.
+left button to select text; by default, release keeps the selection without
+copying it. Selection settings below can enable copying on release and choose
+what happens after a copy.
+A drag stays with the pane where it started, even when the pointer crosses a
+divider. Dividers and the fixed status row are excluded from pane hit testing,
+including when a shared canvas is larger than the window.
 New output, reconnects, and resizing do not change the frozen selection.
 Keyboard input and host paste are consumed locally in the focused copy pane;
 prefix commands remain available to focus other panes, split, or detach.
@@ -256,6 +266,41 @@ active pane's input lease and bracketed-paste setting. Copy also requests the
 host clipboard through OSC 52; terminal support and permissions determine
 whether that request succeeds (including over SSH). Selections above 100 KB
 stay in the internal buffer without sending a clipboard request.
+
+### Selection settings
+
+The TUI reads `~/.tokn/ctl/ctmux.json` at startup. The default settings are:
+
+```json
+{
+  "selection": {
+    "mouse_release": "select",
+    "after_copy": "keep-selection"
+  }
+}
+```
+
+| Setting | Values |
+| --- | --- |
+| `mouse_release` | `select` keeps a completed drag selected; `copy` also copies it on release. |
+| `after_copy` | `keep-selection` preserves the highlight and scroll position; `clear-selection` clears the highlight while staying scrolled; `exit-copy-mode` returns pane history to live output or closes the archive copy view. |
+
+`after_copy` applies to both explicit copy keys and copying on mouse release.
+A click without a selection never copies or exits history, regardless of these
+settings. For example, set `mouse_release` to `copy` and leave `after_copy` as
+`keep-selection` to copy automatically without jumping to live output.
+
+These client-local settings are shared by the TUI in `ctmux`, `ctmux-tui`, and
+`ctl shell`, including local and remote sessions, resume pickers, and TUI
+archives. A remote `ctl shell` uses the configuration on the client machine.
+They do not affect plain/raw presenters, detached commands, or the desktop's
+native terminal viewer. Cmd+C remains controlled by the outer terminal.
+
+Set `CTMUX_CONFIG_FILE` to use another configuration path. A missing default
+file uses the defaults; a missing explicit override or an invalid file reports
+the path and error before a new session is created. Reopen the TUI after editing
+the file. There is no runtime settings command or custom key binding support
+for these settings.
 
 ## Shared views and rendering
 
@@ -466,6 +511,8 @@ Use `ctmux archives` to list local TUI archives and `ctmux archive SESSION_ID` t
 browse one read-only. **Ctrl+B A** opens the archive list; select a session and
 pane, then press Enter to inspect/search/copy its output. No daemon connection
 is needed for archives. The desktop **Archived** browser uses its own local store.
+Copying in a TUI archive keeps the current view, selection, and scroll position
+by default; it follows the same [selection settings](#selection-settings).
 
 Set `CTMUX_ARCHIVE_DIRECTORY` to override the client storage directory.
 

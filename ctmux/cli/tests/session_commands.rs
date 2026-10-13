@@ -1,7 +1,9 @@
 #![cfg(unix)]
 
 use ctmux_proto::{SplitAxis, ViewInfo, ViewLayout};
+use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use std::{
+  io::Read,
   os::unix::fs::PermissionsExt,
   path::PathBuf,
   process::{Command, Output},
@@ -96,6 +98,68 @@ fn resume_requires_a_terminal_before_starting_a_missing_daemon() {
   assert!(String::from_utf8_lossy(&output.stderr).contains("interactive terminal"));
   assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 0);
   std::fs::remove_dir(directory).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn invalid_tui_configuration_prevents_interactive_creation_but_allows_detached() {
+  let daemon = Daemon::start().await;
+  let config = daemon.directory.join("invalid-ctmux.json");
+  std::fs::write(&config, r#"{"selection":{"mouse_release":"typo"}}"#).unwrap();
+  let pair = native_pty_system()
+    .openpty(PtySize {
+      rows: 24,
+      cols: 80,
+      pixel_width: 0,
+      pixel_height: 0,
+    })
+    .unwrap();
+  let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_ctmux"));
+  command.arg("-S");
+  command.arg(daemon.directory.join("ctmux.sock"));
+  command.args(["new", "-s", "unwanted"]);
+  command.env("CTMUX_CONFIG_FILE", &config);
+  let mut reader = pair.master.try_clone_reader().unwrap();
+  let output = std::thread::spawn(move || {
+    let mut output = String::new();
+    // PTYs may report EIO instead of EOF after their final slave closes.
+    let _ = reader.read_to_string(&mut output);
+    output
+  });
+  let mut child = pair.slave.spawn_command(command).unwrap();
+  drop(pair.slave);
+  let status = timeout(Duration::from_secs(5), async {
+    loop {
+      if let Some(status) = child.try_wait().unwrap() {
+        return status;
+      }
+      sleep(Duration::from_millis(10)).await;
+    }
+  })
+  .await;
+  if status.is_err() {
+    let _ = child.kill();
+    let _ = child.wait();
+  }
+  let output = output.join().unwrap();
+  let status = status.expect("invalid configuration must fail before opening the TUI");
+  assert!(!status.success());
+  assert!(output.contains("invalid-ctmux.json"), "{output}");
+  assert!(output.contains("typo"), "{output}");
+  assert_eq!(daemon.success(&["ls"]).lines().count(), 1);
+
+  let detached = Command::new(env!("CARGO_BIN_EXE_ctmux"))
+    .env("CTMUX_CONFIG_FILE", &config)
+    .arg("-S")
+    .arg(daemon.directory.join("ctmux.sock"))
+    .args(["new", "-ds", "detached", "--", "/bin/sh"])
+    .output()
+    .unwrap();
+  assert!(
+    detached.status.success(),
+    "{}",
+    String::from_utf8_lossy(&detached.stderr)
+  );
+  assert!(String::from_utf8_lossy(&detached.stdout).contains("\tdetached\n"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

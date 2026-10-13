@@ -200,14 +200,27 @@ async fn run_shell(
     return Ok(crate::connection::plain_shell(&connector.settings).await?);
   }
   require_terminal()?;
+  let settings = ctmux_cli::Settings::load().map_err(CommandError::Tui)?;
   if resume {
-    ctmux_cli::run_tui_with_startup(connector, ctmux_cli::StartupMode::Resume, false).await?;
+    ctmux_cli::run_tui_with_startup_and_settings(
+      connector,
+      ctmux_cli::StartupMode::Resume,
+      false,
+      settings,
+    )
+    .await?;
     return Ok(0);
   }
   let attach_if_exists = session.is_some();
   let session =
     ctmux_cli::new_session(connector, session, Vec::new(), cwd, attach_if_exists).await?;
-  ctmux_cli::run_tui(connector, Some(session.session_id), false).await?;
+  ctmux_cli::run_tui_with_startup_and_settings(
+    connector,
+    ctmux_cli::StartupMode::Standard(Some(session.session_id)),
+    false,
+    settings,
+  )
+  .await?;
   Ok(0)
 }
 

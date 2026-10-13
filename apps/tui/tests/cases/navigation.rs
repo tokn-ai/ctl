@@ -231,9 +231,10 @@ async fn pane_numbers_and_last_pane_preserve_frozen_copy_and_input_identity() ->
   tui.send(b"y")?;
   tui
     .wait_screen("retained selection reaches the copy buffer", |screen| {
-      footer(screen).contains("Copied to ctmux buffer")
+      footer(screen).contains("Copied to ctmux buffer") && footer(screen).contains("COPY")
     })
     .await?;
+  tui.send(b"q")?;
   command(&mut tui, "paste-buffer").await?;
   tui.send(b"\r")?;
   tui

@@ -260,9 +260,10 @@ async fn command_prompt_preserves_frozen_copy_selection_and_restores_ordinary_in
   tui.send(b"y")?;
   tui
     .wait_screen("selection copied", |screen| {
-      footer(screen).contains("Copied to ctmux buffer")
+      footer(screen).contains("Copied to ctmux buffer") && footer(screen).contains("COPY")
     })
     .await?;
+  tui.send(b"q")?;
   command(&mut tui, "paste-buffer")?;
   tui.send(b"\r")?;
   tui

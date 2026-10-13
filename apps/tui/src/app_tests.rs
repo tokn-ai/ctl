@@ -2307,6 +2307,7 @@ async fn mouse_routes_application_reports_and_local_drags_to_the_original_pane()
   app
     .copies
     .insert(primary.clone(), CopyMode::new(vec!["abcdef".into()]));
+  let previous_buffer = app.copy_buffer.clone();
   app
     .event(mouse(MouseEventKind::Down(MouseButton::Left), 1, 0))
     .await?;
@@ -2320,9 +2321,20 @@ async fn mouse_routes_application_reports_and_local_drags_to_the_original_pane()
       0,
     ))
     .await?;
-  assert_eq!(app.copy_buffer.as_deref(), Some("bcdef"));
-  assert!(!app.copies.contains_key(&primary));
+  assert_eq!(app.copy_buffer, previous_buffer);
+  assert!(app.copies[&primary].selected(crate::copy::Position { row: 0, column: 5 }));
   assert_eq!(app.focused, primary);
+  app
+    .key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE))
+    .await?;
+  assert_eq!(app.copy_buffer.as_deref(), Some("bcdef"));
+  assert!(app.copies.contains_key(&primary));
+  assert!(app.copies.contains_key(&child));
+  app
+    .key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+    .await?;
+  assert!(!app.copies.contains_key(&primary));
+  assert!(app.copies.contains_key(&child));
   app.detach().await;
   Ok(())
 }
@@ -2335,6 +2347,7 @@ async fn assert_alternate_screen_drag(
   // Shift drags select the visible alternate screen, not hidden primary text.
   let visible = app.panes[child].model.vt.line(0).text();
   let expected: String = visible.chars().take(5).collect();
+  let previous_buffer = app.copy_buffer.clone();
   for (kind, x) in [
     (MouseEventKind::Down(MouseButton::Left), 0),
     (MouseEventKind::Drag(MouseButton::Left), 3),
@@ -2362,6 +2375,204 @@ async fn assert_alternate_screen_drag(
       );
     }
   }
+  assert_eq!(app.copy_buffer, previous_buffer);
+  let mode = &app.copies[child];
+  let viewport = (mode.top, mode.left);
+  assert!(mode.selected(crate::copy::Position { row: 0, column: 4 }));
+  app
+    .key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::ALT))
+    .await?;
   assert_eq!(app.copy_buffer.as_deref(), Some(expected.as_str()));
+  let mode = &app.copies[child];
+  assert_eq!((mode.top, mode.left), viewport);
+  assert!(mode.selected(crate::copy::Position { row: 0, column: 4 }));
+  assert!(app.status().contains("Copied to ctmux buffer"));
+  app
+    .key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE))
+    .await?;
+  assert!(!app.status().contains("Copied to ctmux buffer"));
+  app
+    .key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE))
+    .await?;
+  assert!(app.status().contains("Copied to ctmux buffer"));
+  let previous_buffer = app.copy_buffer.clone();
+  for kind in [
+    MouseEventKind::Down(MouseButton::Left),
+    MouseEventKind::Up(MouseButton::Left),
+  ] {
+    app.event(mouse(kind, pane_left + 1, 0)).await?;
+  }
+  assert!(!app.status().contains("Copied to ctmux buffer"));
+  assert_eq!(app.copy_buffer, previous_buffer);
+  let mode = &app.copies[child];
+  assert_eq!((mode.top, mode.left), viewport);
+  assert!(!mode.selected(crate::copy::Position { row: 0, column: 4 }));
   Ok(())
+}
+
+#[tokio::test]
+async fn archived_selection_copies_explicitly_and_keeps_its_view_until_exit() -> Result<()> {
+  let mut app = App::new(PathBuf::new(), true, input::parse_prefix("Ctrl+b")?);
+  app.size = (120, 6);
+  let mut mode = CopyMode::new((0..30).map(|row| format!("archive-{row:02}")).collect());
+  mode.top = 10;
+  app.archive_copy = Some(mode);
+  app.copy_buffer = Some("previous copy".into());
+  for (kind, column) in [
+    (MouseEventKind::Down(MouseButton::Left), 0),
+    (MouseEventKind::Drag(MouseButton::Left), 5),
+    (MouseEventKind::Up(MouseButton::Left), 6),
+  ] {
+    app.event(mouse(kind, column, 1)).await?;
+  }
+  assert_eq!(app.copy_buffer.as_deref(), Some("previous copy"));
+  assert!(
+    app
+      .archive_copy
+      .as_ref()
+      .unwrap()
+      .selected(crate::copy::Position { row: 11, column: 6 })
+  );
+  app.event(mouse(MouseEventKind::ScrollUp, 1, 1)).await?;
+  let viewport = {
+    let mode = app.archive_copy.as_ref().unwrap();
+    assert_eq!(mode.top, 5);
+    (mode.top, mode.left)
+  };
+  for (code, modifiers) in [
+    (KeyCode::Char('y'), KeyModifiers::NONE),
+    (KeyCode::Enter, KeyModifiers::NONE),
+    (KeyCode::Char('w'), KeyModifiers::ALT),
+    (KeyCode::Char('w'), KeyModifiers::CONTROL),
+  ] {
+    app.key(KeyEvent::new(code, modifiers)).await?;
+    assert_eq!(app.copy_buffer.as_deref(), Some("archive"));
+    let mode = app.archive_copy.as_ref().unwrap();
+    assert_eq!((mode.top, mode.left), viewport);
+    assert!(mode.selected(crate::copy::Position { row: 11, column: 6 }));
+    assert!(!mode.selected(crate::copy::Position { row: 6, column: 6 }));
+    assert!(app.status().contains("Copied to ctmux buffer"));
+  }
+  app
+    .key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL))
+    .await?;
+  let mode = app.archive_copy.as_ref().unwrap();
+  assert_eq!((mode.top, mode.left), viewport);
+  assert!(!mode.selected(crate::copy::Position { row: 11, column: 6 }));
+  assert!(!app.status().contains("Copied to ctmux buffer"));
+  app
+    .key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE))
+    .await?;
+  assert!(app.archive_copy.is_none());
+  assert_eq!(app.copy_buffer.as_deref(), Some("archive"));
+  Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn selection_settings_apply_to_mouse_and_keyboard_in_panes_and_archives() -> Result<()> {
+  use crate::{AfterCopy, MouseRelease, SelectionSettings};
+
+  let daemon = Daemon::start().await?;
+  let mut app = daemon.app(false);
+  app.size = (120, 10);
+  let session = create_shell(&app).await?;
+  app.start(Some(session)).await?;
+  let primary = app.focused.clone();
+  for archive in [false, true] {
+    let target = if archive {
+      CopyTarget::Archive
+    } else {
+      CopyTarget::Pane(primary.clone())
+    };
+    for mouse_release in [MouseRelease::Select, MouseRelease::Copy] {
+      for after_copy in [
+        AfterCopy::KeepSelection,
+        AfterCopy::ClearSelection,
+        AfterCopy::ExitCopyMode,
+      ] {
+        app.selection_settings = SelectionSettings {
+          mouse_release,
+          after_copy,
+        };
+        reset_selection_fixture(&mut app, &target, false);
+        for (kind, column) in [
+          (MouseEventKind::Down(MouseButton::Left), 0),
+          (MouseEventKind::Drag(MouseButton::Left), 1),
+          (MouseEventKind::Up(MouseButton::Left), 2),
+        ] {
+          app.event(mouse(kind, column, 1)).await?;
+        }
+        assert_selection_policy_result(
+          &mut app,
+          &target,
+          matches!(mouse_release, MouseRelease::Copy),
+          after_copy,
+        );
+
+        // Clicking clears an existing selection. Even copy-and-exit settings
+        // must not interpret that click as a copy or return the pane to live.
+        reset_selection_fixture(&mut app, &target, true);
+        for kind in [
+          MouseEventKind::Down(MouseButton::Left),
+          MouseEventKind::Up(MouseButton::Left),
+        ] {
+          app.event(mouse(kind, 4, 1)).await?;
+        }
+        assert_eq!(app.copy_buffer.as_deref(), Some("previous copy"));
+        let mode = app.copy_mut(&target).expect("click keeps history open");
+        assert_eq!((mode.top, mode.left), (10, 0));
+        assert!(!mode.selected(crate::copy::Position { row: 11, column: 2 }));
+
+        reset_selection_fixture(&mut app, &target, true);
+        app
+          .key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE))
+          .await?;
+        assert_selection_policy_result(&mut app, &target, true, after_copy);
+      }
+    }
+  }
+  app.detach().await;
+  Ok(())
+}
+
+fn reset_selection_fixture(app: &mut App<'_>, target: &CopyTarget, selected: bool) {
+  app.copies.clear();
+  app.archive_copy = None;
+  app.copy_buffer = Some("previous copy".into());
+  let mut mode = CopyMode::new((0..30).map(|row| format!("row-{row:02}")).collect());
+  mode.top = 10;
+  mode.cursor = crate::copy::Position { row: 11, column: 0 };
+  if selected {
+    mode.begin_drag(0, 1);
+    mode.drag(2, 1);
+    mode.finish_drag();
+  }
+  match target {
+    CopyTarget::Pane(id) => {
+      app.copies.insert(id.clone(), mode);
+    }
+    CopyTarget::Archive => app.archive_copy = Some(mode),
+  }
+}
+
+fn assert_selection_policy_result(
+  app: &mut App<'_>,
+  target: &CopyTarget,
+  copied: bool,
+  after_copy: crate::AfterCopy,
+) {
+  assert_eq!(
+    app.copy_buffer.as_deref(),
+    Some(if copied { "row" } else { "previous copy" })
+  );
+  if copied && matches!(after_copy, crate::AfterCopy::ExitCopyMode) {
+    assert!(app.copy_mut(target).is_none());
+    return;
+  }
+  let mode = app.copy_mut(target).expect("history stays open");
+  assert_eq!((mode.top, mode.left), (10, 0));
+  assert_eq!(
+    mode.selected(crate::copy::Position { row: 11, column: 2 }),
+    !copied || matches!(after_copy, crate::AfterCopy::KeepSelection)
+  );
 }

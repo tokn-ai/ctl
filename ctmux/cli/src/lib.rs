@@ -7,9 +7,9 @@ use clap::{Subcommand, ValueEnum};
 
 pub use commands::{
   CommandError, ConnectFuture, Connector, LocalConnector, attach_session, new_session,
-  resolve_session, run, run_tui, run_tui_with_startup,
+  resolve_session, run, run_tui, run_tui_with_startup, run_tui_with_startup_and_settings,
 };
-pub use ctmux_tui::StartupMode;
+pub use ctmux_tui::{Settings, StartupMode};
 
 /// Canonical ctmux commands, independent of how the daemon is reached.
 #[derive(Debug, Subcommand)]

@@ -62,7 +62,7 @@ async fn run(arguments: Arguments) -> ctmux_tui::Result<()> {
     })
     .await;
   }
-  let (session, read_only) = match command {
+  let (session, read_only, settings) = match command {
     Command::New {
       name,
       cwd,
@@ -70,16 +70,19 @@ async fn run(arguments: Arguments) -> ctmux_tui::Result<()> {
       detached,
       attach_if_exists,
     } => {
-      if !detached {
+      let settings = if detached {
+        None
+      } else {
         ctmux_tui::ensure_terminal()?;
-      }
+        Some(ctmux_tui::Settings::load()?)
+      };
       let session =
         ctmux_cli::new_session(&connector, name, command, cwd, attach_if_exists).await?;
-      if detached {
+      let Some(settings) = settings else {
         println!("{}\t{}", session.session_id, session.name);
         return Ok(());
-      }
-      (session.session_id, false)
+      };
+      (session.session_id, false, settings)
     }
     Command::Attach {
       session,
@@ -90,9 +93,11 @@ async fn run(arguments: Arguments) -> ctmux_tui::Result<()> {
       ..
     } => {
       ctmux_tui::ensure_terminal()?;
+      let settings = ctmux_tui::Settings::load()?;
       (
         ctmux_cli::resolve_session(&connector, target.or(session)).await?,
         read_only,
+        settings,
       )
     }
     command => {
@@ -100,13 +105,17 @@ async fn run(arguments: Arguments) -> ctmux_tui::Result<()> {
       return Ok(());
     }
   };
-  ctmux_tui::run(ctmux_tui::Options {
-    archive: None,
-    socket,
-    session: Some(session),
-    read_only,
-    prefix: arguments.prefix,
-  })
+  ctmux_tui::run_with_startup_and_settings(
+    ctmux_tui::Options {
+      archive: None,
+      socket,
+      session: None,
+      read_only,
+      prefix: arguments.prefix,
+    },
+    ctmux_tui::StartupMode::Standard(Some(session)),
+    settings,
+  )
   .await
 }
 

@@ -23,6 +23,10 @@ creates, `r` renames, and `x` confirms whole-session termination. Leave a new
 name blank and press Enter for an automatic name such as `session-1`. Ctrl+B
 then d detaches while work keeps running. Rename requires ctmuxd 1.1.20.
 
+Mouse selection keeps its position by default; press `y`, Enter, Alt+W, or
+Ctrl+W to copy. Configure copying on release and what follows a copy in
+`~/.tokn/ctl/ctmux.json`; see [selection settings](../../apps/tui/README.md#selection-settings).
+
 Keep `ctmux` and `ctmuxd` in the same binary directory, or set `CTMUXD_BIN` to
 the daemon executable. Cargo does not install a dependency's executables.
 

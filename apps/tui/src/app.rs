@@ -61,7 +61,7 @@ enum CopyTarget {
 enum MouseCapture {
   Selection {
     target: CopyTarget,
-    pending: Option<CopyMode>,
+    pending: Option<Box<CopyMode>>,
   },
   Application {
     terminal_id: String,
@@ -72,6 +72,7 @@ enum MouseCapture {
 
 pub struct App<'a> {
   pub transport: Option<&'a dyn Transport>,
+  pub selection_settings: crate::SelectionSettings,
   socket: PathBuf,
   archive_directory: Option<PathBuf>,
   read_only: bool,
@@ -112,6 +113,7 @@ impl App<'_> {
   pub fn new(socket: PathBuf, read_only: bool, prefix: Prefix) -> Self {
     Self {
       transport: None,
+      selection_settings: crate::SelectionSettings::default(),
       archive_directory: cfg!(test).then(|| socket.with_extension("client-archives")),
       socket,
       read_only,
@@ -1026,23 +1028,47 @@ impl App<'_> {
     if matches!(action, CopyAction::Stay) {
       return Ok(());
     }
+    self.mouse_capture = None;
+    match action {
+      CopyAction::Stay => {}
+      CopyAction::Close => self.close_copy(target),
+      CopyAction::Copy(text) => {
+        self.copy_buffer = Some(text.clone());
+        let sent = crate::terminal::copy_to_clipboard(&text)?;
+        let notice: String = if sent {
+          "Copied to ctmux buffer; clipboard requested (OSC 52)".into()
+        } else {
+          "Copied to ctmux buffer; selection exceeds clipboard limit".into()
+        };
+        match self.selection_settings.after_copy {
+          crate::AfterCopy::KeepSelection => {}
+          crate::AfterCopy::ClearSelection => {
+            if let Some(mode) = self.copy_mut(target) {
+              mode.clear_selection();
+            }
+          }
+          crate::AfterCopy::ExitCopyMode => self.close_copy(target),
+        }
+        if let Some(mode) = self.copy_mut(target) {
+          mode.notice = notice;
+          if self.notice_kind == NoticeKind::Action {
+            self.message_until = Instant::now();
+          }
+        } else {
+          self.notice(notice);
+        }
+      }
+    }
+    Ok(())
+  }
+
+  fn close_copy(&mut self, target: &CopyTarget) {
     match target {
       CopyTarget::Pane(id) => {
         self.copies.remove(id);
       }
       CopyTarget::Archive => self.archive_copy = None,
     }
-    self.mouse_capture = None;
-    if let CopyAction::Copy(text) = action {
-      self.copy_buffer = Some(text.clone());
-      let sent = crate::terminal::copy_to_clipboard(&text)?;
-      self.notice(if sent {
-        "Copied to ctmux buffer; clipboard requested (OSC 52)".into()
-      } else {
-        "Copied to ctmux buffer; selection exceeds clipboard limit".into()
-      });
-    }
-    Ok(())
   }
 
   fn mouse_position(&self, target: &CopyTarget, mouse: MouseEvent) -> Option<(usize, usize)> {
@@ -1142,18 +1168,19 @@ impl App<'_> {
         };
         if mouse.kind == MouseEventKind::Up(MouseButton::Left) {
           // A click only focuses; its pending snapshot never replaces the live view.
+          let behavior = self.selection_settings.mouse_release;
           if pending.is_none()
             && let Some(mode) = self.copy_mut(&target)
           {
             mode.drag(x, y);
-            let action = mode.finish_drag();
+            let action = mode.release_drag(behavior);
             self.copy_action(&target, action)?;
           }
         } else {
           if let Some(mode) = pending
             && let CopyTarget::Pane(id) = &target
           {
-            self.copies.insert(id.clone(), mode);
+            self.copies.insert(id.clone(), *mode);
           }
           if let Some(mode) = self.copy_mut(&target) {
             mode.drag(x, y);
@@ -1234,7 +1261,7 @@ impl App<'_> {
         } else if let CopyTarget::Pane(id) = &target {
           self.new_copy(id).map(|mut mode| {
             mode.begin_drag(position.0, position.1);
-            mode
+            Box::new(mode)
           })
         } else {
           None

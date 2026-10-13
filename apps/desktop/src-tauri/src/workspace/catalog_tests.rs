@@ -701,10 +701,59 @@ fn missing_host_references_and_identities_survive_without_persisting_definitions
     .push(document.host_identities[0].clone());
   assert!(document.validate().is_err());
   document.host_identities.pop();
-  document.host_identities[0].host_id = "not-referenced".into();
+  document.host_identities[0].host_id = "gateway-only".into();
+  document.validate().unwrap();
+  let saved = fixture
+    .repository()
+    .update(UpdateWorkspaceRequest {
+      expected_revision: saved.revision,
+      document: document.clone(),
+    })
+    .unwrap();
+  assert_eq!(fixture.repository().load().unwrap(), saved);
+  document.host_identities[0].host_id = "".into();
   assert!(document.validate().is_err());
   document.host_identities[0].host_id = "local".into();
   assert!(document.validate().is_err());
+}
+
+#[test]
+fn gateway_identity_pins_round_trip_without_direct_workspace_references() {
+  let fixture = Fixture::new();
+  let mut document = WorkspaceDocument::default();
+  document.host_identities.push(WorkspaceHostIdentity {
+    host_id: "ssh-config:jump".into(),
+    remote_info: identity(),
+  });
+  let saved = fixture
+    .repository()
+    .update(UpdateWorkspaceRequest {
+      expected_revision: None,
+      document: document.clone(),
+    })
+    .unwrap();
+  assert_eq!(fixture.repository().load().unwrap(), saved);
+  assert!(!fixture.0.join("hosts.json").exists());
+  document
+    .host_identities
+    .push(document.host_identities[0].clone());
+  assert!(
+    document
+      .validate()
+      .unwrap_err()
+      .message
+      .contains("host_identities[1].host_id: duplicate")
+  );
+  document.host_identities.pop();
+  document.host_identities[0].remote_info.remote_id = "invalid".into();
+  assert!(
+    document
+      .validate()
+      .unwrap_err()
+      .message
+      .contains("host_identities[0].remote_info")
+  );
+  assert_eq!(fixture.repository().load().unwrap(), saved);
 }
 
 #[test]

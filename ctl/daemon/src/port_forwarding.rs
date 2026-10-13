@@ -5,10 +5,54 @@ mod tests;
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
+use std::io;
 
 use ctl_ipc::{LocalPortForward, PortForwardState, PortForwardStatus, SshTarget};
+use tokio::net::TcpListener;
 
-use super::{RequestError, State, control_master_is_ready, run_forward_command};
+use super::{
+  RequestError, State, control_master_is_ready, remote_forward_host, run_forward_command,
+};
+
+fn occupied_port_message(forward: &LocalPortForward) -> String {
+  format!(
+    "Local address {}:{} is already in use. Reuse or stop the existing listener through its owning ctld/application, or choose another local port.",
+    remote_forward_host(&forward.bind_address),
+    forward.local_port
+  )
+}
+
+pub(super) fn local_bind_error(forward: &LocalPortForward, error: &io::Error) -> RequestError {
+  RequestError::PortForwardFailed(if error.kind() == io::ErrorKind::AddrInUse {
+    format!("{} ({error})", occupied_port_message(forward))
+  } else {
+    format!(
+      "Cannot listen on {}:{}: {error}",
+      remote_forward_host(&forward.bind_address),
+      forward.local_port
+    )
+  })
+}
+
+pub(super) async fn forward_command_error(
+  forward: &LocalPortForward,
+  message: String,
+  cancel: bool,
+) -> RequestError {
+  // The mux reply omits the master's bind error. Probe only after a failed add;
+  // an occupied port does not identify its owner or authorize cancelling it.
+  // Failed cancellations must retain their original error and ownership.
+  if !cancel
+    && let Err(error) = TcpListener::bind((forward.bind_address.as_str(), forward.local_port)).await
+    && error.kind() == io::ErrorKind::AddrInUse
+  {
+    return RequestError::PortForwardFailed(format!(
+      "{} OpenSSH reported: {message}",
+      occupied_port_message(forward)
+    ));
+  }
+  RequestError::PortForwardFailed(message)
+}
 
 struct OwnedForward {
   target: SshTarget,

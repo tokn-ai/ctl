@@ -2241,13 +2241,7 @@ async fn run_forward_command(
   forward: &LocalPortForward,
   cancel: bool,
 ) -> Result<(), RequestError> {
-  let specification = format!(
-    "{}:{}:{}:{}",
-    forward.bind_address,
-    forward.local_port,
-    remote_forward_host(&forward.remote_host),
-    forward.remote_port
-  );
+  let specification = forwarding_specification(forward);
   let mut command = Command::new(SSH_PROGRAM);
   command
     .args(["-F", "none"])
@@ -2270,11 +2264,22 @@ async fn run_forward_command(
     return Ok(());
   }
   let message = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-  Err(RequestError::PortForwardFailed(if message.is_empty() {
+  let message = if message.is_empty() {
     output.status.to_string()
   } else {
     message
-  }))
+  };
+  Err(port_forwarding::forward_command_error(forward, message, cancel).await)
+}
+
+fn forwarding_specification(forward: &LocalPortForward) -> String {
+  format!(
+    "{}:{}:{}:{}",
+    remote_forward_host(&forward.bind_address),
+    forward.local_port,
+    remote_forward_host(&forward.remote_host),
+    forward.remote_port
+  )
 }
 
 fn remote_forward_host(host: &str) -> String {
@@ -3568,6 +3573,29 @@ mod tests {
     );
     assert_eq!(remote_forward_host("127.0.0.1"), "127.0.0.1");
     assert_eq!(remote_forward_host("::1"), "[::1]");
+  }
+
+  #[test]
+  fn forwarding_specifications_bracket_both_ipv6_endpoints() {
+    let forward = LocalPortForward {
+      forward_id: "web".into(),
+      bind_address: "::1".into(),
+      local_port: 3000,
+      remote_host: "2001:db8::2".into(),
+      remote_port: 3000,
+    };
+    assert_eq!(
+      forwarding_specification(&forward),
+      "[::1]:3000:[2001:db8::2]:3000"
+    );
+    assert_eq!(
+      forwarding_specification(&LocalPortForward {
+        bind_address: "127.0.0.1".into(),
+        remote_host: "127.0.0.1".into(),
+        ..forward
+      }),
+      "127.0.0.1:3000:127.0.0.1:3000"
+    );
   }
 
   #[cfg(unix)]

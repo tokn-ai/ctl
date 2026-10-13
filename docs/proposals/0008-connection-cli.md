@@ -2,7 +2,7 @@
 
 - Status: Implemented
 - Created: 2026-10-01
-- Updated: 2026-10-09
+- Updated: 2026-10-13
 
 This extends the command scope of [Proposal 0002](0002-ctl.md) while retaining
 its fixed ctmux/task service protocols and remote authentication boundary.
@@ -23,6 +23,10 @@ cannot discover a private ctld SOCKS/VPN master from its destination alone.
 - `ctl -H host port add/list/remove` manages local loopback listeners through
   the existing ctld registry. Runtime forwards outlive the client, are visible
   through desktop Ports refresh, and are not implicitly persisted by the desktop.
+  Repeated adds without `--id` reuse an identical endpoint definition within the
+  selected daemon and connection method, preferring an active record. Failed
+  adds identify occupied local addresses while retaining OpenSSH diagnostics;
+  other daemons' or applications' listeners are never adopted or cancelled.
 - `ctl ssh host [command...]` and `ctl scp source destination` retain OpenSSH's
   ordinary shell, execution, and copy semantics. They do not create ctmux sessions.
 

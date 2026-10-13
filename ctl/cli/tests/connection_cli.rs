@@ -357,3 +357,161 @@ async fn native_ports_add_list_and_remove_use_the_same_daemon_target() {
   }
   daemon.await.unwrap();
 }
+
+fn implicit_port_add_broker(
+  fixture: &Fixture,
+  initial: Vec<ctl_ipc::PortForwardStatus>,
+  expected_id: Option<&'static str>,
+) -> tokio::task::JoinHandle<String> {
+  let active = ctl_ipc::PortForwardState::Active;
+  let listener = tokio::net::UnixListener::bind(fixture.0.join("ctld.sock")).unwrap();
+  let socket = fixture.0.join("master");
+  tokio::spawn(async move {
+    let mut statuses = initial;
+    let mut configured_ids = Vec::new();
+    for request_index in 0..6 {
+      let (mut stream, _) = listener.accept().await.unwrap();
+      assert!(matches!(
+        ctl_ipc::read_frame::<_, ClientMessage>(&mut stream)
+          .await
+          .unwrap(),
+        Some(ClientMessage::Handshake { .. })
+      ));
+      ctl_ipc::write_frame(
+        &mut stream,
+        &ServerMessage::HandshakeAccepted {
+          protocol_version: ctl_ipc::PROTOCOL_VERSION,
+        },
+      )
+      .await
+      .unwrap();
+      let request = ctl_ipc::read_frame::<_, ClientMessage>(&mut stream)
+        .await
+        .unwrap()
+        .unwrap();
+      let response = match (request_index % 3, request) {
+        (0, ClientMessage::ListPortForwards { target }) => {
+          assert_eq!(target.destination, "10.0.0.20");
+          assert_eq!(target.user.as_deref(), Some("alice"));
+          assert_eq!(target.port, Some(2222));
+          // Reordering the catalog must not change the chosen owner.
+          statuses.reverse();
+          ServerMessage::PortForwards {
+            statuses: statuses.clone(),
+          }
+        }
+        (1, ClientMessage::EnsureMaster { target }) => {
+          assert_eq!(target.destination, "10.0.0.20");
+          ServerMessage::MasterReady {
+            control_path: socket.clone(),
+          }
+        }
+        (
+          2,
+          ClientMessage::ConfigurePortForward {
+            target,
+            forward,
+            enabled,
+          },
+        ) => {
+          assert_eq!(target.destination, "10.0.0.20");
+          assert_eq!(target.user.as_deref(), Some("alice"));
+          assert_eq!(target.port, Some(2222));
+          assert!(enabled);
+          if let Some(expected) = expected_id {
+            assert_eq!(forward.forward_id, expected);
+          }
+          configured_ids.push(forward.forward_id.clone());
+          let configured = ctl_ipc::PortForwardStatus {
+            forward,
+            state: active,
+            message: None,
+          };
+          statuses.retain(|status| status.forward.forward_id != configured.forward.forward_id);
+          statuses.push(configured.clone());
+          ServerMessage::PortForwardConfigured { status: configured }
+        }
+        _ => panic!("unexpected port-add request at index {request_index}"),
+      };
+      ctl_ipc::write_frame(&mut stream, &response).await.unwrap();
+    }
+    assert_eq!(configured_ids[0], configured_ids[1]);
+    configured_ids[0].clone()
+  })
+}
+
+#[tokio::test]
+async fn repeated_implicit_port_add_reuses_the_exact_forward_and_prefers_active_records() {
+  let forward = |id: &str| ctl_ipc::LocalPortForward {
+    forward_id: id.into(),
+    bind_address: "127.0.0.1".into(),
+    local_port: 8080,
+    remote_host: "127.0.0.1".into(),
+    remote_port: 80,
+  };
+  let status = |id: &str, state| ctl_ipc::PortForwardStatus {
+    forward: forward(id),
+    state,
+    message: None,
+  };
+  let active = ctl_ipc::PortForwardState::Active;
+  let mut duplicates = vec![
+    status("active-z", active),
+    status("a-error", ctl_ipc::PortForwardState::Error),
+    status("active-a", active),
+  ];
+  for different in [
+    ctl_ipc::LocalPortForward {
+      bind_address: "::1".into(),
+      ..forward("0-other-bind")
+    },
+    ctl_ipc::LocalPortForward {
+      local_port: 8081,
+      ..forward("0-other-local-port")
+    },
+    ctl_ipc::LocalPortForward {
+      remote_host: "database.internal".into(),
+      ..forward("0-other-remote-host")
+    },
+    ctl_ipc::LocalPortForward {
+      remote_port: 81,
+      ..forward("0-other-remote-port")
+    },
+  ] {
+    duplicates.push(ctl_ipc::PortForwardStatus {
+      forward: different,
+      state: active,
+      message: None,
+    });
+  }
+  for (initial, expected_id) in [
+    (Vec::new(), None),
+    (
+      vec![status("retry", ctl_ipc::PortForwardState::Error)],
+      Some("retry"),
+    ),
+    (duplicates, Some("active-a")),
+  ] {
+    let fixture = Fixture::new();
+    let daemon = implicit_port_add_broker(&fixture, initial, expected_id);
+    let mut returned_ids = Vec::new();
+    for _ in 0..2 {
+      let output = fixture
+        .command()
+        .args(["-H", "work", "port", "add", "8080:127.0.0.1:80", "--json"])
+        .output()
+        .await
+        .unwrap();
+      assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+      );
+      let statuses: Vec<ctl_ipc::PortForwardStatus> =
+        serde_json::from_slice(&output.stdout).unwrap();
+      returned_ids.push(statuses[0].forward.forward_id.clone());
+    }
+    let configured_id = daemon.await.unwrap();
+    assert_eq!(returned_ids, [configured_id.clone(), configured_id]);
+  }
+}

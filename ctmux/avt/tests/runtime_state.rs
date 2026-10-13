@@ -232,6 +232,43 @@ fn inactive_buffer_and_saved_cursor_keep_their_previous_size_until_switching_bac
 }
 
 #[test]
+fn inactive_primary_buffer_resizes_with_a_cursor_beyond_its_previous_height() {
+    let actions = [
+        Action::Feed("38;2;\x1b[?1049h".into()),
+        Action::Feed("\r\n".into()),
+        Action::Feed("".into()),
+        Action::Feed("38;2;".into()),
+        Action::Feed("abc".into()),
+        Action::Resize(8, 2),
+        Action::Feed("abc".into()),
+        Action::Resize(2, 6),
+        Action::Feed("\x1b[?1047l".into()),
+    ];
+    for reflow in [false, true] {
+        for history in [None, Some(0), Some(8)] {
+            let mut uninterrupted = terminal(reflow, history);
+            let mut restored = checkpoint(&uninterrupted);
+            for action in &actions {
+                match action {
+                    Action::Feed(input) => {
+                        feed_chars(&mut uninterrupted, input);
+                        feed_chars(&mut restored, input);
+                        assert_equivalent(&uninterrupted, &restored);
+                    }
+                    Action::Resize(cols, rows) => {
+                        resize_both(&mut uninterrupted, &mut restored, *cols, *rows);
+                    }
+                }
+                restored = checkpoint(&restored);
+            }
+            assert_eq!(restored.size(), (2, 6));
+            assert!(restored.cursor().row < 6);
+            feed_both(&mut uninterrupted, &mut restored, "\r\ncontinued");
+        }
+    }
+}
+
+#[test]
 fn boundary_tab_stop_and_pending_wrap_are_safe_to_restore() {
     let mut original = terminal(false, Some(8));
     original.feed_str("abcdefghijkl");

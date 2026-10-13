@@ -26,8 +26,15 @@ enum DragState {
   Pressed {
     column: usize,
     row: usize,
+    anchor: Position,
   },
   Selecting,
+}
+
+#[derive(Clone, Copy)]
+enum Selection {
+  Extending { anchor: Position },
+  Complete { anchor: Position, end: Position },
 }
 
 /// Immutable styled rows: output and checkpoint replacement cannot move a selection.
@@ -38,7 +45,7 @@ pub struct CopyMode {
   pub cursor: Position,
   pub top: usize,
   pub left: usize,
-  anchor: Option<Position>,
+  selection: Option<Selection>,
   drag_state: DragState,
   query: String,
   searching: bool,
@@ -64,7 +71,7 @@ impl CopyMode {
       lines,
       top: 0,
       left: 0,
-      anchor: None,
+      selection: None,
       drag_state: DragState::Idle,
       query: String::new(),
       searching: false,
@@ -195,7 +202,7 @@ impl CopyMode {
     self.cursor.column = self.cursor.column.min(self.line_len().saturating_sub(1));
     if !up
       && self.bottom_behavior == BottomBehavior::ReturnToLive
-      && self.anchor.is_none()
+      && self.selection.is_none()
       && !self.searching
       && self.top == self.lines.len().saturating_sub(height.max(1))
     {
@@ -235,9 +242,12 @@ impl CopyMode {
   }
 
   pub fn begin_drag(&mut self, column: usize, row: usize) {
-    self.cursor = self.position_at(column, row);
-    self.anchor = Some(self.cursor);
-    self.drag_state = DragState::Pressed { column, row };
+    self.selection = None;
+    self.drag_state = DragState::Pressed {
+      column,
+      row,
+      anchor: self.position_at(column, row),
+    };
     self.searching = false;
     self.notice.clear();
   }
@@ -248,34 +258,79 @@ impl CopyMode {
       DragState::Pressed {
         column: initial_column,
         row: initial_row,
+        ..
       } if column == initial_column && row == initial_row => return,
-      DragState::Pressed { .. } => self.drag_state = DragState::Selecting,
+      DragState::Pressed { anchor, .. } => {
+        self.selection = Some(Selection::Extending { anchor });
+        self.drag_state = DragState::Selecting;
+      }
       DragState::Selecting => {}
     }
     self.cursor = self.position_at(column, row);
   }
 
-  pub fn finish_drag(&mut self) -> Action {
+  pub fn finish_drag(&mut self) -> bool {
     match std::mem::take(&mut self.drag_state) {
-      DragState::Selecting => self.selection().map_or(Action::Stay, Action::Copy),
-      DragState::Pressed { .. } => {
-        self.anchor = None;
-        Action::Stay
+      DragState::Selecting => {
+        self.complete_selection();
+        true
       }
-      DragState::Idle => Action::Stay,
+      DragState::Pressed { .. } => {
+        self.selection = None;
+        false
+      }
+      DragState::Idle => false,
     }
+  }
+
+  pub fn release_drag(&mut self, behavior: crate::MouseRelease) -> Action {
+    if self.finish_drag() && behavior == crate::MouseRelease::Copy {
+      self.copy_selection()
+    } else {
+      Action::Stay
+    }
+  }
+
+  pub fn clear_selection(&mut self) {
+    self.selection = None;
+    self.drag_state = DragState::Idle;
+    self.notice.clear();
+  }
+
+  fn copy_selection(&mut self) -> Action {
+    if let Some(text) = self.selected_text().filter(|text| !text.is_empty()) {
+      self.complete_selection();
+      Action::Copy(text)
+    } else {
+      Action::Stay
+    }
+  }
+
+  fn complete_selection(&mut self) {
+    if let Some(Selection::Extending { anchor }) = self.selection {
+      self.selection = Some(Selection::Complete {
+        anchor,
+        end: self.cursor,
+      });
+    }
+  }
+
+  fn selection_bounds(&self) -> Option<(Position, Position)> {
+    let (anchor, end) = match self.selection? {
+      Selection::Extending { anchor } => (anchor, self.cursor),
+      Selection::Complete { anchor, end } => (anchor, end),
+    };
+    Some((anchor.min(end), anchor.max(end)))
   }
 
   pub fn selected(&self, position: Position) -> bool {
     self
-      .anchor
-      .is_some_and(|anchor| (anchor.min(self.cursor)..=anchor.max(self.cursor)).contains(&position))
+      .selection_bounds()
+      .is_some_and(|(start, end)| (start..=end).contains(&position))
   }
 
-  fn selection(&self) -> Option<String> {
-    let anchor = self.anchor?;
-    let start = anchor.min(self.cursor);
-    let end = anchor.max(self.cursor);
+  fn selected_text(&self) -> Option<String> {
+    let (start, end) = self.selection_bounds()?;
     let mut selected = String::new();
     for row in start.row..=end.row {
       let line = self.lines.get(row)?;
@@ -303,7 +358,7 @@ impl CopyMode {
   }
 
   pub fn key(&mut self, key: KeyEvent, page: usize) -> Action {
-    self.drag_state = DragState::Idle;
+    self.finish_drag();
     if self.searching {
       match key.code {
         KeyCode::Esc => self.searching = false,
@@ -330,7 +385,7 @@ impl CopyMode {
       match key.code {
         KeyCode::Char('c') => return Action::Close,
         KeyCode::Char('g') => {
-          self.anchor = None;
+          self.clear_selection();
           return Action::Stay;
         }
         KeyCode::Char('b') => KeyCode::Left,
@@ -375,10 +430,15 @@ impl CopyMode {
       KeyCode::Char('G') => self.cursor.row = self.lines.len().saturating_sub(1),
       KeyCode::Home | KeyCode::Char('0') => self.cursor.column = 0,
       KeyCode::End | KeyCode::Char('$') => self.cursor.column = self.line_len().saturating_sub(1),
-      KeyCode::Char(' ' | 'v') => self.anchor = Some(self.cursor),
+      KeyCode::Char(' ' | 'v') => {
+        self.selection = Some(Selection::Extending {
+          anchor: self.cursor,
+        });
+      }
       KeyCode::Enter | KeyCode::Char('y') => {
-        if let Some(text) = self.selection() {
-          return Action::Copy(text);
+        let action = self.copy_selection();
+        if matches!(action, Action::Copy(_)) {
+          return action;
         }
         self.notice = "Ctrl+Space or v starts a selection".into();
       }
@@ -445,7 +505,7 @@ impl CopyMode {
       return format!("{}{}", if self.backwards { '?' } else { '/' }, self.query);
     }
     format!(
-      " COPY {}/{}{} | arrows/PgUp/PgDn | Ctrl+Space select, Alt+w copy | v/y vi | /? search | q exit {}",
+      " COPY {}/{}{}{} | arrows/PgUp/PgDn | Ctrl+Space select, Alt+w copy | v/y vi | /? search | q exit",
       self.cursor.row + 1,
       self.lines.len(),
       if self.history_gap {
@@ -453,7 +513,11 @@ impl CopyMode {
       } else {
         ""
       },
-      self.notice
+      if self.notice.is_empty() {
+        String::new()
+      } else {
+        format!(" | {}", self.notice)
+      }
     )
   }
 }
@@ -497,7 +561,8 @@ mod tests {
     let mut mode = CopyMode::from_rows(Vec::new(), vec![row], 8);
     mode.begin_drag(0, 0);
     mode.drag(2, 0);
-    let Action::Copy(text) = mode.finish_drag() else {
+    mode.finish_drag();
+    let Action::Copy(text) = mode.key(key(KeyCode::Char('y')), 10) else {
       panic!("expected copied selection")
     };
     assert_eq!(text, "界X");
@@ -536,7 +601,8 @@ mod tests {
     assert_eq!(mode.soft_wrapped, [true, false, true, false]);
     mode.begin_drag(1, 2);
     mode.drag(2, 3);
-    let Action::Copy(text) = mode.finish_drag() else {
+    mode.finish_drag();
+    let Action::Copy(text) = mode.key(key(KeyCode::Char('y')), 10) else {
       panic!("physical rows must retain their original continuation boundary");
     };
     assert_eq!(text, "bcdef界x");
@@ -565,7 +631,8 @@ mod tests {
     assert_eq!(mode.cursor.row, 3);
     mode.begin_drag(0, 0);
     mode.drag(1, 3);
-    let Action::Copy(text) = mode.finish_drag() else {
+    mode.finish_drag();
+    let Action::Copy(text) = mode.key(key(KeyCode::Char('y')), 10) else {
       panic!("blank grid rows must survive a multiline selection");
     };
     assert_eq!(text, "ab\n\n\ncd");
@@ -585,7 +652,8 @@ mod tests {
     assert_eq!(mode.soft_wrapped, [true, true, false]);
     mode.begin_drag(0, 0);
     mode.drag(1, 2);
-    let Action::Copy(text) = mode.finish_drag() else {
+    mode.finish_drag();
+    let Action::Copy(text) = mode.key(key(KeyCode::Char('y')), 10) else {
       panic!("wrapped rows must copy their original text");
     };
     assert_eq!(text, "abcdefghij");
@@ -643,7 +711,8 @@ mod tests {
     assert_eq!(mode.soft_wrapped, [true, true, false, false, true, false]);
     mode.begin_drag(0, 0);
     mode.drag(0, 5);
-    let Action::Copy(text) = mode.finish_drag() else {
+    mode.finish_drag();
+    let Action::Copy(text) = mode.key(key(KeyCode::Char('y')), 10) else {
       panic!("explicit line breaks must survive copying wrapped rows");
     };
     assert_eq!(text, "ab界e\u{301}fg\n\n界終");
@@ -657,7 +726,8 @@ mod tests {
     mode.drag(0, 2);
     mode.fit(2, 1);
     assert_eq!(mode.lines, rows);
-    let Action::Copy(text) = mode.finish_drag() else {
+    mode.finish_drag();
+    let Action::Copy(text) = mode.key(key(KeyCode::Char('y')), 10) else {
       panic!("resizing must preserve a wrapped selection");
     };
     assert_eq!(text, "cdefghi");
@@ -679,11 +749,11 @@ mod tests {
     mode.top = 1;
     mode.left = 1;
     mode.begin_drag(1, 0);
-    assert_eq!((mode.cursor.row, mode.cursor.column), (1, 1));
     mode.drag(2, 0);
     assert_eq!(mode.cursor.column, 2);
-    let Action::Copy(text) = mode.finish_drag() else {
-      panic!("dragging must copy the selected text");
+    mode.finish_drag();
+    let Action::Copy(text) = mode.key(key(KeyCode::Char('y')), 10) else {
+      panic!("explicit copy must use the completed drag");
     };
     assert_eq!(text, "界e\u{301}");
   }
@@ -693,8 +763,9 @@ mod tests {
     let mut mode = CopyMode::new(vec!["alpha".into(), String::new(), "界e\u{301}last".into()]);
     mode.begin_drag(2, 2);
     mode.drag(1, 0);
-    let Action::Copy(text) = mode.finish_drag() else {
-      panic!("reverse dragging must copy the selected text");
+    mode.finish_drag();
+    let Action::Copy(text) = mode.key(key(KeyCode::Char('y')), 10) else {
+      panic!("reverse explicit copy must use the completed drag");
     };
     assert_eq!(text, "lpha\n\n界e\u{301}");
   }
@@ -704,7 +775,8 @@ mod tests {
     let mut mode = CopyMode::new(vec!["界x".into()]);
     mode.begin_drag(0, 0);
     mode.drag(1, 0);
-    let Action::Copy(text) = mode.finish_drag() else {
+    mode.finish_drag();
+    let Action::Copy(text) = mode.key(key(KeyCode::Char('y')), 10) else {
       panic!("moving across a wide character must count as a drag");
     };
     assert_eq!(text, "界");
@@ -713,13 +785,76 @@ mod tests {
   #[test]
   fn mouse_click_does_not_copy_and_inactive_drag_does_not_move_the_cursor() {
     let mut mode = CopyMode::new(vec!["abc".into()]);
+    let original_cursor = (mode.cursor.row, mode.cursor.column);
     mode.begin_drag(1, 0);
     mode.drag(1, 0);
-    assert!(matches!(mode.finish_drag(), Action::Stay));
-    assert!(mode.anchor.is_none());
+    mode.finish_drag();
+    assert!(mode.selection.is_none());
     mode.drag(2, 0);
-    assert_eq!(mode.cursor.column, 1);
-    assert!(matches!(mode.finish_drag(), Action::Stay));
+    assert_eq!((mode.cursor.row, mode.cursor.column), original_cursor);
+    mode.finish_drag();
+  }
+
+  #[test]
+  fn configured_mouse_copy_only_fires_once_for_a_completed_drag() {
+    let mut mode = CopyMode::new(vec!["abcde".into()]);
+    assert!(matches!(
+      mode.release_drag(crate::MouseRelease::Copy),
+      Action::Stay
+    ));
+    mode.begin_drag(0, 0);
+    mode.drag(1, 0);
+    let Action::Copy(text) = mode.release_drag(crate::MouseRelease::Copy) else {
+      panic!("configured mouse copy must copy the completed selection");
+    };
+    assert_eq!(text, "ab");
+    assert!(matches!(
+      mode.release_drag(crate::MouseRelease::Copy),
+      Action::Stay
+    ));
+    mode.begin_drag(1, 0);
+    mode.drag(1, 0);
+    assert!(matches!(
+      mode.release_drag(crate::MouseRelease::Copy),
+      Action::Stay
+    ));
+    assert!(mode.selected_text().is_none());
+  }
+
+  #[test]
+  fn finishing_a_drag_for_keyboard_navigation_does_not_trigger_automatic_copy() {
+    let mut mode = CopyMode::new(vec!["abcde".into()]);
+    mode.begin_drag(0, 0);
+    mode.drag(1, 0);
+    assert!(matches!(mode.key(key(KeyCode::Right), 5), Action::Stay));
+    assert!(matches!(
+      mode.release_drag(crate::MouseRelease::Copy),
+      Action::Stay
+    ));
+    let Action::Copy(text) = mode.key(key(KeyCode::Char('y')), 5) else {
+      panic!("keyboard navigation must retain the completed selection");
+    };
+    assert_eq!(text, "ab");
+  }
+
+  #[test]
+  fn copying_empty_text_is_inert_but_whitespace_and_newlines_are_preserved() {
+    let mut mode = CopyMode::new(vec![String::new(), String::new(), "  ".into()]);
+    mode.begin_drag(0, 0);
+    mode.drag(1, 0);
+    assert!(matches!(
+      mode.release_drag(crate::MouseRelease::Copy),
+      Action::Stay
+    ));
+    assert!(matches!(mode.key(key(KeyCode::Char('y')), 5), Action::Stay));
+    for (start_row, end_row, expected) in [(0, 1, "\n"), (2, 2, "  ")] {
+      mode.begin_drag(0, start_row);
+      mode.drag(1, end_row);
+      let Action::Copy(text) = mode.release_drag(crate::MouseRelease::Copy) else {
+        panic!("nonempty whitespace selections must copy");
+      };
+      assert_eq!(text, expected);
+    }
   }
 
   #[test]
@@ -727,11 +862,12 @@ mod tests {
     let mut mode = CopyMode::new(Vec::new());
     mode.begin_drag(usize::MAX, usize::MAX);
     mode.drag(0, 0);
-    assert!(matches!(mode.finish_drag(), Action::Stay));
+    mode.finish_drag();
     let mut mode = CopyMode::new(vec![String::new(), "a".into()]);
     mode.begin_drag(0, 0);
     mode.drag(usize::MAX, usize::MAX);
-    let Action::Copy(text) = mode.finish_drag() else {
+    mode.finish_drag();
+    let Action::Copy(text) = mode.key(key(KeyCode::Char('y')), 10) else {
       panic!("dragging beyond a short line must clamp to its end");
     };
     assert_eq!(text, "\na");
@@ -749,12 +885,107 @@ mod tests {
     };
     assert_eq!(text, "ab");
     mode.key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL), 2);
-    assert!(mode.anchor.is_none());
+    assert!(mode.selection.is_none());
     mode.key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE), 2);
     assert_eq!(mode.cursor.row, 2);
-    assert!(mode.anchor.is_none());
+    assert!(mode.selection.is_none());
     mode.key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE), 2);
-    assert!(mode.anchor.is_some());
+    assert!(mode.selection.is_some());
+  }
+
+  #[test]
+  fn completed_mouse_selection_stays_fixed_while_browsing_and_copying() {
+    let mut mode = CopyMode::new((0..20).map(|row| format!("line-{row:02}")).collect());
+    mode.top = 5;
+    mode.begin_drag(1, 1);
+    mode.drag(3, 2);
+    mode.finish_drag();
+    let expected = "ine-06\nline";
+    assert_eq!(mode.selected_text().as_deref(), Some(expected));
+    assert_eq!(mode.top, 5);
+    for event in [
+      key(KeyCode::Char('y')),
+      key(KeyCode::Enter),
+      KeyEvent::new(KeyCode::Char('w'), KeyModifiers::ALT),
+      KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL),
+    ] {
+      mode.scroll(true, 3, 5);
+      mode.key(key(KeyCode::PageDown), 5);
+      mode.query = "line-15".into();
+      mode.search(false);
+      mode.fit(10, 5);
+      let viewport = (mode.top, mode.left);
+      let Action::Copy(text) = mode.key(event, 5) else {
+        panic!("explicit copy must use the completed selection");
+      };
+      assert_eq!(text, expected);
+      assert_eq!((mode.top, mode.left), viewport);
+      assert!(mode.selected(Position { row: 6, column: 1 }));
+      assert!(mode.selected(Position { row: 7, column: 3 }));
+      assert!(!mode.selected(Position { row: 6, column: 0 }));
+      assert!(!mode.selected(Position { row: 7, column: 4 }));
+    }
+  }
+
+  #[test]
+  fn keyboard_selection_extends_until_copy_then_new_selection_replaces_it() {
+    let mut mode = CopyMode::new(vec!["abcd".into(), "efgh".into()]);
+    mode.key(key(KeyCode::Char('g')), 5);
+    mode.key(key(KeyCode::Char('v')), 5);
+    mode.key(key(KeyCode::Right), 5);
+    assert_eq!(mode.selected_text().as_deref(), Some("ab"));
+    assert!(matches!(
+      mode.key(key(KeyCode::Char('y')), 5),
+      Action::Copy(_)
+    ));
+    mode.key(key(KeyCode::Down), 5);
+    mode.scroll(false, 1, 1);
+    mode.fit(1, 1);
+    assert_eq!(mode.selected_text().as_deref(), Some("ab"));
+    mode.key(key(KeyCode::Char('v')), 5);
+    mode.key(key(KeyCode::Right), 5);
+    assert_eq!(mode.selected_text().as_deref(), Some("fg"));
+  }
+
+  #[test]
+  fn clearing_completed_selection_keeps_the_viewport() {
+    let mut mode = CopyMode::new((0..20).map(|row| format!("line-{row:02}")).collect());
+    mode.top = 5;
+    for clear_with_click in [false, true] {
+      mode.begin_drag(1, 1);
+      mode.drag(3, 2);
+      mode.finish_drag();
+      let viewport = (mode.top, mode.left);
+      if clear_with_click {
+        mode.begin_drag(0, 1);
+        mode.finish_drag();
+      } else {
+        mode.key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL), 5);
+      }
+      mode.fit(10, 5);
+      assert!(mode.selected_text().is_none());
+      assert_eq!((mode.top, mode.left), viewport);
+    }
+  }
+
+  #[test]
+  fn clicking_a_short_archive_row_does_not_shift_the_horizontal_view() {
+    let mut mode = CopyMode::new(vec!["x".repeat(40), "short".into()]);
+    mode.cursor = Position { row: 0, column: 29 };
+    mode.fit(10, 2);
+    assert_eq!(mode.left, 20);
+    mode.begin_drag(2, 0);
+    mode.drag(4, 0);
+    mode.finish_drag();
+    for row in [0, 1] {
+      mode.begin_drag(0, row);
+      mode.fit(10, 2);
+      assert_eq!(mode.left, 20);
+      mode.finish_drag();
+      mode.fit(10, 2);
+      assert_eq!((mode.top, mode.left), (0, 20));
+      assert!(mode.selected_text().is_none());
+    }
   }
 
   #[test]

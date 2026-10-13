@@ -251,6 +251,11 @@ impl Buffer {
         new_rows: usize,
         mut cursor: VisualPosition,
     ) -> VisualPosition {
+        // Switching from a taller alternate screen can retain a virtual cursor
+        // below this buffer. There is no physical cursor line to protect yet.
+        if cursor.1 >= self.rows {
+            return self.resize(new_cols, new_rows, cursor);
+        }
         let mut old_rows = self.rows;
         let old_count = self.lines.len();
         let old_cursor_absolute = old_count - old_rows + cursor.1;

@@ -2338,9 +2338,10 @@ mod tests {
         terminals: Vec::new(),
         directory,
       };
+      // Input checks must not end the fixture before later lease assertions.
       let command = CommandSpec {
         program: "/bin/sh".into(),
-        arguments: vec!["-c".into(), "IFS= read -r line".into()],
+        arguments: vec!["-c".into(), "while IFS= read -r line; do :; done".into()],
       };
       let root = fixture
         .manager

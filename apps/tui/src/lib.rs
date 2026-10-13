@@ -12,6 +12,7 @@ mod model;
 mod pane;
 mod prompt;
 mod render;
+mod settings;
 mod terminal;
 mod transport;
 
@@ -20,6 +21,7 @@ mod transport;
 #[allow(dead_code)]
 mod test_daemon;
 
+pub use settings::{AfterCopy, MouseRelease, SelectionSettings, Settings};
 pub use transport::{ConnectFuture, Duplex, Stream, Transport};
 
 /// How the terminal UI starts before opening any live pane attachments.
@@ -69,7 +71,7 @@ pub fn ensure_terminal() -> Result<()> {
 /// Run the local split-pane UI and restore the terminal on exit.
 ///
 /// # Errors
-/// Returns connection, protocol, prefix validation, or terminal I/O errors.
+/// Returns configuration, connection, protocol, prefix validation, or terminal I/O errors.
 pub async fn run(mut options: Options) -> Result<()> {
   let session = options.session.take();
   run_with_startup(options, StartupMode::Standard(session)).await
@@ -79,21 +81,38 @@ pub async fn run(mut options: Options) -> Result<()> {
 /// The startup policy takes precedence over `options.session`.
 ///
 /// # Errors
-/// Returns connection, protocol, prefix validation, or terminal I/O errors.
+/// Returns configuration, connection, protocol, prefix validation, or terminal I/O errors.
 pub async fn run_with_startup(options: Options, startup: StartupMode) -> Result<()> {
+  ensure_terminal()?;
+  run_with_startup_and_settings(options, startup, Settings::load()?).await
+}
+
+/// Run the local UI using settings already validated by the launcher.
+///
+/// Launchers that create a session before entering the UI must load settings first
+/// and pass that same value here so invalid configuration cannot leave a new session.
+///
+/// # Errors
+/// Returns connection, protocol, prefix validation, or terminal I/O errors.
+pub async fn run_with_startup_and_settings(
+  options: Options,
+  startup: StartupMode,
+  settings: Settings,
+) -> Result<()> {
   ensure_terminal()?;
   let mut app = app::App::new(
     options.socket,
     options.read_only,
     input::parse_prefix(&options.prefix)?,
   );
+  app.selection_settings = settings.selection;
   Box::pin(run_app(&mut app, options.archive, startup)).await
 }
 
 /// Run the same terminal UI over a caller-supplied local or remote transport.
 ///
 /// # Errors
-/// Returns connection, protocol, or terminal I/O errors.
+/// Returns configuration, connection, protocol, or terminal I/O errors.
 pub async fn run_with_transport(
   transport: &dyn Transport,
   session: Option<String>,
@@ -105,15 +124,30 @@ pub async fn run_with_transport(
 /// Run the terminal UI with an explicit session startup policy.
 ///
 /// # Errors
-/// Returns connection, protocol, or terminal I/O errors.
+/// Returns configuration, connection, protocol, or terminal I/O errors.
 pub async fn run_with_transport_startup(
   transport: &dyn Transport,
   startup: StartupMode,
   read_only: bool,
 ) -> Result<()> {
   ensure_terminal()?;
+  run_with_transport_startup_and_settings(transport, startup, read_only, Settings::load()?).await
+}
+
+/// Run over a caller-supplied transport using settings validated before session creation.
+///
+/// # Errors
+/// Returns connection, protocol, or terminal I/O errors.
+pub async fn run_with_transport_startup_and_settings(
+  transport: &dyn Transport,
+  startup: StartupMode,
+  read_only: bool,
+  settings: Settings,
+) -> Result<()> {
+  ensure_terminal()?;
   let mut app = app::App::new(PathBuf::new(), read_only, input::parse_prefix("Ctrl+b")?);
   app.transport = Some(transport);
+  app.selection_settings = settings.selection;
   Box::pin(run_app(&mut app, None, startup)).await
 }
 

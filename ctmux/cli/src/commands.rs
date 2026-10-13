@@ -101,7 +101,7 @@ impl<C: Connector + Sync> ctmux_tui::Transport for TuiTransport<'_, C> {
 /// Open the shared terminal UI over the connector, including SSH.
 ///
 /// # Errors
-/// Returns transport, protocol, or terminal presentation errors.
+/// Returns configuration, transport, protocol, or terminal presentation errors.
 pub async fn run_tui<C: Connector + Sync>(
   connector: &C,
   session: Option<String>,
@@ -115,7 +115,7 @@ pub async fn run_tui<C: Connector + Sync>(
 /// Open the shared terminal UI using an explicit session startup policy.
 ///
 /// # Errors
-/// Returns transport, protocol, or terminal presentation errors.
+/// Returns configuration, transport, protocol, or terminal presentation errors.
 pub async fn run_tui_with_startup<C: Connector + Sync>(
   connector: &C,
   startup: ctmux_tui::StartupMode,
@@ -124,6 +124,26 @@ pub async fn run_tui_with_startup<C: Connector + Sync>(
   ctmux_tui::run_with_transport_startup(&TuiTransport(connector), startup, read_only)
     .await
     .map_err(CommandError::Tui)
+}
+
+/// Open the shared terminal UI using settings validated before session creation.
+///
+/// # Errors
+/// Returns transport, protocol, or terminal presentation errors.
+pub async fn run_tui_with_startup_and_settings<C: Connector + Sync>(
+  connector: &C,
+  startup: ctmux_tui::StartupMode,
+  read_only: bool,
+  settings: ctmux_tui::Settings,
+) -> Result<(), CommandError> {
+  ctmux_tui::run_with_transport_startup_and_settings(
+    &TuiTransport(connector),
+    startup,
+    read_only,
+    settings,
+  )
+  .await
+  .map_err(CommandError::Tui)
 }
 
 /// Connector used by the standalone local `ctmux` executable.

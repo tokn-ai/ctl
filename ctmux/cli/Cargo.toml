@@ -32,6 +32,7 @@ ctmux-tui.workspace = true
 
 [dev-dependencies]
 ctmuxd.workspace = true
+portable-pty.workspace = true
 uuid.workspace = true
 
 [lints]

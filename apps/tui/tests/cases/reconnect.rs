@@ -165,10 +165,10 @@ async fn reconnect_keeps_shared_zoom_hidden_panes_and_frozen_copy_selection() ->
   tui.send(b"y")?;
   tui
     .wait_screen("the retained selection copies successfully", |screen| {
-      footer(screen).contains("Copied to ctmux buffer")
+      footer(screen).contains("Copied to ctmux buffer") && footer(screen).contains("COPY")
     })
     .await?;
-  tui.send(b"\x02]\r")?;
+  tui.send(b"q\x02]\r")?;
   tui
     .wait_screen(
       "pasting the retained selection reaches the shell",

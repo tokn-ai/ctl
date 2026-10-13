@@ -469,9 +469,10 @@ async fn frozen_copy_selection_follows_its_terminal_through_swap_and_break() -> 
   tui.send(b"y")?;
   tui
     .wait_screen("retained selection is copied after promotion", |screen| {
-      footer(screen).contains("Copied to ctmux buffer")
+      footer(screen).contains("Copied to ctmux buffer") && footer(screen).contains("COPY")
     })
     .await?;
+  tui.send(b"q")?;
   command(&mut tui, "paste-buffer").await?;
   tui.send(b"\r")?;
   tui

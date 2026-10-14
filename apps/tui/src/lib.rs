@@ -2,6 +2,9 @@
 mod actions;
 mod app;
 mod copy;
+mod deadline;
+#[cfg(test)]
+mod deadline_tests;
 mod divider;
 #[cfg(unix)]
 mod host_input;

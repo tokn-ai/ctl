@@ -22,6 +22,13 @@ Termination confirms the exact session and affects all its panes and viewers;
 `ctl shell --resume` cannot be combined with `--session`, `--plain`, or `--cwd`.
 `ctl ctmux --resume` cannot be combined with another ctmux subcommand.
 
+Shell startup lets SSH authentication and gateway/VPN preparation finish under
+their existing connection policy. Each ctmux exchange then gets its own
+five-second deadline; initial pane checkpoints and lease confirmation have a
+separate deadline. Quiet runtime connections remain bounded. Timeout messages
+identify the endpoint, operation, and phase instead of only saying
+`deadline has elapsed`.
+
 An inconclusive SSH control-master check (`ssh_status_unknown`), including a
 control-command timeout, keeps background checks and pane recovery retrying.
 These checks remain passive: uncertainty does not start authentication, prepare

@@ -2,7 +2,7 @@
 
 - Status: Implemented
 - Created: 2026-10-11
-- Updated: 2026-10-12
+- Updated: 2026-10-14
 
 ## Summary
 
@@ -34,6 +34,13 @@ and `--cwd`; the latter describes the initial directory of a newly requested
 session. Ctmux resume is a shared typed startup action, also spelled `resume`,
 and is exclusive with another ctmux subcommand. Standalone endpoint and prefix
 options still apply.
+
+Initial startup prepares the selected SSH/gateway/VPN transport under its existing
+authentication policy before beginning a five-second ctmux exchange deadline.
+Pane attachment and initial checkpoint/lease readiness have separate deadlines;
+quiet runtime connection preparation remains bounded. Timeout diagnostics name
+the endpoint, operation, and expired phase. The same policy applies to manager
+requests and background observations without replaying uncertain mutations.
 
 Inside a shell, Ctrl+B s/w and `:list-sessions` open the same manager. It shows
 session names, stable short IDs, status, and the current-session marker. Enter

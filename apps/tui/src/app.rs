@@ -2,6 +2,7 @@ use crate::{
   Result,
   actions::{Action, Direction},
   copy::{Action as CopyAction, BottomBehavior, CopyMode},
+  deadline::{self, ConnectionMode},
   divider::{Divider, Drag},
   input::{self, Prefix},
   keys::{Dispatch, KeyState},
@@ -27,10 +28,9 @@ use std::{
   path::PathBuf,
   time::Duration,
 };
-use tokio::{
-  sync::mpsc,
-  time::{Instant, timeout},
-};
+#[cfg(all(test, unix))]
+use tokio::time::timeout;
+use tokio::{sync::mpsc, time::Instant};
 
 enum Overlay {
   None,
@@ -162,37 +162,55 @@ impl App<'_> {
 
   #[cfg(all(test, unix))]
   async fn request(&self, message: ClientMessage) -> Result<ServerMessage> {
-    timeout(Duration::from_secs(5), async {
-      let local = LocalTransport(self.socket.clone());
-      let stream = self.transport.unwrap_or(&local).connect().await?;
+    let local = LocalTransport(self.socket.clone());
+    let transport = self.transport.unwrap_or(&local);
+    let stream = deadline::connect(transport, "test request", self.connection_mode()).await?;
+    deadline::request(transport, "test request", async {
       Ok(ctmux_client::request(stream, &identity(), message).await?)
     })
-    .await?
+    .await
   }
 
-  async fn session_client(&self) -> Result<SessionClient<crate::transport::Stream>> {
+  fn connection_mode(&self) -> ConnectionMode {
+    if self.runtime {
+      ConnectionMode::Runtime
+    } else {
+      ConnectionMode::Startup
+    }
+  }
+
+  async fn session_client(
+    &self,
+    operation: &str,
+  ) -> Result<SessionClient<crate::transport::Stream>> {
     let local = LocalTransport(self.socket.clone());
-    let stream = self.transport.unwrap_or(&local).connect().await?;
+    let stream = deadline::connect(
+      self.transport.unwrap_or(&local),
+      operation,
+      self.connection_mode(),
+    )
+    .await?;
     Ok(SessionClient::new(stream, identity()))
   }
 
-  async fn view_client(&self) -> Result<ViewClient<crate::transport::Stream>> {
+  async fn view_client(&self, operation: &str) -> Result<ViewClient<crate::transport::Stream>> {
     let local = LocalTransport(self.socket.clone());
-    let stream = self.transport.unwrap_or(&local).connect().await?;
+    let stream = deadline::connect(
+      self.transport.unwrap_or(&local),
+      operation,
+      self.connection_mode(),
+    )
+    .await?;
     Ok(ViewClient::new(stream, identity()))
   }
 
   async fn get_view(&self, session: &str) -> Result<ViewInfo> {
-    timeout(Duration::from_secs(5), async {
-      Ok::<_, crate::Error>(
-        self
-          .view_client()
-          .await?
-          .get(SessionId(session.into()))
-          .await?,
-      )
+    let client = self.view_client("get view").await?;
+    let local = LocalTransport(self.socket.clone());
+    deadline::request(self.transport.unwrap_or(&local), "get view", async {
+      Ok(client.get(SessionId(session.into())).await?)
     })
-    .await?
+    .await
   }
 
   fn archive_key(&self) -> String {
@@ -298,10 +316,13 @@ impl App<'_> {
   }
 
   async fn list(&mut self) -> Result<()> {
-    let mut sessions = timeout(Duration::from_secs(5), async {
-      Ok::<_, crate::Error>(self.session_client().await?.list().await?)
-    })
-    .await??;
+    let client = self.session_client("list sessions").await?;
+    let local = LocalTransport(self.socket.clone());
+    let mut sessions =
+      deadline::request(self.transport.unwrap_or(&local), "list sessions", async {
+        Ok(client.list().await?)
+      })
+      .await?;
     sessions.retain(|session| session.status == SessionStatus::Running);
     sessions.sort_by_key(|session| (session.created_at_ms, session.session_id.clone()));
     self.sessions = sessions;
@@ -314,11 +335,11 @@ impl App<'_> {
   }
 
   async fn create_named(&mut self, name: Option<String>) -> Result<()> {
-    let session = timeout(Duration::from_secs(5), async {
-      Ok::<_, crate::Error>(
-        self
-          .session_client()
-          .await?
+    let client = self.session_client("create session").await?;
+    let local = LocalTransport(self.socket.clone());
+    let session = deadline::request(self.transport.unwrap_or(&local), "create session", async {
+      Ok(
+        client
           .create(CreateSessionRequest {
             name,
             command: Vec::new(),
@@ -334,7 +355,7 @@ impl App<'_> {
           .await?,
       )
     })
-    .await??;
+    .await?;
     self.list().await?;
     self.select(&session.session_id).await
   }
@@ -515,17 +536,15 @@ impl App<'_> {
         old.close().await;
       }
       let local = LocalTransport(self.socket.clone());
-      let opened = timeout(
-        Duration::from_secs(5),
-        Pane::open(
-          self.transport.unwrap_or(&local),
-          id,
-          self.canvas_size(),
-          request.leases,
-          request.token,
-        ),
+      let opened = Pane::open(
+        self.transport.unwrap_or(&local),
+        id,
+        self.canvas_size(),
+        request.leases,
+        request.token,
+        ConnectionMode::Startup,
       )
-      .await?;
+      .await;
       match opened {
         Ok(opened) => {
           self.cancel_replaced_move(id);
@@ -1778,7 +1797,9 @@ impl App<'_> {
       .await?;
     // Commands enter an ordered local queue. Only the daemon's snapshot confirms
     // the mutation, so do not change focus or geometry optimistically.
-    let view = timeout(Duration::from_secs(5), async {
+    let local = LocalTransport(self.socket.clone());
+    let transport = self.transport.unwrap_or(&local);
+    let view = deadline::confirmation(transport, "set pane zoom", async {
       loop {
         let pane = self.panes.get_mut(&owner).ok_or("Zoom attachment closed")?;
         if let Some(error) = pane.drain().await? {
@@ -1799,7 +1820,7 @@ impl App<'_> {
         tokio::time::sleep(Duration::from_millis(5)).await;
       }
     })
-    .await??;
+    .await?;
     self.adopt_view(view).await
   }
 
@@ -1888,11 +1909,11 @@ impl App<'_> {
       return Ok(());
     }
     let previous: Vec<_> = self.panes.keys().cloned().collect();
-    let view = timeout(Duration::from_secs(5), async {
-      Ok::<_, crate::Error>(
-        self
-          .view_client()
-          .await?
+    let client = self.view_client("split terminal").await?;
+    let local = LocalTransport(self.socket.clone());
+    let view = deadline::request(self.transport.unwrap_or(&local), "split terminal", async {
+      Ok(
+        client
           .split(SplitTerminalRequest {
             terminal_id: TerminalId(self.focused.clone()),
             axis,
@@ -1903,7 +1924,7 @@ impl App<'_> {
           .await?,
       )
     })
-    .await??;
+    .await?;
     let target = view
       .panes
       .iter()
@@ -1983,16 +2004,14 @@ impl App<'_> {
         let id = id.clone();
         self.overlay = Overlay::None;
         if key.code == KeyCode::Char('y') && !id.is_empty() {
-          timeout(Duration::from_secs(5), async {
-            Ok::<_, crate::Error>(
-              self
-                .view_client()
-                .await?
-                .terminate_terminal(TerminalId(id))
-                .await?,
-            )
-          })
-          .await??;
+          let client = self.view_client("terminate terminal").await?;
+          let local = LocalTransport(self.socket.clone());
+          deadline::request(
+            self.transport.unwrap_or(&local),
+            "terminate terminal",
+            async { Ok(client.terminate_terminal(TerminalId(id)).await?) },
+          )
+          .await?;
           self.refresh().await?;
         }
       }

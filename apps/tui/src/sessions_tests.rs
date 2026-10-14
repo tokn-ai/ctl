@@ -1,6 +1,7 @@
 use super::*;
 use crate::{input, test_daemon::TestDaemon};
 use ctmux_proto::{ClientMessage, SplitAxis, TerminalSize};
+use std::time::Duration;
 
 fn app(daemon: &TestDaemon, read_only: bool) -> App<'static> {
   let mut app = App::new(

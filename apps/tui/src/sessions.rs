@@ -1,16 +1,17 @@
 use super::{App, NoticeKind, Overlay};
 use crate::{
-  Result,
+  Result, deadline,
   prompt::{Event as PromptEvent, Prompt},
+  transport::LocalTransport,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ctmux_client::session::SessionId;
 use ctmux_proto::SessionInfo;
 use std::{
   fmt::Write as _,
-  time::{Duration, SystemTime, UNIX_EPOCH},
+  time::{SystemTime, UNIX_EPOCH},
 };
-use tokio::time::{Instant, timeout};
+use tokio::time::Instant;
 
 /// Identity and display label captured before editing or confirming a mutation.
 /// Name changes or reordered lists must never redirect the requested action.
@@ -72,16 +73,12 @@ impl App<'_> {
     // SessionInfo has no revision. Drop an older pending list observation
     // before updating its name; view snapshots have their own ordered revision.
     self.maintenance.cancel_refresh();
-    let session = timeout(Duration::from_secs(5), async {
-      Ok::<_, crate::Error>(
-        self
-          .session_client()
-          .await?
-          .rename(SessionId(target.id.clone()), name)
-          .await?,
-      )
+    let client = self.session_client("rename session").await?;
+    let local = LocalTransport(self.socket.clone());
+    let session = deadline::request(self.transport.unwrap_or(&local), "rename session", async {
+      Ok(client.rename(SessionId(target.id.clone()), name).await?)
     })
-    .await??;
+    .await?;
     if let Some(current) = self
       .sessions
       .iter_mut()
@@ -120,16 +117,14 @@ impl App<'_> {
       return Err("This attachment is read only".into());
     }
     self.maintenance.cancel_refresh();
-    timeout(Duration::from_secs(5), async {
-      Ok::<_, crate::Error>(
-        self
-          .session_client()
-          .await?
-          .terminate(SessionId(target.id.clone()))
-          .await?,
-      )
-    })
-    .await??;
+    let client = self.session_client("terminate session").await?;
+    let local = LocalTransport(self.socket.clone());
+    deadline::request(
+      self.transport.unwrap_or(&local),
+      "terminate session",
+      async { Ok(client.terminate(SessionId(target.id.clone())).await?) },
+    )
+    .await?;
     let active = self
       .view
       .as_ref()

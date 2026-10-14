@@ -33,6 +33,7 @@ terminput.workspace = true
 terminput-crossterm.workspace = true
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 portable-pty.workspace = true
 ctmuxd.workspace = true
 uuid.workspace = true

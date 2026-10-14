@@ -231,6 +231,8 @@ describe("terminal commands", () => {
     });
     command.run();
     expect(actions.showNewShell).toHaveBeenCalledOnce();
+    command.run({ target_key: "local" });
+    expect(actions.showNewShell).toHaveBeenLastCalledWith({ kind: "local" });
   });
 
   it("cycles through open tabs and wraps around", () => {

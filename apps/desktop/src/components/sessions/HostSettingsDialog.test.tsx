@@ -19,6 +19,7 @@ afterEach(cleanup);
 
 function setup(saved = host) {
   const callbacks = {
+    on_remove: vi.fn(async () => undefined),
     onSave: vi.fn(async (_host: WorkspaceHost) => undefined),
     onAddMethod: vi.fn(),
     onEditMethod: vi.fn(),
@@ -30,6 +31,29 @@ function setup(saved = host) {
 }
 
 describe("host settings", () => {
+  it("requires confirmation before removing an unavailable host and shows failures", async () => {
+    const { user, on_remove, onClose } = setup({ ...host, source: "unavailable" });
+    on_remove.mockRejectedValueOnce(new Error("This host is used as a hop"));
+    expect((screen.getByLabelText("Host name") as HTMLInputElement).disabled).toBe(true);
+    await user.click(screen.getByRole("button", { name: "Remove host…" }));
+    expect(on_remove).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Keep host" }));
+    expect(screen.queryByRole("button", { name: "Confirm remove host" })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Remove host…" }));
+    await user.click(screen.getByRole("button", { name: "Confirm remove host" }));
+    expect(await screen.findByRole("alert")).toHaveProperty("textContent", "This host is used as a hop");
+    expect(on_remove).toHaveBeenCalledOnce();
+    expect(onClose).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Confirm remove host" }));
+    expect(on_remove).toHaveBeenCalledTimes(2);
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  it.each(["ssh_config", "tailscale"] as const)("omits removal for a discovered %s host", (source) => {
+    setup({ ...host, source });
+    expect(screen.queryByRole("region", { name: "Danger zone" })).toBeNull();
+  });
+
   it("shows the saved VPN name for its connection method", () => {
     render(<HostSettingsDialog host={{ ...host, connection_methods: [{ ...host.connection_methods[0],
       target: { ...host.connection_methods[0].target, vpn_connection_id: "office-vpn" } }] }}

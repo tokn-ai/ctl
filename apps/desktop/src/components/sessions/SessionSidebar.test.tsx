@@ -86,7 +86,6 @@ function renderHostConnection(
     onAddHost: vi.fn(),
     onConnectHost: vi.fn(),
     onDisconnectHost: vi.fn(),
-    onRemoveHost: vi.fn(),
     onAddExisting: vi.fn(),
     onForget: vi.fn(),
     ...overrides,
@@ -101,6 +100,19 @@ afterEach(() => {
 });
 
 describe("SessionSidebar", () => {
+  it("keeps unavailable host settings accessible while disabling new shells", async () => {
+    const user = userEvent.setup();
+    const target = { ...remoteHost, unavailable: "Restore this host" };
+    const onHostSettings = vi.fn();
+    renderHostConnection(undefined, {
+      targets: [target], hosts: [{ ...hostFromTarget(target), source: "unavailable" }], onHostSettings,
+    });
+    expect((screen.getByRole("button", { name: "New shell on Build machine" }) as HTMLButtonElement).disabled).toBe(true);
+    await user.click(screen.getByRole("button", { name: "Host settings for Build machine" }));
+    expect(onHostSettings).toHaveBeenCalledWith(target);
+  });
+
+
   it.each(["idle", "connecting", "reconnecting", "retry_wait", "disconnected", "error", "ended"] as const)(
     "shows compact observed age alongside the %s connection state", (phase) => {
       vi.useFakeTimers();
@@ -295,7 +307,6 @@ describe("SessionSidebar", () => {
     expect(props.onDisconnectHost).toHaveBeenCalledExactlyOnceWith(remoteHost);
     expect(props.onDisconnect).not.toHaveBeenCalled();
     expect(props.onRequestClose).not.toHaveBeenCalled();
-    expect(props.onRemoveHost).not.toHaveBeenCalled();
     expect(within(screen.getByRole("region", { name: "local sessions" })).queryByRole("status")).toBeNull();
     expect(screen.queryByRole("button", { name: "Disconnect host local" })).toBeNull();
   });
@@ -437,7 +448,6 @@ describe("SessionSidebar", () => {
         onRequestClose={vi.fn()}
         onAddHost={vi.fn()}
         onConnectHost={vi.fn()}
-        onRemoveHost={vi.fn()}
         onAddExisting={vi.fn()}
         onForget={vi.fn()}
       />,
@@ -472,7 +482,6 @@ describe("SessionSidebar", () => {
         onRequestClose={vi.fn()}
         onAddHost={vi.fn()}
         onConnectHost={vi.fn()}
-        onRemoveHost={vi.fn()}
         onAddExisting={vi.fn()}
         onForget={vi.fn()}
       />,
@@ -508,7 +517,6 @@ describe("SessionSidebar", () => {
         onRequestClose={vi.fn()}
         onAddHost={vi.fn()}
         onConnectHost={vi.fn()}
-        onRemoveHost={vi.fn()}
         onAddExisting={vi.fn()}
         onForget={vi.fn()}
       />,
@@ -540,7 +548,6 @@ describe("SessionSidebar", () => {
         onRequestClose={vi.fn()}
         onAddHost={vi.fn()}
         onConnectHost={vi.fn()}
-        onRemoveHost={vi.fn()}
         onAddExisting={vi.fn()}
         onForget={vi.fn()}
       />,
@@ -558,9 +565,9 @@ describe("SessionSidebar", () => {
       destination: "build-host",
       remote_info: { remote_id: "remote-1", agent_version: "0.1.0" },
     };
+    const onNewShell = vi.fn();
     const onConnectHost = vi.fn();
     const onPortForward = vi.fn();
-    const onRemoveHost = vi.fn();
     const onDisconnect = vi.fn();
     const onAddHost = vi.fn();
     const onHostSettings = vi.fn();
@@ -578,13 +585,12 @@ describe("SessionSidebar", () => {
         disconnectingSessionKey={null}
         onRefresh={vi.fn()}
         onSelect={vi.fn()}
-        onNewShell={vi.fn()}
+        onNewShell={onNewShell}
         onDisconnect={onDisconnect}
         onRequestClose={vi.fn()}
         onAddHost={onAddHost}
         onHostSettings={onHostSettings}
         onConnectHost={onConnectHost}
-        onRemoveHost={onRemoveHost}
         onPortForward={onPortForward}
         onAddExisting={vi.fn()}
         onForget={vi.fn()}
@@ -606,10 +612,13 @@ describe("SessionSidebar", () => {
     expect(connect.title).toContain("Agent 0.1.0\nRemote ID: remote-1");
     await user.click(connect);
     await user.click(screen.getByRole("button", { name: "Port forwarding for build-host" }));
-    await user.click(screen.getByRole("button", { name: "Remove build-host" }));
+    expect(screen.queryByRole("button", { name: "Remove build-host" })).toBeNull();
     expect(onConnectHost).toHaveBeenCalledWith(remote);
     expect(onPortForward).toHaveBeenCalledWith(remote);
-    expect(onRemoveHost).toHaveBeenCalledWith(remote);
+    await user.click(screen.getByRole("button", { name: "New shell on build-host" }));
+    expect(onNewShell).toHaveBeenLastCalledWith(remote);
+    await user.click(screen.getByRole("button", { name: "New shell on local" }));
+    expect(onNewShell).toHaveBeenLastCalledWith(session.target);
 
     await user.click(screen.getByRole("button", { name: "Host settings for build-host" }));
     expect(onHostSettings).toHaveBeenCalledWith(remote);
@@ -667,7 +676,6 @@ describe("SessionSidebar", () => {
         onRequestClose={vi.fn()}
         onAddHost={vi.fn()}
         onConnectHost={vi.fn()}
-        onRemoveHost={vi.fn()}
         onAddExisting={vi.fn()}
         onForget={vi.fn()}
         onSelectTask={vi.fn()}

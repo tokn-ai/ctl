@@ -252,6 +252,7 @@ function TerminalWorkbench() {
   const [listError, setListError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [newShellOpen, setNewShellOpen] = useState(false);
+  const [new_shell_target_key, setNewShellTargetKey] = useState<string | undefined>();
   const [component_update_context, setComponentUpdateContext] = useState<ComponentUpdateContext | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
@@ -1531,8 +1532,9 @@ function TerminalWorkbench() {
       showAddRoutedHost: openAddHost,
       showAddExistingSession: () => setImportOpen(true),
       forgetSession: (session) => setPendingForget(session),
-      showNewShell: () => {
+      showNewShell: (target) => {
         if (!daemonRestartBlocksInteractions()) {
+          setNewShellTargetKey(target ? targetKey(target) : undefined);
           setNewShellOpen(true);
         }
       },
@@ -1580,7 +1582,9 @@ function TerminalWorkbench() {
       configureHost: (target) => {
         if (target.kind === "ssh") setHostSettingsId(target.host_id!);
       },
-      removeHost,
+      removeHost: (target) => {
+        if (target.kind === "ssh") setHostSettingsId(target.host_id!);
+      },
       managePortForwards: (target) => { void managePortForwards(target); },
       saveWorkspace: () => persistWorkspace(true),
       configureKeybindings: () => setKeybindingsOpen(true),
@@ -1917,7 +1921,7 @@ function TerminalWorkbench() {
                       session_key: sessionKey(session),
                     })
                   }
-                  onNewShell={() => executeCommandById(COMMAND_IDS.newShell)}
+                  onNewShell={(target) => executeCommandById(COMMAND_IDS.newShell, target ? { target_key: targetKey(target) } : undefined)}
                   onDisconnect={(session) =>
                     executeCommandById(COMMAND_IDS.disconnect, {
                       session_key: sessionKey(session),
@@ -1949,11 +1953,6 @@ function TerminalWorkbench() {
                   }}
                   onConnectHost={(target) =>
                     executeCommandById(COMMAND_IDS.connectHost, {
-                      target_key: targetKey(target),
-                    })
-                  }
-                  onRemoveHost={(target) =>
-                    executeCommandById(COMMAND_IDS.removeHost, {
                       target_key: targetKey(target),
                     })
                   }
@@ -2197,6 +2196,7 @@ function TerminalWorkbench() {
           />
         ) : newShellOpen ? (
           <NewShellFlow
+            initial_target_key={new_shell_target_key}
             targets={connectionTargets}
             hosts={workspace.hosts}
             gateways={workspace.ssh_gateways}
@@ -2318,6 +2318,9 @@ function TerminalWorkbench() {
               setHostSettingsId(null);
               setComponentUpdateContext({ targets: [target] });
             }}
+            on_remove={settingsHost.source !== "ssh_config" && settingsHost.source !== "tailscale" ? async () => {
+              await removeHost(hostTarget(settingsHost, workspace.ssh_gateways, undefined, workspace.hosts));
+            } : undefined}
             onClose={() => setHostSettingsId(null)}
           />
         ) : hostFlow !== null ? (

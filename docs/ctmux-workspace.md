@@ -37,8 +37,11 @@ The workspace contains:
 - task references, sidebar selection, and task drafts with source scopes and
   original saved-definition revisions;
 - loopback-only port-forward definitions and whether each should be restored;
-- `host_identities`: observed remote identity pins only for hosts referenced by
-  sessions, tasks, or forwards. These observations are not host definitions.
+- `host_identities`: observed remote identity pins for hosts referenced by
+  sessions, tasks, forwards, or linked gateway routes in the host catalog. Pins
+  remain valid without direct workspace references or an available catalog;
+  host IDs must be nonempty, unique, and remote. These observations are not host
+  definitions.
 
 Schema 8 imports existing saved hosts and gateways into the catalog before
 removing them from the workspace. Import is idempotent across a crash between

@@ -63,21 +63,34 @@ pub struct WorkspaceSession {
 }
 
 impl WorkspaceSession {
-  fn valid_metadata(&self) -> bool {
-    valid_workspace_text(&self.session_id)
-      && valid_workspace_text(&self.name)
-      && [
-        self.last_known_cwd.as_ref(),
+  fn invalid_metadata_field(&self) -> Option<&'static str> {
+    for (field, value) in [
+      ("session_id", Some(&self.session_id)),
+      ("name", Some(&self.name)),
+      ("last_known_cwd", self.last_known_cwd.as_ref()),
+      (
+        "last_known_cwd_display",
         self.last_known_cwd_display.as_ref(),
-      ]
-      .into_iter()
-      .flatten()
-      .all(|value| valid_workspace_text(value))
-      && self
-        .last_known_terminal_size
-        .as_ref()
-        .is_none_or(|size| size.columns > 0 && size.rows > 0)
-      && self.last_seen_at_ms.is_none_or(valid_observation_timestamp)
+      ),
+    ] {
+      if value.is_some_and(|value| !valid_workspace_text(value)) {
+        return Some(field);
+      }
+    }
+    if self
+      .last_known_terminal_size
+      .as_ref()
+      .is_some_and(|size| size.columns == 0 || size.rows == 0)
+    {
+      return Some("last_known_terminal_size");
+    }
+    if self
+      .last_seen_at_ms
+      .is_some_and(|value| !valid_observation_timestamp(value))
+    {
+      return Some("last_seen_at_ms");
+    }
+    None
   }
 
   fn reference(&self) -> SessionReference {
@@ -199,6 +212,13 @@ fn valid_workspace_text(text: &str) -> bool {
   !text.is_empty() && text.len() <= 4096 && !text.chars().any(char::is_control)
 }
 
+fn invalid_workspace_field(field: &str) -> CommandErrorDto {
+  CommandErrorDto::new(
+    "workspace_invalid",
+    format!("The workspace contains invalid or duplicate references in {field}."),
+  )
+}
+
 impl Default for WorkspaceDocument {
   fn default() -> Self {
     Self {
@@ -244,24 +264,26 @@ impl WorkspaceDocument {
         "Saved task definitions belong in the shared definition store.",
       ));
     }
-    let invalid = || {
-      CommandErrorDto::new(
-        "workspace_invalid",
-        "The workspace contains invalid or duplicate references.",
-      )
-    };
-    if !valid_workspace_text(&self.workspace_id)
-      || self.hosts.len() > 1024
-      || self.sessions.len() > 10_000
-    {
-      return Err(invalid());
+    if !valid_workspace_text(&self.workspace_id) {
+      return Err(invalid_workspace_field("workspace_id"));
+    }
+    if self.hosts.len() > 1024 {
+      return Err(invalid_workspace_field("hosts: more than 1024 entries"));
+    }
+    if self.sessions.len() > 10_000 {
+      return Err(invalid_workspace_field("sessions: more than 10000 entries"));
     }
     let hosts = if self.schema_version < 8 {
       if !self.host_identities.is_empty() {
-        return Err(invalid());
+        return Err(invalid_workspace_field(
+          "host_identities: unsupported in legacy workspaces",
+        ));
       }
-      let gateway_ids = validated_gateway_ids(&self.ssh_gateways).ok_or_else(invalid)?;
-      self.validated_host_ids(&gateway_ids).ok_or_else(invalid)?
+      let gateway_ids = validated_gateway_ids(&self.ssh_gateways)
+        .ok_or_else(|| invalid_workspace_field("ssh_gateways"))?;
+      self
+        .validated_host_ids(&gateway_ids)
+        .ok_or_else(|| invalid_workspace_field("hosts"))?
     } else {
       if !self.hosts.is_empty() || !self.ssh_gateways.is_empty() {
         return Err(CommandErrorDto::new(
@@ -285,43 +307,74 @@ impl WorkspaceDocument {
         .chain(std::iter::once("local"))
         .collect();
       if hosts.iter().any(|host_id| !valid_workspace_text(host_id)) {
-        return Err(invalid());
+        return Err(invalid_workspace_field("host_id"));
       }
-      let mut identities = HashSet::new();
-      if self.host_identities.len() > 1024
-        || self.host_identities.iter().any(|item| {
-          item.host_id == "local"
-            || !hosts.contains(item.host_id.as_str())
-            || !identities.insert(item.host_id.as_str())
-            || !item.remote_info.is_valid()
-        })
-      {
-        return Err(invalid());
-      }
+      self.validate_host_identities()?;
       hosts
     };
     if !self.port_forwards_are_valid(&hosts) {
-      return Err(invalid());
+      return Err(invalid_workspace_field("port_forwards"));
     }
     let mut sessions = HashSet::new();
-    for session in &self.sessions {
-      if !hosts.contains(session.host_id.as_str())
-        || !session.valid_metadata()
-        || !sessions.insert(session.reference())
-      {
-        return Err(invalid());
+    for (index, session) in self.sessions.iter().enumerate() {
+      let field = format!("sessions[{index}]");
+      if !hosts.contains(session.host_id.as_str()) {
+        return Err(invalid_workspace_field(&format!("{field}.host_id")));
+      }
+      if let Some(metadata_field) = session.invalid_metadata_field() {
+        return Err(invalid_workspace_field(&format!(
+          "{field}.{metadata_field}"
+        )));
+      }
+      if !sessions.insert(session.reference()) {
+        return Err(invalid_workspace_field(&format!(
+          "{field}: duplicate session reference"
+        )));
       }
     }
     self.validate_task_drafts()?;
     self.validate_task_tabs(&hosts, &sessions)?;
     let mut tabs = HashSet::new();
-    if self.tabs.iter().any(|tab| !tabs.insert(tab))
-      || self
-        .active_tab
-        .as_ref()
-        .is_some_and(|tab| !tabs.contains(tab))
+    for (index, tab) in self.tabs.iter().enumerate() {
+      if !tabs.insert(tab) {
+        return Err(invalid_workspace_field(&format!(
+          "tabs[{index}]: duplicate"
+        )));
+      }
+    }
+    if self
+      .active_tab
+      .as_ref()
+      .is_some_and(|tab| !tabs.contains(tab))
     {
-      return Err(invalid());
+      return Err(invalid_workspace_field("active_tab: absent from tabs"));
+    }
+    Ok(())
+  }
+
+  fn validate_host_identities(&self) -> CommandResult<()> {
+    if self.host_identities.len() > 1024 {
+      return Err(invalid_workspace_field(
+        "host_identities: more than 1024 entries",
+      ));
+    }
+    // Gateway-only hosts are referenced by routes in the separate catalog.
+    // Keep their identity pins even without sessions, tasks, or forwards, and
+    // without depending on the current catalog's availability.
+    let mut identities = HashSet::new();
+    for (index, item) in self.host_identities.iter().enumerate() {
+      let field = format!("host_identities[{index}]");
+      if item.host_id == "local" || !valid_workspace_text(&item.host_id) {
+        return Err(invalid_workspace_field(&format!("{field}.host_id")));
+      }
+      if !identities.insert(item.host_id.as_str()) {
+        return Err(invalid_workspace_field(&format!(
+          "{field}.host_id: duplicate"
+        )));
+      }
+      if !item.remote_info.is_valid() {
+        return Err(invalid_workspace_field(&format!("{field}.remote_info")));
+      }
     }
     Ok(())
   }

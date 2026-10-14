@@ -124,18 +124,75 @@ fn invalid_session_observation_metadata_is_rejected() {
       pixel_width: None,
       pixel_height: None,
     });
-    assert_eq!(document.validate().unwrap_err().code, "workspace_invalid");
+    let error = document.validate().unwrap_err();
+    assert_eq!(error.code, "workspace_invalid");
+    assert!(
+      error
+        .message
+        .contains("sessions[0].last_known_terminal_size")
+    );
   }
   for timestamp in [0, crate::dto::MAX_OBSERVATION_TIMESTAMP_MS + 1, u64::MAX] {
     let mut document = populated();
     document.sessions[0].last_seen_at_ms = Some(timestamp);
-    assert_eq!(document.validate().unwrap_err().code, "workspace_invalid");
+    let error = document.validate().unwrap_err();
+    assert_eq!(error.code, "workspace_invalid");
+    assert!(error.message.contains("sessions[0].last_seen_at_ms"));
   }
   for timestamp in [1, crate::dto::MAX_OBSERVATION_TIMESTAMP_MS] {
     let mut document = populated();
     document.sessions[0].last_seen_at_ms = Some(timestamp);
     document.validate().unwrap();
   }
+}
+
+#[test]
+fn validation_errors_identify_session_metadata_and_duplicate_references() {
+  for field in [
+    "session_id",
+    "name",
+    "last_known_cwd",
+    "last_known_cwd_display",
+  ] {
+    let mut document = populated();
+    let session = &mut document.sessions[0];
+    match field {
+      "session_id" => session.session_id = String::new(),
+      "name" => session.name = "invalid\nname".into(),
+      "last_known_cwd" => session.last_known_cwd = Some("invalid\0cwd".into()),
+      "last_known_cwd_display" => session.last_known_cwd_display = Some(String::new()),
+      _ => unreachable!(),
+    }
+    let error = document.validate().unwrap_err();
+    assert_eq!(error.code, "workspace_invalid");
+    assert!(error.message.contains(&format!("sessions[0].{field}")));
+  }
+  let mut document = populated();
+  document.sessions.push(document.sessions[0].clone());
+  assert!(
+    document
+      .validate()
+      .unwrap_err()
+      .message
+      .contains("sessions[1]: duplicate")
+  );
+  document.sessions.pop();
+  document.tabs.push(document.tabs[0].clone());
+  assert!(
+    document
+      .validate()
+      .unwrap_err()
+      .message
+      .contains("tabs[1]: duplicate")
+  );
+  document.tabs.clear();
+  assert!(
+    document
+      .validate()
+      .unwrap_err()
+      .message
+      .contains("active_tab: absent from tabs")
+  );
 }
 
 #[test]

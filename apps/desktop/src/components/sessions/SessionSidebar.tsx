@@ -318,26 +318,12 @@ export function SessionSidebar({
           const reachability = connection?.reachability;
           const operation = connection?.operation;
           const presentation = hostConnectionPresentation(target, connection);
-          const remoteAttachments = [...(attachmentStates?.values() ?? [])].filter((state) =>
-            state.session && targetKey(state.session.target) === key);
-          const timedOutAttachment = remoteAttachments.find((state) => state.error_code === "remote_connection_timeout");
-          // A local mux process can outlive a stalled transport. Preserve that
-          // evidence for disconnect controls without claiming remote health.
-          const remoteTimeout = targetFailure?.code === "remote_connection_timeout" || !!timedOutAttachment;
-          const sessionIssue = remoteTimeout ? "Remote connection timed out"
-            : remoteAttachments.some((state) => ["reconnecting", "retry_wait"].includes(state.phase)) ? "Session reconnecting…"
-            : remoteAttachments.some((state) => state.error_code === "automatic_reconnect_timeout") ? "Session reconnect failed" : null;
-          const { state: connectionState, label: connectionLabel, route_unavailable: unavailableRoute } =
-            presentation.state === "connected" && sessionIssue
-              ? { ...presentation, state: "error", label: sessionIssue }
-              : presentation;
+          const { state: connectionState, label: connectionLabel, route_unavailable: unavailableRoute } = presentation;
           const operationLabel = operation?.state === "pending" ? operation.kind === "connect" ? "Connecting…" : "Disconnecting…"
             : operation?.state === "failed" ? operation.kind === "connect" ? "Connect failed" : "Disconnect failed" : null;
           const connectionTitle = [
             connectionLabel,
-            hostError,
             presentation.state === "connected" ? "The local SSH control connection is open. This check does not freshly verify remote responsiveness or terminal health." : null,
-            timedOutAttachment?.message,
             reachability?.state === "available" ? "The endpoint answered with an SSH greeting. Authentication has not been checked." : null,
             observation?.checked_at_ms ? `SSH connection checked at ${new Date(observation.checked_at_ms).toLocaleTimeString()}` : null,
             reachability?.checked_at_ms ? `SSH reachability checked at ${new Date(reachability.checked_at_ms).toLocaleTimeString()}` : null,
@@ -364,7 +350,7 @@ export function SessionSidebar({
               key={key}
               aria-label={`${targetLabel(target)} sessions`}
             >
-              <div className={`host-group-header ${hostError || unavailableRoute ? "has-error" : ""}`}>
+              <div className={`host-group-header ${unavailableRoute ? "has-error" : ""}`}>
                 <button
                   className="host-group-toggle"
                   type="button"
@@ -486,7 +472,9 @@ export function SessionSidebar({
                   const observed_status = session.status === "unknown"
                     ? "unverified"
                     : session.status;
-                  const status = attachment ? attachmentPhaseLabel(attachment.phase)
+                  const status = attachment?.phase === "error" && attachment.error_code === "automatic_reconnect_timeout"
+                    ? "Reconnect failed"
+                    : attachment ? attachmentPhaseLabel(attachment.phase)
                     : session.status === "running" ? "Last seen running" : observed_status;
                   const age = attachment?.phase === "attached" ? null : lastSeenAge(session.last_seen_at_ms, now_ms);
                   const observed_at = age !== null && isObservationTime(session.last_seen_at_ms)
@@ -513,7 +501,7 @@ export function SessionSidebar({
                         <Icon name="terminal" class_name="session-icon" />
                         <span className="session-copy">
                           <strong>{compactTitle}</strong>
-                          <small className="session-details" title={[`${session.name} · ${status}${dimensions} · Session last reported ${observed_status}`, observation_title].filter(Boolean).join("\n")}>
+                          <small className="session-details" title={[`${session.name} · ${status}${dimensions} · Session last reported ${observed_status}`, attachment?.message, observation_title].filter(Boolean).join("\n")}>
                             <span className="session-detail-label">
                               {session.name}
                               <span aria-hidden="true"> · </span>

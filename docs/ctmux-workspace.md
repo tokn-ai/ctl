@@ -174,6 +174,8 @@ Host connection status comes from live OpenSSH master checks across saved and
 active methods, refreshed every five seconds and on window focus. It is separate
 from remembered remote identity and per-session attachment state. The sidebar
 shows status text and a dot, with method names or diagnostics in the tooltip.
+Session reconnects and attachment failures stay on their own session rows and do
+not override the host badge. Session inspection failures remain in notifications.
 Checks neither start `ctld` nor request authentication.
 
 **Disconnect host** detaches its active terminal view, cancels pending connection

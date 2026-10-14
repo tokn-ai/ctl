@@ -97,7 +97,7 @@ impl SharedForwardRegistry {
     // forwarding configuration to make this port available.
     let listener = TcpListener::bind((forward.bind_address.as_str(), forward.local_port))
       .await
-      .map_err(|error| RequestError::PortForwardFailed(error.to_string()))?;
+      .map_err(|error| super::port_forwarding::local_bind_error(forward, &error))?;
     self.start_listener(key, listener, open_channel);
     Ok(())
   }

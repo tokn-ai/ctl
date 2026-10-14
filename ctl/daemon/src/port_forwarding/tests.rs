@@ -76,6 +76,83 @@ fn forward() -> LocalPortForward {
 }
 
 #[tokio::test]
+async fn failed_mux_add_identifies_an_occupied_port_without_touching_its_listener() {
+  let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+  let forward = LocalPortForward {
+    local_port: listener.local_addr().unwrap().port(),
+    ..forward()
+  };
+  let original = "mux_client_forward: forwarding request failed: Port forwarding failed";
+  let error = forward_command_error(&forward, original.into(), false).await;
+  assert_eq!(error.code(), "ssh_port_forward_failed");
+  let message = error.to_string();
+  assert!(message.contains(&format!(
+    "Local address 127.0.0.1:{} is already in use",
+    forward.local_port
+  )));
+  assert!(message.contains("owning ctld/application"));
+  assert!(message.contains("choose another local port"));
+  assert!(message.contains(original));
+
+  let client = tokio::net::TcpStream::connect(listener.local_addr().unwrap())
+    .await
+    .unwrap();
+  let (accepted, _) = tokio::time::timeout(std::time::Duration::from_secs(1), listener.accept())
+    .await
+    .unwrap()
+    .unwrap();
+  assert_eq!(client.local_addr().unwrap(), accepted.peer_addr().unwrap());
+}
+
+#[tokio::test]
+async fn failed_mux_cancel_preserves_its_error_even_when_the_port_is_occupied() {
+  let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+  let forward = LocalPortForward {
+    local_port: listener.local_addr().unwrap().port(),
+    ..forward()
+  };
+  let original = "mux_client_forward: cancellation request failed";
+  let error = forward_command_error(&forward, original.into(), true).await;
+  let RequestError::PortForwardFailed(message) = error else {
+    panic!("expected original forwarding error");
+  };
+  assert_eq!(message, original);
+}
+
+#[tokio::test]
+async fn other_mux_failures_are_not_misclassified_as_a_port_conflict() {
+  let forward = LocalPortForward {
+    // A bind failure other than AddrInUse must preserve the mux failure.
+    bind_address: "192.0.2.1".into(),
+    ..forward()
+  };
+  let original = "Control socket connect: Connection refused";
+  let RequestError::PortForwardFailed(message) =
+    forward_command_error(&forward, original.into(), false).await
+  else {
+    panic!("expected original forwarding error");
+  };
+  assert_eq!(message, original);
+}
+
+#[test]
+fn bind_failures_include_the_exact_endpoint_and_only_report_real_conflicts() {
+  let forward = LocalPortForward {
+    bind_address: "::1".into(),
+    ..forward()
+  };
+  let conflict = local_bind_error(&forward, &io::Error::from(io::ErrorKind::AddrInUse));
+  assert!(
+    conflict
+      .to_string()
+      .contains("Local address [::1]:15432 is already in use")
+  );
+  let denied = local_bind_error(&forward, &io::Error::from(io::ErrorKind::PermissionDenied));
+  assert!(denied.to_string().contains("Cannot listen on [::1]:15432"));
+  assert!(!denied.to_string().contains("already in use"));
+}
+
+#[tokio::test]
 async fn shutdown_cancels_only_owned_listeners_and_reports_unreleased_records() {
   let target = target("test-shutdown");
   let control = Control::ready(std::slice::from_ref(&target));

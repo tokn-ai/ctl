@@ -283,14 +283,7 @@ async fn transported_shell_scrolls_frozen_history_and_reconnects() -> Result<()>
   app
     .key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
     .await?;
-  app.panes[&primary].control.detach().await?;
-  timeout(Duration::from_secs(5), async {
-    while app.panes[&primary].connected {
-      app.drain().await;
-      tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-  })
-  .await?;
+  detach_pane(&mut app, &primary).await?;
   assert!(app.status().contains("reconnecting"));
   app.refresh().await?;
   assert!(app.panes[&primary].connected);
@@ -321,15 +314,7 @@ async fn blocked_reconnect_keeps_its_cause_visible_until_enter_retries() -> Resu
   let session = create_shell(&app).await?;
   app.start(Some(session.clone())).await?;
   let pane = app.focused.clone();
-  app.panes[&pane].control.detach().await?;
-  timeout(Duration::from_secs(5), async {
-    while app.panes[&pane].connected {
-      app.drain().await;
-      tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-  })
-  .await
-  .map_err(|_| "fixture attachment did not finish detaching")?;
+  detach_pane(&mut app, &pane).await?;
   transport
     .authentication_required
     .store(true, Ordering::Release);
@@ -419,14 +404,7 @@ async fn enter_reconnect_is_nonblocking_and_keeps_the_pending_attempt() -> Resul
   let session = create_shell(&app).await?;
   app.start(Some(session.clone())).await?;
   let pane = app.focused.clone();
-  app.panes[&pane].control.detach().await?;
-  timeout(Duration::from_secs(5), async {
-    while app.panes[&pane].connected {
-      app.drain().await;
-      tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-  })
-  .await?;
+  detach_pane(&mut app, &pane).await?;
   transport.paused.store(true, Ordering::Release);
   let attempts = transport.attempts.load(Ordering::Relaxed);
   let mut repeated_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
@@ -501,14 +479,7 @@ async fn enter_keeps_live_input_and_disconnected_copy_mode_behavior() -> Result<
   wait_for_text(&mut app, &pane, "echo:LIVE_ENTER").await?;
   assert_eq!(transport.connections.load(Ordering::Relaxed), connections);
 
-  app.panes[&pane].control.detach().await?;
-  timeout(Duration::from_secs(5), async {
-    while app.panes[&pane].connected {
-      app.drain().await;
-      tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-  })
-  .await?;
+  detach_pane(&mut app, &pane).await?;
   app
     .copies
     .insert(pane.clone(), CopyMode::new(vec!["frozen selection".into()]));
@@ -950,6 +921,23 @@ async fn prompt_errors_and_ended_session_cancel_preserve_frozen_copy_state() -> 
   assert_eq!(app.copies[&pane].lines, frozen);
   assert!(app.panes.contains_key(&pane));
   app.detach().await;
+  Ok(())
+}
+
+async fn detach_pane(app: &mut App<'_>, id: &str) -> Result<()> {
+  let pane = app.panes.get_mut(id).expect("fixture pane exists");
+  pane.control.detach().await?;
+  // Observe this attachment directly. App::drain can reconcile a queued view
+  // update and reconnect it before the test has arranged its recovery policy.
+  timeout(Duration::from_secs(5), async {
+    while pane.connected {
+      pane.drain().await?;
+      tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    Ok::<_, crate::Error>(())
+  })
+  .await
+  .map_err(|_| "fixture attachment did not finish detaching")??;
   Ok(())
 }
 
@@ -2315,14 +2303,7 @@ async fn copy_stays_in_its_pane_while_other_panes_update_and_accept_input() -> R
     .key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))
     .await?;
   assert_eq!(app.copies[&primary].lines, frozen);
-  app.panes[&primary].control.detach().await?;
-  timeout(Duration::from_secs(5), async {
-    while app.panes[&primary].connected {
-      app.drain().await;
-      tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-  })
-  .await?;
+  detach_pane(&mut app, &primary).await?;
   app.refresh().await?;
   assert!(app.panes[&primary].connected);
   assert_eq!(app.copies[&primary].lines, frozen);

@@ -58,10 +58,16 @@ async fn occupied_ports_fail_without_disturbing_the_existing_listener() {
   let external = TcpListener::bind("127.0.0.1:0").await.unwrap();
   let forward = forward(external.local_addr().unwrap().port());
   let mut registry = SharedForwardRegistry::default();
-  assert!(matches!(
-    registry.start_with(&target(), &forward, echo).await,
-    Err(RequestError::PortForwardFailed(_))
-  ));
+  let error = registry
+    .start_with(&target(), &forward, echo)
+    .await
+    .unwrap_err();
+  assert_eq!(error.code(), "ssh_port_forward_failed");
+  assert!(error.to_string().contains(&format!(
+    "Local address 127.0.0.1:{} is already in use",
+    forward.local_port
+  )));
+  assert!(error.to_string().contains("choose another local port"));
   assert_eq!(
     registry.listeners.keys().collect::<Vec<_>>(),
     Vec::<&(SshTarget, LocalPortForward)>::new()

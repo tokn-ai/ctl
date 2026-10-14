@@ -843,6 +843,9 @@ ctl -H work port remove web
 ```
 
 `port add` connects as needed and returns after ctld starts the listener.
+Without `--id`, repeating the same local and remote endpoints on the same
+connection method reuses the existing forward ID. An explicit `--id` selects
+that record for updates and removal.
 Forwards outlive the CLI process and remain in ctld's runtime registry until
 removed or the daemon exits; they are not saved across daemon restarts. Bind
 addresses are loopback-only, defaulting to `127.0.0.1`. Bracket IPv6 addresses,
@@ -851,6 +854,12 @@ List/remove select the chosen connection method; use the same `--method` when
 managing a forward created on a nonpreferred route. The desktop Ports refresh
 also discovers these runtime forwards and can stop them without making them
 persistent workspace entries.
+
+If the local address is already occupied, the error identifies that address and
+retains OpenSSH's original diagnostic. Reuse or stop the existing listener through
+its owning daemon/application, or select another local port. Development and
+normal ctld instances have separate forward registries; an occupied port is never
+adopted or cancelled across those registries.
 
 ## Managed VPN
 

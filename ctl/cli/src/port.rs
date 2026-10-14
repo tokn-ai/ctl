@@ -1,5 +1,7 @@
 use ctl_client::hosts::ConnectionTargetDto;
-use ctl_ipc::{ClientMessage, LocalPortForward, PortForwardStatus, ServerMessage};
+use ctl_ipc::{
+  ClientMessage, LocalPortForward, PortForwardState, PortForwardStatus, ServerMessage,
+};
 
 #[derive(Debug, clap::Subcommand)]
 pub enum Command {
@@ -29,10 +31,31 @@ pub async fn run(target: &ConnectionTargetDto, command: Command) -> Result<(), E
       id,
       json,
     } => {
-      let forward = parse_forward(
+      let implicit_id = id.is_none();
+      let mut forward = parse_forward(
         &specification,
         id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
       )?;
+      if implicit_id {
+        let statuses = list(ssh_target.clone()).await?;
+        if let Some(existing) = statuses
+          .iter()
+          .filter(|status| {
+            let existing = &status.forward;
+            existing.bind_address == forward.bind_address
+              && existing.local_port == forward.local_port
+              && existing.remote_host == forward.remote_host
+              && existing.remote_port == forward.remote_port
+          })
+          .min_by(|left, right| {
+            (left.state != PortForwardState::Active)
+              .cmp(&(right.state != PortForwardState::Active))
+              .then_with(|| left.forward.forward_id.cmp(&right.forward.forward_id))
+          })
+        {
+          forward.forward_id.clone_from(&existing.forward.forward_id);
+        }
+      }
       crate::target::ensure_vpn(target).await?;
       crate::ssh_broker::ensure_master(ssh_target.clone()).await?;
       let ServerMessage::PortForwardConfigured { status } =
@@ -45,7 +68,7 @@ pub async fn run(target: &ConnectionTargetDto, command: Command) -> Result<(), E
       else {
         return Err(Error::UnexpectedResponse);
       };
-      if status.state != ctl_ipc::PortForwardState::Active {
+      if status.state != PortForwardState::Active {
         return Err(Error::Forward(status.message.unwrap_or_else(|| {
           "Port forward is waiting for authentication.".into()
         })));

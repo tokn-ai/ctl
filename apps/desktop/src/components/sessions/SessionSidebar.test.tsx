@@ -226,7 +226,7 @@ describe("SessionSidebar", () => {
     expect(screen.getByRole("button", { name: "Disconnect host Build machine" })).toBeDefined();
   });
 
-  it.each(["inspection", "attachment"])("shows a timed-out %s despite an open SSH master", (source) => {
+  it.each(["inspection", "attachment"])("keeps a timed-out %s separate from an open SSH connection", (source) => {
     const remoteSession = { ...session, target: remoteHost };
     const failure = { code: "remote_connection_timeout", message: "Timed out opening the remote ctmux service over SSH. Try again." };
     renderHostConnection({ state: "connected", method_names: ["Direct"], message: null }, {
@@ -236,25 +236,46 @@ describe("SessionSidebar", () => {
         error_code: failure.code, message: failure.message,
       }]]) : new Map(),
     });
-    const status = screen.getByRole("status", { name: "Host connection for Build machine: Remote connection timed out" });
-    expect(status.title).toContain(failure.message);
+    const status = screen.getByRole("status", { name: "Host connection for Build machine: SSH connected" });
+    expect(status.title).not.toContain(failure.message);
     expect(status.title).toContain("local SSH control connection is open");
     expect(screen.getByRole("button", { name: "Disconnect host Build machine" })).toBeDefined();
-    expect(screen.queryByRole("status", { name: "Host connection for Build machine: SSH connected" })).toBeNull();
+    expect(status.getAttribute("data-state")).toBe("connected");
   });
 
   it.each([
-    ["reconnecting", null, "Session reconnecting…"],
-    ["error", "automatic_reconnect_timeout", "Session reconnect failed"],
-  ] as const)("does not turn a %s attachment into a healthy host badge", (phase, error_code, label) => {
+    ["reconnecting", null, "Reconnecting…"],
+    ["error", "automatic_reconnect_timeout", "Reconnect failed"],
+  ] as const)("keeps a %s attachment status on its session row", (phase, error_code, label) => {
     const remoteSession = { ...session, target: remoteHost };
     renderHostConnection({ state: "connected", method_names: ["Direct"], message: null }, {
       attachmentStates: new Map([[sessionKey(remoteSession), {
         ...initialAttachmentState(), session: remoteSession, phase, error_code,
       }]]),
     });
-    expect(screen.getByRole("status", { name: `Host connection for Build machine: ${label}` })).toBeTruthy();
+    expect(screen.getByRole("status", { name: "Host connection for Build machine: SSH connected" })).toBeTruthy();
+    expect(screen.getByText(label)).toBeTruthy();
     expect(screen.getByRole("button", { name: "Disconnect host Build machine" })).toBeTruthy();
+  });
+
+  it("keeps SSH connected when one session attaches and another fails to reconnect", () => {
+    const attached = { ...session, target: remoteHost };
+    const failed = { ...attached, session_id: "failed-session", name: "second" };
+    const message = "Automatic reconnect attempts stopped. Try reconnecting this session.";
+    renderHostConnection({ state: "connected", method_names: ["Direct"], message: null }, {
+      sessions: [attached, failed],
+      attachmentStates: new Map([
+        [sessionKey(attached), { ...initialAttachmentState(), session: attached, phase: "attached" }],
+        [sessionKey(failed), { ...initialAttachmentState(), session: failed, phase: "error", error_code: "automatic_reconnect_timeout", message }],
+      ]),
+    });
+    const host = screen.getByRole("status", { name: "Host connection for Build machine: SSH connected" });
+    expect(host.getAttribute("data-state")).toBe("connected");
+    expect(host.title).not.toContain(message);
+    expect(screen.getByText("Attached")).toBeTruthy();
+    const failure = screen.getByText("Reconnect failed");
+    expect(failure.closest(".session-details")?.getAttribute("title")).toContain(message);
+    expect(screen.queryByText(/session needs attention/i)).toBeNull();
   });
 
   it("shows an available alternate route when the preferred Tailscale device is unavailable", async () => {
@@ -404,7 +425,7 @@ describe("SessionSidebar", () => {
     expect(status.textContent).toBe(label);
     expect(status.title).toContain(reason);
     expect(screen.queryByText(reason)).toBeNull();
-    expect(status.title).toContain("Session listing failed");
+    expect(status.title).not.toContain("Session listing failed");
     expect(screen.queryByText("Session listing failed")).toBeNull();
     const connect = screen.getByRole("button", { name: "Connect to Build machine" }) as HTMLButtonElement;
     expect(connect.disabled).toBe(true);

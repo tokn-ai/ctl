@@ -2972,7 +2972,8 @@ describe("workspace-backed terminal page", () => {
     render(<TerminalPage />);
     await screen.findByRole("status", { name: "Host connection for test: SSH connected" });
     fireEvent.click(screen.getByRole("button", { name: "Refresh sessions" }));
-    await screen.findByRole("status", { name: "Host connection for test: Remote connection timed out" });
+    await waitFor(() => expect(api.inspectKnownSessions).toHaveBeenCalledOnce());
+    expect(screen.getByRole("status", { name: "Host connection for test: SSH connected" })).toBeTruthy();
     const log = screen.getByRole("log", { name: "Notifications" });
     expect(within(log).getByText(failure.message)).toBeTruthy();
     expect(within(log).queryByRole("button", { name: "Connect host" })).toBeNull();

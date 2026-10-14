@@ -55,6 +55,14 @@ Ordinary `ctl shell` still creates a new session, and `--session NAME` retains
 attach-or-create behavior. `ctl shell --resume` cannot be combined with `--session`,
 `--plain`, or `--cwd`.
 
+Startup authentication and route preparation follow the selected transport's
+connection policy before the ctmux request timer starts. Protocol exchanges,
+initial checkpoint/lease preparation, and view confirmation each have their own
+five-second deadline. Quiet runtime connection preparation also remains bounded
+to five seconds. Timeout errors report the selected endpoint, operation, and
+phase. Authentication and protocol errors retain their existing recovery policy;
+mutations are not automatically replayed after an uncertain response.
+
 Migration: standalone `ctmux new` now attaches by default. Scripts that used it
 to create background sessions must add `-d`.
 

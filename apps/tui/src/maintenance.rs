@@ -1,5 +1,6 @@
 use crate::{
   Result,
+  deadline::{self, ConnectionMode},
   pane::{Pane, ReconnectLeases},
   transport::{LocalTransport, Transport},
 };
@@ -12,7 +13,6 @@ use std::{
   collections::BTreeMap, future::Future, path::PathBuf, pin::Pin, task::Poll, time::Duration,
 };
 
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 type Job<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
 
 pub struct Snapshot {
@@ -103,8 +103,8 @@ impl<'a> Maintenance<'a> {
       job: Box::pin(async move {
         let local = LocalTransport(socket);
         let transport = transport.unwrap_or(&local);
-        let mut sessions = timeout(async {
-          let stream = transport.connect().await?;
+        let stream = deadline::connect(transport, "list sessions", ConnectionMode::Runtime).await?;
+        let mut sessions = deadline::request(transport, "list sessions", async {
           Ok(
             SessionClient::new(stream, crate::pane::identity())
               .list()
@@ -117,9 +117,9 @@ impl<'a> Maintenance<'a> {
         let view = if let Some(session) = session
           && sessions.iter().any(|root| root.session_id == session)
         {
+          let stream = deadline::connect(transport, "get view", ConnectionMode::Runtime).await?;
           Some(
-            timeout(async {
-              let stream = transport.connect().await?;
+            deadline::request(transport, "get view", async {
               Ok(
                 ViewClient::new(stream, crate::pane::identity())
                   .get(SessionId(session))
@@ -160,17 +160,15 @@ impl<'a> Maintenance<'a> {
         recovery_generation: transport.map_or(0, Transport::recovery_generation),
         transport,
         job: Box::pin(async move {
-          timeout(Box::pin(async move {
-            let local = LocalTransport(socket);
-            Pane::open(
-              transport.unwrap_or(&local),
-              &id,
-              reconnect.size,
-              reconnect.leases,
-              reconnect.token,
-            )
-            .await
-          }))
+          let local = LocalTransport(socket);
+          Pane::open(
+            transport.unwrap_or(&local),
+            &id,
+            reconnect.size,
+            reconnect.leases,
+            reconnect.token,
+            ConnectionMode::Runtime,
+          )
           .await
         }),
       },
@@ -266,10 +264,6 @@ fn blocking_reason<'a, T>(pending: &Pending<'a, T>, result: &Result<T>) -> Optio
           generation: pending.recovery_generation,
         }),
     })
-}
-
-async fn timeout<T>(job: impl Future<Output = Result<T>>) -> Result<T> {
-  tokio::time::timeout(REQUEST_TIMEOUT, job).await?
 }
 
 #[cfg(test)]

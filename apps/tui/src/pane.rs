@@ -1,4 +1,9 @@
-use crate::{Result, model::Model, transport::Transport};
+use crate::{
+  Result,
+  deadline::{self, ConnectionMode},
+  model::Model,
+  transport::Transport,
+};
 use ctmux_client::{
   AttachRequest, AttachmentAcknowledgementError, AttachmentControl, AttachmentController,
   AttachmentControllerOptions, AttachmentEvent, AttachmentEvents, ClientIdentity,
@@ -162,8 +167,9 @@ impl Pane {
     size: TerminalSize,
     leases: ReconnectLeases,
     token: Option<String>,
+    mode: ConnectionMode,
   ) -> Result<Self> {
-    let stream = transport.connect().await?;
+    let stream = deadline::connect(transport, "open terminal", mode).await?;
     let request = AttachRequest {
       session: terminal_id.into(),
       resume_from: None,
@@ -175,25 +181,39 @@ impl Pane {
       presentation_window_bytes: DEFAULT_PRESENTATION_WINDOW_BYTES,
     };
     let resuming = token.is_some();
-    let attached = if let Some(token) = token {
-      ctmux_client::resume_attach(stream, &identity(), token, request.clone()).await
-    } else {
-      ctmux_client::session::SessionClient::new(stream, identity())
-        .attach(request.clone())
-        .await
-    };
+    let attached = deadline::request(transport, "attach terminal", async {
+      Ok(if let Some(token) = token {
+        ctmux_client::resume_attach(stream, &identity(), token, request.clone()).await?
+      } else {
+        ctmux_client::session::SessionClient::new(stream, identity())
+          .attach(request.clone())
+          .await?
+      })
+    })
+    .await;
     let (stream, attached) = match attached {
       Ok(attached) => attached,
-      Err(ctmux_client::ClientError::Server {
-        code: ErrorCode::AttachmentResumeRejected,
-        ..
-      }) if resuming => {
-        let stream = transport.connect().await?;
-        ctmux_client::session::SessionClient::new(stream, identity())
-          .attach(request)
-          .await?
+      Err(error)
+        if resuming
+          && matches!(
+            error.downcast_ref::<ctmux_client::ClientError>(),
+            Some(ctmux_client::ClientError::Server {
+              code: ErrorCode::AttachmentResumeRejected,
+              ..
+            })
+          ) =>
+      {
+        let stream = deadline::connect(transport, "open terminal", mode).await?;
+        deadline::request(transport, "attach terminal", async {
+          Ok(
+            ctmux_client::session::SessionClient::new(stream, identity())
+              .attach(request)
+              .await?,
+          )
+        })
+        .await?
       }
-      Err(error) => return Err(error.into()),
+      Err(error) => return Err(error),
     };
     let token = attached.attachment_token.clone();
     let mut model = Model::new(&attached.session.terminal_size);
@@ -226,7 +246,7 @@ impl Pane {
       replay_bytes: 0,
       history_job: None,
     };
-    pane.prepare_reconnect().await?;
+    deadline::checkpoint(transport, "prepare terminal", pane.prepare_reconnect()).await?;
     Ok(pane)
   }
 
@@ -734,6 +754,7 @@ mod tests {
       TerminalSize::default(),
       ReconnectLeases::new(true, true),
       None,
+      ConnectionMode::Startup,
     )
     .await?;
     let rejected = PaneMoveOutcome::Rejected {
@@ -794,6 +815,7 @@ mod tests {
       TerminalSize::default(),
       ReconnectLeases::new(true, true),
       None,
+      ConnectionMode::Startup,
     )
     .await?;
     let rejected = ctmux_proto::PaneResizeOutcome::Rejected {
@@ -896,6 +918,7 @@ mod tests {
       TerminalSize::default(),
       ReconnectLeases::new(true, true),
       None,
+      ConnectionMode::Startup,
     )
     .await?;
     let ctmux_proto::ServerMessage::ViewSnapshot { view } = daemon

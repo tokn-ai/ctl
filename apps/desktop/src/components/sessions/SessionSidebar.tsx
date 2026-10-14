@@ -47,7 +47,7 @@ interface SessionSidebarProps {
   onRefresh(): void;
   on_archives?(): void;
   onSelect(session: SessionSummary): void;
-  onNewShell(): void;
+  onNewShell(target?: ConnectionTarget): void;
   onDisconnect(session: SessionSummary): void;
   onRequestClose(session: SessionSummary): void;
   onAddHost(): void;
@@ -55,7 +55,6 @@ interface SessionSidebarProps {
   onHostSettings?(target: ConnectionTarget): void;
   onConnectHost(target: ConnectionTarget): void;
   onDisconnectHost?(target: ConnectionTarget): void;
-  onRemoveHost(target: ConnectionTarget): void;
   onPortForward?(target: ConnectionTarget): void;
   onAddExisting(): void;
   onForget(session: SessionSummary): void;
@@ -167,7 +166,6 @@ export function SessionSidebar({
   onHostSettings,
   onConnectHost,
   onDisconnectHost,
-  onRemoveHost,
   onPortForward,
   onAddExisting,
   onForget,
@@ -407,20 +405,18 @@ export function SessionSidebar({
                     {operationLabel ? <span title={[operation?.method_name, operation?.message].filter(Boolean).join(": ")}> · {operationLabel}</span> : null}
                   </span>
                 ) : null}
-                {target.kind === "ssh" ? (
-                  <div className="host-group-actions">
-                    {onHostSettings ? (
-                      <button
-                        className="session-action"
-                        type="button"
-                        onClick={() => onHostSettings(target)}
-                        disabled={host?.source === "unavailable"}
-                        aria-label={`Host settings for ${targetLabel(target)}`}
-                        title={`Host settings for ${targetLabel(target)}`}
-                      >
-                        <Icon name="settings" size={14} />
-                      </button>
-                    ) : null}
+                <div className="host-group-actions">
+                  <button
+                    className="session-action"
+                    type="button"
+                    onClick={() => onNewShell(target)}
+                    disabled={creating || Boolean(target.kind === "ssh" && target.unavailable)}
+                    aria-label={`New shell on ${targetLabel(target)}`}
+                    title={`New shell on ${targetLabel(target)}`}
+                  >
+                    <Icon name="plus" size={14} />
+                  </button>
+                  {target.kind === "ssh" ? <>
                     {showDisconnect ? (
                       <button
                         className="session-action"
@@ -456,17 +452,19 @@ export function SessionSidebar({
                         <Icon name="ports" size={14} />
                       </button>
                     ) : null}
-                    {host?.source !== "ssh_config" && host?.source !== "tailscale" ? <button
-                      className="session-action"
-                      type="button"
-                      onClick={() => onRemoveHost(target)}
-                      aria-label={`Remove ${targetLabel(target)}`}
-                      title={`Remove ${targetLabel(target)} from workspace`}
-                    >
-                      <Icon name="close" size={14} />
-                    </button> : null}
-                  </div>
-                ) : null}
+                    {onHostSettings ? (
+                      <button
+                        className="session-action"
+                        type="button"
+                        onClick={() => onHostSettings(target)}
+                        aria-label={`Host settings for ${targetLabel(target)}`}
+                        title={`Host settings for ${targetLabel(target)}`}
+                      >
+                        <Icon name="settings" size={14} />
+                      </button>
+                    ) : null}
+                  </> : null}
+                </div>
               </div>
               <div className="host-group-children" id={childrenId} hidden={!expanded}>
                 {!loading && groupSessions.length === 0 ? (
@@ -592,7 +590,7 @@ export function SessionSidebar({
         <button
           className="new-session-button"
           type="button"
-          onClick={onNewShell}
+          onClick={() => onNewShell()}
           disabled={creating}
         >
           <Icon name="plus" size={15} /> New shell

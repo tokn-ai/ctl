@@ -44,7 +44,7 @@ interface TerminalCommandActions {
   showAddRoutedHost(): void;
   showAddExistingSession(): void;
   forgetSession(session: SessionSummary): void;
-  showNewShell(): void;
+  showNewShell(target?: ConnectionTarget): void;
   openShellTab(): void;
   refreshSessions(): void;
   selectSession(session: SessionSummary): void | Promise<void>;
@@ -216,7 +216,13 @@ export function buildTerminalCommands(
             ? "A shell is being created."
             : "The new-shell dialog is already open.",
       focusTerminalAfterRun: false,
-      run: actions.showNewShell,
+      run: (args) => {
+        if (args?.target_key) {
+          const target = targetFor(args);
+          if (!target || (target.kind === "ssh" && target.unavailable)) return;
+          actions.showNewShell(target);
+        } else actions.showNewShell();
+      },
     },
     {
       id: COMMAND_IDS.newTab,
@@ -475,7 +481,8 @@ export function buildTerminalCommands(
     {
       id: COMMAND_IDS.removeHost,
       category: "Host",
-      title: "Remove Active Host from Workspace",
+      title: "Remove Active Host from Workspace…",
+      detail: "Open Host settings to review and confirm removal in the danger zone.",
       enabled: targetFor()?.kind === "ssh" && !daemonRestartInteractionBlocked,
       isEnabled: (args) =>
         targetFor(args)?.kind === "ssh" && !daemonRestartInteractionBlocked,

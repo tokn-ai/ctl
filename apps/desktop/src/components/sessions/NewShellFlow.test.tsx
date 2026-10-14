@@ -59,6 +59,25 @@ function setup(overrides: Partial<Parameters<typeof NewShellFlow>[0]> = {}) {
 }
 
 describe("new-shell quick-input flow", () => {
+  it("starts at the directory prompt for a host shortcut without creating early", async () => {
+    const { create, user } = setup({ initial_target_key: "local" });
+    expect(screen.queryByRole("option", { name: "Local" })).toBeNull();
+    expect(document.activeElement).toBe(screen.getByLabelText("Working directory"));
+    expect(create).not.toHaveBeenCalled();
+    await user.type(screen.getByLabelText("Working directory"), "/work");
+    await user.keyboard("{Enter}");
+    expect(create).toHaveBeenCalledWith(local, "/work");
+  });
+
+
+  it("preselects a remote host without probing it until directory submission", () => {
+    const { create } = setup({ initial_target_key: "host:remote-id" });
+    expect(screen.getByLabelText("Working directory")).toBeTruthy();
+    expect(screen.queryByRole("option", { name: "Local" })).toBeNull();
+    expect(probeSshHost).not.toHaveBeenCalled();
+    expect(create).not.toHaveBeenCalled();
+  });
+
   it("defaults to Local and accepts a blank home directory with the keyboard", async () => {
     const { create, close, user } = setup();
     expect(document.activeElement).toBe(

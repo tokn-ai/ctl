@@ -149,6 +149,18 @@ other inline methods on the same host. Runtime expected-identity observations
 protect remembered sessions even if catalog metadata changes; autosaving those
 observations does not overwrite the catalog identity.
 
+Each host row offers **＋ New shell** with the host already selected; the working
+directory prompt remains before creation. Remote rows also offer
+**Connect/Disconnect**, **Ports**, and **Settings**. Unavailable hosts keep Settings
+accessible, with editing and connection controls disabled.
+
+**Remove host** lives in the **Danger zone** in Settings and requires confirmation.
+It removes workspace session entries, tabs, port forwards, and saved SSH
+credentials, while remote shells keep running. Hosts used as gateway hops must
+be removed from dependent routes first. The command palette's removal action
+also opens Settings for confirmation. Discovered SSH-config and Tailscale hosts
+cannot be removed until saved as customized hosts.
+
 **Host settings** manages the host name, method names, connection settings, and
 preferred method. **Connect host** uses the preference; **Connect using** selects
 a specific method without changing that preference. There is no automatic

@@ -1359,7 +1359,7 @@ describe("workspace-backed terminal page", () => {
       .mockResolvedValue(newSession());
     render(<TerminalPage />);
     await screen.findByRole("button", { name: "Connect host" });
-    fireEvent.click(screen.getByRole("button", { name: /New shell/ }));
+    fireEvent.click(screen.getByRole("button", { name: "New shell" }));
     fireEvent.click(screen.getByRole("option", { name: "Local" }));
     fireEvent.change(screen.getByLabelText("Working directory"), {
       target: { value: "/missing" },
@@ -1386,7 +1386,7 @@ describe("workspace-backed terminal page", () => {
     );
     render(<TerminalPage />);
     await screen.findByRole("button", { name: "Connect host" });
-    fireEvent.click(screen.getByRole("button", { name: /New shell/ }));
+    fireEvent.click(screen.getByRole("button", { name: "New shell" }));
     fireEvent.click(screen.getByRole("option", { name: "Local" }));
     fireEvent.click(screen.getByRole("button", { name: "Create shell" }));
     await screen.findByText(/was created, but opening its tab failed/);
@@ -1405,7 +1405,7 @@ describe("workspace-backed terminal page", () => {
     await screen.findByRole("button", { name: "Host settings for test" });
     expect(screen.queryByRole("button", { name: "Host settings for only-in-ssh-config" })).toBeNull();
     expect(screen.queryByRole("region", { name: "only-in-ssh-config sessions" })).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: /New shell/ }));
+    fireEvent.click(screen.getByRole("button", { name: "New shell" }));
     expect(screen.getByRole("option", { name: "only-in-ssh-config" })).toBeTruthy();
     fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
     expect(screen.queryByRole("region", { name: "only-in-ssh-config sessions" })).toBeNull();
@@ -1605,7 +1605,7 @@ describe("workspace-backed terminal page", () => {
     api.createSession.mockImplementation(async (request: { target: ConnectionTarget }) => newSession(request.target));
     render(<TerminalPage />);
     await screen.findByRole("button", { name: "Host settings for test" });
-    fireEvent.click(screen.getByRole("button", { name: /New shell/ }));
+    fireEvent.click(screen.getByRole("button", { name: "New shell" }));
     fireEvent.click(screen.getByRole("option", { name: "only-in-ssh-config" }));
     fireEvent.click(screen.getByRole("button", { name: "Create shell" }));
     await waitFor(() => expect(api.probeSshHost).toHaveBeenCalledOnce());
@@ -1704,7 +1704,7 @@ describe("workspace-backed terminal page", () => {
     api.createSession.mockImplementation(async (request: { target: ConnectionTarget }) => newSession(request.target));
     render(<TerminalPage />);
     await screen.findByRole("button", { name: "Host settings for test" });
-    fireEvent.click(screen.getByRole("button", { name: /New shell/ }));
+    fireEvent.click(screen.getByRole("button", { name: "New shell" }));
     fireEvent.click(screen.getByRole("option", { name: "only-in-ssh-config" }));
     fireEvent.change(screen.getByLabelText("Working directory"), { target: { value: "/project/work" } });
     expect(api.probeSshHost).not.toHaveBeenCalled();
@@ -1827,7 +1827,7 @@ describe("workspace-backed terminal page", () => {
     api.createSession.mockImplementation(async (request: { target: ConnectionTarget }) => newSession(request.target));
     render(<TerminalPage />);
     await screen.findByRole("button", { name: "Host settings for test" });
-    fireEvent.click(screen.getByRole("button", { name: /New shell/ }));
+    fireEvent.click(screen.getByRole("button", { name: "New shell" }));
     fireEvent.click(screen.getByRole("option", { name: "only-in-ssh-config" }));
     fireEvent.change(screen.getByLabelText("Working directory"), { target: { value: "/keep/this-draft" } });
     fireEvent.click(screen.getByRole("button", { name: "Create shell" }));
@@ -2474,12 +2474,14 @@ describe("workspace-backed terminal page", () => {
     });
     api.loadHosts.mockResolvedValue(catalog);
     render(<TerminalPage />);
-    fireEvent.click(await screen.findByRole("button", { name: "Remove test" }));
-    await waitFor(() => expect(screen.queryByRole("button", { name: "Remove test" })).toBeNull());
+    fireEvent.click(await screen.findByRole("button", { name: "Host settings for test" }));
+    fireEvent.click(screen.getByRole("button", { name: "Remove host…" }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm remove host" }));
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Host settings for test" })).toBeNull());
     expect(api.forgetSshCredentials).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
       host_id: "test-id", destination: "private.example", method_id: "private",
     }));
-    expect(screen.getByRole("button", { name: "Remove unused" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Host settings for unused" })).toBeTruthy();
     expect(api.killSession).not.toHaveBeenCalled();
   });
 
@@ -2498,7 +2500,9 @@ describe("workspace-backed terminal page", () => {
     const known = restoreWorkspace(saved.document, catalog.document).sessions[0];
     Object.assign(attachment.state, { phase: "attached", session: known } satisfies Partial<AttachmentViewState>);
     render(<TerminalPage />);
-    const remove = await screen.findByRole("button", { name: "Remove test" });
+    fireEvent.click(await screen.findByRole("button", { name: "Host settings for test" }));
+    fireEvent.click(screen.getByRole("button", { name: "Remove host…" }));
+    const remove = screen.getByRole("button", { name: "Confirm remove host" });
     api.configurePortForward.mockClear();
     const saved_before = api.updateWorkspace.mock.calls.length;
     fireEvent.click(remove);
@@ -2508,14 +2512,16 @@ describe("workspace-backed terminal page", () => {
     expect(attachment.detach).not.toHaveBeenCalled();
     expect(api.updateHosts).not.toHaveBeenCalled();
     expect(api.updateWorkspace).toHaveBeenCalledTimes(saved_before);
-    expect(screen.getByRole("button", { name: "Remove test" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Host settings for test" })).toBeTruthy();
     expect(screen.getByRole("tab", { name: "~/work on test" })).toBeTruthy();
   });
 
   it("deletes an unshared credential scope once when removing its only host", async () => {
     render(<TerminalPage />);
-    fireEvent.click(await screen.findByRole("button", { name: "Remove test" }));
-    await waitFor(() => expect(screen.queryByRole("button", { name: "Remove test" })).toBeNull());
+    fireEvent.click(await screen.findByRole("button", { name: "Host settings for test" }));
+    fireEvent.click(screen.getByRole("button", { name: "Remove host…" }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm remove host" }));
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Host settings for test" })).toBeNull());
     expect(api.forgetSshCredentials).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
       host_id: "test-id", destination: "test",
     }));
@@ -3170,7 +3176,7 @@ describe("workspace-backed terminal page", () => {
     );
     const first = render(<TerminalPage />);
     await screen.findByRole("button", { name: "Connect host" });
-    fireEvent.click(screen.getByRole("button", { name: /New shell/ }));
+    fireEvent.click(screen.getByRole("button", { name: "New shell" }));
     fireEvent.click(screen.getByRole("option", { name: "Local" }));
     fireEvent.click(screen.getByRole("button", { name: "Create shell" }));
     await waitFor(() => expect(api.updateWorkspace).toHaveBeenCalledOnce());
@@ -3224,7 +3230,7 @@ describe("workspace-backed terminal page", () => {
     });
     render(<TerminalPage />);
     await screen.findByRole("button", { name: "Connect host" });
-    fireEvent.click(screen.getByRole("button", { name: /New shell/ }));
+    fireEvent.click(screen.getByRole("button", { name: "New shell" }));
     fireEvent.click(screen.getByRole("option", { name: "Local" }));
     fireEvent.click(screen.getByRole("button", { name: "Create shell" }));
     await screen.findByText(

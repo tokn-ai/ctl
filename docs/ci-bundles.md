@@ -114,8 +114,10 @@ refreshes the provisioning profile, and chooses its matching Keychain
 certificate. The component command compiles `ctld`, signs the complete app,
 and atomically publishes its checkout selection under
 `<target-dir>/ctl-dev/helpers/<checkout-id>/`. Ordinary macOS debug CLI and GUI builds
-reuse the same verified app before shared discovery; both consumers can remain
-unsigned. Cargo's
+copy that app into the immutable managed development cache and verify the copy
+before launching it. Both consumers can remain unsigned. A running daemon and
+its askpass, identity-agent, and proxy children therefore remain executable after
+Cargo build outputs are cleaned. Cargo's
 configured target directory and canonical checkout identity determine discovery,
 independently of the current directory. Worktrees sharing a target directory have
 separate selections. Repeat this preparation after helper changes; ordinary CLI
@@ -231,8 +233,10 @@ or restarts a daemon. Existing compatible connections continue using their
 running daemon until it is stopped explicitly.
 
 An explicit `CTLD_BIN` executable override has highest priority. Ordinary macOS debug
-CLI and GUI builds first verify this checkout's provisioned helper under its
-target directory without changing global selections. With no compatible
+CLI and GUI builds first resolve this checkout's provisioned helper under its
+target directory, then verify and pin it under
+`~/.tokn/ctl/components/ctld/development/<archive-sha256>/` without changing global
+selections. With no compatible
 local helper, a standalone macOS CLI prefers a
 verified compatible selected managed app supporting the requested operation, then its
 own bundled helper, then a nearby desktop bundle, sibling executable, or `PATH`.

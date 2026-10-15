@@ -1,16 +1,17 @@
 //! Checkout-scoped discovery of explicitly provisioned development helpers.
 
-use super::{Error, manifest::Manifest};
+use super::{Error, install::Session, manifest::Manifest};
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read as _};
-use std::os::unix::fs::MetadataExt as _;
+use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, OpenOptionsExt as _};
 use std::path::{Component, Path, PathBuf};
 
 const MAX_SELECTION_BYTES: usize = 16 * 1024;
 const MAX_PACKAGE_ENTRIES: usize = 512;
 const MAX_PACKAGE_DEPTH: usize = 32;
+const MAX_PACKAGE_BYTES: u64 = 512 * 1024 * 1024;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -23,7 +24,7 @@ struct Selection {
 
 struct Candidate {
   directory: PathBuf,
-  receipt: Vec<u8>,
+  manifest: Manifest,
 }
 
 #[cfg(target_os = "macos")]
@@ -46,15 +47,23 @@ async fn verify_candidate(
   candidate: &Candidate,
   required: Option<ctl_core::protocol::ProtocolVersion>,
 ) -> Result<Option<PathBuf>, Error> {
-  let info = super::inspect_ctld_package(home, &candidate.directory, &candidate.receipt).await?;
-  if !super::discovery::compatible_for_helper_contract(&info, required) {
+  let home = home.to_owned();
+  let source = candidate.directory.join("ctld.app");
+  let manifest = candidate.manifest.clone();
+  // The private staging session follows its blocking worker on cancellation.
+  // It cannot publish until the copied app passes the normal native checks.
+  let session = tokio::task::spawn_blocking(move || {
+    Session::begin(&home, manifest)?.stage_development_app(&source)
+  })
+  .await
+  .map_err(io::Error::other)??;
+  let prepared = super::macos::verify_helper(&session).await?;
+  if !super::discovery::compatible_for_helper_contract(&prepared.info, required) {
     return Ok(None);
   }
-  // Never resolve selected.json again: the returned executable remains pinned
-  // to the verified immutable build if another provision run changes selection.
-  Ok(Some(
-    candidate.directory.join("ctld.app/Contents/MacOS/ctld"),
-  ))
+  // The immutable managed cache survives Cargo cleanup or checkout removal.
+  // Private caching never changes shared current/compatible selections.
+  Ok(Some(session.cache()?.executable))
 }
 
 fn load_candidate(
@@ -123,7 +132,7 @@ fn load_candidate(
   check_package(&directory.join("ctld.app"))?;
   Ok(Some(Candidate {
     directory: directory.canonicalize()?,
-    receipt,
+    manifest,
   }))
 }
 
@@ -257,6 +266,28 @@ fn check_file_metadata(metadata: &fs::Metadata, path: &Path) -> Result<(), Error
 }
 
 fn check_package(app: &Path) -> Result<(), Error> {
+  visit_package(app, |_, _, _| Ok(()))?;
+  for name in [
+    "Contents/Info.plist",
+    "Contents/embedded.provisionprofile",
+    "Contents/_CodeSignature/CodeResources",
+    "Contents/MacOS/ctld",
+  ] {
+    let path = app.join(name);
+    check_file_metadata(&fs::symlink_metadata(&path)?, &path)?;
+  }
+  if fs::symlink_metadata(app.join("Contents/MacOS/ctld"))?.mode() & 0o100 == 0 {
+    return Err(invalid(
+      "signed helper executable is not executable by its owner",
+    ));
+  }
+  Ok(())
+}
+
+fn visit_package(
+  app: &Path,
+  mut visit: impl FnMut(&Path, &Path, &fs::Metadata) -> Result<(), Error>,
+) -> Result<(), Error> {
   check_directory(app, false)?;
   let mut pending = vec![(app.to_owned(), 0_usize)];
   let mut count = 0;
@@ -279,22 +310,59 @@ fn check_package(app: &Path) -> Result<(), Error> {
     } else {
       check_file_metadata(&metadata, &path)?;
     }
-  }
-  for name in [
-    "Contents/Info.plist",
-    "Contents/embedded.provisionprofile",
-    "Contents/_CodeSignature/CodeResources",
-    "Contents/MacOS/ctld",
-  ] {
-    let path = app.join(name);
-    check_file_metadata(&fs::symlink_metadata(&path)?, &path)?;
-  }
-  if fs::symlink_metadata(app.join("Contents/MacOS/ctld"))?.mode() & 0o100 == 0 {
-    return Err(invalid(
-      "signed helper executable is not executable by its owner",
-    ));
+    visit(&path, path.strip_prefix(app).unwrap(), &metadata)?;
   }
   Ok(())
+}
+
+/// Copy regular owned files into unpublished private state. The destination is
+/// verified independently after copying; no source path is executed or retained.
+pub(super) fn copy_app(source: &Path, destination: &Path) -> Result<(), Error> {
+  let mut remaining = MAX_PACKAGE_BYTES;
+  visit_package(source, |path, relative, metadata| {
+    let target = destination.join(relative);
+    if metadata.is_dir() {
+      fs::DirBuilder::new().mode(0o700).create(&target)?;
+      return Ok(());
+    }
+    let mut input = File::from(
+      rustix::fs::open(
+        path,
+        rustix::fs::OFlags::RDONLY
+          | rustix::fs::OFlags::NOFOLLOW
+          | rustix::fs::OFlags::NONBLOCK
+          | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+      )
+      .map_err(io::Error::from)?,
+    );
+    let opened = input.metadata()?;
+    check_file_metadata(&opened, path)?;
+    if (opened.dev(), opened.ino(), opened.len())
+      != (metadata.dev(), metadata.ino(), metadata.len())
+    {
+      return Err(invalid("signed helper changed while snapshotting"));
+    }
+    remaining = remaining
+      .checked_sub(opened.len())
+      .ok_or_else(|| invalid("signed helper exceeds its snapshot budget"))?;
+    let mode = if opened.mode() & 0o100 != 0 {
+      0o755
+    } else {
+      0o644
+    };
+    let mut output = OpenOptions::new()
+      .write(true)
+      .create_new(true)
+      .mode(mode)
+      .open(target)?;
+    if io::copy(&mut input.by_ref().take(opened.len() + 1), &mut output)? != opened.len() {
+      return Err(invalid("signed helper changed while snapshotting"));
+    }
+    output.sync_all()?;
+    Ok(())
+  })?;
+  check_package(destination)
 }
 
 #[cfg(test)]

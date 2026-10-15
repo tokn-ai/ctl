@@ -49,6 +49,7 @@ impl LocalAgent {
   /// Returns a sanitized failure if the helper or local agent cannot start.
   pub async fn start_with_program(helper_program: &Path) -> Result<Self, IdentityError> {
     use std::os::unix::fs::DirBuilderExt as _;
+    crate::helper_executable::validate(helper_program).map_err(|_| IdentityError::UnlockFailed)?;
     // macOS's per-user temporary directory can exceed Unix socket path limits.
     // Atomic 0700 creation below protects this unpredictable shared-temp path.
     let directory = Path::new("/tmp").join(format!("ctld-key-{}", uuid::Uuid::new_v4().simple()));

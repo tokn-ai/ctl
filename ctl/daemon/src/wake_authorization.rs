@@ -129,7 +129,7 @@ async fn prepare_scope(state: &State, target: SshTarget) -> Option<Scope> {
 }
 
 async fn authorize(state: &Arc<State>, generation: u64) {
-  if !current(state, generation) {
+  if !current(state, generation) || crate::helper_executable::current().is_err() {
     return;
   }
   let hosts = state.wake_recovery.active_before(generation);

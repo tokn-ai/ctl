@@ -46,16 +46,22 @@ The installed helper's version and source
 fingerprint need not match the CLI's. Its signature, provisioning, and build
 metadata are still checked against its own installation manifest.
 
-Prepare a checkout helper with `node scripts/dev/ctl-signed.mts --helper-only`.
+Prepare a checkout helper with `pnpm ctld:build`.
 It publishes under `<target-dir>/ctl-dev/helpers/<checkout-id>/` for reuse by an
-unsigned Cargo debug CLI, without changing shared selections. Embedded signed
-development builds use the immutable
+unsigned Cargo debug CLI, without changing shared selections. Checkout helpers
+and embedded signed development builds launch from the immutable
 `~/.tokn/ctl/components/ctld/development/<archive-sha256>/` cache. Explicit
 development `ctl setup` updates `selected/<target>-ctld1-lifecycle1-helper1`
 while leaving release `current` unchanged. Other standalone CLI builds can reuse
 that selection. The desktop
 continues to prefer its own bundled helper. Source builds remain available for
 development and other Unix platforms.
+
+A daemon launched by an older client from a deleted build directory can still
+serve existing masters, but cannot execute its askpass or isolated-agent helper.
+New connections fail with an explicit helper availability error before credential
+access. Prepare a valid replacement and use `ctl components restart ctld` when
+ready to interrupt its connections and VPNs; updating files does not restart it.
 
 Part of [ctl and ctmux](https://github.com/tokn-ai/ctl). See the
 [repository documentation](https://github.com/tokn-ai/ctl#readme) for setup,

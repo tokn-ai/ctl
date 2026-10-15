@@ -109,24 +109,25 @@ compiles and bundles the helper; ordinary Cargo installation does not embed it.
 For local macOS development, use the shared Xcode provisioning flow from a checkout:
 
 ```sh
-node scripts/dev/ctl-signed.mts --provision
+pnpm ctld:provision
 # Choose your team in Xcode and build the provisioning target once.
-node scripts/dev/ctl-signed.mts --helper-only
+pnpm ctld:build
 cargo run -p ctl-cli -- passwords
 ```
 
 The command discovers and refreshes the provisioning profile, signs `ctld.app`,
 and publishes it under Cargo's configured target directory. An unsigned
-`target/debug/ctl` verifies and reuses that helper before shared installations.
+`target/debug/ctl` pins and verifies that helper in the immutable
+`~/.tokn/ctl/components/ctld/development/<archive-sha256>/` cache before launch.
+Cleaning Cargo outputs does not remove the running daemon's executable or the
+helper used by its askpass, identity-agent, and proxy children.
 Its selection belongs to the checkout, including with a shared target directory,
 and does not depend on the current working directory. Repeat the command after
 helper changes or profile expiry; CLI edits need only a normal Cargo rebuild.
 No notarization credentials are needed, and shared selections stay unchanged.
 
-Running `node scripts/dev/ctl-signed.mts` also embeds the helper in a signed CLI
-at `target/ctl-dev/ctl`. Its automatic preparation uses a separate immutable
-cache under `~/.tokn/ctl/components/ctld/development/`. Explicit
-`target/ctl-dev/ctl setup` selects it for other standalone builds while leaving
+Embedded development helpers use the same immutable cache. Explicit development
+`ctl setup` selects its helper for other standalone builds while leaving
 release `current` unchanged. Existing daemons require an explicit restart.
 
 Use `ctl components update` for an explicit update. It defaults to this computer;

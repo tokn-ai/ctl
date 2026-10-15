@@ -25,7 +25,7 @@ pub struct DevelopmentContext {
 }
 
 impl DevelopmentContext {
-  /// Resolves this checkout's verified helper without changing shared selections.
+  /// Pins this checkout's verified helper in durable storage without changing shared selections.
   ///
   /// # Errors
   /// Rejects unsafe checkpoints, invalid receipts, and failed signature checks.
@@ -143,6 +143,9 @@ pub async fn discover_ctld_for_helper_contract(
 /// directory under `ctl-dev/helpers`, keyed by its canonical repository path.
 /// Supply the canonical repository path recorded at build time; the source
 /// checkout does not need to remain accessible when this function runs.
+/// A selected app is copied into the immutable managed development cache and
+/// verified there before its executable is returned. Cargo cleanup therefore
+/// cannot remove the running broker's child-helper executable.
 /// A missing selection or valid incompatible helper returns `None`.
 ///
 /// # Errors

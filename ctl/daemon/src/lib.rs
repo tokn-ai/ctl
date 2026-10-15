@@ -9,6 +9,7 @@ mod client_lifetime;
 mod credential_metadata;
 pub mod credentials;
 mod endpoint_registry;
+mod helper_executable;
 pub mod identities;
 #[cfg(target_os = "macos")]
 mod identity_connection;
@@ -1114,6 +1115,9 @@ async fn establish_master(
   recovery: Option<&manual_recovery::Capture>,
 ) -> Result<(), RequestError> {
   let interactive = recovery.is_some();
+  // A running broker can outlive its executable. Reject fresh authentication
+  // before any credential read when its askpass/identity helpers cannot run.
+  helper_executable::current().map_err(RequestError::StartMaster)?;
   let token = uuid::Uuid::new_v4().to_string();
   let (prompt_tx, mut prompt_rx) = mpsc::channel(1);
   state
@@ -2359,7 +2363,7 @@ fn start_master(
       "The configured SSH master disappeared before it could be reused. Connect again to reevaluate its configuration.".into(),
     ));
   }
-  let current_executable = std::env::current_exe().map_err(RequestError::StartMaster)?;
+  let current_executable = helper_executable::current().map_err(RequestError::StartMaster)?;
   let mut command = master_command_with_identities(
     target,
     endpoint,

@@ -2,6 +2,7 @@
 
 - Status: Implemented
 - Created: 2026-10-09
+- Updated: 2026-10-15
 - Implementation PRs: [#62](https://github.com/tokn-ai/ctl/pull/62),
   [#66](https://github.com/tokn-ai/ctl/pull/66),
   [#71](https://github.com/tokn-ai/ctl/pull/71),
@@ -62,6 +63,12 @@ sessions, including interactive tasks; ctld restart interrupts clients and VPNs.
 Signed macOS helper discovery is shared by ordinary connection setup and restart
 preparation, respects explicit overrides, and prefers eligible local signed
 builds during development. Passive status does not provision embedded helpers.
+Checkout-scoped development helpers are copied into the existing immutable
+managed development cache, then verified before launch without changing shared
+selections. They remain available to running daemons and their child helpers
+after Cargo output cleanup. A missing running helper blocks new connection
+attempts before credential access; existing master reuse remains available until
+an explicit restart applies the replacement.
 
 ## Invariants
 

@@ -123,7 +123,7 @@ async fn connect(gateways: &[SshGateway], host: &str, port: u16) -> io::Result<S
         .args(["-o", "PermitLocalCommand=no"])
         .args(["-o", "RemoteCommand=none"]);
       if !prefix.is_empty() {
-        let executable = std::env::current_exe()?;
+        let executable = crate::helper_executable::current()?;
         let proxy = ctl_ipc::proxy_command_with_executable(prefix, &executable);
         command.arg("-o").arg(format!("ProxyCommand={proxy}"));
       }

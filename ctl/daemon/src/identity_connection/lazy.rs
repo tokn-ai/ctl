@@ -71,6 +71,7 @@ impl Unlocker for KeychainUnlocker {
   ) -> UnlockFuture {
     let authorization = self.authorization.clone();
     Box::pin(async move {
+      crate::helper_executable::current().map_err(|_| Reason::AgentUnavailable)?;
       // A blocking Keychain worker may outlive cancellation of this future.
       // Prevent a worker waiting for the operation lock from opening new UI.
       let selected = Arc::clone(&snapshot);

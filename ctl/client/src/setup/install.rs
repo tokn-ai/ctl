@@ -204,6 +204,20 @@ impl Session {
     Ok(self)
   }
 
+  /// Snapshot a checkout helper before signature verification and publication.
+  /// Published development entries remain immutable, including damaged ones.
+  pub fn stage_development_app(self, source: &Path) -> Result<Self, Error> {
+    if self.manifest.development.is_none() || self.verification_app.is_some() {
+      return Err(Error::Verification(
+        "only a development installation can snapshot a checkout helper".into(),
+      ));
+    }
+    if !self.reused {
+      super::development::copy_app(source, &self.payload().join("ctld.app"))?;
+    }
+    Ok(self)
+  }
+
   // Called only after platform signature checks and the bounded metadata query.
   pub fn activate(self) -> Result<SetupOutcome, Error> {
     if self.manifest.development.is_none() {

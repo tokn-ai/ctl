@@ -303,11 +303,19 @@ restart preparation. Further changes in this cycle advance only the build,
 for example `1.1.4`; release freezes the final version without another bump.
 The new contract supports a fixed `inspect_components` request and reports
 historical numeric ctmux control metadata separately from published protocols.
-Numeric-owner restart preparation is available only under `1.1.3`; it pins the
-successful historical control stream
-and requires the same separate confirmation as a published owner. This is an
+Numeric-owner restart preparation is available under `1.1.3` and later retained
+contracts; it pins the successful historical control stream and requires the same separate confirmation as a published owner. This is an
 explicit maintenance bridge, not a claim that numeric session protocol 13
 implements published session contract `1.0.13`.
+
+Remote stop advances `ctl_maintenance` from `1.1.3` (build 3) to `1.1.4`
+(build 4). It adds `prepare_ctmux_stop`, `stop_prepared` and `stopped` messages.
+Preparation pins the existing ctmux owner, checks the remote identity and waits
+for a separate `confirm`; it needs no replacement binary. Stop negotiates only
+`1.1.4`. Restart retains its `1.0.2` and `1.1.3` contracts; inspection retains
+`1.1.3`. Their existing wire shapes are unchanged. Local stop reuses the existing cooperative shutdown request and ack from
+restart, without changing `ctld_lifecycle`, `ctmux_control` or `task_control`.
+Product release versions are unchanged.
 
 Every PR description must state its protocol changes, or **None** when there
 are no changes. Include the previous and new contracts and the compatibility

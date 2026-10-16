@@ -80,6 +80,17 @@ pub(super) async fn install_bundled(
   install_archive(&home, manifest, archive, &on_progress, Selection::Shared).await
 }
 
+pub(super) async fn prepare_bundled(
+  manifest: &[u8],
+  archive: &'static [u8],
+  on_progress: impl Fn(SetupEvent) + Send + Sync,
+) -> Result<SetupOutcome, Error> {
+  on_progress(SetupEvent::Manifest);
+  let manifest = Manifest::parse(manifest, env!("CARGO_PKG_VERSION"), release_target()?)?;
+  let home = dirs::home_dir().ok_or(Error::HomeDirectory)?;
+  install_archive(&home, manifest, archive, &on_progress, Selection::Private).await
+}
+
 pub(super) async fn install_bundled_development(
   manifest: &[u8],
   archive: &'static [u8],
@@ -163,7 +174,7 @@ async fn verify_and_publish(
       on_progress(SetupEvent::Activating);
       session.activate()
     }
-    Selection::Private => session.cache(),
+    Selection::Private => session.publish_only(),
   }
 }
 

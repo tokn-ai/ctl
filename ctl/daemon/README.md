@@ -30,16 +30,21 @@ On macOS, saved credentials and Touch ID require the signed helper with the
 `dev.tokn-ai.ctl.ctld` identity and matching Keychain entitlement/provisioning.
 `cargo install ctld` builds the executable but does not configure Apple signing.
 Official version releases provide a Developer ID signed, notarized, and stapled
-`ctld.app` for both macOS architectures. Run `ctl setup` to install the helper
-matching the CLI's release under `~/.tokn/ctl/components/ctld/`; the desktop app
-is not required. Setup preserves the complete bundle, updates the release
-`current` symlink, and selects it for its architecture and APIs without
-restarting the daemon.
+`ctld.app` for both macOS architectures. Run `ctl setup` to prepare the selected
+helper under `~/.tokn/ctl/components/ctld/`; the desktop app is not required.
+Setup preserves the complete bundle. Downloaded official releases update
+`current` and the architecture/API selection. Preparing a selected embedded or
+checkout app leaves shared selections unchanged. No setup operation restarts the
+daemon. When there is no eligible local, shared, or bundled helper, setup
+downloads the release matching the CLI's version and architecture.
 
 `CTLD_BIN` explicitly overrides helper discovery. Ordinary macOS debug CLI
 builds then prefer the checkout's provisioned signed helper; signed development
 CLIs prefer their matching embedded helper. Shared discovery prefers a verified
-compatible shared `ctld.app` before bundled release or loose helpers.
+compatible shared `ctld.app` before a bundled release or nearby desktop app.
+With no eligible signed app, macOS selects an official release awaiting explicit
+setup. Manually managed or unsigned helpers require `CTLD_BIN`; implicit sibling
+and `PATH` discovery is retained on other Unix platforms.
 Compatibility requires the native target and explicitly shared ctld, lifecycle,
 and helper contracts. Remote VPN routes require ctld `1.1.13` and helper `1.1.2`.
 The installed helper's version and source
@@ -51,10 +56,12 @@ It publishes under `<target-dir>/ctl-dev/helpers/<checkout-id>/` for reuse by an
 unsigned Cargo debug CLI, without changing shared selections. Checkout helpers
 and embedded signed development builds launch from the immutable
 `~/.tokn/ctl/components/ctld/development/<archive-sha256>/` cache. Explicit
-development `ctl setup` updates `selected/<target>-ctld1-lifecycle1-helper1`
-while leaving release `current` unchanged. Other standalone CLI builds can reuse
-that selection. The desktop
-continues to prefer its own bundled helper. Source builds remain available for
+development preparation leaves release `current` unchanged. Setup, status,
+startup, and restart use one shared Rust resolver, so setup prepares the same
+checkout, embedded, shared, or explicit override chosen for activation. Status
+only inspects it and reports its source, path, archive hash, and build metadata
+separately from the running owner. The desktop prefers its own bundled helper
+after any explicit complete-bundle selection. Source builds remain available for
 development and other Unix platforms.
 
 A daemon launched by an older client from a deleted build directory can still

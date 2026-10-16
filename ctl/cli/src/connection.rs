@@ -88,6 +88,31 @@ pub async fn prepared_target_arguments(
   target_arguments_with_proxy(target, proxy)
 }
 
+/// Render SSH configuration using the selected helper without preparing it.
+pub async fn inspected_target_arguments(
+  target: &ctl_ipc::SshTarget,
+) -> Result<Vec<OsString>, Error> {
+  let proxy = if target
+    .gateways
+    .iter()
+    .any(ctl_ipc::SshGateway::requires_proxy_command)
+  {
+    let selection = ctl_ipc::resolver::resolve(ctl_ipc::resolver::Request::new(
+      ctl_ipc::resolver::Intent::Inspect,
+    ))
+    .await?;
+    // OpenSSH -G prints this command without executing it. A selected package
+    // awaiting preparation must retain its identity and remain uninstalled.
+    Some(ctl_ipc::proxy_command_with_executable(
+      &target.gateways,
+      &selection.executable,
+    ))
+  } else {
+    None
+  };
+  target_arguments_with_proxy(target, proxy)
+}
+
 fn target_arguments_with_proxy(
   target: &ctl_ipc::SshTarget,
   proxy: Option<String>,
@@ -118,10 +143,11 @@ fn target_arguments_with_proxy(
     .iter()
     .any(ctl_ipc::SshGateway::requires_proxy_command)
   {
-    let proxy = match proxy {
-      Some(proxy) => proxy,
-      None => ctl_ipc::proxy_command(&target.gateways)?,
-    };
+    let proxy = proxy.ok_or_else(|| {
+      Error::Arguments(
+        "A proxy route requires an inspected or prepared ctld helper selection.".into(),
+      )
+    })?;
     option(format!("ProxyCommand={proxy}"));
     // Never let a direct SSH-config master bypass the selected route.
     option("ControlPath=none".into());

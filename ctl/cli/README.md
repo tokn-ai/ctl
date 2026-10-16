@@ -59,8 +59,9 @@ Cargo installs only the selected packages' executables. `ctld`, `ctmuxd`, and
 `ctl-taskd` are companion daemons and must be installed separately from `ctl-cli`.
 Keep terminal/task companion versions aligned with the CLI. These daemons should
 share the CLI's binary directory; `ctl setup` installs the macOS helper under
-`~/.tokn/ctl/components/ctld/` and switches its `current` symlink after verifying
-the full signed and notarized app bundle. It never restarts an existing daemon.
+`~/.tokn/ctl/components/ctld/` after verifying the complete signed app bundle.
+A downloaded official release updates `current`; caching a selected checkout or
+embedded app leaves shared selections unchanged. Setup never restarts a daemon.
 
 For remote sessions and tasks, the controlled machine needs `ctl-agent`,
 `ctmuxd`, and `ctl-taskd`; remote VPNs also need `ctld`. Interactive Unix connections
@@ -89,15 +90,21 @@ Source developers can prepare their exact bundles with `pnpm bundles:sync` from
 `apps/desktop`. Windows remote companions must be installed manually. On macOS,
 Touch ID-protected credential storage
 requires the signed, provisioned `ctld` helper; Cargo installation alone does
-not supply its Keychain entitlement. Setup selects the release matching this
-CLI's version and architecture and requires that release to be published.
+not supply its Keychain entitlement. Setup uses the same selected helper as
+status, startup, and restart. With no eligible local, shared, or bundled helper,
+macOS setup downloads the release matching this CLI's version and architecture;
+that release must be published.
 `CTLD_BIN` remains an explicit override. Ordinary macOS debug builds first prefer
 the provisioned signed helper for their checkout, and signed development CLI
 builds prefer their matching embedded helper. Shared discovery then prefers
 a verified compatible shared `ctld.app`, then its own bundled helper, then a
-nearby desktop bundle, sibling, or `PATH` executable. The desktop continues to
-prefer its own bundled helper. Shared apps must match the native architecture and
-advertise a shared ctld, lifecycle, and helper contract. Remote VPN routes require
+nearby desktop bundle. Without an eligible signed app, macOS selects the official
+release for explicit setup; it does not implicitly choose an unsigned sibling
+or `PATH` executable. Use `CTLD_BIN` to explicitly choose a manually managed
+helper. Other Unix platforms retain sibling/`PATH` discovery. Packaged desktops
+prefer their own bundled helper after any explicit complete-bundle selection.
+Shared apps must match the native architecture and advertise a shared ctld,
+lifecycle, and helper contract. Remote VPN routes require
 ctld `1.1.13` and helper `1.1.2`. Their build identity is checked
 against their own installation manifest; their release version, commit, and
 fingerprint need not equal the CLI's.
@@ -105,8 +112,8 @@ fingerprint need not equal the CLI's.
 Official macOS CLI downloads carry the complete matching signed `ctld.app`
 inside the `ctl` executable. They install it under the same managed directory
 when a command needs the helper and no compatible shared app is selected, or
-when you run `ctl setup`, without downloading it. Running compatible daemons
-and passive status reads are preserved. A dedicated
+when `ctl setup` selects that embedded app, without downloading it. Running
+compatible daemons and passive status reads are preserved. A dedicated
 [build/release command](https://github.com/tokn-ai/ctl/blob/main/docs/ci-bundles.md#build-a-cli-with-ctld-embedded)
 compiles and bundles the helper; ordinary Cargo installation does not embed it.
 
@@ -130,9 +137,19 @@ and does not depend on the current working directory. Repeat the command after
 helper changes or profile expiry; CLI edits need only a normal Cargo rebuild.
 No notarization credentials are needed, and shared selections stay unchanged.
 
-Embedded development helpers use the same immutable cache. Explicit development
-`ctl setup` selects its helper for other standalone builds while leaving
-release `current` unchanged. Existing daemons require an explicit restart.
+Embedded development helpers use the same immutable cache. `ctl setup` prepares
+the helper selected by the shared resolver, including checkout helpers and
+`CTLD_BIN` overrides; it does not replace that selection with a published release.
+Status inspects the same candidate without preparing it. It shows the source,
+path, and archive hash separately from the running build; `--json` includes
+`available_selection`. `ctl setup --json` retains its installation fields and
+adds `selection` with the same identity. The archive hash identifies signed app
+bytes, the source fingerprint identifies compiled inputs, and the checkout ID
+identifies a path. None proves a helper was rebuilt after source edits.
+
+Preparing a development helper leaves release `current` unchanged. Setup preserves
+all running owners; existing daemons require an explicit restart to use the
+selected replacement.
 
 Use `ctl components update` for an explicit update. It defaults to this computer;
 `--hosts work,jump-a` updates several saved hosts through their preferred routes,

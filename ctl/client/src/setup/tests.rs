@@ -128,6 +128,143 @@ pub(super) fn development_bundle() -> (Vec<u8>, Manifest) {
 }
 
 #[test]
+fn passive_verification_never_creates_installation_or_takes_setup_lock() {
+  let home = Home::new();
+  let package = home.0.join("package");
+  let bytes = compressed(&contents(None));
+  let manifest = release(&bytes);
+  fs::create_dir(&package).unwrap();
+  archive::extract(&bytes, &manifest, &package).unwrap();
+  let session = Session::verification(&home.0, &package, manifest.clone()).unwrap();
+  let work = session.work().to_owned();
+  assert!(work.exists());
+  assert!(!home.0.join(".tokn").exists());
+  assert!(session.activate().is_err());
+  assert!(!home.0.join(".tokn").exists());
+  assert!(!work.exists());
+
+  let setup = Session::begin(&home.0, manifest.clone()).unwrap();
+  let inspection = Session::verification(&home.0, &package, manifest).unwrap();
+  assert!(inspection.executable().unwrap().starts_with(&package));
+  drop(inspection);
+  drop(setup);
+}
+
+#[test]
+fn passive_cache_inspection_preserves_selection_and_rejects_changed_receipts() {
+  let home = Home::new();
+  let (bytes, manifest) = development_bundle();
+  assert!(
+    Session::inspect_cached(&home.0, &manifest)
+      .unwrap()
+      .is_none()
+  );
+  assert!(!home.0.join(".tokn").exists());
+  let installed = Session::begin(&home.0, manifest.clone())
+    .unwrap()
+    .unpack(&bytes)
+    .unwrap()
+    .cache()
+    .unwrap();
+  let inspect = Session::inspect_cached(&home.0, &manifest)
+    .unwrap()
+    .unwrap();
+  assert_eq!(
+    inspect.executable().unwrap().canonicalize().unwrap(),
+    installed.executable
+  );
+  drop(inspect);
+  assert!(
+    !ctl_ipc::managed::component_directory(&home.0)
+      .join("current")
+      .exists()
+  );
+  assert!(
+    !ctl_ipc::managed::compatible_selection(&home.0, &manifest.target)
+      .unwrap()
+      .exists()
+  );
+
+  let directory = super::install::installation_directory(&home.0, &manifest);
+  let mut changed = manifest.clone();
+  changed.development.as_mut().unwrap().dirty = !changed.development.as_ref().unwrap().dirty;
+  fs::write(
+    directory.join("installation.json"),
+    serde_json::to_vec(&changed).unwrap(),
+  )
+  .unwrap();
+  assert!(Session::inspect_cached(&home.0, &manifest).is_err());
+  assert_eq!(
+    fs::read(directory.join("installation.json")).unwrap(),
+    serde_json::to_vec(&changed).unwrap()
+  );
+}
+
+#[test]
+fn signed_publication_preserves_shared_selections_for_both_new_and_reused_packages() {
+  let home = Home::new();
+  let bytes = compressed(&contents(None));
+  let manifest = release(&bytes);
+  Session::begin(&home.0, manifest.clone())
+    .unwrap()
+    .unpack(&bytes)
+    .unwrap()
+    .activate()
+    .unwrap();
+  let root = ctl_ipc::managed::component_directory(&home.0);
+  let current = fs::read_link(root.join("current")).unwrap();
+  let compatible = ctl_ipc::managed::compatible_selection(&home.0, &manifest.target).unwrap();
+  let compatible_before = fs::read_link(&compatible).unwrap();
+  let mut replacement = manifest;
+  replacement.app_version = "0.2.0".into();
+  replacement.bundle_id = replacement.app_version.clone();
+  replacement.archive = format!(
+    "ctld-{}-{}.app.tar.gz",
+    replacement.app_version, replacement.target
+  );
+  let published = Session::begin(&home.0, replacement.clone())
+    .unwrap()
+    .unpack(&bytes)
+    .unwrap()
+    .publish_only()
+    .unwrap();
+  assert!(!published.reused);
+  let reused = Session::begin(&home.0, replacement)
+    .unwrap()
+    .publish_only()
+    .unwrap();
+  assert!(reused.reused);
+  assert_eq!(published.executable, reused.executable);
+  assert!(published.executable.is_file());
+  assert_eq!(fs::read_link(root.join("current")).unwrap(), current);
+  assert_eq!(fs::read_link(compatible).unwrap(), compatible_before);
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn uncached_embedded_inspection_only_reports_the_declared_immutable_package() {
+  let home = Home::new();
+  for manifest in [
+    release(&compressed(&contents(None))),
+    development_bundle().1,
+  ] {
+    let selected = super::inspect_manifest(&home.0, &manifest).await.unwrap();
+    assert_eq!(
+      selected.archive_sha256.as_deref(),
+      Some(manifest.sha256.as_str())
+    );
+    assert_eq!(
+      selected.executable,
+      super::install::installation_directory(&home.0, &manifest)
+        .join("ctld.app/Contents/MacOS/ctld")
+    );
+    assert!(selected.info.is_none());
+    assert!(!selected.installed);
+    assert!(!home.0.join(".tokn").exists());
+  }
+}
+
+#[test]
 fn development_installs_reuse_digest_cache_without_replacing_production_selection() {
   let home = Home::new();
   let production = compressed(&contents(None));

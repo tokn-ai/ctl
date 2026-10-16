@@ -13,7 +13,7 @@ pub(super) struct Session {
   destination: PathBuf,
   pub manifest: Manifest,
   pub reused: bool,
-  _lock: SetupLock,
+  _lock: Option<SetupLock>,
   verification_app: Option<PathBuf>,
 }
 
@@ -63,12 +63,12 @@ impl Session {
     let lock = SetupLock::acquire(&root)?;
     // A well-formed dangling selection can be repaired by verified setup, while
     // unsafe paths and foreign-owned selections are never silently replaced.
-    let destination = if manifest.development.is_some() {
-      ctl_ipc::managed::ensure_development_directory(home)?.join(&manifest.sha256)
+    if manifest.development.is_some() {
+      ctl_ipc::managed::ensure_development_directory(home)?;
     } else {
       ctl_ipc::managed::validate_current_selection(home)?;
-      root.join("versions").join(manifest.directory_name())
-    };
+    }
+    let destination = installation_directory(home, &manifest);
     let work = root.join(format!(".setup-{}", uuid::Uuid::new_v4()));
     fs::DirBuilder::new().mode(0o700).create(&work)?;
     let mut session = Self {
@@ -78,7 +78,7 @@ impl Session {
       work,
       manifest,
       reused: false,
-      _lock: lock,
+      _lock: Some(lock),
       verification_app: None,
     };
     fs::DirBuilder::new()
@@ -129,35 +129,52 @@ impl Session {
         "selected helper location does not match its installation manifest".into(),
       ));
     }
-    let session = Self::begin(home, manifest)?;
-    if !session.reused {
-      return Err(Error::InvalidRelease(
-        "selected helper changed while opening its installation".into(),
-      ));
-    }
-    Ok(session)
+    Self::verification(home, &installation.directory, manifest)
   }
 
   pub fn work(&self) -> &Path {
     &self.work
   }
 
-  #[cfg(target_os = "macos")]
+  #[cfg(any(target_os = "macos", all(test, unix)))]
   pub fn verification(home: &Path, directory: &Path, manifest: Manifest) -> Result<Self, Error> {
-    let root = ctl_ipc::managed::ensure_component_directory(home)?;
-    let lock = SetupLock::acquire(&root)?;
-    let work = root.join(format!(".setup-{}", uuid::Uuid::new_v4()));
+    // Trust checks need scratch files, but observation must not create an
+    // installation, acquire its setup lock, or change shared selections.
+    let work = std::env::temp_dir().join(format!("ctld-inspect-{}", uuid::Uuid::new_v4()));
     fs::DirBuilder::new().mode(0o700).create(&work)?;
     Ok(Self {
       home: home.to_owned(),
-      root,
+      root: ctl_ipc::managed::component_directory(home),
       work,
       destination: directory.to_owned(),
       manifest,
       reused: true,
-      _lock: lock,
+      _lock: None,
       verification_app: Some(directory.join("ctld.app")),
     })
+  }
+
+  #[cfg(any(target_os = "macos", all(test, unix)))]
+  pub fn inspect_cached(home: &Path, manifest: &Manifest) -> Result<Option<Self>, Error> {
+    let directory = installation_directory(home, manifest);
+    match fs::symlink_metadata(&directory) {
+      Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+      Err(error) => return Err(error.into()),
+      Ok(_) => {}
+    }
+    let resolve = if manifest.development.is_some() {
+      ctl_ipc::managed::resolve_development_candidate_executable
+    } else {
+      ctl_ipc::managed::resolve_candidate_executable
+    };
+    resolve(home, &directory)?;
+    let installed = read_manifest(&directory, &manifest.target)?;
+    if installed != *manifest {
+      return Err(Error::InvalidRelease(
+        "the selected helper cache has different package contents; it was left unchanged".into(),
+      ));
+    }
+    Self::verification(home, &directory, installed).map(Some)
   }
 
   fn payload(&self) -> PathBuf {
@@ -250,6 +267,11 @@ impl Session {
         "private helper preparation requires a development package".into(),
       ));
     }
+    self.publish_only()
+  }
+
+  /// Publish verified bytes without changing either shared selection.
+  pub fn publish_only(self) -> Result<SetupOutcome, Error> {
     let executable = self.publish()?;
     Ok(self.outcome(executable))
   }
@@ -300,6 +322,15 @@ impl Session {
       executable,
       reused: self.reused,
     }
+  }
+}
+
+pub(super) fn installation_directory(home: &Path, manifest: &Manifest) -> PathBuf {
+  let root = ctl_ipc::managed::component_directory(home);
+  if manifest.development.is_some() {
+    root.join("development").join(&manifest.sha256)
+  } else {
+    root.join("versions").join(manifest.directory_name())
   }
 }
 
@@ -369,7 +400,7 @@ mod tests {
     let session = Session::begin(&home.0, manifest.clone()).unwrap();
     // A duplicated descriptor shares the same open file description, as an
     // unrelated subprocess does between fork and exec despite CLOEXEC.
-    let inherited = session._lock.0.try_clone().unwrap();
+    let inherited = session._lock.as_ref().unwrap().0.try_clone().unwrap();
     let staging = session.work().to_owned();
     drop(session);
     assert!(!staging.exists());

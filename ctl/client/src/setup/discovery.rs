@@ -20,6 +20,43 @@ async fn discover_required(
   home: &Path,
   required: Option<ProtocolVersion>,
 ) -> Result<Option<PathBuf>, Error> {
+  Ok(
+    inspect(home, required)
+      .await?
+      .map(|selection| selection.executable),
+  )
+}
+
+pub(super) async fn inspect(
+  home: &Path,
+  required: Option<ProtocolVersion>,
+) -> Result<Option<super::HelperSelection>, Error> {
+  let target = macos::release_target()?;
+  if let Some(selected) = inspect_selected_bundle(home, required).await? {
+    return Ok(Some(selected));
+  }
+  let Some(installation) = ctl_ipc::managed::resolve_compatible_installation(home, target)? else {
+    return Ok(None);
+  };
+  let session = Session::open_installed(home, target, &installation)?;
+  let prepared = macos::verify_helper(&session).await?;
+  if !compatible_for_helper_contract(&prepared.info, required) {
+    return Ok(None);
+  }
+  // The path is pinned to an immutable cache entry, independent of a concurrent
+  // change to the shared selection. Discovery never activates or restarts it.
+  Ok(Some(super::HelperSelection {
+    executable: prepared.path,
+    info: Some(prepared.info),
+    archive_sha256: Some(session.manifest.sha256.clone()),
+    installed: true,
+  }))
+}
+
+pub(super) async fn inspect_selected_bundle(
+  home: &Path,
+  required: Option<ProtocolVersion>,
+) -> Result<Option<super::HelperSelection>, Error> {
   let target = macos::release_target()?;
   if let Some(bundle) =
     ctl_core::bundles::Store::new(home).selected(ctl_core::bundles::Purpose::Local, target)?
@@ -41,19 +78,15 @@ async fn discover_required(
         "selected bundle helper does not advertise required ctld_helper contract {required}; provision and select a bundle that supports it"
       )));
     }
-    return Ok(Some(bundle.directory.join("ctld.app/Contents/MacOS/ctld")));
+    let manifest = super::manifest::Manifest::parse_installed(receipt, target)?;
+    return Ok(Some(super::HelperSelection {
+      executable: bundle.directory.join("ctld.app/Contents/MacOS/ctld"),
+      info: Some(info),
+      archive_sha256: Some(manifest.sha256),
+      installed: true,
+    }));
   }
-  let Some(installation) = ctl_ipc::managed::resolve_compatible_installation(home, target)? else {
-    return Ok(None);
-  };
-  let session = Session::open_installed(home, target, &installation)?;
-  let prepared = macos::verify_helper(&session).await?;
-  if !compatible_for_helper_contract(&prepared.info, required) {
-    return Ok(None);
-  }
-  // The path is pinned to an immutable cache entry, independent of a concurrent
-  // change to the shared selection. Discovery never activates or restarts it.
-  Ok(Some(prepared.path))
+  Ok(None)
 }
 
 pub(super) fn compatible_for_helper_contract(

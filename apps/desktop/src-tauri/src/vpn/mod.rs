@@ -128,11 +128,8 @@ pub(crate) async fn close_window(window_label: &str) {
 }
 
 /// The About page observes exactly the same owner selected for VPN operations.
-pub(crate) fn owner_endpoint() -> (PathBuf, Result<Option<PathBuf>, ctl_ipc::ConnectError>) {
-  (
-    client::selected_socket_path(),
-    client::selected_daemon_executable(),
-  )
+pub(crate) fn owner_endpoint() -> PathBuf {
+  client::selected_socket_path()
 }
 
 /// Explicit host operations may start their saved VPN before authenticating SSH.

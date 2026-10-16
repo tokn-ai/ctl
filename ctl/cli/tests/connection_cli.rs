@@ -3,6 +3,7 @@
 use ctl_ipc::{ClientMessage, ServerMessage};
 use serde_json::json;
 use std::fs;
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::PathBuf;
 use std::process::Stdio;
 use tokio::io::AsyncWriteExt as _;
@@ -87,6 +88,7 @@ impl Drop for Fixture {
 
 #[tokio::test]
 async fn ssh_saved_alias_uses_broker_and_preserves_command_and_exit_status() {
+  let _guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = Fixture::new();
   fixture.script("ssh", "printf '%s\\n' \"$@\" > \"$CTL_TEST_ARGS\"; exit 37");
   let broker = fixture.broker();
@@ -115,6 +117,7 @@ async fn ssh_saved_alias_uses_broker_and_preserves_command_and_exit_status() {
 
 #[tokio::test]
 async fn ssh_explicit_options_and_unknown_hosts_do_not_start_a_managed_connection() {
+  let _guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = Fixture::new();
   fixture.script("ssh", "printf '%s\\n' \"$@\" > \"$CTL_TEST_ARGS\"");
   for args in [
@@ -135,6 +138,7 @@ async fn ssh_explicit_options_and_unknown_hosts_do_not_start_a_managed_connectio
 
 #[tokio::test]
 async fn scp_transport_resolves_alias_without_consuming_binary_stdin() {
+  let _guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = Fixture::new();
   fixture.script(
     "ssh",
@@ -167,6 +171,7 @@ async fn scp_transport_resolves_alias_without_consuming_binary_stdin() {
 
 #[tokio::test]
 async fn exec_local_preserves_arguments_and_exit_status() {
+  let _guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = Fixture::new();
   let output = fixture
     .command()
@@ -188,6 +193,7 @@ async fn exec_local_preserves_arguments_and_exit_status() {
 
 #[tokio::test]
 async fn persistent_shell_requires_a_terminal_before_creating_a_session() {
+  let _guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = Fixture::new();
   for arguments in [
     &["shell"][..],
@@ -205,6 +211,7 @@ async fn persistent_shell_requires_a_terminal_before_creating_a_session() {
 
 #[tokio::test]
 async fn real_openssh_inspection_honors_explicit_options_before_saved_defaults() {
+  let _guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = Fixture::new();
   let identity = fixture.0.join("key with spaces");
   fs::write(&identity, "fixture").unwrap();
@@ -240,6 +247,7 @@ async fn real_openssh_inspection_honors_explicit_options_before_saved_defaults()
 
 #[tokio::test]
 async fn explicit_jump_overrides_saved_vpn_without_starting_it() {
+  let _guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = Fixture::new();
   let path = fixture.0.join("hosts.json");
   let mut catalog: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
@@ -264,7 +272,84 @@ async fn explicit_jump_overrides_saved_vpn_without_starting_it() {
 }
 
 #[tokio::test]
+async fn ssh_inspection_uses_the_status_helper_selection_without_starting_a_route() {
+  let _guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
+  let fixture = Fixture::new();
+  let path = fixture.0.join("hosts.json");
+  let mut catalog: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+  catalog["document"]["hosts"][0]["connection_methods"][0]["target"]["vpn_connection_id"] =
+    json!("office-vpn");
+  fs::write(path, serde_json::to_vec(&catalog).unwrap()).unwrap();
+  fixture.script("ssh", "printf '%s\\n' \"$@\" > \"$CTL_TEST_ARGS\"");
+  let helper = fixture.0.join("selected-ctld");
+  // Executable identity checks canonicalize the selected path, so this helper
+  // must be a regular executable rather than the shared command launcher.
+  fs::write(&helper, "#!/bin/sh\nprintf '%s\\n' \"$1\" >> \"$CTL_TEST_HELPER_REQUESTS\"\ncase \"$1\" in\n--component-info) printf '%s' \"$CTL_TEST_HELPER_INFO\";;\n*) exit 91;;\nesac\n").unwrap();
+  fs::set_permissions(&helper, fs::Permissions::from_mode(0o700)).unwrap();
+  let requests = fixture.0.join("helper-requests");
+  let binary = ctl_ipc::lifecycle::DaemonBinaryInfo::current();
+  let info = ctl_core::component::ComponentInfo {
+    build: binary.build,
+    protocols: binary.protocols,
+  };
+  let command = || {
+    let mut command = fixture.command();
+    command
+      .env("HOME", &fixture.0)
+      .env("CTMUX_RUNTIME_DIR", &fixture.0)
+      .env("CTL_TASKD_RUNTIME_DIR", &fixture.0)
+      .env("CTLD_BIN", &helper)
+      .env("CTMUXD_BIN", fixture.0.join("missing-ctmuxd"))
+      .env("CTL_TASKD_BIN", fixture.0.join("missing-taskd"))
+      .env("CTL_TEST_HELPER_REQUESTS", &requests)
+      .env(
+        "CTL_TEST_HELPER_INFO",
+        serde_json::to_string(&info).unwrap(),
+      );
+    command
+  };
+  let output = command()
+    .args(["components", "status", "--json"])
+    .output()
+    .await
+    .unwrap();
+  let status: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+  let selection = &status["components"]
+    .as_array()
+    .unwrap()
+    .iter()
+    .find(|row| row["component"] == "ctld")
+    .unwrap()["available_selection"];
+  assert_eq!(selection["source"], "override", "{output:?}");
+  let executable = selection["executable"].as_str().unwrap();
+  let output = command()
+    .args(["ssh", "-G", "work"])
+    .output()
+    .await
+    .unwrap();
+  assert!(output.status.success(), "{output:?}");
+  let proxy = fixture
+    .args()
+    .into_iter()
+    .find(|argument| argument.starts_with("ProxyCommand="))
+    .unwrap();
+  assert!(
+    proxy.starts_with(&format!("ProxyCommand='{executable}' --proxy-route ")),
+    "{proxy}"
+  );
+  assert!(
+    fs::read_to_string(requests)
+      .unwrap()
+      .lines()
+      .all(|argument| argument == "--component-info")
+  );
+  assert!(!fixture.0.join("ctld.sock").exists());
+  assert!(!fixture.0.join(".tokn").exists());
+}
+
+#[tokio::test]
 async fn native_ports_add_list_and_remove_use_the_same_daemon_target() {
+  let _guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = Fixture::new();
   let listener = tokio::net::UnixListener::bind(fixture.0.join("ctld.sock")).unwrap();
   let socket = fixture.0.join("master");
@@ -442,6 +527,7 @@ fn implicit_port_add_broker(
 
 #[tokio::test]
 async fn repeated_implicit_port_add_reuses_the_exact_forward_and_prefers_active_records() {
+  let _guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let forward = |id: &str| ctl_ipc::LocalPortForward {
     forward_id: id.into(),
     bind_address: "127.0.0.1".into(),

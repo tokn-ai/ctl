@@ -11,7 +11,7 @@ impl Fixture {
       &uuid::Uuid::new_v4().simple().to_string()[..12]
     ));
     std::fs::create_dir(&path).unwrap();
-    Self(path)
+    Self(path.canonicalize().unwrap())
   }
   fn command(&self, args: &[&str]) -> Command {
     self.command_at(std::path::Path::new(env!("CARGO_BIN_EXE_ctl")), args)
@@ -195,6 +195,7 @@ async fn status_reads_a_running_owner_without_sending_restart() {
 }
 
 #[test]
+#[cfg(not(target_os = "macos"))]
 fn default_missing_replacements_are_reported_without_failing_status() {
   // Discovery depends on the actual CLI location. A guarded native copy isolates
   // siblings from the shared Cargo target without introducing fake executables.
@@ -213,11 +214,81 @@ fn default_missing_replacements_are_reported_without_failing_status() {
   let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
   for row in value["components"].as_array().unwrap() {
     assert_eq!(row["state"], "not_running");
-    assert_eq!(row["available_missing"], true);
+    if row["component"] == "ctld" {
+      assert!(row["available_selection"].is_object());
+      assert_eq!(row["available_selection"]["installed"], false);
+    } else {
+      assert_eq!(row["available_missing"], true);
+    }
     assert_eq!(row["errors"], serde_json::json!([]));
     assert_eq!(row["warnings"].as_array().unwrap().len(), 1);
     assert!(row["restart_needed"].is_null());
   }
   std::fs::remove_file(executable).unwrap();
   fixture.assert_untouched();
+}
+
+#[test]
+fn setup_and_status_select_the_same_explicit_helper_without_starting_an_owner() {
+  use std::os::unix::fs::PermissionsExt as _;
+
+  let _guard = ctl_core::test_fixtures::ProcessGuard::acquire_blocking();
+  let fixture = Fixture::new();
+  let helper = fixture.0.join("selected-ctld");
+  let requests = fixture.0.join("helper-requests");
+  let info = ctl_ipc::lifecycle::DaemonBinaryInfo::current();
+  let component = ctl_core::component::ComponentInfo {
+    build: info.build,
+    protocols: info.protocols,
+  };
+  std::fs::write(
+    &helper,
+    "#!/bin/sh\nprintf '%s\\n' \"$1\" >> \"$CTL_RESOLVER_REQUESTS\"\ncase \"$1\" in\n--component-info) printf '%s' \"$CTL_RESOLVER_INFO\";;\n*) exit 91;;\nesac\n",
+  ).unwrap();
+  std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
+  let command = |args: &[&str]| {
+    let mut command = fixture.command(args);
+    command
+      .env("CTLD_BIN", &helper)
+      .env("CTL_RESOLVER_REQUESTS", &requests)
+      .env(
+        "CTL_RESOLVER_INFO",
+        serde_json::to_string(&component).unwrap(),
+      );
+    command
+  };
+  let output = command(&["setup", "--json"]).output().unwrap();
+  assert!(output.status.success(), "{output:?}");
+  let setup: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+  assert_eq!(setup["component"], "ctld");
+  assert_eq!(setup["version"], component.build.version);
+  assert_eq!(setup["executable"], serde_json::to_value(&helper).unwrap());
+  assert_eq!(setup["reused"], true);
+  assert_eq!(setup["running_connections_preserved"], true);
+  assert_eq!(setup["selection"]["source"], "override");
+
+  let output = command(&["components", "status", "--json"])
+    .output()
+    .unwrap();
+  // Unrelated explicit ctmuxd/taskd overrides are intentionally missing.
+  assert!(!output.status.success());
+  let status: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+  let row = status["components"]
+    .as_array()
+    .unwrap()
+    .iter()
+    .find(|row| row["component"] == "ctld")
+    .unwrap();
+  assert_eq!(row["available_selection"], setup["selection"]);
+  assert_eq!(row["state"], "not_running");
+  assert_eq!(row["errors"], serde_json::json!([]));
+  assert_eq!(row["running"], serde_json::Value::Null);
+  assert!(
+    std::fs::read_to_string(&requests)
+      .unwrap()
+      .lines()
+      .all(|argument| argument == "--component-info")
+  );
+  assert!(!fixture.0.join("ctld.sock").exists());
+  assert!(!fixture.0.join(".tokn").exists());
 }

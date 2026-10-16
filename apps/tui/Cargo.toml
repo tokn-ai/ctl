@@ -28,7 +28,7 @@ unicode-width.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 filedescriptor = "0.8.3"
-rustix.workspace = true
+rustix = { workspace = true, features = ["termios"] }
 terminput.workspace = true
 terminput-crossterm.workspace = true
 

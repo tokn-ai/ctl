@@ -399,6 +399,14 @@ impl Connector for CtlConnector {
     })
   }
 
+  fn reconnect_interactive(&self) -> Option<ConnectFuture<'_, Transport, CtlConnectError>> {
+    matches!(
+      self.settings,
+      ctl_client::hosts::ConnectionTargetDto::Ssh { .. }
+    )
+    .then(|| self.connect())
+  }
+
   fn is_retryable(&self, error: &CtlConnectError) -> bool {
     reconnect::is_retryable(error)
   }

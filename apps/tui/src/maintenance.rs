@@ -72,6 +72,18 @@ impl<'a> Maintenance<'a> {
     self.authentication_block = None;
   }
 
+  /// A failed/cancelled explicit authentication must not trigger background UI.
+  pub fn block_reconnect(&mut self, transport: Option<&'a dyn Transport>, error: &crate::Error) {
+    self.cancel();
+    self.blocked_reason = Some(error.to_string());
+    self.authentication_block = transport
+      .filter(|transport| transport.is_authentication_required(error))
+      .map(|transport| AuthenticationBlock {
+        transport,
+        generation: transport.recovery_generation(),
+      });
+  }
+
   /// Drop an observation that may predate an explicit session mutation without
   /// changing pane recovery, retry deadlines, or authentication blocking.
   pub fn cancel_refresh(&mut self) {

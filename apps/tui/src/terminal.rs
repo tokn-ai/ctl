@@ -114,22 +114,43 @@ impl Terminal {
   pub fn events(&mut self) -> mpsc::Receiver<io::Result<Event>> {
     self.events.take().expect("terminal events taken once")
   }
-}
 
-impl Drop for Terminal {
-  fn drop(&mut self) {
+  /// Hand terminal input back to an interactive authentication flow.
+  pub fn suspend(mut self) -> io::Result<()> {
+    self.stop_reader()?;
+    // Unlike best-effort shutdown, a handoff must prove cooked input is back
+    // before the next owner starts a credential prompt.
+    terminal::disable_raw_mode()
+  }
+
+  fn stop_reader(&mut self) -> io::Result<()> {
     self.stop.store(true, Ordering::Release);
-    if let Some(reader) = self.reader.take() {
-      // Do not let a platform input backend prevent process shutdown. Healthy
-      // readers observe stop within the 50ms poll timeout; allow scheduling slack.
+    if let Some(reader) = self.reader.as_ref() {
       let deadline = Instant::now() + Duration::from_millis(250);
       while !reader.is_finished() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(5));
       }
-      if reader.is_finished() {
-        let _ = reader.join();
+      if !reader.is_finished() {
+        return Err(io::Error::new(
+          io::ErrorKind::TimedOut,
+          "Terminal input reader did not stop; authentication was not started",
+        ));
       }
     }
+    if let Some(reader) = self.reader.take() {
+      reader
+        .join()
+        .map_err(|_| io::Error::other("Terminal input reader panicked"))?;
+    }
+    Ok(())
+  }
+}
+
+impl Drop for Terminal {
+  fn drop(&mut self) {
+    // Shutdown stays bounded even when a platform input backend is stalled.
+    // Explicit handoff uses the fallible suspend path instead.
+    let _ = self.stop_reader();
     #[cfg(unix)]
     if self.keyboard_enhancement_attempted {
       // The enhancement stack belongs to the active screen; pop before leaving
@@ -147,6 +168,39 @@ impl Drop for Terminal {
       LeaveAlternateScreen
     );
     let _ = terminal::disable_raw_mode();
+  }
+}
+
+/// Restore the host's input mode even if shutdown cancels a password prompt
+/// whose blocking worker still owns its own terminal-mode guard.
+pub struct PromptMode {
+  #[cfg(unix)]
+  terminal: std::fs::File,
+  #[cfg(unix)]
+  mode: rustix::termios::Termios,
+}
+
+impl PromptMode {
+  pub fn capture() -> io::Result<Self> {
+    #[cfg(unix)]
+    {
+      let terminal = std::fs::File::open("/dev/tty")?;
+      let mode = rustix::termios::tcgetattr(&terminal)?;
+      Ok(Self { terminal, mode })
+    }
+    #[cfg(not(unix))]
+    Ok(Self {})
+  }
+}
+
+impl Drop for PromptMode {
+  fn drop(&mut self) {
+    #[cfg(unix)]
+    let _ = rustix::termios::tcsetattr(
+      &self.terminal,
+      rustix::termios::OptionalActions::Now,
+      &self.mode,
+    );
   }
 }
 

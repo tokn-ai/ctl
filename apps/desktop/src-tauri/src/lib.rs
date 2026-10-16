@@ -46,7 +46,6 @@ pub fn run() {
 
   builder
     .setup(|app| {
-      #[cfg(target_os = "macos")]
       daemon_helper::register()?;
       state::register_main_window_cleanup(app);
       Ok(())

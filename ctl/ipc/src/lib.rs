@@ -6,6 +6,7 @@ pub mod identities;
 pub mod lifecycle;
 pub mod managed;
 pub mod remote_vpn;
+pub mod resolver;
 #[cfg(unix)]
 pub mod stdio;
 pub mod vpn;
@@ -748,7 +749,7 @@ pub enum ConnectError {
   Connect(#[source] io::Error),
   #[error("could not determine the current executable: {0}")]
   CurrentExecutable(#[source] io::Error),
-  #[error("could not prepare the bundled ctld: {0}")]
+  #[error("could not resolve the ctld helper: {0}")]
   PrepareDaemon(#[source] io::Error),
   #[error("could not coordinate ctld startup: {0}")]
   CoordinateDaemon(#[source] io::Error),
@@ -1125,6 +1126,8 @@ fn parse_daemon_protocol(stdout: &[u8]) -> io::Result<ProtocolInfo> {
 /// # Errors
 /// Returns an error if the current executable path cannot be determined or a
 /// managed macOS installation is invalid.
+/// Clients registering a shared resolver must use its asynchronous API instead
+/// of falling back to an unrelated synchronous selection.
 pub fn daemon_executable() -> Result<PathBuf, ConnectError> {
   if let Some(executable) = env::var_os(DAEMON_EXECUTABLE_ENV) {
     return Ok(PathBuf::from(executable));
@@ -1161,6 +1164,21 @@ pub async fn prepare_daemon_executable_for_helper_contract(
 }
 
 async fn prepare_daemon_with_contract(
+  required: Option<ProtocolVersion>,
+) -> Result<PathBuf, ConnectError> {
+  if resolver::registered() {
+    return resolver::resolve(resolver::Request {
+      intent: resolver::Intent::Prepare,
+      required,
+    })
+    .await?
+    .ready_executable()
+    .map_err(ConnectError::PrepareDaemon);
+  }
+  legacy_prepare_daemon_with_contract(required).await
+}
+
+async fn legacy_prepare_daemon_with_contract(
   required: Option<ProtocolVersion>,
 ) -> Result<PathBuf, ConnectError> {
   if let Some(executable) = env::var_os(DAEMON_EXECUTABLE_ENV) {
@@ -1276,6 +1294,11 @@ async fn prepare_default_daemon_for_contract(
 /// Returns an error if the current executable path cannot be determined or a
 /// managed macOS installation is invalid.
 pub fn default_daemon_executable() -> Result<PathBuf, ConnectError> {
+  if resolver::registered() {
+    return Err(ConnectError::PrepareDaemon(io::Error::other(
+      "A shared ctld resolver is registered; use resolver::resolve to inspect or prepare its selection",
+    )));
+  }
   if let Some(provider) = DAEMON_PROVIDER
     .get()
     .filter(|provider| provider.policy == DaemonDiscoveryPolicy::Embedded)

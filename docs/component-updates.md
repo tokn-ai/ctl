@@ -217,8 +217,22 @@ executable override or a damaged selected installation remains an error. Inspect
 failures are reported for each component,
 with a nonzero exit status, while successful rows remain visible.
 
-Local status only probes existing service endpoints and runs bounded `--component-info`
-queries. It does not install embedded payloads or start a daemon. Remote status can
+Local ctld setup, status, startup, and restart use one shared Rust resolver. It
+reports the selected source, executable, archive SHA-256 when available, and build
+metadata independently from the running socket owner. `ctl setup --json` includes
+this `selection`; `components status --json` includes `available_selection`.
+An archive hash identifies the signed app bytes; a source fingerprint identifies
+compiled inputs, and a checkout ID identifies its canonical path. None implies
+that a development helper was rebuilt after the latest source edit.
+
+Inspection verifies the selected candidate without installing embedded payloads,
+changing shared selections, or starting a daemon. A selected checkout or embedded
+app that still needs caching is shown as `pending preparation`; unknown build
+metadata is not invented. Explicit `ctl setup` prepares this same selection.
+`ctl ssh -G HOST` also uses passive selection when rendering a route's
+`ProxyCommand`; rendering a future helper path does not prepare or launch it.
+Startup prepares it only when an absent daemon must be launched. Existing owners
+continue running independently until explicit activation. Remote status can
 establish the saved host's SSH/VPN route, verifies its machine identity, and inspects
 companions without starting those remote services. The remote agent is on demand;
 its inspection process does not describe every active terminal transport.
@@ -231,7 +245,8 @@ use cooperative shutdown and verify the successor, without force-killing or auto
 retrying an uncertain mutation. An absent owner is not started by this command. ctld restart uses the same asynchronous
 signed-helper discovery/preparation as normal CLI connections, preserving explicit
 `CTLD_BIN` overrides. It checks that an owner exists before preparing a bundled helper;
-status continues to inspect installed binaries without provisioning them.
+status inspects that same selection without provisioning it. `ctl setup` never
+switches from a selected checkout or explicit override to an unrelated release.
 
 Restarting **ctmuxd ends all of its sessions and panes**, including other clients and
 interactive tasks. Restarting ctld interrupts its clients and VPN connections. Taskd

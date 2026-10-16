@@ -47,7 +47,7 @@ fn main() {
     )
     .expect("invalid bundled ctld payload");
     format!(
-      "Some(EmbeddedBundle {{ manifest: include_bytes!(concat!(env!(\"OUT_DIR\"), \"/ctld-manifest.json\")), archive: include_bytes!(concat!(env!(\"OUT_DIR\"), \"/ctld.app.tar.gz\")), mode: BundleMode::{generated_mode} }})"
+      "Some(EmbeddedBundle {{ manifest: include_bytes!(concat!(env!(\"OUT_DIR\"), \"/ctld-manifest.json\")), archive: include_bytes!(concat!(env!(\"OUT_DIR\"), \"/ctld.app.tar.gz\")), mode: ctl_client::ctld::BundleMode::{generated_mode} }})"
     )
   } else {
     "None".to_owned()

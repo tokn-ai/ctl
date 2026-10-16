@@ -2,6 +2,7 @@ use super::{Daemon, build_label, compatible, flag, output, remote, validate_targ
 use ctl_client::component_status::{LocalOwner, OwnerState, observe_local};
 use ctl_core::component::ComponentInfo;
 use ctl_core::component::{LegacyProtocolInfo, ProtocolInfo, protocols_match};
+use ctl_ipc::resolver::{Intent, Request, Selection, Source};
 use serde::Serialize;
 use std::io;
 use std::path::Path;
@@ -16,6 +17,7 @@ struct Row {
   protocol_mismatch: bool,
   available: Option<ComponentInfo>,
   available_missing: bool,
+  available_selection: Option<Selection>,
   running_compatible: Option<bool>,
   available_compatible: Option<bool>,
   restart_needed: Option<bool>,
@@ -35,6 +37,7 @@ impl Row {
       protocol_mismatch: false,
       available: None,
       available_missing: false,
+      available_selection: None,
       running_compatible: None,
       available_compatible: None,
       restart_needed: None,
@@ -52,6 +55,48 @@ impl Row {
         self.warnings.push(format!("No {} replacement was found by automatic discovery. Build/install it beside this CLI or select a local bundle before restarting.", self.component));
       }
       Err(error) => self.errors.push(format!("Installed replacement: {error}")),
+    }
+  }
+
+  fn set_selection(&mut self, selection: io::Result<Selection>) {
+    match selection {
+      Ok(selection) => {
+        self.available.clone_from(&selection.info);
+        if !selection.installed {
+          self.available_missing = matches!(
+            selection.source,
+            Source::Path | Source::Sibling | Source::OfficialRelease
+          );
+          self.warnings.push(match selection.source {
+            Source::Path | Source::Sibling => "No ctld executable was found. Build/install it beside this client or on PATH, or select an existing helper with CTLD_BIN.",
+            _ => "The selected ctld helper is not prepared yet. Run ctl setup to verify and prepare it without restarting the running daemon.",
+          }.into());
+        }
+        self.available_selection = Some(selection);
+      }
+      Err(error) => self.errors.push(format!("Selected replacement: {error}")),
+    }
+  }
+
+  fn available_label(&self) -> String {
+    if self.available_missing {
+      "not installed".into()
+    } else if self
+      .available_selection
+      .as_ref()
+      .is_some_and(|selection| !selection.installed)
+    {
+      self.available.as_ref().map_or_else(
+        || "pending preparation".into(),
+        |_| {
+          format!(
+            "{} (pending preparation)",
+            build_label(self.available.as_ref())
+          )
+        },
+      )
+    } else {
+      build_label(self.available.as_ref())
     }
   }
 
@@ -138,7 +183,17 @@ fn classify_available(
 }
 
 async fn local_row(component: Daemon) -> Row {
-  // Discovery and metadata inspection do not call the bundled installation provider.
+  if component == Daemon::Ctld {
+    let (running, selection) = tokio::join!(
+      observe(component),
+      ctl_ipc::resolver::resolve(Request::new(Intent::Inspect))
+    );
+    let mut row = observed_row(component, running);
+    row.set_selection(selection.map_err(io::Error::other));
+    row.finish(component);
+    return row;
+  }
+  // The other daemons keep their existing noninstalling discovery rules.
   let available = async {
     let selected = component.executable()?;
     classify_available(
@@ -148,14 +203,18 @@ async fn local_row(component: Daemon) -> Row {
     )
   };
   let (running, available) = tokio::join!(observe(component), available);
-  let mut row = running.unwrap_or_else(|error| {
-    let mut row = Row::new(component.name());
-    row.errors.push(format!("Running owner: {error}"));
-    row
-  });
+  let mut row = observed_row(component, running);
   row.set_available(available);
   row.finish(component);
   row
+}
+
+fn observed_row(component: Daemon, running: io::Result<Row>) -> Row {
+  running.unwrap_or_else(|error| {
+    let mut row = Row::new(component.name());
+    row.errors.push(format!("Running owner: {error}"));
+    row
+  })
 }
 
 fn remote_row(component: ctl_proto::maintenance::RemoteComponent) -> Row {
@@ -268,11 +327,7 @@ pub(crate) async fn run(
           row.component.clone(),
           row.state.clone(),
           build_label(row.running.as_ref()),
-          if row.available_missing {
-            "not installed".into()
-          } else {
-            build_label(row.available.as_ref())
-          },
+          row.available_label(),
           format!(
             "{} / {}",
             flag(row.running_compatible),
@@ -286,6 +341,17 @@ pub(crate) async fn run(
       "{table}\n¹ Running / available protocol compatibility; unknown metadata is shown as ?.\nStatus does not start or restart the inspected services."
     );
     for row in &rows {
+      if let Some(selection) = &row.available_selection {
+        println!(
+          "ctld selection: {} at {}{}",
+          selection.source,
+          crate::table::text(&selection.executable.display().to_string()),
+          selection
+            .archive_sha256
+            .as_ref()
+            .map_or_else(String::new, |hash| format!(" (archive SHA-256 {hash})"))
+        );
+      }
       for warning in &row.warnings {
         eprintln!("{}: {}", row.component, crate::table::text(warning));
       }
@@ -304,6 +370,7 @@ pub(crate) async fn run(
 mod tests {
   use super::{Daemon, LegacyProtocolInfo, Row, classify_available, remote_row};
   use ctl_core::component::ComponentInfo;
+  use ctl_ipc::resolver::{Selection, Source};
   use std::{io, path::Path};
 
   #[test]
@@ -366,6 +433,36 @@ mod tests {
     row.finish(Daemon::CtlTaskd);
     assert_eq!(row.running_compatible, Some(false));
     assert_eq!(row.restart_needed, None);
+  }
+
+  #[test]
+  fn pending_selection_keeps_its_identity_without_inventing_build_or_restart_state() {
+    let mut row = Row::new("ctld");
+    row.set_selection(Ok(Selection {
+      executable: "/cache/development/known-archive/ctld.app/Contents/MacOS/ctld".into(),
+      source: Source::EmbeddedDevelopment,
+      info: None,
+      archive_sha256: Some("a".repeat(64)),
+      installed: false,
+      reused: false,
+    }));
+    row.finish(Daemon::Ctld);
+    assert_eq!(row.available_label(), "pending preparation");
+    assert!(!row.available_missing);
+    assert!(row.available.is_none());
+    assert!(row.available_compatible.is_none());
+    assert!(row.restart_needed.is_none());
+    assert_eq!(row.errors, Vec::<String>::new());
+    let value = serde_json::to_value(row).unwrap();
+    assert_eq!(
+      value["available_selection"]["source"],
+      "embedded_development"
+    );
+    assert_eq!(
+      value["available_selection"]["archive_sha256"],
+      "a".repeat(64)
+    );
+    assert!(value["available_selection"]["info"].is_null());
   }
 
   #[test]

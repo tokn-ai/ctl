@@ -17,12 +17,11 @@ pub(super) struct Owner {
   pub id: String,
   pub label: String,
   pub socket: PathBuf,
-  pub executable: Result<PathBuf, String>,
 }
 
 impl Owner {
-  pub fn client(&self) -> Result<Client, String> {
-    Ok(Client::new(self.socket.clone()).with_daemon_executable(self.executable.clone()?))
+  pub fn client(&self) -> Client {
+    Client::new(self.socket.clone())
   }
 }
 
@@ -31,16 +30,11 @@ pub(super) fn owners() -> Vec<Owner> {
     id: String::new(),
     label: "ctld (SSH)".into(),
     socket: ctl_ipc::socket_path(),
-    executable: ctl_ipc::daemon_executable().map_err(|error| error.to_string()),
   };
-  let (socket, executable) = crate::vpn::owner_endpoint();
   let vpn = Owner {
     id: String::new(),
     label: "ctld (VPN)".into(),
-    socket,
-    executable: executable
-      .and_then(|value| value.map_or_else(ctl_ipc::daemon_executable, Ok))
-      .map_err(|error| error.to_string()),
+    socket: crate::vpn::owner_endpoint(),
   };
   deduplicate_owners(ssh, vpn)
 }
@@ -85,42 +79,46 @@ pub(super) fn ctld_version(binary: DaemonBinaryInfo) -> ComponentVersionInfo {
   )
 }
 
-pub(super) async fn ctld(mut owner: Owner) -> ComponentVersionRow {
+pub(super) async fn ctld(owner: Owner) -> ComponentVersionRow {
   let mut row = ComponentVersionRow::local("ctld", &owner.label);
   row.component_id = owner.id.clone();
   let socket = owner.socket.clone();
   // This discovers an existing verified helper only; it never installs a
   // payload or replaces the owner observed by the separate passive probe.
-  let (running, available) = tokio::join!(observe_local(LocalOwner::Ctld, &socket), async {
-    owner.executable = crate::daemon_helper::executable()
-      .await
-      .map_err(|error| error.to_string());
-    owner
-      .client()?
-      .available()
-      .await
-      .map_err(|error| error.to_string())
-  });
-  let replacement_supported = available.as_ref().is_ok_and(|available| {
-    available
-      .info
-      .supports("ctld", ctl_ipc::SUPPORTED_PROTOCOL_VERSIONS)
-      && available.info.supports(
-        "ctld_lifecycle",
-        ctl_ipc::lifecycle::SUPPORTED_PROTOCOL_VERSIONS,
-      )
+  let (running, available) = tokio::join!(
+    observe_local(LocalOwner::Ctld, &socket),
+    crate::daemon_helper::inspect()
+  );
+  let replacement_supported = available.as_ref().is_ok_and(|selection| {
+    selection.info.as_ref().is_some_and(|info| {
+      info.protocols.iter().any(|protocol| {
+        protocol.name == "ctld"
+          && protocol
+            .negotiate(ctl_ipc::SUPPORTED_PROTOCOL_VERSIONS)
+            .is_some()
+      }) && info.protocols.iter().any(|protocol| {
+        protocol.name == "ctld_lifecycle"
+          && protocol
+            .negotiate(ctl_ipc::lifecycle::SUPPORTED_PROTOCOL_VERSIONS)
+            .is_some()
+      })
+    })
   });
   match available {
-    Ok(available) => {
-      row.available = Some(ctld_version(available.info));
-      if !replacement_supported {
+    Ok(selection) => {
+      row.available = selection.info.map(ComponentVersionInfo::from_component);
+      if selection.installed {
+        row.installed = row.available.clone();
+      } else {
+        row.detail = Some(
+          "The selected helper is pending preparation. Status preserves the running owner.".into(),
+        );
+      }
+      if row.available.is_some() && !replacement_supported {
         row.error = Some("The available ctld helper uses an incompatible protocol. Update or rebuild it together with this app before restarting.".into());
       }
     }
     Err(error) => {
-      if let Ok(executable) = owner.executable.clone() {
-        row.available = read_binary(executable, "ctld").await.ok();
-      }
       row.error = Some(format!("Available helper: {error}"));
     }
   }
@@ -168,7 +166,6 @@ pub(super) async fn ctld(mut owner: Owner) -> ComponentVersionRow {
       append_error(&mut row, error.to_string());
     }
   }
-  row.installed = row.available.clone();
   row.compare_installed();
   row.note_available_mismatch();
   row.note_unreported_build();
@@ -419,7 +416,7 @@ mod tests {
     if std::env::var("CTMUX_HELPER_TEST_MODE").as_deref() != Ok("about") {
       return;
     }
-    ctl_ipc::register_daemon_executable_provider(crate::daemon_helper::tests::provider).unwrap();
+    ctl_ipc::resolver::register(crate::daemon_helper::tests::provider).unwrap();
     let owner = owners().remove(0);
     let row = ctld(owner).await;
     assert!(row.available.is_some(), "{:?}", row.error);
@@ -437,7 +434,7 @@ mod tests {
     if std::env::var("CTMUX_HELPER_TEST_MODE").as_deref() != Ok("about_timeout") {
       return;
     }
-    ctl_ipc::register_daemon_executable_provider(crate::daemon_helper::tests::provider).unwrap();
+    ctl_ipc::resolver::register(crate::daemon_helper::tests::provider).unwrap();
     let owner = owners().remove(0);
     let listener = tokio::net::UnixListener::bind(&owner.socket).unwrap();
     let row = tokio::spawn(ctld(owner));
@@ -482,7 +479,6 @@ mod tests {
       id: String::new(),
       label: label.into(),
       socket: socket.into(),
-      executable: Ok("helper".into()),
     }
   }
 

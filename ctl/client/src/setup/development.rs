@@ -28,7 +28,44 @@ struct Candidate {
 }
 
 #[cfg(target_os = "macos")]
+pub(super) async fn inspect(
+  home: &Path,
+  checkpoint: &Path,
+  repository_root: &Path,
+  required: Option<ctl_core::protocol::ProtocolVersion>,
+) -> Result<Option<super::HelperSelection>, Error> {
+  let target = super::macos::release_target()?;
+  let Some(candidate) = load_candidate(checkpoint, repository_root, target)? else {
+    return Ok(None);
+  };
+  let mut selection = super::inspect_manifest(home, &candidate.manifest).await?;
+  if selection.info.is_none() {
+    let session = Session::verification(home, &candidate.directory, candidate.manifest)?;
+    selection.info = Some(super::macos::verify_helper(&session).await?.info);
+  }
+  if !selection
+    .info
+    .as_ref()
+    .is_some_and(|info| super::discovery::compatible_for_helper_contract(info, required))
+  {
+    return Ok(None);
+  }
+  Ok(Some(selection))
+}
+
+#[cfg(target_os = "macos")]
 pub(super) async fn discover(
+  checkpoint: &Path,
+  repository_root: &Path,
+  required: Option<ctl_core::protocol::ProtocolVersion>,
+) -> Result<Option<PathBuf>, Error> {
+  let home = dirs::home_dir().ok_or(Error::HomeDirectory)?;
+  discover_in(&home, checkpoint, repository_root, required).await
+}
+
+#[cfg(target_os = "macos")]
+pub(super) async fn discover_in(
+  home: &Path,
   checkpoint: &Path,
   repository_root: &Path,
   required: Option<ctl_core::protocol::ProtocolVersion>,
@@ -37,8 +74,7 @@ pub(super) async fn discover(
   let Some(candidate) = load_candidate(checkpoint, repository_root, target)? else {
     return Ok(None);
   };
-  let home = dirs::home_dir().ok_or(Error::HomeDirectory)?;
-  verify_candidate(&home, &candidate, required).await
+  verify_candidate(home, &candidate, required).await
 }
 
 #[cfg(target_os = "macos")]

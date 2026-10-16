@@ -48,6 +48,7 @@ impl Fixture {
         "about::local::tests::shared_helper_timeout_preserves_running_status_child"
       }
       "restart" => "about::restart::tests::shared_helper_restart_selection_child",
+      "restart_absent" => "about::restart::tests::absent_owner_restart_does_not_prepare_child",
       _ => "daemon_helper::tests::desktop_operation_child",
     };
     let mut command = tokio::process::Command::new(&app);
@@ -90,8 +91,13 @@ impl Drop for Fixture {
   }
 }
 
-pub(crate) fn provider() -> ctl_ipc::DaemonExecutableFuture {
-  Box::pin(async {
+pub(crate) fn provider(request: ctl_ipc::resolver::Request) -> ctl_ipc::resolver::ResolutionFuture {
+  Box::pin(async move {
+    if std::env::var("CTMUX_HELPER_TEST_MODE").as_deref() == Ok("bundle") {
+      return ctl_client::ctld::Resolver::desktop(None)
+        .resolve(request)
+        .await;
+    }
     fs::write(
       std::env::var_os("CTMUX_HELPER_TEST_PROVIDER").unwrap(),
       "verified",
@@ -104,9 +110,13 @@ pub(crate) fn provider() -> ctl_ipc::DaemonExecutableFuture {
     {
       std::future::pending::<()>().await;
     }
-    Ok(Some(PathBuf::from(
-      std::env::var_os("CTMUX_HELPER_TEST_SHARED").unwrap(),
-    )))
+    ctl_ipc::resolver::inspect_executable(
+      &shared_executable(),
+      ctl_ipc::resolver::Source::SharedInstallation,
+      request,
+    )
+    .await
+    .map(Some)
   })
 }
 
@@ -126,6 +136,7 @@ async fn desktop_operations_discover_shared_helpers_and_preserve_bundle_override
     "about",
     "about_timeout",
     "restart",
+    "restart_absent",
     "timeout",
   ] {
     let fixture = Fixture::new();
@@ -143,14 +154,21 @@ async fn desktop_operations_discover_shared_helpers_and_preserve_bundle_override
       String::from_utf8_lossy(&output.stdout).contains("1 passed"),
       "{mode}: {output:?}"
     );
-    let passive = matches!(mode, "passive" | "vpn_owner");
+    let passive = matches!(mode, "passive" | "vpn_owner" | "restart_absent");
     assert_eq!(
       provider_marker.exists(),
       !matches!(mode, "bundle" | "override") && !passive,
       "{mode}"
     );
-    if passive || matches!(mode, "timeout" | "about_timeout") {
+    if passive || mode == "about_timeout" {
       assert!(!marker.exists(), "{mode}");
+    } else if mode == "timeout" {
+      assert!(
+        fs::read_to_string(&marker)
+          .unwrap()
+          .lines()
+          .all(|request| request == "shared:--component-info")
+      );
     } else {
       let requests = fs::read_to_string(&marker).unwrap();
       let selected = if matches!(mode, "bundle" | "override") {
@@ -175,7 +193,7 @@ async fn desktop_operation_child() {
   let Ok(mode) = std::env::var("CTMUX_HELPER_TEST_MODE") else {
     return;
   };
-  ctl_ipc::register_daemon_executable_provider(provider).unwrap();
+  ctl_ipc::resolver::register(provider).unwrap();
   if mode == "timeout" {
     pending_discovery_times_out_without_holding_provider_lock().await;
     return;
@@ -265,7 +283,11 @@ async fn pending_discovery_times_out_without_holding_provider_lock() {
   assert!(
     (deadline..=deadline + std::time::Duration::from_millis(10)).contains(&started.elapsed())
   );
+  assert!(!Path::new(&std::env::var_os("CTMUX_HELPER_TEST_REQUESTS").unwrap()).exists());
   // Cancellation releases the provider mutex, so subsequent requests can retry.
+  // Native metadata subprocesses need wall-clock progress after the synthetic
+  // timeout assertions; a paused runtime otherwise advances past their deadline.
+  tokio::time::resume();
   PROVIDER_READY.store(true, Ordering::Relaxed);
   assert_eq!(
     crate::daemon_helper::executable().await.unwrap(),

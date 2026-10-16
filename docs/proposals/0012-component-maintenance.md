@@ -2,7 +2,7 @@
 
 - Status: Implemented
 - Created: 2026-10-09
-- Updated: 2026-10-15
+- Updated: 2026-10-16
 - Implementation PRs: [#62](https://github.com/tokn-ai/ctl/pull/62),
   [#66](https://github.com/tokn-ai/ctl/pull/66),
   [#71](https://github.com/tokn-ai/ctl/pull/71),
@@ -60,9 +60,15 @@ An absent owner is not started by restart. Remote restart supports ctmuxd only;
 local taskd refuses restart while tasks are active. Ctmuxd restart ends all its
 sessions, including interactive tasks; ctld restart interrupts clients and VPNs.
 
-Signed macOS helper discovery is shared by ordinary connection setup and restart
-preparation, respects explicit overrides, and prefers eligible local signed
-builds during development. Passive status does not provision embedded helpers.
+One shared Rust ctld resolver supplies setup, status, startup, and restart.
+Its selection records the source, executable, archive SHA-256 when available,
+verified build metadata, and whether preparation is still needed. It respects
+explicit overrides for every operation, prefers eligible local signed builds
+during development, and preserves packaged desktop priority. Status inspects
+that selection without provisioning payloads or changing shared selections.
+Setup prepares it; startup or explicit restart activates it when permitted.
+Setup therefore cannot install a release while restart silently selects a
+checkout helper. Running owners remain independently observed and unchanged.
 Checkout-scoped development helpers are copied into the existing immutable
 managed development cache, then verified before launch without changing shared
 selections. They remain available to running daemons and their child helpers

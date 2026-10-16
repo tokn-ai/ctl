@@ -160,13 +160,8 @@ async fn prepare(
       Operation::Remote(prepared)
     }
     _ => {
-      let owner = selected_owner(component_id).await?;
-      let prepared = owner
-        .client()
-        .map_err(CommandErrorDto::backend)?
-        .preflight_restart()
-        .await
-        .map_err(|error| CommandErrorDto::new(error.code(), error.to_string()))?;
+      let owner = selected_owner(component_id)?;
+      let prepared = preflight_ctld(&owner).await?;
       let before = prepared.before.as_ref().ok_or_else(|| {
         CommandErrorDto::new(
           "ctld_no_longer_running",
@@ -216,7 +211,7 @@ async fn execute(
   let response = prepared.response;
   let (running, detail) = match prepared.operation {
     Operation::Ctld { owner, prepared } => {
-      if selected_owner(&owner.id).await? != owner {
+      if selected_owner(&owner.id)? != owner {
         return Err(selection_changed());
       }
       let outcome = prepared
@@ -343,8 +338,8 @@ fn take_confirmation<T>(
   Ok(prepared.remove(token).expect("validated pending action"))
 }
 
-async fn selected_owner(component_id: &str) -> CommandResult<Owner> {
-  let mut owner = owners()
+fn selected_owner(component_id: &str) -> CommandResult<Owner> {
+  owners()
     .into_iter()
     .find(|owner| owner.id == component_id)
     .ok_or_else(|| {
@@ -352,13 +347,27 @@ async fn selected_owner(component_id: &str) -> CommandResult<Owner> {
         "component_owner_unavailable",
         "This component is no longer selected by the app. Refresh About before continuing.",
       )
-    })?;
-  owner.executable = Ok(
-    crate::daemon_helper::executable()
+    })
+}
+
+async fn preflight_ctld(owner: &Owner) -> CommandResult<ctl_ipc::lifecycle::PreparedRestart> {
+  let client = owner.client();
+  if matches!(
+    client
+      .probe()
       .await
-      .map_err(CommandErrorDto::backend)?,
-  );
-  Ok(owner)
+      .map_err(|error| CommandErrorDto::new(error.code(), error.to_string()))?,
+    ctl_ipc::lifecycle::DaemonStatus::Absent
+  ) {
+    return Err(CommandErrorDto::new(
+      "ctld_no_longer_running",
+      "This ctld is no longer running. Refresh About to check its status.",
+    ));
+  }
+  client
+    .preflight_restart()
+    .await
+    .map_err(|error| CommandErrorDto::new(error.code(), error.to_string()))
 }
 
 fn selection_changed() -> CommandErrorDto {
@@ -392,27 +401,42 @@ mod tests {
     if std::env::var("CTMUX_HELPER_TEST_MODE").as_deref() != Ok("restart") {
       return;
     }
-    ctl_ipc::register_daemon_executable_provider(crate::daemon_helper::tests::provider).unwrap();
+    ctl_ipc::resolver::register(crate::daemon_helper::tests::provider).unwrap();
     let id = owners().remove(0).id;
-    let selected = selected_owner(&id).await.unwrap();
-    assert_eq!(
-      selected.executable.as_ref().unwrap(),
-      &crate::daemon_helper::tests::shared_executable()
+    let selected = selected_owner(&id).unwrap();
+    assert!(
+      !std::path::Path::new(&std::env::var_os("CTMUX_HELPER_TEST_PROVIDER").unwrap()).exists()
     );
-    let available = selected.client().unwrap().available().await.unwrap();
+    let available = selected.client().available().await.unwrap();
     assert_eq!(
       available.executable,
       crate::daemon_helper::tests::shared_executable()
     );
     assert_eq!(available.info, crate::daemon_helper::tests::binary_info());
-    assert_eq!(selected_owner(&id).await.unwrap(), selected);
+    assert_eq!(selected_owner(&id).unwrap(), selected);
   }
 
+  #[cfg(target_os = "macos")]
   #[tokio::test]
-  async fn caller_cannot_choose_an_arbitrary_endpoint_for_restart() {
+  async fn absent_owner_restart_does_not_prepare_child() {
+    if std::env::var("CTMUX_HELPER_TEST_MODE").as_deref() != Ok("restart_absent") {
+      return;
+    }
+    ctl_ipc::resolver::register(crate::daemon_helper::tests::provider).unwrap();
+    let id = owners().remove(0).id;
+    let selected = selected_owner(&id).unwrap();
+    let error = preflight_ctld(&selected).await.err().unwrap();
+    assert_eq!(error.code, "ctld_no_longer_running");
+    assert!(
+      !std::path::Path::new(&std::env::var_os("CTMUX_HELPER_TEST_PROVIDER").unwrap()).exists()
+    );
+  }
+
+  #[test]
+  fn caller_cannot_choose_an_arbitrary_endpoint_for_restart() {
     for value in ["/tmp/arbitrary-owner.sock", "ctld", "", "../../daemon.sock"] {
       assert_eq!(
-        selected_owner(value).await.unwrap_err().code,
+        selected_owner(value).unwrap_err().code,
         "component_owner_unavailable"
       );
     }

@@ -18,6 +18,16 @@ mod tests;
 use serde::Serialize;
 use std::path::PathBuf;
 
+/// One verified or declared package considered by the shared helper resolver.
+/// Inspection reports its eventual immutable launch path without installing it.
+#[derive(Debug, Clone, Serialize)]
+pub struct HelperSelection {
+  pub executable: PathBuf,
+  pub info: Option<ctl_core::component::ComponentInfo>,
+  pub archive_sha256: Option<String>,
+  pub installed: bool,
+}
+
 /// Build-time provenance shared by debug CLI and desktop helper consumers.
 pub struct DevelopmentContext {
   pub repository_root: &'static str,
@@ -25,16 +35,90 @@ pub struct DevelopmentContext {
 }
 
 impl DevelopmentContext {
+  /// Inspects this checkout's selected helper without publishing or selecting it.
+  ///
+  /// # Errors
+  /// Rejects unsafe selections, invalid receipts, and failed native trust checks.
+  #[cfg_attr(
+    not(target_os = "macos"),
+    expect(
+      clippy::unused_async,
+      reason = "inspection has the same API on every platform"
+    )
+  )]
+  pub async fn inspect(
+    &self,
+    required: Option<ctl_core::protocol::ProtocolVersion>,
+  ) -> Result<Option<HelperSelection>, Error> {
+    #[cfg(target_os = "macos")]
+    {
+      let home = dirs::home_dir().ok_or(Error::HomeDirectory)?;
+      self.inspect_in(&home, required).await
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+      let _ = required;
+      Ok(None)
+    }
+  }
+
+  #[cfg(target_os = "macos")]
+  pub(crate) async fn inspect_in(
+    &self,
+    home: &std::path::Path,
+    required: Option<ctl_core::protocol::ProtocolVersion>,
+  ) -> Result<Option<HelperSelection>, Error> {
+    for checkpoint in self.checkpoints {
+      if let Some(selection) = development::inspect(
+        home,
+        std::path::Path::new(checkpoint),
+        std::path::Path::new(self.repository_root),
+        required,
+      )
+      .await?
+      {
+        return Ok(Some(selection));
+      }
+    }
+    Ok(None)
+  }
+
   /// Pins this checkout's verified helper in durable storage without changing shared selections.
   ///
   /// # Errors
   /// Rejects unsafe checkpoints, invalid receipts, and failed signature checks.
+  #[cfg_attr(
+    not(target_os = "macos"),
+    expect(
+      clippy::unused_async,
+      reason = "discovery has the same API on every platform"
+    )
+  )]
   pub async fn discover(
     &self,
     required: Option<ctl_core::protocol::ProtocolVersion>,
   ) -> Result<Option<PathBuf>, Error> {
+    #[cfg(target_os = "macos")]
+    {
+      let home = dirs::home_dir().ok_or(Error::HomeDirectory)?;
+      self.discover_in(&home, required).await
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+      let _ = required;
+      Ok(None)
+    }
+  }
+
+  #[cfg(target_os = "macos")]
+  pub(crate) async fn discover_in(
+    &self,
+    home: &std::path::Path,
+    required: Option<ctl_core::protocol::ProtocolVersion>,
+  ) -> Result<Option<PathBuf>, Error> {
     for checkpoint in self.checkpoints {
-      if let Some(executable) = discover_development_ctld(
+      if let Some(executable) = development::discover_in(
+        home,
         std::path::Path::new(checkpoint),
         std::path::Path::new(self.repository_root),
         required,
@@ -106,6 +190,115 @@ pub async fn discover_compatible_ctld() -> Result<Option<PathBuf>, Error> {
   }
   #[cfg(not(target_os = "macos"))]
   Ok(None)
+}
+
+/// Inspects the selected shared helper without installing, selecting, or starting it.
+///
+/// # Errors
+/// Rejects invalid installation metadata, unsafe selections, and failed trust checks.
+#[cfg_attr(
+  not(target_os = "macos"),
+  expect(
+    clippy::unused_async,
+    reason = "inspection has the same API on every platform"
+  )
+)]
+pub async fn inspect_compatible_ctld(
+  required: Option<ctl_core::protocol::ProtocolVersion>,
+) -> Result<Option<HelperSelection>, Error> {
+  #[cfg(target_os = "macos")]
+  {
+    let home = dirs::home_dir().ok_or(Error::HomeDirectory)?;
+    discovery::inspect(&home, required).await
+  }
+  #[cfg(not(target_os = "macos"))]
+  {
+    let _ = required;
+    Ok(None)
+  }
+}
+
+/// Inspects only an explicitly selected complete local bundle.
+/// Ordinary managed installations are neither inspected nor modified.
+///
+/// # Errors
+/// Rejects unsafe, invalid, incompatible, or untrusted explicit bundle selections.
+#[cfg_attr(
+  not(target_os = "macos"),
+  expect(
+    clippy::unused_async,
+    reason = "inspection has the same API on every platform"
+  )
+)]
+pub async fn inspect_selected_bundle_ctld(
+  required: Option<ctl_core::protocol::ProtocolVersion>,
+) -> Result<Option<HelperSelection>, Error> {
+  #[cfg(target_os = "macos")]
+  {
+    let home = dirs::home_dir().ok_or(Error::HomeDirectory)?;
+    discovery::inspect_selected_bundle(&home, required).await
+  }
+  #[cfg(not(target_os = "macos"))]
+  {
+    let _ = required;
+    Ok(None)
+  }
+}
+
+/// Reads an embedded package's identity without extracting or downloading it.
+/// An existing exact cache entry receives native signature and metadata checks;
+/// an uncached package reports no executable metadata until preparation.
+///
+/// # Errors
+/// Rejects invalid package receipts and unsafe, changed, or untrusted cache entries.
+#[cfg_attr(
+  not(target_os = "macos"),
+  expect(
+    clippy::unused_async,
+    reason = "inspection has the same API on every platform"
+  )
+)]
+pub async fn inspect_bundled_ctld(
+  receipt: &[u8],
+  development: bool,
+) -> Result<HelperSelection, Error> {
+  #[cfg(target_os = "macos")]
+  {
+    let target = macos::release_target()?;
+    let manifest = if development {
+      manifest::Manifest::parse_development(receipt, env!("CARGO_PKG_VERSION"), target)?
+    } else {
+      manifest::Manifest::parse(receipt, env!("CARGO_PKG_VERSION"), target)?
+    };
+    let home = dirs::home_dir().ok_or(Error::HomeDirectory)?;
+    inspect_manifest(&home, &manifest).await
+  }
+  #[cfg(not(target_os = "macos"))]
+  {
+    let _ = (receipt, development);
+    Err(Error::UnsupportedPlatform)
+  }
+}
+
+#[cfg(target_os = "macos")]
+async fn inspect_manifest(
+  home: &std::path::Path,
+  manifest: &manifest::Manifest,
+) -> Result<HelperSelection, Error> {
+  let session = install::Session::inspect_cached(home, manifest)?;
+  let installed = session.is_some();
+  let info = if let Some(session) = session {
+    Some(macos::verify_helper(&session).await?.info)
+  } else {
+    None
+  };
+  Ok(HelperSelection {
+    executable: install::installation_directory(home, manifest)
+      .join("ctld.app/Contents/MacOS/ctld"),
+    info,
+    archive_sha256: Some(manifest.sha256.clone()),
+    installed,
+  })
 }
 
 /// Discovers a verified shared helper that explicitly implements one helper
@@ -236,6 +429,34 @@ pub async fn install_bundled_ctld(
 ) -> Result<SetupOutcome, Error> {
   #[cfg(target_os = "macos")]
   return macos::install_bundled(manifest, archive, on_progress).await;
+  #[cfg(not(target_os = "macos"))]
+  {
+    let _ = (manifest, archive, on_progress);
+    Err(Error::UnsupportedPlatform)
+  }
+}
+
+/// Publishes a verified signed helper embedded in this CLI without changing
+/// shared selections or starting any daemon. The immutable package receives
+/// the same signature, notarization, build, and protocol checks as installation.
+///
+/// # Errors
+/// Rejects unsupported platforms, invalid receipts, unsafe cache paths, and
+/// failed archive, signature, notarization, build, or protocol verification.
+#[cfg_attr(
+  not(target_os = "macos"),
+  expect(
+    clippy::unused_async,
+    reason = "preparation has the same API on every platform"
+  )
+)]
+pub async fn prepare_bundled_ctld(
+  manifest: &'static [u8],
+  archive: &'static [u8],
+  on_progress: impl Fn(SetupEvent) + Send + Sync,
+) -> Result<SetupOutcome, Error> {
+  #[cfg(target_os = "macos")]
+  return macos::prepare_bundled(manifest, archive, on_progress).await;
   #[cfg(not(target_os = "macos"))]
   {
     let _ = (manifest, archive, on_progress);

@@ -9,6 +9,7 @@ pub mod component_status;
 pub mod component_update;
 #[cfg(unix)]
 pub mod components;
+pub mod ctld;
 
 use std::ffi::OsString;
 use std::future::{Future, ready};

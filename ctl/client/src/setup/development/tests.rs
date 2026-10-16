@@ -509,6 +509,18 @@ async fn unsigned_checkout_helper_is_rejected_before_metadata_execution() {
   .unwrap();
   let candidate = fixture.load().unwrap().unwrap();
   assert!(
+    inspect(
+      &fixture.home.0,
+      &fixture.checkpoint,
+      &fixture.repository,
+      None
+    )
+    .await
+    .is_err()
+  );
+  assert!(!marker.exists());
+  assert!(!fixture.home.0.join(".tokn").exists());
+  assert!(
     verify_candidate(&fixture.home.0, &candidate, None)
       .await
       .is_err()
@@ -517,11 +529,9 @@ async fn unsigned_checkout_helper_is_rejected_before_metadata_execution() {
 }
 
 #[cfg(target_os = "macos")]
-#[tokio::test]
-#[ignore = "requires a provisioned signed development helper"]
-async fn provisioned_checkout_helper_is_discovered_without_selecting_shared_defaults() {
+fn provisioned_fixture() -> Fixture {
   let target = crate::setup::macos::release_target().unwrap();
-  let fixture = if let Some(package) = std::env::var_os("CTL_TEST_CTLD_PACKAGE") {
+  if let Some(package) = std::env::var_os("CTL_TEST_CTLD_PACKAGE") {
     let package = PathBuf::from(package);
     let manifest = Manifest::parse_installed(
       &fs::read(package.join("ctld-package.json")).unwrap(),
@@ -545,13 +555,42 @@ async fn provisioned_checkout_helper_is_discovered_without_selecting_shared_defa
       &fs::read(payload.join(&manifest.archive)).unwrap(),
       manifest,
     )
-  };
+  }
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+#[ignore = "requires a provisioned signed development helper"]
+async fn provisioned_checkout_helper_is_discovered_without_selecting_shared_defaults() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
+  let fixture = provisioned_fixture();
   let candidate = fixture.load().unwrap().unwrap();
+  let inspected = inspect(
+    &fixture.home.0,
+    &fixture.checkpoint,
+    &fixture.repository,
+    None,
+  )
+  .await
+  .unwrap()
+  .unwrap();
+  assert_eq!(
+    inspected.archive_sha256.as_deref(),
+    Some(fixture.manifest.sha256.as_str())
+  );
+  assert!(!inspected.installed);
+  assert!(inspected.info.is_some());
+  assert!(!fixture.home.0.join(".tokn").exists());
+  assert_shared_resolver_parity(&fixture).await;
+  let managed = ctl_ipc::managed::component_directory(&fixture.home.0);
+  let current_before = fs::read_link(managed.join("current")).unwrap();
+  let compatible =
+    ctl_ipc::managed::compatible_selection(&fixture.home.0, &fixture.manifest.target).unwrap();
+  let compatible_before = fs::read_link(&compatible).unwrap();
   let executable = verify_candidate(&fixture.home.0, &candidate, None)
     .await
     .unwrap()
     .unwrap();
-  let managed = ctl_ipc::managed::component_directory(&fixture.home.0);
   assert_eq!(
     executable,
     managed
@@ -561,6 +600,18 @@ async fn provisioned_checkout_helper_is_discovered_without_selecting_shared_defa
       .canonicalize()
       .unwrap()
   );
+  assert_eq!(inspected.executable.canonicalize().unwrap(), executable);
+  let inspected = inspect(
+    &fixture.home.0,
+    &fixture.checkpoint,
+    &fixture.repository,
+    None,
+  )
+  .await
+  .unwrap()
+  .unwrap();
+  assert!(inspected.installed);
+  assert_eq!(inspected.executable.canonicalize().unwrap(), executable);
   assert_eq!(
     verify_candidate(&fixture.home.0, &candidate, None)
       .await
@@ -581,11 +632,74 @@ async fn provisioned_checkout_helper_is_discovered_without_selecting_shared_defa
   assert!(output.status.success());
   let info: ctl_core::component::ComponentInfo = serde_json::from_slice(&output.stdout).unwrap();
   assert_eq!(info.build.version, fixture.manifest.app_version);
-  assert!(!managed.join("selected").exists());
-  assert!(!managed.join("current").exists());
-  assert!(
-    !ctl_ipc::managed::compatible_selection(&fixture.home.0, &fixture.manifest.target)
-      .unwrap()
-      .exists()
+  assert_eq!(
+    fs::read_link(managed.join("current")).unwrap(),
+    current_before
   );
+  assert_eq!(fs::read_link(compatible).unwrap(), compatible_before);
+}
+
+#[cfg(target_os = "macos")]
+async fn assert_shared_resolver_parity(fixture: &Fixture) {
+  use crate::ctld::Resolver;
+  use crate::setup::DevelopmentContext;
+  use ctl_ipc::resolver::{Intent, Request, Source};
+
+  let home = &fixture.home.0;
+  let repository_root: &'static str = fixture.repository.to_str().unwrap().to_owned().leak();
+  let checkpoint: &'static str = fixture.checkpoint.to_str().unwrap().to_owned().leak();
+  let context = DevelopmentContext {
+    repository_root,
+    checkpoints: Box::leak(Box::new([checkpoint])),
+  };
+  let resolver = Resolver::standalone(None, Some(&context)).with_home(home);
+  let before = resolver
+    .resolve(Request::new(Intent::Inspect))
+    .await
+    .unwrap()
+    .unwrap();
+  assert_eq!(before.source, Source::Checkout);
+  assert_eq!(
+    before.archive_sha256.as_deref(),
+    Some(fixture.manifest.sha256.as_str())
+  );
+  assert!(!before.installed);
+  assert!(!home.join(".tokn").exists());
+
+  // A different shared selection must not replace the checkout selected by
+  // status when setup and launch preparation use the same resolver policy.
+  let bytes = crate::setup::tests::compressed(&crate::setup::tests::contents(None));
+  let mut manifest = crate::setup::tests::release(&bytes);
+  manifest.target = crate::setup::macos::release_target().unwrap().into();
+  manifest.archive = format!(
+    "ctld-{}-{}.app.tar.gz",
+    manifest.app_version, manifest.target
+  );
+  Session::begin(home, manifest.clone())
+    .unwrap()
+    .unpack(&bytes)
+    .unwrap()
+    .activate()
+    .unwrap();
+  let managed = ctl_ipc::managed::component_directory(home);
+  let current = fs::read_link(managed.join("current")).unwrap();
+  let compatible = ctl_ipc::managed::compatible_selection(home, &manifest.target).unwrap();
+  let compatible_before = fs::read_link(&compatible).unwrap();
+  for intent in [Intent::Setup, Intent::Prepare, Intent::Inspect] {
+    let selected = resolver
+      .resolve(Request::new(intent))
+      .await
+      .unwrap()
+      .unwrap();
+    assert_eq!(selected.source, before.source);
+    assert_eq!(selected.archive_sha256, before.archive_sha256);
+    assert_eq!(
+      selected.executable.canonicalize().unwrap(),
+      before.executable.canonicalize().unwrap()
+    );
+    assert_eq!(selected.info, before.info);
+    assert!(selected.installed);
+    assert_eq!(fs::read_link(managed.join("current")).unwrap(), current);
+    assert_eq!(fs::read_link(&compatible).unwrap(), compatible_before);
+  }
 }

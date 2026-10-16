@@ -199,8 +199,12 @@ cargo install --locked ctl-cli ctmuxd ctl-taskd
 ctl setup
 ```
 
-Setup uses the fixed `https://github.com/tokn-ai/ctl/releases/download/v<version>/`
-source and approved GitHub HTTPS asset redirects. It installs the release matching
+Setup prepares the helper selected by the same resolver as status, startup, and
+restart. A selected checkout, bundled app, shared installation, or `CTLD_BIN`
+override is reused or prepared before considering a download. With no eligible
+helper, setup uses the fixed
+`https://github.com/tokn-ai/ctl/releases/download/v<version>/` source and approved
+GitHub HTTPS asset redirects. It installs the release matching
 the CLI's version and Mac architecture, rather than resolving the latest release
 or installing a draft. It trusts that repository's HTTPS manifest for the
 publisher Team ID and requires an Apple Developer ID signature for that team
@@ -224,10 +228,12 @@ The full signed bundle is installed without `sudo`:
 
 Remote-agent `~/.tokn/ctl/versions/` and `current` remain independent. An existing
 matching installation is verified and reused; setup does not overwrite a
-version with different release contents. Release setup updates `current`; both
-release and development setup atomically update the architecture/API selection.
-A development selection points to `../development/<archive-sha256>` and does
-not change `current`. Discovery follows this explicit selection instead of
+version with different release contents. Downloaded official releases update
+`current` and atomically update the architecture/API selection. A separately
+selected development installation points to `../development/<archive-sha256>`
+and does not change `current`. Preparing a checkout or embedded app only publishes
+its immutable cache entry; shared selections stay unchanged, including for signed
+release payloads. Discovery follows the explicit shared selection instead of
 sorting directories by hash or modification time. Setup never starts, stops,
 or restarts a daemon. Existing compatible connections continue using their
 running daemon until it is stopped explicitly.
@@ -239,16 +245,27 @@ target directory, then verify and pin it under
 selections. With no compatible
 local helper, a standalone macOS CLI prefers a
 verified compatible selected managed app supporting the requested operation, then its
-own bundled helper, then a nearby desktop bundle, sibling executable, or `PATH`.
-Packaged desktop releases continue to prefer their own bundled helper. Unsafe or invalid selected
-installations produce a verification error. `ctl setup --json` prints the result with
-`component`, `version`, `executable`, and `reused` fields.
+own bundled helper, then a nearby desktop bundle. Without an eligible signed
+app, macOS selects an official release awaiting explicit setup instead of an
+unsigned sibling or `PATH` executable. Use `CTLD_BIN` for an explicitly chosen
+manual helper; other Unix platforms retain sibling/`PATH` discovery. Packaged
+desktop releases prefer their own bundled helper after an explicit complete-bundle
+selection. Unsafe or invalid selected
+installations produce a verification error. `ctl setup --json` retains
+`component`, `version`, `executable`, and `reused`, and adds a `selection` with
+`source`, `executable`, verified build `info`, `archive_sha256` when available,
+and `installed`. Status returns the same selection as `available_selection`.
+Inspection does not publish a cache entry or change shared selections; an embedded
+or checkout candidate awaiting preparation remains visible with `installed: false`
+and may have unknown build metadata until verification can complete. Setup and
+startup preparation use that candidate, rather than selecting an unrelated
+release. Installing never replaces the process already serving a socket.
 
 A CLI built with the bundled release command prepares its embedded helper when
-no compatible shared app is selected, before the sibling/`PATH` fallback.
+no compatible shared app is selected, before considering a nearby desktop app.
 It uses the same verified install transaction without downloading anything.
-Preparation is lazy: starting an absent daemon, inspecting an explicit
-replacement, or creating a fresh proxy route can require it. Passive status
+Preparation is lazy: starting an absent daemon, preparing an explicit restart,
+or creating a fresh proxy route can require it. Passive status
 reads and existing daemon/master reuse do not. Verification failures are
 reported before launching SSH, rather than hidden behind a failed proxy command.
 

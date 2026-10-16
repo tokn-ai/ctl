@@ -142,7 +142,9 @@ pub async fn run_ssh(mut arguments: Vec<OsString>, method: Option<&str>) -> Resu
     defaults
   };
   let mut defaults = if managed {
-    if invocation.inspect || !master.is_empty() {
+    if invocation.inspect {
+      connection::inspected_target_arguments(&default_target).await?
+    } else if !master.is_empty() {
       connection::target_arguments(&default_target)?
     } else {
       connection::prepared_target_arguments(&default_target).await?

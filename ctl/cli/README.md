@@ -35,8 +35,12 @@ These checks remain passive: uncertainty does not start authentication, prepare
 a VPN, or replace a master. Authentication, invalid configuration, and explicit
 disconnects still suspend recovery until the corresponding user action.
 For a disconnected pane, the footer offers **Enter to reconnect**. This retries
-the existing session quietly; it does not create a replacement shell or request
-Touch ID. Host authentication and explicit disconnect policy remain with ctld.
+the existing session and permits SSH authentication, including Touch ID when
+required by ctld. The TUI temporarily releases the host terminal for password,
+confirmation, and gateway/VPN preparation, then restores the same session.
+Rejected or canceled authentication returns to the disconnected TUI until the
+next explicit retry. Background recovery stays quiet. Reconnecting never creates
+a replacement shell.
 
 ## Install
 

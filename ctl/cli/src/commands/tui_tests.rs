@@ -15,6 +15,7 @@ const CHILD_TEST: &str = "commands::tui_tests::terminal_fixture";
 const RESUME_CHILD_TEST: &str = "commands::tui_tests::resume_terminal_fixture";
 const PROMPT_TEXT: &str = "FORBIDDEN_BROKER_PROMPT";
 const WARNING_TEXT: &str = "FORBIDDEN_BROKER_WARNING";
+const SECRET_RESPONSE: &str = "fixture-private-authentication-marker";
 
 #[derive(Default)]
 struct Observations {
@@ -22,6 +23,9 @@ struct Observations {
   checks: AtomicUsize,
   failed: AtomicUsize,
   ensures: AtomicUsize,
+  interactive: AtomicUsize,
+  authenticated: AtomicUsize,
+  rejected: AtomicUsize,
 }
 
 struct Broker {
@@ -155,14 +159,7 @@ async fn answer_request(
       changed.notify_one();
       return;
     }
-    if answer_master(
-      &mut stream,
-      request,
-      prompt.load(Ordering::Acquire),
-      &observations,
-    )
-    .await
-    {
+    if answer_master(&mut stream, request, &prompt, &observations, &changed).await {
       cancelled.fetch_add(1, Ordering::Release);
     }
     changed.notify_one();
@@ -172,10 +169,13 @@ async fn answer_request(
 async fn answer_master(
   stream: &mut tokio::net::UnixStream,
   request: ClientMessage,
-  prompt: usize,
+  prompt_mode: &AtomicUsize,
   observations: &Observations,
+  changed: &Notify,
 ) -> bool {
   let passive = matches!(&request, ClientMessage::MasterStatus { .. });
+  let interactive = matches!(&request, ClientMessage::EnsureMaster { .. });
+  let prompt = prompt_mode.load(Ordering::Acquire);
   assert!(matches!(
     request,
     ClientMessage::EnsureMaster { target }
@@ -199,6 +199,10 @@ async fn answer_master(
     }
   } else {
     observations.ensures.fetch_add(1, Ordering::Release);
+    if interactive {
+      observations.interactive.fetch_add(1, Ordering::Release);
+      changed.notify_one();
+    }
   }
   if passive && prompt != 0 {
     ctl_ipc::write_frame(&mut *stream, &ServerMessage::AuthenticationRequired)
@@ -220,27 +224,64 @@ async fn answer_master(
       &mut *stream,
       &ServerMessage::Prompt {
         prompt_id: "fixture-prompt".into(),
-        kind: if prompt == 1 {
-          PromptKind::Secret
-        } else {
+        kind: if prompt == 2 {
           PromptKind::Confirm
+        } else {
+          PromptKind::Secret
         },
-        message: PROMPT_TEXT.into(),
+        message: format!("{PROMPT_TEXT}_{prompt}"),
         warning: Some(WARNING_TEXT.into()),
       },
     )
     .await
     .unwrap();
+    let response = ctl_ipc::read_frame::<_, ClientMessage>(&mut *stream)
+      .await
+      .unwrap();
+    if interactive {
+      return answer_interactive_prompt(stream, response, prompt, prompt_mode, observations).await;
+    }
     assert!(
-      matches!(
-        ctl_ipc::read_frame::<_, ClientMessage>(&mut *stream).await.unwrap(),
-        Some(ClientMessage::PromptResponse { prompt_id, response })
-          if prompt_id == "fixture-prompt" && response.is_none()
-      ),
-      "the UI must cancel authentication without reading the host terminal"
+      matches!(response, Some(ClientMessage::PromptResponse { prompt_id, response })
+        if prompt_id == "fixture-prompt" && response.is_none()),
+      "automatic recovery must cancel authentication without reading the host terminal"
     );
   }
   !passive && prompt != 0
+}
+
+async fn answer_interactive_prompt(
+  stream: &mut tokio::net::UnixStream,
+  response: Option<ClientMessage>,
+  prompt: usize,
+  prompt_mode: &AtomicUsize,
+  observations: &Observations,
+) -> bool {
+  let Some(ClientMessage::PromptResponse {
+    prompt_id,
+    response: Some(response),
+  }) = response
+  else {
+    return true;
+  };
+  assert_eq!(prompt_id, "fixture-prompt");
+  let expected = if prompt == 2 { "yes" } else { SECRET_RESPONSE };
+  assert_eq!(&*response, expected);
+  let reply = if prompt == 3 {
+    observations.rejected.fetch_add(1, Ordering::Release);
+    ServerMessage::Error {
+      code: "ssh_authentication_failed".into(),
+      message: "Fixture authentication rejected".into(),
+    }
+  } else {
+    observations.authenticated.fetch_add(1, Ordering::Release);
+    prompt_mode.store(0, Ordering::Release);
+    ServerMessage::MasterReady {
+      control_path: PathBuf::from("/tmp/unused-fixture-master"),
+    }
+  };
+  ctl_ipc::write_frame(stream, &reply).await.unwrap();
+  false
 }
 
 fn footer(screen: &Screen) -> &str {
@@ -486,9 +527,243 @@ async fn terminal_ownership_disables_broker_prompts_through_repeated_reconnects(
   }
   tui.send(b"\x02d")?;
   assert!(tui.wait_exit().await?.success());
-  broker.wait_counter(&broker.closed_watches, 1).await?;
-  assert_eq!(broker.watches.load(Ordering::Acquire), 1);
-  assert_eq!(broker.closed_watches.load(Ordering::Acquire), 1);
+  broker.wait_counter(&broker.closed_watches, 3).await?;
+  assert_eq!(broker.watches.load(Ordering::Acquire), 3);
+  assert_eq!(broker.closed_watches.load(Ordering::Acquire), 3);
+  drop(tui);
+  drop(broker);
+  drop(proxy);
+  daemon.shutdown().await?;
+  Ok(())
+}
+
+fn broker_terminal(
+  daemon: &TestDaemon,
+  proxy: &TestProxy,
+  socket: &std::path::Path,
+  session: &str,
+) -> Result<Tui> {
+  let mut command = CommandBuilder::new(std::env::current_exe()?);
+  command.args(["--ignored", "--exact", CHILD_TEST, "--nocapture"]);
+  command.env_clear();
+  command.env("HOME", daemon.directory.join("home"));
+  command.env("PATH", "/usr/bin:/bin");
+  command.env("TERM", "xterm-256color");
+  command.env("LANG", "C.UTF-8");
+  command.env("CTLD_SOCKET_PATH", socket);
+  command.env("CTL_TUI_TEST_SOCKET_PATH", &proxy.socket);
+  command.env("CTL_TUI_TEST_SESSION", session);
+  command.cwd(&daemon.directory);
+  Tui::spawn(command, 120, 13)
+}
+
+async fn block_authentication(
+  tui: &mut Tui,
+  broker: &Broker,
+  proxy: &TestProxy,
+  prompt: usize,
+) -> Result<()> {
+  let cancelled = broker.cancelled.load(Ordering::Acquire);
+  broker.prompt.store(prompt, Ordering::Release);
+  proxy.interrupt();
+  broker
+    .wait_cancelled(cancelled + 1)
+    .await
+    .map_err(|error| format!("quiet authentication block: {error}"))?;
+  tui
+    .wait_screen(
+      "quiet recovery requests explicit authentication",
+      |screen| {
+        footer(screen).contains("authentication")
+          && footer(screen).contains("Enter to reconnect")
+          && !screen.contains(PROMPT_TEXT)
+      },
+    )
+    .await?;
+  Ok(())
+}
+
+async fn authenticate_from_terminal(tui: &mut Tui, broker: &Broker, prompt: usize) -> Result<()> {
+  open_authentication_prompt(tui, broker, prompt).await?;
+  let response = if prompt == 2 { "yes" } else { SECRET_RESPONSE };
+  tui.send(format!("{response}\r").as_bytes())?;
+  Ok(())
+}
+
+async fn open_authentication_prompt(tui: &mut Tui, broker: &Broker, prompt: usize) -> Result<()> {
+  let attempts = broker.observations.interactive.load(Ordering::Acquire);
+  tui.send(b"\r")?;
+  broker
+    .wait_counter(&broker.observations.interactive, attempts + 1)
+    .await
+    .map_err(|error| format!("interactive authentication attempt: {error}"))?;
+  let message = format!("{PROMPT_TEXT}_{prompt}");
+  tui
+    .wait_screen("explicit reconnect authentication prompt", |screen| {
+      screen.contains(&message) && screen.contains(WARNING_TEXT)
+    })
+    .await?;
+  if prompt != 2 {
+    timeout(Duration::from_secs(5), async {
+      while tui.host_terminal_is_cooked()? {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+      }
+      Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
+    })
+    .await
+    .map_err(|_| "password prompt did not disable terminal echo")??;
+  }
+  Ok(())
+}
+
+async fn verify_reconnected_shell(tui: &mut Tui, proxy: &TestProxy, cycle: usize) -> Result<()> {
+  proxy.wait_attachments(cycle + 1).await?;
+  tui
+    .wait_screen("existing shell restored after authentication", |screen| {
+      footer(screen).starts_with(" connected |")
+        && footer(screen).contains("ctmux [explicit-authentication]")
+        && screen.contains("shell:ready")
+    })
+    .await?;
+  let marker = format!("authenticated-{cycle}");
+  tui.send(format!("{marker}\r").as_bytes())?;
+  tui
+    .wait_screen("input returns to the original pane", |screen| {
+      screen.contains(&format!("shell:{marker}"))
+    })
+    .await?;
+  assert!(!tui.transcript_contains(SECRET_RESPONSE.as_bytes()));
+  Ok(())
+}
+
+async fn authentication_fixture() -> Result<(TestDaemon, TestProxy, Broker, Tui)> {
+  let daemon = TestDaemon::start().await?;
+  let session = daemon
+    .create_echo_session(
+      "explicit-authentication",
+      "shell",
+      ctmux_proto::TerminalSize {
+        columns: 120,
+        rows: 12,
+        ..Default::default()
+      },
+    )
+    .await?;
+  let proxy = TestProxy::start(&daemon)?;
+  let broker = Broker::start(&daemon.directory.join("broker.sock"))?;
+  let mut tui = broker_terminal(
+    &daemon,
+    &proxy,
+    &daemon.directory.join("broker.sock"),
+    &session,
+  )?;
+  tui
+    .wait_screen("initial shell", |screen| {
+      screen.contains("shell:ready") && footer(screen).starts_with(" connected |")
+    })
+    .await?;
+  Ok((daemon, proxy, broker, tui))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn enter_authenticates_the_existing_shell_and_restores_ui_after_rejection() -> Result<()> {
+  let (mut daemon, proxy, broker, mut tui) = authentication_fixture().await?;
+  block_authentication(&mut tui, &broker, &proxy, 3).await?;
+  assert!(!tui.transcript_contains(PROMPT_TEXT.as_bytes()));
+  assert!(!tui.transcript_contains(WARNING_TEXT.as_bytes()));
+  proxy.resume();
+  authenticate_from_terminal(&mut tui, &broker, 3).await?;
+  broker
+    .wait_counter(&broker.observations.rejected, 1)
+    .await
+    .map_err(|error| format!("authentication rejection: {error}"))?;
+  tui
+    .wait_screen("authentication rejection returns to the TUI", |screen| {
+      footer(screen).contains("Enter to reconnect")
+        && footer(screen).contains("Fixture authentication rejected")
+        && screen.contains("shell:ready")
+    })
+    .await?;
+  assert!(!tui.transcript_contains(SECRET_RESPONSE.as_bytes()));
+  let ensures = broker.observations.ensures.load(Ordering::Acquire);
+  tokio::time::sleep(Duration::from_secs(3)).await;
+  assert_eq!(broker.observations.ensures.load(Ordering::Acquire), ensures);
+  assert_eq!(proxy.attachments(), 1);
+
+  broker.prompt.store(1, Ordering::Release);
+  authenticate_from_terminal(&mut tui, &broker, 1).await?;
+  broker
+    .wait_counter(&broker.observations.authenticated, 1)
+    .await
+    .map_err(|error| format!("secret authentication: {error}"))?;
+  verify_reconnected_shell(&mut tui, &proxy, 1).await?;
+  block_authentication(&mut tui, &broker, &proxy, 2).await?;
+  proxy.resume();
+  authenticate_from_terminal(&mut tui, &broker, 2).await?;
+  broker
+    .wait_counter(&broker.observations.authenticated, 2)
+    .await
+    .map_err(|error| format!("confirmation authentication: {error}"))?;
+  verify_reconnected_shell(&mut tui, &proxy, 2).await?;
+
+  tui.send(b"\x02d")?;
+  assert!(tui.wait_exit().await?.success());
+  let watches = broker.watches.load(Ordering::Acquire);
+  broker
+    .wait_counter(&broker.closed_watches, watches)
+    .await
+    .map_err(|error| format!("recovery watch cleanup: {error}"))?;
+  drop(tui);
+  drop(broker);
+  drop(proxy);
+  daemon.shutdown().await?;
+  Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cancelling_a_secret_prompt_restores_the_disconnected_ui_for_another_retry() -> Result<()> {
+  let (mut daemon, proxy, broker, mut tui) = authentication_fixture().await?;
+  block_authentication(&mut tui, &broker, &proxy, 1).await?;
+  proxy.resume();
+  open_authentication_prompt(&mut tui, &broker, 1).await?;
+  tui.send(b"\x04")?;
+  tui
+    .wait_screen("cancelled prompt returns to the TUI", |screen| {
+      footer(screen).contains("Enter to reconnect")
+        && footer(screen).contains("unexpected end of file")
+        && screen.contains("shell:ready")
+    })
+    .await?;
+  assert_eq!(proxy.attachments(), 1);
+  authenticate_from_terminal(&mut tui, &broker, 1).await?;
+  broker
+    .wait_counter(&broker.observations.authenticated, 1)
+    .await?;
+  verify_reconnected_shell(&mut tui, &proxy, 1).await?;
+  tui.send(b"\x02d")?;
+  assert!(tui.wait_exit().await?.success());
+  drop(tui);
+  drop(broker);
+  drop(proxy);
+  daemon.shutdown().await?;
+  Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sigterm_during_a_secret_prompt_restores_cooked_terminal_modes() -> Result<()> {
+  use nix::{
+    sys::signal::{Signal, kill},
+    unistd::Pid,
+  };
+  let (mut daemon, proxy, broker, mut tui) = authentication_fixture().await?;
+  block_authentication(&mut tui, &broker, &proxy, 1).await?;
+  proxy.resume();
+  open_authentication_prompt(&mut tui, &broker, 1).await?;
+  assert!(!tui.host_terminal_is_cooked()?);
+  let process_id = i32::try_from(tui.process_id().ok_or("TUI has no process ID")?)?;
+  kill(Pid::from_raw(process_id), Signal::SIGTERM)?;
+  assert!(tui.wait_exit().await?.success());
+  assert!(tui.host_terminal_is_cooked()?);
   drop(tui);
   drop(broker);
   drop(proxy);
@@ -519,6 +794,9 @@ async fn terminal_fixture() {
     .await
     .unwrap();
   assert!(!connector.terminal_ui_active.load(Ordering::Acquire));
+  // Match main's process exit instead of waiting for a canceled blocking
+  // password worker during the private test runtime's shutdown.
+  std::process::exit(0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

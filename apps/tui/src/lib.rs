@@ -171,22 +171,32 @@ async fn run_app(
     app.detach().await;
     return Err(error);
   }
-  let _interaction = TerminalInteraction::new(app.transport);
-  let mut terminal = match terminal::Terminal::enter() {
-    Ok(terminal) => terminal,
-    Err(error) => {
-      app.detach().await;
-      return Err(error.into());
-    }
-  };
-  let events = terminal.events();
   let result = tokio::select! {
-    result = app.run(events) => result,
+    result = run_terminal(app) => result,
     result = shutdown_signal() => result,
   };
   app.detach().await;
-  drop(terminal);
   result
+}
+
+async fn run_terminal(app: &mut app::App<'_>) -> Result<()> {
+  loop {
+    let interaction = TerminalInteraction::new(app.transport);
+    let mut terminal = terminal::Terminal::enter()?;
+    app.run(terminal.events()).await?;
+    let Some(reconnect) = app.take_interactive_reconnect() else {
+      return Ok(());
+    };
+    // Stop and join the input reader before any credential prompt can read the
+    // host terminal. Restore cooked mode and the primary screen first as well.
+    terminal.suspend()?;
+    drop(interaction);
+    let result = {
+      let _mode = terminal::PromptMode::capture()?;
+      reconnect.await
+    };
+    app.finish_interactive_reconnect(result);
+  }
 }
 
 struct TerminalInteraction<'a>(Option<&'a dyn Transport>);

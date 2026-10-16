@@ -160,6 +160,19 @@ impl Tui {
     self.child.process_id()
   }
 
+  /// Inspect the shared host terminal after an interrupted credential prompt.
+  #[allow(dead_code)] // Used by the ctl frontend's shared TUI fixture.
+  pub fn host_terminal_is_cooked(&self) -> Result<bool> {
+    use rustix::termios::LocalModes;
+    let termios = self
+      .master
+      .as_ref()
+      .and_then(|master| master.get_termios())
+      .ok_or("host terminal modes are unavailable")?;
+    let expected = (LocalModes::ICANON | LocalModes::ECHO | LocalModes::ISIG).bits();
+    Ok(termios.local_flags.bits() & expected == expected)
+  }
+
   pub fn send(&mut self, mut bytes: &[u8]) -> Result<()> {
     let deadline = Instant::now() + WAIT_LIMIT;
     while !bytes.is_empty() {

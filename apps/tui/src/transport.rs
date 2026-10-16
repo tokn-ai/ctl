@@ -14,6 +14,11 @@ pub type ConnectFuture<'a> = Pin<Box<dyn Future<Output = Result<Stream>> + Send 
 /// Opens connections for requests, panes, and reconnects in the shared TUI.
 pub trait Transport: Sync {
   fn connect(&self) -> ConnectFuture<'_>;
+  /// Optional explicit reconnect preparation. The caller must release terminal
+  /// ownership and stop its input reader before polling this authentication job.
+  fn reconnect_interactive(&self) -> Option<ConnectFuture<'_>> {
+    None
+  }
   fn archive_key(&self) -> String;
   /// Human-readable selected host or endpoint, shown in session management.
   fn label(&self) -> &str;

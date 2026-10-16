@@ -34,6 +34,12 @@ pub trait Connector {
 
   fn connect(&self) -> ConnectFuture<'_, Self::Stream, Self::Error>;
 
+  /// Prepare an explicit reconnect after the TUI releases terminal ownership.
+  /// Automatic maintenance continues to use `connect` with interaction disabled.
+  fn reconnect_interactive(&self) -> Option<ConnectFuture<'_, Self::Stream, Self::Error>> {
+    None
+  }
+
   /// Suspend direct host-terminal interaction while the shared TUI owns it.
   fn set_terminal_ui_active(&self, _active: bool) {}
 
@@ -62,6 +68,13 @@ impl<C: Connector + Sync> ctmux_tui::Transport for TuiTransport<'_, C> {
     Box::pin(async move {
       let stream = self.0.connect().await?;
       Ok(Box::new(stream) as ctmux_tui::Stream)
+    })
+  }
+
+  fn reconnect_interactive(&self) -> Option<ctmux_tui::ConnectFuture<'_>> {
+    self.0.reconnect_interactive().map(|job| {
+      Box::pin(async move { Ok(Box::new(job.await?) as ctmux_tui::Stream) })
+        as ctmux_tui::ConnectFuture<'_>
     })
   }
 

@@ -214,9 +214,11 @@ While the focused pane is disconnected, the footer shows `Enter to reconnect`
 before the error so the action stays visible in narrow terminals. Plain Enter
 retries attachment to the existing pane immediately, clearing this client's
 old retry blocker or backoff. It leaves an already pending attempt running and
-does not request authentication UI or undo an explicit host disconnect. Once
-connected, Enter goes to the running program. In copy mode, prompts, and pickers,
-Enter retains its existing copy or submit action.
+never creates a shell. For `ctl`, this explicit action also permits host
+authentication and can resume a manually disconnected host. The TUI releases
+the terminal for authentication when needed, then restores the existing pane.
+Once connected, Enter goes to the running program. In copy mode, prompts, and
+pickers, Enter retains its existing copy or submit action.
 
 Press **Ctrl+B [** to inspect a frozen snapshot of the active pane's visible
 screen and its retained scrollback. The snapshot stays inside that pane; other
@@ -434,10 +436,16 @@ credential access or authentication UI.
 Quiet reconnects never open authentication prompts. A canceled or failed wake
 authorization stops without repeated prompts until another sleep/wake cycle or
 an explicit Connect action. Configuration failures and manually disconnected
-hosts remain blocked. For a host requiring explicit authentication, run
-`ctl host connect HOST` in another terminal and select the existing session
-again, or detach and reconnect to answer its prompt. Older brokers retain this
-explicit recovery path. The grouped wake policy applies to `ctl` TUI shells;
+hosts remain blocked until explicit user action. In a disconnected `ctl` pane,
+**Enter to reconnect** permits authentication for the existing host and session.
+The TUI temporarily stops its input reader and restores the host terminal so
+password and confirmation prompts, Touch ID, and gateway/VPN preparation can
+run under the normal interactive connection policy. It then restores the same
+TUI and reconnects the existing pane without creating a shell. Rejected or
+canceled authentication leaves the pane disconnected until another explicit
+retry. Automatic recovery never requests authentication. Alternatively, run
+`ctl host connect HOST` in another terminal or detach and reconnect. Older
+brokers retain these explicit recovery paths. The grouped wake policy applies to `ctl` TUI shells;
 desktop embedded terminals keep their own Connect host flow. Detaching
 releases leases without terminating the session. Normal exit, errors, and Unix
 termination/hangup signals restore the host terminal mode and alternate screen.

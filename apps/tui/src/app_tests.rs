@@ -18,6 +18,65 @@ struct PausedRelayTransport {
   resume: tokio::sync::Notify,
 }
 
+struct InteractiveRelayTransport {
+  relay: RelayTransport,
+  interactive_polls: std::sync::atomic::AtomicUsize,
+  disconnect: std::sync::Arc<tokio::sync::Notify>,
+}
+
+impl InteractiveRelayTransport {
+  async fn disconnect(&self, pane: &mut Pane) -> Result<()> {
+    self.disconnect.notify_waiters();
+    timeout(Duration::from_secs(5), async {
+      while pane.connected {
+        pane.drain().await?;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+      }
+      Ok::<_, crate::Error>(())
+    })
+    .await??;
+    Ok(())
+  }
+}
+
+impl crate::Transport for InteractiveRelayTransport {
+  fn label(&self) -> &'static str {
+    "fixture"
+  }
+
+  fn connect(&self) -> crate::ConnectFuture<'_> {
+    Box::pin(async move {
+      let mut upstream = self.relay.connect().await?;
+      let (client, mut relay) = tokio::io::duplex(4096);
+      let disconnect = self.disconnect.clone();
+      tokio::spawn(async move {
+        tokio::select! {
+          _ = tokio::io::copy_bidirectional(&mut upstream, &mut relay) => {}
+          () = disconnect.notified() => {}
+        }
+      });
+      Ok(Box::new(client) as crate::Stream)
+    })
+  }
+
+  fn reconnect_interactive(&self) -> Option<crate::ConnectFuture<'_>> {
+    Some(Box::pin(async move {
+      self
+        .interactive_polls
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+      self.connect().await
+    }))
+  }
+
+  fn archive_key(&self) -> String {
+    self.relay.archive_key()
+  }
+
+  fn is_retryable(&self, error: &crate::Error) -> bool {
+    self.relay.is_retryable(error)
+  }
+}
+
 impl crate::Transport for PausedRelayTransport {
   fn label(&self) -> &'static str {
     "fixture"
@@ -379,6 +438,96 @@ async fn blocked_reconnect_keeps_its_cause_visible_until_enter_retries() -> Resu
   assert!(!app.status().contains("SSH authentication is required"));
   assert!(!app.status().contains("automatic retries stopped"));
   assert!(!app.status().contains("Enter to reconnect"));
+  app.detach().await;
+  Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn enter_defers_interactive_authentication_and_retries_the_existing_attachment() -> Result<()>
+{
+  use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+  let daemon = Daemon::start().await?;
+  let transport = InteractiveRelayTransport {
+    relay: RelayTransport {
+      socket: daemon.directory.join("ctmux.sock"),
+      connections: AtomicUsize::new(0),
+      fail_next: AtomicBool::new(false),
+      authentication_required: AtomicBool::new(false),
+    },
+    interactive_polls: AtomicUsize::new(0),
+    disconnect: std::sync::Arc::new(tokio::sync::Notify::new()),
+  };
+  let mut app = daemon.app(false);
+  app.transport = Some(&transport);
+  let session = create_shell(&app).await?;
+  app.start(Some(session.clone())).await?;
+  let pane = app.focused.clone();
+  let token = app.panes[&pane].token.clone();
+  transport
+    .disconnect(app.panes.get_mut(&pane).unwrap())
+    .await?;
+  transport
+    .relay
+    .authentication_required
+    .store(true, Ordering::Release);
+
+  let connections = transport.relay.connections.load(Ordering::Relaxed);
+  for _ in 0..2 {
+    app
+      .key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+      .await?;
+    app.poll_maintenance().await;
+  }
+  assert_eq!(transport.interactive_polls.load(Ordering::Relaxed), 0);
+  assert_eq!(
+    transport.relay.connections.load(Ordering::Relaxed),
+    connections
+  );
+  let authentication = app.take_interactive_reconnect().unwrap();
+  assert!(app.take_interactive_reconnect().is_none());
+  app.finish_interactive_reconnect(authentication.await);
+  assert_eq!(transport.interactive_polls.load(Ordering::Relaxed), 1);
+  assert!(
+    app
+      .maintenance
+      .blocked_reason()
+      .unwrap()
+      .contains("SSH authentication is required")
+  );
+
+  transport
+    .relay
+    .authentication_required
+    .store(false, Ordering::Release);
+  for _ in 0..3 {
+    app.schedule_refresh();
+    app.poll_maintenance().await;
+  }
+  assert_eq!(
+    transport.relay.connections.load(Ordering::Relaxed),
+    connections
+  );
+  assert_eq!(app.connection_status(), "disconnected");
+  app
+    .key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+    .await?;
+  assert_eq!(transport.interactive_polls.load(Ordering::Relaxed), 1);
+  let authentication = app.take_interactive_reconnect().unwrap();
+  app.finish_interactive_reconnect(authentication.await);
+  assert_eq!(transport.interactive_polls.load(Ordering::Relaxed), 2);
+  assert!(app.maintenance.blocked_reason().is_none());
+  timeout(Duration::from_secs(5), async {
+    while !app.panes[&pane].connected {
+      app.poll_maintenance().await;
+      tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+  })
+  .await?;
+  assert_eq!(app.connection_status(), "connected");
+  assert_eq!(app.view.as_ref().unwrap().session_id, session);
+  assert_eq!(app.focused, pane);
+  assert_eq!(app.panes[&pane].token, token);
   app.detach().await;
   Ok(())
 }

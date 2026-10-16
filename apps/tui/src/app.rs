@@ -105,11 +105,12 @@ pub struct App<'a> {
   renderer: Renderer,
   layout_owner: Option<String>,
   maintenance: Maintenance<'a>,
+  interactive_reconnect: Option<crate::ConnectFuture<'a>>,
   runtime: bool,
   resize_sequence: u64,
 }
 
-impl App<'_> {
+impl<'a> App<'a> {
   pub fn new(socket: PathBuf, read_only: bool, prefix: Prefix) -> Self {
     Self {
       transport: None,
@@ -146,6 +147,7 @@ impl App<'_> {
       renderer: Renderer::default(),
       layout_owner: None,
       maintenance: Maintenance::default(),
+      interactive_reconnect: None,
       runtime: false,
       resize_sequence: 0,
     }
@@ -577,6 +579,7 @@ impl App<'_> {
 
   pub async fn run(&mut self, mut events: mpsc::Receiver<io::Result<Event>>) -> Result<()> {
     self.runtime = true;
+    self.renderer.invalidate();
     // Keep event-loop state out of the futures owned by CLI callers.
     let result = Box::pin(self.run_loop(&mut events)).await;
     self.runtime = false;
@@ -596,6 +599,9 @@ impl App<'_> {
             Ok(true) => return Ok(()),
             Ok(false) => {}
             Err(error) => self.notice(error.to_string()),
+          }
+          if self.interactive_reconnect.is_some() {
+            return Ok(());
           }
         }
         _ = tick.tick() => {
@@ -1583,12 +1589,35 @@ impl App<'_> {
   }
 
   fn request_reconnect(&mut self) {
-    if self.maintenance.is_reconnecting(&self.focused) {
+    if self.interactive_reconnect.is_some() || self.maintenance.is_reconnecting(&self.focused) {
       return;
     }
-    // Retry existing work through its quiet transport. Clearing this client's
-    // blocker does not authorize credentials or resume a paused ctld target.
     self.maintenance.cancel();
+    self.interactive_reconnect = self.transport.and_then(Transport::reconnect_interactive);
+    if self.interactive_reconnect.is_some() {
+      return;
+    }
+    self.retry_focused();
+  }
+
+  pub fn take_interactive_reconnect(&mut self) -> Option<crate::ConnectFuture<'a>> {
+    self.interactive_reconnect.take()
+  }
+
+  pub fn finish_interactive_reconnect(&mut self, result: Result<crate::Stream>) {
+    match result {
+      Ok(stream) => {
+        drop(stream);
+        self.retry_focused();
+      }
+      Err(error) => {
+        self.maintenance.block_reconnect(self.transport, &error);
+        self.connection_notice(&error.to_string());
+      }
+    }
+  }
+
+  fn retry_focused(&mut self) {
     let focused = self.focused.clone();
     self.schedule_reconnects(std::slice::from_ref(&focused));
     self.schedule_refresh();

@@ -39,26 +39,21 @@ impl DevelopmentContext {
   ///
   /// # Errors
   /// Rejects unsafe selections, invalid receipts, and failed native trust checks.
-  #[cfg_attr(
-    not(target_os = "macos"),
-    expect(
-      clippy::unused_async,
-      reason = "inspection has the same API on every platform"
-    )
-  )]
-  pub async fn inspect(
+  pub fn inspect(
     &self,
     required: Option<ctl_core::protocol::ProtocolVersion>,
-  ) -> Result<Option<HelperSelection>, Error> {
+  ) -> impl std::future::Future<Output = Result<Option<HelperSelection>, Error>> + '_ {
     #[cfg(target_os = "macos")]
     {
-      let home = dirs::home_dir().ok_or(Error::HomeDirectory)?;
-      self.inspect_in(&home, required).await
+      async move {
+        let home = dirs::home_dir().ok_or(Error::HomeDirectory)?;
+        self.inspect_in(&home, required).await
+      }
     }
     #[cfg(not(target_os = "macos"))]
     {
-      let _ = required;
-      Ok(None)
+      let _ = (self, required);
+      std::future::ready(Ok(None))
     }
   }
 
@@ -87,26 +82,21 @@ impl DevelopmentContext {
   ///
   /// # Errors
   /// Rejects unsafe checkpoints, invalid receipts, and failed signature checks.
-  #[cfg_attr(
-    not(target_os = "macos"),
-    expect(
-      clippy::unused_async,
-      reason = "discovery has the same API on every platform"
-    )
-  )]
-  pub async fn discover(
+  pub fn discover(
     &self,
     required: Option<ctl_core::protocol::ProtocolVersion>,
-  ) -> Result<Option<PathBuf>, Error> {
+  ) -> impl std::future::Future<Output = Result<Option<PathBuf>, Error>> + '_ {
     #[cfg(target_os = "macos")]
     {
-      let home = dirs::home_dir().ok_or(Error::HomeDirectory)?;
-      self.discover_in(&home, required).await
+      async move {
+        let home = dirs::home_dir().ok_or(Error::HomeDirectory)?;
+        self.discover_in(&home, required).await
+      }
     }
     #[cfg(not(target_os = "macos"))]
     {
-      let _ = required;
-      Ok(None)
+      let _ = (self, required);
+      std::future::ready(Ok(None))
     }
   }
 

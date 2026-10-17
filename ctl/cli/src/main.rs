@@ -29,20 +29,31 @@ use ctmux_cli::Command as CtmuxCommand;
   about = "Route control commands locally or over OpenSSH"
 )]
 struct Arguments {
-  /// Select a saved ctl host, OpenSSH alias, or destination instead of local.
-  #[arg(long, short = 'H', global = true, value_name = "DESTINATION")]
+  /// Select a saved ctl host by name or ID instead of local.
+  #[arg(long, short = 'H', global = true, value_name = "HOST")]
   host: Option<String>,
+
+  /// Connect to a temporary SSH destination or config alias, without saving a host.
+  /// Supply this option before the subcommand.
+  #[arg(long, id = "remote_destination", value_name = "DESTINATION", conflicts_with_all = ["host", "method"])]
+  destination: Option<String>,
 
   /// Select a saved host's connection method by name or ID.
   #[arg(long, global = true)]
   method: Option<String>,
 
   /// Remote server platform (Windows currently requires the cmd.exe SSH shell).
-  #[arg(long, global = true, requires = "host", value_enum)]
+  #[arg(long, global = true, value_enum)]
   remote_platform: Option<RemotePlatform>,
 
   #[command(subcommand)]
   command: Command,
+}
+
+impl Arguments {
+  fn has_remote_target(&self) -> bool {
+    self.host.is_some() || self.destination.is_some()
+  }
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -391,10 +402,7 @@ mod tests {
   }
 
   #[test]
-  fn remote_platform_requires_host_and_rejects_arbitrary_commands() {
-    assert!(
-      Arguments::try_parse_from(["ctl", "--remote-platform", "windows", "ctmux", "list"]).is_err()
-    );
+  fn remote_platform_rejects_arbitrary_commands() {
     assert!(
       Arguments::try_parse_from([
         "ctl",
@@ -419,6 +427,83 @@ mod tests {
       ])
       .is_err()
     );
+  }
+
+  #[test]
+  fn temporary_destinations_select_remote_commands_without_saved_host_options() {
+    for command in [
+      &["shell", "--resume"][..],
+      &["exec", "--", "true"][..],
+      &["ctmux", "list"][..],
+      &["task", "list"][..],
+      &["vpn", "list"][..],
+    ] {
+      let arguments = Arguments::try_parse_from(
+        [
+          "ctl",
+          "--destination",
+          "user@work",
+          "--remote-platform",
+          "windows",
+        ]
+        .into_iter()
+        .chain(command.iter().copied()),
+      )
+      .unwrap();
+      assert_eq!(arguments.destination.as_deref(), Some("user@work"));
+      assert!(arguments.host.is_none());
+      assert!(arguments.has_remote_target());
+    }
+    for arguments in [
+      vec!["ctl", "--destination", "work", "-H", "saved", "shell"],
+      vec!["ctl", "--destination", "work", "--method", "vpn", "shell"],
+      vec!["ctl", "ctmux", "list", "--destination", "work"],
+    ] {
+      assert!(Arguments::try_parse_from(arguments).is_err());
+    }
+  }
+
+  #[test]
+  fn host_edit_destinations_remain_distinct_from_the_connection_selector() {
+    for command in [
+      vec!["host", "create", "work", "ssh-alias"],
+      vec!["host", "update", "work", "--destination", "ssh-alias"],
+      vec!["host", "method", "add", "work", "Direct", "ssh-alias"],
+      vec![
+        "host",
+        "method",
+        "update",
+        "work",
+        "Direct",
+        "--destination",
+        "ssh-alias",
+      ],
+    ] {
+      let arguments =
+        Arguments::try_parse_from(["ctl"].into_iter().chain(command.iter().copied())).unwrap();
+      assert!(arguments.destination.is_none());
+      match arguments.command {
+        Command::Host {
+          command: host::Command::Create(_),
+        } => {}
+        Command::Host {
+          command:
+            host::Command::Update { destination, .. }
+            | host::Command::Method {
+              command: host::MethodCommand::Update { destination, .. },
+            },
+        } => {
+          assert_eq!(destination.as_deref(), Some("ssh-alias"));
+        }
+        Command::Host {
+          command:
+            host::Command::Method {
+              command: host::MethodCommand::Add { destination, .. },
+            },
+        } => assert_eq!(destination, "ssh-alias"),
+        _ => panic!("expected host edit command"),
+      }
+    }
   }
 
   #[test]

@@ -34,22 +34,36 @@ fn validate_local_command_target(arguments: &Arguments) -> Result<(), CliError> 
     Command::Logs(_) | Command::Audit(_) => CliError::HistoryTarget,
     _ => return Ok(()),
   };
-  if arguments.host.is_some() || arguments.method.is_some() || arguments.remote_platform.is_some() {
+  if arguments.has_remote_target()
+    || arguments.method.is_some()
+    || arguments.remote_platform.is_some()
+  {
     Err(error)
   } else {
     Ok(())
   }
 }
 
-pub async fn run(arguments: Arguments) -> Result<i32, CliError> {
-  validate_local_command_target(&arguments)?;
+fn validate_arguments(arguments: &Arguments) -> Result<(), CliError> {
+  // Clap checks conflicts in each command scope. Global saved-host options
+  // can also arrive after the subcommand, beyond the top-level destination.
+  if arguments.destination.is_some() && (arguments.host.is_some() || arguments.method.is_some()) {
+    return Err(CliError::ConflictingTargets);
+  }
+  validate_local_command_target(arguments)?;
+  if arguments.remote_platform.is_some() && !arguments.has_remote_target() {
+    return Err(CliError::RemotePlatformTarget);
+  }
   validate_terminal_command(&arguments.command)?;
-  if arguments.host.is_some() {
+  if arguments.has_remote_target() {
     if matches!(arguments.command, Command::Taskd { .. }) {
       return Err(CliError::RemoteTaskDaemonRestartUnsupported);
     }
     if matches!(arguments.command, Command::Ssh { .. } | Command::Scp { .. }) {
       return Err(CliError::CompatibilityHost);
+    }
+    if matches!(arguments.command, Command::Host { .. }) {
+      return Err(CliError::HostManagementTarget);
     }
   }
   if matches!(
@@ -57,7 +71,7 @@ pub async fn run(arguments: Arguments) -> Result<i32, CliError> {
     Command::Vpn {
       command: crate::vpn::Command::Create { .. } | crate::vpn::Command::Remove { .. }
     }
-  ) && (arguments.host.is_some() || arguments.method.is_some())
+  ) && (arguments.has_remote_target() || arguments.method.is_some())
   {
     return Err(crate::vpn::Error::LocalProfilesOnly.into());
   }
@@ -66,6 +80,11 @@ pub async fn run(arguments: Arguments) -> Result<i32, CliError> {
   {
     return Err(CliError::RemoteVpnUnsupported);
   }
+  Ok(())
+}
+
+pub async fn run(arguments: Arguments) -> Result<i32, CliError> {
+  validate_arguments(&arguments)?;
   if let Some(result) = crate::history::dispatch(&arguments.command) {
     result.map_err(CliError::History)?;
     return Ok(0);
@@ -76,6 +95,7 @@ pub async fn run(arguments: Arguments) -> Result<i32, CliError> {
       crate::components::run(
         command,
         arguments.host.as_deref(),
+        arguments.destination.as_deref(),
         arguments.method.as_deref(),
         arguments.remote_platform,
       )
@@ -92,9 +112,6 @@ pub async fn run(arguments: Arguments) -> Result<i32, CliError> {
       return Ok(0);
     }
     Command::Host { command } => {
-      if arguments.host.is_some() || arguments.remote_platform.is_some() {
-        return Err(CliError::HostManagementTarget);
-      }
       crate::host::run(command, arguments.method.as_deref()).await?;
       return Ok(0);
     }
@@ -115,8 +132,12 @@ pub async fn run(arguments: Arguments) -> Result<i32, CliError> {
     }
     _ => {}
   }
-  let resolved =
-    crate::target::resolve(arguments.host.as_deref(), arguments.method.as_deref()).await?;
+  let resolved = crate::target::resolve(
+    arguments.host.as_deref(),
+    arguments.destination.as_deref(),
+    arguments.method.as_deref(),
+  )
+  .await?;
   let platform = match arguments.remote_platform {
     Some(RemotePlatform::Windows) => ctl_client::RemotePlatform::Windows,
     _ => ctl_client::RemotePlatform::Unix,
@@ -256,7 +277,18 @@ struct CtlConnector {
 }
 
 impl CtlConnector {
-  fn new(target: ConnectionTarget, settings: ctl_client::hosts::ConnectionTargetDto) -> Self {
+  fn new(target: ConnectionTarget, mut settings: ctl_client::hosts::ConnectionTargetDto) -> Self {
+    if matches!(&target, ConnectionTarget::Ssh { options, .. }
+      if options.remote_platform == ctl_client::RemotePlatform::Windows)
+      && let ctl_client::hosts::ConnectionTargetDto::Ssh {
+        use_ssh_config_master,
+        ..
+      } = &mut settings
+    {
+      // Shared master startup keeps a POSIX shell command alive. Windows
+      // cmd.exe needs the private -N master; endpoint config still applies.
+      *use_ssh_config_master = Some(false);
+    }
     Self {
       target,
       settings,
@@ -522,13 +554,13 @@ enum CtlConnectError {
 
 #[derive(Debug, Error)]
 pub enum CliError {
-  #[error("History is local; omit --host, --method, and --remote-platform.")]
+  #[error("History is local; omit --host, --destination, --method, and --remote-platform.")]
   HistoryTarget,
   #[error("Could not read local history: {0}")]
   History(std::io::Error),
   #[cfg(unix)]
   #[error(
-    "Components manage the local bundle store; omit --host, --method, and --remote-platform."
+    "Components manage the local bundle store; omit --host, --destination, --method, and --remote-platform."
   )]
   ComponentsTarget,
   #[cfg(unix)]
@@ -540,14 +572,18 @@ pub enum CliError {
   Interrupt(std::io::Error),
   #[error(transparent)]
   Setup(#[from] ctl_client::setup::Error),
-  #[error("Setup installs the local signed helper; omit --host, --method, and --remote-platform.")]
+  #[error(
+    "Setup installs the local signed helper; omit --host, --destination, --method, and --remote-platform."
+  )]
   SetupTarget,
   #[error(transparent)]
   Skill(#[from] crate::skill::Error),
-  #[error("Skill documentation is bundled locally; omit --host, --method, and --remote-platform.")]
+  #[error(
+    "Skill documentation is bundled locally; omit --host, --destination, --method, and --remote-platform."
+  )]
   SkillTarget,
   #[error(
-    "Passwords manage the local credential store; omit --host, --method, and --remote-platform."
+    "Passwords manage the local credential store; omit --host, --destination, --method, and --remote-platform."
   )]
   PasswordsTarget,
   #[error(transparent)]
@@ -555,7 +591,7 @@ pub enum CliError {
   #[error(transparent)]
   HostCommand(#[from] crate::host::Error),
   #[error(
-    "Host management edits the local catalog; select a host with its positional name or ID, not --host."
+    "Host management edits the local catalog; select a host with its positional name or ID, not --host or the top-level --destination."
   )]
   HostManagementTarget,
   #[error(transparent)]
@@ -565,8 +601,12 @@ pub enum CliError {
   #[cfg(unix)]
   #[error(transparent)]
   Port(#[from] crate::port::Error),
-  #[error("Use the destination argument with ssh/scp, rather than --host.")]
+  #[error("Use the destination argument with ssh/scp, rather than --host or --destination.")]
   CompatibilityHost,
+  #[error("--remote-platform requires --host or --destination.")]
+  RemotePlatformTarget,
+  #[error("--destination cannot be combined with --host or --method.")]
+  ConflictingTargets,
   #[error("ctl shell requires a terminal; use ctl exec for commands or ctl ctmux new --detached.")]
   TerminalRequired,
   #[error("Remote VPN execution currently requires a Unix host.")]
@@ -653,6 +693,7 @@ mod tests {
     use clap::Parser;
     for flags in [
       &["--host", "remote"][..],
+      &["--destination", "remote"][..],
       &["--method", "route"][..],
       &["--host", "remote", "--remote-platform", "unix"][..],
     ] {
@@ -697,6 +738,7 @@ mod tests {
     use clap::Parser;
     for flags in [
       vec!["--host", "work"],
+      vec!["--destination", "work"],
       vec!["--method", "ssh"],
       vec!["--host", "work", "--remote-platform", "windows"],
     ] {
@@ -718,6 +760,7 @@ mod tests {
     use clap::Parser;
     for options in [
       vec!["--host", "work"],
+      vec!["--destination", "work"],
       vec!["--host", "work", "--method", "ssh"],
       vec!["--host", "work", "--remote-platform", "windows"],
     ] {
@@ -731,25 +774,113 @@ mod tests {
   async fn remote_vpn_profile_mutations_are_rejected_before_connecting() {
     use clap::Parser;
 
-    for action in ["create", "remove"] {
-      let arguments =
-        Arguments::try_parse_from(["ctl", "--host", "vpn-server", "vpn", action]).unwrap();
-      assert!(matches!(
-        run(arguments).await,
-        Err(CliError::Vpn(crate::vpn::Error::LocalProfilesOnly))
-      ));
+    for selector in ["--host", "--destination"] {
+      for action in ["create", "remove"] {
+        let arguments =
+          Arguments::try_parse_from(["ctl", selector, "vpn-server", "vpn", action]).unwrap();
+        assert!(matches!(
+          run(arguments).await,
+          Err(CliError::Vpn(crate::vpn::Error::LocalProfilesOnly))
+        ));
+      }
     }
   }
 
   #[tokio::test]
   async fn remote_daemon_restart_is_rejected_before_connecting() {
     use clap::Parser;
+    for selector in ["--host", "--destination"] {
+      let arguments =
+        Arguments::try_parse_from(["ctl", selector, "task-server", "taskd", "restart"]).unwrap();
+      assert!(matches!(
+        run(arguments).await,
+        Err(CliError::RemoteTaskDaemonRestartUnsupported)
+      ));
+    }
+  }
+
+  #[tokio::test]
+  async fn temporary_targets_are_rejected_by_local_and_compatibility_commands() {
+    use clap::Parser;
+    for command in [
+      &["logs"][..],
+      &["audit"][..],
+      &["skill"][..],
+      &["host", "list"][..],
+      &["ssh", "work"][..],
+      &["scp", "work:file", "."][..],
+    ] {
+      let arguments = Arguments::try_parse_from(
+        ["ctl", "--destination", "work"]
+          .into_iter()
+          .chain(command.iter().copied()),
+      )
+      .unwrap();
+      assert!(matches!(
+        run(arguments).await,
+        Err(
+          CliError::HistoryTarget
+            | CliError::SkillTarget
+            | CliError::HostManagementTarget
+            | CliError::CompatibilityHost
+        )
+      ));
+    }
+  }
+
+  #[tokio::test]
+  async fn remote_platform_requires_an_explicit_target_before_connecting() {
+    use clap::Parser;
     let arguments =
-      Arguments::try_parse_from(["ctl", "--host", "task-server", "taskd", "restart"]).unwrap();
+      Arguments::try_parse_from(["ctl", "--remote-platform", "windows", "ctmux", "list"]).unwrap();
     assert!(matches!(
       run(arguments).await,
-      Err(CliError::RemoteTaskDaemonRestartUnsupported)
+      Err(CliError::RemotePlatformTarget)
     ));
+  }
+
+  #[tokio::test]
+  async fn temporary_target_rejects_saved_options_after_the_subcommand() {
+    use clap::Parser;
+    for selector in ["--host", "--method"] {
+      let arguments =
+        Arguments::try_parse_from(["ctl", "--destination", "work", "shell", selector, "saved"])
+          .unwrap();
+      assert!(matches!(
+        run(arguments).await,
+        Err(CliError::ConflictingTargets)
+      ));
+    }
+  }
+
+  #[test]
+  fn windows_connections_preserve_ssh_config_without_posix_master_startup() {
+    use ctl_client::hosts::ConnectionTargetDto;
+    for platform in [
+      ctl_client::RemotePlatform::Unix,
+      ctl_client::RemotePlatform::Windows,
+    ] {
+      let mut settings = ConnectionTargetDto::ssh("user@configured");
+      if let ConnectionTargetDto::Ssh {
+        ssh_config_alias, ..
+      } = &mut settings
+      {
+        *ssh_config_alias = Some("user@configured".into());
+      }
+      let mut target = settings.to_core();
+      if let ConnectionTarget::Ssh { options, .. } = &mut target {
+        options.remote_platform = platform;
+      }
+      let connector = CtlConnector::new(target, settings);
+      let target = connector.settings.to_ssh_target().unwrap();
+      assert_eq!(target.destination, "user@configured");
+      assert_eq!(target.ssh_config_alias.as_deref(), Some("user@configured"));
+      assert_eq!(
+        target.uses_ssh_config_master(),
+        platform == ctl_client::RemotePlatform::Unix
+      );
+      assert!(target.hostname.is_none() && target.user.is_none() && target.port.is_none());
+    }
   }
 
   #[test]

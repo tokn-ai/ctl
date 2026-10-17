@@ -1,4 +1,5 @@
 //! CLI maintenance delegates mutations to the existing owner-pinned lifecycle APIs.
+use super::TargetOptions;
 use clap::ValueEnum;
 use ctl_core::component::ComponentInfo;
 use ctl_core::protocol::ProtocolVersion;
@@ -96,12 +97,18 @@ fn compatible(component: Daemon, info: &ComponentInfo) -> bool {
     })
 }
 
-fn validate_target(
-  host: Option<&str>,
-  method: Option<&str>,
-  platform: Option<crate::RemotePlatform>,
-  component: Option<Daemon>,
-) -> io::Result<()> {
+fn validate_target(target: TargetOptions<'_>, component: Option<Daemon>) -> io::Result<()> {
+  let TargetOptions {
+    host,
+    destination,
+    method,
+    platform,
+  } = target;
+  if destination.is_some() && host.is_some() {
+    return Err(io::Error::other(
+      "--destination cannot be combined with --host",
+    ));
+  }
   if method.is_some() && host.is_none() {
     return Err(io::Error::other("--method requires --host"));
   }
@@ -110,7 +117,9 @@ fn validate_target(
       "remote component maintenance requires a Unix SSH host",
     ));
   }
-  if host.is_some() && component.is_some_and(|component| component != Daemon::Ctmuxd) {
+  if (host.is_some() || destination.is_some())
+    && component.is_some_and(|component| component != Daemon::Ctmuxd)
+  {
     return Err(io::Error::other(
       "remote restart currently supports only ctmuxd",
     ));
@@ -125,8 +134,8 @@ struct RemoteConnection {
   remote_id: String,
 }
 
-async fn remote(host: &str, method: Option<&str>) -> io::Result<RemoteConnection> {
-  let target = crate::target::resolve(Some(host), method)
+async fn remote(selection: TargetOptions<'_>) -> io::Result<RemoteConnection> {
+  let target = crate::target::resolve(selection.host, selection.destination, selection.method)
     .await
     .map_err(io::Error::other)?
     .target;
@@ -195,16 +204,66 @@ mod tests {
 
   #[test]
   fn unsupported_remote_restarts_are_rejected_before_connecting() {
-    for daemon in [Daemon::Ctld, Daemon::CtlTaskd] {
-      assert!(validate_target(Some("work"), None, None, Some(daemon)).is_err());
+    let local = TargetOptions {
+      host: None,
+      destination: None,
+      method: None,
+      platform: None,
+    };
+    for target in [
+      TargetOptions {
+        host: Some("work"),
+        ..local
+      },
+      TargetOptions {
+        destination: Some("ssh-config-alias"),
+        ..local
+      },
+    ] {
+      for daemon in [Daemon::Ctld, Daemon::CtlTaskd] {
+        assert!(validate_target(target, Some(daemon)).is_err());
+      }
+      assert!(validate_target(target, Some(Daemon::Ctmuxd)).is_ok());
+      assert!(validate_target(target, None).is_ok());
+      assert!(
+        validate_target(
+          TargetOptions {
+            platform: Some(crate::RemotePlatform::Windows),
+            ..target
+          },
+          None,
+        )
+        .is_err()
+      );
     }
-    assert!(validate_target(Some("work"), None, None, Some(Daemon::Ctmuxd)).is_ok());
-    assert!(validate_target(None, Some("vpn"), None, None).is_err());
     assert!(
       validate_target(
-        Some("work"),
-        None,
-        Some(crate::RemotePlatform::Windows),
+        TargetOptions {
+          method: Some("vpn"),
+          ..local
+        },
+        None
+      )
+      .is_err()
+    );
+    assert!(
+      validate_target(
+        TargetOptions {
+          destination: Some("ssh-config-alias"),
+          method: Some("vpn"),
+          ..local
+        },
+        None
+      )
+      .is_err()
+    );
+    assert!(
+      validate_target(
+        TargetOptions {
+          host: Some("work"),
+          destination: Some("ssh-config-alias"),
+          ..local
+        },
         None
       )
       .is_err()

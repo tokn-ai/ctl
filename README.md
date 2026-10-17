@@ -603,10 +603,11 @@ ctl ctmux list
 ctl ctmux attach development
 ```
 
-Pass global `--host`/`-H` to redirect the same ctmux command through SSH. The
-value first selects a saved ctl host by name or ID, then falls back to an
-ordinary OpenSSH destination or `~/.ssh/config` host alias. Unix
-clients ask the per-user `ctld` to establish or reuse an authenticated OpenSSH
+Pass global `--host`/`-H` to select a saved ctl host by name or ID, or
+top-level `--destination` to connect temporarily to an ordinary SSH destination or
+`~/.ssh/config` host alias. Unknown saved names fail with a hint to use
+`--destination`; they do not fall back to SSH lookup. Unix clients ask the
+per-user `ctld` to establish or reuse an authenticated OpenSSH
 control master, then add the app-managed per-user installation to the fixed
 remote command's `PATH` before falling back to the remote account's ordinary
 non-interactive `PATH`:
@@ -615,6 +616,7 @@ non-interactive `PATH`:
 ctl --host workstation ctmux list
 ctl --host workstation ctmux new --name development
 ctl -H workstation ctmux attach development
+ctl --destination my-ssh-alias ctmux list
 ```
 
 `ctl-agent` has no network listener or application-level pairing state. It relays
@@ -750,7 +752,19 @@ ctl -H work shell --session development
 ctl -H work shell --plain
 ctl -H work exec -- uname -a
 ctl -H work exec -- sh -c 'printf "%s\n" "$HOME"'
+ctl --destination 192.168.1.1 shell
+ctl --destination user@mymachine.example.com exec -- uname -a
+ctl --destination my-ssh-alias shell --resume
 ```
+
+Use `-H`/`--host` only for a saved ctl host name or ID. Place `--destination`
+before the subcommand; it accepts an IPv4/IPv6 address, DNS name, or SSH-config
+alias, with an optional `user@`
+prefix. It uses OpenSSH configuration and bypasses the saved host catalog even
+when a saved host has the same name. It does not save a host definition.
+`--destination` conflicts with `--host` and `--method`; `--method` selects a
+saved host's connection method. `--remote-platform` works with either target
+selector. Omit both target selectors for local operations.
 
 Persistent `ctl shell` uses the shared ctmux TUI over local or SSH connections.
 Its bottom banner shows connection and history status. Mouse wheel or trackpad
@@ -817,7 +831,9 @@ method name or ID. Duplicate names are rejected; use a stable host ID instead.
 `user@work` overrides the saved account. Saved names take precedence over
 matching SSH-config aliases. Unknown destinations retain normal OpenSSH lookup.
 Ctl-specific flags go before `ssh`/`scp`; everything after those subcommands
-belongs to OpenSSH, including the remote command's flags.
+belongs to OpenSSH, including the remote command's flags. These compatibility
+commands take their destination positionally and reject ctl's `--host` and
+`--destination`; their saved-host-first lookup is unchanged.
 
 On Unix, ordinary saved-host SSH/SCP sessions reuse the exact ctld master,
 including VPN/SOCKS routes. The saved VPN is started when needed; Tailscale
@@ -840,6 +856,8 @@ config.
 ctl -H work port add 8080:127.0.0.1:80 --id web
 ctl -H work port list
 ctl -H work port remove web
+ctl --destination my-ssh-alias port add 8080:127.0.0.1:80 --id temporary-web
+ctl --destination my-ssh-alias port remove temporary-web
 ```
 
 `port add` connects as needed and returns after ctld starts the listener.
@@ -982,8 +1000,9 @@ the run; ctmuxd owns its process and PTY (ConPTY on Windows). `ctl task show`
 also reports the session ID for `ctl ctmux attach`. `ctl task logs` applies only
 to background tasks.
 
-Global `--host` selects the same remote target for task registration, lifecycle,
-logs, and interactive attachment:
+Global `--host` selects a saved remote target for task registration, lifecycle,
+logs, and interactive attachment. Use `--destination` for a temporary SSH
+destination instead, and keep the same selector throughout the workflow:
 
 ```sh
 ctl --host workstation task create api --cwd /home/me/service --start -- cargo run
@@ -1044,6 +1063,7 @@ shell, then select the server platform explicitly from either client platform:
 ctl --host windows-host --remote-platform windows ctmux new --name development -- cmd.exe /D /Q
 ctl --host windows-host --remote-platform windows ctmux attach development
 ctl --host windows-host --remote-platform windows task list
+ctl --destination windows-ssh-alias --remote-platform windows task list
 ```
 
 The fixed Windows commands are `ctl-agent.exe connect` for ctmux and

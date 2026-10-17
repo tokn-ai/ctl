@@ -16,7 +16,8 @@ live in `~/.tokn/ctl/versions` and are selected by `~/.tokn/ctl/current`. See
 ## Connection command
 
 `ctl ctmux` uses the canonical ctmux command implementation with a ctl-selected
-transport. When global `--host`/`-H` selects a remote target, every one-shot
+transport. When global `--host`/`-H` selects a saved remote target, or top-level
+`--destination` selects a temporary SSH destination or config alias, every one-shot
 request or interactive attachment starts the system OpenSSH client with the
 equivalent fixed argument sequence for the default Unix remote platform:
 
@@ -86,7 +87,7 @@ by [channel_still_open](https://github.com/openssh/openssh-portable/blob/V_9_9_P
 which suspends its [ControlPersist idle timer](https://github.com/openssh/openssh-portable/blob/V_9_9_P1/clientloop.c#L225-L251).
 This is a broker implementation detail; no ctl protocol messages or versions change.
 
-Without `--host`, transport-requiring `ctl ctmux` commands connect directly to
+Without `--host` or `--destination`, transport-requiring `ctl ctmux` commands connect directly to
 the current user's owner-only local `ctmuxd` endpoint and do not start SSH or
 `ctl-agent`. The `ctmux-proto` request, attachment, detach, and reconnect behavior
 above that transport is shared by both targets.

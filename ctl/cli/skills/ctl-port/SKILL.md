@@ -5,7 +5,11 @@ description: "Manage ctl's daemon-owned local SSH port forwards: add, inspect, u
 
 # ctl port
 
-Use `ctl port` on a Unix client with an SSH destination selected through `-H`.
+Use `ctl port` on a Unix client with a saved host selected through `-H`, or
+`ctl --destination DESTINATION port ...` for a temporary SSH address or config
+alias. Put `--destination` before the subcommand. It uses OpenSSH configuration,
+bypasses saved host lookup, and does not save a host definition; it conflicts
+with `--host` and `--method`.
 The listener runs on the client; `remote_host:remote_port` is reached from the
 SSH server. For host or route selection, use [ctl-host](../ctl-host/SKILL.md),
 available with `ctl skill ctl-host`.
@@ -40,6 +44,8 @@ ctl -H work --method vpn port remove work-db
 ```
 
 An empty list on another method does not prove the forward is gone.
+For temporary destinations, repeat the same `--destination` value for add,
+list, and remove.
 
 ## Specification and status
 

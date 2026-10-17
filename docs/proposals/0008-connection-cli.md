@@ -2,7 +2,7 @@
 
 - Status: Implemented
 - Created: 2026-10-01
-- Updated: 2026-10-13
+- Updated: 2026-10-18
 
 This extends the command scope of [Proposal 0002](0002-ctl.md) while retaining
 its fixed ctmux/task service protocols and remote authentication boundary.
@@ -15,13 +15,14 @@ cannot discover a private ctld SOCKS/VPN master from its destination alone.
 
 ## Command surface
 
-- `ctl [-H host] shell` creates and attaches a persistent ctmux session.
+- `ctl [-H host | --destination destination] shell` creates and attaches a
+  persistent ctmux session.
   `--session name` attaches or creates that name; `--plain` opens an ordinary shell.
-- `ctl [-H host] exec -- program arguments...` runs once without a PTY and
-  preserves the exit status and input/output streams. Unix remote arguments
+- `ctl [-H host | --destination destination] exec -- program arguments...` runs
+  once without a PTY and preserves the exit status and input/output streams. Unix remote arguments
   are quoted individually; shell expressions require an explicit shell command.
-- `ctl -H host port add/list/remove` manages local loopback listeners through
-  the existing ctld registry. Runtime forwards outlive the client, are visible
+- `ctl {-H host | --destination destination} port add/list/remove` manages local
+  loopback listeners through the existing ctld registry. Runtime forwards outlive the client, are visible
   through desktop Ports refresh, and are not implicitly persisted by the desktop.
   Repeated adds without `--id` reuse an identical endpoint definition within the
   selected daemon and connection method, preferring an active record. Failed
@@ -44,12 +45,26 @@ follows [Proposal 0011](0011-credentials-reconnect.md).
 
 ## Shared resolution and transport
 
-A host selects a saved catalog name or stable ID first. Unknown names fall back
-to ordinary SSH-config and DNS resolution. Ambiguous display names fail; stable
-IDs remain usable. `--method`, placed before compatibility subcommands, chooses
-a named method or ID instead of the preferred method. Explicit accounts override
-saved accounts. Saved Tailscale device references resolve against current device
-discovery rather than reusing an old address.
+For native commands, `-H`/`--host` selects only a saved catalog name or stable
+ID. Unknown names fail with a hint to use `--destination`; ambiguous display
+names fail and stable IDs remain usable. Top-level `--destination`, placed
+before the subcommand, selects a temporary SSH destination (IPv4/IPv6 address,
+DNS name, or SSH-config alias, optionally
+prefixed with `user@`). It uses OpenSSH configuration and bypasses the saved
+catalog even when names match, without saving a host definition. The same
+selectors apply to ctmux, registered tasks, remote VPN operations, and remote
+component maintenance. `--destination` conflicts with `--host` and `--method`;
+`--remote-platform` works with either target selector.
+
+Compatibility `ssh` and `scp` commands retain their positional destination
+lookup: saved names or IDs first, then ordinary OpenSSH lookup. They reject both
+ctl target selectors. `--method`, placed before compatibility subcommands,
+chooses a named method or ID instead of the preferred saved method. Explicit
+accounts override saved accounts. Saved Tailscale device references resolve
+against current device discovery rather than reusing an old address.
+
+Protocol changes: none. Target selection changes CLI resolution only; service
+operations, fields, and negotiation retain their existing contracts.
 
 Host and route types, validation, and Tailscale discovery are shared Rust code.
 The desktop keeps its existing catalog schema and location. The CLI reads that

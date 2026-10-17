@@ -167,6 +167,10 @@ The desktop currently selects Unix remote commands.
 interactive attachment opens the ordinary ctmux channel on the same target.
 The native SSH fixture exercises both services and both destination selectors.
 
+Windows SSH targets need `ctl-agent.exe` and the relevant companion executables
+installed on the server's `PATH`. Daemon auto-start is supported after installation;
+automatic remote component installation and repair currently target Unix hosts.
+
 `ctl-agent` uses the shared IPC stream and only the data endpoint. Its installed
 companion is `ctmuxd.exe` on Windows. Startup requests both `DETACHED_PROCESS`
 and `CREATE_BREAKAWAY_FROM_JOB`: Windows OpenSSH permits breakaway so the

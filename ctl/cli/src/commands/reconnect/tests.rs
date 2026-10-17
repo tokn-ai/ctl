@@ -44,6 +44,7 @@ fn remote_vpn_prerequisite_interruptions_keep_the_attachment_reconnect_loop_aliv
   assert!(retryable(&remote_vpn(ctl_ipc::remote_vpn::Error::Codec(
     CodecError::Io(ErrorKind::UnexpectedEof.into()),
   ))));
+  #[cfg(unix)]
   assert!(retryable(&CtlConnectError::Target(
     crate::target::Error::Runtime(crate::vpn::Error::Preparation(Box::new(
       crate::target::Error::Runtime(crate::vpn::Error::Remote(

@@ -46,7 +46,8 @@ The first command checks workspace formatting and runs Clippy over every target
 in the portable set with warnings denied. It runs in a separate quality job so
 lint failures do not hide runtime results. The second links and executes their
 native tests, including the client, IPC, task, process metadata parser, terminal
-emulation and ConPTY suites. The selection excludes only `ctld`, `ctmux-app` and
+emulation and ConPTY suites, collecting failures across all test binaries. The
+selection excludes only `ctld`, `ctmux-app` and
 `ctl-keychain-client`; it is explicit so a new platform-specific workspace member
 does not silently enter the gate.
 

@@ -1662,9 +1662,10 @@ mod tests {
 
   #[test]
   fn historical_local_vpn_routes_keep_their_contract_and_wire_shape() {
+    let socket_path = default_socket_path();
     let local: SshGateway = serde_json::from_value(serde_json::json!({
       "kind": "vpn",
-      "vpn": { "connection_id": "work", "socket_path": "/tmp/owner.sock" },
+      "vpn": { "connection_id": "work", "socket_path": socket_path },
       "destination": "work", "hostname": null, "user": null,
       "port": null, "identity_file": null, "mode": "automatic"
     }))
@@ -1679,6 +1680,7 @@ mod tests {
       CONTRACT_V1_1_13
     ));
     let wire = serde_json::to_value(&local).unwrap();
+    assert_eq!(wire["vpn"]["socket_path"], serde_json::json!(socket_path));
     assert!(wire["vpn"].get("expected_remote_id").is_none());
     let mut ssh = local.clone();
     ssh.kind = GatewayKind::Ssh;

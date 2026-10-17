@@ -83,6 +83,7 @@ test("portable quality and runtime checks cover the same clients, targets, and l
   assert.ok(clippy.args.includes("--all-targets"));
   assert.deepEqual(clippy.args.slice(-3), ["--", "-D", "warnings"]);
   assert.equal(tests.args[0], "test");
+  assert.ok(tests.args.includes("--no-fail-fast"));
   const packages = (args: string[]): string[] => args.flatMap((value, index) => value === "-p" ? [args[index + 1]] : []);
   assert.deepEqual(packages(clippy.args), packages(tests.args));
   for (const call of [clippy, tests]) {

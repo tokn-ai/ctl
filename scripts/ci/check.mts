@@ -62,7 +62,7 @@ function check(scope: Scope): void {
       run("cargo", ["clippy", "--locked", ...package_args, "--all-targets", "--", "-D", "warnings"]);
       break;
     case "rust":
-      run("cargo", ["test", "--locked", ...package_args]);
+      run("cargo", ["test", "--locked", "--no-fail-fast", ...package_args]);
       break;
     case "frontend": {
       for (const args of [

@@ -184,8 +184,10 @@ async fn observe(target: hosts::ConnectionTargetDto) -> Result<&'static str, Str
 }
 
 #[cfg(not(unix))]
-async fn observe(_target: hosts::ConnectionTargetDto) -> Result<&'static str, String> {
-  Ok("unsupported")
+fn observe(
+  _target: hosts::ConnectionTargetDto,
+) -> std::future::Ready<Result<&'static str, String>> {
+  std::future::ready(Ok("unsupported"))
 }
 
 #[cfg(unix)]

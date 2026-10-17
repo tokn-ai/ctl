@@ -52,41 +52,39 @@ pub(crate) enum RuntimeClient {
 }
 
 impl RuntimeClient {
-  #[cfg_attr(
-    not(unix),
-    expect(
-      clippy::unused_async,
-      reason = "target selection retains the asynchronous API used to prepare Unix remote routes"
-    )
-  )]
+  #[cfg(unix)]
   async fn for_target(target: &ConnectionTargetDto, start_routes: bool) -> Result<Self, Error> {
     if matches!(target, ConnectionTargetDto::Local) {
       return Ok(Self::Local(ctl_ipc::vpn::Client::default()));
     }
-    #[cfg(unix)]
-    {
-      if start_routes {
-        crate::target::ensure_vpn(target)
-          .await
-          .map_err(|error| Error::Preparation(Box::new(error)))?;
-      }
-      let owner = target.to_ssh_target()?;
-      let control_path = crate::ssh_broker::ensure_master(owner.clone()).await?;
-      let expected_remote_id = match target {
-        ConnectionTargetDto::Ssh { remote_info, .. } => remote_info
-          .as_ref()
-          .map(|identity| identity.remote_id.clone()),
-        ConnectionTargetDto::Local => None,
-      };
-      Ok(Self::Remote(
-        ctl_ipc::remote_vpn::Client::new(owner, expected_remote_id).with_control_path(control_path),
-      ))
+    if start_routes {
+      crate::target::ensure_vpn(target)
+        .await
+        .map_err(|error| Error::Preparation(Box::new(error)))?;
     }
-    #[cfg(not(unix))]
-    {
-      let _ = start_routes;
+    let owner = target.to_ssh_target()?;
+    let control_path = crate::ssh_broker::ensure_master(owner.clone()).await?;
+    let expected_remote_id = match target {
+      ConnectionTargetDto::Ssh { remote_info, .. } => remote_info
+        .as_ref()
+        .map(|identity| identity.remote_id.clone()),
+      ConnectionTargetDto::Local => None,
+    };
+    Ok(Self::Remote(
+      ctl_ipc::remote_vpn::Client::new(owner, expected_remote_id).with_control_path(control_path),
+    ))
+  }
+
+  #[cfg(not(unix))]
+  fn for_target(
+    target: &ConnectionTargetDto,
+    _start_routes: bool,
+  ) -> std::future::Ready<Result<Self, Error>> {
+    std::future::ready(if target.is_local() {
+      Ok(Self::Local(ctl_ipc::vpn::Client::default()))
+    } else {
       Err(Error::RemoteVpnUnsupported)
-    }
+    })
   }
 
   pub(crate) async fn list(&self) -> Result<ctl_ipc::VpnSnapshot, Error> {
@@ -646,6 +644,7 @@ pub enum Error {
   Broker(#[from] crate::ssh_broker::Error),
   #[error(transparent)]
   Remote(#[from] ctl_ipc::remote_vpn::Error),
+  #[cfg(unix)]
   #[error(transparent)]
   Preparation(Box<crate::target::Error>),
   #[error("An interactive terminal is required for `ctl vpn {0}`.")]
@@ -656,8 +655,10 @@ pub enum Error {
   NoOwnedVpn,
   #[error("VPN runtime inventory is unavailable. Specify a VPN name or ID to stop one.")]
   InventoryUnavailable,
+  #[cfg(unix)]
   #[error("VPN runtime inventory is incomplete. Start or update ctld, then retry removal.")]
   RemovalInventoryUnavailable,
+  #[cfg(unix)]
   #[error(
     "VPN {0:?} is active. Stop it and wait for its container to exit before removing its profile."
   )]

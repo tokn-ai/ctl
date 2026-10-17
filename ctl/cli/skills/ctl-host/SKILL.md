@@ -5,7 +5,7 @@ description: Manage ctl's saved host catalog, connection methods and preferred r
 
 # ctl host
 
-Use `ctl host` for saved host definitions shared with the desktop. A host represents one remote account/environment; its methods are alternate ways to reach that environment. These commands take a positional saved host name or ID, not `-H`/`--host`. Unsaved SSH aliases and raw destinations must first be saved to use host management.
+Use `ctl host` for saved host definitions shared with the desktop. A host represents one remote account/environment; its methods are alternate ways to reach that environment. These commands take a positional saved host name or ID, not `-H`/`--host` or the top-level `--destination` selector. Unsaved SSH aliases and raw destinations must first be saved to use host management. For a temporary connection without saving a host, use `ctl --destination DESTINATION shell`, `exec`, or another native remote operation instead.
 
 ## Inspect hosts and connection status
 

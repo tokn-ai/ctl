@@ -1,3 +1,4 @@
+use super::TargetOptions;
 use clap::ValueEnum;
 use ctl_client::component_update::{BuildSource, Package, UpdateResult};
 use ctl_client::hosts::ConnectionTargetDto;
@@ -28,15 +29,36 @@ struct HostResult {
   error: Option<String>,
 }
 
-pub(super) struct TargetOptions<'a> {
-  pub host: Option<&'a str>,
-  pub method: Option<&'a str>,
-  pub platform: Option<crate::RemotePlatform>,
+#[derive(Debug, PartialEq, Eq)]
+enum Choice {
+  Local,
+  Saved(String),
+  Destination(String),
+}
+
+impl Choice {
+  fn host(&self) -> Option<&str> {
+    match self {
+      Self::Saved(host) => Some(host),
+      _ => None,
+    }
+  }
+
+  fn destination(&self) -> Option<&str> {
+    match self {
+      Self::Destination(destination) => Some(destination),
+      _ => None,
+    }
+  }
+
+  fn label(&self) -> &str {
+    self.host().or(self.destination()).unwrap_or("local")
+  }
 }
 
 pub(super) async fn run(
   home: &Path,
-  mut hosts: Vec<String>,
+  hosts: Vec<String>,
   local: bool,
   options: ctl_client::component_update::UpdateOptions,
   target_options: TargetOptions<'_>,
@@ -44,6 +66,7 @@ pub(super) async fn run(
 ) -> io::Result<()> {
   let TargetOptions {
     host,
+    destination,
     method,
     platform,
   } = target_options;
@@ -58,23 +81,20 @@ pub(super) async fn run(
       "component uploads currently require a Unix SSH host",
     ));
   }
-  let choices = choices(&mut hosts, local, host);
+  let choices = choices(hosts, local, host, destination)?;
   let package_label = match package {
     Package::CtlAgent => "ctl-agent",
     Package::FullBundle => "full bundle",
   };
   let mut results = Vec::new();
   for choice in choices {
-    let label = choice.as_deref().unwrap_or("local").to_owned();
+    let label = choice.label().to_owned();
     eprintln!("ctl: Updating {label} ({package_label})…");
     let operation = update_host(
       home,
-      choice.as_deref(),
-      if choice.as_deref() == host {
-        method
-      } else {
-        None
-      },
+      choice.host(),
+      choice.destination(),
+      if choice.host() == host { method } else { None },
       package,
       &source,
     );
@@ -112,30 +132,45 @@ pub(super) async fn run(
   Ok(())
 }
 
-fn choices(hosts: &mut Vec<String>, local: bool, host: Option<&str>) -> Vec<Option<String>> {
+fn choices(
+  hosts: Vec<String>,
+  local: bool,
+  host: Option<&str>,
+  destination: Option<&str>,
+) -> io::Result<Vec<Choice>> {
+  if destination.is_some() && (host.is_some() || !hosts.is_empty()) {
+    return Err(io::Error::other(
+      "--destination cannot be combined with --host or --hosts",
+    ));
+  }
   let mut choices = Vec::new();
   if let Some(host) = host {
-    choices.push(Some(host.to_owned()));
+    choices.push(Choice::Saved(host.to_owned()));
   }
-  for host in hosts.drain(..) {
-    if !choices.contains(&Some(host.clone())) {
-      choices.push(Some(host));
+  if let Some(destination) = destination {
+    choices.push(Choice::Destination(destination.to_owned()));
+  }
+  for host in hosts {
+    let choice = Choice::Saved(host);
+    if !choices.contains(&choice) {
+      choices.push(choice);
     }
   }
   if local || choices.is_empty() {
-    choices.push(None);
+    choices.push(Choice::Local);
   }
-  choices
+  Ok(choices)
 }
 
 async fn update_host(
   home: &Path,
   host: Option<&str>,
+  destination: Option<&str>,
   method: Option<&str>,
   package: Package,
   source: &BuildSource,
 ) -> io::Result<UpdateResult> {
-  let resolved = crate::target::resolve(host, method)
+  let resolved = crate::target::resolve(host, destination, method)
     .await
     .map_err(io::Error::other)?;
   let target = resolved.target;
@@ -294,14 +329,43 @@ mod tests {
   use super::*;
   #[test]
   fn default_local_and_explicit_batch_targets_are_distinct() {
-    assert_eq!(choices(&mut vec![], false, None), vec![None]);
+    assert_eq!(
+      choices(vec![], false, None, None).unwrap(),
+      vec![Choice::Local]
+    );
     assert_eq!(
       choices(
-        &mut vec!["a".into(), "b".into(), "a".into()],
+        vec!["a".into(), "b".into(), "a".into()],
         true,
-        Some("a")
-      ),
-      vec![Some("a".into()), Some("b".into()), None]
+        Some("a"),
+        None,
+      )
+      .unwrap(),
+      vec![
+        Choice::Saved("a".into()),
+        Choice::Saved("b".into()),
+        Choice::Local
+      ]
     );
+  }
+
+  #[test]
+  fn temporary_destination_can_include_local_without_becoming_a_saved_host() {
+    for destination in ["192.168.1.1", "mymachine.example.com", "ssh-config-alias"] {
+      let targets = choices(vec![], true, None, Some(destination)).unwrap();
+      assert_eq!(
+        targets,
+        vec![Choice::Destination(destination.into()), Choice::Local]
+      );
+      assert_eq!(targets[0].host(), None);
+      assert_eq!(targets[0].destination(), Some(destination));
+      assert_eq!(targets[0].label(), destination);
+    }
+  }
+
+  #[test]
+  fn temporary_destination_rejects_saved_host_selections() {
+    assert!(choices(vec![], false, Some("work"), Some("server")).is_err());
+    assert!(choices(vec!["work".into()], false, None, Some("server")).is_err());
   }
 }

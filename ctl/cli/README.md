@@ -3,6 +3,32 @@
 Installs the `ctl` command for local and remote terminal sessions, managed tasks,
 SSH, file copies, port forwards, and VPN connections.
 
+## Select a target
+
+Use `-H`/`--host NAME_OR_ID` for a saved ctl host. Unknown names fail with a
+hint to use `--destination`; ambiguous names require the stable ID.
+Place `--destination DESTINATION` before the subcommand for a temporary SSH
+connection to an IPv4/IPv6 address, DNS name, or SSH-config alias, optionally
+prefixed with `user@`:
+
+```sh
+ctl --destination 192.168.1.1 shell
+ctl --destination user@mymachine.example.com exec -- uname -a
+ctl --destination my-ssh-alias ctmux list
+```
+
+Temporary destinations use OpenSSH configuration, bypass the saved host catalog
+even when names match, and do not save a host definition. `--destination`
+conflicts with `--host` and `--method`; `--method` chooses a saved host's
+connection method. `--remote-platform` works with either target selector.
+Windows destinations retain SSH endpoint configuration but use a private master
+because configured master startup requires a POSIX shell.
+The selectors apply to shells, execution, ctmux, registered tasks, managed ports,
+remote VPN operations, and remote component maintenance. Omit both selectors
+for local operations where supported. `ssh` and `scp` take their destinations
+positionally and retain saved-host-first lookup followed by ordinary OpenSSH
+lookup; they reject both ctl target selectors.
+
 ## Persistent shells
 
 ```sh
@@ -161,6 +187,7 @@ and sessions; restart or reconnect separately.
 ```sh
 ctl components update --hosts work,jump-a --package ctl-agent
 ctl --host work --method vpn components update
+ctl --destination my-ssh-alias components update
 ctl components update --hosts work --from /path/to/bundle-set --json
 ```
 
@@ -177,6 +204,7 @@ for source formats, cancellation, and per-host results.
 
 VPN profiles remain in the local catalog. Use `ctl --host GATEWAY vpn start NAME_OR_ID`,
 `vpn list`, and `vpn stop NAME_OR_ID` to run and manage a profile on an SSH host.
+Use `--destination SSH_DESTINATION` instead of `--host` for a temporary gateway.
 The gateway needs updated ctl-agent/ctld components and Docker or Podman. Its
 VPN SOCKS5 listener stays on remote loopback; traffic travels through SSH.
 Remote VPNs keep running until explicitly stopped, including after SSH disconnects.
@@ -232,7 +260,7 @@ contract `1.1.4` for authoritative discovery; update the selected signed helper
 if an older helper rejects it. Both removal actions require an interactive
 terminal and have no `--yes` bypass. They retain private key files, hosts, VPN profiles, running
 connections, and never-save preferences. These commands manage the local macOS
-Keychain, so omit `--host`, `--method`, and `--remote-platform`.
+Keychain, so omit `--host`, `--destination`, `--method`, and `--remote-platform`.
 
 `vpn create` opens a questionnaire and saves an OpenConnect or Tailscale profile
 without starting a daemon or container. Password input is masked. `vpn list`

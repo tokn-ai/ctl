@@ -619,7 +619,7 @@ fn display_value(value: Option<&str>) -> String {
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-  #[error("VPN profile creation and removal are local operations; omit --host.")]
+  #[error("VPN profile creation and removal are local operations; omit --host and --destination.")]
   LocalProfilesOnly,
   #[error("Multiple remote VPN connections are active; specify a VPN name or ID to stop one.")]
   AmbiguousStop,

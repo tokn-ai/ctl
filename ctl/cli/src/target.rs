@@ -1,7 +1,20 @@
 use ctl_client::hosts::{self, ConnectionTargetDto, HostError, ResolvedHost};
 use std::path::PathBuf;
 
-pub async fn resolve(host: Option<&str>, method: Option<&str>) -> Result<ResolvedHost, HostError> {
+pub async fn resolve(
+  host: Option<&str>,
+  destination: Option<&str>,
+  method: Option<&str>,
+) -> Result<ResolvedHost, HostError> {
+  if let Some(destination) = destination {
+    if host.is_some() || method.is_some() {
+      return Err(HostError::new(
+        "target_conflict",
+        "--destination cannot be combined with --host or --method.",
+      ));
+    }
+    return temporary_destination(destination);
+  }
   let Some(host) = host else {
     if method.is_some() {
       return Err(HostError::new("host_required", "--method requires a host."));
@@ -14,11 +27,72 @@ pub async fn resolve(host: Option<&str>, method: Option<&str>) -> Result<Resolve
     });
   };
   let path = catalog_path()?;
-  let mut resolved = hosts::resolve(&hosts::load_catalog(&path)?, host, method)?;
+  let resolved = resolve_saved(&hosts::load_catalog(&path)?, host, method)?;
+  refresh_tailscale(resolved).await
+}
+
+fn resolve_saved(
+  catalog: &hosts::HostCatalogDocument,
+  host: &str,
+  method: Option<&str>,
+) -> Result<ResolvedHost, HostError> {
+  if !catalog
+    .hosts
+    .iter()
+    .any(|saved| saved.host_id == host || saved.name == host)
+  {
+    return Err(HostError::new(
+      "host_not_found",
+      format!(
+        "No saved ctl host matches {host:?}; use --destination for an SSH address or config alias."
+      ),
+    ));
+  }
+  hosts::resolve(catalog, host, method)
+}
+
+/// Compatibility commands retain saved-host-first positional lookup.
+pub async fn resolve_openssh(
+  destination: &str,
+  method: Option<&str>,
+) -> Result<ResolvedHost, HostError> {
+  let path = catalog_path()?;
+  let resolved = hosts::resolve(&hosts::load_catalog(&path)?, destination, method)?;
+  refresh_tailscale(resolved).await
+}
+
+async fn refresh_tailscale(mut resolved: ResolvedHost) -> Result<ResolvedHost, HostError> {
   if resolved.requires_tailscale() {
     resolved.resolve_tailscale(&ctl_client::tailscale::discover_devices().await.devices)?;
   }
   Ok(resolved)
+}
+
+fn temporary_destination(destination: &str) -> Result<ResolvedHost, HostError> {
+  let mut target = ConnectionTargetDto::ssh(destination);
+  if target.to_ssh_target().is_err()
+    || destination.starts_with('!')
+    || destination.contains(['*', '?'])
+  {
+    return Err(HostError::new(
+      "invalid_ssh_target",
+      "Use a valid SSH destination or config alias with --destination.",
+    ));
+  }
+  if let ConnectionTargetDto::Ssh {
+    ssh_config_alias, ..
+  } = &mut target
+  {
+    // Let OpenSSH resolve the original destination and its sharing policy.
+    // Never copy endpoint overrides or pinned identities from the host catalog.
+    *ssh_config_alias = Some(destination.into());
+  }
+  Ok(ResolvedHost {
+    host_id: None,
+    target,
+    tailscale_node_id: None,
+    gateway_tailscale_bindings: Vec::new(),
+  })
 }
 
 pub fn catalog_path() -> Result<PathBuf, HostError> {
@@ -129,4 +203,71 @@ pub enum Error {
   VpnUnavailable,
   #[error("The selected VPN requires sign-in at {0}. Complete sign-in and reconnect.")]
   VpnAuthenticationRequired(String),
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn saved_selection_requires_a_literal_catalog_name_or_id() {
+    let catalog = serde_json::from_value(serde_json::json!({
+      "schema_version": 1, "ssh_gateways": [],
+      "hosts": [{
+        "host_id": "saved-1", "name": "work", "preferred_method_id": "ssh",
+        "connection_methods": [{
+          "method_id": "ssh", "name": "Direct",
+          "target": { "kind": "ssh", "destination": "saved.example.com", "user": "saved-user" }
+        }]
+      }]
+    }))
+    .unwrap();
+    for selector in ["work", "saved-1"] {
+      let resolved = resolve_saved(&catalog, selector, None).unwrap();
+      assert_eq!(resolved.host_id.as_deref(), Some("saved-1"));
+      assert_eq!(resolved.target.label(), "saved.example.com");
+    }
+    for selector in ["missing", "user@work", "saved.example.com"] {
+      let error = resolve_saved(&catalog, selector, None).err().unwrap();
+      assert_eq!(error.code, "host_not_found");
+      assert!(error.message.contains("--destination"));
+    }
+  }
+
+  #[test]
+  fn invalid_temporary_destinations_fail_before_transport_setup() {
+    for destination in [
+      "",
+      "-options",
+      "has space",
+      "line\nfeed",
+      "!excluded",
+      "*",
+      "host?",
+    ] {
+      assert_eq!(
+        temporary_destination(destination).err().unwrap().code,
+        "invalid_ssh_target",
+      );
+    }
+  }
+
+  #[tokio::test]
+  async fn temporary_targets_reject_saved_options_and_default_is_local() {
+    for (host, method) in [(Some("work"), None), (None, Some("vpn"))] {
+      assert_eq!(
+        resolve(host, Some("alias"), method)
+          .await
+          .err()
+          .unwrap()
+          .code,
+        "target_conflict"
+      );
+    }
+    assert!(resolve(None, None, None).await.unwrap().target.is_local());
+    assert_eq!(
+      resolve(None, None, Some("ssh")).await.err().unwrap().code,
+      "host_required"
+    );
+  }
 }

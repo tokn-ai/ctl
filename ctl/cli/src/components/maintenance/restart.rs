@@ -1,4 +1,5 @@
 use super::{Daemon, build_label, compatible, output, remote, validate_target};
+use crate::components::TargetOptions;
 use ctl_core::component::ComponentInfo;
 use std::io;
 use std::io::IsTerminal as _;
@@ -78,13 +79,9 @@ impl Prepared {
   }
 }
 
-async fn prepare_restart(
-  component: Daemon,
-  host: Option<&str>,
-  method: Option<&str>,
-) -> io::Result<Prepared> {
-  if let Some(host) = host {
-    let remote = remote(host, method).await?;
+async fn prepare_restart(component: Daemon, target: TargetOptions<'_>) -> io::Result<Prepared> {
+  if target.host.is_some() || target.destination.is_some() {
+    let remote = remote(target).await?;
     let prepared = ctl_client::maintenance::prepare_ctmux_restart(
       &remote.destination,
       &remote.options,
@@ -140,27 +137,26 @@ async fn prepare_restart(
 
 pub(crate) async fn run(
   component: Daemon,
-  host: Option<&str>,
-  method: Option<&str>,
-  platform: Option<crate::RemotePlatform>,
+  target: TargetOptions<'_>,
   yes: bool,
   dry_run: bool,
   json: bool,
 ) -> io::Result<()> {
-  validate_target(host, method, platform, Some(component))?;
+  validate_target(target, Some(component))?;
   if !yes && !dry_run && (!io::stdin().is_terminal() || !io::stderr().is_terminal()) {
     return Err(io::Error::other(
       "restart requires an interactive terminal or explicit --yes; use --dry-run to inspect the plan",
     ));
   }
-  let prepared = prepare_restart(component, host, method).await?;
+  let prepared = prepare_restart(component, target).await?;
   let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
   let available = prepared.available();
-  let plan = serde_json::json!({ "host": host.unwrap_or("local"), "component": component, "before": prepared.before(), "available": available, "impact": component.impact(), "dry_run": dry_run });
+  let label = target.host.or(target.destination).unwrap_or("local");
+  let plan = serde_json::json!({ "host": label, "component": component, "before": prepared.before(), "available": available, "impact": component.impact(), "dry_run": dry_run });
   eprintln!(
     "{} on {} → {}\n{}",
     component.name(),
-    crate::table::text(host.unwrap_or("local")),
+    crate::table::text(label),
     build_label(Some(&available)),
     component.impact()
   );
@@ -196,9 +192,7 @@ pub(crate) async fn run(
   // force-kill an owner or retry a mutation on an uncertain result.
   let outcome = prepared.restart().await?;
   if json {
-    output(
-      &serde_json::json!({ "host": host.unwrap_or("local"), "component": component, "result": outcome }),
-    )?;
+    output(&serde_json::json!({ "host": label, "component": component, "result": outcome }))?;
   } else {
     println!(
       "{} restarted and its replacement was verified.",
@@ -214,6 +208,7 @@ pub(crate) async fn run(
 #[cfg(test)]
 mod tests {
   use super::{Daemon, prepare_restart};
+  use crate::components::TargetOptions;
   use std::io;
   use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -302,10 +297,18 @@ mod tests {
         );
       }))
     };
-    let error = prepare_restart(Daemon::Ctld, None, None)
-      .await
-      .err()
-      .expect("fixture must stop before mutation");
+    let error = prepare_restart(
+      Daemon::Ctld,
+      TargetOptions {
+        host: None,
+        destination: None,
+        method: None,
+        platform: None,
+      },
+    )
+    .await
+    .err()
+    .expect("fixture must stop before mutation");
     match mode.as_str() {
       "provider" => {
         assert!(error.to_string().contains(PROVIDER_ERROR), "{error}");

@@ -6,16 +6,19 @@ description: Create or remove saved VPN profiles, list their runtime state, and 
 # ctl vpn
 
 Use `ctl vpn` on a Unix client. Add `--host GATEWAY` to list, start, or stop VPNs
-on an SSH host. Profiles and their secrets remain in the local catalog; remote
-start sends the selected settings over the authenticated SSH channel after
-checking the saved remote identity. Docker or Podman and updated ctl-agent/ctld
+on a saved SSH host, or place `--destination SSH_DESTINATION` before `vpn` for a
+temporary SSH address or config alias. The latter uses OpenSSH configuration,
+bypasses saved host lookup, and does not save a host definition; it conflicts
+with `--host` and `--method`. Profiles and their secrets remain in the local
+catalog; remote start sends the selected settings over the authenticated SSH channel after
+checking any saved remote identity. Docker or Podman and updated ctl-agent/ctld
 components must be available where the VPN executes. Local start launches ctld
 if needed. Local list reads the saved catalog and passively probes the selected
 daemon without acquiring or renewing heartbeat interest. Remote list authenticates
 SSH but does not start the remote VPN service or VPNs. Remote start may prepare
 the selected host's preceding VPN route; list and stop use its existing route.
 Remote VPNs remain running after SSH disconnects until explicitly stopped.
-Create and remove are local profile operations and reject `--host`.
+Create and remove are local profile operations and reject both target selectors.
 
 Use `--gateway JUMP_ID --gateway vpn:PROFILE_ID` when saving an ordered host route.
 A VPN after an SSH gateway executes on that gateway. A first VPN step, or the

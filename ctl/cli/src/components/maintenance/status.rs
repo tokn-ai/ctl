@@ -1,4 +1,5 @@
 use super::{Daemon, build_label, compatible, flag, output, remote, validate_target};
+use crate::components::TargetOptions;
 use ctl_client::component_status::{LocalOwner, OwnerState, observe_local};
 use ctl_core::component::ComponentInfo;
 use ctl_core::component::{LegacyProtocolInfo, ProtocolInfo, protocols_match};
@@ -276,16 +277,11 @@ fn agent_compatible(info: &ComponentInfo) -> bool {
       })
 }
 
-pub(crate) async fn run(
-  host: Option<&str>,
-  method: Option<&str>,
-  platform: Option<crate::RemotePlatform>,
-  json: bool,
-) -> io::Result<()> {
-  validate_target(host, method, platform, None)?;
+pub(crate) async fn run(target: TargetOptions<'_>, json: bool) -> io::Result<()> {
+  validate_target(target, None)?;
   let mut remote_id = None;
-  let rows = if let Some(host) = host {
-    let remote = remote(host, method).await?;
+  let rows = if target.host.is_some() || target.destination.is_some() {
+    let remote = remote(target).await?;
     let snapshot = ctl_client::maintenance::inspect_components(
       &remote.destination,
       &remote.options,
@@ -310,7 +306,7 @@ pub(crate) async fn run(
   };
   if json {
     output(
-      &serde_json::json!({ "host": host.unwrap_or("local"), "remote_id": remote_id, "components": rows }),
+      &serde_json::json!({ "host": target.host.or(target.destination).unwrap_or("local"), "remote_id": remote_id, "components": rows }),
     )?;
   } else {
     let table = crate::table::format(

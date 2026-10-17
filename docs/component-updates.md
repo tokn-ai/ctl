@@ -194,7 +194,7 @@ If activation cannot be verified, ctl reports that installation may have
 completed and asks you to check the host. It does not retry a destructive action
 or stop a daemon automatically.
 
-## Inspect and restart from the CLI
+## Inspect, restart and stop from the CLI
 
 ```sh
 ctl components status
@@ -205,6 +205,10 @@ ctl components restart ctmuxd
 ctl components restart ctl-taskd
 ctl -H work components status
 ctl -H work components restart ctmuxd
+ctl components stop ctld
+ctl components stop ctmuxd
+ctl components stop ctl-taskd
+ctl -H work components stop ctmuxd
 ```
 
 `status` compares each running owner's full build identity and protocol advertisements
@@ -256,5 +260,18 @@ every daemon process on the machine. Remote restart currently supports only ctmu
 ctld and ctl-taskd are rejected before connecting.
 
 Sync/import and update/install continue to preserve running owners. Restart is a separate,
-explicit step after selecting and installing a build. These CLI operations use existing
-lifecycle and remote maintenance contracts; they add no protocol version or build changes.
+explicit step after selecting and installing a build. `stop` pins an existing owner and uses cooperative shutdown without selecting,
+installing or launching a replacement. It accepts the same `--yes`, `--dry-run`
+and `--json` options as restart, with a 20-second confirmation window. Stopping
+an absent local owner succeeds without starting it. Active tasks cause taskd to
+refuse shutdown. Stopping ctmuxd ends all its sessions and panes; stopping ctld
+interrupts its clients and VPNs. No command force-kills a daemon or retries an
+uncertain shutdown. Later connections can start services again; stop does not
+disable normal automatic startup.
+
+Local stop reuses the shutdown phase of the existing lifecycle contracts.
+Remote stop requires ctl-agent maintenance `1.2.4` (build 4), verifies the remote
+machine identity and requires a separate confirmation. Remote stop supports only
+ctmuxd; remote ctld and ctl-taskd are rejected before connecting. An older agent
+must be updated before remote stop can be used. Existing restart and inspection
+contracts remain supported.

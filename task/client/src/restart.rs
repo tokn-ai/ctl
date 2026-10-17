@@ -4,6 +4,7 @@ use super::{ClientError, daemon_executable, retryable, spawn_daemon, wait_for_en
 use ctl_core::{component::ComponentInfo, executable::PreparedExecutable};
 use ctl_task_ipc::{Stream, connect};
 use ctl_task_proto::{control, read_frame, write_frame};
+use std::io;
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::io::AsyncReadExt as _;
@@ -82,6 +83,21 @@ impl Client {
     .map_err(|error| LifecycleError::new("taskd_replacement_unavailable", error))
   }
 
+  /// Pins an existing idle-only owner without selecting a replacement executable.
+  ///
+  /// # Errors
+  /// Rejects inaccessible or absent endpoints; support/busy checks occur on confirmation.
+  pub async fn preflight_stop(&self) -> Result<PreparedStop, LifecycleError> {
+    let stream = connect(&self.socket)
+      .await
+      .map_err(|error| LifecycleError::new("taskd_not_running", error))?;
+    Ok(PreparedStop {
+      stream,
+      socket: self.socket.clone(),
+      expires_at: Instant::now() + CONFIRMATION_TTL,
+    })
+  }
+
   /// Pins an existing owner without sending a mutating request or starting a daemon.
   ///
   /// Retains an unsent stream until confirmation because `RestartDaemon` is
@@ -151,7 +167,7 @@ impl PreparedRestart {
     if Instant::now() >= self.expires_at {
       return Err(LifecycleError::new(
         "taskd_restart_expired",
-        "Restart confirmation expired; prepare it again",
+        "Maintenance confirmation expired; prepare it again",
       ));
     }
     self
@@ -159,52 +175,7 @@ impl PreparedRestart {
       .verify()
       .await
       .map_err(|error| LifecycleError::new("taskd_binary_changed", error))?;
-    if timeout(Duration::from_millis(10), self.stream.read(&mut [0_u8; 1]))
-      .await
-      .is_ok()
-    {
-      return Err(LifecycleError::new(
-        "taskd_owner_changed",
-        "The prepared ctl-taskd connection closed or changed; prepare the restart again",
-      ));
-    }
-    if Instant::now() >= self.expires_at {
-      return Err(LifecycleError::new(
-        "taskd_restart_expired",
-        "Restart confirmation expired; prepare it again",
-      ));
-    }
-    let configuration = timeout(Duration::from_secs(5), async {
-      write_frame(&mut self.stream, &control::ClientMessage::RestartDaemon {
-        protocol: control::protocol_offer(),
-      }).await.map_err(|error| LifecycleError::new("taskd_restart_failed", error).destructive())?;
-      match read_frame::<_, control::ServerMessage>(&mut self.stream).await {
-        Ok(Some(control::ServerMessage::RestartAccepted { protocol_version, data_directory, ctmux_socket }))
-          if control::protocol_offer().accepts(protocol_version) => Ok((data_directory, ctmux_socket)),
-        Ok(Some(control::ServerMessage::Error { message })) => Err(LifecycleError::new("taskd_restart_rejected", message)),
-        _ => Err(LifecycleError::new("taskd_restart_unsupported", "The task owner did not acknowledge cooperative restart; it may require a one-time manual stop").destructive()),
-      }
-    }).await.map_err(|_| LifecycleError::new("taskd_restart_timeout", "ctl-taskd did not acknowledge restart").destructive())??;
-    // EOF is sent only after the listener and persisted-state lock are released.
-    let end = timeout(Duration::from_secs(15), self.stream.read(&mut [0_u8; 1]))
-      .await
-      .map_err(|_| {
-        LifecycleError::new(
-          "taskd_restart_drain_failed",
-          "ctl-taskd did not finish stopping; no replacement was started",
-        )
-        .destructive()
-      })?
-      .map_err(|error| LifecycleError::new("taskd_restart_drain_failed", error).destructive())?;
-    if end != 0 {
-      return Err(
-        LifecycleError::new(
-          "taskd_restart_drain_failed",
-          "Unexpected data while waiting for ctl-taskd shutdown",
-        )
-        .destructive(),
-      );
-    }
+    let configuration = drain_owner(&mut self.stream, self.expires_at).await?;
     self
       .replacement
       .verify()
@@ -221,6 +192,97 @@ impl PreparedRestart {
       .map_err(LifecycleError::destructive)?;
     Ok(RestartOutcome { after })
   }
+}
+
+#[derive(Debug)]
+pub struct PreparedStop {
+  pub expires_at: Instant,
+  stream: Stream,
+  socket: PathBuf,
+}
+impl PreparedStop {
+  /// Stops an idle pinned owner without launching a successor.
+  ///
+  /// # Errors
+  /// Busy owners remain untouched; rejects expired/closed peers and drain failures.
+  pub async fn stop(mut self) -> Result<(), LifecycleError> {
+    if Instant::now() >= self.expires_at {
+      return Err(LifecycleError::new(
+        "taskd_confirmation_expired",
+        "Maintenance confirmation expired; prepare it again",
+      ));
+    }
+    drain_owner(&mut self.stream, self.expires_at).await?;
+    match connect(&self.socket).await {
+      Err(error)
+        if matches!(
+          error.kind(),
+          io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+        ) =>
+      {
+        Ok(())
+      }
+      _ => Err(
+        LifecycleError::new(
+          "taskd_owner_changed",
+          "A task owner is still present after shutdown",
+        )
+        .destructive(),
+      ),
+    }
+  }
+}
+async fn drain_owner(
+  stream: &mut Stream,
+  expires_at: Instant,
+) -> Result<(PathBuf, PathBuf), LifecycleError> {
+  if timeout(Duration::from_millis(10), stream.read(&mut [0_u8; 1]))
+    .await
+    .is_ok()
+  {
+    return Err(LifecycleError::new(
+      "taskd_owner_changed",
+      "The prepared ctl-taskd connection closed or changed; prepare maintenance again",
+    ));
+  }
+  if Instant::now() >= expires_at {
+    return Err(LifecycleError::new(
+      "taskd_restart_expired",
+      "Maintenance confirmation expired; prepare it again",
+    ));
+  }
+  let configuration = timeout(Duration::from_secs(5), async {
+      write_frame(stream, &control::ClientMessage::RestartDaemon {
+        protocol: control::protocol_offer(),
+      }).await.map_err(|error| LifecycleError::new("taskd_restart_failed", error).destructive())?;
+      match read_frame::<_, control::ServerMessage>(stream).await {
+        Ok(Some(control::ServerMessage::RestartAccepted { protocol_version, data_directory, ctmux_socket }))
+          if control::protocol_offer().accepts(protocol_version) => Ok((data_directory, ctmux_socket)),
+        Ok(Some(control::ServerMessage::Error { message })) => Err(LifecycleError::new("taskd_restart_rejected", message)),
+        _ => Err(LifecycleError::new("taskd_restart_unsupported", "The task owner did not acknowledge cooperative shutdown; it may require a one-time manual stop").destructive()),
+      }
+    }).await.map_err(|_| LifecycleError::new("taskd_restart_timeout", "ctl-taskd did not acknowledge shutdown").destructive())??;
+  // EOF is sent only after the listener and persisted-state lock are released.
+  let end = timeout(Duration::from_secs(15), stream.read(&mut [0_u8; 1]))
+    .await
+    .map_err(|_| {
+      LifecycleError::new(
+        "taskd_restart_drain_failed",
+        "ctl-taskd did not finish stopping; no replacement was started",
+      )
+      .destructive()
+    })?
+    .map_err(|error| LifecycleError::new("taskd_restart_drain_failed", error).destructive())?;
+  if end != 0 {
+    return Err(
+      LifecycleError::new(
+        "taskd_restart_drain_failed",
+        "Unexpected data while waiting for ctl-taskd shutdown",
+      )
+      .destructive(),
+    );
+  }
+  Ok(configuration)
 }
 
 async fn verify_successor(

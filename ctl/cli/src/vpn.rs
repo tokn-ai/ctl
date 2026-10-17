@@ -47,10 +47,18 @@ pub enum Command {
 
 pub(crate) enum RuntimeClient {
   Local(ctl_ipc::vpn::Client),
+  #[cfg(unix)]
   Remote(ctl_ipc::remote_vpn::Client),
 }
 
 impl RuntimeClient {
+  #[cfg_attr(
+    not(unix),
+    expect(
+      clippy::unused_async,
+      reason = "target selection retains the asynchronous API used to prepare Unix remote routes"
+    )
+  )]
   async fn for_target(target: &ConnectionTargetDto, start_routes: bool) -> Result<Self, Error> {
     if matches!(target, ConnectionTargetDto::Local) {
       return Ok(Self::Local(ctl_ipc::vpn::Client::default()));
@@ -84,6 +92,7 @@ impl RuntimeClient {
   pub(crate) async fn list(&self) -> Result<ctl_ipc::VpnSnapshot, Error> {
     match self {
       Self::Local(client) => Ok(client.list().await?),
+      #[cfg(unix)]
       Self::Remote(client) => Ok(client.list().await?),
     }
   }
@@ -94,6 +103,7 @@ impl RuntimeClient {
   ) -> Result<ctl_ipc::VpnStatus, Error> {
     match self {
       Self::Local(client) => Ok(client.start_connection(connection).await?),
+      #[cfg(unix)]
       Self::Remote(client) => Ok(client.start_connection(connection).await?),
     }
   }
@@ -101,6 +111,7 @@ impl RuntimeClient {
   async fn stop_id(&self, connection_id: &str) -> Result<ctl_ipc::VpnStatus, Error> {
     match self {
       Self::Local(client) => Ok(client.stop_id(connection_id).await?),
+      #[cfg(unix)]
       Self::Remote(client) => Ok(client.stop_id(connection_id).await?),
     }
   }
@@ -108,6 +119,7 @@ impl RuntimeClient {
   async fn stop(&self) -> Result<ctl_ipc::VpnStatus, Error> {
     match self {
       Self::Local(client) => Ok(client.stop().await?),
+      #[cfg(unix)]
       Self::Remote(_) => {
         let snapshot = self.list().await?;
         let mut connections = snapshot.connections.iter().filter(|status| {
@@ -621,6 +633,7 @@ fn display_value(value: Option<&str>) -> String {
 pub enum Error {
   #[error("VPN profile creation and removal are local operations; omit --host and --destination.")]
   LocalProfilesOnly,
+  #[cfg(unix)]
   #[error("Multiple remote VPN connections are active; specify a VPN name or ID to stop one.")]
   AmbiguousStop,
   #[cfg(not(unix))]

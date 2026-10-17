@@ -99,20 +99,27 @@ $saved = @('--host', 'saved-windows-ci', '--remote-platform', 'windows')
 $sshDirectory = Join-Path $env:USERPROFILE '.ssh'
 New-Item -ItemType Directory -Force $sshDirectory | Out-Null
 $config = Join-Path $sshDirectory 'config'
-$originalConfig = if (Test-Path $config) { [IO.File]::ReadAllBytes($config) } else { $null }
+$originalConfig = $null
+if (Test-Path $config) { $originalConfig = [IO.File]::ReadAllBytes($config) }
 $originalConfigText = if (Test-Path $config) { [IO.File]::ReadAllText($config) } else { '' }
 $service = Get-Service sshd
 $wasRunning = $service.Status -eq 'Running'
 $originalStartType = $service.StartType
 $originalServicePath = (Get-CimInstance Win32_Service -Filter "Name = 'sshd'").PathName
 $serverConfig = Join-Path $env:ProgramData 'ssh\sshd_config'
-$originalServerConfig = if (Test-Path $serverConfig) { [IO.File]::ReadAllBytes($serverConfig) } else { $null }
+$originalServerConfig = $null
+if (Test-Path $serverConfig) { $originalServerConfig = [IO.File]::ReadAllBytes($serverConfig) }
 $shellKey = 'HKLM:\SOFTWARE\OpenSSH'
 $originalShell = (Get-ItemProperty $shellKey -Name DefaultShell -ErrorAction SilentlyContinue).DefaultShell
 $authorizedKeys = Join-Path $env:ProgramData 'ssh\administrators_authorized_keys'
-$originalAuthorizedKeys = if (Test-Path $authorizedKeys) { [IO.File]::ReadAllBytes($authorizedKeys) } else { $null }
+$originalAuthorizedKeys = $null
+if (Test-Path $authorizedKeys) { $originalAuthorizedKeys = [IO.File]::ReadAllBytes($authorizedKeys) }
 $installed = @()
+$aclPaths = @((Split-Path $serverConfig), "$env:ProgramData\ssh\logs", $serverConfig, $authorizedKeys)
 $originalAcls = @{}
+foreach ($path in $aclPaths) {
+  if (Test-Path $path) { $originalAcls[$path] = Get-Acl $path }
+}
 $originalTestHost = $env:CTL_TEST_SSH_HOST
 $taskDaemon = $null
 try {
@@ -154,9 +161,8 @@ SyslogFacility LOCAL0
 LogLevel DEBUG1
 "@ | Set-Content $serverConfig -Encoding ascii
   # sshd validates these ACLs under SYSTEM, before it can initialize logging.
-  foreach ($path in @((Split-Path $serverConfig), "$env:ProgramData\ssh\logs", $serverConfig, $authorizedKeys)) {
-    if (Test-Path $path) { $originalAcls[$path] = Get-Acl $path }
-    else { New-Item -ItemType Directory -Path $path | Out-Null }
+  foreach ($path in $aclPaths) {
+    if (-not (Test-Path $path)) { New-Item -ItemType Directory -Path $path | Out-Null }
     $acl = if ((Get-Item $path).PSIsContainer) {
       [Security.AccessControl.DirectorySecurity]::new()
     } else { [Security.AccessControl.FileSecurity]::new() }
@@ -341,7 +347,11 @@ $originalConfigText
   else { [IO.File]::WriteAllBytes($authorizedKeys, $originalAuthorizedKeys) }
   if ($null -eq $originalShell) { Remove-ItemProperty $shellKey -Name DefaultShell -ErrorAction SilentlyContinue }
   else { Set-ItemProperty $shellKey -Name DefaultShell -Value $originalShell }
-  foreach ($path in $originalAcls.Keys) { if (Test-Path $path) { Set-Acl $path $originalAcls[$path] } }
+  # Restore the parent first: inherited ACL propagation must not overwrite the
+  # original child ACLs after they have been restored.
+  foreach ($path in $aclPaths) {
+    if ($originalAcls.ContainsKey($path) -and (Test-Path $path)) { Set-Acl $path $originalAcls[$path] }
+  }
   Invoke-Native -Program 'sc.exe' -Arguments @('config', 'sshd', 'binPath=', $originalServicePath)
   if ($wasRunning) { Start-Service sshd }
   Set-Service sshd -StartupType $originalStartType

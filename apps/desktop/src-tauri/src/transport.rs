@@ -75,7 +75,8 @@ mod tests {
     assert_eq!(
       target.to_core(),
       ConnectionTarget::Ssh {
-        destination: "ctmux-remote-test".into(),
+        // A direct method without an SSH-config alias selects its explicit endpoint.
+        destination: "127.0.0.1".into(),
         options: SshConnectionOptions {
           remote_platform: ctl_client::RemotePlatform::Unix,
           hostname: Some("127.0.0.1".into()),

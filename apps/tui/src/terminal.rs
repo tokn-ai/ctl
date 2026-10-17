@@ -173,29 +173,24 @@ impl Drop for Terminal {
 
 /// Restore the host's input mode even if shutdown cancels a password prompt
 /// whose blocking worker still owns its own terminal-mode guard.
+#[cfg(unix)]
 pub struct PromptMode {
-  #[cfg(unix)]
   terminal: std::fs::File,
-  #[cfg(unix)]
   mode: rustix::termios::Termios,
 }
 
+#[cfg(unix)]
 impl PromptMode {
   pub fn capture() -> io::Result<Self> {
-    #[cfg(unix)]
-    {
-      let terminal = std::fs::File::open("/dev/tty")?;
-      let mode = rustix::termios::tcgetattr(&terminal)?;
-      Ok(Self { terminal, mode })
-    }
-    #[cfg(not(unix))]
-    Ok(Self {})
+    let terminal = std::fs::File::open("/dev/tty")?;
+    let mode = rustix::termios::tcgetattr(&terminal)?;
+    Ok(Self { terminal, mode })
   }
 }
 
+#[cfg(unix)]
 impl Drop for PromptMode {
   fn drop(&mut self) {
-    #[cfg(unix)]
     let _ = rustix::termios::tcsetattr(
       &self.terminal,
       rustix::termios::OptionalActions::Now,

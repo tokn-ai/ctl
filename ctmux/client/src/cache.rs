@@ -135,12 +135,9 @@ fn private_file(path: &Path, append: bool) -> io::Result<File> {
   }
   options.open(path)
 }
+#[cfg(unix)]
 fn sync_directory(path: &Path) -> io::Result<()> {
-  #[cfg(unix)]
-  File::open(path)?.sync_all()?;
-  #[cfg(not(unix))]
-  let _ignored = path;
-  Ok(())
+  File::open(path)?.sync_all()
 }
 fn atomic_json(path: &Path, value: &Current) -> io::Result<()> {
   let temporary = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
@@ -149,6 +146,7 @@ fn atomic_json(path: &Path, value: &Current) -> io::Result<()> {
     serde_json::to_writer(&mut file, value).map_err(io::Error::other)?;
     file.sync_all()?;
     fs::rename(&temporary, path)?;
+    #[cfg(unix)]
     sync_directory(
       path
         .parent()
@@ -902,10 +900,13 @@ fn copy_record(source: &Path, destination: &Path) -> io::Result<()> {
       })
     {
       fs::copy(entry.path(), &target)?;
-      File::open(target)?.sync_all()?;
+      // Windows FlushFileBuffers requires a handle opened for writing.
+      OpenOptions::new().write(true).open(target)?.sync_all()?;
     }
   }
-  sync_directory(destination)
+  #[cfg(unix)]
+  sync_directory(destination)?;
+  Ok(())
 }
 fn resume_archive(archived: &Path, live: &Path) -> io::Result<()> {
   let parent = live
@@ -915,7 +916,9 @@ fn resume_archive(archived: &Path, live: &Path) -> io::Result<()> {
   let temporary = live.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
   let result = copy_record(archived, &temporary).and_then(|()| {
     fs::rename(&temporary, live)?;
-    sync_directory(parent)
+    #[cfg(unix)]
+    sync_directory(parent)?;
+    Ok(())
   });
   if result.is_err() {
     let _ignored = fs::remove_dir_all(temporary);
@@ -1048,6 +1051,7 @@ impl CacheStore {
           }
         }
         fs::rename(&temporary, &archived)?;
+        #[cfg(unix)]
         sync_directory(parent)?;
       }
       for (directory, mut current) in panes {
@@ -1274,11 +1278,13 @@ impl CacheStore {
       }
       return Err(error);
     }
+    #[cfg(unix)]
     sync_directory(
       archived
         .parent()
         .ok_or_else(|| invalid("Missing archive parent"))?,
     )?;
+    #[cfg(unix)]
     sync_directory(
       root
         .parent()

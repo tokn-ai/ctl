@@ -526,6 +526,10 @@ async fn ssh_interaction(
 }
 
 #[cfg(not(unix))]
+#[expect(
+  clippy::unused_async,
+  reason = "SSH interaction selection keeps the asynchronous Unix broker API on direct clients"
+)]
 async fn ssh_interaction(
   _target: &ctl_client::hosts::ConnectionTargetDto,
   interactive: bool,

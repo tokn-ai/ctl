@@ -148,6 +148,7 @@ impl Store {
       return Ok(history);
     }
     check_directory(&self.directory, true)?;
+    #[cfg(unix)]
     check_ancestors(&self.directory)?;
     if stream == Stream::Audit {
       return self.read_audit(limit, failed_only, run, level);
@@ -324,35 +325,35 @@ fn prepare_directory(path: &Path) -> io::Result<()> {
       prepare_directory(parent)?;
     }
   }
-  let mut builder = fs::DirBuilder::new();
+  let builder = fs::DirBuilder::new();
   #[cfg(unix)]
-  {
+  let builder = {
     use std::os::unix::fs::DirBuilderExt as _;
+    let mut builder = builder;
     builder.mode(0o700);
-  }
+    builder
+  };
   match builder.create(path) {
     Ok(()) => {}
     Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
     Err(error) => return Err(error),
   }
   check_directory(path, true)?;
-  check_ancestors(path)
+  #[cfg(unix)]
+  check_ancestors(path)?;
+  Ok(())
 }
 
+#[cfg(unix)]
 fn check_ancestors(path: &Path) -> io::Result<()> {
-  #[cfg(unix)]
-  {
-    use std::os::unix::fs::MetadataExt as _;
-    for ancestor in path.ancestors().skip(1) {
-      let metadata = fs::symlink_metadata(ancestor)?;
-      if metadata.uid() != rustix::process::getuid().as_raw() {
-        break;
-      }
-      check_directory(ancestor, false)?;
+  use std::os::unix::fs::MetadataExt as _;
+  for ancestor in path.ancestors().skip(1) {
+    let metadata = fs::symlink_metadata(ancestor)?;
+    if metadata.uid() != rustix::process::getuid().as_raw() {
+      break;
     }
+    check_directory(ancestor, false)?;
   }
-  #[cfg(not(unix))]
-  let _ = path;
   Ok(())
 }
 

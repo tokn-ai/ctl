@@ -42,14 +42,21 @@ jobs:
         run: node scripts/ci/check.mts scripts
 
   rust-quality:
-    name: Rust quality
-    runs-on: ubuntu-latest
+    name: Rust quality (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-2025
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
 
       - name: Install Tauri system dependencies
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
@@ -73,7 +80,12 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Check formatting and Clippy
+        if: runner.os != 'Windows'
         run: node scripts/ci/check.mts quality
+
+      - name: Check formatting and Windows Clippy
+        if: runner.os == 'Windows'
+        run: node scripts/ci/check.mts quality --portable
 
   rust-tests:
     name: Rust tests (${{ matrix.os }})
@@ -155,14 +167,10 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@1.99.0
         with:
-          components: clippy, rustfmt
           targets: x86_64-pc-windows-msvc
 
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@v2
-
-      - name: Check formatting and Windows Clippy
-        run: node scripts/ci/check.mts quality --portable
 
       # Includes ctmuxd's Windows ConPTY integration tests.
       - name: Test portable crates and Windows ConPTY sessions

@@ -5,12 +5,14 @@ struct Fixture(std::path::PathBuf);
 impl Fixture {
   fn new() -> Self {
     let root = std::env::temp_dir().join(format!("ctl-history-{}", Uuid::new_v4()));
-    let mut builder = fs::DirBuilder::new();
+    let builder = fs::DirBuilder::new();
     #[cfg(unix)]
-    {
+    let builder = {
       use std::os::unix::fs::DirBuilderExt as _;
+      let mut builder = builder;
       builder.mode(0o700);
-    }
+      builder
+    };
     builder.create(&root).unwrap();
     Self(root)
   }

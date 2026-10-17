@@ -9,10 +9,10 @@ use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 pub const PROTOCOL_BUILD: u16 = 4;
 pub const CONTRACT_V1_0_2: ProtocolVersion = ProtocolVersion::new(1, 0, 2);
 pub const CONTRACT_V1_1_3: ProtocolVersion = ProtocolVersion::new(1, 1, 3);
-pub const CONTRACT_V1_1_4: ProtocolVersion = ProtocolVersion::new(1, 1, 4);
-pub const PROTOCOL_VERSION: ProtocolVersion = CONTRACT_V1_1_4;
+pub const CONTRACT_V1_2_4: ProtocolVersion = ProtocolVersion::new(1, 2, 4);
+pub const PROTOCOL_VERSION: ProtocolVersion = CONTRACT_V1_2_4;
 pub const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] =
-  &[CONTRACT_V1_0_2, CONTRACT_V1_1_3, CONTRACT_V1_1_4];
+  &[CONTRACT_V1_0_2, CONTRACT_V1_1_3, CONTRACT_V1_2_4];
 
 #[must_use]
 pub fn protocol_offer() -> ProtocolOffer {
@@ -199,13 +199,18 @@ mod tests {
   use super::*;
 
   #[test]
-  fn component_inspection_opens_a_new_cycle_and_retains_the_published_restart_contract() {
+  fn stop_opens_the_cycle_after_v0_1_1_and_retains_released_contracts() {
     let initial = ProtocolVersion::new(1, 0, 2);
-    let next_cycle = ProtocolVersion::new(1, 1, 3);
+    // v0.1.1 shipped maintenance 1.1.3; the next change opens minor 2,
+    // while the independent build counter advances from 3 to 4.
+    let released = ProtocolVersion::new(1, 1, 3);
+    let next_cycle = ProtocolVersion::new(1, 2, 4);
     let historical_offer: ProtocolOffer =
       serde_json::from_str(r#"{"build":2,"version":"1.0.2","supported_versions":["1.0.2"]}"#)
         .unwrap();
-    assert_eq!(protocol_offer().version, CONTRACT_V1_1_4);
+    assert_eq!(protocol_offer().version, next_cycle);
+    assert_eq!(protocol_offer().build, 4);
+    assert_eq!(protocol_offer().negotiate(&[released]), Some(released));
     assert_eq!(
       historical_offer.negotiate(SUPPORTED_PROTOCOL_VERSIONS),
       Some(initial)

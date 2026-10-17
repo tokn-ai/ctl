@@ -101,8 +101,8 @@ pub async fn prepare_ctmux_stop<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         && config.service == crate::Service::Ctmux =>
       {
         protocol
-          .negotiate(&[maintenance::CONTRACT_V1_1_4])
-          .ok_or_else(|| io::Error::other("Remote stop requires maintenance 1.1.4"))?
+          .negotiate(&[maintenance::CONTRACT_V1_2_4])
+          .ok_or_else(|| io::Error::other("Remote stop requires maintenance 1.2.4"))?
       }
       _ => {
         return Err(io::Error::other(
@@ -213,7 +213,7 @@ async fn prepare<R: AsyncRead + Unpin>(
     .await
     .map_err(io::Error::other)?;
   if !prepared.before.legacy_protocols.is_empty()
-    && ![maintenance::CONTRACT_V1_1_3, maintenance::CONTRACT_V1_1_4].contains(&protocol_version)
+    && ![maintenance::CONTRACT_V1_1_3, maintenance::CONTRACT_V1_2_4].contains(&protocol_version)
   {
     return Err(io::Error::other(
       "Legacy daemon maintenance requires contract 1.1.3; update the client first.",
@@ -239,7 +239,7 @@ mod tests {
   async fn stop_rejects_old_contracts_and_changed_identity_before_daemon_access() {
     for (version, identity) in [
       (maintenance::CONTRACT_V1_1_3, "actual"),
-      (maintenance::CONTRACT_V1_1_4, "wrong"),
+      (maintenance::CONTRACT_V1_2_4, "wrong"),
     ] {
       let mut bytes = Vec::new();
       maintenance::write(
@@ -357,7 +357,7 @@ mod tests {
           .await
           .unwrap(),
         ServerMessage::StopPrepared {
-          protocol_version: maintenance::CONTRACT_V1_1_4,
+          protocol_version: maintenance::CONTRACT_V1_2_4,
           ..
         }
       ));

@@ -280,7 +280,7 @@ async fn prepare(
     } if maintenance::protocol_offer().accepts(protocol_version)
       && valid_preparation(&info, expected_remote_id)
       && (info.running.legacy_protocols.is_empty()
-        || [maintenance::CONTRACT_V1_1_3, maintenance::CONTRACT_V1_1_4]
+        || [maintenance::CONTRACT_V1_1_3, maintenance::CONTRACT_V1_2_4]
           .contains(&protocol_version)) =>
     {
       info
@@ -380,13 +380,13 @@ async fn prepare_stop(
   .await
   .map_err(|error| failure(error, false))?;
   let response = maintenance::read(&mut stdout).await.map_err(|_| {
-    failure("Remote stop requires an updated ctl-agent with maintenance 1.1.4; update remote components first. Nothing was stopped.", false)
+    failure("Remote stop requires an updated ctl-agent with maintenance 1.2.4; update remote components first. Nothing was stopped.", false)
   })?;
   let info = match response {
     ServerMessage::StopPrepared {
       protocol_version,
       info,
-    } if protocol_version == maintenance::CONTRACT_V1_1_4
+    } if protocol_version == maintenance::CONTRACT_V1_2_4
       && info.remote_id == expected_remote_id
       && valid_running(&info.running) =>
     {
@@ -681,7 +681,7 @@ mod tests {
       let version = if scenario == "old_contract" {
         maintenance::CONTRACT_V1_1_3
       } else {
-        maintenance::CONTRACT_V1_1_4
+        maintenance::CONTRACT_V1_2_4
       };
       if scenario == "wrong_identity" {
         info.remote_id = "another-machine".into();

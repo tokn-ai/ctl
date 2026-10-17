@@ -270,7 +270,7 @@ uncertain shutdown. Later connections can start services again; stop does not
 disable normal automatic startup.
 
 Local stop reuses the shutdown phase of the existing lifecycle contracts.
-Remote stop requires ctl-agent maintenance `1.1.4` (build 4), verifies the remote
+Remote stop requires ctl-agent maintenance `1.2.4` (build 4), verifies the remote
 machine identity and requires a separate confirmation. Remote stop supports only
 ctmuxd; remote ctld and ctl-taskd are rejected before connecting. An older agent
 must be updated before remote stop can be used. Existing restart and inspection

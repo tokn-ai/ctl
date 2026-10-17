@@ -299,20 +299,21 @@ earlier published contracts to be removed.
 
 Component inspection opens the next maintenance development cycle at `1.1.3`
 (build 3), retaining the frozen initial `1.0.2` contract for published-owner
-restart preparation. Further changes in this cycle advance only the build,
-for example `1.1.4`; release freezes the final version without another bump.
-The new contract supports a fixed `inspect_components` request and reports
+restart preparation. Product release `v0.1.1` shipped maintenance `1.1.3`,
+freezing that cycle without another version bump. The inspection contract
+supports a fixed `inspect_components` request and reports
 historical numeric ctmux control metadata separately from published protocols.
 Numeric-owner restart preparation is available under `1.1.3` and later retained
 contracts; it pins the successful historical control stream and requires the same separate confirmation as a published owner. This is an
 explicit maintenance bridge, not a claim that numeric session protocol 13
 implements published session contract `1.0.13`.
 
-Remote stop advances `ctl_maintenance` from `1.1.3` (build 3) to `1.1.4`
-(build 4). It adds `prepare_ctmux_stop`, `stop_prepared` and `stopped` messages.
+Remote stop opens the next maintenance cycle after `v0.1.1`, advancing
+`ctl_maintenance` from frozen `1.1.3` (build 3) to `1.2.4` (build 4). It adds
+`prepare_ctmux_stop`, `stop_prepared` and `stopped` messages.
 Preparation pins the existing ctmux owner, checks the remote identity and waits
 for a separate `confirm`; it needs no replacement binary. Stop negotiates only
-`1.1.4`. Restart retains its `1.0.2` and `1.1.3` contracts; inspection retains
+`1.2.4`. Restart retains its `1.0.2` and `1.1.3` contracts; inspection retains
 `1.1.3`. Their existing wire shapes are unchanged. Local stop reuses the existing cooperative shutdown request and ack from
 restart, without changing `ctld_lifecycle`, `ctmux_control` or `task_control`.
 Product release versions are unchanged.

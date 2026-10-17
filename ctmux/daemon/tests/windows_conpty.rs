@@ -4,8 +4,8 @@ use ctmux_ipc::{
   Stream, connect_existing_daemon, control_socket_path, request_local_daemon_restart,
 };
 use ctmux_proto::{
-  ClientMessage, CommandSpec, DEFAULT_PRESENTATION_WINDOW_BYTES, PROTOCOL_VERSION, ServerMessage,
-  TerminalSize, read_frame, write_frame,
+  ClientMessage, CommandSpec, DEFAULT_PRESENTATION_WINDOW_BYTES, ServerMessage, TerminalSize,
+  read_frame, write_frame,
 };
 use std::{path::PathBuf, process::Stdio, time::Duration};
 use tokio::{

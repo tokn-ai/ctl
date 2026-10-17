@@ -1150,10 +1150,16 @@ fn ssh_base_arguments_with_proxy(
   if let Some(identity_file) = &options.identity_file {
     arguments.extend([OsString::from("-i"), identity_file.as_os_str().to_owned()]);
   }
-  arguments.extend([
-    OsString::from("--"),
-    OsString::from(options.hostname.as_deref().unwrap_or(destination)),
-  ]);
+  if let Some(hostname) = &options.hostname {
+    // Preserve the original destination for Host/Match configuration. Replacing
+    // it with the endpoint loses the alias's authentication and proxy settings
+    // on clients that connect directly rather than through a broker master.
+    arguments.extend([
+      OsString::from("-o"),
+      OsString::from(format!("HostName={hostname}")),
+    ]);
+  }
+  arguments.extend([OsString::from("--"), OsString::from(destination)]);
   arguments
 }
 
@@ -1510,7 +1516,7 @@ mod tests {
 
     assert!(validate_ssh_target("ctmux-remote-test", &options).is_ok());
     assert_eq!(
-      &arguments[arguments.len() - 9..],
+      &arguments[arguments.len() - 11..],
       [
         "-p",
         "2222",
@@ -1518,8 +1524,10 @@ mod tests {
         "ctmux",
         "-i",
         "/tmp/key with spaces",
+        "-o",
+        "HostName=127.0.0.1",
         "--",
-        "127.0.0.1",
+        "ctmux-remote-test",
         UNIX_GATEWAY_COMMAND,
       ]
       .map(OsString::from)

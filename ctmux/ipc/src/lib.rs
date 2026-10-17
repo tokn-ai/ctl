@@ -758,13 +758,11 @@ fn set_owner_only_permissions(directory: &Path) -> io::Result<()> {
   std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
   use super::*;
 
-  #[cfg(unix)]
   use std::sync::Arc;
-  #[cfg(unix)]
   use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
   #[cfg(unix)]
@@ -783,7 +781,6 @@ mod tests {
     );
   }
 
-  #[cfg(unix)]
   #[test]
   fn older_handshake_does_not_advertise_managed_sessions() {
     let response: LocalControlServerMessage = serde_json::from_str(
@@ -843,7 +840,6 @@ mod tests {
     server.await.unwrap();
   }
 
-  #[cfg(unix)]
   #[tokio::test]
   async fn healthy_endpoint_does_not_start_daemon() {
     let connect_count = Arc::new(AtomicUsize::new(0));
@@ -874,7 +870,6 @@ mod tests {
     assert_eq!(start_count.load(Ordering::Relaxed), 0);
   }
 
-  #[cfg(unix)]
   #[tokio::test]
   async fn missing_endpoint_starts_daemon_then_retries() {
     let connect_count = Arc::new(AtomicUsize::new(0));
@@ -909,7 +904,6 @@ mod tests {
     assert_eq!(start_count.load(Ordering::Relaxed), 1);
   }
 
-  #[cfg(unix)]
   #[tokio::test]
   async fn non_retryable_connect_error_does_not_start_daemon() {
     let start_count = Arc::new(AtomicUsize::new(0));
@@ -939,7 +933,6 @@ mod tests {
     assert_eq!(start_count.load(Ordering::Relaxed), 0);
   }
 
-  #[cfg(unix)]
   #[tokio::test]
   async fn endpoint_drain_waits_until_the_endpoint_becomes_unavailable() {
     let connect_count = Arc::new(AtomicUsize::new(0));
@@ -965,7 +958,6 @@ mod tests {
     assert_eq!(connect_count.load(Ordering::Relaxed), 2);
   }
 
-  #[cfg(unix)]
   #[tokio::test]
   async fn endpoint_drain_rechecks_a_reset_before_confirming_shutdown() {
     let connect_count = Arc::new(AtomicUsize::new(0));
@@ -990,7 +982,6 @@ mod tests {
     assert_eq!(connect_count.load(Ordering::Relaxed), 3);
   }
 
-  #[cfg(unix)]
   #[tokio::test]
   async fn endpoint_drain_times_out_when_resets_never_confirm_absence() {
     let error = wait_for_endpoint_drain_with(
@@ -1013,7 +1004,6 @@ mod tests {
     ));
   }
 
-  #[cfg(unix)]
   #[tokio::test]
   async fn endpoint_drain_times_out_without_forcing_a_live_endpoint() {
     let error = wait_for_endpoint_drain_with(
@@ -1032,7 +1022,6 @@ mod tests {
     ));
   }
 
-  #[cfg(unix)]
   #[tokio::test]
   async fn endpoint_drain_stops_on_an_unexpected_probe_error() {
     let error = wait_for_endpoint_drain_with(
@@ -1053,7 +1042,6 @@ mod tests {
     ));
   }
 
-  #[cfg(unix)]
   #[test]
   fn only_absent_endpoints_are_safe_to_replace() {
     assert!(
@@ -1073,7 +1061,6 @@ mod tests {
     );
   }
 
-  #[cfg(unix)]
   #[tokio::test]
   async fn concurrent_connectors_tolerate_duplicate_start_candidates() {
     fn connect(

@@ -39,6 +39,30 @@ fn saved_names_ids_methods_and_routes_share_one_resolution() {
 }
 
 #[test]
+fn direct_transports_use_the_same_alias_or_endpoint_as_the_broker() {
+  for (alias, hostname, expected) in [
+    (Some("lan-box"), Some("127.0.0.1"), "lan-box"),
+    (None, Some("127.0.0.1"), "127.0.0.1"),
+    (None, None, "lan-box"),
+  ] {
+    let target: ConnectionTargetDto = serde_json::from_value(json!({
+      "kind": "ssh", "destination": "lan-box", "ssh_config_alias": alias,
+      "hostname": hostname,
+    }))
+    .unwrap();
+    let crate::ConnectionTarget::Ssh {
+      destination,
+      options,
+    } = target.to_core()
+    else {
+      panic!("expected SSH transport");
+    };
+    assert_eq!(destination, expected);
+    assert_eq!(options.hostname.as_deref(), hostname);
+  }
+}
+
+#[test]
 fn explicit_user_overrides_the_saved_account() {
   let resolved = resolve(&catalog(), "bob@work", None).unwrap();
   assert_eq!(

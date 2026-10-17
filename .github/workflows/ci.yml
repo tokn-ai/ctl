@@ -137,9 +137,9 @@ jobs:
         run: node scripts/ci/check.mts packages
 
   windows-check:
-    name: Windows tasks and terminals
+    name: Windows clients and SSH targets
     runs-on: windows-2025
-    timeout-minutes: 20
+    timeout-minutes: 30
     defaults:
       run:
         shell: pwsh
@@ -147,26 +147,26 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v6
 
+      - name: Install Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@1.99.0
         with:
+          components: clippy, rustfmt
           targets: x86_64-pc-windows-msvc
 
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@v2
 
-      # Typecheck test sources without linking or executing Windows tests.
-      - name: Check portable crates and test sources
-        run: >-
-          cargo check --locked --target x86_64-pc-windows-msvc --all-targets
-          -p tokn-ctl-core -p ctmux-proto -p ctmux-core -p ctmux-client -p ctl-task-proto
-          -p ctl-client -p ctl-proto -p ctmux-ipc -p ctl-task-ipc -p ctl-task-store -p ctl-task-cli -p ctl-taskd -p ctl-cli -p ctl-agent -p ctmux-cli -p ctmuxd -p ctmux-tui
+      - name: Check formatting and Windows Clippy
+        run: node scripts/ci/check.mts quality --portable
 
-      - name: Test Windows tasks and protocol framing
-        run: cargo test --locked -p tokn-ctl-core -p ctl-taskd -p ctl-task-ipc -p ctl-task-proto -p ctl-task-store -p ctl-task-cli -p ctl-cli -p ctl-client -p ctl-proto -p ctl-agent -p ctmux-proto -p ctmux-tui
-
-      - name: Test Windows ConPTY sessions
-        run: cargo test --locked -p ctmuxd --test windows_conpty
+      # Includes ctmuxd's Windows ConPTY integration tests.
+      - name: Test portable crates and Windows ConPTY sessions
+        run: node scripts/ci/check.mts rust --portable
 
       - name: Build Windows executables
         run: cargo build --locked -p ctl-cli -p ctl-agent -p ctl-taskd -p ctmux-cli -p ctmuxd -p ctmux-tui

@@ -74,13 +74,19 @@ impl ConnectionTargetDto {
       Self::Local => ConnectionTarget::local(),
       Self::Ssh {
         destination,
+        ssh_config_alias,
         hostname,
         user,
         port,
         identity_file,
         ..
       } => ConnectionTarget::ssh_with_options(
-        destination.clone(),
+        // Match the broker's config selector: selected aliases retain their
+        // Host settings, while direct methods use their explicit endpoint.
+        ssh_config_alias
+          .as_deref()
+          .or(hostname.as_deref())
+          .unwrap_or(destination),
         SshConnectionOptions {
           remote_platform: crate::RemotePlatform::Unix,
           hostname: hostname.clone(),

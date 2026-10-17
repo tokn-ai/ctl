@@ -1,86 +1,69 @@
-# Windows CI exploration
+# Windows support and CI
 
-Status: Windows background tasks, local ConPTY sessions, and SSH client/gateway routing implemented,
-2026-09-04. Full workspace Windows tests remain deferred. The findings below distinguish source compatibility from runtime
-support.
+Windows client support and Windows SSH target support are separate: the client
+platform determines local IPC and process handling; `--remote-platform windows`
+selects the command understood by a Windows SSH server. The default remote
+platform is Unix, even when the client runs on Windows.
 
-## Initial exploration evidence
+## Supported paths
 
-The following cross-check was run on macOS with Rust 1.97.0 and the installed
-`x86_64-pc-windows-msvc` target:
+| Path | Windows behavior | Native CI coverage |
+| --- | --- | --- |
+| Local `ctl exec` | Runs a program with inherited streams and preserves its exit status | Binary stdin/stdout/stderr and nonzero exit status |
+| `ctl ssh` / `ctl scp` | Uses system OpenSSH and its configuration | Real `ssh -G` checks alias settings and explicit overrides |
+| Remote `ctl exec` | Uses system SSH; `--remote-platform windows` selects cmd.exe command construction | Authenticated loopback stdin/stdout/stderr and exit status |
+| Local `ctl ctmux` / `ctmux` | Named-pipe transport and ConPTY sessions | Auto-start, attachment, reconnect, resize, final output and exit status |
+| Local `ctl task` | Named-pipe transport, background Job Objects and managed ConPTY tasks | Auto-start, lifecycle, logs, recovery and descendant cleanup |
+| Remote ctmux | `ctl-agent.exe connect` routes to `ctmuxd.exe` | Authenticated loopback auto-start, reconnect and both destination selectors |
+| Remote tasks | `ctl-agent.exe connect --service task` routes to `ctl-taskd.exe` | Authenticated loopback lifecycle, log streams, working directory and persistence across channels |
+
+`--host` / `-H` selects a saved ctl host by name or ID. `--destination` selects an
+IP address, DNS name or OpenSSH `Host` alias directly without reading or changing
+the ctl catalog. Both retain OpenSSH configuration; when an alias is selected, an
+explicit hostname override changes `HostName` while retaining the alias's
+identity, user, port and proxy settings.
+The Windows SSH fixture covers saved hosts, temporary aliases, colliding names,
+and a corrupt catalog. A missing saved `--host` is rejected before SSH starts.
+
+Windows clients use direct SSH, without the Unix ctld connection broker.
+Broker-dependent component management, port forwarding and host
+connect/disconnect commands remain Unix-only. The desktop app, ctld, and the
+macOS Keychain bridge are outside the Windows gate.
+
+## Native CI gate
+
+The [CI workflow](../.github/workflows/ci.yml) uses native PowerShell on
+`windows-2025` with the MSVC Rust toolchain, Node 24, Clippy and rustfmt. The
+shared [check entry point](../scripts/ci/check.mts) defines one explicit set of
+21 portable packages for both checks and runtime tests:
 
 ```sh
-cargo check --locked --target x86_64-pc-windows-msvc --all-targets \
-  -p ctmux-proto -p ctmux-core -p ctmux-client -p ctl-task-proto \
-  -p ctl-client -p ctmux-ipc -p ctmux-process-info
+node scripts/ci/check.mts quality --portable
+node scripts/ci/check.mts rust --portable
 ```
 
-It passed. `--all-targets` typechecks test code; it does not link or execute
-Windows test binaries. This is evidence of source compatibility, not proof of
-Windows runtime behavior.
+The first command checks workspace formatting and runs Clippy over every target
+in the portable set with warnings denied. The second links and executes their
+native tests, including the client, IPC, task, process metadata parser, terminal
+emulation and ConPTY suites. The selection excludes only `ctld`, `ctmux-app` and
+`ctl-keychain-client`; it is explicit so a new platform-specific workspace member
+does not silently enter the gate.
 
-| Component | Finding | Implication for Windows CI |
-| --- | --- | --- |
-| `ctmux-proto`, `ctl-task-proto` | Windows cross-check passed, including test code | Initial compile-only candidates |
-| `ctmux-core`, `ctmux-client` | Windows cross-check passed, including test code | Initial compile-only candidates |
-| `ctl-client`, `ctmux-ipc` | Windows cross-check passed; local transport remains unsupported | Check portability without claiming local session support |
-| `ctmux-process-info` | Cross-check passed with dead-code warnings for `valid_pid` and `process_name`; native inspection returns unsupported | Keep separate from the initial warning-clean candidates |
-| `ctmux` CLI | Separate executable check passed with dead-code warnings; non-Unix main exits with an unsupported-platform message | Compilation does not make the CLI usable on Windows |
-| `ctl` / `ctl-task-cli` | Check failed: unconditional `UnixStream` and `rustix::process` usage in ctl-task-cli | Task CLI integration currently prevents even ctl's non-Unix fallback from compiling |
-| `ctl-taskd` | Check failed: the library is Unix-only, while main imports its exports unconditionally | Missing Windows execution backend and binary platform boundary |
-| `ctl-agent` | Check failed: explicit non-Unix compile error and Unix socket import | Gateway requires a Windows local IPC implementation |
-| `ctmuxd` | Source explicitly rejects non-Unix builds | Requires Windows daemon plumbing, not just a CI matrix entry |
-| `ctmux-app` | Source has unsupported local-transport stubs and a batch-SSH path; Windows build was not checked | Separate native build investigation required |
-
-The failing executable checks were exploratory and expected to expose gaps.
-They do not change the passing Linux/macOS CI gates.
-
-## Initial compile-only job
-
-CI checks native Windows compilation of the six portable crates. Keep the
-package list explicit so adding a Unix-only workspace member cannot silently
-expand this gate. The job in [the CI workflow](../.github/workflows/ci.yml) uses
-the following configuration:
-
-```yaml
-windows-check:
-  name: Windows portable compilation
-  runs-on: windows-2025
-  timeout-minutes: 20
-  defaults:
-    run:
-      shell: pwsh
-  steps:
-    - uses: actions/checkout@v6
-    - uses: dtolnay/rust-toolchain@stable
-      with:
-        targets: x86_64-pc-windows-msvc
-    - uses: Swatinem/rust-cache@v2
-    - name: Check portable crates and test sources
-      run: >-
-        cargo check --locked --target x86_64-pc-windows-msvc --all-targets
-        -p ctmux-proto -p ctmux-core -p ctmux-client -p ctl-task-proto
-        -p ctl-client -p ctmux-ipc
-```
-
-An explicit Windows image makes runner changes deliberate. The official
-[Windows Server 2025 image inventory](https://github.com/actions/runner-images/blob/main/images/windows/Windows2025-Readme.md)
-documents the installed development tools. Use the MSVC target and native
-PowerShell rather than WSL: Linux builds under WSL would not exercise Windows
-conditional compilation or native behavior.
-
-The portable check does not need Tauri, a display, SSH credentials, or a local
-daemon. A later native desktop build needs the C++ build tools and WebView2
-described in the [Tauri Windows prerequisites](https://v2.tauri.app/start/prerequisites/#windows),
-plus Node 24, pnpm 10, and the frontend assets. Verify those separately rather
-than treating a successful portable-crate check as a desktop build result.
+The job then builds the Windows executables and runs
+[task](../scripts/ci/windows-tasks.ps1),
+[terminal](../scripts/ci/windows-ctmux.ps1) and
+authenticated [SSH](../scripts/ci/windows-ssh.ps1) fixtures. The SSH test requiring
+server setup is explicitly invoked with `--ignored` by its fixture, rather than
+counted as covered by ordinary `cargo test`. Unix-only shell/FIFO and broker tests
+remain on Linux/macOS; portable CLI tests execute on all three platforms.
+Compilation alone does not establish runtime support, and WSL does not exercise
+these Windows paths. Linux/macOS retain the whole-workspace checks.
 
 ## Windows background tasks
 
 `ctl-task-ipc`, `ctl-task-cli`, `ctl-taskd`, and `ctl` now cross-compile for Windows. The
-native Windows job also builds both executables, runs task integration tests,
-and exercises `ctl task` auto-start, create, logs, restart, stop, remove, and list.
-The original six portable crates retain their explicit compile-only check.
+native Windows job builds both executables, runs task integration tests, and
+exercises `ctl task` auto-start, create, logs, restart, stop, remove, and list.
 
 ctl-taskd uses local named pipes via `interprocess`. The default name is a stable
 UUID derived from `%LOCALAPPDATA%\ctl-taskd`, or `CTL_TASKD_RUNTIME_DIR` when
@@ -141,8 +124,7 @@ A child waiter closes the pseudoconsole before joining the independent output
 reader. Session kill also closes ConPTY on a separate thread. This keeps output
 draining while `ClosePseudoConsole` runs, avoiding the shutdown deadlock on older
 Windows versions. See [Microsoft's ClosePseudoConsole documentation](https://learn.microsoft.com/en-us/windows/console/closepseudoconsole).
-PTY handles remain owned by ctmuxd throughout. A ctl-taskd interactive-task adapter
-is still separate work.
+PTY handles remain owned by ctmuxd throughout, including managed interactive tasks.
 
 Attachment reads retain partial protocol frames across output and resize events;
 Windows named-pipe delivery exposed a cancellation bug in the original reader.
@@ -162,7 +144,8 @@ terminal-derived state continue to work.
 
 ## Windows SSH client routing
 
-`ctl --host HOST ctmux ...` now uses the same connector on Windows and Unix.
+`ctl --host HOST ctmux ...` and `ctl --destination ALIAS ctmux ...` use the same
+connector on Windows and Unix.
 `ctl-client` local transports use the shared `ctmux-ipc::Stream`, so Windows local
 commands retain named-pipe discovery and daemon auto-start. Remote connections
 use the system `ssh` executable with binary stdin/stdout pipes. OpenSSH still
@@ -180,7 +163,7 @@ The desktop currently selects Unix remote commands.
 `ctl --host HOST --remote-platform windows task ...` selects
 `ctl-agent.exe connect --service task`. The companion is `ctl-taskd.exe`, while
 interactive attachment opens the ordinary ctmux channel on the same target.
-This does not broaden the original loopback ctmux fixture's reported coverage.
+The native SSH fixture exercises both services and both destination selectors.
 
 `ctl-agent` uses the shared IPC stream and only the data endpoint. Its installed
 companion is `ctmuxd.exe` on Windows. Startup requests both `DETACHED_PROCESS`
@@ -196,8 +179,13 @@ an authenticated loopback OpenSSH server on the ephemeral Windows runner using
 ephemeral client/host keys, an explicitly pinned host key, disabled passwords,
 and the default cmd.exe shell. It installs companion executables, then tests
 daemon auto-start, ConPTY creation, attachment, SSH disconnect/reconnect,
-resize, final output and exit status, and CLI routing. It restores configuration
-and removes its processes, binaries, and keys afterward. The script refuses to
+resize, final output and exit status, and CLI routing. It also exercises remote
+exec streams and task create/show/start/logs/restart/stop/remove/list, including a
+working directory containing spaces. The task daemon has isolated state and is
+prestarted on the default user endpoint, because SSH sessions do not inherit the
+fixture environment; task daemon auto-start is covered by the local task fixture.
+The SSH fixture restores configuration and removes its processes, binaries, and
+keys afterward. The script refuses to
 run outside GitHub Windows runners. See Microsoft's
 [Windows OpenSSH server configuration](https://learn.microsoft.com/en-us/windows-server/administration/openssh/openssh-server-configuration).
 
@@ -206,20 +194,18 @@ not covered by the loopback fixture.
 
 ## Remaining Windows work
 
-- Additional native SSH coverage for remote task lifecycle and interactive
-  attachment. PTYs remain owned exclusively by ctmuxd.
+- Remote interactive-task attachment over SSH. Local managed ConPTY tasks and
+  remote ctmux attachment are covered separately.
 - Desktop remote-platform selection.
 - Native process inspection and the desktop app's local transport/build.
-- Broader Windows tests for portable crates, remote clients, and terminals.
 - Cross-account ACL tests and filesystem ACL hardening for custom data paths.
 - Persistent logs, restart policies, workspace task integration, and other
   unfinished task features shared with Unix.
 
-The Unix whole-workspace gates remain unchanged. No unsupported daemon is
-included merely to make the Windows job look comprehensive.
+The Unix whole-workspace gates remain unchanged. The Windows gate does not claim
+desktop packaging or Unix broker support.
 
-
-### Interactive managed tasks
+## Interactive managed tasks
 
 The ctl-taskd integration suite also runs against real ConPTY sessions on Windows.
 It verifies task start/stop/restart, normal ctmux attachment and input/output,

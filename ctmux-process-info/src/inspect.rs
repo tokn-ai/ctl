@@ -166,7 +166,7 @@ mod tests {
           .map(|process| (process.identity.pid, process))
           .collect(),
       ),
-      cwd: Some("/shell-directory".into()),
+      cwd: Some(std::env::temp_dir().join("shell-directory")),
       reuse_during_cwd: false,
     }
   }
@@ -204,7 +204,7 @@ mod tests {
     ]);
     let snapshot = inspect(&source, ROOT, Some(20)).unwrap();
     assert_eq!(snapshot.foreground, Foreground::Child(job));
-    assert_eq!(snapshot.cwd, Some("/shell-directory".into()));
+    assert_eq!(snapshot.cwd, source.cwd);
   }
 
   #[test]

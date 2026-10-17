@@ -35,7 +35,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 #[cfg(unix)]
 pub use tokio::net::UnixStream as Stream;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use tokio::time::sleep;
 use tokio::time::timeout;
 use zeroize::{Zeroize, Zeroizing};

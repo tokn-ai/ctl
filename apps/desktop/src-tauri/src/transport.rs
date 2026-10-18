@@ -38,16 +38,7 @@ pub async fn connect(target: &ConnectionTargetDto) -> CommandResult<Transport> {
 /// distinguish that race and therefore use the ordinary fixed transport.
 pub async fn connect_existing(target: &ConnectionTargetDto) -> CommandResult<Transport> {
   match target {
-    ConnectionTargetDto::Local => {
-      #[cfg(unix)]
-      {
-        Ok(Transport::Local(local_transport::connect_existing().await?))
-      }
-      #[cfg(not(unix))]
-      {
-        connect(target).await
-      }
-    }
+    ConnectionTargetDto::Local => Ok(Transport::Local(local_transport::connect_existing().await?)),
     ConnectionTargetDto::Ssh { .. } => connect(target).await,
   }
 }

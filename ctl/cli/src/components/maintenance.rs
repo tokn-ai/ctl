@@ -134,6 +134,7 @@ struct RemoteConnection {
   remote_id: String,
 }
 
+#[cfg(unix)]
 async fn remote(selection: TargetOptions<'_>) -> io::Result<RemoteConnection> {
   let target = crate::target::resolve(selection.host, selection.destination, selection.method)
     .await
@@ -168,6 +169,14 @@ async fn remote(selection: TargetOptions<'_>) -> io::Result<RemoteConnection> {
     control_path,
     remote_id: identity.remote_id,
   })
+}
+
+#[cfg(not(unix))]
+fn remote(_selection: TargetOptions<'_>) -> std::future::Ready<io::Result<RemoteConnection>> {
+  std::future::ready(Err(io::Error::new(
+    io::ErrorKind::Unsupported,
+    "Remote component maintenance requires Unix SSH multiplexing; local component status and restart are available.",
+  )))
 }
 
 fn flag(value: Option<bool>) -> &'static str {

@@ -71,38 +71,23 @@ test("published-source checks retain the minimum Rust version and explicit dirty
   assert.deepEqual(f.calls(), [{ args: ["--allow-dirty"], toolchain: "1.97.0" }]);
 });
 
-test("portable quality and runtime checks cover the same clients, targets, and libraries", { skip: process.platform === "win32" }, (t) => {
+test("quality and runtime checks cover the whole workspace", { skip: process.platform === "win32" }, (t) => {
   const f = fixture(t);
   for (const scope of ["quality", "rust"]) {
-    const result = f.run(scope, "--portable");
+    const result = f.run(scope);
     assert.equal(result.status, 0, result.stderr);
   }
   const [formatting, clippy, tests] = f.calls();
   assert.deepEqual(formatting.args, ["fmt", "--all", "--", "--check"]);
-  assert.equal(clippy.args[0], "clippy");
-  assert.ok(clippy.args.includes("--all-targets"));
-  assert.deepEqual(clippy.args.slice(-3), ["--", "-D", "warnings"]);
-  assert.equal(tests.args[0], "test");
-  assert.ok(tests.args.includes("--no-fail-fast"));
-  const packages = (args: string[]): string[] => args.flatMap((value, index) => value === "-p" ? [args[index + 1]] : []);
-  assert.deepEqual(packages(clippy.args), packages(tests.args));
-  for (const call of [clippy, tests]) {
-    assert.ok(call.args.includes("--locked"));
-    assert.ok(!call.args.includes("--workspace"));
-    for (const name of ["ctl-client", "ctl-agent", "ctl-ipc", "ctl-task-client", "ctmux-client", "ctmux-core", "ctmuxd", "ctmux-avt", "ctmux-process-info"]) {
-      assert.ok(packages(call.args).includes(name), `missing portable package ${name}`);
-    }
-    for (const name of ["ctld", "ctmux-app", "ctl-keychain-client"]) {
-      assert.ok(!packages(call.args).includes(name), `unexpected platform package ${name}`);
-    }
-  }
+  assert.deepEqual(clippy.args, ["clippy", "--locked", "--workspace", "--all-targets", "--", "-D", "warnings"]);
+  assert.deepEqual(tests.args, ["test", "--locked", "--no-fail-fast", "--workspace"]);
 });
 
-test("portable selection rejects unrelated scopes and packaging options", { skip: process.platform === "win32" }, (t) => {
+test("package filtering and unrelated packaging options are rejected", { skip: process.platform === "win32" }, (t) => {
   const f = fixture(t);
   for (const [scope, ...options] of [
-    ["scripts", "--portable"], ["packages", "--portable"], ["all", "--portable"],
-    ["quality", "--portable", "--allow-dirty"],
+    ["quality", "--portable"], ["rust", "--portable"], ["all", "--portable"],
+    ["quality", "--allow-dirty"], ["rust", "--allow-dirty"],
   ]) {
     const result = f.run(scope, ...options);
     assert.notEqual(result.status, 0);

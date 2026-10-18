@@ -19,12 +19,13 @@ mod tui_tests;
 
 fn validate_local_command_target(arguments: &Arguments) -> Result<(), CliError> {
   let error = match &arguments.command {
-    #[cfg(unix)]
     Command::Components {
       command:
-        crate::components::Command::Update { .. }
-        | crate::components::Command::Status { .. }
-        | crate::components::Command::Restart { .. },
+        crate::components::Command::Status { .. } | crate::components::Command::Restart { .. },
+    } => return Ok(()),
+    #[cfg(unix)]
+    Command::Components {
+      command: crate::components::Command::Update { .. },
     } => return Ok(()),
     #[cfg(unix)]
     Command::Components { .. } => CliError::ComponentsTarget,
@@ -90,7 +91,6 @@ pub async fn run(arguments: Arguments) -> Result<i32, CliError> {
     return Ok(0);
   }
   match arguments.command {
-    #[cfg(unix)]
     Command::Components { command } => {
       crate::components::run(
         command,
@@ -184,7 +184,6 @@ async fn run_selected(
     | Command::Scp { .. } => {
       unreachable!("commands dispatched before target resolution")
     }
-    #[cfg(unix)]
     Command::Components { .. } => {
       unreachable!("component store commands run before target resolution")
     }
@@ -567,7 +566,6 @@ pub enum CliError {
     "Components manage the local bundle store; omit --host, --destination, --method, and --remote-platform."
   )]
   ComponentsTarget,
-  #[cfg(unix)]
   #[error("Component maintenance failed: {0}")]
   Components(std::io::Error),
   #[error("Remote repair cancelled.")]

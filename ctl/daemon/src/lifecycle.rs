@@ -136,7 +136,7 @@ async fn error(
   .map_err(Into::into)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
   use super::*;
   use std::sync::Arc;

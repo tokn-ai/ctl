@@ -1,6 +1,5 @@
 mod bundled;
 mod commands;
-#[cfg(unix)]
 mod components;
 mod connection;
 mod history;
@@ -68,8 +67,7 @@ enum Command {
   Logs(history::Arguments),
   /// Review local connection and credential audit history.
   Audit(history::Arguments),
-  /// Inspect and explicitly sync complete component build bundles.
-  #[cfg(unix)]
+  /// Inspect and restart local daemons; manage component bundles on Unix.
   Components {
     #[command(subcommand)]
     command: components::Command,

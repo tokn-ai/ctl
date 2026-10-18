@@ -6,6 +6,11 @@ Part of [ctl and ctmux](https://github.com/tokn-ai/ctl). See the
 [repository documentation](https://github.com/tokn-ai/ctl#readme) for setup,
 platform support, and usage.
 
+Native Keychain operations, dependencies, and session notification adapters are
+compiled only on macOS. The platform-independent session approval state machine
+is tested on every supported platform; Windows and Linux do not expose Keychain
+operations or link Apple frameworks.
+
 On macOS, `with_session_monitor` receives console lock and system sleep events
 on the main run loop. `SessionState::subscribe` revokes credential approval;
 `subscribe_resume` emits a `SessionResume` once per monitored sleep after the

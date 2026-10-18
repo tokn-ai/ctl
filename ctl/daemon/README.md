@@ -5,6 +5,14 @@ Per-user SSH connection and credential broker for ctl.
 Installs `ctld`, the companion daemon used by `ctl` and the ctmux desktop app.
 It owns shared SSH connections, port forwards, and VPN container lifecycles.
 
+Windows runs a per-user owner on a restricted local named pipe. Component
+inspection, cooperative restart, local identity inventory, and container-backed
+VPN management remain available; a missing Docker or Podman installation is
+reported in VPN discovery diagnostics without preventing startup. Native
+Windows OpenSSH does not support ControlMaster, so broker multiplexing, its
+forwarding requests, and recovery watches return an explicit unsupported error.
+Windows clients use direct SSH for interactive shells and remote commands.
+
 Committed private SSH masters retain one local control-socket lease while
 ctld owns the connection, preventing idle expiry without a remote shell or
 credential read. Disconnect and shutdown release it; daemon death restores
@@ -44,7 +52,7 @@ CLIs prefer their matching embedded helper. Shared discovery prefers a verified
 compatible shared `ctld.app` before a bundled release or nearby desktop app.
 With no eligible signed app, macOS selects an official release awaiting explicit
 setup. Manually managed or unsigned helpers require `CTLD_BIN`; implicit sibling
-and `PATH` discovery is retained on other Unix platforms.
+and `PATH` discovery is retained on other platforms.
 Compatibility requires the native target and explicitly shared ctld, lifecycle,
 and helper contracts. Remote VPN routes require ctld `1.1.13` and helper `1.1.2`.
 The installed helper's version and source

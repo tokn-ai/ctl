@@ -13,24 +13,10 @@ type Scope = typeof scopes[number];
 const [requested, ...options] = process.argv.slice(2);
 if (![...scopes, "all"].includes(requested) || options.some((option) => {
   if (option === "--allow-dirty") return !["all", "packages"].includes(requested);
-  if (option === "--portable") return !["quality", "rust"].includes(requested);
   return true;
 })) {
-  throw new Error("usage: node scripts/ci/check.mts <scripts|quality|rust|frontend|packages|all> [--allow-dirty (packages/all)] [--portable (quality/rust)]");
+  throw new Error("usage: node scripts/ci/check.mts <scripts|quality|rust|frontend|packages|all> [--allow-dirty (packages/all)]");
 }
-
-// Native Windows clients and SSH targets share one checked and executed set.
-// ctld, the desktop app, and the macOS Keychain bridge have separate platform
-// requirements; all portable workspace packages belong here, including libraries.
-const portable_packages = [
-  "tokn-ctl-core", "ctl-cli", "ctl-client", "ctl-proto", "ctl-agent", "ctl-ipc",
-  "ctmux-process-info", "ctmux-client", "ctmux-cli", "ctmux-core", "ctmux-avt",
-  "ctmuxd", "ctmux-tui", "ctmux-ipc", "ctmux-proto",
-  "ctl-task-proto", "ctl-task-ipc", "ctl-taskd", "ctl-task-cli", "ctl-task-client", "ctl-task-store",
-];
-const package_args = options.includes("--portable")
-  ? portable_packages.flatMap((name) => ["-p", name])
-  : ["--workspace"];
 
 function run(command: string, args: string[], cwd = root, rust_toolchain = toolchain): void {
   console.log(`\nChecking: ${command} ${args.join(" ")}`);
@@ -59,10 +45,10 @@ function check(scope: Scope): void {
     }
     case "quality":
       run("cargo", ["fmt", "--all", "--", "--check"]);
-      run("cargo", ["clippy", "--locked", ...package_args, "--all-targets", "--", "-D", "warnings"]);
+      run("cargo", ["clippy", "--locked", "--workspace", "--all-targets", "--", "-D", "warnings"]);
       break;
     case "rust":
-      run("cargo", ["test", "--locked", "--no-fail-fast", ...package_args]);
+      run("cargo", ["test", "--locked", "--no-fail-fast", "--workspace"]);
       break;
     case "frontend": {
       for (const args of [

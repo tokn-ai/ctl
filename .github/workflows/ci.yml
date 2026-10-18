@@ -80,12 +80,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Check formatting and Clippy
-        if: runner.os != 'Windows'
         run: node scripts/ci/check.mts quality
-
-      - name: Check formatting and Windows Clippy
-        if: runner.os == 'Windows'
-        run: node scripts/ci/check.mts quality --portable
 
   rust-tests:
     name: Rust tests (${{ matrix.os }})
@@ -95,6 +90,7 @@ jobs:
         os:
           - ubuntu-latest
           - macos-latest
+          - windows-2025
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
@@ -149,7 +145,7 @@ jobs:
         run: node scripts/ci/check.mts packages
 
   windows-check:
-    name: Windows clients and SSH targets
+    name: Windows executable and SSH smoke tests
     runs-on: windows-2025
     timeout-minutes: 30
     defaults:
@@ -171,10 +167,6 @@ jobs:
 
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@v2
-
-      # Includes ctmuxd's Windows ConPTY integration tests.
-      - name: Test portable crates and Windows ConPTY sessions
-        run: node scripts/ci/check.mts rust --portable
 
       - name: Build Windows executables
         run: cargo build --locked -p ctl-cli -p ctl-agent -p ctl-taskd -p ctmux-cli -p ctmuxd -p ctmux-tui

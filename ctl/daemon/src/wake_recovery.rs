@@ -327,6 +327,7 @@ mod tests {
     assert!(registry.register(selected, 0).is_ok());
   }
 
+  #[cfg(unix)]
   #[tokio::test]
   async fn watch_socket_lifetime_releases_its_host_and_delivers_authorization() {
     let state = Arc::new(State::default());

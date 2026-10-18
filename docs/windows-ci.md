@@ -14,6 +14,7 @@ platform is Unix, even when the client runs on Windows.
 | Remote `ctl exec` | Uses system SSH; `--remote-platform windows` selects cmd.exe command construction | Authenticated loopback stdin/stdout/stderr and exit status |
 | Local `ctl ctmux` / `ctmux` | Named-pipe transport and ConPTY sessions | Auto-start, attachment, reconnect, resize, final output and exit status |
 | Local `ctl task` | Named-pipe transport, background Job Objects and managed ConPTY tasks | Auto-start, lifecycle, logs, recovery and descendant cleanup |
+| Local `ctld` | Owner-only named pipe, daemon lifecycle and available local VPN services | Detached startup, status without a container engine, cooperative restart and pipe reuse |
 | Remote ctmux | `ctl-agent.exe connect` routes to `ctmuxd.exe` | Authenticated loopback auto-start, reconnect and both destination selectors |
 | Remote tasks | `ctl-agent.exe connect --service task` routes to `ctl-taskd.exe` | Authenticated loopback lifecycle, log streams, working directory and persistence across channels |
 
@@ -25,41 +26,60 @@ identity, user, port and proxy settings.
 The Windows SSH fixture covers saved hosts, temporary aliases, colliding names,
 and a corrupt catalog. A missing saved `--host` is rejected before SSH starts.
 
-Windows clients use direct SSH, without the Unix ctld connection broker.
-Broker-dependent component management, port forwarding and host
-connect/disconnect commands remain Unix-only. The desktop app, ctld, and the
-macOS Keychain bridge are outside the Windows gate.
+Windows clients use direct SSH for remote connections. `ctld` runs as a local
+owner on Windows and serves daemon lifecycle and local VPN operations as their
+dependencies permit. OpenSSH control-master connection management, forwarding,
+and remote-listener discovery return an explicit platform diagnostic; ordinary
+direct SSH commands remain available. macOS Keychain operations remain macOS-only.
+The desktop backend and `ctld` participate in the whole-workspace Windows checks.
 
 ## Native CI gate
 
-The [CI workflow](../.github/workflows/ci.yml) uses native PowerShell on
-`windows-2025` with the MSVC Rust toolchain, Node 24, Clippy and rustfmt. The
-shared [check entry point](../scripts/ci/check.mts) defines one explicit set of
-21 portable packages for both checks and runtime tests:
+The [CI workflow](../.github/workflows/ci.yml) runs the same whole-workspace Rust
+checks on native platforms through the shared
+[check entry point](../scripts/ci/check.mts):
 
 ```sh
-node scripts/ci/check.mts quality --portable
-node scripts/ci/check.mts rust --portable
+node scripts/ci/check.mts quality
+node scripts/ci/check.mts rust
 ```
 
-The first command checks workspace formatting and runs Clippy over every target
-in the portable set with warnings denied. It runs in a separate quality job so
-lint failures do not hide runtime results. The second links and executes their
-native tests, including the client, IPC, task, process metadata parser, terminal
-emulation and ConPTY suites, collecting failures across all test binaries. The
-selection excludes only `ctld`, `ctmux-app` and
-`ctl-keychain-client`; it is explicit so a new platform-specific workspace member
-does not silently enter the gate.
+The quality command checks workspace formatting and runs Clippy over every
+workspace target with warnings denied on Linux and Windows. The test command
+links and executes workspace tests on Linux, macOS and `windows-2025`, collecting
+failures across all test binaries. Windows uses the MSVC Rust toolchain and Node
+24. New workspace crates enter these checks automatically; there is no package
+allowlist or separate Windows test command.
 
-The job then builds the Windows executables and runs
+Native dependencies and adapters are gated at their actual platform boundary.
+The macOS Keychain framework and notification adapter remain macOS-only, while
+its session revocation/resume state machine runs in the shared test suite.
+Shell/FIFO and Unix socket tests stay Unix-only; Windows runs its native named
+pipe, Job Object and ConPTY integration tests alongside the shared suites.
+Compilation alone does not establish runtime support, and WSL does not exercise
+these Windows paths.
+
+A separate Windows job builds executables and runs
 [task](../scripts/ci/windows-tasks.ps1),
 [terminal](../scripts/ci/windows-ctmux.ps1) and
-authenticated [SSH](../scripts/ci/windows-ssh.ps1) fixtures. The SSH test requiring
-server setup is explicitly invoked with `--ignored` by its fixture, rather than
-counted as covered by ordinary `cargo test`. Unix-only shell/FIFO and broker tests
-remain on Linux/macOS; portable CLI tests execute on all three platforms.
-Compilation alone does not establish runtime support, and WSL does not exercise
-these Windows paths. Linux/macOS retain the whole-workspace checks.
+authenticated [SSH](../scripts/ci/windows-ssh.ps1) fixtures using PowerShell.
+The SSH test requiring server setup is explicitly invoked with `--ignored` by
+its fixture, rather than counted as covered by ordinary `cargo test`.
+
+## Windows local ctld owner
+
+`ctld` listens on a local, owner-only named pipe derived from its runtime
+namespace, and supports explicit `--socket` pipe names. Its lifecycle endpoint
+supports inspection and cooperative restart. Windows removes the endpoint when
+handles close; startup uses an exclusive first pipe instance rather than
+filesystem socket cleanup.
+
+Optional local VPN dependencies are discovered when needed. Missing container
+engines produce discovery diagnostics without preventing daemon startup or
+status requests. The native daemon suite starts `ctld.exe` detached with an empty
+program search path, checks repeated VPN status requests and platform-specific
+SSH diagnostics, then restarts the owner and reuses its pipe name. Actual VPN
+connectivity still requires a supported container engine and configuration.
 
 ## Windows background tasks
 
@@ -203,13 +223,13 @@ not covered by the loopback fixture.
 - Remote interactive-task attachment over SSH. Local managed ConPTY tasks and
   remote ctmux attachment are covered separately.
 - Desktop remote-platform selection.
-- Native process inspection and the desktop app's local transport/build.
+- Native process inspection and Windows desktop bundle installation checks.
 - Cross-account ACL tests and filesystem ACL hardening for custom data paths.
 - Persistent logs, restart policies, workspace task integration, and other
   unfinished task features shared with Unix.
 
-The Unix whole-workspace gates remain unchanged. The Windows gate does not claim
-desktop packaging or Unix broker support.
+Whole-workspace Rust checks cover the desktop backend; producing and installing
+a Windows desktop bundle remains separate validation.
 
 ## Interactive managed tasks
 

@@ -1,14 +1,25 @@
 use super::*;
 
 #[test]
-fn unmonitored_state_fails_closed() {
-  let state = SessionState::new();
+fn authorization_requires_monitor_state_and_current_console_state() {
+  let state = SessionState::new(|| true);
   assert!(!state.is_unlocked());
+  state.available.store(true, Ordering::Release);
+  assert!(!state.is_unlocked());
+  state.unlocked.store(true, Ordering::Release);
+  assert!(state.is_unlocked());
+  state.revoke();
+  assert!(!state.is_unlocked());
+
+  let locked = SessionState::new(|| false);
+  locked.available.store(true, Ordering::Release);
+  locked.unlocked.store(true, Ordering::Release);
+  assert!(!locked.is_unlocked());
 }
 
 #[test]
 fn revocation_updates_generation_and_removes_subscriptions() {
-  let state = Arc::new(SessionState::new());
+  let state = Arc::new(SessionState::new(|| false));
   let revoked = Arc::new(AtomicU64::new(0));
   let count = Arc::clone(&revoked);
   let guard = state.subscribe(Arc::new(move || {
@@ -24,7 +35,7 @@ fn revocation_updates_generation_and_removes_subscriptions() {
 
 #[test]
 fn panicking_subscription_disables_monitor_and_preserves_other_revocations() {
-  let state = Arc::new(SessionState::new());
+  let state = Arc::new(SessionState::new(|| false));
   state.available.store(true, Ordering::Release);
   let revoked = Arc::new(AtomicBool::new(false));
   let count = Arc::clone(&revoked);
@@ -37,7 +48,7 @@ fn panicking_subscription_disables_monitor_and_preserves_other_revocations() {
 
 #[test]
 fn secure_input_metadata_changes_do_not_revoke_approval() {
-  let state = Arc::new(SessionState::new());
+  let state = Arc::new(SessionState::new(|| false));
   state.unlocked.store(true, Ordering::Release);
   let revoked = Arc::new(AtomicU64::new(0));
   let count = Arc::clone(&revoked);
@@ -52,39 +63,12 @@ fn secure_input_metadata_changes_do_not_revoke_approval() {
   assert_eq!(revoked.load(Ordering::Relaxed), 1);
 }
 
-#[test]
-fn delayed_lock_event_revokes_after_console_has_unlocked() {
-  let state = Arc::new(SessionState::new());
-  state.unlocked.store(true, Ordering::Release);
-  let revoked = Arc::new(AtomicU64::new(0));
-  let count = Arc::clone(&revoked);
-  let _guard = state.subscribe(Arc::new(move || {
-    count.fetch_add(1, Ordering::Relaxed);
-  }));
-  let mut callback = CallbackState {
-    state: Arc::clone(&state),
-    connection: 0,
-    probe: String::new(),
-  };
-  let name = CFString::new("com.apple.screenIsLocked");
-  distributed_event(
-    ptr::null_mut(),
-    (&raw mut callback).cast::<c_void>(),
-    name.as_concrete_TypeRef(),
-    ptr::null(),
-    ptr::null(),
-  );
-  assert_eq!(state.generation(), 1);
-  assert_eq!(revoked.load(Ordering::Relaxed), 1);
-  assert!(!state.unlocked.load(Ordering::Acquire));
-}
-
 fn resume_fixture() -> (
   Arc<SessionState>,
   Arc<Mutex<Vec<SessionResume>>>,
   SessionSubscription,
 ) {
-  let state = Arc::new(SessionState::new());
+  let state = Arc::new(SessionState::new(|| true));
   state.available.store(true, Ordering::Release);
   let events = Arc::new(Mutex::new(Vec::new()));
   let received = Arc::clone(&events);
@@ -187,6 +171,7 @@ fn queued_resume_events_reject_a_later_lock_and_display_sleep() {
   state.will_sleep();
   state.screens_changed(true, true);
   let event = events.lock().unwrap()[0];
+  assert!(state.resume_is_current(event));
   state.screens_changed(false, true);
   assert!(!state.resume_is_current(event));
   state.revoke();

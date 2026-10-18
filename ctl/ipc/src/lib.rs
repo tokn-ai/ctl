@@ -1,5 +1,10 @@
 //! Owner-only local protocol between `ctld` and its clients.
 
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+pub use windows::Listener;
+
 pub mod credentials;
 mod daemon_startup;
 pub mod identities;
@@ -792,7 +797,11 @@ pub fn socket_path() -> PathBuf {
     return PathBuf::from(path);
   }
   if let Some(directory) = env::var_os("CTLD_RUNTIME_DIR") {
-    return PathBuf::from(directory).join(format!("ctld-v{}.sock", PROTOCOL_VERSION.major));
+    let directory = PathBuf::from(directory);
+    #[cfg(unix)]
+    return directory.join(format!("ctld-v{}.sock", PROTOCOL_VERSION.major));
+    #[cfg(windows)]
+    return windows::endpoint(&directory);
   }
   default_socket_path()
 }
@@ -814,15 +823,8 @@ pub fn default_socket_path() -> PathBuf {
   }
   #[cfg(windows)]
   {
-    use std::os::windows::ffi::OsStrExt as _;
     let directory = dirs::data_local_dir().unwrap_or_else(env::temp_dir);
-    let bytes: Vec<u8> = directory
-      .as_os_str()
-      .encode_wide()
-      .flat_map(u16::to_le_bytes)
-      .collect();
-    let id = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, &bytes);
-    PathBuf::from(format!(r"\\.\pipe\ctld-v{}-{id}", PROTOCOL_VERSION.major))
+    windows::endpoint(&directory)
   }
 }
 

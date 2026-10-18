@@ -122,6 +122,16 @@ jobs:
       - name: Run workspace tests
         run: node scripts/ci/check.mts rust
 
+      - name: Install Bun for caller credential interoperability
+        uses: oven-sh/setup-bun@v2
+
+      - name: Test Bun caller credential handoff
+        run: cargo test --locked -p ctl-cli --test caller_credentials -- --include-ignored
+
+      - name: Test fresh caller credentials against OpenSSH
+        if: runner.os != 'Windows'
+        run: bash scripts/ci/caller-ssh-unix.sh
+
   cargo-packages:
     name: Cargo packages (Rust 1.97)
     runs-on: ubuntu-latest
@@ -167,6 +177,9 @@ jobs:
 
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@v2
+
+      - name: Install Bun for caller credential interoperability
+        uses: oven-sh/setup-bun@v2
 
       - name: Build Windows executables
         run: cargo build --locked -p ctl-cli -p ctl-agent -p ctld -p ctl-taskd -p ctmux-cli -p ctmuxd -p ctmux-tui

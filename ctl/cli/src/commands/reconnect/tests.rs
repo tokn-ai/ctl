@@ -7,6 +7,7 @@ use crate::commands::CtlConnector;
 
 fn retryable(error: &CtlConnectError) -> bool {
   let connector = CtlConnector {
+    caller_auth: None,
     target: ctl_client::ConnectionTarget::ssh("work"),
     settings: ctl_client::hosts::ConnectionTargetDto::ssh("work"),
     recovery: std::sync::Arc::default(),

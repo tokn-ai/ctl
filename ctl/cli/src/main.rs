@@ -1,4 +1,5 @@
 mod bundled;
+mod caller_auth;
 mod commands;
 mod components;
 mod connection;
@@ -34,6 +35,37 @@ struct Arguments {
   /// Supply this option before the subcommand.
   #[arg(long, id = "remote_destination", value_name = "DESTINATION", conflicts_with_all = ["host", "method"])]
   destination: Option<String>,
+
+  /// Override the SSH user for a temporary shell or exec destination.
+  #[arg(long, requires = "remote_destination")]
+  user: Option<String>,
+
+  /// Override the SSH port for a temporary shell or exec destination.
+  #[arg(long, requires = "remote_destination", value_parser = clap::value_parser!(u16).range(1..))]
+  port: Option<u16>,
+
+  /// Authenticate a fresh connection using only this private key (no broker).
+  #[arg(long, requires = "remote_destination", conflicts_with_all = ["password_fd", "password_pipe", "password_socket"])]
+  identity_file: Option<std::path::PathBuf>,
+
+  /// Read one UTF-8 password until EOF from inherited Unix FD N >= 3.
+  #[arg(long, requires = "remote_destination", conflicts_with_all = ["password_pipe", "password_socket"], value_parser = clap::value_parser!(i32).range(3..))]
+  password_fd: Option<i32>,
+
+  /// Receive a password on an owner-only local Windows named pipe created by ctl.
+  #[arg(
+    long,
+    requires = "remote_destination",
+    conflicts_with = "password_socket"
+  )]
+  password_pipe: Option<std::path::PathBuf>,
+
+  /// Receive a password on a Unix socket in a caller-owned private directory.
+  #[arg(long, requires = "remote_destination")]
+  password_socket: Option<std::path::PathBuf>,
+
+  #[arg(skip)]
+  password_input: Option<std::fs::File>,
 
   /// Select a saved host's connection method by name or ID.
   #[arg(long, global = true)]
@@ -152,11 +184,38 @@ enum TaskdCommand {
   Restart,
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
+  // Claim caller descriptors before Tokio allocates internal descriptors. An
+  // invalid inherited FD must never accidentally select a runtime-owned socket.
+  let arguments = if std::env::var_os(caller_auth::ASKPASS_MODE).is_some()
+    || std::env::var_os(openssh::SCP_TRANSPORT_ENV).is_some()
+  {
+    None
+  } else {
+    let mut arguments = Arguments::parse();
+    if let Err(error) = caller_auth::claim(&mut arguments) {
+      eprintln!("ctl: {error}");
+      std::process::exit(1);
+    }
+    Some(arguments)
+  };
+  let runtime = tokio::runtime::Builder::new_multi_thread()
+    .enable_all()
+    .build()
+    .expect("could not start ctl runtime");
+  let code = runtime.block_on(run_main(arguments));
+  // Drop authentication tasks (and zeroize their buffers) before process exit.
+  drop(runtime);
+  std::process::exit(code);
+}
+
+async fn run_main(arguments: Option<Arguments>) -> i32 {
+  if std::env::var_os(caller_auth::ASKPASS_MODE).is_some() {
+    return i32::from(caller_auth::askpass().await.is_err());
+  }
   if let Err(error) = bundled::register() {
     eprintln!("ctl: {error}");
-    std::process::exit(1);
+    return 1;
   }
   let result = if std::env::var_os(openssh::SCP_TRANSPORT_ENV).is_some() {
     openssh::run_ssh(
@@ -166,13 +225,13 @@ async fn main() {
     .await
     .map_err(commands::CliError::from)
   } else {
-    commands::run(Arguments::parse()).await
+    commands::run(arguments.expect("ordinary invocations have parsed arguments")).await
   };
   match result {
-    Ok(code) => std::process::exit(code),
+    Ok(code) => code,
     Err(error) => {
       eprintln!("ctl: {error}");
-      std::process::exit(1);
+      1
     }
   }
 }
@@ -180,6 +239,88 @@ async fn main() {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn caller_credentials_require_a_temporary_native_operation_and_one_source() {
+    for arguments in [
+      vec!["ctl", "--identity-file", "key", "exec", "true"],
+      vec![
+        "ctl",
+        "--destination",
+        "host",
+        "--port",
+        "0",
+        "exec",
+        "true",
+      ],
+      vec![
+        "ctl",
+        "--destination",
+        "host",
+        "--password-fd",
+        "0",
+        "exec",
+        "true",
+      ],
+      vec![
+        "ctl",
+        "--destination",
+        "host",
+        "--identity-file",
+        "key",
+        "--password-fd",
+        "3",
+        "shell",
+      ],
+      vec![
+        "ctl",
+        "--destination",
+        "host",
+        "--password-fd",
+        "3",
+        "--password-pipe",
+        "pipe",
+        "shell",
+      ],
+      vec![
+        "ctl",
+        "--destination",
+        "host",
+        "--password-socket",
+        "socket",
+        "--identity-file",
+        "key",
+        "shell",
+      ],
+    ] {
+      assert!(Arguments::try_parse_from(arguments).is_err());
+    }
+    for command in ["ctmux", "port"] {
+      let invalid = Arguments::try_parse_from([
+        "ctl",
+        "--destination",
+        "host",
+        "--identity-file",
+        "key",
+        command,
+        "list",
+      ])
+      .unwrap();
+      assert!(caller_auth::validate(&invalid).is_err());
+    }
+    let valid = Arguments::try_parse_from([
+      "ctl",
+      "--destination",
+      "operator@::1",
+      "--port",
+      "2222",
+      "--identity-file",
+      "key",
+      "shell",
+    ])
+    .unwrap();
+    assert!(caller_auth::validate(&valid).is_ok());
+  }
 
   #[test]
   fn passwords_exposes_only_inspection_and_removal_with_global_json_output() {

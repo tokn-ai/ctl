@@ -61,6 +61,44 @@ function Invoke-Ctl {
   }
 }
 
+function Invoke-CallerPassword {
+  param([string]$Executable, [string]$Credentials)
+  $start = [Diagnostics.ProcessStartInfo]::new('bun')
+  $start.UseShellExecute = $false
+  $start.WorkingDirectory = (Get-Location).ProviderPath
+  $start.RedirectStandardInput = $true
+  $start.RedirectStandardOutput = $true
+  $start.RedirectStandardError = $true
+  foreach ($argument in @('./scripts/ci/caller-password.mts', $Executable, 'ctl-windows-ci')) {
+    $start.ArgumentList.Add($argument)
+  }
+  $process = [Diagnostics.Process]::new()
+  $process.StartInfo = $start
+  $started = $false
+  try {
+    $started = $process.Start()
+    if (-not $started) { throw 'Could not start the Bun caller-password fixture' }
+    $stdout = $process.StandardOutput.ReadToEndAsync()
+    $stderr = $process.StandardError.ReadToEndAsync()
+    # Credentials stay on stdin, outside argv, environment and captured logs.
+    $process.StandardInput.Write($Credentials)
+    $process.StandardInput.Close()
+    if (-not $process.WaitForExit(180000)) { throw 'Bun caller-password fixture timed out' }
+    if (-not $stdout.Wait(5000) -or -not $stderr.Wait(5000)) {
+      throw 'Bun caller-password fixture left output streams open'
+    }
+    if ($process.ExitCode -ne 0) {
+      throw "Bun caller-password fixture exited $($process.ExitCode):`n$($stdout.Result)`n$($stderr.Result)"
+    }
+  } finally {
+    if ($started -and -not $process.HasExited) {
+      $process.Kill($true)
+      $process.WaitForExit(5000) | Out-Null
+    }
+    $process.Dispose()
+  }
+}
+
 function Assert-Equal {
   param([string]$Actual, [string]$Expected, [string]$Label)
   if ($Actual -cne $Expected) { throw "${Label}: expected '$Expected', got '$Actual'" }
@@ -125,7 +163,15 @@ $originalForwardHost = $env:CTL_TEST_SSH_FORWARD_HOST
 $originalUnwantedPort = $env:CTL_TEST_SSH_UNWANTED_PORT
 $originalCtlBin = $env:CTL_TEST_CTL_BIN
 $taskDaemon = $null
+$callerUser = 'ctlcallerci'
+$callerCreated = $false
 try {
+  if (Get-LocalUser -Name $callerUser -ErrorAction SilentlyContinue) { throw "Refusing to replace $callerUser" }
+  $callerPassword = [Guid]::NewGuid().ToString('N') + '!aA9'
+  New-LocalUser -Name $callerUser -Password (ConvertTo-SecureString $callerPassword -AsPlainText -Force) | Out-Null
+  $callerCreated = $true
+  $usersGroup = Get-LocalGroup -SID 'S-1-5-32-545'
+  Add-LocalGroupMember -Group $usersGroup.Name -Member $callerUser
   Stop-Service sshd -ErrorAction SilentlyContinue
   # The fixed remote command resolves installed executables through the server's PATH.
   foreach ($binary in @('ctl-agent.exe', 'ctmuxd.exe', 'ctl-taskd.exe')) {
@@ -138,6 +184,7 @@ try {
   New-ItemProperty $shellKey -Name DefaultShell -Value "$env:WINDIR\System32\cmd.exe" -PropertyType String -Force | Out-Null
   Invoke-Native -Program "$openssh\ssh-keygen.exe" -Arguments @('-q', '-t', 'ed25519', '-N', '', '-f', "$root\host")
   Invoke-Native -Program "$openssh\ssh-keygen.exe" -Arguments @('-q', '-t', 'ed25519', '-N', '', '-f', "$root\client")
+  Invoke-Native -Program "$openssh\ssh-keygen.exe" -Arguments @('-q', '-t', 'ed25519', '-N', '', '-f', "$root\wrong-client")
   # SYSTEM runs sshd; only SYSTEM and Administrators may change its host key/config.
   Invoke-Native -Program 'icacls.exe' -Arguments @($root, '/inheritance:r', '/grant:r', '*S-1-5-18:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F', '/T')
   Invoke-Native -Program 'icacls.exe' -Arguments @("$root\host", '/setowner', '*S-1-5-18')
@@ -156,12 +203,14 @@ AuthorizedKeysFile __PROGRAMDATA__/ssh/administrators_authorized_keys
 PubkeyAuthentication yes
 PasswordAuthentication no
 KbdInteractiveAuthentication no
-AllowUsers $user
+AllowUsers $user $callerUser
 AllowTcpForwarding local
 AllowAgentForwarding no
 PermitTTY no
 SyslogFacility LOCAL0
 LogLevel DEBUG1
+Match User $callerUser
+  PasswordAuthentication yes
 "@ | Set-Content $serverConfig -Encoding ascii
   # sshd validates these ACLs under SYSTEM, before it can initialize logging.
   foreach ($path in $aclPaths) {
@@ -344,6 +393,16 @@ $originalConfigText
   $result = Invoke-Ctl -Arguments ($saved + @('task', 'list'))
   Assert-Equal $result.stdout '' 'Remote task cleanup'
   Assert-Equal (Get-FileHash $catalog).Hash $catalogHash 'Connections preserve the saved host catalog'
+  Write-Host 'Checking caller-owned SSH keys and one-shot password channels'
+  $result = Invoke-Ctl -Arguments @('--destination', 'ctl-windows-ci', '--identity-file', "$root\client", '--port', '22222', '--remote-platform', 'windows', 'exec', '--', 'cmd', '/c', 'echo', 'CALLER_KEY_AUTHENTICATED')
+  Assert-Equal $result.stdout.Trim() 'CALLER_KEY_AUTHENTICATED' 'Caller-owned SSH key authentication'
+  # The SSH config's working IdentityFile must not rescue this incorrect key.
+  Invoke-Ctl -Arguments @('--destination', 'ctl-windows-ci', '--identity-file', "$root\wrong-client", '--remote-platform', 'windows', 'exec', '--', 'cmd', '/c', 'exit', '0') -ExpectedExit 255 | Out-Null
+  $callerDirectory = Join-Path $root 'caller cli'
+  New-Item -ItemType Directory $callerDirectory | Out-Null
+  Copy-Item '.\target\debug\ctl.exe' "$callerDirectory\ctl.exe"
+  Invoke-CallerPassword -Executable "$callerDirectory\ctl.exe" -Credentials (@{ user = $callerUser; password = $callerPassword } | ConvertTo-Json -Compress)
+  Invoke-Ctl -Arguments ($temporary + @('ctmux', 'list')) | Out-Null
 } catch {
   Stop-Service sshd -ErrorAction SilentlyContinue
   Get-Content "$root\client.log" -Tail 100 -ErrorAction SilentlyContinue
@@ -392,4 +451,5 @@ $originalConfigText
   $env:CTL_TEST_SSH_UNWANTED_PORT = $originalUnwantedPort
   $env:CTL_TEST_CTL_BIN = $originalCtlBin
   Remove-Item $root -Recurse -Force -ErrorAction SilentlyContinue
+  if ($callerCreated) { Remove-LocalUser -Name $callerUser }
 }

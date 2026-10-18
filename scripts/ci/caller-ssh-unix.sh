@@ -33,6 +33,8 @@ ListenAddress ::1
 PidFile $root/sshd.pid
 HostKey $root/host
 AuthorizedKeysFile $root/client.pub
+# This private test directory is under /tmp, outside the account's home.
+StrictModes no
 AllowUsers $ssh_user
 PasswordAuthentication no
 KbdInteractiveAuthentication no

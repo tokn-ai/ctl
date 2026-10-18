@@ -4,8 +4,9 @@ import { spawn } from "node:child_process";
 import { connect } from "node:net";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { text } from "node:stream/consumers";
 const [ctl, destination] = process.argv.slice(2);
-const { user, password } = JSON.parse(await Bun.stdin.text()) as { user: string; password: string };
+const { user, password } = JSON.parse(await text(process.stdin)) as { user: string; password: string };
 
 async function invoke(supplied: string, input: string, command: string[]) {
   const pipe = `\\\\.\\pipe\\ctl-password-${randomUUID()}`;

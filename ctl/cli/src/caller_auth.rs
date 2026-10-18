@@ -37,6 +37,7 @@ pub fn validate(arguments: &Arguments) -> io::Result<()> {
     && arguments.identity_file.is_none()
     && arguments.password_fd.is_none()
     && arguments.password_pipe.is_none()
+    && arguments.password_socket.is_none()
   {
     return Ok(());
   }
@@ -82,6 +83,8 @@ pub async fn prepare(
     Some(channel::inherited(file).await?)
   } else if let Some(path) = &arguments.password_pipe {
     Some(channel::pipe(path).await?)
+  } else if let Some(path) = &arguments.password_socket {
+    Some(channel::socket(path).await?)
   } else {
     None
   };
@@ -137,37 +140,32 @@ pub async fn prepare(
 }
 
 async fn host_options(target: &ConnectionTargetDto) -> io::Result<Vec<std::ffi::OsString>> {
-  let ssh = target
-    .to_ssh_target()
-    .map_err(|_| channel::invalid("Invalid SSH destination"))?;
-  let mut command = tokio::process::Command::new("ssh");
-  command
-    .args([
-      "-G",
-      "-o",
-      "PermitLocalCommand=no",
-      "-o",
-      "RemoteCommand=none",
-    ])
-    .args(crate::connection::target_arguments(&ssh).map_err(io::Error::other)?)
-    .arg("--")
-    .arg(&ssh.destination)
-    .kill_on_drop(true);
-  let output = tokio::time::timeout(channel::TIMEOUT, command.output())
-    .await
-    .map_err(|_| channel::invalid("SSH configuration lookup timed out"))??;
-  if !output.status.success() || output.stdout.len() > 128 * 1024 {
-    return Err(channel::invalid(
-      "Could not resolve the temporary SSH endpoint",
-    ));
-  }
-  let text = std::str::from_utf8(&output.stdout)
-    .map_err(|_| channel::invalid("Invalid SSH configuration output"))?;
+  let text = query_config(target, false).await?;
+  let mut defaults = None;
   let mut options = Vec::new();
   for line in text.lines() {
     let Some((name, value)) = line.split_once(' ') else {
       continue;
     };
+    if matches!(name, "userknownhostsfile" | "globalknownhostsfile") && ambiguous_paths(value) {
+      // OpenSSH -G does not quote individual paths. Do not accidentally turn
+      // a path containing spaces into several different trust stores. Default
+      // paths can be inherited losslessly, including Windows profiles with spaces.
+      if defaults.is_none() {
+        defaults = Some(query_config(target, true).await?);
+      }
+      let unchanged = defaults.as_deref().is_some_and(|text| {
+        text
+          .lines()
+          .any(|line| line.split_once(' ') == Some((name, value)))
+      });
+      if unchanged {
+        continue;
+      }
+      return Err(channel::invalid(
+        "Custom known-hosts paths containing whitespace cannot be resolved unambiguously; use an unambiguous absolute path",
+      ));
+    }
     // IdentityFile is additive in OpenSSH, so overriding it cannot exclude
     // configured identities. Resolve only endpoint and host-key policy, then
     // run with -F none. Authentication and proxy config cannot re-enter.
@@ -192,6 +190,11 @@ async fn host_options(target: &ConnectionTargetDto) -> io::Result<Vec<std::ffi::
       if value.chars().any(char::is_control) {
         return Err(channel::invalid("Invalid SSH host-key settings"));
       }
+      let value = if name == "revokedhostkeys" {
+        format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+      } else {
+        value.into()
+      };
       options.extend(["-o".into(), format!("{name}={value}").into()]);
     }
     if matches!(name, "proxycommand" | "proxyjump") && value != "none" {
@@ -201,6 +204,69 @@ async fn host_options(target: &ConnectionTargetDto) -> io::Result<Vec<std::ffi::
     }
   }
   Ok(options)
+}
+
+fn ambiguous_paths(value: &str) -> bool {
+  value.contains(char::is_whitespace)
+    && value.split_whitespace().any(|path| {
+      !(path.starts_with('/')
+        || (path.as_bytes().get(1) == Some(&b':')
+          && path
+            .as_bytes()
+            .get(2)
+            .is_some_and(|byte| matches!(byte, b'/' | b'\\'))))
+    })
+}
+
+async fn query_config(target: &ConnectionTargetDto, defaults: bool) -> io::Result<String> {
+  let ssh = target
+    .to_ssh_target()
+    .map_err(|_| channel::invalid("Invalid SSH destination"))?;
+  let mut command = tokio::process::Command::new("ssh");
+  if defaults {
+    command.args(["-F", "none"]);
+  }
+  command
+    .args([
+      "-G",
+      "-o",
+      "PermitLocalCommand=no",
+      "-o",
+      "RemoteCommand=none",
+    ])
+    .args(crate::connection::target_arguments(&ssh).map_err(io::Error::other)?)
+    .arg("--")
+    .arg(&ssh.destination)
+    .stdin(std::process::Stdio::null())
+    .stdout(std::process::Stdio::piped())
+    .stderr(std::process::Stdio::null())
+    .kill_on_drop(true);
+  let mut child = command.spawn()?;
+  let mut output = Vec::new();
+  let read = async {
+    child
+      .stdout
+      .as_mut()
+      .ok_or_else(|| channel::invalid("Missing SSH configuration output"))?
+      .take(128 * 1024 + 1)
+      .read_to_end(&mut output)
+      .await?;
+    if output.len() > 128 * 1024 {
+      return Err(channel::invalid(
+        "SSH configuration exceeds the output limit",
+      ));
+    }
+    if !child.wait().await?.success() {
+      return Err(channel::invalid(
+        "Could not resolve the temporary SSH endpoint",
+      ));
+    }
+    Ok::<_, io::Error>(())
+  };
+  tokio::time::timeout(channel::TIMEOUT, read)
+    .await
+    .map_err(|_| channel::invalid("SSH configuration lookup timed out"))??;
+  String::from_utf8(output).map_err(|_| channel::invalid("Invalid SSH configuration output"))
 }
 
 pub async fn askpass() -> io::Result<()> {

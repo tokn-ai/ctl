@@ -41,7 +41,7 @@ ctl --destination 'operator@::1' --port 2222 --identity-file ./instance-key shel
 
 `--user` and `--port` override the temporary endpoint. Without an explicit
 credential, authentication retains the ordinary ctl-managed policy. Supplying
-`--identity-file`, `--password-fd`, or `--password-pipe` instead selects a fresh,
+`--identity-file`, `--password-fd`, `--password-socket`, or `--password-pipe` instead selects a fresh,
 caller-owned connection: no existing master, configured identities, identity
 agent, alternative authentication method, saved credential or Keychain fallback
 can rescue an incorrect supplied credential. Credential sources conflict.
@@ -50,6 +50,8 @@ The private key must be usable without an agent or an interactive passphrase.
 ctl resolves the SSH alias's endpoint and host-key settings, then uses an isolated
 OpenSSH configuration. Host-key verification and known-hosts policy remain in
 effect; unknown or changed keys are never approved with the supplied password.
+Default known-hosts paths retain profile names containing spaces. Ambiguous
+custom known-hosts path lists are rejected instead of changing which files are trusted.
 Configured proxy authentication is rejected in this mode; use a directly
 reachable destination. This mode neither creates saved hosts nor edits SSH
 configuration. Persistent `shell` sessions still require the remote ctl-agent
@@ -60,7 +62,8 @@ FD N >= 3. File descriptors 0, 1 and 2 remain command stdin/stdout/stderr.
 The parent writes exactly one password and closes its writing end. ctl claims
 and closes the inherited descriptor before starting any subprocess, reads a
 bounded payload until EOF, and rejects a missing EOF after five seconds. Regular
-files are rejected. Example using Bun's Node-compatible process API:
+files are rejected. Example using Node's process API (Bun callers can use the
+socket alternative below without depending on extra-FD stream ownership):
 
 ```ts
 import { spawn } from "node:child_process";
@@ -76,6 +79,15 @@ function execute(password: string, command_input: Uint8Array) {
   return child;
 }
 ```
+
+For Bun or other socket-oriented Unix callers, use `--password-socket PATH`.
+The caller creates a short, private directory with mode 0700; ctl verifies its
+ownership and permissions, creates the Unix socket, and removes only its own
+socket on completion or failure. The parent connects with `node:net`, sends the
+password and closes the connection. It owns cleanup of the empty directory.
+This is a socket endpoint, not a file containing the credential. Standard stdin
+remains available throughout. Existing endpoints and public/symlink directories
+are rejected.
 
 On Windows, use `--password-pipe \\.\pipe\ctl-password-UNIQUE_NAME` instead.
 ctl creates an exclusive local-only pipe with an owner-only DACL and

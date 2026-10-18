@@ -7,6 +7,11 @@ fn main() {
   assert!(std::fs::metadata("/dev/fd/3").is_err(), "credential descriptor leaked into SSH");
   if args.contains(&"-G".to_owned()) {
     println!("hostname 127.0.0.1\nuser caller\nport 2222\nstricthostkeychecking yes\nidentityfile /unrelated-authorized-key\nproxycommand none");
+    match std::env::var("CTL_TEST_CONFIG_PATHS").unwrap_or_default().as_str() {
+      "default-space" => println!("userknownhostsfile C:/Users/Two Names/.ssh/known_hosts C:/Users/Two Names/.ssh/known_hosts2"),
+      "custom-space" if !args.contains(&"-F".to_owned()) => println!("userknownhostsfile /custom/trust store/known_hosts"),
+      _ => println!("userknownhostsfile /default/known_hosts"),
+    }
     return;
   }
   assert!(!args.iter().any(|arg| arg.contains(PASSWORD)));
@@ -17,6 +22,7 @@ fn main() {
     assert!(has(value), "missing authentication isolation option");
   }
   assert!(!has("/unrelated-authorized-key"));
+  assert!(!args.iter().any(|arg| arg.contains("Two Names")), "default paths were not inherited losslessly");
   if has("PreferredAuthentications=password") {
     assert!(has("PubkeyAuthentication=no"));
     let program = std::env::var_os("SSH_ASKPASS").expect("askpass program");

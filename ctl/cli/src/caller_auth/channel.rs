@@ -37,6 +37,64 @@ pub(super) fn invalid(message: &'static str) -> io::Error {
 }
 
 #[cfg(unix)]
+struct SocketCleanup {
+  path: PathBuf,
+  device: u64,
+  inode: u64,
+}
+#[cfg(unix)]
+impl Drop for SocketCleanup {
+  fn drop(&mut self) {
+    use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _};
+    if std::fs::symlink_metadata(&self.path).is_ok_and(|metadata| {
+      metadata.file_type().is_socket()
+        && metadata.dev() == self.device
+        && metadata.ino() == self.inode
+    }) {
+      let _ = std::fs::remove_file(&self.path);
+    }
+  }
+}
+
+#[cfg(unix)]
+pub(super) async fn socket(path: &Path) -> io::Result<Zeroizing<Vec<u8>>> {
+  use std::os::unix::fs::MetadataExt as _;
+  let parent = path
+    .parent()
+    .ok_or_else(|| invalid("Password socket needs a private parent directory"))?;
+  let metadata = std::fs::symlink_metadata(parent)?;
+  if !metadata.is_dir()
+    || metadata.file_type().is_symlink()
+    || metadata.uid() != rustix::process::getuid().as_raw()
+    || metadata.mode() & 0o077 != 0
+  {
+    return Err(invalid(
+      "Password socket directory must be owned by this user with mode 0700",
+    ));
+  }
+  let listener = tokio::net::UnixListener::bind(path)?;
+  let metadata = std::fs::symlink_metadata(path)?;
+  let _cleanup = SocketCleanup {
+    path: path.into(),
+    device: metadata.dev(),
+    inode: metadata.ino(),
+  };
+  let (stream, _) = tokio::time::timeout(TIMEOUT, listener.accept())
+    .await
+    .map_err(|_| invalid("Password socket connection timed out"))??;
+  password(stream).await
+}
+
+#[cfg(not(unix))]
+pub(super) fn socket(
+  _path: &Path,
+) -> impl std::future::Future<Output = io::Result<Zeroizing<Vec<u8>>>> {
+  std::future::ready(Err(invalid(
+    "--password-socket is Unix-only; use --password-pipe on Windows",
+  )))
+}
+
+#[cfg(unix)]
 pub(super) fn claim(fd: i32) -> io::Result<std::fs::File> {
   use nix::fcntl::{FcntlArg, FdFlag, OFlag, fcntl};
   use std::{os::fd::AsRawFd, os::unix::fs::FileTypeExt as _};

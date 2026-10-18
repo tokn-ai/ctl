@@ -48,16 +48,24 @@ struct Arguments {
   port: Option<u16>,
 
   /// Authenticate a fresh connection using only this private key (no broker).
-  #[arg(long, requires = "remote_destination", conflicts_with_all = ["password_fd", "password_pipe"])]
+  #[arg(long, requires = "remote_destination", conflicts_with_all = ["password_fd", "password_pipe", "password_socket"])]
   identity_file: Option<std::path::PathBuf>,
 
   /// Read one UTF-8 password until EOF from inherited Unix FD N >= 3.
-  #[arg(long, requires = "remote_destination", conflicts_with = "password_pipe", value_parser = clap::value_parser!(i32).range(3..))]
+  #[arg(long, requires = "remote_destination", conflicts_with_all = ["password_pipe", "password_socket"], value_parser = clap::value_parser!(i32).range(3..))]
   password_fd: Option<i32>,
 
   /// Receive a password on an owner-only local Windows named pipe created by ctl.
-  #[arg(long, requires = "remote_destination")]
+  #[arg(
+    long,
+    requires = "remote_destination",
+    conflicts_with = "password_socket"
+  )]
   password_pipe: Option<std::path::PathBuf>,
+
+  /// Receive a password on a Unix socket in a caller-owned private directory.
+  #[arg(long, requires = "remote_destination")]
+  password_socket: Option<std::path::PathBuf>,
 
   #[arg(skip)]
   password_input: Option<std::fs::File>,
@@ -277,6 +285,16 @@ mod tests {
         "3",
         "--password-pipe",
         "pipe",
+        "shell",
+      ],
+      vec![
+        "ctl",
+        "--destination",
+        "host",
+        "--password-socket",
+        "socket",
+        "--identity-file",
+        "key",
         "shell",
       ],
     ] {

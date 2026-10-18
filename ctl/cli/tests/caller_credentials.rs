@@ -49,19 +49,67 @@ impl Drop for Fixture {
   }
 }
 
+#[cfg(unix)]
+#[test]
+fn socket_handoff_rejects_public_directories_and_preserves_existing_entries() {
+  use std::os::unix::fs::PermissionsExt as _;
+  let _guard = ctl_core::test_fixtures::ProcessGuard::acquire_blocking();
+  let fixture = Fixture::new();
+  let directory = std::path::PathBuf::from(format!(
+    "/tmp/ctl-input-{}",
+    &uuid::Uuid::new_v4().simple().to_string()[..12]
+  ));
+  std::fs::create_dir(&directory).unwrap();
+  let path = directory.join("password.sock");
+  std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o755)).unwrap();
+  let output = fixture
+    .command(env!("CARGO_BIN_EXE_ctl"))
+    .args(["--destination", "host", "--password-socket"])
+    .arg(&path)
+    .args(["exec", "--", "true"])
+    .output()
+    .unwrap();
+  assert!(!output.status.success());
+  assert!(String::from_utf8_lossy(&output.stderr).contains("0700"));
+  assert!(!path.exists());
+  std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+  std::fs::write(&path, "existing application data").unwrap();
+  let output = fixture
+    .command(env!("CARGO_BIN_EXE_ctl"))
+    .args(["--destination", "host", "--password-socket"])
+    .arg(&path)
+    .args(["exec", "--", "true"])
+    .output()
+    .unwrap();
+  assert!(!output.status.success());
+  assert_eq!(
+    std::fs::read_to_string(&path).unwrap(),
+    "existing application data"
+  );
+  std::fs::remove_dir_all(directory).unwrap();
+}
+
 #[test]
 fn caller_key_mode_isolated_from_managed_authentication_and_config_identities() {
   let _guard = ctl_core::test_fixtures::ProcessGuard::acquire_blocking();
   let fixture = Fixture::new();
-  let output = fixture
-    .command(env!("CARGO_BIN_EXE_ctl"))
-    .args(["--destination", "work", "--identity-file"])
-    .arg(fixture.0.join("key"))
-    .args(["exec", "--", "uname", "-a"])
-    .output()
-    .unwrap();
-  assert_eq!(output.status.code(), Some(17), "{output:?}");
-  assert!(String::from_utf8_lossy(&output.stderr).contains("separate-command-stderr"));
+  for paths in ["normal", "default-space", "custom-space"] {
+    let output = fixture
+      .command(env!("CARGO_BIN_EXE_ctl"))
+      .env("CTL_TEST_CONFIG_PATHS", paths)
+      .args(["--destination", "work", "--identity-file"])
+      .arg(fixture.0.join("key"))
+      .args(["exec", "--", "uname", "-a"])
+      .output()
+      .unwrap();
+    if paths == "custom-space" {
+      assert_eq!(output.status.code(), Some(1), "{output:?}");
+      assert!(String::from_utf8_lossy(&output.stderr).contains("unambiguously"));
+    } else {
+      assert_eq!(output.status.code(), Some(17), "{output:?}");
+      assert!(String::from_utf8_lossy(&output.stderr).contains("separate-command-stderr"));
+    }
+  }
   assert!(!fixture.0.join("never-start.sock").exists());
   assert_eq!(
     std::fs::read_dir(fixture.0.join("home")).unwrap().count(),
@@ -80,6 +128,30 @@ fn bun_password_handoff_preserves_stdin_and_does_not_disclose_or_persist_secrets
     .command("bun")
     .arg(script)
     .arg(env!("CARGO_BIN_EXE_ctl"))
+    .output()
+    .unwrap();
+  assert!(output.status.success(), "{output:?}");
+  assert!(!fixture.0.join("never-start.sock").exists());
+  assert_eq!(
+    std::fs::read_dir(fixture.0.join("home")).unwrap().count(),
+    0
+  );
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "requires Node; explicitly exercised in Unix CI"]
+fn inherited_descriptor_handoff_preserves_stdin_and_rejects_missing_eof() {
+  let _guard = ctl_core::test_fixtures::ProcessGuard::acquire_blocking();
+  let fixture = Fixture::new();
+  let script = fixture.0.join("handoff.mts");
+  std::fs::write(&script, include_str!("fixtures/caller_handoff.mts")).unwrap();
+  let output = fixture
+    .command("node")
+    .arg("--experimental-strip-types")
+    .arg(script)
+    .arg(env!("CARGO_BIN_EXE_ctl"))
+    .arg("--fd")
     .output()
     .unwrap();
   assert!(output.status.success(), "{output:?}");

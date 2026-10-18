@@ -43,13 +43,14 @@ async function invoke(supplied: string, input: string, command: string[]) {
   return { code, stdout, stderr };
 }
 
-const streamed = await invoke(password, "CALLER_STDIN\r\n", ["exec", "--", "cmd", "/c", "more"]);
+// more.com requires a console; findstr.exe supports redirected SSH stdin.
+const streamed = await invoke(password, "CALLER_STDIN\r\n", ["exec", "--", "findstr", "CALLER_STDIN"]);
 assert.equal(streamed.code, 0, streamed.stderr);
 assert(streamed.stdout.includes("CALLER_STDIN"));
-const status = await invoke(password, "", ["exec", "--", "cmd", "/c", "exit", "23"]);
+const status = await invoke(password, "", ["exec", "--", "exit", "23"]);
 assert.equal(status.code, 23, status.stderr);
 const shell = await invoke(password, "echo CALLER_SHELL\r\nexit 19\r\n", ["shell", "--plain"]);
 assert.equal(shell.code, 19, shell.stderr);
 assert(shell.stdout.includes("CALLER_SHELL"));
-const incorrect = await invoke(`wrong-${randomUUID()}`, "", ["exec", "--", "cmd", "/c", "exit", "0"]);
+const incorrect = await invoke(`wrong-${randomUUID()}`, "", ["exec", "--", "exit", "0"]);
 assert.equal(incorrect.code, 255, incorrect.stderr);

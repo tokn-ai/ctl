@@ -23,6 +23,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, R
 use tokio::process::{ChildStdin, ChildStdout, Command};
 use tokio::sync::watch;
 
+pub mod caller_auth;
 #[cfg(unix)]
 pub mod connection;
 pub mod hosts;
@@ -156,6 +157,8 @@ impl SshGateway {
 
 /// Local prompt handling only; this cannot alter the remote command.
 pub enum SshInteraction {
+  /// A fresh, invocation-local connection with no broker or credential fallback.
+  CallerSupplied(caller_auth::Authentication),
   Inherit,
   Batch,
   /// Reuses this exact master and fails if it is unavailable; never starts a
@@ -512,6 +515,10 @@ pub async fn open_identified_ssh_service_after_authentication(
 
 fn configure_ssh_interaction(command: &mut Command, interaction: &SshInteraction) -> Vec<OsString> {
   match interaction {
+    SshInteraction::CallerSupplied(authentication) => {
+      authentication.configure(command.as_std_mut());
+      Vec::new()
+    }
     SshInteraction::Inherit => Vec::new(),
     SshInteraction::Batch => vec!["-o".into(), "BatchMode=yes".into()],
     SshInteraction::Multiplexed { control_path } => vec![

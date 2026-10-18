@@ -29,6 +29,71 @@ for local operations where supported. `ssh` and `scp` take their destinations
 positionally and retain saved-host-first lookup followed by ordinary OpenSSH
 lookup; they reject both ctl target selectors.
 
+## Caller-owned SSH credentials
+
+Applications can select an explicit endpoint and credential for temporary
+`shell` and `exec` calls. Put these options before the subcommand:
+
+```sh
+ctl --destination operator@192.0.2.10 --port 2222 --identity-file ./instance-key exec -- uname -a
+ctl --destination 'operator@::1' --port 2222 --identity-file ./instance-key shell --plain
+```
+
+`--user` and `--port` override the temporary endpoint. Without an explicit
+credential, authentication retains the ordinary ctl-managed policy. Supplying
+`--identity-file`, `--password-fd`, or `--password-pipe` instead selects a fresh,
+caller-owned connection: no existing master, configured identities, identity
+agent, alternative authentication method, saved credential or Keychain fallback
+can rescue an incorrect supplied credential. Credential sources conflict.
+The private key must be usable without an agent or an interactive passphrase.
+
+ctl resolves the SSH alias's endpoint and host-key settings, then uses an isolated
+OpenSSH configuration. Host-key verification and known-hosts policy remain in
+effect; unknown or changed keys are never approved with the supplied password.
+Configured proxy authentication is rejected in this mode; use a directly
+reachable destination. This mode neither creates saved hosts nor edits SSH
+configuration. Persistent `shell` sessions still require the remote ctl-agent
+and ctmuxd; `shell --plain` and `exec` need only SSH.
+
+On Unix, pass `--password-fd N` with an inherited readable **pipe or socket** at
+FD N >= 3. File descriptors 0, 1 and 2 remain command stdin/stdout/stderr.
+The parent writes exactly one password and closes its writing end. ctl claims
+and closes the inherited descriptor before starting any subprocess, reads a
+bounded payload until EOF, and rejects a missing EOF after five seconds. Regular
+files are rejected. Example using Bun's Node-compatible process API:
+
+```ts
+import { spawn } from "node:child_process";
+import type { Writable } from "node:stream";
+
+function execute(password: string, command_input: Uint8Array) {
+  const child = spawn("ctl", ["--destination", "operator@192.0.2.10",
+    "--password-fd", "3", "exec", "--", "cat"], {
+    stdio: ["pipe", "inherit", "inherit", "pipe"],
+  });
+  (child.stdio[3] as Writable).end(Buffer.from(password, "utf8"));
+  child.stdin!.end(command_input);
+  return child;
+}
+```
+
+On Windows, use `--password-pipe \\.\pipe\ctl-password-UNIQUE_NAME` instead.
+ctl creates an exclusive local-only pipe with an owner-only DACL and
+non-inheritable handles. The parent connects using `node:net` (also supported by
+Bun), writes the password and closes the connection. Connect within five
+seconds; transient not-found errors while ctl starts can be retried. Numeric
+Unix descriptors are explicitly rejected on Windows. See the Bun handoff
+fixture in `tests/fixtures/caller_handoff.mts` for both platform transports.
+
+Passwords are 1..4096 UTF-8 bytes without NUL, CR or LF. Leading/trailing spaces
+are preserved; no trimming or newline terminator is supported. Never put a
+password in argv, environment variables or a file. ctl's internal askpass bridge
+requires no caller involvement. Its password buffer exists only in memory for
+this invocation (including its persistent-shell reconnections) and is zeroized
+when the invocation ends. It is never returned to the caller, logged, audited,
+or saved. Terminal interaction, command input/output and exit status remain
+independent of the password channel.
+
 ## Persistent shells
 
 ```sh

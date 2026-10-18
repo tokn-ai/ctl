@@ -46,6 +46,7 @@ fn validate_local_command_target(arguments: &Arguments) -> Result<(), CliError> 
 }
 
 fn validate_arguments(arguments: &Arguments) -> Result<(), CliError> {
+  crate::caller_auth::validate(arguments).map_err(CliError::CallerAuthentication)?;
   // Clap checks conflicts in each command scope. Global saved-host options
   // can also arrive after the subcommand, beyond the top-level destination.
   if arguments.destination.is_some() && (arguments.host.is_some() || arguments.method.is_some()) {
@@ -84,7 +85,7 @@ fn validate_arguments(arguments: &Arguments) -> Result<(), CliError> {
   Ok(())
 }
 
-pub async fn run(arguments: Arguments) -> Result<i32, CliError> {
+pub async fn run(mut arguments: Arguments) -> Result<i32, CliError> {
   validate_arguments(&arguments)?;
   if let Some(result) = crate::history::dispatch(&arguments.command) {
     result.map_err(CliError::History)?;
@@ -143,11 +144,36 @@ pub async fn run(arguments: Arguments) -> Result<i32, CliError> {
     Some(RemotePlatform::Windows) => ctl_client::RemotePlatform::Windows,
     _ => ctl_client::RemotePlatform::Unix,
   };
-  let mut target = resolved.target.to_core();
+  let mut settings = resolved.target;
+  let caller_auth = crate::caller_auth::prepare(&mut arguments, &mut settings)
+    .await
+    .map_err(CliError::CallerAuthentication)?;
+  if let Some(authentication) = &caller_auth {
+    match &arguments.command {
+      Command::Shell { plain: true, .. } => {
+        return crate::connection::caller_command(&settings, authentication, None, platform)
+          .await
+          .map_err(Into::into);
+      }
+      Command::Exec { command } => {
+        return crate::connection::caller_command(
+          &settings,
+          authentication,
+          Some(command),
+          platform,
+        )
+        .await
+        .map_err(Into::into);
+      }
+      _ => {}
+    }
+  }
+  let mut target = settings.to_core();
   if let ConnectionTarget::Ssh { options, .. } = &mut target {
     options.remote_platform = platform;
   }
-  let connector = CtlConnector::new(target, resolved.target);
+  let mut connector = CtlConnector::new(target, settings);
+  connector.caller_auth = caller_auth;
   let operation = run_selected(arguments.command, &connector, platform);
   tokio::select! {
     result = operation => result,
@@ -267,6 +293,7 @@ fn require_terminal() -> Result<(), CliError> {
 }
 
 struct CtlConnector {
+  caller_auth: Option<Arc<crate::caller_auth::CallerAuth>>,
   target: ConnectionTarget,
   settings: ctl_client::hosts::ConnectionTargetDto,
   recovery: Arc<crate::remote::Recovery>,
@@ -278,6 +305,20 @@ struct CtlConnector {
 }
 
 impl CtlConnector {
+  async fn interaction(&self) -> Result<ctl_client::SshInteraction, CtlConnectError> {
+    if let Some(caller) = &self.caller_auth {
+      return Ok(ctl_client::SshInteraction::CallerSupplied(
+        caller.authentication.clone(),
+      ));
+    }
+    ssh_interaction(
+      &self.settings,
+      #[cfg(unix)]
+      &self.broker,
+      !self.terminal_ui_active.load(Ordering::Acquire),
+    )
+    .await
+  }
   fn new(target: ConnectionTarget, mut settings: ctl_client::hosts::ConnectionTargetDto) -> Self {
     if matches!(&target, ConnectionTarget::Ssh { options, .. }
       if options.remote_platform == ctl_client::RemotePlatform::Windows)
@@ -291,6 +332,7 @@ impl CtlConnector {
       *use_ssh_config_master = Some(false);
     }
     Self {
+      caller_auth: None,
       target,
       settings,
       recovery: Arc::default(),
@@ -316,6 +358,12 @@ impl CtlConnector {
     };
     // Repair may be offered only during the initial connection. Reconnects and
     // interactive task attachments share the same state and never prompt again.
+    if self.caller_auth.is_some() {
+      return ctl_client::open_identified_ssh_service(destination, options, interaction, service)
+        .await
+        .map(Some)
+        .map_err(Into::into);
+    }
     let stream = self
       .recovery
       .connect(
@@ -351,6 +399,7 @@ impl CtlConnector {
 
   fn for_interactive_session(&self, ctmux_socket: PathBuf) -> Self {
     Self {
+      caller_auth: self.caller_auth.clone(),
       settings: self.settings.clone(),
       recovery: Arc::clone(&self.recovery),
       terminal_ui_active: Arc::clone(&self.terminal_ui_active),
@@ -374,13 +423,7 @@ impl ctl_task_cli::Connector for CtlConnector {
 
   fn connect_task(&self) -> ctl_task_cli::ConnectFuture<'_, TaskTransport, CtlConnectError> {
     Box::pin(async {
-      let interaction = ssh_interaction(
-        &self.settings,
-        #[cfg(unix)]
-        &self.broker,
-        !self.terminal_ui_active.load(Ordering::Acquire),
-      )
-      .await?;
+      let interaction = self.interaction().await?;
       if let Some(stream) = self
         .identified_remote(&interaction, ctl_client::RemoteService::Task)
         .await?
@@ -413,13 +456,7 @@ impl Connector for CtlConnector {
 
   fn connect(&self) -> ConnectFuture<'_, Transport, CtlConnectError> {
     Box::pin(async {
-      let interaction = ssh_interaction(
-        &self.settings,
-        #[cfg(unix)]
-        &self.broker,
-        !self.terminal_ui_active.load(Ordering::Acquire),
-      )
-      .await?;
+      let interaction = self.interaction().await?;
       if let Some(stream) = self
         .identified_remote(&interaction, ctl_client::RemoteService::Ctmux)
         .await?
@@ -458,7 +495,7 @@ impl Connector for CtlConnector {
   fn set_terminal_ui_active(&self, active: bool) {
     self.terminal_ui_active.store(active, Ordering::Release);
     #[cfg(unix)]
-    if active {
+    if active && self.caller_auth.is_none() {
       if let Ok(target) = self.settings.to_ssh_target() {
         self.recovery_watch.start(target);
       }
@@ -555,6 +592,8 @@ enum CtlConnectError {
 
 #[derive(Debug, Error)]
 pub enum CliError {
+  #[error("Caller-supplied SSH authentication failed: {0}")]
+  CallerAuthentication(std::io::Error),
   #[error("History is local; omit --host, --destination, --method, and --remote-platform.")]
   HistoryTarget,
   #[error("Could not read local history: {0}")]
@@ -898,6 +937,7 @@ mod tests {
       },
     );
     let connector = CtlConnector {
+      caller_auth: None,
       target: target.clone(),
       settings: ctl_client::hosts::ConnectionTargetDto::ssh("task-server"),
       recovery: Arc::default(),
@@ -917,6 +957,7 @@ mod tests {
   #[test]
   fn local_interactive_sessions_use_the_backend_socket() {
     let connector = CtlConnector {
+      caller_auth: None,
       settings: ctl_client::hosts::ConnectionTargetDto::Local,
       recovery: Arc::default(),
       terminal_ui_active: Arc::default(),

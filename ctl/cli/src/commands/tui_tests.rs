@@ -777,6 +777,7 @@ async fn terminal_fixture() {
   let socket = std::env::var_os("CTL_TUI_TEST_SOCKET_PATH").expect("fixture socket");
   let session = std::env::var("CTL_TUI_TEST_SESSION").expect("fixture session");
   let connector = CtlConnector {
+    caller_auth: None,
     // Exercise the real SSH prerequisite policy using a private local daemon
     // for service bytes, avoiding an unrelated OpenSSH process in this fixture.
     target: ConnectionTarget::Local {

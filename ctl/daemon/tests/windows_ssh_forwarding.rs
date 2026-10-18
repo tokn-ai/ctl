@@ -58,7 +58,7 @@ ConvertTo-Json -InputObject @($remaining) -Compress
 exit 1
 ";
 
-#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 struct ProcessIdentity {
   process_id: u32,
   parent_id: u32,
@@ -123,6 +123,33 @@ async fn assert_descendants_gone(processes: &[ProcessIdentity]) {
     output.status.success(),
     "owned forwarding or proxy processes survived: {output:?}"
   );
+}
+
+fn newest_data_descendants(processes: &[ProcessIdentity], owner_id: u32) -> Vec<ProcessIdentity> {
+  // This fixture has one live forward: its anchor predates the data connection
+  // just opened by roundtrip. Follow the newest direct SSH child's proxy tree.
+  let data = processes
+    .iter()
+    .filter(|process| process.parent_id == owner_id && process.name.eq_ignore_ascii_case("ssh.exe"))
+    .max_by_key(|process| process.created_at.parse::<u64>().unwrap())
+    .expect("the active data SSH process was not captured");
+  let mut owned = vec![data.process_id];
+  loop {
+    let previous = owned.len();
+    for process in processes {
+      if owned.contains(&process.parent_id) && !owned.contains(&process.process_id) {
+        owned.push(process.process_id);
+      }
+    }
+    if owned.len() == previous {
+      break;
+    }
+  }
+  processes
+    .iter()
+    .filter(|process| owned.contains(&process.process_id))
+    .cloned()
+    .collect()
 }
 
 struct Echo {
@@ -589,6 +616,25 @@ async fn authenticated_forwarding_preserves_aliases_moves_data_and_releases_owne
     let primary = configure_and_failures(&owner, &target, &first, &second).await;
     half_closed_final_response(&owner, &target).await;
     cli_selectors(&owner, &first).await;
+    let reset = second.roundtrip(primary.local_port).await;
+    let reset_processes = descendants(&owner).await;
+    let reset_processes = newest_data_descendants(&reset_processes, owner.child.id().unwrap());
+    reset.set_zero_linger().unwrap();
+    drop(reset);
+    // Wait for this exact data/proxy branch to exit before checking passive
+    // health, rather than racing a status request ahead of disconnect handling.
+    assert_descendants_gone(&reset_processes).await;
+    let status = owner
+      .list(&target)
+      .await
+      .into_iter()
+      .find(|status| status.forward.forward_id == primary.forward_id)
+      .unwrap();
+    assert_eq!(
+      status.state,
+      PortForwardState::Active,
+      "a client TCP reset poisoned the forward: {status:?}"
+    );
     let mut connection = second.roundtrip(primary.local_port).await;
     let processes = descendants(&owner).await;
     drop(unwanted);

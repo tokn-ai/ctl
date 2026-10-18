@@ -121,7 +121,8 @@ runs under `windows-ssh.ps1`, which enables only local TCP forwarding on its
 loopback server. It exchanges binary data with two TCP endpoints to verify
 updates, checks idempotent enable, list, disable and CLI routing through both
 selectors, and verifies failed authentication and occupied ports leave another
-forward working. A dedicated SSH alias exercises `IdentityFile`, user, a
+forward working. Resetting a data connection must leave passive forwarding
+status active and allow another connection without an explicit retry. A dedicated SSH alias exercises `IdentityFile`, user, a
 nondefault port, a hostname override and `ProxyCommand`. Its configured unrelated
 `LocalForward` must stay inactive. A backend that reads a request to EOF and
 immediately returns binary data verifies TCP half-close, final response draining
@@ -252,12 +253,18 @@ See [OpenSSH job breakaway support](https://github.com/PowerShell/Win32-OpenSSH/
 Native CI runs portable gateway tests over owner-restricted named pipes,
 including byte transparency and endpoint survival. `windows-ssh.ps1` configures
 an authenticated loopback OpenSSH server on the ephemeral Windows runner using
-ephemeral client/host keys, an explicitly pinned host key, disabled passwords,
-local TCP forwarding only, and the default cmd.exe shell. It installs companion executables, then tests
+ephemeral client/host keys, an explicitly pinned host key, local TCP forwarding
+only, and the default cmd.exe shell. Password authentication is disabled except
+for a fixture-created local user with a random password, used to verify
+caller-owned password channels; the user is removed during cleanup. It installs companion executables, then tests
 daemon auto-start, ConPTY creation, attachment, SSH disconnect/reconnect,
 resize, final output and exit status, and CLI routing. It also exercises remote
 exec streams and task create/show/start/logs/restart/stop/remove/list, including a
-working directory containing spaces. The task daemon has isolated state and is
+working directory containing spaces. Caller-owned authentication tests verify an
+explicit key, rejection of an incorrect key despite a valid configured identity,
+and Bun-driven password login with stdin streaming, exit status and plain shell
+behavior. Passwords enter that fixture only through stdin, rather than argv or
+environment. The task daemon has isolated state and is
 prestarted on the default user endpoint, because SSH sessions do not inherit the
 fixture environment; task daemon auto-start is covered by the local task fixture.
 The SSH fixture restores configuration and removes its processes, binaries, and

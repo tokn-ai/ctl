@@ -6,7 +6,7 @@ enum Prepared {
   Ctld(ctl_ipc::lifecycle::PreparedStop),
   Ctmuxd(ctmux_ipc::lifecycle::PreparedStop),
   Taskd(ctl_task_client::restart::PreparedStop),
-  Remote(ctl_client::maintenance::PreparedRemoteCtmuxStop),
+  Remote(Box<ctl_client::maintenance::PreparedRemoteCtmuxStop>),
 }
 impl Prepared {
   async fn stop(self) -> io::Result<serde_json::Value> {
@@ -60,7 +60,7 @@ async fn prepare(component: Daemon, target: TargetOptions<'_>) -> io::Result<Opt
       &remote.remote_id,
     )
     .await
-    .map(|prepared| Some(Prepared::Remote(prepared)))
+    .map(|prepared| Some(Prepared::Remote(Box::new(prepared))))
     .map_err(io::Error::other);
   }
   Ok(match component {

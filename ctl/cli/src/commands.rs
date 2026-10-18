@@ -21,7 +21,9 @@ fn validate_local_command_target(arguments: &Arguments) -> Result<(), CliError> 
   let error = match &arguments.command {
     Command::Components {
       command:
-        crate::components::Command::Status { .. } | crate::components::Command::Restart { .. },
+        crate::components::Command::Status { .. }
+        | crate::components::Command::Restart { .. }
+        | crate::components::Command::Stop { .. },
     } => return Ok(()),
     #[cfg(unix)]
     Command::Components {

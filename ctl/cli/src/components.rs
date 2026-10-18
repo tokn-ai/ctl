@@ -62,6 +62,17 @@ pub enum Command {
     #[arg(long)]
     json: bool,
   },
+  /// Cooperatively stop an existing daemon without launching a replacement.
+  Stop {
+    #[arg(value_enum)]
+    component: maintenance::Daemon,
+    #[arg(long, conflicts_with = "dry_run")]
+    yes: bool,
+    #[arg(long)]
+    dry_run: bool,
+    #[arg(long)]
+    json: bool,
+  },
   /// Cooperatively restart a daemon after verifying its replacement.
   Restart {
     #[arg(value_enum)]
@@ -154,6 +165,12 @@ pub async fn run(
   };
   match command {
     Command::Status { json } => maintenance::status(target_options, json).await,
+    Command::Stop {
+      component,
+      yes,
+      dry_run,
+      json,
+    } => maintenance::stop(component, target_options, yes, dry_run, json).await,
     Command::Restart {
       component,
       yes,
@@ -169,7 +186,7 @@ pub async fn run(
 async fn run_bundle(command: Command, target_options: TargetOptions<'_>) -> io::Result<()> {
   let home = dirs::home_dir().ok_or_else(|| io::Error::other("home directory is unavailable"))?;
   match command {
-    Command::Status { .. } | Command::Restart { .. } => unreachable!(),
+    Command::Status { .. } | Command::Restart { .. } | Command::Stop { .. } => unreachable!(),
     Command::Update {
       hosts,
       local,

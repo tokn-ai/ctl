@@ -42,6 +42,8 @@ enum Command {
   RestartCtmux,
   /// Inspect the existing ctmux owner and wait for a separate confirmation frame.
   PrepareCtmuxRestart,
+  /// Inspect and stop the existing ctmux owner after a separate confirmation frame.
+  PrepareCtmuxStop,
 }
 
 #[tokio::main]
@@ -76,19 +78,8 @@ async fn run(arguments: Arguments) -> Result<(), MainError> {
       config.taskd_bin = companion_binary("ctl-taskd");
       connect_stdio(&config).await?;
     }
-    Command::PrepareCtmuxRestart => {
-      let identity = tokio::task::spawn_blocking(ctl_agent::identity::inspect)
-        .await
-        .map_err(std::io::Error::other)??;
-      let mut config = ConnectConfig::new(ctmux_ipc::socket_path());
-      config.ctmuxd_bin = companion_binary("ctmuxd");
-      ctl_agent::maintenance::prepare_ctmux_restart(
-        &mut tokio::io::stdin(),
-        &mut tokio::io::stdout(),
-        &config,
-        &identity.remote_id,
-      )
-      .await?;
+    command @ (Command::PrepareCtmuxRestart | Command::PrepareCtmuxStop) => {
+      run_ctmux_maintenance(command).await?;
     }
     Command::RestartCtmux => {
       let mut input = Vec::new();
@@ -143,6 +134,32 @@ async fn run(arguments: Arguments) -> Result<(), MainError> {
         .map_err(std::io::Error::other)?;
       println!("{}", serde_json::to_string(&catalog)?);
     }
+  }
+  Ok(())
+}
+
+async fn run_ctmux_maintenance(command: Command) -> Result<(), MainError> {
+  let identity = tokio::task::spawn_blocking(ctl_agent::identity::inspect)
+    .await
+    .map_err(std::io::Error::other)??;
+  let mut config = ConnectConfig::new(ctmux_ipc::socket_path());
+  config.ctmuxd_bin = companion_binary("ctmuxd");
+  if matches!(command, Command::PrepareCtmuxStop) {
+    ctl_agent::maintenance::prepare_ctmux_stop(
+      &mut tokio::io::stdin(),
+      &mut tokio::io::stdout(),
+      &config,
+      &identity.remote_id,
+    )
+    .await?;
+  } else {
+    ctl_agent::maintenance::prepare_ctmux_restart(
+      &mut tokio::io::stdin(),
+      &mut tokio::io::stdout(),
+      &config,
+      &identity.remote_id,
+    )
+    .await?;
   }
   Ok(())
 }
@@ -286,6 +303,7 @@ mod tests {
     for operation in [
       "restart-ctmux",
       "prepare-ctmux-restart",
+      "prepare-ctmux-stop",
       "inspect",
       "inspect-components",
     ] {

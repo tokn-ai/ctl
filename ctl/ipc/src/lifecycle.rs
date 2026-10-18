@@ -270,6 +270,24 @@ impl Client {
     Ok(AvailableDaemon { executable, info })
   }
 
+  /// Pins an existing owner for cooperative shutdown without selecting a replacement.
+  ///
+  /// # Errors
+  /// Rejects absent, inaccessible or unsupported owners.
+  pub async fn preflight_stop(&self) -> Result<PreparedStop, LifecycleError> {
+    let mut stream = self
+      .connect_existing()
+      .await?
+      .ok_or_else(|| LifecycleError::Unavailable("ctld is not running".into()))?;
+    let before = inspect(&mut stream).await?;
+    Ok(PreparedStop {
+      before,
+      stream,
+      client: self.clone(),
+      expires_at: Instant::now() + Duration::from_secs(20),
+    })
+  }
+
   /// Pins the owner and verifies the replacement before a confirmation is shown.
   ///
   /// # Errors
@@ -353,45 +371,7 @@ impl PreparedRestart {
     }
     match (&self.before, self.stream.as_mut()) {
       (Some(before), Some(stream)) => {
-        // A pinned connection belongs to one process even if its endpoint has
-        // meanwhile been replaced. Also verify the selected endpoint still
-        // points to that same instance before submitting the stop request.
-        if !matches!(self.client.probe().await?, DaemonStatus::Running { info } if info.instance_id == before.instance_id)
-        {
-          return Err(LifecycleError::OwnerChanged);
-        }
-        timeout(QUERY_TIMEOUT, async {
-          crate::write_frame(
-            stream,
-            &Request::CtldRestart {
-              expected_instance_id: before.instance_id.clone(),
-            },
-          )
-          .await?;
-          match crate::read_frame::<_, Response>(stream).await? {
-            Some(Response::CtldRestartAccepted { instance_id })
-              if instance_id == before.instance_id =>
-            {
-              Ok(())
-            }
-            Some(Response::CtldError { code, message }) => {
-              Err(LifecycleError::Rejected { code, message })
-            }
-            _ => Err(LifecycleError::UnexpectedResponse),
-          }
-        })
-        .await
-        .map_err(|_| LifecycleError::Timeout)??;
-        let completion = timeout(SHUTDOWN_TIMEOUT, crate::read_frame::<_, Response>(stream))
-          .await
-          .map_err(|_| LifecycleError::ShutdownTimeout)??;
-        match completion {
-          None => {}
-          Some(Response::CtldError { code, message }) => {
-            return Err(LifecycleError::Rejected { code, message });
-          }
-          Some(_) => return Err(LifecycleError::UnexpectedResponse),
-        }
+        drain_owner(&self.client, before, stream, None).await?;
       }
       (None, None) => {
         if !matches!(self.client.probe().await?, DaemonStatus::Absent) {
@@ -466,6 +446,92 @@ async fn inspect(stream: &mut crate::Stream) -> Result<DaemonInfo, LifecycleErro
   })
   .await
   .map_err(|_| LifecycleError::Timeout)?
+}
+
+/// A confirmation-bound owner; dropping it does not send a shutdown request.
+pub struct PreparedStop {
+  pub before: DaemonInfo,
+  pub expires_at: Instant,
+  client: Client,
+  stream: crate::Stream,
+}
+
+impl PreparedStop {
+  /// Drains the pinned owner and verifies that the selected endpoint is absent.
+  ///
+  /// # Errors
+  /// Rejects expired or changed owners and reports uncertain shutdown outcomes.
+  pub async fn stop(mut self) -> Result<DaemonInfo, LifecycleError> {
+    if Instant::now() >= self.expires_at {
+      return Err(LifecycleError::Rejected {
+        code: "ctld_stop_expired".into(),
+        message: "Stop confirmation expired; prepare it again".into(),
+      });
+    }
+    drain_owner(
+      &self.client,
+      &self.before,
+      &mut self.stream,
+      Some(self.expires_at),
+    )
+    .await?;
+    if !matches!(self.client.probe().await?, DaemonStatus::Absent) {
+      return Err(LifecycleError::OwnerChanged);
+    }
+    Ok(self.before)
+  }
+}
+
+async fn drain_owner(
+  client: &Client,
+  before: &DaemonInfo,
+  stream: &mut crate::Stream,
+  expires_at: Option<Instant>,
+) -> Result<(), LifecycleError> {
+  // A pinned connection belongs to one process even if its endpoint has
+  // meanwhile been replaced. Also verify the selected endpoint still
+  // points to that same instance before submitting the stop request.
+  if !matches!(client.probe().await?, DaemonStatus::Running { info } if info.instance_id == before.instance_id)
+  {
+    return Err(LifecycleError::OwnerChanged);
+  }
+  if expires_at.is_some_and(|deadline| Instant::now() >= deadline) {
+    return Err(LifecycleError::Rejected {
+      code: "ctld_stop_expired".into(),
+      message: "Stop confirmation expired; prepare it again".into(),
+    });
+  }
+  timeout(QUERY_TIMEOUT, async {
+    crate::write_frame(
+      stream,
+      &Request::CtldRestart {
+        expected_instance_id: before.instance_id.clone(),
+      },
+    )
+    .await?;
+    match crate::read_frame::<_, Response>(stream).await? {
+      Some(Response::CtldRestartAccepted { instance_id }) if instance_id == before.instance_id => {
+        Ok(())
+      }
+      Some(Response::CtldError { code, message }) => {
+        Err(LifecycleError::Rejected { code, message })
+      }
+      _ => Err(LifecycleError::UnexpectedResponse),
+    }
+  })
+  .await
+  .map_err(|_| LifecycleError::Timeout)??;
+  let completion = timeout(SHUTDOWN_TIMEOUT, crate::read_frame::<_, Response>(stream))
+    .await
+    .map_err(|_| LifecycleError::ShutdownTimeout)??;
+  match completion {
+    None => {}
+    Some(Response::CtldError { code, message }) => {
+      return Err(LifecycleError::Rejected { code, message });
+    }
+    Some(_) => return Err(LifecycleError::UnexpectedResponse),
+  }
+  Ok(())
 }
 
 #[cfg(all(test, unix))]

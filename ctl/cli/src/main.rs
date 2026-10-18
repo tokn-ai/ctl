@@ -67,7 +67,7 @@ enum Command {
   Logs(history::Arguments),
   /// Review local connection and credential audit history.
   Audit(history::Arguments),
-  /// Inspect and restart local daemons; manage component bundles on Unix.
+  /// Inspect, stop, and restart local daemons; manage component bundles on Unix.
   Components {
     #[command(subcommand)]
     command: components::Command,

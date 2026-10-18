@@ -248,11 +248,16 @@ fn process_writer_child() {
     let record = record(Outcome::Succeeded);
     let deadline = Instant::now() + std::time::Duration::from_secs(10);
     // A busy store is an expected, bounded result under concurrent fsyncs.
+    // Back off between attempts instead of immediately contending again with
+    // the cooperating writer holding the store lock. The completion budget
+    // remains short enough to detect starvation; store lock waits stay bounded.
     // Retry only before-write contention; all other failures remain fatal.
     loop {
       match store.append(Stream::Audit, &record) {
         Ok(()) => break,
-        Err(error) if error.kind() == io::ErrorKind::WouldBlock && Instant::now() < deadline => {}
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock && Instant::now() < deadline => {
+          std::thread::sleep(std::time::Duration::from_millis(25));
+        }
         Err(error) => panic!("history writer failed: {error}"),
       }
     }

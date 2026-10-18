@@ -109,6 +109,72 @@ mod unix {
   }
 
   #[tokio::test]
+  async fn stop_drains_pinned_owner_without_a_replacement() {
+    let fixture = Fixture::new().await;
+    std::fs::remove_file(&fixture.executable).unwrap();
+    let listener = UnixListener::bind(&fixture.socket).unwrap();
+    let socket = fixture.socket.clone();
+    let server = tokio::spawn(async move {
+      let mut pinned = inspect_peer(&listener, info("owner")).await;
+      drop(inspect_peer(&listener, info("owner")).await);
+      assert!(
+        matches!(crate::read_frame::<_, Request>(&mut pinned).await.unwrap(), Some(Request::CtldRestart { expected_instance_id }) if expected_instance_id == "owner")
+      );
+      crate::write_frame(
+        &mut pinned,
+        &Response::CtldRestartAccepted {
+          instance_id: "owner".into(),
+        },
+      )
+      .await
+      .unwrap();
+      drop(listener);
+      std::fs::remove_file(socket).unwrap();
+    });
+    let stopped = fixture
+      .client()
+      .preflight_stop()
+      .await
+      .unwrap()
+      .stop()
+      .await
+      .unwrap();
+    assert_eq!(stopped.instance_id, "owner");
+    timeout(Duration::from_secs(5), server)
+      .await
+      .unwrap()
+      .unwrap();
+    assert!(!fixture.executable.exists());
+  }
+
+  #[tokio::test]
+  async fn canceled_and_expired_stop_leave_owner_untouched() {
+    let fixture = Fixture::new().await;
+    let listener = UnixListener::bind(&fixture.socket).unwrap();
+    let server = tokio::spawn(async move {
+      for _ in 0..2 {
+        let mut pinned = inspect_peer(&listener, info("owner")).await;
+        assert!(
+          crate::read_frame::<_, Request>(&mut pinned)
+            .await
+            .unwrap()
+            .is_none()
+        );
+      }
+    });
+    drop(fixture.client().preflight_stop().await.unwrap());
+    let mut prepared = fixture.client().preflight_stop().await.unwrap();
+    prepared.expires_at = Instant::now();
+    assert!(
+      matches!(prepared.stop().await.unwrap_err(), LifecycleError::Rejected { code, .. } if code == "ctld_stop_expired")
+    );
+    timeout(Duration::from_secs(5), server)
+      .await
+      .unwrap()
+      .unwrap();
+  }
+
+  #[tokio::test]
   async fn passive_probe_never_starts_an_absent_owner() {
     let fixture = Fixture::new().await;
     assert_eq!(

@@ -280,3 +280,52 @@ async fn native_identity_helper_lists_files_while_keychain_is_unavailable() {
     PassphraseState::NotRequired
   );
 }
+
+#[tokio::test]
+async fn prepared_stop_observes_confirmation_and_stops_without_a_replacement_helper() {
+  timeout(DEADLINE * 3, async {
+    let mut owner = Owner::start(None).await;
+    let client = Client::new(owner.socket.clone())
+      .with_daemon_executable(owner.directory.join("missing-replacement.exe"));
+    let DaemonStatus::Running { info: before } = owner.info().await else {
+      panic!("owner disappeared");
+    };
+    let abandoned = client.preflight_stop().await.unwrap();
+    assert_eq!(abandoned.before, before);
+    drop(abandoned);
+    assert_eq!(
+      owner.info().await,
+      DaemonStatus::Running {
+        info: before.clone()
+      }
+    );
+
+    let mut expired = client.preflight_stop().await.unwrap();
+    expired.expires_at = tokio::time::Instant::now() - Duration::from_secs(1);
+    let error = expired.stop().await.unwrap_err();
+    assert!(matches!(
+      error,
+      ctl_ipc::lifecycle::LifecycleError::Rejected { code, .. } if code == "ctld_stop_expired"
+    ));
+    assert_eq!(
+      owner.info().await,
+      DaemonStatus::Running {
+        info: before.clone()
+      }
+    );
+
+    let stopped = client.preflight_stop().await.unwrap().stop().await.unwrap();
+    assert_eq!(stopped, before);
+    assert_eq!(owner.info().await, DaemonStatus::Absent);
+    assert!(
+      timeout(DEADLINE, owner.child.wait())
+        .await
+        .unwrap()
+        .unwrap()
+        .success()
+    );
+    assert!(!owner.directory.join("missing-replacement.exe").exists());
+  })
+  .await
+  .unwrap();
+}

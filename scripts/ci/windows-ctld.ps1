@@ -8,6 +8,7 @@ $fixtureCtld = Join-Path $fixtureRoot 'bin\ctld.exe'
 $catalog = Join-Path $fixtureRoot 'hosts.json'
 $profiles = Join-Path $fixtureRoot 'vpns.json'
 $owner = $null
+$successor = $null
 $ownerStdout = $null
 $ownerStderr = $null
 
@@ -156,6 +157,31 @@ try {
   $inventory = Invoke-Ctl -Arguments @('vpn', 'list', '--json')
   Assert-EmptyVpnInventory $inventory
   if (-not $inventory.supports_multiple) { throw 'VPN status did not reconnect after owner replacement' }
+  Write-Host 'Checking graceful Windows ctld stop without a replacement'
+  $successors = @(Get-Process ctld -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $fixtureCtld })
+  if ($successors.Count -ne 1) { throw 'Expected exactly one fixture ctld successor' }
+  $successor = $successors[0]
+  # Open the process handle before stop, so its exit outcome remains observable.
+  $null = $successor.Handle
+  $stopPlan = Invoke-Ctl -Arguments @('components', 'stop', 'ctld', '--dry-run', '--json')
+  if (-not $stopPlan.dry_run -or $stopPlan.component -ne 'ctld' -or $successor.HasExited) {
+    throw 'Stop dry run changed the running owner'
+  }
+  $stopped = Invoke-Ctl -Arguments @('components', 'stop', 'ctld', '--yes', '--json')
+  if ($stopped.result.before.instance_id -ne $afterId) {
+    throw 'Stop did not identify the verified successor'
+  }
+  if (-not $successor.WaitForExit(10000) -or $successor.ExitCode -ne 0) {
+    throw 'Stopped ctld did not exit cleanly'
+  }
+  if ((Get-CtldRow).state -ne 'not_running') { throw 'Stop left a running owner or started a replacement' }
+  $alreadyStopped = Invoke-Ctl -Arguments @('components', 'stop', 'ctld', '--yes', '--json')
+  if (-not $alreadyStopped.already_stopped -or (Get-CtldRow).state -ne 'not_running') {
+    throw 'Stopping an absent owner was not idempotent'
+  }
+  if (Get-Process ctld -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $fixtureCtld }) {
+    throw 'Cooperative stop left a fixture ctld process alive'
+  }
   if ((Test-Path $catalog) -or (Test-Path $profiles)) {
     throw 'Read-only owner operations created a catalog or saved VPN profile'
   }
@@ -177,6 +203,7 @@ try {
     }
     $owner.Dispose()
   }
+  if ($null -ne $successor) { $successor.Dispose() }
   foreach ($output in @($ownerStdout, $ownerStderr)) {
     if ($null -ne $output -and -not $output.Wait(5000)) {
       Write-Warning 'Fixture ctld left an output stream open'

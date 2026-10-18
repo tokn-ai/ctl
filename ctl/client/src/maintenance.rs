@@ -14,6 +14,11 @@ const PREPARE_COMMAND: &str = concat!(
   r#"PATH="$HOME/.tokn/ctl/current:$PATH"; export PATH; "#,
   "exec ctl-agent prepare-ctmux-restart",
 );
+const STOP_COMMAND: &str = concat!(
+  r#"printf 'ctl-maintenance-v1\n'; "#,
+  r#"PATH="$HOME/.tokn/ctl/current:$PATH"; export PATH; "#,
+  "exec ctl-agent prepare-ctmux-stop",
+);
 const INSPECT_COMMAND: &str = concat!(
   r#"printf 'ctl-command-v1\n'; "#,
   r#"PATH="$HOME/.tokn/ctl/current:$PATH"; export PATH; "#,
@@ -252,29 +257,10 @@ fn command(
 }
 
 async fn prepare(
-  mut command: Command,
+  command: Command,
   expected_remote_id: &str,
 ) -> Result<PreparedRemoteCtmuxRestart, MaintenanceError> {
-  command
-    .stdin(Stdio::piped())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::null())
-    .kill_on_drop(true);
-  let mut child = command.spawn().map_err(|error| failure(error, false))?;
-  let mut stdin = child
-    .stdin
-    .take()
-    .ok_or_else(|| failure("SSH input is unavailable.", false))?;
-  let mut stdout = BufReader::new(
-    child
-      .stdout
-      .take()
-      .ok_or_else(|| failure("SSH output is unavailable.", false))?,
-  );
-  crate::ssh_startup::Preface::default()
-    .read_marker(&mut stdout, &[b"ctl-maintenance-v1\n"], b"ctl-maintenance-")
-    .await
-    .map_err(|error| failure(error, false))?;
+  let (child, mut stdin, mut stdout) = start_preparation(command).await?;
   maintenance::write(
     &mut stdin,
     &ClientMessage::PrepareCtmuxRestart {
@@ -294,7 +280,8 @@ async fn prepare(
     } if maintenance::protocol_offer().accepts(protocol_version)
       && valid_preparation(&info, expected_remote_id)
       && (info.running.legacy_protocols.is_empty()
-        || protocol_version == maintenance::CONTRACT_V1_1_3) =>
+        || [maintenance::CONTRACT_V1_1_3, maintenance::CONTRACT_V1_2_4]
+          .contains(&protocol_version)) =>
     {
       info
     }
@@ -320,39 +307,150 @@ async fn prepare(
   })
 }
 
+async fn start_preparation(
+  mut command: Command,
+) -> Result<(Child, ChildStdin, BufReader<ChildStdout>), MaintenanceError> {
+  command
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::null())
+    .kill_on_drop(true);
+  let mut child = command.spawn().map_err(|error| failure(error, false))?;
+  let stdin = child
+    .stdin
+    .take()
+    .ok_or_else(|| failure("SSH input is unavailable.", false))?;
+  let mut stdout = BufReader::new(
+    child
+      .stdout
+      .take()
+      .ok_or_else(|| failure("SSH output is unavailable.", false))?,
+  );
+  crate::ssh_startup::Preface::default()
+    .read_marker(&mut stdout, &[b"ctl-maintenance-v1\n"], b"ctl-maintenance-")
+    .await
+    .map_err(|error| failure(error, false))?;
+  Ok((child, stdin, stdout))
+}
+
+pub struct PreparedRemoteCtmuxStop {
+  pub info: maintenance::CtmuxStopPreparation,
+  child: Child,
+  stdin: ChildStdin,
+  stdout: BufReader<ChildStdout>,
+}
+
+/// Pins a remote owner for shutdown without requiring an installed replacement.
+///
+/// # Errors
+/// Rejects unsupported agents, changed identity and malformed metadata.
+pub async fn prepare_ctmux_stop(
+  destination: &str,
+  options: &SshConnectionOptions,
+  control_path: &Path,
+  expected_remote_id: &str,
+) -> Result<PreparedRemoteCtmuxStop, MaintenanceError> {
+  let command = command(destination, options, control_path, STOP_COMMAND)
+    .map_err(|error| failure(error, false))?;
+  tokio::time::timeout(
+    Duration::from_secs(8),
+    prepare_stop(command, expected_remote_id),
+  )
+  .await
+  .map_err(|_| {
+    failure(
+      "Remote stop preparation timed out; nothing was stopped.",
+      false,
+    )
+  })?
+}
+
+async fn prepare_stop(
+  command: Command,
+  expected_remote_id: &str,
+) -> Result<PreparedRemoteCtmuxStop, MaintenanceError> {
+  let (child, mut stdin, mut stdout) = start_preparation(command).await?;
+  maintenance::write(
+    &mut stdin,
+    &ClientMessage::PrepareCtmuxStop {
+      protocol: maintenance::protocol_offer(),
+      expected_remote_id: expected_remote_id.into(),
+    },
+  )
+  .await
+  .map_err(|error| failure(error, false))?;
+  let response = maintenance::read(&mut stdout).await.map_err(|_| {
+    failure("Remote stop requires an updated ctl-agent with maintenance 1.2.4; update remote components first. Nothing was stopped.", false)
+  })?;
+  let info = match response {
+    ServerMessage::StopPrepared {
+      protocol_version,
+      info,
+    } if protocol_version == maintenance::CONTRACT_V1_2_4
+      && info.remote_id == expected_remote_id
+      && valid_running(&info.running) =>
+    {
+      info
+    }
+    ServerMessage::Error { code, message, .. } => {
+      return Err(MaintenanceError {
+        code,
+        message,
+        may_have_stopped: false,
+      });
+    }
+    _ => {
+      return Err(failure(
+        "Remote identity or stop contract changed; nothing was stopped.",
+        false,
+      ));
+    }
+  };
+  Ok(PreparedRemoteCtmuxStop {
+    info,
+    child,
+    stdin,
+    stdout,
+  })
+}
+
+impl PreparedRemoteCtmuxStop {
+  /// Confirms shutdown of the pinned owner and waits for endpoint drain.
+  ///
+  /// # Errors
+  /// Reports expired confirmations or uncertain shutdown outcomes, without retrying.
+  pub async fn stop(mut self) -> Result<maintenance::CtmuxStopCompleted, MaintenanceError> {
+    tokio::time::timeout(Duration::from_secs(45), async {
+      require_waiting_for_confirmation(&mut self.stdout).await?;
+      maintenance::write(&mut self.stdin, &ClientMessage::Confirm {})
+        .await
+        .map_err(|error| failure(error, true))?;
+      let response = maintenance::read(&mut self.stdout)
+        .await
+        .map_err(|error| failure(error, true))?;
+      match response {
+        ServerMessage::Stopped { result } => {
+          let status = self.child.wait().await.map_err(|error| failure(error, true))?;
+          if !status.success() {
+            return Err(failure("Remote agent failed after shutdown; check component status before retrying.", true));
+          }
+          Ok(result)
+        }
+        ServerMessage::Error { code, message, may_have_stopped } => {
+          Err(MaintenanceError { code, message, may_have_stopped })
+        }
+        _ => Err(failure("Remote stop returned an invalid result; check component status before retrying.", true)),
+      }
+    })
+    .await
+    .map_err(|_| failure("Remote stop timed out; the owner may have stopped. Check component status before retrying.", true))?
+  }
+}
+
 fn valid_preparation(info: &CtmuxPreparation, expected_remote_id: &str) -> bool {
   info.remote_id == expected_remote_id
     && info.available.is_valid()
-    && ctl_core::component::protocols_are_valid(&info.running.protocols)
-    && if info.running.legacy_protocols.is_empty() {
-      info
-        .running
-        .control_protocol_version
-        .is_some_and(|version| {
-          info
-            .running
-            .protocols
-            .iter()
-            .any(|protocol| protocol.name == "ctmux_control" && protocol.supports(version))
-        })
-    } else {
-      info.running.protocols.is_empty()
-        && info.running.control_protocol_version.is_none()
-        && info.running.protocol_version.is_none()
-        && maintenance::valid_legacy_ctmux(&info.running.legacy_protocols)
-    }
-    && info.running.protocol_version.is_none_or(|version| {
-      info
-        .running
-        .protocols
-        .iter()
-        .any(|protocol| protocol.name == "ctmux" && protocol.supports(version))
-    })
-    && info
-      .running
-      .build
-      .as_ref()
-      .is_none_or(ctl_core::component::ComponentBuildInfo::is_valid)
+    && valid_running(&info.running)
     && info
       .available
       .protocols
@@ -367,6 +465,33 @@ fn valid_preparation(info: &CtmuxPreparation, expected_remote_id: &str) -> bool 
       .filter(|protocol| protocol.name == "ctmux_control")
       .count()
       == 1
+}
+
+fn valid_running(running: &maintenance::RunningCtmux) -> bool {
+  ctl_core::component::protocols_are_valid(&running.protocols)
+    && if running.legacy_protocols.is_empty() {
+      running.control_protocol_version.is_some_and(|version| {
+        running
+          .protocols
+          .iter()
+          .any(|protocol| protocol.name == "ctmux_control" && protocol.supports(version))
+      })
+    } else {
+      running.protocols.is_empty()
+        && running.control_protocol_version.is_none()
+        && running.protocol_version.is_none()
+        && maintenance::valid_legacy_ctmux(&running.legacy_protocols)
+    }
+    && running.protocol_version.is_none_or(|version| {
+      running
+        .protocols
+        .iter()
+        .any(|protocol| protocol.name == "ctmux" && protocol.supports(version))
+    })
+    && running
+      .build
+      .as_ref()
+      .is_none_or(ctl_core::component::ComponentBuildInfo::is_valid)
 }
 
 impl PreparedRemoteCtmuxRestart {
@@ -428,7 +553,7 @@ async fn require_waiting_for_confirmation(
   match tokio::time::timeout(Duration::from_millis(10), reader.read(&mut byte)).await {
     Err(_) => Ok(()),
     Ok(_) => Err(failure(
-      "The remote restart confirmation expired or its owner closed. Nothing was restarted; refresh About and try again.",
+      "The remote maintenance confirmation expired or its owner closed. Nothing was stopped; refresh component status and try again.",
       false,
     )),
   }
@@ -461,7 +586,12 @@ mod tests {
 
   #[test]
   fn maintenance_never_falls_back_to_authentication_or_arbitrary_commands() {
-    for operation in [PREPARE_COMMAND, INSPECT_COMMAND, COMPONENTS_COMMAND] {
+    for operation in [
+      PREPARE_COMMAND,
+      STOP_COMMAND,
+      INSPECT_COMMAND,
+      COMPONENTS_COMMAND,
+    ] {
       let command = command(
         "fixture",
         &SshConnectionOptions::default(),
@@ -503,17 +633,26 @@ mod tests {
 
   #[cfg(unix)]
   async fn prepared_fixture(startup: &str, before_response: &str) -> Command {
-    use std::fmt::Write as _;
-    let mut frame = Vec::new();
-    maintenance::write(
-      &mut frame,
+    response_fixture(
+      startup,
+      before_response,
       &ServerMessage::Prepared {
         protocol_version: maintenance::PROTOCOL_VERSION,
         info: preparation(),
       },
     )
     .await
-    .unwrap();
+  }
+
+  #[cfg(unix)]
+  async fn response_fixture(
+    startup: &str,
+    before_response: &str,
+    response: &ServerMessage,
+  ) -> Command {
+    use std::fmt::Write as _;
+    let mut frame = Vec::new();
+    maintenance::write(&mut frame, response).await.unwrap();
     let encoded = frame.iter().fold(String::new(), |mut encoded, byte| {
       write!(encoded, "\\{byte:03o}").unwrap();
       encoded
@@ -528,6 +667,58 @@ mod tests {
       .env("CTL_TEST_BEFORE_RESPONSE", before_response)
       .env("CTL_TEST_PREPARED", encoded);
     command
+  }
+
+  #[cfg(unix)]
+  #[tokio::test]
+  async fn stop_preparation_requires_new_contract_identity_and_valid_owner_metadata() {
+    let _guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
+    for scenario in ["valid", "old_contract", "wrong_identity", "invalid_owner"] {
+      let mut info = maintenance::CtmuxStopPreparation {
+        remote_id: "owned-environment".into(),
+        running: preparation().running,
+      };
+      let version = if scenario == "old_contract" {
+        maintenance::CONTRACT_V1_1_3
+      } else {
+        maintenance::CONTRACT_V1_2_4
+      };
+      if scenario == "wrong_identity" {
+        info.remote_id = "another-machine".into();
+      }
+      if scenario == "invalid_owner" {
+        info.running.protocols.clear();
+      }
+      let command = response_fixture(
+        "Welcome\n",
+        "",
+        &ServerMessage::StopPrepared {
+          protocol_version: version,
+          info,
+        },
+      )
+      .await;
+      let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        prepare_stop(command, "owned-environment"),
+      )
+      .await
+      .unwrap();
+      if scenario == "valid" {
+        let mut prepared = result.unwrap();
+        assert_eq!(prepared.info.remote_id, "owned-environment");
+        require_waiting_for_confirmation(&mut prepared.stdout)
+          .await
+          .unwrap();
+      } else {
+        assert!(
+          !result
+            .err()
+            .expect("invalid stop preparation must be rejected")
+            .may_have_stopped
+        );
+      }
+    }
   }
 
   #[cfg(unix)]

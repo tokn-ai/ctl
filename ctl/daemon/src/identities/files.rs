@@ -20,6 +20,7 @@ pub struct IdentitySnapshot {
   pub fingerprint: Option<String>,
   pub public_key: Option<String>,
   pub encrypted: bool,
+  #[cfg(unix)]
   pub(super) bytes: Zeroizing<Vec<u8>>,
 }
 
@@ -98,6 +99,7 @@ pub fn inspect_path(path: &str) -> Result<IdentitySnapshot, IdentityError> {
     fingerprint: envelope.fingerprint,
     public_key: envelope.public_key,
     encrypted: envelope.encrypted,
+    #[cfg(unix)]
     bytes,
   })
 }

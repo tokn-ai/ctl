@@ -221,7 +221,9 @@ fn check_private_directory(path: &Path) -> io::Result<bool> {
 fn prepare_directory(path: &Path) -> io::Result<()> {
   let parent = path.parent().ok_or_else(invalid_record)?;
   for directory in [parent, path] {
-    let mut builder = fs::DirBuilder::new();
+    let builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    let mut builder = builder;
     #[cfg(unix)]
     builder.mode(0o700);
     match builder.create(directory) {

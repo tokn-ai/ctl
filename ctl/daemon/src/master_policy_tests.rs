@@ -1,3 +1,4 @@
+#[cfg(unix)]
 use std::future::{Future, ready};
 
 use super::*;

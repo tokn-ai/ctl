@@ -9,10 +9,13 @@ use sha2::{Digest as _, Sha256};
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io;
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::time::{Instant, sleep};
+#[cfg(windows)]
+use windows_spawn::{Command, Stdio};
 
 pub(super) async fn connect_or_start(
   path: &Path,
@@ -44,11 +47,6 @@ pub(super) async fn connect_or_start(
     return Ok(stream);
   }
   let mut command = Command::new(&executable);
-  #[cfg(windows)]
-  {
-    use std::os::windows::process::CommandExt as _;
-    command.creation_flags(0x0000_0008);
-  }
   command
     .arg("--socket")
     .arg(path)
@@ -146,15 +144,27 @@ async fn spawn_reaped(
   let (exited, finished) = tokio::sync::oneshot::channel();
   std::thread::Builder::new()
     .name("ctld-reaper".into())
-    .spawn(move || match command.spawn() {
-      Ok(mut child) => {
-        let _ = started.send(Ok(()));
-        let _ = child.wait();
-        drop(startup);
-        let _ = exited.send(());
-      }
-      Err(error) => {
-        let _ = started.send(Err(error));
+    .spawn(move || {
+      #[cfg(unix)]
+      let child = command.spawn();
+      #[cfg(windows)]
+      let child = {
+        use windows_spawn::{CreationFlags, SpawnOptions};
+        // std::process::Command broadly inherits handles even with null stdio.
+        // Inherited capture pipes would keep the caller's output open for the
+        // entire broker lifetime. Transfer only this daemon's null handles.
+        command.spawn_with(SpawnOptions::new().creation_flags(CreationFlags::DETACHED_PROCESS))
+      };
+      match child {
+        Ok(mut child) => {
+          let _ = started.send(Ok(()));
+          let _ = child.wait();
+          drop(startup);
+          let _ = exited.send(());
+        }
+        Err(error) => {
+          let _ = started.send(Err(error));
+        }
       }
     })?;
   result.await.map_err(io::Error::other)??;

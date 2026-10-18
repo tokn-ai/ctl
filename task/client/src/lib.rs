@@ -6,7 +6,6 @@ pub use restart::{PreparedRestart, preflight_restart, preflight_restart_at, rest
 use std::{
   env, io,
   path::{Path, PathBuf},
-  process::Stdio,
   time::Duration,
 };
 use thiserror::Error;
@@ -89,13 +88,12 @@ fn spawn_daemon(
   executable: &Path,
   configuration: Option<(&Path, &Path)>,
 ) -> Result<(), ClientError> {
-  let mut daemon = std::process::Command::new(executable);
+  #[cfg(unix)]
+  use std::process::{Command, Stdio};
   #[cfg(windows)]
-  {
-    use std::os::windows::process::CommandExt;
-    // DETACHED_PROCESS: ctl-taskd survives the invoking console.
-    daemon.creation_flags(0x0000_0008);
-  }
+  use windows_spawn::{Command, CreationFlags, SpawnOptions, Stdio};
+
+  let mut daemon = Command::new(executable);
   if let Some((data_directory, ctmux_socket)) = configuration {
     daemon
       .arg("--data-directory")
@@ -109,12 +107,18 @@ fn spawn_daemon(
     .arg("--detach-from-terminal")
     .stdin(Stdio::null())
     .stdout(Stdio::null())
-    .stderr(Stdio::null())
-    .spawn()
-    .map_err(|source| ClientError::StartDaemon {
-      executable: executable.to_owned(),
-      source,
-    })?;
+    .stderr(Stdio::null());
+  #[cfg(unix)]
+  let child = daemon.spawn();
+  // A persistent owner must not keep the caller's inheritable capture pipes
+  // open. Only this daemon's null standard handles cross the spawn boundary.
+  #[cfg(windows)]
+  let child =
+    daemon.spawn_with(SpawnOptions::new().creation_flags(CreationFlags::DETACHED_PROCESS));
+  child.map_err(|source| ClientError::StartDaemon {
+    executable: executable.to_owned(),
+    source,
+  })?;
   Ok(())
 }
 

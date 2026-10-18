@@ -202,15 +202,13 @@ impl State {
     }
   }
 
+  #[cfg(unix)]
   fn release_private_master(&self, target: &SshTarget) {
-    #[cfg(unix)]
     self
       .private_masters
       .lock()
       .unwrap()
       .remove(&target_key(target));
-    #[cfg(not(unix))]
-    let _ = target;
   }
 
   fn release_master_leases(&self) {
@@ -534,8 +532,8 @@ async fn run_with_approvals(
       }
       result = &mut shutdown => break result.map_err(DaemonError::ShutdownSignal),
       accepted = listener.accept() => {
-        let (stream, _) = match accepted {
-          Ok(accepted) => accepted,
+        let stream = match accepted {
+          Ok(accepted) => accepted.0,
           Err(error) => break Err(DaemonError::Accept(error)),
         };
         let state = Arc::clone(&state);
@@ -1553,6 +1551,7 @@ async fn reuse_master_or_prepare(
   if let Some(previous) = state.existing_endpoint(target)? {
     let changed = previous.control_path != *control_path || previous.shared != endpoint.shared;
     if changed || !ready {
+      #[cfg(unix)]
       state.release_private_master(target);
       // Our shared listeners remain under ctld's control even when the master
       // dies. A dead private master instead needs stale-socket cleanup; asking
@@ -1961,6 +1960,7 @@ async fn disconnect_master_inner(
   let _target_guard = lifecycle.lock.lock().await;
   // Releasing our local client allows finite OpenSSH idle cleanup even if a
   // later control command fails. Existing user channels remain unaffected.
+  #[cfg(unix)]
   state.release_private_master(target);
   let mut forwards = state.forwards.lock().await;
   forwards.pause(target);
@@ -2781,11 +2781,13 @@ async fn bind_listener(path: &Path) -> Result<UnixListener, DaemonError> {
 }
 
 #[cfg(windows)]
-async fn bind_listener(path: &Path) -> Result<ctl_ipc::Listener, DaemonError> {
-  ctl_ipc::Listener::bind(path).map_err(|source| DaemonError::Bind {
-    path: path.to_path_buf(),
-    source,
-  })
+fn bind_listener(path: &Path) -> std::future::Ready<Result<ctl_ipc::Listener, DaemonError>> {
+  std::future::ready(
+    ctl_ipc::Listener::bind(path).map_err(|source| DaemonError::Bind {
+      path: path.to_path_buf(),
+      source,
+    }),
+  )
 }
 
 struct SocketGuard(PathBuf);

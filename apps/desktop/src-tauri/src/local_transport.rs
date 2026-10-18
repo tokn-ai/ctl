@@ -369,7 +369,7 @@ mod tests {
     let endpoints = Endpoints::new();
     let listener = Listener::bind(&endpoints.control).unwrap();
     let server = tokio::spawn(async move {
-      let (mut stream, _) = listener.accept().await.unwrap();
+      let mut stream = listener.accept().await.unwrap().0;
       let request: LocalControlClientMessage = read_local_control_frame(&mut stream)
         .await
         .unwrap()

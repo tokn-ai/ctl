@@ -134,6 +134,7 @@ pub(crate) fn owner_endpoint() -> PathBuf {
 
 /// Explicit host operations may start their saved VPN before authenticating SSH.
 /// Dropping a host attempt stops waiting but never stops a shared VPN startup.
+#[cfg(unix)]
 pub(crate) async fn ensure_for_host(
   app: &tauri::AppHandle,
   target: &crate::dto::ConnectionTargetDto,
@@ -187,6 +188,7 @@ pub(crate) async fn ensure_for_host(
   Ok(())
 }
 
+#[cfg(any(unix, test))]
 async fn await_shared_start<F>(start: F) -> CommandResult<VpnStatus>
 where
   F: Future<Output = CommandResult<VpnStatus>> + Send + 'static,
@@ -198,6 +200,7 @@ where
     .map_err(task_error)?
 }
 
+#[cfg(any(unix, test))]
 fn require_connected(status: &VpnStatus) -> CommandResult<()> {
   if status.state == ctl_ipc::VpnState::Connected && status.running && status.endpoint.is_some() {
     return Ok(());
@@ -269,9 +272,6 @@ async fn connect_saved(directory: PathBuf, request: ConnectVpnRequest) -> Comman
   if let Some(target) = &request.target {
     let (client, key) = remote::client_for_target(target, &request.connection_id).await?;
     return remote::connect_saved(directory, request.connection_id, key, client).await;
-  }
-  if !cfg!(unix) {
-    return Err(runtime_error(ctl_ipc::vpn::VpnError::UnsupportedPlatform));
   }
   let coordinator = COORDINATORS.get(&request.connection_id);
   coordinator
@@ -374,10 +374,7 @@ pub async fn open_vpn_sign_in(request: OpenVpnSignInRequest) -> CommandResult<()
 }
 
 async fn mutation_status() -> CommandResult<VpnSnapshot> {
-  #[cfg(unix)]
-  return vpn_status(None).await;
-  #[cfg(not(unix))]
-  Ok(VpnSnapshot::default())
+  vpn_status(None).await
 }
 
 // Owned adapter for Result::map_err.

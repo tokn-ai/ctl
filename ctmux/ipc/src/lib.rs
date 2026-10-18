@@ -12,7 +12,6 @@ pub use interprocess::local_socket::tokio::Stream;
 #[cfg(windows)]
 use interprocess::local_socket::{GenericFilePath, ToFsName, traits::tokio::Stream as _};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use std::process::Stdio;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 #[cfg(unix)]
@@ -593,24 +592,30 @@ fn start_daemon(socket_path: &Path) -> Result<(), ConnectError> {
 }
 
 fn start_daemon_with_executable(socket_path: &Path, executable: &Path) -> Result<(), ConnectError> {
-  let mut command = std::process::Command::new(executable);
+  #[cfg(unix)]
+  use std::process::{Command, Stdio};
   #[cfg(windows)]
-  {
-    use std::os::windows::process::CommandExt;
-    command.creation_flags(0x0000_0008); // DETACHED_PROCESS
-  }
+  use windows_spawn::{Command, CreationFlags, SpawnOptions, Stdio};
+
+  let mut command = Command::new(executable);
   command
     .arg("--socket")
     .arg(socket_path)
     .arg("--detach-from-terminal")
     .stdin(Stdio::null())
     .stdout(Stdio::null())
-    .stderr(Stdio::null())
-    .spawn()
-    .map_err(|source| ConnectError::StartDaemon {
-      executable: executable.to_owned(),
-      source,
-    })?;
+    .stderr(Stdio::null());
+  #[cfg(unix)]
+  let child = command.spawn();
+  // Pass only the daemon's null stdio handles; inherited caller capture pipes
+  // would otherwise remain open until this persistent daemon exits.
+  #[cfg(windows)]
+  let child =
+    command.spawn_with(SpawnOptions::new().creation_flags(CreationFlags::DETACHED_PROCESS));
+  child.map_err(|source| ConnectError::StartDaemon {
+    executable: executable.to_owned(),
+    source,
+  })?;
   Ok(())
 }
 

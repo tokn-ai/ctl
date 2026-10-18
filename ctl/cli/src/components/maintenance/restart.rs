@@ -280,7 +280,7 @@ mod tests {
     } else {
       let listener = Listener::bind(&socket).unwrap();
       Some(tokio::spawn(async move {
-        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut stream = listener.accept().await.unwrap().0;
         assert!(matches!(
           ctl_ipc::read_frame::<_, ctl_ipc::lifecycle::Request>(&mut stream)
             .await

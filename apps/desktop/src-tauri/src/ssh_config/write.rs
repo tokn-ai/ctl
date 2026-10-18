@@ -57,6 +57,7 @@ fn save_host_to_home(
   }
 
   let ssh_directory = home.join(".ssh");
+  #[cfg(unix)]
   let directory_existed = ssh_directory.exists();
   fs::create_dir_all(&ssh_directory).map_err(|source| SaveSshConfigError::Io {
     action: "create the directory for",

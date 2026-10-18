@@ -27,6 +27,7 @@ url = "2.5.8"
 rustix = { workspace = true, features = ["net", "stdio"] }
 
 [target.'cfg(windows)'.dependencies]
+windows-spawn = "0.1.0"
 interprocess = { version = "2.4.4", features = ["tokio"] }
 widestring = "1.2.1"
 uuid = { workspace = true, features = ["v5"] }

@@ -132,6 +132,11 @@ requires those same process identities, active channels and listeners to vanish
 after cooperative stop and abrupt ctld termination. This does not claim OpenSSH
 connection multiplexing or automated coverage of every proxy topology.
 
+A separate native test creates a saved SOCKS5 gateway route and launches ctld
+from a path containing spaces, an apostrophe and a literal percent sign. It
+exercises the generated helper `ProxyCommand` through CLI add/list/remove,
+authenticated binary forwarding and cleanup of the SSH/helper descendants.
+
 ## Windows background tasks
 
 `ctl-task-ipc`, `ctl-task-cli`, `ctl-taskd`, and `ctl` now cross-compile for Windows. The

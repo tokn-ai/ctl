@@ -193,7 +193,7 @@ jobs:
       - name: Exercise Windows ctmux auto-start and local ctl routing
         run: ./scripts/ci/windows-ctmux.ps1
 
-      - name: Test authenticated Windows SSH gateway and reconnect
+      - name: Test authenticated Windows SSH, forwarding and reconnect
         run: ./scripts/ci/windows-ssh.ps1
 
   frontend:

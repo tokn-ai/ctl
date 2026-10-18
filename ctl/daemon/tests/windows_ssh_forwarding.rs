@@ -6,6 +6,8 @@ use ctl_ipc::{
 };
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::process::{Child, Command};
@@ -86,7 +88,7 @@ async fn powershell(script: &str, owner: u32, input: &[u8]) -> std::process::Out
   .expect("native process ownership check timed out")
 }
 
-async fn descendants(owner: &Owner) -> Vec<ProcessIdentity> {
+async fn snapshot_descendants(owner: &Owner) -> Vec<ProcessIdentity> {
   let owner_id = owner
     .child
     .id()
@@ -96,7 +98,12 @@ async fn descendants(owner: &Owner) -> Vec<ProcessIdentity> {
     output.status.success(),
     "process snapshot failed: {output:?}"
   );
-  let processes: Vec<ProcessIdentity> = serde_json::from_slice(&output.stdout).unwrap();
+  serde_json::from_slice(&output.stdout).unwrap()
+}
+
+async fn descendants(owner: &Owner) -> Vec<ProcessIdentity> {
+  let owner_id = owner.child.id().unwrap();
+  let processes = snapshot_descendants(owner).await;
   let ssh: Vec<_> = processes
     .iter()
     .filter(|process| process.name.eq_ignore_ascii_case("ssh.exe"))
@@ -211,6 +218,69 @@ impl Drop for Echo {
   }
 }
 
+struct Socks {
+  port: u16,
+  connections: Arc<AtomicUsize>,
+  task: JoinHandle<()>,
+}
+
+impl Socks {
+  async fn start() -> Self {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let connections = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&connections);
+    let task = tokio::spawn(async move {
+      let mut clients = JoinSet::new();
+      loop {
+        tokio::select! {
+          accepted = listener.accept() => {
+            let (stream, _) = accepted.unwrap();
+            let observed = Arc::clone(&observed);
+            clients.spawn(async move {
+              let _ = socks_connection(stream, &observed).await;
+            });
+          }
+          Some(result) = clients.join_next(), if !clients.is_empty() => {
+            result.unwrap();
+          }
+        }
+      }
+    });
+    Self {
+      port,
+      connections,
+      task,
+    }
+  }
+}
+
+async fn socks_connection(mut stream: TcpStream, connections: &AtomicUsize) -> std::io::Result<()> {
+  let mut greeting = [0; 3];
+  stream.read_exact(&mut greeting).await?;
+  assert_eq!(greeting, [5, 1, 0]);
+  stream.write_all(&[5, 0]).await?;
+  let mut request = [0; 10];
+  stream.read_exact(&mut request).await?;
+  assert_eq!(&request[..8], &[5, 1, 0, 1, 127, 0, 0, 1]);
+  assert_eq!(
+    u16::from_be_bytes([request[8], request[9]]),
+    22222,
+    "the saved route must reach only the fixture's loopback SSH server"
+  );
+  let mut upstream = TcpStream::connect(("127.0.0.1", 22222)).await?;
+  stream.write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 0]).await?;
+  connections.fetch_add(1, Ordering::SeqCst);
+  tokio::io::copy_bidirectional(&mut stream, &mut upstream).await?;
+  Ok(())
+}
+
+impl Drop for Socks {
+  fn drop(&mut self) {
+    self.task.abort();
+  }
+}
+
 struct Owner {
   directory: PathBuf,
   socket: PathBuf,
@@ -218,12 +288,29 @@ struct Owner {
 }
 
 impl Owner {
-  async fn start() -> Self {
+  fn directory() -> PathBuf {
     let id = uuid::Uuid::new_v4();
     let directory = std::env::temp_dir().join(format!("ctld-forward-{id}"));
     std::fs::create_dir(&directory).unwrap();
-    let socket = PathBuf::from(format!(r"\\.\pipe\ctld-forward-{id}"));
-    let mut command = Command::new(env!("CARGO_BIN_EXE_ctld"));
+    directory
+  }
+
+  async fn start() -> Self {
+    Self::launch(Self::directory(), PathBuf::from(env!("CARGO_BIN_EXE_ctld"))).await
+  }
+
+  async fn start_from_spaced_path() -> Self {
+    let directory = Self::directory();
+    let helper_directory = directory.join("proxy % helper's directory");
+    std::fs::create_dir(&helper_directory).unwrap();
+    let executable = helper_directory.join("ctld.exe");
+    std::fs::copy(env!("CARGO_BIN_EXE_ctld"), &executable).unwrap();
+    Self::launch(directory, executable).await
+  }
+
+  async fn launch(directory: PathBuf, executable: PathBuf) -> Self {
+    let socket = PathBuf::from(format!(r"\\.\pipe\ctld-forward-{}", uuid::Uuid::new_v4()));
+    let mut command = Command::new(executable);
     #[cfg(windows)]
     command.creation_flags(0x0000_0008);
     let child = command
@@ -659,4 +746,96 @@ async fn authenticated_forwarding_preserves_aliases_moves_data_and_releases_owne
   })
   .await
   .expect("authenticated Windows forwarding fixture timed out");
+}
+
+#[tokio::test]
+#[ignore = "requires native Windows and authenticated loopback OpenSSH; run windows-ssh.ps1"]
+async fn saved_socks_gateway_uses_generated_proxy_from_spaced_ctld_path() {
+  timeout(Duration::from_secs(120), async {
+    let echo = Echo::start(b'S').await;
+    let socks = Socks::start().await;
+    let mut owner = Owner::start_from_spaced_path().await;
+    let alias = std::env::var("CTL_TEST_SSH_HOST").unwrap();
+    owner
+      .cli(&[
+        "host",
+        "create",
+        "socks-fixture",
+        &alias,
+        "--ssh-config",
+        "--json",
+      ])
+      .await;
+    // The CLI has no gateway creation command; seed only this saved gateway,
+    // then use normal host editing and forwarding commands for the whole route.
+    let catalog = owner.directory.join("hosts.json");
+    let mut snapshot: serde_json::Value =
+      serde_json::from_slice(&std::fs::read(&catalog).unwrap()).unwrap();
+    snapshot["document"]["ssh_gateways"] = serde_json::json!([{
+      "kind": "socks5",
+      "gateway_id": "local-socks",
+      "name": "Loopback SOCKS fixture",
+      "destination": "127.0.0.1",
+      "port": socks.port,
+    }]);
+    std::fs::write(&catalog, serde_json::to_vec(&snapshot).unwrap()).unwrap();
+    owner
+      .cli(&[
+        "host",
+        "update",
+        "socks-fixture",
+        "--gateway",
+        "local-socks",
+        "--json",
+      ])
+      .await;
+    let port = unused_port().await;
+    let specification = format!("127.0.0.1:{port}:127.0.0.1:{}", echo.port);
+    let output = owner
+      .cli(&[
+        "--host",
+        "socks-fixture",
+        "port",
+        "add",
+        &specification,
+        "--id",
+        "socks-forward",
+        "--json",
+      ])
+      .await;
+    let statuses: Vec<PortForwardStatus> = serde_json::from_str(&output).unwrap();
+    assert_eq!(statuses.len(), 1);
+    assert_eq!(statuses[0].state, PortForwardState::Active);
+    assert_eq!(statuses[0].forward.local_port, port);
+    let mut connection = echo.roundtrip(port).await;
+    assert!(
+      socks.connections.load(Ordering::SeqCst) >= 2,
+      "the authenticated anchor and binary channel must both use SOCKS"
+    );
+    let processes = snapshot_descendants(&owner).await;
+    for name in ["ssh.exe", "ctld.exe"] {
+      assert!(
+        processes
+          .iter()
+          .filter(|process| process.name.eq_ignore_ascii_case(name))
+          .count()
+          >= 2,
+        "anchor and data SSH/helper processes are missing: {processes:?}"
+      );
+    }
+    let output = owner
+      .cli(&["--host", "socks-fixture", "port", "list", "--json"])
+      .await;
+    let listed: Vec<PortForwardStatus> = serde_json::from_str(&output).unwrap();
+    assert_eq!(listed, statuses);
+    owner
+      .cli(&["--host", "socks-fixture", "port", "remove", "socks-forward"])
+      .await;
+    assert_closed(&mut connection).await;
+    assert_released(port).await;
+    assert_descendants_gone(&processes).await;
+    owner.stop().await;
+  })
+  .await
+  .expect("saved SOCKS Windows forwarding fixture timed out");
 }

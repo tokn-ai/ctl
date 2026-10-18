@@ -1,6 +1,6 @@
 // Runs only against the isolated SSH server owned by windows-ssh.ps1.
 // The parent passes fixture credentials on stdin, never argv or environment.
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { connect } from "node:net";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
@@ -19,28 +19,48 @@ async function invoke(supplied: string, input: string, command: string[]) {
   const exited = new Promise<number | null>((resolve, reject) => {
     child.once("error", reject); child.once("close", resolve);
   });
-  const timer = setTimeout(() => child.kill(), 30000);
-  const deadline = Date.now() + 4000;
-  while (true) {
-    try {
-      const socket = await new Promise<import("node:net").Socket>((resolve, reject) => {
-        const connection = connect(pipe);
-        connection.once("error", reject);
-        connection.once("connect", () => { connection.removeListener("error", reject); resolve(connection); });
-      });
-      socket.on("error", () => {});
-      socket.end(Buffer.from(supplied));
-      break;
-    } catch (error) {
-      if (Date.now() >= deadline) { child.kill(); throw error; }
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    }
+  let terminationRequested = false;
+  function terminateTree() {
+    if (terminationRequested || child.exitCode !== null || child.signalCode !== null || child.pid === undefined) return;
+    terminationRequested = true;
+    // Enumerate the owned descendants before terminating ctl: killing ctl alone
+    // can orphan ssh.exe while it still holds our captured output handles.
+    const result = spawnSync("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], {
+      stdio: "ignore", windowsHide: true, timeout: 5000,
+    });
+    if (result.status !== 0) child.kill();
   }
-  child.stdin.end(input);
-  const code = await exited;
-  clearTimeout(timer);
-  assert(!stdout.includes(password) && !stderr.includes(password), "credential disclosed");
-  return { code, stdout, stderr };
+  let timedOut = false;
+  const timer = setTimeout(() => { timedOut = true; terminateTree(); }, 30000);
+  let socket: import("node:net").Socket | undefined;
+  try {
+    const deadline = Date.now() + 4000;
+    while (true) {
+      try {
+        socket = await new Promise<import("node:net").Socket>((resolve, reject) => {
+          const connection = connect(pipe);
+          connection.once("error", reject);
+          connection.once("connect", () => { connection.removeListener("error", reject); resolve(connection); });
+        });
+        socket.on("error", () => {});
+        socket.end(Buffer.from(supplied));
+        break;
+      } catch (error) {
+        if (Date.now() >= deadline) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+    }
+    child.stdin.end(input);
+    const code = await exited;
+    assert(!timedOut, "Caller-auth invocation timed out");
+    assert(!stdout.includes(password) && !stderr.includes(password), "credential disclosed");
+    return { code, stdout, stderr };
+  } finally {
+    clearTimeout(timer);
+    socket?.destroy();
+    child.stdin.destroy();
+    terminateTree();
+  }
 }
 
 // Keep cmd.exe /C expressions in one argument, as in the Windows SSH fixture.

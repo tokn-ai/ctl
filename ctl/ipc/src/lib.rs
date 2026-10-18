@@ -478,7 +478,15 @@ pub async fn prepare_proxy_command(gateways: &[SshGateway]) -> Result<String, Co
 /// Panics if serialization of the gateway route unexpectedly fails.
 #[must_use]
 pub fn proxy_command_with_executable(gateways: &[SshGateway], executable: &Path) -> String {
-  let executable = executable.to_string_lossy().replace('\'', "'\\''");
+  // OpenSSH expands tokens even inside quotes. A literal percent in the helper
+  // path must survive that expansion before the local process is launched.
+  let executable = executable.to_string_lossy().replace('%', "%%");
+  // Native Windows OpenSSH launches ProxyCommand directly, without a POSIX
+  // shell. Single quotes would become part of the executable's filename.
+  #[cfg(windows)]
+  let executable = format!("\"{executable}\"");
+  #[cfg(not(windows))]
+  let executable = format!("'{}'", executable.replace('\'', "'\\''"));
   let bytes = serde_json::to_vec(gateways).expect("gateway route is serializable");
   let encoded = bytes
     .iter()
@@ -487,7 +495,7 @@ pub fn proxy_command_with_executable(gateways: &[SshGateway], executable: &Path)
       write!(text, "{byte:02x}").expect("writing to a String cannot fail");
       text
     });
-  format!("'{executable}' --proxy-route {encoded} --proxy-host %h --proxy-port %p")
+  format!("{executable} --proxy-route {encoded} --proxy-host %h --proxy-port %p")
 }
 
 impl SshTarget {
@@ -1447,6 +1455,28 @@ fn retryable_connect_error(error: &io::Error) -> bool {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[cfg(unix)]
+  #[test]
+  fn proxy_helper_path_is_quoted_for_the_posix_shell_and_ssh_token_expansion() {
+    let command =
+      proxy_command_with_executable(&[], Path::new("/helper's directory/%h %p 100%/ctld"));
+    assert_eq!(
+      command,
+      "'/helper'\\''s directory/%%h %%p 100%%/ctld' --proxy-route 5b5d --proxy-host %h --proxy-port %p"
+    );
+  }
+
+  #[cfg(windows)]
+  #[test]
+  fn proxy_helper_path_is_quoted_for_native_spawn_and_ssh_token_expansion() {
+    let command =
+      proxy_command_with_executable(&[], Path::new(r"C:\helper's directory\%h %p 100%\ctld.exe"));
+    assert_eq!(
+      command,
+      r#""C:\helper's directory\%%h %%p 100%%\ctld.exe" --proxy-route 5b5d --proxy-host %h --proxy-port %p"#
+    );
+  }
 
   #[test]
   fn prompt_warnings_are_optional_for_existing_protocol_clients() {

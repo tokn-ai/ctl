@@ -420,36 +420,43 @@ $originalConfigText
   Get-WinEvent -LogName 'OpenSSH/Admin' -MaxEvents 20 -ErrorAction SilentlyContinue | Format-List TimeCreated, Message
   throw
 } finally {
-  Stop-Service sshd -ErrorAction SilentlyContinue
-  if ($null -ne $taskDaemon) {
-    if (-not $taskDaemon.HasExited) { $taskDaemon.Kill($true); $taskDaemon.WaitForExit(5000) | Out-Null }
-    if ($taskStderr.Wait(5000) -and $taskStderr.Result) { Write-Host $taskStderr.Result }
-    $taskDaemon.Dispose()
+  try {
+    Stop-Service sshd -ErrorAction SilentlyContinue
+    if ($null -ne $taskDaemon) {
+      if (-not $taskDaemon.HasExited) { $taskDaemon.Kill($true); $taskDaemon.WaitForExit(5000) | Out-Null }
+      if ($taskStderr.Wait(5000) -and $taskStderr.Result) { Write-Host $taskStderr.Result }
+      $taskDaemon.Dispose()
+    }
+    Get-CimInstance Win32_Process -Filter "Name = 'ctmuxd.exe' OR Name = 'ctl-taskd.exe' OR Name = 'ctl-agent.exe'" | Where-Object { $_.ExecutablePath -in $installed } | ForEach-Object {
+      Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+    }
+    foreach ($binary in $installed) { Remove-Item $binary -Force -ErrorAction SilentlyContinue }
+    if ($null -eq $originalConfig) { Remove-Item $config -ErrorAction SilentlyContinue }
+    else { [IO.File]::WriteAllBytes($config, $originalConfig) }
+    if ($null -eq $originalServerConfig) { Remove-Item $serverConfig -ErrorAction SilentlyContinue }
+    else { [IO.File]::WriteAllBytes($serverConfig, $originalServerConfig) }
+    if ($null -eq $originalAuthorizedKeys) { Remove-Item $authorizedKeys -ErrorAction SilentlyContinue }
+    else { [IO.File]::WriteAllBytes($authorizedKeys, $originalAuthorizedKeys) }
+    if ($null -eq $originalShell) { Remove-ItemProperty $shellKey -Name DefaultShell -ErrorAction SilentlyContinue }
+    else { Set-ItemProperty $shellKey -Name DefaultShell -Value $originalShell }
+    # Restore the parent first: inherited ACL propagation must not overwrite the
+    # original child ACLs after they have been restored.
+    foreach ($path in $aclPaths) {
+      if ($originalAcls.ContainsKey($path) -and (Test-Path $path)) { Set-Acl $path $originalAcls[$path] }
+    }
+    Invoke-Native -Program 'sc.exe' -Arguments @('config', 'sshd', 'binPath=', $originalServicePath)
+    if ($wasRunning) { Start-Service sshd }
+    Set-Service sshd -StartupType $originalStartType
+  } finally {
+    # Service/config/ACL restoration must not skip the invocation's own cleanup.
+    $env:CTL_TEST_SSH_HOST = $originalTestHost
+    $env:CTL_TEST_SSH_FORWARD_HOST = $originalForwardHost
+    $env:CTL_TEST_SSH_UNWANTED_PORT = $originalUnwantedPort
+    $env:CTL_TEST_CTL_BIN = $originalCtlBin
+    try {
+      if ($callerCreated) { Remove-LocalUser -Name $callerUser }
+    } finally {
+      Remove-Item $root -Recurse -Force -ErrorAction SilentlyContinue
+    }
   }
-  Get-CimInstance Win32_Process -Filter "Name = 'ctmuxd.exe' OR Name = 'ctl-taskd.exe' OR Name = 'ctl-agent.exe'" | Where-Object { $_.ExecutablePath -in $installed } | ForEach-Object {
-    Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
-  }
-  foreach ($binary in $installed) { Remove-Item $binary -Force -ErrorAction SilentlyContinue }
-  if ($null -eq $originalConfig) { Remove-Item $config -ErrorAction SilentlyContinue }
-  else { [IO.File]::WriteAllBytes($config, $originalConfig) }
-  if ($null -eq $originalServerConfig) { Remove-Item $serverConfig -ErrorAction SilentlyContinue }
-  else { [IO.File]::WriteAllBytes($serverConfig, $originalServerConfig) }
-  if ($null -eq $originalAuthorizedKeys) { Remove-Item $authorizedKeys -ErrorAction SilentlyContinue }
-  else { [IO.File]::WriteAllBytes($authorizedKeys, $originalAuthorizedKeys) }
-  if ($null -eq $originalShell) { Remove-ItemProperty $shellKey -Name DefaultShell -ErrorAction SilentlyContinue }
-  else { Set-ItemProperty $shellKey -Name DefaultShell -Value $originalShell }
-  # Restore the parent first: inherited ACL propagation must not overwrite the
-  # original child ACLs after they have been restored.
-  foreach ($path in $aclPaths) {
-    if ($originalAcls.ContainsKey($path) -and (Test-Path $path)) { Set-Acl $path $originalAcls[$path] }
-  }
-  Invoke-Native -Program 'sc.exe' -Arguments @('config', 'sshd', 'binPath=', $originalServicePath)
-  if ($wasRunning) { Start-Service sshd }
-  Set-Service sshd -StartupType $originalStartType
-  $env:CTL_TEST_SSH_HOST = $originalTestHost
-  $env:CTL_TEST_SSH_FORWARD_HOST = $originalForwardHost
-  $env:CTL_TEST_SSH_UNWANTED_PORT = $originalUnwantedPort
-  $env:CTL_TEST_CTL_BIN = $originalCtlBin
-  Remove-Item $root -Recurse -Force -ErrorAction SilentlyContinue
-  if ($callerCreated) { Remove-LocalUser -Name $callerUser }
 }

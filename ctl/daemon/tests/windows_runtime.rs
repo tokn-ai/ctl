@@ -250,7 +250,7 @@ async fn forwarding_inventory_is_passive_and_explicit_mux_is_rejected_before_ali
     else {
       panic!("passive forwarding inventory failed");
     };
-    assert!(statuses.is_empty());
+    assert_eq!(statuses, [] as [ctl_ipc::PortForwardStatus; 0]);
     drop(stream);
     target.use_ssh_config_master = Some(true);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

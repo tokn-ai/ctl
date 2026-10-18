@@ -394,10 +394,10 @@ $originalConfigText
   Assert-Equal $result.stdout '' 'Remote task cleanup'
   Assert-Equal (Get-FileHash $catalog).Hash $catalogHash 'Connections preserve the saved host catalog'
   Write-Host 'Checking caller-owned SSH keys and one-shot password channels'
-  $result = Invoke-Ctl -Arguments @('--destination', 'ctl-windows-ci', '--identity-file', "$root\client", '--port', '22222', '--remote-platform', 'windows', 'exec', '--', 'cmd', '/c', 'echo', 'CALLER_KEY_AUTHENTICATED')
+  $result = Invoke-Ctl -Arguments @('--destination', 'ctl-windows-ci', '--identity-file', "$root\client", '--port', '22222', '--remote-platform', 'windows', 'exec', '--', 'cmd.exe', '/D', '/C', 'echo CALLER_KEY_AUTHENTICATED')
   Assert-Equal $result.stdout.Trim() 'CALLER_KEY_AUTHENTICATED' 'Caller-owned SSH key authentication'
   # The SSH config's working IdentityFile must not rescue this incorrect key.
-  Invoke-Ctl -Arguments @('--destination', 'ctl-windows-ci', '--identity-file', "$root\wrong-client", '--remote-platform', 'windows', 'exec', '--', 'cmd', '/c', 'exit', '0') -ExpectedExit 255 | Out-Null
+  Invoke-Ctl -Arguments @('--destination', 'ctl-windows-ci', '--identity-file', "$root\wrong-client", '--remote-platform', 'windows', 'exec', '--', 'cmd.exe', '/D', '/C', 'exit /b 0') -ExpectedExit 255 | Out-Null
   $callerDirectory = Join-Path $root 'caller cli'
   New-Item -ItemType Directory $callerDirectory | Out-Null
   Copy-Item '.\target\debug\ctl.exe' "$callerDirectory\ctl.exe"

@@ -171,7 +171,7 @@ jobs:
       - name: Build Windows executables
         run: cargo build --locked -p ctl-cli -p ctl-agent -p ctld -p ctl-taskd -p ctmux-cli -p ctmuxd -p ctmux-tui
 
-      - name: Exercise Windows ctld status and cooperative replacement
+      - name: Exercise Windows ctld status, replacement and stop
         run: ./scripts/ci/windows-ctld.ps1
 
       - name: Exercise ctl task auto-start and commands

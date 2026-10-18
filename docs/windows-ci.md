@@ -14,7 +14,7 @@ platform is Unix, even when the client runs on Windows.
 | Remote `ctl exec` | Uses system SSH; `--remote-platform windows` selects cmd.exe command construction | Authenticated loopback stdin/stdout/stderr and exit status |
 | Local `ctl ctmux` / `ctmux` | Named-pipe transport and ConPTY sessions | Auto-start, attachment, reconnect, resize, final output and exit status |
 | Local `ctl task` | Named-pipe transport, background Job Objects and managed ConPTY tasks | Auto-start, lifecycle, logs, recovery and descendant cleanup |
-| Local `ctld` | Owner-only named pipe, daemon lifecycle and available local VPN services | Detached startup, status without a container engine, cooperative restart and pipe reuse |
+| Local `ctld` | Owner-only named pipe, daemon lifecycle and available local VPN services | Detached startup, status without a container engine, cooperative restart/stop and pipe reuse |
 | Remote ctmux | `ctl-agent.exe connect` routes to `ctmuxd.exe` | Authenticated loopback auto-start, reconnect and both destination selectors |
 | Remote tasks | `ctl-agent.exe connect --service task` routes to `ctl-taskd.exe` | Authenticated loopback lifecycle, log streams, working directory and persistence across channels |
 
@@ -71,7 +71,7 @@ its fixture, rather than counted as covered by ordinary `cargo test`.
 
 `ctld` listens on a local, owner-only named pipe derived from its runtime
 namespace, and supports explicit `--socket` pipe names. Its lifecycle endpoint
-supports inspection and cooperative restart. Windows removes the endpoint when
+supports inspection, cooperative restart and confirmed stop. Windows removes the endpoint when
 handles close; startup uses an exclusive first pipe instance rather than
 filesystem socket cleanup.
 
@@ -82,8 +82,10 @@ program search path, checks repeated VPN status requests and platform-specific
 SSH diagnostics, then restarts the owner and reuses its pipe name. Actual VPN
 connectivity still requires a supported container engine and configuration.
 A separate CLI smoke fixture verifies passive status/list operations, a restart
-dry run, owner replacement through `ctl components restart ctld`, and VPN
-status after reconnecting to the successor. All fixture paths and its helper
+dry run, owner replacement through `ctl components restart ctld`, VPN
+status after reconnecting to the successor, and graceful, idempotent
+`ctl components stop ctld`. Native tests also check abandoned and expired stop
+confirmations. All fixture paths and its helper
 executable are isolated from the user profile and other daemon owners.
 
 ## Windows background tasks

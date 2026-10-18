@@ -6,7 +6,7 @@ Installs `ctld`, the companion daemon used by `ctl` and the ctmux desktop app.
 It owns shared SSH connections, port forwards, and VPN container lifecycles.
 
 Windows runs a per-user owner on a restricted local named pipe. Component
-inspection, cooperative restart, local identity inventory, and container-backed
+inspection, cooperative restart/stop, local identity inventory, and container-backed
 VPN management remain available; a missing Docker or Podman installation is
 reported in VPN discovery diagnostics without preventing startup. Native
 Windows OpenSSH does not support ControlMaster, so broker multiplexing, its

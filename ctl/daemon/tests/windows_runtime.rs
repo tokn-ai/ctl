@@ -148,6 +148,13 @@ async fn detached_owner_serves_vpn_status_without_a_container_engine_and_release
       before.binary,
       ctl_ipc::lifecycle::DaemonBinaryInfo::current()
     );
+    let inventory = ctl_ipc::vpn::Client::new(owner.socket.clone())
+      .list()
+      .await
+      .unwrap();
+    assert!(inventory.supports_multiple);
+    assert!(inventory.connections.is_empty());
+    assert!(!inventory.discovery_warnings.is_empty());
     let mut stream = owner.connect().await;
     // A missing optional container engine leaves the broker usable and returns
     // discovery diagnostics. Current contracts permit repeated status requests.

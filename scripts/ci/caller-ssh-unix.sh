@@ -12,6 +12,8 @@ fi
 root=$(mktemp -d /tmp/ctl-caller-ssh.XXXXXX)
 port=22379
 ssh_user=$(id -un)
+pam=no
+if [[ "$RUNNER_OS" == Linux ]]; then pam=yes; fi
 config="$HOME/.ssh/config"
 mkdir -p "$HOME/.ssh"
 had_config=false
@@ -38,7 +40,7 @@ StrictModes no
 AllowUsers $ssh_user
 PasswordAuthentication no
 KbdInteractiveAuthentication no
-UsePAM no
+UsePAM $pam
 AllowTcpForwarding no
 AllowAgentForwarding no
 EOF

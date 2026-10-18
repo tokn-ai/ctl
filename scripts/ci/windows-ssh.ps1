@@ -38,7 +38,8 @@ try {
   $callerPassword = [Guid]::NewGuid().ToString('N') + '!aA9'
   New-LocalUser -Name $callerUser -Password (ConvertTo-SecureString $callerPassword -AsPlainText -Force) | Out-Null
   $callerCreated = $true
-  Get-LocalGroup -SID 'S-1-5-32-545' | Add-LocalGroupMember -Member $callerUser
+  $usersGroup = Get-LocalGroup -SID 'S-1-5-32-545'
+  Add-LocalGroupMember -Group $usersGroup.Name -Member $callerUser
   Stop-Service sshd -ErrorAction SilentlyContinue
   # The fixed remote command resolves installed executables through the server's PATH.
   foreach ($binary in @('ctl-agent.exe', 'ctmuxd.exe')) {

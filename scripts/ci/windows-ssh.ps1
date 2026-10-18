@@ -108,7 +108,7 @@ $originalConfig
   Invoke-Native -Program "$openssh\ssh.exe" -Arguments @('-vvv', '-E', "$root\client.log", 'ctl-windows-ci', 'echo', 'SSH_AUTHENTICATED')
   $env:CTL_TEST_SSH_HOST = 'ctl-windows-ci'
   Invoke-Native -Program 'cargo' -Arguments @('test', '--locked', '-p', 'ctl-agent', '--test', 'windows_ssh', '--', '--ignored', '--nocapture')
-  Invoke-Native -Program '.\target\debug\ctl.exe' -Arguments @('--host', 'ctl-windows-ci', '--remote-platform', 'windows', 'ctmux', 'list')
+  Invoke-Native -Program '.\target\debug\ctl.exe' -Arguments @('--destination', 'ctl-windows-ci', '--remote-platform', 'windows', 'ctmux', 'list')
 } catch {
   Stop-Service sshd -ErrorAction SilentlyContinue
   Get-Content "$root\client.log" -Tail 100 -ErrorAction SilentlyContinue

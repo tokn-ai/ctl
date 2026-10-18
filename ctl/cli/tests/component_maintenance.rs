@@ -123,6 +123,62 @@ fn preflight_failure_never_starts_an_absent_owner() {
   }
 }
 
+#[test]
+fn stop_is_idempotent_without_installed_helpers_and_requires_consent() {
+  let _guard = ctl_core::test_fixtures::ProcessGuard::acquire_blocking();
+  let fixture = Fixture::new();
+  for daemon in ["ctld", "ctmuxd", "ctl-taskd"] {
+    for approval in ["--yes", "--dry-run"] {
+      let output = fixture
+        .command(&["components", "stop", daemon, approval, "--json"])
+        .output()
+        .unwrap();
+      assert!(output.status.success(), "{output:?}");
+      let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+      assert_eq!(value["already_stopped"], true);
+      fixture.assert_untouched();
+    }
+  }
+  for args in [
+    vec!["components", "stop", "ctld"],
+    vec!["-H", "unknown", "components", "stop", "ctld", "--yes"],
+    vec!["-H", "unknown", "components", "stop", "ctl-taskd", "--yes"],
+  ] {
+    let output = fixture.command(&args).output().unwrap();
+    assert!(!output.status.success());
+    fixture.assert_untouched();
+  }
+}
+
+#[test]
+fn stop_with_a_temporary_destination_never_falls_back_to_local() {
+  let _guard = ctl_core::test_fixtures::ProcessGuard::acquire_blocking();
+  let fixture = Fixture::new();
+  for (daemon, destination, expected) in [
+    ("ctld", "work", "only ctmuxd"),
+    ("ctl-taskd", "work", "only ctmuxd"),
+    ("ctmuxd", "!invalid", "valid SSH destination"),
+  ] {
+    let output = fixture
+      .command(&[
+        "--destination",
+        destination,
+        "components",
+        "stop",
+        daemon,
+        "--dry-run",
+      ])
+      .output()
+      .unwrap();
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+      String::from_utf8_lossy(&output.stderr).contains(expected),
+      "{output:?}"
+    );
+    fixture.assert_untouched();
+  }
+}
+
 #[tokio::test]
 async fn status_reads_a_running_owner_without_sending_restart() {
   use ctl_ipc::lifecycle::{DaemonBinaryInfo, DaemonInfo, Request, Response};

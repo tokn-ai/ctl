@@ -24,7 +24,8 @@ fn validate_local_command_target(arguments: &Arguments) -> Result<(), CliError> 
       command:
         crate::components::Command::Update { .. }
         | crate::components::Command::Status { .. }
-        | crate::components::Command::Restart { .. },
+        | crate::components::Command::Restart { .. }
+        | crate::components::Command::Stop { .. },
     } => return Ok(()),
     #[cfg(unix)]
     Command::Components { .. } => CliError::ComponentsTarget,

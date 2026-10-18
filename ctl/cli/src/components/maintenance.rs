@@ -4,13 +4,15 @@ use clap::ValueEnum;
 use ctl_core::component::ComponentInfo;
 use ctl_core::protocol::ProtocolVersion;
 use serde::Serialize;
-use std::io;
+use std::io::{self, IsTerminal as _};
 use std::path::PathBuf;
 
 mod restart;
 mod status;
+mod stop;
 pub(super) use restart::run as restart;
 pub(super) use status::run as status;
+pub(super) use stop::run as stop;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -121,7 +123,7 @@ fn validate_target(target: TargetOptions<'_>, component: Option<Daemon>) -> io::
     && component.is_some_and(|component| component != Daemon::Ctmuxd)
   {
     return Err(io::Error::other(
-      "remote restart currently supports only ctmuxd",
+      "remote daemon maintenance currently supports only ctmuxd",
     ));
   }
   Ok(())
@@ -195,6 +197,44 @@ fn output(value: &impl Serialize) -> io::Result<()> {
     "{}",
     serde_json::to_string_pretty(value).map_err(io::Error::other)?
   );
+  Ok(())
+}
+
+fn require_approval(action: &str, yes: bool, dry_run: bool) -> io::Result<()> {
+  if !yes && !dry_run && (!io::stdin().is_terminal() || !io::stderr().is_terminal()) {
+    return Err(io::Error::other(format!(
+      "{action} requires an interactive terminal or explicit --yes; use --dry-run to inspect the plan"
+    )));
+  }
+  Ok(())
+}
+async fn confirm(
+  action: &'static str,
+  yes: bool,
+  deadline: tokio::time::Instant,
+) -> io::Result<()> {
+  if !yes {
+    let approved = tokio::task::spawn_blocking(move || {
+      cliclack::confirm(format!(
+        "{action} this daemon? (Preparation expires after 20 seconds)"
+      ))
+      .initial_value(false)
+      .interact()
+    })
+    .await
+    .map_err(io::Error::other)??;
+    if !approved {
+      return Err(io::Error::new(
+        io::ErrorKind::Interrupted,
+        format!("{action} cancelled; no service was changed."),
+      ));
+    }
+  }
+  if tokio::time::Instant::now() >= deadline {
+    return Err(io::Error::other(
+      "Maintenance preparation expired; no service was changed. Run the command again.",
+    ));
+  }
   Ok(())
 }
 

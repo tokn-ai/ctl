@@ -1,8 +1,9 @@
-use super::{Daemon, build_label, compatible, output, remote, validate_target};
+use super::{
+  Daemon, build_label, compatible, confirm, output, remote, require_approval, validate_target,
+};
 use crate::components::TargetOptions;
 use ctl_core::component::ComponentInfo;
 use std::io;
-use std::io::IsTerminal as _;
 
 fn restart_error(code: &str, error: &impl std::fmt::Display, may_have_stopped: bool) -> io::Error {
   let guidance = if may_have_stopped {
@@ -143,11 +144,7 @@ pub(crate) async fn run(
   json: bool,
 ) -> io::Result<()> {
   validate_target(target, Some(component))?;
-  if !yes && !dry_run && (!io::stdin().is_terminal() || !io::stderr().is_terminal()) {
-    return Err(io::Error::other(
-      "restart requires an interactive terminal or explicit --yes; use --dry-run to inspect the plan",
-    ));
-  }
+  require_approval("restart", yes, dry_run)?;
   let prepared = prepare_restart(component, target).await?;
   let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
   let available = prepared.available();
@@ -168,26 +165,7 @@ pub(crate) async fn run(
     }
     return Ok(());
   }
-  if !yes {
-    let approved = tokio::task::spawn_blocking(|| {
-      cliclack::confirm("Restart this daemon? (Preparation expires after 20 seconds)")
-        .initial_value(false)
-        .interact()
-    })
-    .await
-    .map_err(io::Error::other)??;
-    if !approved {
-      return Err(io::Error::new(
-        io::ErrorKind::Interrupted,
-        "Restart cancelled; no service was changed.",
-      ));
-    }
-  }
-  if tokio::time::Instant::now() >= deadline {
-    return Err(io::Error::other(
-      "Restart preparation expired; no service was changed. Run the command again.",
-    ));
-  }
+  confirm("Restart", yes, deadline).await?;
   // Once confirmed, await the cooperative request and verified successor. Never
   // force-kill an owner or retry a mutation on an uncertain result.
   let outcome = prepared.restart().await?;

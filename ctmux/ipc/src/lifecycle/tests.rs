@@ -76,6 +76,77 @@ async fn handshake_reply(stream: &mut Stream, info: Option<&ComponentInfo>) {
 }
 
 #[tokio::test]
+async fn stop_drains_sessions_without_a_replacement_binary() {
+  let fixture = Fixture::new().await;
+  std::fs::remove_file(fixture.client.executable.as_ref().unwrap()).unwrap();
+  let listener = fixture.listener();
+  let control = crate::control_socket_path(&fixture.client.socket).unwrap();
+  let server = tokio::spawn(async move {
+    let (mut stream, _) = listener.accept().await.unwrap();
+    handshake_reply(&mut stream, None).await;
+    assert!(matches!(
+      crate::read_local_control_frame::<_, LocalControlClientMessage>(&mut stream)
+        .await
+        .unwrap(),
+      Some(LocalControlClientMessage::RestartDaemon)
+    ));
+    crate::write_local_control_frame(
+      &mut stream,
+      &LocalControlServerMessage::RestartAccepted {
+        terminated_sessions: 2,
+      },
+    )
+    .await
+    .unwrap();
+    drop(listener);
+    std::fs::remove_file(control).unwrap();
+  });
+  assert_eq!(
+    fixture
+      .client
+      .preflight_stop()
+      .await
+      .unwrap()
+      .stop()
+      .await
+      .unwrap(),
+    2
+  );
+  tokio::time::timeout(Duration::from_secs(5), server)
+    .await
+    .unwrap()
+    .unwrap();
+  assert!(!fixture.root.join("spawned").exists());
+}
+
+#[tokio::test]
+async fn canceled_and_expired_stop_preserve_the_owner() {
+  let fixture = Fixture::new().await;
+  let listener = fixture.listener();
+  let server = tokio::spawn(async move {
+    for _ in 0..2 {
+      let (mut stream, _) = listener.accept().await.unwrap();
+      handshake_reply(&mut stream, None).await;
+      assert!(
+        crate::read_local_control_frame::<_, LocalControlClientMessage>(&mut stream)
+          .await
+          .unwrap()
+          .is_none()
+      );
+    }
+  });
+  drop(fixture.client.preflight_stop().await.unwrap());
+  let mut prepared = fixture.client.preflight_stop().await.unwrap();
+  prepared.expires_at = Instant::now();
+  assert!(!prepared.stop().await.unwrap_err().may_have_stopped());
+  tokio::time::timeout(Duration::from_secs(5), server)
+    .await
+    .unwrap()
+    .unwrap();
+  assert!(!fixture.root.join("spawned").exists());
+}
+
+#[tokio::test]
 async fn legacy_preflight_does_not_send_restart_and_pins_unknown_build() {
   let fixture = Fixture::new().await;
   let listener = fixture.listener();

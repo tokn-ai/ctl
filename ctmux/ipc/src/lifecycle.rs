@@ -120,6 +120,31 @@ impl Client {
     }
   }
 
+  /// Pins a cooperative owner without inspecting or installing any replacement.
+  ///
+  /// # Errors
+  /// Rejects absent or unsupported control endpoints.
+  pub async fn preflight_stop(&self) -> Result<PreparedStop, LifecycleError> {
+    let control = crate::control_socket_path(&self.socket)
+      .map_err(|error| LifecycleError::new("daemon_stop_unsupported", error))?;
+    let (stream, before) = query_owner(&control)
+      .await?
+      .ok_or_else(|| LifecycleError::new("daemon_not_running", "ctmuxd is not running"))?;
+    if !before.restart_supported {
+      return Err(LifecycleError::new(
+        "daemon_stop_unsupported",
+        "ctmuxd does not support cooperative shutdown",
+      ));
+    }
+    Ok(PreparedStop {
+      before,
+      socket: self.socket.clone(),
+      control,
+      stream,
+      expires_at: Instant::now() + CONFIRMATION_TTL,
+    })
+  }
+
   /// Pins an existing cooperative owner and checks its replacement without mutation.
   ///
   /// # Errors
@@ -184,65 +209,15 @@ impl PreparedRestart {
   ///
   /// # Errors
   /// Reports expired/changed preflight, graceful drain or successor verification failure.
-  pub async fn restart(mut self) -> Result<RestartOutcome, LifecycleError> {
+  pub async fn restart(self) -> Result<RestartOutcome, LifecycleError> {
     self.ensure_unexpired()?;
     self
       .replacement
       .verify()
       .await
       .map_err(|error| LifecycleError::new("ctmuxd_binary_changed", error))?;
-    // A peer that already closed cannot be the owner we are about to mutate.
-    // A canceled read consumes nothing; healthy armed owners send no data here.
-    if timeout(Duration::from_millis(10), self.stream.read(&mut [0_u8; 1]))
-      .await
-      .is_ok()
-    {
-      return Err(LifecycleError::new(
-        "ctmuxd_owner_changed",
-        "The prepared ctmuxd connection closed or changed; prepare the restart again",
-      ));
-    }
-    self.ensure_unexpired()?;
-    let response = timeout(QUERY_TIMEOUT, async {
-      crate::write_local_control_frame(&mut self.stream, &LocalControlClientMessage::RestartDaemon)
-        .await?;
-      crate::read_local_control_frame(&mut self.stream).await
-    })
-    .await
-    .map_err(|_| {
-      LifecycleError::new(
-        "ctmuxd_restart_timeout",
-        "ctmuxd did not acknowledge restart",
-      )
-      .destructive()
-    })?
-    .map_err(|error| LifecycleError::new("ctmuxd_restart_failed", error).destructive())?;
-    let terminated_sessions = match response {
-      Some(LocalControlServerMessage::RestartAccepted {
-        terminated_sessions,
-      }) => terminated_sessions,
-      Some(LocalControlServerMessage::Error { code, message }) => {
-        let error = LifecycleError::new("ctmuxd_restart_rejected", message);
-        return Err(if code == crate::LocalControlErrorCode::Internal {
-          error.destructive()
-        } else {
-          error
-        });
-      }
-      _ => {
-        return Err(
-          LifecycleError::new(
-            "ctmuxd_restart_failed",
-            "Unexpected ctmuxd restart response",
-          )
-          .destructive(),
-        );
-      }
-    };
-    drop(self.stream);
-    crate::wait_for_daemon_shutdown(&self.socket, &self.control, Duration::from_secs(15))
-      .await
-      .map_err(|error| LifecycleError::new("ctmuxd_restart_drain_failed", error).destructive())?;
+    let terminated_sessions =
+      drain_owner(self.stream, &self.socket, &self.control, self.expires_at).await?;
     self
       .replacement
       .verify()
@@ -285,11 +260,99 @@ impl PreparedRestart {
     if Instant::now() >= self.expires_at {
       return Err(LifecycleError::new(
         "ctmuxd_restart_expired",
-        "Restart confirmation expired; prepare it again",
+        "Maintenance confirmation expired; prepare it again",
       ));
     }
     Ok(())
   }
+}
+
+#[derive(Debug)]
+pub struct PreparedStop {
+  pub before: RunningDaemon,
+  pub expires_at: Instant,
+  socket: PathBuf,
+  control: PathBuf,
+  stream: Stream,
+}
+impl PreparedStop {
+  /// Stops the pinned owner and verifies endpoint drain, without launching a successor.
+  ///
+  /// # Errors
+  /// Rejects expired/closed peers and reports uncertain shutdown outcomes.
+  pub async fn stop(self) -> Result<u32, LifecycleError> {
+    ensure_unexpired(self.expires_at)?;
+    drain_owner(self.stream, &self.socket, &self.control, self.expires_at).await
+  }
+}
+fn ensure_unexpired(expires_at: Instant) -> Result<(), LifecycleError> {
+  if Instant::now() >= expires_at {
+    return Err(LifecycleError::new(
+      "ctmuxd_confirmation_expired",
+      "Maintenance confirmation expired; prepare it again",
+    ));
+  }
+  Ok(())
+}
+async fn drain_owner(
+  mut stream: Stream,
+  socket: &std::path::Path,
+  control: &std::path::Path,
+  expires_at: Instant,
+) -> Result<u32, LifecycleError> {
+  // A peer that already closed cannot be the owner we are about to mutate.
+  // A canceled read consumes nothing; healthy armed owners send no data here.
+  if timeout(Duration::from_millis(10), stream.read(&mut [0_u8; 1]))
+    .await
+    .is_ok()
+  {
+    return Err(LifecycleError::new(
+      "ctmuxd_owner_changed",
+      "The prepared ctmuxd connection closed or changed; prepare maintenance again",
+    ));
+  }
+  ensure_unexpired(expires_at)?;
+  let response = timeout(QUERY_TIMEOUT, async {
+    crate::write_local_control_frame(&mut stream, &LocalControlClientMessage::RestartDaemon)
+      .await?;
+    crate::read_local_control_frame(&mut stream).await
+  })
+  .await
+  .map_err(|_| {
+    LifecycleError::new(
+      "ctmuxd_restart_timeout",
+      "ctmuxd did not acknowledge shutdown",
+    )
+    .destructive()
+  })?
+  .map_err(|error| LifecycleError::new("ctmuxd_restart_failed", error).destructive())?;
+  let terminated_sessions = match response {
+    Some(LocalControlServerMessage::RestartAccepted {
+      terminated_sessions,
+    }) => terminated_sessions,
+    Some(LocalControlServerMessage::Error { code, message }) => {
+      let error = LifecycleError::new("ctmuxd_restart_rejected", message);
+      return Err(if code == crate::LocalControlErrorCode::Internal {
+        error.destructive()
+      } else {
+        error
+      });
+    }
+    _ => {
+      return Err(
+        LifecycleError::new(
+          "ctmuxd_restart_failed",
+          "Unexpected ctmuxd restart response",
+        )
+        .destructive(),
+      );
+    }
+  };
+  drop(stream);
+  crate::wait_for_daemon_shutdown(socket, control, Duration::from_secs(15))
+    .await
+    .map_err(|error| LifecycleError::new("ctmuxd_restart_drain_failed", error).destructive())?;
+  Ok(terminated_sessions)
 }
 
 async fn handshake(stream: &mut Stream) -> Result<RunningDaemon, LifecycleError> {

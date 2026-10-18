@@ -244,13 +244,19 @@ fn process_writer_child() {
   let store = Store::new(directory.into());
   for _ in 0..10 {
     let record = record(Outcome::Succeeded);
-    let deadline = Instant::now() + std::time::Duration::from_secs(10);
+    let deadline = Instant::now() + std::time::Duration::from_secs(60);
     // A busy store is an expected, bounded result under concurrent fsyncs.
+    // Slow Windows runners can spend more than ten seconds behind the other
+    // writers' durable commits. Back off between attempts instead of immediately
+    // reopening the database and competing with the writer holding its lock.
+    // This is a test completion budget; the store's short busy timeout is unchanged.
     // Retry only before-write contention; all other failures remain fatal.
     loop {
       match store.append(Stream::Audit, &record) {
         Ok(()) => break,
-        Err(error) if error.kind() == io::ErrorKind::WouldBlock && Instant::now() < deadline => {}
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock && Instant::now() < deadline => {
+          std::thread::sleep(std::time::Duration::from_millis(25));
+        }
         Err(error) => panic!("history writer failed: {error}"),
       }
     }

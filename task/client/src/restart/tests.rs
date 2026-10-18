@@ -51,6 +51,87 @@ impl Drop for Fixture {
 }
 
 #[tokio::test]
+async fn stop_requires_no_replacement_and_preserves_busy_owners() {
+  let fixture = Fixture::new().await;
+  std::fs::remove_file(fixture.client.executable.as_ref().unwrap()).unwrap();
+  let listener = fixture.listener();
+  let socket = fixture.client.socket.clone();
+  let server = tokio::spawn(async move {
+    for busy in [true, false] {
+      let (mut stream, _) = listener.accept().await.unwrap();
+      assert!(matches!(
+        read_frame::<_, control::ClientMessage>(&mut stream)
+          .await
+          .unwrap(),
+        Some(control::ClientMessage::RestartDaemon { .. })
+      ));
+      let response = if busy {
+        control::ServerMessage::Error {
+          message: "ctl-taskd has active tasks".into(),
+        }
+      } else {
+        control::ServerMessage::RestartAccepted {
+          protocol_version: control::PROTOCOL_VERSION,
+          data_directory: PathBuf::from("unused-data"),
+          ctmux_socket: PathBuf::from("unused-ctmux.sock"),
+        }
+      };
+      write_frame(&mut stream, &response).await.unwrap();
+    }
+    drop(listener);
+    std::fs::remove_file(socket).unwrap();
+  });
+  let error = fixture
+    .client
+    .preflight_stop()
+    .await
+    .unwrap()
+    .stop()
+    .await
+    .unwrap_err();
+  assert!(!error.may_have_stopped());
+  assert!(error.to_string().contains("active tasks"));
+  fixture
+    .client
+    .preflight_stop()
+    .await
+    .unwrap()
+    .stop()
+    .await
+    .unwrap();
+  tokio::time::timeout(Duration::from_secs(5), server)
+    .await
+    .unwrap()
+    .unwrap();
+  assert!(!fixture.root.join("spawned").exists());
+}
+
+#[tokio::test]
+async fn canceled_and_expired_stop_send_no_shutdown_request() {
+  let fixture = Fixture::new().await;
+  let listener = fixture.listener();
+  let server = tokio::spawn(async move {
+    for _ in 0..2 {
+      let (mut stream, _) = listener.accept().await.unwrap();
+      assert!(
+        read_frame::<_, control::ClientMessage>(&mut stream)
+          .await
+          .unwrap()
+          .is_none()
+      );
+    }
+  });
+  drop(fixture.client.preflight_stop().await.unwrap());
+  let mut prepared = fixture.client.preflight_stop().await.unwrap();
+  prepared.expires_at = Instant::now();
+  assert!(!prepared.stop().await.unwrap_err().may_have_stopped());
+  tokio::time::timeout(Duration::from_secs(5), server)
+    .await
+    .unwrap()
+    .unwrap();
+}
+
+#[tokio::test]
 async fn preflight_pins_legacy_owner_without_sending_any_request() {
   let fixture = Fixture::new().await;
   let listener = fixture.listener();

@@ -9,11 +9,21 @@ Windows runs a per-user owner on a restricted local named pipe. Component
 inspection, cooperative restart/stop, local identity inventory, and container-backed
 VPN management remain available; a missing Docker or Podman installation is
 reported in VPN discovery diagnostics without preventing startup. Native
-Windows OpenSSH does not support ControlMaster, so broker multiplexing, its
-forwarding requests, and recovery watches return an explicit unsupported error.
-Windows clients use direct SSH for interactive shells and remote commands.
+Windows local forwarding uses ctld-owned TCP listeners, a native `ssh -N -T`
+health connection per forward, and a separate `ssh -W` process for every accepted
+TCP connection. Authentication is noninteractive and requires credentials already
+available to system OpenSSH, such as configured keys or its agent. Each process
+reads the original SSH configuration, including aliases, hostname overrides and
+proxy routes; ctld does not reconstruct a configuration snapshot. It suppresses
+unrelated configured forwards and reserves `LocalCommand` for its internal
+post-authentication readiness nonce. Windows Job Objects own SSH and proxy
+process lifetimes through listener removal, daemon stop and daemon crash.
 
-Committed private SSH masters retain one local control-socket lease while
+Windows OpenSSH does not support ControlMaster. Broker multiplexing and recovery
+watches retain an explicit unsupported error; Windows clients use direct SSH for
+interactive shells and remote commands. See [Windows support and CI](../../docs/windows-ci.md).
+
+On Unix, committed private SSH masters retain one local control-socket lease while
 ctld owns the connection, preventing idle expiry without a remote shell or
 credential read. Disconnect and shutdown release it; daemon death restores
 OpenSSH's five-minute idle cleanup once no clients remain. Configured shared
@@ -70,7 +80,7 @@ checkout, embedded, shared, or explicit override chosen for activation. Status
 only inspects it and reports its source, path, archive hash, and build metadata
 separately from the running owner. The desktop prefers its own bundled helper
 after any explicit complete-bundle selection. Source builds remain available for
-development and other Unix platforms.
+development and other platforms.
 
 A daemon launched by an older client from a deleted build directory can still
 serve existing masters, but cannot execute its askpass or isolated-agent helper.

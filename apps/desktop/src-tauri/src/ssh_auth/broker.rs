@@ -3,9 +3,7 @@ use ctl_core::protocol::ProtocolVersion;
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use ctl_ipc::{
-  ClientMessage, LocalPortForward, PortForwardStatus, PromptKind, ServerMessage, SshTarget,
-};
+use ctl_ipc::{ClientMessage, PromptKind, ServerMessage, SshTarget};
 
 use super::{PromptContext, SshPromptKind, request_response};
 use crate::dto::{ConnectionTargetDto, SshConnectionStatusDto};
@@ -153,56 +151,7 @@ pub async fn delete_credentials(target: &ConnectionTargetDto) -> CommandResult<(
   }
 }
 
-pub async fn configure_port_forward(
-  target: &ConnectionTargetDto,
-  forward: LocalPortForward,
-  enabled: bool,
-) -> CommandResult<PortForwardStatus> {
-  let target = broker_target(target)?;
-  let mut stream = connect(&target).await?;
-  ctl_ipc::write_frame(
-    &mut stream,
-    &ClientMessage::ConfigurePortForward {
-      target,
-      forward,
-      enabled,
-    },
-  )
-  .await
-  .map_err(CommandErrorDto::backend)?;
-  match ctl_ipc::read_frame::<_, ServerMessage>(&mut stream)
-    .await
-    .map_err(CommandErrorDto::backend)?
-  {
-    Some(ServerMessage::PortForwardConfigured { status }) => Ok(status),
-    Some(ServerMessage::Error { code, message }) => Err(CommandErrorDto::new(code, message)),
-    _ => Err(CommandErrorDto::new(
-      "ctld_protocol_error",
-      "ctld returned an unexpected port-forward response.",
-    )),
-  }
-}
-
-pub async fn list_port_forwards(
-  target: &ConnectionTargetDto,
-) -> CommandResult<Vec<PortForwardStatus>> {
-  let target = broker_target(target)?;
-  let mut stream = connect(&target).await?;
-  ctl_ipc::write_frame(&mut stream, &ClientMessage::ListPortForwards { target })
-    .await
-    .map_err(CommandErrorDto::backend)?;
-  match ctl_ipc::read_frame::<_, ServerMessage>(&mut stream)
-    .await
-    .map_err(CommandErrorDto::backend)?
-  {
-    Some(ServerMessage::PortForwards { statuses }) => Ok(statuses),
-    Some(ServerMessage::Error { code, message }) => Err(CommandErrorDto::new(code, message)),
-    _ => Err(CommandErrorDto::new(
-      "ctld_protocol_error",
-      "ctld returned an unexpected port-forward list.",
-    )),
-  }
-}
+pub(super) use super::forwarding::{configure_port_forward, list_port_forwards};
 
 pub async fn list_remote_listeners(
   target: &ConnectionTargetDto,

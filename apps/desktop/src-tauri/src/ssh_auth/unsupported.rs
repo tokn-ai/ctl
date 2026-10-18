@@ -5,6 +5,8 @@ mod broker;
 pub mod commands;
 #[path = "connection.rs"]
 mod connection;
+#[path = "forwarding.rs"]
+mod forwarding;
 #[path = "verification.rs"]
 mod verification;
 

@@ -223,6 +223,72 @@ async fn multiplexing_requests_report_the_platform_limit_without_stopping_the_ow
 }
 
 #[tokio::test]
+async fn forwarding_inventory_is_passive_and_explicit_mux_is_rejected_before_alias_normalization() {
+  timeout(DEADLINE * 3, async {
+    let mut owner = Owner::start(None).await;
+    let mut target = SshTarget {
+      destination: "nonexistent-forwarding-alias.example.test".into(),
+      ssh_config_alias: Some("nonexistent-forwarding-alias.example.test".into()),
+      use_ssh_config_master: None,
+      hostname: None,
+      user: None,
+      port: None,
+      identity_file: None,
+      gateways: Vec::new(),
+    };
+    let mut stream = owner.connect().await;
+    ctl_ipc::write_frame(
+      &mut stream,
+      &ClientMessage::ListPortForwards {
+        target: target.clone(),
+      },
+    )
+    .await
+    .unwrap();
+    let Some(ServerMessage::PortForwards { statuses }) =
+      ctl_ipc::read_frame(&mut stream).await.unwrap()
+    else {
+      panic!("passive forwarding inventory failed");
+    };
+    assert!(statuses.is_empty());
+    drop(stream);
+    target.use_ssh_config_master = Some(true);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let local_port = listener.local_addr().unwrap().port();
+    // A valid live external listener makes accidental forwarding startup fail
+    // differently; explicit mux must be rejected before any bind or SSH work.
+    for request in [
+      ClientMessage::ConfigurePortForward {
+        target: target.clone(),
+        forward: ctl_ipc::LocalPortForward {
+          forward_id: "explicit-mux-rejected".into(),
+          bind_address: "127.0.0.1".into(),
+          local_port,
+          remote_host: "127.0.0.1".into(),
+          remote_port: 22,
+        },
+        enabled: true,
+      },
+      ClientMessage::ListPortForwards { target },
+    ] {
+      let mut stream = owner.connect().await;
+      ctl_ipc::write_frame(&mut stream, &request).await.unwrap();
+      let Some(ServerMessage::Error { code, message }) =
+        ctl_ipc::read_frame(&mut stream).await.unwrap()
+      else {
+        panic!("missing explicit ControlMaster diagnostic");
+      };
+      assert_eq!(code, "ctld_platform_unsupported");
+      assert!(message.contains("ControlMaster"));
+    }
+    assert!(matches!(owner.info().await, DaemonStatus::Running { .. }));
+    owner.stop().await;
+  })
+  .await
+  .unwrap();
+}
+
+#[tokio::test]
 async fn native_identity_helper_lists_files_while_keychain_is_unavailable() {
   use ctl_ipc::identities::{FileState, PassphraseState, Request as IdentityRequest};
   use tokio::io::AsyncWriteExt as _;

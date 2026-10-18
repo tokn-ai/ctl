@@ -25,7 +25,7 @@ pub(super) struct SharedForwardRegistry {
   listeners: HashMap<(SshTarget, LocalPortForward), OwnedListener>,
 }
 
-struct OwnedListener {
+pub(super) struct OwnedListener {
   shutdown: Option<oneshot::Sender<()>>,
   task: Option<JoinHandle<()>>,
 }
@@ -39,12 +39,53 @@ impl Drop for OwnedListener {
 }
 
 impl OwnedListener {
-  async fn stop(mut self) {
+  #[cfg(any(windows, test))]
+  pub(super) fn is_finished(&self) -> bool {
+    self.task.as_ref().is_none_or(JoinHandle::is_finished)
+  }
+
+  pub(super) async fn stop(mut self) {
     if let Some(shutdown) = self.shutdown.take() {
       let _ = shutdown.send(());
     }
     if let Some(task) = self.task.take() {
       let _ = task.await;
+    }
+  }
+
+  pub(super) fn spawn<F, Fut>(
+    listener: TcpListener,
+    open_channel: F,
+    supervisor: impl Future<Output = ()> + Send + 'static,
+  ) -> Self
+  where
+    F: Fn(TcpStream) -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+  {
+    let (shutdown, mut stop) = oneshot::channel();
+    let task = tokio::spawn(async move {
+      tokio::pin!(supervisor);
+      let mut channels = JoinSet::new();
+      loop {
+        tokio::select! {
+          biased;
+          _ = &mut stop => break,
+          () = &mut supervisor => break,
+          accepted = listener.accept() => match accepted {
+            Ok((stream, _)) => { channels.spawn(open_channel(stream)); }
+            Err(_) => break,
+          },
+          _ = channels.join_next(), if !channels.is_empty() => {},
+        }
+      }
+      drop(listener);
+      // Every channel owns its SSH process. On Windows, closing its Job Object
+      // also kills ProxyCommand descendants, including after daemon crashes.
+      channels.shutdown().await;
+    });
+    Self {
+      shutdown: Some(shutdown),
+      task: Some(task),
     }
   }
 }
@@ -111,31 +152,9 @@ impl SharedForwardRegistry {
     F: Fn(TcpStream) -> Fut + Send + 'static,
     Fut: Future<Output = ()> + Send + 'static,
   {
-    let (shutdown, mut stop) = oneshot::channel();
-    let task = tokio::spawn(async move {
-      let mut channels = JoinSet::new();
-      loop {
-        tokio::select! {
-          biased;
-          _ = &mut stop => break,
-          accepted = listener.accept() => match accepted {
-            Ok((stream, _)) => { channels.spawn(open_channel(stream)); }
-            Err(_) => break,
-          },
-          _ = channels.join_next(), if !channels.is_empty() => {},
-        }
-      }
-      drop(listener);
-      // Aborting channel futures drops their SSH children (kill_on_drop) and
-      // TCP sockets. Wait for that cleanup before reporting disconnection.
-      channels.shutdown().await;
-    });
     self.listeners.insert(
       key,
-      OwnedListener {
-        shutdown: Some(shutdown),
-        task: Some(task),
-      },
+      OwnedListener::spawn(listener, open_channel, std::future::pending()),
     );
   }
 
@@ -190,22 +209,38 @@ async fn relay_ssh_channel(
 
 async fn relay_channel(stream: TcpStream, mut command: Command) -> io::Result<()> {
   let mut child = command.spawn()?;
-  let mut stdin = child.stdin.take().expect("SSH stdin is piped");
-  let mut stdout = child.stdout.take().expect("SSH stdout is piped");
+  let stdin = child.stdin.take().expect("SSH stdin is piped");
+  let stdout = child.stdout.take().expect("SSH stdout is piped");
+  relay_stream(stream, stdin, stdout).await?;
+  child.wait().await?;
+  Ok(())
+}
+
+pub(super) async fn relay_stream(
+  stream: TcpStream,
+  mut stdin: impl tokio::io::AsyncWrite + Unpin,
+  mut stdout: impl tokio::io::AsyncRead + Unpin,
+) -> io::Result<()> {
   let (mut reader, mut writer) = stream.into_split();
   let upload = async move {
-    tokio::io::copy(&mut reader, &mut stdin).await?;
+    let result = tokio::io::copy(&mut reader, &mut stdin).await;
     // Closing the pipe forwards a local TCP half-close as SSH channel EOF.
     // Keeping ChildStdin alive while awaiting stdout would deadlock peers
     // that produce their final response only after receiving EOF.
     drop(stdin);
-    Ok::<_, io::Error>(())
+    // A short-lived SSH channel may close stdin while its final response is
+    // still buffered in stdout. Drain that response rather than cancelling
+    // download as soon as a write observes the closed pipe.
+    match result {
+      Ok(_) => Ok(()),
+      Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+      Err(error) => Err(error),
+    }
   };
   let download = async {
     tokio::io::copy(&mut stdout, &mut writer).await?;
     writer.shutdown().await
   };
   tokio::try_join!(upload, download)?;
-  child.wait().await?;
   Ok(())
 }

@@ -6,12 +6,10 @@ mod history;
 mod host;
 mod openssh;
 mod passwords;
-#[cfg(unix)]
 mod port;
 mod remote;
 mod setup;
 mod skill;
-#[cfg(unix)]
 mod ssh_broker;
 mod table;
 mod target;
@@ -122,7 +120,6 @@ enum Command {
     arguments: Vec<std::ffi::OsString>,
   },
   /// Manage ctld-owned local port forwards.
-  #[cfg(unix)]
   Port {
     #[command(subcommand)]
     command: port::Command,
@@ -434,6 +431,7 @@ mod tests {
       &["exec", "--", "true"][..],
       &["ctmux", "list"][..],
       &["task", "list"][..],
+      &["port", "list"][..],
       &["vpn", "list"][..],
     ] {
       let arguments = Arguments::try_parse_from(

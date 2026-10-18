@@ -292,7 +292,7 @@ where
   }
 }
 
-/// Exchange an existing non-authentication broker operation.
+/// Exchange a broker operation that does not request frontend prompts.
 /// # Errors
 /// Returns connection, negotiation, codec, or daemon errors.
 pub async fn request(message: ClientMessage) -> Result<ServerMessage, Error> {

@@ -23,6 +23,8 @@ mod manual_recovery;
 mod master_diagnostics;
 mod master_observation;
 mod master_ownership;
+#[cfg(any(windows, test))]
+mod native_forwarding;
 mod openconnect;
 mod port_forwarding;
 pub mod proxy_route;
@@ -95,6 +97,8 @@ struct State {
   connection_correlations: Mutex<HashMap<PathBuf, ConnectionCorrelation>>,
   endpoint_registry: endpoint_registry::Registry,
   shared_forwards: AsyncMutex<SharedForwardRegistry>,
+  #[cfg(windows)]
+  native_forwards: AsyncMutex<native_forwarding::Registry>,
   vpn_service: Option<vpn_service::VpnService>,
   wake_recovery: Arc<wake_recovery::Registry>,
   #[cfg(target_os = "macos")]
@@ -684,10 +688,12 @@ async fn handle_request(
   mut request: ClientMessage,
   protocol: ProtocolVersion,
 ) -> Result<(), RequestError> {
-  normalize_request_target(&mut request);
   let result = async {
-    validate_request_contract(&request, protocol)?;
+    // Explicit unsupported choices must be checked before normalization can
+    // erase a preference equivalent to an alias's default policy.
     validate_request_platform(&request)?;
+    normalize_request_target(&mut request);
+    validate_request_contract(&request, protocol)?;
     match request {
       ClientMessage::EnsureMaster { target } => {
         ensure_master(stream, Arc::clone(state), target).await
@@ -749,14 +755,22 @@ fn validate_request_platform(request: &ClientMessage) -> Result<(), RequestError
   if cfg!(windows)
     && matches!(
       request,
+      ClientMessage::ConfigurePortForward { target, .. }
+        | ClientMessage::ListPortForwards { target }
+        if target.use_ssh_config_master == Some(true)
+    )
+  {
+    return Err(RequestError::UnsupportedPlatform("SSH ControlMaster reuse"));
+  }
+  if cfg!(windows)
+    && matches!(
+      request,
       ClientMessage::EnsureMaster { .. }
         | ClientMessage::EnsureMasterQuiet { .. }
         | ClientMessage::MasterStatus { .. }
         | ClientMessage::ConnectionStatus { .. }
         | ClientMessage::WatchRecovery { .. }
         | ClientMessage::DisconnectMaster { .. }
-        | ClientMessage::ConfigurePortForward { .. }
-        | ClientMessage::ListPortForwards { .. }
         | ClientMessage::ListRemoteListeners { .. }
     )
   {
@@ -2085,9 +2099,21 @@ async fn configure_port_forward(
   if state.target(&target).is_paused() {
     forwards.pause(&target);
   }
-  let status = forwards
-    .configure(&SshForwardControl { state }, target, forward, enabled)
-    .await?;
+  let control = SshForwardControl { state };
+  let configure = forwards.configure(&control, target, forward, enabled);
+  #[cfg(windows)]
+  let status = tokio::select! {
+    biased;
+    incoming = ctl_ipc::read_frame::<_, ClientMessage>(stream) => {
+      return Err(match incoming? {
+        None => RequestError::ClientClosed,
+        Some(_) => RequestError::InvalidRequest("unexpected message during forwarding configuration"),
+      });
+    },
+    result = configure => result?,
+  };
+  #[cfg(not(windows))]
+  let status = configure.await?;
   ctl_ipc::write_frame(stream, &ServerMessage::PortForwardConfigured { status }).await?;
   Ok(())
 }

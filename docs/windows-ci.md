@@ -15,6 +15,7 @@ platform is Unix, even when the client runs on Windows.
 | Local `ctl ctmux` / `ctmux` | Named-pipe transport and ConPTY sessions | Auto-start, attachment, reconnect, resize, final output and exit status |
 | Local `ctl task` | Named-pipe transport, background Job Objects and managed ConPTY tasks | Auto-start, lifecycle, logs, recovery and descendant cleanup |
 | Local `ctld` | Owner-only named pipe, daemon lifecycle and available local VPN services | Detached startup, status without a container engine, cooperative restart/stop and pipe reuse |
+| Local SSH forwards | ctld owns loopback listeners and native OpenSSH connections | Authenticated binary transfers, configuration aliases and proxies, enable/update/disable, failure isolation and owner cleanup |
 | Remote ctmux | `ctl-agent.exe connect` routes to `ctmuxd.exe` | Authenticated loopback auto-start, reconnect and both destination selectors |
 | Remote tasks | `ctl-agent.exe connect --service task` routes to `ctl-taskd.exe` | Authenticated loopback lifecycle, log streams, working directory and persistence across channels |
 
@@ -28,9 +29,10 @@ and a corrupt catalog. A missing saved `--host` is rejected before SSH starts.
 
 Windows clients use direct SSH for remote connections. `ctld` runs as a local
 owner on Windows and serves daemon lifecycle and local VPN operations as their
-dependencies permit. OpenSSH control-master connection management, forwarding,
-and remote-listener discovery return an explicit platform diagnostic; ordinary
-direct SSH commands remain available. macOS Keychain operations remain macOS-only.
+dependencies permit. Local forwarding uses ctld-owned listeners and native SSH
+streams. OpenSSH control-master connection management and remote-listener
+discovery return an explicit platform diagnostic; ordinary direct SSH commands
+remain available. macOS Keychain operations remain macOS-only.
 The desktop backend and `ctld` participate in the whole-workspace Windows checks.
 
 ## Native CI gate
@@ -85,8 +87,49 @@ A separate CLI smoke fixture verifies passive status/list operations, a restart
 dry run, owner replacement through `ctl components restart ctld`, VPN
 status after reconnecting to the successor, and graceful, idempotent
 `ctl components stop ctld`. Native tests also check abandoned and expired stop
-confirmations. All fixture paths and its helper
-executable are isolated from the user profile and other daemon owners.
+confirmations. The fixture isolates its helper executable, endpoint, host catalog
+and VPN profile selections from other daemon owners.
+
+## Windows local SSH forwards
+
+`ctl --host HOST port add ...` and `ctl --destination ALIAS port add ...` use the
+same ctld forwarding contract as Unix. Windows ctld owns the local TCP listener,
+a native `ssh -N -T` authentication/health connection, and a separate native
+`ssh -W host:port` stream for each accepted TCP connection. This supports local
+forwarding without requiring OpenSSH control-master multiplexing.
+
+Every SSH process reads the original SSH configuration, retaining `Host` alias
+selection, hostname overrides, user, port, identity files, `ProxyCommand` and
+`ProxyJump`; ctld does not reconstruct an `ssh -G` snapshot. Authentication is
+noninteractive, using credentials already available to system OpenSSH. ctld
+reserves `LocalCommand` for its internal post-authentication readiness nonce and
+passes `ClearAllForwardings=yes` so unrelated configured local, remote or dynamic
+forwards do not start. The owned listener passes bytes without
+constructing a remote shell command. Local `port list` observes owned state and
+does not begin authentication. Enabling, editing or explicitly retrying a
+forward can start authentication; listing does not retry a stopped connection.
+
+Each forward owns its SSH process tree through a Windows Job Object. Disabling a
+forward or stopping ctld releases its listener and owned connections. If ctld
+crashes, closing its job handles terminates SSH and proxy descendants. Updating
+an existing forward ID replaces its previous definition, matching Unix behavior;
+a failed replacement reports an error. Failures for another ID do not authorize
+closing existing forwards or an unrelated listener occupying a requested port.
+
+The authenticated [native forwarding fixture](../ctl/daemon/tests/windows_ssh_forwarding.rs)
+runs under `windows-ssh.ps1`, which enables only local TCP forwarding on its
+loopback server. It exchanges binary data with two TCP endpoints to verify
+updates, checks idempotent enable, list, disable and CLI routing through both
+selectors, and verifies failed authentication and occupied ports leave another
+forward working. A dedicated SSH alias exercises `IdentityFile`, user, a
+nondefault port, a hostname override and `ProxyCommand`. Its configured unrelated
+`LocalForward` must stay inactive. A backend that reads a request to EOF and
+immediately returns binary data verifies TCP half-close, final response draining
+and removal of internal readiness bytes. The fixture records the actual SSH
+anchor, data and proxy descendant process IDs with their creation times, then
+requires those same process identities, active channels and listeners to vanish
+after cooperative stop and abrupt ctld termination. This does not claim OpenSSH
+connection multiplexing or automated coverage of every proxy topology.
 
 ## Windows background tasks
 
@@ -178,8 +221,8 @@ connector on Windows and Unix.
 `ctl-client` local transports use the shared `ctmux-ipc::Stream`, so Windows local
 commands retain named-pipe discovery and daemon auto-start. Remote connections
 use the system `ssh` executable with binary stdin/stdout pipes. OpenSSH still
-owns authentication and host verification; no forwarding, arbitrary remote
-command, or local daemon maintenance capability is added.
+owns authentication and host verification. The agent gateway exposes its service
+data endpoint; local SSH forwarding remains owned by the client's ctld.
 
 The default remote platform remains Unix (a fixed managed-directory `PATH`
 prefix followed by `exec ctl-agent connect`). CLI clients
@@ -210,7 +253,7 @@ Native CI runs portable gateway tests over owner-restricted named pipes,
 including byte transparency and endpoint survival. `windows-ssh.ps1` configures
 an authenticated loopback OpenSSH server on the ephemeral Windows runner using
 ephemeral client/host keys, an explicitly pinned host key, disabled passwords,
-and the default cmd.exe shell. It installs companion executables, then tests
+local TCP forwarding only, and the default cmd.exe shell. It installs companion executables, then tests
 daemon auto-start, ConPTY creation, attachment, SSH disconnect/reconnect,
 resize, final output and exit status, and CLI routing. It also exercises remote
 exec streams and task create/show/start/logs/restart/stop/remove/list, including a

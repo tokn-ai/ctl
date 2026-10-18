@@ -919,6 +919,7 @@ dependencies = [
  "ctl-keychain-client",
  "ctl-proto",
  "dirs",
+ "process-wrap",
  "rpassword",
  "rustix",
  "security-framework",
@@ -930,6 +931,7 @@ dependencies = [
  "tokn-ctl-core",
  "url",
  "uuid",
+ "windows 0.62.2",
  "zeroize",
 ]
 

@@ -873,8 +873,14 @@ managing a forward created on a nonpreferred route. The desktop Ports refresh
 also discovers these runtime forwards and can stop them without making them
 persistent workspace entries.
 
-If the local address is already occupied, the error identifies that address and
-retains OpenSSH's original diagnostic. Reuse or stop the existing listener through
+Windows clients use the same commands through ctld-owned local listeners. Each
+forward has a native SSH health connection, and each accepted TCP connection gets
+its own `ssh -W` stream. Authentication uses preconfigured system OpenSSH keys or
+agent access without prompts. SSH aliases, endpoint overrides and proxy routes
+are retained; unrelated configured forwards are suppressed. These connections
+use Windows Job Objects for lifetime ownership and do not require ControlMaster.
+
+If the local address is already occupied, the error identifies that address. Reuse or stop the existing listener through
 its owning daemon/application, or select another local port. Development and
 normal ctld instances have separate forward registries; an occupied port is never
 adopted or cancelled across those registries.

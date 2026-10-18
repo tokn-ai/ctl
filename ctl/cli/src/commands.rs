@@ -174,7 +174,6 @@ async fn run_selected(
     Command::Exec { command } => {
       return Ok(crate::connection::execute(&connector.settings, command, platform).await?);
     }
-    #[cfg(unix)]
     Command::Port { command } => crate::port::run(&connector.settings, command).await?,
     Command::Logs(_)
     | Command::Audit(_)
@@ -278,7 +277,10 @@ struct CtlConnector {
 }
 
 impl CtlConnector {
-  fn new(target: ConnectionTarget, mut settings: ctl_client::hosts::ConnectionTargetDto) -> Self {
+  fn new(target: ConnectionTarget, settings: ctl_client::hosts::ConnectionTargetDto) -> Self {
+    #[cfg(unix)]
+    let mut settings = settings;
+    #[cfg(unix)]
     if matches!(&target, ConnectionTarget::Ssh { options, .. }
       if options.remote_platform == ctl_client::RemotePlatform::Windows)
       && let ctl_client::hosts::ConnectionTargetDto::Ssh {
@@ -602,7 +604,6 @@ pub enum CliError {
   Host(#[from] ctl_client::hosts::HostError),
   #[error(transparent)]
   Connection(#[from] crate::connection::Error),
-  #[cfg(unix)]
   #[error(transparent)]
   Port(#[from] crate::port::Error),
   #[error("Use the destination argument with ssh/scp, rather than --host or --destination.")]
@@ -857,8 +858,9 @@ mod tests {
     }
   }
 
+  #[cfg(unix)]
   #[test]
-  fn windows_connections_preserve_ssh_config_without_posix_master_startup() {
+  fn unix_clients_preserve_windows_ssh_config_without_posix_master_startup() {
     use ctl_client::hosts::ConnectionTargetDto;
     for platform in [
       ctl_client::RemotePlatform::Unix,

@@ -121,6 +121,9 @@ foreach ($path in $aclPaths) {
   if (Test-Path $path) { $originalAcls[$path] = Get-Acl $path }
 }
 $originalTestHost = $env:CTL_TEST_SSH_HOST
+$originalForwardHost = $env:CTL_TEST_SSH_FORWARD_HOST
+$originalUnwantedPort = $env:CTL_TEST_SSH_UNWANTED_PORT
+$originalCtlBin = $env:CTL_TEST_CTL_BIN
 $taskDaemon = $null
 try {
   Stop-Service sshd -ErrorAction SilentlyContinue
@@ -154,7 +157,7 @@ PubkeyAuthentication yes
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 AllowUsers $user
-AllowTcpForwarding no
+AllowTcpForwarding local
 AllowAgentForwarding no
 PermitTTY no
 SyslogFacility LOCAL0
@@ -178,6 +181,14 @@ LogLevel DEBUG1
   Invoke-Native -Program "$openssh\sshd.exe" -Arguments @('-t', '-f', $serverConfig)
   $hostKey = (Get-Content "$root\host.pub").Split(' ')
   "[127.0.0.1]:22222 $($hostKey[0]) $($hostKey[1])" | Set-Content "$root\known_hosts" -Encoding ascii
+  $unwantedListener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+  try {
+    $unwantedListener.Start()
+    $unwantedPort = $unwantedListener.LocalEndpoint.Port
+  } finally {
+    $unwantedListener.Stop()
+  }
+  $proxySsh = (Join-Path $openssh 'ssh.exe').Replace('\', '/')
   @"
 Host ctl-windows-ci
   HostName 127.0.0.1
@@ -190,6 +201,21 @@ Host ctl-windows-ci
   UserKnownHostsFile $rootSsh/known_hosts
   ConnectTimeout 10
 
+Host ctl-windows-forward-ci
+  HostName must-be-overridden.invalid
+  Port 22222
+  User $user
+  IdentityFile $rootSsh/client
+  IdentitiesOnly yes
+  BatchMode yes
+  StrictHostKeyChecking yes
+  UserKnownHostsFile $rootSsh/known_hosts
+  ConnectTimeout 10
+  ProxyCommand "$proxySsh" -W %h:%p ctl-windows-ci
+  ControlMaster auto
+  ControlPath $rootSsh/must-not-create-control
+  LocalForward 127.0.0.1:$unwantedPort 127.0.0.1:9
+
 $originalConfigText
 "@ | Set-Content $config -Encoding ascii
   Set-Service sshd -StartupType Manual
@@ -198,6 +224,12 @@ $originalConfigText
   Invoke-Native -Program "$openssh\ssh.exe" -Arguments @('-vvv', '-E', "$root\client.log", 'ctl-windows-ci', 'echo', 'SSH_AUTHENTICATED')
   $env:CTL_TEST_SSH_HOST = 'ctl-windows-ci'
   Invoke-Native -Program 'cargo' -Arguments @('test', '--locked', '-p', 'ctl-agent', '--test', 'windows_ssh', '--', '--ignored', '--nocapture')
+
+  Write-Host 'Checking ctld-owned forwarding with native SSH configuration and proxy processes'
+  $env:CTL_TEST_SSH_FORWARD_HOST = 'ctl-windows-forward-ci'
+  $env:CTL_TEST_SSH_UNWANTED_PORT = [string]$unwantedPort
+  $env:CTL_TEST_CTL_BIN = $ctl
+  Invoke-Native -Program 'cargo' -Arguments @('test', '--locked', '-p', 'ctld', '--test', 'windows_ssh_forwarding', '--', '--ignored', '--nocapture')
 
   Write-Host 'Checking temporary destinations, saved hosts, and remote exec streams'
   $result = Invoke-Ctl -Arguments ($temporary + @('exec', '--', 'cmd.exe', '/D', '/C', 'echo TEMPORARY_DESTINATION'))
@@ -356,5 +388,8 @@ $originalConfigText
   if ($wasRunning) { Start-Service sshd }
   Set-Service sshd -StartupType $originalStartType
   $env:CTL_TEST_SSH_HOST = $originalTestHost
+  $env:CTL_TEST_SSH_FORWARD_HOST = $originalForwardHost
+  $env:CTL_TEST_SSH_UNWANTED_PORT = $originalUnwantedPort
+  $env:CTL_TEST_CTL_BIN = $originalCtlBin
   Remove-Item $root -Recurse -Force -ErrorAction SilentlyContinue
 }

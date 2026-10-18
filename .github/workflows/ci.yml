@@ -114,6 +114,15 @@ jobs:
       - name: Run workspace tests
         run: node scripts/ci/check.mts rust
 
+      - name: Install Bun for caller credential interoperability
+        uses: oven-sh/setup-bun@v2
+
+      - name: Test Bun caller credential handoff
+        run: cargo test --locked -p ctl-cli --test caller_credentials -- --include-ignored
+
+      - name: Test fresh caller credentials against OpenSSH
+        run: bash scripts/ci/caller-ssh-unix.sh
+
   cargo-packages:
     name: Cargo packages (Rust 1.97)
     runs-on: ubuntu-latest
@@ -164,6 +173,12 @@ jobs:
 
       - name: Test Windows tasks and protocol framing
         run: cargo test --locked -p tokn-ctl-core -p ctl-taskd -p ctl-task-ipc -p ctl-task-proto -p ctl-task-store -p ctl-task-cli -p ctl-cli -p ctl-client -p ctl-proto -p ctl-agent -p ctmux-proto -p ctmux-tui
+
+      - name: Install Bun for caller credential interoperability
+        uses: oven-sh/setup-bun@v2
+
+      - name: Test Windows Bun caller credential handoff
+        run: cargo test --locked -p ctl-cli --test caller_credentials -- --include-ignored
 
       - name: Test Windows ConPTY sessions
         run: cargo test --locked -p ctmuxd --test windows_conpty

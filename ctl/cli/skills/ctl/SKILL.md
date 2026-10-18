@@ -47,6 +47,25 @@ preferred method is used. A failed selected route does not choose another route.
 `--destination` conflicts with `--host` and `--method`. `--remote-platform`
 works with either target selector.
 
+For application-owned authentication, temporary `shell`/`exec` targets also accept
+`--user`, `--port`, and exactly one of `--identity-file`, `--password-fd` (Unix),
+`--password-socket` (Unix), or `--password-pipe` (Windows), before the subcommand. An explicit credential
+requires a fresh connection with only that credential; it bypasses ctld,
+Keychain, saved credentials, masters, configured keys and identity agents.
+Without a credential, the ordinary managed authentication policy is unchanged.
+Host-key verification remains enabled. The key must work without an agent or
+interactive passphrase; proxy authentication is not supported in this mode.
+Never put a password in arguments, environment variables or a file. A calling
+application must send it over the separate inherited pipe/socket FD (N >= 3),
+or connect to ctl's owner-only `\\.\pipe\ctl-password-UNIQUE` Windows endpoint.
+For Unix socket handoff, create an owned mode-0700 directory and pass a short
+socket path within it; ctl creates and cleans up the endpoint. This transport
+works with Bun's `node:net` without inherited-FD ownership dependencies.
+Write 1..4096 UTF-8 bytes with no NUL, CR or LF, preserving spaces, then close
+the writer within five seconds. Standard input remains remote command input.
+Credential-source conflicts are errors. Do not create a saved host or rewrite
+SSH config to perform caller-owned temporary operations.
+
 Host catalog commands take a positional host and reject both target selectors.
 Their own `host update --destination` and `host method update --destination`
 options edit a saved endpoint. SSH/SCP take their destination positionally and

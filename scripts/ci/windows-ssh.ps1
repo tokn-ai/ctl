@@ -31,7 +31,15 @@ $authorizedKeys = Join-Path $env:ProgramData 'ssh\administrators_authorized_keys
 $originalAuthorizedKeys = if (Test-Path $authorizedKeys) { [IO.File]::ReadAllBytes($authorizedKeys) } else { $null }
 $installed = @()
 $originalAcls = @{}
+$callerUser = 'ctlcallerci'
+$callerCreated = $false
 try {
+  if (Get-LocalUser -Name $callerUser -ErrorAction SilentlyContinue) { throw "Refusing to replace $callerUser" }
+  $callerPassword = [Guid]::NewGuid().ToString('N') + '!aA9'
+  New-LocalUser -Name $callerUser -Password (ConvertTo-SecureString $callerPassword -AsPlainText -Force) | Out-Null
+  $callerCreated = $true
+  $usersGroup = Get-LocalGroup -SID 'S-1-5-32-545'
+  Add-LocalGroupMember -Group $usersGroup.Name -Member $callerUser
   Stop-Service sshd -ErrorAction SilentlyContinue
   # The fixed remote command resolves installed executables through the server's PATH.
   foreach ($binary in @('ctl-agent.exe', 'ctmuxd.exe')) {
@@ -44,6 +52,7 @@ try {
   New-ItemProperty $shellKey -Name DefaultShell -Value "$env:WINDIR\System32\cmd.exe" -PropertyType String -Force | Out-Null
   Invoke-Native -Program "$openssh\ssh-keygen.exe" -Arguments @('-q', '-t', 'ed25519', '-N', '', '-f', "$root\host")
   Invoke-Native -Program "$openssh\ssh-keygen.exe" -Arguments @('-q', '-t', 'ed25519', '-N', '', '-f', "$root\client")
+  Invoke-Native -Program "$openssh\ssh-keygen.exe" -Arguments @('-q', '-t', 'ed25519', '-N', '', '-f', "$root\wrong-client")
   # SYSTEM runs sshd; only SYSTEM and Administrators may change its host key/config.
   Invoke-Native -Program 'icacls.exe' -Arguments @($root, '/inheritance:r', '/grant:r', '*S-1-5-18:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F', '/T')
   Invoke-Native -Program 'icacls.exe' -Arguments @("$root\host", '/setowner', '*S-1-5-18')
@@ -60,9 +69,9 @@ ListenAddress 127.0.0.1
 HostKey $rootSsh/host
 AuthorizedKeysFile __PROGRAMDATA__/ssh/administrators_authorized_keys
 PubkeyAuthentication yes
-PasswordAuthentication no
+PasswordAuthentication yes
 KbdInteractiveAuthentication no
-AllowUsers $user
+AllowUsers $user $callerUser
 AllowTcpForwarding no
 AllowAgentForwarding no
 PermitTTY no
@@ -108,6 +117,16 @@ $originalConfig
   Invoke-Native -Program "$openssh\ssh.exe" -Arguments @('-vvv', '-E', "$root\client.log", 'ctl-windows-ci', 'echo', 'SSH_AUTHENTICATED')
   $env:CTL_TEST_SSH_HOST = 'ctl-windows-ci'
   Invoke-Native -Program 'cargo' -Arguments @('test', '--locked', '-p', 'ctl-agent', '--test', 'windows_ssh', '--', '--ignored', '--nocapture')
+  Invoke-Native -Program '.\target\debug\ctl.exe' -Arguments @('--destination', 'ctl-windows-ci', '--identity-file', "$root\client", '--port', '22222', '--remote-platform', 'windows', 'exec', '--', 'cmd', '/c', 'echo', 'CALLER_KEY_AUTHENTICATED')
+  # The SSH config's working IdentityFile must not rescue this incorrect key.
+  & '.\target\debug\ctl.exe' --destination ctl-windows-ci --identity-file "$root\wrong-client" --remote-platform windows exec -- cmd /c exit 0
+  if ($LASTEXITCODE -ne 255) { throw 'An incorrect supplied key did not fail fresh authentication' }
+  $callerDirectory = Join-Path $root 'caller cli'
+  New-Item -ItemType Directory $callerDirectory | Out-Null
+  Copy-Item '.\target\debug\ctl.exe' "$callerDirectory\ctl.exe"
+  @{ user = $callerUser; password = $callerPassword } | ConvertTo-Json -Compress |
+    & bun ./scripts/ci/caller-password.mts "$callerDirectory\ctl.exe" 'ctl-windows-ci'
+  if ($LASTEXITCODE -ne 0) { throw 'Bun caller-owned password authentication failed' }
   Invoke-Native -Program '.\target\debug\ctl.exe' -Arguments @('--destination', 'ctl-windows-ci', '--remote-platform', 'windows', 'ctmux', 'list')
 } catch {
   Stop-Service sshd -ErrorAction SilentlyContinue
@@ -145,4 +164,5 @@ $originalConfig
   Set-Service sshd -StartupType $originalStartType
   Remove-Item Env:CTL_TEST_SSH_HOST -ErrorAction SilentlyContinue
   Remove-Item $root -Recurse -Force -ErrorAction SilentlyContinue
+  if ($callerCreated) { Remove-LocalUser -Name $callerUser }
 }

@@ -150,6 +150,35 @@ fn stop_is_idempotent_without_installed_helpers_and_requires_consent() {
   }
 }
 
+#[test]
+fn stop_with_a_temporary_destination_never_falls_back_to_local() {
+  let _guard = ctl_core::test_fixtures::ProcessGuard::acquire_blocking();
+  let fixture = Fixture::new();
+  for (daemon, destination, expected) in [
+    ("ctld", "work", "only ctmuxd"),
+    ("ctl-taskd", "work", "only ctmuxd"),
+    ("ctmuxd", "!invalid", "valid SSH destination"),
+  ] {
+    let output = fixture
+      .command(&[
+        "--destination",
+        destination,
+        "components",
+        "stop",
+        daemon,
+        "--dry-run",
+      ])
+      .output()
+      .unwrap();
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+      String::from_utf8_lossy(&output.stderr).contains(expected),
+      "{output:?}"
+    );
+    fixture.assert_untouched();
+  }
+}
+
 #[tokio::test]
 async fn status_reads_a_running_owner_without_sending_restart() {
   use ctl_ipc::lifecycle::{DaemonBinaryInfo, DaemonInfo, Request, Response};

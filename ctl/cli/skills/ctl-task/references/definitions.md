@@ -8,8 +8,8 @@ directory, and execution mode. It is separate from a registered task owned by
 ctl-taskd. Direct saves and catalog operations do not connect to ctl-taskd or start a
 process. Creating from a definition copies its values into a new registration;
 later catalog changes do not update that task. These operations are local-only:
-`--host` is rejected, including for `create --from-definition` and
-`save --from-run`.
+`--host` and `--destination` are rejected, including for
+`create --from-definition` and `save --from-run`.
 
 ## Scope and discovery
 

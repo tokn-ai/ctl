@@ -141,7 +141,9 @@ preserved.
   catalog or authentication error.
 
 For a Windows SSH service target, use `ctl -H HOST --remote-platform windows
-ctmux ...` or `task ...`. Install the `.exe` companions together on the remote
+ctmux ...` or `task ...` for a saved host. For a temporary SSH address or config
+alias, use `ctl --destination DESTINATION --remote-platform windows ctmux ...`
+or `task ...`. Install the `.exe` companions together on the remote
 PATH. The supported server shell is cmd.exe; custom shells and PowerShell are
 not covered by this transport. Host connect/disconnect, managed ports, and
 managed VPNs currently require a Unix client.

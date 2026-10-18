@@ -1,4 +1,5 @@
 use super::{Daemon, confirm, output, remote, require_approval, validate_target};
+use crate::components::TargetOptions;
 use std::io;
 
 enum Prepared {
@@ -49,13 +50,9 @@ fn failed(error: &impl std::fmt::Display, uncertain: bool) -> io::Error {
   };
   io::Error::other(format!("{error}; {guidance}"))
 }
-async fn prepare(
-  component: Daemon,
-  host: Option<&str>,
-  method: Option<&str>,
-) -> io::Result<Option<Prepared>> {
-  if let Some(host) = host {
-    let remote = remote(host, method).await?;
+async fn prepare(component: Daemon, target: TargetOptions<'_>) -> io::Result<Option<Prepared>> {
+  if target.host.is_some() || target.destination.is_some() {
+    let remote = remote(target).await?;
     return ctl_client::maintenance::prepare_ctmux_stop(
       &remote.destination,
       &remote.options,
@@ -107,17 +104,15 @@ async fn prepare(
 
 pub(crate) async fn run(
   component: Daemon,
-  host: Option<&str>,
-  method: Option<&str>,
-  platform: Option<crate::RemotePlatform>,
+  target: TargetOptions<'_>,
   yes: bool,
   dry_run: bool,
   json: bool,
 ) -> io::Result<()> {
-  validate_target(host, method, platform, Some(component))?;
+  validate_target(target, Some(component))?;
   require_approval("stop", yes, dry_run)?;
-  let label = host.unwrap_or("local");
-  let Some(prepared) = prepare(component, host, method).await? else {
+  let label = target.host.or(target.destination).unwrap_or("local");
+  let Some(prepared) = prepare(component, target).await? else {
     if json {
       output(
         &serde_json::json!({ "host": label, "component": component, "already_stopped": true, "dry_run": dry_run }),

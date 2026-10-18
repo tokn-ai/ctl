@@ -304,8 +304,9 @@ an untargeted stop requires zero or one local connection.
 List, stop, and remove never start a daemon. An absent daemon or incomplete engine
 inventory reports a discovery warning rather than a confident empty result. VPN
 commands use the owner-only local IPC endpoint by default, selectable through
-`CTLD_SOCKET_PATH`. `ctl --host HOST vpn list/start/stop` selects that SSH
-account's VPN owner through `ctl-agent vpn`. Profiles stay local and startup
+`CTLD_SOCKET_PATH`. `ctl --host HOST vpn list/start/stop` selects a saved SSH
+account's VPN owner through `ctl-agent vpn`; use top-level `--destination`
+instead for a temporary SSH destination or config alias. Profiles stay local and startup
 sends settings over the identified SSH channel. Create and remove edit local
 profiles and reject remote targets. Remote list and stop do not start the remote
 daemon or a prerequisite VPN.
@@ -709,8 +710,10 @@ and checkpoint state remain intact.
 
 `ctl ctmux`, persistent `ctl shell`, and `ctl task` connect directly to the current
 user's owner-only endpoint for the chosen command domain by default. Global
-`--host`/`-H` resolves saved ctl hosts before OpenSSH aliases/destinations and
-invokes the system OpenSSH client with
+`--host`/`-H` selects a saved ctl host by name or ID. Top-level `--destination`
+selects a temporary SSH destination or config alias, using OpenSSH configuration
+and bypassing saved host lookup without saving a definition. Both invoke the
+system OpenSSH client with
 PTY allocation and all forwarding disabled, an OpenSSH destination supplied
 by the user, and a fixed managed-directory `PATH` prefix followed by
 `exec ctl-agent connect` for ctmux or `exec ctl-agent connect --service task`

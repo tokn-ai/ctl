@@ -8,6 +8,14 @@ mod maintenance;
 mod update;
 pub use update::UpdatePackage;
 
+#[derive(Clone, Copy)]
+pub(crate) struct TargetOptions<'a> {
+  host: Option<&'a str>,
+  destination: Option<&'a str>,
+  method: Option<&'a str>,
+  platform: Option<crate::RemotePlatform>,
+}
+
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum Usage {
   Local,
@@ -67,9 +75,9 @@ pub enum Command {
     #[arg(long)]
     json: bool,
   },
-  /// Update local and/or saved SSH hosts, preserving running services.
+  /// Update local or remote hosts, preserving running services.
   Update {
-    /// Saved host names, IDs or SSH aliases (repeat or separate with commas).
+    /// Saved host names or IDs (repeat or separate with commas).
     #[arg(long, value_delimiter = ',', num_args = 1..)]
     hosts: Vec<String>,
     /// Include the local host; it is the default when no host is supplied.
@@ -130,23 +138,30 @@ pub enum Command {
 pub async fn run(
   command: Command,
   host: Option<&str>,
+  destination: Option<&str>,
   method: Option<&str>,
   platform: Option<crate::RemotePlatform>,
 ) -> io::Result<()> {
+  let target_options = TargetOptions {
+    host,
+    destination,
+    method,
+    platform,
+  };
   match command {
-    Command::Status { json } => return maintenance::status(host, method, platform, json).await,
+    Command::Status { json } => return maintenance::status(target_options, json).await,
     Command::Stop {
       component,
       yes,
       dry_run,
       json,
-    } => return maintenance::stop(component, host, method, platform, yes, dry_run, json).await,
+    } => return maintenance::stop(component, target_options, yes, dry_run, json).await,
     Command::Restart {
       component,
       yes,
       dry_run,
       json,
-    } => return maintenance::restart(component, host, method, platform, yes, dry_run, json).await,
+    } => return maintenance::restart(component, target_options, yes, dry_run, json).await,
     _ => {}
   }
   let home = dirs::home_dir().ok_or_else(|| io::Error::other("home directory is unavailable"))?;
@@ -176,11 +191,7 @@ pub async fn run(
             },
           ),
         },
-        update::TargetOptions {
-          host,
-          method,
-          platform,
-        },
+        target_options,
         json,
       )
       .await;

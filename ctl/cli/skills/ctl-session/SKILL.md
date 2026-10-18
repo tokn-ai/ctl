@@ -6,9 +6,13 @@ description: "Create, attach to, inspect, split, merge, or terminate persistent 
 # ctl Sessions
 
 Use `ctl shell` for an interactive persistent shell, and `ctl ctmux` for session
-and terminal operations. Omit `-H` for local work; use `ctl -H HOST [--method
-NAME_OR_ID] ...` for a saved host, SSH alias, or destination. Keep the same
-target and selected method throughout the workflow. Local sessions require
+and terminal operations. Omit both target selectors for local work; use
+`ctl -H HOST [--method NAME_OR_ID] ...` for a saved host, or
+`ctl --destination DESTINATION ...` for a temporary SSH address or config alias.
+Put `--destination` before the subcommand. It uses OpenSSH configuration,
+bypasses saved host lookup, and does not save a host definition; it conflicts
+with `--host` and `--method`. Keep the same target and selected method throughout
+the workflow. Local sessions require
 `ctmuxd`; remote sessions require `ctl-agent` and `ctmuxd` for the SSH account,
 with `ctld` on Unix clients.
 

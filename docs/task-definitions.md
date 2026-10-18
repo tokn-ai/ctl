@@ -69,7 +69,7 @@ do not update that task. Existing registered-task names remain unique per ctl-ta
 and existing create/start behavior remains intact.
 
 These catalog commands and saved-definition creation are local-only. Supplying
-`--host` fails before touching a local file or opening a daemon connection.
+`--host` or `--destination` fails before touching a local file or opening a daemon connection.
 Legacy remote create/start commands retain their current behavior.
 
 ## Format and save conflicts

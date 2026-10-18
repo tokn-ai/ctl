@@ -192,6 +192,158 @@ async fn exec_local_preserves_arguments_and_exit_status() {
 }
 
 #[tokio::test]
+async fn temporary_destination_bypasses_a_saved_name_without_changing_the_catalog() {
+  let _guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
+  let fixture = Fixture::new();
+  let catalog_path = fixture.0.join("hosts.json");
+  let catalog = fs::read(&catalog_path).unwrap();
+  fixture.script("ssh", "printf '%s\\n' \"$@\" > \"$CTL_TEST_ARGS\"; exit 29");
+  let broker = fixture.broker();
+  let output = fixture
+    .command()
+    .args(["--destination", "work", "exec", "--", "printf", "a b'c"])
+    .output()
+    .await
+    .unwrap();
+  assert_eq!(
+    output.status.code(),
+    Some(29),
+    "{}",
+    String::from_utf8_lossy(&output.stderr)
+  );
+  let target = broker.await.unwrap();
+  assert_eq!(target.destination, "work");
+  assert_eq!(target.ssh_config_alias.as_deref(), Some("work"));
+  assert!(target.uses_ssh_config_master());
+  assert_eq!(target.hostname, None);
+  assert_eq!(target.user, None);
+  assert_eq!(target.port, None);
+  assert_eq!(target.identity_file, None);
+  assert_eq!(target.gateways, []);
+  let args = fixture.args();
+  assert_eq!(&args[args.len() - 2..], &["work", "'printf' 'a b'\\''c'"]);
+  assert!(!args.contains(&"10.0.0.20".into()));
+  assert_eq!(fs::read(catalog_path).unwrap(), catalog);
+}
+
+#[tokio::test]
+async fn temporary_destinations_work_with_an_unreadable_or_invalid_catalog() {
+  let _guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
+  for (destination, invalid_catalog) in [
+    ("192.168.1.1", true),
+    ("mymachine.example.com", false),
+    ("operator@work", true),
+    ("2001:db8::1", false),
+  ] {
+    let fixture = Fixture::new();
+    let catalog_path = fixture.0.join("hosts.json");
+    if invalid_catalog {
+      fs::write(&catalog_path, b"invalid catalog").unwrap();
+    } else {
+      fs::remove_file(&catalog_path).unwrap();
+      fs::create_dir(&catalog_path).unwrap();
+    }
+    fixture.script("ssh", "printf '%s\\n' \"$@\" > \"$CTL_TEST_ARGS\"");
+    let broker = fixture.broker();
+    let output = fixture
+      .command()
+      .args(["--destination", destination, "shell", "--plain"])
+      .output()
+      .await
+      .unwrap();
+    assert!(
+      output.status.success(),
+      "{destination}: {}",
+      String::from_utf8_lossy(&output.stderr)
+    );
+    let target = broker.await.unwrap();
+    assert_eq!(target.destination, destination);
+    assert_eq!(target.ssh_config_alias.as_deref(), Some(destination));
+    assert!(target.uses_ssh_config_master());
+    assert_eq!(target.user, None);
+    assert_eq!(fixture.args().last().map(String::as_str), Some(destination));
+    if invalid_catalog {
+      assert_eq!(fs::read(catalog_path).unwrap(), b"invalid catalog");
+    } else {
+      assert!(catalog_path.is_dir());
+    }
+  }
+}
+
+#[tokio::test]
+async fn saved_host_selection_rejects_unknown_destinations_before_connecting() {
+  let _guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
+  let fixture = Fixture::new();
+  fixture.script("ssh", "printf '%s\\n' \"$@\" > \"$CTL_TEST_ARGS\"");
+  for destination in ["192.168.1.1", "mymachine.example.com", "operator@missing"] {
+    let output = fixture
+      .command()
+      .args(["-H", destination, "exec", "--", "true"])
+      .output()
+      .await
+      .unwrap();
+    assert!(!output.status.success());
+    let diagnostic = String::from_utf8_lossy(&output.stderr);
+    assert!(diagnostic.contains("--destination"), "{diagnostic}");
+  }
+  assert!(!fixture.0.join("ctld.sock").exists());
+  assert!(!fixture.0.join("args").exists());
+}
+
+#[tokio::test]
+async fn temporary_destination_inherits_openssh_endpoint_and_identity_configuration() {
+  let _guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
+  for (destination, expected_user) in [("work", "configured"), ("operator@work", "operator")] {
+    let fixture = Fixture::new();
+    let identity = fixture.0.join("configured key");
+    fs::write(&identity, "fixture").unwrap();
+    let config_path = fixture.0.join("ssh-config");
+    fs::write(
+      &config_path,
+      format!(
+        "Host work\n  HostName configured.example.com\n  User configured\n  Port 2207\n  IdentityFile \"{}\"\n  ProxyJump configured-jump\n  ControlMaster auto\n  ControlPath {}/configured-master\n",
+        identity.display(),
+        fixture.0.display()
+      ),
+    )
+    .unwrap();
+    fixture.script(
+      "ssh",
+      "exec /usr/bin/ssh -G -F \"$CTL_TEST_SSH_CONFIG\" \"$@\"",
+    );
+    let broker = fixture.broker();
+    let output = fixture
+      .command()
+      .env("CTL_TEST_SSH_CONFIG", &config_path)
+      .args(["--destination", destination, "shell", "--plain"])
+      .output()
+      .await
+      .unwrap();
+    assert!(
+      output.status.success(),
+      "{}",
+      String::from_utf8_lossy(&output.stderr)
+    );
+    let target = broker.await.unwrap();
+    assert_eq!(target.destination, destination);
+    assert!(target.uses_ssh_config_master());
+    assert_eq!(target.gateways, []);
+    let config = String::from_utf8(output.stdout).unwrap();
+    for line in [
+      format!("user {expected_user}"),
+      "hostname configured.example.com".into(),
+      "port 2207".into(),
+      format!("identityfile {}", identity.display()),
+    ] {
+      assert!(
+        config.lines().any(|value| value == line),
+        "missing {line}: {config}"
+      );
+    }
+  }
+}
+
+#[tokio::test]
 async fn persistent_shell_requires_a_terminal_before_creating_a_session() {
   let _guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = Fixture::new();

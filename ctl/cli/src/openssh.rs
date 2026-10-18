@@ -106,7 +106,7 @@ pub async fn run_ssh(mut arguments: Vec<OsString>, method: Option<&str>) -> Resu
   let destination = arguments[index]
     .to_str()
     .ok_or_else(|| Error::Arguments("SSH destinations must be UTF-8.".into()))?;
-  let resolved = crate::target::resolve(Some(destination), method).await?;
+  let resolved = crate::target::resolve_openssh(destination, method).await?;
   let managed = resolved.host_id.is_some();
   // Raw destinations retain OpenSSH's full configuration behavior. Saved hosts
   // opt into ctl defaults, and safe session options can share ctld's master.

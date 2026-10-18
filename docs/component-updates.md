@@ -70,12 +70,17 @@ The CLI uses the same package verification and installation policy:
 ctl components update
 ctl components update --hosts work,jump-a --local --package ctl-agent
 ctl --host work --method vpn components update --package full-bundle
+ctl --destination my-ssh-alias components update --package full-bundle
 ctl components update --hosts work,jump-a --from /path/to/bundle-set --json
 ctl components update --local --from target/debug --local-build --ctld-package /path/to/ctld-package
 ```
 
 Saved hosts use their preferred connection method and existing route. `--host`
-also accepts an SSH alias or destination; `--method` applies to that one host.
+accepts only a saved host name or ID; `--method` applies to that one saved host.
+Place `--destination` before `components` for a temporary SSH destination or
+SSH-config alias. It uses OpenSSH configuration, bypasses saved host lookup, and
+does not save a host definition. It cannot be combined with `--host`, `--hosts`,
+or `--method`; `--local` can include this computer alongside the destination.
 The app reports progress and authentication prompts per host. A failed host
 does not undo earlier successes or skip later hosts; the dialog can retry just
 the failed hosts. CLI JSON contains each host's result, and any failure gives a
@@ -209,6 +214,7 @@ ctl components stop ctld
 ctl components stop ctmuxd
 ctl components stop ctl-taskd
 ctl -H work components stop ctmuxd
+ctl --destination alice@server components stop ctmuxd
 ```
 
 `status` compares each running owner's full build identity and protocol advertisements

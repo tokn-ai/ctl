@@ -14,8 +14,8 @@ reference using the commands below. `ctl skill --list` lists bundled name/file
 pairs. `--file PATH` selects a file within the chosen skill; its default is
 `SKILL.md`. Short names `host`, `session`, `task`, `port`, and `vpn` alias their
 `ctl-` names. Reading needs only the binary: no checkout, daemon, configuration,
-or authentication. `-H`, `--method`, and `--remote-platform` are rejected for
-`skill`; it always reads the local binary's bundled documents.
+or authentication. `-H`, `--destination`, `--method`, and `--remote-platform`
+are rejected for `skill`; it always reads the local binary's bundled documents.
 
 ## Choose the operation
 
@@ -33,16 +33,26 @@ or authentication. `-H`, `--method`, and `--remote-platform` are rejected for
 
 ## Target and command discovery
 
-Without `-H`/`--host`, native execution, sessions, and registered tasks target
-the local machine. For remote work, use `ctl -H HOST ...` consistently on every
-operation. HOST first selects a saved host by stable ID or name, then falls
-back to an OpenSSH alias or destination. Ambiguous saved names fail; use the ID.
+Without `-H`/`--host` or `--destination`, native execution, sessions, and
+registered tasks target the local machine. For remote work, use `ctl -H HOST ...`
+for a saved host by stable ID or name, or `ctl --destination DESTINATION ...`
+for a temporary SSH connection. Put `--destination` before the subcommand.
+It accepts an IPv4/IPv6 address, DNS name, or SSH-config alias with an optional
+`user@` prefix, uses OpenSSH configuration, and bypasses the saved catalog even
+when names match. It does not save a host definition. Unknown `--host` values
+fail with a hint to use `--destination`; ambiguous saved names fail, so use the
+ID. Keep the same target selector on every operation.
 `--method NAME_OR_ID` selects a saved host's connection method; otherwise its
 preferred method is used. A failed selected route does not choose another route.
+`--destination` conflicts with `--host` and `--method`. `--remote-platform`
+works with either target selector.
 
-Host catalog commands take a positional host and reject `-H`. SSH/SCP also take
-their destination positionally. `ctl setup`, `ctl passwords`, and `ctl taskd restart` are local.
-VPN list/start/stop also accept `-H`; VPN profile create/remove remain local.
+Host catalog commands take a positional host and reject both target selectors.
+Their own `host update --destination` and `host method update --destination`
+options edit a saved endpoint. SSH/SCP take their destination positionally and
+also reject the target selectors. `ctl setup`, `ctl passwords`, and
+`ctl taskd restart` are local. VPN list/start/stop and remote component maintenance
+accept either selector; VPN profile create/remove remain local.
 
 Check `ctl --version`, `ctl --help`, and the relevant native subcommand's
 `--help` when availability or flags are uncertain. There is no global `--json`.
@@ -72,7 +82,7 @@ including unindexed older copies. Listing/show require helper contract `1.1.4`;
 remove/clear require revocation-aware `1.1.5`. Both
 actions preserve key files, host/VPN settings, and never-save preferences, and
 require an interactive terminal. These commands have no create, update, import,
-reveal, or copy action; omit `-H`, `--method`, and `--remote-platform`.
+reveal, or copy action; omit `-H`, `--destination`, `--method`, and `--remote-platform`.
 
 ## One-off execution
 
@@ -80,6 +90,7 @@ reveal, or copy action; omit `-H`, `--method`, and `--remote-platform`.
 ctl exec -- uname -a
 ctl -H work exec -- uname -a
 ctl -H work exec -- sh -c 'cd /srv/app && cargo test >test.log 2>&1'
+ctl --destination user@mymachine.example.com exec -- uname -a
 ```
 
 `exec` streams stdin/stdout/stderr, allocates no remote PTY, and preserves the
@@ -108,8 +119,9 @@ ctl ssh -G work
 
 Put ctl-specific flags before `ssh` or `scp`; all arguments after the subcommand
 belong to the system OpenSSH program, including its help options. Do not use
-`-H` with these compatibility commands. `user@work` explicitly overrides the
-saved account. Unknown destinations retain normal OpenSSH lookup and semantics.
+`-H` or ctl's `--destination` with these compatibility commands. `user@work`
+explicitly overrides the saved account. Unknown destinations retain normal
+OpenSSH lookup and semantics.
 
 Compatible Unix saved-host operations reuse the exact ctld-authenticated
 connection, including its selected VPN/SOCKS route. Explicit connection/config

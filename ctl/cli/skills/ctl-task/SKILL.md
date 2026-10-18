@@ -27,8 +27,9 @@ before creating another registration for the same work.
 
 ## Select the target and command
 
-Omitting `--host` uses local ctl-taskd. For SSH, carry the same host and connection
-method through creation, inspection, logs, attachment, and lifecycle commands:
+Omitting `--host` and `--destination` uses local ctl-taskd. For SSH, carry the
+same target selector and connection method through creation, inspection, logs,
+attachment, and lifecycle commands:
 
 ```sh
 ctl -H work --method VPN task list
@@ -37,8 +38,11 @@ ctl -H work --method VPN task show api
 ctl -H work --method VPN task logs api
 ```
 
-Omit `--method` to use the saved host's preferred method. Host values select a
-saved ctl host by name or ID, then fall back to an OpenSSH destination or alias.
+Omit `--method` to use the saved host's preferred method. `--host` selects only
+a saved ctl host by name or ID. Use `ctl --destination DESTINATION task ...`
+for a temporary SSH address or config alias; it uses OpenSSH configuration and
+bypasses saved host lookup without saving a definition. Put `--destination`
+before the subcommand, and do not combine it with `--host` or `--method`.
 A task ID belongs to its target; it does not select a host by itself.
 
 For direct local creation, cwd defaults to the caller's current directory and

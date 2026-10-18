@@ -60,6 +60,7 @@ Compilation alone does not establish runtime support, and WSL does not exercise
 these Windows paths.
 
 A separate Windows job builds executables and runs
+[ctld lifecycle](../scripts/ci/windows-ctld.ps1),
 [task](../scripts/ci/windows-tasks.ps1),
 [terminal](../scripts/ci/windows-ctmux.ps1) and
 authenticated [SSH](../scripts/ci/windows-ssh.ps1) fixtures using PowerShell.
@@ -80,6 +81,10 @@ status requests. The native daemon suite starts `ctld.exe` detached with an empt
 program search path, checks repeated VPN status requests and platform-specific
 SSH diagnostics, then restarts the owner and reuses its pipe name. Actual VPN
 connectivity still requires a supported container engine and configuration.
+A separate CLI smoke fixture verifies passive status/list operations, a restart
+dry run, owner replacement through `ctl components restart ctld`, and VPN
+status after reconnecting to the successor. All fixture paths and its helper
+executable are isolated from the user profile and other daemon owners.
 
 ## Windows background tasks
 

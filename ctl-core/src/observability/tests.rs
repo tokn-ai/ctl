@@ -375,7 +375,13 @@ fn dropped_operations_are_interrupted_and_diagnostics_are_not_audit_events() {
 #[test]
 fn audit_writer_lock_precedes_initialization_and_does_not_block_readers() {
   let fixture = Fixture::new();
-  let store = Store::new(fixture.0.clone());
+  let store = fixture.store();
+  fs::create_dir(store.directory()).unwrap();
+  #[cfg(unix)]
+  {
+    use std::os::unix::fs::PermissionsExt as _;
+    fs::set_permissions(store.directory(), fs::Permissions::from_mode(0o700)).unwrap();
+  }
   let lock = fs::OpenOptions::new()
     .read(true)
     .write(true)
@@ -393,7 +399,7 @@ fn audit_writer_lock_precedes_initialization_and_does_not_block_readers() {
   let error = store
     .append(Stream::Audit, &record(Outcome::Succeeded))
     .unwrap_err();
-  assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+  assert_eq!(error.kind(), io::ErrorKind::WouldBlock, "{error}");
   assert!(!store.directory().join("audit.sqlite3").exists());
   assert!(
     store
@@ -415,7 +421,7 @@ fn audit_writer_lock_precedes_initialization_and_does_not_block_readers() {
   let error = store
     .append(Stream::Audit, &record(Outcome::Failed))
     .unwrap_err();
-  assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+  assert_eq!(error.kind(), io::ErrorKind::WouldBlock, "{error}");
   lock.unlock().unwrap();
   store
     .append(Stream::Audit, &record(Outcome::Failed))

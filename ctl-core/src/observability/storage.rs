@@ -278,21 +278,25 @@ impl Store {
 
   fn lock(&self, run: Uuid, create: bool) -> io::Result<File> {
     let path = self.directory.join("logs").join(format!("{run}.lock"));
-    let file = open(&path, create)?;
-    let deadline = Instant::now() + Duration::from_millis(250);
-    loop {
-      match file.try_lock() {
-        Ok(()) => return Ok(file),
-        Err(TryLockError::Error(error)) => return Err(error),
-        Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
-          std::thread::sleep(Duration::from_millis(2));
-        }
-        Err(TryLockError::WouldBlock) => {
-          return Err(io::Error::new(
-            io::ErrorKind::WouldBlock,
-            "history store is busy",
-          ));
-        }
+    lock_file(&path, create)
+  }
+}
+
+fn lock_file(path: &Path, create: bool) -> io::Result<File> {
+  let file = open(path, create)?;
+  let deadline = Instant::now() + Duration::from_millis(250);
+  loop {
+    match file.try_lock() {
+      Ok(()) => return Ok(file),
+      Err(TryLockError::Error(error)) => return Err(error),
+      Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+        std::thread::sleep(Duration::from_millis(2));
+      }
+      Err(TryLockError::WouldBlock) => {
+        return Err(io::Error::new(
+          io::ErrorKind::WouldBlock,
+          "history store is busy",
+        ));
       }
     }
   }

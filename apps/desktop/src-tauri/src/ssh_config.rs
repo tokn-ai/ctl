@@ -419,11 +419,7 @@ mod tests {
     assert_eq!(
       discovery.identity_paths,
       vec![
-        temporary
-          .path()
-          .join("keys/work")
-          .to_string_lossy()
-          .into_owned(),
+        format!("{}/keys/work", temporary.path().display()),
         "/keys/with spaces".into(),
         "~/keys/conditional".into(),
       ]

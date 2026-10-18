@@ -12,6 +12,7 @@ function Invoke-Native {
   # inherit unrelated output handles and keep these streams open after exit.
   $start = [Diagnostics.ProcessStartInfo]::new($Program)
   $start.UseShellExecute = $false
+  $start.WorkingDirectory = (Get-Location).ProviderPath
   $start.RedirectStandardInput = $true
   $start.RedirectStandardOutput = $true
   $start.RedirectStandardError = $true

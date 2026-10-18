@@ -153,8 +153,8 @@ async fn detached_owner_serves_vpn_status_without_a_container_engine_and_release
       .await
       .unwrap();
     assert!(inventory.supports_multiple);
-    assert!(inventory.connections.is_empty());
-    assert!(!inventory.discovery_warnings.is_empty());
+    assert_eq!(inventory.connections, [] as [ctl_ipc::VpnStatus; 0]);
+    assert_ne!(inventory.discovery_warnings, [] as [String; 0]);
     let mut stream = owner.connect().await;
     // A missing optional container engine leaves the broker usable and returns
     // discovery diagnostics. Current contracts permit repeated status requests.
@@ -170,8 +170,8 @@ async fn detached_owner_serves_vpn_status_without_a_container_engine_and_release
         panic!("VPN status unavailable");
       };
       assert!(!status.running);
-      assert!(snapshot.connections.is_empty());
-      assert!(!snapshot.discovery_warnings.is_empty());
+      assert_eq!(snapshot.connections, [] as [ctl_ipc::VpnStatus; 0]);
+      assert_ne!(snapshot.discovery_warnings, [] as [String; 0]);
     }
     drop(stream);
     owner.stop().await;
@@ -265,7 +265,7 @@ async fn native_identity_helper_lists_files_while_keychain_is_unavailable() {
     .unwrap();
   std::fs::remove_dir_all(directory).unwrap();
   assert!(output.status.success());
-  assert!(output.stderr.is_empty());
+  assert_eq!(output.stderr, [] as [u8; 0]);
   let ctl_ipc::identities::Response::Inventory { inventory } =
     serde_json::from_slice(&output.stdout).unwrap()
   else {

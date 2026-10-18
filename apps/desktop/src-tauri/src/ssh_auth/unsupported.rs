@@ -27,12 +27,6 @@ pub(crate) fn existing_master(
   )))
 }
 
-/// This platform does not use the Unix askpass helper.
-#[must_use]
-pub fn helper_exit_code() -> Option<i32> {
-  None
-}
-
 pub async fn connect(target: &ConnectionTargetDto) -> CommandResult<Transport> {
   connection::remote_service(connect_identified(target))
     .await

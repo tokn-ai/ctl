@@ -23,6 +23,7 @@ impl CommandErrorDto {
     }
   }
 
+  #[cfg(any(unix, test))]
   pub fn with_vpn_route_index(mut self, index: usize) -> Self {
     self.vpn_route_index = Some(index);
     self

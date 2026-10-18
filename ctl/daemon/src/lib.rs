@@ -1407,7 +1407,7 @@ impl ConnectionAuthentication {
     let _ = tokio::task::spawn_blocking(move || approved.connected()).await;
   }
 
-  #[cfg(test)]
+  #[cfg(all(test, unix))]
   fn fresh(interactive: bool) -> Self {
     #[cfg(target_os = "macos")]
     let authorization = keychain::approval::Attempt::fresh(interactive);
@@ -3552,6 +3552,10 @@ mod tests {
       control_path_for_socket(&target(), Path::new("/tmp/another-ctld.sock"))
     );
     assert_eq!(first.file_name().unwrap().len(), 32);
+    assert_eq!(first.parent(), Some(control_directory().as_path()));
+    // Unix control sockets have a short path limit. Windows brokers reject mux
+    // requests and do not impose this limit on the user's temporary directory.
+    #[cfg(unix)]
     assert!(first.as_os_str().len() < 80);
   }
 

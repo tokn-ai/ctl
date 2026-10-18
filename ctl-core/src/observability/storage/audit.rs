@@ -44,6 +44,12 @@ impl Store {
   }
 
   pub(super) fn append_audit(&self, record: &Record) -> io::Result<()> {
+    // Serialize cooperating writers before they open SQLite or inspect its
+    // transient rollback journal. A waiting SQLite connection can otherwise
+    // contend on header/schema locks while the active writer commits, starving
+    // concurrent initialization on Windows. The bounded file lock reports
+    // contention before any event is inserted; readers stay read-only.
+    let _writer = super::lock_file(&self.directory.join("audit.lock"), true)?;
     let mut connection = self.database(true)?;
     // Rollback journaling keeps read-only CLI queries from creating WAL sidecars.
     // FULL synchronous commits make each successful insert durable.

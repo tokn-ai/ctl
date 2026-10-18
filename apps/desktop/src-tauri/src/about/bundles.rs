@@ -16,6 +16,13 @@ pub enum BundlePurpose {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(
+  windows,
+  expect(
+    dead_code,
+    reason = "Windows parses the shared IPC request before reporting unsupported bundle selection"
+  )
+)]
 pub struct SelectionRequest {
   bundle_id: String,
   target_triple: String,
@@ -40,12 +47,20 @@ pub struct BundleSummary {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(
+  windows,
+  expect(
+    dead_code,
+    reason = "The shared bundle response keeps its wire values while Windows bundle inventory is empty"
+  )
+)]
 enum BundleUse {
   Selected,
   Available,
   Unavailable,
 }
 
+#[cfg(unix)]
 impl BundleUse {
   fn status(selected: bool, available: bool) -> Self {
     if selected {
@@ -66,6 +81,13 @@ pub struct BundleSnapshot {
 
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(
+  windows,
+  expect(
+    dead_code,
+    reason = "The shared IPC progress channel retains its phases for unsupported Windows bundle selection"
+  )
+)]
 pub enum SelectionPhase {
   Verifying,
   Selecting,

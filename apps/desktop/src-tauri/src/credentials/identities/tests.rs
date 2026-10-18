@@ -6,7 +6,9 @@ fn fixture_home() -> PathBuf {
 }
 
 fn fixture_path(relative: &str) -> String {
-  fixture_home().join(relative).to_str().unwrap().to_owned()
+  let mut path = fixture_home();
+  path.extend(relative.split('/'));
+  path.to_str().unwrap().to_owned()
 }
 
 fn file() -> IdentityFile {

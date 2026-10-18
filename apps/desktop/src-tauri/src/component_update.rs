@@ -14,6 +14,13 @@ use tokio::sync::watch;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(
+  windows,
+  expect(
+    dead_code,
+    reason = "Windows parses the shared IPC request before reporting unsupported component updates"
+  )
+)]
 pub struct UpdateRequest {
   targets: Vec<ConnectionTargetDto>,
   attempt_id: String,
@@ -22,6 +29,13 @@ pub struct UpdateRequest {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(
+  all(windows, not(test)),
+  expect(
+    dead_code,
+    reason = "Update wire states remain shared while Windows reports component updates as unsupported"
+  )
+)]
 enum State {
   Updating,
   Complete,
@@ -56,6 +70,7 @@ struct Registry {
   pending_cancel: BTreeMap<Key, Instant>,
 }
 impl Registry {
+  #[cfg(any(unix, test))]
   fn register(&mut self, key: Key, cancel: watch::Sender<bool>) -> CommandResult<()> {
     if self.active.contains_key(&key) {
       return Err(CommandErrorDto::new(
@@ -93,7 +108,9 @@ fn registry() -> &'static Mutex<Registry> {
   REGISTRY.get_or_init(Mutex::default)
 }
 
+#[cfg(unix)]
 struct Guard(Key);
+#[cfg(unix)]
 impl Drop for Guard {
   fn drop(&mut self) {
     registry().lock().unwrap().active.remove(&self.0);
@@ -240,6 +257,7 @@ pub(crate) fn close_window(window: &str) {
     .retain(|(label, _), _| label != window);
 }
 
+#[cfg(any(unix, test))]
 async fn run_batch<T, F, Fut>(
   targets: Vec<T>,
   cancelled: &mut watch::Receiver<bool>,

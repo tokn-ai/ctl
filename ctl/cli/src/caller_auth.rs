@@ -299,6 +299,11 @@ pub async fn askpass() -> io::Result<()> {
     let response = host_trust::confirm(&prompt, fingerprint)?;
     return writeln!(std::io::stdout().lock(), "{response}");
   }
+  if prompt.starts_with("The authenticity of host '") {
+    return Err(channel::invalid(
+      "Unrecognized SSH host-key confirmation format; refusing to answer with a supplied credential",
+    ));
+  }
   if !prompt.trim_end().ends_with("'s password:")
     || prompt.contains(['\r', '\n'])
     || std::env::var_os("CTL_CALLER_ENDPOINT").is_none()

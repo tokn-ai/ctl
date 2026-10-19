@@ -10,6 +10,11 @@ const TRUST_PROMPT: &str = "The authenticity of host 'fixture (127.0.0.1)' can't
 ED25519 key fingerprint is SHA256:abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ.\n\
 This key is not known by any other names.\n\
 Are you sure you want to continue connecting (yes/no/[fingerprint])? ";
+// Newer OpenSSH uses a colon and no trailing period on the fingerprint line.
+const MODERN_TRUST_PROMPT: &str = "The authenticity of host 'fixture (127.0.0.1)' can't be established.\n\
+ED25519 key fingerprint is: SHA256:abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ\n\
+This key is not known by any other names.\n\
+Are you sure you want to continue connecting (yes/no/[fingerprint])? ";
 
 fn event(value: &str) {
   if let Some(path) = std::env::var_os("CTL_TEST_TRUST_EVENTS") {
@@ -41,7 +46,7 @@ fn reject_trust() -> ! {
 }
 
 fn host_trust(args: &[String], scenario: &str) {
-  let policy = if matches!(scenario, "unknown" | "changed") {
+  let policy = if matches!(scenario, "unknown" | "unknown-modern" | "changed") {
     "stricthostkeychecking=ask"
   } else {
     "stricthostkeychecking=yes"
@@ -60,7 +65,7 @@ fn host_trust(args: &[String], scenario: &str) {
       reject_trust();
     }
     "strict" => reject_trust(),
-    "unknown" => {
+    "unknown" | "unknown-modern" => {
       // OpenSSH does not ask in batch mode. For forced askpass it invokes the
       // full first-use question without SSH_ASKPASS_PROMPT=confirm.
       if args
@@ -70,7 +75,12 @@ fn host_trust(args: &[String], scenario: &str) {
         reject_trust();
       }
       assert_eq!(std::env::var("SSH_ASKPASS_REQUIRE").unwrap(), "force");
-      let result = askpass(TRUST_PROMPT, false);
+      let prompt = if scenario == "unknown-modern" {
+        MODERN_TRUST_PROMPT
+      } else {
+        TRUST_PROMPT
+      };
+      let result = askpass(prompt, false);
       std::io::stderr().write_all(&result.stderr).unwrap();
       assert!(
         !result
@@ -102,7 +112,7 @@ fn main() {
     "credential descriptor leaked into SSH"
   );
   if args.contains(&"-G".to_owned()) {
-    let policy = if matches!(scenario.as_str(), "unknown" | "changed") {
+    let policy = if matches!(scenario.as_str(), "unknown" | "unknown-modern" | "changed") {
       "ask"
     } else {
       "yes"

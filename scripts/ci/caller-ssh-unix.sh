@@ -5,6 +5,8 @@ if [[ "${GITHUB_ACTIONS:-}" != true || "${RUNNER_OS:-}" == Windows ]]; then
   echo 'This fixture is only for ephemeral Unix GitHub runners.' >&2
   exit 1
 fi
+# Keep the installed client visible: host-trust question formats vary by release.
+ssh -V
 if [[ "$RUNNER_OS" == Linux ]]; then
   sudo apt-get install --yes --no-install-recommends openssh-server
   sudo mkdir -p /run/sshd

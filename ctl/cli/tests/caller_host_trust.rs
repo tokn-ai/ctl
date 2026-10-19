@@ -68,6 +68,31 @@ const CASES: &[Case] = &[
   },
 ];
 
+const MODERN_CASES: &[Case] = &[
+  Case {
+    name: "modern-accept",
+    scenario: "unknown-modern",
+    reply: Some("yes"),
+    terminal: true,
+    accepted: true,
+  },
+  Case {
+    name: "modern-decline",
+    scenario: "unknown-modern",
+    reply: Some("no"),
+    terminal: true,
+    accepted: false,
+  },
+];
+
+const ENCRYPTED_CASE: Case = Case {
+  name: "encrypted",
+  scenario: "encrypted",
+  reply: None,
+  terminal: true,
+  accepted: false,
+};
+
 #[test]
 fn caller_host_trust_child_launcher() {
   support::child_launcher();
@@ -86,14 +111,12 @@ fn caller_credentials_require_host_trust_before_authentication_and_preserve_comm
   let _guard = ctl_core::test_fixtures::ProcessGuard::acquire_blocking();
   let fixture = Fixture::new(true);
   for mode in ["key", "password"] {
-    let encrypted = Case {
-      name: "encrypted",
-      scenario: "encrypted",
-      reply: None,
-      terminal: true,
-      accepted: false,
-    };
-    for case in CASES.iter().copied().chain(std::iter::once(encrypted)) {
+    for case in CASES
+      .iter()
+      .chain(MODERN_CASES)
+      .copied()
+      .chain(std::iter::once(ENCRYPTED_CASE))
+    {
       let name = format!("{mode}-{}", case.name);
       let trust = fixture.root.join(format!("{name}.known-hosts"));
       let events = fixture.root.join(format!("{name}.events"));
@@ -129,7 +152,7 @@ fn caller_credentials_require_host_trust_before_authentication_and_preserve_comm
       if case.accepted {
         assert_eq!(result.code, 17, "{name}: {}", result.transcript);
         assert_eq!(result.stdout, INPUT, "{name}: trust consumed command stdin");
-        let trust_event = if case.scenario == "unknown" {
+        let trust_event = if matches!(case.scenario, "unknown" | "unknown-modern") {
           "trust-approved"
         } else {
           "trust-known"
@@ -161,7 +184,7 @@ fn caller_credentials_require_host_trust_before_authentication_and_preserve_comm
         );
       }
       let actual = fs::read_to_string(&trust).ok();
-      let expected = if case.name == "accept" {
+      let expected = if case.accepted && case.reply.is_some() {
         Some("fixture-known-key\n")
       } else {
         previous

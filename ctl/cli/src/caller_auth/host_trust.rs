@@ -10,7 +10,6 @@ const MAX_RESPONSE_BYTES: usize = 256;
 pub(super) fn fingerprint(prompt: &str) -> Option<&str> {
   if prompt.len() > 16 * 1024
     || !prompt.starts_with("The authenticity of host '")
-    || !prompt.lines().next()?.ends_with("can't be established.")
     || ![
       "Are you sure you want to continue connecting (yes/no/[fingerprint])?",
       "Are you sure you want to continue connecting (yes/no)?",
@@ -23,8 +22,28 @@ pub(super) fn fingerprint(prompt: &str) -> Option<&str> {
   {
     return None;
   }
-  let (_, fingerprint) = prompt.lines().nth(1)?.split_once(" key fingerprint is ")?;
-  let fingerprint = fingerprint.strip_suffix('.')?;
+  let mut lines = prompt.lines();
+  let authenticity = lines.next()?;
+  if !authenticity.ends_with("can't be established.") {
+    // A new key type can still require first-use approval when other key types
+    // are known. OpenSSH adds this warning before displaying the fingerprint.
+    if !authenticity.ends_with("can't be established")
+      || lines.next()? != "but keys of different type are already known for this host."
+    {
+      return None;
+    }
+  }
+  let line = lines.next()?;
+  // OpenSSH 10.1 changed "fingerprint is HASH." to "fingerprint is: HASH".
+  let (algorithm, fingerprint) = if let Some(parts) = line.split_once(" key fingerprint is: ") {
+    parts
+  } else {
+    let (algorithm, fingerprint) = line.split_once(" key fingerprint is ")?;
+    (algorithm, fingerprint.strip_suffix('.')?)
+  };
+  if algorithm.is_empty() || algorithm.contains(char::is_whitespace) {
+    return None;
+  }
   if fingerprint.starts_with("SHA256:") || fingerprint.starts_with("MD5:") {
     let (_, value) = fingerprint.split_once(':')?;
     if !value.is_empty()
@@ -155,10 +174,40 @@ mod tests {
       "Enter PIN for authenticator: ".into(),
       "Are you sure you want to continue connecting (yes/no)? ".into(),
       prompt().replace(" key fingerprint is ", " password is "),
+      prompt().replace("ED25519", ""),
       prompt().replace(FINGERPRINT, "unrecognized:fingerprint"),
       prompt().replace("ED25519", "\u{1b}[31mED25519"),
     ] {
       assert_eq!(fingerprint(&prompt), None, "{prompt:?}");
+    }
+  }
+
+  #[test]
+  fn legacy_and_modern_prompts_preserve_fingerprints_with_other_known_key_types() {
+    for fingerprint_line in [
+      format!("ED25519 key fingerprint is {FINGERPRINT}."),
+      format!("ED25519 key fingerprint is: {FINGERPRINT}"),
+    ] {
+      for other_keys in [false, true] {
+        let introduction = if other_keys {
+          "The authenticity of host 'host (192.0.2.1)' can't be established\nbut keys of different type are already known for this host."
+        } else {
+          "The authenticity of host 'host (192.0.2.1)' can't be established."
+        };
+        let prompt = format!(
+          "{introduction}\n{fingerprint_line}\nThis key is not known by any other names.\nAre you sure you want to continue connecting (yes/no/[fingerprint])? "
+        );
+        assert_eq!(fingerprint(&prompt), Some(FINGERPRINT));
+        if other_keys {
+          assert_eq!(
+            fingerprint(&prompt.replace(
+              "but keys of different type are already known for this host.",
+              "Enter passphrase for key '/key':"
+            )),
+            None
+          );
+        }
+      }
     }
   }
 

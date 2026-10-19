@@ -1,5 +1,6 @@
 //! Caller-owned credentials never enter ctld, saved-host storage or audit metadata.
 mod channel;
+mod host_trust;
 use crate::{Arguments, Command};
 use ctl_client::{
   caller_auth::{Authentication, Credential},
@@ -23,6 +24,17 @@ pub struct CallerAuth {
   pub authentication: Authentication,
   task: Option<tokio::task::JoinHandle<()>>,
 }
+
+#[cfg(test)]
+impl CallerAuth {
+  pub(crate) fn for_test(authentication: Authentication) -> Self {
+    Self {
+      authentication,
+      task: None,
+    }
+  }
+}
+
 impl Drop for CallerAuth {
   fn drop(&mut self) {
     if let Some(task) = &self.task {
@@ -97,7 +109,6 @@ pub async fn prepare(
     let listener = channel::Listener::new()?;
     let token = uuid::Uuid::new_v4().to_string();
     let credential = Credential::Password {
-      program: std::env::current_exe()?,
       endpoint: listener.path.clone(),
       token: token.clone(),
     };
@@ -134,6 +145,8 @@ pub async fn prepare(
     authentication: Authentication {
       credential,
       host_options,
+      prompt_program: std::env::current_exe()?,
+      allow_host_key_confirmation: host_trust::has_controlling_terminal(),
     },
     task,
   })))
@@ -183,6 +196,7 @@ async fn host_options(target: &ConnectionTargetDto) -> io::Result<Vec<std::ffi::
         | "updatehostkeys"
         | "hashknownhosts"
         | "hostkeyalgorithms"
+        | "fingerprinthash"
         | "casignaturealgorithms"
         | "revokedhostkeys"
         | "knownhostscommand"
@@ -271,14 +285,31 @@ async fn query_config(target: &ConnectionTargetDto, defaults: bool) -> io::Resul
 
 pub async fn askpass() -> io::Result<()> {
   let prompt = std::env::args().nth(1).unwrap_or_default();
-  if std::env::var("SSH_ASKPASS_PROMPT").ok().as_deref() == Some("confirm")
-    || !prompt
-      .to_ascii_lowercase()
-      .trim_end()
-      .ends_with("password:")
+  // OpenSSH's first-use host prompt uses RP_ECHO, not the separate
+  // SSH_ASKPASS_PROMPT=confirm permission mechanism (e.g. security keys).
+  if std::env::var_os("SSH_ASKPASS_PROMPT").is_some() {
+    return Err(channel::invalid(
+      "This SSH authentication prompt is not supported with a supplied credential",
+    ));
+  }
+  if let Some(fingerprint) = host_trust::fingerprint(&prompt) {
+    if std::env::var("CTL_CALLER_CONFIRM_TTY").ok().as_deref() != Some("1") {
+      return Err(host_trust::terminal_required());
+    }
+    let response = host_trust::confirm(&prompt, fingerprint)?;
+    return writeln!(std::io::stdout().lock(), "{response}");
+  }
+  if prompt.starts_with("The authenticity of host '") {
+    return Err(channel::invalid(
+      "Unrecognized SSH host-key confirmation format; refusing to answer with a supplied credential",
+    ));
+  }
+  if !prompt.trim_end().ends_with("'s password:")
+    || prompt.contains(['\r', '\n'])
+    || std::env::var_os("CTL_CALLER_ENDPOINT").is_none()
   {
     return Err(channel::invalid(
-      "Only password authentication is supported",
+      "Only the supplied SSH credential may authenticate this connection; passphrase, PIN and other prompts are disabled",
     ));
   }
   let endpoint = PathBuf::from(

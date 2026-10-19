@@ -6,7 +6,6 @@
 mod helper;
 pub(super) mod identities;
 mod models;
-#[cfg(unix)]
 mod process;
 
 #[cfg(test)]

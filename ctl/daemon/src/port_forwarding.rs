@@ -73,6 +73,15 @@ pub(super) struct ForwardRegistry {
 pub(super) trait ForwardControl: Sync {
   fn is_ready(&self, target: &SshTarget) -> impl Future<Output = bool> + Send;
 
+  /// Observe an owned listener without authenticating or creating a replacement.
+  fn check(
+    &self,
+    _target: &SshTarget,
+    _forward: &LocalPortForward,
+  ) -> impl Future<Output = Result<(), RequestError>> + Send {
+    std::future::ready(Ok(()))
+  }
+
   fn change(
     &self,
     target: &SshTarget,
@@ -87,6 +96,10 @@ pub(super) struct SshForwardControl<'a> {
 
 impl ForwardControl for SshForwardControl<'_> {
   async fn is_ready(&self, target: &SshTarget) -> bool {
+    if cfg!(windows) {
+      // Explicit Configure can authenticate a native tunnel without a master.
+      return true;
+    }
     let Ok(Some(endpoint)) = self.state.existing_endpoint(target) else {
       return false;
     };
@@ -97,7 +110,46 @@ impl ForwardControl for SshForwardControl<'_> {
       .unwrap_or(false)
   }
 
+  #[cfg(windows)]
+  async fn check(
+    &self,
+    target: &SshTarget,
+    forward: &LocalPortForward,
+  ) -> Result<(), RequestError> {
+    self
+      .state
+      .native_forwards
+      .lock()
+      .await
+      .check(target, forward)
+  }
+
   async fn change(
+    &self,
+    target: &SshTarget,
+    forward: &LocalPortForward,
+    cancel: bool,
+  ) -> Result<(), RequestError> {
+    if cfg!(windows) {
+      #[cfg(windows)]
+      {
+        let mut native = self.state.native_forwards.lock().await;
+        return if cancel {
+          native.cancel(target, forward).await;
+          Ok(())
+        } else {
+          native.start(target, forward).await
+        };
+      }
+    }
+    self.change_master(target, forward, cancel).await
+  }
+}
+
+impl SshForwardControl<'_> {
+  // Retain this path on every target: only Unix callers dispatch master work,
+  // and the same commands remain covered by platform-independent policy tests.
+  async fn change_master(
     &self,
     target: &SshTarget,
     forward: &LocalPortForward,
@@ -180,6 +232,10 @@ impl ForwardRegistry {
         && existing.target == target
         && existing.status.forward == forward
         && control.is_ready(&existing.target).await
+        && control
+          .check(&existing.target, &existing.status.forward)
+          .await
+          .is_ok()
       {
         existing.status = forward_status(existing.status.forward.clone(), Ok(()));
         return Ok(existing.status.clone());
@@ -232,7 +288,10 @@ impl ForwardRegistry {
       if !ready {
         record.status = waiting_status(record.status.forward.clone());
       } else if record.listener_present {
-        record.status = forward_status(record.status.forward.clone(), Ok(()));
+        record.status = forward_status(
+          record.status.forward.clone(),
+          control.check(target, &record.status.forward).await,
+        );
       }
       statuses.push(record.status.clone());
     }

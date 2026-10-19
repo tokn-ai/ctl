@@ -186,14 +186,16 @@ mod tests {
 
   #[test]
   fn parses_enabled_disabled_and_expanded_paths_without_reimplementing_tokens() {
+    let expanded = std::env::temp_dir().join("SSH sockets/user@host-22");
     for value in ["true", "yes", "auto", "ask", "autoask"] {
       let text = format!(
-        "controlmaster {value}\ncontrolpath /tmp/SSH sockets/user@host:22\ncontrolpersist 0\n"
+        "controlmaster {value}\ncontrolpath {}\ncontrolpersist 0\n",
+        expanded.display()
       );
       assert_eq!(
         parse_policy(text.as_bytes()).unwrap(),
         SharingPolicy {
-          path: Some(PathBuf::from("/tmp/SSH sockets/user@host:22")),
+          path: Some(expanded.clone()),
           can_create: true,
           asks_permission: matches!(value, "ask" | "autoask"),
         }

@@ -17,6 +17,7 @@ struct Control {
   ready: Mutex<HashSet<SshTarget>>,
   changes: Mutex<Vec<Change>>,
   fail_cancel: AtomicBool,
+  fail_check: AtomicBool,
 }
 
 impl Control {
@@ -33,6 +34,20 @@ impl ForwardControl for Control {
     ready(self.ready.lock().unwrap().contains(target))
   }
 
+  fn check(
+    &self,
+    _target: &SshTarget,
+    _forward: &LocalPortForward,
+  ) -> impl Future<Output = Result<(), RequestError>> + Send {
+    ready(if self.fail_check.load(Ordering::SeqCst) {
+      Err(RequestError::PortForwardFailed(
+        "SSH transport exited".into(),
+      ))
+    } else {
+      Ok(())
+    })
+  }
+
   fn change(
     &self,
     target: &SshTarget,
@@ -44,12 +59,46 @@ impl ForwardControl for Control {
       forward: forward.clone(),
       cancel,
     });
+    if !cancel {
+      self.fail_check.store(false, Ordering::SeqCst);
+    }
     ready(if cancel && self.fail_cancel.load(Ordering::SeqCst) {
       Err(RequestError::PortForwardFailed("cancel failed".into()))
     } else {
       Ok(())
     })
   }
+}
+
+#[tokio::test]
+async fn passive_health_failure_reports_error_and_explicit_configure_replaces_the_dead_owner() {
+  let target = target("native-host");
+  let control = Control::ready(std::slice::from_ref(&target));
+  let mut registry = ForwardRegistry::default();
+  registry
+    .configure(&control, target.clone(), forward(), true)
+    .await
+    .unwrap();
+  control.fail_check.store(true, Ordering::SeqCst);
+  let statuses = registry.list(&control, &target).await;
+  assert_eq!(statuses[0].state, PortForwardState::Error);
+  assert!(
+    statuses[0]
+      .message
+      .as_ref()
+      .unwrap()
+      .contains("SSH transport exited")
+  );
+  assert_eq!(control.changes.lock().unwrap().len(), 1);
+  let status = registry
+    .configure(&control, target.clone(), forward(), true)
+    .await
+    .unwrap();
+  assert_eq!(status.state, PortForwardState::Active);
+  let changes = control.changes.lock().unwrap();
+  assert_eq!(changes.len(), 3);
+  assert!(changes[1].cancel);
+  assert!(!changes[2].cancel);
 }
 
 fn target(destination: &str) -> SshTarget {

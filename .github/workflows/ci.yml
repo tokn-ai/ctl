@@ -42,14 +42,21 @@ jobs:
         run: node scripts/ci/check.mts scripts
 
   rust-quality:
-    name: Rust quality
-    runs-on: ubuntu-latest
+    name: Rust quality (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-2025
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
 
       - name: Install Tauri system dependencies
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
@@ -83,6 +90,7 @@ jobs:
         os:
           - ubuntu-latest
           - macos-latest
+          - windows-2025
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
@@ -121,6 +129,7 @@ jobs:
         run: cargo test --locked -p ctl-cli --test caller_credentials -- --include-ignored
 
       - name: Test fresh caller credentials against OpenSSH
+        if: runner.os != 'Windows'
         run: bash scripts/ci/caller-ssh-unix.sh
 
   cargo-packages:
@@ -146,15 +155,20 @@ jobs:
         run: node scripts/ci/check.mts packages
 
   windows-check:
-    name: Windows tasks and terminals
+    name: Windows executable and SSH smoke tests
     runs-on: windows-2025
-    timeout-minutes: 20
+    timeout-minutes: 30
     defaults:
       run:
         shell: pwsh
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
+
+      - name: Install Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@1.99.0
@@ -164,27 +178,14 @@ jobs:
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@v2
 
-      # Typecheck test sources without linking or executing Windows tests.
-      - name: Check portable crates and test sources
-        run: >-
-          cargo check --locked --target x86_64-pc-windows-msvc --all-targets
-          -p tokn-ctl-core -p ctmux-proto -p ctmux-core -p ctmux-client -p ctl-task-proto
-          -p ctl-client -p ctl-proto -p ctmux-ipc -p ctl-task-ipc -p ctl-task-store -p ctl-task-cli -p ctl-taskd -p ctl-cli -p ctl-agent -p ctmux-cli -p ctmuxd -p ctmux-tui
-
-      - name: Test Windows tasks and protocol framing
-        run: cargo test --locked -p tokn-ctl-core -p ctl-taskd -p ctl-task-ipc -p ctl-task-proto -p ctl-task-store -p ctl-task-cli -p ctl-cli -p ctl-client -p ctl-proto -p ctl-agent -p ctmux-proto -p ctmux-tui
-
       - name: Install Bun for caller credential interoperability
         uses: oven-sh/setup-bun@v2
 
-      - name: Test Windows Bun caller credential handoff
-        run: cargo test --locked -p ctl-cli --test caller_credentials -- --include-ignored
-
-      - name: Test Windows ConPTY sessions
-        run: cargo test --locked -p ctmuxd --test windows_conpty
-
       - name: Build Windows executables
-        run: cargo build --locked -p ctl-cli -p ctl-agent -p ctl-taskd -p ctmux-cli -p ctmuxd -p ctmux-tui
+        run: cargo build --locked -p ctl-cli -p ctl-agent -p ctld -p ctl-taskd -p ctmux-cli -p ctmuxd -p ctmux-tui
+
+      - name: Exercise Windows ctld status, replacement and stop
+        run: ./scripts/ci/windows-ctld.ps1
 
       - name: Exercise ctl task auto-start and commands
         run: ./scripts/ci/windows-tasks.ps1
@@ -192,7 +193,7 @@ jobs:
       - name: Exercise Windows ctmux auto-start and local ctl routing
         run: ./scripts/ci/windows-ctmux.ps1
 
-      - name: Test authenticated Windows SSH gateway and reconnect
+      - name: Test authenticated Windows SSH, forwarding and reconnect
         run: ./scripts/ci/windows-ssh.ps1
 
   frontend:

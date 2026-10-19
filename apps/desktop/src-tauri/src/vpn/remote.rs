@@ -66,6 +66,7 @@ pub(super) async fn connect_saved(
     .await
 }
 
+#[cfg(any(unix, test))]
 pub(super) fn require_connected(status: &VpnStatus) -> CommandResult<()> {
   if status.state == ctl_ipc::VpnState::Connected
     && status.running
@@ -109,6 +110,7 @@ pub(super) fn runtime_error(error: ctl_ipc::remote_vpn::Error) -> CommandErrorDt
   }
 }
 
+#[cfg(any(unix, test))]
 pub(super) fn route_error(
   mut error: CommandErrorDto,
   vpn_route_index: usize,

@@ -5,7 +5,25 @@ Per-user SSH connection and credential broker for ctl.
 Installs `ctld`, the companion daemon used by `ctl` and the ctmux desktop app.
 It owns shared SSH connections, port forwards, and VPN container lifecycles.
 
-Committed private SSH masters retain one local control-socket lease while
+Windows runs a per-user owner on a restricted local named pipe. Component
+inspection, cooperative restart/stop, local identity inventory, and container-backed
+VPN management remain available; a missing Docker or Podman installation is
+reported in VPN discovery diagnostics without preventing startup. Native
+Windows local forwarding uses ctld-owned TCP listeners, a native `ssh -N -T`
+health connection per forward, and a separate `ssh -W` process for every accepted
+TCP connection. Authentication is noninteractive and requires credentials already
+available to system OpenSSH, such as configured keys or its agent. Each process
+reads the original SSH configuration, including aliases, hostname overrides and
+proxy routes; ctld does not reconstruct a configuration snapshot. It suppresses
+unrelated configured forwards and reserves `LocalCommand` for its internal
+post-authentication readiness nonce. Windows Job Objects own SSH and proxy
+process lifetimes through listener removal, daemon stop and daemon crash.
+
+Windows OpenSSH does not support ControlMaster. Broker multiplexing and recovery
+watches retain an explicit unsupported error; Windows clients use direct SSH for
+interactive shells and remote commands. See [Windows support and CI](../../docs/windows-ci.md).
+
+On Unix, committed private SSH masters retain one local control-socket lease while
 ctld owns the connection, preventing idle expiry without a remote shell or
 credential read. Disconnect and shutdown release it; daemon death restores
 OpenSSH's five-minute idle cleanup once no clients remain. Configured shared
@@ -44,7 +62,7 @@ CLIs prefer their matching embedded helper. Shared discovery prefers a verified
 compatible shared `ctld.app` before a bundled release or nearby desktop app.
 With no eligible signed app, macOS selects an official release awaiting explicit
 setup. Manually managed or unsigned helpers require `CTLD_BIN`; implicit sibling
-and `PATH` discovery is retained on other Unix platforms.
+and `PATH` discovery is retained on other platforms.
 Compatibility requires the native target and explicitly shared ctld, lifecycle,
 and helper contracts. Remote VPN routes require ctld `1.1.13` and helper `1.1.2`.
 The installed helper's version and source
@@ -62,7 +80,7 @@ checkout, embedded, shared, or explicit override chosen for activation. Status
 only inspects it and reports its source, path, archive hash, and build metadata
 separately from the running owner. The desktop prefers its own bundled helper
 after any explicit complete-bundle selection. Source builds remain available for
-development and other Unix platforms.
+development and other platforms.
 
 A daemon launched by an older client from a deleted build directory can still
 serve existing masters, but cannot execute its askpass or isolated-agent helper.

@@ -1,4 +1,5 @@
 //! OpenSSH `ProxyCommand` helper for ordered SSH, SOCKS5, and managed VPN routes.
+use std::ffi::OsStr;
 use std::io;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
@@ -122,6 +123,10 @@ async fn connect(gateways: &[SshGateway], host: &str, port: u16) -> io::Result<S
         .args(["-o", "ForwardX11=no"])
         .args(["-o", "PermitLocalCommand=no"])
         .args(["-o", "RemoteCommand=none"]);
+      gateway_prompt_policy(
+        &mut command,
+        std::env::var_os("SSH_ASKPASS_REQUIRE").as_deref(),
+      );
       if !prefix.is_empty() {
         let executable = crate::helper_executable::current()?;
         let proxy = ctl_ipc::proxy_command_with_executable(prefix, &executable);
@@ -371,9 +376,38 @@ async fn socks_connect(
 }
 
 async fn askpass(gateway: &SshGateway) -> io::Result<Zeroizing<String>> {
+  let requirement = std::env::var_os("SSH_ASKPASS_REQUIRE");
+  let program = std::env::var_os("SSH_ASKPASS");
+  askpass_with_policy(gateway, requirement.as_deref(), program.as_deref()).await
+}
+
+fn prompts_disabled(requirement: Option<&OsStr>) -> bool {
+  requirement == Some(OsStr::new("never"))
+}
+
+fn gateway_prompt_policy(command: &mut Command, requirement: Option<&OsStr>) {
+  if prompts_disabled(requirement) {
+    // BatchMode is an SSH option, so an outer SSH process cannot pass it to a
+    // fresh gateway child through its environment. Preserve the same policy
+    // explicitly, before config can enable password/keyboard interaction.
+    command.args(["-o", "BatchMode=yes"]);
+  }
+}
+
+async fn askpass_with_policy(
+  gateway: &SshGateway,
+  requirement: Option<&OsStr>,
+  program: Option<&OsStr>,
+) -> io::Result<Zeroizing<String>> {
+  if prompts_disabled(requirement) {
+    return Err(io::Error::new(
+      io::ErrorKind::PermissionDenied,
+      "SOCKS5 authentication is required, but prompts are disabled for this connection",
+    ));
+  }
   let user = gateway.user.as_deref().unwrap_or_default();
   let message = format!("SOCKS5 {user}@{} password:", gateway.destination);
-  let Some(program) = std::env::var_os("SSH_ASKPASS") else {
+  let Some(program) = program else {
     return tokio::task::spawn_blocking(move || rpassword::prompt_password(message))
       .await
       .map_err(io::Error::other)?
@@ -464,6 +498,42 @@ mod tests {
   use super::*;
   use ctl_ipc::SshGatewayMode;
   use tokio::net::TcpListener;
+
+  #[test]
+  fn nested_ssh_propagates_noninteractive_authentication_without_changing_interactive_routes() {
+    for requirement in [None, Some("force"), Some("prefer"), Some("never")] {
+      let mut command = Command::new("ssh");
+      gateway_prompt_policy(&mut command, requirement.map(OsStr::new));
+      let arguments: Vec<_> = command.as_std().get_args().collect();
+      if requirement == Some("never") {
+        assert_eq!(arguments, [OsStr::new("-o"), OsStr::new("BatchMode=yes")]);
+      } else {
+        assert_eq!(arguments, [] as [&OsStr; 0]);
+      }
+    }
+  }
+
+  #[tokio::test]
+  async fn noninteractive_socks_authentication_never_starts_a_helper_or_reads_a_terminal() {
+    let gateway = SshGateway {
+      kind: GatewayKind::Socks5,
+      vpn: None,
+      destination: "gateway.example.test".into(),
+      hostname: None,
+      user: Some("operator".into()),
+      port: Some(1080),
+      identity_file: None,
+      mode: SshGatewayMode::Automatic,
+    };
+    for program in [None, Some(OsStr::new("nonexistent-askpass-must-not-start"))] {
+      let error = askpass_with_policy(&gateway, Some(OsStr::new("never")), program)
+        .await
+        .unwrap_err();
+      assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+      assert!(error.to_string().contains("authentication is required"));
+      assert!(error.to_string().contains("prompts are disabled"));
+    }
+  }
 
   #[tokio::test]
   async fn two_socks5_hops_preserve_route_order() {

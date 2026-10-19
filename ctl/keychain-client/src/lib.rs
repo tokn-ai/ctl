@@ -9,8 +9,8 @@
 #[allow(unsafe_code)]
 mod native;
 
-#[cfg(target_os = "macos")]
-#[allow(unsafe_code)]
+#[cfg(any(target_os = "macos", test))]
+#[cfg_attr(target_os = "macos", allow(unsafe_code))]
 mod session;
 
 #[cfg(target_os = "macos")]

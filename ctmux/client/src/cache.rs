@@ -120,14 +120,11 @@ fn private_directory(path: &Path) -> io::Result<()> {
   }
   Ok(())
 }
-fn private_file(path: &Path, append: bool) -> io::Result<File> {
+fn private_file(path: &Path) -> io::Result<File> {
   let mut options = OpenOptions::new();
-  options
-    .read(true)
-    .write(true)
-    .create(true)
-    .truncate(false)
-    .append(append);
+  // History updates truncate uncommitted tails before writing. Windows append
+  // handles cannot truncate, even when OpenOptions::write(true) is also set.
+  options.read(true).write(true).create(true).truncate(false);
   #[cfg(unix)]
   {
     use std::os::unix::fs::OpenOptionsExt;
@@ -135,20 +132,18 @@ fn private_file(path: &Path, append: bool) -> io::Result<File> {
   }
   options.open(path)
 }
+#[cfg(unix)]
 fn sync_directory(path: &Path) -> io::Result<()> {
-  #[cfg(unix)]
-  File::open(path)?.sync_all()?;
-  #[cfg(not(unix))]
-  let _ignored = path;
-  Ok(())
+  File::open(path)?.sync_all()
 }
 fn atomic_json(path: &Path, value: &Current) -> io::Result<()> {
   let temporary = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
   let result = (|| {
-    let mut file = private_file(&temporary, false)?;
+    let mut file = private_file(&temporary)?;
     serde_json::to_writer(&mut file, value).map_err(io::Error::other)?;
     file.sync_all()?;
     fs::rename(&temporary, path)?;
+    #[cfg(unix)]
     sync_directory(
       path
         .parent()
@@ -269,7 +264,7 @@ fn write_lines<T: Serialize>(
   let filename = format!("{prefix}-{}.jsonl", uuid::Uuid::new_v4());
   let path = directory.join(&filename);
   let result = (|| {
-    let mut file = private_file(&path, false)?;
+    let mut file = private_file(&path)?;
     let mut bytes = 0;
     for line in lines {
       let encoded = serde_json::to_vec(line).map_err(io::Error::other)?;
@@ -351,11 +346,13 @@ fn append_lines(directory: &Path, current: &mut Current, lines: &[String]) -> io
   let Some(filename) = &current.history_file else {
     return replace_lines(directory, current, lines);
   };
-  let mut file = private_file(&directory.join(filename), true)?;
+  let mut file = private_file(&directory.join(filename))?;
   if file.metadata()?.len() < current.history_bytes {
     return Err(invalid("Local session history is incomplete"));
   }
   file.set_len(current.history_bytes)?;
+  // CacheStore::apply holds the store lock across this seek and all writes.
+  file.seek(SeekFrom::Start(current.history_bytes))?;
   for line in lines {
     let bytes = serde_json::to_vec(line).map_err(io::Error::other)?;
     file.write_all(&bytes)?;
@@ -408,11 +405,12 @@ fn append_rows(
   let Some(physical) = current.physical_history.as_mut() else {
     return Ok(());
   };
-  let mut file = private_file(&directory.join(&physical.file), true)?;
+  let mut file = private_file(&directory.join(&physical.file))?;
   if file.metadata()?.len() < physical.end {
     return Err(invalid("Local history projection is incomplete"));
   }
   file.set_len(physical.end)?;
+  file.seek(SeekFrom::Start(physical.end))?;
   for row in rows {
     let bytes = serde_json::to_vec(row).map_err(io::Error::other)?;
     file.write_all(&bytes)?;
@@ -902,10 +900,13 @@ fn copy_record(source: &Path, destination: &Path) -> io::Result<()> {
       })
     {
       fs::copy(entry.path(), &target)?;
-      File::open(target)?.sync_all()?;
+      // Windows FlushFileBuffers requires a handle opened for writing.
+      OpenOptions::new().write(true).open(target)?.sync_all()?;
     }
   }
-  sync_directory(destination)
+  #[cfg(unix)]
+  sync_directory(destination)?;
+  Ok(())
 }
 fn resume_archive(archived: &Path, live: &Path) -> io::Result<()> {
   let parent = live
@@ -915,7 +916,9 @@ fn resume_archive(archived: &Path, live: &Path) -> io::Result<()> {
   let temporary = live.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
   let result = copy_record(archived, &temporary).and_then(|()| {
     fs::rename(&temporary, live)?;
-    sync_directory(parent)
+    #[cfg(unix)]
+    sync_directory(parent)?;
+    Ok(())
   });
   if result.is_err() {
     let _ignored = fs::remove_dir_all(temporary);
@@ -987,7 +990,7 @@ impl CacheStore {
   }
   fn lock(&self) -> io::Result<File> {
     private_directory(&self.directory)?;
-    let file = private_file(&self.directory.join("store.lock"), false)?;
+    let file = private_file(&self.directory.join("store.lock"))?;
     file.lock()?;
     Ok(file)
   }
@@ -1048,6 +1051,7 @@ impl CacheStore {
           }
         }
         fs::rename(&temporary, &archived)?;
+        #[cfg(unix)]
         sync_directory(parent)?;
       }
       for (directory, mut current) in panes {
@@ -1274,11 +1278,13 @@ impl CacheStore {
       }
       return Err(error);
     }
+    #[cfg(unix)]
     sync_directory(
       archived
         .parent()
         .ok_or_else(|| invalid("Missing archive parent"))?,
     )?;
+    #[cfg(unix)]
     sync_directory(
       root
         .parent()
@@ -1700,7 +1706,10 @@ mod tests {
     let path = fixture
       .directory(false)
       .join(fixture.current()?.history_file.unwrap());
-    private_file(&path, true)?.write_all(b"\"uncommitted\"\n")?;
+    OpenOptions::new()
+      .append(true)
+      .open(&path)?
+      .write_all(b"\"uncommitted\"\n")?;
     assert_eq!(fixture.presentation()?.history, ["committed"]);
     fixture.output(0, "one\r\ntwo\r\nthree")?;
     assert_eq!(fixture.presentation()?.history, ["committed", "one"]);
@@ -2012,7 +2021,10 @@ mod tests {
     let current = fixture.current()?;
     let physical = current.physical_history.as_ref().unwrap();
     let path = fixture.directory(false).join(&physical.file);
-    private_file(&path, true)?.write_all(b"{\"text\":\"uncommitted\",\"wrapped\":false}\n")?;
+    OpenOptions::new()
+      .append(true)
+      .open(&path)?
+      .write_all(b"{\"text\":\"uncommitted\",\"wrapped\":false}\n")?;
     assert_eq!(fixture.presentation()?.history, ["old", "a"]);
     let sequence = fixture.output(initial.len() as u64, "\r\nd\r\ne\r\nf\r\ng")?;
     drop(source.feed_str("\r\nd\r\ne\r\nf\r\ng"));
@@ -2215,8 +2227,7 @@ mod tests {
     assert!(!fixture.presentation()?.history_gap);
     let before = fs::read(fixture.directory(false).join("current.json"))?;
     let physical = fixture.current()?.physical_history.unwrap();
-    private_file(&fixture.directory(false).join(physical.file), false)?
-      .set_len(physical.end - 1)?;
+    private_file(&fixture.directory(false).join(physical.file))?.set_len(physical.end - 1)?;
     assert!(fixture.presentation().is_err());
     assert!(fixture.output(initial.len() as u64, "\r\nnew").is_err());
     assert_eq!(

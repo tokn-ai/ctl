@@ -187,8 +187,12 @@ pub(crate) async fn run(
 mod tests {
   use super::{Daemon, prepare_restart};
   use crate::components::TargetOptions;
+  #[cfg(windows)]
+  use ctl_ipc::Listener;
   use std::io;
   use std::sync::atomic::{AtomicUsize, Ordering};
+  #[cfg(unix)]
+  use tokio::net::UnixListener as Listener;
 
   static PROVIDER_CALLS: AtomicUsize = AtomicUsize::new(0);
   const PROVIDER_ERROR: &str = "maintenance fixture signed-helper provider consulted";
@@ -202,6 +206,13 @@ mod tests {
         &uuid::Uuid::new_v4().simple().to_string()[..12]
       ));
       std::fs::create_dir(&directory).unwrap();
+      #[cfg(unix)]
+      let socket = directory.join("ctld.sock");
+      #[cfg(windows)]
+      let socket = std::path::PathBuf::from(format!(
+        r"\\.\pipe\ctl-restart-test-{}",
+        uuid::Uuid::new_v4()
+      ));
       let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
       command
         .args([
@@ -210,7 +221,7 @@ mod tests {
           "--nocapture",
         ])
         .env("CTL_MAINTENANCE_TEST_MODE", mode)
-        .env("CTLD_SOCKET_PATH", directory.join("ctld.sock"))
+        .env("CTLD_SOCKET_PATH", socket)
         .env("HOME", &directory)
         .env("PATH", &directory)
         .env_remove("CTLD_BIN")
@@ -245,9 +256,9 @@ mod tests {
     let server = if mode == "absent" {
       None
     } else {
-      let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+      let listener = Listener::bind(&socket).unwrap();
       Some(tokio::spawn(async move {
-        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut stream = listener.accept().await.unwrap().0;
         assert!(matches!(
           ctl_ipc::read_frame::<_, ctl_ipc::lifecycle::Request>(&mut stream)
             .await

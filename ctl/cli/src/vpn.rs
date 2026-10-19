@@ -47,43 +47,50 @@ pub enum Command {
 
 pub(crate) enum RuntimeClient {
   Local(ctl_ipc::vpn::Client),
+  #[cfg(unix)]
   Remote(ctl_ipc::remote_vpn::Client),
 }
 
 impl RuntimeClient {
+  #[cfg(unix)]
   async fn for_target(target: &ConnectionTargetDto, start_routes: bool) -> Result<Self, Error> {
     if matches!(target, ConnectionTargetDto::Local) {
       return Ok(Self::Local(ctl_ipc::vpn::Client::default()));
     }
-    #[cfg(unix)]
-    {
-      if start_routes {
-        crate::target::ensure_vpn(target)
-          .await
-          .map_err(|error| Error::Preparation(Box::new(error)))?;
-      }
-      let owner = target.to_ssh_target()?;
-      let control_path = crate::ssh_broker::ensure_master(owner.clone()).await?;
-      let expected_remote_id = match target {
-        ConnectionTargetDto::Ssh { remote_info, .. } => remote_info
-          .as_ref()
-          .map(|identity| identity.remote_id.clone()),
-        ConnectionTargetDto::Local => None,
-      };
-      Ok(Self::Remote(
-        ctl_ipc::remote_vpn::Client::new(owner, expected_remote_id).with_control_path(control_path),
-      ))
+    if start_routes {
+      crate::target::ensure_vpn(target)
+        .await
+        .map_err(|error| Error::Preparation(Box::new(error)))?;
     }
-    #[cfg(not(unix))]
-    {
-      let _ = start_routes;
+    let owner = target.to_ssh_target()?;
+    let control_path = crate::ssh_broker::ensure_master(owner.clone()).await?;
+    let expected_remote_id = match target {
+      ConnectionTargetDto::Ssh { remote_info, .. } => remote_info
+        .as_ref()
+        .map(|identity| identity.remote_id.clone()),
+      ConnectionTargetDto::Local => None,
+    };
+    Ok(Self::Remote(
+      ctl_ipc::remote_vpn::Client::new(owner, expected_remote_id).with_control_path(control_path),
+    ))
+  }
+
+  #[cfg(not(unix))]
+  fn for_target(
+    target: &ConnectionTargetDto,
+    _start_routes: bool,
+  ) -> std::future::Ready<Result<Self, Error>> {
+    std::future::ready(if target.is_local() {
+      Ok(Self::Local(ctl_ipc::vpn::Client::default()))
+    } else {
       Err(Error::RemoteVpnUnsupported)
-    }
+    })
   }
 
   pub(crate) async fn list(&self) -> Result<ctl_ipc::VpnSnapshot, Error> {
     match self {
       Self::Local(client) => Ok(client.list().await?),
+      #[cfg(unix)]
       Self::Remote(client) => Ok(client.list().await?),
     }
   }
@@ -94,6 +101,7 @@ impl RuntimeClient {
   ) -> Result<ctl_ipc::VpnStatus, Error> {
     match self {
       Self::Local(client) => Ok(client.start_connection(connection).await?),
+      #[cfg(unix)]
       Self::Remote(client) => Ok(client.start_connection(connection).await?),
     }
   }
@@ -101,6 +109,7 @@ impl RuntimeClient {
   async fn stop_id(&self, connection_id: &str) -> Result<ctl_ipc::VpnStatus, Error> {
     match self {
       Self::Local(client) => Ok(client.stop_id(connection_id).await?),
+      #[cfg(unix)]
       Self::Remote(client) => Ok(client.stop_id(connection_id).await?),
     }
   }
@@ -108,6 +117,7 @@ impl RuntimeClient {
   async fn stop(&self) -> Result<ctl_ipc::VpnStatus, Error> {
     match self {
       Self::Local(client) => Ok(client.stop().await?),
+      #[cfg(unix)]
       Self::Remote(_) => {
         let snapshot = self.list().await?;
         let mut connections = snapshot.connections.iter().filter(|status| {
@@ -621,6 +631,7 @@ fn display_value(value: Option<&str>) -> String {
 pub enum Error {
   #[error("VPN profile creation and removal are local operations; omit --host and --destination.")]
   LocalProfilesOnly,
+  #[cfg(unix)]
   #[error("Multiple remote VPN connections are active; specify a VPN name or ID to stop one.")]
   AmbiguousStop,
   #[cfg(not(unix))]
@@ -633,6 +644,7 @@ pub enum Error {
   Broker(#[from] crate::ssh_broker::Error),
   #[error(transparent)]
   Remote(#[from] ctl_ipc::remote_vpn::Error),
+  #[cfg(unix)]
   #[error(transparent)]
   Preparation(Box<crate::target::Error>),
   #[error("An interactive terminal is required for `ctl vpn {0}`.")]
@@ -643,8 +655,10 @@ pub enum Error {
   NoOwnedVpn,
   #[error("VPN runtime inventory is unavailable. Specify a VPN name or ID to stop one.")]
   InventoryUnavailable,
+  #[cfg(unix)]
   #[error("VPN runtime inventory is incomplete. Start or update ctld, then retry removal.")]
   RemovalInventoryUnavailable,
+  #[cfg(unix)]
   #[error(
     "VPN {0:?} is active. Stop it and wait for its container to exit before removing its profile."
   )]

@@ -6,6 +6,7 @@ pub(crate) use broker::existing_master;
 pub(crate) use broker::{check_route_support, ensure_target_master};
 pub mod commands;
 mod connection;
+mod forwarding;
 mod install_identity;
 mod verification;
 

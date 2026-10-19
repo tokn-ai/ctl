@@ -97,7 +97,7 @@ mod tests {
 
   #[test]
   fn observer_owns_its_state_and_registered_selectors_deliver_display_events() {
-    let state = Arc::new(SessionState::new());
+    let state = Arc::new(SessionState::new(console_is_unlocked));
     let weak = Arc::downgrade(&state);
     let observer = DisplayObserver::new(Arc::clone(&state)).unwrap();
     let notification = NSObject::new();

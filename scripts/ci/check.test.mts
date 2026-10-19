@@ -70,3 +70,27 @@ test("published-source checks retain the minimum Rust version and explicit dirty
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(f.calls(), [{ args: ["--allow-dirty"], toolchain: "1.97.0" }]);
 });
+
+test("quality and runtime checks cover the whole workspace", { skip: process.platform === "win32" }, (t) => {
+  const f = fixture(t);
+  for (const scope of ["quality", "rust"]) {
+    const result = f.run(scope);
+    assert.equal(result.status, 0, result.stderr);
+  }
+  const [formatting, clippy, tests] = f.calls();
+  assert.deepEqual(formatting.args, ["fmt", "--all", "--", "--check"]);
+  assert.deepEqual(clippy.args, ["clippy", "--locked", "--workspace", "--all-targets", "--", "-D", "warnings"]);
+  assert.deepEqual(tests.args, ["test", "--locked", "--no-fail-fast", "--workspace"]);
+});
+
+test("package filtering and unrelated packaging options are rejected", { skip: process.platform === "win32" }, (t) => {
+  const f = fixture(t);
+  for (const [scope, ...options] of [
+    ["quality", "--portable"], ["rust", "--portable"], ["all", "--portable"],
+    ["quality", "--allow-dirty"], ["rust", "--allow-dirty"],
+  ]) {
+    const result = f.run(scope, ...options);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /usage: node scripts\/ci\/check.mts/);
+  }
+});

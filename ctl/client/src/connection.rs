@@ -292,7 +292,7 @@ where
   }
 }
 
-/// Exchange an existing non-authentication broker operation.
+/// Exchange a broker operation that does not request frontend prompts.
 /// # Errors
 /// Returns connection, negotiation, codec, or daemon errors.
 pub async fn request(message: ClientMessage) -> Result<ServerMessage, Error> {
@@ -414,11 +414,27 @@ pub enum Error {
 mod tests {
   use super::*;
 
+  #[cfg(unix)]
+  fn stream_pair() -> std::future::Ready<(ctl_ipc::Stream, ctl_ipc::Stream)> {
+    std::future::ready(ctl_ipc::Stream::pair().unwrap())
+  }
+
+  #[cfg(windows)]
+  async fn stream_pair() -> (ctl_ipc::Stream, ctl_ipc::Stream) {
+    let path = PathBuf::from(format!(
+      r"\\.\pipe\ctl-connection-test-{}",
+      uuid::Uuid::new_v4()
+    ));
+    let listener = ctl_ipc::Listener::bind(&path).unwrap();
+    let (client, server) = tokio::join!(ctl_ipc::connect_existing_at(&path), listener.accept());
+    (client.unwrap(), server.unwrap().0)
+  }
+
   #[tokio::test]
   async fn existing_master_observes_the_exact_route_on_every_supported_contract() {
     for protocol in ctl_ipc::SUPPORTED_PROTOCOL_VERSIONS.iter().copied() {
       let client = ConnectionClient::default();
-      let (stream, mut server) = ctl_ipc::Stream::pair().unwrap();
+      let (stream, mut server) = stream_pair().await;
       *client.connection.lock().await = Some((stream, protocol));
       let mut target = fixture_target();
       target.hostname = Some("selected.example.invalid".into());
@@ -491,7 +507,7 @@ mod tests {
   async fn disconnect_can_reach_the_broker_while_authentication_owns_the_socket() {
     let client = ConnectionClient::default();
     let _authentication_guard = client.connection.lock().await;
-    let (stream, mut server) = ctl_ipc::Stream::pair().unwrap();
+    let (stream, mut server) = stream_pair().await;
     let peer = tokio::spawn(async move {
       assert!(matches!(
         ctl_ipc::read_frame::<_, ClientMessage>(&mut server)
@@ -543,7 +559,7 @@ mod tests {
   #[tokio::test]
   async fn ensure_status_and_disconnect_share_the_negotiated_socket() {
     let client = ConnectionClient::default();
-    let (stream, mut server) = ctl_ipc::Stream::pair().unwrap();
+    let (stream, mut server) = stream_pair().await;
     *client.connection.lock().await = Some((stream, ctl_ipc::PROTOCOL_VERSION));
     let peer = tokio::spawn(async move {
       assert!(matches!(
@@ -656,7 +672,7 @@ mod tests {
   #[tokio::test]
   async fn shared_master_client_serializes_requests_without_new_sockets() {
     let client = std::sync::Arc::new(ConnectionClient::default());
-    let (stream, mut server) = ctl_ipc::Stream::pair().unwrap();
+    let (stream, mut server) = stream_pair().await;
     *client.connection.lock().await = Some((stream, ctl_ipc::PROTOCOL_VERSION));
     let worker = tokio::spawn(async move {
       for _ in 0..32 {
@@ -697,7 +713,7 @@ mod tests {
   #[tokio::test]
   async fn master_client_cancellation_discards_the_socket_and_pending_response() {
     let client = ConnectionClient::default();
-    let (stream, mut server) = ctl_ipc::Stream::pair().unwrap();
+    let (stream, mut server) = stream_pair().await;
     *client.connection.lock().await = Some((stream, ctl_ipc::PROTOCOL_VERSION));
     assert!(
       tokio::time::timeout(
@@ -729,7 +745,7 @@ mod tests {
       (ctl_ipc::PROTOCOL_VERSION, false),
     ] {
       let client = ConnectionClient::default();
-      let (stream, mut server) = ctl_ipc::Stream::pair().unwrap();
+      let (stream, mut server) = stream_pair().await;
       *client.connection.lock().await = Some((stream, protocol));
       let worker = tokio::spawn(async move {
         ctl_ipc::read_frame::<_, ClientMessage>(&mut server)
@@ -1046,7 +1062,7 @@ mod tests {
     }))
     .unwrap();
     let ssh = serde_json::json!({"destination":"bastion", "hostname":null, "user":null, "port":null, "identity_file":null, "mode":"automatic"});
-    let vpn = serde_json::json!({"kind":"vpn", "destination":"work", "hostname":null, "user":null, "port":null, "identity_file":null, "mode":"automatic", "vpn":{"connection_id":"work", "socket_path":"/tmp/test-vpn.sock"}});
+    let vpn = serde_json::json!({"kind":"vpn", "destination":"work", "hostname":null, "user":null, "port":null, "identity_file":null, "mode":"automatic", "vpn":{"connection_id":"work", "socket_path":ctl_ipc::default_socket_path()}});
     for selected in ctl_ipc::SUPPORTED_PROTOCOL_VERSIONS.iter().copied() {
       let (mut client, mut server) = tokio::io::duplex(4096);
       let daemon = tokio::spawn(async move {

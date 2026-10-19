@@ -220,9 +220,6 @@ impl Client {
     start_daemon: bool,
     deadline: Duration,
   ) -> Result<Response, VpnError> {
-    if !cfg!(unix) {
-      return Err(VpnError::UnsupportedPlatform);
-    }
     // Preparing a signed bundled helper has its own bounded verification.
     // Keep it outside the VPN exchange deadline, particularly the short
     // capabilities request made before starting Tailscale. Existing-only

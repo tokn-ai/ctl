@@ -21,8 +21,11 @@ Temporary destinations use OpenSSH configuration, bypass the saved host catalog
 even when names match, and do not save a host definition. `--destination`
 conflicts with `--host` and `--method`; `--method` chooses a saved host's
 connection method. `--remote-platform` works with either target selector.
-Windows destinations retain SSH endpoint configuration but use a private master
-because configured master startup requires a POSIX shell.
+Unix clients connecting to Windows destinations retain SSH endpoint configuration
+and use a private master because configured master startup requires a POSIX shell.
+Windows clients use direct SSH for remote commands. Their local `port` commands
+use ctld-owned listeners and separate native SSH connections, preserving system
+SSH configuration and requiring authentication already available without prompts.
 The selectors apply to shells, execution, ctmux, registered tasks, managed ports,
 remote VPN operations, and remote component maintenance. Omit both selectors
 for local operations where supported. `ssh` and `scp` take their destinations
@@ -154,7 +157,7 @@ Once the packages are published:
 cargo install --locked ctl-cli ctmuxd ctl-taskd
 ctl setup
 
-# Other Unix clients.
+# Other Unix and Windows clients.
 cargo install --locked ctl-cli ctld ctmuxd ctl-taskd
 ```
 
@@ -204,7 +207,7 @@ a verified compatible shared `ctld.app`, then its own bundled helper, then a
 nearby desktop bundle. Without an eligible signed app, macOS selects the official
 release for explicit setup; it does not implicitly choose an unsigned sibling
 or `PATH` executable. Use `CTLD_BIN` to explicitly choose a manually managed
-helper. Other Unix platforms retain sibling/`PATH` discovery. Packaged desktops
+helper. Other Unix platforms and Windows retain sibling/`PATH` discovery. Packaged desktops
 prefer their own bundled helper after any explicit complete-bundle selection.
 Shared apps must match the native architecture and advertise a shared ctld,
 lifecycle, and helper contract. Remote VPN routes require

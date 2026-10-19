@@ -59,6 +59,24 @@ fn engine_search_supports_gui_paths_and_never_searches_relative_directories() {
   );
 }
 
+#[cfg(windows)]
+#[test]
+fn windows_engine_search_uses_native_executables_and_absolute_directories() {
+  let paths = engine_candidates(
+    Some(OsStr::new(
+      r".;relative;C:\Program Files\Docker\resources\bin;C:\custom;C:\custom",
+    )),
+    Some(Path::new(r"C:\Users\fixture")),
+  );
+  assert_eq!(
+    paths[0],
+    Path::new(r"C:\Program Files\Docker\resources\bin\docker.exe")
+  );
+  assert!(paths.iter().all(|path| path.is_absolute()));
+  assert!(paths.contains(&PathBuf::from(r"C:\custom\podman.exe")));
+  assert_eq!(paths.len(), 4);
+}
+
 #[test]
 fn accepts_only_a_single_nonzero_loopback_port() {
   assert_eq!(

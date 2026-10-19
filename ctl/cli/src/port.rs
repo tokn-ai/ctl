@@ -24,6 +24,16 @@ pub enum Command {
 }
 
 pub async fn run(target: &ConnectionTargetDto, command: Command) -> Result<(), Error> {
+  #[cfg(not(unix))]
+  if matches!(
+    target,
+    ConnectionTargetDto::Ssh {
+      use_ssh_config_master: Some(true),
+      ..
+    }
+  ) {
+    return Err(Error::MasterSelectionUnsupported);
+  }
   let ssh_target = target.to_ssh_target()?;
   match command {
     Command::Add {
@@ -57,7 +67,10 @@ pub async fn run(target: &ConnectionTargetDto, command: Command) -> Result<(), E
         }
       }
       crate::target::ensure_vpn(target).await?;
+      #[cfg(unix)]
       crate::ssh_broker::ensure_master(ssh_target.clone()).await?;
+      // Windows forwards own a dedicated SSH process. The helper validates and
+      // establishes that transport without a multiplexed master or prompts.
       let ServerMessage::PortForwardConfigured { status } =
         crate::ssh_broker::request(ClientMessage::ConfigurePortForward {
           target: ssh_target,
@@ -194,6 +207,9 @@ fn parse_forward(value: &str, forward_id: String) -> Result<LocalPortForward, Er
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+  #[cfg(not(unix))]
+  #[error("SSH master selection currently requires macOS or Linux.")]
+  MasterSelectionUnsupported,
   #[error(transparent)]
   Host(#[from] ctl_client::hosts::HostError),
   #[error(transparent)]
@@ -228,5 +244,19 @@ mod tests {
     ] {
       assert!(parse_forward(value, "web".into()).is_err());
     }
+  }
+
+  #[cfg(not(unix))]
+  #[tokio::test]
+  async fn explicit_master_selection_is_rejected_before_helper_startup() {
+    let target = serde_json::from_value(serde_json::json!({
+      "kind": "ssh", "destination": "configured", "ssh_config_alias": "configured",
+      "use_ssh_config_master": true,
+    }))
+    .unwrap();
+    assert!(matches!(
+      run(&target, Command::List { json: true }).await,
+      Err(Error::MasterSelectionUnsupported),
+    ));
   }
 }

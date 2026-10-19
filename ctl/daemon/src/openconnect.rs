@@ -451,17 +451,27 @@ pub(super) fn find_engine() -> io::Result<PathBuf> {
 }
 
 fn engine_candidates(search_path: Option<&OsStr>, home: Option<&Path>) -> Vec<PathBuf> {
-  let mut directories: Vec<PathBuf> = search_path
+  let directories: Vec<PathBuf> = search_path
     .into_iter()
     .flat_map(std::env::split_paths)
     .filter(|path| path.is_absolute())
     .collect();
+  #[cfg(unix)]
+  let mut directories = directories;
+  #[cfg(unix)]
   if let Some(home) = home.filter(|path| path.is_absolute()) {
     directories.push(home.join(".local/bin"));
   }
+  #[cfg(unix)]
   directories
     .extend(["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"].map(PathBuf::from));
-  let mut candidates: Vec<_> = ["docker", "podman"]
+  #[cfg(windows)]
+  let _ = home;
+  #[cfg(windows)]
+  let names = ["docker.exe", "podman.exe"];
+  #[cfg(unix)]
+  let names = ["docker", "podman"];
+  let mut candidates: Vec<_> = names
     .into_iter()
     .flat_map(|name| {
       directories

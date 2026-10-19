@@ -192,6 +192,7 @@ async fn run_terminal(app: &mut app::App<'_>) -> Result<()> {
     terminal.suspend()?;
     drop(interaction);
     let result = {
+      #[cfg(unix)]
       let _mode = terminal::PromptMode::capture()?;
       reconnect.await
     };

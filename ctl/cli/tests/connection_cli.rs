@@ -63,10 +63,23 @@ impl Fixture {
       )
       .await
       .unwrap();
-      let Some(ClientMessage::EnsureMaster { target }) =
-        ctl_ipc::read_frame(&mut stream).await.unwrap()
-      else {
-        panic!("expected master request")
+      let mut status_target = None;
+      let target = loop {
+        match ctl_ipc::read_frame(&mut stream).await.unwrap() {
+          Some(ClientMessage::MasterStatus { target }) => {
+            status_target = Some(target);
+            ctl_ipc::write_frame(&mut stream, &ServerMessage::AuthenticationRequired)
+              .await
+              .unwrap();
+          }
+          Some(ClientMessage::EnsureMaster { target }) => {
+            if let Some(status_target) = status_target {
+              assert_eq!(target, status_target);
+            }
+            break target;
+          }
+          _ => panic!("expected master request"),
+        }
       };
       ctl_ipc::write_frame(
         &mut stream,
@@ -224,6 +237,64 @@ async fn temporary_destination_bypasses_a_saved_name_without_changing_the_catalo
   assert_eq!(&args[args.len() - 2..], &["work", "'printf' 'a b'\\''c'"]);
   assert!(!args.contains(&"10.0.0.20".into()));
   assert_eq!(fs::read(catalog_path).unwrap(), catalog);
+}
+
+#[tokio::test]
+async fn windows_targets_use_private_masters_for_plain_shell_exec_and_services() {
+  let _guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
+  for selector in ["--destination", "--host"] {
+    for operation in [
+      &["shell", "--plain"][..],
+      &["exec", "--", "cmd.exe", "/D", "/C", "exit 29"],
+      &["ctmux", "list"],
+      &["task", "list"],
+    ] {
+      let fixture = Fixture::new();
+      let catalog_path = fixture.0.join("hosts.json");
+      let mut catalog: serde_json::Value =
+        serde_json::from_slice(&fs::read(&catalog_path).unwrap()).unwrap();
+      let method = &mut catalog["document"]["hosts"][0]["connection_methods"][0];
+      method["ssh_config_alias"] = json!("10.0.0.20");
+      method["use_ssh_config_master"] = json!(true);
+      fs::write(&catalog_path, serde_json::to_vec(&catalog).unwrap()).unwrap();
+      fixture.script("ssh", "printf '%s\\n' \"$@\" > \"$CTL_TEST_ARGS\"; exit 29");
+      let broker = fixture.broker();
+      let output = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        fixture
+          .command()
+          .args([selector, "work", "--remote-platform", "windows"])
+          .args(operation)
+          .kill_on_drop(true)
+          .output(),
+      )
+      .await
+      .unwrap()
+      .unwrap();
+      let target = broker.await.unwrap();
+      let destination = if selector == "--host" {
+        "10.0.0.20"
+      } else {
+        "work"
+      };
+      assert_eq!(target.destination, destination);
+      assert_eq!(target.ssh_config_alias.as_deref(), Some(destination));
+      assert_eq!(target.use_ssh_config_master, Some(false));
+      assert!(!target.uses_ssh_config_master());
+      let args = fixture.args();
+      assert!(args.contains(&"-S".into()));
+      assert!(args.contains(&destination.into()));
+      if matches!(operation[0], "shell" | "exec") {
+        assert_eq!(output.status.code(), Some(29));
+      } else {
+        assert!(!output.status.success());
+        // The failing SSH fixture still exposes the exact fixed command used
+        // to start either Windows service after master selection.
+        assert!(args.contains(&"ctl-agent.exe".into()));
+        assert!(args.contains(&"connect".into()));
+      }
+    }
+  }
 }
 
 #[tokio::test]

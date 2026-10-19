@@ -1,11 +1,18 @@
-use clap::{Subcommand, ValueEnum};
+use clap::Subcommand;
+#[cfg(unix)]
+use clap::ValueEnum;
+#[cfg(unix)]
 use ctl_core::bundles::{Purpose, Source};
 use std::io;
+#[cfg(unix)]
 use std::path::PathBuf;
 
+#[cfg(unix)]
 mod list;
 mod maintenance;
+#[cfg(unix)]
 mod update;
+#[cfg(unix)]
 pub use update::UpdatePackage;
 
 #[derive(Clone, Copy)]
@@ -16,11 +23,13 @@ pub(crate) struct TargetOptions<'a> {
   platform: Option<crate::RemotePlatform>,
 }
 
+#[cfg(unix)]
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum Usage {
   Local,
   Upload,
 }
+#[cfg(unix)]
 impl From<Usage> for Purpose {
   fn from(value: Usage) -> Self {
     match value {
@@ -30,11 +39,13 @@ impl From<Usage> for Purpose {
   }
 }
 
+#[cfg(unix)]
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum Origin {
   Ci,
   Release,
 }
+#[cfg(unix)]
 impl From<Origin> for Source {
   fn from(value: Origin) -> Self {
     match value {
@@ -76,6 +87,7 @@ pub enum Command {
     json: bool,
   },
   /// Update local or remote hosts, preserving running services.
+  #[cfg(unix)]
   Update {
     /// Saved host names or IDs (repeat or separate with commas).
     #[arg(long, value_delimiter = ',', num_args = 1..)]
@@ -98,6 +110,7 @@ pub enum Command {
     json: bool,
   },
   /// List included and stored complete builds and selections without connecting.
+  #[cfg(unix)]
   List {
     /// Filter by target; defaults to all supported targets.
     #[arg(long)]
@@ -106,6 +119,7 @@ pub enum Command {
     json: bool,
   },
   /// Import a complete build and select it, preserving every running service.
+  #[cfg(unix)]
   Sync {
     /// Directory containing a verified CI/release bundle-set or four native binaries.
     #[arg(long)]
@@ -126,6 +140,7 @@ pub enum Command {
     json: bool,
   },
   /// Select a stored or included complete build; never restart a service.
+  #[cfg(unix)]
   Select {
     bundle_id: String,
     #[arg(long)]
@@ -149,21 +164,26 @@ pub async fn run(
     platform,
   };
   match command {
-    Command::Status { json } => return maintenance::status(target_options, json).await,
+    Command::Status { json } => maintenance::status(target_options, json).await,
     Command::Stop {
       component,
       yes,
       dry_run,
       json,
-    } => return maintenance::stop(component, target_options, yes, dry_run, json).await,
+    } => maintenance::stop(component, target_options, yes, dry_run, json).await,
     Command::Restart {
       component,
       yes,
       dry_run,
       json,
-    } => return maintenance::restart(component, target_options, yes, dry_run, json).await,
-    _ => {}
+    } => maintenance::restart(component, target_options, yes, dry_run, json).await,
+    #[cfg(unix)]
+    command => run_bundle(command, target_options).await,
   }
+}
+
+#[cfg(unix)]
+async fn run_bundle(command: Command, target_options: TargetOptions<'_>) -> io::Result<()> {
   let home = dirs::home_dir().ok_or_else(|| io::Error::other("home directory is unavailable"))?;
   match command {
     Command::Status { .. } | Command::Restart { .. } | Command::Stop { .. } => unreachable!(),
@@ -224,6 +244,7 @@ pub async fn run(
   Ok(())
 }
 
+#[cfg(unix)]
 async fn sync(home: &std::path::Path, command: Command) -> io::Result<()> {
   let Command::Sync {
     from,
@@ -283,6 +304,7 @@ async fn sync(home: &std::path::Path, command: Command) -> io::Result<()> {
   Ok(())
 }
 
+#[cfg(unix)]
 fn default_target(purpose: Usage, local_build: bool) -> String {
   let native = ctl_core::paths::native_target();
   if matches!(purpose, Usage::Upload) && !local_build {

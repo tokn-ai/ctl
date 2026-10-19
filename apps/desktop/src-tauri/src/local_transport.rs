@@ -1,13 +1,9 @@
 use crate::error::CommandErrorDto;
 
-#[cfg(unix)]
 use ctmux_ipc::{LocalControlClientError, LocalControlErrorCode};
-#[cfg(unix)]
 use std::path::Path;
 use std::path::PathBuf;
-#[cfg(unix)]
 use std::time::Duration;
-#[cfg(unix)]
 use tokio::time::timeout;
 
 /// Details returned after a local daemon has been replaced.
@@ -44,26 +40,19 @@ pub(crate) struct ArmedRestart {
   stream: LocalStream,
 }
 
-#[cfg(unix)]
 const DAEMON_RESTART_REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
 // A cooperative restart ends all sessions and waits for live data/control
 // connections to drain naturally. Keep the operation bounded without forcing
 // either endpoint closed.
-#[cfg(unix)]
 const DAEMON_RESTART_DRAIN_TIMEOUT: Duration = Duration::from_secs(15);
 
-#[cfg(unix)]
-pub type LocalStream = tokio::net::UnixStream;
-
-#[cfg(not(unix))]
-pub type LocalStream = tokio::io::DuplexStream;
+pub type LocalStream = ctmux_ipc::Stream;
 
 /// Connects to the currently running local daemon without starting a new one.
 ///
 /// Supplemental metadata lookups use this after a successful primary request:
 /// if the daemon has gone away in the meantime, they should be ignored rather
 /// than silently starting a replacement with unrelated sessions.
-#[cfg(unix)]
 pub async fn connect_existing() -> Result<LocalStream, CommandErrorDto> {
   ctmux_ipc::connect_existing_daemon(&ctmux_ipc::socket_path())
     .await
@@ -81,7 +70,6 @@ pub async fn connect_existing() -> Result<LocalStream, CommandErrorDto> {
 ///
 /// Returns a typed unsupported error when data is live but the paired control
 /// endpoint is absent or does not advertise cooperative restart.
-#[cfg(unix)]
 pub async fn preflight_restart_daemon() -> Result<RestartDaemonPreflight, CommandErrorDto> {
   let data_socket_path = ctmux_ipc::socket_path();
   let control_socket_path =
@@ -89,7 +77,6 @@ pub async fn preflight_restart_daemon() -> Result<RestartDaemonPreflight, Comman
   preflight_restart_daemon_at(&data_socket_path, &control_socket_path).await
 }
 
-#[cfg(unix)]
 async fn preflight_restart_daemon_at(
   data_socket_path: &Path,
   control_socket_path: &Path,
@@ -146,7 +133,6 @@ async fn preflight_restart_daemon_at(
 /// Returns an error when cooperative restart is unsupported, the current
 /// daemon fails to drain naturally, or a fresh daemon cannot be started and
 /// health-checked.
-#[cfg(unix)]
 pub(crate) async fn restart_daemon(
   preflight: RestartDaemonPreflight,
 ) -> Result<RestartLocalDaemonOutcome, CommandErrorDto> {
@@ -195,7 +181,6 @@ pub(crate) async fn restart_daemon(
   })
 }
 
-#[cfg(unix)]
 async fn local_control_handshake_with_timeout(
   stream: &mut LocalStream,
 ) -> Result<ctmux_ipc::LocalControlCapabilities, CommandErrorDto> {
@@ -213,7 +198,6 @@ async fn local_control_handshake_with_timeout(
   .map_err(local_control_error)
 }
 
-#[cfg(unix)]
 async fn preflight_local_control_handshake_with_timeout(
   stream: &mut LocalStream,
 ) -> Result<ctmux_ipc::LocalControlCapabilities, CommandErrorDto> {
@@ -230,7 +214,6 @@ async fn preflight_local_control_handshake_with_timeout(
   .map_err(preflight_local_control_error)
 }
 
-#[cfg(unix)]
 async fn request_restart_with_timeout(stream: &mut LocalStream) -> Result<u32, CommandErrorDto> {
   timeout(
     DAEMON_RESTART_REQUEST_TIMEOUT,
@@ -246,7 +229,6 @@ async fn request_restart_with_timeout(stream: &mut LocalStream) -> Result<u32, C
   .map_err(local_control_error)
 }
 
-#[cfg(unix)]
 fn local_control_error(error: LocalControlClientError) -> CommandErrorDto {
   match error {
     LocalControlClientError::RestartUnsupported => restart_unsupported(
@@ -267,7 +249,6 @@ fn local_control_error(error: LocalControlClientError) -> CommandErrorDto {
   }
 }
 
-#[cfg(unix)]
 fn local_control_error_code(code: LocalControlErrorCode) -> &'static str {
   match code {
     LocalControlErrorCode::InvalidRequest => "local_control_invalid_request",
@@ -278,24 +259,20 @@ fn local_control_error_code(code: LocalControlErrorCode) -> &'static str {
   }
 }
 
-#[cfg(unix)]
 fn restart_unsupported(message: impl Into<String>) -> CommandErrorDto {
   CommandErrorDto::new("daemon_restart_unsupported", message)
 }
 
-#[cfg(unix)]
 fn preflight_local_control_error(error: LocalControlClientError) -> CommandErrorDto {
   restart_preflight_failure(error)
 }
 
-#[cfg(unix)]
 fn restart_preflight_failure(error: impl std::fmt::Display) -> CommandErrorDto {
   restart_unsupported(format!(
     "the running ctmuxd cannot safely perform cooperative restart: {error}"
   ))
 }
 
-#[cfg(unix)]
 fn restart_transition_error(error: CommandErrorDto) -> CommandErrorDto {
   let CommandErrorDto { code, message, .. } = error;
   CommandErrorDto::new(
@@ -328,37 +305,124 @@ pub fn default_working_directory() -> Result<String, CommandErrorDto> {
   })
 }
 
-#[cfg(not(unix))]
-pub async fn connect_existing() -> Result<LocalStream, CommandErrorDto> {
-  Err(CommandErrorDto::new(
-    "unsupported_platform",
-    "local ctmux transport is not implemented on this platform",
-  ))
-}
-
-#[cfg(not(unix))]
-pub async fn preflight_restart_daemon() -> Result<RestartDaemonPreflight, CommandErrorDto> {
-  Err(CommandErrorDto::new(
-    "unsupported_platform",
-    "local ctmux transport is not implemented on this platform",
-  ))
-}
-
-#[cfg(not(unix))]
-pub(crate) async fn restart_daemon(
-  _preflight: RestartDaemonPreflight,
-) -> Result<RestartLocalDaemonOutcome, CommandErrorDto> {
-  Err(CommandErrorDto::new(
-    "unsupported_platform",
-    "local ctmux transport is not implemented on this platform",
-  ))
-}
-
 #[cfg(test)]
 mod tests {
   use super::*;
 
   #[cfg(unix)]
+  type Listener = tokio::net::UnixListener;
+  #[cfg(windows)]
+  type Listener = ctmux_ipc::windows::Listener;
+
+  struct Endpoints {
+    data: PathBuf,
+    control: PathBuf,
+  }
+
+  impl Endpoints {
+    fn new() -> Self {
+      let id = uuid::Uuid::new_v4();
+      #[cfg(unix)]
+      // macOS temp_dir paths can exceed the Unix socket pathname limit.
+      let data = PathBuf::from("/tmp").join(format!("ctmux-desktop-{id}.sock"));
+      #[cfg(windows)]
+      let data = PathBuf::from(format!(r"\\.\pipe\ctmux-desktop-{id}"));
+      let control = ctmux_ipc::control_socket_path(&data).unwrap();
+      Self { data, control }
+    }
+  }
+
+  impl Drop for Endpoints {
+    fn drop(&mut self) {
+      let _ = std::fs::remove_file(&self.data);
+      let _ = std::fs::remove_file(&self.control);
+    }
+  }
+
+  #[tokio::test]
+  async fn absent_local_endpoints_do_not_require_detaching_an_attachment() {
+    let endpoints = Endpoints::new();
+    let preflight = preflight_restart_daemon_at(&endpoints.data, &endpoints.control)
+      .await
+      .unwrap();
+    assert!(!preflight.requires_attachment_detach());
+    assert!(matches!(preflight, RestartDaemonPreflight::DaemonAbsent(_)));
+  }
+
+  #[tokio::test]
+  async fn data_endpoint_without_control_keeps_the_attachment_intact() {
+    let endpoints = Endpoints::new();
+    let _listener = Listener::bind(&endpoints.data).unwrap();
+    let error = preflight_restart_daemon_at(&endpoints.data, &endpoints.control)
+      .await
+      .unwrap_err();
+    assert_eq!(error.code, "daemon_restart_unsupported");
+  }
+
+  #[tokio::test]
+  async fn restart_preflight_retains_the_negotiated_local_control_stream() {
+    use ctmux_ipc::{
+      LocalControlClientMessage, LocalControlServerMessage, read_local_control_frame,
+      write_local_control_frame,
+    };
+
+    let endpoints = Endpoints::new();
+    let listener = Listener::bind(&endpoints.control).unwrap();
+    let server = tokio::spawn(async move {
+      let mut stream = listener.accept().await.unwrap().0;
+      let request: LocalControlClientMessage = read_local_control_frame(&mut stream)
+        .await
+        .unwrap()
+        .unwrap();
+      assert_eq!(
+        request,
+        LocalControlClientMessage::Handshake {
+          protocol: ctmux_ipc::local_control_offer(),
+        }
+      );
+      write_local_control_frame(
+        &mut stream,
+        &LocalControlServerMessage::HandshakeAccepted {
+          protocol_version: ctmux_ipc::LOCAL_CONTROL_PROTOCOL_VERSION,
+          protocols: vec![ctmux_ipc::local_control_protocol_info()],
+          restart_supported: true,
+          build: None,
+          data_protocol_version: None,
+          managed_sessions_supported: false,
+        },
+      )
+      .await
+      .unwrap();
+      let request: LocalControlClientMessage = read_local_control_frame(&mut stream)
+        .await
+        .unwrap()
+        .unwrap();
+      assert_eq!(request, LocalControlClientMessage::RestartDaemon);
+      write_local_control_frame(
+        &mut stream,
+        &LocalControlServerMessage::RestartAccepted {
+          terminated_sessions: 3,
+        },
+      )
+      .await
+      .unwrap();
+    });
+    let preflight = preflight_restart_daemon_at(&endpoints.data, &endpoints.control)
+      .await
+      .unwrap();
+    assert!(preflight.requires_attachment_detach());
+    let RestartDaemonPreflight::Supported(mut armed) = preflight else {
+      panic!("the negotiated local-control connection must be retained")
+    };
+    assert_eq!(
+      request_restart_with_timeout(&mut armed.stream)
+        .await
+        .unwrap(),
+      3
+    );
+    server.await.unwrap();
+  }
+
   #[test]
   fn local_control_error_codes_are_stable() {
     assert_eq!(
@@ -371,7 +435,6 @@ mod tests {
     );
   }
 
-  #[cfg(unix)]
   #[test]
   fn preflight_failures_are_non_destructive_but_armed_failures_are_not() {
     let protocol_mismatch = preflight_local_control_error(LocalControlClientError::Server {

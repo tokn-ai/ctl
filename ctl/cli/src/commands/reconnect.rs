@@ -17,25 +17,28 @@ pub(super) fn is_retryable(error: &CtlConnectError) -> bool {
   }
 }
 
+#[cfg(unix)]
 pub(super) fn is_authentication_required(error: &CtlConnectError) -> bool {
   match error {
     CtlConnectError::Target(error) => target_requires_authentication(error),
-    #[cfg(unix)]
     CtlConnectError::Broker(error) => broker_requires_authentication(error),
     _ => false,
   }
 }
 
+#[cfg(not(unix))]
+pub(super) fn is_authentication_required(_error: &CtlConnectError) -> bool {
+  false
+}
+
+#[cfg(unix)]
 fn target_requires_authentication(error: &crate::target::Error) -> bool {
   match error {
-    crate::target::Error::Runtime(error) => match error {
-      crate::vpn::Error::Preparation(error) => target_requires_authentication(error),
-      #[cfg(unix)]
-      crate::vpn::Error::Broker(error) => broker_requires_authentication(error),
-      _ => false,
-    },
-    #[cfg(unix)]
-    crate::target::Error::Broker(error) => broker_requires_authentication(error),
+    crate::target::Error::Runtime(crate::vpn::Error::Preparation(error)) => {
+      target_requires_authentication(error)
+    }
+    crate::target::Error::Runtime(crate::vpn::Error::Broker(error))
+    | crate::target::Error::Broker(error) => broker_requires_authentication(error),
     _ => false,
   }
 }
@@ -59,6 +62,7 @@ fn target_is_retryable(error: &crate::target::Error) -> bool {
 fn vpn_is_retryable(error: &crate::vpn::Error) -> bool {
   match error {
     crate::vpn::Error::Remote(error) => error.is_retryable_connection(),
+    #[cfg(unix)]
     crate::vpn::Error::Preparation(error) => target_is_retryable(error),
     crate::vpn::Error::Vpn(error) => local_vpn_is_retryable(error),
     #[cfg(unix)]

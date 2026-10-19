@@ -195,9 +195,10 @@ pub(super) async fn pipe(path: &Path) -> io::Result<Zeroizing<Vec<u8>>> {
   // Reuse the exclusive, local-only, owner-DACL pipe implementation. Its handles
   // are non-inheritable; Windows removes the endpoint when they close.
   let listener = ctmux_ipc::windows::Listener::bind(path)?;
-  let (stream, _) = tokio::time::timeout(TIMEOUT, listener.accept())
+  let stream = tokio::time::timeout(TIMEOUT, listener.accept())
     .await
-    .map_err(|_| invalid("Password pipe connection timed out"))??;
+    .map_err(|_| invalid("Password pipe connection timed out"))??
+    .0;
   password(stream).await
 }
 
@@ -242,7 +243,7 @@ impl Listener {
     }
   }
   pub async fn accept(&self) -> io::Result<ctmux_ipc::Stream> {
-    self.inner.accept().await.map(|(stream, _)| stream)
+    self.inner.accept().await.map(|accepted| accepted.0)
   }
 }
 impl Drop for Listener {

@@ -154,7 +154,7 @@ pub fn identity() -> ClientIdentity {
 }
 
 impl Pane {
-  #[cfg(test)]
+  #[cfg(all(test, unix))]
   pub(crate) async fn wait_for_controller_exit(&mut self) {
     if let Some(runner) = self.runner.take() {
       runner.await.expect("attachment controller task panicked");

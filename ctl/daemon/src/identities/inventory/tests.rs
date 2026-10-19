@@ -145,7 +145,10 @@ fn nonregular_oversized_and_public_files_are_unsupported() {
 fn saved_metadata_cannot_redirect_an_identity_to_another_path() {
   let metadata = SavedIdentity {
     version: 1,
-    path: "/tmp/key-fixture".into(),
+    path: std::env::temp_dir()
+      .join("key-fixture")
+      .to_string_lossy()
+      .into_owned(),
     file_version: "a".repeat(64),
     key_type: "ssh-rsa".into(),
     fingerprint: "SHA256:fixture".into(),

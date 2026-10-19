@@ -115,7 +115,7 @@ impl Source for Unsupported {
   }
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 fn valid_pid(pid: u32) -> io::Result<i32> {
   i32::try_from(pid)
     .ok()
@@ -123,7 +123,7 @@ fn valid_pid(pid: u32) -> io::Result<i32> {
     .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 fn process_name(bytes: &[u8]) -> Option<String> {
   let name = std::str::from_utf8(bytes).ok()?;
   (!name.is_empty() && name.len() <= 256 && !name.chars().any(char::is_control))

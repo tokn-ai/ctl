@@ -1,3 +1,4 @@
+#[cfg(unix)]
 use std::future::{Future, ready};
 
 use super::*;
@@ -168,8 +169,11 @@ async fn vpn_routes_force_a_private_master_and_use_stable_profile_identity() {
     .collect();
   assert!(args.iter().any(|arg| arg == "ControlMaster=yes"));
   let executable = std::env::current_exe().unwrap();
-  let pinned = format!("ProxyCommand='{}' ", executable.display());
-  assert!(args.iter().any(|arg| arg.starts_with(&pinned)));
+  let pinned = format!(
+    "ProxyCommand={}",
+    ctl_ipc::proxy_command_with_executable(&routed.gateways, &executable)
+  );
+  assert!(args.iter().any(|arg| arg == &pinned));
   assert!(!args.iter().any(|arg| arg.starts_with("ProxyJump=")));
   let first_key = target_key(&routed);
   let first_path = control_path(&routed);

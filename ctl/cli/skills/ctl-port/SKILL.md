@@ -5,7 +5,7 @@ description: "Manage ctl's daemon-owned local SSH port forwards: add, inspect, u
 
 # ctl port
 
-Use `ctl port` on a Unix client with a saved host selected through `-H`, or
+Use `ctl port` on a Unix or Windows client with a saved host selected through `-H`, or
 `ctl --destination DESTINATION port ...` for a temporary SSH address or config
 alias. Put `--destination` before the subcommand. It uses OpenSSH configuration,
 bypasses saved host lookup, and does not save a host definition; it conflicts
@@ -70,6 +70,11 @@ separately when the requested outcome depends on it.
 
 Forwards outlive the invoking CLI and remain in ctld's runtime registry until
 removed or that daemon exits. They are not saved across daemon restarts.
-An SSH disconnect can leave the definition waiting for authentication; reconnect
-the same method to activate it again. Remove by ID when the requested listener
-is no longer needed, then list that same method to verify removal.
+On Unix, an SSH disconnect can leave the definition waiting for authentication;
+reconnect the same method to activate it again. Windows uses a ctld-owned local
+listener with native SSH health and data connections. Configure noninteractive
+OpenSSH authentication before adding a Windows forward; keys, user, port and
+proxy configuration remain owned by system SSH. Native Windows forwarding does
+not share an OpenSSH ControlMaster. An explicit add retries a failed connection;
+list only observes its state. Remove by ID when the listener is no longer needed,
+then list that same method to verify removal.

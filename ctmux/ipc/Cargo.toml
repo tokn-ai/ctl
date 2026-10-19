@@ -26,6 +26,7 @@ workspace = true
 rustix.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+windows-spawn = "0.1.0"
 interprocess = { version = "2.4.4", features = ["tokio"] }
 widestring = "1.2.1"
 dirs.workspace = true

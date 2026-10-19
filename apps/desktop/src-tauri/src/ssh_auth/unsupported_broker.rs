@@ -1,4 +1,4 @@
-//! Explicit errors for platforms without the Unix control-master broker.
+//! Dedicated forwarding works without a Unix control-master broker.
 
 use std::future::{Ready, ready};
 
@@ -8,7 +8,7 @@ use crate::error::{CommandErrorDto, CommandResult};
 pub(super) fn unsupported<T>() -> Ready<CommandResult<T>> {
   ready(Err(CommandErrorDto::new(
     "ssh_broker_unsupported",
-    "SSH connection status, disconnection, and port forwarding require macOS or Linux.",
+    "SSH connection status, disconnection, and remote listener discovery require macOS or Linux.",
   )))
 }
 
@@ -18,19 +18,7 @@ pub(super) fn connection_status(
   unsupported()
 }
 
-pub(super) fn configure_port_forward(
-  _target: &ConnectionTargetDto,
-  _forward: ctl_ipc::LocalPortForward,
-  _enabled: bool,
-) -> Ready<CommandResult<ctl_ipc::PortForwardStatus>> {
-  unsupported()
-}
-
-pub(super) fn list_port_forwards(
-  _target: &ConnectionTargetDto,
-) -> Ready<CommandResult<Vec<ctl_ipc::PortForwardStatus>>> {
-  unsupported()
-}
+pub(super) use super::forwarding::{configure_port_forward, list_port_forwards};
 
 pub(super) fn list_remote_listeners(
   _target: &ConnectionTargetDto,

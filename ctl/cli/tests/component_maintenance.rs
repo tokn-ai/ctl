@@ -1,9 +1,12 @@
-#![cfg(unix)]
-
 use std::path::PathBuf;
 use std::process::Command;
 
-struct Fixture(PathBuf);
+#[cfg(windows)]
+use ctl_ipc::Listener;
+#[cfg(unix)]
+use tokio::net::UnixListener as Listener;
+
+struct Fixture(PathBuf, PathBuf);
 impl Fixture {
   fn new() -> Self {
     let path = std::env::temp_dir().join(format!(
@@ -11,7 +14,15 @@ impl Fixture {
       &uuid::Uuid::new_v4().simple().to_string()[..12]
     ));
     std::fs::create_dir(&path).unwrap();
-    Self(path.canonicalize().unwrap())
+    let path = path.canonicalize().unwrap();
+    #[cfg(unix)]
+    let socket = path.join("ctld.sock");
+    #[cfg(windows)]
+    let socket = PathBuf::from(format!(
+      r"\\.\pipe\ctl-maintenance-test-{}",
+      uuid::Uuid::new_v4()
+    ));
+    Self(path, socket)
   }
   fn command(&self, args: &[&str]) -> Command {
     self.command_at(std::path::Path::new(env!("CARGO_BIN_EXE_ctl")), args)
@@ -21,7 +32,8 @@ impl Fixture {
     command
       .args(args)
       .env("HOME", &self.0)
-      .env("CTLD_SOCKET_PATH", self.0.join("ctld.sock"))
+      .env("USERPROFILE", &self.0)
+      .env("CTLD_SOCKET_PATH", &self.1)
       .env("CTMUX_RUNTIME_DIR", &self.0)
       .env("CTL_TASKD_RUNTIME_DIR", &self.0)
       .env("CTLD_BIN", self.0.join("missing-ctld"))
@@ -157,7 +169,15 @@ fn stop_with_a_temporary_destination_never_falls_back_to_local() {
   for (daemon, destination, expected) in [
     ("ctld", "work", "only ctmuxd"),
     ("ctl-taskd", "work", "only ctmuxd"),
-    ("ctmuxd", "!invalid", "valid SSH destination"),
+    (
+      "ctmuxd",
+      "!invalid",
+      if cfg!(unix) {
+        "valid SSH destination"
+      } else {
+        "Unix SSH multiplexing"
+      },
+    ),
   ] {
     let output = fixture
       .command(&[
@@ -184,8 +204,8 @@ async fn status_reads_a_running_owner_without_sending_restart() {
   use ctl_ipc::lifecycle::{DaemonBinaryInfo, DaemonInfo, Request, Response};
   let _guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = Fixture::new();
-  let socket = fixture.0.join("ctld.sock");
-  let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+  let socket = fixture.1.clone();
+  let listener = Listener::bind(&socket).unwrap();
   let info = DaemonInfo {
     instance_id: uuid::Uuid::new_v4().to_string(),
     binary: DaemonBinaryInfo::current(),
@@ -193,7 +213,7 @@ async fn status_reads_a_running_owner_without_sending_restart() {
   };
   let expected_build = info.binary.build.clone();
   let server = tokio::spawn(async move {
-    let (mut stream, _) = listener.accept().await.unwrap();
+    let mut stream = listener.accept().await.unwrap().0;
     assert!(matches!(
       ctl_ipc::read_frame::<_, Request>(&mut stream)
         .await
@@ -246,6 +266,7 @@ async fn status_reads_a_running_owner_without_sending_restart() {
     .await
     .unwrap()
     .unwrap();
+  #[cfg(unix)]
   std::fs::remove_file(socket).unwrap();
   fixture.assert_untouched();
 }
@@ -257,7 +278,9 @@ fn default_missing_replacements_are_reported_without_failing_status() {
   // siblings from the shared Cargo target without introducing fake executables.
   let guard = ctl_core::test_fixtures::ProcessGuard::acquire_blocking();
   let fixture = Fixture::new();
-  let executable = fixture.0.join("ctl");
+  let executable = fixture
+    .0
+    .join(format!("ctl{}", std::env::consts::EXE_SUFFIX));
   guard.copy(env!("CARGO_BIN_EXE_ctl"), &executable).unwrap();
   let mut command = fixture.command_at(&executable, &["components", "status", "--json"]);
   command
@@ -285,6 +308,7 @@ fn default_missing_replacements_are_reported_without_failing_status() {
 }
 
 #[test]
+#[cfg(unix)]
 fn setup_and_status_select_the_same_explicit_helper_without_starting_an_owner() {
   use std::os::unix::fs::PermissionsExt as _;
 

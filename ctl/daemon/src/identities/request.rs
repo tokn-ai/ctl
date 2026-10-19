@@ -100,18 +100,7 @@ async fn handle_inner(request: Request) -> Result<Response, IdentityError> {
       if !snapshot.encrypted {
         return Err(IdentityError::InvalidRequest);
       }
-      #[cfg(unix)]
-      {
-        let mut agent = LocalAgent::start().await?;
-        let verified = agent.add_identity(&snapshot, passphrase.clone()).await?;
-        save_verified(&snapshot, &verified, &passphrase)?;
-        Ok(Response::Saved)
-      }
-      #[cfg(not(unix))]
-      {
-        let _ = passphrase;
-        Err(IdentityError::KeychainUnavailable)
-      }
+      save_identity(&snapshot, passphrase).await
     }
     Request::Forget { identity_id } => {
       if !files::valid_id(&identity_id) {
@@ -126,4 +115,23 @@ async fn handle_inner(request: Request) -> Result<Response, IdentityError> {
       Err(IdentityError::KeychainUnavailable)
     }
   }
+}
+
+#[cfg(unix)]
+async fn save_identity(
+  snapshot: &super::IdentitySnapshot,
+  passphrase: Zeroizing<String>,
+) -> Result<Response, IdentityError> {
+  let mut agent = LocalAgent::start().await?;
+  let verified = agent.add_identity(snapshot, passphrase.clone()).await?;
+  save_verified(snapshot, &verified, &passphrase)?;
+  Ok(Response::Saved)
+}
+
+#[cfg(not(unix))]
+fn save_identity(
+  _snapshot: &super::IdentitySnapshot,
+  _passphrase: Zeroizing<String>,
+) -> std::future::Ready<Result<Response, IdentityError>> {
+  std::future::ready(Err(IdentityError::KeychainUnavailable))
 }

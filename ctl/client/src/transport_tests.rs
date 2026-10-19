@@ -7,6 +7,49 @@ use tokio::time::timeout;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(15);
 
+#[tokio::test]
+async fn hostname_override_preserves_openssh_alias_settings() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
+  let path = std::env::temp_dir().join(format!("ctl-ssh-config-{}", uuid::Uuid::new_v4()));
+  std::fs::write(
+    &path,
+    "Host ctl-alias-test\n  HostName config.example.invalid\n  User alias-user\n  Port 2222\n  IdentityFile alias-key\n  ProxyCommand false\n",
+  )
+  .unwrap();
+  let options = SshConnectionOptions {
+    hostname: Some("127.0.0.1".into()),
+    ..SshConnectionOptions::default()
+  };
+  let mut command = Command::new(SSH_PROGRAM);
+  command.arg("-F").arg(&path).arg("-G").args(
+    prepare_ssh_base_arguments("ctl-alias-test", &options, &SshInteraction::Inherit)
+      .await
+      .unwrap(),
+  );
+  let output = timeout(TEST_TIMEOUT, command.kill_on_drop(true).output()).await;
+  std::fs::remove_file(path).unwrap();
+  let output = output.unwrap().unwrap();
+  assert!(
+    output.status.success(),
+    "{}",
+    String::from_utf8_lossy(&output.stderr)
+  );
+  let configuration = String::from_utf8(output.stdout).unwrap();
+  for setting in [
+    "host ctl-alias-test",
+    "hostname 127.0.0.1",
+    "user alias-user",
+    "port 2222",
+    "identityfile alias-key",
+    "proxycommand false",
+  ] {
+    assert!(
+      configuration.lines().any(|line| line == setting),
+      "missing {setting:?} in {configuration}",
+    );
+  }
+}
+
 #[test]
 fn remote_identity_transport_failures_retry_but_invalid_metadata_does_not() {
   for kind in [

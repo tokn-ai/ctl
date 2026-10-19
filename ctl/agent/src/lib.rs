@@ -230,15 +230,6 @@ fn daemon_command(config: &ConnectConfig) -> Result<std::process::Command, Agent
     });
   }
   let mut command = std::process::Command::new(executable);
-  #[cfg(windows)]
-  {
-    use std::os::windows::process::CommandExt;
-    // OpenSSH permits job breakaway. Detaching only from the console would
-    // still let the SSH job kill the daemon when this channel closes.
-    const DETACHED_PROCESS: u32 = 0x0000_0008;
-    const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
-    command.creation_flags(DETACHED_PROCESS | CREATE_BREAKAWAY_FROM_JOB);
-  }
   command
     .arg("--socket")
     .arg(config.socket())
@@ -253,9 +244,30 @@ fn daemon_command(config: &ConnectConfig) -> Result<std::process::Command, Agent
 }
 
 fn start_daemon(config: &ConnectConfig) -> Result<(), AgentError> {
-  let mut command = daemon_command(config)?;
+  let command = daemon_command(config)?;
   let executable = PathBuf::from(command.get_program());
-  command.spawn().map_err(|source| match config.service {
+  #[cfg(unix)]
+  let started = {
+    let mut command = command;
+    command.spawn().map(|_| ())
+  };
+  #[cfg(windows)]
+  let started = {
+    use windows_spawn::{Command, CreationFlags, SpawnOptions, Stdio};
+    // Transfer only null standard handles, and leave the disposable SSH job.
+    // Inheriting other handles would retain its channel pipes after disconnect.
+    Command::new(command.get_program())
+      .args(command.get_args())
+      .stdin(Stdio::null())
+      .stdout(Stdio::null())
+      .stderr(Stdio::null())
+      .spawn_with(
+        SpawnOptions::new()
+          .creation_flags(CreationFlags::DETACHED_PROCESS | CreationFlags::BREAKAWAY_FROM_JOB),
+      )
+      .map(|_| ())
+  };
+  started.map_err(|source| match config.service {
     Service::Ctmux => AgentError::StartCtmuxd { executable, source },
     Service::Task => AgentError::StartTaskd { executable, source },
   })?;

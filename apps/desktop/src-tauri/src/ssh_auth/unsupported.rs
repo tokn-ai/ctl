@@ -5,6 +5,8 @@ mod broker;
 pub mod commands;
 #[path = "connection.rs"]
 mod connection;
+#[path = "forwarding.rs"]
+mod forwarding;
 #[path = "verification.rs"]
 mod verification;
 
@@ -12,24 +14,19 @@ use crate::dto::ConnectionTargetDto;
 use crate::error::{CommandErrorDto, CommandResult};
 use ctl_client::{ConnectionTarget, SshInteraction, Transport, open_identified_ssh_service};
 use serde::Serialize;
+use std::future::{Ready, ready};
 use tauri::ipc::Channel;
 
 #[derive(Clone, Serialize)]
 pub struct SshPromptDto {}
 
-pub(crate) async fn existing_master(
+pub(crate) fn existing_master(
   _target: &ConnectionTargetDto,
-) -> CommandResult<std::path::PathBuf> {
-  Err(CommandErrorDto::new(
+) -> Ready<CommandResult<std::path::PathBuf>> {
+  ready(Err(CommandErrorDto::new(
     "ssh_maintenance_unsupported",
     "Remote component actions require an existing SSH master on macOS or Linux.",
-  ))
-}
-
-/// This platform does not use the Unix askpass helper.
-#[must_use]
-pub fn helper_exit_code() -> Option<i32> {
-  None
+  )))
 }
 
 pub async fn connect(target: &ConnectionTargetDto) -> CommandResult<Transport> {
@@ -44,7 +41,7 @@ async fn connect_identified(
   if matches!(
     target,
     ConnectionTargetDto::Ssh {
-      use_ssh_config_master: Some(_),
+      use_ssh_config_master: Some(true),
       ..
     }
   ) {
@@ -103,18 +100,31 @@ pub async fn probe(
   .await
 }
 
-pub async fn install_agent(
+pub fn install_agent(
   _app: tauri::AppHandle,
   _window: String,
   _attempt_id: String,
   _target: ConnectionTargetDto,
   _channel: Channel<SshPromptDto>,
   _on_progress: Channel<crate::dto::RemoteAgentInstallProgressDto>,
-) -> CommandResult<crate::dto::RemoteAgentInstallResultDto> {
-  Err(CommandErrorDto::new(
+) -> Ready<CommandResult<crate::dto::RemoteAgentInstallResultDto>> {
+  ready(Err(CommandErrorDto::new(
     "remote_agent_install_unsupported",
     "Remote component installation currently requires macOS or Linux.",
-  ))
+  )))
+}
+
+pub fn restart_ctmux(
+  _app: tauri::AppHandle,
+  _window: String,
+  _attempt_id: String,
+  _target: ConnectionTargetDto,
+  _channel: Channel<SshPromptDto>,
+) -> Ready<CommandResult<ctl_proto::RemoteCtmuxRestartResult>> {
+  ready(Err(CommandErrorDto::new(
+    "remote_restart_unsupported",
+    "Remote ctmux restart currently requires macOS or Linux.",
+  )))
 }
 
 pub fn respond(
@@ -131,8 +141,8 @@ pub fn respond(
 
 pub fn cancel(_window: &str, _attempt_id: &str) {}
 pub fn cancel_window(_window: &str) {}
-pub async fn forget(_target: &ConnectionTargetDto) -> CommandResult<()> {
-  Ok(())
+pub fn forget(_target: &ConnectionTargetDto) -> Ready<CommandResult<()>> {
+  ready(Ok(()))
 }
 
 pub fn disconnect(_targets: &[ConnectionTargetDto]) -> std::future::Ready<CommandResult<()>> {
@@ -144,22 +154,34 @@ mod tests {
   use super::*;
 
   #[tokio::test]
-  async fn explicit_master_selections_are_rejected_before_opening_ssh() {
-    for policy in [false, true] {
-      let target = serde_json::from_value(serde_json::json!({
-        "kind": "ssh",
-        "destination": "office",
-        "use_ssh_config_master": policy,
-      }))
-      .unwrap();
-      let Err(error) = connect_identified(&target).await else {
-        panic!("unsupported master selection opened a connection")
-      };
-      assert_eq!(error.code, "ssh_master_selection_unsupported");
-      assert_eq!(
-        error.message,
-        "SSH master selection currently requires macOS or Linux.",
-      );
-    }
+  async fn disabling_a_shared_master_keeps_direct_ssh_destination_validation() {
+    let target = serde_json::from_value(serde_json::json!({
+      "kind": "ssh",
+      "destination": "invalid\ndestination",
+      "use_ssh_config_master": false,
+    }))
+    .unwrap();
+    let Err(error) = connect_identified(&target).await else {
+      panic!("invalid destination opened a connection")
+    };
+    assert_eq!(error.code, "invalid_ssh_destination");
+  }
+
+  #[tokio::test]
+  async fn selecting_a_shared_master_is_rejected_before_opening_ssh() {
+    let target = serde_json::from_value(serde_json::json!({
+      "kind": "ssh",
+      "destination": "office",
+      "use_ssh_config_master": true,
+    }))
+    .unwrap();
+    let Err(error) = connect_identified(&target).await else {
+      panic!("unsupported master selection opened a connection")
+    };
+    assert_eq!(error.code, "ssh_master_selection_unsupported");
+    assert_eq!(
+      error.message,
+      "SSH master selection currently requires macOS or Linux.",
+    );
   }
 }

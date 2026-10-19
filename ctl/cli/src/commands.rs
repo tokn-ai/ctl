@@ -19,13 +19,15 @@ mod tui_tests;
 
 fn validate_local_command_target(arguments: &Arguments) -> Result<(), CliError> {
   let error = match &arguments.command {
-    #[cfg(unix)]
     Command::Components {
       command:
-        crate::components::Command::Update { .. }
-        | crate::components::Command::Status { .. }
+        crate::components::Command::Status { .. }
         | crate::components::Command::Restart { .. }
         | crate::components::Command::Stop { .. },
+    } => return Ok(()),
+    #[cfg(unix)]
+    Command::Components {
+      command: crate::components::Command::Update { .. },
     } => return Ok(()),
     #[cfg(unix)]
     Command::Components { .. } => CliError::ComponentsTarget,
@@ -92,7 +94,6 @@ pub async fn run(mut arguments: Arguments) -> Result<i32, CliError> {
     return Ok(0);
   }
   match arguments.command {
-    #[cfg(unix)]
     Command::Components { command } => {
       crate::components::run(
         command,
@@ -199,7 +200,6 @@ async fn run_selected(
     Command::Exec { command } => {
       return Ok(crate::connection::execute(&connector.settings, command, platform).await?);
     }
-    #[cfg(unix)]
     Command::Port { command } => crate::port::run(&connector.settings, command).await?,
     Command::Logs(_)
     | Command::Audit(_)
@@ -211,7 +211,6 @@ async fn run_selected(
     | Command::Scp { .. } => {
       unreachable!("commands dispatched before target resolution")
     }
-    #[cfg(unix)]
     Command::Components { .. } => {
       unreachable!("component store commands run before target resolution")
     }
@@ -319,7 +318,10 @@ impl CtlConnector {
     )
     .await
   }
-  fn new(target: ConnectionTarget, mut settings: ctl_client::hosts::ConnectionTargetDto) -> Self {
+  fn new(target: ConnectionTarget, settings: ctl_client::hosts::ConnectionTargetDto) -> Self {
+    #[cfg(unix)]
+    let mut settings = settings;
+    #[cfg(unix)]
     if matches!(&target, ConnectionTarget::Ssh { options, .. }
       if options.remote_platform == ctl_client::RemotePlatform::Windows)
       && let ctl_client::hosts::ConnectionTargetDto::Ssh {
@@ -564,6 +566,10 @@ async fn ssh_interaction(
 }
 
 #[cfg(not(unix))]
+#[expect(
+  clippy::unused_async,
+  reason = "SSH interaction selection keeps the asynchronous Unix broker API on direct clients"
+)]
 async fn ssh_interaction(
   _target: &ctl_client::hosts::ConnectionTargetDto,
   interactive: bool,
@@ -603,7 +609,6 @@ pub enum CliError {
     "Components manage the local bundle store; omit --host, --destination, --method, and --remote-platform."
   )]
   ComponentsTarget,
-  #[cfg(unix)]
   #[error("Component maintenance failed: {0}")]
   Components(std::io::Error),
   #[error("Remote repair cancelled.")]
@@ -638,7 +643,6 @@ pub enum CliError {
   Host(#[from] ctl_client::hosts::HostError),
   #[error(transparent)]
   Connection(#[from] crate::connection::Error),
-  #[cfg(unix)]
   #[error(transparent)]
   Port(#[from] crate::port::Error),
   #[error("Use the destination argument with ssh/scp, rather than --host or --destination.")]
@@ -893,8 +897,9 @@ mod tests {
     }
   }
 
+  #[cfg(unix)]
   #[test]
-  fn windows_connections_preserve_ssh_config_without_posix_master_startup() {
+  fn unix_clients_preserve_windows_ssh_config_without_posix_master_startup() {
     use ctl_client::hosts::ConnectionTargetDto;
     for platform in [
       ctl_client::RemotePlatform::Unix,

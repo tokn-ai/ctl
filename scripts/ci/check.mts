@@ -11,9 +11,11 @@ if (!toolchain) throw new Error("rust-toolchain.toml must declare a channel");
 const scopes = ["scripts", "quality", "rust", "frontend", "packages"] as const;
 type Scope = typeof scopes[number];
 const [requested, ...options] = process.argv.slice(2);
-if (![...scopes, "all"].includes(requested) || options.some((option) => option !== "--allow-dirty")
-  || (options.length > 0 && !["all", "packages"].includes(requested))) {
-  throw new Error("usage: node scripts/ci/check.mts <scripts|quality|rust|frontend|packages|all> [--allow-dirty]");
+if (![...scopes, "all"].includes(requested) || options.some((option) => {
+  if (option === "--allow-dirty") return !["all", "packages"].includes(requested);
+  return true;
+})) {
+  throw new Error("usage: node scripts/ci/check.mts <scripts|quality|rust|frontend|packages|all> [--allow-dirty (packages/all)]");
 }
 
 function run(command: string, args: string[], cwd = root, rust_toolchain = toolchain): void {
@@ -46,7 +48,7 @@ function check(scope: Scope): void {
       run("cargo", ["clippy", "--locked", "--workspace", "--all-targets", "--", "-D", "warnings"]);
       break;
     case "rust":
-      run("cargo", ["test", "--locked", "--workspace"]);
+      run("cargo", ["test", "--locked", "--no-fail-fast", "--workspace"]);
       break;
     case "frontend": {
       for (const args of [

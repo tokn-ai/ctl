@@ -118,7 +118,6 @@ pub async fn forget_identity_passphrase(request: ForgetRequest) -> CommandResult
   }
 }
 
-#[cfg(unix)]
 async fn exchange(request: Request) -> CommandResult<Response> {
   let executable = crate::daemon_helper::executable()
     .await
@@ -126,12 +125,6 @@ async fn exchange(request: Request) -> CommandResult<Response> {
   exchange_with(tokio::process::Command::new(executable), request).await
 }
 
-#[cfg(not(unix))]
-fn exchange(_request: Request) -> std::future::Ready<CommandResult<Response>> {
-  std::future::ready(Err(sanitized_error("identity_unsupported")))
-}
-
-#[cfg(unix)]
 async fn exchange_with(
   command: tokio::process::Command,
   request: Request,
@@ -448,7 +441,11 @@ fn sanitized_error(code: &str) -> CommandErrorDto {
     ),
     "identity_keychain_unavailable" => (
       "identity_keychain_unavailable",
-      "Keychain access is unavailable. Check your macOS login session and try again.",
+      if cfg!(target_os = "macos") {
+        "Keychain access is unavailable. Check your macOS login session and try again."
+      } else {
+        "Saved SSH identity passphrases require macOS Keychain. Identity files remain available on this platform."
+      },
     ),
     "identity_keychain_locked" => (
       "identity_keychain_locked",

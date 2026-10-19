@@ -5,12 +5,14 @@ struct Fixture(std::path::PathBuf);
 impl Fixture {
   fn new() -> Self {
     let root = std::env::temp_dir().join(format!("ctl-history-{}", Uuid::new_v4()));
-    let mut builder = fs::DirBuilder::new();
+    let builder = fs::DirBuilder::new();
     #[cfg(unix)]
-    {
+    let builder = {
       use std::os::unix::fs::DirBuilderExt as _;
+      let mut builder = builder;
       builder.mode(0o700);
-    }
+      builder
+    };
     builder.create(&root).unwrap();
     Self(root)
   }
@@ -244,12 +246,11 @@ fn process_writer_child() {
   let store = Store::new(directory.into());
   for _ in 0..10 {
     let record = record(Outcome::Succeeded);
-    let deadline = Instant::now() + std::time::Duration::from_secs(60);
+    let deadline = Instant::now() + std::time::Duration::from_secs(10);
     // A busy store is an expected, bounded result under concurrent fsyncs.
-    // Slow Windows runners can spend more than ten seconds behind the other
-    // writers' durable commits. Back off between attempts instead of immediately
-    // reopening the database and competing with the writer holding its lock.
-    // This is a test completion budget; the store's short busy timeout is unchanged.
+    // Back off between attempts instead of immediately contending again with
+    // the cooperating writer holding the store lock. The completion budget
+    // remains short enough to detect starvation; store lock waits stay bounded.
     // Retry only before-write contention; all other failures remain fatal.
     loop {
       match store.append(Stream::Audit, &record) {
@@ -373,6 +374,66 @@ fn dropped_operations_are_interrupted_and_diagnostics_are_not_audit_events() {
   assert_eq!(
     store.read(Stream::Logs, 100, false).unwrap().records.len(),
     4
+  );
+}
+
+#[test]
+fn audit_writer_lock_precedes_initialization_and_does_not_block_readers() {
+  let fixture = Fixture::new();
+  let store = fixture.store();
+  fs::create_dir(store.directory()).unwrap();
+  #[cfg(unix)]
+  {
+    use std::os::unix::fs::PermissionsExt as _;
+    fs::set_permissions(store.directory(), fs::Permissions::from_mode(0o700)).unwrap();
+  }
+  let lock = fs::OpenOptions::new()
+    .read(true)
+    .write(true)
+    .create_new(true)
+    .open(store.directory().join("audit.lock"))
+    .unwrap();
+  #[cfg(unix)]
+  {
+    use std::os::unix::fs::PermissionsExt as _;
+    lock
+      .set_permissions(fs::Permissions::from_mode(0o600))
+      .unwrap();
+  }
+  lock.lock().unwrap();
+  let error = store
+    .append(Stream::Audit, &record(Outcome::Succeeded))
+    .unwrap_err();
+  assert_eq!(error.kind(), io::ErrorKind::WouldBlock, "{error}");
+  assert!(!store.directory().join("audit.sqlite3").exists());
+  assert!(
+    store
+      .read(Stream::Audit, 10, false)
+      .unwrap()
+      .records
+      .is_empty()
+  );
+  lock.unlock().unwrap();
+
+  store
+    .append(Stream::Audit, &record(Outcome::Succeeded))
+    .unwrap();
+  lock.lock().unwrap();
+  assert_eq!(
+    store.read(Stream::Audit, 10, false).unwrap().records.len(),
+    1
+  );
+  let error = store
+    .append(Stream::Audit, &record(Outcome::Failed))
+    .unwrap_err();
+  assert_eq!(error.kind(), io::ErrorKind::WouldBlock, "{error}");
+  lock.unlock().unwrap();
+  store
+    .append(Stream::Audit, &record(Outcome::Failed))
+    .unwrap();
+  assert_eq!(
+    store.read(Stream::Audit, 10, false).unwrap().records.len(),
+    2
   );
 }
 

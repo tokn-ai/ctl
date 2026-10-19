@@ -1,19 +1,16 @@
 mod bundled;
 mod caller_auth;
 mod commands;
-#[cfg(unix)]
 mod components;
 mod connection;
 mod history;
 mod host;
 mod openssh;
 mod passwords;
-#[cfg(unix)]
 mod port;
 mod remote;
 mod setup;
 mod skill;
-#[cfg(unix)]
 mod ssh_broker;
 mod table;
 mod target;
@@ -100,8 +97,7 @@ enum Command {
   Logs(history::Arguments),
   /// Review local connection and credential audit history.
   Audit(history::Arguments),
-  /// Inspect and explicitly sync complete component build bundles.
-  #[cfg(unix)]
+  /// Inspect, stop, and restart local daemons; manage component bundles on Unix.
   Components {
     #[command(subcommand)]
     command: components::Command,
@@ -156,7 +152,6 @@ enum Command {
     arguments: Vec<std::ffi::OsString>,
   },
   /// Manage ctld-owned local port forwards.
-  #[cfg(unix)]
   Port {
     #[command(subcommand)]
     command: port::Command,
@@ -300,17 +295,19 @@ mod tests {
     ] {
       assert!(Arguments::try_parse_from(arguments).is_err());
     }
-    let invalid = Arguments::try_parse_from([
-      "ctl",
-      "--destination",
-      "host",
-      "--identity-file",
-      "key",
-      "ctmux",
-      "list",
-    ])
-    .unwrap();
-    assert!(caller_auth::validate(&invalid).is_err());
+    for command in ["ctmux", "port"] {
+      let invalid = Arguments::try_parse_from([
+        "ctl",
+        "--destination",
+        "host",
+        "--identity-file",
+        "key",
+        command,
+        "list",
+      ])
+      .unwrap();
+      assert!(caller_auth::validate(&invalid).is_err());
+    }
     let valid = Arguments::try_parse_from([
       "ctl",
       "--destination",
@@ -575,6 +572,7 @@ mod tests {
       &["exec", "--", "true"][..],
       &["ctmux", "list"][..],
       &["task", "list"][..],
+      &["port", "list"][..],
       &["vpn", "list"][..],
     ] {
       let arguments = Arguments::try_parse_from(

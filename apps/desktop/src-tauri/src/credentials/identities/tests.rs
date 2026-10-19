@@ -1,10 +1,20 @@
 use super::*;
 use ctl_ipc::identities::{FileState, PassphraseState};
 
+fn fixture_home() -> PathBuf {
+  std::env::temp_dir().join(format!("identity-host-fixture-{}", std::process::id()))
+}
+
+fn fixture_path(relative: &str) -> String {
+  let mut path = fixture_home();
+  path.extend(relative.split('/'));
+  path.to_str().unwrap().to_owned()
+}
+
 fn file() -> IdentityFile {
   IdentityFile {
     identity_id: "a".repeat(64),
-    path: "/fixture/keys/work".into(),
+    path: fixture_path("keys/work"),
     display_path: "~/keys/work".into(),
     file_version: Some("b".repeat(64)),
     key_type: Some("ssh-ed25519".into()),
@@ -32,14 +42,14 @@ fn host_names_are_hints_and_paths_are_normalized_without_opening_key_contents() 
       target,
     },
   ];
-  let hints = host_paths(&targets, Some(Path::new("/fixture")));
+  let hints = host_paths(&targets, Some(&fixture_home()));
   assert!(hints.complete);
   assert_eq!(
-    hints.names["/fixture/keys/work"],
+    hints.names[&fixture_path("keys/work")],
     BTreeSet::from(["Build".into(), "Test".into()])
   );
-  assert!(normalize_path("~/keys/work\nsecret", Some(Path::new("/fixture"))).is_none());
-  assert!(normalize_path("~someone/key", Some(Path::new("/fixture"))).is_none());
+  assert!(normalize_path("~/keys/work\nsecret", Some(&fixture_home())).is_none());
+  assert!(normalize_path("~someone/key", Some(&fixture_home())).is_none());
 }
 
 #[test]
@@ -55,10 +65,7 @@ fn duplicate_or_invalid_metadata_cannot_create_ambiguous_actions() {
     keychain_error: None,
     metadata_import_required: false,
   };
-  let names = BTreeMap::from([(
-    "/fixture/keys/work".into(),
-    BTreeSet::from(["Build".into()]),
-  )]);
+  let names = BTreeMap::from([(fixture_path("keys/work"), BTreeSet::from(["Build".into()]))]);
   let snapshot = snapshot(inventory, &names, true);
   assert_eq!(snapshot.identity_files.len(), 1);
   assert!(!snapshot.complete);
@@ -77,7 +84,14 @@ fn keychain_failures_keep_their_category_without_forwarding_helper_text() {
       "identity_keychain_missing_entitlement",
       "matching provisioning profile",
     ),
-    ("identity_keychain_unavailable", "macOS login session"),
+    (
+      "identity_keychain_unavailable",
+      if cfg!(target_os = "macos") {
+        "macOS login session"
+      } else {
+        "Identity files remain available"
+      },
+    ),
     ("private-fixture-canary", "could not be inspected"),
   ] {
     let inventory = Inventory {
@@ -241,10 +255,10 @@ fn missing_identity_leaf_keeps_canonical_parent_and_host_association() {
 #[test]
 fn invalid_host_labels_do_not_hide_identity_paths_and_gateway_truncation_is_reported() {
   let target: ConnectionTargetDto = serde_json::from_value(serde_json::json!({
-    "kind": "ssh", "destination": "fixture", "identity_file": "/fixture/key",
+    "kind": "ssh", "destination": "fixture", "identity_file": fixture_path("key"),
     "gateways": (0..9).map(|index| serde_json::json!({
       "gateway_id": format!("gateway-{index}"), "name": "Gateway", "destination": "gateway.example.test",
-      "identity_file": format!("/fixture/gateway-{index}"), "mode": "automatic",
+      "identity_file": fixture_path(&format!("gateway-{index}")), "mode": "automatic",
     })).collect::<Vec<_>>(),
   })).unwrap();
   let hints = host_paths(
@@ -255,7 +269,7 @@ fn invalid_host_labels_do_not_hide_identity_paths_and_gateway_truncation_is_repo
     None,
   );
   assert!(!hints.complete);
-  assert!(hints.names.contains_key("/fixture/key"));
+  assert!(hints.names.contains_key(&fixture_path("key")));
   assert_eq!(hints.names.len(), 9);
   assert!(hints.names.values().all(BTreeSet::is_empty));
 }
@@ -289,14 +303,12 @@ fn configured_identity_tokens_expand_only_known_context_and_percent_is_not_expan
       name: "Build".into(),
       target,
     }],
-    Some(Path::new("/fixture")),
+    Some(&fixture_home()),
   );
   assert!(hints.complete);
-  assert!(
-    hints
-      .names
-      .contains_key("/fixture/keys/%-build.example.test-builder-2222-build.example.test")
-  );
+  assert!(hints.names.contains_key(&fixture_path(
+    "keys/%-build.example.test-builder-2222-build.example.test"
+  )));
 
   for value in [
     "~/keys/%h",
@@ -314,7 +326,7 @@ fn configured_identity_tokens_expand_only_known_context_and_percent_is_not_expan
         name: "Build".into(),
         target,
       }],
-      Some(Path::new("/fixture")),
+      Some(&fixture_home()),
     );
     assert!(!hints.complete, "unresolved value: {value}");
     assert!(hints.names.is_empty(), "unresolved value: {value}");
@@ -334,9 +346,9 @@ fn original_host_token_matches_the_actual_ssh_argument_for_aliases_and_overrides
   ] {
     let target: ConnectionTargetDto = serde_json::from_value(serde_json::json!({
       "kind": "ssh", "destination": "builder@destination", "ssh_config_alias": alias,
-      "hostname": hostname, "identity_file": "/fixture/keys/%n",
+      "hostname": hostname, "identity_file": fixture_path("keys/%n"),
       "gateways": [{ "gateway_id": "gateway", "name": "Gateway", "destination": "old-alias",
-        "hostname": "jump.example.test", "identity_file": "/fixture/keys/%n", "mode": "automatic" }],
+        "hostname": "jump.example.test", "identity_file": fixture_path("keys/%n"), "mode": "automatic" }],
     })).unwrap();
     let hints = host_paths(
       &[NamedTarget {
@@ -349,8 +361,12 @@ fn original_host_token_matches_the_actual_ssh_argument_for_aliases_and_overrides
     assert!(
       hints
         .names
-        .contains_key(&format!("/fixture/keys/{expected}"))
+        .contains_key(&fixture_path(&format!("keys/{expected}")))
     );
-    assert!(hints.names.contains_key("/fixture/keys/jump.example.test"));
+    assert!(
+      hints
+        .names
+        .contains_key(&fixture_path("keys/jump.example.test"))
+    );
   }
 }

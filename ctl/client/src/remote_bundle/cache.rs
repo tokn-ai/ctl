@@ -115,8 +115,10 @@ impl BundleCacheEntry {
     let stage = TemporaryDirectory::new(&self.revision_directory, &self.target)?;
     write_private_file(&stage.0.join(BUNDLE_SET_FILE), &bundle.manifest)?;
     write_private_file(&stage.0.join(&bundle.file_name), &bundle.archive)?;
+    #[cfg(unix)]
     sync_directory(&stage.0)?;
     self.publish(&stage)?;
+    #[cfg(unix)]
     sync_directory(&self.revision_directory)?;
     Ok(())
   }
@@ -439,16 +441,9 @@ fn unique_sibling(parent: &Path, target: &str, kind: &str) -> PathBuf {
   parent.join(format!(".{target}-{kind}-{}", uuid::Uuid::new_v4()))
 }
 
+#[cfg(unix)]
 fn sync_directory(path: &Path) -> io::Result<()> {
-  #[cfg(unix)]
-  {
-    File::open(path)?.sync_all()
-  }
-  #[cfg(not(unix))]
-  {
-    let _ = path;
-    Ok(())
-  }
+  File::open(path)?.sync_all()
 }
 
 fn unsafe_path() -> io::Error {

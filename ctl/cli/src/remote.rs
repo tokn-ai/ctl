@@ -15,6 +15,7 @@ use tokio::sync::watch;
 
 mod bundle;
 
+#[cfg(unix)]
 pub(crate) async fn ensure_update_source(target: &str) -> io::Result<()> {
   bundle::matching_bundle(target)
     .await
@@ -22,6 +23,7 @@ pub(crate) async fn ensure_update_source(target: &str) -> io::Result<()> {
     .map_err(io::Error::other)
 }
 
+#[cfg(unix)]
 pub(crate) fn update_bundle_directories() -> io::Result<Vec<std::path::PathBuf>> {
   bundle::bundle_directories()
 }

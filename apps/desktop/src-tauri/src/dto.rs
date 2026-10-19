@@ -92,6 +92,13 @@ pub struct RemoteAgentInstallResultDto {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(
+  windows,
+  expect(
+    dead_code,
+    reason = "Remote installation progress retains shared wire phases while Windows installation is unsupported"
+  )
+)]
 pub enum RemoteAgentInstallPhase {
   DetectingPlatform,
   VerifyingBundle,

@@ -1,15 +1,24 @@
 //! Terminal presentation adapter for the shared connection client.
+#[cfg(unix)]
+pub use ctl_client::connection::check_route_support;
+#[cfg(unix)]
 use ctl_client::connection::{ConnectionClient, InteractionPolicy};
-pub use ctl_client::connection::{Error, check_route_support, request};
+pub use ctl_client::connection::{Error, request};
+#[cfg(unix)]
 use ctl_ipc::{PromptKind, SshTarget};
+#[cfg(unix)]
 use std::io::{self, Write as _};
+#[cfg(unix)]
 use std::path::PathBuf;
+#[cfg(unix)]
 use zeroize::Zeroizing;
 
+#[cfg(unix)]
 pub async fn ensure_master(target: SshTarget) -> Result<PathBuf, Error> {
   ensure_master_with_interaction(target, true).await
 }
 
+#[cfg(unix)]
 pub async fn ensure_master_with_interaction(
   target: SshTarget,
   interactive: bool,
@@ -19,9 +28,11 @@ pub async fn ensure_master_with_interaction(
     .await
 }
 
+#[cfg(unix)]
 #[derive(Default)]
 pub struct MasterClient(ConnectionClient);
 
+#[cfg(unix)]
 impl MasterClient {
   pub async fn existing_master(&self, target: SshTarget) -> Result<Option<PathBuf>, Error> {
     self
@@ -49,6 +60,7 @@ impl MasterClient {
   }
 }
 
+#[cfg(unix)]
 async fn interactive_prompt(
   kind: PromptKind,
   message: String,
@@ -64,6 +76,7 @@ async fn interactive_prompt(
   .map_err(|_| Error::PromptWorkerStopped)?
 }
 
+#[cfg(unix)]
 fn prompt(kind: PromptKind, message: &str) -> Result<Option<Zeroizing<String>>, Error> {
   match kind {
     PromptKind::Secret => rpassword::prompt_password(format!("{message} "))
@@ -87,6 +100,7 @@ fn prompt(kind: PromptKind, message: &str) -> Result<Option<Zeroizing<String>>, 
   }
 }
 
+#[cfg(unix)]
 fn read_response() -> Result<String, Error> {
   use std::io::BufRead as _;
   io::stderr().flush().map_err(Error::Prompt)?;

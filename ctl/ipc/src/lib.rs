@@ -1,5 +1,10 @@
 //! Owner-only local protocol between `ctld` and its clients.
 
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+pub use windows::Listener;
+
 pub mod credentials;
 mod daemon_startup;
 pub mod identities;
@@ -35,7 +40,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 #[cfg(unix)]
 pub use tokio::net::UnixStream as Stream;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use tokio::time::sleep;
 use tokio::time::timeout;
 use zeroize::{Zeroize, Zeroizing};
@@ -473,7 +478,15 @@ pub async fn prepare_proxy_command(gateways: &[SshGateway]) -> Result<String, Co
 /// Panics if serialization of the gateway route unexpectedly fails.
 #[must_use]
 pub fn proxy_command_with_executable(gateways: &[SshGateway], executable: &Path) -> String {
-  let executable = executable.to_string_lossy().replace('\'', "'\\''");
+  // OpenSSH expands tokens even inside quotes. A literal percent in the helper
+  // path must survive that expansion before the local process is launched.
+  let executable = executable.to_string_lossy().replace('%', "%%");
+  // Native Windows OpenSSH launches ProxyCommand directly, without a POSIX
+  // shell. Single quotes would become part of the executable's filename.
+  #[cfg(windows)]
+  let executable = format!("\"{executable}\"");
+  #[cfg(not(windows))]
+  let executable = format!("'{}'", executable.replace('\'', "'\\''"));
   let bytes = serde_json::to_vec(gateways).expect("gateway route is serializable");
   let encoded = bytes
     .iter()
@@ -482,7 +495,7 @@ pub fn proxy_command_with_executable(gateways: &[SshGateway], executable: &Path)
       write!(text, "{byte:02x}").expect("writing to a String cannot fail");
       text
     });
-  format!("'{executable}' --proxy-route {encoded} --proxy-host %h --proxy-port %p")
+  format!("{executable} --proxy-route {encoded} --proxy-host %h --proxy-port %p")
 }
 
 impl SshTarget {
@@ -792,7 +805,11 @@ pub fn socket_path() -> PathBuf {
     return PathBuf::from(path);
   }
   if let Some(directory) = env::var_os("CTLD_RUNTIME_DIR") {
-    return PathBuf::from(directory).join(format!("ctld-v{}.sock", PROTOCOL_VERSION.major));
+    let directory = PathBuf::from(directory);
+    #[cfg(unix)]
+    return directory.join(format!("ctld-v{}.sock", PROTOCOL_VERSION.major));
+    #[cfg(windows)]
+    return windows::endpoint(&directory);
   }
   default_socket_path()
 }
@@ -814,15 +831,8 @@ pub fn default_socket_path() -> PathBuf {
   }
   #[cfg(windows)]
   {
-    use std::os::windows::ffi::OsStrExt as _;
     let directory = dirs::data_local_dir().unwrap_or_else(env::temp_dir);
-    let bytes: Vec<u8> = directory
-      .as_os_str()
-      .encode_wide()
-      .flat_map(u16::to_le_bytes)
-      .collect();
-    let id = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, &bytes);
-    PathBuf::from(format!(r"\\.\pipe\ctld-v{}-{id}", PROTOCOL_VERSION.major))
+    windows::endpoint(&directory)
   }
 }
 
@@ -1446,6 +1456,28 @@ fn retryable_connect_error(error: &io::Error) -> bool {
 mod tests {
   use super::*;
 
+  #[cfg(unix)]
+  #[test]
+  fn proxy_helper_path_is_quoted_for_the_posix_shell_and_ssh_token_expansion() {
+    let command =
+      proxy_command_with_executable(&[], Path::new("/helper's directory/%h %p 100%/ctld"));
+    assert_eq!(
+      command,
+      "'/helper'\\''s directory/%%h %%p 100%%/ctld' --proxy-route 5b5d --proxy-host %h --proxy-port %p"
+    );
+  }
+
+  #[cfg(windows)]
+  #[test]
+  fn proxy_helper_path_is_quoted_for_native_spawn_and_ssh_token_expansion() {
+    let command =
+      proxy_command_with_executable(&[], Path::new(r"C:\helper's directory\%h %p 100%\ctld.exe"));
+    assert_eq!(
+      command,
+      r#""C:\helper's directory\%%h %%p 100%%\ctld.exe" --proxy-route 5b5d --proxy-host %h --proxy-port %p"#
+    );
+  }
+
   #[test]
   fn prompt_warnings_are_optional_for_existing_protocol_clients() {
     #[derive(serde::Deserialize)]
@@ -1662,9 +1694,10 @@ mod tests {
 
   #[test]
   fn historical_local_vpn_routes_keep_their_contract_and_wire_shape() {
+    let socket_path = default_socket_path();
     let local: SshGateway = serde_json::from_value(serde_json::json!({
       "kind": "vpn",
-      "vpn": { "connection_id": "work", "socket_path": "/tmp/owner.sock" },
+      "vpn": { "connection_id": "work", "socket_path": socket_path },
       "destination": "work", "hostname": null, "user": null,
       "port": null, "identity_file": null, "mode": "automatic"
     }))
@@ -1679,6 +1712,7 @@ mod tests {
       CONTRACT_V1_1_13
     ));
     let wire = serde_json::to_value(&local).unwrap();
+    assert_eq!(wire["vpn"]["socket_path"], serde_json::json!(socket_path));
     assert!(wire["vpn"].get("expected_remote_id").is_none());
     let mut ssh = local.clone();
     ssh.kind = GatewayKind::Ssh;

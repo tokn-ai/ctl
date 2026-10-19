@@ -18,12 +18,13 @@ mod identity_connection;
 mod approval_context;
 #[cfg(target_os = "macos")]
 mod keychain;
-#[cfg(unix)]
 mod lifecycle;
 mod manual_recovery;
 mod master_diagnostics;
 mod master_observation;
 mod master_ownership;
+#[cfg(any(windows, test))]
+mod native_forwarding;
 mod openconnect;
 mod port_forwarding;
 pub mod proxy_route;
@@ -86,7 +87,6 @@ const REMOTE_LISTENERS_COMMAND: &str = concat!(
 #[derive(Default)]
 struct State {
   socket_path: Option<PathBuf>,
-  #[cfg(unix)]
   lifecycle: Option<lifecycle::Control>,
   attempts: Mutex<HashMap<String, Attempt>>,
   targets: Mutex<HashMap<String, Arc<TargetLifecycle>>>,
@@ -97,6 +97,8 @@ struct State {
   connection_correlations: Mutex<HashMap<PathBuf, ConnectionCorrelation>>,
   endpoint_registry: endpoint_registry::Registry,
   shared_forwards: AsyncMutex<SharedForwardRegistry>,
+  #[cfg(windows)]
+  native_forwards: AsyncMutex<native_forwarding::Registry>,
   vpn_service: Option<vpn_service::VpnService>,
   wake_recovery: Arc<wake_recovery::Registry>,
   #[cfg(target_os = "macos")]
@@ -204,19 +206,17 @@ impl State {
     }
   }
 
+  #[cfg(unix)]
   fn release_private_master(&self, target: &SshTarget) {
-    #[cfg(unix)]
     self
       .private_masters
       .lock()
       .unwrap()
       .remove(&target_key(target));
-    #[cfg(not(unix))]
-    let _ = target;
   }
 
-  #[cfg(unix)]
   fn release_master_leases(&self) {
+    #[cfg(unix)]
     self.private_masters.lock().unwrap().clear();
     self.configured_connections.lock().unwrap().clear();
   }
@@ -387,6 +387,8 @@ enum RequestError {
   Codec(#[from] ctl_ipc::CodecError),
   #[error("ctld client ended the request")]
   ClientClosed,
+  #[error("{0} is unavailable on Windows; use a direct SSH connection instead")]
+  UnsupportedPlatform(&'static str),
   #[error("invalid ctld request: {0}")]
   InvalidRequest(&'static str),
   #[error(
@@ -428,7 +430,6 @@ enum RequestError {
 ///
 /// # Errors
 /// Returns an error when the owner-only endpoint cannot be prepared or served.
-#[cfg(unix)]
 pub async fn run(socket_path: PathBuf) -> Result<(), DaemonError> {
   run_with_approvals(
     socket_path,
@@ -482,18 +483,16 @@ pub fn run_monitored(
   })
 }
 
-#[cfg(unix)]
 async fn run_with_approvals(
   socket_path: PathBuf,
   #[cfg(target_os = "macos")] approvals: Option<Arc<keychain::approval::Approvals>>,
 ) -> Result<(), DaemonError> {
-  use tokio::signal::unix::{SignalKind, signal};
-
+  #[cfg(unix)]
   prepare_runtime_directory(&socket_path).map_err(DaemonError::RuntimeDirectory)?;
   let listener = bind_listener(&socket_path).await?;
   let guard = SocketGuard(socket_path);
-  let mut interrupt = signal(SignalKind::interrupt()).map_err(DaemonError::ShutdownSignal)?;
-  let mut terminate = signal(SignalKind::terminate()).map_err(DaemonError::ShutdownSignal)?;
+  let shutdown = shutdown_signal();
+  tokio::pin!(shutdown);
   let (vpn_service, mut vpn_owner) = vpn_service::spawn();
   let (lifecycle, mut restarts) = lifecycle::Control::new();
   let instance_id = lifecycle.instance_id.clone();
@@ -501,6 +500,7 @@ async fn run_with_approvals(
     socket_path: Some(guard.0.clone()),
     vpn_service: Some(vpn_service),
     lifecycle: Some(lifecycle),
+    #[cfg(unix)]
     endpoint_registry: endpoint_registry::Registry::for_socket(&guard.0),
     #[cfg(target_os = "macos")]
     approvals,
@@ -534,11 +534,10 @@ async fn run_with_approvals(
         restarting = Some(stream);
         break Ok(());
       }
-      _ = interrupt.recv() => break Ok(()),
-      _ = terminate.recv() => break Ok(()),
+      result = &mut shutdown => break result.map_err(DaemonError::ShutdownSignal),
       accepted = listener.accept() => {
-        let (stream, _) = match accepted {
-          Ok(accepted) => accepted,
+        let stream = match accepted {
+          Ok(accepted) => accepted.0,
           Err(error) => break Err(DaemonError::Accept(error)),
         };
         let state = Arc::clone(&state);
@@ -586,9 +585,27 @@ async fn run_with_approvals(
   result
 }
 
-#[cfg(not(unix))]
-pub async fn run(_socket_path: PathBuf) -> Result<(), DaemonError> {
-  Err(DaemonError::UnsupportedPlatform)
+async fn shutdown_signal() -> io::Result<()> {
+  #[cfg(unix)]
+  {
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut interrupt = signal(SignalKind::interrupt())?;
+    let mut terminate = signal(SignalKind::terminate())?;
+    tokio::select! {
+      _ = interrupt.recv() => {},
+      _ = terminate.recv() => {},
+    }
+    Ok(())
+  }
+  #[cfg(windows)]
+  {
+    if tokio::signal::ctrl_c().await.is_err() {
+      // An automatically started owner is detached from the client console.
+      // Lifecycle restart remains available when no console handler exists.
+      std::future::pending::<()>().await;
+    }
+    Ok(())
+  }
 }
 
 #[must_use]
@@ -640,9 +657,8 @@ async fn run_askpass() -> Result<(), Box<dyn std::error::Error>> {
   }
 }
 
-#[cfg(unix)]
 async fn handle_connection(
-  mut stream: tokio::net::UnixStream,
+  mut stream: ctl_ipc::Stream,
   state: Arc<State>,
 ) -> Result<(), RequestError> {
   let first = ctl_ipc::read_frame::<_, lifecycle::FirstMessage>(&mut stream)
@@ -666,15 +682,17 @@ async fn handle_connection(
   }
 }
 
-#[cfg(unix)]
 async fn handle_request(
   stream: &mut ctl_ipc::Stream,
   state: &Arc<State>,
   mut request: ClientMessage,
   protocol: ProtocolVersion,
 ) -> Result<(), RequestError> {
-  normalize_request_target(&mut request);
   let result = async {
+    // Explicit unsupported choices must be checked before normalization can
+    // erase a preference equivalent to an alias's default policy.
+    validate_request_platform(&request)?;
+    normalize_request_target(&mut request);
     validate_request_contract(&request, protocol)?;
     match request {
       ClientMessage::EnsureMaster { target } => {
@@ -731,6 +749,36 @@ async fn handle_request(
     .await;
   }
   result
+}
+
+fn validate_request_platform(request: &ClientMessage) -> Result<(), RequestError> {
+  if cfg!(windows)
+    && matches!(
+      request,
+      ClientMessage::ConfigurePortForward { target, .. }
+        | ClientMessage::ListPortForwards { target }
+        if target.use_ssh_config_master == Some(true)
+    )
+  {
+    return Err(RequestError::UnsupportedPlatform("SSH ControlMaster reuse"));
+  }
+  if cfg!(windows)
+    && matches!(
+      request,
+      ClientMessage::EnsureMaster { .. }
+        | ClientMessage::EnsureMasterQuiet { .. }
+        | ClientMessage::MasterStatus { .. }
+        | ClientMessage::ConnectionStatus { .. }
+        | ClientMessage::WatchRecovery { .. }
+        | ClientMessage::DisconnectMaster { .. }
+        | ClientMessage::ListRemoteListeners { .. }
+    )
+  {
+    return Err(RequestError::UnsupportedPlatform(
+      "SSH connection multiplexing",
+    ));
+  }
+  Ok(())
 }
 
 fn validate_request_contract(
@@ -865,7 +913,7 @@ async fn handshake(stream: &mut ctl_ipc::Stream) -> Result<(), ctl_ipc::CodecErr
   }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 async fn handshake_server(stream: &mut ctl_ipc::Stream) -> Result<ProtocolVersion, RequestError> {
   let request = ctl_ipc::read_frame::<_, ClientMessage>(stream).await?;
   accept_handshake(stream, request).await
@@ -1373,7 +1421,7 @@ impl ConnectionAuthentication {
     let _ = tokio::task::spawn_blocking(move || approved.connected()).await;
   }
 
-  #[cfg(test)]
+  #[cfg(all(test, unix))]
   fn fresh(interactive: bool) -> Self {
     #[cfg(target_os = "macos")]
     let authorization = keychain::approval::Attempt::fresh(interactive);
@@ -1517,6 +1565,7 @@ async fn reuse_master_or_prepare(
   if let Some(previous) = state.existing_endpoint(target)? {
     let changed = previous.control_path != *control_path || previous.shared != endpoint.shared;
     if changed || !ready {
+      #[cfg(unix)]
       state.release_private_master(target);
       // Our shared listeners remain under ctld's control even when the master
       // dies. A dead private master instead needs stale-socket cleanup; asking
@@ -1559,6 +1608,7 @@ impl RequestError {
       Self::VpnFailed(_) => "vpn_failed",
       Self::Codec(_) | Self::ClientClosed => "ctld_connection_error",
       Self::InvalidRequest(_) => "ctld_protocol_error",
+      Self::UnsupportedPlatform(_) => "ctld_platform_unsupported",
       Self::ProtocolVersionMismatch { .. } => "ctld_protocol_version_mismatch",
       Self::UnsupportedGatewayRoute(_) => "ctld_protocol_feature_unsupported",
       Self::StartMaster(_) => "ssh_start_failed",
@@ -1924,6 +1974,7 @@ async fn disconnect_master_inner(
   let _target_guard = lifecycle.lock.lock().await;
   // Releasing our local client allows finite OpenSSH idle cleanup even if a
   // later control command fails. Existing user channels remain unaffected.
+  #[cfg(unix)]
   state.release_private_master(target);
   let mut forwards = state.forwards.lock().await;
   forwards.pause(target);
@@ -2048,9 +2099,21 @@ async fn configure_port_forward(
   if state.target(&target).is_paused() {
     forwards.pause(&target);
   }
-  let status = forwards
-    .configure(&SshForwardControl { state }, target, forward, enabled)
-    .await?;
+  let control = SshForwardControl { state };
+  let configure = forwards.configure(&control, target, forward, enabled);
+  #[cfg(windows)]
+  let status = tokio::select! {
+    biased;
+    incoming = ctl_ipc::read_frame::<_, ClientMessage>(stream) => {
+      return Err(match incoming? {
+        None => RequestError::ClientClosed,
+        Some(_) => RequestError::InvalidRequest("unexpected message during forwarding configuration"),
+      });
+    },
+    result = configure => result?,
+  };
+  #[cfg(not(windows))]
+  let status = configure.await?;
   ctl_ipc::write_frame(stream, &ServerMessage::PortForwardConfigured { status }).await?;
   Ok(())
 }
@@ -2743,10 +2806,21 @@ async fn bind_listener(path: &Path) -> Result<UnixListener, DaemonError> {
   Ok(listener)
 }
 
+#[cfg(windows)]
+fn bind_listener(path: &Path) -> std::future::Ready<Result<ctl_ipc::Listener, DaemonError>> {
+  std::future::ready(
+    ctl_ipc::Listener::bind(path).map_err(|source| DaemonError::Bind {
+      path: path.to_path_buf(),
+      source,
+    }),
+  )
+}
+
 struct SocketGuard(PathBuf);
 
 impl Drop for SocketGuard {
   fn drop(&mut self) {
+    #[cfg(unix)]
     let _ = std::fs::remove_file(&self.0);
   }
 }
@@ -3504,6 +3578,10 @@ mod tests {
       control_path_for_socket(&target(), Path::new("/tmp/another-ctld.sock"))
     );
     assert_eq!(first.file_name().unwrap().len(), 32);
+    assert_eq!(first.parent(), Some(control_directory().as_path()));
+    // Unix control sockets have a short path limit. Windows brokers reject mux
+    // requests and do not impose this limit on the user's temporary directory.
+    #[cfg(unix)]
     assert!(first.as_os_str().len() < 80);
   }
 

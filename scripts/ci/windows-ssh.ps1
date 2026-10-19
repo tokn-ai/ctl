@@ -62,7 +62,13 @@ function Invoke-Ctl {
 }
 
 function Invoke-CallerFixture {
-  param([string]$Program, [string[]]$Arguments, [string]$InputText, [string]$Label)
+  param(
+    [string]$Program,
+    [string[]]$Arguments,
+    [string]$InputText,
+    [string]$Label,
+    [string]$ExpectedTest = ''
+  )
   $start = [Diagnostics.ProcessStartInfo]::new($Program)
   $start.UseShellExecute = $false
   $start.WorkingDirectory = (Get-Location).ProviderPath
@@ -90,6 +96,13 @@ function Invoke-CallerFixture {
     if ($process.ExitCode -ne 0) {
       throw "$Label exited $($process.ExitCode):`n$($stdout.Result)`n$($stderr.Result)"
     }
+    if ($ExpectedTest) {
+      $testOutput = [regex]::Replace($stdout.Result, '\x1b\[[0-9;]*m', '')
+      $expectedResult = '(?m)^test ' + [regex]::Escape($ExpectedTest) + ' \.\.\. ok\r?$'
+      if (-not [regex]::IsMatch($testOutput, $expectedResult)) {
+        throw "$Label did not report the expected test success: $ExpectedTest"
+      }
+    }
   } finally {
     if ($started -and -not $process.HasExited) {
       $process.Kill($true)
@@ -108,11 +121,13 @@ function Invoke-CallerPassword {
 
 function Invoke-CallerTrust {
   param([string]$Metadata)
+  $testName = 'native_openssh_requires_host_trust_with_redirected_command_stdin'
   Invoke-CallerFixture -Program 'cargo' -Arguments @(
     'test', '--locked', '-p', 'ctl-cli', '--test', 'caller_host_trust',
-    'native_openssh_requires_host_trust_with_redirected_command_stdin',
+    $testName,
     '--', '--exact', '--ignored', '--nocapture'
-  ) -InputText $Metadata -Label 'Native caller host-trust fixture'
+  ) -InputText $Metadata -Label 'Native caller host-trust fixture' -ExpectedTest $testName
+  Write-Host 'Native caller host-trust key/password checks passed.'
 }
 
 function Assert-Equal {

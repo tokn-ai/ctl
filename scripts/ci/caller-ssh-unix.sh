@@ -48,7 +48,9 @@ sudo /usr/sbin/sshd -t -f "$root/sshd_config"
 sudo /usr/sbin/sshd -f "$root/sshd_config" -E "$root/server.log"
 host_key=$(cut -d ' ' -f 1,2 "$root/host.pub")
 printf '[127.0.0.1]:%s %s\n[::1]:%s %s\n' "$port" "$host_key" "$port" "$host_key" > "$root/known_hosts"
+touch "$root/trust-config"
 cat > "$config" <<EOF
+Include "$root/trust-config"
 Host ctl-caller-ci ctl-caller-untrusted
   HostName 127.0.0.1
   User $ssh_user
@@ -95,3 +97,14 @@ code=$?
 set -e
 [[ $code == 19 ]] || { echo 'Plain shell exit status was not preserved' >&2; exit 1; }
 grep -q CALLER_SHELL "$root/shell-output"
+# The shared Rust driver supplies a controlling PTY while keeping remote
+# command stdin on its own pipe. This server intentionally accepts only keys;
+# the same driver also exercises real password auth in the Windows fixture.
+different_key=$(cut -d ' ' -f 1,2 "$root/wrong-client.pub")
+fingerprint=$(ssh-keygen -E sha256 -lf "$root/host.pub" | awk '{print $2}')
+node --input-type=module -e '
+const [key_user, key_file, server_key, different_key, fingerprint, port, include_file] = process.argv.slice(1);
+process.stdout.write(JSON.stringify({ key_user, key_file, server_key, different_key, fingerprint, port: Number(port), include_file }));
+' "$ssh_user" "$root/client" "$host_key" "$different_key" "$fingerprint" "$port" "$root/trust-config" |
+  cargo test --locked -p ctl-cli --test caller_host_trust \
+    native_openssh_requires_host_trust_with_redirected_command_stdin -- --exact --ignored --nocapture

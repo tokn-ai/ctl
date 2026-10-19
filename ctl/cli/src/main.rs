@@ -211,7 +211,13 @@ fn main() {
 
 async fn run_main(arguments: Option<Arguments>) -> i32 {
   if std::env::var_os(caller_auth::ASKPASS_MODE).is_some() {
-    return i32::from(caller_auth::askpass().await.is_err());
+    return match caller_auth::askpass().await {
+      Ok(()) => 0,
+      Err(error) => {
+        eprintln!("ctl: {error}");
+        1
+      }
+    };
   }
   if let Err(error) = bundled::register() {
     eprintln!("ctl: {error}");

@@ -48,11 +48,27 @@ credential, authentication retains the ordinary ctl-managed policy. Supplying
 caller-owned connection: no existing master, configured identities, identity
 agent, alternative authentication method, saved credential or Keychain fallback
 can rescue an incorrect supplied credential. Credential sources conflict.
-The private key must be usable without an agent or an interactive passphrase.
+The private key must be usable without an agent or a passphrase prompt. ctl does
+not offer passphrase or PIN prompts, or retry with a different credential.
 
 ctl resolves the SSH alias's endpoint and host-key settings, then uses an isolated
 OpenSSH configuration. Host-key verification and known-hosts policy remain in
-effect; unknown or changed keys are never approved with the supplied password.
+effect. When OpenSSH requires first-use confirmation, ctl displays its full host
+authenticity and fingerprint prompt on the caller's controlling terminal and
+reads the confirmation there: `/dev/tty` on Unix, or `CONIN$`/`CONOUT$` on Windows.
+This works independently of redirected command stdin. The supplied password is
+never used to answer a host-trust prompt. OpenSSH records an accepted key in its
+configured known-hosts files as usual; changed-key, revoked-key, and strict
+host-key policies retain OpenSSH's normal behavior.
+
+Without a controlling terminal, a connection that needs host-trust confirmation
+fails without prompting. For unattended use, provision trusted host keys in the
+configured known-hosts files beforehand. Already trusted hosts and configured
+noninteractive host-key policies continue to work. Host-trust confirmation is
+separate from credential delivery: only that first-use trust prompt can read the
+terminal; passwords use the supplied credential channel, and command stdin
+remains available for application data.
+
 Default known-hosts paths retain profile names containing spaces. Ambiguous
 custom known-hosts path lists are rejected instead of changing which files are trusted.
 Configured proxy authentication is rejected in this mode; use a directly
@@ -103,11 +119,11 @@ fixture in `tests/fixtures/caller_handoff.mts` for both platform transports.
 Passwords are 1..4096 UTF-8 bytes without NUL, CR or LF. Leading/trailing spaces
 are preserved; no trimming or newline terminator is supported. Never put a
 password in argv, environment variables or a file. ctl's internal askpass bridge
-requires no caller involvement. Its password buffer exists only in memory for
-this invocation (including its persistent-shell reconnections) and is zeroized
-when the invocation ends. It is never returned to the caller, logged, audited,
-or saved. Terminal interaction, command input/output and exit status remain
-independent of the password channel.
+delivers the supplied password without a terminal password prompt. The password
+buffer exists only in memory for this invocation, including persistent-shell
+reconnections, and is zeroized when the invocation ends. It is never returned to
+the caller, logged, audited, or saved. Terminal interaction, command input/output
+and exit status remain independent of the password channel.
 
 ## Persistent shells
 

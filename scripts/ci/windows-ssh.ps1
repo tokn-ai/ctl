@@ -61,15 +61,15 @@ function Invoke-Ctl {
   }
 }
 
-function Invoke-CallerPassword {
-  param([string]$Executable, [string]$Credentials)
-  $start = [Diagnostics.ProcessStartInfo]::new('bun')
+function Invoke-CallerFixture {
+  param([string]$Program, [string[]]$Arguments, [string]$InputText, [string]$Label)
+  $start = [Diagnostics.ProcessStartInfo]::new($Program)
   $start.UseShellExecute = $false
   $start.WorkingDirectory = (Get-Location).ProviderPath
   $start.RedirectStandardInput = $true
   $start.RedirectStandardOutput = $true
   $start.RedirectStandardError = $true
-  foreach ($argument in @('./scripts/ci/caller-password.mts', $Executable, 'ctl-windows-ci')) {
+  foreach ($argument in $Arguments) {
     $start.ArgumentList.Add($argument)
   }
   $process = [Diagnostics.Process]::new()
@@ -77,18 +77,18 @@ function Invoke-CallerPassword {
   $started = $false
   try {
     $started = $process.Start()
-    if (-not $started) { throw 'Could not start the Bun caller-password fixture' }
+    if (-not $started) { throw "Could not start $Label" }
     $stdout = $process.StandardOutput.ReadToEndAsync()
     $stderr = $process.StandardError.ReadToEndAsync()
     # Credentials stay on stdin, outside argv, environment and captured logs.
-    $process.StandardInput.Write($Credentials)
+    $process.StandardInput.Write($InputText)
     $process.StandardInput.Close()
-    if (-not $process.WaitForExit(180000)) { throw 'Bun caller-password fixture timed out' }
+    if (-not $process.WaitForExit(180000)) { throw "$Label timed out" }
     if (-not $stdout.Wait(5000) -or -not $stderr.Wait(5000)) {
-      throw 'Bun caller-password fixture left output streams open'
+      throw "$Label left output streams open"
     }
     if ($process.ExitCode -ne 0) {
-      throw "Bun caller-password fixture exited $($process.ExitCode):`n$($stdout.Result)`n$($stderr.Result)"
+      throw "$Label exited $($process.ExitCode):`n$($stdout.Result)`n$($stderr.Result)"
     }
   } finally {
     if ($started -and -not $process.HasExited) {
@@ -97,6 +97,22 @@ function Invoke-CallerPassword {
     }
     $process.Dispose()
   }
+}
+
+function Invoke-CallerPassword {
+  param([string]$Executable, [string]$Credentials)
+  Invoke-CallerFixture -Program 'bun' -Arguments @(
+    './scripts/ci/caller-password.mts', $Executable, 'ctl-windows-ci'
+  ) -InputText $Credentials -Label 'Bun caller-password fixture'
+}
+
+function Invoke-CallerTrust {
+  param([string]$Metadata)
+  Invoke-CallerFixture -Program 'cargo' -Arguments @(
+    'test', '--locked', '-p', 'ctl-cli', '--test', 'caller_host_trust',
+    'native_openssh_requires_host_trust_with_redirected_command_stdin',
+    '--', '--exact', '--ignored', '--nocapture'
+  ) -InputText $Metadata -Label 'Native caller host-trust fixture'
 }
 
 function Assert-Equal {
@@ -238,7 +254,10 @@ Match User $callerUser
     $unwantedListener.Stop()
   }
   $proxySsh = (Join-Path $openssh 'ssh.exe').Replace('\', '/')
+  $trustConfig = Join-Path $root 'caller-trust-config'
+  [IO.File]::WriteAllText($trustConfig, '')
   @"
+Include "$rootSsh/caller-trust-config"
 Host ctl-windows-ci
   HostName 127.0.0.1
   Port 22222
@@ -402,6 +421,20 @@ $originalConfigText
   New-Item -ItemType Directory $callerDirectory | Out-Null
   Copy-Item '.\target\debug\ctl.exe' "$callerDirectory\ctl.exe"
   Invoke-CallerPassword -Executable "$callerDirectory\ctl.exe" -Credentials (@{ user = $callerUser; password = $callerPassword } | ConvertTo-Json -Compress)
+  $differentKey = (Get-Content "$root\wrong-client.pub").Split(' ')
+  $fingerprintOutput = & "$openssh\ssh-keygen.exe" -E sha256 -lf "$root\host.pub"
+  if ($LASTEXITCODE -ne 0) { throw 'Could not inspect the fixture host fingerprint' }
+  Invoke-CallerTrust -Metadata (@{
+    key_user = $user
+    key_file = "$root\client"
+    server_key = "$($hostKey[0]) $($hostKey[1])"
+    different_key = "$($differentKey[0]) $($differentKey[1])"
+    fingerprint = ($fingerprintOutput -split '\s+')[1]
+    port = 22222
+    include_file = $trustConfig
+    password_user = $callerUser
+    password = $callerPassword
+  } | ConvertTo-Json -Compress)
   Invoke-Ctl -Arguments ($temporary + @('ctmux', 'list')) | Out-Null
 } catch {
   Stop-Service sshd -ErrorAction SilentlyContinue

@@ -24,6 +24,17 @@ pub struct CallerAuth {
   pub authentication: Authentication,
   task: Option<tokio::task::JoinHandle<()>>,
 }
+
+#[cfg(test)]
+impl CallerAuth {
+  pub(crate) fn for_test(authentication: Authentication) -> Self {
+    Self {
+      authentication,
+      task: None,
+    }
+  }
+}
+
 impl Drop for CallerAuth {
   fn drop(&mut self) {
     if let Some(task) = &self.task {

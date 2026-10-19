@@ -68,6 +68,8 @@ noninteractive host-key policies continue to work. Host-trust confirmation is
 separate from credential delivery: only that first-use trust prompt can read the
 terminal; passwords use the supplied credential channel, and command stdin
 remains available for application data.
+Background channels cannot prompt while ctl's terminal UI owns input. An explicit
+reconnect can ask for confirmation after the UI releases the terminal.
 
 Default known-hosts paths retain profile names containing spaces. Ambiguous
 custom known-hosts path lists are rejected instead of changing which files are trusted.

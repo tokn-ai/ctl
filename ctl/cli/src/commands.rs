@@ -306,9 +306,12 @@ struct CtlConnector {
 impl CtlConnector {
   async fn interaction(&self) -> Result<ctl_client::SshInteraction, CtlConnectError> {
     if let Some(caller) = &self.caller_auth {
-      return Ok(ctl_client::SshInteraction::CallerSupplied(
-        caller.authentication.clone(),
-      ));
+      let mut authentication = caller.authentication.clone();
+      // Background channels must not compete with the TUI's terminal reader.
+      // Explicit reconnect restores the terminal before allowing prompts again.
+      authentication.allow_host_key_confirmation &=
+        !self.terminal_ui_active.load(Ordering::Acquire);
+      return Ok(ctl_client::SshInteraction::CallerSupplied(authentication));
     }
     ssh_interaction(
       &self.settings,
@@ -318,6 +321,7 @@ impl CtlConnector {
     )
     .await
   }
+
   fn new(target: ConnectionTarget, settings: ctl_client::hosts::ConnectionTargetDto) -> Self {
     #[cfg(unix)]
     let mut settings = settings;
@@ -925,6 +929,80 @@ mod tests {
         platform == ctl_client::RemotePlatform::Unix
       );
       assert!(target.hostname.is_none() && target.user.is_none() && target.port.is_none());
+    }
+  }
+
+  #[tokio::test]
+  async fn caller_host_confirmation_is_quiet_in_tui_and_restored_for_explicit_reconnect() {
+    use ctl_client::caller_auth::{Authentication, Credential};
+    use ctl_client::hosts::ConnectionTargetDto;
+    use std::ffi::OsStr;
+
+    for credential in [
+      Credential::Key(PathBuf::from("caller-key")),
+      Credential::Password {
+        endpoint: PathBuf::from("caller-password-endpoint"),
+        token: "caller-password-token".into(),
+      },
+    ] {
+      for caller_has_terminal in [true, false] {
+        let authentication = Authentication {
+          credential: credential.clone(),
+          host_options: vec!["-o".into(), "StrictHostKeyChecking=ask".into()],
+          prompt_program: PathBuf::from("caller-helper"),
+          allow_host_key_confirmation: caller_has_terminal,
+        };
+        let caller = Arc::new(crate::caller_auth::CallerAuth::for_test(authentication));
+        let settings = ConnectionTargetDto::ssh("caller-target");
+        let mut connector = CtlConnector::new(settings.to_core(), settings);
+        connector.caller_auth = Some(Arc::clone(&caller));
+        let attachment = connector.for_interactive_session(PathBuf::from("ctmux.sock"));
+        let mut original = std::process::Command::new("ssh");
+        caller.authentication.configure(&mut original);
+
+        for terminal_ui_active in [false, true, false] {
+          // Interactive attachments share ownership of the host terminal.
+          attachment.set_terminal_ui_active(terminal_ui_active);
+          let ctl_client::SshInteraction::CallerSupplied(interaction) =
+            connector.interaction().await.unwrap()
+          else {
+            panic!("caller credentials must remain the authentication mode");
+          };
+          let mut configured = std::process::Command::new("ssh");
+          interaction.configure(&mut configured);
+          assert_eq!(
+            configured
+              .get_envs()
+              .find_map(|(key, value)| (key == "CTL_CALLER_CONFIRM_TTY").then_some(value)),
+            Some(Some(OsStr::new(
+              if caller_has_terminal && !terminal_ui_active {
+                "1"
+              } else {
+                "0"
+              }
+            )))
+          );
+          assert_eq!(
+            configured.get_args().collect::<Vec<_>>(),
+            original.get_args().collect::<Vec<_>>()
+          );
+          let credential_environment = |command: &std::process::Command| {
+            command
+              .get_envs()
+              .filter(|(key, _)| *key != "CTL_CALLER_CONFIRM_TTY")
+              .map(|(key, value)| (key.to_owned(), value.map(OsStr::to_owned)))
+              .collect::<Vec<_>>()
+          };
+          assert_eq!(
+            credential_environment(&configured),
+            credential_environment(&original)
+          );
+          assert_eq!(
+            caller.authentication.allow_host_key_confirmation,
+            caller_has_terminal
+          );
+        }
+      }
     }
   }
 

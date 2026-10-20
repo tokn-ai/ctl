@@ -1,4 +1,4 @@
-# ctmux published protocol 1.2.21
+# ctmux published protocol 1.2.22
 
 The protocol is independent of local IPC and future remote transport. Internal build
 11 introduced length-prefixed JSON frames for debuggability. Each frame begins with a
@@ -184,7 +184,21 @@ and running-command visibility remain subject to daemon policy.
 
 `handshake_accepted` advertises a heartbeat interval and an attachment-liveness
 timeout. A standard interactive client sends `heartbeat { nonce }` at the
-advertised cadence; `ctmuxd` replies with `heartbeat_ack { nonce }`. Any valid
+advertised cadence; `ctmuxd` replies with `heartbeat_ack { nonce }`. Under
+selected contract `1.2.22`, the reply also carries
+`session_history: { session_id, retained_bytes }`. The session ID identifies the
+terminal's current owning session, including after a pane move. `retained_bytes`
+sums the current retained history of every member terminal, including hidden
+panes, whether or not the client has downloaded it. It counts the UTF-8 text of
+complete logical lines, with trailing whitespace removed and one LF per line;
+styles, live grids, transport framing and a wrapped prefix continuing into the
+live grid are excluded. This is the full retained physical-history window,
+without the separate normalized-preview byte cap. Clearing history and eviction
+can reduce it. The daemon reads cached text counts, refreshing changed terminals
+without producing a checkpoint or transferring their history. Earlier selected
+contracts omit `session_history` and retain byte-identical heartbeat replies.
+Client-local heartbeat RTT uses a monotonic clock and the echoed nonce; no
+cross-machine clock synchronization is required. Any valid
 post-attach client message also demonstrates client liveness.
 
 The client's peer-silence deadline is independent of outbound writes. A blocked

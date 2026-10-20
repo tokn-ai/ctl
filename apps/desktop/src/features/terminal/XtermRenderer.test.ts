@@ -82,6 +82,37 @@ function expectVisibleRows(): void {
 }
 
 describe("resizing with history", () => {
+  it("measures rendered live history once per changed adapter and keeps primary history in alternate screen", async () => {
+    await renderer.write(encoder.encode("one\r\ntwo\r\nlive"), "14", "0");
+    const buffer = activeTerminal().buffer.normal;
+    const read = vi.spyOn(buffer, "getLine");
+    expect(renderer.historyBytes()).toBe(4);
+    const reads = read.mock.calls.length;
+    expect(reads).toBeGreaterThan(0);
+    expect(renderer.historyBytes()).toBe(4);
+    expect(read).toHaveBeenCalledTimes(reads);
+    await renderer.write(encoder.encode("\r\nnext"), "20", "14");
+    expect(renderer.historyBytes()).toBe(8);
+    expect(read.mock.calls.length).toBeGreaterThan(reads);
+    await renderer.write(encoder.encode("\u001b[?1049halt"), "31", "20");
+    expect(renderer.historyBytes()).toBe(8);
+    await renderer.write(encoder.encode("\u001b[?1049l\u001b[3J"), "43", "31");
+    expect(renderer.historyBytes()).toBe(0);
+  });
+
+  it("measures the committed history adapter and invalidates measurements on resize", async () => {
+    await renderer.restoreCheckpoint(size, [], encoder.encode("live"), new Uint8Array(), "0", "snapshot");
+    expect(renderer.historyBytes()).toBe(0);
+    expect(await renderer.syncHistory({ terminal_size: size, rows: [{ text: "older", wrapped: false }], payload: encoder.encode("live"),
+      input_prefix: new Uint8Array(), sequence: "0", snapshot_id: "snapshot", scrollback_limit: "10000" })).toBe(true);
+    expect(renderer.historyBytes()).toBe(6);
+    const buffer = activeTerminal().buffer.normal;
+    const read = vi.spyOn(buffer, "getLine");
+    await renderer.resize({ ...size, columns: 18 });
+    renderer.historyBytes();
+    expect(read).toHaveBeenCalled();
+  });
+
   it("paints the current viewport after repeated checkpoints, history activation and wheel scrolling", async () => {
     const history = Array.from({ length: 50 }, (_, index) => ({ text: `older ${index}`, wrapped: false }));
     const sizes = [{ columns: 60, rows: 6 }, { columns: 32, rows: 3 }, { columns: 80, rows: 8 }, { columns: 24, rows: 2 }];

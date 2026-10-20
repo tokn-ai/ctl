@@ -194,6 +194,20 @@ Live checkpoints, raw output, and normalized logical-history format version 1
 are unchanged. Other named protocols and the product release version are
 unchanged by this addition.
 
+Session statistics advance `ctmux` from `1.2.21` (build 21) to `1.2.22`
+(build 22), retaining `1.0.13` and every published `1.1.14`–`1.2.21` contract.
+Only connections selecting `1.2.22` receive the optional `session_history`
+field on `heartbeat_ack`. It contains the attached terminal's current owning
+`session_id` and full `retained_bytes` across all panes, including hidden ones.
+Bytes count complete retained logical UTF-8 text with one LF per line, excluding
+styles, live grids and incomplete wrapped prefixes; the normalized-preview cap
+does not limit this full retained-history count. Clients can compare their loaded
+history to the server total without downloading it to measure it. Older selected
+contracts keep the original `heartbeat_ack { nonce }` shape and clients report
+the total as unavailable. Heartbeat nonce semantics and other operations are
+unchanged. Other named protocols, storage schemas and product release versions
+are unchanged.
+
 Storage schema versions are separate. Changing a protocol contract does not
 rename or migrate an on-disk schema.
 
@@ -204,9 +218,9 @@ The first handshake or control request contains an offer:
 ```json
 {
   "protocol": {
-    "build": 21,
-    "version": "1.2.21",
-    "supported_versions": ["1.0.13", "1.1.14", "1.1.15", "1.1.16", "1.1.17", "1.1.18", "1.1.19", "1.1.20", "1.2.21"]
+    "build": 22,
+    "version": "1.2.22",
+    "supported_versions": ["1.0.13", "1.1.14", "1.1.15", "1.1.16", "1.1.17", "1.1.18", "1.1.19", "1.1.20", "1.2.21", "1.2.22"]
   }
 }
 ```
@@ -220,7 +234,7 @@ older contract is selected; new servers preserve old-client messages and
 semantics. Optional features must be gated by that selected contract.
 
 Daemon status and session/task handshakes return actual advertisements, separately
-from the selected contract. A server can advertise `1.2.21` while one connection
+from the selected contract. A server can advertise `1.2.22` while one connection
 selects `1.0.13`; diagnostics must retain both facts.
 
 Every component's `--component-info` output declares the release mapping:

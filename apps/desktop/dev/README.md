@@ -44,6 +44,8 @@ Native transport reconnection and scoped session reset events require the native
 app; the preview does not claim to validate those operations.
 
 The preview covers navigation, dialogs, task editing, lease controls, tab
-switching, and port toggles. Remote installation and real connection recovery
+switching, port toggles, and status-bar statistics. Statistics use fictional
+samples with a 1 MiB retained history total to exercise the downloaded/full
+display; they do not measure a real connection. Remote installation and real connection recovery
 require the native app. Sample command output demonstrates the visual layout;
 it is not a validation result from this checkout.

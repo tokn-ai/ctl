@@ -2,6 +2,7 @@ pub mod archive;
 pub mod cache;
 pub mod history;
 mod history_sync;
+mod metrics;
 pub mod session;
 pub mod view;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, size};
@@ -11,6 +12,7 @@ use ctmux_proto::{
   SessionInfo, ShellState, TerminalCheckpoint, TerminalHistoryManifest, TerminalHistoryRow,
   TerminalHistorySnapshot, TerminalSize, read_frame, write_frame,
 };
+pub use metrics::AttachmentStatistics;
 use std::collections::VecDeque;
 use std::io::{self, IsTerminal};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -353,6 +355,7 @@ pub struct AttachmentState {
   leases: Arc<RwLock<AttachmentLeases>>,
   terminal_size: Arc<RwLock<TerminalSize>>,
   shell_state_cache: ShellStateCache,
+  metrics: metrics::Metrics,
 }
 
 impl AttachmentState {
@@ -375,6 +378,7 @@ impl AttachmentState {
       })),
       terminal_size: Arc::new(RwLock::new(terminal_size)),
       shell_state_cache: attached.shell_state_cache(),
+      metrics: metrics::Metrics::default(),
     }
   }
 
@@ -385,6 +389,12 @@ impl AttachmentState {
   #[must_use]
   pub fn received_sequence(&self) -> u64 {
     self.received_sequence.load(Ordering::Acquire)
+  }
+
+  /// Returns traffic, local presentation lag, and negotiated session statistics.
+  #[must_use]
+  pub fn statistics(&self) -> AttachmentStatistics {
+    self.metrics.snapshot()
   }
 
   /// Returns the raw byte sequence the presentation layer has applied.
@@ -552,6 +562,11 @@ enum PendingPresentation {
   Output { sequence_end: u64 },
   Checkpoint { sequence: u64 },
   Geometry { observed_sequence: u64 },
+}
+
+struct TrackedPresentation {
+  presentation: PendingPresentation,
+  receipt: metrics::PresentationReceipt,
 }
 
 /// Failure to queue a presentation command locally.
@@ -1006,7 +1021,7 @@ pub struct AttachmentController<S> {
   /// A renderer may continue to present raw bytes after declaring a geometry
   /// incompatible, but it cannot resume safely until a checkpoint is applied.
   renderer_requires_checkpoint: bool,
-  pending_presentations: VecDeque<PendingPresentation>,
+  pending_presentations: VecDeque<TrackedPresentation>,
 }
 
 struct CheckpointDelivery {
@@ -1014,6 +1029,7 @@ struct CheckpointDelivery {
   history: TerminalHistorySnapshot,
   history_manifest: Option<TerminalHistoryManifest>,
   history_gap: bool,
+  receipt: metrics::PresentationReceipt,
 }
 
 /// Performs the versioned `ctmux` handshake over any bidirectional stream.
@@ -1288,6 +1304,7 @@ impl<S> AttachmentController<S> {
         history: history.clone(),
         history_manifest: attached.history_manifest.clone(),
         history_gap: attached.history_gap,
+        receipt: state.metrics.presentation_received(),
       });
     let history_transfer = attached
       .history_manifest
@@ -1380,14 +1397,23 @@ impl<S> AttachmentController<S> {
     let Some(acknowledgements) = self.acknowledgements.take() else {
       return Err(ClientError::AttachmentControllerAlreadyRun);
     };
-    let (reader, writer) = tokio::io::split(stream);
+    let (reader, writer) = tokio::io::split(metrics::MeteredStream::new(
+      stream,
+      self.state.metrics.clone(),
+    ));
     let (incoming_sender, incoming_receiver) = mpsc::channel(self.options.event_queue_capacity);
     let (writer_status_sender, writer_status_receiver) = mpsc::unbounded_channel();
     let (presentation_progress_sender, presentation_progress_receiver) = watch::channel(None);
     let (history_request_sender, history_request_receiver) = watch::channel(None);
     self.history_requests = Some(history_request_sender);
     let peer_activity = Arc::new(Mutex::new(Instant::now()));
-    let reader = read_server_messages(reader, incoming_sender, Arc::clone(&peer_activity));
+    let reader = read_server_messages(
+      reader,
+      incoming_sender,
+      Arc::clone(&peer_activity),
+      self.state.metrics.clone(),
+      self.protocol_version,
+    );
     let peer_silence = wait_for_peer_silence(peer_activity, self.liveness.peer_timeout);
     let drain_timeout = self.liveness.peer_timeout;
     let writer = drive_attachment_writer(
@@ -1455,11 +1481,15 @@ impl<S> AttachmentController<S> {
       history,
       history_manifest,
       history_gap,
+      receipt,
     }) = self.initial_checkpoint.take()
     {
-      let queued = self.enqueue_presentation(PendingPresentation::Checkpoint {
-        sequence: checkpoint.sequence,
-      });
+      let queued = self.enqueue_presentation(
+        PendingPresentation::Checkpoint {
+          sequence: checkpoint.sequence,
+        },
+        receipt,
+      );
       debug_assert!(
         queued,
         "a non-zero event queue accepts the initial checkpoint"
@@ -1509,8 +1539,8 @@ impl<S> AttachmentController<S> {
         }
         incoming_message = incoming.recv(), if presentation_capacity_available && event_capacity_available && !history_pending => {
           match incoming_message {
-            Some(IncomingServerMessage::Message(message)) => {
-              match self.process_server_message(*message, &mut writer_statuses).await? {
+            Some(IncomingServerMessage::Message { message, receipt }) => {
+              match self.process_server_message(*message, receipt, &mut writer_statuses).await? {
                 ControllerAction::Continue => {}
                 ControllerAction::Exit { reason, .. } => {
                   return Ok(self.finish(reason));
@@ -1538,6 +1568,7 @@ impl<S> AttachmentController<S> {
   async fn process_server_message(
     &mut self,
     message: ServerMessage,
+    receipt: Option<metrics::PresentationReceipt>,
     writer_statuses: &mut mpsc::UnboundedReceiver<WriterStatus>,
   ) -> Result<ControllerAction, ClientError> {
     match message {
@@ -1547,7 +1578,13 @@ impl<S> AttachmentController<S> {
         data,
       } => {
         self
-          .process_output(sequence_start, sequence_end, data, writer_statuses)
+          .process_output(
+            sequence_start,
+            sequence_end,
+            data,
+            receipt.expect("output receipt recorded by reader"),
+            writer_statuses,
+          )
           .await
       }
       ServerMessage::Checkpoint {
@@ -1562,6 +1599,7 @@ impl<S> AttachmentController<S> {
             *history,
             history_manifest.map(|manifest| *manifest),
             history_gap,
+            receipt.expect("checkpoint receipt recorded by reader"),
             writer_statuses,
           )
           .await
@@ -1581,9 +1619,24 @@ impl<S> AttachmentController<S> {
         observed_sequence,
       } => {
         self
-          .accept_geometry_change(terminal_size, observed_sequence, writer_statuses)
+          .accept_geometry_change(
+            terminal_size,
+            observed_sequence,
+            receipt.expect("geometry receipt recorded by reader"),
+            writer_statuses,
+          )
           .await
       }
+      message => self.process_status_message(message, writer_statuses).await,
+    }
+  }
+
+  async fn process_status_message(
+    &mut self,
+    message: ServerMessage,
+    writer_statuses: &mut mpsc::UnboundedReceiver<WriterStatus>,
+  ) -> Result<ControllerAction, ClientError> {
+    match message {
       message @ (ServerMessage::ViewSnapshot { .. }
       | ServerMessage::PaneResizeResult { .. }
       | ServerMessage::PaneMoveResult { .. }) => {
@@ -1601,7 +1654,7 @@ impl<S> AttachmentController<S> {
       ServerMessage::ShellStateChanged { state } => {
         self.process_shell_state(state, writer_statuses).await
       }
-      ServerMessage::HeartbeatAck { nonce } => {
+      ServerMessage::HeartbeatAck { nonce, .. } => {
         self
           .emit_event(AttachmentEvent::HeartbeatAck { nonce }, writer_statuses)
           .await
@@ -1670,10 +1723,11 @@ impl<S> AttachmentController<S> {
     sequence_start: u64,
     sequence_end: u64,
     data: Vec<u8>,
+    receipt: metrics::PresentationReceipt,
     writer_statuses: &mut mpsc::UnboundedReceiver<WriterStatus>,
   ) -> Result<ControllerAction, ClientError> {
     self.accept_output(sequence_start, sequence_end, &data)?;
-    let queued = self.enqueue_presentation(PendingPresentation::Output { sequence_end });
+    let queued = self.enqueue_presentation(PendingPresentation::Output { sequence_end }, receipt);
     debug_assert!(
       queued,
       "presentation capacity is checked before receiving output"
@@ -1696,6 +1750,7 @@ impl<S> AttachmentController<S> {
     history: TerminalHistorySnapshot,
     history_manifest: Option<TerminalHistoryManifest>,
     history_gap: bool,
+    receipt: metrics::PresentationReceipt,
     writer_statuses: &mut mpsc::UnboundedReceiver<WriterStatus>,
   ) -> Result<ControllerAction, ClientError> {
     self.accept_checkpoint(&checkpoint, &history)?;
@@ -1713,9 +1768,12 @@ impl<S> AttachmentController<S> {
     self.history_started = false;
     self.pending_history = None;
     self.queue_history_request(None);
-    let queued = self.enqueue_presentation(PendingPresentation::Checkpoint {
-      sequence: checkpoint.sequence,
-    });
+    let queued = self.enqueue_presentation(
+      PendingPresentation::Checkpoint {
+        sequence: checkpoint.sequence,
+      },
+      receipt,
+    );
     debug_assert!(
       queued,
       "presentation capacity is checked before receiving checkpoints"
@@ -1984,6 +2042,7 @@ impl<S> AttachmentController<S> {
     &mut self,
     terminal_size: TerminalSize,
     observed_sequence: u64,
+    receipt: metrics::PresentationReceipt,
     writer_statuses: &mut mpsc::UnboundedReceiver<WriterStatus>,
   ) -> Result<ControllerAction, ClientError> {
     if observed_sequence < self.state.received_sequence() {
@@ -2002,7 +2061,8 @@ impl<S> AttachmentController<S> {
     }
 
     self.state.set_terminal_size(terminal_size.clone());
-    let queued = self.enqueue_presentation(PendingPresentation::Geometry { observed_sequence });
+    let queued =
+      self.enqueue_presentation(PendingPresentation::Geometry { observed_sequence }, receipt);
     debug_assert!(
       queued,
       "presentation capacity is checked before receiving geometry"
@@ -2018,11 +2078,18 @@ impl<S> AttachmentController<S> {
       .await
   }
 
-  fn enqueue_presentation(&mut self, pending: PendingPresentation) -> bool {
+  fn enqueue_presentation(
+    &mut self,
+    presentation: PendingPresentation,
+    receipt: metrics::PresentationReceipt,
+  ) -> bool {
     if self.pending_presentations.len() >= self.options.event_queue_capacity {
       return false;
     }
-    self.pending_presentations.push_back(pending);
+    self.pending_presentations.push_back(TrackedPresentation {
+      presentation,
+      receipt,
+    });
     true
   }
 
@@ -2051,12 +2118,14 @@ impl<S> AttachmentController<S> {
     &mut self,
     acknowledgement: PresentationAck,
   ) -> Result<Option<u64>, ClientError> {
-    let pending = self.pending_presentations.front().copied().ok_or_else(|| {
-      ClientError::UnexpectedPresentationAcknowledgement {
+    let pending = self
+      .pending_presentations
+      .front()
+      .map(|pending| pending.presentation)
+      .ok_or_else(|| ClientError::UnexpectedPresentationAcknowledgement {
         expected: "no pending presentation event".into(),
         actual: presentation_acknowledgement_name(acknowledgement).into(),
-      }
-    })?;
+      })?;
     let (
       acknowledged_sequence,
       applied_checkpoint,
@@ -2105,7 +2174,12 @@ impl<S> AttachmentController<S> {
         });
       }
     };
-    let _popped = self.pending_presentations.pop_front();
+    if let Some(completed) = self.pending_presentations.pop_front()
+      && !incompatible_checkpoint
+      && !incompatible_geometry
+    {
+      completed.receipt.applied();
+    }
     if applied_checkpoint {
       self.renderer_requires_checkpoint = false;
     }
@@ -2118,7 +2192,7 @@ impl<S> AttachmentController<S> {
     let checkpoint_is_pending = self
       .pending_presentations
       .iter()
-      .any(|pending| matches!(pending, PendingPresentation::Checkpoint { .. }));
+      .any(|pending| matches!(pending.presentation, PendingPresentation::Checkpoint { .. }));
     self.state.set_resume_sequence(
       (!self.renderer_requires_checkpoint && !checkpoint_is_pending)
         .then_some(acknowledged_sequence)
@@ -2160,7 +2234,10 @@ impl<S> AttachmentController<S> {
 }
 
 enum IncomingServerMessage {
-  Message(Box<ServerMessage>),
+  Message {
+    message: Box<ServerMessage>,
+    receipt: Option<metrics::PresentationReceipt>,
+  },
   ConnectionClosed,
   Fatal(ClientError),
 }
@@ -2437,6 +2514,7 @@ where
   }
 
   *heartbeat_nonce = heartbeat_nonce.wrapping_add(1);
+  state.metrics.heartbeat_sent(*heartbeat_nonce);
   send_attachment_message(
     writer,
     &ClientMessage::Heartbeat {
@@ -2450,23 +2528,56 @@ async fn read_server_messages<R>(
   mut reader: R,
   sender: mpsc::Sender<IncomingServerMessage>,
   peer_activity: Arc<Mutex<Instant>>,
+  metrics: metrics::Metrics,
+  protocol_version: ctl_core::protocol::ProtocolVersion,
 ) where
   R: AsyncRead + Unpin,
 {
   loop {
     let message = match read_frame::<_, ServerMessage>(&mut reader).await {
-      Ok(Some(message)) => IncomingServerMessage::Message(Box::new(message)),
+      Ok(Some(message)) => {
+        if let ServerMessage::HeartbeatAck {
+          nonce,
+          session_history,
+        } = &message
+        {
+          if session_history.as_ref().is_some_and(|history| {
+            !ctmux_proto::supports_session_statistics(protocol_version)
+              || history.session_id.is_empty()
+          }) {
+            let _sent = sender
+              .send(IncomingServerMessage::Fatal(unexpected(
+                "heartbeat statistics supported by the selected contract with a session ID",
+                &message,
+              )))
+              .await;
+            return;
+          }
+          metrics.heartbeat_received(*nonce, session_history.as_ref());
+        }
+        let receipt = matches!(
+          message,
+          ServerMessage::Output { .. }
+            | ServerMessage::Checkpoint { .. }
+            | ServerMessage::PtyGeometryChanged { .. }
+        )
+        .then(|| metrics.presentation_received());
+        IncomingServerMessage::Message {
+          message: Box::new(message),
+          receipt,
+        }
+      }
       Ok(None) | Err(CodecError::Io(_)) => IncomingServerMessage::ConnectionClosed,
       Err(error) => IncomingServerMessage::Fatal(error.into()),
     };
-    if matches!(&message, IncomingServerMessage::Message(_)) {
+    if matches!(&message, IncomingServerMessage::Message { .. }) {
       let mut last_activity = match peer_activity.lock() {
         Ok(activity) => activity,
         Err(poisoned) => poisoned.into_inner(),
       };
       *last_activity = Instant::now();
     }
-    let terminal = !matches!(&message, IncomingServerMessage::Message(_));
+    let terminal = !matches!(&message, IncomingServerMessage::Message { .. });
     if sender.send(message).await.is_err() || terminal {
       return;
     }
@@ -3412,7 +3523,7 @@ mod tests {
         assert_eq!(control.state().leases().layout.owned_by_client, keeps_layout);
       }
       assert_eq!(control.break_pane(pane_move_target(), None, "after-loss".into()).await, Err(AttachmentCommandError::LayoutLeaseRequired));
-      write_frame(&mut peer, &ServerMessage::HeartbeatAck { nonce: 9 }).await.unwrap();
+      write_frame(&mut peer, &ServerMessage::HeartbeatAck { nonce: 9, session_history: None }).await.unwrap();
       assert_eq!(events.recv().await, Some(AttachmentEvent::HeartbeatAck { nonce: 9 }));
       control.detach().await.unwrap();
       assert_eq!(read_non_heartbeat_request(&mut peer).await, ClientMessage::Detach);
@@ -3481,7 +3592,7 @@ mod tests {
             keyboard_sent = true;
           }
           ClientMessage::Heartbeat { nonce } => {
-            write_frame(&mut peer, &ServerMessage::HeartbeatAck { nonce })
+            write_frame(&mut peer, &ServerMessage::HeartbeatAck { nonce, session_history: None })
               .await
               .unwrap();
             assert_eq!(
@@ -3908,9 +4019,15 @@ mod tests {
     failed_write.await.unwrap();
     for nonce in 0..2 {
       tokio::time::advance(Duration::from_millis(10)).await;
-      write_frame(&mut daemon, &ServerMessage::HeartbeatAck { nonce })
-        .await
-        .unwrap();
+      write_frame(
+        &mut daemon,
+        &ServerMessage::HeartbeatAck {
+          nonce,
+          session_history: None,
+        },
+      )
+      .await
+      .unwrap();
       assert_eq!(
         events.recv().await,
         Some(AttachmentEvent::HeartbeatAck { nonce })
@@ -4865,9 +4982,15 @@ mod tests {
       AttachmentEvent::Checkpoint { .. }
     ));
     for nonce in 1..=2 {
-      write_frame(&mut daemon, &ServerMessage::HeartbeatAck { nonce })
-        .await
-        .unwrap();
+      write_frame(
+        &mut daemon,
+        &ServerMessage::HeartbeatAck {
+          nonce,
+          session_history: None,
+        },
+      )
+      .await
+      .unwrap();
     }
     tokio::time::timeout(Duration::from_secs(1), async {
       while events.receiver.len() != 2 {
@@ -4944,7 +5067,19 @@ mod tests {
     assert!(events.try_recv().is_err());
     assert!(!runner.is_finished());
 
+    tokio::time::timeout(Duration::from_secs(1), async {
+      while control.state().statistics().pending_events != 2 {
+        tokio::task::yield_now().await;
+      }
+    })
+    .await
+    .expect("receipt behind the presentation ledger was not counted");
+    let before = control.state().statistics().event_lag_ms.unwrap();
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    assert!(control.state().statistics().event_lag_ms.unwrap() > before);
+
     control.acknowledge_output(1).await.unwrap();
+    assert_eq!(control.state().statistics().pending_events, 1);
     assert!(matches!(
       events.recv().await,
       Some(AttachmentEvent::Output {
@@ -4953,6 +5088,8 @@ mod tests {
       })
     ));
     control.acknowledge_output(2).await.unwrap();
+    assert_eq!(control.state().statistics().pending_events, 0);
+    assert!(control.state().statistics().event_lag_ms.is_some());
 
     tokio::time::timeout(Duration::from_secs(1), async {
       loop {
@@ -4971,6 +5108,165 @@ mod tests {
     let exit = runner.await.unwrap().unwrap();
     assert_eq!(exit.reason, AttachExitReason::ConnectionClosed);
     assert_eq!(exit.next_sequence, Some(2));
+  }
+
+  #[tokio::test(start_paused = true)]
+  async fn initial_checkpoint_receipt_includes_time_before_controller_run() {
+    let (client, daemon) = tokio::io::duplex(4096);
+    let attached = attached_session(5, Some(checkpoint(5)), ShellState::default());
+    let (controller, control, mut events) =
+      AttachmentController::new(client, &attached, controller_options()).unwrap();
+    assert_eq!(control.state().statistics().pending_events, 1);
+    tokio::time::advance(Duration::from_millis(25)).await;
+    let runner = tokio::spawn(controller.run());
+    assert!(matches!(
+      events.recv().await,
+      Some(AttachmentEvent::Checkpoint { .. })
+    ));
+    control.acknowledge_checkpoint(5).await.unwrap();
+    let statistics = control.state().statistics();
+    assert_eq!(statistics.pending_events, 0);
+    assert_eq!(statistics.event_lag_ms, Some(25.0));
+    assert_eq!(statistics.downloaded_bytes, 0);
+    drop(daemon);
+    runner.await.unwrap().unwrap();
+  }
+
+  #[tokio::test(start_paused = true)]
+  async fn heartbeat_statistics_update_before_a_full_presentation_queue_drains() {
+    let (client, mut daemon) = tokio::io::duplex(4096);
+    let mut attached = attached_session(0, None, ShellState::default());
+    attached.liveness.heartbeat_interval = Duration::from_millis(100);
+    let options = AttachmentControllerOptions {
+      event_queue_capacity: 1,
+      ..controller_options()
+    };
+    let (controller, control, mut events) =
+      AttachmentController::new(client, &attached, options).unwrap();
+    let runner = tokio::spawn(controller.run());
+    let nonce = match read_frame::<_, ClientMessage>(&mut daemon)
+      .await
+      .unwrap()
+      .unwrap()
+    {
+      ClientMessage::Heartbeat { nonce } => nonce,
+      other => panic!("expected heartbeat, got {other:?}"),
+    };
+    for sequence_start in 0..2 {
+      write_frame(
+        &mut daemon,
+        &ServerMessage::Output {
+          sequence_start,
+          sequence_end: sequence_start + 1,
+          data: vec![b'a'],
+        },
+      )
+      .await
+      .unwrap();
+    }
+    assert!(matches!(
+      events.recv().await,
+      Some(AttachmentEvent::Output {
+        sequence_end: 1,
+        ..
+      })
+    ));
+    tokio::time::advance(Duration::from_millis(20)).await;
+    let history = ctmux_proto::SessionHistoryStatistics {
+      session_id: "session-id".into(),
+      retained_bytes: 42,
+    };
+    write_frame(
+      &mut daemon,
+      &ServerMessage::HeartbeatAck {
+        nonce,
+        session_history: Some(history.clone()),
+      },
+    )
+    .await
+    .unwrap();
+    // The reader can observe the ACK while output still blocks presentation
+    // and the second output fills the incoming queue.
+    for _ in 0..20 {
+      if control.state().statistics().round_trip_ms.is_some() {
+        break;
+      }
+      tokio::task::yield_now().await;
+    }
+    let statistics = control.state().statistics();
+    assert_eq!(statistics.round_trip_ms, Some(20.0));
+    assert_eq!(statistics.session_history, Some(history));
+    assert_eq!(statistics.pending_events, 2);
+    assert!(events.try_recv().is_err());
+    control.acknowledge_output(1).await.unwrap();
+    assert!(matches!(
+      events.recv().await,
+      Some(AttachmentEvent::Output {
+        sequence_end: 2,
+        ..
+      })
+    ));
+    control.acknowledge_output(2).await.unwrap();
+    assert!(matches!(
+      events.recv().await,
+      Some(AttachmentEvent::HeartbeatAck { .. })
+    ));
+    drop(daemon);
+    runner.await.unwrap().unwrap();
+  }
+
+  #[tokio::test]
+  async fn heartbeat_history_requires_the_negotiated_contract_and_session_identity() {
+    for (version, history, accepted) in [
+      (ctmux_proto::CONTRACT_V1_2_21, None, true),
+      (
+        ctmux_proto::CONTRACT_V1_2_21,
+        Some(("session-id", 10)),
+        false,
+      ),
+      (ctmux_proto::CONTRACT_V1_2_22, Some(("", 10)), false),
+      (
+        ctmux_proto::CONTRACT_V1_2_22,
+        Some(("session-id", 10)),
+        true,
+      ),
+    ] {
+      let (client, mut daemon) = tokio::io::duplex(4096);
+      let mut attached = attached_session(0, None, ShellState::default());
+      attached.handshake_info.protocol_version = version;
+      let (controller, control, mut events) =
+        AttachmentController::new(client, &attached, controller_options()).unwrap();
+      let runner = tokio::spawn(controller.run());
+      let history =
+        history.map(
+          |(session_id, retained_bytes)| ctmux_proto::SessionHistoryStatistics {
+            session_id: session_id.into(),
+            retained_bytes,
+          },
+        );
+      write_frame(
+        &mut daemon,
+        &ServerMessage::HeartbeatAck {
+          nonce: 1,
+          session_history: history.clone(),
+        },
+      )
+      .await
+      .unwrap();
+      if accepted {
+        assert!(matches!(
+          events.recv().await,
+          Some(AttachmentEvent::HeartbeatAck { .. })
+        ));
+        assert_eq!(control.state().statistics().session_history, history);
+        assert_eq!(control.state().statistics().round_trip_ms, None);
+        drop(daemon);
+        runner.await.unwrap().unwrap();
+      } else {
+        assert!(runner.await.unwrap().is_err());
+        assert_eq!(control.state().statistics().session_history, None);
+      }
+    }
   }
 
   #[tokio::test]
@@ -5127,9 +5423,15 @@ mod tests {
 
     for nonce in 0..10 {
       tokio::time::advance(Duration::from_millis(15)).await;
-      write_frame(&mut daemon, &ServerMessage::HeartbeatAck { nonce })
-        .await
-        .unwrap();
+      write_frame(
+        &mut daemon,
+        &ServerMessage::HeartbeatAck {
+          nonce,
+          session_history: None,
+        },
+      )
+      .await
+      .unwrap();
       assert_eq!(
         events.recv().await,
         Some(AttachmentEvent::HeartbeatAck { nonce })

@@ -940,6 +940,17 @@ interface AttachmentEventBase {
   attachment_id: string;
 }
 
+export interface AttachmentStatisticsEvent extends AttachmentEventBase {
+  event_type: "attachment_statistics";
+  uploaded_bytes: string;
+  downloaded_bytes: string;
+  round_trip_ms: number | null;
+  event_lag_ms: number | null;
+  pending_events: number;
+  history_session_id: string | null;
+  history_retained_bytes: string | null;
+}
+
 interface PresentationEventBase extends AttachmentEventBase {
   event_id: string;
 }
@@ -1035,6 +1046,7 @@ export interface AttachmentErrorEvent extends AttachmentEventBase {
 }
 
 export type AttachmentEvent =
+  | AttachmentStatisticsEvent
   | CheckpointEvent
   | HistorySyncedEvent
   | OutputEvent

@@ -32,6 +32,7 @@ export interface TerminalAdapter {
   refresh?(): void;
   copyLines?(): string[];
   copyPrimaryRows?(): TerminalHistoryRow[];
+  historyBytes?(): number;
   activate?(scrollback_offset?: number): void;
   viewportOffset?(): number;
   write(data: Uint8Array, callback: () => void): void;
@@ -99,6 +100,7 @@ function sameGeometry(left: TerminalSize, right: TerminalSize): boolean {
 
 export class TerminalPresenter {
   copyLines(): Promise<string[]> { return this.operationTail.then(() => this.adapter.copyLines?.() ?? []); }
+  historyBytes(): number | null { return this.adapter.historyBytes?.() ?? null; }
   cellDimensions() { return this.adapter.cellDimensions?.() ?? null; }
   refresh(): void { this.adapter.refresh?.(); }
   private adapter: TerminalAdapter;

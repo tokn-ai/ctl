@@ -603,9 +603,19 @@ pub enum AttachmentExitReasonDto {
   SessionEnded,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "event_type", rename_all = "snake_case")]
 pub enum AttachmentEventDto {
+  AttachmentStatistics {
+    attachment_id: String,
+    uploaded_bytes: String,
+    downloaded_bytes: String,
+    round_trip_ms: Option<f64>,
+    event_lag_ms: Option<f64>,
+    pending_events: u64,
+    history_session_id: Option<String>,
+    history_retained_bytes: Option<String>,
+  },
   PaneResizeResult {
     attachment_id: String,
     request_id: String,

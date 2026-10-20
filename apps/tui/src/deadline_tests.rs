@@ -239,7 +239,14 @@ async fn stalled_initial_checkpoint_reports_preparation_phase_and_closes_attachm
         ClientMessage::Heartbeat { nonce } => {
           // Cancellation may close the stream between reading a heartbeat and
           // replying. Continue reading so EOF still proves controller cleanup.
-          let _reply = write_frame(&mut peer, &ServerMessage::HeartbeatAck { nonce }).await;
+          let _reply = write_frame(
+            &mut peer,
+            &ServerMessage::HeartbeatAck {
+              nonce,
+              session_history: None,
+            },
+          )
+          .await;
         }
         ClientMessage::RequestCheckpoint => {}
         other => panic!("unexpected checkpoint fixture request: {other:?}"),

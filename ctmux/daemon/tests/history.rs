@@ -64,11 +64,20 @@ impl Daemon {
   }
 
   async fn connect(&self) -> UnixStream {
+    self.connect_version(None).await
+  }
+
+  async fn connect_version(
+    &self,
+    version: Option<ctl_core::protocol::ProtocolVersion>,
+  ) -> UnixStream {
     let mut stream = UnixStream::connect(&self.socket).await.unwrap();
     write_frame(
       &mut stream,
       &ClientMessage::Handshake {
-        protocol: ctmux_proto::protocol_offer(),
+        protocol: version.map_or_else(ctmux_proto::protocol_offer, |version| {
+          ctl_core::protocol::ProtocolOffer::new(version.build, version, &[version])
+        }),
         client_name: "log-test".into(),
         client_version: "test".into(),
       },
@@ -191,7 +200,7 @@ async fn exercise(daemon: &Daemon) -> String {
   loop {
     if matches!(
       message(&mut stream).await,
-      ServerMessage::HeartbeatAck { nonce: 1 }
+      ServerMessage::HeartbeatAck { nonce: 1, .. }
     ) {
       break;
     }
@@ -214,6 +223,75 @@ async fn exercise(daemon: &Daemon) -> String {
     ServerMessage::Success
   ));
   attachment_token
+}
+
+#[tokio::test]
+async fn heartbeat_history_statistics_require_the_selected_new_contract() {
+  let daemon = Daemon::start(None).await;
+  let ServerMessage::SessionCreated { session } = daemon
+    .request(ClientMessage::CreateSession {
+      name: Some("heartbeat-statistics".into()),
+      command: Some(command()),
+      working_directory: None,
+      terminal_size: TerminalSize::default(),
+    })
+    .await
+  else {
+    panic!("session not created");
+  };
+  for &version in ctmux_proto::SUPPORTED_PROTOCOL_VERSIONS {
+    let mut stream = daemon.connect_version(Some(version)).await;
+    write_frame(
+      &mut stream,
+      &ClientMessage::AttachSession {
+        session: session.session_id.clone(),
+        resume_from: None,
+        terminal_size: TerminalSize::default(),
+        request_input_lease: false,
+        request_layout_lease: false,
+        request_command_line: false,
+        request_running_command: false,
+        presentation_window_bytes: ctmux_proto::DEFAULT_PRESENTATION_WINDOW_BYTES,
+      },
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+      message(&mut stream).await,
+      ServerMessage::Attached { .. }
+    ));
+    write_frame(&mut stream, &ClientMessage::Heartbeat { nonce: 77 })
+      .await
+      .unwrap();
+    loop {
+      if let ServerMessage::HeartbeatAck {
+        nonce,
+        session_history,
+      } = message(&mut stream).await
+      {
+        assert_eq!(nonce, 77);
+        if ctmux_proto::supports_session_statistics(version) {
+          let statistics = session_history.expect("new contract supplies current session history");
+          assert_eq!(statistics.session_id, session.session_id);
+          assert_eq!(statistics.retained_bytes, 0);
+        } else {
+          assert!(
+            session_history.is_none(),
+            "legacy heartbeat changed under {version}"
+          );
+        }
+        break;
+      }
+    }
+    write_frame(&mut stream, &ClientMessage::Detach)
+      .await
+      .unwrap();
+    loop {
+      if matches!(message(&mut stream).await, ServerMessage::Detached) {
+        break;
+      }
+    }
+  }
 }
 
 #[tokio::test]

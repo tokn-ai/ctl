@@ -2671,10 +2671,11 @@ where
   };
   let (controller, control, mut events) =
     AttachmentController::new(stream, attached, controller_options)?;
-  let controller = controller.run();
+  // Keep the reader/writer/controller state machines out of the enclosing CLI
+  // dispatch future. This attachment owns and cancels the same driver either way.
+  let mut controller = Box::pin(controller.run());
   let input = forward_interactive_input(control.clone());
   let output = present_interactive_events(&mut events, &control);
-  tokio::pin!(controller);
   tokio::pin!(input);
   tokio::pin!(output);
 

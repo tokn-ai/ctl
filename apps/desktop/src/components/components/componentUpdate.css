@@ -15,4 +15,7 @@
 .component-update-results li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; padding: 10px 0; border-bottom: 1px solid var(--border); }
 .component-update-results li p { grid-column: 1 / -1; margin: 0; overflow-wrap: anywhere; }
 .component-update-progress progress { width: 100%; }
+.published-bundle-status { border: 1px solid var(--border); border-radius: 6px; padding: 12px; overflow-wrap: anywhere; }
+.published-bundle-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.published-bundle-status p { margin: 8px 0 0; }
 @media (max-width: 480px) { .component-update-hosts { grid-template-columns: 1fr; } }

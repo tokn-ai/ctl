@@ -5,10 +5,14 @@ use ctl_core::bundles::{Bundle, MANIFEST_FILE, MAX_FILE_BYTES, Manifest, Purpose
 use std::io;
 use std::path::{Path, PathBuf};
 
-pub use ctl_core::component_update::{BuildSource, Package, UpdateOptions, UpdateResult};
+pub use ctl_core::component_update::{
+  BuildSource, BundleChannel, Package, UpdateOptions, UpdateResult,
+};
 
-/// Resolves an explicit source or the pinned selection for a target. A missing
-/// initial selection can use an included build, but never replaces a selection.
+/// Resolves the requested source without replacing running services. Automatic
+/// sources use current development output or a fresh named publication; only
+/// explicit Selected sources consult an upload pin. Local macOS keeps its signed
+/// helper selection because published remote archives do not contain that package.
 ///
 /// # Errors
 /// Rejects wrong-target, incomplete, corrupt or incompatible builds.
@@ -19,6 +23,26 @@ pub async fn prepare(
   source: &BuildSource,
   included: &[PathBuf],
 ) -> io::Result<Bundle> {
+  if matches!(source, BuildSource::Automatic)
+    && (purpose == Purpose::Upload || !target.ends_with("-apple-darwin"))
+  {
+    let published_target = publisher_target(target, purpose);
+    let target = published_target.as_ref();
+    if target == "x86_64-unknown-linux-musl"
+      && let Some(workspace) = development_workspace()
+    {
+      return development_build(home, target, purpose, &workspace).await;
+    }
+    return published_build(
+      home,
+      target,
+      crate::remote_bundle::published::default_channel(),
+    )
+    .await;
+  }
+  if let BuildSource::Published { channel } = source {
+    return published_build(home, publisher_target(target, purpose).as_ref(), *channel).await;
+  }
   if let BuildSource::Provided {
     path,
     local_build: true,
@@ -39,7 +63,7 @@ pub async fn prepare(
   tokio::task::spawn_blocking(move || {
     let store = Store::new(&home);
     let bundle = match source {
-      BuildSource::Selected => {
+      BuildSource::Automatic | BuildSource::Selected => {
         if let Some(bundle) = store.selected(purpose, &target)? {
           bundle
         } else {
@@ -52,9 +76,129 @@ pub async fn prepare(
         }
       }
       BuildSource::Provided { path, .. } => provided_build(&home, &path, &target, purpose)?,
+      BuildSource::Published { .. } => {
+        unreachable!("published sources resolved before filesystem preparation")
+      }
     };
     verify_source(&bundle.manifest, &target, purpose)?;
     Ok(bundle)
+  })
+  .await
+  .map_err(io::Error::other)?
+}
+
+/// Identifies a debug source checkout without creating or changing any files.
+#[must_use]
+pub fn development_workspace() -> Option<PathBuf> {
+  if !cfg!(debug_assertions) {
+    return None;
+  }
+  let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).ancestors().nth(2)?;
+  (workspace.join(".git").exists()
+    && workspace
+      .join("scripts/dev/build-agent-bundle.mts")
+      .is_file())
+  .then(|| workspace.to_owned())
+}
+
+#[must_use]
+pub fn working_tree_available() -> bool {
+  development_workspace().is_some()
+}
+
+async fn development_build(
+  home: &Path,
+  target: &str,
+  purpose: Purpose,
+  workspace: &Path,
+) -> io::Result<Bundle> {
+  let mut command = tokio::process::Command::new("node");
+  command
+    .args([
+      "--experimental-strip-types",
+      "--disable-warning=ExperimentalWarning",
+    ])
+    .arg(workspace.join("scripts/dev/build-agent-bundle.mts"))
+    .current_dir(workspace);
+  run_development_builder(command).await?;
+  let path = workspace.join("target/development-bundles/x86_64-unknown-linux-musl");
+  let home = home.to_owned();
+  let target = target.to_owned();
+  tokio::task::spawn_blocking(move || provided_build(&home, &path, &target, purpose))
+    .await
+    .map_err(io::Error::other)?
+}
+
+const MAX_BUILD_DIAGNOSTIC_BYTES: usize = 32 * 1024;
+
+async fn run_development_builder(mut command: tokio::process::Command) -> io::Result<()> {
+  command
+    .stdin(std::process::Stdio::null())
+    // The builder prints its output directory. Keep --json stdout exclusively
+    // for the caller's structured result while progress remains on stderr.
+    .stdout(std::process::Stdio::null())
+    .stderr(std::process::Stdio::piped())
+    .kill_on_drop(true);
+  let mut child = command.spawn().map_err(|error| io::Error::other(format!(
+    "Could not start the development component builder (Node 24 and Docker or Podman are required): {error}"
+  )))?;
+  let reader = child
+    .stderr
+    .take()
+    .ok_or_else(|| io::Error::other("development builder has no diagnostic stream"))?;
+  let mut sink = tokio::io::stderr();
+  let (status, diagnostics) = tokio::join!(child.wait(), build_diagnostics(reader, &mut sink));
+  let status = status?;
+  let diagnostics = diagnostics?;
+  if !status.success() {
+    return Err(io::Error::other(format!(
+      "Development component build exited {status}; no components were installed.\n{}",
+      diagnostics.trim()
+    )));
+  }
+  Ok(())
+}
+
+async fn build_diagnostics(
+  mut reader: impl tokio::io::AsyncRead + Unpin,
+  sink: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> io::Result<String> {
+  use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+  let mut tail = Vec::new();
+  let mut chunk = [0; 4096];
+  loop {
+    let count = reader.read(&mut chunk).await?;
+    if count == 0 {
+      break;
+    }
+    let _displayed = sink.write_all(&chunk[..count]).await;
+    tail.extend_from_slice(&chunk[..count]);
+    if tail.len() > MAX_BUILD_DIAGNOSTIC_BYTES {
+      tail.drain(..tail.len() - MAX_BUILD_DIAGNOSTIC_BYTES);
+    }
+  }
+  Ok(String::from_utf8_lossy(&tail).into_owned())
+}
+
+async fn published_build(home: &Path, target: &str, channel: BundleChannel) -> io::Result<Bundle> {
+  let bundle = crate::remote_bundle::published::download_cached(
+    channel,
+    target,
+    &home.join(".tokn/ctl/published-bundles"),
+  )
+  .await
+  .map_err(io::Error::other)?;
+  let source = if bundle.bundle_id == bundle.app_version {
+    Source::Release
+  } else {
+    Source::Ci
+  };
+  let home = home.to_owned();
+  let target = target.to_owned();
+  // Import only this identified publication. Never read or mutate the upload
+  // profile: channel freshness must not be replaced by a sticky old selection.
+  tokio::task::spawn_blocking(move || {
+    crate::components::import_remote(&home, &bundle, &target, source).map_err(io::Error::other)
   })
   .await
   .map_err(io::Error::other)?

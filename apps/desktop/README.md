@@ -157,17 +157,19 @@ platform, adding helper signing and supervision on macOS. Direct
 
 Development startup also performs a local-only bundle preflight. It warns but does
 not block local or already-provisioned SSH work when remote install bundles are
-absent. To test installation on a new SSH host, first commit and push the
-current branch, then run:
+absent. Development Linux x64 uploads now build the working tree locally,
+including uncommitted changes. To prepare the same bundle explicitly, start
+Docker or Podman and run:
 
 ```sh
-pnpm bundles:sync
+pnpm bundles:build
 ```
 
-The command reuses or dispatches the bundle workflow for the exact commit,
-waits for it, verifies all four archives, and stages them in the ignored Tauri
-resource directory. `pnpm bundles:sync --main` is an explicit compatibility
-shortcut for using the latest successful main-branch set.
+The result lives in `target/development-bundles/x86_64-unknown-linux-musl` and
+contains all four components. Other remote targets follow the app's network
+channel. About and Update components can check the latest main publication or
+stable release; explicit channel choices bypass the working-tree build.
+`pnpm bundles:sync` remains an explicit CI-resource packaging/offline tool.
 
 The app may also use the path in `CTMUXD_BIN`. A saved host represents a named
 machine with one remote account/environment. Addresses and gateway routes are

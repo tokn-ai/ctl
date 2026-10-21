@@ -3,11 +3,16 @@ import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { UpdateComponentsDialog } from "./UpdateComponentsDialog";
-import { cancelComponentUpdate, respondSshPrompt, updateComponents } from "../../lib/tauri";
+import { cancelComponentUpdate, checkComponentUpdates, respondSshPrompt, updateComponents } from "../../lib/tauri";
 import type { ComponentUpdateHostResult, ComponentUpdateProgress, SshConnectionTarget } from "../../lib/types";
 
-vi.mock("../../lib/tauri", () => ({ updateComponents: vi.fn(), cancelComponentUpdate: vi.fn(async () => undefined), respondSshPrompt: vi.fn(async () => undefined) }));
-beforeEach(() => { vi.resetAllMocks(); vi.mocked(cancelComponentUpdate).mockResolvedValue(undefined); vi.mocked(respondSshPrompt).mockResolvedValue(undefined); });
+vi.mock("../../lib/tauri", () => ({ checkComponentUpdates: vi.fn(), updateComponents: vi.fn(), cancelComponentUpdate: vi.fn(async () => undefined), respondSshPrompt: vi.fn(async () => undefined) }));
+beforeEach(() => {
+  vi.resetAllMocks();
+  vi.mocked(cancelComponentUpdate).mockResolvedValue(undefined);
+  vi.mocked(respondSshPrompt).mockResolvedValue(undefined);
+  vi.mocked(checkComponentUpdates).mockResolvedValue({ default_channel: "dev", local_development: false, catalog: null, error: null });
+});
 afterEach(cleanup);
 const host: SshConnectionTarget = { kind: "ssh", host_id: "builder", host_name: "Builder", destination: "builder-alias", gateways: [{ kind: "ssh", gateway_id: "jump", name: "Jump", destination: "jump", mode: "automatic" }] };
 const complete = (host_index: number): ComponentUpdateHostResult => ({ host_index, state: "complete", error: null, result: { package: "full_bundle", bundle_id: "verified-build", target_triple: "aarch64-apple-darwin", services_preserved: true } });
@@ -40,6 +45,28 @@ it("keeps per-host failures and retries only failed hosts", async () => {
   await user.click(screen.getByRole("button", { name: "Update" }));
   await waitFor(() => expect(updated).toHaveBeenCalledTimes(2));
   expect(vi.mocked(updateComponents).mock.calls[1][0].targets).toEqual([host]);
+  expect(vi.mocked(updateComponents).mock.calls[0][0].options.source).toEqual({ kind: "automatic" });
+});
+
+it("installs the explicit published channel without using the offline selection", async () => {
+  vi.mocked(updateComponents).mockResolvedValue([complete(0)]);
+  render(<UpdateComponentsDialog targets={[host]} context={{ targets: [host], source: { kind: "published", channel: "stable" } }} on_close={vi.fn()} />);
+  const user = userEvent.setup();
+  expect((screen.getByRole("combobox", { name: "Build source" }) as HTMLSelectElement).value).toBe("stable");
+  await waitFor(() => expect(checkComponentUpdates).toHaveBeenCalledWith("stable", false));
+  await user.click(screen.getByRole("button", { name: "Update" }));
+  await screen.findByText("1 of 1 hosts updated. Running services were preserved.");
+  expect(vi.mocked(updateComponents).mock.calls[0][0].options.source).toEqual({ kind: "published", channel: "stable" });
+  expect(screen.getByText(/Bundle verified-build/)).toBeTruthy();
+});
+
+it("keeps an explicit offline install available without a network check", async () => {
+  vi.mocked(updateComponents).mockResolvedValue([complete(0)]);
+  render(<UpdateComponentsDialog targets={[host]} context={{ targets: [host], source: { kind: "selected" } }} on_close={vi.fn()} />);
+  expect(checkComponentUpdates).not.toHaveBeenCalled();
+  await userEvent.setup().click(screen.getByRole("button", { name: "Update" }));
+  await screen.findByText("1 of 1 hosts updated. Running services were preserved.");
+  expect(vi.mocked(updateComponents).mock.calls[0][0].options.source).toEqual({ kind: "selected" });
 });
 
 it("binds authentication responses to the active host attempt and reports transfer progress", async () => {

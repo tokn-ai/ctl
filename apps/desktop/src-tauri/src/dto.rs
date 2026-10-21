@@ -101,6 +101,7 @@ pub struct RemoteAgentInstallResultDto {
 )]
 pub enum RemoteAgentInstallPhase {
   DetectingPlatform,
+  PreparingBundle,
   VerifyingBundle,
   Connecting,
   Transferring,

@@ -23,6 +23,7 @@ const SUPPORTED_TARGETS: [&str; 4] = [
 
 mod cache;
 pub(crate) mod compatibility;
+pub mod published;
 pub use cache::{BundleCacheEntry, read_compatible_cached_bundle};
 
 #[derive(Debug, Clone, PartialEq, Eq)]

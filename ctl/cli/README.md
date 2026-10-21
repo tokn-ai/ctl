@@ -193,25 +193,17 @@ offer to repair missing
 or recognized older agents with a matching verified bundle, then retry once.
 Repair checks any saved machine ID first, shows upload progress and speed, and
 preserves running daemons. Ctrl-C cancels it; piped commands never prompt.
-Bundles can come from
-`CTL_REMOTE_BUNDLES_DIR`, local resources, `~/.tokn/ctl/agent-bundles`, the matching
-official release, or an existing verified GitHub bundle artifact (requires `gh`).
-Downloaded manifests and archives are cached at
-`~/.tokn/ctl/agent-bundles/<revision>/<target>/` and verified again before reuse.
-Schema-2 bundles include all four components and record their product/source identity and explicit
-protocol support. Compatible local or cached bundles can be reused across CLI
-releases and source revisions, including by development clients. Reuse checks
-all service and companion contracts, the target, archive and binary checksums,
-and agreement between the bundle-set and archived metadata. The exact current
-source cache is checked first, followed by compatible entries in stable revision
-order; this order does not imply which build is newest. Schema-1 bundles remain
-eligible only for the exact clean client build. Downloads still require a clean,
-identified CLI and match that source revision. Compatible cache entries work
-offline and can serve any host with that platform.
-Interrupted downloads never publish a partial entry; damaged cache entries are
-downloaded again. Explicit bundle overrides still reject invalid contents.
-Source developers can prepare their exact bundles with `pnpm bundles:sync` from
-`apps/desktop`. Windows remote companions must be installed manually. On macOS,
+Repair and component updates share their source policy. Development checkouts
+build Linux x64 components from the local working tree; other remote targets
+follow the CLI's development or stable publication channel. Channel checks and
+downloads do not require `gh`. `CTL_REMOTE_BUNDLES_DIR` remains an explicit
+local-source override. Published manifests and verified archives are cached at
+`~/.tokn/ctl/published-bundles`; each network update resolves the channel first,
+so an old selection or cache cannot decide which build is current. Downloads
+verify targets, component contracts, archive/binary checksums and matching
+metadata. Failed downloads never install partial content or silently fall back
+to an older build. `pnpm bundles:build` prepares a Linux x64 working-tree bundle
+without a commit or push. Windows remote companions must be installed manually. On macOS,
 Touch ID-protected credential storage
 requires the signed, provisioned `ctld` helper; Cargo installation alone does
 not supply its Keychain entitlement. Setup uses the same selected helper as
@@ -284,6 +276,11 @@ and sessions; restart or reconnect separately.
 
 ```sh
 ctl components update --hosts work,jump-a --package ctl-agent
+ctl components check --channel dev --json
+ctl components check --channel stable
+ctl components update --hosts work --channel dev
+ctl components update --hosts work --channel stable
+ctl components update --hosts work --selected
 ctl --host work --method vpn components update
 ctl --destination my-ssh-alias components update
 ctl components update --hosts work --from /path/to/bundle-set --json
@@ -291,7 +288,10 @@ ctl components update --hosts work --from /path/to/bundle-set --json
 
 `--from` supplies a complete build directory or archive. Use `--local-build` for
 four native binaries; local macOS full updates also require `--ctld-package`.
-Otherwise updates use the pinned selection for each target. `components list`
+Ordinary remote updates resolve the publication channel, or build a development
+Linux x64 working tree locally. `--channel` chooses a published source explicitly;
+`--selected` requests an offline installation from the pinned/included source.
+Automatic macOS local updates retain the signed local selection. `components list`
 shows included and stored complete builds across all targets, with availability
 and local/upload selections. Use `--target <triple>` to filter or `--json` for
 manifests, availability, selections, and inspection errors. Listing never imports

@@ -48,6 +48,7 @@ pub fn run() {
     .setup(|app| {
       daemon_helper::register()?;
       state::register_main_window_cleanup(app);
+      component_update::catalog::start();
       Ok(())
     })
     .on_window_event(cleanup_destroyed_window)
@@ -55,6 +56,7 @@ pub fn run() {
       about::get_component_versions,
       component_update::update_components,
       component_update::cancel_component_update,
+      component_update::catalog::check_component_updates,
       about::bundles::get_component_bundles,
       about::bundles::select_component_bundle,
       about::restart::preflight_component_action,

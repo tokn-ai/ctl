@@ -11,10 +11,11 @@ pub(super) fn initial() -> Progress {
   desktop_progress(RemoteInstallProgress::default())
 }
 
-fn shared_progress(progress: Progress) -> RemoteInstallProgress {
-  RemoteInstallProgress {
+fn shared_progress(progress: Progress) -> Option<RemoteInstallProgress> {
+  Some(RemoteInstallProgress {
     phase: match progress.phase {
       Phase::DetectingPlatform => RemoteInstallPhase::DetectingPlatform,
+      Phase::PreparingBundle => return None,
       Phase::VerifyingBundle => RemoteInstallPhase::VerifyingBundle,
       Phase::Connecting => RemoteInstallPhase::Connecting,
       Phase::Transferring => RemoteInstallPhase::Transferring,
@@ -27,7 +28,26 @@ fn shared_progress(progress: Progress) -> RemoteInstallProgress {
     transferred_bytes: progress.transferred_bytes,
     total_bytes: progress.total_bytes,
     bytes_per_second: progress.bytes_per_second,
-  }
+  })
+}
+
+fn observe(
+  watchdog: &mut RemoteInstallWatchdog,
+  progress: Progress,
+  now: Instant,
+  authenticating: bool,
+) -> CommandResult<Progress> {
+  let Some(shared) = shared_progress(progress.clone()) else {
+    // Compilation has no SSH receiver and may take minutes on a cold cache.
+    // Downloads enforce their own network timeouts. Keep preparation cancellable
+    // without treating a healthy build as a stalled 30-second upload phase.
+    *watchdog = RemoteInstallWatchdog::new(now);
+    return Ok(progress);
+  };
+  watchdog
+    .observe(shared, now, authenticating)
+    .map(desktop_progress)
+    .map_err(|error| CommandErrorDto::new("remote_agent_install_stalled", error.to_string()))
 }
 
 pub(super) fn desktop_progress(progress: RemoteInstallProgress) -> Progress {
@@ -74,14 +94,12 @@ pub(super) async fn monitor<T>(
         if changed.is_err() { return install.await; }
       }
     }
-    let progress = watchdog
-      .observe(
-        shared_progress(updates.borrow().clone()),
-        Instant::now(),
-        authenticating(),
-      )
-      .map_err(|error| CommandErrorDto::new("remote_agent_install_stalled", error.to_string()))?;
-    on_progress(desktop_progress(progress))?;
+    on_progress(observe(
+      &mut watchdog,
+      updates.borrow().clone(),
+      Instant::now(),
+      authenticating(),
+    )?)?;
   }
 }
 

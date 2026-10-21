@@ -56,6 +56,20 @@ impl BundleCacheEntry {
     })
   }
 
+  /// Cache a channel's resolved immutable manifest, never the moving channel name.
+  pub(super) fn publication(
+    root: &Path,
+    target: &str,
+    expected: &ComponentBuildInfo,
+    manifest: &[u8],
+  ) -> Result<Self, Error> {
+    use sha2::{Digest as _, Sha256};
+    let mut entry = Self::new(root, target, expected)?;
+    entry.revision_directory = entry.root.join(format!("{:x}", Sha256::digest(manifest)));
+    entry.directory = entry.revision_directory.join(target);
+    Ok(entry)
+  }
+
   /// Rechecks the stored version, exact source revision, and archive SHA-256.
   /// Missing, truncated, or damaged contents are a cache miss.
   ///

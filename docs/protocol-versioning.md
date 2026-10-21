@@ -259,9 +259,21 @@ between the gateway, task daemon, ctmux daemon, and ctld VPN broker. Agent and t
 metadata includes their consumed companion contracts; running daemon diagnostics
 continue to describe the actual owner serving a connection. Reuse never restarts
 that owner. Schema-1 bundles lack compatibility advertisements and remain eligible
-only for the exact clean client revision. New downloads also retain exact-source
-selection; a dirty or unidentified development client can reuse a verified
-compatible bundle but cannot download an inferred matching build.
+only for the exact clean client revision. Network updates resolve an explicitly
+named development or stable publication channel instead of inferring a matching
+source build. A development checkout can also build a dirty Linux x64 working
+tree locally. Existing bundle-set schema 2 and managed complete-bundle schema 1
+retain their shapes. Local dirty builds use the managed schema directly; public
+CI/release bundles remain clean.
+
+Distribution discovery adds channel-document schema 1, independently of the
+named IPC contracts and product release versions. It contains `schema_version`,
+`channel` (`dev` or `stable`), and an absolute `bundle_set_url` under the configured
+GitHub Pages bundle root. The referenced existing schema-2 bundle set names
+sibling target archives and their component metadata. Unknown schemas, changed
+channel identities, unsafe URLs, incompatible targets and corrupt archives are
+rejected before installation. This discovery format does not change any named
+service contract, internal protocol build, SSH framing or daemon negotiation.
 
 ## Discovery and SSH framing
 

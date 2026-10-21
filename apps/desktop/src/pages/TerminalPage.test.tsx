@@ -74,6 +74,7 @@ const api = vi.hoisted(() => ({
   forgetIdentityPassphrase: vi.fn(),
   forgetSavedCredential: vi.fn(),
   getComponentVersions: vi.fn(),
+  checkComponentUpdates: vi.fn(),
   preflightComponentAction: vi.fn(),
   executeComponentAction: vi.fn(),
   acknowledgeComponentReconnect: vi.fn(),
@@ -217,6 +218,7 @@ function hostSnapshot(): HostCatalogSnapshot {
 beforeEach(() => {
   vi.clearAllMocks();
   api.getComponentVersions.mockResolvedValue({ components: [] });
+  api.checkComponentUpdates.mockResolvedValue({ default_channel: "dev", local_development: false, catalog: null, error: null });
   attachment.state.phase = "idle";
   attachment.state.error_code = null;
   attachment.state.message = null;

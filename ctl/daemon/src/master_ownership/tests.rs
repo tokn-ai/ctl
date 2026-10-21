@@ -891,18 +891,14 @@ fn closed_termination_peer(acknowledge: bool) -> std::os::unix::net::UnixStream 
     server.write_all(&response).unwrap();
   }
   client.set_nonblocking(true).unwrap();
-  // Peer shutdown happens before any response read. On Darwin, this also
-  // prohibits setsockopt, even while an OK packet remains buffered to read.
+  // Peer shutdown happens before any response read. Some Darwin versions or
+  // socket states reject setsockopt even while an OK packet remains buffered.
   server.shutdown(std::net::Shutdown::Both).unwrap();
   drop(server);
   #[cfg(target_os = "macos")]
-  assert_eq!(
-    client
-      .set_read_timeout(Some(Duration::from_secs(1)))
-      .unwrap_err()
-      .raw_os_error(),
-    Some(22)
-  );
+  if let Err(error) = client.set_read_timeout(Some(Duration::from_secs(1))) {
+    assert_eq!(error.raw_os_error(), Some(22));
+  }
   client
 }
 

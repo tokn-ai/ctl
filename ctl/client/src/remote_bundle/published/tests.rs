@@ -168,11 +168,12 @@ async fn channel_identity_urls_and_archive_checksums_fail_closed() {
 fn production_urls_are_restricted_to_the_fixed_https_publication_tree() {
   let root = reqwest::Url::parse(ROOT).unwrap();
   for url in [
-    "http://tokn-ai.github.io/ctl/bundles/sets/id/bundle-set.json",
-    "https://tokn-ai.github.io/other/bundle-set.json",
-    "https://tokn-ai.github.io/ctl/bundles/sets/a%2fb/bundle-set.json",
-    "https://tokn-ai.github.io/ctl/bundles/sets/id/bundle-set.json?redirect=other",
-    "https://user@tokn-ai.github.io/ctl/bundles/sets/id/bundle-set.json",
+    "https://tokn-ai.github.io/ctl/bundles/sets/id/bundle-set.json",
+    "http://tokn-ai.dev/ctl/bundles/sets/id/bundle-set.json",
+    "https://tokn-ai.dev/other/bundle-set.json",
+    "https://tokn-ai.dev/ctl/bundles/sets/a%2fb/bundle-set.json",
+    "https://tokn-ai.dev/ctl/bundles/sets/id/bundle-set.json?redirect=other",
+    "https://user@tokn-ai.dev/ctl/bundles/sets/id/bundle-set.json",
   ] {
     assert!(!trusted(&reqwest::Url::parse(url).unwrap(), &root), "{url}");
   }

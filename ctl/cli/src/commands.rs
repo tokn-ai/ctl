@@ -611,9 +611,8 @@ pub enum CliError {
   HistoryTarget,
   #[error("Could not read local history: {0}")]
   History(std::io::Error),
-  #[cfg(unix)]
   #[error(
-    "Components manage the local bundle store; omit --host, --destination, --method, and --remote-platform."
+    "Component catalog and bundle-store commands do not accept --host, --destination, --method, or --remote-platform."
   )]
   ComponentsTarget,
   #[error("Component maintenance failed: {0}")]
@@ -760,12 +759,21 @@ mod tests {
     assert!(
       Arguments::try_parse_from(["ctl", "components", "check", "--channel", "latest"]).is_err()
     );
-    let check =
-      Arguments::try_parse_from(["ctl", "--destination", "server", "components", "check"]).unwrap();
-    assert!(matches!(
-      validate_arguments(&check),
-      Err(CliError::ComponentsTarget)
-    ));
+    for flags in [
+      &["--host", "server"][..],
+      &["--destination", "server"][..],
+      &["--method", "route"][..],
+      &["--remote-platform", "windows"][..],
+    ] {
+      let check = Arguments::try_parse_from(
+        [vec!["ctl"], flags.to_vec(), vec!["components", "check"]].concat(),
+      )
+      .unwrap();
+      assert!(matches!(
+        validate_arguments(&check),
+        Err(CliError::ComponentsTarget)
+      ));
+    }
   }
 
   #[cfg(unix)]

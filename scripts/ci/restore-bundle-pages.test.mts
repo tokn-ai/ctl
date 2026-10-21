@@ -108,6 +108,31 @@ test("first deployment ignores current pending and failed jobs but preserves suc
   await assert.rejects(restoreBundlePages("tokn-ai/ctl", output, github(), manual), /no managed catalog/);
 });
 
+test("Actions waiting status permits first publication but never erases earlier publication history", async (t) => {
+  const directory = await root(t), output = join(directory, "restore");
+  // Observed on the initial Pages job: failure, in_progress, queued, waiting.
+  const statuses = [["failure", "in_progress", "queued", "waiting"]];
+  assert.equal(await restoreBundlePages("tokn-ai/ctl", output, github({ statuses }), publicSite(null)), false);
+  for (const state of ["success", "inactive"]) {
+    await assert.rejects(restoreBundlePages("tokn-ai/ctl", output, github({ statuses: [...statuses, [state]] }), publicSite(null)), /no managed catalog/);
+  }
+});
+
+test("unknown or malformed deployment states fail closed with the deployment and invalid value", async (t) => {
+  const directory = await root(t), output = join(directory, "restore");
+  for (const status of [null, {}, { state: null }, { state: 42 }, { state: "future_status" }]) {
+    const underlying = github({ statuses: [["waiting"]] });
+    const gh: GhRunner = async (args) => args[1]?.includes("/statuses?") ? JSON.stringify([[status]]) : underlying(args);
+    const invalid = status?.state;
+    await assert.rejects(restoreBundlePages("tokn-ai/ctl", output, gh, publicSite(null)), (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal(error.message, `Invalid Pages deployment status for deployment 1: ${JSON.stringify(invalid)}`);
+      return true;
+    });
+    await assert.rejects(readFile(join(output, "bundles/catalog.json")), { code: "ENOENT" });
+  }
+});
+
 test("Pages configuration accepts only the canonical domain and path with HTTPS normalization", async (t) => {
   const directory = await root(t), output = join(directory, "restore");
   assert.equal(await restoreBundlePages("tokn-ai/ctl", output, github({ html_url: "http://tokn-ai.dev/ctl/" }), publicSite(null)), false);

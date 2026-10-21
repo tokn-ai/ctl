@@ -91,11 +91,18 @@ async function previouslyPublished(repository: string, gh: GhRunner): Promise<bo
   const deployments = await pages<{ id: number }>(gh, `repos/${repository}/deployments?environment=github-pages&per_page=100`);
   for (const deployment of deployments) {
     if (!Number.isSafeInteger(deployment.id) || deployment.id < 1) throw new Error("Invalid Pages deployment history");
-    const statuses = await pages<{ state: string }>(gh, `repos/${repository}/deployments/${deployment.id}/statuses?per_page=100`);
-    if (statuses.some((status) => !["error", "failure", "inactive", "in_progress", "queued", "pending", "success"].includes(status.state))) throw new Error("Invalid Pages deployment status");
+    const statuses = await pages<{ state?: unknown } | null>(gh, `repos/${repository}/deployments/${deployment.id}/statuses?per_page=100`);
+    // Actions records waiting before queued/in_progress for an environment job;
+    // none of those states establishes that content was published.
+    const known = new Set(["error", "failure", "inactive", "in_progress", "queued", "pending", "success", "waiting"]);
+    for (const status of statuses) {
+      if (typeof status?.state !== "string" || !known.has(status.state)) {
+        throw new Error(`Invalid Pages deployment status for deployment ${deployment.id}: ${JSON.stringify(status?.state)}`);
+      }
+    }
     // Current environment jobs exist before they publish anything. An inactive
     // deployment may have lost its older success status to API retention.
-    if (statuses.some((status) => status.state === "success" || status.state === "inactive")) return true;
+    if (statuses.some((status) => status?.state === "success" || status?.state === "inactive")) return true;
   }
   return false;
 }

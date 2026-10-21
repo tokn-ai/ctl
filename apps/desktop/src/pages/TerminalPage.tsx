@@ -49,6 +49,7 @@ import { CommandPalette } from "../components/commands/CommandPalette";
 import { ArchiveBrowser } from "../components/sessions/ArchiveBrowser";
 import { SessionSidebar } from "../components/sessions/SessionSidebar";
 import { StatusBar } from "../components/status/StatusBar";
+import { TerminalStatisticsProvider } from "../features/statistics/TerminalStatisticsContext";
 import { NotificationBell, Notifications } from "../components/notifications/Notifications";
 import { NotificationStore } from "../features/notifications/NotificationStore";
 import { NotificationProvider, useNotificationEnvironment } from "../features/notifications/NotificationContext";
@@ -178,7 +179,7 @@ async function verifyHostConnectionStatus(target: SshConnectionTarget): Promise<
 
 export function TerminalPage() {
   const [notifications] = useState(() => new NotificationStore());
-  return <NotificationProvider store={notifications}><ManualReconnectProvider><TerminalWorkbench /></ManualReconnectProvider></NotificationProvider>;
+  return <NotificationProvider store={notifications}><ManualReconnectProvider><TerminalStatisticsProvider><TerminalWorkbench /></TerminalStatisticsProvider></ManualReconnectProvider></NotificationProvider>;
 }
 
 function TerminalWorkbench() {

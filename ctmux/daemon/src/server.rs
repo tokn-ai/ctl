@@ -2576,7 +2576,17 @@ where
       process_pane_move(writer, session, attachment_id, protocol_version, request).await?;
     }
     ClientMessage::Heartbeat { nonce } => {
-      write_frame(writer, &ServerMessage::HeartbeatAck { nonce }).await?;
+      let session_history = ctmux_proto::supports_session_statistics(protocol_version)
+        .then(|| session.session_history_statistics())
+        .flatten();
+      write_frame(
+        writer,
+        &ServerMessage::HeartbeatAck {
+          nonce,
+          session_history,
+        },
+      )
+      .await?;
     }
     ClientMessage::Detach => return Ok(false),
     _ => {

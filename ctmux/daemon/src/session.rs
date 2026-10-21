@@ -10,10 +10,11 @@ use ctmux_core::{
   alternate_screen::AlternateScreenTracker, mouse::TerminalInputModes, validate_session_name,
 };
 use ctmux_proto::{
-  CommandSpec, CwdSource, ForegroundProcess, LeaseKind, LeaseStatus, PromptPhase, SessionInfo,
-  SessionStatus, ShellProcessState, ShellState, TERMINAL_CHECKPOINT_FORMAT,
-  TERMINAL_CHECKPOINT_FORMAT_VERSION, TERMINAL_HISTORY_FORMAT, TERMINAL_HISTORY_FORMAT_VERSION,
-  TerminalCheckpoint, TerminalHistorySnapshot, TerminalSize, TuiHint,
+  CommandSpec, CwdSource, ForegroundProcess, LeaseKind, LeaseStatus, PromptPhase,
+  SessionHistoryStatistics, SessionInfo, SessionStatus, ShellProcessState, ShellState,
+  TERMINAL_CHECKPOINT_FORMAT, TERMINAL_CHECKPOINT_FORMAT_VERSION, TERMINAL_HISTORY_FORMAT,
+  TERMINAL_HISTORY_FORMAT_VERSION, TerminalCheckpoint, TerminalHistorySnapshot, TerminalSize,
+  TuiHint,
 };
 #[cfg(unix)]
 use portable_pty::ChildKiller;
@@ -116,6 +117,7 @@ struct TerminalState {
   history_alternate_screen: bool,
   primary_reflow_pending: bool,
   primary_history_rows: Arc<PhysicalHistory>,
+  history_statistics: Option<HistoryStatisticsCache>,
   history: TerminalHistory,
   /// History captured at exactly the same raw-output boundary as `checkpoint`.
   checkpoint_history: TerminalHistorySnapshot,
@@ -146,6 +148,14 @@ struct TerminalState {
   alternate_screen: AlternateScreenTracker,
 }
 
+#[derive(Clone, Copy)]
+struct HistoryStatisticsCache {
+  sequence: u64,
+  geometry_revision: u64,
+  history_generation: u64,
+  retained_bytes: u64,
+}
+
 struct TerminalHistory {
   generation: u64,
   revision: u64,
@@ -170,6 +180,7 @@ impl TerminalState {
       history_alternate_screen: false,
       primary_reflow_pending: false,
       primary_history_rows: Arc::default(),
+      history_statistics: None,
       checkpoint_history: history.snapshot(0),
       checkpoint_history_rows: Arc::default(),
       history,
@@ -375,6 +386,28 @@ impl Terminal {
       .unwrap_or_default();
     registry.publish_layout_leases(&owner);
     result
+  }
+
+  /// Current retained history for this terminal's entire owning session.
+  /// Registry membership stays pinned while reading cached per-pane sizes, so
+  /// hidden panes count once and concurrent pane moves cannot mix sessions.
+  pub fn session_history_statistics(&self) -> Option<SessionHistoryStatistics> {
+    let manager = self.manager.upgrade()?;
+    let registry = lock(&manager.registry);
+    let session_id = lock(&self.owner).session_id.clone();
+    let root = registry.sessions.get(&session_id)?;
+    let retained_bytes = root
+      .view
+      .layout
+      .terminal_ids()
+      .iter()
+      .filter_map(|id| registry.terminals.get(id))
+      .map(|terminal| retained_history_statistics(&mut lock(&terminal.state)))
+      .fold(0_u64, u64::saturating_add);
+    Some(SessionHistoryStatistics {
+      session_id,
+      retained_bytes,
+    })
   }
 
   pub fn info(&self) -> SessionInfo {
@@ -2142,6 +2175,45 @@ fn refresh_history(terminal: &mut TerminalState) {
     .replace(terminal.primary_history_rows.lines(), source_truncated);
 }
 
+/// Count current text without copying style spans or forcing a checkpoint.
+/// Small output below the checkpoint interval still changes retained history.
+fn retained_history_statistics(terminal: &mut TerminalState) -> u64 {
+  let sequence = terminal.journal.next_sequence();
+  if let Some(cached) = terminal.history_statistics
+    && cached.sequence == sequence
+    && cached.geometry_revision == terminal.geometry_revision
+    && cached.history_generation == terminal.history.generation
+  {
+    return cached.retained_bytes;
+  }
+  let retained_bytes = if terminal.history_alternate_screen {
+    terminal.primary_history_rows.retained_text_bytes()
+  } else {
+    let history_rows = terminal
+      .terminal
+      .lines()
+      .count()
+      .saturating_sub(usize::from(terminal.terminal_size.rows));
+    let retained_rows = history_rows.min(terminal_scrollback_rows(&terminal.terminal_size));
+    let mut unwrapper = avt::util::TextUnwrapper::new();
+    terminal
+      .terminal
+      .lines()
+      .skip(history_rows - retained_rows)
+      .take(retained_rows)
+      .filter_map(|line| unwrapper.push(line))
+      .map(|line| line.trim_end().len() as u64 + 1)
+      .fold(0_u64, u64::saturating_add)
+  };
+  terminal.history_statistics = Some(HistoryStatisticsCache {
+    sequence,
+    geometry_revision: terminal.geometry_revision,
+    history_generation: terminal.history.generation,
+    retained_bytes,
+  });
+  retained_bytes
+}
+
 fn terminal_emulator(terminal_size: &TerminalSize) -> avt::Vt {
   // ctmuxd owns a bounded authoritative scrollback in addition to its live
   // checkpoint. Raw output remains a short delta journal, not history state.
@@ -2170,6 +2242,7 @@ fn feed_terminal_bytes(terminal: &mut TerminalState, data: &[u8]) {
 }
 
 fn feed_terminal_bytes_inner(terminal: &mut TerminalState, data: &[u8]) -> Option<TuiHint> {
+  terminal.history_statistics = None;
   let mut tui_hint = None;
   terminal.pending_input.extend_from_slice(data);
 
@@ -2387,6 +2460,44 @@ mod tests {
       }
       let _removed = std::fs::remove_dir_all(&self.directory);
     }
+  }
+
+  #[test]
+  fn history_statistics_include_hidden_panes_and_small_live_changes_without_checkpointing() {
+    let fixture = PtyViewFixture::new();
+    let root = &fixture.terminals[0];
+    let session_id = root.info().session_id;
+    assert_eq!(root.session_history_statistics().unwrap().retained_bytes, 0);
+    let mut expected = 0_u64;
+    for (index, pane) in fixture.terminals.iter().enumerate() {
+      let checkpoint = lock(&pane.state).checkpoint.sequence;
+      let rows = usize::from(pane.info().terminal_size.rows);
+      let text = format!("pane{index}");
+      pane.append_output(format!("{}live", format!("{text}\r\n").repeat(rows + 2)).as_bytes());
+      // This output is much smaller than the 4KiB checkpoint interval.
+      assert_eq!(lock(&pane.state).checkpoint.sequence, checkpoint);
+      expected += (text.len() as u64 + 1) * 3;
+      let statistics = pane.session_history_statistics().unwrap();
+      assert_eq!(statistics.session_id, session_id);
+      assert_eq!(statistics.retained_bytes, expected);
+      assert_eq!(pane.session_history_statistics().unwrap(), statistics);
+    }
+    // Zoom hides other panes but does not release any of their retained history.
+    let attachment = root.create_attachment(false, true);
+    root
+      .set_view_zoom_inner(&attachment.attachment_id, Some(root.id.clone()))
+      .unwrap();
+    assert_eq!(
+      root.session_history_statistics().unwrap().retained_bytes,
+      expected
+    );
+    let third = &fixture.terminals[2];
+    let third_bytes = ("pane2".len() as u64 + 1) * 3;
+    third.append_output(b"\x1b[3J");
+    assert_eq!(
+      root.session_history_statistics().unwrap().retained_bytes,
+      expected - third_bytes
+    );
   }
 
   #[cfg(unix)]
@@ -3129,6 +3240,27 @@ mod tests {
   }
 
   #[test]
+  fn current_history_statistics_match_physical_history_for_utf8_wraps_and_alternate_screen() {
+    let mut terminal = terminal_state_with_size(5, 2, 1024);
+    for text in [
+      "é界 word  \r\nblank\r\nlive",
+      "\r\n\u{85}\r\n\u{feff}\r\nlast",
+      "\x1b[?1049hignored alternate scroll\r\n\r\n\r\n",
+      "\x1b[?1049l\r\nnew line\r\nlive",
+      "\x1b[3J",
+    ] {
+      feed_terminal_bytes(&mut terminal, text.as_bytes());
+      let current = retained_history_statistics(&mut terminal);
+      refresh_history(&mut terminal);
+      assert_eq!(
+        current,
+        terminal.primary_history_rows.retained_text_bytes(),
+        "{text:?}"
+      );
+    }
+  }
+
+  #[test]
   fn history_contains_only_complete_logical_lines_above_the_live_view() {
     let mut terminal = terminal_state_with_size(5, 2, 1024);
 
@@ -3780,6 +3912,7 @@ mod tests {
       history_alternate_screen: false,
       primary_reflow_pending: false,
       primary_history_rows: Arc::default(),
+      history_statistics: None,
       history: TerminalHistory::new(TERMINAL_HISTORY_CAPACITY_BYTES),
       checkpoint_history: TerminalHistory::new(TERMINAL_HISTORY_CAPACITY_BYTES).snapshot(0),
       checkpoint_history_rows: Arc::default(),

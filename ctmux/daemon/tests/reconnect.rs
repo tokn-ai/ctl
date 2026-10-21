@@ -796,7 +796,7 @@ async fn presentation_window_pauses_output_without_blocking_heartbeats() -> Test
   write_frame(&mut attachment, &ClientMessage::Heartbeat { nonce: 99 }).await?;
   loop {
     match required_message(&mut attachment).await? {
-      ServerMessage::HeartbeatAck { nonce: 99 } => break,
+      ServerMessage::HeartbeatAck { nonce: 99, .. } => break,
       ServerMessage::Output { .. } => {
         return Err("daemon exceeded presentation credit before renderer progress".into());
       }
@@ -2416,6 +2416,7 @@ async fn heartbeat(stream: &mut UnixStream, nonce: u64) -> TestResult {
     match presented_message(stream).await? {
       ServerMessage::HeartbeatAck {
         nonce: acknowledged,
+        ..
       } => {
         assert_eq!(acknowledged, nonce);
         return Ok(());
@@ -2480,6 +2481,7 @@ async fn layout_statuses_before_heartbeat(
       } => statuses.push(status),
       ServerMessage::HeartbeatAck {
         nonce: acknowledged,
+        ..
       } if acknowledged == nonce => {
         return Ok(statuses);
       }
@@ -5204,7 +5206,7 @@ async fn assert_view_precedes_control_barrier(
       {
         return Ok(());
       }
-      ServerMessage::HeartbeatAck { nonce: 1 } => {
+      ServerMessage::HeartbeatAck { nonce: 1, .. } => {
         acknowledged_frames += 1;
         if acknowledged_frames >= queued_frames {
           return Err("view update waited until all ready control traffic drained".into());

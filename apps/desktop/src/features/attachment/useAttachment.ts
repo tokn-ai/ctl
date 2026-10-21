@@ -49,6 +49,7 @@ import { LatestTaskQueue } from "./LatestTaskQueue";
 import { useManualReconnect } from "./ManualReconnect";
 import { ResizeCoordinator } from "./ResizeCoordinator";
 import { ResizePump } from "./ResizePump";
+import { useTerminalStatisticsStore } from "../statistics/TerminalStatisticsContext";
 
 const INITIAL_STATE = initialAttachmentState();
 
@@ -108,6 +109,8 @@ export interface AttachmentActions {
 }
 
 export function useAttachment(renderer: AttachmentRenderer | null, view_resize = false): AttachmentActions {
+  const statistics = useTerminalStatisticsStore();
+  const [statistics_id] = useState(() => Symbol("terminal attachment"));
   const prepareManualReconnect = useManualReconnect();
   const view_resize_ref = useRef(view_resize);
   view_resize_ref.current = view_resize;
@@ -115,6 +118,15 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
   const [manualReconnectPending, setManualReconnectPending] = useState(false);
   const connection_attempt = useRef(0);
   const stateRef = useRef(state);
+  useEffect(() => {
+    statistics?.update(statistics_id, {
+      session: state.session,
+      phase: state.phase,
+      attachment_id: state.attachment_id,
+      history_bytes: renderer?.historyBytes ? () => renderer.historyBytes!() : undefined,
+    });
+  }, [statistics, statistics_id, state.session, state.phase, state.attachment_id, renderer]);
+  useEffect(() => () => statistics?.remove(statistics_id), [statistics, statistics_id]);
   // Event channels can deliver multiple transitions before React commits.
   // Fence every callback against the latest transition, not the last render.
   const setState = useCallback((next: AttachmentViewState | ((current: AttachmentViewState) => AttachmentViewState)) => {
@@ -812,7 +824,12 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
               request_layout_lease: resizeControlDesired && resizeWithWindow && proposed !== null,
             },
             (event) => {
+              statistics?.received(event);
               if (generation !== generationRef.current || attempt !== openingAttempt) return;
+              if (event.event_type === "attachment_statistics") {
+                statistics?.sample(statistics_id, event);
+                return;
+              }
               if (responseReady) queueEvent(event, generation);
               else pendingEvents.push(event);
             },
@@ -889,7 +906,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
         }
       }
     },
-    [publishShellState, queueEvent, renderer, setFailure],
+    [publishShellState, queueEvent, renderer, setFailure, statistics, statistics_id],
   );
 
   const submitConnection = useCallback(

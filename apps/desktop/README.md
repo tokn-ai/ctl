@@ -538,6 +538,24 @@ connection has ended, it opens **Connect host** first and then retries the same
 terminal. Canceling authentication cancels that retry; automatic background
 retries never open an authentication dialog.
 
+The terminal status bar shows retained session history, events received by this
+page, attachment upload/download rates, heartbeat round-trip latency, and event
+presentation lag. History counts UTF-8 text and line endings across every pane in
+the session, excluding the live screen, styles, and transport overhead. When the
+history loaded in this window differs from the server's retained history, the
+size appears as **downloaded/full**; matching sizes appear once. The full size is
+reported by ctmux `1.2.22` or later; earlier daemons show it as unavailable rather
+than treating the downloaded tail as the full history.
+
+Event counts and traffic rates include the page's background tabs and panes.
+Statistics samples and last-contact observations do not increase the event count.
+Traffic counts attachment protocol frames after attachment setup, including
+history transfers and control messages, and excludes SSH encryption overhead.
+Latency uses matched heartbeat round trips without comparing host clocks. Lag
+measures the age of received presentation events waiting for the renderer; it
+does not estimate unseen output still on the server. Counters reset on page reload
+and are never saved with the workspace.
+
 These are the defaults. **Configure Keyboard Shortcuts** in the palette opens
 quick input: select a command and enter a combination such as
 `Primary+Shift+Y` (`Primary` means Cmd on macOS and Ctrl elsewhere). Blank removes

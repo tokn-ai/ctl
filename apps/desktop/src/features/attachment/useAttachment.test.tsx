@@ -22,6 +22,8 @@ import { useWorkbenchNotifications } from "../notifications/useWorkbenchNotifica
 import { useAttachmentNotifications } from "../notifications/useAttachmentNotifications";
 import { ManualReconnectProvider, type ManualReconnectRequest } from "./ManualReconnect";
 import { ViewDividers } from "../../components/terminal/ViewDividers";
+import { TerminalStatisticsProvider } from "../statistics/TerminalStatisticsContext";
+import { TerminalStatisticsStore } from "../statistics/TerminalStatisticsStore";
 
 const xterm = vi.hoisted(() => ({
   instances: [] as {
@@ -222,6 +224,73 @@ afterEach(async () => {
   renderer.dispose();
   container.remove();
   await Promise.resolve();
+});
+
+it("records primary and secondary pane receipt and statistics while rendering acknowledgements are stalled", async () => {
+  const store = new TerminalStatisticsStore();
+  const pane_container = document.createElement("div");
+  document.body.append(pane_container);
+  const pane_renderer = new XtermRenderer(pane_container, () => {}, size);
+  pane_renderers.push(pane_renderer);
+  const primary_renderer = renderer.sessionRenderer(first);
+  let release!: () => void;
+  const stalled = new Promise<void>((resolve) => { release = resolve; });
+  api.acknowledgeAttachmentEvent.mockImplementation(() => stalled);
+  const { result, unmount } = renderHook(() => ({ primary: useAttachment(primary_renderer), secondary: useAttachment(pane_renderer) }), {
+    wrapper: ({ children }: { children: ReactNode }) => <TerminalStatisticsProvider store={store}>{children}</TerminalStatisticsProvider>,
+  });
+  try {
+    await act(async () => { await result.current.primary.connect(first); await result.current.secondary.connect(second); });
+    const primary_id = result.current.primary.state.attachment_id!;
+    const secondary_id = result.current.secondary.state.attachment_id!;
+    await act(async () => { channels.get(primary_id)!(checkpoint(primary_id, "first")); });
+    await waitFor(() => expect(api.acknowledgeAttachmentEvent).toHaveBeenCalled());
+    act(() => {
+      channels.get(primary_id)!({ event_type: "output", attachment_id: primary_id, event_id: "queued", sequence_start: "0", sequence_end: "1", data_base64: "eA==" });
+      channels.get(secondary_id)!({ event_type: "lease_status", attachment_id: secondary_id, lease: "input", status: { held: true, owned_by_client: true } });
+      channels.get(primary_id)!({ event_type: "session_observed", attachment_id: primary_id, last_seen_at_ms: Date.now() });
+      for (const attachment_id of [primary_id, secondary_id]) channels.get(attachment_id)!({
+        event_type: "attachment_statistics", attachment_id, uploaded_bytes: "100", downloaded_bytes: "200", round_trip_ms: 5,
+        event_lag_ms: 30, pending_events: 1, history_session_id: attachment_id === primary_id ? first.session_id : second.session_id, history_retained_bytes: "1000",
+      });
+      store.tick();
+    });
+    expect(store.snapshot(first)).toMatchObject({ events_received: 3n, uploaded_bytes: 200n, downloaded_bytes: 400n, history_retained_bytes: 1000n, round_trip_ms: 5, event_lag_ms: 30 });
+    expect(result.current.primary.state.applied_sequence).not.toBe("1");
+  } finally {
+    await act(async () => { release(); });
+    unmount();
+    pane_container.remove();
+  }
+});
+
+it("counts an event at receipt before the open response releases pending events", async () => {
+  const store = new TerminalStatisticsStore();
+  const scoped = renderer.sessionRenderer(first);
+  const original_open = api.openAttachment.getMockImplementation()!;
+  let release!: () => void;
+  const opening = new Promise<void>((resolve) => { release = resolve; });
+  api.openAttachment.mockImplementationOnce(async (request: OpenAttachmentRequest, on_event: (event: AttachmentEvent) => void) => {
+    const result = await original_open(request, on_event);
+    on_event(checkpoint(result.attached.attachment_id, "early output"));
+    await opening;
+    return result;
+  });
+  const { result, unmount } = renderHook(() => useAttachment(scoped), {
+    wrapper: ({ children }: { children: ReactNode }) => <TerminalStatisticsProvider store={store}>{children}</TerminalStatisticsProvider>,
+  });
+  let connected!: Promise<void>;
+  try {
+    act(() => { connected = result.current.connect(first); });
+    await waitFor(() => expect(store.snapshot(first).events_received).toBe(1n));
+    expect(api.acknowledgeAttachmentEvent).not.toHaveBeenCalled();
+    await act(async () => { release(); await connected; });
+    await waitFor(() => expect(api.acknowledgeAttachmentEvent).toHaveBeenCalled());
+    expect(store.snapshot(first).events_received).toBe(1n);
+  } finally {
+    release();
+    unmount();
+  }
 });
 
 class TestPointerEvent extends MouseEvent {

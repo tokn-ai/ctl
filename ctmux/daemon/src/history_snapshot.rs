@@ -1,5 +1,6 @@
 use ctmux_proto::{
-  MAX_ENCODED_HISTORY_BYTES, TerminalHistoryRow, normalize_history_rows, validate_history_row,
+  MAX_ENCODED_HISTORY_BYTES, TerminalHistoryRow, normalize_history_rows,
+  retained_history_text_bytes, validate_history_row,
 };
 use sha2::{Digest, Sha256};
 use std::io;
@@ -11,6 +12,7 @@ use std::sync::{Arc, OnceLock};
 pub(crate) struct PhysicalHistory {
   rows: Vec<TerminalHistoryRow>,
   lines: Vec<String>,
+  retained_text_bytes: u64,
   encoded: OnceLock<Result<EncodedHistory, (io::ErrorKind, String)>>,
   legacy_encoded: OnceLock<Result<EncodedHistory, (io::ErrorKind, String)>>,
 }
@@ -25,9 +27,11 @@ pub(crate) struct EncodedHistory {
 impl PhysicalHistory {
   pub fn new(rows: Vec<TerminalHistoryRow>) -> Self {
     let lines = normalize_history_rows(&rows);
+    let retained_text_bytes = retained_history_text_bytes(&rows);
     Self {
       rows,
       lines,
+      retained_text_bytes,
       encoded: OnceLock::new(),
       legacy_encoded: OnceLock::new(),
     }
@@ -42,6 +46,10 @@ impl PhysicalHistory {
 
   pub fn lines(&self) -> &[String] {
     &self.lines
+  }
+
+  pub fn retained_text_bytes(&self) -> u64 {
+    self.retained_text_bytes
   }
 
   pub fn encoded(&self, styled: bool) -> io::Result<&EncodedHistory> {

@@ -1,5 +1,6 @@
 import type { AttachmentViewState } from "../../lib/types";
 import type { ReactNode } from "react";
+import { TerminalStatistics } from "./TerminalStatistics";
 import {
   createStatusGroups,
   type StatusItem,
@@ -46,6 +47,7 @@ export function StatusBar({ state, children, show_terminal = true, context_label
           <StatusEntry key={status.key} status={status} />
         ))}
       </div>
+      <TerminalStatistics session={show_terminal ? state.session : null} inert={inert} />
       {children}
     </footer>
   );

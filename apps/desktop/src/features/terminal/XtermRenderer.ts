@@ -5,6 +5,7 @@ import { encodeTerminalBinary, encodeTerminalText } from "../../lib/bytes";
 import type { SessionSummary, TerminalSize } from "../../lib/types";
 import { sessionKey } from "../targets/targets";
 import { captureHistoryRow } from "./historyStyle";
+import { terminalHistoryBytes } from "./historyBytes";
 import {
   TerminalPresenter,
   type ProposedDimensions,
@@ -95,6 +96,7 @@ export class XtermRenderer {
   private viewport: HTMLElement | null = null;
   setViewport(viewport: HTMLElement | null): void { this.viewport = viewport; }
   cellDimensions() { return this.active.presenter.cellDimensions(); }
+  historyBytes(): number | null { return this.active.presenter.historyBytes(); }
   private readonly sessions = new Map<string, CachedTerminal>();
   private active: CachedTerminal;
 
@@ -134,6 +136,7 @@ export class XtermRenderer {
       restoreCheckpoint: (size, history, payload, prefix, sequence, snapshot_id) =>
         this.applyToTerminal(terminal(), sequence, (presenter) => presenter.restoreCheckpoint(size, history, payload, prefix, sequence, snapshot_id)),
       syncHistory: (snapshot) => terminal().presenter.syncHistory(snapshot),
+      historyBytes: () => terminal().presenter.historyBytes(),
       cancelHistory: () => terminal().presenter.cancelHistory(),
       recreate: (size) => this.applyToTerminal(terminal(), null, (presenter) => presenter.recreate(size)),
       resize: (size) => {
@@ -389,6 +392,8 @@ export class XtermRenderer {
     terminalSize: TerminalSize,
     options: TerminalAdapterOptions = {},
   ): TerminalAdapter {
+    let history_dirty = true;
+    let history_bytes = 0;
     const mount = document.createElement("div");
     mount.style.width = "100%";
     mount.style.height = "100%";
@@ -478,8 +483,21 @@ export class XtermRenderer {
         const buffer = terminal.buffer.active;
         return Array.from({ length: buffer.length }, (_, index) => buffer.getLine(index)?.translateToString(true) ?? "");
       },
-      write: (data, callback) => terminal.write(data, callback),
-      resize: (columns, rows) => terminal.resize(columns, rows),
+      historyBytes: () => {
+        if (history_dirty) {
+          history_bytes = terminalHistoryBytes(terminal.buffer.normal);
+          history_dirty = false;
+        }
+        return history_bytes;
+      },
+      write: (data, callback) => terminal.write(data, () => {
+        history_dirty = true;
+        callback();
+      }),
+      resize: (columns, rows) => {
+        terminal.resize(columns, rows);
+        history_dirty = true;
+      },
       dispose: () => {
         mount.querySelectorAll(".xterm-screen").forEach((screen) => this.cellObserver?.unobserve(screen));
         terminal.dispose();
@@ -509,4 +527,4 @@ export type AttachmentRenderer = Pick<XtermRenderer,
   "activateSession" | "adoptSession" | "resumeSequence" | "invalidateResumeSequence" |
   "write" | "restoreCheckpoint" | "recreate" | "resize" |
   "proposeDimensions" | "observeDimensions" | "focus"
-> & Partial<Pick<XtermRenderer, "syncHistory" | "cancelHistory">>;
+> & { historyBytes?(): number | null } & Partial<Pick<XtermRenderer, "syncHistory" | "cancelHistory">>;

@@ -108,7 +108,13 @@ let sessions = structuredClone(previewSessions);
 let tasks = structuredClone(previewTasks);
 let definitions = structuredClone(previewDefinitions);
 let keybindings: KeybindingsDocument = { schema_version: 1, overrides: [] };
-const attachments = new Map<string, { channel: Channel<AttachmentEvent>; sequence: number; session: SessionSummary }>();
+const attachments = new Map<string, {
+  channel: Channel<AttachmentEvent>;
+  sequence: number;
+  session: SessionSummary;
+  uploaded_bytes: number;
+  downloaded_bytes: number;
+}>();
 const forwards = new Map<string, PortForwardStatus>();
 let vpn_connections: VpnConnectionsSnapshot = {
   revision: "preview-vpn-1",
@@ -181,6 +187,7 @@ function emitOutput(attachment_id: string, text: string): void {
   const bytes = new TextEncoder().encode(text);
   const start = attachment.sequence;
   attachment.sequence += bytes.length;
+  attachment.downloaded_bytes += bytes.length + 64;
   attachment.channel.onmessage({
     event_type: "output",
     attachment_id,
@@ -467,7 +474,8 @@ mockIPC((command, payload) => {
       const attachment_id = `sample-attachment-${++revision}`;
       const on_event = channel<AttachmentEvent>(payload, "on_event");
       channel<string>(payload, "on_opening").onmessage(attachment_id);
-      attachments.set(attachment_id, { channel: on_event, sequence: Number(data.resume_from ?? 0), session });
+      attachments.set(attachment_id, { channel: on_event, sequence: Number(data.resume_from ?? 0), session,
+        uploaded_bytes: 0, downloaded_bytes: 0 });
       if (data.resume_from === null) emitOutput(attachment_id, previewOutput(session));
       return {
         attachment_id,
@@ -486,6 +494,8 @@ mockIPC((command, payload) => {
     case "send_input": {
       const data = request<AttachmentInputRequest>(payload);
       const input = atob(data.data_base64);
+      const attachment = attachments.get(data.attachment_id);
+      if (attachment) attachment.uploaded_bytes += input.length + 64;
       // Deliberately a terminal echo, never command execution.
       emitOutput(data.attachment_id, input.replace(/\r/g, "\r\n\x1b[90mPreview input only · no command executed\x1b[0m\r\n\x1b[32m❯\x1b[0m "));
       return;
@@ -583,6 +593,24 @@ mockIPC((command, payload) => {
       throw new Error(`The browser preview does not simulate ${command}.`);
   }
 }, { shouldMockEvents: true });
+
+// Fictional samples exercise the real status bar without opening a transport.
+const statistics_timer = setInterval(() => {
+  for (const [attachment_id, attachment] of attachments) {
+    attachment.channel.onmessage({
+      event_type: "attachment_statistics",
+      attachment_id,
+      uploaded_bytes: String(attachment.uploaded_bytes),
+      downloaded_bytes: String(attachment.downloaded_bytes),
+      round_trip_ms: attachment.session.target.kind === "ssh" ? 32.6 : 0.8,
+      event_lag_ms: 0.6,
+      pending_events: 0,
+      history_session_id: attachment.session.session_id,
+      history_retained_bytes: "1048576",
+    });
+  }
+}, 500);
+import.meta.hot?.dispose(() => clearInterval(statistics_timer));
 
 // Dynamic import ensures the native window API sees mockWindows first.
 const { default: App } = await import("../src/App");

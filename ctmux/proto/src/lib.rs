@@ -10,7 +10,7 @@ use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 /// Internal protocol build; incrementing this does not publish a new contract.
-pub const PROTOCOL_BUILD: u16 = 21;
+pub const PROTOCOL_BUILD: u16 = 22;
 /// First published wire contract. Keep this identity immutable.
 pub const CONTRACT_V1_0_13: ProtocolVersion = ProtocolVersion::new(1, 0, 13);
 /// Published compatible addition: paged history and checkpoint recovery.
@@ -29,7 +29,9 @@ pub const CONTRACT_V1_1_19: ProtocolVersion = ProtocolVersion::new(1, 1, 19);
 pub const CONTRACT_V1_1_20: ProtocolVersion = ProtocolVersion::new(1, 1, 20);
 /// Typed foreground/background colors and attributes in paged history rows.
 pub const CONTRACT_V1_2_21: ProtocolVersion = ProtocolVersion::new(1, 2, 21);
-pub const PROTOCOL_VERSION: ProtocolVersion = CONTRACT_V1_2_21;
+/// Current session-retained history statistics on attached heartbeats.
+pub const CONTRACT_V1_2_22: ProtocolVersion = ProtocolVersion::new(1, 2, 22);
+pub const PROTOCOL_VERSION: ProtocolVersion = CONTRACT_V1_2_22;
 pub const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[
   CONTRACT_V1_0_13,
   CONTRACT_V1_1_14,
@@ -40,6 +42,7 @@ pub const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[
   CONTRACT_V1_1_19,
   CONTRACT_V1_1_20,
   CONTRACT_V1_2_21,
+  CONTRACT_V1_2_22,
 ];
 
 #[must_use]
@@ -53,6 +56,7 @@ pub const fn supports_view_zoom(version: ProtocolVersion) -> bool {
       | CONTRACT_V1_1_19
       | CONTRACT_V1_1_20
       | CONTRACT_V1_2_21
+      | CONTRACT_V1_2_22
   )
 }
 
@@ -66,6 +70,7 @@ pub const fn supports_pane_resize(version: ProtocolVersion) -> bool {
       | CONTRACT_V1_1_19
       | CONTRACT_V1_1_20
       | CONTRACT_V1_2_21
+      | CONTRACT_V1_2_22
   )
 }
 
@@ -73,7 +78,12 @@ pub const fn supports_pane_resize(version: ProtocolVersion) -> bool {
 pub const fn supports_divider_resize(version: ProtocolVersion) -> bool {
   matches!(
     version,
-    CONTRACT_V1_1_17 | CONTRACT_V1_1_18 | CONTRACT_V1_1_19 | CONTRACT_V1_1_20 | CONTRACT_V1_2_21
+    CONTRACT_V1_1_17
+      | CONTRACT_V1_1_18
+      | CONTRACT_V1_1_19
+      | CONTRACT_V1_1_20
+      | CONTRACT_V1_2_21
+      | CONTRACT_V1_2_22
   )
 }
 
@@ -81,7 +91,12 @@ pub const fn supports_divider_resize(version: ProtocolVersion) -> bool {
 pub const fn supports_layout_lease_notifications(version: ProtocolVersion) -> bool {
   matches!(
     version,
-    CONTRACT_V1_1_17 | CONTRACT_V1_1_18 | CONTRACT_V1_1_19 | CONTRACT_V1_1_20 | CONTRACT_V1_2_21
+    CONTRACT_V1_1_17
+      | CONTRACT_V1_1_18
+      | CONTRACT_V1_1_19
+      | CONTRACT_V1_1_20
+      | CONTRACT_V1_2_21
+      | CONTRACT_V1_2_22
   )
 }
 
@@ -89,7 +104,7 @@ pub const fn supports_layout_lease_notifications(version: ProtocolVersion) -> bo
 pub const fn supports_extended_keys(version: ProtocolVersion) -> bool {
   matches!(
     version,
-    CONTRACT_V1_1_18 | CONTRACT_V1_1_19 | CONTRACT_V1_1_20 | CONTRACT_V1_2_21
+    CONTRACT_V1_1_18 | CONTRACT_V1_1_19 | CONTRACT_V1_1_20 | CONTRACT_V1_2_21 | CONTRACT_V1_2_22
   )
 }
 
@@ -97,18 +112,26 @@ pub const fn supports_extended_keys(version: ProtocolVersion) -> bool {
 pub const fn supports_pane_moves(version: ProtocolVersion) -> bool {
   matches!(
     version,
-    CONTRACT_V1_1_19 | CONTRACT_V1_1_20 | CONTRACT_V1_2_21
+    CONTRACT_V1_1_19 | CONTRACT_V1_1_20 | CONTRACT_V1_2_21 | CONTRACT_V1_2_22
   )
 }
 
 #[must_use]
 pub const fn supports_session_rename(version: ProtocolVersion) -> bool {
-  matches!(version, CONTRACT_V1_1_20 | CONTRACT_V1_2_21)
+  matches!(
+    version,
+    CONTRACT_V1_1_20 | CONTRACT_V1_2_21 | CONTRACT_V1_2_22
+  )
 }
 
 #[must_use]
 pub const fn supports_styled_history(version: ProtocolVersion) -> bool {
-  matches!(version, CONTRACT_V1_2_21)
+  matches!(version, CONTRACT_V1_2_21 | CONTRACT_V1_2_22)
+}
+
+#[must_use]
+pub const fn supports_session_statistics(version: ProtocolVersion) -> bool {
+  matches!(version, CONTRACT_V1_2_22)
 }
 
 #[must_use]
@@ -285,6 +308,31 @@ pub fn normalize_history_rows(rows: &[TerminalHistoryRow]) -> Vec<String> {
     }
   }
   lines.into()
+}
+
+/// Number of UTF-8 text bytes in every pane's retained complete history lines.
+/// This excludes live grids, styles, framing and incomplete wrapped prefixes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionHistoryStatistics {
+  pub session_id: String,
+  pub retained_bytes: u64,
+}
+
+/// Count all retained complete logical lines, without the normalized-tail cap.
+/// Each line contributes its UTF-8 text with trailing whitespace removed and
+/// one line-feed byte. A wrapped prefix continuing into the live grid is omitted.
+#[must_use]
+pub fn retained_history_text_bytes(rows: &[TerminalHistoryRow]) -> u64 {
+  let mut bytes = 0_u64;
+  let mut pending = String::new();
+  for row in rows {
+    pending.push_str(&row.text);
+    if !row.wrapped {
+      bytes = bytes.saturating_add(pending.trim_end().len() as u64 + 1);
+      pending.clear();
+    }
+  }
+  bytes
 }
 
 /// The shell program that most recently reported session awareness metadata.
@@ -1013,6 +1061,9 @@ pub enum ServerMessage {
   /// Echoes an attached client's heartbeat nonce.
   HeartbeatAck {
     nonce: u64,
+    /// Current full-session history under contract 1.2.22, independent of download.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    session_history: Option<SessionHistoryStatistics>,
   },
   /// Replaces the attached client's shell-awareness state with a newer,
   /// complete session snapshot.
@@ -1189,6 +1240,71 @@ impl<R: AsyncRead + Unpin> FrameReader<R> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn retained_history_statistics_count_full_utf8_logical_lines_without_tail_cap() {
+    let rows = vec![
+      TerminalHistoryRow {
+        text: "é".into(),
+        wrapped: true,
+        styles: Vec::new(),
+      },
+      TerminalHistoryRow {
+        text: "界   ".into(),
+        wrapped: false,
+        styles: Vec::new(),
+      },
+      TerminalHistoryRow {
+        text: String::new(),
+        wrapped: false,
+        styles: Vec::new(),
+      },
+      TerminalHistoryRow {
+        text: "not complete".into(),
+        wrapped: true,
+        styles: Vec::new(),
+      },
+    ];
+    assert_eq!(retained_history_text_bytes(&rows), 7);
+    let bytes = MAX_NORMALIZED_HISTORY_BYTES + 5;
+    let rows = vec![TerminalHistoryRow {
+      text: "x".repeat(bytes),
+      wrapped: false,
+      styles: Vec::new(),
+    }];
+    assert_eq!(retained_history_text_bytes(&rows), bytes as u64 + 1);
+    assert_eq!(normalize_history_rows(&rows), Vec::<String>::new());
+  }
+
+  #[test]
+  fn heartbeat_statistics_are_optional_and_preserve_legacy_wire_shape() {
+    let legacy = serde_json::json!({ "type": "heartbeat_ack", "nonce": 42 });
+    let message: ServerMessage = serde_json::from_value(legacy.clone()).unwrap();
+    assert_eq!(
+      message,
+      ServerMessage::HeartbeatAck {
+        nonce: 42,
+        session_history: None
+      }
+    );
+    assert_eq!(serde_json::to_value(message).unwrap(), legacy);
+    let current = ServerMessage::HeartbeatAck {
+      nonce: 42,
+      session_history: Some(SessionHistoryStatistics {
+        session_id: "session".into(),
+        retained_bytes: 8192,
+      }),
+    };
+    let value = serde_json::to_value(&current).unwrap();
+    assert_eq!(
+      value["session_history"],
+      serde_json::json!({ "session_id": "session", "retained_bytes": 8192 })
+    );
+    assert_eq!(
+      serde_json::from_value::<ServerMessage>(value).unwrap(),
+      current
+    );
+  }
 
   #[test]
   fn physical_history_normalization_preserves_blanks_and_omits_live_continuation() {
@@ -1589,9 +1705,9 @@ mod tests {
   }
 
   #[test]
-  fn styled_history_contract_retains_historical_features() {
-    assert_eq!(PROTOCOL_VERSION, ProtocolVersion::new(1, 2, 21));
-    assert_eq!(PROTOCOL_BUILD, 21);
+  fn session_statistics_contract_retains_historical_features() {
+    assert_eq!(PROTOCOL_VERSION, ProtocolVersion::new(1, 2, 22));
+    assert_eq!(PROTOCOL_BUILD, 22);
     assert_eq!(
       SUPPORTED_PROTOCOL_VERSIONS,
       &[
@@ -1604,6 +1720,7 @@ mod tests {
         CONTRACT_V1_1_19,
         CONTRACT_V1_1_20,
         CONTRACT_V1_2_21,
+        CONTRACT_V1_2_22,
       ]
     );
     for (version, zoom, pane, divider, keys, moves) in [
@@ -1616,6 +1733,7 @@ mod tests {
       (CONTRACT_V1_1_19, true, true, true, true, true),
       (CONTRACT_V1_1_20, true, true, true, true, true),
       (CONTRACT_V1_2_21, true, true, true, true, true),
+      (CONTRACT_V1_2_22, true, true, true, true, true),
       (
         ProtocolVersion::new(1, 1, 21),
         false,
@@ -1633,11 +1751,18 @@ mod tests {
       assert_eq!(supports_pane_moves(version), moves);
       assert_eq!(
         supports_session_rename(version),
-        matches!(version, CONTRACT_V1_1_20 | CONTRACT_V1_2_21)
+        matches!(
+          version,
+          CONTRACT_V1_1_20 | CONTRACT_V1_2_21 | CONTRACT_V1_2_22
+        )
+      );
+      assert_eq!(
+        supports_session_statistics(version),
+        version == CONTRACT_V1_2_22
       );
       assert_eq!(
         supports_styled_history(version),
-        version == CONTRACT_V1_2_21
+        matches!(version, CONTRACT_V1_2_21 | CONTRACT_V1_2_22)
       );
     }
   }

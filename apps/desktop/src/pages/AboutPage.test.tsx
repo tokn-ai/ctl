@@ -4,8 +4,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ComponentVersionInfo, ComponentVersionsSnapshot, ComponentActionPreflight } from "../lib/types";
 import { AboutPage } from "./AboutPage";
 
-const api = vi.hoisted(() => ({ versions: vi.fn(), preflight: vi.fn(), restart: vi.fn(), bundles: vi.fn(), select: vi.fn() }));
-vi.mock("../lib/tauri", () => ({ getComponentVersions: api.versions, preflightComponentAction: api.preflight, executeComponentAction: api.restart, getComponentBundles: api.bundles, selectComponentBundle: api.select }));
+const api = vi.hoisted(() => ({ versions: vi.fn(), preflight: vi.fn(), restart: vi.fn(), bundles: vi.fn(), select: vi.fn(), published: vi.fn() }));
+vi.mock("../lib/tauri", () => ({ getComponentVersions: api.versions, preflightComponentAction: api.preflight, executeComponentAction: api.restart, getComponentBundles: api.bundles, selectComponentBundle: api.select, checkComponentUpdates: api.published }));
 
 const current: ComponentVersionInfo = { version: "0.1.0", source_revision: "abcdef123456", source_fingerprint: "current", dirty: false, protocols: [{ name: "ctld", build: 12, version: "1.0.12", supported_versions: ["1.0.12"] }] };
 const snapshot: ComponentVersionsSnapshot = { components: [
@@ -24,6 +24,7 @@ const props = () => ({ visible: true, on_close: vi.fn(), on_restarted: vi.fn(), 
 beforeEach(() => {
   vi.clearAllMocks();
   api.bundles.mockResolvedValue({ bundles: [], errors: [] });
+  api.published.mockResolvedValue({ default_channel: "dev", local_development: false, catalog: null, error: null });
   api.versions.mockResolvedValue(structuredClone(snapshot));
   api.preflight.mockResolvedValue(structuredClone(preflight));
   api.restart.mockResolvedValue({ component_id: "owner-1", running: current });

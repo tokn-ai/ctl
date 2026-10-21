@@ -1,5 +1,4 @@
 use clap::Subcommand;
-#[cfg(unix)]
 use clap::ValueEnum;
 #[cfg(unix)]
 use ctl_core::bundles::{Purpose, Source};
@@ -7,6 +6,7 @@ use std::io;
 #[cfg(unix)]
 use std::path::PathBuf;
 
+mod check;
 #[cfg(unix)]
 mod list;
 mod maintenance;
@@ -55,8 +55,29 @@ impl From<Origin> for Source {
   }
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum Channel {
+  Dev,
+  Stable,
+}
+impl From<Channel> for ctl_core::component_update::BundleChannel {
+  fn from(value: Channel) -> Self {
+    match value {
+      Channel::Dev => Self::Dev,
+      Channel::Stable => Self::Stable,
+    }
+  }
+}
+
 #[derive(Debug, Subcommand)]
 pub enum Command {
+  /// Check published channel metadata without downloading or installing components.
+  Check {
+    #[arg(long, value_enum)]
+    channel: Option<Channel>,
+    #[arg(long)]
+    json: bool,
+  },
   /// Inspect running owners and installed replacements without starting services.
   Status {
     #[arg(long)]
@@ -97,9 +118,15 @@ pub enum Command {
     local: bool,
     #[arg(long, value_enum, default_value = "full-bundle")]
     package: UpdatePackage,
-    /// Complete build directory or archive; defaults to each target's selection.
-    #[arg(long)]
+    /// Complete build directory or archive instead of automatic source resolution.
+    #[arg(long, conflicts_with_all = ["channel", "selected"])]
     from: Option<PathBuf>,
+    /// Fetch this publication channel, bypassing a development checkout build.
+    #[arg(long, value_enum, conflicts_with_all = ["from", "selected"])]
+    channel: Option<Channel>,
+    /// Explicitly use the existing offline selection for each target.
+    #[arg(long, conflicts_with_all = ["from", "channel"])]
+    selected: bool,
     /// Snapshot four native binaries from --from before installing.
     #[arg(long, requires = "from")]
     local_build: bool,
@@ -164,6 +191,7 @@ pub async fn run(
     platform,
   };
   match command {
+    Command::Check { channel, json } => check::run(channel, json).await,
     Command::Status { json } => maintenance::status(target_options, json).await,
     Command::Stop {
       component,
@@ -186,12 +214,17 @@ pub async fn run(
 async fn run_bundle(command: Command, target_options: TargetOptions<'_>) -> io::Result<()> {
   let home = dirs::home_dir().ok_or_else(|| io::Error::other("home directory is unavailable"))?;
   match command {
-    Command::Status { .. } | Command::Restart { .. } | Command::Stop { .. } => unreachable!(),
+    Command::Check { .. }
+    | Command::Status { .. }
+    | Command::Restart { .. }
+    | Command::Stop { .. } => unreachable!(),
     Command::Update {
       hosts,
       local,
       package,
       from,
+      channel,
+      selected,
       local_build,
       ctld_package,
       json,
@@ -202,13 +235,29 @@ async fn run_bundle(command: Command, target_options: TargetOptions<'_>) -> io::
         local,
         ctl_client::component_update::UpdateOptions {
           package: package.into(),
-          source: from.map_or(
-            ctl_client::component_update::BuildSource::Selected,
-            |path| ctl_client::component_update::BuildSource::Provided {
-              path,
-              local_build,
-              ctld_package,
-            },
+          source: source_with_bundle_override(
+            from.map_or_else(
+              || {
+                channel.map_or_else(
+                  || {
+                    if selected {
+                      ctl_client::component_update::BuildSource::Selected
+                    } else {
+                      ctl_client::component_update::BuildSource::Automatic
+                    }
+                  },
+                  |channel| ctl_client::component_update::BuildSource::Published {
+                    channel: channel.into(),
+                  },
+                )
+              },
+              |path| ctl_client::component_update::BuildSource::Provided {
+                path,
+                local_build,
+                ctld_package,
+              },
+            ),
+            std::env::var_os("CTL_REMOTE_BUNDLES_DIR").map(PathBuf::from),
           ),
         },
         target_options,
@@ -242,6 +291,59 @@ async fn run_bundle(command: Command, target_options: TargetOptions<'_>) -> io::
     }
   }
   Ok(())
+}
+
+#[cfg(unix)]
+pub(crate) fn source_with_bundle_override(
+  source: ctl_client::component_update::BuildSource,
+  directory: Option<PathBuf>,
+) -> ctl_client::component_update::BuildSource {
+  use ctl_client::component_update::BuildSource;
+  match (source, directory) {
+    (BuildSource::Automatic, Some(path)) => BuildSource::Provided {
+      path,
+      local_build: false,
+      ctld_package: None,
+    },
+    (source, _) => source,
+  }
+}
+
+#[cfg(all(test, unix))]
+mod source_tests {
+  use super::*;
+  use ctl_client::component_update::{BuildSource, BundleChannel};
+
+  #[test]
+  fn environment_bundle_override_applies_only_to_automatic_updates() {
+    let directory = PathBuf::from("/provided-bundles");
+    assert!(matches!(
+      source_with_bundle_override(BuildSource::Automatic, Some(directory.clone())),
+      BuildSource::Provided { path, local_build: false, ctld_package: None } if path == directory
+    ));
+    assert!(matches!(
+      source_with_bundle_override(BuildSource::Automatic, None),
+      BuildSource::Automatic
+    ));
+    for source in [
+      BuildSource::Selected,
+      BuildSource::Published {
+        channel: BundleChannel::Dev,
+      },
+      BuildSource::Published {
+        channel: BundleChannel::Stable,
+      },
+      BuildSource::Provided {
+        path: PathBuf::from("/explicit-build"),
+        local_build: true,
+        ctld_package: Some(PathBuf::from("/signed-ctld")),
+      },
+    ] {
+      let expected = serde_json::to_value(&source).unwrap();
+      let resolved = source_with_bundle_override(source, Some(directory.clone()));
+      assert_eq!(serde_json::to_value(resolved).unwrap(), expected);
+    }
+  }
 }
 
 #[cfg(unix)]

@@ -123,6 +123,7 @@ Root commands use `<scope>:<action>`. Signing is part of `ctld:build` and macOS
 | `pnpm desktop:check` | Check desktop TypeScript types |
 | `pnpm desktop:test` | Run desktop UI tests |
 | `pnpm daemons:build` | Build local Rust daemons |
+| `pnpm bundles:build` | Build and package the current working tree for Linux x64 locally |
 | `pnpm bundles:check` | Check staged remote bundles without fetching or changing selections |
 | `pnpm bundles:sync` | Fetch, verify, and select CI upload bundles for the current commit |
 | `pnpm scripts:check` | Check repository-script types |
@@ -326,17 +327,18 @@ pnpm install
 pnpm desktop:dev
 ```
 
-Tauri development starts even without remote install bundles and prints the
-explicit sync command when they are absent or stale. To test first-time remote
-installation, commit and push the current branch, then download or build the
-bundle set for that exact commit:
+Linux x64 remote updates from a development checkout build and package the
+working tree locally, including uncommitted changes. To prepare that bundle
+explicitly, start Docker or Podman and run:
 
 ```sh
-pnpm bundles:sync
+pnpm bundles:build
 ```
 
-`pnpm bundles:sync --main` deliberately uses the latest successful `main`
-bundle set when exact source parity is not required.
+Other remote targets follow the development publication channel. Explicit
+`--channel dev` or the app's published-main source also uses that channel for
+Linux x64. `pnpm bundles:sync` remains available for packaging and offline
+selection. See [local bundles](docs/local-bundles.md).
 
 The `Desktop, control daemon, and remote-agent bundles` workflow builds static
 Linux and native macOS remote bundles and desktop packages for x86-64 and ARM64. Main-branch
@@ -347,14 +349,15 @@ Release bundle IDs are semantic versions; other runs include the source
 revision so different development builds never share a remote install
 directory. Tag names must match the Cargo and desktop versions as `v<version>`.
 
-Successful full builds on main or a version tag create or refresh the
-`v<version>` draft release with installers, macOS app archives, remote bundles,
-manifests, and SHA-256 checksums. Version tags also include signed, notarized,
-and stapled standalone `ctld.app` archives for both Mac architectures. Branch
-builds remain Actions artifacts.
-The workflow never publishes a release, preserves manually added assets and
-notes, and leaves already-published versions unchanged. Bump the app version
-to start the next draft after publishing.
+Successful component builds on main publish bundle archives to GitHub Pages
+and advance the development channel. Version tags publish bundles to GitHub
+Releases and Pages, then advance the stable channel. Clients discover these
+publications over HTTPS; a persistent local selection cannot shadow them.
+Component publication is independent of desktop installer builds. Desktop
+packages and signed standalone Mac helpers remain part of the same workflow;
+branch-only builds remain Actions artifacts. Existing release assets and manual
+notes are preserved. See [release bundles](docs/ci-bundles.md) for publishing and
+initial Pages configuration.
 
 Main development builds can produce unsigned macOS desktop packages when Apple
 credentials are incomplete, and their draft notes identify them as unsigned.
@@ -797,22 +800,16 @@ remote agent is missing or uses the old `ctl-ssh-v2` protocol, then retry once.
 Repair verifies any saved machine ID and the bundle's own source identity and
 checksums, reuses the chosen SSH route, and shows received bytes, speed, and
 installation stages. It preserves running daemons and can be cancelled with
-Ctrl-C. Piped commands and background reconnects never prompt. Local bundle
-sets can be selected with `CTL_REMOTE_BUNDLES_DIR`; otherwise the CLI checks
-its local resources, `~/.tokn/ctl/agent-bundles`, and the verified download cache
-before the matching official release and existing exact-revision GitHub bundle
-artifacts when `gh` is installed. Downloads are cached under
-`~/.tokn/ctl/agent-bundles/<revision>/<target>/` for reuse across hosts; each reuse
-checks its own version, source revision, target, and checksums without contacting
-GitHub. Schema-2 bundles also verify each component's protocol advertisements
-against the archive and require explicit shared service and companion contracts.
-They can be reused across CLI releases and source revisions, including by
-development clients. The exact current source cache is preferred; other compatible
-entries use stable revision order. Older schema-1 bundles and new downloads still
-require the exact clean client source. Installing a cached bundle leaves running
-daemon owners in place; ordinary connections negotiate with those owners.
-For source development, run `pnpm bundles:sync` from the repository root at the same
-clean pushed revision before rebuilding. See [remote setup](docs/remote-mvp.md).
+Ctrl-C. Piped commands and background reconnects never prompt.
+`CTL_REMOTE_BUNDLES_DIR` supplies an explicit local source. Otherwise repair
+uses the same automatic policy as component updates: local Linux x64 working-tree
+builds during development, and published development/stable channels for other
+remote updates. `ctl components check --channel dev` checks metadata without
+opening SSH or downloading binaries. The current publication is resolved before
+using its verified download cache; an older selected bundle never overrides it.
+Schema-2 bundles verify archive and binary checksums, component advertisements,
+and shared service and companion contracts. Installation preserves running
+owners; restart remains separate. See [remote setup](docs/remote-mvp.md).
 
 `ssh` and `scp` accept the system OpenSSH command syntax. A destination such as
 `work` selects the same saved ctl host used by `-H work`:

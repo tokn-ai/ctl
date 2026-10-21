@@ -227,7 +227,7 @@ starting the agent, the Unix wrapper emits `ctl-ssh-nf\n` when it is absent so
 installation does not depend on the remote shell's diagnostic language.
 
 When SSH verification reports an ctmux protocol-version mismatch, the desktop
-offers **Update remote components** using the bundled installer and verifies the
+offers **Update remote components** using the shared updater and verifies the
 same connection again afterward. Attachment errors expose the same action.
 Installation preserves running sessions and does not restart an existing daemon;
 if it remains incompatible, the flow offers a separate **Force restart**
@@ -235,10 +235,11 @@ confirmation warning that all ctmux sessions for the remote account will end,
 including sessions used by other clients. **Not now** preserves those sessions.
 The agent advertises restart support in identity metadata; older agents default
 to unsupported, and the desktop checks this before offering confirmation and
-again before sending the command. Remote installation rejects bundles from a
-different source revision or an app built with uncommitted component changes.
-For development, commit and push the changes, run `pnpm bundles:sync`, and rebuild
-the app so its bundled components and source revision agree.
+again before sending the command. Development Linux x64 uploads build the
+working tree locally, including uncommitted changes; other remote targets use
+the app's published development or stable channel. Explicit channel choices
+bypass the local build. Remote installation verifies the selected publication's
+own metadata and compatible contracts without requiring the desktop's revision.
 After confirmation, the fixed `ctl-agent restart-ctmux` operation checks the remote
 identity, requests shutdown through the owner-only control endpoint, starts the
 installed companion daemon, and re-verifies the connection. It never signals

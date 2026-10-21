@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       build_desktop:
-        description: Build desktop packages (main/tag runs also update the draft release)
+        description: Build desktop packages (main updates a draft; tags append published release assets)
         required: true
         default: true
         type: boolean
@@ -22,13 +22,10 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: bundles-${{ github.ref }}
-  cancel-in-progress: true
-
 env:
   CARGO_TERM_COLOR: always
   CARGO_TARGET_DIR: ${{ github.workspace }}/target
+  CTL_BUNDLE_CHANNEL: ${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') && 'stable' || 'dev' }}
 
 jobs:
   metadata:
@@ -179,6 +176,124 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  component-release:
+    name: Publish versioned component release
+    if: github.repository == 'tokn-ai/ctl' && startsWith(github.ref, 'refs/tags/v')
+    needs: [metadata, remote-agent-set]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    concurrency:
+      group: bundle-release-${{ needs.metadata.outputs.app_version }}
+      queue: max
+      cancel-in-progress: false
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+      - name: Install Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: Download component bundle set
+        uses: actions/download-artifact@v5
+        with:
+          name: ctl-agent-bundle-set
+          path: target/component-release
+      - name: Publish complete component release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: >-
+          node scripts/ci/publish-component-release.mts components
+          "${{ needs.metadata.outputs.app_version }}"
+          "${{ needs.metadata.outputs.bundle_id }}"
+          "${{ needs.metadata.outputs.git_revision }}"
+          target/component-release
+      - name: Upload canonical published component set
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctl-agent-published-bundle-set
+          path: target/component-release/*
+          if-no-files-found: error
+          retention-days: 30
+
+  bundle-pages:
+    name: Publish bundle channels
+    if: >-
+      always() && github.repository == 'tokn-ai/ctl' &&
+      needs.metadata.result == 'success' && needs.remote-agent-set.result == 'success' &&
+      (github.ref == 'refs/heads/main' ||
+      (startsWith(github.ref, 'refs/tags/v') && needs.component-release.result == 'success'))
+    needs: [metadata, remote-agent-set, component-release]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+      deployments: read
+      pages: write
+      id-token: write
+    concurrency:
+      group: bundle-pages-publication
+      queue: max
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+      - name: Install Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: Download component bundle set
+        uses: actions/download-artifact@v5
+        with:
+          name: ${{ startsWith(github.ref, 'refs/tags/v') && 'ctl-agent-published-bundle-set' || 'ctl-agent-bundle-set' }}
+          path: target/pages-incoming
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+      - name: Restore previous complete bundle site
+        id: previous
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: node scripts/ci/restore-bundle-pages.mts target/pages-previous
+      - name: Stage complete site and channel pointers
+        id: stage
+        env:
+          PUBLICATION_CHANNEL: ${{ startsWith(github.ref, 'refs/tags/v') && 'stable' || 'dev' }}
+        run: >-
+          node scripts/ci/stage-bundle-pages.mts
+          "$PUBLICATION_CHANNEL"
+          "${{ needs.metadata.outputs.app_version }}"
+          "${{ needs.metadata.outputs.bundle_id }}"
+          "${{ needs.metadata.outputs.git_revision }}"
+          target/pages-incoming
+          "${{ steps.previous.outputs.previous }}"
+          target/bundle-pages-site
+      - name: Upload Pages artifact
+        if: steps.stage.outputs.publish == 'true'
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: target/bundle-pages-site
+          include-hidden-files: true
+      - name: Save complete site snapshot
+        if: steps.stage.outputs.publish == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: bundle-pages-state-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/bundle-pages-site
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 90
+      - name: Deploy bundle Pages
+        if: steps.stage.outputs.publish == 'true'
+        id: deployment
+        uses: actions/deploy-pages@v4
+
   ctld:
     name: Signed standalone ctld (${{ matrix.target }})
     if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.build_ctld)
@@ -306,10 +421,14 @@ jobs:
 
   desktop:
     name: Desktop (${{ matrix.target }})
-    if: github.event_name == 'push' || inputs.build_desktop
+    if: >-
+      always() && needs.metadata.result == 'success' && needs.remote-agent-set.result == 'success' &&
+      (github.event_name == 'push' || inputs.build_desktop) &&
+      (!startsWith(github.ref, 'refs/tags/v') || github.repository != 'tokn-ai/ctl' || needs.component-release.result == 'success')
     needs:
       - metadata
       - remote-agent-set
+      - component-release
     strategy:
       fail-fast: false
       matrix:
@@ -369,7 +488,7 @@ jobs:
       - name: Download remote-agent bundles
         uses: actions/download-artifact@v5
         with:
-          name: ctl-agent-bundle-set
+          name: ${{ startsWith(github.ref, 'refs/tags/v') && github.repository == 'tokn-ai/ctl' && 'ctl-agent-published-bundle-set' || 'ctl-agent-bundle-set' }}
           path: apps/desktop/src-tauri/resources/agent-bundles
 
       - name: Detect Apple signing configuration
@@ -541,22 +660,25 @@ jobs:
           retention-days: 30
 
   draft-release:
-    name: Update draft release
+    name: Attach desktop release assets
     if: >-
       always() && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) &&
       needs.metadata.result == 'success' && needs.remote-agent-set.result == 'success' &&
-      needs.desktop.result == 'success' && (needs.ctld.result == 'success' || needs.ctld.result == 'skipped')
+      needs.desktop.result == 'success' && (needs.ctld.result == 'success' || needs.ctld.result == 'skipped') &&
+      (github.ref == 'refs/heads/main' || needs.component-release.result == 'success')
     needs:
       - metadata
       - remote-agent-set
       - desktop
       - ctld
+      - component-release
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
       contents: write
     concurrency:
-      group: draft-release-${{ needs.metadata.outputs.app_version }}
+      group: bundle-release-${{ needs.metadata.outputs.app_version }}
+      queue: max
       cancel-in-progress: false
     steps:
       - name: Check out repository
@@ -577,7 +699,7 @@ jobs:
       - name: Download remote-agent bundle set
         uses: actions/download-artifact@v5
         with:
-          name: ctl-agent-bundle-set
+          name: ${{ startsWith(github.ref, 'refs/tags/v') && 'ctl-agent-published-bundle-set' || 'ctl-agent-bundle-set' }}
           path: target/release-assets
 
       - name: Download standalone ctld assets
@@ -597,11 +719,24 @@ jobs:
           merge-multiple: true
 
       - name: Create or refresh the version draft
+        if: github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: >-
           node scripts/ci/update-draft-release.mts
+          "${{ needs.metadata.outputs.app_version }}"
+          "${{ needs.metadata.outputs.bundle_id }}"
+          "${{ needs.metadata.outputs.git_revision }}"
+          target/release-assets
+
+      - name: Append desktop assets to the published version release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: >-
+          node scripts/ci/publish-component-release.mts desktop
           "${{ needs.metadata.outputs.app_version }}"
           "${{ needs.metadata.outputs.bundle_id }}"
           "${{ needs.metadata.outputs.git_revision }}"

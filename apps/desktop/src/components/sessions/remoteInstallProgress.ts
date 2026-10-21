@@ -3,6 +3,7 @@ import type { QuickInputMode } from "../commands/QuickInput";
 
 const STAGES: Record<RemoteAgentInstallProgress["phase"], string> = {
   detecting_platform: "Detecting remote operating system and architecture…",
+  preparing_bundle: "Preparing component bundles…",
   verifying_bundle: "Verifying the bundled archive checksum…",
   connecting: "Opening the SSH transfer…",
   transferring: "Sending",
@@ -31,7 +32,7 @@ export function remoteInstallProgressMode(
   const file_name = state?.file_name;
   const total = state?.total_bytes ?? 0;
   const received = Math.min(total, Math.max(0, state?.transferred_bytes ?? 0));
-  const has_transfer = total > 0 && !["detecting_platform", "verifying_bundle", "connecting"].includes(phase);
+  const has_transfer = total > 0 && !["detecting_platform", "preparing_bundle", "verifying_bundle", "connecting"].includes(phase);
   const message = file_name && ["transferring", "extracting", "checking"].includes(phase)
     ? `${STAGES[phase]} ${file_name}…`
     : STAGES[phase];

@@ -2,6 +2,8 @@
 // Tauri extracts owned command arguments from IPC.
 #![allow(clippy::needless_pass_by_value)]
 
+pub(crate) mod catalog;
+
 use crate::dto::{ConnectionTargetDto, RemoteAgentInstallProgressDto};
 use crate::error::{CommandErrorDto, CommandResult};
 use ctl_core::component_update::{UpdateOptions, UpdateResult};

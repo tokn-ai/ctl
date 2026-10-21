@@ -306,3 +306,25 @@ async fn initial_local_selection_can_use_an_included_portable_linux_build() {
       .is_none()
   );
 }
+
+#[tokio::test]
+async fn development_builder_errors_include_bounded_diagnostics_without_docker() {
+  let mut command = tokio::process::Command::new("/bin/sh");
+  command.args([
+    "-c",
+    "printf 'Docker fixture is unavailable\\n' >&2; printf 'must not enter JSON stdout'; exit 17",
+  ]);
+  let error = run_development_builder(command)
+    .await
+    .unwrap_err()
+    .to_string();
+  assert!(error.contains("17"));
+  assert!(error.contains("Docker fixture is unavailable"));
+  let mut bytes = vec![b'x'; MAX_BUILD_DIAGNOSTIC_BYTES * 2];
+  bytes.extend_from_slice(b"\nfinal compiler cause");
+  let tail = build_diagnostics(bytes.as_slice(), &mut tokio::io::sink())
+    .await
+    .unwrap();
+  assert_eq!(tail.len(), MAX_BUILD_DIAGNOSTIC_BYTES);
+  assert!(tail.ends_with("final compiler cause"));
+}

@@ -9,6 +9,7 @@ import { errorMessage } from "../../lib/errors";
 import type { ComponentUpdateContext, ComponentUpdateHostResult, ComponentUpdateProgress, ComponentUpdateSource, ConnectionTarget, SshPrompt } from "../../lib/types";
 import { promptMode, promptTitle } from "../sessions/sshPrompt";
 import { remoteInstallProgressMode } from "../sessions/remoteInstallProgress";
+import { PublishedBundleStatus } from "./PublishedBundleStatus";
 import "./componentUpdate.css";
 
 interface Props {
@@ -18,12 +19,19 @@ interface Props {
   on_close(): void;
 }
 
+type SourceChoice = "automatic" | "dev" | "stable" | "selected" | "provided";
+
+function sourceChoice(source?: ComponentUpdateSource): SourceChoice {
+  return source?.kind === "published" ? source.channel : source?.kind ?? "automatic";
+}
+
 export function UpdateComponentsDialog({ targets, context, on_updated, on_close }: Props) {
   const available = new Map([LOCAL_TARGET, ...targets, ...(context?.targets ?? [])].map((target) => [targetKey(target), target]));
   const [selected, setSelected] = useState(() => new Set((context?.targets ?? [LOCAL_TARGET]).filter((target) => target.kind !== "ssh" || !target.unavailable).map(targetKey)));
   const [update_package, setPackage] = useState(context?.package ?? "full_bundle");
   const initial_source = context?.source;
-  const [provided, setProvided] = useState(initial_source?.kind === "provided");
+  const [source_choice, setSourceChoice] = useState<SourceChoice>(() => sourceChoice(initial_source));
+  const provided = source_choice === "provided";
   const [path, setPath] = useState(initial_source?.kind === "provided" ? initial_source.path : "");
   const [local_build, setLocalBuild] = useState(initial_source?.kind === "provided" && initial_source.local_build);
   const [ctld_package, setCtldPackage] = useState(initial_source?.kind === "provided" ? initial_source.ctld_package ?? "" : "");
@@ -60,7 +68,9 @@ export function UpdateComponentsDialog({ targets, context, on_updated, on_close 
     if (provided && !path.trim()) { setError("Enter a build directory or archive path."); return; }
     const source: ComponentUpdateSource = provided
       ? { kind: "provided", path: path.trim(), local_build, ctld_package: local_build && ctld_package.trim() ? ctld_package.trim() : null }
-      : { kind: "selected" };
+      : source_choice === "dev" || source_choice === "stable"
+        ? { kind: "published", channel: source_choice }
+        : { kind: source_choice === "selected" ? "selected" : "automatic" };
     const attempt_id = crypto.randomUUID();
     attempt.current = attempt_id;
     host_index.current = 0;
@@ -98,25 +108,34 @@ export function UpdateComponentsDialog({ targets, context, on_updated, on_close 
     <header><h2>Update components</h2><p>Install on selected hosts. Running sessions are kept; restart or reconnect separately.</p></header>
     {running ? <div role="status" className="component-update-progress">
       <strong>{stopping ? "Stopping update…" : `Updating ${targetLabel(submitted_targets[progress?.host_index ?? 0])}`}</strong>
-      <p>{install_progress?.message ?? "Verifying the build and connection…"}</p>
+      <p>{install_progress?.message ?? "Preparing the build and connection…"}</p>
       {install_progress?.detail ? <p>{install_progress.detail}</p> : null}
       {install_progress?.progress ? <progress max={install_progress.progress.max} value={install_progress.progress.value} aria-label={install_progress.progress.label} /> : null}
       <p>Host {(progress?.host_index ?? 0) + 1} of {submitted_targets.length}</p>
     </div> : results ? <div className="component-update-results">
       <p role="status">{results.filter((result) => result.state === "complete").length} of {submitted_targets.length} hosts updated. Running services were preserved.</p>
-      <ul>{results.map((result) => <li key={result.host_index}><strong>{targetLabel(submitted_targets[result.host_index])}</strong><span>{result.state === "complete" ? "Installed" : result.state === "cancelled" ? "Cancelled" : "Failed"}</span>{result.error ? <p role="alert">{result.error}</p> : null}</li>)}</ul>
+      <ul>{results.map((result) => <li key={result.host_index}><strong>{targetLabel(submitted_targets[result.host_index])}</strong><span>{result.state === "complete" ? "Installed" : result.state === "cancelled" ? "Cancelled" : "Failed"}</span>{result.result ? <p>Bundle {result.result.bundle_id} · {result.result.target_triple}</p> : null}{result.error ? <p role="alert">{result.error}</p> : null}</li>)}</ul>
     </div> : <form id="component-update-form" onSubmit={(event) => { event.preventDefault(); void start(); }}>
       <fieldset><legend>Hosts</legend><div className="component-update-hosts">{[...available.values()].map((target) => <label key={targetKey(target)}><input type="checkbox" checked={selected.has(targetKey(target))} disabled={target.kind === "ssh" && !!target.unavailable} onChange={(event) => setSelected((current) => { const next = new Set(current); if (event.target.checked) next.add(targetKey(target)); else next.delete(targetKey(target)); return next; })} /><span>{targetLabel(target)}{target.kind === "ssh" && target.unavailable ? <small>Connection unavailable</small> : null}</span></label>)}</div></fieldset>
       <fieldset><legend>Package</legend>
         <label><input type="radio" name="update-package" checked={update_package === "ctl_agent"} onChange={() => setPackage("ctl_agent")} /><span>ctl-agent only<small>Keep the installed daemons.</small></span></label>
         <label><input type="radio" name="update-package" checked={update_package === "full_bundle"} onChange={() => setPackage("full_bundle")} /><span>Full bundle<small>ctl-agent, ctld, ctmuxd, and ctl-taskd from one build.</small></span></label>
       </fieldset>
-      <label className="component-update-field">Build source<select value={provided ? "provided" : "selected"} onChange={(event) => setProvided(event.target.value === "provided")}><option value="selected">Selected build for each target</option><option value="provided">Provided build files</option></select></label>
+      <label className="component-update-field">Build source<select value={source_choice} onChange={(event) => setSourceChoice(event.target.value as SourceChoice)}>
+        <option value="automatic">Automatic</option>
+        <option value="dev">Latest published main build</option>
+        <option value="stable">Latest stable release</option>
+        <option value="selected">Selected or included build (offline)</option>
+        <option value="provided">Provided build files</option>
+      </select></label>
       {provided ? <div className="component-update-source">
         <label className="component-update-field">Build directory or archive<input value={path} onChange={(event) => setPath(event.target.value)} placeholder="/path/to/build" /></label>
         <label><input type="checkbox" checked={local_build} onChange={(event) => setLocalBuild(event.target.checked)} /><span>Native local build<small>A directory containing all four binaries for this computer's platform.</small></span></label>
         {local_build ? <label className="component-update-field">Signed ctld package directory (macOS full bundle)<input value={ctld_package} onChange={(event) => setCtldPackage(event.target.value)} placeholder="/path/to/ctld-package" /></label> : <p>Use a complete bundle directory, or a verified archive with its bundle-set.json beside it.</p>}
-      </div> : <p className="component-update-hint">Uses your pinned selection. Included builds are used when a target has no selection. Local macOS full bundles need a signed ctld package.</p>}
+      </div> : <>
+        <p className="component-update-hint">{source_choice === "selected" ? "Installs your selected build, or an included build when no selection exists." : source_choice === "automatic" ? "Uses the current publication for this app’s channel. Development Linux x64 builds use the working tree locally. Local macOS services retain their signed selected build." : "Checks the channel and downloads the published build for each host’s target. Cached older builds do not override the channel."} Local macOS full bundles need a signed ctld package.</p>
+        {source_choice !== "selected" ? <PublishedBundleStatus channel={source_choice === "dev" || source_choice === "stable" ? source_choice : undefined} /> : null}
+      </>}
     </form>}
     {error ? <p role="alert" className="quick-input-error">{error}</p> : null}
     <footer>

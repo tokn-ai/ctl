@@ -110,6 +110,10 @@ esac
 "#,
     );
     fixture.script("gh", "touch \"$CTL_TEST_DIR/gh-called\"; exit 93");
+    fixture.script(
+      "node",
+      "touch \"$CTL_TEST_DIR/builder-called\"; printf 'current development builder unavailable in fixture\\n' >&2; exit 94",
+    );
     fixture
   }
 
@@ -143,6 +147,45 @@ esac
       "ctld": component(ctld_protocols),
     });
     self.bundle(build, Some(&components))
+  }
+
+  fn stale_sources(&self) -> ctl_core::bundles::Bundle {
+    let previous = Self::new(EXPECTED_ID);
+    let build = ctl_core::component::ComponentBuildInfo {
+      version: "0.0.9".into(),
+      source_revision: Some("a".repeat(40)),
+      source_fingerprint: "a".repeat(64),
+      dirty: false,
+    };
+    previous.compatible_bundle(&build);
+    let target = "x86_64-unknown-linux-musl";
+    let candidate = ctl_client::remote_bundle::read_verified_bundle(
+      &[previous.0.join("bundles")],
+      target,
+      &build,
+    )
+    .unwrap()
+    .unwrap();
+    let home = self.0.join("home");
+    ctl_client::remote_bundle::BundleCacheEntry::new(
+      &home.join(".tokn/ctl/agent-bundles"),
+      target,
+      &build,
+    )
+    .unwrap()
+    .store(&candidate)
+    .unwrap();
+    let bundle = ctl_client::components::import_remote(
+      &home,
+      &candidate,
+      target,
+      ctl_core::bundles::Source::Ci,
+    )
+    .unwrap();
+    ctl_core::bundles::Store::new(&home)
+      .select(ctl_core::bundles::Purpose::Upload, &bundle)
+      .unwrap();
+    bundle
   }
 
   fn bundle(
@@ -440,6 +483,12 @@ impl Terminal {
     command.env("CTL_HOSTS_PATH", fixture.0.join("hosts.json"));
     command.env("CTLD_SOCKET_PATH", fixture.0.join("ctld.sock"));
     command.env("CTLD_BIN", fixture.0.join("missing-ctld"));
+    // Every repair fixture is offline. Automatic sources must fail discovery
+    // instead of contacting the live channel or silently choosing stale data.
+    command.env("HTTPS_PROXY", "http://127.0.0.1:9");
+    command.env("https_proxy", "http://127.0.0.1:9");
+    command.env("NO_PROXY", "");
+    command.env("no_proxy", "");
     if explicit {
       command.env("CTL_REMOTE_BUNDLES_DIR", fixture.0.join("bundles"));
     } else {
@@ -626,19 +675,19 @@ async fn accepted_repair_detects_platform_but_rejects_unverified_local_bundles_b
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn accepted_repair_activates_verified_components_and_retries_once() {
+async fn accepted_provided_repair_activates_components_without_creating_an_upload_selection() {
   let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   verify_successful_repair(false).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn accepted_repair_uses_the_managed_home_cache_and_retries_without_downloads() {
+async fn provided_repair_ignores_and_preserves_older_cached_and_selected_sources() {
   let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   verify_successful_repair(true).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn compatible_older_cached_components_repair_a_development_cli_and_preserve_identity() {
+async fn compatible_older_provided_components_repair_a_development_cli_and_preserve_identity() {
   let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   // Unlike legacy exact-source fixtures, this test must also exercise a CLI
   // compiled from a dirty checkout or without a recorded source revision.
@@ -651,68 +700,84 @@ async fn compatible_older_cached_components_repair_a_development_cli_and_preserv
   assert_ne!(build.version, env!("CARGO_PKG_VERSION"));
   let fixture = Fixture::new(EXPECTED_ID);
   let bundle_id = fixture.compatible_bundle(&build);
-  let target = "x86_64-unknown-linux-musl";
-  let bundle =
-    ctl_client::remote_bundle::read_verified_bundle(&[fixture.0.join("bundles")], target, &build)
-      .unwrap()
-      .unwrap();
-  let cache = fixture.0.join("home/.tokn/ctl/agent-bundles");
-  ctl_client::remote_bundle::BundleCacheEntry::new(&cache, target, &build)
-    .unwrap()
-    .store(&bundle)
-    .unwrap();
+  let original = fs::read(fixture.0.join("hosts.json")).unwrap();
+  let broker = fixture.broker();
+  let mut terminal = Terminal::with_args(&fixture, &["-H", "work", "ctmux", "list"]);
+  terminal.wait_for_prompt();
+  terminal.answer("y\r");
+  assert_successful_repair(&fixture, &bundle_id, &original, &mut terminal, None);
+  let installed = ctl_core::bundles::Bundle::open(
+    &fs::canonicalize(fixture.0.join("home/.tokn/ctl/current")).unwrap(),
+  )
+  .unwrap();
+  assert_eq!(installed.manifest.components["ctl-agent"].build, build);
+  broker.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn automatic_repair_requires_a_current_source_even_with_older_cached_and_selected_components()
+{
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
+  let fixture = Fixture::new(EXPECTED_ID);
+  let previous = fixture.stale_sources();
   let original = fs::read(fixture.0.join("hosts.json")).unwrap();
   let broker = fixture.broker();
   let mut terminal =
     Terminal::with_bundle_override(&fixture, &["-H", "work", "ctmux", "list"], false);
   terminal.wait_for_prompt();
   terminal.answer("y\r");
-  assert_successful_repair(&fixture, &bundle_id, &original, &mut terminal, true);
-  assert!(
-    terminal
-      .text()
-      .contains("Using cached remote components 0.0.9 (aaaaaaaaaaaa)"),
-    "{}",
-    terminal.text(),
-  );
-  assert!(
-    cache
-      .join("a".repeat(40))
-      .join(target)
-      .join("bundle-set.json")
-      .is_file()
-  );
+  assert!(!terminal.finish().success(), "{}", terminal.text());
+  fixture.assert_managed_route(3);
+  fixture.assert_no_upload();
+  assert!(!fixture.0.join("home/.tokn/ctl/current").exists());
+  assert_selection(&fixture, Some(&previous.manifest.bundle_id));
+  assert_eq!(fs::read(fixture.0.join("hosts.json")).unwrap(), original);
+  if ctl_client::component_update::working_tree_available() {
+    assert!(
+      fixture.0.join("builder-called").exists(),
+      "{}",
+      terminal.text()
+    );
+    assert!(
+      terminal
+        .text()
+        .contains("current development builder unavailable in fixture")
+    );
+  }
   broker.await.unwrap();
 }
 
-async fn verify_successful_repair(cached: bool) {
+async fn verify_successful_repair(stale_sources: bool) {
   let mut build = ctl_core::component::build_info();
   build.dirty = false;
   build.source_revision.get_or_insert_with(|| "a".repeat(40));
   let fixture = Fixture::new(EXPECTED_ID);
   let bundle_id = fixture.compatible_bundle(&build);
-  if cached {
-    let target = "x86_64-unknown-linux-musl";
-    let bundle =
-      ctl_client::remote_bundle::read_verified_bundle(&[fixture.0.join("bundles")], target, &build)
-        .unwrap()
-        .unwrap();
-    ctl_client::remote_bundle::BundleCacheEntry::new(
+  let previous = stale_sources.then(|| fixture.stale_sources());
+  let original = fs::read(fixture.0.join("hosts.json")).unwrap();
+  let broker = fixture.broker();
+  let mut terminal = Terminal::with_args(&fixture, &["-H", "work", "ctmux", "list"]);
+  terminal.wait_for_prompt();
+  terminal.answer("y\r");
+  assert_successful_repair(
+    &fixture,
+    &bundle_id,
+    &original,
+    &mut terminal,
+    previous
+      .as_ref()
+      .map(|bundle| bundle.manifest.bundle_id.as_str()),
+  );
+  if let Some(previous) = previous {
+    let cached = ctl_client::remote_bundle::read_compatible_cached_bundle(
       &fixture.0.join("home/.tokn/ctl/agent-bundles"),
-      target,
+      "x86_64-unknown-linux-musl",
       &build,
     )
     .unwrap()
-    .store(&bundle)
     .unwrap();
+    assert_eq!(cached.bundle_id, previous.manifest.distribution_id.unwrap());
   }
-  let original = fs::read(fixture.0.join("hosts.json")).unwrap();
-  let broker = fixture.broker();
-  let mut terminal =
-    Terminal::with_bundle_override(&fixture, &["-H", "work", "ctmux", "list"], !cached);
-  terminal.wait_for_prompt();
-  terminal.answer("y\r");
-  assert_successful_repair(&fixture, &bundle_id, &original, &mut terminal, cached);
   broker.await.unwrap();
 }
 
@@ -721,16 +786,15 @@ fn assert_successful_repair(
   bundle_id: &str,
   original: &[u8],
   terminal: &mut Terminal,
-  cached: bool,
+  selection: Option<&str>,
 ) {
   assert!(terminal.finish().success(), "{}", terminal.text());
   let transcript = terminal.text();
-  if cached {
-    assert!(
-      transcript.contains("Using cached remote components"),
-      "{transcript}"
-    );
-  }
+  assert!(
+    !transcript.contains("Using cached remote components"),
+    "{transcript}"
+  );
+  assert!(!fixture.0.join("builder-called").exists());
   assert!(
     transcript.contains("Remote components installed. Retrying the connection."),
     "{transcript}"
@@ -740,22 +804,18 @@ fn assert_successful_repair(
   assert!(fixture.0.join("platform").exists());
   assert!(fixture.0.join("upload").exists());
   let base = fixture.0.join("home/.tokn/ctl");
-  let selected = ctl_core::bundles::Store::new(&fixture.0.join("home"))
-    .selected(
-      ctl_core::bundles::Purpose::Upload,
-      "x86_64-unknown-linux-musl",
-    )
-    .unwrap()
-    .unwrap();
+  assert_selection(fixture, selection);
+  let installed =
+    ctl_core::bundles::Bundle::open(&fs::canonicalize(base.join("current")).unwrap()).unwrap();
   assert_eq!(
-    selected.manifest.distribution_id.as_deref(),
+    installed.manifest.distribution_id.as_deref(),
     Some(bundle_id)
   );
   assert_eq!(
     fs::read_link(base.join("current")).unwrap(),
     PathBuf::from(format!(
       "components/bundles/x86_64-unknown-linux-musl/{}",
-      selected.manifest.bundle_id
+      installed.manifest.bundle_id
     ))
   );
   assert!(!base.join("versions").exists());
@@ -795,4 +855,19 @@ fn assert_successful_repair(
     ]
   );
   assert_eq!(fs::read(fixture.0.join("hosts.json")).unwrap(), original);
+}
+
+fn assert_selection(fixture: &Fixture, expected: Option<&str>) {
+  let selected = ctl_core::bundles::Store::new(&fixture.0.join("home"))
+    .selected(
+      ctl_core::bundles::Purpose::Upload,
+      "x86_64-unknown-linux-musl",
+    )
+    .unwrap();
+  assert_eq!(
+    selected
+      .as_ref()
+      .map(|bundle| bundle.manifest.bundle_id.as_str()),
+    expected
+  );
 }

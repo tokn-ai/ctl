@@ -146,27 +146,24 @@ before uploading; if that ID cannot be verified, repair stops. It reuses the
 selected authenticated SSH connection, including its VPN/gateway route. Piped
 commands and later reconnects never prompt or install automatically.
 
-Repair verifies the complete build and uses the explicit upload selection in
-`~/.tokn/ctl/components`. The selection is shared across remote hosts of that
-target and stays stable until Sync/Update changes it. If there is no selection,
-repair can initialize one from a verified schema-2 local resource bundle, an
-existing legacy cache, the matching official release, or an existing GitHub
-bundle artifact for the client revision. It never starts a workflow. Development
-`pnpm bundles:sync` explicitly imports and selects all four CI targets.
+Repair uses the same source policy as ordinary component updates. Development
+checkouts build Linux x64 bundles locally; other remote targets follow the
+client's development or stable publication channel. No pushed commit, GitHub
+CLI, or manual bundle sync is needed. `CTL_REMOTE_BUNDLES_DIR` is an explicit
+local source override. An older cached selection cannot override the channel,
+and network errors do not silently select an older build.
 
 Each bundle contains `ctl-agent`, `ctmuxd`, `ctl-taskd`, and `ctld`. Import verifies
 archive and binary checksums, a common identified build, and agreement between
 the outer and archived advertisements. Client and companion contracts must have
 explicit shared published versions. The selected bundle may differ from the
-client's product version or source revision. CI artifact lookup still needs a
-clean, identified client revision; release reuse depends on advertised contracts.
+client's product version or source revision. Network publication eligibility
+depends on advertised contracts, independently of source equality.
 Legacy schema-1 artifacts cannot become a complete managed selection.
 
 Publication and selection use private staging and atomic rename. Corrupt or
-incompatible selections stop repair instead of changing the build automatically.
-Use `ctl components sync --from <directory> --target <target> --purpose upload`
-to select a verified replacement. `CTL_REMOTE_BUNDLES_DIR` supplies the initial
-candidate when no upload selection exists; it does not override a selection.
+incompatible published bundles stop repair. Use `ctl components update --selected`
+for an explicit offline installation, or `--from <directory>` to provide a build.
 See [Components and updates](component-updates.md) for layout and local use.
 
 Upload progress shows the archive, received bytes, speed, and installation

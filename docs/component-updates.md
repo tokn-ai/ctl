@@ -52,8 +52,20 @@ computer and several saved SSH hosts. Choose one of two packages:
 - **Full bundle** installs `ctl-agent`, `ctld`, `ctmuxd`, and `ctl-taskd` from one
   verified complete build.
 
-Both choices take their binaries from a complete compatible build. The default
-uses each target's pinned selection. **Provided build files** accepts a stored
+Both choices take their binaries from a complete compatible build. **Automatic**
+uses the app's publication channel for remote hosts: development builds follow
+the latest published `main` build, and tagged release builds follow stable
+releases. A development checkout builds Linux x64 components locally before
+uploading, including uncommitted changes. Other remote targets use the network
+channel. Automatic Linux local updates use the same policy, mapping glibc hosts
+to their portable musl target. Automatic macOS local-service updates retain the
+existing signed local selection; full local updates require a signed helper package.
+
+**Latest published main build** and **Latest stable release** explicitly choose
+a network channel, including when running from a development checkout.
+**Selected or included build (offline)** uses the upload selection instead.
+The normal remote update path never lets an older selection override a channel.
+**Provided build files** accepts a stored
 bundle directory or archive, a CI/release bundle-set directory, or an explicitly
 chosen native build directory. Publisher archives need their matching
 `bundle-set.json` beside them. A bundle-set directory can supply different target
@@ -63,13 +75,24 @@ the signed helper package described below. Supplied upload builds do not change
 the pinned upload selection. A local full update selects that build for future
 local service launches.
 
-The CLI uses the same package verification and installation policy:
+The app checks publication metadata at startup without opening SSH connections,
+downloading archives, or changing services. About and the update dialog show
+published bundles and provide **Check for bundle updates** to refresh the check.
+Network errors remain visible; they never silently turn an update into an older
+cached installation. Choose the offline source explicitly when needed.
+
+The CLI uses the same discovery, package verification and installation policy:
 
 ```sh
 # No host flags means this computer.
 ctl components update
+ctl components check --channel dev --json
+ctl components check --channel stable
 ctl components update --hosts work,jump-a --local --package ctl-agent
 ctl --host work --method vpn components update --package full-bundle
+ctl --host work components update --channel dev
+ctl --host work components update --channel stable
+ctl --host work components update --selected
 ctl --destination my-ssh-alias components update --package full-bundle
 ctl components update --hosts work,jump-a --from /path/to/bundle-set --json
 ctl components update --local --from target/debug --local-build --ctld-package /path/to/ctld-package
@@ -113,14 +136,16 @@ explain unavailable uses, such as a missing signed macOS helper package.
 Choosing an included build verifies and imports that exact content identity
 before selecting it. Changing a selection verifies the complete build and
 atomically updates its profile.
-It preserves running services and sessions. New service launches and explicit
-remote updates use that selection; restart and reconnect remain separate actions.
+It preserves running services and sessions. New local service launches and
+explicit offline remote updates use that selection; ordinary remote updates
+resolve their publication channel. Restart and reconnect remain separate actions.
 
 Selections never change because another build appears in the store or because
-a connection is opened. The first remote Update can import and select a compatible
-packaged or cached bundle when no upload selection exists. Subsequent updates
-keep that selection until an explicit Sync or choice in About. A damaged selection
-reports an error instead of silently choosing another build.
+a connection is opened. An explicit offline update can initialize a missing
+upload selection from an included build. Further offline updates keep that
+selection until an explicit Sync or choice in About. A damaged selection reports
+an error instead of silently choosing another build. Network updates cache their
+resolved publication without changing the upload selection.
 
 Import a downloaded CI/release bundle-set directory explicitly:
 
@@ -142,6 +167,10 @@ verified content before changing the requested selection.
 
 `pnpm bundles:sync` also imports and selects all four CI upload targets in this
 shared store, after copying the verified resources needed to package the desktop.
+It remains an explicit packaging/offline tool; normal development uploads no
+longer require committing, pushing, or synchronizing CI artifacts. Use
+`pnpm bundles:build` to prepare the working tree's Linux x64 bundle locally; see
+[Local Linux bundles](local-bundles.md).
 Use `--source release` when importing a release bundle-set. Schema-2 manifests
 must advertise all four components; legacy schema-1 artifacts cannot become a
 managed complete selection. Existing installations and helper caches are retained.
@@ -176,8 +205,8 @@ For a saved remote host:
 2. Use **Update…** to open the shared updater for this account. ctl
    verifies the saved account before uploading, activates an immutable bundle,
    and verifies that the installed agent reports the selected bundle afterward.
-   A compatible cached development bundle may differ from the desktop's source
-   revision; the result describes the bundle actually installed.
+   The chosen channel or local working tree determines the uploaded build;
+   the result identifies the bundle actually installed.
 3. If **Restart required** appears, choose **Restart** on the terminal daemon.
    ctl prepares the installed replacement and reports the impact before asking
    for confirmation. Restart ends every terminal owned by that remote account,

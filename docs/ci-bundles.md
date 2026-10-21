@@ -4,18 +4,24 @@ The `Desktop, control daemon, and remote-agent bundles` workflow builds remote
 agent bundles and desktop packages for Linux and macOS, on Intel/AMD and ARM64.
 Version tags also build standalone signed macOS `ctld.app` bundles and signed
 macOS `ctl` executables with those complete helper bundles embedded. The workflow
-creates or updates a draft release; it never publishes the release automatically.
-Manually maintained release notes and attachments are preserved, and a published
-release is left unchanged.
+automatically publishes component bundles to GitHub Pages. Version tags also
+publish those bundles in a GitHub Release. Component publication does not wait
+for desktop packaging, Apple signing, or notarization. Successful tagged desktop
+builds append their verified packages to the matching published release.
+Manually maintained release notes and attachments are preserved.
 
 ## Build selection and versions
 
 - A push to `main` builds desktop and remote-agent development bundles. Missing
   Apple credentials allow unsigned macOS desktop development artifacts, with
-  that limitation recorded in the draft notes.
+  that limitation recorded in the draft notes. Verified component bundles advance
+  the Dev channel independently of desktop success.
 - A `v<version>` tag builds desktop, remote-agent, and standalone `ctld` bundles.
   The tag must match the workspace Cargo version, Tauri app version, and frontend
   package version. Both macOS architectures require distribution signing.
+  Component bundles publish first; successful signed desktop/helper builds append
+  their assets later. A prerelease tag publishes a GitHub prerelease and versioned
+  Pages archives without advancing the Stable channel.
 - A manual run builds remote-agent bundles. `build_desktop` defaults to `true`;
   setting it to `false` supports the remote-only workflow used by agent syncing.
   `build_ctld=true` additionally builds standalone signed macOS helpers and
@@ -26,8 +32,105 @@ Draft releases on `main` may omit standalone helpers. Any build that uploads
 helpers must include both architectures, with matching version, source revision,
 and Apple Team ID. Version builds always require both helpers, both bundled CLI
 architectures, and signed macOS
-desktop packages. Publishing that draft makes the helper available to
-`ctl setup` for that exact CLI version.
+desktop packages before appending desktop assets. The independently published
+component release can exist while those packages are still building or failed.
+Adding successful signed helper assets makes them available to `ctl setup` for
+that exact CLI version.
+
+## Component channels and GitHub Pages
+
+The public component source is
+[`https://tokn-ai.dev/ctl/bundles/`](https://tokn-ai.dev/ctl/bundles/).
+It contains the actual archives and checksum sidecars, alongside their existing
+schema 2 bundle sets. A catalog alone is insufficient for installation.
+
+Applications discover channels through:
+
+```text
+https://tokn-ai.dev/ctl/bundles/channels/dev.json
+https://tokn-ai.dev/ctl/bundles/channels/stable.json
+```
+
+Each channel document uses schema 1:
+
+```json
+{
+  "schema_version": 1,
+  "channel": "dev",
+  "bundle_set_url": "https://tokn-ai.dev/ctl/bundles/sets/0.1.1-dev.0123456789ab-12345678-1/bundle-set.json"
+}
+```
+
+Stable uses `"channel": "stable"`. The referenced immutable directory contains
+`bundle-set.json` and all four target archives and their `.sha256` sidecars.
+Archive names remain bare sibling filenames in the bundle set. Its existing
+checksums, archived manifests, component metadata, and protocol compatibility
+validation remain authoritative; channel discovery adds no parallel hash format.
+
+Dev tracks the newest **successfully published** main build. A later main commit
+that fails to build does not prevent an earlier successful build from publishing.
+Run number and attempt fences prevent a delayed older run from replacing a newer
+successful publication. Stable advances by semantic release version; a lower
+release tag or any prerelease cannot move it backward. Prerelease archives remain
+available through their retained versioned Pages directory and GitHub prerelease.
+
+Builds explicitly set `CTL_BUNDLE_CHANNEL`: `dev` on main and prerelease tags,
+`stable` on ordinary version tags. Channel choice does not depend on whether Cargo
+uses a debug or release profile. Publication IDs append the Actions run ID and
+attempt to the bundle ID, so reruns never overwrite an existing directory.
+
+The Pages job serializes publication across main and tags with a queued concurrency
+group. It restores the complete last successful site, verifies retained component
+sets, stages every new archive, then writes channel pointers and uploads one full
+Pages artifact. Both channels are included in every replacement. A separate
+90-day Actions snapshot records the full site. Restoration requires the exact
+attempt's successful Pages deployment step, even if a later desktop job failed or
+the overall workflow is still running. Failed deployment candidates are ignored.
+After snapshot expiry, restoration downloads and verifies the managed published
+HTTPS catalog and archives. Network errors, corrupt state, and an existing
+unmanaged site abort publication rather than initialize an empty replacement.
+
+Pages retains five Dev publications, the current Stable publication, and the
+newest other tagged publication. Older Dev directories are removed only when a
+complete replacement site is staged; several generations remain available for
+downloads using a recently cached channel document. Historical tagged archives
+remain in GitHub Releases. A 900 MiB staged-site limit leaves room below the Pages
+site limit; exceeding it fails without changing the deployed site.
+
+Version publication validates all component archives before creating or updating
+a release. Existing main-draft development packages are removed before the tag
+release becomes public. Published assets are immutable: retries compare GitHub's
+asset SHA-256 digest and size, and mismatching bytes or manual-name collisions
+fail. Desktop appending revalidates the complete signed package/helper set and
+the published component manifest; it cannot replace another build's assets.
+Tag reruns download and verify the first published component set as canonical,
+then reuse it for Pages and desktop resources. A complete published desktop set
+is likewise reused on rerun, accommodating timestamp/signing differences without
+replacing published files. An interrupted, incomplete desktop upload with
+conflicting rebuilt bytes fails explicitly instead of mixing package generations;
+resume it with the original run's artifacts.
+
+### Initial repository setup
+
+In repository **Settings → Pages → Build and deployment**, select **GitHub
+Actions** as the source. Allow main and version tags in the `github-pages`
+environment's deployment rules. The workflow needs its declared `pages: write`,
+`id-token: write`, Actions/deployment read access, and release `contents: write`
+permissions. It does not create Pages settings or enable another publishing
+source automatically. The fixed HTTPS `tokn-ai.dev/ctl` URL uses the organization's
+existing GitHub Pages domain. Other domains or unrelated existing content must be
+reconciled explicitly first. Initial deployment permits current in-progress jobs
+and earlier failed jobs when no site exists; any prior successful deployment
+without its managed catalog stops publication rather than resetting the site.
+Appending desktop assets requires GitHub release immutability to remain disabled
+for these releases. If immutable releases are enabled, component publication still
+succeeds but GitHub prohibits later desktop attachments; the publisher reports
+that policy without changing it.
+
+Repository tests use fake GitHub/fetch operations and real verified tar archives.
+They cover complete-site restoration, both channels, stale runs, prereleases,
+retention, corruption, failed uploads/deployments, and append-only desktop assets.
+Running these tests does not deploy Pages, change settings, or publish a release.
 
 Remote bundle schema 2 captures `--component-info` from each packaged executable,
 including explicit published protocol support and companion client contracts.

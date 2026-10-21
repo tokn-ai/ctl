@@ -11,7 +11,7 @@ import { parseHelperProtocols, sameProtocols, type ProtocolInfo } from "../share
 import { maxAgentManifestBytes, parseAgentBundleSet, readAgentFile, verifyAgentBundleTarget } from "../shared/agent-bundle.mts";
 
 const execFileAsync = promisify(execFile);
-const managedLabelPrefix = "ctmux-ci: ";
+export const managedLabelPrefix = "ctmux-ci: ";
 const notesStart = "<!-- ctmux-ci:start -->";
 const notesEnd = "<!-- ctmux-ci:end -->";
 const desktopTargets = [
@@ -312,6 +312,10 @@ export function releaseNotes(bundle: ReleaseBundle, previous: string | null): st
   }
   lines.push(notesEnd);
   const section = lines.join("\n");
+  return mergeReleaseNotes(section, previous);
+}
+
+export function mergeReleaseNotes(section: string, previous: string | null): string {
   const body = previous ?? "";
   const start = body.indexOf(notesStart);
   const end = body.indexOf(notesEnd);
@@ -328,7 +332,7 @@ export function releaseNotes(bundle: ReleaseBundle, previous: string | null): st
   return body.slice(0, start) + section + body.slice(end + notesEnd.length);
 }
 
-async function pages<T>(gh: GhRunner, endpoint: string): Promise<T[]> {
+export async function pages<T>(gh: GhRunner, endpoint: string): Promise<T[]> {
   const result: unknown = JSON.parse(await gh(["api", endpoint, "--paginate", "--slurp"]));
   if (!Array.isArray(result) || !result.every(Array.isArray)) {
     throw new Error(`Unexpected paginated GitHub response: ${endpoint}`);
@@ -336,7 +340,7 @@ async function pages<T>(gh: GhRunner, endpoint: string): Promise<T[]> {
   return result.flat() as T[];
 }
 
-async function findRelease(gh: GhRunner, repository: string, tag: string): Promise<Release | undefined> {
+export async function findRelease(gh: GhRunner, repository: string, tag: string): Promise<Release | undefined> {
   const releases = await pages<Release>(gh, `repos/${repository}/releases?per_page=100`);
   const matches = releases.filter((release) => release.tag_name === tag);
   if (matches.length > 1) {
@@ -346,7 +350,7 @@ async function findRelease(gh: GhRunner, repository: string, tag: string): Promi
 }
 
 /** An existing tag takes precedence over target_commitish, even on a draft. */
-async function verifyReleaseTag(gh: GhRunner, repository: string, tag: string, git_revision: string): Promise<void> {
+export async function verifyReleaseTag(gh: GhRunner, repository: string, tag: string, git_revision: string, required = false): Promise<void> {
   const refs: unknown = JSON.parse(await gh([
     "api", `repos/${repository}/git/matching-refs/tags/${encodeURIComponent(tag)}`,
   ]));
@@ -355,6 +359,7 @@ async function verifyReleaseTag(gh: GhRunner, repository: string, tag: string, g
   }
   const matches = refs.filter((ref) => record(ref) && ref.ref === `refs/tags/${tag}`);
   if (matches.length === 0) {
+    if (required) throw new Error(`Release tag ${tag} does not exist`);
     return;
   }
   if (matches.length !== 1) {

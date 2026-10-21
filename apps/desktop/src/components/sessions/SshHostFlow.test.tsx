@@ -57,6 +57,7 @@ function remoteVpnRecoveryFixture() {
 }
 
 vi.mock("../../lib/tauri", () => ({
+  checkComponentUpdates: vi.fn(async () => ({ default_channel: "dev", local_development: false, catalog: null, error: null })),
   probeSshHost: vi.fn(),
   cancelSshProbe: vi.fn(async () => undefined),
   respondSshPrompt: vi.fn(async () => undefined),
@@ -142,7 +143,7 @@ describe("SSH host quick-input flow", () => {
     expect((screen.getByRole("checkbox", { name: "example" }) as HTMLInputElement).checked).toBe(true);
     await user.click(screen.getByRole("button", { name: "Update" }));
     await waitFor(() => expect(complete).toHaveBeenCalledExactlyOnceWith(true));
-    expect(updateComponents).toHaveBeenCalledWith(expect.objectContaining({ targets: [target], options: { package: "full_bundle", source: { kind: "selected" } } }), expect.any(Function), expect.any(Function));
+    expect(updateComponents).toHaveBeenCalledWith(expect.objectContaining({ targets: [target], options: { package: "full_bundle", source: { kind: "automatic" } } }), expect.any(Function), expect.any(Function));
     expect(probeSshHost).not.toHaveBeenCalled();
     expect(connected).not.toHaveBeenCalled();
     expect(verified).not.toHaveBeenCalled();

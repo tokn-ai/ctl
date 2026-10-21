@@ -20,6 +20,7 @@
     "daemons:build": "cargo build --locked -p ctld -p ctmuxd -p ctl-taskd",
     "bundles:check": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/dev/sync-agent-bundles.mts --check",
     "bundles:sync": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/dev/sync-agent-bundles.mts",
+    "bundles:build": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/dev/build-agent-bundle.mts",
     "scripts:check": "tsc -p tsconfig.scripts.json",
     "scripts:test": "node --experimental-strip-types --disable-warning=ExperimentalWarning --test scripts/dev/*.test.mts scripts/ci/*.test.mts",
     "scripts:test:dev": "node --experimental-strip-types --disable-warning=ExperimentalWarning --test scripts/dev/*.test.mts",

@@ -10,6 +10,7 @@ import { ConnectHostFlow } from "./ConnectHostFlow";
 
 vi.mock("../../lib/tauri", async (original) => ({
   ...(await original<object>()),
+  checkComponentUpdates: vi.fn(async () => ({ default_channel: "dev", local_development: false, catalog: null, error: null })),
   probeSshHost: vi.fn(),
   cancelSshProbe: vi.fn(),
   respondSshPrompt: vi.fn(),
@@ -180,7 +181,7 @@ describe("connection method selection", () => {
     await user.click(screen.getByRole("option", { name: /Update remote components/ }));
     await installAndReconnect(user);
     await waitFor(() => expect(onClose).toHaveBeenCalledOnce());
-    expect(updateComponents).toHaveBeenCalledExactlyOnceWith({ targets: [running], attempt_id: expect.any(String), options: { package: "full_bundle", source: { kind: "selected" } } }, expect.any(Function), expect.any(Function));
+    expect(updateComponents).toHaveBeenCalledExactlyOnceWith({ targets: [running], attempt_id: expect.any(String), options: { package: "full_bundle", source: { kind: "automatic" } } }, expect.any(Function), expect.any(Function));
     expect(probeSshHost).toHaveBeenCalledExactlyOnceWith(running, expect.any(String), expect.any(Function));
   });
   it("offers an explicit component update for a protocol mismatch, then verifies the same route", async () => {
@@ -194,7 +195,7 @@ describe("connection method selection", () => {
     await user.click(screen.getByRole("option", { name: /Update remote components/ }));
     await installAndReconnect(user);
     await waitFor(() => expect(onClose).toHaveBeenCalledOnce());
-    expect(updateComponents).toHaveBeenCalledExactlyOnceWith({ targets: [target], attempt_id: expect.any(String), options: { package: "full_bundle", source: { kind: "selected" } } }, expect.any(Function), expect.any(Function));
+    expect(updateComponents).toHaveBeenCalledExactlyOnceWith({ targets: [target], attempt_id: expect.any(String), options: { package: "full_bundle", source: { kind: "automatic" } } }, expect.any(Function), expect.any(Function));
     expect(vi.mocked(probeSshHost).mock.calls.map(([candidate]) => candidate)).toEqual([target, target]);
     expect(onConnected).toHaveBeenCalledExactlyOnceWith(target);
   });

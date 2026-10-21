@@ -55,7 +55,25 @@ async fn install_bundle(
     .map_err(|error| CommandErrorDto::new("remote_platform_probe_failed", error.to_string()))?;
   let platform = parse_platform(&platform)?;
   let target_triple = platform.target_triple().map_err(bundle_error)?;
-  updates.send_modify(|progress| progress.phase = Phase::VerifyingBundle);
+  updates.send_modify(|progress| {
+    progress.phase = Phase::PreparingBundle;
+    progress.file_name = Some(
+      match &update.source {
+        ctl_core::component_update::BuildSource::Automatic
+          if target_triple == "x86_64-unknown-linux-musl"
+            && ctl_client::component_update::working_tree_available() =>
+        {
+          "Building Linux x64 components from this working tree"
+        }
+        ctl_core::component_update::BuildSource::Automatic
+        | ctl_core::component_update::BuildSource::Published { .. } => {
+          "Preparing published component bundles"
+        }
+        _ => "Verifying the requested component build",
+      }
+      .into(),
+    );
+  });
   let home = dirs::home_dir().ok_or_else(bundle_unavailable)?;
   let bundle = ctl_client::component_update::prepare(
     &home,

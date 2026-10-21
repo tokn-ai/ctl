@@ -1,7 +1,25 @@
 export type Sequence = string;
 
 export type ComponentUpdatePackage = "ctl_agent" | "full_bundle";
-export type ComponentUpdateSource = { kind: "selected" } | {
+export type BundleChannel = "dev" | "stable";
+export interface PublishedBundleCatalog {
+  channel: BundleChannel;
+  bundle_id: string;
+  app_version: string;
+  git_revision: string;
+  targets: {
+    target_triple: string;
+    compatible: boolean;
+    components: Record<string, { build: { version: string; source_revision: string | null; source_fingerprint: string; dirty: boolean }; protocols: ComponentProtocolVersion[] }>;
+  }[];
+}
+export interface ComponentUpdateCatalog {
+  default_channel: BundleChannel;
+  local_development: boolean;
+  catalog: PublishedBundleCatalog | null;
+  error: string | null;
+}
+export type ComponentUpdateSource = { kind: "automatic" } | { kind: "published"; channel: BundleChannel } | { kind: "selected" } | {
   kind: "provided";
   path: string;
   local_build: boolean;
@@ -680,6 +698,7 @@ export interface RemoteAgentInstallResult {
 export interface RemoteAgentInstallProgress {
   phase:
     | "detecting_platform"
+    | "preparing_bundle"
     | "verifying_bundle"
     | "connecting"
     | "transferring"

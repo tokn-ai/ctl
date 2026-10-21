@@ -29,6 +29,9 @@ fn validate_local_command_target(arguments: &Arguments) -> Result<(), CliError> 
     Command::Components {
       command: crate::components::Command::Update { .. },
     } => return Ok(()),
+    Command::Components {
+      command: crate::components::Command::Check { .. },
+    } => CliError::ComponentsTarget,
     #[cfg(unix)]
     Command::Components { .. } => CliError::ComponentsTarget,
     Command::Setup(_) => CliError::SetupTarget,
@@ -608,9 +611,8 @@ pub enum CliError {
   HistoryTarget,
   #[error("Could not read local history: {0}")]
   History(std::io::Error),
-  #[cfg(unix)]
   #[error(
-    "Components manage the local bundle store; omit --host, --destination, --method, and --remote-platform."
+    "Component catalog and bundle-store commands do not accept --host, --destination, --method, or --remote-platform."
   )]
   ComponentsTarget,
   #[error("Component maintenance failed: {0}")]
@@ -711,6 +713,7 @@ mod tests {
           local_build,
           ctld_package,
           json,
+          ..
         },
     } = arguments.command
     else {
@@ -728,6 +731,74 @@ mod tests {
       vec!["--package", "ctmuxd"],
       vec!["--local-build"],
       vec!["--from", "build", "--ctld-package", "package"],
+    ] {
+      assert!(
+        Arguments::try_parse_from([vec!["ctl", "components", "update"], flags].concat()).is_err()
+      );
+    }
+  }
+
+  #[test]
+  fn component_channel_checks_are_portable_and_reject_remote_targets() {
+    use clap::Parser;
+    for channel in ["dev", "stable"] {
+      let check =
+        Arguments::try_parse_from(["ctl", "components", "check", "--channel", channel, "--json"])
+          .unwrap();
+      assert!(validate_arguments(&check).is_ok());
+      assert!(matches!(
+        check.command,
+        Command::Components {
+          command: crate::components::Command::Check {
+            channel: Some(_),
+            json: true
+          }
+        }
+      ));
+    }
+    assert!(
+      Arguments::try_parse_from(["ctl", "components", "check", "--channel", "latest"]).is_err()
+    );
+    for flags in [
+      &["--host", "server"][..],
+      &["--destination", "server"][..],
+      &["--method", "route"][..],
+      &["--remote-platform", "windows"][..],
+    ] {
+      let check = Arguments::try_parse_from(
+        [vec!["ctl"], flags.to_vec(), vec!["components", "check"]].concat(),
+      )
+      .unwrap();
+      assert!(matches!(
+        validate_arguments(&check),
+        Err(CliError::ComponentsTarget)
+      ));
+    }
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn component_update_sources_are_explicit_and_conflict_checked() {
+    use clap::Parser;
+    for channel in ["dev", "stable"] {
+      let update =
+        Arguments::try_parse_from(["ctl", "components", "update", "--channel", channel]).unwrap();
+      assert!(matches!(
+        update.command,
+        Command::Components {
+          command: crate::components::Command::Update {
+            channel: Some(_),
+            selected: false,
+            ..
+          }
+        }
+      ));
+    }
+    for flags in [
+      vec!["--channel", "dev", "--selected"],
+      vec!["--channel", "stable", "--from", "build"],
+      vec!["--selected", "--from", "build"],
+      vec!["--channel", "latest"],
     ] {
       assert!(
         Arguments::try_parse_from([vec!["ctl", "components", "update"], flags].concat()).is_err()

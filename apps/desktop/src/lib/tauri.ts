@@ -15,6 +15,8 @@ import type {
   ComponentUpdateRequest,
   ComponentUpdateProgress,
   ComponentUpdateHostResult,
+  ComponentUpdateCatalog,
+  BundleChannel,
   SshConnectionTarget,
   KillSessionRequest,
   OpenAttachmentRequest,
@@ -86,6 +88,10 @@ export async function getComponentVersions(host_id?: string): Promise<ComponentV
 
 export async function getComponentBundles(): Promise<ComponentBundlesSnapshot> {
   return invoke("get_component_bundles");
+}
+
+export async function checkComponentUpdates(channel?: BundleChannel, refresh = false): Promise<ComponentUpdateCatalog> {
+  return invoke("check_component_updates", { request: { channel: channel ?? null, refresh } });
 }
 
 export async function selectComponentBundle(

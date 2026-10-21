@@ -226,12 +226,23 @@ async fn update_host(
   let platform =
     ctl_client::remote_bundle::Platform::parse_probe(&output).map_err(io::Error::other)?;
   let target_triple = platform.target_triple().map_err(io::Error::other)?;
-  if matches!(source, BuildSource::Selected) {
-    crate::remote::ensure_update_source(target_triple).await?;
-  }
-  let bundle =
-    ctl_client::component_update::prepare(home, target_triple, Purpose::Upload, source, &[])
-      .await?;
+  let bundle = ctl_client::component_update::prepare(
+    home,
+    target_triple,
+    Purpose::Upload,
+    source,
+    &crate::remote::update_bundle_directories()?,
+  )
+  .await?;
+  eprintln!(
+    "ctl: Source bundle {} · revision {}",
+    bundle.manifest.bundle_id,
+    bundle.manifest.components["ctl-agent"]
+      .build
+      .source_revision
+      .as_deref()
+      .unwrap_or("unknown")
+  );
   let result =
     install_with_progress(&destination, &options, &interaction, &bundle, package).await?;
   if matches!(

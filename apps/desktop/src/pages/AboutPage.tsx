@@ -5,6 +5,7 @@ import { ComponentVersionTable, versionLabel } from "../components/about/Compone
 import { QuickInput } from "../components/commands/QuickInput";
 import { Icon } from "../components/ui/Icon";
 import { UpdateComponentsDialog } from "../components/components/UpdateComponentsDialog";
+import { PublishedBundleStatus } from "../components/components/PublishedBundleStatus";
 import { SshHostFlow } from "../components/sessions/SshHostFlow";
 import { useComponentVersions } from "../features/about/useComponentVersions";
 import type { ComponentActionPreflight, ComponentActionResult, ComponentUpdateContext, ConnectionTarget } from "../lib/types";
@@ -52,6 +53,7 @@ export function AboutPage({ visible, on_close, on_restarted, on_dialog_change, e
         {model.notice ? <p className="about-notice" role="status">{model.notice}</p> : null}
         {component_notice ? <p className="about-notice" role="status">{component_notice}</p> : null}
         {model.loading && !model.snapshot ? <p role="status">Checking local components and saved hosts…</p> : null}
+        <PublishedBundleStatus visible={visible} on_update={(channel) => setUpdateContext({ source: { kind: "published", channel } })} />
         <ComponentBundlePanel visible={visible} on_selected={() => void model.refresh()} />
         <section className="about-section" aria-labelledby="about-local"><h2 id="about-local">Local components</h2><p className="about-muted">On disk shows the selected local build. Restart separately to apply it to a running service.</p>{local.length ? <ComponentVersionTable rows={local} {...table_props} /> : !model.loading ? <p className="about-muted">Local component versions are unavailable.</p> : null}</section>
         <section className="about-section" aria-labelledby="about-remote"><h2 id="about-remote">Remote hosts</h2><p className="about-muted">Expand a host to compare its components. Check host authenticates through its preferred route. Updating installs verified components and keeps sessions; restart separately after confirmation.</p>{remote.length ? <ComponentVersionTable rows={remote} {...table_props} on_manage_host={(host_id, mode) => {

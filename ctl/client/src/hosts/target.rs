@@ -114,11 +114,19 @@ impl ConnectionTargetDto {
     &self,
     identity: &ctl_proto::RemoteIdentity,
   ) -> Result<(), HostError> {
+    self.verify_remote_id(&identity.remote_id)
+  }
+
+  /// Confirm a validated account ID without requiring agent build metadata.
+  ///
+  /// # Errors
+  /// Returns an error if the account differs from the saved identity.
+  pub fn verify_remote_id(&self, remote_id: &str) -> Result<(), HostError> {
     if let Self::Ssh {
       remote_info: Some(expected),
       ..
     } = self
-      && expected.remote_id != identity.remote_id
+      && expected.remote_id != remote_id
     {
       return Err(HostError::new(
         "remote_identity_mismatch",

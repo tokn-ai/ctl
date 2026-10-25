@@ -44,7 +44,7 @@ where
 {
   verify_then_upload(
     target,
-    || ctl_client::maintenance::inspect_agent(destination, options, control_path),
+    || ctl_client::maintenance::inspect_remote_id(destination, options, control_path),
     operation,
   )
   .await
@@ -52,11 +52,11 @@ where
 
 async fn verify_then_upload<T, I, F, U>(
   target: &ConnectionTargetDto,
-  inspect: impl FnOnce() -> I,
+  read_remote_id: impl FnOnce() -> I,
   upload: F,
 ) -> CommandResult<T>
 where
-  I: Future<Output = Result<ctl_proto::RemoteIdentity, CoreError>>,
+  I: Future<Output = Result<String, CoreError>>,
   F: FnOnce() -> U,
   U: Future<Output = CommandResult<T>>,
 {
@@ -67,15 +67,15 @@ where
       ..
     }
   ) {
-    let identity = inspect().await.map_err(|error| {
+    let remote_id = read_remote_id().await.map_err(|error| {
       CommandErrorDto::new(
         "remote_update_identity_verification_failed",
         format!(
-          "Could not verify this SSH host's saved remote identity before updating its components. No components were uploaded. Reconnect and verify the host before updating it: {error}"
+          "Could not verify this SSH account before updating its components. No components were uploaded. Reconnect to the expected account and check that its saved ctl identity is present and readable: {error}"
         ),
       )
     })?;
-    target.verify_remote_identity(&identity)?;
+    target.verify_remote_id(&remote_id)?;
   }
   upload().await
 }
@@ -148,14 +148,14 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn matching_passive_identity_is_verified_before_any_upload() {
+  async fn matching_account_id_is_verified_before_any_upload() {
     let inspected = Cell::new(false);
     let uploaded = Cell::new(false);
     let result = verify_then_upload(
       &pinned_target(),
       || {
         inspected.set(true);
-        ready(Ok(identity("11111111-1111-4111-8111-111111111111")))
+        ready(Ok("11111111-1111-4111-8111-111111111111".into()))
       },
       || {
         assert!(inspected.get());
@@ -173,7 +173,7 @@ mod tests {
   async fn changed_remote_identity_blocks_upload_with_the_existing_mismatch_code() {
     let error = verify_then_upload(
       &pinned_target(),
-      || ready(Ok(identity("22222222-2222-4222-8222-222222222222"))),
+      || ready(Ok("22222222-2222-4222-8222-222222222222".into())),
       || -> std::future::Ready<CommandResult<()>> {
         panic!("a mismatched SSH account must never receive component bytes")
       },
@@ -184,11 +184,11 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn unsupported_or_failed_passive_inspection_blocks_upload_without_a_service_fallback() {
+  async fn missing_invalid_or_failed_account_reads_block_upload_without_a_service_fallback() {
     for inspection in [
       CoreError::SshCommandFailed {
-        status: "exit status: 2".into(),
-        diagnostic: "error: unrecognized subcommand 'inspect'".into(),
+        status: "exit status: 1".into(),
+        diagnostic: "The saved ctl account identity is missing or unreadable.".into(),
       },
       CoreError::InvalidSshCommandOutput,
       CoreError::SshCommandFailed {
@@ -214,7 +214,7 @@ mod tests {
   async fn new_unpinned_host_installations_do_not_require_an_existing_agent() {
     let installed = verify_then_upload(
       &ConnectionTargetDto::ssh("new-host"),
-      || -> std::future::Ready<Result<ctl_proto::RemoteIdentity, CoreError>> {
+      || -> std::future::Ready<Result<String, CoreError>> {
         panic!("an unpinned new host must not need an installed agent")
       },
       || ready(Ok("installed")),

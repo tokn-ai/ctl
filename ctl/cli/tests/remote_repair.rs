@@ -15,6 +15,9 @@ use sha2::{Digest as _, Sha256};
 const PROMPT: &str = "Install compatible remote components";
 const EXPECTED_ID: &str = "fa5f874a-bd3c-4a41-9d8f-d584bd9c9a14";
 
+#[path = "remote_repair/components_update.rs"]
+mod components_update;
+
 fn frame(value: &serde_json::Value) -> Vec<u8> {
   let payload = serde_json::to_vec(value).unwrap();
   let mut bytes = u32::try_from(payload.len()).unwrap().to_be_bytes().to_vec();
@@ -85,6 +88,14 @@ export CTL_TEST_CALL_INDEX="$count"
 last=''
 for argument do last=$argument; done
 case "$last" in
+  *remote-id*)
+    touch "$CTL_TEST_DIR/account-id"
+    exec /bin/sh -c "$last"
+    ;;
+  *'exec ctl-agent inspect')
+    touch "$CTL_TEST_DIR/inspect"
+    exec /bin/sh -c "$last"
+    ;;
   --identity)
     if [ -x "$HOME/.tokn/ctl/current/ctl-agent" ]; then
       exec "$HOME/.tokn/ctl/current/ctl-agent" --identity
@@ -212,7 +223,9 @@ esac
     fs::write(
       payload.join("ctl-agent"),
       format!(
-        "#!/bin/sh\nset -eu\ncat \"$CTL_TEST_DIR/upgraded-transport\"\n\
+        "#!/bin/sh\nset -eu\n\
+         if [ \"$1\" = inspect ]; then exec cat \"$CTL_TEST_DIR/upgraded-identity\"; fi\n\
+         cat \"$CTL_TEST_DIR/upgraded-transport\"\n\
          dd bs=1 count={requests} of=\"$CTL_TEST_DIR/service-input-$CTL_TEST_CALL_INDEX\" 2>/dev/null\n\
          cat \"$CTL_TEST_DIR/session-list\"\nexec cat > /dev/null\n"
       ),
@@ -296,7 +309,7 @@ esac
     transport.extend(frame(
       &serde_json::to_value(ctl_proto::identity_protocol_offer()).unwrap(),
     ));
-    transport.extend(frame(&json!({
+    let identity = json!({
       "remote_id": EXPECTED_ID,
       "protocols": ctl_proto::agent_protocols(),
       "agent_version": build.version,
@@ -308,7 +321,13 @@ esac
         "git_revision": build.source_revision,
         "target_triple": target,
       },
-    })));
+    });
+    fs::write(
+      self.0.join("upgraded-identity"),
+      serde_json::to_vec(&identity).unwrap(),
+    )
+    .unwrap();
+    transport.extend(frame(&identity));
     transport.extend(frame(&json!({
       "type": "handshake_accepted", "protocol_version": ctmux_proto::PROTOCOL_VERSION,
       "protocols": [ctmux_proto::protocol_info()],
@@ -338,6 +357,10 @@ esac
   }
 
   fn broker(&self) -> tokio::task::JoinHandle<ctl_ipc::SshTarget> {
+    self.broker_with_observation(true)
+  }
+
+  fn broker_with_observation(&self, observe: bool) -> tokio::task::JoinHandle<ctl_ipc::SshTarget> {
     let listener = tokio::net::UnixListener::bind(self.0.join("ctld.sock")).unwrap();
     let master = self.0.join("master");
     tokio::spawn(async move {
@@ -356,20 +379,27 @@ esac
         )
         .await
         .unwrap();
-        let Some(ClientMessage::MasterStatus { target }) =
+        let observed = if observe {
+          let Some(ClientMessage::MasterStatus { target }) =
+            ctl_ipc::read_frame(&mut stream).await.unwrap()
+          else {
+            panic!("expected a passive managed master observation");
+          };
+          ctl_ipc::write_frame(&mut stream, &ServerMessage::AuthenticationRequired)
+            .await
+            .unwrap();
+          Some(target)
+        } else {
+          None
+        };
+        let Some(ClientMessage::EnsureMaster { target }) =
           ctl_ipc::read_frame(&mut stream).await.unwrap()
         else {
-          panic!("expected a passive managed master observation");
+          panic!("expected one managed master request");
         };
-        ctl_ipc::write_frame(&mut stream, &ServerMessage::AuthenticationRequired)
-          .await
-          .unwrap();
-        let Some(ClientMessage::EnsureMaster { target: requested }) =
-          ctl_ipc::read_frame(&mut stream).await.unwrap()
-        else {
-          panic!("expected one managed master request after observation");
-        };
-        assert_eq!(requested, target);
+        if let Some(observed) = observed {
+          assert_eq!(target, observed);
+        }
         ctl_ipc::write_frame(
           &mut stream,
           &ServerMessage::MasterReady {
@@ -395,15 +425,19 @@ esac
   }
 
   fn assert_managed_route(&self, count: usize) {
-    assert_eq!(
-      fs::read_to_string(self.0.join("count")).unwrap().trim(),
-      count.to_string()
-    );
     let first = self.arguments(1);
     assert_eq!(
       first,
       self.arguments(2),
       "legacy inspection must reuse the original route and fixed service command"
+    );
+    self.assert_managed_channels(count);
+  }
+
+  fn assert_managed_channels(&self, count: usize) {
+    assert_eq!(
+      fs::read_to_string(self.0.join("count")).unwrap().trim(),
+      count.to_string()
     );
     for index in 1..=count {
       let arguments = self.arguments(index);

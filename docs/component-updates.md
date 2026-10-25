@@ -117,6 +117,13 @@ installations live under `~/.tokn/ctl/components/agents/<target>/`, record their
 complete source in `agent-source.json`, and link retained daemons to their
 previous immutable locations. They do not claim to contain the complete bundle.
 
+Before uploading to a saved host, the app and CLI read its existing account ID
+from `~/.tokn/ctl/remote-id` over the authenticated SSH connection and compare it
+with the saved identity. This check works with agents too old to support
+`ctl-agent inspect` and does not start services or create an identity. A missing,
+invalid, or mismatched ID stops the update before upload. After installation,
+the new agent reports its identity and build to verify activation.
+
 ```
 ~/.tokn/ctl/components/
   bundles/<target>/<content-id>/bundle.json

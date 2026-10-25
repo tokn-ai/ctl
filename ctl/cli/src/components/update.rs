@@ -206,11 +206,12 @@ async fn update_host(
       ..
     }
   ) {
-    let identity = ctl_client::maintenance::inspect_agent(&destination, &options, &control_path)
-      .await
-      .map_err(io::Error::other)?;
+    let remote_id =
+      ctl_client::maintenance::inspect_remote_id(&destination, &options, &control_path)
+        .await
+        .map_err(io::Error::other)?;
     target
-      .verify_remote_identity(&identity)
+      .verify_remote_id(&remote_id)
       .map_err(io::Error::other)?;
   }
   let interaction = ctl_client::SshInteraction::Multiplexed {

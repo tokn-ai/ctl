@@ -9,6 +9,9 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
 use crate::{CoreError, RemotePlatform, SSH_PROGRAM, SshConnectionOptions, SshInteraction};
 
+mod identity;
+pub use identity::inspect_remote_id;
+
 const PREPARE_COMMAND: &str = concat!(
   r#"printf 'ctl-maintenance-v1\n'; "#,
   r#"PATH="$HOME/.tokn/ctl/current:$PATH"; export PATH; "#,

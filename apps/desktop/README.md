@@ -504,6 +504,9 @@ terminal shortcuts are:
 - next tab: `Cmd/Ctrl-Shift-]`
 - previous tab: `Cmd/Ctrl-Shift-[`
 
+New tabs open immediately after the session where the command was invoked,
+including when task tabs follow it. This order is saved with the workspace.
+
 The close shortcut opens a quick-input confirmation with **Cancel** focused.
 Press the close shortcut again (`Cmd-E` on macOS, `Ctrl-Shift-E` on Windows/Linux)
 or choose **Terminate session** to terminate the session named in the prompt.

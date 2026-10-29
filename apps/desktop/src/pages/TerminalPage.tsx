@@ -93,7 +93,6 @@ import { useSessionLayouts } from "../features/sessions/useSessionLayouts";
 import { XtermRenderer } from "../features/terminal/XtermRenderer";
 import {
   closeTerminalTab,
-  openTerminalTab,
   reconcileTerminalTabs,
 } from "../features/tabs/tabState";
 import {
@@ -655,7 +654,7 @@ function TerminalWorkbench() {
   }
 
   const activateTab = useCallback(
-    async (requestedSession: SessionSummary, resizeWithWindow = false) => {
+    async (requestedSession: SessionSummary, resizeWithWindow = false, after_tab_key?: string) => {
       const isCurrent = captureDaemonOperation(requestedSession.target);
       if (daemonRestartBlocksInteractions()) {
         return;
@@ -681,11 +680,9 @@ function TerminalWorkbench() {
       const session =
         sessionsRef.current.find((known) => sessionKey(known) === identity) ??
         requestedSession;
-      const nextTabs = openTerminalTab(tabsRef.current, session);
-      tabsRef.current = nextTabs;
+      if (!workspace.openSessionTab(session, after_tab_key)) return;
+      tabsRef.current = workspace.viewRef.current.tabs;
       activeTabKeyRef.current = identity;
-      setTabs(nextTabs);
-      setActiveTabKey(identity);
 
       if (
         sameSession(attachment.state.session, session) &&
@@ -723,7 +720,7 @@ function TerminalWorkbench() {
         resize_with_window: resizeWithWindow,
       });
     },
-    [captureDaemonOperation, attachment, daemonRestartBlocksInteractions, renderer, hostConnections.isPaused],
+    [captureDaemonOperation, attachment, daemonRestartBlocksInteractions, renderer, hostConnections.isPaused, workspace.openSessionTab, workspace.viewRef],
   );
 
   const recoverHost = async (
@@ -982,6 +979,7 @@ function TerminalWorkbench() {
     async (
       target: ConnectionTarget,
       workingDirectory: string | null,
+      after_tab_key?: string,
     ): Promise<void> => {
       if (
         !workspace.ready ||
@@ -1023,7 +1021,7 @@ function TerminalWorkbench() {
           return;
         }
         try {
-          await activateTab(session, true);
+          await activateTab(session, true, after_tab_key);
         } catch (failure) {
           // Creation already succeeded: close the input flow rather than offer
           // a retry that would create a second persistent shell.
@@ -1555,7 +1553,7 @@ function TerminalWorkbench() {
       },
       openShellTab: () => {
         if (currentWorkingDirectory && activeTab) {
-          void create(activeTab.target, currentWorkingDirectory).catch(
+          void create(activeTab.target, currentWorkingDirectory, sessionKey(activeTab)).catch(
             (failure) => setListError(errorMessage(failure)),
           );
         }

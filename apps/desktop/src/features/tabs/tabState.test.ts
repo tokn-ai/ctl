@@ -25,6 +25,34 @@ function session(id: string): SessionSummary {
 }
 
 describe("terminal tab state", () => {
+  it("inserts a new session after its source without mutating the existing tabs", () => {
+    const tabs = [session("first"), session("second"), session("third")];
+    const created = session("created");
+
+    expect(openTerminalTab(tabs, created, sessionKey(tabs[1]))).toEqual([
+      tabs[0], tabs[1], created, tabs[2],
+    ]);
+    expect(tabs.map((tab) => tab.session_id)).toEqual(["first", "second", "third"]);
+  });
+
+  it("appends when the source tab was closed or no insertion anchor was supplied", () => {
+    const tabs = [session("first"), session("second")];
+    const created = session("created");
+
+    expect(openTerminalTab(tabs, created, sessionKey(session("closed")))).toEqual([...tabs, created]);
+    expect(openTerminalTab(tabs, created)).toEqual([...tabs, created]);
+  });
+
+  it("updates an already-open session without moving it to the supplied anchor", () => {
+    const tabs = [session("first"), session("second"), session("third")];
+    const updated = { ...tabs[0], name: "renamed" };
+
+    expect(openTerminalTab(tabs, updated, sessionKey(tabs[1]))).toEqual([
+      updated, tabs[1], tabs[2],
+    ]);
+    expect(tabs[0].name).toBe("first");
+  });
+
   it("opens a session once and preserves tab order", () => {
     const first = session("first");
     const second = session("second");

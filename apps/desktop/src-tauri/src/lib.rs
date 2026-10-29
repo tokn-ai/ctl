@@ -1,4 +1,5 @@
 mod about;
+mod browser;
 mod command_menu;
 mod commands;
 mod component_update;
@@ -54,6 +55,7 @@ pub fn run() {
     .on_window_event(cleanup_destroyed_window)
     .invoke_handler(tauri::generate_handler![
       about::get_component_versions,
+      browser::open_external_url,
       component_update::update_components,
       component_update::cancel_component_update,
       component_update::catalog::check_component_updates,

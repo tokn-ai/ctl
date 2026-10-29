@@ -9,12 +9,15 @@ export interface ClosedTabState {
 export function openTerminalTab(
   tabs: readonly SessionSummary[],
   session: SessionSummary,
+  after_tab_key?: string,
 ): SessionSummary[] {
   const existingIndex = tabs.findIndex(
     (tab) => sessionKey(tab) === sessionKey(session),
   );
   if (existingIndex === -1) {
-    return [...tabs, session];
+    const afterIndex = tabs.findIndex((tab) => sessionKey(tab) === after_tab_key);
+    const insertionIndex = afterIndex < 0 ? tabs.length : afterIndex + 1;
+    return [...tabs.slice(0, insertionIndex), session, ...tabs.slice(insertionIndex)];
   }
   if (tabs[existingIndex] === session) {
     return [...tabs];

@@ -40,6 +40,7 @@ import type {
   KeybindingsSnapshot,
   KeybindingsDocument,
   NativeCommandBinding,
+  NativeCommandMenuResult,
   TaskDefinition,
   TaskDefinitionScope,
   TaskDefinitionCatalog,
@@ -240,9 +241,9 @@ export async function saveKeybindings(
 
 export async function syncCommandMenu(
   bindings: NativeCommandBinding[],
-): Promise<void> {
-  if (!("__TAURI_INTERNALS__" in window)) return;
-  await invoke("sync_command_menu", { bindings });
+): Promise<NativeCommandMenuResult> {
+  if (!("__TAURI_INTERNALS__" in window)) return { rejected: [] };
+  return invoke("sync_command_menu", { bindings });
 }
 
 export async function loadWorkspace(): Promise<WorkspaceSnapshot> {

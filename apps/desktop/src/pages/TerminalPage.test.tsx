@@ -247,7 +247,7 @@ beforeEach(() => {
     revision: null,
     document: { schema_version: 1, overrides: [] },
   });
-  api.syncCommandMenu.mockResolvedValue(undefined);
+  api.syncCommandMenu.mockResolvedValue({ rejected: [] });
   api.saveKeybindings.mockImplementation(
     async (_revision: string | null, document: KeybindingsDocument) => ({
       path: "/test/keybindings.json",
@@ -344,6 +344,37 @@ function nativeCommand(commandId: string, count = 1) {
       listener!({ payload: commandId });
     }
   });
+}
+
+function newTabWorkspace() {
+  const source = { ...newSession(), session_id: "source", name: "source" };
+  const saved: WorkspaceSnapshot = {
+    revision: "ordered-tabs",
+    document: {
+      schema_version: 8,
+      workspace_id: "default",
+      sessions: ["first", "source", "last"].map((id) => ({
+        host_id: "local", session_id: id, name: id, last_known_cwd: `/${id}`, last_known_cwd_display: `/${id}`,
+      })),
+      task_references: [{ host_id: "local", task_id: "job", definition_id: null, applied_revision: null, is_default: false }],
+      tabs: [
+        { kind: "session", host_id: "local", session_id: "first" },
+        { kind: "session", host_id: "local", session_id: "source" },
+        { kind: "task", host_id: "local", task_id: "job" },
+        { kind: "session", host_id: "local", session_id: "last" },
+      ],
+      active_tab: { kind: "session", host_id: "local", session_id: "source" },
+    },
+  };
+  api.loadWorkspace.mockResolvedValue(saved);
+  Object.assign(attachment.state, {
+    phase: "attached", session: source,
+    shell_state: {
+      shell_type: "unknown", cwd: "/source", running_command: null,
+      prompt_phase: "at_prompt", tui_hint: "unknown", revision: "1", observed_sequence: "0",
+    },
+  });
+  return { source, saved };
 }
 
 function sidebarAction(name: string): HTMLElement {
@@ -3297,6 +3328,70 @@ describe("workspace-backed terminal page", () => {
       target: { kind: "local" },
     });
     expect(api.listSessions).not.toHaveBeenCalled();
+  });
+
+  it.each(["shortcut", "button"])("opens the new tab after its source among task tabs and restores that order (%s)", async (trigger) => {
+    vi.spyOn(navigator, "platform", "get").mockReturnValue("MacIntel");
+    const { saved } = newTabWorkspace();
+    const created = newSession();
+    api.createSession.mockResolvedValue(created);
+    let disk = saved;
+    api.updateWorkspace.mockImplementation(async (_revision: string | null, document: WorkspaceDocument) => {
+      disk = { revision: crypto.randomUUID(), document };
+      return disk;
+    });
+    const rendered = render(<TerminalPage />);
+    await waitFor(() => expect(api.syncCommandMenu).toHaveBeenLastCalledWith(expect.arrayContaining([
+      expect.objectContaining({ command_id: COMMAND_IDS.newTab, enabled: true }),
+    ])));
+    if (trigger === "shortcut") nativeCommand(COMMAND_IDS.newTab);
+    else fireEvent.click(screen.getByRole("button", { name: "New tab in current folder" }));
+
+    const expected_tabs = [
+      ...saved.document.tabs.slice(0, 2),
+      { kind: "session", host_id: "local", session_id: created.session_id },
+      ...saved.document.tabs.slice(2),
+    ];
+    await waitFor(() => expect(disk.document.tabs).toEqual(expected_tabs));
+    expect(api.createSession).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      target: { kind: "local" }, working_directory: "/source",
+    }));
+    expect(screen.getAllByRole("tab").map((tab) => tab.getAttribute("aria-label"))).toEqual([
+      "/first on local", "/source on local", "created-shell on local", "Saved task on Local", "/last on local",
+    ]);
+    expect(screen.getByRole("tab", { name: "created-shell on local" }).getAttribute("aria-selected")).toBe("true");
+    expect(disk.document.active_tab).toEqual({ kind: "session", host_id: "local", session_id: created.session_id });
+
+    rendered.unmount();
+    api.loadWorkspace.mockResolvedValue(disk);
+    render(<TerminalPage />);
+    await screen.findByRole("tab", { name: "created-shell on local" });
+    expect(screen.getAllByRole("tab").map((tab) => tab.getAttribute("aria-label"))).toEqual([
+      "/first on local", "/source on local", "created-shell on local", "Saved task on Local", "/last on local",
+    ]);
+  });
+
+  it.each(["switch", "close"])("retains the original new-tab insertion anchor during pending creation (%s)", async (action) => {
+    const { saved } = newTabWorkspace();
+    const created = newSession();
+    let finish!: (session: SessionSummary) => void;
+    api.createSession.mockImplementationOnce(() => new Promise<SessionSummary>((resolve) => { finish = resolve; }));
+    render(<TerminalPage />);
+    await waitFor(() => expect(api.syncCommandMenu).toHaveBeenLastCalledWith(expect.arrayContaining([
+      expect.objectContaining({ command_id: COMMAND_IDS.newTab, enabled: true }),
+    ])));
+    nativeCommand(COMMAND_IDS.newTab);
+    await waitFor(() => expect(api.createSession).toHaveBeenCalledOnce());
+    if (action === "switch") fireEvent.click(screen.getByRole("tab", { name: "/first on local" }));
+    else fireEvent.click(screen.getByRole("button", { name: "Close source tab" }));
+    await act(async () => finish(created));
+    const created_tab = { kind: "session", host_id: "local", session_id: created.session_id };
+    const expected_tabs = action === "switch"
+      ? [...saved.document.tabs.slice(0, 2), created_tab, ...saved.document.tabs.slice(2)]
+      : [saved.document.tabs[0], ...saved.document.tabs.slice(2), created_tab];
+    await waitFor(() => expect(api.updateWorkspace.mock.lastCall![1].tabs).toEqual(expected_tabs));
+    expect(screen.getByRole("tab", { name: "created-shell on local" }).getAttribute("aria-selected")).toBe("true");
+    expect(api.createSession).toHaveBeenCalledOnce();
   });
 
   it("does not attach, kill, or duplicate a shell when saving after creation fails", async () => {

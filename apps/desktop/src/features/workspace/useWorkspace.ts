@@ -7,7 +7,7 @@ import {
 } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { loadHosts, loadWorkspace, listSshConfigHosts, listTailscaleDevices, updateHosts, updateWorkspace } from "../../lib/tauri";
-import type { HostCatalogDocument, SshConfigHost, TailscaleDeviceCatalog } from "../../lib/types";
+import type { HostCatalogDocument, SessionSummary, SshConfigHost, TailscaleDeviceCatalog } from "../../lib/types";
 import { errorMessage } from "../../lib/errors";
 import {
   browserStorage,
@@ -16,6 +16,7 @@ import {
 } from "../targets/targets";
 import { sessionKey } from "../targets/targets";
 import { WorkspaceWriter } from "./WorkspaceWriter";
+import { openWorkspaceSessionTab } from "./workspaceTabs";
 import { sameSshEndpoint } from "./remoteRecovery";
 import {
   emptyWorkspaceView,
@@ -156,6 +157,15 @@ export function useWorkspace() {
       await persistCatalog(viewRef.current, retry);
       await writer.write(workspaceDocument(viewRef.current, workspaceIdRef.current), retry);
     }), [queueOperation, persistCatalog]);
+
+  const openSessionTab = useCallback((session: SessionSummary, after_tab_key?: string): boolean => {
+    if (!mounted.current || !writerRef.current || closingRef.current) return false;
+    const next = openWorkspaceSessionTab(viewRef.current, session, after_tab_key);
+    viewRef.current = next;
+    setView(next);
+    void persist().catch(() => undefined);
+    return true;
+  }, [persist]);
 
   const replaceView = useCallback((replace: (current: WorkspaceView) => WorkspaceView) => {
     if (!writerRef.current || closingRef.current) throw new Error("Workspace is not available.");
@@ -322,6 +332,7 @@ export function useWorkspace() {
   return {
     ...view,
     viewRef,
+    openSessionTab,
     replaceView,
     sshConfigHosts,
     sshConfigWarning,

@@ -135,11 +135,12 @@ impl KeybindingsDocument {
 }
 
 pub fn valid_command_id(id: &str) -> bool {
+  // Component command IDs retain their product names, e.g. ctl-taskd.restart.
   !id.is_empty()
     && id.len() <= 128
-    && id
-      .bytes()
-      .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_'))
+    && id.bytes().all(|byte| {
+      byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_' | b'-')
+    })
 }
 
 pub fn accelerator(key: &Keybinding) -> CommandResult<String> {
@@ -341,6 +342,31 @@ mod tests {
   use super::*;
 
   #[test]
+  fn command_ids_accept_component_names_and_reject_invalid_characters() {
+    for id in [
+      "ctl-taskd.restart",
+      "view.show_command_palette",
+      "pane.focus_left",
+      "tab.1",
+    ] {
+      assert!(valid_command_id(id), "{id}");
+    }
+    for id in [
+      "",
+      "Task.restart",
+      "task restart",
+      "task/restart",
+      "task:restart",
+      "task.restart\n",
+      "tásk.restart",
+    ] {
+      assert!(!valid_command_id(id), "{id:?}");
+    }
+    assert!(valid_command_id(&"a".repeat(128)));
+    assert!(!valid_command_id(&"a".repeat(129)));
+  }
+
+  #[test]
   fn prefix_settings_preserve_legacy_documents_and_validate_entries() {
     let legacy: KeybindingsDocument =
       serde_json::from_str(r#"{"schema_version":1,"overrides":[]}"#).unwrap();
@@ -392,10 +418,21 @@ mod tests {
     let document = KeybindingsDocument {
       schema_version: 1,
       prefix: None,
-      overrides: vec![KeybindingOverride {
-        command_id: "session.close".into(),
-        keybinding: None,
-      }],
+      overrides: vec![
+        KeybindingOverride {
+          command_id: "session.close".into(),
+          keybinding: None,
+        },
+        KeybindingOverride {
+          command_id: "ctl-taskd.restart".into(),
+          keybinding: Some(Keybinding {
+            code: "KeyR".into(),
+            primary: true,
+            shift: true,
+            alt: false,
+          }),
+        },
+      ],
     };
     let saved = save(
       &dir,

@@ -247,7 +247,7 @@ beforeEach(() => {
     revision: null,
     document: { schema_version: 1, overrides: [] },
   });
-  api.syncCommandMenu.mockResolvedValue(undefined);
+  api.syncCommandMenu.mockResolvedValue({ rejected: [] });
   api.saveKeybindings.mockImplementation(
     async (_revision: string | null, document: KeybindingsDocument) => ({
       path: "/test/keybindings.json",

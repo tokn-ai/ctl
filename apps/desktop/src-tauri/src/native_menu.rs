@@ -98,8 +98,8 @@ pub fn handle(app_handle: &AppHandle, event: &tauri::menu::MenuEvent) {
 
 pub fn sync(
   app: &AppHandle,
-  bindings: &[crate::command_menu::NativeCommandBinding],
-) -> crate::error::CommandResult<()> {
+  prepared: crate::command_menu::PreparedCommandMenu,
+) -> crate::error::CommandResult<crate::command_menu::NativeCommandMenuResult> {
   use crate::error::CommandErrorDto;
   let menu = app.menu().ok_or_else(|| {
     CommandErrorDto::new(
@@ -109,22 +109,18 @@ pub fn sync(
   })?;
   let next = Submenu::with_id_and_items(app, COMMAND_MENU_ID, "Commands", true, &[])
     .map_err(CommandErrorDto::backend)?;
-  for binding in bindings {
-    let accelerator = binding
-      .keybinding
-      .as_ref()
-      .map(crate::keybindings::accelerator)
-      .transpose()?;
+  let report = prepared.install(|command| {
+    let binding = &command.binding;
     let item = MenuItem::with_id(
       app,
       format!("ctmux.command.{}", binding.command_id),
       &binding.title,
       binding.enabled,
-      accelerator.as_deref(),
+      command.accelerator.as_deref(),
     )
     .map_err(CommandErrorDto::backend)?;
-    next.append(&item).map_err(CommandErrorDto::backend)?;
-  }
+    next.append(&item).map_err(CommandErrorDto::backend)
+  });
   let previous = menu.get(COMMAND_MENU_ID);
   if let Some(previous) = &previous {
     menu.remove(previous).map_err(CommandErrorDto::backend)?;
@@ -135,7 +131,7 @@ pub fn sync(
     }
     return Err(CommandErrorDto::backend(failure));
   }
-  Ok(())
+  Ok(report)
 }
 
 fn current_event_is_key_repeat() -> bool {

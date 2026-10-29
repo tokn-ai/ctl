@@ -595,6 +595,9 @@ Sidebar, tab, toolbar, palette, dialog, and native-menu actions use the same
 dispatcher, with explicit session/host targets and shared availability checks.
 Native Command-modified accelerators and displayed labels derive from the
 resolved keymap; unmodified dialog and Alt/function keys use the webview adapter.
+Native menu registration isolates invalid commands and reports the affected
+shortcuts while keeping other commands available. This runtime recovery does not
+change saved-keymap validation: invalid settings leave the last valid keymap intact.
 Shortcuts are local to the focused app. Text editing, focus/list navigation,
 and raw xterm/PTY input remain widget behavior. Standard native editing/window
 commands (including Cmd-Q) and emergency reload after a renderer crash remain

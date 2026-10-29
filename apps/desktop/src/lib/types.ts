@@ -249,6 +249,16 @@ export interface NativeCommandBinding {
   enabled: boolean;
 }
 
+export interface RejectedNativeCommand {
+  command_id: string | null;
+  index: number;
+  message: string;
+}
+
+export interface NativeCommandMenuResult {
+  rejected: RejectedNativeCommand[];
+}
+
 export interface RemoteIdentity {
   remote_id: string;
   agent_version: string;

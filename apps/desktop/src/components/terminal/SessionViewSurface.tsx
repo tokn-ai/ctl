@@ -38,9 +38,12 @@ interface Props extends SurfaceProps {
   input_enabled?: boolean;
   on_command?(id: string): void;
   on_pane_commands?(commands: AppCommand[]): void;
+  on_view?(session: SessionSummary, view: SessionView): void;
 }
 
-export function SessionViewSurface({ controls_container, session, open_session_keys, shell_state, renderer, input_owned, on_toggle_input, on_select_terminal, on_promoted, prefix_settings, shortcuts_enabled = true, input_enabled = true, on_command, on_pane_commands, ...surface }: Props) {
+export function SessionViewSurface({ controls_container, session, open_session_keys, shell_state, renderer, input_owned, on_toggle_input, on_select_terminal, on_promoted, prefix_settings, shortcuts_enabled = true, input_enabled = true, on_command, on_pane_commands, on_view, ...surface }: Props) {
+  const on_view_ref = useRef(on_view);
+  on_view_ref.current = on_view;
   const [viewport, setViewport] = useState<HTMLDivElement | null>(null);
   const [controls_host, setControlsHost] = useState<HTMLDivElement | null>(null);
   const [cell, setCell] = useState({ width: 8, height: 16 });
@@ -79,9 +82,14 @@ export function SessionViewSurface({ controls_container, session, open_session_k
   }, [open_session_keys]);
   const view_ref = useRef(view);
   view_ref.current = view?.session_id === session?.session_id ? view : session ? cached_views.get(sessionKey(session))?.view ?? null : null;
-  const storeView = (next: SessionView | null) => {
+  const reportView = (next: SessionView | null) => {
+    const owner = session_ref.current;
+    if (owner && next?.session_id === owner.session_id) on_view_ref.current?.(owner, next);
+  };
+  const storeView = (next: SessionView | null, report = true) => {
     const previous = view_ref.current;
     if (next && previous?.view_id === next.view_id && BigInt(next.revision) < BigInt(previous.revision)) return;
+    if (report) reportView(next);
     view_ref.current = next;
     setView(next);
   };
@@ -121,12 +129,13 @@ export function SessionViewSurface({ controls_container, session, open_session_k
       ++sequence.current;
       const previous = view_ref.current;
       if (previous?.view_id === next.view_id && BigInt(next.revision) < BigInt(previous.revision)) return;
+      reportView(next);
       const removed = previous?.terminals.filter((terminal) => !next.terminals.some((candidate) => candidate.terminal_id === terminal.terminal_id)) ?? [];
       if (previous && removed.length) {
         setEndedIds((previous) => new Set([...previous, ...removed.map((terminal) => terminal.terminal_id)]));
         // Keep exited panes and their final screen until the user dismisses them.
-        storeView({ ...previous, revision: next.revision, zoomed_terminal_id: next.zoomed_terminal_id });
-      } else storeView(next);
+        storeView({ ...previous, revision: next.revision, zoomed_terminal_id: next.zoomed_terminal_id }, false);
+      } else storeView(next, false);
     } else {
       setCachedViews((previous) => {
         const cached = previous.get(owner_key);
@@ -157,6 +166,7 @@ export function SessionViewSurface({ controls_container, session, open_session_k
         if (generation.current !== current || request_sequence !== sequence.current) return;
         const removed = view_ref.current?.terminals.filter((terminal) => !next?.terminals.some((candidate) => candidate.terminal_id === terminal.terminal_id)) ?? [];
         if (removed.length) {
+          reportView(next);
           setEndedIds((previous) => new Set([...previous, ...removed.map((terminal) => terminal.terminal_id)]));
         } else storeView(next);
         setError(null);

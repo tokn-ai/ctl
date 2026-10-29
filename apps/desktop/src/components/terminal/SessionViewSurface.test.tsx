@@ -81,6 +81,20 @@ function paneAction(name: string): HTMLButtonElement {
 }
 
 describe("session compositor", () => {
+  it("reports confirmed layouts without counting retained ended panes", async () => {
+    mocks.request.mockResolvedValue(split);
+    const on_view = vi.fn();
+    render(<SessionViewSurface {...props()} on_view={on_view} />);
+    await waitFor(() => expect(on_view).toHaveBeenCalledWith(session, split));
+    const surviving = { ...initial, revision: "2" };
+    act(() => publishSessionView({ session, attachment_id: "primary-owner", view: surviving }));
+    expect(on_view).toHaveBeenLastCalledWith(session, surviving);
+    expect(screen.getAllByLabelText("Terminal input")).toHaveLength(2);
+    expect(screen.getByRole("separator").getAttribute("aria-disabled")).toBe("true");
+    act(() => publishSessionView({ session, attachment_id: "primary-owner", view: split }));
+    expect(on_view).toHaveBeenCalledTimes(2);
+  });
+
   it("puts focused-pane actions in the shared footer without remounting terminals", async () => {
     mocks.request.mockResolvedValue(split);
     const footer = document.createElement("footer");

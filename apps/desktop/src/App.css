@@ -173,7 +173,8 @@ svg {
   background: transparent;
 }
 
-.host-group-toggle {
+.host-group-toggle,
+.host-group-label {
   display: flex;
   min-width: 0;
   min-height: 30px;
@@ -185,8 +186,15 @@ svg {
   text-align: left;
   border: 0;
   background: transparent;
-  cursor: pointer;
 }
+
+.host-group-toggle { cursor: pointer; }
+
+.host-chevron-spacer {
+  flex: 0 0 14px;
+}
+
+.host-identity-icon { display: flex; }
 
 .host-group-name {
   overflow: hidden;
@@ -212,6 +220,16 @@ svg {
   color: var(--muted);
   font-size: 11px;
   line-height: 16px;
+}
+
+.host-session-error {
+  display: flex;
+  flex-basis: 100%;
+  align-items: center;
+  gap: 5px;
+  margin: 0 6px 5px 47px;
+  color: var(--warning);
+  font-size: 11px;
 }
 
 .host-connection-dot {
@@ -266,7 +284,9 @@ svg {
 }
 
 .host-group-header:hover .host-group-toggle,
-.host-group-header:focus-within .host-group-toggle {
+.host-group-header:focus-within .host-group-toggle,
+.host-group-header:hover .host-group-label,
+.host-group-header:focus-within .host-group-label {
   padding-right: 74px;
 }
 
@@ -281,13 +301,6 @@ svg {
 
 .session-row.active .session-actions {
   background: var(--selection);
-}
-
-.host-empty-state {
-  margin: 0;
-  padding: 9px 14px 11px 30px;
-  color: var(--muted);
-  font-size: 11px;
 }
 
 .session-icon {
@@ -319,6 +332,7 @@ svg {
   }
 
   .host-group-toggle,
+  .host-group-label,
   .session-select {
     padding-right: 74px;
   }

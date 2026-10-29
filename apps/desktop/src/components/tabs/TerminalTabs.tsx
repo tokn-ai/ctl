@@ -1,13 +1,17 @@
-import type { KeyboardEvent, ReactNode } from "react";
-import type { SessionSummary, ShellStateSummary } from "../../lib/types";
+import type { CSSProperties, KeyboardEvent, ReactNode } from "react";
+import type { SessionSummary, ShellStateSummary, ViewLayout } from "../../lib/types";
 import { formatTerminalTitle } from "../../features/tabs/terminalTitle";
 import { sessionKey, targetLabel } from "../../features/targets/targets";
+import { hostColor, hostIdColor } from "../../features/workspace/hostColor";
+import { SessionIcon, sessionIconLabel } from "../sessions/SessionIcon";
 import { Icon } from "../ui/Icon";
+import "./TerminalTabs.css";
 
 export interface ExtraTab {
   tab_key: string;
   title: string;
   host: string;
+  host_id?: string;
   status: string;
 }
 
@@ -20,6 +24,7 @@ interface TerminalTabsProps {
   on_close_extra?(key: string): void;
   tabs: readonly SessionSummary[];
   shellStates: ReadonlyMap<string, ShellStateSummary>;
+  session_layouts?: ReadonlyMap<string, ViewLayout>;
   activeSessionKey: string | null;
   canCreate: boolean;
   onSelect(session: SessionSummary): void;
@@ -31,6 +36,8 @@ interface WorkspaceTabProps {
   active: boolean;
   title: string;
   host: string;
+  host_color: string;
+  description?: string;
   close_label: string;
   close_hint: string;
   icon: ReactNode;
@@ -40,23 +47,26 @@ interface WorkspaceTabProps {
 }
 
 function WorkspaceTab({
-  active, title, host, close_label, close_hint, icon, children,
+  active, title, host, host_color, description, close_label, close_hint, icon, children,
   on_select, on_close,
 }: WorkspaceTabProps) {
   return (
-    <div className={`terminal-tab ${active ? "active" : ""}`}>
+    <div
+      className={`terminal-tab ${active ? "active" : ""}`}
+      style={{ "--host-color": host_color } as CSSProperties}
+    >
       <button
         className="terminal-tab-select"
         type="button"
         role="tab"
         aria-selected={active}
         aria-label={`${title} on ${host}`}
+        aria-description={description}
         title={`${title} · ${host}`}
         onClick={on_select}
       >
         {icon}
         <span className="terminal-tab-copy">{children}</span>
-
       </button>
       <button
         className="terminal-tab-close"
@@ -97,6 +107,7 @@ export function TerminalTabs({
   on_close_extra,
   tabs,
   shellStates,
+  session_layouts,
   activeSessionKey,
   canCreate,
   onSelect,
@@ -105,7 +116,9 @@ export function TerminalTabs({
 }: TerminalTabsProps) {
   const terminalNodes = tabs.map((tab) => {
     const key = sessionKey(tab);
-    const title = formatTerminalTitle(tab, shellStates.get(key) ?? null);
+    const shell_state = shellStates.get(key);
+    const layout = session_layouts?.get(key);
+    const title = formatTerminalTitle(tab, shell_state ?? null);
     return {
       tab_key: key,
       node: (
@@ -114,9 +127,17 @@ export function TerminalTabs({
           active={key === activeSessionKey}
           title={title.text}
           host={targetLabel(tab.target)}
+          host_color={hostColor(tab.target)}
+          description={sessionIconLabel(shell_state?.shell_type, layout)}
           close_label={`Close ${tab.name} tab`}
           close_hint="Close tab; keep session running"
-          icon={<Icon name="terminal" class_name="tab-icon" />}
+          icon={(
+            <SessionIcon
+              shell_type={shell_state?.shell_type}
+              layout={layout}
+              class_name="tab-icon"
+            />
+          )}
           on_select={() => onSelect(tab)}
           on_close={() => onClose(tab)}
         >
@@ -139,6 +160,7 @@ export function TerminalTabs({
         active={tab.tab_key === activeSessionKey}
         title={tab.title}
         host={tab.host}
+        host_color={hostIdColor(tab.host_id ?? (tab.host.toLowerCase() === "local" ? "local" : tab.host))}
         close_label={`Close ${tab.title} tab`}
         close_hint="Close view; keep task running"
         icon={<span className={`task-state-dot ${tab.status}`} />}

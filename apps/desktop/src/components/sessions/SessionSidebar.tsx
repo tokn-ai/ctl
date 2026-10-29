@@ -1,6 +1,8 @@
 import { ControlPopover } from "../ui/ControlPopover";
 import { useId, useState } from "react";
 import { Icon } from "../ui/Icon";
+import { SessionIcon, sessionIconLabel } from "./SessionIcon";
+import { hostColor } from "../../features/workspace/hostColor";
 import { attachmentPhaseLabel } from "../../features/attachment/attachmentState";
 import { isObservationTime, lastSeenAge, useLastSeenClock } from "../../features/sessions/lastSeen";
 import { hasKnownTerminalSize } from "../../features/sessions/sessionObservation";
@@ -18,6 +20,7 @@ import type {
   SessionSummary,
   ShellStateSummary,
   WorkspaceHost,
+  ViewLayout,
 } from "../../lib/types";
 import {
   connectionUnavailableLabel,
@@ -39,6 +42,7 @@ interface SessionSidebarProps {
   sessions: SessionSummary[];
   interactiveTasks?: ManagedTask[];
   shellStates: ReadonlyMap<string, ShellStateSummary>;
+  session_layouts?: ReadonlyMap<string, ViewLayout>;
   selectedSessionKey: string | null;
   openTabSessionKeys: ReadonlySet<string>;
   loading: boolean;
@@ -150,6 +154,7 @@ export function SessionSidebar({
   sessions,
   interactiveTasks = [],
   shellStates,
+  session_layouts,
   selectedSessionKey,
   openTabSessionKeys,
   loading,
@@ -291,7 +296,8 @@ export function SessionSidebar({
         ) : null}
         {sessionGroups.map(({ target, sessions: groupSessions }) => {
           const key = targetKey(target);
-          const expanded = !collapsedHosts.has(key);
+          const can_expand = groupSessions.length > 0;
+          const expanded = can_expand && !collapsedHosts.has(key);
           const childrenId = `${groupId}-${encodeURIComponent(key)}`;
           const host = hosts.find((item) => item.host_id === (target.kind === "local" ? "local" : target.host_id));
           const unavailable = target.kind === "ssh" ? target.unavailable : undefined;
@@ -331,6 +337,18 @@ export function SessionSidebar({
             connection?.state === "disconnecting" ||
             (connection?.state === "error" && connection.method_names.length > 0)
           );
+          const heading = <>
+            {can_expand ? <Icon name={expanded ? "chevron_down" : "chevron_right"} size={14} />
+              : <span className="host-chevron-spacer" aria-hidden="true" />}
+            <span className="host-identity-icon" style={{ color: hostColor(target) }}>
+              <Icon name={target.kind === "local" ? "monitor" : "server"} size={15} />
+            </span>
+            <span className="host-group-name">{target.kind === "local" ? "Local" : targetLabel(target)}</span>
+            {host?.source === "ssh_config" ? <span className="host-config-source" title="From SSH config; saved only when customized">SSH</span> : null}
+            {host?.source === "tailscale" ? <span className="host-config-source" title="Discovered from Tailscale; saved only when customized">Tailscale</span> : null}
+            {can_expand && <span className="host-group-count">{groupSessions.length}</span>}
+          </>;
+          const heading_title = [hostTitle(target), hostError ? `Sessions: ${hostError}` : null].filter(Boolean).join("\n");
           return (
             <section
               className="session-group host-group"
@@ -338,30 +356,17 @@ export function SessionSidebar({
               aria-label={`${targetLabel(target)} sessions`}
             >
               <div className={`host-group-header ${unavailableRoute ? "has-error" : ""}`}>
-                <button
+                {can_expand ? <button
                   className="host-group-toggle"
                   type="button"
                   aria-expanded={expanded}
                   aria-controls={childrenId}
                   aria-label={`${expanded ? "Collapse" : "Expand"} ${targetLabel(target)}`}
-                  title={hostTitle(target)}
+                  title={heading_title}
                   onClick={() => toggleHost(key)}
                 >
-                  <Icon
-                    name={expanded ? "chevron_down" : "chevron_right"}
-                    size={14}
-                  />
-                  <Icon
-                    name={target.kind === "local" ? "monitor" : "server"}
-                    size={15}
-                  />
-                  <span className="host-group-name">
-                    {target.kind === "local" ? "Local" : targetLabel(target)}
-                  </span>
-                  {host?.source === "ssh_config" ? <span className="host-config-source" title="From SSH config; saved only when customized">SSH</span> : null}
-                  {host?.source === "tailscale" ? <span className="host-config-source" title="Discovered from Tailscale; saved only when customized">Tailscale</span> : null}
-                  <span className="host-group-count">{groupSessions.length}</span>
-                </button>
+                  {heading}
+                </button> : <div className="host-group-label" title={heading_title}>{heading}</div>}
                 {target.kind === "ssh" ? (
                   <span
                     className="host-connection-status"
@@ -378,6 +383,12 @@ export function SessionSidebar({
                     {operationLabel ? <span title={[operation?.method_name, operation?.message].filter(Boolean).join(": ")}> · {operationLabel}</span> : null}
                   </span>
                 ) : null}
+                {!can_expand && hostError ? <p
+                  className="host-session-error"
+                  role="status"
+                  aria-label={`Sessions unavailable: ${hostError}`}
+                  title={hostError}
+                ><Icon name="info" size={12} />Sessions unavailable</p> : null}
                 <div className="host-group-actions">
                   <button
                     className="session-action"
@@ -439,12 +450,7 @@ export function SessionSidebar({
                   </> : null}
                 </div>
               </div>
-              <div className="host-group-children" id={childrenId} hidden={!expanded}>
-                {!loading && groupSessions.length === 0 ? (
-                  <p className="host-empty-state">
-                    {hostError || unavailableRoute ? "Sessions unavailable" : "No known sessions"}
-                  </p>
-                ) : null}
+              {can_expand && <div className="host-group-children" id={childrenId} hidden={!expanded}>
                 {groupSessions.map((session) => {
                   const identity = sessionKey(session);
                   const { fullTitle, compactTitle } = sidebarTitle(
@@ -483,10 +489,14 @@ export function SessionSidebar({
                         disabled={closing}
                         aria-current={selected ? "true" : undefined}
                         aria-label={`${fullTitle} — ${session.name}`}
-                        aria-description={observation_title}
+                        aria-description={[sessionIconLabel(shellStates.get(identity)?.shell_type, session_layouts?.get(identity)), observation_title].filter(Boolean).join(". ")}
                         title={fullTitle}
                       >
-                        <span aria-label={status} title={details_title}><Icon name="terminal" class_name="session-icon" /></span>
+                        <span aria-label={status} title={details_title}><SessionIcon
+                          shell_type={shellStates.get(identity)?.shell_type}
+                          layout={session_layouts?.get(identity)}
+                          class_name="session-icon"
+                        /></span>
                         <span className="session-copy">
                           <strong>{compactTitle}</strong>
                           {attachment?.phase !== "attached" && <small className="session-details" title={details_title}>
@@ -547,7 +557,7 @@ export function SessionSidebar({
                     </div>
                   );
                 })}
-              </div>
+              </div>}
             </section>
           );
         })}

@@ -13,6 +13,7 @@ import type {
 } from "../../lib/types";
 import { sessionKey, targetKey } from "../../features/targets/targets";
 import { hostFromTarget } from "../../features/workspace/workspaceModel";
+import { hostColor } from "../../features/workspace/hostColor";
 import { TAILSCALE_UNAVAILABLE } from "../../features/workspace/tailscaleProjection";
 import { errorDetails } from "../../lib/errors";
 import { initialAttachmentState } from "../../features/attachment/attachmentState";
@@ -100,6 +101,56 @@ afterEach(() => {
 });
 
 describe("SessionSidebar", () => {
+  it("keeps empty hosts static and their actions accessible", async () => {
+    const user = userEvent.setup();
+    const props = renderHostConnection(undefined, { sessions: [] });
+    for (const name of ["local", "Build machine"]) {
+      const group = screen.getByRole("region", { name: `${name} sessions` });
+      expect(group.querySelector("[aria-expanded]")).toBeNull();
+      expect(group.querySelector(".host-group-children")).toBeNull();
+      expect(group.querySelector(".host-group-count")).toBeNull();
+      await user.click(within(group).getByRole("button", { name: `New shell on ${name}` }));
+    }
+    expect(screen.queryByText("No known sessions")).toBeNull();
+    expect(props.onNewShell).toHaveBeenNthCalledWith(1, session.target);
+    expect(props.onNewShell).toHaveBeenNthCalledWith(2, remoteHost);
+    await user.click(screen.getByRole("button", { name: "Connect to Build machine" }));
+    expect(props.onConnectHost).toHaveBeenCalledWith(remoteHost);
+  });
+
+  it("uses host colors and shell or actual split-layout icons", () => {
+    renderHostConnection(undefined, {
+      sessions: [session, { ...secondSession, target: remoteHost }],
+      shellStates: new Map([[sessionKey(session), shellState]]),
+      session_layouts: new Map([[sessionKey({ ...secondSession, target: remoteHost }), {
+        kind: "split", axis: "horizontal", children: [
+          { kind: "terminal", terminal_id: "left" },
+          { kind: "terminal", terminal_id: "right" },
+        ],
+      }]]),
+    });
+    expect(screen.getByRole("img", { name: "Zsh session" })).toBeTruthy();
+    expect(screen.getByRole("img", { name: "2-pane session layout" })).toBeTruthy();
+    expect(screen.getByRole("img", { name: "Zsh session" }).closest("button")?.getAttribute("aria-description")).toBe("Zsh session");
+    expect(screen.getByRole("button", { name: "Shell — second" }).getAttribute("aria-description")).toBe("2-pane session layout");
+    for (const target of [session.target, remoteHost]) {
+      const group = screen.getByRole("region", { name: `${target.kind === "local" ? "local" : "Build machine"} sessions` });
+      const expected = document.createElement("span");
+      expected.style.color = hostColor(target);
+      expect((group.querySelector(".host-identity-icon") as HTMLElement).style.color).toBe(expected.style.color);
+    }
+  });
+
+  it("keeps empty-host lookup failures visible without making the host expandable", () => {
+    const message = "Timed out listing sessions.";
+    renderHostConnection({ state: "connected", method_names: ["Direct"], message: null }, {
+      sessions: [], targetErrors: new Map([[targetKey(remoteHost), errorDetails({ code: "timeout", message })]]),
+    });
+    expect(screen.getByRole("status", { name: `Sessions unavailable: ${message}` }).textContent).toBe("Sessions unavailable");
+    expect(screen.getByRole("status", { name: "Host connection for Build machine: SSH connected" }).textContent).toBe("SSH connected");
+    expect(screen.getByRole("region", { name: "Build machine sessions" }).querySelector("[aria-expanded]")).toBeNull();
+  });
+
   it("keeps unavailable host settings accessible while disabling new shells", async () => {
     const user = userEvent.setup();
     const target = { ...remoteHost, unavailable: "Restore this host" };
@@ -129,7 +180,7 @@ describe("SessionSidebar", () => {
       expect(age.closest(".session-detail-label")).toBeNull();
       expect(age.getAttribute("datetime")).toBe("2026-10-01T10:00:00.000Z");
       expect(age.title).toBe("Last observed by this app: 2026-10-01T10:00:00.000Z");
-      expect(row.getAttribute("aria-description")).toBe(age.title);
+      expect(row.getAttribute("aria-description")).toContain(age.title);
       expect(row.querySelector(".session-status")?.getAttribute("data-status")).toBe(phase);
       expect(row.querySelector("small")?.title).toContain("80×24");
       expect(row.textContent).not.toContain("80×24");
@@ -160,7 +211,7 @@ describe("SessionSidebar", () => {
       const row = screen.getByRole("button", { name: `Shell — ${name}` });
       expect(row.querySelector("time")).toBeNull();
       expect(row.querySelector("small")?.title).not.toContain("80×24");
-      expect(row.getAttribute("aria-description")).toBeNull();
+      expect(row.getAttribute("aria-description")).toBe("Terminal session");
     }
     expect(vi.getTimerCount()).toBe(0);
   });
@@ -628,7 +679,9 @@ describe("SessionSidebar", () => {
     await user.keyboard(" ");
     expect(localGroup.getAttribute("aria-expanded")).toBe("true");
     expect(screen.getByRole("button", { name: "Shell — first" })).toBeTruthy();
-    expect(screen.getByText("No known sessions")).toBeTruthy();
+    expect(screen.queryByText("No known sessions")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Expand build-host" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Collapse build-host" })).toBeNull();
     const connect = screen.getByRole("button", { name: "Connect to build-host" });
     expect(connect.title).toContain("Agent 0.1.0\nRemote ID: remote-1");
     await user.click(connect);

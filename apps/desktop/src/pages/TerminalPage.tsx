@@ -89,6 +89,7 @@ import {
   syncSessionObservation,
 } from "../features/sessions/sessionListState";
 import { mergeSessionObservation } from "../features/sessions/sessionObservation";
+import { useSessionLayouts } from "../features/sessions/useSessionLayouts";
 import { XtermRenderer } from "../features/terminal/XtermRenderer";
 import {
   closeTerminalTab,
@@ -381,6 +382,16 @@ function TerminalWorkbench() {
       ]);
     },
     onResume: portForwarding.resumeHost,
+  });
+  const layout_sessions = useMemo(() => [...new Map(
+    [...tabs, ...sessions].map((session) => [sessionKey(session), session]),
+  ).values()], [sessions, tabs]);
+  const session_layouts = useSessionLayouts({
+    sessions: layout_sessions,
+    host_connections: hostConnections.statuses,
+    enabled: workspace.ready && !workspace.closing && !restartingDaemon,
+    attached_session_keys: new Set(attachment.states.flatMap((state) =>
+      state.phase === "attached" && state.session ? [sessionKey(state.session)] : [])),
   });
 
   const daemonRestartBlocksInteractions = useCallback(
@@ -1909,6 +1920,7 @@ function TerminalWorkbench() {
                   sessions={sessions}
                   interactiveTasks={taskWorkspace.tasks}
                   shellStates={displayedSessionShellStates}
+                  session_layouts={session_layouts.layouts}
                   selectedSessionKey={activeTabKey}
                   openTabSessionKeys={openTabSessionKeys}
                   loading={loading || !workspace.ready}
@@ -1996,6 +2008,7 @@ function TerminalWorkbench() {
                     tab_key: workspaceTabKey(tab),
                     title: task?.definition.name ?? "Saved task",
                     host: tab.host_id === "local" ? "Local" : tab.host_id,
+                    host_id: tab.host_id,
                     status: task ? taskState(task) : "unknown",
                   };
                 })}
@@ -2008,6 +2021,7 @@ function TerminalWorkbench() {
                 }}
                 on_close_extra={taskWorkspace.close}
                 shellStates={displayedTabShellStates}
+                session_layouts={session_layouts.layouts}
                 activeSessionKey={activeTabKey}
                 canCreate={
                   currentWorkingDirectory !== null &&
@@ -2073,6 +2087,7 @@ function TerminalWorkbench() {
                   ) : null}
                 </div>
                 <SessionViewSurface
+                  on_view={session_layouts.observeView}
                   controls_container={pane_controls_host}
                   prefix_settings={{ document: keybindings.document, bindings: keybindings.bindings, platform: shortcutPlatform }}
                   shortcuts_enabled={!utility_page && !dialogOpen && !paletteOpen && keybindings.ready && !workspace.closing}

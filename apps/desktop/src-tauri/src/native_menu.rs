@@ -191,6 +191,10 @@ mod tests {
       frontend_command(&MenuId::new("ctmux.command.session.close")),
       Some("session.close")
     );
+    assert_eq!(
+      frontend_command(&MenuId::new("ctmux.command.ctl-taskd.restart")),
+      Some("ctl-taskd.restart")
+    );
     assert!(frontend_command(&MenuId::new("undo")).is_none());
     assert!(frontend_command(&MenuId::new("ctmux.command.")).is_none());
   }

@@ -1,3 +1,4 @@
+import { Icon } from "../components/ui/Icon";
 import { WorkspaceSidebar } from "../components/workspace/WorkspaceSidebar";
 import { AboutPage } from "./AboutPage";
 import { CredentialsPage } from "./CredentialsPage";
@@ -56,7 +57,7 @@ import { NotificationProvider, useNotificationEnvironment } from "../features/no
 import { useWorkbenchNotifications } from "../features/notifications/useWorkbenchNotifications";
 import { TerminalTabs } from "../components/tabs/TerminalTabs";
 import { SessionViewSurface } from "../components/terminal/SessionViewSurface";
-import { TerminalToolbar } from "../components/terminal/TerminalToolbar";
+import { TerminalControls } from "../components/terminal/TerminalControls";
 import { useResizeControl, useResizeWithWindow } from "../features/attachment/useResizeControl";
 import { useSessionAttachments } from "../features/attachment/useSessionAttachments";
 import { ManualReconnectProvider, useManualReconnectHandler } from "../features/attachment/ManualReconnect";
@@ -198,6 +199,8 @@ function TerminalWorkbench() {
     setShellStates: setSessionShellStates,
     persist: persistWorkspace,
   } = workspace;
+  const [sidebar_visible, setSidebarVisible] = useState(true);
+  const [pane_controls_host, setPaneControlsHost] = useState<HTMLDivElement | null>(null);
   const [renderer, setRenderer] = useState<XtermRenderer | null>(null);
   const [shortcutPlatform] = useState(detectShortcutPlatform);
   const keybindings = useKeybindings(shortcutPlatform);
@@ -1866,12 +1869,13 @@ function TerminalWorkbench() {
         <CommandBindings platform={shortcutPlatform} />
         <div className="workbench">
           <main
-            className="app-shell"
+            className={`app-shell${sidebar_visible ? "" : " sidebar-collapsed"}`}
             inert={
               !workspace.ready || workspace.closing || dialogOpen || paletteOpen
             }
           >
             <WorkspaceSidebar
+              hidden={!sidebar_visible}
               on_about={() => executeCommandById(COMMAND_IDS.about)}
               about_open={utility_page === "about"}
               on_credentials={() => executeCommandById(COMMAND_IDS.credentials)}
@@ -1888,13 +1892,8 @@ function TerminalWorkbench() {
               vpn_active_count={vpn_activity.active_count}
               vpn_status_stale={vpn.status_stale}
               vpn_inventory_incomplete={vpn_activity.inventory_incomplete}
-              tasks={
-                <TaskSidebar
-                  model={taskWorkspace}
-                  definitions={taskWorkspace.definitions}
-                  references={workspace.task_references}
-                />
-              }
+              tasks={<TaskSidebar model={taskWorkspace} definitions={taskWorkspace.definitions} references={workspace.task_references} />}
+              running_task_count={taskWorkspace.tasks.filter((task) => !!task.active_run).length}
               sessions={
                 <SessionSidebar
                   on_archives={() => setArchivesOpen(true)}
@@ -1984,8 +1983,10 @@ function TerminalWorkbench() {
                 />
               }
             />
-            <section className="terminal-workspace" hidden={utility_page !== null}>
+            <div className="workspace-main">
               <TerminalTabs
+                leading_actions={<button type="button" id="workspace-sidebar-toggle" className="terminal-tab-new" aria-label={sidebar_visible ? "Hide sidebar" : "Show sidebar"} title={sidebar_visible ? "Hide sidebar" : "Show sidebar"} aria-expanded={sidebar_visible} aria-controls="workspace-sidebar" onClick={() => setSidebarVisible((visible) => !visible)}><Icon name="panel_left" /></button>}
+                trailing_actions={<button type="button" className="terminal-tab-new" aria-label="Commands" title={`Commands (${paletteShortcutLabel})`} onClick={() => executeCommandById(COMMAND_IDS.showPalette)}><Icon name="command" /></button>}
                 tabs={tabs}
                 extra_tabs={workspace.task_tabs.map((tab) => {
                   const task = taskWorkspace.tasks.find(
@@ -2003,7 +2004,7 @@ function TerminalWorkbench() {
                   const tab = workspace.task_tabs.find(
                     (item) => workspaceTabKey(item) === key,
                   );
-                  if (tab) taskWorkspace.open(tab);
+                  if (tab) { setUtilityPage(null); taskWorkspace.open(tab); }
                 }}
                 on_close_extra={taskWorkspace.close}
                 shellStates={displayedTabShellStates}
@@ -2026,6 +2027,7 @@ function TerminalWorkbench() {
                 }
                 onCreate={() => executeCommandById(COMMAND_IDS.newTab)}
               />
+              <section className="terminal-workspace" hidden={utility_page !== null}>
               {taskWorkspace.active?.kind === "task" ? (
                 <TaskDetail
                   key={`${taskWorkspace.active.host_id}:${taskWorkspace.active.task_id}`}
@@ -2043,19 +2045,6 @@ function TerminalWorkbench() {
                   )
                 }
               >
-                <TerminalToolbar
-                  showInputControl={false}
-                  state={resize_display_state}
-                  resize_control_status={resize_control_status}
-                  onRequestResizeControl={() => executeCommandById(COMMAND_IDS.toggleResizeControl)}
-                  onToggleInput={() => executeCommandById(COMMAND_IDS.toggleInput)}
-                  onToggleResizeWithWindow={() =>
-                    executeCommandById(COMMAND_IDS.toggleResize)
-                  }
-                  onReconnect={() => executeCommandById(COMMAND_IDS.reconnect)}
-                  onShowCommands={() => executeCommandById(COMMAND_IDS.showPalette)}
-                  commandShortcutLabel={paletteShortcutLabel}
-                />
                 <div className="terminal-notices">
                   {activeTab && attachment.state.session === null ? (
                     <div className="message-banner" role="status">
@@ -2084,6 +2073,7 @@ function TerminalWorkbench() {
                   ) : null}
                 </div>
                 <SessionViewSurface
+                  controls_container={pane_controls_host}
                   prefix_settings={{ document: keybindings.document, bindings: keybindings.bindings, platform: shortcutPlatform }}
                   shortcuts_enabled={!utility_page && !dialogOpen && !paletteOpen && keybindings.ready && !workspace.closing}
                   input_enabled={!utility_page && !dialogOpen && !paletteOpen && !workspace.closing && !daemonRestartBlocksInteractions()}
@@ -2132,6 +2122,7 @@ function TerminalWorkbench() {
                 else { void vpn.refresh(); void hostConnections.refresh(); void portForwarding.refreshAll(); }
               }}
             />
+            </div>
           </main>
           <StatusBar
             state={resize_display_state}
@@ -2141,6 +2132,18 @@ function TerminalWorkbench() {
             context_label={utility_page === "about" ? "About ctmux" : utility_page === "credentials" ? "Credentials" : "Tasks"}
             inert={dialogOpen || paletteOpen || workspace.closing}
           >
+            <div className="status-terminal-controls" hidden={!!utility_page || (!!taskWorkspace.active && !(taskWorkspace.activeTask?.definition.execution_mode === "interactive" && taskWorkspace.activeTask.active_run))}>
+              <div ref={setPaneControlsHost} />
+                <TerminalControls
+                  state={resize_display_state}
+                  resize_control_status={resize_control_status}
+                  onRequestResizeControl={() => executeCommandById(COMMAND_IDS.toggleResizeControl)}
+                  onToggleResizeWithWindow={() =>
+                    executeCommandById(COMMAND_IDS.toggleResize)
+                  }
+                  onReconnect={() => executeCommandById(COMMAND_IDS.reconnect)}
+                />
+            </div>
             <NotificationBell store={notifications} />
           </StatusBar>
         </div>

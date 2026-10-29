@@ -1,3 +1,4 @@
+import { ControlPopover } from "../ui/ControlPopover";
 import { useId, useState } from "react";
 import { Icon } from "../ui/Icon";
 import { attachmentPhaseLabel } from "../../features/attachment/attachmentState";
@@ -215,29 +216,15 @@ export function SessionSidebar({
     <aside className="session-sidebar" aria-label="ctmux sessions">
       <div className="sidebar-connections">
         <header className="sidebar-header">
-          <strong>Sessions</strong>
-          {on_archives && <button type="button" onClick={on_archives}>Archived</button>}
+          <strong>Hosts</strong>
           <div className="sidebar-header-actions">
-            {onChooseHost ? (
-              <button
-                className="icon-button"
-                type="button"
-                onClick={onChooseHost}
-                aria-label="Choose host to connect"
-                title="Connect host"
-              >
-                <Icon name="plug" />
-              </button>
-            ) : null}
-            <button
-              className="icon-button"
-              type="button"
-              onClick={onAddHost}
-              aria-label="Add host"
-              title="Add host"
-            >
-              <Icon name="plus" />
-            </button>
+            <ControlPopover label="Add or manage sessions" trigger_content={<Icon name="plus" />} placement="below" close_on_select>
+              <button type="button" onClick={() => onNewShell()} disabled={creating}><Icon name="terminal" />New shell</button>
+              <button type="button" onClick={onAddExisting} aria-label="Add existing session"><Icon name="plug" />Attach session</button>
+              <button type="button" onClick={onAddHost}><Icon name="server" />Add host</button>
+              {onChooseHost && <button type="button" onClick={onChooseHost} aria-label="Choose host to connect"><Icon name="plug" />Connect host</button>}
+              {on_archives && <button type="button" onClick={on_archives} aria-label="Archived sessions"><Icon name="archive" />Archives</button>}
+            </ControlPopover>
             <button
               className="icon-button"
               type="button"
@@ -483,6 +470,7 @@ export function SessionSidebar({
                   const dimensions = attachment?.phase === "attached" || hasKnownTerminalSize(session)
                     ? ` · ${session.terminal_size.columns}×${session.terminal_size.rows}`
                     : "";
+                  const details_title = [`${session.name} · ${status}${dimensions} · Session last reported ${observed_status}`, attachment?.message, observation_title].filter(Boolean).join("\n");
                   return (
                     <div
                       className={`session-row ${selected ? "active" : ""}`}
@@ -498,13 +486,11 @@ export function SessionSidebar({
                         aria-description={observation_title}
                         title={fullTitle}
                       >
-                        <Icon name="terminal" class_name="session-icon" />
+                        <span aria-label={status} title={details_title}><Icon name="terminal" class_name="session-icon" /></span>
                         <span className="session-copy">
                           <strong>{compactTitle}</strong>
-                          <small className="session-details" title={[`${session.name} · ${status}${dimensions} · Session last reported ${observed_status}`, attachment?.message, observation_title].filter(Boolean).join("\n")}>
+                          {attachment?.phase !== "attached" && <small className="session-details" title={details_title}>
                             <span className="session-detail-label">
-                              {session.name}
-                              <span aria-hidden="true"> · </span>
                               <span className="session-status" data-status={attachment?.phase ?? (session.status === "running" ? "unknown" : session.status)}>
                                 {status}
                               </span>
@@ -513,7 +499,7 @@ export function SessionSidebar({
                               <span aria-hidden="true"> · </span>
                               <time dateTime={observed_at ?? undefined} title={observation_title}>{age}</time>
                             </span> : null}
-                          </small>
+                          </small>}
                         </span>
                       </button>
                       <div className="session-actions">
@@ -567,23 +553,6 @@ export function SessionSidebar({
         })}
       </div>
 
-      <footer className="sidebar-footer">
-        <button
-          className="new-session-button"
-          type="button"
-          onClick={onAddExisting}
-        >
-          <Icon name="plug" size={15} /> Add existing session
-        </button>
-        <button
-          className="new-session-button"
-          type="button"
-          onClick={() => onNewShell()}
-          disabled={creating}
-        >
-          <Icon name="plus" size={15} /> New shell
-        </button>
-      </footer>
     </aside>
   );
 }

@@ -12,6 +12,8 @@ export interface ExtraTab {
 }
 
 interface TerminalTabsProps {
+  leading_actions?: ReactNode;
+  trailing_actions?: ReactNode;
   extra_tabs?: ExtraTab[];
   tab_order?: string[];
   on_select_extra?(key: string): void;
@@ -54,7 +56,7 @@ function WorkspaceTab({
       >
         {icon}
         <span className="terminal-tab-copy">{children}</span>
-        <span className="terminal-tab-host">{host}</span>
+
       </button>
       <button
         className="terminal-tab-close"
@@ -87,6 +89,8 @@ function navigateTabs(event: KeyboardEvent<HTMLDivElement>) {
 }
 
 export function TerminalTabs({
+  leading_actions,
+  trailing_actions,
   extra_tabs = [],
   tab_order = [],
   on_select_extra,
@@ -152,6 +156,7 @@ export function TerminalTabs({
   });
   return (
     <nav className="terminal-tabs" aria-label="Workspace tabs">
+      {leading_actions}
       <div className="terminal-tab-list" role="tablist" onKeyDown={navigateTabs}>
         {nodes.map((item) => item.node)}
       </div>
@@ -165,6 +170,7 @@ export function TerminalTabs({
       >
         <Icon name="plus" />
       </button>
+      {trailing_actions}
     </nav>
   );
 }

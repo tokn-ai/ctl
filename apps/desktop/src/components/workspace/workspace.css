@@ -1,0 +1,223 @@
+.workspace-main {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+}
+
+.workspace-main > .terminal-workspace {
+  flex: 1;
+}
+
+.workspace-sidebar {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  background: var(--surface-1);
+  border-right: 1px solid var(--border);
+}
+
+.sidebar-content,
+.sidebar-content > div:not([hidden]) {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+}
+
+.sidebar-content .session-sidebar {
+  flex: 1;
+  min-height: 0;
+  border: 0;
+}
+
+.workspace-rail {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 6px 0;
+  border-right: 1px solid var(--border);
+}
+
+.workspace-navigation {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.workspace-navigation > button,
+.workspace-settings > .control-popover > button {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 36px;
+  padding: 0;
+  color: var(--muted);
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.workspace-navigation button[aria-pressed="true"],
+.workspace-navigation button[aria-expanded="true"],
+.workspace-settings button[aria-expanded="true"] {
+  color: var(--text);
+  background: var(--selection);
+}
+
+.workspace-settings {
+  margin-top: auto;
+  padding-top: 12px;
+}
+
+.workspace-sidebar .control-popover-content > button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.workspace-sidebar .control-popover-content > button:hover {
+  background: var(--surface-3);
+}
+
+.sidebar-header-actions > .control-popover > button {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  color: var(--muted);
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.vpn-activity-indicator,
+.rail-activity-dot {
+  position: absolute;
+  top: 5px;
+  right: 4px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--warning);
+}
+
+.rail-activity-dot {
+  background: var(--success);
+}
+
+.vpn-activity-indicator.connected {
+  background: var(--success);
+}
+
+.vpn-activity-indicator.stale {
+  background: var(--muted);
+}
+
+.app-shell.sidebar-collapsed {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.sidebar-collapsed > .workspace-sidebar {
+  display: none;
+}
+
+.sidebar-content .task-sidebar {
+  min-height: 0;
+  flex: 1;
+  overflow-y: auto;
+}
+
+.task-browser {
+  display: flex;
+  flex-direction: column;
+}
+
+.task-definitions,
+.task-runs {
+  min-width: 0;
+  padding-bottom: 12px;
+}
+
+.task-definitions {
+  border-bottom: 1px solid var(--border);
+}
+
+.status-session,
+.status-terminal-controls,
+.terminal-controls,
+.status-terminal-controls > div {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.status-alerts {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.status-session > .control-popover > button {
+  max-width: 220px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.status-session .control-popover-content {
+  left: 0;
+  right: auto;
+}
+
+.status-bar button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 24px;
+  padding: 3px 7px;
+  color: var(--muted);
+  font: inherit;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.status-bar button:hover {
+  color: var(--text);
+  background: var(--surface-3);
+}
+
+.status-bar .control-popover-content > button {
+  justify-content: flex-start;
+  padding: 7px;
+  line-height: 1.5;
+}
+
+.status-bar .control-popover-content {
+  line-height: 1.5;
+}
+
+.status-bar .active-control {
+  color: var(--text);
+  background: var(--selection);
+}

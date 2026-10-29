@@ -147,9 +147,9 @@ describe("SessionSidebar", () => {
       attachmentStates: new Map([[sessionKey(known), { ...initialAttachmentState(), phase: "attached", session: known }]]),
     });
     const row = screen.getByRole("button", { name: "Shell — first" });
-    expect(within(row).getByText("Attached")).toBeTruthy();
+    expect(within(row).getByLabelText("Attached").getAttribute("title")).toContain("80×24");
     expect(row.querySelector("time")).toBeNull();
-    expect(row.querySelector("small")?.title).toContain("80×24");
+    expect(row.querySelector("small")).toBeNull();
     expect(vi.getTimerCount()).toBe(0);
   });
 
@@ -272,7 +272,7 @@ describe("SessionSidebar", () => {
     const host = screen.getByRole("status", { name: "Host connection for Build machine: SSH connected" });
     expect(host.getAttribute("data-state")).toBe("connected");
     expect(host.title).not.toContain(message);
-    expect(screen.getByText("Attached")).toBeTruthy();
+    expect(screen.getByLabelText("Attached")).toBeTruthy();
     const failure = screen.getByText("Reconnect failed");
     expect(failure.closest(".session-details")?.getAttribute("title")).toContain(message);
     expect(screen.queryByText(/session needs attention/i)).toBeNull();
@@ -475,11 +475,11 @@ describe("SessionSidebar", () => {
     );
 
     expect(markup).toContain('aria-label="Terminate first"');
-    expect(markup).toContain('aria-label="Add host"');
+    expect(markup).toContain('aria-label="Add or manage sessions"');
     expect(markup).not.toContain('aria-label="Add host with gateways"');
     expect(markup).not.toContain("session-close-confirmation");
     expect(markup).not.toContain("host-form");
-    expect(markup).toContain("New shell");
+    expect(markup).toContain("Add or manage sessions");
     expect(markup).not.toContain("<form");
   });
 
@@ -513,7 +513,7 @@ describe("SessionSidebar", () => {
     expect(markup).toContain(`title="${fullTitle}"`);
     expect(markup).toContain("<strong>…/desktop — …mux-app</strong>");
     expect(markup).toContain(
-      `<small class="session-details" title="${session.name} · Last seen running · Session last reported running"><span class="session-detail-label">${session.name}<span aria-hidden="true"> · </span>`,
+      `<small class="session-details" title="${session.name} · Last seen running · Session last reported running"><span class="session-detail-label">`,
     );
     expect(markup).not.toContain(`<strong>${session.name}</strong>`);
   });
@@ -643,6 +643,7 @@ describe("SessionSidebar", () => {
 
     await user.click(screen.getByRole("button", { name: "Host settings for build-host" }));
     expect(onHostSettings).toHaveBeenCalledWith(remote);
+    await user.click(screen.getByRole("button", { name: "Add or manage sessions" }));
     await user.click(screen.getByRole("button", { name: "Add host" }));
     expect(onAddHost).toHaveBeenCalledOnce();
     expect(screen.queryByRole("button", { name: "Add host with gateways" })).toBeNull();

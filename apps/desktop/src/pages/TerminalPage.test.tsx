@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { flushSync } from "react-dom";
 import {
   act,
   cleanup,
@@ -345,7 +346,41 @@ function nativeCommand(commandId: string, count = 1) {
   });
 }
 
+function sidebarAction(name: string): HTMLElement {
+  const menu = ["Credentials", "About ctmux", "Configure Keyboard Shortcuts"].includes(name) ? "Settings" : "Add or manage sessions";
+  if (!screen.queryByRole("button", { name })) {
+    flushSync(() => fireEvent.click(screen.getByRole("button", { name: menu })));
+  }
+  return screen.getByRole("button", { name });
+}
+
+async function findSidebarAction(name: string): Promise<HTMLElement> {
+  await waitFor(() => expect(document.querySelector("main")?.hasAttribute("inert")).toBe(false));
+  return sidebarAction(name);
+}
+
 describe("workspace-backed terminal page", () => {
+  it("switches the sidebar to tasks without changing or remounting workspace tabs", async () => {
+    render(<TerminalPage />);
+    await screen.findByRole("button", { name: "Connect host" });
+    const tabs = screen.getByRole("navigation", { name: "Workspace tabs" });
+    fireEvent.click(screen.getByRole("button", { name: "Tasks" }));
+    expect(screen.queryByRole("button", { name: "Add or manage sessions" })).toBeNull();
+    expect(screen.getByRole("complementary", { name: "Workspace navigation" }).contains(screen.getByRole("button", { name: "New task definition" }))).toBe(true);
+    expect(document.querySelector(".workspace-task-drawer")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Tasks" }));
+    expect(screen.getByRole("button", { name: "Tasks" }).getAttribute("aria-pressed")).toBe("true");
+    fireEvent.click(screen.getByRole("button", { name: "Hide sidebar" }));
+    expect(screen.queryByRole("button", { name: "New task definition" })).toBeNull();
+    expect(screen.getByRole("navigation", { name: "Workspace tabs" })).toBe(tabs);
+    fireEvent.click(screen.getByRole("button", { name: "Show sidebar" }));
+    expect(screen.getByRole("button", { name: "New task definition" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Sessions" }));
+    expect(screen.queryByRole("button", { name: "New task definition" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Add or manage sessions" })).toBeTruthy();
+    expect(screen.getByRole("navigation", { name: "Workspace tabs" })).toBe(tabs);
+  });
+
   it("shows and releases a verified alias owner in this window instead of reporting another client", async () => {
     const selected: SessionSummary = { ...newSession({ kind: "ssh", host_id: "test-id", destination: "test", remote_info: remoteInfo }),
       session_id: "known-id", terminal_id: "primary", view_id: "shared-view" };
@@ -362,6 +397,7 @@ describe("workspace-backed terminal page", () => {
     try {
       render(<TerminalPage />);
       await screen.findByRole("button", { name: "Host settings for test" });
+      fireEvent.click(await screen.findByRole("button", { name: /^Layout/ }));
       await screen.findByRole("button", { name: "Release resize control" });
       await waitFor(() => expect(screen.getByRole("button", { name: "Release resize control" }).hasAttribute("disabled")).toBe(false));
       expect(screen.getByLabelText("Resize control status").textContent).toBe("Resize: Owned here");
@@ -377,7 +413,7 @@ describe("workspace-backed terminal page", () => {
     api.createSession.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
     render(<TerminalPage />);
     await screen.findByRole("button", { name: "Host settings for test" });
-    fireEvent.click(screen.getByRole("button", { name: "New shell" }));
+    fireEvent.click(sidebarAction("New shell"));
     fireEvent.click(screen.getByRole("option", { name: "test" }));
     fireEvent.click(screen.getByRole("button", { name: "Create shell" }));
     await waitFor(() => expect(api.createSession).toHaveBeenCalledOnce());
@@ -414,7 +450,7 @@ describe("workspace-backed terminal page", () => {
     await screen.findByRole("button", { name: "Connect host" });
     const terminal = page.container.querySelector(".terminal-workspace")!;
     const updates_before = api.updateWorkspace.mock.calls.length;
-    fireEvent.click(screen.getByRole("button", { name: "About ctmux" }));
+    fireEvent.click(sidebarAction("About ctmux"));
     await screen.findByRole("heading", { name: "About ctmux" });
     await waitFor(() => expect(api.getComponentVersions).toHaveBeenCalledOnce());
     expect(page.container.querySelector(".terminal-workspace")).toBe(terminal);
@@ -426,7 +462,7 @@ describe("workspace-backed terminal page", () => {
     nativeCommand(COMMAND_IDS.about);
     await screen.findByRole("heading", { name: "About ctmux" });
     expect(page.container.querySelector(".terminal-workspace")).toBe(terminal);
-    fireEvent.click(screen.getByRole("tab", { name: "VPN" }));
+    fireEvent.click(screen.getByRole("button", { name: "VPN" }));
     expect(screen.queryByRole("heading", { name: "About ctmux" })).toBeNull();
     expect(terminal.hasAttribute("hidden")).toBe(false);
   });
@@ -436,7 +472,7 @@ describe("workspace-backed terminal page", () => {
     await screen.findByRole("button", { name: "Connect host" });
     const terminal = page.container.querySelector(".terminal-workspace")!;
     expect(api.listSavedCredentials).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: "Credentials" }));
+    fireEvent.click(sidebarAction("Credentials"));
     await screen.findByRole("heading", { name: "Credentials" });
     await waitFor(() => expect(api.listSavedCredentials).toHaveBeenCalled());
     expect(api.listSavedCredentials.mock.calls[api.listSavedCredentials.mock.calls.length - 1][0]).toEqual(expect.arrayContaining([
@@ -592,9 +628,9 @@ describe("workspace-backed terminal page", () => {
       endpoint: "socks5h://127.0.0.1:49152", container_name: "sample-vpn",
     }], supports_multiple: true });
     render(<TerminalPage />);
-    const vpn_tab = await screen.findByRole("tab", { name: "VPN" });
+    const vpn_tab = await screen.findByRole("button", { name: "VPN" });
     await waitFor(() => expect(vpn_tab.getAttribute("aria-description")).toBe("Connected"));
-    expect(screen.getByRole("tab", { name: "Sessions" }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByRole("complementary", { name: "ctmux sessions" })).toBeTruthy();
     fireEvent.click(vpn_tab);
     expect(await screen.findByText("https://vpn.example.test")).toBeTruthy();
     expect(screen.getByText("cli-user")).toBeTruthy();
@@ -619,7 +655,7 @@ describe("workspace-backed terminal page", () => {
       return { ...first, state: "stopped", running: false, endpoint: null };
     });
     render(<TerminalPage />);
-    const vpn_tab = await screen.findByRole("tab", { name: "VPN" });
+    const vpn_tab = await screen.findByRole("button", { name: "VPN" });
     await waitFor(() => expect(vpn_tab.getAttribute("aria-description")).toBe("2 active VPNs"));
     fireEvent.click(vpn_tab);
     const items = screen.getAllByRole("region", { name: "Connected VPN" });
@@ -637,7 +673,7 @@ describe("workspace-backed terminal page", () => {
     const page = render(<StrictMode><TerminalPage /></StrictMode>);
     await screen.findByRole("button", { name: "Connect host" });
     expect(api.loadVpnConnections).toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("tab", { name: "VPN" }));
+    fireEvent.click(screen.getByRole("button", { name: "VPN" }));
     await screen.findByText("No saved VPN connections.");
     expect(api.vpnStatus).toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Add VPN connection" }));
@@ -659,8 +695,8 @@ describe("workspace-backed terminal page", () => {
   it("switches sidebar tabs and keeps an incomplete draft after dismissal and relaunch", async () => {
     const first = render(<TerminalPage />);
     await screen.findByRole("button", { name: "Connect host" });
-    fireEvent.click(screen.getByRole("tab", { name: "Tasks" }));
-    expect(screen.queryByRole("button", { name: "New shell" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Tasks" }));
+    expect(screen.queryByRole("button", { name: "Add or manage sessions" })).toBeNull();
     const existingTabs = within(
       screen.getByRole("navigation", { name: "Workspace tabs" }),
     ).getAllByRole("tab").length;
@@ -723,14 +759,14 @@ describe("workspace-backed terminal page", () => {
     ).toBe("");
     fireEvent.click(screen.getByRole("button", { name: "Close task editor" }));
     expect(screen.queryByRole("dialog")).toBeNull();
-    fireEvent.click(screen.getByRole("tab", { name: "Sessions" }));
-    expect(screen.getByRole("button", { name: "New shell" })).toBeDefined();
+    fireEvent.click(screen.getByRole("button", { name: "Sessions" }));
+    expect(screen.getByRole("button", { name: "Add or manage sessions" })).toBeDefined();
   });
 
   it("creates a definition explicitly from the autosaved draft without starting a task", async () => {
     render(<TerminalPage />);
     await screen.findByRole("button", { name: "Connect host" });
-    fireEvent.click(screen.getByRole("tab", { name: "Tasks" }));
+    fireEvent.click(screen.getByRole("button", { name: "Tasks" }));
     fireEvent.click(
       screen.getByRole("button", { name: "New task definition" }),
     );
@@ -762,7 +798,7 @@ describe("workspace-backed terminal page", () => {
   it("generates a name when creating a definition with a blank name", async () => {
     render(<TerminalPage />);
     await screen.findByRole("button", { name: "Connect host" });
-    fireEvent.click(screen.getByRole("tab", { name: "Tasks" }));
+    fireEvent.click(screen.getByRole("button", { name: "Tasks" }));
     fireEvent.click(screen.getByRole("button", { name: "New task definition" }));
     fireEvent.change(screen.getByRole("textbox", { name: "Command line" }), {
       target: { value: "cargo build" },
@@ -777,7 +813,7 @@ describe("workspace-backed terminal page", () => {
   it("parses command input and preserves unfinished quoting on dismissal", async () => {
     render(<TerminalPage />);
     await screen.findByRole("button", { name: "Connect host" });
-    fireEvent.click(screen.getByRole("tab", { name: "Tasks" }));
+    fireEvent.click(screen.getByRole("button", { name: "Tasks" }));
     fireEvent.click(
       screen.getByRole("button", { name: "New task definition" }),
     );
@@ -823,7 +859,7 @@ describe("workspace-backed terminal page", () => {
     api.loadTaskDefinitions.mockResolvedValue({ scope, path: "/shared/tasks.json", definitions: [original] });
     render(<TerminalPage />);
     await screen.findByRole("button", { name: "Connect host" });
-    fireEvent.click(screen.getByRole("tab", { name: "Tasks" }));
+    fireEvent.click(screen.getByRole("button", { name: "Tasks" }));
     fireEvent.click(await screen.findByText("Build"));
     fireEvent.change(screen.getByRole("textbox", { name: "Name" }), { target: { value: "My draft" } });
 
@@ -858,7 +894,7 @@ describe("workspace-backed terminal page", () => {
     api.saveTaskDefinition.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
     render(<TerminalPage />);
     await screen.findByRole("button", { name: "Connect host" });
-    fireEvent.click(screen.getByRole("tab", { name: "Tasks" }));
+    fireEvent.click(screen.getByRole("button", { name: "Tasks" }));
     fireEvent.click(await screen.findByText("Build"));
     fireEvent.change(screen.getByRole("textbox", { name: "Name" }), { target: { value: "Saved build" } });
     fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
@@ -874,7 +910,7 @@ describe("workspace-backed terminal page", () => {
   it("requires an absolute project folder and keeps a resumed draft pinned to that source", async () => {
     render(<TerminalPage />);
     await screen.findByRole("button", { name: "Connect host" });
-    fireEvent.click(screen.getByRole("tab", { name: "Tasks" }));
+    fireEvent.click(screen.getByRole("button", { name: "Tasks" }));
     fireEvent.change(screen.getByRole("combobox", { name: "Definition source" }), { target: { value: "project" } });
     fireEvent.change(screen.getByRole("textbox", { name: "Project folder" }), { target: { value: "relative/project" } });
     fireEvent.click(screen.getByRole("button", { name: "Open project definitions" }));
@@ -905,7 +941,7 @@ describe("workspace-backed terminal page", () => {
     api.removeTaskDefinition.mockRejectedValue({ code: "definition_conflict", message: "The definition changed before deletion." });
     render(<TerminalPage />);
     await screen.findByRole("button", { name: "Connect host" });
-    fireEvent.click(screen.getByRole("tab", { name: "Tasks" }));
+    fireEvent.click(screen.getByRole("button", { name: "Tasks" }));
     fireEvent.click(await screen.findByText("Build"));
     fireEvent.change(screen.getByRole("textbox", { name: "Name" }), { target: { value: "Unfinished edit" } });
     fireEvent.click(screen.getByRole("button", { name: "Delete definition…" }));
@@ -970,8 +1006,8 @@ describe("workspace-backed terminal page", () => {
     expect(within(center).getByText("Stop active tasks before restarting ctl-taskd.")).toBeTruthy();
     fireEvent.click(within(center).getByRole("button", { name: "Dismiss Tasks notification" }));
     fireEvent.click(screen.getByRole("button", { name: "Hide notification center" }));
-    fireEvent.click(screen.getByRole("tab", { name: "Sessions" }));
-    fireEvent.click(screen.getByRole("tab", { name: "Tasks" }));
+    fireEvent.click(screen.getByRole("button", { name: "Sessions" }));
+    fireEvent.click(screen.getByRole("button", { name: "Tasks" }));
     expect(screen.queryByText("Stop active tasks before restarting ctl-taskd.")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Notifications" }));
     expect(screen.getByText("No notifications")).toBeTruthy();
@@ -1361,7 +1397,7 @@ describe("workspace-backed terminal page", () => {
       .mockResolvedValue(newSession());
     render(<TerminalPage />);
     await screen.findByRole("button", { name: "Connect host" });
-    fireEvent.click(screen.getByRole("button", { name: "New shell" }));
+    fireEvent.click(sidebarAction("New shell"));
     fireEvent.click(screen.getByRole("option", { name: "Local" }));
     fireEvent.change(screen.getByLabelText("Working directory"), {
       target: { value: "/missing" },
@@ -1388,7 +1424,7 @@ describe("workspace-backed terminal page", () => {
     );
     render(<TerminalPage />);
     await screen.findByRole("button", { name: "Connect host" });
-    fireEvent.click(screen.getByRole("button", { name: "New shell" }));
+    fireEvent.click(sidebarAction("New shell"));
     fireEvent.click(screen.getByRole("option", { name: "Local" }));
     fireEvent.click(screen.getByRole("button", { name: "Create shell" }));
     await screen.findByText(/was created, but opening its tab failed/);
@@ -1407,7 +1443,7 @@ describe("workspace-backed terminal page", () => {
     await screen.findByRole("button", { name: "Host settings for test" });
     expect(screen.queryByRole("button", { name: "Host settings for only-in-ssh-config" })).toBeNull();
     expect(screen.queryByRole("region", { name: "only-in-ssh-config sessions" })).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "New shell" }));
+    fireEvent.click(sidebarAction("New shell"));
     expect(screen.getByRole("option", { name: "only-in-ssh-config" })).toBeTruthy();
     fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
     expect(screen.queryByRole("region", { name: "only-in-ssh-config sessions" })).toBeNull();
@@ -1431,7 +1467,7 @@ describe("workspace-backed terminal page", () => {
       { ...tailscaleDevice, node_id: "unknown", name: "Unknown device", online: null },
     ], warnings: [], state: "available" });
     render(<TerminalPage />);
-    fireEvent.click(await screen.findByRole("button", { name: button }));
+    fireEvent.click(await findSidebarAction(button));
     const group = await screen.findByRole("group", { name: "Tailscale · Virtual" });
     expect(within(group).getByRole("option", { name: /Tailnet builder/ })).toBeTruthy();
     expect(screen.queryByRole("option", { name: /Offline device|Unknown device/ })).toBeNull();
@@ -1449,12 +1485,12 @@ describe("workspace-backed terminal page", () => {
       .mockImplementationOnce(() => new Promise<TailscaleDeviceCatalog>((resolve) => { finishRefresh = resolve; }))
       .mockResolvedValue({ devices: [tailscaleDevice, { ...newDevice, online: false }], warnings: [], state: "available" });
     render(<TerminalPage />);
-    fireEvent.click(await screen.findByRole("button", { name: "New shell" }));
+    fireEvent.click(await findSidebarAction("New shell"));
     await screen.findByRole("option", { name: /Tailnet builder/ });
     fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
     expect(api.listTailscaleDevices).toHaveBeenCalledTimes(1);
 
-    fireEvent.click(screen.getByRole("button", { name: "Add host" }));
+    fireEvent.click(sidebarAction("Add host"));
     expect(api.listTailscaleDevices).toHaveBeenCalledTimes(2);
     expect(screen.queryByRole("option", { name: /Tailnet builder/ })).toBeNull();
     expect(screen.getByText("Discovering hosts…")).toBeTruthy();
@@ -1466,7 +1502,7 @@ describe("workspace-backed terminal page", () => {
     expect(screen.queryByRole("option", { name: /Tailnet builder/ })).toBeNull();
     fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
 
-    fireEvent.click(screen.getByRole("button", { name: "Add host" }));
+    fireEvent.click(sidebarAction("Add host"));
     expect(api.listTailscaleDevices).toHaveBeenCalledTimes(3);
     await screen.findByRole("option", { name: /Tailnet builder/ });
     expect(screen.queryByRole("option", { name: /New online device/ })).toBeNull();
@@ -1479,7 +1515,7 @@ describe("workspace-backed terminal page", () => {
     api.listTailscaleDevices.mockResolvedValue({ devices: [tailscaleDevice], warnings: [], state: "available" });
     api.createSession.mockImplementation(async (request: { target: ConnectionTarget }) => newSession(request.target));
     render(<TerminalPage />);
-    fireEvent.click(await screen.findByRole("button", { name: "New shell" }));
+    fireEvent.click(await findSidebarAction("New shell"));
     fireEvent.click(await screen.findByRole("option", { name: /Tailnet builder/ }));
     fireEvent.click(screen.getByRole("button", { name: "Create shell" }));
     await screen.findByRole("textbox", { name: "SSH user" });
@@ -1498,7 +1534,7 @@ describe("workspace-backed terminal page", () => {
     api.listTailscaleDevices.mockResolvedValue({ devices: [tailscaleDevice], warnings: [], state: "available" });
     api.listSessions.mockResolvedValue({ sessions: [], shell_states: {} });
     render(<TerminalPage />);
-    fireEvent.click(await screen.findByRole("button", { name: "Add host" }));
+    fireEvent.click(await findSidebarAction("Add host"));
     fireEvent.click(await screen.findByRole("option", { name: /Tailnet builder/ }));
     fireEvent.change(screen.getByLabelText("Host name"), { target: { value: "Private builder" } });
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
@@ -1512,7 +1548,7 @@ describe("workspace-backed terminal page", () => {
       host_id: tailscaleHostId(tailscaleDevice.node_id), preferred_method_id: "tailscale",
       connection_methods: [{ method_id: "tailscale", tailscale_node_id: tailscaleDevice.node_id, target: { user: "developer" } }],
     });
-    fireEvent.click(screen.getByRole("button", { name: "Add existing session" }));
+    fireEvent.click(sidebarAction("Add existing session"));
     fireEvent.click(screen.getByRole("option", { name: /Private builder/ }));
     await waitFor(() => expect(api.listSessions).toHaveBeenCalledOnce());
     expect(api.listSessions.mock.calls[0][0]).toMatchObject({
@@ -1538,7 +1574,7 @@ describe("workspace-backed terminal page", () => {
   ] as const)("labels virtual projections explicitly in the %s selector", async (button, includesSaved) => {
     render(<TerminalPage />);
     await screen.findByRole("button", { name: "Host settings for test" });
-    fireEvent.click(screen.getByRole("button", { name: button }));
+    fireEvent.click(sidebarAction(button));
     const virtual = screen.getByRole("group", { name: "SSH config · Virtual" });
     expect(within(virtual).getByRole("option", { name: "only-in-ssh-config" })).toBeTruthy();
     if (includesSaved) {
@@ -1607,7 +1643,7 @@ describe("workspace-backed terminal page", () => {
     api.createSession.mockImplementation(async (request: { target: ConnectionTarget }) => newSession(request.target));
     render(<TerminalPage />);
     await screen.findByRole("button", { name: "Host settings for test" });
-    fireEvent.click(screen.getByRole("button", { name: "New shell" }));
+    fireEvent.click(sidebarAction("New shell"));
     fireEvent.click(screen.getByRole("option", { name: "only-in-ssh-config" }));
     fireEvent.click(screen.getByRole("button", { name: "Create shell" }));
     await waitFor(() => expect(api.probeSshHost).toHaveBeenCalledOnce());
@@ -1651,7 +1687,7 @@ describe("workspace-backed terminal page", () => {
     api.listSessions.mockImplementation(async (target: ConnectionTarget) => ({ sessions: [newSession(target)], shell_states: {} }));
     render(<TerminalPage />);
     await screen.findByRole("button", { name: "Host settings for test" });
-    fireEvent.click(screen.getByRole("button", { name: "Add existing session" }));
+    fireEvent.click(sidebarAction("Add existing session"));
     fireEvent.click(screen.getByRole("option", { name: "only-in-ssh-config" }));
     await waitFor(() => expect(api.probeSshHost).toHaveBeenCalledOnce());
     expect(api.listSessions).not.toHaveBeenCalled();
@@ -1706,7 +1742,7 @@ describe("workspace-backed terminal page", () => {
     api.createSession.mockImplementation(async (request: { target: ConnectionTarget }) => newSession(request.target));
     render(<TerminalPage />);
     await screen.findByRole("button", { name: "Host settings for test" });
-    fireEvent.click(screen.getByRole("button", { name: "New shell" }));
+    fireEvent.click(sidebarAction("New shell"));
     fireEvent.click(screen.getByRole("option", { name: "only-in-ssh-config" }));
     fireEvent.change(screen.getByLabelText("Working directory"), { target: { value: "/project/work" } });
     expect(api.probeSshHost).not.toHaveBeenCalled();
@@ -1753,7 +1789,7 @@ describe("workspace-backed terminal page", () => {
     render(<TerminalPage />);
     await screen.findByRole("button", { name: "Host settings for test" });
     await waitFor(() => expect(nativeWindow.onCloseRequested).toHaveBeenCalledOnce());
-    fireEvent.click(screen.getByRole("button", { name: action }));
+    fireEvent.click(sidebarAction(action));
     fireEvent.click(screen.getByRole("option", { name: "test" }));
     if (action === "New shell") fireEvent.click(screen.getByRole("button", { name: "Create shell" }));
     await waitFor(() => expect(stage === "save" ? api.updateHosts : api.listPortForwards).toHaveBeenCalledOnce());
@@ -1792,7 +1828,7 @@ describe("workspace-backed terminal page", () => {
     }]);
     render(<TerminalPage />);
     await screen.findByRole("button", { name: "Connect host" });
-    fireEvent.click(screen.getByRole("button", { name: action }));
+    fireEvent.click(sidebarAction(action));
     if (action !== "Connect host") fireEvent.click(screen.getByRole("option", { name: "test" }));
     if (action === "New shell") fireEvent.click(screen.getByRole("button", { name: "Create shell" }));
 
@@ -1829,7 +1865,7 @@ describe("workspace-backed terminal page", () => {
     api.createSession.mockImplementation(async (request: { target: ConnectionTarget }) => newSession(request.target));
     render(<TerminalPage />);
     await screen.findByRole("button", { name: "Host settings for test" });
-    fireEvent.click(screen.getByRole("button", { name: "New shell" }));
+    fireEvent.click(sidebarAction("New shell"));
     fireEvent.click(screen.getByRole("option", { name: "only-in-ssh-config" }));
     fireEvent.change(screen.getByLabelText("Working directory"), { target: { value: "/keep/this-draft" } });
     fireEvent.click(screen.getByRole("button", { name: "Create shell" }));
@@ -1860,7 +1896,7 @@ describe("workspace-backed terminal page", () => {
     });
     render(<TerminalPage />);
     await screen.findByRole("button", { name: "Host settings for test" });
-    fireEvent.click(screen.getByRole("button", { name: "Add existing session" }));
+    fireEvent.click(sidebarAction("Add existing session"));
     fireEvent.click(screen.getByRole("option", { name: "only-in-ssh-config" }));
     await waitFor(() => expect(api.probeSshHost).toHaveBeenCalledOnce());
     await act(async () => showPrompt({ prompt_id: "password", kind: "secret", message: "Password:" }));
@@ -1889,7 +1925,7 @@ describe("workspace-backed terminal page", () => {
     render(<TerminalPage />);
     await screen.findByRole("button", { name: "Host settings for test" });
     expect(api.probeSshHost).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: action }));
+    fireEvent.click(sidebarAction(action));
     fireEvent.click(screen.getByRole("option", { name: "test" }));
     if (action === "New shell") {
       expect(api.probeSshHost).not.toHaveBeenCalled();
@@ -1953,7 +1989,7 @@ describe("workspace-backed terminal page", () => {
     catalog.document.hosts[0].remote_info = remoteInfo;
     api.loadHosts.mockResolvedValue(catalog);
     render(<TerminalPage />);
-    fireEvent.click(await screen.findByRole("button", { name: "Add host" }));
+    fireEvent.click(await findSidebarAction("Add host"));
     fireEvent.change(screen.getByLabelText("SSH host"), { target: { value: "deploy@build.example:2222" } });
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
     fireEvent.change(screen.getByLabelText("Host name"), {
@@ -1999,7 +2035,7 @@ describe("workspace-backed terminal page", () => {
     }] });
     api.createSession.mockImplementation(async (request: { target: ConnectionTarget }) => newSession(request.target));
     render(<TerminalPage />);
-    fireEvent.click(await screen.findByRole("button", { name: "Add host" }));
+    fireEvent.click(await findSidebarAction("Add host"));
     fireEvent.change(screen.getByLabelText("SSH host"), { target: { value: "deploy@build.example.test" } });
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
     fireEvent.change(screen.getByLabelText("Host name"), { target: { value: "Office builder" } });
@@ -2020,7 +2056,7 @@ describe("workspace-backed terminal page", () => {
     expect(JSON.stringify(host)).not.toContain("vpn-user");
     expect(api.connectVpn).not.toHaveBeenCalled();
 
-    fireEvent.click(screen.getByRole("button", { name: "New shell" }));
+    fireEvent.click(sidebarAction("New shell"));
     fireEvent.click(screen.getByRole("option", { name: /Office builder/ }));
     fireEvent.click(screen.getByRole("button", { name: "Create shell" }));
     await waitFor(() => expect(api.createSession).toHaveBeenCalledOnce());
@@ -2037,7 +2073,7 @@ describe("workspace-backed terminal page", () => {
     }];
     api.loadHosts.mockResolvedValue(catalog);
     render(<TerminalPage />);
-    fireEvent.click(await screen.findByRole("button", { name: "Add host" }));
+    fireEvent.click(await findSidebarAction("Add host"));
     fireEvent.change(screen.getByLabelText("SSH host"), { target: { value: "build.example.test" } });
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
@@ -2071,7 +2107,7 @@ describe("workspace-backed terminal page", () => {
     api.createSession.mockImplementation(async (request: { target: ConnectionTarget }) => newSession(request.target));
     api.listSessions.mockImplementation(async (target: ConnectionTarget) => ({ sessions: [newSession(target)], shell_states: {} }));
     render(<TerminalPage />);
-    fireEvent.click(await screen.findByRole("button", { name: "Add host" }));
+    fireEvent.click(await findSidebarAction("Add host"));
     fireEvent.click(screen.getByRole("option", { name: "only-in-ssh-config" }));
     fireEvent.change(screen.getByLabelText("Host name"), { target: { value: "Office machine" } });
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
@@ -2098,7 +2134,7 @@ describe("workspace-backed terminal page", () => {
     expect(attachment.connect).not.toHaveBeenCalled();
     api.probeSshHost.mockClear();
 
-    fireEvent.click(screen.getByRole("button", { name: action }));
+    fireEvent.click(sidebarAction(action));
     fireEvent.click(screen.getByRole("option", { name: "Office machine" }));
     if (action === "New shell") fireEvent.click(screen.getByRole("button", { name: "Create shell" }));
     const target = {
@@ -2156,7 +2192,7 @@ describe("workspace-backed terminal page", () => {
     expect(attachment.detach).not.toHaveBeenCalled();
     api.probeSshHost.mockClear();
 
-    fireEvent.click(screen.getByRole("button", { name: action }));
+    fireEvent.click(sidebarAction(action));
     fireEvent.click(screen.getByRole("option", { name: "test" }));
     if (action === "New shell") fireEvent.click(screen.getByRole("button", { name: "Create shell" }));
     if (change === "edited") {
@@ -2310,7 +2346,7 @@ describe("workspace-backed terminal page", () => {
 
   it("retries a failed new-host save without adding duplicate hosts", async () => {
     render(<TerminalPage />);
-    fireEvent.click(await screen.findByRole("button", { name: "Add host" }));
+    fireEvent.click(await findSidebarAction("Add host"));
     fireEvent.change(screen.getByLabelText("SSH host"), { target: { value: "build.example" } });
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
     fireEvent.change(screen.getByLabelText("Host name"), { target: { value: "Build machine" } });
@@ -2399,7 +2435,7 @@ describe("workspace-backed terminal page", () => {
     expect(persisted.sessions).toEqual(saved.sessions);
     expect(persisted.active_tab).toEqual({ ...saved.active_tab, kind: "session" });
 
-    fireEvent.click(screen.getByRole("button", { name: "Choose host to connect" }));
+    fireEvent.click(sidebarAction("Choose host to connect"));
     fireEvent.click(screen.getByRole("option", { name: "Build server" }));
     const preferredOption = screen.getByRole("option", { name: /VPN/ });
     expect(preferredOption.getAttribute("aria-selected")).toBe("true");
@@ -2440,7 +2476,7 @@ describe("workspace-backed terminal page", () => {
     render(<TerminalPage />);
     await screen.findByRole("button", { name: "Host settings for test" });
     if (entry === "picker") {
-      fireEvent.click(screen.getByRole("button", { name: "Choose host to connect" }));
+      fireEvent.click(sidebarAction("Choose host to connect"));
       fireEvent.click(screen.getByRole("option", { name: "test" }));
     } else {
       const connect = screen.getByRole("button", { name: "Connect to test" });
@@ -2670,7 +2706,7 @@ describe("workspace-backed terminal page", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Refresh sessions" }));
     fireEvent.click(screen.getByRole("button", { name: "~/work — remembered" }));
-    fireEvent.click(screen.getByRole("tab", { name: "Ports" }));
+    fireEvent.click(screen.getByRole("button", { name: "Ports" }));
     await screen.findByText("Host disconnected. Connect this host to resume forwarding.");
     expect(api.inspectKnownSessions).not.toHaveBeenCalled();
     expect(attachment.connect).not.toHaveBeenCalled();
@@ -2680,7 +2716,7 @@ describe("workspace-backed terminal page", () => {
       expect.objectContaining({ host_id: "test-id" }),
     );
 
-    fireEvent.click(screen.getByRole("tab", { name: "Sessions" }));
+    fireEvent.click(screen.getByRole("button", { name: "Sessions" }));
     fireEvent.click(screen.getByRole("button", { name: "Connect to test" }));
     await waitFor(() => expect(attachment.connect).toHaveBeenCalledOnce());
     expect(await screen.findByRole("status", { name: "Host connection for test: SSH connected" })).toBeTruthy();
@@ -3179,7 +3215,7 @@ describe("workspace-backed terminal page", () => {
     );
     const first = render(<TerminalPage />);
     await screen.findByRole("button", { name: "Connect host" });
-    fireEvent.click(screen.getByRole("button", { name: "New shell" }));
+    fireEvent.click(sidebarAction("New shell"));
     fireEvent.click(screen.getByRole("option", { name: "Local" }));
     fireEvent.click(screen.getByRole("button", { name: "Create shell" }));
     await waitFor(() => expect(api.updateWorkspace).toHaveBeenCalledOnce());
@@ -3233,7 +3269,7 @@ describe("workspace-backed terminal page", () => {
     });
     render(<TerminalPage />);
     await screen.findByRole("button", { name: "Connect host" });
-    fireEvent.click(screen.getByRole("button", { name: "New shell" }));
+    fireEvent.click(sidebarAction("New shell"));
     fireEvent.click(screen.getByRole("option", { name: "Local" }));
     fireEvent.click(screen.getByRole("button", { name: "Create shell" }));
     await screen.findByText(

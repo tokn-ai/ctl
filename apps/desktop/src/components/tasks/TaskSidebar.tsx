@@ -36,143 +36,149 @@ export function TaskSidebar({
           <Icon name="plus" />
         </button>
       </header>
-      <TaskDefinitionSource model={model} />
-      {model.drafts.filter(
-        (draft) =>
-          !definitions.some(
-            (saved) => saved.definition_id === draft.definition_id && definitionScopeKey(draft.scope) === definitionScopeKey(model.definition_scope),
-          ),
-      ).length ? (
-        <>
-          <h3>Drafts</h3>
-          {model.drafts
-            .filter(
-              (draft) =>
-                !definitions.some(
-                  (saved) => saved.definition_id === draft.definition_id && definitionScopeKey(draft.scope) === definitionScopeKey(model.definition_scope),
-                ),
-            )
-            .map((draft) => (
-              <div className="task-sidebar-row" key={`${definitionScopeKey(draft.scope)}:${draft.definition_id}`}>
+      <div className="task-browser">
+        <div className="task-definitions">
+          <TaskDefinitionSource model={model} />
+          {model.drafts.filter(
+            (draft) =>
+              !definitions.some(
+                (saved) => saved.definition_id === draft.definition_id && definitionScopeKey(draft.scope) === definitionScopeKey(model.definition_scope),
+              ),
+          ).length ? (
+            <>
+              <h3>Drafts</h3>
+              {model.drafts
+                .filter(
+                  (draft) =>
+                    !definitions.some(
+                      (saved) => saved.definition_id === draft.definition_id && definitionScopeKey(draft.scope) === definitionScopeKey(model.definition_scope),
+                    ),
+                )
+                .map((draft) => (
+                  <div className="task-sidebar-row" key={`${definitionScopeKey(draft.scope)}:${draft.definition_id}`}>
+                    <button
+                      className="task-row-main"
+                      aria-label={`Resume draft ${draft.definition.name || "Untitled task"}`}
+                      onClick={() => model.openEditor(draft.definition_id, draft.scope ?? GLOBAL_DEFINITION_SCOPE)}
+                    >
+                      <Icon name="tasks" class_name="task-definition-icon" />
+                      <span>
+                        {draft.definition.name || "Untitled task"}
+                        <small>Draft · {definitionScopeLabel(draft.scope ?? GLOBAL_DEFINITION_SCOPE)}</small>
+                      </span>
+                    </button>
+                    <button
+                      className="task-row-run"
+                      aria-label={`Delete draft ${draft.definition.name || "Untitled task"}`}
+                      onClick={() => model.discardDraft(draft.definition_id, draft.scope ?? GLOBAL_DEFINITION_SCOPE)}
+                    >
+                      <Icon name="close" size={14} />
+                    </button>
+                  </div>
+                ))}
+            </>
+          ) : null}
+          <h3>
+            Saved definitions <span>{definitions.length}</span>
+          </h3>
+          {!model.definitions_loaded && !model.definitions_error ? (
+            <p className="task-sidebar-note">Loading definitions…</p>
+          ) : model.definitions_loaded && definitions.length === 0 ? (
+            <button className="task-empty-action" onClick={model.newDefinition}>
+              <Icon name="plus" size={14} /> Create a task definition
+            </button>
+          ) : (
+            definitions.map((saved) => (
+              <div
+                className={`task-sidebar-row ${model.editorId === saved.definition_id ? "selected" : ""}`}
+                key={saved.definition_id}
+              >
                 <button
                   className="task-row-main"
-                  aria-label={`Resume draft ${draft.definition.name || "Untitled task"}`}
-                  onClick={() => model.openEditor(draft.definition_id, draft.scope ?? GLOBAL_DEFINITION_SCOPE)}
+                  onClick={() => model.openEditor(saved.definition_id, model.definition_scope)}
                 >
                   <Icon name="tasks" class_name="task-definition-icon" />
                   <span>
-                    {draft.definition.name || "Untitled task"}
-                    <small>Draft · {definitionScopeLabel(draft.scope ?? GLOBAL_DEFINITION_SCOPE)}</small>
+                    {saved.definition.name}
+                    <small>
+                      {model.drafts.some(
+                        (draft) => draft.definition_id === saved.definition_id && definitionScopeKey(draft.scope) === definitionScopeKey(model.definition_scope),
+                      )
+                        ? "Draft changes"
+                        : saved.definition.execution_mode}
+                    </small>
                   </span>
                 </button>
                 <button
                   className="task-row-run"
-                  aria-label={`Delete draft ${draft.definition.name || "Untitled task"}`}
-                  onClick={() => model.discardDraft(draft.definition_id, draft.scope ?? GLOBAL_DEFINITION_SCOPE)}
+                  title={`Run ${saved.definition.name}`}
+                  aria-label={`Run ${saved.definition.name}`}
+                  disabled={model.busy}
+                  onClick={() => void model.run(saved)}
                 >
-                  <Icon name="close" size={14} />
+                  <Icon name="arrow_right" size={14} />
                 </button>
               </div>
-            ))}
-        </>
-      ) : null}
-      <h3>
-        Saved definitions <span>{definitions.length}</span>
-      </h3>
-      {!model.definitions_loaded && !model.definitions_error ? (
-        <p className="task-sidebar-note">Loading definitions…</p>
-      ) : model.definitions_loaded && definitions.length === 0 ? (
-        <button className="task-empty-action" onClick={model.newDefinition}>
-          <Icon name="plus" size={14} /> Create a task definition
-        </button>
-      ) : (
-        definitions.map((saved) => (
-          <div
-            className={`task-sidebar-row ${model.editorId === saved.definition_id ? "selected" : ""}`}
-            key={saved.definition_id}
-          >
+            ))
+          )}
+        </div>
+        <div className="task-runs">
+          <h3>
+            Managed tasks <span>Local</span>
+          </h3>
+          {!model.hasLoaded && !model.error ? (
+            <p className="task-sidebar-note">Loading tasks…</p>
+          ) : !model.tasks.length && !model.error ? (
+            <p className="task-sidebar-note">
+              Run a saved definition, or create a task with ctl.
+            </p>
+          ) : null}
+          {model.tasks.map((task) => (
             <button
-              className="task-row-main"
-              onClick={() => model.openEditor(saved.definition_id, model.definition_scope)}
+              className={`task-sidebar-row task-row-main ${model.active?.kind === "task" && model.active.task_id === task.task_id ? "selected" : ""}`}
+              key={task.task_id}
+              onClick={() => model.openTask(task)}
             >
-              <Icon name="tasks" class_name="task-definition-icon" />
+              <span className={`task-state-dot ${taskState(task)}`} />
               <span>
-                {saved.definition.name}
-                <small>
-                  {model.drafts.some(
-                    (draft) => draft.definition_id === saved.definition_id && definitionScopeKey(draft.scope) === definitionScopeKey(model.definition_scope),
-                  )
-                    ? "Draft changes"
-                    : saved.definition.execution_mode}
-                </small>
+                {task.definition.name}
+                <small>{taskState(task)}</small>
               </span>
             </button>
-            <button
-              className="task-row-run"
-              title={`Run ${saved.definition.name}`}
-              aria-label={`Run ${saved.definition.name}`}
-              disabled={model.busy}
-              onClick={() => void model.run(saved)}
-            >
-              <Icon name="arrow_right" size={14} />
-            </button>
-          </div>
-        ))
-      )}
-      <h3>
-        Managed tasks <span>Local</span>
-      </h3>
-      {!model.hasLoaded && !model.error ? (
-        <p className="task-sidebar-note">Loading tasks…</p>
-      ) : !model.tasks.length && !model.error ? (
-        <p className="task-sidebar-note">
-          Run a saved definition, or create a task with ctl.
-        </p>
-      ) : null}
-      {model.tasks.map((task) => (
-        <button
-          className={`task-sidebar-row task-row-main ${model.active?.kind === "task" && model.active.task_id === task.task_id ? "selected" : ""}`}
-          key={task.task_id}
-          onClick={() => model.openTask(task)}
-        >
-          <span className={`task-state-dot ${taskState(task)}`} />
-          <span>
-            {task.definition.name}
-            <small>{taskState(task)}</small>
-          </span>
-        </button>
-      ))}
-      {references
-        .filter(
-          (reference) =>
-            reference.host_id !== "local" ||
-            !model.tasks.some((task) => task.task_id === reference.task_id),
-        )
-        .map((reference) => (
-          <button
-            className="task-sidebar-row task-row-main"
-            key={`${reference.host_id}:${reference.task_id}`}
-            onClick={() =>
-              model.open({
-                kind: "task",
-                host_id: reference.host_id,
-                task_id: reference.task_id,
-              })
-            }
-          >
-            <span className="task-state-dot unknown" />
-            <span>
-              {model.savedForReference(reference)?.definition.name ?? "Saved task"}
-              <small>
-                {reference.host_id === "local"
-                  ? model.connection_error
-                    ? "Unavailable"
-                    : "Not registered"
-                  : "Remote · unsupported"}
-              </small>
-            </span>
-          </button>
-        ))}
+          ))}
+          {references
+            .filter(
+              (reference) =>
+                reference.host_id !== "local" ||
+                !model.tasks.some((task) => task.task_id === reference.task_id),
+            )
+            .map((reference) => (
+              <button
+                className="task-sidebar-row task-row-main"
+                key={`${reference.host_id}:${reference.task_id}`}
+                onClick={() =>
+                  model.open({
+                    kind: "task",
+                    host_id: reference.host_id,
+                    task_id: reference.task_id,
+                  })
+                }
+              >
+                <span className="task-state-dot unknown" />
+                <span>
+                  {model.savedForReference(reference)?.definition.name ?? "Saved task"}
+                  <small>
+                    {reference.host_id === "local"
+                      ? model.connection_error
+                        ? "Unavailable"
+                        : "Not registered"
+                      : "Remote · unsupported"}
+                  </small>
+                </span>
+              </button>
+            ))}
+        </div>
+      </div>
     </section>
   );
 }

@@ -8,7 +8,7 @@ using the official Tauri IPC and window mocks. It creates no shell processes,
 SSH connections, port forwards, or files. Changes only affect memory and reset
 on reload. Terminal typing echoes input; it does not execute commands.
 
-Use `?view=tasks`, `?view=ports`, or `?view=vpn` to open those sidebar views directly.
+Use `?view=tasks`, `?view=ports`, or `?view=vpn` to open the corresponding sidebar directly.
 The VPN preview uses sample connections and simulated status; it never starts a container
 or saves credentials to disk. Add `&vpn=connected` for a saved connection or
 `&vpn=external` for a CLI connection, including when previewing another sidebar
@@ -28,7 +28,7 @@ Cancel removes the draft and never touches a real container or account.
 The Tasks variant also selects the sample web-development task and its output.
 The normal `index.html` entry and production build do not import these fixtures.
 
-Open **About ctmux** from the bottom info button or command palette to inspect
+Open **About ctmux** from the rail’s **Settings** menu or command palette to inspect
 sample component versions. Each daemon has its own **Restart** action, while
 remote ctl-agent rows offer **Reconnect**. These confirmations and completion
 states only change memory. Restarting ctl-taskd is refused while sample tasks are

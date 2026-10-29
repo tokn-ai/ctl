@@ -434,10 +434,10 @@ export class XtermRenderer {
       lineHeight: 1.18,
       scrollback: options.scrollback_limit ?? DEFAULT_SCROLLBACK_LINES,
       theme: {
-        background: "#1f1f1f",
-        foreground: "#cccccc",
+        background: "#17191b",
+        foreground: "#dedfe2",
         cursor: "#aeafad",
-        cursorAccent: "#1f1f1f",
+        cursorAccent: "#17191b",
         selectionBackground: "#264f78",
         black: "#20242b",
         red: "#ff6b6b",

@@ -1,4 +1,5 @@
 import { useEffect, useId, useRef, useState } from "react";
+import { Icon } from "../ui/Icon";
 import { createPortal } from "react-dom";
 import type { SessionSummary } from "../../lib/types";
 import { useTerminalStatistics } from "../../features/statistics/TerminalStatisticsContext";
@@ -36,11 +37,7 @@ export function TerminalStatistics({ session, inert = false }: { session: Sessio
   return <div className="terminal-statistics">
     <button type="button" ref={trigger} aria-label="Terminal statistics" aria-expanded={open && !inert} aria-controls={panel_id}
       disabled={inert} onClick={() => setOpen((current) => !current)} title="Terminal statistics for this page and selected session">
-      <span className="statistics-short-label">Stats</span>
-      {session && <span className="statistics-history" title={history_title + history_state}>History {history}</span>}
-      <span className="statistics-events" title="Terminal events received by this page, including background tabs and panes. Statistics samples and observation bookkeeping are excluded.">Events {statistics.events_received.toLocaleString()}</span>
-      <span className="statistics-rate" title="All page attachment streams: framed protocol bytes per second. SSH encryption overhead and the initial handshake are excluded.">↑ {formatStatisticsRate(statistics.upload_bytes_per_second)} ↓ {formatStatisticsRate(statistics.download_bytes_per_second)}</span>
-      <span className="statistics-timing" title="Selected session: highest measured heartbeat round-trip and event lag across its live panes. Lag shows the oldest pending event age, or the last completed event's delay.">RTT {formatStatisticsDuration(statistics.round_trip_ms)} · Lag {formatStatisticsDuration(statistics.event_lag_ms)}</span>
+      <Icon name="activity" size={14} />
     </button>
     {open && !inert && createPortal(<section ref={panel} id={panel_id} className="terminal-statistics-details" aria-label="Terminal statistics details">
       <strong>Page traffic</strong>

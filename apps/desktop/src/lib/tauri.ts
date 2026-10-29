@@ -83,6 +83,10 @@ function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> 
   return nativeInvoke<T>(command, args);
 }
 
+export function openExternalUrl(url: string): Promise<void> {
+  return invoke("open_external_url", { url });
+}
+
 export async function getComponentVersions(host_id?: string): Promise<ComponentVersionsSnapshot> {
   return invoke("get_component_versions", host_id ? { host_id } : undefined);
 }

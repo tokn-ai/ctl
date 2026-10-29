@@ -49,6 +49,7 @@ vi.mock("@xterm/xterm", async () => {
           get rows() { return terminal.rows; },
           write: (data: Uint8Array, callback: () => void) => terminal.write(data, callback),
           resize: (columns: number, rows: number) => terminal.resize(columns, rows),
+          reset: () => terminal.reset(),
           refresh: () => undefined,
           dispose,
           open: (container: HTMLElement) => {
@@ -69,6 +70,11 @@ vi.mock("@xterm/addon-fit", () => ({
   FitAddon: class {
     proposeDimensions() { return { cols: 80, rows: 24 }; }
   },
+}));
+// Headless xterm has no DOM linkifier; gesture coverage uses the real browser
+// terminal in XtermRenderer.test.ts and terminalLinks.test.ts.
+vi.mock("../terminal/terminalLinks", () => ({
+  installTerminalLinks: () => ({ dispose() {} }),
 }));
 
 const api = vi.hoisted(() => ({

@@ -1,7 +1,10 @@
 import { Icon } from "../ui/Icon";
-import { useEffect, useRef } from "react";
+import { useEffect, useId, useRef } from "react";
 import type { ConnectionPhase, TerminalSize } from "../../lib/types";
+import { errorMessage } from "../../lib/errors";
+import { openExternalUrl } from "../../lib/tauri";
 import { XtermRenderer } from "../../features/terminal/XtermRenderer";
+import { useNotificationEnvironment } from "../../features/notifications/NotificationContext";
 
 const INITIAL_SIZE: TerminalSize = {
   columns: 80,
@@ -32,25 +35,70 @@ export function TerminalSurface({
   const containerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef(onInput);
   const readyRef = useRef(onReady);
+  const surface_id = useId();
+  const link_notification_key = `terminal-link:${surface_id}`;
+  const copy_notification_key = `terminal-copy:${surface_id}`;
+  const notifications = useNotificationEnvironment()?.store;
+  const notificationsRef = useRef(notifications);
   inputRef.current = ended_message ? () => {} : onInput;
   readyRef.current = onReady;
+  notificationsRef.current = notifications;
 
   useEffect(() => {
     const container = containerRef.current;
     if (!container) {
       return;
     }
+    let disposed = false;
+    let open_generation = 0;
+    let copy_generation = 0;
+    const copyText = async (text: string) => {
+      if (disposed || !text) return;
+      const generation = ++copy_generation;
+      const store = notificationsRef.current;
+      store?.report(copy_notification_key, null);
+      try {
+        if (!navigator.clipboard?.writeText) throw new Error("Clipboard access is unavailable.");
+        await navigator.clipboard.writeText(text);
+        if (!disposed && generation === copy_generation) store?.resolve(copy_notification_key);
+      } catch (failure) {
+        if (!disposed && generation === copy_generation) store?.report(copy_notification_key, {
+          severity: "error",
+          title: "Could not copy selection",
+          message: errorMessage(failure),
+          source: "Terminal",
+        });
+      }
+    };
     const renderer = new XtermRenderer(
       container,
       (data) => inputRef.current(data),
       INITIAL_SIZE,
+      (url) => {
+        if (disposed) return;
+        const generation = ++open_generation;
+        const store = notificationsRef.current;
+        store?.report(link_notification_key, null);
+        void openExternalUrl(url).then(() => {
+          if (!disposed && generation === open_generation) store?.resolve(link_notification_key);
+        }, (failure) => {
+          if (!disposed && generation === open_generation) store?.report(link_notification_key, {
+            severity: "error",
+            title: "Could not open link",
+            message: errorMessage(failure),
+            source: "Terminal",
+          });
+        });
+      },
+      (text) => { void copyText(text); },
     );
     readyRef.current(renderer);
     return () => {
+      disposed = true;
       readyRef.current(null);
       renderer.dispose();
     };
-  }, []);
+  }, [link_notification_key, copy_notification_key]);
 
   return (
     <div className="terminal-shell" onKeyDownCapture={(event) => {

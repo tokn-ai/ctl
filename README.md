@@ -587,6 +587,14 @@ for terminating its daemon-owned session. The Windows/Linux equivalents are
 untouched. On macOS these are native application-menu accelerators; `Cmd-Q`
 retains its standard meaning and quits the app without terminating sessions.
 
+HTTP and HTTPS links in terminal output open in the default browser with
+`Cmd-click` on macOS or `Ctrl-click` on Windows/Linux. Hover a link to see its
+destination; ordinary clicks and text selection keep their terminal behavior.
+`Cmd-drag` (macOS) or `Ctrl-drag` (Windows/Linux) selects text and copies it on
+release, including in fullscreen and mouse-enabled programs. The app draws its
+own selection bounds while dragging and clears them on release. Dragging from
+a link selects text; clicking it opens the link.
+
 ## Local and remote control
 
 `ctmux` remains the canonical local session CLI:

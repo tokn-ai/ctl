@@ -6,6 +6,7 @@ import type { SessionSummary, TerminalSize } from "../../lib/types";
 import { sessionKey } from "../targets/targets";
 import { captureHistoryRow } from "./historyStyle";
 import { terminalHistoryBytes } from "./historyBytes";
+import { installTerminalLinks } from "./terminalLinks";
 import {
   TerminalPresenter,
   type ProposedDimensions,
@@ -104,6 +105,8 @@ export class XtermRenderer {
     private readonly container: HTMLElement,
     private readonly onInput: (data: Uint8Array) => void,
     initialSize: TerminalSize,
+    private readonly on_open_link: (url: string) => void = () => {},
+    private readonly on_copy_text: (text: string) => void = () => {},
   ) {
     this.active = this.createTerminal(initialSize);
     XtermRenderer.renderers.add(this);
@@ -460,6 +463,7 @@ export class XtermRenderer {
     const fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
     terminal.open(mount);
+    const links = installTerminalLinks(terminal, this.on_open_link, this.on_copy_text);
     if (!options.background) activate();
     terminal.onData((data) => {
       if (this.active.container === container && mount.parentElement === container) this.onInput(encodeTerminalText(data));
@@ -500,6 +504,10 @@ export class XtermRenderer {
       },
       dispose: () => {
         mount.querySelectorAll(".xterm-screen").forEach((screen) => this.cellObserver?.unobserve(screen));
+        links.dispose();
+        // xterm removes document-level PTY mouse listeners when its protocol
+        // resets; dispose alone leaves listeners from a lost release behind.
+        terminal.reset();
         terminal.dispose();
         mount.remove();
         measurement_host.remove();

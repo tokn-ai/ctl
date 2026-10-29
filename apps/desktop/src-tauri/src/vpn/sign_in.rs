@@ -1,8 +1,6 @@
 //! Open only a current, validated sign-in URL from the selected VPN owner.
 
 use std::future::Future;
-use std::process::Stdio;
-use std::time::Duration;
 
 use ctl_ipc::{VpnProvider, VpnSnapshot, VpnState};
 
@@ -48,57 +46,9 @@ pub(super) async fn open_browser(url: String) -> CommandResult<()> {
   if !ctl_ipc::vpn::is_tailscale_auth_url(&url) {
     return Err(browser_error());
   }
-  #[cfg(unix)]
-  let mut command = browser_command(&url);
-  #[cfg(windows)]
-  let mut command = browser_command(&url)?;
-  let status = tokio::time::timeout(
-    Duration::from_secs(10),
-    command
-      .stdin(Stdio::null())
-      .stdout(Stdio::null())
-      .stderr(Stdio::null())
-      .kill_on_drop(true)
-      .status(),
-  )
-  .await
-  .map_err(|_| browser_error())?
-  .map_err(|_| browser_error())?;
-  if status.success() {
-    Ok(())
-  } else {
-    Err(browser_error())
-  }
-}
-
-#[cfg(unix)]
-fn browser_command(url: &str) -> tokio::process::Command {
-  #[cfg(target_os = "macos")]
-  {
-    let mut command = tokio::process::Command::new("/usr/bin/open");
-    command.arg("--").arg(url);
-    command
-  }
-  #[cfg(all(unix, not(target_os = "macos")))]
-  {
-    let mut command = tokio::process::Command::new("xdg-open");
-    command.arg(url);
-    command
-  }
-}
-
-#[cfg(windows)]
-fn browser_command(url: &str) -> CommandResult<tokio::process::Command> {
-  let system_directory =
-    std::path::PathBuf::from(std::env::var_os("SystemRoot").ok_or_else(browser_error)?)
-      .join("System32");
-  // Use the system URL handler directly. The validated URL remains one
-  // argument and never enters cmd.exe or a PowerShell command string.
-  let mut command = tokio::process::Command::new(system_directory.join("rundll32.exe"));
-  command
-    .current_dir(system_directory)
-    .args(["url.dll,FileProtocolHandler", url]);
-  Ok(command)
+  crate::browser::open(&url)
+    .await
+    .map_err(|_| browser_error())
 }
 
 fn browser_error() -> CommandErrorDto {

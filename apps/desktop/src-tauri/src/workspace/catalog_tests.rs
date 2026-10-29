@@ -72,6 +72,51 @@ fn catalog() -> HostCatalogDocument {
 }
 
 #[test]
+fn host_color_overrides_round_trip_without_saved_host_definitions() {
+  let fixture = Fixture::new();
+  let document = HostCatalogDocument {
+    schema_version: 2,
+    host_colors: [
+      ("local".into(), "#ffffff".into()),
+      ("ssh-config:office".into(), "#83d5a4".into()),
+    ]
+    .into(),
+    ..HostCatalogDocument::default()
+  };
+  let saved = fixture
+    .repository()
+    .update_hosts(UpdateHostsRequest {
+      expected_revision: None,
+      document,
+    })
+    .unwrap();
+  assert_eq!(fixture.repository().load_hosts().unwrap(), saved);
+  assert!(saved.document.hosts.is_empty());
+  let before = fs::read(fixture.0.join("hosts.json")).unwrap();
+  let mut invalid = saved.document.clone();
+  invalid.host_colors.insert("local".into(), "red".into());
+  assert!(
+    fixture
+      .repository()
+      .update_hosts(UpdateHostsRequest {
+        expected_revision: saved.revision.clone(),
+        document: invalid,
+      })
+      .is_err()
+  );
+  assert_eq!(fs::read(fixture.0.join("hosts.json")).unwrap(), before);
+  let reset = fixture
+    .repository()
+    .update_hosts(UpdateHostsRequest {
+      expected_revision: saved.revision,
+      document: HostCatalogDocument::default(),
+    })
+    .unwrap();
+  assert_eq!(reset.document.schema_version, 1);
+  assert!(reset.document.host_colors.is_empty());
+}
+
+#[test]
 fn tailscale_method_binding_round_trips_without_becoming_a_transport_setting() {
   let fixture = Fixture::new();
   let mut document = catalog();

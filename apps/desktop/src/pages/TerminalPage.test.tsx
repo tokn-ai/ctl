@@ -360,6 +360,48 @@ async function findSidebarAction(name: string): Promise<HTMLElement> {
 }
 
 describe("workspace-backed terminal page", () => {
+  it("persists a chosen host dot color, shares it with tabs, and restores the default", async () => {
+    render(<TerminalPage />);
+    const picker = await screen.findByRole("button", { name: "Change color for test" });
+    await waitFor(() => expect((picker as HTMLButtonElement).disabled).toBe(false));
+    const tab = screen.getByRole("tab").closest<HTMLElement>(".terminal-tab")!;
+    const original_color = tab.style.getPropertyValue("--host-color");
+    const connection_count = attachment.connect.mock.calls.length;
+    fireEvent.click(picker);
+    fireEvent.click(screen.getByRole("button", { name: "Blue" }));
+    await waitFor(() => expect(tab.style.getPropertyValue("--host-color")).toBe("#91b7f2"));
+    const saved = api.updateHosts.mock.lastCall![1] as HostCatalogDocument;
+    expect(saved.schema_version).toBe(2);
+    expect(saved.host_colors).toEqual({ "test-id": "#91b7f2" });
+    expect(saved.hosts).toEqual(hostSnapshot().document.hosts);
+    expect(picker.querySelector<HTMLElement>(".host-color-dot")?.style.background).toBe("rgb(145, 183, 242)");
+    expect(attachment.connect).toHaveBeenCalledTimes(connection_count);
+    cleanup();
+    api.loadHosts.mockResolvedValue({ revision: "saved-colors", document: saved });
+    render(<TerminalPage />);
+    const restored_picker = await screen.findByRole("button", { name: "Change color for test" });
+    await waitFor(() => expect((restored_picker as HTMLButtonElement).disabled).toBe(false));
+    const restored_tab = screen.getByRole("tab").closest<HTMLElement>(".terminal-tab")!;
+    expect(restored_tab.style.getPropertyValue("--host-color")).toBe("#91b7f2");
+    fireEvent.click(restored_picker);
+    fireEvent.click(screen.getByRole("button", { name: "Reset" }));
+    await waitFor(() => expect(restored_tab.style.getPropertyValue("--host-color")).toBe(original_color));
+    expect(api.updateHosts.mock.lastCall![1]).not.toHaveProperty("host_colors");
+  });
+
+  it("keeps the current host color when saving the preference fails", async () => {
+    api.updateHosts.mockRejectedValueOnce(new Error("Could not save host color"));
+    render(<TerminalPage />);
+    const picker = await screen.findByRole("button", { name: "Change color for test" });
+    await waitFor(() => expect((picker as HTMLButtonElement).disabled).toBe(false));
+    const tab = screen.getByRole("tab").closest<HTMLElement>(".terminal-tab")!;
+    const original_color = tab.style.getPropertyValue("--host-color");
+    fireEvent.click(picker);
+    fireEvent.click(screen.getByRole("button", { name: "Blue" }));
+    await screen.findAllByText("Could not save host color");
+    expect(tab.style.getPropertyValue("--host-color")).toBe(original_color);
+  });
+
   it("switches the sidebar to tasks without changing or remounting workspace tabs", async () => {
     render(<TerminalPage />);
     await screen.findByRole("button", { name: "Connect host" });

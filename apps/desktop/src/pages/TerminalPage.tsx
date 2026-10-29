@@ -43,7 +43,7 @@ import {
   remapStateKeys,
   sameSshEndpoint,
 } from "../features/workspace/remoteRecovery";
-import { connectionMethodOptions, connectionSettings, expectedHostIdentity, hostFromTarget, hostTarget, isVirtualHost, projectedHostId, tailscaleHostId, promoteHost, updateHostSettings, workspaceSidebarTargets } from "../features/workspace/workspaceModel";
+import { connectionMethodOptions, connectionSettings, expectedHostIdentity, hostFromTarget, hostTarget, isVirtualHost, projectedHostId, tailscaleHostId, promoteHost, updateHostColor, updateHostSettings, workspaceSidebarTargets } from "../features/workspace/workspaceModel";
 import { removableHostCredentials } from "../features/workspace/hostCredentials";
 import { isHostRouteStep } from "../features/workspace/sshRoute";
 import { CommandPalette } from "../components/commands/CommandPalette";
@@ -1910,6 +1910,12 @@ function TerminalWorkbench() {
                   on_archives={() => setArchivesOpen(true)}
                   targets={sidebarTargets}
                   hosts={workspace.hosts}
+                  host_colors={workspace.host_colors}
+                  color_picker_disabled={!workspace.ready || workspace.closing}
+                  on_host_color_change={(host_id, color) => {
+                    void workspace.replaceView((view) => updateHostColor(view, host_id, color))
+                      .catch((failure) => setListError(errorMessage(failure)));
+                  }}
                   connectableHostKeys={connectableHostKeys}
                   hostConnections={hostConnections.statuses}
                   attachmentStates={new Map(attachment.states.flatMap((state) => state.session ? [[sessionKey(state.session), state] as const] : []))}
@@ -2000,6 +2006,7 @@ function TerminalWorkbench() {
                 leading_actions={<button type="button" id="workspace-sidebar-toggle" className="terminal-tab-new" aria-label={sidebar_visible ? "Hide sidebar" : "Show sidebar"} title={sidebar_visible ? "Hide sidebar" : "Show sidebar"} aria-expanded={sidebar_visible} aria-controls="workspace-sidebar" onClick={() => setSidebarVisible((visible) => !visible)}><Icon name="panel_left" /></button>}
                 trailing_actions={<button type="button" className="terminal-tab-new" aria-label="Commands" title={`Commands (${paletteShortcutLabel})`} onClick={() => executeCommandById(COMMAND_IDS.showPalette)}><Icon name="command" /></button>}
                 tabs={tabs}
+                host_colors={workspace.host_colors}
                 extra_tabs={workspace.task_tabs.map((tab) => {
                   const task = taskWorkspace.tasks.find(
                     (item) => item.task_id === tab.task_id,

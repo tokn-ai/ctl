@@ -96,6 +96,63 @@ fn invalid_saved_settings_cannot_be_silently_dropped() {
 }
 
 #[test]
+fn host_colors_are_versioned_presentation_metadata_for_any_valid_host_identity() {
+  let mut document = HostCatalogDocument {
+    schema_version: 2,
+    ..HostCatalogDocument::default()
+  };
+  for host_id in [
+    "local",
+    "ssh-config:office",
+    "tailscale:node-1",
+    "missing-host",
+  ] {
+    document
+      .host_colors
+      .insert(host_id.into(), "#Ab12Ef".into());
+  }
+  document.validate().unwrap();
+  let value = serde_json::to_value(&document).unwrap();
+  let decoded: HostCatalogDocument = serde_json::from_value(value).unwrap();
+  assert_eq!(decoded, document);
+  assert!(decoded.hosts.is_empty());
+  document.schema_version = 1;
+  assert_eq!(document.validate().unwrap_err().code, "hosts_invalid");
+  document.host_colors.clear();
+  document.validate().unwrap();
+  assert!(
+    serde_json::to_value(document)
+      .unwrap()
+      .get("host_colors")
+      .is_none()
+  );
+}
+
+#[test]
+fn invalid_host_colors_and_identity_keys_are_rejected() {
+  for (host_id, color) in [
+    ("", "#123456"),
+    ("bad\nidentity", "#123456"),
+    ("host", "red"),
+    ("host", "#abc"),
+    ("host", "#12345678"),
+    ("host", "#12345g"),
+    ("host", " #123456"),
+    ("host", "url(example)"),
+  ] {
+    let document = HostCatalogDocument {
+      schema_version: 2,
+      host_colors: [(host_id.to_owned(), color.to_owned())].into(),
+      ..HostCatalogDocument::default()
+    };
+    assert!(
+      document.validate().is_err(),
+      "accepted {host_id:?}: {color:?}"
+    );
+  }
+}
+
+#[test]
 fn tailscale_bindings_follow_device_identity_and_reject_a_missing_device() {
   let mut catalog = catalog();
   catalog.hosts[0].connection_methods[0].tailscale_node_id = Some("node-1".into());

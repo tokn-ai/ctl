@@ -9,7 +9,8 @@ can be remembered by several clients. `ctl-agent` stores only its environment ID
 
 The native backend keeps two files under `~/.tokn/ctl` on every platform:
 
-- `hosts.json` (schema 1) owns saved remote hosts and reusable gateways.
+- `hosts.json` (schemas 1 and 2) owns saved remote hosts, reusable gateways, and
+  optional host color preferences.
 - `workspace.json` (schema 8) owns session membership and presentation state.
 
 Their shared lock file and schema backups live alongside them. The app reads
@@ -26,7 +27,18 @@ The host catalog contains:
   agent version, and bundle metadata;
 - reusable `ssh_gateways`, referenced in order by a method's `gateway_route`.
   Route steps may also reference a saved `host_id` and its selected `method_id`,
-  or a saved VPN profile. Host links reuse the method's current route and endpoint.
+  or a saved VPN profile. Host links reuse the method's current route and endpoint;
+- optional schema-2 `host_colors`, mapping stable host IDs to six-digit `#RRGGBB`
+  colors. Appearance preferences can reference local, discovered, or unavailable
+  hosts without adding their connection definitions to the catalog. Unset remote
+  colors use the stable default. The GUI keeps Local fixed white and ignores any
+  saved local color override.
+
+Color overrides use catalog schema 2; catalogs without overrides retain schema 1.
+Updated clients read both formats, and resetting every override permits schema-1
+output again. Older clients reject schema-2 catalogs and preserve the file rather
+than discarding unfamiliar preferences. This storage extension does not change
+workspace schema 8, named IPC protocol versions, or product release versions.
 
 The workspace contains:
 

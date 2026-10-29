@@ -106,7 +106,7 @@ describe("SessionSidebar", () => {
     const props = renderHostConnection(undefined, { sessions: [] });
     for (const name of ["local", "Build machine"]) {
       const group = screen.getByRole("region", { name: `${name} sessions` });
-      expect(group.querySelector("[aria-expanded]")).toBeNull();
+      expect(group.querySelector(".host-group-toggle")).toBeNull();
       expect(group.querySelector(".host-group-children")).toBeNull();
       expect(group.querySelector(".host-group-count")).toBeNull();
       await user.click(within(group).getByRole("button", { name: `New shell on ${name}` }));
@@ -136,8 +136,8 @@ describe("SessionSidebar", () => {
     for (const target of [session.target, remoteHost]) {
       const group = screen.getByRole("region", { name: `${target.kind === "local" ? "local" : "Build machine"} sessions` });
       const expected = document.createElement("span");
-      expected.style.color = hostColor(target);
-      expect((group.querySelector(".host-identity-icon") as HTMLElement).style.color).toBe(expected.style.color);
+      expected.style.background = hostColor(target);
+      expect((group.querySelector(".host-color-dot") as HTMLElement).style.background).toBe(expected.style.background);
     }
   });
 
@@ -148,7 +148,45 @@ describe("SessionSidebar", () => {
     });
     expect(screen.getByRole("status", { name: `Sessions unavailable: ${message}` }).textContent).toBe("Sessions unavailable");
     expect(screen.getByRole("status", { name: "Host connection for Build machine: SSH connected" }).textContent).toBe("SSH connected");
-    expect(screen.getByRole("region", { name: "Build machine sessions" }).querySelector("[aria-expanded]")).toBeNull();
+    expect(screen.getByRole("region", { name: "Build machine sessions" }).querySelector(".host-group-toggle")).toBeNull();
+  });
+
+  it("changes color without toggling the host or its session selection", async () => {
+    const user = userEvent.setup();
+    const on_host_color_change = vi.fn();
+    renderHostConnection(undefined, { on_host_color_change, host_colors: { build: "#91b7f2" } });
+    const expand = screen.getByRole("button", { name: "Collapse Build machine" });
+    const picker = screen.getByRole("button", { name: "Change color for Build machine" });
+    expect(expand.contains(picker)).toBe(false);
+    await user.click(picker);
+    await user.click(screen.getByRole("button", { name: "Coral" }));
+    expect(on_host_color_change).toHaveBeenCalledExactlyOnceWith("build", "#f18f8f");
+    expect(expand.getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getByRole("button", { name: "Shell — first" })).toBeTruthy();
+  });
+
+  it("keeps Local as a fixed white dot even if an old preference is present", () => {
+    renderHostConnection(undefined, { host_colors: { local: "#91b7f2" } });
+    expect(screen.queryByRole("button", { name: "Change color for Local" })).toBeNull();
+    const group = screen.getByRole("region", { name: "local sessions" });
+    expect(group.querySelector<HTMLElement>(".host-color-dot")?.style.background).toBe("rgb(255, 255, 255)");
+  });
+
+  it.each([
+    ["connect", "pending", "Connecting…"],
+    ["disconnect", "pending", "Disconnecting…"],
+    ["connect", "failed", "Connect failed"],
+  ] as const)("shows one operation label for %s/%s with details in the tooltip", (kind, state, label) => {
+    renderHostConnection({
+      state: "checking", method_names: [], message: null,
+      operation: { kind, state, method_name: "Office", message: "Waiting for the SSH connection" },
+    });
+    const status = screen.getByRole("status", { name: `Host connection for Build machine: Checking… · ${label}` });
+    expect(status.textContent).toBe(label);
+    expect(status.querySelectorAll(".host-connection-label")).toHaveLength(1);
+    expect(status.title).toContain("Checking…");
+    expect(status.title).toContain("Office");
+    expect(status.title).toContain("Waiting for the SSH connection");
   });
 
   it("keeps unavailable host settings accessible while disabling new shells", async () => {

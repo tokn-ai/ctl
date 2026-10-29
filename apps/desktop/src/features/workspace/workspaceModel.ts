@@ -25,6 +25,7 @@ import type {
 import { LOCAL_TARGET, sessionKey, targetKey } from "../targets/targets";
 import { expandSshRoute, hasVpnRoute, isHostRouteStep } from "./sshRoute";
 import { hasKnownTerminalSize, knownTerminalSize, observedAt } from "../sessions/sessionObservation";
+import { normalizeHostColor } from "./hostColor";
 import {
   projectedTailscaleHost,
   resolveTailscaleMethod,
@@ -44,6 +45,7 @@ export interface WorkspaceView {
   tab_order: string[];
   targets: ConnectionTarget[];
   hosts: WorkspaceHost[];
+  host_colors: Record<string, string>;
   sessions: SessionSummary[];
   tabs: SessionSummary[];
   active_tab_key: string | null;
@@ -63,6 +65,7 @@ export function emptyWorkspaceView(): WorkspaceView {
     tab_order: [],
     targets: [LOCAL_TARGET],
     hosts: [hostFromTarget(LOCAL_TARGET)],
+    host_colors: {},
     sessions: [],
     tabs: [],
     active_tab_key: null,
@@ -341,10 +344,12 @@ function composeHosts(
   return [...hosts.values()];
 }
 
-/** Only saved definitions enter hosts.json; projections and runtime state stay in memory. */
+/** Save connections and appearance preferences without copying discovery definitions or runtime state. */
 export function hostCatalogDocument(view: WorkspaceView): HostCatalogDocument {
+  const has_colors = Object.keys(view.host_colors).length > 0;
   return {
-    schema_version: 1,
+    schema_version: has_colors ? 2 : 1,
+    ...(has_colors ? { host_colors: { ...view.host_colors } } : {}),
     hosts: view.hosts
       .filter((host) => host.host_id !== "local" && (!host.source || host.source === "saved"))
       .map((host) => ({
@@ -412,7 +417,7 @@ export function refreshHostCatalog(
     ...session, target: byKey.get(targetKey(session.target)) ?? session.target,
   });
   return {
-    ...view, hosts, targets, ssh_gateways: catalog.ssh_gateways,
+    ...view, hosts, targets, host_colors: { ...catalog.host_colors }, ssh_gateways: catalog.ssh_gateways,
     sessions: view.sessions.map(remap), tabs: view.tabs.map(remap),
   };
 }
@@ -432,6 +437,17 @@ export function updateHostSettings(view: WorkspaceView, host: WorkspaceHost): Wo
     sessions: view.sessions.map((session) => ({ ...session, target: rename(session.target) })),
     tabs: view.tabs.map((session) => ({ ...session, target: rename(session.target) })),
   };
+}
+
+/** Appearance does not claim a discovered host or rewrite its connection settings. */
+export function updateHostColor(view: WorkspaceView, host_id: string, color: string | undefined): WorkspaceView {
+  if (!host_id || host_id.length > 4096 || /[\u0000-\u001f\u007f-\u009f]/.test(host_id))
+    throw new Error("Choose a valid host identity.");
+  const normalized = normalizeHostColor(color);
+  if (color !== undefined && !normalized) throw new Error("Choose a six-digit hexadecimal color.");
+  const host_colors = normalized ? { ...view.host_colors, [host_id]: normalized } : { ...view.host_colors };
+  if (!normalized) delete host_colors[host_id];
+  return { ...view, host_colors };
 }
 
 export function resolveSshGateways(
@@ -519,6 +535,7 @@ export function restoreWorkspace(
   return {
     targets,
     hosts,
+    host_colors: { ...catalog?.host_colors },
     ssh_gateways,
     port_forwards: document.port_forwards ?? [],
     sessions,

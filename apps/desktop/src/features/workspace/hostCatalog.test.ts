@@ -12,6 +12,7 @@ import {
   refreshHostCatalog,
   restoreWorkspace,
   updateHostSettings,
+  updateHostColor,
   usesSshConfigMaster,
   workspaceDocument,
   workspaceSidebarTargets,
@@ -32,6 +33,57 @@ function document(host_id?: string): WorkspaceDocument {
 }
 
 describe("saved host catalog and SSH config projections", () => {
+  it("persists colors for local, projected, and unavailable identities without saving their definitions", () => {
+    const original = restoreWorkspace(document("missing-host"), empty_catalog, aliases);
+    const colored = ["local", projectedHostId("build"), "missing-host"].reduce(
+      (view, host_id) => updateHostColor(view, host_id, "#A1B2C3"), original,
+    );
+    const catalog = hostCatalogDocument(colored);
+    expect(catalog).toEqual({
+      ...empty_catalog, schema_version: 2,
+      host_colors: { local: "#a1b2c3", "ssh-config:build": "#a1b2c3", "missing-host": "#a1b2c3" },
+    });
+    expect(colored.hosts).toBe(original.hosts);
+    expect(colored.targets).toBe(original.targets);
+    expect(colored.sessions).toBe(original.sessions);
+    expect(workspaceDocument(colored)).not.toHaveProperty("host_colors");
+    const restored = restoreWorkspace(workspaceDocument(colored), catalog, aliases);
+    expect(restored.host_colors).toEqual(colored.host_colors);
+    expect(restored.hosts.find((host) => host.host_id === projectedHostId("build"))?.source).toBe("ssh_config");
+  });
+
+  it("retains colors when discovery loses a host and restores defaults by removing overrides", () => {
+    const original = updateHostColor(restoreWorkspace(document(), empty_catalog, aliases), projectedHostId("build"), "#123456");
+    const catalog = hostCatalogDocument(original);
+    const refreshed = refreshHostCatalog(original, catalog, []);
+    expect(refreshed.hosts.some((host) => host.host_id === projectedHostId("build"))).toBe(false);
+    expect(refreshed.host_colors).toEqual(original.host_colors);
+    expect(hostCatalogDocument(refreshed)).toEqual(catalog);
+    const reset = updateHostColor(refreshed, projectedHostId("build"), undefined);
+    expect(hostCatalogDocument(reset)).toEqual(empty_catalog);
+    expect(original.host_colors[projectedHostId("build")]).toBe("#123456");
+    expect(restoreWorkspace(document(), empty_catalog).host_colors).toEqual({});
+  });
+
+  it("rejects malformed color preferences without changing the current workspace", () => {
+    const original = restoreWorkspace(document(), empty_catalog);
+    for (const color of ["red", "#abc", "#12345678", "#12345g", " #123456", "url(example)"])
+      expect(() => updateHostColor(original, "local", color)).toThrow("six-digit hexadecimal");
+    for (const host_id of ["", "bad\nidentity", "x".repeat(4097)])
+      expect(() => updateHostColor(original, host_id, "#123456")).toThrow("valid host identity");
+    expect(original.host_colors).toEqual({});
+  });
+
+  it("round-trips a host identity named __proto__ as an ordinary color key", () => {
+    const colored = updateHostColor(restoreWorkspace(document(), empty_catalog), "__proto__", "#123456");
+    const catalog: HostCatalogDocument = JSON.parse(JSON.stringify(hostCatalogDocument(colored)));
+    const restored = restoreWorkspace(document(), catalog);
+    expect(Object.keys(restored.host_colors)).toEqual(["__proto__"]);
+    expect(restored.host_colors["__proto__"]).toBe("#123456");
+    expect(Object.getPrototypeOf(restored.host_colors)).toBe(Object.prototype);
+    expect(hostCatalogDocument(updateHostColor(restored, "__proto__", undefined))).toEqual(empty_catalog);
+  });
+
   it("projects aliases deterministically without writing their definitions", () => {
     const first = restoreWorkspace(document(), empty_catalog, aliases);
     const second = restoreWorkspace(document(), empty_catalog, [...aliases].reverse());

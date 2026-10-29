@@ -1,6 +1,8 @@
-use super::{HostError, WorkspaceHost, WorkspaceSshGateway, validated_gateway_ids};
+use super::{
+  HostError, WorkspaceHost, WorkspaceSshGateway, valid_workspace_text, validated_gateway_ids,
+};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -8,6 +10,9 @@ pub struct HostCatalogDocument {
   pub schema_version: u32,
   pub hosts: Vec<WorkspaceHost>,
   pub ssh_gateways: Vec<WorkspaceSshGateway>,
+  /// Presentation only; local and projected identities need no saved definition.
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub host_colors: BTreeMap<String, String>,
 }
 
 impl Default for HostCatalogDocument {
@@ -16,6 +21,7 @@ impl Default for HostCatalogDocument {
       schema_version: 1,
       hosts: Vec::new(),
       ssh_gateways: Vec::new(),
+      host_colors: BTreeMap::new(),
     }
   }
 }
@@ -26,7 +32,7 @@ impl HostCatalogDocument {
   /// # Errors
   /// Returns an error for an unsupported version or invalid saved settings.
   pub fn validate(&self) -> Result<(), HostError> {
-    if self.schema_version != 1 {
+    if !matches!(self.schema_version, 1 | 2) {
       return Err(HostError::new(
         "hosts_version_unsupported",
         "This host catalog was written by another app version. Its file has not been changed.",
@@ -38,6 +44,16 @@ impl HostCatalogDocument {
         "The host catalog contains invalid or duplicate connections.",
       )
     };
+    if (self.schema_version == 1 && !self.host_colors.is_empty())
+      || self.host_colors.iter().any(|(host_id, color)| {
+        !valid_workspace_text(host_id)
+          || color.len() != 7
+          || !color.starts_with('#')
+          || !color.as_bytes()[1..].iter().all(u8::is_ascii_hexdigit)
+      })
+    {
+      return Err(invalid());
+    }
     let gateway_ids = validated_gateway_ids(&self.ssh_gateways).ok_or_else(invalid)?;
     let mut host_ids = HashSet::new();
     if self.hosts.len() > 1024

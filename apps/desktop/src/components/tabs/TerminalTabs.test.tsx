@@ -85,7 +85,7 @@ describe("TerminalTabs", () => {
     expect(markup).not.toContain("Projects/Agents/~");
   });
 
-  it("matches terminal and task accents by host ID while keeping host names accessible", () => {
+  it.each([undefined, { local: "#e79acb", "build-server": "#91b7f2" }])("matches terminal and task accents by host ID with preferences %j", (host_colors) => {
     const local = session("local-shell");
     const remote: SessionSummary = {
       ...session("remote-shell"),
@@ -96,6 +96,7 @@ describe("TerminalTabs", () => {
     const markup = renderToStaticMarkup(
       <TerminalTabs
         tabs={[local, remote]}
+        host_colors={host_colors}
         extra_tabs={[{
           tab_key: "task:compile", title: "Compile", host: "Build", host_id: "build-server", status: "running",
         }]}
@@ -109,7 +110,7 @@ describe("TerminalTabs", () => {
     );
 
     const accents = [...markup.matchAll(/style="--host-color:([^"]+)"/g)].map((match) => match[1]);
-    expect(accents).toEqual(["#ffffff", hostIdColor("build-server"), hostIdColor("build-server")]);
+    expect(accents).toEqual(["#ffffff", host_colors?.["build-server"] ?? hostIdColor("build-server"), host_colors?.["build-server"] ?? hostIdColor("build-server")]);
     expect(markup).toContain('aria-label="remote-shell on Build"');
     expect(markup).toContain('title="remote-shell · Build"');
     expect(markup).toContain('aria-label="Compile on Build"');

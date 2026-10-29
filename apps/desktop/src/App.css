@@ -165,23 +165,26 @@ svg {
 
 .host-group-header {
   position: relative;
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: 12px 22px minmax(0, 1fr) auto;
+  column-gap: 4px;
   align-items: center;
   min-height: 30px;
-  padding-right: 6px;
+  padding: 0 6px;
   background: transparent;
 }
 
 .host-group-toggle,
 .host-group-label {
-  display: flex;
+  display: grid;
+  grid-template-columns: 12px 22px minmax(0, 1fr);
+  grid-column: 1 / 4;
+  grid-row: 1;
   min-width: 0;
   min-height: 30px;
-  flex: 1;
   align-items: center;
-  gap: 6px;
-  padding: 0 6px;
+  gap: 4px;
+  padding: 0;
   color: var(--text);
   text-align: left;
   border: 0;
@@ -190,11 +193,18 @@ svg {
 
 .host-group-toggle { cursor: pointer; }
 
-.host-chevron-spacer {
-  flex: 0 0 14px;
+.host-color-control {
+  grid-column: 2;
+  grid-row: 1;
+  z-index: 1;
 }
 
-.host-identity-icon { display: flex; }
+.host-group-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
 
 .host-group-name {
   overflow: hidden;
@@ -209,27 +219,31 @@ svg {
   color: var(--muted);
   font-size: 11px;
   font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
 }
 
-.host-connection-status {
+.host-connection-status,
+.host-session-error {
   display: flex;
-  flex-basis: 100%;
+  grid-column: 3 / -1;
+  min-width: 0;
   align-items: center;
   gap: 5px;
-  margin: -1px 6px 5px 47px;
+  margin: 0 0 5px;
   color: var(--muted);
   font-size: 11px;
   line-height: 16px;
 }
 
 .host-session-error {
-  display: flex;
-  flex-basis: 100%;
-  align-items: center;
-  gap: 5px;
-  margin: 0 6px 5px 47px;
   color: var(--warning);
-  font-size: 11px;
+}
+
+.host-connection-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .host-connection-dot {
@@ -257,18 +271,42 @@ svg {
   color: var(--danger);
 }
 
-.host-connection-status[data-state="unknown"],
-.host-connection-status[data-availability="unknown"]:not([data-state="available"]):not([data-state="connected"]) {
+.host-connection-status[data-operation="pending"] .host-connection-dot {
+  color: var(--warning);
+  background: transparent;
+}
+
+.host-connection-status[data-operation="failed"] {
+  color: var(--danger);
+}
+
+.host-connection-status[data-operation="failed"] .host-connection-dot {
+  color: var(--danger);
+  background: transparent;
+}
+
+.host-connection-status[data-state="unknown"]:not([data-operation="failed"]),
+.host-connection-status[data-availability="unknown"]:not([data-state="available"]):not([data-state="connected"]):not([data-operation="failed"]) {
   color: var(--warning);
 }
 
 .host-group-actions {
-  position: absolute;
-  right: 6px;
-  top: 3px;
+  grid-column: 4;
+  grid-row: 1;
+  width: 0;
+  min-width: 0;
+  overflow: hidden;
   opacity: 0;
   pointer-events: none;
   background: var(--surface-1);
+}
+
+.host-group-actions > button { flex-shrink: 0; }
+
+.host-group-header:hover .host-group-actions,
+.host-group-header:focus-within .host-group-actions {
+  width: auto;
+  overflow: visible;
 }
 
 .host-group-header:hover .host-group-actions,
@@ -281,17 +319,6 @@ svg {
 
 .host-group-header.has-error .host-group-name {
   color: var(--danger);
-}
-
-.host-group-header:hover .host-group-toggle,
-.host-group-header:focus-within .host-group-toggle,
-.host-group-header:hover .host-group-label,
-.host-group-header:focus-within .host-group-label {
-  padding-right: 74px;
-}
-
-.host-group-header:not(:has(.host-group-actions)) .host-group-toggle {
-  padding-right: 6px;
 }
 
 .session-row:hover .session-select,
@@ -331,8 +358,11 @@ svg {
     pointer-events: auto;
   }
 
-  .host-group-toggle,
-  .host-group-label,
+  .host-group-actions {
+    width: auto;
+    overflow: visible;
+  }
+
   .session-select {
     padding-right: 74px;
   }
@@ -467,6 +497,11 @@ button:disabled {
   background: transparent;
 }
 
+.host-group-children {
+  border-radius: 6px;
+  background: var(--surface-2);
+}
+
 .session-actions {
   position: absolute;
   right: 5px;
@@ -476,7 +511,7 @@ button:disabled {
   transform: translateY(-50%);
   opacity: 0;
   pointer-events: none;
-  background: var(--surface-1);
+  background: inherit;
 }
 
 .session-action {

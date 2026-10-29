@@ -79,7 +79,7 @@ export function hostPresentation(
   else if (unavailable && !connected) tone = "muted";
   else if (connection_failed) tone = "error";
   else if (lookup_error || pending || observation_uncertain || unavailable && connected) tone = "warning";
-  else if (connected) tone = "normal";
+  else if (connected || reachability?.state === "available") tone = "normal";
   else if (connection?.manually_disconnected) tone = "muted";
   else if (reachability?.state === "checking" || reachability?.state === "unknown" ||
     !connection || connection.state === "checking") tone = "warning";

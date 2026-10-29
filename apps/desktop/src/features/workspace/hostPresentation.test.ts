@@ -41,12 +41,15 @@ describe("host presentation", () => {
     ]));
   });
 
-  it("does not infer an open connection from a reachable endpoint", () => {
+  it.each([false, true])("keeps an available name white and its dot hollow (manually paused: %s)", (manually_disconnected) => {
     const result = hostPresentation(target, status({
       state: "disconnected", method_names: [], observation: { ...observation, availability: "unavailable", method_names: [] },
+      manually_disconnected,
       reachability: { state: "available", reason: null, method_names: ["VPN"], message: null, checked_at_ms: 2000 },
     }));
-    expect(result).toMatchObject({ connected: false, tone: "muted", label: "SSH available", connection_label: "SSH disconnected" });
+    expect(result).toMatchObject({ connected: false, tone: "normal",
+      label: manually_disconnected ? "Disconnected manually" : "SSH available",
+      connection_label: manually_disconnected ? "Disconnected manually" : "SSH disconnected" });
     expect(result.description).toContain("Authentication has not been checked");
     expect(result.details).toContainEqual({ label: "SSH reachability checked", value: new Date(2000).toLocaleString() });
   });

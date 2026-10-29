@@ -330,7 +330,7 @@ describe("SessionSidebar", () => {
     expect(status.getAttribute("aria-description")).toContain("Reachability details");
     expect(status.getAttribute("aria-description")).toContain("Disconnected manually");
     expect(status.getAttribute("aria-description")).toContain(label);
-    expect(status.getAttribute("data-tone")).toBe("muted");
+    expect(status.getAttribute("data-tone")).toBe(evidence.state === "available" ? "normal" : "muted");
     if (evidence.state === "available") {
       expect(status.getAttribute("aria-description")).toContain("Authentication has not been checked");
       expect(status.getAttribute("data-connected")).toBe("false");

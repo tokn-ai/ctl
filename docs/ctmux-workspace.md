@@ -185,8 +185,9 @@ restart the preferred method is used for subsequent connections.
 Host connection status comes from live OpenSSH master checks across saved and
 active methods, refreshed every five seconds and on window focus. It is separate
 from remembered remote identity and per-session attachment state. The sidebar
-uses the host name's color for status: gray for unavailable, yellow for warnings,
-and red for errors. The host's chosen color dot is filled only with current
+uses the host name's color for status: white for connected or available, gray for
+unavailable, yellow for warnings, and red for errors. The host's chosen color dot
+is filled only with current
 connection evidence and hollow otherwise; Local remains solid white. Hovering or
 focusing the name opens a details card with connection, reachability, method,
 operation, and session-lookup information. Session reconnects and attachment

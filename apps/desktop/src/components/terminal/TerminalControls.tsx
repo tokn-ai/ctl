@@ -1,32 +1,23 @@
+import { ControlPopover } from "../ui/ControlPopover";
 import { Icon } from "../ui/Icon";
 import type { AttachmentViewState } from "../../lib/types";
-import { targetLabel } from "../../features/targets/targets";
-import { attachmentPhaseLabel } from "../../features/attachment/attachmentState";
 import type { ResizeControlStatus } from "../../features/attachment/componentActions";
 
-interface TerminalToolbarProps {
+interface TerminalControlsProps {
   state: AttachmentViewState;
-  showInputControl?: boolean;
-  onToggleInput(): void;
   onToggleResizeWithWindow(): void;
   resize_control_status: ResizeControlStatus;
   onRequestResizeControl(acquire: boolean): void;
   onReconnect(): void;
-  onShowCommands(): void;
-  commandShortcutLabel: string;
 }
 
-export function TerminalToolbar({
+export function TerminalControls({
   state,
-  showInputControl = true,
-  onToggleInput,
   onToggleResizeWithWindow,
   resize_control_status,
   onRequestResizeControl,
   onReconnect,
-  onShowCommands,
-  commandShortcutLabel,
-}: TerminalToolbarProps) {
+}: TerminalControlsProps) {
   const attached = state.phase === "attached";
   const canReconnect =
     state.session !== null &&
@@ -34,39 +25,20 @@ export function TerminalToolbar({
   const resizeOwned = resize_control_status === "owned";
   const resizeActive = state.resize_with_window && resizeOwned;
   const resizeAvailable = resize_control_status === "available";
+  const layout_summary = !attached || resize_control_status === "unavailable" ? "Unavailable"
+    : resize_control_status === "held_elsewhere" ? "Held elsewhere"
+    : resizeActive ? "Auto resize" : state.resize_with_window ? "Waiting for control" : "Fixed size";
   const resizeLabel = resizeOwned ? "Owned here" : resizeAvailable ? "Available"
     : resize_control_status === "held_elsewhere" ? "Held elsewhere" : "Unavailable";
 
   return (
-    <header className="terminal-toolbar">
-      <div className="toolbar-session">
-        <span className={`connection-dot ${state.phase}`} aria-hidden="true" />
-        <div>
-          <strong>{state.session?.name ?? "No session"}</strong>
-          <small>
-            {state.session ? `${targetLabel(state.session.target)} · ` : ""}
-            {attachmentPhaseLabel(state.phase)}
-          </small>
-        </div>
-      </div>
-      <div className="toolbar-actions">
-        {canReconnect ? (
-          <button type="button" onClick={onReconnect}>
-            <Icon name="refresh" size={14} /> Reconnect
-          </button>
-        ) : null}
-        {showInputControl && <button
-          type="button"
-          onClick={onToggleInput}
-          disabled={!attached}
-          className={state.input_lease.owned_by_client ? "active-control" : ""}
-          aria-pressed={state.input_lease.owned_by_client}
-          aria-label={state.input_lease.owned_by_client ? "Release input" : "Request input"}
-          title={state.input_lease.owned_by_client ? "Release input to make this terminal read-only" : "Request input control for this terminal"}
-        >
-          <Icon name="keyboard" size={14} />
-          {state.input_lease.owned_by_client ? "Input enabled" : "Read only"}
-        </button>}
+    <div className="terminal-controls">
+      {canReconnect ? (
+        <button type="button" onClick={onReconnect}>
+          <Icon name="refresh" size={14} /> Reconnect
+        </button>
+      ) : null}
+      <ControlPopover label={`Layout · ${layout_summary}`} trigger_content={<Icon name="monitor" size={14} />}>
         <span aria-label="Resize control status">Resize: {resizeLabel}</span>
         <button
           type="button"
@@ -93,19 +65,7 @@ export function TerminalToolbar({
           <Icon name="monitor" size={14} />
           {state.resize_with_window ? "Auto resize" : "Fixed size"}
         </button>
-        <button
-          className="command-palette-trigger"
-          type="button"
-          onClick={onShowCommands}
-          title={`Show command palette${commandShortcutLabel ? ` (${commandShortcutLabel})` : ""}`}
-        >
-          <Icon name="command" size={14} />
-          <span>Commands</span>
-          {commandShortcutLabel ? (
-            <kbd aria-hidden="true">{commandShortcutLabel}</kbd>
-          ) : null}
-        </button>
-      </div>
-    </header>
+      </ControlPopover>
+    </div>
   );
 }

@@ -1,12 +1,14 @@
 import type { ReactNode } from "react";
 
 const paths = {
+  archive: <><rect x="3" y="3" width="18" height="5" rx="1" /><path d="M5 8v13h14V8M10 12h4" /></>,
+  activity: <path d="M3 12h4l3-8 4 16 3-8h4" />,
   info: <><circle cx="12" cy="12" r="9" /><path d="M12 11v6m0-10h.01" /></>,
   key: <><circle cx="8" cy="8" r="5" /><path d="m12 12 9 9m-4-4 3-3m-6 0 3-3M7 7h.01" /></>,
   terminal: <><rect x="3" y="4" width="18" height="16" rx="2" /><path d="m7 9 3 3-3 3m6 0h4" /></>,
   tasks: <><rect x="5" y="3" width="14" height="18" rx="2" /><path d="m8 8 1 1 2-2m2 1h3m-8 6 1 1 2-2m2 1h3" /></>,
-  ports: <><circle cx="6" cy="6" r="3" /><circle cx="18" cy="18" r="3" /><path d="M9 6h6a3 3 0 0 1 3 3v6M6 9v12" /></>,
-  vpn: <><path d="m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6z" /><path d="m8 12 3 3 5-6" /></>,
+  ports: <><path d="M5 4H3v16h2M19 4h2v16h-2M7 9h10m-3-3 3 3-3 3M17 15H7m3-3-3 3 3 3" /></>,
+  vpn: <><path d="M11 21a9 9 0 1 1 10-10M3 12h10M12 3c-4 4-4 14 0 18M12 3c2 2 3 4 3 7" /><rect x="14" y="15" width="8" height="7" rx="1" /><path d="M16 15v-2a2 2 0 0 1 4 0v2" /></>,
   server: <><rect x="3" y="3" width="18" height="7" rx="1" /><rect x="3" y="14" width="18" height="7" rx="1" /><path d="M7 6.5h.01M7 17.5h.01M11 6.5h6m-6 11h6" /></>,
   monitor: <><rect x="3" y="3" width="18" height="14" rx="1" /><path d="M8 21h8m-4-4v4" /></>,
   chevron_right: <path d="m9 5 7 7-7 7" />,

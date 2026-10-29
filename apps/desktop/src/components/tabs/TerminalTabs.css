@@ -1,0 +1,24 @@
+.terminal-tabs .terminal-tab {
+  position: relative;
+}
+
+.terminal-tabs .terminal-tab::before {
+  position: absolute;
+  top: 0;
+  right: 8px;
+  left: 8px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--host-color);
+  content: "";
+  pointer-events: none;
+}
+
+.terminal-tabs .terminal-tab.active {
+  box-shadow: none;
+}
+
+.terminal-tabs .terminal-tab .tab-icon {
+  flex-shrink: 0;
+  color: inherit;
+}

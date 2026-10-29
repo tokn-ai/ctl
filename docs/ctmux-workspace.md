@@ -9,7 +9,8 @@ can be remembered by several clients. `ctl-agent` stores only its environment ID
 
 The native backend keeps two files under `~/.tokn/ctl` on every platform:
 
-- `hosts.json` (schema 1) owns saved remote hosts and reusable gateways.
+- `hosts.json` (schemas 1 and 2) owns saved remote hosts, reusable gateways, and
+  optional host color preferences.
 - `workspace.json` (schema 8) owns session membership and presentation state.
 
 Their shared lock file and schema backups live alongside them. The app reads
@@ -26,7 +27,18 @@ The host catalog contains:
   agent version, and bundle metadata;
 - reusable `ssh_gateways`, referenced in order by a method's `gateway_route`.
   Route steps may also reference a saved `host_id` and its selected `method_id`,
-  or a saved VPN profile. Host links reuse the method's current route and endpoint.
+  or a saved VPN profile. Host links reuse the method's current route and endpoint;
+- optional schema-2 `host_colors`, mapping stable host IDs to six-digit `#RRGGBB`
+  colors. Appearance preferences can reference local, discovered, or unavailable
+  hosts without adding their connection definitions to the catalog. Unset remote
+  colors use the stable default. The GUI keeps Local fixed white and ignores any
+  saved local color override.
+
+Color overrides use catalog schema 2; catalogs without overrides retain schema 1.
+Updated clients read both formats, and resetting every override permits schema-1
+output again. Older clients reject schema-2 catalogs and preserve the file rather
+than discarding unfamiliar preferences. This storage extension does not change
+workspace schema 8, named IPC protocol versions, or product release versions.
 
 The workspace contains:
 
@@ -173,9 +185,14 @@ restart the preferred method is used for subsequent connections.
 Host connection status comes from live OpenSSH master checks across saved and
 active methods, refreshed every five seconds and on window focus. It is separate
 from remembered remote identity and per-session attachment state. The sidebar
-shows status text and a dot, with method names or diagnostics in the tooltip.
-Session reconnects and attachment failures stay on their own session rows and do
-not override the host badge. Session inspection failures remain in notifications.
+uses the host name's color for status: white for connected or available, gray for
+unavailable, yellow for warnings, and red for errors. The host's chosen color dot
+is filled only with current
+connection evidence and hollow otherwise; Local remains solid white. Hovering or
+focusing the name opens a details card with connection, reachability, method,
+operation, and session-lookup information. Session reconnects and attachment
+failures stay on their own session rows. Session inspection failures can mark the
+host name as a warning without changing its confirmed connection or dot fill.
 Checks neither start `ctld` nor request authentication.
 
 **Disconnect host** detaches its active terminal view, cancels pending connection
@@ -190,8 +207,8 @@ as an error and can be retried.
 
 **Connect host** discovers an account-owned UUID and the installed agent version
 on the same SSH stream used to verify the ctmux service. Bundled installations also
-report the app version, bundle ID, Git revision, and target triple. The host heading's
-tooltip shows the last discovered metadata.
+report the app version, bundle ID, Git revision, and target triple. The host details
+card shows the last discovered metadata.
 
 All methods saved on a host must verify the same account-owned UUID. Adding a
 method retains the existing methods, and verifying a matching UUID never merges

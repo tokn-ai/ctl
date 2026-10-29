@@ -1,23 +1,31 @@
-import type { KeyboardEvent, ReactNode } from "react";
-import type { SessionSummary, ShellStateSummary } from "../../lib/types";
+import type { CSSProperties, KeyboardEvent, ReactNode } from "react";
+import type { SessionSummary, ShellStateSummary, ViewLayout } from "../../lib/types";
 import { formatTerminalTitle } from "../../features/tabs/terminalTitle";
-import { sessionKey, targetLabel } from "../../features/targets/targets";
+import { sessionKey, targetKey, targetLabel } from "../../features/targets/targets";
+import { hostColor, hostIdColor } from "../../features/workspace/hostColor";
+import { SessionIcon, sessionIconLabel } from "../sessions/SessionIcon";
 import { Icon } from "../ui/Icon";
+import "./TerminalTabs.css";
 
 export interface ExtraTab {
   tab_key: string;
   title: string;
   host: string;
+  host_id?: string;
   status: string;
 }
 
 interface TerminalTabsProps {
+  leading_actions?: ReactNode;
+  trailing_actions?: ReactNode;
   extra_tabs?: ExtraTab[];
   tab_order?: string[];
   on_select_extra?(key: string): void;
   on_close_extra?(key: string): void;
   tabs: readonly SessionSummary[];
   shellStates: ReadonlyMap<string, ShellStateSummary>;
+  session_layouts?: ReadonlyMap<string, ViewLayout>;
+  host_colors?: Readonly<Record<string, string>>;
   activeSessionKey: string | null;
   canCreate: boolean;
   onSelect(session: SessionSummary): void;
@@ -29,6 +37,8 @@ interface WorkspaceTabProps {
   active: boolean;
   title: string;
   host: string;
+  host_color: string;
+  description?: string;
   close_label: string;
   close_hint: string;
   icon: ReactNode;
@@ -38,23 +48,26 @@ interface WorkspaceTabProps {
 }
 
 function WorkspaceTab({
-  active, title, host, close_label, close_hint, icon, children,
+  active, title, host, host_color, description, close_label, close_hint, icon, children,
   on_select, on_close,
 }: WorkspaceTabProps) {
   return (
-    <div className={`terminal-tab ${active ? "active" : ""}`}>
+    <div
+      className={`terminal-tab ${active ? "active" : ""}`}
+      style={{ "--host-color": host_color } as CSSProperties}
+    >
       <button
         className="terminal-tab-select"
         type="button"
         role="tab"
         aria-selected={active}
         aria-label={`${title} on ${host}`}
+        aria-description={description}
         title={`${title} · ${host}`}
         onClick={on_select}
       >
         {icon}
         <span className="terminal-tab-copy">{children}</span>
-        <span className="terminal-tab-host">{host}</span>
       </button>
       <button
         className="terminal-tab-close"
@@ -87,12 +100,16 @@ function navigateTabs(event: KeyboardEvent<HTMLDivElement>) {
 }
 
 export function TerminalTabs({
+  leading_actions,
+  trailing_actions,
   extra_tabs = [],
   tab_order = [],
   on_select_extra,
   on_close_extra,
   tabs,
   shellStates,
+  session_layouts,
+  host_colors = {},
   activeSessionKey,
   canCreate,
   onSelect,
@@ -101,7 +118,10 @@ export function TerminalTabs({
 }: TerminalTabsProps) {
   const terminalNodes = tabs.map((tab) => {
     const key = sessionKey(tab);
-    const title = formatTerminalTitle(tab, shellStates.get(key) ?? null);
+    const host_id = tab.target.kind === "local" ? "local" : tab.target.host_id ?? targetKey(tab.target);
+    const shell_state = shellStates.get(key);
+    const layout = session_layouts?.get(key);
+    const title = formatTerminalTitle(tab, shell_state ?? null);
     return {
       tab_key: key,
       node: (
@@ -110,9 +130,17 @@ export function TerminalTabs({
           active={key === activeSessionKey}
           title={title.text}
           host={targetLabel(tab.target)}
+          host_color={hostColor(tab.target, host_colors[host_id])}
+          description={sessionIconLabel(shell_state?.shell_type, layout)}
           close_label={`Close ${tab.name} tab`}
           close_hint="Close tab; keep session running"
-          icon={<Icon name="terminal" class_name="tab-icon" />}
+          icon={(
+            <SessionIcon
+              shell_type={shell_state?.shell_type}
+              layout={layout}
+              class_name="tab-icon"
+            />
+          )}
           on_select={() => onSelect(tab)}
           on_close={() => onClose(tab)}
         >
@@ -127,24 +155,28 @@ export function TerminalTabs({
       ),
     };
   });
-  const extraNodes = extra_tabs.map((tab) => ({
-    tab_key: tab.tab_key,
-    node: (
-      <WorkspaceTab
-        key={tab.tab_key}
-        active={tab.tab_key === activeSessionKey}
-        title={tab.title}
-        host={tab.host}
-        close_label={`Close ${tab.title} tab`}
-        close_hint="Close view; keep task running"
-        icon={<span className={`task-state-dot ${tab.status}`} />}
-        on_select={() => on_select_extra?.(tab.tab_key)}
-        on_close={() => on_close_extra?.(tab.tab_key)}
-      >
-        {tab.title}
-      </WorkspaceTab>
-    ),
-  }));
+  const extraNodes = extra_tabs.map((tab) => {
+    const host_id = tab.host_id ?? (tab.host.toLowerCase() === "local" ? "local" : tab.host);
+    return {
+      tab_key: tab.tab_key,
+      node: (
+        <WorkspaceTab
+          key={tab.tab_key}
+          active={tab.tab_key === activeSessionKey}
+          title={tab.title}
+          host={tab.host}
+          host_color={hostIdColor(host_id, host_colors[host_id])}
+          close_label={`Close ${tab.title} tab`}
+          close_hint="Close view; keep task running"
+          icon={<span className={`task-state-dot ${tab.status}`} />}
+          on_select={() => on_select_extra?.(tab.tab_key)}
+          on_close={() => on_close_extra?.(tab.tab_key)}
+        >
+          {tab.title}
+        </WorkspaceTab>
+      ),
+    };
+  });
   const nodes = [...terminalNodes, ...extraNodes].sort((a, b) => {
     const first = tab_order.indexOf(a.tab_key);
     const second = tab_order.indexOf(b.tab_key);
@@ -152,6 +184,7 @@ export function TerminalTabs({
   });
   return (
     <nav className="terminal-tabs" aria-label="Workspace tabs">
+      {leading_actions}
       <div className="terminal-tab-list" role="tablist" onKeyDown={navigateTabs}>
         {nodes.map((item) => item.node)}
       </div>
@@ -165,6 +198,7 @@ export function TerminalTabs({
       >
         <Icon name="plus" />
       </button>
+      {trailing_actions}
     </nav>
   );
 }

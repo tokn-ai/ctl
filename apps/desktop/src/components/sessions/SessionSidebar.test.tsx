@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -13,6 +13,7 @@ import type {
 } from "../../lib/types";
 import { sessionKey, targetKey } from "../../features/targets/targets";
 import { hostFromTarget } from "../../features/workspace/workspaceModel";
+import { hostColor } from "../../features/workspace/hostColor";
 import { TAILSCALE_UNAVAILABLE } from "../../features/workspace/tailscaleProjection";
 import { errorDetails } from "../../lib/errors";
 import { initialAttachmentState } from "../../features/attachment/attachmentState";
@@ -100,6 +101,125 @@ afterEach(() => {
 });
 
 describe("SessionSidebar", () => {
+  it("keeps empty hosts static and their actions accessible", async () => {
+    const user = userEvent.setup();
+    const props = renderHostConnection(undefined, { sessions: [] });
+    for (const name of ["local", "Build machine"]) {
+      const group = screen.getByRole("region", { name: `${name} sessions` });
+      expect(group.querySelector(".host-group-toggle")).toBeNull();
+      expect(group.querySelector(".host-group-children")).toBeNull();
+      expect(group.querySelector(".host-group-count")).toBeNull();
+      await user.click(within(group).getByRole("button", { name: `New shell on ${name}` }));
+    }
+    expect(screen.queryByText("No known sessions")).toBeNull();
+    expect(props.onNewShell).toHaveBeenNthCalledWith(1, session.target);
+    expect(props.onNewShell).toHaveBeenNthCalledWith(2, remoteHost);
+    await user.click(screen.getByRole("button", { name: "Connect to Build machine" }));
+    expect(props.onConnectHost).toHaveBeenCalledWith(remoteHost);
+  });
+
+  it("uses host colors and shell or actual split-layout icons", () => {
+    renderHostConnection(undefined, {
+      sessions: [session, { ...secondSession, target: remoteHost }],
+      shellStates: new Map([[sessionKey(session), shellState]]),
+      session_layouts: new Map([[sessionKey({ ...secondSession, target: remoteHost }), {
+        kind: "split", axis: "horizontal", children: [
+          { kind: "terminal", terminal_id: "left" },
+          { kind: "terminal", terminal_id: "right" },
+        ],
+      }]]),
+    });
+    expect(screen.getByRole("img", { name: "Zsh session" })).toBeTruthy();
+    expect(screen.getByRole("img", { name: "2-pane session layout" })).toBeTruthy();
+    expect(screen.getByRole("img", { name: "Zsh session" }).closest("button")?.getAttribute("aria-description")).toBe("Zsh session");
+    expect(screen.getByRole("button", { name: "Shell — second" }).getAttribute("aria-description")).toBe("2-pane session layout");
+    for (const target of [session.target, remoteHost]) {
+      const group = screen.getByRole("region", { name: `${target.kind === "local" ? "local" : "Build machine"} sessions` });
+      const expected = document.createElement("span");
+      if (target.kind === "local") {
+        expected.style.background = hostColor(target);
+        expect((group.querySelector(".host-color-dot") as HTMLElement).style.background).toBe(expected.style.background);
+      } else {
+        expected.style.color = hostColor(target);
+        expect((group.querySelector(".host-color-dot") as HTMLElement).style.color).toBe(expected.style.color);
+      }
+    }
+  });
+
+  it("marks empty-host lookup warnings on the name without adding a status row", () => {
+    const message = "Timed out listing sessions.";
+    renderHostConnection({ state: "connected", method_names: ["Direct"], message: null }, {
+      sessions: [], targetErrors: new Map([[targetKey(remoteHost), errorDetails({ code: "timeout", message })]]),
+    });
+    const status = screen.getByRole("status", { name: "Host connection for Build machine: Session lookup failed" });
+    expect(status.textContent).toBe("Build machine");
+    expect(status.getAttribute("data-tone")).toBe("warning");
+    expect(status.getAttribute("data-connected")).toBe("true");
+    expect(status.getAttribute("aria-description")).toContain(`Sessions: ${message}`);
+    expect(document.querySelector(".host-session-error, .host-connection-status")).toBeNull();
+    expect(screen.getByRole("region", { name: "Build machine sessions" }).querySelector(".host-group-toggle")).toBeNull();
+  });
+
+  it("changes color without toggling the host or its session selection", async () => {
+    const user = userEvent.setup();
+    const on_host_color_change = vi.fn();
+    renderHostConnection(undefined, { on_host_color_change, host_colors: { build: "#91b7f2" } });
+    const expand = screen.getByRole("button", { name: "Collapse Build machine" });
+    const picker = screen.getByRole("button", { name: "Change color for Build machine" });
+    expect(expand.contains(picker)).toBe(false);
+    await user.click(picker);
+    await user.click(screen.getByRole("button", { name: "Coral" }));
+    expect(on_host_color_change).toHaveBeenCalledExactlyOnceWith("build", "#f18f8f");
+    expect(expand.getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getByRole("button", { name: "Shell — first" })).toBeTruthy();
+  });
+
+  it("keeps Local as a fixed white dot even if an old preference is present", () => {
+    renderHostConnection(undefined, { host_colors: { local: "#91b7f2" } });
+    expect(screen.queryByRole("button", { name: "Change color for Local" })).toBeNull();
+    const group = screen.getByRole("region", { name: "local sessions" });
+    expect(group.querySelector<HTMLElement>(".host-color-dot")?.style.background).toBe("rgb(255, 255, 255)");
+  });
+
+  it.each([
+    ["connect", "pending", "Connecting…"],
+    ["disconnect", "pending", "Disconnecting…"],
+    ["connect", "failed", "Connect failed"],
+  ] as const)("colors the host name for %s/%s and keeps operation text in its details", (kind, state, label) => {
+    renderHostConnection({
+      state: "checking", method_names: [], message: null,
+      operation: { kind, state, method_name: "Office", message: "Waiting for the SSH connection" },
+    });
+    const status = screen.getByRole("status", { name: `Host connection for Build machine: ${label}` });
+    expect(status.textContent).toBe("Build machine");
+    expect(status.getAttribute("data-tone")).toBe(state === "failed" ? "error" : "warning");
+    expect(document.querySelector(".host-connection-status")).toBeNull();
+    expect(status.getAttribute("aria-description")).toContain("Checking SSH…");
+    expect(status.getAttribute("aria-description")).toContain("Office");
+    expect(status.getAttribute("aria-description")).toContain("Waiting for the SSH connection");
+  });
+
+  it.each([false, true])("opens host details on keyboard focus with sessions present=%s", (has_sessions) => {
+    renderHostConnection({ state: "connected", method_names: ["Office"], message: null }, {
+      sessions: has_sessions ? [{ ...session, target: remoteHost }] : [],
+    });
+    const group = screen.getByRole("region", { name: "Build machine sessions" });
+    const trigger = group.querySelector<HTMLElement>(".host-group-toggle, .host-group-label")!;
+    Object.defineProperty(trigger, "getBoundingClientRect", { value: () => new DOMRect(10, 20, 180, 30) });
+    Object.defineProperty(group.querySelector(".host-group-header"), "getBoundingClientRect", { value: () => new DOMRect(10, 20, 220, 30) });
+    expect(screen.queryByRole("tooltip")).toBeNull();
+    expect(within(group).queryByText("SSH connected")).toBeNull();
+    fireEvent.focus(trigger);
+    const card = screen.getByRole("tooltip");
+    expect(card.textContent).toContain("SSH connected");
+    expect(card.textContent).toContain("Office");
+    expect(card.textContent).toContain("remote-1");
+    expect(trigger.getAttribute("aria-describedby")).toBe(card.id);
+    expect(trigger.hasAttribute("title")).toBe(false);
+    fireEvent.keyDown(trigger, { key: "Escape" });
+    expect(screen.queryByRole("tooltip")).toBeNull();
+  });
+
   it("keeps unavailable host settings accessible while disabling new shells", async () => {
     const user = userEvent.setup();
     const target = { ...remoteHost, unavailable: "Restore this host" };
@@ -129,7 +249,7 @@ describe("SessionSidebar", () => {
       expect(age.closest(".session-detail-label")).toBeNull();
       expect(age.getAttribute("datetime")).toBe("2026-10-01T10:00:00.000Z");
       expect(age.title).toBe("Last observed by this app: 2026-10-01T10:00:00.000Z");
-      expect(row.getAttribute("aria-description")).toBe(age.title);
+      expect(row.getAttribute("aria-description")).toContain(age.title);
       expect(row.querySelector(".session-status")?.getAttribute("data-status")).toBe(phase);
       expect(row.querySelector("small")?.title).toContain("80×24");
       expect(row.textContent).not.toContain("80×24");
@@ -147,9 +267,9 @@ describe("SessionSidebar", () => {
       attachmentStates: new Map([[sessionKey(known), { ...initialAttachmentState(), phase: "attached", session: known }]]),
     });
     const row = screen.getByRole("button", { name: "Shell — first" });
-    expect(within(row).getByText("Attached")).toBeTruthy();
+    expect(within(row).getByLabelText("Attached").getAttribute("title")).toContain("80×24");
     expect(row.querySelector("time")).toBeNull();
-    expect(row.querySelector("small")?.title).toContain("80×24");
+    expect(row.querySelector("small")).toBeNull();
     expect(vi.getTimerCount()).toBe(0);
   });
 
@@ -160,7 +280,7 @@ describe("SessionSidebar", () => {
       const row = screen.getByRole("button", { name: `Shell — ${name}` });
       expect(row.querySelector("time")).toBeNull();
       expect(row.querySelector("small")?.title).not.toContain("80×24");
-      expect(row.getAttribute("aria-description")).toBeNull();
+      expect(row.getAttribute("aria-description")).toBe("Terminal session");
     }
     expect(vi.getTimerCount()).toBe(0);
   });
@@ -199,19 +319,21 @@ describe("SessionSidebar", () => {
     [{ state: "unavailable", reason: "connection_refused" }, "SSH unavailable"],
     [{ state: "not_checked", reason: "vpn_disconnected" }, "VPN disconnected"],
     [{ state: "not_checked", reason: "route_requires_connection" }, "SSH not checked"],
-    [{ state: "unknown", reason: "check_failed" }, "SSH status unknown"],
+    [{ state: "unknown", reason: "check_failed" }, "SSH reachability unknown"],
   ] as const)("shows %s reachability without granting connected controls", async (evidence, label) => {
     const user = userEvent.setup();
     const reachability: HostReachabilityObservation = { ...evidence, method_names: evidence.state === "available" ? ["Direct"] : [], message: "Reachability details", checked_at_ms: 1 };
     const props = renderHostConnection({ state: "disconnected", method_names: [], message: "Disconnected manually. Connect this host to resume.",
       manually_disconnected: true, reachability });
-    const status = screen.getByRole("status", { name: `Host connection for Build machine: ${label}` });
-    expect(status.textContent).toBe(label);
-    expect(status.title).toContain("Reachability details");
-    expect(status.title).toContain("Disconnected manually");
+    const status = screen.getByRole("status", { name: "Host connection for Build machine: Disconnected manually" });
+    expect(status.textContent).toBe("Build machine");
+    expect(status.getAttribute("aria-description")).toContain("Reachability details");
+    expect(status.getAttribute("aria-description")).toContain("Disconnected manually");
+    expect(status.getAttribute("aria-description")).toContain(label);
+    expect(status.getAttribute("data-tone")).toBe(evidence.state === "available" ? "normal" : "muted");
     if (evidence.state === "available") {
-      expect(status.title).toContain("Authentication has not been checked");
-      expect(status.getAttribute("data-state")).toBe("available");
+      expect(status.getAttribute("aria-description")).toContain("Authentication has not been checked");
+      expect(status.getAttribute("data-connected")).toBe("false");
     }
     expect(screen.queryByRole("button", { name: "Disconnect host Build machine" })).toBeNull();
     await user.click(screen.getByRole("button", { name: "Connect to Build machine" }));
@@ -222,7 +344,7 @@ describe("SessionSidebar", () => {
     renderHostConnection({ state: "connected", method_names: ["Direct"], message: null,
       reachability: { state: "unavailable", reason: "timed_out", method_names: [], message: null, checked_at_ms: 1 } });
     const status = screen.getByRole("status", { name: "Host connection for Build machine: SSH connected" });
-    expect(status.title).toContain("does not freshly verify remote responsiveness");
+    expect(status.getAttribute("aria-description")).toContain("does not freshly verify remote responsiveness");
     expect(screen.getByRole("button", { name: "Disconnect host Build machine" })).toBeDefined();
   });
 
@@ -236,11 +358,12 @@ describe("SessionSidebar", () => {
         error_code: failure.code, message: failure.message,
       }]]) : new Map(),
     });
-    const status = screen.getByRole("status", { name: "Host connection for Build machine: SSH connected" });
-    expect(status.title).not.toContain(failure.message);
-    expect(status.title).toContain("local SSH control connection is open");
+    const status = screen.getByRole("status", { name: `Host connection for Build machine: ${source === "inspection" ? "Session lookup failed" : "SSH connected"}` });
+    if (source === "inspection") expect(status.getAttribute("aria-description")).toContain(`Sessions: ${failure.message}`);
+    else expect(status.getAttribute("aria-description")).not.toContain(failure.message);
+    expect(status.getAttribute("aria-description")).toContain("local SSH control connection is open");
     expect(screen.getByRole("button", { name: "Disconnect host Build machine" })).toBeDefined();
-    expect(status.getAttribute("data-state")).toBe("connected");
+    expect(status.getAttribute("data-connected")).toBe("true");
   });
 
   it.each([
@@ -270,9 +393,9 @@ describe("SessionSidebar", () => {
       ]),
     });
     const host = screen.getByRole("status", { name: "Host connection for Build machine: SSH connected" });
-    expect(host.getAttribute("data-state")).toBe("connected");
-    expect(host.title).not.toContain(message);
-    expect(screen.getByText("Attached")).toBeTruthy();
+    expect(host.getAttribute("data-connected")).toBe("true");
+    expect(host.getAttribute("aria-description")).not.toContain(message);
+    expect(screen.getByLabelText("Attached")).toBeTruthy();
     const failure = screen.getByText("Reconnect failed");
     expect(failure.closest(".session-details")?.getAttribute("title")).toContain(message);
     expect(screen.queryByText(/session needs attention/i)).toBeNull();
@@ -285,9 +408,9 @@ describe("SessionSidebar", () => {
       reachability: { state: "available", reason: null, method_names: ["Direct"], message: null, checked_at_ms: 1 } }, {
       targets: [target], connectableHostKeys: new Set([targetKey(target)]),
     });
-    const status = screen.getByRole("status", { name: "Host connection for Build machine: SSH available" });
-    expect(status.title).toContain("Available methods: Direct");
-    expect(status.title).toContain(TAILSCALE_UNAVAILABLE);
+    const status = screen.getByRole("status", { name: "Host connection for Build machine: Tailscale unavailable" });
+    expect(status.getAttribute("aria-description")).toContain("Available methods: Direct");
+    expect(status.getAttribute("aria-description")).toContain(TAILSCALE_UNAVAILABLE);
     expect(screen.queryByRole("button", { name: "Disconnect host Build machine" })).toBeNull();
     await user.click(screen.getByRole("button", { name: "Connect to Build machine" }));
     expect(props.onConnectHost).toHaveBeenCalledExactlyOnceWith(target);
@@ -298,11 +421,11 @@ describe("SessionSidebar", () => {
       hosts: [{ ...hostFromTarget(remoteHost), source: "tailscale" }],
     });
     expect(screen.getByText("Tailscale").title).toBe("Discovered from Tailscale; saved only when customized");
-    expect(screen.getByRole("status", { name: "Host connection for Build machine: Disconnected" }).textContent).toBe("Disconnected");
+    expect(screen.getByRole("status", { name: "Host connection for Build machine: SSH disconnected" }).textContent).toBe("Build machine");
     expect(screen.queryByRole("button", { name: "Remove Build machine" })).toBeNull();
   });
 
-  it("keeps a readable connection status visible when the host is collapsed and disconnects the host independently", async () => {
+  it("keeps name status available when collapsed and disconnects the host independently", async () => {
     const user = userEvent.setup();
     const props = renderHostConnection({
       state: "connected",
@@ -312,10 +435,10 @@ describe("SessionSidebar", () => {
     const status = screen.getByRole("status", {
       name: "Host connection for Build machine: SSH connected",
     });
-    expect(status.textContent).toBe("SSH connected");
-    expect(status.title).toContain("Connection methods: Office network, VPN");
-    expect(status.querySelector(".host-connection-dot")?.getAttribute("aria-hidden")).toBe("true");
-    expect(status.closest("button")).toBeNull();
+    expect(status.textContent).toBe("Build machine");
+    expect(status.getAttribute("aria-description")).toContain("Connected methods: Office network, VPN");
+    expect(screen.getByRole("button", { name: "Change color for Build machine" }).getAttribute("data-connected")).toBe("true");
+    expect(status.closest("button")?.getAttribute("aria-description")).toContain("SSH connected");
     expect(screen.queryByRole("button", { name: "Connect to Build machine" })).toBeNull();
 
     await user.click(screen.getByRole("button", { name: "Collapse Build machine" }));
@@ -333,12 +456,12 @@ describe("SessionSidebar", () => {
   });
 
   it.each([
-    [undefined, "Checking…"],
-    [{ state: "disconnected", method_names: [], message: null } as HostConnectionStatus, "Disconnected"],
+    [undefined, "Checking SSH…"],
+    [{ state: "disconnected", method_names: [], message: null } as HostConnectionStatus, "SSH disconnected"],
   ])("does not infer a live connection from cached identity or running sessions (%s)", async (connection, label) => {
     const user = userEvent.setup();
     const props = renderHostConnection(connection);
-    expect(screen.getByRole("status", { name: `Host connection for Build machine: ${label}` }).textContent).toBe(label);
+    expect(screen.getByRole("status", { name: `Host connection for Build machine: ${label}` }).textContent).toBe("Build machine");
     expect(screen.queryByRole("button", { name: "Disconnect host Build machine" })).toBeNull();
     await user.click(screen.getByRole("button", { name: "Connect to Build machine" }));
     expect(props.onConnectHost).toHaveBeenCalledExactlyOnceWith(remoteHost);
@@ -352,7 +475,7 @@ describe("SessionSidebar", () => {
     const props = renderHostConnection({ state, method_names: ["Office network"], message: null }, {
       connectableHostKeys: new Set([targetKey(remoteHost)]),
     });
-    expect(screen.getByRole("status", { name: `Host connection for Build machine: ${label}` }).textContent).toBe(label);
+    expect(screen.getByRole("status", { name: `Host connection for Build machine: ${label}` }).textContent).toBe("Build machine");
     const action = screen.getByRole("button", { name: actionLabel }) as HTMLButtonElement;
     expect(action.disabled).toBe(true);
     await user.click(action);
@@ -368,9 +491,9 @@ describe("SessionSidebar", () => {
       message: "VPN status check failed",
     });
     const status = screen.getByRole("status", { name: "Host connection for Build machine: Connection error" });
-    expect(status.textContent).toBe("Connection error");
-    expect(status.title).toContain("Office network");
-    expect(status.title).toContain("VPN status check failed");
+    expect(status.textContent).toBe("Build machine");
+    expect(status.getAttribute("aria-description")).toContain("Office network");
+    expect(status.getAttribute("aria-description")).toContain("VPN status check failed");
     await user.click(screen.getByRole("button", { name: "Disconnect host Build machine" }));
     expect(props.onDisconnectHost).toHaveBeenCalledExactlyOnceWith(remoteHost);
   });
@@ -392,12 +515,12 @@ describe("SessionSidebar", () => {
       targetErrors: new Map([[targetKey(target), errorDetails(TAILSCALE_UNAVAILABLE)]]),
     });
     const status = screen.getByRole("status", { name: "Host connection for Build machine: SSH connected" });
-    expect(status.textContent).toBe("SSH connected");
-    expect(status.getAttribute("data-state")).toBe("connected");
-    expect(status.title).toContain("Office network");
-    expect(status.title).toContain("Some connection methods couldn't be checked.");
-    expect(status.title).toContain("Status unknown for: Tailscale");
-    expect(status.title).toContain(TAILSCALE_UNAVAILABLE);
+    expect(status.textContent).toBe("Build machine");
+    expect(status.getAttribute("data-connected")).toBe("true");
+    expect(status.getAttribute("aria-description")).toContain("Office network");
+    expect(status.getAttribute("aria-description")).toContain("Some connection methods couldn't be checked.");
+    expect(status.getAttribute("aria-description")).toContain("Status unknown for: Tailscale");
+    expect(status.getAttribute("aria-description")).toContain(TAILSCALE_UNAVAILABLE);
     expect(screen.queryByText(TAILSCALE_UNAVAILABLE)).toBeNull();
     await user.click(screen.getByRole("button", { name: "Disconnect host Build machine" }));
     expect(props.onDisconnectHost).toHaveBeenCalledExactlyOnceWith(target);
@@ -422,10 +545,11 @@ describe("SessionSidebar", () => {
       targetErrors: new Map([[targetKey(unavailable), errorDetails("Session listing failed")]]),
     });
     const status = screen.getByRole("status", { name: `Host connection for Build machine: ${label}` });
-    expect(status.textContent).toBe(label);
-    expect(status.title).toContain(reason);
+    expect(status.textContent).toBe("Build machine");
+    expect(status.getAttribute("aria-description")).toContain(reason);
     expect(screen.queryByText(reason)).toBeNull();
-    expect(status.title).not.toContain("Session listing failed");
+    expect(status.getAttribute("aria-description")).toContain("Sessions: Session listing failed");
+    expect(status.getAttribute("data-tone")).toBe("muted");
     expect(screen.queryByText("Session listing failed")).toBeNull();
     const connect = screen.getByRole("button", { name: "Connect to Build machine" }) as HTMLButtonElement;
     expect(connect.disabled).toBe(true);
@@ -475,11 +599,11 @@ describe("SessionSidebar", () => {
     );
 
     expect(markup).toContain('aria-label="Terminate first"');
-    expect(markup).toContain('aria-label="Add host"');
+    expect(markup).toContain('aria-label="Add or manage sessions"');
     expect(markup).not.toContain('aria-label="Add host with gateways"');
     expect(markup).not.toContain("session-close-confirmation");
     expect(markup).not.toContain("host-form");
-    expect(markup).toContain("New shell");
+    expect(markup).toContain("Add or manage sessions");
     expect(markup).not.toContain("<form");
   });
 
@@ -513,7 +637,7 @@ describe("SessionSidebar", () => {
     expect(markup).toContain(`title="${fullTitle}"`);
     expect(markup).toContain("<strong>…/desktop — …mux-app</strong>");
     expect(markup).toContain(
-      `<small class="session-details" title="${session.name} · Last seen running · Session last reported running"><span class="session-detail-label">${session.name}<span aria-hidden="true"> · </span>`,
+      `<small class="session-details" title="${session.name} · Last seen running · Session last reported running"><span class="session-detail-label">`,
     );
     expect(markup).not.toContain(`<strong>${session.name}</strong>`);
   });
@@ -628,7 +752,9 @@ describe("SessionSidebar", () => {
     await user.keyboard(" ");
     expect(localGroup.getAttribute("aria-expanded")).toBe("true");
     expect(screen.getByRole("button", { name: "Shell — first" })).toBeTruthy();
-    expect(screen.getByText("No known sessions")).toBeTruthy();
+    expect(screen.queryByText("No known sessions")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Expand build-host" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Collapse build-host" })).toBeNull();
     const connect = screen.getByRole("button", { name: "Connect to build-host" });
     expect(connect.title).toContain("Agent 0.1.0\nRemote ID: remote-1");
     await user.click(connect);
@@ -643,6 +769,7 @@ describe("SessionSidebar", () => {
 
     await user.click(screen.getByRole("button", { name: "Host settings for build-host" }));
     expect(onHostSettings).toHaveBeenCalledWith(remote);
+    await user.click(screen.getByRole("button", { name: "Add or manage sessions" }));
     await user.click(screen.getByRole("button", { name: "Add host" }));
     expect(onAddHost).toHaveBeenCalledOnce();
     expect(screen.queryByRole("button", { name: "Add host with gateways" })).toBeNull();

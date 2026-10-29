@@ -1,0 +1,120 @@
+.host-color-trigger,
+.host-color-fixed {
+  display: grid;
+  width: 22px;
+  height: 26px;
+  flex: 0 0 22px;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+}
+
+.host-color-trigger { cursor: pointer; }
+
+.host-color-trigger:disabled {
+  opacity: 1;
+  cursor: default;
+}
+
+.host-color-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  flex: 0 0 10px;
+  border-radius: 50%;
+}
+
+.host-color-trigger .host-color-dot {
+  box-sizing: border-box;
+  border: 1.5px solid currentColor;
+}
+
+.host-color-popover {
+  position: fixed;
+  z-index: 90;
+  width: 220px;
+  max-width: calc(100vw - 16px);
+  max-height: calc(100vh - 16px);
+  padding: 10px;
+  overflow-y: auto;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+  box-shadow: 0 8px 24px #00000055;
+}
+
+.host-color-swatches {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 4px;
+}
+
+.host-color-swatch {
+  display: grid;
+  width: 29px;
+  height: 29px;
+  place-items: center;
+  padding: 3px;
+  border: 1px solid transparent;
+  border-radius: 50%;
+  background: transparent;
+  cursor: pointer;
+}
+
+.host-color-swatch span {
+  width: 19px;
+  height: 19px;
+  border-radius: 50%;
+}
+
+.host-color-swatch:hover,
+.host-color-swatch[aria-pressed="true"] {
+  border-color: var(--text);
+}
+
+.host-color-swatch:focus-visible {
+  outline-offset: 0;
+}
+
+.host-color-random-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 9px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.host-color-random-heading button,
+.host-color-reset {
+  padding: 3px 5px;
+  color: var(--muted);
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.host-color-random-heading button:hover,
+.host-color-reset:hover {
+  color: var(--text);
+  background: var(--surface-3);
+}
+
+.host-color-suggestions {
+  grid-template-columns: repeat(4, 29px);
+  margin-top: 4px;
+}
+
+.host-color-reset {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 7px;
+  font-size: 11px;
+}

@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { flushSync } from "react-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AttachmentViewState, SessionSummary, SessionView } from "../../lib/types";
 import { sessionKey } from "../../features/targets/targets";
@@ -72,7 +73,51 @@ afterEach(() => {
   vi.unstubAllGlobals(); vi.clearAllMocks(); mocks.attachment_state = null; mocks.mounted_inputs = []; vi.useRealTimers();
 });
 
+function paneAction(name: string): HTMLButtonElement {
+  if (!screen.queryByRole("button", { name })) {
+    flushSync(() => fireEvent.click(screen.getByRole("button", { name: "Pane actions" })));
+  }
+  return screen.getByRole<HTMLButtonElement>("button", { name });
+}
+
 describe("session compositor", () => {
+  it("reports confirmed layouts without counting retained ended panes", async () => {
+    mocks.request.mockResolvedValue(split);
+    const on_view = vi.fn();
+    render(<SessionViewSurface {...props()} on_view={on_view} />);
+    await waitFor(() => expect(on_view).toHaveBeenCalledWith(session, split));
+    const surviving = { ...initial, revision: "2" };
+    act(() => publishSessionView({ session, attachment_id: "primary-owner", view: surviving }));
+    expect(on_view).toHaveBeenLastCalledWith(session, surviving);
+    expect(screen.getAllByLabelText("Terminal input")).toHaveLength(2);
+    expect(screen.getByRole("separator").getAttribute("aria-disabled")).toBe("true");
+    act(() => publishSessionView({ session, attachment_id: "primary-owner", view: split }));
+    expect(on_view).toHaveBeenCalledTimes(2);
+  });
+
+  it("puts focused-pane actions in the shared footer without remounting terminals", async () => {
+    mocks.request.mockResolvedValue(split);
+    const footer = document.createElement("footer");
+    document.body.append(footer);
+    const result = render(<SessionViewSurface {...props()} controls_container={footer} />);
+    try {
+      await waitFor(() => expect(screen.getAllByLabelText("Terminal input")).toHaveLength(2));
+      expect(result.container.querySelector(".view-controls")).toBeNull();
+      expect(footer.querySelector(".view-controls")).toBeTruthy();
+      act(() => screen.getAllByLabelText("Terminal input")[1].focus());
+      expect(screen.queryByRole("button", { name: "Split right" })).toBeNull();
+      const split_button = paneAction("Split right");
+      expect(footer.contains(split_button)).toBe(true);
+      fireEvent.click(split_button);
+      await waitFor(() => expect(mocks.request).toHaveBeenLastCalledWith(session.target,
+        expect.objectContaining({ kind: "split", terminal_id: "b" })));
+      expect(mocks.unmount).not.toHaveBeenCalled();
+    } finally {
+      result.unmount();
+      footer.remove();
+    }
+  });
+
   it("continues a held drag through confirmed views and renderer cell measurement refreshes", async () => {
     mocks.request.mockResolvedValue(split);
     const cell = { width: 313 / 40, height: 399 / 24 };
@@ -112,7 +157,7 @@ describe("session compositor", () => {
     expect(mocks.unmount).not.toHaveBeenCalled();
     fireEvent.pointerUp(handle, { clientX: point(43), clientY: 100 });
     expect(captured.has(handle)).toBe(false);
-    expect(screen.getByRole("button", { name: "Split right" }).hasAttribute("disabled")).toBe(false);
+    expect(paneAction("Split right").hasAttribute("disabled")).toBe(false);
     expect(mocks.divider).toHaveBeenCalledTimes(2);
   });
 
@@ -147,7 +192,7 @@ describe("session compositor", () => {
     expect(document.activeElement).toBe(inputs[1]);
     expect(mocks.mount).toHaveBeenCalledTimes(2);
     expect(mocks.unmount).not.toHaveBeenCalled();
-    expect(screen.getByRole("button", { name: "Split right" }).hasAttribute("disabled")).toBe(false);
+    expect(paneAction("Split right").hasAttribute("disabled")).toBe(false);
   });
 
   it("reads a synchronous newer view before React renders a batched observer update and divider ACK", async () => {
@@ -165,7 +210,7 @@ describe("session compositor", () => {
       publishPaneResizeResult({ session, attachment_id: "primary-owner", request_id, view: { ...split, revision: "2" }, error: null });
     });
     expect(mocks.divider).toHaveBeenCalledTimes(1);
-    expect(screen.getByRole("button", { name: "Split right" }).hasAttribute("disabled")).toBe(false);
+    expect(paneAction("Split right").hasAttribute("disabled")).toBe(false);
   });
 
   it("rejects a drag on an old rendered handle when topology changes in the same batch", async () => {
@@ -262,7 +307,7 @@ describe("session compositor", () => {
     const actions = props();
     const mounted = render(<SessionViewSurface {...actions} prefix_settings={prefix_settings} />);
     await waitFor(() => expect(screen.getAllByLabelText("Terminal input")).toHaveLength(2));
-    await waitFor(() => expect(screen.getByRole("button", { name: "Split right" }).hasAttribute("disabled")).toBe(false));
+    await waitFor(() => expect(paneAction("Split right").hasAttribute("disabled")).toBe(false));
     const input = screen.getAllByLabelText("Terminal input")[0];
     fireEvent.keyDown(input, { key: "b", code: "KeyB", ctrlKey: true });
     fireEvent.keyDown(input, { key: "ArrowRight", ctrlKey: true });
@@ -271,7 +316,7 @@ describe("session compositor", () => {
     const request_id = mocks.resize.mock.lastCall![3];
     if (ended === "secondary") mocks.attachment_state = { ...initialAttachmentState(), session: { ...session, terminal_id: "b" }, phase: "ended" };
     mounted.rerender(<SessionViewSurface {...actions} phase={ended === "primary" ? "ended" : "attached"} prefix_settings={prefix_settings} />);
-    await waitFor(() => expect(screen.getByRole("button", { name: "Split right" }).hasAttribute("disabled")).toBe(true));
+    await waitFor(() => expect(paneAction("Split right").hasAttribute("disabled")).toBe(true));
     await act(async () => publishPaneResizeResult({ session, attachment_id: "primary-owner", request_id, view: null, error: { code: "session_not_found", message: "The terminal ended during resize." } }));
     expect(screen.queryByRole("alert")).toBeNull();
     expect(screen.getAllByLabelText("Terminal input")[0]).toBe(input);
@@ -503,7 +548,7 @@ describe("session compositor", () => {
     expect(right.style.width).toBe("312px");
     expect(left.querySelector("button")).toBeNull();
     expect(right.querySelector("button")).toBeNull();
-    expect(screen.getByRole("button", { name: "Split right" }).closest(".view-viewport")).toBeNull();
+    expect(paneAction("Split right").closest(".view-viewport")).toBeNull();
     await waitFor(() => expect(mocks.connect).toHaveBeenCalledWith(expect.objectContaining({ terminal_id: "b" }), { resize_with_window: false, terminal_id: "b" }));
   });
 
@@ -537,11 +582,11 @@ describe("session compositor", () => {
       .mockResolvedValueOnce(initial)
       .mockResolvedValueOnce(split);
     await act(async () => { render(<SessionViewSurface {...props()} />); });
-    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Split right" })); });
+    await act(async () => { fireEvent.click(paneAction("Split right")); });
     expect(screen.getByRole("alert").textContent).toBe("Could not spawn shell");
     await act(async () => { vi.advanceTimersByTime(2000); });
     expect(screen.getByRole("alert").textContent).toBe("Could not spawn shell");
-    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Split right" })); });
+    await act(async () => { fireEvent.click(paneAction("Split right")); });
     expect(screen.queryByRole("alert")).toBeNull();
     expect(screen.getAllByTestId("terminal-surface")).toHaveLength(2);
   });
@@ -550,7 +595,7 @@ describe("session compositor", () => {
     mocks.request.mockResolvedValueOnce(initial).mockResolvedValueOnce(split);
     render(<SessionViewSurface {...props()} />);
     await waitFor(() => expect(mocks.request).toHaveBeenCalledTimes(1));
-    fireEvent.click(screen.getByRole("button", { name: "Split right" }));
+    fireEvent.click(paneAction("Split right"));
     await waitFor(() => {
       expect(screen.getAllByTestId("terminal-surface")).toHaveLength(2);
       expect(mocks.mount).toHaveBeenCalledTimes(2);
@@ -566,7 +611,7 @@ describe("session compositor", () => {
     render(<SessionViewSurface {...actions} />);
     await waitFor(() => expect(screen.getAllByLabelText("Terminal input")).toHaveLength(2));
     act(() => screen.getAllByLabelText("Terminal input")[1].focus());
-    fireEvent.click(screen.getByRole("button", { name: "Move to new session" }));
+    fireEvent.click(paneAction("Move to new session"));
     await waitFor(() => expect(actions.on_promoted).toHaveBeenCalledWith(expect.objectContaining({ session_id: "new-root", terminal_id: "b", name: "New root" })));
   });
 
@@ -590,7 +635,7 @@ describe("session compositor", () => {
     fireEvent.keyDown(second, { key: "b", code: "KeyB", ctrlKey: true });
     fireEvent.keyDown(second, { key: "z", code: "KeyZ" });
     await waitFor(() => expect(first.closest<HTMLElement>(".view-pane")?.style.visibility).toBe("hidden"));
-    const split_button = screen.getByRole<HTMLButtonElement>("button", { name: label });
+    const split_button = paneAction(label);
     // The shared view can render before this owner's command settles.
     await waitFor(() => expect(split_button.disabled).toBe(false));
     fireEvent.click(split_button);

@@ -2,21 +2,22 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { initialAttachmentState } from "../../features/attachment/attachmentState";
-import { TerminalToolbar } from "./TerminalToolbar";
+import { TerminalControls } from "./TerminalControls";
 
 afterEach(cleanup);
 const session = { target: { kind: "local" as const }, session_id: "session", name: "shell", status: "running" as const,
   terminal_size: { columns: 80, rows: 24, pixel_width: null, pixel_height: null }, next_sequence: "0" };
 function props() {
   return { state: { ...initialAttachmentState(), phase: "attached" as const, session }, resize_control_status: "available" as const,
-    onToggleInput: vi.fn(), onToggleResizeWithWindow: vi.fn(), onRequestResizeControl: vi.fn(), onReconnect: vi.fn(),
-    onShowCommands: vi.fn(), commandShortcutLabel: "" };
+    onToggleResizeWithWindow: vi.fn(), onRequestResizeControl: vi.fn(), onReconnect: vi.fn(),
+  };
 }
 
 describe("terminal toolbar resize controls", () => {
   it("offers manual resize control independently from fixed canvas size", () => {
     const actions = props();
-    render(<TerminalToolbar {...actions} />);
+    render(<TerminalControls {...actions} />);
+    fireEvent.click(screen.getByRole("button", { name: /^Layout/ }));
     expect(screen.getByLabelText("Resize control status").textContent).toBe("Resize: Available");
     fireEvent.click(screen.getByRole("button", { name: "Take resize control" }));
     expect(actions.onRequestResizeControl).toHaveBeenCalledExactlyOnceWith(true);
@@ -27,7 +28,8 @@ describe("terminal toolbar resize controls", () => {
 
   it("shows the aggregate local owner while leaving auto resizing off", () => {
     const actions = props();
-    render(<TerminalToolbar {...actions} resize_control_status="owned" />);
+    render(<TerminalControls {...actions} resize_control_status="owned" />);
+    fireEvent.click(screen.getByRole("button", { name: /^Layout/ }));
     expect(screen.getByLabelText("Resize control status").textContent).toBe("Resize: Owned here");
     expect(screen.getByRole("button", { name: "Resize with window" }).textContent).toContain("Fixed size");
     fireEvent.click(screen.getByRole("button", { name: "Release resize control" }));
@@ -37,7 +39,8 @@ describe("terminal toolbar resize controls", () => {
 
   it("stops auto resizing with its own control while retaining manual resize ownership", () => {
     const actions = props();
-    render(<TerminalToolbar {...actions} resize_control_status="owned" state={{ ...actions.state, resize_with_window: true }} />);
+    render(<TerminalControls {...actions} resize_control_status="owned" state={{ ...actions.state, resize_with_window: true }} />);
+    fireEvent.click(screen.getByRole("button", { name: /^Layout/ }));
     fireEvent.click(screen.getByRole("button", { name: "Use fixed size" }));
     expect(actions.onToggleResizeWithWindow).toHaveBeenCalledOnce();
     expect(actions.onRequestResizeControl).not.toHaveBeenCalled();
@@ -46,7 +49,8 @@ describe("terminal toolbar resize controls", () => {
 
   it("allows an ordinary acquire to refresh held state while explaining that the current owner must release", () => {
     const actions = props();
-    render(<TerminalToolbar {...actions} resize_control_status="held_elsewhere" />);
+    render(<TerminalControls {...actions} resize_control_status="held_elsewhere" />);
+    fireEvent.click(screen.getByRole("button", { name: /^Layout/ }));
     expect(screen.getByLabelText("Resize control status").textContent).toBe("Resize: Held elsewhere");
     const take = screen.getByRole("button", { name: "Take resize control" });
     expect(take.hasAttribute("disabled")).toBe(false);

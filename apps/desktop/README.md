@@ -304,8 +304,8 @@ hover shows the exact observation time. Startup
 restores those entries as unverified and automatically connects the selected
 local tab. Remote terminal tabs stay disconnected until explicitly opened; **Connect
 host** resumes that host's selected tab, or its first open tab if another host
-was selected. No daemon inventory is discovered automatically. Use **Add
-existing session** in the sidebar or command palette to discover one host's
+was selected. No daemon inventory is discovered automatically. Use **Attach session** in the sidebar **+** menu, or **Add existing session**
+in the command palette, to discover one host's
 inventory and explicitly remember sessions without attaching. **Refresh Known
 Sessions** inspects only remembered IDs; it does not adopt other apps' sessions.
 **New shell** and **Add existing session** authenticate the selected SSH host
@@ -602,11 +602,24 @@ platform/recovery operations, outside the configurable app command registry.
 
 ## Visual preview
 
-The workbench uses a compact activity bar for Sessions, Tasks, and Ports, a
-collapsible host/session tree, and shared tab and command styling. Host and
-session row actions appear on hover or keyboard focus. The keyboard icon at the
-bottom of the activity bar opens shortcut configuration. Closing a tab keeps its
-session running; **Terminate session** is the separate destructive action.
+The workbench keeps a collapsible host/session tree beside compact terminal tabs.
+Icon buttons in the tab row toggle the sidebar and open the command palette. **Tasks** switches the
+sidebar to definitions, drafts, and managed runs, leaving the active terminal
+unchanged. Selecting a task opens its existing task detail tab. **Ports**
+and **VPN** in the left icon rail open connection tools; **Sessions** returns to
+the host tree. Every rail icon has a tooltip and accessible name. The rail's
+**Settings** menu contains labeled entries for credentials, shortcuts, and About.
+The **+** beside Hosts offers New shell, Attach session, Add host, Connect host,
+and Archives. These occasional actions no longer occupy a sidebar footer.
+
+One workspace footer shows the selected host and actionable connection/history
+warnings. Its controls open session details, diagnostics, pane actions, and layout
+settings on demand. Input control follows the focused pane and remains independent
+of resize ownership. Read-only panes retain a visible label. Popovers close on
+Escape or outside interaction. Routine metrics and repeated host labels are kept
+out of the terminal and tab strip. The native window title is the only title bar.
+Host and session row actions appear on hover or keyboard focus. Closing a tab
+keeps its session running; **Terminate session** is the separate destructive action.
 
 For a browser preview with sample data, run `pnpm desktop:preview`
 and open `/preview.html` at the URL Vite prints. This development-only entry renders

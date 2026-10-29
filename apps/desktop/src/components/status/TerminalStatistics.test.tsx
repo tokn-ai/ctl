@@ -23,10 +23,11 @@ describe("terminal statistics status", () => {
     now = 500;
     store.tick();
     render(<TerminalStatisticsProvider store={store}><TerminalStatistics session={session} /></TerminalStatisticsProvider>);
-    expect(screen.getByText("History 1 KiB / 2 KiB")).toBeTruthy();
+    expect(screen.queryByText("History 1 KiB / 2 KiB")).toBeNull();
     const summary = screen.getByLabelText("Terminal statistics");
     fireEvent.click(summary);
     expect(summary.getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getByText("1 KiB / 2 KiB")).toBeTruthy();
     expect(screen.getByRole("region", { name: "Terminal statistics details" })).toBeTruthy();
     expect(screen.getByRole("region", { name: "Terminal statistics details" }).parentElement).toBe(document.body);
     expect(screen.getByText("Bytes downloaded")).toBeTruthy();

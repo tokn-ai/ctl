@@ -1,5 +1,11 @@
+import { ControlPopover } from "../ui/ControlPopover";
 import { useId, useState } from "react";
 import { Icon } from "../ui/Icon";
+import { SessionIcon, sessionIconLabel } from "./SessionIcon";
+import { HostColorPicker } from "./HostColorPicker";
+import { HostDetailsCard } from "./HostDetailsCard";
+import { hostPresentation } from "../../features/workspace/hostPresentation";
+import { hostColor } from "../../features/workspace/hostColor";
 import { attachmentPhaseLabel } from "../../features/attachment/attachmentState";
 import { isObservationTime, lastSeenAge, useLastSeenClock } from "../../features/sessions/lastSeen";
 import { hasKnownTerminalSize } from "../../features/sessions/sessionObservation";
@@ -17,9 +23,9 @@ import type {
   SessionSummary,
   ShellStateSummary,
   WorkspaceHost,
+  ViewLayout,
 } from "../../lib/types";
 import {
-  connectionUnavailableLabel,
   sessionKey,
   targetKey,
   targetLabel,
@@ -30,6 +36,9 @@ const SIDEBAR_TERMINAL_TITLE_MAX_LENGTH = 20;
 interface SessionSidebarProps {
   targets: readonly ConnectionTarget[];
   hosts?: readonly WorkspaceHost[];
+  host_colors?: Readonly<Record<string, string>>;
+  color_picker_disabled?: boolean;
+  on_host_color_change?(host_id: string, color: string | undefined): void;
   /** Hosts with at least one available saved connection method. */
   connectableHostKeys?: ReadonlySet<string>;
   targetErrors: ReadonlyMap<string, ErrorDetails>;
@@ -38,6 +47,7 @@ interface SessionSidebarProps {
   sessions: SessionSummary[];
   interactiveTasks?: ManagedTask[];
   shellStates: ReadonlyMap<string, ShellStateSummary>;
+  session_layouts?: ReadonlyMap<string, ViewLayout>;
   selectedSessionKey: string | null;
   openTabSessionKeys: ReadonlySet<string>;
   loading: boolean;
@@ -108,40 +118,12 @@ function hostTitle(target: ConnectionTarget): string {
   return lines.join("\n");
 }
 
-function hostConnectionPresentation(target: ConnectionTarget, connection: HostConnectionStatus | undefined): {
-  state: string; label: string; route_unavailable?: boolean;
-} {
-  const observation = connection?.observation;
-  const reachability = connection?.reachability;
-  const connected = observation ? observation.availability === "available" : connection?.state === "connected";
-  if (connected) return { state: "connected", label: "SSH connected" };
-  if (reachability?.state === "available") return { state: "available", label: "SSH available" };
-  if (target.kind === "ssh" && target.unavailable)
-    return { state: "error", label: connectionUnavailableLabel(target), route_unavailable: true };
-  if (reachability) {
-    if (reachability.reason === "vpn_disconnected") return { state: "disconnected", label: "VPN disconnected" };
-    if (reachability.state === "unavailable") return { state: "disconnected", label: "SSH unavailable" };
-    if (reachability.state === "checking") return { state: "checking", label: "Checking SSH…" };
-    if (reachability.state === "not_checked") return { state: "disconnected", label: "SSH not checked" };
-    return { state: "unknown", label: "SSH status unknown" };
-  }
-  if (observation) {
-    if (observation.availability === "unavailable") return {
-      state: "disconnected", label: connection?.manually_disconnected ? "Disconnected manually" : "SSH disconnected",
-    };
-    if (observation.completeness === "pending") return { state: "checking", label: "Checking SSH…" };
-    return { state: "unknown", label: "SSH status unknown" };
-  }
-  const state = connection?.state ?? "checking";
-  return { state, label: {
-    checking: "Checking…", connected: "SSH connected", connecting: "Connecting…",
-    disconnecting: "Disconnecting…", disconnected: "Disconnected", error: "Connection error",
-  }[state] };
-}
-
 export function SessionSidebar({
   targets,
   hosts = [],
+  host_colors = {},
+  color_picker_disabled = false,
+  on_host_color_change,
   connectableHostKeys,
   targetErrors,
   hostConnections,
@@ -149,6 +131,7 @@ export function SessionSidebar({
   sessions,
   interactiveTasks = [],
   shellStates,
+  session_layouts,
   selectedSessionKey,
   openTabSessionKeys,
   loading,
@@ -215,29 +198,15 @@ export function SessionSidebar({
     <aside className="session-sidebar" aria-label="ctmux sessions">
       <div className="sidebar-connections">
         <header className="sidebar-header">
-          <strong>Sessions</strong>
-          {on_archives && <button type="button" onClick={on_archives}>Archived</button>}
+          <strong>Hosts</strong>
           <div className="sidebar-header-actions">
-            {onChooseHost ? (
-              <button
-                className="icon-button"
-                type="button"
-                onClick={onChooseHost}
-                aria-label="Choose host to connect"
-                title="Connect host"
-              >
-                <Icon name="plug" />
-              </button>
-            ) : null}
-            <button
-              className="icon-button"
-              type="button"
-              onClick={onAddHost}
-              aria-label="Add host"
-              title="Add host"
-            >
-              <Icon name="plus" />
-            </button>
+            <ControlPopover label="Add or manage sessions" trigger_content={<Icon name="plus" />} placement="below" close_on_select>
+              <button type="button" onClick={() => onNewShell()} disabled={creating}><Icon name="terminal" />New shell</button>
+              <button type="button" onClick={onAddExisting} aria-label="Add existing session"><Icon name="plug" />Attach session</button>
+              <button type="button" onClick={onAddHost}><Icon name="server" />Add host</button>
+              {onChooseHost && <button type="button" onClick={onChooseHost} aria-label="Choose host to connect"><Icon name="plug" />Connect host</button>}
+              {on_archives && <button type="button" onClick={on_archives} aria-label="Archived sessions"><Icon name="archive" />Archives</button>}
+            </ControlPopover>
             <button
               className="icon-button"
               type="button"
@@ -304,39 +273,19 @@ export function SessionSidebar({
         ) : null}
         {sessionGroups.map(({ target, sessions: groupSessions }) => {
           const key = targetKey(target);
-          const expanded = !collapsedHosts.has(key);
+          const host_id = target.kind === "local" ? "local" : target.host_id ?? key;
+          const can_expand = groupSessions.length > 0;
+          const expanded = can_expand && !collapsedHosts.has(key);
           const childrenId = `${groupId}-${encodeURIComponent(key)}`;
           const host = hosts.find((item) => item.host_id === (target.kind === "local" ? "local" : target.host_id));
-          const unavailable = target.kind === "ssh" ? target.unavailable : undefined;
-          const targetFailure = targetErrors.get(key);
-          const targetError = targetFailure?.message;
-          const hostError = targetError === unavailable ? undefined : targetError;
           const connection = target.kind === "ssh"
             ? hostConnections?.get(target.host_id ?? "")
             : undefined;
-          const observation = connection?.observation;
-          const reachability = connection?.reachability;
           const operation = connection?.operation;
-          const presentation = hostConnectionPresentation(target, connection);
-          const { state: connectionState, label: connectionLabel, route_unavailable: unavailableRoute } = presentation;
-          const operationLabel = operation?.state === "pending" ? operation.kind === "connect" ? "Connecting…" : "Disconnecting…"
-            : operation?.state === "failed" ? operation.kind === "connect" ? "Connect failed" : "Disconnect failed" : null;
-          const connectionTitle = [
-            connectionLabel,
-            presentation.state === "connected" ? "The local SSH control connection is open. This check does not freshly verify remote responsiveness or terminal health." : null,
-            reachability?.state === "available" ? "The endpoint answered with an SSH greeting. Authentication has not been checked." : null,
-            observation?.checked_at_ms ? `SSH connection checked at ${new Date(observation.checked_at_ms).toLocaleTimeString()}` : null,
-            reachability?.checked_at_ms ? `SSH reachability checked at ${new Date(reachability.checked_at_ms).toLocaleTimeString()}` : null,
-            reachability?.method_names.length ? `Available methods: ${reachability.method_names.join(", ")}` : null,
-            connection?.method_names.length
-              ? `Connection methods: ${connection.method_names.join(", ")}`
-              : null,
-            unavailable,
-            connection?.message !== unavailable ? connection?.message : null,
-            observation?.completeness === "partial" ? "Some connection methods couldn't be checked." : null,
-            observation?.failed_method_names.length ? `Status unknown for: ${observation.failed_method_names.join(", ")}` : null,
-            reachability?.message,
-          ].filter(Boolean).join("\n");
+          const presentation = hostPresentation(target, connection, targetErrors.get(key));
+          const details_description = [presentation.description,
+            ...presentation.details.map((detail) => `${detail.label}: ${detail.value}`),
+          ].join("\n");
           const connectionBusy = connection?.state === "connecting" ||
             connection?.state === "disconnecting" || operation?.state === "pending";
           const showDisconnect = onDisconnectHost && (
@@ -344,53 +293,67 @@ export function SessionSidebar({
             connection?.state === "disconnecting" ||
             (connection?.state === "error" && connection.method_names.length > 0)
           );
+          const heading = <>
+            {can_expand ? <Icon name={expanded ? "chevron_down" : "chevron_right"} size={12} />
+              : <span className="host-chevron-spacer" aria-hidden="true" />}
+            <span aria-hidden="true" />
+            <span className="host-group-title">
+              <span
+                className="host-group-name"
+                role={target.kind === "ssh" ? "status" : undefined}
+                aria-label={target.kind === "ssh" ? `Host connection for ${targetLabel(target)}: ${presentation.label}` : undefined}
+                aria-description={details_description}
+                data-tone={presentation.tone}
+                data-connected={presentation.connected}
+              >{target.kind === "local" ? "Local" : targetLabel(target)}</span>
+              {host?.source === "ssh_config" ? <span className="host-config-source" title="From SSH config; saved only when customized">SSH</span> : null}
+              {host?.source === "tailscale" ? <span className="host-config-source" title="Discovered from Tailscale; saved only when customized">Tailscale</span> : null}
+              {can_expand && <span className="host-group-count">{groupSessions.length}</span>}
+            </span>
+          </>;
           return (
             <section
               className="session-group host-group"
               key={key}
               aria-label={`${targetLabel(target)} sessions`}
             >
-              <div className={`host-group-header ${unavailableRoute ? "has-error" : ""}`}>
-                <button
+              <div className="host-group-header">
+                <HostDetailsCard
+                  host_name={target.kind === "local" ? "Local" : targetLabel(target)}
+                  label={presentation.label}
+                  tone={presentation.tone}
+                  details={presentation.details}
+                  description={presentation.description}
+                >{(trigger_props) => can_expand ? <button
+                  {...trigger_props}
                   className="host-group-toggle"
                   type="button"
                   aria-expanded={expanded}
                   aria-controls={childrenId}
                   aria-label={`${expanded ? "Collapse" : "Expand"} ${targetLabel(target)}`}
-                  title={hostTitle(target)}
+                  aria-description={details_description}
                   onClick={() => toggleHost(key)}
                 >
-                  <Icon
-                    name={expanded ? "chevron_down" : "chevron_right"}
-                    size={14}
-                  />
-                  <Icon
-                    name={target.kind === "local" ? "monitor" : "server"}
-                    size={15}
-                  />
-                  <span className="host-group-name">
-                    {target.kind === "local" ? "Local" : targetLabel(target)}
-                  </span>
-                  {host?.source === "ssh_config" ? <span className="host-config-source" title="From SSH config; saved only when customized">SSH</span> : null}
-                  {host?.source === "tailscale" ? <span className="host-config-source" title="Discovered from Tailscale; saved only when customized">Tailscale</span> : null}
-                  <span className="host-group-count">{groupSessions.length}</span>
-                </button>
-                {target.kind === "ssh" ? (
-                  <span
-                    className="host-connection-status"
-                    role="status"
-                    aria-label={`Host connection for ${targetLabel(target)}: ${connectionLabel}${operationLabel ? ` · ${operationLabel}` : ""}`}
-                    data-state={connectionState}
-                    data-availability={observation?.availability}
-                    data-reachability={reachability?.state}
-                    data-completeness={observation?.completeness}
-                    title={connectionTitle}
-                  >
-                    <span className="host-connection-dot" aria-hidden="true" />
-                    <span>{connectionLabel}</span>
-                    {operationLabel ? <span title={[operation?.method_name, operation?.message].filter(Boolean).join(": ")}> · {operationLabel}</span> : null}
-                  </span>
-                ) : null}
+                  {heading}
+                </button> : <div
+                  {...trigger_props}
+                  className="host-group-label"
+                  tabIndex={0}
+                  aria-label={target.kind === "local" ? "Local" : targetLabel(target)}
+                  aria-description={details_description}
+                >{heading}</div>}</HostDetailsCard>
+                <div className="host-color-control">
+                  {target.kind === "local" ? <span className="host-color-fixed" title="Local · white" aria-hidden="true">
+                    <span className="host-color-dot" style={{ background: hostColor(target) }} />
+                  </span> : <HostColorPicker
+                    host_name={targetLabel(target)}
+                    color={hostColor(target, host_colors[host_id])}
+                    connected={presentation.connected}
+                    default_color={hostColor(target)}
+                    disabled={color_picker_disabled}
+                    on_change={(color) => on_host_color_change?.(host_id, color)}
+                  />}
+                </div>
                 <div className="host-group-actions">
                   <button
                     className="session-action"
@@ -452,12 +415,7 @@ export function SessionSidebar({
                   </> : null}
                 </div>
               </div>
-              <div className="host-group-children" id={childrenId} hidden={!expanded}>
-                {!loading && groupSessions.length === 0 ? (
-                  <p className="host-empty-state">
-                    {hostError || unavailableRoute ? "Sessions unavailable" : "No known sessions"}
-                  </p>
-                ) : null}
+              {can_expand && <div className="host-group-children" id={childrenId} hidden={!expanded}>
                 {groupSessions.map((session) => {
                   const identity = sessionKey(session);
                   const { fullTitle, compactTitle } = sidebarTitle(
@@ -483,6 +441,7 @@ export function SessionSidebar({
                   const dimensions = attachment?.phase === "attached" || hasKnownTerminalSize(session)
                     ? ` · ${session.terminal_size.columns}×${session.terminal_size.rows}`
                     : "";
+                  const details_title = [`${session.name} · ${status}${dimensions} · Session last reported ${observed_status}`, attachment?.message, observation_title].filter(Boolean).join("\n");
                   return (
                     <div
                       className={`session-row ${selected ? "active" : ""}`}
@@ -495,16 +454,18 @@ export function SessionSidebar({
                         disabled={closing}
                         aria-current={selected ? "true" : undefined}
                         aria-label={`${fullTitle} — ${session.name}`}
-                        aria-description={observation_title}
+                        aria-description={[sessionIconLabel(shellStates.get(identity)?.shell_type, session_layouts?.get(identity)), observation_title].filter(Boolean).join(". ")}
                         title={fullTitle}
                       >
-                        <Icon name="terminal" class_name="session-icon" />
+                        <span aria-label={status} title={details_title}><SessionIcon
+                          shell_type={shellStates.get(identity)?.shell_type}
+                          layout={session_layouts?.get(identity)}
+                          class_name="session-icon"
+                        /></span>
                         <span className="session-copy">
                           <strong>{compactTitle}</strong>
-                          <small className="session-details" title={[`${session.name} · ${status}${dimensions} · Session last reported ${observed_status}`, attachment?.message, observation_title].filter(Boolean).join("\n")}>
+                          {attachment?.phase !== "attached" && <small className="session-details" title={details_title}>
                             <span className="session-detail-label">
-                              {session.name}
-                              <span aria-hidden="true"> · </span>
                               <span className="session-status" data-status={attachment?.phase ?? (session.status === "running" ? "unknown" : session.status)}>
                                 {status}
                               </span>
@@ -513,7 +474,7 @@ export function SessionSidebar({
                               <span aria-hidden="true"> · </span>
                               <time dateTime={observed_at ?? undefined} title={observation_title}>{age}</time>
                             </span> : null}
-                          </small>
+                          </small>}
                         </span>
                       </button>
                       <div className="session-actions">
@@ -561,29 +522,12 @@ export function SessionSidebar({
                     </div>
                   );
                 })}
-              </div>
+              </div>}
             </section>
           );
         })}
       </div>
 
-      <footer className="sidebar-footer">
-        <button
-          className="new-session-button"
-          type="button"
-          onClick={onAddExisting}
-        >
-          <Icon name="plug" size={15} /> Add existing session
-        </button>
-        <button
-          className="new-session-button"
-          type="button"
-          onClick={() => onNewShell()}
-          disabled={creating}
-        >
-          <Icon name="plus" size={15} /> New shell
-        </button>
-      </footer>
     </aside>
   );
 }

@@ -15,8 +15,6 @@
   flex: 1;
   font-size: 11px;
   font-weight: 500;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
 }
 .task-sidebar button {
   background: transparent;
@@ -36,7 +34,7 @@
   padding: 0;
   color: var(--muted);
 }
-.task-sidebar > h3 {
+.task-browser h3 {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -44,12 +42,10 @@
   padding: 8px 16px 4px;
   margin: 0;
   font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.035em;
   color: var(--text);
   font-weight: 600;
 }
-.task-sidebar > h3 span {
+.task-browser h3 span {
   font-size: 11px;
   font-weight: 400;
   text-transform: none;
@@ -162,7 +158,6 @@
 }
 .task-eyebrow {
   font-size: 11px;
-  letter-spacing: 0.05em;
   color: var(--muted);
   font-weight: 500;
 }

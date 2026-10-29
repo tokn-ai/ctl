@@ -475,9 +475,11 @@ export interface WorkspaceHostIdentity {
 }
 
 export interface HostCatalogDocument {
-  schema_version: 1;
+  schema_version: 1 | 2;
   hosts: WorkspaceHost[];
   ssh_gateways: WorkspaceSshGateway[];
+  /** Schema 2 appearance overrides, including local and discovered identities. */
+  host_colors?: Record<string, string>;
 }
 
 export interface HostCatalogSnapshot {

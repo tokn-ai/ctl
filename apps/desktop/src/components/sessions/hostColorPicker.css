@@ -26,6 +26,11 @@
   border-radius: 50%;
 }
 
+.host-color-trigger .host-color-dot {
+  box-sizing: border-box;
+  border: 1.5px solid currentColor;
+}
+
 .host-color-popover {
   position: fixed;
   z-index: 90;

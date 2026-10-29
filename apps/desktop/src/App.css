@@ -222,73 +222,9 @@ svg {
   flex-shrink: 0;
 }
 
-.host-connection-status,
-.host-session-error {
-  display: flex;
-  grid-column: 3 / -1;
-  min-width: 0;
-  align-items: center;
-  gap: 5px;
-  margin: 0 0 5px;
-  color: var(--muted);
-  font-size: 11px;
-  line-height: 16px;
-}
-
-.host-session-error {
-  color: var(--warning);
-}
-
-.host-connection-label {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.host-connection-dot {
-  width: 6px;
-  height: 6px;
-  flex: 0 0 6px;
-  border: 1px solid currentColor;
-  border-radius: 50%;
-}
-
-.host-connection-status[data-state="connected"] .host-connection-dot {
-  color: var(--success);
-  background: currentColor;
-}
-
-.host-connection-status[data-state="available"] .host-connection-dot {
-  color: var(--success);
-}
-
-.host-connection-status:is([data-state="checking"], [data-state="connecting"], [data-state="disconnecting"]) .host-connection-dot {
-  color: var(--warning);
-}
-
-.host-connection-status[data-state="error"] {
-  color: var(--danger);
-}
-
-.host-connection-status[data-operation="pending"] .host-connection-dot {
-  color: var(--warning);
-  background: transparent;
-}
-
-.host-connection-status[data-operation="failed"] {
-  color: var(--danger);
-}
-
-.host-connection-status[data-operation="failed"] .host-connection-dot {
-  color: var(--danger);
-  background: transparent;
-}
-
-.host-connection-status[data-state="unknown"]:not([data-operation="failed"]),
-.host-connection-status[data-availability="unknown"]:not([data-state="available"]):not([data-state="connected"]):not([data-operation="failed"]) {
-  color: var(--warning);
-}
+.host-group-name[data-tone="muted"] { color: var(--muted); }
+.host-group-name[data-tone="warning"] { color: var(--warning); }
+.host-group-name[data-tone="error"] { color: var(--danger); }
 
 .host-group-actions {
   grid-column: 4;
@@ -315,10 +251,6 @@ svg {
 .session-row:focus-within .session-actions {
   opacity: 1;
   pointer-events: auto;
-}
-
-.host-group-header.has-error .host-group-name {
-  color: var(--danger);
 }
 
 .session-row:hover .session-select,

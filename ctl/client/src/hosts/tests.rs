@@ -115,7 +115,7 @@ fn host_colors_are_versioned_presentation_metadata_for_any_valid_host_identity()
   let value = serde_json::to_value(&document).unwrap();
   let decoded: HostCatalogDocument = serde_json::from_value(value).unwrap();
   assert_eq!(decoded, document);
-  assert!(decoded.hosts.is_empty());
+  assert_eq!(decoded.hosts, Vec::<WorkspaceHost>::new());
   document.schema_version = 1;
   assert_eq!(document.validate().unwrap_err().code, "hosts_invalid");
   document.host_colors.clear();

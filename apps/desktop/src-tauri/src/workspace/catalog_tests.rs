@@ -91,7 +91,7 @@ fn host_color_overrides_round_trip_without_saved_host_definitions() {
     })
     .unwrap();
   assert_eq!(fixture.repository().load_hosts().unwrap(), saved);
-  assert!(saved.document.hosts.is_empty());
+  assert_eq!(saved.document.hosts, Vec::<WorkspaceHost>::new());
   let before = fs::read(fixture.0.join("hosts.json")).unwrap();
   let mut invalid = saved.document.clone();
   invalid.host_colors.insert("local".into(), "red".into());
@@ -113,7 +113,10 @@ fn host_color_overrides_round_trip_without_saved_host_definitions() {
     })
     .unwrap();
   assert_eq!(reset.document.schema_version, 1);
-  assert!(reset.document.host_colors.is_empty());
+  assert_eq!(
+    reset.document.host_colors,
+    std::collections::BTreeMap::new()
+  );
 }
 
 #[test]

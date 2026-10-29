@@ -1,0 +1,80 @@
+.host-details-card {
+  position: fixed;
+  z-index: 80;
+  width: max-content;
+  min-width: min(240px, calc(100vw - 16px));
+  max-width: min(330px, calc(100vw - 16px));
+  max-height: min(360px, calc(100vh - 16px));
+  padding: 12px;
+  overflow: auto;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+  box-shadow: 0 8px 24px #00000055;
+  scrollbar-width: thin;
+  user-select: text;
+}
+
+.host-details-card-heading {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  overflow-wrap: anywhere;
+}
+
+.host-details-card-heading strong {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.host-details-card-heading > span {
+  color: var(--text);
+  font-size: 11px;
+}
+
+.host-details-card-heading > [data-tone="muted"] {
+  color: var(--muted);
+}
+
+.host-details-card-heading > [data-tone="warning"] {
+  color: var(--warning);
+}
+
+.host-details-card-heading > [data-tone="error"] {
+  color: var(--danger);
+}
+
+.host-details-description {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.host-details-card dl {
+  display: grid;
+  grid-template-columns: minmax(0, max-content) minmax(0, 1fr);
+  gap: 7px 12px;
+  margin: 10px 0 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.host-details-card dt,
+.host-details-card dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.host-details-card dt {
+  color: var(--muted);
+}
+
+.host-details-card dd {
+  white-space: pre-wrap;
+}

@@ -9,9 +9,10 @@ interface Props {
   default_color: string;
   on_change(color: string | undefined): void;
   disabled?: boolean;
+  connected?: boolean;
 }
 
-export function HostColorPicker({ host_name, color, default_color, on_change, disabled = false }: Props) {
+export function HostColorPicker({ host_name, color, default_color, on_change, disabled = false, connected = true }: Props) {
   const [open, setOpen] = useState(false);
   const [suggestions, setSuggestions] = useState<string[]>([]);
   const [position, setPosition] = useState({ top: 0, left: 0 });
@@ -91,17 +92,19 @@ export function HostColorPicker({ host_name, color, default_color, on_change, di
       className="host-color-trigger"
       type="button"
       aria-label={`Change color for ${host_name}`}
+      aria-description={connected ? "Connected" : "Not connected"}
       title={`Change color for ${host_name}`}
       aria-haspopup="dialog"
       aria-expanded={open}
       aria-controls={open ? id : undefined}
+      data-connected={connected}
       disabled={disabled}
       onClick={() => {
         if (!open) setSuggestions(randomHostColors());
         setOpen(!open);
       }}
     >
-      <span className="host-color-dot" style={{ background: color }} aria-hidden="true" />
+      <span className="host-color-dot" style={{ color, background: connected ? "currentColor" : "transparent" }} aria-hidden="true" />
     </button>
     {open && !disabled && createPortal(
       <div

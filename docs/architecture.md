@@ -149,7 +149,7 @@ wins; otherwise an unreferenced projection is hidden when a saved method already
 uses exactly that alias without overrides. Referenced projections remain distinct.
 Unconnected projections stay in connection and session pickers. The sidebar
 shows them after successful verification or when they have workspace references.
-Connecting does not persist their definitions. Saving a customization promotes
+Connecting does not persist their definitions. Saving connection settings promotes
 the projection without changing its ID. Catalog serialization explicitly excludes
 projected/unavailable hosts and runtime fields. Missing definitions retain
 unavailable placeholders for workspace references; unavailable targets fail before

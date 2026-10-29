@@ -21,6 +21,41 @@ function picker(props: Partial<Parameters<typeof HostColorPicker>[0]> = {}) {
 }
 
 describe("HostColorPicker", () => {
+  it("changes connection fill without remounting or interrupting color selection", async () => {
+    const user = userEvent.setup();
+    const on_change = vi.fn();
+    const { rerender } = render(picker({ on_change }));
+    const trigger = screen.getByRole("button", { name: "Change color for Build" });
+    const dot = trigger.querySelector<HTMLElement>(".host-color-dot")!;
+    const original_color = dot.style.color;
+    expect(dot.style.background).toBe("currentcolor");
+    expect(trigger.getAttribute("aria-description")).toBe("Connected");
+
+    await user.click(trigger);
+    const dialog = screen.getByRole("dialog", { name: "Color for Build" });
+    const reset_dot = within(dialog).getByRole("button", { name: "Reset" })
+      .querySelector<HTMLElement>(".host-color-dot")!;
+    const reset_background = reset_dot.style.background;
+    rerender(picker({ on_change, connected: false }));
+    expect(screen.getByRole("dialog", { name: "Color for Build" })).toBe(dialog);
+    expect(screen.getByRole("button", { name: "Change color for Build" })).toBe(trigger);
+    expect(trigger.querySelector(".host-color-dot")).toBe(dot);
+    expect(trigger.getAttribute("data-connected")).toBe("false");
+    expect(trigger.getAttribute("aria-description")).toBe("Not connected");
+    expect(dot.style.background).toBe("transparent");
+    expect(dot.style.color).toBe(original_color);
+    expect(reset_dot.style.background).toBe(reset_background);
+
+    rerender(picker({ on_change, connected: true }));
+    expect(trigger.getAttribute("data-connected")).toBe("true");
+    expect(dot.style.background).toBe("currentcolor");
+    expect(dot.style.color).toBe(original_color);
+    await user.click(screen.getByRole("button", { name: "Blue" }));
+    expect(on_change).toHaveBeenCalledExactlyOnceWith(HOST_COLOR_PALETTE.find(({ name }) => name === "Blue")?.color);
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(document.activeElement).toBe(trigger);
+  });
+
   it("portals out of clipping containers and selects a named palette color", async () => {
     const user = userEvent.setup();
     const on_change = vi.fn();

@@ -185,9 +185,13 @@ restart the preferred method is used for subsequent connections.
 Host connection status comes from live OpenSSH master checks across saved and
 active methods, refreshed every five seconds and on window focus. It is separate
 from remembered remote identity and per-session attachment state. The sidebar
-shows status text and a dot, with method names or diagnostics in the tooltip.
-Session reconnects and attachment failures stay on their own session rows and do
-not override the host badge. Session inspection failures remain in notifications.
+uses the host name's color for status: gray for unavailable, yellow for warnings,
+and red for errors. The host's chosen color dot is filled only with current
+connection evidence and hollow otherwise; Local remains solid white. Hovering or
+focusing the name opens a details card with connection, reachability, method,
+operation, and session-lookup information. Session reconnects and attachment
+failures stay on their own session rows. Session inspection failures can mark the
+host name as a warning without changing its confirmed connection or dot fill.
 Checks neither start `ctld` nor request authentication.
 
 **Disconnect host** detaches its active terminal view, cancels pending connection
@@ -202,8 +206,8 @@ as an error and can be retried.
 
 **Connect host** discovers an account-owned UUID and the installed agent version
 on the same SSH stream used to verify the ctmux service. Bundled installations also
-report the app version, bundle ID, Git revision, and target triple. The host heading's
-tooltip shows the last discovered metadata.
+report the app version, bundle ID, Git revision, and target triple. The host details
+card shows the last discovered metadata.
 
 All methods saved on a host must verify the same account-owned UUID. Adding a
 method retains the existing methods, and verifying a matching UUID never merges

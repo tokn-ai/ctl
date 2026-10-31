@@ -1,0 +1,61 @@
+.terminal-disconnected {
+  box-shadow: inset 0 0 0 1px var(--warning, #d7b46a);
+}
+
+.terminal-connection {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  z-index: 8;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  max-width: calc(100% - 20px);
+  padding: 5px 8px;
+  border: 1px solid var(--border-subtle, #3b3d40);
+  border-radius: 6px;
+  background: var(--surface-1, #202225);
+  color: var(--warning, #d7b46a);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.terminal-connection-dot {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+  border: 1px solid currentColor;
+  border-radius: 50%;
+}
+
+.terminal-connection > span:not(.terminal-connection-dot) {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.terminal-connection-pending {
+  background: currentColor;
+}
+
+.terminal-connection button {
+  flex: 0 0 auto;
+  padding: 2px 5px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--foreground, #dedfe2);
+  font: inherit;
+  cursor: pointer;
+}
+
+.terminal-connection button:hover:not(:disabled),
+.terminal-connection button:focus-visible {
+  background: var(--surface-2, #27292c);
+}
+
+.terminal-connection button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}

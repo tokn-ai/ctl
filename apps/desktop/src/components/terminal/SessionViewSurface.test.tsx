@@ -18,19 +18,23 @@ const mocks = vi.hoisted(() => ({ request: vi.fn(), zoom: vi.fn(), resize: vi.fn
 vi.mock("../../lib/tauri", () => ({ sessionView: mocks.request }));
 vi.mock("../../features/attachment/useAttachment", () => ({ useAttachment: () => ({
   state: mocks.attachment_state ?? { phase: "attached", applied_sequence: "0", input_lease: { owned_by_client: true } },
+  has_cached_content: true, reconnectOnInteraction: vi.fn(),
   connect: mocks.connect, reconnect: mocks.reconnect, detach: mocks.detach, handleInput: mocks.input, toggleInputLease: vi.fn(), toggleResizeWithWindow: vi.fn(),
 }) }));
 vi.mock("./TerminalSurface", async () => {
   const { useEffect } = await import("react");
   const renderer = {};
-  return { TerminalSurface: ({ onReady, onInput, ended_message, on_dismiss }: { onReady(renderer: unknown): void; onInput(data: Uint8Array): void; ended_message?: string | null; on_dismiss?(): void }) => {
+  return { TerminalSurface: ({ onReady, onInput, ended_message, on_dismiss, phase, on_reconnect }: { onReady(renderer: unknown): void; onInput(data: Uint8Array): void; ended_message?: string | null; on_dismiss?(): void; phase: string; on_reconnect?(): Promise<void> | void }) => {
     useEffect(() => {
       mocks.mount();
       mocks.mounted_inputs.push(onInput);
       onReady(renderer);
       return () => { mocks.unmount(); onReady(null); };
     }, []);
-    return <div data-testid="terminal-surface" className="terminal-container"><textarea aria-label="Terminal input" />{ended_message && <button onClick={on_dismiss}>Dismiss ended pane</button>}</div>;
+    return <div data-testid="terminal-surface" className="terminal-container"><textarea aria-label="Terminal input" />
+      {ended_message && <button onClick={on_dismiss}>Dismiss ended pane</button>}
+      {on_reconnect && ["disconnected", "error", "retry_wait"].includes(phase) && <button onClick={on_reconnect}>Reconnect terminal</button>}
+    </div>;
   } };
 });
 
@@ -523,6 +527,49 @@ describe("session compositor", () => {
     const panes = screen.getAllByLabelText("Terminal input").map((input) => input.closest<HTMLElement>(".view-pane")!);
     expect(panes.map((pane) => pane.style.width)).toEqual(["320px", "312px"]);
     expect(panes.map((pane) => pane.style.height)).toEqual(["384px", "384px"]);
+  });
+
+  it("keeps local pane navigation and controls while disconnected without changing the server layout", async () => {
+    mocks.request.mockResolvedValue(split);
+    const actions = { ...props(), on_command: vi.fn() };
+    const prefix_settings = { document: { schema_version: 1 as const, overrides: [] }, bindings: new Map(), platform: "other" as const };
+    const mounted = render(<SessionViewSurface {...actions} prefix_settings={prefix_settings} />);
+    await waitFor(() => expect(screen.getAllByLabelText("Terminal input")).toHaveLength(2));
+    mounted.rerender(<SessionViewSurface {...actions} phase="disconnected" prefix_settings={prefix_settings} />);
+    const [first, second] = screen.getAllByLabelText("Terminal input");
+    act(() => first.focus());
+    expect(paneAction("Split right").disabled).toBe(true);
+    mocks.request.mockClear();
+    fireEvent.keyDown(first, { key: "b", code: "KeyB", ctrlKey: true });
+    fireEvent.keyDown(first, { key: "ArrowRight", code: "ArrowRight" });
+    await waitFor(() => expect(document.activeElement).toBe(second));
+    fireEvent.keyDown(second, { key: "b", code: "KeyB", ctrlKey: true });
+    fireEvent.keyDown(second, { key: "v", code: "KeyV" });
+    for (const key of ["n", "p", ":"]) {
+      fireEvent.keyDown(second, { key: "b", code: "KeyB", ctrlKey: true });
+      fireEvent.keyDown(second, { key });
+    }
+    expect(actions.on_command.mock.calls).toEqual([["tab.next"], ["tab.previous"], ["view.show_command_palette"]]);
+    expect(mocks.request).not.toHaveBeenCalled();
+    expect(mocks.unmount).not.toHaveBeenCalled();
+    expect(screen.getAllByLabelText("Terminal input")).toEqual([first, second]);
+  });
+
+  it("reconnects the selected pane without reconnecting its sibling", async () => {
+    mocks.request.mockResolvedValue(split);
+    const actions = { ...props(), on_reconnect: vi.fn() };
+    const mounted = render(<SessionViewSurface {...actions} />);
+    await waitFor(() => expect(screen.getAllByLabelText("Terminal input")).toHaveLength(2));
+    mocks.attachment_state = { ...initialAttachmentState(), phase: "disconnected", session: { ...session, terminal_id: "b" } };
+    mounted.rerender(<SessionViewSurface {...actions} phase="disconnected" />);
+    const [primary, secondary] = screen.getAllByRole("button", { name: "Reconnect terminal" });
+    fireEvent.click(secondary);
+    expect(mocks.reconnect).toHaveBeenCalledOnce();
+    expect(actions.on_reconnect).not.toHaveBeenCalled();
+    fireEvent.click(primary);
+    expect(actions.on_reconnect).toHaveBeenCalledOnce();
+    expect(mocks.reconnect).toHaveBeenCalledOnce();
+    expect(mocks.unmount).not.toHaveBeenCalled();
   });
 
   it("bounds a missing session's fallback canvas and dismisses without a network request", async () => {

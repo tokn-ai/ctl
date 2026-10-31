@@ -595,6 +595,13 @@ release, including in fullscreen and mouse-enabled programs. The app draws its
 own selection bounds while dragging and clears them on release. Dragging from
 a link selects text; clicking it opens the link.
 
+If a terminal disconnects, its last screen stays available for scrolling,
+selection, copying, and local shortcuts. Each affected pane shows its connection
+state and a **Reconnect** button. Typing requests a quiet reconnect without
+replaying the triggering key or opening an authentication prompt. Automatic
+recovery uses increasing delays and stops after 30 seconds; typing never resets
+that limit. **Reconnect** starts a fresh attempt and can authenticate the host.
+
 ## Local and remote control
 
 `ctmux` remains the canonical local session CLI:

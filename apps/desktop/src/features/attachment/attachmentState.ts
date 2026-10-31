@@ -95,7 +95,7 @@ export function transitionAttachment(state: AttachmentViewState, event: Attachme
         (state.phase !== "disconnected" && state.phase !== "error")) return state;
       return { ...offline, phase: "retry_wait", retry_at_ms: event.retry_at_ms };
     case "retry_exhausted":
-      if (!state.session || !["disconnected", "error", "retry_wait"].includes(state.phase)) return state;
+      if (!state.session || !["disconnected", "error", "retry_wait", "reconnecting"].includes(state.phase)) return state;
       return {
         ...offline, phase: "error", error_code: "automatic_reconnect_timeout",
         message: "Automatic retries stopped. The remote session's current state is unknown. Retry to reconnect.",

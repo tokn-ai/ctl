@@ -98,6 +98,8 @@ export class XtermRenderer {
   setViewport(viewport: HTMLElement | null): void { this.viewport = viewport; }
   cellDimensions() { return this.active.presenter.cellDimensions(); }
   historyBytes(): number | null { return this.active.presenter.historyBytes(); }
+  hasContent(): boolean { return this.active.presenter.hasContent(); }
+  isFocused(): boolean { return this.active.container.contains(document.activeElement); }
   private readonly sessions = new Map<string, CachedTerminal>();
   private active: CachedTerminal;
 
@@ -129,6 +131,8 @@ export class XtermRenderer {
       activateSession: (next) => activate(next),
       adoptSession: (next) => activate(next, true),
       resumeSequence: () => terminal().resume_from,
+      hasContent: () => terminal().presenter.hasContent(),
+      isFocused: () => terminal().container.contains(document.activeElement),
       invalidateResumeSequence: () => {
         const cached = terminal();
         cached.presenter.cancelHistory();
@@ -535,4 +539,4 @@ export type AttachmentRenderer = Pick<XtermRenderer,
   "activateSession" | "adoptSession" | "resumeSequence" | "invalidateResumeSequence" |
   "write" | "restoreCheckpoint" | "recreate" | "resize" |
   "proposeDimensions" | "observeDimensions" | "focus"
-> & { historyBytes?(): number | null } & Partial<Pick<XtermRenderer, "syncHistory" | "cancelHistory">>;
+> & { historyBytes?(): number | null; hasContent?(): boolean; isFocused?(): boolean } & Partial<Pick<XtermRenderer, "syncHistory" | "cancelHistory">>;

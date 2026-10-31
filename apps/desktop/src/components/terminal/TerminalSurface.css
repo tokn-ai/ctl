@@ -1,9 +1,22 @@
+.terminal-shell > .terminal-scroll-region {
+  opacity: 1;
+  /* Briefly successful retries must not flash the retained screen. */
+  transition: opacity 120ms ease-out 500ms;
+}
+
 .terminal-disconnected {
   box-shadow: inset 0 0 0 1px var(--warning, #d7b46a);
 }
 
 .terminal-disconnected > .terminal-scroll-region {
   opacity: 0.55;
+  transition: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .terminal-shell > .terminal-scroll-region {
+    transition-duration: 0s;
+  }
 }
 
 .terminal-connection {

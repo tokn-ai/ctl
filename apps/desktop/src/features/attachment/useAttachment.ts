@@ -772,7 +772,9 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
         : request.resume_from === retainedSequence ? request.resume_from : null;
       let restored_local_cache = false;
       try {
-        if (resumeFrom === null && renderer.resumeSequence() === null) {
+        // Losing a safe replay cursor does not invalidate the visible screen.
+        // Disk previews seed empty renderers, never repaint a retained buffer.
+        if (resumeFrom === null && renderer.resumeSequence() === null && !renderer.hasContent?.()) {
           const response = await sessionCache({ kind: "load", host_key: targetKey(session.target), session_id: session.session_id, terminal_id: session.terminal_id });
           if (generation !== generationRef.current) return;
           if (response.kind === "loaded" && response.cache) {

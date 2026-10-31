@@ -1862,6 +1862,43 @@ describe("opened session cache", () => {
 
 
 describe("durable terminal previews", () => {
+  it("keeps the retained screen through failed retries instead of repainting an older disk preview", async () => {
+    const { result } = renderHook(() => useAttachment(renderer));
+    await act(async () => { await result.current.connect(first); });
+    await emit(checkpoint(result.current.state.attachment_id!, "retained live screen", "10"));
+    const visible = visibleTerminal();
+    const restore = vi.spyOn(renderer, "restoreCheckpoint");
+    api.sessionCache.mockClear().mockResolvedValue({ kind: "loaded", cache: {
+      terminal_id: first.terminal_id, checkpoint: checkpoint("saved", "older disk preview", "5").checkpoint,
+      history: [], history_gap: false,
+    } });
+    const failure = { code: "backend_error", message: "Temporary transport failure" };
+    api.sendInput.mockRejectedValueOnce(failure);
+    api.openAttachment.mockRejectedValueOnce(failure);
+    vi.useFakeTimers();
+    await act(async () => { result.current.handleInput(new TextEncoder().encode("x")); });
+    expect(renderer.resumeSequence()).toBeNull();
+    expect(result.current.state.phase).toBe("retry_wait");
+    await act(async () => { await vi.advanceTimersByTimeAsync(250); });
+    expect(api.sessionCache).not.toHaveBeenCalled();
+    expect(result.current.state.phase).toBe("retry_wait");
+    expect(visibleTerminal()).toBe(visible);
+    expect(line(visible.terminal)).toBe("retained live screen");
+    await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+    expect(result.current.state.phase).toBe("attached");
+    expect(api.openAttachment).toHaveBeenCalledTimes(3);
+    expect(api.openAttachment.mock.lastCall?.[0].resume_from).toBeNull();
+    expect(api.sessionCache).not.toHaveBeenCalled();
+    expect(restore).not.toHaveBeenCalled();
+    expect(visibleTerminal()).toBe(visible);
+    expect(line(visible.terminal)).toBe("retained live screen");
+    vi.useRealTimers();
+    await emit(checkpoint(result.current.state.attachment_id!, "authoritative replacement", "20"));
+    expect(restore).toHaveBeenCalledOnce();
+    expect(line(visible.terminal)).toBe("authoritative replacement");
+    expect(renderer.resumeSequence()).toBe("20");
+  });
+
   it("retains a root preview while adopting its resolved terminal before the live checkpoint", async () => {
     api.sessionCache.mockResolvedValue({ kind: "loaded", cache: {
       terminal_id: first.terminal_id, checkpoint: checkpoint("saved", "saved preview", "7").checkpoint,

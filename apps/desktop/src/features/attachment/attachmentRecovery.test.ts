@@ -5,6 +5,7 @@ import {
   ATTACHMENT_RECOVERY_STABILITY_MS,
   AttachmentRecoveryBackoff,
   canAutomaticallyRecoverAttachment,
+  canRecoverAttachmentOnInteraction,
   interruptedAttachmentState,
   reconnectSequenceAfterError,
 } from "./attachmentRecovery";
@@ -44,6 +45,28 @@ function attachedState(
 }
 
 describe("attachment recovery", () => {
+  it("allows interaction recovery only for recoverable disconnected sessions", () => {
+    for (const phase of ["disconnected", "retry_wait", "error"] as const) {
+      expect(canRecoverAttachmentOnInteraction(attachedState({ phase }))).toBe(true);
+      expect(canRecoverAttachmentOnInteraction(attachedState({ phase, error_code: "automatic_reconnect_timeout" }))).toBe(false);
+      expect(canRecoverAttachmentOnInteraction(attachedState({ phase, error_code: "ssh_authentication_required" }))).toBe(false);
+    }
+    for (const phase of ["idle", "connecting", "attached", "reconnecting", "ended"] as const) {
+      expect(canRecoverAttachmentOnInteraction(attachedState({ phase }))).toBe(false);
+    }
+    expect(canRecoverAttachmentOnInteraction(attachedState({ phase: "disconnected", session: null }))).toBe(false);
+  });
+
+  it("keeps one deadline when interactions start recovery before a scheduled retry", () => {
+    const backoff = new AttachmentRecoveryBackoff();
+    expect(backoff.remainingTime(1_000)).toBeNull();
+    backoff.start(1_000);
+    expect(backoff.remainingTime(2_000)).toBe(29_000);
+    backoff.start(2_000);
+    expect(backoff.remainingTime(30_500)).toBe(500);
+    expect(backoff.remainingTime(31_001)).toBe(0);
+  });
+
   it("uses capped exponential backoff inside the recovery window", () => {
     const backoff = new AttachmentRecoveryBackoff();
 

@@ -111,7 +111,7 @@ export class AttachmentNotifications {
 
   canReconnect(owner?: string): boolean {
     const state = this.current(owner)?.state;
-    return !!state && ["error", "disconnected"].includes(state.phase) && state.error_code !== "protocol_version_mismatch";
+    return !!state && ["error", "disconnected", "retry_wait"].includes(state.phase) && state.error_code !== "protocol_version_mismatch";
   }
 
   async reconnect(owner?: string): Promise<void> {

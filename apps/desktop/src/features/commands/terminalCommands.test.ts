@@ -483,6 +483,14 @@ describe("terminal commands", () => {
     expect(findCommand(commands, COMMAND_IDS.reconnect).enabled).toBe(false);
   });
 
+  it("allows an explicit reconnect while an automatic retry is waiting", () => {
+    const { commands, actions } = setup("first", "macos", "/work/ctmux", ["first"], "retry_wait");
+    const reconnect = findCommand(commands, COMMAND_IDS.reconnect);
+    expect(reconnect.enabled).toBe(true);
+    reconnect.run();
+    expect(actions.reconnect).toHaveBeenCalledOnce();
+  });
+
   it("does not expose disabled session actions without an active session", () => {
     const { commands } = setup(null);
 

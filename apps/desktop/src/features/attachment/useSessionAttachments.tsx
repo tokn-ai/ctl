@@ -76,6 +76,7 @@ export function useSessionAttachments(renderer: XtermRenderer | null): Attachmen
     selected.current = key;
     let entry = entries.current.get(key);
     renderer_ref.current?.selectSession({ ...(entry?.session ?? session), terminal_id: entry?.options.terminal_id ?? options.terminal_id });
+    renderer_ref.current?.focus();
     notify();
     if (entry) {
       await entry.ready;
@@ -93,7 +94,6 @@ export function useSessionAttachments(renderer: XtermRenderer | null): Attachmen
       } else {
         notify();
       }
-      renderer_ref.current?.focus();
       return;
     }
     entry = createEntry(session, options);
@@ -130,12 +130,14 @@ export function useSessionAttachments(renderer: XtermRenderer | null): Attachmen
   const actions = active() ?? idle;
   return {
     state: actions.state,
+    has_cached_content: actions.has_cached_content,
     connection_attempt: actions.connection_attempt,
     storage_error,
     states,
     session_keys,
     connect,
     reconnect: () => active()?.reconnect() ?? Promise.resolve(),
+    reconnectOnInteraction: () => active()?.reconnectOnInteraction() ?? Promise.resolve(),
     cancelPendingConnection: (session) => {
       const entry = entries.current.get(sessionKey(session));
       entry?.actions?.cancelPendingConnection(session);

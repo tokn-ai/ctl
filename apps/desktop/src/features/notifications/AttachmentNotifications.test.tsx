@@ -49,11 +49,15 @@ describe("attachment notification lifecycle", () => {
     expect(store.snapshot().entries[0]).toMatchObject({ title: "Session connection failed", toast_visible: true });
   });
 
-  it("reports a failure when retry_wait is the first observable state", () => {
-    const { store, report, registry, owner } = setup();
+  it("offers an explicit reconnect when retry_wait is the first observable state", async () => {
+    const { store, report, registry, owner, reconnect } = setup();
     report(transitionAttachment(failed, { type: "retry_scheduled", retry_at_ms: 1000 }));
-    expect(store.snapshot().entries).toMatchObject([{ severity: "error", title: "Session connection failed", actions: [] }]);
-    expect(registry.canReconnect(owner)).toBe(false);
+    expect(store.snapshot().entries).toMatchObject([{ severity: "error", title: "Session connection failed",
+      actions: [{ label: "Reconnect", command_id: COMMAND_IDS.reconnectNotificationAttachment, args: { value: owner } }],
+    }]);
+    expect(registry.canReconnect(owner)).toBe(true);
+    await registry.reconnect(owner);
+    expect(reconnect).toHaveBeenCalledOnce();
   });
 
   it("resolves an error only after attachment succeeds, then reports a later recurrence", () => {

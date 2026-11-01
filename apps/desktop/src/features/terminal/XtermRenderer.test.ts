@@ -127,6 +127,34 @@ function expectNoSelection(terminal: Terminal): void {
   expect(terminal.hasSelection()).toBe(false);
 }
 
+describe("retained terminal content", () => {
+  it("retains readable content after the safe replay cursor is invalidated", async () => {
+    expect(renderer.hasContent()).toBe(false);
+    await renderer.resize(size);
+    expect(renderer.hasContent()).toBe(false);
+    await renderer.write(encoder.encode("last known screen"), "17", "0");
+    renderer.invalidateResumeSequence();
+    expect(renderer.resumeSequence()).toBeNull();
+    expect(renderer.hasContent()).toBe(true);
+    expect(activeTerminal().buffer.active.getLine(0)?.translateToString(true)).toBe("last known screen");
+    await renderer.recreate(size);
+    expect(renderer.hasContent()).toBe(false);
+  });
+
+  it("reports content for each cached session independently of the selected tab", async () => {
+    const session: SessionSummary = { target: { kind: "local" }, session_id: "background", name: "background",
+      status: "running", terminal_size: size, next_sequence: "0" };
+    const background = renderer.sessionRenderer(session);
+    await background.restoreCheckpoint(size, [], encoder.encode("cached background"), new Uint8Array(), "0");
+    background.invalidateResumeSequence();
+    expect(background.hasContent?.()).toBe(true);
+    expect(renderer.hasContent()).toBe(false);
+    renderer.selectSession(session);
+    expect(renderer.hasContent()).toBe(true);
+    expect(renderer.resumeSequence()).toBeNull();
+  });
+});
+
 describe("terminal links", () => {
   it("detects naturally wrapped URLs with wide Unicode prefixes and surrounding punctuation", async () => {
     const url = "https://example.com/docs?q=one#part";

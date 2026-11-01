@@ -2111,7 +2111,12 @@ function TerminalWorkbench() {
                   on_dismiss={() => { if (attachment.state.session) void dismissSession(attachment.state.session); }}
                   phase={attachment.state.phase}
                   hasSession={attachment.state.session !== null}
-                  has_cached_content={attachment.state.applied_sequence !== null}
+                  has_cached_content={attachment.has_cached_content}
+                  on_reconnect={attachment.reconnect}
+                  on_reconnect_interaction={attachment.reconnectOnInteraction}
+                  reconnect_available={attachment.state.error_code !== "protocol_version_mismatch"}
+                  reconnect_error={attachment.state.message}
+                  retry_paused={attachment.state.error_code === "automatic_reconnect_timeout"}
                   onInput={handleTerminalInput}
                   onReady={setRenderer}
                 />

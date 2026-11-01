@@ -4,7 +4,6 @@ import { createPortal } from "react-dom";
 import { useAttachment } from "../../features/attachment/useAttachment";
 import { resizeSessionPane, setSessionViewZoom, subscribeSessionViews } from "../../features/attachment/componentActions";
 import { useAttachmentNotifications } from "../../features/notifications/useAttachmentNotifications";
-import { attachmentPhaseLabel } from "../../features/attachment/attachmentState";
 import { adjacentPane, swapPanes } from "../../features/terminal/viewLayout";
 import type { XtermRenderer } from "../../features/terminal/XtermRenderer";
 import { sessionKey } from "../../features/targets/targets";
@@ -355,7 +354,7 @@ export function SessionViewSurface({ controls_container, session, open_session_k
   useEffect(() => () => on_pane_commands?.([]), [on_pane_commands]);
   const prefix_map = resolvePrefix(prefix_settings?.document ?? { schema_version: 1, overrides: [], prefix: { key: null, bindings: [] } }, prefix_settings?.bindings ?? new Map(), prefix_settings?.platform ?? "other");
   const prefix = useTerminalPrefix({
-    enabled: input_enabled && shortcuts_enabled && connected && Boolean(current_view) && !focused_ended,
+    enabled: input_enabled && shortcuts_enabled && Boolean(current_view) && !focused_ended,
     context: `${key}:${focused ?? ""}`,
     repeat_context: key,
     keymap: prefix_map,
@@ -365,6 +364,9 @@ export function SessionViewSurface({ controls_container, session, open_session_k
     },
     on_action: (action) => {
       if (!focused || !current_view) return;
+      // Pane focus is local. Mutating the shared layout still needs a live
+      // connection; offline navigation must not issue remote commands.
+      if (!connected && action.startsWith("pane.") && (!action.startsWith("pane.focus_") || active_zoom)) return;
       if (action.startsWith("pane.resize_")) {
         const direction = action.slice("pane.resize_".length).replace(/_large$/, "") as ResizeDirection;
         resize_focused.current(direction, action.endsWith("_large") ? 5 : 1);
@@ -412,10 +414,10 @@ export function SessionViewSurface({ controls_container, session, open_session_k
       {input_control}
       <ControlPopover key={terminal_id} label="Pane actions" trigger_content={<Icon name="more" size={14} />}>
         <span>{label}</span>
-        <button disabled={busy || ended_ids.size > 0 || primary_ended.current} title="Split side by side" onClick={() => void mutate({ kind: "split", terminal_id, axis: "horizontal", terminal_size: session!.terminal_size, working_directory: null })}>Split right</button>
-        <button disabled={busy || ended_ids.size > 0 || primary_ended.current} title="Split vertically" onClick={() => void mutate({ kind: "split", terminal_id, axis: "vertical", terminal_size: session!.terminal_size, working_directory: null })}>Split below</button>
-        <button disabled={busy || ended_ids.size > 0 || primary_ended.current} onClick={() => void mutate({ kind: "kill_terminal", terminal_id })}>Terminate pane</button>
-        {panes.length > 1 && <button disabled={busy || ended_ids.size > 0 || primary_ended.current} onClick={() => void mutate({ kind: "promote", terminal_id, name: null })}>Move to new session</button>}
+        <button disabled={!connected || busy || ended_ids.size > 0 || primary_ended.current} title="Split side by side" onClick={() => void mutate({ kind: "split", terminal_id, axis: "horizontal", terminal_size: session!.terminal_size, working_directory: null })}>Split right</button>
+        <button disabled={!connected || busy || ended_ids.size > 0 || primary_ended.current} title="Split vertically" onClick={() => void mutate({ kind: "split", terminal_id, axis: "vertical", terminal_size: session!.terminal_size, working_directory: null })}>Split below</button>
+        <button disabled={!connected || busy || ended_ids.size > 0 || primary_ended.current} onClick={() => void mutate({ kind: "kill_terminal", terminal_id })}>Terminate pane</button>
+        {panes.length > 1 && <button disabled={!connected || busy || ended_ids.size > 0 || primary_ended.current} onClick={() => void mutate({ kind: "promote", terminal_id, name: null })}>Move to new session</button>}
       </ControlPopover>
     </div>;
   }
@@ -426,8 +428,8 @@ export function SessionViewSurface({ controls_container, session, open_session_k
 
   const pane_controls = (
     <div className="view-controls" ref={setControlsHost}>
-      {connected && primary_id && focused === primary_id && controls(primary_id, shell_state,
-        <button onClick={on_toggle_input} aria-label={input_owned ? "Release input" : "Take input"} title={input_owned ? "Input enabled · Click to release" : "Read only · Click to request input"}><Icon name="keyboard" size={14} />{!input_owned && "Read only"}</button>)}
+      {primary_id && focused === primary_id && controls(primary_id, shell_state,
+        <button disabled={!connected} onClick={on_toggle_input} aria-label={input_owned ? "Release input" : "Take input"} title={input_owned ? "Input enabled · Click to release" : "Read only · Click to request input"}><Icon name="keyboard" size={14} />{!input_owned && "Read only"}</button>)}
     </div>
   );
 
@@ -454,7 +456,7 @@ export function SessionViewSurface({ controls_container, session, open_session_k
         on_busy={(next) => { busy_ref.current = next; setBusy(next); if (next) { ++sequence.current; prefix.cancel(); } }}
         on_error={setActionError} on_confirm={(next) => { ++sequence.current; storeView(next); }} />
       <div className="view-pane" data-active={focused === primary_id} ref={paneRef(primary_id)} onFocusCapture={() => setFocusedId(primary_id ?? null)} style={{ ...paneStyle(primary_rect), ...(takeover_id ? { visibility: "hidden" } : {}) }}>
-        <TerminalSurface {...surface} onInput={handlePrimaryInput} ended_message={surface.ended_message ?? (surface.phase === "ended" ? "Terminal exited" : surface.phase !== "attached" && ended_ids.has(primary_id ?? "") ? "Terminal no longer exists" : null)} on_dismiss={() => void dismissPane(primary_id)} />
+        <TerminalSurface {...surface} interaction_enabled={input_enabled} onInput={handlePrimaryInput} ended_message={surface.ended_message ?? (surface.phase === "ended" ? "Terminal exited" : surface.phase !== "attached" && ended_ids.has(primary_id ?? "") ? "Terminal no longer exists" : null)} on_dismiss={() => void dismissPane(primary_id)} />
       </div>
       {[...rendered_views].flatMap(([owner_key, cached]) => {
         const visible = owner_key === key;
@@ -519,7 +521,11 @@ function AdditionalTerminal({ visible, input_enabled, on_ended, on_dismiss, conf
   }, [renderer, key, detach_registry, input_registry, toggle_registry, handleInput]);
   return <>
     {render_controls(attachment.state.shell_state, <button disabled={attachment.state.phase !== "attached"} aria-label={attachment.state.input_lease.owned_by_client ? "Release input" : "Take input"} title={attachment.state.input_lease.owned_by_client ? "Input enabled · Click to release" : "Read only · Click to request input"} onClick={() => void attachment.toggleInputLease()}><Icon name="keyboard" size={14} />{!attachment.state.input_lease.owned_by_client && "Read only"}</button>)}
-    {attachment.state.phase !== "attached" && !ended_message && <div role="status" className="pane-message">{attachmentPhaseLabel(attachment.state.phase)} · Last known terminal content</div>}
-    <TerminalSurface ended_message={ended_message} on_dismiss={on_dismiss} phase={attachment.state.phase} hasSession={true} has_cached_content={attachment.state.applied_sequence !== null} onInput={handleInput} onReady={setRenderer} />
+    <TerminalSurface ended_message={ended_message} on_dismiss={on_dismiss} phase={attachment.state.phase} hasSession={true}
+      has_cached_content={attachment.has_cached_content} interaction_enabled={input_enabled && visible}
+      on_reconnect={attachment.reconnect} on_reconnect_interaction={attachment.reconnectOnInteraction}
+      reconnect_available={attachment.state.error_code !== "protocol_version_mismatch"}
+      reconnect_error={attachment.state.message} retry_paused={attachment.state.error_code === "automatic_reconnect_timeout"}
+      onInput={handleInput} onReady={setRenderer} />
   </>;
 }

@@ -3,6 +3,7 @@ import type { AttachmentViewState } from "../../lib/types";
 export const INITIAL_ATTACHMENT_RECOVERY_DELAY_MS = 250;
 export const MAX_ATTACHMENT_RECOVERY_DELAY_MS = 5_000;
 export const ATTACHMENT_RECOVERY_WINDOW_MS = 30_000;
+export const ATTACHMENT_RECOVERY_INTERACTION_INTERVAL_MS = 1_000;
 export const ATTACHMENT_RECOVERY_STABILITY_MS =
   ATTACHMENT_RECOVERY_WINDOW_MS;
 
@@ -32,6 +33,13 @@ export function canAutomaticallyRecoverAttachment(
   errorCode: string | null,
 ): boolean {
   return errorCode === null || !NON_RECOVERABLE_ERROR_CODES.has(errorCode);
+}
+
+export function canRecoverAttachmentOnInteraction(
+  state: Pick<AttachmentViewState, "session" | "phase" | "error_code">,
+): boolean {
+  return state.session !== null && ["disconnected", "retry_wait", "error"].includes(state.phase) &&
+    canAutomaticallyRecoverAttachment(state.error_code);
 }
 
 export function reconnectSequenceAfterError(
@@ -77,10 +85,17 @@ export class AttachmentRecoveryBackoff {
   private startedAt: number | null = null;
   private attempt = 0;
 
-  nextDelay(now: number): number | null {
+  start(now: number): void {
     this.startedAt ??= now;
-    const elapsed = now - this.startedAt;
-    const remaining = ATTACHMENT_RECOVERY_WINDOW_MS - elapsed;
+  }
+
+  remainingTime(now: number): number | null {
+    return this.startedAt === null ? null : Math.max(0, ATTACHMENT_RECOVERY_WINDOW_MS - (now - this.startedAt));
+  }
+
+  nextDelay(now: number): number | null {
+    this.start(now);
+    const remaining = this.remainingTime(now)!;
     if (remaining <= 0) {
       return null;
     }

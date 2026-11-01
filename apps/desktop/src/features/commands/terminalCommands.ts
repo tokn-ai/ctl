@@ -97,7 +97,7 @@ export function buildTerminalCommands(
     activeAttachmentMatchesTab && context.phase === "attached";
   const canReconnect =
     activeAttachmentMatchesTab &&
-    (context.phase === "disconnected" || context.phase === "error");
+    (context.phase === "disconnected" || context.phase === "error" || context.phase === "retry_wait");
   const closingActive =
     activeSession !== null &&
     context.closingSessionKeys.has(sessionKey(activeSession));

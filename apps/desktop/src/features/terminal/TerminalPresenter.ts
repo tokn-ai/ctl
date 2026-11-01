@@ -99,6 +99,7 @@ function sameGeometry(left: TerminalSize, right: TerminalSize): boolean {
 }
 
 export class TerminalPresenter {
+  hasContent(): boolean { return this.has_content; }
   copyLines(): Promise<string[]> { return this.operationTail.then(() => this.adapter.copyLines?.() ?? []); }
   historyBytes(): number | null { return this.adapter.historyBytes?.() ?? null; }
   cellDimensions() { return this.adapter.cellDimensions?.() ?? null; }
@@ -106,6 +107,7 @@ export class TerminalPresenter {
   private adapter: TerminalAdapter;
   private operationTail = Promise.resolve();
   private disposed = false;
+  private has_content = false;
   private generation = 0;
   private terminalSize: TerminalSize;
   private sequence: bigint | null = null;
@@ -123,6 +125,7 @@ export class TerminalPresenter {
   write(data: Uint8Array, sequence_end?: string, sequence_start?: string): Promise<void> {
     return this.enqueue(async () => {
       await this.writeBytes(this.adapter, data);
+      if (data.length) this.has_content = true;
       this.recordReplay(data, sequence_end, sequence_start);
     });
   }
@@ -151,6 +154,7 @@ export class TerminalPresenter {
       }
       chunks.push(home, payload, inputPrefix);
       await this.writeBytes(this.adapter, concatenate(chunks));
+      this.has_content = true;
       if (viewport_offset > 0) this.adapter.activate?.(viewport_offset);
       // Older daemons and disk previews supply normalized history directly.
       // Their bulk history uses the same off-view staging path.
@@ -182,6 +186,7 @@ export class TerminalPresenter {
       this.adapter.dispose();
       this.terminalSize = terminalSize;
       this.adapter = this.factory(terminalSize);
+      this.has_content = false;
       this.sequence = null;
       this.checkpointSequence = null;
     });

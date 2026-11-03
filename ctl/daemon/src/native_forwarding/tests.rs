@@ -184,6 +184,36 @@ async fn bound_forward() -> (TcpListener, LocalPortForward) {
   (listener, forward)
 }
 
+// Connect without yielding to the accept task. Closure of this queued peer
+// identifies the original listener even if another process reuses its port.
+fn queued_peer(forward: &LocalPortForward) -> TcpStream {
+  use std::io::Read as _;
+
+  let mut peer =
+    std::net::TcpStream::connect((forward.bind_address.as_str(), forward.local_port)).unwrap();
+  peer.set_nonblocking(true).unwrap();
+  assert_eq!(
+    peer.read(&mut [0]).unwrap_err().kind(),
+    io::ErrorKind::WouldBlock
+  );
+  TcpStream::from_std(peer).unwrap()
+}
+
+async fn assert_listener_released(mut peer: TcpStream) {
+  match tokio::time::timeout(Duration::from_secs(5), peer.read(&mut [0]))
+    .await
+    .expect("the queued peer remained connected after listener shutdown")
+  {
+    Ok(0) => {}
+    Err(error)
+      if matches!(
+        error.kind(),
+        io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted
+      ) => {}
+    result => panic!("expected closure of the queued peer, got {result:?}"),
+  }
+}
+
 #[tokio::test]
 async fn occupied_ports_and_explicit_master_reuse_fail_before_native_ssh_starts() {
   let external = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -203,29 +233,33 @@ async fn occupied_ports_and_explicit_master_reuse_fail_before_native_ssh_starts(
 #[tokio::test]
 async fn cancellation_during_authentication_releases_reserved_listener() {
   let (listener, forward) = bound_forward().await;
+  let peer = queued_peer(&forward);
   let mut registry = Registry::default();
   let nonce = readiness_nonce();
   let target = target();
-  let start = registry.start_listener(&target, &forward, fixture(None, false), nonce, listener);
-  assert!(
-    tokio::time::timeout(Duration::from_millis(100), start)
-      .await
-      .is_err()
-  );
+  {
+    let start = registry.start_listener(&target, &forward, fixture(None, false), nonce, listener);
+    tokio::pin!(start);
+    // Poll startup into its authentication wait, then cancel by dropping it.
+    tokio::select! {
+      biased;
+      result = &mut start => panic!("silent anchor completed startup: {result:?}"),
+      () = std::future::ready(()) => {}
+    }
+  }
   assert!(registry.listeners.is_empty());
-  TcpListener::bind((forward.bind_address.as_str(), forward.local_port))
-    .await
-    .unwrap();
+  assert_listener_released(peer).await;
 }
 
 #[tokio::test]
-async fn authenticated_anchor_exit_changes_passive_status_and_releases_its_listener() {
+async fn authenticated_anchor_exit_changes_passive_status_and_stops_its_listener_task() {
   let (listener, forward) = bound_forward().await;
   let mut registry = Registry::default();
   let nonce = readiness_nonce();
+  let target = target();
   registry
     .start_listener(
-      &target(),
+      &target,
       &forward,
       fixture(Some(&nonce), true),
       nonce,
@@ -233,23 +267,22 @@ async fn authenticated_anchor_exit_changes_passive_status_and_releases_its_liste
     )
     .await
     .unwrap();
-  registry.check(&target(), &forward).unwrap();
+  registry.check(&target, &forward).unwrap();
+  let owner = &registry.listeners[&(target.clone(), forward.clone())].owner;
   tokio::time::timeout(Duration::from_secs(5), async {
-    while registry.check(&target(), &forward).is_ok() {
+    while !owner.is_finished() {
       tokio::time::sleep(Duration::from_millis(10)).await;
     }
   })
   .await
-  .unwrap();
-  registry.cancel(&target(), &forward).await;
+  .expect("listener task outlived the authenticated anchor");
+  assert!(registry.check(&target, &forward).is_err());
+  registry.cancel(&target, &forward).await;
   assert!(registry.listeners.is_empty());
-  TcpListener::bind((forward.bind_address.as_str(), forward.local_port))
-    .await
-    .unwrap();
 }
 
-#[tokio::test]
-async fn disabling_or_dropping_an_owned_native_listener_releases_the_port() {
+#[tokio::test(flavor = "current_thread")]
+async fn disabling_or_dropping_an_owned_native_listener_closes_queued_peers() {
   for cancel in [false, true] {
     let (listener, forward) = bound_forward().await;
     let mut registry = Registry::default();
@@ -265,23 +298,14 @@ async fn disabling_or_dropping_an_owned_native_listener_releases_the_port() {
       .await
       .unwrap();
     registry.check(&target(), &forward).unwrap();
+    let peer = queued_peer(&forward);
     if cancel {
       registry.cancel(&target(), &forward).await;
+      assert!(registry.listeners.is_empty());
+    } else {
+      drop(registry);
     }
-    drop(registry);
-    tokio::time::timeout(Duration::from_secs(2), async {
-      loop {
-        if TcpListener::bind((forward.bind_address.as_str(), forward.local_port))
-          .await
-          .is_ok()
-        {
-          break;
-        }
-        tokio::task::yield_now().await;
-      }
-    })
-    .await
-    .unwrap();
+    assert_listener_released(peer).await;
   }
 }
 

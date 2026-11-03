@@ -7,7 +7,8 @@ import { basename, dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
-import { maxComponentMetadata, verifyReleaseComponent, type ProtocolInfo } from "../shared/protocol-contract.mts";
+import { verifyReleaseComponent, type ProtocolInfo } from "../shared/protocol-contract.mts";
+import { probeComponent } from "../shared/component-probe.mts";
 
 const execute = promisify(execFile);
 const bundleIdentifier = "dev.tokn-ai.ctl.ctld";
@@ -114,12 +115,13 @@ function signingRequirement(team: string): string {
 
 export async function packageCtldBundle(
   options: CtldBundleOptions,
-  run: ProcessRunner = async (command, args) => execute(command, args, {
-    maxBuffer: args[0] === "--component-info" ? maxComponentMetadata : 16 * 1024 * 1024,
-    timeout: args[0] === "--component-info" ? 5_000 : undefined,
-    env: { ...process.env, CTLD_ASKPASS: undefined, CTLD_ASKPASS_TOKEN: undefined,
-      CTLD_IDENTITY_ASKPASS: undefined, CTLD_IDENTITY_ASKPASS_SOCKET: undefined, CTLD_IDENTITY_ASKPASS_TOKEN: undefined },
-  }),
+  run: ProcessRunner = async (command, args) => {
+    const env = { ...process.env, CTLD_ASKPASS: undefined, CTLD_ASKPASS_TOKEN: undefined,
+      CTLD_IDENTITY_ASKPASS: undefined, CTLD_IDENTITY_ASKPASS_SOCKET: undefined, CTLD_IDENTITY_ASKPASS_TOKEN: undefined };
+    return args[0] === "--component-info"
+      ? probeComponent(command, args, { env, target: options.target })
+      : execute(command, args, { maxBuffer: 16 * 1024 * 1024, env });
+  },
 ): Promise<CtldBundleManifest> {
   const architecture = macTargets.get(options.target);
   if (!architecture) {

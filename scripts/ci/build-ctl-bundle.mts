@@ -7,7 +7,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { packageCtldBundle, type CtldBundleManifest } from "./package-ctld-bundle.mts";
 
-import { maxComponentMetadata, parseHelperProtocols, sameProtocols, verifyReleaseComponent } from "../shared/protocol-contract.mts";
+import { parseHelperProtocols, sameProtocols, verifyReleaseComponent } from "../shared/protocol-contract.mts";
+import { probeComponent } from "../shared/component-probe.mts";
 
 const execute = promisify(execFile);
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -150,10 +151,9 @@ async function verifyReusedHelper(
 export async function buildCtlBundle(
   options: BuildCtlOptions,
   run: BuildRunner = async (command, args, context) => {
-    const result = await execute(command, args, { ...context,
-      maxBuffer: args[0] === "--component-info" ? maxComponentMetadata : 32 * 1024 * 1024,
-      timeout: args[0] === "--component-info" ? 5_000 : undefined,
-    });
+    const result = args[0] === "--component-info"
+      ? await probeComponent(command, args, { ...context, target: options.target })
+      : await execute(command, args, { ...context, maxBuffer: 32 * 1024 * 1024 });
     if (result.stderr) process.stderr.write(result.stderr);
     return result;
   },

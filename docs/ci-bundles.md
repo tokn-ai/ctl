@@ -140,6 +140,15 @@ its identity. CLI cache reuse validates both documents and can select a compatib
 bundle across product releases. Signing and version selection for `ctld.app`
 remain separate from this remote bundle schema.
 
+Component metadata probes execute the packaged bytes, including Intel macOS
+executables through Rosetta on ARM runners. The bundle workflow sets
+`CTL_COMPONENT_PROBE_TIMEOUT_MS=30000` to allow cold startup; standalone packaging
+defaults to five seconds. Probes retain the 16 KiB output limit and fail without
+retrying a crashed executable or substituting metadata from another build.
+Failures include the target, runner architecture, elapsed time, configured
+deadline, exit code, signal, and bounded stderr. Successful probes taking more
+than five seconds also report their timing on stderr.
+
 ## Apple distribution credentials
 
 Configure these repository or organization secrets and variables:

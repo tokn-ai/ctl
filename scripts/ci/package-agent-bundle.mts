@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import { agentComponents, agentTargets, archiveName, inspectAgentArchive, parseAgentComponents, readAgentFile, validateAgentIdentity,
   type AgentBundleIdentity, type AgentBundleManifest, type AgentComponentMap } from "../shared/agent-bundle.mts";
 import { maxComponentMetadata } from "../shared/protocol-contract.mts";
+import { probeComponent } from "../shared/component-probe.mts";
 
 const execute = promisify(execFile);
 export type AgentProcessRunner = (command: string, args: string[]) => Promise<{ stdout: string; stderr: string }>;
@@ -16,11 +17,12 @@ export interface AgentBundleOptions extends AgentBundleIdentity {
   binary_directory: string;
 }
 
-export async function packageAgentBundle(options: AgentBundleOptions, run: AgentProcessRunner = (command, args) => execute(command, args, {
-  timeout: args[0] === "--component-info" ? 5_000 : undefined,
-  maxBuffer: args[0] === "--component-info" ? maxComponentMetadata : 1024 * 1024,
-  env: { ...process.env, COPYFILE_DISABLE: "1" },
-})): Promise<AgentBundleManifest> {
+export async function packageAgentBundle(options: AgentBundleOptions, run: AgentProcessRunner = (command, args) => {
+  const env = { ...process.env, COPYFILE_DISABLE: "1" };
+  return args[0] === "--component-info"
+    ? probeComponent(command, args, { env, target: options.target })
+    : execute(command, args, { maxBuffer: 1024 * 1024, env });
+}): Promise<AgentBundleManifest> {
   validateAgentIdentity(options);
   if (!(agentTargets as readonly string[]).includes(options.target)) throw new Error(`unsupported agent bundle target: ${options.target}`);
   const output = resolve(options.output_directory);
@@ -34,7 +36,8 @@ export async function packageAgentBundle(options: AgentBundleOptions, run: Agent
       await copyFile(path, join(staging, name));
     }
     try {
-      await run("strip", agentComponents.map((name) => join(staging, name)));
+      const stripped = await run("strip", agentComponents.map((name) => join(staging, name)));
+      if (stripped.stderr) process.stderr.write(`strip: ${stripped.stderr.slice(0, 2048)}\n`);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }

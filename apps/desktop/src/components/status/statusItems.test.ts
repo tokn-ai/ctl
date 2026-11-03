@@ -34,6 +34,7 @@ function state(overrides: Partial<AttachmentViewState> = {}): AttachmentViewStat
     applied_sequence: "58006",
     reconnect_sequence: null,
     history_gap: false,
+    history_loading: false,
     terminal_size_mismatch: false,
     resize_with_window: false,
     resize_control_desired: false,
@@ -114,6 +115,19 @@ describe("createStatusGroups", () => {
     expect(labels(createStatusGroups(current))).toEqual({
       context: ["bash", "/work/ctmux"],
       indicators: ["LAST KNOWN", "107×24", "RECONNECTING", "HISTORY GAP"],
+    });
+  });
+
+  it("keeps background history loading quiet while connection recovery remains visible", () => {
+    const groups = createStatusGroups(state({ phase: "reconnecting", history_gap: true, history_loading: true }));
+    expect(groups.indicators.some((entry) => entry.key === "history")).toBe(false);
+    expect(groups.indicators.find((entry) => entry.key === "connection")?.label).toBe("RECONNECTING");
+  });
+
+  it("reports an actual unavailable-history warning after loading completes", () => {
+    const groups = createStatusGroups(state({ history_gap: true, history_loading: false }));
+    expect(groups.indicators.find((entry) => entry.key === "history")).toMatchObject({
+      label: "HISTORY GAP", tone: "warning", title: "Some earlier output is unavailable in this view.",
     });
   });
 

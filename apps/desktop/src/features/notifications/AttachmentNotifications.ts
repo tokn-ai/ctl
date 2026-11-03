@@ -76,12 +76,19 @@ export class AttachmentNotifications {
         message: state.message, source, actions,
       } : null);
     }
-    // Beginning a retry resets the attachment snapshot, not the history warning.
-    if (state.history_gap || state.phase === "attached" || state.phase === "ended") {
-      this.store.report(`history:${key}`, state.history_gap ? {
+    const history_key = `history:${key}`;
+    if (state.history_loading) {
+      // Loading is progress, not a new failure or proof of recovery. Keep the
+      // occurrence and its deduplication while removing its visible toast.
+      const warning = this.store.snapshot().entries.find((entry) => entry.source_key === history_key);
+      if (warning?.toast_visible) this.store.hide(warning.id);
+    } else if (state.history_gap) {
+      this.store.report(history_key, {
         severity: "warning", title: "Earlier output unavailable", source,
-        message: "Some earlier output is unavailable in this view. Retained history may still be loading.",
-      } : null);
+        message: "Some earlier output is unavailable in this view.",
+      });
+    } else if (state.phase === "attached" || state.phase === "ended") {
+      this.store.resolve(history_key);
     }
   }
 

@@ -22,6 +22,9 @@ const connecting = transitionAttachment(initialAttachmentState(), {
 const failed = transitionAttachment(connecting, {
   type: "failed", code: "transport_error", message: "Connection interrupted.", resume_from: null,
 });
+const history_ready: AttachmentViewState = {
+  ...failed, phase: "attached", message: null, error_code: null, history_loading: false,
+};
 
 function setup() {
   const store = new NotificationStore();
@@ -163,13 +166,60 @@ describe("attachment notification lifecycle", () => {
 
   it("retains pane history warnings across retry snapshots and clears obsolete recovery actions", () => {
     const { store, report } = setup();
-    report({ ...failed, phase: "attached", message: null, history_gap: true });
+    report({ ...history_ready, history_gap: true });
     store.dismiss(store.snapshot().entries[0].id);
     report(failed);
     report({ ...connecting, phase: "reconnecting" });
-    report({ ...failed, phase: "attached", message: null, history_gap: true });
+    report({ ...history_ready, history_gap: true });
     expect(store.snapshot().entries).toHaveLength(1);
     expect(store.snapshot().entries[0].actions).toEqual([]);
+  });
+
+  it.each([false, true])("does not warn while retained history is loading (gap=%s)", (history_gap) => {
+    const { store, report } = setup();
+    report({ ...history_ready, history_gap, history_loading: true });
+    expect(store.snapshot().entries).toEqual([]);
+  });
+
+  it.each(["attached", "ended"] as const)("hides a warning during loading and resolves only confirmed %s recovery", (phase) => {
+    const { store, report } = setup();
+    report({ ...history_ready, history_gap: true });
+    const id = store.snapshot().entries[0].id;
+    expect(store.snapshot().entries).toMatchObject([{
+      id, title: "Earlier output unavailable", toast_visible: true, resolved_at: null,
+      message: "Some earlier output is unavailable in this view.",
+    }]);
+
+    report({ ...history_ready, history_gap: true, history_loading: true });
+    expect(store.snapshot().entries).toMatchObject([{ id, toast_visible: false, resolved_at: null, occurrence_count: 1 }]);
+    report({ ...history_ready, phase, history_gap: false, history_loading: true });
+    expect(store.snapshot().entries[0].resolved_at).toBeNull();
+
+    report({ ...history_ready, phase, history_gap: false });
+    expect(store.snapshot().entries).toMatchObject([{ id, toast_visible: false, resolved_at: expect.any(Number), occurrence_count: 1 }]);
+
+    report({ ...history_ready, phase, history_gap: true });
+    expect(store.snapshot().entries).toMatchObject([{ id, toast_visible: true, resolved_at: null, occurrence_count: 2 }]);
+  });
+
+  it.each(["disconnected", "retry_wait", "reconnecting", "error"] as const)("does not treat a %s snapshot with no gap as confirmed recovery", (phase) => {
+    const { store, report } = setup();
+    report({ ...history_ready, history_gap: true });
+    report({ ...history_ready, phase, history_gap: false });
+    expect(store.snapshot().entries[0].resolved_at).toBeNull();
+    report({ ...history_ready, phase, history_gap: false, history_loading: true });
+    expect(store.snapshot().entries).toMatchObject([{ toast_visible: false, resolved_at: null }]);
+  });
+
+  it.each(["hide", "dismiss"] as const)("preserves history-warning %s and deduplication when loading finishes with the same gap", (action) => {
+    const { store, report } = setup();
+    report({ ...history_ready, history_gap: true });
+    store[action](store.snapshot().entries[0].id);
+    report({ ...connecting, phase: "reconnecting", history_gap: false, history_loading: true });
+    report({ ...history_ready, history_gap: true });
+    expect(store.snapshot().entries.filter((entry) => entry.toast_visible)).toEqual([]);
+    if (action === "hide") expect(store.snapshot().entries).toMatchObject([{ occurrence_count: 1, resolved_at: null }]);
+    else expect(store.snapshot().entries).toEqual([]);
   });
 
   it.each([session, { ...session, target: { kind: "ssh" as const, host_id: "remote", destination: "workstation" } }])(

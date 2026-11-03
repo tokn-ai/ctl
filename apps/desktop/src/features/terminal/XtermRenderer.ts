@@ -143,6 +143,7 @@ export class XtermRenderer {
       restoreCheckpoint: (size, history, payload, prefix, sequence, snapshot_id) =>
         this.applyToTerminal(terminal(), sequence, (presenter) => presenter.restoreCheckpoint(size, history, payload, prefix, sequence, snapshot_id)),
       syncHistory: (snapshot) => terminal().presenter.syncHistory(snapshot),
+      pendingHistory: () => terminal().presenter.pendingHistory(),
       historyBytes: () => terminal().presenter.historyBytes(),
       cancelHistory: () => terminal().presenter.cancelHistory(),
       recreate: (size) => this.applyToTerminal(terminal(), null, (presenter) => presenter.recreate(size)),
@@ -277,6 +278,8 @@ export class XtermRenderer {
   syncHistory(snapshot: HistoryPresentation): Promise<boolean> {
     return this.active.presenter.syncHistory(snapshot);
   }
+
+  pendingHistory(): Promise<boolean> | null { return this.active.presenter.pendingHistory(); }
 
   cancelHistory(): void { this.active.presenter.cancelHistory(); }
 
@@ -539,4 +542,4 @@ export type AttachmentRenderer = Pick<XtermRenderer,
   "activateSession" | "adoptSession" | "resumeSequence" | "invalidateResumeSequence" |
   "write" | "restoreCheckpoint" | "recreate" | "resize" |
   "proposeDimensions" | "observeDimensions" | "focus"
-> & { historyBytes?(): number | null; hasContent?(): boolean; isFocused?(): boolean } & Partial<Pick<XtermRenderer, "syncHistory" | "cancelHistory">>;
+> & { historyBytes?(): number | null; hasContent?(): boolean; isFocused?(): boolean } & Partial<Pick<XtermRenderer, "syncHistory" | "pendingHistory" | "cancelHistory">>;

@@ -532,6 +532,9 @@ Info and success cards hide automatically after eight seconds, paused while
 hovered or focused; warnings and errors stay visible until hidden, dismissed,
 or their attachment/session inspection confirms recovery. Recovered connection
 errors stay in the notification center with a **Resolved** label.
+Retained terminal history loads quietly in the background. Warnings about
+unavailable earlier output hide while recovery is loading and become resolved
+once the history is restored.
 The app shows up to three cards and retains the latest 100 notifications in
 this window's memory. History resets when the window is reloaded or closed.
 Background sessions and split panes report independently; reconnect actions target

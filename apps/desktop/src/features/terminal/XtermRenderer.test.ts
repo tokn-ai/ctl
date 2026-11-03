@@ -153,6 +153,20 @@ describe("retained terminal content", () => {
     expect(renderer.hasContent()).toBe(true);
     expect(renderer.resumeSequence()).toBeNull();
   });
+
+  it("keeps inline history completion with the pane that restored it", async () => {
+    const session: SessionSummary = { target: { kind: "local" }, session_id: "background", name: "background",
+      status: "running", terminal_size: size, next_sequence: "0" };
+    const background = renderer.sessionRenderer(session);
+    const lines = Array.from({ length: 80 }, (_, index) => `history ${index}`);
+    await background.restoreCheckpoint(size, lines, encoder.encode("live"), new Uint8Array(), "0");
+    const pending = background.pendingHistory?.();
+    expect(renderer.pendingHistory()).toBeNull();
+    expect(await pending).toBe(true);
+    renderer.selectSession(session);
+    expect(renderer.pendingHistory()).toBe(pending);
+    expect(activeTerminal().buffer.normal.getLine(0)?.translateToString(true)).toBe("history 0");
+  });
 });
 
 describe("terminal links", () => {

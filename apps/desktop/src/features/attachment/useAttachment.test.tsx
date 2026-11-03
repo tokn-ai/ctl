@@ -777,7 +777,7 @@ describe("background history presentation", () => {
     expect(api.acknowledgeAttachmentEvent).not.toHaveBeenCalled();
   });
 
-  it.each([false, true])("marks an incomplete preview until matching history is ready (source gap=%s)", async (source_gap) => {
+  it.each([false, true])("loads a recent preview quietly and clears raw replay gaps after hydration (raw gap=%s)", async (source_gap) => {
     let finish!: (applied: boolean) => void;
     vi.spyOn(renderer, "syncHistory").mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
     const { result } = renderHook(() => useAttachment(renderer));
@@ -786,11 +786,93 @@ describe("background history presentation", () => {
     initial.history_manifest!.first_line = "1";
     initial.history_gap = source_gap;
     await emit(initial);
-    await waitFor(() => expect(result.current.state.history_gap).toBe(true));
-    await emit(syncedHistory(initial));
+    expect(result.current.state).toMatchObject({ history_loading: true, history_gap: false });
+    await emit({ ...syncedHistory(initial), history_gap: source_gap });
     await act(async () => { finish(true); });
-    expect(result.current.state.history_gap).toBe(source_gap);
+    expect(result.current.state).toMatchObject({ history_loading: false, history_gap: false });
     expect(api.requestAttachmentCheckpoint).not.toHaveBeenCalled();
+  });
+
+  it.each(["snapshot", "manifest", "completed history"])("retains confirmed truncation from %s after loading", async (source) => {
+    let finish!: (applied: boolean) => void;
+    vi.spyOn(renderer, "syncHistory").mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+    const { result } = renderHook(() => useAttachment(renderer));
+    await act(async () => { await result.current.connect(first); });
+    const initial = withHistoryManifest(checkpoint(result.current.state.attachment_id!, "live"));
+    initial.history.truncated = source === "snapshot";
+    initial.history_manifest!.truncated = source === "manifest";
+    await emit(initial);
+    expect(result.current.state).toMatchObject({ history_loading: true, history_gap: source !== "completed history" });
+    const completed = syncedHistory(initial);
+    completed.history.truncated = source === "snapshot" || source === "completed history";
+    await emit(completed);
+    await act(async () => { finish(true); });
+    expect(result.current.state).toMatchObject({ history_loading: false, history_gap: true });
+  });
+
+  it.each([false, true].flatMap((raw_gap) => [false, true].map((truncated) => ({ raw_gap, truncated }))))(
+    "finishes inline legacy history without treating raw replay gap as loss ($raw_gap, $truncated)", async ({ raw_gap, truncated }) => {
+      const { result } = renderHook(() => useAttachment(renderer));
+      await act(async () => { await result.current.connect(first); });
+      const initial = checkpoint(result.current.state.attachment_id!, "legacy live");
+      initial.history_gap = raw_gap;
+      initial.history.truncated = truncated;
+      initial.history.lines = ["retained legacy history"];
+      await emit(initial);
+      expect(result.current.state).toMatchObject({ history_loading: false, history_gap: truncated });
+      expect(visibleTerminal().terminal.buffer.normal.getLine(0)?.translateToString(true)).toBe("retained legacy history");
+    },
+  );
+
+  it.each([false, true])("keeps legacy background history quiet until its stage completes (truncated=%s)", async (truncated) => {
+    let finish!: (applied: boolean) => void;
+    vi.spyOn(renderer, "pendingHistory").mockReturnValue(new Promise((resolve) => { finish = resolve; }));
+    const store = new NotificationStore();
+    const { result } = renderHook(() => {
+      const attachment = useAttachment(renderer);
+      useAttachmentNotifications(attachment);
+      return attachment;
+    }, { wrapper: ({ children }: { children: ReactNode }) => <NotificationProvider store={store}>{children}</NotificationProvider> });
+    await act(async () => { await result.current.connect(first); });
+    const initial = checkpoint(result.current.state.attachment_id!, "legacy live");
+    initial.history.truncated = truncated;
+    initial.history.lines = ["legacy history"];
+    await emit(initial);
+    expect(result.current.state).toMatchObject({ history_loading: true, history_gap: truncated });
+    expect(store.snapshot().entries.filter((entry) => entry.source_key.startsWith("history:"))).toHaveLength(0);
+    await act(async () => { finish(true); });
+    expect(result.current.state).toMatchObject({ history_loading: false, history_gap: truncated });
+    expect(store.snapshot().entries.filter((entry) => entry.source_key.startsWith("history:"))).toHaveLength(truncated ? 1 : 0);
+  });
+
+  it("ignores a stale legacy stage completion after a new checkpoint recovers history", async () => {
+    let finish!: (applied: boolean) => void;
+    vi.spyOn(renderer, "pendingHistory").mockReturnValueOnce(new Promise((resolve) => { finish = resolve; })).mockReturnValue(null);
+    const { result } = renderHook(() => useAttachment(renderer));
+    await act(async () => { await result.current.connect(first); });
+    const initial = checkpoint(result.current.state.attachment_id!, "legacy live");
+    initial.history.truncated = true;
+    await emit(initial);
+    expect(result.current.state).toMatchObject({ history_loading: true, history_gap: true });
+    await emit(checkpoint(initial.attachment_id, "replacement", "1"));
+    expect(result.current.state).toMatchObject({ history_loading: false, history_gap: false });
+    await act(async () => { finish(false); });
+    expect(result.current.state).toMatchObject({ history_loading: false, history_gap: false });
+  });
+
+  it("does not publish a response raw gap while its fresh checkpoint is pending", async () => {
+    const original_open = api.openAttachment.getMockImplementation()!;
+    api.openAttachment.mockImplementationOnce(async (...args) => {
+      const response = await original_open(...args);
+      return { ...response, attached: { ...response.attached, history_gap: true } };
+    });
+    const { result } = renderHook(() => useAttachment(renderer));
+    await act(async () => { await result.current.connect(first); });
+    expect(result.current.state).toMatchObject({ phase: "attached", history_loading: true, history_gap: false });
+    const initial = checkpoint(result.current.state.attachment_id!, "authoritative");
+    initial.history_gap = true;
+    await emit(initial);
+    expect(result.current.state).toMatchObject({ history_loading: false, history_gap: false });
   });
 
   it("requests a fresh checkpoint when current history cannot catch up", async () => {
@@ -801,8 +883,85 @@ describe("background history presentation", () => {
     await emit(initial);
     await emit(syncedHistory(initial));
     expect(api.requestAttachmentCheckpoint).toHaveBeenCalledExactlyOnceWith({ attachment_id: initial.attachment_id });
-    expect(result.current.state.history_gap).toBe(true);
+    expect(result.current.state).toMatchObject({ history_loading: true, history_gap: false });
     expect(result.current.state.phase).toBe("attached");
+  });
+
+  it("stops waiting when the process exits after submitting a replacement checkpoint request", async () => {
+    vi.spyOn(renderer, "syncHistory").mockResolvedValue(false);
+    const { result } = renderHook(() => useAttachment(renderer));
+    await act(async () => { await result.current.connect(first); });
+    const initial = withHistoryManifest(checkpoint(result.current.state.attachment_id!, "final screen"));
+    await emit(initial);
+    await emit(syncedHistory(initial));
+    expect(api.requestAttachmentCheckpoint).toHaveBeenCalledExactlyOnceWith({ attachment_id: initial.attachment_id });
+    expect(result.current.state).toMatchObject({ history_loading: true, history_gap: false });
+    await emit({ event_type: "session_ended", attachment_id: initial.attachment_id, session_id: first.session_id, exit_code: 0 });
+    await emit({ event_type: "attachment_exited", attachment_id: initial.attachment_id, reason: "session_ended",
+      next_sequence: "0", received_sequence: "0", exit_code: 0 });
+    expect(result.current.state).toMatchObject({ phase: "ended", history_loading: false, history_gap: true });
+    expect(api.requestAttachmentCheckpoint).toHaveBeenCalledOnce();
+  });
+
+  it.each(["legacy", "manifest"])("reports interrupted %s history after a geometry change", async (kind) => {
+    let finish!: (applied: boolean) => void;
+    if (kind === "legacy") vi.spyOn(renderer, "pendingHistory").mockReturnValue(new Promise((resolve) => { finish = resolve; }));
+    else vi.spyOn(renderer, "syncHistory").mockResolvedValue(true);
+    const { result } = renderHook(() => useAttachment(renderer));
+    await act(async () => { await result.current.connect(first); });
+    const initial = checkpoint(result.current.state.attachment_id!, "live", "10");
+    await emit(kind === "manifest" ? withHistoryManifest(initial) : initial);
+    expect(result.current.state).toMatchObject({ history_loading: true, history_gap: false });
+    await emit({ event_type: "pty_geometry_changed", attachment_id: initial.attachment_id, event_id: "geometry",
+      terminal_size: { ...size, columns: 100 }, observed_sequence: "10" });
+    expect(result.current.state).toMatchObject({ history_loading: false, history_gap: true });
+    if (kind === "legacy") {
+      await act(async () => { finish(true); });
+      expect(api.requestAttachmentCheckpoint).not.toHaveBeenCalled();
+    } else await emit(syncedHistory(initial));
+    expect(result.current.state).toMatchObject({ history_loading: false, history_gap: true });
+  });
+
+  it("does not claim a history gap when geometry changes after history is complete", async () => {
+    const { result } = renderHook(() => useAttachment(renderer));
+    await act(async () => { await result.current.connect(first); });
+    const initial = checkpoint(result.current.state.attachment_id!, "complete", "10");
+    await emit(initial);
+    expect(result.current.state).toMatchObject({ history_loading: false, history_gap: false });
+    await emit({ event_type: "pty_geometry_changed", attachment_id: initial.attachment_id, event_id: "geometry",
+      terminal_size: { ...size, columns: 100 }, observed_sequence: "10" });
+    expect(result.current.state).toMatchObject({ history_loading: false, history_gap: false });
+  });
+
+  it.each(["renderer", "checkpoint request"])("reports incomplete history only after %s recovery fails", async (failure) => {
+    const error = new Error("History recovery failed");
+    if (failure === "renderer") vi.spyOn(renderer, "syncHistory").mockRejectedValue(error);
+    else {
+      vi.spyOn(renderer, "syncHistory").mockResolvedValue(false);
+      api.requestAttachmentCheckpoint.mockRejectedValueOnce(error);
+    }
+    const { result } = renderHook(() => useAttachment(renderer));
+    await act(async () => { await result.current.connect(first); });
+    const initial = withHistoryManifest(checkpoint(result.current.state.attachment_id!, "live"));
+    await emit(initial);
+    expect(result.current.state).toMatchObject({ history_loading: true, history_gap: false });
+    await emit(syncedHistory(initial));
+    expect(result.current.state).toMatchObject({ phase: "attached", history_loading: false, history_gap: true });
+    await emit(checkpoint(initial.attachment_id, "recovered", "1"));
+    expect(result.current.state).toMatchObject({ history_loading: false, history_gap: false });
+  });
+
+  it("ignores a rejected history stage after a replacing checkpoint recovers the view", async () => {
+    let fail!: (error: Error) => void;
+    vi.spyOn(renderer, "syncHistory").mockImplementation(() => new Promise((_resolve, reject) => { fail = reject; }));
+    const { result } = renderHook(() => useAttachment(renderer));
+    await act(async () => { await result.current.connect(first); });
+    const initial = withHistoryManifest(checkpoint(result.current.state.attachment_id!, "old"));
+    await emit(initial);
+    await emit(syncedHistory(initial));
+    await emit(checkpoint(initial.attachment_id, "recovered", "1"));
+    await act(async () => { fail(new Error("Obsolete stage failure")); });
+    expect(result.current.state).toMatchObject({ history_loading: false, history_gap: false });
   });
 
   it("ignores an old history failure after a replacement checkpoint", async () => {
@@ -819,7 +978,59 @@ describe("background history presentation", () => {
     await act(async () => { finish(false); });
     expect(api.requestAttachmentCheckpoint).not.toHaveBeenCalled();
     expect(result.current.state.history_gap).toBe(false);
+    expect(result.current.state.history_loading).toBe(true);
   });
+
+  it("completes pending hydration after a confirmed normal exit", async () => {
+    let finish!: (applied: boolean) => void;
+    vi.spyOn(renderer, "syncHistory").mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+    const { result } = renderHook(() => useAttachment(renderer));
+    await act(async () => { await result.current.connect(first); });
+    const initial = withHistoryManifest(checkpoint(result.current.state.attachment_id!, "final screen"));
+    initial.history_manifest!.first_line = "1";
+    initial.history_gap = true;
+    await emit(initial);
+    await emit({ ...syncedHistory(initial), history_gap: true });
+    await emit({ event_type: "session_ended", attachment_id: initial.attachment_id, session_id: first.session_id, exit_code: 0 });
+    await emit({ event_type: "attachment_exited", attachment_id: initial.attachment_id, reason: "session_ended", next_sequence: "0", received_sequence: "0", exit_code: 0 });
+    expect(result.current.state).toMatchObject({ phase: "ended", history_loading: true, history_gap: false });
+    await act(async () => { finish(true); });
+    expect(result.current.state).toMatchObject({ phase: "ended", history_loading: false, history_gap: false });
+  });
+
+  it("ends history loading when the process exits before the remote transfer arrives", async () => {
+    const { result } = renderHook(() => useAttachment(renderer));
+    await act(async () => { await result.current.connect(first); });
+    const initial = withHistoryManifest(checkpoint(result.current.state.attachment_id!, "final screen"));
+    initial.history_manifest!.first_line = "1";
+    await emit(initial);
+    expect(result.current.state).toMatchObject({ history_loading: true, history_gap: false });
+    await emit({ event_type: "session_ended", attachment_id: initial.attachment_id, session_id: first.session_id, exit_code: 0 });
+    await emit({ event_type: "attachment_exited", attachment_id: initial.attachment_id, reason: "session_ended", next_sequence: "0", received_sequence: "0", exit_code: 0 });
+    expect(result.current.state).toMatchObject({ phase: "ended", history_loading: false, history_gap: true });
+    expect(api.requestAttachmentCheckpoint).not.toHaveBeenCalled();
+  });
+
+  it.each(["unapplied", "rejected"].flatMap((outcome) => [false, true].map((attachment_exited) => ({ outcome, attachment_exited }))))(
+    "finishes failed local hydration after process exit ($outcome, transport exited=$attachment_exited)", async ({ outcome, attachment_exited }) => {
+      let finish!: (applied: boolean) => void;
+      let fail!: (error: Error) => void;
+      vi.spyOn(renderer, "syncHistory").mockImplementation(() => new Promise((resolve, reject) => { finish = resolve; fail = reject; }));
+      const { result } = renderHook(() => useAttachment(renderer));
+      await act(async () => { await result.current.connect(first); });
+      const initial = withHistoryManifest(checkpoint(result.current.state.attachment_id!, "final screen"));
+      initial.history_manifest!.first_line = "1";
+      await emit(initial);
+      await emit(syncedHistory(initial));
+      await emit({ event_type: "session_ended", attachment_id: initial.attachment_id, session_id: first.session_id, exit_code: 0 });
+      if (attachment_exited) await emit({ event_type: "attachment_exited", attachment_id: initial.attachment_id,
+        reason: "session_ended", next_sequence: "0", received_sequence: "0", exit_code: 0 });
+      expect(result.current.state).toMatchObject({ phase: "ended", history_loading: true });
+      await act(async () => { if (outcome === "unapplied") finish(false); else fail(new Error("History stage rejected")); });
+      expect(result.current.state).toMatchObject({ phase: "ended", history_loading: false, history_gap: true });
+      expect(api.requestAttachmentCheckpoint).not.toHaveBeenCalled();
+    },
+  );
 
   it("finishes received history after a normal process exit", async () => {
     const { result } = renderHook(() => useAttachment(renderer));
@@ -833,6 +1044,7 @@ describe("background history presentation", () => {
     await waitFor(() => expect(visibleTerminal().terminal.buffer.normal.getLine(0)?.translateToString(true)).toBe("older history"));
     expect(result.current.state.phase).toBe("ended");
     await waitFor(() => expect(result.current.state.history_gap).toBe(false));
+    expect(result.current.state.history_loading).toBe(false);
     expect(api.requestAttachmentCheckpoint).not.toHaveBeenCalled();
   });
 
@@ -1547,6 +1759,53 @@ describe("pending remote attachments", () => {
 });
 
 describe("opened session cache", () => {
+  it("preserves confirmed truncation across a delta-only reconnect until a fresh checkpoint proves recovery", async () => {
+    vi.spyOn(renderer, "syncHistory").mockResolvedValue(true);
+    const { result } = renderHook(() => useAttachment(renderer));
+    await act(async () => { await result.current.connect(first, { terminal_id: first.terminal_id }); });
+    const initial = withHistoryManifest(checkpoint(result.current.state.attachment_id!, "retained", "10"));
+    initial.history_manifest!.truncated = true;
+    await emit(initial);
+    await emit(syncedHistory(initial));
+    expect(result.current.state).toMatchObject({ history_loading: false, history_gap: true });
+    vi.useFakeTimers();
+    await emit({ event_type: "attachment_exited", attachment_id: initial.attachment_id, reason: "connection_closed",
+      exit_code: null, next_sequence: "10", received_sequence: "10" });
+    await act(async () => { await vi.advanceTimersByTimeAsync(250); });
+    expect(api.openAttachment.mock.lastCall?.[0].resume_from).toBe("10");
+    expect(result.current.state).toMatchObject({ phase: "attached", history_loading: false, history_gap: true });
+    vi.useRealTimers();
+    await emit(checkpoint(result.current.state.attachment_id!, "complete replacement", "20"));
+    expect(result.current.state).toMatchObject({ history_loading: false, history_gap: false });
+  });
+
+  it.each(["connection loss", "explicit reconnect", "session switch"])("requires a fresh checkpoint after unfinished history is interrupted by %s", async (interruption) => {
+    const { result } = renderHook(() => useAttachment(renderer));
+    await act(async () => { await result.current.connect(first, { terminal_id: first.terminal_id }); });
+    const initial = withHistoryManifest(checkpoint(result.current.state.attachment_id!, "retained", "10"));
+    initial.history_manifest!.first_line = "1";
+    await emit(initial);
+    expect(result.current.state.history_loading).toBe(true);
+    expect(renderer.resumeSequence()).toBe("10");
+    if (interruption === "connection loss") {
+      vi.useFakeTimers();
+      await emit({ event_type: "attachment_exited", attachment_id: initial.attachment_id, reason: "connection_closed",
+        exit_code: null, next_sequence: "10", received_sequence: "10" });
+      await act(async () => { await vi.advanceTimersByTimeAsync(250); });
+      vi.useRealTimers();
+    } else if (interruption === "explicit reconnect") {
+      await act(async () => { await result.current.reconnect(); });
+    } else {
+      await act(async () => { await result.current.connect(second, { terminal_id: second.terminal_id }); });
+      await act(async () => { await result.current.connect(first, { terminal_id: first.terminal_id }); });
+    }
+    expect(api.openAttachment.mock.lastCall?.[0]).toMatchObject({ session: first.terminal_id, resume_from: null });
+    expect(renderer.resumeSequence()).toBeNull();
+    expect(result.current.state).toMatchObject({ phase: "attached", history_loading: true });
+    await emit(checkpoint(result.current.state.attachment_id!, "complete replacement", "20"));
+    expect(result.current.state).toMatchObject({ history_loading: false, history_gap: false });
+  });
+
   it.each(["0", "5"])("preserves a root attachment's screen and history across network reconnect at sequence %s", async (sequence) => {
     const { result } = renderHook(() => useAttachment(renderer));
     await act(async () => { await result.current.connect(first); });
@@ -1561,6 +1820,7 @@ describe("opened session cache", () => {
     await waitFor(() => expect(api.openAttachment).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(result.current.state.phase).toBe("attached"));
     expect(api.openAttachment.mock.lastCall?.[0]).toMatchObject({ session: first.terminal_id, resume_from: sequence });
+    expect(result.current.state.history_loading).toBe(false);
     expect(visibleTerminal() === saved).toBe(true);
     expect(saved.dispose).not.toHaveBeenCalled();
     await emit({ event_type: "output", attachment_id: result.current.state.attachment_id!, event_id: "resumed-output", sequence_start: sequence, sequence_end: "10", data_base64: btoa(" and new output") });
@@ -1816,6 +2076,7 @@ describe("opened session cache", () => {
     await act(async () => { await result.current.connect(first, { terminal_id: first.terminal_id }); });
     const replacement = checkpoint(result.current.state.attachment_id!, "fresh", "20");
     replacement.history_gap = true;
+    replacement.history.truncated = true;
     await emit(replacement);
     expect(line(visibleTerminal().terminal)).toBe("fresh");
     expect(visibleTerminal()).toBe(saved);
@@ -1862,6 +2123,34 @@ describe("opened session cache", () => {
 
 
 describe("durable terminal previews", () => {
+  it("keeps an incomplete disk preview quiet while a fresh live checkpoint is pending", async () => {
+    const store = new NotificationStore();
+    api.sessionCache.mockResolvedValue({ kind: "loaded", cache: {
+      terminal_id: first.terminal_id, checkpoint: checkpoint("saved", "saved preview", "7").checkpoint,
+      history: [], history_gap: true,
+    } });
+    const original_open = api.openAttachment.getMockImplementation()!;
+    let finish!: () => Promise<void>;
+    api.openAttachment.mockImplementationOnce((request: OpenAttachmentRequest, on_event: (event: AttachmentEvent) => void) =>
+      new Promise((resolve) => { finish = async () => resolve(await original_open(request, on_event)); }));
+    const { result } = renderHook(() => {
+      const attachment = useAttachment(renderer);
+      useAttachmentNotifications(attachment);
+      return attachment;
+    }, { wrapper: ({ children }: { children: ReactNode }) => <NotificationProvider store={store}>{children}</NotificationProvider> });
+    let connecting!: Promise<void>;
+    await act(async () => { connecting = result.current.connect(first); });
+    await waitFor(() => expect(result.current.state.applied_sequence).toBe("7"));
+    expect(result.current.state).toMatchObject({ history_loading: true, history_gap: true });
+    expect(store.snapshot().entries.some((entry) => entry.title === "Earlier output unavailable")).toBe(false);
+    await act(async () => { await finish(); await connecting; });
+    expect(result.current.state).toMatchObject({ phase: "attached", history_loading: true });
+    expect(store.snapshot().entries.some((entry) => entry.title === "Earlier output unavailable")).toBe(false);
+    await emit(checkpoint(result.current.state.attachment_id!, "authoritative", "9"));
+    expect(result.current.state).toMatchObject({ history_loading: false, history_gap: false });
+    expect(store.snapshot().entries.some((entry) => entry.title === "Earlier output unavailable")).toBe(false);
+  });
+
   it("keeps the retained screen through failed retries instead of repainting an older disk preview", async () => {
     const { result } = renderHook(() => useAttachment(renderer));
     await act(async () => { await result.current.connect(first); });

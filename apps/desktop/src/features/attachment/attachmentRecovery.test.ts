@@ -35,6 +35,7 @@ function attachedState(
     shell_state: null,
     applied_sequence: "12",
     reconnect_sequence: null,
+    history_loading: false,
     history_gap: false,
     terminal_size_mismatch: false,
     resize_with_window: true,

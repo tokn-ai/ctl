@@ -71,6 +71,7 @@ export function interruptedAttachmentState(
     ...state,
     phase: recoverable ? "disconnected" : state.phase,
     attachment_id: null,
+    history_loading: false,
     retry_at_ms: null,
     input_lease: EMPTY_LEASE,
     layout_lease: EMPTY_LEASE,

@@ -150,7 +150,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
   const generationRef = useRef(0);
   const eventTailRef = useRef(Promise.resolve());
   const appliedSequenceRef = useRef<string | null>(null);
-  const historySnapshotRef = useRef<{ snapshot_id: string; source_gap: boolean } | null>(null);
+  const historySnapshotRef = useRef<{ snapshot_id: string | null; truncated: boolean; received: boolean } | null>(null);
   const pendingShellStateRef = useRef<ShellStateSummary | null>(null);
   const inputLeaseOwnedRef = useRef(false);
   const layoutLeaseOwnedRef = useRef(false);
@@ -167,6 +167,12 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
   const layoutLeasePumpRef = useRef<LayoutLeasePump | null>(null);
   const resizePumpRef = useRef<ResizePump | null>(null);
   const resizeCoordinatorRef = useRef<ResizeCoordinator | null>(null);
+  const cancelPendingHistory = useCallback(() => {
+    // A live-output cursor cannot recover older history whose stage was cancelled.
+    if (stateRef.current.history_loading) rendererRef.current?.invalidateResumeSequence();
+    historySnapshotRef.current = null;
+    rendererRef.current?.cancelHistory?.();
+  }, []);
   if (!connectionQueueRef.current) {
     connectionQueueRef.current = new LatestTaskQueue();
   }
@@ -199,6 +205,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
   const setFailure = useCallback((error: unknown) => {
     const code = errorCode(error);
     if (stateRef.current.phase === "ended") return;
+    cancelPendingHistory();
     rendererRef.current?.invalidateResumeSequence();
     // An unusable actor cannot keep input/layout authority or publish late events.
     generationRef.current += 1;
@@ -216,7 +223,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
       type: "failed", code, message: errorMessage(error),
       resume_from: reconnectSequenceAfterError(code, current.reconnect_sequence),
     }));
-  }, []);
+  }, [cancelPendingHistory]);
 
   const stopResizeWithMessage = useCallback(
     (message: string) => {
@@ -392,8 +399,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
       lifecycleRecoveryStateRef.current =
         interruptedAttachmentState(stateRef.current) ?? INITIAL_STATE;
       clearRecoveryTimer();
-      historySnapshotRef.current = null;
-      rendererRef.current?.cancelHistory?.();
+      cancelPendingHistory();
       generationRef.current += 1;
       openingAbortRef.current?.abort();
       inputLeaseOwnedRef.current = false;
@@ -413,7 +419,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
         void detachAttachment({ attachment_id: attachmentId });
       }
     };
-  }, [abortManualReconnect, clearRecoveryTimer]);
+  }, [abortManualReconnect, cancelPendingHistory, clearRecoveryTimer]);
 
   const publishAppliedSequence = useCallback((sequence: string) => {
     appliedSequenceRef.current = sequence;
@@ -466,7 +472,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
       if (!isCurrent()) {
         return;
       }
-      if (stateRef.current.phase === "ended" && event.event_type !== "attachment_exited") return;
+      if (stateRef.current.phase === "ended" && event.event_type !== "attachment_exited" && event.event_type !== "history_synced") return;
       if (!renderer) {
         throw new Error("The terminal renderer is not available.");
       }
@@ -498,10 +504,10 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
           });
           break;
         case "checkpoint": {
-          const snapshot = event.history_manifest
-            ? { snapshot_id: event.history_manifest.snapshot_id, source_gap: event.history_gap }
-            : null;
+          const truncated = event.history.truncated || event.history_manifest?.truncated === true;
+          const snapshot = { snapshot_id: event.history_manifest?.snapshot_id ?? null, truncated, received: !event.history_manifest };
           historySnapshotRef.current = snapshot;
+          setState((current) => ({ ...current, history_loading: true, history_gap: truncated }));
           await renderer.restoreCheckpoint(
             event.checkpoint.terminal_size,
             event.history.lines,
@@ -521,9 +527,11 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
           if (!view_resize_ref.current && !resizeWithWindowRef.current) resizeCoordinatorRef.current?.setAuthoritative(
             event.checkpoint.terminal_size,
           );
+          const pending_history = event.history_manifest ? null : renderer.pendingHistory?.();
           setState((current) => ({
             ...current,
-            history_gap: event.history_gap || BigInt(event.history_manifest?.first_line ?? "0") > 0n,
+            history_loading: !!event.history_manifest || !!pending_history,
+            history_gap: truncated,
             session: current.session
               ? {
                   ...current.session,
@@ -532,6 +540,14 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
                 }
               : current.session,
           }));
+          if (pending_history) {
+            const finishHistory = (applied: boolean) => {
+              if (snapshot !== historySnapshotRef.current || generation !== generationRef.current ||
+                (!isCurrent() && stateRef.current.phase !== "ended")) return;
+              setState((current) => ({ ...current, history_loading: false, history_gap: truncated || !applied }));
+            };
+            void pending_history.then(finishHistory, () => finishHistory(false));
+          }
           break;
         }
         case "history_synced": {
@@ -539,6 +555,12 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
           if (!snapshot || snapshot.snapshot_id !== event.snapshot_id) break;
           if (event.history.sequence !== event.checkpoint.sequence ||
             !sequenceAtLeast(appliedSequenceRef.current, event.checkpoint.sequence)) break;
+          snapshot.received = true;
+          const historyFailed = () => {
+            if (snapshot !== historySnapshotRef.current || generation !== generationRef.current ||
+              (!isCurrent() && stateRef.current.phase !== "ended")) return;
+            setState((current) => ({ ...current, history_loading: false, history_gap: true }));
+          };
           // Background history never joins the ordered acknowledgement tail.
           // The presenter publishes it only after replay reaches its live head.
           void renderer.syncHistory?.({
@@ -552,14 +574,17 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
           }).then((applied) => {
             if (snapshot !== historySnapshotRef.current || generation !== generationRef.current) return;
             if (applied && (isCurrent() || stateRef.current.phase === "ended")) {
-              setState((current) => ({ ...current, history_gap: snapshot.source_gap || event.history_gap }));
+              setState((current) => ({ ...current, history_loading: false, history_gap: snapshot.truncated || event.history.truncated }));
+            } else if (!applied && stateRef.current.phase === "ended") {
+              historyFailed();
             } else if (!applied && isCurrent()) {
               // A busy terminal can outrun the bounded replay window. Keep
               // its current screen and retry history from a fresh checkpoint.
-              setState((current) => ({ ...current, history_gap: true }));
-              void requestAttachmentCheckpoint({ attachment_id: event.attachment_id }).catch(() => undefined);
+              snapshot.received = false;
+              setState((current) => ({ ...current, history_loading: true }));
+              void requestAttachmentCheckpoint({ attachment_id: event.attachment_id }).catch(historyFailed);
             }
-          }).catch(() => undefined);
+          }).catch(historyFailed);
           break;
         }
         case "output":
@@ -573,8 +598,9 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
           }
           publishAppliedSequence(event.sequence_end);
           break;
-        case "pty_geometry_changed":
-          historySnapshotRef.current = null;
+        case "pty_geometry_changed": {
+          const history_interrupted = stateRef.current.history_loading && historySnapshotRef.current !== null;
+          cancelPendingHistory();
           await renderer.resize(event.terminal_size);
           if (!isCurrent()) {
             return;
@@ -586,11 +612,14 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
           if (!view_resize_ref.current && !resizeWithWindowRef.current) resizeCoordinatorRef.current?.setAuthoritative(event.terminal_size);
           setState((current) => ({
             ...current,
+            history_loading: false,
+            history_gap: current.history_gap || history_interrupted,
             session: current.session
               ? { ...current.session, terminal_size: event.terminal_size, terminal_size_known: true }
               : current.session,
           }));
           break;
+        }
         case "lease_status":
           const expectedLayoutIntent =
             event.lease === "layout" && !event.notification
@@ -686,10 +715,14 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
         case "attachment_exited":
           // A normal exit stops new output; already received history can
           // finish staging and fill the final screen's scrollback.
-          if (stateRef.current.phase !== "ended") {
-            historySnapshotRef.current = null;
-            renderer.cancelHistory?.();
+          if (stateRef.current.phase !== "ended" && event.reason !== "session_ended") {
+            cancelPendingHistory();
             if (event.next_sequence === null) renderer.invalidateResumeSequence();
+          } else if (stateRef.current.history_loading && !historySnapshotRef.current?.received) {
+            // A closed transport cannot deliver the rest of an unreceived
+            // snapshot. A stage already received locally may still finish.
+            cancelPendingHistory();
+            setState((current) => ({ ...current, history_loading: false, history_gap: true }));
           }
           const resumeResize =
             event.reason === "connection_closed" && resizeWithWindowRef.current;
@@ -709,8 +742,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
           }));
           break;
         case "attachment_error":
-          historySnapshotRef.current = null;
-          renderer.cancelHistory?.();
+          cancelPendingHistory();
           renderer.invalidateResumeSequence();
           activeAttachmentRef.current = null;
           channelRef.current = null;
@@ -727,6 +759,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
     },
     [
       acknowledge,
+      cancelPendingHistory,
       loseLease,
       publishAppliedSequence,
       publishShellState,
@@ -898,6 +931,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
             ...result.attached,
             session: mergeSessionObservation(current.session ?? undefined, { ...result.attached.session, terminal_size_known: true }),
           }, resize_with_window: resizeWithWindow, layout_request_pending: acquireAfterAttach,
+          history_loading: requestedResume === null || result.attached.history_gap,
         }));
         if (acquireAfterAttach) layoutLeasePumpRef.current?.schedule({
           attachment_id: result.attached.attachment_id, generation, acquire: true,
@@ -966,8 +1000,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
     ): Promise<void> => {
       const generation = generationRef.current + 1;
       generationRef.current = generation;
-      historySnapshotRef.current = null;
-      rendererRef.current?.cancelHistory?.();
+      cancelPendingHistory();
       openingAbortRef.current?.abort();
       inputLeaseOwnedRef.current = false;
       layoutLeaseOwnedRef.current = false;
@@ -1004,7 +1037,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
       drainDeferredConnectionRef.current();
       return completion;
     },
-    [],
+    [cancelPendingHistory],
   );
 
   const connect = useCallback(
@@ -1036,8 +1069,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
       const attachmentId = activeAttachmentRef.current;
       let transitionGeneration = generationRef.current;
       if (attachmentId) {
-        historySnapshotRef.current = null;
-        rendererRef.current?.cancelHistory?.();
+        cancelPendingHistory();
         generationRef.current += 1;
         transitionGeneration = generationRef.current;
         activeAttachmentRef.current = null;
@@ -1069,7 +1101,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
       );
       return completion.outcome?.generation === generationRef.current ? completion.outcome : null;
     },
-    [connectAt, resetRecovery],
+    [cancelPendingHistory, connectAt, resetRecovery],
   );
 
   const reconnect = useCallback(
@@ -1238,23 +1270,21 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
     }
 
     resetRecovery();
-    historySnapshotRef.current = null;
-    rendererRef.current?.cancelHistory?.();
+    cancelPendingHistory();
     generationRef.current += 1;
     openingAbortRef.current?.abort();
     connectionQueueRef.current?.cancelPending();
     appliedSequenceRef.current = null;
     pendingShellStateRef.current = null;
     setState(INITIAL_STATE);
-  }, [abortManualReconnect, resetRecovery]);
+  }, [abortManualReconnect, cancelPendingHistory, resetRecovery]);
 
   const detach = useCallback(async () => {
     abortManualReconnect();
     resetRecovery();
     const generation = generationRef.current + 1;
     generationRef.current = generation;
-    historySnapshotRef.current = null;
-    rendererRef.current?.cancelHistory?.();
+    cancelPendingHistory();
     openingAbortRef.current?.abort();
     inputLeaseOwnedRef.current = false;
     layoutLeaseOwnedRef.current = false;
@@ -1285,13 +1315,12 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
     appliedSequenceRef.current = null;
     pendingShellStateRef.current = null;
     setState(INITIAL_STATE);
-  }, [abortManualReconnect, resetRecovery]);
+  }, [abortManualReconnect, cancelPendingHistory, resetRecovery]);
 
   const resetAfterDaemonRestart = useCallback(() => {
     abortManualReconnect();
     resetRecovery();
-    historySnapshotRef.current = null;
-    rendererRef.current?.cancelHistory?.();
+    cancelPendingHistory();
     generationRef.current += 1;
     openingAbortRef.current?.abort();
     inputLeaseOwnedRef.current = false;
@@ -1308,7 +1337,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
     channelRef.current = null;
     stateRef.current = INITIAL_STATE;
     setState(INITIAL_STATE);
-  }, [abortManualReconnect, resetRecovery]);
+  }, [abortManualReconnect, cancelPendingHistory, resetRecovery]);
 
   const requestResizeControl = useCallback(async (acquire: boolean) => {
     const attachment_id = activeAttachmentRef.current;

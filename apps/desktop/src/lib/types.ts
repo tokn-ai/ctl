@@ -1114,6 +1114,8 @@ export interface AttachmentViewState {
   shell_state: ShellStateSummary | null;
   applied_sequence: Sequence | null;
   reconnect_sequence: Sequence | null;
+  /** Retained history is being restored; this is not evidence of missing output. */
+  history_loading: boolean;
   history_gap: boolean;
   terminal_size_mismatch: boolean;
   resize_with_window: boolean;

@@ -132,6 +132,7 @@ const attachment = vi.hoisted(() => ({
     shell_state: null,
     applied_sequence: null,
     reconnect_sequence: null,
+    history_loading: false,
     history_gap: false,
     terminal_size_mismatch: false,
     resize_with_window: false,

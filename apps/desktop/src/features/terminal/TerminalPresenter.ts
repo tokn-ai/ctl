@@ -116,6 +116,7 @@ export class TerminalPresenter {
   private replay: ReplayChunk[] = [];
   private replayBytes = 0;
   private stage: HistoryStage | null = null;
+  private inlineHistory: Promise<boolean> | null = null;
 
   constructor(private readonly factory: TerminalAdapterFactory, initialSize: TerminalSize) {
     this.terminalSize = initialSize;
@@ -159,10 +160,15 @@ export class TerminalPresenter {
       // Older daemons and disk previews supply normalized history directly.
       // Their bulk history uses the same off-view staging path.
       if (generation === this.generation && recent.length < historyLines.length && snapshot_id === null) {
-        void this.startHistory({ terminal_size: terminalSize, rows: historyLines.map((text) => ({ text, wrapped: false })), payload,
+        this.inlineHistory = this.startHistory({ terminal_size: terminalSize, rows: historyLines.map((text) => ({ text, wrapped: false })), payload,
           input_prefix: inputPrefix, sequence, snapshot_id: "", scrollback_limit: String(MAX_HISTORY_ROWS) }).catch(() => false);
       }
     });
+  }
+
+  /** The latest inline checkpoint's background result, even if it settled before acknowledgement. */
+  pendingHistory(): Promise<boolean> | null {
+    return this.inlineHistory;
   }
 
   syncHistory(snapshot: HistoryPresentation): Promise<boolean> {
@@ -174,6 +180,7 @@ export class TerminalPresenter {
     this.generation += 1;
     if (this.stage) this.stage.cancelled = true;
     this.stage = null;
+    this.inlineHistory = null;
     this.snapshotId = null;
     this.replay = [];
     this.replayBytes = 0;

@@ -1,11 +1,12 @@
 import type { AttachmentViewState, OpenAttachmentResponse, SessionSummary } from "../../lib/types";
 import { canAutomaticallyRecoverAttachment } from "./attachmentRecovery";
+import { sameSession } from "../targets/targets";
 
 export type ConnectionIntent = "attach" | "reconnect";
 
 export type AttachmentTransition =
   | { type: "begin"; intent: ConnectionIntent; session: SessionSummary; resume_from: string | null; resize_with_window: boolean; resize_control_desired?: boolean }
-  | { type: "attached"; response: OpenAttachmentResponse; resize_with_window: boolean; layout_request_pending?: boolean }
+  | { type: "attached"; response: OpenAttachmentResponse; resize_with_window: boolean; layout_request_pending?: boolean; history_loading?: boolean }
   | { type: "failed"; code: string | null; message: string; resume_from: string | null }
   | { type: "closed"; reason: "connection_closed" | "detached" | "session_ended"; next_sequence: string | null }
   | { type: "ended"; exit_code: number | null }
@@ -30,7 +31,7 @@ export function initialAttachmentState(): AttachmentViewState {
   return {
     phase: "idle", retry_at_ms: null, error_code: null, attachment_id: null, session: null,
     input_lease: EMPTY_LEASE, layout_lease: EMPTY_LEASE, shell_state: null,
-    applied_sequence: null, reconnect_sequence: null, history_gap: false,
+    applied_sequence: null, reconnect_sequence: null, history_loading: false, history_gap: false,
     terminal_size_mismatch: false, resize_with_window: false, resize_control_desired: false, message: null,
   };
 }
@@ -48,6 +49,9 @@ export function transitionAttachment(state: AttachmentViewState, event: Attachme
     case "begin": return {
       ...initialAttachmentState(),
       phase: event.intent === "reconnect" ? "reconnecting" : "connecting",
+      history_loading: true,
+      history_gap: sameSession(state.session, event.session) &&
+        (!state.session?.terminal_id || !event.session.terminal_id || state.session.terminal_id === event.session.terminal_id) && state.history_gap,
       session: event.session,
       applied_sequence: event.resume_from,
       reconnect_sequence: event.resume_from,
@@ -63,7 +67,9 @@ export function transitionAttachment(state: AttachmentViewState, event: Attachme
         attachment_id: response.attachment_id, session: response.session,
         input_lease: response.input_lease, layout_lease: response.layout_lease,
         terminal_size_mismatch: response.terminal_size_mismatch,
-        history_gap: state.history_gap || response.history_gap,
+        // The response gap can describe raw replay replaced by a checkpoint.
+        // Checkpoint/history events decide whether readable history is missing.
+        history_loading: event.history_loading ?? false,
         reconnect_sequence: null, resize_with_window: resizing,
         message: state.resize_control_desired && !response.layout_lease.owned_by_client && !event.layout_request_pending
           ? resizeControlNotice(response.layout_lease.held)
@@ -78,7 +84,7 @@ export function transitionAttachment(state: AttachmentViewState, event: Attachme
     };
     case "failed":
       if (state.phase === "ended" || state.phase === "idle") return state;
-      return { ...offline, phase: "error", error_code: event.code, message: event.message, reconnect_sequence: event.resume_from };
+      return { ...offline, phase: "error", error_code: event.code, message: event.message, reconnect_sequence: event.resume_from, history_loading: false };
     case "closed":
       if (state.phase === "ended") return offline;
       if (state.phase !== "attached") return state;
@@ -86,6 +92,7 @@ export function transitionAttachment(state: AttachmentViewState, event: Attachme
         ...offline,
         phase: event.reason === "session_ended" ? "ended" : event.reason === "detached" ? "idle" : "disconnected",
         error_code: null, reconnect_sequence: event.next_sequence,
+        history_loading: event.reason === "session_ended" && state.history_loading,
         resize_with_window: event.reason === "connection_closed" && state.resize_with_window,
         resize_control_desired: event.reason === "connection_closed" && state.resize_control_desired,
         message: event.reason === "connection_closed" ? "Connection interrupted." : event.reason === "session_ended" ? "Session ended." : null,
@@ -98,6 +105,7 @@ export function transitionAttachment(state: AttachmentViewState, event: Attachme
       if (!state.session || !["disconnected", "error", "retry_wait", "reconnecting"].includes(state.phase)) return state;
       return {
         ...offline, phase: "error", error_code: "automatic_reconnect_timeout",
+        history_loading: false,
         message: "Automatic retries stopped. The remote session's current state is unknown. Retry to reconnect.",
       };
   }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { SessionSummary } from "../../lib/types";
+import type { OpenAttachmentResponse, SessionSummary } from "../../lib/types";
 import { initialAttachmentState, transitionAttachment } from "./attachmentState";
 
 const session: SessionSummary = {
@@ -10,8 +10,56 @@ const opened = {
   ...initialAttachmentState(), phase: "attached" as const, session, attachment_id: "actor",
   input_lease: { held: true, owned_by_client: true }, layout_lease: { held: true, owned_by_client: true },
 };
+const response: OpenAttachmentResponse = {
+  attachment_id: "actor", session, replay_from: "0", history_gap: true, terminal_size_mismatch: false,
+  input_lease: { held: true, owned_by_client: true }, layout_lease: { held: false, owned_by_client: false },
+  shell_state: { shell_type: "unknown", cwd: null, running_command: null, prompt_phase: "unknown", tui_hint: "unknown", revision: "0", observed_sequence: "0" },
+};
 
 describe("attachment lifecycle", () => {
+  it("begins history loading without claiming a gap", () => {
+    expect(initialAttachmentState()).toMatchObject({ history_loading: false, history_gap: false });
+    const beginning = transitionAttachment(initialAttachmentState(), { type: "begin", intent: "attach", session,
+      resume_from: null, resize_with_window: false });
+    expect(beginning).toMatchObject({ history_loading: true, history_gap: false });
+  });
+
+  it.each([undefined, false, true])("keeps response raw replay gaps separate from pending history (%s)", (history_loading) => {
+    const beginning = transitionAttachment(initialAttachmentState(), { type: "begin", intent: "reconnect", session,
+      resume_from: "0", resize_with_window: false });
+    const attached = transitionAttachment(beginning, { type: "attached", response, resize_with_window: false, history_loading });
+    expect(attached).toMatchObject({ phase: "attached", history_loading: history_loading ?? false, history_gap: false });
+  });
+
+  it("preserves known truncation when the same terminal reconnects without a replacing checkpoint", () => {
+    const retained = { ...opened, session: { ...session, terminal_id: "pane" }, history_gap: true };
+    const beginning = transitionAttachment(retained, { type: "begin", intent: "reconnect", session: retained.session,
+      resume_from: "10", resize_with_window: false });
+    expect(beginning).toMatchObject({ history_loading: true, history_gap: true });
+    const attached = transitionAttachment(beginning, { type: "attached", response: { ...response, session: retained.session, history_gap: false },
+      resize_with_window: false, history_loading: false });
+    expect(attached).toMatchObject({ history_loading: false, history_gap: true });
+  });
+
+  it("recognizes normalized root terminal identity when preserving known truncation", () => {
+    const beginning = transitionAttachment({ ...opened, history_gap: true }, { type: "begin", intent: "reconnect",
+      session: { ...session, terminal_id: session.session_id }, resume_from: "10", resize_with_window: false });
+    expect(beginning.history_gap).toBe(true);
+  });
+
+  it.each(["host", "session", "terminal"])("does not copy known truncation into a different %s", (change) => {
+    const retained = { ...opened, session: { ...session, terminal_id: "pane" }, history_gap: true };
+    const selected: SessionSummary = {
+      ...retained.session,
+      ...(change === "host" ? { target: { kind: "ssh" as const, destination: "other" } } : {}),
+      ...(change === "session" ? { session_id: "other" } : {}),
+      ...(change === "terminal" ? { terminal_id: "other" } : {}),
+    };
+    const beginning = transitionAttachment(retained, { type: "begin", intent: "attach", session: selected,
+      resume_from: null, resize_with_window: false });
+    expect(beginning.history_gap).toBe(false);
+  });
+
   it.each([false, true])("reports unavailable resize control accurately (held=%s)", (held) => {
     const connecting = transitionAttachment(initialAttachmentState(), { type: "begin", intent: "attach", session, resume_from: null,
       resize_with_window: false, resize_control_desired: true });
@@ -28,6 +76,7 @@ describe("attachment lifecycle", () => {
       const next = transitionAttachment(initialAttachmentState(), { type: "begin", intent, session, resume_from, resize_with_window: false });
       expect(next.phase).toBe(intent === "attach" ? "connecting" : "reconnecting");
       expect(next.reconnect_sequence).toBe(resume_from);
+      expect(next.history_loading).toBe(true);
     }
   });
 

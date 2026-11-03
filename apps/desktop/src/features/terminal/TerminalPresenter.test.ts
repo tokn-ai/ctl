@@ -317,9 +317,24 @@ describe("TerminalPresenter", () => {
     const lines = await presenter.copyLines();
     expect(lines).toHaveLength(66);
     expect(lines[64]).toBe("live");
+    const pending = presenter.pendingHistory();
+    expect(pending).not.toBeNull();
     await vi.waitFor(() => expect(finish_stage).toBeTypeOf("function"));
-    presenter.dispose();
+    await presenter.restoreCheckpoint(terminalSize(20, 2), [], new TextEncoder().encode("replacement"), new Uint8Array(), "1");
+    expect(presenter.pendingHistory()).toBeNull();
     finish_stage();
+    expect(await pending).toBe(false);
+    expect(await presenter.copyLines()).toEqual(["replacement", ""]);
+    presenter.dispose();
+  });
+
+  it("reports when an invalid older inline row prevents full history restoration", async () => {
+    const presenter = new TerminalPresenter(headlessFactory([]), terminalSize(20, 2));
+    const history = ["invalid\u001b[2J", ...Array.from({ length: 64 }, (_, index) => `recent ${index}`)];
+    await presenter.restoreCheckpoint(terminalSize(20, 2), history, new TextEncoder().encode("live"), new Uint8Array());
+    expect(await presenter.pendingHistory()).toBe(false);
+    expect((await presenter.copyLines())[0]).toBe("recent 0");
+    presenter.dispose();
   });
 
   it("preserves the checkpoint decoder prefix when newer bytes are replayed into history", async () => {

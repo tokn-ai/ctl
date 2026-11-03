@@ -159,11 +159,11 @@ export function createStatusGroups(state: AttachmentViewState): StatusGroups {
   if (connection) {
     alerts.push(connection);
   }
-  if (state.history_gap) {
+  if (state.history_gap && !state.history_loading) {
     alerts.push(item(
       "history",
       "HISTORY GAP",
-      "Some earlier output is unavailable in this view. Retained history may still be loading.",
+      "Some earlier output is unavailable in this view.",
       { tone: "warning" },
     ));
   }

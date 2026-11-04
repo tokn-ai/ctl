@@ -344,6 +344,13 @@ for a separate `confirm`; it needs no replacement binary. Stop negotiates only
 restart, without changing `ctld_lifecycle`, `ctmux_control` or `task_control`.
 Product release versions are unchanged.
 
+Product release `v0.1.2` freezes `ctmux` `1.2.22` (build 22) and
+`ctl_maintenance` `1.2.4` (build 4), alongside the unchanged named contracts in
+the [v0.1.2 protocol map](releases/v0.1.2.md#protocol-contracts). Release
+preparation introduces no wire change and increments no protocol version or
+internal build. Every earlier published contract in the same major remains
+supported; the release notes record their exact supported sets.
+
 Every PR description must state its protocol changes, or **None** when there
 are no changes. Include the previous and new contracts and the compatibility
 impact. Keep PR titles brief; put protocol details in the description.

@@ -1,4 +1,5 @@
 use super::*;
+#[cfg(unix)]
 use ctl_ipc::PortForwardProtocol;
 use std::time::Duration;
 use tokio::time::timeout;
@@ -7,6 +8,7 @@ fn target() -> SshTarget {
   serde_json::from_value(serde_json::json!({"destination": "fixture.invalid"})).unwrap()
 }
 
+#[cfg(unix)]
 fn forward(port: u16) -> LocalPortForward {
   LocalPortForward {
     protocol: PortForwardProtocol::Udp,

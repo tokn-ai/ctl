@@ -17,7 +17,7 @@ path = "src/main.rs"
 
 [dependencies]
 time.workspace = true
-ctl-core = { workspace = true, features = ["observability"] }
+ctl-core = { workspace = true, features = ["observability", "presence"] }
 clap.workspace = true
 cliclack = "0.5.6"
 comfy-table.workspace = true

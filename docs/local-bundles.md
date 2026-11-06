@@ -1,18 +1,21 @@
 # Build a local Linux bundle
 
 Run `pnpm bundles:build` from the checkout to build `ctl-agent`, `ctmuxd`,
-`ctl-taskd`, and `ctld` for `x86_64-unknown-linux-musl`. The command uses the
+`ctl-taskd`, `ctld`, `ctl`, and `ctmux` for `x86_64-unknown-linux-musl`. The command uses the
 current working tree, including uncommitted changes and commits that have not
 been pushed. It does not publish anything or change a saved upload selection.
 
 Start Docker or Podman with Linux containers first. Set `CTL_CONTAINER_ENGINE`
-to an executable path to choose a particular engine. When Zig and
-`cargo-zigbuild` are installed, the command cross-compiles with the host's Rust
+to an executable path to choose a particular engine. When Zig, `cargo-zigbuild`,
+Make, and Perl are installed, the command cross-compiles with the host's Rust
 toolchain, installing the Linux musl Rust target on first use. It then runs the
 resulting binaries in a small Linux container to package their metadata. This
 keeps compilation native on ARM Macs and other development hosts.
 
-Without Zig or `cargo-zigbuild`, it builds and packages inside a Linux amd64
+The musl build compiles OpenSSL from source and links it statically into `ctl`.
+At runtime, HTTPS uses the remote system's installed CA certificates.
+
+When the native cross-compilation tools are unavailable, it builds and packages inside a Linux amd64
 container with Rust 1.99, Node 24, and musl. ARM hosts need their engine's amd64
 execution support for either path; emulating the complete compiler is slower.
 The first build downloads the necessary images and dependencies. Native cross
@@ -28,6 +31,8 @@ target/development-bundles/x86_64-unknown-linux-musl/
   ctmuxd
   ctl-taskd
   ctld
+  ctl
+  ctmux
 ```
 
 Use that directory as **Provided build files** in the component update dialog,

@@ -361,7 +361,7 @@ test("partial validation rejects incomplete, corrupt, mixed, or unrecognized pre
   });
 });
 
-test("validates schema2 remote metadata against archive contents before publishing", async (t) => {
+test("validates schema3 remote metadata against archive contents before publishing", async (t) => {
   const directory = await fixture(t);
   const components = componentMapFixture(identity);
   const targets: Record<string, unknown> = {};
@@ -370,7 +370,7 @@ test("validates schema2 remote metadata against archive contents before publishi
     const asset = await writeAsset(directory, archive, tarFixture(archiveEntriesFixture(target, identity, components)));
     targets[target] = { archive, sha256: asset.sha256, components };
   }
-  const manifest = { schema_version: 2, ...identity, targets };
+  const manifest = { schema_version: 3, ...identity, targets };
   await writeFile(join(directory, "bundle-set.json"), JSON.stringify(manifest));
   const verified = await validateReleaseBundle(identity, directory);
   assert.ok(verified.asset_names.includes("bundle-set.json"));

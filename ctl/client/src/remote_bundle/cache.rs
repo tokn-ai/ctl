@@ -150,7 +150,7 @@ impl BundleCacheEntry {
       ));
     }
     manifest.verify_archive_bytes(&self.target, &bundle.archive)?;
-    if manifest.schema_version == 2 {
+    if manifest.schema_version >= 2 {
       super::compatibility::verify_archive(&manifest, &self.target, &bundle.archive)?;
     }
     Ok(())
@@ -174,9 +174,9 @@ impl BundleCacheEntry {
   }
 }
 
-/// Selects an exact clean-client entry first, then compatible schema-2 entries
+/// Selects an exact clean-client entry first, then compatible schema-2/3 entries
 /// in stable revision order. No directory is created and no live owner changes.
-/// Dirty or unidentified clients may reuse independently verified schema-2 data.
+/// Dirty or unidentified clients may reuse independently verified schema-2/3 data.
 ///
 /// # Errors
 /// Rejects unsafe cache paths or inaccessible files. Damaged entries are misses.
@@ -263,7 +263,7 @@ fn read_compatible_entry(
       "cached bundle source does not match its immutable revision path".into(),
     ));
   }
-  if manifest.schema_version != 2 || !manifest.is_compatible(target)? {
+  if manifest.schema_version < 2 || !manifest.is_compatible(target)? {
     return Ok(None);
   }
   let archive = read_private_file(

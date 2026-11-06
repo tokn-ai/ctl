@@ -103,7 +103,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends musl-tools
+          sudo apt-get install --yes --no-install-recommends make musl-tools perl
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@1.99.0
@@ -115,10 +115,14 @@ jobs:
         with:
           key: agent-${{ matrix.target }}
 
+      - name: Check target-specific TLS features
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/ci/check-agent-tls.mts
+
       - name: Build remote components
         run: >-
           cargo build --locked --release --target ${{ matrix.target }}
-          -p ctl-agent -p ctmuxd -p ctl-taskd -p ctld
+          -p ctl-agent -p ctmuxd -p ctl-taskd -p ctld -p ctl-cli -p ctmux-cli
 
       - name: Package remote components
         shell: bash

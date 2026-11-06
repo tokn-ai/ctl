@@ -12,6 +12,8 @@ use std::time::Duration;
 
 const MAX_BUNDLE_BYTES: usize = 128 * 1024 * 1024;
 const MAX_BUNDLE_SET_BYTES: usize = 64 * 1024;
+// Reserve space for tar headers and padding beyond the managed payload limit.
+const MAX_TAR_BYTES: u64 = ctl_core::bundle_layout::MAX_TOTAL_BYTES as u64 + 1024 * 1024;
 const BUNDLE_SET_FILE: &str = "bundle-set.json";
 const RELEASE_ROOT: &str = "https://github.com/tokn-ai/ctl/releases/download";
 const SUPPORTED_TARGETS: [&str; 4] = [
@@ -21,6 +23,7 @@ const SUPPORTED_TARGETS: [&str; 4] = [
   "aarch64-apple-darwin",
 ];
 
+pub(crate) mod archive;
 mod cache;
 pub(crate) mod compatibility;
 pub mod published;
@@ -130,7 +133,7 @@ impl BundleSet {
     }
     let manifest: Self = serde_json::from_slice(bytes)
       .map_err(|_| Error::Invalid("invalid remote bundle-set JSON".into()))?;
-    if !matches!(manifest.schema_version, 1 | 2) {
+    if ctl_core::bundle_layout::Layout::public(manifest.schema_version).is_none() {
       return Err(Error::Invalid(
         "unsupported remote bundle-set schema version".into(),
       ));
@@ -206,7 +209,7 @@ impl BundleSet {
   /// Schema-1 bundles have no advertisements and cannot be reused across builds.
   ///
   /// # Errors
-  /// Rejects unsupported targets or invalid schema-2 component advertisements.
+  /// Rejects unsupported targets or invalid component advertisements.
   pub fn is_compatible(&self, target: &str) -> Result<bool, Error> {
     let entry = self.target(target)?;
     Ok(
@@ -215,6 +218,11 @@ impl BundleSet {
         .as_ref()
         .is_some_and(compatibility::compatible),
     )
+  }
+
+  pub(crate) fn layout(&self) -> ctl_core::bundle_layout::Layout {
+    ctl_core::bundle_layout::Layout::public(self.schema_version)
+      .expect("validated bundle-set schema")
   }
 
   pub(crate) fn target(&self, target: &str) -> Result<&BundleTarget, Error> {
@@ -260,7 +268,7 @@ impl BundleSet {
     manifest: Vec<u8>,
   ) -> Result<VerifiedBundle, Error> {
     self.verify_archive_bytes(target, &archive)?;
-    if self.schema_version == 2 {
+    if self.schema_version >= 2 {
       compatibility::verify_archive(self, target, &archive)?;
     }
     let entry = self.target(target)?;
@@ -331,7 +339,7 @@ pub fn read_verified_bundle(
   Ok(None)
 }
 
-/// Reads valid schema-2 bundles compatible with this client, independent of release.
+/// Reads valid schema-2/3 bundles compatible with this client, independent of release.
 /// Missing or valid incompatible candidates are skipped; malformed present inputs fail.
 ///
 /// # Errors
@@ -343,7 +351,7 @@ pub fn read_compatible_bundle(
   read_reusable(directories, target, None)
 }
 
-/// Reads compatible schema-2 bundles or an exact clean-client schema-1 bundle.
+/// Reads compatible schema-2/3 bundles or an exact clean-client schema-1 bundle.
 ///
 /// # Errors
 /// Rejects unsafe, malformed, or checksum-invalid candidate bundles.

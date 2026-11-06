@@ -54,8 +54,8 @@ successful retry.
 
 The public component source is
 [`https://tokn-ai.dev/ctl/bundles/`](https://tokn-ai.dev/ctl/bundles/).
-It contains the actual archives and checksum sidecars, alongside their existing
-schema 2 bundle sets. A catalog alone is insufficient for installation.
+It contains each target's archive, SHA-256 sidecar and bundle-set metadata.
+New publications use schema 3. Previously published schema-2 sets remain usable.
 
 Applications discover channels through:
 
@@ -148,13 +148,24 @@ They cover complete-site restoration, both channels, stale runs, prereleases,
 retention, corruption, failed uploads/deployments, and append-only desktop assets.
 Running these tests does not deploy Pages, change settings, or publish a release.
 
-Remote bundle schema 2 captures `--component-info` from each packaged executable,
-including explicit published protocol support and companion client contracts.
-The archived manifest binds those advertisements to binary checksums; assembly
-copies them into each target's bundle-set entry after verifying the archive and
-its identity. CLI cache reuse validates both documents and can select a compatible
-bundle across product releases. Signing and version selection for `ctld.app`
-remain separate from this remote bundle schema.
+Remote bundle schema 3 ships six executables for each target: `ctl-agent`,
+`ctmuxd`, `ctl-taskd`, `ctld`, `ctl`, and `ctmux`. Packaging runs
+`--component-info` on each binary. The archive manifest binds its build identity
+and supported protocol versions to the binary's checksum. Assembly verifies the
+archive before copying the advertisements into the bundle-set document. Cache
+reuse checks both documents and the contracts shared by the clients and services.
+
+Schema 2 remains readable with its original four service binaries and published
+protocol advertisements. Schema 1 retains its original checksum and exact-source
+revision requirements. The managed store uses a separate `bundle.json` schema.
+Managed schema 2 identifies a complete six-executable build, and managed schema 1
+continues to identify its four-executable predecessors.
+
+A full remote installation selects the build at `~/.tokn/ctl/current`. In a new
+managed remote shell, run `ctl who` for live ctl service connections or `ctmux ls`
+for sessions. An ordinary SSH login can invoke `~/.tokn/ctl/current/ctl` and
+`~/.tokn/ctl/current/ctmux` directly or add that directory to its own `PATH`.
+The installer leaves login shell configuration to the account owner.
 
 Component metadata probes execute the packaged bytes, including Intel macOS
 executables through Rosetta on ARM runners. The bundle workflow sets

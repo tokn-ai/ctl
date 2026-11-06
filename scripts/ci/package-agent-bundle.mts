@@ -4,7 +4,7 @@ import { copyFile, lstat, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
-import { agentComponents, agentTargets, archiveName, inspectAgentArchive, parseAgentComponents, readAgentFile, validateAgentIdentity,
+import { addAgentPayloadBytes, agentComponents, agentTargets, archiveName, inspectAgentArchive, parseAgentComponents, readAgentFile, validateAgentIdentity,
   type AgentBundleIdentity, type AgentBundleManifest, type AgentComponentMap } from "../shared/agent-bundle.mts";
 import { maxComponentMetadata } from "../shared/protocol-contract.mts";
 import { probeComponent } from "../shared/component-probe.mts";
@@ -43,6 +43,7 @@ export async function packageAgentBundle(options: AgentBundleOptions, run: Agent
     }
     const components = {} as AgentComponentMap;
     const files = {} as AgentBundleManifest["files"];
+    let payloadBytes = 0;
     for (const name of agentComponents) {
       const binary = join(staging, name);
       // Execute the packaged bytes on their native runner (or macOS Rosetta).
@@ -50,13 +51,17 @@ export async function packageAgentBundle(options: AgentBundleOptions, run: Agent
       const { stdout } = await run(binary, ["--component-info"]);
       if (Buffer.byteLength(stdout) > maxComponentMetadata) throw new Error(`${name} reported oversized component metadata`);
       components[name] = JSON.parse(stdout);
-      files[name] = createHash("sha256").update(await readAgentFile(binary, 128 * 1024 * 1024)).digest("hex");
+      const bytes = await readAgentFile(binary, 128 * 1024 * 1024);
+      payloadBytes = addAgentPayloadBytes(payloadBytes, bytes.length);
+      files[name] = createHash("sha256").update(bytes).digest("hex");
     }
     const { app_version, bundle_id, git_revision, target } = options;
     const identity = { app_version, bundle_id, git_revision };
-    const manifest: AgentBundleManifest = { schema_version: 2, ...identity, target_triple: target, files,
+    const manifest: AgentBundleManifest = { schema_version: 3, ...identity, target_triple: target, files,
       components: parseAgentComponents(components, identity) };
-    await writeFile(join(staging, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
+    const manifestBytes = Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`);
+    addAgentPayloadBytes(payloadBytes, manifestBytes.length);
+    await writeFile(join(staging, "manifest.json"), manifestBytes);
     const archive = archiveName(identity, target);
     const archivePath = join(staging, archive);
     await run("tar", ["--format=ustar", "-czf", archivePath, "-C", staging, ...agentComponents, "manifest.json"]);

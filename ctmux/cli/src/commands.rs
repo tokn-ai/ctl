@@ -1,4 +1,5 @@
 use super::{Command, ShellCommand, shell};
+use ctl_core::presence::display_label;
 use ctmux_client::session::{CreateSessionRequest, SessionClient, SessionId};
 use ctmux_client::view::{SplitTerminalRequest, TerminalId, ViewClient};
 use ctmux_client::{
@@ -233,12 +234,11 @@ where
       Ok(())
     }
     Command::View { session } => {
-      print_view(
-        &view_client(connector)
-          .await?
-          .get(SessionId(session))
-          .await?,
-      );
+      let view = view_client(connector)
+        .await?
+        .get(SessionId(session))
+        .await?;
+      print_view(&view);
       Ok(())
     }
     Command::Split {
@@ -290,7 +290,8 @@ where
         .await?;
       Ok(())
     }
-    Command::List => list_sessions(connector).await,
+    Command::List { unused, json } => list_sessions(connector, unused, json).await,
+    Command::Clients { session, json } => list_clients(connector, session.as_deref(), json).await,
     Command::Archives => show_archives(None),
     Command::Archive { session_id } => show_archives(Some(&session_id)),
     Command::State { session } => show_shell_state(connector, &session).await,
@@ -426,18 +427,95 @@ fn show_archives(id: Option<&str>) -> Result<(), CommandError> {
   Ok(())
 }
 
-async fn list_sessions<C: Connector>(connector: &C) -> Result<(), CommandError> {
+async fn session_usage<C: Connector>(
+  connector: &C,
+) -> Result<Vec<ctmux_proto::SessionUsage>, CommandError> {
   let stream = connector.connect().await.map_err(connection_error)?;
-  let sessions = SessionClient::new(stream, client_identity(connector))
-    .list()
-    .await?;
+  Ok(
+    SessionClient::new(stream, client_identity(connector))
+      .list_with_clients()
+      .await?,
+  )
+}
+
+async fn list_sessions<C: Connector>(
+  connector: &C,
+  unused: bool,
+  json: bool,
+) -> Result<(), CommandError> {
+  let mut sessions = session_usage(connector).await?;
+  if unused {
+    if sessions.iter().any(|row| row.clients.is_none()) {
+      return Err(CommandError::UnknownPresence);
+    }
+    sessions.retain(|row| row.unused() == Some(true));
+  }
+  if json {
+    println!("{}", serde_json::to_string(&sessions)?);
+    return Ok(());
+  }
+  if sessions.is_empty() {
+    println!(
+      "{}",
+      if unused {
+        "no unused sessions"
+      } else {
+        "no sessions"
+      }
+    );
+    return Ok(());
+  }
+  println!("NAME\tID\tSTATUS\tSIZE\tNEXT_SEQUENCE\tVIEWERS");
+  for session in &sessions {
+    print_session(session);
+  }
+  Ok(())
+}
+
+async fn list_clients<C: Connector>(
+  connector: &C,
+  selector: Option<&str>,
+  json: bool,
+) -> Result<(), CommandError> {
+  let mut sessions = session_usage(connector).await?;
+  if let Some(selector) = selector {
+    // Match the daemon's root resolution: prefer an exact ID to a session name.
+    let session = sessions
+      .iter()
+      .position(|row| row.session.session_id == selector)
+      .or_else(|| sessions.iter().position(|row| row.session.name == selector))
+      .ok_or_else(|| CommandError::SessionNotFound(display_label(selector)))?;
+    sessions = vec![sessions.swap_remove(session)];
+  }
+  if json {
+    println!("{}", serde_json::to_string(&sessions)?);
+    return Ok(());
+  }
   if sessions.is_empty() {
     println!("no sessions");
     return Ok(());
   }
-  println!("NAME\tID\tSTATUS\tSIZE\tNEXT_SEQUENCE");
-  for session in &sessions {
-    print_session(session);
+  println!("SESSION\tCLIENT\tVERSION\tDEVICE\tINSTANCE\tCONNECTED\tRECONNECTING");
+  for row in sessions {
+    let name = display_label(&row.session.name);
+    match row.clients {
+      None => println!("{name}\tunknown (older daemon)"),
+      Some(clients) if clients.is_empty() => println!("{name}\tunused"),
+      Some(clients) => {
+        for client in clients {
+          let identity = &client.identity;
+          println!(
+            "{name}\t{}\t{}\t{}\t{}\t{}\t{}",
+            display_label(&identity.client_name),
+            display_label(&identity.client_version),
+            display_label(identity.device_name.as_deref().unwrap_or("—")),
+            display_label(&identity.instance_id),
+            client.connected_attachments,
+            client.reconnecting_attachments
+          );
+        }
+      }
+    }
   }
   Ok(())
 }
@@ -665,15 +743,40 @@ fn client_identity<C: Connector>(connector: &C) -> ClientIdentity {
   }
 }
 
-fn print_session(session: &SessionInfo) {
+fn print_session(row: &ctmux_proto::SessionUsage) {
+  let session = &row.session;
+  let viewers = row.clients.as_ref().map_or_else(
+    || "unknown (older daemon)".into(),
+    |clients| {
+      let count = clients
+        .iter()
+        .filter(|client| client.connected_attachments > 0)
+        .count();
+      let summary = match count {
+        0 => "unused".into(),
+        1 => "1 client".into(),
+        _ => format!("{count} clients"),
+      };
+      let reconnecting = clients
+        .iter()
+        .filter(|client| client.reconnecting_attachments > 0)
+        .count();
+      if reconnecting > 0 {
+        format!("{summary}, {reconnecting} reconnecting")
+      } else {
+        summary
+      }
+    },
+  );
   println!(
-    "{}\t{}\t{:?}\t{}x{}\t{}",
-    session.name,
-    session.session_id,
+    "{}\t{}\t{:?}\t{}x{}\t{}\t{}",
+    display_label(&session.name),
+    display_label(&session.session_id),
     session.status,
     session.terminal_size.columns,
     session.terminal_size.rows,
-    session.next_sequence
+    session.next_sequence,
+    viewers
   );
 }
 
@@ -740,6 +843,12 @@ fn connection_error(error: impl Error + Send + Sync + 'static) -> CommandError {
 
 #[derive(Debug, Error)]
 pub enum CommandError {
+  #[error("this daemon does not report client presence; --unused requires ctmux protocol 1.3.23")]
+  UnknownPresence,
+  #[error("session '{0}' was not found")]
+  SessionNotFound(String),
+  #[error(transparent)]
+  Json(#[from] serde_json::Error),
   #[error("terminal UI failed: {0}")]
   Tui(#[source] Box<dyn Error + Send + Sync>),
   #[error("local archive failed: {0}")]

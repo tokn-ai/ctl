@@ -17,9 +17,10 @@ export async function assembleAgentBundleSet(identity: AgentBundleIdentity, inpu
     const sidecar = (await readAgentFile(`${path}.sha256`, 256)).toString("utf8").trim().split(/\s+/u);
     if (sidecar.length !== 2 || sidecar[0].toLowerCase() !== sha256 || sidecar[1] !== archive) throw new Error(`checksum mismatch or invalid sidecar for ${archive}`);
     const manifest = await inspectAgentArchive(bytes, identity, target);
+    if (manifest.schema_version !== 3) throw new Error(`New bundle sets require schema-3 archives: ${archive}`);
     targets[target] = { archive, sha256, components: manifest.components };
   }
-  const manifest: AgentBundleSet = { schema_version: 2, ...identity, targets };
+  const manifest: AgentBundleSet = { ...identity, schema_version: 3, targets };
   const manifestBytes = Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`);
   parseAgentBundleSet(manifestBytes, identity);
   if (manifestBytes.length > maxAgentManifestBytes) throw new Error("agent bundle set exceeds its size limit");

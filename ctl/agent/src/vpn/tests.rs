@@ -123,6 +123,7 @@ async fn select_contract(writer: &mut (impl AsyncWrite + Unpin)) {
     writer,
     &ctl_ipc::remote_vpn::ProtocolSelection {
       protocol_version: ctl_ipc::remote_vpn::PROTOCOL_VERSION,
+      client_identity: None,
     },
   )
   .await
@@ -516,6 +517,7 @@ async fn list_on_absent_owner_never_starts_the_companion_and_full_broker_request
       &mut input,
       &ctl_ipc::remote_vpn::ProtocolSelection {
         protocol_version: ctl_ipc::remote_vpn::CONTRACT_V1_0_1,
+        client_identity: None,
       },
     )
     .await

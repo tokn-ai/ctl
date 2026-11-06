@@ -12,7 +12,7 @@ keywords = ["ctmux", "terminal", "client"]
 publish = ["crates-io"]
 
 [dependencies]
-ctl-core.workspace = true
+ctl-core = { workspace = true, features = ["presence"] }
 avt.workspace = true
 crossterm.workspace = true
 serde.workspace = true

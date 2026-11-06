@@ -74,7 +74,7 @@ fi
 printf 'ctl-install-progress-v1 receiving %s\n' "$received"
 printf 'ctl-install-progress-v1 extracting\n'
 tar -xzf "$archive" -C "$payload"
-for binary in ctl-agent ctmuxd ctl-taskd ctld; do
+for binary in __COMPONENTS__; do
   printf 'ctl-install-progress-v1 checking %s\n' "$binary"
   test -f "$payload/$binary"
   test ! -L "$payload/$binary"
@@ -92,7 +92,7 @@ if [ -e "$destination" ] || [ -L "$destination" ]; then
   if [ ! -d "$destination" ] || [ -L "$destination" ]; then
     reject_existing_bundle 'installation type'
   fi
-  for binary in ctl-agent ctmuxd ctl-taskd ctld; do
+  for binary in __COMPONENTS__; do
     if [ ! -f "$destination/$binary" ] || [ -L "$destination/$binary" ] || \
       [ ! -x "$destination/$binary" ] || ! cmp -s "$payload/$binary" "$destination/$binary"; then
       reject_existing_bundle "$binary"
@@ -115,10 +115,9 @@ if [ -e "$destination" ] || [ -L "$destination" ]; then
 else
   mv "$payload" "$destination"
 fi
-test -x "$destination/ctl-agent"
-test -x "$destination/ctmuxd"
-test -x "$destination/ctl-taskd"
-test -x "$destination/ctld"
+for binary in __COMPONENTS__; do
+  test -x "$destination/$binary"
+done
 printf 'ctl-install-progress-v1 activating\n'
 if [ "$managed" = yes ]; then
   ln -s "components/bundles/$target/$store_id" "$link"

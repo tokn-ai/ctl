@@ -1,5 +1,81 @@
 use super::*;
 
+#[tokio::test]
+async fn presence_selection_carries_bounded_client_metadata_and_preserves_request_bytes() {
+  let identity = ctl_core::presence::ClientIdentity {
+    instance_id: "fixture-vpn-client".into(),
+    device_name: Some("Fixture device".into()),
+    client_name: "ctl".into(),
+    client_version: "0.1.2".into(),
+  };
+  let mut input = Vec::new();
+  crate::write_frame(
+    &mut input,
+    &ProtocolSelection {
+      protocol_version: CONTRACT_V1_1_2,
+      client_identity: Some(identity.clone()),
+    },
+  )
+  .await
+  .unwrap();
+  input.extend_from_slice(&[0, 255, 1, 2]);
+  let mut reader = input.as_slice();
+  let selection = accept_contract_with_client(&mut reader, &mut Vec::new())
+    .await
+    .unwrap();
+  assert_eq!(selection.client_identity, Some(identity.clone()));
+  assert_eq!(reader, &[0, 255, 1, 2]);
+  for (version, mut client) in [
+    (CONTRACT_V1_0_1, identity.clone()),
+    (CONTRACT_V1_1_2, identity),
+  ] {
+    if version == CONTRACT_V1_1_2 {
+      client.device_name = Some("bad\nlabel".into());
+    }
+    let mut input = Vec::new();
+    crate::write_frame(
+      &mut input,
+      &ProtocolSelection {
+        protocol_version: version,
+        client_identity: Some(client),
+      },
+    )
+    .await
+    .unwrap();
+    assert!(
+      accept_contract_with_client(&mut input.as_slice(), &mut Vec::new())
+        .await
+        .is_err()
+    );
+  }
+}
+
+#[tokio::test]
+async fn legacy_presence_selection_omits_the_new_field_exactly() {
+  let mut input = Vec::new();
+  crate::write_frame(
+    &mut input,
+    &ProtocolOffer::new(1, CONTRACT_V1_0_1, &[CONTRACT_V1_0_1]),
+  )
+  .await
+  .unwrap();
+  let mut output = Vec::new();
+  assert_eq!(
+    negotiate_contract(&mut input.as_slice(), &mut output)
+      .await
+      .unwrap(),
+    CONTRACT_V1_0_1
+  );
+  let mut expected = Vec::new();
+  crate::write_frame(
+    &mut expected,
+    &serde_json::json!({"protocol_version": CONTRACT_V1_0_1}),
+  )
+  .await
+  .unwrap();
+  assert_eq!(output, expected);
+}
+
 #[test]
 fn recovery_retries_transport_interruptions_and_known_timeouts_only() {
   for error in [
@@ -324,7 +400,7 @@ async fn preface_discards_startup_noise_and_preserves_identity_and_stream_bytes(
     negotiate_contract(&mut reader, &mut selection)
       .await
       .unwrap(),
-    CONTRACT_V1_0_1
+    PROTOCOL_VERSION
   );
   assert_eq!(
     ctl_proto::read_identity(&mut reader).await.unwrap(),
@@ -578,7 +654,7 @@ async fn identity_mismatch_closes_the_child_before_a_profile_can_be_sent() {
   if !bytes.is_empty() {
     let mut remaining = bytes.as_slice();
     let selected: ProtocolSelection = crate::read_frame(&mut remaining).await.unwrap().unwrap();
-    assert_eq!(selected.protocol_version, CONTRACT_V1_0_1);
+    assert_eq!(selected.protocol_version, PROTOCOL_VERSION);
     assert_eq!(remaining, [] as [u8; 0]);
   }
   std::fs::remove_dir_all(directory).unwrap();
@@ -700,7 +776,7 @@ async fn successful_setup_keeps_buffered_tcp_bytes_and_half_close_reaps_the_ssh_
     .arg(payload);
   let mut stream = client.open_command(command).await.unwrap();
   assert_eq!(stream.identity(), &identity);
-  assert_eq!(stream.protocol_version(), CONTRACT_V1_0_1);
+  assert_eq!(stream.protocol_version(), PROTOCOL_VERSION);
   assert!(matches!(
     send_request(
       &mut stream,

@@ -4,8 +4,8 @@ import { access, chmod, copyFile, lstat, mkdir, mkdtemp, readFile, rename, rm, w
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
-import { agentComponents } from "../shared/agent-bundle.mts";
-import { maxComponentMetadata, negotiateProtocol, parseComponent, type ComponentInfo } from "../shared/protocol-contract.mts";
+import { addAgentPayloadBytes, agentCargoPackages, agentComponents, validateBundleProtocols, type AgentComponentMap } from "../shared/agent-bundle.mts";
+import { maxComponentMetadata, parseComponent, type ComponentInfo } from "../shared/protocol-contract.mts";
 
 const execute = promisify(execFile);
 export const targetTriple = "x86_64-unknown-linux-musl";
@@ -24,7 +24,7 @@ export interface LocalBundleManifest {
 
 /** Keep the exact field/map order used by ctl_core::bundles::Manifest's content identity. */
 export function localManifest(components: Record<string, ComponentInfo>, files: LocalBundleManifest["files"]): LocalBundleManifest {
-  const ordered: Record<string, ComponentInfo> = {};
+  const ordered = {} as AgentComponentMap;
   const orderedFiles: LocalBundleManifest["files"] = {};
   for (const name of [...agentComponents].sort()) {
     const component = parseComponent(components[name]);
@@ -37,19 +37,11 @@ export function localManifest(components: Record<string, ComponentInfo>, files: 
   }
   const first = JSON.stringify(ordered["ctl-agent"].build);
   if (Object.values(ordered).some((component) => JSON.stringify(component.build) !== first)) {
-    throw new Error("The four components were built from different working trees");
+    throw new Error("The components were built from different working trees");
   }
-  for (const [consumer, provider, protocol] of [
-    ["ctl-agent", "ctld", "ctld"], ["ctl-agent", "ctmuxd", "ctmux"], ["ctl-agent", "ctmuxd", "ctmux_control"],
-    ["ctl-agent", "ctl-taskd", "task"], ["ctl-agent", "ctl-taskd", "task_control"],
-    ["ctl-taskd", "ctmuxd", "ctmux"], ["ctl-taskd", "ctmuxd", "ctmux_control"],
-  ]) {
-    const client = ordered[consumer].protocols.find((entry) => entry.name === protocol);
-    const server = ordered[provider].protocols.find((entry) => entry.name === protocol);
-    if (!client || !server || !negotiateProtocol(client, server)) throw new Error(`Components cannot share ${protocol}`);
-  }
+  validateBundleProtocols(ordered, agentComponents);
   const manifest: LocalBundleManifest = {
-    schema_version: 1, bundle_id: "", target_triple: targetTriple, source: "local", components: ordered, files: orderedFiles,
+    schema_version: 2, bundle_id: "", target_triple: targetTriple, source: "local", components: ordered, files: orderedFiles,
   };
   manifest.bundle_id = createHash("sha256").update(JSON.stringify(manifest)).digest("hex");
   return manifest;
@@ -63,10 +55,12 @@ export async function packageLocalBundle(binary_directory: string, output_direct
   await mkdir(output_directory, { recursive: true, mode: 0o700 });
   const components: Record<string, ComponentInfo> = {};
   const files: LocalBundleManifest["files"] = {};
+  let payloadBytes = 0;
   for (const name of agentComponents) {
     const source = join(binary_directory, name);
     const info = await lstat(source);
     if (!info.isFile() || info.size === 0 || info.size > 128 * 1024 * 1024) throw new Error(`Invalid build executable: ${name}`);
+    payloadBytes = addAgentPayloadBytes(payloadBytes, info.size);
     const destination = join(output_directory, name);
     await copyFile(source, destination);
     await chmod(destination, 0o700);
@@ -174,7 +168,7 @@ async function containerBuild(packageOnly: boolean): Promise<void> {
   const staging = await mkdtemp("/tmp/ctl-bundle-");
   try {
     if (!packageOnly) {
-      await runProcess("cargo", ["build", "--locked", "--release", "--target", targetTriple, ...agentComponents.flatMap((name) => ["-p", name])], {
+      await runProcess("cargo", ["build", "--locked", "--release", "--target", targetTriple, ...agentCargoPackages.flatMap((name) => ["-p", name])], {
         cwd: "/workspace", group: true, signal: cancellation.signal,
       });
     }
@@ -237,6 +231,8 @@ async function hasCrossCompiler(): Promise<boolean> {
   try {
     await execute("zig", ["version"], { timeout: 10_000 });
     await execute("cargo", ["zigbuild", "--help"], { timeout: 10_000 });
+    await execute("make", ["--version"], { timeout: 10_000 });
+    await execute("perl", ["-MFindBin", "-MIPC::Cmd", "-e", "1"], { timeout: 10_000 });
     return true;
   } catch { return false; }
 }
@@ -267,7 +263,7 @@ export async function buildAgentBundle(repository: string): Promise<string> {
   await chmod(outputRoot, 0o700);
   const unlock = await acquireLock(join(outputRoot, `.${targetTriple}.lock`), cancellation.signal);
   const temporary = await mkdtemp(join(outputRoot, ".linux-build-"));
-  // The container writes only four files and a manifest into this host-owned directory.
+  // The container writes the executables and manifest into this host-owned directory.
   await chmod(temporary, 0o777);
   await mkdir(join(temporary, "bundle"), { mode: 0o777 });
   await chmod(join(temporary, "bundle"), 0o777);
@@ -302,9 +298,9 @@ export async function buildAgentBundle(repository: string): Promise<string> {
         await runOwnedProcess("rustup", ["target", "add", targetTriple], cancellation.signal, { cwd: root });
       }
       await runOwnedProcess("cargo", ["zigbuild", "--locked", "--release", "--target", targetTriple, "--target-dir", nativeTarget,
-        ...agentComponents.flatMap((name) => ["-p", name])], cancellation.signal, { cwd: root, env: { ...process.env, CARGO_INCREMENTAL: "1" } });
+        ...agentCargoPackages.flatMap((name) => ["-p", name])], cancellation.signal, { cwd: root, env: { ...process.env, CARGO_INCREMENTAL: "1" } });
     } else {
-      console.error("ctl: Preparing the Linux x64 container builder (install Zig and cargo-zigbuild for native cross-compilation)…");
+      console.error("ctl: Preparing the Linux x64 container builder (native cross-compilation requires Zig, cargo-zigbuild, Make, and Perl)…");
       await runOwnedProcess(engine, ["build", "--platform", "linux/amd64", "--tag", imageName, join(root, "scripts/dev/linux-bundle-builder")], cancellation.signal);
     }
     const git = async (args: string[]): Promise<string> => (await execute("git", ["-C", root, ...args])).stdout.trim();
@@ -354,7 +350,7 @@ async function main(): Promise<void> {
   if (args[0] === "--owned-process" && args[1]) return ownedProcess(args[1], args.slice(2));
   if (args.length === 1 && ["--container", "--container-package"].includes(args[0])) return containerBuild(args[0] === "--container-package");
   if (args.length === 1 && args[0] === "--help") {
-    console.log("usage: pnpm bundles:build\nBuild the current working tree's four Linux x64 components.\nUses native cargo-zigbuild when available, otherwise a Linux container compiler.\nDocker or Podman runs the target binaries for packaging.\nOutput: target/development-bundles/x86_64-unknown-linux-musl/");
+    console.log("usage: pnpm bundles:build\nBuild the current working tree's six Linux x64 executables.\nUses native cargo-zigbuild when available, otherwise a Linux container compiler.\nDocker or Podman runs the target binaries for packaging.\nOutput: target/development-bundles/x86_64-unknown-linux-musl/");
     return;
   }
   if (args.length) throw new Error("usage: pnpm bundles:build");

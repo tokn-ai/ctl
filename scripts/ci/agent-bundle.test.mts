@@ -7,13 +7,23 @@ import { basename, join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { promisify } from "node:util";
 import { gunzipSync, gzipSync } from "node:zlib";
-import { agentComponents, agentTargets, archiveName, inspectAgentArchive, parseAgentBundleSet, parseAgentComponents, readAgentFile, verifyAgentBundleTarget } from "../shared/agent-bundle.mts";
+import { addAgentPayloadBytes, agentComponents, agentTargets, archiveName, inspectAgentArchive, parseAgentBundleSet, parseAgentComponents, readAgentFile, verifyAgentBundleTarget } from "../shared/agent-bundle.mts";
 import { agentIdentity, archiveEntriesFixture, componentMapFixture, tarFixture } from "./agent-bundle.fixtures.mts";
 import { assembleAgentBundleSet } from "./assemble-agent-bundle-set.mts";
 import { packageAgentBundle, type AgentProcessRunner } from "./package-agent-bundle.mts";
 
 const execute = promisify(execFile);
 const target = agentTargets[0];
+
+test("archive file sizes include the inner manifest in the 512 MiB managed import limit", () => {
+  const mib = 1024 * 1024;
+  const binary_sizes = [100, 100, 100, 100, 100, 12].map((size) => size * mib);
+  const manifest_size = 4096;
+  binary_sizes[0] -= manifest_size;
+  const file_sizes = [...binary_sizes, manifest_size];
+  assert.equal(file_sizes.reduce(addAgentPayloadBytes, 0), 512 * mib);
+  assert.throws(() => [...binary_sizes, manifest_size + 1].reduce(addAgentPayloadBytes, 0), /total payload size limit/);
+});
 
 async function directory(t: TestContext): Promise<string> {
   const path = await mkdtemp(join(tmpdir(), "ctl-agent-package-test-"));
@@ -43,13 +53,34 @@ test("packages actual executable metadata and assembles all targets without exec
   }
   assert.deepEqual([...inspected].sort(), [...agentComponents].sort());
   const set = await assembleAgentBundleSet(agentIdentity, input, output);
-  assert.equal(set.schema_version, 2);
+  assert.equal(set.schema_version, 3);
   const parsed = parseAgentBundleSet(await readFile(join(output, "bundle-set.json")), agentIdentity);
   for (const target of agentTargets) {
     // Development sync passes the complete catalog, which extends the build identity.
     assert.deepEqual((await verifyAgentBundleTarget(output, parsed, target, parsed.targets[target]))?.components, components);
   }
   assert.ok((await readdir(input)).every((name) => !name.startsWith(".package-")));
+});
+
+test("schema-2 archives and sets retain exactly the original four services", async () => {
+  const legacy = archiveEntriesFixture(target, agentIdentity, componentMapFixture(), 2);
+  const archive = await inspectAgentArchive(tarFixture(legacy), agentIdentity, target);
+  assert.equal(archive.schema_version, 2);
+  assert.deepEqual(Object.keys(archive.components).sort(), ["ctl-agent", "ctl-taskd", "ctld", "ctmuxd"]);
+  const targets = Object.fromEntries(agentTargets.map((target) => [target, {
+    archive: archiveName(agentIdentity, target), sha256: "a".repeat(64), components: archive.components,
+  }]));
+  const set = { ...agentIdentity, schema_version: 2, targets };
+  assert.equal(parseAgentBundleSet(Buffer.from(JSON.stringify(set))).schema_version, 2);
+  assert.throws(() => parseAgentBundleSet(Buffer.from(JSON.stringify({ ...set, schema_version: 3 }))));
+  targets[target].components = componentMapFixture();
+  assert.throws(() => parseAgentBundleSet(Buffer.from(JSON.stringify(set))));
+  assert.throws(() => parseAgentBundleSet(Buffer.from(JSON.stringify({ ...set, schema_version: 1 }))));
+
+  const cli = { name: "ctl", bytes: Buffer.from("unexpected CLI in schema 2") };
+  await assert.rejects(inspectAgentArchive(tarFixture([cli, ...legacy]), agentIdentity, target));
+  const newer = archiveEntriesFixture(target).filter((entry) => entry.name !== "ctmux");
+  await assert.rejects(inspectAgentArchive(tarFixture(newer), agentIdentity, target));
 });
 
 test("metadata rejects mixed source builds, incomplete maps and invented or incoherent contracts", async (t) => {
@@ -62,6 +93,9 @@ test("metadata rejects mixed source builds, incomplete maps and invented or inco
     ["missing control helper contract", (value) => { value.ctld.protocols.pop(); }],
     ["missing remote VPN contract", (value) => { value["ctl-agent"].protocols = value["ctl-agent"].protocols.filter((protocol) => protocol.name !== "ctl_remote_vpn"); }],
     ["missing companion contract", (value) => { value["ctl-agent"].protocols.pop(); }],
+    ["incomplete CLI pair", (value) => { Reflect.deleteProperty(value, "ctl"); }],
+    ["ctmux client missing control", (value) => { value.ctmux.protocols.pop(); }],
+    ["ctl client mismatches remote identity", (value) => { value.ctl.protocols[0] = { name: "ctl_identity", build: 4, version: "2.0.4", supported_versions: ["2.0.4"] }; }],
     ["duplicate contract", (value) => { value.ctmuxd.protocols.push(value.ctmuxd.protocols[0]); }],
     ["latest omitted", (value) => { value.ctmuxd.protocols[0].supported_versions = ["1.0.12"]; }],
     ["invented range", (value) => { value.ctmuxd.protocols[0].supported_versions.push("1.1.12"); }],

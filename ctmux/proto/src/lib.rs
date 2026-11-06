@@ -10,7 +10,7 @@ use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 /// Internal protocol build; incrementing this does not publish a new contract.
-pub const PROTOCOL_BUILD: u16 = 22;
+pub const PROTOCOL_BUILD: u16 = 23;
 /// First published wire contract. Keep this identity immutable.
 pub const CONTRACT_V1_0_13: ProtocolVersion = ProtocolVersion::new(1, 0, 13);
 /// Published compatible addition: paged history and checkpoint recovery.
@@ -31,7 +31,9 @@ pub const CONTRACT_V1_1_20: ProtocolVersion = ProtocolVersion::new(1, 1, 20);
 pub const CONTRACT_V1_2_21: ProtocolVersion = ProtocolVersion::new(1, 2, 21);
 /// Current session-retained history statistics on attached heartbeats.
 pub const CONTRACT_V1_2_22: ProtocolVersion = ProtocolVersion::new(1, 2, 22);
-pub const PROTOCOL_VERSION: ProtocolVersion = CONTRACT_V1_2_22;
+/// Per-session client presence, including optional process identity on attach and resume.
+pub const CONTRACT_V1_3_23: ProtocolVersion = ProtocolVersion::new(1, 3, 23);
+pub const PROTOCOL_VERSION: ProtocolVersion = CONTRACT_V1_3_23;
 pub const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[
   CONTRACT_V1_0_13,
   CONTRACT_V1_1_14,
@@ -43,6 +45,7 @@ pub const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[
   CONTRACT_V1_1_20,
   CONTRACT_V1_2_21,
   CONTRACT_V1_2_22,
+  CONTRACT_V1_3_23,
 ];
 
 #[must_use]
@@ -57,6 +60,7 @@ pub const fn supports_view_zoom(version: ProtocolVersion) -> bool {
       | CONTRACT_V1_1_20
       | CONTRACT_V1_2_21
       | CONTRACT_V1_2_22
+      | CONTRACT_V1_3_23
   )
 }
 
@@ -71,6 +75,7 @@ pub const fn supports_pane_resize(version: ProtocolVersion) -> bool {
       | CONTRACT_V1_1_20
       | CONTRACT_V1_2_21
       | CONTRACT_V1_2_22
+      | CONTRACT_V1_3_23
   )
 }
 
@@ -84,6 +89,7 @@ pub const fn supports_divider_resize(version: ProtocolVersion) -> bool {
       | CONTRACT_V1_1_20
       | CONTRACT_V1_2_21
       | CONTRACT_V1_2_22
+      | CONTRACT_V1_3_23
   )
 }
 
@@ -97,6 +103,7 @@ pub const fn supports_layout_lease_notifications(version: ProtocolVersion) -> bo
       | CONTRACT_V1_1_20
       | CONTRACT_V1_2_21
       | CONTRACT_V1_2_22
+      | CONTRACT_V1_3_23
   )
 }
 
@@ -104,7 +111,12 @@ pub const fn supports_layout_lease_notifications(version: ProtocolVersion) -> bo
 pub const fn supports_extended_keys(version: ProtocolVersion) -> bool {
   matches!(
     version,
-    CONTRACT_V1_1_18 | CONTRACT_V1_1_19 | CONTRACT_V1_1_20 | CONTRACT_V1_2_21 | CONTRACT_V1_2_22
+    CONTRACT_V1_1_18
+      | CONTRACT_V1_1_19
+      | CONTRACT_V1_1_20
+      | CONTRACT_V1_2_21
+      | CONTRACT_V1_2_22
+      | CONTRACT_V1_3_23
   )
 }
 
@@ -112,7 +124,7 @@ pub const fn supports_extended_keys(version: ProtocolVersion) -> bool {
 pub const fn supports_pane_moves(version: ProtocolVersion) -> bool {
   matches!(
     version,
-    CONTRACT_V1_1_19 | CONTRACT_V1_1_20 | CONTRACT_V1_2_21 | CONTRACT_V1_2_22
+    CONTRACT_V1_1_19 | CONTRACT_V1_1_20 | CONTRACT_V1_2_21 | CONTRACT_V1_2_22 | CONTRACT_V1_3_23
   )
 }
 
@@ -120,18 +132,26 @@ pub const fn supports_pane_moves(version: ProtocolVersion) -> bool {
 pub const fn supports_session_rename(version: ProtocolVersion) -> bool {
   matches!(
     version,
-    CONTRACT_V1_1_20 | CONTRACT_V1_2_21 | CONTRACT_V1_2_22
+    CONTRACT_V1_1_20 | CONTRACT_V1_2_21 | CONTRACT_V1_2_22 | CONTRACT_V1_3_23
   )
 }
 
 #[must_use]
 pub const fn supports_styled_history(version: ProtocolVersion) -> bool {
-  matches!(version, CONTRACT_V1_2_21 | CONTRACT_V1_2_22)
+  matches!(
+    version,
+    CONTRACT_V1_2_21 | CONTRACT_V1_2_22 | CONTRACT_V1_3_23
+  )
 }
 
 #[must_use]
 pub const fn supports_session_statistics(version: ProtocolVersion) -> bool {
-  matches!(version, CONTRACT_V1_2_22)
+  matches!(version, CONTRACT_V1_2_22 | CONTRACT_V1_3_23)
+}
+
+#[must_use]
+pub const fn supports_client_presence(version: ProtocolVersion) -> bool {
+  matches!(version, CONTRACT_V1_3_23)
 }
 
 #[must_use]
@@ -641,6 +661,45 @@ pub struct SessionInfo {
   pub terminal_size: TerminalSize,
 }
 
+/// One client process, or one logical attachment for clients without process metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionViewer {
+  #[serde(flatten)]
+  pub identity: ctl_core::presence::ClientIdentity,
+  pub legacy: bool,
+  pub connected_attachments: usize,
+  pub reconnecting_attachments: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionUsage {
+  #[serde(flatten)]
+  pub session: SessionInfo,
+  /// None means an older daemon did not provide client presence.
+  pub clients: Option<Vec<SessionViewer>>,
+}
+
+impl SessionUsage {
+  #[must_use]
+  pub fn unused(&self) -> Option<bool> {
+    self.clients.as_ref().map(|clients| {
+      clients
+        .iter()
+        .all(|client| client.connected_attachments == 0)
+    })
+  }
+}
+
+/// Optional metadata sent only on the opening attach or resume frame in 1.3.23.
+/// Historical requests with the same message discriminants omit this field.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct OpeningRequest {
+  #[serde(flatten)]
+  pub request: ClientMessage,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub client_identity: Option<ctl_core::presence::ClientIdentity>,
+}
+
 /// A server-owned composition. Every terminal occurs exactly once in its layout.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ViewInfo {
@@ -805,6 +864,7 @@ pub enum ClientMessage {
     terminal_size: TerminalSize,
   },
   ListSessions,
+  ListSessionClients,
   /// Rename an existing root without replacing its terminals or layout.
   RenameSession {
     session: String,
@@ -1023,6 +1083,9 @@ pub enum ServerMessage {
   },
   SessionList {
     sessions: Vec<SessionInfo>,
+  },
+  SessionClients {
+    sessions: Vec<SessionUsage>,
   },
   ShellStateResponse {
     session: SessionInfo,
@@ -1705,9 +1768,9 @@ mod tests {
   }
 
   #[test]
-  fn session_statistics_contract_retains_historical_features() {
-    assert_eq!(PROTOCOL_VERSION, ProtocolVersion::new(1, 2, 22));
-    assert_eq!(PROTOCOL_BUILD, 22);
+  fn presence_contract_retains_historical_features() {
+    assert_eq!(PROTOCOL_VERSION, ProtocolVersion::new(1, 3, 23));
+    assert_eq!(PROTOCOL_BUILD, 23);
     assert_eq!(
       SUPPORTED_PROTOCOL_VERSIONS,
       &[
@@ -1721,6 +1784,7 @@ mod tests {
         CONTRACT_V1_1_20,
         CONTRACT_V1_2_21,
         CONTRACT_V1_2_22,
+        CONTRACT_V1_3_23,
       ]
     );
     for (version, zoom, pane, divider, keys, moves) in [
@@ -1734,6 +1798,7 @@ mod tests {
       (CONTRACT_V1_1_20, true, true, true, true, true),
       (CONTRACT_V1_2_21, true, true, true, true, true),
       (CONTRACT_V1_2_22, true, true, true, true, true),
+      (CONTRACT_V1_3_23, true, true, true, true, true),
       (
         ProtocolVersion::new(1, 1, 21),
         false,
@@ -1743,6 +1808,10 @@ mod tests {
         false,
       ),
     ] {
+      assert_eq!(
+        supports_client_presence(version),
+        version == CONTRACT_V1_3_23
+      );
       assert_eq!(supports_view_zoom(version), zoom);
       assert_eq!(supports_pane_resize(version), pane);
       assert_eq!(supports_divider_resize(version), divider);
@@ -1753,16 +1822,19 @@ mod tests {
         supports_session_rename(version),
         matches!(
           version,
-          CONTRACT_V1_1_20 | CONTRACT_V1_2_21 | CONTRACT_V1_2_22
+          CONTRACT_V1_1_20 | CONTRACT_V1_2_21 | CONTRACT_V1_2_22 | CONTRACT_V1_3_23
         )
       );
       assert_eq!(
         supports_session_statistics(version),
-        version == CONTRACT_V1_2_22
+        matches!(version, CONTRACT_V1_2_22 | CONTRACT_V1_3_23)
       );
       assert_eq!(
         supports_styled_history(version),
-        matches!(version, CONTRACT_V1_2_21 | CONTRACT_V1_2_22)
+        matches!(
+          version,
+          CONTRACT_V1_2_21 | CONTRACT_V1_2_22 | CONTRACT_V1_3_23
+        )
       );
     }
   }

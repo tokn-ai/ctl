@@ -1,5 +1,6 @@
 use super::*;
 use crate::remote_bundle::compatibility::tests::Fixture;
+use ctl_core::bundle_layout::SERVICES as COMPONENTS;
 use std::os::unix::fs::DirBuilderExt as _;
 use std::path::PathBuf;
 
@@ -41,7 +42,9 @@ async fn compatible_different_build_is_imported_without_selecting_or_running_it(
   );
   assert_eq!(upload.git_revision, candidate.git_revision);
   assert_eq!(
-    inspect_upload_archive(&upload.archive).unwrap().unwrap(),
+    inspect_upload_archive(&mut read_archive(&upload.archive).unwrap())
+      .unwrap()
+      .unwrap(),
     bundle.manifest
   );
   assert!(home.0.join(".tokn/ctl/components/bundles").is_dir());
@@ -117,11 +120,13 @@ fn local_provenance_is_complete_and_retains_a_legacy_agent_identity() {
 }
 
 #[tokio::test]
-async fn local_import_queries_four_components_without_starting_services_or_selecting() {
+async fn local_import_preserves_legacy_builds_and_requires_both_clients_for_new_builds() {
   use std::os::unix::fs::PermissionsExt as _;
   let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let home = Home::new();
-  let candidate = Fixture::new("0.0.9", &"b".repeat(40)).bundle();
+  let candidate = Fixture::new("0.0.9", &"b".repeat(40))
+    .with_clients()
+    .bundle();
   let outer = crate::remote_bundle::BundleSet::parse_intrinsic(&candidate.manifest).unwrap();
   let components = outer
     .target("aarch64-apple-darwin")
@@ -142,6 +147,13 @@ async fn local_import_queries_four_components_without_starting_services_or_selec
   let bundle = import_local(&home.0, &source, None).await.unwrap();
   assert_eq!(bundle.manifest.source, Source::Local);
   assert_eq!(bundle.manifest.components, *components);
+  assert_eq!(bundle.manifest.schema_version, 2);
+  std::fs::remove_file(source.join("ctl")).unwrap();
+  assert!(import_local(&home.0, &source, None).await.is_err());
+  std::fs::remove_file(source.join("ctmux")).unwrap();
+  let services = import_local(&home.0, &source, None).await.unwrap();
+  assert_eq!(services.manifest.schema_version, 1);
+  assert!(ctl_core::bundle_layout::Layout::Services.matches(&services.manifest.components));
   assert!(
     Store::new(&home.0)
       .selected(Purpose::Local, ctl_core::paths::native_target())

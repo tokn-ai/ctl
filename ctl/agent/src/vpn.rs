@@ -18,14 +18,15 @@ pub async fn serve_stdio(
   #[cfg(unix)]
   {
     let (mut reader, mut writer) = ctl_ipc::stdio::take()?;
-    serve(&mut reader, &mut writer, client, identity).await
+    serve_with_presence(&mut reader, &mut writer, client, identity, true).await
   }
   #[cfg(not(unix))]
-  serve(
+  serve_with_presence(
     &mut tokio::io::stdin(),
     &mut tokio::io::stdout(),
     client,
     identity,
+    true,
   )
   .await
 }
@@ -40,18 +41,33 @@ pub async fn serve<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
   client: &ctl_ipc::vpn::Client,
   identity: &ctl_proto::RemoteIdentity,
 ) -> io::Result<()> {
+  serve_with_presence(reader, writer, client, identity, false).await
+}
+
+async fn serve_with_presence<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+  reader: &mut R,
+  writer: &mut W,
+  client: &ctl_ipc::vpn::Client,
+  identity: &ctl_proto::RemoteIdentity,
+  record_presence: bool,
+) -> io::Result<()> {
   // Match the client's startup budget across every stage. A delayed SSH
   // channel must not expire early or gain a fresh budget after negotiation.
   let deadline = tokio::time::Instant::now() + STARTUP_TIMEOUT;
-  tokio::time::timeout_at(deadline, async {
+  let selection = tokio::time::timeout_at(deadline, async {
     writer.write_all(PREFACE).await?;
     writer.flush().await?;
-    ctl_ipc::remote_vpn::accept_contract(reader, writer)
+    ctl_ipc::remote_vpn::accept_contract_with_client(reader, writer)
       .await
       .map_err(io::Error::other)
   })
   .await
   .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "Remote VPN negotiation timed out"))??;
+  let _presence = if record_presence {
+    super::register_connection(selection.client_identity, "vpn")
+  } else {
+    None
+  };
   tokio::time::timeout_at(deadline, async {
     ctl_proto::write_identity(writer, identity).await?;
     writer.flush().await

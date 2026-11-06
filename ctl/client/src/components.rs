@@ -2,9 +2,7 @@
 
 pub mod inventory;
 
-use ctl_core::bundles::{
-  Bundle, COMPONENTS, MANIFEST_FILE, MAX_FILE_BYTES, Manifest, Purpose, Source, Store,
-};
+use ctl_core::bundles::{Bundle, MANIFEST_FILE, MAX_FILE_BYTES, Manifest, Purpose, Source, Store};
 use ctl_core::component::ComponentInfo;
 use std::collections::BTreeMap;
 use std::io::{self, Read as _};
@@ -117,7 +115,17 @@ pub async fn import_local(
     let _ = (helper, &mut app_executables);
     None
   };
-  for name in COMPONENTS {
+  let client_present = |name: &str| match std::fs::symlink_metadata(directory.join(name)) {
+    Ok(_) => Ok(true),
+    Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+    Err(error) => Err(error),
+  };
+  let layout = match (client_present("ctl")?, client_present("ctmux")?) {
+    (true, true) => ctl_core::bundle_layout::Layout::WithClients,
+    (false, false) => ctl_core::bundle_layout::Layout::Services,
+    _ => return Err(invalid("local bundle must include both ctl and ctmux")),
+  };
+  for &name in layout.names() {
     let path = if name == "ctld" {
       signed_helper
         .as_ref()
@@ -321,8 +329,9 @@ pub fn compatible(components: &BTreeMap<String, ComponentInfo>) -> bool {
 ///
 /// # Errors
 /// Rejects unsafe, excessive or checksum-invalid managed payloads.
-pub(crate) fn inspect_upload_archive(bytes: &[u8]) -> io::Result<Option<Manifest>> {
-  let mut files = read_archive(bytes)?;
+pub(crate) fn inspect_upload_archive(
+  files: &mut BTreeMap<String, Vec<u8>>,
+) -> io::Result<Option<Manifest>> {
   let Some(bytes) = files.remove(MANIFEST_FILE) else {
     return Ok(None);
   };
@@ -331,64 +340,11 @@ pub(crate) fn inspect_upload_archive(bytes: &[u8]) -> io::Result<Option<Manifest
   }
   let manifest: Manifest = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
   manifest.validate()?;
-  manifest.verify_files(&files)?;
+  manifest.verify_files(files)?;
   Ok(Some(manifest))
 }
 
-pub(crate) fn read_archive(bytes: &[u8]) -> io::Result<BTreeMap<String, Vec<u8>>> {
-  if bytes.len() > MAX_FILE_BYTES {
-    return Err(invalid("component archive exceeds its size limit"));
-  }
-  let decoder = flate2::read::MultiGzDecoder::new(bytes)
-    .take(ctl_core::bundles::MAX_TOTAL_BYTES as u64 + 1024 * 1024);
-  let mut archive = tar::Archive::new(decoder);
-  let mut files = BTreeMap::new();
-  let mut total = 0usize;
-  for entry in archive.entries()?.raw(true) {
-    let mut entry = entry?;
-    let name = std::str::from_utf8(&entry.path_bytes())
-      .map_err(io::Error::other)?
-      .to_owned();
-    if entry.header().entry_type() != tar::EntryType::Regular
-      || entry.size() == 0
-      || entry.size() > MAX_FILE_BYTES as u64
-      || files.len() > 512
-    {
-      return Err(invalid("unsafe or excessive component archive entries"));
-    }
-    let mut payload = Vec::new();
-    entry.read_to_end(&mut payload)?;
-    total = total.saturating_add(payload.len());
-    if total > ctl_core::bundles::MAX_TOTAL_BYTES + ctl_core::bundles::MAX_MANIFEST_BYTES {
-      return Err(invalid("component archive exceeds its payload limit"));
-    }
-    if name.contains(['\\', '\0'])
-      || name
-        .split('/')
-        .any(|part| part.is_empty() || part == "." || part == "..")
-    {
-      return Err(invalid("unsafe component archive path"));
-    }
-    if files.insert(name, payload).is_some() {
-      return Err(invalid("duplicate component archive entry"));
-    }
-  }
-  let mut padding = archive.into_inner();
-  let mut buffer = [0; 8192];
-  loop {
-    let read = padding.read(&mut buffer)?;
-    if read == 0 {
-      break;
-    }
-    if buffer[..read].iter().any(|byte| *byte != 0) {
-      return Err(invalid("component archive contains trailing data"));
-    }
-  }
-  if padding.limit() == 0 {
-    return Err(invalid("component archive exceeds its expanded limit"));
-  }
-  Ok(files)
-}
+pub(crate) use crate::remote_bundle::archive::read_archive;
 
 pub(crate) fn append<W: io::Write>(
   archive: &mut tar::Builder<W>,

@@ -96,9 +96,8 @@ open at the command palette location. Verify any SSH host-key prompt against
 the fingerprint above. Once `ctl-agent connect --identity` succeeds, choose **OpenSSH config** to create a
 reusable managed `Host` block, or **This app only** to keep those settings in
 the app's native workspace file. The latter still invokes the system SSH client and does
-not store the key contents. An app with a synchronized bundle set can install a
-missing `ctl-agent`, `ctmuxd`, `ctl-taskd`, and `ctld` bundle under the remote user's
-`~/.tokn/ctl/versions` directory and retry. `~/.tokn/ctl/current` selects the active
+not store the key contents. An app with a synchronized bundle set can install
+the matching remote build and retry. `~/.tokn/ctl/current` selects the active
 bundle, and `~/.tokn/ctl/remote-id` stores the stable environment ID. Release
 bundles use the app version as their immutable
 install ID; development bundles include their Git revision so one source build
@@ -153,7 +152,10 @@ CLI, or manual bundle sync is needed. `CTL_REMOTE_BUNDLES_DIR` is an explicit
 local source override. An older cached selection cannot override the channel,
 and network errors do not silently select an older build.
 
-Each bundle contains `ctl-agent`, `ctmuxd`, `ctl-taskd`, and `ctld`. Import verifies
+New schema-3 remote bundles contain `ctl-agent`, `ctmuxd`, `ctl-taskd`, `ctld`,
+`ctl`, and `ctmux`. Existing schema-2 bundles contain the four service binaries.
+The extra CLIs let the remote account run `ctl who` to inspect active ctl service
+channels and `ctmux clients` to inspect terminal viewers. Import verifies
 archive and binary checksums, a common identified build, and agreement between
 the outer and archived advertisements. Client and companion contracts must have
 explicit shared published versions. The selected bundle may differ from the
@@ -189,11 +191,13 @@ choose a host and working directory. Only submission contacts that host;
 authentication can be established with **Connect host** first. **New Tab in
 Current Folder** always inherits the active session's host.
 
-The image also includes `ctl` for local debugging against the same services:
+The image includes `ctl` and `ctmux` for querying state inside the controlled account.
 
 ```sh
 docker compose exec --user ctmux ctmux-remote ctl task list
-docker compose exec --user ctmux ctmux-remote ctl ctmux list
+docker compose exec --user ctmux ctmux-remote ctl who
+docker compose exec --user ctmux ctmux-remote ctmux ls
+docker compose exec --user ctmux ctmux-remote ctmux clients
 ```
 
 The gateway starts `ctl-taskd` on demand, sharing `/run/ctmux` with `ctmuxd` for

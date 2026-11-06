@@ -10,21 +10,35 @@ export const agentTargets = [
   "x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl",
   "x86_64-apple-darwin", "aarch64-apple-darwin",
 ] as const;
-export const agentComponents = ["ctl-agent", "ctmuxd", "ctl-taskd", "ctld"] as const;
+const serviceComponents = ["ctl-agent", "ctmuxd", "ctl-taskd", "ctld"] as const;
+export const agentComponents = [...serviceComponents, "ctl", "ctmux"] as const;
+export const agentCargoPackages = [...serviceComponents, "ctl-cli", "ctmux-cli"] as const;
+type MetadataSchema = 2 | 3;
+type ComponentName = typeof agentComponents[number];
+type BundledEntries<T> = Record<typeof serviceComponents[number], T> & Partial<Record<"ctl" | "ctmux", T>>;
+const componentsFor = (schema: MetadataSchema) => schema === 2 ? serviceComponents : agentComponents;
 export const maxAgentManifestBytes = 64 * 1024;
 const maxArchiveBytes = 128 * 1024 * 1024;
-const maxUnpackedBytes = agentComponents.length * maxArchiveBytes + maxAgentManifestBytes + 1024 * 1024;
+// The managed import counts every regular member, including manifest.json.
+const maxPayloadBytes = 512 * 1024 * 1024;
+const maxUnpackedBytes = maxPayloadBytes + 1024 * 1024;
+
+export function addAgentPayloadBytes(accepted: number, size: number): number {
+  const total = accepted + size;
+  if (total > maxPayloadBytes) throw new Error("agent bundle exceeds its total payload size limit");
+  return total;
+}
 
 export interface AgentBundleIdentity {
   app_version: string;
   bundle_id: string;
   git_revision: string;
 }
-export type AgentComponentMap = Record<typeof agentComponents[number], ComponentInfo>;
+export type AgentComponentMap = BundledEntries<ComponentInfo>;
 export interface AgentBundleManifest extends AgentBundleIdentity {
-  schema_version: 2;
+  schema_version: MetadataSchema;
   target_triple: string;
-  files: Record<typeof agentComponents[number], string>;
+  files: BundledEntries<string>;
   components: AgentComponentMap;
 }
 export interface AgentBundleTarget {
@@ -33,7 +47,7 @@ export interface AgentBundleTarget {
   components?: AgentComponentMap;
 }
 export interface AgentBundleSet extends AgentBundleIdentity {
-  schema_version: 1 | 2;
+  schema_version: 1 | MetadataSchema;
   targets: Record<string, AgentBundleTarget>;
 }
 
@@ -43,7 +57,9 @@ function record(value: unknown, name: string): Record<string, unknown> {
 }
 
 function exactKeys(value: Record<string, unknown>, keys: readonly string[], name: string): void {
-  if (Object.keys(value).sort().join() !== [...keys].sort().join()) throw new Error(`${name} contains missing or unexpected fields`);
+  if (Object.keys(value).length !== keys.length || keys.some((key) => !Object.hasOwn(value, key))) {
+    throw new Error(`${name} contains missing or unexpected fields`);
+  }
 }
 
 export function validateAgentIdentity(identity: AgentBundleIdentity): void {
@@ -54,38 +70,54 @@ export function validateAgentIdentity(identity: AgentBundleIdentity): void {
   }
 }
 
-export function parseAgentComponents(value: unknown, identity: AgentBundleIdentity): AgentComponentMap {
+const protocols: Record<ComponentName, string[]> = {
+  "ctl-agent": ["ctl_identity", "ctl_maintenance", "ctl_remote_vpn", "ctld", "ctmux", "ctmux_control", "task", "task_control"],
+  ctmuxd: ["ctmux", "ctmux_control"],
+  "ctl-taskd": ["task", "task_control", "ctmux", "ctmux_control"],
+  ctld: ["ctld", "ctld_lifecycle", "ctld_helper"],
+  ctl: ["ctl_identity", "ctl_maintenance", "ctl_remote_vpn", "ctld", "ctld_lifecycle", "ctld_helper", "ctmux", "ctmux_control", "task", "task_control"],
+  ctmux: ["ctmux", "ctmux_control"],
+};
+
+/** Check the actual consumer/provider pairs in the bundle, including clients in schema 3. */
+export function validateBundleProtocols(components: AgentComponentMap, names: readonly ComponentName[]): void {
+  for (const name of names) {
+    if (protocols[name].some((protocol) => !components[name]?.protocols.some((entry) => entry.name === protocol))) {
+      throw new Error(`${name} omits a required protocol`);
+    }
+  }
+  function check(consumer: ComponentName, provider: ComponentName, required: readonly string[]) {
+    for (const name of required) {
+      const client = components[consumer]?.protocols.find((entry) => entry.name === name);
+      const server = components[provider]?.protocols.find((entry) => entry.name === name);
+      if (!client || !server || !negotiateProtocol(client, server)) throw new Error(`${consumer} and ${provider} cannot share ${name}`);
+    }
+  }
+  check("ctl-agent", "ctld", ["ctld"]);
+  check("ctl-agent", "ctmuxd", protocols.ctmuxd);
+  check("ctl-agent", "ctl-taskd", ["task", "task_control"]);
+  check("ctl-taskd", "ctmuxd", protocols.ctmuxd);
+  if (names.includes("ctl")) {
+    check("ctl", "ctl-agent", ["ctl_identity", "ctl_maintenance", "ctl_remote_vpn"]);
+    check("ctl", "ctld", protocols.ctld);
+    check("ctl", "ctl-taskd", ["task", "task_control"]);
+    check("ctl", "ctmuxd", protocols.ctmuxd);
+    check("ctmux", "ctmuxd", protocols.ctmuxd);
+  }
+}
+
+export function parseAgentComponents(value: unknown, identity: AgentBundleIdentity, schema: MetadataSchema = 3): AgentComponentMap {
   const entries = record(value, "bundle components");
-  exactKeys(entries, agentComponents, "bundle components");
-  const required = {
-    "ctl-agent": ["ctl_identity", "ctl_maintenance", "ctl_remote_vpn", "ctld", "ctmux", "ctmux_control", "task", "task_control"],
-    ctmuxd: ["ctmux", "ctmux_control"],
-    "ctl-taskd": ["task", "task_control", "ctmux", "ctmux_control"],
-    ctld: ["ctld", "ctld_lifecycle", "ctld_helper"],
-  };
+  exactKeys(entries, componentsFor(schema), "bundle components");
   const parsed = {} as AgentComponentMap;
-  for (const name of agentComponents) {
+  for (const name of componentsFor(schema)) {
     const component = parseComponent(entries[name]);
     if (component.build.dirty || component.build.version !== identity.app_version || component.build.source_revision !== identity.git_revision) {
       throw new Error(`${name} source identity does not match the clean bundle`);
     }
-    if (required[name].some((protocol) => !component.protocols.some((entry) => entry.name === protocol))) {
-      throw new Error(`${name} omits a required protocol`);
-    }
     parsed[name] = component;
   }
-  for (const [name, protocols] of [["ctmuxd", ["ctmux", "ctmux_control"]], ["ctl-taskd", ["task", "task_control"]], ["ctld", ["ctld"]]] as const) {
-    for (const protocol of protocols) {
-      const client = parsed["ctl-agent"].protocols.find((entry) => entry.name === protocol)!;
-      const server = parsed[name].protocols.find((entry) => entry.name === protocol)!;
-      if (!negotiateProtocol(client, server)) throw new Error(`bundle components have no common ${protocol} contract`);
-    }
-  }
-  for (const protocol of ["ctmux", "ctmux_control"]) {
-    const client = parsed["ctl-taskd"].protocols.find((entry) => entry.name === protocol)!;
-    const server = parsed.ctmuxd.protocols.find((entry) => entry.name === protocol)!;
-    if (!negotiateProtocol(client, server)) throw new Error(`task daemon has no common ${protocol} contract with ctmuxd`);
-  }
+  validateBundleProtocols(parsed, componentsFor(schema));
   return parsed;
 }
 
@@ -100,7 +132,7 @@ export function parseAgentBundleSet(bytes: Buffer, expected?: Partial<AgentBundl
   if (bytes.length > maxAgentManifestBytes) throw new Error("agent bundle set exceeds its size limit");
   const root = record(JSON.parse(bytes.toString("utf8")), "bundle set");
   exactKeys(root, ["schema_version", "app_version", "bundle_id", "git_revision", "targets"], "bundle set");
-  if (root.schema_version !== 1 && root.schema_version !== 2) throw new Error("unsupported agent bundle-set schema version");
+  if (root.schema_version !== 1 && root.schema_version !== 2 && root.schema_version !== 3) throw new Error("unsupported agent bundle-set schema version");
   const identity = identityFrom(root);
   for (const [field, value] of Object.entries(expected ?? {})) {
     if (identity[field as keyof AgentBundleIdentity] !== value) throw new Error(`bundle set identity does not match expected ${field}`);
@@ -110,12 +142,12 @@ export function parseAgentBundleSet(bytes: Buffer, expected?: Partial<AgentBundl
   const parsed: AgentBundleSet["targets"] = {};
   for (const target of agentTargets) {
     const entry = record(targets[target], `bundle target ${target}`);
-    exactKeys(entry, root.schema_version === 2 ? ["archive", "sha256", "components"] : ["archive", "sha256"], `bundle target ${target}`);
+    exactKeys(entry, root.schema_version === 1 ? ["archive", "sha256"] : ["archive", "sha256", "components"], `bundle target ${target}`);
     if (entry.archive !== archiveName(identity, target) || typeof entry.sha256 !== "string" || !/^[a-fA-F0-9]{64}$/.test(entry.sha256)) {
       throw new Error(`invalid bundle metadata for ${target}`);
     }
     parsed[target] = { archive: entry.archive as string, sha256: entry.sha256.toLowerCase(),
-      ...(root.schema_version === 2 ? { components: parseAgentComponents(entry.components, identity) } : {}) };
+      ...(root.schema_version === 1 ? {} : { components: parseAgentComponents(entry.components, identity, root.schema_version) }) };
   }
   return { schema_version: root.schema_version, ...identity, targets: parsed };
 }
@@ -128,15 +160,15 @@ export function parseAgentBundleManifest(bytes: Buffer, identity: AgentBundleIde
   if (bytes.length > maxAgentManifestBytes) throw new Error("agent bundle manifest exceeds its size limit");
   const root = record(JSON.parse(bytes.toString("utf8")), "archive manifest");
   exactKeys(root, ["schema_version", "app_version", "bundle_id", "git_revision", "target_triple", "files", "components"], "archive manifest");
-  if (root.schema_version !== 2 || root.target_triple !== target ||
+  if ((root.schema_version !== 2 && root.schema_version !== 3) || root.target_triple !== target ||
     root.app_version !== identity.app_version || root.bundle_id !== identity.bundle_id ||
     root.git_revision !== identity.git_revision) throw new Error("archive manifest does not match the bundle identity and target");
   const files = record(root.files, "archive file hashes");
-  exactKeys(files, agentComponents, "archive file hashes");
+  exactKeys(files, componentsFor(root.schema_version), "archive file hashes");
   if (Object.values(files).some((value) => typeof value !== "string" || !/^[a-fA-F0-9]{64}$/.test(value))) throw new Error("invalid archive file checksum");
-  return { schema_version: 2, ...identity, target_triple: target,
+  return { ...identity, schema_version: root.schema_version, target_triple: target,
     files: Object.fromEntries(Object.entries(files).map(([name, digest]) => [name, (digest as string).toLowerCase()])) as AgentBundleManifest["files"],
-    components: parseAgentComponents(root.components, identity) };
+    components: parseAgentComponents(root.components, identity, root.schema_version) };
 }
 
 function octal(bytes: Buffer): number {
@@ -155,6 +187,7 @@ export async function inspectAgentArchive(bytes: Buffer, identity: AgentBundleId
   const manifestParts: Buffer[] = [];
   let pending = Buffer.alloc(0);
   let total = 0;
+  let payloadBytes = 0;
   let current: { name: string; remaining: number; padding: number; hash: Hash } | undefined;
   let padding = 0;
   let endBlocks = 0;
@@ -195,14 +228,17 @@ export async function inspectAgentArchive(bytes: Buffer, identity: AgentBundleId
         }
         if (size === 0 || size > (name === "manifest.json" ? maxAgentManifestBytes : maxArchiveBytes) ||
           (name !== "manifest.json" && (octal(header.subarray(100, 108)) & 0o111) === 0)) throw new Error("archive contains an invalid file size or executable mode");
+        payloadBytes = addAgentPayloadBytes(payloadBytes, size);
         seen.add(name);
         current = { name, remaining: size, padding: (512 - size % 512) % 512, hash: createHash("sha256") };
       }
     }
   }
-  if (current || padding || pending.length || endBlocks < 2 || seen.size !== agentComponents.length + 1) throw new Error("agent archive is truncated or incomplete");
+  if (current || padding || pending.length || endBlocks < 2 || !seen.has("manifest.json")) throw new Error("agent archive is truncated or incomplete");
   const manifest = parseAgentBundleManifest(Buffer.concat(manifestParts), identity, target);
-  for (const name of agentComponents) {
+  const names = componentsFor(manifest.schema_version);
+  if (seen.size !== names.length + 1) throw new Error("archive entries differ from declared schema");
+  for (const name of names) {
     if (hashes.get(name) !== manifest.files[name]) throw new Error(`archive checksum mismatch for ${name}`);
   }
   return manifest;
@@ -211,6 +247,7 @@ export async function inspectAgentArchive(bytes: Buffer, identity: AgentBundleId
 export function sameAgentComponents(left: AgentComponentMap, right: AgentComponentMap): boolean {
   return agentComponents.every((name) => {
     const a = left[name]; const b = right[name];
+    if (!a || !b) return a === b;
     return a.build.version === b.build.version && a.build.source_revision === b.build.source_revision &&
       a.build.source_fingerprint === b.build.source_fingerprint && a.build.dirty === b.build.dirty && sameProtocols(a.protocols, b.protocols);
   });

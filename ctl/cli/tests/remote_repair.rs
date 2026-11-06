@@ -307,7 +307,12 @@ esac
   ) -> usize {
     let mut transport = ctl_proto::IDENTITY_PREFACE.to_vec();
     transport.extend(frame(
-      &serde_json::to_value(ctl_proto::identity_protocol_offer()).unwrap(),
+      &serde_json::to_value(ctl_core::protocol::ProtocolOffer::new(
+        3,
+        ctl_proto::IDENTITY_CONTRACT_V1_0_3,
+        &[ctl_proto::IDENTITY_CONTRACT_V1_0_3],
+      ))
+      .unwrap(),
     ));
     let identity = json!({
       "remote_id": EXPECTED_ID,
@@ -337,17 +342,17 @@ esac
     fs::write(self.0.join("upgraded-transport"), transport).unwrap();
     fs::write(
       self.0.join("session-list"),
-      frame(&json!({"type": "session_list", "sessions": []})),
+      frame(&json!({"type": "session_clients", "sessions": []})),
     )
     .unwrap();
     let handshake = json!({
       "type": "handshake", "protocol": ctmux_proto::protocol_offer(),
       "client_name": "ctl", "client_version": env!("CARGO_PKG_VERSION"),
     });
-    let selection = json!({"protocol_version": ctl_proto::IDENTITY_PROTOCOL_VERSION});
+    let selection = json!({"protocol_version": ctl_proto::IDENTITY_CONTRACT_V1_0_3});
     frame(&selection).len()
       + frame(&handshake).len()
-      + frame(&json!({"type": "list_sessions"})).len()
+      + frame(&json!({"type": "list_session_clients"})).len()
   }
 
   fn script(&self, name: &str, body: &str) {
@@ -883,9 +888,9 @@ fn assert_successful_repair(
   assert_eq!(
     requests,
     [
-      json!({"protocol_version": ctl_proto::IDENTITY_PROTOCOL_VERSION}),
+      json!({"protocol_version": ctl_proto::IDENTITY_CONTRACT_V1_0_3}),
       json!({"type": "handshake", "protocol": ctmux_proto::protocol_offer(), "client_name": "ctl", "client_version": env!("CARGO_PKG_VERSION")}),
-      json!({"type": "list_sessions"}),
+      json!({"type": "list_session_clients"}),
     ]
   );
   assert_eq!(fs::read(fixture.0.join("hosts.json")).unwrap(), original);

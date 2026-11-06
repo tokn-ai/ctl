@@ -18,6 +18,8 @@ the user's request includes setup or the work requires an authorized setup.
 | Local interactive tasks | `ctl-taskd`, `ctmuxd` | Local machine |
 | Unix remote native commands / saved connections | `ctld` | SSH service |
 | Remote sessions/tasks | `ctld` on Unix client | `ctl-agent`, `ctmuxd` and/or `ctl-taskd` |
+| Current service connections on a managed remote account | Open a shell on that account | `ctl who` or `ctl who --json` |
+| Clients viewing terminal sessions | `ctl -H HOST ctmux clients` | `ctmux clients` on the account |
 | Managed ports | `ctld` on Unix client | SSH service |
 | Local VPN | `ctld`, Docker or Podman | Local container engine |
 | Remote VPN | `ctld` on Unix client | SSH service, `ctl-agent`, `ctld`, Docker or Podman |
@@ -33,6 +35,10 @@ executables. The desktop continues to prefer its own bundled helper.
 Terminal/task helpers normally resolve beside the client. Remote
 companions must belong to the SSH account and be available together through
 the managed installation or noninteractive PATH.
+
+The current six-executable remote bundle installs `ctl` and `ctmux` together
+with its services. In an ordinary SSH login, invoke `~/.tokn/ctl/current/ctl`
+or `~/.tokn/ctl/current/ctmux`, or add `~/.tokn/ctl/current` to `PATH`.
 
 For an authorized published CLI setup on macOS:
 
@@ -79,7 +85,7 @@ checkout helper before shared discovery; release builds use shared discovery.
 When working from the ctl source checkout, a local CLI/service build is:
 
 ```sh
-cargo build -p ctl-cli -p ctld -p ctmuxd -p ctl-taskd -p ctl-agent
+cargo build -p ctl-cli -p ctmux-cli -p ctld -p ctmuxd -p ctl-taskd -p ctl-agent
 ./target/debug/ctl --help
 ```
 

@@ -130,7 +130,7 @@ export function UpdateComponentsDialog({ targets, context, on_updated, on_close 
       </select></label>
       {provided ? <div className="component-update-source">
         <label className="component-update-field">Build directory or archive<input value={path} onChange={(event) => setPath(event.target.value)} placeholder="/path/to/build" /></label>
-        <label><input type="checkbox" checked={local_build} onChange={(event) => setLocalBuild(event.target.checked)} /><span>Native local build<small>A directory containing all four binaries for this computer's platform.</small></span></label>
+        <label><input type="checkbox" checked={local_build} onChange={(event) => setLocalBuild(event.target.checked)} /><span>Native local build<small>A directory of component binaries built for this computer's platform.</small></span></label>
         {local_build ? <label className="component-update-field">Signed ctld package directory (macOS full bundle)<input value={ctld_package} onChange={(event) => setCtldPackage(event.target.value)} placeholder="/path/to/ctld-package" /></label> : <p>Use a complete bundle directory, or a verified archive with its bundle-set.json beside it.</p>}
       </div> : <>
         <p className="component-update-hint">{source_choice === "selected" ? "Installs your selected build, or an included build when no selection exists." : source_choice === "automatic" ? "Uses the current publication for this app’s channel. Development Linux x64 builds use the working tree locally. Local macOS services retain their signed selected build." : "Checks the channel and downloads the published build for each host’s target. Cached older builds do not override the channel."} Local macOS full bundles need a signed ctld package.</p>

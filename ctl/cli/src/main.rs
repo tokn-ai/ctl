@@ -1,6 +1,7 @@
 mod bundled;
 mod caller_auth;
 mod commands;
+mod component_info;
 mod components;
 mod connection;
 mod history;
@@ -15,6 +16,7 @@ mod ssh_broker;
 mod table;
 mod target;
 mod vpn;
+mod who;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use ctl_task_cli::Command as TaskCommand;
@@ -93,6 +95,14 @@ enum RemotePlatform {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+  #[command(long_flag = "component-info", hide = true)]
+  ComponentInfo,
+  /// List active SSH service connections to this account.
+  Who {
+    /// Print connection records as JSON.
+    #[arg(long)]
+    json: bool,
+  },
   /// Review local daemon diagnostics without starting ctld.
   Logs(history::Arguments),
   /// Review local connection and credential audit history.
@@ -193,6 +203,13 @@ fn main() {
     None
   } else {
     let mut arguments = Arguments::parse();
+    if matches!(arguments.command, Command::ComponentInfo) {
+      if let Err(error) = component_info::print() {
+        eprintln!("ctl: {error}");
+        std::process::exit(1);
+      }
+      return;
+    }
     if let Err(error) = caller_auth::claim(&mut arguments) {
       eprintln!("ctl: {error}");
       std::process::exit(1);
@@ -450,7 +467,10 @@ mod tests {
     assert!(matches!(
       arguments.command,
       Command::Ctmux {
-        command: CtmuxCommand::List
+        command: CtmuxCommand::List {
+          unused: false,
+          json: false
+        }
       }
     ));
   }

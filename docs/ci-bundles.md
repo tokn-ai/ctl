@@ -6,8 +6,9 @@ Version tags also build standalone signed macOS `ctld.app` bundles and signed
 macOS `ctl` executables with those complete helper bundles embedded. The workflow
 automatically publishes component bundles to GitHub Pages. Version tags also
 publish those bundles in a GitHub Release. Component publication does not wait
-for desktop packaging, Apple signing, or notarization. Successful tagged desktop
-builds append their verified packages to the matching published release.
+for desktop packaging, Apple signing, or notarization. Successful tagged desktop,
+helper, and CLI builds append their verified packages to the matching published
+release even when another target fails.
 Manually maintained release notes and attachments are preserved.
 
 ## Build selection and versions
@@ -19,23 +20,35 @@ Manually maintained release notes and attachments are preserved.
 - A `v<version>` tag builds desktop, remote-agent, and standalone `ctld` bundles.
   The tag must match the workspace Cargo version, Tauri app version, and frontend
   package version. Both macOS architectures require distribution signing.
-  Component bundles publish first; successful signed desktop/helper builds append
-  their assets later. A prerelease tag publishes a GitHub prerelease and versioned
-  Pages archives without advancing the Stable channel.
+  Component bundles publish first; successful desktop, signed helper, and CLI
+  targets append their assets later. A prerelease tag publishes a GitHub
+  prerelease and versioned Pages archives without advancing the Stable channel.
 - A manual run builds remote-agent bundles. `build_desktop` defaults to `true`;
   setting it to `false` supports the remote-only workflow used by agent syncing.
   `build_ctld=true` additionally builds standalone signed macOS helpers and
   requires the Apple credentials below.
 
+Main-branch draft refreshes still require complete desktop builds and all
+requested helpers. Remote-only or failed refreshes leave that draft unchanged.
+
 Release bundle IDs are the version; development IDs append the source revision.
-Draft releases on `main` may omit standalone helpers. Any build that uploads
-helpers must include both architectures, with matching version, source revision,
-and Apple Team ID. Version builds always require both helpers, both bundled CLI
-architectures, and signed macOS
-desktop packages before appending desktop assets. The independently published
-component release can exist while those packages are still building or failed.
-Adding successful signed helper assets makes them available to `ctl setup` for
-that exact CLI version.
+Remote-agent publication requires all four targets because clients consume one
+complete bundle set. Tagged desktop packages, standalone helpers, and bundled
+CLIs are validated per available target. Each desktop target must contain every
+package format for that platform. Helpers must match the version and source revision,
+and available helper targets must agree on their Apple Team ID and protocols.
+Each bundled CLI requires its matching same-target helper and archive checksum.
+A helper can publish even if the later CLI build fails. On retry, CI restores the
+verified published helper before uploading the helper artifact or building the
+CLI, so the CLI embeds the same canonical helper bytes.
+
+Version-tag macOS packages still require distribution signing and notarization.
+Missing Apple credentials fail those jobs without preventing verified remote
+components or successful Linux desktop packages from publishing. Failed jobs
+remain failures in Actions, and release notes list the targets actually attached.
+Adding a successful signed helper makes it available to `ctl setup` for that
+exact CLI version and architecture. Missing targets can be appended after a
+successful retry.
 
 ## Component channels and GitHub Pages
 
@@ -101,14 +114,17 @@ Version publication validates all component archives before creating or updating
 a release. Existing main-draft development packages are removed before the tag
 release becomes public. Published assets are immutable: retries compare GitHub's
 asset SHA-256 digest and size, and mismatching bytes or manual-name collisions
-fail. Desktop appending revalidates the complete signed package/helper set and
-the published component manifest; it cannot replace another build's assets.
+fail. Appending packages revalidates each available target and the complete
+published component manifest; it cannot replace another build's assets.
 Tag reruns download and verify the first published component set as canonical,
-then reuse it for Pages and desktop resources. A complete published desktop set
-is likewise reused on rerun, accommodating timestamp/signing differences without
-replacing published files. An interrupted, incomplete desktop upload with
-conflicting rebuilt bytes fails explicitly instead of mixing package generations;
-resume it with the original run's artifacts.
+then reuse it for Pages and desktop resources. Published package targets are
+likewise reused on rerun, accommodating timestamp/signing differences without
+replacing published files while allowing missing targets to be appended.
+An interrupted upload must retain every already-published file's digest and size;
+conflicting rebuilt bytes fail explicitly instead of mixing package generations.
+Resume such an upload with the original run's artifacts. An existing empty
+release can receive its first verified component set after the tag's source
+revision is checked.
 
 ### Initial repository setup
 

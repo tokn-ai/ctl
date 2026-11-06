@@ -392,6 +392,18 @@ jobs:
           target/ctld-app/ctld.app
           target/ctld-assets
 
+      - name: Reuse the published canonical helper on retries
+        if: needs.metadata.outputs.bundle_id == needs.metadata.outputs.app_version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: >-
+          node scripts/ci/reuse-published-helper.mts
+          "${{ matrix.target }}"
+          "${{ needs.metadata.outputs.app_version }}"
+          "${{ needs.metadata.outputs.git_revision }}"
+          target/ctld-assets
+
       - name: Upload standalone ctld assets
         uses: actions/upload-artifact@v4
         with:
@@ -662,12 +674,13 @@ jobs:
           retention-days: 30
 
   draft-release:
-    name: Attach desktop release assets
+    name: Attach available release assets
     if: >-
-      always() && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) &&
+      !cancelled() &&
       needs.metadata.result == 'success' && needs.remote-agent-set.result == 'success' &&
-      needs.desktop.result == 'success' && (needs.ctld.result == 'success' || needs.ctld.result == 'skipped') &&
-      (github.ref == 'refs/heads/main' || needs.component-release.result == 'success')
+      ((github.ref == 'refs/heads/main' && needs.desktop.result == 'success' &&
+      (needs.ctld.result == 'success' || needs.ctld.result == 'skipped')) ||
+      (startsWith(github.ref, 'refs/tags/v') && needs.component-release.result == 'success'))
     needs:
       - metadata
       - remote-agent-set
@@ -705,7 +718,6 @@ jobs:
           path: target/release-assets
 
       - name: Download standalone ctld assets
-        if: needs.ctld.result == 'success'
         uses: actions/download-artifact@v5
         with:
           pattern: ctld-standalone-*
@@ -713,7 +725,7 @@ jobs:
           merge-multiple: true
 
       - name: Download bundled ctl CLI assets
-        if: needs.ctld.result == 'success' && needs.metadata.outputs.bundle_id == needs.metadata.outputs.app_version
+        if: needs.metadata.outputs.bundle_id == needs.metadata.outputs.app_version
         uses: actions/download-artifact@v5
         with:
           pattern: ctl-cli-*

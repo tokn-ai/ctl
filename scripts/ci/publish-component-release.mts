@@ -12,14 +12,66 @@ import { findRelease, managedLabelPrefix, mergeReleaseNotes, pages, releaseNotes
 interface Asset { id: number; name: string; label: string | null; digest?: string | null; size: number }
 interface Release { id: number; draft: boolean; tag_name: string; body: string | null; html_url: string; immutable?: boolean }
 
+async function verifyPublishedAsset(asset: Asset, directory: string): Promise<void> {
+  if (!asset.label?.startsWith(managedLabelPrefix) || asset.digest !== await fileDigest(join(directory, asset.name)) ||
+    asset.size !== (await lstat(join(directory, asset.name))).size) {
+    throw new Error(`Published canonical release asset does not match its immutable digest: ${asset.name}`);
+  }
+}
+
+function additionalManifestName(name: string, bundle_id: string): string | undefined {
+  if (/^(desktop-(?:x86_64|aarch64)-(?:unknown-linux-gnu|apple-darwin)|(?:ctld|ctl-cli)-(?:x86_64|aarch64)-apple-darwin)\.json$/.test(name)) return name;
+  const packages: [string, RegExp, string][] = [
+    [`ctmux-${bundle_id}-`, /^((?:x86_64|aarch64)-unknown-linux-gnu)\.(?:deb|rpm|AppImage)(?:\.sha256)?$/, "desktop"],
+    [`ctmux-${bundle_id}-`, /^((?:x86_64|aarch64)-apple-darwin)\.(?:dmg|app\.tar\.gz)(?:\.sha256)?$/, "desktop"],
+    [`ctld-${bundle_id}-`, /^((?:x86_64|aarch64)-apple-darwin)\.app\.tar\.gz(?:\.sha256)?$/, "ctld"],
+    [`ctl-${bundle_id}-`, /^((?:x86_64|aarch64)-apple-darwin)\.tar\.gz(?:\.sha256)?$/, "ctl-cli"],
+  ];
+  for (const [prefix, suffix, component] of packages) {
+    if (!name.startsWith(prefix)) continue;
+    const match = suffix.exec(name.slice(prefix.length));
+    if (match) return `${component}-${match[1]}.json`;
+  }
+  return undefined;
+}
+
+/** Restore published bytes per target, including targets absent from this run. */
+async function restoreCanonicalAssets(repository: string, identity: BundleIdentity, directory: string, mode: "components" | "desktop",
+  assets: Asset[], canonical: string, gh: GhRunner): Promise<void> {
+  const incoming = mode === "desktop"
+    ? await validateReleaseBundle(identity, directory, { allow_partial: true })
+    : await validatedComponentSet(directory, identity);
+  await mkdir(canonical);
+  for (const name of incoming.asset_names) await copyFile(join(directory, name), join(canonical, name));
+  const download = async (names: string[]): Promise<void> => {
+    if (names.length) await gh(["release", "download", `v${identity.app_version}`, "--repo", repository, "--dir", canonical,
+      "--clobber", ...names.flatMap((name) => ["--pattern", name])]);
+  };
+  await download(["bundle-set.json"]);
+  await verifyPublishedAsset(assets.find((asset) => asset.name === "bundle-set.json")!, canonical);
+  const manifest = parseAgentBundleSet(await readFile(join(canonical, "bundle-set.json")), identity);
+  const remote_names = Object.values(manifest.targets).flatMap((entry) => [entry.archive, `${entry.archive}.sha256`]);
+  const target_manifests = new Set([...incoming.asset_names, ...assets.map((asset) => asset.name)]
+    .filter((name) => additionalManifestName(name, identity.bundle_id) === name));
+  // A failed upload may have left a subset. Local files can fill missing names
+  // only when they validate against the already-published canonical manifest.
+  await download(assets.filter((asset) => remote_names.includes(asset.name) ||
+    (mode === "desktop" && target_manifests.has(additionalManifestName(asset.name, identity.bundle_id) ?? ""))).map((asset) => asset.name));
+  const verified = mode === "desktop"
+    ? await validateReleaseBundle(identity, canonical, { allow_partial: true })
+    : await validatedComponentSet(canonical, identity);
+  for (const asset of assets.filter((asset) => verified.asset_names.includes(asset.name))) await verifyPublishedAsset(asset, canonical);
+  for (const name of verified.asset_names) await copyFile(join(canonical, name), join(directory, name));
+}
+
 /** Components publish independently; later desktop builds only append verified assets. */
 export async function publishComponentRelease(repository: string, build: BundleIdentity, directory: string, mode: "components" | "desktop", gh: GhRunner): Promise<string> {
   const identity = componentIdentity(build);
   repositoryName(repository);
   if (identity.bundle_id !== identity.app_version) throw new Error("Only version-tag bundles may publish a release");
   const components = await validatedComponentSet(directory, identity);
-  let desktop = mode === "desktop" ? await validateReleaseBundle(identity, directory) : null;
-  const names = desktop?.asset_names ?? components.asset_names;
+  let desktop = mode === "desktop" ? await validateReleaseBundle(identity, directory, { allow_partial: true }) : null;
+  let names = desktop?.asset_names ?? components.asset_names;
   const tag = `v${identity.app_version}`;
   await verifyReleaseTag(gh, repository, tag, identity.git_revision, true);
   let release: Release | undefined = await findRelease(gh, repository, tag);
@@ -40,30 +92,22 @@ export async function publishComponentRelease(repository: string, build: BundleI
     }
     const endpoint = `repos/${repository}/releases/${release.id}`;
     const assets = await pages<Asset>(gh, `${endpoint}/assets?per_page=100`);
-    if (!release.draft && (mode === "components" || names.every((name) => assets.some((asset) => asset.name === name)))) {
+    const canonical_manifest = assets.find((asset) => asset.name === "bundle-set.json");
+    if (!release.draft && canonical_manifest) {
       // Tar metadata and signing can change on a fresh build. The first
       // published set is canonical for this tag, so reuse its verified bytes
       // instead of replacing them or making a harmless retry fail.
       const canonical = join(temp, "canonical");
-      await mkdir(canonical);
-      await gh(["release", "download", tag, "--repo", repository, "--dir", canonical, "--pattern", "bundle-set.json"]);
-      const manifest = parseAgentBundleSet(await readFile(join(canonical, "bundle-set.json")), identity);
-      const download_names = mode === "desktop" ? names.filter((name) => name !== "bundle-set.json") : Object.values(manifest.targets).flatMap((entry) => [entry.archive, `${entry.archive}.sha256`]);
-      await gh(["release", "download", tag, "--repo", repository, "--dir", canonical, ...download_names.flatMap((name) => ["--pattern", name])]);
-      const verified = mode === "desktop" ? await validateReleaseBundle(identity, canonical) : await validatedComponentSet(canonical, identity);
-      for (const name of verified.asset_names) {
-        const asset = assets.find((entry) => entry.name === name);
-        if (!asset?.label?.startsWith(managedLabelPrefix) || asset.digest !== await fileDigest(join(canonical, name)) || asset.size !== (await lstat(join(canonical, name))).size) {
-          throw new Error(`Published canonical release asset does not match its immutable digest: ${name}`);
-        }
-      }
-      for (const name of verified.asset_names) await copyFile(join(canonical, name), join(directory, name));
-      if (mode === "desktop") desktop = await validateReleaseBundle(identity, directory);
+      await restoreCanonicalAssets(repository, identity, directory, mode, assets, canonical, gh);
+      if (mode === "desktop") desktop = await validateReleaseBundle(identity, directory, { allow_partial: true });
+      names = desktop?.asset_names ?? (await validatedComponentSet(directory, identity)).asset_names;
+    } else if (!release.draft && mode === "desktop") {
+      throw new Error("Published component release has no canonical bundle-set.json; publish components before appending assets");
     }
     const matches = new Set<string>();
     const local = new Map<string, { digest: string; size: number }>();
     for (const name of names) local.set(name, { digest: await fileDigest(join(directory, name)), size: (await lstat(join(directory, name))).size });
-    if (!release.draft && !assets.some((asset) => asset.name === "bundle-set.json" && asset.label?.startsWith(managedLabelPrefix) &&
+    if (!release.draft && canonical_manifest && !assets.some((asset) => asset.name === "bundle-set.json" && asset.label?.startsWith(managedLabelPrefix) &&
       asset.digest === local.get("bundle-set.json")!.digest && asset.size === local.get("bundle-set.json")!.size)) {
       throw new Error("Published release has no matching immutable bundle-set.json; refusing assets from another build");
     }
@@ -77,7 +121,11 @@ export async function publishComponentRelease(repository: string, build: BundleI
       else if (!release.draft) throw new Error(`Published asset differs from this build and cannot be replaced: ${name}`);
     }
     if (release.immutable && names.some((name) => !matches.has(name))) throw new Error("GitHub release immutability prevents appending desktop assets after component publication; no release policy was changed");
-    for (const name of names) {
+    // Upload payloads before their manifests so interrupted uploads remain
+    // recoverable without advertising an incomplete target or component set.
+    const upload_rank = (name: string): number => !name.endsWith(".json") ? 0 : name.startsWith("ctl-cli-") ? 2 : 1;
+    const upload_names = [...names].sort((left, right) => upload_rank(left) - upload_rank(right));
+    for (const name of upload_names) {
       if (matches.has(name)) continue;
       const existing = assets.find((asset) => asset.name === name);
       if (existing) {
@@ -101,7 +149,7 @@ export async function publishComponentRelease(repository: string, build: BundleI
         await gh(["api", `repos/${repository}/releases/assets/${asset.id}`, "--method", "DELETE"]);
       }
     }
-    if (release.draft || (desktop && notes(latest.body) !== latest.body)) {
+    if (release.draft || ((desktop || !canonical_manifest) && notes(latest.body) !== latest.body)) {
       const prerelease = /^\d+\.\d+\.\d+-/.test(identity.app_version);
       await writeFile(payload, JSON.stringify({ tag_name: tag, body: notes(latest.body),
         ...(release.draft ? { draft: false, prerelease, make_latest: prerelease ? "false" : "legacy" } : {}) }));

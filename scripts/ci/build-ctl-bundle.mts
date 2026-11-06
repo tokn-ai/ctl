@@ -74,7 +74,10 @@ async function regularFile(path: string): Promise<void> {
   if (!info.isFile() || info.size === 0) throw new Error(`expected a nonempty regular file: ${path}`);
 }
 
-async function readHelper(directory: string, options: BuildCtlOptions): Promise<CtldBundleManifest> {
+export async function readVerifiedHelper(
+  directory: string,
+  options: Pick<BuildCtlOptions, "target" | "app_version" | "git_revision">,
+): Promise<CtldBundleManifest> {
   const path = join(directory, `ctld-${options.target}.json`);
   await regularFile(path);
   if ((await lstat(path)).size > 16 * 1024) throw new Error("oversized ctld manifest");
@@ -193,7 +196,7 @@ export async function buildCtlBundle(
     await mkdir(payload);
     let identityPath = options.signing_identity_path ?? env.CTLD_SIGNING_IDENTITY_OUTPUT;
     if (options.ctld_assets) {
-      const original = await readHelper(resolve(options.ctld_assets), options);
+      const original = await readVerifiedHelper(resolve(options.ctld_assets), options);
       // Snapshot the complete inputs so another build cannot replace them while
       // Cargo reads and embeds the bundle.
       await copyFile(join(options.ctld_assets, `ctld-${options.target}.json`), join(payload, `ctld-${options.target}.json`));
@@ -214,7 +217,7 @@ export async function buildCtlBundle(
         notary_key_path: env.APPLE_API_KEY_PATH!, notary_key_id: env.APPLE_API_KEY!, notary_issuer: env.APPLE_API_ISSUER!,
       }, (command, args) => invoke(command, args));
     }
-    const helper = await readHelper(payload, options);
+    const helper = await readVerifiedHelper(payload, options);
     if (options.ctld_assets) await verifyReusedHelper(payload, helper, temporary, (command, args) => invoke(command, args));
     if (!identityPath) throw new Error("a matching Developer ID signing identity file is required");
     await regularFile(identityPath);

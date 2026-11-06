@@ -45,7 +45,11 @@ async function writeAsset(directory: string, name: string, bytes: Buffer): Promi
   return { sha256, archive_size: bytes.length };
 }
 
-async function fixture(t: TestContext, buildIdentity: BundleIdentity = identity): Promise<string> {
+async function fixture(
+  t: TestContext,
+  buildIdentity: BundleIdentity = identity,
+  desktop_targets: string[] = desktopTargets,
+): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), "ctmux-release-test-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const addAsset = async (name: string): Promise<string> => {
@@ -59,7 +63,7 @@ async function fixture(t: TestContext, buildIdentity: BundleIdentity = identity)
   await writeFile(join(directory, "bundle-set.json"), JSON.stringify({
     schema_version: 1, ...buildIdentity, targets,
   }));
-  for (const target of desktopTargets) {
+  for (const target of desktop_targets) {
     const extensions = target.endsWith("apple-darwin") ? ["dmg", "app.tar.gz"] : ["deb", "rpm", "AppImage"];
     const assets: { name: string; sha256: string }[] = [];
     for (const extension of extensions) {
@@ -82,13 +86,14 @@ const exampleBundle: ReleaseBundle = {
   ...identity,
   asset_directory: "/tmp/bundles",
   asset_names: ["new-package.dmg", "desktop.json"],
+  desktop_targets: ["aarch64-apple-darwin"],
   unsigned_targets: ["aarch64-apple-darwin"],
   signed_ctld_targets: [],
   bundled_cli_targets: [],
 };
 
-async function ctldAssets(directory: string, buildIdentity: BundleIdentity = identity): Promise<void> {
-  for (const target of macTargets) {
+async function ctldAssets(directory: string, buildIdentity: BundleIdentity = identity, targets = macTargets): Promise<void> {
+  for (const target of targets) {
     const archive = `ctld-${buildIdentity.bundle_id}-${target}.app.tar.gz`;
     const asset = await writeAsset(directory, archive, Buffer.from(`fixture signed helper ${target}`));
     await writeFile(join(directory, `ctld-${target}.json`), JSON.stringify({
@@ -99,8 +104,8 @@ async function ctldAssets(directory: string, buildIdentity: BundleIdentity = ide
   }
 }
 
-async function cliAssets(directory: string, buildIdentity: BundleIdentity = identity): Promise<void> {
-  for (const target of macTargets) {
+async function cliAssets(directory: string, buildIdentity: BundleIdentity = identity, targets = macTargets): Promise<void> {
+  for (const target of targets) {
     const ctldManifest = JSON.parse(await readFile(join(directory, `ctld-${target}.json`), "utf8"));
     const archive = `ctl-${buildIdentity.bundle_id}-${target}.tar.gz`;
     const asset = await writeAsset(directory, archive, Buffer.from(`fixture signed ctl ${target}`));
@@ -222,8 +227,138 @@ test("validates all four desktop and remote targets and their checksum files", a
   const directory = await fixture(t);
   const bundle = await validateReleaseBundle(identity, directory);
   assert.equal(bundle.asset_names.length, 33);
+  assert.deepEqual(bundle.desktop_targets, desktopTargets);
   assert.deepEqual(bundle.unsigned_targets, ["x86_64-apple-darwin", "aarch64-apple-darwin"]);
   assert.ok(bundle.asset_names.includes("bundle-set.json"));
+});
+
+test("partial builds accept available Linux desktops without macOS helpers", async (t) => {
+  for (const buildIdentity of [identity, { ...identity, bundle_id: identity.app_version }]) {
+    await t.test(buildIdentity.bundle_id, async (t) => {
+      const target = desktopTargets[0]!;
+      const directory = await fixture(t, buildIdentity, [target]);
+      const bundle = await validateReleaseBundle(buildIdentity, directory, { allow_partial: true });
+      assert.deepEqual(bundle.desktop_targets, [target]);
+      assert.deepEqual(bundle.signed_ctld_targets, []);
+      assert.deepEqual(bundle.bundled_cli_targets, []);
+      assert.equal(bundle.asset_names.length, 16);
+      const notes = releaseNotes(bundle, null);
+      assert.ok(notes.includes(`Desktop packages: \`${target}\`.`));
+      assert.ok(!notes.includes("apple-darwin"));
+      assert.ok(!notes.includes("signed and notarized ctl CLI"));
+      await assert.rejects(validateReleaseBundle(buildIdentity, directory), /desktop-aarch64-unknown-linux-gnu.json/);
+    });
+  }
+});
+
+test("partial builds accept one standalone helper without desktop or CLI packages", async (t) => {
+  const versionIdentity = { ...identity, bundle_id: identity.app_version };
+  const target = macTargets[1]!;
+  const directory = await fixture(t, versionIdentity, []);
+  await ctldAssets(directory, versionIdentity, [target]);
+  const bundle = await validateReleaseBundle(versionIdentity, directory, { allow_partial: true });
+  assert.deepEqual(bundle.desktop_targets, []);
+  assert.deepEqual(bundle.signed_ctld_targets, [target]);
+  assert.deepEqual(bundle.bundled_cli_targets, []);
+  assert.equal(bundle.asset_names.length, 12);
+  const notes = releaseNotes(bundle, null);
+  assert.ok(notes.includes(`ctld.app bundles for: \`${target}\`.`));
+  assert.ok(!notes.includes("Desktop packages:"));
+  assert.ok(!notes.includes("both macOS architectures"));
+  assert.ok(!notes.includes("signed and notarized ctl CLI"));
+});
+
+test("partial builds accept a CLI only with its matching signed helper", async (t) => {
+  const target = macTargets[1]!;
+  const directory = await fixture(t, identity, []);
+  await ctldAssets(directory, identity, [target]);
+  await cliAssets(directory, identity, [target]);
+  const bundle = await validateReleaseBundle(identity, directory, { allow_partial: true });
+  assert.deepEqual(bundle.signed_ctld_targets, [target]);
+  assert.deepEqual(bundle.bundled_cli_targets, [target]);
+  assert.ok(releaseNotes(bundle, null).includes(`ctl CLI archives for: \`${target}\``));
+  const helper = JSON.parse(await readFile(join(directory, `ctld-${target}.json`), "utf8"));
+  await rm(join(directory, `ctld-${target}.json`));
+  await rm(join(directory, helper.archive));
+  await rm(join(directory, `${helper.archive}.sha256`));
+  await assert.rejects(validateReleaseBundle(identity, directory, { allow_partial: true }), /matching helper identity/);
+  await ctldAssets(directory, identity, [macTargets[0]!]);
+  await assert.rejects(validateReleaseBundle(identity, directory, { allow_partial: true }), /matching helper identity/);
+});
+
+test("partial validation still requires every remote target", async (t) => {
+  const directory = await fixture(t, identity, []);
+  const path = join(directory, "bundle-set.json");
+  const manifest = JSON.parse(await readFile(path, "utf8"));
+  delete manifest.targets[remoteTargets[0]!];
+  await writeFile(path, JSON.stringify(manifest));
+  await assert.rejects(validateReleaseBundle(identity, directory, { allow_partial: true }), /bundle-set targets contains missing/);
+});
+
+test("partial validation rejects incomplete, corrupt, mixed, or unrecognized present assets", async (t) => {
+  const target = desktopTargets[0]!;
+  await t.test("missing package format", async (t) => {
+    const directory = await fixture(t, identity, [target]);
+    const path = join(directory, `desktop-${target}.json`);
+    const manifest = JSON.parse(await readFile(path, "utf8"));
+    manifest.assets.pop();
+    await writeFile(path, JSON.stringify(manifest));
+    await assert.rejects(validateReleaseBundle(identity, directory, { allow_partial: true }), /every required package format/);
+  });
+  await t.test("missing checksum", async (t) => {
+    const directory = await fixture(t, identity, [target]);
+    await rm(join(directory, `ctmux-${identity.bundle_id}-${target}.deb.sha256`));
+    await assert.rejects(validateReleaseBundle(identity, directory, { allow_partial: true }), /ENOENT/);
+  });
+  await t.test("corrupt package", async (t) => {
+    const directory = await fixture(t, identity, [target]);
+    await writeFile(join(directory, `ctmux-${identity.bundle_id}-${target}.deb`), "corrupt");
+    await assert.rejects(validateReleaseBundle(identity, directory, { allow_partial: true }), /Checksum mismatch/);
+  });
+  await t.test("missing helper archive", async (t) => {
+    const directory = await fixture(t, identity, []);
+    await ctldAssets(directory, identity, [macTargets[0]!]);
+    await rm(join(directory, `ctld-${identity.bundle_id}-${macTargets[0]}.app.tar.gz`));
+    await assert.rejects(validateReleaseBundle(identity, directory, { allow_partial: true }), /ENOENT/);
+  });
+  await t.test("different helper Apple team", async (t) => {
+    const directory = await fixture(t, identity, []);
+    await ctldAssets(directory);
+    const path = join(directory, `ctld-${macTargets[1]}.json`);
+    const manifest = JSON.parse(await readFile(path, "utf8"));
+    manifest.team_identifier = "OTHERTEAM1";
+    await writeFile(path, JSON.stringify(manifest));
+    await assert.rejects(validateReleaseBundle(identity, directory, { allow_partial: true }), /same Apple team/);
+  });
+  await t.test("different helper protocols", async (t) => {
+    const directory = await fixture(t, identity, []);
+    await ctldAssets(directory);
+    const path = join(directory, `ctld-${macTargets[1]}.json`);
+    const manifest = JSON.parse(await readFile(path, "utf8"));
+    manifest.protocols[0] = { name: "ctld", build: 13, version: "1.1.13", supported_versions: ["1.0.12", "1.1.13"] };
+    await writeFile(path, JSON.stringify(manifest));
+    await assert.rejects(validateReleaseBundle(identity, directory, { allow_partial: true }), /same published protocols/);
+  });
+  await t.test("unsigned macOS version desktop", async (t) => {
+    const versionIdentity = { ...identity, bundle_id: identity.app_version };
+    const target = macTargets[0]!;
+    const directory = await fixture(t, versionIdentity, [target]);
+    const path = join(directory, `desktop-${target}.json`);
+    const manifest = JSON.parse(await readFile(path, "utf8"));
+    manifest.signing_mode = "unsigned";
+    await writeFile(path, JSON.stringify(manifest));
+    await assert.rejects(validateReleaseBundle(versionIdentity, directory, { allow_partial: true }), /require signed macOS desktop/);
+  });
+  await t.test("orphaned desktop assets", async (t) => {
+    const directory = await fixture(t, identity, [target]);
+    await rm(join(directory, `desktop-${target}.json`));
+    await assert.rejects(validateReleaseBundle(identity, directory, { allow_partial: true }), /Unexpected file/);
+  });
+  await t.test("unknown attachment", async (t) => {
+    const directory = await fixture(t, identity, []);
+    await writeFile(join(directory, "unexpected.zip"), "unexpected");
+    await assert.rejects(validateReleaseBundle(identity, directory, { allow_partial: true }), /Unexpected file/);
+  });
 });
 
 test("validates schema2 remote metadata against archive contents before publishing", async (t) => {
@@ -525,6 +660,14 @@ test("existing draft uploads managed assets, preserves manual assets and notes, 
   assert.equal(github.payloads[0]!.target_commitish, identity.git_revision);
   assert.ok(String(github.payloads[0]!.body).startsWith("Notes edited while the upload ran."));
   assert.ok(!("draft" in github.payloads[0]!));
+});
+
+test("remote-only runs leave existing draft assets and notes unchanged", async (t) => {
+  const directory = await fixture(t, identity, []);
+  const bundle = await validateReleaseBundle(identity, directory, { allow_partial: true });
+  const github = mockGithub({ assets: [{ id: 1, name: "previous-desktop.dmg", label: "ctmux-ci: previous-desktop.dmg" }] });
+  assert.deepEqual(await updateDraftRelease("tokn-ai/ctl", bundle, github.gh), { status: "skipped" });
+  assert.deepEqual(github.calls, []);
 });
 
 test("creates a draft at the exact build revision and uploads by returned ID without listing again", async () => {

@@ -226,15 +226,15 @@ pub const CONTRACT_V1_1_13: ProtocolVersion = ProtocolVersion::new(1, 1, 13);
 pub const CONTRACT_V1_1_14: ProtocolVersion = ProtocolVersion::new(1, 1, 14);
 pub const CONTRACT_V1_1_15: ProtocolVersion = ProtocolVersion::new(1, 1, 15);
 pub const CONTRACT_V1_1_16: ProtocolVersion = ProtocolVersion::new(1, 1, 16);
-pub const CONTRACT_V1_1_17: ProtocolVersion = ProtocolVersion::new(1, 1, 17);
-pub const PROTOCOL_VERSION: ProtocolVersion = CONTRACT_V1_1_17;
+pub const CONTRACT_V1_2_17: ProtocolVersion = ProtocolVersion::new(1, 2, 17);
+pub const PROTOCOL_VERSION: ProtocolVersion = CONTRACT_V1_2_17;
 pub const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[
   CONTRACT_V1_0_12,
   CONTRACT_V1_1_13,
   CONTRACT_V1_1_14,
   CONTRACT_V1_1_15,
   CONTRACT_V1_1_16,
-  CONTRACT_V1_1_17,
+  CONTRACT_V1_2_17,
 ];
 
 #[must_use]
@@ -422,10 +422,10 @@ pub fn recovery_watch_supported(protocol: ProtocolVersion) -> bool {
   SUPPORTED_PROTOCOL_VERSIONS.contains(&protocol) && protocol >= CONTRACT_V1_1_16
 }
 
-/// Protocol-aware listener discovery and UDP forwarding require broker 1.1.17.
+/// Protocol-aware listener discovery and UDP forwarding require broker 1.2.17.
 #[must_use]
 pub fn forwarding_protocol_supported(protocol: ProtocolVersion) -> bool {
-  SUPPORTED_PROTOCOL_VERSIONS.contains(&protocol) && protocol >= CONTRACT_V1_1_17
+  SUPPORTED_PROTOCOL_VERSIONS.contains(&protocol) && protocol >= CONTRACT_V1_2_17
 }
 
 /// Resolve a remote VPN's SSH owner using the exact prefix that reaches it.
@@ -1806,7 +1806,7 @@ mod tests {
     for contract in SUPPORTED_PROTOCOL_VERSIONS {
       assert_eq!(
         forwarding_protocol_supported(*contract),
-        *contract == CONTRACT_V1_1_17
+        *contract == CONTRACT_V1_2_17
       );
     }
     assert!(!forwarding_protocol_supported(ProtocolVersion::new(

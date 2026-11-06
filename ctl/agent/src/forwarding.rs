@@ -1,11 +1,21 @@
-//! A disposable SSH process owns one connected remote UDP socket.
+//! One disposable SSH process multiplexes independent remote UDP peer sockets.
 
+use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;
 
-use ctl_proto::forwarding::{self, MAX_DATAGRAM_BYTES, Request, Response};
+use ctl_proto::forwarding::{
+  self, Frame, MAX_DATAGRAM_BYTES, MAX_PEERS, PEER_IDLE, Request, Response,
+};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt as _};
 use tokio::net::UdpSocket;
+use tokio::sync::mpsc;
+use tokio::task::{AbortHandle, JoinSet};
+
+const PEER_QUEUE: usize = 8;
+const STREAM_QUEUE: usize = 64;
+// Receive every UDP payload whole before applying the published frame bound.
+const RECEIVE_BUFFER_BYTES: usize = 65_536;
 
 /// Serves this process's SSH descriptors without retaining them after EOF.
 ///
@@ -33,7 +43,7 @@ pub async fn serve(
   let socket = tokio::time::timeout(forwarding::STARTUP_TIMEOUT, async {
     writer.write_all(forwarding::PREFACE).await?;
     writer.flush().await?;
-    forwarding::accept_contract(reader, writer).await?;
+    let protocol = forwarding::accept_contract(reader, writer).await?;
     let request: Request = forwarding::read(reader).await?;
     if let Err(error) = request.validate() {
       forwarding::write(
@@ -48,7 +58,7 @@ pub async fn serve(
     match connect(&request).await {
       Ok(socket) => {
         forwarding::write(writer, &Response::Ready).await?;
-        Ok(Some(socket))
+        Ok(Some((protocol, socket)))
       }
       Err(error) => {
         forwarding::write(
@@ -64,10 +74,14 @@ pub async fn serve(
   })
   .await
   .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "UDP forwarding setup timed out"))??;
-  let Some(socket) = socket else {
+  let Some((protocol, socket)) = socket else {
     return Ok(());
   };
-  relay(reader, writer, &socket).await
+  if protocol == forwarding::CONTRACT_V1_0_1 {
+    relay(reader, writer, &socket).await
+  } else {
+    relay_multiplexed(reader, writer, socket).await
+  }
 }
 
 async fn connect(request: &Request) -> io::Result<UdpSocket> {
@@ -121,6 +135,142 @@ async fn relay(
   }
 }
 
+struct Peer {
+  sender: mpsc::Sender<Vec<u8>>,
+  abort: AbortHandle,
+}
+
+async fn relay_multiplexed(
+  reader: &mut (impl AsyncRead + Unpin),
+  writer: &mut (impl AsyncWrite + Unpin),
+  socket: UdpSocket,
+) -> io::Result<()> {
+  let (input, packets) = mpsc::channel(STREAM_QUEUE);
+  let (output, mut replies) = mpsc::channel(STREAM_QUEUE);
+  let receive = async {
+    while let Some(packet) = forwarding::read_packet(reader).await? {
+      if input.send(packet).await.is_err() {
+        break;
+      }
+    }
+    Ok(())
+  };
+  let send = async {
+    while let Some(packet) = replies.recv().await {
+      forwarding::write_packet(writer, &packet).await?;
+    }
+    Ok(())
+  };
+  // Framed reads and writes stay alive as complete loops. A peer reply cannot
+  // cancel a partially consumed input frame or interleave output frame bytes.
+  tokio::select! {
+    result = receive => result,
+    result = send => result,
+    result = manage_peers(socket, packets, output) => result,
+  }
+}
+
+async fn manage_peers(
+  socket: UdpSocket,
+  mut packets: mpsc::Receiver<Frame>,
+  output: mpsc::Sender<Frame>,
+) -> io::Result<()> {
+  let address = socket.peer_addr()?;
+  let mut initial = Some(socket);
+  let mut highest_peer_id = 0;
+  let mut peers: HashMap<u64, Peer> = HashMap::new();
+  let mut tasks = JoinSet::new();
+  loop {
+    tokio::select! {
+      biased;
+      finished = tasks.join_next(), if !tasks.is_empty() => {
+        let peer_id = match finished {
+          Some(Ok(peer_id)) => Some(peer_id),
+          Some(Err(error)) => peers.iter().find_map(|(&peer_id, peer)| {
+            (peer.abort.id() == error.id()).then_some(peer_id)
+          }),
+          None => None,
+        };
+        if let Some(peer_id) = peer_id
+          && peers.remove(&peer_id).is_some()
+          && output.send(Frame::Close { peer_id }).await.is_err()
+        {
+          break;
+        }
+      },
+      packet = packets.recv() => match packet {
+        Some(Frame::Close { peer_id }) => {
+          if let Some(peer) = peers.remove(&peer_id) { peer.abort.abort(); }
+        },
+        Some(Frame::Datagram { peer_id, payload }) => {
+          if let Some(peer) = peers.get(&peer_id) {
+            // UDP traffic is lossy under load; one slow destination must not
+            // stall every association or allocate an unbounded packet queue.
+            let _ = peer.sender.try_send(payload);
+            continue;
+          }
+          // IDs are strictly increasing when an association is created. A
+          // delayed frame cannot resurrect a closed peer or reuse its socket.
+          if peer_id <= highest_peer_id || peers.len() >= MAX_PEERS {
+            highest_peer_id = highest_peer_id.max(peer_id);
+            if output.send(Frame::Close { peer_id }).await.is_err() { break; }
+            continue;
+          }
+          highest_peer_id = peer_id;
+          let socket = if let Some(socket) = initial.take() {
+            socket
+          } else if let Ok(socket) = connect_address(address).await {
+            socket
+          } else {
+            if output.send(Frame::Close { peer_id }).await.is_err() { break; }
+            continue;
+          };
+          let (sender, receiver) = mpsc::channel(PEER_QUEUE);
+          let _ = sender.try_send(payload);
+          let output = output.clone();
+          let abort = tasks.spawn(async move {
+            let _ = relay_peer(peer_id, socket, receiver, &output).await;
+            peer_id
+          });
+          peers.insert(peer_id, Peer { sender, abort });
+        },
+        None => break,
+      },
+    }
+  }
+  tasks.shutdown().await;
+  Ok(())
+}
+
+async fn relay_peer(
+  peer_id: u64,
+  socket: UdpSocket,
+  mut packets: mpsc::Receiver<Vec<u8>>,
+  output: &mpsc::Sender<Frame>,
+) -> io::Result<()> {
+  let mut buffer = vec![0; RECEIVE_BUFFER_BYTES];
+  let mut deadline = tokio::time::Instant::now() + PEER_IDLE;
+  loop {
+    tokio::select! {
+      () = tokio::time::sleep_until(deadline) => return Ok(()),
+      packet = packets.recv() => {
+        let Some(packet) = packet else { return Ok(()); };
+        socket.send(&packet).await?;
+        deadline = tokio::time::Instant::now() + PEER_IDLE;
+      },
+      received = socket.recv(&mut buffer) => {
+        let size = received?;
+        if size > MAX_DATAGRAM_BYTES { continue; }
+        deadline = tokio::time::Instant::now() + PEER_IDLE;
+        let packet = Frame::Datagram { peer_id, payload: buffer[..size].to_vec() };
+        if matches!(output.try_send(packet), Err(mpsc::error::TrySendError::Closed(_))) {
+          return Ok(());
+        }
+      },
+    }
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -134,13 +284,40 @@ mod tests {
     tokio::io::ReadHalf<tokio::io::DuplexStream>,
     tokio::io::WriteHalf<tokio::io::DuplexStream>,
   ) {
+    open_for(stream, port, false).await
+  }
+
+  async fn open_for(
+    stream: tokio::io::DuplexStream,
+    port: u16,
+    multiplexed: bool,
+  ) -> (
+    tokio::io::ReadHalf<tokio::io::DuplexStream>,
+    tokio::io::WriteHalf<tokio::io::DuplexStream>,
+  ) {
     let (mut reader, mut writer) = tokio::io::split(stream);
     let mut preface = vec![0; forwarding::PREFACE.len()];
     reader.read_exact(&mut preface).await.unwrap();
     assert_eq!(preface, forwarding::PREFACE);
-    forwarding::negotiate_contract(&mut reader, &mut writer)
+    if multiplexed {
+      assert_eq!(
+        forwarding::negotiate_multiplex_contract(&mut reader, &mut writer)
+          .await
+          .unwrap(),
+        forwarding::CONTRACT_V1_0_2
+      );
+    } else {
+      let offer: ctl_core::protocol::ProtocolOffer = forwarding::read(&mut reader).await.unwrap();
+      assert!(offer.accepts(forwarding::CONTRACT_V1_0_1));
+      forwarding::write(
+        &mut writer,
+        &serde_json::json!({
+          "protocol_version": forwarding::CONTRACT_V1_0_1,
+        }),
+      )
       .await
       .unwrap();
+    }
     forwarding::write(
       &mut writer,
       &Request {
@@ -155,6 +332,211 @@ mod tests {
       Response::Ready
     ));
     (reader, writer)
+  }
+
+  #[tokio::test]
+  async fn one_stream_preserves_more_than_ten_independent_udp_peers() {
+    let echo = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let port = echo.local_addr().unwrap().port();
+    let echo = tokio::spawn(async move {
+      let mut addresses = std::collections::HashSet::new();
+      let mut buffer = [0; 32];
+      for _ in 0..MAX_PEERS {
+        let (count, address) = echo.recv_from(&mut buffer).await.unwrap();
+        assert!(addresses.insert(address));
+        echo.send_to(&buffer[..count], address).await.unwrap();
+      }
+      assert_eq!(addresses.len(), MAX_PEERS);
+      let (count, address) = echo.recv_from(&mut buffer).await.unwrap();
+      echo.send_to(&buffer[..count], address).await.unwrap();
+    });
+    let (client, server) = tokio::io::duplex(4096);
+    let server = tokio::spawn(async move {
+      let (mut reader, mut writer) = tokio::io::split(server);
+      serve(&mut reader, &mut writer).await.unwrap();
+    });
+    let (mut reader, mut writer) = open_for(client, port, true).await;
+    let peer_count = u64::try_from(MAX_PEERS).unwrap();
+    for peer_id in 1_u64..=peer_count {
+      forwarding::write_packet(
+        &mut writer,
+        &Frame::Datagram {
+          peer_id,
+          payload: peer_id.to_be_bytes().to_vec(),
+        },
+      )
+      .await
+      .unwrap();
+    }
+    let mut seen = std::collections::HashSet::new();
+    for _ in 0..MAX_PEERS {
+      let packet =
+        tokio::time::timeout(Duration::from_secs(3), forwarding::read_packet(&mut reader))
+          .await
+          .unwrap()
+          .unwrap()
+          .unwrap();
+      let Frame::Datagram { peer_id, payload } = packet else {
+        panic!("peer unexpectedly closed");
+      };
+      assert_eq!(payload, peer_id.to_be_bytes());
+      assert!(seen.insert(peer_id));
+    }
+    forwarding::write_packet(
+      &mut writer,
+      &Frame::Datagram {
+        peer_id: peer_count + 1,
+        payload: vec![1],
+      },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+      forwarding::read_packet(&mut reader).await.unwrap(),
+      Some(Frame::Close {
+        peer_id: peer_count + 1
+      })
+    );
+    forwarding::write_packet(&mut writer, &Frame::Close { peer_id: 1 })
+      .await
+      .unwrap();
+    forwarding::write_packet(
+      &mut writer,
+      &Frame::Datagram {
+        peer_id: peer_count + 2,
+        payload: vec![2],
+      },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+      forwarding::read_packet(&mut reader).await.unwrap(),
+      Some(Frame::Datagram {
+        peer_id: peer_count + 2,
+        payload: vec![2]
+      })
+    );
+    writer.shutdown().await.unwrap();
+    server.await.unwrap();
+    echo.await.unwrap();
+  }
+
+  #[tokio::test]
+  async fn closing_one_peer_cannot_reuse_it_or_interrupt_other_peers() {
+    let echo = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let port = echo.local_addr().unwrap().port();
+    let (client, server) = tokio::io::duplex(4096);
+    let server = tokio::spawn(async move {
+      let (mut reader, mut writer) = tokio::io::split(server);
+      serve(&mut reader, &mut writer).await.unwrap();
+    });
+    let (mut reader, mut writer) = open_for(client, port, true).await;
+    let mut addresses = Vec::new();
+    let mut buffer = [0; 32];
+    for peer_id in [1, 2] {
+      forwarding::write_packet(
+        &mut writer,
+        &Frame::Datagram {
+          peer_id,
+          payload: vec![],
+        },
+      )
+      .await
+      .unwrap();
+      let (count, address) = echo.recv_from(&mut buffer).await.unwrap();
+      assert_eq!(count, 0);
+      addresses.push(address);
+    }
+    forwarding::write_packet(&mut writer, &Frame::Close { peer_id: 1 })
+      .await
+      .unwrap();
+    forwarding::write_packet(
+      &mut writer,
+      &Frame::Datagram {
+        peer_id: 1,
+        payload: vec![1],
+      },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+      forwarding::read_packet(&mut reader).await.unwrap(),
+      Some(Frame::Close { peer_id: 1 })
+    );
+    echo.send_to(&[2], addresses[1]).await.unwrap();
+    assert_eq!(
+      forwarding::read_packet(&mut reader).await.unwrap(),
+      Some(Frame::Datagram {
+        peer_id: 2,
+        payload: vec![2]
+      })
+    );
+    forwarding::write_packet(
+      &mut writer,
+      &Frame::Datagram {
+        peer_id: 3,
+        payload: vec![3],
+      },
+    )
+    .await
+    .unwrap();
+    let (count, third) = echo.recv_from(&mut buffer).await.unwrap();
+    assert_eq!(&buffer[..count], &[3]);
+    assert_ne!(third, addresses[1]);
+    writer.shutdown().await.unwrap();
+    server.await.unwrap();
+  }
+
+  #[tokio::test]
+  async fn multiplexed_reply_does_not_discard_a_partial_upload_frame() {
+    let echo = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let port = echo.local_addr().unwrap().port();
+    let (client, server) = tokio::io::duplex(4096);
+    let server = tokio::spawn(async move {
+      let (mut reader, mut writer) = tokio::io::split(server);
+      serve(&mut reader, &mut writer).await.unwrap();
+    });
+    let (mut reader, mut writer) = open_for(client, port, true).await;
+    forwarding::write_packet(
+      &mut writer,
+      &Frame::Datagram {
+        peer_id: 1,
+        payload: vec![1],
+      },
+    )
+    .await
+    .unwrap();
+    let mut buffer = [0; 32];
+    let (_, address) = echo.recv_from(&mut buffer).await.unwrap();
+    let mut bytes = Vec::new();
+    forwarding::write_packet(
+      &mut bytes,
+      &Frame::Datagram {
+        peer_id: 1,
+        payload: vec![3],
+      },
+    )
+    .await
+    .unwrap();
+    writer.write_all(&bytes[..5]).await.unwrap();
+    writer.flush().await.unwrap();
+    echo.send_to(&[2], address).await.unwrap();
+    assert_eq!(
+      forwarding::read_packet(&mut reader).await.unwrap(),
+      Some(Frame::Datagram {
+        peer_id: 1,
+        payload: vec![2]
+      })
+    );
+    writer.write_all(&bytes[5..]).await.unwrap();
+    writer.flush().await.unwrap();
+    let (count, _) = tokio::time::timeout(Duration::from_secs(3), echo.recv_from(&mut buffer))
+      .await
+      .unwrap()
+      .unwrap();
+    assert_eq!(&buffer[..count], &[3]);
+    writer.shutdown().await.unwrap();
+    server.await.unwrap();
   }
 
   #[tokio::test]

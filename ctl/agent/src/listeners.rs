@@ -1,4 +1,6 @@
-use ctl_proto::{PortProtocol, TcpListenerCatalog};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use ctl_proto::PortProtocol;
+use ctl_proto::TcpListenerCatalog;
 
 #[derive(Debug, Clone, Copy, Default, clap::ValueEnum)]
 pub enum Protocol {
@@ -8,6 +10,7 @@ pub enum Protocol {
   Any,
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 impl Protocol {
   fn includes(self, protocol: PortProtocol) -> bool {
     matches!(self, Self::Any)
@@ -183,6 +186,7 @@ mod linux {
 
 #[cfg(any(target_os = "macos", test))]
 mod macos {
+  #[cfg(target_os = "macos")]
   use std::collections::BTreeSet;
   #[cfg(target_os = "macos")]
   use std::process::Command;
@@ -202,7 +206,9 @@ mod macos {
         continue;
       }
       let mut command = Command::new("/usr/sbin/lsof");
-      command.args(["-nP", "-Fn"]);
+      // Socket type disambiguates lsof's identical `*:port` names for IPv4
+      // and IPv6. File markers prevent carrying a type across socket records.
+      command.args(["-nP", "-Fftn"]);
       let label = match transport {
         PortProtocol::Tcp => {
           command.args(["-iTCP", "-sTCP:LISTEN"]);
@@ -221,11 +227,7 @@ mod macos {
         }
       };
       let stdout = String::from_utf8_lossy(&output.stdout);
-      listeners.extend(
-        stdout
-          .lines()
-          .filter_map(|line| parse_name_field(line, transport)),
-      );
+      listeners.extend(parse_lsof(&stdout, transport));
       // lsof returns 1 with no stderr when no matching sockets exist.
       if !output.status.success() {
         let message = String::from_utf8_lossy(&output.stderr).trim().to_owned();
@@ -240,8 +242,52 @@ mod macos {
     }
   }
 
-  fn parse_name_field(line: &str, protocol: PortProtocol) -> Option<TcpListener> {
-    let endpoint = line.strip_prefix('n')?;
+  #[derive(Clone, Copy)]
+  enum AddressFamily {
+    Ipv4,
+    Ipv6,
+  }
+
+  #[derive(Default)]
+  struct SocketFields<'a> {
+    family: Option<AddressFamily>,
+    endpoint: Option<&'a str>,
+  }
+
+  impl SocketFields<'_> {
+    fn listener(self, protocol: PortProtocol) -> Option<TcpListener> {
+      parse_name_field(self.endpoint?, self.family, protocol)
+    }
+  }
+
+  fn parse_lsof(contents: &str, protocol: PortProtocol) -> Vec<TcpListener> {
+    let mut listeners = Vec::new();
+    let mut fields = SocketFields::default();
+    for line in contents.lines() {
+      match line.as_bytes().first() {
+        Some(b'p' | b'f') => {
+          listeners.extend(std::mem::take(&mut fields).listener(protocol));
+        }
+        Some(b't') => {
+          fields.family = match &line[1..] {
+            "IPv4" => Some(AddressFamily::Ipv4),
+            "IPv6" => Some(AddressFamily::Ipv6),
+            _ => None,
+          };
+        }
+        Some(b'n') => fields.endpoint = Some(&line[1..]),
+        _ => {}
+      }
+    }
+    listeners.extend(fields.listener(protocol));
+    listeners
+  }
+
+  fn parse_name_field(
+    endpoint: &str,
+    family: Option<AddressFamily>,
+    protocol: PortProtocol,
+  ) -> Option<TcpListener> {
     if endpoint.contains("->") {
       return None;
     }
@@ -253,7 +299,10 @@ mod macos {
       .unwrap_or(address);
     Some(TcpListener {
       bind_address: match bind_address {
-        "*" => "0.0.0.0".into(),
+        "*" => match family? {
+          AddressFamily::Ipv4 => "0.0.0.0".into(),
+          AddressFamily::Ipv6 => "::".into(),
+        },
         value => value.to_owned(),
       },
       port,
@@ -269,7 +318,7 @@ mod macos {
     fn parses_lsof_name_fields_without_connections() {
       for protocol in [PortProtocol::Tcp, PortProtocol::Udp] {
         assert_eq!(
-          parse_name_field("n127.0.0.1:5432", protocol),
+          parse_name_field("127.0.0.1:5432", Some(AddressFamily::Ipv4), protocol),
           Some(TcpListener {
             bind_address: "127.0.0.1".into(),
             port: 5432,
@@ -277,20 +326,80 @@ mod macos {
           })
         );
         assert_eq!(
-          parse_name_field("n127.0.0.1:5432->127.0.0.1:60000", protocol),
+          parse_name_field(
+            "127.0.0.1:5432->127.0.0.1:60000",
+            Some(AddressFamily::Ipv4),
+            protocol
+          ),
           None
         );
         assert_eq!(
-          parse_name_field("n[::1]:53", protocol)
+          parse_name_field("[::1]:53", Some(AddressFamily::Ipv6), protocol)
             .unwrap()
             .bind_address,
           "::1"
         );
         assert_eq!(
-          parse_name_field("n*:53", protocol).unwrap().bind_address,
+          parse_name_field("*:53", Some(AddressFamily::Ipv4), protocol)
+            .unwrap()
+            .bind_address,
           "0.0.0.0"
         );
+        assert_eq!(
+          parse_name_field("*:53", Some(AddressFamily::Ipv6), protocol)
+            .unwrap()
+            .bind_address,
+          "::"
+        );
       }
+    }
+
+    #[test]
+    fn parses_mixed_wildcard_families_for_tcp_and_udp() {
+      let fields = "p101\nf3\ntIPv4\nn*:53\nf4\ntIPv6\nn*:53\nf5\nn[::1]:5353\ntIPv6\n";
+      for protocol in [PortProtocol::Tcp, PortProtocol::Udp] {
+        assert_eq!(
+          parse_lsof(fields, protocol),
+          vec![
+            TcpListener {
+              bind_address: "0.0.0.0".into(),
+              port: 53,
+              protocol
+            },
+            TcpListener {
+              bind_address: "::".into(),
+              port: 53,
+              protocol
+            },
+            TcpListener {
+              bind_address: "::1".into(),
+              port: 5353,
+              protocol
+            },
+          ]
+        );
+      }
+      let endpoints: std::collections::BTreeSet<_> = [PortProtocol::Tcp, PortProtocol::Udp]
+        .into_iter()
+        .flat_map(|protocol| parse_lsof(fields, protocol))
+        .collect();
+      assert_eq!(endpoints.len(), 6);
+    }
+
+    #[test]
+    fn socket_family_is_not_inherited_across_file_or_process_records() {
+      let fields =
+        "p101\nf3\ntIPv6\nn*:53\nf4\nn*:54\nf5\ntREG\nn*:55\np102\nn*:56\nf3\ntIPv4\nn*:57\n";
+      let listeners = parse_lsof(fields, PortProtocol::Udp);
+      assert_eq!(
+        listeners
+          .iter()
+          .map(|listener| listener.port)
+          .collect::<Vec<_>>(),
+        vec![53, 57]
+      );
+      assert_eq!(listeners[0].bind_address, "::");
+      assert_eq!(listeners[1].bind_address, "0.0.0.0");
     }
   }
 }

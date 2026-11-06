@@ -796,7 +796,7 @@ fn validate_request_contract(
   };
   if !forwarding_protocol.is_tcp() && !ctl_ipc::forwarding_protocol_supported(protocol) {
     return Err(RequestError::InvalidRequest(
-      "UDP forwarding requires ctld 1.1.17",
+      "UDP forwarding requires ctld 1.2.17",
     ));
   }
   if matches!(request, ClientMessage::EnsureMasterQuiet { .. })
@@ -3154,13 +3154,13 @@ mod tests {
           },
         ] {
           let result = validate_request_contract(&request, selected);
-          if protocol == ctl_ipc::PortForwardProtocol::Tcp || selected >= ctl_ipc::CONTRACT_V1_1_17
+          if protocol == ctl_ipc::PortForwardProtocol::Tcp || selected >= ctl_ipc::CONTRACT_V1_2_17
           {
             result.unwrap();
           } else {
             assert!(matches!(
               result,
-              Err(RequestError::InvalidRequest(message)) if message.contains("1.1.17")
+              Err(RequestError::InvalidRequest(message)) if message.contains("1.2.17")
             ));
           }
         }
@@ -3174,7 +3174,7 @@ mod tests {
     for selected in ctl_ipc::SUPPORTED_PROTOCOL_VERSIONS
       .iter()
       .copied()
-      .filter(|selected| *selected < ctl_ipc::CONTRACT_V1_1_17)
+      .filter(|selected| *selected < ctl_ipc::CONTRACT_V1_2_17)
     {
       for protocol in [
         ctl_ipc::PortForwardProtocol::Udp,
@@ -3195,12 +3195,12 @@ mod tests {
           let (mut client, mut server) = ctl_ipc::Stream::pair().unwrap();
           assert!(matches!(
             handle_request(&mut server, &state, request, selected).await,
-            Err(RequestError::InvalidRequest(message)) if message.contains("1.1.17")
+            Err(RequestError::InvalidRequest(message)) if message.contains("1.2.17")
           ));
           assert!(matches!(
             ctl_ipc::read_frame::<_, ServerMessage>(&mut client).await.unwrap(),
             Some(ServerMessage::Error { code, message })
-              if code == "ctld_protocol_error" && message.contains("1.1.17")
+              if code == "ctld_protocol_error" && message.contains("1.2.17")
           ));
           assert!(
             state.targets.lock().unwrap().is_empty(),
@@ -3253,7 +3253,7 @@ mod tests {
         .iter()
         .map(|status| status.forward.protocol)
         .collect();
-      if selected >= ctl_ipc::CONTRACT_V1_1_17 {
+      if selected >= ctl_ipc::CONTRACT_V1_2_17 {
         assert_eq!(protocols.len(), 3);
         assert!(protocols.contains(&ctl_ipc::PortForwardProtocol::Tcp));
         assert!(protocols.contains(&ctl_ipc::PortForwardProtocol::Udp));

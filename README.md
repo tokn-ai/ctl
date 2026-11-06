@@ -879,11 +879,11 @@ ctl --destination my-ssh-alias port remove temporary-web
 TCP and UDP on the selected local port. Lists show each rule's protocol.
 The desktop discovers TCP and UDP endpoints and defaults a new rule to the
 selected endpoint's protocol, with an **Any (TCP/UDP)** creation option.
-UDP and Any require ctld protocol `1.1.17` and an updated remote `ctl-agent`
-implementing `ctl_forwarding 1.0.1`. Existing TCP rules remain compatible.
-UDP peers have separate remote sockets; idle peer channels expire after 60
-seconds without traffic in either direction. Each rule admits up to 64 active peers, with
-bounded packet queues that discard excess UDP traffic.
+UDP and Any require ctld protocol `1.2.17` and an updated remote `ctl-agent`
+implementing `ctl_forwarding 1.0.2`. Existing TCP rules remain compatible.
+Each UDP rule uses one SSH session, multiplexing up to 64 local peers onto
+separate remote UDP sockets. Peer associations expire after 60 seconds without
+traffic in either direction; bounded packet queues discard excess UDP traffic.
 Without `--id`, repeating the same protocol and local and remote endpoints on the same
 connection method reuses the existing forward ID. An explicit `--id` selects
 that record for updates and removal.

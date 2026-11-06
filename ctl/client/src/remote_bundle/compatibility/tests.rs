@@ -429,6 +429,54 @@ fn client_and_every_internal_companion_contract_must_explicitly_intersect() {
 }
 
 #[test]
+fn forwarding_advertisements_are_optional_but_must_explicitly_intersect_when_present() {
+  let mut fixture = Fixture::new("0.0.9", &"b".repeat(40));
+  let parsed = BundleSet::parse_intrinsic(&serde_json::to_vec(&fixture.outer).unwrap()).unwrap();
+  let mut components = parsed.target(TARGET).unwrap().components.clone().unwrap();
+  components
+    .get_mut("ctl-agent")
+    .unwrap()
+    .protocols
+    .retain(|protocol| protocol.name != "ctl_forwarding");
+  let mut check = |components: &BTreeMap<String, ComponentInfo>, expected| {
+    assert_eq!(compatible(components), expected);
+    #[cfg(unix)]
+    assert_eq!(crate::components::compatible(components), expected);
+    fixture.outer["targets"][TARGET]["components"] = serde_json::to_value(components).unwrap();
+    let parsed = BundleSet::parse_intrinsic(&serde_json::to_vec(&fixture.outer).unwrap()).unwrap();
+    assert_eq!(parsed.is_compatible(TARGET).unwrap(), expected);
+  };
+  // Original agents have no forwarding advertisement and remain usable for TCP.
+  check(&components, true);
+  for contract in ctl_proto::forwarding::SUPPORTED_PROTOCOL_VERSIONS {
+    let mut advertised = components.clone();
+    advertised
+      .get_mut("ctl-agent")
+      .unwrap()
+      .protocols
+      .push(ProtocolInfo::new(
+        "ctl_forwarding",
+        contract.build,
+        *contract,
+        &[*contract],
+      ));
+    check(&advertised, true);
+  }
+  let future = ProtocolVersion::new(2, 0, 3);
+  components
+    .get_mut("ctl-agent")
+    .unwrap()
+    .protocols
+    .push(ProtocolInfo::new(
+      "ctl_forwarding",
+      future.build,
+      future,
+      &[future],
+    ));
+  check(&components, false);
+}
+
+#[test]
 fn newer_explicit_contracts_retain_older_support_without_inferred_build_gaps() {
   let fixture = Fixture::new(VERSION, REVISION);
   let parsed = BundleSet::parse_intrinsic(&serde_json::to_vec(&fixture.outer).unwrap()).unwrap();

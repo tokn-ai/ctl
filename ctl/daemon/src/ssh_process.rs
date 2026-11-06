@@ -54,6 +54,7 @@ impl Process {
     self.inner.stdin.take()
   }
 
+  #[cfg(any(windows, test))]
   pub(super) fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
     self.inner.try_wait()
   }

@@ -5,8 +5,9 @@ Per-user SSH connection and credential broker for ctl.
 Installs `ctld`, the companion daemon used by `ctl` and the ctmux desktop app.
 It owns shared SSH connections, port forwards, and VPN container lifecycles.
 Port forwards select TCP, UDP, or Any (both). TCP uses OpenSSH forwarding;
-UDP uses ctld-owned loopback sockets and negotiated remote `ctl-agent`
-datagram channels. Existing rules without a protocol retain TCP behavior.
+UDP uses ctld-owned loopback sockets and one negotiated remote `ctl-agent`
+datagram channel per rule, multiplexing independent peer sockets. Existing
+rules without a protocol retain TCP behavior.
 
 Windows runs a per-user owner on a restricted local named pipe. Component
 inspection, cooperative restart/stop, local identity inventory, and container-backed

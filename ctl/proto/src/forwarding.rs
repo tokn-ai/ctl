@@ -8,14 +8,17 @@ use ctl_core::protocol::{ProtocolOffer, ProtocolVersion};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 
-pub const PROTOCOL_BUILD: u16 = 1;
+pub const PROTOCOL_BUILD: u16 = 2;
 pub const CONTRACT_V1_0_1: ProtocolVersion = ProtocolVersion::new(1, 0, 1);
-pub const PROTOCOL_VERSION: ProtocolVersion = CONTRACT_V1_0_1;
-pub const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[CONTRACT_V1_0_1];
+pub const CONTRACT_V1_0_2: ProtocolVersion = ProtocolVersion::new(1, 0, 2);
+pub const PROTOCOL_VERSION: ProtocolVersion = CONTRACT_V1_0_2;
+pub const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[CONTRACT_V1_0_1, CONTRACT_V1_0_2];
 pub const PREFACE: &[u8] = b"ctl-udp-forwarding\n";
 pub const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 /// The largest UDP payload supported by both IPv4 and IPv6.
 pub const MAX_DATAGRAM_BYTES: usize = 65_507;
+pub const MAX_PEERS: usize = 64;
+pub const PEER_IDLE: Duration = Duration::from_secs(60);
 const MAX_FRAME_BYTES: usize = 8192;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -105,9 +108,28 @@ pub async fn negotiate_contract(
   reader: &mut (impl AsyncRead + Unpin),
   writer: &mut (impl AsyncWrite + Unpin),
 ) -> io::Result<ProtocolVersion> {
+  negotiate_supported(reader, writer, SUPPORTED_PROTOCOL_VERSIONS).await
+}
+
+/// Requires peer-multiplexed forwarding before sending any destination.
+///
+/// # Errors
+/// Rejects peers without the explicit multiplexed forwarding contract.
+pub async fn negotiate_multiplex_contract(
+  reader: &mut (impl AsyncRead + Unpin),
+  writer: &mut (impl AsyncWrite + Unpin),
+) -> io::Result<ProtocolVersion> {
+  negotiate_supported(reader, writer, &[CONTRACT_V1_0_2]).await
+}
+
+async fn negotiate_supported(
+  reader: &mut (impl AsyncRead + Unpin),
+  writer: &mut (impl AsyncWrite + Unpin),
+  supported: &[ProtocolVersion],
+) -> io::Result<ProtocolVersion> {
   let offer: ProtocolOffer = read(reader).await?;
   let selected = offer
-    .negotiate(SUPPORTED_PROTOCOL_VERSIONS)
+    .negotiate(supported)
     .ok_or_else(|| invalid("No shared published UDP forwarding contract"))?;
   write(
     writer,
@@ -188,6 +210,72 @@ pub async fn write_datagram(
     .await?;
   writer.write_all(bytes).await?;
   writer.flush().await
+}
+
+/// One peer's datagram or the end of its association under contract 1.0.2.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Frame {
+  Datagram { peer_id: u64, payload: Vec<u8> },
+  Close { peer_id: u64 },
+}
+
+/// Reads one complete peer frame, retaining empty UDP payloads.
+///
+/// # Errors
+/// Rejects unknown packet types, zero peer IDs, oversized datagrams, and
+/// partial frames. A clean frame-boundary EOF returns `None`.
+pub async fn read_packet(reader: &mut (impl AsyncRead + Unpin)) -> io::Result<Option<Frame>> {
+  let mut kind = [0; 1];
+  if reader.read(&mut kind).await? == 0 {
+    return Ok(None);
+  }
+  if !matches!(kind[0], 1 | 2) {
+    return Err(invalid("Invalid UDP peer frame type"));
+  }
+  let peer_id = reader.read_u64().await?;
+  if peer_id == 0 {
+    return Err(invalid("Invalid UDP peer ID"));
+  }
+  Ok(Some(if kind[0] == 1 {
+    Frame::Datagram {
+      peer_id,
+      payload: read_datagram(reader)
+        .await?
+        .ok_or_else(|| invalid("Missing UDP peer datagram"))?,
+    }
+  } else {
+    Frame::Close { peer_id }
+  }))
+}
+
+/// Writes one bounded peer frame without exposing local network addresses.
+///
+/// # Errors
+/// Rejects zero peer IDs and oversized datagrams before writing any bytes.
+pub async fn write_packet(
+  writer: &mut (impl AsyncWrite + Unpin),
+  packet: &Frame,
+) -> io::Result<()> {
+  let (kind, peer_id) = match packet {
+    Frame::Datagram { peer_id, payload } => {
+      if payload.len() > MAX_DATAGRAM_BYTES {
+        return Err(invalid("UDP forwarding datagram is too large"));
+      }
+      (1, *peer_id)
+    }
+    Frame::Close { peer_id } => (2, *peer_id),
+  };
+  if peer_id == 0 {
+    return Err(invalid("Invalid UDP peer ID"));
+  }
+  writer.write_u8(kind).await?;
+  writer.write_u64(peer_id).await?;
+  if let Frame::Datagram { payload, .. } = packet {
+    write_datagram(writer, payload).await?;
+  } else {
+    writer.flush().await?;
+  }
+  Ok(())
 }
 
 fn invalid(message: &str) -> io::Error {
@@ -286,8 +374,11 @@ mod tests {
       let request: Request = read(&mut server_reader).await.unwrap();
       assert_eq!(request.host, "localhost");
       assert_eq!(
-        read_datagram(&mut server_reader).await.unwrap(),
-        Some(vec![0, 255])
+        read_packet(&mut server_reader).await.unwrap(),
+        Some(Frame::Datagram {
+          peer_id: 1,
+          payload: vec![0, 255]
+        })
       );
     });
     let (mut reader, mut writer) = tokio::io::split(client);
@@ -304,7 +395,15 @@ mod tests {
     )
     .await
     .unwrap();
-    write_datagram(&mut writer, &[0, 255]).await.unwrap();
+    write_packet(
+      &mut writer,
+      &Frame::Datagram {
+        peer_id: 1,
+        payload: vec![0, 255],
+      },
+    )
+    .await
+    .unwrap();
     server.await.unwrap();
   }
 
@@ -336,5 +435,103 @@ mod tests {
         .await
         .is_err()
     );
+  }
+
+  #[tokio::test]
+  async fn peer_packets_preserve_ids_boundaries_and_maximum_datagrams() {
+    let packets = [
+      Frame::Datagram {
+        peer_id: 1,
+        payload: vec![],
+      },
+      Frame::Datagram {
+        peer_id: u64::MAX,
+        payload: vec![0, 255, 13, 10],
+      },
+      Frame::Close { peer_id: 1 },
+      Frame::Datagram {
+        peer_id: 2,
+        payload: vec![17; MAX_DATAGRAM_BYTES],
+      },
+    ];
+    let mut bytes = Vec::new();
+    for packet in &packets {
+      write_packet(&mut bytes, packet).await.unwrap();
+    }
+    let mut input = bytes.as_slice();
+    for packet in packets {
+      assert_eq!(read_packet(&mut input).await.unwrap(), Some(packet));
+    }
+    assert_eq!(read_packet(&mut input).await.unwrap(), None);
+  }
+
+  #[tokio::test]
+  async fn peer_packet_validation_rejects_malformed_frames_without_writing() {
+    for packet in [
+      Frame::Datagram {
+        peer_id: 0,
+        payload: vec![1],
+      },
+      Frame::Close { peer_id: 0 },
+      Frame::Datagram {
+        peer_id: 1,
+        payload: vec![0; MAX_DATAGRAM_BYTES + 1],
+      },
+    ] {
+      let mut bytes = Vec::new();
+      assert!(write_packet(&mut bytes, &packet).await.is_err());
+      assert_eq!(bytes, [] as [u8; 0]);
+    }
+    for bytes in [
+      vec![3],
+      vec![1, 0],
+      vec![2, 0, 0, 0, 0, 0, 0, 0, 0],
+      vec![1, 0, 0, 0, 0, 0, 0, 0, 1],
+      vec![1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1],
+      vec![1, 0, 0, 0, 0, 0, 0, 0, 1, 255, 255, 255, 255],
+    ] {
+      assert!(read_packet(&mut bytes.as_slice()).await.is_err());
+    }
+  }
+
+  #[tokio::test]
+  async fn multiplexed_clients_reject_legacy_agents_before_sending_a_selection() {
+    let mut bytes = Vec::new();
+    write(
+      &mut bytes,
+      &ProtocolOffer::new(1, CONTRACT_V1_0_1, &[CONTRACT_V1_0_1]),
+    )
+    .await
+    .unwrap();
+    let mut output = Vec::new();
+    assert!(
+      negotiate_multiplex_contract(&mut bytes.as_slice(), &mut output)
+        .await
+        .is_err()
+    );
+    assert_eq!(output, [] as [u8; 0]);
+  }
+
+  #[tokio::test]
+  async fn new_agents_retain_the_original_explicit_contract() {
+    let mut bytes = Vec::new();
+    write(
+      &mut bytes,
+      &Selection {
+        protocol_version: CONTRACT_V1_0_1,
+      },
+    )
+    .await
+    .unwrap();
+    let mut output = Vec::new();
+    assert_eq!(
+      accept_contract(&mut bytes.as_slice(), &mut output)
+        .await
+        .unwrap(),
+      CONTRACT_V1_0_1
+    );
+    let offer: ProtocolOffer = read(&mut output.as_slice()).await.unwrap();
+    assert!(offer.accepts(CONTRACT_V1_0_1));
+    assert!(offer.accepts(CONTRACT_V1_0_2));
   }
 }

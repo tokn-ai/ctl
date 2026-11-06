@@ -407,7 +407,7 @@ pub enum Error {
   )]
   UnsupportedQuietMaster(ProtocolVersion),
   #[error(
-    "UDP forwarding requires local protocol 1.1.17, but ctld selected {0}. Update and restart ctld."
+    "UDP forwarding requires local protocol 1.2.17, but ctld selected {0}. Update and restart ctld."
   )]
   UnsupportedForwardingProtocol(ProtocolVersion),
   #[error(
@@ -1063,7 +1063,7 @@ mod tests {
           let (stream, mut server) = stream_pair().await;
           *client.connection.lock().await = Some((stream, selected));
           let supported =
-            protocol == ctl_ipc::PortForwardProtocol::Tcp || selected >= ctl_ipc::CONTRACT_V1_1_17;
+            protocol == ctl_ipc::PortForwardProtocol::Tcp || selected >= ctl_ipc::CONTRACT_V1_2_17;
           if supported {
             let peer = tokio::spawn(async move {
               let request = ctl_ipc::read_frame::<_, ClientMessage>(&mut server)

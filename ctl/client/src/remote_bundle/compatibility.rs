@@ -149,6 +149,21 @@ pub(crate) fn compatible(components: &BTreeMap<String, ComponentInfo>) -> bool {
   required
     .iter()
     .all(|(component, name, supported)| intersects(components, component, name, supported))
+    // Older agents remain eligible for their TCP and companion services. If a
+    // bundle advertises UDP forwarding, its contract must be one we implement.
+    && components
+      .get("ctl-agent")
+      .and_then(|info| {
+        info
+          .protocols
+          .iter()
+          .find(|protocol| protocol.name == "ctl_forwarding")
+      })
+      .is_none_or(|protocol| {
+        protocol
+          .negotiate(ctl_proto::forwarding::SUPPORTED_PROTOCOL_VERSIONS)
+          .is_some()
+      })
     && [
       ("ctl-agent", "ctld", "ctld"),
       ("ctl-agent", "ctmuxd", "ctmux"),

@@ -17,6 +17,7 @@ fn target() -> SshTarget {
 
 fn forward(port: u16) -> LocalPortForward {
   LocalPortForward {
+    protocol: ctl_ipc::PortForwardProtocol::Tcp,
     forward_id: "native-forward".into(),
     bind_address: "127.0.0.1".into(),
     local_port: port,

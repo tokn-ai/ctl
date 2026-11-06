@@ -30,8 +30,13 @@ enum Command {
     #[arg(long)]
     identity: bool,
   },
-  /// List TCP listeners without exposing process arguments or environment.
-  Listeners,
+  /// List TCP/UDP listeners without exposing process arguments or environment.
+  Listeners {
+    #[arg(long, value_enum, default_value_t = ctl_agent::listeners::Protocol::Tcp)]
+    protocol: ctl_agent::listeners::Protocol,
+  },
+  /// Relay framed datagrams to a destination supplied on stdin.
+  ForwardUdp,
   /// Print installed agent identity without opening or starting a service.
   Inspect,
   /// Inspect installed companions and existing owners without opening a service.
@@ -129,10 +134,12 @@ async fn run(arguments: Arguments) -> Result<(), MainError> {
       println!("{}", serde_json::to_string(&identity)?);
     }
     Command::Vpn => run_vpn().await?,
-    Command::Listeners => {
-      let catalog = tokio::task::spawn_blocking(ctl_agent::listeners::discover)
-        .await
-        .map_err(std::io::Error::other)?;
+    Command::ForwardUdp => ctl_agent::forwarding::serve_stdio().await?,
+    Command::Listeners { protocol } => {
+      let catalog =
+        tokio::task::spawn_blocking(move || ctl_agent::listeners::discover_for(protocol))
+          .await
+          .map_err(std::io::Error::other)?;
       println!("{}", serde_json::to_string(&catalog)?);
     }
   }
@@ -322,8 +329,20 @@ mod tests {
         .unwrap()
         .command
         .unwrap(),
-      Command::Listeners
+      Command::Listeners {
+        protocol: ctl_agent::listeners::Protocol::Tcp
+      }
     ));
     assert!(Arguments::try_parse_from(["ctl-agent", "listeners", "--command", "sh"]).is_err());
+    for protocol in ["tcp", "udp", "any"] {
+      assert!(
+        Arguments::try_parse_from(["ctl-agent", "listeners", "--protocol", protocol]).is_ok()
+      );
+    }
+    assert!(Arguments::try_parse_from(["ctl-agent", "listeners", "--protocol", "raw"]).is_err());
+    assert!(Arguments::try_parse_from(["ctl-agent", "forward-udp"]).is_ok());
+    for argument in ["--host", "--port", "--command"] {
+      assert!(Arguments::try_parse_from(["ctl-agent", "forward-udp", argument, "value"]).is_err());
+    }
   }
 }

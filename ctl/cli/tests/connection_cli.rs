@@ -753,6 +753,7 @@ async fn repeated_implicit_port_add_reuses_the_exact_forward_and_prefers_active_
   let _guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let forward = |id: &str| ctl_ipc::LocalPortForward {
     forward_id: id.into(),
+    protocol: ctl_ipc::PortForwardProtocol::Tcp,
     bind_address: "127.0.0.1".into(),
     local_port: 8080,
     remote_host: "127.0.0.1".into(),
@@ -770,6 +771,14 @@ async fn repeated_implicit_port_add_reuses_the_exact_forward_and_prefers_active_
     status("active-a", active),
   ];
   for different in [
+    ctl_ipc::LocalPortForward {
+      protocol: ctl_ipc::PortForwardProtocol::Udp,
+      ..forward("0-other-udp")
+    },
+    ctl_ipc::LocalPortForward {
+      protocol: ctl_ipc::PortForwardProtocol::Any,
+      ..forward("0-other-any")
+    },
     ctl_ipc::LocalPortForward {
       bind_address: "::1".into(),
       ..forward("0-other-bind")

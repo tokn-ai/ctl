@@ -591,12 +591,16 @@ export interface VpnSnapshot {
   discovery_warnings?: string[];
 }
 
+export type PortForwardProtocol = "tcp" | "udp" | "any";
+
 export interface LocalPortForward {
   forward_id: string;
   bind_address: "127.0.0.1";
   local_port: number;
   remote_host: string;
   remote_port: number;
+  /** Missing on legacy forwards, which use TCP. */
+  protocol?: PortForwardProtocol;
 }
 
 export interface WorkspacePortForward extends LocalPortForward {
@@ -619,6 +623,8 @@ export interface PortForwardStatus {
 export interface TcpListener {
   bind_address: string;
   port: number;
+  /** Missing on older agents, which discover only TCP. */
+  protocol?: "tcp" | "udp";
 }
 
 export interface TcpListenerCatalog {

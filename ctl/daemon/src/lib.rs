@@ -32,9 +32,11 @@ pub mod proxy_route;
 mod reconnect_approval;
 mod shared_forwarding;
 mod ssh_config_master;
+mod ssh_process;
 mod ssh_startup;
 mod tailscale;
 mod target_lifecycle;
+mod udp_forwarding;
 mod vpn_container;
 mod vpn_service;
 #[cfg(target_os = "macos")]
@@ -97,6 +99,7 @@ struct State {
   connection_correlations: Mutex<HashMap<PathBuf, ConnectionCorrelation>>,
   endpoint_registry: endpoint_registry::Registry,
   shared_forwards: AsyncMutex<SharedForwardRegistry>,
+  udp_forwards: AsyncMutex<udp_forwarding::Registry>,
   #[cfg(windows)]
   native_forwards: AsyncMutex<native_forwarding::Registry>,
   vpn_service: Option<vpn_service::VpnService>,
@@ -567,6 +570,7 @@ async fn run_with_approvals(
     .await;
   vpn_owner.shutdown().await;
   state.shared_forwards.lock().await.shutdown().await;
+  state.udp_forwards.lock().await.shutdown().await;
   // Native authorization work may still hold an Arc<State> after its async
   // waiter is canceled. Release connection leases before exposing the endpoint
   // to a replacement owner, without waiting for those references to disappear.
@@ -712,10 +716,10 @@ async fn handle_request(
         enabled,
       } => configure_port_forward(stream, state, target, forward, enabled).await,
       ClientMessage::ListPortForwards { target } => {
-        list_port_forwards(stream, state, &target).await
+        list_port_forwards(stream, state, &target, protocol).await
       }
-      ClientMessage::ListRemoteListeners { target } => {
-        list_remote_listeners(stream, state, &target).await
+      ClientMessage::ListRemoteListeners { target, protocol } => {
+        list_remote_listeners(stream, state, &target, protocol).await
       }
       request @ (ClientMessage::StartVpn { .. }
       | ClientMessage::StartVpnConnection { .. }
@@ -785,6 +789,16 @@ fn validate_request_contract(
   request: &ClientMessage,
   protocol: ProtocolVersion,
 ) -> Result<(), RequestError> {
+  let forwarding_protocol = match request {
+    ClientMessage::ConfigurePortForward { forward, .. } => forward.protocol,
+    ClientMessage::ListRemoteListeners { protocol, .. } => *protocol,
+    _ => ctl_ipc::PortForwardProtocol::Tcp,
+  };
+  if !forwarding_protocol.is_tcp() && !ctl_ipc::forwarding_protocol_supported(protocol) {
+    return Err(RequestError::InvalidRequest(
+      "UDP forwarding requires ctld 1.2.17",
+    ));
+  }
   if matches!(request, ClientMessage::EnsureMasterQuiet { .. })
     && !ctl_ipc::quiet_master_supported(protocol)
   {
@@ -808,7 +822,7 @@ fn validate_request_contract(
   | ClientMessage::DeleteCredentials { target }
   | ClientMessage::ConfigurePortForward { target, .. }
   | ClientMessage::ListPortForwards { target }
-  | ClientMessage::ListRemoteListeners { target }) = request
+  | ClientMessage::ListRemoteListeners { target, .. }) = request
   else {
     return Ok(());
   };
@@ -882,7 +896,7 @@ fn normalize_request_target(request: &mut ClientMessage) {
     | ClientMessage::DeleteCredentials { target }
     | ClientMessage::ConfigurePortForward { target, .. }
     | ClientMessage::ListPortForwards { target }
-    | ClientMessage::ListRemoteListeners { target } => target.normalize_master_policy(),
+    | ClientMessage::ListRemoteListeners { target, .. } => target.normalize_master_policy(),
     ClientMessage::Handshake { .. }
     | ClientMessage::PromptResponse { .. }
     | ClientMessage::Askpass { .. }
@@ -1579,6 +1593,8 @@ async fn reuse_master_or_prepare(
           .await?;
         forwards.resume(target);
       }
+      // UDP sockets belong to ctld even when their SSH master was private.
+      state.udp_forwards.lock().await.cancel_target(target).await;
       state
         .endpoint_registry
         .remove(&crate::control_path(target))?;
@@ -1978,6 +1994,7 @@ async fn disconnect_master_inner(
   state.release_private_master(target);
   let mut forwards = state.forwards.lock().await;
   forwards.pause(target);
+  state.udp_forwards.lock().await.cancel_target(target).await;
   let endpoint = state.existing_endpoint(target)?;
   if let Some(endpoint) = &endpoint {
     // Pin the recovered endpoint while listener cleanup runs after its durable
@@ -2122,14 +2139,18 @@ async fn list_port_forwards(
   stream: &mut ctl_ipc::Stream,
   state: &State,
   target: &SshTarget,
+  protocol: ProtocolVersion,
 ) -> Result<(), RequestError> {
   validate_target(target)?;
-  let statuses = state
+  let mut statuses = state
     .forwards
     .lock()
     .await
     .list(&SshForwardControl { state }, target)
     .await;
+  if !ctl_ipc::forwarding_protocol_supported(protocol) {
+    statuses.retain(|status| status.forward.protocol.is_tcp());
+  }
   ctl_ipc::write_frame(stream, &ServerMessage::PortForwards { statuses }).await?;
   Ok(())
 }
@@ -2138,6 +2159,7 @@ async fn list_remote_listeners(
   stream: &mut ctl_ipc::Stream,
   state: &State,
   target: &SshTarget,
+  protocol: ctl_ipc::PortForwardProtocol,
 ) -> Result<(), RequestError> {
   validate_target(target)?;
   let lifecycle = state.target(target);
@@ -2159,13 +2181,17 @@ async fn list_remote_listeners(
   }
 
   let catalog = attempt
-    .run(run_listener_discovery(target, &control_path))
+    .run(run_listener_discovery(target, &control_path, protocol))
     .await??;
   ctl_ipc::write_frame(stream, &ServerMessage::RemoteListeners { catalog }).await?;
   Ok(())
 }
 
-fn listener_discovery_command(target: &SshTarget, control_path: &Path) -> Command {
+fn listener_discovery_command(
+  target: &SshTarget,
+  control_path: &Path,
+  protocol: ctl_ipc::PortForwardProtocol,
+) -> Command {
   let mut command = Command::new(SSH_PROGRAM);
   command
     .arg("-S")
@@ -2184,7 +2210,11 @@ fn listener_discovery_command(target: &SshTarget, control_path: &Path) -> Comman
     .args(["-o", "ForkAfterAuthentication=no"]);
   append_target_arguments(&mut command, target);
   command
-    .arg(REMOTE_LISTENERS_COMMAND)
+    .arg(match protocol {
+      ctl_ipc::PortForwardProtocol::Tcp => REMOTE_LISTENERS_COMMAND.to_owned(),
+      ctl_ipc::PortForwardProtocol::Udp => format!("{REMOTE_LISTENERS_COMMAND} --protocol udp"),
+      ctl_ipc::PortForwardProtocol::Any => format!("{REMOTE_LISTENERS_COMMAND} --protocol any"),
+    })
     .stdin(Stdio::null())
     .stdout(Stdio::piped())
     .stderr(Stdio::piped())
@@ -2195,8 +2225,9 @@ fn listener_discovery_command(target: &SshTarget, control_path: &Path) -> Comman
 async fn run_listener_discovery(
   target: &SshTarget,
   control_path: &Path,
+  protocol: ctl_ipc::PortForwardProtocol,
 ) -> Result<ctl_proto::TcpListenerCatalog, RequestError> {
-  let mut child = listener_discovery_command(target, control_path)
+  let mut child = listener_discovery_command(target, control_path, protocol)
     .spawn()
     .map_err(RequestError::StartMaster)?;
   let mut stdout = child.stdout.take().ok_or(RequestError::InvalidRequest(
@@ -2260,6 +2291,8 @@ fn listener_discovery_requires_agent_update(diagnostics: &str) -> bool {
         "unrecognized subcommand `listeners`",
         "unexpected argument 'listeners'",
         "unexpected argument `listeners`",
+        "unexpected argument '--protocol'",
+        "unexpected argument `--protocol`",
       ]
       .iter()
       .any(|message| diagnostics.contains(message))
@@ -3090,6 +3123,147 @@ mod tests {
     }
   }
 
+  fn protocol_forward(protocol: ctl_ipc::PortForwardProtocol) -> LocalPortForward {
+    LocalPortForward {
+      forward_id: format!("contract-{protocol:?}"),
+      protocol,
+      bind_address: "127.0.0.1".into(),
+      local_port: 15432,
+      remote_host: "localhost".into(),
+      remote_port: 5432,
+    }
+  }
+
+  #[test]
+  fn forwarding_requests_require_the_selected_protocol_contract() {
+    for selected in ctl_ipc::SUPPORTED_PROTOCOL_VERSIONS.iter().copied() {
+      for protocol in [
+        ctl_ipc::PortForwardProtocol::Tcp,
+        ctl_ipc::PortForwardProtocol::Udp,
+        ctl_ipc::PortForwardProtocol::Any,
+      ] {
+        for request in [
+          ClientMessage::ConfigurePortForward {
+            target: target(),
+            forward: protocol_forward(protocol),
+            enabled: true,
+          },
+          ClientMessage::ListRemoteListeners {
+            target: target(),
+            protocol,
+          },
+        ] {
+          let result = validate_request_contract(&request, selected);
+          if protocol == ctl_ipc::PortForwardProtocol::Tcp || selected >= ctl_ipc::CONTRACT_V1_2_17
+          {
+            result.unwrap();
+          } else {
+            assert!(matches!(
+              result,
+              Err(RequestError::InvalidRequest(message)) if message.contains("1.2.17")
+            ));
+          }
+        }
+      }
+    }
+  }
+
+  #[cfg(unix)]
+  #[tokio::test]
+  async fn old_forwarding_contracts_reject_udp_before_dispatch() {
+    for selected in ctl_ipc::SUPPORTED_PROTOCOL_VERSIONS
+      .iter()
+      .copied()
+      .filter(|selected| *selected < ctl_ipc::CONTRACT_V1_2_17)
+    {
+      for protocol in [
+        ctl_ipc::PortForwardProtocol::Udp,
+        ctl_ipc::PortForwardProtocol::Any,
+      ] {
+        for request in [
+          ClientMessage::ConfigurePortForward {
+            target: target(),
+            forward: protocol_forward(protocol),
+            enabled: true,
+          },
+          ClientMessage::ListRemoteListeners {
+            target: target(),
+            protocol,
+          },
+        ] {
+          let state = Arc::new(State::default());
+          let (mut client, mut server) = ctl_ipc::Stream::pair().unwrap();
+          assert!(matches!(
+            handle_request(&mut server, &state, request, selected).await,
+            Err(RequestError::InvalidRequest(message)) if message.contains("1.2.17")
+          ));
+          assert!(matches!(
+            ctl_ipc::read_frame::<_, ServerMessage>(&mut client).await.unwrap(),
+            Some(ServerMessage::Error { code, message })
+              if code == "ctld_protocol_error" && message.contains("1.2.17")
+          ));
+          assert!(
+            state.targets.lock().unwrap().is_empty(),
+            "unsupported forwarding must not enter the target lifecycle"
+          );
+        }
+      }
+    }
+  }
+
+  #[cfg(unix)]
+  #[tokio::test]
+  async fn forwarding_lists_keep_udp_and_any_out_of_historical_contracts() {
+    let state = State::default();
+    let target = target();
+    {
+      let mut forwards = state.forwards.lock().await;
+      forwards.pause(&target);
+      for protocol in [
+        ctl_ipc::PortForwardProtocol::Tcp,
+        ctl_ipc::PortForwardProtocol::Udp,
+        ctl_ipc::PortForwardProtocol::Any,
+      ] {
+        let status = forwards
+          .configure(
+            &SshForwardControl { state: &state },
+            target.clone(),
+            protocol_forward(protocol),
+            true,
+          )
+          .await
+          .unwrap();
+        assert_eq!(
+          status.state,
+          ctl_ipc::PortForwardState::WaitingForAuthentication
+        );
+      }
+    }
+    let (mut client, mut server) = ctl_ipc::Stream::pair().unwrap();
+    for selected in ctl_ipc::SUPPORTED_PROTOCOL_VERSIONS.iter().copied() {
+      list_port_forwards(&mut server, &state, &target, selected)
+        .await
+        .unwrap();
+      let Some(ServerMessage::PortForwards { statuses }) =
+        ctl_ipc::read_frame(&mut client).await.unwrap()
+      else {
+        panic!("expected a forwarding list");
+      };
+      let protocols: Vec<_> = statuses
+        .iter()
+        .map(|status| status.forward.protocol)
+        .collect();
+      if selected >= ctl_ipc::CONTRACT_V1_2_17 {
+        assert_eq!(protocols.len(), 3);
+        assert!(protocols.contains(&ctl_ipc::PortForwardProtocol::Tcp));
+        assert!(protocols.contains(&ctl_ipc::PortForwardProtocol::Udp));
+        assert!(protocols.contains(&ctl_ipc::PortForwardProtocol::Any));
+      } else {
+        assert_eq!(protocols, [ctl_ipc::PortForwardProtocol::Tcp]);
+      }
+    }
+  }
+
   #[test]
   fn disconnect_exits_only_the_requested_control_master() {
     let path = Path::new("/private/tmp/ctld-test/master.sock");
@@ -3131,7 +3305,8 @@ mod tests {
       };
       let path = PathBuf::from(format!("/tmp/ctld-mux-{}", uuid::Uuid::new_v4().simple()));
       assert!(!path.exists());
-      let production = listener_discovery_command(&target, &path);
+      let production =
+        listener_discovery_command(&target, &path, ctl_ipc::PortForwardProtocol::Tcp);
       let mut command = Command::new(SSH_PROGRAM);
       command
         .args(["-F", "/dev/null", "-o", "ConnectTimeout=1"])
@@ -3183,7 +3358,13 @@ mod tests {
       Err(RequestError::HostDisconnected)
     ));
     assert!(matches!(
-      list_remote_listeners(&mut server, &state, &target).await,
+      list_remote_listeners(
+        &mut server,
+        &state,
+        &target,
+        ctl_ipc::PortForwardProtocol::Tcp
+      )
+      .await,
       Err(RequestError::HostDisconnected)
     ));
     connection_status(&mut server, &state, &target)
@@ -3632,6 +3813,7 @@ mod tests {
   #[test]
   fn local_forwards_are_structured_and_loopback_only() {
     let valid = LocalPortForward {
+      protocol: ctl_ipc::PortForwardProtocol::Tcp,
       forward_id: "database".into(),
       bind_address: "127.0.0.1".into(),
       local_port: 15432,
@@ -3660,6 +3842,7 @@ mod tests {
   #[test]
   fn forwarding_specifications_bracket_both_ipv6_endpoints() {
     let forward = LocalPortForward {
+      protocol: ctl_ipc::PortForwardProtocol::Tcp,
       forward_id: "web".into(),
       bind_address: "::1".into(),
       local_port: 3000,

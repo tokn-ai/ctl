@@ -175,7 +175,12 @@ mod tests {
   fn helper_operations_require_the_exact_advertised_contract() {
     let old = ctl_ipc::HELPER_API_CONTRACT_V1_0_1;
     let required = ctl_ipc::HELPER_API_CONTRACT_V1_1_3;
-    let newer = ProtocolVersion::new(1, 1, ctl_ipc::HELPER_API_BUILD + 1);
+    let current = ctl_ipc::HELPER_API_VERSION;
+    let newer = ProtocolVersion::new(
+      current.major,
+      current.minor + 1,
+      ctl_ipc::HELPER_API_BUILD + 1,
+    );
     let cases: &[(ProtocolVersion, &[ProtocolVersion], bool, bool)] = &[
       (old, &[old], true, false),
       (required, &[old, required], true, true),
@@ -249,11 +254,12 @@ mod tests {
     let mut info = info();
     for protocol in &mut info.protocols {
       let common = protocol.version;
-      let newer = ctl_core::protocol::ProtocolVersion::new(1, 1, protocol.build + 1);
+      let newer = ProtocolVersion::new(common.major, common.minor + 1, protocol.build + 1);
       protocol.build += 1;
       protocol.version = newer;
       protocol.supported_versions = vec![common, newer];
     }
+    assert!(info.is_valid());
     assert!(compatible(&info));
     for index in 0..info.protocols.len() {
       let mut unsupported = info.clone();

@@ -411,7 +411,7 @@
 
 .port-forward-dialog .port-forward-form {
   display: grid;
-  grid-template-columns: 1.2fr 0.7fr 1.2fr 0.7fr;
+  grid-template-columns: 1.2fr 0.85fr 0.7fr 1.2fr 0.7fr;
   gap: 12px 8px;
   align-items: start;
   padding: 16px;
@@ -424,7 +424,8 @@
   font-size: 12px;
 }
 
-.port-forward-dialog .port-forward-form input {
+.port-forward-dialog .port-forward-form input,
+.port-forward-dialog .port-forward-form select {
   min-width: 0;
   width: 100%;
   padding: 7px 8px;
@@ -436,7 +437,8 @@
   outline: none;
 }
 
-.port-forward-dialog .port-forward-form input:focus {
+.port-forward-dialog .port-forward-form input:focus,
+.port-forward-dialog .port-forward-form select:focus {
   border-color: var(--accent-strong);
 }
 

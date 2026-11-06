@@ -116,6 +116,7 @@ fn target(destination: &str) -> SshTarget {
 
 fn forward() -> LocalPortForward {
   LocalPortForward {
+    protocol: ctl_ipc::PortForwardProtocol::Tcp,
     forward_id: "workspace-forward-id".into(),
     bind_address: "127.0.0.1".into(),
     local_port: 15432,

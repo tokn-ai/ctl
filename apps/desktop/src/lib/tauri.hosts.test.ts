@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { configurePortForward, createSession, listSessions, probeSshHost, sshReachability } from "./tauri";
+import { checkLocalPort, configurePortForward, createSession, listSessions, probeSshHost, sshReachability } from "./tauri";
 import type { LocalPortForward, SshConnectionTarget } from "./types";
 
 const ipc = vi.hoisted(() => ({ invoke: vi.fn() }));
@@ -39,4 +39,11 @@ describe("unavailable host transport boundary", () => {
       request: { target, forward, enabled: false },
     });
   });
+});
+
+it("checks local availability for the selected forwarding protocol", async () => {
+  for (const protocol of ["tcp", "udp", "any"] as const) {
+    await checkLocalPort(5353, protocol);
+    expect(ipc.invoke).toHaveBeenLastCalledWith("check_local_port", { request: { port: 5353, protocol } });
+  }
 });

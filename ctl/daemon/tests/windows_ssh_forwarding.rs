@@ -488,6 +488,7 @@ async fn unused_port() -> u16 {
 
 async fn forward(id: &str, remote_port: u16) -> LocalPortForward {
   LocalPortForward {
+    protocol: ctl_ipc::PortForwardProtocol::Tcp,
     forward_id: id.into(),
     bind_address: "127.0.0.1".into(),
     local_port: unused_port().await,

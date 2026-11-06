@@ -128,6 +128,31 @@ enum. The sibling owner-only `ctmuxd` maintenance endpoint is never exposed.
 Taskd accesses that endpoint locally for managed interactive-session lifecycle;
 the gateway itself cannot route to it.
 
+### Port discovery and UDP forwarding
+
+The original `ctl-agent listeners` command returns TCP endpoints. The additive
+`--protocol tcp|udp|any` option selects discovery transports, with each UDP
+entry carrying `protocol: "udp"`; missing protocol retains TCP. Linux uses
+unconnected UDP sockets and listening TCP sockets, and macOS uses `lsof` without
+reading process arguments or environment.
+
+`ctl-agent forward-udp` emits `ctl-udp-forwarding\n` and negotiates the independent
+`ctl_forwarding 1.0.2` contract before accepting a bounded JSON destination
+`{ host, port }`. Setup returns `ready` or a structured `error`. A successful
+channel switches to bounded peer frames: a one-byte kind and nonzero eight-byte
+big-endian peer ID, followed for datagrams by a four-byte big-endian payload
+length and up to 65,507 payload bytes. Kind 1 carries a datagram, including an
+empty one; kind 2 closes that peer association. A rule uses one SSH command
+session for up to 64 independent connected remote UDP sockets, avoiding a
+session per local source port. Both peers release associations after 60 seconds
+without traffic in either direction. The retained `1.0.1` contract uses one
+remote UDP socket with the original length-prefixed datagram framing; new ctld
+clients require explicit `1.0.2` support before sending a destination. This endpoint requires an authenticated SSH
+command channel and accepts no shell commands or arbitrary local IPC paths.
+The local ctld contract `1.2.17` adds `tcp`, `udp`, and `any` forwarding rules;
+`any` forwards both transports on the same local port. Earlier selected
+contracts keep TCP-only messages and semantics.
+
 ### Remote VPN requests
 
 `ctl-agent vpn` is a separate, narrow SSH command. It emits the stable `ctl-vpn\n`

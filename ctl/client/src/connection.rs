@@ -321,6 +321,14 @@ fn validate_request_contract(
   message: &ClientMessage,
   protocol: ProtocolVersion,
 ) -> Result<(), Error> {
+  let forwarding_protocol = match message {
+    ClientMessage::ConfigurePortForward { forward, .. } => forward.protocol,
+    ClientMessage::ListRemoteListeners { protocol, .. } => *protocol,
+    _ => ctl_ipc::PortForwardProtocol::Tcp,
+  };
+  if !forwarding_protocol.is_tcp() && !ctl_ipc::forwarding_protocol_supported(protocol) {
+    return Err(Error::UnsupportedForwardingProtocol(protocol));
+  }
   match message {
     ClientMessage::EnsureMasterQuiet { target } => {
       if !ctl_ipc::quiet_master_supported(protocol) {
@@ -335,7 +343,7 @@ fn validate_request_contract(
     | ClientMessage::DeleteCredentials { target }
     | ClientMessage::ConfigurePortForward { target, .. }
     | ClientMessage::ListPortForwards { target }
-    | ClientMessage::ListRemoteListeners { target } => validate_route(target, protocol),
+    | ClientMessage::ListRemoteListeners { target, .. } => validate_route(target, protocol),
     _ => Ok(()),
   }
 }
@@ -398,6 +406,10 @@ pub enum Error {
     "Quiet SSH connection requires local protocol 1.1.14, but ctld selected {0}. Rebuild or update ctld, then restart ctld."
   )]
   UnsupportedQuietMaster(ProtocolVersion),
+  #[error(
+    "UDP forwarding requires local protocol 1.2.17, but ctld selected {0}. Update and restart ctld."
+  )]
+  UnsupportedForwardingProtocol(ProtocolVersion),
   #[error(
     "SSH authentication is required. Detach and reconnect to answer the authentication prompt."
   )]
@@ -1017,6 +1029,89 @@ mod tests {
       ));
     }
     validate_request_contract(&request, ctl_ipc::CONTRACT_V1_1_14).unwrap();
+  }
+
+  #[tokio::test]
+  async fn forwarding_protocol_contracts_are_checked_before_writing_requests() {
+    for selected in ctl_ipc::SUPPORTED_PROTOCOL_VERSIONS.iter().copied() {
+      for protocol in [
+        ctl_ipc::PortForwardProtocol::Tcp,
+        ctl_ipc::PortForwardProtocol::Udp,
+        ctl_ipc::PortForwardProtocol::Any,
+      ] {
+        for discovery in [false, true] {
+          let request = if discovery {
+            ClientMessage::ListRemoteListeners {
+              target: fixture_target(),
+              protocol,
+            }
+          } else {
+            ClientMessage::ConfigurePortForward {
+              target: fixture_target(),
+              forward: ctl_ipc::LocalPortForward {
+                forward_id: "contract-forward".into(),
+                protocol,
+                bind_address: "127.0.0.1".into(),
+                local_port: 15432,
+                remote_host: "localhost".into(),
+                remote_port: 5432,
+              },
+              enabled: true,
+            }
+          };
+          let client = ConnectionClient::default();
+          let (stream, mut server) = stream_pair().await;
+          *client.connection.lock().await = Some((stream, selected));
+          let supported =
+            protocol == ctl_ipc::PortForwardProtocol::Tcp || selected >= ctl_ipc::CONTRACT_V1_2_17;
+          if supported {
+            let peer = tokio::spawn(async move {
+              let request = ctl_ipc::read_frame::<_, ClientMessage>(&mut server)
+                .await
+                .unwrap()
+                .unwrap();
+              assert!(match request {
+                ClientMessage::ListRemoteListeners {
+                  protocol: actual, ..
+                } => {
+                  discovery && actual == protocol
+                }
+                ClientMessage::ConfigurePortForward { forward, .. } => {
+                  !discovery && forward.protocol == protocol
+                }
+                _ => false,
+              });
+              ctl_ipc::write_frame(&mut server, &ServerMessage::AuthenticationRequired)
+                .await
+                .unwrap();
+            });
+            assert!(matches!(
+              client
+                .exchange_using(request, false, async { Ok(None) })
+                .await,
+              Ok(Some(ServerMessage::AuthenticationRequired))
+            ));
+            peer.await.unwrap();
+          } else {
+            assert!(matches!(
+              client.exchange_using(request, false, async { Ok(None) }).await,
+              Err(Error::UnsupportedForwardingProtocol(actual)) if actual == selected
+            ));
+            assert!(
+              tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                ctl_ipc::read_frame::<_, ClientMessage>(&mut server)
+              )
+              .await
+              .unwrap()
+              .unwrap()
+              .is_none(),
+              "unsupported forwarding must close without sending a request"
+            );
+          }
+        }
+      }
+    }
   }
 
   #[tokio::test]

@@ -1,4 +1,5 @@
 //! Versioned metadata preceding the service protocol on identified SSH streams.
+pub mod forwarding;
 mod identity_contract;
 pub mod maintenance;
 use ctl_core::protocol::{ProtocolOffer, ProtocolVersion};
@@ -10,10 +11,28 @@ use serde::{Deserialize, Serialize};
 use std::io;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PortProtocol {
+  #[default]
+  Tcp,
+  Udp,
+}
+
+impl PortProtocol {
+  #[must_use]
+  pub fn is_tcp(&self) -> bool {
+    *self == Self::Tcp
+  }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct TcpListener {
   pub bind_address: String,
   pub port: u16,
+  /// Omitted TCP preserves the original argument-free listener command's shape.
+  #[serde(default, skip_serializing_if = "PortProtocol::is_tcp")]
+  pub protocol: PortProtocol,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -69,6 +88,12 @@ pub fn agent_protocols() -> Vec<ctl_core::component::ProtocolInfo> {
       maintenance::PROTOCOL_BUILD,
       maintenance::PROTOCOL_VERSION,
       maintenance::SUPPORTED_PROTOCOL_VERSIONS,
+    ),
+    ctl_core::component::ProtocolInfo::new(
+      "ctl_forwarding",
+      forwarding::PROTOCOL_BUILD,
+      forwarding::PROTOCOL_VERSION,
+      forwarding::SUPPORTED_PROTOCOL_VERSIONS,
     ),
   ]
 }
@@ -185,6 +210,19 @@ fn invalid_identity() -> io::Error {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn legacy_listeners_default_to_tcp_and_keep_the_original_wire_shape() {
+    let legacy = serde_json::json!({ "bind_address": "127.0.0.1", "port": 53 });
+    let tcp: TcpListener = serde_json::from_value(legacy.clone()).unwrap();
+    assert_eq!(tcp.protocol, PortProtocol::Tcp);
+    assert_eq!(serde_json::to_value(&tcp).unwrap(), legacy);
+    let udp = TcpListener {
+      protocol: PortProtocol::Udp,
+      ..tcp
+    };
+    assert_eq!(serde_json::to_value(&udp).unwrap()["protocol"], "udp");
+  }
 
   #[test]
   fn older_agent_identity_has_unknown_build_metadata() {

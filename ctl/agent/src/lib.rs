@@ -8,6 +8,7 @@
 //! making the gateway own its sessions or requiring an inbound broker daemon.
 
 pub mod components;
+pub mod forwarding;
 pub mod identity;
 pub mod listeners;
 pub mod maintenance;

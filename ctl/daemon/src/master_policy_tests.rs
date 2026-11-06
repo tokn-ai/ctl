@@ -440,6 +440,7 @@ async fn a_missing_private_fallback_socket_does_not_block_reconnection_with_forw
       &ReadyControl,
       configured.clone(),
       LocalPortForward {
+        protocol: ctl_ipc::PortForwardProtocol::Tcp,
         forward_id: "web".into(),
         bind_address: "127.0.0.1".into(),
         local_port: 18080,

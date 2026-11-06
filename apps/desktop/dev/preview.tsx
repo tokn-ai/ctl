@@ -577,7 +577,13 @@ mockIPC((command, payload) => {
       return status;
     }
     case "list_remote_listeners":
-      return { listeners: [5432, 8080, 9090].map((port) => ({ bind_address: "127.0.0.1", port })), warnings: [] };
+      return {
+        listeners: [
+          ...[5432, 8080, 9090].map((port) => ({ bind_address: "127.0.0.1", port, protocol: "tcp" })),
+          { bind_address: "127.0.0.1", port: 5353, protocol: "udp" },
+        ],
+        warnings: [],
+      };
     case "check_local_port":
       return { port: request<{ port: number }>(payload).port, available: true, message: null };
     case "save_ssh_config_host": {

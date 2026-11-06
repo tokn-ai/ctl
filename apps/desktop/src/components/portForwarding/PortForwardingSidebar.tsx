@@ -4,6 +4,7 @@ import type {
   WorkspacePortForward,
 } from "../../lib/types";
 import { targetLabel } from "../../features/targets/targets";
+import { portForwardProtocolLabel } from "../../features/portForwarding/protocol";
 import { Icon } from "../ui/Icon";
 import "./portForwarding.css";
 
@@ -101,7 +102,7 @@ export function PortForwardingSidebar({
                     <span className={`port-sidebar-indicator ${status.tone}`} aria-hidden="true" />
                     <span>
                       <strong>{forward.name}</strong>
-                      <code>{forward.bind_address}:{forward.local_port}</code>
+                      <code>{portForwardProtocolLabel(forward.protocol)} · {forward.bind_address}:{forward.local_port}</code>
                       <small>→ {forward.remote_host}:{forward.remote_port}</small>
                       <small className={`port-sidebar-status ${status.tone}`}>
                         {changing ? "Changing…" : status.label}

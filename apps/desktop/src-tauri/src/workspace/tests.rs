@@ -439,6 +439,7 @@ fn migrates_v4_workspace_to_sidebar_schema() {
   let mut document = legacy_populated();
   document.schema_version = 4;
   document.port_forwards.push(WorkspacePortForward {
+    protocol: ctl_ipc::PortForwardProtocol::Tcp,
     forward_id: uuid::Uuid::new_v4().to_string(),
     host_id: "remote-id".into(),
     name: "Database".into(),
@@ -461,9 +462,36 @@ fn migrates_v4_workspace_to_sidebar_schema() {
   assert_eq!(loaded.document.sidebar_view, SidebarView::Sessions);
   assert_eq!(loaded.document.port_forwards.len(), 1);
   assert_eq!(
+    loaded.document.port_forwards[0].protocol,
+    ctl_ipc::PortForwardProtocol::Tcp
+  );
+  assert_eq!(
     fs::read(fixture.0.join("workspace-v4.backup.json")).unwrap(),
     bytes
   );
+}
+
+#[test]
+fn port_forward_protocols_round_trip_with_legacy_tcp_default() {
+  let legacy = serde_json::json!({
+    "forward_id": "dns", "host_id": "remote-id", "name": "DNS",
+    "bind_address": "127.0.0.1", "local_port": 5353,
+    "remote_host": "localhost", "remote_port": 53, "enabled": true
+  });
+  let mut forward: WorkspacePortForward = serde_json::from_value(legacy.clone()).unwrap();
+  assert_eq!(forward.protocol, ctl_ipc::PortForwardProtocol::Tcp);
+  assert_eq!(serde_json::to_value(&forward).unwrap(), legacy);
+  for protocol in [
+    ctl_ipc::PortForwardProtocol::Udp,
+    ctl_ipc::PortForwardProtocol::Any,
+  ] {
+    forward.protocol = protocol;
+    let value = serde_json::to_value(&forward).unwrap();
+    assert_eq!(
+      serde_json::from_value::<WorkspacePortForward>(value).unwrap(),
+      forward
+    );
+  }
 }
 
 #[test]
@@ -562,6 +590,7 @@ fn socks5_gateway_round_trips_and_requires_a_port() {
 fn port_forwards_require_a_remote_workspace_host_and_loopback_binding() {
   let mut document = populated();
   document.port_forwards.push(WorkspacePortForward {
+    protocol: ctl_ipc::PortForwardProtocol::Tcp,
     forward_id: uuid::Uuid::new_v4().to_string(),
     host_id: "remote-id".into(),
     name: "Database".into(),

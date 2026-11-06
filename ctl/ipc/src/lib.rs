@@ -220,19 +220,21 @@ fn register_provider(provider: DaemonProvider) -> io::Result<()> {
 }
 
 /// Internal evolution counter; advancing it alone does not publish a contract.
-pub const PROTOCOL_BUILD: u16 = 16;
+pub const PROTOCOL_BUILD: u16 = 17;
 pub const CONTRACT_V1_0_12: ProtocolVersion = ProtocolVersion::new(1, 0, 12);
 pub const CONTRACT_V1_1_13: ProtocolVersion = ProtocolVersion::new(1, 1, 13);
 pub const CONTRACT_V1_1_14: ProtocolVersion = ProtocolVersion::new(1, 1, 14);
 pub const CONTRACT_V1_1_15: ProtocolVersion = ProtocolVersion::new(1, 1, 15);
 pub const CONTRACT_V1_1_16: ProtocolVersion = ProtocolVersion::new(1, 1, 16);
-pub const PROTOCOL_VERSION: ProtocolVersion = CONTRACT_V1_1_16;
+pub const CONTRACT_V1_2_17: ProtocolVersion = ProtocolVersion::new(1, 2, 17);
+pub const PROTOCOL_VERSION: ProtocolVersion = CONTRACT_V1_2_17;
 pub const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[
   CONTRACT_V1_0_12,
   CONTRACT_V1_1_13,
   CONTRACT_V1_1_14,
   CONTRACT_V1_1_15,
   CONTRACT_V1_1_16,
+  CONTRACT_V1_2_17,
 ];
 
 #[must_use]
@@ -420,6 +422,12 @@ pub fn recovery_watch_supported(protocol: ProtocolVersion) -> bool {
   SUPPORTED_PROTOCOL_VERSIONS.contains(&protocol) && protocol >= CONTRACT_V1_1_16
 }
 
+/// Protocol-aware listener discovery and UDP forwarding require broker 1.2.17.
+#[must_use]
+pub fn forwarding_protocol_supported(protocol: ProtocolVersion) -> bool {
+  SUPPORTED_PROTOCOL_VERSIONS.contains(&protocol) && protocol >= CONTRACT_V1_2_17
+}
+
 /// Resolve a remote VPN's SSH owner using the exact prefix that reaches it.
 #[must_use]
 pub fn vpn_owner_target(gateways: &[SshGateway], vpn_index: usize) -> Option<SshTarget> {
@@ -517,9 +525,37 @@ impl SshTarget {
   }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PortForwardProtocol {
+  #[default]
+  Tcp,
+  Udp,
+  Any,
+}
+
+impl PortForwardProtocol {
+  #[must_use]
+  pub fn is_tcp(&self) -> bool {
+    *self == Self::Tcp
+  }
+
+  #[must_use]
+  pub fn includes_tcp(self) -> bool {
+    matches!(self, Self::Tcp | Self::Any)
+  }
+
+  #[must_use]
+  pub fn includes_udp(self) -> bool {
+    matches!(self, Self::Udp | Self::Any)
+  }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct LocalPortForward {
   pub forward_id: String,
+  #[serde(default, skip_serializing_if = "PortForwardProtocol::is_tcp")]
+  pub protocol: PortForwardProtocol,
   pub bind_address: String,
   pub local_port: u16,
   pub remote_host: String,
@@ -678,6 +714,8 @@ pub enum ClientMessage {
   },
   ListRemoteListeners {
     target: SshTarget,
+    #[serde(default, skip_serializing_if = "PortForwardProtocol::is_tcp")]
+    protocol: PortForwardProtocol,
   },
   StartVpn {
     env_file: PathBuf,
@@ -1760,6 +1798,57 @@ mod tests {
     assert_eq!(
       serde_json::to_value(request).unwrap()["type"],
       "ensure_master_quiet"
+    );
+  }
+
+  #[test]
+  fn forwarding_protocol_contract_preserves_legacy_tcp_shapes() {
+    for contract in SUPPORTED_PROTOCOL_VERSIONS {
+      assert_eq!(
+        forwarding_protocol_supported(*contract),
+        *contract == CONTRACT_V1_2_17
+      );
+    }
+    assert!(!forwarding_protocol_supported(ProtocolVersion::new(
+      1, 2, 18
+    )));
+    let legacy = serde_json::json!({
+      "forward_id": "database", "bind_address": "127.0.0.1", "local_port": 5432,
+      "remote_host": "localhost", "remote_port": 5432
+    });
+    let mut forward: LocalPortForward = serde_json::from_value(legacy.clone()).unwrap();
+    assert_eq!(forward.protocol, PortForwardProtocol::Tcp);
+    assert_eq!(serde_json::to_value(&forward).unwrap(), legacy);
+    for (protocol, wire) in [
+      (PortForwardProtocol::Udp, "udp"),
+      (PortForwardProtocol::Any, "any"),
+    ] {
+      forward.protocol = protocol;
+      let value = serde_json::to_value(&forward).unwrap();
+      assert_eq!(value["protocol"], wire);
+      assert_eq!(
+        serde_json::from_value::<LocalPortForward>(value).unwrap(),
+        forward
+      );
+    }
+    let request = serde_json::json!({
+      "type": "list_remote_listeners",
+      "target": { "destination": "fixture", "hostname": null, "user": null,
+        "port": null, "identity_file": null }
+    });
+    let legacy: ClientMessage = serde_json::from_value(request).unwrap();
+    assert!(matches!(
+      legacy,
+      ClientMessage::ListRemoteListeners {
+        protocol: PortForwardProtocol::Tcp,
+        ..
+      }
+    ));
+    assert!(
+      serde_json::to_value(legacy)
+        .unwrap()
+        .get("protocol")
+        .is_none()
     );
   }
 

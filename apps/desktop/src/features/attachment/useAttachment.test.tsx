@@ -217,7 +217,7 @@ beforeEach(() => {
           observed_sequence: "0",
         },
       },
-      channel: {},
+      close: vi.fn(),
     };
   });
 });
@@ -1659,6 +1659,28 @@ describe("connection evidence and transitions", () => {
     expect(result.current.state.phase).toBe("error");
   });
 
+  it("disposes and replaces an attachment that stops delivering events", async () => {
+    const { result } = renderHook(() => useAttachment(renderer));
+    await act(async () => { await result.current.connect(first); });
+    const attachment_id = result.current.state.attachment_id!;
+    const { close } = await api.openAttachment.mock.results[0].value;
+    const stalled = api.openAttachment.mock.calls[0][3];
+    await emit(checkpoint(attachment_id, "previous screen", "10"));
+    vi.useFakeTimers();
+
+    await act(async () => { stalled(); });
+    expect(close).toHaveBeenCalledOnce();
+    expect(api.detachAttachment).toHaveBeenCalledExactlyOnceWith({ attachment_id });
+    expect(result.current.state).toMatchObject({ phase: "retry_wait", error_code: "attachment_delivery_stalled" });
+    await act(async () => { await vi.advanceTimersByTimeAsync(250); });
+    expect(api.openAttachment.mock.lastCall?.[0]).toMatchObject({ resume_from: null });
+    expect(result.current.state.phase).toBe("attached");
+
+    await act(async () => { stalled(); });
+    expect(result.current.state.phase).toBe("attached");
+    expect(api.detachAttachment).toHaveBeenCalledTimes(1);
+  });
+
   it.each(["sendInput", "releaseAttachmentLease"] as const)("waits for the exit event when %s races with disconnect", async (command) => {
     const { result } = renderHook(() => useAttachment(renderer));
     await act(async () => { await result.current.connect(first); });
@@ -2372,7 +2394,7 @@ describe("durable terminal previews", () => {
     expect(line(visibleTerminal().terminal)).toBe("saved current");
     expect(result.current.state.applied_sequence).toBe("7");
     expect(result.current.state.phase).toBe("error");
-    expect(api.openAttachment).toHaveBeenCalledWith(expect.objectContaining({ resume_from: null }), expect.any(Function), expect.any(AbortSignal));
+    expect(api.openAttachment).toHaveBeenCalledWith(expect.objectContaining({ resume_from: null }), expect.any(Function), expect.any(AbortSignal), expect.any(Function));
   });
 
   it("reports a disk-cache failure before opening a live channel", async () => {
@@ -2568,21 +2590,36 @@ describe("opened session channels", () => {
     expect(api.openAttachment).toHaveBeenCalledTimes(3);
   });
 
-  it("archives a removed interactive session after detaching its channel", async () => {
+  it.each(["Tab closed", "Host removed"])("archives a removed interactive session after detaching its channel (%s)", async (reason) => {
+    const session: SessionSummary = reason === "Host removed"
+      ? { ...first, target: { kind: "ssh", host_id: "build-host", destination: "build.example" } }
+      : first;
+    const open = api.openAttachment.getMockImplementation()!;
+    api.openAttachment.mockImplementation(async (...args) => {
+      const result = await open(...args);
+      result.attached.session = session;
+      return result;
+    });
     let attachments!: ReturnType<typeof useSessionAttachments>;
     function TestComponent() {
       attachments = useSessionAttachments(renderer);
       return <>{attachments.controllers}</>;
     }
     render(<TestComponent />);
-    act(() => { void attachments.connect(first); });
+    act(() => { void attachments.connect(session); });
     await waitFor(() => expect(attachments.state.phase).toBe("attached"));
     api.sessionCache.mockImplementation(async (action) => {
       if (action.kind === "archive") expect(api.detachAttachment).toHaveBeenCalledWith({ attachment_id: "attachment-0" });
       return { kind: "archived" };
     });
-    act(() => attachments.retainSessions(new Set()));
-    await waitFor(() => expect(api.sessionCache).toHaveBeenCalledWith({ kind: "archive", host_key: "local", session_id: "first", reason: "Tab closed" }));
+    if (reason === "Host removed") {
+      await act(async () => { await attachments.disconnectHost("build-host", reason); });
+    } else {
+      act(() => attachments.retainSessions(new Set()));
+    }
+    await waitFor(() => expect(api.sessionCache).toHaveBeenCalledWith({
+      kind: "archive", host_key: reason === "Host removed" ? "host:build-host" : "local", session_id: "first", reason,
+    }));
     expect(attachments.session_keys.size).toBe(0);
   });
 

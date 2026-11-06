@@ -51,7 +51,7 @@ pub async fn session_cache(
   request: CacheRequest,
 ) -> CommandResult<CacheResponse> {
   let transition = if matches!(request.action, CacheAction::Archive { .. }) {
-    Some(state.window_transition(window.label()).await)
+    Some(state.window_transition(window.label()))
   } else {
     None
   };

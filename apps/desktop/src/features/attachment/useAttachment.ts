@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import type { Channel } from "@tauri-apps/api/core";
 import { decodeBase64, encodeBase64, sequenceAtLeast } from "../../lib/bytes";
 import {
   acknowledgeAttachmentEvent,
@@ -149,7 +148,11 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
   const openingAbortRef = useRef<AbortController | null>(null);
   const manualReconnectRef = useRef<{ abort: AbortController; promise: Promise<void> } | null>(null);
   const directReconnectRef = useRef<Promise<void> | null>(null);
-  const channelRef = useRef<Channel<AttachmentEvent> | null>(null);
+  const closeChannelRef = useRef<(() => void) | null>(null);
+  const closeChannel = useCallback(() => {
+    closeChannelRef.current?.();
+    closeChannelRef.current = null;
+  }, []);
   const generationRef = useRef(0);
   const eventTailRef = useRef(Promise.resolve());
   const appliedSequenceRef = useRef<string | null>(null);
@@ -216,7 +219,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
     generationRef.current += 1;
     const attachment_id = activeAttachmentRef.current;
     activeAttachmentRef.current = null;
-    channelRef.current = null;
+    closeChannel();
     openingAbortRef.current?.abort();
     inputLeaseOwnedRef.current = false;
     layoutLeaseOwnedRef.current = false;
@@ -228,7 +231,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
       type: "failed", code, message: errorMessage(error),
       resume_from: reconnectSequenceAfterError(code, current.reconnect_sequence),
     }));
-  }, [cancelPendingHistory]);
+  }, [cancelPendingHistory, closeChannel]);
 
   const stopResizeWithMessage = useCallback(
     (message: string) => {
@@ -422,12 +425,12 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
       const attachmentId = activeAttachmentRef.current ?? resumableAttachmentRef.current;
       activeAttachmentRef.current = null;
       resumableAttachmentRef.current = null;
-      channelRef.current = null;
+      closeChannel();
       if (attachmentId) {
         void detachAttachment({ attachment_id: attachmentId });
       }
     };
-  }, [abortManualReconnect, cancelPendingHistory, clearRecoveryTimer]);
+  }, [abortManualReconnect, cancelPendingHistory, clearRecoveryTimer, closeChannel]);
 
   const publishAppliedSequence = useCallback((sequence: string) => {
     appliedSequenceRef.current = sequence;
@@ -747,7 +750,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
               ? event.attachment_id
               : null;
           activeAttachmentRef.current = null;
-          channelRef.current = null;
+          closeChannel();
           inputLeaseOwnedRef.current = false;
           layoutLeaseOwnedRef.current = false;
           resizeWithWindowRef.current = resumeResize;
@@ -762,7 +765,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
           cancelPendingHistory();
           renderer.invalidateResumeSequence();
           activeAttachmentRef.current = null;
-          channelRef.current = null;
+          closeChannel();
           inputLeaseOwnedRef.current = false;
           layoutLeaseOwnedRef.current = false;
           inputPumpRef.current?.clear();
@@ -777,6 +780,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
     [
       acknowledge,
       cancelPendingHistory,
+      closeChannel,
       loseLease,
       publishAppliedSequence,
       publishShellState,
@@ -850,7 +854,6 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
       }));
       const previous_attachment_id = activeAttachmentRef.current;
       activeAttachmentRef.current = null;
-      channelRef.current = null;
 
       const proposed = renderer.proposeDimensions();
       const requestedTerminalSize = proposed
@@ -862,6 +865,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
       const openingAbort = new AbortController();
       openingAbortRef.current = openingAbort;
       let unclaimed_attachment_id: string | null = null;
+      let result!: Awaited<ReturnType<typeof openAttachment>>;
       try {
         // Each renderer owns its attachment. Replacing this renderer's session
         // must release its leases without detaching sibling panes.
@@ -873,7 +877,6 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
         // Disk content is a preview. A root pane may have changed since it was
         // saved, so it always requires an authoritative checkpoint.
         let requestedResume = restored_local_cache ? null : resumeFrom;
-        let result!: Awaited<ReturnType<typeof openAttachment>>;
         for (let attempt = 0; attempt < 2; attempt += 1) {
           openingAttempt = attempt;
           const resumeAttachmentId = attempt === 0 ? request.resume_attachment_id : undefined;
@@ -894,8 +897,8 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
               request_layout_lease: resizeControlDesired && resizeWithWindow && proposed !== null,
             },
             (event) => {
-              statistics?.received(event);
               if (generation !== generationRef.current || attempt !== openingAttempt) return;
+              statistics?.received(event);
               if (event.event_type === "attachment_statistics") {
                 statistics?.sample(statistics_id, event);
                 return;
@@ -904,6 +907,17 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
               else pendingEvents.push(event);
             },
             openingAbort.signal,
+            () => {
+              if (generation !== generationRef.current || attempt !== openingAttempt) return;
+              setFailure({
+                code: "attachment_delivery_stalled",
+                message: "The terminal stopped receiving events. Reconnecting.",
+              });
+              if (unclaimed_attachment_id) {
+                void detachAttachment({ attachment_id: unclaimed_attachment_id }).catch(() => undefined);
+                unclaimed_attachment_id = null;
+              }
+            },
           );
           unclaimed_attachment_id = result.attached.attachment_id;
           if (generation !== generationRef.current) return;
@@ -916,6 +930,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
           // once against the resolved terminal with a fresh checkpoint.
           openingAttempt += 1;
           pendingEvents = [];
+          result.close();
           await detachAttachment({ attachment_id: unclaimed_attachment_id });
           unclaimed_attachment_id = null;
           if (generation !== generationRef.current) return;
@@ -937,7 +952,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
         }
         activeAttachmentRef.current = result.attached.attachment_id;
         unclaimed_attachment_id = null;
-        channelRef.current = result.channel;
+        closeChannelRef.current = result.close;
         inputLeaseOwnedRef.current = result.attached.input_lease.owned_by_client;
         layoutLeaseOwnedRef.current = result.attached.layout_lease.owned_by_client;
         const acquireAfterAttach = resizeControlDesired && !result.attached.layout_lease.held;
@@ -965,7 +980,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
           attachment_id: result.attached.attachment_id, generation, acquire: true,
         });
         responseReady = true;
-        for (const event of pendingEvents) {
+        for (const event of pendingEvents.splice(0)) {
           queueEvent(event, generation);
         }
         request.on_complete?.({ generation, error_code: null });
@@ -978,7 +993,9 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
           request.on_complete?.({ generation: generationRef.current, error_code: errorCode(error) });
         }
       } finally {
+        pendingEvents.length = 0;
         if (unclaimed_attachment_id !== null) {
+          result.close();
           await detachAttachment({ attachment_id: unclaimed_attachment_id }).catch(() => undefined);
         }
         if (openingAbortRef.current === openingAbort) {
@@ -1030,6 +1047,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
       generationRef.current = generation;
       cancelPendingHistory();
       openingAbortRef.current?.abort();
+      closeChannel();
       inputLeaseOwnedRef.current = false;
       layoutLeaseOwnedRef.current = false;
       resizeWithWindowRef.current = resizeWithWindow;
@@ -1066,7 +1084,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
       drainDeferredConnectionRef.current();
       return completion;
     },
-    [cancelPendingHistory],
+    [cancelPendingHistory, closeChannel],
   );
 
   const connect = useCallback(
@@ -1108,7 +1126,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
         generationRef.current += 1;
         transitionGeneration = generationRef.current;
         activeAttachmentRef.current = null;
-        channelRef.current = null;
+        closeChannel();
         try {
           await detachAttachment({ attachment_id: attachmentId });
         } catch {
@@ -1136,7 +1154,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
       );
       return completion.outcome?.generation === generationRef.current ? completion.outcome : null;
     },
-    [cancelPendingHistory, connectAt, resetRecovery],
+    [cancelPendingHistory, closeChannel, connectAt, resetRecovery],
   );
 
   const reconnect = useCallback(
@@ -1309,15 +1327,17 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
     generationRef.current += 1;
     openingAbortRef.current?.abort();
     connectionQueueRef.current?.cancelPending();
-    const abandoned_attachment_id = resumableAttachmentRef.current;
+    const abandoned_attachment_id = activeAttachmentRef.current ?? resumableAttachmentRef.current;
+    activeAttachmentRef.current = null;
     resumableAttachmentRef.current = null;
+    closeChannel();
     if (abandoned_attachment_id) {
       void detachAttachment({ attachment_id: abandoned_attachment_id }).catch(() => undefined);
     }
     appliedSequenceRef.current = null;
     pendingShellStateRef.current = null;
     setState(INITIAL_STATE);
-  }, [abortManualReconnect, cancelPendingHistory, resetRecovery]);
+  }, [abortManualReconnect, cancelPendingHistory, closeChannel, resetRecovery]);
 
   const detach = useCallback(async () => {
     abortManualReconnect();
@@ -1337,7 +1357,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
     const attachmentId = activeAttachmentRef.current ?? resumableAttachmentRef.current;
     activeAttachmentRef.current = null;
     resumableAttachmentRef.current = null;
-    channelRef.current = null;
+    closeChannel();
     if (attachmentId) {
       try {
         await detachAttachment({ attachment_id: attachmentId });
@@ -1356,7 +1376,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
     appliedSequenceRef.current = null;
     pendingShellStateRef.current = null;
     setState(INITIAL_STATE);
-  }, [abortManualReconnect, cancelPendingHistory, resetRecovery]);
+  }, [abortManualReconnect, cancelPendingHistory, closeChannel, resetRecovery]);
 
   const resetAfterDaemonRestart = useCallback(() => {
     abortManualReconnect();
@@ -1376,10 +1396,10 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
     pendingShellStateRef.current = null;
     activeAttachmentRef.current = null;
     resumableAttachmentRef.current = null;
-    channelRef.current = null;
+    closeChannel();
     stateRef.current = INITIAL_STATE;
     setState(INITIAL_STATE);
-  }, [abortManualReconnect, cancelPendingHistory, resetRecovery]);
+  }, [abortManualReconnect, cancelPendingHistory, closeChannel, resetRecovery]);
 
   const requestResizeControl = useCallback(async (acquire: boolean) => {
     const attachment_id = activeAttachmentRef.current;

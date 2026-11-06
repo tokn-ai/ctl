@@ -52,7 +52,7 @@ pub async fn prepare(
   if component_id.starts_with("remote:saved:") {
     return prepare_saved(app, state, component_id).await;
   }
-  let active = state.remote_actors().await;
+  let active = state.remote_actors();
   let actors: Vec<_> = active
     .into_iter()
     .filter(|actor| row(actor, component_id).is_some())
@@ -165,7 +165,6 @@ async fn prepare_saved(
   };
   let actors: Vec<_> = state
     .remote_actors()
-    .await
     .into_iter()
     .filter(|actor| {
       actor
@@ -195,7 +194,7 @@ impl PreparedRemoteAction {
     {
       return Err(unavailable());
     }
-    let active = state.remote_actors().await;
+    let active = state.remote_actors();
     if !self
       .actors
       .iter()

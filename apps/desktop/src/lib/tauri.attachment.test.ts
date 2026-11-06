@@ -1,12 +1,19 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { OpenAttachmentRequest, OpenAttachmentResponse } from "./types";
-import { openAttachment, resizeAttachmentDivider, resizeAttachmentPane, requestAttachmentCheckpoint } from "./tauri";
+// @vitest-environment jsdom
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { Channel } from "@tauri-apps/api/core";
+import type { AttachmentEvent, OpenAttachmentRequest, OpenAttachmentResponse } from "./types";
+import { openAttachment, resizeAttachmentDivider, resizeAttachmentPane, requestAttachmentCheckpoint, watchTaskLogs } from "./tauri";
 
 const ipc = vi.hoisted(() => ({ invoke: vi.fn() }));
-vi.mock("@tauri-apps/api/core", () => ({
+vi.mock("@tauri-apps/api/core", async (load) => ({
+  ...await load<typeof import("@tauri-apps/api/core")>(),
   invoke: ipc.invoke,
-  Channel: class { onmessage = (_message: unknown) => {}; },
 }));
+
+const callbacks = new Map<number, (value: unknown) => void>();
+function deliver<T>(channel: Channel<T>, index: number, message: T): void {
+  callbacks.get(channel.id)?.({ index, message });
+}
 
 const request: OpenAttachmentRequest = {
   target: { kind: "ssh", destination: "offline" },
@@ -16,8 +23,22 @@ const request: OpenAttachmentRequest = {
   request_input_lease: true,
   request_layout_lease: false,
 };
+const attached = { attachment_id: "active", session: { session_id: "shell" } } as OpenAttachmentResponse;
 
-beforeEach(() => { vi.resetAllMocks(); });
+beforeEach(() => {
+  vi.resetAllMocks();
+  callbacks.clear();
+  let id = 0;
+  vi.stubGlobal("__TAURI_INTERNALS__", {
+    transformCallback: (callback: (value: unknown) => void) => { callbacks.set(++id, callback); return id; },
+    unregisterCallback: (id: number) => callbacks.delete(id),
+  });
+});
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+  vi.useRealTimers();
+});
 
 describe("attachment IPC cancellation", () => {
   it("keeps the verified environment while retaining saved alias metadata", async () => {
@@ -51,10 +72,10 @@ describe("attachment IPC cancellation", () => {
 
   it.each([true, false])("cancels before or after the opening notification (before=%s)", async (before) => {
     let reject_open!: (error: unknown) => void;
-    let notify_opening!: (id: string) => void;
+    let notify_opening!: Channel<string>;
     ipc.invoke.mockImplementation((command, args) => {
       if (command === "open_attachment") {
-        notify_opening = args.on_opening.onmessage;
+        notify_opening = args.on_opening;
         return new Promise((_resolve, reject) => { reject_open = reject; });
       }
       reject_open({ code: "attachment_cancelled" });
@@ -65,13 +86,14 @@ describe("attachment IPC cancellation", () => {
     const cancelled = expect(opening).rejects.toMatchObject({ code: "attachment_cancelled" });
     if (before) controller.abort();
     expect(ipc.invoke).toHaveBeenCalledTimes(1);
-    notify_opening("registered-id");
+    deliver(notify_opening, 0, "registered-id");
     if (!before) controller.abort();
     await cancelled;
     expect(ipc.invoke).toHaveBeenCalledTimes(2);
     expect(ipc.invoke).toHaveBeenLastCalledWith("cancel_attachment_open", {
       request: { attachment_id: "registered-id" },
     });
+    expect(callbacks.size).toBe(0);
   });
 
   it("does not start an already-cancelled request", async () => {
@@ -82,15 +104,76 @@ describe("attachment IPC cancellation", () => {
   });
 
   it("removes cancellation after the open settles and preserves the response", async () => {
-    const response = { attachment_id: "active", session: { session_id: "shell" } } as OpenAttachmentResponse;
     ipc.invoke.mockImplementation(async (_command, args) => {
-      args.on_opening.onmessage("active");
-      return response;
+      deliver(args.on_opening, 0, "active");
+      return attached;
     });
     const controller = new AbortController();
     const result = await openAttachment(request, vi.fn(), controller.signal);
     controller.abort();
     expect(result.attached.session.target).toEqual(request.target);
     expect(ipc.invoke).toHaveBeenCalledOnce();
+    expect(callbacks.size).toBe(0);
+  });
+});
+
+describe("attachment delivery", () => {
+  it("releases a channel that cannot deliver later events after an index is lost", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(document, "hidden", "get").mockReturnValue(false);
+    ipc.invoke.mockResolvedValue(attached);
+    const on_event = vi.fn();
+    const stalled = vi.fn();
+    await openAttachment(request, on_event, undefined, stalled);
+    const channel = ipc.invoke.mock.calls[0][1].on_event as Channel<AttachmentEvent>;
+    const stats = { event_type: "attachment_statistics", attachment_id: "active" } as AttachmentEvent;
+    deliver(channel, 0, stats);
+    deliver(channel, 2, stats);
+    callbacks.get(channel.id)?.({ index: 3, end: true });
+    expect(on_event).toHaveBeenCalledOnce();
+    expect(callbacks.has(channel.id)).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(35_000);
+    expect(stalled).toHaveBeenCalledOnce();
+    expect(callbacks.has(channel.id)).toBe(false);
+  });
+
+  it("waits for foreground silence and stops watching when an ordered exit arrives", async () => {
+    vi.useFakeTimers();
+    const hidden = vi.spyOn(document, "hidden", "get").mockReturnValue(true);
+    ipc.invoke.mockResolvedValue(attached);
+    const on_event = vi.fn();
+    const stalled = vi.fn();
+    const { close } = await openAttachment(request, on_event, undefined, stalled);
+    const channel = ipc.invoke.mock.calls[0][1].on_event as Channel<AttachmentEvent>;
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(stalled).not.toHaveBeenCalled();
+
+    hidden.mockReturnValue(false);
+    document.dispatchEvent(new Event("visibilitychange"));
+    await vi.advanceTimersByTimeAsync(25_000);
+    const exit = { event_type: "attachment_exited", attachment_id: "active", reason: "detached" } as AttachmentEvent;
+    deliver(channel, 0, exit);
+    await vi.advanceTimersByTimeAsync(35_000);
+
+    expect(on_event).toHaveBeenCalledExactlyOnceWith(exit);
+    expect(stalled).not.toHaveBeenCalled();
+    // The renderer processed the final event even though the native end
+    // marker did not arrive. Cleanup can still release the registration.
+    close();
+    close();
+    expect(callbacks.size).toBe(0);
+  });
+
+  it("releases a task log callback when its pane closes before the subscription opens", async () => {
+    let finish!: (id: string) => void;
+    ipc.invoke.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    const controller = new AbortController();
+    const watching = watchTaskLogs("task", null, vi.fn(), controller.signal);
+    expect(callbacks.size).toBe(1);
+    controller.abort();
+    expect(callbacks.size).toBe(0);
+    finish("subscription");
+    await expect(watching).resolves.toBe("subscription");
   });
 });

@@ -259,6 +259,7 @@ describe("attachment notification lifecycle", () => {
   });
 
   it("survives StrictMode effect replay and releases actions on real unmount", async () => {
+    const register = vi.spyOn(AttachmentNotifications.prototype, "createOwner");
     const store = new NotificationStore();
     const wrapper = ({ children }: { children: ReactNode }) => <StrictMode><NotificationProvider store={store}>{children}</NotificationProvider></StrictMode>;
     const hook = renderHook(() => {
@@ -266,6 +267,8 @@ describe("attachment notification lifecycle", () => {
       return useNotificationEnvironment()!;
     }, { wrapper });
     await act(async () => {});
+    expect(register).toHaveBeenCalledOnce();
+    register.mockRestore();
     expect(store.snapshot().entries).toMatchObject([{ occurrence_count: 1 }]);
     const registry = hook.result.current.attachments;
     const owner = store.snapshot().entries[0].actions![0].args!.value;

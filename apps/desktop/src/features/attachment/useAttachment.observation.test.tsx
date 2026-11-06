@@ -37,7 +37,7 @@ beforeEach(() => {
   api.openAttachment.mockImplementation(async (request: OpenAttachmentRequest, on_event: (event: AttachmentEvent) => void) => {
     const attachment_id = `attachment-${channels.length}`;
     channels.push(on_event);
-    return { channel: {}, attached: {
+    return { close: vi.fn(), attached: {
       attachment_id, session: { ...session, target: request.target }, replay_from: "0", history_gap: false,
       terminal_size_mismatch: false, input_lease: { held: true, owned_by_client: true },
       layout_lease: { held: false, owned_by_client: false }, shell_state: {

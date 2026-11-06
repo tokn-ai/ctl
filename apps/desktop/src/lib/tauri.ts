@@ -286,8 +286,11 @@ export async function sshReachability(target: ConnectionTarget): Promise<SshReac
   return invoke("ssh_reachability", { request: { target } });
 }
 
-export async function disconnectSshHost(targets: readonly ConnectionTarget[]): Promise<void> {
-  return invoke("disconnect_ssh_host", { request: { targets } });
+export async function disconnectSshHost(
+  targets: readonly ConnectionTarget[],
+  retained_targets?: readonly ConnectionTarget[],
+): Promise<void> {
+  return invoke("disconnect_ssh_host", { request: { targets, retained_targets } });
 }
 
 export async function installRemoteAgent(
@@ -400,7 +403,7 @@ export async function checkLocalPort(
 
 export interface OpenAttachmentResult {
   attached: OpenAttachmentResponse;
-  channel: Channel<AttachmentEvent>;
+  close(): void;
 }
 
 export async function listSessions(
@@ -461,19 +464,62 @@ export async function restartLocalDaemon(): Promise<RestartLocalDaemonResponse> 
   return invoke<RestartLocalDaemonResponse>("restart_local_daemon");
 }
 
+export async function closeAttachmentWindow(): Promise<void> {
+  await invoke("close_attachment_window");
+}
+
+const ATTACHMENT_DELIVERY_CHECK_MS = 5_000;
+const ATTACHMENT_DELIVERY_TIMEOUT_MS = 30_000;
+
+function unregisterChannel(id: number): void {
+  const ipc = (window as Window & {
+    __TAURI_INTERNALS__?: { unregisterCallback(id: number): void };
+  }).__TAURI_INTERNALS__;
+  ipc?.unregisterCallback(id);
+}
+
 export async function openAttachment(
   request: OpenAttachmentRequest,
   onEvent: (event: AttachmentEvent) => void,
   signal?: AbortSignal,
+  onDeliveryStalled?: () => void,
 ): Promise<OpenAttachmentResult> {
   signal?.throwIfAborted();
   const channel = new Channel<AttachmentEvent>();
-  channel.onmessage = onEvent;
   const opening = new Channel<string>();
   let opening_id: string | null = null;
+  let opening_complete = false;
   let cancellation_sent = false;
-  const cancel = () => {
-    if (!signal?.aborted || opening_id === null || cancellation_sent) return;
+  let closed = false;
+  let unregistered = false;
+  let delivery_check: ReturnType<typeof setInterval> | undefined;
+  let last_check_at = 0;
+  let silent_ms = 0;
+  let received = false;
+
+  const resetDeliveryClock = () => {
+    silent_ms = 0;
+    last_check_at = Date.now();
+  };
+  const stop = () => {
+    if (closed) return false;
+    closed = true;
+    if (delivery_check !== undefined) {
+      clearInterval(delivery_check);
+      document.removeEventListener("visibilitychange", resetDeliveryClock);
+    }
+    signal?.removeEventListener("abort", abort);
+    channel.onmessage = () => {};
+    return true;
+  };
+  const close = () => {
+    stop();
+    if (unregistered) return;
+    unregistered = true;
+    unregisterChannel(channel.id);
+  };
+  const cancelOpening = () => {
+    if (!signal?.aborted || opening_complete || opening_id === null || cancellation_sent) return;
     cancellation_sent = true;
     // The open's response remains authoritative, including a connection that
     // completed just before cancellation. Its caller discards stale results.
@@ -481,17 +527,48 @@ export async function openAttachment(
       request: { attachment_id: opening_id },
     }).catch(() => undefined);
   };
+  const abort = () => {
+    close();
+    cancelOpening();
+  };
+  channel.onmessage = (event) => {
+    received = true;
+    if (event.event_type === "attachment_exited" || event.event_type === "attachment_error") {
+      // Tauri unregisters the ordered callback on its end marker. Stop
+      // holding the renderer as soon as the final event arrives.
+      stop();
+    }
+    onEvent(event);
+  };
   opening.onmessage = (attachment_id) => {
     opening_id = attachment_id;
-    cancel();
+    cancelOpening();
   };
-  signal?.addEventListener("abort", cancel, { once: true });
+  signal?.addEventListener("abort", abort, { once: true });
   try {
     const attached = await invoke<OpenAttachmentResponse>("open_attachment", {
       request: { ...request, cache_host_key: request.target.kind === "local" ? "local" : request.target.host_id ? `host:${request.target.host_id}` : `ssh:${request.target.destination}` },
       on_event: channel,
       on_opening: opening,
     });
+    if (!closed && onDeliveryStalled) {
+      resetDeliveryClock();
+      document.addEventListener("visibilitychange", resetDeliveryClock);
+      delivery_check = setInterval(() => {
+        const now = Date.now();
+        if (document.hidden || received) silent_ms = 0;
+        // Native statistics normally arrive every 500 ms, including on an
+        // idle terminal. Ignore elapsed time when a timer was delayed by
+        // sleep or throttling.
+        else silent_ms += Math.min(ATTACHMENT_DELIVERY_CHECK_MS, Math.max(0, now - last_check_at));
+        received = false;
+        last_check_at = now;
+        if (silent_ms >= ATTACHMENT_DELIVERY_TIMEOUT_MS) {
+          close();
+          onDeliveryStalled();
+        }
+      }, ATTACHMENT_DELIVERY_CHECK_MS);
+    }
     return {
       attached: {
         ...attached,
@@ -502,10 +579,15 @@ export async function openAttachment(
             : request.target,
         },
       },
-      channel,
+      close,
     };
+  } catch (error) {
+    close();
+    throw error;
   } finally {
-    signal?.removeEventListener("abort", cancel);
+    opening_complete = true;
+    opening.onmessage = () => {};
+    unregisterChannel(opening.id);
   }
 }
 
@@ -580,13 +662,42 @@ export async function taskRequest(request: import("./types").TaskRequest): Promi
   return invoke("task_request", { request });
 }
 
-export async function watchTaskLogs(task_id: string, after_sequence: string | null, onEvent: (event: import("./types").TaskLogEvent) => void): Promise<string> {
+export async function watchTaskLogs(
+  task_id: string,
+  after_sequence: string | null,
+  onEvent: (event: import("./types").TaskLogEvent) => void,
+  signal: AbortSignal,
+): Promise<string> {
+  signal.throwIfAborted();
   const channel = new Channel<import("./types").TaskLogEvent>();
+  let stopped = false;
+  const stop = () => {
+    if (stopped) return false;
+    stopped = true;
+    signal.removeEventListener("abort", release);
+    channel.onmessage = () => {};
+    return true;
+  };
+  const release = () => {
+    if (stop()) unregisterChannel(channel.id);
+  };
   channel.onmessage = (event) => {
     try { onEvent(event); }
-    finally { if (event.event_type === "log") void invoke("acknowledge_task_log", { subscriptionId: event.subscription_id, sequence: event.sequence }).catch(() => undefined); }
+    finally {
+      if (event.event_type === "log") {
+        void invoke("acknowledge_task_log", { subscriptionId: event.subscription_id, sequence: event.sequence }).catch(() => undefined);
+      } else {
+        stop();
+      }
+    }
   };
-  return invoke("watch_task_logs", { request: { task_id, after_sequence }, onEvent: channel });
+  signal.addEventListener("abort", release, { once: true });
+  try {
+    return await invoke("watch_task_logs", { request: { task_id, after_sequence }, onEvent: channel });
+  } catch (error) {
+    release();
+    throw error;
+  }
 }
 
 export async function cancelTaskLogs(subscription_id: string): Promise<void> {

@@ -15,6 +15,7 @@ import { recoverRemoteHost } from "./remoteRecovery";
 import type { HostCatalogDocument, HostCatalogSnapshot, TailscaleDeviceCatalog, WorkspaceDocument, WorkspaceSnapshot } from "../../lib/types";
 
 const api = vi.hoisted(() => ({
+  closeAttachmentWindow: vi.fn(),
   loadWorkspace: vi.fn(),
   updateWorkspace: vi.fn(),
   loadHosts: vi.fn(),
@@ -24,7 +25,6 @@ const api = vi.hoisted(() => ({
 }));
 const nativeWindow = vi.hoisted(() => ({
   onCloseRequested: vi.fn(),
-  destroy: vi.fn(),
 }));
 vi.mock("../../lib/tauri", () => api);
 vi.mock("@tauri-apps/api/window", () => ({
@@ -74,7 +74,7 @@ beforeEach(() => {
   window.localStorage.clear();
   delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
   nativeWindow.onCloseRequested.mockResolvedValue(() => {});
-  nativeWindow.destroy.mockResolvedValue(undefined);
+  api.closeAttachmentWindow.mockResolvedValue(undefined);
   api.loadWorkspace.mockResolvedValue(initial);
   api.loadHosts.mockResolvedValue(initialHosts);
   api.listSshConfigHosts.mockResolvedValue({ hosts: [], warnings: [] });
@@ -501,7 +501,7 @@ describe("workspace lifecycle", () => {
     });
     expect(preventDefault).toHaveBeenCalledOnce();
     expect(result.current.closing).toBe(true);
-    expect(nativeWindow.destroy).not.toHaveBeenCalled();
+    expect(api.closeAttachmentWindow).not.toHaveBeenCalled();
     act(() => result.current.setSessions([]));
     expect(result.current.sessions).toHaveLength(1);
     await act(async () => {
@@ -511,7 +511,7 @@ describe("workspace lifecycle", () => {
       });
       await closing;
     });
-    expect(nativeWindow.destroy).toHaveBeenCalledOnce();
+    expect(api.closeAttachmentWindow).toHaveBeenCalledOnce();
   });
 
   it("pauses window close for an in-flight session creation or a save failure", async () => {
@@ -526,7 +526,7 @@ describe("workspace lifecycle", () => {
         preventDefault: vi.fn(),
       }),
     );
-    expect(nativeWindow.destroy).not.toHaveBeenCalled();
+    expect(api.closeAttachmentWindow).not.toHaveBeenCalled();
     expect(result.current.error).toContain("ongoing operations");
     result.current.closeBlockedRef.current = () => false;
     api.updateWorkspace.mockRejectedValue({
@@ -541,7 +541,7 @@ describe("workspace lifecycle", () => {
     );
     expect(result.current.closing).toBe(false);
     expect(result.current.error).toContain("disk full");
-    expect(nativeWindow.destroy).not.toHaveBeenCalled();
+    expect(api.closeAttachmentWindow).not.toHaveBeenCalled();
   });
 
   it("does not discard malformed legacy settings", async () => {

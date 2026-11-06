@@ -51,7 +51,7 @@ export function useSessionAttachments(renderer: XtermRenderer | null): Attachmen
   session_keys: ReadonlySet<string>;
   closeSession(session: SessionSummary): Promise<void>;
   retainSessions(keys: ReadonlySet<string>): void;
-  disconnectHost(host_id: string): Promise<void>;
+  disconnectHost(host_id: string, archive_reason?: string): Promise<void>;
   forgetRestartedSessions(keys: ReadonlySet<string>): void;
 } {
   // The idle attachment supplies the placeholder state and never opens a stream.
@@ -112,17 +112,24 @@ export function useSessionAttachments(renderer: XtermRenderer | null): Attachmen
     renderer_ref.current?.retainSessions(new Set(entries.current.keys()));
   }, [notify]);
 
+  const closeAndArchive = useCallback(async (session: SessionSummary, reason: string) => {
+    try {
+      await closeSession(session);
+      await sessionCache({ kind: "archive", host_key: targetKey(session.target), session_id: session.session_id, reason });
+    } catch (error) {
+      setStorageError(errorMessage(error));
+    }
+  }, [closeSession]);
+
   const retainSessions = useCallback((keys: ReadonlySet<string>) => {
     for (const [key, entry] of entries.current) {
       if (!keys.has(key) && !archiving.current.has(key)) {
         archiving.current.add(key);
-        void closeSession(entry.session)
-          .then(() => sessionCache({ kind: "archive", host_key: targetKey(entry.session.target), session_id: entry.session.session_id, reason: "Tab closed" }))
-          .catch((error) => setStorageError(errorMessage(error)))
+        void closeAndArchive(entry.session, "Tab closed")
           .finally(() => archiving.current.delete(key));
       }
     }
-  }, [closeSession]);
+  }, [closeAndArchive]);
 
   const states = useMemo(() => [...entries.current.values()].flatMap((entry) => entry.actions ? [entry.actions.state] : []), [revision]);
   const session_keys = useMemo(() => new Set(entries.current.keys()), [revision]);
@@ -176,10 +183,10 @@ export function useSessionAttachments(renderer: XtermRenderer | null): Attachmen
     },
     closeSession,
     retainSessions,
-    disconnectHost: async (host_id) => {
+    disconnectHost: async (host_id, archive_reason) => {
       await Promise.all([...entries.current.values()]
         .filter((entry) => entry.session.target.kind === "ssh" && entry.session.target.host_id === host_id)
-        .map((entry) => closeSession(entry.session)));
+        .map(({ session }) => archive_reason ? closeAndArchive(session, archive_reason) : closeSession(session)));
     },
     controllers: [...entries.current].map(([key, entry]) =>
       <SessionAttachment key={key} entry={entry} renderer={renderer} onChange={notify} />),

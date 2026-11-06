@@ -37,6 +37,7 @@ pub struct ConfigurePortForwardRequest {
 #[derive(Deserialize)]
 pub struct DisconnectSshHostRequest {
   targets: Vec<ConnectionTargetDto>,
+  retained_targets: Option<Vec<ConnectionTargetDto>>,
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -123,7 +124,53 @@ pub async fn ssh_connection_status(
 
 #[tauri::command]
 pub async fn disconnect_ssh_host(request: DisconnectSshHostRequest) -> CommandResult<()> {
+  if let Some(retained) = request.retained_targets {
+    return disconnect_removed_host(&request.targets, &retained).await;
+  }
   super::disconnect(&request.targets).await
+}
+
+#[cfg(unix)]
+async fn disconnect_removed_host(
+  targets: &[ConnectionTargetDto],
+  retained: &[ConnectionTargetDto],
+) -> CommandResult<()> {
+  let targets = unshared_master_targets(targets, retained);
+  if targets.is_empty() {
+    return Ok(());
+  }
+  super::disconnect(&targets).await
+}
+
+#[cfg(not(unix))]
+fn disconnect_removed_host(
+  _targets: &[ConnectionTargetDto],
+  _retained: &[ConnectionTargetDto],
+) -> std::future::Ready<CommandResult<()>> {
+  // This platform has no persistent SSH broker to clean up on host removal.
+  std::future::ready(Ok(()))
+}
+
+#[cfg(unix)]
+fn unshared_master_targets(
+  targets: &[ConnectionTargetDto],
+  retained: &[ConnectionTargetDto],
+) -> Vec<ConnectionTargetDto> {
+  // Use the broker's normalized route identity. Display names, host IDs, and
+  // gateway profile labels do not distinguish two uses of the same master.
+  let mut used: std::collections::HashSet<_> = retained
+    .iter()
+    .filter_map(|target| target.to_ssh_target().ok())
+    .collect();
+  targets
+    .iter()
+    .filter(|target| {
+      target
+        .to_ssh_target()
+        .is_ok_and(|target| used.insert(target))
+    })
+    .cloned()
+    .collect()
 }
 
 #[tauri::command]
@@ -145,4 +192,28 @@ pub async fn list_remote_listeners(
   request: crate::dto::TargetRequestDto,
 ) -> CommandResult<ctl_proto::TcpListenerCatalog> {
   super::broker::list_remote_listeners(&request.target).await
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn host_removal_keeps_shared_masters_and_deduplicates_obsolete_routes() {
+    let route = |host_id: &str, user: &str, master_policy: Option<bool>| {
+      serde_json::from_value::<ConnectionTargetDto>(serde_json::json!({
+        "kind": "ssh",
+        "host_id": host_id,
+        "destination": "build.example",
+        "user": user,
+        "use_ssh_config_master": master_policy,
+      }))
+      .unwrap()
+    };
+    let shared = route("removed", "build", None);
+    let retained = route("retained", "build", Some(false));
+    let obsolete = route("removed", "other", None);
+    let removed = [shared, obsolete.clone(), obsolete.clone()];
+    assert_eq!(unshared_master_targets(&removed, &[retained]), [obsolete]);
+  }
 }

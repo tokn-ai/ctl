@@ -43,7 +43,6 @@ const nativeEvents = vi.hoisted(() => ({
 }));
 const nativeWindow = vi.hoisted(() => ({
   onCloseRequested: vi.fn(),
-  destroy: vi.fn(),
 }));
 const terminalSurface = vi.hoisted(() => ({
   on_input: null as ((data: Uint8Array) => void) | null,
@@ -68,6 +67,7 @@ vi.mock("@tauri-apps/api/window", () => ({
 }));
 
 const api = vi.hoisted(() => ({
+  closeAttachmentWindow: vi.fn(),
   listSavedCredentials: vi.fn(),
   listIdentityFiles: vi.fn(),
   importCredentialMetadata: vi.fn(),
@@ -233,7 +233,7 @@ beforeEach(() => {
   attachment.states = [];
   delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
   nativeWindow.onCloseRequested.mockResolvedValue(() => {});
-  nativeWindow.destroy.mockResolvedValue(undefined);
+  api.closeAttachmentWindow.mockResolvedValue(undefined);
   api.restartTaskDaemon.mockResolvedValue(undefined);
   api.taskRequest.mockResolvedValue({ type: "task_list", tasks: [] });
   api.loadTaskDefinitions.mockImplementation(async (scope: TaskDefinitionScope) => ({ scope, path: "/test/definitions.json", definitions: [] }));
@@ -1876,7 +1876,7 @@ describe("workspace-backed terminal page", () => {
       await closing;
     });
     await screen.findByText("Workspace is closing.");
-    expect(nativeWindow.destroy).toHaveBeenCalledOnce();
+    expect(api.closeAttachmentWindow).toHaveBeenCalledOnce();
     expect(api.createSession).not.toHaveBeenCalled();
     expect(api.listSessions).not.toHaveBeenCalled();
     expect(api.inspectKnownSessions).not.toHaveBeenCalled();
@@ -2590,6 +2590,13 @@ describe("workspace-backed terminal page", () => {
     fireEvent.click(screen.getByRole("button", { name: "Remove host…" }));
     fireEvent.click(screen.getByRole("button", { name: "Confirm remove host" }));
     await waitFor(() => expect(screen.queryByRole("button", { name: "Host settings for test" })).toBeNull());
+    expect(api.disconnectSshHost).toHaveBeenCalledExactlyOnceWith(
+      expect.arrayContaining([
+        expect.objectContaining({ host_id: "test-id", destination: "test" }),
+        expect.objectContaining({ host_id: "test-id", destination: "private.example" }),
+      ]),
+      expect.arrayContaining([expect.objectContaining({ host_id: "unused-id", destination: "test", user: "another-account" })]),
+    );
     expect(api.forgetSshCredentials).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
       host_id: "test-id", destination: "private.example", method_id: "private",
     }));
@@ -2619,6 +2626,7 @@ describe("workspace-backed terminal page", () => {
     const saved_before = api.updateWorkspace.mock.calls.length;
     fireEvent.click(remove);
     await screen.findByText("This host is used as a hop by unused. Edit those routes before removing it.");
+    expect(api.disconnectSshHost).not.toHaveBeenCalled();
     expect(api.forgetSshCredentials).not.toHaveBeenCalled();
     expect(api.configurePortForward).not.toHaveBeenCalled();
     expect(attachment.detach).not.toHaveBeenCalled();

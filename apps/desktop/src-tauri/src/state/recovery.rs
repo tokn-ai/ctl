@@ -68,14 +68,14 @@ impl AttachmentActor {
 }
 
 impl AppState {
-  pub async fn resume_attachment(
+  pub fn resume_attachment(
     &self,
     window_label: &str,
     attachment_id: &str,
     target: &ConnectionTargetDto,
     terminal_id: &str,
   ) -> Option<(ConnectionTargetDto, String)> {
-    let registry = self.registry.lock().await;
+    let registry = self.registry.lock().unwrap();
     let Some(AttachmentSlot::Resumable(resume)) = registry
       .by_window
       .get(window_label)
@@ -88,8 +88,8 @@ impl AppState {
       .then(|| (resume.target.clone(), resume.token.clone()))
   }
 
-  pub async fn forget_resume(&self, window_label: &str, attachment_id: &str) {
-    let mut registry = self.registry.lock().await;
+  pub fn forget_resume(&self, window_label: &str, attachment_id: &str) {
+    let mut registry = self.registry.lock().unwrap();
     if let Some(slots) = registry.by_window.get_mut(window_label) {
       remove_resume(slots, attachment_id);
       if slots.is_empty() {
@@ -98,8 +98,8 @@ impl AppState {
     }
   }
 
-  pub(super) async fn finish_attachment(&self, actor: &Arc<AttachmentActor>, disconnected: bool) {
-    let mut registry = self.registry.lock().await;
+  pub(super) fn finish_attachment(&self, actor: &Arc<AttachmentActor>, disconnected: bool) {
+    let mut registry = self.registry.lock().unwrap();
     let Some(slots) = registry.by_window.get_mut(&actor.window_label) else {
       return;
     };
@@ -122,7 +122,7 @@ impl AppState {
       let expires_at = Instant::now() + resume.retention;
       tokio::spawn(async move {
         sleep_until(expires_at).await;
-        state.forget_resume(&window_label, &attachment_id).await;
+        state.forget_resume(&window_label, &attachment_id);
       });
     } else {
       slots.remove(&actor.attachment_id);
@@ -138,7 +138,7 @@ impl AppState {
     attachment_id: &str,
   ) -> CommandResult<()> {
     let actor = {
-      let mut registry = self.registry.lock().await;
+      let mut registry = self.registry.lock().unwrap();
       let Some(slots) = registry.by_window.get_mut(window_label) else {
         return Ok(());
       };

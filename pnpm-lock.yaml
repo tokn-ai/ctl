@@ -18,8 +18,8 @@ importers:
   apps/desktop:
     dependencies:
       '@tauri-apps/api':
-        specifier: ^2
-        version: 2.11.1
+        specifier: ^2.12.3
+        version: 2.12.3
       '@xterm/addon-fit':
         specifier: 0.11.0
         version: 0.11.0
@@ -542,8 +542,8 @@ packages:
   '@standard-schema/spec@1.1.0':
     resolution: {integrity: sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w==}
 
-  '@tauri-apps/api@2.11.1':
-    resolution: {integrity: sha512-M2FPuYND2m+wh5hfW9ZpSdxMPdEJovPBWwoHJmwUpysTYNHaOkVFN419m/K0LIgjb/7KU2vBgsUepJWugQCvAA==}
+  '@tauri-apps/api@2.12.3':
+    resolution: {integrity: sha512-9s0PKw0p4r3kFq92jhpivYSp+cSht15o0gXpZxuQd0+dV9KCexEVkNaLELVoLdJWyoH4KlfQo5h3W2LIM8siJg==}
 
   '@tauri-apps/cli-darwin-arm64@2.11.4':
     resolution: {integrity: sha512-1ryOF3ZhpZ/nemHV5zVwBQBz9jDGKmKPvWPADOhc83ig0P4bMc2iER4NbC6r9sjeIZ6RVQ4g3RZIYvezhcl4TQ==}
@@ -1483,7 +1483,7 @@ snapshots:
 
   '@standard-schema/spec@1.1.0': {}
 
-  '@tauri-apps/api@2.11.1': {}
+  '@tauri-apps/api@2.12.3': {}
 
   '@tauri-apps/cli-darwin-arm64@2.11.4':
     optional: true

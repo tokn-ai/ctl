@@ -19,7 +19,7 @@ pub async fn get_component_versions(
   host_id: Option<String>,
 ) -> crate::error::CommandResult<ComponentVersionsSnapshot> {
   let ctld_owners = local::owners();
-  let (ctld, ctmuxd, taskd, remote, saved) = tokio::join!(
+  let (ctld, ctmuxd, taskd, saved) = tokio::join!(
     async {
       let mut tasks = tokio::task::JoinSet::new();
       for owner in ctld_owners {
@@ -42,11 +42,10 @@ pub async fn get_component_versions(
     },
     local::ctmuxd(),
     local::taskd(),
-    state.remote_observations(),
     inventory::rows(&app, host_id.as_deref()),
   );
   let saved = saved?;
-  let mut active = observations::rows(remote);
+  let mut active = observations::rows(state.remote_observations());
   for row in &mut active {
     row.observation = "last_observed";
     row.installed = saved

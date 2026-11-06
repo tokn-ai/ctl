@@ -6,7 +6,7 @@ import {
   type SetStateAction,
 } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { loadHosts, loadWorkspace, listSshConfigHosts, listTailscaleDevices, updateHosts, updateWorkspace } from "../../lib/tauri";
+import { closeAttachmentWindow, loadHosts, loadWorkspace, listSshConfigHosts, listTailscaleDevices, updateHosts, updateWorkspace } from "../../lib/tauri";
 import type { HostCatalogDocument, SessionSummary, SshConfigHost, TailscaleDeviceCatalog } from "../../lib/types";
 import { errorMessage } from "../../lib/errors";
 import {
@@ -280,7 +280,7 @@ export function useWorkspace() {
       setClosing(true);
       try {
         await persist(true);
-        await getCurrentWindow().destroy();
+        await closeAttachmentWindow();
       } catch (failure) {
         closingRef.current = false;
         setClosing(false);

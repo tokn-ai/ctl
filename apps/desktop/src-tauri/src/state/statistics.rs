@@ -3,14 +3,18 @@
 //! A slow renderer must not freeze its own lag indicator or hide heartbeat RTT.
 
 use tauri::ipc::Channel;
-use tokio::time::{Interval, timeout_at};
+use tokio::time::{Interval, MissedTickBehavior, interval, timeout_at};
 
 use crate::dto::AttachmentEventDto;
 use crate::error::{CommandErrorDto, CommandResult};
 
 use super::AttachmentActor;
 
-pub(super) const INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+pub(super) fn sampling_interval() -> Interval {
+  let mut sampling = interval(std::time::Duration::from_millis(500));
+  sampling.set_missed_tick_behavior(MissedTickBehavior::Skip);
+  sampling
+}
 
 pub(super) async fn wait_for_presentation(
   actor: &AttachmentActor,

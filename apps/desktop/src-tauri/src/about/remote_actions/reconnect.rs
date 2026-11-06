@@ -62,11 +62,7 @@ async fn acknowledge(
     .await
     .remove(&key)
     .ok_or_else(|| failure("This reconnect action expired or belongs to another window."))?;
-  let result = validate_results(
-    &pending.actors,
-    &state.remote_actors().await,
-    request.results,
-  );
+  let result = validate_results(&pending.actors, &state.remote_actors(), request.results);
   let _ = pending.result.send(result);
   Ok(())
 }

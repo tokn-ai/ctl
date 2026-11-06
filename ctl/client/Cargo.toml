@@ -40,6 +40,10 @@ tar = { version = "0.4.46", default-features = false }
 ctl-core = { workspace = true, features = ["test-fixtures"] }
 serde_json.workspace = true
 
+[target.'cfg(all(target_os = "linux", target_env = "musl"))'.dependencies]
+# Portable remote clients link OpenSSL for the target and load the account's system CA store at runtime.
+reqwest = { version = "0.13.4", default-features = false, features = ["native-tls-vendored"] }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 base64.workspace = true
 

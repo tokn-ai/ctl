@@ -68,7 +68,13 @@ if [ -z "$previous" ] && { [ -e "$base/current" ] || [ -L "$base/current" ]; }; 
   case "$previous" in "$base"/*) ;; *) printf 'ctl install: active components are outside the managed directory\n' >&2; exit 1 ;; esac
 fi
 if [ -n "$previous" ]; then
-  for binary in ctmuxd ctl-taskd ctld; do
+  # An agent-only update keeps the previous client pair available through current.
+  if [ -e "$previous/ctl" ] || [ -L "$previous/ctl" ] || [ -e "$previous/ctmux" ] || [ -L "$previous/ctmux" ]; then
+    for client in ctl ctmux; do
+      test -f "$previous/$client" && test -x "$previous/$client" || fail "incomplete existing CLI pair"
+    done
+  fi
+  for binary in ctmuxd ctl-taskd ctld ctl ctmux; do
     companion="$previous/$binary"
     if [ "$binary" = ctld ] && [ -f "$previous/ctld.app/Contents/MacOS/ctld" ]; then
       companion="$previous/ctld.app/Contents/MacOS/ctld"

@@ -97,6 +97,31 @@ impl Fixture {
     }
   }
 
+  pub(crate) fn with_clients(mut self) -> Self {
+    let components = &mut self.inner["components"];
+    let mut ctl = components["ctl-agent"].clone();
+    let daemon_protocols = components["ctld"]["protocols"].as_array().unwrap();
+    ctl["protocols"].as_array_mut().unwrap().extend(
+      daemon_protocols
+        .iter()
+        .filter(|p| p["name"] != "ctld")
+        .cloned(),
+    );
+    components["ctl"] = ctl;
+    components["ctmux"] = components["ctmuxd"].clone();
+    self.inner["schema_version"] = json!(3);
+    self.outer["schema_version"] = json!(3);
+    for target in SUPPORTED_TARGETS {
+      self.outer["targets"][target]["components"] = self.inner["components"].clone();
+    }
+    for name in ["ctl", "ctmux"] {
+      let bytes = format!("binary fixture {name}").into_bytes();
+      self.inner["files"][name] = json!(format!("{:x}", Sha256::digest(&bytes)));
+      self.files.insert(name.into(), bytes);
+    }
+    self
+  }
+
   pub(crate) fn archive(&self) -> Vec<u8> {
     self.archive_with(None)
   }
@@ -160,6 +185,43 @@ fn append<W: std::io::Write>(
 }
 
 #[test]
+fn schema3_requires_both_verified_clients_and_preserves_the_schema2_layout() {
+  let fixture = Fixture::new(VERSION, REVISION).with_clients();
+  let bundle = fixture.verify().unwrap();
+  let parsed = BundleSet::parse_intrinsic(&bundle.manifest).unwrap();
+  assert!(parsed.is_compatible(TARGET).unwrap());
+
+  let mut missing = Fixture::new(VERSION, REVISION).with_clients();
+  missing.files.remove("ctmux");
+  assert!(missing.verify().is_err());
+  let mut wrong_layout = Fixture::new(VERSION, REVISION).with_clients();
+  wrong_layout.outer["schema_version"] = json!(2);
+  assert!(wrong_layout.verify().is_err());
+  let mut incompatible = parsed.target(TARGET).unwrap().components.clone().unwrap();
+  let protocol = &mut incompatible.get_mut("ctl").unwrap().protocols[0];
+  let different = ProtocolVersion::new(2, 0, protocol.build);
+  *protocol = ProtocolInfo::new(&protocol.name, protocol.build, different, &[different]);
+  assert!(!compatible(&incompatible));
+}
+
+#[test]
+fn archive_payload_limit_counts_all_six_binaries_and_their_manifest() {
+  let fixture = Fixture::new(VERSION, REVISION).with_clients();
+  let bytes = fixture.archive();
+  let manifest = BundleSet::parse_intrinsic(&fixture.bind_archive(&bytes)).unwrap();
+  let file_bytes = fixture.files.values().map(Vec::len).sum::<usize>();
+  let payload_bytes = (file_bytes + serde_json::to_vec(&fixture.inner).unwrap().len()) as u64;
+
+  // Use the actual tar entries and a small limit to exercise the same boundary
+  // that protects a 512 MiB managed import.
+  assert!(read_archive_payload(&manifest, &bytes, payload_bytes).is_ok());
+  assert!(matches!(
+    read_archive_payload(&manifest, &bytes, payload_bytes - 1),
+    Err(Error::Invalid(message)) if message.contains("payload limit")
+  ));
+}
+
+#[test]
 fn schema2_binds_actual_binary_hashes_and_each_component_advertisement() {
   let fixture = Fixture::new(VERSION, REVISION);
   let bundle = fixture.bundle();
@@ -175,7 +237,10 @@ fn schema2_binds_actual_binary_hashes_and_each_component_advertisement() {
       0 => fixture.files.get_mut("ctmuxd").unwrap().push(1),
       1 => fixture.inner["git_revision"] = json!("b".repeat(40)),
       2 => fixture.inner["target_triple"] = json!("x86_64-unknown-linux-musl"),
-      3 => fixture.inner["components"]["ctl-agent"]["protocols"][0]["build"] = json!(4),
+      3 => {
+        let build = &mut fixture.inner["components"]["ctl-agent"]["protocols"][0]["build"];
+        *build = json!(build.as_u64().unwrap() + 1);
+      }
       4 => fixture.inner["files"]["extra"] = json!("a".repeat(64)),
       _ => {
         fixture.files.remove("ctl-taskd");

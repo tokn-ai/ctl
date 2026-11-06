@@ -136,9 +136,9 @@ impl Resolver {
     }
     let bytes = self.read(&url, MAX_BUNDLE_SET_BYTES).await?;
     let manifest = BundleSet::parse_intrinsic(&bytes)?;
-    if manifest.schema_version != 2 {
+    if manifest.schema_version < 2 {
       return Err(Error::Invalid(
-        "published channels require schema-2 component metadata".into(),
+        "published channels require versioned component metadata".into(),
       ));
     }
     if channel == BundleChannel::Stable

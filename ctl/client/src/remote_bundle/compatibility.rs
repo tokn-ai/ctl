@@ -3,16 +3,17 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read as _;
 
+use ctl_core::bundle_layout::{ALL, Layout, MAX_FILE_BYTES, MAX_TOTAL_BYTES, required_protocols};
 use ctl_core::component::{ComponentInfo, protocols_match};
 use ctl_core::protocol::ProtocolVersion;
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
 
-use super::{BundleSet, Error, MAX_BUNDLE_SET_BYTES};
+use super::{BundleSet, Error, MAX_BUNDLE_SET_BYTES, MAX_TAR_BYTES};
 
-pub(super) const COMPONENTS: [&str; 4] = ["ctl-agent", "ctmuxd", "ctl-taskd", "ctld"];
-const MAX_BINARY_BYTES: u64 = 128 * 1024 * 1024;
-const MAX_EXPANDED_BYTES: u64 = 4 * MAX_BINARY_BYTES + MAX_BUNDLE_SET_BYTES as u64 + 1024 * 1024;
+#[cfg(test)]
+pub(super) use ctl_core::bundle_layout::SERVICES as COMPONENTS;
+const MAX_BINARY_BYTES: u64 = MAX_FILE_BYTES as u64;
 
 pub(super) fn deserialize_components<'de, D: serde::Deserializer<'de>>(
   deserializer: D,
@@ -22,13 +23,13 @@ pub(super) fn deserialize_components<'de, D: serde::Deserializer<'de>>(
     type Value = BTreeMap<String, ComponentInfo>;
 
     fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-      formatter.write_str("a uniquely named map of four component advertisements")
+      formatter.write_str("a uniquely named map of bundle component advertisements")
     }
 
     fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
       let mut components = BTreeMap::new();
       while let Some((name, component)) = map.next_entry::<String, ComponentInfo>()? {
-        if components.insert(name, component).is_some() || components.len() > COMPONENTS.len() {
+        if components.insert(name, component).is_some() || components.len() > ALL.len() {
           return Err(serde::de::Error::custom(
             "duplicate or excessive bundle components",
           ));
@@ -53,14 +54,10 @@ pub(super) fn validate_components(
       ))
     };
   }
-  let components = components.ok_or_else(|| invalid("schema-2 bundle lacks component metadata"))?;
-  if components.len() != COMPONENTS.len()
-    || COMPONENTS
-      .iter()
-      .any(|name| !components.contains_key(*name))
-  {
+  let components = components.ok_or_else(|| invalid("bundle lacks component metadata"))?;
+  if !manifest.layout().matches(components) {
     return Err(invalid(
-      "bundle metadata must identify exactly the four shipped components",
+      "bundle metadata must identify exactly the shipped components",
     ));
   }
   for (name, info) in components {
@@ -73,23 +70,7 @@ pub(super) fn validate_components(
         "component provenance does not match the clean bundle identity",
       ));
     }
-    let required: &[&str] = match name.as_str() {
-      "ctl-agent" => &[
-        "ctl_identity",
-        "ctl_maintenance",
-        "ctl_remote_vpn",
-        "ctld",
-        "ctmux",
-        "ctmux_control",
-        "task",
-        "task_control",
-      ],
-      "ctmuxd" => &["ctmux", "ctmux_control"],
-      "ctl-taskd" => &["task", "task_control", "ctmux", "ctmux_control"],
-      "ctld" => &["ctld", "ctld_lifecycle", "ctld_helper"],
-      _ => unreachable!("component names were checked above"),
-    };
-    if required
+    if required_protocols(name)
       .iter()
       .any(|name| !info.protocols.iter().any(|protocol| protocol.name == *name))
     {
@@ -164,29 +145,7 @@ pub(crate) fn compatible(components: &BTreeMap<String, ComponentInfo>) -> bool {
           .negotiate(ctl_proto::forwarding::SUPPORTED_PROTOCOL_VERSIONS)
           .is_some()
       })
-    && [
-      ("ctl-agent", "ctld", "ctld"),
-      ("ctl-agent", "ctmuxd", "ctmux"),
-      ("ctl-agent", "ctmuxd", "ctmux_control"),
-      ("ctl-agent", "ctl-taskd", "task"),
-      ("ctl-agent", "ctl-taskd", "task_control"),
-      ("ctl-taskd", "ctmuxd", "ctmux"),
-      ("ctl-taskd", "ctmuxd", "ctmux_control"),
-    ]
-    .iter()
-    .all(|(consumer, provider, name)| {
-      components
-        .get(*consumer)
-        .and_then(|info| {
-          info
-            .protocols
-            .iter()
-            .find(|protocol| protocol.name == *name)
-        })
-        .is_some_and(|consumer| {
-          intersects(components, provider, name, &consumer.supported_versions)
-        })
-    })
+    && Layout::from_components(components).is_some_and(|layout| layout.compatible(components))
 }
 
 fn intersects(
@@ -220,12 +179,57 @@ pub(crate) fn verify_archive(
   target: &str,
   bytes: &[u8],
 ) -> Result<(), Error> {
-  let decoder = flate2::read::MultiGzDecoder::new(bytes).take(MAX_EXPANDED_BYTES + 1);
+  let (inner, hashes) = read_archive_payload(manifest, bytes, MAX_TOTAL_BYTES as u64)?;
+  if inner.schema_version != manifest.schema_version
+    || inner.app_version != manifest.app_version
+    || inner.bundle_id != manifest.bundle_id
+    || inner.git_revision != manifest.git_revision
+    || inner.target_triple != target
+    || hashes.len() != manifest.layout().names().len()
+    || inner.files.len() != manifest.layout().names().len()
+    || hashes.iter().any(|(name, hash)| {
+      inner
+        .files
+        .get(name)
+        .is_none_or(|expected| !expected.eq_ignore_ascii_case(hash))
+    })
+  {
+    return Err(invalid(
+      "archive manifest identity or actual binary hashes disagree with the bundle",
+    ));
+  }
+  validate_components(manifest, inner.components.as_ref())?;
+  let outer = manifest
+    .target(target)?
+    .components
+    .as_ref()
+    .ok_or_else(|| invalid("missing outer component metadata"))?;
+  if inner.components.as_ref().is_none_or(|inner| {
+    outer.iter().any(|(name, expected)| {
+      inner.get(name).is_none_or(|actual| {
+        expected.build != actual.build || !protocols_match(&expected.protocols, &actual.protocols)
+      })
+    })
+  }) {
+    return Err(invalid(
+      "archive component advertisements disagree with the bundle set",
+    ));
+  }
+  Ok(())
+}
+
+fn read_archive_payload(
+  manifest: &BundleSet,
+  bytes: &[u8],
+  max_payload_bytes: u64,
+) -> Result<(ArchiveManifest, BTreeMap<String, String>), Error> {
+  let decoder = flate2::read::MultiGzDecoder::new(bytes).take(MAX_TAR_BYTES + 1);
   let mut archive = tar::Archive::new(decoder);
   let mut hashes = BTreeMap::new();
   let mut names = BTreeSet::new();
   let mut inner = None;
   let mut payload_end = 0;
+  let mut payload_bytes = 0;
   for entry in archive.entries().map_err(archive_error)?.raw(true) {
     let mut entry = entry.map_err(archive_error)?;
     let name = entry.path_bytes();
@@ -233,7 +237,7 @@ pub(crate) fn verify_archive(
       .map_err(|_| invalid("non-UTF8 archive path"))?
       .to_owned();
     if entry.header().entry_type() != tar::EntryType::Regular
-      || (!COMPONENTS.contains(&name.as_str()) && name != "manifest.json")
+      || (!manifest.layout().names().contains(&name.as_str()) && name != "manifest.json")
       || !names.insert(name.clone())
     {
       return Err(invalid(
@@ -244,6 +248,11 @@ pub(crate) fn verify_archive(
       return Err(invalid(
         "bundle entry is empty or exceeds its expanded size limit",
       ));
+    }
+    // The managed store counts manifest.json alongside all executable files.
+    payload_bytes += entry.size();
+    if payload_bytes > max_payload_bytes {
+      return Err(invalid("bundle archive exceeds its payload limit"));
     }
     payload_end += 512 + entry.size().div_ceil(512) * 512;
     if name == "manifest.json" {
@@ -279,42 +288,7 @@ pub(crate) fn verify_archive(
   // and enforce a total decompressed bound including tar padding/headers.
   validate_padding(archive.into_inner(), payload_end)?;
   let inner = inner.ok_or_else(|| invalid("bundle archive lacks its component manifest"))?;
-  if inner.schema_version != 2
-    || inner.app_version != manifest.app_version
-    || inner.bundle_id != manifest.bundle_id
-    || inner.git_revision != manifest.git_revision
-    || inner.target_triple != target
-    || hashes.len() != COMPONENTS.len()
-    || inner.files.len() != COMPONENTS.len()
-    || hashes.iter().any(|(name, hash)| {
-      inner
-        .files
-        .get(name)
-        .is_none_or(|expected| !expected.eq_ignore_ascii_case(hash))
-    })
-  {
-    return Err(invalid(
-      "archive manifest identity or actual binary hashes disagree with the bundle",
-    ));
-  }
-  validate_components(manifest, inner.components.as_ref())?;
-  let outer = manifest
-    .target(target)?
-    .components
-    .as_ref()
-    .ok_or_else(|| invalid("missing outer component metadata"))?;
-  if inner.components.as_ref().is_none_or(|inner| {
-    outer.iter().any(|(name, expected)| {
-      inner.get(name).is_none_or(|actual| {
-        expected.build != actual.build || !protocols_match(&expected.protocols, &actual.protocols)
-      })
-    })
-  }) {
-    return Err(invalid(
-      "archive component advertisements disagree with the bundle set",
-    ));
-  }
-  Ok(())
+  Ok((inner, hashes))
 }
 
 fn validate_padding<R: std::io::Read>(
@@ -331,7 +305,7 @@ fn validate_padding<R: std::io::Read>(
       return Err(invalid("bundle archive contains trailing non-padding data"));
     }
   }
-  let expanded = MAX_EXPANDED_BYTES + 1 - reader.limit();
+  let expanded = MAX_TAR_BYTES + 1 - reader.limit();
   if reader.limit() == 0 {
     return Err(invalid("bundle archive exceeds its expanded size limit"));
   }

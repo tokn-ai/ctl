@@ -1213,7 +1213,16 @@ where
   S: AsyncRead + AsyncWrite + Unpin,
 {
   let handshake = handshake(&mut stream, identity).await?;
-  write_frame(&mut stream, &message).await?;
+  let client_identity = ctmux_proto::supports_client_presence(handshake.protocol_version)
+    .then(|| ctl_core::presence::local_identity(&identity.name, &identity.version));
+  write_frame(
+    &mut stream,
+    &ctmux_proto::OpeningRequest {
+      request: message,
+      client_identity,
+    },
+  )
+  .await?;
 
   let response = read_response(&mut stream).await?;
   let ServerMessage::Attached {

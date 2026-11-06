@@ -1,4 +1,6 @@
 mod diagnostics;
+mod path;
+pub(crate) mod presence;
 mod topology;
 
 use crate::history_snapshot::PhysicalHistory;
@@ -90,6 +92,7 @@ pub struct Terminal {
 
 struct AttachmentRecord {
   attachment_id: String,
+  peer: presence::AttachmentPeer,
   generation: u64,
   connected: bool,
   superseded: watch::Sender<u64>,
@@ -502,6 +505,7 @@ impl Terminal {
     &self,
     request_input_lease: bool,
     request_layout_lease: bool,
+    peer: presence::AttachmentPeer,
   ) -> AttachmentRegistration {
     let attachment_id = Uuid::new_v4().to_string();
     let (superseded, receiver) = watch::channel(0_u64);
@@ -515,6 +519,7 @@ impl Terminal {
         candidate.clone(),
         AttachmentRecord {
           attachment_id: attachment_id.clone(),
+          peer,
           generation: 0,
           connected: true,
           superseded,
@@ -541,11 +546,18 @@ impl Terminal {
   }
 
   /// Rebinds a replacement transport and invalidates the previous generation.
-  fn resume_attachment_inner(&self, attachment_token: &str) -> Option<AttachmentRegistration> {
+  fn resume_attachment_inner(
+    &self,
+    attachment_token: &str,
+    peer: Option<presence::AttachmentPeer>,
+  ) -> Option<AttachmentRegistration> {
     let (attachment_id, generation, superseded) = {
       let mut attachments = lock(&self.attachments);
       let record = attachments.get_mut(attachment_token)?;
       record.generation = record.generation.checked_add(1)?;
+      if let Some(peer) = peer {
+        record.peer = peer;
+      }
       record.connected = true;
       let _ignored = record.superseded.send(record.generation);
       (
@@ -1628,6 +1640,18 @@ impl SessionManager {
   }
 
   pub fn list(&self) -> Vec<SessionInfo> {
+    self
+      .session_rows(false)
+      .into_iter()
+      .map(|row| row.session)
+      .collect()
+  }
+
+  pub fn list_with_clients(&self) -> Vec<ctmux_proto::SessionUsage> {
+    self.session_rows(true)
+  }
+
+  fn session_rows(&self, include_clients: bool) -> Vec<ctmux_proto::SessionUsage> {
     let registry = lock(&self.inner.registry);
     let mut sessions: Vec<_> = registry
       .sessions
@@ -1636,14 +1660,18 @@ impl SessionManager {
         registry
           .terminals
           .get(&session.view.layout.first_terminal())
-          .map(|terminal| terminal.info())
+          .map(|terminal| ctmux_proto::SessionUsage {
+            session: terminal.info(),
+            clients: include_clients.then(|| presence::session_viewers(&registry, session)),
+          })
       })
       .collect();
     sessions.sort_by(|left, right| {
       left
+        .session
         .created_at_ms
-        .cmp(&right.created_at_ms)
-        .then_with(|| left.name.cmp(&right.name))
+        .cmp(&right.session.created_at_ms)
+        .then_with(|| left.session.name.cmp(&right.session.name))
     });
     sessions
   }
@@ -1908,6 +1936,9 @@ fn build_command(
   } else {
     CommandBuilder::new_default_prog()
   };
+  if let Ok(directory) = ctl_core::paths::directory() {
+    path::include_managed_clients(&mut builder, &directory.join("current"));
+  }
 
   if let Some(working_directory) = working_directory {
     builder.cwd(working_directory);

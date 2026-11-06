@@ -4,6 +4,8 @@
 //! stdin/stdout to the fixed per-user `ctmuxd` endpoint (or `ctl-taskd` with
 //! `--service task`) and owns no terminal, task, or reconnect state. Identified
 //! connections read an account-owned ID that survives component upgrades.
+//! A process-held registration reports the inbound channel's lifetime without
+//! making the gateway own its sessions or requiring an inbound broker daemon.
 
 pub mod components;
 pub mod forwarding;
@@ -73,6 +75,8 @@ pub enum Service {
 #[derive(Debug, Clone)]
 pub struct ConnectConfig {
   pub service: Service,
+  /// Record the gateway's live inbound channel in this account's registry.
+  pub record_presence: bool,
   /// Metadata emitted only when the client requested the identified protocol.
   pub identity: Option<ctl_proto::RemoteIdentity>,
   /// Fixed per-user local `ctmuxd` endpoint. It is never client controlled.
@@ -90,6 +94,7 @@ impl ConnectConfig {
   pub fn new(ctmux_socket: PathBuf) -> Self {
     Self {
       service: Service::Ctmux,
+      record_presence: false,
       identity: None,
       ctmux_socket,
       ctmuxd_bin: None,
@@ -154,14 +159,15 @@ where
   R: AsyncRead + Unpin,
   W: AsyncWrite + Unpin,
 {
+  let mut client_identity = None;
   if config.identity.is_some() {
     client_writer
       .write_all(ctl_proto::IDENTITY_PREFACE)
       .await
       .map_err(AgentError::Relay)?;
-    tokio::time::timeout(
+    let selection = tokio::time::timeout(
       Duration::from_secs(30),
-      ctl_proto::accept_identity_contract(&mut client_reader, &mut client_writer),
+      ctl_proto::accept_identity_contract_with_client(&mut client_reader, &mut client_writer),
     )
     .await
     .map_err(|_| {
@@ -171,8 +177,20 @@ where
       ))
     })?
     .map_err(AgentError::Relay)?;
+    client_identity = selection.client_identity;
   }
   let daemon = connect_or_start_daemon(config).await?;
+  let _presence = if config.record_presence {
+    register_connection(
+      client_identity,
+      match config.service {
+        Service::Ctmux => "ctmux",
+        Service::Task => "task",
+      },
+    )
+  } else {
+    None
+  };
   if let Some(identity) = &config.identity {
     ctl_proto::write_identity(&mut client_writer, identity)
       .await
@@ -188,6 +206,29 @@ where
   relay::copy(client_reader, client_writer, daemon_reader, daemon_writer)
     .await
     .map_err(AgentError::Relay)
+}
+
+fn register_connection(
+  client: Option<ctl_core::presence::ClientIdentity>,
+  service: &str,
+) -> Option<ctl_core::presence::ConnectionRegistration> {
+  match ctl_core::presence::ConnectionRegistration::register(client, service, ssh_source()) {
+    Ok(registration) => Some(registration),
+    Err(error) => {
+      eprintln!("ctl-agent: live connection tracking unavailable: {error}");
+      None
+    }
+  }
+}
+
+fn ssh_source() -> Option<String> {
+  std::env::var("SSH_CONNECTION")
+    .ok()?
+    .split_whitespace()
+    .next()?
+    .parse::<std::net::IpAddr>()
+    .ok()
+    .map(|address| address.to_string())
 }
 
 async fn connect_existing_daemon(config: &ConnectConfig) -> Result<Stream, AgentError> {

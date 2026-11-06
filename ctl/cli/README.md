@@ -205,7 +205,27 @@ A downloaded official release updates `current`; caching a selected checkout or
 embedded app leaves shared selections unchanged. Setup never restarts a daemon.
 
 For remote sessions and tasks, the controlled machine needs `ctl-agent`,
-`ctmuxd`, and `ctl-taskd`; remote VPNs also need `ctld`. Interactive Unix connections
+`ctmuxd`, and `ctl-taskd`. Remote VPNs also need `ctld`. Current full bundles
+also install `ctl` and `ctmux` for inspecting state on the remote account.
+In a new managed remote shell, these commands use the selected build:
+
+```sh
+ctl who             # Live inbound ctl service channels for this account
+ctl who --json      # Connection IDs, reported client/device identity, source and start time
+ctmux ls            # Terminal sessions managed by this account's ctmux daemon
+ctmux clients       # Clients viewing those sessions
+ctmux ls --unused   # Sessions with no current viewers
+ctl task list       # Tasks managed by this account's task daemon
+```
+
+`ctl who` lists live service channels registered by updated gateways on this
+account. If registration fails, the gateway reports the failure on stderr and
+continues serving the channel. A client can own several channels. Older clients
+can appear with an unknown label. From an
+ordinary SSH login, use `~/.tokn/ctl/current/ctl who` or add `~/.tokn/ctl/current`
+to `PATH`. Installation preserves the user's login shell configuration.
+
+Interactive Unix connections
 offer to repair missing
 or recognized older agents with a matching verified bundle, then retry once.
 Repair checks any saved machine ID first, shows upload progress and speed, and
@@ -287,8 +307,9 @@ selected replacement.
 Use `ctl components update` for an explicit update. It defaults to this computer;
 `--hosts work,jump-a` updates several saved hosts through their preferred routes,
 and `--local` includes this computer in that batch. `--package ctl-agent` retains
-the installed daemons; the default `--package full-bundle` installs all four
-components from one compatible complete build. Updates preserve running services
+installed companion executables. The default `--package full-bundle` installs
+the executables from one verified build, including both CLIs in current bundles.
+Updates preserve running services
 and sessions; restart or reconnect separately.
 
 ```sh

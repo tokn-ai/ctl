@@ -23,6 +23,8 @@ ctl ctmux list
 ctl ctmux new --detached --name development --cwd /absolute/project
 ctl -H work ctmux new --detached --name build --cwd /srv/app -- cargo build
 ctl -H work ctmux list
+ctl -H work ctmux list --unused --json
+ctl -H work ctmux clients build --json
 ctl -H work ctmux view build
 ctl -H work ctmux state build
 ```
@@ -39,10 +41,18 @@ absolute path when the directory matters: explicit relative paths are passed
 to the daemon, and an invalid terminal cwd can fall back to the target's home.
 `--cwd` affects creation, not a session that already exists.
 
-`list` reports root sessions. `view` returns a JSON layout with terminal IDs;
+`list` reports root sessions and live viewer counts; `--json` provides structured
+rows and `--unused` filters sessions with no live viewers. `clients [SESSION]`
+lists reported device/app identities and supports `--json`. Read-only viewers
+count, one app's pane attachments are grouped, and reconnecting attachments are
+reported separately. Presence requires ctmux 1.3.23; older daemons report it as
+unknown and cannot support the unused filter. Unused sessions may still have
+running processes; viewer counts do not authorize termination.
+
+`view` returns a JSON layout with terminal IDs;
 `state` prints advisory shell/cwd/prompt metadata without disclosing typed or
 running command text. The displayed cwd can abbreviate home as `~`. Do not
-invent `--json` for list/state or a `send-keys` command.
+invent `--json` for state or a `send-keys` command.
 
 ## Attach and detach
 

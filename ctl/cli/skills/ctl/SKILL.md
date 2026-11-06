@@ -24,6 +24,7 @@ are rejected for `skill`; it always reads the local binary's bundled documents.
 | Install the signed macOS connection helper for this CLI version | `ctl setup`; [setup reference](references/setup.md) |
 | Run once, stream output, preserve exit status | `ctl exec -- PROGRAM ARGS...`; guidance below |
 | Ordinary SSH login or file copy | `ctl ssh` / `ctl scp`; guidance below |
+| See live clients on the current account | `ctl who [--json]`; session viewers use `ctl ctmux clients [SESSION] [--json]` |
 | Inspect or edit saved hosts and connection methods | [ctl-host](../ctl-host/SKILL.md), `ctl skill ctl-host` |
 | Inspect or remove locally saved SSH passwords and key passphrases | `ctl passwords`; guidance below |
 | Create, attach, inspect, split, or terminate persistent terminals | [ctl-session](../ctl-session/SKILL.md), `ctl skill ctl-session` |
@@ -69,7 +70,7 @@ SSH config to perform caller-owned temporary operations.
 Host catalog commands take a positional host and reject both target selectors.
 Their own `host update --destination` and `host method update --destination`
 options edit a saved endpoint. SSH/SCP take their destination positionally and
-also reject the target selectors. `ctl setup`, `ctl passwords`, and
+also reject the target selectors. `ctl who`, `ctl setup`, `ctl passwords`, and
 `ctl taskd restart` are local. VPN list/start/stop and remote component maintenance
 accept either selector; VPN profile create/remove remain local.
 

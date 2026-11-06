@@ -153,7 +153,7 @@ export async function validateReleaseBundle(
     if (!record(asset) || asset.archive !== `ctl-agent-bundle-${identity.bundle_id}-${target}.tar.gz`) {
       throw new Error(`Invalid remote bundle for ${target}`);
     }
-    if (bundleSet.schema_version === 2) await verifyAgentBundleTarget(directory, identity, target, asset);
+    if (bundleSet.schema_version !== 1) await verifyAgentBundleTarget(directory, identity, target, asset);
     addNames(await validateAsset(directory, asset.archive, asset.sha256));
   }
 

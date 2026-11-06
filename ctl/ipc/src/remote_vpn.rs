@@ -16,10 +16,11 @@ use tokio::task::JoinHandle;
 
 use crate::{SshTarget, VpnConnection, VpnSnapshot, VpnStatus};
 
-pub const PROTOCOL_BUILD: u16 = 1;
+pub const PROTOCOL_BUILD: u16 = 2;
 pub const CONTRACT_V1_0_1: ProtocolVersion = ProtocolVersion::new(1, 0, 1);
-pub const PROTOCOL_VERSION: ProtocolVersion = CONTRACT_V1_0_1;
-pub const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[CONTRACT_V1_0_1];
+pub const CONTRACT_V1_1_2: ProtocolVersion = ProtocolVersion::new(1, 1, 2);
+pub const PROTOCOL_VERSION: ProtocolVersion = CONTRACT_V1_1_2;
+pub const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[CONTRACT_V1_0_1, CONTRACT_V1_1_2];
 /// Stable framing marker; the published contract is negotiated separately.
 pub const PREFACE: &[u8] = b"ctl-vpn\n";
 const REMOTE_COMMAND: &str = concat!(
@@ -36,6 +37,8 @@ const MAX_DIAGNOSTICS: usize = 8192;
 #[serde(deny_unknown_fields)]
 pub struct ProtocolSelection {
   pub protocol_version: ProtocolVersion,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub client_identity: Option<ctl_core::presence::ClientIdentity>,
 }
 
 #[must_use]
@@ -65,6 +68,8 @@ pub async fn negotiate_contract(
     writer,
     &ProtocolSelection {
       protocol_version: selected,
+      client_identity: (selected == CONTRACT_V1_1_2)
+        .then(|| ctl_core::presence::process_identity(env!("CARGO_PKG_VERSION"))),
     },
   )
   .await?;
@@ -79,6 +84,21 @@ pub async fn accept_contract(
   reader: &mut (impl AsyncRead + Unpin),
   writer: &mut (impl AsyncWrite + Unpin),
 ) -> Result<ProtocolVersion, Error> {
+  Ok(
+    accept_contract_with_client(reader, writer)
+      .await?
+      .protocol_version,
+  )
+}
+
+/// Accepts bounded client labels only under the explicitly selected contract.
+///
+/// # Errors
+/// Rejects malformed frames, labels and unsupported selections.
+pub async fn accept_contract_with_client(
+  reader: &mut (impl AsyncRead + Unpin),
+  writer: &mut (impl AsyncWrite + Unpin),
+) -> Result<ProtocolSelection, Error> {
   let offer = protocol_offer();
   crate::write_frame(writer, &offer).await?;
   let selection: ProtocolSelection = crate::read_frame(reader)
@@ -87,7 +107,14 @@ pub async fn accept_contract(
   if !offer.accepts(selection.protocol_version) {
     return Err(Error::UnsupportedProtocol);
   }
-  Ok(selection.protocol_version)
+  if selection
+    .client_identity
+    .as_ref()
+    .is_some_and(|client| !client.validate() || selection.protocol_version != CONTRACT_V1_1_2)
+  {
+    return Err(Error::UnsupportedProtocol);
+  }
+  Ok(selection)
 }
 
 /// One request per authenticated channel. Connect switches to raw bytes.

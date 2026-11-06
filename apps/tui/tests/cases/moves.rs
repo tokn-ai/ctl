@@ -305,12 +305,26 @@ async fn reconnect_panes(proxy: &TestProxy, tui: &mut Tui, pane_count: usize) ->
   let stalled = proxy.stalled();
   proxy.interrupt();
   proxy.wait_stalled(stalled).await?;
+  // Observe the interruption before resuming so the previous connected frame
+  // cannot satisfy the recovery check.
+  tui
+    .wait_screen(
+      "focused pane observes the interrupted connection",
+      |screen| footer(screen).starts_with(" reconnecting |"),
+    )
+    .await?;
   proxy.resume();
   proxy.wait_attachments(before + pane_count).await?;
+  // The focused pane and the pane holding the layout lease recover separately.
+  // Both must be ready in the TUI before it can send a swap.
   tui
-    .wait_screen("moved panes recover their connections", |screen| {
-      footer(screen).starts_with(" connected |")
-    })
+    .wait_screen(
+      "focused pane reconnects and the TUI regains the layout lease",
+      |screen| {
+        let status = footer(screen);
+        status.starts_with(" connected |") && status.contains(" | resize owner |")
+      },
+    )
     .await?;
   Ok(())
 }
@@ -403,7 +417,8 @@ async fn swaps_preserve_nested_weighted_slots_and_focus_policy_across_reconnect(
     "recovered owner can still swap panes",
     |view| view.revision > recovered.revision && view.layout == expected,
   )
-  .await?;
+  .await
+  .map_err(|error| format!("{error}; owner footer: {}", footer(&owner.screen())))?;
   assert_slots(&original, &after_reconnect, [&second, &third, &first]);
   visible_slots(&mut owner, &after_reconnect, &tags).await?;
   visible_slots(&mut observer, &after_reconnect, &tags).await?;

@@ -240,6 +240,36 @@ the total as unavailable. Heartbeat nonce semantics and other operations are
 unchanged. Other named protocols, storage schemas and product release versions
 are unchanged.
 
+Client presence starts the next cycle after v0.1.2, advancing `ctmux` from
+`1.2.22` (build 22) to `1.3.23` (build 23). It retains every previous published
+major-1 contract. The new one-shot `list_session_clients` request returns
+`session_clients`, containing each session and its process-grouped viewers.
+Each viewer has a client instance ID, optional device label, application name
+and version, connected and reconnecting attachment counts, and a `legacy` flag.
+Newly negotiated attach/resume requests may include the optional outer
+`client_identity` field; all earlier selected contracts keep their original
+request shapes. Ordinary `list_sessions` responses remain unchanged on every
+contract. Read-only attachments count as viewers; one-shot queries do not.
+Counts cover every pane in the session's current composition. Disconnected
+attachments are reported separately during reconnect grace, and older daemons
+report presence as unavailable rather than implying that sessions are unused.
+
+Inbound SSH client labels advance `ctl_identity` from frozen `1.0.3` (build 3)
+to `1.1.4` (build 4), retaining `1.0.3`. A selection of `1.1.4` may include
+`client_identity` with the same bounded process and display metadata. Under
+`1.0.3`, clients omit that field and updated gateways reject its use. The
+receiving account identity and subsequent service byte stream retain their
+existing shapes and framing. These are client-reported labels, separate from
+the authenticated SSH account and the receiving environment's stable ID.
+
+The independent `ctl_remote_vpn` contract likewise advances from frozen
+`1.0.1` (build 1) to `1.1.2` (build 2), retaining `1.0.1`. Only its new
+selection may include the optional `client_identity` field. Existing VPN
+requests, replies, account identity and raw TCP relay semantics are unchanged.
+These additions let updated gateways register live ctmux, task and VPN channels
+without requiring an inbound broker daemon. All other named wire contracts and
+the product release version are unchanged.
+
 Storage schema versions are separate. Changing a protocol contract does not
 rename or migrate an on-disk schema.
 
@@ -250,9 +280,9 @@ The first handshake or control request contains an offer:
 ```json
 {
   "protocol": {
-    "build": 22,
-    "version": "1.2.22",
-    "supported_versions": ["1.0.13", "1.1.14", "1.1.15", "1.1.16", "1.1.17", "1.1.18", "1.1.19", "1.1.20", "1.2.21", "1.2.22"]
+    "build": 23,
+    "version": "1.3.23",
+    "supported_versions": ["1.0.13", "1.1.14", "1.1.15", "1.1.16", "1.1.17", "1.1.18", "1.1.19", "1.1.20", "1.2.21", "1.2.22", "1.3.23"]
   }
 }
 ```
@@ -266,7 +296,7 @@ older contract is selected; new servers preserve old-client messages and
 semantics. Optional features must be gated by that selected contract.
 
 Daemon status and session/task handshakes return actual advertisements, separately
-from the selected contract. A server can advertise `1.2.22` while one connection
+from the selected contract. A server can advertise `1.3.23` while one connection
 selects `1.0.13`; diagnostics must retain both facts.
 
 Every component's `--component-info` output declares the release mapping:
@@ -282,8 +312,13 @@ helpers from different product releases may be reused when their advertised
 contracts intersect the client's supported set. Verified replacement checks
 still pin the complete inspected binary and its metadata.
 
-Remote bundle schema 2 records the complete `--component-info` metadata for each
-shipped component. Standalone CLI repair can reuse a local or cached bundle from
+Remote bundle schemas 2 and 3 record complete `--component-info` metadata for
+each shipped component. Schema 3 adds `ctl` and `ctmux` to the original four
+services; schema 2 retains its exact four-component shape. Updated consumers
+read both, while consumers that only understand schema 2 cannot install schema
+3. Managed complete-bundle schema 2 likewise adds the client pair while readers
+retain managed schema 1. These distribution schema changes are independent of
+named wire protocols. Standalone CLI repair can reuse a local or cached bundle from
 a different product release or source revision after verifying its own identity,
 target, archive and binary checksums, and agreement with the archived manifest.
 Eligibility requires explicit shared service contracts and compatible contracts

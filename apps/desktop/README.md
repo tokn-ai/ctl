@@ -166,7 +166,7 @@ pnpm bundles:build
 ```
 
 The result lives in `target/development-bundles/x86_64-unknown-linux-musl` and
-contains all four components. Other remote targets follow the app's network
+contains the four services plus the `ctl` and `ctmux` commands. Other remote targets follow the app's network
 channel. About and Update components can check the latest main publication or
 stable release; explicit channel choices bypass the working-tree build.
 `pnpm bundles:sync` remains an explicit CI-resource packaging/offline tool.

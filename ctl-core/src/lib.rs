@@ -1,5 +1,7 @@
 //! Shared foundations for ctl and ctmux components.
 
+#[path = "bundles/layout.rs"]
+pub mod bundle_layout;
 #[cfg(all(feature = "bundles", unix))]
 pub mod bundles;
 pub mod component;
@@ -10,6 +12,7 @@ pub mod development;
 #[cfg(feature = "executable")]
 pub mod executable;
 pub mod paths;
+pub mod presence;
 pub mod protocol;
 
 #[cfg(any(test, feature = "test-fixtures"))]

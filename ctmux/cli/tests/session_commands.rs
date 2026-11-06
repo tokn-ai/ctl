@@ -16,7 +16,249 @@ struct Daemon {
   task: tokio::task::JoinHandle<Result<(), ctmuxd::DaemonError>>,
 }
 
+#[test]
+fn component_info_reports_protocols_without_opening_a_socket() {
+  let temp = std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
+  let result = Command::new(env!("CARGO_BIN_EXE_ctmux"))
+    .args(["--component-info", "-S"])
+    .arg(&temp)
+    .output()
+    .unwrap();
+  assert!(result.status.success());
+  let info: ctl_core::component::ComponentInfo = serde_json::from_slice(&result.stdout).unwrap();
+  assert_eq!(
+    info.protocols,
+    vec![
+      ctmux_proto::protocol_info(),
+      ctmux_ipc::local_control_protocol_info()
+    ]
+  );
+  assert!(!temp.exists());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn clients_group_live_panes_and_keep_reconnect_grace_separate_from_use() {
+  use ctmux_client::{ClientIdentity, begin_attach, resume_attach};
+  use ctmux_proto::{ClientMessage, write_frame};
+  let daemon = Daemon::start().await;
+  daemon.success(&["new", "-ds", "work", "--", "/bin/sh"]);
+  daemon.success(&["new", "-ds", "spare", "--", "/bin/sh"]);
+  let socket = daemon.directory.join("ctmux.sock");
+  let root = daemon.view(&["view", "work"]).terminals[0]
+    .terminal_id
+    .clone();
+  let split = daemon.view(&["split", &root, "--", "/bin/sh"]);
+  let child = split
+    .terminals
+    .iter()
+    .find(|t| t.terminal_id != root)
+    .unwrap()
+    .terminal_id
+    .clone();
+  let identity = ClientIdentity {
+    name: "fixture-viewer".into(),
+    version: "test".into(),
+  };
+  let stream = ctmux_ipc::connect_existing_daemon(&socket).await.unwrap();
+  let (secondary, attached) = begin_attach(stream, &identity, viewer_request(&child))
+    .await
+    .unwrap();
+  assert_eq!(
+    daemon.usage("work").clients.unwrap()[0].connected_attachments,
+    1
+  );
+  assert_eq!(
+    daemon
+      .unused()
+      .into_iter()
+      .map(|row| row.session.name)
+      .collect::<Vec<_>>(),
+    vec!["spare"]
+  );
+  let stream = ctmux_ipc::connect_existing_daemon(&socket).await.unwrap();
+  let (mut primary, _) = begin_attach(stream, &identity, viewer_request(&root))
+    .await
+    .unwrap();
+  let grouped = daemon.usage("work").clients.unwrap();
+  assert_eq!(grouped.len(), 1);
+  assert_eq!(grouped[0].connected_attachments, 2);
+  assert!(!grouped[0].legacy);
+  assert_eq!(grouped[0].identity.client_name, "fixture-viewer");
+  write_frame(&mut primary, &ClientMessage::Detach)
+    .await
+    .unwrap();
+  drop(primary);
+  drop(secondary);
+  timeout(Duration::from_secs(3), async {
+    loop {
+      let row = daemon.usage("work");
+      if row.unused() == Some(true)
+        && row
+          .clients
+          .unwrap()
+          .iter()
+          .any(|c| c.reconnecting_attachments == 1)
+      {
+        break;
+      }
+      sleep(Duration::from_millis(10)).await;
+    }
+  })
+  .await
+  .unwrap();
+  assert!(daemon.unused().iter().any(|row| row.session.name == "work"));
+  let stream = ctmux_ipc::connect_existing_daemon(&socket).await.unwrap();
+  let (mut resumed, _) = resume_attach(
+    stream,
+    &identity,
+    attached.attachment_token,
+    viewer_request(&child),
+  )
+  .await
+  .unwrap();
+  let again = daemon.usage("work").clients.unwrap();
+  assert_eq!(again.len(), 1);
+  assert_eq!(again[0].identity, grouped[0].identity);
+  assert_eq!(
+    (
+      again[0].connected_attachments,
+      again[0].reconnecting_attachments
+    ),
+    (1, 0)
+  );
+  let promoted = daemon.view(&["promote", &child, "--name", "promoted"]);
+  assert_eq!(daemon.usage("work").unused(), Some(true));
+  assert_eq!(
+    daemon.usage(&promoted.session_id).clients.unwrap()[0],
+    again[0]
+  );
+  write_frame(&mut resumed, &ClientMessage::Detach)
+    .await
+    .unwrap();
+}
+
+fn viewer_request(id: &str) -> ctmux_client::AttachRequest {
+  ctmux_client::AttachRequest {
+    session: id.into(),
+    resume_from: None,
+    terminal_size: ctmux_proto::TerminalSize::default(),
+    request_input_lease: false,
+    request_layout_lease: false,
+    request_command_line: false,
+    request_running_command: false,
+    presentation_window_bytes: ctmux_proto::DEFAULT_PRESENTATION_WINDOW_BYTES,
+  }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn tables_escape_presence_labels_but_json_preserves_client_information() {
+  let daemon = Daemon::start().await;
+  let name = "shared";
+  daemon.success(&["new", "-ds", name, "--", "/bin/sh"]);
+  let device = "测试\u{202e}device\u{2028}name";
+  let peer = ctl_core::presence::ClientIdentity {
+    instance_id: "id\u{2066}".into(),
+    client_name: "viewer\u{202e}".into(),
+    client_version: "v\u{2028}".into(),
+    device_name: Some(device.into()),
+  };
+  let _modern = daemon.raw_viewer(name, "viewer", Some(peer.clone())).await;
+  let _legacy = daemon
+    .raw_viewer(name, "leg\x1bacy\tapp\u{202e}", None)
+    .await;
+  let text = daemon.success(&["clients", name]);
+  assert_eq!(text.lines().count(), 3);
+  assert!(
+    text
+      .lines()
+      .skip(1)
+      .all(|line| line.split('\t').count() == 7 && line.ends_with("\t1\t0"))
+  );
+  for escaped in [
+    "测试\\u{202e}device\\u{2028}name",
+    "viewer\\u{202e}",
+    "v\\u{2028}",
+    "id\\u{2066}",
+    "legacyapp\\u{202e}",
+  ] {
+    assert!(text.contains(escaped), "missing escaped field {escaped}");
+  }
+  assert!(!text.contains(['\x1b', '\u{202e}', '\u{2028}', '\u{2066}']));
+  let list = daemon.success(&["ls"]);
+  assert!(list.contains("shared"));
+  assert!(list.contains("2 clients"));
+  let row = daemon.usage(name);
+  assert_eq!(row.session.name, name);
+  let clients = row.clients.unwrap();
+  assert!(
+    clients
+      .iter()
+      .any(|client| client.identity == peer && client.connected_attachments == 1)
+  );
+  assert!(clients.iter().any(|client| client.legacy
+    && client.identity.client_name == "legacyapp\u{202e}"
+    && client.connected_attachments == 1));
+}
+
 impl Daemon {
+  async fn raw_viewer(
+    &self,
+    name: &str,
+    app: &str,
+    client_identity: Option<ctl_core::presence::ClientIdentity>,
+  ) -> ctmux_ipc::Stream {
+    use ctmux_proto::{ClientMessage, OpeningRequest, ServerMessage, read_frame, write_frame};
+    let mut stream = ctmux_ipc::connect_existing_daemon(&self.directory.join("ctmux.sock"))
+      .await
+      .unwrap();
+    ctmux_client::handshake(
+      &mut stream,
+      &ctmux_client::ClientIdentity {
+        name: app.into(),
+        version: "test".into(),
+      },
+    )
+    .await
+    .unwrap();
+    write_frame(
+      &mut stream,
+      &OpeningRequest {
+        client_identity,
+        request: ClientMessage::AttachSession {
+          session: name.into(),
+          resume_from: None,
+          terminal_size: ctmux_proto::TerminalSize::default(),
+          request_input_lease: false,
+          request_layout_lease: false,
+          request_command_line: false,
+          request_running_command: false,
+          presentation_window_bytes: ctmux_proto::DEFAULT_PRESENTATION_WINDOW_BYTES,
+        },
+      },
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+      read_frame::<_, ServerMessage>(&mut stream).await.unwrap(),
+      Some(ServerMessage::Attached { .. })
+    ));
+    stream
+  }
+
+  fn usage(&self, name: &str) -> ctmux_proto::SessionUsage {
+    let json = self.success(&["clients", name, "--json"]);
+    serde_json::from_str::<Vec<ctmux_proto::SessionUsage>>(&json)
+      .unwrap()
+      .remove(0)
+  }
+
+  fn unused(&self) -> Vec<ctmux_proto::SessionUsage> {
+    serde_json::from_str::<Vec<ctmux_proto::SessionUsage>>(
+      &self.success(&["ls", "--unused", "--json"]),
+    )
+    .unwrap()
+  }
+
   async fn start() -> Self {
     let directory =
       std::env::temp_dir().join(format!("rcli-{}", &uuid::Uuid::new_v4().to_string()[..8]));

@@ -72,6 +72,7 @@ async fn run(arguments: Arguments) -> Result<(), MainError> {
     Command::Connect { service, identity } => {
       let mut config = ConnectConfig::new(ctmux_ipc::socket_path());
       config.service = service;
+      config.record_presence = true;
       if identity {
         config.identity = Some(
           tokio::task::spawn_blocking(ctl_agent::identity::discover)

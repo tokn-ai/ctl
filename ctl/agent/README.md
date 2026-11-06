@@ -9,6 +9,10 @@ that accepts the user's SSH connections. Once the packages are published:
 cargo install --locked ctl-agent ctmuxd ctl-taskd ctld
 ```
 
+Current full remote bundles also install `ctl` and `ctmux` for querying service
+connections and terminal sessions from the controlled account. For a manual
+installation of these commands, use `cargo install --locked ctl-cli ctmux-cli`.
+
 The agent runs for the lifetime of a connection; the companion daemons preserve
 sessions and tasks after disconnecting. Keep all four package versions aligned.
 VPN containers and their heartbeat interests belong to remote `ctld` and survive

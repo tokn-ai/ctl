@@ -49,6 +49,45 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SessionClient<S> {
     }
   }
 
+  /// List sessions and their viewers without opening an attachment. Older
+  /// daemons return their normal session list with unknown client presence.
+  /// # Errors
+  /// Returns handshake, transport, or daemon response errors.
+  pub async fn list_with_clients(mut self) -> Result<Vec<ctmux_proto::SessionUsage>, ClientError> {
+    let version = handshake(&mut self.stream, &self.identity)
+      .await?
+      .protocol_version;
+    if ctmux_proto::supports_client_presence(version) {
+      write_frame(&mut self.stream, &ClientMessage::ListSessionClients).await?;
+      return match read_response(&mut self.stream).await? {
+        ServerMessage::SessionClients { sessions }
+          if sessions.iter().all(|row| {
+            row
+              .clients
+              .as_ref()
+              .is_some_and(|clients| clients.iter().all(|client| client.identity.validate()))
+          }) =>
+        {
+          Ok(sessions)
+        }
+        response => Err(unexpected("session_clients", &response)),
+      };
+    }
+    write_frame(&mut self.stream, &ClientMessage::ListSessions).await?;
+    match read_response(&mut self.stream).await? {
+      ServerMessage::SessionList { sessions } => Ok(
+        sessions
+          .into_iter()
+          .map(|session| ctmux_proto::SessionUsage {
+            session,
+            clients: None,
+          })
+          .collect(),
+      ),
+      response => Err(unexpected("session_list", &response)),
+    }
+  }
+
   /// Rename existing persistent work without changing its identity or layout.
   /// # Errors
   /// Returns an unsupported-operation error before sending a mutation to an
@@ -451,6 +490,98 @@ mod tests {
         ..
       })
     ));
+    peer.await.unwrap();
+  }
+
+  #[tokio::test]
+  async fn attachment_identity_is_sent_only_on_negotiated_presence_contracts() {
+    for version in [ctmux_proto::CONTRACT_V1_2_22, ctmux_proto::CONTRACT_V1_3_23] {
+      for resume in [false, true] {
+        let (client, mut server) = tokio::io::duplex(4096);
+        let peer = tokio::spawn(async move {
+          accept_contract(&mut server, version).await;
+          let frame = read_frame::<_, serde_json::Value>(&mut server)
+            .await
+            .unwrap()
+            .unwrap();
+          assert_eq!(
+            frame["type"],
+            if resume {
+              "resume_attachment"
+            } else {
+              "attach_session"
+            }
+          );
+          if version == ctmux_proto::CONTRACT_V1_3_23 {
+            let identity: ctl_core::presence::ClientIdentity =
+              serde_json::from_value(frame["client_identity"].clone()).unwrap();
+            assert_eq!(identity.client_name, "api-test");
+            assert!(identity.validate());
+          } else {
+            assert!(frame.get("client_identity").is_none());
+          }
+          write_frame(
+            &mut server,
+            &ServerMessage::Error {
+              code: ErrorCode::SessionNotFound,
+              message: "missing".into(),
+            },
+          )
+          .await
+          .unwrap();
+        });
+        let request = AttachRequest {
+          session: "missing".into(),
+          resume_from: None,
+          terminal_size: TerminalSize::default(),
+          request_input_lease: false,
+          request_layout_lease: false,
+          request_command_line: false,
+          request_running_command: false,
+          presentation_window_bytes: ctmux_proto::DEFAULT_PRESENTATION_WINDOW_BYTES,
+        };
+        let result = if resume {
+          crate::resume_attach(client, &identity(), "fixture-token".into(), request).await
+        } else {
+          begin_attach(client, &identity(), request).await
+        };
+        assert!(matches!(
+          result,
+          Err(ClientError::Server {
+            code: ErrorCode::SessionNotFound,
+            ..
+          })
+        ));
+        peer.await.unwrap();
+      }
+    }
+  }
+
+  #[tokio::test]
+  async fn historical_list_reports_unknown_instead_of_unused() {
+    let (client, mut server) = tokio::io::duplex(4096);
+    let peer = tokio::spawn(async move {
+      accept_contract(&mut server, ctmux_proto::CONTRACT_V1_2_22).await;
+      assert_eq!(
+        read_frame::<_, ClientMessage>(&mut server).await.unwrap(),
+        Some(ClientMessage::ListSessions)
+      );
+      write_frame(
+        &mut server,
+        &ServerMessage::SessionList {
+          sessions: vec![session()],
+        },
+      )
+      .await
+      .unwrap();
+    });
+    let rows = SessionClient::new(client, identity())
+      .list_with_clients()
+      .await
+      .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].unused(), None);
+    assert!(rows[0].clients.is_none());
     peer.await.unwrap();
   }
 

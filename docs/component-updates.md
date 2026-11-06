@@ -70,7 +70,8 @@ bundle directory or archive, a CI/release bundle-set directory, or an explicitly
 chosen native build directory. Publisher archives need their matching
 `bundle-set.json` beside them. A bundle-set directory can supply different target
 artifacts for a batch; a single-target build cannot be uploaded to another target.
-Native builds must contain all four binaries; local macOS full updates also need
+Current native builds include `ctl-agent`, `ctmuxd`, `ctl-taskd`, `ctld`, `ctl`,
+and `ctmux` for the selected platform. Local macOS full updates also need
 the signed helper package described below. Supplied upload builds do not change
 the pinned upload selection. A local full update selects that build for future
 local service launches.
@@ -178,14 +179,17 @@ It remains an explicit packaging/offline tool; normal development uploads no
 longer require committing, pushing, or synchronizing CI artifacts. Use
 `pnpm bundles:build` to prepare the working tree's Linux x64 bundle locally; see
 [Local Linux bundles](local-bundles.md).
-Use `--source release` when importing a release bundle-set. Schema-2 manifests
-must advertise all four components; legacy schema-1 artifacts cannot become a
-managed complete selection. Existing installations and helper caches are retained.
+Use `--source release` when importing a release bundle-set. Published schema 3
+advertises all six executables. Published schema 2 retains its four service
+binaries. Import accepts either schema and verifies the advertised contracts.
+Legacy published schema 1 supports exact-source repair only. The managed store
+identifies six-executable builds with schema 2 and four-executable builds with
+schema 1 in `bundle.json`.
 
 For a native local build:
 
 ```sh
-cargo build --locked -p ctl-agent -p ctmuxd -p ctl-taskd -p ctld
+cargo build --locked -p ctl-agent -p ctmuxd -p ctl-taskd -p ctld -p ctl-cli -p ctmux-cli
 ctl components sync --from target/debug --local-build --purpose local
 ```
 

@@ -37,6 +37,7 @@ export interface BundleIdentity {
 export interface ReleaseBundle extends BundleIdentity {
   asset_directory: string;
   asset_names: string[];
+  desktop_targets: string[];
   unsigned_targets: string[];
   signed_ctld_targets: string[];
   bundled_cli_targets: string[];
@@ -56,10 +57,10 @@ interface Release {
   html_url: string;
 }
 
-export interface ReleaseUpdate {
+export type ReleaseUpdate = { status: "skipped" } | {
   status: "updated" | "published";
   html_url: string;
-}
+};
 
 export type GhRunner = (args: string[]) => Promise<string>;
 
@@ -122,14 +123,17 @@ async function validateAsset(directory: string, name: unknown, sha256: unknown):
   return [name, checksumName];
 }
 
-/** Reject incomplete or mixed builds before making any GitHub changes. */
+/** Validate every present target before making any GitHub changes. */
 export async function validateReleaseBundle(
   identity: BundleIdentity,
   asset_directory: string,
+  options: { allow_partial?: boolean } = {},
 ): Promise<ReleaseBundle> {
   validateIdentity(identity);
   const directory = resolve(asset_directory);
+  const names = new Set(await readdir(directory));
   const assetNames = new Set<string>();
+  const availableDesktopTargets: string[] = [];
   const unsignedTargets: string[] = [];
   const signedCtldTargets: string[] = [];
   const bundledCliTargets: string[] = [];
@@ -155,6 +159,7 @@ export async function validateReleaseBundle(
 
   for (const target of desktopTargets) {
     const manifestName = `desktop-${target}.json`;
+    if (options.allow_partial && !names.has(manifestName)) continue;
     const manifest = await readJson(directory, manifestName);
     const extensions = target.endsWith("apple-darwin")
       ? ["dmg", "app.tar.gz"]
@@ -193,12 +198,13 @@ export async function validateReleaseBundle(
       }
       addNames(await validateAsset(directory, asset.name, asset.sha256));
     }
+    availableDesktopTargets.push(target);
   }
-  // Main builds may omit standalone helpers and bundled CLIs. Any component
-  // upload must be a complete pair; version builds require both signed pairs.
-  const names = await readdir(directory);
-  const ctldPresent = ctldTargets.some((target) => names.includes(`ctld-${target}.json`));
-  const cliPresent = ctldTargets.some((target) => names.includes(`ctl-cli-${target}.json`));
+  // Strict validation requires complete helper/CLI pairs when included, and
+  // requires both pairs for version builds. Partial uploads validate each
+  // available target; each CLI still requires its matching standalone helper.
+  const ctldPresent = ctldTargets.some((target) => names.has(`ctld-${target}.json`));
+  const cliPresent = ctldTargets.some((target) => names.has(`ctl-cli-${target}.json`));
   const versionBuild = identity.bundle_id === identity.app_version;
   if (versionBuild && unsignedTargets.length > 0) {
     throw new Error("Version releases require signed macOS desktop packages");
@@ -209,6 +215,7 @@ export async function validateReleaseBundle(
   if (ctldPresent || cliPresent || versionBuild) {
     for (const target of ctldTargets) {
       const manifestName = `ctld-${target}.json`;
+      if (options.allow_partial && !names.has(manifestName)) continue;
       const manifest = await readJson(directory, manifestName);
       if (
         manifest.schema_version !== 1 || manifest.component !== "ctld" ||
@@ -250,6 +257,7 @@ export async function validateReleaseBundle(
   if (cliPresent || versionBuild) {
     for (const target of ctldTargets) {
       const manifestName = `ctl-cli-${target}.json`;
+      if (options.allow_partial && !names.has(manifestName)) continue;
       const manifest = await readJson(directory, manifestName);
       const ctldManifest = ctldManifests.get(target);
       if (
@@ -282,6 +290,7 @@ export async function validateReleaseBundle(
     ...identity,
     asset_directory: directory,
     asset_names: [...assetNames].sort(),
+    desktop_targets: availableDesktopTargets,
     unsigned_targets: unsignedTargets,
     signed_ctld_targets: signedCtldTargets,
     bundled_cli_targets: bundledCliTargets,
@@ -294,14 +303,17 @@ export function releaseNotes(bundle: ReleaseBundle, previous: string | null): st
     `Built from commit \`${bundle.git_revision}\`.`,
     `Bundle ID: \`${bundle.bundle_id}\`.`,
     "",
-    "Contains Linux and macOS desktop packages for Intel/AMD and ARM64, plus matching remote-agent bundles.",
+    "Contains remote-agent bundles for Linux and macOS on Intel/AMD and ARM64.",
     "Each package includes a SHA-256 checksum file. Build manifests record the package hashes and source revision.",
   ];
+  if (bundle.desktop_targets.length > 0) {
+    lines.push(`Desktop packages: ${bundle.desktop_targets.map((target) => `\`${target}\``).join(", ")}.`);
+  }
   if (bundle.signed_ctld_targets.length > 0) {
-    lines.push("Includes standalone Developer ID signed, notarized, and stapled ctld.app bundles for both macOS architectures.");
+    lines.push(`Includes standalone Developer ID signed, notarized, and stapled ctld.app bundles for: ${bundle.signed_ctld_targets.map((target) => `\`${target}\``).join(", ")}.`);
   }
   if (bundle.bundled_cli_targets.length > 0) {
-    lines.push("Includes Developer ID signed and notarized ctl CLI archives for both macOS architectures, with the matching ctld helper embedded for offline setup.");
+    lines.push(`Includes Developer ID signed and notarized ctl CLI archives for: ${bundle.bundled_cli_targets.map((target) => `\`${target}\``).join(", ")}, with the matching ctld helper embedded for offline setup.`);
   }
   if (bundle.unsigned_targets.length > 0) {
     lines.push(
@@ -408,6 +420,9 @@ export async function updateDraftRelease(
   if (!/^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/.test(repository)) {
     throw new Error("GH_REPO or GITHUB_REPOSITORY must be OWNER/REPO");
   }
+  if (bundle.desktop_targets.length + bundle.signed_ctld_targets.length + bundle.bundled_cli_targets.length === 0) {
+    return { status: "skipped" };
+  }
   const tag = `v${bundle.app_version}`;
   let release = await findRelease(gh, repository, tag);
   if (release && !release.draft) {
@@ -497,6 +512,10 @@ async function main(): Promise<void> {
     const { stdout } = await execFileAsync("gh", gh_args, { maxBuffer: 16 * 1024 * 1024 });
     return stdout;
   });
+  if (result.status === "skipped") {
+    console.log("No completed desktop, helper, or CLI targets; leaving the version draft unchanged.");
+    return;
+  }
   console.log(result.status === "published"
     ? `::notice::Release v${app_version} is already published; bump the app version to create the next draft.`
     : `Updated draft release v${app_version} with ${bundle.asset_names.length} assets.`);

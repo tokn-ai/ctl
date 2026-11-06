@@ -9,7 +9,7 @@ import type { XtermRenderer } from "../../features/terminal/XtermRenderer";
 import { sessionKey } from "../../features/targets/targets";
 import { errorCode, errorMessage } from "../../lib/errors";
 import { sessionView } from "../../lib/tauri";
-import type { ResizeDirection, SessionSummary, SessionView, ShellStateSummary, ViewAction } from "../../lib/types";
+import type { AttachmentViewState, ResizeDirection, SessionSummary, SessionView, ShellStateSummary, ViewAction } from "../../lib/types";
 import { terminalPaneTitle } from "../../lib/shellState";
 import { ControlPopover } from "../ui/ControlPopover";
 import { Icon } from "../ui/Icon";
@@ -29,6 +29,7 @@ interface Props extends SurfaceProps {
   shell_state?: ShellStateSummary | null;
   renderer?: XtermRenderer | null;
   input_owned?: boolean;
+  input_request?: AttachmentViewState["input_lease_request"];
   on_toggle_input?(): void;
   on_select_terminal(session: SessionSummary): Promise<void>;
   on_promoted(session: SessionSummary): Promise<void>;
@@ -40,7 +41,7 @@ interface Props extends SurfaceProps {
   on_view?(session: SessionSummary, view: SessionView): void;
 }
 
-export function SessionViewSurface({ controls_container, session, open_session_keys, shell_state, renderer, input_owned, on_toggle_input, on_select_terminal, on_promoted, prefix_settings, shortcuts_enabled = true, input_enabled = true, on_command, on_pane_commands, on_view, ...surface }: Props) {
+export function SessionViewSurface({ controls_container, session, open_session_keys, shell_state, renderer, input_owned, input_request, on_toggle_input, on_select_terminal, on_promoted, prefix_settings, shortcuts_enabled = true, input_enabled = true, on_command, on_pane_commands, on_view, ...surface }: Props) {
   const on_view_ref = useRef(on_view);
   on_view_ref.current = on_view;
   const [viewport, setViewport] = useState<HTMLDivElement | null>(null);
@@ -429,7 +430,7 @@ export function SessionViewSurface({ controls_container, session, open_session_k
   const pane_controls = (
     <div className="view-controls" ref={setControlsHost}>
       {primary_id && focused === primary_id && controls(primary_id, shell_state,
-        <button disabled={!connected} onClick={on_toggle_input} aria-label={input_owned ? "Release input" : "Take input"} title={input_owned ? "Input enabled · Click to release" : "Read only · Click to request input"}><Icon name="keyboard" size={14} />{!input_owned && "Read only"}</button>)}
+        <InputLeaseButton live={surface.phase === "attached" && !surface.ended_message} owned={input_owned} request={input_request} on_toggle={on_toggle_input} />)}
     </div>
   );
 
@@ -472,6 +473,22 @@ export function SessionViewSurface({ controls_container, session, open_session_k
     </div>
     </div>
   </div>;
+}
+
+function InputLeaseButton({ live, owned = false, request, on_toggle }: {
+  live: boolean;
+  owned?: boolean;
+  request?: AttachmentViewState["input_lease_request"];
+  on_toggle?(): void;
+}) {
+  const pending = live && request?.status === "pending";
+  const denied = live && request?.status === "denied";
+  const progress = pending && !request.acquire ? "Releasing input…" : "Requesting input…";
+  return <button disabled={!live || pending} aria-busy={pending} onClick={on_toggle}
+    aria-label={pending ? progress : denied ? "Input in use. Request input" : owned ? "Release input" : "Take input"}
+    title={pending ? progress : denied ? "Another attachment has input control · Click to try again" : owned ? "Input enabled · Click to release" : "Read only · Click to request input"}>
+    <Icon name="keyboard" size={14} />{pending ? progress : denied ? "Input in use" : !owned && "Read only"}
+  </button>;
 }
 
 function AdditionalTerminal({ visible, input_enabled, on_ended, on_dismiss, confirmed_missing, session, detach_registry, input_registry, toggle_registry, render_controls }: {
@@ -520,7 +537,11 @@ function AdditionalTerminal({ visible, input_enabled, on_ended, on_dismiss, conf
     };
   }, [renderer, key, detach_registry, input_registry, toggle_registry, handleInput]);
   return <>
-    {render_controls(attachment.state.shell_state, <button disabled={attachment.state.phase !== "attached"} aria-label={attachment.state.input_lease.owned_by_client ? "Release input" : "Take input"} title={attachment.state.input_lease.owned_by_client ? "Input enabled · Click to release" : "Read only · Click to request input"} onClick={() => void attachment.toggleInputLease()}><Icon name="keyboard" size={14} />{!attachment.state.input_lease.owned_by_client && "Read only"}</button>)}
+    {render_controls(attachment.state.shell_state,
+      <InputLeaseButton live={attachment.state.phase === "attached" && !ended_message}
+        owned={attachment.state.input_lease.owned_by_client}
+        request={attachment.state.input_lease_request}
+        on_toggle={attachment.toggleInputLease} />)}
     <TerminalSurface ended_message={ended_message} on_dismiss={on_dismiss} phase={attachment.state.phase} hasSession={true}
       has_cached_content={attachment.has_cached_content} interaction_enabled={input_enabled && visible}
       on_reconnect={attachment.reconnect} on_reconnect_interaction={attachment.reconnectOnInteraction}

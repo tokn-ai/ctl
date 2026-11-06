@@ -1,5 +1,5 @@
 use ctl_client::CoreError;
-use ctmux_client::ClientError;
+use ctmux_client::{AttachmentCommandError, ClientError};
 use ctmux_proto::ErrorCode;
 use serde::Serialize;
 
@@ -36,6 +36,13 @@ impl CommandErrorDto {
   pub fn client(error: ClientError) -> Self {
     match error {
       ClientError::Server { code, message } => Self::new(protocol_error_code(&code), message),
+      error => Self::backend(error),
+    }
+  }
+
+  pub fn attachment_command(error: AttachmentCommandError) -> Self {
+    match error {
+      AttachmentCommandError::Closed => Self::new("attachment_closing", error.to_string()),
       error => Self::backend(error),
     }
   }
@@ -124,6 +131,18 @@ mod tests {
       serde_json::json!({
         "code": "ssh_authentication_required", "message": "Authenticate this host.",
       })
+    );
+  }
+
+  #[test]
+  fn only_closed_controller_commands_report_attachment_closing() {
+    assert_eq!(
+      CommandErrorDto::attachment_command(AttachmentCommandError::Closed).code,
+      "attachment_closing"
+    );
+    assert_eq!(
+      CommandErrorDto::attachment_command(AttachmentCommandError::InputLeaseRequired),
+      CommandErrorDto::backend(AttachmentCommandError::InputLeaseRequired)
     );
   }
 

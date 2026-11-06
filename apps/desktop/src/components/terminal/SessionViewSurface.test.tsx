@@ -122,6 +122,29 @@ describe("session compositor", () => {
     }
   });
 
+  it("shows input request progress and denial on the focused pane", async () => {
+    mocks.request.mockResolvedValue(split);
+    const active = props();
+    const pending = { status: "pending", acquire: true } as const;
+    const denied = { status: "denied" } as const;
+    const result = render(<SessionViewSurface {...active} input_request={pending} />);
+    await waitFor(() => expect(screen.getAllByLabelText("Terminal input")).toHaveLength(2));
+    expect(screen.getByRole<HTMLButtonElement>("button", { name: "Requesting input…" }).disabled).toBe(true);
+    result.rerender(<SessionViewSurface {...active} input_request={denied} />);
+    expect(screen.getByRole<HTMLButtonElement>("button", { name: "Input in use. Request input" }).disabled).toBe(false);
+    result.rerender(<SessionViewSurface {...active} phase="ended" />);
+    expect(screen.getByRole<HTMLButtonElement>("button", { name: "Take input" }).disabled).toBe(true);
+
+    const split_state = { ...initialAttachmentState(), phase: "attached" as const };
+    mocks.attachment_state = { ...split_state, input_lease_request: pending };
+    result.rerender(<SessionViewSurface {...active} />);
+    act(() => screen.getAllByLabelText("Terminal input")[1].focus());
+    expect(screen.getByRole<HTMLButtonElement>("button", { name: "Requesting input…" }).disabled).toBe(true);
+    mocks.attachment_state = { ...split_state, input_lease_request: denied };
+    result.rerender(<SessionViewSurface {...active} />);
+    expect(screen.getByRole<HTMLButtonElement>("button", { name: "Input in use. Request input" }).disabled).toBe(false);
+  });
+
   it("continues a held drag through confirmed views and renderer cell measurement refreshes", async () => {
     mocks.request.mockResolvedValue(split);
     const cell = { width: 313 / 40, height: 399 / 24 };

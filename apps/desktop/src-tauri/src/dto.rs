@@ -387,6 +387,8 @@ pub struct OpenAttachmentRequestDto {
   pub target: ConnectionTargetDto,
   pub session: String,
   pub terminal_size: TerminalSizeDto,
+  #[serde(default)]
+  pub resume_attachment_id: Option<String>,
   pub resume_from: Option<String>,
   pub request_input_lease: bool,
   pub request_layout_lease: bool,

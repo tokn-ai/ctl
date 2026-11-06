@@ -850,6 +850,8 @@ export interface OpenAttachmentRequest {
   target: ConnectionTarget;
   session: string;
   resume_from: Sequence | null;
+  /** Native attachment handle retained after transport loss. */
+  resume_attachment_id?: string;
   terminal_size: TerminalSize;
   request_input_lease: boolean;
   request_layout_lease: boolean;
@@ -1120,6 +1122,8 @@ export interface AttachmentViewState {
   shell_state: ShellStateSummary | null;
   applied_sequence: Sequence | null;
   reconnect_sequence: Sequence | null;
+  /** Local feedback for an explicit input control request on this attachment. */
+  input_lease_request?: { status: "pending"; acquire: boolean } | { status: "denied" };
   /** Retained history is being restored; this is not evidence of missing output. */
   history_loading: boolean;
   history_gap: boolean;

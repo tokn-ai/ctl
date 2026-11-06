@@ -237,7 +237,7 @@ fn installation_script(bundle_id: &str, archive: &[u8]) -> Result<(String, Layou
   ))
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 async fn run_install_command(
   command: Command,
   archive: &[u8],

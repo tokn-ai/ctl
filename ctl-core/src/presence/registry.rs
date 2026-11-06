@@ -338,6 +338,10 @@ mod tests {
   fn unlocked_crash_records_are_removed_without_pid_or_clock_checks() {
     let root = std::env::temp_dir().join(format!("ctl-presence-{}", uuid::Uuid::new_v4()));
     let mut registration = register_at(&root, None, "ctmux", None).unwrap();
+    // Other parallel tests can fork between opening a descriptor and exec.
+    // Explicitly unlock this fixture so an inherited duplicate cannot retain
+    // its lease; the production child-kill test covers crash cleanup itself.
+    registration.lease.as_ref().unwrap().unlock().unwrap();
     drop(registration.lease.take());
     assert_eq!(
       connections_in(&root).unwrap(),

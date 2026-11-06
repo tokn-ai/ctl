@@ -106,7 +106,7 @@ impl Terminal {
     }
   }
 
-  #[cfg(test)]
+  #[cfg(all(test, unix))]
   pub fn create_attachment(&self, input: bool, layout: bool) -> super::AttachmentRegistration {
     self.create_peer_attachment(
       input,
@@ -133,7 +133,7 @@ impl Terminal {
     result
   }
 
-  #[cfg(test)]
+  #[cfg(all(test, unix))]
   pub fn resume_attachment(&self, token: &str) -> Option<super::AttachmentRegistration> {
     self.resume_peer_attachment(token, None)
   }

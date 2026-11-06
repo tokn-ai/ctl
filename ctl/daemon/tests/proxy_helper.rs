@@ -3,7 +3,7 @@
 use ctl_ipc::{ClientMessage, GatewayKind, ServerMessage, SshGateway, SshGatewayMode, SshTarget};
 use std::fmt::Write as _;
 use std::os::unix::fs::PermissionsExt as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
@@ -439,6 +439,20 @@ async fn remote_vpn_uses_its_ssh_owner_and_preserves_the_remote_dns_destination(
     ctl_ipc::vpn_owner_target(&route, 2).unwrap()
   );
   let request = std::fs::read(request_path).unwrap();
+  let request = &request[assert_vpn_selection(&request, &executable)..];
+  let size = usize::try_from(u32::from_be_bytes(request[..4].try_into().unwrap())).unwrap();
+  let frame: serde_json::Value = serde_json::from_slice(&request[4..4 + size]).unwrap();
+  assert_eq!(
+    frame,
+    serde_json::json!({
+      "type": "connect", "connection_id": "work", "host": "private.internal", "port": 2200
+    })
+  );
+  assert_eq!(&request[4 + size..], b"destination-input");
+  fixture.assert_only_history();
+}
+
+fn assert_vpn_selection(request: &[u8], executable: &Path) -> usize {
   let selected_size =
     usize::try_from(u32::from_be_bytes(request[..4].try_into().unwrap())).unwrap();
   let selection: ctl_ipc::remote_vpn::ProtocolSelection =
@@ -456,17 +470,7 @@ async fn remote_vpn_uses_its_ssh_owner_and_preserves_the_remote_dns_destination(
     executable.file_stem().unwrap().to_str().unwrap()
   );
   assert_eq!(peer.client_version, env!("CARGO_PKG_VERSION"));
-  let request = &request[4 + selected_size..];
-  let size = usize::try_from(u32::from_be_bytes(request[..4].try_into().unwrap())).unwrap();
-  let frame: serde_json::Value = serde_json::from_slice(&request[4..4 + size]).unwrap();
-  assert_eq!(
-    frame,
-    serde_json::json!({
-      "type": "connect", "connection_id": "work", "host": "private.internal", "port": 2200
-    })
-  );
-  assert_eq!(&request[4 + size..], b"destination-input");
-  fixture.assert_only_history();
+  4 + selected_size
 }
 
 fn vpn_route(fixture: &Fixture) -> (Vec<SshGateway>, SshTarget) {

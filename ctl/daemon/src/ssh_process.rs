@@ -1,4 +1,4 @@
-//! Own the whole Windows SSH/ProxyCommand process tree, including on ctld death.
+//! Own SSH children and the Windows `ProxyCommand` process tree, including on ctld death.
 
 use std::io;
 use std::process::ExitStatus;
@@ -36,8 +36,7 @@ impl Process {
     let stderr = inner.stderr().take();
     #[cfg(not(windows))]
     let stderr = inner.stderr.take();
-    let diagnostics =
-      stderr.map(|stderr| tokio::spawn(super::super::master_diagnostics::collect(stderr)));
+    let diagnostics = stderr.map(|stderr| tokio::spawn(super::master_diagnostics::collect(stderr)));
     Ok(Self { inner, diagnostics })
   }
 

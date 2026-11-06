@@ -1,13 +1,35 @@
 use ctl_client::hosts::ConnectionTargetDto;
 use ctl_ipc::{
-  ClientMessage, LocalPortForward, PortForwardState, PortForwardStatus, ServerMessage,
+  ClientMessage, LocalPortForward, PortForwardProtocol, PortForwardState, PortForwardStatus,
+  ServerMessage,
 };
+
+#[derive(Debug, Clone, Copy, Default, clap::ValueEnum)]
+pub enum Protocol {
+  #[default]
+  Tcp,
+  Udp,
+  Any,
+}
+
+impl From<Protocol> for PortForwardProtocol {
+  fn from(protocol: Protocol) -> Self {
+    match protocol {
+      Protocol::Tcp => Self::Tcp,
+      Protocol::Udp => Self::Udp,
+      Protocol::Any => Self::Any,
+    }
+  }
+}
 
 #[derive(Debug, clap::Subcommand)]
 pub enum Command {
   /// Start a local forward: `[bind_address:]local_port:remote_host:remote_port`.
   Add {
     specification: String,
+    /// Forward TCP, UDP, or both protocols on the same local port.
+    #[arg(long, value_enum, default_value_t = Protocol::Tcp)]
+    protocol: Protocol,
     /// Stable ID for updating/removing this forward.
     #[arg(long)]
     id: Option<String>,
@@ -38,6 +60,7 @@ pub async fn run(target: &ConnectionTargetDto, command: Command) -> Result<(), E
   match command {
     Command::Add {
       specification,
+      protocol,
       id,
       json,
     } => {
@@ -46,17 +69,12 @@ pub async fn run(target: &ConnectionTargetDto, command: Command) -> Result<(), E
         &specification,
         id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
       )?;
+      forward.protocol = protocol.into();
       if implicit_id {
         let statuses = list(ssh_target.clone()).await?;
         if let Some(existing) = statuses
           .iter()
-          .filter(|status| {
-            let existing = &status.forward;
-            existing.bind_address == forward.bind_address
-              && existing.local_port == forward.local_port
-              && existing.remote_host == forward.remote_host
-              && existing.remote_port == forward.remote_port
-          })
+          .filter(|status| same_forward_destination(&status.forward, &forward))
           .min_by(|left, right| {
             (left.state != PortForwardState::Active)
               .cmp(&(right.state != PortForwardState::Active))
@@ -128,6 +146,11 @@ fn print_statuses(statuses: &[PortForwardStatus], json: bool) -> Result<(), Erro
       let forward = &status.forward;
       [
         forward.forward_id.clone(),
+        match forward.protocol {
+          PortForwardProtocol::Tcp => "TCP".into(),
+          PortForwardProtocol::Udp => "UDP".into(),
+          PortForwardProtocol::Any => "ANY".into(),
+        },
         endpoint(&forward.bind_address, forward.local_port),
         endpoint(&forward.remote_host, forward.remote_port),
         format!("{:?}", status.state),
@@ -135,7 +158,7 @@ fn print_statuses(statuses: &[PortForwardStatus], json: bool) -> Result<(), Erro
     });
     println!(
       "{}",
-      crate::table::format(["ID", "LOCAL", "REMOTE", "STATUS"], rows)
+      crate::table::format(["ID", "PROTOCOL", "LOCAL", "REMOTE", "STATUS"], rows)
     );
     for status in statuses {
       if let Some(message) = &status.message {
@@ -148,6 +171,14 @@ fn print_statuses(statuses: &[PortForwardStatus], json: bool) -> Result<(), Erro
     }
   }
   Ok(())
+}
+
+fn same_forward_destination(left: &LocalPortForward, right: &LocalPortForward) -> bool {
+  left.protocol == right.protocol
+    && left.bind_address == right.bind_address
+    && left.local_port == right.local_port
+    && left.remote_host == right.remote_host
+    && left.remote_port == right.remote_port
 }
 
 fn endpoint(host: &str, port: u16) -> String {
@@ -198,6 +229,7 @@ fn parse_forward(value: &str, forward_id: String) -> Result<LocalPortForward, Er
   }
   Ok(LocalPortForward {
     forward_id,
+    protocol: PortForwardProtocol::Tcp,
     bind_address: bind.into(),
     local_port: port_number(local)?,
     remote_host: remote.into(),
@@ -231,6 +263,64 @@ pub enum Error {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn implicit_forward_ids_are_reused_only_for_the_same_protocol_and_destination() {
+    let tcp = parse_forward("5353:localhost:5353", "tcp".into()).unwrap();
+    assert_eq!(tcp.protocol, PortForwardProtocol::Tcp);
+    let mut udp = tcp.clone();
+    udp.protocol = PortForwardProtocol::Udp;
+    assert!(!same_forward_destination(&tcp, &udp));
+    let mut both = tcp.clone();
+    both.protocol = PortForwardProtocol::Any;
+    assert!(!same_forward_destination(&tcp, &both));
+    let mut same = tcp.clone();
+    same.forward_id = "other-owner".into();
+    assert!(same_forward_destination(&tcp, &same));
+  }
+
+  #[test]
+  fn protocol_selection_accepts_only_tcp_udp_and_any() {
+    use clap::Parser as _;
+
+    for (value, expected) in [
+      ("tcp", PortForwardProtocol::Tcp),
+      ("udp", PortForwardProtocol::Udp),
+      ("any", PortForwardProtocol::Any),
+    ] {
+      let arguments = crate::Arguments::try_parse_from([
+        "ctl",
+        "--destination",
+        "remote.example",
+        "port",
+        "add",
+        "5353:localhost:5353",
+        "--protocol",
+        value,
+      ])
+      .unwrap();
+      let crate::Command::Port {
+        command: Command::Add { protocol, .. },
+      } = arguments.command
+      else {
+        panic!("expected port add");
+      };
+      assert_eq!(PortForwardProtocol::from(protocol), expected);
+    }
+    assert!(
+      crate::Arguments::try_parse_from([
+        "ctl",
+        "--destination",
+        "remote.example",
+        "port",
+        "add",
+        "5353:localhost:5353",
+        "--protocol",
+        "sctp",
+      ])
+      .is_err()
+    );
+  }
   #[test]
   fn forwarding_supports_ipv6_without_binding_public_interfaces() {
     let forward = parse_forward("[::1]:8080:[2001:db8::2]:80", "web".into()).unwrap();

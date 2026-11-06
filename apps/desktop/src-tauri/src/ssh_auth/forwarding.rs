@@ -64,7 +64,7 @@ async fn request(message: ClientMessage) -> CommandResult<ServerMessage> {
     .await
     .map_err(|error| match error {
       Error::Daemon { code, message } => CommandErrorDto::new(code, message),
-      error @ Error::UnsupportedGatewayRoute(_) => {
+      error @ (Error::UnsupportedGatewayRoute(_) | Error::UnsupportedForwardingProtocol(_)) => {
         CommandErrorDto::new("ctld_protocol_feature_unsupported", error.to_string())
       }
       error @ Error::UnsupportedBrokerProtocol(_) => {
@@ -82,6 +82,7 @@ mod tests {
   async fn forwarding_rejects_local_targets_before_contacting_the_helper() {
     let forward = LocalPortForward {
       forward_id: "web".into(),
+      protocol: ctl_ipc::PortForwardProtocol::Tcp,
       bind_address: "127.0.0.1".into(),
       local_port: 8080,
       remote_host: "localhost".into(),

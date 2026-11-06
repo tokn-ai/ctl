@@ -1,6 +1,6 @@
 # ctl-proto
 
-Remote identity and maintenance protocols for ctl agents.
+Remote identity, maintenance, and UDP forwarding protocols for ctl agents.
 
 Part of [ctl and ctmux](https://github.com/tokn-ai/ctl). See the
 [repository documentation](https://github.com/tokn-ai/ctl#readme) for setup,

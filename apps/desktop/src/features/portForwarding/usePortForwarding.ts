@@ -363,6 +363,7 @@ function pausedStatuses(
       status.forward.bind_address !== forward.bind_address ||
       status.forward.local_port !== forward.local_port ||
       status.forward.remote_host !== forward.remote_host ||
+      (status.forward.protocol ?? "tcp") !== (forward.protocol ?? "tcp") ||
       status.forward.remote_port !== forward.remote_port) {
       next ??= new Map(current);
       next.set(forward.forward_id, {

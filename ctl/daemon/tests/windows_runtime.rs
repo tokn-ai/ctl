@@ -261,6 +261,7 @@ async fn forwarding_inventory_is_passive_and_explicit_mux_is_rejected_before_ali
       ClientMessage::ConfigurePortForward {
         target: target.clone(),
         forward: ctl_ipc::LocalPortForward {
+          protocol: ctl_ipc::PortForwardProtocol::Tcp,
           forward_id: "explicit-mux-rejected".into(),
           bind_address: "127.0.0.1".into(),
           local_port,

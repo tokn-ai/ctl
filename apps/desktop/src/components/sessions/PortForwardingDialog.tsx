@@ -6,12 +6,14 @@ import {
 } from "../../lib/tauri";
 import type {
   LocalPortAvailability,
+  PortForwardProtocol,
   PortForwardStatus,
   SshConnectionTarget,
   TcpListener,
   WorkspacePortForward,
 } from "../../lib/types";
 import { targetLabel } from "../../features/targets/targets";
+import { portForwardProtocolLabel } from "../../features/portForwarding/protocol";
 import { QuickInputFrame } from "../commands/QuickInputFrame";
 import "../portForwarding/portForwarding.css";
 
@@ -44,6 +46,7 @@ export function PortForwardingDialog({
   const [localPort, setLocalPort] = useState("");
   const [remoteHost, setRemoteHost] = useState("127.0.0.1");
   const [remotePort, setRemotePort] = useState("");
+  const [protocol, setProtocol] = useState<PortForwardProtocol>("tcp");
   const [listeners, setListeners] = useState<TcpListener[]>([]);
   const [listenerWarnings, setListenerWarnings] = useState<string[]>([]);
   const [listenerError, setListenerError] = useState<string | null>(null);
@@ -58,7 +61,8 @@ export function PortForwardingDialog({
     try {
       const catalog = await listRemoteListeners(target);
       setListeners([...catalog.listeners].sort((left, right) =>
-        left.port - right.port || left.bind_address.localeCompare(right.bind_address),
+        left.port - right.port || left.bind_address.localeCompare(right.bind_address) ||
+        (left.protocol ?? "tcp").localeCompare(right.protocol ?? "tcp"),
       ));
       setListenerWarnings(catalog.warnings);
     } catch (failure) {
@@ -87,7 +91,7 @@ export function PortForwardingDialog({
     }
     let cancelled = false;
     const timer = window.setTimeout(() => {
-      void checkLocalPort(port).then(
+      void checkLocalPort(port, protocol).then(
         (result) => {
           if (!cancelled) setAvailability(result);
         },
@@ -100,7 +104,7 @@ export function PortForwardingDialog({
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [localPort]);
+  }, [localPort, protocol]);
 
   async function setEnabled(forward: WorkspacePortForward, value: boolean) {
     setError(null);
@@ -154,12 +158,14 @@ export function PortForwardingDialog({
         local_port: parsedLocal,
         remote_host: remoteHost.trim(),
         remote_port: parsedRemote,
+        protocol,
         enabled: false,
       },
     ]);
     setName("");
     setLocalPort("");
     setRemotePort("");
+    setProtocol("tcp");
     setError(null);
   }
 
@@ -169,6 +175,7 @@ export function PortForwardingDialog({
     setLocalPort(String(listener.port));
     setRemoteHost(host);
     setRemotePort(String(listener.port));
+    setProtocol(listener.protocol ?? "tcp");
     setError(null);
   }
 
@@ -183,32 +190,32 @@ export function PortForwardingDialog({
       </p>
       <section className="remote-listeners" aria-labelledby="remote-listeners-heading">
         <header>
-          <strong id="remote-listeners-heading">Remote TCP listeners</strong>
+          <strong id="remote-listeners-heading">Remote TCP/UDP listeners</strong>
           <button type="button" onClick={() => void refreshListeners()} disabled={listenersLoading}>
             {listenersLoading ? "Scanning…" : "Refresh"}
           </button>
         </header>
         {listenerUpdateRequired ? (
           <div className="remote-agent-update" role="status">
-            <p>Update the remote components to discover TCP listeners on this host.</p>
+            <p>Update the remote components to discover listeners on this host.</p>
             <button type="button" onClick={onUpdateAgent}>Update remote components</button>
           </div>
         ) : null}
         {listenerError ? <p className="remote-listener-message error" role="status">{listenerError}</p> : null}
         {!listenerError && !listenerUpdateRequired && !listenersLoading && listeners.length === 0 ? (
-          <p className="remote-listener-message">No visible TCP listeners.</p>
+          <p className="remote-listener-message">No visible TCP/UDP listeners.</p>
         ) : null}
         {listeners.length > 0 ? (
           <div className="remote-listener-grid">
             {listeners.map((listener) => (
               <button
                 type="button"
-                key={`${listener.bind_address}:${listener.port}`}
+                key={`${listener.protocol ?? "tcp"}:${listener.bind_address}:${listener.port}`}
                 onClick={() => selectListener(listener)}
                 title="Prefill a local forward"
               >
                 <code>{listener.bind_address}:{listener.port}</code>
-                <small>{listenerScope(listener.bind_address)}</small>
+                <small>{portForwardProtocolLabel(listener.protocol)} · {listenerScope(listener.bind_address)}</small>
                 <span>Forward</span>
               </button>
             ))}
@@ -228,7 +235,7 @@ export function PortForwardingDialog({
             <div className="port-forward-row" key={forward.forward_id}>
               <div>
                 <strong>{forward.name}</strong>
-                <code>{forward.bind_address}:{forward.local_port} → {forward.remote_host}:{forward.remote_port}</code>
+                <code>{portForwardProtocolLabel(forward.protocol)} · {forward.bind_address}:{forward.local_port} → {forward.remote_host}:{forward.remote_port}</code>
                 <small className={`port-forward-state ${status?.state ?? "stopped"}`}>
                   {changing ? "changing…" : status?.state.replace(/_/g, " ") ?? "stopped"}
                   {status?.message ? ` · ${status.message}` : ""}
@@ -261,6 +268,14 @@ export function PortForwardingDialog({
         }}
       >
         <label>Name<input value={name} onChange={(event) => setName(event.target.value)} placeholder="Database" /></label>
+        <label>
+          Protocol
+          <select value={protocol} onChange={(event) => setProtocol(event.target.value as PortForwardProtocol)}>
+            <option value="tcp">TCP</option>
+            <option value="udp">UDP</option>
+            <option value="any">Any (TCP/UDP)</option>
+          </select>
+        </label>
         <label>
           Local port
           <input inputMode="numeric" value={localPort} onChange={(event) => setLocalPort(event.target.value)} placeholder="5432" />

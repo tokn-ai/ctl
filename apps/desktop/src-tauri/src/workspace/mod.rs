@@ -32,6 +32,8 @@ use ctl_client::hosts::validated_gateway_ids;
 #[serde(deny_unknown_fields)]
 pub struct WorkspacePortForward {
   pub forward_id: String,
+  #[serde(default, skip_serializing_if = "ctl_ipc::PortForwardProtocol::is_tcp")]
+  pub protocol: ctl_ipc::PortForwardProtocol,
   pub host_id: String,
   pub name: String,
   pub bind_address: String,

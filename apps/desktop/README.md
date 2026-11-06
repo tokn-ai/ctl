@@ -321,6 +321,10 @@ including stopped entries, and shows `ctld`'s current active, waiting, or error
 state. Start and Stop act on the shared `ctld` owner; selecting a row opens the
 host-specific forwarding dialog for discovery and editing. Runtime state is
 refreshed on launch, when the panel opens, and on demand, but is not persisted.
+Discovery and saved rules display TCP or UDP. Selecting a discovered endpoint
+prefills its original protocol; creation also offers **Any (TCP/UDP)** to bind
+both transports. Existing saved rules default to TCP. UDP forwarding requires
+ctld protocol `1.1.17` and the remote agent's `ctl_forwarding 1.0.1` contract.
 
 The identity-file input suggests candidate files from the top level of
 `~/.ssh`. Type to filter, use the arrow keys and Enter, or click a file. Manual

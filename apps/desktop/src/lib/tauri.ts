@@ -46,6 +46,7 @@ import type {
   TaskDefinitionCatalog,
   SavedTaskDefinition,
   LocalPortForward,
+  PortForwardProtocol,
   PortForwardStatus,
   TcpListenerCatalog,
   LocalPortAvailability,
@@ -392,8 +393,9 @@ export async function listRemoteListeners(
 
 export async function checkLocalPort(
   port: number,
+  protocol: PortForwardProtocol = "tcp",
 ): Promise<LocalPortAvailability> {
-  return invoke("check_local_port", { request: { port } });
+  return invoke("check_local_port", { request: { port, protocol } });
 }
 
 export interface OpenAttachmentResult {

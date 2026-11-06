@@ -180,6 +180,7 @@ async fn forwards_preserve_saved_and_temporary_targets_through_native_ipc() {
     let status = PortForwardStatus {
       forward: LocalPortForward {
         forward_id: "web".into(),
+        protocol: ctl_ipc::PortForwardProtocol::Tcp,
         bind_address: "127.0.0.1".into(),
         local_port: 8080,
         remote_host: "localhost".into(),

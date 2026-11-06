@@ -110,21 +110,82 @@ impl ForwardControl for SshForwardControl<'_> {
       .unwrap_or(false)
   }
 
-  #[cfg(windows)]
   async fn check(
     &self,
     target: &SshTarget,
     forward: &LocalPortForward,
   ) -> Result<(), RequestError> {
-    self
-      .state
-      .native_forwards
-      .lock()
-      .await
-      .check(target, forward)
+    if forward.protocol.includes_udp() {
+      self
+        .state
+        .udp_forwards
+        .lock()
+        .await
+        .check(target, forward)?;
+    }
+    #[cfg(windows)]
+    if forward.protocol.includes_tcp() {
+      self
+        .state
+        .native_forwards
+        .lock()
+        .await
+        .check(target, forward)?;
+    }
+    Ok(())
   }
 
   async fn change(
+    &self,
+    target: &SshTarget,
+    forward: &LocalPortForward,
+    cancel: bool,
+  ) -> Result<(), RequestError> {
+    if !forward.protocol.includes_udp() {
+      return self.change_tcp(target, forward, cancel).await;
+    }
+    if cancel {
+      if forward.protocol.includes_tcp() {
+        self.change_tcp(target, forward, true).await?;
+      }
+      self
+        .state
+        .udp_forwards
+        .lock()
+        .await
+        .cancel(target, forward)
+        .await;
+      return Ok(());
+    }
+    let path = if cfg!(windows) {
+      None
+    } else {
+      let endpoint = self
+        .state
+        .existing_endpoint(target)?
+        .ok_or(RequestError::HostDisconnected)?;
+      self.state.remember_endpoint(target, &endpoint, None);
+      Some(endpoint.control_path)
+    };
+    let mut udp = self.state.udp_forwards.lock().await;
+    // Keep startup ownership local until every requested protocol is ready.
+    // Dropping this future (client EOF/shutdown) aborts the provisional owner.
+    let prepared = udp.prepare(target, path.as_deref(), forward).await?;
+    if forward.protocol.includes_tcp()
+      && let Err(error) = self.change_tcp(target, forward, false).await
+    {
+      // Any is one rule: a TCP collision must release its newly bound UDP half.
+      prepared.stop().await;
+      return Err(error);
+    }
+    // No suspension between committing listeners and recording the rule.
+    udp.commit(prepared);
+    Ok(())
+  }
+}
+
+impl SshForwardControl<'_> {
+  async fn change_tcp(
     &self,
     target: &SshTarget,
     forward: &LocalPortForward,
@@ -144,9 +205,6 @@ impl ForwardControl for SshForwardControl<'_> {
     }
     self.change_master(target, forward, cancel).await
   }
-}
-
-impl SshForwardControl<'_> {
   // Retain this path on every target: only Unix callers dispatch master work,
   // and the same commands remain covered by platform-independent policy tests.
   async fn change_master(

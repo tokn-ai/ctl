@@ -4,7 +4,6 @@
 //! connection uses a fresh `ssh -W` transport, preserving OpenSSH's own config
 //! evaluation while `ClearAllForwardings` suppresses unrelated config forwards.
 
-mod process;
 #[cfg(test)]
 mod tests;
 
@@ -20,8 +19,8 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::process::Command;
 
 use super::shared_forwarding::{OwnedListener, relay_stream};
+use super::ssh_process::Process;
 use super::{RequestError, SSH_PROGRAM, append_target_arguments, remote_forward_host};
-use process::Process;
 
 const START_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_READY_BYTES: usize = 256;

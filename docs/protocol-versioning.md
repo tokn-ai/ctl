@@ -44,6 +44,7 @@ unpublished wire formats.
 | `ctl_identity` | 3 | `1.0.3` |
 | `ctl_maintenance` | 2 | `1.0.2` |
 | `ctl_remote_vpn` | 1 | `1.0.1` |
+| `ctl_forwarding` | 1 | `1.0.1` |
 
 The remote VPN addition starts the next development cycle with ctld `1.1.13`
 (build 13) and helper `1.1.2` (build 2), retaining their frozen initial contracts.
@@ -92,6 +93,28 @@ reconnect behavior without automatic wake authorization. Existing operation
 shapes and semantics remain supported. The independent helper contract stays
 `1.1.5` (build 5), lifecycle stays `1.0.1` (build 1), and the product release
 version is unchanged by this protocol addition.
+
+Protocol-aware port forwarding advances `ctld` from `1.1.16` (build 16) to
+`1.1.17` (build 17), retaining `1.0.12` and every published `1.1.13`–`1.1.16`
+contract. `configure_port_forward.forward` adds `protocol` (`tcp`, `udp`, or
+`any`), with omission retaining TCP. `any` forwards both TCP and UDP on the same
+local port. `list_remote_listeners` adds the same protocol selector; omission
+retains the original TCP-only discovery. Listener entries add `protocol` (`tcp`
+or `udp`), with TCP omitted to preserve historical wire shapes. Clients require
+negotiated `1.1.17` before requesting UDP, `any`, or protocol-aware discovery.
+Earlier selected contracts retain TCP-only list and forwarding behavior; updated
+clients use TCP discovery with older brokers and report UDP forwarding unavailable.
+The remote agent retains its original argument-free `listeners` command and
+adds `listeners --protocol any` for protocol-aware discovery.
+
+UDP transport introduces the independent `ctl_forwarding` contract `1.0.1`
+(build 1), advertised by the agent and negotiated on the fixed `forward-udp`
+SSH endpoint before sending a validated destination and bounded datagrams.
+Datagram boundaries, empty datagrams, and separate local peer associations are
+retained. TCP continues using OpenSSH forwarding. Older agents retain TCP
+behavior and require an update for UDP. The identity, helper, lifecycle, and
+other named contracts, storage schema versions, and product release version
+are unchanged.
 
 Quiet SSH establishment advances ctld from `1.1.13` (build 13) to `1.1.14`
 (build 14), retaining `1.0.12` and `1.1.13`. The additive `ensure_master_quiet`

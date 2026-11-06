@@ -32,6 +32,23 @@ for local operations where supported. `ssh` and `scp` take their destinations
 positionally and retain saved-host-first lookup followed by ordinary OpenSSH
 lookup; they reject both ctl target selectors.
 
+## Port forwarding
+
+`port add` defaults to TCP. Choose `--protocol udp` for datagrams or
+`--protocol any` to forward both TCP and UDP on the same local port:
+
+```sh
+ctl -H work port add 5353:127.0.0.1:5353 --protocol udp --id dns
+ctl -H work port add 8080:127.0.0.1:8080 --protocol any --id service
+ctl -H work port list
+ctl -H work port remove dns
+```
+
+The list includes each forward's protocol. Repeating an add without `--id`
+reuses a matching forward only when both its endpoints and protocol match.
+UDP and `any` require updated local ctld and remote ctl-agent components.
+Existing forwards without a protocol retain TCP behavior.
+
 ## Caller-owned SSH credentials
 
 Applications can select an explicit endpoint and credential for temporary

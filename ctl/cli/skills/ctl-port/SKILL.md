@@ -18,6 +18,8 @@ available with `ctl skill ctl-host`.
 
 ```sh
 ctl -H work port add 8080:127.0.0.1:80 --id work-web --json
+ctl -H work port add 5353:127.0.0.1:5353 --protocol udp --id work-dns
+ctl -H work port add 8080:127.0.0.1:8080 --protocol any --id work-service
 ctl -H work port list --json
 ctl -H work port remove work-web
 ```
@@ -50,6 +52,10 @@ list, and remove.
 ## Specification and status
 
 The specification is `[bind_address:]local_port:remote_host:remote_port`.
+The protocol defaults to TCP. `--protocol udp` forwards datagrams, while
+`--protocol any` forwards both TCP and UDP at the same endpoints. UDP and `any`
+require updated local ctld and remote ctl-agent components. Plain lists include
+a protocol column. TCP and UDP can use the same local port independently.
 Both ports must be 1–65535. The default bind is `127.0.0.1`; only `127.0.0.1`
 and `::1` are accepted. Public and wildcard binds are unavailable.
 Bracket IPv6 addresses and quote the whole specification so shell globbing does
@@ -61,7 +67,8 @@ ctl -H work port add '[::1]:8080:[2001:db8::2]:80' --id work-web-v6
 
 Add and list `--json` output an array, including add's single result. Each item
 contains `forward` with `forward_id`, `bind_address`, `local_port`, `remote_host`,
-and `remote_port`, plus `state` and `message`. JSON states are `active`,
+and `remote_port`, with `protocol` present for `udp` or `any` (omitted means
+`tcp`), plus `state` and `message`. JSON states are `active`,
 `waiting_for_authentication`, and `error`. Remove has no JSON option.
 An active listener confirms forwarding setup; verify the destination service
 separately when the requested outcome depends on it.

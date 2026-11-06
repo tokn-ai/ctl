@@ -866,6 +866,8 @@ config.
 
 ```sh
 ctl -H work port add 8080:127.0.0.1:80 --id web
+ctl -H work port add 5353:127.0.0.1:53 --protocol udp --id dns
+ctl -H work port add 9000:127.0.0.1:9000 --protocol any --id service
 ctl -H work port list
 ctl -H work port remove web
 ctl --destination my-ssh-alias port add 8080:127.0.0.1:80 --id temporary-web
@@ -873,7 +875,16 @@ ctl --destination my-ssh-alias port remove temporary-web
 ```
 
 `port add` connects as needed and returns after ctld starts the listener.
-Without `--id`, repeating the same local and remote endpoints on the same
+`--protocol tcp` is the default; `udp` forwards datagrams and `any` binds both
+TCP and UDP on the selected local port. Lists show each rule's protocol.
+The desktop discovers TCP and UDP endpoints and defaults a new rule to the
+selected endpoint's protocol, with an **Any (TCP/UDP)** creation option.
+UDP and Any require ctld protocol `1.1.17` and an updated remote `ctl-agent`
+implementing `ctl_forwarding 1.0.1`. Existing TCP rules remain compatible.
+UDP peers have separate remote sockets; idle peer channels expire after 60
+seconds without traffic in either direction. Each rule admits up to 64 active peers, with
+bounded packet queues that discard excess UDP traffic.
+Without `--id`, repeating the same protocol and local and remote endpoints on the same
 connection method reuses the existing forward ID. An explicit `--id` selects
 that record for updates and removal.
 Forwards outlive the CLI process and remain in ctld's runtime registry until

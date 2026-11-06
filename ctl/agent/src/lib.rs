@@ -6,6 +6,7 @@
 //! connections read an account-owned ID that survives component upgrades.
 
 pub mod components;
+pub mod forwarding;
 pub mod identity;
 pub mod listeners;
 pub mod maintenance;

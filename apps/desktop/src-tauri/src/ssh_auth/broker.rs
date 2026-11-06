@@ -49,7 +49,8 @@ fn connection_error(error: ConnectionError) -> CommandErrorDto {
       CommandErrorDto::new("ctld_protocol_error", error.to_string())
     }
     error @ (ConnectionError::UnsupportedGatewayRoute(_)
-    | ConnectionError::UnsupportedQuietMaster(_)) => {
+    | ConnectionError::UnsupportedQuietMaster(_)
+    | ConnectionError::UnsupportedForwardingProtocol(_)) => {
       CommandErrorDto::new("ctld_protocol_feature_unsupported", error.to_string())
     }
     error @ ConnectionError::UnsupportedBrokerProtocol(_) => {
@@ -157,12 +158,20 @@ pub async fn list_remote_listeners(
   target: &ConnectionTargetDto,
 ) -> CommandResult<ctl_proto::TcpListenerCatalog> {
   let target = broker_target(target)?;
-  let mut stream = connect_existing(&target)
+  let (mut stream, protocol_version) = connect_existing_with_protocol(&target)
     .await?
     .ok_or_else(authentication_required)?;
-  ctl_ipc::write_frame(&mut stream, &ClientMessage::ListRemoteListeners { target })
-    .await
-    .map_err(CommandErrorDto::backend)?;
+  let protocol = if ctl_ipc::forwarding_protocol_supported(protocol_version) {
+    ctl_ipc::PortForwardProtocol::Any
+  } else {
+    ctl_ipc::PortForwardProtocol::Tcp
+  };
+  ctl_ipc::write_frame(
+    &mut stream,
+    &ClientMessage::ListRemoteListeners { target, protocol },
+  )
+  .await
+  .map_err(CommandErrorDto::backend)?;
   match ctl_ipc::read_frame::<_, ServerMessage>(&mut stream)
     .await
     .map_err(CommandErrorDto::backend)?
@@ -195,6 +204,16 @@ async fn connect(target: &SshTarget) -> CommandResult<ctl_ipc::Stream> {
 }
 
 async fn connect_existing(target: &SshTarget) -> CommandResult<Option<ctl_ipc::Stream>> {
+  Ok(
+    connect_existing_with_protocol(target)
+      .await?
+      .map(|(stream, _)| stream),
+  )
+}
+
+async fn connect_existing_with_protocol(
+  target: &SshTarget,
+) -> CommandResult<Option<(ctl_ipc::Stream, ProtocolVersion)>> {
   let mut stream = match ctl_ipc::connect_existing().await {
     Ok(stream) => stream,
     Err(ctl_ipc::ConnectError::Connect(error))
@@ -209,7 +228,7 @@ async fn connect_existing(target: &SshTarget) -> CommandResult<Option<ctl_ipc::S
   };
   let protocol = handshake(&mut stream).await?;
   validate_route(target, protocol)?;
-  Ok(Some(stream))
+  Ok(Some((stream, protocol)))
 }
 
 fn validate_route(target: &SshTarget, protocol: ProtocolVersion) -> CommandResult<()> {

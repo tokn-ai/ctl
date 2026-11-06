@@ -33,6 +33,7 @@ const forwards: WorkspacePortForward[] = [
     local_port: 3000,
     remote_host: "127.0.0.1",
     remote_port: 3000,
+    protocol: "udp",
     enabled: false,
   },
 ];
@@ -71,6 +72,8 @@ describe("port forwarding sidebar", () => {
 
     expect(screen.getByText("Database")).toBeTruthy();
     expect(screen.getByText("Preview")).toBeTruthy();
+    expect(screen.getByText("TCP · 127.0.0.1:5432")).toBeTruthy();
+    expect(screen.getByText("UDP · 127.0.0.1:3000")).toBeTruthy();
     expect(screen.getByText("Active")).toBeTruthy();
     expect(screen.getByText("Stopped")).toBeTruthy();
 

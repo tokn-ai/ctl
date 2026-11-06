@@ -80,6 +80,7 @@ interface ConnectionRequest {
   generation: number;
   session: SessionSummary;
   resume_from: string | null;
+  resume_attachment_id?: string;
   resize_with_window: boolean;
   resize_control_desired: boolean;
   use_cached_state: boolean;
@@ -143,6 +144,8 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
   }, []);
   const rendererRef = useRef<AttachmentRenderer | null>(renderer);
   const activeAttachmentRef = useRef<string | null>(null);
+  const resumableAttachmentRef = useRef<string | null>(null);
+  const attachmentCanvasRef = useRef<TerminalSize | null>(null);
   const openingAbortRef = useRef<AbortController | null>(null);
   const manualReconnectRef = useRef<{ abort: AbortController; promise: Promise<void> } | null>(null);
   const directReconnectRef = useRef<Promise<void> | null>(null);
@@ -204,7 +207,9 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
 
   const setFailure = useCallback((error: unknown) => {
     const code = errorCode(error);
-    if (stateRef.current.phase === "ended") return;
+    // The native actor can stop accepting commands before its ordered exit
+    // event arrives. Let that event determine whether to resume the attachment.
+    if (code === "attachment_closing" || stateRef.current.phase === "ended") return;
     cancelPendingHistory();
     rendererRef.current?.invalidateResumeSequence();
     // An unusable actor cannot keep input/layout authority or publish late events.
@@ -261,7 +266,8 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
       (error, command) => {
         if (
           command.generation !== generationRef.current ||
-          command.attachment_id !== activeAttachmentRef.current
+          command.attachment_id !== activeAttachmentRef.current ||
+          errorCode(error) === "attachment_closing"
         ) {
           return;
         }
@@ -297,7 +303,8 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
       (error, resize) => {
         if (
           resize.generation === generationRef.current &&
-          resize.attachment_id === activeAttachmentRef.current
+          resize.attachment_id === activeAttachmentRef.current &&
+          errorCode(error) !== "attachment_closing"
         ) {
           stopResizeWithMessage(
             `Could not resize terminal: ${errorMessage(error)}`,
@@ -412,8 +419,9 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
       connectionQueueRef.current?.cancelPending();
       appliedSequenceRef.current = null;
       pendingShellStateRef.current = null;
-      const attachmentId = activeAttachmentRef.current;
+      const attachmentId = activeAttachmentRef.current ?? resumableAttachmentRef.current;
       activeAttachmentRef.current = null;
+      resumableAttachmentRef.current = null;
       channelRef.current = null;
       if (attachmentId) {
         void detachAttachment({ attachment_id: attachmentId });
@@ -491,6 +499,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
           if (previous) {
             const session = { ...previous, session_id: event.view.session_id, view_id: event.view.view_id, name: event.view.session_name };
             setState((current) => ({ ...current, session }));
+            attachmentCanvasRef.current = event.view.canvas_size;
             resizeCoordinatorRef.current?.setAuthoritative(event.view.canvas_size);
             publishSessionView({ session, attachment_id: event.attachment_id, view: event.view });
           }
@@ -620,25 +629,34 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
           }));
           break;
         }
-        case "lease_status":
+        case "lease_status": {
+          if (event.lease === "input") {
+            inputLeaseOwnedRef.current = event.status.owned_by_client;
+            setState((current) => {
+              let request = current.input_lease_request;
+              if (request?.status === "pending" && !event.notification) {
+                request = request.acquire && event.status.held && !event.status.owned_by_client
+                  ? { status: "denied" }
+                  : undefined;
+              } else if (request?.status === "denied" && (event.status.owned_by_client || !event.status.held)) {
+                request = undefined;
+              }
+              return { ...current, input_lease: event.status, input_lease_request: request };
+            });
+            break;
+          }
           const expectedLayoutIntent =
-            event.lease === "layout" && !event.notification
+            !event.notification
               ? layoutLeasePumpRef.current?.takeExpectedResponse(
                   event.attachment_id,
                   generation,
                 ) ?? null
               : null;
-          if (event.lease === "input") {
-            inputLeaseOwnedRef.current = event.status.owned_by_client;
-          }
-          if (event.lease === "layout") {
-            layoutLeaseOwnedRef.current = event.status.owned_by_client;
-            if (!event.status.owned_by_client) {
-              resizeCoordinatorRef.current?.setEnabled(false);
-            }
+          layoutLeaseOwnedRef.current = event.status.owned_by_client;
+          if (!event.status.owned_by_client) {
+            resizeCoordinatorRef.current?.setEnabled(false);
           }
           const resizeLost =
-            event.lease === "layout" &&
             !(event.notification && layoutLeasePumpRef.current?.hasScheduledIntent(event.attachment_id, generation, true)) &&
             shouldStopResizeAfterLeaseStatus(
               resizeWithWindowRef.current,
@@ -651,24 +669,19 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
           }
           setState((current) => ({
             ...current,
-            input_lease:
-              event.lease === "input" ? event.status : current.input_lease,
-            layout_lease:
-              event.lease === "layout" ? event.status : current.layout_lease,
+            layout_lease: event.status,
             resize_with_window: resizeLost
               ? false
               : current.resize_with_window,
-            message: event.lease === "layout" && event.status.owned_by_client ? null : resizeLost
+            message: event.status.owned_by_client ? null : resizeLost
               ? event.status.held
                 ? resizeControlNotice(true)
                 : "Resize with window stopped because layout ownership was released."
-              : event.lease === "layout" && !event.status.owned_by_client &&
-                (expectedLayoutIntent === true || isResizeControlNotice(current.message))
+              : (expectedLayoutIntent === true || isResizeControlNotice(current.message))
                 ? resizeControlNotice(event.status.held)
               : current.message,
           }));
           if (
-            event.lease === "layout" &&
             event.status.owned_by_client &&
             resizeWithWindowRef.current
           ) {
@@ -678,7 +691,6 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
             }
             resizeCoordinatorRef.current?.setEnabled(true);
           } else if (
-            event.lease === "layout" &&
             event.status.owned_by_client &&
             !stateRef.current.resize_control_desired &&
             !layoutLeasePumpRef.current?.hasScheduledIntent(
@@ -694,6 +706,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
             });
           }
           break;
+        }
         case "shell_state_changed":
           publishShellState(event.shell_state);
           break;
@@ -729,6 +742,10 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
           if (event.reason !== "connection_closed") {
             resetRecovery();
           }
+          resumableAttachmentRef.current =
+            event.reason === "connection_closed" && stateRef.current.phase !== "ended"
+              ? event.attachment_id
+              : null;
           activeAttachmentRef.current = null;
           channelRef.current = null;
           inputLeaseOwnedRef.current = false;
@@ -859,12 +876,18 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
         let result!: Awaited<ReturnType<typeof openAttachment>>;
         for (let attempt = 0; attempt < 2; attempt += 1) {
           openingAttempt = attempt;
+          const resumeAttachmentId = attempt === 0 ? request.resume_attachment_id : undefined;
           result = await openAttachment(
             {
               target: openingSession.target,
               session: openingSession.terminal_id ?? openingSession.session_id,
               resume_from: requestedResume,
-              terminal_size: requestedTerminalSize,
+              ...(resumeAttachmentId ? { resume_attachment_id: resumeAttachmentId } : {}),
+              // A resumed layout owner applies this size even without a new
+              // lease request. Keep a fixed canvas at its last observed size.
+              terminal_size: resumeAttachmentId && (!resizeWithWindow || !proposed)
+                ? attachmentCanvasRef.current ?? openingSession.terminal_size
+                : requestedTerminalSize,
               request_input_lease: true,
               // Owning layout during Attach also applies its terminal_size.
               // Manual control must acquire afterward to keep a fixed canvas.
@@ -884,6 +907,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
           );
           unclaimed_attachment_id = result.attached.attachment_id;
           if (generation !== generationRef.current) return;
+          resumableAttachmentRef.current = null;
           renderer.adoptSession(result.attached.session);
           if (requestedResume === null || renderer.resumeSequence() === requestedResume) break;
 
@@ -896,6 +920,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
           unclaimed_attachment_id = null;
           if (generation !== generationRef.current) return;
           openingSession = result.attached.session;
+          attachmentCanvasRef.current = null;
           requestedResume = null;
           resumeFrom = null;
           appliedSequenceRef.current = null;
@@ -917,6 +942,9 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
         layoutLeaseOwnedRef.current = result.attached.layout_lease.owned_by_client;
         const acquireAfterAttach = resizeControlDesired && !result.attached.layout_lease.held;
         const resizeActive = resizeWithWindow && (result.attached.layout_lease.owned_by_client || acquireAfterAttach);
+        if (resizeActive && proposed && result.attached.layout_lease.owned_by_client) {
+          attachmentCanvasRef.current = requestedTerminalSize;
+        }
         resizeWithWindowRef.current = resizeActive;
         resizeCoordinatorRef.current?.reset(
           view_resize_ref.current ? (resizeActive && proposed ? requestedTerminalSize : null) : result.attached.session.terminal_size,
@@ -1025,6 +1053,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
         generation,
         session,
         resume_from: resumeFrom,
+        resume_attachment_id: intent === "reconnect" ? resumableAttachmentRef.current ?? undefined : undefined,
         resize_with_window: resizeWithWindow,
         resize_control_desired: resizeControlDesired,
         use_cached_state,
@@ -1045,6 +1074,12 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
       abortManualReconnect();
       connection_attempt.current += 1;
       resetRecovery();
+      const abandoned_attachment_id = resumableAttachmentRef.current;
+      resumableAttachmentRef.current = null;
+      attachmentCanvasRef.current = null;
+      if (abandoned_attachment_id) {
+        void detachAttachment({ attachment_id: abandoned_attachment_id }).catch(() => undefined);
+      }
       const selected = { ...session, terminal_id: options.terminal_id };
       const resizeWithWindow = options.resize_with_window ?? view_resize_ref.current;
       return connectAt(selected, null, resizeWithWindow, resizeWithWindow || (options.resize_control ?? false), Boolean(options.terminal_id));
@@ -1274,6 +1309,11 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
     generationRef.current += 1;
     openingAbortRef.current?.abort();
     connectionQueueRef.current?.cancelPending();
+    const abandoned_attachment_id = resumableAttachmentRef.current;
+    resumableAttachmentRef.current = null;
+    if (abandoned_attachment_id) {
+      void detachAttachment({ attachment_id: abandoned_attachment_id }).catch(() => undefined);
+    }
     appliedSequenceRef.current = null;
     pendingShellStateRef.current = null;
     setState(INITIAL_STATE);
@@ -1294,8 +1334,9 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
     resizeCoordinatorRef.current?.reset();
     deferredConnectionRef.current?.cancel();
     connectionQueueRef.current?.cancelPending();
-    const attachmentId = activeAttachmentRef.current;
+    const attachmentId = activeAttachmentRef.current ?? resumableAttachmentRef.current;
     activeAttachmentRef.current = null;
+    resumableAttachmentRef.current = null;
     channelRef.current = null;
     if (attachmentId) {
       try {
@@ -1334,6 +1375,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
     appliedSequenceRef.current = null;
     pendingShellStateRef.current = null;
     activeAttachmentRef.current = null;
+    resumableAttachmentRef.current = null;
     channelRef.current = null;
     stateRef.current = INITIAL_STATE;
     setState(INITIAL_STATE);
@@ -1411,14 +1453,17 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
     }
   }, []);
 
-  const changeLease = useCallback(
-    async (lease: LeaseKind, acquire: boolean) => {
+  const toggleInputLease = useCallback(
+    async () => {
       const attachmentId = activeAttachmentRef.current;
       const generation = generationRef.current;
-      if (!attachmentId) {
+      const current = stateRef.current;
+      if (!attachmentId || current.phase !== "attached" || current.input_lease_request?.status === "pending") {
         return;
       }
-      const request = { attachment_id: attachmentId, lease };
+      const acquire = !current.input_lease.owned_by_client;
+      const request = { attachment_id: attachmentId, lease: "input" as const };
+      setState({ ...current, input_lease_request: { status: "pending", acquire } });
       try {
         if (acquire) {
           await acquireAttachmentLease(request);
@@ -1434,12 +1479,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
         }
       }
     },
-    [setFailure],
-  );
-
-  const toggleInputLease = useCallback(
-    async () => changeLease("input", !stateRef.current.input_lease.owned_by_client),
-    [changeLease],
+    [setFailure, setState],
   );
 
   const toggleResizeWithWindow = useCallback(async (initial_size?: TerminalSize) => {

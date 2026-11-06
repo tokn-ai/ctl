@@ -1,5 +1,6 @@
 use ctmux_client::{
-  AttachmentAcknowledgementError, AttachmentControl, AttachmentEvent, AttachmentEvents,
+  AttachmentAcknowledgementError, AttachmentCommandError, AttachmentControl, AttachmentEvent,
+  AttachmentEvents,
 };
 use std::collections::HashMap;
 use std::future::Future;
@@ -17,7 +18,10 @@ use crate::error::{CommandErrorDto, CommandResult};
 
 mod cache_writer;
 mod observation;
+mod recovery;
 mod statistics;
+
+use recovery::AttachmentResume;
 
 const PRESENTATION_ACKNOWLEDGEMENT_TIMEOUT: std::time::Duration =
   std::time::Duration::from_secs(30);
@@ -41,6 +45,7 @@ enum AttachmentSlot {
     cancel: watch::Sender<bool>,
   },
   Active(Arc<AttachmentActor>),
+  Resumable(Arc<AttachmentResume>),
 }
 
 pub struct AttachmentActor {
@@ -50,8 +55,10 @@ pub struct AttachmentActor {
   pub control: AttachmentControl,
   pub cache_identity: Option<ctmux_client::cache::CacheIdentity>,
   pub remote_observation: Option<crate::about::observations::RemoteObservation>,
+  resume: Option<Arc<AttachmentResume>>,
   pending: Mutex<Option<PendingPresentation>>,
   pending_changed: Notify,
+  detaching: AtomicBool,
   closed: AtomicBool,
   closed_changed: Notify,
 }
@@ -207,7 +214,7 @@ impl AppState {
           AttachmentSlot::Active(actor) if actor.target.is_local() => {
             actors.push(Arc::clone(actor));
           }
-          AttachmentSlot::Active(_) => {}
+          AttachmentSlot::Active(_) | AttachmentSlot::Resumable(_) => {}
         }
       }
       actors
@@ -278,23 +285,34 @@ impl AppState {
     window_label: &str,
     attachment_id: &str,
     actor: Arc<AttachmentActor>,
+    resume_attachment_id: Option<&str>,
   ) -> CommandResult<()> {
     let mut registry = self.registry.lock().await;
-    let reservation_matches = matches!(
-      registry.by_window.get(window_label).and_then(|slots| slots.get(attachment_id)),
-      Some(AttachmentSlot::Opening { attachment_id: reserved, .. }) if reserved == attachment_id
-    );
-    if !reservation_matches {
+    let Some(slots) = registry.by_window.get_mut(window_label) else {
       return Err(CommandErrorDto::new(
         "attachment_reservation_lost",
         "the attachment window reservation is no longer active",
       ));
+    };
+    match slots.get(attachment_id) {
+      Some(AttachmentSlot::Opening { cancel, .. }) if *cancel.borrow() => {
+        return Err(CommandErrorDto::new(
+          "attachment_cancelled",
+          "Session attachment cancelled.",
+        ));
+      }
+      Some(AttachmentSlot::Opening { .. }) => {}
+      _ => {
+        return Err(CommandErrorDto::new(
+          "attachment_reservation_lost",
+          "the attachment window reservation is no longer active",
+        ));
+      }
     }
-    registry
-      .by_window
-      .get_mut(window_label)
-      .expect("reservation exists")
-      .insert(attachment_id.into(), AttachmentSlot::Active(actor));
+    slots.insert(attachment_id.into(), AttachmentSlot::Active(actor));
+    if let Some(previous_id) = resume_attachment_id {
+      recovery::remove_resume(slots, previous_id);
+    }
     Ok(())
   }
 
@@ -310,7 +328,7 @@ impl AppState {
         ..
       }) => current == attachment_id,
       Some(AttachmentSlot::Active(actor)) => actor.attachment_id == attachment_id,
-      None => false,
+      Some(AttachmentSlot::Resumable(_)) | None => false,
     };
     if should_remove && let Some(slots) = registry.by_window.get_mut(window_label) {
       slots.remove(attachment_id);
@@ -326,15 +344,23 @@ impl AppState {
     attachment_id: &str,
   ) -> CommandResult<Arc<AttachmentActor>> {
     let registry = self.registry.lock().await;
-    let Some(AttachmentSlot::Active(actor)) = registry
+    let actor = match registry
       .by_window
       .get(window_label)
       .and_then(|slots| slots.get(attachment_id))
-    else {
-      return Err(CommandErrorDto::new(
-        "attachment_not_found",
-        "this window has no active attachment with the requested ID",
-      ));
+    {
+      Some(AttachmentSlot::Active(actor)) => actor,
+      Some(AttachmentSlot::Resumable(_)) => {
+        return Err(CommandErrorDto::attachment_command(
+          AttachmentCommandError::Closed,
+        ));
+      }
+      _ => {
+        return Err(CommandErrorDto::new(
+          "attachment_not_found",
+          "this window has no active attachment with the requested ID",
+        ));
+      }
     };
     if actor.attachment_id != attachment_id || actor.window_label != window_label {
       return Err(CommandErrorDto::new(
@@ -361,6 +387,7 @@ impl AppState {
         AttachmentSlot::Active(actor) => {
           let _ignored = actor.control.detach().await;
         }
+        AttachmentSlot::Resumable(_) => {}
       }
     }
   }
@@ -398,8 +425,10 @@ impl AttachmentActor {
       control,
       cache_identity: None,
       remote_observation: None,
+      resume: None,
       pending: Mutex::new(None),
       pending_changed: Notify::new(),
+      detaching: AtomicBool::new(false),
       closed: AtomicBool::new(false),
       closed_changed: Notify::new(),
     }
@@ -505,6 +534,7 @@ impl AttachmentActor {
   }
 
   pub async fn detach_and_wait(&self) -> CommandResult<()> {
+    self.detaching.store(true, Ordering::Release);
     if self.closed.load(Ordering::Acquire) {
       return Ok(());
     }
@@ -660,20 +690,34 @@ pub async fn forward_attachment_events(
   // A timeout/disconnect is not new contact. Flush only the last incoming time.
   let _ignored = publish_observation(&actor.attachment_id, &channel, observations.flush());
   let _ignored = statistics::publish(&actor, &channel).await;
-  publish_attachment_outcome(&actor, &channel, outcome, bridge_error, require_checkpoint);
-  state
-    .release(&actor.window_label, &actor.attachment_id)
-    .await;
-  actor.mark_closed();
+  finish_attachment_bridge(
+    &state,
+    &actor,
+    &channel,
+    outcome,
+    bridge_error,
+    require_checkpoint,
+  )
+  .await;
 }
 
-fn publish_attachment_outcome(
-  actor: &AttachmentActor,
+async fn finish_attachment_bridge(
+  state: &AppState,
+  actor: &Arc<AttachmentActor>,
   channel: &Channel<AttachmentEventDto>,
   outcome: Result<ctmux_client::AttachExit, ctmux_client::ClientError>,
   bridge_error: Option<CommandErrorDto>,
   require_checkpoint: bool,
 ) {
+  let disconnected = bridge_error.is_none()
+    && matches!(
+      &outcome,
+      Ok(exit) if exit.reason == ctmux_client::AttachExitReason::ConnectionClosed
+    );
+  // The renderer can open the replacement as soon as it receives closure.
+  if disconnected {
+    state.finish_attachment(actor, true).await;
+  }
   if let Some(error) = bridge_error {
     let _ignored = channel.send(AttachmentEventDto::attachment_error(
       &actor.attachment_id,
@@ -698,6 +742,10 @@ fn publish_attachment_outcome(
       }
     }
   }
+  if !disconnected {
+    state.finish_attachment(actor, false).await;
+  }
+  actor.mark_closed();
 }
 
 async fn forward_buffered_events(
@@ -993,12 +1041,21 @@ mod tests {
           .unwrap();
       // Complete the transport before any frontend frame is acknowledged.
       let exit = controller.run().await.unwrap();
-      let actor = Arc::new(AttachmentActor::new(
-        "owner".into(),
-        "main".into(),
-        ConnectionTargetDto::Local,
-        control,
-      ));
+      let actor = Arc::new(
+        AttachmentActor::new(
+          "owner".into(),
+          "main".into(),
+          ConnectionTargetDto::Local,
+          control,
+        )
+        .with_resume(&attached),
+      );
+      let state = AppState::default();
+      state.reserve_window("main", "owner").await.unwrap();
+      state
+        .activate("main", "owner", Arc::clone(&actor), None)
+        .await
+        .unwrap();
       let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
       let channel = Channel::new(move |body| {
         sender
@@ -1007,13 +1064,14 @@ mod tests {
         Ok(())
       });
       let renderer_actor = Arc::clone(&actor);
+      let renderer_state = state.clone();
       let rendering = async move {
         let mut delivered = Vec::new();
         let mut delayed = false;
         while let Some(event) = receiver.recv().await {
           if let Some(event_id) = event["event_id"].as_str() {
-            let stale = renderer_actor.acknowledge("wrong-event").await.unwrap_err();
-            assert_eq!(stale.code, "stale_presentation_event");
+            let wrong_event_error = renderer_actor.acknowledge("wrong-event").await.unwrap_err();
+            assert_eq!(wrong_event_error.code, "stale_presentation_event");
             if !delayed {
               // The transport is already closed, but final renderer progress
               // must remain visible through statistics during the drain.
@@ -1022,17 +1080,20 @@ mod tests {
             }
             renderer_actor.acknowledge(event_id).await.unwrap();
           }
+          if event["event_type"] == "attachment_exited" {
+            let resume = renderer_state
+              .resume_attachment("main", "owner", &ConnectionTargetDto::Local, "terminal")
+              .await;
+            assert_eq!(resume.is_some(), !natural_exit);
+          }
           delivered.push(event);
         }
         delivered
       };
-      let forwarding = forward_attachment_events(
-        AppState::default(),
-        Arc::clone(&actor),
-        events,
-        channel,
-        async { Ok(exit) },
-      );
+      let forwarding =
+        forward_attachment_events(state, Arc::clone(&actor), events, channel, async {
+          Ok(exit)
+        });
       let ((), delivered) = timeout(std::time::Duration::from_secs(2), async {
         tokio::join!(forwarding, rendering)
       })
@@ -1377,6 +1438,135 @@ mod tests {
     assert_eq!(state.registry.lock().await.by_window["main"].len(), 1);
     state.cancel_opening("main", "first").await;
     assert!(*first.borrow());
+  }
+
+  #[tokio::test]
+  async fn recovery_is_scoped_to_the_verified_window_route_and_terminal() {
+    use ctmux_client::{AttachmentController, AttachmentControllerOptions};
+
+    let (client, _peer, attached) = buffered_test_attachment().await;
+    let (_, control, _) =
+      AttachmentController::new(client, &attached, AttachmentControllerOptions::default()).unwrap();
+    let target = ConnectionTargetDto::ssh("saved-alias");
+    let mut pinned = target.clone();
+    if let ConnectionTargetDto::Ssh { remote_info, .. } = &mut pinned {
+      *remote_info = Some(Box::new(ctl_proto::RemoteIdentity {
+        remote_id: "11111111-1111-4111-8111-111111111111".into(),
+        agent_version: "1.0.0".into(),
+        build: None,
+        ctmux_restart_supported: false,
+        bundle: None,
+        protocols: Vec::new(),
+      }));
+    }
+    let actor = Arc::new(
+      AttachmentActor::new("old".into(), "main".into(), pinned.clone(), control)
+        .with_resume(&attached),
+    );
+    let state = AppState::default();
+    state.reserve_window("main", "old").await.unwrap();
+    state
+      .activate("main", "old", Arc::clone(&actor), None)
+      .await
+      .unwrap();
+    assert_eq!(
+      state
+        .resume_attachment("main", "old", &target, "terminal")
+        .await,
+      None
+    );
+    state.finish_attachment(&actor, true).await;
+    assert_eq!(
+      state.actor("main", "old").await.err().unwrap().code,
+      "attachment_closing"
+    );
+
+    let mut different_identity = pinned.clone();
+    if let ConnectionTargetDto::Ssh {
+      remote_info: Some(remote),
+      ..
+    } = &mut different_identity
+    {
+      remote.remote_id = "22222222-2222-4222-8222-222222222222".into();
+    }
+    let different_target = ConnectionTargetDto::ssh("other-alias");
+    for (window, terminal, target) in [
+      ("other", "terminal", &target),
+      ("main", "other", &target),
+      ("main", "terminal", &different_target),
+      ("main", "terminal", &different_identity),
+    ] {
+      assert_eq!(
+        state
+          .resume_attachment(window, "old", target, terminal)
+          .await,
+        None
+      );
+    }
+    assert_eq!(
+      state
+        .resume_attachment("main", "old", &target, "terminal")
+        .await,
+      Some((pinned, "token".into())),
+    );
+
+    state.detach_attachment("main", "old").await.unwrap();
+    state.detach_attachment("main", "old").await.unwrap();
+    assert!(state.registry.lock().await.by_window.is_empty());
+  }
+
+  #[tokio::test]
+  async fn cancelled_replacement_keeps_recovery_until_activation() {
+    use ctmux_client::{AttachmentController, AttachmentControllerOptions};
+
+    let (client, _peer, attached) = buffered_test_attachment().await;
+    let (_, control, _) =
+      AttachmentController::new(client, &attached, AttachmentControllerOptions::default()).unwrap();
+    let target = ConnectionTargetDto::Local;
+    let actor = Arc::new(
+      AttachmentActor::new("old".into(), "main".into(), target.clone(), control.clone())
+        .with_resume(&attached),
+    );
+    let replacement = Arc::new(AttachmentActor::new(
+      "new".into(),
+      "main".into(),
+      target.clone(),
+      control,
+    ));
+    let state = AppState::default();
+    state.reserve_window("main", "old").await.unwrap();
+    state
+      .activate("main", "old", Arc::clone(&actor), None)
+      .await
+      .unwrap();
+    state.finish_attachment(&actor, true).await;
+
+    let _cancelled = state.reserve_window("main", "new").await.unwrap();
+    state.cancel_opening("main", "new").await;
+    let error = state
+      .activate("main", "new", Arc::clone(&replacement), Some("old"))
+      .await
+      .unwrap_err();
+    assert_eq!(error.code, "attachment_cancelled");
+    state.release("main", "new").await;
+    assert!(
+      state
+        .resume_attachment("main", "old", &target, "terminal")
+        .await
+        .is_some()
+    );
+
+    state.reserve_window("main", "new").await.unwrap();
+    state
+      .activate("main", "new", replacement, Some("old"))
+      .await
+      .unwrap();
+    assert_eq!(
+      state
+        .resume_attachment("main", "old", &target, "terminal")
+        .await,
+      None
+    );
   }
 
   #[tokio::test]

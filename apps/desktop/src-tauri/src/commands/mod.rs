@@ -9,9 +9,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ctmux_client::{
-  AttachRequest, AttachmentController, AttachmentControllerOptions, ClientIdentity,
-  DEFAULT_PRESENTATION_WINDOW_BYTES, get_shell_state,
+  AttachRequest, AttachedSession, AttachmentController, AttachmentControllerOptions, ClientError,
+  ClientIdentity, DEFAULT_PRESENTATION_WINDOW_BYTES, get_shell_state, resume_attach,
 };
+use ctmux_proto::ErrorCode;
 use tauri::ipc::Channel;
 use tauri::{State, WebviewWindow};
 use tokio::task::JoinSet;
@@ -294,13 +295,15 @@ async fn open_reserved_attachment(
   request: OpenAttachmentRequestDto,
   on_event: Channel<AttachmentEventDto>,
 ) -> CommandResult<OpenAttachmentResponseDto> {
-  let target = request.target.clone();
   let root_requested = request.session.clone();
   let terminal_size = request.terminal_size.into_proto()?;
   let resume_from = parse_sequence(request.resume_from)?;
-  let stream = transport::connect(&target).await?;
-  let (stream, attached) = SessionClient::new(stream, client_identity())
-    .attach(AttachRequest {
+  let (stream, attached, replaced_attachment_id) = connect_attachment(
+    &state,
+    &window_label,
+    &request.target,
+    request.resume_attachment_id.as_deref(),
+    AttachRequest {
       session: request.session,
       resume_from,
       terminal_size,
@@ -309,9 +312,9 @@ async fn open_reserved_attachment(
       request_command_line: false,
       request_running_command: true,
       presentation_window_bytes: DEFAULT_PRESENTATION_WINDOW_BYTES,
-    })
-    .await
-    .map_err(CommandErrorDto::client)?;
+    },
+  )
+  .await?;
 
   let options = AttachmentControllerOptions {
     // This bridge is paired with the GUI's xterm presenter, which always
@@ -332,7 +335,7 @@ async fn open_reserved_attachment(
         crate::about::observations::RemoteObservation {
           identity,
           handshake: attached.handshake_info.clone(),
-          label: target.label().into(),
+          label: request.target.label().into(),
           host_id: request
             .cache_host_key
             .as_deref()
@@ -346,7 +349,7 @@ async fn open_reserved_attachment(
   // Transport verification has completed. Expose the actual environment to
   // the GUI so separate saved SSH aliases can recognize their shared owner.
   let target = verified_attachment_target(
-    target,
+    request.target.clone(),
     remote_observation.as_ref().map(|remote| &remote.identity),
   );
   let (controller, control, events) =
@@ -354,6 +357,7 @@ async fn open_reserved_attachment(
   let response = OpenAttachmentResponseDto::new(attachment_id.clone(), &attached, target.clone());
   let actor = Arc::new(
     AttachmentActor::new(attachment_id.clone(), window_label.clone(), target, control)
+      .with_resume(&attached)
       .with_cache(ctmux_client::cache::CacheIdentity {
         host_key: request
           .cache_host_key
@@ -370,7 +374,12 @@ async fn open_reserved_attachment(
       .with_remote_observation(remote_observation),
   );
   state
-    .activate(&window_label, &attachment_id, Arc::clone(&actor))
+    .activate(
+      &window_label,
+      &attachment_id,
+      Arc::clone(&actor),
+      replaced_attachment_id,
+    )
     .await?;
 
   tauri::async_runtime::spawn(forward_attachment_events(
@@ -381,6 +390,45 @@ async fn open_reserved_attachment(
     controller.run(),
   ));
   Ok(response)
+}
+
+async fn connect_attachment<'a>(
+  state: &AppState,
+  window_label: &str,
+  target: &ConnectionTargetDto,
+  resume_attachment_id: Option<&'a str>,
+  request: AttachRequest,
+) -> CommandResult<(ctl_client::Transport, AttachedSession, Option<&'a str>)> {
+  let identity = client_identity();
+  let fallback_target;
+  let target = if let Some(previous_id) = resume_attachment_id
+    && let Some((pinned_target, token)) = state
+      .resume_attachment(window_label, previous_id, target, &request.session)
+      .await
+  {
+    let stream = transport::connect(&pinned_target).await?;
+    match resume_attach(stream, &identity, token, request.clone()).await {
+      Ok((stream, attached)) => return Ok((stream, attached, Some(previous_id))),
+      Err(ClientError::Server {
+        code: ErrorCode::AttachmentResumeRejected,
+        ..
+      }) => {
+        state.forget_resume(window_label, previous_id).await;
+      }
+      Err(error) => return Err(CommandErrorDto::client(error)),
+    }
+    fallback_target = pinned_target;
+    &fallback_target
+  } else {
+    target
+  };
+
+  let stream = transport::connect(target).await?;
+  let (stream, attached) = SessionClient::new(stream, identity)
+    .attach(request)
+    .await
+    .map_err(CommandErrorDto::client)?;
+  Ok((stream, attached, None))
 }
 
 fn verified_attachment_target(
@@ -405,7 +453,7 @@ pub async fn send_input(
     .control
     .input(data)
     .await
-    .map_err(CommandErrorDto::backend)
+    .map_err(CommandErrorDto::attachment_command)
 }
 
 #[tauri::command]
@@ -420,7 +468,7 @@ pub async fn resize_attachment(
     .control
     .resize(terminal_size)
     .await
-    .map_err(CommandErrorDto::backend)
+    .map_err(CommandErrorDto::attachment_command)
 }
 
 #[tauri::command]
@@ -440,7 +488,7 @@ pub async fn resize_attachment_divider(
     .control
     .resize_divider(request.divider()?, request.request_id)
     .await
-    .map_err(CommandErrorDto::backend)
+    .map_err(CommandErrorDto::attachment_command)
 }
 
 #[tauri::command]
@@ -465,7 +513,7 @@ pub async fn resize_attachment_pane(
       request.request_id,
     )
     .await
-    .map_err(CommandErrorDto::backend)
+    .map_err(CommandErrorDto::attachment_command)
 }
 
 #[tauri::command]
@@ -485,7 +533,7 @@ pub async fn set_attachment_view_zoom(
     .control
     .set_view_zoom(request.terminal_id)
     .await
-    .map_err(CommandErrorDto::backend)
+    .map_err(CommandErrorDto::attachment_command)
 }
 
 #[tauri::command]
@@ -499,7 +547,7 @@ pub async fn acquire_attachment_lease(
     .control
     .request_lease(request.lease.into())
     .await
-    .map_err(CommandErrorDto::backend)
+    .map_err(CommandErrorDto::attachment_command)
 }
 
 #[tauri::command]
@@ -513,7 +561,7 @@ pub async fn release_attachment_lease(
     .control
     .release_lease(request.lease.into())
     .await
-    .map_err(CommandErrorDto::backend)
+    .map_err(CommandErrorDto::attachment_command)
 }
 
 #[tauri::command]
@@ -537,7 +585,7 @@ pub async fn request_attachment_checkpoint(
     .control
     .request_checkpoint()
     .await
-    .map_err(CommandErrorDto::backend)
+    .map_err(CommandErrorDto::attachment_command)
 }
 
 #[tauri::command]
@@ -548,8 +596,9 @@ pub async fn detach_attachment(
 ) -> CommandResult<()> {
   let transition = state.window_transition(window.label()).await;
   let _transition_guard = transition.lock().await;
-  let actor = state.actor(window.label(), &request.attachment_id).await?;
-  actor.detach_and_wait().await
+  state
+    .detach_attachment(window.label(), &request.attachment_id)
+    .await
 }
 
 fn client_identity() -> ClientIdentity {

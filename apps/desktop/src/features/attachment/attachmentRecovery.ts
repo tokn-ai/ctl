@@ -74,6 +74,7 @@ export function interruptedAttachmentState(
     history_loading: false,
     retry_at_ms: null,
     input_lease: EMPTY_LEASE,
+    input_lease_request: undefined,
     layout_lease: EMPTY_LEASE,
     reconnect_sequence: recoverable ? null : state.reconnect_sequence,
     message: recoverable

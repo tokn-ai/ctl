@@ -655,6 +655,37 @@ describe("background history presentation", () => {
     expect(result.current.state.resize_control_desired).toBe(false);
   });
 
+  it("resumes manual layout ownership at the observed canvas size", async () => {
+    vi.spyOn(renderer, "proposeDimensions").mockReturnValue({ columns: 90, rows: 30 });
+    const { result } = renderHook(() => useAttachment(renderer, true));
+    await act(async () => { await result.current.connect(first, { resize_with_window: false, resize_control: true }); });
+    const attachment_id = result.current.state.attachment_id!;
+    const canvas_size = { ...size, columns: 160, rows: 36 };
+    const layout_lease = { held: true, owned_by_client: true };
+    await emit({ event_type: "view_changed", attachment_id, view: {
+      session_id: first.session_id, session_name: first.name, view_id: first.view_id!, revision: "1",
+      canvas_size, zoomed_terminal_id: null, panes: [], terminals: [], layout: { kind: "terminal", terminal_id: first.terminal_id! },
+    } });
+    await emit({ event_type: "lease_status", attachment_id, lease: "layout", status: layout_lease });
+    const open = api.openAttachment.getMockImplementation()!;
+    api.openAttachment.mockImplementationOnce(async (...args) => {
+      const response = await open(...args);
+      response.attached.layout_lease = layout_lease;
+      return response;
+    });
+    vi.useFakeTimers();
+    await emit({ event_type: "attachment_exited", attachment_id, reason: "connection_closed",
+      exit_code: null, next_sequence: null, received_sequence: "0" });
+    await act(async () => { await vi.advanceTimersByTimeAsync(250); });
+
+    expect(api.openAttachment.mock.lastCall?.[0]).toMatchObject({
+      resume_attachment_id: attachment_id, terminal_size: canvas_size, request_layout_lease: false,
+    });
+    expect(api.acquireAttachmentLease).toHaveBeenCalledOnce();
+    expect(api.resizeAttachment).not.toHaveBeenCalled();
+    expect(result.current.state).toMatchObject({ phase: "attached", layout_lease, resize_with_window: false });
+  });
+
   it.each([true, false])("adopts moved view identity and preserves authoritative loss notifications (before view=%s)", async (before_view) => {
     const { result } = renderHook(() => useAttachment(renderer, true));
     await act(async () => { await result.current.connect(first, { resize_with_window: false, resize_control: true }); });
@@ -1151,7 +1182,8 @@ describe("explicit SSH reconnect preparation", () => {
     expect(api.openAttachment).toHaveBeenCalledOnce();
     await act(async () => { finish(true); await reconnecting; });
     expect(api.openAttachment.mock.lastCall?.[0]).toMatchObject({
-      target: remote.target, session: remote.terminal_id, resume_from: "15", request_layout_lease: false,
+      target: remote.target, session: remote.terminal_id, resume_from: "15",
+      resume_attachment_id: attachment_id, request_layout_lease: false,
     });
     expect(visibleTerminal()).toBe(visible);
     expect(line(visible.terminal)).toBe("retained screen");
@@ -1535,6 +1567,52 @@ describe("interaction recovery", () => {
 });
 
 describe("connection evidence and transitions", () => {
+  it("resumes the original attachment after transport loss, even without a replay cursor", async () => {
+    const { result } = renderHook(() => useAttachment(renderer));
+    await act(async () => { await result.current.connect(first); });
+    const attachment_id = result.current.state.attachment_id!;
+    vi.useFakeTimers();
+    await emit({ event_type: "attachment_exited", attachment_id, reason: "connection_closed",
+      exit_code: null, next_sequence: null, received_sequence: "0" });
+    await act(async () => { await vi.advanceTimersByTimeAsync(250); });
+
+    expect(api.openAttachment.mock.lastCall?.[0]).toMatchObject({
+      session: first.terminal_id, resume_attachment_id: attachment_id, resume_from: null,
+    });
+    expect(api.detachAttachment).not.toHaveBeenCalled();
+    expect(result.current.state).toMatchObject({ phase: "attached", input_lease: { owned_by_client: true } });
+  });
+
+  it("forgets the saved attachment when closing a disconnected view", async () => {
+    const { result } = renderHook(() => useAttachment(renderer));
+    await act(async () => { await result.current.connect(first); });
+    const attachment_id = result.current.state.attachment_id!;
+    vi.useFakeTimers();
+    await emit({ event_type: "attachment_exited", attachment_id, reason: "connection_closed",
+      exit_code: null, next_sequence: null, received_sequence: "0" });
+    await act(async () => { await result.current.detach(); await result.current.connect(first); });
+
+    expect(api.detachAttachment).toHaveBeenCalledWith({ attachment_id });
+    expect(api.openAttachment.mock.lastCall?.[0]).not.toHaveProperty("resume_attachment_id");
+  });
+
+  it("keeps the previous attachment available after a failed recovery attempt", async () => {
+    const { result } = renderHook(() => useAttachment(renderer));
+    await act(async () => { await result.current.connect(first); });
+    const attachment_id = result.current.state.attachment_id!;
+    api.openAttachment.mockRejectedValueOnce({ code: "transport_error", message: "Connection unavailable" });
+    vi.useFakeTimers();
+    await emit({ event_type: "attachment_exited", attachment_id, reason: "connection_closed",
+      exit_code: null, next_sequence: null, received_sequence: "0" });
+    await act(async () => { await vi.advanceTimersByTimeAsync(250); });
+    expect(result.current.state.phase).toBe("retry_wait");
+    await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+
+    expect(api.openAttachment.mock.calls.slice(1).map(([request]) => request.resume_attachment_id))
+      .toEqual([attachment_id, attachment_id]);
+    expect(result.current.state.phase).toBe("attached");
+  });
+
   it.each(["automatic", "typing"])("keeps focus in other controls during %s recovery", async (trigger) => {
     const { result } = renderHook(() => useAttachment(renderer));
     await act(async () => { await result.current.connect(first); });
@@ -1579,6 +1657,88 @@ describe("connection evidence and transitions", () => {
     expect(api.sendInput).not.toHaveBeenCalled();
     await act(async () => channels.get(attachment_id)!({ event_type: "session_ended", attachment_id, session_id: first.session_id, exit_code: 0 }));
     expect(result.current.state.phase).toBe("error");
+  });
+
+  it.each(["sendInput", "releaseAttachmentLease"] as const)("waits for the exit event when %s races with disconnect", async (command) => {
+    const { result } = renderHook(() => useAttachment(renderer));
+    await act(async () => { await result.current.connect(first); });
+    const attachment_id = result.current.state.attachment_id!;
+    api[command].mockRejectedValueOnce({ code: "attachment_closing", message: "Attachment transport has closed" });
+    await act(async () => {
+      if (command === "sendInput") result.current.handleInput(new Uint8Array([65]));
+      else await result.current.toggleInputLease();
+    });
+    expect(api[command]).toHaveBeenCalledOnce();
+    expect(api.detachAttachment).not.toHaveBeenCalled();
+    vi.useFakeTimers();
+    await emit({ event_type: "attachment_exited", attachment_id, reason: "connection_closed",
+      exit_code: null, next_sequence: null, received_sequence: "0" });
+    await act(async () => { await vi.advanceTimersByTimeAsync(250); });
+
+    expect(api.openAttachment.mock.lastCall?.[0]).toMatchObject({ resume_attachment_id: attachment_id });
+    expect(result.current.state.phase).toBe("attached");
+  });
+
+  it("reports each explicit input denial and allows a new request after the reply", async () => {
+    const store = new NotificationStore();
+    const { result } = renderHook(() => {
+      const attachment = useAttachment(renderer);
+      useAttachmentNotifications(attachment);
+      return attachment;
+    }, { wrapper: ({ children }) => <NotificationProvider store={store}>{children}</NotificationProvider> });
+    const open = api.openAttachment.getMockImplementation()!;
+    const held_elsewhere = { held: true, owned_by_client: false };
+    api.openAttachment.mockImplementationOnce(async (...args) => {
+      const response = await open(...args);
+      response.attached.input_lease = held_elsewhere;
+      return response;
+    });
+    await act(async () => { await result.current.connect(first); });
+    const attachment_id = result.current.state.attachment_id!;
+    const input_status = { event_type: "lease_status", attachment_id, lease: "input", status: held_elsewhere } as const;
+    expect(store.snapshot().entries).toEqual([]);
+
+    await act(async () => {
+      await result.current.toggleInputLease();
+      await result.current.toggleInputLease();
+    });
+    expect(api.acquireAttachmentLease).toHaveBeenCalledExactlyOnceWith({ attachment_id, lease: "input" });
+    await emit({ ...input_status, notification: true });
+    expect(result.current.state.input_lease_request?.status).toBe("pending");
+    expect(store.snapshot().entries).toEqual([]);
+
+    await emit(input_status);
+    expect(result.current.state.input_lease_request?.status).toBe("denied");
+    expect(store.snapshot().entries).toContainEqual(expect.objectContaining({ title: "Input is in use", toast_visible: true }));
+    act(() => store.dismiss(store.snapshot().entries[0].id));
+
+    await act(async () => { await result.current.toggleInputLease(); });
+    await emit(input_status);
+    expect(api.acquireAttachmentLease).toHaveBeenCalledTimes(2);
+    expect(store.snapshot().entries).toContainEqual(expect.objectContaining({ title: "Input is in use", toast_visible: true }));
+
+    await act(async () => { await result.current.toggleInputLease(); });
+    await emit({ ...input_status, status: { held: true, owned_by_client: true } });
+    expect(result.current.state.input_lease.owned_by_client).toBe(true);
+    expect(result.current.state.input_lease_request).toBeUndefined();
+    expect(store.snapshot().entries).toContainEqual(expect.objectContaining({ title: "Input is in use", toast_visible: false }));
+  });
+
+  it("clears pending input requests on release and attachment replacement", async () => {
+    const { result } = renderHook(() => useAttachment(renderer));
+    await act(async () => { await result.current.connect(first); });
+    const attachment_id = result.current.state.attachment_id!;
+    await act(async () => { await result.current.toggleInputLease(); });
+    expect(api.releaseAttachmentLease).toHaveBeenCalledExactlyOnceWith({ attachment_id, lease: "input" });
+    const status = { event_type: "lease_status", attachment_id, lease: "input", status: { held: true, owned_by_client: false } } as const;
+    await emit(status);
+    expect(result.current.state.input_lease_request).toBeUndefined();
+    await act(async () => { await result.current.toggleInputLease(); });
+    expect(result.current.state.input_lease_request?.status).toBe("pending");
+    await act(async () => { await result.current.connect(second); });
+    await emit(status);
+    expect(result.current.state.input_lease_request).toBeUndefined();
+    expect(result.current.state.input_lease.owned_by_client).toBe(true);
   });
 
   it("records retry wait separately and reconnects even when there is no replay cursor", async () => {

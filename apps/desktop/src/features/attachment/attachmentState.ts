@@ -43,7 +43,7 @@ export function initialAttachmentState(): AttachmentViewState {
  * Callers fence async events with the owning generation before transitioning.
  */
 export function transitionAttachment(state: AttachmentViewState, event: AttachmentTransition): AttachmentViewState {
-  const offline = { ...state, attachment_id: null, input_lease: EMPTY_LEASE, layout_lease: EMPTY_LEASE, retry_at_ms: null };
+  const offline = { ...state, attachment_id: null, input_lease: EMPTY_LEASE, input_lease_request: undefined, layout_lease: EMPTY_LEASE, retry_at_ms: null };
   switch (event.type) {
     case "reset": return initialAttachmentState();
     case "begin": return {

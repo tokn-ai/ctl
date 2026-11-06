@@ -2104,6 +2104,7 @@ function TerminalWorkbench() {
                   shell_state={attachment.state.shell_state}
                   renderer={renderer}
                   input_owned={attachment.state.input_lease.owned_by_client}
+                  input_request={attachment.state.input_lease_request}
                   on_toggle_input={attachment.toggleInputLease}
                   on_promoted={(session) => importSession(session, null)}
                   on_select_terminal={(session) => attachment.connect(session, { resize_with_window: true, terminal_id: session.terminal_id })}

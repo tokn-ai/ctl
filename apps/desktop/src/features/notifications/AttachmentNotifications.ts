@@ -54,6 +54,7 @@ export class AttachmentNotifications {
     if (this.sources.get(key) !== owner) {
       // A new owner is a new open attempt, even if the previous one failed identically.
       this.store.report(`attachment:${key}`, null);
+      this.store.resolve(`input-lease:${key}`);
       this.store.report(`history:${key}`, null);
       this.sources.set(key, owner);
     }
@@ -75,6 +76,17 @@ export class AttachmentNotifications {
         title: failure ? "Session connection failed" : "Session update",
         message: state.message, source, actions,
       } : null);
+    }
+    const input_key = `input-lease:${key}`;
+    if (state.phase === "attached" && state.input_lease_request?.status === "denied") {
+      // A new denial is actionable even if the previous warning was dismissed.
+      if (previous?.state.input_lease_request !== state.input_lease_request) this.store.report(input_key, null);
+      this.store.report(input_key, {
+        severity: "warning", title: "Input is in use", source,
+        message: "Another attachment has input control. Release it there before trying again here.",
+      });
+    } else if (state.phase !== "attached" || !state.input_lease_request) {
+      this.store.resolve(input_key);
     }
     const history_key = `history:${key}`;
     if (state.history_loading) {
@@ -103,6 +115,7 @@ export class AttachmentNotifications {
     if (!entry || this.sources.get(entry.key) !== owner) return;
     this.sources.delete(entry.key);
     this.store.report(`attachment:${entry.key}`, null);
+    this.store.resolve(`input-lease:${entry.key}`);
     this.store.report(`history:${entry.key}`, null);
   }
 

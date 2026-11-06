@@ -24,6 +24,87 @@ type TestResult<T = ()> = Result<T, Box<dyn Error + Send + Sync>>;
 static PTY_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[tokio::test]
+async fn historical_viewer_is_counted_without_exposing_a_reconnect_token_or_new_wire_fields()
+-> TestResult {
+  let _lock = PTY_TEST_LOCK.get_or_init(|| Mutex::new(())).lock().await;
+  let directory = TestDirectory::new();
+  let socket = directory.path.join("ctmux.sock");
+  let daemon = spawn_daemon(&socket, 4096, 1024);
+  let session = create_shell_session(&socket, "historical", "IFS= read -r line").await?;
+  let old = ctmux_proto::CONTRACT_V1_2_22;
+  let mut legacy = historical_connection(&socket, old).await?;
+  let request = ClientMessage::AttachSession {
+    session: session.session_id.clone(),
+    resume_from: None,
+    terminal_size: TerminalSize::default(),
+    request_input_lease: false,
+    request_layout_lease: false,
+    request_command_line: false,
+    request_running_command: false,
+    presentation_window_bytes: DEFAULT_PRESENTATION_WINDOW_BYTES,
+  };
+  write_frame(&mut legacy, &request).await?;
+  let ServerMessage::Attached {
+    attachment_token, ..
+  } = required_message(&mut legacy).await?
+  else {
+    return Err("expected historical attachment".into());
+  };
+  let ServerMessage::SessionClients { sessions } =
+    topology_request(&socket, ClientMessage::ListSessionClients).await?
+  else {
+    return Err("expected client listing".into());
+  };
+  let client = &sessions[0].clients.as_ref().unwrap()[0];
+  assert!(client.legacy);
+  assert_eq!(client.identity.client_name, "historical-proportions");
+  assert_eq!(client.connected_attachments, 1);
+  assert!(!serde_json::to_string(&sessions)?.contains(&attachment_token));
+
+  let mut listing = historical_connection(&socket, old).await?;
+  write_frame(&mut listing, &ClientMessage::ListSessions).await?;
+  let raw: serde_json::Value = read_frame(&mut listing).await?.unwrap();
+  assert_eq!(
+    raw,
+    serde_json::json!({"type":"session_list","sessions":[session]})
+  );
+  let rejected = historical_view_request(&socket, old, ClientMessage::ListSessionClients).await?;
+  assert!(matches!(
+    rejected,
+    ServerMessage::Error {
+      code: ErrorCode::InvalidRequest,
+      ..
+    }
+  ));
+  for (version, id) in [(old, "valid-id"), (PROTOCOL_VERSION, "bad\nid")] {
+    let mut invalid = historical_connection(&socket, version).await?;
+    write_frame(
+      &mut invalid,
+      &ctmux_proto::OpeningRequest {
+        request: request.clone(),
+        client_identity: Some(ctl_core::presence::ClientIdentity {
+          instance_id: id.into(),
+          client_name: "fixture".into(),
+          client_version: "test".into(),
+          device_name: None,
+        }),
+      },
+    )
+    .await?;
+    assert!(matches!(
+      required_message(&mut invalid).await?,
+      ServerMessage::Error {
+        code: ErrorCode::InvalidRequest,
+        ..
+      }
+    ));
+  }
+  write_frame(&mut legacy, &ClientMessage::Detach).await?;
+  kill_shell_session(&socket, &session.session_id).await?;
+  wait_for_daemon_exit(daemon, "client presence fixture did not exit").await
+}
+
+#[tokio::test]
 async fn published_contract_handshakes_select_explicit_shared_versions() -> TestResult {
   use ctl_core::protocol::{ProtocolOffer, ProtocolVersion};
   use ctmux_ipc::{LocalControlClientMessage, LocalControlServerMessage};

@@ -265,7 +265,7 @@ async fn receiver_progress_is_valid_before_the_background_writer_starts() {
         .env("HOME", fixture.directory.join("home"));
       let result = tokio::time::timeout(
         std::time::Duration::from_secs(10),
-        run_package_install(command, b"hello", true, |_| {}),
+        run_package_install(command, b"hello", &["ctl-agent"], |_| {}),
       )
       .await
       .unwrap();
@@ -612,7 +612,7 @@ async fn both_installers_use_posix_permissions_from_a_zsh_login_shell() {
     command
   };
   let upload = crate::components::upload_bundle(&bundle).unwrap();
-  let script = installation_script(&upload.bundle_id, &upload.archive).unwrap();
+  let (script, _) = installation_script(&upload.bundle_id, &upload.archive).unwrap();
   tokio::time::timeout(
     std::time::Duration::from_secs(10),
     run_install_command(command(&script), &upload.archive, |_| {}),
@@ -630,7 +630,7 @@ async fn both_installers_use_posix_permissions_from_a_zsh_login_shell() {
   let script = agent_script(&archive, Some(&original)).unwrap();
   tokio::time::timeout(
     std::time::Duration::from_secs(10),
-    run_package_install(command(&script), &archive, true, |_| {}),
+    run_package_install(command(&script), &archive, &["ctl-agent"], |_| {}),
   )
   .await
   .unwrap()
@@ -669,7 +669,9 @@ async fn both_installers_explain_writable_storage_without_activating() {
   let agent_archive = crate::component_update::agent_archive(&bundle).unwrap();
   for (script, archive, agent_only) in [
     (
-      installation_script(&upload.bundle_id, &upload.archive).unwrap(),
+      installation_script(&upload.bundle_id, &upload.archive)
+        .unwrap()
+        .0,
       upload.archive,
       false,
     ),
@@ -683,7 +685,17 @@ async fn both_installers_explain_writable_storage_without_activating() {
     command
       .args(["-c", &posix_install_command(&script)])
       .env("HOME", &home);
-    let result = run_package_install(command, &archive, agent_only, |_| {}).await;
+    let result = run_package_install(
+      command,
+      &archive,
+      if agent_only {
+        &["ctl-agent"]
+      } else {
+        Layout::Services.names()
+      },
+      |_| {},
+    )
+    .await;
     assert!(matches!(result,
       Err(CoreError::SshCommandFailed { diagnostic, .. })
         if diagnostic.contains("storage directory is writable by group or others") && diagnostic.contains(tokn.to_str().unwrap())
@@ -734,7 +746,7 @@ async fn agent_installer_reports_progress_before_the_receiver_opens_its_archive(
   let events = Mutex::new(Vec::new());
   tokio::time::timeout(
     std::time::Duration::from_secs(10),
-    run_package_install(command, &archive, true, |event| {
+    run_package_install(command, &archive, &["ctl-agent"], |event| {
       events.lock().unwrap().push(event);
     }),
   )
@@ -750,6 +762,42 @@ async fn agent_installer_reports_progress_before_the_receiver_opens_its_archive(
     received_bytes: archive.len() as u64,
   }));
   assert_eq!(events.last(), Some(&RemoteInstallEvent::Complete));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn full_schema3_archive_activates_and_reports_both_clients() {
+  use crate::remote_bundle::compatibility::tests::Fixture;
+  use std::os::unix::fs::PermissionsExt as _;
+  use std::sync::Mutex;
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
+  let home = BundleFixture::new();
+  let bundle = Fixture::new("0.1.0", &"b".repeat(40))
+    .with_clients()
+    .bundle();
+  let (script, layout) = installation_script(&bundle.bundle_id, &bundle.archive).unwrap();
+  assert_eq!(layout, Layout::WithClients);
+  let mut command = Command::new("sh");
+  command
+    .args(["-c", &script])
+    .env("HOME", home.directory.join("home"));
+  let checked = Mutex::new(Vec::new());
+  run_package_install(command, &bundle.archive, layout.names(), |event| {
+    if let RemoteInstallEvent::Checking { file_name } = event {
+      checked.lock().unwrap().push(file_name);
+    }
+  })
+  .await
+  .unwrap();
+  assert_eq!(checked.into_inner().unwrap(), layout.names());
+  for name in ["ctl", "ctmux"] {
+    let path = home.directory.join("home/.tokn/ctl/current").join(name);
+    assert_eq!(
+      std::fs::read(&path).unwrap(),
+      format!("binary fixture {name}").as_bytes()
+    );
+    assert_ne!(path.metadata().unwrap().permissions().mode() & 0o111, 0);
+  }
 }
 
 #[cfg(unix)]
@@ -771,7 +819,7 @@ async fn managed_installer_uses_the_shared_store_and_preserves_selection_on_dama
   )
   .unwrap();
   let upload = components::upload_bundle(&bundle).unwrap();
-  let script = installation_script(&upload.bundle_id, &upload.archive).unwrap();
+  let (script, _) = installation_script(&upload.bundle_id, &upload.archive).unwrap();
   let home = fixture.directory.join("home");
   let command = || {
     let mut command = Command::new("sh");
@@ -853,7 +901,7 @@ async fn managed_installer_rejects_symlinked_storage_and_an_active_sync() {
   )
   .unwrap();
   let upload = components::upload_bundle(&bundle).unwrap();
-  let script = installation_script(&upload.bundle_id, &upload.archive).unwrap();
+  let (script, _) = installation_script(&upload.bundle_id, &upload.archive).unwrap();
   let command = || {
     let mut command = Command::new("sh");
     command.args(["-c", &script]).env("HOME", &home);

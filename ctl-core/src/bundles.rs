@@ -6,6 +6,7 @@ mod filesystem;
 #[cfg(test)]
 mod tests;
 
+use crate::bundle_layout::{ALL, Layout};
 use crate::component::{ComponentInfo, protocols_match};
 use crate::protocol::ProtocolVersion;
 use serde::{Deserialize, Serialize};
@@ -14,10 +15,9 @@ use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 
-pub const COMPONENTS: [&str; 4] = ["ctl-agent", "ctmuxd", "ctl-taskd", "ctld"];
-pub const MAX_FILE_BYTES: usize = 128 * 1024 * 1024;
-pub const MAX_MANIFEST_BYTES: usize = 256 * 1024;
-pub const MAX_TOTAL_BYTES: usize = 512 * 1024 * 1024;
+/// The original four services. Use the manifest schema to list its executables.
+pub use crate::bundle_layout::SERVICES as COMPONENTS;
+pub use crate::bundle_layout::{MAX_FILE_BYTES, MAX_MANIFEST_BYTES, MAX_TOTAL_BYTES};
 pub const MANIFEST_FILE: &str = "bundle.json";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -71,7 +71,7 @@ pub struct Manifest {
 fn unique_components<'de, D: serde::Deserializer<'de>>(
   d: D,
 ) -> Result<BTreeMap<String, ComponentInfo>, D::Error> {
-  unique_map(d, 4)
+  unique_map(d, ALL.len())
 }
 fn unique_files<'de, D: serde::Deserializer<'de>>(
   d: D,
@@ -117,8 +117,10 @@ impl Manifest {
     components: BTreeMap<String, ComponentInfo>,
     files: &BTreeMap<String, Vec<u8>>,
   ) -> io::Result<Self> {
+    let layout =
+      Layout::from_components(&components).ok_or_else(|| invalid("incomplete component bundle"))?;
     let mut manifest = Self {
-      schema_version: 1,
+      schema_version: layout.managed_schema(),
       bundle_id: String::new(),
       target_triple: target.into(),
       source,
@@ -131,8 +133,7 @@ impl Manifest {
             name.clone(),
             FileInfo {
               sha256: digest(bytes),
-              executable: COMPONENTS.contains(&name.as_str())
-                || name == "ctld.app/Contents/MacOS/ctld",
+              executable: ALL.contains(&name.as_str()) || name == "ctld.app/Contents/MacOS/ctld",
             },
           )
         })
@@ -186,8 +187,9 @@ impl Manifest {
   /// Rejects malformed metadata or an identity that does not bind this manifest.
   pub fn validate(&self) -> io::Result<()> {
     validate_target(&self.target_triple)?;
+    let layout = Layout::managed(self.schema_version)
+      .ok_or_else(|| invalid("unknown component bundle schema"))?;
     if serde_json::to_vec(self).map_err(io::Error::other)?.len() > MAX_MANIFEST_BYTES
-      || self.schema_version != 1
       || self.distribution_id.as_ref().is_some_and(|id| {
         id.is_empty()
           || id.len() > 128
@@ -196,13 +198,11 @@ impl Manifest {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_' | b'+'))
       })
       || self.bundle_id != self.content_id()?
-      || self.components.len() != COMPONENTS.len()
-      || COMPONENTS
-        .iter()
-        .any(|name| !self.components.contains_key(*name))
+      || !layout.matches(&self.components)
       || self.files.len() > 512
-      || self.files.keys().any(|name| !safe_file(name))
-      || COMPONENTS
+      || self.files.keys().any(|name| !safe_file(name, layout))
+      || layout
+        .names()
         .iter()
         .any(|name| !self.files.get(*name).is_some_and(|file| file.executable))
       || self.files.values().any(|file| !valid_digest(&file.sha256))
@@ -234,31 +234,10 @@ impl Manifest {
         "bundle components must come from the same identified build",
       ));
     }
-    for (consumer, provider, protocol) in [
-      ("ctl-agent", "ctld", "ctld"),
-      ("ctl-agent", "ctmuxd", "ctmux"),
-      ("ctl-agent", "ctmuxd", "ctmux_control"),
-      ("ctl-agent", "ctl-taskd", "task"),
-      ("ctl-agent", "ctl-taskd", "task_control"),
-      ("ctl-taskd", "ctmuxd", "ctmux"),
-      ("ctl-taskd", "ctmuxd", "ctmux_control"),
-    ] {
-      let client = self.components[consumer]
-        .protocols
-        .iter()
-        .find(|entry| entry.name == protocol);
-      let server = self.components[provider]
-        .protocols
-        .iter()
-        .find(|entry| entry.name == protocol);
-      if client
-        .zip(server)
-        .is_none_or(|(client, server)| server.negotiate(&client.supported_versions).is_none())
-      {
-        return Err(invalid(
-          "bundle components have incompatible companion protocols",
-        ));
-      }
+    if !layout.compatible(&self.components) {
+      return Err(invalid(
+        "bundle components have incompatible companion protocols",
+      ));
     }
     Ok(())
   }
@@ -514,8 +493,8 @@ pub(super) fn validate_target(target: &str) -> io::Result<()> {
   Ok(())
 }
 
-fn safe_file(name: &str) -> bool {
-  (COMPONENTS.contains(&name)
+fn safe_file(name: &str, layout: Layout) -> bool {
+  (layout.names().contains(&name)
     || name == "manifest.json"
     || name == "ctld-package.json"
     || name.starts_with("ctld.app/Contents/"))

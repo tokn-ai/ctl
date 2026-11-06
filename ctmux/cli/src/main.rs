@@ -9,6 +9,9 @@ use std::path::PathBuf;
   about = "Persistent terminal sessions with a tmux-style interface"
 )]
 struct Arguments {
+  /// Print build and supported protocol metadata without connecting to a daemon.
+  #[arg(long)]
+  component_info: bool,
   /// Override the local endpoint (Unix socket or Windows named pipe).
   #[arg(long, short = 'S', global = true)]
   socket: Option<PathBuf>,
@@ -30,6 +33,17 @@ async fn main() {
 }
 
 async fn run(arguments: Arguments) -> ctmux_tui::Result<()> {
+  if arguments.component_info {
+    let info = ctl_core::component::ComponentInfo {
+      build: ctl_core::component::build_info(),
+      protocols: vec![
+        ctmux_proto::protocol_info(),
+        ctmux_ipc::local_control_protocol_info(),
+      ],
+    };
+    println!("{}", serde_json::to_string(&info)?);
+    return Ok(());
+  }
   let socket = arguments.socket.unwrap_or_else(ctmux_ipc::socket_path);
   let connector = LocalConnector::new(socket.clone());
   let command = arguments.command.unwrap_or(Command::New {
@@ -156,7 +170,10 @@ mod tests {
         Arguments::try_parse_from(["ctmux", command])
           .unwrap()
           .command,
-        Some(Command::List)
+        Some(Command::List {
+          unused: false,
+          json: false
+        })
       ));
     }
     assert!(Arguments::try_parse_from(["ctmux", "attach", "work", "-t", "other"]).is_err());

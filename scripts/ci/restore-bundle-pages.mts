@@ -74,7 +74,7 @@ async function restorePublished(catalog: BundleCatalog, directory: string, fetch
     await writeFile(join(local, "bundle-set.json"), manifest_bytes!);
     // Validate names and identity before using archive filenames in URLs/paths.
     const parsed = parseAgentBundleSet(manifest_bytes!, componentIdentity(entry));
-    if (parsed.schema_version !== 2) throw new Error("Published Pages set does not use schema 2");
+    if (parsed.schema_version === 1) throw new Error("Published Pages set lacks component metadata");
     for (const target of Object.values(parsed.targets)) {
       for (const [name, maximum] of [[target.archive, 128 * 1024 * 1024], [`${target.archive}.sha256`, 256]] as const) {
         await writeFile(join(local, name), (await download(new URL(`${relative}${name}`, bundleRoot), maximum, fetcher))!);

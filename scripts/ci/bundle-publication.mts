@@ -14,7 +14,7 @@ export function componentIdentity(value: AgentBundleIdentity): AgentBundleIdenti
 export async function validatedComponentSet(directory: string, identity: AgentBundleIdentity): Promise<{ manifest: AgentBundleSet; asset_names: string[] }> {
   const expected = componentIdentity(identity);
   const manifest = parseAgentBundleSet(await readAgentFile(join(directory, "bundle-set.json"), maxAgentManifestBytes), expected);
-  if (manifest.schema_version !== 2) throw new Error("Published component bundles must use schema 2");
+  if (manifest.schema_version === 1) throw new Error("Published component bundles require component metadata");
   const asset_names = ["bundle-set.json"];
   for (const target of agentTargets) {
     const entry = manifest.targets[target];

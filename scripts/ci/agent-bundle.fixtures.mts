@@ -14,11 +14,13 @@ export function componentFixture(names: string[], identity = agentIdentity): Com
       supported_versions: name === "ctld" ? ["1.0.12", "1.1.13"] : [`1.0.${builds[name]}`] })) };
 }
 
-export function componentMapFixture(identity = agentIdentity): AgentComponentMap {
+export function componentMapFixture(identity = agentIdentity): Required<AgentComponentMap> {
   return { "ctl-agent": componentFixture(["ctl_identity", "ctl_maintenance", "ctl_remote_vpn", "ctld", "ctmux", "ctmux_control", "task", "task_control"], identity),
     ctmuxd: componentFixture(["ctmux", "ctmux_control"], identity),
     "ctl-taskd": componentFixture(["task", "task_control", "ctmux", "ctmux_control"], identity),
-    ctld: componentFixture(["ctld", "ctld_lifecycle", "ctld_helper"], identity) };
+    ctld: componentFixture(["ctld", "ctld_lifecycle", "ctld_helper"], identity),
+    ctl: componentFixture(["ctl_identity", "ctl_maintenance", "ctl_remote_vpn", "ctld", "ctld_lifecycle", "ctld_helper", "ctmux", "ctmux_control", "task", "task_control"], identity),
+    ctmux: componentFixture(["ctmux", "ctmux_control"], identity) };
 }
 
 export interface TarFixtureEntry {
@@ -49,9 +51,11 @@ export function tarFixture(entries: TarFixtureEntry[], terminator = true): Buffe
   return gzipSync(Buffer.concat(parts));
 }
 
-export function archiveEntriesFixture(target: string, identity = agentIdentity, components = componentMapFixture(identity)): TarFixtureEntry[] {
-  const entries: TarFixtureEntry[] = agentComponents.map((name) => ({ name, bytes: Buffer.from(`fixture ${name} ${target}`) }));
+export function archiveEntriesFixture(target: string, identity = agentIdentity, components: AgentComponentMap = componentMapFixture(identity), schema_version: 2 | 3 = 3): TarFixtureEntry[] {
+  const names = agentComponents.filter((name) => schema_version === 3 || (name !== "ctl" && name !== "ctmux"));
+  const entries: TarFixtureEntry[] = names.map((name) => ({ name, bytes: Buffer.from(`fixture ${name} ${target}`) }));
   const files = Object.fromEntries(entries.map((entry) => [entry.name, createHash("sha256").update(entry.bytes).digest("hex")]));
-  entries.push({ name: "manifest.json", bytes: Buffer.from(JSON.stringify({ schema_version: 2, ...identity, target_triple: target, files, components })) });
+  entries.push({ name: "manifest.json", bytes: Buffer.from(JSON.stringify({ schema_version, ...identity, target_triple: target, files,
+    components: Object.fromEntries(names.map((name) => [name, components[name]])) })) });
   return entries;
 }

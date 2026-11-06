@@ -20,7 +20,7 @@ impl Drop for Home {
 }
 
 fn bundle(home: &Path, revision: char) -> Bundle {
-  let fixture = Fixture::new("0.1.0", &revision.to_string().repeat(40));
+  let fixture = Fixture::new("0.1.0", &revision.to_string().repeat(40)).with_clients();
   let components =
     serde_json::from_value(fixture.outer["targets"]["aarch64-apple-darwin"]["components"].clone())
       .unwrap();
@@ -35,7 +35,7 @@ fn bundle(home: &Path, revision: char) -> Bundle {
 }
 
 #[tokio::test]
-async fn agent_only_retains_the_exact_daemons_across_repeated_updates() {
+async fn agent_only_retains_the_exact_services_and_clients_across_repeated_updates() {
   let home = Home::new();
   let original = bundle(&home.0, 'a');
   let replacement = bundle(&home.0, 'b');
@@ -59,7 +59,7 @@ async fn agent_only_retains_the_exact_daemons_across_repeated_updates() {
     !installed.join(MANIFEST_FILE).exists(),
     "partial installs must not claim a full bundle"
   );
-  for name in ["ctmuxd", "ctl-taskd", "ctld"] {
+  for name in ["ctmuxd", "ctl-taskd", "ctld", "ctl", "ctmux"] {
     assert_eq!(
       std::fs::canonicalize(current.join(name)).unwrap(),
       std::fs::canonicalize(original.directory.join(name)).unwrap()
@@ -72,7 +72,7 @@ async fn agent_only_retains_the_exact_daemons_across_repeated_updates() {
   crate::ssh_install::install_local_agent(&home.0, None, &archive)
     .await
     .unwrap();
-  for name in ["ctmuxd", "ctl-taskd", "ctld"] {
+  for name in ["ctmuxd", "ctl-taskd", "ctld", "ctl", "ctmux"] {
     assert_eq!(
       std::fs::canonicalize(current.join(name)).unwrap(),
       std::fs::canonicalize(original.directory.join(name)).unwrap()
@@ -194,7 +194,7 @@ async fn full_install_after_agent_only_replaces_all_retained_companions() {
   );
   assert!(current.join(MANIFEST_FILE).is_file());
   assert!(!current.join(SOURCE_FILE).exists());
-  for name in ctl_core::bundles::COMPONENTS {
+  for name in ctl_core::bundle_layout::ALL {
     assert!(
       !std::fs::symlink_metadata(current.join(name))
         .unwrap()

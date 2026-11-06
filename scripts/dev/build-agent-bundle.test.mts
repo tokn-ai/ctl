@@ -26,7 +26,8 @@ test("local bundles retain dirty source identity and use canonical Rust manifest
   assert.equal(manifest.source, "local");
   assert.equal(manifest.target_triple, targetTriple);
   assert.equal(manifest.components.ctmuxd.build.dirty, true);
-  assert.deepEqual(Object.keys(manifest.components), ["ctl-agent", "ctl-taskd", "ctld", "ctmuxd"]);
+  assert.equal(manifest.schema_version, 2);
+  assert.deepEqual(Object.keys(manifest.components), ["ctl", "ctl-agent", "ctl-taskd", "ctld", "ctmux", "ctmuxd"]);
   // This digest is also checked against the real Rust reader in the local build verification.
   assert.equal(manifest.bundle_id, createHash("sha256").update(JSON.stringify({ ...manifest, bundle_id: "" })).digest("hex"));
   const reordered = Object.fromEntries(Object.entries(components).reverse().map(([name, component]) => [name, {
@@ -42,10 +43,10 @@ test("a local bundle rejects components from different working trees or without 
   assert.throws(() => localManifest(components, files), /different working trees/);
   const incompatible = componentMapFixture();
   incompatible.ctmuxd.protocols = incompatible.ctmuxd.protocols.filter((entry) => entry.name !== "ctmux");
-  assert.throws(() => localManifest(incompatible, files), /cannot share ctmux/);
+  assert.throws(() => localManifest(incompatible, files), /required protocol/);
 });
 
-test("packaging snapshots all four executables and queries the copied target binaries", async (context) => {
+test("packaging snapshots the services and both CLIs and queries the copied target binaries", async (context) => {
   const root = await directory(context);
   const binaries = join(root, "binaries");
   const output = join(root, "bundle");

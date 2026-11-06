@@ -540,7 +540,14 @@ fn identified_fixture(json: &str) -> Command {
       write!(out, "\\{byte:03o}").unwrap();
       out
     });
-  let offer = serde_json::to_vec(&ctl_proto::identity_protocol_offer()).unwrap();
+  // Exercise a published legacy peer; new clients must keep this selection
+  // byte-identical and must not leak presence metadata into service input.
+  let offer = serde_json::to_vec(&ctl_core::protocol::ProtocolOffer::new(
+    3,
+    ctl_proto::IDENTITY_CONTRACT_V1_0_3,
+    &[ctl_proto::IDENTITY_CONTRACT_V1_0_3],
+  ))
+  .unwrap();
   let offer_frame = u32::try_from(offer.len())
     .unwrap()
     .to_be_bytes()
@@ -551,7 +558,7 @@ fn identified_fixture(json: &str) -> Command {
       out
     });
   let selection = serde_json::to_vec(
-    &serde_json::json!({"protocol_version": ctl_proto::IDENTITY_PROTOCOL_VERSION}),
+    &serde_json::json!({"protocol_version": ctl_proto::IDENTITY_CONTRACT_V1_0_3}),
   )
   .unwrap();
   let mut command = fixture(

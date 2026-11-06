@@ -10,8 +10,17 @@ cargo install --locked ctmux-cli ctmuxd
 ctmux new -s work
 ctmux --resume
 ctmux ls
+ctmux ls --unused
+ctmux clients work --json
 ctmux attach -t work
 ```
+
+`ctmux ls` shows how many client processes are viewing each session.
+`ctmux clients [SESSION]` lists their reported application and device names
+and counts connected and reconnecting pane attachments. Read-only viewers
+count. Clients without process metadata appear once per attachment.
+`--unused` selects sessions with zero live viewers, including sessions whose
+only viewers are waiting to reconnect. Older daemons report unknown presence.
 
 `ctmux --resume` opens the existing-session picker, or creates one shell when
 no sessions exist. `--socket PATH` and `--prefix Ctrl+a` still apply; resume

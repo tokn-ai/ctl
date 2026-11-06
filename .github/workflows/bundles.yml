@@ -118,7 +118,7 @@ jobs:
       - name: Build remote components
         run: >-
           cargo build --locked --release --target ${{ matrix.target }}
-          -p ctl-agent -p ctmuxd -p ctl-taskd -p ctld
+          -p ctl-agent -p ctmuxd -p ctl-taskd -p ctld -p ctl-cli -p ctmux-cli
 
       - name: Package remote components
         shell: bash

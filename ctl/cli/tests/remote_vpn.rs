@@ -58,14 +58,21 @@ impl Fixture {
   fn ssh(&self, request: &Request, response: &Response, remote_id: &str) {
     let identity = json!({"remote_id": remote_id, "agent_version": "test", "protocols": ctl_proto::agent_protocols()});
     let mut preface = ctl_ipc::remote_vpn::PREFACE.to_vec();
-    preface.extend(frame(&ctl_ipc::remote_vpn::protocol_offer()));
+    // Keep this fixture on the first published contract, exercising fallback
+    // to the original selection shape without client-presence metadata.
+    preface.extend(frame(&ctl_core::protocol::ProtocolOffer::new(
+      1,
+      ctl_ipc::remote_vpn::CONTRACT_V1_0_1,
+      &[ctl_ipc::remote_vpn::CONTRACT_V1_0_1],
+    )));
     preface.extend(frame(&identity));
     fs::write(self.0.join("preface"), preface).unwrap();
     fs::write(self.0.join("response"), frame(response)).unwrap();
     let script = format!(
       "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$CTL_TEST_ARGS\"\ncat \"$CTL_TEST_PREFACE\"\ndd bs=1 count={} of=\"$CTL_TEST_SELECTION\" 2>/dev/null\ndd bs=1 count={} of=\"$CTL_TEST_REQUEST\" 2>/dev/null\nexec cat \"$CTL_TEST_RESPONSE\"\n",
       frame(&ctl_ipc::remote_vpn::ProtocolSelection {
-        protocol_version: ctl_ipc::remote_vpn::PROTOCOL_VERSION
+        protocol_version: ctl_ipc::remote_vpn::CONTRACT_V1_0_1,
+        client_identity: None,
       })
       .len(),
       frame(request).len(),
@@ -177,8 +184,9 @@ impl Fixture {
       serde_json::from_slice(&selection[4..]).unwrap();
     assert_eq!(
       selected.protocol_version,
-      ctl_ipc::remote_vpn::PROTOCOL_VERSION
+      ctl_ipc::remote_vpn::CONTRACT_V1_0_1
     );
+    assert_eq!(selected.client_identity, None);
     let bytes = fs::read(self.0.join("request")).unwrap();
     serde_json::from_slice(&bytes[4..]).unwrap()
   }

@@ -44,7 +44,23 @@ pub enum Command {
 
   /// List running sessions.
   #[command(name = "list-sessions", visible_aliases = ["ls", "list"])]
-  List,
+  List {
+    /// Show sessions without any connected viewer.
+    #[arg(long)]
+    unused: bool,
+    /// Print machine-readable session and viewer details.
+    #[arg(long)]
+    json: bool,
+  },
+
+  /// Show the clients viewing a session, or all sessions.
+  #[command(visible_alias = "list-clients")]
+  Clients {
+    /// Session name or session ID.
+    session: Option<String>,
+    #[arg(long)]
+    json: bool,
+  },
 
   /// List retained read-only session archives.
   Archives,

@@ -106,27 +106,50 @@ impl Terminal {
     }
   }
 
+  #[cfg(test)]
   pub fn create_attachment(&self, input: bool, layout: bool) -> super::AttachmentRegistration {
+    self.create_peer_attachment(
+      input,
+      layout,
+      super::presence::AttachmentPeer::legacy("unknown", "unknown"),
+    )
+  }
+
+  pub(crate) fn create_peer_attachment(
+    &self,
+    input: bool,
+    layout: bool,
+    peer: super::presence::AttachmentPeer,
+  ) -> super::AttachmentRegistration {
     let mut operation = Operation::diagnostic_at(
       "8a84f0e8-15f0-420a-b4ff-c3af1bbe89b5",
       Event::AttachmentCreate,
       Level::Info,
       self.log_context(None),
     );
-    let result = self.create_attachment_inner(input, layout);
+    let result = self.create_attachment_inner(input, layout, peer);
     operation.set_context(self.log_context(Some(&result.attachment_id)));
     operation.finish(Outcome::Succeeded, None, None);
     result
   }
 
+  #[cfg(test)]
   pub fn resume_attachment(&self, token: &str) -> Option<super::AttachmentRegistration> {
+    self.resume_peer_attachment(token, None)
+  }
+
+  pub(crate) fn resume_peer_attachment(
+    &self,
+    token: &str,
+    peer: Option<super::presence::AttachmentPeer>,
+  ) -> Option<super::AttachmentRegistration> {
     let mut operation = Operation::diagnostic_at(
       "333a1e67-62e7-4380-8acd-2430bdb974d1",
       Event::AttachmentResume,
       Level::Info,
       self.log_context(None),
     );
-    let result = self.resume_attachment_inner(token);
+    let result = self.resume_attachment_inner(token, peer);
     if let Some(registration) = &result {
       operation.set_context(self.log_context(Some(&registration.attachment_id)));
       operation.finish(Outcome::Succeeded, None, None);

@@ -779,7 +779,12 @@ async fn handle_active_connection(
     return Ok(());
   };
 
-  let ClientMessage::Handshake { protocol, .. } = handshake else {
+  let ClientMessage::Handshake {
+    protocol,
+    client_name,
+    client_version,
+  } = handshake
+  else {
     send_error(
       &mut stream,
       ErrorCode::InvalidRequest,
@@ -824,8 +829,42 @@ async fn handle_active_connection(
     restart,
     attachment_liveness.timeout,
     protocol_version,
+    crate::session::presence::AttachmentPeer::legacy(&client_name, &client_version),
   )
   .await
+}
+
+async fn read_opening_request(
+  stream: &mut Stream,
+  protocol_version: ctl_core::protocol::ProtocolVersion,
+  legacy_peer: crate::session::presence::AttachmentPeer,
+) -> Result<Option<(ClientMessage, crate::session::presence::AttachmentPeer)>, ConnectionError> {
+  let Some(opening) = read_frame::<_, ctmux_proto::OpeningRequest>(stream).await? else {
+    return Ok(None);
+  };
+  let request = opening.request;
+  let peer = if let Some(identity) = opening.client_identity {
+    if !ctmux_proto::supports_client_presence(protocol_version)
+      || !matches!(
+        request,
+        ClientMessage::AttachSession { .. } | ClientMessage::ResumeAttachment { .. }
+      )
+      || !identity.validate()
+    {
+      send_error(
+        stream,
+        ErrorCode::InvalidRequest,
+        "invalid or unsupported attachment client identity",
+      )
+      .await?;
+      return Ok(None);
+    }
+    crate::session::presence::AttachmentPeer::Process(identity)
+  } else {
+    legacy_peer
+  };
+
+  Ok(Some((request, peer)))
 }
 
 async fn handle_request(
@@ -834,11 +873,13 @@ async fn handle_request(
   restart: Arc<RestartCoordinator>,
   attachment_liveness_timeout: Duration,
   protocol_version: ctl_core::protocol::ProtocolVersion,
+  legacy_peer: crate::session::presence::AttachmentPeer,
 ) -> Result<(), ConnectionError> {
-  let Some(request) = read_frame::<_, ClientMessage>(&mut stream).await? else {
+  let Some((request, peer)) =
+    read_opening_request(&mut stream, protocol_version, legacy_peer).await?
+  else {
     return Ok(());
   };
-
   match request {
     ClientMessage::CreateSession {
       name,
@@ -871,6 +912,7 @@ async fn handle_request(
     } => {
       let request = AttachParameters {
         protocol_version,
+        peer,
         resume_from,
         client_terminal_size: terminal_size,
         request_input_lease,
@@ -893,6 +935,7 @@ async fn handle_request(
     } => {
       let request = AttachParameters {
         protocol_version,
+        peer,
         resume_from,
         client_terminal_size: terminal_size,
         request_input_lease: false,
@@ -931,6 +974,24 @@ async fn handle_session_request(
   protocol_version: ctl_core::protocol::ProtocolVersion,
 ) -> Result<(), ConnectionError> {
   match request {
+    ClientMessage::ListSessionClients => {
+      if ctmux_proto::supports_client_presence(protocol_version) {
+        write_frame(
+          &mut stream,
+          &ServerMessage::SessionClients {
+            sessions: sessions.list_with_clients(),
+          },
+        )
+        .await?;
+      } else {
+        send_error(
+          &mut stream,
+          ErrorCode::InvalidRequest,
+          "client presence requires contract 1.3.23",
+        )
+        .await?;
+      }
+    }
     ClientMessage::ListSessions => {
       write_frame(
         &mut stream,
@@ -1187,7 +1248,7 @@ async fn handle_resume_attachment_request(
   match restart.run_while_accepting(|| {
     sessions
       .resolve(&session)
-      .map(|session| prepare_resumed_attachment(session, &attachment_token))
+      .map(|session| prepare_resumed_attachment(session, &attachment_token, &request.peer))
   }) {
     Some(Ok(Ok(attachment))) => handle_attach(stream, attachment, request).await,
     Some(Ok(Err(ResumePreparationError::SessionEnded(exit_code)))) => {
@@ -1292,6 +1353,7 @@ async fn handle_shell_state_request(
 )]
 struct AttachParameters {
   protocol_version: ctl_core::protocol::ProtocolVersion,
+  peer: crate::session::presence::AttachmentPeer,
   resume_from: Option<u64>,
   client_terminal_size: ctmux_proto::TerminalSize,
   request_input_lease: bool,
@@ -1363,8 +1425,11 @@ fn prepare_attachment(
   // `subscribe_events` reports that fact instead of returning a permanently
   // silent receiver.
   let events = session.subscribe_events()?;
-  let registration =
-    session.create_attachment(request.request_input_lease, request.request_layout_lease);
+  let registration = session.create_peer_attachment(
+    request.request_input_lease,
+    request.request_layout_lease,
+    request.peer.clone(),
+  );
   let shell_state_updates = session.subscribe_shell_state();
   Ok(prepared_attachment(
     session,
@@ -1383,12 +1448,13 @@ enum ResumePreparationError {
 fn prepare_resumed_attachment(
   session: Arc<Terminal>,
   attachment_token: &str,
+  peer: &crate::session::presence::AttachmentPeer,
 ) -> Result<PreparedAttachment, ResumePreparationError> {
   let events = session
     .subscribe_events()
     .map_err(ResumePreparationError::SessionEnded)?;
   let registration = session
-    .resume_attachment(attachment_token)
+    .resume_peer_attachment(attachment_token, Some(peer.clone()))
     .ok_or(ResumePreparationError::Rejected)?;
   let shell_state_updates = session.subscribe_shell_state();
   Ok(prepared_attachment(

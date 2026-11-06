@@ -2,7 +2,10 @@
 mod identity_contract;
 pub mod maintenance;
 use ctl_core::protocol::{ProtocolOffer, ProtocolVersion};
-pub use identity_contract::{accept_identity_contract, negotiate_identity_contract};
+pub use identity_contract::{
+  IdentitySelection, accept_identity_contract, accept_identity_contract_with_client,
+  negotiate_identity_contract, negotiate_identity_contract_with_client,
+};
 use serde::{Deserialize, Serialize};
 use std::io;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -32,10 +35,12 @@ pub struct RemoteCtmuxRestartResult {
   pub terminated_sessions: u32,
 }
 
-pub const IDENTITY_PROTOCOL_BUILD: u16 = 3;
+pub const IDENTITY_PROTOCOL_BUILD: u16 = 4;
 pub const IDENTITY_CONTRACT_V1_0_3: ProtocolVersion = ProtocolVersion::new(1, 0, 3);
-pub const IDENTITY_PROTOCOL_VERSION: ProtocolVersion = IDENTITY_CONTRACT_V1_0_3;
-pub const IDENTITY_SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[IDENTITY_CONTRACT_V1_0_3];
+pub const IDENTITY_CONTRACT_V1_1_4: ProtocolVersion = ProtocolVersion::new(1, 1, 4);
+pub const IDENTITY_PROTOCOL_VERSION: ProtocolVersion = IDENTITY_CONTRACT_V1_1_4;
+pub const IDENTITY_SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] =
+  &[IDENTITY_CONTRACT_V1_0_3, IDENTITY_CONTRACT_V1_1_4];
 /// Stable framing marker. Compatibility is negotiated after this marker.
 pub const IDENTITY_PREFACE: &[u8] = b"ctl-ssh-identity\n";
 const MAX_IDENTITY_BYTES: usize = 8192;

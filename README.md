@@ -822,8 +822,11 @@ builds during development, and published development/stable channels for other
 remote updates. `ctl components check --channel dev` checks metadata without
 opening SSH or downloading binaries. The current publication is resolved before
 using its verified download cache; an older selected bundle never overrides it.
-Schema-2 bundles verify archive and binary checksums, component advertisements,
-and shared service and companion contracts. Installation preserves running
+Published schema-3 bundles include `ctl` and `ctmux` alongside the four services.
+The remote account can run `ctl who` to list active ctl service connections and
+`ctmux clients` to list terminal viewers. Schema-2 and schema-3 bundles verify
+archive and binary checksums, component advertisements, and shared contracts.
+Installation preserves running
 owners; restart remains separate. See [remote setup](docs/remote-mvp.md).
 
 `ssh` and `scp` accept the system OpenSSH command syntax. A destination such as
@@ -1049,7 +1052,7 @@ Task clients and daemons negotiate published contract `1.0.4`. Product release
 versions are independent; compatible implementations can come from different
 releases. See [protocol versioning](docs/protocol-versioning.md). SSH task routing additionally requires
 the matching gateway and SSH forced-command allowlist; rebuilding the Docker
-target updates all four binaries. Automatic restart policies remain pending.
+target updates its bundled services and command-line clients. Automatic restart policies remain pending.
 The desktop task interface currently manages local tasks.
 
 On Unix, background tasks run in their own process group. Stop first sends a

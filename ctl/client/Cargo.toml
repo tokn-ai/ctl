@@ -14,7 +14,7 @@ publish = ["crates-io"]
 exclude = ["tests/forced_command.rs"]
 
 [dependencies]
-ctl-core = { workspace = true, features = ["executable"] }
+ctl-core = { workspace = true, features = ["executable", "presence"] }
 dirs.workspace = true
 glob.workspace = true
 serde.workspace = true

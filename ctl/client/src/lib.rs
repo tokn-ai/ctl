@@ -860,9 +860,10 @@ async fn read_negotiated_ssh_identity(
   stdout: &mut (impl AsyncRead + Unpin),
   stdin: &mut (impl AsyncWrite + Unpin),
 ) -> io::Result<ctl_proto::RemoteIdentity> {
+  let client_identity = ctl_core::presence::process_identity(env!("CARGO_PKG_VERSION"));
   let selected = tokio::time::timeout(
     std::time::Duration::from_secs(30),
-    ctl_proto::negotiate_identity_contract(stdout, stdin),
+    ctl_proto::negotiate_identity_contract_with_client(stdout, stdin, Some(&client_identity)),
   )
   .await
   .map_err(|_| {

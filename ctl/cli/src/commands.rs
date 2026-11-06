@@ -38,6 +38,7 @@ fn validate_local_command_target(arguments: &Arguments) -> Result<(), CliError> 
     Command::Skill(_) => CliError::SkillTarget,
     Command::Passwords { .. } => CliError::PasswordsTarget,
     Command::Logs(_) | Command::Audit(_) => CliError::HistoryTarget,
+    Command::Who { .. } => CliError::WhoTarget,
     _ => return Ok(()),
   };
   if arguments.has_remote_target()
@@ -90,13 +91,17 @@ fn validate_arguments(arguments: &Arguments) -> Result<(), CliError> {
   Ok(())
 }
 
-pub async fn run(mut arguments: Arguments) -> Result<i32, CliError> {
+pub async fn run(arguments: Arguments) -> Result<i32, CliError> {
   validate_arguments(&arguments)?;
   if let Some(result) = crate::history::dispatch(&arguments.command) {
     result.map_err(CliError::History)?;
     return Ok(0);
   }
   match arguments.command {
+    Command::Who { json } => {
+      crate::who::run(json).map_err(CliError::Who)?;
+      return Ok(0);
+    }
     Command::Components { command } => {
       crate::components::run(
         command,
@@ -138,6 +143,10 @@ pub async fn run(mut arguments: Arguments) -> Result<i32, CliError> {
     }
     _ => {}
   }
+  run_on_target(arguments).await
+}
+
+async fn run_on_target(mut arguments: Arguments) -> Result<i32, CliError> {
   let resolved = crate::target::resolve(
     arguments.host.as_deref(),
     arguments.destination.as_deref(),
@@ -204,7 +213,9 @@ async fn run_selected(
       return Ok(crate::connection::execute(&connector.settings, command, platform).await?);
     }
     Command::Port { command } => crate::port::run(&connector.settings, command).await?,
-    Command::Logs(_)
+    Command::ComponentInfo
+    | Command::Who { .. }
+    | Command::Logs(_)
     | Command::Audit(_)
     | Command::Setup(_)
     | Command::Skill(_)
@@ -605,6 +616,12 @@ enum CtlConnectError {
 
 #[derive(Debug, Error)]
 pub enum CliError {
+  #[error(
+    "Run ctl who on the account that owns the connections. Omit --host, --destination, --method, and --remote-platform."
+  )]
+  WhoTarget,
+  #[error("Could not list active service connections: {0}")]
+  Who(std::io::Error),
   #[error("Caller-supplied SSH authentication failed: {0}")]
   CallerAuthentication(std::io::Error),
   #[error("History is local; omit --host, --destination, --method, and --remote-platform.")]

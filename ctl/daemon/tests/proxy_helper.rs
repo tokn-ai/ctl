@@ -441,12 +441,21 @@ async fn remote_vpn_uses_its_ssh_owner_and_preserves_the_remote_dns_destination(
   let request = std::fs::read(request_path).unwrap();
   let selected_size =
     usize::try_from(u32::from_be_bytes(request[..4].try_into().unwrap())).unwrap();
-  let selection: serde_json::Value =
+  let selection: ctl_ipc::remote_vpn::ProtocolSelection =
     serde_json::from_slice(&request[4..4 + selected_size]).unwrap();
   assert_eq!(
-    selection,
-    serde_json::json!({ "protocol_version": "1.0.1" })
+    selection.protocol_version,
+    ctl_ipc::remote_vpn::PROTOCOL_VERSION
   );
+  let peer = selection
+    .client_identity
+    .expect("current VPN contract reports its client");
+  assert!(peer.validate());
+  assert_eq!(
+    peer.client_name,
+    executable.file_stem().unwrap().to_str().unwrap()
+  );
+  assert_eq!(peer.client_version, env!("CARGO_PKG_VERSION"));
   let request = &request[4 + selected_size..];
   let size = usize::try_from(u32::from_be_bytes(request[..4].try_into().unwrap())).unwrap();
   let frame: serde_json::Value = serde_json::from_slice(&request[4..4 + size]).unwrap();

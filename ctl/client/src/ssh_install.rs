@@ -1,3 +1,4 @@
+use ctl_core::bundle_layout::{ALL, Layout};
 use std::io;
 use std::process::Stdio;
 
@@ -55,7 +56,7 @@ pub async fn install_ssh_agent_only_with_progress(
     .args(extra)
     .args(prepare_ssh_base_arguments(destination, options, interaction).await?)
     .arg(posix_install_command(&script));
-  run_package_install(command, archive, true, on_progress).await
+  run_package_install(command, archive, &["ctl-agent"], on_progress).await
 }
 
 #[cfg(unix)]
@@ -67,7 +68,7 @@ pub(crate) async fn install_local_agent(
   let script = agent_script(archive, companions)?;
   let mut command = Command::new("sh");
   command.args(["-c", &script]).env("HOME", home);
-  run_package_install(command, archive, true, |_| {}).await
+  run_package_install(command, archive, &["ctl-agent"], |_| {}).await
 }
 
 #[cfg(unix)]
@@ -80,10 +81,10 @@ pub(crate) async fn install_local_bundle(
     .await
     .map_err(|error| CoreError::InvalidComponentBundle(error.to_string()))?
     .map_err(|error| CoreError::InvalidComponentBundle(error.to_string()))?;
-  let script = installation_script(&upload.bundle_id, &upload.archive)?;
+  let (script, layout) = installation_script(&upload.bundle_id, &upload.archive)?;
   let mut command = Command::new("sh");
   command.args(["-c", &script]).env("HOME", home);
-  run_install_command(command, &upload.archive, |_| {}).await
+  run_package_install(command, &upload.archive, layout.names(), |_| {}).await
 }
 
 #[cfg(unix)]
@@ -155,14 +156,14 @@ pub async fn install_ssh_unix_agent_interactive_with_progress(
   if options.remote_platform != RemotePlatform::Unix {
     return Err(CoreError::InvalidSshOption("remote_platform".into()));
   }
-  let script = installation_script(bundle_id, archive)?;
+  let (script, layout) = installation_script(bundle_id, archive)?;
   let mut command = Command::new(SSH_PROGRAM);
   let extra = configure_ssh_interaction(&mut command, interaction);
   command
     .args(extra)
     .args(prepare_ssh_base_arguments(destination, options, interaction).await?)
     .arg(posix_install_command(&script));
-  run_install_command(command, archive, on_progress).await
+  run_package_install(command, archive, layout.names(), on_progress).await
 }
 
 fn posix_install_command(script: &str) -> String {
@@ -172,13 +173,15 @@ fn posix_install_command(script: &str) -> String {
   format!("exec sh -c '{}'", script.replace('\'', "'\\''"))
 }
 
+#[cfg(test)]
 fn install_script(bundle_id: &str, archive_bytes: usize) -> Result<String, CoreError> {
-  build_install_script(bundle_id, archive_bytes, None)
+  build_install_script(bundle_id, archive_bytes, Layout::Services, None)
 }
 
 fn build_install_script(
   bundle_id: &str,
   archive_bytes: usize,
+  layout: Layout,
   managed: Option<(&str, &str, &str)>,
 ) -> Result<String, CoreError> {
   if bundle_id.is_empty()
@@ -193,6 +196,7 @@ fn build_install_script(
   Ok(
     UNIX_INSTALL_COMMAND
       .replace("__BUNDLE_ID__", bundle_id)
+      .replace("__COMPONENTS__", &layout.names().join(" "))
       .replace("__ARCHIVE_BYTES__", &archive_bytes.to_string())
       .replace("__MANAGED__", if managed.is_some() { "yes" } else { "no" })
       .replace("__BUNDLE_TARGET__", target)
@@ -201,9 +205,11 @@ fn build_install_script(
   )
 }
 
-fn installation_script(bundle_id: &str, archive: &[u8]) -> Result<String, CoreError> {
+fn installation_script(bundle_id: &str, archive: &[u8]) -> Result<(String, Layout), CoreError> {
+  let invalid = |error: io::Error| CoreError::InvalidComponentBundle(error.to_string());
+  let mut files = crate::remote_bundle::archive::read_archive(archive).map_err(invalid)?;
   #[cfg(unix)]
-  if let Some(manifest) = crate::components::inspect_upload_archive(archive)
+  if let Some(manifest) = crate::components::inspect_upload_archive(&mut files)
     .map_err(|error| CoreError::InvalidComponentBundle(error.to_string()))?
   {
     use sha2::{Digest as _, Sha256};
@@ -215,27 +221,35 @@ fn installation_script(bundle_id: &str, archive: &[u8]) -> Result<String, CoreEr
       return Err(CoreError::InvalidAgentBundleId(bundle_id.into()));
     }
     let digest = format!("{:x}", Sha256::digest(archive));
-    return build_install_script(
+    let layout = Layout::managed(manifest.schema_version).expect("validated managed schema");
+    let script = build_install_script(
       bundle_id,
       archive.len(),
+      layout,
       Some((&manifest.target_triple, &manifest.bundle_id, &digest)),
-    );
+    )?;
+    return Ok((script, layout));
   }
-  install_script(bundle_id, archive.len())
+  let layout = crate::remote_bundle::archive::public_layout(&mut files).map_err(invalid)?;
+  Ok((
+    build_install_script(bundle_id, archive.len(), layout, None)?,
+    layout,
+  ))
 }
 
+#[cfg(test)]
 async fn run_install_command(
   command: Command,
   archive: &[u8],
   on_progress: impl Fn(RemoteInstallEvent),
 ) -> Result<(), CoreError> {
-  run_package_install(command, archive, false, on_progress).await
+  run_package_install(command, archive, Layout::Services.names(), on_progress).await
 }
 
 async fn run_package_install(
   mut command: Command,
   archive: &[u8],
-  agent_only: bool,
+  components: &[&'static str],
   on_progress: impl Fn(RemoteInstallEvent),
 ) -> Result<(), CoreError> {
   command
@@ -254,7 +268,7 @@ async fn run_package_install(
   };
   let (write, progress, stderr, status) = tokio::join!(
     write,
-    read_package_progress(stdout, archive.len() as u64, agent_only, &on_progress),
+    read_package_progress(stdout, archive.len() as u64, components, &on_progress),
     read_bounded_output(&mut stderr),
     child.wait(),
   );
@@ -287,13 +301,13 @@ async fn read_progress(
   total_bytes: u64,
   on_progress: &impl Fn(RemoteInstallEvent),
 ) -> io::Result<()> {
-  read_package_progress(stdout, total_bytes, false, on_progress).await
+  read_package_progress(stdout, total_bytes, Layout::Services.names(), on_progress).await
 }
 
 async fn read_package_progress(
   stdout: impl AsyncRead + Unpin,
   total_bytes: u64,
-  agent_only: bool,
+  components: &[&'static str],
   on_progress: &impl Fn(RemoteInstallEvent),
 ) -> io::Result<()> {
   let mut reader = BufReader::new(stdout);
@@ -309,27 +323,14 @@ async fn read_package_progress(
   }
   on_progress(RemoteInstallEvent::Receiving { received_bytes: 0 });
   let mut received_bytes = 0;
-  let stages = [
-    RemoteInstallEvent::Extracting,
-    RemoteInstallEvent::Checking {
-      file_name: "ctl-agent",
-    },
-    RemoteInstallEvent::Checking {
-      file_name: "ctmuxd",
-    },
-    RemoteInstallEvent::Checking {
-      file_name: "ctl-taskd",
-    },
-    RemoteInstallEvent::Checking { file_name: "ctld" },
-    RemoteInstallEvent::Activating,
-    RemoteInstallEvent::Complete,
-  ];
-  let agent_stages = [stages[0], stages[1], stages[5], stages[6]];
-  let stages = if agent_only {
-    &agent_stages[..]
-  } else {
-    &stages[..]
-  };
+  let stages: Vec<_> = std::iter::once(RemoteInstallEvent::Extracting)
+    .chain(
+      components
+        .iter()
+        .map(|&file_name| RemoteInstallEvent::Checking { file_name }),
+    )
+    .chain([RemoteInstallEvent::Activating, RemoteInstallEvent::Complete])
+    .collect();
   let mut next_stage = 0;
   let mut invalid = false;
   loop {
@@ -374,17 +375,14 @@ fn parse_progress(line: &str) -> Option<RemoteInstallEvent> {
     "ctl-install-v1\n" => Some(RemoteInstallEvent::Complete),
     "ctl-install-progress-v1 extracting\n" => Some(RemoteInstallEvent::Extracting),
     "ctl-install-progress-v1 activating\n" => Some(RemoteInstallEvent::Activating),
-    "ctl-install-progress-v1 checking ctl-agent\n" => Some(RemoteInstallEvent::Checking {
-      file_name: "ctl-agent",
-    }),
-    "ctl-install-progress-v1 checking ctmuxd\n" => Some(RemoteInstallEvent::Checking {
-      file_name: "ctmuxd",
-    }),
-    "ctl-install-progress-v1 checking ctl-taskd\n" => Some(RemoteInstallEvent::Checking {
-      file_name: "ctl-taskd",
-    }),
-    "ctl-install-progress-v1 checking ctld\n" => {
-      Some(RemoteInstallEvent::Checking { file_name: "ctld" })
+    _ if line.starts_with("ctl-install-progress-v1 checking ") => {
+      let name = line
+        .strip_prefix("ctl-install-progress-v1 checking ")?
+        .strip_suffix('\n')?;
+      ALL
+        .into_iter()
+        .find(|&file_name| file_name == name)
+        .map(|file_name| RemoteInstallEvent::Checking { file_name })
     }
     _ => line
       .strip_prefix("ctl-install-progress-v1 receiving ")?

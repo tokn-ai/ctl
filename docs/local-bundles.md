@@ -28,6 +28,8 @@ target/development-bundles/x86_64-unknown-linux-musl/
   ctmuxd
   ctl-taskd
   ctld
+  ctl
+  ctmux
 ```
 
 Use that directory as **Provided build files** in the component update dialog,

@@ -4,12 +4,11 @@ use ctmux_client::{
 };
 use std::collections::HashMap;
 use std::future::Future;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tauri::Manager as _;
+use std::sync::{Arc, Mutex as RegistryMutex};
 use tauri::ipc::Channel;
 use tokio::sync::{Mutex, Notify, watch};
-use tokio::time::{MissedTickBehavior, interval, timeout};
+use tokio::time::timeout;
 
 use crate::dto::{
   AttachmentEventDto, ConnectionTargetDto, PresentationAcknowledgement, observation_timestamp_ms,
@@ -17,6 +16,7 @@ use crate::dto::{
 use crate::error::{CommandErrorDto, CommandResult};
 
 mod cache_writer;
+mod document;
 mod observation;
 mod recovery;
 mod statistics;
@@ -26,10 +26,11 @@ use recovery::AttachmentResume;
 const PRESENTATION_ACKNOWLEDGEMENT_TIMEOUT: std::time::Duration =
   std::time::Duration::from_secs(30);
 const ATTACHMENT_CLOSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+type AttachmentOutcome = Result<ctmux_client::AttachExit, ctmux_client::ClientError>;
 
 #[derive(Clone, Default)]
 pub struct AppState {
-  registry: Arc<Mutex<AttachmentRegistry>>,
+  registry: Arc<RegistryMutex<AttachmentRegistry>>,
   daemon_restart_transition: Arc<Mutex<()>>,
 }
 
@@ -37,6 +38,8 @@ pub struct AppState {
 struct AttachmentRegistry {
   by_window: HashMap<String, HashMap<String, AttachmentSlot>>,
   window_transitions: HashMap<String, Arc<Mutex<()>>>,
+  documents: HashMap<String, Arc<document::WindowDocument>>,
+  exiting: bool,
 }
 
 enum AttachmentSlot {
@@ -59,6 +62,8 @@ pub struct AttachmentActor {
   pending: Mutex<Option<PendingPresentation>>,
   pending_changed: Notify,
   detaching: AtomicBool,
+  renderer_retired: watch::Sender<bool>,
+  abort_bridge: Notify,
   closed: AtomicBool,
   closed_changed: Notify,
 }
@@ -91,11 +96,11 @@ impl PendingPresentation {
 }
 
 impl AppState {
-  pub async fn remote_actors(&self) -> Vec<Arc<AttachmentActor>> {
+  pub fn remote_actors(&self) -> Vec<Arc<AttachmentActor>> {
     self
       .registry
       .lock()
-      .await
+      .unwrap()
       .by_window
       .values()
       .flat_map(|slots| slots.values())
@@ -110,11 +115,11 @@ impl AppState {
       .collect()
   }
 
-  pub async fn remote_observations(&self) -> Vec<crate::about::observations::RemoteObservation> {
+  pub fn remote_observations(&self) -> Vec<crate::about::observations::RemoteObservation> {
     self
       .registry
       .lock()
-      .await
+      .unwrap()
       .by_window
       .values()
       .flat_map(|slots| slots.values())
@@ -136,9 +141,11 @@ impl AppState {
     on_opening: impl FnOnce() -> CommandResult<()>,
     open: impl Future<Output = CommandResult<T>>,
   ) -> CommandResult<T> {
-    let transition = self.window_transition(window_label).await;
+    let document = self.current_document(window_label)?;
+    document.wait_for_previous().await;
+    let transition = self.window_transition(window_label);
     let _transition_guard = transition.lock().await;
-    let mut cancelled = self.reserve_window(window_label, attachment_id).await?;
+    let mut cancelled = self.reserve_document(window_label, &document, attachment_id)?;
 
     let result = async {
       // Publish the ID only after cancellation is registered. A frontend
@@ -155,13 +162,13 @@ impl AppState {
     }
     .await;
     if result.is_err() {
-      self.release(window_label, attachment_id).await;
+      self.release(window_label, attachment_id);
     }
     result
   }
 
-  pub async fn cancel_opening(&self, window_label: &str, attachment_id: &str) {
-    let registry = self.registry.lock().await;
+  pub fn cancel_opening(&self, window_label: &str, attachment_id: &str) {
+    let registry = self.registry.lock().unwrap();
     if let Some(AttachmentSlot::Opening {
       attachment_id: current,
       cancel,
@@ -182,8 +189,8 @@ impl AppState {
     Arc::clone(&self.daemon_restart_transition)
   }
 
-  pub async fn window_transition(&self, window_label: &str) -> Arc<Mutex<()>> {
-    let mut registry = self.registry.lock().await;
+  pub fn window_transition(&self, window_label: &str) -> Arc<Mutex<()>> {
+    let mut registry = self.registry.lock().unwrap();
     Arc::clone(
       registry
         .window_transitions
@@ -196,7 +203,7 @@ impl AppState {
   /// Remote panes remain attached.
   pub async fn detach_active_local_window(&self, window_label: &str) -> CommandResult<()> {
     let actors = {
-      let registry = self.registry.lock().await;
+      let registry = self.registry.lock().unwrap();
       let mut actors = Vec::new();
       for slot in registry
         .by_window
@@ -234,7 +241,7 @@ impl AppState {
     let actors: Vec<_> = self
       .registry
       .lock()
-      .await
+      .unwrap()
       .by_window
       .get(window_label)
       .into_iter()
@@ -256,12 +263,16 @@ impl AppState {
     Ok(())
   }
 
-  async fn reserve_window(
+  fn reserve_document(
     &self,
     window_label: &str,
+    document: &Arc<document::WindowDocument>,
     attachment_id: &str,
   ) -> CommandResult<watch::Receiver<bool>> {
-    let mut registry = self.registry.lock().await;
+    let mut registry = self.registry.lock().unwrap();
+    if !registry.is_current_document(window_label, document) {
+      return Err(document::stale_document());
+    }
     let slots = registry.by_window.entry(window_label.into()).or_default();
     if slots.contains_key(attachment_id) {
       return Err(CommandErrorDto::new(
@@ -280,14 +291,24 @@ impl AppState {
     Ok(cancelled)
   }
 
-  pub async fn activate(
+  #[cfg(test)]
+  fn reserve_window(
+    &self,
+    window_label: &str,
+    attachment_id: &str,
+  ) -> CommandResult<watch::Receiver<bool>> {
+    let document = self.current_document(window_label)?;
+    self.reserve_document(window_label, &document, attachment_id)
+  }
+
+  pub fn activate(
     &self,
     window_label: &str,
     attachment_id: &str,
     actor: Arc<AttachmentActor>,
     resume_attachment_id: Option<&str>,
   ) -> CommandResult<()> {
-    let mut registry = self.registry.lock().await;
+    let mut registry = self.registry.lock().unwrap();
     let Some(slots) = registry.by_window.get_mut(window_label) else {
       return Err(CommandErrorDto::new(
         "attachment_reservation_lost",
@@ -316,8 +337,8 @@ impl AppState {
     Ok(())
   }
 
-  pub async fn release(&self, window_label: &str, attachment_id: &str) {
-    let mut registry = self.registry.lock().await;
+  pub fn release(&self, window_label: &str, attachment_id: &str) {
+    let mut registry = self.registry.lock().unwrap();
     let should_remove = match registry
       .by_window
       .get(window_label)
@@ -338,12 +359,12 @@ impl AppState {
     }
   }
 
-  pub async fn actor(
+  pub fn actor(
     &self,
     window_label: &str,
     attachment_id: &str,
   ) -> CommandResult<Arc<AttachmentActor>> {
-    let registry = self.registry.lock().await;
+    let registry = self.registry.lock().unwrap();
     let actor = match registry
       .by_window
       .get(window_label)
@@ -370,45 +391,6 @@ impl AppState {
     }
     Ok(Arc::clone(actor))
   }
-
-  async fn detach_window(&self, window_label: &str) {
-    let slots = self
-      .registry
-      .lock()
-      .await
-      .by_window
-      .remove(window_label)
-      .unwrap_or_default();
-    for slot in slots.into_values() {
-      match slot {
-        AttachmentSlot::Opening { cancel, .. } => {
-          let _ = cancel.send(true);
-        }
-        AttachmentSlot::Active(actor) => {
-          let _ignored = actor.control.detach().await;
-        }
-        AttachmentSlot::Resumable(_) => {}
-      }
-    }
-  }
-}
-
-pub fn register_main_window_cleanup(app: &tauri::App) {
-  let Some(window) = app.get_webview_window("main") else {
-    return;
-  };
-  let state = app.state::<AppState>().inner().clone();
-  let window_label = window.label().to_owned();
-  window.on_window_event(move |event| {
-    if matches!(event, tauri::WindowEvent::Destroyed) {
-      crate::ssh_auth::cancel_window(&window_label);
-      let state = state.clone();
-      let window_label = window_label.clone();
-      tauri::async_runtime::spawn(async move {
-        state.detach_window(&window_label).await;
-      });
-    }
-  });
 }
 
 impl AttachmentActor {
@@ -429,6 +411,8 @@ impl AttachmentActor {
       pending: Mutex::new(None),
       pending_changed: Notify::new(),
       detaching: AtomicBool::new(false),
+      renderer_retired: watch::channel(false).0,
+      abort_bridge: Notify::new(),
       closed: AtomicBool::new(false),
       closed_changed: Notify::new(),
     }
@@ -572,8 +556,8 @@ fn acknowledgement_error(error: &AttachmentAcknowledgementError) -> CommandError
 
 async fn detach_controller(
   control: &AttachmentControl,
-  controller: impl Future<Output = Result<ctmux_client::AttachExit, ctmux_client::ClientError>>,
-) -> Result<ctmux_client::AttachExit, ctmux_client::ClientError> {
+  controller: impl Future<Output = AttachmentOutcome>,
+) -> AttachmentOutcome {
   tokio::pin!(controller);
   // The bounded command queue may be full, including before run() is first
   // polled. Keep its consumer running while requesting cleanup.
@@ -586,11 +570,24 @@ async fn detach_controller(
 pub async fn forward_attachment_events(
   state: AppState,
   actor: Arc<AttachmentActor>,
+  events: AttachmentEvents,
+  channel: Channel<AttachmentEventDto>,
+  controller: impl Future<Output = AttachmentOutcome>,
+) {
+  tokio::select! {
+    biased;
+    () = actor.abort_bridge.notified() => {}
+    () = drive_attachment_bridge(&state, &actor, events, channel, controller) => {}
+  }
+  actor.mark_closed();
+}
+
+async fn drive_attachment_bridge(
+  state: &AppState,
+  actor: &Arc<AttachmentActor>,
   mut events: AttachmentEvents,
   channel: Channel<AttachmentEventDto>,
-  controller: impl std::future::Future<
-    Output = Result<ctmux_client::AttachExit, ctmux_client::ClientError>,
-  >,
+  controller: impl Future<Output = AttachmentOutcome>,
 ) {
   tokio::pin!(controller);
 
@@ -600,13 +597,17 @@ pub async fn forward_attachment_events(
     .map(|identity| cache_writer::CacheWriter::new(identity, actor.control.clone()));
   let mut observations = observation::Observations::default();
   let mut bridge_error = None;
-  let mut statistics_interval = interval(statistics::INTERVAL);
-  statistics_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+  let mut statistics_interval = statistics::sampling_interval();
+  let mut retired = actor.renderer_retired.subscribe();
   let outcome = loop {
+    if *retired.borrow() {
+      break drain_without_renderer(&mut events, cache_writer.as_ref(), &mut controller).await;
+    }
     if actor.has_pending_presentation().await {
       tokio::select! {
+        _ = retired.changed() => {},
         result = &mut controller => break result,
-        result = statistics::wait_for_presentation(&actor, &channel, &mut statistics_interval, false) => {
+        result = statistics::wait_for_presentation(actor, &channel, &mut statistics_interval, false) => {
           if let Err(error) = result {
             bridge_error = Some(error);
             break detach_controller(&actor.control, &mut controller).await;
@@ -618,8 +619,9 @@ pub async fn forward_attachment_events(
 
     tokio::select! {
       biased;
+      _ = retired.changed() => {}
       _ = statistics_interval.tick() => {
-        if let Err(error) = statistics::publish(&actor, &channel).await {
+        if let Err(error) = statistics::publish(actor, &channel).await {
           bridge_error = Some(error);
           break detach_controller(&actor.control, &mut controller).await;
         }
@@ -635,7 +637,7 @@ pub async fn forward_attachment_events(
         if let Some(cache_writer) = &cache_writer {
           cache_writer.enqueue(&event);
         }
-        let forwarding = forward_event(&actor, &channel, event);
+        let forwarding = forward_event(actor, &channel, event);
         tokio::pin!(forwarding);
         let forwarded = tokio::select! {
           result = &mut forwarding => result,
@@ -657,29 +659,76 @@ pub async fn forward_attachment_events(
   };
 
   let mut require_checkpoint = actor.has_pending_presentation().await;
-  if bridge_error.is_none() {
+  if !*retired.borrow() && bridge_error.is_none() {
     // A completed controller has already queued all final frames. Keep the
     // actor available for their renderer acknowledgements and deliver Ended
     // before publishing closure. The remote resume cursor cannot account for
     // these locally completed presentations, so abnormal reconnects still
     // require a checkpoint.
-    match forward_buffered_events(
-      &actor,
+    let draining = forward_buffered_events(
+      actor,
       &mut events,
       &channel,
       cache_writer.as_ref(),
       &mut observations,
       &mut statistics_interval,
-    )
-    .await
-    {
-      Ok(rendered_after_close) => require_checkpoint |= rendered_after_close,
-      Err(error) => bridge_error = Some(error),
+    );
+    tokio::select! {
+      _ = retired.changed() => {},
+      result = draining => match result {
+        Ok(rendered_after_close) => require_checkpoint |= rendered_after_close,
+        Err(error) => bridge_error = Some(error),
+      }
     }
   }
   actor.clear_pending().await;
+  finish_attachment_cache(actor, &channel, cache_writer).await;
+  if *retired.borrow() {
+    return;
+  }
+  // A timeout/disconnect is not new contact. Flush only the last incoming time.
+  let _ignored = publish_observation(&actor.attachment_id, &channel, observations.flush());
+  let _ignored = statistics::publish(actor, &channel).await;
+  finish_attachment_bridge(
+    state,
+    actor,
+    &channel,
+    outcome,
+    bridge_error,
+    require_checkpoint,
+  );
+}
+
+async fn drain_without_renderer(
+  events: &mut AttachmentEvents,
+  cache_writer: Option<&cache_writer::CacheWriter>,
+  controller: impl Future<Output = AttachmentOutcome>,
+) -> AttachmentOutcome {
+  tokio::pin!(controller);
+  // Consume queued output while waiting for the peer's Detach reply.
+  loop {
+    tokio::select! {
+      result = &mut controller => return result,
+      event = events.recv() => match event {
+        Some(event) => {
+          if let Some(cache_writer) = cache_writer {
+            cache_writer.enqueue(&event);
+          }
+        }
+        None => return controller.await,
+      }
+    }
+  }
+}
+
+async fn finish_attachment_cache(
+  actor: &AttachmentActor,
+  channel: &Channel<AttachmentEventDto>,
+  cache_writer: Option<cache_writer::CacheWriter>,
+) {
   if let Some(cache_writer) = cache_writer
     && let Err(error) = cache_writer.finish().await
+    && !*actor.renderer_retired.borrow()
   {
     let _ignored = channel.send(AttachmentEventDto::ServerError {
       attachment_id: actor.attachment_id.clone(),
@@ -687,25 +736,13 @@ pub async fn forward_attachment_events(
       message: error.message,
     });
   }
-  // A timeout/disconnect is not new contact. Flush only the last incoming time.
-  let _ignored = publish_observation(&actor.attachment_id, &channel, observations.flush());
-  let _ignored = statistics::publish(&actor, &channel).await;
-  finish_attachment_bridge(
-    &state,
-    &actor,
-    &channel,
-    outcome,
-    bridge_error,
-    require_checkpoint,
-  )
-  .await;
 }
 
-async fn finish_attachment_bridge(
+fn finish_attachment_bridge(
   state: &AppState,
   actor: &Arc<AttachmentActor>,
   channel: &Channel<AttachmentEventDto>,
-  outcome: Result<ctmux_client::AttachExit, ctmux_client::ClientError>,
+  outcome: AttachmentOutcome,
   bridge_error: Option<CommandErrorDto>,
   require_checkpoint: bool,
 ) {
@@ -716,7 +753,7 @@ async fn finish_attachment_bridge(
     );
   // The renderer can open the replacement as soon as it receives closure.
   if disconnected {
-    state.finish_attachment(actor, true).await;
+    state.finish_attachment(actor, true);
   }
   if let Some(error) = bridge_error {
     let _ignored = channel.send(AttachmentEventDto::attachment_error(
@@ -743,9 +780,8 @@ async fn finish_attachment_bridge(
     }
   }
   if !disconnected {
-    state.finish_attachment(actor, false).await;
+    state.finish_attachment(actor, false);
   }
-  actor.mark_closed();
 }
 
 async fn forward_buffered_events(
@@ -1051,10 +1087,9 @@ mod tests {
         .with_resume(&attached),
       );
       let state = AppState::default();
-      state.reserve_window("main", "owner").await.unwrap();
+      state.reserve_window("main", "owner").unwrap();
       state
         .activate("main", "owner", Arc::clone(&actor), None)
-        .await
         .unwrap();
       let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
       let channel = Channel::new(move |body| {
@@ -1081,9 +1116,12 @@ mod tests {
             renderer_actor.acknowledge(event_id).await.unwrap();
           }
           if event["event_type"] == "attachment_exited" {
-            let resume = renderer_state
-              .resume_attachment("main", "owner", &ConnectionTargetDto::Local, "terminal")
-              .await;
+            let resume = renderer_state.resume_attachment(
+              "main",
+              "owner",
+              &ConnectionTargetDto::Local,
+              "terminal",
+            );
             assert_eq!(resume.is_some(), !natural_exit);
           }
           delivered.push(event);
@@ -1219,7 +1257,7 @@ mod tests {
       .unwrap();
     tokio::time::advance(std::time::Duration::from_secs(29)).await;
     let channel = Channel::new(|_| Ok(()));
-    let mut interval = interval(statistics::INTERVAL);
+    let mut interval = statistics::sampling_interval();
     let error = timeout(
       std::time::Duration::from_secs(2),
       statistics::wait_for_presentation(&actor, &channel, &mut interval, true),
@@ -1426,17 +1464,17 @@ mod tests {
   #[tokio::test]
   async fn opening_and_releasing_a_pane_preserves_sibling_reservations() {
     let state = AppState::default();
-    let first = state.reserve_window("main", "first").await.unwrap();
+    let first = state.reserve_window("main", "first").unwrap();
     state
       .open_attachment("main", "second", || Ok(()), async { Ok(()) })
       .await
       .unwrap();
     assert!(!*first.borrow());
-    assert_eq!(state.registry.lock().await.by_window["main"].len(), 2);
-    state.release("main", "second").await;
+    assert_eq!(state.registry.lock().unwrap().by_window["main"].len(), 2);
+    state.release("main", "second");
     assert!(!*first.borrow());
-    assert_eq!(state.registry.lock().await.by_window["main"].len(), 1);
-    state.cancel_opening("main", "first").await;
+    assert_eq!(state.registry.lock().unwrap().by_window["main"].len(), 1);
+    state.cancel_opening("main", "first");
     assert!(*first.borrow());
   }
 
@@ -1464,20 +1502,17 @@ mod tests {
         .with_resume(&attached),
     );
     let state = AppState::default();
-    state.reserve_window("main", "old").await.unwrap();
+    state.reserve_window("main", "old").unwrap();
     state
       .activate("main", "old", Arc::clone(&actor), None)
-      .await
       .unwrap();
     assert_eq!(
-      state
-        .resume_attachment("main", "old", &target, "terminal")
-        .await,
+      state.resume_attachment("main", "old", &target, "terminal"),
       None
     );
-    state.finish_attachment(&actor, true).await;
+    state.finish_attachment(&actor, true);
     assert_eq!(
-      state.actor("main", "old").await.err().unwrap().code,
+      state.actor("main", "old").err().unwrap().code,
       "attachment_closing"
     );
 
@@ -1497,22 +1532,18 @@ mod tests {
       ("main", "terminal", &different_identity),
     ] {
       assert_eq!(
-        state
-          .resume_attachment(window, "old", target, terminal)
-          .await,
+        state.resume_attachment(window, "old", target, terminal),
         None
       );
     }
     assert_eq!(
-      state
-        .resume_attachment("main", "old", &target, "terminal")
-        .await,
+      state.resume_attachment("main", "old", &target, "terminal"),
       Some((pinned, "token".into())),
     );
 
     state.detach_attachment("main", "old").await.unwrap();
     state.detach_attachment("main", "old").await.unwrap();
-    assert!(state.registry.lock().await.by_window.is_empty());
+    assert!(state.registry.lock().unwrap().by_window.is_empty());
   }
 
   #[tokio::test]
@@ -1534,37 +1565,31 @@ mod tests {
       control,
     ));
     let state = AppState::default();
-    state.reserve_window("main", "old").await.unwrap();
+    state.reserve_window("main", "old").unwrap();
     state
       .activate("main", "old", Arc::clone(&actor), None)
-      .await
       .unwrap();
-    state.finish_attachment(&actor, true).await;
+    state.finish_attachment(&actor, true);
 
-    let _cancelled = state.reserve_window("main", "new").await.unwrap();
-    state.cancel_opening("main", "new").await;
+    let _cancelled = state.reserve_window("main", "new").unwrap();
+    state.cancel_opening("main", "new");
     let error = state
       .activate("main", "new", Arc::clone(&replacement), Some("old"))
-      .await
       .unwrap_err();
     assert_eq!(error.code, "attachment_cancelled");
-    state.release("main", "new").await;
+    state.release("main", "new");
     assert!(
       state
         .resume_attachment("main", "old", &target, "terminal")
-        .await
         .is_some()
     );
 
-    state.reserve_window("main", "new").await.unwrap();
+    state.reserve_window("main", "new").unwrap();
     state
       .activate("main", "new", replacement, Some("old"))
-      .await
       .unwrap();
     assert_eq!(
-      state
-        .resume_attachment("main", "old", &target, "terminal")
-        .await,
+      state.resume_attachment("main", "old", &target, "terminal"),
       None
     );
   }
@@ -1572,14 +1597,21 @@ mod tests {
   #[tokio::test]
   async fn closing_a_window_cancels_all_its_panes_only() {
     let state = AppState::default();
-    let first = state.reserve_window("main", "first").await.unwrap();
-    let second = state.reserve_window("main", "second").await.unwrap();
-    let other = state.reserve_window("other", "first").await.unwrap();
-    state.detach_window("main").await;
+    let first = state.reserve_window("main", "first").unwrap();
+    let second = state.reserve_window("main", "second").unwrap();
+    let other = state.reserve_window("other", "first").unwrap();
+    state.retire_attachment_window("main").await;
     assert!(*first.borrow());
     assert!(*second.borrow());
     assert!(!*other.borrow());
-    assert!(!state.registry.lock().await.by_window.contains_key("main"));
+    assert!(
+      !state
+        .registry
+        .lock()
+        .unwrap()
+        .by_window
+        .contains_key("main")
+    );
   }
 
   #[tokio::test]
@@ -1613,7 +1645,7 @@ mod tests {
         .await
     });
     ready.await.unwrap();
-    state.cancel_opening("main", "stalled").await;
+    state.cancel_opening("main", "stalled");
     let error = timeout(std::time::Duration::from_secs(1), opening)
       .await
       .unwrap()
@@ -1638,33 +1670,127 @@ mod tests {
   #[tokio::test]
   async fn opening_cancellation_is_scoped_to_the_window_and_current_id() {
     let state = AppState::default();
-    let cancelled = state.reserve_window("main", "current").await.unwrap();
-    state.cancel_opening("secondary", "current").await;
-    state.cancel_opening("main", "old").await;
+    let cancelled = state.reserve_window("main", "current").unwrap();
+    state.cancel_opening("secondary", "current");
+    state.cancel_opening("main", "old");
     assert!(!*cancelled.borrow());
-    state.cancel_opening("main", "current").await;
+    state.cancel_opening("main", "current");
     assert!(*cancelled.borrow());
-    state.release("main", "current").await;
-    let replacement = state.reserve_window("main", "replacement").await.unwrap();
-    state.cancel_opening("main", "current").await;
+    state.release("main", "current");
+    let replacement = state.reserve_window("main", "replacement").unwrap();
+    state.cancel_opening("main", "current");
     assert!(!*replacement.borrow());
   }
 
   #[tokio::test]
-  async fn window_cleanup_cancels_its_pending_open() {
+  async fn window_close_and_reload_fence_queued_opens() {
+    for reload in [false, true] {
+      let state = AppState::default();
+      let transition = state.window_transition("main");
+      let transition_guard = transition.lock().await;
+      let opening = state.open_attachment(
+        "main",
+        "queued",
+        || panic!("stale open published its ID"),
+        async { Ok(()) },
+      );
+      tokio::pin!(opening);
+      tokio::select! {
+        biased;
+        _ = &mut opening => panic!("open skipped the transition lock"),
+        () = std::future::ready(()) => {}
+      }
+
+      if reload {
+        state.attachment_page_started("main");
+      } else {
+        state.retire_attachment_window("main").await;
+      }
+      drop(transition_guard);
+      assert_eq!(opening.await.unwrap_err().code, "attachment_cancelled");
+      assert_eq!(state.reserve_window("main", "fresh").is_ok(), reload);
+    }
+  }
+
+  #[tokio::test]
+  async fn reloading_detaches_the_old_transport_before_opening_a_replacement() {
+    use ctmux_client::{AttachmentController, AttachmentControllerOptions};
+    use ctmux_proto::{ClientMessage, ServerMessage, read_frame, write_frame};
+    let (client, mut peer, attached) = buffered_test_attachment().await;
+    let (controller, control, events) =
+      AttachmentController::new(client, &attached, AttachmentControllerOptions::default()).unwrap();
+    let actor = Arc::new(AttachmentActor::new(
+      "old".into(),
+      "main".into(),
+      ConnectionTargetDto::Local,
+      control,
+    ));
     let state = AppState::default();
-    let cancelled = state.reserve_window("main", "opening").await.unwrap();
-    state.detach_window("main").await;
-    assert!(*cancelled.borrow());
-    assert!(state.reserve_window("main", "next").await.is_ok());
+    state.reserve_window("main", "old").unwrap();
+    state
+      .activate("main", "old", Arc::clone(&actor), None)
+      .unwrap();
+    let (output_sent, mut output) = tokio::sync::mpsc::channel(1);
+    let channel = Channel::new(move |body| {
+      if body.deserialize::<serde_json::Value>().unwrap()["event_type"] == "output" {
+        let _ = output_sent.try_send(());
+      }
+      Ok(())
+    });
+    let bridge = tokio::spawn(forward_attachment_events(
+      state.clone(),
+      actor,
+      events,
+      channel,
+      controller.run(),
+    ));
+    timeout(std::time::Duration::from_secs(2), async {
+      write_frame(
+        &mut peer,
+        &ServerMessage::Output {
+          sequence_start: 0,
+          sequence_end: 4,
+          data: b"test".to_vec(),
+        },
+      )
+      .await
+      .unwrap();
+      assert_eq!(output.recv().await, Some(()));
+      // The old document never acknowledges the event.
+      state.attachment_page_started("main");
+      let replacement = state.open_attachment("main", "new", || Ok(()), async { Ok(()) });
+      tokio::pin!(replacement);
+      tokio::select! {
+        biased;
+        _ = &mut replacement => panic!("replacement opened before the old transport detached"),
+        () = std::future::ready(()) => {}
+      }
+      loop {
+        if read_frame::<_, ClientMessage>(&mut peer)
+          .await
+          .unwrap()
+          .unwrap()
+          == ClientMessage::Detach
+        {
+          break;
+        }
+      }
+      write_frame(&mut peer, &ServerMessage::Detached)
+        .await
+        .unwrap();
+      replacement.await.unwrap();
+      bridge.await.unwrap();
+    })
+    .await
+    .unwrap();
   }
 
   #[tokio::test]
   async fn window_transitions_are_stable_and_window_scoped() {
     let state = AppState::default();
-    let first = state.window_transition("main").await;
-    let same_window = state.window_transition("main").await;
-    let other_window = state.window_transition("secondary").await;
+    let first = state.window_transition("main");
+    let same_window = state.window_transition("main");
+    let other_window = state.window_transition("secondary");
 
     assert!(Arc::ptr_eq(&first, &same_window));
     assert!(!Arc::ptr_eq(&first, &other_window));

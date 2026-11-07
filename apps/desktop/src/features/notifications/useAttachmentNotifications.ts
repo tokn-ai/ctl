@@ -5,16 +5,21 @@ import { useNotificationEnvironment } from "./NotificationContext";
 /** Report from the attachment owner so hidden panes and teardown share one lifecycle. */
 export function useAttachmentNotifications(attachment: Pick<AttachmentActions, "state" | "reconnect" | "connection_attempt">) {
   const registry = useNotificationEnvironment()?.attachments;
-  const lifetime = useMemo(() => ({ owner: registry?.createOwner(), mounted: false }), [registry]);
+  const lifetime = useMemo(() => ({ owner: null as string | null, mounted: false }), [registry]);
   const latest = useRef(attachment);
   latest.current = attachment;
   useEffect(() => {
+    if (!registry) return;
+    lifetime.owner ??= registry.createOwner();
     lifetime.mounted = true;
     return () => {
       lifetime.mounted = false;
       // React StrictMode replays effects without starting a new connection.
       queueMicrotask(() => {
-        if (!lifetime.mounted && lifetime.owner) registry?.remove(lifetime.owner);
+        if (!lifetime.mounted && lifetime.owner) {
+          registry.remove(lifetime.owner);
+          lifetime.owner = null;
+        }
       });
     };
   }, [registry, lifetime]);

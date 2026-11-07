@@ -236,7 +236,7 @@ pub async fn restart_local_daemon(
   let preflight = local_transport::preflight_restart_daemon().await?;
   if preflight.requires_attachment_detach() {
     let window_label = window.label().to_owned();
-    let window_transition = state.window_transition(&window_label).await;
+    let window_transition = state.window_transition(&window_label);
     let _window_transition_guard = window_transition.lock().await;
     state.detach_active_local_window(&window_label).await?;
   }
@@ -282,9 +282,7 @@ pub async fn cancel_attachment_open(
   state: State<'_, AppState>,
   request: AttachmentRequestDto,
 ) -> CommandResult<()> {
-  state
-    .cancel_opening(window.label(), &request.attachment_id)
-    .await;
+  state.cancel_opening(window.label(), &request.attachment_id);
   Ok(())
 }
 
@@ -373,14 +371,12 @@ async fn open_reserved_attachment(
       })
       .with_remote_observation(remote_observation),
   );
-  state
-    .activate(
-      &window_label,
-      &attachment_id,
-      Arc::clone(&actor),
-      replaced_attachment_id,
-    )
-    .await?;
+  state.activate(
+    &window_label,
+    &attachment_id,
+    Arc::clone(&actor),
+    replaced_attachment_id,
+  )?;
 
   tauri::async_runtime::spawn(forward_attachment_events(
     state,
@@ -402,9 +398,8 @@ async fn connect_attachment<'a>(
   let identity = client_identity();
   let fallback_target;
   let target = if let Some(previous_id) = resume_attachment_id
-    && let Some((pinned_target, token)) = state
-      .resume_attachment(window_label, previous_id, target, &request.session)
-      .await
+    && let Some((pinned_target, token)) =
+      state.resume_attachment(window_label, previous_id, target, &request.session)
   {
     let stream = transport::connect(&pinned_target).await?;
     match resume_attach(stream, &identity, token, request.clone()).await {
@@ -413,7 +408,7 @@ async fn connect_attachment<'a>(
         code: ErrorCode::AttachmentResumeRejected,
         ..
       }) => {
-        state.forget_resume(window_label, previous_id).await;
+        state.forget_resume(window_label, previous_id);
       }
       Err(error) => return Err(CommandErrorDto::client(error)),
     }
@@ -447,7 +442,7 @@ pub async fn send_input(
   state: State<'_, AppState>,
   request: SendInputRequestDto,
 ) -> CommandResult<()> {
-  let actor = state.actor(window.label(), &request.attachment_id).await?;
+  let actor = state.actor(window.label(), &request.attachment_id)?;
   let data = decode_input(&request.data_base64)?;
   actor
     .control
@@ -462,7 +457,7 @@ pub async fn resize_attachment(
   state: State<'_, AppState>,
   request: ResizeAttachmentRequestDto,
 ) -> CommandResult<()> {
-  let actor = state.actor(window.label(), &request.attachment_id).await?;
+  let actor = state.actor(window.label(), &request.attachment_id)?;
   let terminal_size = request.terminal_size.into_proto()?;
   actor
     .control
@@ -477,7 +472,7 @@ pub async fn resize_attachment_divider(
   state: State<'_, AppState>,
   request: ResizeAttachmentDividerRequestDto,
 ) -> CommandResult<()> {
-  let actor = state.actor(window.label(), &request.attachment_id).await?;
+  let actor = state.actor(window.label(), &request.attachment_id)?;
   if !actor.control.supports_divider_resize() {
     return Err(CommandErrorDto::new(
       "divider_resize_unsupported",
@@ -497,7 +492,7 @@ pub async fn resize_attachment_pane(
   state: State<'_, AppState>,
   request: ResizeAttachmentPaneRequestDto,
 ) -> CommandResult<()> {
-  let actor = state.actor(window.label(), &request.attachment_id).await?;
+  let actor = state.actor(window.label(), &request.attachment_id)?;
   if !actor.control.supports_pane_resize() {
     return Err(CommandErrorDto::new(
       "pane_resize_unsupported",
@@ -522,7 +517,7 @@ pub async fn set_attachment_view_zoom(
   state: State<'_, AppState>,
   request: SetAttachmentViewZoomRequestDto,
 ) -> CommandResult<()> {
-  let actor = state.actor(window.label(), &request.attachment_id).await?;
+  let actor = state.actor(window.label(), &request.attachment_id)?;
   if !actor.control.supports_view_zoom() {
     return Err(CommandErrorDto::new(
       "view_zoom_unsupported",
@@ -542,7 +537,7 @@ pub async fn acquire_attachment_lease(
   state: State<'_, AppState>,
   request: AttachmentLeaseRequestDto,
 ) -> CommandResult<()> {
-  let actor = state.actor(window.label(), &request.attachment_id).await?;
+  let actor = state.actor(window.label(), &request.attachment_id)?;
   actor
     .control
     .request_lease(request.lease.into())
@@ -556,7 +551,7 @@ pub async fn release_attachment_lease(
   state: State<'_, AppState>,
   request: AttachmentLeaseRequestDto,
 ) -> CommandResult<()> {
-  let actor = state.actor(window.label(), &request.attachment_id).await?;
+  let actor = state.actor(window.label(), &request.attachment_id)?;
   actor
     .control
     .release_lease(request.lease.into())
@@ -570,7 +565,7 @@ pub async fn acknowledge_attachment_event(
   state: State<'_, AppState>,
   request: AcknowledgeAttachmentEventRequestDto,
 ) -> CommandResult<()> {
-  let actor = state.actor(window.label(), &request.attachment_id).await?;
+  let actor = state.actor(window.label(), &request.attachment_id)?;
   actor.acknowledge(&request.event_id).await
 }
 
@@ -580,7 +575,7 @@ pub async fn request_attachment_checkpoint(
   state: State<'_, AppState>,
   request: AttachmentRequestDto,
 ) -> CommandResult<()> {
-  let actor = state.actor(window.label(), &request.attachment_id).await?;
+  let actor = state.actor(window.label(), &request.attachment_id)?;
   actor
     .control
     .request_checkpoint()
@@ -594,11 +589,24 @@ pub async fn detach_attachment(
   state: State<'_, AppState>,
   request: AttachmentRequestDto,
 ) -> CommandResult<()> {
-  let transition = state.window_transition(window.label()).await;
+  let transition = state.window_transition(window.label());
   let _transition_guard = transition.lock().await;
   state
     .detach_attachment(window.label(), &request.attachment_id)
     .await
+}
+
+#[tauri::command]
+pub async fn close_attachment_window(
+  window: WebviewWindow,
+  state: State<'_, AppState>,
+) -> CommandResult<()> {
+  state.retire_attachment_window(window.label()).await;
+  if let Err(error) = window.destroy() {
+    state.reopen_after_close_failure(window.label());
+    return Err(CommandErrorDto::backend(error));
+  }
+  Ok(())
 }
 
 fn client_identity() -> ClientIdentity {

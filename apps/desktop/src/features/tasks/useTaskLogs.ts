@@ -17,6 +17,7 @@ export function useTaskLogs(task: ManagedTask | null) {
     if (!task || !run || (run.definition ?? task.definition).execution_mode !== "background") return;
     let disposed = false;
     let subscription: string | null = null;
+    const abort = new AbortController();
     const append = (stream: "stdout" | "stderr", text: string) => {
       if (!text || disposed) return;
       setLines((previous) => {
@@ -38,8 +39,12 @@ export function useTaskLogs(task: ManagedTask | null) {
       if (event.event_type === "log" && event.run_id === run.run_id) append(event.stream, decoders.current[event.stream].decode(new Uint8Array(event.data), { stream: true }));
       if (event.event_type === "error") setError(event.message);
       if (event.event_type === "finished") { append("stdout", decoders.current.stdout.decode()); append("stderr", decoders.current.stderr.decode()); }
-    }).then((id) => { if (disposed) void cancelTaskLogs(id).catch(() => undefined); else subscription = id; }).catch((failure: unknown) => { if (!disposed) setError(errorMessage(failure)); });
-    return () => { disposed = true; if (subscription) void cancelTaskLogs(subscription).catch(() => undefined); };
+    }, abort.signal).then((id) => { if (disposed) void cancelTaskLogs(id).catch(() => undefined); else subscription = id; }).catch((failure: unknown) => { if (!disposed) setError(errorMessage(failure)); });
+    return () => {
+      disposed = true;
+      abort.abort();
+      if (subscription) void cancelTaskLogs(subscription).catch(() => undefined);
+    };
   }, [task?.task_id, run?.run_id, retry]);
   return { lines, error, truncated, clear: () => { setLines([]); setTruncated(false); }, retry: () => setRetry((value) => value + 1) };
 }

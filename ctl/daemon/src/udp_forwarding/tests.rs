@@ -93,7 +93,7 @@ async fn local_clients_keep_datagram_boundaries_and_cancellation_releases_the_so
   registry.check(&target(), &forward).unwrap();
   registry.cancel(&target(), &forward).await;
   assert!(registry.check(&target(), &forward).is_err());
-  assert!(UdpSocket::bind(address).await.is_ok());
+  assert_socket_released(address).await;
 }
 
 #[cfg(unix)]
@@ -168,16 +168,28 @@ async fn echo_channel_with_pid() -> (Channel, u32) {
   )
 }
 
-#[cfg(unix)]
-async fn assert_released(address: SocketAddr, pids: &[u32]) {
+async fn assert_socket_released(address: SocketAddr) {
   timeout(Duration::from_secs(3), async {
     loop {
-      if let Ok(socket) = UdpSocket::bind(address).await {
-        drop(socket);
-        break;
+      match UdpSocket::bind(address).await {
+        Ok(_) => break,
+        // Another parallel test can claim a released ephemeral port before
+        // this probe. Keep the release check bounded, as with process exit.
+        Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
+          tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        Err(error) => panic!("could not probe the released UDP socket: {error}"),
       }
-      tokio::time::sleep(Duration::from_millis(10)).await;
     }
+  })
+  .await
+  .expect("cancelling UDP ownership must release its socket");
+}
+
+#[cfg(unix)]
+async fn assert_released(address: SocketAddr, pids: &[u32]) {
+  assert_socket_released(address).await;
+  timeout(Duration::from_secs(3), async {
     for pid in pids {
       while Command::new("/bin/kill")
         .args(["-0", &pid.to_string()])
@@ -193,7 +205,7 @@ async fn assert_released(address: SocketAddr, pids: &[u32]) {
     }
   })
   .await
-  .expect("cancelling UDP ownership must release its socket and SSH processes");
+  .expect("cancelling UDP ownership must release its SSH processes");
 }
 
 #[cfg(unix)]
@@ -360,7 +372,7 @@ async fn remote_close_retires_a_peer_and_stale_replies_cannot_reach_its_replacem
   assert_eq!(&bytes[..size], b"second");
   stop.send(()).unwrap();
   relay.await.unwrap().unwrap();
-  assert!(UdpSocket::bind(address).await.is_ok());
+  assert_socket_released(address).await;
 }
 
 #[tokio::test]
@@ -463,5 +475,5 @@ async fn closing_a_peer_releases_full_local_capacity_without_reusing_its_id() {
 
   stop.send(()).unwrap();
   relay.await.unwrap().unwrap();
-  assert!(UdpSocket::bind(address).await.is_ok());
+  assert_socket_released(address).await;
 }

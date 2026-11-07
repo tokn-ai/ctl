@@ -167,6 +167,52 @@ describe("retained terminal content", () => {
     expect(renderer.pendingHistory()).toBe(pending);
     expect(activeTerminal().buffer.normal.getLine(0)?.translateToString(true)).toBe("history 0");
   });
+
+  it("disposes the visible terminal when its last tab is pruned", async () => {
+    const session: SessionSummary = { target: { kind: "local" }, session_id: "closed", name: "closed",
+      status: "running", terminal_size: size, next_sequence: "0" };
+    renderer.selectSession(session);
+    const scoped = renderer.sessionRenderer(session);
+    await scoped.write(encoder.encode("old output"), "10", "0");
+    const terminal = activeTerminal();
+    const dispose = vi.spyOn(terminal, "dispose");
+
+    renderer.retainSessions(new Set());
+    scoped.cancelHistory?.();
+    scoped.invalidateResumeSequence();
+    await scoped.write(encoder.encode("late output"), "21", "10");
+    await vi.waitFor(() => expect(dispose).toHaveBeenCalledOnce());
+    expect(container.querySelector(".xterm")).toBeNull();
+    expect(scoped.hasContent?.()).toBe(false);
+    expect(renderer.resumeSequence()).toBeNull();
+
+    renderer.selectSession(session);
+    await scoped.write(encoder.encode("more stale output"), "38", "21");
+    expect(renderer.hasContent()).toBe(false);
+    expect(activeTerminal()).not.toBe(terminal);
+  });
+
+  it("does not recreate xterm from a stale handle after renderer disposal", async () => {
+    const session: SessionSummary = { target: { kind: "local" }, session_id: "disposed", name: "disposed",
+      status: "running", terminal_size: size, next_sequence: "0" };
+    renderer.selectSession(session);
+    const scoped = renderer.sessionRenderer(session);
+    const stop_observing = scoped.observeDimensions(vi.fn());
+    const disconnect = vi.spyOn(ResizeObserver.prototype, "disconnect");
+    renderer.dispose();
+    stop_observing();
+    expect(disconnect).toHaveBeenCalledTimes(2);
+    const opened = terminals.length;
+
+    scoped.cancelHistory?.();
+    scoped.invalidateResumeSequence();
+    scoped.activateSession(session);
+    scoped.adoptSession(session);
+    await scoped.restoreCheckpoint(size, [], encoder.encode("late checkpoint"), new Uint8Array(), "0");
+    expect(scoped.historyBytes?.()).toBeNull();
+    expect(terminals).toHaveLength(opened);
+    expect(container.querySelector(".xterm")).toBeNull();
+  });
 });
 
 describe("terminal links", () => {

@@ -44,7 +44,7 @@ import {
   sameSshEndpoint,
 } from "../features/workspace/remoteRecovery";
 import { connectionMethodOptions, connectionSettings, expectedHostIdentity, hostFromTarget, hostTarget, isVirtualHost, projectedHostId, tailscaleHostId, promoteHost, updateHostColor, updateHostSettings, workspaceSidebarTargets } from "../features/workspace/workspaceModel";
-import { removableHostCredentials } from "../features/workspace/hostCredentials";
+import { hostRouteSnapshots, removableHostCredentials } from "../features/workspace/hostCredentials";
 import { isHostRouteStep } from "../features/workspace/sshRoute";
 import { CommandPalette } from "../components/commands/CommandPalette";
 import { ArchiveBrowser } from "../components/sessions/ArchiveBrowser";
@@ -112,6 +112,7 @@ import { displayWorkingDirectory } from "../lib/shellState";
 import {
   sessionCache,
   createSession,
+  disconnectSshHost,
   killSession,
   inspectKnownSessions,
   probeSshHost,
@@ -888,9 +889,10 @@ function TerminalWorkbench() {
 
   const removeHost = useCallback(
     async (target: ConnectionTarget) => {
-      if (target.kind === "local" || daemonRestartBlocksInteractions()) {
+      if (target.kind === "local" || !target.host_id || daemonRestartBlocksInteractions()) {
         return;
       }
+      const host_id = target.host_id;
       const dependents = workspace.viewRef.current.hosts.filter((host) =>
         host.connection_methods.some((method) => method.target.gateway_route?.some((step) =>
           isHostRouteStep(step) && step.host_id === target.host_id)));
@@ -902,8 +904,15 @@ function TerminalWorkbench() {
       )) {
         await portForwarding.setEnabled(target, forward, false);
       }
+      const live_targets = [...attachment.states, attachment.state].flatMap(({ session }) =>
+        session ? [session.target] : []);
+      const routes = hostRouteSnapshots(workspace.viewRef.current, live_targets);
+      const removed_routes = routes.filter((route) => route.host_id === host_id);
+      const retained_routes = routes.filter((route) => route.host_id !== host_id);
+      await attachment.disconnectHost(host_id, "Host removed");
+      if (removed_routes.length) await disconnectSshHost(removed_routes, retained_routes);
       for (const credentialTarget of removableHostCredentials(
-        workspace.viewRef.current, target.host_id!, attachment.state.session?.target,
+        workspace.viewRef.current, host_id, attachment.state.session?.target,
       )) {
         await forgetSshCredentials(credentialTarget);
       }
@@ -914,10 +923,6 @@ function TerminalWorkbench() {
       const removingActive = activeTab
         ? sameTarget(activeTab.target, target)
         : false;
-      if (removingActive) {
-        await attachment.detach();
-      }
-
       const nextTargets = targets.filter(
         (candidate) => !sameTarget(candidate, target),
       );

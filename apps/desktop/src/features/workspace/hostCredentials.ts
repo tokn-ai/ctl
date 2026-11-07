@@ -26,20 +26,28 @@ function credentialScope(target: SshConnectionTarget): string {
   ]);
 }
 
+/** Include historical routes that are still represented by a session or tab. */
+export function hostRouteSnapshots(
+  view: WorkspaceView,
+  attachment_targets: readonly ConnectionTarget[] = [],
+): SshConnectionTarget[] {
+  return [
+    ...view.hosts.flatMap((host) => host.connection_methods.map((method) =>
+      hostTarget(host, view.ssh_gateways, method.method_id, view.hosts))),
+    ...view.targets,
+    ...view.sessions.map((session) => session.target),
+    ...view.tabs.map((session) => session.target),
+    ...attachment_targets,
+  ].filter((target): target is SshConnectionTarget => target.kind === "ssh" && !target.unavailable);
+}
+
 /** Delete only scopes that no surviving saved method or live snapshot still uses. */
 export function removableHostCredentials(
   view: WorkspaceView,
   host_id: string,
   attachment_target?: ConnectionTarget,
 ): SshConnectionTarget[] {
-  const targets = [
-    ...view.hosts.flatMap((host) => host.connection_methods.map((method) =>
-      hostTarget(host, view.ssh_gateways, method.method_id, view.hosts))),
-    ...view.targets,
-    ...view.sessions.map((session) => session.target),
-    ...view.tabs.map((session) => session.target),
-    ...(attachment_target ? [attachment_target] : []),
-  ].filter((target): target is SshConnectionTarget => target.kind === "ssh" && !target.unavailable);
+  const targets = hostRouteSnapshots(view, attachment_target ? [attachment_target] : []);
   const shared = new Set(targets
     .filter((target) => target.host_id !== host_id)
     .map(credentialScope));

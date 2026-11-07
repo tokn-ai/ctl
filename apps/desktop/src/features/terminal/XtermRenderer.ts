@@ -19,9 +19,9 @@ const DEFAULT_SCROLLBACK_LINES = 10_000;
 const MAX_TERMINAL_DIMENSION = 65_535;
 
 interface CachedTerminal {
+  identity: symbol;
   container: HTMLElement;
   presenter: TerminalPresenter;
-  owner_key: string | null;
   resume_from: string | null;
   presentation_version: number;
   is_local: boolean;
@@ -47,9 +47,7 @@ export class XtermRenderer {
 
   static forgetRestartedSessions(session_keys: ReadonlySet<string>): void {
     for (const renderer of XtermRenderer.renderers) {
-      const active_affected = [...renderer.sessions].some(([key, terminal]) => session_keys.has(key) && terminal === renderer.active);
       renderer.retainSessions(new Set([...renderer.sessions.keys()].filter((key) => !session_keys.has(key))));
-      if (active_affected) renderer.invalidateResumeSequence();
     }
   }
 
@@ -67,8 +65,11 @@ export class XtermRenderer {
   private cellObserver: ResizeObserver | null = null;
   private cellFrame: number | null = null;
   private readonly cellListeners = new Set<(cell: { width: number; height: number }) => void>();
+  private readonly stopDimensionObservers = new Set<() => void>();
+  private disposed = false;
 
   observeCellDimensions(listener: (cell: { width: number; height: number }) => void): () => void {
+    if (this.disposed) return () => undefined;
     this.cellListeners.add(listener);
     if (!this.cellObserver) {
       this.cellObserver = new ResizeObserver(() => this.scheduleCellMeasurement());
@@ -87,7 +88,7 @@ export class XtermRenderer {
   }
 
   private scheduleCellMeasurement(): void {
-    if (this.cellFrame !== null) return;
+    if (this.disposed || this.cellFrame !== null) return;
     this.cellFrame = requestAnimationFrame(() => {
       this.cellFrame = null;
       const cell = this.cellDimensions();
@@ -95,13 +96,14 @@ export class XtermRenderer {
     });
   }
   private viewport: HTMLElement | null = null;
-  setViewport(viewport: HTMLElement | null): void { this.viewport = viewport; }
-  cellDimensions() { return this.active.presenter.cellDimensions(); }
-  historyBytes(): number | null { return this.active.presenter.historyBytes(); }
-  hasContent(): boolean { return this.active.presenter.hasContent(); }
-  isFocused(): boolean { return this.active.container.contains(document.activeElement); }
+  setViewport(viewport: HTMLElement | null): void { if (!this.disposed) this.viewport = viewport; }
+  cellDimensions() { return this.active?.presenter.cellDimensions() ?? null; }
+  historyBytes(): number | null { return this.active?.presenter.historyBytes() ?? null; }
+  hasContent(): boolean { return this.active?.presenter.hasContent() ?? false; }
+  isFocused(): boolean { return this.active?.container.contains(document.activeElement) ?? false; }
   private readonly sessions = new Map<string, CachedTerminal>();
-  private active: CachedTerminal;
+  private active: CachedTerminal | null;
+  private selected_key: string | null = null;
 
   constructor(
     private readonly container: HTMLElement,
@@ -120,46 +122,61 @@ export class XtermRenderer {
     // owns its stream. Keep its cache in the tab's slot until the tab closes.
     const cache_key = sessionKey(session);
     let selected = session;
-    const terminal = () => this.ensureSession(selected, { cache_key });
+    let bound_identity: symbol | undefined;
+    const current = () => {
+      const cached = this.sessions.get(cache_key);
+      if (!cached || cached.terminal_id !== selected.terminal_id) return null;
+      if (bound_identity !== undefined && cached.identity !== bound_identity) return null;
+      return cached;
+    };
+    const terminal = () => {
+      if (bound_identity === undefined) {
+        // First presentation may populate a background cache. Once the
+        // cache is pruned, only explicit activation may recreate it.
+        const cached = this.ensureSession(selected, { cache_key });
+        bound_identity = cached?.identity;
+        return cached;
+      }
+      return current();
+    };
     const activate = (next: SessionSummary, resolve_root = false) => {
-      const visible = this.active.owner_key === cache_key;
       selected = next;
       const cached = this.ensureSession(next, { cache_key, resolve_root });
-      if (visible) this.showTerminal(cached);
+      bound_identity = cached?.identity;
+      if (cached && this.selected_key === cache_key) this.showTerminal(cache_key, cached);
     };
     return {
       activateSession: (next) => activate(next),
       adoptSession: (next) => activate(next, true),
-      resumeSequence: () => terminal().resume_from,
-      hasContent: () => terminal().presenter.hasContent(),
-      isFocused: () => terminal().container.contains(document.activeElement),
+      resumeSequence: () => current()?.resume_from ?? null,
+      hasContent: () => current()?.presenter.hasContent() ?? false,
+      isFocused: () => current()?.container.contains(document.activeElement) ?? false,
       invalidateResumeSequence: () => {
-        const cached = terminal();
-        cached.presenter.cancelHistory();
-        cached.resume_from = null;
-        cached.presentation_version += 1;
+        const cached = current();
+        if (cached) this.invalidateTerminal(cached);
       },
       write: (data, sequence, sequence_start) => this.applyToTerminal(terminal(), sequence, (presenter) => presenter.write(data, sequence, sequence_start)),
       restoreCheckpoint: (size, history, payload, prefix, sequence, snapshot_id) =>
         this.applyToTerminal(terminal(), sequence, (presenter) => presenter.restoreCheckpoint(size, history, payload, prefix, sequence, snapshot_id)),
-      syncHistory: (snapshot) => terminal().presenter.syncHistory(snapshot),
-      pendingHistory: () => terminal().presenter.pendingHistory(),
-      historyBytes: () => terminal().presenter.historyBytes(),
-      cancelHistory: () => terminal().presenter.cancelHistory(),
+      syncHistory: (snapshot) => current()?.presenter.syncHistory(snapshot) ?? Promise.resolve(false),
+      pendingHistory: () => current()?.presenter.pendingHistory() ?? null,
+      historyBytes: () => current()?.presenter.historyBytes() ?? null,
+      cancelHistory: () => current()?.presenter.cancelHistory(),
       recreate: (size) => this.applyToTerminal(terminal(), null, (presenter) => presenter.recreate(size)),
       resize: (size) => {
         const cached = terminal();
-        return this.applyToTerminal(cached, cached.resume_from, (presenter) => presenter.resize(size));
+        return this.applyToTerminal(cached, cached?.resume_from ?? null, (presenter) => presenter.resize(size));
       },
-      proposeDimensions: () => terminal() === this.active ? this.proposeDimensions() : null,
+      proposeDimensions: () => current() === this.active ? this.proposeDimensions() : null,
       observeDimensions: (listener) => this.observeDimensions((dimensions) => {
-        if (terminal() === this.active) listener(dimensions);
+        if (current() === this.active) listener(dimensions);
       }),
-      focus: () => { if (terminal() === this.active) this.focus(); },
+      focus: () => { if (current() === this.active) this.focus(); },
     };
   }
 
-  private ensureSession(session: SessionSummary, options: { cache_key?: string; resolve_root?: boolean } = {}): CachedTerminal {
+  private ensureSession(session: SessionSummary, options: { cache_key?: string; resolve_root?: boolean } = {}): CachedTerminal | null {
+    if (this.disposed) return null;
     const key = options.cache_key ?? sessionKey(session);
     let terminal = this.sessions.get(key);
     // A root open resolves its pane on the server. Bind that authoritative ID
@@ -174,7 +191,6 @@ export class XtermRenderer {
     }
     if (!terminal) {
       terminal = this.createTerminal(session.terminal_size);
-      terminal.owner_key = key;
       terminal.is_local = session.target.kind === "local";
       terminal.terminal_id = session.terminal_id;
       terminal.container.hidden = true;
@@ -185,23 +201,30 @@ export class XtermRenderer {
 
   /** Display an opened session without replacing its selected terminal or cache. */
   selectSession(session: SessionSummary): void {
-    this.showTerminal(this.sessions.get(sessionKey(session)) ?? this.ensureSession(session));
+    const key = sessionKey(session);
+    const terminal = this.sessions.get(key) ?? this.ensureSession(session, { cache_key: key });
+    if (terminal) this.showTerminal(key, terminal);
   }
 
   activateSession(session: SessionSummary): void {
-    this.showTerminal(this.ensureSession(session));
+    const key = sessionKey(session);
+    const terminal = this.ensureSession(session, { cache_key: key });
+    if (terminal) this.showTerminal(key, terminal);
   }
 
   /** Adopt an open response while preserving an unresolved root's preview. */
   adoptSession(session: SessionSummary): void {
-    this.showTerminal(this.ensureSession(session, { resolve_root: true }));
+    const key = sessionKey(session);
+    const terminal = this.ensureSession(session, { cache_key: key, resolve_root: true });
+    if (terminal) this.showTerminal(key, terminal);
   }
 
-  private showTerminal(terminal: CachedTerminal): void {
+  private showTerminal(key: string, terminal: CachedTerminal): void {
+    this.selected_key = key;
     if (terminal === this.active) return;
-    this.active.container.hidden = true;
-    if (![...this.sessions.values()].includes(this.active)) {
-      this.disposeTerminal(this.active);
+    if (this.active) {
+      this.active.container.hidden = true;
+      if (![...this.sessions.values()].includes(this.active)) this.disposeTerminal(this.active);
     }
     this.active = terminal;
     terminal.container.hidden = false;
@@ -212,22 +235,25 @@ export class XtermRenderer {
   }
 
   resumeSequence(): string | null {
-    return this.active.resume_from;
+    return this.active?.resume_from ?? null;
   }
 
   invalidateResumeSequence(): void {
-    this.active.presenter.cancelHistory();
-    this.active.resume_from = null;
-    this.active.presentation_version += 1;
+    if (this.active) this.invalidateTerminal(this.active);
+  }
+
+  private invalidateTerminal(terminal: CachedTerminal): void {
+    terminal.presenter.cancelHistory();
+    terminal.resume_from = null;
+    terminal.presentation_version += 1;
   }
 
   retainSessions(session_keys: ReadonlySet<string>): void {
     for (const [key, terminal] of this.sessions) {
       if (!session_keys.has(key)) {
         this.sessions.delete(key);
-        // The current view remains visible until the next activation. Removing
-        // it from the cache prevents a closed tab from reusing its cursor.
-        if (terminal !== this.active) this.disposeTerminal(terminal);
+        if (terminal === this.active) this.active = null;
+        this.disposeTerminal(terminal);
       }
     }
   }
@@ -238,10 +264,15 @@ export class XtermRenderer {
       const terminal = this.sessions.get(old_key);
       if (!terminal) continue;
       this.sessions.delete(old_key);
-      if (!this.sessions.has(new_key)) {
-        terminal.owner_key = new_key;
+      const replacement = this.sessions.get(new_key);
+      if (!replacement) {
+        if (this.selected_key === old_key) this.selected_key = new_key;
         this.sessions.set(new_key, terminal);
-      } else if (terminal !== this.active) this.disposeTerminal(terminal);
+      } else if (terminal === this.active) {
+        this.showTerminal(new_key, replacement);
+      } else {
+        this.disposeTerminal(terminal);
+      }
     }
   }
 
@@ -253,7 +284,6 @@ export class XtermRenderer {
           .map(([key]) => key),
       ),
     );
-    if (this.active.is_local) this.invalidateResumeSequence();
   }
 
   write(data: Uint8Array, sequence_end: string, sequence_start?: string): Promise<void> {
@@ -276,12 +306,12 @@ export class XtermRenderer {
   }
 
   syncHistory(snapshot: HistoryPresentation): Promise<boolean> {
-    return this.active.presenter.syncHistory(snapshot);
+    return this.active?.presenter.syncHistory(snapshot) ?? Promise.resolve(false);
   }
 
-  pendingHistory(): Promise<boolean> | null { return this.active.presenter.pendingHistory(); }
+  pendingHistory(): Promise<boolean> | null { return this.active?.presenter.pendingHistory() ?? null; }
 
-  cancelHistory(): void { this.active.presenter.cancelHistory(); }
+  cancelHistory(): void { this.active?.presenter.cancelHistory(); }
 
   recreate(terminalSize: TerminalSize): Promise<void> {
     return this.applyPresentation(null, (presenter) =>
@@ -290,7 +320,7 @@ export class XtermRenderer {
   }
 
   resize(terminalSize: TerminalSize): Promise<void> {
-    return this.applyPresentation(this.active.resume_from, (presenter) =>
+    return this.applyPresentation(this.active?.resume_from ?? null, (presenter) =>
       presenter.resize(terminalSize),
     );
   }
@@ -302,13 +332,14 @@ export class XtermRenderer {
       const dimensions = { columns: Math.floor(this.viewport.clientWidth / cell.width), rows: Math.floor(this.viewport.clientHeight / cell.height) };
       return validDimensions(dimensions) ? dimensions : null;
     }
-    const dimensions = this.active.presenter.proposeDimensions();
+    const dimensions = this.active?.presenter.proposeDimensions() ?? null;
     return validDimensions(dimensions) ? dimensions : null;
   }
 
   observeDimensions(
     onDimensions: (dimensions: ProposedDimensions) => void,
   ): () => void {
+    if (this.disposed) return () => undefined;
     let animationFrame: number | null = null;
     const publish = () => {
       animationFrame = null;
@@ -328,29 +359,38 @@ export class XtermRenderer {
     const stopCellObservation = this.observeCellDimensions(schedule);
     schedule();
 
-    return () => {
+    const stop = () => {
+      if (!this.stopDimensionObservers.delete(stop)) return;
       observer.disconnect();
       stopCellObservation();
       if (animationFrame !== null) {
         cancelAnimationFrame(animationFrame);
       }
     };
+    this.stopDimensionObservers.add(stop);
+    return stop;
   }
 
   focus(): void {
-    this.active.presenter.focus();
+    this.active?.presenter.focus();
   }
 
   dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
     XtermRenderer.renderers.delete(this);
+    for (const stop of this.stopDimensionObservers) stop();
+    this.viewport = null;
     this.cellObserver?.disconnect();
     this.cellObserver = null;
     this.cellListeners.clear();
     if (this.cellFrame !== null) cancelAnimationFrame(this.cellFrame);
     this.cellFrame = null;
     for (const terminal of new Set([...this.sessions.values(), this.active])) {
-      this.disposeTerminal(terminal);
+      if (terminal) this.disposeTerminal(terminal);
     }
+    this.active = null;
+    this.selected_key = null;
     this.sessions.clear();
   }
 
@@ -359,12 +399,12 @@ export class XtermRenderer {
     container.className = "terminal-session";
     this.container.append(container);
     return {
+      identity: Symbol(),
       container,
       presenter: new TerminalPresenter(
         (size, options) => this.createAdapter(container, size, options),
         terminalSize,
       ),
-      owner_key: null,
       resume_from: null,
       presentation_version: 0,
       is_local: false,
@@ -387,10 +427,11 @@ export class XtermRenderer {
   }
 
   private async applyToTerminal(
-    terminal: CachedTerminal,
+    terminal: CachedTerminal | null,
     sequence: string | null,
     operation: (presenter: TerminalPresenter) => Promise<void>,
   ): Promise<void> {
+    if (!terminal) return;
     const version = ++terminal.presentation_version;
     terminal.resume_from = null;
     await operation(terminal.presenter);
@@ -473,10 +514,10 @@ export class XtermRenderer {
     const links = installTerminalLinks(terminal, this.on_open_link, this.on_copy_text);
     if (!options.background) activate();
     terminal.onData((data) => {
-      if (this.active.container === container && mount.parentElement === container) this.onInput(encodeTerminalText(data));
+      if (this.active?.container === container && mount.parentElement === container) this.onInput(encodeTerminalText(data));
     });
     terminal.onBinary((data) => {
-      if (this.active.container === container && mount.parentElement === container) this.onInput(encodeTerminalBinary(data));
+      if (this.active?.container === container && mount.parentElement === container) this.onInput(encodeTerminalBinary(data));
     });
 
     return {

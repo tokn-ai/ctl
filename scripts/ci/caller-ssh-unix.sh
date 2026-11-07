@@ -11,6 +11,7 @@ if [[ "$RUNNER_OS" == Linux ]]; then
   sudo apt-get install --yes --no-install-recommends openssh-server
   sudo mkdir -p /run/sshd
 fi
+cargo build --locked -p ctl-agent -p ctmuxd -p ctl-taskd
 root=$(mktemp -d /tmp/ctl-caller-ssh.XXXXXX)
 port=22379
 ssh_user=$(id -un)
@@ -45,6 +46,8 @@ KbdInteractiveAuthentication no
 UsePAM $pam
 AllowTcpForwarding no
 AllowAgentForwarding no
+MaxSessions 2
+SetEnv "PATH=$PWD/target/debug:$PATH" "CTMUX_RUNTIME_DIR=$root" "CTL_TASKD_RUNTIME_DIR=$root"
 EOF
 sudo /usr/sbin/sshd -t -f "$root/sshd_config"
 sudo /usr/sbin/sshd -f "$root/sshd_config" -E "$root/server.log"
@@ -110,3 +113,8 @@ process.stdout.write(JSON.stringify({ key_user, key_file, server_key, different_
 ' "$ssh_user" "$root/client" "$host_key" "$different_key" "$fingerprint" "$port" "$root/trust-config" |
   cargo test --locked -p ctl-cli --test caller_host_trust \
     native_openssh_requires_host_trust_with_redirected_command_stdin -- --exact --ignored --nocapture
+CTL_TEST_SHARED_SSH_ALIAS=ctl-caller-ci \
+CTL_TEST_SHARED_SSH_CONTROL="$root/master" \
+CTL_TEST_SHARED_SSH_RUNTIME="$root" \
+  cargo test --locked -p ctl-agent --test multiplex \
+    native_ssh_limit_allows_sixteen_views_and_udp_rules_on_one_agent_session -- --exact --ignored --nocapture

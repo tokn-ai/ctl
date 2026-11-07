@@ -3,19 +3,76 @@
 use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use ctl_proto::forwarding::{
   self, Frame, MAX_DATAGRAM_BYTES, MAX_PEERS, PEER_IDLE, Request, Response,
 };
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt as _};
 use tokio::net::UdpSocket;
-use tokio::sync::mpsc;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio::task::{AbortHandle, JoinSet};
 
 const PEER_QUEUE: usize = 8;
 const STREAM_QUEUE: usize = 64;
 // Receive every UDP payload whole before applying the published frame bound.
 const RECEIVE_BUFFER_BYTES: usize = 65_536;
+const SHARED_QUEUED_BYTES: usize = 32 * 1024 * 1024;
+const SHARED_PEERS: usize = 512;
+
+/// One endpoint's UDP allocations stay bounded across all logical services.
+#[derive(Clone)]
+pub(crate) struct UdpBudget {
+  bytes: Arc<Semaphore>,
+  peers: Arc<Semaphore>,
+}
+
+impl UdpBudget {
+  pub(crate) fn shared() -> Self {
+    Self::new(SHARED_QUEUED_BYTES, SHARED_PEERS)
+  }
+
+  fn new(bytes: usize, peers: usize) -> Self {
+    Self {
+      bytes: Arc::new(Semaphore::new(bytes)),
+      peers: Arc::new(Semaphore::new(peers)),
+    }
+  }
+
+  fn acquire_bytes(&self, size: usize) -> Option<OwnedSemaphorePermit> {
+    self
+      .bytes
+      .clone()
+      .try_acquire_many_owned(size.try_into().ok()?)
+      .ok()
+  }
+
+  fn queue(&self, frame: Frame) -> Option<QueuedFrame> {
+    let permit = match &frame {
+      Frame::Datagram { payload, .. } => Some(self.acquire_bytes(payload.len())?),
+      Frame::Close { .. } => None,
+    };
+    Some(QueuedFrame {
+      frame,
+      _permit: permit,
+    })
+  }
+}
+
+struct QueuedFrame {
+  frame: Frame,
+  // Keep payloads charged while queued and until their actual write completes.
+  _permit: Option<OwnedSemaphorePermit>,
+}
+
+impl QueuedFrame {
+  fn close(peer_id: u64) -> Self {
+    Self {
+      frame: Frame::Close { peer_id },
+      _permit: None,
+    }
+  }
+}
 
 /// Serves this process's SSH descriptors without retaining them after EOF.
 ///
@@ -40,6 +97,20 @@ pub async fn serve(
   reader: &mut (impl AsyncRead + Unpin),
   writer: &mut (impl AsyncWrite + Unpin),
 ) -> io::Result<()> {
+  // Standalone forwarding retains its existing per-process queue/peer limits.
+  serve_with_budget(
+    reader,
+    writer,
+    UdpBudget::new(Semaphore::MAX_PERMITS, Semaphore::MAX_PERMITS),
+  )
+  .await
+}
+
+pub(crate) async fn serve_with_budget(
+  reader: &mut (impl AsyncRead + Unpin),
+  writer: &mut (impl AsyncWrite + Unpin),
+  budget: UdpBudget,
+) -> io::Result<()> {
   let socket = tokio::time::timeout(forwarding::STARTUP_TIMEOUT, async {
     writer.write_all(forwarding::PREFACE).await?;
     writer.flush().await?;
@@ -55,10 +126,20 @@ pub async fn serve(
       .await?;
       return Ok::<_, io::Error>(None);
     }
+    let Ok(peer) = budget.peers.clone().try_acquire_owned() else {
+      forwarding::write(
+        writer,
+        &Response::Error {
+          message: "UDP forwarding peer limit reached".into(),
+        },
+      )
+      .await?;
+      return Ok(None);
+    };
     match connect(&request).await {
       Ok(socket) => {
         forwarding::write(writer, &Response::Ready).await?;
-        Ok(Some((protocol, socket)))
+        Ok(Some((protocol, socket, peer)))
       }
       Err(error) => {
         forwarding::write(
@@ -74,13 +155,14 @@ pub async fn serve(
   })
   .await
   .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "UDP forwarding setup timed out"))??;
-  let Some((protocol, socket)) = socket else {
+  let Some((protocol, socket, peer)) = socket else {
     return Ok(());
   };
   if protocol == forwarding::CONTRACT_V1_0_1 {
-    relay(reader, writer, &socket).await
+    let _peer = peer;
+    relay(reader, writer, &socket, &budget).await
   } else {
-    relay_multiplexed(reader, writer, socket).await
+    relay_multiplexed(reader, writer, socket, &budget, peer).await
   }
 }
 
@@ -111,9 +193,13 @@ async fn relay(
   reader: &mut (impl AsyncRead + Unpin),
   writer: &mut (impl AsyncWrite + Unpin),
   socket: &UdpSocket,
+  budget: &UdpBudget,
 ) -> io::Result<()> {
   let upload = async {
     while let Some(bytes) = forwarding::read_datagram(reader).await? {
+      let Some(_permit) = budget.acquire_bytes(bytes.len()) else {
+        continue;
+      };
       socket.send(&bytes).await?;
     }
     Ok::<_, io::Error>(())
@@ -122,6 +208,9 @@ async fn relay(
     let mut buffer = vec![0; MAX_DATAGRAM_BYTES + 1];
     loop {
       let count = socket.recv(&mut buffer).await?;
+      let Some(_permit) = budget.acquire_bytes(count) else {
+        continue;
+      };
       forwarding::write_datagram(writer, &buffer[..count]).await?;
     }
     #[allow(unreachable_code)]
@@ -136,7 +225,7 @@ async fn relay(
 }
 
 struct Peer {
-  sender: mpsc::Sender<Vec<u8>>,
+  sender: mpsc::Sender<QueuedFrame>,
   abort: AbortHandle,
 }
 
@@ -144,11 +233,16 @@ async fn relay_multiplexed(
   reader: &mut (impl AsyncRead + Unpin),
   writer: &mut (impl AsyncWrite + Unpin),
   socket: UdpSocket,
+  budget: &UdpBudget,
+  initial_permit: OwnedSemaphorePermit,
 ) -> io::Result<()> {
   let (input, packets) = mpsc::channel(STREAM_QUEUE);
-  let (output, mut replies) = mpsc::channel(STREAM_QUEUE);
+  let (output, mut replies) = mpsc::channel::<QueuedFrame>(STREAM_QUEUE);
   let receive = async {
     while let Some(packet) = forwarding::read_packet(reader).await? {
+      let Some(packet) = budget.queue(packet) else {
+        continue;
+      };
       if input.send(packet).await.is_err() {
         break;
       }
@@ -157,7 +251,7 @@ async fn relay_multiplexed(
   };
   let send = async {
     while let Some(packet) = replies.recv().await {
-      forwarding::write_packet(writer, &packet).await?;
+      forwarding::write_packet(writer, &packet.frame).await?;
     }
     Ok(())
   };
@@ -166,17 +260,19 @@ async fn relay_multiplexed(
   tokio::select! {
     result = receive => result,
     result = send => result,
-    result = manage_peers(socket, packets, output) => result,
+    result = manage_peers(socket, packets, output, budget, initial_permit) => result,
   }
 }
 
 async fn manage_peers(
   socket: UdpSocket,
-  mut packets: mpsc::Receiver<Frame>,
-  output: mpsc::Sender<Frame>,
+  mut packets: mpsc::Receiver<QueuedFrame>,
+  output: mpsc::Sender<QueuedFrame>,
+  budget: &UdpBudget,
+  initial_permit: OwnedSemaphorePermit,
 ) -> io::Result<()> {
   let address = socket.peer_addr()?;
-  let mut initial = Some(socket);
+  let mut initial = Some((socket, initial_permit));
   let mut highest_peer_id = 0;
   let mut peers: HashMap<u64, Peer> = HashMap::new();
   let mut tasks = JoinSet::new();
@@ -193,48 +289,56 @@ async fn manage_peers(
         };
         if let Some(peer_id) = peer_id
           && peers.remove(&peer_id).is_some()
-          && output.send(Frame::Close { peer_id }).await.is_err()
+          && output.send(QueuedFrame::close(peer_id)).await.is_err()
         {
           break;
         }
       },
-      packet = packets.recv() => match packet {
-        Some(Frame::Close { peer_id }) => {
-          if let Some(peer) = peers.remove(&peer_id) { peer.abort.abort(); }
-        },
-        Some(Frame::Datagram { peer_id, payload }) => {
-          if let Some(peer) = peers.get(&peer_id) {
-            // UDP traffic is lossy under load; one slow destination must not
-            // stall every association or allocate an unbounded packet queue.
-            let _ = peer.sender.try_send(payload);
+      packet = packets.recv() => {
+        let Some(packet) = packet else { break; };
+        let peer_id = match &packet.frame {
+          Frame::Close { peer_id } => {
+            if let Some(peer) = peers.remove(peer_id) { peer.abort.abort(); }
             continue;
-          }
-          // IDs are strictly increasing when an association is created. A
-          // delayed frame cannot resurrect a closed peer or reuse its socket.
-          if peer_id <= highest_peer_id || peers.len() >= MAX_PEERS {
-            highest_peer_id = highest_peer_id.max(peer_id);
-            if output.send(Frame::Close { peer_id }).await.is_err() { break; }
-            continue;
-          }
-          highest_peer_id = peer_id;
-          let socket = if let Some(socket) = initial.take() {
-            socket
-          } else if let Ok(socket) = connect_address(address).await {
-            socket
-          } else {
-            if output.send(Frame::Close { peer_id }).await.is_err() { break; }
+          },
+          Frame::Datagram { peer_id, .. } => *peer_id,
+        };
+        if let Some(peer) = peers.get(&peer_id) {
+          // UDP traffic is lossy under load; one slow destination must not
+          // stall every association or allocate an unbounded packet queue.
+          let _ = peer.sender.try_send(packet);
+          continue;
+        }
+        // IDs are strictly increasing when an association is created. A
+        // delayed frame cannot resurrect a closed peer or reuse its socket.
+        if peer_id <= highest_peer_id || peers.len() >= MAX_PEERS {
+          highest_peer_id = highest_peer_id.max(peer_id);
+          if output.send(QueuedFrame::close(peer_id)).await.is_err() { break; }
+          continue;
+        }
+        highest_peer_id = peer_id;
+        let (socket, permit) = if let Some(initial) = initial.take() {
+          initial
+        } else {
+          let Ok(permit) = budget.peers.clone().try_acquire_owned() else {
+            if output.send(QueuedFrame::close(peer_id)).await.is_err() { break; }
             continue;
           };
-          let (sender, receiver) = mpsc::channel(PEER_QUEUE);
-          let _ = sender.try_send(payload);
-          let output = output.clone();
-          let abort = tasks.spawn(async move {
-            let _ = relay_peer(peer_id, socket, receiver, &output).await;
-            peer_id
-          });
-          peers.insert(peer_id, Peer { sender, abort });
-        },
-        None => break,
+          let Ok(socket) = connect_address(address).await else {
+            if output.send(QueuedFrame::close(peer_id)).await.is_err() { break; }
+            continue;
+          };
+          (socket, permit)
+        };
+        let (sender, receiver) = mpsc::channel(PEER_QUEUE);
+        let _ = sender.try_send(packet);
+        let output = output.clone();
+        let budget = budget.clone();
+        let abort = tasks.spawn(async move {
+          let _ = relay_peer(peer_id, socket, receiver, &output, &budget, permit).await;
+          peer_id
+        });
+        peers.insert(peer_id, Peer { sender, abort });
       },
     }
   }
@@ -245,8 +349,10 @@ async fn manage_peers(
 async fn relay_peer(
   peer_id: u64,
   socket: UdpSocket,
-  mut packets: mpsc::Receiver<Vec<u8>>,
-  output: &mpsc::Sender<Frame>,
+  mut packets: mpsc::Receiver<QueuedFrame>,
+  output: &mpsc::Sender<QueuedFrame>,
+  budget: &UdpBudget,
+  _peer_permit: OwnedSemaphorePermit,
 ) -> io::Result<()> {
   let mut buffer = vec![0; RECEIVE_BUFFER_BYTES];
   let mut deadline = tokio::time::Instant::now() + PEER_IDLE;
@@ -255,14 +361,19 @@ async fn relay_peer(
       () = tokio::time::sleep_until(deadline) => return Ok(()),
       packet = packets.recv() => {
         let Some(packet) = packet else { return Ok(()); };
-        socket.send(&packet).await?;
+        if let Frame::Datagram { payload, .. } = &packet.frame {
+          socket.send(payload).await?;
+        }
         deadline = tokio::time::Instant::now() + PEER_IDLE;
       },
       received = socket.recv(&mut buffer) => {
         let size = received?;
         if size > MAX_DATAGRAM_BYTES { continue; }
         deadline = tokio::time::Instant::now() + PEER_IDLE;
-        let packet = Frame::Datagram { peer_id, payload: buffer[..size].to_vec() };
+        let Some(packet) = budget.queue(Frame::Datagram {
+          peer_id,
+          payload: buffer[..size].to_vec(),
+        }) else { continue; };
         if matches!(output.try_send(packet), Err(mpsc::error::TrySendError::Closed(_))) {
           return Ok(());
         }
@@ -294,6 +405,20 @@ mod tests {
   ) -> (
     tokio::io::ReadHalf<tokio::io::DuplexStream>,
     tokio::io::WriteHalf<tokio::io::DuplexStream>,
+  ) {
+    let (reader, writer, response) = request_for(stream, port, multiplexed).await;
+    assert!(matches!(response, Response::Ready));
+    (reader, writer)
+  }
+
+  async fn request_for(
+    stream: tokio::io::DuplexStream,
+    port: u16,
+    multiplexed: bool,
+  ) -> (
+    tokio::io::ReadHalf<tokio::io::DuplexStream>,
+    tokio::io::WriteHalf<tokio::io::DuplexStream>,
+    Response,
   ) {
     let (mut reader, mut writer) = tokio::io::split(stream);
     let mut preface = vec![0; forwarding::PREFACE.len()];
@@ -327,11 +452,150 @@ mod tests {
     )
     .await
     .unwrap();
-    assert!(matches!(
-      forwarding::read::<Response>(&mut reader).await.unwrap(),
-      Response::Ready
-    ));
-    (reader, writer)
+    let response = forwarding::read::<Response>(&mut reader).await.unwrap();
+    (reader, writer, response)
+  }
+
+  async fn wait_for_permits(semaphore: &Semaphore, expected: usize) {
+    tokio::time::timeout(Duration::from_secs(3), async {
+      while semaphore.available_permits() != expected {
+        tokio::task::yield_now().await;
+      }
+    })
+    .await
+    .unwrap();
+  }
+
+  #[tokio::test]
+  async fn idle_legacy_setup_reserves_shared_socket_capacity_without_affecting_siblings() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+      let budget = UdpBudget::new(128, 1);
+      let destination = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+      let port = destination.local_addr().unwrap().port();
+      let mut active = None;
+      let mut servers = Vec::new();
+      for multiplexed in [false, true] {
+        let (client, server) = tokio::io::duplex(1024);
+        let shared = budget.clone();
+        servers.push(tokio::spawn(async move {
+          let (mut reader, mut writer) = tokio::io::split(server);
+          serve_with_budget(&mut reader, &mut writer, shared)
+            .await
+            .unwrap();
+        }));
+        let (reader, writer, response) = request_for(client, port, multiplexed).await;
+        if multiplexed {
+          assert!(matches!(response, Response::Error { .. }));
+        } else {
+          assert!(matches!(response, Response::Ready));
+          active = Some((reader, writer));
+        }
+      }
+      // Rejecting new work leaves the existing legacy service usable.
+      let (mut reader, mut writer) = active.unwrap();
+      forwarding::write_datagram(&mut writer, &[9]).await.unwrap();
+      let (count, address) = destination.recv_from(&mut [0; 16]).await.unwrap();
+      assert_eq!(count, 1);
+      destination.send_to(&[7], address).await.unwrap();
+      assert_eq!(
+        forwarding::read_datagram(&mut reader).await.unwrap(),
+        Some(vec![7])
+      );
+      writer.shutdown().await.unwrap();
+      for server in servers {
+        server.await.unwrap();
+      }
+      wait_for_permits(&budget.peers, 1).await;
+      wait_for_permits(&budget.bytes, 128).await;
+    })
+    .await
+    .unwrap();
+  }
+
+  #[tokio::test]
+  async fn shared_budget_bounds_blocked_writes_and_peers_without_blocking_close() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+      let budget = UdpBudget::new(128, 2);
+      let destination = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+      let port = destination.local_addr().unwrap().port();
+      let mut clients = Vec::new();
+      let mut servers = Vec::new();
+      let mut addresses = Vec::new();
+      for _ in 0..2 {
+        let (client, server) = tokio::io::duplex(64);
+        let budget = budget.clone();
+        servers.push(tokio::spawn(async move {
+          let (mut reader, mut writer) = tokio::io::split(server);
+          serve_with_budget(&mut reader, &mut writer, budget)
+            .await
+            .unwrap();
+        }));
+        let (reader, mut writer) = open_for(client, port, true).await;
+        forwarding::write_packet(
+          &mut writer,
+          &Frame::Datagram {
+            peer_id: 1,
+            payload: vec![],
+          },
+        )
+        .await
+        .unwrap();
+        let (count, address) = destination.recv_from(&mut [0; 1]).await.unwrap();
+        assert_eq!(count, 0);
+        addresses.push(address);
+        clients.push((reader, writer));
+      }
+      wait_for_permits(&budget.peers, 0).await;
+      // The first frame exceeds the stream buffer: dequeuing it must keep its
+      // payload charged until the blocked frame write finishes.
+      destination.send_to(&[7; 128], addresses[0]).await.unwrap();
+      wait_for_permits(&budget.bytes, 0).await;
+      let (reader, writer) = &mut clients[1];
+      for (peer_id, payload) in [(1, vec![9]), (2, vec![])] {
+        forwarding::write_packet(writer, &Frame::Datagram { peer_id, payload })
+          .await
+          .unwrap();
+      }
+      assert_eq!(
+        forwarding::read_packet(reader).await.unwrap(),
+        Some(Frame::Close { peer_id: 2 })
+      );
+      forwarding::write_packet(writer, &Frame::Close { peer_id: 1 })
+        .await
+        .unwrap();
+      wait_for_permits(&budget.peers, 1).await;
+      forwarding::write_packet(
+        writer,
+        &Frame::Datagram {
+          peer_id: 3,
+          payload: vec![],
+        },
+      )
+      .await
+      .unwrap();
+      // The nonempty upload was dropped under pressure. The next received
+      // packet belongs to the replacement peer, admitted after Close freed it.
+      let (count, _) = destination.recv_from(&mut [0; 16]).await.unwrap();
+      assert_eq!(count, 0);
+      assert_eq!(budget.bytes.available_permits(), 0);
+      assert_eq!(
+        forwarding::read_packet(&mut clients[0].0).await.unwrap(),
+        Some(Frame::Datagram {
+          peer_id: 1,
+          payload: vec![7; 128]
+        })
+      );
+      wait_for_permits(&budget.bytes, 128).await;
+      for (_, writer) in &mut clients {
+        writer.shutdown().await.unwrap();
+      }
+      for server in servers {
+        server.await.unwrap();
+      }
+      wait_for_permits(&budget.peers, 2).await;
+    })
+    .await
+    .unwrap();
   }
 
   #[tokio::test]

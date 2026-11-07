@@ -104,6 +104,14 @@ export function validateBundleProtocols(components: AgentComponentMap, names: re
     check("ctl", "ctmuxd", protocols.ctmuxd);
     check("ctmux", "ctmuxd", protocols.ctmuxd);
   }
+  // Older components retain their direct service endpoints. When both sides
+  // advertise shared streams, the published contracts must intersect.
+  for (const consumer of ["ctl", "ctld"] as const) {
+    if (components[consumer]?.protocols.some((entry) => entry.name === "ctl_transport") &&
+      components["ctl-agent"]?.protocols.some((entry) => entry.name === "ctl_transport")) {
+      check(consumer, "ctl-agent", ["ctl_transport"]);
+    }
+  }
 }
 
 export function parseAgentComponents(value: unknown, identity: AgentBundleIdentity, schema: MetadataSchema = 3): AgentComponentMap {

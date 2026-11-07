@@ -45,6 +45,7 @@ unpublished wire formats.
 | `ctl_maintenance` | 2 | `1.0.2` |
 | `ctl_remote_vpn` | 1 | `1.0.1` |
 | `ctl_forwarding` | 1 | `1.0.1` |
+| `ctl_transport` | 1 | `1.0.1` |
 
 The remote VPN addition starts the next development cycle with ctld `1.1.13`
 (build 13) and helper `1.1.2` (build 2), retaining their frozen initial contracts.
@@ -124,6 +125,42 @@ intersect the client's supported set. UDP capability is checked again on the
 operation's channel. TCP continues using OpenSSH forwarding. The identity,
 helper, lifecycle, and other named contracts, storage schema versions, and
 product release version are unchanged.
+
+Shared remote service streams advance `ctld` from `1.2.17` (build 17) to
+`1.2.18` (build 18), retaining `1.0.12`, every published `1.1.13`–`1.1.16`
+contract, and `1.2.17`. The additive `open_service { target, control_path,
+service }` request opens `ctmux`, `task`, or `udp` on the exact previously
+selected SSH master. A successful `service_opened` acknowledgement permanently
+hands that local socket to raw service bytes until EOF. This dedicated socket
+accepts no further broker requests. Clients require explicitly negotiated
+`1.2.18` before sending the request. Earlier contracts retain their existing
+operations and framing.
+
+The fixed `ctl-agent multiplex` endpoint introduces the independent
+`ctl_transport 1.0.1` contract (build 1). It emits the stable
+`ctl-service-transport` marker and a bounded published-contract offer before
+accepting a selection and Yamux streams. Each logical stream starts with one
+fixed service selector byte, with 0 selecting ctmux, 1 task, and 2 UDP.
+Ctmux and task streams retain their existing
+identity negotiation and service contracts. UDP streams retain
+`ctl_forwarding 1.0.1` and `1.0.2`, including destination validation and peer
+framing. Existing `connect` and `forward-udp` endpoints remain supported.
+
+The broker shares one physical agent command channel among service streams and
+forwarding rules using the same selected physical control socket, including
+aliases resolving to that socket. A target disconnect closes its own streams
+while other aliases retain theirs. The transport bounds active service handlers
+to 128 and aggregate service receive windows to 32 MiB, with one additional
+256 KiB server admission slot for rejecting excess streams. Slow readers have
+independent backpressure, and closing one logical stream preserves its siblings.
+Physical transport loss closes all of that transport's logical streams. An unused
+transport closes after five seconds, allowing the master's ordinary idle policy
+to resume. UDP services on a shared remote endpoint also share a 32 MiB owned
+datagram payload budget and at most 512 peer or setup sockets, whose receive
+buffers total at most another 32 MiB. Excess data is dropped, while exhausted
+socket capacity uses existing forwarding error and close responses. The `ctmux`,
+`task`, `ctl_identity`, `ctl_forwarding`, helper, lifecycle,
+storage, and product release versions are unchanged by this addition.
 
 Quiet SSH establishment advances ctld from `1.1.13` (build 13) to `1.1.14`
 (build 14), retaining `1.0.12` and `1.1.13`. The additive `ensure_master_quiet`

@@ -4,7 +4,11 @@ use std::io::{self, Write as _};
 /// Contracts consumed by this executable, from the same definitions used in negotiation.
 pub fn print() -> io::Result<()> {
   let mut protocols = ctl_proto::agent_protocols();
-  protocols.extend(ctl_ipc::lifecycle::DaemonBinaryInfo::current().protocols);
+  for protocol in ctl_ipc::lifecycle::DaemonBinaryInfo::current().protocols {
+    if !protocols.contains(&protocol) {
+      protocols.push(protocol);
+    }
+  }
   protocols.extend([
     ctmux_proto::protocol_info(),
     ctmux_ipc::local_control_protocol_info(),

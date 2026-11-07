@@ -50,7 +50,8 @@ fn connection_error(error: ConnectionError) -> CommandErrorDto {
     }
     error @ (ConnectionError::UnsupportedGatewayRoute(_)
     | ConnectionError::UnsupportedQuietMaster(_)
-    | ConnectionError::UnsupportedForwardingProtocol(_)) => {
+    | ConnectionError::UnsupportedForwardingProtocol(_)
+    | ConnectionError::UnsupportedServiceTransport(_)) => {
       CommandErrorDto::new("ctld_protocol_feature_unsupported", error.to_string())
     }
     error @ ConnectionError::UnsupportedBrokerProtocol(_) => {

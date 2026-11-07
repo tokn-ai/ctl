@@ -116,6 +116,21 @@ test("metadata rejects mixed source builds, incomplete maps and invented or inco
   assert.deepEqual(parseAgentComponents(newer, agentIdentity), newer);
 });
 
+test("shared service transport advertisements retain legacy bundles and require matching peers", () => {
+  const components = componentMapFixture();
+  const transport = { name: "ctl_transport", build: 1, version: "1.0.1", supported_versions: ["1.0.1"] };
+  assert.deepEqual(parseAgentComponents(components, agentIdentity), components);
+  components["ctl-agent"].protocols.push(transport);
+  assert.deepEqual(parseAgentComponents(components, agentIdentity), components);
+  components.ctl.protocols.push({ ...transport });
+  components.ctld.protocols.push({ ...transport });
+  assert.deepEqual(parseAgentComponents(components, agentIdentity), components);
+  components.ctl.protocols[components.ctl.protocols.length - 1] = {
+    name: "ctl_transport", build: 2, version: "2.0.2", supported_versions: ["2.0.2"],
+  };
+  assert.throws(() => parseAgentComponents(components, agentIdentity), /cannot share ctl_transport/);
+});
+
 test("archive inspection rejects corrupted, mixed and unsafe payloads even with a valid outer checksum", async (t) => {
   const cases: [string, (entries: ReturnType<typeof archiveEntriesFixture>) => void][] = [
     ["duplicate member", (entries) => { entries.push(entries[0]); }],

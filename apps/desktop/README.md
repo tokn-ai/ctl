@@ -324,7 +324,9 @@ refreshed on launch, when the panel opens, and on demand, but is not persisted.
 Discovery and saved rules display TCP or UDP. Selecting a discovered endpoint
 prefills its original protocol; creation also offers **Any (TCP/UDP)** to bind
 both transports. Existing saved rules default to TCP. UDP forwarding requires
-ctld protocol `1.2.17` and the remote agent's `ctl_forwarding 1.0.2` contract.
+the remote agent's `ctl_forwarding 1.0.2` contract. Updated clients use ctld
+`1.2.18` and the agent's `ctl_transport 1.0.1` contract to share one SSH command
+channel across forwarding rules, ctmux views, and supplemental service requests.
 
 The identity-file input suggests candidate files from the top level of
 `~/.ssh`. Type to filter, use the arrow keys and Enter, or click a file. Manual

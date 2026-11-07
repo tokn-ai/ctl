@@ -185,7 +185,7 @@ async fn existing_master_fixture() {
       };
       assert!(matches!(
         ssh_interaction(&settings(), &broker, interactive).await.unwrap(),
-        ctl_client::SshInteraction::Multiplexed { control_path }
+        ctl_client::SshInteraction::Brokered { control_path, .. }
           if control_path == std::path::Path::new(expected_path)
       ));
     }

@@ -16,6 +16,10 @@ fn current_binary_advertises_the_revocation_helper_and_all_historical_contracts(
   for contract in crate::SUPPORTED_HELPER_API_VERSIONS {
     assert!(helper.supports(*contract));
   }
+  assert!(info.supports(
+    "ctl_transport",
+    ctl_proto::transport::SUPPORTED_PROTOCOL_VERSIONS,
+  ));
 }
 
 #[cfg(unix)]

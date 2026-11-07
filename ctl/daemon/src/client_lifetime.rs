@@ -72,7 +72,7 @@ mod tests {
     let target = ctl_ipc::SshTarget {
       destination: "fixture.invalid".into(),
       ssh_config_alias: None,
-      use_ssh_config_master: Some(false),
+      use_ssh_config_master: None,
       hostname: None,
       user: None,
       port: None,
@@ -81,29 +81,33 @@ mod tests {
     };
     let lifecycle = state.target(&target);
     let _busy = lifecycle.lock.lock().await;
-    for quiet in [false, true] {
+    for request in [
+      ClientMessage::EnsureMaster {
+        target: target.clone(),
+      },
+      ClientMessage::EnsureMasterQuiet {
+        target: target.clone(),
+      },
+      ClientMessage::OpenService {
+        target: target.clone(),
+        control_path: "/fixture/control".into(),
+        service: ctl_proto::transport::Service::Ctmux,
+      },
+    ] {
       for _ in 0..32 {
         let (mut client, server) = UnixStream::pair().unwrap();
         let task = tokio::spawn(handle_connection(server, Arc::clone(&state)));
         handshake(&mut client).await.unwrap();
-        let request = if quiet {
-          ClientMessage::EnsureMasterQuiet {
-            target: target.clone(),
-          }
-        } else {
-          ClientMessage::EnsureMaster {
-            target: target.clone(),
-          }
-        };
         ctl_ipc::write_frame(&mut client, &request).await.unwrap();
         drop(client);
-        assert!(matches!(
-          tokio::time::timeout(Duration::from_secs(1), task)
-            .await
-            .unwrap()
-            .unwrap(),
-          Err(RequestError::ClientClosed)
-        ));
+        let result = tokio::time::timeout(Duration::from_secs(1), task)
+          .await
+          .unwrap()
+          .unwrap();
+        assert!(
+          matches!(result, Err(RequestError::ClientClosed)),
+          "{result:?}"
+        );
       }
     }
     assert!(state.attempts.lock().unwrap().is_empty());

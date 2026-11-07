@@ -220,14 +220,15 @@ fn register_provider(provider: DaemonProvider) -> io::Result<()> {
 }
 
 /// Internal evolution counter; advancing it alone does not publish a contract.
-pub const PROTOCOL_BUILD: u16 = 17;
+pub const PROTOCOL_BUILD: u16 = 18;
 pub const CONTRACT_V1_0_12: ProtocolVersion = ProtocolVersion::new(1, 0, 12);
 pub const CONTRACT_V1_1_13: ProtocolVersion = ProtocolVersion::new(1, 1, 13);
 pub const CONTRACT_V1_1_14: ProtocolVersion = ProtocolVersion::new(1, 1, 14);
 pub const CONTRACT_V1_1_15: ProtocolVersion = ProtocolVersion::new(1, 1, 15);
 pub const CONTRACT_V1_1_16: ProtocolVersion = ProtocolVersion::new(1, 1, 16);
 pub const CONTRACT_V1_2_17: ProtocolVersion = ProtocolVersion::new(1, 2, 17);
-pub const PROTOCOL_VERSION: ProtocolVersion = CONTRACT_V1_2_17;
+pub const CONTRACT_V1_2_18: ProtocolVersion = ProtocolVersion::new(1, 2, 18);
+pub const PROTOCOL_VERSION: ProtocolVersion = CONTRACT_V1_2_18;
 pub const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[
   CONTRACT_V1_0_12,
   CONTRACT_V1_1_13,
@@ -235,6 +236,7 @@ pub const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[
   CONTRACT_V1_1_15,
   CONTRACT_V1_1_16,
   CONTRACT_V1_2_17,
+  CONTRACT_V1_2_18,
 ];
 
 #[must_use]
@@ -426,6 +428,12 @@ pub fn recovery_watch_supported(protocol: ProtocolVersion) -> bool {
 #[must_use]
 pub fn forwarding_protocol_supported(protocol: ProtocolVersion) -> bool {
   SUPPORTED_PROTOCOL_VERSIONS.contains(&protocol) && protocol >= CONTRACT_V1_2_17
+}
+
+/// Shared agent streams require the additive broker stream-handoff contract.
+#[must_use]
+pub fn service_streams_supported(protocol: ProtocolVersion) -> bool {
+  SUPPORTED_PROTOCOL_VERSIONS.contains(&protocol) && protocol >= CONTRACT_V1_2_18
 }
 
 /// Resolve a remote VPN's SSH owner using the exact prefix that reaches it.
@@ -698,6 +706,12 @@ pub enum ClientMessage {
   WatchRecovery {
     target: SshTarget,
   },
+  /// Hand off this dedicated local connection to one shared agent service.
+  OpenService {
+    target: SshTarget,
+    control_path: PathBuf,
+    service: ctl_proto::transport::Service,
+  },
   DisconnectMaster {
     target: SshTarget,
   },
@@ -749,6 +763,8 @@ pub enum ServerMessage {
   MasterReady {
     control_path: PathBuf,
   },
+  /// Raw service bytes follow this acknowledgement until the socket closes.
+  ServiceOpened,
   AuthenticationRequired,
   RecoveryRegistered,
   RecoveryAuthorized {
@@ -1806,11 +1822,11 @@ mod tests {
     for contract in SUPPORTED_PROTOCOL_VERSIONS {
       assert_eq!(
         forwarding_protocol_supported(*contract),
-        *contract == CONTRACT_V1_2_17
+        *contract >= CONTRACT_V1_2_17
       );
     }
     assert!(!forwarding_protocol_supported(ProtocolVersion::new(
-      1, 2, 18
+      1, 2, 19
     )));
     let legacy = serde_json::json!({
       "forward_id": "database", "bind_address": "127.0.0.1", "local_port": 5432,

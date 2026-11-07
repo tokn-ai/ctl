@@ -44,8 +44,193 @@ async fn echo_gateway(starts: Arc<AtomicUsize>, stopped: mpsc::Sender<()>) -> io
   transport::connect(client).await
 }
 
+async fn assert_echo(stream: &mut Stream, payload: &[u8]) {
+  stream.write_all(payload).await.unwrap();
+  let mut bytes = vec![0; payload.len()];
+  timeout(Duration::from_secs(2), stream.read_exact(&mut bytes))
+    .await
+    .unwrap()
+    .unwrap();
+  assert_eq!(bytes, payload);
+}
+
+async fn assert_closed(stream: &mut Stream) {
+  assert!(
+    timeout(Duration::from_secs(2), stream.read_u8())
+      .await
+      .unwrap()
+      .is_err()
+  );
+}
+
+fn pool_client(registry: &Registry, path: &Path, group: Group) -> Client {
+  registry.gateways.lock().unwrap()[&std::fs::canonicalize(path).unwrap()].groups[&group]
+    .owned
+    .lock()
+    .unwrap()
+    .client
+    .as_ref()
+    .unwrap()
+    .clone()
+}
+
+async fn wait_for_owners(registry: &Registry, path: &Path, group: Group, count: usize) {
+  let path = std::fs::canonicalize(path).unwrap();
+  timeout(Duration::from_secs(1), async {
+    loop {
+      let ready = registry
+        .gateways
+        .lock()
+        .unwrap()
+        .get(&path)
+        .and_then(|master| master.groups.get(&group))
+        .is_some_and(|slot| slot.owned.lock().unwrap().targets.len() == count);
+      if ready {
+        break;
+      }
+      tokio::task::yield_now().await;
+    }
+  })
+  .await
+  .unwrap();
+}
+
 #[tokio::test]
-async fn views_and_rules_share_initialization_and_master_replacement_closes_old_streams() {
+async fn queued_startup_uses_its_pinned_canonical_socket_after_a_symlink_is_retargeted() {
+  let directory = directory();
+  let first_path = directory.0.join("first");
+  let second_path = directory.0.join("second");
+  let alias = directory.0.join("alias");
+  let _first_socket = UnixListener::bind(&first_path).unwrap();
+  let _second_socket = UnixListener::bind(&second_path).unwrap();
+  std::os::unix::fs::symlink(&first_path, &alias).unwrap();
+  let first_canonical = std::fs::canonicalize(&first_path).unwrap();
+  let first_owner = target("first.invalid");
+  let next_owner = target("next.invalid");
+  let registry = Arc::new(Registry::default());
+  let (started, initializing) = tokio::sync::oneshot::channel();
+  let pending_registry = Arc::clone(&registry);
+  let pending_alias = alias.clone();
+  let pending_owner = first_owner.clone();
+  let pending = tokio::spawn(async move {
+    pending_registry
+      .open_with(&pending_owner, &pending_alias, Service::Ctmux, |_| async {
+        let _ = started.send(());
+        std::future::pending::<io::Result<Client>>().await
+      })
+      .await
+  });
+  initializing.await.unwrap();
+  let starts = Arc::new(AtomicUsize::new(0));
+  let (stopped, mut stops) = mpsc::channel(2);
+  let queued_registry = Arc::clone(&registry);
+  let queued_alias = alias.clone();
+  let queued_owner = next_owner.clone();
+  let command_target = next_owner.clone();
+  let queued_starts = Arc::clone(&starts);
+  let queued_stopped = stopped.clone();
+  let queued = tokio::spawn(async move {
+    queued_registry
+      .open_with(
+        &queued_owner,
+        &queued_alias,
+        Service::Task,
+        |selected| async move {
+          assert_eq!(selected, first_canonical);
+          // The real SSH command receives this same pinned path, never the
+          // original alias which can now point to a different live master.
+          let command = command(&command_target, &selected);
+          let arguments: Vec<_> = command.as_std().get_args().collect();
+          assert!(
+            arguments
+              .windows(2)
+              .any(|pair| pair == [std::ffi::OsStr::new("-S"), selected.as_os_str()])
+          );
+          echo_gateway(queued_starts, queued_stopped).await
+        },
+      )
+      .await
+  });
+  wait_for_owners(&registry, &alias, Group::Sessions, 2).await;
+  std::fs::remove_file(&alias).unwrap();
+  std::os::unix::fs::symlink(&second_path, &alias).unwrap();
+  registry.cancel_target(&first_owner);
+  assert!(pending.await.unwrap().is_err());
+  let mut pinned = timeout(Duration::from_secs(1), queued)
+    .await
+    .unwrap()
+    .unwrap()
+    .unwrap();
+  assert_echo(&mut pinned, b"first physical master").await;
+  let mut retargeted = registry
+    .open_with(&next_owner, &alias, Service::Ctmux, |selected| async move {
+      assert_eq!(selected, std::fs::canonicalize(&second_path).unwrap());
+      echo_gateway(Arc::clone(&starts), stopped).await
+    })
+    .await
+    .unwrap();
+  assert_echo(&mut retargeted, b"second physical master").await;
+  assert_echo(&mut pinned, b"first master is preserved").await;
+  registry.shutdown();
+  for _ in 0..2 {
+    timeout(Duration::from_secs(2), stops.recv())
+      .await
+      .unwrap()
+      .unwrap();
+  }
+}
+
+#[tokio::test]
+async fn disconnect_between_reservation_and_startup_cannot_restore_stale_alias_ownership() {
+  for service in [Service::Ctmux, Service::Udp] {
+    let directory = directory();
+    let path = directory.0.join("master");
+    let _socket = UnixListener::bind(&path).unwrap();
+    let stale_owner = target("stale.invalid");
+    let live_owner = target("live.invalid");
+    let registry = Registry::default();
+    let lifecycle = super::super::target_lifecycle::TargetLifecycle::default();
+    let mut attempt = lifecycle.attempt();
+    let guard = lifecycle.lock.lock().await;
+    let reserved = registry.reserve(&stale_owner, &path, service).unwrap();
+    let reserved_attempt = registry.reserve(&stale_owner, &path, service).unwrap();
+    let (stopped, mut stops) = mpsc::channel(1);
+    let mut live = registry
+      .open_with(&live_owner, &path, service, |_| {
+        echo_gateway(Arc::default(), stopped)
+      })
+      .await
+      .unwrap();
+    // Disconnect publishes its generation while waiting for this target's
+    // lock. Its ownership cleanup must therefore see every old reservation.
+    lifecycle.pause();
+    drop(guard);
+    registry.cancel_target(&stale_owner);
+    let error = registry
+      .open_reserved_with(reserved, |_| async {
+        panic!("a cancelled reservation must not start SSH")
+      })
+      .await
+      .err()
+      .expect("cancelled reservation");
+    assert_eq!(error.kind(), io::ErrorKind::ConnectionAborted);
+    assert!(matches!(
+      attempt.run(registry.open_reserved(reserved_attempt)).await,
+      Err(RequestError::HostDisconnected)
+    ));
+    assert_echo(&mut live, b"live alias").await;
+    registry.cancel_target(&live_owner);
+    assert_closed(&mut live).await;
+    assert!(registry.gateways.lock().unwrap().is_empty());
+    timeout(Duration::from_secs(2), stops.recv())
+      .await
+      .unwrap()
+      .unwrap();
+  }
+}
+
+#[tokio::test]
+async fn groups_share_initialization_across_aliases_and_replace_together() {
   let directory = directory();
   let path = directory.0.join("master");
   let old_socket = UnixListener::bind(&path).unwrap();
@@ -53,23 +238,25 @@ async fn views_and_rules_share_initialization_and_master_replacement_closes_old_
     serde_json::from_value(serde_json::json!({"destination":"fixture.invalid"})).unwrap();
   let registry = Arc::new(Registry::default());
   let starts = Arc::new(AtomicUsize::new(0));
-  let (stopped, mut stops) = mpsc::channel(2);
+  let (stopped, mut stops) = mpsc::channel(3);
   let mut opens = JoinSet::new();
-  for index in 0_u8..32 {
+  for index in 0_u8..64 {
     let registry = Arc::clone(&registry);
     let mut target = target.clone();
-    target.destination = format!("fixture-{index}.invalid");
+    target.destination = format!("fixture-{}.invalid", index / 2);
     let path = path.clone();
     let starts = Arc::clone(&starts);
     let stopped = stopped.clone();
     opens.spawn(async move {
-      let service = if index % 2 == 0 {
+      let service = if index == 0 {
+        Service::Task
+      } else if index % 2 == 0 {
         Service::Ctmux
       } else {
         Service::Udp
       };
       let mut stream = registry
-        .open_with(&target, &path, service, || echo_gateway(starts, stopped))
+        .open_with(&target, &path, service, |_| echo_gateway(starts, stopped))
         .await
         .unwrap();
       stream.write_all(&[index]).await.unwrap();
@@ -82,33 +269,33 @@ async fn views_and_rules_share_initialization_and_master_replacement_closes_old_
   while let Some(stream) = opens.join_next().await {
     streams.push(stream.unwrap());
   }
-  assert_eq!(starts.load(Ordering::Relaxed), 1);
+  assert_eq!(starts.load(Ordering::Relaxed), 2);
   let mut first_alias = target.clone();
   first_alias.destination = "fixture-0.invalid".into();
   registry.cancel_target(&first_alias);
-  // Disconnecting one alias must not close the shared physical gateway while
-  // another alias still owns logical services on the same control socket.
-  streams[1].write_all(b"sibling").await.unwrap();
-  streams[1].flush().await.unwrap();
-  let mut sibling = [0; 7];
-  streams[1].read_exact(&mut sibling).await.unwrap();
-  assert_eq!(&sibling, b"sibling");
+  // Each alias owns both classes. Disconnecting one leaves both physical
+  // agent channels available to the aliases that still share this socket.
+  for stream in &mut streams {
+    assert_echo(stream, b"sibling").await;
+  }
 
   // Keep the original inode alive while replacing its pathname, as when a
   // configured master is replaced without waiting for the prior SSH to exit.
   std::fs::remove_file(&path).unwrap();
   let replacement_socket = UnixListener::bind(&path).unwrap();
   let mut replacement = registry
-    .open_with(&target, &path, Service::Task, || {
+    .open_with(&target, &path, Service::Task, |_| {
       echo_gateway(Arc::clone(&starts), stopped)
     })
     .await
     .unwrap();
-  assert_eq!(starts.load(Ordering::Relaxed), 2);
-  timeout(Duration::from_secs(2), stops.recv())
-    .await
-    .unwrap()
-    .unwrap();
+  assert_eq!(starts.load(Ordering::Relaxed), 3);
+  for _ in 0..2 {
+    timeout(Duration::from_secs(2), stops.recv())
+      .await
+      .unwrap()
+      .unwrap();
+  }
   for stream in &mut streams {
     assert!(
       timeout(Duration::from_secs(2), stream.read_u8())
@@ -137,6 +324,439 @@ async fn views_and_rules_share_initialization_and_master_replacement_closes_old_
 }
 
 #[tokio::test]
+async fn a_blocked_forwarding_initializer_does_not_block_sessions_on_the_same_master() {
+  let directory = directory();
+  let path = directory.0.join("master");
+  let _socket = UnixListener::bind(&path).unwrap();
+  let owner = target("fixture.invalid");
+  let registry = Arc::new(Registry::default());
+  let (started, initializing) = tokio::sync::oneshot::channel();
+  let pending_registry = Arc::clone(&registry);
+  let pending_path = path.clone();
+  let pending_owner = owner.clone();
+  let pending = tokio::spawn(async move {
+    pending_registry
+      .open_with(&pending_owner, &pending_path, Service::Udp, |_| async {
+        let _ = started.send(());
+        std::future::pending::<io::Result<Client>>().await
+      })
+      .await
+  });
+  initializing.await.unwrap();
+  let (stopped, mut stops) = mpsc::channel(1);
+  let mut session = timeout(
+    Duration::from_secs(1),
+    registry.open_with(&owner, &path, Service::Task, |_| {
+      echo_gateway(Arc::default(), stopped)
+    }),
+  )
+  .await
+  .expect("sessions have an independent initialization lock")
+  .unwrap();
+  assert_echo(&mut session, b"responsive").await;
+  assert!(!pending.is_finished());
+  // One target owns both an active session and a pending forwarding startup.
+  // Disconnect must release both without awaiting that startup.
+  registry.cancel_target(&owner);
+  assert_closed(&mut session).await;
+  assert_eq!(
+    timeout(Duration::from_secs(1), pending)
+      .await
+      .unwrap()
+      .unwrap()
+      .err()
+      .expect("forwarding initializer was cancelled")
+      .kind(),
+    io::ErrorKind::ConnectionAborted
+  );
+  timeout(Duration::from_secs(2), stops.recv())
+    .await
+    .unwrap()
+    .unwrap();
+  assert!(registry.gateways.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn groups_have_independent_capacity_and_group_specific_recovery() {
+  let directory = directory();
+  let path = directory.0.join("master");
+  let _socket = UnixListener::bind(&path).unwrap();
+  let owner = target("fixture.invalid");
+  let registry = Registry::default();
+  let starts = Arc::new(AtomicUsize::new(0));
+  let (stopped, mut stops) = mpsc::channel(2);
+  let mut sessions = Vec::new();
+  let mut forwards = Vec::new();
+  for _ in 0..transport::MAX_STREAMS {
+    sessions.push(
+      registry
+        .open_with(&owner, &path, Service::Ctmux, |_| {
+          echo_gateway(Arc::clone(&starts), stopped.clone())
+        })
+        .await
+        .unwrap(),
+    );
+  }
+  // Task metadata and terminal attachments intentionally share session slots.
+  let session_error = registry
+    .open_with(&owner, &path, Service::Task, |_| {
+      echo_gateway(Arc::clone(&starts), stopped.clone())
+    })
+    .await
+    .err()
+    .expect("session pool capacity");
+  assert_eq!(session_error.kind(), io::ErrorKind::WouldBlock);
+  assert!(session_error.to_string().contains("sessions pool"));
+  assert!(
+    session_error
+      .to_string()
+      .contains("Close an unused terminal view")
+  );
+  assert!(!session_error.to_string().contains("Stop an unused"));
+  for _ in 0..transport::MAX_STREAMS {
+    forwards.push(
+      registry
+        .open_with(&owner, &path, Service::Udp, |_| {
+          echo_gateway(Arc::clone(&starts), stopped.clone())
+        })
+        .await
+        .unwrap(),
+    );
+  }
+  let forwarding_error = registry
+    .open_with(&owner, &path, Service::Udp, |_| {
+      echo_gateway(Arc::clone(&starts), stopped)
+    })
+    .await
+    .err()
+    .expect("forwarding pool capacity");
+  assert_eq!(forwarding_error.kind(), io::ErrorKind::WouldBlock);
+  assert!(forwarding_error.to_string().contains("UDP forwarding pool"));
+  assert!(
+    forwarding_error
+      .to_string()
+      .contains("Stop an unused UDP or Any forwarding rule")
+  );
+  assert!(!forwarding_error.to_string().contains("Close an unused"));
+  assert_eq!(starts.load(Ordering::Relaxed), 2);
+  assert_echo(&mut sessions[0], b"session").await;
+  assert_echo(&mut forwards[0], b"forward").await;
+  registry.shutdown();
+  for _ in 0..2 {
+    timeout(Duration::from_secs(2), stops.recv())
+      .await
+      .unwrap()
+      .unwrap();
+  }
+}
+
+#[tokio::test]
+async fn a_group_failure_preserves_and_does_not_restart_its_sibling() {
+  for (failed_service, healthy_service) in [
+    (Service::Ctmux, Service::Udp),
+    (Service::Udp, Service::Ctmux),
+  ] {
+    let directory = directory();
+    let path = directory.0.join("master");
+    let _socket = UnixListener::bind(&path).unwrap();
+    let owner = target("fixture.invalid");
+    let registry = Registry::default();
+    let starts = Arc::new(AtomicUsize::new(0));
+    let (stopped, mut stops) = mpsc::channel(3);
+    let mut failed = registry
+      .open_with(&owner, &path, failed_service, |_| {
+        echo_gateway(Arc::clone(&starts), stopped.clone())
+      })
+      .await
+      .unwrap();
+    let mut healthy = registry
+      .open_with(&owner, &path, healthy_service, |_| {
+        echo_gateway(Arc::clone(&starts), stopped.clone())
+      })
+      .await
+      .unwrap();
+    pool_client(&registry, &path, Group::for_service(failed_service)).close();
+    assert_closed(&mut failed).await;
+    assert_echo(&mut healthy, b"healthy").await;
+    let mut replacement = registry
+      .open_with(&owner, &path, failed_service, |_| {
+        echo_gateway(Arc::clone(&starts), stopped)
+      })
+      .await
+      .unwrap();
+    assert_eq!(starts.load(Ordering::Relaxed), 3);
+    assert_echo(&mut replacement, b"recovered").await;
+    assert_echo(&mut healthy, b"still healthy").await;
+    registry.shutdown();
+    for _ in 0..3 {
+      timeout(Duration::from_secs(2), stops.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    }
+  }
+}
+
+#[tokio::test]
+async fn disconnect_releases_only_groups_without_remaining_alias_owners() {
+  let directory = directory();
+  let path = directory.0.join("master");
+  let _socket = UnixListener::bind(&path).unwrap();
+  let first_owner = target("first.invalid");
+  let second_owner = target("second.invalid");
+  let registry = Registry::default();
+  let starts = Arc::new(AtomicUsize::new(0));
+  let (stopped, mut stops) = mpsc::channel(3);
+  let first_session = registry
+    .open_with(&first_owner, &path, Service::Ctmux, |_| {
+      echo_gateway(Arc::clone(&starts), stopped.clone())
+    })
+    .await
+    .unwrap();
+  let mut first_forward = registry
+    .open_with(&first_owner, &path, Service::Udp, |_| {
+      echo_gateway(Arc::clone(&starts), stopped.clone())
+    })
+    .await
+    .unwrap();
+  let mut second_session = registry
+    .open_with(&second_owner, &path, Service::Task, |_| {
+      echo_gateway(Arc::clone(&starts), stopped.clone())
+    })
+    .await
+    .unwrap();
+  assert_eq!(starts.load(Ordering::Relaxed), 2);
+  registry.cancel_target(&first_owner);
+  assert_closed(&mut first_forward).await;
+  assert_echo(&mut second_session, b"remaining alias").await;
+  let mut second_forward = registry
+    .open_with(&second_owner, &path, Service::Udp, |_| {
+      echo_gateway(Arc::clone(&starts), stopped)
+    })
+    .await
+    .unwrap();
+  assert_eq!(starts.load(Ordering::Relaxed), 3);
+  assert_echo(&mut second_forward, b"new forwarding owner").await;
+  assert_echo(&mut second_session, b"same session pool").await;
+  registry.cancel_target(&second_owner);
+  assert_closed(&mut second_forward).await;
+  assert_closed(&mut second_session).await;
+  assert!(registry.gateways.lock().unwrap().is_empty());
+  for _ in 0..3 {
+    timeout(Duration::from_secs(2), stops.recv())
+      .await
+      .unwrap()
+      .unwrap();
+  }
+  drop(first_session);
+}
+
+#[tokio::test]
+async fn one_groups_idle_cleanup_leaves_active_siblings_available() {
+  let directory = directory();
+  let path = directory.0.join("master");
+  let _socket = UnixListener::bind(&path).unwrap();
+  let owner = target("fixture.invalid");
+  let registry = Registry::default();
+  let starts = Arc::new(AtomicUsize::new(0));
+  let (stopped, mut stops) = mpsc::channel(3);
+  let session = registry
+    .open_with(&owner, &path, Service::Ctmux, |_| {
+      echo_gateway(Arc::clone(&starts), stopped.clone())
+    })
+    .await
+    .unwrap();
+  let mut forward = registry
+    .open_with(&owner, &path, Service::Udp, |_| {
+      echo_gateway(Arc::clone(&starts), stopped.clone())
+    })
+    .await
+    .unwrap();
+  let idle = pool_client(&registry, &path, Group::Sessions);
+  let active = pool_client(&registry, &path, Group::Forwarding);
+  drop(session);
+  timeout(Duration::from_secs(6), idle.closed())
+    .await
+    .unwrap();
+  assert!(!active.is_closed());
+  assert_echo(&mut forward, b"still active").await;
+  let mut reopened = registry
+    .open_with(&owner, &path, Service::Task, |_| {
+      echo_gateway(Arc::clone(&starts), stopped)
+    })
+    .await
+    .unwrap();
+  assert_eq!(starts.load(Ordering::Relaxed), 3);
+  assert_echo(&mut reopened, b"new session").await;
+  assert_echo(&mut forward, b"same forwarding pool").await;
+  registry.shutdown();
+  for _ in 0..3 {
+    timeout(Duration::from_secs(2), stops.recv())
+      .await
+      .unwrap()
+      .unwrap();
+  }
+}
+
+#[tokio::test]
+async fn master_replacement_closes_active_groups_and_cancels_pending_startups() {
+  let directory = directory();
+  let path = directory.0.join("master");
+  let old_socket = UnixListener::bind(&path).unwrap();
+  let owner = target("fixture.invalid");
+  let registry = Arc::new(Registry::default());
+  let starts = Arc::new(AtomicUsize::new(0));
+  let (stopped, mut stops) = mpsc::channel(3);
+  let mut old_session = registry
+    .open_with(&owner, &path, Service::Ctmux, |_| {
+      echo_gateway(Arc::clone(&starts), stopped.clone())
+    })
+    .await
+    .unwrap();
+  let (started, initializing) = tokio::sync::oneshot::channel();
+  let pending_registry = Arc::clone(&registry);
+  let pending_path = path.clone();
+  let pending_owner = owner.clone();
+  let pending = tokio::spawn(async move {
+    pending_registry
+      .open_with(&pending_owner, &pending_path, Service::Udp, |_| async {
+        let _ = started.send(());
+        std::future::pending::<io::Result<Client>>().await
+      })
+      .await
+  });
+  initializing.await.unwrap();
+  std::fs::remove_file(&path).unwrap();
+  let replacement_socket = UnixListener::bind(&path).unwrap();
+  let mut new_session = registry
+    .open_with(&owner, &path, Service::Task, |_| {
+      echo_gateway(Arc::clone(&starts), stopped.clone())
+    })
+    .await
+    .unwrap();
+  assert_closed(&mut old_session).await;
+  assert_eq!(
+    timeout(Duration::from_secs(1), pending)
+      .await
+      .unwrap()
+      .unwrap()
+      .err()
+      .expect("old forwarding startup was cancelled")
+      .kind(),
+    io::ErrorKind::ConnectionAborted
+  );
+  let mut new_forward = registry
+    .open_with(&owner, &path, Service::Udp, |_| {
+      echo_gateway(Arc::clone(&starts), stopped)
+    })
+    .await
+    .unwrap();
+  assert_eq!(starts.load(Ordering::Relaxed), 3);
+  assert_echo(&mut new_session, b"new session").await;
+  assert_echo(&mut new_forward, b"new forward").await;
+  registry.shutdown();
+  for _ in 0..3 {
+    timeout(Duration::from_secs(2), stops.recv())
+      .await
+      .unwrap()
+      .unwrap();
+  }
+  drop((old_socket, replacement_socket));
+}
+
+#[tokio::test]
+async fn master_replacement_cancels_both_groups_before_either_initializer_is_ready() {
+  let directory = directory();
+  let path = directory.0.join("master");
+  let old_socket = UnixListener::bind(&path).unwrap();
+  let owner = target("fixture.invalid");
+  let registry = Arc::new(Registry::default());
+  let (started, mut initializing) = mpsc::channel(2);
+  let mut pending = JoinSet::new();
+  for service in [Service::Ctmux, Service::Udp] {
+    let registry = Arc::clone(&registry);
+    let path = path.clone();
+    let owner = owner.clone();
+    let started = started.clone();
+    pending.spawn(async move {
+      registry
+        .open_with(&owner, &path, service, |_| async {
+          started.send(()).await.unwrap();
+          std::future::pending::<io::Result<Client>>().await
+        })
+        .await
+    });
+  }
+  for _ in 0..2 {
+    initializing.recv().await.unwrap();
+  }
+  std::fs::remove_file(&path).unwrap();
+  let replacement_socket = UnixListener::bind(&path).unwrap();
+  let (stopped, mut stops) = mpsc::channel(1);
+  let mut replacement = registry
+    .open_with(&owner, &path, Service::Task, |_| {
+      echo_gateway(Arc::default(), stopped)
+    })
+    .await
+    .unwrap();
+  timeout(Duration::from_secs(1), async {
+    while let Some(result) = pending.join_next().await {
+      assert_eq!(
+        result.unwrap().err().expect("old initializer").kind(),
+        io::ErrorKind::ConnectionAborted
+      );
+    }
+  })
+  .await
+  .unwrap();
+  assert_echo(&mut replacement, b"new master").await;
+  registry.shutdown();
+  timeout(Duration::from_secs(2), stops.recv())
+    .await
+    .unwrap()
+    .unwrap();
+  drop((old_socket, replacement_socket));
+}
+
+#[tokio::test]
+async fn a_startup_observing_master_replacement_cannot_publish_either_old_group() {
+  let directory = directory();
+  let path = directory.0.join("master");
+  let old_socket = UnixListener::bind(&path).unwrap();
+  let owner = target("fixture.invalid");
+  let registry = Registry::default();
+  let starts = Arc::new(AtomicUsize::new(0));
+  let (stopped, mut stops) = mpsc::channel(2);
+  let mut session = registry
+    .open_with(&owner, &path, Service::Ctmux, |_| {
+      echo_gateway(Arc::clone(&starts), stopped.clone())
+    })
+    .await
+    .unwrap();
+  let replacement = std::sync::Mutex::new(None);
+  let error = registry
+    .open_with(&owner, &path, Service::Udp, |_| async {
+      let client = echo_gateway(Arc::clone(&starts), stopped).await?;
+      std::fs::remove_file(&path).unwrap();
+      *replacement.lock().unwrap() = Some(UnixListener::bind(&path).unwrap());
+      Ok(client)
+    })
+    .await
+    .err()
+    .expect("the physical master changed during startup");
+  assert_eq!(error.kind(), io::ErrorKind::ConnectionAborted);
+  assert_closed(&mut session).await;
+  assert!(registry.gateways.lock().unwrap().is_empty());
+  for _ in 0..2 {
+    timeout(Duration::from_secs(2), stops.recv())
+      .await
+      .unwrap()
+      .unwrap();
+  }
+  drop((old_socket, replacement));
+}
+
+#[tokio::test]
 async fn disconnect_never_waits_for_an_unrelated_hosts_initializer() {
   let directory = directory();
   let ready_path = directory.0.join("ready");
@@ -148,7 +768,7 @@ async fn disconnect_never_waits_for_an_unrelated_hosts_initializer() {
   let registry = Arc::new(Registry::default());
   let (stopped, mut stops) = mpsc::channel(1);
   let mut ready = registry
-    .open_with(&ready_target, &ready_path, Service::Ctmux, || {
+    .open_with(&ready_target, &ready_path, Service::Ctmux, |_| {
       echo_gateway(Arc::default(), stopped)
     })
     .await
@@ -157,7 +777,7 @@ async fn disconnect_never_waits_for_an_unrelated_hosts_initializer() {
   let pending_registry = Arc::clone(&registry);
   let pending = tokio::spawn(async move {
     pending_registry
-      .open_with(&pending_target, &pending_path, Service::Task, || async {
+      .open_with(&pending_target, &pending_path, Service::Task, |_| async {
         let _ = started.send(());
         std::future::pending::<io::Result<Client>>().await
       })
@@ -195,7 +815,7 @@ async fn cancelling_an_alias_initializer_releases_its_siblings_startup() {
   let first_owner = first_target.clone();
   let first = tokio::spawn(async move {
     first_registry
-      .open_with(&first_owner, &first_path, Service::Ctmux, || async {
+      .open_with(&first_owner, &first_path, Service::Ctmux, |_| async {
         let _ = started.send(());
         std::future::pending::<io::Result<Client>>().await
       })
@@ -208,27 +828,12 @@ async fn cancelling_an_alias_initializer_releases_its_siblings_startup() {
   let next_owner = next_target.clone();
   let next = tokio::spawn(async move {
     next_registry
-      .open_with(&next_owner, &next_path, Service::Task, || {
+      .open_with(&next_owner, &next_path, Service::Task, |_| {
         echo_gateway(Arc::default(), stopped)
       })
       .await
   });
-  timeout(Duration::from_secs(1), async {
-    loop {
-      let both_registered = registry
-        .gateways
-        .lock()
-        .unwrap()
-        .values()
-        .any(|slot| slot.owned.lock().unwrap().targets.len() == 2);
-      if both_registered {
-        break;
-      }
-      tokio::task::yield_now().await;
-    }
-  })
-  .await
-  .unwrap();
+  wait_for_owners(&registry, &path, Group::Sessions, 2).await;
   registry.cancel_target(&first_target);
   assert_eq!(
     first
@@ -266,7 +871,7 @@ async fn an_initializer_finishing_with_disconnect_cannot_publish_a_detached_gate
   let starts = Arc::new(AtomicUsize::new(0));
   let (stopped, mut stops) = mpsc::channel(2);
   let error = registry
-    .open_with(&target, &path, Service::Ctmux, || async {
+    .open_with(&target, &path, Service::Ctmux, |_| async {
       let client = echo_gateway(Arc::clone(&starts), stopped.clone()).await?;
       registry.cancel_target(&target);
       Ok(client)
@@ -281,7 +886,7 @@ async fn an_initializer_finishing_with_disconnect_cannot_publish_a_detached_gate
     .unwrap()
     .unwrap();
   let mut reopened = registry
-    .open_with(&target, &path, Service::Task, || {
+    .open_with(&target, &path, Service::Task, |_| {
       echo_gateway(Arc::clone(&starts), stopped)
     })
     .await

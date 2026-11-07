@@ -46,7 +46,7 @@ KbdInteractiveAuthentication no
 UsePAM $pam
 AllowTcpForwarding no
 AllowAgentForwarding no
-MaxSessions 2
+MaxSessions 3
 SetEnv "PATH=$PWD/target/debug:$PATH" "CTMUX_RUNTIME_DIR=$root" "CTL_TASKD_RUNTIME_DIR=$root"
 EOF
 sudo /usr/sbin/sshd -t -f "$root/sshd_config"
@@ -117,4 +117,4 @@ CTL_TEST_SHARED_SSH_ALIAS=ctl-caller-ci \
 CTL_TEST_SHARED_SSH_CONTROL="$root/master" \
 CTL_TEST_SHARED_SSH_RUNTIME="$root" \
   cargo test --locked -p ctl-agent --test multiplex \
-    native_ssh_limit_allows_sixteen_views_and_udp_rules_on_one_agent_session -- --exact --ignored --nocapture
+    native_ssh_limit_allows_sixteen_views_and_udp_rules_on_two_agent_sessions -- --exact --ignored --nocapture

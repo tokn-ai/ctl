@@ -325,8 +325,14 @@ Discovery and saved rules display TCP or UDP. Selecting a discovered endpoint
 prefills its original protocol; creation also offers **Any (TCP/UDP)** to bind
 both transports. Existing saved rules default to TCP. UDP forwarding requires
 the remote agent's `ctl_forwarding 1.0.2` contract. Updated clients use ctld
-`1.2.18` and the agent's `ctl_transport 1.0.1` contract to share one SSH command
-channel across forwarding rules, ctmux views, and supplemental service requests.
+`1.2.18` and the agent's `ctl_transport 1.0.1` contract to lazily open two shared
+SSH command channels per physical master, including across aliases: Sessions
+carries ctmux and task connections, while Forwarding carries UDP rules. Each has
+its own 64-stream capacity, 16 MiB receive budget, and agent failure handling;
+physical SSH loss affects both. Both active groups consume two SSH exec session
+slots, or three with an optional master lease anchor. TCP forwarding consumes no
+exec slots; **Any** combines native TCP with UDP on Forwarding. The Forwarding
+agent alone shares a 32 MiB UDP payload budget and 512-socket cap across its rules.
 
 The identity-file input suggests candidate files from the top level of
 `~/.ssh`. Type to filter, use the arrow keys and Enter, or click a file. Manual

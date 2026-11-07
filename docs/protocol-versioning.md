@@ -146,21 +146,35 @@ identity negotiation and service contracts. UDP streams retain
 `ctl_forwarding 1.0.1` and `1.0.2`, including destination validation and peer
 framing. Existing `connect` and `forward-udp` endpoints remain supported.
 
-The broker shares one physical agent command channel among service streams and
-forwarding rules using the same selected physical control socket, including
-aliases resolving to that socket. A target disconnect closes its own streams
-while other aliases retain theirs. The transport bounds active service handlers
-to 128 and aggregate service receive windows to 32 MiB, with one additional
-256 KiB server admission slot for rejecting excess streams. Slow readers have
-independent backpressure, and closing one logical stream preserves its siblings.
-Physical transport loss closes all of that transport's logical streams. An unused
-transport closes after five seconds, allowing the master's ordinary idle policy
-to resume. UDP services on a shared remote endpoint also share a 32 MiB owned
-datagram payload budget and at most 512 peer or setup sockets, whose receive
-buffers total at most another 32 MiB. Excess data is dropped, while exhausted
-socket capacity uses existing forwarding error and close responses. The `ctmux`,
-`task`, `ctl_identity`, `ctl_forwarding`, helper, lifecycle,
-storage, and product release versions are unchanged by this addition.
+The broker lazily opens two shared agent command channels on each selected
+physical control socket, including aliases resolving to that socket. The
+Sessions group carries ctmux and task streams; Forwarding carries UDP streams.
+Both active groups consume two SSH exec slots, or three with an optional master
+lease anchor. Native TCP forwarding consumes no exec slots; Any combines native
+TCP with UDP on Forwarding. A target disconnect closes its own streams while
+other aliases retain theirs.
+
+Each group independently bounds active service handlers to 64 and aggregate
+service receive windows to 16 MiB. The two groups total 128 handlers and 32 MiB,
+plus one 256 KiB server admission slot per group for rejecting excess streams:
+the combined server receive bound is 32.5 MiB. Capacity, agent failures, and
+buffering remain independent between groups, while both share the physical
+master's network bandwidth. Slow readers have independent logical stream
+backpressure, and closing one stream preserves its siblings. Losing one agent
+closes only its group's streams; losing the physical SSH master affects both.
+Each unused group closes after five seconds, allowing the master's ordinary
+idle policy to resume once neither group is active.
+
+Only the Forwarding agent has UDP services: they share one 32 MiB owned datagram
+payload budget and at most 512 peer or setup sockets, whose receive buffers total
+at most another 32 MiB. The Sessions group does not duplicate these UDP budgets.
+Excess data is dropped, while exhausted socket capacity uses existing forwarding
+error and close responses. Splitting the two groups and setting these resource
+limits changes implementation policy without changing serialized fields or
+negotiation. The ctld `1.2.18` contract (build 18) and `ctl_transport 1.0.1`
+contract (build 1) remain unchanged. The `ctmux`, `task`, `ctl_identity`,
+`ctl_forwarding`, helper, lifecycle, storage, and product release versions are
+also unchanged by this addition.
 
 Quiet SSH establishment advances ctld from `1.1.13` (build 13) to `1.1.14`
 (build 14), retaining `1.0.12` and `1.1.13`. The additive `ensure_master_quiet`

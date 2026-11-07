@@ -21,8 +21,8 @@ pub const CONTRACT_V1_0_1: ProtocolVersion = ProtocolVersion::new(1, 0, 1);
 pub const PROTOCOL_VERSION: ProtocolVersion = CONTRACT_V1_0_1;
 pub const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[CONTRACT_V1_0_1];
 pub const PREFACE: &[u8] = b"ctl-service-transport\n";
-pub const MAX_STREAMS: usize = 128;
-pub const MAX_RECEIVE_BYTES: usize = 32 * 1024 * 1024;
+pub const MAX_STREAMS: usize = 64;
+pub const MAX_RECEIVE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_NEGOTIATION_BYTES: usize = 8192;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -326,7 +326,7 @@ where
             if at_capacity {
               return Poll::Ready(Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
-                format!("The shared SSH service transport has reached its limit of {MAX_STREAMS} open streams. Close an unused view or stop an unused UDP rule, then try again."),
+                format!("The shared SSH service transport has reached its limit of {MAX_STREAMS} open streams. Close an unused service connection, then try again."),
               )));
             }
             if write_blocked.load(Ordering::Relaxed) {

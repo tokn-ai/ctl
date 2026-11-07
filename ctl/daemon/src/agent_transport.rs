@@ -1,4 +1,4 @@
-//! One authenticated agent command carries every logical service on a master.
+//! Session and UDP service pools share an authenticated master independently.
 
 #[cfg(all(test, unix))]
 mod tests;
@@ -63,17 +63,76 @@ struct GatewaySlot {
 #[derive(Default)]
 struct OwnedGateway {
   targets: HashMap<SshTarget, watch::Sender<bool>>,
-  gateway: Option<Gateway>,
+  client: Option<Client>,
 }
 
 #[derive(Default)]
 pub(super) struct Registry {
-  gateways: Mutex<HashMap<PathBuf, Arc<GatewaySlot>>>,
+  gateways: Mutex<HashMap<PathBuf, MasterGateway>>,
 }
 
-struct Gateway {
+struct MasterGateway {
   socket_identity: (u64, u64),
-  client: Client,
+  groups: HashMap<Group, Arc<GatewaySlot>>,
+}
+
+struct Reservation {
+  target: SshTarget,
+  control_path: PathBuf,
+  socket_identity: (u64, u64),
+  service: Service,
+  group: Group,
+  slot: Arc<GatewaySlot>,
+  cancelled: watch::Receiver<bool>,
+}
+
+impl MasterGateway {
+  fn close(self) {
+    for slot in self.groups.into_values() {
+      let mut owned = slot.owned.lock().unwrap();
+      for (_, cancelled) in owned.targets.drain() {
+        cancelled.send_replace(true);
+      }
+      if let Some(client) = owned.client.take() {
+        client.close();
+      }
+    }
+  }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Group {
+  Sessions,
+  Forwarding,
+}
+
+impl Group {
+  fn for_service(service: Service) -> Self {
+    match service {
+      Service::Ctmux | Service::Task => Self::Sessions,
+      Service::Udp => Self::Forwarding,
+    }
+  }
+
+  fn capacity_error(self, error: io::Error) -> io::Error {
+    if error.kind() != io::ErrorKind::WouldBlock {
+      return error;
+    }
+    let (name, recovery) = match self {
+      Self::Sessions => ("sessions", "Close an unused terminal view"),
+      Self::Forwarding => (
+        "UDP forwarding",
+        "Stop an unused UDP or Any forwarding rule",
+      ),
+    };
+    io::Error::new(
+      io::ErrorKind::WouldBlock,
+      format!(
+        "The shared SSH {name} pool has reached its limit of {} open streams. {recovery}, then try again.",
+        transport::MAX_STREAMS,
+      ),
+    )
+  }
 }
 
 pub(super) async fn open_service(
@@ -89,7 +148,7 @@ pub(super) async fn open_service(
   let startup = async {
     let lifecycle = state.target(target);
     let mut attempt = lifecycle.attempt();
-    let _target_guard = attempt
+    let target_guard = attempt
       .run(Arc::clone(&lifecycle.lock).lock_owned())
       .await?;
     lifecycle.require_connected()?;
@@ -107,8 +166,18 @@ pub(super) async fn open_service(
     {
       return Err(RequestError::HostDisconnected);
     }
+    // Register ownership before releasing the target lock. Disconnect may
+    // already have published cancellation, but its registry cleanup must run
+    // after this reservation and cannot miss a later stale registration.
+    let reserved = state
+      .agent_transports
+      .reserve(target, control_path, service)
+      .map_err(RequestError::AgentTransport)?;
+    // Remote startup remains cancellable without holding the other class
+    // behind this target's lifecycle lock.
+    drop(target_guard);
     let remote = attempt
-      .run(state.agent_transports.open(target, control_path, service))
+      .run(state.agent_transports.open_reserved(reserved))
       .await?
       .map_err(RequestError::AgentTransport)?;
     Ok::<_, RequestError>((remote, attempt))
@@ -147,8 +216,8 @@ impl Registry {
     service: Service,
   ) -> io::Result<Stream> {
     self
-      .open_with(target, control_path, service, || {
-        start(command(target, control_path))
+      .open_with(target, control_path, service, |selected_path| {
+        start(command(target, &selected_path))
       })
       .await
   }
@@ -161,15 +230,45 @@ impl Registry {
     connect: F,
   ) -> io::Result<Stream>
   where
-    F: FnOnce() -> Fut,
+    F: FnOnce(PathBuf) -> Fut,
     Fut: Future<Output = io::Result<Client>>,
   {
+    self
+      .open_reserved_with(self.reserve(target, control_path, service)?, connect)
+      .await
+  }
+
+  fn reserve(
+    &self,
+    target: &SshTarget,
+    control_path: &Path,
+    service: Service,
+  ) -> io::Result<Reservation> {
     // Aliases can resolve to the same master. Canonicalize symlinks as well so
     // the authenticated control socket, rather than a target spelling, owns it.
     let control_path = std::fs::canonicalize(control_path)?;
-    let (slot, mut cancelled) = {
+    let group = Group::for_service(service);
+    let (slot, cancelled, socket_identity) = {
       let mut gateways = self.gateways.lock().unwrap();
-      let slot = gateways.entry(control_path.clone()).or_default();
+      // Observe identity while holding the registry lock: an opener that read
+      // an older inode must not replace a newer entry another opener installed.
+      let socket_identity = socket_identity(&control_path)?;
+      if gateways
+        .get(&control_path)
+        .is_some_and(|master| master.socket_identity != socket_identity)
+        && let Some(previous) = gateways.remove(&control_path)
+      {
+        // Both groups belong to this physical master, even when one has only
+        // a pending startup and no published client to inspect yet.
+        previous.close();
+      }
+      let master = gateways
+        .entry(control_path.clone())
+        .or_insert_with(|| MasterGateway {
+          socket_identity,
+          groups: HashMap::new(),
+        });
+      let slot = master.groups.entry(group).or_default();
       let cancelled = slot
         .owned
         .lock()
@@ -178,27 +277,63 @@ impl Registry {
         .entry(target.clone())
         .or_insert_with(|| watch::channel(false).0)
         .subscribe();
-      (Arc::clone(slot), cancelled)
+      (Arc::clone(slot), cancelled, socket_identity)
     };
+    Ok(Reservation {
+      target: target.clone(),
+      control_path,
+      socket_identity,
+      service,
+      group,
+      slot,
+      cancelled,
+    })
+  }
+
+  async fn open_reserved(&self, reserved: Reservation) -> io::Result<Stream> {
+    let target = reserved.target.clone();
+    self
+      .open_reserved_with(reserved, |selected_path| {
+        start(command(&target, &selected_path))
+      })
+      .await
+  }
+
+  async fn open_reserved_with<F, Fut>(
+    &self,
+    reserved: Reservation,
+    connect: F,
+  ) -> io::Result<Stream>
+  where
+    F: FnOnce(PathBuf) -> Fut,
+    Fut: Future<Output = io::Result<Client>>,
+  {
+    let Reservation {
+      target,
+      control_path,
+      socket_identity,
+      service,
+      group,
+      slot,
+      mut cancelled,
+    } = reserved;
     let availability = cancelled.clone();
     let open = async {
       let client = {
         // Ownership uses a separate short lock. Disconnect never waits for
         // remote startup, including another alias initializing this socket.
         let _initializing = slot.initialization.lock().await;
-        let socket_identity = socket_identity(&control_path)?;
+        self.require_current_master(&control_path, socket_identity)?;
         let existing = {
           let mut owned = slot.owned.lock().unwrap();
-          if owned.gateway.as_ref().is_some_and(|entry| {
-            entry.socket_identity != socket_identity || entry.client.is_closed()
-          }) && let Some(previous) = owned.gateway.take()
+          if owned.client.as_ref().is_some_and(Client::is_closed)
+            && let Some(previous) = owned.client.take()
           {
-            previous.client.close();
-            // Previous aliases owned the replaced physical connection. Their
-            // pending opens must retry against its new identity, and must not
-            // keep a replacement gateway alive after its new owner leaves.
+            previous.close();
+            // Only this group's agent closed. Its old aliases must retry,
+            // while the other group retains its client and ownership.
             owned.targets.retain(|owner, cancelled| {
-              if owner == target {
+              if owner == &target {
                 true
               } else {
                 cancelled.send_replace(true);
@@ -206,12 +341,16 @@ impl Registry {
               }
             });
           }
-          owned.gateway.as_ref().map(|entry| entry.client.clone())
+          owned.client.clone()
         };
         if let Some(client) = existing {
           client
         } else {
-          let client = connect().await?;
+          let client = connect(control_path.clone()).await?;
+          if let Err(error) = self.require_current_master(&control_path, socket_identity) {
+            client.close();
+            return Err(error);
+          }
           let mut owned = slot.owned.lock().unwrap();
           if *availability.borrow() {
             // A cancelled initializer may finish in the same poll as its
@@ -219,14 +358,14 @@ impl Registry {
             client.close();
             return Err(cancelled_open());
           }
-          owned.gateway = Some(Gateway {
-            socket_identity,
-            client: client.clone(),
-          });
+          owned.client = Some(client.clone());
           client
         }
       };
-      client.open(service).await
+      client
+        .open(service)
+        .await
+        .map_err(|error| group.capacity_error(error))
     };
     tokio::select! {
       biased;
@@ -236,38 +375,53 @@ impl Registry {
   }
 
   pub(super) fn cancel_target(&self, target: &SshTarget) {
-    self.gateways.lock().unwrap().retain(|_, slot| {
-      let mut owned = slot.owned.lock().unwrap();
-      if let Some(cancelled) = owned.targets.remove(target) {
-        cancelled.send_replace(true);
-      }
-      if !owned.targets.is_empty() {
-        return true;
-      }
-      if let Some(gateway) = owned.gateway.take() {
-        gateway.client.close();
-      }
-      false
+    self.gateways.lock().unwrap().retain(|_, master| {
+      master.groups.retain(|_, slot| {
+        let mut owned = slot.owned.lock().unwrap();
+        if let Some(cancelled) = owned.targets.remove(target) {
+          cancelled.send_replace(true);
+        }
+        if !owned.targets.is_empty() {
+          return true;
+        }
+        if let Some(client) = owned.client.take() {
+          client.close();
+        }
+        false
+      });
+      !master.groups.is_empty()
     });
   }
 
   pub(super) fn shutdown(&self) {
-    let slots: Vec<_> = self
+    let masters: Vec<_> = self
       .gateways
       .lock()
       .unwrap()
       .drain()
-      .map(|(_, slot)| slot)
+      .map(|(_, master)| master)
       .collect();
-    for slot in slots {
-      let mut owned = slot.owned.lock().unwrap();
-      for (_, cancelled) in owned.targets.drain() {
-        cancelled.send_replace(true);
-      }
-      if let Some(gateway) = owned.gateway.take() {
-        gateway.client.close();
-      }
+    for master in masters {
+      master.close();
     }
+  }
+
+  fn require_current_master(&self, path: &Path, expected: (u64, u64)) -> io::Result<()> {
+    if socket_identity(path)? == expected {
+      return Ok(());
+    }
+    let mut gateways = self.gateways.lock().unwrap();
+    if gateways
+      .get(path)
+      .is_some_and(|master| master.socket_identity == expected)
+      && let Some(previous) = gateways.remove(path)
+    {
+      previous.close();
+    }
+    Err(io::Error::new(
+      io::ErrorKind::ConnectionAborted,
+      "The selected SSH master changed while opening its shared service stream",
+    ))
   }
 }
 

@@ -19,20 +19,26 @@ const PAYLOAD: &[u8] = b"forward\0\xff\xfe\r\nbytes";
 const SNAPSHOT_DESCENDANTS: &str = r"
 $ErrorActionPreference = 'Stop'
 $processes = @(Get-CimInstance Win32_Process)
-$parents = [Collections.Generic.HashSet[uint32]]::new()
-$parents.Add([uint32]$env:CTL_FORWARD_OWNER_PID) | Out-Null
+$owner = $processes | Where-Object { $_.ProcessId -eq [uint32]$env:CTL_FORWARD_OWNER_PID }
+if ($null -eq $owner -or $null -eq $owner.CreationDate) { throw 'Owner process creation time is unavailable' }
+$parents = [Collections.Generic.Dictionary[uint32, long]]::new()
+$parents.Add($owner.ProcessId, $owner.CreationDate.ToUniversalTime().Ticks)
 $descendants = @()
 do {
   $changed = $false
   foreach ($process in $processes) {
-    if ($parents.Contains($process.ParentProcessId) -and $parents.Add($process.ProcessId)) {
+    if ($parents.ContainsKey($process.ParentProcessId) -and -not $parents.ContainsKey($process.ProcessId)) {
       if ($null -eq $process.CreationDate) { throw 'Owned process creation time is unavailable' }
+      $created_at = $process.CreationDate.ToUniversalTime().Ticks
+      # ParentProcessId can refer to a previous process that used the same PID.
+      if ($created_at -lt $parents[$process.ParentProcessId]) { continue }
+      $parents.Add($process.ProcessId, $created_at)
       $changed = $true
       $descendants += [pscustomobject]@{
         process_id = $process.ProcessId
         parent_id = $process.ParentProcessId
         name = $process.Name
-        created_at = [string]$process.CreationDate.ToUniversalTime().Ticks
+        created_at = [string]$created_at
       }
     }
   }
@@ -86,6 +92,44 @@ async fn powershell(script: &str, owner: u32, input: &[u8]) -> std::process::Out
   })
   .await
   .expect("native process ownership check timed out")
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn process_snapshot_excludes_older_trees_with_reused_parent_pids() {
+  let fixture = r"
+function Get-CimInstance {
+  # Deliberately place the grandchild before its parent to exercise traversal.
+  foreach ($entry in @(
+    @(400, 200, 'proxy.exe', 300),
+    @(600, 500, 'unrelated-child.exe', 75),
+    @(500, 200, 'unrelated.exe', 50),
+    @(200, 100, 'ssh.exe', 200),
+    @(100, 1, 'ctld.exe', 100)
+  )) {
+    [pscustomobject]@{
+      ProcessId = [uint32]$entry[0]
+      ParentProcessId = [uint32]$entry[1]
+      Name = $entry[2]
+      CreationDate = [DateTime]::new(2026, 1, 1).AddSeconds($entry[3])
+    }
+  }
+}
+";
+  let output = powershell(&format!("{fixture}\n{SNAPSHOT_DESCENDANTS}"), 100, &[]).await;
+  assert!(
+    output.status.success(),
+    "process snapshot failed: {output:?}"
+  );
+  let mut processes: Vec<ProcessIdentity> = serde_json::from_slice(&output.stdout).unwrap();
+  processes.sort_by_key(|process| process.process_id);
+  assert_eq!(
+    processes
+      .iter()
+      .map(|process| process.process_id)
+      .collect::<Vec<_>>(),
+    vec![200, 400]
+  );
 }
 
 async fn snapshot_descendants(owner: &Owner) -> Vec<ProcessIdentity> {

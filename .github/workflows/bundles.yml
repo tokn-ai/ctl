@@ -126,12 +126,18 @@ jobs:
 
       - name: Package remote components
         shell: bash
-        run: >-
-          ./scripts/ci/package-agent-bundle.sh
-          "${{ matrix.target }}"
-          "${{ needs.metadata.outputs.app_version }}"
-          "${{ needs.metadata.outputs.bundle_id }}"
-          "${{ needs.metadata.outputs.git_revision }}"
+        run: |
+          ./scripts/ci/package-agent-bundle.sh \
+          "${{ matrix.target }}" \
+          "${{ needs.metadata.outputs.app_version }}" \
+          "${{ needs.metadata.outputs.bundle_id }}" \
+          "${{ needs.metadata.outputs.git_revision }}" \
+          target/agent-bundles
+          node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/ci/package-updater.mts \
+          "${{ matrix.target }}" \
+          "${{ needs.metadata.outputs.app_version }}" \
+          "${{ needs.metadata.outputs.bundle_id }}" \
+          "${{ needs.metadata.outputs.git_revision }}" \
           target/agent-bundles
 
       - name: Upload remote-agent bundle

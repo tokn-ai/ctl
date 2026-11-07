@@ -1,4 +1,4 @@
-//! Explicit selections shared by local discovery and remote component uploads.
+//! One native installation alongside cached and included deployment builds.
 
 use serde::{Deserialize, Serialize};
 use tauri::ipc::Channel;
@@ -128,12 +128,12 @@ pub async fn select_component_bundle(
 ) -> CommandResult<SelectionResult> {
   #[cfg(unix)]
   {
-    use ctl_core::bundles::Purpose;
     let home = home()?;
-    let purpose = match request.purpose {
-      BundlePurpose::Local => Purpose::Local,
-      BundlePurpose::Upload => Purpose::Upload,
-    };
+    if matches!(request.purpose, BundlePurpose::Upload) {
+      return Err(selection_error(
+        "Upload selections were removed. Choose a channel or provided files when updating a host.",
+      ));
+    }
     let directories = crate::remote_agent::bundle_directories(&app)?;
     let _ = on_progress.send(SelectionPhase::Verifying);
     let bundle = {
@@ -145,16 +145,12 @@ pub async fn select_component_bundle(
         .map_err(CommandErrorDto::backend)?
         .map_err(selection_error)?
     };
-    if purpose == Purpose::Upload
-      && !ctl_client::components::upload_target(&bundle.manifest.target_triple)
-    {
-      return Err(selection_error(
-        "This target is unavailable for remote uploads.",
-      ));
-    }
-    ctl_client::components::select_with_progress(&home, purpose, &bundle, || {
-      let _ = on_progress.send(SelectionPhase::Selecting);
-    })
+    let _ = on_progress.send(SelectionPhase::Selecting);
+    ctl_client::component_update::install_local(
+      &home,
+      &bundle,
+      ctl_client::component_update::Package::FullBundle,
+    )
     .await
     .map_err(selection_error)?;
     Ok(SelectionResult {
@@ -244,10 +240,14 @@ fn summary(
   let signed_package = !cfg!(target_os = "macos")
     || (manifest.files.contains_key("ctld.app/Contents/MacOS/ctld")
       && manifest.files.contains_key("ctld-package.json"));
+  let complete =
+    manifest.components.contains_key("ctl") && manifest.components.contains_key("ctmux");
   let local_reason = if !compatible {
     Some("Incompatible with this app")
   } else if !ctl_core::bundles::local_target(target) {
     Some("For another platform")
+  } else if !complete {
+    Some("Legacy build lacks ctl and ctmux")
   } else if !signed_package {
     Some("Requires a signed macOS helper package")
   } else {

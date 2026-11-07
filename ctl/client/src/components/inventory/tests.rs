@@ -67,7 +67,7 @@ fn includes_all_packaged_targets_without_importing_and_honors_filter() {
 }
 
 #[test]
-fn included_choice_imports_exact_content_and_is_deduplicated_with_selection() {
+fn included_choice_caches_exact_content_without_creating_an_upload_selection() {
   let root = Directory::new();
   let home = root.0.join("home");
   let directories = [root.0.join("included")];
@@ -77,7 +77,6 @@ fn included_choice_imports_exact_content_and_is_deduplicated_with_selection() {
   let expected = listed.bundles.pop().unwrap().manifest;
   let bundle = load_selection(&home, &directories, target, &expected.bundle_id).unwrap();
   assert_eq!(bundle.manifest, expected);
-  Store::new(&home).select(Purpose::Upload, &bundle).unwrap();
   let listed = snapshot(&home, None, &directories);
   assert!(listed.errors.is_empty(), "{:?}", listed.errors);
   assert_eq!(listed.bundles.len(), 4);
@@ -86,7 +85,7 @@ fn included_choice_imports_exact_content_and_is_deduplicated_with_selection() {
     .iter()
     .find(|entry| entry.manifest == expected)
     .unwrap();
-  assert!(entry.availability.included() && entry.availability.stored() && entry.selected_upload);
+  assert!(entry.availability.included() && entry.availability.stored() && !entry.selected_upload);
   assert_eq!(
     snapshot(&home, None, &[]).bundles.len(),
     1,
@@ -106,8 +105,7 @@ fn damaged_included_target_reports_error_without_hiding_other_builds() {
     .pop()
     .unwrap()
     .manifest;
-  let bundle = load_selection(&home, &directories, target, &manifest.bundle_id).unwrap();
-  Store::new(&home).select(Purpose::Upload, &bundle).unwrap();
+  load_selection(&home, &directories, target, &manifest.bundle_id).unwrap();
   std::fs::write(
     directories[0].join(format!("ctl-agent-bundle-0.0.9-{target}.tar.gz")),
     b"corrupt",
@@ -123,7 +121,9 @@ fn damaged_included_target_reports_error_without_hiding_other_builds() {
     .find(|bundle| bundle.manifest.target_triple == target)
     .unwrap();
   assert!(
-    !retained.availability.included() && retained.availability.stored() && retained.selected_upload
+    !retained.availability.included()
+      && retained.availability.stored()
+      && !retained.selected_upload
   );
 }
 
@@ -137,4 +137,36 @@ fn empty_inventory_and_invalid_filters_remain_passive() {
   assert_ne!(invalid.errors, [] as [String; 0]);
   assert!(invalid.bundles.is_empty());
   assert!(!home.0.exists());
+}
+
+#[test]
+fn active_installation_is_visible_once_and_legacy_upload_pins_are_ignored() {
+  let root = Directory::new();
+  let home = root.0.join("home");
+  std::fs::create_dir_all(&home).unwrap();
+  let fixture = Fixture::new("0.1.2", &"b".repeat(40)).with_clients();
+  let target = ctl_core::paths::native_target();
+  let components = serde_json::from_value(fixture.inner["components"].clone()).unwrap();
+  let manifest = Manifest::new(target, Source::Ci, components, &fixture.files).unwrap();
+  let cache = Store::cache(&home);
+  let cached = cache.publish(&manifest, &fixture.files).unwrap();
+  let installs = Installations::new(&home);
+  installs.activate(&cached).unwrap();
+  let legacy = Store::new(&home);
+  let old = legacy.publish(&manifest, &fixture.files).unwrap();
+  legacy
+    .select(ctl_core::bundles::Purpose::Upload, &old)
+    .unwrap();
+  let listed = snapshot(&home, None, &[]);
+  assert!(listed.errors.is_empty(), "{:?}", listed.errors);
+  assert_eq!(listed.bundles.len(), 1);
+  assert!(listed.bundles[0].selected_local);
+  assert!(!listed.bundles[0].selected_upload);
+  assert!(
+    listed
+      .selections
+      .iter()
+      .all(|selection| selection.selected_upload.is_none())
+  );
+  assert_eq!(listed.bundles[0].manifest, manifest);
 }

@@ -11,6 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { agentTargets, maxAgentManifestBytes, parseAgentBundleSet, readAgentFile, verifyAgentBundleTarget, type AgentBundleSet } from "../shared/agent-bundle.mts";
+import { updaterBinaryName, updaterManifestName, verifyUpdaterTarget } from "../shared/updater-bundle.mts";
 
 const WORKFLOW = "bundles.yml";
 const ARTIFACT = "ctl-agent-bundle-set";
@@ -162,6 +163,7 @@ async function readBundleSet(
   if (verifyArchives) {
     for (const target of SUPPORTED_TARGETS) {
       await verifyAgentBundleTarget(directory, manifest, target, manifest.targets[target]);
+      await verifyUpdaterTarget(directory, manifest, target);
     }
   }
   return manifest;
@@ -199,6 +201,11 @@ function installBundleSet(source: string, destination: string, manifest: BundleS
     const archive = manifest.targets[target].archive;
     copyFileSync(join(source, archive), join(destination, archive));
     copyFileSync(join(source, `${archive}.sha256`), join(destination, `${archive}.sha256`));
+    const metadata = updaterManifestName(target);
+    if (existsSync(join(source, metadata))) {
+      const binary = updaterBinaryName(manifest, target);
+      for (const name of [binary, `${binary}.sha256`, metadata]) copyFileSync(join(source, name), join(destination, name));
+    }
   }
   const temporaryManifest = join(
     destination,
@@ -304,13 +311,8 @@ async function syncBundles(repoRoot: string, useMain: boolean): Promise<void> {
       "apps/desktop/src-tauri/resources/agent-bundles",
     );
     installBundleSet(temporaryDirectory, destination, manifest);
-    for (const target of SUPPORTED_TARGETS) {
-      runCommand("cargo", ["run", "--locked", "--manifest-path", join(repoRoot, "Cargo.toml"),
-        "-p", "ctl-cli", "--", "components", "sync", "--from", destination,
-        "--target", target, "--purpose", "upload", "--source", "ci"], repoRoot, true);
-    }
     console.log(
-      `Installed ${manifest.bundle_id} from run ${run.databaseId} into ${resolve(destination)}`,
+      `Staged verified packaging resources for ${manifest.bundle_id} from run ${run.databaseId} into ${resolve(destination)}`,
     );
   } finally {
     rmSync(temporaryDirectory, { recursive: true, force: true });
@@ -324,8 +326,9 @@ async function main(): Promise<void> {
   }
   if (args[0] === "--help") {
     console.log("usage: pnpm bundles:sync [--main]");
-    console.log("  default  sync or build bundles for the exact pushed commit");
-    console.log("  --main   use the latest successful main-branch bundle set");
+    console.log("  default  stage verified packaging resources for the exact pushed commit");
+    console.log("  --main   stage the latest successful main-branch bundle set");
+    console.log("  Never activates an installation or changes account state.");
     return;
   }
 

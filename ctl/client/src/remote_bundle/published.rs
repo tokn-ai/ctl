@@ -8,6 +8,13 @@ use std::time::Duration;
 
 use super::{BundleSet, Error, MAX_BUNDLE_BYTES, MAX_BUNDLE_SET_BYTES, VerifiedBundle};
 
+#[cfg(unix)]
+mod updater;
+#[cfg(unix)]
+pub use updater::{UpdaterInfo, VerifiedUpdater, download_updater_cached, read_updater};
+#[cfg(unix)]
+pub(crate) use updater::{cache_verified, prune_updater_cache, read_cached_updater};
+
 pub const ROOT: &str = "https://tokn-ai.dev/ctl/bundles/";
 const MAX_CHANNEL_BYTES: usize = 4 * 1024;
 

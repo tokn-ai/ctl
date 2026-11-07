@@ -34,7 +34,8 @@ async fn compatible_different_build_is_imported_without_selecting_or_running_it(
   );
   let store = Store::new(&home.0);
   assert!(store.selected(Purpose::Upload, target).unwrap().is_none());
-  select(&home.0, Purpose::Upload, &bundle).await.unwrap();
+  let error = select(&home.0, Purpose::Upload, &bundle).await.unwrap_err();
+  assert!(error.to_string().contains("upload selections"));
   let upload = upload_bundle(&bundle).unwrap();
   assert_eq!(
     upload.bundle_id, candidate.bundle_id,
@@ -47,7 +48,7 @@ async fn compatible_different_build_is_imported_without_selecting_or_running_it(
       .unwrap(),
     bundle.manifest
   );
-  assert!(home.0.join(".tokn/ctl/components/bundles").is_dir());
+  assert!(home.0.join(".tokn/ctl/cache/components/bundles").is_dir());
   assert!(!home.0.join(".tokn/ctl/agent-bundles").exists());
 }
 

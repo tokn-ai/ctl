@@ -20,7 +20,7 @@ pub fn import_remote(
   source: Source,
 ) -> Result<Bundle, crate::remote_bundle::Error> {
   let payload = remote_payload(bundle, target, source)?;
-  Ok(Store::new(home).publish(&payload.manifest, &payload.files)?)
+  Ok(Store::cache(home).publish(&payload.manifest, &payload.files)?)
 }
 
 /// Inspects a complete archive without importing, selecting or executing it.
@@ -183,7 +183,7 @@ fn publish_local(
   let manifest = Manifest::new(target, Source::Local, manifest.components, &files)?
     .with_executables(app_executables)?
     .with_distribution_id(&publisher_id)?;
-  Store::new(home).publish(&manifest, &files)
+  Store::cache(home).publish(&manifest, &files)
 }
 
 /// Selects an imported complete build, without starting or restarting services.
@@ -204,16 +204,46 @@ pub async fn select_with_progress(
   bundle: &Bundle,
   verified: impl FnOnce(),
 ) -> io::Result<()> {
-  if purpose == Purpose::Upload && !upload_target(&bundle.manifest.target_triple) {
-    return Err(invalid("this target is unavailable for remote uploads"));
+  if purpose == Purpose::Upload {
+    return Err(invalid(
+      "upload selections were replaced by deployment cache entries; use ctlup update --from",
+    ));
   }
+  verify_local(home, bundle).await?;
+  verified();
+  let home = home.to_owned();
+  let bundle = bundle.clone();
+  tokio::task::spawn_blocking(move || {
+    let installations = ctl_core::installations::Installations::new(&home);
+    installations.activate(&bundle)?;
+    if let Err(error) = installations.prune() {
+      eprintln!("ctlup: installed successfully; cleanup deferred: {error}");
+    }
+    Ok(())
+  })
+  .await
+  .map_err(io::Error::other)?
+}
+
+/// Verify a complete native build before provisioning or activation.
+///
+/// # Errors
+/// Rejects incompatible contracts and invalid signed macOS helper packages.
+#[cfg_attr(
+  not(target_os = "macos"),
+  expect(
+    clippy::unused_async,
+    reason = "native trust verification is asynchronous on macOS"
+  )
+)]
+pub async fn verify_local(home: &Path, bundle: &Bundle) -> io::Result<()> {
   if !compatible(&bundle.manifest.components) {
     return Err(invalid(
       "bundle is incompatible with this client; choose a compatible complete build",
     ));
   }
   #[cfg(target_os = "macos")]
-  if purpose == Purpose::Local {
+  {
     let files = bundle.read_files()?;
     let receipt = files
       .get("ctld-package.json")
@@ -227,12 +257,9 @@ pub async fn select_with_progress(
       ));
     }
   }
-  verified();
-  let home = home.to_owned();
-  let bundle = bundle.clone();
-  tokio::task::spawn_blocking(move || Store::new(&home).select(purpose, &bundle))
-    .await
-    .map_err(io::Error::other)?
+  #[cfg(not(target_os = "macos"))]
+  let _ = home;
+  Ok(())
 }
 
 /// Portable targets recognized by the remote platform probe.
@@ -251,17 +278,18 @@ pub fn upload_target(target: &str) -> bool {
 ///
 /// # Errors
 /// Rejects incompatible candidates or an unsafe existing selection.
+#[expect(
+  clippy::unused_async,
+  reason = "retained source-compatible API; deployment caches no longer initialize a selection"
+)]
 pub async fn initialize_upload(home: &Path, bundle: &Bundle) -> io::Result<Bundle> {
   if !upload_target(&bundle.manifest.target_triple) || !compatible(&bundle.manifest.components) {
     return Err(invalid(
       "initial upload bundle is incompatible with this client",
     ));
   }
-  let home = home.to_owned();
-  let bundle = bundle.clone();
-  tokio::task::spawn_blocking(move || Store::new(&home).select_if_unset(Purpose::Upload, &bundle))
-    .await
-    .map_err(io::Error::other)?
+  let _ = home;
+  Ok(bundle.clone())
 }
 
 /// Packages exactly the selected immutable complete build for remote upload.

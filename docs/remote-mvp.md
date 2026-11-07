@@ -163,9 +163,11 @@ client's product version or source revision. Network publication eligibility
 depends on advertised contracts, independently of source equality.
 Legacy schema-1 artifacts cannot become a complete managed selection.
 
-Publication and selection use private staging and atomic rename. Corrupt or
-incompatible published bundles stop repair. Use `ctl components update --selected`
-for an explicit offline installation, or `--from <directory>` to provide a build.
+Publication and installation use private staging and atomic rename. Corrupt or
+incompatible published bundles stop repair. Use `ctlup update --from <directory>`
+for an explicit offline installation. The separate target updater sidecar must
+accompany foreign-target files. Remote bootstrap prepares `~/.tokn/ctl/bin/ctlup`,
+which uses the same installation engine as local updates.
 See [Components and updates](component-updates.md) for layout and local use.
 
 Upload progress shows the archive, received bytes, speed, and installation

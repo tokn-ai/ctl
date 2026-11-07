@@ -54,7 +54,8 @@ successful retry.
 
 The public component source is
 [`https://tokn-ai.dev/ctl/bundles/`](https://tokn-ai.dev/ctl/bundles/).
-It contains each target's archive, SHA-256 sidecar and bundle-set metadata.
+It contains each target's runtime archive, SHA-256 sidecar, standalone `ctlup`
+executable and updater metadata, plus the complete bundle-set document.
 New publications use schema 3. Previously published schema-2 sets remain usable.
 
 Applications discover channels through:
@@ -76,6 +77,24 @@ Each channel document uses schema 1:
 
 Stable uses `"channel": "stable"`. The referenced immutable directory contains
 `bundle-set.json` and all four target archives and their `.sha256` sidecars.
+New publications also include these files for each target:
+
+```text
+ctlup-<bundle-id>-<target>
+ctlup-<bundle-id>-<target>.sha256
+ctlup-<target>.json
+```
+
+The updater's schema-1 manifest binds its version, source revision, target,
+filename, byte size and SHA-256. Packaging strips and probes the actual updater
+bytes before recording them. Its identity must match the runtime publication.
+The updater stays outside the six-component runtime archive, so changing the
+active runtime or rolling it back never replaces the installation manager.
+Older publications without updater sidecars remain readable. A partial updater
+set or a checksum mismatch blocks assembly/publication; CI emits all four targets.
+`pnpm bundles:sync` verifies and stages these files for desktop packaging only.
+It does not import an account cache, select a build or activate an installation;
+ordinary updates populate their deployment cache on demand.
 Archive names remain bare sibling filenames in the bundle set. Its existing
 checksums, archived manifests, component metadata, and protocol compatibility
 validation remain authoritative; channel discovery adds no parallel hash format.
@@ -94,13 +113,13 @@ attempt to the bundle ID, so reruns never overwrite an existing directory.
 
 The Pages job serializes publication across main and tags with a queued concurrency
 group. It restores the complete last successful site, verifies retained component
-sets, stages every new archive, then writes channel pointers and uploads one full
+sets, stages every new archive and updater, then writes channel pointers and uploads one full
 Pages artifact. Both channels are included in every replacement. A separate
 90-day Actions snapshot records the full site. Restoration requires the exact
 attempt's successful Pages deployment step, even if a later desktop job failed or
 the overall workflow is still running. Failed deployment candidates are ignored.
 After snapshot expiry, restoration downloads and verifies the managed published
-HTTPS catalog and archives. Network errors, corrupt state, and an existing
+HTTPS catalog, archives and updater sidecars. Network errors, corrupt state, and an existing
 unmanaged site abort publication rather than initialize an empty replacement.
 
 Pages retains five Dev publications, the current Stable publication, and the
@@ -117,7 +136,9 @@ asset SHA-256 digest and size, and mismatching bytes or manual-name collisions
 fail. Appending packages revalidates each available target and the complete
 published component manifest; it cannot replace another build's assets.
 Tag reruns download and verify the first published component set as canonical,
-then reuse it for Pages and desktop resources. Published package targets are
+then reuse it, including already-published updater bytes, for Pages and desktop
+resources. A retry may append missing updater sidecars only after checking the
+tag's exact source revision; existing sidecars cannot be replaced. Published package targets are
 likewise reused on rerun, accommodating timestamp/signing differences without
 replacing published files while allowing missing targets to be appended.
 An interrupted upload must retain every already-published file's digest and size;
@@ -161,11 +182,21 @@ revision requirements. The managed store uses a separate `bundle.json` schema.
 Managed schema 2 identifies a complete six-executable build, and managed schema 1
 continues to identify its four-executable predecessors.
 
-A full remote installation selects the build at `~/.tokn/ctl/current`. In a new
-managed remote shell, run `ctl who` for live ctl service connections or `ctmux ls`
-for sessions. An ordinary SSH login can invoke `~/.tokn/ctl/current/ctl` and
-`~/.tokn/ctl/current/ctmux` directly or add that directory to its own `PATH`.
+A full installation uses one immutable payload under
+`~/.tokn/ctl/installs/<content-id>` and atomically switches
+`~/.tokn/ctl/current`. Stable command entry points live in `~/.tokn/ctl/bin`;
+add that directory to `PATH` for an ordinary SSH login. Managed terminal sessions
+and ctl SSH gateway launches add it automatically. `ctlup` is a separate executable
+at `~/.tokn/ctl/bin/ctlup`, while runtime command aliases resolve through `current`.
 The installer leaves login shell configuration to the account owner.
+
+Clients obtain and verify the target updater locally. When it is absent or its
+checksum differs on the receiving account, they bootstrap it over authenticated
+SSH without requiring remote internet access. The updater verifies a retained
+runtime before deciding whether an archive upload is needed, then applies the
+same installation transaction as a local `ctlup install`. The previous complete
+build is retained for rollback, and process-held leases preserve builds still
+used by running clients or daemons. Updates never restart those processes.
 
 Component metadata probes execute the packaged bytes, including Intel macOS
 executables through Rosetta on ARM runners. The bundle workflow sets
@@ -365,7 +396,10 @@ The full signed bundle is installed without `sudo`:
   selected/<target>-ctld1-lifecycle1-helper1 -> ../versions/<version>-<target>
 ```
 
-Remote-agent `~/.tokn/ctl/versions/` and `current` remain independent. An existing
+The runtime installation's `~/.tokn/ctl/current` pointer remains independent of
+this signed-helper package store. A complete local installation containing a
+verified helper takes precedence; otherwise existing signed-helper discovery
+continues. An existing
 matching installation is verified and reused; setup does not overwrite a
 version with different release contents. Downloaded official releases update
 `current` and atomically update the architecture/API selection. A separately

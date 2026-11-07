@@ -58,13 +58,19 @@ pub(super) async fn inspect_selected_bundle(
   required: Option<ProtocolVersion>,
 ) -> Result<Option<super::HelperSelection>, Error> {
   let target = macos::release_target()?;
-  if let Some(bundle) =
-    ctl_core::bundles::Store::new(home).selected(ctl_core::bundles::Purpose::Local, target)?
-  {
+  if let Some(bundle) = ctl_core::installations::Installations::new(home).active()? {
     let files = bundle.read_files()?;
-    let receipt = files.get("ctld-package.json").ok_or_else(|| {
-      Error::Verification("selected bundle lacks its signed helper receipt".into())
-    })?;
+    let Some(receipt) = files.get("ctld-package.json") else {
+      // Flat remote packages serve SSH peers; they do not replace the account's
+      // separately provisioned signed macOS helper. A packaged app, when present,
+      // must always pass native verification rather than falling back.
+      if files.keys().any(|name| name.starts_with("ctld.app/")) {
+        return Err(Error::Verification(
+          "active helper app lacks its signed receipt".into(),
+        ));
+      }
+      return Ok(None);
+    };
     let info = super::inspect_ctld_package(home, &bundle.directory, receipt).await?;
     if !compatible(&info) || !bundle.manifest.same_component("ctld", &info) {
       return Err(Error::Verification(

@@ -100,8 +100,8 @@ Project task definitions stay in `<project-root>/.ctl/tasks.json`. Explicit
 `CTMUX_ARCHIVE_DIRECTORY` overrides retain their existing behavior. Old storage
 locations are not read or migrated. SSH credentials remain in macOS Keychain;
 runtime sockets continue to use private OS-specific runtime directories.
-Remote identity and component bundles already use this root as `remote-id`,
-`versions/`, and `current`.
+Remote identity and installations use this root as `remote-id`, `installs/`,
+`current`, and `previous`; stable commands are exposed through `bin/`.
 
 ## Repository commands
 
@@ -125,7 +125,7 @@ Root commands use `<scope>:<action>`. Signing is part of `ctld:build` and macOS
 | `pnpm daemons:build` | Build local Rust daemons |
 | `pnpm bundles:build` | Build and package the current working tree for Linux x64 locally |
 | `pnpm bundles:check` | Check staged remote bundles without fetching or changing selections |
-| `pnpm bundles:sync` | Fetch, verify, and select CI upload bundles for the current commit |
+| `pnpm bundles:sync` | Fetch and verify CI deployment resources for the current commit |
 | `pnpm scripts:check` | Check repository-script types |
 | `pnpm scripts:test` | Run development and CI/release script tests |
 | `pnpm scripts:test:dev` | Run only development script tests |
@@ -535,7 +535,8 @@ not install, sign in to, or reconfigure Tailscale.
 
 The app records the host's remote environment ID and installed agent/bundle version.
 The remote stores its ID in `~/.tokn/ctl/remote-id`; installed bundles live under
-`~/.tokn/ctl/versions`, with `~/.tokn/ctl/current` selecting the active bundle.
+`~/.tokn/ctl/installs`, with `~/.tokn/ctl/current` selecting the active build and
+`~/.tokn/ctl/bin` providing stable commands. `ctlup` manages installation and rollback.
 Every method on a host must reach that same environment. Hosts are never merged
 automatically because their remote IDs match. Hover over a host heading to see
 its last observed version and remote ID.
@@ -819,9 +820,10 @@ Ctrl-C. Piped commands and background reconnects never prompt.
 `CTL_REMOTE_BUNDLES_DIR` supplies an explicit local source. Otherwise repair
 uses the same automatic policy as component updates: local Linux x64 working-tree
 builds during development, and published development/stable channels for other
-remote updates. `ctl components check --channel dev` checks metadata without
+remote updates. `ctlup check --channel dev` checks metadata without
 opening SSH or downloading binaries. The current publication is resolved before
-using its verified download cache; an older selected bundle never overrides it.
+using its verified download cache. `ctlup update` manages complete local or remote
+installations; `ctlup rollback` restores the previous build without restarting services.
 Published schema-3 bundles include `ctl` and `ctmux` alongside the four services.
 The remote account can run `ctl who` to list active ctl service connections and
 `ctmux clients` to list terminal viewers. Schema-2 and schema-3 bundles verify

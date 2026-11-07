@@ -263,7 +263,7 @@ ID, `signing_mode: "signed"`, `notarized: true`, archive filename, SHA-256 hash,
 and archive size. The draft updater validates the complete asset set and each
 checksum before changing release attachments.
 
-## Signed ctld for local development
+## Native development installations
 
 For local macOS CLI and GUI development, run the shared provisioning commands
 from the repository root:
@@ -272,37 +272,37 @@ from the repository root:
 pnpm ctld:provision
 # In Xcode, choose your team in Signing & Capabilities and build once.
 pnpm ctld:build
-cargo run -p ctl-cli -- passwords
+~/.tokn/ctl/bin/ctl passwords
+~/.tokn/ctl/bin/ctlup status --json
 ```
 
-For GUI development, `pnpm desktop:dev` automatically builds and stages signed
-helpers on macOS. Its managed worktree daemon survives app reloads; running
-`ctld:build` first is unnecessary. The standard Tauri command can also launch a
-direct debug GUI build that discovers the same selected helper as the CLI.
+For GUI development, `pnpm desktop:dev` delegates native preparation to
+`ctlup dev` on macOS and Linux. On Unix, `pnpm daemons:build` also uses that
+complete-build path; Linux requires no Apple provisioning. The macOS worktree
+daemon survives app reloads, and running `ctld:build` first is unnecessary.
+The macOS-only `pnpm ctld:build` bootstraps the same manager and delegates to the
+same complete-build path for CLI development.
 
-The `ctld:build` command detects the native Rust target and workspace version, finds or
-refreshes the provisioning profile, and chooses its matching Keychain
-certificate. The component command compiles `ctld`, signs the complete app,
-and atomically publishes its checkout selection under
-`<target-dir>/ctl-dev/helpers/<checkout-id>/`. Ordinary macOS debug CLI and GUI builds
-copy that app into the immutable managed development cache and verify the copy
-before launching it. Both consumers can remain unsigned. A running daemon and
-its askpass, identity-agent, and proxy children therefore remain executable after
-Cargo build outputs are cleaned. Cargo's
-configured target directory and canonical checkout identity determine discovery,
-independently of the current directory. Worktrees sharing a target directory have
-separate selections. Repeat this preparation after helper changes; ordinary CLI
-edits need only a Cargo rebuild.
+The manager compiles all six runtime commands and `ctlup` from the working tree,
+snapshots Cargo's actual outputs, then strips and verifies those copies. On
+macOS it finds or refreshes the provisioning profile, chooses its matching
+Keychain certificate, and signs the copied `ctld.app`. The resulting receipt
+binds its revision, source fingerprint, dirty flag, and protocol metadata.
+The CLI and GUI can remain unsigned; no notarization credentials are needed.
 
-One `pnpm ctld:build` output supplies both consumers; no development CLI
-embedding or signing step is needed. It allows local source changes and needs
-no notarization credentials. Its receipt binds the helper's revision, source
-fingerprint, and dirty flag. Preparation leaves shared component selections and
-running services unchanged.
-The runtime still checks signature, provisioning expiry,
-certificate identity, source metadata against the app's own manifest, and API
-compatibility. Rebuild after a profile expires. An existing compatible daemon is
-never restarted automatically.
+Successful preparation installs one immutable build under
+`~/.tokn/ctl/installs/` and activates it through the same selection used by
+`ctlup update`. Stable commands live in `~/.tokn/ctl/bin`. Cargo profiles and
+configured target directories are preserved; compilation caches under
+`<target-dir>/ctl-dev/<checkout-id>/cargo` keep worktrees separate. Launchers
+hold an installation lease while using its exact executable paths. Active,
+previous, and running builds remain available after Cargo outputs are cleaned.
+
+The runtime checks signature, provisioning expiry, certificate identity, source
+metadata, and API compatibility. Rebuild after a profile expires. Preparation
+preserves existing daemons and sessions; restarting an owner is a separate
+action. See [local development builds](local-bundles.md) for direct `ctlup dev`
+usage and custom Cargo profiles.
 
 Local component signing explicitly uses `--timestamp=none`,
 so an unavailable Apple timestamp service does not block development. Release

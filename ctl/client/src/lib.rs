@@ -11,6 +11,8 @@ pub mod component_update;
 pub mod components;
 pub mod ctld;
 #[cfg(unix)]
+pub mod development;
+#[cfg(unix)]
 pub mod installation;
 
 use std::ffi::OsString;

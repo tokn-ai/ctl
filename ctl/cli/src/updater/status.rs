@@ -10,33 +10,34 @@ pub(super) async fn run(
   rollback: bool,
   json: bool,
 ) -> io::Result<()> {
-  let status =
-    if options.host.is_some() || options.destination.is_some() || options.method.is_some() {
-      crate::bundled::register()?;
-      remote(options, rollback).await?
-    } else {
-      if rollback {
-        let account = home.to_owned();
-        tokio::task::spawn_blocking(move || {
-          let installs = ctl_core::installations::Installations::new(&account);
-          installs.rollback()?;
-          if let Err(error) = installs.prune() {
-            eprintln!("ctlup: rollback completed; cleanup deferred: {error}");
-          }
-          Ok::<_, io::Error>(())
-        })
-        .await
-        .map_err(io::Error::other)??;
-      }
-      ctl_client::installation::status(home)?
-    };
+  let is_remote =
+    options.host.is_some() || options.destination.is_some() || options.method.is_some();
+  let status = if is_remote {
+    crate::bundled::register()?;
+    remote(options, rollback).await?
+  } else {
+    if rollback {
+      let account = home.to_owned();
+      tokio::task::spawn_blocking(move || {
+        let installs = ctl_core::installations::Installations::new(&account);
+        installs.rollback()?;
+        if let Err(error) = installs.prune() {
+          eprintln!("ctlup: rollback completed; cleanup deferred: {error}");
+        }
+        Ok::<_, io::Error>(())
+      })
+      .await
+      .map_err(io::Error::other)??;
+    }
+    ctl_client::installation::status(home)?
+  };
   if json {
     println!(
       "{}",
       serde_json::to_string(&status).map_err(io::Error::other)?
     );
   } else {
-    print(&status);
+    print(&status, !is_remote && in_checkout());
     if rollback {
       println!(
         "Previous installation restored. Running services were preserved; restart separately."
@@ -102,7 +103,27 @@ async fn verify_account(
   Ok(())
 }
 
-fn print(status: &InstallationStatus) {
+fn in_checkout() -> bool {
+  std::env::current_dir().is_ok_and(|directory| {
+    directory.ancestors().any(|root| {
+      root.join(".git").exists()
+        && root.join("Cargo.toml").is_file()
+        && root.join("ctl/cli/Cargo.toml").is_file()
+        && root.join("scripts/dev/ctld-signed.mts").is_file()
+    })
+  })
+}
+
+fn print(status: &InstallationStatus, development: bool) {
+  if status.active.is_none() && status.previous.is_none() {
+    println!("No managed ctl installation.");
+    if development {
+      println!("Run `ctlup dev` to build and install this checkout.");
+    } else {
+      println!("Run `ctlup install --help` for installation options.");
+    }
+    return;
+  }
   for (label, manifest) in [("Active", &status.active), ("Previous", &status.previous)] {
     if let Some(manifest) = manifest {
       let version = &manifest.components["ctl-agent"].build.version;

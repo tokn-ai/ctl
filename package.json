@@ -17,7 +17,7 @@
     "desktop:test": "pnpm --filter ctmux-app exec vitest run",
     "ctld:provision": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/dev/ctld-signed.mts --provision",
     "ctld:build": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/dev/ctld-signed.mts",
-    "daemons:build": "cargo build --locked -p ctld -p ctmuxd -p ctl-taskd",
+    "daemons:build": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/dev/prepare-daemons.mts",
     "bundles:check": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/dev/sync-agent-bundles.mts --check",
     "bundles:sync": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/dev/sync-agent-bundles.mts",
     "bundles:build": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/dev/build-agent-bundle.mts",

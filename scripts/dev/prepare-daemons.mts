@@ -1,12 +1,16 @@
 import { buildDaemons, DaemonBuildError } from "./daemon-build.mts";
+import { prepareDevelopment, DevelopmentPreparationError } from "./ctlup-development.mts";
 
 try {
-  await buildDaemons(process.argv.slice(2), process.cwd(), process.env);
+  if (process.platform === "win32") {
+    await buildDaemons(process.argv.slice(2), process.cwd(), process.env);
+  } else {
+    const prepared = await prepareDevelopment(process.argv.slice(2), process.cwd(), process.env);
+    await prepared.close();
+  }
 } catch (error) {
-  if (error instanceof DaemonBuildError && error.compilation_failed) {
-    // Tauri keeps watching after exit 101 only when the last diagnostic contains
-    // "could not compile", matching Cargo's normal compilation-failure output.
-    console.error(`error: could not compile local daemons (${error.message})`);
+  if ((error instanceof DaemonBuildError || error instanceof DevelopmentPreparationError) && error.compilation_failed) {
+    console.error(`error: could not compile local components (${error.message})`);
     process.exitCode = 101;
   } else {
     console.error(error instanceof Error ? error.message : error);

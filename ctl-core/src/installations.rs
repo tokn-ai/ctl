@@ -112,6 +112,25 @@ impl Installations {
   /// Rejects incomplete or foreign builds, unsafe storage, changed bytes and
   /// command collisions. A pending transaction is recovered before a new one.
   pub fn activate(&self, bundle: &Bundle) -> io::Result<Bundle> {
+    self
+      .activate_with(bundle, |_| Ok(()))
+      .map(|(installed, ())| installed)
+  }
+
+  /// Activates and retains a build in one transaction, so another updater
+  /// cannot prune it before its launcher obtains a process lease.
+  ///
+  /// # Errors
+  /// Reports activation errors or an unavailable lease before switching builds.
+  pub fn activate_and_lease(&self, bundle: &Bundle) -> io::Result<(Bundle, Lease)> {
+    self.activate_with(bundle, |installed| leases::acquire_locked(self, installed))
+  }
+
+  fn activate_with<T>(
+    &self,
+    bundle: &Bundle,
+    prepare: impl FnOnce(&Bundle) -> io::Result<T>,
+  ) -> io::Result<(Bundle, T)> {
     filesystem::validate_native(bundle, false)?;
     let files = bundle.read_files()?;
     filesystem::ensure_root(self)?;
@@ -122,8 +141,9 @@ impl Installations {
       .map(|bundle| filesystem::publish(self, &bundle, None))
       .transpose()?;
     let installed = filesystem::publish(self, bundle, Some(&files))?;
+    let retained = prepare(&installed)?;
     filesystem::activate(self, &installed, previous.as_ref())?;
-    Ok(installed)
+    Ok((installed, retained))
   }
 
   /// Switches the complete active and previous payloads, without restarting.

@@ -87,15 +87,30 @@ pub async fn import_local(
   directory: &Path,
   helper: Option<&Path>,
 ) -> io::Result<Bundle> {
+  import_local_for_target(home, directory, helper, ctl_core::paths::native_target()).await
+}
+
+/// Snapshots a locally executable build whose target was established by Cargo.
+/// GNU Linux development can explicitly prepare its same-architecture musl
+/// artifacts without relabeling them as the updater's own GNU target.
+///
+/// # Errors
+/// Rejects foreign targets before probing, mismatched builds or invalid signing.
+pub(crate) async fn import_local_for_target(
+  home: &Path,
+  directory: &Path,
+  helper: Option<&Path>,
+  target: &str,
+) -> io::Result<Bundle> {
+  if !ctl_core::bundles::local_target(target) {
+    return Err(invalid("local build target must run on this computer"));
+  }
   let mut components = BTreeMap::new();
   let mut files = BTreeMap::new();
   let mut app_executables = Vec::new();
   #[cfg(target_os = "macos")]
   let signed_helper = if let Some(helper) = helper {
-    let receipt = read_input(
-      &helper.join("installation.json"),
-      ctl_core::bundles::MAX_MANIFEST_BYTES,
-    )?;
+    let receipt = helper_receipt(helper)?;
     let info = crate::setup::inspect_ctld_package(home, helper, &receipt)
       .await
       .map_err(io::Error::other)?;
@@ -153,18 +168,21 @@ pub async fn import_local(
     return Err(invalid("local build is incompatible with this client"));
   }
   let home = home.to_owned();
-  tokio::task::spawn_blocking(move || publish_local(&home, components, files, &app_executables))
-    .await
-    .map_err(io::Error::other)?
+  let target = target.to_owned();
+  tokio::task::spawn_blocking(move || {
+    publish_local(&home, &target, components, files, &app_executables)
+  })
+  .await
+  .map_err(io::Error::other)?
 }
 
 fn publish_local(
   home: &Path,
+  target: &str,
   components: BTreeMap<String, ComponentInfo>,
   mut files: BTreeMap<String, Vec<u8>>,
   app_executables: &[String],
 ) -> io::Result<Bundle> {
-  let target = ctl_core::paths::native_target();
   let manifest =
     Manifest::new(target, Source::Local, components, &files)?.with_executables(app_executables)?;
   // Retain a publisher identity for older compatible agents that only read the
@@ -223,6 +241,35 @@ pub async fn select_with_progress(
   })
   .await
   .map_err(io::Error::other)?
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn helper_receipt(directory: &Path) -> io::Result<Vec<u8>> {
+  let optional =
+    |name| match read_input(&directory.join(name), ctl_core::bundles::MAX_MANIFEST_BYTES) {
+      Ok(bytes) => Ok(Some(bytes)),
+      Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+      Err(error) => Err(error),
+    };
+  let installation = optional("installation.json")?;
+  let checkpoint = optional("ctld-package.json")?;
+  match (installation, checkpoint) {
+    (Some(installation), Some(checkpoint)) => {
+      let parsed =
+        |bytes: &[u8]| serde_json::from_slice::<serde_json::Value>(bytes).map_err(io::Error::other);
+      if parsed(&installation)? != parsed(&checkpoint)? {
+        return Err(invalid(
+          "signed helper package has conflicting installation and development receipts",
+        ));
+      }
+      Ok(installation)
+    }
+    (Some(receipt), None) | (None, Some(receipt)) => Ok(receipt),
+    (None, None) => Err(io::Error::new(
+      io::ErrorKind::NotFound,
+      "signed helper package requires installation.json or ctld-package.json",
+    )),
+  }
 }
 
 /// Verify a complete native build before provisioning or activation.

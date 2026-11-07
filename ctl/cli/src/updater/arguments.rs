@@ -29,6 +29,8 @@ pub(super) enum Command {
   Install(UpdateArguments),
   /// Update a complete installation; running sessions keep their current owner.
   Update(UpdateArguments),
+  /// Build and install one complete native development build from a checkout.
+  Dev(DevelopmentArguments),
   /// Show the active installation and rollback candidate without starting services.
   Status {
     #[arg(long)]
@@ -81,6 +83,30 @@ pub(super) struct UpdateArguments {
   pub json: bool,
 }
 
+#[derive(Debug, Args)]
+pub(super) struct DevelopmentArguments {
+  /// Source checkout; defaults to the current directory.
+  #[arg(long)]
+  pub workspace: Option<PathBuf>,
+  #[arg(long, conflicts_with_all = ["profile", "cargo_args_json"])]
+  pub release: bool,
+  #[arg(long, conflicts_with = "cargo_args_json")]
+  pub profile: Option<String>,
+  #[arg(long, conflicts_with = "cargo_args_json")]
+  pub target_dir: Option<PathBuf>,
+  /// Native Rust target; foreign-target development installations are rejected.
+  #[arg(long, conflicts_with = "cargo_args_json")]
+  pub target: Option<String>,
+  /// Original Cargo invocation supplied by the desktop's build adapter.
+  #[arg(long, hide = true)]
+  pub cargo_args_json: Option<String>,
+  /// Keep the prepared installation leased until the launcher's input closes.
+  #[arg(long, hide = true, requires = "json")]
+  pub lease: bool,
+  #[arg(long)]
+  pub json: bool,
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -126,5 +152,38 @@ mod tests {
       ])
       .is_err()
     );
+  }
+
+  #[test]
+  fn native_development_builds_accept_one_cargo_configuration() {
+    let args = Arguments::try_parse_from([
+      "ctlup",
+      "dev",
+      "--workspace",
+      "/checkout",
+      "--profile",
+      "custom",
+      "--target-dir",
+      "/build-output",
+      "--json",
+    ])
+    .unwrap();
+    assert!(matches!(
+      args.command,
+      Command::Dev(DevelopmentArguments {
+        release: false,
+        profile: Some(_),
+        ..
+      })
+    ));
+    for flags in [
+      vec!["--release", "--profile", "custom"],
+      vec!["--release", "--cargo-args-json", "[]"],
+      vec!["--target-dir", "/output", "--cargo-args-json", "[]"],
+    ] {
+      assert!(Arguments::try_parse_from([vec!["ctlup", "dev"], flags].concat()).is_err());
+    }
+    assert!(Arguments::try_parse_from(["ctlup", "dev", "--lease"]).is_err());
+    assert!(Arguments::try_parse_from(["ctlup", "dev", "--lease", "--json"]).is_ok());
   }
 }

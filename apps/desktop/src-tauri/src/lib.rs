@@ -5,6 +5,8 @@ mod commands;
 mod component_update;
 mod credentials;
 mod daemon_helper;
+#[cfg(unix)]
+mod development_installation;
 mod dto;
 mod error;
 mod keybindings;
@@ -41,6 +43,8 @@ use tauri::Manager as _;
 ///
 /// Panics when Tauri cannot initialize or run the configured application.
 pub fn run() {
+  #[cfg(unix)]
+  let _development_installation = development_installation::retain();
   let builder = tauri::Builder::default()
     .manage(state::AppState::default())
     .manage(tasks::TaskStreams::default());

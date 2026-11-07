@@ -212,8 +212,9 @@ fn old_local_selection_can_be_migrated_without_a_current_link() {
 fn leases_retain_old_payloads_until_their_users_release_them() {
   let home = Home::new();
   let installs = Installations::new(&home.0);
-  let first = installs.activate(&fixture(&home.0, 1, true)).unwrap();
-  let lease = installs.lease(&first).unwrap();
+  let (first, lease) = installs
+    .activate_and_lease(&fixture(&home.0, 1, true))
+    .unwrap();
   installs.activate(&fixture(&home.0, 2, true)).unwrap();
   installs.activate(&fixture(&home.0, 3, true)).unwrap();
   let result = installs.prune().unwrap();

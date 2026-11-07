@@ -277,22 +277,26 @@ For local macOS development, use the shared Xcode provisioning flow from a check
 pnpm ctld:provision
 # Choose your team in Xcode and build the provisioning target once.
 pnpm ctld:build
-cargo run -p ctl-cli -- passwords
+~/.tokn/ctl/bin/ctl passwords
+~/.tokn/ctl/bin/ctlup status --json
 ```
 
-The command discovers and refreshes the provisioning profile, signs `ctld.app`,
-and publishes it under Cargo's configured target directory. An unsigned
-`target/debug/ctl` pins and verifies that helper in the immutable
-`~/.tokn/ctl/components/ctld/development/<archive-sha256>/` cache before launch.
-Cleaning Cargo outputs does not remove the running daemon's executable or the
-helper used by its askpass, identity-agent, and proxy children.
-Its selection belongs to the checkout, including with a shared target directory,
-and does not depend on the current working directory. Repeat the command after
-helper changes or profile expiry; CLI edits need only a normal Cargo rebuild.
-No notarization credentials are needed, and shared selections stay unchanged.
+The command bootstraps `ctlup` and delegates to `ctlup dev`. The manager builds
+the complete native command set, signs the copied `ctld.app`, and activates one
+verified installation under `~/.tokn/ctl/installs/`. Stable commands live in
+`~/.tokn/ctl/bin`. This uses the same active selection as other `ctlup` updates,
+and status reports the development build immediately. Cargo profiles and target
+directory configuration are preserved. The macOS desktop launcher delegates
+to the same path automatically; no notarization credentials are needed.
+See [local development builds](../../docs/local-bundles.md).
 
-Embedded development helpers use the same immutable cache. `ctl setup` prepares
-the helper selected by the shared resolver, including checkout helpers and
+Cleaning Cargo outputs does not remove the installed daemon's executable or its
+askpass, identity-agent, and proxy helpers. Running services retain their
+existing installation until explicitly restarted.
+
+Older checkout selections and embedded development helpers remain readable in
+the immutable development cache for compatibility. `ctl setup` prepares
+the helper selected by the shared resolver, including these checkout helpers and
 `CTLD_BIN` overrides; it does not replace that selection with a published release.
 Status inspects the same candidate without preparing it. It shows the source,
 path, and archive hash separately from the running build; `--json` includes
@@ -301,9 +305,8 @@ adds `selection` with the same identity. The archive hash identifies signed app
 bytes, the source fingerprint identifies compiled inputs, and the checkout ID
 identifies a path. None proves a helper was rebuilt after source edits.
 
-Preparing a development helper leaves release `current` unchanged. Setup preserves
-all running owners; existing daemons require an explicit restart to use the
-selected replacement.
+Setup preserves all running owners; existing daemons require an explicit
+restart to use the selected replacement.
 
 Use `ctlup` to install and update complete builds. It defaults to this computer;
 `--hosts work,jump-a` updates saved hosts through their existing authentication

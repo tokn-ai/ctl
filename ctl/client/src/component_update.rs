@@ -377,22 +377,42 @@ pub async fn install_local(
       "agent-only overlays are no longer installed; use a complete ctlup update",
     ));
   }
+  let _installation = install_local_with_manager(home, bundle, None).await?;
+  Ok(result(bundle, package))
+}
+
+/// Install a verified native cohort using its freshly built independent manager.
+///
+/// # Errors
+/// Rejects invalid native signing, unsafe storage or a failed activation.
+pub(crate) async fn install_local_with_manager(
+  home: &Path,
+  bundle: &Bundle,
+  manager: Option<&Path>,
+) -> io::Result<(Bundle, ctl_core::installations::Lease)> {
+  if !ctl_core::bundles::local_target(&bundle.manifest.target_triple) {
+    return Err(invalid("this build cannot run on the local host"));
+  }
   crate::components::verify_local(home, bundle).await?;
-  crate::installation::provision_manager(home, bundle).await?;
+  if let Some(manager) = manager {
+    crate::installation::provision_manager_from(home, manager).await?;
+  } else {
+    crate::installation::provision_manager(home, bundle).await?;
+  }
   let account = home.to_owned();
   let snapshot = bundle.clone();
-  tokio::task::spawn_blocking(move || {
+  let installed = tokio::task::spawn_blocking(move || {
     let installations = ctl_core::installations::Installations::new(&account);
-    installations.activate(&snapshot)?;
+    let installed = installations.activate_and_lease(&snapshot)?;
     if let Err(error) = installations.prune() {
       eprintln!("ctlup: installed successfully; cleanup deferred: {error}");
     }
-    Ok::<_, io::Error>(())
+    Ok::<_, io::Error>(installed)
   })
   .await
   .map_err(io::Error::other)??;
   prune_after_update(home).await;
-  Ok(result(bundle, package))
+  Ok(installed)
 }
 
 #[must_use]

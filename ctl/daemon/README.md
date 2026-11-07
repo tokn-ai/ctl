@@ -73,12 +73,17 @@ The installed helper's version and source
 fingerprint need not match the CLI's. Its signature, provisioning, and build
 metadata are still checked against its own installation manifest.
 
-Prepare a checkout helper with `pnpm ctld:build`.
-It publishes under `<target-dir>/ctl-dev/helpers/<checkout-id>/` for reuse by an
-unsigned Cargo debug CLI, without changing shared selections. Checkout helpers
-and embedded signed development builds launch from the immutable
-`~/.tokn/ctl/components/ctld/development/<archive-sha256>/` cache. Explicit
-development preparation leaves release `current` unchanged. Setup, status,
+Prepare a native development installation with `ctlup dev`, or use
+`pnpm ctld:build` to bootstrap and delegate to it on macOS. This builds all six
+runtime commands and the manager, signs the copied `ctld.app`, and activates
+the verified build under `~/.tokn/ctl/installs/`. Commands are exposed through
+`~/.tokn/ctl/bin`; the desktop launcher delegates to the same builder.
+Preparation preserves running services. See
+[local development builds](../../docs/local-bundles.md).
+
+Older checkout helper selections and embedded signed development helpers remain
+readable through the immutable
+`~/.tokn/ctl/components/ctld/development/<archive-sha256>/` cache. Setup, status,
 startup, and restart use one shared Rust resolver, so setup prepares the same
 checkout, embedded, shared, or explicit override chosen for activation. Status
 only inspects it and reports its source, path, archive hash, and build metadata

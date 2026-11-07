@@ -135,6 +135,46 @@ fn passive_status_and_metadata_do_not_prepare_an_installation() {
 }
 
 #[test]
+fn empty_status_explains_managed_installations_and_scopes_the_development_hint() {
+  let home = Home::new();
+  let output = home
+    .command(&["status"])
+    .current_dir(&home.0)
+    .output()
+    .unwrap();
+  assert!(output.status.success());
+  let text = String::from_utf8(output.stdout).unwrap();
+  assert!(text.contains("No managed ctl installation."));
+  assert!(text.contains("ctlup install --help"));
+  assert!(!text.contains("ctlup dev"));
+
+  let checkout = home.0.join("checkout");
+  fs::create_dir_all(checkout.join("ctl/cli")).unwrap();
+  fs::create_dir_all(checkout.join("scripts/dev")).unwrap();
+  for path in [
+    ".git",
+    "Cargo.toml",
+    "ctl/cli/Cargo.toml",
+    "scripts/dev/ctld-signed.mts",
+  ] {
+    fs::write(checkout.join(path), b"fixture").unwrap();
+  }
+  let output = home
+    .command(&["status"])
+    .current_dir(checkout.join("ctl/cli"))
+    .output()
+    .unwrap();
+  assert!(output.status.success());
+  let text = String::from_utf8(output.stdout).unwrap();
+  assert!(text.contains("No managed ctl installation."));
+  assert!(text.contains("ctlup dev"));
+  assert!(
+    !home.0.join(".tokn").exists(),
+    "status never activates or adopts development helpers"
+  );
+}
+
+#[test]
 fn updater_executable_preserves_the_shared_private_askpass_entrypoint() {
   let home = Home::new();
   let output = home

@@ -9,6 +9,8 @@ use std::path::PathBuf;
 mod archive;
 mod arguments;
 #[cfg(unix)]
+mod development;
+#[cfg(unix)]
 mod status;
 #[cfg(unix)]
 pub(crate) mod update;
@@ -106,6 +108,10 @@ async fn run(arguments: Arguments) -> io::Result<i32> {
       }
     }
     Command::Status { json } => status::run(&home, target, false, json).await?,
+    Command::Dev(options) => {
+      require_local(target)?;
+      development::run(&home, options).await?;
+    }
     Command::Rollback { json } => status::run(&home, target, true, json).await?,
     Command::Check { channel, json } => {
       require_local(target)?;

@@ -110,19 +110,19 @@ Run `pnpm install` at the repository root. The pnpm workspace includes
 `apps/desktop` and uses one root lockfile; repository scripts are checked and
 run from the root. The desktop package keeps the standard Tauri/Vite scripts
 (`dev`, `build`, `preview`, and `tauri`); project-specific commands live at the root.
-Root commands use `<scope>:<action>`. Signing is part of `ctld:build` and macOS
-`desktop:dev`; it does not require a separate `:signed` command.
+Root commands use `<scope>:<action>`. Native development preparation delegates
+to `ctlup`; macOS signing is included.
 
 | Command | Purpose |
 | --- | --- |
 | `pnpm ctld:provision` | Open the shared macOS Xcode provisioning project |
-| `pnpm ctld:build` | Build and select one signed ctld component for CLI and GUI development |
-| `pnpm desktop:dev` | Start native development; macOS automatically stages a signed helper |
+| `pnpm ctld:build` | Prepare a complete native development installation on macOS |
+| `pnpm desktop:dev` | Start the desktop; macOS and Linux delegate native preparation to ctlup |
 | `pnpm desktop:build` | Build native desktop packages |
 | `pnpm desktop:preview` | Start the browser preview with sample data |
 | `pnpm desktop:check` | Check desktop TypeScript types |
 | `pnpm desktop:test` | Run desktop UI tests |
-| `pnpm daemons:build` | Build local Rust daemons |
+| `pnpm daemons:build` | Prepare a native installation on Unix; build local daemons on Windows |
 | `pnpm bundles:build` | Build and package the current working tree for Linux x64 locally |
 | `pnpm bundles:check` | Check staged remote bundles without fetching or changing selections |
 | `pnpm bundles:sync` | Fetch and verify CI deployment resources for the current commit |
@@ -216,40 +216,39 @@ pnpm ctld:provision
 
 In Xcode, select the `ctld-provisioning` target, choose your team under
 **Signing & Capabilities**, and build once. For CLI development, prepare the
-signed component and start the CLI:
+complete native installation and start its CLI:
 
 ```sh
 pnpm ctld:build
-cargo run -p ctl-cli -- passwords
-# Or: cargo build -p ctl-cli && target/debug/ctl passwords
+~/.tokn/ctl/bin/ctl passwords
+~/.tokn/ctl/bin/ctlup status --json
 ```
 
-For native GUI development, run `pnpm desktop:dev`. On macOS its launcher
-builds and stages signed helpers automatically, including on native reloads,
-and preserves the worktree's running daemon. It does not require a separate
-`ctld:build` first. Linux and Windows use ordinary native Tauri development.
+For native GUI development, run `pnpm desktop:dev`. On macOS and Linux its
+launcher delegates each native preparation to `ctlup dev`, including macOS
+signing, and preserves running services. The macOS worktree daemon also survives
+app reloads. A separate `ctld:build` is unnecessary. Windows uses ordinary native
+Tauri development.
 
-The `ctld:build` command discovers your profile and matching Keychain certificate,
-refreshing the profile through Xcode when needed. It compiles and signs `ctld.app` and
-publishes the complete signed app and verification receipt under
-`target/ctl-dev/helpers/<checkout-id>/build-<archive-sha256>/`. Debug CLI builds
-and GUI builds launched directly with the standard Tauri command discover the
-same verified selection using their build location and checkout identity,
-independently of the current working directory. The CLI and GUI can remain unsigned.
-Repeat `pnpm ctld:build` after changing daemon code or its contracts;
-ordinary CLI edits need only a Cargo rebuild. No signing
-environment variables or notarization credentials are required. The output
-follows Cargo's configured target directory.
+`pnpm ctld:build` bootstraps `ctlup` and delegates to the same native builder.
+It builds all six runtime commands and the manager from one source identity,
+then activates the verified installation under `~/.tokn/ctl/installs/`.
+Stable commands live in `~/.tokn/ctl/bin`; add that directory to `PATH` to use
+`ctlup dev` directly. Cargo's configured target directory and custom profiles
+are respected. On macOS, the builder discovers your profile and matching
+Keychain certificate, refreshing the profile through Xcode when needed. The
+CLI and GUI can remain unsigned; no signing environment variables or
+notarization credentials are required.
 
 Development signing explicitly disables timestamps, so it does not depend on
 Apple's timestamp service. Distributable releases still require secure timestamps.
 
-Checkout helper selections remain separate from shared production selections,
-even when worktrees share a Cargo target directory. The CLI and GUI both verify
-the helper's signature, provisioning profile, receipt, and compatible contracts
-before using it. Expired profiles require rebuilding. Component preparation
-preserves existing daemons and sessions; restart explicitly when ready to use a
-new build.
+Development builds update the same active installation as other `ctlup` updates.
+Compilation caches are isolated by checkout, even with a shared Cargo target
+directory. The helper's signature, provisioning profile, receipt, and contracts
+are verified before activation. Expired profiles require rebuilding. Existing
+daemons and sessions retain their running build; restart explicitly when ready
+to use the replacement. See [local development builds](docs/local-bundles.md).
 
 ```sh
 cargo build --workspace

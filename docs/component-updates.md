@@ -107,6 +107,31 @@ On macOS, a local service installation requires the complete verified signed
 The package remains intact inside the installation. Flat remote macOS bundles
 do not replace an independently provisioned signed local helper.
 
+## Native development builds
+
+```sh
+ctlup dev --workspace /path/to/checkout
+ctlup dev --release
+ctlup dev --profile custom --target-dir /path/to/build-output --json
+```
+
+`dev` builds the six native runtime components and the independent updater from
+one checkout. On macOS it signs and verifies the complete `ctld.app` package.
+Only a successful complete build becomes active; compilation, signing or
+verification failure leaves the previous installation and running services
+intact. `ctlup status` then reports that development installation. Foreign
+targets are rejected because this command prepares the current computer.
+
+The desktop development launcher bootstraps a private native `ctlup` executable
+with Cargo, then delegates preparation to `ctlup dev`. It passes Cargo's original
+arguments and working directory, preserving custom profiles, output directories
+and configuration files. The launched GUI receives immutable paths from the
+resulting installation and holds a lease for its lifetime. Each signed macOS
+worktree retains its isolated daemon endpoint, and existing GUI or daemon
+processes keep their original build until an explicit restart or successful GUI
+replacement. `pnpm ctld:build` and `pnpm daemons:build` use this same preparation
+path on Unix. Windows retains its existing daemon build fallback.
+
 ## Downloads and cache
 
 Updates resolve the current Dev or Stable channel, validate its immutable

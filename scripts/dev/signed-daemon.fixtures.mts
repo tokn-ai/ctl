@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
-import { appendFile, chmod, copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { TestContext } from "node:test";
 import type { ProtocolInfo } from "../shared/protocol-contract.mts";
@@ -11,32 +12,21 @@ export interface Fixture {
   root: string;
   executable: string;
   log: string;
-  package_log: string;
   config: SignedDaemonConfig;
   supervisor: SignedDaemon;
   diagnostics: string[];
-  fail_signing: boolean;
 }
 
 export const unixOnly = { skip: process.platform === "win32", timeout: 15_000 };
 
 export async function fixture(context: TestContext): Promise<Fixture> {
   const root = await mkdtemp("/tmp/ctld-supervisor-");
-  const profile = path.join(root, "profile");
-  await writeFile(profile, "test provisioning profile");
-  for (const relative of ["scripts/ci/package-ctld-app.sh", "apps/desktop/src-tauri/macos/ctld/Info.plist", "apps/desktop/src-tauri/macos/ctld/Entitlements.plist"]) {
-    const file = path.join(root, relative);
-    await mkdir(path.dirname(file), { recursive: true });
-    await writeFile(file, "test signing recipe");
-  }
   const result: Fixture = {
     root,
     executable: path.join(root, "ctld"),
     log: path.join(root, "processes.jsonl"),
-    package_log: path.join(root, "packages.jsonl"),
-    config: { runtime_directory: path.join(root, "runtime"), profile_path: profile, app_version: "0.1.0", repository_root: root },
+    config: { runtime_directory: path.join(root, "runtime") },
     diagnostics: [],
-    fail_signing: false,
     supervisor: undefined as unknown as SignedDaemon,
   };
   result.supervisor = supervisor(result);
@@ -54,17 +44,12 @@ export function supervisor(data: Fixture): SignedDaemon {
     startup_timeout_ms: 800,
     shutdown_timeout_ms: 200,
     on_diagnostic: (message) => data.diagnostics.push(message),
-    package_bundle: async (executable, bundle) => {
-      await appendFile(data.package_log, "package\n");
-      if (data.fail_signing) throw new Error("test signing failed");
-      const output = path.join(bundle, "Contents/MacOS/ctld");
-      await mkdir(path.dirname(output), { recursive: true });
-      await copyFile(executable, output);
-    },
   });
 }
 
 export async function writeHelper(data: Fixture, protocol_build: number, mode = "ready", contract?: ProtocolInfo): Promise<void> {
+  data.executable = path.join(data.root, "managed", randomUUID(), "ctld.app/Contents/MacOS/ctld");
+  await mkdir(path.dirname(data.executable), { recursive: true });
   await writeFile(data.executable, `#!${process.execPath}
 const fs = require("node:fs");
 const net = require("node:net");
@@ -144,10 +129,6 @@ export async function starts(data: Fixture): Promise<Array<{ pid: number; protoc
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
     throw error;
   }
-}
-
-export async function packages(data: Fixture): Promise<number> {
-  return (await readFile(data.package_log, "utf8")).trim().split("\n").length;
 }
 
 export function running(pid: number): boolean {

@@ -26,6 +26,10 @@ impl Drop for Lease {
 pub(super) fn acquire(store: &Installations, bundle: &Bundle) -> io::Result<Lease> {
   filesystem::ensure_root(store)?;
   let _lock = Lock::acquire(store)?;
+  acquire_locked(store, bundle)
+}
+
+pub(super) fn acquire_locked(store: &Installations, bundle: &Bundle) -> io::Result<Lease> {
   let installed = filesystem::load(store, &bundle.manifest.bundle_id)?;
   if installed.directory != bundle.directory || installed.manifest != bundle.manifest {
     return Err(filesystem::invalid(

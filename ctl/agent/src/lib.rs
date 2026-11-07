@@ -16,6 +16,7 @@ mod relay;
 pub mod restart;
 #[cfg(all(test, unix))]
 mod stdio;
+pub mod transport;
 pub mod vpn;
 
 use ctmux_ipc::Stream;

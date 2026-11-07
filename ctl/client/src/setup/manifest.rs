@@ -252,10 +252,18 @@ mod tests {
     let parse = |manifest: &Manifest| {
       Manifest::parse_installed(&serde_json::to_vec(manifest).unwrap(), &manifest.target)
     };
-    for index in 0..original.protocols.len() {
+    let required = ["ctld", "ctld_lifecycle", "ctld_helper"];
+    for name in required {
       let mut missing = original.clone();
-      missing.protocols.remove(index);
-      assert!(parse(&missing).is_err());
+      missing.protocols.retain(|protocol| protocol.name != name);
+      assert!(parse(&missing).is_err(), "missing {name}");
+    }
+    let mut legacy = original.clone();
+    legacy
+      .protocols
+      .retain(|protocol| required.contains(&protocol.name.as_str()));
+    assert_eq!(parse(&legacy).unwrap(), legacy);
+    for index in 0..original.protocols.len() {
       let mut duplicate = original.clone();
       duplicate.protocols.push(duplicate.protocols[index].clone());
       assert!(parse(&duplicate).is_err());

@@ -348,7 +348,16 @@ pub fn read_compatible_bundle(
   directories: &[PathBuf],
   target: &str,
 ) -> Result<Option<VerifiedBundle>, Error> {
-  read_reusable(directories, target, None)
+  read_reusable(directories, target, None, false)
+}
+
+/// Filters upload candidates for the shared services used by current Unix clients.
+#[cfg(unix)]
+pub(crate) fn read_shared_service_bundle(
+  directories: &[PathBuf],
+  target: &str,
+) -> Result<Option<VerifiedBundle>, Error> {
+  read_reusable(directories, target, None, true)
 }
 
 /// Reads compatible schema-2/3 bundles or an exact clean-client schema-1 bundle.
@@ -360,13 +369,14 @@ pub fn read_reusable_bundle(
   target: &str,
   expected: &ComponentBuildInfo,
 ) -> Result<Option<VerifiedBundle>, Error> {
-  read_reusable(directories, target, Some(expected))
+  read_reusable(directories, target, Some(expected), false)
 }
 
 fn read_reusable(
   directories: &[PathBuf],
   target: &str,
   expected: Option<&ComponentBuildInfo>,
+  shared_services: bool,
 ) -> Result<Option<VerifiedBundle>, Error> {
   validate_target(target)?;
   for directory in directories {
@@ -380,7 +390,13 @@ fn read_reusable(
     } else {
       manifest.is_compatible(target)?
     };
-    if reusable {
+    let feature_supported = !shared_services
+      || manifest
+        .target(target)?
+        .components
+        .as_ref()
+        .is_some_and(compatibility::supports_shared_services);
+    if reusable && feature_supported {
       let archive = read_bounded_file(
         &directory.join(manifest.archive_name(target)?),
         MAX_BUNDLE_BYTES,

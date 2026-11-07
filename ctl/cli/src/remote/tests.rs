@@ -165,6 +165,17 @@ async fn cloned_recovery_state_allows_only_one_concurrent_repair_offer() {
 fn repair_is_limited_to_known_old_or_missing_agents() {
   assert!(repair_reason(&CoreError::AgentNotFound).is_some());
   assert!(repair_reason(&CoreError::IdentityUnsupported).is_some());
+  for code in ["ctl_agent_not_found", "ctl_agent_update_required"] {
+    assert!(
+      repair_reason(&CoreError::BrokerService(
+        ctl_client::connection::Error::Daemon {
+          code: code.into(),
+          message: "Remote components require installation".into(),
+        }
+      ))
+      .is_some()
+    );
+  }
   assert!(repair_reason(&legacy_error()).is_some());
   assert!(
     repair_reason(&CoreError::UnsupportedSshProtocol {
@@ -267,6 +278,14 @@ async fn nonterminal_offer_preserves_piped_input_child() {
     legacy_error(),
     CoreError::AgentNotFound,
     CoreError::IdentityUnsupported,
+    CoreError::BrokerService(ctl_client::connection::Error::Daemon {
+      code: "ctl_agent_not_found".into(),
+      message: "Missing".into(),
+    }),
+    CoreError::BrokerService(ctl_client::connection::Error::Daemon {
+      code: "ctl_agent_update_required".into(),
+      message: "Update".into(),
+    }),
   ] {
     assert!(
       !offer_repair(

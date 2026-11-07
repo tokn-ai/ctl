@@ -60,6 +60,12 @@ impl DaemonBinaryInfo {
           crate::HELPER_API_VERSION,
           crate::SUPPORTED_HELPER_API_VERSIONS,
         ),
+        ProtocolInfo::new(
+          "ctl_transport",
+          ctl_proto::transport::PROTOCOL_BUILD,
+          ctl_proto::transport::PROTOCOL_VERSION,
+          ctl_proto::transport::SUPPORTED_PROTOCOL_VERSIONS,
+        ),
       ],
     }
   }

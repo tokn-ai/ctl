@@ -15,6 +15,8 @@ use sha2::{Digest as _, Sha256};
 const PROMPT: &str = "Install compatible remote components";
 const EXPECTED_ID: &str = "fa5f874a-bd3c-4a41-9d8f-d584bd9c9a14";
 
+#[path = "remote_repair/broker.rs"]
+mod broker;
 #[path = "remote_repair/components_update.rs"]
 mod components_update;
 
@@ -46,6 +48,8 @@ impl Fixture {
     fs::create_dir(&directory).unwrap();
     fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
     let fixture = Self(directory);
+    fs::create_dir_all(fixture.0.join("home/.tokn/ctl")).unwrap();
+    fs::write(fixture.0.join("home/.tokn/ctl/remote-id"), observed_id).unwrap();
     fs::write(
       fixture.0.join("hosts.json"),
       serde_json::to_vec(&json!({
@@ -62,14 +66,6 @@ impl Fixture {
       .unwrap(),
     )
     .unwrap();
-    let identity = json!({
-      "remote_id": observed_id,
-      "agent_version": "0.1.0",
-      "rmux_restart_supported": true,
-    });
-    let mut framed = b"ctl-ssh-v2\n".to_vec();
-    framed.extend(frame(&identity));
-    fs::write(fixture.0.join("identity"), framed).unwrap();
     fs::create_dir(fixture.0.join("bundles")).unwrap();
     fs::write(
       fixture.0.join("bundles/bundle-set.json"),
@@ -95,14 +91,6 @@ case "$last" in
   *'exec ctl-agent inspect')
     touch "$CTL_TEST_DIR/inspect"
     exec /bin/sh -c "$last"
-    ;;
-  --identity)
-    if [ -x "$HOME/.tokn/ctl/current/ctl-agent" ]; then
-      exec "$HOME/.tokn/ctl/current/ctl-agent" --identity
-    fi
-    : > "$CTL_TEST_DIR/service-input-$count"
-    cat "$CTL_TEST_DIR/identity"
-    exec cat > "$CTL_TEST_DIR/service-input-$count"
     ;;
   *ctl-platform-v1*)
     touch "$CTL_TEST_DIR/platform"
@@ -147,6 +135,7 @@ esac
       "ctl-agent": component(vec![
         protocol("ctl_identity", 3), protocol("ctl_maintenance", 2),
         protocol("ctl_remote_vpn", 1), consumed_ctld.clone(),
+        protocol("ctl_transport", 1),
         protocol("ctmux", 13), protocol("ctmux_control", 1),
         protocol("task", 4), protocol("task_control", 2),
       ]),
@@ -215,20 +204,14 @@ esac
       "git_revision": revision,
       "target_triple": target,
     });
-    let requests = self.repaired_transport(build, &bundle_id, target);
+    self.repaired_transport(build, &bundle_id, target);
     let payload = self.0.join("payload");
     fs::create_dir(&payload).unwrap();
-    // Record all client frames before returning the final response, so
-    // dropping the one-shot transport cannot race the fixture's input capture.
     fs::write(
       payload.join("ctl-agent"),
-      format!(
-        "#!/bin/sh\nset -eu\n\
+      b"#!/bin/sh\nset -eu\n\
          if [ \"$1\" = inspect ]; then exec cat \"$CTL_TEST_DIR/upgraded-identity\"; fi\n\
-         cat \"$CTL_TEST_DIR/upgraded-transport\"\n\
-         dd bs=1 count={requests} of=\"$CTL_TEST_DIR/service-input-$CTL_TEST_CALL_INDEX\" 2>/dev/null\n\
-         cat \"$CTL_TEST_DIR/session-list\"\nexec cat > /dev/null\n"
-      ),
+         printf 'unexpected direct service command after broker handoff\\n' >&2\nexit 95\n",
     )
     .unwrap();
     for binary in ["ctmuxd", "ctl-taskd", "ctld"] {
@@ -304,7 +287,7 @@ esac
     build: &ctl_core::component::ComponentBuildInfo,
     bundle_id: &str,
     target: &str,
-  ) -> usize {
+  ) {
     let mut transport = ctl_proto::IDENTITY_PREFACE.to_vec();
     transport.extend(frame(
       &serde_json::to_value(ctl_core::protocol::ProtocolOffer::new(
@@ -345,14 +328,6 @@ esac
       frame(&json!({"type": "session_clients", "sessions": []})),
     )
     .unwrap();
-    let handshake = json!({
-      "type": "handshake", "protocol": ctmux_proto::protocol_offer(),
-      "client_name": "ctl", "client_version": env!("CARGO_PKG_VERSION"),
-    });
-    let selection = json!({"protocol_version": ctl_proto::IDENTITY_CONTRACT_V1_0_3});
-    frame(&selection).len()
-      + frame(&handshake).len()
-      + frame(&json!({"type": "list_session_clients"})).len()
   }
 
   fn script(&self, name: &str, body: &str) {
@@ -366,59 +341,7 @@ esac
   }
 
   fn broker_with_observation(&self, observe: bool) -> tokio::task::JoinHandle<ctl_ipc::SshTarget> {
-    let listener = tokio::net::UnixListener::bind(self.0.join("ctld.sock")).unwrap();
-    let master = self.0.join("master");
-    tokio::spawn(async move {
-      let exchange = async {
-        let (mut stream, _) = listener.accept().await.unwrap();
-        assert!(matches!(
-          ctl_ipc::read_frame::<_, ClientMessage>(&mut stream).await.unwrap(),
-          Some(ClientMessage::Handshake { protocol })
-            if protocol.negotiate(ctl_ipc::SUPPORTED_PROTOCOL_VERSIONS).is_some()
-        ));
-        ctl_ipc::write_frame(
-          &mut stream,
-          &ServerMessage::HandshakeAccepted {
-            protocol_version: ctl_ipc::PROTOCOL_VERSION,
-          },
-        )
-        .await
-        .unwrap();
-        let observed = if observe {
-          let Some(ClientMessage::MasterStatus { target }) =
-            ctl_ipc::read_frame(&mut stream).await.unwrap()
-          else {
-            panic!("expected a passive managed master observation");
-          };
-          ctl_ipc::write_frame(&mut stream, &ServerMessage::AuthenticationRequired)
-            .await
-            .unwrap();
-          Some(target)
-        } else {
-          None
-        };
-        let Some(ClientMessage::EnsureMaster { target }) =
-          ctl_ipc::read_frame(&mut stream).await.unwrap()
-        else {
-          panic!("expected one managed master request");
-        };
-        if let Some(observed) = observed {
-          assert_eq!(target, observed);
-        }
-        ctl_ipc::write_frame(
-          &mut stream,
-          &ServerMessage::MasterReady {
-            control_path: master,
-          },
-        )
-        .await
-        .unwrap();
-        target
-      };
-      tokio::time::timeout(Duration::from_secs(10), exchange)
-        .await
-        .unwrap()
-    })
+    broker::spawn(self, observe, "ctl_agent_update_required")
   }
 
   fn arguments(&self, index: usize) -> Vec<String> {
@@ -430,12 +353,7 @@ esac
   }
 
   fn assert_managed_route(&self, count: usize) {
-    let first = self.arguments(1);
-    assert_eq!(
-      first,
-      self.arguments(2),
-      "legacy inspection must reuse the original route and fixed service command"
-    );
+    assert!(self.arguments(1).join("\n").contains("remote-id"));
     self.assert_managed_channels(count);
   }
 
@@ -467,14 +385,11 @@ esac
 
   fn assert_no_upload(&self) {
     assert!(!self.0.join("upload").exists());
-    for index in [1, 2] {
-      let input = fs::read(self.0.join(format!("service-input-{index}"))).unwrap();
-      assert_eq!(
-        input,
-        [] as [u8; 0],
-        "repair inspection sent a service request"
-      );
-    }
+    assert!(!self.0.join("broker-service-input").exists());
+    assert_eq!(
+      fs::read_to_string(self.0.join("service-opens")).unwrap(),
+      "1"
+    );
   }
 }
 
@@ -638,30 +553,38 @@ impl Drop for Terminal {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn matching_legacy_identity_offers_repair_and_declining_does_not_install() {
+async fn missing_or_old_agent_offers_repair_only_after_verifying_the_saved_account() {
   let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
-  let fixture = Fixture::new(EXPECTED_ID);
-  let original = fs::read(fixture.0.join("hosts.json")).unwrap();
-  let broker = fixture.broker();
-  let mut terminal = Terminal::new(&fixture);
-  terminal.wait_for_prompt();
-  terminal.answer("\r");
-  assert!(!terminal.finish().success());
-  let transcript = terminal.text();
-  assert!(transcript.contains("ctl-ssh-v2"));
-  assert!(!transcript.contains("Detecting the remote platform"));
-  assert!(!fixture.0.join("platform").exists());
-  fixture.assert_managed_route(2);
-  fixture.assert_no_upload();
-  assert_eq!(fs::read(fixture.0.join("hosts.json")).unwrap(), original);
-  let target = broker.await.unwrap();
-  assert_eq!(target.destination, "10.0.0.20");
-  assert_eq!(target.user.as_deref(), Some("alice"));
-  assert_eq!(target.port, Some(2222));
+  for code in ["ctl_agent_not_found", "ctl_agent_update_required"] {
+    let fixture = Fixture::new(EXPECTED_ID);
+    let original = fs::read(fixture.0.join("hosts.json")).unwrap();
+    let broker = broker::spawn(&fixture, true, code);
+    let mut terminal = Terminal::new(&fixture);
+    terminal.wait_for_prompt();
+    terminal.answer("\r");
+    assert!(!terminal.finish().success());
+    let transcript = terminal.text();
+    assert!(fixture.0.join("account-id").exists());
+    let reason = if code == "ctl_agent_not_found" {
+      "The remote ctl-agent is missing."
+    } else {
+      "The remote ctl-agent needs an update for shared SSH services."
+    };
+    assert!(transcript.contains(reason), "{transcript}");
+    assert!(!transcript.contains("Detecting the remote platform"));
+    assert!(!fixture.0.join("platform").exists());
+    fixture.assert_managed_route(1);
+    fixture.assert_no_upload();
+    assert_eq!(fs::read(fixture.0.join("hosts.json")).unwrap(), original);
+    let target = broker.await.unwrap();
+    assert_eq!(target.destination, "10.0.0.20");
+    assert_eq!(target.user.as_deref(), Some("alice"));
+    assert_eq!(target.port, Some(2222));
+  }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn mismatched_legacy_identity_fails_before_offer_or_remote_changes() {
+async fn mismatched_account_identity_fails_before_offer_or_remote_changes() {
   let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = Fixture::new("0c9247af-580a-4e90-9a88-45a4f76c0ca7");
   let original = fs::read(fixture.0.join("hosts.json")).unwrap();
@@ -675,7 +598,7 @@ async fn mismatched_legacy_identity_fails_before_offer_or_remote_changes() {
   );
   assert!(!transcript.contains(PROMPT));
   assert!(!fixture.0.join("platform").exists());
-  fixture.assert_managed_route(2);
+  fixture.assert_managed_route(1);
   fixture.assert_no_upload();
   assert_eq!(fs::read(fixture.0.join("hosts.json")).unwrap(), original);
   broker.await.unwrap();
@@ -707,7 +630,7 @@ async fn accepted_repair_detects_platform_but_rejects_unverified_local_bundles_b
     "{transcript}"
   );
   assert!(fixture.0.join("platform").exists());
-  fixture.assert_managed_route(3);
+  fixture.assert_managed_route(2);
   fixture.assert_no_upload();
   assert_eq!(fs::read(fixture.0.join("hosts.json")).unwrap(), original);
   broker.await.unwrap();
@@ -766,7 +689,7 @@ async fn automatic_repair_requires_a_current_source_even_with_older_cached_and_s
   terminal.wait_for_prompt();
   terminal.answer("y\r");
   assert!(!terminal.finish().success(), "{}", terminal.text());
-  fixture.assert_managed_route(3);
+  fixture.assert_managed_route(2);
   fixture.assert_no_upload();
   assert!(!fixture.0.join("home/.tokn/ctl/current").exists());
   assert_selection(&fixture, Some(&previous.manifest.bundle_id));
@@ -838,8 +761,11 @@ fn assert_successful_repair(
     transcript.contains("Remote components installed. Retrying the connection."),
     "{transcript}"
   );
-  fixture.assert_managed_route(5);
-  assert_eq!(fixture.arguments(1), fixture.arguments(5));
+  fixture.assert_managed_route(3);
+  assert_eq!(
+    fs::read_to_string(fixture.0.join("service-opens")).unwrap(),
+    "2"
+  );
   assert!(fixture.0.join("platform").exists());
   assert!(fixture.0.join("upload").exists());
   let base = fixture.0.join("home/.tokn/ctl");
@@ -878,17 +804,18 @@ fn assert_successful_repair(
       0o700
     );
   }
-  for index in [1, 2] {
-    assert_eq!(
-      fs::read(fixture.0.join(format!("service-input-{index}"))).unwrap(),
-      [] as [u8; 0]
-    );
-  }
-  let requests = frames(&fs::read(fixture.0.join("service-input-5")).unwrap());
+  let requests = frames(&fs::read(fixture.0.join("broker-service-input")).unwrap());
+  let selection: ctl_proto::IdentitySelection =
+    serde_json::from_value(requests[0].clone()).unwrap();
   assert_eq!(
-    requests,
+    selection.protocol_version,
+    ctl_proto::IDENTITY_CONTRACT_V1_0_3
+  );
+  // The new outer transport retains the older published identity contract.
+  assert!(selection.client_identity.is_none());
+  assert_eq!(
+    requests[1..],
     [
-      json!({"protocol_version": ctl_proto::IDENTITY_CONTRACT_V1_0_3}),
       json!({"type": "handshake", "protocol": ctmux_proto::protocol_offer(), "client_name": "ctl", "client_version": env!("CARGO_PKG_VERSION")}),
       json!({"type": "list_session_clients"}),
     ]

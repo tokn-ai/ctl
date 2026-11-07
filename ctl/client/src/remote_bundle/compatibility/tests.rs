@@ -101,12 +101,12 @@ impl Fixture {
     let components = &mut self.inner["components"];
     let mut ctl = components["ctl-agent"].clone();
     let daemon_protocols = components["ctld"]["protocols"].as_array().unwrap();
-    ctl["protocols"].as_array_mut().unwrap().extend(
-      daemon_protocols
-        .iter()
-        .filter(|p| p["name"] != "ctld")
-        .cloned(),
-    );
+    let client_protocols = ctl["protocols"].as_array_mut().unwrap();
+    for protocol in daemon_protocols {
+      if !client_protocols.contains(protocol) {
+        client_protocols.push(protocol.clone());
+      }
+    }
     components["ctl"] = ctl;
     components["ctmux"] = components["ctmuxd"].clone();
     self.inner["schema_version"] = json!(3);
@@ -118,6 +118,23 @@ impl Fixture {
       let bytes = format!("binary fixture {name}").into_bytes();
       self.inner["files"][name] = json!(format!("{:x}", Sha256::digest(&bytes)));
       self.files.insert(name.into(), bytes);
+    }
+    self
+  }
+
+  pub(crate) fn without_shared_services(mut self) -> Self {
+    for component in self.inner["components"]
+      .as_object_mut()
+      .unwrap()
+      .values_mut()
+    {
+      component["protocols"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|protocol| protocol["name"] != "ctl_transport");
+    }
+    for target in SUPPORTED_TARGETS {
+      self.outer["targets"][target]["components"] = self.inner["components"].clone();
     }
     self
   }
@@ -494,15 +511,15 @@ fn client_and_every_internal_companion_contract_must_explicitly_intersect() {
 }
 
 #[test]
-fn forwarding_advertisements_are_optional_but_must_explicitly_intersect_when_present() {
-  let mut fixture = Fixture::new("0.0.9", &"b".repeat(40));
+fn optional_transport_advertisements_must_explicitly_intersect_when_present() {
+  let mut fixture = Fixture::new("0.0.9", &"b".repeat(40)).without_shared_services();
   let parsed = BundleSet::parse_intrinsic(&serde_json::to_vec(&fixture.outer).unwrap()).unwrap();
   let mut components = parsed.target(TARGET).unwrap().components.clone().unwrap();
   components
     .get_mut("ctl-agent")
     .unwrap()
     .protocols
-    .retain(|protocol| protocol.name != "ctl_forwarding");
+    .retain(|protocol| !matches!(protocol.name.as_str(), "ctl_forwarding" | "ctl_transport"));
   let mut check = |components: &BTreeMap<String, ComponentInfo>, expected| {
     assert_eq!(compatible(components), expected);
     #[cfg(unix)]
@@ -511,34 +528,41 @@ fn forwarding_advertisements_are_optional_but_must_explicitly_intersect_when_pre
     let parsed = BundleSet::parse_intrinsic(&serde_json::to_vec(&fixture.outer).unwrap()).unwrap();
     assert_eq!(parsed.is_compatible(TARGET).unwrap(), expected);
   };
-  // Original agents have no forwarding advertisement and remain usable for TCP.
+  // Original agents remain eligible for their existing command endpoints.
   check(&components, true);
-  for contract in ctl_proto::forwarding::SUPPORTED_PROTOCOL_VERSIONS {
+  for (name, supported) in [
+    (
+      "ctl_forwarding",
+      ctl_proto::forwarding::SUPPORTED_PROTOCOL_VERSIONS,
+    ),
+    (
+      "ctl_transport",
+      ctl_proto::transport::SUPPORTED_PROTOCOL_VERSIONS,
+    ),
+  ] {
+    for contract in supported {
+      let mut advertised = components.clone();
+      advertised
+        .get_mut("ctl-agent")
+        .unwrap()
+        .protocols
+        .push(ProtocolInfo::new(
+          name,
+          contract.build,
+          *contract,
+          &[*contract],
+        ));
+      check(&advertised, true);
+    }
+    let future = ProtocolVersion::new(2, 0, 3);
     let mut advertised = components.clone();
     advertised
       .get_mut("ctl-agent")
       .unwrap()
       .protocols
-      .push(ProtocolInfo::new(
-        "ctl_forwarding",
-        contract.build,
-        *contract,
-        &[*contract],
-      ));
-    check(&advertised, true);
+      .push(ProtocolInfo::new(name, future.build, future, &[future]));
+    check(&advertised, false);
   }
-  let future = ProtocolVersion::new(2, 0, 3);
-  components
-    .get_mut("ctl-agent")
-    .unwrap()
-    .protocols
-    .push(ProtocolInfo::new(
-      "ctl_forwarding",
-      future.build,
-      future,
-      &[future],
-    ));
-  check(&components, false);
 }
 
 #[test]

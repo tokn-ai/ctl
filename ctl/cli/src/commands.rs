@@ -567,11 +567,14 @@ async fn ssh_interaction(
       // Keep background activity passive, and propagate failed or canceled
       // explicit requests without starting a second authentication attempt.
       let control_path = if interactive {
-        broker.ensure_master(ssh_target, true).await?
+        broker.ensure_master(ssh_target.clone(), true).await?
       } else {
         control_path
       };
-      return Ok(ctl_client::SshInteraction::Multiplexed { control_path });
+      return Ok(ctl_client::SshInteraction::Brokered {
+        target: ssh_target,
+        control_path,
+      });
     }
     Ok(None) => {}
     Err(crate::ssh_broker::Error::Daemon { code, .. })
@@ -579,8 +582,13 @@ async fn ssh_interaction(
     Err(error) => return Err(error.into()),
   }
   crate::target::ensure_vpn_with_interaction(target, interactive).await?;
-  let control_path = broker.ensure_master(ssh_target, interactive).await?;
-  Ok(ctl_client::SshInteraction::Multiplexed { control_path })
+  let control_path = broker
+    .ensure_master(ssh_target.clone(), interactive)
+    .await?;
+  Ok(ctl_client::SshInteraction::Brokered {
+    target: ssh_target,
+    control_path,
+  })
 }
 
 #[cfg(not(unix))]

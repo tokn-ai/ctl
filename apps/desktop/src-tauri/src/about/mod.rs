@@ -63,6 +63,18 @@ pub async fn get_component_versions(
           && saved.status != VersionStatus::Unavailable
       })
   });
+  let mut app_protocols = ctl_ipc::lifecycle::DaemonBinaryInfo::current().protocols;
+  app_protocols.extend([
+    ctmux_proto::protocol_info(),
+    ctmux_ipc::local_control_protocol_info(),
+    ctl_task_proto::protocol_info(),
+    ctl_task_proto::control::protocol_info(),
+  ]);
+  for protocol in ctl_proto::agent_protocols() {
+    if !app_protocols.contains(&protocol) {
+      app_protocols.push(protocol);
+    }
+  }
   let mut app = ComponentVersionRow::local("ctmux", "ctmux");
   app.observation = "bundled";
   app.status = VersionStatus::Current;
@@ -72,16 +84,8 @@ pub async fn get_component_versions(
       .then(|| env!("CTMUX_SOURCE_REVISION").into()),
     source_fingerprint: None,
     dirty: None,
-    protocols: ctl_ipc::lifecycle::DaemonBinaryInfo::current()
-      .protocols
+    protocols: app_protocols
       .into_iter()
-      .chain([
-        ctmux_proto::protocol_info(),
-        ctmux_ipc::local_control_protocol_info(),
-        ctl_task_proto::protocol_info(),
-        ctl_task_proto::control::protocol_info(),
-      ])
-      .chain(ctl_proto::agent_protocols())
       .map(ProtocolVersion::from)
       .collect(),
   });

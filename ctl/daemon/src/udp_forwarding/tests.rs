@@ -38,6 +38,106 @@ async fn next_local_datagram(socket: &UdpSocket) -> Vec<u8> {
   payload
 }
 
+#[tokio::test]
+async fn blocked_rules_share_upload_bytes_until_writes_finish_or_are_cancelled() {
+  const PACKET_BYTES: usize = 1024;
+  let mut registry = Registry::default();
+  assert_eq!(registry.upload_budget.available_permits(), MAX_UPLOAD_BYTES);
+  registry.upload_budget = Arc::new(Semaphore::new(4 * PACKET_BYTES));
+  let budget = Arc::clone(&registry.upload_budget);
+  let (first_outgoing, first_uploads) = mpsc::channel(4);
+  let (second_outgoing, second_uploads) = mpsc::channel(4);
+  let payload = vec![42; PACKET_BYTES];
+  for (outgoing, peer_ids) in [(&first_outgoing, [1, 2]), (&second_outgoing, [3, 4])] {
+    for peer_id in peer_ids {
+      assert!(try_queue_datagram(outgoing, &budget, peer_id, &payload));
+    }
+  }
+  assert_eq!(budget.available_permits(), 0);
+
+  // Each writer can send only the frame kind before blocking. Taking a frame
+  // out of its queue must keep the payload charged while that write is pending.
+  let (mut first_writer, mut first_remote) = tokio::io::duplex(1);
+  let (mut second_writer, mut second_remote) = tokio::io::duplex(1);
+  let first = tokio::spawn(async move { write_uploads(&mut first_writer, first_uploads).await });
+  let second = tokio::spawn(async move { write_uploads(&mut second_writer, second_uploads).await });
+  assert_eq!(
+    timeout(Duration::from_secs(3), first_remote.read_u8())
+      .await
+      .unwrap()
+      .unwrap(),
+    1
+  );
+  let kind = timeout(Duration::from_secs(3), second_remote.read_u8())
+    .await
+    .unwrap()
+    .unwrap();
+  assert_eq!(kind, 1);
+  assert_eq!(budget.available_permits(), 0);
+  assert!(!try_queue_datagram(&second_outgoing, &budget, 99, &payload));
+  // Peer retirement still has a queue slot when all shared payload bytes are
+  // in use. It requires no byte permit and must follow the preceding datagrams.
+  second_outgoing.try_send(Upload::close(4)).unwrap();
+  assert_eq!(budget.available_permits(), 0);
+
+  first.abort();
+  assert!(first.await.unwrap_err().is_cancelled());
+  assert_eq!(budget.available_permits(), 2 * PACKET_BYTES);
+  assert!(try_queue_datagram(&second_outgoing, &budget, 5, &payload));
+  assert_eq!(budget.available_permits(), PACKET_BYTES);
+  drop(second_outgoing);
+
+  let mut second_remote = std::io::Cursor::new([kind]).chain(second_remote);
+  for peer_id in [3, 4] {
+    assert_eq!(
+      next_packet(&mut second_remote).await,
+      forwarding::Frame::Datagram {
+        peer_id,
+        payload: payload.clone()
+      }
+    );
+  }
+  assert_eq!(
+    next_packet(&mut second_remote).await,
+    forwarding::Frame::Close { peer_id: 4 }
+  );
+  assert_eq!(
+    next_packet(&mut second_remote).await,
+    forwarding::Frame::Datagram {
+      peer_id: 5,
+      payload
+    }
+  );
+  timeout(Duration::from_secs(3), second)
+    .await
+    .unwrap()
+    .unwrap()
+    .unwrap();
+  assert_eq!(budget.available_permits(), 4 * PACKET_BYTES);
+  assert!(
+    forwarding::read_packet(&mut second_remote)
+      .await
+      .unwrap()
+      .is_none()
+  );
+}
+
+#[test]
+fn a_full_rule_queue_does_not_reserve_upload_bytes_from_siblings() {
+  let budget = Arc::new(Semaphore::new(8));
+  let (first, first_uploads) = mpsc::channel(1);
+  let (second, second_uploads) = mpsc::channel(1);
+  assert!(try_queue_datagram(&first, &budget, 1, b"data"));
+  assert_eq!(budget.available_permits(), 4);
+  assert!(!try_queue_datagram(&first, &budget, 1, b"drop"));
+  assert_eq!(budget.available_permits(), 4);
+  assert!(try_queue_datagram(&second, &budget, 1, b"data"));
+  assert_eq!(budget.available_permits(), 0);
+  drop(first_uploads);
+  drop(second_uploads);
+  assert_eq!(budget.available_permits(), 8);
+}
+
 #[cfg(unix)]
 fn echo_channel() -> io::Result<Channel> {
   let mut command = Command::new("cat");
@@ -47,9 +147,9 @@ fn echo_channel() -> io::Result<Channel> {
     .stderr(Stdio::piped());
   let mut process = Process::spawn(command)?;
   Ok(Channel {
-    stdin: process.stdin().unwrap(),
-    stdout: process.stdout().unwrap(),
-    process,
+    stdin: Box::new(process.stdin().unwrap()),
+    stdout: Box::new(process.stdout().unwrap()),
+    process: Some(process),
   })
 }
 
@@ -60,7 +160,7 @@ async fn local_clients_keep_datagram_boundaries_and_cancellation_releases_the_so
   let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
   let address = socket.local_addr().unwrap();
   let forward = forward(address.port());
-  let listener = Registry::listener(socket, echo_channel().unwrap());
+  let listener = registry.listener(socket, echo_channel().unwrap());
   registry
     .listeners
     .insert((target(), forward.clone()), listener);
@@ -110,6 +210,7 @@ async fn udp_collision_does_not_open_a_channel_or_disturb_tcp() {
       &target(),
       Some(Path::new("/fixture/missing-control")),
       &forward,
+      &super::super::agent_transport::Registry::default(),
     )
     .await
     .err()
@@ -160,9 +261,9 @@ async fn echo_channel_with_pid() -> (Channel, u32) {
   .unwrap();
   (
     Channel {
-      process,
-      stdin,
-      stdout,
+      process: Some(process),
+      stdin: Box::new(stdin),
+      stdout: Box::new(stdout),
     },
     pid,
   )
@@ -211,11 +312,12 @@ async fn assert_released(address: SocketAddr, pids: &[u32]) {
 #[cfg(unix)]
 #[tokio::test]
 async fn dropping_uncommitted_udp_startup_releases_idle_and_active_channels() {
+  let registry = Registry::default();
   for active_peers in [false, true] {
     let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let address = socket.local_addr().unwrap();
     let (initial, pid) = echo_channel_with_pid().await;
-    let listener = Registry::listener(socket, initial);
+    let listener = registry.listener(socket, initial);
     let prepared = Prepared {
       key: (target(), forward(address.port())),
       listener,
@@ -251,7 +353,7 @@ async fn disconnecting_a_missing_private_master_releases_owned_udp_listeners() {
   let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
   let address = socket.local_addr().unwrap();
   let (initial, pid) = echo_channel_with_pid().await;
-  let listener = Registry::listener(socket, initial);
+  let listener = state.udp_forwards.lock().await.listener(socket, initial);
   state
     .udp_forwards
     .lock()
@@ -276,10 +378,11 @@ async fn disconnecting_a_missing_private_master_releases_owned_udp_listeners() {
 #[cfg(unix)]
 #[tokio::test]
 async fn more_than_ten_local_clients_share_one_channel_and_remain_isolated() {
+  let registry = Registry::default();
   let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
   let address = socket.local_addr().unwrap();
   let (channel, pid) = echo_channel_with_pid().await;
-  let listener = Registry::listener(socket, channel);
+  let listener = registry.listener(socket, channel);
   let mut clients = Vec::new();
   for index in 0_u8..16 {
     let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -310,7 +413,14 @@ async fn remote_close_retires_a_peer_and_stale_replies_cannot_reach_its_replacem
   let (stop, receiver) = oneshot::channel();
   let relay = tokio::spawn(async move {
     let (mut reader, mut writer) = tokio::io::split(daemon);
-    relay_socket(&socket, &mut writer, &mut reader, receiver).await
+    relay_socket(
+      &socket,
+      &mut writer,
+      &mut reader,
+      receiver,
+      Registry::default().upload_budget,
+    )
+    .await
   });
   let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
   client.send_to(b"first", address).await.unwrap();
@@ -384,7 +494,14 @@ async fn closing_a_peer_releases_full_local_capacity_without_reusing_its_id() {
   let (stop, receiver) = oneshot::channel();
   let relay = tokio::spawn(async move {
     let (mut reader, mut writer) = tokio::io::split(daemon);
-    relay_socket(&socket, &mut writer, &mut reader, receiver).await
+    relay_socket(
+      &socket,
+      &mut writer,
+      &mut reader,
+      receiver,
+      Registry::default().upload_budget,
+    )
+    .await
   });
   let mut clients = Vec::new();
   let mut peer_ids = Vec::new();

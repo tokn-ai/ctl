@@ -54,6 +54,16 @@ impl CommandErrorDto {
         Self::new("ctl_agent_identity_unsupported", error.to_string())
       }
       CoreError::RemoteIdentity(_) => Self::new("invalid_remote_identity", error.to_string()),
+      CoreError::BrokerService(source) => match source {
+        ctl_client::connection::Error::Daemon { code, message } => Self::new(code, message),
+        ctl_client::connection::Error::AuthenticationRequired => {
+          Self::new("ssh_authentication_required", error.to_string())
+        }
+        ctl_client::connection::Error::UnsupportedServiceTransport(_) => {
+          Self::new("ctld_protocol_feature_unsupported", error.to_string())
+        }
+        _ => Self::new("local_connection_failed", error.to_string()),
+      },
       CoreError::InvalidSshDestination(_) | CoreError::InvalidSshOption(_) => {
         Self::new("invalid_ssh_destination", error.to_string())
       }
@@ -185,6 +195,25 @@ mod tests {
     let error = CommandErrorDto::transport(&CoreError::AgentNotFound);
 
     assert_eq!(error.code, "ctl_agent_not_found");
+  }
+
+  #[test]
+  fn broker_service_errors_preserve_install_update_and_retry_codes() {
+    for code in [
+      "ctl_agent_not_found",
+      "ctl_agent_update_required",
+      "ssh_service_capacity",
+      "ssh_transport_failed",
+    ] {
+      let error = CommandErrorDto::transport(&CoreError::BrokerService(
+        ctl_client::connection::Error::Daemon {
+          code: code.into(),
+          message: "Remote service unavailable".into(),
+        },
+      ));
+      assert_eq!(error.code, code);
+      assert_eq!(error.message, "Remote service unavailable");
+    }
   }
 
   #[test]

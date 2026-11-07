@@ -30,6 +30,8 @@ enum Command {
     #[arg(long)]
     identity: bool,
   },
+  /// Share this SSH channel among fixed local services and UDP forwards.
+  Multiplex,
   /// List TCP/UDP listeners without exposing process arguments or environment.
   Listeners {
     #[arg(long, value_enum, default_value_t = ctl_agent::listeners::Protocol::Tcp)]
@@ -83,6 +85,18 @@ async fn run(arguments: Arguments) -> Result<(), MainError> {
       config.ctmuxd_bin = companion_binary("ctmuxd");
       config.taskd_bin = companion_binary("ctl-taskd");
       connect_stdio(&config).await?;
+    }
+    Command::Multiplex => {
+      let mut config = ConnectConfig::new(ctmux_ipc::socket_path());
+      config.record_presence = true;
+      config.identity = Some(
+        tokio::task::spawn_blocking(ctl_agent::identity::discover)
+          .await
+          .map_err(std::io::Error::other)??,
+      );
+      config.ctmuxd_bin = companion_binary("ctmuxd");
+      config.taskd_bin = companion_binary("ctl-taskd");
+      ctl_agent::transport::serve_stdio(&config).await?;
     }
     command @ (Command::PrepareCtmuxRestart | Command::PrepareCtmuxStop) => {
       run_ctmux_maintenance(command).await?;
@@ -283,6 +297,19 @@ mod tests {
         Arguments::try_parse_from(std::iter::once("ctl-agent").chain(arguments.clone())).is_err(),
         "must reject {arguments:?}"
       );
+    }
+  }
+
+  #[test]
+  fn multiplex_exposes_only_fixed_logical_services() {
+    assert!(matches!(
+      Arguments::try_parse_from(["ctl-agent", "multiplex"])
+        .unwrap()
+        .command,
+      Some(Command::Multiplex)
+    ));
+    for argument in ["--socket", "--ctld-bin", "--command", "--service"] {
+      assert!(Arguments::try_parse_from(["ctl-agent", "multiplex", argument, "value"]).is_err());
     }
   }
 

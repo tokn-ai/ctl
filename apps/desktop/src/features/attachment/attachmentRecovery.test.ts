@@ -114,7 +114,11 @@ describe("attachment recovery", () => {
     for (const code of [
       "remote_identity_mismatch",
       "invalid_remote_identity",
+      "ctl_agent_not_found",
       "ctl_agent_identity_unsupported",
+      "ctl_agent_update_required",
+      "ctld_protocol_feature_unsupported",
+      "ssh_service_capacity",
       "ssh_authentication_failed",
       "ssh_authentication_required",
       "ssh_host_disconnected",

@@ -4,10 +4,12 @@ The `ctl ctmux`, persistent `ctl shell`, and `ctl task` commands carry a version
 `ctmux-proto` or `ctl-task-proto` stream through an OpenSSH
 remote command. There is no separate network listener, TLS identity, pairing format,
 or outer application-authentication protocol. CLI and desktop service connections
-append `--identity` and use the stable `ctl-ssh-identity` framing marker,
+use the stable `ctl-ssh-identity` framing marker,
 followed by a bounded contract offer, the client's selection, and environment
-identity before the selected service handshake. Raw connections without identity
-retain the fixed `ctl-ssh-v1` framing marker and negotiate the service directly.
+identity before the selected service handshake. Direct command connections
+request this framing with `--identity`; brokered logical streams retain the same
+identity contract. Raw direct connections without identity retain the fixed
+`ctl-ssh-v1` framing marker and negotiate the service directly.
 Startup output cannot be mistaken for protocol frames. See
 [published protocol contracts](protocol-versioning.md). The remote generates its UUID in `~/.tokn/ctl/remote-id`; Unix bundles
 live in `~/.tokn/ctl/versions` and are selected by `~/.tokn/ctl/current`. See
@@ -17,9 +19,11 @@ live in `~/.tokn/ctl/versions` and are selected by `~/.tokn/ctl/current`. See
 
 `ctl ctmux` uses the canonical ctmux command implementation with a ctl-selected
 transport. When global `--host`/`-H` selects a saved remote target, or top-level
-`--destination` selects a temporary SSH destination or config alias, every one-shot
-request or interactive attachment starts the system OpenSSH client with the
-equivalent fixed argument sequence for the default Unix remote platform:
+`--destination` selects a temporary SSH destination or config alias, broker-backed
+Unix clients open one-shot requests and interactive attachments as logical
+streams in the Sessions group described below. Retained direct service
+connections use the system OpenSSH client with the equivalent fixed argument
+sequence for the default Unix remote platform:
 
 ```text
 ssh -T \
@@ -105,6 +109,45 @@ replacement channel and uses the `ctmux-proto` attachment token described below.
 
 ## Remote command
 
+Updated broker-backed clients lazily open two shared `ctl-agent multiplex` SSH
+command channels for the selected physical OpenSSH control socket. The Sessions
+transport carries ctmux views, task connections, and their supplemental service
+requests; the Forwarding transport carries UDP rules. Aliases resolving to the
+same socket reuse these two groups. Each channel independently negotiates the
+`ctl_transport 1.0.1` contract after `ctl-service-transport\n`; Yamux then carries
+independently flow-controlled logical streams. Each stream selects ctmux, task,
+or UDP before exchanging that service's existing framing.
+
+When both groups are active, they consume two SSH exec session slots on the
+physical master, or three when the master also has a lease anchor. Adding views
+or UDP rules within a group adds logical streams rather than SSH exec sessions.
+TCP forwarding uses native OpenSSH forwarding channels and consumes no exec
+session slots. An Any rule combines native TCP with UDP on the Forwarding group.
+
+The dedicated local ctld `open_service` request requires ctld `1.2.18` and pins
+both the target and selected control path. After `service_opened`, the broker
+socket carries only that logical service until it closes. Closing a view closes
+its stream while other views and rules retain their streams. Disconnecting a
+target closes that target's streams; another alias sharing the socket retains
+its streams. Each group has its own capacity, failure handling, and buffering:
+at most 64 active service handlers and a 16 MiB aggregate service receive window.
+Across both groups these limits total 128 handlers and 32 MiB. Each server also
+reserves one 256 KiB internal admission slot to reject excess replacements
+without closing sibling services, bringing the combined server receive bound
+to 32.5 MiB. A full or failed group leaves the other group available; both still
+share the physical SSH connection's network bandwidth.
+The broker closes each idle transport after five seconds. Losing one agent
+transport closes its group's streams; losing the physical SSH master affects
+both groups. Both continue to use the exact authenticated OpenSSH master.
+Earlier brokers and agents retain their published direct command endpoints.
+
+UDP services on the remote Forwarding agent share a 32 MiB datagram payload
+budget and at most 512 sockets, including setup sockets. Receive buffers are
+separately bounded to 32 MiB across those sockets. These UDP budgets belong only
+to the Forwarding group and are not duplicated for Sessions. Excess UDP data is
+dropped; new services or peers are rejected through existing forwarding responses
+when the socket budget is exhausted. Other service streams remain available.
+
 `ctl-agent connect` is a disposable, stateless process launched once per SSH
 channel. The default service connects to the fixed per-user `ctmuxd` data endpoint;
 `--service task` connects to the fixed per-user `ctl-taskd` endpoint. It starts only
@@ -142,9 +185,10 @@ reading process arguments or environment.
 channel switches to bounded peer frames: a one-byte kind and nonzero eight-byte
 big-endian peer ID, followed for datagrams by a four-byte big-endian payload
 length and up to 65,507 payload bytes. Kind 1 carries a datagram, including an
-empty one; kind 2 closes that peer association. A rule uses one SSH command
-session for up to 64 independent connected remote UDP sockets, avoiding a
-session per local source port. Both peers release associations after 60 seconds
+empty one; kind 2 closes that peer association. Each rule carries up to 64
+independent connected remote UDP sockets on one logical stream of the shared
+agent transport. The retained direct `forward-udp` endpoint uses one SSH command
+session for the same peer framing. Both peers release associations after 60 seconds
 without traffic in either direction. The retained `1.0.1` contract uses one
 remote UDP socket with the original length-prefixed datagram framing; new ctld
 clients require explicit `1.0.2` support before sending a destination. This endpoint requires an authenticated SSH

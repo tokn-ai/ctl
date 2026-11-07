@@ -55,18 +55,30 @@ pub(super) async fn run(home: &Path, options: DevelopmentArguments) -> io::Resul
   Ok(())
 }
 
-fn lease_pipe() -> io::Result<tokio::net::unix::pipe::Receiver> {
+type LeaseInput = Box<dyn tokio::io::AsyncRead + Send + Unpin>;
+
+fn lease_pipe() -> io::Result<LeaseInput> {
   use std::os::fd::AsFd as _;
   let descriptor = io::stdin().as_fd().try_clone_to_owned()?;
-  tokio::net::unix::pipe::Receiver::from_owned_fd(descriptor).map_err(|error| {
-    io::Error::new(
-      error.kind(),
-      format!("development lease requires a readable stdin pipe: {error}"),
-    )
-  })
+  let metadata = rustix::fs::fstat(&descriptor)?;
+  match rustix::fs::FileType::from_raw_mode(metadata.st_mode) {
+    rustix::fs::FileType::Fifo => Ok(Box::new(tokio::net::unix::pipe::Receiver::from_owned_fd(
+      descriptor,
+    )?)),
+    rustix::fs::FileType::Socket => {
+      // Node's child_process uses a socketpair for piped stdio on macOS.
+      let stream = std::os::unix::net::UnixStream::from(descriptor);
+      stream.set_nonblocking(true)?;
+      Ok(Box::new(tokio::net::UnixStream::from_std(stream)?))
+    }
+    _ => Err(io::Error::new(
+      io::ErrorKind::InvalidInput,
+      "development lease requires a readable stdin pipe or Unix socket",
+    )),
+  }
 }
 
-async fn read_lease_input(mut input: tokio::net::unix::pipe::Receiver) -> io::Result<()> {
+async fn read_lease_input(mut input: LeaseInput) -> io::Result<()> {
   use tokio::io::AsyncReadExt as _;
   if input.read(&mut [0]).await? == 0 {
     Ok(())

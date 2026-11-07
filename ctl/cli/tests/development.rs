@@ -86,6 +86,49 @@ fn failed_development_preparation_exits_while_the_launcher_holds_stdin_open() {
 }
 
 #[test]
+fn node_launcher_socket_stdin_is_cancellable_when_the_builder_fails() {
+  let fixture = Fixture::new();
+  let launcher = fixture.0.join("launcher.cjs");
+  fs::write(&launcher, r#"
+const { spawn } = require("node:child_process");
+const child = spawn(process.env.FIXTURE_CTLUP, ["dev", "--workspace", process.env.HOME, "--json", "--lease"], {
+  stdio: ["pipe", "pipe", "pipe"],
+});
+child.stdout.pipe(process.stdout);
+child.stderr.pipe(process.stderr);
+let timed_out = false;
+const timer = setTimeout(() => { timed_out = true; child.kill("SIGKILL"); }, 3000);
+child.once("error", (error) => { console.error(error); process.exitCode = 1; clearTimeout(timer); });
+child.once("close", (code) => {
+  clearTimeout(timer);
+  child.stdin.end();
+  process.exitCode = timed_out || code === 0 ? 1 : 0;
+});
+"#).unwrap();
+  let output = finish(
+    Command::new("node")
+      .arg(&launcher)
+      .env("FIXTURE_CTLUP", env!("CARGO_BIN_EXE_ctlup"))
+      .env("HOME", &fixture.0)
+      .env("USERPROFILE", &fixture.0)
+      .env("CTL_NODE_PROGRAM", fixture.0.join("builder"))
+      .stdin(Stdio::null())
+      .stdout(Stdio::piped())
+      .stderr(Stdio::piped())
+      .spawn()
+      .unwrap(),
+  );
+  assert!(
+    output.status.success(),
+    "{}",
+    String::from_utf8_lossy(&output.stderr)
+  );
+  assert!(String::from_utf8_lossy(&output.stderr).contains("fixture build failure"));
+  assert_eq!(output.stdout, Vec::<u8>::new());
+  assert!(!fixture.0.join(".tokn/ctl/current").exists());
+}
+
+#[test]
 fn private_development_lease_rejects_non_pipe_input_before_building() {
   let fixture = Fixture::new();
   let output = finish(

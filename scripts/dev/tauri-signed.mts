@@ -12,7 +12,6 @@ import { constants } from "node:os";
 import { serveAppSupervisor } from "./signed-app-supervisor.mts";
 import { SignedDaemon } from "./signed-daemon.mts";
 import { createSignedSupervisorDirectory, prepareSignedRuntime } from "./signed-runtime.mts";
-import { getCargoTargetDirectory, prepareProvisioningProfile } from "./macos-provisioning.mts";
 import { desktopDevArguments } from "./desktop-dev-config.mts";
 import { startFrontendProcess } from "./frontend-process.mts";
 
@@ -49,8 +48,6 @@ async function main(): Promise<void> {
     return;
   }
 
-  const targetDirectory = await getCargoTargetDirectory(repositoryRoot);
-
   let supervisorDirectory: string | undefined;
   let daemon: SignedDaemon | undefined;
   let supervisor: Awaited<ReturnType<typeof serveAppSupervisor>> | undefined;
@@ -70,23 +67,9 @@ async function main(): Promise<void> {
     }
   };
   try {
-    const profile = await prepareProvisioningProfile({
-      repository_root: repositoryRoot, target_directory: targetDirectory,
-      provision_command: "pnpm ctld:provision",
-    });
-    const tauriConfig = JSON.parse(
-      await readFile(path.join(appDirectory, "src-tauri/tauri.conf.json"), "utf8"),
-    ) as { version?: string };
-    if (!tauriConfig.version) {
-      throw new Error("ctmux has no version in src-tauri/tauri.conf.json");
-    }
-
     const runtimeDirectory = await prepareSignedRuntime(repositoryRoot);
     daemon = new SignedDaemon({
       runtime_directory: runtimeDirectory,
-      profile_path: profile.path,
-      app_version: tauriConfig.version,
-      repository_root: repositoryRoot,
     });
     const ownedDaemon = daemon;
     // The app supervisor belongs to this launcher; the daemon endpoint is

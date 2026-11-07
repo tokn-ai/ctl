@@ -2,6 +2,7 @@
 //! Selection is an explicit transaction; discovery never searches for a newer build.
 
 pub mod agent;
+mod cache;
 mod filesystem;
 #[cfg(test)]
 mod tests;
@@ -14,6 +15,9 @@ use sha2::{Digest as _, Sha256};
 use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+pub use cache::PruneCacheResult;
 
 /// The original four services. Use the manifest schema to list its executables.
 pub use crate::bundle_layout::SERVICES as COMPONENTS;
@@ -281,6 +285,7 @@ impl Manifest {
 pub struct Bundle {
   pub directory: PathBuf,
   pub manifest: Manifest,
+  _cache_lease: Option<Arc<std::fs::File>>,
 }
 
 impl Bundle {
@@ -293,6 +298,7 @@ impl Bundle {
     let bundle = Self {
       directory: directory.to_owned(),
       manifest,
+      _cache_lease: None,
     };
     filesystem::verify_payload(&bundle.directory, &bundle.manifest)?;
     Ok(bundle)
@@ -318,7 +324,9 @@ impl Bundle {
 
 #[derive(Debug, Clone)]
 pub struct Store {
+  home: PathBuf,
   root: PathBuf,
+  cache: bool,
 }
 
 impl Store {
@@ -326,7 +334,20 @@ impl Store {
   #[must_use]
   pub fn new(home: &Path) -> Self {
     Self {
+      home: home.to_owned(),
       root: home.join(".tokn/ctl/components"),
+      cache: false,
+    }
+  }
+
+  /// Complete verified deployment payloads, without an active/upload profile.
+  /// Native execution is selected only through [`crate::installations::Installations`].
+  #[must_use]
+  pub fn cache(home: &Path) -> Self {
+    Self {
+      home: home.to_owned(),
+      root: home.join(".tokn/ctl/cache/components"),
+      cache: true,
     }
   }
 
@@ -340,6 +361,10 @@ impl Store {
   /// # Errors
   /// Invalid selections and changed bytes fail instead of selecting another build.
   pub fn selected(&self, purpose: Purpose, target: &str) -> io::Result<Option<Bundle>> {
+    if self.cache {
+      validate_target(target)?;
+      return Ok(None);
+    }
     filesystem::selected(self, purpose, target)
   }
 
@@ -360,7 +385,9 @@ impl Store {
     if !valid_digest(bundle_id) {
       return Err(invalid("invalid component bundle identity"));
     }
-    filesystem::load(self, target, bundle_id)
+    let bundle = filesystem::load(self, target, bundle_id)?;
+    cache::touch(self, target, bundle_id)?;
+    Ok(bundle)
   }
 
   /// Publishes immutable bytes; it does not select or start a component.
@@ -375,11 +402,25 @@ impl Store {
     filesystem::publish(self, manifest, files)
   }
 
+  /// Evicts least recently used deployment payloads to a bounded byte budget.
+  /// Bundles held by live operations are protected by shared file leases.
+  ///
+  /// # Errors
+  /// Refuses unsafe paths and never prunes the legacy installation store.
+  pub fn prune_cache(&self, max_bytes: u64) -> io::Result<PruneCacheResult> {
+    cache::prune(self, max_bytes)
+  }
+
   /// Atomically selects one already verified complete bundle for a purpose.
   ///
   /// # Errors
   /// Rejects changed bundles, non-native local selections or unsigned local macOS payloads.
   pub fn select(&self, purpose: Purpose, bundle: &Bundle) -> io::Result<()> {
+    if self.cache {
+      return Err(invalid(
+        "deployment caches have no selected build; install a native build with ctlup",
+      ));
+    }
     filesystem::select(self, purpose, bundle, false)
   }
 
@@ -388,6 +429,11 @@ impl Store {
   /// # Errors
   /// Rejects damaged existing selections or invalid bundle payloads.
   pub fn select_if_unset(&self, purpose: Purpose, bundle: &Bundle) -> io::Result<Bundle> {
+    if self.cache {
+      return Err(invalid(
+        "deployment caches have no selected build; install a native build with ctlup",
+      ));
+    }
     filesystem::select(self, purpose, bundle, true)?;
     self
       .selected(purpose, &bundle.manifest.target_triple)?
@@ -430,10 +476,31 @@ pub fn selected_executable_at(
   component: &str,
   required: &[(&str, &[ProtocolVersion])],
 ) -> io::Result<Option<PathBuf>> {
-  let Some(bundle) = Store::new(home).selected(Purpose::Local, crate::paths::native_target())?
-  else {
+  let Some(bundle) = crate::installations::Installations::new(home).active()? else {
     return Ok(None);
   };
+  if component == "ctld" && cfg!(target_os = "macos") {
+    let receipt = bundle.manifest.files.contains_key("ctld-package.json");
+    let has_app = bundle
+      .manifest
+      .files
+      .keys()
+      .any(|name| name.starts_with("ctld.app/"));
+    let app = bundle
+      .manifest
+      .files
+      .contains_key("ctld.app/Contents/MacOS/ctld");
+    if !receipt && !has_app {
+      // A flat SSH package makes no claim to replace the signed local helper,
+      // including when its remote broker contracts differ from this client.
+      return Ok(None);
+    }
+    if !receipt || !app {
+      return Err(invalid(
+        "signed helper requires its complete app package and receipt",
+      ));
+    }
+  }
   let info = bundle
     .manifest
     .components
@@ -468,7 +535,7 @@ pub(super) fn invalid(message: &str) -> io::Error {
   io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
-pub(super) fn validate_target(target: &str) -> io::Result<()> {
+pub(crate) fn validate_target(target: &str) -> io::Result<()> {
   if target.is_empty()
     || target.len() > 128
     || !target

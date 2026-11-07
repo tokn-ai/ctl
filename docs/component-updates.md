@@ -34,210 +34,146 @@ host without a verified saved identity asks for **Check host** to verify its acc
 A legacy numeric protocol is labeled **legacy**, independently of published
 contract versions.
 
-## Complete build bundles
+## One active installation
 
-All managed builds live under `~/.tokn/ctl/components`. A bundle contains
-`ctl-agent`, `ctmuxd`, `ctl-taskd`, and `ctld` from the same build. It records its
-source (CI, release, or local build), target, component contracts, and SHA-256
-checksums. ctl checks both client compatibility and the contracts between the
-components. Foreign-target binaries are never executed during import.
+`ctlup` installs and updates complete builds. `ctl` and `ctmux` perform runtime
+operations. The desktop uses the same Rust installation engine as `ctlup`.
 
-## Update components
+Each account has one active build containing `ctl`, `ctmux`, `ctl-agent`,
+`ctmuxd`, `ctl-taskd`, and `ctld`. Builds are immutable and verified against
+their file checksums, build identity, target and shared protocol contracts.
+Foreign-target binaries are never executed during download or import.
 
-Use **Update components…** in the command palette, About, or a saved host's
-settings. Context actions preselect the host; the dialog can include this
-computer and several saved SSH hosts. Choose one of two packages:
+```text
+~/.tokn/ctl/
+  bin/ctlup                         # independent updater executable
+  bin/ctl -> ../current/ctl          # stable command aliases
+  bin/ctmux -> ../current/ctmux
+  bin/ctl-agent -> ../current/ctl-agent
+  current -> installs/<content-id>
+  previous -> installs/<previous-id>
+  installs/<content-id>/bundle.json
+  installs/<content-id>/<executables>
+  cache/                            # reusable deployment artifacts
+```
 
-- **ctl-agent only** installs the agent and keeps the installed daemons.
-- **Full bundle** installs `ctl-agent`, `ctld`, `ctmuxd`, and `ctl-taskd` from one
-  verified complete build.
+Add `~/.tokn/ctl/bin` to `PATH`. New managed terminal shells include it
+automatically; existing shells keep their environment. Ordinary SSH login
+configuration remains under the account owner’s control.
 
-Both choices take their binaries from a complete compatible build. **Automatic**
-uses the app's publication channel for remote hosts: development builds follow
-the latest published `main` build, and tagged release builds follow stable
-releases. A development checkout builds Linux x64 components locally before
-uploading, including uncommitted changes. Other remote targets use the network
-channel. Automatic Linux local updates use the same policy, mapping glibc hosts
-to their portable musl target. Automatic macOS local-service updates retain the
-existing signed local selection; full local updates require a signed helper package.
+Activation atomically changes `current`. The previous complete build is kept
+for rollback. Older installations remain only while live processes hold leases
+on them; OS-held locks release after a crash. Installing never restarts daemons
+or ends sessions. Existing agent channels use their original process until
+reconnect. A terminal-daemon restart remains a separate confirmed action.
 
-**Latest published main build** and **Latest stable release** explicitly choose
-a network channel, including when running from a development checkout.
-**Selected or included build (offline)** uses the upload selection instead.
-The normal remote update path never lets an older selection override a channel.
-**Provided build files** accepts a stored
-bundle directory or archive, a CI/release bundle-set directory, or an explicitly
-chosen native build directory. Publisher archives need their matching
-`bundle-set.json` beside them. A bundle-set directory can supply different target
-artifacts for a batch; a single-target build cannot be uploaded to another target.
-Current native builds include `ctl-agent`, `ctmuxd`, `ctl-taskd`, `ctld`, `ctl`,
-and `ctmux` for the selected platform. Local macOS full updates also need
-the signed helper package described below. Supplied upload builds do not change
-the pinned upload selection. A local full update selects that build for future
-local service launches.
-
-The app checks publication metadata at startup without opening SSH connections,
-downloading archives, or changing services. About and the update dialog show
-published bundles and provide **Check for bundle updates** to refresh the check.
-Network errors remain visible; they never silently turn an update into an older
-cached installation. Choose the offline source explicitly when needed.
-
-The CLI uses the same discovery, package verification and installation policy:
+## Install, update and roll back
 
 ```sh
-# No host flags means this computer.
-ctl components update
-ctl components check --channel dev --json
-ctl components check --channel stable
-ctl components update --hosts work,jump-a --local --package ctl-agent
-ctl --host work --method vpn components update --package full-bundle
-ctl --host work components update --channel dev
-ctl --host work components update --channel stable
-ctl --host work components update --selected
-ctl --destination my-ssh-alias components update --package full-bundle
-ctl components update --hosts work,jump-a --from /path/to/bundle-set --json
-ctl components update --local --from target/debug --local-build --ctld-package /path/to/ctld-package
+ctlup install
+ctlup update
+ctlup update --channel stable
+ctlup update --channel dev
+ctlup update --host work
+ctlup update --hosts work,jump-a --local
+ctlup update --destination my-ssh-alias
+ctlup update --from /path/to/bundle-set --hosts work,jump-a --json
+ctlup install --from target/debug --local-build --ctld-package /path/to/ctld-package
+ctlup status --json
+ctlup rollback
+ctlup rollback --host work
+ctlup prune
 ```
 
-Saved hosts use their preferred connection method and existing route. `--host`
-accepts only a saved host name or ID; `--method` applies to that one saved host.
-Place `--destination` before `components` for a temporary SSH destination or
-SSH-config alias. It uses OpenSSH configuration, bypasses saved host lookup, and
-does not save a host definition. It cannot be combined with `--host`, `--hosts`,
-or `--method`; `--local` can include this computer alongside the destination.
-The app reports progress and authentication prompts per host. A failed host
-does not undo earlier successes or skip later hosts; the dialog can retry just
-the failed hosts. CLI JSON contains each host's result, and any failure gives a
-nonzero exit status. Stop/Ctrl-C skips remaining hosts. If activation raced with
-cancellation, refresh status before retrying.
+`install` and `update` share the same verification and activation transaction.
+No host option means this account. Saved hosts reuse their existing route,
+connection method and SSH authentication. A temporary destination uses OpenSSH
+configuration without adding a saved host. Hosts are processed independently;
+a failure preserves successful hosts and produces a nonzero exit status.
 
-Updates preserve running services and sessions. **Restart** remains a separate
-confirmed action, and **Reconnect** applies an installed agent to existing SSH
-channels. An agent-only update cannot upgrade a daemon's contracts. Agent-only
-installations live under `~/.tokn/ctl/components/agents/<target>/`, record their
-complete source in `agent-source.json`, and link retained daemons to their
-previous immutable locations. They do not claim to contain the complete bundle.
+An explicit channel is saved as this account’s preference after a successful
+command. Otherwise automatic updates use that preference or the distribution’s
+compiled Dev/Stable default. Development checkouts build the Linux x64 working
+tree locally. Explicit channel requests always resolve the publication.
 
-Before uploading to a saved host, the app and CLI read its existing account ID
-from `~/.tokn/ctl/remote-id` over the authenticated SSH connection and compare it
-with the saved identity. This check works with agents too old to support
-`ctl-agent inspect` and does not start services or create an identity. A missing,
-invalid, or mismatched ID stops the update before upload. After installation,
-the new agent reports its identity and build to verify activation.
+`--from` supplies an exact complete build or publisher bundle-set. Publisher
+archives need their matching `bundle-set.json`. Foreign-target deployment also
+needs that target’s separately checksummed updater sidecar. Native local builds
+must include all six executables. There are no upload selections or agent-only
+overlay installs. Old `ctl components` mutation commands direct users to `ctlup`.
 
-```
-~/.tokn/ctl/components/
-  bundles/<target>/<content-id>/bundle.json
-  bundles/<target>/<content-id>/<component files>
-  selected/local-<platform>.json
-  selected/upload-<target>.json
-```
+On macOS, a local service installation requires the complete verified signed
+`ctld.app` and receipt. `--ctld-package` supplies these for a native build.
+The package remains intact inside the installation. Flat remote macOS bundles
+do not replace an independently provisioned signed local helper.
 
-One complete bundle is selected for local services. The local profile uses the
-native target on macOS and the architecture’s portable musl target on Linux,
-so GNU and musl clients share the same selection. Each remote upload target
-has its own complete selection. **About → Bundles** lists verified complete builds
-included with the app alongside stored builds, without importing or selecting
-anything during inspection. Identical included and stored builds share one row.
-Separate local-service and remote-upload columns show supported choices and
-explain unavailable uses, such as a missing signed macOS helper package.
-Choosing an included build verifies and imports that exact content identity
-before selecting it. Changing a selection verifies the complete build and
-atomically updates its profile.
-It preserves running services and sessions. New local service launches and
-explicit offline remote updates use that selection; ordinary remote updates
-resolve their publication channel. Restart and reconnect remain separate actions.
-
-Selections never change because another build appears in the store or because
-a connection is opened. An explicit offline update can initialize a missing
-upload selection from an included build. Further offline updates keep that
-selection until an explicit Sync or choice in About. A damaged selection reports
-an error instead of silently choosing another build. Network updates cache their
-resolved publication without changing the upload selection.
-
-Import a downloaded CI/release bundle-set directory explicitly:
+## Native development builds
 
 ```sh
-ctl components list
-ctl components sync --from /path/to/bundle-set --target x86_64-unknown-linux-musl --purpose upload --source ci
-ctl components list --target x86_64-unknown-linux-musl --json
-ctl components select <content-id> --target x86_64-unknown-linux-musl --purpose upload
+ctlup dev --workspace /path/to/checkout
+ctlup dev --release
+ctlup dev --profile custom --target-dir /path/to/build-output --json
 ```
 
-`ctl components list` includes packaged builds and imported builds across all
-supported targets. It labels included/stored availability and local/upload
-selections, deduplicates identical builds, and reports a clear message when none
-are available. `--target` filters the inventory. `--json` retains complete
-manifests in `bundles` and adds `availability`, per-target `selections`, and
-inspection `errors`; `target_triple` is null for an unfiltered inventory.
-Listing is read-only. Selecting a listed included build imports its exact
-verified content before changing the requested selection.
+`dev` builds the six native runtime components and the independent updater from
+one checkout. On macOS it signs and verifies the complete `ctld.app` package.
+Only a successful complete build becomes active; compilation, signing or
+verification failure leaves the previous installation and running services
+intact. `ctlup status` then reports that development installation. Foreign
+targets are rejected because this command prepares the current computer.
 
-`pnpm bundles:sync` also imports and selects all four CI upload targets in this
-shared store, after copying the verified resources needed to package the desktop.
-It remains an explicit packaging/offline tool; normal development uploads no
-longer require committing, pushing, or synchronizing CI artifacts. Use
-`pnpm bundles:build` to prepare the working tree's Linux x64 bundle locally; see
-[Local Linux bundles](local-bundles.md).
-Use `--source release` when importing a release bundle-set. Published schema 3
-advertises all six executables. Published schema 2 retains its four service
-binaries. Import accepts either schema and verifies the advertised contracts.
-Legacy published schema 1 supports exact-source repair only. The managed store
-identifies six-executable builds with schema 2 and four-executable builds with
-schema 1 in `bundle.json`.
+The desktop development launcher bootstraps a private native `ctlup` executable
+with Cargo, then delegates preparation to `ctlup dev`. It passes Cargo's original
+arguments and working directory, preserving custom profiles, output directories
+and configuration files. The launched GUI receives immutable paths from the
+resulting installation and holds a lease for its lifetime. Each signed macOS
+worktree retains its isolated daemon endpoint, and existing GUI or daemon
+processes keep their original build until an explicit restart or successful GUI
+replacement. `pnpm ctld:build` and `pnpm daemons:build` use this same preparation
+path on Unix. Windows retains its existing daemon build fallback.
 
-For a native local build:
+## Downloads and cache
 
-```sh
-cargo build --locked -p ctl-agent -p ctmuxd -p ctl-taskd -p ctld -p ctl-cli -p ctmux-cli
-ctl components sync --from target/debug --local-build --purpose local
-```
+Updates resolve the current Dev or Stable channel, validate its immutable
+manifest, and download only the needed target archive. Archive and binary
+checksums and compatible protocol advertisements are verified before use.
+Channel discovery is refreshed before cache reuse. Network errors remain
+errors; choose provided files or the desktop’s included offline build explicitly.
 
-For local use on macOS, supply `--ctld-package /path/to/provisioned-helper-package` as well.
-That directory must contain the complete signed `ctld.app` and its
-`installation.json` receipt from `ctl setup`. ctl verifies the package using
-its existing signing and provisioning checks, retains the whole app, and rejects
-mixing it with companions from a different build. Current CI agent archives
-contain flat binaries and are available for uploads on macOS; they lack the
-provisioned app required for local use. On GNU Linux, a matching static musl build
-can also be selected locally; a musl host cannot assume GNU dynamic libraries.
+Cached archives live under `cache/downloads`, extracted deployment builds under
+`cache/components`, and standalone updater binaries under `cache/updaters`.
+Automatic cleanup budgets compressed runtime downloads at 256 MiB, extracted
+payloads at 512 MiB, and updater binaries at 128 MiB. Prepared extracted builds
+hold shared leases and can temporarily exceed the budget until users release
+them. Active and rollback installations are separate from deployment cache.
 
-Uploads use `~/.tokn/ctl/components/bundles/<target>/<content-id>` on the remote
-account and atomically switch `~/.tokn/ctl/current`. Unchanged installed content
-is reused. Archive checksum failure or changed same-ID content keeps the previous
-activation. Concurrent remote sync attempts fail without changing it. If a remote
-install shell is forcibly killed, its `.sync-lock` directory may need removal
-after confirming no sync is running. Ordinary errors and cancellations clean it.
+## Remote deployment
 
-For a saved remote host:
+The client downloads and verifies files locally, then uploads through the
+authenticated SSH route. The remote host needs no internet access. A small
+bootstrap atomically prepares `bin/ctlup` when absent or changed. That updater
+uses the same installation transaction and crash-releasing OS lock as a local
+update. Verified identical installed builds are activated without reuploading
+the runtime archive. A changed same-ID payload fails rather than being replaced.
 
-1. Use **Check host** to authenticate through its preferred connection method
-   and route, then refresh component status. This does not open a terminal.
-2. Use **Update…** to open the shared updater for this account. ctl
-   verifies the saved account before uploading, activates an immutable bundle,
-   and verifies that the installed agent reports the selected bundle afterward.
-   The chosen channel or local working tree determines the uploaded build;
-   the result identifies the bundle actually installed.
-3. If **Restart required** appears, choose **Restart** on the terminal daemon.
-   ctl prepares the installed replacement and reports the impact before asking
-   for confirmation. Restart ends every terminal owned by that remote account,
-   including terminals in other windows and clients. Canceling keeps sessions.
+Saved account identity is checked before mutation and the installed agent is
+verified afterward. A failed post-install check reports that activation may
+have completed; it does not retry, roll back or stop services automatically.
 
-Installation preserves running daemons and sessions. Existing SSH channels keep
-an older agent process until **Reconnect** applies the installed agent; remote
-terminal sessions survive that reconnect. The inspection agent itself is an
-on-demand process, not evidence that existing channels were updated.
+## Desktop and migration
 
-For this computer, use **Update components…** or select a complete local build
-in Bundles, then use the separate confirmed restart actions. With no selection, existing desktop/helper discovery
-continues. Explicit executable environment overrides retain their diagnostic use. Remote broker and task-daemon
-status is displayed alongside the terminal daemon; their remote restart actions
-are not exposed. A legacy owner without cooperative restart support requires a
-manual restart after its work can be ended.
+Use **Update components…** in the command palette, About, or host settings.
+Choose hosts and a channel, provided files, or an included offline build. Every
+update installs a complete build. About’s bundle list shows the active native
+build and offers local installation of another usable build; foreign artifacts
+are deployment cache entries, not independent upload profiles.
 
-If activation cannot be verified, ctl reports that installation may have
-completed and asks you to check the host. It does not retry a destructive action
-or stop a daemon automatically.
+Existing verified complete installations and local selections are recognized
+without mutation. The first successful explicit install migrates the previous
+complete build into the new rollback store. Historical four-service installs
+can be retained as rollback candidates; new installs require all six binaries.
+Legacy trees remain intact because processes predating leases may still use
+them. Host identity, saved settings and sessions are preserved.
 
 ## Inspect, restart and stop from the CLI
 

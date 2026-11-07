@@ -9,6 +9,7 @@ import { promisify } from "node:util";
 
 import { parseHelperProtocols, sameProtocols, type ProtocolInfo } from "../shared/protocol-contract.mts";
 import { maxAgentManifestBytes, parseAgentBundleSet, readAgentFile, verifyAgentBundleTarget } from "../shared/agent-bundle.mts";
+import { verifyUpdaterTarget } from "../shared/updater-bundle.mts";
 
 const execFileAsync = promisify(execFile);
 export const managedLabelPrefix = "ctmux-ci: ";
@@ -155,6 +156,7 @@ export async function validateReleaseBundle(
     }
     if (bundleSet.schema_version !== 1) await verifyAgentBundleTarget(directory, identity, target, asset);
     addNames(await validateAsset(directory, asset.archive, asset.sha256));
+    addNames(await verifyUpdaterTarget(directory, identity, target));
   }
 
   for (const target of desktopTargets) {

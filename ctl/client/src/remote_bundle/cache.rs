@@ -418,15 +418,89 @@ impl PublicationLock {
       .truncate(false)
       .open(path)?;
     require_private_file(&file.metadata()?)?;
-    file.try_lock().map_err(|error| match error {
-      fs::TryLockError::WouldBlock => io::Error::new(
-        io::ErrorKind::WouldBlock,
-        "another process is publishing this remote bundle cache entry",
-      ),
-      fs::TryLockError::Error(error) => error,
-    })?;
+    file.lock()?;
     Ok(Self(file))
   }
+
+  #[cfg(unix)]
+  fn try_acquire(path: &Path) -> io::Result<Option<Self>> {
+    let file = private_options()
+      .read(true)
+      .write(true)
+      .create(true)
+      .truncate(false)
+      .open(path)?;
+    require_private_file(&file.metadata()?)?;
+    match file.try_lock() {
+      Ok(()) => Ok(Some(Self(file))),
+      Err(fs::TryLockError::WouldBlock) => Ok(None),
+      Err(fs::TryLockError::Error(error)) => Err(error),
+    }
+  }
+}
+
+/// Bound compressed download storage. Readers already hold archive bytes in
+/// memory; concurrent publications are protected by their existing target lock.
+#[cfg(unix)]
+pub(crate) fn prune_download_cache(root: &Path, maximum: u64) -> io::Result<u64> {
+  if !existing_directory(root)? {
+    return Ok(0);
+  }
+  let _prune = PublicationLock::acquire(&root.join("prune.lock"))?;
+  let mut candidates = Vec::new();
+  let mut total = 0_u64;
+  for revision in fs::read_dir(root)? {
+    let revision = revision?;
+    let name = revision.file_name();
+    let Some(name) = name.to_str() else {
+      continue;
+    };
+    if !matches!(name.len(), 40 | 64) || !name.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+      continue;
+    }
+    let directory = revision.path();
+    if !existing_directory(&directory)? {
+      continue;
+    }
+    for target in super::SUPPORTED_TARGETS {
+      let path = directory.join(target);
+      if !existing_directory(&path)? {
+        continue;
+      }
+      let mut size = 0_u64;
+      let mut newest = std::time::SystemTime::UNIX_EPOCH;
+      for file in fs::read_dir(&path)? {
+        let metadata = fs::symlink_metadata(file?.path())?;
+        require_private_file(&metadata)?;
+        size = size.saturating_add(metadata.len());
+        newest = newest.max(metadata.modified()?);
+      }
+      total = total.saturating_add(size);
+      candidates.push((newest, path, directory.join(format!("{target}.lock")), size));
+    }
+  }
+  candidates.sort_by_key(|candidate| candidate.0);
+  for (_, path, lock, size) in candidates {
+    if total <= maximum {
+      break;
+    }
+    let Some(_entry) = PublicationLock::try_acquire(&lock)? else {
+      continue;
+    };
+    let parent = path
+      .parent()
+      .ok_or_else(|| io::Error::other("missing cache parent"))?;
+    let displaced = unique_sibling(parent, "cache", "evicted");
+    match fs::rename(&path, &displaced) {
+      Ok(()) => {
+        fs::remove_dir_all(displaced)?;
+        total = total.saturating_sub(size);
+      }
+      Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+      Err(error) => return Err(error),
+    }
+  }
+  Ok(total)
 }
 
 impl Drop for PublicationLock {

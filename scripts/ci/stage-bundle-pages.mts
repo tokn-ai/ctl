@@ -156,7 +156,17 @@ export async function stageBundlePages(publication: Publication, incoming: strin
     await writeFile(join(output, "bundles/catalog.json"), `${JSON.stringify(catalog, null, 2)}\n`);
     await writeFile(join(output, ".nojekyll"), "");
     await writeFile(join(output, "index.html"), `<!-- ${siteMarker} --><!doctype html><title>ctl component bundles</title><h1>ctl component bundles</h1><p><a href="bundles/channels/dev.json">Dev channel</a> · <a href="bundles/channels/stable.json">Stable channel</a></p><p>Channel documents reference verified bundle sets and downloadable archives.</p>\n`);
-    if (await regularTree(output) > maximum_bytes) throw new Error("Retained bundle site exceeds the Pages safety limit (900 MiB in CI)");
+    // Runtime archives and standalone updaters can grow independently. Five
+    // Dev generations are an upper bound; preserve both channel heads and the
+    // newest other tag before spending space on older unselected Dev builds.
+    while (await regularTree(output) > maximum_bytes) {
+      const evicted = catalog.publications.filter((entry) => entry.channel === "dev" && entry.publication_id !== catalog.channels.dev)
+        .sort((left, right) => newer(left, right))[0];
+      if (!evicted) throw new Error("Pinned bundle publications exceed the Pages safety limit (900 MiB in CI)");
+      await rm(join(sets, evicted.publication_id), { recursive: true, force: true });
+      catalog = { ...catalog, publications: catalog.publications.filter((entry) => entry !== evicted) };
+      await writeFile(join(output, "bundles/catalog.json"), `${JSON.stringify(catalog, null, 2)}\n`);
+    }
     return true;
   } catch (error) {
     await rm(output, { recursive: true, force: true });

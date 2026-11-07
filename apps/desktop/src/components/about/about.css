@@ -83,10 +83,10 @@
 
 .about-bundle-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 16px; margin-bottom: 10px; }
 .about-section .about-bundle-heading h2 { margin: 0; }
-.about-bundle-table { width: 100%; min-width: 780px; table-layout: fixed; border-collapse: collapse; text-align: left; font-size: 12px; }
-.about-bundle-build-column { width: 30%; }
-.about-bundle-target-column { width: 26%; }
-.about-bundle-use-column { width: 22%; }
+.about-bundle-table { width: 100%; min-width: 640px; table-layout: fixed; border-collapse: collapse; text-align: left; font-size: 12px; }
+.about-bundle-build-column { width: 40%; }
+.about-bundle-target-column { width: 30%; }
+.about-bundle-use-column { width: 30%; }
 .about-bundle-table th, .about-bundle-table td { padding: 12px; border-bottom: 1px solid var(--border); vertical-align: top; overflow-wrap: anywhere; }
 .about-bundle-table thead { color: var(--muted); background: var(--surface-1); }
 .about-bundle-table th { font-weight: 500; }

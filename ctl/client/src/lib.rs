@@ -10,6 +10,10 @@ pub mod component_update;
 #[cfg(unix)]
 pub mod components;
 pub mod ctld;
+#[cfg(unix)]
+pub mod development;
+#[cfg(unix)]
+pub mod installation;
 
 use std::ffi::OsString;
 use std::future::{Future, ready};
@@ -37,23 +41,23 @@ pub mod ssh_reachability;
 mod ssh_startup;
 pub mod tailscale;
 
-#[cfg(unix)]
-pub use ssh_install::install_ssh_agent_only_with_progress;
 pub use ssh_install::{
   RemoteInstallEvent, RemoteInstallPhase, RemoteInstallProgress, RemoteInstallStalled,
   RemoteInstallWatchdog, install_ssh_unix_agent_interactive,
   install_ssh_unix_agent_interactive_with_progress,
 };
+#[cfg(unix)]
+pub use ssh_install::{install_ssh_agent_only_with_progress, install_ssh_unix_bundle_with_updater};
 
 const SSH_PROGRAM: &str = "ssh";
 const MAX_SSH_COMMAND_OUTPUT: usize = 8192;
 const UNIX_GATEWAY_COMMAND: &str = concat!(
-  r#"PATH="$HOME/.tokn/ctl/current:$PATH"; export PATH; "#,
+  r#"PATH="$HOME/.tokn/ctl/bin:$HOME/.tokn/ctl/current:$PATH"; export PATH; "#,
   r#"command -v ctl-agent >/dev/null 2>&1 || { printf 'ctl-ssh-nf\n'; exit 127; }; "#,
   "exec ctl-agent connect",
 );
 const UNIX_AUTHENTICATED_GATEWAY_COMMAND: &str = concat!(
-  r#"printf 'ctl-ssh-auth-v1\n'; PATH="$HOME/.tokn/ctl/current:$PATH"; export PATH; "#,
+  r#"printf 'ctl-ssh-auth-v1\n'; PATH="$HOME/.tokn/ctl/bin:$HOME/.tokn/ctl/current:$PATH"; export PATH; "#,
   r#"command -v ctl-agent >/dev/null 2>&1 || { printf 'ctl-ssh-nf\n'; exit 127; }; "#,
   "exec ctl-agent connect",
 );
@@ -600,7 +604,7 @@ pub async fn restart_ssh_ctmux_interactive(
 ) -> Result<ctl_proto::RemoteCtmuxRestartResult, CoreError> {
   const COMMAND: &str = concat!(
     r#"printf 'ctl-command-v1\n'; "#,
-    r#"PATH="$HOME/.tokn/ctl/current:$PATH"; export PATH; "#,
+    r#"PATH="$HOME/.tokn/ctl/bin:$HOME/.tokn/ctl/current:$PATH"; export PATH; "#,
     "exec ctl-agent restart-ctmux",
   );
   let input = serde_json::to_vec(&ctl_proto::RemoteCtmuxRestartRequest {
@@ -1576,7 +1580,7 @@ mod tests {
     assert_eq!(
       UNIX_GATEWAY_COMMAND,
       concat!(
-        r#"PATH="$HOME/.tokn/ctl/current:$PATH"; export PATH; "#,
+        r#"PATH="$HOME/.tokn/ctl/bin:$HOME/.tokn/ctl/current:$PATH"; export PATH; "#,
         r#"command -v ctl-agent >/dev/null 2>&1 || { printf 'ctl-ssh-nf\n'; exit 127; }; "#,
         "exec ctl-agent connect",
       )

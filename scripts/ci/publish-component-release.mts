@@ -6,6 +6,7 @@ import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { componentIdentity, fileDigest, repositoryName, validatedComponentSet } from "./bundle-publication.mts";
 import { parseAgentBundleSet } from "../shared/agent-bundle.mts";
+import { updaterBinaryName, updaterManifestName } from "../shared/updater-bundle.mts";
 import { findRelease, managedLabelPrefix, mergeReleaseNotes, pages, releaseNotes, validateReleaseBundle, verifyReleaseTag,
   type BundleIdentity, type GhRunner } from "./update-draft-release.mts";
 
@@ -51,6 +52,10 @@ async function restoreCanonicalAssets(repository: string, identity: BundleIdenti
   await verifyPublishedAsset(assets.find((asset) => asset.name === "bundle-set.json")!, canonical);
   const manifest = parseAgentBundleSet(await readFile(join(canonical, "bundle-set.json")), identity);
   const remote_names = Object.values(manifest.targets).flatMap((entry) => [entry.archive, `${entry.archive}.sha256`]);
+  for (const target of Object.keys(manifest.targets)) {
+    const binary = updaterBinaryName(identity, target);
+    remote_names.push(binary, `${binary}.sha256`, updaterManifestName(target));
+  }
   const target_manifests = new Set([...incoming.asset_names, ...assets.map((asset) => asset.name)]
     .filter((name) => additionalManifestName(name, identity.bundle_id) === name));
   // A failed upload may have left a subset. Local files can fill missing names

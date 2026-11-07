@@ -1,6 +1,7 @@
 //! Passive inventory of stored and included complete builds, shared by app and CLI.
 
-use ctl_core::bundles::{Manifest, Purpose, Source, Store};
+use ctl_core::bundles::{Manifest, Source, Store};
+use ctl_core::installations::Installations;
 use std::collections::BTreeSet;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -79,46 +80,62 @@ pub fn scan(
     },
     |target| BTreeSet::from([target]),
   );
-  let store = Store::new(home);
+  let installs = Installations::new(home);
   let mut snapshot = Snapshot::default();
+  let active = match installs.active() {
+    Ok(bundle) => bundle,
+    Err(error) => {
+      snapshot
+        .errors
+        .push(format!("Active installation: {error}"));
+      None
+    }
+  };
+  let installed = match installs.list() {
+    Ok(bundles) => bundles,
+    Err(error) => {
+      snapshot.errors.push(format!("Installed builds: {error}"));
+      Vec::new()
+    }
+  };
   for target in targets {
-    let mut selected = |purpose| match store.selected(purpose, target) {
-      Ok(bundle) => bundle.map(|bundle| bundle.manifest.bundle_id),
-      Err(error) => {
-        snapshot
-          .errors
-          .push(format!("{target} {purpose:?} selection: {error}"));
-        None
+    let local = active
+      .as_ref()
+      .filter(|bundle| bundle.manifest.target_triple == target)
+      .map(|bundle| bundle.manifest.bundle_id.clone());
+    for store in [Store::cache(home), Store::new(home)] {
+      match store.list(target) {
+        Ok(bundles) => {
+          for bundle in bundles {
+            add(
+              &mut snapshot,
+              bundle.manifest,
+              Availability::Stored,
+              local.as_deref(),
+            );
+          }
+        }
+        Err(error) => snapshot.errors.push(format!("{target}: {error}")),
       }
-    };
-    let local = selected(Purpose::Local);
-    let upload = selected(Purpose::Upload);
-    let entry = |manifest: Manifest, availability| AvailableBundle {
-      selected_local: local.as_deref() == Some(&manifest.bundle_id),
-      selected_upload: upload.as_deref() == Some(&manifest.bundle_id),
-      manifest,
-      availability,
-    };
-    match store.list(target) {
-      Ok(bundles) => snapshot.bundles.extend(
-        bundles
-          .into_iter()
-          .map(|bundle| entry(bundle.manifest, Availability::Stored)),
-      ),
-      Err(error) => snapshot.errors.push(format!("{target}: {error}")),
+    }
+    for bundle in installed
+      .iter()
+      .filter(|bundle| bundle.manifest.target_triple == target)
+    {
+      add(
+        &mut snapshot,
+        bundle.manifest.clone(),
+        Availability::Stored,
+        local.as_deref(),
+      );
     }
     match included(target) {
-      Ok(Some(manifest)) => {
-        if let Some(stored) = snapshot.bundles.iter_mut().find(|bundle| {
-          bundle.manifest.target_triple == target && bundle.manifest.bundle_id == manifest.bundle_id
-        }) {
-          stored.availability = Availability::IncludedAndStored;
-        } else {
-          snapshot
-            .bundles
-            .push(entry(manifest, Availability::Included));
-        }
-      }
+      Ok(Some(manifest)) => add(
+        &mut snapshot,
+        manifest,
+        Availability::Included,
+        local.as_deref(),
+      ),
       Ok(None) => {}
       Err(error) => snapshot
         .errors
@@ -127,10 +144,33 @@ pub fn scan(
     snapshot.selections.push(Selection {
       target_triple: target.into(),
       selected_local: local,
-      selected_upload: upload,
+      selected_upload: None,
     });
   }
   snapshot
+}
+
+fn add(
+  snapshot: &mut Snapshot,
+  manifest: Manifest,
+  availability: Availability,
+  active: Option<&str>,
+) {
+  if let Some(existing) = snapshot.bundles.iter_mut().find(|bundle| {
+    bundle.manifest.target_triple == manifest.target_triple
+      && bundle.manifest.bundle_id == manifest.bundle_id
+  }) {
+    if existing.availability.included() != availability.included() {
+      existing.availability = Availability::IncludedAndStored;
+    }
+    return;
+  }
+  snapshot.bundles.push(AvailableBundle {
+    selected_local: active == Some(manifest.bundle_id.as_str()),
+    selected_upload: false,
+    manifest,
+    availability,
+  });
 }
 
 fn included_bundle(
@@ -162,8 +202,20 @@ pub fn load_selection(
   target: &str,
   id: &str,
 ) -> io::Result<ctl_core::bundles::Bundle> {
-  match Store::new(home).get(target, id) {
-    Ok(bundle) => return Ok(bundle),
+  for store in [Store::cache(home), Store::new(home)] {
+    match store.get(target, id) {
+      Ok(bundle) => return Ok(bundle),
+      Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+      Err(error) => return Err(error),
+    }
+  }
+  match Installations::new(home).get(id) {
+    Ok(bundle) if bundle.manifest.target_triple == target => return Ok(bundle),
+    Ok(_) => {
+      return Err(io::Error::other(
+        "The installed build has a different target.",
+      ));
+    }
     Err(error) if error.kind() == io::ErrorKind::NotFound => {}
     Err(error) => return Err(error),
   }

@@ -34,7 +34,8 @@ async fn compatible_different_build_is_imported_without_selecting_or_running_it(
   );
   let store = Store::new(&home.0);
   assert!(store.selected(Purpose::Upload, target).unwrap().is_none());
-  select(&home.0, Purpose::Upload, &bundle).await.unwrap();
+  let error = select(&home.0, Purpose::Upload, &bundle).await.unwrap_err();
+  assert!(error.to_string().contains("upload selections"));
   let upload = upload_bundle(&bundle).unwrap();
   assert_eq!(
     upload.bundle_id, candidate.bundle_id,
@@ -47,7 +48,7 @@ async fn compatible_different_build_is_imported_without_selecting_or_running_it(
       .unwrap(),
     bundle.manifest
   );
-  assert!(home.0.join(".tokn/ctl/components/bundles").is_dir());
+  assert!(home.0.join(".tokn/ctl/cache/components/bundles").is_dir());
   assert!(!home.0.join(".tokn/ctl/agent-bundles").exists());
 }
 
@@ -100,7 +101,14 @@ fn local_provenance_is_complete_and_retains_a_legacy_agent_identity() {
     .into_iter()
     .map(|name| (name.into(), name.as_bytes().to_vec()))
     .collect();
-  let bundle = publish_local(&home.0, components, files, &[]).unwrap();
+  let bundle = publish_local(
+    &home.0,
+    ctl_core::paths::native_target(),
+    components,
+    files,
+    &[],
+  )
+  .unwrap();
   assert_eq!(bundle.manifest.source, Source::Local);
   let legacy: serde_json::Value =
     serde_json::from_slice(&bundle.read_files().unwrap()["manifest.json"]).unwrap();
@@ -166,4 +174,103 @@ async fn local_import_preserves_legacy_builds_and_requires_both_clients_for_new_
       .unwrap()
       .is_none()
   );
+}
+
+#[test]
+fn signed_helper_receipts_support_checkpoints_and_installed_packages_without_ambiguity() {
+  let home = Home::new();
+  assert_eq!(
+    helper_receipt(&home.0).unwrap_err().kind(),
+    io::ErrorKind::NotFound
+  );
+  let installation = home.0.join("installation.json");
+  let checkpoint = home.0.join("ctld-package.json");
+  let compact = br#"{"schema_version":1,"component":"ctld"}"#;
+  std::fs::write(&checkpoint, compact).unwrap();
+  assert_eq!(helper_receipt(&home.0).unwrap(), compact);
+  let formatted = b"{\n  \"component\": \"ctld\", \"schema_version\": 1\n}\n";
+  std::fs::write(&installation, formatted).unwrap();
+  assert_eq!(helper_receipt(&home.0).unwrap(), formatted);
+  std::fs::write(&checkpoint, br#"{"schema_version":2,"component":"ctld"}"#).unwrap();
+  assert!(
+    helper_receipt(&home.0)
+      .unwrap_err()
+      .to_string()
+      .contains("conflicting")
+  );
+  std::fs::remove_file(&checkpoint).unwrap();
+  assert_eq!(helper_receipt(&home.0).unwrap(), formatted);
+}
+
+#[test]
+fn a_second_unsafe_or_oversized_helper_receipt_never_becomes_a_silent_fallback() {
+  let home = Home::new();
+  let installation = home.0.join("installation.json");
+  let checkpoint = home.0.join("ctld-package.json");
+  std::fs::write(&installation, b"{}").unwrap();
+  std::os::unix::fs::symlink(&installation, &checkpoint).unwrap();
+  assert!(helper_receipt(&home.0).is_err());
+  std::fs::remove_file(&checkpoint).unwrap();
+  std::fs::write(
+    &checkpoint,
+    vec![b' '; ctl_core::bundles::MAX_MANIFEST_BYTES + 1],
+  )
+  .unwrap();
+  assert!(helper_receipt(&home.0).is_err());
+  std::fs::write(&checkpoint, b"invalid json").unwrap();
+  assert!(helper_receipt(&home.0).is_err());
+}
+
+#[tokio::test]
+async fn explicit_foreign_local_build_targets_are_rejected_before_any_probe() {
+  let home = Home::new();
+  let target = if ctl_core::paths::native_target().starts_with("aarch64-") {
+    "x86_64-unknown-linux-musl"
+  } else {
+    "aarch64-unknown-linux-musl"
+  };
+  let error = import_local_for_target(&home.0, &home.0.join("missing-binaries"), None, target)
+    .await
+    .unwrap_err();
+  assert!(
+    error
+      .to_string()
+      .contains("target must run on this computer")
+  );
+  assert!(!home.0.join(".tokn").exists());
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[tokio::test]
+async fn an_explicit_portable_build_keeps_its_musl_identity_on_a_gnu_host() {
+  use std::os::unix::fs::PermissionsExt as _;
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
+  let home = Home::new();
+  let fixture = Fixture::new("0.1.2", &"b".repeat(40)).with_clients();
+  let components: BTreeMap<String, ComponentInfo> =
+    serde_json::from_value(fixture.inner["components"].clone()).unwrap();
+  let source = home.0.join("native-build");
+  std::fs::create_dir(&source).unwrap();
+  for (name, info) in &components {
+    let script = format!(
+      "#!/bin/sh\nprintf '%s\\n' '{}'\n",
+      serde_json::to_string(info).unwrap()
+    );
+    std::fs::write(source.join(name), script).unwrap();
+    std::fs::set_permissions(source.join(name), std::fs::Permissions::from_mode(0o700)).unwrap();
+  }
+  let target = format!(
+    "{}-musl",
+    ctl_core::paths::native_target()
+      .strip_suffix("-gnu")
+      .unwrap()
+  );
+  let bundle = import_local_for_target(&home.0, &source, None, &target)
+    .await
+    .unwrap();
+  assert_eq!(bundle.manifest.target_triple, target);
+  let provenance: serde_json::Value =
+    serde_json::from_slice(&bundle.read_files().unwrap()["manifest.json"]).unwrap();
+  assert_eq!(provenance["target_triple"], target);
+  assert!(!home.0.join(".tokn/ctl/current").exists());
 }

@@ -28,7 +28,6 @@ function sourceChoice(source?: ComponentUpdateSource): SourceChoice {
 export function UpdateComponentsDialog({ targets, context, on_updated, on_close }: Props) {
   const available = new Map([LOCAL_TARGET, ...targets, ...(context?.targets ?? [])].map((target) => [targetKey(target), target]));
   const [selected, setSelected] = useState(() => new Set((context?.targets ?? [LOCAL_TARGET]).filter((target) => target.kind !== "ssh" || !target.unavailable).map(targetKey)));
-  const [update_package, setPackage] = useState(context?.package ?? "full_bundle");
   const initial_source = context?.source;
   const [source_choice, setSourceChoice] = useState<SourceChoice>(() => sourceChoice(initial_source));
   const provided = source_choice === "provided";
@@ -77,7 +76,7 @@ export function UpdateComponentsDialog({ targets, context, on_updated, on_close 
     setSubmittedTargets(chosen);
     setRunning(true); setStopping(false); setError(null); setResults(null); setProgress(null);
     try {
-      const updated = await updateComponents({ targets: chosen, attempt_id, options: { package: update_package, source } },
+      const updated = await updateComponents({ targets: chosen, attempt_id, options: { package: "full_bundle", source } },
         (next) => { if (mounted.current && attempt.current === attempt_id) setPrompt(next); },
         (next) => { if (mounted.current && attempt.current === attempt_id) { host_index.current = next.host_index; setProgress(next); } },
       );
@@ -117,15 +116,11 @@ export function UpdateComponentsDialog({ targets, context, on_updated, on_close 
       <ul>{results.map((result) => <li key={result.host_index}><strong>{targetLabel(submitted_targets[result.host_index])}</strong><span>{result.state === "complete" ? "Installed" : result.state === "cancelled" ? "Cancelled" : "Failed"}</span>{result.result ? <p>Bundle {result.result.bundle_id} · {result.result.target_triple}</p> : null}{result.error ? <p role="alert">{result.error}</p> : null}</li>)}</ul>
     </div> : <form id="component-update-form" onSubmit={(event) => { event.preventDefault(); void start(); }}>
       <fieldset><legend>Hosts</legend><div className="component-update-hosts">{[...available.values()].map((target) => <label key={targetKey(target)}><input type="checkbox" checked={selected.has(targetKey(target))} disabled={target.kind === "ssh" && !!target.unavailable} onChange={(event) => setSelected((current) => { const next = new Set(current); if (event.target.checked) next.add(targetKey(target)); else next.delete(targetKey(target)); return next; })} /><span>{targetLabel(target)}{target.kind === "ssh" && target.unavailable ? <small>Connection unavailable</small> : null}</span></label>)}</div></fieldset>
-      <fieldset><legend>Package</legend>
-        <label><input type="radio" name="update-package" checked={update_package === "ctl_agent"} onChange={() => setPackage("ctl_agent")} /><span>ctl-agent only<small>Keep the installed daemons.</small></span></label>
-        <label><input type="radio" name="update-package" checked={update_package === "full_bundle"} onChange={() => setPackage("full_bundle")} /><span>Full bundle<small>ctl-agent, ctld, ctmuxd, and ctl-taskd from one build.</small></span></label>
-      </fieldset>
       <label className="component-update-field">Build source<select value={source_choice} onChange={(event) => setSourceChoice(event.target.value as SourceChoice)}>
         <option value="automatic">Automatic</option>
         <option value="dev">Latest published main build</option>
         <option value="stable">Latest stable release</option>
-        <option value="selected">Selected or included build (offline)</option>
+        <option value="selected">Included build (offline)</option>
         <option value="provided">Provided build files</option>
       </select></label>
       {provided ? <div className="component-update-source">
@@ -133,7 +128,7 @@ export function UpdateComponentsDialog({ targets, context, on_updated, on_close 
         <label><input type="checkbox" checked={local_build} onChange={(event) => setLocalBuild(event.target.checked)} /><span>Native local build<small>A directory of component binaries built for this computer's platform.</small></span></label>
         {local_build ? <label className="component-update-field">Signed ctld package directory (macOS full bundle)<input value={ctld_package} onChange={(event) => setCtldPackage(event.target.value)} placeholder="/path/to/ctld-package" /></label> : <p>Use a complete bundle directory, or a verified archive with its bundle-set.json beside it.</p>}
       </div> : <>
-        <p className="component-update-hint">{source_choice === "selected" ? "Installs your selected build, or an included build when no selection exists." : source_choice === "automatic" ? "Uses the current publication for this app’s channel. Development Linux x64 builds use the working tree locally. Local macOS services retain their signed selected build." : "Checks the channel and downloads the published build for each host’s target. Cached older builds do not override the channel."} Local macOS full bundles need a signed ctld package.</p>
+        <p className="component-update-hint">{source_choice === "selected" ? "Installs the complete build included with this app." : source_choice === "automatic" ? "Uses this app’s channel. Development Linux x64 builds use the working tree." : "Downloads this channel’s complete build for each platform."} Local macOS installation requires a signed ctld package.</p>
         {source_choice !== "selected" ? <PublishedBundleStatus channel={source_choice === "dev" || source_choice === "stable" ? source_choice : undefined} /> : null}
       </>}
     </form>}

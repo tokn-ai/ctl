@@ -9,6 +9,7 @@ RUN --mount=type=cache,id=ctmux-cargo-registry,target=/usr/local/cargo/registry 
   cargo build --locked --release -p ctl-agent -p ctl-cli -p ctmux-cli -p ctmuxd -p ctl-taskd -p ctld \
   && install -D -m 0755 /workspace/target/release/ctl-agent /out/ctl-agent \
   && install -D -m 0755 /workspace/target/release/ctl /out/ctl \
+  && install -D -m 0755 /workspace/target/release/ctlup /out/ctlup \
   && install -D -m 0755 /workspace/target/release/ctmux /out/ctmux \
   && install -D -m 0755 /workspace/target/release/ctmuxd /out/ctmuxd \
   && install -D -m 0755 /workspace/target/release/ctl-taskd /out/ctl-taskd \
@@ -34,6 +35,7 @@ ENV CTMUX_RUNTIME_DIR=/run/ctmux \
 
 COPY --from=builder /out/ctl-agent /usr/local/bin/ctl-agent
 COPY --from=builder /out/ctl /usr/local/bin/ctl
+COPY --from=builder /out/ctlup /usr/local/bin/ctlup
 COPY --from=builder /out/ctmux /usr/local/bin/ctmux
 COPY --from=builder /out/ctmuxd /usr/local/bin/ctmuxd
 COPY --from=builder /out/ctl-taskd /usr/local/bin/ctl-taskd
@@ -45,6 +47,7 @@ COPY docker/ctmux/sshd_config /etc/ssh/sshd_config
 RUN chmod 0755 \
   /usr/local/bin/ctl-agent \
   /usr/local/bin/ctl \
+  /usr/local/bin/ctlup \
   /usr/local/bin/ctmux \
   /usr/local/bin/ctmuxd \
   /usr/local/bin/ctl-taskd \

@@ -31,11 +31,13 @@ fn bundle(home: &Path, revision: char) -> Bundle {
     &fixture.files,
   )
   .unwrap();
-  Store::new(home).publish(&manifest, &fixture.files).unwrap()
+  Store::cache(home)
+    .publish(&manifest, &fixture.files)
+    .unwrap()
 }
 
 #[tokio::test]
-async fn agent_only_retains_the_exact_services_and_clients_across_repeated_updates() {
+async fn legacy_agent_overlay_retains_exact_companions_for_migration() {
   let home = Home::new();
   let original = bundle(&home.0, 'a');
   let replacement = bundle(&home.0, 'b');
@@ -109,57 +111,122 @@ async fn failed_agent_activation_keeps_the_previous_installation() {
   assert!(!home.0.join(".tokn/ctl/components/.sync-lock").exists());
 }
 
+fn write_included(directory: &Path, target: &str, revision: char) {
+  std::fs::create_dir(directory).unwrap();
+  let mut fixture = Fixture::new("0.1.0", &revision.to_string().repeat(40)).with_clients();
+  fixture.inner["target_triple"] = serde_json::json!(target);
+  let archive = fixture.archive();
+  std::fs::write(
+    directory.join("bundle-set.json"),
+    fixture.bind_archive(&archive),
+  )
+  .unwrap();
+  let name = fixture.outer["targets"][target]["archive"]
+    .as_str()
+    .unwrap();
+  std::fs::write(directory.join(name), archive).unwrap();
+}
+
 #[tokio::test]
-async fn selected_source_stays_pinned_and_provided_source_does_not_change_it() {
+async fn selected_source_uses_included_build_even_when_an_older_native_build_is_active() {
   let home = Home::new();
   let old = bundle(&home.0, 'a');
-  let new = bundle(&home.0, 'b');
-  // Upload selection supports portable targets; use native local selection on
-  // Linux, or its corresponding upload profile on macOS without signed ctld.
-  let purpose = if cfg!(target_os = "macos") {
-    Purpose::Upload
-  } else {
-    Purpose::Local
-  };
-  Store::new(&home.0).select(purpose, &old).unwrap();
-  let selected = prepare(
+  let installs = ctl_core::installations::Installations::new(&home.0);
+  installs.activate(&old).unwrap();
+  let directory = home.0.join("included");
+  let native = ctl_core::paths::native_target();
+  let target = publisher_target(native, Purpose::Local);
+  write_included(&directory, &target, 'b');
+  let included = prepare(
     &home.0,
-    ctl_core::paths::native_target(),
-    purpose,
+    native,
+    Purpose::Local,
     &BuildSource::Selected,
-    &[],
+    &[directory],
   )
   .await
   .unwrap();
-  assert_eq!(selected.manifest.bundle_id, old.manifest.bundle_id);
+  assert_eq!(
+    included.manifest.components["ctl-agent"]
+      .build
+      .source_revision
+      .as_deref(),
+    Some("b".repeat(40).as_str())
+  );
+  assert_ne!(included.manifest.bundle_id, old.manifest.bundle_id);
+  assert_eq!(installs.active().unwrap().unwrap().manifest, old.manifest);
+}
+
+#[tokio::test]
+async fn selected_source_never_uses_a_legacy_upload_pin_or_active_build_as_offline_fallback() {
+  let home = Home::new();
+  let old = bundle(&home.0, 'a');
+  let installs = ctl_core::installations::Installations::new(&home.0);
+  installs.activate(&old).unwrap();
+  let store = Store::new(&home.0);
+  let legacy = store
+    .publish(&old.manifest, &old.read_files().unwrap())
+    .unwrap();
+  store.select(Purpose::Upload, &legacy).unwrap();
+  for purpose in [Purpose::Local, Purpose::Upload] {
+    assert!(
+      prepare(
+        &home.0,
+        ctl_core::paths::native_target(),
+        purpose,
+        &BuildSource::Selected,
+        &[]
+      )
+      .await
+      .is_err()
+    );
+  }
+  assert_eq!(installs.active().unwrap().unwrap().manifest, old.manifest);
+}
+
+#[tokio::test]
+async fn provided_source_caches_verified_files_without_changing_the_active_build() {
+  let home = Home::new();
+  let old = bundle(&home.0, 'a');
+  let new = bundle(&home.0, 'b');
+  let installs = ctl_core::installations::Installations::new(&home.0);
+  installs.activate(&old).unwrap();
   let provided = BuildSource::Provided {
     path: new.directory.clone(),
     local_build: false,
     ctld_package: None,
   };
-  assert_eq!(
-    prepare(
-      &home.0,
-      ctl_core::paths::native_target(),
-      purpose,
-      &provided,
-      &[]
-    )
+  let prepared = prepare(
+    &home.0,
+    ctl_core::paths::native_target(),
+    Purpose::Local,
+    &provided,
+    &[],
+  )
+  .await
+  .unwrap();
+  assert_eq!(prepared.manifest, new.manifest);
+  assert_eq!(installs.active().unwrap().unwrap().manifest, old.manifest);
+  assert!(
+    Store::cache(&home.0)
+      .selected(Purpose::Upload, ctl_core::paths::native_target())
+      .unwrap()
+      .is_none()
+  );
+}
+
+#[tokio::test]
+async fn agent_only_updates_are_rejected_without_changing_active_files() {
+  let home = Home::new();
+  let old = bundle(&home.0, 'a');
+  let installs = ctl_core::installations::Installations::new(&home.0);
+  installs.activate(&old).unwrap();
+  let replacement = bundle(&home.0, 'b');
+  let error = install_local(&home.0, &replacement, Package::CtlAgent)
     .await
-    .unwrap()
-    .manifest
-    .bundle_id,
-    new.manifest.bundle_id
-  );
-  assert_eq!(
-    Store::new(&home.0)
-      .selected(purpose, ctl_core::paths::native_target())
-      .unwrap()
-      .unwrap()
-      .manifest
-      .bundle_id,
-    old.manifest.bundle_id
-  );
+    .unwrap_err();
+  assert!(error.to_string().contains("agent-only"));
+  assert_eq!(installs.active().unwrap().unwrap().manifest, old.manifest);
 }
 
 #[test]
@@ -182,15 +249,24 @@ async fn full_install_after_agent_only_replaces_all_retained_companions() {
   )
   .await
   .unwrap();
-  // Exercise the shared atomic full installer using fixtures, without selecting
-  // a fake unsigned local helper or touching any running service.
-  crate::ssh_install::install_local_bundle(&home.0, &replacement)
+  // Remote archive activation accepts the verified flat native fixture and
+  // shares the core transaction without provisioning a fake signed helper.
+  let archive = crate::components::package_bundle(&replacement)
+    .unwrap()
+    .archive;
+  let installed = crate::installation::install_archive(&home.0, &archive)
     .await
     .unwrap();
   let current = home.0.join(".tokn/ctl/current");
   assert_eq!(
     std::fs::canonicalize(&current).unwrap(),
-    std::fs::canonicalize(&replacement.directory).unwrap()
+    installed.directory.canonicalize().unwrap()
+  );
+  assert_eq!(installed.manifest, replacement.manifest);
+  assert!(
+    installed
+      .directory
+      .starts_with(home.0.join(".tokn/ctl/installs"))
   );
   assert!(current.join(MANIFEST_FILE).is_file());
   assert!(!current.join(SOURCE_FILE).exists());
@@ -228,7 +304,7 @@ async fn wrong_target_provided_source_is_rejected_before_importing_or_selecting(
       .await
       .is_err()
   );
-  assert!(!account.0.join(".tokn/ctl/components").exists());
+  assert!(!account.0.join(".tokn/ctl/cache/components").exists());
 }
 
 #[tokio::test]
@@ -267,12 +343,12 @@ async fn provided_managed_archive_imports_verified_content_without_changing_sele
 
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 #[tokio::test]
-async fn initial_local_selection_can_use_an_included_portable_linux_build() {
+async fn an_included_portable_linux_build_is_prepared_without_activation() {
   let home = Home::new();
   let directory = home.0.join("included");
   std::fs::create_dir(&directory).unwrap();
   let target = publisher_target(ctl_core::paths::native_target(), Purpose::Local);
-  let mut fixture = Fixture::new("0.1.0", &"a".repeat(40));
+  let mut fixture = Fixture::new("0.1.0", &"a".repeat(40)).with_clients();
   fixture.inner["target_triple"] = serde_json::json!(&target);
   let archive = fixture.archive();
   std::fs::write(
@@ -305,6 +381,23 @@ async fn initial_local_selection_can_use_an_included_portable_linux_build() {
       .unwrap()
       .is_none()
   );
+  assert!(!home.0.join(".tokn/ctl/current").exists());
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn flat_local_macos_update_is_rejected_before_manager_provisioning_or_activation() {
+  let home = Home::new();
+  let old = bundle(&home.0, 'a');
+  let installs = ctl_core::installations::Installations::new(&home.0);
+  installs.activate(&old).unwrap();
+  let replacement = bundle(&home.0, 'b');
+  let error = install_local(&home.0, &replacement, Package::FullBundle)
+    .await
+    .unwrap_err();
+  assert!(error.to_string().contains("signed helper receipt"));
+  assert_eq!(installs.active().unwrap().unwrap().manifest, old.manifest);
+  assert!(!home.0.join(".tokn/ctl/bin/ctlup").exists());
 }
 
 #[tokio::test]

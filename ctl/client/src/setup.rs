@@ -235,6 +235,14 @@ pub async fn inspect_selected_bundle_ctld(
   }
 }
 
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) async fn inspect_selected_bundle_ctld_in(
+  home: &std::path::Path,
+  required: Option<ctl_core::protocol::ProtocolVersion>,
+) -> Result<Option<HelperSelection>, Error> {
+  discovery::inspect_selected_bundle(home, required).await
+}
+
 /// Reads an embedded package's identity without extracting or downloading it.
 /// An existing exact cache entry receives native signature and metadata checks;
 /// an uncached package reports no executable metadata until preparation.

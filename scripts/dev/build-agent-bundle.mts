@@ -6,6 +6,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { addAgentPayloadBytes, agentCargoPackages, agentComponents, validateBundleProtocols, type AgentComponentMap } from "../shared/agent-bundle.mts";
 import { maxComponentMetadata, parseComponent, type ComponentInfo } from "../shared/protocol-contract.mts";
+import { packageUpdater } from "../ci/package-updater.mts";
+import { parseUpdaterManifest, updaterManifestName, verifyUpdaterTarget, type UpdaterManifest } from "../shared/updater-bundle.mts";
 
 const execute = promisify(execFile);
 export const targetTriple = "x86_64-unknown-linux-musl";
@@ -173,16 +175,22 @@ async function containerBuild(packageOnly: boolean): Promise<void> {
       });
     }
     cancellation.signal.throwIfAborted();
-    await packageLocalBundle(`/build/${targetTriple}/release`, staging, async (program, args) => {
+    const manifest = await packageLocalBundle(`/build/${targetTriple}/release`, staging, async (program, args) => {
       const { stdout } = await execute(program, args, { timeout: 30_000, maxBuffer: maxComponentMetadata, signal: cancellation.signal });
       return stdout;
     });
+    const build = manifest.components["ctl-agent"].build;
+    const updater = await packageUpdater({ target: targetTriple, app_version: build.version,
+      bundle_id: `${build.version}-dev.${build.source_revision!.slice(0, 12)}`, git_revision: build.source_revision!,
+      binary_directory: `/build/${targetTriple}/release`, output_directory: join(staging, "updater"), allow_dirty: true });
     // Rootless engines cannot chmod host-owned bind-mount files. Transfer only
     // their bytes; the host retains ownership and applies private store modes.
     for (const name of [...agentComponents, "bundle.json"]) {
       cancellation.signal.throwIfAborted();
       await writeFile(join("/result/bundle", name), await readFile(join(staging, name)));
     }
+    await writeFile("/result/updater/ctlup", await readFile(join(staging, "updater", updater.binary)));
+    await writeFile("/result/updater/manifest.json", await readFile(join(staging, "updater", updaterManifestName(targetTriple))));
   } finally { stopLease(); await rm(staging, { recursive: true, force: true }); }
 }
 
@@ -267,6 +275,12 @@ export async function buildAgentBundle(repository: string): Promise<string> {
   await chmod(temporary, 0o777);
   await mkdir(join(temporary, "bundle"), { mode: 0o777 });
   await chmod(join(temporary, "bundle"), 0o777);
+  await mkdir(join(temporary, "updater"), { mode: 0o777 });
+  await chmod(join(temporary, "updater"), 0o777);
+  for (const name of ["ctlup", "manifest.json"]) {
+    await writeFile(join(temporary, "updater", name), "");
+    await chmod(join(temporary, "updater", name), 0o666);
+  }
   // Preserve host ownership even when a rootful container overwrites the payload.
   for (const name of [...agentComponents, "bundle.json"]) {
     await writeFile(join(temporary, "bundle", name), "");
@@ -334,6 +348,18 @@ export async function buildAgentBundle(repository: string): Promise<string> {
     await chmod(join(temporary, "bundle/bundle.json"), 0o600);
     await chmod(join(temporary, "bundle"), 0o700);
     await publishLocalBundle(join(temporary, "bundle"), output);
+    const updater_bytes = await readFile(join(temporary, "updater/manifest.json"));
+    const identity = JSON.parse(updater_bytes.toString("utf8")) as UpdaterManifest;
+    const updater = parseUpdaterManifest(updater_bytes, identity, targetTriple);
+    const updater_stage = join(temporary, "updater-published");
+    await mkdir(updater_stage, { mode: 0o700 });
+    await writeFile(join(updater_stage, updater.binary), await readFile(join(temporary, "updater/ctlup")), { mode: 0o700 });
+    await writeFile(join(updater_stage, updaterManifestName(targetTriple)), updater_bytes, { mode: 0o600 });
+    await writeFile(join(updater_stage, `${updater.binary}.sha256`), `${updater.sha256}  ${updater.binary}\n`, { mode: 0o600 });
+    await verifyUpdaterTarget(updater_stage, updater, targetTriple, true);
+    const updater_root = join(outputRoot, "updaters");
+    await mkdir(updater_root, { mode: 0o700 });
+    await publishLocalBundle(updater_stage, join(updater_root, targetTriple));
     console.log(output);
     return output;
   } finally {

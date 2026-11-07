@@ -79,6 +79,37 @@ fn assert_update_channels(fixture: &Fixture) {
   assert!(!fixture.0.join("service-input-1").exists());
 }
 
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_downloaded_manager_filename_can_deploy_offline_to_its_native_target() {
+  let _guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
+  let fixture = Fixture::new(EXPECTED_ID);
+  source(&fixture);
+  legacy_installation(&fixture, Some(EXPECTED_ID));
+  let executable = fixture.0.join("ctlup-fixture-manager");
+  let broker = fixture.broker_with_observation(false);
+  let mut terminal = Terminal::with_executable(
+    &fixture,
+    &[
+      "--host",
+      "work",
+      "update",
+      "--from",
+      fixture.0.join("bundles").to_str().unwrap(),
+    ],
+    true,
+    &executable,
+    None,
+  );
+  assert!(terminal.finish().success(), "{}", terminal.text());
+  assert_update_channels(&fixture);
+  assert_eq!(
+    Sha256::digest(fs::read(fixture.0.join("home/.tokn/ctl/bin/ctlup")).unwrap()),
+    Sha256::digest(fs::read(executable).unwrap()),
+  );
+  broker.await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn old_agent_without_inspect_can_update_the_complete_build_and_verify_activation() {
   let _guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;

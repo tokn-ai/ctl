@@ -114,16 +114,50 @@ fn pointer_path(store: &Installations, name: &str) -> io::Result<Option<PathBuf>
     return Ok(None);
   }
   let link = fs::read_link(path)?;
-  if link.is_absolute()
-    || link
-      .components()
-      .any(|part| !matches!(part, Component::Normal(_)))
+  let absolute = link.is_absolute();
+  let link = if absolute {
+    // The historical agent-only installer resolved the account root with
+    // pwd -P before publishing an absolute current link. Accept that exact
+    // namespace, including an OS alias above the validated account home.
+    let physical = fs::canonicalize(&store.root)?;
+    link
+      .strip_prefix(&physical)
+      .or_else(|_| link.strip_prefix(&store.root))
+      .map_err(|_| invalid("absolute installation pointer is outside legacy agent storage"))?
+      .to_owned()
+  } else {
+    link
+  };
+  if link
+    .components()
+    .any(|part| !matches!(part, Component::Normal(_)))
   {
     return Err(invalid(
       "installation pointer must be a managed relative link",
     ));
   }
   let parts = link.iter().collect::<Vec<_>>();
+  if absolute {
+    let agent = name == "current"
+      && parts.len() == 4
+      && parts[0] == "components"
+      && parts[1] == "agents"
+      && parts[2]
+        .to_str()
+        .is_some_and(|target| crate::bundles::validate_target(target).is_ok())
+      && parts[3].to_str().is_some_and(|id| {
+        id.split_once('-').is_some_and(|(id, suffix)| {
+          valid_id(id)
+            && suffix.len() == 6
+            && suffix.bytes().all(|byte| byte.is_ascii_alphanumeric())
+        })
+      });
+    if !agent {
+      return Err(invalid(
+        "absolute installation pointer is outside legacy agent storage",
+      ));
+    }
+  }
   let managed =
     parts.len() == 2 && parts[0] == "installs" && parts[1].to_str().is_some_and(valid_id);
   let legacy = name == "current"

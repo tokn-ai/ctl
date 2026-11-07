@@ -622,3 +622,63 @@ fn broker_alias_migrates_but_an_unrecognized_regular_command_is_preserved() {
   assert!(error.to_string().contains("managed proxy"));
   assert_eq!(fs::read(command).unwrap(), b"user command");
 }
+
+#[test]
+fn absolute_legacy_agent_pointers_migrate_only_within_the_exact_owned_namespace() {
+  let home = Home::new();
+  let source = fixture(&home.0, 1, true);
+  let installs = Installations::new(&home.0);
+  let relative = Path::new("components/agents")
+    .join(crate::paths::native_target())
+    .join(format!("{}-legacy", "a".repeat(64)));
+  let old = installs.root().join(&relative);
+  fs::DirBuilder::new()
+    .recursive(true)
+    .mode(0o700)
+    .create(&old)
+    .unwrap();
+  fs::write(old.join("ctl-agent"), b"historical agent").unwrap();
+  // The actual old installer uses pwd -P, so its absolute pointer may resolve
+  // an OS-level directory alias above this test account's home.
+  let absolute = installs.root().canonicalize().unwrap().join(&relative);
+  symlink(&absolute, installs.root().join("current")).unwrap();
+  assert!(installs.active().unwrap().is_none());
+  let installed = installs.activate(&source).unwrap();
+  assert!(installs.previous().unwrap().is_none());
+  assert_eq!(
+    fs::read(old.join("ctl-agent")).unwrap(),
+    b"historical agent"
+  );
+  assert_eq!(
+    installs.active().unwrap().unwrap().manifest,
+    installed.manifest
+  );
+
+  fs::remove_file(installs.root().join("current")).unwrap();
+  symlink(
+    installed.directory.canonicalize().unwrap(),
+    installs.root().join("current"),
+  )
+  .unwrap();
+  assert!(
+    installs.active().is_err(),
+    "new installations require relative pointers"
+  );
+  fs::remove_file(installs.root().join("current")).unwrap();
+  symlink(&absolute, installs.root().join("previous")).unwrap();
+  assert!(
+    installs.previous().is_err(),
+    "absolute compatibility applies only to old current"
+  );
+  fs::remove_file(installs.root().join("previous")).unwrap();
+
+  let target = old.parent().unwrap();
+  let real_target = target.with_file_name("relocated-target");
+  fs::rename(target, &real_target).unwrap();
+  symlink(&real_target, target).unwrap();
+  symlink(&absolute, installs.root().join("current")).unwrap();
+  assert!(
+    installs.active().is_err(),
+    "legacy storage parents cannot be links"
+  );
+}

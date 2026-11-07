@@ -25,11 +25,7 @@ pub async fn provision_manager(home: &Path, bundle: &Bundle) -> io::Result<()> {
     ));
   }
   let executable = std::env::current_exe()?;
-  let bytes = if executable
-    .file_stem()
-    .and_then(|name| name.to_str())
-    .is_some_and(|name| name == "ctlup" || name.starts_with("ctlup-"))
-  {
+  let bytes = if updater_path(&executable) {
     native_updater(&executable).await?
   } else {
     updater_for_bundle(home, bundle).await?
@@ -114,7 +110,7 @@ pub async fn updater_for_manifest(
   }
   if target == ctl_core::paths::native_target() {
     let executable = std::env::current_exe()?;
-    let source = if executable.file_stem().is_some_and(|name| name == "ctlup") {
+    let source = if updater_path(&executable) {
       executable.clone()
     } else {
       executable.with_file_name("ctlup")
@@ -178,6 +174,13 @@ pub async fn updater_for_manifest(
   .await
   .map_err(io::Error::other)?;
   Ok(updater.bytes)
+}
+
+fn updater_path(path: &Path) -> bool {
+  path
+    .file_stem()
+    .and_then(|name| name.to_str())
+    .is_some_and(|name| name == "ctlup" || name.starts_with("ctlup-"))
 }
 
 pub(crate) fn remember_supplied_updater(

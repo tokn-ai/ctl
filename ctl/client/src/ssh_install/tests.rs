@@ -990,6 +990,7 @@ async fn managed_installer_rejects_symlinked_storage_and_an_active_sync() {
     command
   };
   let lock = home.join(".tokn/ctl/components/.sync-lock");
+  std::fs::create_dir_all(lock.parent().unwrap()).unwrap();
   std::fs::create_dir(&lock).unwrap();
   assert!(
     matches!(run_install_command(command(), &upload.archive, |_| {}).await,

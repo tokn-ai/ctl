@@ -122,12 +122,13 @@ After snapshot expiry, restoration downloads and verifies the managed published
 HTTPS catalog, archives and updater sidecars. Network errors, corrupt state, and an existing
 unmanaged site abort publication rather than initialize an empty replacement.
 
-Pages retains five Dev publications, the current Stable publication, and the
-newest other tagged publication. Older Dev directories are removed only when a
-complete replacement site is staged; several generations remain available for
-downloads using a recently cached channel document. Historical tagged archives
-remain in GitHub Releases. A 900 MiB staged-site limit leaves room below the Pages
-site limit; exceeding it fails without changing the deployed site.
+Pages retains up to five Dev publications, the current Stable publication, and
+the newest other tagged publication. The current Dev and Stable pointers and
+the newest other tag are pinned. If the staged site would exceed 900 MiB, older
+unselected Dev publications are removed oldest first until it fits. If pinned
+publications alone exceed the budget, publication fails without changing the
+deployed site. Retention changes occur only in a complete replacement site;
+historical tagged archives also remain in GitHub Releases.
 
 Version publication validates all component archives before creating or updating
 a release. Existing main-draft development packages are removed before the tag

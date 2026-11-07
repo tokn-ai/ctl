@@ -142,10 +142,10 @@ async fn run(arguments: Arguments) -> io::Result<i32> {
 }
 
 #[cfg(not(unix))]
-async fn run(_arguments: Arguments) -> io::Result<i32> {
-  Err(io::Error::other(
+fn run(_arguments: Arguments) -> std::future::Ready<io::Result<i32>> {
+  std::future::ready(Err(io::Error::other(
     "ctlup installation management currently requires macOS or Linux",
-  ))
+  )))
 }
 
 #[cfg(unix)]

@@ -46,6 +46,8 @@ candidate without starting services. `ctlup rollback` restores the previous
 build for future launches; running daemons and sessions keep their owners.
 `ctl components status/restart/stop` are runtime maintenance commands.
 Do not use the removed component sync/select or agent-only installation paths.
+The manager is distributed separately. To upgrade it, run a fresh downloaded
+`ctlup` with `install` or a local `update`; runtime rollback leaves it available.
 
 For an authorized published CLI setup on macOS:
 

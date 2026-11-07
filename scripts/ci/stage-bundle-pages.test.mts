@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
@@ -72,6 +72,50 @@ test("retains five dev generations and two stable versions without dropping curr
   assert.equal(catalog.publications.filter((entry) => entry.channel === "stable").length, 2);
   assert.equal((await readdir(join(previous!, "bundles/sets"))).length, 7);
   for (const id of Object.values(catalog.channels)) assert.ok(catalog.publications.some((entry) => entry.publication_id === id));
+});
+
+async function treeBytes(path: string): Promise<number> {
+  const metadata = await lstat(path);
+  if (metadata.isFile()) return metadata.size;
+  let bytes = 0;
+  for (const name of await readdir(path)) bytes += await treeBytes(join(path, name));
+  return bytes;
+}
+
+test("byte pressure evicts oldest unselected Dev generations while pinning channel heads and the newest other tag", async (t) => {
+  const directory = await root(t);
+  const stable = publicationFixture(1, "stable", "1.0.0");
+  const tag = publicationFixture(2, "stable", "2.0.0-beta.1");
+  const dev = [3, 4, 5].map((run) => publicationFixture(run));
+  let previous: string | null = null;
+  for (const entry of [stable, tag, ...dev.slice(0, 2)]) {
+    const next = join(directory, `site-${entry.run_id}`);
+    await stageBundlePages(entry, await componentSetFixture(directory, entry), previous, next);
+    previous = next;
+  }
+  const before = await readFile(join(previous!, "bundles/catalog.json"));
+  const incoming = dev[2];
+  const input = await componentSetFixture(directory, incoming);
+  const complete = join(directory, "complete");
+  await stageBundlePages(incoming, input, previous, complete);
+  const full_size = await treeBytes(complete);
+  const oldest_size = await treeBytes(join(complete, "bundles/sets", dev[0].publication_id));
+  const budget = full_size - oldest_size;
+  const output = join(directory, "bounded");
+  await stageBundlePages(incoming, input, previous, output, budget);
+  assert.ok(await treeBytes(output) <= budget);
+  const catalog = parseBundleCatalog(await readFile(join(output, "bundles/catalog.json")));
+  assert.deepEqual(catalog.publications.map((entry) => entry.publication_id), [incoming, dev[1], stable, tag].map((entry) => entry.publication_id));
+  assert.equal(catalog.channels.dev, incoming.publication_id);
+  assert.equal(catalog.channels.stable, stable.publication_id);
+  await assert.rejects(lstat(join(output, "bundles/sets", dev[0].publication_id)), { code: "ENOENT" });
+  for (const entry of catalog.publications) await validatedComponentSet(join(output, "bundles/sets", entry.publication_id), entry);
+  assert.deepEqual(await readFile(join(previous!, "bundles/catalog.json")), before);
+  await validatedComponentSet(join(previous!, "bundles/sets", dev[0].publication_id), dev[0]);
+  const impossible = join(directory, "impossible");
+  await assert.rejects(stageBundlePages(incoming, input, previous, impossible, 1), /Pinned bundle publications exceed/);
+  await assert.rejects(lstat(impossible), { code: "ENOENT" });
+  assert.deepEqual(await readFile(join(previous!, "bundles/catalog.json")), before);
 });
 
 test("failed validation or capacity checks leave the previous deployment intact and never expose a pointer", async (t) => {

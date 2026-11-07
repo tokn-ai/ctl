@@ -535,7 +535,7 @@ pub(super) fn invalid(message: &str) -> io::Error {
   io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
-pub(super) fn validate_target(target: &str) -> io::Result<()> {
+pub(crate) fn validate_target(target: &str) -> io::Result<()> {
   if target.is_empty()
     || target.len() > 128
     || !target

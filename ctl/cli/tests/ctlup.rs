@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write as _;
 use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 struct Home(PathBuf);
@@ -18,7 +18,11 @@ impl Home {
   }
 
   fn command(&self, args: &[&str]) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_ctlup"));
+    self.command_at(Path::new(env!("CARGO_BIN_EXE_ctlup")), args)
+  }
+
+  fn command_at(&self, executable: &Path, args: &[&str]) -> Command {
+    let mut command = Command::new(executable);
     command
       .args(args)
       .env("HOME", &self.0)
@@ -160,8 +164,17 @@ fn install_from_files_provisions_the_independent_manager_and_complete_commands()
   tar::Archive::new(flate2::read::GzDecoder::new(bytes.as_slice()))
     .unpack(&provided)
     .unwrap();
+  // Exercise the distributed executable form while retaining the production
+  // size bound; Linux debug information alone can exceed that bound.
+  let executable = home.0.join("ctlup-downloaded-target");
+  fs::copy(env!("CARGO_BIN_EXE_ctlup"), &executable).unwrap();
+  let stripped = Command::new("strip").arg(&executable).output().unwrap();
+  assert!(stripped.status.success(), "{stripped:?}");
   let output = home
-    .command(&["install", "--from", provided.to_str().unwrap(), "--json"])
+    .command_at(
+      &executable,
+      &["install", "--from", provided.to_str().unwrap(), "--json"],
+    )
     .output()
     .unwrap();
   assert!(

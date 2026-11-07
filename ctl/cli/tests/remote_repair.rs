@@ -144,7 +144,18 @@ esac
       "node",
       "touch \"$CTL_TEST_DIR/builder-called\"; printf 'current development builder unavailable in fixture\\n' >&2; exit 94",
     );
+    fixture.prepare_updater();
     fixture
+  }
+
+  fn prepare_updater(&self) {
+    let executable = self.0.join("ctlup-fixture-manager");
+    fs::copy(env!("CARGO_BIN_EXE_ctlup"), &executable).unwrap();
+    // Match the shipped form instead of relaxing the 128 MiB input limit for
+    // unstripped Linux debug information.
+    let stripped = Command::new("strip").arg(&executable).output().unwrap();
+    assert!(stripped.status.success(), "{stripped:?}");
+    fs::set_permissions(executable, fs::Permissions::from_mode(0o700)).unwrap();
   }
 
   fn compatible_bundle(&self, build: &ctl_core::component::ComponentBuildInfo) -> String {
@@ -558,13 +569,6 @@ impl Terminal {
   }
 
   fn with_bundle_override(fixture: &Fixture, args: &[&str], explicit: bool) -> Self {
-    let pair = portable_pty::native_pty_system()
-      .openpty(portable_pty::PtySize {
-        rows: 40,
-        cols: 120,
-        ..portable_pty::PtySize::default()
-      })
-      .unwrap();
     let updater = args.first().is_some_and(|arg| *arg == "__ctlup");
     let executable = if updater {
       env!("CARGO_BIN_EXE_ctlup")
@@ -572,6 +576,29 @@ impl Terminal {
       env!("CARGO_BIN_EXE_ctl")
     };
     let args = if updater { &args[1..] } else { args };
+    Self::with_executable(
+      fixture,
+      args,
+      explicit,
+      std::path::Path::new(executable),
+      Some(&fixture.0.join("ctlup-fixture-manager")),
+    )
+  }
+
+  fn with_executable(
+    fixture: &Fixture,
+    args: &[&str],
+    explicit: bool,
+    executable: &std::path::Path,
+    manager: Option<&std::path::Path>,
+  ) -> Self {
+    let pair = portable_pty::native_pty_system()
+      .openpty(portable_pty::PtySize {
+        rows: 40,
+        cols: 120,
+        ..portable_pty::PtySize::default()
+      })
+      .unwrap();
     let mut command = portable_pty::CommandBuilder::new(executable);
     command.args(args);
     command.cwd(&fixture.0);
@@ -581,7 +608,12 @@ impl Terminal {
       format!("{}:{}", fixture.0.display(), std::env::var("PATH").unwrap()),
     );
     command.env("CTL_TEST_DIR", &fixture.0);
-    command.env("CTLUP_BIN", env!("CARGO_BIN_EXE_ctlup"));
+    if let Some(manager) = manager {
+      command.env("CTLUP_BIN", manager);
+    } else {
+      command.env_remove("CTLUP_BIN");
+    }
+    command.env_remove("CTLUP_BUNDLES_DIR");
     command.env("HOME", fixture.0.join("home"));
     command.env("CTL_HOSTS_PATH", fixture.0.join("hosts.json"));
     command.env("CTLD_SOCKET_PATH", fixture.0.join("ctld.sock"));

@@ -314,6 +314,9 @@ GUI uses the same updater. Runtime operations remain in `ctl` and `ctmux`;
 `ctlup` exposes stable commands under `~/.tokn/ctl/bin`. Only that directory
 needs to be on `PATH`. The manager remains there independently of runtime
 installs; `current` selects one verified immutable build under `installs/`.
+To upgrade the manager itself, run a newly downloaded `ctlup` executable with
+`install` or a local `update`. `ctlup update` does not automatically fetch a newer
+manager for itself.
 The previous build is retained for rollback, together with any older installation
 leased by a running process. Unused installations are pruned after activation.
 Signed macOS helper apps are retained intact. An update or rollback changes

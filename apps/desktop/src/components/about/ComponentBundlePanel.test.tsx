@@ -39,44 +39,43 @@ it("verifies before selecting, serializes actions and observes completion while 
   });
   const on_selected = vi.fn();
   const page = render(<ComponentBundlePanel visible on_selected={on_selected} />);
-  fireEvent.click(await screen.findByRole("button", { name: "Use for uploads" }));
-  expect(api.select.mock.calls[0][0]).toEqual({ bundle_id: bundle.bundle_id, target_triple: bundle.target_triple, purpose: "upload" });
+  fireEvent.click(await screen.findByRole("button", { name: "Install" }));
+  expect(api.select.mock.calls[0][0]).toEqual({ bundle_id: bundle.bundle_id, target_triple: bundle.target_triple, purpose: "local" });
   expect(screen.getByText("Verifying the complete build…")).toBeTruthy();
-  expect((screen.getByRole("button", { name: "Use locally" }) as HTMLButtonElement).disabled).toBe(true);
+  expect((screen.getByRole("button", { name: "Install" }) as HTMLButtonElement).disabled).toBe(true);
   act(() => progress("selecting"));
-  expect(screen.getByText("Selecting the verified bundle…")).toBeTruthy();
+  expect(screen.getByText("Activating the verified build…")).toBeTruthy();
   page.rerender(<ComponentBundlePanel visible={false} on_selected={on_selected} />);
-  api.list.mockResolvedValue({ bundles: [{ ...bundle, upload_use: "selected" }], errors: [] });
-  await act(async () => complete({ bundle_id: bundle.bundle_id, target_triple: bundle.target_triple, purpose: "upload", services_preserved: true }));
+  api.list.mockResolvedValue({ bundles: [{ ...bundle, local_use: "selected" }, { ...bundle, bundle_id: "b".repeat(64) }], errors: [] });
+  await act(async () => complete({ bundle_id: bundle.bundle_id, target_triple: bundle.target_triple, purpose: "local", services_preserved: true }));
   expect(on_selected).toHaveBeenCalledOnce();
-  expect(screen.getByText("Selected for uploads")).toBeTruthy();
+  expect(screen.getByText("Active")).toBeTruthy();
   expect(screen.getByText(/Running services and sessions were preserved/)).toBeTruthy();
 });
 
 it("keeps the prior selection and reports verification failure without claiming success", async () => {
-  api.list.mockResolvedValue({ bundles: [{ ...bundle, local_use: "selected" }], errors: [] });
+  api.list.mockResolvedValue({ bundles: [{ ...bundle, local_use: "selected" }, { ...bundle, bundle_id: "b".repeat(64) }], errors: [] });
   api.select.mockRejectedValue({ message: "Bundle checksum changed." });
   const on_selected = vi.fn();
   render(<ComponentBundlePanel visible on_selected={on_selected} />);
-  fireEvent.click(await screen.findByRole("button", { name: "Use for uploads" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Install" }));
   await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("Bundle checksum changed."));
-  expect(screen.getByText("Selected locally")).toBeTruthy();
+  expect(screen.getByText("Active")).toBeTruthy();
   expect(on_selected).not.toHaveBeenCalled();
   expect(screen.queryByText(/were preserved/)).toBeNull();
 });
 
-it("shows included builds and separates local services from remote uploads", async () => {
+it("shows included deployment builds without upload selections", async () => {
   api.list.mockResolvedValue({ bundles: [{ ...bundle, included: true, source: "ci", local_use: "unavailable", local_unavailable_reason: "Requires a signed macOS helper package" }], errors: [] });
   render(<ComponentBundlePanel visible on_selected={vi.fn()} />);
   const table = within(await screen.findByRole("table", { name: "Component bundles" }));
   expect(table.getByText("Included with app")).toBeTruthy();
-  expect(table.getByRole("columnheader", { name: "Local services" })).toBeTruthy();
-  expect(table.getByRole("columnheader", { name: "Remote uploads" })).toBeTruthy();
+  expect(table.getByRole("columnheader", { name: "Installation" })).toBeTruthy();
+  expect(table.queryByRole("columnheader", { name: "Remote uploads" })).toBeNull();
   expect(table.getByText("macOS · Apple silicon").title).toBe(bundle.target_triple);
   expect(table.getByText("Requires a signed macOS helper package")).toBeTruthy();
-  expect(table.queryByRole("button", { name: "Use locally" })).toBeNull();
-  fireEvent.click(table.getByRole("button", { name: "Use for uploads" }));
-  expect(api.select.mock.calls[0][0]).toEqual({ bundle_id: bundle.bundle_id, target_triple: bundle.target_triple, purpose: "upload" });
+  expect(table.queryByRole("button", { name: "Install" })).toBeNull();
+  expect(api.select).not.toHaveBeenCalled();
 });
 
 it("does not report an empty store when the first check failed", async () => {

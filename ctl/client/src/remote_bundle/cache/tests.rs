@@ -311,11 +311,8 @@ fn concurrent_writers_publish_one_complete_immutable_entry() {
       let barrier = Arc::clone(&barrier);
       std::thread::spawn(move || {
         barrier.wait();
-        match cache.store(&bundle) {
-          Ok(()) => true,
-          Err(Error::Io(error)) if error.kind() == io::ErrorKind::WouldBlock => false,
-          Err(error) => panic!("unexpected cache publication error: {error}"),
-        }
+        cache.store(&bundle).unwrap();
+        true
       })
     })
     .collect();
@@ -324,7 +321,7 @@ fn concurrent_writers_publish_one_complete_immutable_entry() {
     .map(|thread| thread.join().unwrap())
     .filter(|published| *published)
     .count();
-  assert!(winners >= 1);
+  assert_eq!(winners, 4);
   assert_eq!(fixture.cache.load().unwrap().unwrap().archive, b"archive");
   assert_eq!(fs::read_dir(&fixture.cache.directory).unwrap().count(), 2);
   fixture.assert_no_staging();
@@ -347,7 +344,7 @@ fn a_failed_publication_leaves_no_partial_entry() {
 }
 
 #[test]
-fn a_busy_publication_lock_returns_without_waiting() {
+fn a_busy_publication_lock_waits_and_reuses_the_completed_entry() {
   let fixture = Fixture::new();
   ensure_directory(&fixture.cache.revision_directory).unwrap();
   let path = fixture
@@ -355,14 +352,43 @@ fn a_busy_publication_lock_returns_without_waiting() {
     .revision_directory
     .join(format!("{TARGET}.lock"));
   let held = PublicationLock::acquire(&path).unwrap();
-  assert!(
-    matches!(fixture.cache.store(&Fixture::bundle()), Err(Error::Io(error)) if error.kind() == io::ErrorKind::WouldBlock)
-  );
+  let cache = fixture.cache.clone();
+  let (started, waiting) = std::sync::mpsc::channel();
+  let (complete, result) = std::sync::mpsc::channel();
+  let writer = std::thread::spawn(move || {
+    started.send(()).unwrap();
+    complete.send(cache.store(&Fixture::bundle())).unwrap();
+  });
+  waiting.recv().unwrap();
+  assert!(result.try_recv().is_err());
   assert!(fixture.cache.load().unwrap().is_none());
   fixture.assert_no_staging();
   drop(held);
-  fixture.cache.store(&Fixture::bundle()).unwrap();
+  result
+    .recv_timeout(std::time::Duration::from_secs(5))
+    .unwrap()
+    .unwrap();
+  writer.join().unwrap();
   assert!(fixture.cache.load().unwrap().is_some());
+}
+
+#[test]
+#[cfg(unix)]
+fn download_cleanup_evicts_complete_entries_but_waits_for_live_publications() {
+  let fixture = Fixture::new();
+  fixture.cache.store(&Fixture::bundle()).unwrap();
+  let held = PublicationLock::acquire(
+    &fixture
+      .cache
+      .revision_directory
+      .join(format!("{TARGET}.lock")),
+  )
+  .unwrap();
+  assert!(prune_download_cache(&fixture.cache.root, 0).unwrap() > 0);
+  assert!(fixture.cache.load().unwrap().is_some());
+  drop(held);
+  assert_eq!(prune_download_cache(&fixture.cache.root, 0).unwrap(), 0);
+  assert!(fixture.cache.load().unwrap().is_none());
 }
 
 #[test]

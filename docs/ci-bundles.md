@@ -54,7 +54,8 @@ successful retry.
 
 The public component source is
 [`https://tokn-ai.dev/ctl/bundles/`](https://tokn-ai.dev/ctl/bundles/).
-It contains each target's archive, SHA-256 sidecar and bundle-set metadata.
+It contains each target's runtime archive, SHA-256 sidecar, standalone `ctlup`
+executable and updater metadata, plus the complete bundle-set document.
 New publications use schema 3. Previously published schema-2 sets remain usable.
 
 Applications discover channels through:
@@ -76,6 +77,24 @@ Each channel document uses schema 1:
 
 Stable uses `"channel": "stable"`. The referenced immutable directory contains
 `bundle-set.json` and all four target archives and their `.sha256` sidecars.
+New publications also include these files for each target:
+
+```text
+ctlup-<bundle-id>-<target>
+ctlup-<bundle-id>-<target>.sha256
+ctlup-<target>.json
+```
+
+The updater's schema-1 manifest binds its version, source revision, target,
+filename, byte size and SHA-256. Packaging strips and probes the actual updater
+bytes before recording them. Its identity must match the runtime publication.
+The updater stays outside the six-component runtime archive, so changing the
+active runtime or rolling it back never replaces the installation manager.
+Older publications without updater sidecars remain readable. A partial updater
+set or a checksum mismatch blocks assembly/publication; CI emits all four targets.
+`pnpm bundles:sync` verifies and stages these files for desktop packaging only.
+It does not import an account cache, select a build or activate an installation;
+ordinary updates populate their deployment cache on demand.
 Archive names remain bare sibling filenames in the bundle set. Its existing
 checksums, archived manifests, component metadata, and protocol compatibility
 validation remain authoritative; channel discovery adds no parallel hash format.
@@ -94,21 +113,22 @@ attempt to the bundle ID, so reruns never overwrite an existing directory.
 
 The Pages job serializes publication across main and tags with a queued concurrency
 group. It restores the complete last successful site, verifies retained component
-sets, stages every new archive, then writes channel pointers and uploads one full
+sets, stages every new archive and updater, then writes channel pointers and uploads one full
 Pages artifact. Both channels are included in every replacement. A separate
 90-day Actions snapshot records the full site. Restoration requires the exact
 attempt's successful Pages deployment step, even if a later desktop job failed or
 the overall workflow is still running. Failed deployment candidates are ignored.
 After snapshot expiry, restoration downloads and verifies the managed published
-HTTPS catalog and archives. Network errors, corrupt state, and an existing
+HTTPS catalog, archives and updater sidecars. Network errors, corrupt state, and an existing
 unmanaged site abort publication rather than initialize an empty replacement.
 
-Pages retains five Dev publications, the current Stable publication, and the
-newest other tagged publication. Older Dev directories are removed only when a
-complete replacement site is staged; several generations remain available for
-downloads using a recently cached channel document. Historical tagged archives
-remain in GitHub Releases. A 900 MiB staged-site limit leaves room below the Pages
-site limit; exceeding it fails without changing the deployed site.
+Pages retains up to five Dev publications, the current Stable publication, and
+the newest other tagged publication. The current Dev and Stable pointers and
+the newest other tag are pinned. If the staged site would exceed 900 MiB, older
+unselected Dev publications are removed oldest first until it fits. If pinned
+publications alone exceed the budget, publication fails without changing the
+deployed site. Retention changes occur only in a complete replacement site;
+historical tagged archives also remain in GitHub Releases.
 
 Version publication validates all component archives before creating or updating
 a release. Existing main-draft development packages are removed before the tag
@@ -117,7 +137,9 @@ asset SHA-256 digest and size, and mismatching bytes or manual-name collisions
 fail. Appending packages revalidates each available target and the complete
 published component manifest; it cannot replace another build's assets.
 Tag reruns download and verify the first published component set as canonical,
-then reuse it for Pages and desktop resources. Published package targets are
+then reuse it, including already-published updater bytes, for Pages and desktop
+resources. A retry may append missing updater sidecars only after checking the
+tag's exact source revision; existing sidecars cannot be replaced. Published package targets are
 likewise reused on rerun, accommodating timestamp/signing differences without
 replacing published files while allowing missing targets to be appended.
 An interrupted upload must retain every already-published file's digest and size;
@@ -161,11 +183,21 @@ revision requirements. The managed store uses a separate `bundle.json` schema.
 Managed schema 2 identifies a complete six-executable build, and managed schema 1
 continues to identify its four-executable predecessors.
 
-A full remote installation selects the build at `~/.tokn/ctl/current`. In a new
-managed remote shell, run `ctl who` for live ctl service connections or `ctmux ls`
-for sessions. An ordinary SSH login can invoke `~/.tokn/ctl/current/ctl` and
-`~/.tokn/ctl/current/ctmux` directly or add that directory to its own `PATH`.
+A full installation uses one immutable payload under
+`~/.tokn/ctl/installs/<content-id>` and atomically switches
+`~/.tokn/ctl/current`. Stable command entry points live in `~/.tokn/ctl/bin`;
+add that directory to `PATH` for an ordinary SSH login. Managed terminal sessions
+and ctl SSH gateway launches add it automatically. `ctlup` is a separate executable
+at `~/.tokn/ctl/bin/ctlup`, while runtime command aliases resolve through `current`.
 The installer leaves login shell configuration to the account owner.
+
+Clients obtain and verify the target updater locally. When it is absent or its
+checksum differs on the receiving account, they bootstrap it over authenticated
+SSH without requiring remote internet access. The updater verifies a retained
+runtime before deciding whether an archive upload is needed, then applies the
+same installation transaction as a local `ctlup install`. The previous complete
+build is retained for rollback, and process-held leases preserve builds still
+used by running clients or daemons. Updates never restart those processes.
 
 Component metadata probes execute the packaged bytes, including Intel macOS
 executables through Rosetta on ARM runners. The bundle workflow sets
@@ -231,7 +263,7 @@ ID, `signing_mode: "signed"`, `notarized: true`, archive filename, SHA-256 hash,
 and archive size. The draft updater validates the complete asset set and each
 checksum before changing release attachments.
 
-## Signed ctld for local development
+## Native development installations
 
 For local macOS CLI and GUI development, run the shared provisioning commands
 from the repository root:
@@ -240,37 +272,37 @@ from the repository root:
 pnpm ctld:provision
 # In Xcode, choose your team in Signing & Capabilities and build once.
 pnpm ctld:build
-cargo run -p ctl-cli -- passwords
+~/.tokn/ctl/bin/ctl passwords
+~/.tokn/ctl/bin/ctlup status --json
 ```
 
-For GUI development, `pnpm desktop:dev` automatically builds and stages signed
-helpers on macOS. Its managed worktree daemon survives app reloads; running
-`ctld:build` first is unnecessary. The standard Tauri command can also launch a
-direct debug GUI build that discovers the same selected helper as the CLI.
+For GUI development, `pnpm desktop:dev` delegates native preparation to
+`ctlup dev` on macOS and Linux. On Unix, `pnpm daemons:build` also uses that
+complete-build path; Linux requires no Apple provisioning. The macOS worktree
+daemon survives app reloads, and running `ctld:build` first is unnecessary.
+The macOS-only `pnpm ctld:build` bootstraps the same manager and delegates to the
+same complete-build path for CLI development.
 
-The `ctld:build` command detects the native Rust target and workspace version, finds or
-refreshes the provisioning profile, and chooses its matching Keychain
-certificate. The component command compiles `ctld`, signs the complete app,
-and atomically publishes its checkout selection under
-`<target-dir>/ctl-dev/helpers/<checkout-id>/`. Ordinary macOS debug CLI and GUI builds
-copy that app into the immutable managed development cache and verify the copy
-before launching it. Both consumers can remain unsigned. A running daemon and
-its askpass, identity-agent, and proxy children therefore remain executable after
-Cargo build outputs are cleaned. Cargo's
-configured target directory and canonical checkout identity determine discovery,
-independently of the current directory. Worktrees sharing a target directory have
-separate selections. Repeat this preparation after helper changes; ordinary CLI
-edits need only a Cargo rebuild.
+The manager compiles all six runtime commands and `ctlup` from the working tree,
+snapshots Cargo's actual outputs, then strips and verifies those copies. On
+macOS it finds or refreshes the provisioning profile, chooses its matching
+Keychain certificate, and signs the copied `ctld.app`. The resulting receipt
+binds its revision, source fingerprint, dirty flag, and protocol metadata.
+The CLI and GUI can remain unsigned; no notarization credentials are needed.
 
-One `pnpm ctld:build` output supplies both consumers; no development CLI
-embedding or signing step is needed. It allows local source changes and needs
-no notarization credentials. Its receipt binds the helper's revision, source
-fingerprint, and dirty flag. Preparation leaves shared component selections and
-running services unchanged.
-The runtime still checks signature, provisioning expiry,
-certificate identity, source metadata against the app's own manifest, and API
-compatibility. Rebuild after a profile expires. An existing compatible daemon is
-never restarted automatically.
+Successful preparation installs one immutable build under
+`~/.tokn/ctl/installs/` and activates it through the same selection used by
+`ctlup update`. Stable commands live in `~/.tokn/ctl/bin`. Cargo profiles and
+configured target directories are preserved; compilation caches under
+`<target-dir>/ctl-dev/<checkout-id>/cargo` keep worktrees separate. Launchers
+hold an installation lease while using its exact executable paths. Active,
+previous, and running builds remain available after Cargo outputs are cleaned.
+
+The runtime checks signature, provisioning expiry, certificate identity, source
+metadata, and API compatibility. Rebuild after a profile expires. Preparation
+preserves existing daemons and sessions; restarting an owner is a separate
+action. See [local development builds](local-bundles.md) for direct `ctlup dev`
+usage and custom Cargo profiles.
 
 Local component signing explicitly uses `--timestamp=none`,
 so an unavailable Apple timestamp service does not block development. Release
@@ -365,7 +397,10 @@ The full signed bundle is installed without `sudo`:
   selected/<target>-ctld1-lifecycle1-helper1 -> ../versions/<version>-<target>
 ```
 
-Remote-agent `~/.tokn/ctl/versions/` and `current` remain independent. An existing
+The runtime installation's `~/.tokn/ctl/current` pointer remains independent of
+this signed-helper package store. A complete local installation containing a
+verified helper takes precedence; otherwise existing signed-helper discovery
+continues. An existing
 matching installation is verified and reused; setup does not overwrite a
 version with different release contents. Downloaded official releases update
 `current` and atomically update the architecture/API selection. A separately

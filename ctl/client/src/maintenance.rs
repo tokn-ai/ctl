@@ -14,22 +14,22 @@ pub use identity::inspect_remote_id;
 
 const PREPARE_COMMAND: &str = concat!(
   r#"printf 'ctl-maintenance-v1\n'; "#,
-  r#"PATH="$HOME/.tokn/ctl/current:$PATH"; export PATH; "#,
+  r#"PATH="$HOME/.tokn/ctl/bin:$HOME/.tokn/ctl/current:$PATH"; export PATH; "#,
   "exec ctl-agent prepare-ctmux-restart",
 );
 const STOP_COMMAND: &str = concat!(
   r#"printf 'ctl-maintenance-v1\n'; "#,
-  r#"PATH="$HOME/.tokn/ctl/current:$PATH"; export PATH; "#,
+  r#"PATH="$HOME/.tokn/ctl/bin:$HOME/.tokn/ctl/current:$PATH"; export PATH; "#,
   "exec ctl-agent prepare-ctmux-stop",
 );
 const INSPECT_COMMAND: &str = concat!(
   r#"printf 'ctl-command-v1\n'; "#,
-  r#"PATH="$HOME/.tokn/ctl/current:$PATH"; export PATH; "#,
+  r#"PATH="$HOME/.tokn/ctl/bin:$HOME/.tokn/ctl/current:$PATH"; export PATH; "#,
   "exec ctl-agent inspect",
 );
 const COMPONENTS_COMMAND: &str = concat!(
   r#"printf 'ctl-maintenance-v1\n'; "#,
-  r#"PATH="$HOME/.tokn/ctl/current:$PATH"; export PATH; "#,
+  r#"PATH="$HOME/.tokn/ctl/bin:$HOME/.tokn/ctl/current:$PATH"; export PATH; "#,
   "exec ctl-agent inspect-components",
 );
 

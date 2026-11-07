@@ -127,15 +127,19 @@ verification. Remote agent
 the daemon or existing connections. Repeating setup checks and reuses the same
 immutable version when its release metadata matches.
 
-`CTLD_BIN` continues to override discovery. Ordinary debug CLI and GUI builds
-first check this checkout's provisioned signed helper under the configured
-target directory. Prepare it with `pnpm ctld:build` from the repository root;
-neither consumer needs signing. Checkout selections are isolated from shared
-defaults. Without a compatible local helper, the standalone macOS CLI
+`CTLD_BIN` continues to override discovery. For source development,
+`pnpm ctld:build` delegates to `ctlup dev`: it builds the complete native command
+set, signs `ctld.app`, and activates the verified installation under
+`~/.tokn/ctl/installs/`. The macOS desktop launcher uses the same preparation
+path automatically. Neither consumer needs signing. This updates the active
+complete build while preserving running services; it does not publish a
+release. Older checkout helper selections remain readable for compatibility.
+Without a compatible local helper, the standalone macOS CLI
 prefers a verified compatible managed app, then its own bundled helper, then a
 nearby desktop bundle, sibling, or `PATH` executable. Packaged desktop releases
 continue to prefer their own bundled helper. Ordinary Cargo CLI builds also
-discover selected signed development apps.
+discover selected signed development apps. See
+[local development builds](local-bundles.md) for profiles and target directories.
 
 Selections use
 `~/.tokn/ctl/components/ctld/selected/<target>-ctld1-lifecycle1-helper1`.

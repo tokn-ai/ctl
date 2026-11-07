@@ -11,6 +11,8 @@ pub mod connection;
 pub mod development;
 #[cfg(feature = "executable")]
 pub mod executable;
+#[cfg(all(feature = "bundles", unix))]
+pub mod installations;
 pub mod paths;
 pub mod presence;
 pub mod protocol;

@@ -61,7 +61,7 @@ fn included_builds_are_visible_without_import_and_deduplicated_after_selection()
   let listed = snapshot_with(&home, included);
   assert_eq!(listed.bundles.len(), 1);
   assert!(listed.bundles[0].included);
-  assert!(matches!(listed.bundles[0].upload_use, BundleUse::Selected));
+  assert!(matches!(listed.bundles[0].upload_use, BundleUse::Available));
   assert_eq!(
     store
       .selected(Purpose::Upload, &manifest.target_triple)
@@ -91,7 +91,7 @@ fn an_included_archive_error_keeps_the_stored_selection_visible() {
   });
   assert_eq!(listed.bundles.len(), 1);
   assert!(!listed.bundles[0].included);
-  assert!(matches!(listed.bundles[0].upload_use, BundleUse::Selected));
+  assert!(matches!(listed.bundles[0].upload_use, BundleUse::Available));
   assert_eq!(listed.errors.len(), 1);
   assert!(listed.errors[0].contains("checksum mismatch"));
   std::fs::remove_dir_all(home).unwrap();
@@ -109,7 +109,19 @@ fn missing_or_changed_included_selections_never_create_a_store() {
 #[cfg(target_os = "macos")]
 #[test]
 fn a_flat_included_native_archive_explains_why_local_use_is_unavailable() {
-  let (manifest, _) = fixture(ctl_core::paths::native_target());
+  let (manifest, mut files) = fixture(ctl_core::paths::native_target());
+  let mut components = manifest.components;
+  components.insert("ctl".into(), components["ctl-agent"].clone());
+  components.insert("ctmux".into(), components["ctmuxd"].clone());
+  files.insert("ctl".into(), b"ctl".to_vec());
+  files.insert("ctmux".into(), b"ctmux".to_vec());
+  let manifest = Manifest::new(
+    ctl_core::paths::native_target(),
+    Source::Release,
+    components,
+    &files,
+  )
+  .unwrap();
   let listed = summary(&manifest, None, None, true);
   assert!(listed.compatible);
   assert!(matches!(listed.local_use, BundleUse::Unavailable));
@@ -118,6 +130,19 @@ fn a_flat_included_native_archive_explains_why_local_use_is_unavailable() {
     Some("Requires a signed macOS helper package")
   );
   assert!(matches!(listed.upload_use, BundleUse::Available));
+}
+
+#[test]
+fn legacy_native_builds_are_not_offered_for_installation_but_can_remain_active() {
+  let (manifest, _) = fixture(ctl_core::paths::native_target());
+  let listed = summary(&manifest, None, None, false);
+  assert!(matches!(listed.local_use, BundleUse::Unavailable));
+  assert_eq!(
+    listed.local_unavailable_reason,
+    Some("Legacy build lacks ctl and ctmux")
+  );
+  let active = summary(&manifest, Some(&manifest.bundle_id), None, false);
+  assert!(matches!(active.local_use, BundleUse::Selected));
 }
 
 #[test]
@@ -229,9 +254,6 @@ fn packaged_archives_are_discovered_and_imported_only_when_explicitly_chosen() {
       .unwrap()
       .is_none()
   );
-  Store::new(&home)
-    .select(Purpose::Upload, &imported)
-    .unwrap();
   let listed = snapshot(&home, &directories);
   assert_eq!(listed.bundles.len(), 4);
   assert!(matches!(
@@ -241,7 +263,7 @@ fn packaged_archives_are_discovered_and_imported_only_when_explicitly_chosen() {
       .find(|bundle| bundle.target_triple == target)
       .unwrap()
       .upload_use,
-    BundleUse::Selected
+    BundleUse::Available
   ));
   // A broken stored selection must not be repaired silently from its app copy.
   std::fs::write(imported.directory.join("ctl-agent"), b"modified").unwrap();

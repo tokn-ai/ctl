@@ -89,7 +89,7 @@ pub(super) async fn run(
   let mut results = Vec::new();
   for choice in choices {
     let label = choice.label().to_owned();
-    eprintln!("ctl: Updating {label} ({package_label})…");
+    eprintln!("ctlup: Updating {label} ({package_label})…");
     let operation = update_host(
       home,
       choice.host(),
@@ -104,11 +104,11 @@ pub(super) async fn run(
     };
     let (result, error) = match outcome {
       Ok(result) => {
-        eprintln!("ctl: {label}: installed; running services preserved. Restart separately.");
+        eprintln!("ctlup: {label}: installed; running services preserved. Restart separately.");
         (Some(result), None)
       }
       Err(error) => {
-        eprintln!("ctl: {label}: {error}");
+        eprintln!("ctlup: {label}: {error}");
         (None, Some(error.to_string()))
       }
     };
@@ -236,7 +236,7 @@ async fn update_host(
   )
   .await?;
   eprintln!(
-    "ctl: Source bundle {} · revision {}",
+    "ctlup: Source bundle {} · revision {}",
     bundle.manifest.bundle_id,
     bundle.manifest.components["ctl-agent"]
       .build
@@ -363,7 +363,7 @@ mod tests {
 
   #[test]
   fn temporary_destination_can_include_local_without_becoming_a_saved_host() {
-    for destination in ["192.168.1.1", "mymachine.example.com", "ssh-config-alias"] {
+    for destination in ["192.0.2.1", "server.example.com", "ssh-config-alias"] {
       let targets = choices(vec![], true, None, Some(destination)).unwrap();
       assert_eq!(
         targets,

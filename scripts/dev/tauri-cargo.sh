@@ -2,14 +2,10 @@
 set -eu
 
 # Tauri invokes its runner for every native reload. Signed development hands
-# successful builds to the app supervisor; unsigned runs keep Cargo ownership.
+# successful builds to the app supervisor; every Unix run prepares through ctlup.
 if [ "${1:-}" = run ]; then
   script_directory=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
-  if [ -n "${CTMUX_DEV_APP_SUPERVISOR:-}" ]; then
-    exec node --experimental-strip-types --disable-warning=ExperimentalWarning \
-      "$script_directory/signed-cargo.mts" "$@"
-  fi
-  node --experimental-strip-types --disable-warning=ExperimentalWarning \
-    "$script_directory/prepare-daemons.mts" "$@"
+  exec node --experimental-strip-types --disable-warning=ExperimentalWarning \
+    "$script_directory/signed-cargo.mts" "$@"
 fi
 exec cargo "$@"

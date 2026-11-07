@@ -26,6 +26,15 @@ struct Arguments {
 
 #[tokio::main]
 async fn main() {
+  #[cfg(unix)]
+  let _installation = if std::env::args_os().any(|argument| argument == "--component-info") {
+    None
+  } else {
+    ctl_core::installations::lease_current_executable().unwrap_or_else(|error| {
+      eprintln!("ctmux: could not retain its installation: {error}");
+      std::process::exit(1);
+    })
+  };
   if let Err(error) = run(Arguments::parse()).await {
     eprintln!("ctmux: {error}");
     std::process::exit(1);

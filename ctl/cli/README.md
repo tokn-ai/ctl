@@ -196,7 +196,8 @@ ctl setup
 cargo install --locked ctl-cli ctld ctmuxd ctl-taskd
 ```
 
-Cargo installs only the selected packages' executables. `ctld`, `ctmuxd`, and
+The `ctl-cli` package installs both `ctl` and the standalone installation manager
+`ctlup`. Cargo installs only the selected packages' executables. `ctld`, `ctmuxd`, and
 `ctl-taskd` are companion daemons and must be installed separately from `ctl-cli`.
 Keep terminal/task companion versions aligned with the CLI. These daemons should
 share the CLI's binary directory; `ctl setup` installs the macOS helper under
@@ -222,7 +223,7 @@ ctl task list       # Tasks managed by this account's task daemon
 account. If registration fails, the gateway reports the failure on stderr and
 continues serving the channel. A client can own several channels. Older clients
 can appear with an unknown label. From an
-ordinary SSH login, use `~/.tokn/ctl/current/ctl who` or add `~/.tokn/ctl/current`
+ordinary SSH login, use `~/.tokn/ctl/bin/ctl who` or add `~/.tokn/ctl/bin`
 to `PATH`. Installation preserves the user's login shell configuration.
 
 Interactive Unix connections
@@ -276,22 +277,26 @@ For local macOS development, use the shared Xcode provisioning flow from a check
 pnpm ctld:provision
 # Choose your team in Xcode and build the provisioning target once.
 pnpm ctld:build
-cargo run -p ctl-cli -- passwords
+~/.tokn/ctl/bin/ctl passwords
+~/.tokn/ctl/bin/ctlup status --json
 ```
 
-The command discovers and refreshes the provisioning profile, signs `ctld.app`,
-and publishes it under Cargo's configured target directory. An unsigned
-`target/debug/ctl` pins and verifies that helper in the immutable
-`~/.tokn/ctl/components/ctld/development/<archive-sha256>/` cache before launch.
-Cleaning Cargo outputs does not remove the running daemon's executable or the
-helper used by its askpass, identity-agent, and proxy children.
-Its selection belongs to the checkout, including with a shared target directory,
-and does not depend on the current working directory. Repeat the command after
-helper changes or profile expiry; CLI edits need only a normal Cargo rebuild.
-No notarization credentials are needed, and shared selections stay unchanged.
+The command bootstraps `ctlup` and delegates to `ctlup dev`. The manager builds
+the complete native command set, signs the copied `ctld.app`, and activates one
+verified installation under `~/.tokn/ctl/installs/`. Stable commands live in
+`~/.tokn/ctl/bin`. This uses the same active selection as other `ctlup` updates,
+and status reports the development build immediately. Cargo profiles and target
+directory configuration are preserved. The macOS desktop launcher delegates
+to the same path automatically; no notarization credentials are needed.
+See [local development builds](../../docs/local-bundles.md).
 
-Embedded development helpers use the same immutable cache. `ctl setup` prepares
-the helper selected by the shared resolver, including checkout helpers and
+Cleaning Cargo outputs does not remove the installed daemon's executable or its
+askpass, identity-agent, and proxy helpers. Running services retain their
+existing installation until explicitly restarted.
+
+Older checkout selections and embedded development helpers remain readable in
+the immutable development cache for compatibility. `ctl setup` prepares
+the helper selected by the shared resolver, including these checkout helpers and
 `CTLD_BIN` overrides; it does not replace that selection with a published release.
 Status inspects the same candidate without preparing it. It shows the source,
 path, and archive hash separately from the running build; `--json` includes
@@ -300,41 +305,49 @@ adds `selection` with the same identity. The archive hash identifies signed app
 bytes, the source fingerprint identifies compiled inputs, and the checkout ID
 identifies a path. None proves a helper was rebuilt after source edits.
 
-Preparing a development helper leaves release `current` unchanged. Setup preserves
-all running owners; existing daemons require an explicit restart to use the
-selected replacement.
+Setup preserves all running owners; existing daemons require an explicit
+restart to use the selected replacement.
 
-Use `ctl components update` for an explicit update. It defaults to this computer;
-`--hosts work,jump-a` updates several saved hosts through their preferred routes,
-and `--local` includes this computer in that batch. `--package ctl-agent` retains
-installed companion executables. The default `--package full-bundle` installs
-the executables from one verified build, including both CLIs in current bundles.
-Updates preserve running services
-and sessions; restart or reconnect separately.
+Use `ctlup` to install and update complete builds. It defaults to this computer;
+`--hosts work,jump-a` updates saved hosts through their existing authentication
+and preferred routes, and `--local` includes this computer in the batch. The
+GUI uses the same updater. Runtime operations remain in `ctl` and `ctmux`;
+`ctl components status/restart/stop` inspect and control running services.
+
+`ctlup` exposes stable commands under `~/.tokn/ctl/bin`. Only that directory
+needs to be on `PATH`. The manager remains there independently of runtime
+installs; `current` selects one verified immutable build under `installs/`.
+To upgrade the manager itself, run a newly downloaded `ctlup` executable with
+`install` or a local `update`. `ctlup update` does not automatically fetch a newer
+manager for itself.
+The previous build is retained for rollback, together with any older installation
+leased by a running process. Unused installations are pruned after activation.
+Signed macOS helper apps are retained intact. An update or rollback changes
+future launches and preserves running services and sessions; restart or
+reconnect separately.
 
 ```sh
-ctl components update --hosts work,jump-a --package ctl-agent
-ctl components check --channel dev --json
-ctl components check --channel stable
-ctl components update --hosts work --channel dev
-ctl components update --hosts work --channel stable
-ctl components update --hosts work --selected
-ctl --host work --method vpn components update
-ctl --destination my-ssh-alias components update
-ctl components update --hosts work --from /path/to/bundle-set --json
+ctlup install
+ctlup status --json
+ctlup check --channel stable
+ctlup update --hosts work,jump-a --channel stable
+ctlup --host work --method vpn update
+ctlup --destination my-ssh-alias update
+ctlup update --hosts work --from /path/to/bundle-set --json
+ctlup rollback
+ctlup --host work rollback --json
+ctlup prune
 ```
 
-`--from` supplies a complete build directory or archive. Use `--local-build` for
-four native binaries; local macOS full updates also require `--ctld-package`.
-Ordinary remote updates resolve the publication channel, or build a development
-Linux x64 working tree locally. `--channel` chooses a published source explicitly;
-`--selected` requests an offline installation from the pinned/included source.
-Automatic macOS local updates retain the signed local selection. `components list`
-shows included and stored complete builds across all targets, with availability
-and local/upload selections. Use `--target <triple>` to filter or `--json` for
-manifests, availability, selections, and inspection errors. Listing never imports
-or selects a build. `components sync` imports a build; `components select` can
-choose a listed stored or included build. See the
+`--from` supplies a complete build directory or archive for an explicit offline
+installation. Use `--local-build` for native binaries; local macOS builds also
+require `--ctld-package` with the signed app and its receipt. Automatic updates
+resolve the configured publication channel, or build a development Linux x64
+working tree locally. Explicit `--channel` chooses a published source and records
+the choice after success. Foreign-target artifacts are deployment cache entries,
+with no separate upload selection. Agent-only overlays and `--selected` are not
+part of the updater. Old `ctl components` installation commands report a hint to
+use `ctlup` without changing files. See the
 [component update guide](https://github.com/tokn-ai/ctl/blob/main/docs/component-updates.md)
 for source formats, cancellation, and per-host results.
 

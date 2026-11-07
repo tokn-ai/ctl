@@ -92,10 +92,23 @@ pub(super) fn load(store: &Store, target: &str, id: &str) -> io::Result<Bundle> 
       "component store is absent",
     ));
   }
+  let _guard = super::cache::read_guard(store)?;
+  load_locked(store, target, id)
+}
+
+fn load_locked(store: &Store, target: &str, id: &str) -> io::Result<Bundle> {
+  if !root_exists(store)? {
+    return Err(io::Error::new(
+      io::ErrorKind::NotFound,
+      "component store is absent",
+    ));
+  }
   let root = store.root.join("bundles");
   require_directory(&root)?;
   require_directory(&root.join(target))?;
   let directory = root.join(target).join(id);
+  require_directory(&directory)?;
+  let cache_lease = super::cache::lease(store, target, id)?;
   let manifest = read_manifest(&directory)?;
   if manifest.bundle_id != id || manifest.target_triple != target {
     return Err(invalid("bundle identity differs from its immutable path"));
@@ -104,6 +117,7 @@ pub(super) fn load(store: &Store, target: &str, id: &str) -> io::Result<Bundle> 
   Ok(Bundle {
     directory,
     manifest,
+    _cache_lease: cache_lease,
   })
 }
 
@@ -207,13 +221,15 @@ pub(super) fn publish(
   let root = root.join(&manifest.target_triple);
   ensure_directory(&root)?;
   let destination = root.join(&manifest.bundle_id);
+  super::cache::prepare_lease(store, &manifest.target_triple, &manifest.bundle_id)?;
   if directory_exists(&destination)? {
-    let existing = load(store, &manifest.target_triple, &manifest.bundle_id)?;
+    let existing = load_locked(store, &manifest.target_triple, &manifest.bundle_id)?;
     if existing.manifest != *manifest {
       return Err(invalid(
         "immutable bundle already contains different metadata",
       ));
     }
+    super::cache::touch(store, &manifest.target_triple, &manifest.bundle_id)?;
     return Ok(existing);
   }
   let stage = Temporary(root.join(format!(".partial-{}", uuid::Uuid::new_v4())));
@@ -231,7 +247,7 @@ pub(super) fn publish(
   sync_tree(&stage.0)?;
   fs::rename(&stage.0, &destination)?;
   File::open(&root)?.sync_all()?;
-  load(store, &manifest.target_triple, &manifest.bundle_id)
+  load_locked(store, &manifest.target_triple, &manifest.bundle_id)
 }
 
 pub(super) fn select(
@@ -245,7 +261,7 @@ pub(super) fn select(
   if only_unset && selected(store, purpose, &bundle.manifest.target_triple)?.is_some() {
     return Ok(());
   }
-  let current = load(
+  let current = load_locked(
     store,
     &bundle.manifest.target_triple,
     &bundle.manifest.bundle_id,
@@ -307,18 +323,17 @@ fn selection_path(store: &Store, purpose: Purpose, target: &str) -> PathBuf {
     .join(format!("{}-{target}.json", purpose.name()))
 }
 
-fn ancestors(store: &Store) -> [PathBuf; 4] {
-  let ctl = store.root.parent().unwrap();
-  let tokn = ctl.parent().unwrap();
-  [
-    tokn.parent().unwrap().to_owned(),
-    tokn.to_owned(),
-    ctl.to_owned(),
-    store.root.clone(),
-  ]
+fn ancestors(store: &Store) -> Vec<PathBuf> {
+  let mut paths = vec![store.home.clone()];
+  let mut path = store.home.clone();
+  for part in store.root.strip_prefix(&store.home).unwrap() {
+    path.push(part);
+    paths.push(path.clone());
+  }
+  paths
 }
 
-fn root_exists(store: &Store) -> io::Result<bool> {
+pub(super) fn root_exists(store: &Store) -> io::Result<bool> {
   for path in ancestors(store) {
     if !directory_exists(&path)? {
       return Ok(false);
@@ -334,7 +349,7 @@ fn ensure_root(store: &Store) -> io::Result<()> {
   Ok(())
 }
 
-fn directory_exists(path: &Path) -> io::Result<bool> {
+pub(super) fn directory_exists(path: &Path) -> io::Result<bool> {
   match fs::symlink_metadata(path) {
     Ok(metadata) => {
       require_directory_metadata(&metadata)?;
@@ -345,7 +360,7 @@ fn directory_exists(path: &Path) -> io::Result<bool> {
   }
 }
 
-fn require_directory(path: &Path) -> io::Result<()> {
+pub(super) fn require_directory(path: &Path) -> io::Result<()> {
   require_directory_metadata(&fs::symlink_metadata(path)?)
 }
 fn require_directory_metadata(metadata: &Metadata) -> io::Result<()> {
@@ -357,7 +372,7 @@ fn require_directory_metadata(metadata: &Metadata) -> io::Result<()> {
   }
   Ok(())
 }
-fn require_file(metadata: &Metadata) -> io::Result<()> {
+pub(super) fn require_file(metadata: &Metadata) -> io::Result<()> {
   if !metadata.is_file()
     || metadata.uid() != rustix::process::getuid().as_raw()
     || metadata.mode() & 0o077 != 0
@@ -366,7 +381,7 @@ fn require_file(metadata: &Metadata) -> io::Result<()> {
   }
   Ok(())
 }
-fn ensure_directory(path: &Path) -> io::Result<()> {
+pub(super) fn ensure_directory(path: &Path) -> io::Result<()> {
   if directory_exists(path)? {
     return Ok(());
   }
@@ -397,7 +412,7 @@ fn check_parents(root: &Path, path: &Path) -> io::Result<()> {
   }
   Ok(())
 }
-fn options() -> OpenOptions {
+pub(super) fn options() -> OpenOptions {
   let mut options = OpenOptions::new();
   options.mode(0o600).custom_flags(i32::from_ne_bytes(
     (rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK | rustix::fs::OFlags::CLOEXEC)
@@ -434,9 +449,9 @@ fn sync_tree(path: &Path) -> io::Result<()> {
   }
   File::open(path)?.sync_all()
 }
-struct Lock(File);
+pub(super) struct Lock(File);
 impl Lock {
-  fn acquire(path: &Path) -> io::Result<Self> {
+  pub(super) fn acquire(path: &Path) -> io::Result<Self> {
     match fs::symlink_metadata(path) {
       Ok(metadata) => require_file(&metadata)?,
       Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -449,13 +464,7 @@ impl Lock {
       .truncate(false)
       .open(path)?;
     require_file(&file.metadata()?)?;
-    file.try_lock().map_err(|error| match error {
-      fs::TryLockError::WouldBlock => io::Error::new(
-        io::ErrorKind::WouldBlock,
-        "another component sync is running",
-      ),
-      fs::TryLockError::Error(error) => error,
-    })?;
+    file.lock()?;
     Ok(Self(file))
   }
 }

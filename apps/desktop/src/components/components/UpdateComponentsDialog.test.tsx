@@ -17,20 +17,19 @@ afterEach(cleanup);
 const host: SshConnectionTarget = { kind: "ssh", host_id: "builder", host_name: "Builder", destination: "builder-alias", gateways: [{ kind: "ssh", gateway_id: "jump", name: "Jump", destination: "jump", mode: "automatic" }] };
 const complete = (host_index: number): ComponentUpdateHostResult => ({ host_index, state: "complete", error: null, result: { package: "full_bundle", bundle_id: "verified-build", target_triple: "aarch64-apple-darwin", services_preserved: true } });
 
-it("prefills a host, permits several hosts, and sends the chosen package and supplied build", async () => {
+it("prefills a host, permits several hosts, and always installs a complete build from supplied files", async () => {
   vi.mocked(updateComponents).mockResolvedValue([complete(0), complete(1)]);
   render(<UpdateComponentsDialog targets={[host]} context={{ targets: [host] }} on_close={vi.fn()} />);
   const user = userEvent.setup();
   expect((screen.getByRole("checkbox", { name: "Builder" }) as HTMLInputElement).checked).toBe(true);
   expect((screen.getByRole("checkbox", { name: "local" }) as HTMLInputElement).checked).toBe(false);
-  expect(screen.getAllByRole("radio")).toHaveLength(2);
+  expect(screen.queryAllByRole("radio")).toHaveLength(0);
   await user.click(screen.getByRole("checkbox", { name: "local" }));
-  await user.click(screen.getByRole("radio", { name: /ctl-agent only/ }));
   await user.selectOptions(screen.getByRole("combobox", { name: "Build source" }), "provided");
   await user.type(screen.getByRole("textbox", { name: "Build directory or archive" }), "/tmp/build directory");
   await user.click(screen.getByRole("button", { name: "Update" }));
   await screen.findByText("2 of 2 hosts updated. Running services were preserved.");
-  expect(updateComponents).toHaveBeenCalledExactlyOnceWith({ targets: [{ kind: "local" }, host], attempt_id: expect.any(String), options: { package: "ctl_agent", source: { kind: "provided", path: "/tmp/build directory", local_build: false, ctld_package: null } } }, expect.any(Function), expect.any(Function));
+  expect(updateComponents).toHaveBeenCalledExactlyOnceWith({ targets: [{ kind: "local" }, host], attempt_id: expect.any(String), options: { package: "full_bundle", source: { kind: "provided", path: "/tmp/build directory", local_build: false, ctld_package: null } } }, expect.any(Function), expect.any(Function));
 });
 
 it("keeps per-host failures and retries only failed hosts", async () => {

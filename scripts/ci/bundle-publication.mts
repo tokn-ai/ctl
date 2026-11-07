@@ -3,6 +3,7 @@ import { createReadStream } from "node:fs";
 import { join } from "node:path";
 import { agentTargets, maxAgentManifestBytes, parseAgentBundleSet, readAgentFile, verifyAgentBundleTarget,
   type AgentBundleIdentity, type AgentBundleSet } from "../shared/agent-bundle.mts";
+import { verifyUpdaterTarget } from "../shared/updater-bundle.mts";
 
 export const bundleRoot = "https://tokn-ai.dev/ctl/bundles/";
 export type BundleChannel = "dev" | "stable";
@@ -16,11 +17,16 @@ export async function validatedComponentSet(directory: string, identity: AgentBu
   const manifest = parseAgentBundleSet(await readAgentFile(join(directory, "bundle-set.json"), maxAgentManifestBytes), expected);
   if (manifest.schema_version === 1) throw new Error("Published component bundles require component metadata");
   const asset_names = ["bundle-set.json"];
+  let updater_assets = 0;
   for (const target of agentTargets) {
     const entry = manifest.targets[target];
     await verifyAgentBundleTarget(directory, expected, target, entry);
     asset_names.push(entry.archive, `${entry.archive}.sha256`);
+    const updater = await verifyUpdaterTarget(directory, expected, target);
+    updater_assets += updater.length;
+    asset_names.push(...updater);
   }
+  if (updater_assets !== 0 && updater_assets !== agentTargets.length * 3) throw new Error("component set contains an incomplete ctlup target set");
   return { manifest, asset_names };
 }
 

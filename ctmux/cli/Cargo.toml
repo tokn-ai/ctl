@@ -20,7 +20,7 @@ name = "ctmux"
 path = "src/main.rs"
 
 [dependencies]
-ctl-core.workspace = true
+ctl-core = { workspace = true, features = ["bundles"] }
 serde_json.workspace = true
 clap.workspace = true
 ctmux-client.workspace = true

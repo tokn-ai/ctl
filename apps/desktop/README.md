@@ -395,14 +395,15 @@ profiles expire after seven days; after initial setup the signed-development
 launcher asks Xcode to refresh an expired profile automatically.
 
 The CLI and GUI share this provisioning project and profile discovery.
-From the repository root, `pnpm ctld:build` prepares one complete signed
-`ctld.app` that ordinary unsigned debug CLI and GUI builds both discover and
-verify when launched directly with Cargo or the standard Tauri command; see the
+From the repository root, `pnpm ctld:build` delegates to `ctlup dev` to prepare
+a complete native installation, including signed `ctld.app`. The manager
+activates the verified build under `~/.tokn/ctl/installs/` and exposes stable
+commands in `~/.tokn/ctl/bin`; see the
 [development instructions](../../README.md#build).
 
-Root `pnpm desktop:dev` manages its signed development daemon automatically;
-preparing `ctld:build` separately is unnecessary for this launcher.
-The launcher searches Xcode's downloaded
+Root `pnpm desktop:dev` delegates preparation to the same manager automatically;
+preparing `ctld:build` separately is unnecessary. During signing, it searches
+Xcode's downloaded
 profiles and `~/Library/Application Support/ctmux/signing/ctld.provisionprofile`,
 selects the newest unexpired profile for `dev.tokn-ai.ctl.ctld`, discovers its
 matching signing certificate in the login Keychain, and selects a private,
@@ -418,8 +419,11 @@ Tauri watching for the next edit. If the first build fails, the watcher stays
 active until a build succeeds. Frontend hot reload continues to use Vite.
 Quitting the launcher closes its app and build processes.
 
-Before each native launch, the launcher uses Cargo's reported helper artifact
-and stages a signed bundle when it changes. It starts ctld only if no daemon is
+Before each native launch, `ctlup dev` builds all six runtime commands and the
+manager from one source identity, using Cargo's reported artifacts and configured
+profile/target directory. It snapshots and signs the helper before activating
+the complete installation. The launcher holds a lease and uses immutable paths
+from that installation. It starts ctld only if no daemon is
 running. A rebuild leaves an existing daemon in place; use **About → Restart**
 on the SSH ctld row to apply the staged build explicitly. The app can open About
 even when the running daemon uses an older SSH protocol. Build or signing
@@ -436,10 +440,10 @@ Tauri arguments, such as `--release`, can be passed through
 `pnpm desktop:dev --release`.
 Explicit `--no-watch` or `--exit-on-panic` still opts out of waiting after a
 failed build, following Tauri's behavior.
-Direct debug builds launched with the standard Tauri command first verify this
-checkout's selected signed ctld, then discover a compatible, verified `ctld.app`
-selected under `~/.tokn/ctl`,
-including signed development installations. Packaged desktop releases prefer
+Direct debug builds retain compatibility with older checkout helper selections
+and can discover a compatible, verified `ctld.app` selected under
+`~/.tokn/ctl`, including signed development installations. The managed launcher
+pins the complete build prepared by `ctlup`. Packaged desktop releases prefer
 their own bundled helper. Without a signed app, development falls back to a
 loose, unsigned daemon and cannot store Touch ID-protected credentials. Preparing
 a signed helper preserves an already-running daemon: use **About → Restart**

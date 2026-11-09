@@ -84,6 +84,16 @@ fn repair_reason(error: &CoreError) -> Option<&'static str> {
   match error {
     CoreError::AgentNotFound => Some("The remote ctl-agent is missing."),
     CoreError::IdentityUnsupported => Some("The remote ctl-agent predates host identity support."),
+    CoreError::BrokerService(ctl_client::connection::Error::Daemon { code, .. })
+      if code == "ctl_agent_not_found" =>
+    {
+      Some("The remote ctl-agent is missing.")
+    }
+    CoreError::BrokerService(ctl_client::connection::Error::Daemon { code, .. })
+      if code == "ctl_agent_update_required" =>
+    {
+      Some("The remote ctl-agent needs an update for shared SSH services.")
+    }
     CoreError::UnsupportedSshProtocol { marker } if marker == "ctl-ssh-v2" => {
       Some("The remote ctl-agent uses the older rmux protocol.")
     }
@@ -114,7 +124,27 @@ pub(super) async fn offer_repair(
   {
     return Ok(false);
   }
-  if matches!(error, CoreError::UnsupportedSshProtocol { .. }) {
+  if matches!(error, CoreError::BrokerService(ctl_client::connection::Error::Daemon { code, .. }) if matches!(code.as_str(), "ctl_agent_not_found" | "ctl_agent_update_required"))
+  {
+    if matches!(
+      settings,
+      ConnectionTargetDto::Ssh {
+        remote_info: Some(_),
+        ..
+      }
+    ) {
+      let (SshInteraction::Brokered { control_path, .. }
+      | SshInteraction::Multiplexed { control_path }) = interaction
+      else {
+        return Ok(false);
+      };
+      // Read the account's existing pin without depending on an installed or
+      // compatible ctl-agent. Unpinned first-time hosts can proceed to install.
+      let remote_id =
+        ctl_client::maintenance::inspect_remote_id(destination, options, control_path).await?;
+      settings.verify_remote_id(&remote_id)?;
+    }
+  } else if matches!(error, CoreError::UnsupportedSshProtocol { .. }) {
     let identity =
       ctl_client::inspect_legacy_ssh_identity(destination, options, interaction, service).await?;
     settings.verify_remote_identity(&identity)?;

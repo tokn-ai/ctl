@@ -2,6 +2,7 @@
 pub mod forwarding;
 mod identity_contract;
 pub mod maintenance;
+pub mod transport;
 use ctl_core::protocol::{ProtocolOffer, ProtocolVersion};
 pub use identity_contract::{
   IdentitySelection, accept_identity_contract, accept_identity_contract_with_client,
@@ -94,6 +95,12 @@ pub fn agent_protocols() -> Vec<ctl_core::component::ProtocolInfo> {
       forwarding::PROTOCOL_BUILD,
       forwarding::PROTOCOL_VERSION,
       forwarding::SUPPORTED_PROTOCOL_VERSIONS,
+    ),
+    ctl_core::component::ProtocolInfo::new(
+      "ctl_transport",
+      transport::PROTOCOL_BUILD,
+      transport::PROTOCOL_VERSION,
+      transport::SUPPORTED_PROTOCOL_VERSIONS,
     ),
   ]
 }

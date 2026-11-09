@@ -341,7 +341,7 @@ export function SshHostFlow({
       setVpnUpdateOwner(remoteVpnUpdateOwner(candidate, failure));
       onConnectionChange?.(candidate, "error", errorMessage(failure));
       const code = errorCode(failure);
-      const update = code === "ctl_agent_identity_unsupported" || code === "protocol_version_mismatch";
+      const update = code === "ctl_agent_identity_unsupported" || code === "ctl_agent_update_required" || code === "protocol_version_mismatch";
       const restart = code === "protocol_version_mismatch" && componentsUpdatedRef.current !== null
         && sameSshEndpoint(candidate, componentsUpdatedRef.current);
       setNeedsUpdate(update);

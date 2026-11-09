@@ -4,6 +4,7 @@ use ctl_core::observability::{
   Event as HistoryEvent, Operation as HistoryOperation, Outcome as HistoryOutcome,
 };
 
+mod agent_transport;
 #[cfg(unix)]
 mod client_lifetime;
 mod credential_metadata;
@@ -81,7 +82,7 @@ const MAX_DIAGNOSTICS: usize = 8192;
 const MAX_LISTENER_CATALOG_BYTES: usize = 64 * 1024;
 const LISTENER_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
 const REMOTE_LISTENERS_COMMAND: &str = concat!(
-  r#"PATH="$HOME/.tokn/ctl/current:$PATH"; export PATH; "#,
+  r#"PATH="$HOME/.tokn/ctl/bin:$HOME/.tokn/ctl/current:$PATH"; export PATH; "#,
   r#"command -v ctl-agent >/dev/null 2>&1 || { printf 'ctl-agent is not installed\n' >&2; exit 127; }; "#,
   "exec ctl-agent listeners",
 );
@@ -100,6 +101,7 @@ struct State {
   endpoint_registry: endpoint_registry::Registry,
   shared_forwards: AsyncMutex<SharedForwardRegistry>,
   udp_forwards: AsyncMutex<udp_forwarding::Registry>,
+  agent_transports: agent_transport::Registry,
   #[cfg(windows)]
   native_forwards: AsyncMutex<native_forwarding::Registry>,
   vpn_service: Option<vpn_service::VpnService>,
@@ -417,6 +419,10 @@ enum RequestError {
   MasterObservationFailed(String),
   #[error("could not use SSH configuration: {0}")]
   SshConfig(String),
+  #[error("shared SSH service transport failed: {0}")]
+  AgentTransport(#[source] io::Error),
+  #[error("shared SSH service stream closed: {0}")]
+  ServiceStreamClosed(#[source] io::Error),
   #[error("This SSH host was disconnected. Use Connect host to reconnect.")]
   HostDisconnected,
   #[error("could not disconnect the OpenSSH control master: {0}")]
@@ -571,6 +577,7 @@ async fn run_with_approvals(
   vpn_owner.shutdown().await;
   state.shared_forwards.lock().await.shutdown().await;
   state.udp_forwards.lock().await.shutdown().await;
+  state.agent_transports.shutdown();
   // Native authorization work may still hold an Arc<State> after its async
   // waiter is canceled. Release connection leases before exposing the endpoint
   // to a replacement owner, without waiting for those references to disappear.
@@ -679,8 +686,9 @@ async fn handle_connection(
     let Some(request) = ctl_ipc::read_frame::<_, ClientMessage>(&mut stream).await? else {
       return Ok(());
     };
+    let service_handoff = matches!(&request, ClientMessage::OpenService { .. });
     handle_request(&mut stream, &state, request, protocol).await?;
-    if !ctl_ipc::persistent_requests_supported(protocol) {
+    if service_handoff || !ctl_ipc::persistent_requests_supported(protocol) {
       return Ok(());
     }
   }
@@ -708,6 +716,11 @@ async fn handle_request(
       ClientMessage::MasterStatus { target } => master_status(stream, state, &target).await,
       ClientMessage::ConnectionStatus { target } => connection_status(stream, state, &target).await,
       ClientMessage::WatchRecovery { target } => wake_recovery::watch(stream, state, target).await,
+      ClientMessage::OpenService {
+        target,
+        control_path,
+        service,
+      } => agent_transport::open_service(stream, state, &target, &control_path, service).await,
       ClientMessage::DisconnectMaster { target } => disconnect_master(stream, state, &target).await,
       ClientMessage::DeleteCredentials { target } => delete_credentials(stream, &target).await,
       ClientMessage::ConfigurePortForward {
@@ -739,20 +752,23 @@ async fn handle_request(
   }
   .await;
   if let Err(error) = &result {
-    if matches!(error, RequestError::AuthenticationRequired) {
-      let _ = ctl_ipc::write_frame(stream, &ServerMessage::AuthenticationRequired).await;
-      return result;
-    }
-    let _ = ctl_ipc::write_frame(
-      stream,
-      &ServerMessage::Error {
-        code: error.code().to_owned(),
-        message: error.to_string(),
-      },
-    )
-    .await;
+    respond_to_request_error(stream, error).await;
   }
   result
+}
+
+async fn respond_to_request_error(stream: &mut ctl_ipc::Stream, error: &RequestError) {
+  let response = match error {
+    // ServiceOpened transfers the socket to the inner protocol. Any subsequent
+    // broker frame would corrupt that stream; closing it conveys the failure.
+    RequestError::ServiceStreamClosed(_) => return,
+    RequestError::AuthenticationRequired => ServerMessage::AuthenticationRequired,
+    _ => ServerMessage::Error {
+      code: error.code().to_owned(),
+      message: error.to_string(),
+    },
+  };
+  let _ = ctl_ipc::write_frame(stream, &response).await;
 }
 
 fn validate_request_platform(request: &ClientMessage) -> Result<(), RequestError> {
@@ -774,6 +790,7 @@ fn validate_request_platform(request: &ClientMessage) -> Result<(), RequestError
         | ClientMessage::MasterStatus { .. }
         | ClientMessage::ConnectionStatus { .. }
         | ClientMessage::WatchRecovery { .. }
+        | ClientMessage::OpenService { .. }
         | ClientMessage::DisconnectMaster { .. }
         | ClientMessage::ListRemoteListeners { .. }
     )
@@ -789,6 +806,13 @@ fn validate_request_contract(
   request: &ClientMessage,
   protocol: ProtocolVersion,
 ) -> Result<(), RequestError> {
+  if matches!(request, ClientMessage::OpenService { .. })
+    && !ctl_ipc::service_streams_supported(protocol)
+  {
+    return Err(RequestError::InvalidRequest(
+      "shared SSH services require ctld 1.2.18",
+    ));
+  }
   let forwarding_protocol = match request {
     ClientMessage::ConfigurePortForward { forward, .. } => forward.protocol,
     ClientMessage::ListRemoteListeners { protocol, .. } => *protocol,
@@ -818,6 +842,7 @@ fn validate_request_contract(
   | ClientMessage::MasterStatus { target }
   | ClientMessage::ConnectionStatus { target }
   | ClientMessage::WatchRecovery { target }
+  | ClientMessage::OpenService { target, .. }
   | ClientMessage::DisconnectMaster { target }
   | ClientMessage::DeleteCredentials { target }
   | ClientMessage::ConfigurePortForward { target, .. }
@@ -892,6 +917,7 @@ fn normalize_request_target(request: &mut ClientMessage) {
     | ClientMessage::MasterStatus { target }
     | ClientMessage::ConnectionStatus { target }
     | ClientMessage::WatchRecovery { target }
+    | ClientMessage::OpenService { target, .. }
     | ClientMessage::DisconnectMaster { target }
     | ClientMessage::DeleteCredentials { target }
     | ClientMessage::ConfigurePortForward { target, .. }
@@ -1595,6 +1621,7 @@ async fn reuse_master_or_prepare(
       }
       // UDP sockets belong to ctld even when their SSH master was private.
       state.udp_forwards.lock().await.cancel_target(target).await;
+      state.agent_transports.cancel_target(target);
       state
         .endpoint_registry
         .remove(&crate::control_path(target))?;
@@ -1633,6 +1660,16 @@ impl RequestError {
       Self::MasterConnectionFailed(_) => "ssh_connection_failed",
       Self::MasterObservationFailed(_) => "ssh_status_unknown",
       Self::SshConfig(_) => "ssh_config_error",
+      Self::AgentTransport(error) if agent_transport::agent_is_missing(error) => {
+        "ctl_agent_not_found"
+      }
+      Self::AgentTransport(error) if error.kind() == io::ErrorKind::Unsupported => {
+        "ctl_agent_update_required"
+      }
+      Self::AgentTransport(error) if error.kind() == io::ErrorKind::WouldBlock => {
+        "ssh_service_capacity"
+      }
+      Self::AgentTransport(_) | Self::ServiceStreamClosed(_) => "ssh_transport_failed",
       Self::HostDisconnected => "ssh_host_disconnected",
       Self::DisconnectFailed(_) => "ssh_disconnect_failed",
       Self::PortForwardFailed(_) => "ssh_port_forward_failed",
@@ -1995,6 +2032,7 @@ async fn disconnect_master_inner(
   let mut forwards = state.forwards.lock().await;
   forwards.pause(target);
   state.udp_forwards.lock().await.cancel_target(target).await;
+  state.agent_transports.cancel_target(target);
   let endpoint = state.existing_endpoint(target)?;
   if let Some(endpoint) = &endpoint {
     // Pin the recovered endpoint while listener cleanup runs after its durable

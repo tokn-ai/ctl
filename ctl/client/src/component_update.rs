@@ -23,6 +23,18 @@ pub async fn prepare(
   source: &BuildSource,
   included: &[PathBuf],
 ) -> io::Result<Bundle> {
+  let bundle = prepare_source(home, target, purpose, source, included).await?;
+  verify_source(&bundle.manifest, target, purpose)?;
+  Ok(bundle)
+}
+
+async fn prepare_source(
+  home: &Path,
+  target: &str,
+  purpose: Purpose,
+  source: &BuildSource,
+  included: &[PathBuf],
+) -> io::Result<Bundle> {
   if matches!(source, BuildSource::Automatic)
     && (purpose == Purpose::Upload || !target.ends_with("-apple-darwin"))
   {
@@ -213,6 +225,18 @@ fn verify_source(manifest: &Manifest, target: &str, purpose: Purpose) -> io::Res
       "choose a compatible complete build for this host's target",
     ));
   }
+  if purpose == Purpose::Upload {
+    require_shared_services(manifest)?;
+  }
+  Ok(())
+}
+
+fn require_shared_services(manifest: &Manifest) -> io::Result<()> {
+  if !crate::remote_bundle::compatibility::supports_shared_services(&manifest.components) {
+    return Err(invalid(
+      "remote uploads require ctl-agent with ctl_transport 1.0.1; choose a newer complete build",
+    ));
+  }
   Ok(())
 }
 
@@ -235,13 +259,17 @@ fn included_build(
 ) -> io::Result<Bundle> {
   let target = publisher_target(target, purpose);
   let target = target.as_ref();
-  let candidate = crate::remote_bundle::read_compatible_bundle(directories, target)
-    .map_err(io::Error::other)?
-    .ok_or_else(|| {
-      invalid(
-        "no selected or included compatible build; provide build files or select a bundle in About",
-      )
-    })?;
+  let candidate = if purpose == Purpose::Upload {
+    crate::remote_bundle::read_shared_service_bundle(directories, target)
+  } else {
+    crate::remote_bundle::read_compatible_bundle(directories, target)
+  }
+  .map_err(io::Error::other)?
+  .ok_or_else(|| {
+    invalid(
+      "no selected or included compatible build; provide build files or select a bundle in About",
+    )
+  })?;
   let source = if candidate.bundle_id == candidate.app_version {
     Source::Release
   } else {
@@ -457,15 +485,15 @@ pub async fn install_remote(
       "agent-only overlays are no longer installed; use a complete ctlup update",
     )));
   }
+  require_shared_services(&bundle.manifest).map_err(invalid)?;
   let home =
     dirs::home_dir().ok_or_else(|| invalid(invalid_data("home directory is unavailable")))?;
   let updater = crate::installation::updater_for_bundle(&home, bundle)
     .await
     .map_err(invalid)?;
   let snapshot = bundle.clone();
-  let archive = tokio::task::spawn_blocking(move || match package {
-    Package::CtlAgent => agent_archive(&snapshot),
-    Package::FullBundle => crate::components::upload_bundle(&snapshot).map(|upload| upload.archive),
+  let archive = tokio::task::spawn_blocking(move || {
+    crate::components::upload_bundle(&snapshot).map(|upload| upload.archive)
   })
   .await
   .map_err(|error| invalid(io::Error::other(error)))?

@@ -27,6 +27,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, R
 use tokio::process::{ChildStdin, ChildStdout, Command};
 use tokio::sync::watch;
 
+mod broker_transport;
 pub mod caller_auth;
 pub mod connection;
 pub mod hosts;
@@ -167,6 +168,12 @@ pub enum SshInteraction {
   /// Reuses this exact master and fails if it is unavailable; never starts a
   /// separate SSH connection, even when noninteractive credentials are usable.
   Multiplexed {
+    control_path: PathBuf,
+  },
+  /// Opens fixed services through ctld's shared agent transport. Other fixed
+  /// SSH commands retain the exact selected master's authentication policy.
+  Brokered {
+    target: ctl_ipc::SshTarget,
     control_path: PathBuf,
   },
   Askpass {
@@ -335,16 +342,24 @@ pub async fn open_task_transport_with_interaction(
   }
 }
 
-/// One OpenSSH remote-command channel carrying raw service protocol bytes.
-///
-/// Dropping the stream closes its pipes and asks the supervisor to terminate
-/// and reap the SSH child. A fresh reconnect always creates a fresh SSH
-/// channel; OpenSSH may transparently reuse a configured control master.
+/// One remote service stream carried by OpenSSH or ctld's shared transport.
+/// Dropping a brokered stream closes that logical service, while dropping a
+/// direct stream asks its supervisor to terminate and reap its SSH child.
 pub struct SshTransport {
   pub remote_identity: Option<Box<ctl_proto::RemoteIdentity>>,
-  stdin: ChildStdin,
-  stdout: BufReader<ChildStdout>,
-  shutdown: watch::Sender<bool>,
+  io: SshIo,
+}
+
+enum SshIo {
+  Process {
+    stdin: ChildStdin,
+    stdout: BufReader<ChildStdout>,
+    shutdown: watch::Sender<bool>,
+  },
+  Brokered {
+    stdin: tokio::io::WriteHalf<ctl_ipc::Stream>,
+    stdout: BufReader<tokio::io::ReadHalf<ctl_ipc::Stream>>,
+  },
 }
 
 impl AsyncRead for SshTransport {
@@ -353,7 +368,10 @@ impl AsyncRead for SshTransport {
     context: &mut Context<'_>,
     buffer: &mut ReadBuf<'_>,
   ) -> Poll<io::Result<()>> {
-    Pin::new(&mut self.stdout).poll_read(context, buffer)
+    match &mut self.io {
+      SshIo::Process { stdout, .. } => Pin::new(stdout).poll_read(context, buffer),
+      SshIo::Brokered { stdout, .. } => Pin::new(stdout).poll_read(context, buffer),
+    }
   }
 }
 
@@ -363,27 +381,38 @@ impl AsyncWrite for SshTransport {
     context: &mut Context<'_>,
     buffer: &[u8],
   ) -> Poll<Result<usize, io::Error>> {
-    Pin::new(&mut self.stdin).poll_write(context, buffer)
+    match &mut self.io {
+      SshIo::Process { stdin, .. } => Pin::new(stdin).poll_write(context, buffer),
+      SshIo::Brokered { stdin, .. } => Pin::new(stdin).poll_write(context, buffer),
+    }
   }
 
   fn poll_flush(
     mut self: Pin<&mut Self>,
     context: &mut Context<'_>,
   ) -> Poll<Result<(), io::Error>> {
-    Pin::new(&mut self.stdin).poll_flush(context)
+    match &mut self.io {
+      SshIo::Process { stdin, .. } => Pin::new(stdin).poll_flush(context),
+      SshIo::Brokered { stdin, .. } => Pin::new(stdin).poll_flush(context),
+    }
   }
 
   fn poll_shutdown(
     mut self: Pin<&mut Self>,
     context: &mut Context<'_>,
   ) -> Poll<Result<(), io::Error>> {
-    Pin::new(&mut self.stdin).poll_shutdown(context)
+    match &mut self.io {
+      SshIo::Process { stdin, .. } => Pin::new(stdin).poll_shutdown(context),
+      SshIo::Brokered { stdin, .. } => Pin::new(stdin).poll_shutdown(context),
+    }
   }
 }
 
 impl Drop for SshTransport {
   fn drop(&mut self) {
-    let _ignored = self.shutdown.send(true);
+    if let SshIo::Process { shutdown, .. } = &self.io {
+      let _ignored = shutdown.send(true);
+    }
   }
 }
 
@@ -435,6 +464,9 @@ pub async fn open_ssh_service_interactive(
   service: RemoteService,
 ) -> Result<SshTransport, CoreError> {
   validate_ssh_target(destination, options)?;
+  if let Some(stream) = broker_transport::open(options, interaction, service, false).await? {
+    return Ok(stream);
+  }
   let mut command = Command::new(SSH_PROGRAM);
 
   // Insert local-only options before `--`; never append them to the remote command.
@@ -455,6 +487,9 @@ pub async fn open_identified_ssh_service(
   service: RemoteService,
 ) -> Result<SshTransport, CoreError> {
   validate_ssh_target(destination, options)?;
+  if let Some(stream) = broker_transport::open(options, interaction, service, true).await? {
+    return Ok(stream);
+  }
   let mut command = Command::new(SSH_PROGRAM);
   let extra = configure_ssh_interaction(&mut command, interaction);
   command
@@ -524,7 +559,8 @@ fn configure_ssh_interaction(command: &mut Command, interaction: &SshInteraction
     }
     SshInteraction::Inherit => Vec::new(),
     SshInteraction::Batch => vec!["-o".into(), "BatchMode=yes".into()],
-    SshInteraction::Multiplexed { control_path } => vec![
+    SshInteraction::Multiplexed { control_path }
+    | SshInteraction::Brokered { control_path, .. } => vec![
       "-S".into(),
       control_path.as_os_str().to_owned(),
       "-o".into(),
@@ -854,9 +890,11 @@ where
 
   Ok(SshTransport {
     remote_identity,
-    stdin,
-    stdout,
-    shutdown,
+    io: SshIo::Process {
+      stdin,
+      stdout,
+      shutdown,
+    },
   })
 }
 
@@ -907,6 +945,18 @@ pub fn is_retryable_connection_error(error: &CoreError) -> bool {
     // This is a preface-read failure enriched with stderr; retain its previous
     // reconnect behavior (for example after a transient connection refusal).
     CoreError::SshStartup(_) => true,
+    CoreError::BrokerService(source) => match source {
+      connection::Error::ConnectionClosed | connection::Error::ServiceTimeout => true,
+      connection::Error::Codec(ctl_ipc::CodecError::Io(source))
+      | connection::Error::Connect(ctl_ipc::ConnectError::Connect(source)) => {
+        ctl_core::connection::is_transient_io_error(source)
+      }
+      connection::Error::Daemon { code, .. } => matches!(
+        code.as_str(),
+        "ssh_connection_failed" | "ssh_transport_failed" | "ctld_connection_error"
+      ),
+      _ => false,
+    },
     CoreError::RemoteIdentity(source) => ctl_core::connection::is_transient_io_error(source),
     CoreError::LocalConnection(_)
     | CoreError::LocalTask(_)
@@ -1083,7 +1133,10 @@ async fn prepare_ssh_base_arguments(
   options: &SshConnectionOptions,
   interaction: &SshInteraction,
 ) -> Result<Vec<OsString>, CoreError> {
-  let fresh_route = !matches!(interaction, SshInteraction::Multiplexed { .. });
+  let fresh_route = !matches!(
+    interaction,
+    SshInteraction::Multiplexed { .. } | SshInteraction::Brokered { .. }
+  );
   let proxy = if fresh_route
     && options
       .gateways
@@ -1214,6 +1267,8 @@ pub enum CoreError {
   LocalTask(#[from] ctl_task_client::ClientError),
   #[error(transparent)]
   LocalConnection(#[from] ctl_ipc::ConnectError),
+  #[error(transparent)]
+  BrokerService(#[from] connection::Error),
   #[error("invalid SSH destination '{0}'")]
   InvalidSshDestination(String),
   #[error("invalid structured SSH setting '{0}'")]
@@ -1547,32 +1602,46 @@ mod tests {
 
   #[test]
   fn multiplexed_connections_require_the_selected_master_without_prompting() {
-    let mut command = Command::new("ssh");
-    let arguments = configure_ssh_interaction(
-      &mut command,
-      &SshInteraction::Multiplexed {
-        control_path: PathBuf::from("/tmp/ctld/master"),
+    let control_path = PathBuf::from("/tmp/ctld/master");
+    for interaction in [
+      SshInteraction::Multiplexed {
+        control_path: control_path.clone(),
       },
-    );
-
-    assert_eq!(
-      arguments,
-      [
-        "-S",
-        "/tmp/ctld/master",
-        "-o",
-        "ControlMaster=no",
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "ProxyCommand=false",
-        "-o",
-        "ForkAfterAuthentication=no",
-        "-o",
-        "StdinNull=no",
-      ]
-      .map(OsString::from)
-    );
+      SshInteraction::Brokered {
+        target: ctl_ipc::SshTarget {
+          destination: "fixture".into(),
+          ssh_config_alias: None,
+          use_ssh_config_master: None,
+          hostname: None,
+          user: None,
+          port: None,
+          identity_file: None,
+          gateways: Vec::new(),
+        },
+        control_path,
+      },
+    ] {
+      let mut command = Command::new("ssh");
+      let arguments = configure_ssh_interaction(&mut command, &interaction);
+      assert_eq!(
+        arguments,
+        [
+          "-S",
+          "/tmp/ctld/master",
+          "-o",
+          "ControlMaster=no",
+          "-o",
+          "BatchMode=yes",
+          "-o",
+          "ProxyCommand=false",
+          "-o",
+          "ForkAfterAuthentication=no",
+          "-o",
+          "StdinNull=no",
+        ]
+        .map(OsString::from)
+      );
+    }
   }
 
   #[test]

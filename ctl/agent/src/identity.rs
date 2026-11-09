@@ -331,12 +331,12 @@ mod tests {
     let components = &mut manifest["components"];
     let mut ctl = components["ctl-agent"].clone();
     let ctld_protocols = components["ctld"]["protocols"].as_array().unwrap();
-    ctl["protocols"].as_array_mut().unwrap().extend(
-      ctld_protocols
-        .iter()
-        .filter(|p| p["name"] != "ctld")
-        .cloned(),
-    );
+    let protocols = ctl["protocols"].as_array_mut().unwrap();
+    for protocol in ctld_protocols.iter().filter(|p| p["name"] != "ctld") {
+      if !protocols.contains(protocol) {
+        protocols.push(protocol.clone());
+      }
+    }
     components["ctl"] = ctl;
     components["ctmux"] = components["ctmuxd"].clone();
     assert!(parse_manifest(&serde_json::to_vec(&manifest).unwrap(), &component).is_ok());
@@ -373,12 +373,14 @@ mod tests {
     let mut other_agent = valid.clone();
     other_agent["components"]["ctl-agent"]["build"]["source_fingerprint"] = json!("c".repeat(64));
     cases.push(other_agent);
-    let mut missing_protocol = valid.clone();
-    missing_protocol["components"]["ctl-agent"]["protocols"]
-      .as_array_mut()
-      .unwrap()
-      .pop();
-    cases.push(missing_protocol);
+    for protocol in ["ctl_identity", "ctl_transport"] {
+      let mut missing_protocol = valid.clone();
+      missing_protocol["components"]["ctl-agent"]["protocols"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|entry| entry["name"] != protocol);
+      cases.push(missing_protocol);
+    }
     let mut invalid_protocol = valid.clone();
     invalid_protocol["components"]["ctmuxd"]["protocols"][0]["supported_versions"] = json!([]);
     cases.push(invalid_protocol);
@@ -386,7 +388,7 @@ mod tests {
     missing_companion_protocol["components"]["ctl-taskd"]["protocols"]
       .as_array_mut()
       .unwrap()
-      .pop();
+      .retain(|entry| entry["name"] != "ctmux_control");
     cases.push(missing_companion_protocol);
     let mut missing_vpn_daemon = valid.clone();
     missing_vpn_daemon["components"]
@@ -398,7 +400,7 @@ mod tests {
     missing_vpn_daemon_protocol["components"]["ctld"]["protocols"]
       .as_array_mut()
       .unwrap()
-      .pop();
+      .retain(|entry| entry["name"] != "ctld_helper");
     cases.push(missing_vpn_daemon_protocol);
     for manifest in cases {
       assert_eq!(

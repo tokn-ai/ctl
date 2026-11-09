@@ -14,8 +14,8 @@ use ctl_ipc::{LocalPortForward, SshTarget};
 use ctl_proto::forwarding;
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite};
 use tokio::net::UdpSocket;
-use tokio::process::{ChildStdin, ChildStdout, Command};
-use tokio::sync::{mpsc, oneshot};
+use tokio::process::Command;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
@@ -24,15 +24,25 @@ use super::{RequestError, SSH_PROGRAM, append_target_arguments};
 
 const PEER_QUEUE: usize = 8;
 const CHANNEL_QUEUE: usize = forwarding::MAX_PEERS * PEER_QUEUE;
+const MAX_UPLOAD_BYTES: usize = 32 * 1024 * 1024;
 const REMOTE_COMMAND: &str = concat!(
-  r#"PATH="$HOME/.tokn/ctl/current:$PATH"; export PATH; "#,
+  r#"PATH="$HOME/.tokn/ctl/bin:$HOME/.tokn/ctl/current:$PATH"; export PATH; "#,
   r#"command -v ctl-agent >/dev/null 2>&1 || { printf 'ctl-agent is not installed\n' >&2; exit 127; }; "#,
   "exec ctl-agent forward-udp",
 );
 
-#[derive(Default)]
 pub(super) struct Registry {
   listeners: HashMap<(SshTarget, LocalPortForward), Listener>,
+  upload_budget: Arc<Semaphore>,
+}
+
+impl Default for Registry {
+  fn default() -> Self {
+    Self {
+      listeners: HashMap::new(),
+      upload_budget: Arc::new(Semaphore::new(MAX_UPLOAD_BYTES)),
+    }
+  }
 }
 
 struct Listener {
@@ -77,6 +87,7 @@ impl Registry {
     target: &SshTarget,
     path: Option<&Path>,
     forward: &LocalPortForward,
+    gateways: &super::agent_transport::Registry,
   ) -> Result<Prepared, RequestError> {
     super::validate_forward(forward)?;
     self.cancel(target, forward).await;
@@ -85,14 +96,22 @@ impl Registry {
       .await
       .map_err(|error| super::port_forwarding::local_bind_error(forward, &error))?;
     // Verify agent capability and destination before reporting the rule active.
-    // Every peer uses this single SSH session, leaving the master's remaining
-    // command sessions available to terminals and other ctl operations.
-    let channel = Channel::open(command(target, path), forward)
-      .await
-      .map_err(|error| {
-        RequestError::PortForwardFailed(format!("Could not start UDP forwarding: {error}"))
-      })?;
-    let listener = Self::listener(socket, channel);
+    // Rules and terminal views use logical streams on the same agent command.
+    // Native Windows SSH has no shared master and retains its direct channel.
+    let channel = match path {
+      Some(path) => {
+        let stream = gateways
+          .open(target, path, ctl_proto::transport::Service::Udp)
+          .await
+          .map_err(RequestError::AgentTransport)?;
+        Channel::shared(stream, forward).await
+      }
+      None => Channel::open(command(target, None), forward).await,
+    }
+    .map_err(|error| {
+      RequestError::PortForwardFailed(format!("Could not start UDP forwarding: {error}"))
+    })?;
+    let listener = self.listener(socket, channel);
     Ok(Prepared {
       key: (target.clone(), forward.clone()),
       listener,
@@ -153,20 +172,24 @@ impl Registry {
     }
   }
 
-  fn listener(socket: UdpSocket, channel: Channel) -> Listener {
+  fn listener(&self, socket: UdpSocket, channel: Channel) -> Listener {
     let (shutdown, stop) = oneshot::channel();
     let error = Arc::new(Mutex::new(None));
     let health = Arc::clone(&error);
+    let upload_budget = Arc::clone(&self.upload_budget);
     let task = tokio::spawn(async move {
       let Channel {
         mut process,
         mut stdin,
         mut stdout,
       } = channel;
-      let result = relay_socket(&socket, &mut stdin, &mut stdout, stop).await;
+      let result = relay_socket(&socket, &mut stdin, &mut stdout, stop, upload_budget).await;
       drop(socket);
       if let Err(error) = result {
-        let message = process.failure(&error.to_string()).await;
+        let message = match &mut process {
+          Some(process) => process.failure(&error.to_string()).await,
+          None => error.to_string(),
+        };
         *health.lock().unwrap() = Some(format!(
           "The UDP forwarding channel failed: {message}. Enable the forward again to reconnect."
         ));
@@ -181,35 +204,63 @@ impl Registry {
 }
 
 struct Channel {
-  process: Process,
-  stdin: ChildStdin,
-  stdout: ChildStdout,
+  process: Option<Process>,
+  stdin: Box<dyn AsyncWrite + Unpin + Send>,
+  stdout: Box<dyn AsyncRead + Unpin + Send>,
 }
 
 impl Channel {
   async fn open(command: Command, forward: &LocalPortForward) -> io::Result<Self> {
     let mut process = Process::spawn(command)?;
-    let mut stdin = process.stdin().expect("UDP SSH stdin is piped");
-    let mut stdout = process.stdout().expect("UDP SSH stdout is piped");
+    let stdin = Box::new(process.stdin().expect("UDP SSH stdin is piped"));
+    let stdout = Box::new(process.stdout().expect("UDP SSH stdout is piped"));
+    Self::ready(
+      Self {
+        process: Some(process),
+        stdin,
+        stdout,
+      },
+      forward,
+    )
+    .await
+  }
+
+  async fn shared(
+    stream: ctl_proto::transport::Stream,
+    forward: &LocalPortForward,
+  ) -> io::Result<Self> {
+    let (reader, writer) = tokio::io::split(stream);
+    Self::ready(
+      Self {
+        process: None,
+        stdin: Box::new(writer),
+        stdout: Box::new(reader),
+      },
+      forward,
+    )
+    .await
+  }
+
+  async fn ready(mut self, forward: &LocalPortForward) -> io::Result<Self> {
     let startup = tokio::time::timeout(forwarding::STARTUP_TIMEOUT, async {
       let mut marker = vec![0; forwarding::PREFACE.len()];
-      stdout.read_exact(&mut marker).await?;
+      self.stdout.read_exact(&mut marker).await?;
       if marker != forwarding::PREFACE {
         return Err(io::Error::new(
           io::ErrorKind::InvalidData,
           "Unsupported remote UDP forwarding endpoint",
         ));
       }
-      forwarding::negotiate_multiplex_contract(&mut stdout, &mut stdin).await?;
+      forwarding::negotiate_multiplex_contract(&mut self.stdout, &mut self.stdin).await?;
       forwarding::write(
-        &mut stdin,
+        &mut self.stdin,
         &forwarding::Request {
           host: forward.remote_host.clone(),
           port: forward.remote_port,
         },
       )
       .await?;
-      match forwarding::read::<forwarding::Response>(&mut stdout).await? {
+      match forwarding::read::<forwarding::Response>(&mut self.stdout).await? {
         forwarding::Response::Ready => Ok(()),
         forwarding::Response::Error { message } => Err(io::Error::other(message)),
       }
@@ -222,19 +273,78 @@ impl Channel {
       ))
     });
     if let Err(error) = startup {
-      return Err(io::Error::other(process.failure(&error.to_string()).await));
+      let message = match &mut self.process {
+        Some(process) => process.failure(&error.to_string()).await,
+        None => error.to_string(),
+      };
+      return Err(io::Error::other(message));
     }
-    Ok(Self {
-      process,
-      stdin,
-      stdout,
-    })
+    Ok(self)
   }
 }
 
 struct Peer {
   id: u64,
   last_activity: Instant,
+}
+
+#[derive(Debug)]
+struct Upload {
+  packet: forwarding::Frame,
+  // Keep bytes reserved until the payload is written or discarded. Fields
+  // drop in declaration order, so payload memory is freed before its budget.
+  _payload_bytes: Option<OwnedSemaphorePermit>,
+}
+
+impl Upload {
+  fn close(peer_id: u64) -> Self {
+    Self {
+      packet: forwarding::Frame::Close { peer_id },
+      _payload_bytes: None,
+    }
+  }
+}
+
+fn try_queue_datagram(
+  outgoing: &mpsc::Sender<Upload>,
+  budget: &Arc<Semaphore>,
+  peer_id: u64,
+  payload: &[u8],
+) -> bool {
+  // Reserve both limits before copying data. A full channel or a busy sibling
+  // rule drops this datagram without allocating or waiting for SSH to drain.
+  let Ok(slot) = outgoing.try_reserve() else {
+    return false;
+  };
+  let Ok(bytes) = u32::try_from(payload.len()) else {
+    return false;
+  };
+  let Ok(permit) = Arc::clone(budget).try_acquire_many_owned(bytes) else {
+    return false;
+  };
+  slot.send(Upload {
+    packet: forwarding::Frame::Datagram {
+      peer_id,
+      payload: payload.to_vec(),
+    },
+    _payload_bytes: Some(permit),
+  });
+  true
+}
+
+async fn write_uploads(
+  stdin: &mut (impl AsyncWrite + Unpin),
+  mut uploads: mpsc::Receiver<Upload>,
+) -> io::Result<()> {
+  while let Some(upload) = uploads.recv().await {
+    tokio::time::timeout(
+      forwarding::PEER_IDLE,
+      forwarding::write_packet(stdin, &upload.packet),
+    )
+    .await
+    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "UDP channel write timed out"))??;
+  }
+  Ok(())
 }
 
 /// One pair of complete framed I/O loops serves every local UDP association.
@@ -244,20 +354,11 @@ async fn relay_socket(
   stdin: &mut (impl AsyncWrite + Unpin),
   stdout: &mut (impl AsyncRead + Unpin),
   mut stop: oneshot::Receiver<()>,
+  upload_budget: Arc<Semaphore>,
 ) -> io::Result<()> {
-  let (outgoing, mut uploads) = mpsc::channel(CHANNEL_QUEUE);
+  let (outgoing, uploads) = mpsc::channel(CHANNEL_QUEUE);
   let (downloads, mut incoming) = mpsc::channel(PEER_QUEUE);
-  let upload = async {
-    while let Some(packet) = uploads.recv().await {
-      tokio::time::timeout(
-        forwarding::PEER_IDLE,
-        forwarding::write_packet(stdin, &packet),
-      )
-      .await
-      .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "UDP channel write timed out"))??;
-    }
-    Ok(())
-  };
+  let upload = write_uploads(stdin, uploads);
   let download = async {
     while let Some(packet) = forwarding::read_packet(stdout).await? {
       if downloads.send(packet).await.is_err() {
@@ -288,7 +389,7 @@ async fn relay_socket(
           if now.duration_since(peer.last_activity) < forwarding::PEER_IDLE { return true; }
           // Keep an expired association reserved if the bounded channel is
           // busy. Retrying the close avoids orphaning a remote peer socket.
-          if outgoing.try_send(forwarding::Frame::Close { peer_id: peer.id }).is_err() { return true; }
+          if outgoing.try_send(Upload::close(peer.id)).is_err() { return true; }
           addresses.remove(&peer.id);
           false
         });
@@ -321,10 +422,9 @@ async fn relay_socket(
           None if peers.len() < forwarding::MAX_PEERS => next_id,
           None => continue,
         };
-        let packet = forwarding::Frame::Datagram { peer_id: id, payload: buffer[..size].to_vec() };
         // UDP has no backpressure: drop excess data rather than accumulating
         // unbounded memory or blocking every other client on this listener.
-        if outgoing.try_send(packet).is_err() { continue; }
+        if !try_queue_datagram(&outgoing, &upload_budget, id, &buffer[..size]) { continue; }
         if let Some(peer) = peers.get_mut(&address) {
           peer.last_activity = Instant::now();
         } else {

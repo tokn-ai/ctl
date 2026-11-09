@@ -52,6 +52,39 @@ async fn hostname_override_preserves_openssh_alias_settings() {
 
 #[test]
 fn remote_identity_transport_failures_retry_but_invalid_metadata_does_not() {
+  for (kind, retry) in [
+    (io::ErrorKind::ConnectionReset, true),
+    (io::ErrorKind::TimedOut, true),
+    (io::ErrorKind::InvalidData, false),
+    (io::ErrorKind::PermissionDenied, false),
+  ] {
+    for source in [
+      crate::connection::Error::Codec(ctl_ipc::CodecError::Io(kind.into())),
+      crate::connection::Error::Connect(ctl_ipc::ConnectError::Connect(kind.into())),
+    ] {
+      assert_eq!(
+        is_retryable_connection_error(&CoreError::BrokerService(source)),
+        retry
+      );
+    }
+  }
+  for (code, retry) in [
+    ("ssh_transport_failed", true),
+    ("ssh_service_capacity", false),
+    ("ctl_agent_update_required", false),
+    ("ssh_host_disconnected", false),
+    ("ctld_protocol_error", false),
+  ] {
+    assert_eq!(
+      is_retryable_connection_error(&CoreError::BrokerService(
+        crate::connection::Error::Daemon {
+          code: code.into(),
+          message: "fixture".into(),
+        },
+      )),
+      retry
+    );
+  }
   for kind in [
     io::ErrorKind::UnexpectedEof,
     io::ErrorKind::ConnectionReset,

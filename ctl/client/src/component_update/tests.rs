@@ -37,6 +37,99 @@ fn bundle(home: &Path, revision: char) -> Bundle {
 }
 
 #[tokio::test]
+async fn remote_repairs_reject_legacy_sources_before_upload_or_selection_changes() {
+  let source_home = Home::new();
+  let account = Home::new();
+  let target = "aarch64-apple-darwin";
+  let candidate = Fixture::new("0.0.9", &"c".repeat(40))
+    .with_clients()
+    .without_shared_services()
+    .bundle();
+  let legacy =
+    crate::components::import_remote(&source_home.0, &candidate, target, Source::Ci).unwrap();
+  // Inventory, import, and explicit legacy packaging retain their existing
+  // compatibility rules. Current remote services need the additional feature.
+  assert!(crate::components::compatible(&legacy.manifest.components));
+  assert!(agent_archive(&legacy).is_ok());
+  let store = Store::new(&source_home.0);
+  let pinned = store
+    .publish(&legacy.manifest, &legacy.read_files().unwrap())
+    .unwrap();
+  store.select(Purpose::Upload, &pinned).unwrap();
+  let selected = prepare(
+    &source_home.0,
+    target,
+    Purpose::Upload,
+    &BuildSource::Selected,
+    &[],
+  )
+  .await
+  .unwrap_err();
+  assert!(
+    selected
+      .to_string()
+      .contains("no selected or included compatible build")
+  );
+  let provided = prepare(
+    &account.0,
+    target,
+    Purpose::Upload,
+    &BuildSource::Provided {
+      path: legacy.directory.clone(),
+      local_build: false,
+      ctld_package: None,
+    },
+    &[],
+  )
+  .await
+  .unwrap_err();
+  assert!(provided.to_string().contains("ctl_transport 1.0.1"));
+  assert!(!account.0.join(".tokn/ctl/components").exists());
+  assert!(!account.0.join(".tokn/ctl/cache/components").exists());
+  assert_eq!(
+    store
+      .selected(Purpose::Upload, target)
+      .unwrap()
+      .unwrap()
+      .manifest
+      .bundle_id,
+    legacy.manifest.bundle_id
+  );
+  let error = install_remote(
+    "invalid\nhost",
+    &crate::SshConnectionOptions::default(),
+    &crate::SshInteraction::Batch,
+    &legacy,
+    Package::FullBundle,
+    |_| panic!("an unsupported source must fail before starting an upload"),
+  )
+  .await
+  .unwrap_err();
+  assert!(
+    matches!(error, crate::CoreError::InvalidComponentBundle(message) if message.contains("ctl_transport 1.0.1"))
+  );
+}
+
+#[test]
+fn shared_service_uploads_retain_older_remote_broker_contracts() {
+  let fixture = Fixture::new("0.0.9", &"d".repeat(40)).with_clients();
+  let target = "aarch64-apple-darwin";
+  let mut components: std::collections::BTreeMap<String, ctl_core::component::ComponentInfo> =
+    serde_json::from_value(fixture.outer["targets"][target]["components"].clone()).unwrap();
+  let ctld = components
+    .get_mut("ctld")
+    .unwrap()
+    .protocols
+    .iter_mut()
+    .find(|protocol| protocol.name == "ctld")
+    .unwrap();
+  let retained = ctl_ipc::CONTRACT_V1_0_12;
+  *ctld = ctl_core::component::ProtocolInfo::new("ctld", retained.build, retained, &[retained]);
+  let manifest = Manifest::new(target, Source::Ci, components, &fixture.files).unwrap();
+  verify_source(&manifest, target, Purpose::Upload).unwrap();
+}
+
+#[tokio::test]
 async fn legacy_agent_overlay_retains_exact_companions_for_migration() {
   let home = Home::new();
   let original = bundle(&home.0, 'a');

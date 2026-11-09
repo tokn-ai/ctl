@@ -1303,8 +1303,8 @@ describe("SSH host quick-input flow", () => {
     expect(screen.queryByText("Save host")).toBeNull();
   });
 
-  it("offers an update for agents without identity support", async () => {
-    vi.mocked(probeSshHost).mockRejectedValueOnce({ code: "ctl_agent_identity_unsupported", message: "Update required" });
+  it.each(["ctl_agent_identity_unsupported", "ctl_agent_update_required"])("offers an agent update for %s", async (code) => {
+    vi.mocked(probeSshHost).mockRejectedValueOnce({ code, message: "Update required" });
     const { user } = setup();
     await details(user);
     await user.click(screen.getByRole("option", { name: /SSH config \/ agent/ }));

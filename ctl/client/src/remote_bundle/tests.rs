@@ -349,6 +349,46 @@ fn compatible_local_selection_prefilters_only_valid_ineligible_metadata() {
   ));
 }
 
+#[cfg(unix)]
+#[test]
+fn shared_service_upload_scan_skips_legacy_bundles_without_reading_their_archive() {
+  let legacy_directory = Directory::new();
+  let legacy = compatibility::tests::Fixture::new("0.0.8", &"b".repeat(40))
+    .without_shared_services()
+    .bundle();
+  let metadata: Value = serde_json::from_slice(&legacy.manifest).unwrap();
+  legacy_directory.install(&metadata, &legacy.archive);
+  // Ordinary legacy service eligibility remains unchanged.
+  assert_eq!(
+    read_compatible_bundle(std::slice::from_ref(&legacy_directory.0), TARGET)
+      .unwrap()
+      .unwrap()
+      .git_revision,
+    legacy.git_revision
+  );
+  // Feature filtering must happen before touching an ineligible payload.
+  std::fs::remove_file(
+    legacy_directory
+      .0
+      .join(metadata["targets"][TARGET]["archive"].as_str().unwrap()),
+  )
+  .unwrap();
+  let current_directory = Directory::new();
+  let current = compatibility::tests::Fixture::new("0.0.9", &"c".repeat(40)).bundle();
+  let metadata: Value = serde_json::from_slice(&current.manifest).unwrap();
+  current_directory.install(&metadata, &current.archive);
+  assert_eq!(
+    read_shared_service_bundle(
+      &[legacy_directory.0.clone(), current_directory.0.clone()],
+      TARGET
+    )
+    .unwrap()
+    .unwrap()
+    .git_revision,
+    current.git_revision
+  );
+}
+
 #[test]
 fn missing_directories_are_skipped_but_present_invalid_sets_are_not() {
   let absent = Directory::new();

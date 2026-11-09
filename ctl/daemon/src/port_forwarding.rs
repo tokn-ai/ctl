@@ -170,7 +170,14 @@ impl ForwardControl for SshForwardControl<'_> {
     let mut udp = self.state.udp_forwards.lock().await;
     // Keep startup ownership local until every requested protocol is ready.
     // Dropping this future (client EOF/shutdown) aborts the provisional owner.
-    let prepared = udp.prepare(target, path.as_deref(), forward).await?;
+    let prepared = udp
+      .prepare(
+        target,
+        path.as_deref(),
+        forward,
+        &self.state.agent_transports,
+      )
+      .await?;
     if forward.protocol.includes_tcp()
       && let Err(error) = self.change_tcp(target, forward, false).await
     {

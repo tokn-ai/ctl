@@ -27,6 +27,52 @@ pub struct ConnectionReady {
   pub control_path: PathBuf,
 }
 
+/// Opens one fixed remote service on an existing broker-owned SSH master.
+/// The dedicated local connection becomes a raw service stream after the
+/// acknowledgement and closes independently of other services.
+/// # Errors
+/// Returns broker, contract, authentication, or stream-handoff errors.
+pub async fn open_service(
+  target: SshTarget,
+  control_path: PathBuf,
+  service: ctl_proto::transport::Service,
+) -> Result<ctl_ipc::Stream, Error> {
+  let mut stream = ctl_ipc::connect_existing().await?;
+  tokio::time::timeout(
+    std::time::Duration::from_secs(30),
+    open_service_on(&mut stream, target, control_path, service),
+  )
+  .await
+  .map_err(|_| Error::ServiceTimeout)??;
+  Ok(stream)
+}
+
+async fn open_service_on<S>(
+  stream: &mut S,
+  target: SshTarget,
+  control_path: PathBuf,
+  service: ctl_proto::transport::Service,
+) -> Result<(), Error>
+where
+  S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+  let protocol = handshake(stream).await?;
+  let request = ClientMessage::OpenService {
+    target,
+    control_path,
+    service,
+  };
+  validate_request_contract(&request, protocol)?;
+  ctl_ipc::write_frame(stream, &request).await?;
+  match ctl_ipc::read_frame::<_, ServerMessage>(stream).await? {
+    Some(ServerMessage::ServiceOpened) => Ok(()),
+    Some(ServerMessage::AuthenticationRequired) => Err(Error::AuthenticationRequired),
+    Some(ServerMessage::Error { code, message }) => Err(Error::Daemon { code, message }),
+    None => Err(Error::ConnectionClosed),
+    _ => Err(Error::UnexpectedResponse),
+  }
+}
+
 /// One request at a time; taking the socket makes cancellation close it rather
 /// than returning a partially consumed response to the next caller.
 #[derive(Default)]
@@ -330,6 +376,12 @@ fn validate_request_contract(
     return Err(Error::UnsupportedForwardingProtocol(protocol));
   }
   match message {
+    ClientMessage::OpenService { target, .. } => {
+      if !ctl_ipc::service_streams_supported(protocol) {
+        return Err(Error::UnsupportedServiceTransport(protocol));
+      }
+      validate_route(target, protocol)
+    }
     ClientMessage::EnsureMasterQuiet { target } => {
       if !ctl_ipc::quiet_master_supported(protocol) {
         return Err(Error::UnsupportedQuietMaster(protocol));
@@ -386,6 +438,8 @@ where
 pub enum Error {
   #[error("ctld status query timed out")]
   StatusTimeout,
+  #[error("ctld timed out opening the shared SSH service")]
+  ServiceTimeout,
   #[error(transparent)]
   Connect(#[from] ctl_ipc::ConnectError),
   #[error(transparent)]
@@ -411,6 +465,10 @@ pub enum Error {
   )]
   UnsupportedForwardingProtocol(ProtocolVersion),
   #[error(
+    "Shared SSH services require local protocol 1.2.18, but ctld selected {0}. Update and restart ctld."
+  )]
+  UnsupportedServiceTransport(ProtocolVersion),
+  #[error(
     "SSH authentication is required. Detach and reconnect to answer the authentication prompt."
   )]
   AuthenticationRequired,
@@ -425,6 +483,120 @@ pub enum Error {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[tokio::test]
+  async fn shared_services_require_the_selected_contract_before_sending_a_request() {
+    for selected in ctl_ipc::SUPPORTED_PROTOCOL_VERSIONS.iter().copied() {
+      let (mut client, mut server) = tokio::io::duplex(4096);
+      let peer = tokio::spawn(async move {
+        assert!(matches!(
+          ctl_ipc::read_frame::<_, ClientMessage>(&mut server)
+            .await
+            .unwrap(),
+          Some(ClientMessage::Handshake { .. })
+        ));
+        ctl_ipc::write_frame(
+          &mut server,
+          &ServerMessage::HandshakeAccepted {
+            protocol_version: selected,
+          },
+        )
+        .await
+        .unwrap();
+        if ctl_ipc::service_streams_supported(selected) {
+          assert!(matches!(
+            ctl_ipc::read_frame::<_, ClientMessage>(&mut server).await.unwrap(),
+            Some(ClientMessage::OpenService { target, control_path, service })
+              if target == fixture_target()
+                && control_path == std::path::Path::new("/fixture/shared-master")
+                && service == ctl_proto::transport::Service::Ctmux
+          ));
+          ctl_ipc::write_frame(&mut server, &ServerMessage::ServiceOpened)
+            .await
+            .unwrap();
+        } else {
+          assert!(
+            ctl_ipc::read_frame::<_, ClientMessage>(&mut server)
+              .await
+              .unwrap()
+              .is_none()
+          );
+        }
+      });
+      let result = open_service_on(
+        &mut client,
+        fixture_target(),
+        "/fixture/shared-master".into(),
+        ctl_proto::transport::Service::Ctmux,
+      )
+      .await;
+      if ctl_ipc::service_streams_supported(selected) {
+        result.unwrap();
+      } else {
+        assert!(
+          matches!(result, Err(Error::UnsupportedServiceTransport(actual)) if actual == selected)
+        );
+      }
+      drop(client);
+      peer.await.unwrap();
+    }
+  }
+
+  #[tokio::test]
+  async fn more_than_ten_service_handoffs_keep_their_raw_streams_independent() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let mut clients = Vec::new();
+    let mut peers = tokio::task::JoinSet::new();
+    for index in 0_u8..16 {
+      let (mut client, mut server) = tokio::io::duplex(4096);
+      peers.spawn(async move {
+        assert!(matches!(
+          ctl_ipc::read_frame::<_, ClientMessage>(&mut server)
+            .await
+            .unwrap(),
+          Some(ClientMessage::Handshake { .. })
+        ));
+        ctl_ipc::write_frame(
+          &mut server,
+          &ServerMessage::HandshakeAccepted {
+            protocol_version: ctl_ipc::PROTOCOL_VERSION,
+          },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+          ctl_ipc::read_frame::<_, ClientMessage>(&mut server)
+            .await
+            .unwrap(),
+          Some(ClientMessage::OpenService {
+            service: ctl_proto::transport::Service::Task,
+            ..
+          })
+        ));
+        ctl_ipc::write_frame(&mut server, &ServerMessage::ServiceOpened)
+          .await
+          .unwrap();
+        assert_eq!(server.read_u8().await.unwrap(), index);
+        server.write_u8(index).await.unwrap();
+      });
+      open_service_on(
+        &mut client,
+        fixture_target(),
+        "/fixture/shared-master".into(),
+        ctl_proto::transport::Service::Task,
+      )
+      .await
+      .unwrap();
+      clients.push((index, client));
+    }
+    for (index, mut client) in clients {
+      client.write_u8(index).await.unwrap();
+      assert_eq!(client.read_u8().await.unwrap(), index);
+    }
+    while let Some(result) = peers.join_next().await {
+      result.unwrap();
+    }
+  }
 
   #[cfg(unix)]
   fn stream_pair() -> std::future::Ready<(ctl_ipc::Stream, ctl_ipc::Stream)> {

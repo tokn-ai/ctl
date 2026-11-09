@@ -52,6 +52,7 @@ fn component_info_reports_the_consumed_contracts_without_initializing_the_accoun
       "ctl_identity",
       "ctl_maintenance",
       "ctl_remote_vpn",
+      "ctl_transport",
       "ctld",
       "ctld_lifecycle",
       "ctld_helper",

@@ -130,7 +130,10 @@ async fn connect_with(
       }
     },
     |control_path| async move {
-      let interaction = SshInteraction::Multiplexed { control_path };
+      let interaction = SshInteraction::Brokered {
+        target: broker::broker_target(target)?,
+        control_path,
+      };
       let stream = open_identified_ssh_service(
         &destination,
         &options,

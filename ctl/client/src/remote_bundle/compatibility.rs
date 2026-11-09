@@ -127,25 +127,40 @@ pub(crate) fn compatible(components: &BTreeMap<String, ComponentInfo>) -> bool {
       ctl_task_proto::control::SUPPORTED_PROTOCOL_VERSIONS,
     ),
   ];
+  // Older agents remain eligible for their existing services. An optional
+  // transport advertisement must explicitly intersect the client's set.
+  let optional = [
+    (
+      "ctl_forwarding",
+      ctl_proto::forwarding::SUPPORTED_PROTOCOL_VERSIONS,
+    ),
+    (
+      "ctl_transport",
+      ctl_proto::transport::SUPPORTED_PROTOCOL_VERSIONS,
+    ),
+  ];
   required
     .iter()
     .all(|(component, name, supported)| intersects(components, component, name, supported))
-    // Older agents remain eligible for their TCP and companion services. If a
-    // bundle advertises UDP forwarding, its contract must be one we implement.
-    && components
-      .get("ctl-agent")
-      .and_then(|info| {
+    && optional.iter().all(|(name, supported)| {
+      components.values().all(|info| {
         info
           .protocols
           .iter()
-          .find(|protocol| protocol.name == "ctl_forwarding")
+          .find(|protocol| protocol.name == *name)
+          .is_none_or(|protocol| protocol.negotiate(supported).is_some())
       })
-      .is_none_or(|protocol| {
-        protocol
-          .negotiate(ctl_proto::forwarding::SUPPORTED_PROTOCOL_VERSIONS)
-          .is_some()
-      })
+    })
     && Layout::from_components(components).is_some_and(|layout| layout.compatible(components))
+}
+
+pub(crate) fn supports_shared_services(components: &BTreeMap<String, ComponentInfo>) -> bool {
+  intersects(
+    components,
+    "ctl-agent",
+    "ctl_transport",
+    ctl_proto::transport::SUPPORTED_PROTOCOL_VERSIONS,
+  )
 }
 
 fn intersects(

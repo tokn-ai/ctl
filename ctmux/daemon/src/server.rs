@@ -44,6 +44,7 @@ const INITIAL_ATTACHMENT_DELIVERY_TIMEOUT: Duration = Duration::from_mins(5);
 const MAX_PRESENTATION_WINDOW_BYTES: u64 = 8 * 1024 * 1024;
 const MIN_OUTPUT_FRAME_CHARGE_BYTES: u64 = 4 * 1024;
 const MAX_OUTPUT_FRAME_BYTES: usize = 64 * 1024;
+const SMALL_OUTPUT_INTERVAL: Duration = Duration::from_millis(16);
 const HISTORY_SNAPSHOT_IDLE_TTL: Duration = Duration::from_mins(2);
 const MAX_RECENT_HISTORY_BYTES: usize = 16 * 1024;
 const MAX_RECENT_HISTORY_LINES: usize = 64;
@@ -1872,6 +1873,8 @@ async fn drive_attachment(
     attachment_liveness_timeout,
     deadline,
     pending_session_end: None,
+    next_small_output_at: Instant::now(),
+    output_flush_at: None,
   };
   if !driver.send_available_output().await? {
     return Ok(AttachmentExit::Disconnected);
@@ -1909,12 +1912,18 @@ async fn drive_attachment(
     if driver.send_session_end_if_drained().await? {
       return Ok(AttachmentExit::Disconnected);
     }
+    let output_flush_at = driver.output_flush_at.unwrap_or(driver.deadline);
     tokio::select! {
       biased;
       () = sleep_until(driver.deadline) => return Ok(AttachmentExit::Disconnected),
       changed = driver.attachment.superseded.changed() => {
         let _ = changed;
         return Ok(AttachmentExit::Superseded);
+      }
+      () = sleep_until(output_flush_at), if driver.output_flush_at.is_some() => {
+        if !driver.send_available_output().await? {
+          return Ok(AttachmentExit::Disconnected);
+        }
       }
       incoming = driver.attachment.reader.read_frame::<ClientMessage>() => {
         let Some(message) = incoming? else {
@@ -1978,6 +1987,8 @@ struct AttachmentDriver {
   attachment_liveness_timeout: Duration,
   deadline: Instant,
   pending_session_end: Option<PendingSessionEnd>,
+  next_small_output_at: Instant,
+  output_flush_at: Option<Instant>,
 }
 
 #[derive(Clone, Copy)]
@@ -2303,6 +2314,7 @@ impl AttachmentDriver {
   }
 
   async fn send_available_output(&mut self) -> Result<bool, ConnectionError> {
+    self.output_flush_at = None;
     if self.attachment.applied_sequence.is_none() {
       return Ok(true);
     }
@@ -2312,13 +2324,31 @@ impl AttachmentDriver {
       return self.send_checkpoint(snapshot).await;
     }
 
+    let window_bytes = self.attachment.presentation_window_bytes;
+    let full_frame_bytes = window_bytes.min(MAX_OUTPUT_FRAME_BYTES as u64);
+    let minimum_charge = output_frame_charge(0, window_bytes);
     loop {
-      let available_bytes = self
-        .attachment
-        .presentation_window_bytes
-        .saturating_sub(self.attachment.in_flight_charge_bytes);
-      if available_bytes == 0 {
+      let available_bytes = window_bytes.saturating_sub(self.attachment.in_flight_charge_bytes);
+      if available_bytes < minimum_charge {
         return Ok(true);
+      }
+
+      if let Some(pending_bytes) = self.session.pending_output_bytes(
+        self.attachment.sent_sequence,
+        self.attachment.checkpoint_geometry_revision,
+      ) {
+        if pending_bytes == 0 {
+          return Ok(true);
+        }
+        // Leave small writes in the journal until the next send time. New
+        // writes and acknowledgements cannot move that deadline later.
+        if pending_bytes.min(available_bytes) < full_frame_bytes
+          && self.pending_session_end.is_none()
+          && Instant::now() < self.next_small_output_at
+        {
+          self.output_flush_at = Some(self.next_small_output_at);
+          return Ok(true);
+        }
       }
 
       let mut snapshot = self.session.snapshot_for_delivery(
@@ -2344,11 +2374,7 @@ impl AttachmentDriver {
         return Ok(true);
       };
       let sequence_end = chunk.sequence_end();
-      let charge_bytes =
-        output_frame_charge(chunk.data.len(), self.attachment.presentation_window_bytes);
-      if charge_bytes > available_bytes {
-        return Ok(true);
-      }
+      let charge_bytes = output_frame_charge(chunk.data.len(), window_bytes);
       if write_before_deadline(
         &mut self.attachment.writer,
         &chunk.into_server_message(),
@@ -2360,6 +2386,7 @@ impl AttachmentDriver {
         return Ok(false);
       }
       self.attachment.sent_sequence = sequence_end;
+      self.next_small_output_at = Instant::now() + SMALL_OUTPUT_INTERVAL;
       self.attachment.in_flight_charge_bytes += charge_bytes;
       self.attachment.in_flight_output.push_back(OutputDelivery {
         sequence_end,
@@ -2400,6 +2427,7 @@ impl AttachmentDriver {
     self.attachment.pending_history = None;
     self.attachment.sent_sequence = sequence;
     self.attachment.applied_sequence = None;
+    self.next_small_output_at = Instant::now();
     self.attachment.checkpoint_geometry_revision = snapshot.checkpoint_geometry_revision;
     Ok(true)
   }

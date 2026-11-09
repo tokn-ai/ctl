@@ -88,6 +88,10 @@ unicode-width = "0.1.14"
 uuid = { version = "1.26.0", features = ["v4"] }
 zeroize = { version = "1.8", features = ["serde"] }
 
+# Managed development binaries verify their installation before opening sockets.
+[profile.dev.package.sha2]
+opt-level = 3
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 

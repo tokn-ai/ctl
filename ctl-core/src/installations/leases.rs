@@ -3,7 +3,7 @@ use super::filesystem::{self, Lock};
 use crate::bundles::Bundle;
 use std::fs::{self, File};
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// A process-held file lease, automatically released on exit or crash.
 /// Keep the value alive for as long as the installation may be used.
@@ -36,12 +36,17 @@ pub(super) fn acquire_locked(store: &Installations, bundle: &Bundle) -> io::Resu
       "process lease must pin this immutable installation",
     ));
   }
+  retain_verified(store, &installed.manifest.bundle_id)
+}
+
+// The caller holds the installation lock from verification until publication.
+fn retain_verified(store: &Installations, id: &str) -> io::Result<Lease> {
   let root = store.root.join("leases");
   filesystem::ensure_directory(&root)?;
-  let root = root.join(&bundle.manifest.bundle_id);
+  let root = root.join(id);
   // Abrupt exits bypass Drop. Sweep unlocked rows on the next launch, even
   // while this build remains active and is therefore excluded from payload GC.
-  in_use(store, &bundle.manifest.bundle_id)?;
+  in_use(store, id)?;
   filesystem::ensure_directory(&root)?;
   let path = root.join(uuid::Uuid::new_v4().to_string());
   let file = filesystem::options()
@@ -100,6 +105,10 @@ pub(super) fn in_use(store: &Installations, id: &str) -> io::Result<bool> {
 /// rather than running without retention protection.
 pub fn lease_current_executable() -> io::Result<Option<Lease>> {
   let executable = std::env::current_exe()?.canonicalize()?;
+  lease_executable(&executable)
+}
+
+pub(super) fn lease_executable(executable: &Path) -> io::Result<Option<Lease>> {
   for directory in executable.ancestors().skip(1) {
     let Some(id) = directory.file_name().and_then(|name| name.to_str()) else {
       continue;
@@ -124,8 +133,10 @@ pub fn lease_current_executable() -> io::Result<Option<Lease>> {
       .and_then(std::path::Path::parent)
       .ok_or_else(|| filesystem::invalid("managed executable has no account directory"))?;
     let store = Installations::new(home);
+    filesystem::ensure_root(&store)?;
+    let _lock = Lock::acquire(&store)?;
     let bundle = store.get(id)?;
-    return store.lease(&bundle).map(Some);
+    return retain_verified(&store, &bundle.manifest.bundle_id).map(Some);
   }
   Ok(None)
 }

@@ -507,12 +507,18 @@ fn launching_an_active_build_sweeps_crash_records_but_keeps_live_users() {
     .create_new(true)
     .open(&stale)
     .unwrap();
-  let next = installs.lease(&active).unwrap();
+  let executable = active.executable("ctld").unwrap().canonicalize().unwrap();
+  let next = leases::lease_executable(&executable).unwrap().unwrap();
   assert!(!stale.exists());
   assert_eq!(fs::read_dir(&root).unwrap().count(), 2);
   drop(held);
   drop(next);
   assert_eq!(fs::read_dir(root).unwrap().count(), 0);
+  fs::write(&executable, b"changed payload").unwrap();
+  assert_eq!(
+    leases::lease_executable(&executable).unwrap_err().kind(),
+    io::ErrorKind::InvalidData
+  );
 }
 
 #[cfg(target_os = "macos")]

@@ -10,9 +10,9 @@ pub use ctl_core::component_update::{
 };
 
 /// Resolves the requested source without replacing running services. Automatic
-/// sources use current development output or a fresh named publication; only
-/// explicit Selected sources consult an upload pin. Local macOS keeps its signed
-/// helper selection because published remote archives do not contain that package.
+/// sources use current development output or a fresh named publication. Explicit
+/// Selected sources use included offline resources without consulting old pins.
+/// Local macOS keeps its signed active build because remote archives omit its app.
 ///
 /// # Errors
 /// Rejects wrong-target, incomplete, corrupt or incompatible builds.
@@ -45,12 +45,7 @@ async fn prepare_source(
     {
       return development_build(home, target, purpose, &workspace).await;
     }
-    return published_build(
-      home,
-      target,
-      crate::remote_bundle::published::default_channel(),
-    )
-    .await;
+    return published_build(home, target, crate::installation::default_channel(home)?).await;
   }
   if let BuildSource::Published { channel } = source {
     return published_build(home, publisher_target(target, purpose).as_ref(), *channel).await;
@@ -73,20 +68,17 @@ async fn prepare_source(
   let source = source.clone();
   let included = included.to_vec();
   tokio::task::spawn_blocking(move || {
-    let store = Store::new(&home);
     let bundle = match source {
-      BuildSource::Automatic | BuildSource::Selected => {
-        if let Some(bundle) = store.selected(purpose, &target)? {
+      BuildSource::Automatic => {
+        if purpose == Purpose::Local
+          && let Some(bundle) = ctl_core::installations::Installations::new(&home).active()?
+        {
           bundle
         } else {
-          let bundle = included_build(&home, &included, &target, purpose)?;
-          if purpose == Purpose::Upload {
-            store.select_if_unset(purpose, &bundle)?
-          } else {
-            bundle
-          }
+          included_build(&home, &included, &target, purpose)?
         }
       }
+      BuildSource::Selected => included_build(&home, &included, &target, purpose)?,
       BuildSource::Provided { path, .. } => provided_build(&home, &path, &target, purpose)?,
       BuildSource::Published { .. } => {
         unreachable!("published sources resolved before filesystem preparation")
@@ -196,7 +188,7 @@ async fn published_build(home: &Path, target: &str, channel: BundleChannel) -> i
   let bundle = crate::remote_bundle::published::download_cached(
     channel,
     target,
-    &home.join(".tokn/ctl/published-bundles"),
+    &home.join(".tokn/ctl/cache/downloads"),
   )
   .await
   .map_err(io::Error::other)?;
@@ -210,7 +202,12 @@ async fn published_build(home: &Path, target: &str, channel: BundleChannel) -> i
   // Import only this identified publication. Never read or mutate the upload
   // profile: channel freshness must not be replaced by a sticky old selection.
   tokio::task::spawn_blocking(move || {
-    crate::components::import_remote(&home, &bundle, &target, source).map_err(io::Error::other)
+    let imported = crate::components::import_remote(&home, &bundle, &target, source)
+      .map_err(io::Error::other)?;
+    if let Err(error) = crate::installation::prune_caches(&home) {
+      eprintln!("ctlup: cache cleanup deferred: {error}");
+    }
+    Ok(imported)
   })
   .await
   .map_err(io::Error::other)?
@@ -278,7 +275,12 @@ fn included_build(
   } else {
     Source::Ci
   };
-  crate::components::import_remote(home, &candidate, target, source).map_err(io::Error::other)
+  let imported =
+    crate::components::import_remote(home, &candidate, target, source).map_err(io::Error::other)?;
+  for directory in directories {
+    crate::installation::remember_supplied_updater(home, &imported, directory)?;
+  }
+  Ok(imported)
 }
 
 fn provided_build(home: &Path, path: &Path, target: &str, purpose: Purpose) -> io::Result<Bundle> {
@@ -286,9 +288,13 @@ fn provided_build(home: &Path, path: &Path, target: &str, purpose: Purpose) -> i
     if path.join(MANIFEST_FILE).exists() {
       let bundle = Bundle::open(path)?;
       verify_source(&bundle.manifest, target, purpose)?;
-      return Store::new(home).publish(&bundle.manifest, &bundle.read_files()?);
+      let imported = Store::cache(home).publish(&bundle.manifest, &bundle.read_files()?)?;
+      crate::installation::remember_supplied_updater(home, &imported, path)?;
+      return Ok(imported);
     }
-    return included_build(home, &[path.to_owned()], target, purpose);
+    let imported = included_build(home, &[path.to_owned()], target, purpose)?;
+    crate::installation::remember_supplied_updater(home, &imported, path)?;
+    return Ok(imported);
   }
   let bytes = crate::components::read_input(path, MAX_FILE_BYTES)?;
   let mut files = crate::components::read_archive(&bytes)?;
@@ -298,7 +304,11 @@ fn provided_build(home: &Path, path: &Path, target: &str, purpose: Purpose) -> i
     }
     let manifest: Manifest = serde_json::from_slice(&metadata).map_err(io::Error::other)?;
     verify_source(&manifest, target, purpose)?;
-    return Store::new(home).publish(&manifest, &files);
+    let imported = Store::cache(home).publish(&manifest, &files)?;
+    if let Some(parent) = path.parent() {
+      crate::installation::remember_supplied_updater(home, &imported, parent)?;
+    }
+    return Ok(imported);
   }
   // A publisher archive needs its matching bundle-set.json next to it. Verify
   // the named file, rather than accidentally accepting a different sibling.
@@ -320,7 +330,10 @@ fn provided_build(home: &Path, path: &Path, target: &str, purpose: Purpose) -> i
   } else {
     Source::Ci
   };
-  crate::components::import_remote(home, &candidate, target, source).map_err(io::Error::other)
+  let imported =
+    crate::components::import_remote(home, &candidate, target, source).map_err(io::Error::other)?;
+  crate::installation::remember_supplied_updater(home, &imported, parent)?;
+  Ok(imported)
 }
 
 /// Packages only the agent from a verified complete source; retained daemons
@@ -387,32 +400,47 @@ pub async fn install_local(
   if !ctl_core::bundles::local_target(&bundle.manifest.target_triple) {
     return Err(invalid("this build cannot run on the local host"));
   }
-  match package {
-    Package::FullBundle => {
-      // Validate signing and commit the local service profile before activation.
-      // If the second pointer cannot switch, report the completed profile change
-      // explicitly; never imply that the selected daemons were rolled back.
-      crate::components::select(home, Purpose::Local, bundle).await?;
-      crate::ssh_install::install_local_bundle(home, bundle).await.map_err(|error| io::Error::other(format!("Local services now select this bundle, but agent activation failed: {error}. Running services were preserved; refresh Components before retrying.")))?;
-    }
-    Package::CtlAgent => {
-      let snapshot = bundle.clone();
-      let account = home.to_owned();
-      let (archive, companions) = tokio::task::spawn_blocking(move || {
-        let archive = agent_archive(&snapshot)?;
-        let companions = Store::new(&account)
-          .selected(Purpose::Local, ctl_core::paths::native_target())?
-          .map(|bundle| bundle.directory);
-        Ok::<_, io::Error>((archive, companions))
-      })
-      .await
-      .map_err(io::Error::other)??;
-      crate::ssh_install::install_local_agent(home, companions.as_deref(), &archive)
-        .await
-        .map_err(io::Error::other)?;
-    }
+  if package != Package::FullBundle {
+    return Err(invalid(
+      "agent-only overlays are no longer installed; use a complete ctlup update",
+    ));
   }
+  let _installation = install_local_with_manager(home, bundle, None).await?;
   Ok(result(bundle, package))
+}
+
+/// Install a verified native cohort using its freshly built independent manager.
+///
+/// # Errors
+/// Rejects invalid native signing, unsafe storage or a failed activation.
+pub(crate) async fn install_local_with_manager(
+  home: &Path,
+  bundle: &Bundle,
+  manager: Option<&Path>,
+) -> io::Result<(Bundle, ctl_core::installations::Lease)> {
+  if !ctl_core::bundles::local_target(&bundle.manifest.target_triple) {
+    return Err(invalid("this build cannot run on the local host"));
+  }
+  crate::components::verify_local(home, bundle).await?;
+  if let Some(manager) = manager {
+    crate::installation::provision_manager_from(home, manager).await?;
+  } else {
+    crate::installation::provision_manager(home, bundle).await?;
+  }
+  let account = home.to_owned();
+  let snapshot = bundle.clone();
+  let installed = tokio::task::spawn_blocking(move || {
+    let installations = ctl_core::installations::Installations::new(&account);
+    let installed = installations.activate_and_lease(&snapshot)?;
+    if let Err(error) = installations.prune() {
+      eprintln!("ctlup: installed successfully; cleanup deferred: {error}");
+    }
+    Ok::<_, io::Error>(installed)
+  })
+  .await
+  .map_err(io::Error::other)??;
+  prune_after_update(home).await;
+  Ok(installed)
 }
 
 #[must_use]
@@ -452,11 +480,20 @@ pub async fn install_remote(
   use crate::{RemoteInstallEvent as Event, RemoteInstallPhase as Phase, RemoteInstallProgress};
   use std::sync::atomic::{AtomicU64, Ordering};
   let invalid = |error: io::Error| crate::CoreError::InvalidComponentBundle(error.to_string());
+  if package != Package::FullBundle {
+    return Err(invalid(invalid_data(
+      "agent-only overlays are no longer installed; use a complete ctlup update",
+    )));
+  }
   require_shared_services(&bundle.manifest).map_err(invalid)?;
+  let home =
+    dirs::home_dir().ok_or_else(|| invalid(invalid_data("home directory is unavailable")))?;
+  let updater = crate::installation::updater_for_bundle(&home, bundle)
+    .await
+    .map_err(invalid)?;
   let snapshot = bundle.clone();
-  let archive = tokio::task::spawn_blocking(move || match package {
-    Package::CtlAgent => agent_archive(&snapshot),
-    Package::FullBundle => crate::components::upload_bundle(&snapshot).map(|upload| upload.archive),
+  let archive = tokio::task::spawn_blocking(move || {
+    crate::components::upload_bundle(&snapshot).map(|upload| upload.archive)
   })
   .await
   .map_err(|error| invalid(io::Error::other(error)))?
@@ -486,35 +523,39 @@ pub async fn install_remote(
       bytes_per_second: 0,
     });
   };
-  match package {
-    Package::CtlAgent => {
-      crate::install_ssh_agent_only_with_progress(
-        destination,
-        options,
-        interaction,
-        &archive,
-        report,
-      )
-      .await?;
-    }
-    Package::FullBundle => {
-      let id = bundle
-        .manifest
-        .distribution_id
-        .as_ref()
-        .unwrap_or(&bundle.manifest.bundle_id);
-      crate::install_ssh_unix_agent_interactive_with_progress(
-        destination,
-        options,
-        interaction,
-        id,
-        &archive,
-        report,
-      )
-      .await?;
-    }
+  {
+    let id = bundle
+      .manifest
+      .distribution_id
+      .as_ref()
+      .unwrap_or(&bundle.manifest.bundle_id);
+    crate::install_ssh_unix_bundle_with_updater(
+      destination,
+      options,
+      interaction,
+      &updater,
+      id,
+      &archive,
+      report,
+    )
+    .await?;
   }
+  prune_after_update(&home).await;
   Ok(result(bundle, package))
+}
+
+fn invalid_data(message: &str) -> io::Error {
+  io::Error::new(io::ErrorKind::InvalidData, message)
+}
+
+async fn prune_after_update(home: &Path) {
+  let home = home.to_owned();
+  let result = tokio::task::spawn_blocking(move || crate::installation::prune_caches(&home)).await;
+  match result {
+    Ok(Ok(_)) => {}
+    Ok(Err(error)) => eprintln!("ctlup: installed successfully; cache cleanup deferred: {error}"),
+    Err(error) => eprintln!("ctlup: installed successfully; cache cleanup interrupted: {error}"),
+  }
 }
 
 fn invalid(message: &str) -> io::Error {

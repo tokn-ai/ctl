@@ -42,6 +42,28 @@ struct Arguments {
 }
 
 fn main() {
+  #[cfg(unix)]
+  let _installation = retain_installation();
+  run_main();
+}
+
+#[cfg(unix)]
+fn retain_installation() -> Option<ctl_core::installations::Lease> {
+  if std::env::args_os().any(|argument| {
+    argument == "--component-info"
+      || argument == "--protocol-version"
+      || argument == "--protocol-build"
+  }) {
+    None
+  } else {
+    ctl_core::installations::lease_current_executable().unwrap_or_else(|error| {
+      eprintln!("ctld: could not retain its installation: {error}");
+      std::process::exit(1);
+    })
+  }
+}
+
+fn run_main() {
   if ["CTLD_ASKPASS", "CTLD_IDENTITY_ASKPASS"]
     .iter()
     .any(|name| std::env::var(name).as_deref() == Ok("1"))

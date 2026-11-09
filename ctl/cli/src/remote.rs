@@ -215,30 +215,30 @@ async fn install(
     ..RemoteInstallProgress::default()
   };
   let (updates, mut receiver) = watch::channel(initial);
+  #[cfg(unix)]
+  let manager = {
+    let home = dirs::home_dir().ok_or_else(|| io::Error::other("home directory is unavailable"))?;
+    let (manifest, _) = ctl_client::installation::unpack_archive(&bundle.archive)?;
+    ctl_client::installation::updater_for_manifest(&home, &manifest).await?
+  };
+  #[cfg(unix)]
+  let upload = ctl_client::install_ssh_unix_bundle_with_updater(
+    destination,
+    options,
+    interaction,
+    &manager,
+    &bundle.bundle_id,
+    &bundle.archive,
+    |event| update_progress(&updates, event),
+  );
+  #[cfg(not(unix))]
   let upload = ctl_client::install_ssh_unix_agent_interactive_with_progress(
     destination,
     options,
     interaction,
     &bundle.bundle_id,
     &bundle.archive,
-    |event| {
-      updates.send_modify(|progress| match event {
-        RemoteInstallEvent::Receiving { received_bytes } => {
-          progress.phase = Phase::Transferring;
-          progress.transferred_bytes = received_bytes;
-        }
-        RemoteInstallEvent::Extracting => progress.phase = Phase::Extracting,
-        RemoteInstallEvent::Checking { file_name } => {
-          progress.phase = Phase::Checking;
-          progress.file_name = Some(file_name.into());
-        }
-        RemoteInstallEvent::Activating => {
-          progress.phase = Phase::Activating;
-          progress.file_name = None;
-        }
-        RemoteInstallEvent::Complete => progress.phase = Phase::Complete,
-      });
-    },
+    |event| update_progress(&updates, event),
   );
   tokio::pin!(upload);
   let mut watchdog = RemoteInstallWatchdog::new(Instant::now());
@@ -257,6 +257,29 @@ async fn install(
     let progress = watchdog.observe(receiver.borrow().clone(), Instant::now(), false)?;
     display.show(&progress);
   }
+}
+
+fn update_progress(
+  updates: &watch::Sender<ctl_client::RemoteInstallProgress>,
+  event: RemoteInstallEvent,
+) {
+  use ctl_client::RemoteInstallPhase as Phase;
+  updates.send_modify(|progress| match event {
+    RemoteInstallEvent::Receiving { received_bytes } => {
+      progress.phase = Phase::Transferring;
+      progress.transferred_bytes = received_bytes;
+    }
+    RemoteInstallEvent::Extracting => progress.phase = Phase::Extracting,
+    RemoteInstallEvent::Checking { file_name } => {
+      progress.phase = Phase::Checking;
+      progress.file_name = Some(file_name.into());
+    }
+    RemoteInstallEvent::Activating => {
+      progress.phase = Phase::Activating;
+      progress.file_name = None;
+    }
+    RemoteInstallEvent::Complete => progress.phase = Phase::Complete,
+  });
 }
 
 #[derive(Default)]

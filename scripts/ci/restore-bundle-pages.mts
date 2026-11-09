@@ -7,6 +7,7 @@ import { pathToFileURL } from "node:url";
 import { isDeepStrictEqual, promisify } from "node:util";
 import { bundleRoot, componentIdentity, repositoryName, validatedComponentSet } from "./bundle-publication.mts";
 import { parseAgentBundleSet } from "../shared/agent-bundle.mts";
+import { maxUpdaterBytes, maxUpdaterManifestBytes, parseUpdaterManifest, updaterManifestName } from "../shared/updater-bundle.mts";
 import { parseBundleCatalog, siteMarker, type BundleCatalog } from "./stage-bundle-pages.mts";
 import { pages, type GhRunner } from "./update-draft-release.mts";
 
@@ -75,9 +76,18 @@ async function restorePublished(catalog: BundleCatalog, directory: string, fetch
     // Validate names and identity before using archive filenames in URLs/paths.
     const parsed = parseAgentBundleSet(manifest_bytes!, componentIdentity(entry));
     if (parsed.schema_version === 1) throw new Error("Published Pages set lacks component metadata");
-    for (const target of Object.values(parsed.targets)) {
+    for (const [target_triple, target] of Object.entries(parsed.targets)) {
       for (const [name, maximum] of [[target.archive, 128 * 1024 * 1024], [`${target.archive}.sha256`, 256]] as const) {
         await writeFile(join(local, name), (await download(new URL(`${relative}${name}`, bundleRoot), maximum, fetcher))!);
+      }
+      const name = updaterManifestName(target_triple);
+      const updater_bytes = await download(new URL(`${relative}${name}`, bundleRoot), maxUpdaterManifestBytes, fetcher, true);
+      if (updater_bytes) {
+        const updater = parseUpdaterManifest(updater_bytes, entry, target_triple);
+        await writeFile(join(local, name), updater_bytes);
+        for (const [asset, maximum] of [[updater.binary, maxUpdaterBytes], [`${updater.binary}.sha256`, 512]] as const) {
+          await writeFile(join(local, asset), (await download(new URL(`${relative}${asset}`, bundleRoot), maximum, fetcher))!);
+        }
       }
     }
     await validatedComponentSet(local, entry);

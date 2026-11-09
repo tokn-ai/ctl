@@ -3,8 +3,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { constants } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { buildDaemons } from "./daemon-build.mts";
-import { resolveRunnerTarget } from "./signed-cargo-target.mts";
+import { developmentEnvironment, DevelopmentPreparationError, prepareDevelopment, type PreparedDevelopment } from "./ctlup-development.mts";
 
 const script = fileURLToPath(import.meta.url);
 const nodeArguments = ["--experimental-strip-types", "--disable-warning=ExperimentalWarning"];
@@ -31,32 +30,41 @@ async function worker(cargo_args: string[]): Promise<number> {
   process.stdin.once("error", canceled);
   process.stdin.resume();
   let directory: string | undefined;
+  let prepared: PreparedDevelopment | undefined;
+  let cargo: ChildProcess | undefined;
+  const supervisor = process.env.CTMUX_DEV_APP_SUPERVISOR;
   try {
-    const supervisor = process.env.CTMUX_DEV_APP_SUPERVISOR;
-    if (!supervisor) throw new Error("Signed app supervisor is unavailable");
-    directory = await mkdtemp(path.join(path.dirname(supervisor), "cargo-"));
-    const marker = path.join(directory, "launch-state");
-    const artifacts = await buildDaemons(cargo_args, process.cwd(), process.env);
-    const target = await resolveRunnerTarget(cargo_args, artifacts, process.cwd(), process.env);
-    const cargo = spawn("cargo", withAppRunner(cargo_args, target), {
+    if (supervisor) directory = await mkdtemp(path.join(path.dirname(supervisor), "cargo-"));
+    const marker = directory && path.join(directory, "launch-state");
+    prepared = await prepareDevelopment(cargo_args, process.cwd(), process.env);
+    const installation = prepared.installation;
+    const args = supervisor ? withAppRunner(cargo_args, installation.target_triple) : cargo_args;
+    cargo = spawn("cargo", args, {
       cwd: process.cwd(),
-      env: { ...process.env, CTMUX_DEV_CTLD_EXECUTABLE: artifacts.ctld, CTMUX_DEV_APP_FAILURE_MARKER: marker },
+      env: { ...developmentEnvironment(installation, process.env), CTMUX_DEV_CTLD_EXECUTABLE: installation.executables.ctld, CTMUX_DEV_APP_FAILURE_MARKER: marker },
       stdio: ["ignore", "inherit", "inherit"],
     });
-    const code = await status(cargo);
-    const phase = await readFile(marker, "utf8").catch(() => undefined);
+    const code = await Promise.race([status(cargo), prepared.exited.then(() => { throw new Error("Development installation lease closed during the app launch"); })]);
+    if (!supervisor) return code;
+    const phase = marker && await readFile(marker, "utf8").catch(() => undefined);
     if (phase === "started") return code;
     throw new Error(code === 0 ? "Cargo did not launch the signed app relay" : `Cargo or signed app preparation exited with status ${code}`);
   } catch (error) {
     console.error(error instanceof Error ? error.message : "Signed app preparation failed");
+    if (!supervisor && !(error instanceof DevelopmentPreparationError && error.compilation_failed)) return 1;
     // This exact final line/exit status is Tauri's recoverable failure contract.
     console.error("error: could not compile signed development app; keeping the current app running");
     return 101;
   } finally {
-    if (directory) await rm(directory, { recursive: true, force: true });
-    process.stdin.off("end", canceled);
-    process.stdin.off("error", canceled);
-    process.stdin.destroy();
+    cargo?.kill("SIGTERM");
+    try {
+      await prepared?.close();
+    } finally {
+      if (directory) await rm(directory, { recursive: true, force: true });
+      process.stdin.off("end", canceled);
+      process.stdin.off("error", canceled);
+      process.stdin.destroy();
+    }
   }
 }
 

@@ -37,8 +37,17 @@ companions must belong to the SSH account and be available together through
 the managed installation or noninteractive PATH.
 
 The current six-executable remote bundle installs `ctl` and `ctmux` together
-with its services. In an ordinary SSH login, invoke `~/.tokn/ctl/current/ctl`
-or `~/.tokn/ctl/current/ctmux`, or add `~/.tokn/ctl/current` to `PATH`.
+with its services. In an ordinary SSH login, invoke `~/.tokn/ctl/bin/ctl`
+or `~/.tokn/ctl/bin/ctmux`, or add `~/.tokn/ctl/bin` to `PATH`.
+
+`ctlup` owns install, update, rollback, channel checks and pruning.
+`ctlup status --json` reports the active installation and previous rollback
+candidate without starting services. `ctlup rollback` restores the previous
+build for future launches; running daemons and sessions keep their owners.
+`ctl components status/restart/stop` are runtime maintenance commands.
+Do not use the removed component sync/select or agent-only installation paths.
+The manager is distributed separately. To upgrade it, run a fresh downloaded
+`ctlup` with `install` or a local `update`; runtime rollback leaves it available.
 
 For an authorized published CLI setup on macOS:
 
@@ -128,12 +137,13 @@ preserved.
   protocol, checks any saved machine ID, installs verified matching components,
   and retries once. Confirm the repair only for the intended SSH account/route.
   Piped commands, unknown protocol markers, and later reconnects do not offer
-  installation. A clean source build needs exact-revision bundles: run
-  `pnpm bundles:sync` from the repository root, or set `CTL_REMOTE_BUNDLES_DIR`
-  to that bundle set. The CLI may download an existing verified exact-revision bundle artifact
-  through `gh`; it never dispatches a workflow. Downloaded bundles are cached
-  under `~/.tokn/ctl/agent-bundles/<revision>/<target>/` and checked again on reuse,
-  so later repairs for the same build and platform can work offline. A manually
+  installation. Use `ctlup --host HOST update` for an explicit complete-build
+  update or `ctlup --destination DESTINATION update` for an SSH alias. Updates
+  resolve the configured Dev/Stable publication channel; development checkouts
+  can build Linux x64 from the working tree. `--channel stable` or `--channel dev`
+  chooses a published source explicitly. `--from DIRECTORY_OR_ARCHIVE` supplies
+  an offline verified build. Network failures never silently choose an older
+  cached publication. No GitHub CLI or workflow dispatch is required. A manually
   run `ctl-agent connect` waits for protocol input; it is not a finite
   health-check command.
 - **Missing signed macOS helper:** for authorized local setup, run `ctl setup`.

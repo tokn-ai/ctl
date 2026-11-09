@@ -24,7 +24,7 @@ pub const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[CONTRACT_V1_0_1, C
 /// Stable framing marker; the published contract is negotiated separately.
 pub const PREFACE: &[u8] = b"ctl-vpn\n";
 const REMOTE_COMMAND: &str = concat!(
-  r#"PATH="$HOME/.tokn/ctl/current:$PATH"; export PATH; "#,
+  r#"PATH="$HOME/.tokn/ctl/bin:$HOME/.tokn/ctl/current:$PATH"; export PATH; "#,
   r#"command -v ctl-agent >/dev/null 2>&1 || { printf 'ctl-ssh-nf\n'; exit 127; }; "#,
   "exec ctl-agent vpn",
 );

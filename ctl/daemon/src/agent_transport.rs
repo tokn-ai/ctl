@@ -29,7 +29,7 @@ const STARTUP_MARKER: &[u8] = b"ctl-multiplex-startup\n";
 const MISSING_AGENT_MARKER: &[u8] = b"ctl-multiplex-missing-agent\n";
 const UNSUPPORTED_AGENT_MARKER: &[u8] = b"ctl-multiplex-unsupported-agent\n";
 const REMOTE_COMMAND: &str = concat!(
-  r#"PATH="$HOME/.tokn/ctl/current:$PATH"; export PATH; "#,
+  r#"PATH="$HOME/.tokn/ctl/bin:$HOME/.tokn/ctl/current:$PATH"; export PATH; "#,
   r#"command -v ctl-agent >/dev/null 2>&1 || { printf 'ctl-multiplex-missing-agent\n'; exit 127; }; "#,
   "printf 'ctl-multiplex-startup\\n'; ",
   r#"if component_info=$(ctl-agent --component-info); then printf '%s\n' "$component_info"; "#,

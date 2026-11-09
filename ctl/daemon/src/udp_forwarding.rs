@@ -26,7 +26,7 @@ const PEER_QUEUE: usize = 8;
 const CHANNEL_QUEUE: usize = forwarding::MAX_PEERS * PEER_QUEUE;
 const MAX_UPLOAD_BYTES: usize = 32 * 1024 * 1024;
 const REMOTE_COMMAND: &str = concat!(
-  r#"PATH="$HOME/.tokn/ctl/current:$PATH"; export PATH; "#,
+  r#"PATH="$HOME/.tokn/ctl/bin:$HOME/.tokn/ctl/current:$PATH"; export PATH; "#,
   r#"command -v ctl-agent >/dev/null 2>&1 || { printf 'ctl-agent is not installed\n' >&2; exit 127; }; "#,
   "exec ctl-agent forward-udp",
 );

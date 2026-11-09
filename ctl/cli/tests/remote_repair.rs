@@ -12,6 +12,15 @@ use rustix::termios::LocalModes;
 use serde_json::json;
 use sha2::{Digest as _, Sha256};
 
+fn fixture_target() -> &'static str {
+  match (std::env::consts::OS, std::env::consts::ARCH) {
+    ("macos", "aarch64") => "aarch64-apple-darwin",
+    ("macos", "x86_64") => "x86_64-apple-darwin",
+    (_, "aarch64") => "aarch64-unknown-linux-musl",
+    _ => "x86_64-unknown-linux-musl",
+  }
+}
+
 const PROMPT: &str = "Install compatible remote components";
 const EXPECTED_ID: &str = "fa5f874a-bd3c-4a41-9d8f-d584bd9c9a14";
 
@@ -80,7 +89,6 @@ if [ -f "$CTL_TEST_DIR/count" ]; then read -r count < "$CTL_TEST_DIR/count"; fi
 count=$((count + 1))
 printf '%s\n' "$count" > "$CTL_TEST_DIR/count"
 printf '%s\n' "$@" > "$CTL_TEST_DIR/ssh-$count.args"
-export CTL_TEST_CALL_INDEX="$count"
 last=''
 for argument do last=$argument; done
 case "$last" in
@@ -94,9 +102,19 @@ case "$last" in
     ;;
   *ctl-platform-v1*)
     touch "$CTL_TEST_DIR/platform"
-    printf 'ctl-platform-v1\nLinux\nx86_64\n'
+    printf 'ctl-platform-v1\n'
+    uname -s
+    uname -m
     ;;
-  *ctl-install-progress-v1*)
+  *ctlup-bootstrap-v1*)
+    touch "$CTL_TEST_DIR/bootstrap"
+    exec /bin/sh -c "$last"
+    ;;
+  *activate-installed*)
+    touch "$CTL_TEST_DIR/preflight"
+    exec /bin/sh -c "$last"
+    ;;
+  *install-archive*|*ctl-install-progress-v1*)
     touch "$CTL_TEST_DIR/upload"
     if [ -f "$CTL_TEST_DIR/allow-upload" ]; then
       exec /bin/sh -c "$last"
@@ -113,7 +131,18 @@ esac
       "node",
       "touch \"$CTL_TEST_DIR/builder-called\"; printf 'current development builder unavailable in fixture\\n' >&2; exit 94",
     );
+    fixture.prepare_updater();
     fixture
+  }
+
+  fn prepare_updater(&self) {
+    let executable = self.0.join("ctlup-fixture-manager");
+    fs::copy(env!("CARGO_BIN_EXE_ctlup"), &executable).unwrap();
+    // Match the shipped form instead of relaxing the 128 MiB input limit for
+    // unstripped Linux debug information.
+    let stripped = Command::new("strip").arg(&executable).output().unwrap();
+    assert!(stripped.status.success(), "{stripped:?}");
+    fs::set_permissions(executable, fs::Permissions::from_mode(0o700)).unwrap();
   }
 
   fn compatible_bundle(&self, build: &ctl_core::component::ComponentBuildInfo) -> String {
@@ -131,7 +160,7 @@ esac
       .iter()
       .find(|protocol| protocol["name"] == "ctld")
       .unwrap();
-    let components = json!({
+    let mut components = json!({
       "ctl-agent": component(vec![
         protocol("ctl_identity", 3), protocol("ctl_maintenance", 2),
         protocol("ctl_remote_vpn", 1), consumed_ctld.clone(),
@@ -146,6 +175,15 @@ esac
       ]),
       "ctld": component(ctld_protocols),
     });
+    components["ctl"] = components["ctl-agent"].clone();
+    let consumed_contracts = components["ctl"]["protocols"].as_array_mut().unwrap();
+    for protocol in ctl_ipc::lifecycle::DaemonBinaryInfo::current().protocols {
+      let protocol = json!(protocol);
+      if !consumed_contracts.contains(&protocol) {
+        consumed_contracts.push(protocol);
+      }
+    }
+    components["ctmux"] = components["ctmuxd"].clone();
     self.bundle(build, Some(&components))
   }
 
@@ -158,7 +196,7 @@ esac
       dirty: false,
     };
     previous.compatible_bundle(&build);
-    let target = "x86_64-unknown-linux-musl";
+    let target = fixture_target();
     let candidate = ctl_client::remote_bundle::read_verified_bundle(
       &[previous.0.join("bundles")],
       target,
@@ -182,6 +220,11 @@ esac
       ctl_core::bundles::Source::Ci,
     )
     .unwrap();
+    // Recreate a pre-ctlup selection, rather than asking the deployment cache
+    // to create an upload profile in the new installation model.
+    let bundle = ctl_core::bundles::Store::new(&home)
+      .publish(&bundle.manifest, &bundle.read_files().unwrap())
+      .unwrap();
     ctl_core::bundles::Store::new(&home)
       .select(ctl_core::bundles::Purpose::Upload, &bundle)
       .unwrap();
@@ -195,8 +238,19 @@ esac
   ) -> String {
     let revision = build.source_revision.as_deref().unwrap();
     let bundle_id = format!("{}-dev.{}", build.version, &revision[..12]);
-    let target = "x86_64-unknown-linux-musl";
-    let schema_version = if components.is_some() { 2 } else { 1 };
+    let target = fixture_target();
+    let schema_version = components.map_or(1, |components| {
+      if components.get("ctl").is_some() {
+        3
+      } else {
+        2
+      }
+    });
+    let binaries = if schema_version == 3 {
+      vec!["ctl-agent", "ctmuxd", "ctl-taskd", "ctld", "ctl", "ctmux"]
+    } else {
+      vec!["ctl-agent", "ctmuxd", "ctl-taskd", "ctld"]
+    };
     let mut manifest = json!({
       "schema_version": schema_version,
       "app_version": build.version,
@@ -214,11 +268,11 @@ esac
          printf 'unexpected direct service command after broker handoff\\n' >&2\nexit 95\n",
     )
     .unwrap();
-    for binary in ["ctmuxd", "ctl-taskd", "ctld"] {
+    for binary in binaries.iter().filter(|binary| **binary != "ctl-agent") {
       fs::write(payload.join(binary), b"#!/bin/sh\nexit 0\n").unwrap();
     }
     let mut files = serde_json::Map::new();
-    for binary in ["ctl-agent", "ctmuxd", "ctl-taskd", "ctld"] {
+    for &binary in &binaries {
       fs::set_permissions(payload.join(binary), fs::Permissions::from_mode(0o700)).unwrap();
       files.insert(
         binary.into(),
@@ -237,20 +291,7 @@ esac
       serde_json::to_vec(&manifest).unwrap(),
     )
     .unwrap();
-    let archive = self.0.join(format!(
-      "bundles/ctl-agent-bundle-{bundle_id}-{target}.tar.gz"
-    ));
-    let output = Command::new("tar")
-      .env("COPYFILE_DISABLE", "1")
-      .args(["--format=ustar", "-czf"])
-      .arg(&archive)
-      .arg("-C")
-      .arg(&payload)
-      .args(["ctl-agent", "ctmuxd", "ctl-taskd", "ctld", "manifest.json"])
-      .output()
-      .unwrap();
-    assert!(output.status.success(), "{output:?}");
-    let checksum = format!("{:x}", Sha256::digest(fs::read(&archive).unwrap()));
+    let checksum = self.package_payload(&payload, &bundle_id, target, &binaries);
     let mut targets = serde_json::Map::new();
     for target in [
       "x86_64-unknown-linux-musl",
@@ -280,6 +321,30 @@ esac
     fs::write(self.0.join("home/.tokn/ctl/remote-id"), EXPECTED_ID).unwrap();
     fs::write(self.0.join("allow-upload"), []).unwrap();
     bundle_id
+  }
+
+  fn package_payload(
+    &self,
+    payload: &std::path::Path,
+    bundle_id: &str,
+    target: &str,
+    binaries: &[&str],
+  ) -> String {
+    let archive = self.0.join(format!(
+      "bundles/ctl-agent-bundle-{bundle_id}-{target}.tar.gz"
+    ));
+    let output = Command::new("tar")
+      .env("COPYFILE_DISABLE", "1")
+      .args(["--format=ustar", "-czf"])
+      .arg(&archive)
+      .arg("-C")
+      .arg(payload)
+      .args(binaries)
+      .arg("manifest.json")
+      .output()
+      .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    format!("{:x}", Sha256::digest(fs::read(&archive).unwrap()))
   }
 
   fn repaired_transport(
@@ -417,6 +482,29 @@ impl Terminal {
   }
 
   fn with_bundle_override(fixture: &Fixture, args: &[&str], explicit: bool) -> Self {
+    let updater = args.first().is_some_and(|arg| *arg == "__ctlup");
+    let executable = if updater {
+      env!("CARGO_BIN_EXE_ctlup")
+    } else {
+      env!("CARGO_BIN_EXE_ctl")
+    };
+    let args = if updater { &args[1..] } else { args };
+    Self::with_executable(
+      fixture,
+      args,
+      explicit,
+      std::path::Path::new(executable),
+      Some(&fixture.0.join("ctlup-fixture-manager")),
+    )
+  }
+
+  fn with_executable(
+    fixture: &Fixture,
+    args: &[&str],
+    explicit: bool,
+    executable: &std::path::Path,
+    manager: Option<&std::path::Path>,
+  ) -> Self {
     let pair = portable_pty::native_pty_system()
       .openpty(portable_pty::PtySize {
         rows: 40,
@@ -424,7 +512,7 @@ impl Terminal {
         ..portable_pty::PtySize::default()
       })
       .unwrap();
-    let mut command = portable_pty::CommandBuilder::new(env!("CARGO_BIN_EXE_ctl"));
+    let mut command = portable_pty::CommandBuilder::new(executable);
     command.args(args);
     command.cwd(&fixture.0);
     command.env("TERM", "xterm-256color");
@@ -433,6 +521,12 @@ impl Terminal {
       format!("{}:{}", fixture.0.display(), std::env::var("PATH").unwrap()),
     );
     command.env("CTL_TEST_DIR", &fixture.0);
+    if let Some(manager) = manager {
+      command.env("CTLUP_BIN", manager);
+    } else {
+      command.env_remove("CTLUP_BIN");
+    }
+    command.env_remove("CTLUP_BUNDLES_DIR");
     command.env("HOME", fixture.0.join("home"));
     command.env("CTL_HOSTS_PATH", fixture.0.join("hosts.json"));
     command.env("CTLD_SOCKET_PATH", fixture.0.join("ctld.sock"));
@@ -620,7 +714,7 @@ async fn accepted_repair_detects_platform_but_rejects_unverified_local_bundles_b
     "{transcript}"
   );
   assert!(
-    transcript.contains("Preparing compatible components for Linux x86_64"),
+    transcript.contains("Preparing compatible components for"),
     "{transcript}"
   );
   // The explicit local manifest is validated even when this CLI has a dirty
@@ -694,7 +788,9 @@ async fn automatic_repair_requires_a_current_source_even_with_older_cached_and_s
   assert!(!fixture.0.join("home/.tokn/ctl/current").exists());
   assert_selection(&fixture, Some(&previous.manifest.bundle_id));
   assert_eq!(fs::read(fixture.0.join("hosts.json")).unwrap(), original);
-  if ctl_client::component_update::working_tree_available() {
+  if ctl_client::component_update::working_tree_available()
+    && fixture_target() == "x86_64-unknown-linux-musl"
+  {
     assert!(
       fixture.0.join("builder-called").exists(),
       "{}",
@@ -733,7 +829,7 @@ async fn verify_successful_repair(stale_sources: bool) {
   if let Some(previous) = previous {
     let cached = ctl_client::remote_bundle::read_compatible_cached_bundle(
       &fixture.0.join("home/.tokn/ctl/agent-bundles"),
-      "x86_64-unknown-linux-musl",
+      fixture_target(),
       &build,
     )
     .unwrap()
@@ -761,7 +857,16 @@ fn assert_successful_repair(
     transcript.contains("Remote components installed. Retrying the connection."),
     "{transcript}"
   );
-  fixture.assert_managed_route(3);
+  fixture.assert_managed_route(6);
+  for (index, command) in [
+    (2, "ctl-platform-v1"),
+    (3, "ctlup-bootstrap-v1"),
+    (4, "ctlup-bootstrap-v1"),
+    (5, "activate-installed"),
+    (6, "install-archive"),
+  ] {
+    assert!(fixture.arguments(index).join("\n").contains(command));
+  }
   assert_eq!(
     fs::read_to_string(fixture.0.join("service-opens")).unwrap(),
     "2"
@@ -778,10 +883,7 @@ fn assert_successful_repair(
   );
   assert_eq!(
     fs::read_link(base.join("current")).unwrap(),
-    PathBuf::from(format!(
-      "components/bundles/x86_64-unknown-linux-musl/{}",
-      installed.manifest.bundle_id
-    ))
+    PathBuf::from(format!("installs/{}", installed.manifest.bundle_id))
   );
   assert!(!base.join("versions").exists());
   assert_eq!(
@@ -825,10 +927,7 @@ fn assert_successful_repair(
 
 fn assert_selection(fixture: &Fixture, expected: Option<&str>) {
   let selected = ctl_core::bundles::Store::new(&fixture.0.join("home"))
-    .selected(
-      ctl_core::bundles::Purpose::Upload,
-      "x86_64-unknown-linux-musl",
-    )
+    .selected(ctl_core::bundles::Purpose::Upload, fixture_target())
     .unwrap();
   assert_eq!(
     selected

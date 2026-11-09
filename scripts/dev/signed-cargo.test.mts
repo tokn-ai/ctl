@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import test, { type TestContext } from "node:test";
 import { serveAppSupervisor } from "./signed-app-supervisor.mts";
 import { encodeAppMessage, parseAppLaunchRequest, type AppLaunchRequest } from "./signed-app-protocol.mts";
+import { writeDevelopmentManager } from "./ctlup-development.fixtures.mts";
 
 const runner = fileURLToPath(new URL("./tauri-cargo.sh", import.meta.url));
 const subprocess = { skip: process.platform === "win32", timeout: 20_000 };
@@ -16,13 +17,14 @@ async function fixture(context: TestContext, target = "fixture-target", profile 
   const target_directory = path.join(directory, "target");
   const output = path.join(target_directory, target, profile);
   await mkdir(output, { recursive: true });
-  const artifacts = Object.fromEntries(["ctld", "ctmuxd", "ctl-taskd"].map((name) => [name, path.join(output, name)]));
+  const artifacts = Object.fromEntries(["ctl-agent", "ctld", "ctmuxd", "ctl-taskd", "ctl", "ctmux"].map((name) => [name, path.join(output, name)]));
   for (const executable of Object.values(artifacts)) await writeFile(executable, "synthetic helper");
+  const manager = await writeDevelopmentManager(directory, artifacts, target || "fixture-host");
   const executable = path.join(output, "ctmux-app");
   const app_marker = path.join(directory, "app.json");
   await writeFile(executable, `#!${process.execPath}
 const fs = require("node:fs");
-fs.writeFileSync(process.env.TEST_APP_MARKER + ".tmp", JSON.stringify({pid:process.pid,args:process.argv.slice(2),cwd:process.cwd(),dyld:process.env.DYLD_FALLBACK_LIBRARY_PATH,ctmuxd:process.env.CTMUXD_BIN,ctl_taskd:process.env.CTL_TASKD_BIN}));
+fs.writeFileSync(process.env.TEST_APP_MARKER + ".tmp", JSON.stringify({pid:process.pid,args:process.argv.slice(2),cwd:process.cwd(),dyld:process.env.DYLD_FALLBACK_LIBRARY_PATH,ctmuxd:process.env.CTMUXD_BIN,ctl_taskd:process.env.CTL_TASKD_BIN,installation_id:process.env.CTL_DEV_INSTALLATION_ID}));
 fs.renameSync(process.env.TEST_APP_MARKER + ".tmp", process.env.TEST_APP_MARKER);
 setInterval(() => {}, 1000);
 `, { mode: 0o755 });
@@ -39,8 +41,8 @@ if(args[0] === "build") {
     setInterval(()=>{},1000);
   } else if(process.env.TEST_HELPER_FAILURE) {
     console.error("synthetic helper failure"); process.exitCode=101;
-  } else for(const [name,executable] of Object.entries(JSON.parse(process.env.TEST_ARTIFACTS))) console.log(JSON.stringify({reason:"compiler-artifact",target:{name,kind:["bin"]},executable}));
-} else if(args[0] === "metadata") console.log(JSON.stringify({target_directory:process.env.TEST_TARGET_DIRECTORY}));
+  } else console.log(JSON.stringify({reason:"compiler-artifact",target:{name:"ctlup",kind:["bin"]},executable:process.env.TEST_MANAGER_EXECUTABLE}));
+} else if(args[0] === "metadata") console.log(JSON.stringify({workspace_root:process.cwd(),target_directory:process.env.TEST_TARGET_DIRECTORY}));
 else if(args[0] === "run") {
   if(process.env.TEST_HOLD_BUILD === "app") {
     const grandchild = spawn(process.execPath, ["-e", "setInterval(()=>{},1000)"], {stdio:"ignore"});
@@ -68,6 +70,7 @@ else if(args[0] === "run") {
     CTL_TASKD_BIN: "/synthetic/user-taskd",
     TEST_TARGET_DIRECTORY: target_directory,
     TEST_ARTIFACTS: JSON.stringify(artifacts),
+    TEST_MANAGER_EXECUTABLE: manager.manager_executable,
     TEST_CARGO_CALLS: path.join(directory, "calls.jsonl"),
     TEST_APP_EXECUTABLE: executable,
     TEST_APP_MARKER: app_marker,
@@ -130,8 +133,9 @@ test("failed first build and signing recover; relay preserves Cargo runtime envi
   const server = await responder(data.socket, (request, peer) => {
     requests += 1;
     assert.equal(request.env.DYLD_FALLBACK_LIBRARY_PATH, "/synthetic/cargo/runtime");
-    assert.equal(request.env.CTMUXD_BIN, "/synthetic/user-ctmuxd");
-    assert.equal(request.env.CTL_TASKD_BIN, "/synthetic/user-taskd");
+    assert.equal(request.env.CTMUXD_BIN, data.artifacts.ctmuxd);
+    assert.equal(request.env.CTL_TASKD_BIN, data.artifacts["ctl-taskd"]);
+    assert.equal(request.env.CTL_DEV_INSTALLATION_ID, "a".repeat(64));
     assert.equal(request.ctld_executable, data.artifacts.ctld);
     assert.equal(request.cwd, data.directory);
     assert.deepEqual(request.args, ["with spaces", "--target=app-only"]);

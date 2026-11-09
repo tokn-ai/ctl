@@ -50,6 +50,11 @@ fn main() {
     );
     return;
   }
+  #[cfg(unix)]
+  let _installation = ctl_core::installations::lease_current_executable().unwrap_or_else(|error| {
+    eprintln!("ctmuxd: could not retain its installation: {error}");
+    std::process::exit(1);
+  });
   ctl_core::observability::initialize_daemon(
     ctl_core::observability::Component::Ctmuxd,
     arguments.detach_from_terminal,

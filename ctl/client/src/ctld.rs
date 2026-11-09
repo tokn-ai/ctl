@@ -176,6 +176,15 @@ impl<'a> Resolver<'a> {
   }
 
   async fn select(&self, request: Request) -> Result<Candidate, setup::Error> {
+    // The account's explicit complete installation is authoritative for every
+    // client. Checkout and embedded helpers are fallback preparation sources.
+    // Explicit CTLD_BIN overrides remain the IPC resolver's responsibility.
+    if let Some(selection) = self.inspect_active(request.required).await? {
+      return Ok(Candidate::Existing(selection_from(
+        selection,
+        Source::SharedBundle,
+      )));
+    }
     if let Some(bundle) = self
       .embedded
       .filter(|bundle| bundle.mode == BundleMode::Development)
@@ -191,21 +200,12 @@ impl<'a> Resolver<'a> {
         Source::Checkout,
       )));
     }
-    // An explicit complete-bundle selection is authoritative, including for a
-    // packaged desktop. Ordinary compatible installations remain its fallback.
-    if self.desktop {
-      if let Some(selection) = setup::inspect_selected_bundle_ctld(request.required).await? {
-        return Ok(Candidate::Existing(selection_from(
-          selection,
-          Source::SharedBundle,
-        )));
-      }
-      if let Some(executable) = ctl_ipc::resolver::desktop_candidate() {
-        return Ok(Candidate::Existing(
-          ctl_ipc::resolver::inspect_executable(&executable, Source::DesktopBundle, request)
-            .await?,
-        ));
-      }
+    if self.desktop
+      && let Some(executable) = ctl_ipc::resolver::desktop_candidate()
+    {
+      return Ok(Candidate::Existing(
+        ctl_ipc::resolver::inspect_executable(&executable, Source::DesktopBundle, request).await?,
+      ));
     }
     let shared = setup::inspect_compatible_ctld(request.required)
       .await?
@@ -234,6 +234,17 @@ impl<'a> Resolver<'a> {
     return missing_candidate();
     #[cfg(not(target_os = "macos"))]
     Ok(missing_candidate())
+  }
+
+  async fn inspect_active(
+    &self,
+    required: Option<ctl_core::protocol::ProtocolVersion>,
+  ) -> Result<Option<HelperSelection>, setup::Error> {
+    #[cfg(all(test, target_os = "macos"))]
+    if let Some(home) = self.home {
+      return setup::inspect_selected_bundle_ctld_in(home, required).await;
+    }
+    setup::inspect_selected_bundle_ctld(required).await
   }
 
   async fn inspect_checkout(
@@ -390,3 +401,6 @@ async fn installed_release_identity(executable: &Path) -> Result<Option<String>,
   }
   Ok(selection.archive_sha256)
 }
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests;

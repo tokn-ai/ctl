@@ -27,6 +27,8 @@ pub(crate) mod archive;
 mod cache;
 pub(crate) mod compatibility;
 pub mod published;
+#[cfg(unix)]
+pub(crate) use cache::prune_download_cache;
 pub use cache::{BundleCacheEntry, read_compatible_cached_bundle};
 
 #[derive(Debug, Clone, PartialEq, Eq)]

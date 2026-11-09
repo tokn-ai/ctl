@@ -1937,7 +1937,12 @@ fn build_command(
     CommandBuilder::new_default_prog()
   };
   if let Ok(directory) = ctl_core::paths::directory() {
-    path::include_managed_clients(&mut builder, &directory.join("current"));
+    let bin = directory.join("bin");
+    if bin.is_dir() {
+      path::include_managed_clients(&mut builder, &bin);
+    } else {
+      path::include_managed_clients(&mut builder, &directory.join("current"));
+    }
   }
 
   if let Some(working_directory) = working_directory {

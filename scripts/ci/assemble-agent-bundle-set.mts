@@ -4,11 +4,13 @@ import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { agentTargets, archiveName, inspectAgentArchive, maxAgentManifestBytes, parseAgentBundleSet, readAgentFile, validateAgentIdentity,
   type AgentBundleIdentity, type AgentBundleSet } from "../shared/agent-bundle.mts";
+import { verifyUpdaterTarget } from "../shared/updater-bundle.mts";
 
 /** Copy only complete, verified component sets, without executing foreign binaries. */
 export async function assembleAgentBundleSet(identity: AgentBundleIdentity, input_directory: string, output_directory: string): Promise<AgentBundleSet> {
   validateAgentIdentity(identity);
   const targets: AgentBundleSet["targets"] = {};
+  const updater_assets: string[] = [];
   for (const target of agentTargets) {
     const archive = archiveName(identity, target);
     const path = join(input_directory, archive);
@@ -19,7 +21,9 @@ export async function assembleAgentBundleSet(identity: AgentBundleIdentity, inpu
     const manifest = await inspectAgentArchive(bytes, identity, target);
     if (manifest.schema_version !== 3) throw new Error(`New bundle sets require schema-3 archives: ${archive}`);
     targets[target] = { archive, sha256, components: manifest.components };
+    updater_assets.push(...await verifyUpdaterTarget(input_directory, identity, target));
   }
+  if (updater_assets.length !== 0 && updater_assets.length !== agentTargets.length * 3) throw new Error("bundle set contains an incomplete ctlup target set");
   const manifest: AgentBundleSet = { ...identity, schema_version: 3, targets };
   const manifestBytes = Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`);
   parseAgentBundleSet(manifestBytes, identity);
@@ -30,6 +34,7 @@ export async function assembleAgentBundleSet(identity: AgentBundleIdentity, inpu
     await copyFile(join(input_directory, archive), join(output_directory, archive));
     await copyFile(join(input_directory, `${archive}.sha256`), join(output_directory, `${archive}.sha256`));
   }
+  for (const name of updater_assets) await copyFile(join(input_directory, name), join(output_directory, name));
   await writeFile(join(output_directory, "bundle-set.json"), manifestBytes);
   return manifest;
 }

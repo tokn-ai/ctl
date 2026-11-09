@@ -14,6 +14,8 @@ use crate::{
 
 const UNIX_INSTALL_COMMAND: &str = include_str!("ssh_install.sh");
 #[cfg(unix)]
+const UPDATER_BOOTSTRAP_COMMAND: &str = include_str!("ssh_updater_bootstrap.sh");
+#[cfg(unix)]
 const AGENT_INSTALL_COMMAND: &str = include_str!("ssh_agent_install.sh");
 const MAX_PROGRESS_LINE_BYTES: u64 = 256;
 const INITIAL_PROGRESS_MARKER: &[u8] = b"ctl-install-progress-v1 receiving 0\n";
@@ -59,7 +61,7 @@ pub async fn install_ssh_agent_only_with_progress(
   run_package_install(command, archive, &["ctl-agent"], on_progress).await
 }
 
-#[cfg(unix)]
+#[cfg(all(test, unix))]
 pub(crate) async fn install_local_agent(
   home: &std::path::Path,
   companions: Option<&std::path::Path>,
@@ -69,22 +71,6 @@ pub(crate) async fn install_local_agent(
   let mut command = Command::new("sh");
   command.args(["-c", &script]).env("HOME", home);
   run_package_install(command, archive, &["ctl-agent"], |_| {}).await
-}
-
-#[cfg(unix)]
-pub(crate) async fn install_local_bundle(
-  home: &std::path::Path,
-  bundle: &ctl_core::bundles::Bundle,
-) -> Result<(), CoreError> {
-  let bundle = bundle.clone();
-  let upload = tokio::task::spawn_blocking(move || crate::components::package_bundle(&bundle))
-    .await
-    .map_err(|error| CoreError::InvalidComponentBundle(error.to_string()))?
-    .map_err(|error| CoreError::InvalidComponentBundle(error.to_string()))?;
-  let (script, layout) = installation_script(&upload.bundle_id, &upload.archive)?;
-  let mut command = Command::new("sh");
-  command.args(["-c", &script]).env("HOME", home);
-  run_package_install(command, &upload.archive, layout.names(), |_| {}).await
 }
 
 #[cfg(unix)]
@@ -164,6 +150,214 @@ pub async fn install_ssh_unix_agent_interactive_with_progress(
     .args(prepare_ssh_base_arguments(destination, options, interaction).await?)
     .arg(posix_install_command(&script));
   run_package_install(command, archive, layout.names(), on_progress).await
+}
+
+/// Installs a complete build through the independent target-native updater.
+/// The receiver verifies a retained installation before deciding whether any
+/// runtime archive bytes need to cross SSH.
+///
+/// # Errors
+/// Rejects invalid packages, unsafe bootstrap paths, or failed SSH operations.
+#[cfg(unix)]
+pub async fn install_ssh_unix_bundle_with_updater(
+  destination: &str,
+  options: &SshConnectionOptions,
+  interaction: &SshInteraction,
+  updater: &[u8],
+  bundle_id: &str,
+  archive: &[u8],
+  on_progress: impl Fn(RemoteInstallEvent) + Send + Sync,
+) -> Result<(), CoreError> {
+  validate_ssh_target(destination, options)?;
+  if options.remote_platform != RemotePlatform::Unix {
+    return Err(CoreError::InvalidSshOption("remote_platform".into()));
+  }
+  // This verifies the entire managed archive before executing anything remotely.
+  let (manifest, layout) = managed_installation(archive, bundle_id)?;
+  let preflight = updater_bootstrap_script(updater, true)?;
+  let command = updater_ssh_command(destination, options, interaction, &preflight).await?;
+  let (status, stdout, stderr) = run_updater_command(command, &[]).await?;
+  if status.code() == Some(10) {
+    let bootstrap = updater_bootstrap_script(updater, false)?;
+    let command = updater_ssh_command(destination, options, interaction, &bootstrap).await?;
+    let (status, stdout, stderr) = run_updater_command(command, updater).await?;
+    require_updater_success(status, &stdout, &stderr, b"ctlup-bootstrap-v1\n")?;
+  } else {
+    require_updater_success(status, &stdout, &stderr, b"ctlup-bootstrap-v1\n")?;
+  }
+  let script = format!(
+    "exec \"$HOME/.tokn/ctl/bin/ctlup\" activate-installed '{}'",
+    manifest.bundle_id,
+  );
+  let command = updater_ssh_command(destination, options, interaction, &script).await?;
+  let (status, stdout, stderr) = run_updater_command(command, &[]).await?;
+  if status.success() {
+    require_updater_success(status, &stdout, &stderr, b"ctl-install-v1\n")?;
+    on_progress(RemoteInstallEvent::Receiving { received_bytes: 0 });
+    on_progress(RemoteInstallEvent::Receiving {
+      received_bytes: archive.len() as u64,
+    });
+    on_progress(RemoteInstallEvent::Extracting);
+    for &file_name in layout.names() {
+      on_progress(RemoteInstallEvent::Checking { file_name });
+    }
+    on_progress(RemoteInstallEvent::Activating);
+    on_progress(RemoteInstallEvent::Complete);
+    return Ok(());
+  }
+  if status.code() != Some(10) {
+    return require_updater_success(status, &stdout, &stderr, b"ctl-install-v1\n");
+  }
+  let command = updater_ssh_command(
+    destination,
+    options,
+    interaction,
+    "exec \"$HOME/.tokn/ctl/bin/ctlup\" install-archive",
+  )
+  .await?;
+  run_package_install(command, archive, layout.names(), on_progress).await
+}
+
+#[cfg(unix)]
+fn managed_installation(
+  archive: &[u8],
+  bundle_id: &str,
+) -> Result<(ctl_core::bundles::Manifest, Layout), CoreError> {
+  let invalid = |error: io::Error| CoreError::InvalidComponentBundle(error.to_string());
+  let mut files = crate::remote_bundle::archive::read_archive(archive).map_err(invalid)?;
+  let manifest = crate::components::inspect_upload_archive(&mut files)
+    .map_err(|error| CoreError::InvalidComponentBundle(error.to_string()))?
+    .ok_or_else(|| invalid(io::Error::other("ctlup requires a complete managed bundle")))?;
+  if manifest.bundle_id != bundle_id && manifest.distribution_id.as_deref() != Some(bundle_id) {
+    return Err(CoreError::InvalidAgentBundleId(bundle_id.into()));
+  }
+  let layout = Layout::managed(manifest.schema_version).expect("verified managed schema");
+  Ok((manifest, layout))
+}
+
+#[cfg(unix)]
+fn updater_bootstrap_script(updater: &[u8], check_only: bool) -> Result<String, CoreError> {
+  use sha2::{Digest as _, Sha256};
+  if updater.is_empty() || updater.len() > ctl_core::bundle_layout::MAX_FILE_BYTES {
+    return Err(CoreError::InvalidComponentBundle(
+      "invalid ctlup executable size".into(),
+    ));
+  }
+  Ok(
+    UPDATER_BOOTSTRAP_COMMAND
+      .replace("__CHECK_ONLY__", if check_only { "yes" } else { "no" })
+      .replace("__TOKEN__", &uuid::Uuid::new_v4().to_string())
+      .replace("__UPDATER_BYTES__", &updater.len().to_string())
+      .replace(
+        "__UPDATER_SHA256__",
+        &format!("{:x}", Sha256::digest(updater)),
+      ),
+  )
+}
+
+#[cfg(unix)]
+async fn updater_ssh_command(
+  destination: &str,
+  options: &SshConnectionOptions,
+  interaction: &SshInteraction,
+  script: &str,
+) -> Result<Command, CoreError> {
+  let mut command = Command::new(SSH_PROGRAM);
+  let extra = configure_ssh_interaction(&mut command, interaction);
+  command
+    .args(extra)
+    .args(prepare_ssh_base_arguments(destination, options, interaction).await?)
+    .arg(posix_install_command(script));
+  Ok(command)
+}
+
+#[cfg(unix)]
+async fn run_updater_command(
+  mut command: Command,
+  input: &[u8],
+) -> Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>), CoreError> {
+  command
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .kill_on_drop(true);
+  let mut child = command.spawn().map_err(CoreError::StartSsh)?;
+  let mut stdin = child.stdin.take().ok_or(CoreError::MissingSshStdin)?;
+  let mut stdout = child.stdout.take().ok_or(CoreError::MissingSshStdout)?;
+  let mut stderr = child.stderr.take().ok_or(CoreError::MissingSshStderr)?;
+  let write = async move {
+    let result = stdin.write_all(input).await;
+    drop(stdin);
+    result
+  };
+  let (write, stdout, stderr, status) = tokio::join!(
+    write,
+    read_updater_output(&mut stdout),
+    read_bounded_output(&mut stderr),
+    child.wait()
+  );
+  let status = status.map_err(CoreError::WaitSshCommand)?;
+  if status.success() {
+    write.map_err(CoreError::WriteSshCommand)?;
+  }
+  Ok((
+    status,
+    stdout.map_err(CoreError::ReadSshCommand)?,
+    stderr.map_err(CoreError::ReadSshCommand)?,
+  ))
+}
+
+#[cfg(unix)]
+async fn read_updater_output(reader: &mut (impl AsyncRead + Unpin)) -> io::Result<Vec<u8>> {
+  let mut retained = Vec::new();
+  let mut buffer = [0; 1024];
+  let mut oversized = false;
+  loop {
+    let count = reader.read(&mut buffer).await?;
+    if count == 0 {
+      break;
+    }
+    let keep = count.min((64 * 1024_usize).saturating_sub(retained.len()));
+    retained.extend_from_slice(&buffer[..keep]);
+    oversized |= keep != count;
+  }
+  if oversized {
+    return Err(io::Error::new(
+      io::ErrorKind::InvalidData,
+      "updater startup output exceeded 64 KiB",
+    ));
+  }
+  Ok(retained)
+}
+
+#[cfg(unix)]
+fn require_updater_success(
+  status: std::process::ExitStatus,
+  stdout: &[u8],
+  stderr: &[u8],
+  marker: &[u8],
+) -> Result<(), CoreError> {
+  if !status.success() {
+    let diagnostic = String::from_utf8_lossy(stderr)
+      .chars()
+      .filter(|character| !character.is_control() || matches!(character, '\n' | '\t'))
+      .collect::<String>();
+    let diagnostic = diagnostic.trim();
+    return Err(CoreError::SshCommandFailed {
+      status: status.to_string(),
+      diagnostic: if diagnostic.is_empty() {
+        "remote updater exited without reporting a reason".into()
+      } else {
+        diagnostic.to_owned()
+      },
+    });
+  }
+  if !stdout.ends_with(marker) {
+    return Err(CoreError::InvalidComponentBundle(
+      "ctlup did not confirm the requested operation".into(),
+    ));
+  }
+  Ok(())
 }
 
 fn posix_install_command(script: &str) -> String {

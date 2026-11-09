@@ -2,6 +2,88 @@ use super::*;
 
 const VALID_PROGRESS: &[u8] = b"ctl-install-progress-v1 receiving 0\nctl-install-progress-v1 receiving 5\nctl-install-progress-v1 receiving 10\nctl-install-progress-v1 extracting\nctl-install-progress-v1 checking ctl-agent\nctl-install-progress-v1 checking ctmuxd\nctl-install-progress-v1 checking ctl-taskd\nctl-install-progress-v1 checking ctld\nctl-install-progress-v1 activating\nctl-install-v1\n";
 
+#[cfg(unix)]
+#[tokio::test]
+async fn updater_bootstrap_verifies_bytes_and_executable_before_replacing_the_manager() {
+  use std::os::unix::fs::PermissionsExt as _;
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
+  let fixture = BundleFixture::new();
+  let home = fixture.directory.join("home");
+  let binary = home.join(".tokn/ctl/bin/ctlup");
+  let updater = b"#!/bin/sh\ncase \"$1\" in --component-info) exit 0;; --version) printf 'ctlup 0.0.0\\n';; *) exit 1;; esac\n";
+  let run = |script: String| {
+    let mut command = Command::new("sh");
+    command.args(["-c", &script]).env("HOME", &home);
+    command
+  };
+  let (status, _, _) =
+    run_updater_command(run(updater_bootstrap_script(updater, true).unwrap()), &[])
+      .await
+      .unwrap();
+  assert_eq!(status.code(), Some(10));
+  let (status, stdout, stderr) = run_updater_command(
+    run(updater_bootstrap_script(updater, false).unwrap()),
+    updater,
+  )
+  .await
+  .unwrap();
+  require_updater_success(status, &stdout, &stderr, b"ctlup-bootstrap-v1\n").unwrap();
+  assert_eq!(std::fs::read(&binary).unwrap(), updater);
+  let (status, stdout, stderr) =
+    run_updater_command(run(updater_bootstrap_script(updater, true).unwrap()), &[])
+      .await
+      .unwrap();
+  require_updater_success(status, &stdout, &stderr, b"ctlup-bootstrap-v1\n").unwrap();
+  assert_eq!(
+    std::fs::metadata(&binary).unwrap().permissions().mode() & 0o777,
+    0o700
+  );
+  for (script, input) in [
+    (
+      updater_bootstrap_script(updater, false).unwrap(),
+      b"corrupt upload".as_slice(),
+    ),
+    (
+      updater_bootstrap_script(b"#!/bin/sh\nexit 9\n", false).unwrap(),
+      b"#!/bin/sh\nexit 9\n".as_slice(),
+    ),
+  ] {
+    let (status, _, _) = run_updater_command(run(script), input).await.unwrap();
+    assert!(!status.success());
+    assert_eq!(std::fs::read(&binary).unwrap(), updater);
+    assert_eq!(
+      std::fs::read_dir(binary.parent().unwrap()).unwrap().count(),
+      1
+    );
+  }
+  std::fs::remove_file(&binary).unwrap();
+  let outside = fixture.directory.join("outside");
+  std::fs::write(&outside, b"untouched").unwrap();
+  std::os::unix::fs::symlink(&outside, &binary).unwrap();
+  let (status, _, _) = run_updater_command(
+    run(updater_bootstrap_script(updater, false).unwrap()),
+    updater,
+  )
+  .await
+  .unwrap();
+  assert!(!status.success());
+  assert_eq!(std::fs::read(&outside).unwrap(), b"untouched");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn updater_control_retains_a_marker_after_bounded_shell_startup_output() {
+  let output = [vec![b'x'; 32 * 1024], b"ctlup-bootstrap-v1\n".to_vec()].concat();
+  let mut input = output.as_slice();
+  assert_eq!(read_updater_output(&mut input).await.unwrap(), output);
+  let oversized = vec![b'x'; 64 * 1024 + 1];
+  let mut input = oversized.as_slice();
+  assert_eq!(
+    read_updater_output(&mut input).await.unwrap_err().kind(),
+    io::ErrorKind::InvalidData
+  );
+}
+
 #[test]
 fn bundle_ids_cannot_change_the_fixed_script_or_installation_path() {
   let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire_blocking();
@@ -908,6 +990,7 @@ async fn managed_installer_rejects_symlinked_storage_and_an_active_sync() {
     command
   };
   let lock = home.join(".tokn/ctl/components/.sync-lock");
+  std::fs::create_dir_all(lock.parent().unwrap()).unwrap();
   std::fs::create_dir(&lock).unwrap();
   assert!(
     matches!(run_install_command(command(), &upload.archive, |_| {}).await,

@@ -82,7 +82,7 @@ const MAX_DIAGNOSTICS: usize = 8192;
 const MAX_LISTENER_CATALOG_BYTES: usize = 64 * 1024;
 const LISTENER_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
 const REMOTE_LISTENERS_COMMAND: &str = concat!(
-  r#"PATH="$HOME/.tokn/ctl/current:$PATH"; export PATH; "#,
+  r#"PATH="$HOME/.tokn/ctl/bin:$HOME/.tokn/ctl/current:$PATH"; export PATH; "#,
   r#"command -v ctl-agent >/dev/null 2>&1 || { printf 'ctl-agent is not installed\n' >&2; exit 127; }; "#,
   "exec ctl-agent listeners",
 );

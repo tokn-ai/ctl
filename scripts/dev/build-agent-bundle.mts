@@ -349,7 +349,6 @@ export async function buildAgentBundle(repository: string): Promise<string> {
     for (const name of agentComponents) await chmod(join(temporary, "bundle", name), 0o700);
     await chmod(join(temporary, "bundle/bundle.json"), 0o600);
     await chmod(join(temporary, "bundle"), 0o700);
-    await publishLocalBundle(join(temporary, "bundle"), output);
     const updater_bytes = await readFile(join(temporary, "updater/manifest.json"));
     const identity = JSON.parse(updater_bytes.toString("utf8")) as UpdaterManifest;
     const updater = parseUpdaterManifest(updater_bytes, identity, targetTriple);
@@ -360,7 +359,9 @@ export async function buildAgentBundle(repository: string): Promise<string> {
     await writeFile(join(updater_stage, `${updater.binary}.sha256`), `${updater.sha256}  ${updater.binary}\n`, { mode: 0o600 });
     await verifyUpdaterTarget(updater_stage, updater, targetTriple, true);
     const updater_root = join(outputRoot, "updaters");
-    await mkdir(updater_root, { mode: 0o700 });
+    await mkdir(updater_root, { recursive: true, mode: 0o700 });
+    if (!(await lstat(updater_root)).isDirectory()) throw new Error("development updater output must be a directory");
+    await publishLocalBundle(join(temporary, "bundle"), output);
     await publishLocalBundle(updater_stage, join(updater_root, targetTriple));
     console.log(output);
     return output;

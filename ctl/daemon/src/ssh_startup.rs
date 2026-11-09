@@ -3,11 +3,40 @@
 use super::RequestError;
 
 pub(super) fn failure(message: String) -> RequestError {
-  if is_transport_failure(&message) {
+  if let Some(message) = expired_profile_message(&message) {
+    RequestError::SshConfig(message.into())
+  } else if is_transport_failure(&message) {
     RequestError::MasterConnectionFailed(message)
   } else {
     RequestError::MasterFailed(message)
   }
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn expired_profile_message(message: &str) -> Option<&'static str> {
+  diagnose_expired_profile(
+    message,
+    super::helper_executable::has_expired_provisioning_profile,
+  )
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(super) const fn expired_profile_message(_: &str) -> Option<&'static str> {
+  None
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn diagnose_expired_profile(
+  message: &str,
+  profile_expired: impl FnOnce() -> bool,
+) -> Option<&'static str> {
+  let uid = message.trim().strip_prefix("No user exists for uid ")?;
+  if uid.is_empty() || !uid.bytes().all(|byte| byte.is_ascii_digit()) || !profile_expired() {
+    return None;
+  }
+  Some(
+    "The running ctld's macOS provisioning profile has expired. Re-sign the development helper with a renewed profile or install an updated signed helper, then restart ctld.",
+  )
 }
 
 pub(super) fn failure_with_interaction(message: String, interactive: bool) -> RequestError {

@@ -1,5 +1,6 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import { refreshInstalledDependencies } from "./dev/installed-dependencies";
 import { chooseDesktopDevPort } from "./dev/server-options";
 
 const host = process.env.TAURI_DEV_HOST;
@@ -7,7 +8,7 @@ const dynamicPort = process.env.CTL_DESKTOP_DYNAMIC_PORT === "1";
 
 // https://vite.dev/config/
 export default defineConfig(async () => ({
-  plugins: [react()],
+  plugins: [react(), refreshInstalledDependencies()],
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //

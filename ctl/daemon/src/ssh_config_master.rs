@@ -11,7 +11,7 @@ use tokio::process::Command;
 
 use super::{
   MasterEndpoint, RequestError, SSH_PROGRAM, SharedMasterStartup, append_target_arguments,
-  control_master_is_ready,
+  control_master_is_ready, ssh_startup,
 };
 
 const CONFIG_TIMEOUT: Duration = Duration::from_secs(5);
@@ -106,10 +106,12 @@ async fn read_policy(mut command: Command) -> Result<SharingPolicy, RequestError
     let (status, stdout, stderr) =
       tokio::try_join!(child.wait(), read_limited(stdout), read_limited(stderr))?;
     if !status.success() {
-      return Err(io::Error::other(format!(
-        "could not evaluate SSH config: {}",
-        String::from_utf8_lossy(&stderr).trim()
-      )));
+      let stderr = String::from_utf8_lossy(&stderr);
+      let message = ssh_startup::expired_profile_message(&stderr).map_or_else(
+        || format!("could not evaluate SSH config: {}", stderr.trim()),
+        str::to_owned,
+      );
+      return Err(io::Error::other(message));
     }
     parse_policy(&stdout)
   })

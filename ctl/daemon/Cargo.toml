@@ -37,6 +37,7 @@ process-wrap = { version = "10.0.0", default-features = false, features = ["toki
 
 [target.'cfg(target_os = "macos")'.dependencies]
 ctl-keychain-client.workspace = true
+plist = "1.10"
 security-framework = { version = "3.7", features = ["OSX_10_15"] }
 
 [lints]

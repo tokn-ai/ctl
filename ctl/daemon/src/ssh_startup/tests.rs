@@ -1,6 +1,24 @@
 use super::*;
 
 #[test]
+fn reports_provisioning_expiration_only_for_the_local_uid_failure() {
+  let message = "No user exists for uid 1234";
+  let error = diagnose_expired_profile(&format!("{message}\r\n"), || true).unwrap();
+  assert!(error.contains("provisioning profile has expired"));
+  assert!(error.contains("then restart ctld"));
+  assert_eq!(diagnose_expired_profile(message, || false), None);
+
+  for other in [
+    "No user exists for uid ",
+    "No user exists for uid unknown",
+    "Permission denied (publickey).",
+    "ProxyCommand failed: No user exists for uid 1234",
+  ] {
+    assert_eq!(diagnose_expired_profile(other, || unreachable!()), None);
+  }
+}
+
+#[test]
 fn transport_startup_failures_have_their_own_broker_error_code() {
   for message in [
     // Confirmed with a real local OpenSSH loopback connection attempt.

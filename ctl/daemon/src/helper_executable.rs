@@ -3,6 +3,11 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "macos")]
+pub(crate) use macos::has_expired_provisioning_profile;
+
 pub(super) fn current() -> io::Result<PathBuf> {
   let executable = std::env::current_exe().map_err(|error| {
     io::Error::new(

@@ -928,6 +928,7 @@ dependencies = [
  "ctl-keychain-client",
  "ctl-proto",
  "dirs 6.0.0",
+ "plist",
  "process-wrap",
  "rpassword",
  "rustix",

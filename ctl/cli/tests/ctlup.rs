@@ -58,7 +58,11 @@ fn archive(revision: char) -> (Manifest, Vec<u8>) {
     dirty: false,
   };
   let mut protocols = ctl_proto::agent_protocols();
-  protocols.extend(ctl_ipc::lifecycle::DaemonBinaryInfo::current().protocols);
+  for protocol in ctl_ipc::lifecycle::DaemonBinaryInfo::current().protocols {
+    if !protocols.contains(&protocol) {
+      protocols.push(protocol);
+    }
+  }
   protocols.extend([
     ctmux_proto::protocol_info(),
     ctmux_ipc::local_control_protocol_info(),

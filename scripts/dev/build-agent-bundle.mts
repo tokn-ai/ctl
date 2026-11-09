@@ -180,9 +180,11 @@ async function containerBuild(packageOnly: boolean): Promise<void> {
       return stdout;
     });
     const build = manifest.components["ctl-agent"].build;
+    // The slim package-only image has no binutils. Preserve the Zig build's
+    // ctlup bytes, just as we do for the other local executables.
     const updater = await packageUpdater({ target: targetTriple, app_version: build.version,
       bundle_id: `${build.version}-dev.${build.source_revision!.slice(0, 12)}`, git_revision: build.source_revision!,
-      binary_directory: `/build/${targetTriple}/release`, output_directory: join(staging, "updater"), allow_dirty: true });
+      binary_directory: `/build/${targetTriple}/release`, output_directory: join(staging, "updater"), allow_dirty: true, strip: !packageOnly });
     // Rootless engines cannot chmod host-owned bind-mount files. Transfer only
     // their bytes; the host retains ownership and applies private store modes.
     for (const name of [...agentComponents, "bundle.json"]) {

@@ -6,7 +6,7 @@ import { QUICK_INPUT_IDS } from "../../features/commands/commandIds";
 import { LOCAL_TARGET, targetKey, targetLabel } from "../../features/targets/targets";
 import { cancelComponentUpdate, respondSshPrompt, updateComponents } from "../../lib/tauri";
 import { errorMessage } from "../../lib/errors";
-import type { ComponentUpdateContext, ComponentUpdateHostResult, ComponentUpdateProgress, ComponentUpdateSource, ConnectionTarget, SshPrompt } from "../../lib/types";
+import type { BundleChannel, ComponentUpdateContext, ComponentUpdateHostResult, ComponentUpdateProgress, ComponentUpdateSource, ConnectionTarget, SshPrompt } from "../../lib/types";
 import { promptMode, promptTitle } from "../sessions/sshPrompt";
 import { remoteInstallProgressMode } from "../sessions/remoteInstallProgress";
 import { PublishedBundleStatus } from "./PublishedBundleStatus";
@@ -19,7 +19,7 @@ interface Props {
   on_close(): void;
 }
 
-type SourceChoice = "automatic" | "dev" | "stable" | "working_tree" | "selected" | "provided";
+type SourceChoice = BundleChannel | Exclude<ComponentUpdateSource["kind"], "published">;
 
 function sourceChoice(source?: ComponentUpdateSource): SourceChoice {
   return source?.kind === "published" ? source.channel : source?.kind ?? "automatic";
@@ -30,6 +30,8 @@ export function UpdateComponentsDialog({ targets, context, on_updated, on_close 
   const [selected, setSelected] = useState(() => new Set((context?.targets ?? [LOCAL_TARGET]).filter((target) => target.kind !== "ssh" || !target.unavailable).map(targetKey)));
   const initial_source = context?.source;
   const [source_choice, setSourceChoice] = useState<SourceChoice>(() => sourceChoice(initial_source));
+  const published = source_choice === "nightly" || source_choice === "dev" || source_choice === "stable";
+  const show_dev = source_choice === "dev" || (initial_source?.kind === "published" && initial_source.channel === "dev");
   const provided = source_choice === "provided";
   const [path, setPath] = useState(initial_source?.kind === "provided" ? initial_source.path : "");
   const [local_build, setLocalBuild] = useState(initial_source?.kind === "provided" && initial_source.local_build);
@@ -67,7 +69,7 @@ export function UpdateComponentsDialog({ targets, context, on_updated, on_close 
     if (provided && !path.trim()) { setError("Enter a build directory or archive path."); return; }
     const source: ComponentUpdateSource = provided
       ? { kind: "provided", path: path.trim(), local_build, ctld_package: local_build && ctld_package.trim() ? ctld_package.trim() : null }
-      : source_choice === "dev" || source_choice === "stable"
+      : published
         ? { kind: "published", channel: source_choice }
         : { kind: source_choice };
     const attempt_id = crypto.randomUUID();
@@ -118,7 +120,8 @@ export function UpdateComponentsDialog({ targets, context, on_updated, on_close 
       <fieldset><legend>Hosts</legend><div className="component-update-hosts">{[...available.values()].map((target) => <label key={targetKey(target)}><input type="checkbox" checked={selected.has(targetKey(target))} disabled={target.kind === "ssh" && !!target.unavailable} onChange={(event) => setSelected((current) => { const next = new Set(current); if (event.target.checked) next.add(targetKey(target)); else next.delete(targetKey(target)); return next; })} /><span>{targetLabel(target)}{target.kind === "ssh" && target.unavailable ? <small>Connection unavailable</small> : null}</span></label>)}</div></fieldset>
       <label className="component-update-field">Build source<select value={source_choice} onChange={(event) => setSourceChoice(event.target.value as SourceChoice)}>
         <option value="automatic">Automatic</option>
-        <option value="dev">Latest published main build</option>
+        <option value="nightly">Nightly (latest published main build)</option>
+        {show_dev ? <option value="dev">Development channel (Dev)</option> : null}
         <option value="stable">Latest stable release</option>
         {import.meta.env.DEV || source_choice === "working_tree" ? <option value="working_tree">Build from checkout</option> : null}
         <option value="selected">Included build (offline)</option>
@@ -130,7 +133,7 @@ export function UpdateComponentsDialog({ targets, context, on_updated, on_close 
         {local_build ? <label className="component-update-field">Signed ctld package directory (macOS full bundle)<input value={ctld_package} onChange={(event) => setCtldPackage(event.target.value)} placeholder="/path/to/ctld-package" /></label> : <p>Use a complete bundle directory, or a verified archive with its bundle-set.json beside it.</p>}
       </div> : <>
         <p className="component-update-hint">{source_choice === "working_tree" ? "Builds for Linux x64 or ARM64 from the current checkout." : source_choice === "selected" ? "Installs the complete build included with this app." : source_choice === "automatic" ? "Uses the configured channel. Development Linux x64 builds use the working tree." : "Downloads this channel’s complete build for each platform."}</p>
-        {source_choice !== "selected" && source_choice !== "working_tree" ? <PublishedBundleStatus channel={source_choice === "dev" || source_choice === "stable" ? source_choice : undefined} /> : null}
+        {source_choice !== "selected" && source_choice !== "working_tree" ? <PublishedBundleStatus channel={published ? source_choice : undefined} /> : null}
       </>}
     </form>}
     {error ? <p role="alert" className="quick-input-error">{error}</p> : null}

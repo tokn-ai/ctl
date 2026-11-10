@@ -47,16 +47,30 @@ it("keeps per-host failures and retries only failed hosts", async () => {
   expect(vi.mocked(updateComponents).mock.calls[0][0].options.source).toEqual({ kind: "automatic" });
 });
 
-it("installs the explicit published channel without using the offline selection", async () => {
+it.each(["stable", "dev"] as const)("keeps an explicit %s source and installs its published bundle", async (channel) => {
   vi.mocked(updateComponents).mockResolvedValue([complete(0)]);
-  render(<UpdateComponentsDialog targets={[host]} context={{ targets: [host], source: { kind: "published", channel: "stable" } }} on_close={vi.fn()} />);
+  render(<UpdateComponentsDialog targets={[host]} context={{ targets: [host], source: { kind: "published", channel } }} on_close={vi.fn()} />);
   const user = userEvent.setup();
-  expect((screen.getByRole("combobox", { name: "Build source" }) as HTMLSelectElement).value).toBe("stable");
-  await waitFor(() => expect(checkComponentUpdates).toHaveBeenCalledWith("stable", false));
+  expect((screen.getByRole("combobox", { name: "Build source" }) as HTMLSelectElement).value).toBe(channel);
+  await waitFor(() => expect(checkComponentUpdates).toHaveBeenCalledWith(channel, false));
   await user.click(screen.getByRole("button", { name: "Update" }));
   await screen.findByText("1 of 1 hosts updated. Running services were preserved.");
-  expect(vi.mocked(updateComponents).mock.calls[0][0].options.source).toEqual({ kind: "published", channel: "stable" });
+  expect(vi.mocked(updateComponents).mock.calls[0][0].options.source).toEqual({ kind: "published", channel });
   expect(screen.getByText(/Bundle verified-build/)).toBeTruthy();
+});
+
+it("offers Nightly as the main build choice and sends it to discovery and installation", async () => {
+  vi.mocked(updateComponents).mockResolvedValue([complete(0)]);
+  render(<UpdateComponentsDialog targets={[host]} context={{ targets: [host] }} on_close={vi.fn()} />);
+  const user = userEvent.setup();
+  const select = screen.getByRole("combobox", { name: "Build source" }) as HTMLSelectElement;
+  expect(select.value).toBe("automatic");
+  expect(Array.from(select.options, (option) => option.value)).not.toContain("dev");
+  await user.selectOptions(select, screen.getByRole("option", { name: "Nightly (latest published main build)" }));
+  await waitFor(() => expect(checkComponentUpdates).toHaveBeenLastCalledWith("nightly", false));
+  await user.click(screen.getByRole("button", { name: "Update" }));
+  await screen.findByText("1 of 1 hosts updated. Running services were preserved.");
+  expect(vi.mocked(updateComponents).mock.calls[0][0].options.source).toEqual({ kind: "published", channel: "nightly" });
 });
 
 it("keeps an explicit offline install available without a network check", async () => {

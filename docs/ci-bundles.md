@@ -62,6 +62,7 @@ Applications discover channels through:
 
 ```text
 https://tokn-ai.dev/ctl/bundles/channels/dev.json
+https://tokn-ai.dev/ctl/bundles/channels/nightly.json
 https://tokn-ai.dev/ctl/bundles/channels/stable.json
 ```
 
@@ -99,8 +100,10 @@ Archive names remain bare sibling filenames in the bundle set. Its existing
 checksums, archived manifests, component metadata, and protocol compatibility
 validation remain authoritative; channel discovery adds no parallel hash format.
 
-Dev tracks the newest **successfully published** main build. A later main commit
-that fails to build does not prevent an earlier successful build from publishing.
+Nightly and Dev point to the same newest **successfully published** main build.
+Each has its own channel document and both reference one immutable set. CI
+advances them after a successful main build. A later main commit that fails
+to build does not prevent an earlier successful build from publishing.
 Run number and attempt fences prevent a delayed older run from replacing a newer
 successful publication. Stable advances by semantic release version; a lower
 release tag or any prerelease cannot move it backward. Prerelease archives remain

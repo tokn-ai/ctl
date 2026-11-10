@@ -34,6 +34,20 @@ it("keeps a failed check distinct from an available publication", async () => {
   expect(screen.queryByText("0.1.0-dev.abcdef123456")).toBeNull();
 });
 
+it("labels a Nightly publication and preserves that channel when opening installation", async () => {
+  const nightly: ComponentUpdateCatalog = {
+    ...available,
+    catalog: { ...available.catalog!, channel: "nightly" },
+  };
+  vi.mocked(checkComponentUpdates).mockResolvedValue(nightly);
+  const on_update = vi.fn();
+  render(<PublishedBundleStatus channel="nightly" on_update={on_update} />);
+  expect((await screen.findByRole("status")).textContent).toContain("Published nightly bundle");
+  expect(checkComponentUpdates).toHaveBeenCalledWith("nightly", false);
+  fireEvent.click(screen.getByRole("button", { name: "Install published bundle…" }));
+  expect(on_update).toHaveBeenCalledExactlyOnceWith("nightly");
+});
+
 it("ignores an old channel response after the channel changes", async () => {
   let finish!: (value: ComponentUpdateCatalog) => void;
   vi.mocked(checkComponentUpdates).mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));

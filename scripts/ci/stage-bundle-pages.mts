@@ -8,6 +8,8 @@ export const siteMarker = "ctl-bundle-pages";
 export const devRetention = 5;
 const stableRetention = 2;
 const maximumSiteBytes = 900 * 1024 * 1024;
+export const catalogChannels = ["dev", "nightly", "stable"] as const;
+type CatalogChannel = (typeof catalogChannels)[number];
 
 export interface Publication extends AgentBundleIdentity {
   publication_id: string;
@@ -21,7 +23,7 @@ export interface BundleCatalog {
   site: typeof siteMarker;
   generation: number;
   publications: Publication[];
-  channels: Partial<Record<BundleChannel, string>>;
+  channels: Partial<Record<CatalogChannel, string>>;
 }
 
 function object(value: unknown): value is Record<string, unknown> {
@@ -43,17 +45,33 @@ export function parseBundleCatalog(bytes: Buffer): BundleCatalog {
   const value: unknown = JSON.parse(bytes.toString("utf8"));
   if (!object(value) || value.schema_version !== 1 || value.site !== siteMarker || !Number.isSafeInteger(value.generation) || (value.generation as number) < 1 ||
     !Array.isArray(value.publications) || value.publications.length > devRetention + stableRetention || !object(value.channels) ||
-    Object.keys(value.channels).some((key) => key !== "dev" && key !== "stable")) throw new Error("Existing Pages site is not a supported managed bundle site");
+    Object.keys(value.channels).some((key) => !catalogChannels.some((channel) => channel === key))) throw new Error("Existing Pages site is not a supported managed bundle site");
   const seen = new Set<string>();
   for (const publication of value.publications) {
     validatePublication(publication);
     if (seen.has(publication.publication_id)) throw new Error("Duplicate Pages publication");
     seen.add(publication.publication_id);
   }
+  if (Object.hasOwn(value.channels, "nightly") && value.channels.nightly !== value.channels.dev) {
+    throw new Error("Pages Nightly must point to the same publication as Dev");
+  }
   for (const [channel, id] of Object.entries(value.channels)) {
-    if (!value.publications.some((entry) => entry.publication_id === id && entry.channel === channel && (channel !== "stable" || !semver(entry.app_version).prerelease.length))) throw new Error("Pages channel points outside its retained publication set or to a prerelease");
+    const owner = channel === "nightly" ? "dev" : channel;
+    if (!value.publications.some((entry) => entry.publication_id === id && entry.channel === owner && (owner !== "stable" || !semver(entry.app_version).prerelease.length))) throw new Error("Pages channel points outside its retained publication set or to a prerelease");
   }
   return value as unknown as BundleCatalog;
+}
+
+function channelPointer(channel: CatalogChannel, publication_id: string) {
+  return { schema_version: 1, channel, bundle_set_url: `${bundleRoot}sets/${publication_id}/bundle-set.json` };
+}
+
+export function verifyChannelPointer(bytes: Buffer, channel: CatalogChannel, publication_id: string): void {
+  const value: unknown = JSON.parse(bytes.toString("utf8"));
+  const expected = channelPointer(channel, publication_id);
+  if (!object(value) || value.schema_version !== expected.schema_version || value.channel !== expected.channel || value.bundle_set_url !== expected.bundle_set_url) {
+    throw new Error("Pages channel and catalog disagree");
+  }
 }
 
 function semver(value: string): { core: bigint[]; prerelease: string[] } {
@@ -112,10 +130,9 @@ export async function stageBundlePages(publication: Publication, incoming: strin
       const { asset_names } = await validatedComponentSet(directory, entry);
       if ((await readdir(directory)).some((name) => !asset_names.includes(name))) throw new Error("Unrecognized content in an immutable bundle set");
     }
-    for (const channel of ["dev", "stable"] as const) {
-      if (!catalog.channels[channel]) continue;
-      const pointer = JSON.parse(await readFile(join(previous, "bundles/channels", `${channel}.json`), "utf8"));
-      if (pointer.schema_version !== 1 || pointer.channel !== channel || pointer.bundle_set_url !== `${bundleRoot}sets/${catalog.channels[channel]}/bundle-set.json`) throw new Error("Pages channel and catalog disagree");
+    for (const channel of catalogChannels) {
+      const id = catalog.channels[channel];
+      if (id) verifyChannelPointer(await readFile(join(previous, "bundles/channels", `${channel}.json`)), channel, id);
     }
   }
   const current = catalog.publications.find((entry) => entry.publication_id === catalog.channels[publication.channel]);
@@ -124,7 +141,11 @@ export async function stageBundlePages(publication: Publication, incoming: strin
   if (catalog.publications.some((entry) => entry.publication_id === publication.publication_id)) return false;
   const promote = publication.channel === "dev" || (!semver(publication.app_version).prerelease.length && (!current || newer(publication, current) > 0));
   const retained = [...catalog.publications, publication];
-  const channels = promote ? { ...catalog.channels, [publication.channel]: publication.publication_id } : catalog.channels;
+  const channels = { ...catalog.channels };
+  if (promote) channels[publication.channel] = publication.publication_id;
+  // Nightly aliases the retained Dev head, including when restoring an older
+  // catalog on a release run. It has no independent publications to retain.
+  if (channels.dev) channels.nightly = channels.dev;
   const pinned_stable = retained.find((entry) => entry.publication_id === channels.stable);
   const stable = retained.filter((entry) => entry.channel === "stable" && entry !== pinned_stable)
     .sort((a, b) => b.run_number - a.run_number || b.run_attempt - a.run_attempt).slice(0, stableRetention - Number(!!pinned_stable));
@@ -149,13 +170,14 @@ export async function stageBundlePages(publication: Publication, incoming: strin
     const { asset_names } = await validatedComponentSet(incoming, publication);
     for (const name of asset_names) await copyFile(join(incoming, name), join(next, name));
     await mkdir(join(output, "bundles/channels"), { recursive: true });
-    for (const channel of ["dev", "stable"] as const) {
+    for (const channel of catalogChannels) {
       const id = catalog.channels[channel];
-      if (id) await writeFile(join(output, "bundles/channels", `${channel}.json`), `${JSON.stringify({ schema_version: 1, channel, bundle_set_url: `${bundleRoot}sets/${id}/bundle-set.json` }, null, 2)}\n`);
+      if (id) await writeFile(join(output, "bundles/channels", `${channel}.json`), `${JSON.stringify(channelPointer(channel, id), null, 2)}\n`);
     }
     await writeFile(join(output, "bundles/catalog.json"), `${JSON.stringify(catalog, null, 2)}\n`);
     await writeFile(join(output, ".nojekyll"), "");
-    await writeFile(join(output, "index.html"), `<!-- ${siteMarker} --><!doctype html><title>ctl component bundles</title><h1>ctl component bundles</h1><p><a href="bundles/channels/dev.json">Dev channel</a> · <a href="bundles/channels/stable.json">Stable channel</a></p><p>Channel documents reference verified bundle sets and downloadable archives.</p>\n`);
+    const nightly = catalog.channels.nightly ? '<a href="bundles/channels/nightly.json">Nightly channel</a> · ' : "";
+    await writeFile(join(output, "index.html"), `<!-- ${siteMarker} --><!doctype html><title>ctl component bundles</title><h1>ctl component bundles</h1><p>${nightly}<a href="bundles/channels/dev.json">Dev channel</a> · <a href="bundles/channels/stable.json">Stable channel</a></p><p>Channel documents reference verified bundle sets and downloadable archives.</p>\n`);
     // Runtime archives and standalone updaters can grow independently. Five
     // Dev generations are an upper bound; preserve both channel heads and the
     // newest other tag before spending space on older unselected Dev builds.

@@ -386,11 +386,13 @@ CI/release bundles remain clean.
 
 Distribution discovery adds channel-document schema 1, independently of the
 named IPC contracts and product release versions. It contains `schema_version`,
-`channel` (`dev` or `stable`), and an absolute `bundle_set_url` under the configured
+`channel` (`dev`, `nightly`, or `stable`), and an absolute `bundle_set_url` under the configured
 GitHub Pages bundle root. The referenced existing schema-2 bundle set names
 sibling target archives and their component metadata. Unknown schemas, changed
 channel identities, unsafe URLs, incompatible targets and corrupt archives are
-rejected before installation. This discovery format does not change any named
+rejected before installation. The Nightly pointer uses schema 1 and names the
+same immutable set as Dev. Existing Dev and Stable pointers remain valid.
+This discovery format does not change any named
 service contract, internal protocol build, SSH framing or daemon negotiation.
 
 ## Discovery and SSH framing

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { cp, mkdtemp, readFile, rm } from "node:fs/promises";
+import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
@@ -67,7 +67,7 @@ test("restores a deployed snapshot even while Pages CDN is still missing its cat
   await validatedComponentSet(join(output, "bundles/sets", entry.publication_id), entry);
 });
 
-test("expired snapshots recover actual archives and both channel pointers from the managed HTTPS site", async (t) => {
+test("expired snapshots recover actual archives and all channel pointers from the managed HTTPS site", async (t) => {
   const directory = await root(t), first = publicationFixture(1), second = publicationFixture(2, "stable");
   const old = join(directory, "old"), site = join(directory, "site"), output = join(directory, "restore");
   await stageBundlePages(first, await componentSetFixture(directory, first), null, old);
@@ -75,7 +75,27 @@ test("expired snapshots recover actual archives and both channel pointers from t
   assert.equal(await restoreBundlePages("tokn-ai/ctl", output, github({ deployed: true }), publicSite(site)), true);
   assert.deepEqual(parseBundleCatalog(await readFile(join(output, "bundles/catalog.json"))).channels,
     parseBundleCatalog(await readFile(join(site, "bundles/catalog.json"))).channels);
+  for (const channel of ["dev", "nightly", "stable"]) {
+    const relative = `bundles/channels/${channel}.json`;
+    assert.deepEqual(await readFile(join(output, relative)), await readFile(join(site, relative)));
+  }
   for (const entry of [first, second]) await validatedComponentSet(join(output, "bundles/sets", entry.publication_id), entry);
+  await writeFile(join(site, "bundles/channels/nightly.json"), await readFile(join(site, "bundles/channels/stable.json")));
+  await assert.rejects(restoreBundlePages("tokn-ai/ctl", join(directory, "corrupt"), github(), publicSite(site)), /channel and catalog disagree/);
+});
+
+test("restores a legacy HTTPS catalog without requiring a Nightly pointer", async (t) => {
+  const directory = await root(t), dev = publicationFixture(1);
+  const site = join(directory, "legacy"), output = join(directory, "restore");
+  await stageBundlePages(dev, await componentSetFixture(directory, dev), null, site);
+  const catalog_path = join(site, "bundles/catalog.json");
+  const catalog = parseBundleCatalog(await readFile(catalog_path));
+  delete catalog.channels.nightly;
+  await writeFile(catalog_path, JSON.stringify(catalog));
+  await rm(join(site, "bundles/channels/nightly.json"));
+  assert.equal(await restoreBundlePages("tokn-ai/ctl", output, github({ deployed: true }), publicSite(site)), true);
+  assert.equal(parseBundleCatalog(await readFile(join(output, "bundles/catalog.json"))).channels.dev, dev.publication_id);
+  await assert.rejects(readFile(join(output, "bundles/channels/nightly.json")), { code: "ENOENT" });
 });
 
 test("a newer published generation wins over an older surviving Actions snapshot", async (t) => {

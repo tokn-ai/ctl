@@ -136,8 +136,8 @@ preserved.
   command for a missing or recognized outdated Unix agent. Use
   `ctlup --host HOST update` from macOS or Linux for an explicit complete-build
   update or `ctlup --destination DESTINATION update` for an SSH alias. Updates
-  resolve the configured Dev/Stable publication channel; development checkouts
-  can build Linux x64 or ARM64 with `--working-tree`. `--channel stable` or `--channel dev`
+  resolve the configured publication channel; development checkouts
+  can build Linux x64 or ARM64 with `--working-tree`. `--channel stable` or `--channel nightly`
   chooses a published source explicitly. `--from DIRECTORY_OR_ARCHIVE` supplies
   an offline verified build. Network failures never silently choose an older
   cached publication. No GitHub CLI or workflow dispatch is required. A manually

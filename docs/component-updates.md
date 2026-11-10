@@ -73,7 +73,7 @@ reconnect. A terminal-daemon restart remains a separate confirmed action.
 ctlup install
 ctlup update
 ctlup update --channel stable
-ctlup update --channel dev
+ctlup update --channel nightly
 ctlup update --host work
 ctlup update --hosts work,jump-a --local
 ctlup update --destination my-ssh-alias
@@ -93,8 +93,10 @@ a failure preserves successful hosts and produces a nonzero exit status.
 
 An explicit channel is saved as this account’s preference after a successful
 command. Otherwise automatic updates use that preference or the distribution’s
-compiled Dev/Stable default. Development checkouts build the Linux x64 working
-tree locally. Explicit channel requests always resolve the publication.
+compiled default. Nightly tracks the latest successfully published CI build
+from `main`. The `dev` channel points to that same build for existing clients.
+Stable tracks tagged releases. Development checkouts build the Linux x64
+working tree locally. Explicit channel requests always resolve the publication.
 
 `--from` supplies an exact complete build or publisher bundle-set. Publisher
 archives need their matching `bundle-set.json`. Foreign-target deployment also
@@ -134,7 +136,7 @@ path on Unix. Windows retains its existing daemon build fallback.
 
 ## Downloads and cache
 
-Updates resolve Dev or Stable once, then verify the target runtime archive
+Updates resolve the selected channel once, then verify the target runtime archive
 and its updater from the same immutable publication. Archive and binary
 checksums and compatible protocol advertisements are verified before use.
 Channel discovery is refreshed before cache reuse. Network errors remain

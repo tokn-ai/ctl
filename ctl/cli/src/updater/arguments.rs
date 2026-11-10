@@ -121,18 +121,20 @@ mod tests {
   #[test]
   fn install_and_update_share_one_explicit_source_and_target_surface() {
     for command in ["install", "update"] {
-      assert!(
-        Arguments::try_parse_from([
-          "ctlup",
-          command,
-          "--host",
-          "work",
-          "--channel",
-          "stable",
-          "--json"
-        ])
-        .is_ok()
-      );
+      for channel in ["dev", "nightly", "stable"] {
+        assert!(
+          Arguments::try_parse_from([
+            "ctlup",
+            command,
+            "--host",
+            "work",
+            "--channel",
+            channel,
+            "--json"
+          ])
+          .is_ok()
+        );
+      }
       assert!(
         Arguments::try_parse_from(["ctlup", command, "--channel", "dev", "--from", "/build"])
           .is_err()

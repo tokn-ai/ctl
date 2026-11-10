@@ -16,6 +16,7 @@ pub enum Package {
 #[serde(rename_all = "snake_case")]
 pub enum BundleChannel {
   Dev,
+  Nightly,
   Stable,
 }
 
@@ -24,6 +25,7 @@ impl BundleChannel {
   pub const fn name(self) -> &'static str {
     match self {
       Self::Dev => "dev",
+      Self::Nightly => "nightly",
       Self::Stable => "stable",
     }
   }
@@ -31,6 +33,7 @@ impl BundleChannel {
   #[must_use]
   pub const fn configured_default() -> Self {
     match env!("CTL_BUNDLE_CHANNEL").as_bytes() {
+      b"nightly" => Self::Nightly,
       b"stable" => Self::Stable,
       _ => Self::Dev,
     }
@@ -86,7 +89,11 @@ mod tests {
   fn update_source_defaults_to_automatic_and_channels_use_snake_case() {
     let options: UpdateOptions = serde_json::from_str("{}").unwrap();
     assert!(matches!(options.source, BuildSource::Automatic));
-    for channel in [BundleChannel::Dev, BundleChannel::Stable] {
+    for channel in [
+      BundleChannel::Dev,
+      BundleChannel::Nightly,
+      BundleChannel::Stable,
+    ] {
       let value = serde_json::to_value(BuildSource::Published { channel }).unwrap();
       assert_eq!(value["kind"], "published");
       assert_eq!(value["channel"], channel.name());

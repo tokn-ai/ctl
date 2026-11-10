@@ -8,7 +8,7 @@ import { isDeepStrictEqual, promisify } from "node:util";
 import { bundleRoot, componentIdentity, repositoryName, validatedComponentSet } from "./bundle-publication.mts";
 import { parseAgentBundleSet } from "../shared/agent-bundle.mts";
 import { maxUpdaterBytes, maxUpdaterManifestBytes, parseUpdaterManifest, updaterManifestName } from "../shared/updater-bundle.mts";
-import { parseBundleCatalog, siteMarker, type BundleCatalog } from "./stage-bundle-pages.mts";
+import { catalogChannels, parseBundleCatalog, siteMarker, verifyChannelPointer, type BundleCatalog } from "./stage-bundle-pages.mts";
 import { pages, type GhRunner } from "./update-draft-release.mts";
 
 export const pagesJobName = "Publish bundle channels";
@@ -92,8 +92,12 @@ async function restorePublished(catalog: BundleCatalog, directory: string, fetch
     }
     await validatedComponentSet(local, entry);
   }
-  for (const channel of ["dev", "stable"] as const) {
-    if (catalog.channels[channel]) await writeFile(join(directory, "bundles/channels", `${channel}.json`), (await download(new URL(`channels/${channel}.json`, bundleRoot), 4096, fetcher))!);
+  for (const channel of catalogChannels) {
+    const id = catalog.channels[channel];
+    if (!id) continue;
+    const pointer = (await download(new URL(`channels/${channel}.json`, bundleRoot), 4096, fetcher))!;
+    verifyChannelPointer(pointer, channel, id);
+    await writeFile(join(directory, "bundles/channels", `${channel}.json`), pointer);
   }
 }
 

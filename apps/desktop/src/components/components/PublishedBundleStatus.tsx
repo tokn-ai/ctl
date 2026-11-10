@@ -9,6 +9,12 @@ interface Props {
   on_update?(channel: BundleChannel): void;
 }
 
+const channel_names: Record<BundleChannel, string> = {
+  dev: "development",
+  nightly: "nightly",
+  stable: "stable",
+};
+
 /** Reads publication metadata only; downloading and installing remain explicit. */
 export function PublishedBundleStatus({ visible = true, channel, on_update }: Props) {
   const [snapshot, setSnapshot] = useState<ComponentUpdateCatalog | null>(null);
@@ -38,15 +44,14 @@ export function PublishedBundleStatus({ visible = true, channel, on_update }: Pr
 
   if (!visible) return null;
   const catalog = snapshot?.catalog;
-  const effective_channel = channel ?? snapshot?.default_channel;
   return <section className="published-bundle-status" aria-label="Published component bundles">
     <div className="published-bundle-actions">
       <button type="button" disabled={loading} onClick={() => void check(true)}>{loading ? "Checking published bundles…" : "Check for bundle updates"}</button>
       {catalog && on_update ? <button type="button" onClick={() => on_update(catalog.channel)}>Install published bundle…</button> : null}
     </div>
-    {catalog ? <p role="status">Published {catalog.channel === "dev" ? "development" : "stable"} bundle: <strong>{catalog.bundle_id}</strong>.</p> : null}
+    {catalog ? <p role="status">Published {channel_names[catalog.channel]} bundle: <strong>{catalog.bundle_id}</strong>.</p> : null}
     {catalog?.targets.some((target) => !target.compatible) ? <p>Some published targets require a newer client. Update the client before installing incompatible components.</p> : null}
-    {!channel && snapshot?.local_development ? <p>Linux x64 uploads build this working tree locally. Other remote targets use the {effective_channel === "stable" ? "stable" : "development"} channel.</p> : null}
+    {!channel && snapshot?.local_development ? <p>Linux x64 uploads build this working tree locally. Other remote targets use the {channel_names[snapshot.default_channel]} channel.</p> : null}
     {error ? <p role="alert">Could not check published bundles: {error}</p> : null}
   </section>;
 }

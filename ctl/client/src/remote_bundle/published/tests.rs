@@ -143,6 +143,44 @@ async fn check_reads_only_channel_and_metadata_while_download_verifies_archive()
 }
 
 #[tokio::test]
+async fn nightly_discovery_reads_the_same_immutable_set_as_dev() {
+  let fixture = fixture();
+  let outer = fixture.bind_archive(&fixture.archive());
+  let server = Server::start(move |root| {
+    let dev = pointer(root);
+    let mut nightly = dev.clone();
+    nightly["channel"] = "nightly".into();
+    BTreeMap::from([
+      (
+        "/bundles/channels/dev.json".into(),
+        serde_json::to_vec(&dev).unwrap(),
+      ),
+      (
+        "/bundles/channels/nightly.json".into(),
+        serde_json::to_vec(&nightly).unwrap(),
+      ),
+      ("/bundles/sets/test/bundle-set.json".into(), outer),
+    ])
+  })
+  .await;
+  let resolver = server.resolver();
+  let nightly = resolver.check(BundleChannel::Nightly).await.unwrap();
+  let dev = resolver.check(BundleChannel::Dev).await.unwrap();
+  assert_eq!(nightly.channel, BundleChannel::Nightly);
+  assert_eq!(nightly.bundle_id, dev.bundle_id);
+  assert_eq!(nightly.git_revision, dev.git_revision);
+  assert_eq!(
+    server.requests.lock().unwrap().as_slice(),
+    [
+      "/bundles/channels/nightly.json",
+      "/bundles/sets/test/bundle-set.json",
+      "/bundles/channels/dev.json",
+      "/bundles/sets/test/bundle-set.json",
+    ]
+  );
+}
+
+#[tokio::test]
 async fn channel_identity_urls_and_archive_checksums_fail_closed() {
   for change in ["channel", "origin", "path", "checksum"] {
     let server = server(

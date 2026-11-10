@@ -26,6 +26,8 @@ fn channel_inspection_is_passive_and_explicit_choices_are_atomic() {
   assert!(!home.0.join(".tokn").exists());
   set_channel(&home.0, BundleChannel::Stable).unwrap();
   assert_eq!(default_channel(&home.0).unwrap(), BundleChannel::Stable);
+  set_channel(&home.0, BundleChannel::Nightly).unwrap();
+  assert_eq!(default_channel(&home.0).unwrap(), BundleChannel::Nightly);
   set_channel(&home.0, BundleChannel::Dev).unwrap();
   assert_eq!(default_channel(&home.0).unwrap(), BundleChannel::Dev);
   assert!(

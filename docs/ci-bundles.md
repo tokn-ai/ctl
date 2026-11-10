@@ -57,12 +57,13 @@ successful retry.
 
 ### Install a temporary PR build
 
-Dispatch the bundle workflow on the PR branch in this repository. After CI
+Queue the bundle workflow for a PR branch in this repository. The build command
+uses authenticated `gh` and requires permission to run Actions. After CI
 produces a bundle for the PR's current commit, use `ctlup` to view or install it.
 
 ```sh
-gh workflow run bundles.yml --ref PR_BRANCH -f build_desktop=false
 ctlup release list --channel dev
+ctlup release build --pr PR_NUMBER
 ctlup release view --pr PR_NUMBER
 ctlup update --pr PR_NUMBER --host HOST
 ```

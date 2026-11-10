@@ -47,6 +47,23 @@ pub struct PullRequestArtifact {
   pub url: String,
 }
 
+/// The outcome of requesting a bundle build for a pull request.
+#[derive(Debug, Serialize)]
+pub struct PullRequestBuildRequest {
+  pub number: u64,
+  pub head_sha: String,
+  pub status: PullRequestBuildRequestStatus,
+  pub url: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PullRequestBuildRequestStatus {
+  Queued,
+  AlreadyBuilt,
+  InProgress,
+}
+
 /// A private temporary directory holding the selected pull request build.
 pub struct DownloadedPrBundle(PathBuf);
 
@@ -77,7 +94,7 @@ pub async fn list() -> Result<Vec<PullRequestBuild>, Error> {
   let (pulls, artifacts) = tokio::try_join!(github.recent_pulls(), github.artifacts())?;
   let runs = github.candidate_runs(&pulls, &artifacts, &[]).await?;
   pulls
-    .into_iter()
+    .iter()
     .map(|pull| pull.resolve(&artifacts, &runs))
     .collect()
 }
@@ -87,6 +104,90 @@ pub async fn list() -> Result<Vec<PullRequestBuild>, Error> {
 /// Reports missing pull requests, API failures, or invalid response metadata.
 pub async fn view(number: u64) -> Result<PullRequestBuild, Error> {
   Github::new()?.view(number).await
+}
+
+/// Request the bundle workflow on a PR branch through the authenticated GitHub CLI.
+/// # Errors
+/// Reports unavailable or changed branches, GitHub metadata failures, or dispatch failures.
+pub async fn trigger_build(number: u64) -> Result<PullRequestBuildRequest, Error> {
+  let github = Github::new()?;
+  let (pull, artifacts) = tokio::try_join!(github.pull(number), github.artifacts())?;
+  let runs = github
+    .candidate_runs(
+      std::slice::from_ref(&pull),
+      &artifacts,
+      &[("head_sha", &pull.head.sha)],
+    )
+    .await?;
+  let selection = pull.resolve(&artifacts, &runs)?;
+  let (status, url) = if let Some(build) = selection.build {
+    (PullRequestBuildRequestStatus::AlreadyBuilt, Some(build.url))
+  } else {
+    let reference = pull.dispatch_ref()?;
+    if let Some(run_id) = github.active_run(&pull.head).await? {
+      (
+        PullRequestBuildRequestStatus::InProgress,
+        Some(format!("{REPOSITORY_URL}/actions/runs/{run_id}")),
+      )
+    } else {
+      github.verify_branch_head(&pull).await?;
+      (
+        PullRequestBuildRequestStatus::Queued,
+        dispatch_workflow(&reference).await?,
+      )
+    }
+  };
+  Ok(PullRequestBuildRequest {
+    number,
+    head_sha: selection.head_sha,
+    status,
+    url,
+  })
+}
+
+async fn dispatch_workflow(reference: &str) -> Result<Option<String>, Error> {
+  let output = tokio::process::Command::new("gh")
+    .args([
+      "workflow",
+      "run",
+      "bundles.yml",
+      "--repo",
+      "github.com/tokn-ai/ctl",
+      "--ref",
+      reference,
+      "-f",
+      "build_desktop=false",
+      "-f",
+      "build_ctld=false",
+    ])
+    .env("GH_PROMPT_DISABLED", "1")
+    .stdin(Stdio::null())
+    .stderr(Stdio::inherit())
+    .kill_on_drop(true)
+    .output()
+    .await
+    .map_err(|error| {
+      if error.kind() == io::ErrorKind::NotFound {
+        Error::Download("install the GitHub CLI and run `gh auth login` to build PRs".into())
+      } else {
+        Error::Io(error)
+      }
+    })?;
+  if !output.status.success() {
+    return Err(Error::Download(
+      "GitHub CLI could not start the bundle workflow; check `gh auth status` and repository Actions write access"
+        .into(),
+    ));
+  }
+  Ok(dispatched_run_url(&String::from_utf8_lossy(&output.stdout)))
+}
+
+fn dispatched_run_url(output: &str) -> Option<String> {
+  const PREFIX: &str = "https://github.com/tokn-ai/ctl/actions/runs/";
+  output.split_whitespace().find_map(|word| {
+    let run_id = word.strip_prefix(PREFIX)?.parse::<u64>().ok()?;
+    (run_id != 0).then(|| format!("{PREFIX}{run_id}"))
+  })
 }
 
 /// Download the current build through the authenticated GitHub CLI.
@@ -239,6 +340,10 @@ impl Github {
     if !query.is_empty() {
       url.query_pairs_mut().extend_pairs(query);
     }
+    self.read_json(&url).await
+  }
+
+  async fn read_json<T: DeserializeOwned>(&self, url: &Url) -> Result<T, Error> {
     let bytes = super::download(&self.0, url.as_str(), MAX_GITHUB_JSON_BYTES).await?;
     serde_json::from_slice(&bytes)
       .map_err(|_| Error::Invalid("GitHub returned invalid PR build metadata".into()))
@@ -365,6 +470,52 @@ impl Github {
       .await?;
     pull.resolve(&artifacts, &runs)
   }
+
+  async fn active_run(&self, head: &PullHead) -> Result<Option<u64>, Error> {
+    let response: WorkflowRunPage = self
+      .get(
+        "actions/workflows/bundles.yml/runs",
+        &[
+          ("event", "workflow_dispatch"),
+          ("branch", &head.branch),
+          ("head_sha", &head.sha),
+          ("per_page", &PAGE_SIZE.to_string()),
+        ],
+      )
+      .await?;
+    Ok(
+      response
+        .workflow_runs
+        .iter()
+        .find(|run| run.is_active_for(head))
+        .map(|run| run.id),
+    )
+  }
+
+  async fn verify_branch_head(&self, pull: &PullRequest) -> Result<(), Error> {
+    let mut url = Url::parse(&format!(
+      "https://api.github.com/repos/{REPOSITORY}/branches/"
+    ))
+    .expect("fixed GitHub API URL");
+    url
+      .path_segments_mut()
+      .expect("GitHub API URL supports path segments")
+      .pop_if_empty()
+      .push(&pull.head.branch);
+    let branch: Branch = self.read_json(&url).await.map_err(|error| match error {
+      Error::NotAvailable(_) => {
+        Error::NotAvailable(format!("PR #{} branch is no longer available", pull.number))
+      }
+      error => error,
+    })?;
+    if branch.name != pull.head.branch || branch.commit.sha != pull.head.sha {
+      return Err(Error::Stale(format!(
+        "PR #{} branch moved while checking its build; retry with the current head",
+        pull.number
+      )));
+    }
+    Ok(())
+  }
 }
 
 #[derive(Deserialize)]
@@ -372,11 +523,28 @@ struct PullRequest {
   number: u64,
   title: String,
   head: PullHead,
+  base: Option<PullBase>,
 }
 
 impl PullRequest {
+  fn dispatch_ref(&self) -> Result<String, Error> {
+    let same_repository = self
+      .head
+      .repo
+      .as_ref()
+      .zip(self.base.as_ref())
+      .is_some_and(|(head, base)| head.id != 0 && head.id == base.repo.id);
+    if !same_repository || self.head.branch.is_empty() || self.head.branch == "main" {
+      return Err(Error::NotAvailable(format!(
+        "PR #{} needs a source branch in {REPOSITORY} other than main to start a bundle build",
+        self.number
+      )));
+    }
+    Ok(format!("refs/heads/{}", self.head.branch))
+  }
+
   fn resolve(
-    self,
+    &self,
     artifacts: &[Artifact],
     runs: &BTreeMap<u64, WorkflowRun>,
   ) -> Result<PullRequestBuild, Error> {
@@ -410,13 +578,29 @@ impl PullRequest {
     }
     Ok(PullRequestBuild {
       number: self.number,
-      title: self.title,
-      head_sha: self.head.sha,
+      title: self.title.clone(),
+      head_sha: self.head.sha.clone(),
       url: format!("{REPOSITORY_URL}/pull/{}", self.number),
       status,
       build,
     })
   }
+}
+
+#[derive(Deserialize)]
+struct PullBase {
+  repo: Repository,
+}
+
+#[derive(Deserialize)]
+struct Branch {
+  name: String,
+  commit: BranchCommit,
+}
+
+#[derive(Deserialize)]
+struct BranchCommit {
+  sha: String,
 }
 
 #[derive(Deserialize)]
@@ -491,6 +675,26 @@ struct WorkflowRun {
 }
 
 impl WorkflowRun {
+  fn is_active_for(&self, head: &PullHead) -> bool {
+    self.id != 0
+      && self.path == BUNDLE_WORKFLOW
+      && self.event == "workflow_dispatch"
+      && matches!(
+        self.status.as_str(),
+        "queued" | "in_progress" | "requested" | "waiting" | "pending"
+      )
+      && head.repo.as_ref().is_some_and(|repo| {
+        self.repository.id == repo.id
+          && self
+            .head_repository
+            .as_ref()
+            .map(|repository| repository.id)
+            == Some(repo.id)
+      })
+      && self.head_branch == head.branch
+      && self.head_sha == head.sha
+  }
+
   fn matches(&self, artifact: &ArtifactRun) -> bool {
     self.id == artifact.id
       && self.path == BUNDLE_WORKFLOW
@@ -511,6 +715,72 @@ impl WorkflowRun {
 mod tests {
   use super::*;
   use serde_json::json;
+
+  #[test]
+  fn dispatch_requires_an_upstream_pr_branch_and_qualifies_the_ref() {
+    let pull = |branch: &str, repository: Option<u64>| PullRequest {
+      number: 155,
+      title: "Improve updates".into(),
+      head: PullHead {
+        sha: "a".repeat(40),
+        branch: branch.into(),
+        repo: repository.map(|id| Repository { id }),
+      },
+      base: Some(PullBase {
+        repo: Repository { id: 42 },
+      }),
+    };
+    assert_eq!(
+      pull("v1.2.3", Some(42)).dispatch_ref().unwrap(),
+      "refs/heads/v1.2.3"
+    );
+    for (branch, repository) in [("main", Some(42)), ("topic", Some(99)), ("topic", None)] {
+      assert!(matches!(
+        pull(branch, repository).dispatch_ref(),
+        Err(Error::NotAvailable(_))
+      ));
+    }
+  }
+
+  #[test]
+  fn active_builds_must_match_the_pr_head_and_bundle_workflow() {
+    let head = PullHead {
+      sha: "a".repeat(40),
+      branch: "updates".into(),
+      repo: Some(Repository { id: 42 }),
+    };
+    let mut run = WorkflowRun {
+      id: 1,
+      path: BUNDLE_WORKFLOW.into(),
+      event: "workflow_dispatch".into(),
+      status: "queued".into(),
+      conclusion: None,
+      repository: Repository { id: 42 },
+      head_repository: Some(Repository { id: 42 }),
+      head_branch: head.branch.clone(),
+      head_sha: head.sha.clone(),
+    };
+    assert!(run.is_active_for(&head));
+    run.head_sha = "b".repeat(40);
+    assert!(!run.is_active_for(&head));
+    run.head_sha.clone_from(&head.sha);
+    run.status = "completed".into();
+    assert!(!run.is_active_for(&head));
+    run.status = "queued".into();
+    run.path = ".github/workflows/ci.yml".into();
+    assert!(!run.is_active_for(&head));
+  }
+
+  #[test]
+  fn dispatch_output_accepts_only_the_repository_run_url() {
+    let url = format!("{REPOSITORY_URL}/actions/runs/123");
+    assert_eq!(dispatched_run_url(&format!("{url}\n")), Some(url));
+    assert_eq!(dispatched_run_url("Created workflow_dispatch event"), None);
+    assert_eq!(
+      dispatched_run_url("https://github.com/someone/else/actions/runs/123"),
+      None
+    );
+  }
 
   #[test]
   fn reports_outdated_builds_but_only_selects_a_verified_current_build() {

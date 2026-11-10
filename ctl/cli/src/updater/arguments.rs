@@ -48,7 +48,7 @@ pub(super) enum Command {
     #[arg(long)]
     json: bool,
   },
-  /// Browse published releases and pull request builds.
+  /// Browse published releases and manage pull request builds.
   Release(ReleaseArguments),
   /// Remove unused builds, retaining active, previous and running installations.
   Prune {
@@ -63,7 +63,7 @@ pub(super) enum Command {
 
 #[derive(Debug, Args)]
 pub(super) struct ReleaseArguments {
-  /// Output release metadata as JSON.
+  /// Output the result as JSON.
   #[arg(long, global = true)]
   pub json: bool,
   #[command(subcommand)]
@@ -88,6 +88,12 @@ pub(super) enum ReleaseCommand {
     /// Pull request number.
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..), conflicts_with_all = ["channel", "publication_id"])]
     pr: Option<u64>,
+  },
+  /// Request a bundle build for the current commit of a pull request.
+  Build {
+    /// Pull request number.
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    pr: u64,
   },
 }
 
@@ -240,6 +246,21 @@ mod tests {
     ] {
       assert!(Arguments::try_parse_from([&["ctlup"][..], args].concat()).is_err());
     }
+  }
+
+  #[test]
+  fn release_build_requires_a_positive_pr_number_and_accepts_json() {
+    let args =
+      Arguments::try_parse_from(["ctlup", "release", "build", "--pr", "155", "--json"]).unwrap();
+    assert!(matches!(
+      args.command,
+      Command::Release(ReleaseArguments {
+        command: ReleaseCommand::Build { pr: 155 },
+        json: true,
+      })
+    ));
+    assert!(Arguments::try_parse_from(["ctlup", "release", "build"]).is_err());
+    assert!(Arguments::try_parse_from(["ctlup", "release", "build", "--pr", "0"]).is_err());
   }
 
   #[test]

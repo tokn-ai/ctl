@@ -110,6 +110,7 @@ ctlup release view --channel nightly
 ctlup release view PUBLICATION_ID --channel nightly --json
 ctlup release list --channel stable
 ctlup release list --channel dev
+ctlup release build --pr PR_NUMBER
 ctlup release view --pr 155
 ```
 
@@ -120,9 +121,11 @@ set from a release tag, including a matching updater for each target.
 The Dev list shows the 10 most recently updated PRs. An unexpired bundle for
 the current commit is marked `built`. One for an earlier commit on the branch
 is marked `outdated`. A branch without an unexpired bundle shows `no build`.
-`release view --pr` shows the selected PR and its build status. `update --pr`
-downloads the bundle for the current commit through the authenticated GitHub
-CLI (`gh`). Use `--host` to target a remote machine. See
+`release build --pr` uses the authenticated GitHub CLI (`gh`) to queue a build
+for a branch in this repository. It reports an existing bundle or active build
+for the same commit when available. `release view --pr` shows the PR and its
+build status. `update --pr` uses `gh` to download the bundle for the current
+commit. Use `--host` to target a remote machine. See
 [install a temporary PR build](ci-bundles.md#install-a-temporary-pr-build).
 
 In a development checkout, automatic Linux x64 remote updates build the working

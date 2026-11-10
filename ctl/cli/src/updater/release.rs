@@ -1,7 +1,7 @@
 use super::arguments::{ReleaseArguments, ReleaseCommand, ReleaseListChannel};
 use super::{print_targets, selected_channel};
 use crate::components::Channel;
-use ctl_client::remote_bundle::pr::{self, PullRequestBuildStatus};
+use ctl_client::remote_bundle::pr::{self, PullRequestBuildRequestStatus, PullRequestBuildStatus};
 use ctl_client::remote_bundle::published;
 use serde::Serialize;
 use std::io;
@@ -63,6 +63,7 @@ pub(super) async fn run(home: &Path, options: ReleaseArguments) -> io::Result<()
       }
       Ok(())
     }
+    ReleaseCommand::Build { pr: number } => build_pr(number, options.json).await,
   }
 }
 
@@ -106,6 +107,26 @@ async fn view_pr(number: u64, json: bool) -> io::Result<()> {
     println!("Outdated build available for an earlier commit.");
   } else {
     println!("No build for this commit.");
+  }
+  Ok(())
+}
+
+async fn build_pr(number: u64, json: bool) -> io::Result<()> {
+  let request = pr::trigger_build(number).await.map_err(io::Error::other)?;
+  if json {
+    return print_json(&request);
+  }
+  match request.status {
+    PullRequestBuildRequestStatus::Queued => println!("Queued a build for PR #{number}."),
+    PullRequestBuildRequestStatus::AlreadyBuilt => {
+      println!("PR #{number} already has a bundle for its current commit.");
+    }
+    PullRequestBuildRequestStatus::InProgress => {
+      println!("A build for the current commit of PR #{number} is already in progress.");
+    }
+  }
+  if let Some(url) = request.url {
+    println!("{url}");
   }
   Ok(())
 }

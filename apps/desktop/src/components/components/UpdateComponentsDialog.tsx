@@ -30,8 +30,7 @@ export function UpdateComponentsDialog({ targets, context, on_updated, on_close 
   const [selected, setSelected] = useState(() => new Set((context?.targets ?? [LOCAL_TARGET]).filter((target) => target.kind !== "ssh" || !target.unavailable).map(targetKey)));
   const initial_source = context?.source;
   const [source_choice, setSourceChoice] = useState<SourceChoice>(() => sourceChoice(initial_source));
-  const published = source_choice === "nightly" || source_choice === "dev" || source_choice === "stable";
-  const show_dev = source_choice === "dev" || (initial_source?.kind === "published" && initial_source.channel === "dev");
+  const published = source_choice === "nightly" || source_choice === "stable";
   const provided = source_choice === "provided";
   const [path, setPath] = useState(initial_source?.kind === "provided" ? initial_source.path : "");
   const [local_build, setLocalBuild] = useState(initial_source?.kind === "provided" && initial_source.local_build);
@@ -121,7 +120,6 @@ export function UpdateComponentsDialog({ targets, context, on_updated, on_close 
       <label className="component-update-field">Build source<select value={source_choice} onChange={(event) => setSourceChoice(event.target.value as SourceChoice)}>
         <option value="automatic">Automatic</option>
         <option value="nightly">Nightly (latest published main build)</option>
-        {show_dev ? <option value="dev">Development channel (Dev)</option> : null}
         <option value="stable">Latest stable release</option>
         {import.meta.env.DEV || source_choice === "working_tree" ? <option value="working_tree">Build from checkout</option> : null}
         <option value="selected">Included build (offline)</option>

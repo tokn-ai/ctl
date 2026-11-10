@@ -16,7 +16,7 @@ Manually maintained release notes and attachments are preserved.
 - A push to `main` builds desktop and remote-agent development bundles. Missing
   Apple credentials allow unsigned macOS desktop development artifacts, with
   that limitation recorded in the draft notes. Verified component bundles advance
-  the Dev channel independently of desktop success.
+  Nightly independently of desktop success.
 - A `v<version>` tag builds desktop, remote-agent, and standalone `ctld` bundles.
   The tag must match the workspace Cargo version, Tauri app version, and frontend
   package version. Both macOS architectures require distribution signing.
@@ -27,11 +27,14 @@ Manually maintained release notes and attachments are preserved.
   setting it to `false` supports the remote-only workflow used by agent syncing.
   `build_ctld=true` additionally builds standalone signed macOS helpers and
   requires the Apple credentials below.
+- A manual run on a PR branch produces temporary Dev artifacts in Actions. Only
+  `main` and version-tag runs can publish to Pages.
 
 Main-branch draft refreshes still require complete desktop builds and all
 requested helpers. Remote-only or failed refreshes leave that draft unchanged.
 
-Release bundle IDs are the version; development IDs append the source revision.
+Release bundle IDs are the version. Nightly and Dev both retain the existing
+`<version>-dev.<revision>` bundle ID format for updater compatibility.
 Remote-agent publication requires all four targets because clients consume one
 complete bundle set. Tagged desktop packages, standalone helpers, and bundled
 CLIs are validated per available target. Each desktop target must contain every
@@ -50,6 +53,20 @@ Adding a successful signed helper makes it available to `ctl setup` for that
 exact CLI version and architecture. Missing targets can be appended after a
 successful retry.
 
+### Install a temporary PR build
+
+Dispatch the bundle workflow on the PR branch in this repository. Use the ID of
+that run to download its complete bundle set after it finishes.
+
+```sh
+gh workflow run bundles.yml --ref PR_BRANCH -f build_desktop=false
+gh run download RUN_ID -n ctl-agent-bundle-set -D ./bundle-set
+ctlup update --from ./bundle-set --host HOST
+```
+
+The artifact expires after 30 days. The download includes the runtime archive
+and updater for each target. A later run produces its own artifact.
+
 ## Component channels and GitHub Pages
 
 The public component source is
@@ -58,20 +75,19 @@ It contains each target's runtime archive, SHA-256 sidecar, standalone `ctlup`
 executable and updater metadata, plus the complete bundle-set document.
 New publications use schema 3. Previously published schema-2 sets remain usable.
 
-Applications discover channels through:
+Applications discover the two published channels at these URLs.
 
 ```text
-https://tokn-ai.dev/ctl/bundles/channels/dev.json
 https://tokn-ai.dev/ctl/bundles/channels/nightly.json
 https://tokn-ai.dev/ctl/bundles/channels/stable.json
 ```
 
-Each channel document uses schema 1:
+Each channel document uses schema 1.
 
 ```json
 {
   "schema_version": 1,
-  "channel": "dev",
+  "channel": "nightly",
   "bundle_set_url": "https://tokn-ai.dev/ctl/bundles/sets/0.1.1-dev.0123456789ab-12345678-1/bundle-set.json"
 }
 ```
@@ -100,35 +116,39 @@ Archive names remain bare sibling filenames in the bundle set. Its existing
 checksums, archived manifests, component metadata, and protocol compatibility
 validation remain authoritative; channel discovery adds no parallel hash format.
 
-Nightly and Dev point to the same newest **successfully published** main build.
-Each has its own channel document and both reference one immutable set. CI
-advances them after a successful main build. A later main commit that fails
-to build does not prevent an earlier successful build from publishing.
+Nightly tracks the latest **successfully published** build from `main`.
+A later main commit that fails to build leaves the previous publication available.
 Run number and attempt fences prevent a delayed older run from replacing a newer
-successful publication. Stable advances by semantic release version; a lower
-release tag or any prerelease cannot move it backward. Prerelease archives remain
+successful publication. Stable advances by semantic release version. Lower
+release tags and prereleases leave its pointer unchanged. Prerelease archives remain
 available through their retained versioned Pages directory and GitHub prerelease.
 
-Builds explicitly set `CTL_BUNDLE_CHANNEL`: `dev` on main and prerelease tags,
-`stable` on ordinary version tags. Channel choice does not depend on whether Cargo
-uses a debug or release profile. Publication IDs append the Actions run ID and
-attempt to the bundle ID, so reruns never overwrite an existing directory.
+During the rollout, CI also writes `channels/dev.json` with its original `dev`
+channel identity and the same bundle-set URL as Nightly. New updaters can use
+that legacy pointer if `nightly.json` returns HTTP 404. Retire it in a later
+deployment after the Nightly updater ships.
+
+CI builds select a default update channel explicitly via `CTL_BUNDLE_CHANNEL`.
+Ordinary version tags select Stable. All other builds select Nightly as their
+default published update feed, including Dev artifacts and prereleases. Pages
+publication IDs append the Actions run ID and attempt to the bundle ID, so reruns
+never overwrite an existing directory.
 
 The Pages job serializes publication across main and tags with a queued concurrency
 group. It restores the complete last successful site, verifies retained component
-sets, stages every new archive and updater, then writes channel pointers and uploads one full
-Pages artifact. Both channels are included in every replacement. A separate
-90-day Actions snapshot records the full site. Restoration requires the exact
+sets, stages every new archive and updater, then writes channel pointers and
+uploads one complete Pages artifact. A separate 90-day Actions snapshot records
+the full site. Restoration requires the exact
 attempt's successful Pages deployment step, even if a later desktop job failed or
 the overall workflow is still running. Failed deployment candidates are ignored.
 After snapshot expiry, restoration downloads and verifies the managed published
 HTTPS catalog, archives and updater sidecars. Network errors, corrupt state, and an existing
 unmanaged site abort publication rather than initialize an empty replacement.
 
-Pages retains up to five Dev publications, the current Stable publication, and
-the newest other tagged publication. The current Dev and Stable pointers and
+Pages retains up to five Nightly publications, the current Stable publication,
+and the newest other tagged publication. The current Nightly and Stable sets and
 the newest other tag are pinned. If the staged site would exceed 900 MiB, older
-unselected Dev publications are removed oldest first until it fits. If pinned
+unselected Nightly publications are removed oldest first until it fits. If pinned
 publications alone exceed the budget, publication fails without changing the
 deployed site. Retention changes occur only in a complete replacement site;
 historical tagged archives also remain in GitHub Releases.

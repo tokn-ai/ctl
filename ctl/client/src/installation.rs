@@ -178,7 +178,23 @@ impl Drop for StagedBundle {
 #[serde(deny_unknown_fields)]
 struct Settings {
   schema_version: u16,
+  #[serde(serialize_with = "serialize_setting_channel")]
   channel: BundleChannel,
+}
+
+#[expect(
+  clippy::trivially_copy_pass_by_ref,
+  reason = "serde field serialization passes the value by reference"
+)]
+fn serialize_setting_channel<S: serde::Serializer>(
+  channel: &BundleChannel,
+  serializer: S,
+) -> Result<S::Ok, S::Error> {
+  // Retain the schema-1 spelling older updaters can read after a rollback.
+  serializer.serialize_str(match channel {
+    BundleChannel::Nightly => "dev",
+    BundleChannel::Stable => "stable",
+  })
 }
 
 /// The account's explicitly chosen channel, or the compiled distribution default.

@@ -57,7 +57,7 @@ function remoteVpnRecoveryFixture() {
 }
 
 vi.mock("../../lib/tauri", () => ({
-  checkComponentUpdates: vi.fn(async () => ({ default_channel: "dev", local_development: false, catalog: null, error: null })),
+  checkComponentUpdates: vi.fn(async () => ({ default_channel: "nightly", local_development: false, catalog: null, error: null })),
   probeSshHost: vi.fn(),
   cancelSshProbe: vi.fn(async () => undefined),
   respondSshPrompt: vi.fn(async () => undefined),

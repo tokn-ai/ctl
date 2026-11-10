@@ -6,7 +6,7 @@ import { agentTargets, maxAgentManifestBytes, parseAgentBundleSet, readAgentFile
 import { verifyUpdaterTarget } from "../shared/updater-bundle.mts";
 
 export const bundleRoot = "https://tokn-ai.dev/ctl/bundles/";
-export type BundleChannel = "dev" | "stable";
+export type BundleChannel = "nightly" | "stable";
 
 export function componentIdentity(value: AgentBundleIdentity): AgentBundleIdentity {
   return { app_version: value.app_version, bundle_id: value.bundle_id, git_revision: value.git_revision };

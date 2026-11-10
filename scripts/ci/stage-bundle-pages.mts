@@ -5,7 +5,7 @@ import { bundleRoot, validatedComponentSet, type BundleChannel } from "./bundle-
 import { validateAgentIdentity, type AgentBundleIdentity } from "../shared/agent-bundle.mts";
 
 export const siteMarker = "ctl-bundle-pages";
-export const devRetention = 5;
+export const nightlyRetention = 5;
 const stableRetention = 2;
 const maximumSiteBytes = 900 * 1024 * 1024;
 export const catalogChannels = ["dev", "nightly", "stable"] as const;
@@ -18,11 +18,13 @@ export interface Publication extends AgentBundleIdentity {
   run_number: number;
   run_attempt: number;
 }
+type CatalogPublication = Omit<Publication, "channel"> & { channel: CatalogChannel };
+
 export interface BundleCatalog {
   schema_version: 1;
   site: typeof siteMarker;
   generation: number;
-  publications: Publication[];
+  publications: CatalogPublication[];
   channels: Partial<Record<CatalogChannel, string>>;
 }
 
@@ -30,11 +32,19 @@ function object(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function validatePublication(value: unknown): asserts value is Publication {
+function isBundleChannel(value: unknown): value is BundleChannel {
+  return value === "nightly" || value === "stable";
+}
+
+function publicationChannel(channel: CatalogChannel): BundleChannel {
+  return channel === "dev" ? "nightly" : channel;
+}
+
+function validatePublication(value: unknown): asserts value is CatalogPublication {
   if (!object(value)) throw new Error("Invalid bundle publication");
   if (["app_version", "bundle_id", "git_revision"].some((field) => typeof value[field] !== "string")) throw new Error("Invalid bundle publication identity");
   validateAgentIdentity(value as unknown as AgentBundleIdentity);
-  if ((value.channel !== "dev" && value.channel !== "stable") || typeof value.run_id !== "string" || !/^[1-9]\d*$/.test(value.run_id) ||
+  if ((value.channel !== "dev" && !isBundleChannel(value.channel)) || typeof value.run_id !== "string" || !/^[1-9]\d*$/.test(value.run_id) ||
     !Number.isSafeInteger(value.run_number) || (value.run_number as number) <= 0 || !Number.isSafeInteger(value.run_attempt) || (value.run_attempt as number) <= 0 ||
     value.publication_id !== `${value.bundle_id}-${value.run_id}-${value.run_attempt}` ||
     (value.channel === "stable") !== (value.app_version === value.bundle_id)) throw new Error("Invalid bundle publication identity or channel");
@@ -44,7 +54,7 @@ export function parseBundleCatalog(bytes: Buffer): BundleCatalog {
   if (bytes.length > 64 * 1024) throw new Error("Pages catalog exceeds its size limit");
   const value: unknown = JSON.parse(bytes.toString("utf8"));
   if (!object(value) || value.schema_version !== 1 || value.site !== siteMarker || !Number.isSafeInteger(value.generation) || (value.generation as number) < 1 ||
-    !Array.isArray(value.publications) || value.publications.length > devRetention + stableRetention || !object(value.channels) ||
+    !Array.isArray(value.publications) || value.publications.length > nightlyRetention + stableRetention || !object(value.channels) ||
     Object.keys(value.channels).some((key) => !catalogChannels.some((channel) => channel === key))) throw new Error("Existing Pages site is not a supported managed bundle site");
   const seen = new Set<string>();
   for (const publication of value.publications) {
@@ -52,12 +62,15 @@ export function parseBundleCatalog(bytes: Buffer): BundleCatalog {
     if (seen.has(publication.publication_id)) throw new Error("Duplicate Pages publication");
     seen.add(publication.publication_id);
   }
-  if (Object.hasOwn(value.channels, "nightly") && value.channels.nightly !== value.channels.dev) {
-    throw new Error("Pages Nightly must point to the same publication as Dev");
+  if (Object.hasOwn(value.channels, "nightly") && Object.hasOwn(value.channels, "dev") && value.channels.nightly !== value.channels.dev) {
+    throw new Error("Pages legacy Dev pointer must match Nightly");
   }
-  for (const [channel, id] of Object.entries(value.channels)) {
-    const owner = channel === "nightly" ? "dev" : channel;
-    if (!value.publications.some((entry) => entry.publication_id === id && entry.channel === owner && (owner !== "stable" || !semver(entry.app_version).prerelease.length))) throw new Error("Pages channel points outside its retained publication set or to a prerelease");
+  for (const channel of catalogChannels) {
+    if (!Object.hasOwn(value.channels, channel)) continue;
+    const id = value.channels[channel];
+    if (!value.publications.some((entry: CatalogPublication) => entry.publication_id === id && publicationChannel(entry.channel) === publicationChannel(channel) && (channel !== "stable" || !semver(entry.app_version).prerelease.length))) {
+      throw new Error("Pages channel points outside its retained publication set or to a prerelease");
+    }
   }
   return value as unknown as BundleCatalog;
 }
@@ -98,7 +111,7 @@ export function compareVersions(left: string, right: string): number {
   return 0;
 }
 
-function newer(left: Publication, right: Publication): number {
+function newer(left: CatalogPublication, right: CatalogPublication): number {
   return (left.channel === "stable" ? compareVersions(left.app_version, right.app_version) : 0) || left.run_number - right.run_number || left.run_attempt - right.run_attempt;
 }
 
@@ -113,6 +126,7 @@ async function regularTree(path: string): Promise<number> {
 
 /** Fail closed before touching output; each pointer is built with all its archives. */
 export async function stageBundlePages(publication: Publication, incoming: string, previous: string | null, output: string, maximum_bytes = maximumSiteBytes): Promise<boolean> {
+  if (!isBundleChannel(publication.channel)) throw new Error("Pages accepts only Nightly and versioned publications");
   validatePublication(publication);
   await validatedComponentSet(incoming, publication);
   let catalog: BundleCatalog = { schema_version: 1, site: siteMarker, generation: 0, publications: [], channels: {} };
@@ -135,24 +149,29 @@ export async function stageBundlePages(publication: Publication, incoming: strin
       if (id) verifyChannelPointer(await readFile(join(previous, "bundles/channels", `${channel}.json`)), channel, id);
     }
   }
-  const current = catalog.publications.find((entry) => entry.publication_id === catalog.channels[publication.channel]);
-  if (publication.channel === "dev" && current && newer(publication, current) <= 0) return false;
+  const current_id = publication.channel === "nightly" ? catalog.channels.nightly ?? catalog.channels.dev : catalog.channels.stable;
+  const current = catalog.publications.find((entry) => entry.publication_id === current_id);
+  if (publication.channel === "nightly" && current && newer(publication, current) <= 0) return false;
   if (current?.channel === "stable" && current.app_version === publication.app_version && current.git_revision !== publication.git_revision) throw new Error("A release version cannot change source revision");
   if (catalog.publications.some((entry) => entry.publication_id === publication.publication_id)) return false;
-  const promote = publication.channel === "dev" || (!semver(publication.app_version).prerelease.length && (!current || newer(publication, current) > 0));
+  const promote = publication.channel === "nightly" || (!semver(publication.app_version).prerelease.length && (!current || newer(publication, current) > 0));
   const retained = [...catalog.publications, publication];
   const channels = { ...catalog.channels };
   if (promote) channels[publication.channel] = publication.publication_id;
-  // Nightly aliases the retained Dev head, including when restoring an older
-  // catalog on a release run. It has no independent publications to retain.
-  if (channels.dev) channels.nightly = channels.dev;
+  // Restore the Nightly head from pre-migration catalogs. Keep Dev readable by
+  // installed updaters until the Nightly-aware updater has shipped.
+  const nightly_id = channels.nightly ?? channels.dev;
+  if (nightly_id) {
+    channels.nightly = nightly_id;
+    channels.dev = nightly_id;
+  }
   const pinned_stable = retained.find((entry) => entry.publication_id === channels.stable);
   const stable = retained.filter((entry) => entry.channel === "stable" && entry !== pinned_stable)
     .sort((a, b) => b.run_number - a.run_number || b.run_attempt - a.run_attempt).slice(0, stableRetention - Number(!!pinned_stable));
   if (pinned_stable) stable.unshift(pinned_stable);
   catalog = { ...catalog, generation: catalog.generation + 1, channels,
     publications: [
-      ...retained.filter((entry) => entry.channel === "dev").sort((a, b) => newer(b, a)).slice(0, devRetention),
+      ...retained.filter((entry) => publicationChannel(entry.channel) === "nightly").sort((a, b) => newer(b, a)).slice(0, nightlyRetention),
       ...stable,
     ] };
   if (!catalog.publications.includes(publication)) return false;
@@ -176,13 +195,15 @@ export async function stageBundlePages(publication: Publication, incoming: strin
     }
     await writeFile(join(output, "bundles/catalog.json"), `${JSON.stringify(catalog, null, 2)}\n`);
     await writeFile(join(output, ".nojekyll"), "");
-    const nightly = catalog.channels.nightly ? '<a href="bundles/channels/nightly.json">Nightly channel</a> · ' : "";
-    await writeFile(join(output, "index.html"), `<!-- ${siteMarker} --><!doctype html><title>ctl component bundles</title><h1>ctl component bundles</h1><p>${nightly}<a href="bundles/channels/dev.json">Dev channel</a> · <a href="bundles/channels/stable.json">Stable channel</a></p><p>Channel documents reference verified bundle sets and downloadable archives.</p>\n`);
-    // Runtime archives and standalone updaters can grow independently. Five
-    // Dev generations are an upper bound; preserve both channel heads and the
-    // newest other tag before spending space on older unselected Dev builds.
+    const links = [
+      catalog.channels.nightly && '<a href="bundles/channels/nightly.json">Nightly channel</a>',
+      catalog.channels.stable && '<a href="bundles/channels/stable.json">Stable channel</a>',
+    ].filter(Boolean).join(" · ");
+    await writeFile(join(output, "index.html"), `<!-- ${siteMarker} --><!doctype html><title>ctl component bundles</title><h1>ctl component bundles</h1><p>${links}</p><p>Channel documents reference verified bundle sets and downloadable archives.</p>\n`);
+    // Five Nightly generations are an upper bound. Preserve the channel heads
+    // and the newest other tag before spending space on older Nightly builds.
     while (await regularTree(output) > maximum_bytes) {
-      const evicted = catalog.publications.filter((entry) => entry.channel === "dev" && entry.publication_id !== catalog.channels.dev)
+      const evicted = catalog.publications.filter((entry) => publicationChannel(entry.channel) === "nightly" && entry.publication_id !== catalog.channels.nightly)
         .sort((left, right) => newer(left, right))[0];
       if (!evicted) throw new Error("Pinned bundle publications exceed the Pages safety limit (900 MiB in CI)");
       await rm(join(sets, evicted.publication_id), { recursive: true, force: true });
@@ -198,7 +219,7 @@ export async function stageBundlePages(publication: Publication, incoming: strin
 
 async function main(): Promise<void> {
   const [channel, app_version, bundle_id, git_revision, incoming, previous, output, ...extra] = process.argv.slice(2);
-  if ((channel !== "dev" && channel !== "stable") || !output || extra.length) throw new Error("usage: stage-bundle-pages.mts dev|stable APP_VERSION BUNDLE_ID GIT_REVISION INPUT PREVIOUS|- OUTPUT");
+  if (!isBundleChannel(channel) || !output || extra.length) throw new Error("usage: stage-bundle-pages.mts nightly|stable APP_VERSION BUNDLE_ID GIT_REVISION INPUT PREVIOUS|- OUTPUT");
   const run_id = process.env.GITHUB_RUN_ID ?? "";
   const run_attempt = Number(process.env.GITHUB_RUN_ATTEMPT);
   const publication: Publication = { channel, app_version, bundle_id, git_revision, run_id, run_attempt,

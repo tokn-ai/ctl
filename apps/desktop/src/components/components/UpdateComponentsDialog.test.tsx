@@ -11,7 +11,7 @@ beforeEach(() => {
   vi.resetAllMocks();
   vi.mocked(cancelComponentUpdate).mockResolvedValue(undefined);
   vi.mocked(respondSshPrompt).mockResolvedValue(undefined);
-  vi.mocked(checkComponentUpdates).mockResolvedValue({ default_channel: "dev", local_development: false, catalog: null, error: null });
+  vi.mocked(checkComponentUpdates).mockResolvedValue({ default_channel: "nightly", local_development: false, catalog: null, error: null });
 });
 afterEach(cleanup);
 const host: SshConnectionTarget = { kind: "ssh", host_id: "builder", host_name: "Builder", destination: "builder-alias", gateways: [{ kind: "ssh", gateway_id: "jump", name: "Jump", destination: "jump", mode: "automatic" }] };
@@ -47,7 +47,7 @@ it("keeps per-host failures and retries only failed hosts", async () => {
   expect(vi.mocked(updateComponents).mock.calls[0][0].options.source).toEqual({ kind: "automatic" });
 });
 
-it.each(["stable", "dev"] as const)("keeps an explicit %s source and installs its published bundle", async (channel) => {
+it.each(["stable", "nightly"] as const)("keeps an explicit %s source and installs its published bundle", async (channel) => {
   vi.mocked(updateComponents).mockResolvedValue([complete(0)]);
   render(<UpdateComponentsDialog targets={[host]} context={{ targets: [host], source: { kind: "published", channel } }} on_close={vi.fn()} />);
   const user = userEvent.setup();

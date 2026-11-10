@@ -29,11 +29,10 @@ struct Cached {
 }
 
 fn cache(channel: BundleChannel) -> &'static Mutex<Option<Cached>> {
-  static CACHE: OnceLock<[Mutex<Option<Cached>>; 3]> = OnceLock::new();
+  static CACHE: OnceLock<[Mutex<Option<Cached>>; 2]> = OnceLock::new();
   let index = match channel {
-    BundleChannel::Dev => 0,
+    BundleChannel::Nightly => 0,
     BundleChannel::Stable => 1,
-    BundleChannel::Nightly => 2,
   };
   &CACHE.get_or_init(|| std::array::from_fn(|_| Mutex::new(None)))[index]
 }

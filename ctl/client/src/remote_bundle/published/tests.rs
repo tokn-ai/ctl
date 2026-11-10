@@ -90,7 +90,7 @@ async fn server(pointer: impl FnOnce(&reqwest::Url) -> serde_json::Value, corrup
       .unwrap();
     BTreeMap::from([
       (
-        "/bundles/channels/dev.json".to_owned(),
+        "/bundles/channels/nightly.json".to_owned(),
         serde_json::to_vec(&pointer(root)).unwrap(),
       ),
       ("/bundles/sets/test/bundle-set.json".to_owned(), outer),
@@ -108,26 +108,26 @@ async fn server(pointer: impl FnOnce(&reqwest::Url) -> serde_json::Value, corrup
 }
 
 fn pointer(root: &reqwest::Url) -> serde_json::Value {
-  serde_json::json!({"schema_version":1,"channel":"dev","bundle_set_url":root.join("sets/test/bundle-set.json").unwrap().as_str()})
+  serde_json::json!({"schema_version":1,"channel":"nightly","bundle_set_url":root.join("sets/test/bundle-set.json").unwrap().as_str()})
 }
 
 #[tokio::test]
 async fn check_reads_only_channel_and_metadata_while_download_verifies_archive() {
   let server = server(pointer, false).await;
   let resolver = server.resolver();
-  let catalog = resolver.check(BundleChannel::Dev).await.unwrap();
+  let catalog = resolver.check(BundleChannel::Nightly).await.unwrap();
   assert_eq!(catalog.git_revision, "a".repeat(40));
   assert_eq!(catalog.targets.len(), 4);
   assert!(catalog.targets.iter().all(|target| target.compatible));
   assert_eq!(
     server.requests.lock().unwrap().as_slice(),
     [
-      "/bundles/channels/dev.json",
+      "/bundles/channels/nightly.json",
       "/bundles/sets/test/bundle-set.json"
     ]
   );
   let bundle = resolver
-    .download(BundleChannel::Dev, "aarch64-apple-darwin")
+    .download(BundleChannel::Nightly, "aarch64-apple-darwin")
     .await
     .unwrap();
   assert_eq!(bundle.git_revision, catalog.git_revision);
@@ -143,39 +143,84 @@ async fn check_reads_only_channel_and_metadata_while_download_verifies_archive()
 }
 
 #[tokio::test]
-async fn nightly_discovery_reads_the_same_immutable_set_as_dev() {
+async fn nightly_discovery_falls_back_when_only_legacy_dev_is_published() {
   let fixture = fixture();
   let outer = fixture.bind_archive(&fixture.archive());
   let server = Server::start(move |root| {
-    let dev = pointer(root);
-    let mut nightly = dev.clone();
-    nightly["channel"] = "nightly".into();
+    let mut dev = pointer(root);
+    dev["channel"] = "dev".into();
     BTreeMap::from([
       (
         "/bundles/channels/dev.json".into(),
         serde_json::to_vec(&dev).unwrap(),
       ),
-      (
-        "/bundles/channels/nightly.json".into(),
-        serde_json::to_vec(&nightly).unwrap(),
-      ),
       ("/bundles/sets/test/bundle-set.json".into(), outer),
     ])
   })
   .await;
-  let resolver = server.resolver();
-  let nightly = resolver.check(BundleChannel::Nightly).await.unwrap();
-  let dev = resolver.check(BundleChannel::Dev).await.unwrap();
+  let nightly = server
+    .resolver()
+    .check(BundleChannel::Nightly)
+    .await
+    .unwrap();
   assert_eq!(nightly.channel, BundleChannel::Nightly);
-  assert_eq!(nightly.bundle_id, dev.bundle_id);
-  assert_eq!(nightly.git_revision, dev.git_revision);
+  assert_eq!(nightly.git_revision, "a".repeat(40));
   assert_eq!(
     server.requests.lock().unwrap().as_slice(),
     [
       "/bundles/channels/nightly.json",
-      "/bundles/sets/test/bundle-set.json",
       "/bundles/channels/dev.json",
       "/bundles/sets/test/bundle-set.json",
+    ]
+  );
+}
+
+#[tokio::test]
+async fn fallback_requires_a_missing_nightly_pointer_and_matching_legacy_identity() {
+  let server = Server::start(|root| {
+    let nightly = pointer(root);
+    let mut dev = nightly.clone();
+    dev["channel"] = "dev".into();
+    BTreeMap::from([
+      (
+        "/bundles/channels/nightly.json".into(),
+        serde_json::to_vec(&nightly).unwrap(),
+      ),
+      (
+        "/bundles/channels/dev.json".into(),
+        serde_json::to_vec(&dev).unwrap(),
+      ),
+    ])
+  })
+  .await;
+  assert!(matches!(
+    server.resolver().check(BundleChannel::Nightly).await,
+    Err(Error::NotAvailable(_))
+  ));
+  assert_eq!(
+    server.requests.lock().unwrap().as_slice(),
+    [
+      "/bundles/channels/nightly.json",
+      "/bundles/sets/test/bundle-set.json"
+    ]
+  );
+
+  let server = Server::start(|root| {
+    BTreeMap::from([(
+      "/bundles/channels/dev.json".into(),
+      serde_json::to_vec(&pointer(root)).unwrap(),
+    )])
+  })
+  .await;
+  assert!(matches!(
+    server.resolver().check(BundleChannel::Nightly).await,
+    Err(Error::Invalid(message)) if message.contains("channel identity")
+  ));
+  assert_eq!(
+    server.requests.lock().unwrap().as_slice(),
+    [
+      "/bundles/channels/nightly.json",
+      "/bundles/channels/dev.json"
     ]
   );
 }
@@ -187,7 +232,7 @@ async fn channel_identity_urls_and_archive_checksums_fail_closed() {
       |root| {
         let mut value = pointer(root);
         match change {
-          "channel" => value["channel"] = "stable".into(),
+          "channel" => value["channel"] = "dev".into(),
           "origin" => value["bundle_set_url"] = "https://example.com/bundle-set.json".into(),
           "path" => {
             value["bundle_set_url"] = root
@@ -206,7 +251,7 @@ async fn channel_identity_urls_and_archive_checksums_fail_closed() {
     assert!(
       server
         .resolver()
-        .download(BundleChannel::Dev, "aarch64-apple-darwin")
+        .download(BundleChannel::Nightly, "aarch64-apple-darwin")
         .await
         .is_err(),
       "{change}"
@@ -246,11 +291,11 @@ async fn exact_publication_cache_avoids_archive_redownload_but_not_fresh_discove
   let resolver = server.resolver();
   let target = "aarch64-apple-darwin";
   let first = resolver
-    .download_cached(BundleChannel::Dev, target, &root)
+    .download_cached(BundleChannel::Nightly, target, &root)
     .await
     .unwrap();
   let second = resolver
-    .download_cached(BundleChannel::Dev, target, &root)
+    .download_cached(BundleChannel::Nightly, target, &root)
     .await
     .unwrap();
   assert_eq!(first.archive, second.archive);
@@ -266,7 +311,7 @@ async fn exact_publication_cache_avoids_archive_redownload_but_not_fresh_discove
     assert_eq!(
       requests
         .iter()
-        .filter(|path| path.ends_with("dev.json"))
+        .filter(|path| path.ends_with("nightly.json"))
         .count(),
       2
     );
@@ -278,7 +323,7 @@ async fn exact_publication_cache_avoids_archive_redownload_but_not_fresh_discove
   std::fs::write(cached, b"corrupt cached archive").unwrap();
   assert_eq!(
     resolver
-      .download_cached(BundleChannel::Dev, target, &root)
+      .download_cached(BundleChannel::Nightly, target, &root)
       .await
       .unwrap()
       .archive,
@@ -298,7 +343,7 @@ async fn exact_publication_cache_avoids_archive_redownload_but_not_fresh_discove
   tokio::task::yield_now().await;
   assert!(
     resolver
-      .download_cached(BundleChannel::Dev, target, &root)
+      .download_cached(BundleChannel::Nightly, target, &root)
       .await
       .is_err(),
     "a cached archive must not replace failed channel discovery"
@@ -322,7 +367,7 @@ fn installation_routes(
     .unwrap();
   let metadata_url = root.join(&format!("sets/{id}/bundle-set.json")).unwrap();
   let pointer = serde_json::to_vec(&serde_json::json!({
-    "schema_version": 1, "channel": "dev", "bundle_set_url": metadata_url.as_str(),
+    "schema_version": 1, "channel":"nightly", "bundle_set_url": metadata_url.as_str(),
   }))
   .unwrap();
   let updater = format!("fixture updater for {id}").into_bytes();
@@ -365,7 +410,7 @@ async fn installation_download_pins_both_assets_when_the_channel_advances() {
     .create(&home)
     .unwrap();
   let target = "aarch64-apple-darwin";
-  let channel_path = "/bundles/channels/dev.json";
+  let channel_path = "/bundles/channels/nightly.json";
   let first_revision = "a".repeat(40);
   let second_revision = "b".repeat(40);
   let server = Server::start_with(|root| {
@@ -389,7 +434,7 @@ async fn installation_download_pins_both_assets_when_the_channel_advances() {
   let (bundle, updater) = server
     .resolver()
     .download_installation_cached(
-      BundleChannel::Dev,
+      BundleChannel::Nightly,
       target,
       &cache.join("downloads"),
       &cache.join("updaters"),
@@ -424,7 +469,11 @@ async fn installation_download_pins_both_assets_when_the_channel_advances() {
         .all(|path| path.starts_with("/bundles/sets/first/"))
     );
   }
-  let current = server.resolver().check(BundleChannel::Dev).await.unwrap();
+  let current = server
+    .resolver()
+    .check(BundleChannel::Nightly)
+    .await
+    .unwrap();
   assert_eq!(current.git_revision, second_revision);
   std::fs::remove_dir_all(home).unwrap();
 }
@@ -437,7 +486,7 @@ async fn missing_installation_updater_is_reported_before_downloading_runtime() {
   let result = server
     .resolver()
     .download_installation_cached(
-      BundleChannel::Dev,
+      BundleChannel::Nightly,
       "aarch64-apple-darwin",
       unused,
       unused,
@@ -450,7 +499,7 @@ async fn missing_installation_updater_is_reported_before_downloading_runtime() {
   assert_eq!(
     server.requests.lock().unwrap().as_slice(),
     [
-      "/bundles/channels/dev.json",
+      "/bundles/channels/nightly.json",
       "/bundles/sets/test/bundle-set.json",
       "/bundles/sets/test/ctlup-aarch64-apple-darwin.json",
     ]
@@ -461,12 +510,18 @@ async fn missing_installation_updater_is_reported_before_downloading_runtime() {
 async fn channel_metadata_is_bounded_before_parsing() {
   let server = Server::start(|_| {
     BTreeMap::from([(
-      "/bundles/channels/dev.json".to_owned(),
+      "/bundles/channels/nightly.json".to_owned(),
       vec![b'x'; MAX_CHANNEL_BYTES + 1],
     )])
   })
   .await;
-  assert!(server.resolver().check(BundleChannel::Dev).await.is_err());
+  assert!(
+    server
+      .resolver()
+      .check(BundleChannel::Nightly)
+      .await
+      .is_err()
+  );
   assert_eq!(server.requests.lock().unwrap().len(), 1);
 }
 

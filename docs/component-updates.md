@@ -86,17 +86,25 @@ ctlup prune
 ```
 
 `install` and `update` share the same verification and activation transaction.
-No host option means this account. Saved hosts reuse their existing route,
-connection method and SSH authentication. A temporary destination uses OpenSSH
-configuration without adding a saved host. Hosts are processed independently;
-a failure preserves successful hosts and produces a nonzero exit status.
+No host option means this account. With a remote target, `--local` also includes
+this computer. Saved hosts reuse their existing route, connection method and
+SSH authentication. A temporary destination uses OpenSSH configuration without
+adding a saved host. Hosts are processed independently. A failure preserves
+successful hosts and produces a nonzero exit status.
 
 An explicit channel is saved as this account’s preference after a successful
 command. Otherwise automatic updates use that preference or the distribution’s
-compiled default. Nightly tracks the latest successfully published CI build
-from `main`. The `dev` channel points to that same build for existing clients.
-Stable tracks tagged releases. Development checkouts build the Linux x64
-working tree locally. Explicit channel requests always resolve the publication.
+compiled default. Stable tracks tagged releases and Nightly tracks the latest
+successfully published CI build from `main`. Existing `dev` preferences and
+`--channel dev` requests resolve to Nightly for compatibility. Explicit channel
+requests always resolve the publication.
+
+Temporary Dev builds are tied to a PR run. Download the complete bundle set from
+that run and install it with `--from`. See [install a temporary PR build](ci-bundles.md#install-a-temporary-pr-build).
+
+In a development checkout, automatic Linux x64 remote updates build the working
+tree. Use `--working-tree` to choose that source explicitly for Linux x64 or
+ARM64 targets.
 
 `--from` supplies an exact complete build or publisher bundle-set. Publisher
 archives need their matching `bundle-set.json`. Foreign-target deployment also
@@ -140,7 +148,15 @@ Updates resolve the selected channel once, then verify the target runtime archiv
 and its updater from the same immutable publication. Archive and binary
 checksums and compatible protocol advertisements are verified before use.
 Channel discovery is refreshed before cache reuse. Network errors remain
-errors; choose provided files or the desktop’s included offline build explicitly.
+errors. Nightly uses the legacy `dev.json` pointer only when `nightly.json`
+returns HTTP 404 during the updater rollout. For offline updates, choose provided
+files or the desktop’s included build explicitly.
+
+An older `ctlup` can keep using the installed updater when it updates the
+runtime. To switch that account to Nightly, use the standalone `ctlup` for this
+computer from a published Nightly bundle set. Verify the executable against its
+SHA-256 sidecar, make it executable, and run it with `update --channel nightly`
+to install the bundle and updater together.
 
 Cached archives live under `cache/downloads`, extracted deployment builds under
 `cache/components`, and standalone updater binaries under `cache/updaters`.

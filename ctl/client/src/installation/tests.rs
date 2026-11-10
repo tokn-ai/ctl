@@ -28,8 +28,11 @@ fn channel_inspection_is_passive_and_explicit_choices_are_atomic() {
   assert_eq!(default_channel(&home.0).unwrap(), BundleChannel::Stable);
   set_channel(&home.0, BundleChannel::Nightly).unwrap();
   assert_eq!(default_channel(&home.0).unwrap(), BundleChannel::Nightly);
-  set_channel(&home.0, BundleChannel::Dev).unwrap();
-  assert_eq!(default_channel(&home.0).unwrap(), BundleChannel::Dev);
+  let settings = std::fs::read(home.0.join(".tokn/ctl/ctlup.json")).unwrap();
+  assert_eq!(
+    serde_json::from_slice::<serde_json::Value>(&settings).unwrap()["channel"],
+    "dev"
+  );
   assert!(
     !std::fs::read_dir(home.0.join(".tokn/ctl"))
       .unwrap()

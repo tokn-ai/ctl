@@ -66,7 +66,7 @@ pub struct PublishedCatalog {
 #[serde(deny_unknown_fields)]
 struct ChannelDocument {
   schema_version: u32,
-  channel: BundleChannel,
+  channel: String,
   bundle_set_url: String,
 }
 
@@ -168,10 +168,10 @@ impl Resolver {
     Ok(Self { root, client })
   }
 
-  async fn publication(&self, channel: BundleChannel) -> Result<Publication, Error> {
+  async fn channel_pointer(&self, channel: &str) -> Result<ChannelDocument, Error> {
     let channel_url = self
       .root
-      .join(&format!("channels/{}.json", channel.name()))
+      .join(&format!("channels/{channel}.json"))
       .map_err(|error| Error::Invalid(error.to_string()))?;
     let pointer: ChannelDocument =
       serde_json::from_slice(&self.read(&channel_url, MAX_CHANNEL_BYTES).await?)
@@ -181,6 +181,16 @@ impl Resolver {
         "component channel identity does not match the request".into(),
       ));
     }
+    Ok(pointer)
+  }
+
+  async fn publication(&self, channel: BundleChannel) -> Result<Publication, Error> {
+    let pointer = match self.channel_pointer(channel.name()).await {
+      Err(Error::NotAvailable(_)) if channel == BundleChannel::Nightly => {
+        self.channel_pointer("dev").await?
+      }
+      result => result?,
+    };
     let url = reqwest::Url::parse(&pointer.bundle_set_url)
       .map_err(|_| Error::Invalid("invalid component publication URL".into()))?;
     if !trusted(&url, &self.root) || !url.path().ends_with("/bundle-set.json") {

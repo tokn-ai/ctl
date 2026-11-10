@@ -10,7 +10,7 @@ import { ConnectHostFlow } from "./ConnectHostFlow";
 
 vi.mock("../../lib/tauri", async (original) => ({
   ...(await original<object>()),
-  checkComponentUpdates: vi.fn(async () => ({ default_channel: "dev", local_development: false, catalog: null, error: null })),
+  checkComponentUpdates: vi.fn(async () => ({ default_channel: "nightly", local_development: false, catalog: null, error: null })),
   probeSshHost: vi.fn(),
   cancelSshProbe: vi.fn(),
   respondSshPrompt: vi.fn(),

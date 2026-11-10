@@ -119,6 +119,18 @@ mod tests {
   use super::*;
 
   #[test]
+  fn the_legacy_dev_channel_selects_nightly() {
+    let args = Arguments::try_parse_from(["ctlup", "check", "--channel", "dev"]).unwrap();
+    assert!(matches!(
+      args.command,
+      Command::Check {
+        channel: Some(crate::components::Channel::Nightly),
+        ..
+      }
+    ));
+  }
+
+  #[test]
   fn install_and_update_share_one_explicit_source_and_target_surface() {
     for command in ["install", "update"] {
       for channel in ["dev", "nightly", "stable"] {

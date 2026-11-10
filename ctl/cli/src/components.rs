@@ -30,14 +30,13 @@ pub enum Origin {
 }
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum Channel {
-  Dev,
+  #[value(alias = "dev")]
   Nightly,
   Stable,
 }
 impl From<Channel> for ctl_core::component_update::BundleChannel {
   fn from(value: Channel) -> Self {
     match value {
-      Channel::Dev => Self::Dev,
       Channel::Nightly => Self::Nightly,
       Channel::Stable => Self::Stable,
     }

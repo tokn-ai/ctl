@@ -174,7 +174,7 @@ pub async fn updater_for_manifest(
       ctl_core::component_update::BundleChannel::Stable
     }
     ctl_core::bundles::Source::Ci | ctl_core::bundles::Source::Release => {
-      ctl_core::component_update::BundleChannel::Dev
+      ctl_core::component_update::BundleChannel::Nightly
     }
     ctl_core::bundles::Source::Local => super::default_channel(home)?,
   };

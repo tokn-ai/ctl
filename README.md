@@ -334,10 +334,10 @@ explicitly, start Docker or Podman and run:
 pnpm bundles:build
 ```
 
-Other remote targets follow the development publication channel. Explicit
-`--channel dev` or the app's published-main source also uses that channel for
-Linux x64. `pnpm bundles:sync` remains available for packaging and offline
-selection. See [local bundles](docs/local-bundles.md).
+Other remote targets follow the configured publication channel. Explicit
+`--channel nightly` or the app's **Nightly** source downloads the published
+`main` build, including for Linux x64. `pnpm bundles:sync` remains available for
+packaging and offline selection. See [local bundles](docs/local-bundles.md).
 
 The `Desktop, control daemon, and remote-agent bundles` workflow builds static
 Linux and native macOS remote bundles and desktop packages for x86-64 and ARM64. Main-branch
@@ -348,15 +348,15 @@ Release bundle IDs are semantic versions; other runs include the source
 revision so different development builds never share a remote install
 directory. Tag names must match the Cargo and desktop versions as `v<version>`.
 
-Successful component builds on main publish bundle archives to GitHub Pages
-and advance the development channel. Version tags publish bundles to GitHub
-Releases and Pages, then advance the stable channel. Clients discover these
-publications over HTTPS; a persistent local selection cannot shadow them.
+Successful component builds on `main` publish bundle archives to GitHub Pages
+and advance Nightly. Version tags publish bundles to GitHub Releases and Pages,
+and ordinary release tags advance Stable. Clients discover these publications
+over HTTPS.
 Component publication is independent of desktop installer builds. Desktop
-packages and signed standalone Mac helpers remain part of the same workflow;
-branch-only builds remain Actions artifacts. Existing release assets and manual
-notes are preserved. See [release bundles](docs/ci-bundles.md) for publishing and
-initial Pages configuration.
+packages and signed standalone Mac helpers remain part of the same workflow.
+Temporary Dev builds for PR branches stay in Actions. Existing release assets
+and manual notes are preserved. See [release bundles](docs/ci-bundles.md) for
+publishing and initial Pages configuration.
 
 Main development builds can produce unsigned macOS desktop packages when Apple
 credentials are incomplete, and their draft notes identify them as unsigned.
@@ -816,7 +816,7 @@ updater verifies any saved machine ID, uses the selected SSH route, and shows
 download and installation progress. It preserves running daemons.
 `CTL_REMOTE_BUNDLES_DIR` supplies an explicit local source. Use
 `ctlup update --working-tree` to build for Linux x64 or ARM64 from a checkout.
-`ctlup check --channel dev` checks metadata without
+`ctlup check --channel nightly` checks metadata without
 opening SSH or downloading binaries. The current publication is resolved before
 using its verified download cache. `ctlup update` manages complete local or remote
 installations; `ctlup rollback` restores the previous build without restarting services.

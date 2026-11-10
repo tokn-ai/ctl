@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { bundleRoot, validatedComponentSet } from "./bundle-publication.mts";
-import { componentSetFixture, publicationFixture } from "./bundle-publication.fixtures.mts";
-import { compareVersions, devRetention, parseBundleCatalog, stageBundlePages } from "./stage-bundle-pages.mts";
+import { componentSetFixture, legacyPagesCatalog, publicationFixture } from "./bundle-publication.fixtures.mts";
+import { compareVersions, nightlyRetention, parseBundleCatalog, stageBundlePages } from "./stage-bundle-pages.mts";
 
 async function root(t: TestContext): Promise<string> {
   const path = await mkdtemp(join(tmpdir(), "ctl-pages-test-"));
@@ -13,45 +13,55 @@ async function root(t: TestContext): Promise<string> {
   return path;
 }
 
-test("stages verified archives and aliases Nightly to Dev without copying a bundle set", async (t) => {
+test("stages verified Nightly archives and keeps Dev as an unlisted compatibility pointer", async (t) => {
   const directory = await root(t);
-  const stable = publicationFixture(1, "stable"), dev = publicationFixture(2);
+  const stable = publicationFixture(1, "stable"), nightly = publicationFixture(2);
   const previous = join(directory, "previous"), next = join(directory, "next");
   assert.equal(await stageBundlePages(stable, await componentSetFixture(directory, stable), null, previous), true);
   await assert.rejects(readFile(join(previous, "bundles/channels/nightly.json")), { code: "ENOENT" });
-  assert.equal(await stageBundlePages(dev, await componentSetFixture(directory, dev), previous, next), true);
-  for (const publication of [stable, dev]) {
+  assert.equal(await stageBundlePages(nightly, await componentSetFixture(directory, nightly), previous, next), true);
+  for (const publication of [stable, nightly]) {
     const pointer = JSON.parse(await readFile(join(next, "bundles/channels", `${publication.channel}.json`), "utf8"));
     assert.deepEqual(pointer, { schema_version: 1, channel: publication.channel, bundle_set_url: `${bundleRoot}sets/${publication.publication_id}/bundle-set.json` });
     const { asset_names } = await validatedComponentSet(join(next, "bundles/sets", publication.publication_id), publication);
     assert.equal(asset_names.length, 9);
   }
-  assert.deepEqual(JSON.parse(await readFile(join(next, "bundles/channels/nightly.json"), "utf8")), {
-    schema_version: 1, channel: "nightly", bundle_set_url: `${bundleRoot}sets/${dev.publication_id}/bundle-set.json`,
+  assert.deepEqual(JSON.parse(await readFile(join(next, "bundles/channels/dev.json"), "utf8")), {
+    schema_version: 1, channel: "dev", bundle_set_url: `${bundleRoot}sets/${nightly.publication_id}/bundle-set.json`,
   });
-  assert.deepEqual((await readdir(join(next, "bundles/sets"))).sort(), [stable.publication_id, dev.publication_id].sort());
+  assert.deepEqual((await readdir(join(next, "bundles/sets"))).sort(), [stable.publication_id, nightly.publication_id].sort());
   const catalog = parseBundleCatalog(await readFile(join(next, "bundles/catalog.json")));
   assert.equal(catalog.channels.nightly, catalog.channels.dev);
+  assert.equal(catalog.publications[0].channel, "nightly");
   assert.equal(catalog.generation, 2);
+  const index = await readFile(join(next, "index.html"), "utf8");
+  assert.match(index, /channels\/nightly\.json/);
+  assert.match(index, /channels\/stable\.json/);
+  assert.doesNotMatch(index, /channels\/dev\.json/);
 });
 
 test("backfills Nightly from a legacy Dev head on release publication and rejects a divergent alias", async (t) => {
   const directory = await root(t);
-  const dev = publicationFixture(1), stable = publicationFixture(2, "stable");
+  const legacy = publicationFixture(2), stable = publicationFixture(3, "stable");
   const previous = join(directory, "previous"), next = join(directory, "next");
-  await stageBundlePages(dev, await componentSetFixture(directory, dev), null, previous);
-  const catalog_path = join(previous, "bundles/catalog.json");
-  const legacy = parseBundleCatalog(await readFile(catalog_path));
-  delete legacy.channels.nightly;
-  await writeFile(catalog_path, JSON.stringify(legacy));
-  await rm(join(previous, "bundles/channels/nightly.json"));
+  await stageBundlePages(legacy, await componentSetFixture(directory, legacy), null, previous);
+  await legacyPagesCatalog(previous, false);
+
+  const stale = publicationFixture(1);
+  assert.equal(await stageBundlePages(stale, await componentSetFixture(directory, stale), previous, next), false);
 
   await stageBundlePages(stable, await componentSetFixture(directory, stable), previous, next);
   const catalog = parseBundleCatalog(await readFile(join(next, "bundles/catalog.json")));
-  assert.equal(catalog.channels.nightly, dev.publication_id);
+  assert.equal(catalog.channels.nightly, legacy.publication_id);
   assert.equal(catalog.channels.stable, stable.publication_id);
-  catalog.channels.nightly = stable.publication_id;
-  assert.throws(() => parseBundleCatalog(Buffer.from(JSON.stringify(catalog))), /same publication as Dev/);
+  catalog.channels.dev = stable.publication_id;
+  assert.throws(() => parseBundleCatalog(Buffer.from(JSON.stringify(catalog))), /Dev pointer must match Nightly/);
+
+  const nightly = publicationFixture(4), advanced = join(directory, "advanced");
+  await stageBundlePages(nightly, await componentSetFixture(directory, nightly), next, advanced);
+  const migrated = parseBundleCatalog(await readFile(join(advanced, "bundles/catalog.json")));
+  assert.deepEqual(migrated.channels, { stable: stable.publication_id, nightly: nightly.publication_id, dev: nightly.publication_id });
+  assert.deepEqual(migrated.publications, [nightly, { ...legacy, channel: "dev" }, stable]);
 });
 
 test("old main runs and lower release versions cannot roll channels back", async (t) => {
@@ -84,7 +94,7 @@ test("a versioned prerelease archive is mirrored without moving the stable point
   assert.equal(parseBundleCatalog(await readFile(join(only_beta, "bundles/catalog.json"))).channels.stable, undefined);
 });
 
-test("retains five dev generations and two stable versions without dropping current pointers", async (t) => {
+test("retains five Nightly generations and two stable versions without dropping current pointers", async (t) => {
   const directory = await root(t);
   let previous: string | null = null;
   for (let run = 1; run <= 9; run += 1) {
@@ -94,7 +104,7 @@ test("retains five dev generations and two stable versions without dropping curr
     previous = next;
   }
   const catalog = parseBundleCatalog(await readFile(join(previous!, "bundles/catalog.json")));
-  assert.equal(catalog.publications.filter((entry) => entry.channel === "dev").length, devRetention);
+  assert.equal(catalog.publications.filter((entry) => entry.channel === "nightly").length, nightlyRetention);
   assert.equal(catalog.publications.filter((entry) => entry.channel === "stable").length, 2);
   assert.equal((await readdir(join(previous!, "bundles/sets"))).length, 7);
   for (const id of Object.values(catalog.channels)) assert.ok(catalog.publications.some((entry) => entry.publication_id === id));
@@ -108,37 +118,37 @@ async function treeBytes(path: string): Promise<number> {
   return bytes;
 }
 
-test("byte pressure evicts oldest unselected Dev generations while pinning channel heads and the newest other tag", async (t) => {
+test("byte pressure evicts oldest unselected Nightly generations while pinning channel heads and the newest other tag", async (t) => {
   const directory = await root(t);
   const stable = publicationFixture(1, "stable", "1.0.0");
   const tag = publicationFixture(2, "stable", "2.0.0-beta.1");
-  const dev = [3, 4, 5].map((run) => publicationFixture(run));
+  const nightlies = [3, 4, 5].map((run) => publicationFixture(run));
   let previous: string | null = null;
-  for (const entry of [stable, tag, ...dev.slice(0, 2)]) {
+  for (const entry of [stable, tag, ...nightlies.slice(0, 2)]) {
     const next = join(directory, `site-${entry.run_id}`);
     await stageBundlePages(entry, await componentSetFixture(directory, entry), previous, next);
     previous = next;
   }
   const before = await readFile(join(previous!, "bundles/catalog.json"));
-  const incoming = dev[2];
+  const incoming = nightlies[2];
   const input = await componentSetFixture(directory, incoming);
   const complete = join(directory, "complete");
   await stageBundlePages(incoming, input, previous, complete);
   const full_size = await treeBytes(complete);
-  const oldest_size = await treeBytes(join(complete, "bundles/sets", dev[0].publication_id));
+  const oldest_size = await treeBytes(join(complete, "bundles/sets", nightlies[0].publication_id));
   const budget = full_size - oldest_size;
   const output = join(directory, "bounded");
   await stageBundlePages(incoming, input, previous, output, budget);
   assert.ok(await treeBytes(output) <= budget);
   const catalog = parseBundleCatalog(await readFile(join(output, "bundles/catalog.json")));
-  assert.deepEqual(catalog.publications.map((entry) => entry.publication_id), [incoming, dev[1], stable, tag].map((entry) => entry.publication_id));
+  assert.deepEqual(catalog.publications.map((entry) => entry.publication_id), [incoming, nightlies[1], stable, tag].map((entry) => entry.publication_id));
   assert.equal(catalog.channels.dev, incoming.publication_id);
   assert.equal(catalog.channels.nightly, incoming.publication_id);
   assert.equal(catalog.channels.stable, stable.publication_id);
-  await assert.rejects(lstat(join(output, "bundles/sets", dev[0].publication_id)), { code: "ENOENT" });
+  await assert.rejects(lstat(join(output, "bundles/sets", nightlies[0].publication_id)), { code: "ENOENT" });
   for (const entry of catalog.publications) await validatedComponentSet(join(output, "bundles/sets", entry.publication_id), entry);
   assert.deepEqual(await readFile(join(previous!, "bundles/catalog.json")), before);
-  await validatedComponentSet(join(previous!, "bundles/sets", dev[0].publication_id), dev[0]);
+  await validatedComponentSet(join(previous!, "bundles/sets", nightlies[0].publication_id), nightlies[0]);
   const impossible = join(directory, "impossible");
   await assert.rejects(stageBundlePages(incoming, input, previous, impossible, 1), /Pinned bundle publications exceed/);
   await assert.rejects(lstat(impossible), { code: "ENOENT" });
@@ -166,13 +176,13 @@ test("unmanaged content, mixed pointers and moved release tags fail closed", asy
   await stageBundlePages(old, await componentSetFixture(directory, old), null, previous);
   const input = await componentSetFixture(directory, next);
   await assert.rejects(stageBundlePages(next, input, previous, output), /cannot change source revision/);
-  const dev = publicationFixture(3);
-  const dev_input = await componentSetFixture(directory, dev);
+  const nightly = publicationFixture(3);
+  const nightly_input = await componentSetFixture(directory, nightly);
   await writeFile(join(previous, "manual.html"), "preserve me");
-  await assert.rejects(stageBundlePages(dev, dev_input, previous, output), /non-bundle Pages content/);
+  await assert.rejects(stageBundlePages(nightly, nightly_input, previous, output), /non-bundle Pages content/);
   await rm(join(previous, "manual.html"));
   await writeFile(join(previous, "bundles/channels/stable.json"), JSON.stringify({ schema_version: 1, channel: "stable", bundle_set_url: "https://example.com/wrong" }));
-  await assert.rejects(stageBundlePages(dev, dev_input, previous, output), /disagree/);
+  await assert.rejects(stageBundlePages(nightly, nightly_input, previous, output), /disagree/);
 });
 
 test("release ordering follows semver rather than lexical or workflow run ordering", () => {

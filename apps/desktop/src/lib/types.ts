@@ -1,7 +1,7 @@
 export type Sequence = string;
 
 export type ComponentUpdatePackage = "ctl_agent" | "full_bundle";
-export type BundleChannel = "dev" | "nightly" | "stable";
+export type BundleChannel = "nightly" | "stable";
 export interface PublishedBundleCatalog {
   channel: BundleChannel;
   bundle_id: string;

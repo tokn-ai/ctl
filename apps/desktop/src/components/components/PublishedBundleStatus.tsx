@@ -10,7 +10,6 @@ interface Props {
 }
 
 const channel_names: Record<BundleChannel, string> = {
-  dev: "development",
   nightly: "nightly",
   stable: "stable",
 };

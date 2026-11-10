@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { cp, mkdtemp, readFile, rm } from "node:fs/promises";
+import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
-import { componentSetFixture, publicationFixture } from "./bundle-publication.fixtures.mts";
+import { componentSetFixture, legacyPagesCatalog, publicationFixture } from "./bundle-publication.fixtures.mts";
 import { bundleRoot, validatedComponentSet } from "./bundle-publication.mts";
 import { pagesDeployStep, pagesJobName, restoreBundlePages, successfulSnapshot } from "./restore-bundle-pages.mts";
 import { parseBundleCatalog, stageBundlePages } from "./stage-bundle-pages.mts";
@@ -60,14 +60,18 @@ test("snapshot selection requires the exact successful deployment attempt, not a
   assert.ok(calls.some((endpoint) => endpoint.includes("attempts/1/jobs")));
 });
 
-test("restores a deployed snapshot even while Pages CDN is still missing its catalog", async (t) => {
+test("restores a deployed legacy snapshot with both pointers while Pages CDN is still missing its catalog", async (t) => {
   const directory = await root(t), entry = publicationFixture(1), site = join(directory, "site"), output = join(directory, "restore");
   await stageBundlePages(entry, await componentSetFixture(directory, entry), null, site);
+  await legacyPagesCatalog(site, true);
   assert.equal(await restoreBundlePages("tokn-ai/ctl", output, github({ artifact_site: site }), publicSite(null)), true);
+  const catalog = parseBundleCatalog(await readFile(join(output, "bundles/catalog.json")));
+  assert.deepEqual(catalog.channels, { nightly: entry.publication_id, dev: entry.publication_id });
+  assert.equal(catalog.publications[0].channel, "dev");
   await validatedComponentSet(join(output, "bundles/sets", entry.publication_id), entry);
 });
 
-test("expired snapshots recover actual archives and both channel pointers from the managed HTTPS site", async (t) => {
+test("expired snapshots recover actual archives and all channel pointers from the managed HTTPS site", async (t) => {
   const directory = await root(t), first = publicationFixture(1), second = publicationFixture(2, "stable");
   const old = join(directory, "old"), site = join(directory, "site"), output = join(directory, "restore");
   await stageBundlePages(first, await componentSetFixture(directory, first), null, old);
@@ -75,7 +79,25 @@ test("expired snapshots recover actual archives and both channel pointers from t
   assert.equal(await restoreBundlePages("tokn-ai/ctl", output, github({ deployed: true }), publicSite(site)), true);
   assert.deepEqual(parseBundleCatalog(await readFile(join(output, "bundles/catalog.json"))).channels,
     parseBundleCatalog(await readFile(join(site, "bundles/catalog.json"))).channels);
+  for (const channel of ["dev", "nightly", "stable"]) {
+    const relative = `bundles/channels/${channel}.json`;
+    assert.deepEqual(await readFile(join(output, relative)), await readFile(join(site, relative)));
+  }
   for (const entry of [first, second]) await validatedComponentSet(join(output, "bundles/sets", entry.publication_id), entry);
+  await writeFile(join(site, "bundles/channels/nightly.json"), await readFile(join(site, "bundles/channels/stable.json")));
+  await assert.rejects(restoreBundlePages("tokn-ai/ctl", join(directory, "corrupt"), github(), publicSite(site)), /channel and catalog disagree/);
+});
+
+test("restores a legacy HTTPS catalog without requiring a Nightly pointer", async (t) => {
+  const directory = await root(t), dev = publicationFixture(1);
+  const site = join(directory, "legacy"), output = join(directory, "restore");
+  await stageBundlePages(dev, await componentSetFixture(directory, dev), null, site);
+  await legacyPagesCatalog(site, false);
+  assert.equal(await restoreBundlePages("tokn-ai/ctl", output, github({ deployed: true }), publicSite(site)), true);
+  const catalog = parseBundleCatalog(await readFile(join(output, "bundles/catalog.json")));
+  assert.deepEqual(catalog.channels, { dev: dev.publication_id });
+  assert.equal(catalog.publications[0].channel, "dev");
+  await assert.rejects(readFile(join(output, "bundles/channels/nightly.json")), { code: "ENOENT" });
 });
 
 test("a newer published generation wins over an older surviving Actions snapshot", async (t) => {
@@ -148,14 +170,16 @@ test("HTTP errors or malformed published catalogs never initialize an empty site
   await assert.rejects(readFile(join(output, "bundles/catalog.json")), { code: "ENOENT" });
 });
 
-test("workflow publication depends on components, not desktop success or the latest unpublished main commit", async () => {
+test("workflow advances Nightly from main component builds and keeps PR builds in Actions", async () => {
   const workflow = await readFile(new URL("../../.github/workflows/bundles.yml", import.meta.url), "utf8");
   const pages = workflow.split("  bundle-pages:")[1]!.split("  ctld:")[0]!;
   assert.ok(pages.includes("needs: [metadata, remote-agent-set, component-release]"));
   assert.ok(!pages.includes("needs.desktop"));
   assert.ok(!pages.includes("git/ref/heads/main"));
+  assert.match(pages, /github\.ref == 'refs\/heads\/main' \|\|\s+\(startsWith\(github\.ref, 'refs\/tags\/v'\) && needs\.component-release\.result == 'success'\)\)/);
+  assert.match(pages, /PUBLICATION_CHANNEL: .*'stable' \|\| 'nightly'/);
   assert.ok(pages.includes("queue: max"));
   assert.ok(pages.includes(`name: ${pagesDeployStep}`));
-  assert.ok(workflow.includes("CTL_BUNDLE_CHANNEL:"));
+  assert.match(workflow, /CTL_BUNDLE_CHANNEL: .*'stable' \|\| 'nightly'/);
   assert.ok(workflow.includes("publish-component-release.mts desktop"));
 });

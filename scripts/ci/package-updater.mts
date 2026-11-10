@@ -5,7 +5,7 @@ import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { readAgentFile, validateAgentIdentity, type AgentBundleIdentity } from "../shared/agent-bundle.mts";
-import { probeComponent } from "../shared/component-probe.mts";
+import { probeBundledComponent } from "../shared/component-probe.mts";
 import { parseComponent } from "../shared/protocol-contract.mts";
 import { maxUpdaterBytes, parseUpdaterManifest, updaterBinaryName, updaterManifestName, verifyUpdaterTarget, type UpdaterManifest } from "../shared/updater-bundle.mts";
 
@@ -18,7 +18,7 @@ export interface PackageUpdaterOptions extends AgentBundleIdentity {
 }
 
 export async function packageUpdater(options: PackageUpdaterOptions,
-  probe = (path: string) => probeComponent(path, ["--component-info"], { target: options.target })): Promise<UpdaterManifest> {
+  probe = (path: string) => probeBundledComponent(path, ["--component-info"], { target: options.target })): Promise<UpdaterManifest> {
   validateAgentIdentity(options);
   const input = join(options.binary_directory, "ctlup");
   await mkdir(options.output_directory, { recursive: true });

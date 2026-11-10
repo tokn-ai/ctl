@@ -1,13 +1,14 @@
 import { spawn, execFile, fork } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { access, chmod, copyFile, lstat, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { promisify } from "node:util";
-import { addAgentPayloadBytes, agentCargoPackages, agentComponents, validateBundleProtocols, type AgentComponentMap } from "../shared/agent-bundle.mts";
-import { maxComponentMetadata, parseComponent, type ComponentInfo } from "../shared/protocol-contract.mts";
+import { parseArgs, promisify } from "node:util";
+import { addAgentPayloadBytes, agentCargoPackages, agentComponents, readAgentFile, validateBundleProtocols, type AgentComponentMap } from "../shared/agent-bundle.mts";
+import { parseComponent, type ComponentInfo } from "../shared/protocol-contract.mts";
+import { isLinuxBundleTarget, readElfComponent, type LinuxBundleTarget } from "../shared/elf-component.mts";
 import { packageUpdater } from "../ci/package-updater.mts";
-import { parseUpdaterManifest, updaterManifestName, verifyUpdaterTarget, type UpdaterManifest } from "../shared/updater-bundle.mts";
+import { type UpdaterManifest } from "../shared/updater-bundle.mts";
 
 const execute = promisify(execFile);
 export const targetTriple = "x86_64-unknown-linux-musl";
@@ -25,7 +26,7 @@ export interface LocalBundleManifest {
 }
 
 /** Keep the exact field/map order used by ctl_core::bundles::Manifest's content identity. */
-export function localManifest(components: Record<string, ComponentInfo>, files: LocalBundleManifest["files"]): LocalBundleManifest {
+export function localManifest(components: Record<string, ComponentInfo>, files: LocalBundleManifest["files"], target: LinuxBundleTarget = targetTriple): LocalBundleManifest {
   const ordered = {} as AgentComponentMap;
   const orderedFiles: LocalBundleManifest["files"] = {};
   for (const name of [...agentComponents].sort()) {
@@ -43,36 +44,52 @@ export function localManifest(components: Record<string, ComponentInfo>, files: 
   }
   validateBundleProtocols(ordered, agentComponents);
   const manifest: LocalBundleManifest = {
-    schema_version: 2, bundle_id: "", target_triple: targetTriple, source: "local", components: ordered, files: orderedFiles,
+    schema_version: 2, bundle_id: "", target_triple: target, source: "local", components: ordered, files: orderedFiles,
   };
   manifest.bundle_id = createHash("sha256").update(JSON.stringify(manifest)).digest("hex");
   return manifest;
 }
 
-/** Runs inside Linux, querying the actual copied executables rather than a host build. */
-export async function packageLocalBundle(binary_directory: string, output_directory: string, run: Runner = async (program, args) => {
-  const { stdout } = await execute(program, args, { timeout: 30_000, maxBuffer: maxComponentMetadata });
-  return stdout;
-}): Promise<LocalBundleManifest> {
+/** Package a snapshot of each executable using the metadata compiled into it. */
+export async function packageLocalBundle(binary_directory: string, output_directory: string, run?: Runner,
+  target: LinuxBundleTarget = targetTriple, signal?: AbortSignal): Promise<LocalBundleManifest> {
   await mkdir(output_directory, { recursive: true, mode: 0o700 });
   const components: Record<string, ComponentInfo> = {};
   const files: LocalBundleManifest["files"] = {};
   let payloadBytes = 0;
   for (const name of agentComponents) {
-    const source = join(binary_directory, name);
-    const info = await lstat(source);
-    if (!info.isFile() || info.size === 0 || info.size > 128 * 1024 * 1024) throw new Error(`Invalid build executable: ${name}`);
-    payloadBytes = addAgentPayloadBytes(payloadBytes, info.size);
+    signal?.throwIfAborted();
+    const bytes = await readAgentFile(join(binary_directory, name), 128 * 1024 * 1024);
+    payloadBytes = addAgentPayloadBytes(payloadBytes, bytes.length);
     const destination = join(output_directory, name);
-    await copyFile(source, destination);
+    await writeFile(destination, bytes, { mode: 0o700 });
     await chmod(destination, 0o700);
-    components[name] = parseComponent(JSON.parse(await run(destination, ["--component-info"])));
-    files[name] = { sha256: createHash("sha256").update(await readFile(destination)).digest("hex"), executable: true };
+    components[name] = run ? parseComponent(JSON.parse(await run(destination, ["--component-info"]))) : readElfComponent(bytes, target, name);
+    files[name] = { sha256: createHash("sha256").update(bytes).digest("hex"), executable: true };
   }
-  const manifest = localManifest(components, files);
-  await writeFile(join(output_directory, "bundle.json"), `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
+  const manifest = localManifest(components, files, target);
+  const manifest_bytes = Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`);
+  addAgentPayloadBytes(payloadBytes, manifest_bytes.length);
+  await writeFile(join(output_directory, "bundle.json"), manifest_bytes, { mode: 0o600 });
   await chmod(join(output_directory, "bundle.json"), 0o600);
   return manifest;
+}
+
+async function packageBuiltArtifacts(binary_directory: string, bundle_directory: string, updater_directory: string,
+  target: LinuxBundleTarget, signal: AbortSignal): Promise<UpdaterManifest> {
+  const manifest = await packageLocalBundle(binary_directory, bundle_directory, undefined, target, signal);
+  const build = manifest.components["ctl-agent"].build;
+  return packageUpdater({ target, app_version: build.version,
+    bundle_id: `${build.version}-dev.${build.source_revision!.slice(0, 12)}`, git_revision: build.source_revision!,
+    binary_directory, output_directory: updater_directory, allow_dirty: true, strip: false,
+  }, async (path) => {
+    signal.throwIfAborted();
+    const info = readElfComponent(await readAgentFile(path, 128 * 1024 * 1024), target, "ctlup");
+    if (JSON.stringify(info.build) !== JSON.stringify(build)) {
+      throw new Error("ctlup and the runtime components were built from different working trees");
+    }
+    return { stdout: JSON.stringify(info), stderr: "" };
+  });
 }
 
 function runProcess(program: string, args: string[], options: { cwd?: string; env?: NodeJS.ProcessEnv; signal?: AbortSignal; group?: boolean } = {}): Promise<void> {
@@ -164,36 +181,26 @@ export function watchBuildLease(read: () => Promise<string>, cancel: () => void,
   return () => clearInterval(timer);
 }
 
-async function containerBuild(packageOnly: boolean): Promise<void> {
+const packageArguments = agentCargoPackages.flatMap((name) => ["-p", name]);
+const buildExecutables = [...agentComponents, "ctlup"];
+
+async function containerBuild(target: LinuxBundleTarget): Promise<void> {
   const cancellation = new AbortController();
   const stopLease = watchBuildLease(() => readFile("/result/lease", "utf8"), () => cancellation.abort());
-  const staging = await mkdtemp("/tmp/ctl-bundle-");
   try {
-    if (!packageOnly) {
-      await runProcess("cargo", ["build", "--locked", "--release", "--target", targetTriple, ...agentCargoPackages.flatMap((name) => ["-p", name])], {
-        cwd: "/workspace", group: true, signal: cancellation.signal,
-      });
-    }
-    cancellation.signal.throwIfAborted();
-    const manifest = await packageLocalBundle(`/build/${targetTriple}/release`, staging, async (program, args) => {
-      const { stdout } = await execute(program, args, { timeout: 30_000, maxBuffer: maxComponentMetadata, signal: cancellation.signal });
-      return stdout;
+    await runProcess("cargo", ["build", "--locked", "--release", "--target", target, ...packageArguments], {
+      cwd: "/workspace", group: true, signal: cancellation.signal,
     });
-    const build = manifest.components["ctl-agent"].build;
-    // The slim package-only image has no binutils. Preserve the Zig build's
-    // ctlup bytes, just as we do for the other local executables.
-    const updater = await packageUpdater({ target: targetTriple, app_version: build.version,
-      bundle_id: `${build.version}-dev.${build.source_revision!.slice(0, 12)}`, git_revision: build.source_revision!,
-      binary_directory: `/build/${targetTriple}/release`, output_directory: join(staging, "updater"), allow_dirty: true, strip: !packageOnly });
     // Rootless engines cannot chmod host-owned bind-mount files. Transfer only
     // their bytes; the host retains ownership and applies private store modes.
-    for (const name of [...agentComponents, "bundle.json"]) {
+    for (const name of buildExecutables) {
       cancellation.signal.throwIfAborted();
-      await writeFile(join("/result/bundle", name), await readFile(join(staging, name)));
+      const bytes = await readAgentFile(join("/build", target, "release", name), 128 * 1024 * 1024);
+      await writeFile(join("/result/binaries", name), bytes);
     }
-    await writeFile("/result/updater/ctlup", await readFile(join(staging, "updater", updater.binary)));
-    await writeFile("/result/updater/manifest.json", await readFile(join(staging, "updater", updaterManifestName(targetTriple))));
-  } finally { stopLease(); await rm(staging, { recursive: true, force: true }); }
+  } finally {
+    stopLease();
+  }
 }
 
 async function acquireLock(path: string, signal: AbortSignal): Promise<() => Promise<void>> {
@@ -237,10 +244,11 @@ async function selectEngine(): Promise<string> {
   throw new Error(`Start a Linux container engine (${choices.join(" or ")}) before building remote components`);
 }
 
-async function hasCrossCompiler(): Promise<boolean> {
+async function hasCrossCompiler(root: string): Promise<boolean> {
   try {
     await execute("zig", ["version"], { timeout: 10_000 });
-    await execute("cargo", ["zigbuild", "--help"], { timeout: 10_000 });
+    await execute("cargo", ["zigbuild", "--help"], { cwd: root, timeout: 10_000 });
+    await execute("rustup", ["target", "list", "--installed"], { cwd: root, timeout: 10_000 });
     await execute("make", ["--version"], { timeout: 10_000 });
     await execute("perl", ["-MFindBin", "-MIPC::Cmd", "-e", "1"], { timeout: 10_000 });
     return true;
@@ -260,130 +268,164 @@ export async function publishLocalBundle(staging: string, destination: string): 
   if (moved) await rm(previous, { recursive: true, force: true });
 }
 
-export async function buildAgentBundle(repository: string): Promise<string> {
-  const root = resolve(repository);
-  const outputRoot = join(root, "target/development-bundles");
-  const output = join(outputRoot, targetTriple);
-  const cancellation = new AbortController();
-  const stop = (): void => cancellation.abort();
-  process.once("SIGINT", stop); process.once("SIGTERM", stop);
-  // Only the user may traverse this parent, including while a bind-mounted
-  // staging directory is writable by the container's differently mapped uid.
-  await mkdir(outputRoot, { recursive: true, mode: 0o700 });
-  await chmod(outputRoot, 0o700);
-  const unlock = await acquireLock(join(outputRoot, `.${targetTriple}.lock`), cancellation.signal);
-  const temporary = await mkdtemp(join(outputRoot, ".linux-build-"));
-  // The container writes the executables and manifest into this host-owned directory.
+async function compileWithZig(root: string, target: LinuxBundleTarget, signal: AbortSignal): Promise<string> {
+  const native_target = join(root, "target/development-bundle-build");
+  const installed = (await execute("rustup", ["target", "list", "--installed"], { cwd: root })).stdout;
+  if (!installed.split(/\s+/u).includes(target)) {
+    console.error(`ctl: Installing the Rust target ${target}…`);
+    await runOwnedProcess("rustup", ["target", "add", target], signal, { cwd: root });
+  }
+  console.error(`ctl: Cross-compiling ${target} with Zig…`);
+  await runOwnedProcess("cargo", ["zigbuild", "--locked", "--release", "--target", target, "--target-dir", native_target,
+    ...packageArguments], signal, { cwd: root, env: { ...process.env, CARGO_INCREMENTAL: "1" } });
+  return join(native_target, target, "release");
+}
+
+async function compileInContainer(root: string, temporary: string, target: LinuxBundleTarget, signal: AbortSignal): Promise<string> {
+  console.error("ctl: Preparing the container compiler (host compilation requires Zig, cargo-zigbuild, rustup, Make, and Perl)…");
+  const engine = await selectEngine();
+  const arch = target.startsWith("x86_64") ? "amd64" : "arm64";
+  const platform = `linux/${arch}`;
+  const image = `${imageName}-${arch}`;
+  await runOwnedProcess(engine, ["build", "--platform", platform, "--build-arg", `CTL_BUILD_TARGET=${target}`, "--tag", image,
+    join(root, "scripts/dev/linux-bundle-builder")], signal);
+
+  const binaries = join(temporary, "binaries");
+  // The container may have a different uid. The parent is private and all
+  // transferred files remain owned by the host user.
   await chmod(temporary, 0o777);
-  await mkdir(join(temporary, "bundle"), { mode: 0o777 });
-  await chmod(join(temporary, "bundle"), 0o777);
-  await mkdir(join(temporary, "updater"), { mode: 0o777 });
-  await chmod(join(temporary, "updater"), 0o777);
-  for (const name of ["ctlup", "manifest.json"]) {
-    await writeFile(join(temporary, "updater", name), "");
-    await chmod(join(temporary, "updater", name), 0o666);
+  await mkdir(binaries);
+  await chmod(binaries, 0o777);
+  for (const name of buildExecutables) {
+    const path = join(binaries, name);
+    await writeFile(path, "");
+    await chmod(path, 0o666);
   }
-  // Preserve host ownership even when a rootful container overwrites the payload.
-  for (const name of [...agentComponents, "bundle.json"]) {
-    await writeFile(join(temporary, "bundle", name), "");
-    await chmod(join(temporary, "bundle", name), 0o666);
-  }
-  let heartbeat: NodeJS.Timeout | undefined;
-  let engine: string | undefined;
-  let containerMayRun = false;
+  const git = async (args: string[]): Promise<string> => (await execute("git", ["-C", root, ...args])).stdout.trim();
+  const common = await git(["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+  const gitDirectory = await git(["rev-parse", "--absolute-git-dir"]);
+  const gitRelative = relative(common, gitDirectory);
+  if (gitRelative.startsWith("..") || isAbsolute(gitRelative)) throw new Error("Worktree Git directory is outside its common directory");
+  const cache = createHash("sha256").update(root).digest("hex").slice(0, 16);
   const cidfile = join(temporary, "container-id");
   const removeContainer = async (): Promise<void> => {
-    if (!engine || !containerMayRun) return;
     try {
       const id = (await readFile(cidfile, "utf8")).trim();
       if (/^[a-f0-9]{12,64}$/.test(id)) await execute(engine, ["rm", "--force", id], { timeout: 15_000 });
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT" && !cancellation.signal.aborted) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT" && !signal.aborted) {
         console.error("ctl: Container cleanup did not complete; its build lease will expire.");
       }
     }
   };
+  let sequence = 0;
+  await writeFile(join(temporary, "lease"), String(sequence++));
+  const heartbeat = setInterval(() => {
+    void writeFile(join(temporary, "lease"), String(sequence++)).catch(() => clearInterval(heartbeat));
+  }, 1_000);
+  const abort = (): void => { void removeContainer(); };
+  signal.addEventListener("abort", abort, { once: true });
   try {
-    engine = await selectEngine();
-    const nativeCross = await hasCrossCompiler();
-    const nativeTarget = join(root, "target/development-bundle-build");
-    if (nativeCross) {
-      console.error("ctl: Cross-compiling the current working tree for Linux x64 with Zig…");
-      const installed = (await execute("rustup", ["target", "list", "--installed"], { cwd: root })).stdout;
-      if (!installed.split(/\s+/u).includes(targetTriple)) {
-        await runOwnedProcess("rustup", ["target", "add", targetTriple], cancellation.signal, { cwd: root });
-      }
-      await runOwnedProcess("cargo", ["zigbuild", "--locked", "--release", "--target", targetTriple, "--target-dir", nativeTarget,
-        ...agentCargoPackages.flatMap((name) => ["-p", name])], cancellation.signal, { cwd: root, env: { ...process.env, CARGO_INCREMENTAL: "1" } });
-    } else {
-      console.error("ctl: Preparing the Linux x64 container builder (native cross-compilation requires Zig, cargo-zigbuild, Make, and Perl)…");
-      await runOwnedProcess(engine, ["build", "--platform", "linux/amd64", "--tag", imageName, join(root, "scripts/dev/linux-bundle-builder")], cancellation.signal);
-    }
-    const git = async (args: string[]): Promise<string> => (await execute("git", ["-C", root, ...args])).stdout.trim();
-    const common = await git(["rev-parse", "--path-format=absolute", "--git-common-dir"]);
-    const gitDirectory = await git(["rev-parse", "--absolute-git-dir"]);
-    const gitRelative = relative(common, gitDirectory);
-    if (gitRelative.startsWith("..") || isAbsolute(gitRelative)) throw new Error("Worktree Git directory is outside its common directory");
-    const cache = createHash("sha256").update(root).digest("hex").slice(0, 16);
-    let sequence = 0;
-    await writeFile(join(temporary, "lease"), String(sequence++));
-    heartbeat = setInterval(() => { void writeFile(join(temporary, "lease"), String(sequence++)).catch(stop); }, 1_000);
-    console.error(nativeCross ? "ctl: Packaging the Linux x64 executables…" : "ctl: Building and packaging the current working tree for Linux x64…");
-    containerMayRun = true;
-    const running = runOwnedProcess(engine, [
-      "run", "--rm", "--platform", "linux/amd64", "--cidfile", cidfile,
+    console.error(`ctl: Compiling ${target} in the Linux container…`);
+    await runOwnedProcess(engine, [
+      "run", "--rm", "--platform", platform, "--cidfile", cidfile,
       "--volume", `${root}:/workspace:ro`, "--volume", `${common}:/git:ro`,
-      "--volume", `${temporary}:/result:rw`, "--volume", nativeCross ? `${nativeTarget}:/build:ro` : `ctl-bundle-target-${cache}:/build`,
+      "--volume", `${temporary}:/result:rw`, "--volume", `ctl-bundle-target-${cache}-${arch}:/build`,
       "--volume", "ctl-bundle-registry:/usr/local/cargo/registry", "--volume", "ctl-bundle-git:/usr/local/cargo/git",
       "--env", "CARGO_TARGET_DIR=/build", "--env", "CARGO_INCREMENTAL=1", "--env", "GIT_WORK_TREE=/workspace",
       "--env", `GIT_DIR=/git${gitRelative ? `/${gitRelative.split("\\").join("/")}` : ""}`,
       "--env", "GIT_CONFIG_COUNT=1", "--env", "GIT_CONFIG_KEY_0=safe.directory", "--env", "GIT_CONFIG_VALUE_0=/workspace",
-      nativeCross ? "docker.io/library/node:24-bookworm-slim" : imageName,
-      "node", "/workspace/scripts/dev/build-agent-bundle.mts", nativeCross ? "--container-package" : "--container",
-    ], cancellation.signal);
-    const abort = (): void => { void removeContainer().catch(() => {}); };
-    cancellation.signal.addEventListener("abort", abort, { once: true });
-    try { await running; containerMayRun = false; } finally { cancellation.signal.removeEventListener("abort", abort); }
+      image, "node", "/workspace/scripts/dev/build-agent-bundle.mts", "--container", target,
+    ], signal);
+    return binaries;
+  } catch (error) {
+    await removeContainer();
+    throw error;
+  } finally {
+    clearInterval(heartbeat);
+    signal.removeEventListener("abort", abort);
+  }
+}
+
+export async function buildAgentBundle(repository: string, target: LinuxBundleTarget = targetTriple, output_root?: string): Promise<string> {
+  const root = resolve(repository);
+  const default_root = join(root, "target/development-bundles");
+  const outputRoot = output_root ? resolve(root, output_root) : default_root;
+  const output = join(outputRoot, target);
+  const cancellation = new AbortController();
+  const stop = (): void => cancellation.abort();
+  process.once("SIGINT", stop);
+  process.once("SIGTERM", stop);
+  const lifeline = process.env.CTLUP_BUNDLE_BUILD_LIFELINE === "1" ? process.stdin : undefined;
+  lifeline?.once("end", stop);
+  lifeline?.once("error", stop);
+  lifeline?.resume();
+  let unlock: (() => Promise<void>) | undefined;
+  let staging: string | undefined;
+  let container_stage: string | undefined;
+  try {
+    for (const directory of new Set([default_root, outputRoot])) {
+      await mkdir(directory, { recursive: true, mode: 0o700 });
+      const info = await lstat(directory);
+      if (!info.isDirectory() || (process.getuid && ((info.mode & 0o077) !== 0 || info.uid !== process.getuid()))) {
+        throw new Error("The development bundle output must be a private directory owned by the current user");
+      }
+    }
+    console.error(`ctl: Preparing the ${target} build toolchain…`);
+    unlock = await acquireLock(join(default_root, `.${target}.lock`), cancellation.signal);
+    staging = await mkdtemp(join(outputRoot, ".linux-build-"));
+    let binaries: string;
+    if (await hasCrossCompiler(root)) {
+      binaries = await compileWithZig(root, target, cancellation.signal);
+    } else {
+      container_stage = await mkdtemp(join(default_root, ".linux-container-"));
+      binaries = await compileInContainer(root, container_stage, target, cancellation.signal);
+    }
     cancellation.signal.throwIfAborted();
-    await access(join(temporary, "bundle/bundle.json"));
-    for (const name of agentComponents) await chmod(join(temporary, "bundle", name), 0o700);
-    await chmod(join(temporary, "bundle/bundle.json"), 0o600);
-    await chmod(join(temporary, "bundle"), 0o700);
-    const updater_bytes = await readFile(join(temporary, "updater/manifest.json"));
-    const identity = JSON.parse(updater_bytes.toString("utf8")) as UpdaterManifest;
-    const updater = parseUpdaterManifest(updater_bytes, identity, targetTriple);
-    const updater_stage = join(temporary, "updater-published");
+    console.error(`ctl: Packaging and verifying the ${target} executables…`);
+    const bundle_stage = join(staging, "bundle");
+    const updater_stage = join(staging, "updater");
     await mkdir(updater_stage, { mode: 0o700 });
-    await writeFile(join(updater_stage, updater.binary), await readFile(join(temporary, "updater/ctlup")), { mode: 0o700 });
-    await writeFile(join(updater_stage, updaterManifestName(targetTriple)), updater_bytes, { mode: 0o600 });
-    await writeFile(join(updater_stage, `${updater.binary}.sha256`), `${updater.sha256}  ${updater.binary}\n`, { mode: 0o600 });
-    await verifyUpdaterTarget(updater_stage, updater, targetTriple, true);
+    await packageBuiltArtifacts(binaries, bundle_stage, updater_stage, target, cancellation.signal);
     const updater_root = join(outputRoot, "updaters");
     await mkdir(updater_root, { recursive: true, mode: 0o700 });
     if (!(await lstat(updater_root)).isDirectory()) throw new Error("development updater output must be a directory");
-    await publishLocalBundle(join(temporary, "bundle"), output);
-    await publishLocalBundle(updater_stage, join(updater_root, targetTriple));
+    cancellation.signal.throwIfAborted();
+    await publishLocalBundle(bundle_stage, output);
+    await publishLocalBundle(updater_stage, join(updater_root, target));
     console.log(output);
     return output;
   } finally {
-    clearInterval(heartbeat);
-    await removeContainer();
-    await rm(temporary, { recursive: true, force: true });
-    await unlock();
-    process.removeListener("SIGINT", stop); process.removeListener("SIGTERM", stop);
+    try {
+      if (staging) await rm(staging, { recursive: true, force: true });
+      if (container_stage) await rm(container_stage, { recursive: true, force: true });
+    } finally {
+      try {
+        await unlock?.();
+      } finally {
+        process.removeListener("SIGINT", stop);
+        process.removeListener("SIGTERM", stop);
+        lifeline?.removeListener("end", stop);
+        lifeline?.removeListener("error", stop);
+        lifeline?.pause();
+      }
+    }
   }
 }
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   if (args[0] === "--owned-process" && args[1]) return ownedProcess(args[1], args.slice(2));
-  if (args.length === 1 && ["--container", "--container-package"].includes(args[0])) return containerBuild(args[0] === "--container-package");
-  if (args.length === 1 && args[0] === "--help") {
-    console.log("usage: pnpm bundles:build\nBuild the current working tree's six Linux x64 executables.\nUses native cargo-zigbuild when available, otherwise a Linux container compiler.\nDocker or Podman runs the target binaries for packaging.\nOutput: target/development-bundles/x86_64-unknown-linux-musl/");
+  if (args.length === 2 && args[0] === "--container" && isLinuxBundleTarget(args[1])) return containerBuild(args[1]);
+  const { values } = parseArgs({ args, options: { target: { type: "string" }, "output-root": { type: "string" }, help: { type: "boolean" } } });
+  if (values.help) {
+    console.log("usage: pnpm bundles:build [--target x86_64-unknown-linux-musl|aarch64-unknown-linux-musl] [--output-root DIRECTORY]\nBuild the current working tree's Linux components and ctlup.\nUses host cargo-zigbuild when available, otherwise Docker or Podman.\nOutput: target/development-bundles/<target>/");
     return;
   }
-  if (args.length) throw new Error("usage: pnpm bundles:build");
-  await buildAgentBundle(resolve(dirname(fileURLToPath(import.meta.url)), "../.."));
+  const target = values.target ?? targetTriple;
+  if (!isLinuxBundleTarget(target)) throw new Error("Choose the x86_64-unknown-linux-musl or aarch64-unknown-linux-musl target");
+  if (values["output-root"] === "") throw new Error("The output root must name a directory");
+  await buildAgentBundle(resolve(dirname(fileURLToPath(import.meta.url)), "../.."), target, values["output-root"]);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {

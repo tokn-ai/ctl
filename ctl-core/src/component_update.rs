@@ -15,7 +15,8 @@ pub enum Package {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BundleChannel {
-  Dev,
+  #[serde(alias = "dev")]
+  Nightly,
   Stable,
 }
 
@@ -23,7 +24,7 @@ impl BundleChannel {
   #[must_use]
   pub const fn name(self) -> &'static str {
     match self {
-      Self::Dev => "dev",
+      Self::Nightly => "nightly",
       Self::Stable => "stable",
     }
   }
@@ -32,7 +33,7 @@ impl BundleChannel {
   pub const fn configured_default() -> Self {
     match env!("CTL_BUNDLE_CHANNEL").as_bytes() {
       b"stable" => Self::Stable,
-      _ => Self::Dev,
+      _ => Self::Nightly,
     }
   }
 }
@@ -51,6 +52,7 @@ pub enum BuildSource {
   Published {
     channel: BundleChannel,
   },
+  WorkingTree,
   Selected,
   Provided {
     path: PathBuf,
@@ -85,7 +87,7 @@ mod tests {
   fn update_source_defaults_to_automatic_and_channels_use_snake_case() {
     let options: UpdateOptions = serde_json::from_str("{}").unwrap();
     assert!(matches!(options.source, BuildSource::Automatic));
-    for channel in [BundleChannel::Dev, BundleChannel::Stable] {
+    for channel in [BundleChannel::Nightly, BundleChannel::Stable] {
       let value = serde_json::to_value(BuildSource::Published { channel }).unwrap();
       assert_eq!(value["kind"], "published");
       assert_eq!(value["channel"], channel.name());
@@ -93,6 +95,12 @@ mod tests {
         matches!(serde_json::from_value::<BuildSource>(value).unwrap(), BuildSource::Published { channel: decoded } if decoded == channel)
       );
     }
+    assert!(matches!(
+      serde_json::from_str::<BuildSource>(r#"{"kind":"published","channel":"dev"}"#).unwrap(),
+      BuildSource::Published {
+        channel: BundleChannel::Nightly
+      }
+    ));
     assert!(
       serde_json::from_str::<BuildSource>(r#"{"kind":"published","channel":"latest"}"#).is_err()
     );

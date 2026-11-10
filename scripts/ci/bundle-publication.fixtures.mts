@@ -1,15 +1,28 @@
 import { createHash } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { agentTargets } from "../shared/agent-bundle.mts";
 import { assembleAgentBundleSet } from "./assemble-agent-bundle-set.mts";
 import { archiveEntriesFixture, tarFixture } from "./agent-bundle.fixtures.mts";
-import type { Publication } from "./stage-bundle-pages.mts";
+import { parseBundleCatalog, type Publication } from "./stage-bundle-pages.mts";
 
-export function publicationFixture(run_number: number, channel: "dev" | "stable" = "dev", app_version = "0.1.0", git_revision = `${run_number.toString(16).padStart(12, "0")}${"a".repeat(28)}`): Publication {
+export function publicationFixture(run_number: number, channel: Publication["channel"] = "nightly", app_version = "0.1.0", git_revision = `${run_number.toString(16).padStart(12, "0")}${"a".repeat(28)}`): Publication {
   const bundle_id = channel === "stable" ? app_version : `${app_version}-dev.${git_revision.slice(0, 12)}`;
   const run_id = String(1000 + run_number);
   return { channel, app_version, bundle_id, git_revision, run_id, run_number, run_attempt: 1, publication_id: `${bundle_id}-${run_id}-1` };
+}
+
+export async function legacyPagesCatalog(directory: string, has_nightly_pointer: boolean): Promise<void> {
+  const path = join(directory, "bundles/catalog.json");
+  const catalog = parseBundleCatalog(await readFile(path));
+  for (const entry of catalog.publications) {
+    if (entry.channel === "nightly") entry.channel = "dev";
+  }
+  if (!has_nightly_pointer) {
+    delete catalog.channels.nightly;
+    await rm(join(directory, "bundles/channels/nightly.json"));
+  }
+  await writeFile(path, JSON.stringify(catalog));
 }
 
 export async function componentSetFixture(root: string, publication: Publication): Promise<string> {

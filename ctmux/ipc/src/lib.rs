@@ -58,15 +58,21 @@ pub fn local_control_offer() -> ProtocolOffer {
   )
 }
 
-#[must_use]
-pub fn local_control_protocol_info() -> ctl_core::component::ProtocolInfo {
-  ctl_core::component::ProtocolInfo::new(
+pub const LOCAL_CONTROL_CONTRACT: ctl_core::component::ProtocolContract =
+  ctl_core::component::ProtocolContract::new(
     "ctmux_control",
     LOCAL_CONTROL_PROTOCOL_BUILD,
     LOCAL_CONTROL_PROTOCOL_VERSION,
     LOCAL_CONTROL_SUPPORTED_PROTOCOL_VERSIONS,
-  )
+  );
+
+#[must_use]
+pub fn local_control_protocol_info() -> ctl_core::component::ProtocolInfo {
+  LOCAL_CONTROL_CONTRACT.info()
 }
+
+pub const COMPONENT_CONTRACTS: [ctl_core::component::ProtocolContract; 2] =
+  [ctmux_proto::CONTRACT, LOCAL_CONTROL_CONTRACT];
 
 #[must_use]
 pub fn socket_path() -> PathBuf {

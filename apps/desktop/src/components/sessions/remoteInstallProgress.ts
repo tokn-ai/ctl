@@ -4,6 +4,9 @@ import type { QuickInputMode } from "../commands/QuickInput";
 const STAGES: Record<RemoteAgentInstallProgress["phase"], string> = {
   detecting_platform: "Detecting remote operating system and architecture…",
   preparing_bundle: "Preparing component bundles…",
+  downloading_bundle: "Downloading components…",
+  building_bundle: "Building components…",
+  checking_bundle: "Verifying components…",
   verifying_bundle: "Verifying the bundled archive checksum…",
   connecting: "Opening the SSH transfer…",
   transferring: "Sending",
@@ -29,23 +32,24 @@ export function remoteInstallProgressMode(
 ): Extract<QuickInputMode, { kind: "progress" }> {
   const phase = state?.phase ?? "detecting_platform";
   const transferring = phase === "transferring";
+  const downloading = phase === "downloading_bundle";
   const file_name = state?.file_name;
   const total = state?.total_bytes ?? 0;
   const received = Math.min(total, Math.max(0, state?.transferred_bytes ?? 0));
-  const has_transfer = total > 0 && !["detecting_platform", "preparing_bundle", "verifying_bundle", "connecting"].includes(phase);
+  const has_transfer = total > 0 && (downloading || ["transferring", "extracting", "checking", "activating", "complete"].includes(phase));
   const message = file_name && ["transferring", "extracting", "checking"].includes(phase)
     ? `${STAGES[phase]} ${file_name}…`
-    : STAGES[phase];
+    : downloading && file_name ? `Downloading ${file_name}…` : STAGES[phase];
   return {
     kind: "progress",
     message,
     progress: {
-      label: "Remote component transfer",
+      label: downloading ? "Component download" : phase === "building_bundle" ? "Component build" : "Remote component transfer",
       max: Math.max(1, total),
       value: has_transfer ? received : undefined,
     },
     detail: has_transfer
-      ? `${formatBytes(received)} / ${formatBytes(total)} · ${Math.floor(received / total * 100)}%${transferring ? ` · ${formatBytes(state?.bytes_per_second ?? 0)}/s` : " · Transfer complete"}`
-      : file_name ?? undefined,
+      ? `${formatBytes(received)} / ${formatBytes(total)} · ${Math.floor(received / total * 100)}%${transferring ? ` · ${formatBytes(state?.bytes_per_second ?? 0)}/s` : downloading ? "" : " · Transfer complete"}`
+      : downloading ? state?.transferred_bytes ? formatBytes(state.transferred_bytes) : undefined : file_name ?? undefined,
   };
 }

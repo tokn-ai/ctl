@@ -166,9 +166,10 @@ pnpm bundles:build
 ```
 
 The result lives in `target/development-bundles/x86_64-unknown-linux-musl` and
-contains the four services plus the `ctl` and `ctmux` commands. Other remote targets follow the app's network
-channel. About and Update components can check the latest main publication or
-stable release; explicit channel choices bypass the working-tree build.
+contains the four services plus the `ctl` and `ctmux` commands. Other remote
+targets follow the app's network channel. About and Update components can check
+Nightly for the latest published `main` build or Stable for a release. Explicit
+channel choices bypass the working-tree build.
 `pnpm bundles:sync` remains an explicit CI-resource packaging/offline tool.
 
 The app may also use the path in `CTMUXD_BIN`. A saved host represents a named

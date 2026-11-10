@@ -24,7 +24,7 @@ const props = () => ({ visible: true, on_close: vi.fn(), on_restarted: vi.fn(), 
 beforeEach(() => {
   vi.clearAllMocks();
   api.bundles.mockResolvedValue({ bundles: [], errors: [] });
-  api.published.mockResolvedValue({ default_channel: "dev", local_development: false, catalog: null, error: null });
+  api.published.mockResolvedValue({ default_channel: "nightly", local_development: false, catalog: null, error: null });
   api.versions.mockResolvedValue(structuredClone(snapshot));
   api.preflight.mockResolvedValue(structuredClone(preflight));
   api.restart.mockResolvedValue({ component_id: "owner-1", running: current });

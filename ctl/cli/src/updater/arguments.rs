@@ -60,6 +60,10 @@ pub(super) enum Command {
 }
 
 #[derive(Debug, Args)]
+#[expect(
+  clippy::struct_excessive_bools,
+  reason = "clap parses independent command-line flags"
+)]
 pub(super) struct UpdateArguments {
   /// Saved host names or IDs; repeat or separate with commas.
   #[arg(long, value_delimiter = ',', num_args = 1..)]
@@ -68,11 +72,14 @@ pub(super) struct UpdateArguments {
   #[arg(long)]
   pub local: bool,
   /// Publication channel; remembered after a successful update.
-  #[arg(long, value_enum, conflicts_with = "from")]
+  #[arg(long, value_enum, conflicts_with_all = ["from", "working_tree"])]
   pub channel: Option<crate::components::Channel>,
   /// Complete build directory or archive for an explicit offline installation.
-  #[arg(long, conflicts_with = "channel")]
+  #[arg(long, conflicts_with_all = ["channel", "working_tree"])]
   pub from: Option<PathBuf>,
+  /// Cross-build a Linux x64 or ARM64 bundle from this checkout.
+  #[arg(long)]
+  pub working_tree: bool,
   /// Inspect and snapshot native binaries from --from.
   #[arg(long, requires = "from")]
   pub local_build: bool,
@@ -112,22 +119,41 @@ mod tests {
   use super::*;
 
   #[test]
+  fn the_legacy_dev_channel_selects_nightly() {
+    let args = Arguments::try_parse_from(["ctlup", "check", "--channel", "dev"]).unwrap();
+    assert!(matches!(
+      args.command,
+      Command::Check {
+        channel: Some(crate::components::Channel::Nightly),
+        ..
+      }
+    ));
+  }
+
+  #[test]
   fn install_and_update_share_one_explicit_source_and_target_surface() {
     for command in ["install", "update"] {
-      assert!(
-        Arguments::try_parse_from([
-          "ctlup",
-          command,
-          "--host",
-          "work",
-          "--channel",
-          "stable",
-          "--json"
-        ])
-        .is_ok()
-      );
+      for channel in ["dev", "nightly", "stable"] {
+        assert!(
+          Arguments::try_parse_from([
+            "ctlup",
+            command,
+            "--host",
+            "work",
+            "--channel",
+            channel,
+            "--json"
+          ])
+          .is_ok()
+        );
+      }
       assert!(
         Arguments::try_parse_from(["ctlup", command, "--channel", "dev", "--from", "/build"])
+          .is_err()
+      );
+      assert!(Arguments::try_parse_from(["ctlup", command, "--working-tree"]).is_ok());
+      assert!(
+        Arguments::try_parse_from(["ctlup", command, "--working-tree", "--channel", "dev"])
           .is_err()
       );
       assert!(Arguments::try_parse_from(["ctlup", command, "--package", "ctl-agent"]).is_err());

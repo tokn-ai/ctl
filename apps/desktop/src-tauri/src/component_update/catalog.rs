@@ -31,10 +31,10 @@ struct Cached {
 fn cache(channel: BundleChannel) -> &'static Mutex<Option<Cached>> {
   static CACHE: OnceLock<[Mutex<Option<Cached>>; 2]> = OnceLock::new();
   let index = match channel {
-    BundleChannel::Dev => 0,
+    BundleChannel::Nightly => 0,
     BundleChannel::Stable => 1,
   };
-  &CACHE.get_or_init(|| [Mutex::new(None), Mutex::new(None)])[index]
+  &CACHE.get_or_init(|| std::array::from_fn(|_| Mutex::new(None)))[index]
 }
 
 async fn snapshot(channel: BundleChannel, refresh: bool) -> CatalogSnapshot {

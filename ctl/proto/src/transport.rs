@@ -20,6 +20,13 @@ pub const PROTOCOL_BUILD: u16 = 1;
 pub const CONTRACT_V1_0_1: ProtocolVersion = ProtocolVersion::new(1, 0, 1);
 pub const PROTOCOL_VERSION: ProtocolVersion = CONTRACT_V1_0_1;
 pub const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[CONTRACT_V1_0_1];
+pub const CONTRACT: ctl_core::component::ProtocolContract =
+  ctl_core::component::ProtocolContract::new(
+    "ctl_transport",
+    PROTOCOL_BUILD,
+    PROTOCOL_VERSION,
+    SUPPORTED_PROTOCOL_VERSIONS,
+  );
 pub const PREFACE: &[u8] = b"ctl-service-transport\n";
 pub const MAX_STREAMS: usize = 64;
 pub const MAX_RECEIVE_BYTES: usize = 16 * 1024 * 1024;

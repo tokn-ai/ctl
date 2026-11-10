@@ -1,14 +1,12 @@
 //! The broker exposes errors before handing a dedicated socket to service bytes.
 
 use super::*;
-use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::task::{JoinHandle, JoinSet};
 
 pub(super) fn spawn(
   fixture: &Fixture,
-  observe: bool,
-  failure: &'static str,
+  failure: Option<&'static str>,
 ) -> JoinHandle<ctl_ipc::SshTarget> {
   let listener = UnixListener::bind(fixture.0.join("ctld.sock")).unwrap();
   let directory = fixture.0.clone();
@@ -16,10 +14,10 @@ pub(super) fn spawn(
     tokio::time::timeout(Duration::from_secs(20), async {
       let (mut control, _) = listener.accept().await.unwrap();
       handshake(&mut control).await;
-      let target = master(&mut control, &directory, observe).await;
-      if !observe {
+      let target = master(&mut control, &directory, failure.is_some()).await;
+      let Some(failure) = failure else {
         return target;
-      }
+      };
       let mut services = JoinSet::new();
       let mut count = 0;
       loop {
@@ -115,37 +113,13 @@ async fn service(
       if &target == expected && control_path == directory.join("master")
         && service == ctl_proto::transport::Service::Ctmux
   ));
-  if !directory.join("home/.tokn/ctl/current").exists() {
-    ctl_ipc::write_frame(
-      &mut stream,
-      &ServerMessage::Error {
-        code: failure.into(),
-        message: "The remote agent needs compatible shared SSH services.".into(),
-      },
-    )
-    .await
-    .unwrap();
-    return;
-  }
-  ctl_ipc::write_frame(&mut stream, &ServerMessage::ServiceOpened)
-    .await
-    .unwrap();
-  stream
-    .write_all(&fs::read(directory.join("upgraded-transport")).unwrap())
-    .await
-    .unwrap();
-  let mut input = Vec::new();
-  for _ in 0..3 {
-    let request: serde_json::Value = ctl_ipc::read_frame(&mut stream).await.unwrap().unwrap();
-    input.extend(frame(&request));
-  }
-  // Capture the complete request before the final response lets the CLI exit.
-  fs::write(directory.join("broker-service-input"), input).unwrap();
-  stream
-    .write_all(&fs::read(directory.join("session-list")).unwrap())
-    .await
-    .unwrap();
-  let mut remaining = Vec::new();
-  stream.read_to_end(&mut remaining).await.unwrap();
-  assert_eq!(remaining, [] as [u8; 0]);
+  ctl_ipc::write_frame(
+    &mut stream,
+    &ServerMessage::Error {
+      code: failure.into(),
+      message: "The remote agent needs compatible shared SSH services.".into(),
+    },
+  )
+  .await
+  .unwrap();
 }

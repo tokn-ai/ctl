@@ -19,6 +19,9 @@ mod updater;
 mod vpn;
 mod who;
 
+#[doc(hidden)]
+pub use component_info::CONTRACTS as COMPONENT_CONTRACTS;
+
 use clap::{Parser, Subcommand, ValueEnum};
 use ctl_task_cli::Command as TaskCommand;
 use ctmux_cli::Command as CtmuxCommand;

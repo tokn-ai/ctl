@@ -14,10 +14,10 @@ mod remote;
 mod tests;
 mod updater;
 pub use remote::{remote_rollback, remote_status};
-pub(crate) use updater::remember_supplied_updater;
 pub use updater::{
   provision_manager, provision_manager_from, updater_for_bundle, updater_for_manifest,
 };
+pub(crate) use updater::{provision_manager_bytes, remember_supplied_updater};
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -178,7 +178,23 @@ impl Drop for StagedBundle {
 #[serde(deny_unknown_fields)]
 struct Settings {
   schema_version: u16,
+  #[serde(serialize_with = "serialize_setting_channel")]
   channel: BundleChannel,
+}
+
+#[expect(
+  clippy::trivially_copy_pass_by_ref,
+  reason = "serde field serialization passes the value by reference"
+)]
+fn serialize_setting_channel<S: serde::Serializer>(
+  channel: &BundleChannel,
+  serializer: S,
+) -> Result<S::Ok, S::Error> {
+  // Retain the schema-1 spelling older updaters can read after a rollback.
+  serializer.serialize_str(match channel {
+    BundleChannel::Nightly => "dev",
+    BundleChannel::Stable => "stable",
+  })
 }
 
 /// The account's explicitly chosen channel, or the compiled distribution default.

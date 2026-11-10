@@ -138,19 +138,15 @@ fixture persists this ID in its `ctl_data` volume across container replacement.
 The fixed-command allowlist includes the identity flag without accepting arbitrary
 remote commands. See `docs/ctmux-workspace.md` for identity storage and migration.
 
-An interactive CLI connection to a Unix host with missing remote components or
-an old `ctl-ssh-v2` agent offers to install matching components and retry once.
-The CLI verifies a saved machine ID using the old agent's identity response
-before uploading; if that ID cannot be verified, repair stops. It reuses the
-selected authenticated SSH connection, including its VPN/gateway route. Piped
-commands and later reconnects never prompt or install automatically.
+When `ctl` recognizes a missing or outdated agent on a Unix host, it prints a
+`ctlup update` command. Run it from macOS or Linux, then reconnect. For a saved
+host, the updater uses the selected VPN or SSH gateway route and verifies the
+machine ID before uploading.
 
-Repair uses the same source policy as ordinary component updates. Development
-checkouts build Linux x64 bundles locally; other remote targets follow the
-client's development or stable publication channel. No pushed commit, GitHub
-CLI, or manual bundle sync is needed. `CTL_REMOTE_BUNDLES_DIR` is an explicit
-local source override. An older cached selection cannot override the channel,
-and network errors do not silently select an older build.
+`ctlup` resolves the configured Dev or Stable publication and verifies the
+matching runtime and updater for the target. Use `--working-tree` to build
+Linux x64 or ARM64 from a checkout. `CTL_REMOTE_BUNDLES_DIR` is an explicit
+local source override. Network errors do not silently select an older build.
 
 New schema-3 remote bundles contain `ctl-agent`, `ctmuxd`, `ctl-taskd`, `ctld`,
 `ctl`, and `ctmux`. Existing schema-2 bundles contain the four service binaries.
@@ -164,19 +160,19 @@ depends on advertised contracts, independently of source equality.
 Legacy schema-1 artifacts cannot become a complete managed selection.
 
 Publication and installation use private staging and atomic rename. Corrupt or
-incompatible published bundles stop repair. Use `ctlup update --from <directory>`
+incompatible published bundles stop the update. Use `ctlup update --from <directory>`
 for an explicit offline installation. The separate target updater sidecar must
 accompany foreign-target files. Remote bootstrap prepares `~/.tokn/ctl/bin/ctlup`,
 which uses the same installation engine as local updates.
 See [Components and updates](component-updates.md) for layout and local use.
 
 Upload progress shows the archive, received bytes, speed, and installation
-stage; a healthy transfer has no overall time limit. Ctrl-C cancels repair.
+stage. A healthy transfer has no overall time limit. Ctrl-C cancels the update.
 
 Installation selects `~/.tokn/ctl/current` without restarting running daemons or
 replacing a different existing bundle with the same ID. Existing old `rmux`
 sessions can keep running separately. If a running service still has an
-incompatible protocol after installation, the retried connection reports that
+incompatible protocol after installation, reconnecting reports that
 error; inspect its sessions before considering a disruptive restart.
 
 The app restores known sessions from disk and automatically attaches the last

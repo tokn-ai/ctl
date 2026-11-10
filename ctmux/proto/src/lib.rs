@@ -163,14 +163,17 @@ pub fn protocol_offer() -> ProtocolOffer {
   )
 }
 
-#[must_use]
-pub fn protocol_info() -> ctl_core::component::ProtocolInfo {
-  ctl_core::component::ProtocolInfo::new(
+pub const CONTRACT: ctl_core::component::ProtocolContract =
+  ctl_core::component::ProtocolContract::new(
     "ctmux",
     PROTOCOL_BUILD,
     PROTOCOL_VERSION,
     SUPPORTED_PROTOCOL_VERSIONS,
-  )
+  );
+
+#[must_use]
+pub fn protocol_info() -> ctl_core::component::ProtocolInfo {
+  CONTRACT.info()
 }
 pub const MAX_FRAME_SIZE: usize = 8 * 1024 * 1024;
 /// Default maximum raw terminal bytes sent beyond a renderer-applied cursor.

@@ -9,6 +9,7 @@ import { test, type TestContext } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { componentMapFixture } from "../ci/agent-bundle.fixtures.mts";
 import { agentComponents } from "../shared/agent-bundle.mts";
+import { readElfComponent } from "../shared/elf-component.mts";
 import { localManifest, packageLocalBundle, publishLocalBundle, runOwnedProcess, targetTriple, watchBuildLease } from "./build-agent-bundle.mts";
 
 async function directory(context: TestContext): Promise<string> {
@@ -18,6 +19,61 @@ async function directory(context: TestContext): Promise<string> {
 }
 
 const files = Object.fromEntries(agentComponents.map((name) => [name, { sha256: "a".repeat(64), executable: true }]));
+
+function elfFixture() {
+  const word = (value: number): Buffer => {
+    const bytes = Buffer.alloc(2);
+    bytes.writeUInt16LE(value);
+    return bytes;
+  };
+  const text = (value: string): Buffer => Buffer.concat([word(Buffer.byteLength(value)), Buffer.from(value)]);
+  const target = "aarch64-unknown-linux-musl";
+  const component = {
+    build: { version: "0.1.2", source_revision: "a".repeat(40), source_fingerprint: "b".repeat(64), dirty: true },
+    protocols: [{ name: "test", build: 2, version: "1.1.2", supported_versions: ["1.0.1", "1.1.2"] }],
+  };
+  const payload = Buffer.concat([
+    text("ctmux"), text(target), text(component.build.version), text(component.build.source_revision), text(component.build.source_fingerprint),
+    Buffer.from([1]), word(1),
+    text("test"), word(2), word(1), word(1), word(2), word(2),
+    word(1), word(0), word(1), word(1), word(1), word(2),
+  ]);
+  const size = Buffer.alloc(4);
+  size.writeUInt32LE(payload.length);
+  const record = Buffer.concat([Buffer.from("\0tokn-ctl-component\0\x01"), size, payload]);
+  const header = Buffer.alloc(120);
+  header.set([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1]);
+  header.writeUInt16LE(3, 16); // Static PIE.
+  header.writeUInt16LE(183, 18);
+  header.writeBigUInt64LE(64n, 32);
+  header.writeUInt16LE(56, 54);
+  header.writeUInt16LE(1, 56);
+  header.writeUInt32LE(1, 64); // Read-only PT_LOAD.
+  header.writeUInt32LE(4, 68);
+  header.writeBigUInt64LE(BigInt(header.length), 72);
+  header.writeBigUInt64LE(BigInt(record.length), 96);
+  return { header, record, target, component } as const;
+}
+
+test("ELF packaging reads the linked component and independently checks executable identity and architecture", () => {
+  const { header, record, target, component } = elfFixture();
+  const binary = Buffer.concat([header, record]);
+  assert.deepEqual(readElfComponent(binary, target, "ctmux"), component);
+  assert.throws(() => readElfComponent(binary, target, "ctmuxd"), /different executable or target/);
+  assert.throws(() => readElfComponent(binary, targetTriple, "ctmux"), /expected a Linux ELF executable/);
+});
+
+test("ELF packaging rejects a dynamic interpreter, detached metadata and duplicate records", () => {
+  const { header, record, target } = elfFixture();
+  const binary = () => Buffer.concat([header, record]);
+  header.writeUInt32LE(3, 64); // PT_INTERP.
+  assert.throws(() => readElfComponent(binary(), target, "ctmux"), /dynamic interpreter/);
+  header.writeUInt32LE(1, 64);
+  header.writeBigUInt64LE(0n, 96);
+  assert.throws(() => readElfComponent(binary(), target, "ctmux"), /no linked component metadata/);
+  header.writeBigUInt64LE(BigInt(record.length * 2), 96);
+  assert.throws(() => readElfComponent(Buffer.concat([header, record, record]), target, "ctmux"), /exactly one embedded component record/);
+});
 
 test("local bundles retain dirty source identity and use canonical Rust manifest field order", () => {
   const components = componentMapFixture();

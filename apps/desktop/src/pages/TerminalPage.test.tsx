@@ -220,7 +220,7 @@ function hostSnapshot(): HostCatalogSnapshot {
 beforeEach(() => {
   vi.clearAllMocks();
   api.getComponentVersions.mockResolvedValue({ components: [] });
-  api.checkComponentUpdates.mockResolvedValue({ default_channel: "dev", local_development: false, catalog: null, error: null });
+  api.checkComponentUpdates.mockResolvedValue({ default_channel: "nightly", local_development: false, catalog: null, error: null });
   attachment.state.phase = "idle";
   attachment.state.error_code = null;
   attachment.state.message = null;

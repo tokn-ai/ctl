@@ -15,7 +15,10 @@ fn shared_progress(progress: Progress) -> Option<RemoteInstallProgress> {
   Some(RemoteInstallProgress {
     phase: match progress.phase {
       Phase::DetectingPlatform => RemoteInstallPhase::DetectingPlatform,
-      Phase::PreparingBundle => return None,
+      Phase::PreparingBundle
+      | Phase::DownloadingBundle
+      | Phase::BuildingBundle
+      | Phase::CheckingBundle => return None,
       Phase::VerifyingBundle => RemoteInstallPhase::VerifyingBundle,
       Phase::Connecting => RemoteInstallPhase::Connecting,
       Phase::Transferring => RemoteInstallPhase::Transferring,
@@ -66,6 +69,24 @@ pub(super) fn desktop_progress(progress: RemoteInstallProgress) -> Progress {
     transferred_bytes: progress.transferred_bytes,
     total_bytes: progress.total_bytes,
     bytes_per_second: progress.bytes_per_second,
+  }
+}
+
+pub(crate) fn preparation_progress(
+  progress: ctl_client::component_update::PreparationProgress,
+) -> Progress {
+  use ctl_client::component_update::PreparationPhase;
+  Progress {
+    phase: match progress.phase {
+      PreparationPhase::Resolving => Phase::PreparingBundle,
+      PreparationPhase::Downloading => Phase::DownloadingBundle,
+      PreparationPhase::Building => Phase::BuildingBundle,
+      PreparationPhase::Verifying => Phase::CheckingBundle,
+    },
+    file_name: Some(progress.detail),
+    transferred_bytes: progress.received_bytes,
+    total_bytes: progress.total_bytes,
+    bytes_per_second: 0,
   }
 }
 

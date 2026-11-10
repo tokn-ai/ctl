@@ -161,10 +161,7 @@ fn run_main() {
 }
 
 fn print_component_info() {
-  let metadata = ctl_core::component::ComponentInfo {
-    build: ctl_core::component::build_info(),
-    protocols: ctl_ipc::lifecycle::DaemonBinaryInfo::current().protocols,
-  };
+  let metadata = ctl_core::embedded_component_info!("ctld", &ctl_ipc::lifecycle::DAEMON_CONTRACTS);
   println!(
     "{}",
     serde_json::to_string(&metadata).expect("component metadata")

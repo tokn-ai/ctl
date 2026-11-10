@@ -9,6 +9,94 @@ pub use ctl_core::component_update::{
   BuildSource, BundleChannel, Package, UpdateOptions, UpdateResult,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreparationPhase {
+  Resolving,
+  Building,
+  Downloading,
+  Verifying,
+}
+
+#[derive(Debug, Clone)]
+pub struct PreparationProgress {
+  pub phase: PreparationPhase,
+  pub detail: String,
+  pub received_bytes: u64,
+  pub total_bytes: u64,
+}
+
+impl std::fmt::Display for PreparationProgress {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.write_str(&self.detail)
+  }
+}
+
+fn preparation(phase: PreparationPhase, detail: impl Into<String>) -> PreparationProgress {
+  PreparationProgress {
+    phase,
+    detail: detail.into(),
+    received_bytes: 0,
+    total_bytes: 0,
+  }
+}
+
+/// A verified runtime and the exact updater selected during preparation.
+pub struct PreparedUpdate {
+  pub bundle: Bundle,
+  updater: Option<Vec<u8>>,
+  remote_archive: Option<Vec<u8>>,
+}
+
+/// Prepare artifacts before starting the remote installation watchdog.
+/// # Errors
+/// Reports source discovery, compilation, verification and packaging failures.
+pub async fn prepare_update(
+  home: &Path,
+  target: &str,
+  purpose: Purpose,
+  source: &BuildSource,
+  included: &[PathBuf],
+  on_progress: impl Fn(PreparationProgress) + Send + Sync,
+) -> io::Result<PreparedUpdate> {
+  on_progress(preparation(
+    PreparationPhase::Resolving,
+    "Resolving component bundle",
+  ));
+  let (bundle, mut updater) =
+    prepare_source(home, target, purpose, source, included, &on_progress).await?;
+  verify_source(&bundle.manifest, target, purpose)?;
+  let remote_archive = if purpose == Purpose::Upload {
+    if updater.is_none() {
+      on_progress(preparation(
+        PreparationPhase::Resolving,
+        "Resolving the target updater",
+      ));
+      updater = Some(crate::installation::updater_for_bundle(home, &bundle).await?);
+    }
+    on_progress(preparation(
+      PreparationPhase::Verifying,
+      "Verifying and preparing the SSH archive",
+    ));
+    let snapshot = bundle.clone();
+    Some(
+      tokio::task::spawn_blocking(move || {
+        crate::components::upload_bundle(&snapshot)
+          .map(|upload| upload.archive)
+          .map_err(io::Error::other)
+      })
+      .await
+      .map_err(io::Error::other)??,
+    )
+  } else {
+    None
+  };
+  Ok(PreparedUpdate {
+    bundle,
+    updater,
+    remote_archive,
+  })
+}
+
 /// Resolves the requested source without replacing running services. Automatic
 /// sources use current development output or a fresh named publication. Explicit
 /// Selected sources use included offline resources without consulting old pins.
@@ -16,14 +104,15 @@ pub use ctl_core::component_update::{
 ///
 /// # Errors
 /// Rejects wrong-target, incomplete, corrupt or incompatible builds.
-pub async fn prepare(
+#[cfg(test)]
+async fn prepare(
   home: &Path,
   target: &str,
   purpose: Purpose,
   source: &BuildSource,
   included: &[PathBuf],
 ) -> io::Result<Bundle> {
-  let bundle = prepare_source(home, target, purpose, source, included).await?;
+  let (bundle, _) = prepare_source(home, target, purpose, source, included, &|_| {}).await?;
   verify_source(&bundle.manifest, target, purpose)?;
   Ok(bundle)
 }
@@ -34,21 +123,52 @@ async fn prepare_source(
   purpose: Purpose,
   source: &BuildSource,
   included: &[PathBuf],
-) -> io::Result<Bundle> {
+  on_progress: &(impl Fn(PreparationProgress) + Send + Sync),
+) -> io::Result<(Bundle, Option<Vec<u8>>)> {
+  let published_target = publisher_target(target, purpose);
+  let working_tree = matches!(source, BuildSource::WorkingTree)
+    || (matches!(source, BuildSource::Automatic)
+      && published_target == "x86_64-unknown-linux-musl"
+      && development_workspace().is_some());
+  if working_tree {
+    if !matches!(
+      published_target.as_ref(),
+      "x86_64-unknown-linux-musl" | "aarch64-unknown-linux-musl"
+    ) {
+      return Err(invalid(
+        "working-tree bundles require a Linux x64 or ARM64 SSH target; use ctlup dev for native builds",
+      ));
+    }
+    let caller_workspace = || {
+      std::env::current_dir()
+        .ok()?
+        .ancestors()
+        .find(|root| root.join("scripts/dev/build-agent-bundle.mts").is_file())
+        .map(Path::to_owned)
+    };
+    let workspace = if matches!(source, BuildSource::WorkingTree) {
+      caller_workspace().or_else(development_workspace)
+    } else {
+      development_workspace()
+    }
+    .ok_or_else(|| invalid("run the working-tree update from a ctl source checkout"))?;
+    return development_build(
+      home,
+      published_target.as_ref(),
+      purpose,
+      &workspace,
+      on_progress,
+    )
+    .await;
+  }
   if matches!(source, BuildSource::Automatic)
     && (purpose == Purpose::Upload || !target.ends_with("-apple-darwin"))
   {
-    let published_target = publisher_target(target, purpose);
-    let target = published_target.as_ref();
-    if target == "x86_64-unknown-linux-musl"
-      && let Some(workspace) = development_workspace()
-    {
-      return development_build(home, target, purpose, &workspace).await;
-    }
-    return published_build(home, target, crate::installation::default_channel(home)?).await;
+    let channel = crate::installation::default_channel(home)?;
+    return published_build(home, published_target.as_ref(), channel, on_progress).await;
   }
   if let BuildSource::Published { channel } = source {
-    return published_build(home, publisher_target(target, purpose).as_ref(), *channel).await;
+    return published_build(home, published_target.as_ref(), *channel, on_progress).await;
   }
   if let BuildSource::Provided {
     path,
@@ -61,8 +181,18 @@ async fn prepare_source(
         "native build files cannot be uploaded to another target",
       ));
     }
-    return crate::components::import_local(home, path, ctld_package.as_deref()).await;
+    on_progress(preparation(
+      PreparationPhase::Verifying,
+      "Verifying the native build",
+    ));
+    return crate::components::import_local(home, path, ctld_package.as_deref())
+      .await
+      .map(|bundle| (bundle, None));
   }
+  on_progress(preparation(
+    PreparationPhase::Verifying,
+    "Verifying the requested component bundle",
+  ));
   let home = home.to_owned();
   let target = target.to_owned();
   let source = source.clone();
@@ -80,12 +210,12 @@ async fn prepare_source(
       }
       BuildSource::Selected => included_build(&home, &included, &target, purpose)?,
       BuildSource::Provided { path, .. } => provided_build(&home, &path, &target, purpose)?,
-      BuildSource::Published { .. } => {
-        unreachable!("published sources resolved before filesystem preparation")
+      BuildSource::Published { .. } | BuildSource::WorkingTree => {
+        unreachable!("published and working-tree sources resolved before filesystem preparation")
       }
     };
     verify_source(&bundle.manifest, &target, purpose)?;
-    Ok(bundle)
+    Ok((bundle, None))
   })
   .await
   .map_err(io::Error::other)?
@@ -115,7 +245,13 @@ async fn development_build(
   target: &str,
   purpose: Purpose,
   workspace: &Path,
-) -> io::Result<Bundle> {
+  on_progress: &(impl Fn(PreparationProgress) + Send + Sync),
+) -> io::Result<(Bundle, Option<Vec<u8>>)> {
+  on_progress(preparation(
+    PreparationPhase::Building,
+    format!("Building {target} from the working tree"),
+  ));
+  let output = crate::development::OutputDirectory::new()?;
   let mut command = tokio::process::Command::new("node");
   command
     .args([
@@ -123,35 +259,67 @@ async fn development_build(
       "--disable-warning=ExperimentalWarning",
     ])
     .arg(workspace.join("scripts/dev/build-agent-bundle.mts"))
+    .args(["--target", target])
+    .arg("--output-root")
+    .arg(&output.0)
+    .env("CARGO_TERM_COLOR", "never")
     .current_dir(workspace);
-  run_development_builder(command).await?;
-  let path = workspace.join("target/development-bundles/x86_64-unknown-linux-musl");
+  run_development_builder(command, on_progress).await?;
+  let path = output.0.join(target);
+  let updater_path = output.0.join("updaters").join(target);
+  on_progress(preparation(
+    PreparationPhase::Verifying,
+    "Verifying the working-tree runtime and updater",
+  ));
   let home = home.to_owned();
   let target = target.to_owned();
-  tokio::task::spawn_blocking(move || provided_build(&home, &path, &target, purpose))
-    .await
-    .map_err(io::Error::other)?
+  tokio::task::spawn_blocking(move || {
+    let bundle = provided_build(&home, &path, &target, purpose)?;
+    let updater = crate::remote_bundle::published::read_updater(&updater_path, &target)
+      .map_err(io::Error::other)?;
+    let build = &bundle.manifest.components["ctl-agent"].build;
+    if updater.info.app_version != build.version
+      || Some(updater.info.git_revision.as_str()) != build.source_revision.as_deref()
+    {
+      return Err(invalid(
+        "working-tree updater differs from the runtime build",
+      ));
+    }
+    Ok((bundle, Some(updater.bytes)))
+  })
+  .await
+  .map_err(io::Error::other)?
 }
 
 const MAX_BUILD_DIAGNOSTIC_BYTES: usize = 32 * 1024;
 
-async fn run_development_builder(mut command: tokio::process::Command) -> io::Result<()> {
+async fn run_development_builder(
+  mut command: tokio::process::Command,
+  on_progress: &(impl Fn(PreparationProgress) + Send + Sync),
+) -> io::Result<()> {
   command
-    .stdin(std::process::Stdio::null())
+    .stdin(std::process::Stdio::piped())
     // The builder prints its output directory. Keep --json stdout exclusively
     // for the caller's structured result while progress remains on stderr.
     .stdout(std::process::Stdio::null())
     .stderr(std::process::Stdio::piped())
-    .kill_on_drop(true);
-  let mut child = command.spawn().map_err(|error| io::Error::other(format!(
-    "Could not start the development component builder (Node 24 and Docker or Podman are required): {error}"
-  )))?;
+    .env("CTLUP_BUNDLE_BUILD_LIFELINE", "1");
+  let mut child = command.spawn().map_err(|error| {
+    io::Error::other(format!(
+      "Could not start the development component builder (Node 24 is required): {error}"
+    ))
+  })?;
+  // Closing stdin on cancellation lets the script stop its owned processes.
+  let _lifeline = child.stdin.take();
   let reader = child
     .stderr
     .take()
     .ok_or_else(|| io::Error::other("development builder has no diagnostic stream"))?;
   let mut sink = tokio::io::stderr();
-  let (status, diagnostics) = tokio::join!(child.wait(), build_diagnostics(reader, &mut sink));
+  let (status, diagnostics) = tokio::join!(
+    child.wait(),
+    build_diagnostics(reader, &mut sink, on_progress)
+  );
   let status = status?;
   let diagnostics = diagnostics?;
   if !status.success() {
@@ -166,16 +334,35 @@ async fn run_development_builder(mut command: tokio::process::Command) -> io::Re
 async fn build_diagnostics(
   mut reader: impl tokio::io::AsyncRead + Unpin,
   sink: &mut (impl tokio::io::AsyncWrite + Unpin),
+  on_progress: &(impl Fn(PreparationProgress) + Send + Sync),
 ) -> io::Result<String> {
   use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
   let mut tail = Vec::new();
   let mut chunk = [0; 4096];
+  let mut line = Vec::new();
   loop {
     let count = reader.read(&mut chunk).await?;
     if count == 0 {
       break;
     }
     let _displayed = sink.write_all(&chunk[..count]).await;
+    for &byte in &chunk[..count] {
+      if matches!(byte, b'\n' | b'\r') {
+        let text = String::from_utf8_lossy(&line);
+        let text = text.trim();
+        if let Some(detail) = text.strip_prefix("ctl: ").or_else(|| {
+          ["Compiling ", "Finished "]
+            .iter()
+            .any(|prefix| text.starts_with(prefix))
+            .then(|| text.split(" (").next().unwrap_or(text))
+        }) {
+          on_progress(preparation(PreparationPhase::Building, detail));
+        }
+        line.clear();
+      } else if line.len() < 256 {
+        line.push(byte);
+      }
+    }
     tail.extend_from_slice(&chunk[..count]);
     if tail.len() > MAX_BUILD_DIAGNOSTIC_BYTES {
       tail.drain(..tail.len() - MAX_BUILD_DIAGNOSTIC_BYTES);
@@ -184,11 +371,30 @@ async fn build_diagnostics(
   Ok(String::from_utf8_lossy(&tail).into_owned())
 }
 
-async fn published_build(home: &Path, target: &str, channel: BundleChannel) -> io::Result<Bundle> {
-  let bundle = crate::remote_bundle::published::download_cached(
+async fn published_build(
+  home: &Path,
+  target: &str,
+  channel: BundleChannel,
+  on_progress: &(impl Fn(PreparationProgress) + Send + Sync),
+) -> io::Result<(Bundle, Option<Vec<u8>>)> {
+  use crate::remote_bundle::published::DownloadArtifact;
+  let (bundle, updater) = crate::remote_bundle::published::download_installation_cached(
     channel,
     target,
     &home.join(".tokn/ctl/cache/downloads"),
+    &home.join(".tokn/ctl/cache/updaters"),
+    |progress| {
+      let artifact = match progress.artifact {
+        DownloadArtifact::Runtime => "Runtime bundle",
+        DownloadArtifact::Updater => "ctlup",
+      };
+      on_progress(PreparationProgress {
+        phase: PreparationPhase::Downloading,
+        detail: format!("{artifact} for {target}"),
+        received_bytes: progress.received_bytes,
+        total_bytes: progress.total_bytes,
+      });
+    },
   )
   .await
   .map_err(io::Error::other)?;
@@ -199,6 +405,10 @@ async fn published_build(home: &Path, target: &str, channel: BundleChannel) -> i
   };
   let home = home.to_owned();
   let target = target.to_owned();
+  on_progress(preparation(
+    PreparationPhase::Verifying,
+    "Verifying the published installation",
+  ));
   // Import only this identified publication. Never read or mutate the upload
   // profile: channel freshness must not be replaced by a sticky old selection.
   tokio::task::spawn_blocking(move || {
@@ -207,7 +417,7 @@ async fn published_build(home: &Path, target: &str, channel: BundleChannel) -> i
     if let Err(error) = crate::installation::prune_caches(&home) {
       eprintln!("ctlup: cache cleanup deferred: {error}");
     }
-    Ok(imported)
+    Ok((imported, Some(updater.bytes)))
   })
   .await
   .map_err(io::Error::other)?
@@ -409,6 +619,33 @@ pub async fn install_local(
   Ok(result(bundle, package))
 }
 
+/// Install the local runtime and updater selected in preparation.
+/// # Errors
+/// Reports invalid signing, an incompatible platform or failed activation.
+pub async fn install_prepared_local(
+  home: &Path,
+  prepared: PreparedUpdate,
+  package: Package,
+) -> io::Result<UpdateResult> {
+  let PreparedUpdate {
+    bundle, updater, ..
+  } = prepared;
+  let Some(updater) = updater else {
+    return install_local(home, &bundle, package).await;
+  };
+  if package != Package::FullBundle
+    || !ctl_core::bundles::local_target(&bundle.manifest.target_triple)
+  {
+    return Err(invalid(
+      "local installation requires a complete native build",
+    ));
+  }
+  crate::components::verify_local(home, &bundle).await?;
+  crate::installation::provision_manager_bytes(home, updater).await?;
+  let _installation = activate_local(home, &bundle).await?;
+  Ok(result(&bundle, package))
+}
+
 /// Install a verified native cohort using its freshly built independent manager.
 ///
 /// # Errors
@@ -427,6 +664,13 @@ pub(crate) async fn install_local_with_manager(
   } else {
     crate::installation::provision_manager(home, bundle).await?;
   }
+  activate_local(home, bundle).await
+}
+
+async fn activate_local(
+  home: &Path,
+  bundle: &Bundle,
+) -> io::Result<(Bundle, ctl_core::installations::Lease)> {
   let account = home.to_owned();
   let snapshot = bundle.clone();
   let installed = tokio::task::spawn_blocking(move || {
@@ -469,11 +713,11 @@ pub fn agent_matches(
 ///
 /// # Errors
 /// Rejects changed bytes, unsupported targets or failed remote activation.
-pub async fn install_remote(
+pub async fn install_prepared_remote(
   destination: &str,
   options: &crate::SshConnectionOptions,
   interaction: &crate::SshInteraction,
-  bundle: &Bundle,
+  prepared: &PreparedUpdate,
   package: Package,
   on_progress: impl Fn(crate::RemoteInstallProgress) + Send + Sync,
 ) -> Result<UpdateResult, crate::CoreError> {
@@ -485,19 +729,14 @@ pub async fn install_remote(
       "agent-only overlays are no longer installed; use a complete ctlup update",
     )));
   }
-  require_shared_services(&bundle.manifest).map_err(invalid)?;
+  let bundle = &prepared.bundle;
   let home =
     dirs::home_dir().ok_or_else(|| invalid(invalid_data("home directory is unavailable")))?;
-  let updater = crate::installation::updater_for_bundle(&home, bundle)
-    .await
-    .map_err(invalid)?;
-  let snapshot = bundle.clone();
-  let archive = tokio::task::spawn_blocking(move || {
-    crate::components::upload_bundle(&snapshot).map(|upload| upload.archive)
-  })
-  .await
-  .map_err(|error| invalid(io::Error::other(error)))?
-  .map_err(invalid)?;
+  let (Some(updater), Some(archive)) = (&prepared.updater, &prepared.remote_archive) else {
+    return Err(invalid(invalid_data(
+      "prepare a remote component update before installing",
+    )));
+  };
   let transferred = AtomicU64::new(0);
   on_progress(RemoteInstallProgress {
     phase: Phase::Connecting,
@@ -506,6 +745,27 @@ pub async fn install_remote(
   });
   let report = |event| {
     let (phase, file_name) = match event {
+      Event::SendingUpdater {
+        sent_bytes,
+        total_bytes,
+      } => {
+        on_progress(RemoteInstallProgress {
+          phase: Phase::Transferring,
+          file_name: Some("ctlup".into()),
+          transferred_bytes: sent_bytes,
+          total_bytes,
+          bytes_per_second: 0,
+        });
+        return;
+      }
+      Event::CheckingUpdater => {
+        on_progress(RemoteInstallProgress {
+          phase: Phase::Checking,
+          file_name: Some("ctlup".into()),
+          ..RemoteInstallProgress::default()
+        });
+        return;
+      }
       Event::Receiving { received_bytes } => {
         transferred.store(received_bytes, Ordering::Relaxed);
         (Phase::Transferring, None)
@@ -533,9 +793,9 @@ pub async fn install_remote(
       destination,
       options,
       interaction,
-      &updater,
+      updater,
       id,
-      &archive,
+      archive,
       report,
     )
     .await?;

@@ -1,10 +1,13 @@
 name: Desktop, control daemon, and remote-agent bundles
+run-name: >-
+  ${{ github.ref == 'refs/heads/main' && 'Nightly bundles' || startsWith(github.ref, 'refs/tags/v') && 'Release bundles' || 'Dev bundles' }}
+  for ${{ github.ref_name }}
 
 on:
   workflow_dispatch:
     inputs:
       build_desktop:
-        description: Build desktop packages (main updates a draft; tags append published release assets)
+        description: Build desktop packages (turn off for a remote-only Dev artifact from a PR branch)
         required: true
         default: true
         type: boolean
@@ -27,7 +30,8 @@ env:
   CARGO_TARGET_DIR: ${{ github.workspace }}/target
   # First execution of an Intel executable on an ARM Mac may need Rosetta startup.
   CTL_COMPONENT_PROBE_TIMEOUT_MS: "30000"
-  CTL_BUNDLE_CHANNEL: ${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') && 'stable' || 'dev' }}
+  # Default published feed used by the built clients, including Dev previews.
+  CTL_BUNDLE_CHANNEL: ${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') && 'stable' || 'nightly' }}
 
 jobs:
   metadata:
@@ -276,7 +280,7 @@ jobs:
       - name: Stage complete site and channel pointers
         id: stage
         env:
-          PUBLICATION_CHANNEL: ${{ startsWith(github.ref, 'refs/tags/v') && 'stable' || 'dev' }}
+          PUBLICATION_CHANNEL: ${{ startsWith(github.ref, 'refs/tags/v') && 'stable' || 'nightly' }}
         run: >-
           node scripts/ci/stage-bundle-pages.mts
           "$PUBLICATION_CHANNEL"

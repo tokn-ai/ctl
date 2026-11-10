@@ -10,7 +10,7 @@ fn retryable(error: &CtlConnectError) -> bool {
     caller_auth: None,
     target: ctl_client::ConnectionTarget::ssh("work"),
     settings: ctl_client::hosts::ConnectionTargetDto::ssh("work"),
-    recovery: std::sync::Arc::default(),
+    update_command: None,
     terminal_ui_active: std::sync::Arc::default(),
     #[cfg(unix)]
     recovery_watch: std::sync::Arc::default(),
@@ -78,20 +78,22 @@ fn remote_vpn_security_and_protocol_failures_stop_reconnecting() {
 }
 
 #[test]
-fn initial_repair_wrapper_preserves_transport_retry_classification() {
+fn transport_and_update_errors_keep_distinct_retry_policies() {
   for kind in [ErrorKind::TimedOut, ErrorKind::ConnectionReset] {
-    assert!(retryable(&CtlConnectError::Repair(
-      crate::remote::Error::Core(ctl_client::CoreError::RemoteIdentity(kind.into())),
+    assert!(retryable(&CtlConnectError::Core(
+      ctl_client::CoreError::RemoteIdentity(kind.into()),
     )));
   }
-  assert!(!retryable(&CtlConnectError::Repair(
-    crate::remote::Error::Core(ctl_client::CoreError::RemoteIdentity(
-      ErrorKind::InvalidData.into(),
-    )),
+  assert!(!retryable(&CtlConnectError::Core(
+    ctl_client::CoreError::RemoteIdentity(ErrorKind::InvalidData.into()),
   )));
-  assert!(!retryable(&CtlConnectError::Repair(
-    crate::remote::Error::Cancelled,
-  )));
+  let update = crate::remote::update_required(
+    &ctl_client::CoreError::AgentNotFound,
+    ctl_client::RemotePlatform::Unix,
+    None,
+  )
+  .unwrap();
+  assert!(!retryable(&CtlConnectError::from(update)));
 }
 
 #[cfg(unix)]

@@ -377,21 +377,23 @@ between the gateway, task daemon, ctmux daemon, and ctld VPN broker. Agent and t
 metadata includes their consumed companion contracts; running daemon diagnostics
 continue to describe the actual owner serving a connection. Reuse never restarts
 that owner. Schema-1 bundles lack compatibility advertisements and remain eligible
-only for the exact clean client revision. Network updates resolve an explicitly
-named development or stable publication channel instead of inferring a matching
-source build. A development checkout can also build a dirty Linux x64 working
-tree locally. Existing bundle-set schema 2 and managed complete-bundle schema 1
-retain their shapes. Local dirty builds use the managed schema directly; public
-CI/release bundles remain clean.
+only for the exact clean client revision. Network updates resolve a Nightly or
+Stable publication. Temporary PR builds are selected by artifact. A development
+checkout can also build a dirty Linux x64 or ARM64 working tree locally. Existing
+bundle-set schema 2 and managed complete-bundle schema 1 retain their shapes.
+Local dirty builds use the managed schema directly. CI and release bundles use
+clean source revisions.
 
 Distribution discovery adds channel-document schema 1, independently of the
 named IPC contracts and product release versions. It contains `schema_version`,
-`channel` (`dev` or `stable`), and an absolute `bundle_set_url` under the configured
-GitHub Pages bundle root. The referenced existing schema-2 bundle set names
-sibling target archives and their component metadata. Unknown schemas, changed
-channel identities, unsafe URLs, incompatible targets and corrupt archives are
-rejected before installation. This discovery format does not change any named
-service contract, internal protocol build, SSH framing or daemon negotiation.
+`channel` (`nightly` or `stable`), and an absolute `bundle_set_url` under the
+configured GitHub Pages bundle root. The bundle set names sibling target archives
+and their component metadata. The updater rejects unknown schemas, unexpected
+channel identities, unsafe URLs, incompatible targets and corrupt archives
+before installation. During rollout, the legacy `dev.json` keeps its `dev`
+identity and points to the same immutable set as Nightly. New clients can use it
+if the Nightly pointer returns HTTP 404. The named service contracts, internal
+protocol builds, SSH framing and daemon negotiation remain unchanged.
 
 ## Discovery and SSH framing
 

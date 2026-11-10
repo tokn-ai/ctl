@@ -3,6 +3,7 @@ pub mod forwarding;
 mod identity_contract;
 pub mod maintenance;
 pub mod transport;
+use ctl_core::component::{ProtocolContract, ProtocolInfo};
 use ctl_core::protocol::{ProtocolOffer, ProtocolVersion};
 pub use identity_contract::{
   IdentitySelection, accept_identity_contract, accept_identity_contract_with_client,
@@ -75,34 +76,34 @@ pub fn identity_protocol_offer() -> ProtocolOffer {
 }
 
 /// Protocol contracts implemented by this agent build, independent of release version.
+pub const AGENT_CONTRACTS: [ProtocolContract; 4] = [
+  ProtocolContract::new(
+    "ctl_identity",
+    IDENTITY_PROTOCOL_BUILD,
+    IDENTITY_PROTOCOL_VERSION,
+    IDENTITY_SUPPORTED_PROTOCOL_VERSIONS,
+  ),
+  ProtocolContract::new(
+    "ctl_maintenance",
+    maintenance::PROTOCOL_BUILD,
+    maintenance::PROTOCOL_VERSION,
+    maintenance::SUPPORTED_PROTOCOL_VERSIONS,
+  ),
+  ProtocolContract::new(
+    "ctl_forwarding",
+    forwarding::PROTOCOL_BUILD,
+    forwarding::PROTOCOL_VERSION,
+    forwarding::SUPPORTED_PROTOCOL_VERSIONS,
+  ),
+  transport::CONTRACT,
+];
+
 #[must_use]
-pub fn agent_protocols() -> Vec<ctl_core::component::ProtocolInfo> {
-  vec![
-    ctl_core::component::ProtocolInfo::new(
-      "ctl_identity",
-      IDENTITY_PROTOCOL_BUILD,
-      IDENTITY_PROTOCOL_VERSION,
-      IDENTITY_SUPPORTED_PROTOCOL_VERSIONS,
-    ),
-    ctl_core::component::ProtocolInfo::new(
-      "ctl_maintenance",
-      maintenance::PROTOCOL_BUILD,
-      maintenance::PROTOCOL_VERSION,
-      maintenance::SUPPORTED_PROTOCOL_VERSIONS,
-    ),
-    ctl_core::component::ProtocolInfo::new(
-      "ctl_forwarding",
-      forwarding::PROTOCOL_BUILD,
-      forwarding::PROTOCOL_VERSION,
-      forwarding::SUPPORTED_PROTOCOL_VERSIONS,
-    ),
-    ctl_core::component::ProtocolInfo::new(
-      "ctl_transport",
-      transport::PROTOCOL_BUILD,
-      transport::PROTOCOL_VERSION,
-      transport::SUPPORTED_PROTOCOL_VERSIONS,
-    ),
-  ]
+pub fn agent_protocols() -> Vec<ProtocolInfo> {
+  AGENT_CONTRACTS
+    .into_iter()
+    .map(ProtocolContract::info)
+    .collect()
 }
 
 /// Stable identity of a remote user's ctl environment, independent of its address.

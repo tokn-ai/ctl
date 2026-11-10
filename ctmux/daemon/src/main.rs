@@ -37,13 +37,7 @@ struct Arguments {
 fn main() {
   let arguments = Arguments::parse();
   if arguments.component_info {
-    let info = ctl_core::component::ComponentInfo {
-      build: ctl_core::component::build_info(),
-      protocols: vec![
-        ctmux_proto::protocol_info(),
-        ctmux_ipc::local_control_protocol_info(),
-      ],
-    };
+    let info = ctl_core::embedded_component_info!("ctmuxd", &ctmux_ipc::COMPONENT_CONTRACTS);
     println!(
       "{}",
       serde_json::to_string(&info).expect("component metadata serializes")

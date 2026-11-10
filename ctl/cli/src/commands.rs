@@ -187,14 +187,16 @@ async fn run_on_target(mut arguments: Arguments) -> Result<i32, CliError> {
   }
   let mut connector = CtlConnector::new(target, settings);
   connector.caller_auth = caller_auth;
-  let operation = run_selected(arguments.command, &connector, platform);
-  tokio::select! {
-    result = operation => result,
-    interrupted = connector.recovery.interrupt() => {
-      interrupted.map_err(CliError::Interrupt)?;
-      Err(CliError::RepairCancelled)
-    }
+  // The updater can reproduce a saved route or an OpenSSH alias. It cannot
+  // reproduce temporary SSH account and port overrides supplied to ctl.
+  if arguments.user.is_none() && arguments.port.is_none() {
+    connector.update_command = crate::remote::update_command(
+      arguments.host.as_deref(),
+      arguments.destination.as_deref(),
+      arguments.method.as_deref(),
+    );
   }
+  run_selected(arguments.command, &connector, platform).await
 }
 
 async fn run_selected(
@@ -309,7 +311,7 @@ struct CtlConnector {
   caller_auth: Option<Arc<crate::caller_auth::CallerAuth>>,
   target: ConnectionTarget,
   settings: ctl_client::hosts::ConnectionTargetDto,
-  recovery: Arc<crate::remote::Recovery>,
+  update_command: Option<String>,
   terminal_ui_active: Arc<AtomicBool>,
   #[cfg(unix)]
   recovery_watch: Arc<ctl_client::recovery::RecoveryClient>,
@@ -355,7 +357,7 @@ impl CtlConnector {
       caller_auth: None,
       target,
       settings,
-      recovery: Arc::default(),
+      update_command: None,
       terminal_ui_active: Arc::default(),
       #[cfg(unix)]
       recovery_watch: Arc::default(),
@@ -376,37 +378,23 @@ impl CtlConnector {
     else {
       return Ok(None);
     };
-    // Repair may be offered only during the initial connection. Reconnects and
-    // interactive task attachments share the same state and never prompt again.
     if self.caller_auth.is_some() {
       return ctl_client::open_identified_ssh_service(destination, options, interaction, service)
         .await
         .map(Some)
         .map_err(Into::into);
     }
-    let stream = self
-      .recovery
-      .connect(
-        || ctl_client::open_identified_ssh_service(destination, options, interaction, service),
-        |error| async move {
-          if crate::remote::offer_repair(
+    let stream =
+      ctl_client::open_identified_ssh_service(destination, options, interaction, service)
+        .await
+        .map_err(|error| {
+          crate::remote::update_required(
             &error,
-            destination,
-            options,
-            interaction,
-            service,
-            &self.settings,
-            &self.recovery,
+            options.remote_platform,
+            self.update_command.as_deref(),
           )
-          .await?
-          {
-            Ok(())
-          } else {
-            Err(CtlConnectError::from(error))
-          }
-        },
-      )
-      .await?;
+          .map_or_else(|| CtlConnectError::from(error), CtlConnectError::from)
+        })?;
     let identity = stream.remote_identity.as_ref().ok_or_else(|| {
       ctl_client::hosts::HostError::new(
         "identity_missing",
@@ -421,7 +409,7 @@ impl CtlConnector {
     Self {
       caller_auth: self.caller_auth.clone(),
       settings: self.settings.clone(),
-      recovery: Arc::clone(&self.recovery),
+      update_command: self.update_command.clone(),
       terminal_ui_active: Arc::clone(&self.terminal_ui_active),
       #[cfg(unix)]
       recovery_watch: Arc::clone(&self.recovery_watch),
@@ -610,7 +598,7 @@ async fn ssh_interaction(
 #[derive(Debug, Error)]
 enum CtlConnectError {
   #[error(transparent)]
-  Repair(#[from] crate::remote::Error),
+  UpdateRequired(#[from] crate::remote::UpdateRequired),
   #[error(transparent)]
   Host(#[from] ctl_client::hosts::HostError),
   #[error(transparent)]
@@ -642,10 +630,6 @@ pub enum CliError {
   ComponentsTarget,
   #[error("Component maintenance failed: {0}")]
   Components(std::io::Error),
-  #[error("Remote repair cancelled.")]
-  RepairCancelled,
-  #[error("Could not listen for cancellation: {0}")]
-  Interrupt(std::io::Error),
   #[error(transparent)]
   Setup(#[from] ctl_client::setup::Error),
   #[error(
@@ -1119,7 +1103,7 @@ mod tests {
       caller_auth: None,
       target: target.clone(),
       settings: ctl_client::hosts::ConnectionTargetDto::ssh("task-server"),
-      recovery: Arc::default(),
+      update_command: Some("ctlup update --host='task-server'".into()),
       terminal_ui_active: Arc::default(),
       #[cfg(unix)]
       recovery_watch: Arc::default(),
@@ -1128,7 +1112,12 @@ mod tests {
     };
     let attachment = connector.for_interactive_session(PathBuf::from("/remote/ctmux.sock"));
     assert_eq!(attachment.target, target);
-    assert!(Arc::ptr_eq(&attachment.recovery, &connector.recovery));
+    assert_eq!(attachment.update_command, connector.update_command);
+    #[cfg(unix)]
+    assert!(Arc::ptr_eq(
+      &attachment.recovery_watch,
+      &connector.recovery_watch
+    ));
     #[cfg(unix)]
     assert!(Arc::ptr_eq(&attachment.broker, &connector.broker));
   }
@@ -1138,7 +1127,7 @@ mod tests {
     let connector = CtlConnector {
       caller_auth: None,
       settings: ctl_client::hosts::ConnectionTargetDto::Local,
-      recovery: Arc::default(),
+      update_command: None,
       terminal_ui_active: Arc::default(),
       #[cfg(unix)]
       recovery_watch: Arc::default(),

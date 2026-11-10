@@ -7,8 +7,8 @@ import { PublishedBundleStatus } from "./PublishedBundleStatus";
 
 vi.mock("../../lib/tauri", () => ({ checkComponentUpdates: vi.fn() }));
 const available: ComponentUpdateCatalog = {
-  default_channel: "dev", local_development: false, error: null,
-  catalog: { channel: "dev", app_version: "0.1.0", bundle_id: "0.1.0-dev.abcdef123456", git_revision: "abcdef123456", targets: [{ target_triple: "x86_64-unknown-linux-musl", compatible: true, components: {} }] },
+  default_channel: "nightly", local_development: false, error: null,
+  catalog: { channel: "nightly", app_version: "0.1.0", bundle_id: "0.1.0-dev.abcdef123456", git_revision: "abcdef123456", targets: [{ target_triple: "x86_64-unknown-linux-musl", compatible: true, components: {} }] },
 };
 beforeEach(() => { vi.resetAllMocks(); vi.mocked(checkComponentUpdates).mockResolvedValue(available); });
 afterEach(cleanup);
@@ -23,7 +23,7 @@ it("checks only when visible and refreshes publication metadata explicitly", asy
   fireEvent.click(screen.getByRole("button", { name: "Check for bundle updates" }));
   await waitFor(() => expect(checkComponentUpdates).toHaveBeenLastCalledWith(undefined, true));
   fireEvent.click(await screen.findByRole("button", { name: "Install published bundle…" }));
-  expect(on_update).toHaveBeenCalledWith("dev");
+  expect(on_update).toHaveBeenCalledWith("nightly");
 });
 
 it("keeps a failed check distinct from an available publication", async () => {
@@ -34,12 +34,21 @@ it("keeps a failed check distinct from an available publication", async () => {
   expect(screen.queryByText("0.1.0-dev.abcdef123456")).toBeNull();
 });
 
+it("labels a Nightly publication and preserves that channel when opening installation", async () => {
+  const on_update = vi.fn();
+  render(<PublishedBundleStatus channel="nightly" on_update={on_update} />);
+  expect((await screen.findByRole("status")).textContent).toContain("Published nightly bundle");
+  expect(checkComponentUpdates).toHaveBeenCalledWith("nightly", false);
+  fireEvent.click(screen.getByRole("button", { name: "Install published bundle…" }));
+  expect(on_update).toHaveBeenCalledExactlyOnceWith("nightly");
+});
+
 it("ignores an old channel response after the channel changes", async () => {
   let finish!: (value: ComponentUpdateCatalog) => void;
   vi.mocked(checkComponentUpdates).mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
   const stable: ComponentUpdateCatalog = { ...available, catalog: { ...available.catalog!, channel: "stable", bundle_id: "0.2.0", app_version: "0.2.0" } };
   vi.mocked(checkComponentUpdates).mockResolvedValueOnce(stable);
-  const page = render(<PublishedBundleStatus channel="dev" />);
+  const page = render(<PublishedBundleStatus channel="nightly" />);
   page.rerender(<PublishedBundleStatus channel="stable" />);
   expect(await screen.findByText("0.2.0")).toBeTruthy();
   await act(async () => finish(available));

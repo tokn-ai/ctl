@@ -784,7 +784,7 @@ async fn terminal_fixture() {
       socket_path: socket.into(),
     },
     settings: ctl_client::hosts::ConnectionTargetDto::ssh("fixture"),
-    recovery: Arc::default(),
+    update_command: None,
     terminal_ui_active: Arc::default(),
     #[cfg(unix)]
     recovery_watch: Arc::default(),

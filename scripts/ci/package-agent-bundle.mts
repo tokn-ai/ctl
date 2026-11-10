@@ -7,7 +7,7 @@ import { promisify } from "node:util";
 import { addAgentPayloadBytes, agentComponents, agentTargets, archiveName, inspectAgentArchive, parseAgentComponents, readAgentFile, validateAgentIdentity,
   type AgentBundleIdentity, type AgentBundleManifest, type AgentComponentMap } from "../shared/agent-bundle.mts";
 import { maxComponentMetadata } from "../shared/protocol-contract.mts";
-import { probeComponent } from "../shared/component-probe.mts";
+import { probeBundledComponent } from "../shared/component-probe.mts";
 
 const execute = promisify(execFile);
 export type AgentProcessRunner = (command: string, args: string[]) => Promise<{ stdout: string; stderr: string }>;
@@ -20,7 +20,7 @@ export interface AgentBundleOptions extends AgentBundleIdentity {
 export async function packageAgentBundle(options: AgentBundleOptions, run: AgentProcessRunner = (command, args) => {
   const env = { ...process.env, COPYFILE_DISABLE: "1" };
   return args[0] === "--component-info"
-    ? probeComponent(command, args, { env, target: options.target })
+    ? probeBundledComponent(command, args, { env, target: options.target })
     : execute(command, args, { maxBuffer: 1024 * 1024, env });
 }): Promise<AgentBundleManifest> {
   validateAgentIdentity(options);

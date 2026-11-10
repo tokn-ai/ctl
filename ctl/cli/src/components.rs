@@ -6,8 +6,6 @@ use std::path::PathBuf;
 
 mod maintenance;
 #[cfg(unix)]
-pub(crate) use crate::updater::source_with_bundle_override;
-#[cfg(unix)]
 pub use crate::updater::update::UpdatePackage;
 
 #[derive(Clone, Copy)]

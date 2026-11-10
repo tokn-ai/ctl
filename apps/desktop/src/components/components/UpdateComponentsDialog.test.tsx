@@ -82,6 +82,12 @@ it("binds authentication responses to the active host attempt and reports transf
   await user.type(await screen.findByLabelText("SSH response"), "test secret{Enter}");
   const attempt = vi.mocked(updateComponents).mock.calls[0][0].attempt_id;
   expect(respondSshPrompt).toHaveBeenCalledWith(`${attempt}:1`, "password", "test secret");
+  act(() => report({ host_index: 1, state: "updating", progress: { phase: "downloading_bundle", file_name: "ctlup", transferred_bytes: 1024, total_bytes: 4096, bytes_per_second: 0 } }));
+  expect(screen.getByText("Downloading ctlup…")).toBeTruthy();
+  expect(screen.getByRole("progressbar", { name: "Component download" }).getAttribute("value")).toBe("1024");
+  act(() => report({ host_index: 1, state: "updating", progress: { phase: "building_bundle", file_name: "Compiling ctl-agent v0.1.2", transferred_bytes: 0, total_bytes: 0, bytes_per_second: 0 } }));
+  expect(screen.getByText("Compiling ctl-agent v0.1.2")).toBeTruthy();
+  expect(screen.getByRole("progressbar", { name: "Component build" }).hasAttribute("value")).toBe(false);
   act(() => report({ host_index: 1, state: "updating", progress: { phase: "transferring", file_name: "ctl-agent", transferred_bytes: 2048, total_bytes: 8192, bytes_per_second: 1024 } }));
   expect(screen.getByRole("progressbar").getAttribute("value")).toBe("2048");
   expect(screen.getByText("2 KiB / 8 KiB · 25% · 1 KiB/s")).toBeTruthy();

@@ -1133,6 +1133,21 @@ async fn prepare_ssh_base_arguments(
   options: &SshConnectionOptions,
   interaction: &SshInteraction,
 ) -> Result<Vec<OsString>, CoreError> {
+  prepare_ssh_base_arguments_with(
+    destination,
+    options,
+    interaction,
+    ctl_ipc::prepare_proxy_command,
+  )
+  .await
+}
+
+async fn prepare_ssh_base_arguments_with(
+  destination: &str,
+  options: &SshConnectionOptions,
+  interaction: &SshInteraction,
+  prepare_proxy: impl AsyncFnOnce(&[ctl_ipc::SshGateway]) -> Result<String, ctl_ipc::ConnectError>,
+) -> Result<Vec<OsString>, CoreError> {
   let fresh_route = !matches!(
     interaction,
     SshInteraction::Multiplexed { .. } | SshInteraction::Brokered { .. }
@@ -1148,7 +1163,7 @@ async fn prepare_ssh_base_arguments(
       .iter()
       .map(SshGateway::to_ipc)
       .collect::<Vec<_>>();
-    Some(ctl_ipc::prepare_proxy_command(&gateways).await?)
+    Some(prepare_proxy(&gateways).await?)
   } else {
     None
   };
@@ -1308,6 +1323,15 @@ mod tests {
   use super::*;
   use tokio::io::AsyncWriteExt;
 
+  async fn fixture_proxy_command(
+    gateways: &[ctl_ipc::SshGateway],
+  ) -> Result<String, ctl_ipc::ConnectError> {
+    Ok(ctl_ipc::proxy_command_with_executable(
+      gateways,
+      std::path::Path::new("ctld-fixture"),
+    ))
+  }
+
   #[tokio::test]
   async fn ssh_command_uses_a_fixed_remote_command_and_disables_forwarding() {
     assert_eq!(
@@ -1372,9 +1396,14 @@ mod tests {
       ],
       ..SshConnectionOptions::default()
     };
-    let args = prepare_ssh_base_arguments("target.internal", &options, &SshInteraction::Inherit)
-      .await
-      .unwrap();
+    let args = prepare_ssh_base_arguments_with(
+      "target.internal",
+      &options,
+      &SshInteraction::Inherit,
+      fixture_proxy_command,
+    )
+    .await
+    .unwrap();
     let proxy = args
       .iter()
       .find(|arg| arg.to_string_lossy().starts_with("ProxyCommand="))
@@ -1425,9 +1454,14 @@ mod tests {
       ..SshConnectionOptions::default()
     };
     assert!(validate_ssh_target("target", &options).is_ok());
-    let args = prepare_ssh_base_arguments("target", &options, &SshInteraction::Inherit)
-      .await
-      .unwrap();
+    let args = prepare_ssh_base_arguments_with(
+      "target",
+      &options,
+      &SshInteraction::Inherit,
+      fixture_proxy_command,
+    )
+    .await
+    .unwrap();
     assert!(args.iter().any(|arg| arg == "ControlPath=none"));
     assert!(
       args

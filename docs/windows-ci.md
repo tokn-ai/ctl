@@ -244,8 +244,8 @@ interactive attachment opens the ordinary ctmux channel on the same target.
 The native SSH fixture exercises both services and both destination selectors.
 
 Windows SSH targets need `ctl-agent.exe` and the relevant companion executables
-installed on the server's `PATH`. Daemon auto-start is supported after installation;
-automatic remote component installation and repair currently target Unix hosts.
+installed on the server's `PATH`. Daemon auto-start is supported after installation.
+Bundle updates use `ctlup` on macOS or Linux and support Unix targets.
 
 `ctl-agent` uses the shared IPC stream and only the data endpoint. Its installed
 companion is `ctmuxd.exe` on Windows. Startup requests both `DETACHED_PROCESS`

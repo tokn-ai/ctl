@@ -1,30 +1,20 @@
-use ctl_core::component::{ComponentInfo, ProtocolInfo};
+use ctl_core::component::{ComponentInfo, ProtocolContract};
 use std::io::{self, Write as _};
 
 /// Contracts consumed by this executable, from the same definitions used in negotiation.
+pub const CONTRACTS: [ProtocolContract; 12] = ProtocolContract::join(&[
+  &ctl_proto::AGENT_CONTRACTS,
+  &ctl_ipc::lifecycle::DAEMON_CORE_CONTRACTS,
+  &ctmux_ipc::COMPONENT_CONTRACTS,
+  &[
+    ctl_task_proto::CONTRACT,
+    ctl_task_proto::control::CONTRACT,
+    ctl_ipc::remote_vpn::CONTRACT,
+  ],
+]);
+
 pub fn print() -> io::Result<()> {
-  let mut protocols = ctl_proto::agent_protocols();
-  for protocol in ctl_ipc::lifecycle::DaemonBinaryInfo::current().protocols {
-    if !protocols.contains(&protocol) {
-      protocols.push(protocol);
-    }
-  }
-  protocols.extend([
-    ctmux_proto::protocol_info(),
-    ctmux_ipc::local_control_protocol_info(),
-    ctl_task_proto::protocol_info(),
-    ctl_task_proto::control::protocol_info(),
-    ProtocolInfo::new(
-      "ctl_remote_vpn",
-      ctl_ipc::remote_vpn::PROTOCOL_BUILD,
-      ctl_ipc::remote_vpn::PROTOCOL_VERSION,
-      ctl_ipc::remote_vpn::SUPPORTED_PROTOCOL_VERSIONS,
-    ),
-  ]);
-  let component = ComponentInfo {
-    build: ctl_core::component::build_info(),
-    protocols,
-  };
+  let component = ComponentInfo::from_contracts(&CONTRACTS);
   let mut output = io::stdout().lock();
   serde_json::to_writer(&mut output, &component)?;
   writeln!(output)

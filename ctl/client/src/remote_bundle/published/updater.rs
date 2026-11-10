@@ -1,6 +1,6 @@
 //! The updater is distributed separately so runtime rollback never replaces it.
 
-use super::{BundleChannel, Error, Resolver};
+use super::{AssetProgress, BundleChannel, Error, Publication, Resolver, report_progress};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::io::{self, Write as _};
@@ -66,13 +66,18 @@ impl UpdaterInfo {
   }
 
   pub(crate) fn verify(&self, bytes: Vec<u8>) -> Result<VerifiedUpdater, Error> {
-    if bytes.len() as u64 != self.size || format!("{:x}", Sha256::digest(&bytes)) != self.sha256 {
-      return Err(Error::Invalid("updater size or checksum mismatch".into()));
-    }
+    self.verify_bytes(&bytes)?;
     Ok(VerifiedUpdater {
       info: self.clone(),
       bytes,
     })
+  }
+
+  fn verify_bytes(&self, bytes: &[u8]) -> Result<(), Error> {
+    if bytes.len() as u64 != self.size || format!("{:x}", Sha256::digest(bytes)) != self.sha256 {
+      return Err(Error::Invalid("updater size or checksum mismatch".into()));
+    }
+    Ok(())
   }
 }
 
@@ -103,41 +108,85 @@ pub async fn download_updater_cached(
 ) -> Result<VerifiedUpdater, Error> {
   let resolver = Resolver::production()?;
   let publication = resolver.publication(channel).await?;
-  let url = publication
-    .url
-    .join(&format!("ctlup-{target}.json"))
-    .map_err(|error| Error::Invalid(error.to_string()))?;
-  let metadata = resolver.read(&url, super::MAX_BUNDLE_SET_BYTES).await?;
-  let info = UpdaterInfo::parse(&metadata, target)?;
-  if info.app_version != publication.manifest.app_version
-    || info.bundle_id != publication.manifest.bundle_id
-    || info.git_revision != publication.manifest.git_revision
-  {
-    return Err(Error::Invalid(
-      "updater differs from its immutable publication".into(),
-    ));
-  }
-  if let Some(verified) = read_cached_updater(cache_root, &info)? {
-    return Ok(verified);
-  }
-  let binary_url = publication
-    .url
-    .join(&info.binary)
-    .map_err(|error| Error::Invalid(error.to_string()))?;
-  let verified = info.verify(resolver.read(&binary_url, super::MAX_BUNDLE_BYTES).await?)?;
-  let root = cache_root.to_owned();
-  let snapshot = verified.clone();
-  tokio::task::spawn_blocking(move || cache_verified(&root, &snapshot))
+  resolver
+    .updater_cached(&publication, target, cache_root, None)
+    .await
+}
+
+impl Resolver {
+  pub(super) async fn updater_cached(
+    &self,
+    publication: &Publication,
+    target: &str,
+    cache_root: &Path,
+    progress: AssetProgress<'_>,
+  ) -> Result<VerifiedUpdater, Error> {
+    report_progress(progress, 0, 0);
+    let url = publication
+      .url
+      .join(&format!("ctlup-{target}.json"))
+      .map_err(|error| Error::Invalid(error.to_string()))?;
+    let metadata = self
+      .read(&url, 16 * 1024)
+      .await
+      .map_err(|error| missing_updater(error, publication, target, "metadata"))?;
+    let info = UpdaterInfo::parse(&metadata, target)?;
+    if info.app_version != publication.manifest.app_version
+      || info.bundle_id != publication.manifest.bundle_id
+      || info.git_revision != publication.manifest.git_revision
+    {
+      return Err(Error::Invalid(
+        "updater differs from its immutable publication".into(),
+      ));
+    }
+    let root = cache_root.to_owned();
+    let read_root = root.clone();
+    let read_info = info.clone();
+    if let Some(verified) =
+      tokio::task::spawn_blocking(move || read_cached_updater(&read_root, &read_info))
+        .await
+        .map_err(|error| Error::Io(io::Error::other(error)))??
+    {
+      report_progress(progress, info.size, info.size);
+      return Ok(verified);
+    }
+    let binary_url = publication
+      .url
+      .join(&info.binary)
+      .map_err(|error| Error::Invalid(error.to_string()))?;
+    let maximum = usize::try_from(info.size)
+      .map_err(|_| Error::Invalid("updater exceeds its size limit on this platform".into()))?;
+    let bytes = self
+      .read_with_progress(&binary_url, maximum, Some(info.size), progress)
+      .await
+      .map_err(|error| missing_updater(error, publication, target, "executable"))?;
+    let verified = tokio::task::spawn_blocking(move || {
+      let verified = info.verify(bytes)?;
+      cache_verified(&root, &verified)?;
+      Ok::<_, Error>(verified)
+    })
     .await
     .map_err(|error| Error::Io(io::Error::other(error)))??;
-  Ok(verified)
+    report_progress(progress, verified.info.size, verified.info.size);
+    Ok(verified)
+  }
+}
+
+fn missing_updater(error: Error, publication: &Publication, target: &str, asset: &str) -> Error {
+  if matches!(error, Error::NotAvailable(_)) {
+    return Error::NotAvailable(format!(
+      "publication {} has no ctlup {asset} for {target}",
+      publication.manifest.bundle_id,
+    ));
+  }
+  error
 }
 
 pub(crate) fn cache_verified(root: &Path, updater: &VerifiedUpdater) -> Result<(), Error> {
   let encoded =
     serde_json::to_vec(&updater.info).map_err(|error| Error::Invalid(error.to_string()))?;
   let info = UpdaterInfo::parse(&encoded, &updater.info.target_triple)?;
-  info.verify(updater.bytes.clone())?;
+  info.verify_bytes(&updater.bytes)?;
   crate::installation::safe_directory(root)?;
   let _lock = CacheLock::acquire(root)?;
   if read_cached_updater(root, &updater.info)?.is_some() {

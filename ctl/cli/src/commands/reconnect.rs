@@ -7,9 +7,7 @@ use super::CtlConnectError;
 
 pub(super) fn is_retryable(error: &CtlConnectError) -> bool {
   match error {
-    CtlConnectError::Core(error) | CtlConnectError::Repair(crate::remote::Error::Core(error)) => {
-      ctl_client::is_retryable_connection_error(error)
-    }
+    CtlConnectError::Core(error) => ctl_client::is_retryable_connection_error(error),
     CtlConnectError::Target(error) => target_is_retryable(error),
     #[cfg(unix)]
     CtlConnectError::Broker(error) => broker_is_retryable(error),

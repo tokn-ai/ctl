@@ -2,7 +2,7 @@
 //! Lifecycle frames are independent of the SSH/VPN protocol so a newer client
 //! can inspect an older data protocol without submitting an SSH or VPN request.
 
-use ctl_core::component::{ComponentBuildInfo, ComponentInfo, ProtocolInfo};
+use ctl_core::component::{ComponentBuildInfo, ComponentInfo, ProtocolContract, ProtocolInfo};
 use ctl_core::protocol::{ProtocolOffer, ProtocolVersion};
 use serde::{Deserialize, Serialize};
 use std::io;
@@ -14,6 +14,29 @@ pub const PROTOCOL_BUILD: u16 = 1;
 pub const CONTRACT_V1_0_1: ProtocolVersion = ProtocolVersion::new(1, 0, 1);
 pub const PROTOCOL_VERSION: ProtocolVersion = CONTRACT_V1_0_1;
 pub const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[CONTRACT_V1_0_1];
+pub const CTLD_CONTRACT: ProtocolContract = ProtocolContract::new(
+  "ctld",
+  crate::PROTOCOL_BUILD,
+  crate::PROTOCOL_VERSION,
+  crate::SUPPORTED_PROTOCOL_VERSIONS,
+);
+pub const DAEMON_CORE_CONTRACTS: [ProtocolContract; 3] = [
+  CTLD_CONTRACT,
+  ProtocolContract::new(
+    "ctld_lifecycle",
+    PROTOCOL_BUILD,
+    PROTOCOL_VERSION,
+    SUPPORTED_PROTOCOL_VERSIONS,
+  ),
+  ProtocolContract::new(
+    "ctld_helper",
+    crate::HELPER_API_BUILD,
+    crate::HELPER_API_VERSION,
+    crate::SUPPORTED_HELPER_API_VERSIONS,
+  ),
+];
+pub const DAEMON_CONTRACTS: [ProtocolContract; 4] =
+  ProtocolContract::join(&[&DAEMON_CORE_CONTRACTS, &[ctl_proto::transport::CONTRACT]]);
 
 #[must_use]
 pub fn protocol_offer() -> ProtocolOffer {
@@ -41,32 +64,10 @@ impl DaemonBinaryInfo {
       build: ctl_core::component::build_info(),
       protocol_version: crate::PROTOCOL_VERSION,
       lifecycle_protocol_version: PROTOCOL_VERSION,
-      protocols: vec![
-        ProtocolInfo::new(
-          "ctld",
-          crate::PROTOCOL_BUILD,
-          crate::PROTOCOL_VERSION,
-          crate::SUPPORTED_PROTOCOL_VERSIONS,
-        ),
-        ProtocolInfo::new(
-          "ctld_lifecycle",
-          PROTOCOL_BUILD,
-          PROTOCOL_VERSION,
-          SUPPORTED_PROTOCOL_VERSIONS,
-        ),
-        ProtocolInfo::new(
-          "ctld_helper",
-          crate::HELPER_API_BUILD,
-          crate::HELPER_API_VERSION,
-          crate::SUPPORTED_HELPER_API_VERSIONS,
-        ),
-        ProtocolInfo::new(
-          "ctl_transport",
-          ctl_proto::transport::PROTOCOL_BUILD,
-          ctl_proto::transport::PROTOCOL_VERSION,
-          ctl_proto::transport::SUPPORTED_PROTOCOL_VERSIONS,
-        ),
-      ],
+      protocols: DAEMON_CONTRACTS
+        .into_iter()
+        .map(ProtocolContract::info)
+        .collect(),
     }
   }
 

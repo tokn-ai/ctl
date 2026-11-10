@@ -21,6 +21,13 @@ pub const CONTRACT_V1_0_1: ProtocolVersion = ProtocolVersion::new(1, 0, 1);
 pub const CONTRACT_V1_1_2: ProtocolVersion = ProtocolVersion::new(1, 1, 2);
 pub const PROTOCOL_VERSION: ProtocolVersion = CONTRACT_V1_1_2;
 pub const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[CONTRACT_V1_0_1, CONTRACT_V1_1_2];
+pub const CONTRACT: ctl_core::component::ProtocolContract =
+  ctl_core::component::ProtocolContract::new(
+    "ctl_remote_vpn",
+    PROTOCOL_BUILD,
+    PROTOCOL_VERSION,
+    SUPPORTED_PROTOCOL_VERSIONS,
+  );
 /// Stable framing marker; the published contract is negotiated separately.
 pub const PREFACE: &[u8] = b"ctl-vpn\n";
 const REMOTE_COMMAND: &str = concat!(

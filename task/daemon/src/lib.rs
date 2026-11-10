@@ -34,17 +34,15 @@ const MAX_LOG_BYTES_PER_RUN: usize = 4 * 1024 * 1024;
 
 /// Build identity and contracts implemented or consumed by this task daemon.
 /// Companion entries describe the contracts this executable can use.
+pub const COMPONENT_CONTRACTS: [ctl_core::component::ProtocolContract; 4] =
+  ctl_core::component::ProtocolContract::join(&[
+    &[ctl_task_proto::CONTRACT, ctl_task_proto::control::CONTRACT],
+    &ctmux_ipc::COMPONENT_CONTRACTS,
+  ]);
+
 #[must_use]
 pub fn component_info() -> ctl_core::component::ComponentInfo {
-  ctl_core::component::ComponentInfo {
-    build: ctl_core::component::build_info(),
-    protocols: vec![
-      ctl_task_proto::protocol_info(),
-      ctl_task_proto::control::protocol_info(),
-      ctmux_proto::protocol_info(),
-      ctmux_ipc::local_control_protocol_info(),
-    ],
-  }
+  ctl_core::component::ComponentInfo::from_contracts(&COMPONENT_CONTRACTS)
 }
 
 #[derive(Debug, Clone)]

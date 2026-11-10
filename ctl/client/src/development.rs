@@ -171,10 +171,10 @@ fn read_output(output: &Path) -> io::Result<BuildOutput> {
   Ok(descriptor)
 }
 
-struct OutputDirectory(PathBuf);
+pub(crate) struct OutputDirectory(pub(crate) PathBuf);
 
 impl OutputDirectory {
-  fn new() -> io::Result<Self> {
+  pub(crate) fn new() -> io::Result<Self> {
     let directory =
       std::env::temp_dir().join(format!("ctlup-development-{}", uuid::Uuid::new_v4()));
     std::fs::DirBuilder::new().mode(0o700).create(&directory)?;

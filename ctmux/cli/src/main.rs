@@ -43,13 +43,7 @@ async fn main() {
 
 async fn run(arguments: Arguments) -> ctmux_tui::Result<()> {
   if arguments.component_info {
-    let info = ctl_core::component::ComponentInfo {
-      build: ctl_core::component::build_info(),
-      protocols: vec![
-        ctmux_proto::protocol_info(),
-        ctmux_ipc::local_control_protocol_info(),
-      ],
-    };
+    let info = ctl_core::embedded_component_info!("ctmux", &ctmux_ipc::COMPONENT_CONTRACTS);
     println!("{}", serde_json::to_string(&info)?);
     return Ok(());
   }

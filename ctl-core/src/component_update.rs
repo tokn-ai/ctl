@@ -51,6 +51,7 @@ pub enum BuildSource {
   Published {
     channel: BundleChannel,
   },
+  WorkingTree,
   Selected,
   Provided {
     path: PathBuf,

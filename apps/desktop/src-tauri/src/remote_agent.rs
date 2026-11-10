@@ -9,13 +9,12 @@ use ctl_core::component::ComponentBuildInfo;
 use tauri::{AppHandle, Manager as _, path::BaseDirectory};
 use tokio::sync::watch;
 
-use crate::dto::{
-  RemoteAgentInstallPhase as Phase, RemoteAgentInstallProgressDto as Progress,
-  RemoteAgentInstallResultDto,
-};
+use crate::dto::{RemoteAgentInstallProgressDto as Progress, RemoteAgentInstallResultDto};
 use crate::error::{CommandErrorDto, CommandResult};
 
 mod progress;
+#[cfg(unix)]
+pub(crate) use progress::preparation_progress;
 
 pub(crate) struct Installation {
   pub version: RemoteAgentInstallResultDto,
@@ -55,48 +54,24 @@ async fn install_bundle(
     .map_err(|error| CommandErrorDto::new("remote_platform_probe_failed", error.to_string()))?;
   let platform = parse_platform(&platform)?;
   let target_triple = platform.target_triple().map_err(bundle_error)?;
-  updates.send_modify(|progress| {
-    progress.phase = Phase::PreparingBundle;
-    progress.file_name = Some(
-      match &update.source {
-        ctl_core::component_update::BuildSource::Automatic
-          if target_triple == "x86_64-unknown-linux-musl"
-            && ctl_client::component_update::working_tree_available() =>
-        {
-          "Building Linux x64 components from this working tree"
-        }
-        ctl_core::component_update::BuildSource::Automatic
-        | ctl_core::component_update::BuildSource::Published { .. } => {
-          "Preparing published component bundles"
-        }
-        _ => "Verifying the requested component build",
-      }
-      .into(),
-    );
-  });
   let home = dirs::home_dir().ok_or_else(bundle_unavailable)?;
-  let bundle = ctl_client::component_update::prepare(
+  let prepared = ctl_client::component_update::prepare_update(
     &home,
     target_triple,
     ctl_core::bundles::Purpose::Upload,
     &update.source,
     &bundle_directories(app)?,
+    |progress| {
+      updates.send_replace(preparation_progress(progress));
+    },
   )
   .await
   .map_err(CommandErrorDto::backend)?;
-  updates.send_modify(|progress| {
-    progress.phase = Phase::Connecting;
-    progress.file_name = Some(match update.package {
-      ctl_client::component_update::Package::CtlAgent => "ctl-agent".into(),
-      ctl_client::component_update::Package::FullBundle => "Complete bundle".into(),
-    });
-  });
-
-  ctl_client::component_update::install_remote(
+  ctl_client::component_update::install_prepared_remote(
     destination,
     options,
     interaction,
-    &bundle,
+    &prepared,
     update.package,
     |progress| {
       updates.send_replace(progress::desktop_progress(progress));
@@ -105,6 +80,7 @@ async fn install_bundle(
   .await
   .map_err(|error| CommandErrorDto::new("remote_agent_install_failed", error.to_string()))?;
 
+  let bundle = prepared.bundle;
   Ok(Installation {
     agent: bundle.manifest.components["ctl-agent"].clone(),
     result: ctl_client::component_update::result(&bundle, update.package),

@@ -63,7 +63,7 @@ async fn main() {
 
 async fn run(arguments: Arguments) -> Result<(), MainError> {
   if arguments.component_info {
-    let info = ctl_agent::component_info();
+    let info = ctl_core::embedded_component_info!("ctl-agent", &ctl_agent::COMPONENT_CONTRACTS);
     println!("{}", serde_json::to_string(&info)?);
     return Ok(());
   }

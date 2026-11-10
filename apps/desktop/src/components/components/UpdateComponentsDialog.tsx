@@ -19,7 +19,7 @@ interface Props {
   on_close(): void;
 }
 
-type SourceChoice = "automatic" | "dev" | "stable" | "selected" | "provided";
+type SourceChoice = "automatic" | "dev" | "stable" | "working_tree" | "selected" | "provided";
 
 function sourceChoice(source?: ComponentUpdateSource): SourceChoice {
   return source?.kind === "published" ? source.channel : source?.kind ?? "automatic";
@@ -69,7 +69,7 @@ export function UpdateComponentsDialog({ targets, context, on_updated, on_close 
       ? { kind: "provided", path: path.trim(), local_build, ctld_package: local_build && ctld_package.trim() ? ctld_package.trim() : null }
       : source_choice === "dev" || source_choice === "stable"
         ? { kind: "published", channel: source_choice }
-        : { kind: source_choice === "selected" ? "selected" : "automatic" };
+        : { kind: source_choice };
     const attempt_id = crypto.randomUUID();
     attempt.current = attempt_id;
     host_index.current = 0;
@@ -120,6 +120,7 @@ export function UpdateComponentsDialog({ targets, context, on_updated, on_close 
         <option value="automatic">Automatic</option>
         <option value="dev">Latest published main build</option>
         <option value="stable">Latest stable release</option>
+        {import.meta.env.DEV || source_choice === "working_tree" ? <option value="working_tree">Build from checkout</option> : null}
         <option value="selected">Included build (offline)</option>
         <option value="provided">Provided build files</option>
       </select></label>
@@ -128,8 +129,8 @@ export function UpdateComponentsDialog({ targets, context, on_updated, on_close 
         <label><input type="checkbox" checked={local_build} onChange={(event) => setLocalBuild(event.target.checked)} /><span>Native local build<small>A directory of component binaries built for this computer's platform.</small></span></label>
         {local_build ? <label className="component-update-field">Signed ctld package directory (macOS full bundle)<input value={ctld_package} onChange={(event) => setCtldPackage(event.target.value)} placeholder="/path/to/ctld-package" /></label> : <p>Use a complete bundle directory, or a verified archive with its bundle-set.json beside it.</p>}
       </div> : <>
-        <p className="component-update-hint">{source_choice === "selected" ? "Installs the complete build included with this app." : source_choice === "automatic" ? "Uses this app’s channel. Development Linux x64 builds use the working tree." : "Downloads this channel’s complete build for each platform."} Local macOS installation requires a signed ctld package.</p>
-        {source_choice !== "selected" ? <PublishedBundleStatus channel={source_choice === "dev" || source_choice === "stable" ? source_choice : undefined} /> : null}
+        <p className="component-update-hint">{source_choice === "working_tree" ? "Builds for Linux x64 or ARM64 from the current checkout." : source_choice === "selected" ? "Installs the complete build included with this app." : source_choice === "automatic" ? "Uses the configured channel. Development Linux x64 builds use the working tree." : "Downloads this channel’s complete build for each platform."}</p>
+        {source_choice !== "selected" && source_choice !== "working_tree" ? <PublishedBundleStatus channel={source_choice === "dev" || source_choice === "stable" ? source_choice : undefined} /> : null}
       </>}
     </form>}
     {error ? <p role="alert" className="quick-input-error">{error}</p> : null}

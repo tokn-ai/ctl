@@ -4,7 +4,8 @@ use ctl_core::component::ComponentInfo;
 use ctl_core::component_update::BundleChannel;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::time::Duration;
+use std::path::Path;
+use std::time::{Duration, Instant};
 
 use super::{BundleSet, Error, MAX_BUNDLE_BYTES, MAX_BUNDLE_SET_BYTES, VerifiedBundle};
 
@@ -17,6 +18,33 @@ pub(crate) use updater::{cache_verified, prune_updater_cache, read_cached_update
 
 pub const ROOT: &str = "https://tokn-ai.dev/ctl/bundles/";
 const MAX_CHANNEL_BYTES: usize = 4 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DownloadArtifact {
+  Runtime,
+  Updater,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DownloadProgress {
+  pub artifact: DownloadArtifact,
+  pub received_bytes: u64,
+  /// Zero until the size is known.
+  pub total_bytes: u64,
+}
+
+type DownloadObserver<'a> = &'a (dyn Fn(DownloadProgress) + Send + Sync);
+type AssetProgress<'a> = Option<(DownloadArtifact, DownloadObserver<'a>)>;
+
+fn report_progress(progress: AssetProgress<'_>, received_bytes: u64, total_bytes: u64) {
+  if let Some((artifact, report)) = progress {
+    report(DownloadProgress {
+      artifact,
+      received_bytes,
+      total_bytes,
+    });
+  }
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PublishedTarget {
@@ -82,10 +110,27 @@ pub async fn download(channel: BundleChannel, target: &str) -> Result<VerifiedBu
 pub async fn download_cached(
   channel: BundleChannel,
   target: &str,
-  cache_root: &std::path::Path,
+  cache_root: &Path,
 ) -> Result<VerifiedBundle, Error> {
   Resolver::production()?
     .download_cached(channel, target, cache_root)
+    .await
+}
+
+/// Resolve a channel once and verify both installation assets from that publication.
+///
+/// # Errors
+/// Reports incompatible targets, missing updater metadata or invalid assets.
+#[cfg(unix)]
+pub async fn download_installation_cached(
+  channel: BundleChannel,
+  target: &str,
+  downloads_root: &Path,
+  updaters_root: &Path,
+  on_progress: impl Fn(DownloadProgress) + Send + Sync,
+) -> Result<(VerifiedBundle, VerifiedUpdater), Error> {
+  Resolver::production()?
+    .download_installation_cached(channel, target, downloads_root, updaters_root, &on_progress)
     .await
 }
 
@@ -196,11 +241,7 @@ impl Resolver {
 
   async fn download(&self, channel: BundleChannel, target: &str) -> Result<VerifiedBundle, Error> {
     let publication = self.publication(channel).await?;
-    if !publication.manifest.is_compatible(target)? {
-      return Err(Error::NotAvailable(
-        "published components do not support this client's contracts".into(),
-      ));
-    }
+    Self::require_compatible(&publication, target)?;
     let archive_url = publication
       .url
       .join(publication.manifest.archive_name(target)?)
@@ -215,14 +256,62 @@ impl Resolver {
     &self,
     channel: BundleChannel,
     target: &str,
-    cache_root: &std::path::Path,
+    cache_root: &Path,
   ) -> Result<VerifiedBundle, Error> {
     let publication = self.publication(channel).await?;
+    Self::require_compatible(&publication, target)?;
+    self
+      .archive_cached(publication, target, cache_root, None)
+      .await
+  }
+
+  #[cfg(unix)]
+  async fn download_installation_cached(
+    &self,
+    channel: BundleChannel,
+    target: &str,
+    downloads_root: &Path,
+    updaters_root: &Path,
+    on_progress: DownloadObserver<'_>,
+  ) -> Result<(VerifiedBundle, VerifiedUpdater), Error> {
+    let publication = self.publication(channel).await?;
+    Self::require_compatible(&publication, target)?;
+    let updater = self
+      .updater_cached(
+        &publication,
+        target,
+        updaters_root,
+        Some((DownloadArtifact::Updater, on_progress)),
+      )
+      .await?;
+    let bundle = self
+      .archive_cached(
+        publication,
+        target,
+        downloads_root,
+        Some((DownloadArtifact::Runtime, on_progress)),
+      )
+      .await?;
+    Ok((bundle, updater))
+  }
+
+  fn require_compatible(publication: &Publication, target: &str) -> Result<(), Error> {
     if !publication.manifest.is_compatible(target)? {
       return Err(Error::NotAvailable(
         "published components do not support this client's contracts".into(),
       ));
     }
+    Ok(())
+  }
+
+  async fn archive_cached(
+    &self,
+    publication: Publication,
+    target: &str,
+    cache_root: &Path,
+    progress: AssetProgress<'_>,
+  ) -> Result<VerifiedBundle, Error> {
+    report_progress(progress, 0, 0);
     let expected = &publication
       .manifest
       .target(target)?
@@ -242,25 +331,42 @@ impl Resolver {
           "cached publication differs from its content identity".into(),
         ));
       }
+      let size = bundle.archive.len() as u64;
+      report_progress(progress, size, size);
       return Ok(bundle);
     }
     let archive_url = publication
       .url
       .join(publication.manifest.archive_name(target)?)
       .map_err(|error| Error::Invalid(error.to_string()))?;
-    let archive = self.read(&archive_url, MAX_BUNDLE_BYTES).await?;
+    let archive = self
+      .read_with_progress(&archive_url, MAX_BUNDLE_BYTES, None, progress)
+      .await?;
     let bundle = publication
       .manifest
       .verify_archive(target, archive, publication.bytes)?;
-    tokio::task::spawn_blocking(move || {
+    let bundle = tokio::task::spawn_blocking(move || {
       cache.store(&bundle)?;
-      Ok(bundle)
+      Ok::<_, Error>(bundle)
     })
     .await
-    .map_err(|error| Error::Io(std::io::Error::other(error)))?
+    .map_err(|error| Error::Io(std::io::Error::other(error)))??;
+    let size = bundle.archive.len() as u64;
+    report_progress(progress, size, size);
+    Ok(bundle)
   }
 
   async fn read(&self, url: &reqwest::Url, maximum: usize) -> Result<Vec<u8>, Error> {
+    self.read_with_progress(url, maximum, None, None).await
+  }
+
+  async fn read_with_progress(
+    &self,
+    url: &reqwest::Url,
+    maximum: usize,
+    expected_size: Option<u64>,
+    progress: AssetProgress<'_>,
+  ) -> Result<Vec<u8>, Error> {
     if !trusted(url, &self.root) {
       return Err(Error::Invalid("untrusted component publication URL".into()));
     }
@@ -284,6 +390,11 @@ impl Resolver {
       ));
     }
     let mut bytes = Vec::new();
+    let mut last_report = Instant::now();
+    let total_bytes = expected_size.or(length).unwrap_or_default();
+    if total_bytes != 0 {
+      report_progress(progress, 0, total_bytes);
+    }
     while let Some(chunk) = response.chunk().await.map_err(super::download_error)? {
       if chunk.len() > maximum.saturating_sub(bytes.len()) {
         return Err(Error::Invalid(
@@ -291,6 +402,10 @@ impl Resolver {
         ));
       }
       bytes.extend_from_slice(&chunk);
+      if progress.is_some() && last_report.elapsed() >= Duration::from_millis(250) {
+        report_progress(progress, bytes.len() as u64, total_bytes);
+        last_report = Instant::now();
+      }
     }
     if length.is_some_and(|length| length != bytes.len() as u64) {
       return Err(Error::Invalid("truncated component publication".into()));

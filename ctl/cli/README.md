@@ -226,23 +226,14 @@ can appear with an unknown label. From an
 ordinary SSH login, use `~/.tokn/ctl/bin/ctl who` or add `~/.tokn/ctl/bin`
 to `PATH`. Installation preserves the user's login shell configuration.
 
-Interactive Unix connections
-offer to repair missing
-or recognized older agents with a matching verified bundle, then retry once.
-Repair checks any saved machine ID first, shows upload progress and speed, and
-preserves running daemons. Ctrl-C cancels it; piped commands never prompt.
-Repair and component updates share their source policy. Development checkouts
-build Linux x64 components from the local working tree; other remote targets
-follow the CLI's development or stable publication channel. Channel checks and
-downloads do not require `gh`. `CTL_REMOTE_BUNDLES_DIR` remains an explicit
-local-source override. Published manifests and verified archives are cached at
-`~/.tokn/ctl/published-bundles`; each network update resolves the channel first,
-so an old selection or cache cannot decide which build is current. Downloads
-verify targets, component contracts, archive/binary checksums and matching
-metadata. Failed downloads never install partial content or silently fall back
-to an older build. `pnpm bundles:build` prepares a Linux x64 working-tree bundle
-without a commit or push. Windows remote companions must be installed manually. On macOS,
-Touch ID-protected credential storage
+If a Unix host needs a component update, `ctl` prints a `ctlup update`
+command for the selected host or SSH alias. Run it from macOS or Linux and
+then reconnect. The updater verifies any saved machine ID and downloads the
+runtime and updater from the same publication. Use `--working-tree` to build
+for Linux x64 or ARM64 from a checkout, or `--from` for supplied build files.
+Windows remote companions require manual installation.
+
+On macOS, Touch ID-protected credential storage
 requires the signed, provisioned `ctld` helper; Cargo installation alone does
 not supply its Keychain entitlement. Setup uses the same selected helper as
 status, startup, and restart. With no eligible local, shared, or bundled helper,

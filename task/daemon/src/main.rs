@@ -24,7 +24,7 @@ struct Arguments {
 fn main() {
   let arguments = Arguments::parse();
   if arguments.component_info {
-    let info = ctl_taskd::component_info();
+    let info = ctl_core::embedded_component_info!("ctl-taskd", &ctl_taskd::COMPONENT_CONTRACTS);
     println!(
       "{}",
       serde_json::to_string(&info).expect("component metadata serializes")

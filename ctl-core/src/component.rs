@@ -3,6 +3,63 @@
 use crate::protocol::{ProtocolVersion, negotiate_versions, valid_offer};
 use serde::{Deserialize, Serialize};
 
+#[doc(hidden)]
+pub mod embedded;
+
+/// A protocol advertisement shared by runtime metadata and cross-build inspection.
+#[derive(Clone, Copy)]
+pub struct ProtocolContract {
+  name: &'static str,
+  build: u16,
+  version: ProtocolVersion,
+  supported: &'static [ProtocolVersion],
+}
+
+impl ProtocolContract {
+  #[must_use]
+  pub const fn new(
+    name: &'static str,
+    build: u16,
+    version: ProtocolVersion,
+    supported: &'static [ProtocolVersion],
+  ) -> Self {
+    Self {
+      name,
+      build,
+      version,
+      supported,
+    }
+  }
+
+  #[must_use]
+  pub fn info(self) -> ProtocolInfo {
+    ProtocolInfo::new(self.name, self.build, self.version, self.supported)
+  }
+
+  /// Joins existing protocol groups without copying their contract definitions.
+  ///
+  /// # Panics
+  /// Panics if the group lengths do not add up to `N`.
+  #[must_use]
+  pub const fn join<const N: usize>(groups: &[&[Self]]) -> [Self; N] {
+    let mut result = [Self::new("", 0, ProtocolVersion::new(0, 0, 0), &[]); N];
+    let mut index = 0;
+    let mut group_index = 0;
+    while group_index < groups.len() {
+      let group = groups[group_index];
+      let mut item = 0;
+      while item < group.len() {
+        result[index] = group[item];
+        index += 1;
+        item += 1;
+      }
+      group_index += 1;
+    }
+    assert!(index == N);
+    result
+  }
+}
+
 /// Historical numeric protocols must not be treated as published contracts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -68,6 +125,14 @@ pub struct ComponentInfo {
 }
 
 impl ComponentInfo {
+  #[must_use]
+  pub fn from_contracts(contracts: &[ProtocolContract]) -> Self {
+    Self {
+      build: build_info(),
+      protocols: contracts.iter().map(|contract| contract.info()).collect(),
+    }
+  }
+
   /// Validates bounded component metadata, including every advertised protocol.
   #[must_use]
   pub fn is_valid(&self) -> bool {

@@ -1,7 +1,9 @@
 import { execFile, type ExecFileException } from "node:child_process";
 import { basename } from "node:path";
-import { promisify } from "node:util";
-import { maxComponentMetadata } from "./protocol-contract.mts";
+import { isDeepStrictEqual, promisify } from "node:util";
+import { readAgentFile } from "./agent-bundle.mts";
+import { isLinuxBundleTarget, readElfComponent } from "./elf-component.mts";
+import { maxComponentMetadata, parseComponent } from "./protocol-contract.mts";
 
 const execute = promisify(execFile);
 const defaultTimeoutMs = 5_000;
@@ -83,4 +85,18 @@ export async function probeComponent(command: string, args: string[], options: P
   } finally {
     clearTimeout(timer);
   }
+}
+
+/** Validate that the linked record used by cross-builds matches the live binary. */
+export async function probeBundledComponent(command: string, args: string[], options: ProbeOptions): Promise<{ stdout: string; stderr: string }> {
+  const result = await probeComponent(command, args, options);
+  if (options.target && isLinuxBundleTarget(options.target)) {
+    const name = basename(command);
+    const binary = await readAgentFile(command, 128 * 1024 * 1024);
+    const embedded = readElfComponent(binary, options.target, name);
+    if (!isDeepStrictEqual(embedded, parseComponent(JSON.parse(result.stdout)))) {
+      throw new Error(`${name}: linked component metadata disagrees with --component-info`);
+    }
+  }
+  return result;
 }

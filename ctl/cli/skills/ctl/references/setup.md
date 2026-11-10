@@ -132,15 +132,12 @@ preserved.
   route rather than substituting a destination or assuming an old address works.
 - **Remote identity mismatch:** stop the service request and investigate the
   host/account/route. Do not erase a pinned identity as routine recovery.
-- **Missing remote helper or protocol mismatch:** an interactive Unix service
-  connection offers repair for a missing agent or recognized old `ctl-ssh-v2`
-  protocol, checks any saved machine ID, installs verified matching components,
-  and retries once. Confirm the repair only for the intended SSH account/route.
-  Piped commands, unknown protocol markers, and later reconnects do not offer
-  installation. Use `ctlup --host HOST update` for an explicit complete-build
+- **Missing remote helper or protocol mismatch:** `ctl` prints an update
+  command for a missing or recognized outdated Unix agent. Use
+  `ctlup --host HOST update` from macOS or Linux for an explicit complete-build
   update or `ctlup --destination DESTINATION update` for an SSH alias. Updates
   resolve the configured Dev/Stable publication channel; development checkouts
-  can build Linux x64 from the working tree. `--channel stable` or `--channel dev`
+  can build Linux x64 or ARM64 with `--working-tree`. `--channel stable` or `--channel dev`
   chooses a published source explicitly. `--from DIRECTORY_OR_ARCHIVE` supplies
   an offline verified build. Network failures never silently choose an older
   cached publication. No GitHub CLI or workflow dispatch is required. A manually

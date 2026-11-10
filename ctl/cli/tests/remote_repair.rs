@@ -1,14 +1,13 @@
 #![cfg(unix)]
 
 use std::fs;
-use std::io::{Read as _, Write as _};
+use std::io::Read as _;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
 use ctl_ipc::{ClientMessage, ServerMessage};
-use rustix::termios::LocalModes;
 use serde_json::json;
 use sha2::{Digest as _, Sha256};
 
@@ -21,32 +20,12 @@ fn fixture_target() -> &'static str {
   }
 }
 
-const PROMPT: &str = "Install compatible remote components";
 const EXPECTED_ID: &str = "fa5f874a-bd3c-4a41-9d8f-d584bd9c9a14";
 
 #[path = "remote_repair/broker.rs"]
 mod broker;
 #[path = "remote_repair/components_update.rs"]
 mod components_update;
-
-fn frame(value: &serde_json::Value) -> Vec<u8> {
-  let payload = serde_json::to_vec(value).unwrap();
-  let mut bytes = u32::try_from(payload.len()).unwrap().to_be_bytes().to_vec();
-  bytes.extend(payload);
-  bytes
-}
-
-fn frames(mut bytes: &[u8]) -> Vec<serde_json::Value> {
-  let mut messages = Vec::new();
-  while !bytes.is_empty() {
-    let (size, remainder) = bytes.split_at(4);
-    let size = u32::from_be_bytes(size.try_into().unwrap()) as usize;
-    let (payload, remainder) = remainder.split_at(size);
-    messages.push(serde_json::from_slice(payload).unwrap());
-    bytes = remainder;
-  }
-  messages
-}
 
 struct Fixture(PathBuf);
 
@@ -131,7 +110,6 @@ esac
       "node",
       "touch \"$CTL_TEST_DIR/builder-called\"; printf 'current development builder unavailable in fixture\\n' >&2; exit 94",
     );
-    fixture.prepare_updater();
     fixture
   }
 
@@ -184,15 +162,15 @@ esac
       }
     }
     components["ctmux"] = components["ctmuxd"].clone();
-    self.bundle(build, Some(&components))
+    self.bundle(build, &components)
   }
 
   fn stale_sources(&self) -> ctl_core::bundles::Bundle {
     let previous = Self::new(EXPECTED_ID);
     let build = ctl_core::component::ComponentBuildInfo {
-      version: "0.0.9".into(),
-      source_revision: Some("a".repeat(40)),
-      source_fingerprint: "a".repeat(64),
+      version: "0.0.8".into(),
+      source_revision: Some("b".repeat(40)),
+      source_fingerprint: "b".repeat(64),
       dirty: false,
     };
     previous.compatible_bundle(&build);
@@ -234,31 +212,18 @@ esac
   fn bundle(
     &self,
     build: &ctl_core::component::ComponentBuildInfo,
-    components: Option<&serde_json::Value>,
+    components: &serde_json::Value,
   ) -> String {
     let revision = build.source_revision.as_deref().unwrap();
     let bundle_id = format!("{}-dev.{}", build.version, &revision[..12]);
     let target = fixture_target();
-    let schema_version = components.map_or(1, |components| {
-      if components.get("ctl").is_some() {
-        3
-      } else {
-        2
-      }
-    });
-    let binaries = if schema_version == 3 {
-      vec!["ctl-agent", "ctmuxd", "ctl-taskd", "ctld", "ctl", "ctmux"]
-    } else {
-      vec!["ctl-agent", "ctmuxd", "ctl-taskd", "ctld"]
-    };
-    let mut manifest = json!({
-      "schema_version": schema_version,
-      "app_version": build.version,
-      "bundle_id": bundle_id,
-      "git_revision": revision,
-      "target_triple": target,
-    });
-    self.repaired_transport(build, &bundle_id, target);
+    let binaries = ["ctl-agent", "ctmuxd", "ctl-taskd", "ctld", "ctl", "ctmux"];
+    self.write_agent_identity(
+      build,
+      &bundle_id,
+      target,
+      &components["ctl-agent"]["protocols"],
+    );
     let payload = self.0.join("payload");
     fs::create_dir(&payload).unwrap();
     fs::write(
@@ -282,13 +247,14 @@ esac
         )),
       );
     }
-    if let Some(components) = components {
-      manifest["files"] = json!(files);
-      manifest["components"] = components.clone();
-    }
     fs::write(
       payload.join("manifest.json"),
-      serde_json::to_vec(&manifest).unwrap(),
+      serde_json::to_vec(&json!({
+        "schema_version": 3, "app_version": build.version, "bundle_id": bundle_id,
+        "git_revision": revision, "target_triple": target,
+        "files": files, "components": components,
+      }))
+      .unwrap(),
     )
     .unwrap();
     let checksum = self.package_payload(&payload, &bundle_id, target, &binaries);
@@ -299,19 +265,17 @@ esac
       "x86_64-apple-darwin",
       "aarch64-apple-darwin",
     ] {
-      let mut entry = json!({
+      let entry = json!({
         "archive": format!("ctl-agent-bundle-{bundle_id}-{target}.tar.gz"),
         "sha256": checksum,
+        "components": components,
       });
-      if let Some(components) = components {
-        entry["components"] = components.clone();
-      }
       targets.insert(target.into(), entry);
     }
     fs::write(
       self.0.join("bundles/bundle-set.json"),
       serde_json::to_vec(&json!({
-        "schema_version": schema_version, "app_version": build.version,
+        "schema_version": 3, "app_version": build.version,
         "bundle_id": bundle_id, "git_revision": revision, "targets": targets,
       }))
       .unwrap(),
@@ -347,24 +311,16 @@ esac
     format!("{:x}", Sha256::digest(fs::read(&archive).unwrap()))
   }
 
-  fn repaired_transport(
+  fn write_agent_identity(
     &self,
     build: &ctl_core::component::ComponentBuildInfo,
     bundle_id: &str,
     target: &str,
+    protocols: &serde_json::Value,
   ) {
-    let mut transport = ctl_proto::IDENTITY_PREFACE.to_vec();
-    transport.extend(frame(
-      &serde_json::to_value(ctl_core::protocol::ProtocolOffer::new(
-        3,
-        ctl_proto::IDENTITY_CONTRACT_V1_0_3,
-        &[ctl_proto::IDENTITY_CONTRACT_V1_0_3],
-      ))
-      .unwrap(),
-    ));
     let identity = json!({
       "remote_id": EXPECTED_ID,
-      "protocols": ctl_proto::agent_protocols(),
+      "protocols": protocols,
       "agent_version": build.version,
       "build": build,
       "ctmux_restart_supported": true,
@@ -380,19 +336,6 @@ esac
       serde_json::to_vec(&identity).unwrap(),
     )
     .unwrap();
-    transport.extend(frame(&identity));
-    transport.extend(frame(&json!({
-      "type": "handshake_accepted", "protocol_version": ctmux_proto::PROTOCOL_VERSION,
-      "protocols": [ctmux_proto::protocol_info()],
-      "server_version": build.version, "build": build,
-      "heartbeat_interval_ms": 1000, "attachment_liveness_timeout_ms": 30000,
-    })));
-    fs::write(self.0.join("upgraded-transport"), transport).unwrap();
-    fs::write(
-      self.0.join("session-list"),
-      frame(&json!({"type": "session_clients", "sessions": []})),
-    )
-    .unwrap();
   }
 
   fn script(&self, name: &str, body: &str) {
@@ -401,12 +344,8 @@ esac
     fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
   }
 
-  fn broker(&self) -> tokio::task::JoinHandle<ctl_ipc::SshTarget> {
-    self.broker_with_observation(true)
-  }
-
-  fn broker_with_observation(&self, observe: bool) -> tokio::task::JoinHandle<ctl_ipc::SshTarget> {
-    broker::spawn(self, observe, "ctl_agent_update_required")
+  fn updater_broker(&self) -> tokio::task::JoinHandle<ctl_ipc::SshTarget> {
+    broker::spawn(self, None)
   }
 
   fn arguments(&self, index: usize) -> Vec<String> {
@@ -415,11 +354,6 @@ esac
       .lines()
       .map(str::to_owned)
       .collect()
-  }
-
-  fn assert_managed_route(&self, count: usize) {
-    assert!(self.arguments(1).join("\n").contains("remote-id"));
-    self.assert_managed_channels(count);
   }
 
   fn assert_managed_channels(&self, count: usize) {
@@ -447,15 +381,6 @@ esac
     }
     assert!(!self.0.join("gh-called").exists());
   }
-
-  fn assert_no_upload(&self) {
-    assert!(!self.0.join("upload").exists());
-    assert!(!self.0.join("broker-service-input").exists());
-    assert_eq!(
-      fs::read_to_string(self.0.join("service-opens")).unwrap(),
-      "1"
-    );
-  }
 }
 
 impl Drop for Fixture {
@@ -473,17 +398,10 @@ struct Terminal {
 }
 
 impl Terminal {
-  fn new(fixture: &Fixture) -> Self {
-    Self::with_args(fixture, &["-H", "work", "shell"])
-  }
-
   fn with_args(fixture: &Fixture, args: &[&str]) -> Self {
-    Self::with_bundle_override(fixture, args, true)
-  }
-
-  fn with_bundle_override(fixture: &Fixture, args: &[&str], explicit: bool) -> Self {
     let updater = args.first().is_some_and(|arg| *arg == "__ctlup");
     let executable = if updater {
+      fixture.prepare_updater();
       env!("CARGO_BIN_EXE_ctlup")
     } else {
       env!("CARGO_BIN_EXE_ctl")
@@ -492,7 +410,6 @@ impl Terminal {
     Self::with_executable(
       fixture,
       args,
-      explicit,
       std::path::Path::new(executable),
       Some(&fixture.0.join("ctlup-fixture-manager")),
     )
@@ -501,7 +418,6 @@ impl Terminal {
   fn with_executable(
     fixture: &Fixture,
     args: &[&str],
-    explicit: bool,
     executable: &std::path::Path,
     manager: Option<&std::path::Path>,
   ) -> Self {
@@ -531,17 +447,12 @@ impl Terminal {
     command.env("CTL_HOSTS_PATH", fixture.0.join("hosts.json"));
     command.env("CTLD_SOCKET_PATH", fixture.0.join("ctld.sock"));
     command.env("CTLD_BIN", fixture.0.join("missing-ctld"));
-    // Every repair fixture is offline. Automatic sources must fail discovery
-    // instead of contacting the live channel or silently choosing stale data.
+    // Every fixture is offline. Only explicit test data may supply a bundle.
     command.env("HTTPS_PROXY", "http://127.0.0.1:9");
     command.env("https_proxy", "http://127.0.0.1:9");
     command.env("NO_PROXY", "");
     command.env("no_proxy", "");
-    if explicit {
-      command.env("CTL_REMOTE_BUNDLES_DIR", fixture.0.join("bundles"));
-    } else {
-      command.env_remove("CTL_REMOTE_BUNDLES_DIR");
-    }
+    command.env("CTL_REMOTE_BUNDLES_DIR", fixture.0.join("bundles"));
     command.env_remove("CTL_SCP_SSH_TRANSPORT");
     command.env_remove("CTLD_ASKPASS");
     let child = pair.slave.spawn_command(command).unwrap();
@@ -564,43 +475,6 @@ impl Terminal {
       output,
       transcript: Vec::new(),
     }
-  }
-
-  fn wait_for_prompt(&mut self) {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-      if String::from_utf8_lossy(&self.transcript).contains(PROMPT) {
-        return;
-      }
-      match self
-        .output
-        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-      {
-        Ok(bytes) => self.transcript.extend(bytes),
-        Err(error) => panic!("repair prompt did not appear: {error}\n{}", self.text()),
-      }
-    }
-  }
-
-  fn answer(&mut self, keys: &str) {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-      let termios = self.master.as_ref().unwrap().get_termios().unwrap();
-      if termios.local_flags.bits() & (LocalModes::ICANON | LocalModes::ISIG).bits() == 0 {
-        break;
-      }
-      assert!(
-        Instant::now() < deadline,
-        "confirmation did not enter raw mode: {}",
-        self.text()
-      );
-      if let Ok(bytes) = self.output.recv_timeout(Duration::from_millis(1)) {
-        self.transcript.extend(bytes);
-      }
-    }
-    let writer = self.writer.as_mut().unwrap();
-    writer.write_all(keys.as_bytes()).unwrap();
-    writer.flush().unwrap();
   }
 
   fn finish(&mut self) -> portable_pty::ExitStatus {
@@ -647,282 +521,74 @@ impl Drop for Terminal {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn missing_or_old_agent_offers_repair_only_after_verifying_the_saved_account() {
-  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
-  for code in ["ctl_agent_not_found", "ctl_agent_update_required"] {
+async fn missing_or_incompatible_agent_exits_with_a_targeted_update_command() {
+  let _guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
+  for (code, args, reason, hint) in [
+    (
+      "ctl_agent_not_found",
+      &["-H", "work", "shell"][..],
+      "The remote ctl-agent is missing.",
+      "ctlup update --host='work'",
+    ),
+    (
+      "ctl_agent_update_required",
+      &["-H", "work", "--method", "direct", "ctmux", "list"][..],
+      "The remote ctl-agent needs an update for shared SSH services.",
+      "ctlup update --host='work' --method='direct'",
+    ),
+  ] {
     let fixture = Fixture::new(EXPECTED_ID);
-    let original = fs::read(fixture.0.join("hosts.json")).unwrap();
-    let broker = broker::spawn(&fixture, true, code);
-    let mut terminal = Terminal::new(&fixture);
-    terminal.wait_for_prompt();
-    terminal.answer("\r");
-    assert!(!terminal.finish().success());
+    let original_hosts = fs::read(fixture.0.join("hosts.json")).unwrap();
+    let account = fixture.0.join("home/.tokn/ctl");
+    let original_id = fs::read(account.join("remote-id")).unwrap();
+    let broker = broker::spawn(&fixture, Some(code));
+    let mut terminal = Terminal::with_args(&fixture, args);
+    assert!(!terminal.finish().success(), "{}", terminal.text());
     let transcript = terminal.text();
-    assert!(fixture.0.join("account-id").exists());
-    let reason = if code == "ctl_agent_not_found" {
-      "The remote ctl-agent is missing."
-    } else {
-      "The remote ctl-agent needs an update for shared SSH services."
-    };
     assert!(transcript.contains(reason), "{transcript}");
-    assert!(!transcript.contains("Detecting the remote platform"));
-    assert!(!fixture.0.join("platform").exists());
-    fixture.assert_managed_route(1);
-    fixture.assert_no_upload();
-    assert_eq!(fs::read(fixture.0.join("hosts.json")).unwrap(), original);
+    assert!(
+      transcript.lines().any(|line| line.trim() == hint),
+      "{transcript}"
+    );
+    assert!(
+      !transcript.contains("Install compatible remote components"),
+      "{transcript}"
+    );
+    assert!(
+      !transcript.contains("Retrying the connection"),
+      "{transcript}"
+    );
+
     let target = broker.await.unwrap();
     assert_eq!(target.destination, "10.0.0.20");
     assert_eq!(target.user.as_deref(), Some("alice"));
     assert_eq!(target.port, Some(2222));
-  }
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn mismatched_account_identity_fails_before_offer_or_remote_changes() {
-  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
-  let fixture = Fixture::new("0c9247af-580a-4e90-9a88-45a4f76c0ca7");
-  let original = fs::read(fixture.0.join("hosts.json")).unwrap();
-  let broker = fixture.broker();
-  let mut terminal = Terminal::new(&fixture);
-  assert!(!terminal.finish().success());
-  let transcript = terminal.text();
-  assert!(
-    transcript.contains("different remote environment"),
-    "{transcript}"
-  );
-  assert!(!transcript.contains(PROMPT));
-  assert!(!fixture.0.join("platform").exists());
-  fixture.assert_managed_route(1);
-  fixture.assert_no_upload();
-  assert_eq!(fs::read(fixture.0.join("hosts.json")).unwrap(), original);
-  broker.await.unwrap();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn accepted_repair_detects_platform_but_rejects_unverified_local_bundles_before_upload() {
-  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
-  let fixture = Fixture::new(EXPECTED_ID);
-  let original = fs::read(fixture.0.join("hosts.json")).unwrap();
-  let broker = fixture.broker();
-  let mut terminal = Terminal::new(&fixture);
-  terminal.wait_for_prompt();
-  terminal.answer("y\r");
-  assert!(!terminal.finish().success());
-  let transcript = terminal.text();
-  assert!(
-    transcript.contains("Detecting the remote platform"),
-    "{transcript}"
-  );
-  assert!(
-    transcript.contains("Preparing compatible components for"),
-    "{transcript}"
-  );
-  // The explicit local manifest is validated even when this CLI has a dirty
-  // build identity, and invalid selected content cannot upload or download.
-  assert!(
-    transcript.contains("invalid remote bundle-set JSON"),
-    "{transcript}"
-  );
-  assert!(fixture.0.join("platform").exists());
-  fixture.assert_managed_route(2);
-  fixture.assert_no_upload();
-  assert_eq!(fs::read(fixture.0.join("hosts.json")).unwrap(), original);
-  broker.await.unwrap();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn accepted_provided_repair_activates_components_without_creating_an_upload_selection() {
-  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
-  verify_successful_repair(false).await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn provided_repair_ignores_and_preserves_older_cached_and_selected_sources() {
-  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
-  verify_successful_repair(true).await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn compatible_older_provided_components_repair_a_development_cli_and_preserve_identity() {
-  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
-  // Unlike legacy exact-source fixtures, this test must also exercise a CLI
-  // compiled from a dirty checkout or without a recorded source revision.
-  let build = ctl_core::component::ComponentBuildInfo {
-    version: "0.0.9".into(),
-    source_revision: Some("a".repeat(40)),
-    source_fingerprint: "a".repeat(64),
-    dirty: false,
-  };
-  assert_ne!(build.version, env!("CARGO_PKG_VERSION"));
-  let fixture = Fixture::new(EXPECTED_ID);
-  let bundle_id = fixture.compatible_bundle(&build);
-  let original = fs::read(fixture.0.join("hosts.json")).unwrap();
-  let broker = fixture.broker();
-  let mut terminal = Terminal::with_args(&fixture, &["-H", "work", "ctmux", "list"]);
-  terminal.wait_for_prompt();
-  terminal.answer("y\r");
-  assert_successful_repair(&fixture, &bundle_id, &original, &mut terminal, None);
-  let installed = ctl_core::bundles::Bundle::open(
-    &fs::canonicalize(fixture.0.join("home/.tokn/ctl/current")).unwrap(),
-  )
-  .unwrap();
-  assert_eq!(installed.manifest.components["ctl-agent"].build, build);
-  broker.await.unwrap();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn automatic_repair_requires_a_current_source_even_with_older_cached_and_selected_components()
-{
-  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
-  let fixture = Fixture::new(EXPECTED_ID);
-  let previous = fixture.stale_sources();
-  let original = fs::read(fixture.0.join("hosts.json")).unwrap();
-  let broker = fixture.broker();
-  let mut terminal =
-    Terminal::with_bundle_override(&fixture, &["-H", "work", "ctmux", "list"], false);
-  terminal.wait_for_prompt();
-  terminal.answer("y\r");
-  assert!(!terminal.finish().success(), "{}", terminal.text());
-  fixture.assert_managed_route(2);
-  fixture.assert_no_upload();
-  assert!(!fixture.0.join("home/.tokn/ctl/current").exists());
-  assert_selection(&fixture, Some(&previous.manifest.bundle_id));
-  assert_eq!(fs::read(fixture.0.join("hosts.json")).unwrap(), original);
-  if ctl_client::component_update::working_tree_available()
-    && fixture_target() == "x86_64-unknown-linux-musl"
-  {
-    assert!(
-      fixture.0.join("builder-called").exists(),
-      "{}",
-      terminal.text()
-    );
-    assert!(
-      terminal
-        .text()
-        .contains("current development builder unavailable in fixture")
-    );
-  }
-  broker.await.unwrap();
-}
-
-async fn verify_successful_repair(stale_sources: bool) {
-  let mut build = ctl_core::component::build_info();
-  build.dirty = false;
-  build.source_revision.get_or_insert_with(|| "a".repeat(40));
-  let fixture = Fixture::new(EXPECTED_ID);
-  let bundle_id = fixture.compatible_bundle(&build);
-  let previous = stale_sources.then(|| fixture.stale_sources());
-  let original = fs::read(fixture.0.join("hosts.json")).unwrap();
-  let broker = fixture.broker();
-  let mut terminal = Terminal::with_args(&fixture, &["-H", "work", "ctmux", "list"]);
-  terminal.wait_for_prompt();
-  terminal.answer("y\r");
-  assert_successful_repair(
-    &fixture,
-    &bundle_id,
-    &original,
-    &mut terminal,
-    previous
-      .as_ref()
-      .map(|bundle| bundle.manifest.bundle_id.as_str()),
-  );
-  if let Some(previous) = previous {
-    let cached = ctl_client::remote_bundle::read_compatible_cached_bundle(
-      &fixture.0.join("home/.tokn/ctl/agent-bundles"),
-      fixture_target(),
-      &build,
-    )
-    .unwrap()
-    .unwrap();
-    assert_eq!(cached.bundle_id, previous.manifest.distribution_id.unwrap());
-  }
-  broker.await.unwrap();
-}
-
-fn assert_successful_repair(
-  fixture: &Fixture,
-  bundle_id: &str,
-  original: &[u8],
-  terminal: &mut Terminal,
-  selection: Option<&str>,
-) {
-  assert!(terminal.finish().success(), "{}", terminal.text());
-  let transcript = terminal.text();
-  assert!(
-    !transcript.contains("Using cached remote components"),
-    "{transcript}"
-  );
-  assert!(!fixture.0.join("builder-called").exists());
-  assert!(
-    transcript.contains("Remote components installed. Retrying the connection."),
-    "{transcript}"
-  );
-  fixture.assert_managed_route(6);
-  for (index, command) in [
-    (2, "ctl-platform-v1"),
-    (3, "ctlup-bootstrap-v1"),
-    (4, "ctlup-bootstrap-v1"),
-    (5, "activate-installed"),
-    (6, "install-archive"),
-  ] {
-    assert!(fixture.arguments(index).join("\n").contains(command));
-  }
-  assert_eq!(
-    fs::read_to_string(fixture.0.join("service-opens")).unwrap(),
-    "2"
-  );
-  assert!(fixture.0.join("platform").exists());
-  assert!(fixture.0.join("upload").exists());
-  let base = fixture.0.join("home/.tokn/ctl");
-  assert_selection(fixture, selection);
-  let installed =
-    ctl_core::bundles::Bundle::open(&fs::canonicalize(base.join("current")).unwrap()).unwrap();
-  assert_eq!(
-    installed.manifest.distribution_id.as_deref(),
-    Some(bundle_id)
-  );
-  assert_eq!(
-    fs::read_link(base.join("current")).unwrap(),
-    PathBuf::from(format!("installs/{}", installed.manifest.bundle_id))
-  );
-  assert!(!base.join("versions").exists());
-  assert_eq!(
-    fs::read_to_string(base.join("remote-id")).unwrap(),
-    EXPECTED_ID
-  );
-  for file in ["ctl-agent", "ctmuxd", "ctl-taskd", "ctld", "manifest.json"] {
     assert_eq!(
-      fs::read(base.join("current").join(file)).unwrap(),
-      fs::read(fixture.0.join("payload").join(file)).unwrap()
+      fs::read_to_string(fixture.0.join("service-opens")).unwrap(),
+      "1"
     );
-  }
-  for binary in ["ctl-agent", "ctmuxd", "ctl-taskd", "ctld"] {
+    for marker in ["count", "builder-called", "gh-called"] {
+      assert!(!fixture.0.join(marker).exists(), "unexpected {marker}");
+    }
+    for path in [
+      "current",
+      "installs",
+      "bin",
+      "cache",
+      "components",
+      "versions",
+    ] {
+      assert!(
+        matches!(fs::symlink_metadata(account.join(path)), Err(error) if error.kind() == std::io::ErrorKind::NotFound),
+        "unexpected {path}"
+      );
+    }
+    assert_eq!(fs::read(account.join("remote-id")).unwrap(), original_id);
     assert_eq!(
-      fs::metadata(base.join("current").join(binary))
-        .unwrap()
-        .permissions()
-        .mode()
-        & 0o777,
-      0o700
+      fs::read(fixture.0.join("hosts.json")).unwrap(),
+      original_hosts
     );
   }
-  let requests = frames(&fs::read(fixture.0.join("broker-service-input")).unwrap());
-  let selection: ctl_proto::IdentitySelection =
-    serde_json::from_value(requests[0].clone()).unwrap();
-  assert_eq!(
-    selection.protocol_version,
-    ctl_proto::IDENTITY_CONTRACT_V1_0_3
-  );
-  // The new outer transport retains the older published identity contract.
-  assert!(selection.client_identity.is_none());
-  assert_eq!(
-    requests[1..],
-    [
-      json!({"type": "handshake", "protocol": ctmux_proto::protocol_offer(), "client_name": "ctl", "client_version": env!("CARGO_PKG_VERSION")}),
-      json!({"type": "list_session_clients"}),
-    ]
-  );
-  assert_eq!(fs::read(fixture.0.join("hosts.json")).unwrap(), original);
 }
 
 fn assert_selection(fixture: &Fixture, expected: Option<&str>) {

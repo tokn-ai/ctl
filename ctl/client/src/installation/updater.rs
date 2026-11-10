@@ -30,7 +30,7 @@ pub async fn provision_manager(home: &Path, bundle: &Bundle) -> io::Result<()> {
   } else {
     updater_for_bundle(home, bundle).await?
   };
-  publish_manager(home, bytes).await
+  provision_manager_bytes(home, bytes).await
 }
 
 /// Provision the exact verified native manager produced with a development build.
@@ -38,10 +38,10 @@ pub async fn provision_manager(home: &Path, bundle: &Bundle) -> io::Result<()> {
 /// # Errors
 /// Rejects invalid executables or unsafe manager storage before activation.
 pub async fn provision_manager_from(home: &Path, executable: &Path) -> io::Result<()> {
-  publish_manager(home, native_updater(executable).await?).await
+  provision_manager_bytes(home, native_updater(executable).await?).await
 }
 
-async fn publish_manager(home: &Path, bytes: Vec<u8>) -> io::Result<()> {
+pub(crate) async fn provision_manager_bytes(home: &Path, bytes: Vec<u8>) -> io::Result<()> {
   let directory = home.join(".tokn/ctl/bin");
   let stage = tokio::task::spawn_blocking(move || {
     use std::io::Write as _;

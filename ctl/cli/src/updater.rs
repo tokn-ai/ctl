@@ -76,7 +76,11 @@ async fn run(arguments: Arguments) -> io::Result<i32> {
       let source = options.from.map_or_else(
         || {
           options.channel.map_or(
-            ctl_client::component_update::BuildSource::Automatic,
+            if options.working_tree {
+              ctl_client::component_update::BuildSource::WorkingTree
+            } else {
+              ctl_client::component_update::BuildSource::Automatic
+            },
             |channel| ctl_client::component_update::BuildSource::Published {
               channel: channel.into(),
             },

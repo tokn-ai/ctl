@@ -34,16 +34,24 @@ fn desktop_adapter_preserves_all_shared_progress_fields_and_phases() {
 fn source_preparation_can_exceed_the_installation_deadline_without_disabling_ssh_checks() {
   let start = Instant::now();
   let mut watchdog = RemoteInstallWatchdog::new(start);
-  let mut preparation = initial();
-  preparation.phase = Phase::PreparingBundle;
-  observe(&mut watchdog, preparation.clone(), start, false).unwrap();
-  let built = start + Duration::from_mins(10);
-  assert_eq!(
-    observe(&mut watchdog, preparation, built, false)
-      .unwrap()
-      .phase,
-    Phase::PreparingBundle
-  );
+  let mut built = start;
+  for phase in [
+    Phase::PreparingBundle,
+    Phase::DownloadingBundle,
+    Phase::BuildingBundle,
+    Phase::CheckingBundle,
+  ] {
+    let mut preparation = initial();
+    preparation.phase = phase;
+    observe(&mut watchdog, preparation.clone(), built, false).unwrap();
+    built += Duration::from_mins(10);
+    assert_eq!(
+      observe(&mut watchdog, preparation, built, false)
+        .unwrap()
+        .phase,
+      phase
+    );
+  }
   let mut connecting = initial();
   connecting.phase = Phase::Connecting;
   observe(&mut watchdog, connecting.clone(), built, false).unwrap();

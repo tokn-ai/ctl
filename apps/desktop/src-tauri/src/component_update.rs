@@ -203,16 +203,23 @@ impl Context<'_> {
       ConnectionTargetDto::Local => {
         let home = dirs::home_dir()
           .ok_or_else(|| CommandErrorDto::backend("Home directory is unavailable."))?;
-        let bundle = ctl_client::component_update::prepare(
+        let prepared = ctl_client::component_update::prepare_update(
           &home,
           ctl_core::paths::native_target(),
           ctl_core::bundles::Purpose::Local,
           &options.source,
           &crate::remote_agent::bundle_directories(app)?,
+          |progress| {
+            let _ = on_progress.send(UpdateProgress {
+              host_index,
+              state: State::Updating,
+              progress: Some(crate::remote_agent::preparation_progress(progress)),
+            });
+          },
         )
         .await
         .map_err(CommandErrorDto::backend)?;
-        ctl_client::component_update::install_local(&home, &bundle, options.package)
+        ctl_client::component_update::install_prepared_local(&home, prepared, options.package)
           .await
           .map_err(CommandErrorDto::backend)
       }

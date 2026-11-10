@@ -25,12 +25,23 @@ pub use progress::{
   RemoteInstallPhase, RemoteInstallProgress, RemoteInstallStalled, RemoteInstallWatchdog,
 };
 
-/// Receiver-confirmed installation progress from the fixed remote script.
+/// SSH bootstrap and receiver-confirmed runtime installation progress.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RemoteInstallEvent {
-  Receiving { received_bytes: u64 },
+  /// Bytes written to SSH stdin while bootstrapping the target updater.
+  SendingUpdater {
+    sent_bytes: u64,
+    total_bytes: u64,
+  },
+  /// The updater input has closed and the remote shell is checking it.
+  CheckingUpdater,
+  Receiving {
+    received_bytes: u64,
+  },
   Extracting,
-  Checking { file_name: &'static str },
+  Checking {
+    file_name: &'static str,
+  },
   Activating,
   Complete,
 }
@@ -176,11 +187,11 @@ pub async fn install_ssh_unix_bundle_with_updater(
   let (manifest, layout) = managed_installation(archive, bundle_id)?;
   let preflight = updater_bootstrap_script(updater, true)?;
   let command = updater_ssh_command(destination, options, interaction, &preflight).await?;
-  let (status, stdout, stderr) = run_updater_command(command, &[]).await?;
+  let (status, stdout, stderr) = run_updater_command(command, &[], |_| {}).await?;
   if status.code() == Some(10) {
     let bootstrap = updater_bootstrap_script(updater, false)?;
     let command = updater_ssh_command(destination, options, interaction, &bootstrap).await?;
-    let (status, stdout, stderr) = run_updater_command(command, updater).await?;
+    let (status, stdout, stderr) = run_updater_command(command, updater, &on_progress).await?;
     require_updater_success(status, &stdout, &stderr, b"ctlup-bootstrap-v1\n")?;
   } else {
     require_updater_success(status, &stdout, &stderr, b"ctlup-bootstrap-v1\n")?;
@@ -190,7 +201,7 @@ pub async fn install_ssh_unix_bundle_with_updater(
     manifest.bundle_id,
   );
   let command = updater_ssh_command(destination, options, interaction, &script).await?;
-  let (status, stdout, stderr) = run_updater_command(command, &[]).await?;
+  let (status, stdout, stderr) = run_updater_command(command, &[], |_| {}).await?;
   if status.success() {
     require_updater_success(status, &stdout, &stderr, b"ctl-install-v1\n")?;
     on_progress(RemoteInstallEvent::Receiving { received_bytes: 0 });
@@ -275,6 +286,7 @@ async fn updater_ssh_command(
 async fn run_updater_command(
   mut command: Command,
   input: &[u8],
+  on_progress: impl Fn(RemoteInstallEvent),
 ) -> Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>), CoreError> {
   command
     .stdin(Stdio::piped())
@@ -286,9 +298,33 @@ async fn run_updater_command(
   let mut stdout = child.stdout.take().ok_or(CoreError::MissingSshStdout)?;
   let mut stderr = child.stderr.take().ok_or(CoreError::MissingSshStderr)?;
   let write = async move {
-    let result = stdin.write_all(input).await;
+    let total_bytes = input.len() as u64;
+    let mut sent = 0;
+    if total_bytes != 0 {
+      on_progress(RemoteInstallEvent::SendingUpdater {
+        sent_bytes: 0,
+        total_bytes,
+      });
+    }
+    while sent < input.len() {
+      // One write can finish with only a portion of its requested bytes when
+      // SSH is backpressured. Report those bytes before waiting for more room.
+      let end = (sent + 64 * 1024).min(input.len());
+      let count = stdin.write(&input[sent..end]).await?;
+      if count == 0 {
+        return Err(io::ErrorKind::WriteZero.into());
+      }
+      sent += count;
+      on_progress(RemoteInstallEvent::SendingUpdater {
+        sent_bytes: sent as u64,
+        total_bytes,
+      });
+    }
     drop(stdin);
-    result
+    if total_bytes != 0 {
+      on_progress(RemoteInstallEvent::CheckingUpdater);
+    }
+    Ok(())
   };
   let (write, stdout, stderr, status) = tokio::join!(
     write,

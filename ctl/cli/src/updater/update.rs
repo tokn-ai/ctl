@@ -1,11 +1,14 @@
 use super::TargetOptions;
 use clap::ValueEnum;
-use ctl_client::component_update::{BuildSource, Package, UpdateResult};
+use ctl_client::component_update::{
+  BuildSource, Package, PreparationPhase, PreparedUpdate, UpdateResult,
+};
 use ctl_client::hosts::ConnectionTargetDto;
 use ctl_core::bundles::Purpose;
 use serde::Serialize;
-use std::io;
-use std::path::Path;
+use std::io::{self, Write as _};
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -175,15 +178,14 @@ async fn update_host(
     .map_err(io::Error::other)?;
   let target = resolved.target;
   if target.is_local() {
-    let bundle = ctl_client::component_update::prepare(
+    let prepared = prepare(
       home,
       ctl_core::paths::native_target(),
       Purpose::Local,
       source,
-      &crate::remote::update_bundle_directories()?,
     )
     .await?;
-    return ctl_client::component_update::install_local(home, &bundle, package).await;
+    return ctl_client::component_update::install_prepared_local(home, prepared, package).await;
   }
   crate::target::ensure_vpn(&target)
     .await
@@ -227,25 +229,9 @@ async fn update_host(
   let platform =
     ctl_client::remote_bundle::Platform::parse_probe(&output).map_err(io::Error::other)?;
   let target_triple = platform.target_triple().map_err(io::Error::other)?;
-  let bundle = ctl_client::component_update::prepare(
-    home,
-    target_triple,
-    Purpose::Upload,
-    source,
-    &crate::remote::update_bundle_directories()?,
-  )
-  .await?;
-  eprintln!(
-    "ctlup: Source bundle {} · revision {}",
-    bundle.manifest.bundle_id,
-    bundle.manifest.components["ctl-agent"]
-      .build
-      .source_revision
-      .as_deref()
-      .unwrap_or("unknown")
-  );
+  let prepared = prepare(home, target_triple, Purpose::Upload, source).await?;
   let result =
-    install_with_progress(&destination, &options, &interaction, &bundle, package).await?;
+    install_with_progress(&destination, &options, &interaction, &prepared, package).await?;
   if matches!(
     target,
     ConnectionTargetDto::Ssh {
@@ -259,7 +245,7 @@ async fn update_host(
     target
       .verify_remote_identity(&identity)
       .map_err(io::Error::other)?;
-    verify_activation(&bundle, &identity, package)?;
+    verify_activation(&prepared.bundle, &identity, package)?;
   }
   Ok(result)
 }
@@ -299,41 +285,188 @@ fn verify_activation(
   Ok(())
 }
 
+async fn prepare(
+  home: &Path,
+  target: &str,
+  purpose: Purpose,
+  source: &BuildSource,
+) -> io::Result<PreparedUpdate> {
+  let last_download_report = Mutex::new(None::<Instant>);
+  let prepared = ctl_client::component_update::prepare_update(
+    home,
+    target,
+    purpose,
+    source,
+    &bundle_directories(home)?,
+    |progress| match progress.phase {
+      // Cargo's build diagnostics already go to stderr.
+      PreparationPhase::Building => {}
+      PreparationPhase::Downloading => {
+        let received = progress.received_bytes;
+        let total = progress.total_bytes;
+        let mut last_report = last_download_report.lock().unwrap();
+        if received == 0 && total == 0 {
+          eprintln!("ctlup: Preparing {}", progress.detail);
+          *last_report = Some(Instant::now());
+        } else if received != 0
+          && (received == total
+            || last_report.is_none_or(|last| last.elapsed() >= Duration::from_secs(1)))
+        {
+          if total == 0 {
+            eprintln!("ctlup: {} ({received} bytes)", progress.detail);
+          } else {
+            eprintln!("ctlup: {} ({received}/{total} bytes)", progress.detail);
+          }
+          *last_report = Some(Instant::now());
+        }
+      }
+      _ => eprintln!("ctlup: {progress}"),
+    },
+  )
+  .await?;
+  if purpose == Purpose::Upload {
+    let manifest = &prepared.bundle.manifest;
+    eprintln!(
+      "ctlup: Source bundle {} · revision {}",
+      manifest.bundle_id,
+      manifest.components["ctl-agent"]
+        .build
+        .source_revision
+        .as_deref()
+        .unwrap_or("unknown")
+    );
+  }
+  Ok(prepared)
+}
+
+fn bundle_directories(home: &Path) -> io::Result<Vec<PathBuf>> {
+  if let Some(directory) = std::env::var_os("CTL_REMOTE_BUNDLES_DIR") {
+    return Ok(vec![PathBuf::from(directory)]);
+  }
+  let mut directories = Vec::new();
+  if cfg!(debug_assertions) {
+    directories.push(
+      PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../apps/desktop/src-tauri/resources/agent-bundles"),
+    );
+  }
+  if let Some(parent) = std::env::current_exe()?.parent() {
+    directories.push(parent.join("resources/agent-bundles"));
+  }
+  directories.push(home.join(".tokn/ctl/agent-bundles"));
+  Ok(directories)
+}
+
 async fn install_with_progress(
   destination: &str,
   options: &ctl_client::SshConnectionOptions,
   interaction: &ctl_client::SshInteraction,
-  bundle: &ctl_core::bundles::Bundle,
+  prepared: &PreparedUpdate,
   package: Package,
 ) -> io::Result<UpdateResult> {
-  let (updates, mut receiver) =
-    tokio::sync::watch::channel(ctl_client::RemoteInstallProgress::default());
-  let upload = ctl_client::component_update::install_remote(
+  let (updates, mut receiver) = tokio::sync::watch::channel(ctl_client::RemoteInstallProgress {
+    phase: ctl_client::RemoteInstallPhase::VerifyingBundle,
+    ..ctl_client::RemoteInstallProgress::default()
+  });
+  let upload = ctl_client::component_update::install_prepared_remote(
     destination,
     options,
     interaction,
-    bundle,
+    prepared,
     package,
     |progress| {
       updates.send_replace(progress);
     },
   );
   tokio::pin!(upload);
-  let mut tick = tokio::time::interval(Duration::from_millis(500));
   let mut watchdog = ctl_client::RemoteInstallWatchdog::new(Instant::now());
-  let mut display = crate::remote::ProgressDisplay::default();
-  let result = loop {
+  let mut tick = tokio::time::interval(Duration::from_millis(500));
+  let mut display = ProgressDisplay::default();
+  loop {
     tokio::select! {
-      result = &mut upload => { display.finish(); break result.map_err(io::Error::other)?; },
+      result = &mut upload => return result.map_err(io::Error::other),
       _ = tick.tick() => {},
-      _ = receiver.changed() => {},
+      changed = receiver.changed() => {
+        if changed.is_err() {
+          return upload.await.map_err(io::Error::other);
+        }
+      }
     }
     let progress = watchdog
       .observe(receiver.borrow().clone(), Instant::now(), false)
       .map_err(io::Error::other)?;
     display.show(&progress);
-  };
-  Ok(result)
+  }
+}
+
+#[derive(Default)]
+struct ProgressDisplay {
+  active: bool,
+  phase: Option<ctl_client::RemoteInstallPhase>,
+  file_name: Option<String>,
+}
+
+impl ProgressDisplay {
+  fn show(&mut self, progress: &ctl_client::RemoteInstallProgress) {
+    use ctl_client::RemoteInstallPhase as Phase;
+    let file = crate::table::text(progress.file_name.as_deref().unwrap_or("remote components"));
+    let changed = self.phase != Some(progress.phase) || self.file_name != progress.file_name;
+    if changed {
+      self.finish();
+      self.phase = Some(progress.phase);
+      self.file_name.clone_from(&progress.file_name);
+    }
+    let message = if progress.phase == Phase::Transferring {
+      if changed {
+        eprintln!("ctlup: Sending {file}");
+      }
+      let total = progress.total_bytes.max(1);
+      let filled = usize::try_from(progress.transferred_bytes.saturating_mul(20) / total)
+        .unwrap_or(20)
+        .min(20);
+      format!(
+        "[{}{}] {}% ({}/{} bytes, {} B/s)",
+        "=".repeat(filled),
+        " ".repeat(20 - filled),
+        progress.transferred_bytes.saturating_mul(100) / total,
+        progress.transferred_bytes,
+        progress.total_bytes,
+        progress.bytes_per_second
+      )
+    } else {
+      if !changed {
+        return;
+      }
+      let stage = match progress.phase {
+        Phase::DetectingPlatform => "Detecting platform",
+        Phase::VerifyingBundle => "Verifying bundle",
+        Phase::Connecting => "Opening upload channel",
+        Phase::Extracting => "Extracting",
+        Phase::Checking => "Checking",
+        Phase::Activating => "Activating",
+        Phase::Complete => "Installed",
+        Phase::Transferring => unreachable!(),
+      };
+      eprintln!("ctlup: {stage} {file}");
+      return;
+    };
+    eprint!("\r\x1b[2Kctlup: {message}");
+    let _ = io::stderr().flush();
+    self.active = true;
+  }
+
+  fn finish(&mut self) {
+    if self.active {
+      eprintln!();
+      self.active = false;
+    }
+  }
+}
+
+impl Drop for ProgressDisplay {
+  fn drop(&mut self) {
+    self.finish();
+  }
 }
 
 #[cfg(test)]

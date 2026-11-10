@@ -52,6 +52,7 @@ pub(super) async fn activate(home: &Path, bundle_id: &str) -> io::Result<i32> {
 fn emit(event: ctl_client::RemoteInstallEvent) {
   use ctl_client::RemoteInstallEvent as Event;
   let line = match event {
+    Event::SendingUpdater { .. } | Event::CheckingUpdater => return,
     Event::Receiving { received_bytes } => {
       format!("ctl-install-progress-v1 receiving {received_bytes}")
     }

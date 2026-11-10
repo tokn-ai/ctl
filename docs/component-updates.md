@@ -134,8 +134,8 @@ path on Unix. Windows retains its existing daemon build fallback.
 
 ## Downloads and cache
 
-Updates resolve the current Dev or Stable channel, validate its immutable
-manifest, and download only the needed target archive. Archive and binary
+Updates resolve Dev or Stable once, then verify the target runtime archive
+and its updater from the same immutable publication. Archive and binary
 checksums and compatible protocol advertisements are verified before use.
 Channel discovery is refreshed before cache reuse. Network errors remain
 errors; choose provided files or the desktop’s included offline build explicitly.
@@ -160,10 +160,17 @@ Saved account identity is checked before mutation and the installed agent is
 verified afterward. A failed post-install check reports that activation may
 have completed; it does not retry, roll back or stop services automatically.
 
+When a Unix host has a missing or recognized outdated agent, `ctl` prints a
+`ctlup update` command for the selected host or SSH alias. Run it from macOS
+or Linux, then reconnect. Windows clients and targets are outside the
+updater's supported platforms.
+
 ## Desktop and migration
 
 Use **Update components…** in the command palette, About, or host settings.
-Choose hosts and a channel, provided files, or an included offline build. Every
+Choose hosts and a channel, provided files, or an included offline build.
+Development builds can also cross-build Linux x64 and ARM64 from the checkout.
+The dialog reports preparation progress before SSH transfer begins. Every
 update installs a complete build. About’s bundle list shows the active native
 build and offers local installation of another usable build; foreign artifacts
 are deployment cache entries, not independent upload profiles.

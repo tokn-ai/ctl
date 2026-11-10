@@ -70,7 +70,7 @@ async fn remote_repairs_reject_legacy_sources_before_upload_or_selection_changes
       .to_string()
       .contains("no selected or included compatible build")
   );
-  let provided = prepare(
+  let provided = prepare_update(
     &account.0,
     target,
     Purpose::Upload,
@@ -80,9 +80,11 @@ async fn remote_repairs_reject_legacy_sources_before_upload_or_selection_changes
       ctld_package: None,
     },
     &[],
+    |_| {},
   )
   .await
-  .unwrap_err();
+  .err()
+  .expect("legacy source must fail before packaging");
   assert!(provided.to_string().contains("ctl_transport 1.0.1"));
   assert!(!account.0.join(".tokn/ctl/components").exists());
   assert!(!account.0.join(".tokn/ctl/cache/components").exists());
@@ -94,19 +96,6 @@ async fn remote_repairs_reject_legacy_sources_before_upload_or_selection_changes
       .manifest
       .bundle_id,
     legacy.manifest.bundle_id
-  );
-  let error = install_remote(
-    "invalid\nhost",
-    &crate::SshConnectionOptions::default(),
-    &crate::SshInteraction::Batch,
-    &legacy,
-    Package::FullBundle,
-    |_| panic!("an unsupported source must fail before starting an upload"),
-  )
-  .await
-  .unwrap_err();
-  assert!(
-    matches!(error, crate::CoreError::InvalidComponentBundle(message) if message.contains("ctl_transport 1.0.1"))
   );
 }
 
@@ -500,17 +489,21 @@ async fn development_builder_errors_include_bounded_diagnostics_without_docker()
     "-c",
     "printf 'Docker fixture is unavailable\\n' >&2; printf 'must not enter JSON stdout'; exit 17",
   ]);
-  let error = run_development_builder(command)
+  let error = run_development_builder(command, &|_| {})
     .await
     .unwrap_err()
     .to_string();
   assert!(error.contains("17"));
   assert!(error.contains("Docker fixture is unavailable"));
   let mut bytes = vec![b'x'; MAX_BUILD_DIAGNOSTIC_BYTES * 2];
-  bytes.extend_from_slice(b"\nfinal compiler cause");
-  let tail = build_diagnostics(bytes.as_slice(), &mut tokio::io::sink())
-    .await
-    .unwrap();
+  bytes.extend_from_slice(b"\nCompiling fixture v0.1.0 (/local/checkout)\nfinal compiler cause");
+  let progress = std::sync::Mutex::new(Vec::new());
+  let tail = build_diagnostics(bytes.as_slice(), &mut tokio::io::sink(), &|event| {
+    progress.lock().unwrap().push(event.detail);
+  })
+  .await
+  .unwrap();
   assert_eq!(tail.len(), MAX_BUILD_DIAGNOSTIC_BYTES);
   assert!(tail.ends_with("final compiler cause"));
+  assert_eq!(progress.into_inner().unwrap(), ["Compiling fixture v0.1.0"]);
 }

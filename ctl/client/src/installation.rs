@@ -14,10 +14,10 @@ mod remote;
 mod tests;
 mod updater;
 pub use remote::{remote_rollback, remote_status};
-pub(crate) use updater::remember_supplied_updater;
 pub use updater::{
   provision_manager, provision_manager_from, updater_for_bundle, updater_for_manifest,
 };
+pub(crate) use updater::{provision_manager_bytes, remember_supplied_updater};
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

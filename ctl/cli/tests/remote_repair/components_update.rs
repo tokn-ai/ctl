@@ -38,14 +38,7 @@ fn source(fixture: &Fixture) -> String {
     source_fingerprint: "a".repeat(64),
     dirty: false,
   };
-  let bundle_id = fixture.compatible_bundle(&build);
-  let manifest: serde_json::Value =
-    serde_json::from_slice(&fs::read(fixture.0.join("payload/manifest.json")).unwrap()).unwrap();
-  let path = fixture.0.join("upgraded-identity");
-  let mut identity: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-  identity["protocols"] = manifest["components"]["ctl-agent"]["protocols"].clone();
-  fs::write(path, serde_json::to_vec(&identity).unwrap()).unwrap();
-  bundle_id
+  fixture.compatible_bundle(&build)
 }
 
 fn update(fixture: &Fixture) -> Terminal {
@@ -76,7 +69,40 @@ fn assert_update_channels(fixture: &Fixture) {
     assert!(fixture.arguments(index).join("\n").contains(command));
   }
   assert!(!fixture.0.join("builder-called").exists());
-  assert!(!fixture.0.join("service-input-1").exists());
+  assert!(!fixture.0.join("service-opens").exists());
+}
+
+fn assert_installed_bundle(fixture: &Fixture, bundle_id: &str) {
+  let account = fixture.0.join("home/.tokn/ctl");
+  let current = account.join("current");
+  let installed = ctl_core::bundles::Bundle::open(&fs::canonicalize(&current).unwrap()).unwrap();
+  assert_eq!(
+    installed.manifest.distribution_id.as_deref(),
+    Some(bundle_id)
+  );
+  assert_eq!(
+    fs::read_link(&current).unwrap(),
+    PathBuf::from("installs").join(&installed.manifest.bundle_id)
+  );
+  assert_eq!(
+    fs::read_to_string(account.join("remote-id")).unwrap(),
+    EXPECTED_ID
+  );
+  let payload = fixture.0.join("payload");
+  for file in [
+    "ctl-agent",
+    "ctmuxd",
+    "ctl-taskd",
+    "ctld",
+    "ctl",
+    "ctmux",
+    "manifest.json",
+  ] {
+    assert_eq!(
+      fs::read(current.join(file)).unwrap(),
+      fs::read(payload.join(file)).unwrap()
+    );
+  }
 }
 
 #[cfg(target_os = "macos")]
@@ -86,8 +112,9 @@ async fn a_downloaded_manager_filename_can_deploy_offline_to_its_native_target()
   let fixture = Fixture::new(EXPECTED_ID);
   source(&fixture);
   legacy_installation(&fixture, Some(EXPECTED_ID));
+  fixture.prepare_updater();
   let executable = fixture.0.join("ctlup-fixture-manager");
-  let broker = fixture.broker_with_observation(false);
+  let broker = fixture.updater_broker();
   let mut terminal = Terminal::with_executable(
     &fixture,
     &[
@@ -97,7 +124,6 @@ async fn a_downloaded_manager_filename_can_deploy_offline_to_its_native_target()
       "--from",
       fixture.0.join("bundles").to_str().unwrap(),
     ],
-    true,
     &executable,
     None,
   );
@@ -124,7 +150,7 @@ async fn old_agent_without_inspect_can_update_the_complete_build_and_verify_acti
       .unwrap();
     assert_eq!(old_inspect.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&old_inspect.stderr).contains("unrecognized subcommand"));
-    let broker = fixture.broker_with_observation(false);
+    let broker = fixture.updater_broker();
     let mut terminal = update(&fixture);
     assert!(terminal.finish().success(), "{}", terminal.text());
     assert!(
@@ -133,16 +159,7 @@ async fn old_agent_without_inspect_can_update_the_complete_build_and_verify_acti
         .contains("installed; running services preserved")
     );
     assert_update_channels(&fixture);
-    let current = fixture.0.join("home/.tokn/ctl/current");
-    let installed = ctl_core::bundles::Bundle::open(&fs::canonicalize(&current).unwrap()).unwrap();
-    assert_eq!(
-      installed.manifest.distribution_id.as_deref(),
-      Some(bundle_id.as_str())
-    );
-    assert_eq!(
-      fs::read_to_string(current.parent().unwrap().join("remote-id")).unwrap(),
-      EXPECTED_ID
-    );
+    assert_installed_bundle(&fixture, &bundle_id);
     assert_eq!(
       fs::read(fixture.0.join("hosts.json")).unwrap(),
       original_hosts
@@ -159,7 +176,7 @@ async fn missing_or_changed_account_id_blocks_before_platform_source_or_upload()
     let fixture = Fixture::new(EXPECTED_ID);
     let legacy = legacy_installation(&fixture, remote_id);
     let original_hosts = fs::read(fixture.0.join("hosts.json")).unwrap();
-    let broker = fixture.broker_with_observation(false);
+    let broker = fixture.updater_broker();
     let mut terminal = update(&fixture);
     assert!(!terminal.finish().success(), "{}", terminal.text());
     if remote_id.is_some() {
@@ -199,7 +216,7 @@ async fn newly_installed_agent_must_still_report_the_saved_account_and_exact_act
       identity["bundle"]["bundle_id"] = json!("different-installed-bundle");
     }
     fs::write(path, serde_json::to_vec(&identity).unwrap()).unwrap();
-    let broker = fixture.broker_with_observation(false);
+    let broker = fixture.updater_broker();
     let mut terminal = update(&fixture);
     assert!(!terminal.finish().success(), "{}", terminal.text());
     let expected = if changed_account {
@@ -217,4 +234,65 @@ async fn newly_installed_agent_must_still_report_the_saved_account_and_exact_act
     );
     broker.await.unwrap();
   }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn malformed_provided_bundle_is_rejected_before_bootstrap_or_upload() {
+  let _guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
+  let fixture = Fixture::new(EXPECTED_ID);
+  let original_hosts = fs::read(fixture.0.join("hosts.json")).unwrap();
+  let broker = fixture.updater_broker();
+  let mut terminal = update(&fixture);
+  assert!(!terminal.finish().success(), "{}", terminal.text());
+  assert!(
+    terminal.text().contains("invalid remote bundle-set JSON"),
+    "{}",
+    terminal.text()
+  );
+  fixture.assert_managed_channels(2);
+  assert!(fixture.arguments(1).join("\n").contains("remote-id"));
+  assert!(fixture.arguments(2).join("\n").contains("ctl-platform-v1"));
+  for marker in [
+    "bootstrap",
+    "preflight",
+    "upload",
+    "inspect",
+    "builder-called",
+  ] {
+    assert!(!fixture.0.join(marker).exists(), "unexpected {marker}");
+  }
+  assert!(!fixture.0.join("home/.tokn/ctl/current").exists());
+  assert_eq!(
+    fs::read(fixture.0.join("hosts.json")).unwrap(),
+    original_hosts
+  );
+  broker.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn explicit_update_preserves_older_cached_and_selected_sources() {
+  let _guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
+  let fixture = Fixture::new(EXPECTED_ID);
+  let previous = fixture.stale_sources();
+  let bundle_id = source(&fixture);
+  let original_hosts = fs::read(fixture.0.join("hosts.json")).unwrap();
+  let broker = fixture.updater_broker();
+  let mut terminal = update(&fixture);
+  assert!(terminal.finish().success(), "{}", terminal.text());
+  assert_update_channels(&fixture);
+  assert_installed_bundle(&fixture, &bundle_id);
+  assert_selection(&fixture, Some(&previous.manifest.bundle_id));
+  let cache = ctl_client::remote_bundle::BundleCacheEntry::new(
+    &fixture.0.join("home/.tokn/ctl/agent-bundles"),
+    fixture_target(),
+    &previous.manifest.components["ctl-agent"].build,
+  )
+  .unwrap();
+  let retained = cache.load().unwrap().unwrap();
+  assert_eq!(Some(retained.bundle_id), previous.manifest.distribution_id);
+  assert_eq!(
+    fs::read(fixture.0.join("hosts.json")).unwrap(),
+    original_hosts
+  );
+  broker.await.unwrap();
 }

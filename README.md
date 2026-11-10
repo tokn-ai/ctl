@@ -810,16 +810,13 @@ The default target is local. Persistent remote shells require `ctl-agent` and
 `ctmuxd` on the destination, as with `ctl ctmux`; plain SSH operations need only
 the remote SSH service.
 
-Interactive Unix connections offer to install matching components when the
-remote agent is missing or uses the old `ctl-ssh-v2` protocol, then retry once.
-Repair verifies any saved machine ID and the bundle's own source identity and
-checksums, reuses the chosen SSH route, and shows received bytes, speed, and
-installation stages. It preserves running daemons and can be cancelled with
-Ctrl-C. Piped commands and background reconnects never prompt.
-`CTL_REMOTE_BUNDLES_DIR` supplies an explicit local source. Otherwise repair
-uses the same automatic policy as component updates: local Linux x64 working-tree
-builds during development, and published development/stable channels for other
-remote updates. `ctlup check --channel dev` checks metadata without
+When a Unix host needs a component update, `ctl` prints the corresponding
+`ctlup update` command. Run it from macOS or Linux, then reconnect. The
+updater verifies any saved machine ID, uses the selected SSH route, and shows
+download and installation progress. It preserves running daemons.
+`CTL_REMOTE_BUNDLES_DIR` supplies an explicit local source. Use
+`ctlup update --working-tree` to build for Linux x64 or ARM64 from a checkout.
+`ctlup check --channel dev` checks metadata without
 opening SSH or downloading binaries. The current publication is resolved before
 using its verified download cache. `ctlup update` manages complete local or remote
 installations; `ctlup rollback` restores the previous build without restarting services.

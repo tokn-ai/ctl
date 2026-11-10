@@ -16,23 +16,30 @@ async fn updater_bootstrap_verifies_bytes_and_executable_before_replacing_the_ma
     command.args(["-c", &script]).env("HOME", &home);
     command
   };
-  let (status, _, _) =
-    run_updater_command(run(updater_bootstrap_script(updater, true).unwrap()), &[])
-      .await
-      .unwrap();
+  let (status, _, _) = run_updater_command(
+    run(updater_bootstrap_script(updater, true).unwrap()),
+    &[],
+    |_| panic!("an updater probe should not report upload progress"),
+  )
+  .await
+  .unwrap();
   assert_eq!(status.code(), Some(10));
   let (status, stdout, stderr) = run_updater_command(
     run(updater_bootstrap_script(updater, false).unwrap()),
     updater,
+    |_| {},
   )
   .await
   .unwrap();
   require_updater_success(status, &stdout, &stderr, b"ctlup-bootstrap-v1\n").unwrap();
   assert_eq!(std::fs::read(&binary).unwrap(), updater);
-  let (status, stdout, stderr) =
-    run_updater_command(run(updater_bootstrap_script(updater, true).unwrap()), &[])
-      .await
-      .unwrap();
+  let (status, stdout, stderr) = run_updater_command(
+    run(updater_bootstrap_script(updater, true).unwrap()),
+    &[],
+    |_| panic!("an updater probe should not report upload progress"),
+  )
+  .await
+  .unwrap();
   require_updater_success(status, &stdout, &stderr, b"ctlup-bootstrap-v1\n").unwrap();
   assert_eq!(
     std::fs::metadata(&binary).unwrap().permissions().mode() & 0o777,
@@ -48,7 +55,9 @@ async fn updater_bootstrap_verifies_bytes_and_executable_before_replacing_the_ma
       b"#!/bin/sh\nexit 9\n".as_slice(),
     ),
   ] {
-    let (status, _, _) = run_updater_command(run(script), input).await.unwrap();
+    let (status, _, _) = run_updater_command(run(script), input, |_| {})
+      .await
+      .unwrap();
     assert!(!status.success());
     assert_eq!(std::fs::read(&binary).unwrap(), updater);
     assert_eq!(
@@ -63,11 +72,49 @@ async fn updater_bootstrap_verifies_bytes_and_executable_before_replacing_the_ma
   let (status, _, _) = run_updater_command(
     run(updater_bootstrap_script(updater, false).unwrap()),
     updater,
+    |_| {},
   )
   .await
   .unwrap();
   assert!(!status.success());
   assert_eq!(std::fs::read(&outside).unwrap(), b"untouched");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn updater_upload_reports_partial_input_before_checking() {
+  use std::sync::Mutex;
+
+  let mut command = Command::new("sh");
+  command.args(["-c", "cat >/dev/null"]);
+  let input = vec![0; 128 * 1024 + 1];
+  let total = input.len() as u64;
+  let events = Mutex::new(Vec::new());
+  let (status, _, _) = run_updater_command(command, &input, |event| {
+    events.lock().unwrap().push(event);
+  })
+  .await
+  .unwrap();
+  assert!(status.success());
+  let mut events = events.into_inner().unwrap();
+  assert_eq!(events.pop(), Some(RemoteInstallEvent::CheckingUpdater));
+  let bytes: Vec<_> = events
+    .into_iter()
+    .map(|event| match event {
+      RemoteInstallEvent::SendingUpdater {
+        sent_bytes,
+        total_bytes,
+      } => {
+        assert_eq!(total_bytes, total);
+        sent_bytes
+      }
+      other => panic!("unexpected updater progress {other:?}"),
+    })
+    .collect();
+  assert_eq!(bytes.first(), Some(&0));
+  assert_eq!(bytes.last(), Some(&total));
+  assert!(bytes.len() > 2);
+  assert!(bytes.windows(2).all(|pair| pair[0] < pair[1]));
 }
 
 #[cfg(unix)]

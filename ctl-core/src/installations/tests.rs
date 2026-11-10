@@ -410,6 +410,8 @@ fn original_unmanaged_versions_can_be_superseded_without_claiming_a_rollback() {
 
 #[test]
 fn cache_gc_waits_for_the_last_prepared_bundle_clone() {
+  use std::time::{Duration, Instant};
+
   let home = Home::new();
   let first = fixture(&home.0, 1, true);
   let second = fixture(&home.0, 2, true);
@@ -419,10 +421,30 @@ fn cache_gc_waits_for_the_last_prepared_bundle_clone() {
     .unwrap();
   let clone = prepared.clone();
   drop(prepared);
-  cache
-    .publish(&second.manifest, &second.read_files().unwrap())
-    .unwrap();
-  let result = cache.prune_cache(0).unwrap();
+  drop(
+    cache
+      .publish(&second.manifest, &second.read_files().unwrap())
+      .unwrap(),
+  );
+  let prune_until_removed = |pinned: Option<&str>| {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+      let result = cache.prune_cache(0).unwrap();
+      if let Some(pinned) = pinned {
+        assert!(
+          result.retained_in_use.iter().any(|id| id == pinned),
+          "{result:?}"
+        );
+      }
+      // A parallel fork can hold an inherited lease briefly after our close.
+      // A prune that removed anything must still pass the exact assertions.
+      if !result.removed.is_empty() || Instant::now() >= deadline {
+        break result;
+      }
+      std::thread::sleep(Duration::from_millis(10));
+    }
+  };
+  let result = prune_until_removed(Some(&first.manifest.bundle_id));
   assert_eq!(result.removed, vec![second.manifest.bundle_id]);
   assert_eq!(
     result.retained_in_use,
@@ -431,7 +453,7 @@ fn cache_gc_waits_for_the_last_prepared_bundle_clone() {
   assert!(result.remaining_bytes > 0);
   assert!(clone.read_files().is_ok());
   drop(clone);
-  let result = cache.prune_cache(0).unwrap();
+  let result = prune_until_removed(None);
   assert_eq!(result.removed, vec![first.manifest.bundle_id]);
   assert_eq!(result.remaining_bytes, 0);
   assert!(Store::new(&home.0).prune_cache(0).is_err());

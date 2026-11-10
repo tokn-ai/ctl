@@ -55,9 +55,7 @@ impl UpdaterInfo {
         "invalid updater build, target or binary identity".into(),
       ));
     }
-    if info.bundle_id != info.app_version
-      && info.bundle_id != format!("{}-dev.{}", info.app_version, &info.git_revision[..12])
-    {
+    if !super::super::valid_bundle_id(&info.app_version, &info.bundle_id, &info.git_revision) {
       return Err(Error::Invalid(
         "updater bundle ID differs from its source identity".into(),
       ));

@@ -9,6 +9,9 @@ use std::time::{Duration, Instant};
 
 use super::{BundleSet, Error, MAX_BUNDLE_BYTES, MAX_BUNDLE_SET_BYTES, VerifiedBundle};
 
+mod history;
+pub use history::{PublishedRelease, PublishedReleaseDetails, list_releases, view_release};
+
 #[cfg(unix)]
 mod updater;
 #[cfg(unix)]
@@ -185,32 +188,24 @@ impl Resolver {
   }
 
   async fn publication(&self, channel: BundleChannel) -> Result<Publication, Error> {
-    let pointer = match self.channel_pointer(channel.name()).await {
-      Err(Error::NotAvailable(_)) if channel == BundleChannel::Nightly => {
-        self.channel_pointer("dev").await?
-      }
-      result => result?,
-    };
+    let pointer = self
+      .channel_pointer(channel.name())
+      .await
+      .map_err(|error| match error {
+        Error::NotAvailable(_) => {
+          Error::NotAvailable(format!("the {} channel is not published", channel.name()))
+        }
+        error => error,
+      })?;
     let url = reqwest::Url::parse(&pointer.bundle_set_url)
       .map_err(|_| Error::Invalid("invalid component publication URL".into()))?;
     if !trusted(&url, &self.root) || !url.path().ends_with("/bundle-set.json") {
       return Err(Error::Invalid("untrusted component publication URL".into()));
     }
     let bytes = self.read(&url, MAX_BUNDLE_SET_BYTES).await?;
-    let manifest = BundleSet::parse_intrinsic(&bytes)?;
-    if manifest.schema_version < 2 {
-      return Err(Error::Invalid(
-        "published channels require versioned component metadata".into(),
-      ));
-    }
+    let manifest = parse_published_manifest(&bytes)?;
     if channel == BundleChannel::Stable
-      && (manifest.bundle_id != manifest.app_version
-        || manifest
-          .app_version
-          .split('+')
-          .next()
-          .unwrap_or(&manifest.app_version)
-          .contains('-'))
+      && (manifest.bundle_id != manifest.app_version || is_prerelease(&manifest.app_version))
     {
       return Err(Error::Invalid(
         "stable channel points to a development or prerelease bundle".into(),
@@ -224,22 +219,8 @@ impl Resolver {
   }
 
   async fn check(&self, channel: BundleChannel) -> Result<PublishedCatalog, Error> {
-    let publication = self.publication(channel).await?;
-    let manifest = publication.manifest;
-    let targets = manifest
-      .targets
-      .iter()
-      .map(|(target, metadata)| {
-        Ok(PublishedTarget {
-          target_triple: target.clone(),
-          compatible: manifest.is_compatible(target)?,
-          components: metadata
-            .components
-            .clone()
-            .ok_or_else(|| Error::Invalid("publication lacks component metadata".into()))?,
-        })
-      })
-      .collect::<Result<_, Error>>()?;
+    let manifest = self.publication(channel).await?.manifest;
+    let targets = published_targets(&manifest)?;
     Ok(PublishedCatalog {
       channel,
       bundle_id: manifest.bundle_id,
@@ -422,6 +403,37 @@ impl Resolver {
     }
     Ok(bytes)
   }
+}
+
+fn parse_published_manifest(bytes: &[u8]) -> Result<BundleSet, Error> {
+  let manifest = BundleSet::parse_intrinsic(bytes)?;
+  if manifest.schema_version < 2 {
+    return Err(Error::Invalid(
+      "published channels require versioned component metadata".into(),
+    ));
+  }
+  Ok(manifest)
+}
+
+fn published_targets(manifest: &BundleSet) -> Result<Vec<PublishedTarget>, Error> {
+  manifest
+    .targets
+    .iter()
+    .map(|(target, metadata)| {
+      Ok(PublishedTarget {
+        target_triple: target.clone(),
+        compatible: manifest.is_compatible(target)?,
+        components: metadata
+          .components
+          .clone()
+          .ok_or_else(|| Error::Invalid("publication lacks component metadata".into()))?,
+      })
+    })
+    .collect()
+}
+
+fn is_prerelease(version: &str) -> bool {
+  version.split('+').next().unwrap_or(version).contains('-')
 }
 
 fn trusted(url: &reqwest::Url, root: &reqwest::Url) -> bool {

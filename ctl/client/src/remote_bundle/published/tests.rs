@@ -111,6 +111,156 @@ fn pointer(root: &reqwest::Url) -> serde_json::Value {
   serde_json::json!({"schema_version":1,"channel":"nightly","bundle_set_url":root.join("sets/test/bundle-set.json").unwrap().as_str()})
 }
 
+fn retained_release(channel: &str, version: &str, run_number: u64) -> serde_json::Value {
+  let revision = "a".repeat(40);
+  let bundle_id = match channel {
+    "stable" => version.to_owned(),
+    "dev" => format!("{version}-dev.{}", &revision[..12]),
+    _ => format!("{version}-nightly.20261110+g{}", &revision[..12]),
+  };
+  serde_json::json!({
+    "channel": channel,
+    "publication_id": format!("{bundle_id}-{run_number}-1"),
+    "bundle_id": bundle_id,
+    "app_version": version,
+    "git_revision": revision,
+    "run_id": run_number.to_string(),
+    "run_number": run_number,
+    "run_attempt": 1,
+  })
+}
+
+#[tokio::test]
+async fn release_history_lists_retained_channels_and_accepts_a_legacy_nightly_head() {
+  let first = retained_release("dev", "0.1.0", 1);
+  let latest = retained_release("dev", "0.1.0", 2);
+  let stable = retained_release("stable", "0.1.0", 3);
+  let prerelease = retained_release("stable", "0.1.1-beta.1", 4);
+  let catalog = serde_json::json!({
+    "schema_version": 1,
+    "site": "ctl-bundle-pages",
+    "generation": 4,
+    "channels": {"dev": latest["publication_id"], "stable": stable["publication_id"]},
+    "publications": [first, stable, prerelease, latest],
+  });
+  let server = Server::start(|_| {
+    BTreeMap::from([(
+      "/bundles/catalog.json".into(),
+      serde_json::to_vec(&catalog).unwrap(),
+    )])
+  })
+  .await;
+  let resolver = server.resolver();
+
+  let nightly = resolver
+    .list_releases(BundleChannel::Nightly)
+    .await
+    .unwrap();
+  assert_eq!(nightly.len(), 2);
+  assert_eq!(
+    nightly[0].publication_id,
+    latest["publication_id"].as_str().unwrap()
+  );
+  assert_eq!(nightly[0].channel, BundleChannel::Nightly);
+  assert!(nightly[0].current);
+  assert!(!nightly[1].current);
+
+  let stable_releases = resolver.list_releases(BundleChannel::Stable).await.unwrap();
+  assert_eq!(stable_releases.len(), 1);
+  assert_eq!(stable_releases[0].app_version, "0.1.0");
+  assert!(stable_releases[0].current);
+  assert_eq!(
+    server.requests.lock().unwrap().as_slice(),
+    ["/bundles/catalog.json", "/bundles/catalog.json"]
+  );
+}
+
+#[tokio::test]
+async fn release_view_fetches_only_the_catalog_and_exact_manifest_and_checks_identity() {
+  let nightly = retained_release("nightly", "0.1.0", 1);
+  let id = nightly["publication_id"].as_str().unwrap();
+  let bundle_id = nightly["bundle_id"].as_str().unwrap();
+  let catalog = serde_json::json!({
+    "schema_version": 1,
+    "site": "ctl-bundle-pages",
+    "generation": 1,
+    "channels": {"nightly": id},
+    "publications": [nightly],
+  });
+  let manifest_path = format!("/bundles/sets/{id}/bundle-set.json");
+
+  for (revision, succeeds) in [("a".repeat(40), true), ("b".repeat(40), false)] {
+    let mut fixture = Fixture::new("0.1.0", &revision);
+    let revision_id = format!("0.1.0-nightly.20261110+g{}", &revision[..12]);
+    fixture.outer["bundle_id"] = serde_json::json!(revision_id);
+    for (target, value) in fixture.outer["targets"].as_object_mut().unwrap() {
+      value["archive"] =
+        serde_json::json!(format!("ctl-agent-bundle-{revision_id}-{target}.tar.gz"));
+    }
+    let server = Server::start(|_| {
+      BTreeMap::from([
+        (
+          "/bundles/catalog.json".into(),
+          serde_json::to_vec(&catalog).unwrap(),
+        ),
+        (
+          manifest_path.clone(),
+          fixture.bind_archive(&fixture.archive()),
+        ),
+      ])
+    })
+    .await;
+    let resolver = server.resolver();
+    let detail = resolver
+      .view_release(BundleChannel::Nightly, succeeds.then_some(id))
+      .await;
+    if succeeds {
+      let detail = detail.unwrap();
+      assert_eq!(detail.release.publication_id, id);
+      assert_eq!(detail.release.bundle_id, bundle_id);
+      assert_eq!(detail.targets.len(), 4);
+      assert!(detail.targets.iter().all(|target| target.compatible));
+    } else {
+      assert!(
+        matches!(detail, Err(Error::Invalid(message)) if message.contains("identities differ"))
+      );
+    }
+    assert!(matches!(
+      resolver
+        .view_release(BundleChannel::Nightly, Some("../../other"))
+        .await,
+      Err(Error::NotAvailable(_))
+    ));
+    assert_eq!(
+      server.requests.lock().unwrap().as_slice(),
+      [
+        "/bundles/catalog.json",
+        manifest_path.as_str(),
+        "/bundles/catalog.json"
+      ]
+    );
+  }
+}
+
+#[tokio::test]
+async fn check_names_the_channel_when_its_pointer_is_missing() {
+  let server = Server::start(|_| BTreeMap::new()).await;
+  let resolver = server.resolver();
+  for channel in [BundleChannel::Stable, BundleChannel::Nightly] {
+    assert!(matches!(
+      resolver.check(channel).await,
+      Err(Error::NotAvailable(message)) if message == format!("the {} channel is not published", channel.name())
+    ));
+  }
+  assert_eq!(
+    server.requests.lock().unwrap().as_slice(),
+    [
+      "/bundles/channels/stable.json",
+      "/bundles/channels/nightly.json"
+    ]
+  );
+}
+
 #[tokio::test]
 async fn check_reads_only_channel_and_metadata_while_download_verifies_archive() {
   let server = server(pointer, false).await;
@@ -143,85 +293,23 @@ async fn check_reads_only_channel_and_metadata_while_download_verifies_archive()
 }
 
 #[tokio::test]
-async fn nightly_discovery_falls_back_when_only_legacy_dev_is_published() {
-  let fixture = fixture();
-  let outer = fixture.bind_archive(&fixture.archive());
+async fn nightly_discovery_ignores_the_legacy_dev_pointer() {
   let server = Server::start(move |root| {
     let mut dev = pointer(root);
     dev["channel"] = "dev".into();
-    BTreeMap::from([
-      (
-        "/bundles/channels/dev.json".into(),
-        serde_json::to_vec(&dev).unwrap(),
-      ),
-      ("/bundles/sets/test/bundle-set.json".into(), outer),
-    ])
-  })
-  .await;
-  let nightly = server
-    .resolver()
-    .check(BundleChannel::Nightly)
-    .await
-    .unwrap();
-  assert_eq!(nightly.channel, BundleChannel::Nightly);
-  assert_eq!(nightly.git_revision, "a".repeat(40));
-  assert_eq!(
-    server.requests.lock().unwrap().as_slice(),
-    [
-      "/bundles/channels/nightly.json",
-      "/bundles/channels/dev.json",
-      "/bundles/sets/test/bundle-set.json",
-    ]
-  );
-}
-
-#[tokio::test]
-async fn fallback_requires_a_missing_nightly_pointer_and_matching_legacy_identity() {
-  let server = Server::start(|root| {
-    let nightly = pointer(root);
-    let mut dev = nightly.clone();
-    dev["channel"] = "dev".into();
-    BTreeMap::from([
-      (
-        "/bundles/channels/nightly.json".into(),
-        serde_json::to_vec(&nightly).unwrap(),
-      ),
-      (
-        "/bundles/channels/dev.json".into(),
-        serde_json::to_vec(&dev).unwrap(),
-      ),
-    ])
-  })
-  .await;
-  assert!(matches!(
-    server.resolver().check(BundleChannel::Nightly).await,
-    Err(Error::NotAvailable(_))
-  ));
-  assert_eq!(
-    server.requests.lock().unwrap().as_slice(),
-    [
-      "/bundles/channels/nightly.json",
-      "/bundles/sets/test/bundle-set.json"
-    ]
-  );
-
-  let server = Server::start(|root| {
     BTreeMap::from([(
       "/bundles/channels/dev.json".into(),
-      serde_json::to_vec(&pointer(root)).unwrap(),
+      serde_json::to_vec(&dev).unwrap(),
     )])
   })
   .await;
   assert!(matches!(
     server.resolver().check(BundleChannel::Nightly).await,
-    Err(Error::Invalid(message)) if message.contains("channel identity")
+    Err(Error::NotAvailable(message)) if message == "the nightly channel is not published"
   ));
   assert_eq!(
     server.requests.lock().unwrap().as_slice(),
-    [
-      "/bundles/channels/nightly.json",
-      "/bundles/channels/dev.json"
-    ]
+    ["/bundles/channels/nightly.json"]
   );
 }
 

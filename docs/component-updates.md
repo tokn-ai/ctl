@@ -74,6 +74,7 @@ ctlup install
 ctlup update
 ctlup update --channel stable
 ctlup update --channel nightly
+ctlup update --pr 155
 ctlup update --host work
 ctlup update --hosts work,jump-a --local
 ctlup update --destination my-ssh-alias
@@ -95,12 +96,34 @@ successful hosts and produces a nonzero exit status.
 An explicit channel is saved as this account’s preference after a successful
 command. Otherwise automatic updates use that preference or the distribution’s
 compiled default. Stable tracks tagged releases and Nightly tracks the latest
-successfully published CI build from `main`. Existing `dev` preferences and
-`--channel dev` requests resolve to Nightly for compatibility. Explicit channel
-requests always resolve the publication.
+successfully published CI build from `main`. Nightly versions include the UTC
+commit date, for example `0.1.2-nightly.20261110+g7f380d40f15e`.
 
-Temporary Dev builds are tied to a PR run. Download the complete bundle set from
-that run and install it with `--from`. See [install a temporary PR build](ci-bundles.md#install-a-temporary-pr-build).
+Use `ctlup release list` to see the recent releases retained for your selected
+channel. Each row shows the publication ID and marks the current release. Use
+`ctlup release view` to inspect the current release, or pass a publication ID
+from the list to inspect a specific build and its target compatibility.
+
+```sh
+ctlup release list --channel nightly
+ctlup release view --channel nightly
+ctlup release view PUBLICATION_ID --channel nightly --json
+ctlup release list --channel stable
+ctlup release list --channel dev
+ctlup release view --pr 155
+```
+
+Both commands read publication metadata. `ctlup check` still checks the current
+channel directly. Stable becomes available after CI publishes a complete bundle
+set from a release tag, including a matching updater for each target.
+
+The Dev list shows the 10 most recently updated PRs. An unexpired bundle for
+the current commit is marked `built`. One for an earlier commit on the branch
+is marked `outdated`. A branch without an unexpired bundle shows `no build`.
+`release view --pr` shows the selected PR and its build status. `update --pr`
+downloads the bundle for the current commit through the authenticated GitHub
+CLI (`gh`). Use `--host` to target a remote machine. See
+[install a temporary PR build](ci-bundles.md#install-a-temporary-pr-build).
 
 In a development checkout, automatic Linux x64 remote updates build the working
 tree. Use `--working-tree` to choose that source explicitly for Linux x64 or
@@ -148,15 +171,13 @@ Updates resolve the selected channel once, then verify the target runtime archiv
 and its updater from the same immutable publication. Archive and binary
 checksums and compatible protocol advertisements are verified before use.
 Channel discovery is refreshed before cache reuse. Network errors remain
-errors. Nightly uses the legacy `dev.json` pointer only when `nightly.json`
-returns HTTP 404 during the updater rollout. For offline updates, choose provided
-files or the desktop’s included build explicitly.
+errors. For offline updates, choose provided files or the desktop’s included
+build explicitly.
 
-An older `ctlup` can keep using the installed updater when it updates the
-runtime. To switch that account to Nightly, use the standalone `ctlup` for this
-computer from a published Nightly bundle set. Verify the executable against its
-SHA-256 sidecar, make it executable, and run it with `update --channel nightly`
-to install the bundle and updater together.
+If an older `ctlup` rejects dated Nightly versions, use the standalone `ctlup`
+for this computer from a published Nightly bundle set. Verify the executable
+against its SHA-256 sidecar, make it executable, and run it with
+`update --channel nightly` to install the bundle and updater together.
 
 Cached archives live under `cache/downloads`, extracted deployment builds under
 `cache/components`, and standalone updater binaries under `cache/updaters`.

@@ -3,7 +3,7 @@ import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
-import { componentSetFixture, legacyPagesCatalog, publicationFixture } from "./bundle-publication.fixtures.mts";
+import { componentSetFixture, legacyNightlyFixture, legacyPagesCatalog, publicationFixture } from "./bundle-publication.fixtures.mts";
 import { bundleRoot, validatedComponentSet } from "./bundle-publication.mts";
 import { pagesDeployStep, pagesJobName, restoreBundlePages, successfulSnapshot } from "./restore-bundle-pages.mts";
 import { parseBundleCatalog, stageBundlePages } from "./stage-bundle-pages.mts";
@@ -61,7 +61,7 @@ test("snapshot selection requires the exact successful deployment attempt, not a
 });
 
 test("restores a deployed legacy snapshot with both pointers while Pages CDN is still missing its catalog", async (t) => {
-  const directory = await root(t), entry = publicationFixture(1), site = join(directory, "site"), output = join(directory, "restore");
+  const directory = await root(t), entry = legacyNightlyFixture(1), site = join(directory, "site"), output = join(directory, "restore");
   await stageBundlePages(entry, await componentSetFixture(directory, entry), null, site);
   await legacyPagesCatalog(site, true);
   assert.equal(await restoreBundlePages("tokn-ai/ctl", output, github({ artifact_site: site }), publicSite(null)), true);
@@ -79,7 +79,7 @@ test("expired snapshots recover actual archives and all channel pointers from th
   assert.equal(await restoreBundlePages("tokn-ai/ctl", output, github({ deployed: true }), publicSite(site)), true);
   assert.deepEqual(parseBundleCatalog(await readFile(join(output, "bundles/catalog.json"))).channels,
     parseBundleCatalog(await readFile(join(site, "bundles/catalog.json"))).channels);
-  for (const channel of ["dev", "nightly", "stable"]) {
+  for (const channel of ["nightly", "stable"]) {
     const relative = `bundles/channels/${channel}.json`;
     assert.deepEqual(await readFile(join(output, relative)), await readFile(join(site, relative)));
   }
@@ -89,7 +89,7 @@ test("expired snapshots recover actual archives and all channel pointers from th
 });
 
 test("restores a legacy HTTPS catalog without requiring a Nightly pointer", async (t) => {
-  const directory = await root(t), dev = publicationFixture(1);
+  const directory = await root(t), dev = legacyNightlyFixture(1);
   const site = join(directory, "legacy"), output = join(directory, "restore");
   await stageBundlePages(dev, await componentSetFixture(directory, dev), null, site);
   await legacyPagesCatalog(site, false);

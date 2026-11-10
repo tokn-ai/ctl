@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { bundleRoot, validatedComponentSet } from "./bundle-publication.mts";
-import { componentSetFixture, legacyPagesCatalog, publicationFixture } from "./bundle-publication.fixtures.mts";
+import { componentSetFixture, legacyNightlyFixture, legacyPagesCatalog, publicationFixture } from "./bundle-publication.fixtures.mts";
 import { compareVersions, nightlyRetention, parseBundleCatalog, stageBundlePages } from "./stage-bundle-pages.mts";
 
 async function root(t: TestContext): Promise<string> {
@@ -13,7 +13,7 @@ async function root(t: TestContext): Promise<string> {
   return path;
 }
 
-test("stages verified Nightly archives and keeps Dev as an unlisted compatibility pointer", async (t) => {
+test("stages verified dated Nightly archives and Stable archives", async (t) => {
   const directory = await root(t);
   const stable = publicationFixture(1, "stable"), nightly = publicationFixture(2);
   const previous = join(directory, "previous"), next = join(directory, "next");
@@ -26,12 +26,11 @@ test("stages verified Nightly archives and keeps Dev as an unlisted compatibilit
     const { asset_names } = await validatedComponentSet(join(next, "bundles/sets", publication.publication_id), publication);
     assert.equal(asset_names.length, 9);
   }
-  assert.deepEqual(JSON.parse(await readFile(join(next, "bundles/channels/dev.json"), "utf8")), {
-    schema_version: 1, channel: "dev", bundle_set_url: `${bundleRoot}sets/${nightly.publication_id}/bundle-set.json`,
-  });
+  await assert.rejects(readFile(join(next, "bundles/channels/dev.json")), { code: "ENOENT" });
   assert.deepEqual((await readdir(join(next, "bundles/sets"))).sort(), [stable.publication_id, nightly.publication_id].sort());
   const catalog = parseBundleCatalog(await readFile(join(next, "bundles/catalog.json")));
-  assert.equal(catalog.channels.nightly, catalog.channels.dev);
+  assert.equal(catalog.channels.nightly, nightly.publication_id);
+  assert.equal(catalog.channels.dev, undefined);
   assert.equal(catalog.publications[0].channel, "nightly");
   assert.equal(catalog.generation, 2);
   const index = await readFile(join(next, "index.html"), "utf8");
@@ -40,9 +39,9 @@ test("stages verified Nightly archives and keeps Dev as an unlisted compatibilit
   assert.doesNotMatch(index, /channels\/dev\.json/);
 });
 
-test("backfills Nightly from a legacy Dev head on release publication and rejects a divergent alias", async (t) => {
+test("migrates a legacy Dev head to Nightly and removes its pointer without changing the previous site", async (t) => {
   const directory = await root(t);
-  const legacy = publicationFixture(2), stable = publicationFixture(3, "stable");
+  const legacy = legacyNightlyFixture(2), stable = publicationFixture(3, "stable");
   const previous = join(directory, "previous"), next = join(directory, "next");
   await stageBundlePages(legacy, await componentSetFixture(directory, legacy), null, previous);
   await legacyPagesCatalog(previous, false);
@@ -54,14 +53,17 @@ test("backfills Nightly from a legacy Dev head on release publication and reject
   const catalog = parseBundleCatalog(await readFile(join(next, "bundles/catalog.json")));
   assert.equal(catalog.channels.nightly, legacy.publication_id);
   assert.equal(catalog.channels.stable, stable.publication_id);
+  assert.equal(catalog.channels.dev, undefined);
+  await assert.rejects(readFile(join(next, "bundles/channels/dev.json")), { code: "ENOENT" });
+  assert.match(await readFile(join(previous, "bundles/channels/dev.json"), "utf8"), /"channel":"dev"/);
   catalog.channels.dev = stable.publication_id;
   assert.throws(() => parseBundleCatalog(Buffer.from(JSON.stringify(catalog))), /Dev pointer must match Nightly/);
 
   const nightly = publicationFixture(4), advanced = join(directory, "advanced");
   await stageBundlePages(nightly, await componentSetFixture(directory, nightly), next, advanced);
   const migrated = parseBundleCatalog(await readFile(join(advanced, "bundles/catalog.json")));
-  assert.deepEqual(migrated.channels, { stable: stable.publication_id, nightly: nightly.publication_id, dev: nightly.publication_id });
-  assert.deepEqual(migrated.publications, [nightly, { ...legacy, channel: "dev" }, stable]);
+  assert.deepEqual(migrated.channels, { stable: stable.publication_id, nightly: nightly.publication_id });
+  assert.deepEqual(migrated.publications, [nightly, legacy, stable]);
 });
 
 test("old main runs and lower release versions cannot roll channels back", async (t) => {
@@ -142,7 +144,7 @@ test("byte pressure evicts oldest unselected Nightly generations while pinning c
   assert.ok(await treeBytes(output) <= budget);
   const catalog = parseBundleCatalog(await readFile(join(output, "bundles/catalog.json")));
   assert.deepEqual(catalog.publications.map((entry) => entry.publication_id), [incoming, nightlies[1], stable, tag].map((entry) => entry.publication_id));
-  assert.equal(catalog.channels.dev, incoming.publication_id);
+  assert.equal(catalog.channels.dev, undefined);
   assert.equal(catalog.channels.nightly, incoming.publication_id);
   assert.equal(catalog.channels.stable, stable.publication_id);
   await assert.rejects(lstat(join(output, "bundles/sets", nightlies[0].publication_id)), { code: "ENOENT" });

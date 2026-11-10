@@ -1,4 +1,4 @@
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
@@ -48,6 +48,8 @@ pub(super) enum Command {
     #[arg(long)]
     json: bool,
   },
+  /// Browse published releases and pull request builds.
+  Release(ReleaseArguments),
   /// Remove unused builds, retaining active, previous and running installations.
   Prune {
     #[arg(long)]
@@ -57,6 +59,43 @@ pub(super) enum Command {
   InstallArchive,
   #[command(hide = true)]
   ActivateInstalled { bundle_id: String },
+}
+
+#[derive(Debug, Args)]
+pub(super) struct ReleaseArguments {
+  /// Output release metadata as JSON.
+  #[arg(long, global = true)]
+  pub json: bool,
+  #[command(subcommand)]
+  pub command: ReleaseCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub(super) enum ReleaseCommand {
+  /// List recent releases or pull requests.
+  List {
+    /// Release channel; defaults to the configured channel. Dev lists pull requests.
+    #[arg(long, value_enum)]
+    channel: Option<ReleaseListChannel>,
+  },
+  /// Show metadata for a release or the current build of a pull request.
+  View {
+    /// Publication ID from `ctlup release list`; defaults to the current release.
+    publication_id: Option<String>,
+    /// Published channel; defaults to the configured channel.
+    #[arg(long, value_enum)]
+    channel: Option<crate::components::Channel>,
+    /// Pull request number.
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..), conflicts_with_all = ["channel", "publication_id"])]
+    pr: Option<u64>,
+  },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub(super) enum ReleaseListChannel {
+  Dev,
+  Nightly,
+  Stable,
 }
 
 #[derive(Debug, Args)]
@@ -80,6 +119,9 @@ pub(super) struct UpdateArguments {
   /// Cross-build a Linux x64 or ARM64 bundle from this checkout.
   #[arg(long)]
   pub working_tree: bool,
+  /// Install the current build of a pull request.
+  #[arg(long, value_parser = clap::value_parser!(u64).range(1..), conflicts_with_all = ["channel", "from", "working_tree"])]
+  pub pr: Option<u64>,
   /// Inspect and snapshot native binaries from --from.
   #[arg(long, requires = "from")]
   pub local_build: bool,
@@ -119,21 +161,91 @@ mod tests {
   use super::*;
 
   #[test]
-  fn the_legacy_dev_channel_selects_nightly() {
-    let args = Arguments::try_parse_from(["ctlup", "check", "--channel", "dev"]).unwrap();
+  fn release_commands_accept_a_channel_and_an_optional_publication_id() {
+    let args =
+      Arguments::try_parse_from(["ctlup", "release", "list", "--channel", "stable", "--json"])
+        .unwrap();
     assert!(matches!(
       args.command,
-      Command::Check {
-        channel: Some(crate::components::Channel::Nightly),
-        ..
-      }
+      Command::Release(ReleaseArguments {
+        command: ReleaseCommand::List {
+          channel: Some(ReleaseListChannel::Stable)
+        },
+        json: true,
+      })
     ));
+
+    let args = Arguments::try_parse_from(["ctlup", "release", "view"]).unwrap();
+    assert!(matches!(
+      args.command,
+      Command::Release(ReleaseArguments {
+        command: ReleaseCommand::View {
+          publication_id: None,
+          channel: None,
+          pr: None,
+        },
+        json: false,
+      })
+    ));
+
+    let args = Arguments::try_parse_from([
+      "ctlup",
+      "release",
+      "view",
+      "0.1.2-123-1",
+      "--channel",
+      "nightly",
+    ])
+    .unwrap();
+    assert!(matches!(
+      args.command,
+      Command::Release(ReleaseArguments {
+        command: ReleaseCommand::View {
+          publication_id: Some(id),
+          channel: Some(crate::components::Channel::Nightly),
+          pr: None,
+        },
+        ..
+      }) if id == "0.1.2-123-1"
+    ));
+  }
+
+  #[test]
+  fn dev_listing_and_pr_view_use_explicit_preview_selectors() {
+    let args = Arguments::try_parse_from(["ctlup", "release", "list", "--channel", "dev"]).unwrap();
+    assert!(matches!(
+      args.command,
+      Command::Release(ReleaseArguments {
+        command: ReleaseCommand::List {
+          channel: Some(ReleaseListChannel::Dev)
+        },
+        ..
+      })
+    ));
+    let args = Arguments::try_parse_from(["ctlup", "release", "view", "--pr", "155"]).unwrap();
+    assert!(matches!(
+      args.command,
+      Command::Release(ReleaseArguments {
+        command: ReleaseCommand::View { pr: Some(155), .. },
+        ..
+      })
+    ));
+    for args in [
+      &["release", "list", "--pr", "155"][..],
+      &["release", "view", "--pr", "155", "--channel", "nightly"],
+      &["release", "view", "--pr", "155", "0.1.2-123-1"],
+      &["release", "view", "--pr", "0"],
+      &["release", "view", "--channel", "dev"],
+      &["check", "--channel", "dev"],
+    ] {
+      assert!(Arguments::try_parse_from([&["ctlup"][..], args].concat()).is_err());
+    }
   }
 
   #[test]
   fn install_and_update_share_one_explicit_source_and_target_surface() {
     for command in ["install", "update"] {
-      for channel in ["dev", "nightly", "stable"] {
+      for channel in ["nightly", "stable"] {
         assert!(
           Arguments::try_parse_from([
             "ctlup",
@@ -148,16 +260,43 @@ mod tests {
         );
       }
       assert!(
-        Arguments::try_parse_from(["ctlup", command, "--channel", "dev", "--from", "/build"])
+        Arguments::try_parse_from(["ctlup", command, "--channel", "nightly", "--from", "/build"])
           .is_err()
       );
       assert!(Arguments::try_parse_from(["ctlup", command, "--working-tree"]).is_ok());
       assert!(
-        Arguments::try_parse_from(["ctlup", command, "--working-tree", "--channel", "dev"])
+        Arguments::try_parse_from(["ctlup", command, "--working-tree", "--channel", "nightly"])
           .is_err()
       );
       assert!(Arguments::try_parse_from(["ctlup", command, "--package", "ctl-agent"]).is_err());
       assert!(Arguments::try_parse_from(["ctlup", command, "--selected"]).is_err());
+    }
+  }
+
+  #[test]
+  fn update_can_select_a_pr_and_keep_the_target_options() {
+    let args = Arguments::try_parse_from([
+      "ctlup", "update", "--pr", "155", "--host", "work", "--local", "--json",
+    ])
+    .unwrap();
+    assert_eq!(args.host.as_deref(), Some("work"));
+    assert!(matches!(
+      args.command,
+      Command::Update(UpdateArguments {
+        pr: Some(155),
+        local: true,
+        json: true,
+        ..
+      })
+    ));
+    for flags in [
+      &["--pr", "155", "--channel", "stable"][..],
+      &["--pr", "155", "--from", "/build"],
+      &["--pr", "155", "--working-tree"],
+      &["--pr", "0"],
+      &["--channel", "dev"],
+    ] {
+      assert!(Arguments::try_parse_from([&["ctlup", "update"][..], flags].concat()).is_err());
     }
   }
 

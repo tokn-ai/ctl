@@ -31,7 +31,7 @@ fn channel_inspection_is_passive_and_explicit_choices_are_atomic() {
   let settings = std::fs::read(home.0.join(".tokn/ctl/ctlup.json")).unwrap();
   assert_eq!(
     serde_json::from_slice::<serde_json::Value>(&settings).unwrap()["channel"],
-    "dev"
+    "nightly"
   );
   assert!(
     !std::fs::read_dir(home.0.join(".tokn/ctl"))
@@ -42,6 +42,12 @@ fn channel_inspection_is_passive_and_explicit_choices_are_atomic() {
         .to_string_lossy()
         .starts_with(".ctlup-settings-"))
   );
+  std::fs::write(
+    home.0.join(".tokn/ctl/ctlup.json"),
+    br#"{"schema_version":1,"channel":"dev"}"#,
+  )
+  .unwrap();
+  assert_eq!(default_channel(&home.0).unwrap(), BundleChannel::Nightly);
   std::fs::write(
     home.0.join(".tokn/ctl/ctlup.json"),
     br#"{"schema_version":99,"channel":"stable"}"#,

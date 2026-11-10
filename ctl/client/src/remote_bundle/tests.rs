@@ -106,18 +106,37 @@ fn platform_probe_rejects_missing_fields_and_unremoved_startup_text() {
 }
 
 #[test]
-fn valid_release_and_revision_bound_development_sets_are_supported() {
+fn valid_release_and_revision_bound_development_and_nightly_sets_are_supported() {
   let mut value = manifest(b"archive");
   parse(&value).unwrap().verify_revision(&build()).unwrap();
-  let development_id = format!("{VERSION}-dev.{}", &REVISION[..12]);
-  value["bundle_id"] = json!(development_id);
-  for target in SUPPORTED_TARGETS {
-    value["targets"][target]["archive"] =
-      json!(format!("ctl-agent-bundle-{development_id}-{target}.tar.gz"));
+  for (id, valid) in [
+    (format!("{VERSION}-dev.{}", &REVISION[..12]), true),
+    (
+      format!("{VERSION}-nightly.20261110+g{}", &REVISION[..12]),
+      true,
+    ),
+    (
+      format!("{VERSION}-nightly.2026-11-10+g{}", &REVISION[..12]),
+      false,
+    ),
+    (
+      format!("{VERSION}-nightly.20261110+g{}", "a".repeat(12)),
+      false,
+    ),
+  ] {
+    value["bundle_id"] = json!(id);
+    for target in SUPPORTED_TARGETS {
+      value["targets"][target]["archive"] = json!(format!("ctl-agent-bundle-{id}-{target}.tar.gz"));
+    }
+    let parsed = parse(&value);
+    if valid {
+      let parsed = parsed.unwrap();
+      assert_eq!(parsed.bundle_id, id);
+      parsed.verify_revision(&build()).unwrap();
+    } else {
+      assert!(matches!(parsed, Err(Error::Invalid(message)) if message.contains("Git revision")));
+    }
   }
-  let parsed = parse(&value).unwrap();
-  assert_eq!(parsed.bundle_id, development_id);
-  parsed.verify_revision(&build()).unwrap();
 }
 
 #[test]

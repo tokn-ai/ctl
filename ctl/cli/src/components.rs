@@ -30,7 +30,6 @@ pub enum Origin {
 }
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum Channel {
-  #[value(alias = "dev")]
   Nightly,
   Stable,
 }

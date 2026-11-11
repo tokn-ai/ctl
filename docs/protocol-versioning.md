@@ -471,6 +471,13 @@ preparation introduces no wire change and increments no protocol version or
 internal build. Every earlier published contract in the same major remains
 supported; the release notes record their exact supported sets.
 
+Product release `v0.1.3` freezes `ctmux` `1.3.23` (build 23), `ctld` `1.2.18`
+(build 18), `ctl_identity` `1.1.4` (build 4), `ctl_remote_vpn` `1.1.2`
+(build 2), `ctl_forwarding` `1.0.2` (build 2), and `ctl_transport` `1.0.1`
+(build 1). Release preparation increments no protocol version or internal
+build. The [v0.1.3 protocol map](releases/v0.1.3.md#protocol-contracts) records
+all named contracts and their supported versions.
+
 Every PR description must state its protocol changes, or **None** when there
 are no changes. Include the previous and new contracts and the compatibility
 impact. Keep PR titles brief; put protocol details in the description.

@@ -28,7 +28,7 @@ impl Drop for Home {
 fn fixture() -> VerifiedUpdater {
   let bytes = b"updater fixture".to_vec();
   let target = "x86_64-unknown-linux-musl";
-  let bundle_id = "0.1.0-dev.aaaaaaaaaaaa";
+  let bundle_id = "0.1.0-nightly.20261110+gaaaaaaaaaaaa";
   VerifiedUpdater {
     info: UpdaterInfo {
       schema_version: 1,

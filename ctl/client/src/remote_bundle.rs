@@ -26,6 +26,8 @@ const SUPPORTED_TARGETS: [&str; 4] = [
 pub(crate) mod archive;
 mod cache;
 pub(crate) mod compatibility;
+#[cfg(unix)]
+pub mod pr;
 pub mod published;
 #[cfg(unix)]
 pub(crate) use cache::prune_download_cache;
@@ -156,12 +158,11 @@ impl BundleSet {
     {
       return Err(Error::Invalid("invalid remote bundle Git revision".into()));
     }
-    let development_id = format!(
-      "{}-dev.{}",
-      manifest.app_version,
-      &manifest.git_revision[..12]
-    );
-    if manifest.bundle_id != manifest.app_version && manifest.bundle_id != development_id {
+    if !valid_bundle_id(
+      &manifest.app_version,
+      &manifest.bundle_id,
+      &manifest.git_revision,
+    ) {
       return Err(Error::Invalid(
         "remote bundle ID does not match its version and Git revision".into(),
       ));
@@ -473,6 +474,29 @@ fn safe_id(value: &str) -> bool {
     && value
       .bytes()
       .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'+' | b'-'))
+}
+
+fn valid_bundle_id(app_version: &str, bundle_id: &str, git_revision: &str) -> bool {
+  let Some(suffix) = bundle_id.strip_prefix(app_version) else {
+    return false;
+  };
+  if suffix.is_empty() {
+    return true;
+  }
+  let Some(revision) = git_revision.get(..12) else {
+    return false;
+  };
+  if let Some(dev_revision) = suffix.strip_prefix("-dev.") {
+    return dev_revision == revision;
+  }
+  suffix
+    .strip_prefix("-nightly.")
+    .and_then(|nightly| nightly.split_once("+g"))
+    .is_some_and(|(date, nightly_revision)| {
+      date.len() == 8
+        && date.bytes().all(|byte| byte.is_ascii_digit())
+        && nightly_revision == revision
+    })
 }
 
 fn validate_target(target: &str) -> Result<(), Error> {

@@ -33,8 +33,10 @@ Manually maintained release notes and attachments are preserved.
 Main-branch draft refreshes still require complete desktop builds and all
 requested helpers. Remote-only or failed refreshes leave that draft unchanged.
 
-Release bundle IDs are the version. Nightly and Dev both retain the existing
-`<version>-dev.<revision>` bundle ID format for updater compatibility.
+Release bundle IDs are the version. Nightly uses
+`<version>-nightly.<YYYYMMDD>+g<revision>` with the UTC commit date and the
+first 12 characters of the Git revision. A rerun keeps the same bundle ID.
+Dev uses `<version>-dev.<revision>` for temporary branch builds.
 Remote-agent publication requires all four targets because clients consume one
 complete bundle set. Tagged desktop packages, standalone helpers, and bundled
 CLIs are validated per available target. Each desktop target must contain every
@@ -55,17 +57,21 @@ successful retry.
 
 ### Install a temporary PR build
 
-Dispatch the bundle workflow on the PR branch in this repository. Use the ID of
-that run to download its complete bundle set after it finishes.
+Queue the bundle workflow for a PR branch in this repository. The build command
+uses authenticated `gh` and requires permission to run Actions. After CI
+produces a bundle for the PR's current commit, use `ctlup` to view or install it.
 
 ```sh
-gh workflow run bundles.yml --ref PR_BRANCH -f build_desktop=false
-gh run download RUN_ID -n ctl-agent-bundle-set -D ./bundle-set
-ctlup update --from ./bundle-set --host HOST
+ctlup release list --channel dev
+ctlup release build --pr PR_NUMBER
+ctlup release view --pr PR_NUMBER
+ctlup update --pr PR_NUMBER --host HOST
 ```
 
 The artifact expires after 30 days. The download includes the runtime archive
-and updater for each target. A later run produces its own artifact.
+and updater for each target. To use a specific retained run, download it with
+`gh run download RUN_ID -n ctl-agent-bundle-set -D ./bundle-set` and use
+`ctlup update --from ./bundle-set`.
 
 ## Component channels and GitHub Pages
 
@@ -88,7 +94,7 @@ Each channel document uses schema 1.
 {
   "schema_version": 1,
   "channel": "nightly",
-  "bundle_set_url": "https://tokn-ai.dev/ctl/bundles/sets/0.1.1-dev.0123456789ab-12345678-1/bundle-set.json"
+  "bundle_set_url": "https://tokn-ai.dev/ctl/bundles/sets/0.1.2-nightly.20261110+g0123456789ab-12345678-1/bundle-set.json"
 }
 ```
 
@@ -123,10 +129,8 @@ successful publication. Stable advances by semantic release version. Lower
 release tags and prereleases leave its pointer unchanged. Prerelease archives remain
 available through their retained versioned Pages directory and GitHub prerelease.
 
-During the rollout, CI also writes `channels/dev.json` with its original `dev`
-channel identity and the same bundle-set URL as Nightly. New updaters can use
-that legacy pointer if `nightly.json` returns HTTP 404. Retire it in a later
-deployment after the Nightly updater ships.
+The Pages publisher retires the legacy `dev.json` alias. The Dev list in `ctlup`
+uses PR and Actions metadata from GitHub.
 
 CI builds select a default update channel explicitly via `CTL_BUNDLE_CHANNEL`.
 Ordinary version tags select Stable. All other builds select Nightly as their
@@ -152,6 +156,8 @@ unselected Nightly publications are removed oldest first until it fits. If pinne
 publications alone exceed the budget, publication fails without changing the
 deployed site. Retention changes occur only in a complete replacement site;
 historical tagged archives also remain in GitHub Releases.
+`ctlup release list` and `ctlup release view` use the retained Pages catalog for
+Nightly and Stable. Older retained Nightly builds keep their original bundle IDs.
 
 Version publication validates all component archives before creating or updating
 a release. Existing main-draft development packages are removed before the tag

@@ -65,7 +65,11 @@ function exactKeys(value: Record<string, unknown>, keys: readonly string[], name
 export function validateAgentIdentity(identity: AgentBundleIdentity): void {
   if (!/^[a-zA-Z0-9._+-]{1,128}$/.test(identity.app_version) || !/^[a-zA-Z0-9._+-]{1,128}$/.test(identity.bundle_id) ||
     !/^[a-fA-F0-9]{40}$/.test(identity.git_revision)) throw new Error("invalid agent bundle identity");
-  if (identity.bundle_id !== identity.app_version && identity.bundle_id !== `${identity.app_version}-dev.${identity.git_revision.slice(0, 12)}`) {
+  const revision = identity.git_revision.slice(0, 12);
+  const suffix = identity.bundle_id.slice(identity.app_version.length);
+  const nightly = /^-nightly\.[0-9]{8}\+g([a-fA-F0-9]{12})$/.exec(suffix);
+  if (!identity.bundle_id.startsWith(identity.app_version) ||
+    (suffix !== "" && suffix !== `-dev.${revision}` && nightly?.[1] !== revision)) {
     throw new Error("bundle id does not match its app version and Git revision");
   }
 }

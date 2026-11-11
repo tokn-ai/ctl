@@ -155,23 +155,18 @@ export async function stageBundlePages(publication: Publication, incoming: strin
   if (current?.channel === "stable" && current.app_version === publication.app_version && current.git_revision !== publication.git_revision) throw new Error("A release version cannot change source revision");
   if (catalog.publications.some((entry) => entry.publication_id === publication.publication_id)) return false;
   const promote = publication.channel === "nightly" || (!semver(publication.app_version).prerelease.length && (!current || newer(publication, current) > 0));
-  const retained = [...catalog.publications, publication];
-  const channels = { ...catalog.channels };
+  const retained = catalog.publications.map((entry) => ({ ...entry, channel: publicationChannel(entry.channel) }));
+  retained.push(publication);
+  const { dev: legacy_dev, ...channels } = catalog.channels;
+  if (legacy_dev && !channels.nightly) channels.nightly = legacy_dev;
   if (promote) channels[publication.channel] = publication.publication_id;
-  // Restore the Nightly head from pre-migration catalogs. Keep Dev readable by
-  // installed updaters until the Nightly-aware updater has shipped.
-  const nightly_id = channels.nightly ?? channels.dev;
-  if (nightly_id) {
-    channels.nightly = nightly_id;
-    channels.dev = nightly_id;
-  }
   const pinned_stable = retained.find((entry) => entry.publication_id === channels.stable);
   const stable = retained.filter((entry) => entry.channel === "stable" && entry !== pinned_stable)
     .sort((a, b) => b.run_number - a.run_number || b.run_attempt - a.run_attempt).slice(0, stableRetention - Number(!!pinned_stable));
   if (pinned_stable) stable.unshift(pinned_stable);
   catalog = { ...catalog, generation: catalog.generation + 1, channels,
     publications: [
-      ...retained.filter((entry) => publicationChannel(entry.channel) === "nightly").sort((a, b) => newer(b, a)).slice(0, nightlyRetention),
+      ...retained.filter((entry) => entry.channel === "nightly").sort((a, b) => newer(b, a)).slice(0, nightlyRetention),
       ...stable,
     ] };
   if (!catalog.publications.includes(publication)) return false;
@@ -189,6 +184,7 @@ export async function stageBundlePages(publication: Publication, incoming: strin
     const { asset_names } = await validatedComponentSet(incoming, publication);
     for (const name of asset_names) await copyFile(join(incoming, name), join(next, name));
     await mkdir(join(output, "bundles/channels"), { recursive: true });
+    await rm(join(output, "bundles/channels/dev.json"), { force: true });
     for (const channel of catalogChannels) {
       const id = catalog.channels[channel];
       if (id) await writeFile(join(output, "bundles/channels", `${channel}.json`), `${JSON.stringify(channelPointer(channel, id), null, 2)}\n`);
@@ -203,7 +199,7 @@ export async function stageBundlePages(publication: Publication, incoming: strin
     // Five Nightly generations are an upper bound. Preserve the channel heads
     // and the newest other tag before spending space on older Nightly builds.
     while (await regularTree(output) > maximum_bytes) {
-      const evicted = catalog.publications.filter((entry) => publicationChannel(entry.channel) === "nightly" && entry.publication_id !== catalog.channels.nightly)
+      const evicted = catalog.publications.filter((entry) => entry.channel === "nightly" && entry.publication_id !== catalog.channels.nightly)
         .sort((left, right) => newer(left, right))[0];
       if (!evicted) throw new Error("Pinned bundle publications exceed the Pages safety limit (900 MiB in CI)");
       await rm(join(sets, evicted.publication_id), { recursive: true, force: true });

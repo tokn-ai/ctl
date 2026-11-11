@@ -11,11 +11,15 @@ mod arguments;
 #[cfg(unix)]
 mod development;
 #[cfg(unix)]
+mod release;
+#[cfg(unix)]
 mod status;
 #[cfg(unix)]
 pub(crate) mod update;
 
 use arguments::{Arguments, Command};
+#[cfg(unix)]
+use ctl_client::remote_bundle::published;
 
 #[cfg(unix)]
 #[derive(Clone, Copy)]
@@ -71,45 +75,7 @@ async fn run(arguments: Arguments) -> io::Result<i32> {
   match arguments.command {
     Command::ComponentInfo => unreachable!(),
     Command::Install(options) | Command::Update(options) => {
-      crate::bundled::register()?;
-      let explicit_channel = options.channel.map(Into::into);
-      let source = options.from.map_or_else(
-        || {
-          options.channel.map_or(
-            if options.working_tree {
-              ctl_client::component_update::BuildSource::WorkingTree
-            } else {
-              ctl_client::component_update::BuildSource::Automatic
-            },
-            |channel| ctl_client::component_update::BuildSource::Published {
-              channel: channel.into(),
-            },
-          )
-        },
-        |path| ctl_client::component_update::BuildSource::Provided {
-          path,
-          local_build: options.local_build,
-          ctld_package: options.ctld_package,
-        },
-      );
-      update::run(
-        &home,
-        options.hosts,
-        options.local,
-        ctl_client::component_update::UpdateOptions {
-          package: ctl_client::component_update::Package::FullBundle,
-          source: source_with_bundle_override(
-            source,
-            std::env::var_os("CTL_REMOTE_BUNDLES_DIR").map(PathBuf::from),
-          ),
-        },
-        target,
-        options.json,
-      )
-      .await?;
-      if let Some(channel) = explicit_channel {
-        ctl_client::installation::set_channel(&home, channel)?;
-      }
+      update::run(&home, options, target).await?;
     }
     Command::Status { json } => status::run(&home, target, false, json).await?,
     Command::Dev(options) => {
@@ -120,6 +86,10 @@ async fn run(arguments: Arguments) -> io::Result<i32> {
     Command::Check { channel, json } => {
       require_local(target)?;
       check(&home, channel, json).await?;
+    }
+    Command::Release(options) => {
+      require_local(target)?;
+      release::run(&home, options).await?;
     }
     Command::Prune { json } => {
       require_local(target)?;
@@ -185,18 +155,24 @@ pub(crate) fn source_with_bundle_override(
 }
 
 #[cfg(unix)]
+fn selected_channel(
+  home: &std::path::Path,
+  channel: Option<crate::components::Channel>,
+) -> io::Result<ctl_core::component_update::BundleChannel> {
+  channel.map_or_else(
+    || ctl_client::installation::default_channel(home),
+    |channel| Ok(channel.into()),
+  )
+}
+
+#[cfg(unix)]
 async fn check(
   home: &std::path::Path,
   channel: Option<crate::components::Channel>,
   json: bool,
 ) -> io::Result<()> {
-  let channel = channel.map_or_else(
-    || ctl_client::installation::default_channel(home),
-    |channel| Ok(channel.into()),
-  )?;
-  let catalog = ctl_client::remote_bundle::published::check(channel)
-    .await
-    .map_err(io::Error::other)?;
+  let channel = selected_channel(home, channel)?;
+  let catalog = published::check(channel).await.map_err(io::Error::other)?;
   if json {
     println!(
       "{}",
@@ -209,17 +185,22 @@ async fn check(
       catalog.bundle_id,
       catalog.git_revision
     );
-    for target in catalog.targets {
-      println!(
-        "{}: {}",
-        target.target_triple,
-        if target.compatible {
-          "compatible"
-        } else {
-          "incompatible"
-        }
-      );
-    }
+    print_targets(&catalog.targets);
   }
   Ok(())
+}
+
+#[cfg(unix)]
+fn print_targets(targets: &[published::PublishedTarget]) {
+  for target in targets {
+    println!(
+      "{}: {}",
+      target.target_triple,
+      if target.compatible {
+        "compatible"
+      } else {
+        "incompatible"
+      }
+    );
+  }
 }

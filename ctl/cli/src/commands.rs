@@ -750,7 +750,7 @@ mod tests {
   #[test]
   fn component_channel_checks_are_portable_and_reject_remote_targets() {
     use clap::Parser;
-    for channel in ["dev", "stable"] {
+    for channel in ["nightly", "stable"] {
       let check =
         Arguments::try_parse_from(["ctl", "components", "check", "--channel", channel, "--json"])
           .unwrap();
@@ -789,7 +789,7 @@ mod tests {
   #[test]
   fn component_update_sources_are_explicit_and_conflict_checked() {
     use clap::Parser;
-    for channel in ["dev", "stable"] {
+    for channel in ["nightly", "stable"] {
       let update =
         Arguments::try_parse_from(["ctl", "components", "update", "--channel", channel]).unwrap();
       assert!(matches!(
@@ -804,7 +804,7 @@ mod tests {
       ));
     }
     for flags in [
-      vec!["--channel", "dev", "--selected"],
+      vec!["--channel", "nightly", "--selected"],
       vec!["--channel", "stable", "--from", "build"],
       vec!["--selected", "--from", "build"],
       vec!["--channel", "latest"],

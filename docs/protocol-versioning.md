@@ -390,10 +390,10 @@ named IPC contracts and product release versions. It contains `schema_version`,
 configured GitHub Pages bundle root. The bundle set names sibling target archives
 and their component metadata. The updater rejects unknown schemas, unexpected
 channel identities, unsafe URLs, incompatible targets and corrupt archives
-before installation. During rollout, the legacy `dev.json` keeps its `dev`
-identity and points to the same immutable set as Nightly. New clients can use it
-if the Nightly pointer returns HTTP 404. The named service contracts, internal
-protocol builds, SSH framing and daemon negotiation remain unchanged.
+before installation. Nightly bundle IDs include the UTC commit date. Earlier
+retained Nightly bundles keep their original IDs. Temporary PR builds are resolved
+through GitHub Actions. The named service contracts, internal protocol builds,
+SSH framing and daemon negotiation remain unchanged.
 
 ## Discovery and SSH framing
 

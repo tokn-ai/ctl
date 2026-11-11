@@ -70,6 +70,9 @@ jobs:
               exit 1
             fi
             bundle_id=$app_version
+          elif [[ "$GITHUB_REF" == refs/heads/main ]]; then
+            commit_date=$(TZ=UTC git show -s --format=%cd --date=format-local:%Y%m%d HEAD)
+            bundle_id="$app_version-nightly.$commit_date+g${GITHUB_SHA:0:12}"
           else
             bundle_id="$app_version-dev.${GITHUB_SHA:0:12}"
           fi

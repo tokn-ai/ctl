@@ -1,9 +1,10 @@
-use super::TargetOptions;
+use super::{TargetOptions, arguments::UpdateArguments, source_with_bundle_override};
 use clap::ValueEnum;
 use ctl_client::component_update::{
   BuildSource, Package, PreparationPhase, PreparedUpdate, UpdateResult,
 };
 use ctl_client::hosts::ConnectionTargetDto;
+use ctl_client::remote_bundle::pr;
 use ctl_core::bundles::Purpose;
 use serde::Serialize;
 use std::io::{self, Write as _};
@@ -61,19 +62,16 @@ impl Choice {
 
 pub(super) async fn run(
   home: &Path,
-  hosts: Vec<String>,
-  local: bool,
-  options: ctl_client::component_update::UpdateOptions,
+  options: UpdateArguments,
   target_options: TargetOptions<'_>,
-  json: bool,
 ) -> io::Result<()> {
+  crate::bundled::register()?;
   let TargetOptions {
     host,
     destination,
     method,
     platform,
   } = target_options;
-  let ctl_client::component_update::UpdateOptions { package, source } = options;
   if method.is_some() && host.is_none() {
     return Err(io::Error::other(
       "--method requires --host; --hosts uses each host's preferred method",
@@ -84,21 +82,48 @@ pub(super) async fn run(
       "component uploads currently require a Unix SSH host",
     ));
   }
-  let choices = choices(hosts, local, host, destination)?;
-  let package_label = match package {
-    Package::CtlAgent => "ctl-agent",
-    Package::FullBundle => "full bundle",
+  let choices = choices(options.hosts, options.local, host, destination)?;
+  let pr_bundle = if let Some(number) = options.pr {
+    eprintln!("ctlup: Downloading the current build for PR #{number}…");
+    Some(tokio::select! {
+      result = pr::download(number) => result.map_err(io::Error::other)?,
+      _ = tokio::signal::ctrl_c() => return Err(io::Error::new(io::ErrorKind::Interrupted, "PR bundle download cancelled.")),
+    })
+  } else {
+    None
   };
+  let explicit_channel = options.channel.map(Into::into);
+  let provided = pr_bundle
+    .as_ref()
+    .map(|bundle| bundle.directory().to_owned())
+    .or(options.from);
+  let source = if let Some(path) = provided {
+    BuildSource::Provided {
+      path,
+      local_build: options.local_build,
+      ctld_package: options.ctld_package,
+    }
+  } else if let Some(channel) = explicit_channel {
+    BuildSource::Published { channel }
+  } else if options.working_tree {
+    BuildSource::WorkingTree
+  } else {
+    BuildSource::Automatic
+  };
+  let source = source_with_bundle_override(
+    source,
+    std::env::var_os("CTL_REMOTE_BUNDLES_DIR").map(PathBuf::from),
+  );
   let mut results = Vec::new();
   for choice in choices {
     let label = choice.label().to_owned();
-    eprintln!("ctlup: Updating {label} ({package_label})…");
+    eprintln!("ctlup: Updating {label} (full bundle)…");
     let operation = update_host(
       home,
       choice.host(),
       choice.destination(),
       if choice.host() == host { method } else { None },
-      package,
+      Package::FullBundle,
       &source,
     );
     let outcome = tokio::select! {
@@ -121,7 +146,7 @@ pub(super) async fn run(
       error,
     });
   }
-  if json {
+  if options.json {
     println!(
       "{}",
       serde_json::to_string(&results).map_err(io::Error::other)?
@@ -131,6 +156,9 @@ pub(super) async fn run(
     return Err(io::Error::other(
       "some component updates failed; successful hosts were kept",
     ));
+  }
+  if let Some(channel) = explicit_channel {
+    ctl_client::installation::set_channel(home, channel)?;
   }
   Ok(())
 }

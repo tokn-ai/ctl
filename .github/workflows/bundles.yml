@@ -313,6 +313,35 @@ jobs:
         id: deployment
         uses: actions/deploy-pages@v4
 
+      - name: Verify public bundle catalog and channels
+        if: steps.stage.outputs.publish == 'true'
+        working-directory: target/bundle-pages-site
+        env:
+          PAGES_URL: ${{ steps.deployment.outputs.page_url }}
+        shell: bash
+        run: |
+          : "${PAGES_URL:?Pages deployment did not provide a URL}"
+          verify_publication() {
+            local path
+            for path in bundles/catalog.json bundles/channels/*.json; do
+              last_path=$path
+              curl --fail --silent --max-time 10 --header 'Cache-Control: no-cache' \
+                "${PAGES_URL%/}/$path?verify=$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$attempt" \
+                | cmp -s "$path" - || return 1
+            done
+          }
+
+          deadline=$((SECONDS + 600))
+          for ((attempt = 1; SECONDS < deadline; attempt++)); do
+            if verify_publication; then
+              echo 'The public catalog and channel pointers match the staged files.'
+              exit 0
+            fi
+            sleep 15
+          done
+          printf '::error::GitHub Pages did not serve the staged %s.\n' "$last_path"
+          exit 1
+
   ctld:
     name: Signed standalone ctld (${{ matrix.target }})
     if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.build_ctld)

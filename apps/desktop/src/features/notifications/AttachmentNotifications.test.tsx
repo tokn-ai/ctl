@@ -116,15 +116,49 @@ describe("attachment notification lifecycle", () => {
 
   it("resets deduplication when an attachment is closed and reopened", () => {
     const { store, report, registry, owner, reconnect } = setup();
-    const authentication_failure = { ...failed, error_code: "ssh_authentication_required" };
-    report(authentication_failure);
+    report(failed);
     store.dismiss(store.snapshot().entries[0].id);
     registry.remove(owner);
     const replacement = registry.createOwner();
     registry.report(replacement, connecting, reconnect);
-    registry.report(replacement, authentication_failure, reconnect);
+    registry.report(replacement, failed, reconnect);
     expect(store.snapshot().entries).toMatchObject([{ toast_visible: true, actions: [{ args: { value: replacement } }] }]);
     expect(registry.canReconnect(owner)).toBe(false);
+  });
+
+  it("groups SSH authentication requests by host and retains the action until its sessions recover", () => {
+    const { store, report, registry, reconnect } = setup();
+    const target = { kind: "ssh" as const, host_id: "build", destination: "build.example" };
+    const blocked = {
+      ...failed, session: { ...session, target },
+      error_code: "ssh_authentication_required", message: "Authentication needed.",
+    };
+    const second = { ...blocked, session: { ...blocked.session, session_id: "second", terminal_id: undefined } };
+    const second_owner = registry.createOwner();
+    const other_owner = registry.createOwner();
+    report(blocked);
+    registry.report(second_owner, second, reconnect);
+    registry.report(other_owner, {
+      ...blocked, session: { ...blocked.session, target: { ...target, host_id: "test", destination: "test.example" } },
+    }, reconnect);
+    const action = { label: "Connect host", command_id: COMMAND_IDS.connectHost, args: { target_key: "host:build" } };
+    const build_notice = () => store.snapshot().entries.find((entry) => entry.source === "build.example");
+
+    expect(store.snapshot().entries).toHaveLength(2);
+    expect(store.snapshot().entries.every((entry) => !entry.toast_visible)).toBe(true);
+    expect(build_notice()).toMatchObject({ occurrence_count: 1, actions: [action] });
+
+    report({ ...blocked, phase: "attached", error_code: null, message: null });
+    expect(build_notice()).toMatchObject({ resolved_at: null, actions: [action] });
+
+    registry.report(second_owner, { ...second, phase: "reconnecting", error_code: null, message: null }, reconnect);
+    expect(build_notice()).toMatchObject({ resolved_at: null });
+    registry.report(second_owner, {
+      ...second, session: { ...second.session, terminal_id: "new-pane" },
+      phase: "attached", error_code: null, message: null,
+    }, reconnect);
+    expect(build_notice()).toMatchObject({ resolved_at: expect.any(Number), actions: [] });
+    expect(store.snapshot().entries.find((entry) => entry.source === "test.example")).toMatchObject({ resolved_at: null });
   });
 
   it("retries the specified pane using its latest callback and rejects stale actions", async () => {

@@ -1,6 +1,6 @@
-import type { AttachmentViewState, NotificationAction } from "../../lib/types";
+import type { AttachmentViewState, NotificationAction, SshConnectionTarget } from "../../lib/types";
 import { COMMAND_IDS } from "../commands/commandIds";
-import { sessionKey, targetLabel } from "../targets/targets";
+import { sessionKey, targetKey, targetLabel } from "../targets/targets";
 import type { NotificationStore } from "./NotificationStore";
 
 interface AttachmentSource {
@@ -10,11 +10,18 @@ interface AttachmentSource {
   reconnect(): Promise<void>;
 }
 
+function authenticationTarget(state?: AttachmentViewState): SshConnectionTarget | undefined {
+  const target = state?.session?.target;
+  if (target?.kind === "ssh" && state?.error_code === "ssh_authentication_required" &&
+      ["error", "disconnected", "retry_wait"].includes(state.phase)) return target;
+}
+
 /** Window-local attachment owners, including background tabs and split panes. */
 export class AttachmentNotifications {
   private owners = new Map<string, AttachmentSource>();
   private owner_order = new Map<string, number>();
   private sources = new Map<string, string>();
+  private host_authentication = new Map<string, SshConnectionTarget>();
   private next_owner = 0;
 
   constructor(private readonly store: NotificationStore) {}
@@ -50,6 +57,7 @@ export class AttachmentNotifications {
     if (this.owners.get(owner)?.connection_attempt !== connection_attempt) {
       this.store.report(`attachment:${key}`, null);
     }
+    const previous_authentication = current_owner ? authenticationTarget(this.owners.get(current_owner)?.state) : undefined;
     this.owners.set(owner, { key, state, reconnect, connection_attempt });
     if (this.sources.get(key) !== owner) {
       // A new owner is a new open attempt, even if the previous one failed identically.
@@ -59,7 +67,13 @@ export class AttachmentNotifications {
       this.sources.set(key, owner);
     }
     const source = `${targetLabel(session.target)} · ${session.name}${session.terminal_id ? ` · ${session.terminal_id}` : ""}`;
-    if (state.phase === "connecting" || state.phase === "reconnecting") {
+    const authentication = authenticationTarget(state);
+    if (authentication) {
+      const source_key = `attachment:${key}`;
+      this.store.report(source_key, null);
+      const previous_notice = this.store.snapshot().entries.find((entry) => entry.source_key === source_key);
+      if (previous_notice?.toast_visible) this.store.hide(previous_notice.id);
+    } else if (state.phase === "connecting" || state.phase === "reconnecting") {
       // Retain the last failure's identity throughout an automatic retry.
       this.store.setActions(`attachment:${key}`, []);
     } else {
@@ -77,6 +91,9 @@ export class AttachmentNotifications {
         message: state.message, source, actions,
       } : null);
     }
+    const recovered = state.phase === "attached" && !state.message && previous?.state.phase !== "attached";
+    const affected_host = authentication ?? previous_authentication ?? (recovered && session.target.kind === "ssh" ? session.target : undefined);
+    if (affected_host) this.updateAuthentication(targetKey(affected_host), recovered);
     const input_key = `input-lease:${key}`;
     if (state.phase === "attached" && state.input_lease_request?.status === "denied") {
       // A new denial is actionable even if the previous warning was dismissed.
@@ -109,6 +126,37 @@ export class AttachmentNotifications {
     this.release(owner);
   }
 
+  reportHostAuthentication(key: string, target: SshConnectionTarget | null, recovered = false): void {
+    const previous = this.host_authentication.get(key);
+    if (target) this.host_authentication.set(key, target);
+    else this.host_authentication.delete(key);
+    if (target || previous) this.updateAuthentication(key, recovered);
+  }
+
+  private updateAuthentication(key: string, recovered: boolean): void {
+    const source_key = `ssh-authentication:${key}`;
+    let target = this.host_authentication.get(key);
+    if (!target) {
+      for (const owner of this.sources.values()) {
+        const candidate = authenticationTarget(this.owners.get(owner)?.state);
+        if (candidate && targetKey(candidate) === key) {
+          target = candidate;
+          break;
+        }
+      }
+    }
+    if (target) {
+      this.store.report(source_key, {
+        severity: "warning",
+        title: "SSH authentication required",
+        message: "Use Connect host to authenticate.",
+        source: targetLabel(target),
+        actions: [{ label: "Connect host", command_id: COMMAND_IDS.connectHost, args: { target_key: key } }],
+      }, { toast: false });
+    } else if (recovered) this.store.resolve(source_key);
+    else this.store.report(source_key, null);
+  }
+
   private release(owner: string): void {
     const entry = this.owners.get(owner);
     this.owners.delete(owner);
@@ -117,6 +165,8 @@ export class AttachmentNotifications {
     this.store.report(`attachment:${entry.key}`, null);
     this.store.resolve(`input-lease:${entry.key}`);
     this.store.report(`history:${entry.key}`, null);
+    const authentication = authenticationTarget(entry.state);
+    if (authentication) this.updateAuthentication(targetKey(authentication), false);
   }
 
   private current(owner?: string): AttachmentSource | undefined {

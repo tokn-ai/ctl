@@ -21,10 +21,10 @@ async function verifyPublishedAsset(asset: Asset, directory: string): Promise<vo
 }
 
 function additionalManifestName(name: string, bundle_id: string): string | undefined {
-  if (/^(desktop-(?:x86_64|aarch64)-(?:unknown-linux-gnu|apple-darwin)|(?:ctld|ctl-cli)-(?:x86_64|aarch64)-apple-darwin)\.json$/.test(name)) return name;
+  if (/^(desktop-(?:x86_64|aarch64)-(?:unknown-linux-gnu|apple-darwin(?:-unsigned)?)|(?:ctld|ctl-cli)-(?:x86_64|aarch64)-apple-darwin)\.json$/.test(name)) return name;
   const packages: [string, RegExp, string][] = [
     [`ctmux-${bundle_id}-`, /^((?:x86_64|aarch64)-unknown-linux-gnu)\.(?:deb|rpm|AppImage)(?:\.sha256)?$/, "desktop"],
-    [`ctmux-${bundle_id}-`, /^((?:x86_64|aarch64)-apple-darwin)\.(?:dmg|app\.tar\.gz)(?:\.sha256)?$/, "desktop"],
+    [`ctmux-${bundle_id}-`, /^((?:x86_64|aarch64)-apple-darwin(?:-unsigned)?)\.(?:dmg|app\.tar\.gz)(?:\.sha256)?$/, "desktop"],
     [`ctld-${bundle_id}-`, /^((?:x86_64|aarch64)-apple-darwin)\.app\.tar\.gz(?:\.sha256)?$/, "ctld"],
     [`ctl-${bundle_id}-`, /^((?:x86_64|aarch64)-apple-darwin)\.tar\.gz(?:\.sha256)?$/, "ctl-cli"],
   ];
@@ -36,7 +36,7 @@ function additionalManifestName(name: string, bundle_id: string): string | undef
   return undefined;
 }
 
-/** Restore published bytes per target, including targets absent from this run. */
+/** Restore published bytes per target and signing variant, including packages absent from this run. */
 async function restoreCanonicalAssets(repository: string, identity: BundleIdentity, directory: string, mode: "components" | "desktop",
   assets: Asset[], canonical: string, gh: GhRunner): Promise<void> {
   const incoming = mode === "desktop"

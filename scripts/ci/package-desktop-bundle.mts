@@ -14,6 +14,7 @@ export type SigningMode = "signed" | "unsigned" | "not_applicable";
 
 export interface DesktopBundleOptions {
   target: string;
+  app_version: string;
   bundle_id: string;
   git_revision: string;
   signing_mode: SigningMode;
@@ -28,6 +29,14 @@ export interface DesktopBundleManifest {
   git_revision: string;
   signing_mode: SigningMode;
   assets: { name: string; sha256: string }[];
+}
+
+export function desktopBundleNames(bundle_id: string, target: string, unsigned_variant: boolean): {
+  asset_prefix: string;
+  manifest_name: string;
+} {
+  const variant = `${target}${unsigned_variant ? "-unsigned" : ""}`;
+  return { asset_prefix: `ctmux-${bundle_id}-${variant}`, manifest_name: `desktop-${variant}.json` };
 }
 
 async function findInstaller(inputDirectory: string, directory: string, extension: string): Promise<string> {
@@ -65,6 +74,9 @@ export async function packageDesktopBundle(options: DesktopBundleOptions): Promi
   const isMac = macTargets.has(options.target);
   if (!isMac && !linuxTargets.has(options.target)) {
     throw new Error(`unsupported desktop target: ${options.target}`);
+  }
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._+-]{0,127}$/.test(options.app_version)) {
+    throw new Error(`invalid app version: ${options.app_version}`);
   }
   if (!/^[a-zA-Z0-9][a-zA-Z0-9._+-]{0,127}$/.test(options.bundle_id)) {
     throw new Error(`invalid bundle ID: ${options.bundle_id}`);
@@ -106,7 +118,8 @@ export async function packageDesktopBundle(options: DesktopBundleOptions): Promi
   if ((await readdir(options.output_directory)).length !== 0) {
     throw new Error(`desktop output directory must be empty: ${options.output_directory}`);
   }
-  const prefix = `ctmux-${options.bundle_id}-${options.target}`;
+  const unsigned_variant = options.signing_mode === "unsigned" && options.bundle_id === options.app_version;
+  const { asset_prefix, manifest_name } = desktopBundleNames(options.bundle_id, options.target, unsigned_variant);
   const assets: DesktopBundleManifest["assets"] = [];
   const recordAsset = async (name: string): Promise<void> => {
     const sha256 = await checksum(join(options.output_directory, name));
@@ -114,14 +127,14 @@ export async function packageDesktopBundle(options: DesktopBundleOptions): Promi
     assets.push({ name, sha256 });
   };
   for (const { source, extension } of installers) {
-    const name = `${prefix}${extension}`;
+    const name = `${asset_prefix}${extension}`;
     const destination = join(options.output_directory, name);
     await copyFile(source, destination);
     await chmod(destination, (await lstat(source)).mode & 0o777);
     await recordAsset(name);
   }
   if (isMac) {
-    const name = `${prefix}.app.tar.gz`;
+    const name = `${asset_prefix}.app.tar.gz`;
     // Archive before artifact upload: GitHub's artifact transport does not
     // preserve the executable modes and symlinks inside a raw .app directory.
     await execute("tar", [
@@ -140,7 +153,7 @@ export async function packageDesktopBundle(options: DesktopBundleOptions): Promi
     assets,
   };
   await writeFile(
-    join(options.output_directory, `desktop-${options.target}.json`),
+    join(options.output_directory, manifest_name),
     `${JSON.stringify(manifest, null, 2)}\n`,
   );
   return manifest;
@@ -148,12 +161,12 @@ export async function packageDesktopBundle(options: DesktopBundleOptions): Promi
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
-  if (args.length !== 6) {
-    throw new Error("usage: package-desktop-bundle.mts TARGET BUNDLE_ID GIT_REVISION SIGNING_MODE INPUT_DIRECTORY OUTPUT_DIRECTORY");
+  if (args.length !== 7) {
+    throw new Error("usage: package-desktop-bundle.mts TARGET APP_VERSION BUNDLE_ID GIT_REVISION SIGNING_MODE INPUT_DIRECTORY OUTPUT_DIRECTORY");
   }
-  const [target, bundle_id, git_revision, signing_mode, input_directory, output_directory] = args;
+  const [target, app_version, bundle_id, git_revision, signing_mode, input_directory, output_directory] = args;
   const manifest = await packageDesktopBundle({
-    target, bundle_id, git_revision, signing_mode: signing_mode as SigningMode, input_directory, output_directory,
+    target, app_version, bundle_id, git_revision, signing_mode: signing_mode as SigningMode, input_directory, output_directory,
   });
   console.log(`Packaged ${manifest.assets.length} desktop assets for ${target} in ${output_directory}`);
 }

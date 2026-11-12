@@ -97,6 +97,15 @@ enum RemotePlatform {
   Windows,
 }
 
+impl From<RemotePlatform> for ctl_client::RemotePlatform {
+  fn from(platform: RemotePlatform) -> Self {
+    match platform {
+      RemotePlatform::Unix => Self::Unix,
+      RemotePlatform::Windows => Self::Windows,
+    }
+  }
+}
+
 #[derive(Debug, Subcommand)]
 enum Command {
   #[command(long_flag = "component-info", hide = true)]

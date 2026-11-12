@@ -11,7 +11,7 @@ import {
   checkLocalPort,
   listRemoteListeners,
 } from "../../lib/tauri";
-import type { TcpListener, WorkspacePortForward } from "../../lib/types";
+import type { SshRemotePlatform, TcpListener, WorkspacePortForward } from "../../lib/types";
 
 vi.mock("../../lib/tauri", () => ({
   checkLocalPort: vi.fn(),
@@ -29,6 +29,14 @@ beforeEach(() => {
 });
 
 describe("remote listener forwarding defaults", () => {
+  it("offers manual TCP forwarding for Windows SSH hosts", () => {
+    renderDialog(vi.fn(), "windows");
+    expect(screen.getByRole("combobox", { name: "Protocol" })).toHaveProperty("value", "tcp");
+    expect(screen.queryByRole("option", { name: "UDP" })).toBeNull();
+    expect(screen.queryByRole("region", { name: "Remote TCP/UDP listeners" })).toBeNull();
+    expect(listRemoteListeners).not.toHaveBeenCalled();
+  });
+
   it.each([
     ["tcp", "tcp"],
     ["udp", "udp"],
@@ -108,10 +116,10 @@ describe("remote listener forwarding defaults", () => {
   });
 });
 
-function renderDialog(onChange: (forwards: WorkspacePortForward[]) => void) {
+function renderDialog(onChange: (forwards: WorkspacePortForward[]) => void, remote_platform?: SshRemotePlatform) {
   return render(
     <PortForwardingDialog
-      target={{ kind: "ssh", host_id: "remote", destination: "example" }}
+      target={{ kind: "ssh", host_id: "remote", destination: "example", remote_platform }}
       forwards={[]}
       statuses={new Map()}
       busy={new Set()}

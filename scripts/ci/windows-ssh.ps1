@@ -164,7 +164,7 @@ New-Item -ItemType Directory -Force $root | Out-Null
 $ctl = (Resolve-Path 'target/debug/ctl.exe').Path
 $catalog = Join-Path $root 'hosts.json'
 $temporary = @('--destination', 'ctl-windows-ci', '--remote-platform', 'windows')
-$saved = @('--host', 'saved-windows-ci', '--remote-platform', 'windows')
+$saved = @('--host', 'saved-windows-ci')
 $sshDirectory = Join-Path $env:USERPROFILE '.ssh'
 New-Item -ItemType Directory -Force $sshDirectory | Out-Null
 $config = Join-Path $sshDirectory 'config'
@@ -325,6 +325,9 @@ $originalConfigText
   $created = (Invoke-Ctl -Arguments @('host', 'create', 'saved-windows-ci', 'ctl-windows-ci', '--ssh-config', '--hostname', '127.0.0.1', '--json')).stdout | ConvertFrom-Json
   Assert-Equal $created.connection_methods[0].ssh_config_alias 'ctl-windows-ci' 'Saved SSH-config alias'
   Assert-Equal $created.connection_methods[0].target.hostname '127.0.0.1' 'Saved hostname override'
+  $savedCatalog = [IO.File]::ReadAllText($catalog) | ConvertFrom-Json -AsHashtable
+  $savedCatalog.document.hosts[0].connection_methods[0].target.remote_platform = 'windows'
+  [IO.File]::WriteAllText($catalog, ($savedCatalog | ConvertTo-Json -Depth 24))
   $result = Invoke-Ctl -Arguments ($saved + @('exec', '--', 'cmd.exe', '/D', '/C', 'echo SAVED_HOST'))
   Assert-Equal $result.stdout.Trim() 'SAVED_HOST' 'Saved host output'
   # An alias and a saved name may collide. The saved route deliberately points

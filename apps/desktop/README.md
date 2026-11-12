@@ -198,6 +198,13 @@ method suppresses an otherwise-unused duplicate projection. Missing aliases
 with workspace references remain visible as unavailable; restoring the alias
 restores access without losing session or task references.
 
+To connect to a Windows SSH server, select **Windows** under **Server platform**
+in Add host or when editing a connection method. The setting is saved with the
+method. Existing methods default to Unix. Use the server's default `cmd.exe`
+SSH shell and install `ctl-agent.exe` and `ctmuxd.exe` together on the remote
+user's PATH. The app uses the existing OpenSSH config, host trust, and
+credentials. Manage Windows agent installation and daemon restarts on the host.
+
 The connection-method editor supports direct SSH, saved VPNs, optional
 identity-file paths, and ordered routes through reusable gateways. **Verify and save** verifies the
 remote environment and saves the method in the host catalog. For a new direct

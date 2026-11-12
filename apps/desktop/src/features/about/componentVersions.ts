@@ -79,7 +79,7 @@ export interface ComponentHostFailure {
   component_ids: ReadonlySet<string>;
 }
 
-const inspection_prerequisites = new Set(["remote_component_inspection_unsupported", "ssh_authentication_required", "ssh_host_disconnected", "remote_identity_unverified"]);
+const inspection_prerequisites = new Set(["remote_component_inspection_unsupported", "ssh_authentication_required", "ssh_host_disconnected", "remote_identity_unverified", "remote_windows_maintenance_unsupported"]);
 
 function hostConnected(rows: readonly ComponentVersionRow[]): boolean | null {
   if (rows.some((row) => row.connected === true || row.observation === "last_observed")) return true;
@@ -92,7 +92,8 @@ export function componentHostFailure(rows: readonly ComponentVersionRow[]): Comp
   const shared = errors.filter((row) => row.observation === "not_checked" || errors.filter((candidate) => candidate.error === row.error).length > 1);
   if (!shared.length) return null;
   const codes = new Set(shared.map((row) => row.error_code));
-  const message = codes.has("remote_component_inspection_unsupported") ? "Update the agent to check components."
+  const message = codes.has("remote_windows_maintenance_unsupported") ? "Check and manage components on the Windows host."
+    : codes.has("remote_component_inspection_unsupported") ? "Update the agent to check components."
     : codes.has("remote_identity_unverified") ? "Check host to verify its account."
     : hostConnected(rows) !== true && (codes.has("ssh_authentication_required") || codes.has("ssh_host_disconnected")) ? "Connect this host to check components."
     : "Could not check components. Try Check host.";

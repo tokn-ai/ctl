@@ -1,4 +1,4 @@
-use ctl_client::hosts::ConnectionTargetDto;
+use ctl_client::{RemotePlatform, hosts::ConnectionTargetDto};
 use ctl_ipc::{
   ClientMessage, LocalPortForward, PortForwardProtocol, PortForwardState, PortForwardStatus,
   ServerMessage,
@@ -46,14 +46,27 @@ pub enum Command {
 }
 
 pub async fn run(target: &ConnectionTargetDto, command: Command) -> Result<(), Error> {
+  if target.remote_platform() == RemotePlatform::Windows
+    && matches!(
+      command,
+      Command::Add {
+        protocol: Protocol::Udp | Protocol::Any,
+        ..
+      }
+    )
+  {
+    return Err(Error::WindowsUdpUnsupported);
+  }
   #[cfg(not(unix))]
-  if matches!(
-    target,
-    ConnectionTargetDto::Ssh {
-      use_ssh_config_master: Some(true),
-      ..
-    }
-  ) {
+  if target.remote_platform() != RemotePlatform::Windows
+    && matches!(
+      target,
+      ConnectionTargetDto::Ssh {
+        use_ssh_config_master: Some(true),
+        ..
+      }
+    )
+  {
     return Err(Error::MasterSelectionUnsupported);
   }
   let ssh_target = target.to_ssh_target()?;
@@ -239,6 +252,8 @@ fn parse_forward(value: &str, forward_id: String) -> Result<LocalPortForward, Er
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+  #[error("UDP forwarding to Windows SSH hosts is unavailable. Choose TCP forwarding.")]
+  WindowsUdpUnsupported,
   #[cfg(not(unix))]
   #[error("SSH master selection currently requires macOS or Linux.")]
   MasterSelectionUnsupported,
@@ -348,5 +363,25 @@ mod tests {
       run(&target, Command::List { json: true }).await,
       Err(Error::MasterSelectionUnsupported),
     ));
+  }
+
+  #[tokio::test]
+  async fn udp_forwarding_rejects_windows_ssh_targets_before_helper_startup() {
+    let target = serde_json::from_value(serde_json::json!({
+      "kind": "ssh", "destination": "configured", "remote_platform": "windows",
+    }))
+    .unwrap();
+    for protocol in [Protocol::Udp, Protocol::Any] {
+      let command = Command::Add {
+        specification: "5353:localhost:5353".into(),
+        protocol,
+        id: None,
+        json: true,
+      };
+      assert!(matches!(
+        run(&target, command).await,
+        Err(Error::WindowsUdpUnsupported),
+      ));
+    }
   }
 }

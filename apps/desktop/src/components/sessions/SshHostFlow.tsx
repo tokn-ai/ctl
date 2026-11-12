@@ -3,6 +3,7 @@ import { UpdateComponentsDialog } from "../components/UpdateComponentsDialog";
 import { QuickInput, type QuickInputMode } from "../commands/QuickInput";
 import { promptMode, promptTitle } from "./sshPrompt";
 import { GatewayRouteDialog } from "./GatewayRouteDialog";
+import { SshRemotePlatformSelect } from "./SshRemotePlatformSelect";
 import { tailscaleDeviceDetail, VIRTUAL_SSH_GROUP, VIRTUAL_TAILSCALE_GROUP } from "./hostChoices";
 import { connectionMethodOptions, connectionSettings, resolveSshGateways, tailscaleTarget } from "../../features/workspace/workspaceModel";
 import { vpnRouteDetail } from "../../features/vpn/status";
@@ -33,6 +34,7 @@ import type {
   SshHostStorage,
   SshPrompt,
   SshConnectionTarget,
+  SshRemotePlatform,
   SshGatewayRouteStep,
   WorkspaceSshGateway,
   WorkspaceHost,
@@ -153,10 +155,13 @@ export function SshHostFlow({
 }: SshHostFlowProps) {
   const editingConnection = Boolean(onSaveConnection);
   const preferred_endpoint = editingConnection && !initialTarget ? default_target : undefined;
+  const windows_client = /^Win/i.test(navigator.platform);
+  const can_manage_target = !windows_client && (target?.kind !== "ssh" || target.remote_platform !== "windows");
+  const opens_update = can_manage_target && (updateRequired || component_mode === "update");
   const availableTailscaleDevices = discoveryLoading ? [] : tailscaleDevices.filter((device) => device.online === true);
   const needsSshUser = target?.kind === "ssh" && Boolean(target.tailscale_node_id) && !target.remote_info && !target.user;
   const [step, setStep] = useState<Step>(() => {
-    if (updateRequired || component_mode === "update") return "update";
+    if (opens_update) return "update";
     if (needsSshUser) return "ssh_user";
     if (target) return autoConnect ? "progress" : "reconnect";
     return complex || editingConnection ? "route" : "host";
@@ -166,6 +171,7 @@ export function SshHostFlow({
   const [hostName, setHostName] = useState("");
   const [hostAlias, setHostAlias] = useState(initialTarget?.hostname ? initialTarget.destination : "");
   const [hostIdentityFile, setHostIdentityFile] = useState(initialTarget?.identity_file ?? "");
+  const [remote_platform, setRemotePlatform] = useState<SshRemotePlatform | undefined>(initialTarget?.remote_platform ?? preferred_endpoint?.remote_platform);
   const [sshConfigMaster, setSshConfigMaster] = useState(initialTarget?.use_ssh_config_master);
   const [exportToSshConfig, setExportToSshConfig] = useState(false);
   const [definition, setDefinition] = useState<SshHostDefinition>({
@@ -189,11 +195,11 @@ export function SshHostFlow({
   const [opening_vpn_sign_in, setOpeningVpnSignIn] = useState(false);
   const [prompt, setPrompt] = useState<SshPrompt | null>(null);
   const [saving, setSaving] = useState(false);
-  const [canInstallAgent, setCanInstallAgent] = useState(updateRequired || component_mode === "update");
+  const [canInstallAgent, setCanInstallAgent] = useState(opens_update);
   const [pending_update, setPendingUpdate] = useState<{ target: ConnectionTarget; reconnect_candidate: ConnectionTarget } | null>(null);
   const attemptRef = useRef<string | null>(null);
   const identityRef = useRef<RemoteIdentity | null>(null);
-  const [needsUpdate, setNeedsUpdate] = useState(updateRequired || component_mode === "update");
+  const [needsUpdate, setNeedsUpdate] = useState(opens_update);
   const restartingRef = useRef(false);
   const componentsUpdatedRef = useRef<ConnectionTarget | null>(null);
   const [needsDaemonRestart, setNeedsDaemonRestart] = useState(false);
@@ -219,7 +225,7 @@ export function SshHostFlow({
   useEffect(() => {
     closedRef.current = false;
     let mounted = true;
-    if (autoConnect && target && !updateRequired && !needsSshUser) {
+    if (autoConnect && target && !opens_update && !needsSshUser) {
       // Wait for StrictMode's setup/cleanup replay before starting one probe.
       void Promise.resolve().then(() => {
         if (mounted && !closedRef.current) void connect(target);
@@ -244,6 +250,11 @@ export function SshHostFlow({
   async function connect(candidate: ConnectionTarget) {
     if (candidate.kind === "ssh" && expectedIdentity) {
       candidate = { ...candidate, remote_info: expectedIdentity };
+    }
+    if (component_mode && candidate.kind === "ssh" && candidate.remote_platform === "windows") {
+      setError("Manage remote components directly on this Windows host.");
+      setStep("retry");
+      return;
     }
     cancelAttempt();
     if (uncommittedTargetRef.current !== candidate) forgetUncommitted();
@@ -335,18 +346,20 @@ export function SshHostFlow({
       if (attemptRef.current !== attempt || closedRef.current) return;
       attemptRef.current = null;
       setPrompt(null);
-      setError(errorMessage(failure));
-      setNeedsVpnSignIn(errorCode(failure) === "vpn_sign_in_required");
-      setNeedsRemoteVpnSignIn(errorCode(failure) === "remote_vpn_sign_in_required");
-      setVpnUpdateOwner(remoteVpnUpdateOwner(candidate, failure));
-      onConnectionChange?.(candidate, "error", errorMessage(failure));
       const code = errorCode(failure);
+      setError(errorMessage(failure));
+      setNeedsVpnSignIn(code === "vpn_sign_in_required");
+      setNeedsRemoteVpnSignIn(code === "remote_vpn_sign_in_required");
+      const vpn_owner = remoteVpnUpdateOwner(candidate, failure);
+      setVpnUpdateOwner(!windows_client && vpn_owner?.target.remote_platform !== "windows" ? vpn_owner : null);
+      onConnectionChange?.(candidate, "error", errorMessage(failure));
       const update = code === "ctl_agent_identity_unsupported" || code === "ctl_agent_update_required" || code === "protocol_version_mismatch";
-      const restart = code === "protocol_version_mismatch" && componentsUpdatedRef.current !== null
+      const can_manage = !windows_client && (candidate.kind !== "ssh" || candidate.remote_platform !== "windows");
+      const restart = can_manage && code === "protocol_version_mismatch" && componentsUpdatedRef.current !== null
         && sameSshEndpoint(candidate, componentsUpdatedRef.current);
       setNeedsUpdate(update);
       setNeedsDaemonRestart(restart);
-      setCanInstallAgent(!restart && (component_mode !== undefined || update || code === "ctl_agent_not_found"));
+      setCanInstallAgent(can_manage && !restart && (component_mode !== undefined || update || code === "ctl_agent_not_found"));
       if (restart) await checkRestart(candidate);
       else setStep("retry");
     } finally {
@@ -430,6 +443,7 @@ export function SshHostFlow({
       try {
         void connect(resolveSshGateways({
           ...candidate,
+          ...(remote_platform ? { remote_platform } : {}),
           ...(vpnConnectionId ? { vpn_connection_id: vpnConnectionId, use_ssh_config_master: false } : {}),
           ...(gatewayRoute.length ? { gateway_route: gatewayRoute } : {}),
         }, draftGatewaysRef.current, hosts));
@@ -502,7 +516,7 @@ export function SshHostFlow({
         delete candidate.ssh_config_alias;
       }
       if (identity_file) candidate.identity_file = identity_file;
-      return candidate;
+      return { ...candidate, ...(remote_platform ? { remote_platform } : {}) };
     }
     const parsed = parseHostAddress(destination);
     const unchangedAlias = source && !source.hostname && destination === source.destination;
@@ -524,6 +538,7 @@ export function SshHostFlow({
       const sameAlias = source && !source.hostname && selectedAlias === source.destination;
       return {
         ...target,
+        ...(remote_platform ? { remote_platform } : {}),
         ...(sameAlias
           ? { user: source.user, port: source.port,
             ...(source.tailscale_node_id ? { tailscale_node_id: source.tailscale_node_id } : {}) }
@@ -554,7 +569,7 @@ export function SshHostFlow({
     if (source?.ssh_config_alias === name && parsed.hostname === source.hostname) {
       target.ssh_config_alias = source.ssh_config_alias;
     }
-    return target;
+    return { ...target, ...(remote_platform ? { remote_platform } : {}) };
   }
 
   function answer(value: string) {
@@ -614,7 +629,7 @@ export function SshHostFlow({
       <GatewayRouteDialog
         title={editingConnection ? initialTarget ? "Edit connection method" : "Add connection method" : undefined}
         submitLabel={editingConnection ? "Verify and save" : undefined}
-        target={{ kind: "ssh", host_id: editing_host_id ?? initialTarget?.host_id, destination: route_settings?.destination || address.trim() || preferred_endpoint?.destination || "New host", gateway_route: gatewayRoute, vpn_connection_id: vpnConnectionId }}
+        target={{ kind: "ssh", host_id: editing_host_id ?? initialTarget?.host_id, destination: route_settings?.destination || address.trim() || preferred_endpoint?.destination || "New host", remote_platform, gateway_route: gatewayRoute, vpn_connection_id: vpnConnectionId }}
         vpn_connections={vpn_connections}
         vpn_statuses={vpn_statuses}
         vpn_loading={vpn_loading}
@@ -629,12 +644,13 @@ export function SshHostFlow({
           default_identity_file: !address.trim() ? preferred_endpoint?.identity_file : undefined,
           alias: hostAlias,
           identity_file: hostIdentityFile,
+          remote_platform,
           suggestions,
           warning,
           identity_files: editingConnection ? identityFiles.identity_files : undefined,
           identity_loading: editingConnection && identityFiles.loading,
           identity_warning: editingConnection ? identityFiles.warnings.join("\n") : undefined,
-          ssh_config_master: /Win/i.test(navigator.platform) ? undefined : {
+          ssh_config_master: windows_client || remote_platform === "windows" ? undefined : {
             checked: sshConfigMaster ?? defaultSshConfigMaster,
             onChange: setSshConfigMaster,
           },
@@ -647,6 +663,7 @@ export function SshHostFlow({
           onAddressChange: setAddress,
           onAliasChange: setHostAlias,
           onIdentityFileChange: setHostIdentityFile,
+          onRemotePlatformChange: setRemotePlatform,
         }}
         readonlyExisting
         readonlyGatewayIds={originalGatewayIds.current}
@@ -688,6 +705,7 @@ export function SshHostFlow({
         label: "SSH host",
         placeholder: "ctmux@127.0.0.1:2222",
         initial_value: address,
+        additional_field: onSaveNewHost ? <SshRemotePlatformSelect value={remote_platform} onChange={setRemotePlatform} className="quick-input-ssh-platform" /> : undefined,
         suggestions: suggestions.length || availableTailscaleDevices.length || discoveryLoading
           ? {
               label: "Discovered hosts",
@@ -771,8 +789,8 @@ export function SshHostFlow({
       break;
     case "auth":
       title = selectedProviderTargetRef.current ? "Authentication · 5/5" : "Authentication · 4/4";
-      description =
-        "OpenSSH authenticates this host. On macOS, you can save a verified password or key passphrase in Keychain, protected by Touch ID or your macOS account password.";
+      description = windows_client ? "Use a key available to OpenSSH and a host already trusted by OpenSSH."
+        : "OpenSSH authenticates this host. On macOS, you can save a verified password or key passphrase in Keychain, protected by Touch ID or your macOS account password.";
       mode = {
         kind: "pick",
         choices: [
@@ -786,11 +804,11 @@ export function SshHostFlow({
             label: "Identity file",
             detail: "Specify a private-key path; never copy the key.",
           },
-          {
+          ...(windows_client ? [] : [{
             id: "password",
             label: "Password / interactive authentication",
             detail: "Answer OpenSSH's masked prompt when requested.",
-          },
+          }]),
         ],
       };
       onBack = back("connect_through");
@@ -870,7 +888,10 @@ export function SshHostFlow({
             ? (needsUpdate
               ? "Update the remote components to match this app. Running sessions are preserved; an already-running daemon may still need to be restarted on the host."
               : "SSH is available, but this host is missing the ctmux remote components. Install them for this user or retry after installing them manually.")
-            : "OpenSSH will ask for host verification or authentication if needed.";
+            : needsUpdate && candidateRef.current?.kind === "ssh" && candidateRef.current.remote_platform === "windows"
+              ? "Update the components on the Windows host, then reconnect."
+              : windows_client ? "Uses the keys and host trust configured in OpenSSH."
+                : "OpenSSH will ask for host verification or authentication if needed.";
       mode = opening_vpn_sign_in ? { kind: "progress", message: "Opening sign-in in your browser…" } : {
         kind: "pick",
         choices: [

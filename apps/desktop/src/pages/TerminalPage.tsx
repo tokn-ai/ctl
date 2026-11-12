@@ -2348,11 +2348,12 @@ function TerminalWorkbench() {
             onAddMethod={() => editMethod(settingsHost)}
             onEditMethod={(method) => editMethod(settingsHost, method)}
             onConnect={(method) => connectHostMethod(hostTarget(settingsHost, workspace.ssh_gateways, method.method_id, workspace.hosts), method.method_id)}
-            on_update_components={() => {
+            on_update_components={settingsHost.connection_methods.some((method) =>
+              method.method_id === settingsHost.preferred_method_id && method.target.remote_platform !== "windows") ? () => {
               const target = hostTarget(settingsHost, workspace.ssh_gateways, undefined, workspace.hosts);
               setHostSettingsId(null);
               setComponentUpdateContext({ targets: [target] });
-            }}
+            } : undefined}
             on_remove={settingsHost.source !== "ssh_config" && settingsHost.source !== "tailscale" ? async () => {
               await removeHost(hostTarget(settingsHost, workspace.ssh_gateways, undefined, workspace.hosts));
             } : undefined}

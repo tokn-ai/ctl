@@ -52,6 +52,11 @@ async fn remote(options: TargetOptions<'_>, rollback: bool) -> io::Result<Instal
     .await
     .map_err(io::Error::other)?;
   let target = resolved.target;
+  if target.remote_platform() == ctl_client::RemotePlatform::Windows {
+    return Err(io::Error::other(
+      "remote installation management requires a Unix SSH host",
+    ));
+  }
   crate::target::ensure_vpn(&target)
     .await
     .map_err(io::Error::other)?;

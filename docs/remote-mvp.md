@@ -301,11 +301,11 @@ currently manages local tasks, while remote tasks are available through the CLI.
 - SSH authentication must work for a non-interactive remote command. Password
   and host-key prompts remain OpenSSH behavior, but key, agent, or certificate
   authentication is preferable for unattended reconnects.
-- Windows hosts use `--remote-platform windows` with the server's default
-  cmd.exe shell. Install `ctl-agent.exe`, `ctl-taskd.exe`, and `ctmuxd.exe` together
-  on the remote PATH. Their data endpoints are owner-restricted named pipes. PowerShell/custom
-  server shells and desktop remote-platform selection remain unverified or
-  unimplemented.
+- Use `--remote-platform windows` in the CLI or select **Windows** under
+  **Server platform** in the desktop connection settings. The server uses its
+  default `cmd.exe` SSH shell. Install `ctl-agent.exe`, `ctl-taskd.exe`, and
+  `ctmuxd.exe` together on the remote PATH. Their data endpoints are
+  owner-restricted named pipes. Custom SSH server shells remain unverified.
 - Journals, checkpoints, shell awareness, and reconnect tokens are memory-only.
 - Arbitrary gateway commands, files, port forwarding, desktop streaming, and
   `ctmuxd` maintenance control are not exposed by `ctl-agent`.

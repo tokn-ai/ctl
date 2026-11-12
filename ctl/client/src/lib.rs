@@ -64,7 +64,10 @@ const UNIX_AUTHENTICATED_GATEWAY_COMMAND: &str = concat!(
 );
 const UNIX_PLATFORM_PROBE_COMMAND: &str = "printf 'ctl-platform-v1\\n'; uname -s; uname -m";
 /// Remote command-shell convention, independent of the client platform.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(
+  Debug, Clone, Copy, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
 pub enum RemotePlatform {
   #[default]
   Unix,

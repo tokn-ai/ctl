@@ -1,6 +1,19 @@
 use ctl_client::hosts::{self, ConnectionTargetDto, HostError, ResolvedHost};
 use std::path::PathBuf;
 
+pub(crate) fn apply_remote_platform(
+  target: &mut ConnectionTargetDto,
+  selection: Option<crate::RemotePlatform>,
+) {
+  if let Some(platform) = selection
+    && let ConnectionTargetDto::Ssh {
+      remote_platform, ..
+    } = target
+  {
+    *remote_platform = Some(platform.into());
+  }
+}
+
 pub async fn resolve(
   host: Option<&str>,
   destination: Option<&str>,

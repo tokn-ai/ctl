@@ -3,6 +3,7 @@
 use ctl_client::connection::{self, Error};
 use ctl_ipc::{ClientMessage, LocalPortForward, PortForwardStatus, ServerMessage, SshTarget};
 
+use super::connection::require_unix_target;
 use crate::dto::ConnectionTargetDto;
 use crate::error::{CommandErrorDto, CommandResult};
 
@@ -11,6 +12,9 @@ pub(super) async fn configure_port_forward(
   forward: LocalPortForward,
   enabled: bool,
 ) -> CommandResult<PortForwardStatus> {
+  if enabled && forward.protocol.includes_udp() {
+    require_unix_target(target, "UDP port forwarding")?;
+  }
   match request(ClientMessage::ConfigurePortForward {
     target: forwarding_target(target)?,
     forward,
@@ -44,13 +48,15 @@ pub(super) async fn list_port_forwards(
 
 fn forwarding_target(target: &ConnectionTargetDto) -> CommandResult<SshTarget> {
   #[cfg(not(unix))]
-  if matches!(
-    target,
-    ConnectionTargetDto::Ssh {
-      use_ssh_config_master: Some(true),
-      ..
-    }
-  ) {
+  if target.remote_platform() != ctl_client::RemotePlatform::Windows
+    && matches!(
+      target,
+      ConnectionTargetDto::Ssh {
+        use_ssh_config_master: Some(true),
+        ..
+      }
+    )
+  {
     return Err(CommandErrorDto::new(
       "ssh_master_selection_unsupported",
       "SSH master selection currently requires macOS or Linux.",
@@ -102,6 +108,34 @@ mod tests {
         .code,
       "invalid_ssh_target",
     );
+  }
+
+  #[tokio::test]
+  async fn windows_udp_and_any_are_rejected_before_contacting_the_helper() {
+    let target = serde_json::from_value(serde_json::json!({
+      "kind": "ssh", "destination": "office", "remote_platform": "windows",
+    }))
+    .unwrap();
+    for protocol in [
+      ctl_ipc::PortForwardProtocol::Udp,
+      ctl_ipc::PortForwardProtocol::Any,
+    ] {
+      let forward = LocalPortForward {
+        forward_id: "dns".into(),
+        protocol,
+        bind_address: "127.0.0.1".into(),
+        local_port: 5353,
+        remote_host: "localhost".into(),
+        remote_port: 53,
+      };
+      assert_eq!(
+        configure_port_forward(&target, forward, true)
+          .await
+          .unwrap_err()
+          .code,
+        "windows_ssh_operation_unsupported"
+      );
+    }
   }
 
   #[cfg(not(unix))]

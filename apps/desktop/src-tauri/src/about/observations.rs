@@ -10,6 +10,7 @@ use super::models::{ComponentAction, ComponentVersionInfo, ComponentVersionRow, 
 pub(crate) struct RemoteObservation {
   pub identity: ctl_proto::RemoteIdentity,
   pub handshake: ctmux_client::HandshakeInfo,
+  pub remote_platform: ctl_client::RemotePlatform,
   pub label: String,
   pub host_id: Option<String>,
 }
@@ -77,6 +78,9 @@ fn insert(
   hash.update(serde_json::to_vec(&running).expect("version metadata serializes"));
   let id = format!("remote:{component}:{:x}", hash.finalize());
   rows.entry(id.clone()).or_insert_with(|| {
+    let restart_supported = component == "ctmuxd"
+      && observation.remote_platform == ctl_client::RemotePlatform::Unix
+      && observation.identity.ctmux_restart_supported;
     let mut row = ComponentVersionRow {
       component_id: id,
       component,
@@ -101,10 +105,10 @@ fn insert(
         ctl_core::component::build_info(),
         expected_protocols,
       )),
-      restart_supported: component == "ctmuxd" && observation.identity.ctmux_restart_supported,
+      restart_supported,
       action: match component {
         "ctl_agent" => Some(ComponentAction::Reconnect),
-        "ctmuxd" if observation.identity.ctmux_restart_supported => Some(ComponentAction::Restart),
+        "ctmuxd" if restart_supported => Some(ComponentAction::Restart),
         _ => None,
       },
       detail: Some(
@@ -147,6 +151,7 @@ mod tests {
           peer_timeout: Duration::from_secs(3),
         },
       },
+      remote_platform: ctl_client::RemotePlatform::Unix,
       label: "Test environment".into(),
       host_id: Some("test-host".into()),
     }
@@ -204,6 +209,21 @@ mod tests {
         && row.observation == "running"
         && row.action.is_some())
     );
+  }
+
+  #[test]
+  fn windows_observations_offer_reconnect_without_remote_restart() {
+    let mut windows = observation();
+    windows.remote_platform = ctl_client::RemotePlatform::Windows;
+    let result = rows(vec![windows]);
+    let daemon = result.iter().find(|row| row.component == "ctmuxd").unwrap();
+    assert!(!daemon.restart_supported);
+    assert!(daemon.action.is_none());
+    let agent = result
+      .iter()
+      .find(|row| row.component == "ctl_agent")
+      .unwrap();
+    assert!(matches!(agent.action, Some(ComponentAction::Reconnect)));
   }
 
   #[test]

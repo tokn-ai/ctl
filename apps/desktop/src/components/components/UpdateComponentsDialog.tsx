@@ -26,8 +26,12 @@ function sourceChoice(source?: ComponentUpdateSource): SourceChoice {
 }
 
 export function UpdateComponentsDialog({ targets, context, on_updated, on_close }: Props) {
-  const available = new Map([LOCAL_TARGET, ...targets, ...(context?.targets ?? [])].map((target) => [targetKey(target), target]));
-  const [selected, setSelected] = useState(() => new Set((context?.targets ?? [LOCAL_TARGET]).filter((target) => target.kind !== "ssh" || !target.unavailable).map(targetKey)));
+  const available = new Map([LOCAL_TARGET, ...targets, ...(context?.targets ?? [])]
+    .filter((target) => target.kind !== "ssh" || target.remote_platform !== "windows")
+    .map((target) => [targetKey(target), target]));
+  const [selected, setSelected] = useState(() => new Set((context?.targets ?? [LOCAL_TARGET])
+    .filter((target) => target.kind !== "ssh" || (target.remote_platform !== "windows" && !target.unavailable))
+    .map(targetKey)));
   const initial_source = context?.source;
   const [source_choice, setSourceChoice] = useState<SourceChoice>(() => sourceChoice(initial_source));
   const published = source_choice === "nightly" || source_choice === "stable";

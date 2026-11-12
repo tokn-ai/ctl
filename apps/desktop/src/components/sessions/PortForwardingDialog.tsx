@@ -41,12 +41,14 @@ export function PortForwardingDialog({
   onUpdateAgent,
   onClose,
 }: Props) {
+  const windows_target = target.remote_platform === "windows";
   const [error, setError] = useState<string | null>(null);
   const [name, setName] = useState("");
   const [localPort, setLocalPort] = useState("");
   const [remoteHost, setRemoteHost] = useState("127.0.0.1");
   const [remotePort, setRemotePort] = useState("");
-  const [protocol, setProtocol] = useState<PortForwardProtocol>("tcp");
+  const [selected_protocol, setProtocol] = useState<PortForwardProtocol>("tcp");
+  const protocol = windows_target ? "tcp" : selected_protocol;
   const [listeners, setListeners] = useState<TcpListener[]>([]);
   const [listenerWarnings, setListenerWarnings] = useState<string[]>([]);
   const [listenerError, setListenerError] = useState<string | null>(null);
@@ -79,7 +81,7 @@ export function PortForwardingDialog({
   }
 
   useEffect(() => {
-    void refreshListeners();
+    if (!windows_target) void refreshListeners();
   }, [target]);
 
   useEffect(() => {
@@ -188,7 +190,7 @@ export function PortForwardingDialog({
       <p className="quick-input-description">
         Local connections bind only to 127.0.0.1. Enabled forwards remain owned by ctld and are restored after SSH reconnects.
       </p>
-      <section className="remote-listeners" aria-labelledby="remote-listeners-heading">
+      {!windows_target ? <section className="remote-listeners" aria-labelledby="remote-listeners-heading">
         <header>
           <strong id="remote-listeners-heading">Remote TCP/UDP listeners</strong>
           <button type="button" onClick={() => void refreshListeners()} disabled={listenersLoading}>
@@ -224,7 +226,7 @@ export function PortForwardingDialog({
         {listenerWarnings.map((warning) => (
           <p className="remote-listener-message warning" key={warning}>{warning}</p>
         ))}
-      </section>
+      </section> : null}
       <div className="port-forward-list">
         {forwards.length === 0 ? (
           <p className="port-forward-empty">No saved forwards for this host.</p>
@@ -272,8 +274,10 @@ export function PortForwardingDialog({
           Protocol
           <select value={protocol} onChange={(event) => setProtocol(event.target.value as PortForwardProtocol)}>
             <option value="tcp">TCP</option>
-            <option value="udp">UDP</option>
-            <option value="any">Any (TCP/UDP)</option>
+            {!windows_target ? <>
+              <option value="udp">UDP</option>
+              <option value="any">Any (TCP/UDP)</option>
+            </> : null}
           </select>
         </label>
         <label>

@@ -1087,7 +1087,10 @@ Windows desktop backend and native shell metadata remain separate work.
 
 Install `ctl-agent.exe`, `ctl-taskd.exe`, and `ctmuxd.exe` together in a directory on the
 remote user's PATH. Enable Windows OpenSSH Server with its default `cmd.exe`
-shell, then select the server platform explicitly from either client platform:
+shell. In the desktop, choose **Windows** under **Server platform** when adding
+the host or editing its connection method. The app saves the platform and uses
+your existing OpenSSH configuration and credentials. In the CLI, you can select
+the platform for an individual command:
 
 ```sh
 ctl --host windows-host --remote-platform windows ctmux new --name development -- cmd.exe /D /Q
@@ -1101,7 +1104,6 @@ The fixed Windows commands are `ctl-agent.exe connect` for ctmux and
 user-owned data pipe and starts its companion daemon when absent. The daemon
 breaks away from the SSH job so its sessions or tasks survive disconnects.
 PowerShell and custom SSH shells are not covered by this implementation.
-Desktop remote-platform selection remains pending.
 
 The SSH gateway is named `ctl-agent` (`ctl-agent.exe` on Windows), reflecting
 its per-connection lifetime. CLI and desktop service channels use the stable

@@ -15,6 +15,7 @@ export function sameSshEndpoint(
     return left.kind === right.kind;
   return (
     left.destination === right.destination &&
+    (left.remote_platform ?? "unix") === (right.remote_platform ?? "unix") &&
     left.hostname === right.hostname &&
     left.user === right.user &&
     left.port === right.port &&

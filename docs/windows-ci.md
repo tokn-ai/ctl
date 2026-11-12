@@ -235,7 +235,9 @@ prefix followed by `exec ctl-agent connect`). CLI clients
 can select `--remote-platform windows` to use the fixed `ctl-agent.exe connect`
 command with the Windows OpenSSH server's default cmd.exe shell. The platform
 is independent of the client OS; arbitrary shell commands remain disallowed.
-The desktop currently selects Unix remote commands.
+The desktop saves the platform with each connection method. Selecting Windows
+uses the same fixed gateway command and OpenSSH configuration, including the
+existing host-key policy and credentials. Older saved methods default to Unix.
 
 [Proposal 0006](proposals/0006-remote-tasks.md) extends this convention to tasks:
 `ctl --host HOST --remote-platform windows task ...` selects
@@ -284,7 +286,7 @@ not covered by the loopback fixture.
 
 - Remote interactive-task attachment over SSH. Local managed ConPTY tasks and
   remote ctmux attachment are covered separately.
-- Desktop remote-platform selection.
+- End-to-end desktop verification against a Windows SSH server.
 - Native process inspection and Windows desktop bundle installation checks.
 - Cross-account ACL tests and filesystem ACL hardening for custom data paths.
 - Persistent logs, restart policies, workspace task integration, and other

@@ -59,6 +59,7 @@ pub async fn prepare(
     .collect();
   let actor = actors.first().ok_or_else(unavailable)?;
   let row = row(actor, component_id).ok_or_else(unavailable)?;
+  let action = row.action.ok_or_else(unavailable)?;
   let observation = actor.remote_observation.as_ref().ok_or_else(unavailable)?;
   let remote_id = observation.identity.remote_id.clone();
   let control_path = tokio::time::timeout(
@@ -84,7 +85,7 @@ pub async fn prepare(
     label: row.label,
     component: row.component,
     host_id: row.host_id,
-    action: row.action.ok_or_else(unavailable)?,
+    action,
     running: row.running,
     available: None,
     attachment_count: u32::try_from(actors.len()).unwrap_or(u32::MAX),

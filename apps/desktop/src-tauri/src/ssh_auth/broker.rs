@@ -158,6 +158,7 @@ pub(super) use super::forwarding::{configure_port_forward, list_port_forwards};
 pub async fn list_remote_listeners(
   target: &ConnectionTargetDto,
 ) -> CommandResult<ctl_proto::TcpListenerCatalog> {
+  super::connection::require_unix_target(target, "Remote listener discovery")?;
   let target = broker_target(target)?;
   let (mut stream, protocol_version) = connect_existing_with_protocol(&target)
     .await?

@@ -158,6 +158,22 @@ describe("host identity and connection methods", () => {
     expect(() => hostTarget({ ...saved_host, preferred_method_id: "removed" }, [gateway])).toThrow("Choose a connection method");
   });
 
+  it("restores the Windows platform from a saved SSH alias", () => {
+    const saved_host = host();
+    saved_host.connection_methods[0].target = { kind: "ssh", destination: "build", remote_platform: "windows" };
+    const aliases = [{ destination: "build" }];
+    const view = restoreWorkspace(document(), { schema_version: 1, hosts: [saved_host], ssh_gateways: [gateway] }, aliases);
+    const catalog = hostCatalogDocument(view);
+    expect(catalog.hosts[0].connection_methods[0]).toMatchObject({
+      ssh_config_alias: "build", target: { destination: "build", remote_platform: "windows" },
+    });
+    const restored = restoreWorkspace(workspaceDocument(view), catalog, aliases);
+    expect(restored.targets.find((target) => targetKey(target) === "host:build-machine")).toMatchObject({
+      ssh_config_alias: "build", remote_platform: "windows", remote_info,
+    });
+    expect(restored.sessions[0].target).toMatchObject({ remote_platform: "windows" });
+  });
+
   it("keeps active transports and references when host settings are renamed or edited", () => {
     const before = restoreWorkspace(document());
     const updated_host = {

@@ -266,6 +266,8 @@ export interface RemoteIdentity {
   bundle?: RemoteAgentInstallResult;
 }
 
+export type SshRemotePlatform = "unix" | "windows";
+
 export interface SshConnectionTarget {
   /** Runtime-only: retained workspace references cannot currently be connected. */
   unavailable?: string;
@@ -283,6 +285,8 @@ export interface SshConnectionTarget {
   ssh_config_alias?: string;
   /** Runtime copy of the method's master preference; absent uses its source default. */
   use_ssh_config_master?: boolean;
+  /** Remote OpenSSH shell convention. Defaults to Unix. */
+  remote_platform?: SshRemotePlatform;
   destination: string;
   hostname?: string;
   user?: string;

@@ -138,12 +138,18 @@ struct RemoteConnection {
 
 #[cfg(unix)]
 async fn remote(selection: TargetOptions<'_>) -> io::Result<RemoteConnection> {
-  let target = crate::target::resolve(selection.host, selection.destination, selection.method)
+  let mut target = crate::target::resolve(selection.host, selection.destination, selection.method)
     .await
     .map_err(io::Error::other)?
     .target;
   if target.is_local() {
     return Err(io::Error::other("--host must select an SSH host"));
+  }
+  crate::target::apply_remote_platform(&mut target, selection.platform);
+  if target.remote_platform() == ctl_client::RemotePlatform::Windows {
+    return Err(io::Error::other(
+      "remote component maintenance requires a Unix SSH host",
+    ));
   }
   crate::target::ensure_vpn(&target)
     .await

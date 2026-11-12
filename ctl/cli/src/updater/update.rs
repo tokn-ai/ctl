@@ -215,6 +215,11 @@ async fn update_host(
     .await?;
     return ctl_client::component_update::install_prepared_local(home, prepared, package).await;
   }
+  if target.remote_platform() == ctl_client::RemotePlatform::Windows {
+    return Err(io::Error::other(
+      "component uploads currently require a Unix SSH host",
+    ));
+  }
   crate::target::ensure_vpn(&target)
     .await
     .map_err(io::Error::other)?;

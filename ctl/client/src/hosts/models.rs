@@ -49,6 +49,7 @@ where
     "vpn_connection_id",
     "gateways",
     "remote_info",
+    "remote_platform",
   ];
   let value = serde_json::Value::deserialize(deserializer)?;
   if let Some(fields) = value.as_object()
@@ -110,6 +111,7 @@ impl WorkspaceConnectionMethod {
       gateway_route,
       vpn_connection_id,
       gateways,
+      ..
     } = &self.target
     else {
       return false;

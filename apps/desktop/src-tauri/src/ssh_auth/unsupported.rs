@@ -12,7 +12,7 @@ mod verification;
 
 use crate::dto::ConnectionTargetDto;
 use crate::error::{CommandErrorDto, CommandResult};
-use ctl_client::{ConnectionTarget, SshInteraction, Transport, open_identified_ssh_service};
+use ctl_client::{ConnectionTarget, RemotePlatform, SshInteraction, Transport};
 use serde::Serialize;
 use std::future::{Ready, ready};
 use tauri::ipc::Channel;
@@ -38,13 +38,15 @@ pub async fn connect(target: &ConnectionTargetDto) -> CommandResult<Transport> {
 async fn connect_identified(
   target: &ConnectionTargetDto,
 ) -> CommandResult<(Transport, ctl_proto::RemoteIdentity)> {
-  if matches!(
-    target,
-    ConnectionTargetDto::Ssh {
-      use_ssh_config_master: Some(true),
-      ..
-    }
-  ) {
+  if target.remote_platform() != RemotePlatform::Windows
+    && matches!(
+      target,
+      ConnectionTargetDto::Ssh {
+        use_ssh_config_master: Some(true),
+        ..
+      }
+    )
+  {
     return Err(CommandErrorDto::new(
       "ssh_master_selection_unsupported",
       "SSH master selection currently requires macOS or Linux.",
@@ -60,21 +62,7 @@ async fn connect_identified(
       "Select a remote SSH host.",
     ));
   };
-  let stream = open_identified_ssh_service(
-    &destination,
-    &options,
-    &SshInteraction::Batch,
-    ctl_client::RemoteService::Ctmux,
-  )
-  .await
-  .map_err(|error| CommandErrorDto::transport(&error))?;
-  let identity = stream
-    .remote_identity
-    .as_deref()
-    .expect("identified transport")
-    .clone();
-  target.verify_remote_identity(&identity)?;
-  Ok((Transport::Ssh(stream), identity))
+  connection::open_terminal(target, &destination, &options, &SshInteraction::Batch).await
 }
 
 pub async fn probe(
@@ -83,14 +71,18 @@ pub async fn probe(
   _attempt_id: String,
   target: ConnectionTargetDto,
   _channel: Channel<SshPromptDto>,
-  _restart_check: bool,
+  restart_check: bool,
   components_only: bool,
 ) -> CommandResult<ctl_proto::RemoteIdentity> {
   if components_only {
+    connection::require_unix_target(&target, "Remote component inspection")?;
     return Err(CommandErrorDto::new(
       "remote_component_inspection_unsupported",
       "Remote component inspection currently requires an existing SSH master on macOS or Linux.",
     ));
+  }
+  if restart_check {
+    connection::require_unix_target(&target, "Remote ctmux restart")?;
   }
   connection::remote_service(async {
     let (stream, identity) = connect_identified(&target).await?;
@@ -104,10 +96,13 @@ pub fn install_agent(
   _app: tauri::AppHandle,
   _window: String,
   _attempt_id: String,
-  _target: ConnectionTargetDto,
+  target: ConnectionTargetDto,
   _channel: Channel<SshPromptDto>,
   _on_progress: Channel<crate::dto::RemoteAgentInstallProgressDto>,
 ) -> Ready<CommandResult<crate::dto::RemoteAgentInstallResultDto>> {
+  if let Err(error) = connection::require_unix_target(&target, "Remote component installation") {
+    return ready(Err(error));
+  }
   ready(Err(CommandErrorDto::new(
     "remote_agent_install_unsupported",
     "Remote component installation currently requires macOS or Linux.",
@@ -118,9 +113,12 @@ pub fn restart_ctmux(
   _app: tauri::AppHandle,
   _window: String,
   _attempt_id: String,
-  _target: ConnectionTargetDto,
+  target: ConnectionTargetDto,
   _channel: Channel<SshPromptDto>,
 ) -> Ready<CommandResult<ctl_proto::RemoteCtmuxRestartResult>> {
+  if let Err(error) = connection::require_unix_target(&target, "Remote ctmux restart") {
+    return ready(Err(error));
+  }
   ready(Err(CommandErrorDto::new(
     "remote_restart_unsupported",
     "Remote ctmux restart currently requires macOS or Linux.",

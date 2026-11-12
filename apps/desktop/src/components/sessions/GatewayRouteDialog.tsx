@@ -11,11 +11,13 @@ import type {
   WorkspaceHost,
   WorkspaceSshGateway,
   SshIdentityFile,
+  SshRemotePlatform,
   VpnConnection,
   VpnStatus,
 } from "../../lib/types";
 import { QuickInputFrame } from "../commands/QuickInputFrame";
 import "./gatewayRoute.css";
+import { SshRemotePlatformSelect } from "./SshRemotePlatformSelect";
 
 interface Props {
   title?: string;
@@ -35,6 +37,7 @@ interface Props {
     default_identity_file?: string;
     alias: string;
     identity_file: string;
+    remote_platform?: SshRemotePlatform;
     suggestions: readonly string[];
     warning: string | null;
     identity_files?: readonly SshIdentityFile[];
@@ -52,6 +55,7 @@ interface Props {
     onAddressChange(value: string): void;
     onAliasChange(value: string): void;
     onIdentityFileChange(value: string): void;
+    onRemotePlatformChange(value: SshRemotePlatform): void;
   };
   readonlyExisting?: boolean;
   readonlyGatewayIds?: readonly string[];
@@ -353,6 +357,7 @@ export function GatewayRouteDialog({
             {hostSetup.identity_loading ? <span>Loading identity files…</span> : null}
             {hostSetup.identity_warning ? <span role="status">{hostSetup.identity_warning}</span> : null}
           </label>
+          <SshRemotePlatformSelect value={hostSetup.remote_platform} onChange={hostSetup.onRemotePlatformChange} />
           {hostSetup.ssh_config_master ? (
             <label className="gateway-checkbox-option">
               <input

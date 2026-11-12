@@ -34,6 +34,7 @@ async fn docker_workspace_survives_client_restart() -> Result<(), String> {
     ssh_config_alias: None,
     use_ssh_config_master: None,
     remote_info: None,
+    remote_platform: None,
     destination: "workspace-smoke".into(),
     hostname: Some("127.0.0.1".into()),
     user: Some("ctmux".into()),

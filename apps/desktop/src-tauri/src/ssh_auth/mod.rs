@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use ctl_client::{ConnectionTarget, SshInteraction, Transport, open_identified_ssh_service};
+use ctl_client::{ConnectionTarget, SshInteraction, Transport};
 use serde::Serialize;
 use tauri::ipc::Channel;
 use tokio::sync::{oneshot, watch};
@@ -134,21 +134,7 @@ async fn connect_with(
         target: broker::broker_target(target)?,
         control_path,
       };
-      let stream = open_identified_ssh_service(
-        &destination,
-        &options,
-        &interaction,
-        ctl_client::RemoteService::Ctmux,
-      )
-      .await
-      .map_err(|error| CommandErrorDto::transport(&error))?;
-      let identity = stream
-        .remote_identity
-        .as_deref()
-        .expect("identified transport")
-        .clone();
-      target.verify_remote_identity(&identity)?;
-      Ok((Transport::Ssh(stream), identity))
+      connection::open_terminal(target, &destination, &options, &interaction).await
     },
   ))
   .await
@@ -170,6 +156,11 @@ pub async fn probe(
   restart_check: bool,
   components_only: bool,
 ) -> CommandResult<ctl_proto::RemoteIdentity> {
+  if components_only {
+    connection::require_unix_target(&target, "Remote component inspection")?;
+  } else if restart_check {
+    connection::require_unix_target(&target, "Remote ctmux restart")?;
+  }
   let key = (window, attempt_id);
   let (cancel, mut cancelled) = watch::channel(false);
   let attempt = Arc::new(Attempt {
@@ -256,6 +247,7 @@ pub(crate) async fn install_components(
   update: ctl_client::component_update::UpdateOptions,
   on_progress: impl Fn(crate::dto::RemoteAgentInstallProgressDto) -> CommandResult<()> + Send + Sync,
 ) -> CommandResult<crate::remote_agent::Installation> {
+  connection::require_unix_target(&target, "Remote component installation")?;
   let key = (window, attempt_id);
   let (cancel, mut cancelled) = watch::channel(false);
   let attempt = Arc::new(Attempt {
@@ -353,6 +345,7 @@ pub async fn restart_ctmux(
   target: ConnectionTargetDto,
   channel: Channel<SshPromptDto>,
 ) -> CommandResult<ctl_proto::RemoteCtmuxRestartResult> {
+  connection::require_unix_target(&target, "Remote ctmux restart")?;
   let key = (window, attempt_id);
   let (cancel, mut cancelled) = watch::channel(false);
   let attempt = Arc::new(Attempt {

@@ -51,7 +51,13 @@ impl ConnectionTargetDto {
     let mut target = ctl_ipc::SshTarget {
       destination: destination.clone(),
       ssh_config_alias: ssh_config_alias.clone(),
-      use_ssh_config_master: *use_ssh_config_master,
+      use_ssh_config_master: if self.remote_platform() == crate::RemotePlatform::Windows {
+        // Shared master startup requires a POSIX shell. Windows cmd.exe
+        // can use a private -N master with the same endpoint configuration.
+        Some(false)
+      } else {
+        *use_ssh_config_master
+      },
       hostname: hostname.clone(),
       user: user.clone(),
       port: *port,
@@ -88,7 +94,7 @@ impl ConnectionTargetDto {
           .or(hostname.as_deref())
           .unwrap_or(destination),
         SshConnectionOptions {
-          remote_platform: crate::RemotePlatform::Unix,
+          remote_platform: self.remote_platform(),
           hostname: hostname.clone(),
           user: user.clone(),
           port: *port,

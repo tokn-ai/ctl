@@ -9,7 +9,10 @@ $env:CTL_TASKD_DATA_DIR = Join-Path $root 'data'
 Remove-Item Env:CTL_TASKD_BIN -ErrorAction SilentlyContinue
 
 function Invoke-Native {
-  param([string]$Program, [string[]]$Arguments)
+  param([string]$Program, [string[]]$Arguments, [DateTime]$Deadline = [DateTime]::MaxValue)
+  $invocation = "$Program $($Arguments -join ' ')"
+  $timeoutMilliseconds = [int][Math]::Min(45000, ($Deadline - [DateTime]::UtcNow).TotalMilliseconds)
+  if ($timeoutMilliseconds -le 0) { throw "$invocation exceeded the task lifecycle deadline" }
   # Capturing the short-lived CLI also checks that its detached daemon does not
   # inherit unrelated output handles and keep these streams open after exit.
   $start = [Diagnostics.ProcessStartInfo]::new($Program)
@@ -24,16 +27,16 @@ function Invoke-Native {
   $started = $false
   try {
     $started = $process.Start()
-    if (-not $started) { throw "Could not start $Program" }
+    if (-not $started) { throw "Could not start $invocation" }
     $stdout = $process.StandardOutput.ReadToEndAsync()
     $stderr = $process.StandardError.ReadToEndAsync()
     $process.StandardInput.Close()
-    if (-not $process.WaitForExit(45000)) { throw "$Program $($Arguments -join ' ') timed out" }
+    if (-not $process.WaitForExit($timeoutMilliseconds)) { throw "$invocation timed out" }
     if (-not $stdout.Wait(5000) -or -not $stderr.Wait(5000)) {
-      throw "$Program $($Arguments -join ' ') left its captured streams open after exit"
+      throw "$invocation left its captured streams open after exit"
     }
     if ($process.ExitCode -ne 0) {
-      throw "$Program exited $($process.ExitCode):`n$($stdout.Result)`n$($stderr.Result)"
+      throw "$invocation exited $($process.ExitCode):`n$($stdout.Result)`n$($stderr.Result)"
     }
     if ($stderr.Result.Length -gt 0) { [Console]::Error.Write($stderr.Result) }
     if ($stdout.Result.Length -gt 0) { return $stdout.Result -split '\r?\n' }
@@ -47,8 +50,8 @@ function Invoke-Native {
 }
 
 function Invoke-Ctl {
-  param([string[]]$Arguments)
-  Invoke-Native -Program $ctl -Arguments $Arguments
+  param([string[]]$Arguments, [DateTime]$Deadline = [DateTime]::MaxValue)
+  Invoke-Native -Program $ctl -Arguments $Arguments -Deadline $Deadline
 }
 
 try {
@@ -65,9 +68,16 @@ try {
     Invoke-Ctl -Arguments @('taskd', 'restart')
     Invoke-Ctl -Arguments @('task', 'show', 'smoke')
     Invoke-Ctl -Arguments @('task', 'remove', 'smoke')
-    Invoke-Ctl -Arguments @('task', 'create', 'long-running', '--start', '--', 'cmd.exe', '/D', '/C', 'ping -n 30 127.0.0.1 >nul')
-    Invoke-Ctl -Arguments @('task', 'stop', 'long-running')
-    Invoke-Ctl -Arguments @('task', 'remove', 'long-running')
+    # Each create --start opens two task connections in one short-lived CLI.
+    # Repeat that teardown path while its child task is still running.
+    $deadline = [DateTime]::UtcNow.AddMinutes(2)
+    for ($round = 1; $round -le 24; $round++) {
+      $name = "long-running-$round"
+      Write-Host "Checking task lifecycle $round/24"
+      Invoke-Ctl -Arguments @('task', 'create', $name, '--start', '--', 'cmd.exe', '/D', '/C', 'ping -n 30 127.0.0.1 >nul') -Deadline $deadline
+      Invoke-Ctl -Arguments @('task', 'stop', $name) -Deadline $deadline
+      Invoke-Ctl -Arguments @('task', 'remove', $name) -Deadline $deadline
+    }
     Invoke-Ctl -Arguments @('task', 'list')
   } finally {
     Pop-Location

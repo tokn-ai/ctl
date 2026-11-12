@@ -27,6 +27,8 @@ url = "2.5.8"
 rustix = { workspace = true, features = ["net", "stdio"] }
 
 [target.'cfg(windows)'.dependencies]
+# Require the pipe lifetime fix from https://github.com/tokio-rs/mio/pull/2014.
+mio.workspace = true
 windows-spawn = "0.1.0"
 interprocess = { version = "2.4.4", features = ["tokio"] }
 widestring = "1.2.1"

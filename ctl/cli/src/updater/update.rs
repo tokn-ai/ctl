@@ -370,9 +370,32 @@ struct ProgressDisplay {
   active: bool,
   phase: Option<ctl_client::RemoteInstallPhase>,
   file_name: Option<String>,
+  last_render: Option<Instant>,
+  last_rendered_bytes: u64,
 }
 
 impl ProgressDisplay {
+  fn transfer_due(
+    &mut self,
+    progress: &ctl_client::RemoteInstallProgress,
+    changed: bool,
+    now: Instant,
+  ) -> bool {
+    let completed = progress.transferred_bytes >= progress.total_bytes
+      && progress.transferred_bytes != self.last_rendered_bytes;
+    if !changed
+      && !completed
+      && self
+        .last_render
+        .is_some_and(|last| now.saturating_duration_since(last) < Duration::from_millis(500))
+    {
+      return false;
+    }
+    self.last_render = Some(now);
+    self.last_rendered_bytes = progress.transferred_bytes;
+    true
+  }
+
   fn show(&mut self, progress: &ctl_client::RemoteInstallProgress) {
     use ctl_client::RemoteInstallPhase as Phase;
     let file = crate::table::text(progress.file_name.as_deref().unwrap_or("remote components"));
@@ -383,6 +406,11 @@ impl ProgressDisplay {
       self.file_name.clone_from(&progress.file_name);
     }
     let message = if progress.phase == Phase::Transferring {
+      // Receiver reports may arrive for every small block. Keep observing them
+      // for the watchdog, but bound redraws and redirected diagnostic volume.
+      if !self.transfer_due(progress, changed, Instant::now()) {
+        return;
+      }
       if changed {
         eprintln!("ctlup: Sending {file}");
       }
@@ -438,6 +466,33 @@ impl Drop for ProgressDisplay {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn transfer_redraws_are_bounded_without_delaying_completion_or_phase_changes() {
+    let start = Instant::now();
+    let mut display = ProgressDisplay::default();
+    let mut progress = ctl_client::RemoteInstallProgress {
+      phase: ctl_client::RemoteInstallPhase::Transferring,
+      total_bytes: 10_000,
+      ..ctl_client::RemoteInstallProgress::default()
+    };
+    let mut rendered = 0;
+    for tick in 0..10_000 {
+      progress.transferred_bytes = tick;
+      rendered += usize::from(display.transfer_due(
+        &progress,
+        tick == 0,
+        start + Duration::from_micros(tick * 100),
+      ));
+    }
+    assert_eq!(rendered, 2);
+    progress.transferred_bytes = progress.total_bytes;
+    assert!(display.transfer_due(&progress, false, start + Duration::from_secs(1)));
+    assert!(!display.transfer_due(&progress, false, start + Duration::from_secs(1)));
+    progress.transferred_bytes = 0;
+    assert!(display.transfer_due(&progress, true, start + Duration::from_secs(1)));
+  }
+
   #[test]
   fn default_local_and_explicit_batch_targets_are_distinct() {
     assert_eq!(

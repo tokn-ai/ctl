@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { appendFile, copyFile, lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
+import { pathToFileURL } from "node:url";
 import { windowsAgentTarget, type AgentBundleIdentity } from "../shared/agent-bundle.mts";
 import { parseComponent } from "../shared/protocol-contract.mts";
 import { updaterBinaryName, updaterManifestName } from "../shared/updater-bundle.mts";
@@ -23,9 +24,48 @@ interface HostCatalog {
   document: { hosts: { name: string; remote_info?: { remote_id: string; agent_version: string } }[] };
 }
 
-async function json(program: string, args: string[]): Promise<unknown> {
-  const output = await execute(program, args, { timeout: 120_000, maxBuffer: 1024 * 1024 });
-  return JSON.parse(output.stdout);
+export async function json(program: string, args: string[], options: { timeout_ms?: number } = {}): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(program, args, { stdio: ["ignore", "pipe", "pipe"] });
+    const stdout: Buffer[] = [];
+    let stdout_bytes = 0;
+    let stderr = Buffer.alloc(0);
+    let failure: Error | undefined;
+    const timer = setTimeout(() => {
+      failure ??= new Error("Command timed out");
+      child.kill();
+      child.stdout.destroy();
+      child.stderr.destroy();
+    }, options.timeout_ms ?? 120_000);
+    child.stdout.on("data", (chunk: Buffer) => {
+      stdout_bytes += chunk.length;
+      if (stdout_bytes > 1024 * 1024) {
+        failure ??= new Error("Command JSON exceeded the 1 MiB output limit");
+        child.kill();
+        child.stdout.destroy();
+        child.stderr.destroy();
+      } else stdout.push(chunk);
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      // Progress can exceed a megabyte during a large verified upload. Drain it
+      // continuously while retaining the tail needed to explain a failure.
+      stderr = Buffer.concat([stderr, chunk]).subarray(-32 * 1024);
+    });
+    child.once("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.once("close", (code, signal) => {
+      clearTimeout(timer);
+      if (failure || code !== 0) {
+        const reason = failure?.message ?? `Command exited ${signal ?? code}`;
+        reject(new Error(`${reason}: ${program}\n${stderr.toString("utf8").trim()}`));
+        return;
+      }
+      try { resolve(JSON.parse(Buffer.concat(stdout).toString("utf8"))); }
+      catch (error) { reject(error); }
+    });
+  });
 }
 
 async function status(program: string, target: string[]): Promise<Status> {
@@ -163,7 +203,9 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((error: unknown) => {
-  console.error(error);
-  process.exitCode = 1;
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  main().catch((error: unknown) => {
+    console.error(error);
+    process.exitCode = 1;
+  });
+}

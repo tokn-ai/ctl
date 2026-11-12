@@ -737,6 +737,34 @@ struct SshStartup {
   diagnostics: ssh_startup::Diagnostics,
 }
 
+impl SshStartup {
+  fn close_pipes(self) -> (tokio::process::Child, ssh_startup::Diagnostics) {
+    let Self {
+      child,
+      stdin,
+      stdout,
+      diagnostics,
+    } = self;
+    // Child::wait cannot close stdin after we have taken it out of Child.
+    // Release both pipes before waiting for a peer that may be blocked on I/O.
+    drop(stdin);
+    drop(stdout);
+    (child, diagnostics)
+  }
+
+  async fn fail(self, source: io::Error) -> CoreError {
+    let (child, diagnostics) = self.close_pipes();
+    ssh_startup::startup_error(child, diagnostics, source).await
+  }
+
+  async fn stop(self) -> io::Result<std::process::ExitStatus> {
+    let (mut child, diagnostics) = self.close_pipes();
+    let status = ssh_startup::terminate(&mut child).await;
+    drop(diagnostics);
+    status
+  }
+}
+
 fn spawn_ssh_command(mut command: Command) -> Result<SshStartup, CoreError> {
   command
     .stdin(Stdio::piped())
@@ -759,34 +787,26 @@ async fn inspect_legacy_ssh_command(
   command: Command,
 ) -> Result<ctl_proto::RemoteIdentity, CoreError> {
   const LEGACY_PREFACES: &[&[u8]] = &[b"ctl-ssh-v2\n", b"ctl-ssh-v3\n"];
-  let SshStartup {
-    mut child,
-    stdin,
-    mut stdout,
-    diagnostics,
-  } = spawn_ssh_command(command)?;
+  let mut startup = spawn_ssh_command(command)?;
   // Keep stdin open until disposal, without ever writing a service frame. This
   // prevents the legacy relay from closing before it has emitted its identity.
-  let _stdin = stdin;
   let probe = async {
     ssh_startup::Preface::default()
-      .read_marker(&mut stdout, LEGACY_PREFACES, b"ctl-ssh-")
+      .read_marker(&mut startup.stdout, LEGACY_PREFACES, b"ctl-ssh-")
       .await?;
-    Ok::<_, io::Error>(ctl_proto::read_identity(&mut stdout).await)
+    Ok::<_, io::Error>(ctl_proto::read_identity(&mut startup.stdout).await)
   };
   let result = match tokio::time::timeout(std::time::Duration::from_secs(30), probe).await {
     Ok(Ok(identity)) => identity.map_err(CoreError::RemoteIdentity),
     Ok(Err(error)) => {
-      return Err(ssh_startup::startup_error(child, diagnostics, error).await);
+      return Err(startup.fail(error).await);
     }
     Err(_) => Err(CoreError::RemoteIdentity(io::Error::new(
       io::ErrorKind::TimedOut,
       "legacy remote identity inspection timed out",
     ))),
   };
-  let _ = child.start_kill();
-  let reaped = child.wait().await;
-  drop(diagnostics);
+  let reaped = startup.stop().await;
   let identity = result?;
   reaped.map_err(CoreError::WaitSshCommand)?;
   Ok(identity)
@@ -801,12 +821,7 @@ async fn start_ssh_transport_identified<F>(
 where
   F: Future<Output = ()>,
 {
-  let SshStartup {
-    mut child,
-    mut stdin,
-    mut stdout,
-    diagnostics,
-  } = spawn_ssh_command(command)?;
+  let mut startup = spawn_ssh_command(command)?;
   let mut preface = ssh_startup::Preface::default();
   let markers = [
     SSH_AUTHENTICATED_PREFACE,
@@ -814,10 +829,10 @@ where
     ctl_proto::IDENTITY_PREFACE,
     SSH_AGENT_NOT_FOUND_PREFACE,
   ];
-  let startup = async {
+  let marker = async {
     if authentication_marker {
       if preface
-        .read_marker(&mut stdout, &markers, b"ctl-ssh-")
+        .read_marker(&mut startup.stdout, &markers, b"ctl-ssh-")
         .await?
         != 0
       {
@@ -829,13 +844,13 @@ where
       on_authenticated.await;
     }
     preface
-      .read_marker(&mut stdout, &markers, b"ctl-ssh-")
+      .read_marker(&mut startup.stdout, &markers, b"ctl-ssh-")
       .await
   }
   .await;
-  let marker = match startup {
+  let marker = match marker {
     Ok(index) => markers[index],
-    Err(error) => return Err(ssh_startup::startup_error(child, diagnostics, error).await),
+    Err(error) => return Err(startup.fail(error).await),
   };
   let expected = if identified {
     ctl_proto::IDENTITY_PREFACE
@@ -843,38 +858,45 @@ where
     SSH_TRANSPORT_PREFACE
   };
   if marker == SSH_AGENT_NOT_FOUND_PREFACE {
-    let _ = child.kill().await;
-    drop(diagnostics);
+    let _ = startup.stop().await;
     return Err(CoreError::AgentNotFound);
   }
   if identified && marker == SSH_TRANSPORT_PREFACE {
+    let _ = startup.stop().await;
     return Err(CoreError::IdentityUnsupported);
   }
   if marker != expected {
     return Err(
-      ssh_startup::startup_error(
-        child,
-        diagnostics,
-        io::Error::new(
+      startup
+        .fail(io::Error::new(
           io::ErrorKind::InvalidData,
           "remote command returned an unexpected transport marker",
-        ),
-      )
-      .await,
+        ))
+        .await,
     );
   }
   let remote_identity = if identified {
-    let identity = match read_negotiated_ssh_identity(&mut stdout, &mut stdin).await {
+    let identity = match read_negotiated_ssh_identity(&mut startup.stdout, &mut startup.stdin).await
+    {
       Ok(identity) => identity,
       Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
-        return Err(ssh_startup::startup_error(child, diagnostics, error).await);
+        return Err(startup.fail(error).await);
       }
-      Err(error) => return Err(CoreError::RemoteIdentity(error)),
+      Err(error) => {
+        let _ = startup.stop().await;
+        return Err(CoreError::RemoteIdentity(error));
+      }
     };
     Some(Box::new(identity))
   } else {
     None
   };
+  let SshStartup {
+    child,
+    stdin,
+    stdout,
+    diagnostics,
+  } = startup;
   let (shutdown, shutdown_requested) = watch::channel(false);
   ssh_startup::supervise(child, diagnostics, shutdown_requested);
 

@@ -788,6 +788,7 @@ dependencies = [
  "ctl-proto",
  "dirs 6.0.0",
  "interprocess",
+ "mio",
  "rustix",
  "serde",
  "serde_json",
@@ -866,6 +867,7 @@ dependencies = [
  "ctl-task-proto",
  "dirs 6.0.0",
  "interprocess",
+ "mio",
  "rustix",
  "tokio",
  "tokn-ctl-core",
@@ -1049,6 +1051,7 @@ dependencies = [
  "ctmux-proto",
  "dirs 6.0.0",
  "interprocess",
+ "mio",
  "rustix",
  "serde",
  "serde_json",
@@ -2783,9 +2786,9 @@ dependencies = [
 
 [[package]]
 name = "mio"
-version = "1.2.2"
+version = "1.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "30d65c71f1ce40ab09135ce117d742b9f8a19ff91a41a8b57ed50bc2de59c427"
+checksum = "1788edb87fdc09c7e26304471e2f5be8cdefb1b6930d6e3985fc02ff53bf86ee"
 dependencies = [
  "libc",
  "log",

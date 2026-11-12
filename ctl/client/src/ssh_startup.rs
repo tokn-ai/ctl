@@ -1,5 +1,5 @@
 use std::io;
-use std::time::Duration;
+use std::{process::ExitStatus, time::Duration};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::{Child, ChildStderr};
 use tokio::sync::watch;
@@ -182,7 +182,7 @@ pub async fn startup_error(
   let status = if let Ok(Ok(status)) = timeout(Duration::from_secs(1), child.wait()).await {
     Some(status)
   } else {
-    let _ = child.kill().await;
+    let _ = terminate(&mut child).await;
     None
   };
   let message = if let Ok(Ok(message)) = timeout(Duration::from_secs(1), &mut diagnostics.0).await {
@@ -206,6 +206,18 @@ pub async fn startup_error(
   } else {
     CoreError::ReadSshPreface(source)
   }
+}
+
+pub async fn terminate(child: &mut Child) -> io::Result<ExitStatus> {
+  let _ = child.start_kill();
+  timeout(Duration::from_secs(5), child.wait())
+    .await
+    .map_err(|_| {
+      io::Error::new(
+        io::ErrorKind::TimedOut,
+        "SSH child did not exit after termination",
+      )
+    })?
 }
 
 #[cfg(test)]

@@ -49,6 +49,7 @@ ctl-keychain-client = { path = "ctl/keychain-client", version = "=0.1.3" }
 ctl-ipc = { path = "ctl/ipc", version = "=0.1.3" }
 dirs = "6.0.0"
 glob = "0.3.4"
+mio = { version = "1.2.4", default-features = false }
 nix = { version = "0.29.0", default-features = false, features = ["fs"] }
 portable-pty = "0.9.0"
 ctmux-process-info = { path = "ctmux-process-info", version = "=0.1.3" }

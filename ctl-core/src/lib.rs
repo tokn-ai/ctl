@@ -2,7 +2,7 @@
 
 #[path = "bundles/layout.rs"]
 pub mod bundle_layout;
-#[cfg(all(feature = "bundles", unix))]
+#[cfg(all(feature = "bundles", any(unix, windows)))]
 pub mod bundles;
 pub mod component;
 pub mod component_update;
@@ -11,10 +11,12 @@ pub mod connection;
 pub mod development;
 #[cfg(feature = "executable")]
 pub mod executable;
-#[cfg(all(feature = "bundles", unix))]
+#[cfg(all(feature = "bundles", any(unix, windows)))]
 pub mod installations;
 pub mod paths;
 pub mod presence;
+#[cfg(all(feature = "bundles", any(unix, windows)))]
+pub mod private_fs;
 pub mod protocol;
 
 #[cfg(any(test, feature = "test-fixtures"))]

@@ -13,7 +13,6 @@ use crate::{
 };
 
 const UNIX_INSTALL_COMMAND: &str = include_str!("ssh_install.sh");
-#[cfg(unix)]
 const UPDATER_BOOTSTRAP_COMMAND: &str = include_str!("ssh_updater_bootstrap.sh");
 #[cfg(unix)]
 const AGENT_INSTALL_COMMAND: &str = include_str!("ssh_agent_install.sh");
@@ -21,9 +20,13 @@ const MAX_PROGRESS_LINE_BYTES: u64 = 256;
 const INITIAL_PROGRESS_MARKER: &[u8] = b"ctl-install-progress-v1 receiving 0\n";
 
 mod progress;
+mod windows;
 pub use progress::{
   RemoteInstallPhase, RemoteInstallProgress, RemoteInstallStalled, RemoteInstallWatchdog,
 };
+pub(crate) use windows::account_guard as windows_account_guard;
+pub use windows::probe_ssh_windows_platform;
+pub(crate) use windows::{read_remote_id, windows_ssh_command};
 
 /// SSH bootstrap and receiver-confirmed runtime installation progress.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -163,12 +166,40 @@ pub async fn install_ssh_unix_agent_interactive_with_progress(
   run_package_install(command, archive, layout.names(), on_progress).await
 }
 
+pub(crate) struct UpdaterUpload<'a> {
+  pub updater: &'a [u8],
+  pub bundle_id: &'a str,
+  pub archive: &'a [u8],
+  pub expected_account: Option<&'a str>,
+}
+
 /// Installs a complete build through the independent target-native updater.
 /// The receiver verifies a retained installation before deciding whether any
 /// runtime archive bytes need to cross SSH.
 ///
 /// # Errors
 /// Rejects invalid packages, unsafe bootstrap paths, or failed SSH operations.
+pub(crate) async fn install_ssh_bundle_with_updater(
+  destination: &str,
+  options: &SshConnectionOptions,
+  interaction: &SshInteraction,
+  upload: UpdaterUpload<'_>,
+  on_progress: impl Fn(RemoteInstallEvent) + Send + Sync,
+) -> Result<(), CoreError> {
+  match options.remote_platform {
+    RemotePlatform::Unix => {
+      install_unix_bundle_with_updater(destination, options, interaction, upload, on_progress).await
+    }
+    RemotePlatform::Windows => {
+      windows::install(destination, options, interaction, upload, on_progress).await
+    }
+  }
+}
+
+/// Installs a complete bundle on a POSIX host through its native updater.
+///
+/// # Errors
+/// Rejects an invalid package, unexpected platform, or failed SSH operation.
 #[cfg(unix)]
 pub async fn install_ssh_unix_bundle_with_updater(
   destination: &str,
@@ -179,17 +210,40 @@ pub async fn install_ssh_unix_bundle_with_updater(
   archive: &[u8],
   on_progress: impl Fn(RemoteInstallEvent) + Send + Sync,
 ) -> Result<(), CoreError> {
+  let upload = UpdaterUpload {
+    updater,
+    bundle_id,
+    archive,
+    expected_account: None,
+  };
+  install_unix_bundle_with_updater(destination, options, interaction, upload, on_progress).await
+}
+
+async fn install_unix_bundle_with_updater(
+  destination: &str,
+  options: &SshConnectionOptions,
+  interaction: &SshInteraction,
+  upload: UpdaterUpload<'_>,
+  on_progress: impl Fn(RemoteInstallEvent) + Send + Sync,
+) -> Result<(), CoreError> {
+  let UpdaterUpload {
+    updater,
+    bundle_id,
+    archive,
+    expected_account,
+  } = upload;
   validate_ssh_target(destination, options)?;
   if options.remote_platform != RemotePlatform::Unix {
     return Err(CoreError::InvalidSshOption("remote_platform".into()));
   }
   // This verifies the entire managed archive before executing anything remotely.
   let (manifest, layout) = managed_installation(archive, bundle_id)?;
-  let preflight = updater_bootstrap_script(updater, true)?;
+  let guard = unix_account_guard(expected_account)?;
+  let preflight = format!("{guard}{}", updater_bootstrap_script(updater, true)?);
   let command = updater_ssh_command(destination, options, interaction, &preflight).await?;
   let (status, stdout, stderr) = run_updater_command(command, &[], |_| {}).await?;
   if status.code() == Some(10) {
-    let bootstrap = updater_bootstrap_script(updater, false)?;
+    let bootstrap = format!("{guard}{}", updater_bootstrap_script(updater, false)?);
     let command = updater_ssh_command(destination, options, interaction, &bootstrap).await?;
     let (status, stdout, stderr) = run_updater_command(command, updater, &on_progress).await?;
     require_updater_success(status, &stdout, &stderr, b"ctlup-bootstrap-v1\n")?;
@@ -197,23 +251,14 @@ pub async fn install_ssh_unix_bundle_with_updater(
     require_updater_success(status, &stdout, &stderr, b"ctlup-bootstrap-v1\n")?;
   }
   let script = format!(
-    "exec \"$HOME/.tokn/ctl/bin/ctlup\" activate-installed '{}'",
+    "{guard}exec \"$HOME/.tokn/ctl/bin/ctlup\" activate-installed '{}'",
     manifest.bundle_id,
   );
   let command = updater_ssh_command(destination, options, interaction, &script).await?;
   let (status, stdout, stderr) = run_updater_command(command, &[], |_| {}).await?;
   if status.success() {
     require_updater_success(status, &stdout, &stderr, b"ctl-install-v1\n")?;
-    on_progress(RemoteInstallEvent::Receiving { received_bytes: 0 });
-    on_progress(RemoteInstallEvent::Receiving {
-      received_bytes: archive.len() as u64,
-    });
-    on_progress(RemoteInstallEvent::Extracting);
-    for &file_name in layout.names() {
-      on_progress(RemoteInstallEvent::Checking { file_name });
-    }
-    on_progress(RemoteInstallEvent::Activating);
-    on_progress(RemoteInstallEvent::Complete);
+    report_reused(archive, layout, &on_progress);
     return Ok(());
   }
   if status.code() != Some(10) {
@@ -223,13 +268,38 @@ pub async fn install_ssh_unix_bundle_with_updater(
     destination,
     options,
     interaction,
-    "exec \"$HOME/.tokn/ctl/bin/ctlup\" install-archive",
+    &format!("{guard}exec \"$HOME/.tokn/ctl/bin/ctlup\" install-archive"),
   )
   .await?;
   run_package_install(command, archive, layout.names(), on_progress).await
 }
 
-#[cfg(unix)]
+pub(crate) fn unix_account_guard(expected: Option<&str>) -> Result<String, CoreError> {
+  let Some(expected) = expected else {
+    return Ok(String::new());
+  };
+  if !ctl_proto::valid_remote_id(expected) {
+    return Err(CoreError::InvalidSshCommandOutput);
+  }
+  // Bound the read and preserve trailing newlines during command substitution.
+  Ok(format!(
+    "identity=\"$HOME/.tokn/ctl/remote-id\"\nif ! [ -f \"$identity\" ] || ! [ \"$(wc -c < \"$identity\")\" -eq 36 ] || [ \"$(dd if=\"$identity\" bs=1 count=36 2>/dev/null; printf x)\" != '{expected}x' ]; then printf 'The SSH account identity changed.\\n' >&2; exit 1; fi\n"
+  ))
+}
+
+fn report_reused(archive: &[u8], layout: Layout, on_progress: &impl Fn(RemoteInstallEvent)) {
+  on_progress(RemoteInstallEvent::Receiving { received_bytes: 0 });
+  on_progress(RemoteInstallEvent::Receiving {
+    received_bytes: archive.len() as u64,
+  });
+  on_progress(RemoteInstallEvent::Extracting);
+  for &file_name in layout.names() {
+    on_progress(RemoteInstallEvent::Checking { file_name });
+  }
+  on_progress(RemoteInstallEvent::Activating);
+  on_progress(RemoteInstallEvent::Complete);
+}
+
 fn managed_installation(
   archive: &[u8],
   bundle_id: &str,
@@ -246,7 +316,6 @@ fn managed_installation(
   Ok((manifest, layout))
 }
 
-#[cfg(unix)]
 fn updater_bootstrap_script(updater: &[u8], check_only: bool) -> Result<String, CoreError> {
   use sha2::{Digest as _, Sha256};
   if updater.is_empty() || updater.len() > ctl_core::bundle_layout::MAX_FILE_BYTES {
@@ -266,7 +335,6 @@ fn updater_bootstrap_script(updater: &[u8], check_only: bool) -> Result<String, 
   )
 }
 
-#[cfg(unix)]
 async fn updater_ssh_command(
   destination: &str,
   options: &SshConnectionOptions,
@@ -282,7 +350,6 @@ async fn updater_ssh_command(
   Ok(command)
 }
 
-#[cfg(unix)]
 async fn run_updater_command(
   mut command: Command,
   input: &[u8],
@@ -297,35 +364,7 @@ async fn run_updater_command(
   let mut stdin = child.stdin.take().ok_or(CoreError::MissingSshStdin)?;
   let mut stdout = child.stdout.take().ok_or(CoreError::MissingSshStdout)?;
   let mut stderr = child.stderr.take().ok_or(CoreError::MissingSshStderr)?;
-  let write = async move {
-    let total_bytes = input.len() as u64;
-    let mut sent = 0;
-    if total_bytes != 0 {
-      on_progress(RemoteInstallEvent::SendingUpdater {
-        sent_bytes: 0,
-        total_bytes,
-      });
-    }
-    while sent < input.len() {
-      // One write can finish with only a portion of its requested bytes when
-      // SSH is backpressured. Report those bytes before waiting for more room.
-      let end = (sent + 64 * 1024).min(input.len());
-      let count = stdin.write(&input[sent..end]).await?;
-      if count == 0 {
-        return Err(io::ErrorKind::WriteZero.into());
-      }
-      sent += count;
-      on_progress(RemoteInstallEvent::SendingUpdater {
-        sent_bytes: sent as u64,
-        total_bytes,
-      });
-    }
-    drop(stdin);
-    if total_bytes != 0 {
-      on_progress(RemoteInstallEvent::CheckingUpdater);
-    }
-    Ok(())
-  };
+  let write = async move { write_updater(&mut stdin, input, &on_progress).await };
   let (write, stdout, stderr, status) = tokio::join!(
     write,
     read_updater_output(&mut stdout),
@@ -343,7 +382,35 @@ async fn run_updater_command(
   ))
 }
 
-#[cfg(unix)]
+async fn write_updater(
+  stdin: &mut (impl tokio::io::AsyncWrite + Unpin),
+  bytes: &[u8],
+  on_progress: &impl Fn(RemoteInstallEvent),
+) -> io::Result<()> {
+  let total_bytes = bytes.len() as u64;
+  let mut sent = 0;
+  while sent < bytes.len() {
+    on_progress(RemoteInstallEvent::SendingUpdater {
+      sent_bytes: sent as u64,
+      total_bytes,
+    });
+    let end = (sent + 64 * 1024).min(bytes.len());
+    let count = stdin.write(&bytes[sent..end]).await?;
+    if count == 0 {
+      return Err(io::ErrorKind::WriteZero.into());
+    }
+    sent += count;
+  }
+  if total_bytes != 0 {
+    on_progress(RemoteInstallEvent::SendingUpdater {
+      sent_bytes: total_bytes,
+      total_bytes,
+    });
+    on_progress(RemoteInstallEvent::CheckingUpdater);
+  }
+  Ok(())
+}
+
 async fn read_updater_output(reader: &mut (impl AsyncRead + Unpin)) -> io::Result<Vec<u8>> {
   let mut retained = Vec::new();
   let mut buffer = [0; 1024];
@@ -366,7 +433,6 @@ async fn read_updater_output(reader: &mut (impl AsyncRead + Unpin)) -> io::Resul
   Ok(retained)
 }
 
-#[cfg(unix)]
 fn require_updater_success(
   status: std::process::ExitStatus,
   stdout: &[u8],
@@ -477,7 +543,17 @@ async fn run_install_command(
 }
 
 async fn run_package_install(
+  command: Command,
+  archive: &[u8],
+  components: &[&'static str],
+  on_progress: impl Fn(RemoteInstallEvent),
+) -> Result<(), CoreError> {
+  run_package_install_with_prefix(command, &[], archive, components, on_progress).await
+}
+
+async fn run_package_install_with_prefix(
   mut command: Command,
+  updater: &[u8],
   archive: &[u8],
   components: &[&'static str],
   on_progress: impl Fn(RemoteInstallEvent),
@@ -491,7 +567,9 @@ async fn run_package_install(
   let mut stdin = child.stdin.take().ok_or(CoreError::MissingSshStdin)?;
   let stdout = child.stdout.take().ok_or(CoreError::MissingSshStdout)?;
   let mut stderr = child.stderr.take().ok_or(CoreError::MissingSshStderr)?;
+  let report = &on_progress;
   let write = async move {
+    write_updater(&mut stdin, updater, report).await?;
     let result = stdin.write_all(archive).await;
     drop(stdin);
     result

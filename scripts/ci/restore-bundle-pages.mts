@@ -6,7 +6,7 @@ import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { isDeepStrictEqual, promisify } from "node:util";
 import { bundleRoot, componentIdentity, repositoryName, validatedComponentSet } from "./bundle-publication.mts";
-import { parseAgentBundleSet } from "../shared/agent-bundle.mts";
+import { maxAgentManifestBytes, parseAgentBundleSet, parseWindowsAgentBundleSet, windowsAgentManifestName } from "../shared/agent-bundle.mts";
 import { maxUpdaterBytes, maxUpdaterManifestBytes, parseUpdaterManifest, updaterManifestName } from "../shared/updater-bundle.mts";
 import { catalogChannels, parseBundleCatalog, siteMarker, verifyChannelPointer, type BundleCatalog } from "./stage-bundle-pages.mts";
 import { pages, type GhRunner } from "./update-draft-release.mts";
@@ -71,12 +71,18 @@ async function restorePublished(catalog: BundleCatalog, directory: string, fetch
     const relative = `sets/${entry.publication_id}/`;
     const local = join(directory, "bundles", relative);
     await mkdir(local, { recursive: true });
-    const manifest_bytes = await download(new URL(`${relative}bundle-set.json`, bundleRoot), 64 * 1024, fetcher);
+    const manifest_bytes = await download(new URL(`${relative}bundle-set.json`, bundleRoot), maxAgentManifestBytes, fetcher);
     await writeFile(join(local, "bundle-set.json"), manifest_bytes!);
     // Validate names and identity before using archive filenames in URLs/paths.
     const parsed = parseAgentBundleSet(manifest_bytes!, componentIdentity(entry));
     if (parsed.schema_version === 1) throw new Error("Published Pages set lacks component metadata");
-    for (const [target_triple, target] of Object.entries(parsed.targets)) {
+    const windows_bytes = await download(new URL(`${relative}${windowsAgentManifestName}`, bundleRoot), maxAgentManifestBytes, fetcher, true);
+    const targets = { ...parsed.targets };
+    if (windows_bytes) {
+      Object.assign(targets, parseWindowsAgentBundleSet(windows_bytes, componentIdentity(entry)).targets);
+      await writeFile(join(local, windowsAgentManifestName), windows_bytes);
+    }
+    for (const [target_triple, target] of Object.entries(targets)) {
       for (const [name, maximum] of [[target.archive, 128 * 1024 * 1024], [`${target.archive}.sha256`, 256]] as const) {
         await writeFile(join(local, name), (await download(new URL(`${relative}${name}`, bundleRoot), maximum, fetcher))!);
       }

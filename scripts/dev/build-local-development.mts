@@ -14,6 +14,7 @@ const executables = [...agentComponents, "ctlup"] as const;
 type Executable = typeof executables[number];
 const max_raw_binary_bytes = 512 * 1024 * 1024;
 const max_binary_bytes = 128 * 1024 * 1024;
+const nativeTargetPattern = /^(?:(?:x86_64|aarch64)-(?:apple-darwin|unknown-linux-(?:gnu|musl))|x86_64-pc-windows-msvc)$/;
 
 export interface LocalDevelopmentOptions {
   workspace: string;
@@ -99,12 +100,13 @@ export async function buildLocalDevelopment(
   if (typeof expected_version !== "string") throw new Error("Cargo metadata did not report the ctld package version");
   const compiler = env.RUSTC ?? env.CARGO_BUILD_RUSTC ?? "rustc";
   const host = /^host: (\S+)$/m.exec((await invoke(compiler, ["-vV"], 10_000)).stdout)?.[1];
-  if (!host || !/^(?:x86_64|aarch64)-(?:apple-darwin|unknown-linux-(?:gnu|musl))$/.test(host)) {
-    throw new Error("local development installation requires a supported native macOS or Linux compiler");
+  if (!host || !nativeTargetPattern.test(host)) {
+    throw new Error("local development installation requires a supported native macOS, Linux, or Windows compiler");
   }
   const output_metadata = await lstat(options.output);
   if (!output_metadata.isDirectory() || output_metadata.isSymbolicLink() ||
-    (process.getuid && output_metadata.uid !== process.getuid()) || (output_metadata.mode & 0o077) !== 0 ||
+    (process.getuid && output_metadata.uid !== process.getuid()) ||
+    (process.platform !== "win32" && (output_metadata.mode & 0o077) !== 0) ||
     (await readdir(options.output)).length !== 0) throw new Error("development output must be an empty owned private directory");
   const output = await realpath(options.output);
   await mkdir(metadata.target_directory, { recursive: true });
@@ -119,27 +121,29 @@ export async function buildLocalDevelopment(
   const normalized = Object.fromEntries(await Promise.all(Object.entries(compiled).map(async ([name, path]) => [name, await realpath(path)]))) as Record<Executable, string>;
   const target = targetFromArtifacts(await realpath(cache), normalized) ?? host;
   const native_target = options.native_target ?? host;
-  if (!/^(?:x86_64|aarch64)-(?:apple-darwin|unknown-linux-(?:gnu|musl))$/.test(target) ||
+  if (!nativeTargetPattern.test(target) ||
     (target !== native_target && target !== native_target.replace(/-unknown-linux-gnu$/, "-unknown-linux-musl"))) {
-    throw new Error("development artifacts do not target an executable native macOS or Linux platform");
+    throw new Error("development artifacts do not target a supported native platform");
   }
+  const windows = target === "x86_64-pc-windows-msvc";
   const binary_directory = join(output, "bin");
   await ensurePrivateDirectory(binary_directory);
+  const binaryPath = (name: Executable) => join(binary_directory, windows ? `${name}.exe` : name);
   // Snapshot every file before probing or stripping any of them. Another Cargo
   // invocation can replace original outputs as soon as this build releases its lock.
   for (const name of executables) {
     const input = compiled[name];
     const info = await lstat(input);
     if (!info.isFile() || info.isSymbolicLink() || info.size === 0 || info.size > max_raw_binary_bytes) throw new Error(`invalid development executable: ${name}`);
-    const copied = join(binary_directory, name);
+    const copied = binaryPath(name);
     await copyFile(input, copied);
     await chmod(copied, 0o700);
   }
-  await invoke("strip", executables.map((name) => join(binary_directory, name)));
+  if (!windows) await invoke("strip", executables.map(binaryPath));
   const components = {} as Record<Executable, ComponentInfo>;
   let total = 0;
   for (const name of executables) {
-    const path = join(binary_directory, name);
+    const path = binaryPath(name);
     const size = (await lstat(path)).size;
     total += size;
     if (size === 0 || size > max_binary_bytes || total > 512 * 1024 * 1024) throw new Error("stripped development executables exceed the installation size limits");
@@ -155,7 +159,7 @@ export async function buildLocalDevelopment(
       target, app_version: expected_version, output_directory: ctld_package, env }, run);
   }
   const result: LocalDevelopmentResult = { schema_version: 1, target_triple: target, binary_directory,
-    ctld_package, manager_executable: join(binary_directory, "ctlup") };
+    ctld_package, manager_executable: binaryPath("ctlup") };
   const stage = join(output, ".result.json");
   await writeFile(stage, `${JSON.stringify(result, null, 2)}\n`, { mode: 0o600, flag: "wx" });
   await rename(stage, join(output, "result.json"));

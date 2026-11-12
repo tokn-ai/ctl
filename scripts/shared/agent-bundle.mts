@@ -1,6 +1,6 @@
 import { createHash, type Hash } from "node:crypto";
 import { constants } from "node:fs";
-import { open } from "node:fs/promises";
+import { lstat, open } from "node:fs/promises";
 import { join } from "node:path";
 import { Readable } from "node:stream";
 import { createGunzip } from "node:zlib";
@@ -10,6 +10,10 @@ export const agentTargets = [
   "x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl",
   "x86_64-apple-darwin", "aarch64-apple-darwin",
 ] as const;
+export const windowsAgentTarget = "x86_64-pc-windows-msvc";
+export const windowsAgentManifestName = "bundle-set-windows.json";
+export const isAgentTarget = (target: string): boolean => target === windowsAgentTarget || (agentTargets as readonly string[]).includes(target);
+export const executableName = (name: string, target: string): string => target === windowsAgentTarget ? `${name}.exe` : name;
 const serviceComponents = ["ctl-agent", "ctmuxd", "ctl-taskd", "ctld"] as const;
 export const agentComponents = [...serviceComponents, "ctl", "ctmux"] as const;
 export const agentCargoPackages = [...serviceComponents, "ctl-cli", "ctmux-cli"] as const;
@@ -141,6 +145,25 @@ function identityFrom(root: Record<string, unknown>): AgentBundleIdentity {
 }
 
 export function parseAgentBundleSet(bytes: Buffer, expected?: Partial<AgentBundleIdentity>): AgentBundleSet {
+  return parseBundleSet(bytes, agentTargets, expected);
+}
+
+export function parseWindowsAgentBundleSet(bytes: Buffer, expected?: Partial<AgentBundleIdentity>): AgentBundleSet {
+  const manifest = parseBundleSet(bytes, [windowsAgentTarget], expected);
+  if (manifest.schema_version !== 3) throw new Error("Windows bundle sets require schema 3");
+  return manifest;
+}
+
+export async function readWindowsAgentBundleSet(directory: string, { app_version, bundle_id, git_revision }: AgentBundleIdentity): Promise<AgentBundleSet | undefined> {
+  try {
+    return parseWindowsAgentBundleSet(await readAgentFile(join(directory, windowsAgentManifestName), maxAgentManifestBytes), { app_version, bundle_id, git_revision });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    return undefined;
+  }
+}
+
+function parseBundleSet(bytes: Buffer, targetTriples: readonly string[], expected?: Partial<AgentBundleIdentity>): AgentBundleSet {
   if (bytes.length > maxAgentManifestBytes) throw new Error("agent bundle set exceeds its size limit");
   const root = record(JSON.parse(bytes.toString("utf8")), "bundle set");
   exactKeys(root, ["schema_version", "app_version", "bundle_id", "git_revision", "targets"], "bundle set");
@@ -150,9 +173,9 @@ export function parseAgentBundleSet(bytes: Buffer, expected?: Partial<AgentBundl
     if (identity[field as keyof AgentBundleIdentity] !== value) throw new Error(`bundle set identity does not match expected ${field}`);
   }
   const targets = record(root.targets, "bundle-set targets");
-  exactKeys(targets, agentTargets, "bundle-set targets");
+  exactKeys(targets, targetTriples, "bundle-set targets");
   const parsed: AgentBundleSet["targets"] = {};
-  for (const target of agentTargets) {
+  for (const target of targetTriples) {
     const entry = record(targets[target], `bundle target ${target}`);
     exactKeys(entry, root.schema_version === 1 ? ["archive", "sha256"] : ["archive", "sha256", "components"], `bundle target ${target}`);
     if (entry.archive !== archiveName(identity, target) || typeof entry.sha256 !== "string" || !/^[a-fA-F0-9]{64}$/.test(entry.sha256)) {
@@ -173,6 +196,7 @@ export function parseAgentBundleManifest(bytes: Buffer, identity: AgentBundleIde
   const root = record(JSON.parse(bytes.toString("utf8")), "archive manifest");
   exactKeys(root, ["schema_version", "app_version", "bundle_id", "git_revision", "target_triple", "files", "components"], "archive manifest");
   if ((root.schema_version !== 2 && root.schema_version !== 3) || root.target_triple !== target ||
+    (target === windowsAgentTarget && root.schema_version !== 3) ||
     root.app_version !== identity.app_version || root.bundle_id !== identity.bundle_id ||
     root.git_revision !== identity.git_revision) throw new Error("archive manifest does not match the bundle identity and target");
   const files = record(root.files, "archive file hashes");
@@ -194,6 +218,7 @@ function octal(bytes: Buffer): number {
 /** Inspect bytes without extracting files or executing foreign-target components. */
 export async function inspectAgentArchive(bytes: Buffer, identity: AgentBundleIdentity, target: string): Promise<AgentBundleManifest> {
   if (bytes.length > maxArchiveBytes) throw new Error("agent archive exceeds its compressed size limit");
+  const allowedNames = new Set([...agentComponents.map((name) => executableName(name, target)), "manifest.json"]);
   const hashes = new Map<string, string>();
   const seen = new Set<string>();
   const manifestParts: Buffer[] = [];
@@ -235,11 +260,13 @@ export async function inspectAgentArchive(bytes: Buffer, identity: AgentBundleId
         const name = header.subarray(0, 100).toString("utf8").replace(/\0.*$/su, "");
         const size = octal(header.subarray(124, 136));
         if (checksum !== actual || (header[156] !== 0 && header[156] !== 48) || header.subarray(157, 257).some((byte) => byte !== 0) ||
-          header.subarray(345, 500).some((byte) => byte !== 0) || ![...agentComponents, "manifest.json"].includes(name) || seen.has(name)) {
+          header.subarray(345, 500).some((byte) => byte !== 0) || !allowedNames.has(name) || seen.has(name)) {
           throw new Error("archive contains invalid, duplicate, or unexpected entries");
         }
         if (size === 0 || size > (name === "manifest.json" ? maxAgentManifestBytes : maxArchiveBytes) ||
-          (name !== "manifest.json" && (octal(header.subarray(100, 108)) & 0o111) === 0)) throw new Error("archive contains an invalid file size or executable mode");
+          (target !== windowsAgentTarget && name !== "manifest.json" && (octal(header.subarray(100, 108)) & 0o111) === 0)) {
+          throw new Error("archive contains an invalid file size or executable mode");
+        }
         payloadBytes = addAgentPayloadBytes(payloadBytes, size);
         seen.add(name);
         current = { name, remaining: size, padding: (512 - size % 512) % 512, hash: createHash("sha256") };
@@ -251,7 +278,7 @@ export async function inspectAgentArchive(bytes: Buffer, identity: AgentBundleId
   const names = componentsFor(manifest.schema_version);
   if (seen.size !== names.length + 1) throw new Error("archive entries differ from declared schema");
   for (const name of names) {
-    if (hashes.get(name) !== manifest.files[name]) throw new Error(`archive checksum mismatch for ${name}`);
+    if (hashes.get(executableName(name, target)) !== manifest.files[name]) throw new Error(`archive checksum mismatch for ${name}`);
   }
   return manifest;
 }
@@ -266,10 +293,15 @@ export function sameAgentComponents(left: AgentComponentMap, right: AgentCompone
 }
 
 export async function readAgentFile(path: string, maximum: number): Promise<Buffer> {
+  // Node does not expose O_NOFOLLOW on Windows. Check the directory entry and
+  // verify the opened handle still refers to the same regular file.
+  const entry = process.platform === "win32" ? await lstat(path, { bigint: true }) : undefined;
+  if (entry && !entry.isFile()) throw new Error(`invalid agent bundle file: ${path}`);
   const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
-    const info = await file.stat();
-    if (!info.isFile() || info.size === 0 || info.size > maximum) throw new Error(`invalid agent bundle file: ${path}`);
+    const info = await file.stat({ bigint: true });
+    if (!info.isFile() || info.size === 0n || info.size > BigInt(maximum) ||
+      (entry && (info.dev !== entry.dev || info.ino !== entry.ino))) throw new Error(`invalid agent bundle file: ${path}`);
     const chunks: Buffer[] = [];
     let total = 0;
     while (true) {

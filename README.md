@@ -811,7 +811,7 @@ The default target is local. Persistent remote shells require `ctl-agent` and
 the remote SSH service.
 
 When a Unix host needs a component update, `ctl` prints the corresponding
-`ctlup update` command. Run it from macOS or Linux, then reconnect. The
+`ctlup update` command. Run it from macOS, Linux, or Windows x64, then reconnect. The
 updater verifies any saved machine ID, uses the selected SSH route, and shows
 download and installation progress. It preserves running daemons.
 `CTL_REMOTE_BUNDLES_DIR` supplies an explicit local source. Use
@@ -1085,22 +1085,24 @@ Windows desktop backend and native shell metadata remain separate work.
 
 ### Windows SSH hosts
 
-Install `ctl-agent.exe`, `ctl-taskd.exe`, and `ctmuxd.exe` together in a directory on the
-remote user's PATH. Enable Windows OpenSSH Server with its default `cmd.exe`
-shell. In the desktop, choose **Windows** under **Server platform** when adding
+Enable Windows OpenSSH Server with its default `cmd.exe` shell. Install the
+managed Windows x64 components over SSH using `ctlup`, then connect. In the
+desktop, choose **Windows** under **Server platform** when adding
 the host or editing its connection method. The app saves the platform and uses
-your existing OpenSSH configuration and credentials. In the CLI, you can select
-the platform for an individual command:
+your existing OpenSSH configuration and credentials.
 
 ```sh
+ctlup update --host windows-host
+ctlup update --destination windows-ssh-alias --remote-platform windows
 ctl --host windows-host --remote-platform windows ctmux new --name development -- cmd.exe /D /Q
 ctl --host windows-host --remote-platform windows ctmux attach development
 ctl --host windows-host --remote-platform windows task list
 ctl --destination windows-ssh-alias --remote-platform windows task list
 ```
 
-The fixed Windows commands are `ctl-agent.exe connect` for ctmux and
-`ctl-agent.exe connect --service task` for tasks. The gateway relays the selected
+SSH prefers the managed `ctl-agent.exe` under the Windows user's `.tokn\ctl\bin`.
+Existing installations of the agent and its companion executables on `PATH`
+remain usable. The gateway relays the selected
 user-owned data pipe and starts its companion daemon when absent. The daemon
 breaks away from the SSH job so its sessions or tasks survive disconnects.
 PowerShell and custom SSH shells are not covered by this implementation.

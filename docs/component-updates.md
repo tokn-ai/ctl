@@ -57,6 +57,10 @@ Foreign-target binaries are never executed during download or import.
   cache/                            # reusable deployment artifacts
 ```
 
+On Windows x64, `%USERPROFILE%\.tokn\ctl\bin` contains native `.exe` launchers.
+They resolve the active runtime or updater from the installation store. This
+allows `ctlup` to install a new updater while the current process is running.
+
 Add `~/.tokn/ctl/bin` to `PATH`. New managed terminal shells include it
 automatically; existing shells keep their environment. Ordinary SSH login
 configuration remains under the account owner’s control.
@@ -78,6 +82,7 @@ ctlup update --pr 155
 ctlup update --host work
 ctlup update --hosts work,jump-a --local
 ctlup update --destination my-ssh-alias
+ctlup update --destination windows-alias --remote-platform windows
 ctlup update --from /path/to/bundle-set --hosts work,jump-a --json
 ctlup install --from target/debug --local-build --ctld-package /path/to/ctld-package
 ctlup status --json
@@ -92,6 +97,12 @@ this computer. Saved hosts reuse their existing route, connection method and
 SSH authentication. A temporary destination uses OpenSSH configuration without
 adding a saved host. Hosts are processed independently. A failure preserves
 successful hosts and produces a nonzero exit status.
+
+Windows SSH hosts use the platform saved in the connection method. For a
+temporary Windows destination, supply `--remote-platform windows`. The server
+uses the default Windows OpenSSH `cmd.exe` shell. Start a local Windows
+installation by running the standalone x64 `ctlup` executable from the
+publication.
 
 An explicit channel is saved as this account’s preference after a successful
 command. Otherwise automatic updates use that preference or the distribution’s
@@ -133,7 +144,8 @@ tree. Use `--working-tree` to choose that source explicitly for Linux x64 or
 ARM64 targets.
 
 `--from` supplies an exact complete build or publisher bundle-set. Publisher
-archives need their matching `bundle-set.json`. Foreign-target deployment also
+archives need their matching `bundle-set.json` or `bundle-set-windows.json`.
+Foreign-target deployment also
 needs that target’s separately checksummed updater sidecar. Native local builds
 must include all six executables. There are no upload selections or agent-only
 overlay installs. Old `ctl components` mutation commands direct users to `ctlup`.

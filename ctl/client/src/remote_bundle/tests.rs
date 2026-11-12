@@ -69,7 +69,7 @@ impl Drop for Directory {
 }
 
 #[test]
-fn platform_probe_maps_only_supported_unix_targets() {
+fn platform_probe_maps_only_supported_targets() {
   for (os, architecture, expected) in [
     ("Linux", "x86_64", "x86_64-unknown-linux-musl"),
     ("Linux", "amd64", "x86_64-unknown-linux-musl"),
@@ -77,6 +77,7 @@ fn platform_probe_maps_only_supported_unix_targets() {
     ("Linux", "arm64", "aarch64-unknown-linux-musl"),
     ("Darwin", "x86_64", "x86_64-apple-darwin"),
     ("Darwin", "arm64", "aarch64-apple-darwin"),
+    ("Windows", "AMD64", WINDOWS_TARGET),
   ] {
     let platform =
       Platform::parse_probe(&format!("ctl-platform-v1\n{os}\n{architecture}\n")).unwrap();

@@ -1,6 +1,6 @@
 use super::*;
 use crate::remote_bundle::tests::{REVISION, TARGET, VERSION};
-use crate::remote_bundle::{BundleSet, SUPPORTED_TARGETS, VerifiedBundle};
+use crate::remote_bundle::{BundleSet, SUPPORTED_TARGETS, VerifiedBundle, WINDOWS_TARGET};
 use ctl_core::component::{ComponentBuildInfo, ProtocolInfo};
 use serde_json::{Value, json};
 
@@ -139,6 +139,21 @@ impl Fixture {
     self
   }
 
+  pub(crate) fn for_windows(mut self) -> Self {
+    let bundle_id = self.outer["bundle_id"].as_str().unwrap();
+    let archive = format!("ctl-agent-bundle-{bundle_id}-{WINDOWS_TARGET}.tar.gz");
+    let mut target = self.outer["targets"][TARGET].clone();
+    target["archive"] = json!(archive);
+    self.outer["targets"] = json!({WINDOWS_TARGET: target});
+    self.inner["target_triple"] = json!(WINDOWS_TARGET);
+    self.files = self
+      .files
+      .into_iter()
+      .map(|(name, bytes)| (format!("{name}.exe"), bytes))
+      .collect();
+    self
+  }
+
   pub(crate) fn archive(&self) -> Vec<u8> {
     self.archive_with(None)
   }
@@ -163,8 +178,8 @@ impl Fixture {
 
   pub(crate) fn bind_archive(&self, archive: &[u8]) -> Vec<u8> {
     let mut outer = self.outer.clone();
-    for target in SUPPORTED_TARGETS {
-      outer["targets"][target]["sha256"] = json!(format!("{:x}", Sha256::digest(archive)));
+    for target in outer["targets"].as_object_mut().unwrap().values_mut() {
+      target["sha256"] = json!(format!("{:x}", Sha256::digest(archive)));
     }
     serde_json::to_vec(&outer).unwrap()
   }
@@ -174,7 +189,11 @@ impl Fixture {
     let bytes = self.bind_archive(&archive);
     BundleSet::parse_intrinsic(&bytes)
       .unwrap()
-      .verify_archive(TARGET, archive, bytes)
+      .verify_archive(
+        self.inner["target_triple"].as_str().unwrap(),
+        archive,
+        bytes,
+      )
       .unwrap()
   }
 
@@ -192,7 +211,10 @@ fn append<W: std::io::Write>(
   kind: tar::EntryType,
 ) {
   let mut header = tar::Header::new_ustar();
-  header.set_mode(0o700);
+  let executable = std::path::Path::new(name)
+    .extension()
+    .is_some_and(|extension| extension == "exe");
+  header.set_mode(if executable { 0o600 } else { 0o700 });
   header.set_size(bytes.len() as u64);
   header.set_entry_type(kind);
   // Raw headers deliberately preserve representative unsafe path fixtures.
@@ -231,11 +253,46 @@ fn archive_payload_limit_counts_all_six_binaries_and_their_manifest() {
 
   // Use the actual tar entries and a small limit to exercise the same boundary
   // that protects a 512 MiB managed import.
-  assert!(read_archive_payload(&manifest, &bytes, payload_bytes).is_ok());
+  assert!(read_archive_payload(&manifest, TARGET, &bytes, payload_bytes).is_ok());
   assert!(matches!(
-    read_archive_payload(&manifest, &bytes, payload_bytes - 1),
+    read_archive_payload(&manifest, TARGET, &bytes, payload_bytes - 1),
     Err(Error::Invalid(message)) if message.contains("payload limit")
   ));
+}
+
+#[test]
+fn windows_archive_binds_logical_hashes_to_physical_executables() {
+  use crate::remote_bundle::{BUNDLE_SET_FILE, WINDOWS_BUNDLE_SET_FILE};
+  let mut fixture = Fixture::new(VERSION, REVISION).with_clients().for_windows();
+  let bundle = fixture.bundle();
+  let manifest = BundleSet::parse_set(&bundle.manifest, WINDOWS_BUNDLE_SET_FILE).unwrap();
+  assert!(manifest.is_compatible(WINDOWS_TARGET).unwrap());
+  assert!(BundleSet::parse_set(&bundle.manifest, BUNDLE_SET_FILE).is_err());
+  let home = crate::installation::TemporaryDirectory::new("windows-archive-test").unwrap();
+  let managed = crate::components::import_remote(
+    &home.0,
+    &bundle,
+    WINDOWS_TARGET,
+    ctl_core::bundles::Source::Release,
+  )
+  .unwrap();
+  assert!(managed.manifest.files["ctl.exe"].executable);
+  assert!(managed.manifest.components.contains_key("ctl"));
+  let upload = crate::components::upload_bundle(&managed).unwrap();
+  let (manifest, files) = crate::installation::unpack_archive(&upload.archive).unwrap();
+  assert_eq!(manifest, managed.manifest);
+  assert_eq!(files["ctl.exe"], fixture.files["ctl.exe"]);
+
+  let client = fixture.files.remove("ctl.exe").unwrap();
+  fixture.files.insert("ctl".into(), client);
+  let archive = fixture.archive();
+  let bytes = fixture.bind_archive(&archive);
+  assert!(
+    BundleSet::parse_intrinsic(&bytes)
+      .unwrap()
+      .verify_archive(WINDOWS_TARGET, archive, bytes)
+      .is_err()
+  );
 }
 
 #[test]

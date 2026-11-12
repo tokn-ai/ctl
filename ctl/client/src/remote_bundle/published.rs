@@ -7,16 +7,16 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use super::{BundleSet, Error, MAX_BUNDLE_BYTES, MAX_BUNDLE_SET_BYTES, VerifiedBundle};
+use super::{
+  BUNDLE_SET_FILE, BundleSet, Error, MAX_BUNDLE_BYTES, MAX_BUNDLE_SET_BYTES, VerifiedBundle,
+  WINDOWS_BUNDLE_SET_FILE, WINDOWS_TARGET,
+};
 
 mod history;
 pub use history::{PublishedRelease, PublishedReleaseDetails, list_releases, view_release};
 
-#[cfg(unix)]
 mod updater;
-#[cfg(unix)]
 pub use updater::{UpdaterInfo, VerifiedUpdater, download_updater_cached, read_updater};
-#[cfg(unix)]
 pub(crate) use updater::{cache_verified, prune_updater_cache, read_cached_updater};
 
 pub const ROOT: &str = "https://tokn-ai.dev/ctl/bundles/";
@@ -124,7 +124,6 @@ pub async fn download_cached(
 ///
 /// # Errors
 /// Reports incompatible targets, missing updater metadata or invalid assets.
-#[cfg(unix)]
 pub async fn download_installation_cached(
   channel: BundleChannel,
   target: &str,
@@ -203,7 +202,7 @@ impl Resolver {
       return Err(Error::Invalid("untrusted component publication URL".into()));
     }
     let bytes = self.read(&url, MAX_BUNDLE_SET_BYTES).await?;
-    let manifest = parse_published_manifest(&bytes)?;
+    let manifest = parse_published_manifest(&bytes, BUNDLE_SET_FILE)?;
     if channel == BundleChannel::Stable
       && (manifest.bundle_id != manifest.app_version || is_prerelease(&manifest.app_version))
     {
@@ -219,8 +218,11 @@ impl Resolver {
   }
 
   async fn check(&self, channel: BundleChannel) -> Result<PublishedCatalog, Error> {
-    let manifest = self.publication(channel).await?.manifest;
-    let targets = published_targets(&manifest)?;
+    let publication = self.publication(channel).await?;
+    let targets = self
+      .catalog_targets(&publication.url, &publication.manifest)
+      .await?;
+    let manifest = publication.manifest;
     Ok(PublishedCatalog {
       channel,
       bundle_id: manifest.bundle_id,
@@ -231,7 +233,7 @@ impl Resolver {
   }
 
   async fn download(&self, channel: BundleChannel, target: &str) -> Result<VerifiedBundle, Error> {
-    let publication = self.publication(channel).await?;
+    let publication = self.target_publication(channel, target).await?;
     Self::require_compatible(&publication, target)?;
     let archive_url = publication
       .url
@@ -249,14 +251,13 @@ impl Resolver {
     target: &str,
     cache_root: &Path,
   ) -> Result<VerifiedBundle, Error> {
-    let publication = self.publication(channel).await?;
+    let publication = self.target_publication(channel, target).await?;
     Self::require_compatible(&publication, target)?;
     self
       .archive_cached(publication, target, cache_root, None)
       .await
   }
 
-  #[cfg(unix)]
   async fn download_installation_cached(
     &self,
     channel: BundleChannel,
@@ -265,7 +266,7 @@ impl Resolver {
     updaters_root: &Path,
     on_progress: DownloadObserver<'_>,
   ) -> Result<(VerifiedBundle, VerifiedUpdater), Error> {
-    let publication = self.publication(channel).await?;
+    let publication = self.target_publication(channel, target).await?;
     Self::require_compatible(&publication, target)?;
     let updater = self
       .updater_cached(
@@ -284,6 +285,70 @@ impl Resolver {
       )
       .await?;
     Ok((bundle, updater))
+  }
+
+  async fn target_publication(
+    &self,
+    channel: BundleChannel,
+    target: &str,
+  ) -> Result<Publication, Error> {
+    super::validate_target(target)?;
+    let publication = self.publication(channel).await?;
+    if target == WINDOWS_TARGET {
+      self
+        .windows_publication(&publication.url, &publication.manifest)
+        .await
+    } else {
+      Ok(publication)
+    }
+  }
+
+  async fn windows_publication(
+    &self,
+    unix_url: &reqwest::Url,
+    unix_manifest: &BundleSet,
+  ) -> Result<Publication, Error> {
+    let url = unix_url
+      .join(WINDOWS_BUNDLE_SET_FILE)
+      .map_err(|error| Error::Invalid(error.to_string()))?;
+    let bytes = self
+      .read(&url, MAX_BUNDLE_SET_BYTES)
+      .await
+      .map_err(|error| match error {
+        Error::NotAvailable(_) => Error::NotAvailable(format!(
+          "publication {} has no Windows x64 bundle",
+          unix_manifest.bundle_id
+        )),
+        error => error,
+      })?;
+    let manifest = parse_published_manifest(&bytes, WINDOWS_BUNDLE_SET_FILE)?;
+    if manifest.app_version != unix_manifest.app_version
+      || manifest.bundle_id != unix_manifest.bundle_id
+      || manifest.git_revision != unix_manifest.git_revision
+    {
+      return Err(Error::Invalid(
+        "Windows bundle differs from its immutable publication".into(),
+      ));
+    }
+    Ok(Publication {
+      manifest,
+      bytes,
+      url,
+    })
+  }
+
+  async fn catalog_targets(
+    &self,
+    url: &reqwest::Url,
+    manifest: &BundleSet,
+  ) -> Result<Vec<PublishedTarget>, Error> {
+    let mut targets = published_targets(manifest)?;
+    match self.windows_publication(url, manifest).await {
+      Ok(windows) => targets.extend(published_targets(&windows.manifest)?),
+      Err(Error::NotAvailable(_)) => {}
+      Err(error) => return Err(error),
+    }
+    Ok(targets)
   }
 
   fn require_compatible(publication: &Publication, target: &str) -> Result<(), Error> {
@@ -405,8 +470,8 @@ impl Resolver {
   }
 }
 
-fn parse_published_manifest(bytes: &[u8]) -> Result<BundleSet, Error> {
-  let manifest = BundleSet::parse_intrinsic(bytes)?;
+fn parse_published_manifest(bytes: &[u8], set_file: &str) -> Result<BundleSet, Error> {
+  let manifest = BundleSet::parse_set(bytes, set_file)?;
   if manifest.schema_version < 2 {
     return Err(Error::Invalid(
       "published channels require versioned component metadata".into(),

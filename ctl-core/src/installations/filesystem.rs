@@ -1,15 +1,25 @@
 use super::Installations;
 use crate::bundles::{Bundle, MANIFEST_FILE, local_target};
+use crate::private_fs::{self, options, sync_directory};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::fs::{self, File, Metadata, OpenOptions};
+use std::fs::{self, File, Metadata};
 use std::io::{self, Read as _, Write as _};
-use std::os::unix::fs::{
-  DirBuilderExt as _, MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _, symlink,
+use std::path::{Path, PathBuf};
+
+#[cfg(unix)]
+use std::os::unix::fs::{PermissionsExt as _, symlink};
+#[cfg(unix)]
+use std::path::Component;
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+pub(super) use windows::{
+  activate, install_manager, lease_manager_executable, manager_and_lease, pointer, prune_managers,
 };
-use std::path::{Component, Path, PathBuf};
 
 const JOURNAL: &str = ".activation.json";
+#[cfg(unix)]
 pub(super) const CTLD_PROXY: &[u8] = include_bytes!("ctld-proxy.sh");
 
 #[derive(Serialize, Deserialize)]
@@ -37,10 +47,7 @@ pub(super) fn path_exists(path: &Path) -> io::Result<bool> {
 
 pub(super) fn directory(path: &Path) -> io::Result<()> {
   let metadata = fs::symlink_metadata(path)?;
-  if !metadata.is_dir()
-    || metadata.uid() != rustix::process::getuid().as_raw()
-    || metadata.mode() & 0o022 != 0
-  {
+  if !private_fs::is_directory(&metadata) {
     return Err(invalid(
       "installation directories must be owned and not writable by others",
     ));
@@ -49,7 +56,7 @@ pub(super) fn directory(path: &Path) -> io::Result<()> {
 }
 
 pub(super) fn ensure_directory(path: &Path) -> io::Result<()> {
-  match fs::DirBuilder::new().mode(0o700).create(path) {
+  match private_fs::create_directory(path) {
     Ok(()) => Ok(()),
     Err(error) if error.kind() == io::ErrorKind::AlreadyExists => directory(path),
     Err(error) => Err(error),
@@ -57,25 +64,12 @@ pub(super) fn ensure_directory(path: &Path) -> io::Result<()> {
 }
 
 pub(super) fn private_file(metadata: &Metadata) -> io::Result<()> {
-  if !metadata.is_file()
-    || metadata.uid() != rustix::process::getuid().as_raw()
-    || metadata.mode() & 0o077 != 0
-  {
+  if !private_fs::is_private_file(metadata) {
     return Err(invalid(
       "installation files must be private owned regular files",
     ));
   }
   Ok(())
-}
-
-pub(super) fn options() -> OpenOptions {
-  let mut options = OpenOptions::new();
-  options.mode(0o600).custom_flags(i32::from_ne_bytes(
-    (rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK | rustix::fs::OFlags::CLOEXEC)
-      .bits()
-      .to_ne_bytes(),
-  ));
-  options
 }
 
 pub(super) fn root_exists(store: &Installations) -> io::Result<bool> {
@@ -108,6 +102,7 @@ pub(super) fn validate_native(bundle: &Bundle, legacy: bool) -> io::Result<()> {
   Ok(())
 }
 
+#[cfg(unix)]
 fn pointer_path(store: &Installations, name: &str) -> io::Result<Option<PathBuf>> {
   let path = store.root.join(name);
   if !path_exists(&path)? {
@@ -177,6 +172,7 @@ fn pointer_path(store: &Installations, name: &str) -> io::Result<Option<PathBuf>
   Ok(Some(parent))
 }
 
+#[cfg(unix)]
 pub(super) fn pointer(
   store: &Installations,
   name: &str,
@@ -215,7 +211,7 @@ pub(super) fn load(store: &Installations, id: &str) -> io::Result<Bundle> {
   }
   directory(&store.root.join("installs"))?;
   let bundle = Bundle::open(&store.root.join("installs").join(id))?;
-  validate_native(&bundle, true)?;
+  validate_native(&bundle, cfg!(unix))?;
   if bundle.manifest.bundle_id != id {
     return Err(invalid(
       "installation payload identity differs from its path",
@@ -268,7 +264,7 @@ pub(super) fn publish(
   Bundle::open(&stage.0)?;
   sync_tree(&stage.0)?;
   fs::rename(&stage.0, &destination)?;
-  File::open(&root)?.sync_all()?;
+  sync_directory(&root)?;
   load(store, &source.manifest.bundle_id)
 }
 
@@ -276,12 +272,13 @@ fn write(path: &Path, bytes: &[u8], executable: bool) -> io::Result<()> {
   let mut file = options().write(true).create_new(true).open(path)?;
   file.write_all(bytes)?;
   if executable {
-    file.set_permissions(fs::Permissions::from_mode(0o700))?;
+    private_fs::set_executable(&file)?;
   }
   file.sync_all()
 }
 
 fn read(path: &Path) -> io::Result<Vec<u8>> {
+  private_file(&fs::symlink_metadata(path)?)?;
   let file = options().read(true).open(path)?;
   private_file(&file.metadata()?)?;
   let mut bytes = Vec::new();
@@ -299,9 +296,10 @@ fn sync_tree(path: &Path) -> io::Result<()> {
       sync_tree(&entry.path())?;
     }
   }
-  File::open(path)?.sync_all()
+  sync_directory(path)
 }
 
+#[cfg(unix)]
 fn replace_link(path: &Path, target: &Path) -> io::Result<()> {
   if path_exists(path)? && !fs::symlink_metadata(path)?.is_symlink() {
     return Err(invalid("refusing to replace a non-link installation entry"));
@@ -312,13 +310,14 @@ fn replace_link(path: &Path, target: &Path) -> io::Result<()> {
   File::open(path.parent().unwrap())?.sync_all()
 }
 
+#[cfg(unix)]
 fn existing_proxy(path: &Path) -> io::Result<bool> {
   let metadata = fs::symlink_metadata(path)?;
   if !metadata.is_file() {
     return Ok(false);
   }
   private_file(&metadata)?;
-  if metadata.mode() & 0o777 != 0o700 || read(path)? != CTLD_PROXY {
+  if metadata.permissions().mode() & 0o777 != 0o700 || read(path)? != CTLD_PROXY {
     return Err(invalid(
       "stable ctld command differs from the managed proxy",
     ));
@@ -326,6 +325,7 @@ fn existing_proxy(path: &Path) -> io::Result<bool> {
   Ok(true)
 }
 
+#[cfg(unix)]
 fn prepare_proxy(root: &Path) -> io::Result<()> {
   let path = root.join("ctld");
   if path_exists(&path)? && existing_proxy(&path)? {
@@ -337,6 +337,7 @@ fn prepare_proxy(root: &Path) -> io::Result<()> {
   File::open(root)?.sync_all()
 }
 
+#[cfg(unix)]
 fn prepare_aliases(store: &Installations) -> io::Result<()> {
   let root = store.root.join("bin");
   ensure_directory(&root)?;
@@ -366,6 +367,7 @@ fn prepare_aliases(store: &Installations) -> io::Result<()> {
   Ok(())
 }
 
+#[cfg(unix)]
 pub(super) fn activate(
   store: &Installations,
   active: &Bundle,
@@ -399,6 +401,7 @@ pub(super) fn activate(
   recover(store)
 }
 
+#[cfg(unix)]
 pub(super) fn recover(store: &Installations) -> io::Result<()> {
   let path = store.root.join(JOURNAL);
   if !path_exists(&path)? {
@@ -470,13 +473,13 @@ pub(super) fn clean_staging(store: &Installations) -> io::Result<()> {
       fs::remove_dir_all(entry.path())?;
     }
   }
-  File::open(root)?.sync_all()
+  sync_directory(&root)
 }
 
 pub(super) fn remove_installation(path: &Path) -> io::Result<()> {
   directory(path)?;
   fs::remove_dir_all(path)?;
-  File::open(path.parent().unwrap())?.sync_all()
+  sync_directory(path.parent().unwrap())
 }
 
 pub(super) struct Lock(File);

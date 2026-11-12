@@ -5,14 +5,10 @@
 //! belong to the user's OpenSSH installation and configuration.
 
 pub mod component_status;
-#[cfg(unix)]
 pub mod component_update;
-#[cfg(unix)]
 pub mod components;
 pub mod ctld;
-#[cfg(unix)]
 pub mod development;
-#[cfg(unix)]
 pub mod installation;
 
 use std::ffi::OsString;
@@ -45,7 +41,7 @@ pub mod tailscale;
 pub use ssh_install::{
   RemoteInstallEvent, RemoteInstallPhase, RemoteInstallProgress, RemoteInstallStalled,
   RemoteInstallWatchdog, install_ssh_unix_agent_interactive,
-  install_ssh_unix_agent_interactive_with_progress,
+  install_ssh_unix_agent_interactive_with_progress, probe_ssh_windows_platform,
 };
 #[cfg(unix)]
 pub use ssh_install::{install_ssh_agent_only_with_progress, install_ssh_unix_bundle_with_updater};
@@ -75,14 +71,6 @@ pub enum RemotePlatform {
   Windows,
 }
 
-impl RemotePlatform {
-  fn command(self) -> &'static [&'static str] {
-    match self {
-      Self::Unix => &[UNIX_GATEWAY_COMMAND],
-      Self::Windows => &["ctl-agent.exe", "connect"],
-    }
-  }
-}
 const SSH_TRANSPORT_PREFACE: &[u8] = b"ctl-ssh-v1\n";
 const SSH_AUTHENTICATED_PREFACE: &[u8] = b"ctl-ssh-auth-v1\n";
 const SSH_AGENT_NOT_FOUND_PREFACE: &[u8] = b"ctl-ssh-nf\n";
@@ -473,7 +461,7 @@ pub async fn open_ssh_service_interactive(
   let mut command = Command::new(SSH_PROGRAM);
 
   // Insert local-only options before `--`; never append them to the remote command.
-  let arguments = ssh_service_arguments(destination, options, interaction, service).await?;
+  let arguments = ssh_service_arguments(destination, options, interaction, service, false).await?;
   let extra = configure_ssh_interaction(&mut command, interaction);
   command.args(extra).args(arguments);
   start_ssh_transport(command).await
@@ -497,8 +485,7 @@ pub async fn open_identified_ssh_service(
   let extra = configure_ssh_interaction(&mut command, interaction);
   command
     .args(extra)
-    .args(ssh_service_arguments(destination, options, interaction, service).await?)
-    .arg("--identity");
+    .args(ssh_service_arguments(destination, options, interaction, service, true).await?);
   start_ssh_transport_identified(command, true, false, ready(())).await
 }
 
@@ -520,8 +507,7 @@ pub async fn inspect_legacy_ssh_identity(
   let extra = configure_ssh_interaction(&mut command, interaction);
   command
     .args(extra)
-    .args(ssh_service_arguments(destination, options, interaction, service).await?)
-    .arg("--identity");
+    .args(ssh_service_arguments(destination, options, interaction, service, true).await?);
   inspect_legacy_ssh_command(command).await
 }
 
@@ -1071,6 +1057,7 @@ async fn ssh_arguments(destination: &str, options: &SshConnectionOptions) -> Vec
     options,
     &SshInteraction::Inherit,
     RemoteService::Ctmux,
+    false,
   )
   .await
   .unwrap()
@@ -1081,15 +1068,27 @@ async fn ssh_service_arguments(
   options: &SshConnectionOptions,
   interaction: &SshInteraction,
   service: RemoteService,
+  identity: bool,
 ) -> Result<Vec<OsString>, CoreError> {
-  ssh_service_arguments_with_command(
-    destination,
-    options,
-    interaction,
-    options.remote_platform.command(),
-    service,
-  )
-  .await
+  let mut arguments = prepare_ssh_base_arguments(destination, options, interaction).await?;
+  if options.remote_platform == RemotePlatform::Windows {
+    let path = r#""%USERPROFILE%\.tokn\ctl\bin\ctl-agent.exe""#;
+    let mut action = String::from("connect");
+    if service == RemoteService::Task {
+      action.push_str(" --service task");
+    }
+    if identity {
+      action.push_str(" --identity");
+    }
+    arguments
+      .push(format!("if exist {path} ({path} {action}) else (ctl-agent.exe {action})").into());
+  } else {
+    append_service_arguments(&mut arguments, &[UNIX_GATEWAY_COMMAND], service);
+    if identity {
+      arguments.push("--identity".into());
+    }
+  }
+  Ok(arguments)
 }
 
 async fn ssh_authenticated_service_arguments(
@@ -1367,8 +1366,8 @@ mod tests {
     };
     let arguments = ssh_arguments("windows-host", &options).await;
     assert_eq!(
-      &arguments[arguments.len() - 4..],
-      ["--", "windows-host", "ctl-agent.exe", "connect"].map(OsString::from)
+      &arguments[arguments.len() - 3..],
+      ["--", "windows-host", r#"if exist "%USERPROFILE%\.tokn\ctl\bin\ctl-agent.exe" ("%USERPROFILE%\.tokn\ctl\bin\ctl-agent.exe" connect) else (ctl-agent.exe connect)"#].map(OsString::from)
     );
   }
 
@@ -1562,6 +1561,7 @@ mod tests {
         &options,
         &SshInteraction::Inherit,
         RemoteService::Ctmux,
+        false,
       )
       .await
       .unwrap();
@@ -1570,14 +1570,28 @@ mod tests {
         &options,
         &SshInteraction::Inherit,
         RemoteService::Task,
+        false,
       )
       .await
       .unwrap();
-      assert_eq!(&task[..ctmux.len()], ctmux.as_slice());
-      assert_eq!(
-        &task[ctmux.len()..],
-        ["--service", "task"].map(OsString::from)
-      );
+      if remote_platform == RemotePlatform::Windows {
+        let (command, arguments) = task.split_last().unwrap();
+        assert_eq!(arguments, &ctmux[..ctmux.len() - 1]);
+        assert_eq!(
+          command.to_string_lossy(),
+          ctmux
+            .last()
+            .unwrap()
+            .to_string_lossy()
+            .replace(" connect", " connect --service task")
+        );
+      } else {
+        assert_eq!(&task[..ctmux.len()], ctmux.as_slice());
+        assert_eq!(
+          &task[ctmux.len()..],
+          ["--service", "task"].map(OsString::from)
+        );
+      }
     }
   }
 

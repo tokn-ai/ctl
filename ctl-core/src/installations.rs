@@ -5,10 +5,14 @@
 
 mod filesystem;
 mod leases;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;
+#[cfg(all(test, windows))]
+mod windows_tests;
 
-use crate::bundles::{Bundle, Purpose, Store};
+use crate::bundles::Bundle;
+#[cfg(unix)]
+use crate::bundles::{Purpose, Store};
 use serde::Serialize;
 use std::collections::BTreeSet;
 use std::io;
@@ -57,12 +61,53 @@ impl Installations {
     if let Some(bundle) = filesystem::pointer(self, "current", true)? {
       return Ok(Some(bundle));
     }
-    if filesystem::path_exists(&self.root.join("current"))? {
-      // A historical agent-only overlay is not a complete installation. Keep
-      // it operational until an explicit complete install supersedes it.
+    #[cfg(unix)]
+    {
+      if filesystem::path_exists(&self.root.join("current"))? {
+        // A historical agent-only overlay is not a complete installation. Keep
+        // it operational until an explicit complete install supersedes it.
+        return Ok(None);
+      }
+      Store::new(&self.home).selected(Purpose::Local, crate::paths::native_target())
+    }
+    #[cfg(windows)]
+    Ok(None)
+  }
+
+  /// Resolves the active installation and keeps it available for a new process.
+  ///
+  /// # Errors
+  /// Reports damaged installations or unavailable storage or leases.
+  #[cfg(windows)]
+  pub fn active_and_lease(&self) -> io::Result<Option<(Bundle, Lease)>> {
+    if !filesystem::root_exists(self)? {
       return Ok(None);
     }
-    Store::new(&self.home).selected(Purpose::Local, crate::paths::native_target())
+    let _lock = filesystem::Lock::acquire(self)?;
+    let Some(bundle) = self.active()? else {
+      return Ok(None);
+    };
+    let lease = leases::retain(&self.root.join("leases"), &bundle.manifest.bundle_id)?;
+    Ok(Some((bundle, lease)))
+  }
+
+  /// Publishes a verified Windows updater and selects it for future invocations.
+  /// Existing invocations continue using their leased updater payloads.
+  ///
+  /// # Errors
+  /// Reports unsafe storage, damaged aliases or collisions with other commands.
+  #[cfg(windows)]
+  pub fn install_manager(&self, updater: &[u8]) -> io::Result<()> {
+    filesystem::install_manager(self, updater)
+  }
+
+  /// Resolves and pins the active Windows updater for a new invocation.
+  ///
+  /// # Errors
+  /// Reports unsafe storage, damaged updater content or unavailable leases.
+  #[cfg(windows)]
+  pub fn manager_and_lease(&self) -> io::Result<Option<(PathBuf, Lease)>> {
+    filesystem::manager_and_lease(self)
   }
 
   /// Reads the single rollback candidate without changing any pointer.
@@ -135,6 +180,7 @@ impl Installations {
     let files = bundle.read_files()?;
     filesystem::ensure_root(self)?;
     let _lock = filesystem::Lock::acquire(self)?;
+    #[cfg(unix)]
     filesystem::recover(self)?;
     let previous = self
       .active()?
@@ -153,6 +199,7 @@ impl Installations {
   pub fn rollback(&self) -> io::Result<Bundle> {
     filesystem::ensure_root(self)?;
     let _lock = filesystem::Lock::acquire(self)?;
+    #[cfg(unix)]
     filesystem::recover(self)?;
     let previous = self.previous()?.ok_or_else(|| {
       io::Error::new(io::ErrorKind::NotFound, "there is no previous installation")
@@ -175,12 +222,15 @@ impl Installations {
       return Ok(PruneResult::default());
     }
     let _lock = filesystem::Lock::acquire(self)?;
+    #[cfg(unix)]
     filesystem::recover(self)?;
     self.prune_locked()
   }
 
   fn prune_locked(&self) -> io::Result<PruneResult> {
     filesystem::clean_staging(self)?;
+    #[cfg(windows)]
+    filesystem::prune_managers(self)?;
     let mut retained = BTreeSet::new();
     for bundle in [self.active()?, self.previous()?].into_iter().flatten() {
       retained.insert(bundle.manifest.bundle_id);

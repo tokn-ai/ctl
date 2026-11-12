@@ -4,8 +4,10 @@ import { copyFile, cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/p
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test, { type TestContext } from "node:test";
+import { windowsAgentManifestName, windowsAgentTarget } from "../shared/agent-bundle.mts";
+import { updaterManifestName } from "../shared/updater-bundle.mts";
 import { componentMapFixture } from "./agent-bundle.fixtures.mts";
-import { componentSetFixture, publicationFixture } from "./bundle-publication.fixtures.mts";
+import { componentSetFixture, publicationFixture, windowsComponentSetFixture } from "./bundle-publication.fixtures.mts";
 import { fileDigest, validatedComponentSet } from "./bundle-publication.mts";
 import { publishComponentRelease } from "./publish-component-release.mts";
 import { managedLabelPrefix, releaseNotes, validateReleaseBundle, type GhRunner } from "./update-draft-release.mts";
@@ -125,7 +127,9 @@ function assertPayloadsBeforeManifests(calls: string[][]): void {
 }
 
 test("publishes verified components without desktop artifacts and preserves manual assets/notes", async (t) => {
-  const directory = await componentSetFixture(await fixture(t), identity);
+  const root = await fixture(t);
+  const directory = await componentSetFixture(root, identity);
+  await cp(await windowsComponentSetFixture(root, identity), directory, { recursive: true });
   const api = github({ release: { ...published, draft: true }, assets: [
     { id: 1, name: "old-development.dmg", label: `${managedLabelPrefix}old-development.dmg`, digest: "old", size: 1 },
     { id: 2, name: "manual.pdf", label: null, digest: "manual", size: 1 },
@@ -133,7 +137,8 @@ test("publishes verified components without desktop artifacts and preserves manu
   await publishComponentRelease("tokn-ai/ctl", identity, directory, "components", api.gh);
   assert.equal(api.release()?.draft, false);
   assert.ok(api.release()?.body?.startsWith("Maintainer notes"));
-  assert.equal(api.assets.length, 10);
+  assert.equal(api.assets.length, 16);
+  assert.ok(api.release()?.body?.includes("Windows x64"));
   assert.ok(api.assets.some((asset) => asset.name === "manual.pdf"));
   assert.ok(!api.assets.some((asset) => asset.name === "old-development.dmg"));
   const last_upload = api.calls.map((args) => args[1]!.startsWith("https://uploads.github.com")).lastIndexOf(true);
@@ -141,6 +146,8 @@ test("publishes verified components without desktop artifacts and preserves manu
   const publication = api.calls.findIndex((args) => args.includes("PATCH"));
   assert.ok(last_upload < deletion && deletion < publication);
   assertPayloadsBeforeManifests(api.calls);
+  const uploads = uploadNames(api.calls);
+  assert.ok(uploads.indexOf(updaterManifestName(windowsAgentTarget)) < uploads.indexOf(windowsAgentManifestName));
 });
 
 test("an empty published release receives components without canonical downloads", async (t) => {
@@ -156,6 +163,20 @@ test("an empty published release receives components without canonical downloads
   assert.equal(api.patches.length, 1);
   assert.ok(!("draft" in api.patches[0]!));
   assertPayloadsBeforeManifests(api.calls);
+});
+
+test("a tag retry appends a Windows companion to a published Unix-only release", async (t) => {
+  const root = await fixture(t), canonical = await componentSetFixture(root, identity), rebuilt = join(root, "rebuilt");
+  await cp(canonical, rebuilt, { recursive: true });
+  await cp(await windowsComponentSetFixture(root, identity), rebuilt, { recursive: true });
+  const api = github({ release: published, assets: await existingComponents(canonical), canonical_directory: canonical });
+  await publishComponentRelease("tokn-ai/ctl", identity, rebuilt, "components", api.gh);
+  const uploads = uploadNames(api.calls);
+  assert.equal(uploads.length, 6);
+  assert.equal(uploads.at(-1), windowsAgentManifestName);
+  assert.ok(uploads.includes(updaterManifestName(windowsAgentTarget)));
+  assert.ok(api.release()?.body?.includes("Windows x64"));
+  assert.ok(!api.calls.some((args) => args.includes("DELETE")));
 });
 
 test("a partial Linux desktop appends without macOS desktops or helpers", async (t) => {
@@ -357,20 +378,24 @@ test("missing/moved release tags and manual collisions cannot publish", async (t
 
 test("a tag rebuild reuses published canonical archives despite different valid tar metadata", async (t) => {
   const root = await fixture(t), canonical = await componentSetFixture(root, identity), rebuilt = join(root, "rebuilt");
+  await cp(await windowsComponentSetFixture(root, identity), canonical, { recursive: true });
   await cp(canonical, rebuilt, { recursive: true });
-  const manifest = JSON.parse(await readFile(join(rebuilt, "bundle-set.json"), "utf8"));
-  const target = manifest.targets["x86_64-apple-darwin"];
-  const archive = await readFile(join(rebuilt, target.archive));
-  archive.writeUInt32LE(12345678, 4);
-  target.sha256 = createHash("sha256").update(archive).digest("hex");
-  await writeFile(join(rebuilt, target.archive), archive);
-  await writeFile(join(rebuilt, `${target.archive}.sha256`), `${target.sha256}  ${target.archive}\n`);
-  await writeFile(join(rebuilt, "bundle-set.json"), JSON.stringify(manifest));
+  const changed_assets: string[] = [];
+  for (const [filename, target_triple] of [["bundle-set.json", "x86_64-apple-darwin"], [windowsAgentManifestName, windowsAgentTarget]]) {
+    const manifest = JSON.parse(await readFile(join(rebuilt, filename), "utf8"));
+    const target = manifest.targets[target_triple];
+    const archive = await readFile(join(rebuilt, target.archive));
+    archive.writeUInt32LE(12345678, 4);
+    target.sha256 = createHash("sha256").update(archive).digest("hex");
+    await writeFile(join(rebuilt, target.archive), archive);
+    await writeFile(join(rebuilt, `${target.archive}.sha256`), `${target.sha256}  ${target.archive}\n`);
+    await writeFile(join(rebuilt, filename), JSON.stringify(manifest));
+    changed_assets.push(target.archive, `${target.archive}.sha256`, filename);
+  }
   await validatedComponentSet(rebuilt, identity);
   const api = github({ release: published, assets: await existingComponents(canonical), canonical_directory: canonical });
   await publishComponentRelease("tokn-ai/ctl", identity, rebuilt, "components", api.gh);
-  assert.deepEqual(await readFile(join(rebuilt, target.archive)), await readFile(join(canonical, target.archive)));
-  assert.deepEqual(await readFile(join(rebuilt, "bundle-set.json")), await readFile(join(canonical, "bundle-set.json")));
+  for (const name of changed_assets) assert.deepEqual(await readFile(join(rebuilt, name)), await readFile(join(canonical, name)));
   assert.ok(!api.calls.some((args) => args.includes("POST") || args.includes("PATCH") || args.includes("DELETE")));
 });
 

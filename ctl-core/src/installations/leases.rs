@@ -1,6 +1,7 @@
 use super::Installations;
 use super::filesystem::{self, Lock};
 use crate::bundles::Bundle;
+use crate::private_fs::options;
 use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -9,14 +10,17 @@ use std::path::{Path, PathBuf};
 /// Keep the value alive for as long as the installation may be used.
 #[derive(Debug)]
 pub struct Lease {
-  file: File,
-  path: PathBuf,
+  // Close the lock before trying to delete the file on Windows.
+  _file: File,
+  _path: LeaseFile,
 }
 
-impl Drop for Lease {
+#[derive(Debug)]
+struct LeaseFile(PathBuf);
+
+impl Drop for LeaseFile {
   fn drop(&mut self) {
-    let _ = fs::remove_file(&self.path);
-    let _ = self.file.unlock();
+    let _ = fs::remove_file(&self.0);
     // Only pruning, while holding the installation lock, removes an empty
     // lease directory. Removing it here could race another process between
     // checking that directory and publishing its own lease.
@@ -36,35 +40,40 @@ pub(super) fn acquire_locked(store: &Installations, bundle: &Bundle) -> io::Resu
       "process lease must pin this immutable installation",
     ));
   }
-  retain_verified(store, &installed.manifest.bundle_id)
+  retain(&store.root.join("leases"), &installed.manifest.bundle_id)
 }
 
 // The caller holds the installation lock from verification until publication.
-fn retain_verified(store: &Installations, id: &str) -> io::Result<Lease> {
-  let root = store.root.join("leases");
-  filesystem::ensure_directory(&root)?;
-  let root = root.join(id);
+pub(super) fn retain(leases: &Path, id: &str) -> io::Result<Lease> {
+  filesystem::ensure_directory(leases)?;
   // Abrupt exits bypass Drop. Sweep unlocked rows on the next launch, even
   // while this build remains active and is therefore excluded from payload GC.
-  in_use(store, id)?;
+  in_use_at(leases, id)?;
+  let root = leases.join(id);
   filesystem::ensure_directory(&root)?;
   let path = root.join(uuid::Uuid::new_v4().to_string());
-  let file = filesystem::options()
+  let file = options()
     .read(true)
     .write(true)
     .create_new(true)
     .open(&path)?;
   file.lock()?;
-  Ok(Lease { file, path })
+  Ok(Lease {
+    _file: file,
+    _path: LeaseFile(path),
+  })
 }
 
 pub(super) fn in_use(store: &Installations, id: &str) -> io::Result<bool> {
-  let root = store.root.join("leases");
-  if !filesystem::path_exists(&root)? {
+  in_use_at(&store.root.join("leases"), id)
+}
+
+pub(super) fn in_use_at(leases: &Path, id: &str) -> io::Result<bool> {
+  if !filesystem::path_exists(leases)? {
     return Ok(false);
   }
-  filesystem::directory(&root)?;
-  let root = root.join(id);
+  filesystem::directory(leases)?;
+  let root = leases.join(id);
   if !filesystem::path_exists(&root)? {
     return Ok(false);
   }
@@ -75,18 +84,21 @@ pub(super) fn in_use(store: &Installations, id: &str) -> io::Result<bool> {
       return Err(filesystem::invalid("too many installation leases"));
     }
     let path = entry?.path();
-    let file = match filesystem::options().read(true).write(true).open(&path) {
+    let file = match options().read(true).write(true).open(&path) {
       Ok(file) => file,
       Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
       Err(error) => return Err(error),
     };
     filesystem::private_file(&file.metadata()?)?;
     match file.try_lock() {
-      Ok(()) => match fs::remove_file(path) {
-        Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
-      },
+      Ok(()) => {
+        drop(file);
+        match fs::remove_file(path) {
+          Ok(()) => {}
+          Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+          Err(error) => return Err(error),
+        }
+      }
       Err(fs::TryLockError::WouldBlock) => live = true,
       Err(fs::TryLockError::Error(error)) => return Err(error),
     }
@@ -109,6 +121,10 @@ pub fn lease_current_executable() -> io::Result<Option<Lease>> {
 }
 
 pub(super) fn lease_executable(executable: &Path) -> io::Result<Option<Lease>> {
+  #[cfg(windows)]
+  if let Some(lease) = filesystem::lease_manager_executable(executable)? {
+    return Ok(Some(lease));
+  }
   for directory in executable.ancestors().skip(1) {
     let Some(id) = directory.file_name().and_then(|name| name.to_str()) else {
       continue;
@@ -136,7 +152,7 @@ pub(super) fn lease_executable(executable: &Path) -> io::Result<Option<Lease>> {
     filesystem::ensure_root(&store)?;
     let _lock = Lock::acquire(&store)?;
     let bundle = store.get(id)?;
-    return retain_verified(&store, &bundle.manifest.bundle_id).map(Some);
+    return retain(&store.root.join("leases"), &bundle.manifest.bundle_id).map(Some);
   }
   Ok(None)
 }

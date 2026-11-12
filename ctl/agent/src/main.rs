@@ -67,7 +67,6 @@ async fn run(arguments: Arguments) -> Result<(), MainError> {
     println!("{}", serde_json::to_string(&info)?);
     return Ok(());
   }
-  #[cfg(unix)]
   let _installation = ctl_core::installations::lease_current_executable()?;
   match arguments
     .command

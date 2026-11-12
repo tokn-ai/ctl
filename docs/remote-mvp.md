@@ -139,11 +139,11 @@ The fixed-command allowlist includes the identity flag without accepting arbitra
 remote commands. See `docs/ctmux-workspace.md` for identity storage and migration.
 
 When `ctl` recognizes a missing or outdated agent on a Unix host, it prints a
-`ctlup update` command. Run it from macOS or Linux, then reconnect. For a saved
+`ctlup update` command. Run it from macOS, Linux, or Windows x64, then reconnect. For a saved
 host, the updater uses the selected VPN or SSH gateway route and verifies the
 machine ID before uploading.
 
-`ctlup` resolves the configured Dev or Stable publication and verifies the
+`ctlup` resolves the configured Nightly or Stable publication and verifies the
 matching runtime and updater for the target. Use `--working-tree` to build
 Linux x64 or ARM64 from a checkout. `CTL_REMOTE_BUNDLES_DIR` is an explicit
 local source override. Network errors do not silently select an older build.

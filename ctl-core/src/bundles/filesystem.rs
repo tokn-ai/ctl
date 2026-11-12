@@ -2,13 +2,11 @@ use super::{
   Bundle, MANIFEST_FILE, MAX_FILE_BYTES, MAX_MANIFEST_BYTES, Manifest, Purpose, Store, invalid,
   valid_digest, validate_target,
 };
+use crate::private_fs::{self, is_executable, options, sync_directory};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::fs::{self, File, Metadata, OpenOptions};
+use std::fs::{self, File, Metadata};
 use std::io::{self, Read as _, Write as _};
-use std::os::unix::fs::{
-  DirBuilderExt as _, MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _,
-};
 use std::path::{Path, PathBuf};
 
 #[derive(Serialize, Deserialize)]
@@ -141,7 +139,7 @@ pub(super) fn verify_payload(directory: &Path, manifest: &Manifest) -> io::Resul
     if bytes.is_empty()
       || total > super::MAX_TOTAL_BYTES
       || super::digest(&bytes) != info.sha256
-      || (info.executable && fs::symlink_metadata(&path)?.mode() & 0o111 == 0)
+      || (info.executable && !is_executable(&fs::symlink_metadata(&path)?))
     {
       return Err(invalid(
         "stored component bundle failed payload verification",
@@ -161,6 +159,10 @@ fn verify_tree(root: &Path, directory: &Path, manifest: &Manifest) -> io::Result
       .map_err(io::Error::other)?
       .to_str()
       .ok_or_else(|| invalid("invalid bundle payload path"))?;
+    #[cfg(windows)]
+    let normalized = name.replace('\\', "/");
+    #[cfg(windows)]
+    let name = normalized.as_str();
     if name.len() > 512 {
       return Err(invalid("excessive bundle payload path"));
     }
@@ -174,7 +176,7 @@ fn verify_tree(root: &Path, directory: &Path, manifest: &Manifest) -> io::Result
     } else if entry.file_type()?.is_file()
       && (name == MANIFEST_FILE || manifest.files.contains_key(name))
     {
-      require_file(&entry.metadata()?)?;
+      require_file(&fs::symlink_metadata(&path)?)?;
     } else {
       return Err(invalid("unexpected file in immutable component bundle"));
     }
@@ -194,7 +196,7 @@ pub(super) fn payload(bundle: &Bundle) -> io::Result<BTreeMap<String, Vec<u8>>> 
     let path = bundle.directory.join(name);
     check_parents(&bundle.directory, &path)?;
     let bytes = read(&path, MAX_FILE_BYTES)?;
-    if info.executable && fs::symlink_metadata(&path)?.mode() & 0o111 == 0 {
+    if info.executable && !is_executable(&fs::symlink_metadata(&path)?) {
       return Err(invalid("component bundle executable permissions changed"));
     }
     total = total.saturating_add(bytes.len());
@@ -246,7 +248,7 @@ pub(super) fn publish(
   )?;
   sync_tree(&stage.0)?;
   fs::rename(&stage.0, &destination)?;
-  File::open(&root)?.sync_all()?;
+  sync_directory(&root)?;
   load_locked(store, &manifest.target_triple, &manifest.bundle_id)
 }
 
@@ -304,7 +306,7 @@ pub(super) fn select(
     false,
   )?;
   fs::rename(&next.0, path)?;
-  File::open(&directory)?.sync_all()
+  sync_directory(&directory)
 }
 
 fn selection_path(store: &Store, purpose: Purpose, target: &str) -> PathBuf {
@@ -364,19 +366,13 @@ pub(super) fn require_directory(path: &Path) -> io::Result<()> {
   require_directory_metadata(&fs::symlink_metadata(path)?)
 }
 fn require_directory_metadata(metadata: &Metadata) -> io::Result<()> {
-  if !metadata.is_dir()
-    || metadata.uid() != rustix::process::getuid().as_raw()
-    || metadata.mode() & 0o022 != 0
-  {
+  if !private_fs::is_directory(metadata) {
     return Err(unsafe_path());
   }
   Ok(())
 }
 pub(super) fn require_file(metadata: &Metadata) -> io::Result<()> {
-  if !metadata.is_file()
-    || metadata.uid() != rustix::process::getuid().as_raw()
-    || metadata.mode() & 0o077 != 0
-  {
+  if !private_fs::is_private_file(metadata) {
     return Err(unsafe_path());
   }
   Ok(())
@@ -385,7 +381,7 @@ pub(super) fn ensure_directory(path: &Path) -> io::Result<()> {
   if directory_exists(path)? {
     return Ok(());
   }
-  match fs::DirBuilder::new().mode(0o700).create(path) {
+  match private_fs::create_directory(path) {
     Err(error) if error.kind() == io::ErrorKind::AlreadyExists => require_directory(path),
     result => result,
   }
@@ -412,15 +408,6 @@ fn check_parents(root: &Path, path: &Path) -> io::Result<()> {
   }
   Ok(())
 }
-pub(super) fn options() -> OpenOptions {
-  let mut options = OpenOptions::new();
-  options.mode(0o600).custom_flags(i32::from_ne_bytes(
-    (rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK | rustix::fs::OFlags::CLOEXEC)
-      .bits()
-      .to_ne_bytes(),
-  ));
-  options
-}
 pub(super) fn read(path: &Path, maximum: usize) -> io::Result<Vec<u8>> {
   require_file(&fs::symlink_metadata(path)?)?;
   let file = options().read(true).open(path)?;
@@ -436,7 +423,7 @@ fn write(path: &Path, bytes: &[u8], executable: bool) -> io::Result<()> {
   let mut file = options().write(true).create_new(true).open(path)?;
   file.write_all(bytes)?;
   if executable {
-    file.set_permissions(fs::Permissions::from_mode(0o700))?;
+    private_fs::set_executable(&file)?;
   }
   file.sync_all()
 }
@@ -447,7 +434,7 @@ fn sync_tree(path: &Path) -> io::Result<()> {
       sync_tree(&entry.path())?;
     }
   }
-  File::open(path)?.sync_all()
+  sync_directory(path)
 }
 pub(super) struct Lock(File);
 impl Lock {

@@ -42,12 +42,10 @@ struct Arguments {
 }
 
 fn main() {
-  #[cfg(unix)]
   let _installation = retain_installation();
   run_main();
 }
 
-#[cfg(unix)]
 fn retain_installation() -> Option<ctl_core::installations::Lease> {
   if std::env::args_os().any(|argument| {
     argument == "--component-info"

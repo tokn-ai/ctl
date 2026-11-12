@@ -245,9 +245,11 @@ existing host-key policy and credentials. Older saved methods default to Unix.
 interactive attachment opens the ordinary ctmux channel on the same target.
 The native SSH fixture exercises both services and both destination selectors.
 
-Windows SSH targets need `ctl-agent.exe` and the relevant companion executables
-installed on the server's `PATH`. Daemon auto-start is supported after installation.
-Bundle updates use `ctlup` on macOS or Linux and support Unix targets.
+Run `ctlup update --destination ALIAS --remote-platform windows` to provision a
+Windows x64 SSH account. SSH prefers the managed agent and also supports an
+existing agent and companion executables on the server's `PATH`. The Windows CI
+fixtures exercise local and OpenSSH installation, updater replacement, and
+runtime rollback.
 
 `ctl-agent` uses the shared IPC stream and only the data endpoint. Its installed
 companion is `ctmuxd.exe` on Windows. Startup requests both `DETACHED_PROCESS`

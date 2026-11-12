@@ -1,5 +1,4 @@
 use super::TargetOptions;
-use ctl_client::hosts::ConnectionTargetDto;
 use ctl_client::installation::InstallationStatus;
 use std::io;
 use std::path::Path;
@@ -48,64 +47,37 @@ pub(super) async fn run(
 }
 
 async fn remote(options: TargetOptions<'_>, rollback: bool) -> io::Result<InstallationStatus> {
-  let resolved = crate::target::resolve(options.host, options.destination, options.method)
+  let mut resolved = crate::target::resolve(options.host, options.destination, options.method)
     .await
     .map_err(io::Error::other)?;
-  let target = resolved.target;
-  if target.remote_platform() == ctl_client::RemotePlatform::Windows {
-    return Err(io::Error::other(
-      "remote installation management requires a Unix SSH host",
-    ));
+  crate::target::apply_remote_platform(&mut resolved.target, options.platform);
+  let target = super::remote::Target::connect(resolved.target).await?;
+  let expected_account = target.expected_account();
+  if expected_account.is_none() {
+    target.verify_account().await?;
   }
-  crate::target::ensure_vpn(&target)
-    .await
-    .map_err(io::Error::other)?;
-  let control_path =
-    crate::ssh_broker::ensure_master(target.to_ssh_target().map_err(io::Error::other)?)
-      .await
-      .map_err(io::Error::other)?;
-  let ctl_client::ConnectionTarget::Ssh {
-    destination,
-    options,
-  } = target.to_core()
-  else {
-    return Err(io::Error::other("the selected host is local; omit --host"));
-  };
-  verify_account(&target, &destination, &options, &control_path).await?;
-  let interaction = ctl_client::SshInteraction::Multiplexed {
-    control_path: control_path.clone(),
-  };
   let status = if rollback {
-    ctl_client::installation::remote_rollback(&destination, &options, &interaction).await
+    ctl_client::installation::remote_rollback(
+      &target.destination,
+      &target.options,
+      &target.interaction,
+      expected_account,
+    )
+    .await
   } else {
-    ctl_client::installation::remote_status(&destination, &options, &interaction).await
+    ctl_client::installation::remote_status(
+      &target.destination,
+      &target.options,
+      &target.interaction,
+      expected_account,
+    )
+    .await
   }
   .map_err(io::Error::other)?;
-  if rollback {
-    verify_account(&target, &destination, &options, &control_path).await?;
+  if rollback && expected_account.is_none() {
+    target.verify_account().await?;
   }
   Ok(status)
-}
-
-async fn verify_account(
-  target: &ConnectionTargetDto,
-  destination: &str,
-  options: &ctl_client::SshConnectionOptions,
-  control_path: &Path,
-) -> io::Result<()> {
-  if matches!(
-    target,
-    ConnectionTargetDto::Ssh {
-      remote_info: Some(_),
-      ..
-    }
-  ) {
-    let id = ctl_client::maintenance::inspect_remote_id(destination, options, control_path)
-      .await
-      .map_err(io::Error::other)?;
-    target.verify_remote_id(&id).map_err(io::Error::other)?;
-  }
-  Ok(())
 }
 
 fn in_checkout() -> bool {

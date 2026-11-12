@@ -1,4 +1,5 @@
 use ctl_core::bundles::Bundle;
+use ctl_core::private_fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -19,13 +20,16 @@ pub async fn updater_for_bundle(home: &Path, bundle: &Bundle) -> io::Result<Vec<
 /// Rejects foreign installs, unavailable managers, unsafe storage or an invalid
 /// executable. A failed probe leaves the existing manager untouched.
 pub async fn provision_manager(home: &Path, bundle: &Bundle) -> io::Result<()> {
+  bundle.manifest.validate()?;
   if !ctl_core::bundles::local_target(&bundle.manifest.target_triple) {
     return Err(io::Error::other(
       "manager provisioning requires a native installation",
     ));
   }
   let executable = std::env::current_exe()?;
-  let bytes = if updater_path(&executable) {
+  let bytes = if let Some(bytes) = supplied_updater(home, &bundle.manifest)? {
+    bytes
+  } else if updater_path(&executable) {
     native_updater(&executable).await?
   } else {
     updater_for_bundle(home, bundle).await?
@@ -42,53 +46,59 @@ pub async fn provision_manager_from(home: &Path, executable: &Path) -> io::Resul
 }
 
 pub(crate) async fn provision_manager_bytes(home: &Path, bytes: Vec<u8>) -> io::Result<()> {
+  let home = home.to_owned();
   let directory = home.join(".tokn/ctl/bin");
   let stage = tokio::task::spawn_blocking(move || {
     use std::io::Write as _;
-    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
     super::safe_directory(&directory)?;
+    #[cfg(unix)]
     manager_destination(&directory.join("ctlup"))?;
-    let stage = TemporaryManager(directory.join(format!(".ctlup-{}", uuid::Uuid::new_v4())));
-    let mut file = std::fs::OpenOptions::new()
+    let stage = TemporaryManager(directory.join(format!(
+      ".ctlup-{}{}",
+      uuid::Uuid::new_v4(),
+      std::env::consts::EXE_SUFFIX
+    )));
+    let mut file = private_fs::options()
       .write(true)
       .create_new(true)
-      .mode(0o700)
       .open(&stage.0)?;
     file.write_all(&bytes)?;
-    file.set_permissions(std::fs::Permissions::from_mode(0o700))?;
+    private_fs::set_executable(&file)?;
     file.sync_all()?;
     Ok::<_, io::Error>(stage)
   })
   .await
   .map_err(io::Error::other)??;
   // Probe the exact staged bytes, including architecture and command identity.
-  native_updater(&stage.0).await?;
+  let verified = native_updater(&stage.0).await?;
   tokio::task::spawn_blocking(move || {
-    let directory = stage
-      .0
-      .parent()
-      .ok_or_else(|| io::Error::other("missing manager directory"))?;
-    manager_destination(&directory.join("ctlup"))?;
-    std::fs::rename(&stage.0, directory.join("ctlup"))?;
-    std::fs::File::open(directory)?.sync_all()
+    #[cfg(windows)]
+    {
+      ctl_core::installations::Installations::new(&home).install_manager(&verified)
+    }
+    #[cfg(unix)]
+    {
+      let _ = (home, verified);
+      let directory = stage
+        .0
+        .parent()
+        .ok_or_else(|| io::Error::other("missing manager directory"))?;
+      manager_destination(&directory.join("ctlup"))?;
+      std::fs::rename(&stage.0, directory.join("ctlup"))?;
+      private_fs::sync_directory(directory)
+    }
   })
   .await
   .map_err(io::Error::other)?
 }
 
+#[cfg(unix)]
 fn manager_destination(path: &Path) -> io::Result<()> {
-  use std::os::unix::fs::MetadataExt as _;
   match std::fs::symlink_metadata(path) {
-    Ok(metadata)
-      if !metadata.is_file()
-        || metadata.uid() != rustix::process::getuid().as_raw()
-        || metadata.mode() & 0o022 != 0 =>
-    {
-      Err(io::Error::new(
-        io::ErrorKind::PermissionDenied,
-        "manager entry point must be an owned regular file, not a link or writable by others",
-      ))
-    }
+    Ok(metadata) if !private_fs::is_owned_file(&metadata) => Err(io::Error::new(
+      io::ErrorKind::PermissionDenied,
+      "manager entry point must be an owned regular file, not a link or writable by others",
+    )),
     Ok(_) => Ok(()),
     Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
     Err(error) => Err(error),
@@ -125,14 +135,23 @@ pub async fn updater_for_manifest(
     let source = if updater_path(&executable) {
       executable.clone()
     } else {
-      executable.with_file_name("ctlup")
+      executable.with_file_name(format!("ctlup{}", std::env::consts::EXE_SUFFIX))
     };
-    for path in [source, home.join(".tokn/ctl/bin/ctlup")] {
+    let paths = std::iter::once(source);
+    #[cfg(unix)]
+    let paths = paths.chain(std::iter::once(home.join(".tokn/ctl/bin/ctlup")));
+    for path in paths {
       match native_updater(&path).await {
         Ok(bytes) => return Ok(bytes),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(error),
       }
+    }
+    #[cfg(windows)]
+    if let Some((path, _lease)) =
+      ctl_core::installations::Installations::new(home).manager_and_lease()?
+    {
+      return native_updater(&path).await;
     }
   }
   let mut directories = Vec::new();
@@ -210,25 +229,25 @@ pub(crate) fn remember_supplied_updater(
     }
     Err(error) => return Err(io::Error::other(error)),
   };
+  verify_supplied_identity(&bundle.manifest, &updater.info)?;
   let root = home.join(".tokn/ctl/cache/updaters");
   crate::remote_bundle::published::cache_verified(&root, &updater).map_err(io::Error::other)?;
   let records = root.join("records");
   super::safe_directory(&records)?;
   let stage = records.join(format!(".record-{}", uuid::Uuid::new_v4()));
   let result = (|| {
-    use std::os::unix::fs::OpenOptionsExt as _;
-    let mut file = std::fs::OpenOptions::new()
+    let mut file = private_fs::options()
       .write(true)
       .create_new(true)
-      .mode(0o600)
       .open(&stage)?;
     serde_json::to_writer(&mut file, &updater.info)?;
     file.sync_all()?;
+    drop(file);
     std::fs::rename(
       &stage,
       records.join(format!("{}.json", bundle.manifest.bundle_id)),
     )?;
-    std::fs::File::open(&records)?.sync_all()
+    private_fs::sync_directory(&records)
   })();
   if result.is_err() {
     let _ = std::fs::remove_file(stage);
@@ -257,9 +276,30 @@ fn supplied_updater(
   let info =
     crate::remote_bundle::published::UpdaterInfo::parse(&metadata, &manifest.target_triple)
       .map_err(io::Error::other)?;
+  verify_supplied_identity(manifest, &info)?;
   crate::remote_bundle::published::read_cached_updater(&root, &info)
     .map(|updater| updater.map(|updater| updater.bytes))
     .map_err(io::Error::other)
+}
+
+fn verify_supplied_identity(
+  manifest: &ctl_core::bundles::Manifest,
+  updater: &crate::remote_bundle::published::UpdaterInfo,
+) -> io::Result<()> {
+  let build = &manifest.components["ctl-agent"].build;
+  if updater.app_version != build.version
+    || Some(updater.git_revision.as_str()) != build.source_revision.as_deref()
+    || manifest
+      .distribution_id
+      .as_ref()
+      .is_some_and(|id| *id != updater.bundle_id)
+  {
+    return Err(io::Error::new(
+      io::ErrorKind::InvalidData,
+      "supplied updater differs from the runtime bundle's publication",
+    ));
+  }
+  Ok(())
 }
 
 async fn native_updater(path: &Path) -> io::Result<Vec<u8>> {
@@ -320,7 +360,7 @@ async fn read_version(reader: impl tokio::io::AsyncRead + Unpin) -> io::Result<V
   Ok(bytes)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
   use super::*;
   use sha2::{Digest as _, Sha256};

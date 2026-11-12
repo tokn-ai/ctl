@@ -173,8 +173,9 @@ test("HTTP errors or malformed published catalogs never initialize an empty site
 test("workflow advances Nightly from main component builds and keeps PR builds in Actions", async () => {
   const workflow = await readFile(new URL("../../.github/workflows/bundles.yml", import.meta.url), "utf8");
   const pages = workflow.split("  bundle-pages:")[1]!.split("  ctld:")[0]!;
-  assert.ok(pages.includes("needs: [metadata, remote-agent-set, component-release]"));
+  assert.ok(pages.includes("needs: [metadata, remote-agent-set, remote-agent-windows, component-release]"));
   assert.ok(!pages.includes("needs.desktop"));
+  assert.ok(!pages.includes("needs.remote-agent-windows.result"));
   assert.ok(!pages.includes("git/ref/heads/main"));
   assert.match(pages, /github\.ref == 'refs\/heads\/main' \|\|\s+\(startsWith\(github\.ref, 'refs\/tags\/v'\) && needs\.component-release\.result == 'success'\)\)/);
   assert.match(pages, /PUBLICATION_CHANNEL: .*'stable' \|\| 'nightly'/);
@@ -182,4 +183,7 @@ test("workflow advances Nightly from main component builds and keeps PR builds i
   assert.ok(pages.includes(`name: ${pagesDeployStep}`));
   assert.match(workflow, /CTL_BUNDLE_CHANNEL: .*'stable' \|\| 'nightly'/);
   assert.ok(workflow.includes("publish-component-release.mts desktop"));
+  const release = workflow.split("  component-release:")[1]!.split("  bundle-pages:")[0]!;
+  assert.ok(release.includes("needs: [metadata, remote-agent-set, remote-agent-windows]"));
+  assert.ok(!release.includes("needs.remote-agent-windows.result"));
 });

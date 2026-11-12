@@ -4,7 +4,7 @@ import { chmod, copyFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
-import { readAgentFile, validateAgentIdentity, type AgentBundleIdentity } from "../shared/agent-bundle.mts";
+import { executableName, readAgentFile, validateAgentIdentity, windowsAgentTarget, type AgentBundleIdentity } from "../shared/agent-bundle.mts";
 import { probeBundledComponent } from "../shared/component-probe.mts";
 import { parseComponent } from "../shared/protocol-contract.mts";
 import { maxUpdaterBytes, parseUpdaterManifest, updaterBinaryName, updaterManifestName, verifyUpdaterTarget, type UpdaterManifest } from "../shared/updater-bundle.mts";
@@ -20,15 +20,16 @@ export interface PackageUpdaterOptions extends AgentBundleIdentity {
 export async function packageUpdater(options: PackageUpdaterOptions,
   probe = (path: string) => probeBundledComponent(path, ["--component-info"], { target: options.target })): Promise<UpdaterManifest> {
   validateAgentIdentity(options);
-  const input = join(options.binary_directory, "ctlup");
+  const filename = executableName("ctlup", options.target);
+  const input = join(options.binary_directory, filename);
   await mkdir(options.output_directory, { recursive: true });
   const stage = await mkdtemp(join(options.output_directory, ".ctlup-"));
   try {
     await readAgentFile(input, maxUpdaterBytes);
-    const executable = join(stage, "ctlup");
+    const executable = join(stage, filename);
     await copyFile(input, executable);
     await chmod(executable, 0o700);
-    if (options.strip !== false) await promisify(execFile)("strip", [executable], { maxBuffer: 1024 * 1024 });
+    if (options.target !== windowsAgentTarget && options.strip !== false) await promisify(execFile)("strip", [executable], { maxBuffer: 1024 * 1024 });
     const bytes = await readAgentFile(executable, maxUpdaterBytes);
     const { stdout } = await probe(executable);
     const info = parseComponent(JSON.parse(stdout));

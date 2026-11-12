@@ -1,16 +1,19 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
-import { agentTargets } from "../shared/agent-bundle.mts";
+import { promisify } from "node:util";
+import { agentComponents, agentTargets, executableName, parseAgentBundleSet, parseWindowsAgentBundleSet, windowsAgentManifestName, windowsAgentTarget } from "../shared/agent-bundle.mts";
 import { parseUpdaterManifest, updaterManifestName, verifyUpdaterTarget } from "../shared/updater-bundle.mts";
 import { agentIdentity, componentMapFixture } from "./agent-bundle.fixtures.mts";
 import { packageUpdater } from "./package-updater.mts";
+import { packageAgentBundle } from "./package-agent-bundle.mts";
 import { componentSetFixture, publicationFixture } from "./bundle-publication.fixtures.mts";
 import { validatedComponentSet } from "./bundle-publication.mts";
-import { assembleAgentBundleSet } from "./assemble-agent-bundle-set.mts";
+import { assembleAgentBundleSet, assembleWindowsAgentBundleSet } from "./assemble-agent-bundle-set.mts";
 import { stageBundlePages } from "./stage-bundle-pages.mts";
 import { restoreBundlePages } from "./restore-bundle-pages.mts";
 import type { GhRunner } from "./update-draft-release.mts";
@@ -64,6 +67,39 @@ test("complete updater sidecars survive assembly and Pages staging outside runti
   const { app_version, bundle_id, git_revision } = publication;
   await assembleAgentBundleSet({ app_version, bundle_id, git_revision }, incoming, assembled);
   assert.equal((await readdir(assembled)).length, 21);
+
+  // The Windows companion carries the same clean source identity, while the
+  // manifest and asset layout consumed by existing Unix clients stay intact.
+  const original = await readFile(join(assembled, "bundle-set.json"));
+  const windows_input = join(root, "windows-input");
+  const windows_options = { app_version, bundle_id, git_revision, target: windowsAgentTarget, binary_directory, output_directory: windows_input };
+  for (const name of [...agentComponents, "ctlup"]) {
+    await writeFile(join(binary_directory, executableName(name, windowsAgentTarget)), `Windows fixture ${name}`);
+  }
+  const components = componentMapFixture(publication);
+  const manifest = await packageAgentBundle(windows_options, async (command, args, cwd) => {
+    if (args[0] === "--component-info") {
+      const component = agentComponents.find((name) => command.endsWith(executableName(name, windowsAgentTarget)));
+      assert.ok(component);
+      return { stdout: JSON.stringify(components[component]), stderr: "" };
+    }
+    assert.equal(command, "tar");
+    return promisify(execFile)(command, args, { cwd, env: { ...process.env, COPYFILE_DISABLE: "1" } });
+  });
+  assert.deepEqual(Object.keys(manifest.files), [...agentComponents]);
+  await assert.rejects(assembleWindowsAgentBundleSet(windows_options, windows_input, assembled), { code: "ENOENT" });
+  const updater = await packageUpdater(windows_options, async (path) => {
+    assert.ok(path.endsWith("ctlup.exe"));
+    return { stdout: JSON.stringify(components.ctl), stderr: "" };
+  });
+  assert.equal(updater.binary, `ctlup-${publication.bundle_id}-${windowsAgentTarget}.exe`);
+  await assembleWindowsAgentBundleSet({ app_version, bundle_id, git_revision }, windows_input, assembled);
+  const companion = await readFile(join(assembled, windowsAgentManifestName));
+  assert.throws(() => parseAgentBundleSet(companion), /bundle-set targets/);
+  assert.deepEqual(Object.keys(parseWindowsAgentBundleSet(companion).targets), [windowsAgentTarget]);
+  assert.deepEqual(await readFile(join(assembled, "bundle-set.json")), original);
+  assert.equal((await validatedComponentSet(assembled, publication)).asset_names.length, 27);
+
   const site = join(root, "site");
   await stageBundlePages(publication, assembled, null, site);
   const published = join(site, "bundles/sets", publication.publication_id);
@@ -86,4 +122,6 @@ test("complete updater sidecars survive assembly and Pages staging outside runti
   assert.deepEqual((await readdir(join(restored, "bundles/sets", publication.publication_id))).sort(), (await readdir(assembled)).sort());
   await rm(join(incoming, updaterManifestName(agentTargets[0])));
   await assert.rejects(validatedComponentSet(incoming, publication), /incomplete ctlup/);
+  await rm(join(assembled, updaterManifestName(windowsAgentTarget)));
+  await assert.rejects(validatedComponentSet(assembled, publication), { code: "ENOENT" });
 });

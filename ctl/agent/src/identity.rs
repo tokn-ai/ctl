@@ -76,7 +76,6 @@ fn discover_at(directory: &Path, executable: &Path) -> io::Result<RemoteIdentity
 fn installed_identity(remote_id: String, executable: &Path) -> io::Result<RemoteIdentity> {
   let component = crate::component_info();
   let manifest = executable.with_file_name("manifest.json");
-  #[cfg(unix)]
   let managed_bundle =
     match fs::symlink_metadata(executable.with_file_name(ctl_core::bundles::MANIFEST_FILE)) {
       Ok(_) => {
@@ -104,8 +103,6 @@ fn installed_identity(remote_id: String, executable: &Path) -> io::Result<Remote
       Err(error) if error.kind() == io::ErrorKind::NotFound => None,
       Err(error) => return Err(error),
     };
-  #[cfg(not(unix))]
-  let managed_bundle = None;
   #[cfg(unix)]
   let agent_source =
     match fs::symlink_metadata(executable.with_file_name(ctl_core::bundles::agent::SOURCE_FILE)) {

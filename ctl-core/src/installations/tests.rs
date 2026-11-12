@@ -1,6 +1,7 @@
 use super::*;
 use crate::bundles::{Manifest, Source};
 use crate::component::{ComponentBuildInfo, ComponentInfo, ProtocolInfo};
+use crate::private_fs::options;
 use crate::protocol::ProtocolVersion;
 use std::collections::BTreeMap;
 use std::fs;
@@ -247,7 +248,7 @@ fn crashed_process_leases_are_recovered_without_pid_or_age_checks() {
     .create(&root)
     .unwrap();
   let path = root.join("crash-fixture");
-  let file = filesystem::options()
+  let file = options()
     .read(true)
     .write(true)
     .create_new(true)
@@ -524,11 +525,7 @@ fn launching_an_active_build_sweeps_crash_records_but_keeps_live_users() {
     .join("leases")
     .join(&active.manifest.bundle_id);
   let stale = root.join("previous-crash");
-  filesystem::options()
-    .write(true)
-    .create_new(true)
-    .open(&stale)
-    .unwrap();
+  options().write(true).create_new(true).open(&stale).unwrap();
   let executable = active.executable("ctld").unwrap().canonicalize().unwrap();
   let next = leases::lease_executable(&executable).unwrap().unwrap();
   assert!(!stale.exists());

@@ -22,10 +22,11 @@ impl AgentSource {
   /// Rejects invalid source metadata or changed agent bytes.
   pub fn verify(&self, bytes: &[u8]) -> io::Result<()> {
     self.source_bundle.validate()?;
+    let agent = self.agent_name();
     if self.schema_version != 1
       || bytes.is_empty()
       || bytes.len() > MAX_FILE_BYTES
-      || digest(bytes) != self.source_bundle.files["ctl-agent"].sha256
+      || digest(bytes) != self.source_bundle.files[agent.as_ref()].sha256
     {
       return Err(invalid("agent does not match its complete source build"));
     }
@@ -40,8 +41,15 @@ impl AgentSource {
   pub fn open(directory: &Path) -> io::Result<Self> {
     let source = read(&directory.join(SOURCE_FILE), MAX_MANIFEST_BYTES)?;
     let source: Self = serde_json::from_slice(&source).map_err(io::Error::other)?;
-    source.verify(&read(&directory.join("ctl-agent"), MAX_FILE_BYTES)?)?;
+    source.verify(&read(
+      &directory.join(source.agent_name().as_ref()),
+      MAX_FILE_BYTES,
+    )?)?;
     Ok(source)
+  }
+
+  fn agent_name(&self) -> std::borrow::Cow<'_, str> {
+    crate::bundle_layout::executable_name(&self.source_bundle.target_triple, "ctl-agent")
   }
 }
 

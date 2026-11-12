@@ -5,10 +5,7 @@ struct Home(PathBuf);
 impl Home {
   fn new() -> Self {
     let home = Self(std::env::temp_dir().join(format!("ctlup-settings-{}", uuid::Uuid::new_v4())));
-    std::fs::DirBuilder::new()
-      .mode(0o700)
-      .create(&home.0)
-      .unwrap();
+    private_fs::create_directory(&home.0).unwrap();
     home
   }
 }
@@ -57,6 +54,7 @@ fn channel_inspection_is_passive_and_explicit_choices_are_atomic() {
 }
 
 #[test]
+#[cfg(unix)]
 fn settings_do_not_follow_account_storage_links() {
   let home = Home::new();
   let outside = Home::new();

@@ -4,10 +4,10 @@
 pub mod agent;
 mod cache;
 mod filesystem;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;
 
-use crate::bundle_layout::{ALL, Layout};
+use crate::bundle_layout::{ALL, Layout, executable_name, windows_target};
 use crate::component::{ComponentInfo, protocols_match};
 use crate::protocol::ProtocolVersion;
 use serde::{Deserialize, Serialize};
@@ -137,7 +137,10 @@ impl Manifest {
             name.clone(),
             FileInfo {
               sha256: digest(bytes),
-              executable: ALL.contains(&name.as_str()) || name == "ctld.app/Contents/MacOS/ctld",
+              executable: ALL
+                .iter()
+                .any(|component| executable_name(target, component) == name.as_str())
+                || name == "ctld.app/Contents/MacOS/ctld",
             },
           )
         })
@@ -204,11 +207,16 @@ impl Manifest {
       || self.bundle_id != self.content_id()?
       || !layout.matches(&self.components)
       || self.files.len() > 512
-      || self.files.keys().any(|name| !safe_file(name, layout))
-      || layout
-        .names()
-        .iter()
-        .any(|name| !self.files.get(*name).is_some_and(|file| file.executable))
+      || self
+        .files
+        .keys()
+        .any(|name| !safe_file(name, layout, &self.target_triple))
+      || layout.names().iter().any(|name| {
+        !self
+          .files
+          .get(executable_name(&self.target_triple, name).as_ref())
+          .is_some_and(|file| file.executable)
+      })
       || self.files.values().any(|file| !valid_digest(&file.sha256))
       || self
         .files
@@ -314,11 +322,11 @@ impl Bundle {
 
   #[must_use]
   pub fn executable(&self, component: &str) -> Option<PathBuf> {
-    self
-      .manifest
-      .components
-      .contains_key(component)
-      .then(|| self.directory.join(component))
+    self.manifest.components.contains_key(component).then(|| {
+      self
+        .directory
+        .join(executable_name(&self.manifest.target_triple, component).as_ref())
+    })
   }
 }
 
@@ -552,6 +560,8 @@ pub(crate) fn validate_target(target: &str) -> io::Result<()> {
       "aarch64-unknown-linux-gnu",
       "x86_64-apple-darwin",
       "aarch64-apple-darwin",
+      "x86_64-pc-windows-msvc",
+      "aarch64-pc-windows-msvc",
     ]
     .contains(&target)
   {
@@ -560,13 +570,43 @@ pub(crate) fn validate_target(target: &str) -> io::Result<()> {
   Ok(())
 }
 
-fn safe_file(name: &str, layout: Layout) -> bool {
-  (layout.names().contains(&name)
+fn safe_file(name: &str, layout: Layout, target: &str) -> bool {
+  let macos_package = !windows_target(target)
+    && (name == "ctld-package.json" || name.starts_with("ctld.app/Contents/"));
+  (layout
+    .names()
+    .iter()
+    .any(|component| executable_name(target, component) == name)
     || name == "manifest.json"
-    || name == "ctld-package.json"
-    || name.starts_with("ctld.app/Contents/"))
+    || macos_package)
     && name.len() <= 512
-    && name
-      .split('/')
-      .all(|part| !part.is_empty() && part != "." && part != ".." && !part.contains(['\\', '\0']))
+    && name.split('/').all(safe_path_component)
+}
+
+fn safe_path_component(part: &str) -> bool {
+  if part.is_empty() || part == "." || part == ".." || part.contains(['\\', ':', '\0']) {
+    return false;
+  }
+  #[cfg(windows)]
+  {
+    // A Windows host can cache other platforms' archives. Prevent path
+    // normalization and DOS device names from redirecting file creation.
+    if part.ends_with([' ', '.'])
+      || part.contains(['<', '>', '"', '|', '?', '*'])
+      || part.bytes().any(|byte| byte < 32)
+    {
+      return false;
+    }
+    let stem = part.split('.').next().unwrap_or(part).trim_end();
+    let stem = stem.to_ascii_uppercase();
+    if ["CON", "PRN", "AUX", "NUL"].contains(&stem.as_str())
+      || stem
+        .strip_prefix("COM")
+        .or_else(|| stem.strip_prefix("LPT"))
+        .is_some_and(|n| ["1", "2", "3", "4", "5", "6", "7", "8", "9", "¹", "²", "³"].contains(&n))
+    {
+      return false;
+    }
+  }
+  true
 }

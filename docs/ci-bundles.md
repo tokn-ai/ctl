@@ -2,6 +2,7 @@
 
 The `Desktop, control daemon, and remote-agent bundles` workflow builds remote
 agent bundles and desktop packages for Linux and macOS, on Intel/AMD and ARM64.
+It also builds native Windows x64 component bundles and `ctlup.exe`.
 Version tags also build standalone signed macOS `ctld.app` bundles and signed
 macOS `ctl` executables with those complete helper bundles embedded. The workflow
 automatically publishes component bundles to GitHub Pages. Version tags also
@@ -37,8 +38,8 @@ Release bundle IDs are the version. Nightly uses
 `<version>-nightly.<YYYYMMDD>+g<revision>` with the UTC commit date and the
 first 12 characters of the Git revision. A rerun keeps the same bundle ID.
 Dev uses `<version>-dev.<revision>` for temporary branch builds.
-Remote-agent publication requires all four targets because clients consume one
-complete bundle set. Tagged desktop packages, standalone helpers, and bundled
+Component publication verifies the four-target Unix set and the Windows x64
+companion from the same build. Tagged desktop packages, standalone helpers, and bundled
 CLIs are validated per available target. Each desktop target must contain every
 package format for that platform. Helpers must match the version and source revision,
 and available helper targets must agree on their Apple Team ID and protocols.
@@ -72,6 +73,7 @@ The artifact expires after 30 days. The download includes the runtime archive
 and updater for each target. To use a specific retained run, download it with
 `gh run download RUN_ID -n ctl-agent-bundle-set -D ./bundle-set` and use
 `ctlup update --from ./bundle-set`.
+For Windows, download `ctl-agent-windows-bundle-set` into that directory instead.
 
 ## Component channels and GitHub Pages
 
@@ -79,7 +81,9 @@ The public component source is
 [`https://tokn-ai.dev/ctl/bundles/`](https://tokn-ai.dev/ctl/bundles/).
 It contains each target's runtime archive, SHA-256 sidecar, standalone `ctlup`
 executable and updater metadata, plus the complete bundle-set document.
-New publications use schema 3. Previously published schema-2 sets remain usable.
+New publications use schema 3. `bundle-set.json` lists the Unix targets and the
+sibling `bundle-set-windows.json` lists Windows x64. Previously published
+schema-2 sets remain usable.
 
 Applications discover the two published channels at these URLs.
 

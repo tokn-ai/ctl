@@ -1,6 +1,7 @@
 //! Immutable, verified per-build cache entries with atomic publication.
 
-use std::fs::{self, File, Metadata, OpenOptions};
+use ctl_core::private_fs;
+use std::fs::{self, File, Metadata};
 use std::io::{self, Read as _, Write as _};
 use std::path::{Path, PathBuf};
 
@@ -129,11 +130,9 @@ impl BundleCacheEntry {
     let stage = TemporaryDirectory::new(&self.revision_directory, &self.target)?;
     write_private_file(&stage.0.join(BUNDLE_SET_FILE), &bundle.manifest)?;
     write_private_file(&stage.0.join(&bundle.file_name), &bundle.archive)?;
-    #[cfg(unix)]
-    sync_directory(&stage.0)?;
+    private_fs::sync_directory(&stage.0)?;
     self.publish(&stage)?;
-    #[cfg(unix)]
-    sync_directory(&self.revision_directory)?;
+    private_fs::sync_directory(&self.revision_directory)?;
     Ok(())
   }
 
@@ -295,7 +294,7 @@ fn ensure_directory(path: &Path) -> io::Result<()> {
   {
     ensure_directory(parent)?;
   }
-  match create_private_directory(path) {
+  match private_fs::create_directory(path) {
     Ok(()) => {}
     Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
     Err(error) => return Err(error),
@@ -304,80 +303,23 @@ fn ensure_directory(path: &Path) -> io::Result<()> {
   Ok(())
 }
 
-fn create_private_directory(path: &Path) -> io::Result<()> {
-  let builder = fs::DirBuilder::new();
-  #[cfg(unix)]
-  let mut builder = builder;
-  #[cfg(unix)]
-  {
-    use std::os::unix::fs::DirBuilderExt as _;
-    builder.mode(0o700);
-  }
-  builder.create(path)
-}
-
 fn require_safe_directory(metadata: &Metadata) -> io::Result<()> {
-  if !metadata.is_dir() || is_reparse_point(metadata) {
+  if !private_fs::is_directory(metadata) {
     return Err(unsafe_path());
-  }
-  #[cfg(unix)]
-  {
-    use std::os::unix::fs::MetadataExt as _;
-    if metadata.uid() != rustix::process::getuid().as_raw() || metadata.mode() & 0o022 != 0 {
-      return Err(unsafe_path());
-    }
   }
   Ok(())
 }
 
 fn require_private_file(metadata: &Metadata) -> io::Result<()> {
-  if !metadata.is_file() || is_reparse_point(metadata) {
+  if !private_fs::is_private_file(metadata) {
     return Err(unsafe_path());
-  }
-  #[cfg(unix)]
-  {
-    use std::os::unix::fs::MetadataExt as _;
-    if metadata.uid() != rustix::process::getuid().as_raw() || metadata.mode() & 0o077 != 0 {
-      return Err(unsafe_path());
-    }
   }
   Ok(())
 }
 
-fn is_reparse_point(metadata: &Metadata) -> bool {
-  #[cfg(windows)]
-  {
-    use std::os::windows::fs::MetadataExt as _;
-    metadata.file_attributes() & 0x0400 != 0
-  }
-  #[cfg(not(windows))]
-  {
-    metadata.file_type().is_symlink()
-  }
-}
-
-fn private_options() -> OpenOptions {
-  let mut options = OpenOptions::new();
-  #[cfg(unix)]
-  {
-    use std::os::unix::fs::OpenOptionsExt as _;
-    options.mode(0o600).custom_flags(i32::from_ne_bytes(
-      (rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK | rustix::fs::OFlags::CLOEXEC)
-        .bits()
-        .to_ne_bytes(),
-    ));
-  }
-  #[cfg(windows)]
-  {
-    use std::os::windows::fs::OpenOptionsExt as _;
-    options.custom_flags(0x0020_0000); // FILE_FLAG_OPEN_REPARSE_POINT
-  }
-  options
-}
-
 fn read_private_file(path: &Path, maximum: usize) -> Result<Vec<u8>, Error> {
   require_private_file(&fs::symlink_metadata(path)?)?;
-  let file = private_options().read(true).open(path)?;
+  let file = private_fs::options().read(true).open(path)?;
   let metadata = file.metadata()?;
   require_private_file(&metadata)?;
   if metadata.len() > maximum as u64 {
@@ -396,7 +338,10 @@ fn read_private_file(path: &Path, maximum: usize) -> Result<Vec<u8>, Error> {
 }
 
 fn write_private_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
-  let mut file = private_options().write(true).create_new(true).open(path)?;
+  let mut file = private_fs::options()
+    .write(true)
+    .create_new(true)
+    .open(path)?;
   require_private_file(&file.metadata()?)?;
   file.write_all(bytes)?;
   file.sync_all()
@@ -411,7 +356,7 @@ impl PublicationLock {
       Err(error) if error.kind() == io::ErrorKind::NotFound => {}
       Err(error) => return Err(error),
     }
-    let file = private_options()
+    let file = private_fs::options()
       .read(true)
       .write(true)
       .create(true)
@@ -422,9 +367,8 @@ impl PublicationLock {
     Ok(Self(file))
   }
 
-  #[cfg(unix)]
   fn try_acquire(path: &Path) -> io::Result<Option<Self>> {
-    let file = private_options()
+    let file = private_fs::options()
       .read(true)
       .write(true)
       .create(true)
@@ -441,7 +385,6 @@ impl PublicationLock {
 
 /// Bound compressed download storage. Readers already hold archive bytes in
 /// memory; concurrent publications are protected by their existing target lock.
-#[cfg(unix)]
 pub(crate) fn prune_download_cache(root: &Path, maximum: u64) -> io::Result<u64> {
   if !existing_directory(root)? {
     return Ok(0);
@@ -462,7 +405,10 @@ pub(crate) fn prune_download_cache(root: &Path, maximum: u64) -> io::Result<u64>
     if !existing_directory(&directory)? {
       continue;
     }
-    for target in super::SUPPORTED_TARGETS {
+    for target in super::SUPPORTED_TARGETS
+      .into_iter()
+      .chain(std::iter::once(super::WINDOWS_TARGET))
+    {
       let path = directory.join(target);
       if !existing_directory(&path)? {
         continue;
@@ -514,7 +460,7 @@ struct TemporaryDirectory(PathBuf);
 impl TemporaryDirectory {
   fn new(parent: &Path, target: &str) -> io::Result<Self> {
     let path = unique_sibling(parent, target, "partial");
-    create_private_directory(&path)?;
+    private_fs::create_directory(&path)?;
     Ok(Self(path))
   }
 }
@@ -527,11 +473,6 @@ impl Drop for TemporaryDirectory {
 
 fn unique_sibling(parent: &Path, target: &str, kind: &str) -> PathBuf {
   parent.join(format!(".{target}-{kind}-{}", uuid::Uuid::new_v4()))
-}
-
-#[cfg(unix)]
-fn sync_directory(path: &Path) -> io::Result<()> {
-  File::open(path)?.sync_all()
 }
 
 fn unsafe_path() -> io::Error {

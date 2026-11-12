@@ -4,9 +4,9 @@ pub mod inventory;
 
 use ctl_core::bundles::{Bundle, MANIFEST_FILE, MAX_FILE_BYTES, Manifest, Purpose, Source, Store};
 use ctl_core::component::ComponentInfo;
+use ctl_core::{bundle_layout, private_fs};
 use std::collections::BTreeMap;
 use std::io::{self, Read as _};
-use std::os::unix::fs::MetadataExt as _;
 use std::path::Path;
 
 /// Imports a verified CI/release bundle without changing selection or services.
@@ -59,19 +59,7 @@ fn remote_payload(
     .components
     .clone()
     .ok_or_else(|| invalid("bundle lacks component advertisements"))?;
-  let mut files = BTreeMap::new();
-  let mut archive = tar::Archive::new(flate2::read::MultiGzDecoder::new(bundle.archive.as_slice()));
-  for entry in archive.entries()? {
-    let mut entry = entry?;
-    let name = entry
-      .path()?
-      .to_str()
-      .ok_or_else(|| invalid("non-UTF8 bundle path"))?
-      .to_owned();
-    let mut bytes = Vec::new();
-    entry.read_to_end(&mut bytes)?;
-    files.insert(name, bytes);
-  }
+  let files = read_archive(&bundle.archive)?;
   let manifest =
     Manifest::new(target, source, components, &files)?.with_distribution_id(&bundle.bundle_id)?;
   Ok(RemotePayload { manifest, files })
@@ -130,7 +118,9 @@ pub(crate) async fn import_local_for_target(
     let _ = (helper, &mut app_executables);
     None
   };
-  let client_present = |name: &str| match std::fs::symlink_metadata(directory.join(name)) {
+  let executable_path =
+    |name: &str| directory.join(bundle_layout::executable_name(target, name).as_ref());
+  let client_present = |name: &str| match std::fs::symlink_metadata(executable_path(name)) {
     Ok(_) => Ok(true),
     Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
     Err(error) => Err(error),
@@ -141,12 +131,13 @@ pub(crate) async fn import_local_for_target(
     _ => return Err(invalid("local bundle must include both ctl and ctmux")),
   };
   for &name in layout.names() {
+    let executable = bundle_layout::executable_name(target, name);
     let path = if name == "ctld" {
       signed_helper
         .as_ref()
-        .map_or_else(|| directory.join(name), |(path, _)| path.clone())
+        .map_or_else(|| executable_path(name), |(path, _)| path.clone())
     } else {
-      directory.join(name)
+      executable_path(name)
     };
     let bytes = read_input(&path, MAX_FILE_BYTES)?;
     let info = if name == "ctld" {
@@ -162,7 +153,7 @@ pub(crate) async fn import_local_for_target(
     }
     check_total(&files, bytes.len())?;
     components.insert(name.into(), info);
-    files.insert(name.into(), bytes);
+    files.insert(executable.into_owned(), bytes);
   }
   if !compatible(&components) {
     return Err(invalid("local build is incompatible with this client"));
@@ -243,7 +234,7 @@ pub async fn select_with_progress(
   .map_err(io::Error::other)?
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", all(test, unix)))]
 fn helper_receipt(directory: &Path) -> io::Result<Vec<u8>> {
   let optional =
     |name| match read_input(&directory.join(name), ctl_core::bundles::MAX_MANIFEST_BYTES) {
@@ -312,13 +303,7 @@ pub async fn verify_local(home: &Path, bundle: &Bundle) -> io::Result<()> {
 /// Portable targets recognized by the remote platform probe.
 #[must_use]
 pub fn upload_target(target: &str) -> bool {
-  matches!(
-    target,
-    "x86_64-unknown-linux-musl"
-      | "aarch64-unknown-linux-musl"
-      | "x86_64-apple-darwin"
-      | "aarch64-apple-darwin"
-  )
+  crate::remote_bundle::supported_target(target)
 }
 
 /// Initializes the first upload selection without replacing an explicit choice.
@@ -436,24 +421,14 @@ pub(crate) fn append<W: io::Write>(
 
 pub(crate) fn read_input(path: &Path, maximum: usize) -> io::Result<Vec<u8>> {
   let metadata = std::fs::symlink_metadata(path)?;
-  if !metadata.is_file() || metadata.mode() & 0o022 != 0 {
+  if !safe_input_file(&metadata) {
     return Err(invalid(
       "component input must be a regular file, not a link or writable by another account",
     ));
   }
-  let file = std::fs::File::from(
-    rustix::fs::open(
-      path,
-      rustix::fs::OFlags::RDONLY
-        | rustix::fs::OFlags::NOFOLLOW
-        | rustix::fs::OFlags::NONBLOCK
-        | rustix::fs::OFlags::CLOEXEC,
-      rustix::fs::Mode::empty(),
-    )
-    .map_err(io::Error::from)?,
-  );
+  let file = private_fs::options().read(true).open(path)?;
   let metadata = file.metadata()?;
-  if !metadata.is_file() || metadata.mode() & 0o022 != 0 {
+  if !safe_input_file(&metadata) {
     return Err(invalid("component input changed to an unsafe file"));
   }
   let mut bytes = Vec::new();
@@ -464,6 +439,18 @@ pub(crate) fn read_input(path: &Path, maximum: usize) -> io::Result<Vec<u8>> {
   Ok(bytes)
 }
 
+fn safe_input_file(metadata: &std::fs::Metadata) -> bool {
+  #[cfg(unix)]
+  {
+    use std::os::unix::fs::MetadataExt as _;
+    metadata.is_file() && metadata.mode() & 0o022 == 0
+  }
+  #[cfg(windows)]
+  {
+    private_fs::is_owned_file(metadata)
+  }
+}
+
 #[cfg(target_os = "macos")]
 fn collect_app(
   root: &Path,
@@ -471,6 +458,7 @@ fn collect_app(
   files: &mut BTreeMap<String, Vec<u8>>,
   executables: &mut Vec<String>,
 ) -> io::Result<()> {
+  use std::os::unix::fs::MetadataExt as _;
   if !std::fs::symlink_metadata(directory)?.is_dir() {
     return Err(invalid("helper package contains an unsafe directory"));
   }
@@ -515,5 +503,5 @@ fn invalid(message: &str) -> io::Error {
   io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;

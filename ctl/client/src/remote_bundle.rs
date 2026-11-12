@@ -1,11 +1,10 @@
 //! Trusted remote component bundles shared by desktop and standalone clients.
 
 use ctl_core::component::{ComponentBuildInfo, ComponentInfo};
+use ctl_core::private_fs;
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
 use std::collections::BTreeMap;
-#[cfg(unix)]
-use std::fs::File;
 use std::io::{self, Read as _};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -15,7 +14,9 @@ const MAX_BUNDLE_SET_BYTES: usize = 64 * 1024;
 // Reserve space for tar headers and padding beyond the managed payload limit.
 const MAX_TAR_BYTES: u64 = ctl_core::bundle_layout::MAX_TOTAL_BYTES as u64 + 1024 * 1024;
 const BUNDLE_SET_FILE: &str = "bundle-set.json";
+const WINDOWS_BUNDLE_SET_FILE: &str = "bundle-set-windows.json";
 const RELEASE_ROOT: &str = "https://github.com/tokn-ai/ctl/releases/download";
+pub const WINDOWS_TARGET: &str = "x86_64-pc-windows-msvc";
 const SUPPORTED_TARGETS: [&str; 4] = [
   "x86_64-unknown-linux-musl",
   "aarch64-unknown-linux-musl",
@@ -26,10 +27,8 @@ const SUPPORTED_TARGETS: [&str; 4] = [
 pub(crate) mod archive;
 mod cache;
 pub(crate) mod compatibility;
-#[cfg(unix)]
 pub mod pr;
 pub mod published;
-#[cfg(unix)]
 pub(crate) use cache::prune_download_cache;
 pub use cache::{BundleCacheEntry, read_compatible_cached_bundle};
 
@@ -71,7 +70,7 @@ impl Platform {
     })
   }
 
-  /// Maps the supported remote Unix platforms to portable bundle targets.
+  /// Maps the supported remote platforms to portable bundle targets.
   ///
   /// # Errors
   /// Rejects platforms for which this project does not ship a remote bundle.
@@ -81,6 +80,7 @@ impl Platform {
       ("Linux", "aarch64" | "arm64") => Ok("aarch64-unknown-linux-musl"),
       ("Darwin", "x86_64" | "amd64") => Ok("x86_64-apple-darwin"),
       ("Darwin", "aarch64" | "arm64") => Ok("aarch64-apple-darwin"),
+      ("Windows", "x86_64" | "amd64" | "AMD64") => Ok(WINDOWS_TARGET),
       _ => Err(Error::UnsupportedTarget(format!(
         "{} {}",
         self.os, self.architecture
@@ -116,13 +116,18 @@ impl BundleSet {
   /// and malformed build identities or checksums.
   pub fn parse(bytes: &[u8], expected_version: &str) -> Result<Self, Error> {
     let manifest = Self::parse_intrinsic(bytes)?;
-    if !safe_id(expected_version) || manifest.app_version != expected_version {
+    manifest.verify_version(expected_version)?;
+    Ok(manifest)
+  }
+
+  fn verify_version(&self, expected_version: &str) -> Result<(), Error> {
+    if !safe_id(expected_version) || self.app_version != expected_version {
       return Err(Error::Invalid(format!(
         "remote bundle set targets version {}, not {expected_version}",
-        manifest.app_version
+        self.app_version
       )));
     }
-    Ok(manifest)
+    Ok(())
   }
 
   /// Validates the bundle's own immutable identity without selecting a client release.
@@ -167,11 +172,14 @@ impl BundleSet {
         "remote bundle ID does not match its version and Git revision".into(),
       ));
     }
-    if manifest.targets.len() != SUPPORTED_TARGETS.len()
-      || SUPPORTED_TARGETS
+    let complete_unix_set = manifest.targets.len() == SUPPORTED_TARGETS.len()
+      && SUPPORTED_TARGETS
         .iter()
-        .any(|target| !manifest.targets.contains_key(*target))
-    {
+        .all(|target| manifest.targets.contains_key(*target));
+    let windows_set = manifest.schema_version == 3
+      && manifest.targets.len() == 1
+      && manifest.targets.contains_key(WINDOWS_TARGET);
+    if !complete_unix_set && !windows_set {
       return Err(Error::Invalid(
         "remote bundle set does not contain every supported target".into(),
       ));
@@ -226,6 +234,16 @@ impl BundleSet {
   pub(crate) fn layout(&self) -> ctl_core::bundle_layout::Layout {
     ctl_core::bundle_layout::Layout::public(self.schema_version)
       .expect("validated bundle-set schema")
+  }
+
+  fn parse_set(bytes: &[u8], set_file: &str) -> Result<Self, Error> {
+    let manifest = Self::parse_intrinsic(bytes)?;
+    if manifest.targets.contains_key(WINDOWS_TARGET) != (set_file == WINDOWS_BUNDLE_SET_FILE) {
+      return Err(Error::Invalid(
+        "bundle targets disagree with the manifest filename".into(),
+      ));
+    }
+    Ok(manifest)
   }
 
   pub(crate) fn target(&self, target: &str) -> Result<&BundleTarget, Error> {
@@ -327,11 +345,13 @@ pub fn read_verified_bundle(
 ) -> Result<Option<VerifiedBundle>, Error> {
   validate_target(target)?;
   for directory in directories {
-    let bytes = match read_bounded_file(&directory.join(BUNDLE_SET_FILE), MAX_BUNDLE_SET_BYTES) {
+    let set_file = bundle_set_file(target);
+    let bytes = match read_bounded_file(&directory.join(set_file), MAX_BUNDLE_SET_BYTES) {
       Err(Error::Io(error)) if error.kind() == io::ErrorKind::NotFound => continue,
       result => result?,
     };
-    let manifest = BundleSet::parse(&bytes, &expected.version)?;
+    let manifest = BundleSet::parse_set(&bytes, set_file)?;
+    manifest.verify_version(&expected.version)?;
     manifest.verify_revision(expected)?;
     let archive = read_bounded_file(
       &directory.join(&manifest.target(target)?.archive),
@@ -354,8 +374,7 @@ pub fn read_compatible_bundle(
   read_reusable(directories, target, None, false)
 }
 
-/// Filters upload candidates for the shared services used by current Unix clients.
-#[cfg(unix)]
+/// Filters upload candidates for the shared services used by current clients.
 pub(crate) fn read_shared_service_bundle(
   directories: &[PathBuf],
   target: &str,
@@ -383,11 +402,12 @@ fn read_reusable(
 ) -> Result<Option<VerifiedBundle>, Error> {
   validate_target(target)?;
   for directory in directories {
-    let bytes = match read_bounded_file(&directory.join(BUNDLE_SET_FILE), MAX_BUNDLE_SET_BYTES) {
+    let set_file = bundle_set_file(target);
+    let bytes = match read_bounded_file(&directory.join(set_file), MAX_BUNDLE_SET_BYTES) {
       Err(Error::Io(error)) if error.kind() == io::ErrorKind::NotFound => continue,
       result => result?,
     };
-    let manifest = BundleSet::parse_intrinsic(&bytes)?;
+    let manifest = BundleSet::parse_set(&bytes, set_file)?;
     let reusable = if manifest.schema_version == 1 {
       expected.is_some_and(|expected| manifest.verify_revision(expected).is_ok())
     } else {
@@ -441,13 +461,10 @@ pub async fn download_release_bundle(
     .build()
     .map_err(download_error)?;
   let root = format!("{RELEASE_ROOT}/v{}", expected.version);
-  let bytes = download(
-    &client,
-    &format!("{root}/{BUNDLE_SET_FILE}"),
-    MAX_BUNDLE_SET_BYTES,
-  )
-  .await?;
-  let manifest = BundleSet::parse(&bytes, &expected.version)?;
+  let set_file = bundle_set_file(target);
+  let bytes = download(&client, &format!("{root}/{set_file}"), MAX_BUNDLE_SET_BYTES).await?;
+  let manifest = BundleSet::parse_set(&bytes, set_file)?;
+  manifest.verify_version(&expected.version)?;
   if !manifest.is_compatible(target)? {
     return Err(Error::NotAvailable(
       "published bundle does not advertise the required compatible component contracts".into(),
@@ -500,46 +517,33 @@ fn valid_bundle_id(app_version: &str, bundle_id: &str, git_revision: &str) -> bo
 }
 
 fn validate_target(target: &str) -> Result<(), Error> {
-  if SUPPORTED_TARGETS.contains(&target) {
+  if supported_target(target) {
     Ok(())
   } else {
     Err(Error::UnsupportedTarget(target.into()))
   }
 }
 
+pub(crate) fn supported_target(target: &str) -> bool {
+  target == WINDOWS_TARGET || SUPPORTED_TARGETS.contains(&target)
+}
+
+fn bundle_set_file(target: &str) -> &'static str {
+  if target == WINDOWS_TARGET {
+    WINDOWS_BUNDLE_SET_FILE
+  } else {
+    BUNDLE_SET_FILE
+  }
+}
+
 fn read_bounded_file(path: &Path, maximum: usize) -> Result<Vec<u8>, Error> {
-  #[cfg(unix)]
-  let file = File::from(
-    rustix::fs::open(
-      path,
-      rustix::fs::OFlags::RDONLY
-        | rustix::fs::OFlags::NOFOLLOW
-        | rustix::fs::OFlags::NONBLOCK
-        | rustix::fs::OFlags::CLOEXEC,
-      rustix::fs::Mode::empty(),
-    )
-    .map_err(io::Error::from)?,
-  );
-  #[cfg(not(unix))]
-  let file = {
-    let mut options = std::fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(windows)]
-    {
-      use std::os::windows::fs::OpenOptionsExt as _;
-      options.custom_flags(0x0020_0000); // FILE_FLAG_OPEN_REPARSE_POINT
-    }
-    options.open(path)?
-  };
+  let file = private_fs::options().read(true).open(path)?;
   let metadata = file.metadata()?;
   #[cfg(windows)]
-  {
-    use std::os::windows::fs::MetadataExt as _;
-    if metadata.file_attributes() & 0x0400 != 0 {
-      return Err(Error::Invalid(
-        "remote bundle files must not be reparse points".into(),
-      ));
-    }
+  if !private_fs::is_owned_file(&metadata) {
+    return Err(Error::Invalid(
+      "remote bundle files must be regular files without reparse points".into(),
+    ));
   }
   if !metadata.is_file() {
     return Err(Error::Invalid(

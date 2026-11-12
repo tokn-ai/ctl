@@ -2,26 +2,21 @@
 
 use clap::Parser;
 use std::io;
-#[cfg(unix)]
 use std::path::PathBuf;
 
-#[cfg(unix)]
 mod archive;
 mod arguments;
-#[cfg(unix)]
 mod development;
-#[cfg(unix)]
+#[cfg(windows)]
+mod launcher;
 mod release;
-#[cfg(unix)]
+mod remote;
 mod status;
-#[cfg(unix)]
 pub(crate) mod update;
 
 use arguments::{Arguments, Command};
-#[cfg(unix)]
 use ctl_client::remote_bundle::published;
 
-#[cfg(unix)]
 #[derive(Clone, Copy)]
 pub(crate) struct TargetOptions<'a> {
   host: Option<&'a str>,
@@ -31,6 +26,15 @@ pub(crate) struct TargetOptions<'a> {
 }
 
 pub(crate) fn main() {
+  #[cfg(windows)]
+  match launcher::dispatch() {
+    Ok(Some(code)) => std::process::exit(code),
+    Ok(None) => {}
+    Err(error) => {
+      eprintln!("ctlup: {error}");
+      std::process::exit(1);
+    }
+  }
   let arguments = Arguments::parse();
   if matches!(arguments.command, Command::ComponentInfo) {
     if let Err(error) = crate::component_info::print() {
@@ -39,6 +43,11 @@ pub(crate) fn main() {
     }
     return;
   }
+  #[cfg(windows)]
+  let installation = ctl_core::installations::lease_current_executable().unwrap_or_else(|error| {
+    eprintln!("ctlup: could not retain its installation: {error}");
+    std::process::exit(1);
+  });
   let runtime = tokio::runtime::Builder::new_multi_thread()
     .enable_all()
     .build()
@@ -48,6 +57,8 @@ pub(crate) fn main() {
     });
   let result = runtime.block_on(run(arguments));
   drop(runtime);
+  #[cfg(windows)]
+  drop(installation);
   let code = match result {
     Ok(code) => code,
     Err(error) => {
@@ -58,18 +69,22 @@ pub(crate) fn main() {
   std::process::exit(code);
 }
 
-#[cfg(unix)]
 async fn run(arguments: Arguments) -> io::Result<i32> {
   let home = dirs::home_dir().ok_or_else(|| io::Error::other("home directory is unavailable"))?;
   let target = TargetOptions {
     host: arguments.host.as_deref(),
     destination: arguments.destination.as_deref(),
     method: arguments.method.as_deref(),
-    platform: None,
+    platform: arguments.remote_platform,
   };
   if target.destination.is_some() && (target.host.is_some() || target.method.is_some()) {
     return Err(io::Error::other(
       "--destination cannot be combined with --host or --method",
+    ));
+  }
+  if target.platform.is_some() && target.host.is_none() && target.destination.is_none() {
+    return Err(io::Error::other(
+      "--remote-platform requires --host or --destination",
     ));
   }
   match arguments.command {
@@ -117,18 +132,20 @@ async fn run(arguments: Arguments) -> io::Result<i32> {
       require_local(target)?;
       return archive::activate(&home, &bundle_id).await;
     }
+    #[cfg(windows)]
+    Command::UpdaterDigest => {
+      use sha2::{Digest as _, Sha256};
+      require_local(target)?;
+      let executable = std::env::current_exe()?;
+      let mut file = std::fs::File::open(executable)?;
+      let mut digest = Sha256::new();
+      io::copy(&mut file, &mut digest)?;
+      println!("{:x}", digest.finalize());
+    }
   }
   Ok(0)
 }
 
-#[cfg(not(unix))]
-fn run(_arguments: Arguments) -> std::future::Ready<io::Result<i32>> {
-  std::future::ready(Err(io::Error::other(
-    "ctlup installation management currently requires macOS or Linux",
-  )))
-}
-
-#[cfg(unix)]
 fn require_local(target: TargetOptions<'_>) -> io::Result<()> {
   if target.host.is_some() || target.destination.is_some() || target.method.is_some() {
     return Err(io::Error::other(
@@ -138,7 +155,6 @@ fn require_local(target: TargetOptions<'_>) -> io::Result<()> {
   Ok(())
 }
 
-#[cfg(unix)]
 pub(crate) fn source_with_bundle_override(
   source: ctl_client::component_update::BuildSource,
   directory: Option<PathBuf>,
@@ -154,7 +170,6 @@ pub(crate) fn source_with_bundle_override(
   }
 }
 
-#[cfg(unix)]
 fn selected_channel(
   home: &std::path::Path,
   channel: Option<crate::components::Channel>,
@@ -165,7 +180,6 @@ fn selected_channel(
   )
 }
 
-#[cfg(unix)]
 async fn check(
   home: &std::path::Path,
   channel: Option<crate::components::Channel>,
@@ -190,7 +204,6 @@ async fn check(
   Ok(())
 }
 
-#[cfg(unix)]
 fn print_targets(targets: &[published::PublishedTarget]) {
   for target in targets {
     println!(

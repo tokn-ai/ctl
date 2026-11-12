@@ -230,7 +230,6 @@ pub fn run() {
     }
     Some(arguments)
   };
-  #[cfg(unix)]
   let installation = ctl_core::installations::lease_current_executable().unwrap_or_else(|error| {
     eprintln!("ctl: could not retain its installation: {error}");
     std::process::exit(1);
@@ -245,7 +244,6 @@ pub fn run() {
   let code = runtime.block_on(run_main(arguments));
   // Drop authentication tasks (and zeroize their buffers) before process exit.
   drop(runtime);
-  #[cfg(unix)]
   drop(installation);
   std::process::exit(code);
 }

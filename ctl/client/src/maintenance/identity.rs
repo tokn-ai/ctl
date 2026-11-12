@@ -32,6 +32,19 @@ pub async fn inspect_remote_id(
   inspect(command(destination, options, control_path)?).await
 }
 
+pub(crate) async fn inspect_remote_id_interactive(
+  destination: &str,
+  options: &SshConnectionOptions,
+  interaction: &crate::SshInteraction,
+) -> Result<String, CoreError> {
+  if let crate::SshInteraction::Multiplexed { control_path } = interaction {
+    return inspect_remote_id(destination, options, control_path).await;
+  }
+  let command =
+    crate::ssh_command_interactive(destination, options, interaction, &remote_command()).await?;
+  inspect(command).await
+}
+
 fn command(
   destination: &str,
   options: &SshConnectionOptions,

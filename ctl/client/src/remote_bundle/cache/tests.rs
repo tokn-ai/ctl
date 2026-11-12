@@ -10,7 +10,7 @@ impl Fixture {
   fn new() -> Self {
     let directory =
       std::env::temp_dir().join(format!("ctl-bundle-cache-test-{}", uuid::Uuid::new_v4()));
-    create_private_directory(&directory).unwrap();
+    private_fs::create_directory(&directory).unwrap();
     let cache = BundleCacheEntry::new(&directory.join("cache"), TARGET, &build()).unwrap();
     Self { directory, cache }
   }
@@ -395,9 +395,9 @@ fn download_cleanup_evicts_complete_entries_but_waits_for_live_publications() {
 fn staging_creation_never_reuses_an_existing_directory() {
   let fixture = Fixture::new();
   let path = fixture.directory.join("staging");
-  create_private_directory(&path).unwrap();
+  private_fs::create_directory(&path).unwrap();
   assert_eq!(
-    create_private_directory(&path).unwrap_err().kind(),
+    private_fs::create_directory(&path).unwrap_err().kind(),
     io::ErrorKind::AlreadyExists
   );
 }

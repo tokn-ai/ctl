@@ -454,6 +454,17 @@ $originalConfigText
     password = $callerPassword
   } | ConvertTo-Json -Compress)
   Invoke-Ctl -Arguments ($temporary + @('ctmux', 'list')) | Out-Null
+  Write-Host 'Checking native ctlup install, update and rollback over Windows OpenSSH'
+  # The first connection must fail with no ctl-agent.exe on the server PATH.
+  # Subsequent connections find the freshly managed launcher in the SSH account.
+  Remove-Item -LiteralPath (Join-Path $env:WINDIR 'System32\ctl-agent.exe') -Force
+  $originalHostsPath = $env:CTL_HOSTS_PATH
+  try {
+    $env:CTL_HOSTS_PATH = $catalog
+    Invoke-Native -Program 'node' -Arguments @('scripts/ci/windows-ctlup-smoke.mts', 'target/debug', '-', 'ctl-windows-ci', 'saved-windows-ci')
+  } finally {
+    $env:CTL_HOSTS_PATH = $originalHostsPath
+  }
 } catch {
   Stop-Service sshd -ErrorAction SilentlyContinue
   Get-Content "$root\client.log" -Tail 100 -ErrorAction SilentlyContinue

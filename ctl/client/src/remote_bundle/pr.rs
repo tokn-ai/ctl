@@ -1,13 +1,14 @@
 //! Temporary bundle builds for pull requests in the ctl repository.
 
 use super::{
-  BUNDLE_SET_FILE, BundleSet, Error, MAX_BUNDLE_SET_BYTES, download_error, read_bounded_file,
+  BundleSet, Error, MAX_BUNDLE_SET_BYTES, WINDOWS_TARGET, bundle_set_file, download_error,
+  read_bounded_file,
 };
+use ctl_core::private_fs;
 use reqwest::{Client, Url, header};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
-use std::os::unix::fs::DirBuilderExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -16,8 +17,17 @@ const REPOSITORY: &str = "tokn-ai/ctl";
 const REPOSITORY_URL: &str = "https://github.com/tokn-ai/ctl";
 const BUNDLE_WORKFLOW: &str = ".github/workflows/bundles.yml";
 const ARTIFACT_NAME: &str = "ctl-agent-bundle-set";
+const WINDOWS_ARTIFACT_NAME: &str = "ctl-agent-windows-bundle-set";
 const MAX_GITHUB_JSON_BYTES: usize = 4 * 1024 * 1024;
 const PAGE_SIZE: usize = 100;
+
+fn artifact_name(target: &str) -> &'static str {
+  if target == WINDOWS_TARGET {
+    WINDOWS_ARTIFACT_NAME
+  } else {
+    ARTIFACT_NAME
+  }
+}
 
 /// A recent pull request and its available build, if one matches the current head.
 #[derive(Debug, Serialize)]
@@ -70,7 +80,7 @@ pub struct DownloadedPrBundle(PathBuf);
 impl DownloadedPrBundle {
   fn new() -> io::Result<Self> {
     let directory = std::env::temp_dir().join(format!("ctlup-pr-{}", uuid::Uuid::new_v4()));
-    std::fs::DirBuilder::new().mode(0o700).create(&directory)?;
+    private_fs::create_directory(&directory)?;
     Ok(Self(directory))
   }
 
@@ -91,7 +101,8 @@ impl Drop for DownloadedPrBundle {
 /// Reports GitHub API failures or invalid response metadata.
 pub async fn list() -> Result<Vec<PullRequestBuild>, Error> {
   let github = Github::new()?;
-  let (pulls, artifacts) = tokio::try_join!(github.recent_pulls(), github.artifacts())?;
+  let artifact = artifact_name(ctl_core::paths::native_target());
+  let (pulls, artifacts) = tokio::try_join!(github.recent_pulls(), github.artifacts(artifact))?;
   let runs = github.candidate_runs(&pulls, &artifacts, &[]).await?;
   pulls
     .iter()
@@ -103,7 +114,9 @@ pub async fn list() -> Result<Vec<PullRequestBuild>, Error> {
 /// # Errors
 /// Reports missing pull requests, API failures, or invalid response metadata.
 pub async fn view(number: u64) -> Result<PullRequestBuild, Error> {
-  Github::new()?.view(number).await
+  Github::new()?
+    .view(number, artifact_name(ctl_core::paths::native_target()))
+    .await
 }
 
 /// Request the bundle workflow on a PR branch through the authenticated GitHub CLI.
@@ -111,7 +124,8 @@ pub async fn view(number: u64) -> Result<PullRequestBuild, Error> {
 /// Reports unavailable or changed branches, GitHub metadata failures, or dispatch failures.
 pub async fn trigger_build(number: u64) -> Result<PullRequestBuildRequest, Error> {
   let github = Github::new()?;
-  let (pull, artifacts) = tokio::try_join!(github.pull(number), github.artifacts())?;
+  let artifact = artifact_name(ctl_core::paths::native_target());
+  let (pull, artifacts) = tokio::try_join!(github.pull(number), github.artifacts(artifact))?;
   let runs = github
     .candidate_runs(
       std::slice::from_ref(&pull),
@@ -194,16 +208,38 @@ fn dispatched_run_url(output: &str) -> Option<String> {
 /// # Errors
 /// Reports missing builds, download failures, or a bundle that does not match the PR head.
 pub async fn download(number: u64) -> Result<DownloadedPrBundle, Error> {
+  let target = if cfg!(windows) {
+    WINDOWS_TARGET
+  } else {
+    super::SUPPORTED_TARGETS[0]
+  };
+  download_for_target(number, target).await
+}
+
+/// Download the current PR build for the requested target through GitHub CLI.
+///
+/// # Errors
+/// Reports missing builds, download failures, or a bundle that does not match the PR head.
+pub async fn download_for_target(number: u64, target: &str) -> Result<DownloadedPrBundle, Error> {
+  let target = match target {
+    "x86_64-unknown-linux-gnu" => "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-gnu" => "aarch64-unknown-linux-musl",
+    target => target,
+  };
+  super::validate_target(target)?;
+  let artifact = artifact_name(target);
+  let set_file = bundle_set_file(target);
   let github = Github::new()?;
-  let selection = github.view(number).await?;
+  let selection = github.view(number, artifact).await?;
   let build = selection.build.ok_or_else(|| {
     Error::NotAvailable(format!(
-      "PR #{number} has no build for {}",
+      "PR #{number} has no {target} build for {}",
       selection.head_sha
     ))
   })?;
   let bundle = DownloadedPrBundle::new()?;
-  let status = tokio::process::Command::new("gh")
+  let mut command = tokio::process::Command::new("gh");
+  command
     .args([
       "run",
       "download",
@@ -211,24 +247,25 @@ pub async fn download(number: u64) -> Result<DownloadedPrBundle, Error> {
       "--repo",
       "github.com/tokn-ai/ctl",
     ])
-    .args(["--name", ARTIFACT_NAME, "--dir"])
+    .args(["--name", artifact, "--dir"])
     .arg(bundle.directory())
     .env("GH_PROMPT_DISABLED", "1")
-    .env("TMPDIR", bundle.directory())
     .kill_on_drop(true)
     .stdin(Stdio::null())
-    .stdout(Stdio::null())
-    .status()
-    .await
-    .map_err(|error| {
-      if error.kind() == io::ErrorKind::NotFound {
-        Error::Download(
-          "install the GitHub CLI and run `gh auth login` to download PR builds".into(),
-        )
-      } else {
-        Error::Io(error)
-      }
-    })?;
+    .stdout(Stdio::null());
+  #[cfg(unix)]
+  command.env("TMPDIR", bundle.directory());
+  #[cfg(windows)]
+  command
+    .env("TMP", bundle.directory())
+    .env("TEMP", bundle.directory());
+  let status = command.status().await.map_err(|error| {
+    if error.kind() == io::ErrorKind::NotFound {
+      Error::Download("install the GitHub CLI and run `gh auth login` to download PR builds".into())
+    } else {
+      Error::Io(error)
+    }
+  })?;
   if !status.success() {
     return Err(Error::Download(format!(
       "GitHub CLI could not download the PR #{number} bundle from run {}; check `gh auth status`",
@@ -243,16 +280,16 @@ pub async fn download(number: u64) -> Result<DownloadedPrBundle, Error> {
   }
   let revision = selection.head_sha;
   tokio::task::spawn_blocking(move || {
-    verify_download(bundle.directory(), &revision)?;
+    verify_download(bundle.directory(), &revision, set_file)?;
     Ok(bundle)
   })
   .await
   .map_err(io::Error::other)?
 }
 
-fn verify_download(directory: &Path, revision: &str) -> Result<(), Error> {
-  let bytes = read_bounded_file(&directory.join(BUNDLE_SET_FILE), MAX_BUNDLE_SET_BYTES)?;
-  let manifest = BundleSet::parse_intrinsic(&bytes)?;
+fn verify_download(directory: &Path, revision: &str, set_file: &str) -> Result<(), Error> {
+  let bytes = read_bounded_file(&directory.join(set_file), MAX_BUNDLE_SET_BYTES)?;
+  let manifest = BundleSet::parse_set(&bytes, set_file)?;
   if manifest.git_revision != revision
     || manifest.bundle_id != format!("{}-dev.{}", manifest.app_version, &revision[..12])
   {
@@ -262,8 +299,8 @@ fn verify_download(directory: &Path, revision: &str) -> Result<(), Error> {
   }
   // A supplied build directory can also describe a managed bundle. Allow only
   // publisher bundle files so installation always uses the manifest above.
-  let mut expected = BTreeSet::from([BUNDLE_SET_FILE.to_owned()]);
-  for target in super::SUPPORTED_TARGETS {
+  let mut expected = BTreeSet::from([set_file.to_owned()]);
+  for target in manifest.targets.keys().map(String::as_str) {
     let archive = manifest.archive_name(target)?;
     let updater_manifest = format!("ctlup-{target}.json");
     let metadata = match read_bounded_file(&directory.join(&updater_manifest), MAX_BUNDLE_SET_BYTES)
@@ -294,7 +331,7 @@ fn verify_download(directory: &Path, revision: &str) -> Result<(), Error> {
   }
   for entry in std::fs::read_dir(directory)? {
     let entry = entry?;
-    if !entry.file_type()?.is_file()
+    if !private_fs::is_owned_file(&std::fs::symlink_metadata(entry.path())?)
       || !expected.remove(entry.file_name().to_string_lossy().as_ref())
     {
       return Err(Error::Invalid(
@@ -382,7 +419,7 @@ impl Github {
     Ok(pull)
   }
 
-  async fn artifacts(&self) -> Result<Vec<Artifact>, Error> {
+  async fn artifacts(&self, artifact: &str) -> Result<Vec<Artifact>, Error> {
     let mut artifacts = Vec::new();
     let mut page = 1;
     loop {
@@ -390,7 +427,7 @@ impl Github {
         .get(
           "actions/artifacts",
           &[
-            ("name", ARTIFACT_NAME),
+            ("name", artifact),
             ("per_page", &PAGE_SIZE.to_string()),
             ("page", &page.to_string()),
           ],
@@ -459,8 +496,8 @@ impl Github {
     Ok(runs)
   }
 
-  async fn view(&self, number: u64) -> Result<PullRequestBuild, Error> {
-    let (pull, artifacts) = tokio::try_join!(self.pull(number), self.artifacts())?;
+  async fn view(&self, number: u64, artifact: &str) -> Result<PullRequestBuild, Error> {
+    let (pull, artifacts) = tokio::try_join!(self.pull(number), self.artifacts(artifact))?;
     let runs = self
       .candidate_runs(
         std::slice::from_ref(&pull),
@@ -885,13 +922,14 @@ mod tests {
       "targets": targets
     }))
     .unwrap();
-    std::fs::write(directory.directory().join(BUNDLE_SET_FILE), bytes).unwrap();
+    let set_file = super::super::BUNDLE_SET_FILE;
+    std::fs::write(directory.directory().join(set_file), bytes).unwrap();
     assert!(matches!(
-      verify_download(directory.directory(), &"b".repeat(40)),
+      verify_download(directory.directory(), &"b".repeat(40), set_file),
       Err(Error::Stale(_))
     ));
     assert!(matches!(
-      verify_download(directory.directory(), &revision),
+      verify_download(directory.directory(), &revision, set_file),
       Err(Error::NotAvailable(message)) if message.contains("missing the ctlup updater")
     ));
   }

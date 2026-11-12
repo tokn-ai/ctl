@@ -1,10 +1,10 @@
 //! The updater is distributed separately so runtime rollback never replaces it.
 
 use super::{AssetProgress, BundleChannel, Error, Publication, Resolver, report_progress};
+use ctl_core::{bundle_layout, private_fs};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::io::{self, Write as _};
-use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, OpenOptionsExt as _};
 use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,7 +37,7 @@ impl UpdaterInfo {
       .map_err(|_| Error::Invalid("invalid updater metadata".into()))?;
     if info.schema_version != 1
       || info.target_triple != target
-      || !super::super::SUPPORTED_TARGETS.contains(&target)
+      || !super::super::supported_target(target)
       || !super::super::safe_id(&info.app_version)
       || !super::super::safe_id(&info.bundle_id)
       || info.git_revision.len() != 40
@@ -49,7 +49,8 @@ impl UpdaterInfo {
       || !info.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
       || info.size == 0
       || info.size > super::MAX_BUNDLE_BYTES as u64
-      || info.binary != format!("ctlup-{}-{target}", info.bundle_id)
+      || info.binary
+        != bundle_layout::executable_name(target, &format!("ctlup-{}-{target}", info.bundle_id))
     {
       return Err(Error::Invalid(
         "invalid updater build, target or binary identity".into(),
@@ -84,6 +85,7 @@ impl UpdaterInfo {
 /// # Errors
 /// Rejects missing metadata, wrong targets, unsafe input files and corrupt bytes.
 pub fn read_updater(directory: &Path, target: &str) -> Result<VerifiedUpdater, Error> {
+  super::super::validate_target(target)?;
   let bytes = crate::components::read_input(
     &directory.join(format!("ctlup-{target}.json")),
     super::MAX_BUNDLE_SET_BYTES,
@@ -105,7 +107,7 @@ pub async fn download_updater_cached(
   cache_root: &Path,
 ) -> Result<VerifiedUpdater, Error> {
   let resolver = Resolver::production()?;
-  let publication = resolver.publication(channel).await?;
+  let publication = resolver.target_publication(channel, target).await?;
   resolver
     .updater_cached(&publication, target, cache_root, None)
     .await
@@ -191,17 +193,18 @@ pub(crate) fn cache_verified(root: &Path, updater: &VerifiedUpdater) -> Result<(
     return Ok(());
   }
   let stage = root.join(format!(".updater-{}", uuid::Uuid::new_v4()));
-  std::fs::DirBuilder::new().mode(0o700).create(&stage)?;
+  private_fs::create_directory(&stage)?;
   let result = (|| {
-    let mut file = std::fs::OpenOptions::new()
+    let mut file = private_fs::options()
       .write(true)
       .create_new(true)
-      .mode(0o700)
       .open(stage.join("ctlup"))?;
     file.write_all(&updater.bytes)?;
+    private_fs::set_executable(&file)?;
     file.sync_all()?;
+    drop(file);
     let destination = root.join(&updater.info.sha256);
-    std::fs::File::open(&stage)?.sync_all()?;
+    private_fs::sync_directory(&stage)?;
     let displaced = if owned_directory(&destination)? {
       let displaced = root.join(format!(".corrupt-updater-{}", uuid::Uuid::new_v4()));
       std::fs::rename(&destination, &displaced)?;
@@ -218,7 +221,7 @@ pub(crate) fn cache_verified(root: &Path, updater: &VerifiedUpdater) -> Result<(
     if let Some(displaced) = displaced {
       let _ = std::fs::remove_dir_all(displaced);
     }
-    std::fs::File::open(root)?.sync_all()?;
+    private_fs::sync_directory(root)?;
     Ok(())
   })();
   let _ = std::fs::remove_dir_all(stage);
@@ -293,9 +296,9 @@ pub(crate) fn prune_updater_cache(root: &Path, maximum_bytes: u64) -> io::Result
     std::fs::remove_file(path)?;
   }
   if owned_directory(&root.join("records"))? {
-    std::fs::File::open(root.join("records"))?.sync_all()?;
+    private_fs::sync_directory(&root.join("records"))?;
   }
-  std::fs::File::open(root)?.sync_all()?;
+  private_fs::sync_directory(root)?;
   Ok(removed_bytes)
 }
 
@@ -407,13 +410,7 @@ fn existing_cache_path(path: &Path) -> io::Result<bool> {
 
 fn owned_directory(path: &Path) -> io::Result<bool> {
   match std::fs::symlink_metadata(path) {
-    Ok(metadata)
-      if metadata.is_dir()
-        && metadata.uid() == rustix::process::getuid().as_raw()
-        && metadata.mode() & 0o022 == 0 =>
-    {
-      Ok(true)
-    }
+    Ok(metadata) if private_fs::is_directory(&metadata) => Ok(true),
     Ok(_) => Err(unsafe_cache()),
     Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
     Err(error) => Err(error),
@@ -421,10 +418,7 @@ fn owned_directory(path: &Path) -> io::Result<bool> {
 }
 
 fn require_owned_file(metadata: &std::fs::Metadata) -> io::Result<()> {
-  if !metadata.is_file()
-    || metadata.uid() != rustix::process::getuid().as_raw()
-    || metadata.mode() & 0o022 != 0
-  {
+  if !private_fs::is_owned_file(metadata) {
     return Err(unsafe_cache());
   }
   Ok(())
@@ -441,18 +435,12 @@ struct CacheLock(std::fs::File);
 
 impl CacheLock {
   fn acquire(root: &Path) -> io::Result<Self> {
-    let file = std::fs::File::from(
-      rustix::fs::open(
-        root.join("updater.lock"),
-        rustix::fs::OFlags::CREATE
-          | rustix::fs::OFlags::RDWR
-          | rustix::fs::OFlags::NOFOLLOW
-          | rustix::fs::OFlags::NONBLOCK
-          | rustix::fs::OFlags::CLOEXEC,
-        rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
-      )
-      .map_err(io::Error::from)?,
-    );
+    let file = private_fs::options()
+      .read(true)
+      .write(true)
+      .create(true)
+      .truncate(false)
+      .open(root.join("updater.lock"))?;
     require_owned_file(&file.metadata()?)?;
     file.lock()?;
     Ok(Self(file))
@@ -465,5 +453,5 @@ impl Drop for CacheLock {
   }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;

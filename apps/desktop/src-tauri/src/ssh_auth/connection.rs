@@ -55,7 +55,7 @@ fn terminal_error(error: &CoreError, platform: RemotePlatform) -> CommandErrorDt
   {
     return CommandErrorDto::new(
       "windows_remote_agent_setup_required",
-      "Install current ctl-agent.exe and ctmuxd.exe on the Windows SSH user's PATH and use the default cmd.exe SSH shell.",
+      "Install the Windows components with `ctlup update --destination <ssh-alias> --remote-platform windows`, then reconnect. Use the default cmd.exe SSH shell.",
     );
   }
   diagnostic
@@ -134,7 +134,7 @@ mod tests {
   use std::sync::atomic::{AtomicBool, Ordering};
 
   #[test]
-  fn missing_windows_agent_requests_manual_setup_without_masking_ssh_errors() {
+  fn missing_windows_agent_suggests_ctlup_without_masking_ssh_errors() {
     for error in [
       CoreError::AgentNotFound,
       CoreError::IdentityUnsupported,
@@ -144,7 +144,8 @@ mod tests {
     ] {
       let error = terminal_error(&error, RemotePlatform::Windows);
       assert_eq!(error.code, "windows_remote_agent_setup_required");
-      assert!(error.message.contains("ctl-agent.exe and ctmuxd.exe"));
+      assert!(error.message.contains("ctlup update"));
+      assert!(error.message.contains("--remote-platform windows"));
     }
     assert_eq!(
       terminal_error(&CoreError::AgentNotFound, RemotePlatform::Unix).code,

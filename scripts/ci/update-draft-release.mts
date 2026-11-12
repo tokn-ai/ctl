@@ -8,8 +8,9 @@ import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
 import { parseHelperProtocols, sameProtocols, type ProtocolInfo } from "../shared/protocol-contract.mts";
-import { maxAgentManifestBytes, parseAgentBundleSet, readAgentFile, verifyAgentBundleTarget } from "../shared/agent-bundle.mts";
+import { agentTargets, maxAgentManifestBytes, parseAgentBundleSet, readAgentFile, verifyAgentBundleTarget, windowsAgentManifestName } from "../shared/agent-bundle.mts";
 import { verifyUpdaterTarget } from "../shared/updater-bundle.mts";
+import { validatedWindowsComponentSet } from "./bundle-publication.mts";
 
 const execFileAsync = promisify(execFile);
 export const managedLabelPrefix = "ctmux-ci: ";
@@ -18,12 +19,6 @@ const notesEnd = "<!-- ctmux-ci:end -->";
 const desktopTargets = [
   "x86_64-unknown-linux-gnu",
   "aarch64-unknown-linux-gnu",
-  "x86_64-apple-darwin",
-  "aarch64-apple-darwin",
-] as const;
-const remoteTargets = [
-  "x86_64-unknown-linux-musl",
-  "aarch64-unknown-linux-musl",
   "x86_64-apple-darwin",
   "aarch64-apple-darwin",
 ] as const;
@@ -149,7 +144,7 @@ export async function validateReleaseBundle(
 
   const bundleSet = parseAgentBundleSet(await readAgentFile(join(directory, "bundle-set.json"), maxAgentManifestBytes), identity);
   addNames(["bundle-set.json"]);
-  for (const target of remoteTargets) {
+  for (const target of agentTargets) {
     const asset = bundleSet.targets[target];
     if (!record(asset) || asset.archive !== `ctl-agent-bundle-${identity.bundle_id}-${target}.tar.gz`) {
       throw new Error(`Invalid remote bundle for ${target}`);
@@ -158,6 +153,7 @@ export async function validateReleaseBundle(
     addNames(await validateAsset(directory, asset.archive, asset.sha256));
     addNames(await verifyUpdaterTarget(directory, identity, target));
   }
+  addNames(await validatedWindowsComponentSet(directory, identity));
 
   for (const target of desktopTargets) {
     const manifestName = `desktop-${target}.json`;
@@ -306,6 +302,7 @@ export function releaseNotes(bundle: ReleaseBundle, previous: string | null): st
     `Bundle ID: \`${bundle.bundle_id}\`.`,
     "",
     "Contains remote-agent bundles for Linux and macOS on Intel/AMD and ARM64.",
+    ...(bundle.asset_names.includes(windowsAgentManifestName) ? ["Contains verified Windows x64 component bundles."] : []),
     "Each package includes a SHA-256 checksum file. Build manifests record the package hashes and source revision.",
   ];
   if (bundle.desktop_targets.length > 0) {

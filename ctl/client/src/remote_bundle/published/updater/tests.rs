@@ -7,10 +7,7 @@ struct Home(PathBuf);
 impl Home {
   fn new() -> Self {
     let path = std::env::temp_dir().join(format!("ctlup-cache-test-{}", uuid::Uuid::new_v4()));
-    std::fs::DirBuilder::new()
-      .mode(0o700)
-      .create(&path)
-      .unwrap();
+    private_fs::create_directory(&path).unwrap();
     Self(path)
   }
 
@@ -120,10 +117,7 @@ fn cache_rejects_symlink_parents_and_content_directories_without_touching_target
   let root = home.cache();
   crate::installation::safe_directory(&root).unwrap();
   let outside = home.0.join("outside");
-  std::fs::DirBuilder::new()
-    .mode(0o700)
-    .create(&outside)
-    .unwrap();
+  private_fs::create_directory(&outside).unwrap();
   std::fs::write(outside.join("ctlup"), b"untouched").unwrap();
   let blob = root.join(&updater.info.sha256);
   std::os::unix::fs::symlink(&outside, &blob).unwrap();

@@ -14,6 +14,7 @@ publish = ["crates-io"]
 exclude = ["tests/forced_command.rs"]
 
 [dependencies]
+base64.workspace = true
 ctl-core = { workspace = true, features = ["executable", "presence"] }
 dirs.workspace = true
 glob.workspace = true
@@ -44,11 +45,11 @@ serde_json.workspace = true
 # Portable remote clients link OpenSSL for the target and load the account's system CA store at runtime.
 reqwest = { version = "0.13.4", default-features = false, features = ["native-tls-vendored"] }
 
-[target.'cfg(target_os = "macos")'.dependencies]
-base64.workspace = true
-
 [target.'cfg(unix)'.dependencies]
 rustix.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+process-wrap = { version = "10.0.0", default-features = false, features = ["tokio1", "job-object", "kill-on-drop"] }
 
 [lints]
 workspace = true

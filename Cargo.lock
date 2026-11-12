@@ -731,6 +731,7 @@ dependencies = [
  "dirs 6.0.0",
  "filedescriptor",
  "flate2",
+ "libproc",
  "nix 0.29.0",
  "portable-pty",
  "rpassword",

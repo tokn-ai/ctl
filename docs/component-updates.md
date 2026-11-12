@@ -143,6 +143,57 @@ On macOS, a local service installation requires the complete verified signed
 The package remains intact inside the installation. Flat remote macOS bundles
 do not replace an independently provisioned signed local helper.
 
+## Install or update the desktop app
+
+```sh
+ctlup app install
+ctlup app install --channel stable
+ctlup app install --local
+ctlup app update
+ctlup app update --channel nightly
+ctlup app update --local
+```
+
+These commands install on this computer. `--local` builds a native debug app
+from the current source checkout, including its frontend and bundled daemons.
+Run it inside a ctl checkout. A local build
+preserves the saved publication channel and conflicts with `--channel`.
+Install the checkout's frontend dependencies with `pnpm install --frozen-lockfile`
+before building locally.
+
+Local macOS builds sign the bundled `ctld.app` when a usable development
+profile and signing identity are available, and fall back to an unsigned
+helper when signing is unavailable.
+
+Published installs use the same saved channel preference as runtime bundle
+updates, with the distribution's compiled default when no preference is saved.
+`--channel stable` or `--channel nightly` selects the published source and saves
+that choice after a successful install or update.
+
+Stable uses the desktop package attached to the matching tagged release.
+Nightly uses authenticated GitHub CLI (`gh`) access to download the desktop
+Actions artifact for the exact source revision selected by the Nightly channel.
+If that build's desktop package is unavailable for this computer, the command
+reports the missing package.
+
+On macOS, launch the installed app with `open ~/.tokn/ctl/apps/ctmux.app`.
+Quit ctmux before updating it. The installer prefers the signed, notarized
+archive and uses the official unsigned archive when the release has no
+signed manifest. On Linux, launch `~/.tokn/ctl/apps/ctmux.AppImage`.
+
+For published packages, `ctlup` checks the release manifest and the package's
+SHA-256 checksum before replacing the app. An update keeps the previous app at
+the path printed by `ctlup`. Running daemons and their terminal sessions continue
+independently.
+Desktop packages can become available after their matching runtime release.
+
+On macOS, `pnpm ctld:build` from a checkout prepares a signed local helper
+through `ctlup dev`. At the next daemon startup, the desktop prefers the
+selected signed helper, then a compatible separately provisioned signed
+helper, then its bundled helper. The desktop can use a fallback if a
+development provisioning profile has expired. The app's own release
+signing is independent of the helper selection.
+
 ## Native development builds
 
 ```sh

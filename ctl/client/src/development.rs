@@ -12,6 +12,9 @@ use tokio::io::AsyncReadExt as _;
 const MAX_DESCRIPTOR_BYTES: usize = 64 * 1024;
 const MAX_DIAGNOSTIC_BYTES: usize = 32 * 1024;
 
+mod desktop;
+pub use desktop::{DesktopBuild, build_desktop};
+
 #[derive(Debug, Clone)]
 pub struct DevelopmentOptions {
   pub workspace: PathBuf,

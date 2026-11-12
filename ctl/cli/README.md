@@ -342,6 +342,15 @@ use `ctlup` without changing files. See the
 [component update guide](https://github.com/tokn-ai/ctl/blob/main/docs/component-updates.md)
 for source formats, cancellation, and per-host results.
 
+Use `ctlup app install` and `ctlup app update` for the local ctmux desktop app
+on macOS and Linux. Both accept `--local` and `--channel stable|nightly`.
+`--local` builds from the current source checkout and conflicts with `--channel`.
+Published installs use the saved runtime bundle channel preference and remember
+an explicit channel after success. Nightly desktop downloads require
+authenticated `gh` access to the Actions artifact for the selected source revision. See the
+[desktop app install guide](https://github.com/tokn-ai/ctl/blob/main/docs/component-updates.md#install-or-update-the-desktop-app)
+for install locations and platform requirements.
+
 VPN profiles remain in the local catalog. Use `ctl --host GATEWAY vpn start NAME_OR_ID`,
 `vpn list`, and `vpn stop NAME_OR_ID` to run and manage a profile on an SSH host.
 Use `--destination SSH_DESTINATION` instead of `--host` for a temporary gateway.

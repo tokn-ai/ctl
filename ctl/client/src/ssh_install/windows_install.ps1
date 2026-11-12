@@ -1,7 +1,17 @@
 $ErrorActionPreference = 'Stop'
 __ACCOUNT_GUARD__
 __MANAGER__
-$inputStream = [Console]::OpenStandardInput()
+# ConsoleStream blocks on OpenSSH pipes; keep raw stdin open for the child.
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class CtlStdin {
+  [DllImport("kernel32.dll")]
+  public static extern IntPtr GetStdHandle(int kind);
+}
+'@
+$handle = [Microsoft.Win32.SafeHandles.SafeFileHandle]::new([CtlStdin]::GetStdHandle(-10), $false)
+$inputStream = [IO.FileStream]::new($handle, [IO.FileAccess]::Read, 1)
 $remaining = __UPDATER_SIZE__
 $stage = $null
 try {
@@ -43,5 +53,6 @@ try {
     exit $process.ExitCode
   } finally { $process.Dispose() }
 } finally {
+  $inputStream.Dispose()
   if ($stage) { Remove-Item -LiteralPath $stage -Force -ErrorAction SilentlyContinue }
 }

@@ -68,6 +68,19 @@ pub fn status(home: &Path) -> io::Result<InstallationStatus> {
   })
 }
 
+/// Resolves the account's desktop app directory.
+/// # Errors
+/// Reports unsafe storage and errors creating the directory when requested.
+pub fn app_directory(home: &Path, create: bool) -> io::Result<PathBuf> {
+  let directory = Installations::new(home).root().join("apps");
+  if create {
+    safe_directory(&directory)?;
+  } else {
+    storage_exists(&directory)?;
+  }
+  Ok(directory)
+}
+
 /// Decode and verify a bounded complete managed installation archive.
 ///
 /// # Errors

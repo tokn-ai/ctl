@@ -5,6 +5,8 @@ use std::io;
 #[cfg(unix)]
 use std::path::PathBuf;
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+mod app;
 #[cfg(unix)]
 mod archive;
 mod arguments;
@@ -76,6 +78,18 @@ async fn run(arguments: Arguments) -> io::Result<i32> {
     Command::ComponentInfo => unreachable!(),
     Command::Install(options) | Command::Update(options) => {
       update::run(&home, options, target).await?;
+    }
+    Command::App { command } => {
+      require_local(target)?;
+      #[cfg(any(target_os = "macos", target_os = "linux"))]
+      app::run(&home, command).await?;
+      #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+      {
+        let _ = command;
+        return Err(io::Error::other(
+          "ctlup app installation currently requires macOS or Linux",
+        ));
+      }
     }
     Command::Status { json } => status::run(&home, target, false, json).await?,
     Command::Dev(options) => {

@@ -143,6 +143,31 @@ On macOS, a local service installation requires the complete verified signed
 The package remains intact inside the installation. Flat remote macOS bundles
 do not replace an independently provisioned signed local helper.
 
+## Install or update the desktop app
+
+```sh
+ctlup app install
+ctlup app update
+```
+
+These commands use the current Stable desktop release for this computer.
+On macOS, launch the installed app with `open ~/.tokn/ctl/apps/ctmux.app`.
+Quit ctmux before updating it. The installer prefers the signed, notarized
+archive and uses the official unsigned archive when the release has no
+signed manifest. On Linux, launch `~/.tokn/ctl/apps/ctmux.AppImage`.
+
+`ctlup` checks the release manifest and the package's SHA-256 checksum before
+replacing the app. An update keeps the previous app at the path printed by
+`ctlup`. Running daemons and their terminal sessions continue independently.
+Desktop packages can become available after their matching runtime release.
+
+On macOS, `pnpm ctld:build` from a checkout prepares a signed local helper
+through `ctlup dev`. At the next daemon startup, the desktop prefers the
+selected signed helper, then a compatible separately provisioned signed
+helper, then its bundled helper. The desktop can use a fallback if a
+development provisioning profile has expired. The app's own release
+signing is independent of the helper selection.
+
 ## Native development builds
 
 ```sh

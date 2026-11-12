@@ -208,6 +208,14 @@ pub async fn inspect_compatible_ctld(
   }
 }
 
+#[cfg(target_os = "macos")]
+pub(crate) async fn inspect_cached_ctld_in(
+  home: &std::path::Path,
+  required: Option<ctl_core::protocol::ProtocolVersion>,
+) -> Result<Option<HelperSelection>, Error> {
+  discovery::inspect_cached(home, required).await
+}
+
 /// Inspects only an explicitly selected complete local bundle.
 /// Ordinary managed installations are neither inspected nor modified.
 ///
@@ -379,6 +387,8 @@ pub enum Error {
   Download(String),
   #[error("signed ctld verification failed: {0}")]
   Verification(String),
+  #[error("signed ctld verification failed: development provisioning profile has expired")]
+  DevelopmentProfileExpired,
 }
 
 /// Installs the signed helper for this CLI's release without starting or stopping

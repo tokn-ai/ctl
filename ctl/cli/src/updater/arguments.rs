@@ -29,6 +29,11 @@ pub(super) enum Command {
   Install(UpdateArguments),
   /// Update a complete installation; running sessions keep their current owner.
   Update(UpdateArguments),
+  /// Install or update the ctmux desktop app on this computer.
+  App {
+    #[command(subcommand)]
+    command: AppCommand,
+  },
   /// Build and install one complete native development build from a checkout.
   Dev(DevelopmentArguments),
   /// Show the active installation and rollback candidate without starting services.
@@ -59,6 +64,14 @@ pub(super) enum Command {
   InstallArchive,
   #[command(hide = true)]
   ActivateInstalled { bundle_id: String },
+}
+
+#[derive(Debug, Clone, Copy, Subcommand, PartialEq, Eq)]
+pub(super) enum AppCommand {
+  /// Install the latest Stable desktop app.
+  Install,
+  /// Update an installed desktop app to the latest Stable release.
+  Update,
 }
 
 #[derive(Debug, Args)]
@@ -165,6 +178,20 @@ pub(super) struct DevelopmentArguments {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn app_commands_are_distinct_from_component_commands() {
+    for (argument, expected) in [
+      ("install", AppCommand::Install),
+      ("update", AppCommand::Update),
+    ] {
+      let args = Arguments::try_parse_from(["ctlup", "app", argument]).unwrap();
+      assert!(matches!(args.command, Command::App { command } if command == expected));
+      assert!(
+        Arguments::try_parse_from(["ctlup", "app", argument, "--channel", "nightly"]).is_err()
+      );
+    }
+  }
 
   #[test]
   fn release_commands_accept_a_channel_and_an_optional_publication_id() {

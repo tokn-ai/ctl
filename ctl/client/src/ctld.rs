@@ -68,11 +68,8 @@ impl<'a> Resolver<'a> {
   #[must_use]
   pub const fn desktop(development: Option<&'a DevelopmentContext>) -> Self {
     Self {
-      embedded: None,
-      development,
       desktop: true,
-      #[cfg(all(test, target_os = "macos"))]
-      home: None,
+      ..Self::standalone(None, development)
     }
   }
 
@@ -105,7 +102,13 @@ impl<'a> Resolver<'a> {
     if request.intent == Intent::Setup {
       return Err(setup::Error::UnsupportedPlatform);
     }
-    let candidate = self.select(request).await?;
+    let candidate = self
+      .select(
+        request,
+        self.inspect_active(request.required).await,
+        ctl_ipc::resolver::desktop_candidate,
+      )
+      .await?;
     if request.intent == Intent::Inspect || candidate.selection().installed {
       return Ok(Some(candidate.selection().clone()));
     }
@@ -175,11 +178,27 @@ impl<'a> Resolver<'a> {
     Ok(Some(after))
   }
 
-  async fn select(&self, request: Request) -> Result<Candidate, setup::Error> {
+  async fn select(
+    &self,
+    request: Request,
+    active: Result<Option<HelperSelection>, setup::Error>,
+    desktop_candidate: impl FnOnce() -> Option<std::path::PathBuf>,
+  ) -> Result<Candidate, setup::Error> {
+    let mut expired_profile = false;
+    let mut available = |result| match result {
+      Err(setup::Error::DevelopmentProfileExpired)
+        if self.desktop && request.intent != Intent::Setup =>
+      {
+        expired_profile = true;
+        Ok(None)
+      }
+      result => result,
+    };
     // The account's explicit complete installation is authoritative for every
-    // client. Checkout and embedded helpers are fallback preparation sources.
-    // Explicit CTLD_BIN overrides remain the IPC resolver's responsibility.
-    if let Some(selection) = self.inspect_active(request.required).await? {
+    // client while its helper is usable. Desktop can proceed past a verified
+    // but expired development profile. Explicit CTLD_BIN overrides remain the
+    // IPC resolver's responsibility.
+    if let Some(selection) = available(active)? {
       return Ok(Candidate::Existing(selection_from(
         selection,
         Source::SharedBundle,
@@ -193,38 +212,35 @@ impl<'a> Resolver<'a> {
     }
     if self.embedded.is_none()
       && let Some(context) = self.development
-      && let Some(selection) = self.inspect_checkout(context, request.required).await?
+      && let Some(selection) = available(self.inspect_checkout(context, request.required).await)?
     {
       return Ok(Candidate::Checkout(selection_from(
         selection,
         Source::Checkout,
       )));
     }
-    if self.desktop
-      && let Some(executable) = ctl_ipc::resolver::desktop_candidate()
-    {
-      return Ok(Candidate::Existing(
-        ctl_ipc::resolver::inspect_executable(&executable, Source::DesktopBundle, request).await?,
-      ));
-    }
-    let shared = setup::inspect_compatible_ctld(request.required)
-      .await?
-      .map(|selection| {
-        let source = shared_source(&selection.executable);
-        selection_from(selection, source)
-      });
-    if let Some(selection) = shared {
-      return Ok(Candidate::Existing(selection));
+    if let Some(selection) = available(self.inspect_shared(request.required).await)? {
+      return Ok(Candidate::Existing(selection_from(
+        selection,
+        Source::SharedInstallation,
+      )));
     }
     if let Some(bundle) = self.embedded {
       return embedded_candidate(bundle, request.required).await;
     }
-    if !self.desktop
-      && let Some(executable) = ctl_ipc::resolver::desktop_candidate()
-    {
-      return Ok(Candidate::Existing(
-        ctl_ipc::resolver::inspect_executable(&executable, Source::DesktopBundle, request).await?,
-      ));
+    if let Some(executable) = desktop_candidate() {
+      let fallback =
+        ctl_ipc::resolver::inspect_executable(&executable, Source::DesktopBundle, request).await;
+      return match fallback {
+        Ok(selection) => Ok(Candidate::Existing(selection)),
+        Err(error) if expired_profile => Err(setup::Error::Verification(format!(
+          "development provisioning profile has expired and the bundled helper is unavailable: {error}"
+        ))),
+        Err(error) => Err(error.into()),
+      };
+    }
+    if expired_profile {
+      return Err(setup::Error::DevelopmentProfileExpired);
     }
     #[cfg(not(target_os = "macos"))]
     if let Some(selection) = ctl_ipc::resolver::fallback(request).await? {
@@ -245,6 +261,30 @@ impl<'a> Resolver<'a> {
       return setup::inspect_selected_bundle_ctld_in(home, required).await;
     }
     setup::inspect_selected_bundle_ctld(required).await
+  }
+
+  #[cfg_attr(
+    not(target_os = "macos"),
+    expect(clippy::unused_async, reason = "shared helper cache is macOS-only")
+  )]
+  async fn inspect_shared(
+    &self,
+    required: Option<ctl_core::protocol::ProtocolVersion>,
+  ) -> Result<Option<HelperSelection>, setup::Error> {
+    #[cfg(target_os = "macos")]
+    {
+      #[cfg(test)]
+      if let Some(home) = self.home {
+        return setup::inspect_cached_ctld_in(home, required).await;
+      }
+      let home = dirs::home_dir().ok_or(setup::Error::HomeDirectory)?;
+      setup::inspect_cached_ctld_in(&home, required).await
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+      let _ = required;
+      Ok(None)
+    }
   }
 
   async fn inspect_checkout(
@@ -282,15 +322,6 @@ fn selection_from(selection: HelperSelection, source: Source) -> Selection {
     archive_sha256: selection.archive_sha256,
     installed: selection.installed,
     reused: selection.installed,
-  }
-}
-
-fn shared_source(executable: &Path) -> Source {
-  let managed = dirs::home_dir().map(|home| ctl_ipc::managed::component_directory(&home));
-  if managed.is_some_and(|root| executable.starts_with(root.canonicalize().unwrap_or(root))) {
-    Source::SharedInstallation
-  } else {
-    Source::SharedBundle
   }
 }
 

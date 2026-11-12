@@ -140,7 +140,7 @@ export async function createWindowsPortable(options: WindowsPortableOptions): Pr
         ...[...files.keys(), "portable.json"].sort().map((name) => `ctmux/${name}`),
       ].join("\n"), { flag: "wx" });
       await execute("powershell.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
-        "$ErrorActionPreference = 'Stop'; Add-Type -AssemblyName System.IO.Compression.FileSystem; " +
+        "$ErrorActionPreference = 'Stop'; Add-Type -AssemblyName System.IO.Compression; Add-Type -AssemblyName System.IO.Compression.FileSystem; " +
         "$archive = [System.IO.Compression.ZipFile]::Open($env:CTL_DESKTOP_ZIP_OUTPUT, [System.IO.Compression.ZipArchiveMode]::Create); " +
         "try { foreach ($name in [System.IO.File]::ReadLines($env:CTL_DESKTOP_ZIP_PLAN)) { " +
         "if ($name.EndsWith('/')) { $null = $archive.CreateEntry($name) } else { " +

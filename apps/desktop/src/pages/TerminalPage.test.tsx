@@ -623,7 +623,7 @@ describe("workspace-backed terminal page", () => {
   it("dispatches a notification retry to its attachment without selecting a session", async () => {
     const session = restoreWorkspace(snapshot().document, hostSnapshot().document).sessions[0];
     Object.assign(attachment.state, {
-      phase: "error", session, error_code: "ssh_authentication_required", message: "Authentication expired",
+      phase: "error", session, error_code: "ssh_connection_failed", message: "Connection lost",
     });
     attachment.reconnect.mockResolvedValue(undefined);
     render(<TerminalPage />);
@@ -645,7 +645,12 @@ describe("workspace-backed terminal page", () => {
     catalog.document.hosts[0].preferred_method_id = "preferred";
     api.loadHosts.mockResolvedValue(catalog);
     const session = { ...restoreWorkspace(snapshot().document, hostSnapshot().document).sessions[0], terminal_id: "side-pane" };
-    Object.assign(attachment.state, { phase: "error", session, error_code: "ssh_authentication_required", message: "Authentication expired" });
+    Object.assign(attachment.state, {
+      phase: "error",
+      session,
+      error_code: source === "toolbar" ? "ssh_authentication_required" : "ssh_connection_failed",
+      message: source === "toolbar" ? "Authentication expired" : "Connection lost",
+    });
     let connected = false;
     api.sshConnectionStatus.mockImplementation(async () => ({ connected, manually_disconnected: false }));
     let finish!: () => void;
@@ -657,9 +662,22 @@ describe("workspace-backed terminal page", () => {
       if (await manualReconnect.request!(session.target, new AbortController().signal)) resumed(session.terminal_id);
     });
     render(<TerminalPage />);
-    const card = await screen.findByRole("article", { name: "Session connection failed" });
-    const retry = source === "notification" ? within(card).getByRole("button", { name: "Reconnect" })
-      : screen.getAllByRole("button", { name: "Reconnect" }).find((button) => !card.contains(button))!;
+    let retry: HTMLElement;
+    if (source === "notification") {
+      const card = await screen.findByRole("article", { name: "Session connection failed" });
+      retry = within(card).getByRole("button", { name: "Reconnect" });
+    } else {
+      retry = await screen.findByRole("button", { name: "Reconnect" });
+      expect((retry as HTMLButtonElement).disabled).toBe(false);
+      const bell = await screen.findByRole("button", { name: "Notifications, 1 unread" });
+      const log = screen.getByRole("log", { name: "Notifications" });
+      expect(within(log).queryByRole("article")).toBeNull();
+      fireEvent.click(bell);
+      const history = screen.getByRole("region", { name: "Notification center" });
+      const card = within(history).getByRole("article", { name: "SSH authentication required" });
+      expect(within(card).getByRole("button", { name: "Connect host" })).toBeTruthy();
+      fireEvent.click(within(history).getByRole("button", { name: "Hide notification center" }));
+    }
     fireEvent.click(retry);
     await screen.findByRole("dialog", { name: "Connecting to host" });
     expect(api.probeSshHost).toHaveBeenCalledExactlyOnceWith(session.target, expect.any(String), expect.any(Function));
@@ -683,8 +701,7 @@ describe("workspace-backed terminal page", () => {
       if (await manualReconnect.request!(session.target, new AbortController().signal)) resumed();
     });
     render(<TerminalPage />);
-    const card = await screen.findByRole("article", { name: "Session connection failed" });
-    fireEvent.click(within(card).getByRole("button", { name: "Reconnect" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Reconnect" }));
     const dialog = await screen.findByRole("dialog", { name: "Connecting to host" });
     await waitFor(() => expect(api.probeSshHost).toHaveBeenCalledOnce());
     fireEvent.keyDown(dialog, { key: "Escape" });
@@ -3134,12 +3151,24 @@ describe("workspace-backed terminal page", () => {
     await screen.findByRole("button", { name: "Connect host" });
     fireEvent.click(screen.getByRole("button", { name: "Refresh sessions" }));
     await screen.findByText("unreachable", { exact: false });
-    expect(screen.getByText("Authenticate first")).toBeTruthy();
+    const bell = await screen.findByRole("button", { name: "Notifications, 1 unread" });
+    const log = screen.getByRole("log", { name: "Notifications" });
+    expect(within(log).queryByRole("article")).toBeNull();
     expect(screen.queryByText("missing", { exact: false })).toBeNull();
     expect(api.killSession).not.toHaveBeenCalled();
     expect(api.probeSshHost).not.toHaveBeenCalled();
     expect(api.respondSshPrompt).not.toHaveBeenCalled();
     expect(screen.queryByRole("dialog")).toBeNull();
+
+    fireEvent.click(bell);
+    const history = screen.getByRole("region", { name: "Notification center" });
+    const card = within(history).getByRole("article", { name: "SSH authentication required" });
+    fireEvent.click(within(card).getByRole("button", { name: "Connect host" }));
+    await waitFor(() => expect(api.probeSshHost).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ kind: "ssh", host_id: "test-id", destination: "test" }),
+      expect.any(String),
+      expect.any(Function),
+    ));
   });
 
   it("accepts another sidebar session click while a remote attachment is pending", async () => {

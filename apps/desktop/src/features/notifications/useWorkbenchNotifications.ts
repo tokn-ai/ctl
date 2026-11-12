@@ -4,6 +4,7 @@ import type { ErrorDetails } from "../../lib/errors";
 import { targetKey, targetLabel } from "../targets/targets";
 import { COMMAND_IDS } from "../commands/commandIds";
 import type { NotificationStore } from "./NotificationStore";
+import type { AttachmentNotifications } from "./AttachmentNotifications";
 
 interface Sources {
   workspace_error: string | null;
@@ -20,13 +21,13 @@ interface Sources {
   tasks_loaded: boolean;
 }
 
-export function useWorkbenchNotifications(store: NotificationStore, sources: Sources) {
+export function useWorkbenchNotifications(store: NotificationStore, sources: Sources, attachments: AttachmentNotifications) {
   const previous_hosts = useRef(new Set<string>());
   const previous_runs = useRef<Map<string, string> | null>(null);
   const previous_task_status = useRef<string | null>(null);
   useEffect(() => {
-    const reportError = (key: string, title: string, message: string | null, actions: NotificationAction[] = []) => {
-      store.report(key, message ? { severity: "error", title, message, source: title, actions } : null);
+    const reportError = (key: string, title: string, message: string | null, actions: NotificationAction[] = [], toast = true) => {
+      store.report(key, message ? { severity: "error", title, message, source: title, actions } : null, { toast });
     };
     reportError("workspace", "Workspace", sources.workspace_error, sources.workspace_ready
       ? [{ label: "Retry saving", command_id: COMMAND_IDS.saveWorkspace }] : []);
@@ -49,16 +50,25 @@ export function useWorkbenchNotifications(store: NotificationStore, sources: Sou
 
     const host_keys = new Set(sources.target_errors.keys());
     for (const key of previous_hosts.current) {
-      if (!host_keys.has(key)) store.report(`host:${key}`, null);
+      if (!host_keys.has(key)) {
+        store.report(`host:${key}`, null);
+        attachments.reportHostAuthentication(key, null);
+      }
     }
     previous_hosts.current = host_keys;
     for (const [key, error] of sources.target_errors) {
       const target = sources.targets.find((target) => targetKey(target) === key);
-      const authentication_required = error.code === "ssh_authentication_required" || error.code === "ssh_authentication_failed";
+      if (target?.kind === "ssh" && error.code === "ssh_authentication_required") {
+        store.report(`host:${key}`, null);
+        attachments.reportHostAuthentication(key, target);
+        continue;
+      }
+      attachments.reportHostAuthentication(key, null);
       reportError(`host:${key}`, target ? `Host · ${targetLabel(target)}` : "Host", error.message,
-        target?.kind === "ssh" && authentication_required
+        target?.kind === "ssh" && error.code === "ssh_authentication_failed"
           ? [{ label: "Connect host", command_id: COMMAND_IDS.connectHost, args: { target_key: key } }]
-          : [{ label: "Refresh sessions", command_id: COMMAND_IDS.refreshSessions }]);
+          : [{ label: "Refresh sessions", command_id: COMMAND_IDS.refreshSessions }],
+        error.code !== "ssh_authentication_required");
     }
 
     if (sources.tasks_loaded) {

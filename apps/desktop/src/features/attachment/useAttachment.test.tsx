@@ -16,7 +16,7 @@ import { XtermRenderer } from "../terminal/XtermRenderer";
 import { useAttachment, type AttachmentActions } from "./useAttachment";
 import { useSessionAttachments } from "./useSessionAttachments";
 import { reconnectComponentAttachments, resetComponentAttachments, resizeSessionDivider, resizeSessionPane, setSessionViewZoom, toggleSessionResizeWithWindow } from "./componentActions";
-import { NotificationProvider } from "../notifications/NotificationContext";
+import { NotificationProvider, useNotificationEnvironment } from "../notifications/NotificationContext";
 import { NotificationStore } from "../notifications/NotificationStore";
 import { useWorkbenchNotifications } from "../notifications/useWorkbenchNotifications";
 import { useAttachmentNotifications } from "../notifications/useAttachmentNotifications";
@@ -2632,7 +2632,7 @@ describe("opened session channels", () => {
         workspace_error: null, workspace_ready: true, keybindings_error: null, session_error: null,
         targets: [], target_errors: new Map(), storage_error: attachments.storage_error,
         task_error: null, definitions_error: null, task_status: null, tasks: [], tasks_loaded: false,
-      });
+      }, useNotificationEnvironment()!.attachments);
       return <>{attachments.controllers}</>;
     }
     render(<NotificationProvider store={store}><TestComponent /></NotificationProvider>);

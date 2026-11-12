@@ -1,10 +1,15 @@
 import assert from "node:assert/strict";
-import { lstat, mkdir, mkdtemp, open, readdir, rm, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
+import { lstat, mkdir, mkdtemp, open, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
-import { windowsExecutableFixture } from "../shared/windows-portable.fixtures.mts";
+import { promisify } from "node:util";
+import { extractWindowsPortableFixture, windowsExecutableFixture, windowsPortableFixtureEntries } from "../shared/windows-portable.fixtures.mts";
 import { createWindowsPortable, validateWindowsPortablePath, windowsPortableExecutables, type WindowsPortableOptions } from "../shared/windows-portable.mts";
+
+const execute = promisify(execFile);
 
 async function fixture(context: TestContext): Promise<WindowsPortableOptions> {
   const root = await mkdtemp(join(tmpdir(), "ctmux-portable-limits-"));
@@ -24,6 +29,27 @@ async function unpublished(options: WindowsPortableOptions): Promise<void> {
   await assert.rejects(lstat(options.archive_path), { code: "ENOENT" });
   assert.deepEqual(await readdir(join(options.archive_path, "..")), []);
 }
+
+test("Windows portable archives use forward slash paths and preserve hidden files and empty directories", async (context) => {
+  const options = await fixture(context);
+  const hidden = join(options.resources_directory!, ".hidden");
+  await writeFile(hidden, "hidden fixture");
+  if (process.platform === "win32") await execute("attrib.exe", ["+H", hidden]);
+  await mkdir(join(options.resources_directory!, "empty"));
+  const manifest = await createWindowsPortable(options);
+  const entries = await windowsPortableFixtureEntries(options.archive_path);
+  assert.deepEqual(entries.sort(), [
+    "ctmux/", "ctmux/ctl-taskd.exe", "ctmux/ctld.exe", "ctmux/ctmux-app.exe", "ctmux/ctmuxd.exe",
+    "ctmux/portable.json", "ctmux/resources/", "ctmux/resources/agent-bundles/",
+    "ctmux/resources/agent-bundles/.hidden", "ctmux/resources/agent-bundles/empty/",
+  ].sort());
+  const extracted = join(options.archive_path, "..", "extracted");
+  await extractWindowsPortableFixture(options.archive_path, extracted);
+  assert.equal((await lstat(join(extracted, "ctmux/resources/agent-bundles/empty"))).isDirectory(), true);
+  for (const [relative, digest] of Object.entries(manifest.files)) {
+    assert.equal(createHash("sha256").update(await readFile(join(extracted, "ctmux", ...relative.split("/")))).digest("hex"), digest);
+  }
+});
 
 test("Windows portable rejects all installer-reserved names and non-ASCII resource names", async (context) => {
   for (const name of ["CLOCK$.txt", "CONIN$.txt", "CONOUT$.txt", "caf\u00e9.txt"]) {

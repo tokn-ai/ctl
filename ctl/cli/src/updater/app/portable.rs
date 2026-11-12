@@ -317,7 +317,9 @@ fn safe_path(path: &str) -> io::Result<()> {
         && (base.starts_with("COM") || base.starts_with("LPT"))
         && matches!(base.as_bytes()[3], b'1'..=b'9'))
     {
-      return Err(invalid("unsafe or reserved Windows portable path"));
+      return Err(invalid(&format!(
+        "unsafe or reserved Windows portable path: {path:?}"
+      )));
     }
   }
   Ok(())

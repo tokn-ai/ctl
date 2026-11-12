@@ -1,8 +1,29 @@
 import { execFile } from "node:child_process";
-import { mkdir } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import { promisify } from "node:util";
 
 const execute = promisify(execFile);
+
+/** Read actual central-directory names; native extraction accepts unsafe separators. */
+export async function windowsPortableFixtureEntries(archive: string): Promise<string[]> {
+  const bytes = await readFile(archive);
+  const end = bytes.lastIndexOf(Buffer.from([0x50, 0x4b, 0x05, 0x06]));
+  if (end < 0 || end + 22 > bytes.length) throw new Error("fixture ZIP end record is missing");
+  const count = bytes.readUInt16LE(end + 10);
+  let offset = bytes.readUInt32LE(end + 16);
+  const entries = [];
+  for (let index = 0; index < count; index += 1) {
+    if (offset + 46 > end || bytes.readUInt32LE(offset) !== 0x02014b50) throw new Error("fixture ZIP directory is invalid");
+    const name_length = bytes.readUInt16LE(offset + 28);
+    const extra_length = bytes.readUInt16LE(offset + 30);
+    const comment_length = bytes.readUInt16LE(offset + 32);
+    const next = offset + 46 + name_length + extra_length + comment_length;
+    if (next > end) throw new Error("fixture ZIP entry exceeds the directory");
+    entries.push(bytes.subarray(offset + 46, offset + 46 + name_length).toString("utf8"));
+    offset = next;
+  }
+  return entries;
+}
 
 /** A PE32+ header fixture, deliberately never launched by packaging tests. */
 export function windowsExecutableFixture(target: string): Buffer {

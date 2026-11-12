@@ -128,12 +128,28 @@ export async function createWindowsPortable(options: WindowsPortableOptions): Pr
     await writeFile(join(app, "portable.json"), manifest_bytes, { flag: "wx" });
     const temporary_archive = join(staging, "payload.zip");
     if (process.platform === "win32") {
-      // Compress-Archive omits hidden files. ZipFile includes every staged file.
+      // PowerShell's .NET compatibility defaults can make CreateFromDirectory
+      // emit backslashes. Explicit entry names keep ZIP paths portable and also
+      // include hidden files and empty directories without shell enumeration.
+      const zip_plan = join(staging, "zip-entries.txt");
+      // Validated ASCII names contain no newlines. A line plan avoids legacy
+      // PowerShell JSON size limits when packages contain many directories.
+      await writeFile(zip_plan, [
+        "ctmux/",
+        ...[...names.values()].filter((name) => !files.has(name)).sort().map((name) => `ctmux/${name}/`),
+        ...[...files.keys(), "portable.json"].sort().map((name) => `ctmux/${name}`),
+      ].join("\n"), { flag: "wx" });
       await execute("powershell.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
         "$ErrorActionPreference = 'Stop'; Add-Type -AssemblyName System.IO.Compression.FileSystem; " +
-        "[System.IO.Compression.ZipFile]::CreateFromDirectory($env:CTL_DESKTOP_ZIP_ROOT, $env:CTL_DESKTOP_ZIP_OUTPUT, " +
-        "[System.IO.Compression.CompressionLevel]::Optimal, $true)"], {
-        env: { ...process.env, CTL_DESKTOP_ZIP_ROOT: app, CTL_DESKTOP_ZIP_OUTPUT: temporary_archive },
+        "$archive = [System.IO.Compression.ZipFile]::Open($env:CTL_DESKTOP_ZIP_OUTPUT, [System.IO.Compression.ZipArchiveMode]::Create); " +
+        "try { foreach ($name in [System.IO.File]::ReadLines($env:CTL_DESKTOP_ZIP_PLAN)) { " +
+        "if ($name.EndsWith('/')) { $null = $archive.CreateEntry($name) } else { " +
+        "$relative = $name.Substring(6); " +
+        "$source = [System.IO.Path]::Combine($env:CTL_DESKTOP_ZIP_ROOT, $relative); " +
+        "$null = [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($archive, $source, $name, " +
+        "[System.IO.Compression.CompressionLevel]::Optimal) " +
+        "} } } finally { $archive.Dispose() }"], {
+        env: { ...process.env, CTL_DESKTOP_ZIP_ROOT: app, CTL_DESKTOP_ZIP_OUTPUT: temporary_archive, CTL_DESKTOP_ZIP_PLAN: zip_plan },
       });
     } else {
       await execute("zip", ["-q", "-r", temporary_archive, "ctmux"], { cwd: staging });

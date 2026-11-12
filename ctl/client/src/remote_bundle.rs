@@ -457,7 +457,7 @@ pub async fn download_release_bundle(
   manifest.verify_archive(target, archive, bytes)
 }
 
-fn safe_id(value: &str) -> bool {
+pub(crate) fn safe_id(value: &str) -> bool {
   !value.is_empty()
     && value.len() <= 128
     && value

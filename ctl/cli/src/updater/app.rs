@@ -1,8 +1,11 @@
 use super::arguments::AppCommand;
 use ctl_client::installation::app_directory;
-use ctl_client::remote_bundle::desktop::{self, DesktopSigning, DesktopTarget};
+use ctl_client::remote_bundle::desktop::{self, DesktopRelease, DesktopSigning, DesktopTarget};
 use ctl_core::component_update::BundleChannel;
-use std::{io, path::Path};
+use std::{
+  io,
+  path::{Path, PathBuf},
+};
 
 mod activation;
 #[cfg(target_os = "linux")]
@@ -15,9 +18,6 @@ pub(super) async fn run(home: &Path, command: AppCommand) -> io::Result<()> {
     AppCommand::Install(options) => (options, false),
     AppCommand::Update(options) => (options, true),
   };
-  // App commands always target this account. --local makes that explicit.
-  let _ = options.local;
-  let channel = super::selected_channel(home, options.channel)?;
   let explicit_channel = options.channel.map(Into::into);
   let target = DesktopTarget::native()?;
   #[cfg(target_os = "macos")]
@@ -42,10 +42,18 @@ pub(super) async fn run(home: &Path, command: AppCommand) -> io::Result<()> {
     ));
   }
 
-  let release = desktop::latest(channel, target).await?;
-  let signing = release.signing();
+  let release = if options.local {
+    None
+  } else {
+    let channel = super::selected_channel(home, options.channel)?;
+    Some(desktop::latest(channel, target).await?)
+  };
   #[cfg(target_os = "linux")]
-  if installed.is_some() && linux::is_executable(&destination)? && release.matches(&destination)? {
+  if let Some(release) = &release
+    && installed.is_some()
+    && linux::is_executable(&destination)?
+    && release.matches(&destination)?
+  {
     return report_current(home, explicit_channel, &release.bundle_id, &destination);
   }
 
@@ -59,32 +67,20 @@ pub(super) async fn run(home: &Path, command: AppCommand) -> io::Result<()> {
       ),
     )
   })?;
-  let download = workspace.staging().join(release.asset_name());
-  let signing_note = if signing == DesktopSigning::Unsigned {
-    " (unsigned macOS release)"
-  } else {
-    ""
-  };
-  println!("Downloading ctmux {}{signing_note}…", release.bundle_id);
-  release.download(&download).await?;
-  #[cfg(target_os = "macos")]
-  let staged = macos::stage(
-    &download,
-    workspace.staging(),
-    &release.app_version,
-    signing,
-  )?;
-  #[cfg(target_os = "linux")]
-  let staged = linux::prepare(download)?;
+  let prepared = prepare(release, workspace.staging()).await?;
 
   #[cfg(target_os = "macos")]
   if installed.is_some() {
-    if macos::matches(&destination, &staged)? {
-      return report_current(home, explicit_channel, &release.bundle_id, &destination);
+    if macos::matches(&destination, &prepared.payload)? {
+      return report_current(home, explicit_channel, &prepared.bundle_id, &destination);
     }
     require_app_closed(&destination)?;
   }
-  let previous = workspace.activate(&staged, installed.as_ref())?;
+  #[cfg(target_os = "linux")]
+  if installed.is_some() && linux::matches(&destination, &prepared.payload)? {
+    return report_current(home, explicit_channel, &prepared.bundle_id, &destination);
+  }
+  let previous = workspace.activate(&prepared.payload, installed.as_ref())?;
   let verb = if installed.is_some() {
     "Updated"
   } else {
@@ -92,7 +88,7 @@ pub(super) async fn run(home: &Path, command: AppCommand) -> io::Result<()> {
   };
   println!(
     "{verb} ctmux {} at {}.",
-    release.bundle_id,
+    prepared.bundle_id,
     destination.display()
   );
   if let Some(previous) = previous {
@@ -107,6 +103,52 @@ pub(super) async fn run(home: &Path, command: AppCommand) -> io::Result<()> {
     })?;
   }
   Ok(())
+}
+
+struct PreparedApp {
+  payload: PathBuf,
+  bundle_id: String,
+}
+
+async fn prepare(release: Option<DesktopRelease>, staging: &Path) -> io::Result<PreparedApp> {
+  let Some(release) = release else {
+    eprintln!("Building the ctmux desktop app from local source…");
+    let built = ctl_client::development::build_desktop(
+      &std::env::current_dir()?,
+      &staging.join("local-build"),
+    )
+    .await?;
+    #[cfg(target_os = "macos")]
+    let payload = macos::stage_local(&built.archive, staging, &built.app_version)?;
+    #[cfg(target_os = "linux")]
+    let payload = {
+      let destination = staging.join("ctmux.AppImage");
+      std::fs::rename(&built.archive, &destination)?;
+      linux::prepare(destination)?
+    };
+    return Ok(PreparedApp {
+      payload,
+      bundle_id: built.bundle_id,
+    });
+  };
+  let signing = release.signing();
+  let download = staging.join(release.asset_name());
+  let signing_note = if signing == DesktopSigning::Unsigned {
+    " (unsigned macOS release)"
+  } else {
+    ""
+  };
+  println!("Downloading ctmux {}{signing_note}…", release.bundle_id);
+  release.download(&download).await?;
+  #[cfg(target_os = "macos")]
+  let staged = macos::stage(&download, staging, &release.app_version, signing)?;
+  #[cfg(target_os = "linux")]
+  let staged = linux::prepare(download)?;
+
+  Ok(PreparedApp {
+    payload: staged,
+    bundle_id: release.bundle_id,
+  })
 }
 
 fn report_current(
@@ -134,3 +176,6 @@ fn require_app_closed(app: &Path) -> io::Result<()> {
   }
   Ok(())
 }
+
+#[cfg(test)]
+mod tests;

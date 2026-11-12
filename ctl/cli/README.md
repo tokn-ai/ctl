@@ -344,9 +344,10 @@ for source formats, cancellation, and per-host results.
 
 Use `ctlup app install` and `ctlup app update` for the local ctmux desktop app
 on macOS and Linux. Both accept `--local` and `--channel stable|nightly`.
-They use the saved runtime bundle channel preference and remember an explicit
-channel after success. Nightly desktop downloads require authenticated `gh`
-access to the Actions artifact for the selected source revision. See the
+`--local` builds from the current source checkout and conflicts with `--channel`.
+Published installs use the saved runtime bundle channel preference and remember
+an explicit channel after success. Nightly desktop downloads require
+authenticated `gh` access to the Actions artifact for the selected source revision. See the
 [desktop app install guide](https://github.com/tokn-ai/ctl/blob/main/docs/component-updates.md#install-or-update-the-desktop-app)
 for install locations and platform requirements.
 

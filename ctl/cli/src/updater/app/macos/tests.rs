@@ -173,6 +173,30 @@ fn stages_an_app_from_an_unsigned_release() {
 }
 
 #[test]
+fn stages_a_local_native_app_without_distribution_signing() {
+  let scratch = Scratch::new();
+  let source = scratch.fixture();
+  let app = stage_local(&scratch.archive(), &scratch.staging(), "0.1.3").unwrap();
+
+  assert!(matches(&source, &app).unwrap());
+  assert!(verify_existing(&app, "0.1.3", DesktopSigning::Signed).is_err());
+}
+
+#[test]
+fn rejects_a_local_app_with_an_executable_that_is_not_macho() {
+  let scratch = Scratch::new();
+  let source = scratch.fixture();
+  fs::write(source.join(EXECUTABLE_PATH), b"#!/bin/sh\nexit 0\n").unwrap();
+
+  let error = stage_local(&scratch.archive(), &scratch.staging(), "0.1.3").unwrap_err();
+  assert!(
+    error
+      .to_string()
+      .contains("local application architecture verification")
+  );
+}
+
+#[test]
 fn compares_app_contents_and_inventory_at_the_same_product_version() {
   let scratch = Scratch::new();
   let installed = scratch.fixture();

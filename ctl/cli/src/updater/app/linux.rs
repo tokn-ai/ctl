@@ -1,6 +1,7 @@
 use rustix::fs::{Mode, OFlags};
+use sha2::{Digest as _, Sha256};
 use std::fs::{self, File, Permissions};
-use std::io::{self, Read as _};
+use std::io::{self, Read as _, Seek as _};
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 
@@ -17,6 +18,22 @@ pub(super) fn prepare(path: PathBuf) -> io::Result<PathBuf> {
   image.set_permissions(Permissions::from_mode(0o755))?;
   image.sync_all()?;
   Ok(path)
+}
+
+pub(super) fn matches(installed: &Path, staged: &Path) -> io::Result<bool> {
+  let mut installed = open_image(installed)?;
+  let mut staged = open_image(staged)?;
+  let size = staged.metadata()?.len();
+  if installed.metadata()?.len() != size || size > 512 * 1024 * 1024 {
+    return Ok(false);
+  }
+  installed.rewind()?;
+  staged.rewind()?;
+  let mut expected = Sha256::new();
+  let mut actual = Sha256::new();
+  let expected_size = io::copy(&mut staged.take(size + 1), &mut expected)?;
+  let actual_size = io::copy(&mut installed.take(size + 1), &mut actual)?;
+  Ok(expected_size == size && actual_size == size && actual.finalize() == expected.finalize())
 }
 
 fn open_image(path: &Path) -> io::Result<File> {

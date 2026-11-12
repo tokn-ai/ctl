@@ -68,16 +68,16 @@ pub(super) enum Command {
 
 #[derive(Debug, Subcommand)]
 pub(super) enum AppCommand {
-  /// Install the desktop app from the selected publication channel.
+  /// Install the desktop app from a publication channel or the local checkout.
   Install(AppArguments),
-  /// Update an installed desktop app from the selected publication channel.
+  /// Update the desktop app from a publication channel or the local checkout.
   Update(AppArguments),
 }
 
 #[derive(Debug, Args)]
 pub(super) struct AppArguments {
-  /// Target this computer; also the default when omitted.
-  #[arg(long)]
+  /// Build the desktop app from the current source checkout.
+  #[arg(long, conflicts_with = "channel")]
   pub local: bool,
   /// Publication channel; remembered after a successful install or update.
   #[arg(long, value_enum)]
@@ -190,39 +190,51 @@ mod tests {
   use super::*;
 
   #[test]
-  fn app_install_and_update_accept_channels_and_an_explicit_local_target() {
+  fn app_install_and_update_accept_a_local_build_or_a_publication_channel() {
     for operation in ["install", "update"] {
-      for local in [false, true] {
-        for channel in [None, Some("nightly"), Some("stable")] {
-          let mut command_line = vec!["ctlup", "app", operation];
-          if local {
-            command_line.push("--local");
-          }
-          if let Some(channel) = channel {
-            command_line.extend(["--channel", channel]);
-          }
-          let args = Arguments::try_parse_from(command_line).unwrap();
-          let Command::App { command } = args.command else {
-            panic!("expected the desktop app command");
-          };
-          let options = match command {
-            AppCommand::Install(options) => {
-              assert_eq!(operation, "install");
-              options
-            }
-            AppCommand::Update(options) => {
-              assert_eq!(operation, "update");
-              options
-            }
-          };
-          assert_eq!(options.local, local);
-          assert_eq!(
+      for (flags, local, channel) in [
+        (&[][..], false, None),
+        (&["--local"][..], true, None),
+        (&["--channel", "nightly"][..], false, Some("nightly")),
+        (&["--channel", "stable"][..], false, Some("stable")),
+      ] {
+        let command_line = [&["ctlup", "app", operation][..], flags].concat();
+        let args = Arguments::try_parse_from(command_line).unwrap();
+        let Command::App { command } = args.command else {
+          panic!("expected the desktop app command");
+        };
+        let options = match command {
+          AppCommand::Install(options) => {
+            assert_eq!(operation, "install");
             options
-              .channel
-              .map(|value| value.to_possible_value().unwrap().get_name().to_owned())
-              .as_deref(),
-            channel
-          );
+          }
+          AppCommand::Update(options) => {
+            assert_eq!(operation, "update");
+            options
+          }
+        };
+        assert_eq!(options.local, local);
+        assert_eq!(
+          options
+            .channel
+            .map(|value| value.to_possible_value().unwrap().get_name().to_owned())
+            .as_deref(),
+          channel
+        );
+      }
+    }
+  }
+
+  #[test]
+  fn app_local_builds_conflict_with_publication_channels_in_either_order() {
+    for operation in ["install", "update"] {
+      for channel in ["stable", "nightly"] {
+        for flags in [
+          ["--local", "--channel", channel],
+          ["--channel", channel, "--local"],
+        ] {
+          let command_line = [&["ctlup", "app", operation][..], &flags].concat();
+          assert!(Arguments::try_parse_from(command_line).is_err());
         }
       }
     }

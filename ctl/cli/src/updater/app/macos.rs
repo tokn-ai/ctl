@@ -100,6 +100,30 @@ pub(super) fn stage(
   Ok(app)
 }
 
+pub(super) fn stage_local(archive: &Path, staging: &Path, version: &str) -> io::Result<PathBuf> {
+  let app = stage(archive, staging, version, DesktopSigning::Unsigned)?;
+  let native_architectures: &[&str] = match std::env::consts::ARCH {
+    "aarch64" => &["arm64", "arm64e"],
+    "x86_64" => &["x86_64"],
+    _ => return Err(invalid("unsupported macOS architecture")),
+  };
+  let architectures = require_success(
+    Command::new("/usr/bin/lipo")
+      .arg(app.join(EXECUTABLE_PATH))
+      .arg("-archs"),
+    "local application architecture verification",
+  )?;
+  if !String::from_utf8_lossy(&architectures.stdout)
+    .split_whitespace()
+    .any(|architecture| native_architectures.contains(&architecture))
+  {
+    return Err(invalid(
+      "locally built application does not contain the native architecture",
+    ));
+  }
+  Ok(app)
+}
+
 pub(super) fn matches(installed: &Path, staged: &Path) -> io::Result<bool> {
   let compare = || -> io::Result<bool> {
     let mut pending = vec![(installed.to_owned(), staged.to_owned())];

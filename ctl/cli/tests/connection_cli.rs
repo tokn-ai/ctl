@@ -290,8 +290,16 @@ async fn windows_targets_use_private_masters_for_plain_shell_exec_and_services()
         assert!(!output.status.success());
         // The failing SSH fixture still exposes the exact fixed command used
         // to start either Windows service after master selection.
-        assert!(args.contains(&"ctl-agent.exe".into()));
-        assert!(args.contains(&"connect".into()));
+        let path = r#""%USERPROFILE%\.tokn\ctl\bin\ctl-agent.exe""#;
+        let service = if operation[0] == "task" {
+          " --service task"
+        } else {
+          ""
+        };
+        let expected = format!(
+          "if exist {path} ({path} connect{service} --identity) else (ctl-agent.exe connect{service} --identity)"
+        );
+        assert_eq!(args.last(), Some(&expected));
       }
     }
   }

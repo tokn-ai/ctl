@@ -323,3 +323,6 @@ fn invalid(message: &str) -> io::Error {
 
 #[cfg(all(test, unix))]
 mod tests;
+
+#[cfg(all(test, windows))]
+mod windows_tests;

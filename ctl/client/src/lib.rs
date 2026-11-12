@@ -8,6 +8,7 @@ pub mod component_status;
 pub mod component_update;
 pub mod components;
 pub mod ctld;
+pub mod desktop_storage;
 pub mod development;
 pub mod installation;
 

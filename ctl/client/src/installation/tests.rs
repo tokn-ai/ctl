@@ -74,8 +74,15 @@ fn desktop_storage_is_passive_until_requested_and_rejects_links() {
   assert!(path.is_dir());
 
   std::fs::remove_dir(&path).unwrap();
-  let outside = Home::new();
-  std::os::unix::fs::symlink(&outside.0, &path).unwrap();
+  std::fs::write(&path, b"file").unwrap();
   assert!(app_directory(&home.0, false).is_err());
   assert!(app_directory(&home.0, true).is_err());
+  #[cfg(unix)]
+  {
+    std::fs::remove_file(&path).unwrap();
+    let outside = Home::new();
+    std::os::unix::fs::symlink(&outside.0, &path).unwrap();
+    assert!(app_directory(&home.0, false).is_err());
+    assert!(app_directory(&home.0, true).is_err());
+  }
 }

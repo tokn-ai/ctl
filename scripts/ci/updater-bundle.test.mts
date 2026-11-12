@@ -7,7 +7,8 @@ import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { promisify } from "node:util";
 import { agentComponents, agentTargets, executableName, parseAgentBundleSet, parseWindowsAgentBundleSet, windowsAgentManifestName, windowsAgentTarget } from "../shared/agent-bundle.mts";
-import { parseUpdaterManifest, updaterManifestName, verifyUpdaterTarget } from "../shared/updater-bundle.mts";
+import { parseUpdaterManifest, updaterManifestName, verifyUpdaterTarget, windowsUpdaterTargets } from "../shared/updater-bundle.mts";
+import { windowsExecutableFixture } from "../shared/windows-portable.fixtures.mts";
 import { agentIdentity, componentMapFixture } from "./agent-bundle.fixtures.mts";
 import { packageUpdater } from "./package-updater.mts";
 import { packageAgentBundle } from "./package-agent-bundle.mts";
@@ -73,9 +74,10 @@ test("complete updater sidecars survive assembly and Pages staging outside runti
   const original = await readFile(join(assembled, "bundle-set.json"));
   const windows_input = join(root, "windows-input");
   const windows_options = { app_version, bundle_id, git_revision, target: windowsAgentTarget, binary_directory, output_directory: windows_input };
-  for (const name of [...agentComponents, "ctlup"]) {
+  for (const name of agentComponents) {
     await writeFile(join(binary_directory, executableName(name, windowsAgentTarget)), `Windows fixture ${name}`);
   }
+  await writeFile(join(binary_directory, "ctlup.exe"), windowsExecutableFixture(windowsAgentTarget));
   const components = componentMapFixture(publication);
   const manifest = await packageAgentBundle(windows_options, async (command, args, cwd) => {
     if (args[0] === "--component-info") {
@@ -125,3 +127,27 @@ test("complete updater sidecars survive assembly and Pages staging outside runti
   await rm(join(assembled, updaterManifestName(windowsAgentTarget)));
   await assert.rejects(validatedComponentSet(assembled, publication), { code: "ENOENT" });
 });
+
+for (const target of windowsUpdaterTargets) {
+  test(`packages a native ${target} updater executable without Unix stripping`, async (t) => {
+    const root = await directory(t);
+    const binary_directory = join(root, "release");
+    await mkdir(binary_directory);
+    const payload = windowsExecutableFixture(target);
+    await writeFile(join(binary_directory, "ctlup.exe"), payload);
+    const output_directory = join(root, "output");
+    const manifest = await packageUpdater({ ...agentIdentity, target, binary_directory, output_directory }, async (path) => {
+      assert.ok(path.endsWith("ctlup.exe"));
+      return { stdout: JSON.stringify(componentMapFixture().ctl), stderr: "" };
+    });
+    assert.equal(manifest.binary, `ctlup-${agentIdentity.bundle_id}-${target}.exe`);
+    assert.deepEqual(await readFile(join(output_directory, manifest.binary)), payload);
+    assert.equal((await verifyUpdaterTarget(output_directory, agentIdentity, target, true)).length, 3);
+    assert.throws(() => parseUpdaterManifest(Buffer.from(JSON.stringify({ ...manifest, binary: manifest.binary.replace(/\.exe$/, "") })), agentIdentity, target));
+    const foreign_target = windowsUpdaterTargets.find((candidate) => candidate !== target)!;
+    await writeFile(join(binary_directory, "ctlup.exe"), windowsExecutableFixture(foreign_target));
+    await assert.rejects(packageUpdater({ ...agentIdentity, target, binary_directory, output_directory }, async () => {
+      assert.fail("a foreign PE image must be rejected before executing its probe");
+    }), /PE machine/);
+  });
+}

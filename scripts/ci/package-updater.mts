@@ -4,9 +4,10 @@ import { chmod, copyFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
-import { executableName, readAgentFile, validateAgentIdentity, windowsAgentTarget, type AgentBundleIdentity } from "../shared/agent-bundle.mts";
+import { readAgentFile, validateAgentIdentity, type AgentBundleIdentity } from "../shared/agent-bundle.mts";
 import { probeBundledComponent } from "../shared/component-probe.mts";
 import { parseComponent } from "../shared/protocol-contract.mts";
+import { validateWindowsExecutableTarget } from "../shared/windows-portable.mts";
 import { maxUpdaterBytes, parseUpdaterManifest, updaterBinaryName, updaterManifestName, verifyUpdaterTarget, type UpdaterManifest } from "../shared/updater-bundle.mts";
 
 export interface PackageUpdaterOptions extends AgentBundleIdentity {
@@ -20,16 +21,18 @@ export interface PackageUpdaterOptions extends AgentBundleIdentity {
 export async function packageUpdater(options: PackageUpdaterOptions,
   probe = (path: string) => probeBundledComponent(path, ["--component-info"], { target: options.target })): Promise<UpdaterManifest> {
   validateAgentIdentity(options);
-  const filename = executableName("ctlup", options.target);
-  const input = join(options.binary_directory, filename);
+  const windows = options.target.endsWith("-pc-windows-msvc");
+  const executable_name = windows ? "ctlup.exe" : "ctlup";
+  const input = join(options.binary_directory, executable_name);
   await mkdir(options.output_directory, { recursive: true });
   const stage = await mkdtemp(join(options.output_directory, ".ctlup-"));
   try {
     await readAgentFile(input, maxUpdaterBytes);
-    const executable = join(stage, filename);
+    const executable = join(stage, executable_name);
     await copyFile(input, executable);
+    if (windows) await validateWindowsExecutableTarget(executable, options.target);
     await chmod(executable, 0o700);
-    if (options.target !== windowsAgentTarget && options.strip !== false) await promisify(execFile)("strip", [executable], { maxBuffer: 1024 * 1024 });
+    if (!windows && options.strip !== false) await promisify(execFile)("strip", [executable], { maxBuffer: 1024 * 1024 });
     const bytes = await readAgentFile(executable, maxUpdaterBytes);
     const { stdout } = await probe(executable);
     const info = parseComponent(JSON.parse(stdout));

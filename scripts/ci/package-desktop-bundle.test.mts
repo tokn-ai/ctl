@@ -6,6 +6,8 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { promisify } from "node:util";
+import { extractWindowsPortableFixture, windowsExecutableFixture } from "../shared/windows-portable.fixtures.mts";
+import { windowsPortableExecutables } from "../shared/windows-portable.mts";
 import { packageDesktopBundle, type DesktopBundleOptions } from "./package-desktop-bundle.mts";
 
 const execute = promisify(execFile);
@@ -44,6 +46,88 @@ async function macBundle(options: DesktopBundleOptions): Promise<string> {
   await file(join(options.input_directory, "dmg", "ctmux_0.1.0_aarch64.dmg"), "Disk image");
   return app;
 }
+
+async function windowsBundle(options: DesktopBundleOptions): Promise<void> {
+  options.app_version = "0.1.0";
+  options.resources_directory = join(dirname(options.input_directory), "resources");
+  await mkdir(options.input_directory, { recursive: true });
+  for (const executable of windowsPortableExecutables) {
+    await writeFile(join(options.input_directory, `${executable}.exe`), windowsExecutableFixture(options.target));
+  }
+  await file(join(options.resources_directory, "bundle/.hidden"), "hidden bundled resource");
+}
+
+test("packages x64 and ARM64 Windows executables and resources with a complete portable inventory", async (context) => {
+  for (const target of ["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"]) {
+    const options = await fixture(context, target);
+    await windowsBundle(options);
+    const manifest = await packageDesktopBundle(options);
+    assert.equal(manifest.signing_mode, "not_applicable");
+    assert.equal(manifest.schema_version, 1);
+    assert.deepEqual(manifest.assets.map((asset) => asset.name), [`ctmux-${options.bundle_id}-${target}.zip`]);
+    const archive = join(options.output_directory, manifest.assets[0].name);
+    assert.equal(manifest.assets[0].sha256, createHash("sha256").update(await readFile(archive)).digest("hex"));
+    const extracted = join(dirname(options.output_directory), "extracted");
+    await extractWindowsPortableFixture(archive, extracted);
+    assert.deepEqual(await readdir(extracted), ["ctmux"]);
+    const app = join(extracted, "ctmux");
+    const portable = JSON.parse(await readFile(join(app, "portable.json"), "utf8"));
+    assert.deepEqual(Object.keys(portable).sort(), ["app_version", "files", "schema_version", "target_triple"]);
+    assert.equal(portable.app_version, options.app_version);
+    assert.equal(portable.target_triple, target);
+    assert.equal(portable.schema_version, 1);
+    assert.deepEqual(Object.keys(portable.files), [
+      "ctl-taskd.exe", "ctld.exe", "ctmux-app.exe", "ctmuxd.exe", "resources/agent-bundles/bundle/.hidden",
+    ]);
+    for (const [path, digest] of Object.entries(portable.files)) {
+      assert.equal(digest, createHash("sha256").update(await readFile(join(app, ...path.split("/")))).digest("hex"));
+    }
+    assert.equal((await readdir(options.output_directory)).length, 3);
+  }
+});
+
+test("Windows packaging rejects missing, malformed and foreign-machine executables without publishing a manifest", async (context) => {
+  for (const failure of ["missing", "malformed", "foreign"] as const) {
+    for (const executable of windowsPortableExecutables) {
+      const options = await fixture(context, "aarch64-pc-windows-msvc");
+      await windowsBundle(options);
+      const path = join(options.input_directory, `${executable}.exe`);
+      if (failure === "missing") await rm(path);
+      else await writeFile(path, failure === "malformed" ? Buffer.alloc(1024) : windowsExecutableFixture("x86_64-pc-windows-msvc"));
+      await assert.rejects(packageDesktopBundle(options), failure === "missing" ? /ENOENT/ : /PE/);
+      assert.deepEqual(await readdir(options.output_directory), []);
+    }
+  }
+});
+
+test("Windows packaging requires an app version and refuses unsafe or ambiguous resource paths", async (context) => {
+  const missing_version = await fixture(context, "x86_64-pc-windows-msvc");
+  await assert.rejects(packageDesktopBundle(missing_version), /requires app_version/);
+  for (const name of ["CON.txt", "trailing.", "bad:name"]) {
+    // Windows cannot create these names; rejection on Unix also prevents unsafe cross-packaging.
+    if (process.platform === "win32") continue;
+    const options = await fixture(context, "x86_64-pc-windows-msvc");
+    await windowsBundle(options);
+    await file(join(options.resources_directory!, name), "unsafe resource");
+    await assert.rejects(packageDesktopBundle(options), /unsafe Windows portable filename/);
+    assert.deepEqual(await readdir(options.output_directory), []);
+  }
+  if (process.platform !== "win32" && process.platform !== "darwin") {
+    const options = await fixture(context, "x86_64-pc-windows-msvc");
+    await windowsBundle(options);
+    await file(join(options.resources_directory!, "CASE"), "one");
+    await file(join(options.resources_directory!, "case"), "two");
+    await assert.rejects(packageDesktopBundle(options), /duplicate Windows portable path/);
+  }
+});
+
+test("Windows packaging rejects resource symlinks", { skip: process.platform === "win32" }, async (context) => {
+  const options = await fixture(context, "x86_64-pc-windows-msvc");
+  await windowsBundle(options);
+  await symlink("bundle/.hidden", join(options.resources_directory!, "linked"));
+  await assert.rejects(packageDesktopBundle(options), /cannot contain symlinks/);
+  assert.deepEqual(await readdir(options.output_directory), []);
+});
 
 test("stages every Linux installer with target-specific names and matching checksums", async (context) => {
   const options = await fixture(context);

@@ -173,6 +173,12 @@ preserves the saved publication channel and conflicts with `--channel`.
 Install the checkout's frontend dependencies with `pnpm install --frozen-lockfile`
 before building locally.
 
+Windows supports native x64 (`x86_64-pc-windows-msvc`) and ARM64
+(`aarch64-pc-windows-msvc`). Both use a portable, per-user directory rather than
+MSI or NSIS installation; installing the app does not require administrator
+access. Local builds require Node 24, pnpm, Rust's matching MSVC toolchain, the
+Visual Studio C++ build tools and Windows SDK.
+
 Local macOS builds sign the bundled `ctld.app` when a usable development
 profile and signing identity are available, and fall back to an unsigned
 helper when signing is unavailable.
@@ -192,11 +198,42 @@ On macOS, launch the installed app with `open ~/.tokn/ctl/apps/ctmux.app`.
 Quit ctmux before updating it. The installer prefers the signed, notarized
 archive and uses the official unsigned archive when the release has no
 signed manifest. On Linux, launch `~/.tokn/ctl/apps/ctmux.AppImage`.
+On Windows, launch the executable from PowerShell:
+
+```powershell
+& "$env:USERPROFILE\.tokn\ctl\apps\ctmux\ctmux-app.exe"
+```
+
+Close ctmux and the local helpers running from its Windows app directory before
+updating; the updater refuses to replace files that are in use. The portable ZIP contains
+the desktop executable, `ctld.exe`, `ctmuxd.exe`, `ctl-taskd.exe`, resources and a
+`portable.json` inventory binding every file's SHA-256 digest to the app version
+and native target. Keep that directory together when moving a portable copy.
+GUI launch requires Microsoft's
+[WebView2 Evergreen Runtime](https://developer.microsoft.com/microsoft-edge/webview2/).
+`ctlup` installs the app files without installing WebView2; a missing runtime
+must be installed separately before launch.
+
+Windows releases also provide a standalone
+`ctlup-<bundle>-<target>.exe`, its `.sha256` checksum and `ctlup-<target>.json`
+metadata. Download the files for the native architecture from the same release,
+or from the same Nightly desktop Actions artifact. Compare `Get-FileHash -Algorithm
+SHA256` for the executable with the checksum before running it. The metadata
+records the target, app version, bundle identity and exact source revision.
+Run the downloaded executable with `app install` or `app update`; it can remain
+outside the installed app directory.
 
 For published packages, `ctlup` checks the release manifest and the package's
 SHA-256 checksum before replacing the app. An update keeps the previous app at
-the path printed by `ctlup`. Running daemons and their terminal sessions continue
-independently.
+the path printed by `ctlup`. On Windows, the previous directory is retained at
+`~/.tokn/ctl/apps/.ctlup-ctmux/previous`. Windows replacement uses two directory
+renames with a short gap when the app path is absent. It retains an interrupted
+replacement at `.ctlup-ctmux/pending-previous`; the next `ctlup app install` or
+`ctlup app update` restores that directory if the app is missing, or retains it
+as the previous app if activation completed. This is recoverable replacement,
+not an atomic directory exchange. The updater does not stop running apps or
+helpers to make room. On macOS and Linux, independently running daemons and their
+terminal sessions continue.
 Desktop packages can become available after their matching runtime release.
 
 On macOS, `pnpm ctld:build` from a checkout prepares a signed local helper
@@ -266,9 +303,10 @@ verified afterward. A failed post-install check reports that activation may
 have completed; it does not retry, roll back or stop services automatically.
 
 When a Unix host has a missing or recognized outdated agent, `ctl` prints a
-`ctlup update` command for the selected host or SSH alias. Run it from macOS
-or Linux, then reconnect. Windows clients and targets are outside the
-updater's supported platforms.
+`ctlup update` command for the selected host or SSH alias. Run it, then reconnect.
+Whole-runtime installation and deployment support Windows x64 clients and SSH
+targets as well as the supported Unix platforms. Windows ARM64 currently supports
+the local desktop app commands above; ARM64 whole-runtime bundles are unavailable.
 
 ## Desktop and migration
 

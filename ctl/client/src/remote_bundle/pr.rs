@@ -1,24 +1,22 @@
 //! Temporary bundle builds for pull requests in the ctl repository.
 
+use super::github::{Github, download_artifact};
 use super::{
-  BundleSet, Error, MAX_BUNDLE_SET_BYTES, WINDOWS_TARGET, bundle_set_file, download_error,
-  read_bounded_file,
+  BundleSet, Error, MAX_BUNDLE_SET_BYTES, WINDOWS_TARGET, bundle_set_file, read_bounded_file,
 };
 use ctl_core::private_fs;
-use reqwest::{Client, Url, header};
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use reqwest::Url;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::time::Duration;
 
 const REPOSITORY: &str = "tokn-ai/ctl";
 const REPOSITORY_URL: &str = "https://github.com/tokn-ai/ctl";
 const BUNDLE_WORKFLOW: &str = ".github/workflows/bundles.yml";
 const ARTIFACT_NAME: &str = "ctl-agent-bundle-set";
 const WINDOWS_ARTIFACT_NAME: &str = "ctl-agent-windows-bundle-set";
-const MAX_GITHUB_JSON_BYTES: usize = 4 * 1024 * 1024;
 const PAGE_SIZE: usize = 100;
 
 fn artifact_name(target: &str) -> &'static str {
@@ -254,45 +252,6 @@ pub async fn download_for_target(number: u64, target: &str) -> Result<Downloaded
   .map_err(io::Error::other)?
 }
 
-pub(super) async fn download_artifact(
-  run_id: u64,
-  name: &str,
-  destination: &Path,
-) -> Result<(), Error> {
-  let status = tokio::process::Command::new("gh")
-    .args([
-      "run",
-      "download",
-      &run_id.to_string(),
-      "--repo",
-      "github.com/tokn-ai/ctl",
-    ])
-    .args(["--name", name, "--dir"])
-    .arg(destination)
-    .env("GH_PROMPT_DISABLED", "1")
-    .env("TMPDIR", destination)
-    .kill_on_drop(true)
-    .stdin(Stdio::null())
-    .stdout(Stdio::null())
-    .status()
-    .await
-    .map_err(|error| {
-      if error.kind() == io::ErrorKind::NotFound {
-        Error::Download(
-          "install the GitHub CLI and run `gh auth login` to download workflow artifacts".into(),
-        )
-      } else {
-        Error::Io(error)
-      }
-    })?;
-  if !status.success() {
-    return Err(Error::Download(format!(
-      "GitHub CLI could not download {name} from run {run_id}; check `gh auth status`",
-    )));
-  }
-  Ok(())
-}
-
 fn verify_download(directory: &Path, revision: &str, set_file: &str) -> Result<(), Error> {
   let bytes = read_bounded_file(&directory.join(set_file), MAX_BUNDLE_SET_BYTES)?;
   let manifest = BundleSet::parse_set(&bytes, set_file)?;
@@ -351,47 +310,7 @@ fn verify_download(directory: &Path, revision: &str, set_file: &str) -> Result<(
   Ok(())
 }
 
-struct Github(Client);
-
 impl Github {
-  fn new() -> Result<Self, Error> {
-    let headers = header::HeaderMap::from_iter([
-      (
-        header::ACCEPT,
-        header::HeaderValue::from_static("application/vnd.github+json"),
-      ),
-      (
-        header::CACHE_CONTROL,
-        header::HeaderValue::from_static("no-cache"),
-      ),
-    ]);
-    Client::builder()
-      .https_only(true)
-      .redirect(reqwest::redirect::Policy::none())
-      .connect_timeout(Duration::from_secs(15))
-      .read_timeout(Duration::from_secs(30))
-      .user_agent(concat!("ctlup/", env!("CARGO_PKG_VERSION")))
-      .default_headers(headers)
-      .build()
-      .map(Self)
-      .map_err(download_error)
-  }
-
-  async fn get<T: DeserializeOwned>(&self, path: &str, query: &[(&str, &str)]) -> Result<T, Error> {
-    let mut url = Url::parse(&format!("https://api.github.com/repos/{REPOSITORY}/{path}"))
-      .map_err(|error| Error::Invalid(error.to_string()))?;
-    if !query.is_empty() {
-      url.query_pairs_mut().extend_pairs(query);
-    }
-    self.read_json(&url).await
-  }
-
-  async fn read_json<T: DeserializeOwned>(&self, url: &Url) -> Result<T, Error> {
-    let bytes = super::download(&self.0, url.as_str(), MAX_GITHUB_JSON_BYTES).await?;
-    serde_json::from_slice(&bytes)
-      .map_err(|_| Error::Invalid("GitHub returned invalid PR build metadata".into()))
-  }
-
   async fn recent_pulls(&self) -> Result<Vec<PullRequest>, Error> {
     self
       .get(

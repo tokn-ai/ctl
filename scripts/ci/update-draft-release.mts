@@ -9,7 +9,7 @@ import { promisify } from "node:util";
 
 import { parseHelperProtocols, sameProtocols, type ProtocolInfo } from "../shared/protocol-contract.mts";
 import { agentTargets, maxAgentManifestBytes, parseAgentBundleSet, readAgentFile, verifyAgentBundleTarget, windowsAgentManifestName } from "../shared/agent-bundle.mts";
-import { verifyUpdaterTarget } from "../shared/updater-bundle.mts";
+import { updaterManifestName, verifyUpdaterTarget, windowsUpdaterTargets } from "../shared/updater-bundle.mts";
 import { validatedWindowsComponentSet } from "./bundle-publication.mts";
 
 const execFileAsync = promisify(execFile);
@@ -21,6 +21,7 @@ const desktopTargets = [
   "aarch64-unknown-linux-gnu",
   "x86_64-apple-darwin",
   "aarch64-apple-darwin",
+  ...windowsUpdaterTargets,
 ] as const;
 const ctldTargets = ["x86_64-apple-darwin", "aarch64-apple-darwin"] as const;
 
@@ -157,9 +158,11 @@ export async function validateReleaseBundle(
 
   for (const target of desktopTargets) {
     const manifestName = `desktop-${target}.json`;
-    if (options.allow_partial && !names.has(manifestName)) continue;
+    const windows = target.endsWith("-pc-windows-msvc");
+    // Windows groups publish independently of the required Unix desktop set.
+    if ((options.allow_partial || windows) && !names.has(manifestName)) continue;
     const manifest = await readJson(directory, manifestName);
-    const extensions = target.endsWith("apple-darwin")
+    const extensions = windows ? ["zip"] : target.endsWith("apple-darwin")
       ? ["dmg", "app.tar.gz"]
       : ["deb", "rpm", "AppImage"];
     const expectedAssets = new Set(extensions.map((extension) => `ctmux-${identity.bundle_id}-${target}.${extension}`));
@@ -183,7 +186,7 @@ export async function validateReleaseBundle(
         unsignedTargets.push(target);
       }
     } else if (manifest.signing_mode !== "not_applicable") {
-      throw new Error(`Invalid Linux signing mode: ${manifestName}`);
+      throw new Error(`Invalid ${windows ? "Windows" : "Linux"} signing mode: ${manifestName}`);
     }
     addNames([manifestName]);
     for (const asset of manifest.assets) {
@@ -197,6 +200,10 @@ export async function validateReleaseBundle(
       addNames(await validateAsset(directory, asset.name, asset.sha256));
     }
     availableDesktopTargets.push(target);
+    // Windows x64 runtime and desktop packages share one updater asset group.
+    if (windows && !assetNames.has(updaterManifestName(target))) {
+      addNames(await verifyUpdaterTarget(directory, identity, target, true));
+    }
   }
   // Strict validation requires complete helper/CLI pairs when included, and
   // requires both pairs for version builds. Partial uploads validate each
@@ -307,6 +314,9 @@ export function releaseNotes(bundle: ReleaseBundle, previous: string | null): st
   ];
   if (bundle.desktop_targets.length > 0) {
     lines.push(`Desktop packages: ${bundle.desktop_targets.map((target) => `\`${target}\``).join(", ")}.`);
+    if (bundle.desktop_targets.some((target) => target.endsWith("-pc-windows-msvc"))) {
+      lines.push("Windows desktop ZIPs are portable per-user packages and include separately downloadable ctlup.exe files with matching checksums and manifests.");
+    }
   }
   if (bundle.signed_ctld_targets.length > 0) {
     lines.push(`Includes standalone Developer ID signed, notarized, and stapled ctld.app bundles for: ${bundle.signed_ctld_targets.map((target) => `\`${target}\``).join(", ")}.`);

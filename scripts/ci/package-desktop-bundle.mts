@@ -5,6 +5,7 @@ import { chmod, copyFile, lstat, mkdir, readdir, writeFile } from "node:fs/promi
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
+import { createWindowsPortable, isWindowsDesktopTarget, windowsPortableExecutables } from "../shared/windows-portable.mts";
 
 const execute = promisify(execFile);
 const macTargets = new Set(["x86_64-apple-darwin", "aarch64-apple-darwin"]);
@@ -19,6 +20,8 @@ export interface DesktopBundleOptions {
   signing_mode: SigningMode;
   input_directory: string;
   output_directory: string;
+  app_version?: string;
+  resources_directory?: string;
 }
 
 export interface DesktopBundleManifest {
@@ -63,7 +66,8 @@ async function checksum(path: string): Promise<string> {
 
 export async function packageDesktopBundle(options: DesktopBundleOptions): Promise<DesktopBundleManifest> {
   const isMac = macTargets.has(options.target);
-  if (!isMac && !linuxTargets.has(options.target)) {
+  const isWindows = isWindowsDesktopTarget(options.target);
+  if (!isMac && !isWindows && !linuxTargets.has(options.target)) {
     throw new Error(`unsupported desktop target: ${options.target}`);
   }
   if (!/^[a-zA-Z0-9][a-zA-Z0-9._+-]{0,127}$/.test(options.bundle_id)) {
@@ -75,8 +79,9 @@ export async function packageDesktopBundle(options: DesktopBundleOptions): Promi
   if (isMac ? !["signed", "unsigned"].includes(options.signing_mode) : options.signing_mode !== "not_applicable") {
     throw new Error(`invalid signing mode ${options.signing_mode} for ${options.target}`);
   }
+  if (isWindows && !options.app_version) throw new Error("Windows desktop packaging requires app_version");
 
-  const formats = isMac
+  const formats = isWindows ? [] : isMac
     ? [["dmg", ".dmg"]]
     : [["deb", ".deb"], ["rpm", ".rpm"], ["appimage", ".AppImage"]];
   // Resolve every required format before writing release assets, so missing or
@@ -113,6 +118,17 @@ export async function packageDesktopBundle(options: DesktopBundleOptions): Promi
     await writeFile(join(options.output_directory, `${name}.sha256`), `${sha256}  ${name}\n`);
     assets.push({ name, sha256 });
   };
+  if (isWindows) {
+    const name = `${prefix}.zip`;
+    await createWindowsPortable({
+      target: options.target, app_version: options.app_version!,
+      archive_path: join(options.output_directory, name), resources_directory: options.resources_directory,
+      executables: Object.fromEntries(windowsPortableExecutables.map((executable) => [
+        executable, join(options.input_directory, `${executable}.exe`),
+      ])) as Record<(typeof windowsPortableExecutables)[number], string>,
+    });
+    await recordAsset(name);
+  }
   for (const { source, extension } of installers) {
     const name = `${prefix}${extension}`;
     const destination = join(options.output_directory, name);
@@ -148,12 +164,13 @@ export async function packageDesktopBundle(options: DesktopBundleOptions): Promi
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
-  if (args.length !== 6) {
-    throw new Error("usage: package-desktop-bundle.mts TARGET BUNDLE_ID GIT_REVISION SIGNING_MODE INPUT_DIRECTORY OUTPUT_DIRECTORY");
+  if (args.length < 6 || args.length > 8) {
+    throw new Error("usage: package-desktop-bundle.mts TARGET BUNDLE_ID GIT_REVISION SIGNING_MODE INPUT_DIRECTORY OUTPUT_DIRECTORY [APP_VERSION [RESOURCES_DIRECTORY]]");
   }
-  const [target, bundle_id, git_revision, signing_mode, input_directory, output_directory] = args;
+  const [target, bundle_id, git_revision, signing_mode, input_directory, output_directory, app_version, resources_directory] = args;
   const manifest = await packageDesktopBundle({
     target, bundle_id, git_revision, signing_mode: signing_mode as SigningMode, input_directory, output_directory,
+    app_version, resources_directory,
   });
   console.log(`Packaged ${manifest.assets.length} desktop assets for ${target} in ${output_directory}`);
 }

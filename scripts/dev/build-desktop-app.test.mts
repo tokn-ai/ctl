@@ -7,7 +7,8 @@ import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { promisify } from "node:util";
 import { componentMapFixture } from "../ci/agent-bundle.fixtures.mts";
-import { buildDesktopApp, type DesktopBuildOptions } from "./build-desktop-app.mts";
+import { extractWindowsPortableFixture, windowsExecutableFixture } from "../shared/windows-portable.fixtures.mts";
+import { buildDesktopApp, runDesktopBuildCommand, type DesktopBuildOptions } from "./build-desktop-app.mts";
 import type { buildDaemons } from "./daemon-build.mts";
 import type { MacosCommandRunner } from "./macos-provisioning.mts";
 
@@ -33,9 +34,13 @@ async function fixture(t: TestContext, settings: {
   const checkout = createHash("sha256").update(workspace).digest("hex").slice(0, 20);
   const cache = join(target_directory, "ctl-desktop-build", checkout, "cargo");
   const macos = native.endsWith("-apple-darwin");
+  const windows = native.endsWith("-pc-windows-msvc");
+  const windows_app = join(cache, native, "debug", "ctmux-app.exe");
   const bundle_directory = join(cache, native, "debug/bundle", macos ? "macos" : "appimage");
   await mkdir(bundle_directory, { recursive: true, mode: 0o700 });
   await writeFile(join(bundle_directory, "stale-app"), "earlier build");
+  if (windows) await writeFile(windows_app, windowsExecutableFixture(native));
+  await writeFile(join(config_directory, "resources/agent-bundles/.resource"), "bundled resource");
   const calls: { command: string; args: string[] }[] = [];
   const build: typeof buildDaemons = async (args, cwd, env) => {
     calls.push({ command: "buildDaemons", args });
@@ -45,7 +50,7 @@ async function fixture(t: TestContext, settings: {
     const result = { ctld: "", ctmuxd: "", "ctl-taskd": "" };
     for (const name of ["ctld", "ctmuxd", "ctl-taskd"] as const) {
       const executable = join(root, `compiled-${name}`);
-      await writeFile(executable, `fresh ${name}`, { mode: 0o755 });
+      await writeFile(executable, windows ? windowsExecutableFixture(native) : `fresh ${name}`, { mode: 0o755 });
       result[name] = executable;
     }
     return result;
@@ -97,8 +102,12 @@ async function fixture(t: TestContext, settings: {
       assert.equal(context.env.CARGO_TARGET_DIR, cache);
       assert.ok(args.includes("--debug"));
       assert.equal(args[args.indexOf("--target") + 1], native);
-      assert.equal(args[args.indexOf("--bundles") + 1], macos ? "app" : "appimage");
+      if (windows) {
+        assert.ok(args.includes("--no-bundle"));
+        assert.ok(!args.includes("--bundles"));
+      } else assert.equal(args[args.indexOf("--bundles") + 1], macos ? "app" : "appimage");
       const config = JSON.parse(await readFile(args[args.indexOf("--config") + 1]!, "utf8"));
+      if (windows) assert.deepEqual(config.bundle.externalBin, []);
       assert.deepEqual(config.bundle.resources, {
         [join(config_directory, "resources/agent-bundles")]: "resources/agent-bundles/",
       });
@@ -106,11 +115,13 @@ async function fixture(t: TestContext, settings: {
         assert.ok(path.startsWith(join(output, "binaries")));
         assert.match(await readFile(`${path}-${native}`, "utf8"), /^fresh /);
       }
-      await assert.rejects(readFile(join(bundle_directory, "stale-app")));
+      await assert.rejects(readFile(windows ? windows_app : join(bundle_directory, "stale-app")));
       if (settings.output === "failed") throw new Error("fixture frontend failed");
       if (settings.output === "missing") return empty;
       await mkdir(bundle_directory, { recursive: true });
-      if (macos) {
+      if (windows) {
+        await writeFile(windows_app, windowsExecutableFixture(native));
+      } else if (macos) {
         assert.ok(args.includes("--no-sign"));
         const app = join(bundle_directory, "ctmux.app");
         await mkdir(join(app, "Contents/MacOS"), { recursive: true });
@@ -152,10 +163,31 @@ test("macOS reuses an available provisioning profile for its helper and leaves G
 });
 
 test("failed or incomplete frontend builds cannot reuse earlier app outputs", async (t) => {
-  for (const output of ["failed", "missing"] as const) {
-    const input = await fixture(t, { output });
-    await assert.rejects(buildDesktopApp(input.options, input.run, input.build));
-    await assert.rejects(readFile(join(input.options.output, "result.json")));
+  for (const target of ["x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]) {
+    for (const output of ["failed", "missing"] as const) {
+      const input = await fixture(t, { output, target });
+      await assert.rejects(buildDesktopApp(input.options, input.run, input.build));
+      await assert.rejects(readFile(join(input.options.output, "result.json")));
+    }
+  }
+});
+
+test("Windows local builds produce complete native portable apps without launching any executable", async (t) => {
+  for (const target of ["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"]) {
+    const input = await fixture(t, { target });
+    const result = await buildDesktopApp(input.options, input.run, input.build);
+    assert.equal(result.archive, "ctmux.zip");
+    const extracted = join(input.options.output, "extracted");
+    await extractWindowsPortableFixture(join(input.options.output, result.archive), extracted);
+    const app = join(extracted, "ctmux");
+    const manifest = JSON.parse(await readFile(join(app, "portable.json"), "utf8"));
+    assert.equal(manifest.target_triple, target);
+    assert.equal(manifest.app_version, result.app_version);
+    assert.deepEqual(Object.keys(manifest.files), [
+      "ctl-taskd.exe", "ctld.exe", "ctmux-app.exe", "ctmuxd.exe", "resources/agent-bundles/.resource",
+    ]);
+    assert.equal(await readFile(join(app, "resources/agent-bundles/.resource"), "utf8"), "bundled resource");
+    assert.ok(!input.calls.some((call) => call.command.endsWith(".exe") || call.args[0] === "--component-info"));
   }
 });
 
@@ -178,4 +210,18 @@ test("version mismatches fail before compiling or staging native services", asyn
   const input = await fixture(t, { mixed_version: true });
   await assert.rejects(buildDesktopApp(input.options, input.run, input.build), /same ctmux version/);
   assert.ok(!input.calls.some((call) => call.command === "buildDaemons"));
+});
+
+test("Windows pnpm shims receive paths containing spaces and shell characters literally", { skip: process.platform !== "win32" }, async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "ctl-desktop-command-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const script = join(root, "arguments.cjs");
+  await writeFile(script, "process.stdout.write(JSON.stringify(process.argv.slice(2)))");
+  await writeFile(join(root, "pnpm.cmd"), '@"%CTL_TEST_NODE%" "%CTL_TEST_SCRIPT%" %*\r\n');
+  const args = ["--config", join(root, "space & percent% ! (config).json")];
+  const result = await runDesktopBuildCommand("pnpm", args, {
+    cwd: root, env: { ...process.env, PATH: `${root};${process.env.PATH ?? process.env.Path ?? ""}`,
+      CTL_TEST_NODE: process.execPath, CTL_TEST_SCRIPT: script },
+  });
+  assert.deepEqual(JSON.parse(result.stdout), args);
 });

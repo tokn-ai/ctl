@@ -27,8 +27,8 @@ const SUPPORTED_TARGETS: [&str; 4] = [
 pub(crate) mod archive;
 mod cache;
 pub(crate) mod compatibility;
-#[cfg(unix)]
 pub mod desktop;
+mod github;
 pub mod pr;
 pub mod published;
 pub(crate) use cache::prune_download_cache;
@@ -525,7 +525,7 @@ fn bundle_set_file(target: &str) -> &'static str {
   }
 }
 
-fn read_bounded_file(path: &Path, maximum: usize) -> Result<Vec<u8>, Error> {
+pub(crate) fn read_bounded_file(path: &Path, maximum: usize) -> Result<Vec<u8>, Error> {
   let file = private_fs::options().read(true).open(path)?;
   let metadata = file.metadata()?;
   #[cfg(windows)]

@@ -219,10 +219,13 @@ pub(crate) fn remember_supplied_updater(
   bundle: &Bundle,
   directory: &Path,
 ) -> io::Result<()> {
-  let updater = match crate::remote_bundle::published::read_updater(
-    directory,
-    &bundle.manifest.target_triple,
-  ) {
+  let target = &bundle.manifest.target_triple;
+  // Native builds such as GNU Linux do not have publisher updater sidecars.
+  // Their manager is resolved from the native executable during provisioning.
+  if ctl_core::bundles::local_target(target) && !crate::remote_bundle::supported_target(target) {
+    return Ok(());
+  }
+  let updater = match crate::remote_bundle::published::read_updater(directory, target) {
     Ok(updater) => updater,
     Err(crate::remote_bundle::Error::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
       return Ok(());
@@ -365,6 +368,37 @@ mod tests {
   use super::*;
   use sha2::{Digest as _, Sha256};
   use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
+
+  #[test]
+  fn native_builds_without_publisher_updaters_can_be_imported() {
+    let root = super::super::TemporaryDirectory::new("native-updater").unwrap();
+    let fixture =
+      crate::remote_bundle::compatibility::tests::Fixture::new("0.1.0", &"a".repeat(40))
+        .with_clients();
+    let target = ctl_core::paths::native_target();
+    let components = serde_json::from_value(fixture.inner["components"].clone()).unwrap();
+    let manifest = ctl_core::bundles::Manifest::new(
+      target,
+      ctl_core::bundles::Source::Local,
+      components,
+      &fixture.files,
+    )
+    .unwrap();
+    let bundle = ctl_core::bundles::Store::cache(&root.0)
+      .publish(&manifest, &fixture.files)
+      .unwrap();
+    remember_supplied_updater(&root.0, &bundle, &root.0).unwrap();
+    assert!(supplied_updater(&root.0, &manifest).unwrap().is_none());
+    assert!(!root.0.join(".tokn/ctl/cache/updaters").exists());
+
+    // Explicit publisher lookups still reject GNU targets, even without files.
+    for target in ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"] {
+      assert!(matches!(
+        crate::remote_bundle::published::read_updater(&root.0, target),
+        Err(crate::remote_bundle::Error::UnsupportedTarget(_))
+      ));
+    }
+  }
 
   #[tokio::test]
   async fn a_runtime_cli_with_valid_metadata_is_not_accepted_as_the_updater() {

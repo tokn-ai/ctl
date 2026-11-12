@@ -2,13 +2,13 @@ use super::{
   Asset, DesktopRelease, DesktopSigning, DesktopTarget, MAX_PACKAGE_BYTES, PackageSource, invalid,
   open_package, parse_manifest, select_asset,
 };
-use crate::remote_bundle::{Error, MAX_BUNDLE_SET_BYTES, pr, published, read_bounded_file};
+use crate::remote_bundle::{Error, MAX_BUNDLE_SET_BYTES, github, published, read_bounded_file};
 use ctl_core::component_update::BundleChannel;
+use ctl_core::private_fs;
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
 use std::fs::{self, File};
 use std::io::{self, Read as _, Write as _};
-use std::os::unix::fs::DirBuilderExt as _;
 use std::path::{Path, PathBuf};
 
 const REPOSITORY: &str = "tokn-ai/ctl";
@@ -20,7 +20,7 @@ pub(super) async fn latest(target: DesktopTarget) -> io::Result<DesktopRelease> 
     .map_err(io::Error::other)?
     .release;
   let (run_id, run_attempt) = publication_run(&publication)?;
-  let github = pr::Github::new().map_err(io::Error::other)?;
+  let github = github::Github::new().map_err(io::Error::other)?;
   let run: WorkflowRun = github
     .get(&format!("actions/runs/{run_id}"), &[])
     .await
@@ -61,7 +61,7 @@ pub(super) async fn latest(target: DesktopTarget) -> io::Result<DesktopRelease> 
     return Err(unavailable(&publication.bundle_id, target));
   }
   let directory = DownloadedArtifact::new()?;
-  pr::download_artifact(run_id, &artifact_name, &directory.0)
+  github::download_artifact(run_id, &artifact_name, &directory.0)
     .await
     .map_err(io::Error::other)?;
   let current: WorkflowRun = github
@@ -121,7 +121,7 @@ pub(super) struct DownloadedArtifact(PathBuf);
 impl DownloadedArtifact {
   fn new() -> io::Result<Self> {
     let path = std::env::temp_dir().join(format!("ctlup-desktop-{}", uuid::Uuid::new_v4()));
-    fs::DirBuilder::new().mode(0o700).create(&path)?;
+    private_fs::create_directory(&path)?;
     Ok(Self(path))
   }
 
@@ -161,14 +161,17 @@ fn publication_run(publication: &published::PublishedRelease) -> io::Result<(u64
     .strip_prefix(&format!("{}-", publication.bundle_id))
     .and_then(|suffix| suffix.split_once('-'))
     .ok_or_else(|| invalid("Nightly publication has no workflow identity"))?;
-  Ok((
-    run_id
-      .parse()
-      .map_err(|_| invalid("invalid Nightly workflow run ID"))?,
-    run_attempt
-      .parse()
-      .map_err(|_| invalid("invalid Nightly workflow attempt"))?,
-  ))
+  let run_id = run_id
+    .parse()
+    .ok()
+    .filter(|id| *id != 0)
+    .ok_or_else(|| invalid("invalid Nightly workflow run ID"))?;
+  let run_attempt = run_attempt
+    .parse()
+    .ok()
+    .filter(|attempt| *attempt != 0)
+    .ok_or_else(|| invalid("invalid Nightly workflow attempt"))?;
+  Ok((run_id, run_attempt))
 }
 
 #[derive(Deserialize)]

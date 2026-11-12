@@ -1,9 +1,11 @@
 import { createHash } from "node:crypto";
+import { spawn } from "node:child_process";
 import { createReadStream } from "node:fs";
 import { chmod, copyFile, lstat, mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseHelperComponent } from "../shared/protocol-contract.mts";
+import { createWindowsPortable } from "../shared/windows-portable.mts";
 import { buildDaemons } from "./daemon-build.mts";
 import { developmentEnvironment, signDevelopmentHelper } from "./ctld-signed.mts";
 import { findProvisioningProfile, runMacosCommand, type MacosCommandRunner } from "./macos-provisioning.mts";
@@ -20,19 +22,34 @@ export interface DesktopBuildResult {
   schema_version: 1;
   app_version: string;
   bundle_id: string;
-  archive: "ctmux.app.tar.gz" | "ctmux.AppImage";
+  archive: "ctmux.app.tar.gz" | "ctmux.AppImage" | "ctmux.zip";
 }
+
+export const runDesktopBuildCommand: MacosCommandRunner = (command, args, context) => {
+  if (process.platform !== "win32" || command !== "pnpm") return runMacosCommand(command, args, context);
+  // Windows pnpm installations normally expose a .cmd shim. Keep paths in the
+  // environment, inside quotes, instead of interpolating them into shell code.
+  const env = { ...context.env };
+  const parameters = args.map((argument, index) => {
+    if (/["\r\n\u0000]/.test(argument)) throw new Error("invalid Windows desktop build argument");
+    const name = `CTL_DESKTOP_BUILD_ARG_${index}`;
+    env[name] = argument;
+    return `"%${name}%"`;
+  });
+  return runMacosCommand("cmd.exe", ["/d", "/v:off", "/s", "/c", `pnpm ${parameters.join(" ")}`], { ...context, env });
+};
 
 /** Build a checkout's complete desktop payload without installing or launching it. */
 export async function buildDesktopApp(
   options: DesktopBuildOptions,
-  run: MacosCommandRunner = runMacosCommand,
+  run: MacosCommandRunner = runDesktopBuildCommand,
   build: typeof buildDaemons = buildDaemons,
 ): Promise<DesktopBuildResult> {
   const workspace = await realpath(options.workspace);
   const output_metadata = await lstat(options.output);
   if (!output_metadata.isDirectory() || output_metadata.isSymbolicLink() ||
-    (process.getuid && output_metadata.uid !== process.getuid()) || (output_metadata.mode & 0o077) !== 0 ||
+    (process.getuid && output_metadata.uid !== process.getuid()) ||
+    (process.platform !== "win32" && (output_metadata.mode & 0o077) !== 0) ||
     (await readdir(options.output)).length !== 0) {
     throw new Error("desktop build output must be an empty owned private directory");
   }
@@ -48,8 +65,8 @@ export async function buildDesktopApp(
     throw new Error("Cargo metadata must describe the requested desktop workspace and an absolute target directory");
   }
   const native = /^host: (\S+)$/m.exec((await invoke(env.RUSTC ?? env.CARGO_BUILD_RUSTC ?? "rustc", ["-vV"])).stdout)?.[1];
-  if (!native || !/^(?:x86_64|aarch64)-(?:apple-darwin|unknown-linux-gnu)$/.test(native)) {
-    throw new Error("local desktop builds require a native macOS or Linux GNU compiler");
+  if (!native || !/^(?:x86_64|aarch64)-(?:apple-darwin|unknown-linux-gnu|pc-windows-msvc)$/.test(native)) {
+    throw new Error("local desktop builds require a native macOS, Linux GNU, or Windows MSVC compiler");
   }
   const app_version = metadata.packages?.find((pkg) => pkg.name === "ctmux-app")?.version;
   const tauri_directory = join(workspace, "apps/desktop/src-tauri");
@@ -69,18 +86,20 @@ export async function buildDesktopApp(
   const cache = join(checkout, "cargo");
   await ensurePrivateDirectory(cache);
   const build_env = { ...env, CARGO_TARGET_DIR: cache };
+  const windows = native.endsWith("-pc-windows-msvc");
   console.error("Building native desktop services…");
   const daemons = await build(["--target", native], workspace, build_env);
   const binaries = join(output, "binaries");
   await ensurePrivateDirectory(binaries);
   for (const name of ["ctld", "ctmuxd", "ctl-taskd"] as const) {
     await requireFile(daemons[name]);
-    await copyFile(daemons[name], join(binaries, `${name}-${native}`));
-    await chmod(join(binaries, `${name}-${native}`), 0o700);
+    const staged = join(binaries, `${name}-${native}${windows ? ".exe" : ""}`);
+    await copyFile(daemons[name], staged);
+    await chmod(staged, 0o700);
   }
 
   const macos = native.endsWith("-apple-darwin");
-  const external_names = macos ? ["ctmuxd", "ctl-taskd"] : ["ctmuxd", "ctl-taskd", "ctld"];
+  const external_names = windows ? [] : macos ? ["ctmuxd", "ctl-taskd"] : ["ctmuxd", "ctl-taskd", "ctld"];
   const bundle: {
     externalBin: string[];
     resources?: Record<string, string>;
@@ -127,17 +146,26 @@ export async function buildDesktopApp(
   await writeFile(tauri_config, JSON.stringify({ bundle }), { mode: 0o600, flag: "wx" });
   const format = macos ? "app" : "appimage";
   const bundle_directory = join(cache, native, "debug/bundle", macos ? "macos" : "appimage");
+  const windows_app = join(cache, native, "debug", "ctmux-app.exe");
   // A failed or incomplete invocation must never select an earlier app bundle.
-  await rm(bundle_directory, { recursive: true, force: true });
+  if (windows) await rm(windows_app, { force: true });
+  else await rm(bundle_directory, { recursive: true, force: true });
   console.error("Building desktop frontend and native app…");
   await invoke("pnpm", [
     "--workspace-root", "desktop:build", "--debug", "--target", native,
-    "--bundles", format, "--config", tauri_config, ...(macos ? ["--no-sign"] : []),
+    ...(windows ? ["--no-bundle"] : ["--bundles", format]),
+    "--config", tauri_config, ...(macos ? ["--no-sign"] : []),
   ], { CARGO_TARGET_DIR: cache });
 
-  const archive = macos ? "ctmux.app.tar.gz" : "ctmux.AppImage";
+  const archive = windows ? "ctmux.zip" : macos ? "ctmux.app.tar.gz" : "ctmux.AppImage";
   const payload = join(output, archive);
-  if (macos) {
+  if (windows) {
+    await createWindowsPortable({
+      target: native, app_version, archive_path: payload,
+      executables: { "ctmux-app": windows_app, ...daemons },
+      ...(bundle.resources ? { resources_directory: resources } : {}),
+    });
+  } else if (macos) {
     const app = join(bundle_directory, "ctmux.app");
     await requireFile(join(app, "Contents/MacOS/ctmux-app"));
     await invoke("tar", ["-czf", payload, "-C", bundle_directory, "ctmux.app"], { COPYFILE_DISABLE: undefined });
@@ -175,7 +203,14 @@ async function directoryExists(path: string): Promise<boolean> {
 
 async function main(): Promise<void> {
   const owned_group = process.env.CTLUP_DEVELOPMENT_LIFELINE === "1";
-  const canceled = () => process.kill(-process.pid, "SIGKILL");
+  const canceled = () => {
+    if (process.platform === "win32") {
+      // The builder owns this tree. Windows has no negative-PID process groups.
+      const killer = spawn("taskkill.exe", ["/PID", String(process.pid), "/T", "/F"], { stdio: "ignore" });
+      killer.once("error", () => process.exit(1));
+      killer.once("exit", () => process.exit(1));
+    } else process.kill(-process.pid, "SIGKILL");
+  };
   if (owned_group) {
     process.stdin.once("end", canceled);
     process.stdin.once("error", canceled);

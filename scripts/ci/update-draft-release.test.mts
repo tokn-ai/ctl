@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { cp, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { archiveEntriesFixture, componentMapFixture, tarFixture } from "./agent-bundle.fixtures.mts";
+import { windowsAgentManifestName, windowsAgentTarget } from "../shared/agent-bundle.mts";
+import { publicationFixture, windowsComponentSetFixture } from "./bundle-publication.fixtures.mts";
+import { updaterBinaryName, updaterManifestName, windowsUpdaterTargets } from "../shared/updater-bundle.mts";
 import {
   planAssetUpdate,
   releaseNotes,
@@ -25,6 +28,7 @@ const desktopTargets = [
   "aarch64-unknown-linux-gnu",
   "x86_64-apple-darwin",
   "aarch64-apple-darwin",
+  ...windowsUpdaterTargets,
 ];
 const remoteTargets = [
   "x86_64-unknown-linux-musl",
@@ -64,7 +68,8 @@ async function fixture(
     schema_version: 1, ...buildIdentity, targets,
   }));
   for (const target of desktop_targets) {
-    const extensions = target.endsWith("apple-darwin") ? ["dmg", "app.tar.gz"] : ["deb", "rpm", "AppImage"];
+    const windows = target.endsWith("-pc-windows-msvc");
+    const extensions = windows ? ["zip"] : target.endsWith("apple-darwin") ? ["dmg", "app.tar.gz"] : ["deb", "rpm", "AppImage"];
     const assets: { name: string; sha256: string }[] = [];
     for (const extension of extensions) {
       const name = `ctmux-${buildIdentity.bundle_id}-${target}.${extension}`;
@@ -78,6 +83,14 @@ async function fixture(
       signing_mode: target.endsWith("apple-darwin") ? (buildIdentity.bundle_id === buildIdentity.app_version ? "signed" : "unsigned") : "not_applicable",
       assets,
     }));
+    if (windows) {
+      const binary = updaterBinaryName(buildIdentity, target);
+      const payload = Buffer.from(`Windows updater ${target}`);
+      const updater = await writeAsset(directory, binary, payload);
+      await writeFile(join(directory, updaterManifestName(target)), JSON.stringify({
+        schema_version: 1, ...buildIdentity, target_triple: target, binary, sha256: updater.sha256, size: payload.length,
+      }));
+    }
   }
   return directory;
 }
@@ -223,10 +236,10 @@ function mockGithub(options: {
   return { gh, calls, payloads, creation_payloads: creationPayloads };
 }
 
-test("validates all four desktop and remote targets and their checksum files", async (t) => {
+test("validates six desktop targets, four remote targets and Windows updater sidecars", async (t) => {
   const directory = await fixture(t);
   const bundle = await validateReleaseBundle(identity, directory);
-  assert.equal(bundle.asset_names.length, 33);
+  assert.equal(bundle.asset_names.length, 45);
   assert.deepEqual(bundle.desktop_targets, desktopTargets);
   assert.deepEqual(bundle.unsigned_targets, ["x86_64-apple-darwin", "aarch64-apple-darwin"]);
   assert.ok(bundle.asset_names.includes("bundle-set.json"));
@@ -285,6 +298,49 @@ test("partial builds accept a CLI only with its matching signed helper", async (
   await ctldAssets(directory, identity, [macTargets[0]!]);
   await assert.rejects(validateReleaseBundle(identity, directory, { allow_partial: true }), /matching helper identity/);
 });
+
+test("strict validation retains complete Unix desktops when optional Windows jobs produce no assets", async (t) => {
+  const unix_targets = desktopTargets.filter((target) => !target.endsWith("-pc-windows-msvc"));
+  const directory = await fixture(t, identity, unix_targets);
+  const bundle = await validateReleaseBundle(identity, directory);
+  assert.deepEqual(bundle.desktop_targets, unix_targets);
+  assert.equal(bundle.asset_names.length, 33);
+});
+
+test("Windows runtime and desktop targets share one verified x64 updater group", async (t) => {
+  const directory = await fixture(t, identity, [...windowsUpdaterTargets]);
+  const root = await mkdtemp(join(tmpdir(), "ctmux-windows-runtime-test-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const publication = { ...publicationFixture(1), ...identity };
+  await cp(await windowsComponentSetFixture(root, publication), directory, { recursive: true });
+  const bundle = await validateReleaseBundle(identity, directory, { allow_partial: true });
+  assert.deepEqual(bundle.desktop_targets, windowsUpdaterTargets);
+  assert.ok(bundle.asset_names.includes(windowsAgentManifestName));
+  for (const target of windowsUpdaterTargets) {
+    assert.equal(bundle.asset_names.filter((name) => name === updaterManifestName(target)).length, 1);
+    assert.equal(bundle.asset_names.filter((name) => name === updaterBinaryName(identity, target)).length, 1);
+  }
+  await rm(join(directory, `${updaterBinaryName(identity, windowsAgentTarget)}.sha256`));
+  await assert.rejects(validateReleaseBundle(identity, directory, { allow_partial: true }), /ENOENT/);
+});
+
+for (const target of windowsUpdaterTargets) {
+  test(`a ${target} desktop append requires its source-bound standalone updater`, async (t) => {
+    const directory = await fixture(t, identity, [target]);
+    const verified = await validateReleaseBundle(identity, directory, { allow_partial: true });
+    assert.deepEqual(verified.desktop_targets, [target]);
+    assert.ok(verified.asset_names.includes(updaterBinaryName(identity, target)));
+    const path = join(directory, updaterManifestName(target));
+    const manifest = JSON.parse(await readFile(path, "utf8"));
+    await writeFile(path, JSON.stringify({ ...manifest, git_revision: "b".repeat(40) }));
+    await assert.rejects(validateReleaseBundle(identity, directory, { allow_partial: true }), /publication identity/);
+    await writeFile(path, JSON.stringify(manifest));
+    await writeFile(join(directory, manifest.binary), "corrupt updater");
+    await assert.rejects(validateReleaseBundle(identity, directory, { allow_partial: true }), /ctlup checksum mismatch/);
+    await rm(path);
+    await assert.rejects(validateReleaseBundle(identity, directory, { allow_partial: true }), /ENOENT/);
+  });
+}
 
 test("partial validation still requires every remote target", async (t) => {
   const directory = await fixture(t, identity, []);
@@ -384,7 +440,7 @@ test("accepts a complete signed standalone helper pair without CLI assets in dev
   const directory = await fixture(t);
   await ctldAssets(directory);
   const bundle = await validateReleaseBundle(identity, directory);
-  assert.equal(bundle.asset_names.length, 39);
+  assert.equal(bundle.asset_names.length, 51);
   assert.deepEqual(bundle.signed_ctld_targets, macTargets);
   assert.deepEqual(bundle.bundled_cli_targets, []);
   assert.ok(releaseNotes(bundle, null).includes("signed, notarized, and stapled ctld.app"));
@@ -397,7 +453,7 @@ test("accepts matching signed helper and bundled CLI pairs in development and ve
       await ctldAssets(directory, buildIdentity);
       await cliAssets(directory, buildIdentity);
       const bundle = await validateReleaseBundle(buildIdentity, directory);
-      assert.equal(bundle.asset_names.length, 45);
+      assert.equal(bundle.asset_names.length, 57);
       assert.deepEqual(bundle.signed_ctld_targets, macTargets);
       assert.deepEqual(bundle.bundled_cli_targets, macTargets);
       const notes = releaseNotes(bundle, null);

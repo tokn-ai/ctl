@@ -5,12 +5,12 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { windowsAgentManifestName, windowsAgentTarget } from "../shared/agent-bundle.mts";
-import { updaterManifestName } from "../shared/updater-bundle.mts";
 import { componentMapFixture } from "./agent-bundle.fixtures.mts";
 import { componentSetFixture, publicationFixture, windowsComponentSetFixture } from "./bundle-publication.fixtures.mts";
 import { fileDigest, validatedComponentSet } from "./bundle-publication.mts";
 import { publishComponentRelease } from "./publish-component-release.mts";
 import { managedLabelPrefix, releaseNotes, validateReleaseBundle, type GhRunner } from "./update-draft-release.mts";
+import { updaterBinaryName, updaterManifestName, windowsUpdaterTargets } from "../shared/updater-bundle.mts";
 
 const identity = publicationFixture(1, "stable");
 const buildIdentity = { app_version: identity.app_version, bundle_id: identity.bundle_id, git_revision: identity.git_revision };
@@ -93,7 +93,8 @@ async function writeAsset(directory: string, name: string, content = `fixture ${
 
 async function desktopAssets(directory: string, target: string): Promise<void> {
   const mac = target.endsWith("apple-darwin"), assets = [];
-  for (const extension of mac ? ["dmg", "app.tar.gz"] : ["deb", "rpm", "AppImage"]) {
+  const windows = target.endsWith("-pc-windows-msvc");
+  for (const extension of windows ? ["zip"] : mac ? ["dmg", "app.tar.gz"] : ["deb", "rpm", "AppImage"]) {
     const asset = await writeAsset(directory, `ctmux-${identity.bundle_id}-${target}.${extension}`);
     assets.push({ name: asset.archive, sha256: asset.sha256 });
   }
@@ -101,6 +102,13 @@ async function desktopAssets(directory: string, target: string): Promise<void> {
     schema_version: 1, target, bundle_id: identity.bundle_id, git_revision: identity.git_revision,
     signing_mode: mac ? "signed" : "not_applicable", assets,
   }));
+  if (windows) {
+    const binary = updaterBinaryName(identity, target);
+    const asset = await writeAsset(directory, binary);
+    await writeFile(join(directory, updaterManifestName(target)), JSON.stringify({
+      schema_version: 1, ...buildIdentity, target_triple: target, binary, sha256: asset.sha256, size: asset.archive_size,
+    }));
+  }
 }
 
 async function helperAssets(directory: string, target: string, include_cli = false): Promise<void> {
@@ -179,6 +187,31 @@ test("a tag retry appends a Windows companion to a published Unix-only release",
   assert.ok(!api.calls.some((args) => args.includes("DELETE")));
 });
 
+test("Windows desktop append reuses the canonical x64 runtime updater and adds ARM64 independently", async (t) => {
+  const canonical_root = await fixture(t);
+  const canonical = await componentSetFixture(canonical_root, identity);
+  await cp(await windowsComponentSetFixture(canonical_root, identity), canonical, { recursive: true });
+  const original = await existingComponents(canonical);
+  const incoming_root = await fixture(t);
+  const directory = await componentSetFixture(incoming_root, identity);
+  await cp(await windowsComponentSetFixture(incoming_root, identity), directory, { recursive: true });
+  for (const target of windowsUpdaterTargets) await desktopAssets(directory, target);
+  const updater = updaterBinaryName(identity, windowsAgentTarget);
+  assert.notDeepEqual(await readFile(join(directory, updater)), await readFile(join(canonical, updater)));
+  const api = github({ release: published, assets: original, canonical_directory: canonical });
+  await publishComponentRelease("tokn-ai/ctl", identity, directory, "desktop", api.gh);
+  assert.deepEqual(await readFile(join(directory, updater)), await readFile(join(canonical, updater)));
+  assert.deepEqual(api.assets.find((asset) => asset.name === updater), original.find((asset) => asset.name === updater));
+  const uploads = uploadNames(api.calls);
+  assert.equal(uploads.length, 9);
+  assert.ok(!uploads.includes(updater));
+  assert.ok(!uploads.includes(updaterManifestName(windowsAgentTarget)));
+  assert.ok(uploads.includes(updaterManifestName(windowsUpdaterTargets[1])));
+  assert.equal(new Set(api.assets.map((asset) => asset.name)).size, api.assets.length);
+  assert.deepEqual((await validateReleaseBundle(buildIdentity, directory, { allow_partial: true })).desktop_targets, windowsUpdaterTargets);
+  assertPayloadsBeforeManifests(api.calls);
+});
+
 test("a partial Linux desktop appends without macOS desktops or helpers", async (t) => {
   const directory = await componentSetFixture(await fixture(t), identity);
   const components = await existingComponents(directory), target = "x86_64-unknown-linux-gnu";
@@ -234,6 +267,26 @@ test("a later target append retains canonical target bytes and lists the target 
   assert.ok(notes?.includes(`Desktop packages: \`${old_target}\`, \`${new_target}\`.`));
   assert.ok(!api.calls.some((args) => args.includes("DELETE")));
   assertPayloadsBeforeManifests(api.calls);
+});
+
+test("a later desktop append restores the canonical Windows ZIP and complete updater group", async (t) => {
+  const canonical = await componentSetFixture(await fixture(t), identity);
+  const old_target = windowsUpdaterTargets[1], new_target = "x86_64-unknown-linux-gnu";
+  await desktopAssets(canonical, old_target);
+  const original = await existingReleaseAssets(canonical);
+  const directory = await componentSetFixture(await fixture(t), identity);
+  await desktopAssets(directory, new_target);
+  const api = github({ release: published, assets: original, canonical_directory: canonical });
+  await publishComponentRelease("tokn-ai/ctl", identity, directory, "desktop", api.gh);
+  for (const asset of original.filter((asset) => asset.name.includes(old_target))) {
+    assert.deepEqual(await readFile(join(directory, asset.name)), await readFile(join(canonical, asset.name)));
+    assert.deepEqual(api.assets.find((entry) => entry.name === asset.name), asset);
+  }
+  assert.equal(original.filter((asset) => asset.name.includes(old_target)).length, 6);
+  assert.equal(uploadNames(api.calls).length, 7);
+  assert.ok(uploadNames(api.calls).every((name) => name.includes(new_target)));
+  assert.ok(api.release()?.body?.includes(old_target));
+  assert.ok(!api.calls.some((args) => args.includes("DELETE")));
 });
 
 test("a rebuilt target reuses canonical bytes while a new target appends", async (t) => {
@@ -402,7 +455,7 @@ test("a tag rebuild reuses published canonical archives despite different valid 
 test("desktop packages append to an already-published matching component release", async (t) => {
   const directory = await componentSetFixture(await fixture(t), identity);
   const api = github({ release: published, assets: await existingComponents(directory), canonical_directory: directory });
-  for (const target of ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "aarch64-apple-darwin"]) {
+  for (const target of ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "aarch64-apple-darwin", ...windowsUpdaterTargets]) {
     await desktopAssets(directory, target);
     if (target.endsWith("apple-darwin")) await helperAssets(directory, target, true);
   }
@@ -411,6 +464,10 @@ test("desktop packages append to an already-published matching component release
   assert.ok(api.release()?.body?.startsWith("Maintainer notes"));
   assert.ok(api.assets.some((asset) => asset.name === "desktop-aarch64-apple-darwin.json"));
   assert.ok(api.assets.some((asset) => asset.name === "ctl-cli-aarch64-apple-darwin.json"));
+  for (const target of windowsUpdaterTargets) {
+    assert.ok(api.assets.some((asset) => asset.name === `desktop-${target}.json`));
+    assert.ok(api.assets.some((asset) => asset.name === updaterBinaryName(identity, target)));
+  }
   const uploads = uploadNames(api.calls);
   for (const target of ["x86_64-apple-darwin", "aarch64-apple-darwin"]) {
     const manifests = [`ctld-${target}.json`, `ctl-cli-${target}.json`];

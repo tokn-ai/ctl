@@ -1,5 +1,5 @@
 use super::arguments::AppCommand;
-use ctl_client::installation::app_directory;
+use ctl_client::desktop_storage::app_directory;
 use ctl_client::remote_bundle::desktop::{self, DesktopRelease, DesktopSigning, DesktopTarget};
 use ctl_core::component_update::BundleChannel;
 use std::{
@@ -7,11 +7,17 @@ use std::{
   path::{Path, PathBuf},
 };
 
+#[cfg(unix)]
+mod activation;
+#[cfg(windows)]
+#[path = "app/windows_activation.rs"]
 mod activation;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(any(windows, test))]
+mod portable;
 
 pub(super) async fn run(home: &Path, command: AppCommand) -> io::Result<()> {
   let (options, update) = match command {
@@ -24,7 +30,13 @@ pub(super) async fn run(home: &Path, command: AppCommand) -> io::Result<()> {
   let app_name = macos::APP_NAME;
   #[cfg(target_os = "linux")]
   let app_name = "ctmux.AppImage";
+  #[cfg(windows)]
+  let app_name = "ctmux";
+  app_directory(home, true)?;
   let destination = app_directory(home, false)?.join(app_name);
+  // Recover interrupted Windows replacements and acquire the destination lock
+  // before inspecting its state or spending time building/downloading a package.
+  let mut workspace = activation::Workspace::begin(&destination)?;
   let installed = activation::existing(&destination)?;
 
   #[cfg(target_os = "macos")]
@@ -34,6 +46,10 @@ pub(super) async fn run(home: &Path, command: AppCommand) -> io::Result<()> {
   #[cfg(target_os = "linux")]
   if installed.is_some() {
     linux::verify_existing(&destination)?;
+  }
+  #[cfg(windows)]
+  if installed.is_some() {
+    portable::verify_existing(&destination, target.triple())?;
   }
   if update && installed.is_none() {
     return Err(io::Error::new(
@@ -57,16 +73,6 @@ pub(super) async fn run(home: &Path, command: AppCommand) -> io::Result<()> {
     return report_current(home, explicit_channel, &release.bundle_id, &destination);
   }
 
-  app_directory(home, true)?;
-  let mut workspace = activation::Workspace::begin(&destination).map_err(|error| {
-    io::Error::new(
-      error.kind(),
-      format!(
-        "could not stage an app at {}: {error}",
-        destination.display()
-      ),
-    )
-  })?;
   let prepared = prepare(release, workspace.staging()).await?;
 
   #[cfg(target_os = "macos")]
@@ -78,6 +84,10 @@ pub(super) async fn run(home: &Path, command: AppCommand) -> io::Result<()> {
   }
   #[cfg(target_os = "linux")]
   if installed.is_some() && linux::matches(&destination, &prepared.payload)? {
+    return report_current(home, explicit_channel, &prepared.bundle_id, &destination);
+  }
+  #[cfg(windows)]
+  if installed.is_some() && portable::matches(&destination, &prepared.payload)? {
     return report_current(home, explicit_channel, &prepared.bundle_id, &destination);
   }
   let previous = workspace.activate(&prepared.payload, installed.as_ref())?;
@@ -95,7 +105,7 @@ pub(super) async fn run(home: &Path, command: AppCommand) -> io::Result<()> {
     println!("Previous app saved at {}.", previous.display());
   }
   if let Some(channel) = explicit_channel {
-    ctl_client::installation::set_channel(home, channel).map_err(|error| {
+    ctl_client::desktop_storage::set_channel(home, channel).map_err(|error| {
       io::Error::new(
         error.kind(),
         format!("app installed successfully, but could not save its channel preference: {error}"),
@@ -126,6 +136,13 @@ async fn prepare(release: Option<DesktopRelease>, staging: &Path) -> io::Result<
       std::fs::rename(&built.archive, &destination)?;
       linux::prepare(destination)?
     };
+    #[cfg(windows)]
+    let payload = portable::stage(
+      &built.archive,
+      staging,
+      &built.app_version,
+      DesktopTarget::native()?.triple(),
+    )?;
     return Ok(PreparedApp {
       payload,
       bundle_id: built.bundle_id,
@@ -144,6 +161,13 @@ async fn prepare(release: Option<DesktopRelease>, staging: &Path) -> io::Result<
   let staged = macos::stage(&download, staging, &release.app_version, signing)?;
   #[cfg(target_os = "linux")]
   let staged = linux::prepare(download)?;
+  #[cfg(windows)]
+  let staged = portable::stage(
+    &download,
+    staging,
+    &release.app_version,
+    DesktopTarget::native()?.triple(),
+  )?;
 
   Ok(PreparedApp {
     payload: staged,
@@ -158,7 +182,7 @@ fn report_current(
   destination: &Path,
 ) -> io::Result<()> {
   if let Some(channel) = channel {
-    ctl_client::installation::set_channel(home, channel)?;
+    ctl_client::desktop_storage::set_channel(home, channel)?;
   }
   println!(
     "ctmux {bundle_id} is already installed at {}.",

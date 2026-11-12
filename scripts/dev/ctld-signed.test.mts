@@ -12,7 +12,13 @@ const execute = promisify(execFile);
 const protocols = [{ name: "ctld", build: 12, version: "1.0.12", supported_versions: ["1.0.12"] },
   ...["ctld_lifecycle", "ctld_helper"].map((name) => ({ name, build: 1, version: "1.0.1", supported_versions: ["1.0.1"] }))];
 
-async function fixture(t: TestContext, settings: { failure?: "metadata" | "signing" | "architecture" | "signed-metadata"; mutate_original?: boolean; native_binary?: boolean } = {}) {
+async function fixture(t: TestContext, settings: {
+  failure?: "metadata" | "signing" | "architecture" | "signed-metadata";
+  mutate_original?: boolean;
+  native_binary?: boolean;
+  profile_expired?: boolean;
+  renewal?: "failure" | "unavailable";
+} = {}) {
   const root = await mkdtemp(join(tmpdir(), "ctld-prebuilt-signing-test-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const output = join(root, "output"), target_directory = join(root, "custom Cargo cache");
@@ -23,12 +29,18 @@ async function fixture(t: TestContext, settings: { failure?: "metadata" | "signi
   await mkdir(target_directory);
   const target = settings.native_binary && process.arch === "x64" ? "x86_64-apple-darwin" : "aarch64-apple-darwin";
   let probes = 0;
+  let expiration = settings.profile_expired ? "2000-01-01T00:00:00Z" : "2099-01-01T00:00:00Z";
   const calls: { command: string; args: string[]; context: MacosCommandContext }[] = [];
   const run: MacosCommandRunner = async (command, args, context) => {
     calls.push({ command, args, context });
     const empty = { stdout: "", stderr: "" };
     if (command === "security") return empty;
-    if (command === "/usr/libexec/PlistBuddy") return { stdout: args[1]?.endsWith(":ExpirationDate") ? "2099-01-01T00:00:00Z" : "TEAM123ABC.dev.tokn-ai.ctl.ctld", stderr: "" };
+    if (command === "/usr/libexec/PlistBuddy") return { stdout: args[1]?.endsWith(":ExpirationDate") ? expiration : "TEAM123ABC.dev.tokn-ai.ctl.ctld", stderr: "" };
+    if (command === "xcodebuild") {
+      if (settings.renewal === "failure") throw new Error("fixture provisioning renewal failed");
+      if (settings.renewal !== "unavailable") expiration = "2099-01-01T00:00:00Z";
+      return empty;
+    }
     if (args[0] === "--component-info") {
       assert.notEqual(command, artifact, "signing probes its own immutable copy");
       assert.deepEqual(await readFile(command), bytes);
@@ -87,6 +99,47 @@ test("signing a prebuilt helper preserves source identity and emits a complete r
   assert.deepEqual(await readdir(input.target_directory), []);
   assert.equal(input.calls.some((call) => ["cargo", "git", "xcodebuild", "spctl"].includes(call.command)), false);
 });
+
+async function configureProvisioning(input: Awaited<ReturnType<typeof fixture>>): Promise<void> {
+  const project = join(input.target_directory, "ctld-provisioning/ctld-provisioning.xcodeproj");
+  await mkdir(project, { recursive: true });
+  await writeFile(join(project, "project.pbxproj"), "DEVELOPMENT_TEAM = TEAM123ABC;");
+}
+
+test("strict helper signing renews an expired configured profile before publishing a receipt", async (t) => {
+  const input = await fixture(t, { profile_expired: true });
+  await configureProvisioning(input);
+
+  const result = await signDevelopmentHelper(input.options, input.run);
+
+  const renewal_index = input.calls.findIndex((call) => call.command === "xcodebuild");
+  const signing_index = input.calls.findIndex((call) => call.command === "/bin/sh");
+  assert.ok(renewal_index >= 0 && renewal_index < signing_index);
+  assert.equal(input.calls.filter((call) => call.command === "xcodebuild").length, 1);
+  assert.deepEqual(JSON.parse(await readFile(join(input.output, "installation.json"), "utf8")), result.manifest);
+  assert.deepEqual(await readFile(join(result.app, "Contents/MacOS/ctld")), input.bytes);
+});
+
+for (const [renewal, description] of [
+  ["failure", "an Xcode renewal failure"],
+  ["unavailable", "a refresh without a usable profile"],
+] as const) {
+  test(`${description} cannot sign the helper or publish a receipt`, async (t) => {
+    const input = await fixture(t, { profile_expired: true, renewal });
+    await configureProvisioning(input);
+
+    await assert.rejects(
+      signDevelopmentHelper(input.options, input.run),
+      renewal === "failure" ? /fixture provisioning renewal failed/ : /No unexpired provisioning profile/,
+    );
+
+    assert.equal(input.calls.filter((call) => call.command === "xcodebuild").length, 1);
+    assert.equal(input.calls.some((call) => call.command === "/bin/sh" || call.args[0] === "--component-info"), false);
+    await assert.rejects(readFile(join(input.output, "installation.json")), { code: "ENOENT" });
+    await assert.rejects(lstat(input.output), { code: "ENOENT" });
+    assert.deepEqual(await readFile(input.artifact), input.bytes);
+  });
+}
 
 for (const failure of ["metadata", "signing", "architecture", "signed-metadata"] as const) {
   test(`failed ${failure} cannot publish a successful receipt or modify the prebuilt input`, async (t) => {

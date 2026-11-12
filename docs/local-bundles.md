@@ -28,6 +28,12 @@ CLI work; it is unnecessary before `desktop:dev`. Provision once with
 `pnpm ctld:provision`, choose a team in Xcode, and build the provisioning target.
 Development signing needs no notarization credentials and disables timestamps.
 
+`ctlup app install --local` and `ctlup app update --local` use the same helper
+profile discovery and signing preparation. After the Xcode provisioning project
+has a configured team, both build paths can renew an expired profile through
+Xcode. On macOS, native runtime installation requires a successfully signed helper.
+The app build can bundle an unsigned helper if provisioning or signing fails.
+
 Cargo configuration, custom profiles, `CARGO_TARGET_DIR`, and explicit
 `--target-dir` are preserved. The builder consumes Cargo's actual executable
 paths and uses a cache under

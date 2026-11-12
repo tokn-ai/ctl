@@ -27,16 +27,15 @@ export interface DesktopBuildResult {
 
 export const runDesktopBuildCommand: MacosCommandRunner = (command, args, context) => {
   if (process.platform !== "win32" || command !== "pnpm") return runMacosCommand(command, args, context);
-  // Windows pnpm installations normally expose a .cmd shim. Keep paths in the
-  // environment, inside quotes, instead of interpolating them into shell code.
-  const env = { ...context.env };
-  const parameters = args.map((argument, index) => {
-    if (/["\r\n\u0000]/.test(argument)) throw new Error("invalid Windows desktop build argument");
-    const name = `CTL_DESKTOP_BUILD_ARG_${index}`;
-    env[name] = argument;
-    return `"%${name}%"`;
-  });
-  return runMacosCommand("cmd.exe", ["/d", "/v:off", "/s", "/c", `pnpm ${parameters.join(" ")}`], { ...context, env });
+  if (args[0] !== "--workspace-root" || args[1] !== "desktop:build") {
+    throw new Error("unsupported Windows desktop build command");
+  }
+  // Use the same Node entry point as the native development launcher. Node
+  // passes paths and flags directly to Tauri, including shell metacharacters.
+  const app_directory = join(context.cwd, "apps/desktop");
+  return runMacosCommand(process.execPath, [
+    join(app_directory, "node_modules/@tauri-apps/cli/tauri.js"), "build", ...args.slice(2),
+  ], { ...context, cwd: app_directory });
 };
 
 /** Build a checkout's complete desktop payload without installing or launching it. */

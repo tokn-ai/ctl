@@ -278,16 +278,16 @@ test("version mismatches fail before compiling or staging native services", asyn
   assert.ok(!input.calls.some((call) => call.command === "buildDaemons"));
 });
 
-test("Windows pnpm shims receive paths containing spaces and shell characters literally", { skip: process.platform !== "win32" }, async (t) => {
-  const root = await mkdtemp(join(tmpdir(), "ctl-desktop-command-"));
+test("Windows desktop commands receive paths containing spaces and shell characters literally", { skip: process.platform !== "win32" }, async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "ctl desktop & command-"));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const script = join(root, "arguments.cjs");
-  await writeFile(script, "process.stdout.write(JSON.stringify(process.argv.slice(2)))");
-  await writeFile(join(root, "pnpm.cmd"), '@"%CTL_TEST_NODE%" "%CTL_TEST_SCRIPT%" %*\r\n');
-  const args = ["--config", join(root, "space & percent% ! (config).json")];
-  const result = await runDesktopBuildCommand("pnpm", args, {
-    cwd: root, env: { ...process.env, PATH: `${root};${process.env.PATH ?? process.env.Path ?? ""}`,
-      CTL_TEST_NODE: process.execPath, CTL_TEST_SCRIPT: script },
-  });
-  assert.deepEqual(JSON.parse(result.stdout), args);
+  const app_directory = join(root, "apps/desktop");
+  const script = join(app_directory, "node_modules/@tauri-apps/cli/tauri.js");
+  await mkdir(dirname(script), { recursive: true });
+  await writeFile(script, "process.stdout.write(JSON.stringify({ args: process.argv.slice(2), cwd: process.cwd() }))");
+  const args = ["--workspace-root", "desktop:build", "--config", join(root, "space & percent% ! (config).json")];
+  const result = await runDesktopBuildCommand("pnpm", args, { cwd: root, env: process.env });
+  const actual = JSON.parse(result.stdout) as { args: string[]; cwd: string };
+  assert.deepEqual(actual.args, ["build", ...args.slice(2)]);
+  assert.equal(await realpath(actual.cwd), await realpath(app_directory));
 });

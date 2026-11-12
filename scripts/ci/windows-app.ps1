@@ -17,6 +17,10 @@ if ($nativeTarget -ne $Target) {
   throw "This smoke test must execute natively: requested $Target, toolchain host $nativeTarget."
 }
 
+# Exercise the real native Node/Tauri argument boundary before compiling the desktop.
+& node --experimental-strip-types --disable-warning=ExperimentalWarning --test --test-name-pattern '^Windows desktop commands ' scripts/dev/build-desktop-app.test.mts
+if ($LASTEXITCODE -ne 0) { throw 'The native Windows desktop command arguments test failed.' }
+
 # GUI launch requires WebView2. The install fixture does not launch the GUI,
 # install prerequisites, or change the runner's active app and daemon owners.
 $runtimeId = '{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'

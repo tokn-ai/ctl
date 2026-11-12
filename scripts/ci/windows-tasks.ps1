@@ -11,7 +11,7 @@ Remove-Item Env:CTL_TASKD_BIN -ErrorAction SilentlyContinue
 function Invoke-Native {
   param([string]$Program, [string[]]$Arguments, [DateTime]$Deadline = [DateTime]::MaxValue)
   $invocation = "$Program $($Arguments -join ' ')"
-  $timeoutMilliseconds = [int][Math]::Min(45000, ($Deadline - [DateTime]::UtcNow).TotalMilliseconds)
+  $timeoutMilliseconds = [int][Math]::Min([double]45000, ($Deadline - [DateTime]::UtcNow).TotalMilliseconds)
   if ($timeoutMilliseconds -le 0) { throw "$invocation exceeded the task lifecycle deadline" }
   # Capturing the short-lived CLI also checks that its detached daemon does not
   # inherit unrelated output handles and keep these streams open after exit.

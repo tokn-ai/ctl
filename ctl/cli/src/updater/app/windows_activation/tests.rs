@@ -22,6 +22,8 @@ fn payload(workspace: &Workspace, bytes: &[u8]) -> PathBuf {
   let root = workspace.staging().join("ctmux");
   fs::create_dir(&root).unwrap();
   fs::write(root.join("fixture"), bytes).unwrap();
+  fs::create_dir(root.join("nested")).unwrap();
+  fs::write(root.join("nested/resource"), bytes).unwrap();
   root
 }
 
@@ -36,6 +38,10 @@ fn serializes_installers_and_retains_the_immediate_previous_app() {
     let staged = payload(&work, &[version]);
     let previous = work.activate(&staged, expected.as_ref()).unwrap();
     assert_eq!(fs::read(destination.join("fixture")).unwrap(), [version]);
+    assert_eq!(
+      fs::read(destination.join("nested/resource")).unwrap(),
+      [version]
+    );
     if version > 1 {
       assert_eq!(
         fs::read(previous.unwrap().join("fixture")).unwrap(),
@@ -80,7 +86,13 @@ fn rolls_back_if_publishing_the_replacement_fails() {
     .open(staged.join("fixture"))
     .unwrap();
   let expected = existing(&destination).unwrap();
-  assert!(work.activate(&staged, expected.as_ref()).is_err());
+  let error = work.activate(&staged, expected.as_ref()).unwrap_err();
+  assert!(
+    error
+      .to_string()
+      .contains("could not publish the staged app"),
+    "{error}"
+  );
   assert_eq!(fs::read(destination.join("fixture")).unwrap(), b"original");
   assert!(!work.storage.join("pending-previous").exists());
   drop(busy);
@@ -225,4 +237,34 @@ fn hold_windows_image_for_activation_test() {
     return;
   }
   let _ = std::io::stdin().read(&mut [0_u8]);
+}
+
+#[test]
+fn a_post_move_busy_file_preserves_rollback_until_recovery() {
+  let scratch = Scratch::new();
+  let destination = scratch.destination();
+  let work = Workspace::begin(&destination).unwrap();
+  let staged = payload(&work, b"replacement");
+  let pending = work.storage.join("pending-previous");
+  fs::create_dir(&pending).unwrap();
+  fs::write(pending.join("fixture"), b"original").unwrap();
+  // Simulate a process acquiring a file after the installed tree was moved.
+  let busy = OpenOptions::new()
+    .read(true)
+    .share_mode(1)
+    .open(pending.join("fixture"))
+    .unwrap();
+  let error = work.publish_replacement(&staged, &pending).unwrap_err();
+  assert!(
+    error.to_string().contains("Close the ctmux desktop app"),
+    "{error}"
+  );
+  assert!(!destination.exists());
+  assert_eq!(fs::read(pending.join("fixture")).unwrap(), b"original");
+  assert_eq!(fs::read(staged.join("fixture")).unwrap(), b"replacement");
+  drop(busy);
+  drop(work);
+  let recovered = Workspace::begin(&destination).unwrap();
+  assert_eq!(fs::read(destination.join("fixture")).unwrap(), b"original");
+  assert!(!recovered.storage.join("pending-previous").exists());
 }

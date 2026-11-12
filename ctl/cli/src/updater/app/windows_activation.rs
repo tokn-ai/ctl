@@ -78,7 +78,11 @@ impl Workspace {
         ));
       }
       // Windows rename never replaces a directory that appeared concurrently.
-      fs::rename(staged, &self.destination)?;
+      rename(
+        staged,
+        &self.destination,
+        "could not install the staged app",
+      )?;
       return Ok(None);
     };
     let actual = existing(&self.destination)?
@@ -88,11 +92,41 @@ impl Workspace {
     {
       return Err(invalid("installed app changed during update"));
     }
-    let _leases = close_app_leases(&self.destination)?;
+    // Windows forbids directory renames while any descendant handle is open,
+    // including our own probes. Release every probe before moving the tree.
+    drop(app_file_guards(&self.destination)?);
     let pending = self.storage.join("pending-previous");
-    fs::rename(&self.destination, &pending)?;
-    if let Err(error) = fs::rename(staged, &self.destination) {
-      return match fs::rename(&pending, &self.destination) {
+    rename(
+      &self.destination,
+      &pending,
+      "could not retain the installed app before replacement",
+    )?;
+    self.publish_replacement(staged, &pending)?;
+    // Keep the successfully activated app even if retention cleanup is blocked.
+    Ok(Some(self.retain_previous().unwrap_or(pending)))
+  }
+
+  fn publish_replacement(&self, staged: &Path, pending: &Path) -> io::Result<()> {
+    let published = (|| {
+      // A process may have started between the first check and rename. Check
+      // again after the old public path is absent, before publishing anything.
+      // These handles protect pending while we move the separate staged tree.
+      let guards = app_file_guards(pending)?;
+      let result = rename(
+        staged,
+        &self.destination,
+        "could not publish the staged app",
+      );
+      drop(guards);
+      result
+    })();
+    if let Err(error) = published {
+      // All our pending handles are closed before attempting rollback too.
+      return match rename(
+        pending,
+        &self.destination,
+        "could not restore the installed app",
+      ) {
         Ok(()) => Err(error),
         Err(restore) => Err(io::Error::other(format!(
           "app activation failed: {error}; rollback is retained at {} but restoration failed: {restore}. Run ctlup app install again to recover.",
@@ -100,8 +134,7 @@ impl Workspace {
         ))),
       };
     }
-    // Keep the successfully activated app even if retention cleanup is blocked.
-    Ok(Some(self.retain_previous().unwrap_or(pending)))
+    Ok(())
   }
 
   fn recover(&mut self) -> io::Result<()> {
@@ -110,7 +143,11 @@ impl Workspace {
       return Ok(());
     }
     if existing(&self.destination)?.is_none() {
-      fs::rename(pending, &self.destination)?;
+      rename(
+        &pending,
+        &self.destination,
+        "could not recover the retained app",
+      )?;
     } else {
       self.retain_previous()?;
     }
@@ -122,30 +159,45 @@ impl Workspace {
     let retired = self
       .storage
       .join(format!("retired-{}", uuid::Uuid::new_v4()));
-    let previous_leases = if existing(&previous)?.is_some() {
-      // Refuse cleanup before touching any older retained tree. remove_dir_all
-      // can otherwise delete resources before failing on a running executable.
-      Some(close_app_leases(&previous)?)
+    let retired_guards = if existing(&previous)?.is_some() {
+      // Never partially delete a busy older build. Probe before moving it and
+      // again at its private retired path, retaining every file on failure.
+      drop(app_file_guards(&previous)?);
+      rename(
+        &previous,
+        &retired,
+        "could not retire the older previous app",
+      )?;
+      match app_file_guards(&retired) {
+        Ok(guards) => Some(guards),
+        Err(error) => {
+          let _ = rename(
+            &retired,
+            &previous,
+            "could not restore the older previous app",
+          );
+          return Err(error);
+        }
+      }
     } else {
       None
     };
-    let moved = if previous_leases.is_some() {
-      fs::rename(&previous, &retired)?;
-      true
-    } else {
-      false
-    };
+    let moved = retired_guards.is_some();
     let pending = self.storage.join("pending-previous");
-    if let Err(error) = fs::rename(&pending, &previous) {
+    let saved = rename(&pending, &previous, "could not save the previous app");
+    // Retired handles must be closed before either restoring or deleting it.
+    drop(retired_guards);
+    if let Err(error) = saved {
       if moved {
-        let _ = fs::rename(&retired, &previous);
+        let _ = rename(
+          &retired,
+          &previous,
+          "could not restore the older previous app",
+        );
       }
       return Err(error);
     }
     if moved {
-      // Its old public path has moved and all files were leased through the
-      // rename. Release our own handles before removing the retired directory.
-      drop(previous_leases);
       let _ = fs::remove_dir_all(retired);
     }
     Ok(previous)
@@ -176,17 +228,17 @@ fn require_directory(path: &Path) -> io::Result<()> {
   Ok(())
 }
 
-fn close_app_leases(root: &Path) -> io::Result<Vec<File>> {
+fn app_file_guards(root: &Path) -> io::Result<Vec<File>> {
   let mut leases = Vec::new();
   for entry in fs::read_dir(root)? {
     let path = entry?.path();
     let metadata = fs::symlink_metadata(&path)?;
     if private_fs::is_directory(&metadata) {
-      leases.extend(close_app_leases(&path)?);
+      leases.extend(app_file_guards(&path)?);
     } else if private_fs::is_owned_file(&metadata) {
-      // A mapped executable denies write access. Deny new readers/writers while
-      // retaining FILE_SHARE_DELETE so the directory can be renamed safely.
-      // Hold these handles until replacement completes to prevent relaunches.
+      // A mapped executable denies write access. Keep all successfully opened
+      // files guarded until the whole tree has been checked. The caller must
+      // drop these guards before renaming or deleting this tree.
       let file = private_fs::options()
         .write(true)
         .share_mode(0x4)
@@ -208,6 +260,11 @@ fn close_app_leases(root: &Path) -> io::Result<Vec<File>> {
     }
   }
   Ok(leases)
+}
+
+fn rename(source: &Path, destination: &Path, operation: &str) -> io::Result<()> {
+  fs::rename(source, destination)
+    .map_err(|error| io::Error::new(error.kind(), format!("{operation}: {error}")))
 }
 
 fn invalid(message: &str) -> io::Error {

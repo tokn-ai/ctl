@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { copyFile, cp, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { copyFile, cp, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { promisify } from "node:util";
 import { componentMapFixture } from "../ci/agent-bundle.fixtures.mts";
@@ -16,7 +16,8 @@ const execute = promisify(execFile);
 
 async function fixture(t: TestContext, settings: {
   target?: string; profile?: boolean; output?: "missing" | "failed"; mixed_version?: boolean;
-  signing_failure?: boolean; invalid_helper?: boolean;
+  signing_failure?: boolean; invalid_helper?: boolean; configured_project?: boolean;
+  profile_expired?: boolean; renewal_failure?: boolean; profile_from_home?: boolean;
 } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "ctl-desktop-source-test-")));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -29,8 +30,20 @@ async function fixture(t: TestContext, settings: {
   await writeFile(join(config_directory, "tauri.conf.json"), JSON.stringify({
     productName: "ctmux", version: settings.mixed_version ? "0.1.1" : "0.1.0",
   }));
-  const profile = join(root, "profile");
-  if (settings.profile) await writeFile(profile, "fixture provisioning profile");
+  const profile = settings.profile_from_home
+    ? join(home, "Library/Developer/Xcode/UserData/Provisioning Profiles/fixture.provisionprofile")
+    : join(root, "profile");
+  let profile_available = settings.profile ?? false;
+  let profile_expired = settings.profile_expired ?? false;
+  if (profile_available) {
+    await mkdir(dirname(profile), { recursive: true });
+    await writeFile(profile, "fixture provisioning profile");
+  }
+  const provisioning_project = join(target_directory, "ctld-provisioning/ctld-provisioning.xcodeproj");
+  if (settings.configured_project) {
+    await mkdir(provisioning_project, { recursive: true });
+    await writeFile(join(provisioning_project, "project.pbxproj"), "DEVELOPMENT_TEAM = TEAM123ABC;");
+  }
   const checkout = createHash("sha256").update(workspace).digest("hex").slice(0, 20);
   const cache = join(target_directory, "ctl-desktop-build", checkout, "cargo");
   const macos = native.endsWith("-apple-darwin");
@@ -65,12 +78,26 @@ async function fixture(t: TestContext, settings: {
     }
     if (command === "fixture-rustc") return { stdout: `host: ${native}\n`, stderr: "" };
     if (command === "security") {
-      if (!settings.profile) throw new Error("fixture profile unavailable");
+      assert.equal(args[args.indexOf("-i") + 1], profile);
+      if (!profile_available) throw new Error("fixture profile unavailable");
       return empty;
     }
     if (command === "/usr/libexec/PlistBuddy") {
-      return { stdout: args[1]!.endsWith(":ExpirationDate") ? "2099-01-01T00:00:00Z" :
+      const expiration = profile_expired ? "2000-01-01T00:00:00Z" : "2099-01-01T00:00:00Z";
+      return { stdout: args[1]!.endsWith(":ExpirationDate") ? expiration :
         "TEAM123ABC.dev.tokn-ai.ctl.ctld", stderr: "" };
+    }
+    if (command === "xcodebuild") {
+      assert.ok(settings.configured_project);
+      assert.equal(args[args.indexOf("-project") + 1], provisioning_project);
+      assert.ok(args.includes("-allowProvisioningUpdates"));
+      assert.ok(args.includes("-allowProvisioningDeviceRegistration"));
+      if (settings.renewal_failure) throw new Error("fixture Xcode provisioning refresh failed");
+      profile_available = true;
+      profile_expired = false;
+      await mkdir(dirname(profile), { recursive: true });
+      await writeFile(profile, "renewed fixture provisioning profile");
+      return empty;
     }
     if (args[0] === "--component-info") {
       const component = componentMapFixture().ctld;
@@ -135,7 +162,8 @@ async function fixture(t: TestContext, settings: {
     throw new Error(`unexpected command ${command}`);
   };
   const options: DesktopBuildOptions = { workspace, output, home_directory: home,
-    env: { ...process.env, RUSTC: "fixture-rustc", CARGO_TARGET_DIR: target_directory, CTLD_PROVISIONING_PROFILE: profile } };
+    env: { ...process.env, RUSTC: "fixture-rustc", CARGO_TARGET_DIR: target_directory,
+      CTLD_PROVISIONING_PROFILE: settings.profile_from_home ? undefined : profile } };
   return { options, run, build, calls };
 }
 
@@ -152,14 +180,51 @@ test("local desktop builds native daemons and a fresh debug AppImage into privat
 
 test("macOS reuses an available provisioning profile for its helper and leaves GUI signing optional", async (t) => {
   for (const profile of [false, true]) {
-    const input = await fixture(t, { target: "aarch64-apple-darwin", profile });
+    const input = await fixture(t, { target: "aarch64-apple-darwin", profile, configured_project: profile });
     const result = await buildDesktopApp(input.options, input.run, input.build);
     assert.equal(result.archive, "ctmux.app.tar.gz");
     const listing = await execute("tar", ["-tzf", join(input.options.output, result.archive)]);
     assert.match(listing.stdout, /ctmux.app\/Contents\/Helpers\/ctld.app\/Contents\/MacOS\/ctld/);
     assert.equal(listing.stdout.includes("embedded.provisionprofile"), profile);
     assert.equal(input.calls.some((call) => call.command === "codesign"), profile);
+    assert.equal(input.calls.some((call) => call.command === "xcodebuild"), false);
   }
+});
+
+test("macOS renews configured provisioning before signing an expired or missing helper profile", async (t) => {
+  for (const initial_profile of ["expired", "missing"] as const) {
+    const input = await fixture(t, {
+      target: "aarch64-apple-darwin", configured_project: true, profile_from_home: true,
+      profile: initial_profile === "expired", profile_expired: initial_profile === "expired",
+    });
+    const result = await buildDesktopApp(input.options, input.run, input.build);
+    const archive = join(input.options.output, result.archive);
+    const embedded = await execute("tar", ["-xOf", archive,
+      "ctmux.app/Contents/Helpers/ctld.app/Contents/embedded.provisionprofile"]);
+    assert.equal(embedded.stdout, "renewed fixture provisioning profile");
+    const listing = await execute("tar", ["-tzf", archive]);
+    assert.ok(listing.stdout.includes("_CodeSignature/CodeResources"));
+    assert.equal(input.calls.filter((call) => call.command === "xcodebuild").length, 1);
+    assert.equal(input.calls.filter((call) => call.command === "/bin/sh").length, 1);
+    assert.ok(input.calls.findIndex((call) => call.command === "xcodebuild") <
+      input.calls.findIndex((call) => call.command === "codesign"));
+    const receipt = JSON.parse(await readFile(join(input.options.output, "helper/installation.json"), "utf8"));
+    assert.equal(receipt.signing_mode, "development");
+  }
+});
+
+test("failed macOS provisioning renewal falls back to a clean unsigned helper", async (t) => {
+  const input = await fixture(t, {
+    target: "aarch64-apple-darwin", profile: true, profile_expired: true,
+    configured_project: true, renewal_failure: true, profile_from_home: true,
+  });
+  const result = await buildDesktopApp(input.options, input.run, input.build);
+  const listing = await execute("tar", ["-tzf", join(input.options.output, result.archive)]);
+  assert.ok(!listing.stdout.includes("embedded.provisionprofile"));
+  assert.ok(!listing.stdout.includes("_CodeSignature"));
+  assert.equal(input.calls.filter((call) => call.command === "xcodebuild").length, 1);
+  assert.equal(input.calls.some((call) => call.command === "codesign"), false);
+  assert.deepEqual(await readdir(join(input.options.output, "helper")), ["ctld.app"]);
 });
 
 test("failed or incomplete frontend builds cannot reuse earlier app outputs", async (t) => {
@@ -198,6 +263,7 @@ test("a helper signing failure falls back to a clean unsigned package", async (t
   assert.ok(!listing.stdout.includes("embedded.provisionprofile"));
   assert.ok(!listing.stdout.includes("_CodeSignature"));
   assert.equal(input.calls.filter((call) => call.command === "/bin/sh").length, 2);
+  assert.deepEqual(await readdir(join(input.options.output, "helper")), ["ctld.app"]);
 });
 
 test("invalid compiled helper metadata still fails before signing or bundling", async (t) => {

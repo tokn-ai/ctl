@@ -11,6 +11,7 @@ import { parseHelperProtocols, sameProtocols, type ProtocolInfo } from "../share
 import { agentTargets, maxAgentManifestBytes, parseAgentBundleSet, readAgentFile, verifyAgentBundleTarget, windowsAgentManifestName } from "../shared/agent-bundle.mts";
 import { updaterManifestName, verifyUpdaterTarget, windowsUpdaterTargets } from "../shared/updater-bundle.mts";
 import { validatedWindowsComponentSet } from "./bundle-publication.mts";
+import { desktopBundleNames } from "./package-desktop-bundle.mts";
 
 const execFileAsync = promisify(execFile);
 export const managedLabelPrefix = "ctmux-ci: ";
@@ -130,7 +131,8 @@ export async function validateReleaseBundle(
   const directory = resolve(asset_directory);
   const names = new Set(await readdir(directory));
   const assetNames = new Set<string>();
-  const availableDesktopTargets: string[] = [];
+  const versionBuild = identity.bundle_id === identity.app_version;
+  const availableDesktopTargets = new Set<string>();
   const unsignedTargets: string[] = [];
   const signedCtldTargets: string[] = [];
   const bundledCliTargets: string[] = [];
@@ -157,51 +159,52 @@ export async function validateReleaseBundle(
   addNames(await validatedWindowsComponentSet(directory, identity));
 
   for (const target of desktopTargets) {
-    const manifestName = `desktop-${target}.json`;
+    const isMac = target.endsWith("apple-darwin");
     const windows = target.endsWith("-pc-windows-msvc");
-    // Windows groups publish independently of the required Unix desktop set.
-    if ((options.allow_partial || windows) && !names.has(manifestName)) continue;
-    const manifest = await readJson(directory, manifestName);
-    const extensions = windows ? ["zip"] : target.endsWith("apple-darwin")
-      ? ["dmg", "app.tar.gz"]
-      : ["deb", "rpm", "AppImage"];
-    const expectedAssets = new Set(extensions.map((extension) => `ctmux-${identity.bundle_id}-${target}.${extension}`));
-    if (
-      manifest.schema_version !== 1 ||
-      manifest.target !== target ||
-      manifest.bundle_id !== identity.bundle_id ||
-      manifest.git_revision !== identity.git_revision ||
-      !Array.isArray(manifest.assets)
-    ) {
-      throw new Error(`Desktop manifest does not match the expected build identity: ${manifestName}`);
+    const variants = [{ ...desktopBundleNames(identity.bundle_id, target, false), unsigned: false }];
+    if (versionBuild && isMac) {
+      const unsigned = desktopBundleNames(identity.bundle_id, target, true);
+      if (names.has(unsigned.manifest_name)) variants.push({ ...unsigned, unsigned: true });
     }
-    if (manifest.assets.length !== expectedAssets.size) {
-      throw new Error(`Desktop manifest must contain every required package format: ${manifestName}`);
+    const extensions = windows ? ["zip"] : isMac ? ["dmg", "app.tar.gz"] : ["deb", "rpm", "AppImage"];
+    for (const { manifest_name, asset_prefix, unsigned } of variants) {
+      // Windows groups publish independently of the required Unix desktop set.
+      if (!names.has(manifest_name) && (options.allow_partial || windows || variants.length > 1)) continue;
+      const manifest = await readJson(directory, manifest_name);
+      const expectedAssets = new Set(extensions.map((extension) => asset_prefix + "." + extension));
+      if (manifest.schema_version !== 1 || manifest.target !== target ||
+        manifest.bundle_id !== identity.bundle_id || manifest.git_revision !== identity.git_revision ||
+        !Array.isArray(manifest.assets)) {
+        throw new Error("Desktop manifest does not match the expected build identity: " + manifest_name);
+      }
+      if (manifest.assets.length !== expectedAssets.size) {
+        throw new Error("Desktop manifest must contain every required package format: " + manifest_name);
+      }
+      if (isMac) {
+        const isUnsigned = manifest.signing_mode === "unsigned";
+        if (!isUnsigned && manifest.signing_mode !== "signed") {
+          throw new Error("Invalid macOS signing mode: " + manifest_name);
+        }
+        if (versionBuild && isUnsigned !== unsigned) {
+          throw new Error("macOS signing mode does not match the desktop manifest filename: " + manifest_name);
+        }
+        if (isUnsigned) unsignedTargets.push(target);
+      } else if (manifest.signing_mode !== "not_applicable") {
+        throw new Error("Invalid " + (windows ? "Windows" : "Linux") + " signing mode: " + manifest_name);
+      }
+      addNames([manifest_name]);
+      for (const asset of manifest.assets) {
+        if (!record(asset)) throw new Error("Invalid asset in " + manifest_name);
+        validateName(asset.name);
+        if (!expectedAssets.delete(asset.name)) {
+          throw new Error("Unexpected desktop package filename in " + manifest_name + ": " + asset.name);
+        }
+        addNames(await validateAsset(directory, asset.name, asset.sha256));
+      }
+      availableDesktopTargets.add(target);
     }
-    if (target.endsWith("apple-darwin")) {
-      if (manifest.signing_mode !== "signed" && manifest.signing_mode !== "unsigned") {
-        throw new Error(`Invalid macOS signing mode: ${manifestName}`);
-      }
-      if (manifest.signing_mode === "unsigned") {
-        unsignedTargets.push(target);
-      }
-    } else if (manifest.signing_mode !== "not_applicable") {
-      throw new Error(`Invalid ${windows ? "Windows" : "Linux"} signing mode: ${manifestName}`);
-    }
-    addNames([manifestName]);
-    for (const asset of manifest.assets) {
-      if (!record(asset)) {
-        throw new Error(`Invalid asset in ${manifestName}`);
-      }
-      validateName(asset.name);
-      if (!expectedAssets.delete(asset.name)) {
-        throw new Error(`Unexpected desktop package filename in ${manifestName}: ${asset.name}`);
-      }
-      addNames(await validateAsset(directory, asset.name, asset.sha256));
-    }
-    availableDesktopTargets.push(target);
     // Windows x64 runtime and desktop packages share one updater asset group.
-    if (windows && !assetNames.has(updaterManifestName(target))) {
+    if (windows && availableDesktopTargets.has(target) && !assetNames.has(updaterManifestName(target))) {
       addNames(await verifyUpdaterTarget(directory, identity, target, true));
     }
   }
@@ -210,10 +213,6 @@ export async function validateReleaseBundle(
   // available target; each CLI still requires its matching standalone helper.
   const ctldPresent = ctldTargets.some((target) => names.has(`ctld-${target}.json`));
   const cliPresent = ctldTargets.some((target) => names.has(`ctl-cli-${target}.json`));
-  const versionBuild = identity.bundle_id === identity.app_version;
-  if (versionBuild && unsignedTargets.length > 0) {
-    throw new Error("Version releases require signed macOS desktop packages");
-  }
   let ctldTeam: string | undefined;
   let ctldProtocols: ProtocolInfo[] | undefined;
   const ctldManifests = new Map<string, Record<string, unknown>>();
@@ -295,7 +294,7 @@ export async function validateReleaseBundle(
     ...identity,
     asset_directory: directory,
     asset_names: [...assetNames].sort(),
-    desktop_targets: availableDesktopTargets,
+    desktop_targets: [...availableDesktopTargets],
     unsigned_targets: unsignedTargets,
     signed_ctld_targets: signedCtldTargets,
     bundled_cli_targets: bundledCliTargets,
@@ -325,10 +324,13 @@ export function releaseNotes(bundle: ReleaseBundle, previous: string | null): st
     lines.push(`Includes Developer ID signed and notarized ctl CLI archives for: ${bundle.bundled_cli_targets.map((target) => `\`${target}\``).join(", ")}, with the matching ctld helper embedded for offline setup.`);
   }
   if (bundle.unsigned_targets.length > 0) {
+    const targets = bundle.unsigned_targets.map((target) => `\`${target}\``).join(", ");
     lines.push(
       "",
-      `Unsigned macOS builds: ${bundle.unsigned_targets.map((target) => `\`${target}\``).join(", ")}.`,
-      "These builds are not Developer ID signed or notarized. Touch ID credential storage is unavailable.",
+      bundle.bundle_id === bundle.app_version
+        ? `Unsigned macOS desktop downloads for ${targets} have \`-unsigned\` in their filenames.`
+        : `Unsigned macOS builds: ${targets}.`,
+      "Gatekeeper may block first launch. Touch ID credential storage is unavailable.",
     );
   }
   lines.push(notesEnd);

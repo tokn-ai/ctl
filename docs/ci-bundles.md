@@ -20,9 +20,10 @@ Manually maintained release notes and attachments are preserved.
   Nightly independently of desktop success.
 - A `v<version>` tag builds desktop, remote-agent, and standalone `ctld` bundles.
   The tag must match the workspace Cargo version, Tauri app version, and frontend
-  package version. Both macOS architectures require distribution signing.
-  Component bundles publish first; successful desktop, signed helper, and CLI
-  targets append their assets later. A prerelease tag publishes a GitHub
+  package version. macOS desktop builds use distribution signing when Apple
+  credentials are configured and produce unsigned packages when credentials are
+  missing. Component bundles publish first. Successful desktop, signed helper,
+  and CLI targets append their assets later. A prerelease tag publishes a GitHub
   prerelease and versioned Pages archives without advancing the Stable channel.
 - A manual run builds remote-agent bundles. `build_desktop` defaults to `true`;
   setting it to `false` supports the remote-only workflow used by agent syncing.
@@ -48,13 +49,16 @@ A helper can publish even if the later CLI build fails. On retry, CI restores th
 verified published helper before uploading the helper artifact or building the
 CLI, so the CLI embeds the same canonical helper bytes.
 
-Version-tag macOS packages still require distribution signing and notarization.
-Missing Apple credentials fail those jobs without preventing verified remote
-components or successful Linux desktop packages from publishing. Failed jobs
-remain failures in Actions, and release notes list the targets actually attached.
-Adding a successful signed helper makes it available to `ctl setup` for that
-exact CLI version and architecture. Missing targets can be appended after a
-successful retry.
+Unsigned macOS desktop release downloads add `-unsigned` after the target in
+the DMG, app archive, checksum, and manifest filenames. Gatekeeper may block
+first launch, and Touch ID-protected credential storage is unavailable. A later
+successful signing run can append the signed desktop packages under their usual
+filenames. Each published package retains its original checksum.
+
+The standalone macOS helper and bundled CLI require distribution signing and
+notarization. Missing Apple credentials fail those jobs while the successful
+packages still publish. Adding a successful signed helper makes it available to
+`ctl setup` for that exact CLI version and architecture.
 
 ### Install a temporary PR build
 
@@ -270,8 +274,8 @@ failures stop the build; no unsigned standalone release is substituted.
 
 Repository script tests use fake signing/notarization operations and real tar
 archives. On macOS, native checks also exercise plist parsing and requirement
-compilation. They do not import signing secrets or submit software to Apple. A distributable
-release still needs a successful credentialed CI signing/notarization run.
+compilation. They do not import signing secrets or submit software to Apple.
+Signed release assets require a successful signing and notarization run.
 
 ## Standalone helper release assets
 

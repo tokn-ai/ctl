@@ -49,6 +49,36 @@ async function writeAsset(directory: string, name: string, bytes: Buffer): Promi
   return { sha256, archive_size: bytes.length };
 }
 
+async function desktopAssets(directory: string, buildIdentity: BundleIdentity, target: string, unsigned_variant = false): Promise<void> {
+  const isMac = target.endsWith("apple-darwin");
+  const windows = target.endsWith("-pc-windows-msvc");
+  const extensions = windows ? ["zip"] : isMac ? ["dmg", "app.tar.gz"] : ["deb", "rpm", "AppImage"];
+  const suffix = unsigned_variant ? "-unsigned" : "";
+  const assets = [];
+  for (const extension of extensions) {
+    const name = `ctmux-${buildIdentity.bundle_id}-${target}${suffix}.${extension}`;
+    const { sha256 } = await writeAsset(directory, name, Buffer.from(`test bundle ${name}`));
+    assets.push({ name, sha256 });
+  }
+  const unsigned = unsigned_variant || buildIdentity.bundle_id !== buildIdentity.app_version;
+  await writeFile(join(directory, `desktop-${target}${suffix}.json`), JSON.stringify({
+    schema_version: 1,
+    target,
+    bundle_id: buildIdentity.bundle_id,
+    git_revision: buildIdentity.git_revision,
+    signing_mode: isMac ? (unsigned ? "unsigned" : "signed") : "not_applicable",
+    assets,
+  }));
+  if (windows) {
+    const binary = updaterBinaryName(buildIdentity, target);
+    const payload = Buffer.from(`Windows updater ${target}`);
+    const updater = await writeAsset(directory, binary, payload);
+    await writeFile(join(directory, updaterManifestName(target)), JSON.stringify({
+      schema_version: 1, ...buildIdentity, target_triple: target, binary, sha256: updater.sha256, size: payload.length,
+    }));
+  }
+}
+
 async function fixture(
   t: TestContext,
   buildIdentity: BundleIdentity = identity,
@@ -68,29 +98,7 @@ async function fixture(
     schema_version: 1, ...buildIdentity, targets,
   }));
   for (const target of desktop_targets) {
-    const windows = target.endsWith("-pc-windows-msvc");
-    const extensions = windows ? ["zip"] : target.endsWith("apple-darwin") ? ["dmg", "app.tar.gz"] : ["deb", "rpm", "AppImage"];
-    const assets: { name: string; sha256: string }[] = [];
-    for (const extension of extensions) {
-      const name = `ctmux-${buildIdentity.bundle_id}-${target}.${extension}`;
-      assets.push({ name, sha256: await addAsset(name) });
-    }
-    await writeFile(join(directory, `desktop-${target}.json`), JSON.stringify({
-      schema_version: 1,
-      target,
-      bundle_id: buildIdentity.bundle_id,
-      git_revision: buildIdentity.git_revision,
-      signing_mode: target.endsWith("apple-darwin") ? (buildIdentity.bundle_id === buildIdentity.app_version ? "signed" : "unsigned") : "not_applicable",
-      assets,
-    }));
-    if (windows) {
-      const binary = updaterBinaryName(buildIdentity, target);
-      const payload = Buffer.from(`Windows updater ${target}`);
-      const updater = await writeAsset(directory, binary, payload);
-      await writeFile(join(directory, updaterManifestName(target)), JSON.stringify({
-        schema_version: 1, ...buildIdentity, target_triple: target, binary, sha256: updater.sha256, size: payload.length,
-      }));
-    }
+    await desktopAssets(directory, buildIdentity, target);
   }
   return directory;
 }
@@ -264,6 +272,61 @@ test("partial builds accept available Linux desktops without macOS helpers", asy
   }
 });
 
+test("version releases accept an unsigned desktop fallback and a signed desktop for the same target", async (t) => {
+  const versionIdentity = { ...identity, bundle_id: identity.app_version };
+  const target = macTargets[1]!;
+  const directory = await fixture(t, versionIdentity, []);
+  await desktopAssets(directory, versionIdentity, target, true);
+  const unsigned = await validateReleaseBundle(versionIdentity, directory, { allow_partial: true });
+  assert.deepEqual(unsigned.desktop_targets, [target]);
+  assert.deepEqual(unsigned.unsigned_targets, [target]);
+  assert.deepEqual(unsigned.signed_ctld_targets, []);
+  assert.deepEqual(unsigned.bundled_cli_targets, []);
+  assert.ok(unsigned.asset_names.includes(`desktop-${target}-unsigned.json`));
+  for (const extension of ["dmg", "app.tar.gz"]) {
+    const name = `ctmux-${versionIdentity.bundle_id}-${target}-unsigned.${extension}`;
+    assert.ok(unsigned.asset_names.includes(name));
+    assert.ok(unsigned.asset_names.includes(`${name}.sha256`));
+  }
+
+  await desktopAssets(directory, versionIdentity, target);
+  const both = await validateReleaseBundle(versionIdentity, directory, { allow_partial: true });
+  assert.deepEqual(both.desktop_targets, [target]);
+  assert.deepEqual(both.unsigned_targets, [target]);
+  assert.ok(both.asset_names.includes(`desktop-${target}.json`));
+  assert.ok(both.asset_names.includes(`desktop-${target}-unsigned.json`));
+  assert.ok(releaseNotes(both, null).includes(`Unsigned macOS desktop downloads for \`${target}\` have \`-unsigned\` in their filenames.`));
+});
+
+test("version release validation rejects mislabeled, unsafe, and corrupt unsigned fallback packages", async (t) => {
+  const versionIdentity = { ...identity, bundle_id: identity.app_version };
+  const target = macTargets[0]!;
+  const directory = await fixture(t, versionIdentity, []);
+  await desktopAssets(directory, versionIdentity, target, true);
+  const path = join(directory, `desktop-${target}-unsigned.json`);
+  const manifest = JSON.parse(await readFile(path, "utf8"));
+  for (const [name, error] of [
+    [`ctmux-${versionIdentity.bundle_id}-${target}.dmg`, /Unexpected desktop package filename/],
+    ["../outside.dmg", /Unsafe asset filename/],
+  ] as const) {
+    const assets = [{ ...manifest.assets[0], name }, ...manifest.assets.slice(1)];
+    await writeFile(path, JSON.stringify({ ...manifest, assets }));
+    await assert.rejects(validateReleaseBundle(versionIdentity, directory, { allow_partial: true }), error);
+  }
+  await writeFile(path, JSON.stringify({ ...manifest, signing_mode: "signed" }));
+  await assert.rejects(validateReleaseBundle(versionIdentity, directory, { allow_partial: true }), /signing mode does not match/);
+  await writeFile(path, JSON.stringify(manifest));
+  await writeFile(join(directory, `${manifest.assets[0].name}.sha256`), "invalid checksum\n");
+  await assert.rejects(validateReleaseBundle(versionIdentity, directory, { allow_partial: true }), /Invalid checksum file/);
+});
+
+test("development releases retain their original unsigned package filenames", async (t) => {
+  const directory = await fixture(t, identity, []);
+  const target = macTargets[0]!;
+  await desktopAssets(directory, identity, target, true);
+  await assert.rejects(validateReleaseBundle(identity, directory, { allow_partial: true }), /Unexpected file in release asset directory/);
+});
+
 test("partial builds accept one standalone helper without desktop or CLI packages", async (t) => {
   const versionIdentity = { ...identity, bundle_id: identity.app_version };
   const target = macTargets[1]!;
@@ -395,7 +458,7 @@ test("partial validation rejects incomplete, corrupt, mixed, or unrecognized pre
     await writeFile(path, JSON.stringify(manifest));
     await assert.rejects(validateReleaseBundle(identity, directory, { allow_partial: true }), /same published protocols/);
   });
-  await t.test("unsigned macOS version desktop", async (t) => {
+  await t.test("unsigned macOS version desktop with standard filenames", async (t) => {
     const versionIdentity = { ...identity, bundle_id: identity.app_version };
     const target = macTargets[0]!;
     const directory = await fixture(t, versionIdentity, [target]);
@@ -403,7 +466,7 @@ test("partial validation rejects incomplete, corrupt, mixed, or unrecognized pre
     const manifest = JSON.parse(await readFile(path, "utf8"));
     manifest.signing_mode = "unsigned";
     await writeFile(path, JSON.stringify(manifest));
-    await assert.rejects(validateReleaseBundle(versionIdentity, directory, { allow_partial: true }), /require signed macOS desktop/);
+    await assert.rejects(validateReleaseBundle(versionIdentity, directory, { allow_partial: true }), /signing mode does not match/);
   });
   await t.test("orphaned desktop assets", async (t) => {
     const directory = await fixture(t, identity, [target]);
@@ -464,7 +527,7 @@ test("accepts matching signed helper and bundled CLI pairs in development and ve
   }
 });
 
-test("version builds require signed macOS desktops and complete helper and CLI pairs", async (t) => {
+test("strict version builds require complete signed helper and CLI pairs", async (t) => {
   const versionIdentity = { ...identity, bundle_id: identity.app_version };
   await t.test("missing helpers", async (t) => {
     const directory = await fixture(t, versionIdentity);
@@ -497,14 +560,15 @@ test("version builds require signed macOS desktops and complete helper and CLI p
     }
     await assert.rejects(validateReleaseBundle(identity, directory), /ctld-x86_64-apple-darwin.json/);
   });
-  await t.test("unsigned version desktop", async (t) => {
-    const directory = await fixture(t, versionIdentity);
+  await t.test("unsigned fallback completes the desktop target set", async (t) => {
+    const target = macTargets[1]!;
+    const directory = await fixture(t, versionIdentity, desktopTargets.filter((entry) => entry !== target));
+    await desktopAssets(directory, versionIdentity, target, true);
     await ctldAssets(directory, versionIdentity);
-    const path = join(directory, "desktop-aarch64-apple-darwin.json");
-    const manifest = JSON.parse(await readFile(path, "utf8"));
-    manifest.signing_mode = "unsigned";
-    await writeFile(path, JSON.stringify(manifest));
-    await assert.rejects(validateReleaseBundle(versionIdentity, directory), /require signed macOS desktop/);
+    await cliAssets(directory, versionIdentity);
+    const bundle = await validateReleaseBundle(versionIdentity, directory);
+    assert.deepEqual(bundle.desktop_targets, desktopTargets);
+    assert.deepEqual(bundle.unsigned_targets, [target]);
   });
 });
 
@@ -679,7 +743,7 @@ test("replaces only generated notes and describes unsigned macOS limitations", (
   assert.ok(updated.startsWith("User introduction.\n"));
   assert.ok(updated.endsWith("\nUser changelog."));
   assert.ok(updated.includes(identity.git_revision));
-  assert.ok(updated.includes("not Developer ID signed or notarized"));
+  assert.ok(updated.includes("Gatekeeper may block first launch"));
   assert.ok(updated.includes("Touch ID credential storage is unavailable"));
   assert.ok(!updated.includes("old build"));
   assert.equal(releaseNotes(exampleBundle, updated), updated);

@@ -8,7 +8,7 @@ import { parseHelperComponent } from "../shared/protocol-contract.mts";
 import { createWindowsPortable } from "../shared/windows-portable.mts";
 import { buildDaemons } from "./daemon-build.mts";
 import { developmentEnvironment, signDevelopmentHelper } from "./ctld-signed.mts";
-import { findProvisioningProfile, runMacosCommand, type MacosCommandRunner } from "./macos-provisioning.mts";
+import { runMacosCommand, type MacosCommandRunner } from "./macos-provisioning.mts";
 import { ensurePrivateDirectory } from "./signed-runtime.mts";
 
 export interface DesktopBuildOptions {
@@ -115,25 +115,16 @@ export async function buildDesktopApp(
       !/^[a-fA-F0-9]{40}$/.test(component.build.source_revision)) {
       throw new Error("locally compiled ctld has invalid source identity or version");
     }
-    const profile = await findProvisioningProfile({
-      repository_root: workspace, target_directory, env, run, home_directory: options.home_directory,
-    });
     const app = join(helper, "ctld.app");
-    let signed = false;
-    if (profile) {
-      try {
-        await signDevelopmentHelper({
-          repository_root: workspace, target_directory, artifact,
-          target: native, app_version, output_directory: helper, profile_path: profile.path, env,
-        }, run);
-        signed = true;
-      } catch (error) {
-        const detail = (error instanceof Error ? error.message : String(error)).split("\n", 1)[0];
-        console.error(`ctld signing failed, building an unsigned helper. ${detail}`);
-      }
-    }
-    if (!signed) {
-      console.error("Bundling ctld without a provisioning profile…");
+    try {
+      await signDevelopmentHelper({
+        repository_root: workspace, target_directory, artifact,
+        target: native, app_version, output_directory: helper, env,
+        home_directory: options.home_directory,
+      }, run);
+    } catch (error) {
+      const detail = (error instanceof Error ? error.message : String(error)).split("\n", 1)[0];
+      console.error(`ctld provisioning or signing failed, building an unsigned helper. ${detail}`);
       await rm(helper, { recursive: true, force: true });
       await invoke("/bin/sh", ["scripts/ci/package-ctld-app.sh", artifact, app, app_version], {
         CTLD_PROVISIONING_PROFILE: undefined, CTLD_REQUIRE_DISTRIBUTION_SIGNING: "false",

@@ -91,16 +91,17 @@ async function writeAsset(directory: string, name: string, content = `fixture ${
   return { archive: name, sha256, archive_size: bytes.length };
 }
 
-async function desktopAssets(directory: string, target: string): Promise<void> {
+async function desktopAssets(directory: string, target: string, unsigned = false): Promise<void> {
   const mac = target.endsWith("apple-darwin"), assets = [];
   const windows = target.endsWith("-pc-windows-msvc");
+  const variant = unsigned ? `${target}-unsigned` : target;
   for (const extension of windows ? ["zip"] : mac ? ["dmg", "app.tar.gz"] : ["deb", "rpm", "AppImage"]) {
-    const asset = await writeAsset(directory, `ctmux-${identity.bundle_id}-${target}.${extension}`);
+    const asset = await writeAsset(directory, `ctmux-${identity.bundle_id}-${variant}.${extension}`);
     assets.push({ name: asset.archive, sha256: asset.sha256 });
   }
-  await writeFile(join(directory, `desktop-${target}.json`), JSON.stringify({
+  await writeFile(join(directory, `desktop-${variant}.json`), JSON.stringify({
     schema_version: 1, target, bundle_id: identity.bundle_id, git_revision: identity.git_revision,
-    signing_mode: mac ? "signed" : "not_applicable", assets,
+    signing_mode: unsigned ? "unsigned" : mac ? "signed" : "not_applicable", assets,
   }));
   if (windows) {
     const binary = updaterBinaryName(identity, target);
@@ -313,6 +314,43 @@ test("a rebuilt target reuses canonical bytes while a new target appends", async
   assert.ok(uploadNames(api.calls).every((name) => name.includes(new_target)));
   assert.ok(api.release()?.body?.includes(old_target));
   assert.ok(api.release()?.body?.includes(new_target));
+  assert.ok(!api.calls.some((args) => args.includes("DELETE")));
+});
+
+test("an unsigned desktop preserves Windows assets and a later signed build appends beside it", async (t) => {
+  const canonical_root = await fixture(t);
+  const canonical = await componentSetFixture(canonical_root, identity);
+  await cp(await windowsComponentSetFixture(canonical_root, identity), canonical, { recursive: true });
+  for (const target of windowsUpdaterTargets) await desktopAssets(canonical, target);
+  const target = "aarch64-apple-darwin";
+  await desktopAssets(canonical, "x86_64-unknown-linux-gnu");
+  const fallback = await componentSetFixture(await fixture(t), identity);
+  await desktopAssets(fallback, target, true);
+
+  const fallback_api = github({ release: published, assets: await existingReleaseAssets(canonical), canonical_directory: canonical });
+  await publishComponentRelease("tokn-ai/ctl", identity, fallback, "desktop", fallback_api.gh);
+  const fallback_uploads = uploadNames(fallback_api.calls);
+  assert.equal(fallback_uploads.length, 5);
+  assert.ok(fallback_uploads.every((name) => name.includes(`${target}-unsigned`)));
+  assert.equal(fallback_uploads.at(-1), `desktop-${target}-unsigned.json`);
+  assert.match(fallback_api.release()?.body ?? "", /[Uu]nsigned/);
+
+  const directory = await componentSetFixture(await fixture(t), identity);
+  await desktopAssets(directory, target);
+  const original = fallback_api.assets;
+  const api = github({ release: fallback_api.release()!, assets: original, canonical_directory: fallback });
+  await publishComponentRelease("tokn-ai/ctl", identity, directory, "desktop", api.gh);
+
+  const uploads = uploadNames(api.calls);
+  assert.equal(uploads.length, 5);
+  assert.ok(uploads.every((name) => name.includes(target) && !name.includes("-unsigned")));
+  assert.equal(uploads.at(-1), `desktop-${target}.json`);
+  for (const asset of original) {
+    assert.equal(await fileDigest(join(directory, asset.name)), asset.digest);
+    assert.deepEqual(api.assets.find((entry) => entry.name === asset.name), asset);
+  }
+  assert.ok(api.release()?.body?.includes(`\`${target}\``));
+  assert.match(api.release()?.body ?? "", /[Uu]nsigned/);
   assert.ok(!api.calls.some((args) => args.includes("DELETE")));
 });
 

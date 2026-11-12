@@ -647,10 +647,6 @@ jobs:
           [[ -n "$NOTARY_KEY_ID" ]] || missing+=(APPLE_API_KEY)
           [[ -n "$PROFILE_BASE64" ]] || missing+=(APPLE_CTLD_PROVISIONING_PROFILE)
           if (( ${#missing[@]} > 0 )); then
-            if [[ "$GITHUB_REF_TYPE" == tag ]]; then
-              printf '::error::Version-tag macOS releases require Apple signing configuration: %s\n' "${missing[*]}"
-              exit 1
-            fi
             echo "enabled=false" >> "$GITHUB_OUTPUT"
             printf '::notice::Building unsigned macOS packages; missing Apple signing configuration: %s\n' "${missing[*]}"
             echo 'macOS packages are unsigned and not notarized. Touch ID-protected credential storage requires a signed build.' >> "$GITHUB_STEP_SUMMARY"
@@ -688,7 +684,7 @@ jobs:
         env:
           CTLD_SIGNING_IDENTITY_OUTPUT: ${{ runner.temp }}/ctld-signing-identity
           APPLE_SIGNING_ENABLED: ${{ steps.signing.outputs.enabled }}
-          CTLD_REQUIRE_DISTRIBUTION_SIGNING: ${{ github.ref_type == 'tag' }}
+          CTLD_REQUIRE_DISTRIBUTION_SIGNING: ${{ github.ref_type == 'tag' && steps.signing.outputs.enabled == 'true' }}
         shell: bash
         run: |
           cargo build --locked --release --target "${{ matrix.target }}" -p ctld -p ctmuxd -p ctl-taskd
@@ -781,6 +777,7 @@ jobs:
           fi
           node scripts/ci/package-desktop-bundle.mts \
             "${{ matrix.target }}" \
+            "${{ needs.metadata.outputs.app_version }}" \
             "${{ needs.metadata.outputs.bundle_id }}" \
             "${{ needs.metadata.outputs.git_revision }}" \
             "$signing_mode" \
@@ -790,7 +787,9 @@ jobs:
       - name: Upload desktop bundles
         uses: actions/upload-artifact@v4
         with:
-          name: ctmux-desktop-${{ matrix.target }}
+          name: >-
+            ctmux-desktop-${{ matrix.target }}${{ needs.metadata.outputs.bundle_id == needs.metadata.outputs.app_version &&
+            steps.signing.outputs.enabled == 'false' && '-unsigned' || '' }}
           path: target/desktop-assets/*
           if-no-files-found: error
           retention-days: 30
@@ -868,7 +867,7 @@ jobs:
 
       - name: Package portable desktop and standalone updater
         run: |
-          node scripts/ci/package-desktop-bundle.mts '${{ matrix.target }}' '${{ needs.metadata.outputs.bundle_id }}' '${{ needs.metadata.outputs.git_revision }}' not_applicable 'target/${{ matrix.target }}/release' target/desktop-assets '${{ needs.metadata.outputs.app_version }}' apps/desktop/src-tauri/resources/agent-bundles
+          node scripts/ci/package-desktop-bundle.mts '${{ matrix.target }}' '${{ needs.metadata.outputs.app_version }}' '${{ needs.metadata.outputs.bundle_id }}' '${{ needs.metadata.outputs.git_revision }}' not_applicable 'target/${{ matrix.target }}/release' target/desktop-assets apps/desktop/src-tauri/resources/agent-bundles
           if ($LASTEXITCODE -ne 0) { throw 'Portable desktop packaging failed.' }
           $updaterManifest = 'ctlup-${{ matrix.target }}.json'
           $resources = 'apps/desktop/src-tauri/resources/agent-bundles'

@@ -179,9 +179,12 @@ MSI or NSIS installation; installing the app does not require administrator
 access. Local builds require Node 24, pnpm, Rust's matching MSVC toolchain, the
 Visual Studio C++ build tools and Windows SDK.
 
-Local macOS builds sign the bundled `ctld.app` when a usable development
-profile and signing identity are available, and fall back to an unsigned
-helper when signing is unavailable.
+Local macOS app builds and `ctlup dev` use the same helper provisioning and
+signing preparation. They discover an unexpired development profile and can
+renew it through Xcode when the provisioning project has a configured team.
+`ctlup dev` requires successful helper signing before activating its runtime
+build. App builds can use an unsigned bundled helper when provisioning or
+signing fails.
 
 Published installs use the same saved channel preference as runtime bundle
 updates, with the distribution's compiled default when no preference is saved.

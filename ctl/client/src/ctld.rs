@@ -263,28 +263,26 @@ impl<'a> Resolver<'a> {
     setup::inspect_selected_bundle_ctld(required).await
   }
 
-  #[cfg_attr(
-    not(target_os = "macos"),
-    expect(clippy::unused_async, reason = "shared helper cache is macOS-only")
-  )]
+  #[cfg(target_os = "macos")]
   async fn inspect_shared(
     &self,
     required: Option<ctl_core::protocol::ProtocolVersion>,
   ) -> Result<Option<HelperSelection>, setup::Error> {
-    #[cfg(target_os = "macos")]
-    {
-      #[cfg(test)]
-      if let Some(home) = self.home {
-        return setup::inspect_cached_ctld_in(home, required).await;
-      }
-      let home = dirs::home_dir().ok_or(setup::Error::HomeDirectory)?;
-      setup::inspect_cached_ctld_in(&home, required).await
+    #[cfg(test)]
+    if let Some(home) = self.home {
+      return setup::inspect_cached_ctld_in(home, required).await;
     }
-    #[cfg(not(target_os = "macos"))]
-    {
-      let _ = required;
-      Ok(None)
-    }
+    let home = dirs::home_dir().ok_or(setup::Error::HomeDirectory)?;
+    setup::inspect_cached_ctld_in(&home, required).await
+  }
+
+  #[cfg(not(target_os = "macos"))]
+  fn inspect_shared(
+    &self,
+    required: Option<ctl_core::protocol::ProtocolVersion>,
+  ) -> std::future::Ready<Result<Option<HelperSelection>, setup::Error>> {
+    let _ = (self, required);
+    std::future::ready(Ok(None))
   }
 
   async fn inspect_checkout(

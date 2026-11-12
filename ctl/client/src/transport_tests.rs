@@ -822,6 +822,27 @@ async fn authentication_hook_does_not_run_when_the_wrapper_skips_its_marker() {
 }
 
 #[tokio::test]
+async fn rejected_startup_closes_owned_pipes_before_collecting_diagnostics() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
+  let command = fixture(
+    "printf 'ctl-ssh-identity\\n'; cat >/dev/null; printf 'startup input closed\\n' >&2",
+    "rejected-startup.ps1",
+  );
+  let error = timeout(
+    TEST_TIMEOUT,
+    start_ssh_transport_identified(command, true, true, ready(())),
+  )
+  .await
+  .expect("rejected startup did not close and reap its producer")
+  .err()
+  .unwrap();
+  assert!(matches!(error, CoreError::InvalidSshPreface(_)));
+  let message = error.to_string();
+  assert!(message.contains("skipped the SSH authentication marker"));
+  assert!(message.contains("startup input closed"), "{message}");
+}
+
+#[tokio::test]
 async fn identified_transport_rejects_old_agents_and_invalid_metadata() {
   let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   timeout(TEST_TIMEOUT, async {

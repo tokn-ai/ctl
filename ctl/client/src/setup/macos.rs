@@ -420,11 +420,13 @@ async fn plist_string(path: &Path, key: &str) -> Result<String, Error> {
 
 async fn verify(session: &Session) -> Result<(), Error> {
   verify_signature(session).await?;
-  let profile = profile_entitlements(session).await?;
+  let profile_path = session.work().join("profile.plist");
+  let profile = profile_entitlements(session, &profile_path).await?;
   let signed = signed_entitlements(session).await?;
   let team = &session.manifest.team_identifier;
   if session.manifest.development.is_some() {
-    validate_development_entitlements(&signed, &profile, team)
+    validate_development_entitlements(&signed, &profile, team)?;
+    verify_development_profile(session, &profile_path).await
   } else {
     validate_entitlements(&signed, team)?;
     verify_notarization(&session.app()).await
@@ -489,11 +491,13 @@ async fn verify_signature(session: &Session) -> Result<(), Error> {
   Ok(())
 }
 
-async fn profile_entitlements(session: &Session) -> Result<serde_json::Value, Error> {
+async fn profile_entitlements(
+  session: &Session,
+  profile: &Path,
+) -> Result<serde_json::Value, Error> {
   let app = session.app();
   let team = &session.manifest.team_identifier;
   let development = session.manifest.development.is_some();
-  let profile = session.work().join("profile.plist");
   let output = tool(
     "/usr/bin/security",
     &[
@@ -507,15 +511,14 @@ async fn profile_entitlements(session: &Session) -> Result<serde_json::Value, Er
   )
   .await?;
   require_success(&output, "distribution provisioning profile")?;
-  if !development && plist_string(&profile, "ProvisionsAllDevices").await? != "true" {
+  if !development && plist_string(profile, "ProvisionsAllDevices").await? != "true" {
     return Err(Error::Verification(
       "helper does not have a Developer ID distribution profile".into(),
     ));
   }
-  let entitlements = plist_json(&profile, "Entitlements").await?;
+  let entitlements = plist_json(profile, "Entitlements").await?;
   if development {
     validate_entitlement_identity(&entitlements, team)?;
-    verify_development_profile(session, &profile).await?;
   } else {
     validate_entitlements(&entitlements, team)?;
   }
@@ -629,8 +632,6 @@ async fn verify_development_profile(session: &Session, profile: &Path) -> Result
       "development profile belongs to a different team".into(),
     ));
   }
-  let expiration = plist_string(profile, "ExpirationDate").await?;
-  verify_profile_expiration(&expiration).await?;
   let certificates = tool(
     "/usr/bin/plutil",
     &[
@@ -674,7 +675,8 @@ async fn verify_development_profile(session: &Session, profile: &Path) -> Result
       "helper signing certificate is not authorized by its development profile".into(),
     ));
   }
-  Ok(())
+  let expiration = plist_string(profile, "ExpirationDate").await?;
+  verify_profile_expiration(&expiration).await
 }
 
 async fn extract_signing_certificates(app: &Path, prefix: &Path) -> Result<(), Error> {
@@ -756,9 +758,7 @@ async fn verify_profile_expiration(value: &str) -> Result<(), Error> {
     .map_err(io::Error::other)?
     .as_secs();
   if expires <= now {
-    return Err(Error::Verification(
-      "development provisioning profile has expired".into(),
-    ));
+    return Err(Error::DevelopmentProfileExpired);
   }
   Ok(())
 }
@@ -849,12 +849,14 @@ mod tests {
     verify_profile_expiration("2099-01-01T00:00:00Z")
       .await
       .unwrap();
-    assert!(
-      verify_profile_expiration("2000-01-01T00:00:00Z")
-        .await
-        .is_err()
-    );
-    assert!(verify_profile_expiration("not-a-date").await.is_err());
+    assert!(matches!(
+      verify_profile_expiration("2000-01-01T00:00:00Z").await,
+      Err(Error::DevelopmentProfileExpired)
+    ));
+    assert!(matches!(
+      verify_profile_expiration("not-a-date").await,
+      Err(Error::Verification(_))
+    ));
     assert_eq!(
       decode_profile_certificates(b"<plist><array><data> AQI=\n </data></array></plist>").unwrap(),
       vec![vec![1, 2]]

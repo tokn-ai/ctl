@@ -333,7 +333,7 @@ function TerminalWorkbench() {
     task_status: taskWorkspace.daemonStatus,
     tasks: taskWorkspace.tasks,
     tasks_loaded: taskWorkspace.hasLoaded,
-  });
+  }, attachmentNotifications);
   const captureDaemonOperation = useCallback((target: ConnectionTarget) => {
     const epoch = daemonEpochRef.current;
     return () => target.kind !== "local" || epoch === daemonEpochRef.current;
@@ -493,7 +493,10 @@ function TerminalWorkbench() {
         setSessions(visible);
         for (const { target } of results) {
           const key = targetKey(target);
-          if (!errors.has(key)) notifications.resolve(`host:${key}`);
+          if (!errors.has(key)) {
+            notifications.resolve(`host:${key}`);
+            attachmentNotifications.reportHostAuthentication(key, null, true);
+          }
         }
         setTargetErrors((current) => {
           const next = new Map(current);
@@ -532,6 +535,7 @@ function TerminalWorkbench() {
       setSessionShellStates,
       hostConnections.isPaused,
       notifications,
+      attachmentNotifications,
     ],
   );
 
@@ -742,9 +746,11 @@ function TerminalWorkbench() {
     renderer?.remapSessions(recovered.key_changes);
     setTabShellStates((current) => remapStateKeys(current, recovered.key_changes));
     const host_keys = new Set(recovered.view.targets.map(targetKey));
-    notifications.resolve(`host:${targetKey(recovered.target)}`);
+    const recovered_key = targetKey(recovered.target);
+    notifications.resolve(`host:${recovered_key}`);
+    attachmentNotifications.reportHostAuthentication(recovered_key, null, true);
     setTargetErrors((current) => new Map(
-      [...current].filter(([key]) => host_keys.has(key) && key !== targetKey(recovered.target)),
+      [...current].filter(([key]) => host_keys.has(key) && key !== recovered_key),
     ));
     sessionsRef.current = workspace.viewRef.current.sessions;
     tabsRef.current = workspace.viewRef.current.tabs;

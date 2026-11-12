@@ -24,13 +24,13 @@ export class NotificationStore {
   };
 
   /** A dismissed error stays dismissed until its source changes or recovers. */
-  report(source_key: string, input: NotificationInput | null): void {
+  report(source_key: string, input: NotificationInput | null, { toast = true }: { toast?: boolean } = {}): void {
     if (input === null) {
       this.reported.delete(source_key);
       this.setActions(source_key, []);
       return;
     }
-    const signature = JSON.stringify([input.severity, input.title, input.message, input.source]);
+    const signature = JSON.stringify([input.severity, input.title, input.message, input.source, toast]);
     const previous = this.state.entries.find((entry) => entry.source_key === source_key);
     if (this.reported.get(source_key) === signature) {
       // Availability or context can change without being a new occurrence.
@@ -56,7 +56,7 @@ export class NotificationStore {
       updated_at: time,
       occurrence_count: repeated ? previous.occurrence_count + 1 : 1,
       read: this.state.center_open,
-      toast_visible: !this.state.center_open,
+      toast_visible: toast && !this.state.center_open,
       resolved_at: null,
     };
     let visible = 0;

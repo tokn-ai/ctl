@@ -238,40 +238,7 @@ pub async fn download_for_target(number: u64, target: &str) -> Result<Downloaded
     ))
   })?;
   let bundle = DownloadedPrBundle::new()?;
-  let mut command = tokio::process::Command::new("gh");
-  command
-    .args([
-      "run",
-      "download",
-      &build.run_id.to_string(),
-      "--repo",
-      "github.com/tokn-ai/ctl",
-    ])
-    .args(["--name", artifact, "--dir"])
-    .arg(bundle.directory())
-    .env("GH_PROMPT_DISABLED", "1")
-    .kill_on_drop(true)
-    .stdin(Stdio::null())
-    .stdout(Stdio::null());
-  #[cfg(unix)]
-  command.env("TMPDIR", bundle.directory());
-  #[cfg(windows)]
-  command
-    .env("TMP", bundle.directory())
-    .env("TEMP", bundle.directory());
-  let status = command.status().await.map_err(|error| {
-    if error.kind() == io::ErrorKind::NotFound {
-      Error::Download("install the GitHub CLI and run `gh auth login` to download PR builds".into())
-    } else {
-      Error::Io(error)
-    }
-  })?;
-  if !status.success() {
-    return Err(Error::Download(format!(
-      "GitHub CLI could not download the PR #{number} bundle from run {}; check `gh auth status`",
-      build.run_id
-    )));
-  }
+  download_artifact(build.run_id, artifact, bundle.directory()).await?;
   let current = github.pull(number).await?;
   if current.head.sha != selection.head_sha {
     return Err(Error::Stale(format!(
@@ -285,6 +252,45 @@ pub async fn download_for_target(number: u64, target: &str) -> Result<Downloaded
   })
   .await
   .map_err(io::Error::other)?
+}
+
+pub(super) async fn download_artifact(
+  run_id: u64,
+  name: &str,
+  destination: &Path,
+) -> Result<(), Error> {
+  let status = tokio::process::Command::new("gh")
+    .args([
+      "run",
+      "download",
+      &run_id.to_string(),
+      "--repo",
+      "github.com/tokn-ai/ctl",
+    ])
+    .args(["--name", name, "--dir"])
+    .arg(destination)
+    .env("GH_PROMPT_DISABLED", "1")
+    .env("TMPDIR", destination)
+    .kill_on_drop(true)
+    .stdin(Stdio::null())
+    .stdout(Stdio::null())
+    .status()
+    .await
+    .map_err(|error| {
+      if error.kind() == io::ErrorKind::NotFound {
+        Error::Download(
+          "install the GitHub CLI and run `gh auth login` to download workflow artifacts".into(),
+        )
+      } else {
+        Error::Io(error)
+      }
+    })?;
+  if !status.success() {
+    return Err(Error::Download(format!(
+      "GitHub CLI could not download {name} from run {run_id}; check `gh auth status`",
+    )));
+  }
+  Ok(())
 }
 
 fn verify_download(directory: &Path, revision: &str, set_file: &str) -> Result<(), Error> {

@@ -31,10 +31,17 @@ pub(super) async fn inspect(
   home: &Path,
   required: Option<ProtocolVersion>,
 ) -> Result<Option<super::HelperSelection>, Error> {
-  let target = macos::release_target()?;
   if let Some(selected) = inspect_selected_bundle(home, required).await? {
     return Ok(Some(selected));
   }
+  inspect_cached(home, required).await
+}
+
+pub(super) async fn inspect_cached(
+  home: &Path,
+  required: Option<ProtocolVersion>,
+) -> Result<Option<super::HelperSelection>, Error> {
+  let target = macos::release_target()?;
   let Some(installation) = ctl_ipc::managed::resolve_compatible_installation(home, target)? else {
     return Ok(None);
   };

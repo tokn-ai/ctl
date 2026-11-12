@@ -27,6 +27,8 @@ const SUPPORTED_TARGETS: [&str; 4] = [
 pub(crate) mod archive;
 mod cache;
 pub(crate) mod compatibility;
+#[cfg(unix)]
+pub mod desktop;
 pub mod pr;
 pub mod published;
 pub(crate) use cache::prune_download_cache;
@@ -446,20 +448,7 @@ pub async fn download_release_bundle(
       "invalid client version for remote bundle download".into(),
     ));
   }
-  let client = reqwest::Client::builder()
-    .https_only(true)
-    .connect_timeout(Duration::from_secs(15))
-    .read_timeout(Duration::from_secs(30))
-    .redirect(reqwest::redirect::Policy::custom(|attempt| {
-      if attempt.previous().len() >= 5 || !trusted_url(attempt.url()) {
-        attempt.error("untrusted remote bundle redirect")
-      } else {
-        attempt.follow()
-      }
-    }))
-    .user_agent(concat!("ctl/", env!("CARGO_PKG_VERSION")))
-    .build()
-    .map_err(download_error)?;
+  let client = release_http_client()?;
   let root = format!("{RELEASE_ROOT}/v{}", expected.version);
   let set_file = bundle_set_file(target);
   let bytes = download(&client, &format!("{root}/{set_file}"), MAX_BUNDLE_SET_BYTES).await?;
@@ -485,7 +474,7 @@ pub async fn download_release_bundle(
   manifest.verify_archive(target, archive, bytes)
 }
 
-fn safe_id(value: &str) -> bool {
+pub(crate) fn safe_id(value: &str) -> bool {
   !value.is_empty()
     && value.len() <= 128
     && value
@@ -579,6 +568,23 @@ fn trusted_url(url: &reqwest::Url) -> bool {
           | "github-releases.githubusercontent.com"
       )
     )
+}
+
+fn release_http_client() -> Result<reqwest::Client, Error> {
+  reqwest::Client::builder()
+    .https_only(true)
+    .connect_timeout(Duration::from_secs(15))
+    .read_timeout(Duration::from_secs(30))
+    .redirect(reqwest::redirect::Policy::custom(|attempt| {
+      if attempt.previous().len() >= 5 || !trusted_url(attempt.url()) {
+        attempt.error("untrusted remote bundle redirect")
+      } else {
+        attempt.follow()
+      }
+    }))
+    .user_agent(concat!("ctl/", env!("CARGO_PKG_VERSION")))
+    .build()
+    .map_err(download_error)
 }
 
 fn download_error(error: reqwest::Error) -> Error {

@@ -32,6 +32,11 @@ pub(super) enum Command {
   Install(UpdateArguments),
   /// Update a complete installation; running sessions keep their current owner.
   Update(UpdateArguments),
+  /// Install or update the ctmux desktop app on this computer.
+  App {
+    #[command(subcommand)]
+    command: AppCommand,
+  },
   /// Build and install one complete native development build from a checkout.
   Dev(DevelopmentArguments),
   /// Show the active installation and rollback candidate without starting services.
@@ -65,6 +70,24 @@ pub(super) enum Command {
   #[cfg(windows)]
   #[command(hide = true)]
   UpdaterDigest,
+}
+
+#[derive(Debug, Subcommand)]
+pub(super) enum AppCommand {
+  /// Install the desktop app from a publication channel or the local checkout.
+  Install(AppArguments),
+  /// Update the desktop app from a publication channel or the local checkout.
+  Update(AppArguments),
+}
+
+#[derive(Debug, Args)]
+pub(super) struct AppArguments {
+  /// Build the desktop app from the current source checkout.
+  #[arg(long, conflicts_with = "channel")]
+  pub local: bool,
+  /// Publication channel; remembered after a successful install or update.
+  #[arg(long, value_enum)]
+  pub channel: Option<crate::components::Channel>,
 }
 
 #[derive(Debug, Args)]
@@ -171,6 +194,86 @@ pub(super) struct DevelopmentArguments {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn app_install_and_update_accept_a_local_build_or_a_publication_channel() {
+    for operation in ["install", "update"] {
+      for (flags, local, channel) in [
+        (&[][..], false, None),
+        (&["--local"][..], true, None),
+        (&["--channel", "nightly"][..], false, Some("nightly")),
+        (&["--channel", "stable"][..], false, Some("stable")),
+      ] {
+        let command_line = [&["ctlup", "app", operation][..], flags].concat();
+        let args = Arguments::try_parse_from(command_line).unwrap();
+        let Command::App { command } = args.command else {
+          panic!("expected the desktop app command");
+        };
+        let options = match command {
+          AppCommand::Install(options) => {
+            assert_eq!(operation, "install");
+            options
+          }
+          AppCommand::Update(options) => {
+            assert_eq!(operation, "update");
+            options
+          }
+        };
+        assert_eq!(options.local, local);
+        assert_eq!(
+          options
+            .channel
+            .map(|value| value.to_possible_value().unwrap().get_name().to_owned())
+            .as_deref(),
+          channel
+        );
+      }
+    }
+  }
+
+  #[test]
+  fn app_local_builds_conflict_with_publication_channels_in_either_order() {
+    for operation in ["install", "update"] {
+      for channel in ["stable", "nightly"] {
+        for flags in [
+          ["--local", "--channel", channel],
+          ["--channel", channel, "--local"],
+        ] {
+          let command_line = [&["ctlup", "app", operation][..], &flags].concat();
+          assert!(Arguments::try_parse_from(command_line).is_err());
+        }
+      }
+    }
+  }
+
+  #[test]
+  fn app_commands_reject_unsupported_channels_and_keep_global_host_options() {
+    for operation in ["install", "update"] {
+      for flags in [
+        &["--channel", "dev"][..],
+        &["--channel", "unknown"],
+        &["--hosts", "fixture-host"],
+        &["--pr", "1"],
+      ] {
+        assert!(
+          Arguments::try_parse_from([&["ctlup", "app", operation][..], flags].concat()).is_err()
+        );
+      }
+      for option in ["--host", "--destination", "--method"] {
+        let args =
+          Arguments::try_parse_from(["ctlup", "app", operation, "--local", option, "fixture-host"])
+            .unwrap();
+        let selected = match option {
+          "--host" => args.host,
+          "--destination" => args.destination,
+          "--method" => args.method,
+          _ => unreachable!(),
+        };
+        assert_eq!(selected.as_deref(), Some("fixture-host"));
+        assert!(matches!(args.command, Command::App { .. }));
+      }
+    }
+  }
 
   #[test]
   fn release_commands_accept_a_channel_and_an_optional_publication_id() {

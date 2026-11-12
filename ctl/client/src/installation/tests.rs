@@ -63,3 +63,19 @@ fn settings_do_not_follow_account_storage_links() {
   assert!(default_channel(&home.0).is_err());
   assert!(!outside.0.join("ctl").exists());
 }
+
+#[test]
+fn desktop_storage_is_passive_until_requested_and_rejects_links() {
+  let home = Home::new();
+  let path = home.0.join(".tokn/ctl/apps");
+  assert_eq!(app_directory(&home.0, false).unwrap(), path);
+  assert!(!home.0.join(".tokn").exists());
+  assert_eq!(app_directory(&home.0, true).unwrap(), path);
+  assert!(path.is_dir());
+
+  std::fs::remove_dir(&path).unwrap();
+  let outside = Home::new();
+  std::os::unix::fs::symlink(&outside.0, &path).unwrap();
+  assert!(app_directory(&home.0, false).is_err());
+  assert!(app_directory(&home.0, true).is_err());
+}

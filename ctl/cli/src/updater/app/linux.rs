@@ -23,8 +23,14 @@ pub(super) fn prepare(path: PathBuf) -> io::Result<PathBuf> {
 pub(super) fn matches(installed: &Path, staged: &Path) -> io::Result<bool> {
   let mut installed = open_image(installed)?;
   let mut staged = open_image(staged)?;
-  let size = staged.metadata()?.len();
-  if installed.metadata()?.len() != size || size > 512 * 1024 * 1024 {
+  let installed_metadata = installed.metadata()?;
+  let staged_metadata = staged.metadata()?;
+  let size = staged_metadata.len();
+  if installed_metadata.len() != size
+    || installed_metadata.permissions().mode() & 0o100
+      != staged_metadata.permissions().mode() & 0o100
+    || size > 512 * 1024 * 1024
+  {
     return Ok(false);
   }
   installed.rewind()?;
@@ -55,3 +61,6 @@ fn open_image(path: &Path) -> io::Result<File> {
     format!("expected an AppImage at {}", path.display()),
   ))
 }
+
+#[cfg(test)]
+mod tests;

@@ -173,6 +173,62 @@ fn stages_an_app_from_an_unsigned_release() {
 }
 
 #[test]
+fn compares_app_contents_and_inventory_at_the_same_product_version() {
+  let scratch = Scratch::new();
+  let installed = scratch.fixture();
+  let resource = "Contents/resource";
+  fs::write(installed.join(resource), b"original").unwrap();
+  let staged = unpack(&scratch.archive(), &scratch.staging()).unwrap();
+  assert!(matches(&installed, &staged).unwrap());
+
+  fs::write(installed.join(resource), b"modified").unwrap();
+  assert_eq!(installed_version(&installed).unwrap(), "0.1.3");
+  assert!(!matches(&installed, &staged).unwrap());
+  fs::copy(staged.join(resource), installed.join(resource)).unwrap();
+  assert!(matches(&installed, &staged).unwrap());
+
+  let extra = installed.join("Contents/extra");
+  fs::write(&extra, b"unexpected").unwrap();
+  assert!(!matches(&installed, &staged).unwrap());
+  fs::remove_file(extra).unwrap();
+  fs::remove_file(installed.join(resource)).unwrap();
+  assert!(!matches(&installed, &staged).unwrap());
+  assert!(!matches(&scratch.0.join("missing.app"), &staged).unwrap());
+}
+
+#[test]
+fn compares_executable_permissions_and_symlink_destinations() {
+  let scratch = Scratch::new();
+  let installed = scratch.fixture();
+  let link = installed.join("Contents/Link");
+  symlink("MacOS/ctmux-app", &link).unwrap();
+  let staged = unpack(&scratch.archive(), &scratch.staging()).unwrap();
+  assert!(matches(&installed, &staged).unwrap());
+
+  let executable = installed.join(EXECUTABLE_PATH);
+  let permissions = fs::metadata(&executable).unwrap().permissions();
+  fs::set_permissions(&executable, fs::Permissions::from_mode(0o644)).unwrap();
+  assert!(!matches(&installed, &staged).unwrap());
+  fs::set_permissions(&executable, permissions).unwrap();
+  assert!(matches(&installed, &staged).unwrap());
+
+  fs::remove_file(&link).unwrap();
+  symlink("Info.plist", &link).unwrap();
+  assert!(!matches(&installed, &staged).unwrap());
+}
+
+#[test]
+fn never_traverses_an_installed_directory_replaced_with_a_symlink() {
+  let scratch = Scratch::new();
+  let installed = scratch.fixture();
+  let staged = unpack(&scratch.archive(), &scratch.staging()).unwrap();
+  fs::remove_dir_all(installed.join("Contents/MacOS")).unwrap();
+  symlink("MacOS", installed.join("Contents/MacOS")).unwrap();
+
+  assert!(!matches(&installed, &staged).unwrap());
+}
+
+#[test]
 fn identifies_the_running_bundle_by_its_executable_path() {
   let scratch = Scratch::new();
   let app = scratch.fixture();

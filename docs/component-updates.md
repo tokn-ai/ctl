@@ -147,10 +147,23 @@ do not replace an independently provisioned signed local helper.
 
 ```sh
 ctlup app install
+ctlup app install --local --channel stable
 ctlup app update
+ctlup app update --local --channel nightly
 ```
 
-These commands use the current Stable desktop release for this computer.
+These commands install on this computer. `--local` makes that target explicit.
+They use the same saved channel preference as runtime bundle updates, with the
+distribution's compiled default when no preference is saved. `--channel stable`
+or `--channel nightly` selects the source and saves that choice after a
+successful install or update.
+
+Stable uses the desktop package attached to the matching tagged release.
+Nightly uses authenticated GitHub CLI (`gh`) access to download the desktop
+Actions artifact for the exact source revision selected by the Nightly channel.
+If that build's desktop package is unavailable for this computer, the command
+reports the missing package.
+
 On macOS, launch the installed app with `open ~/.tokn/ctl/apps/ctmux.app`.
 Quit ctmux before updating it. The installer prefers the signed, notarized
 archive and uses the official unsigned archive when the release has no

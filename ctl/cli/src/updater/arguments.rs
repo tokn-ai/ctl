@@ -66,12 +66,22 @@ pub(super) enum Command {
   ActivateInstalled { bundle_id: String },
 }
 
-#[derive(Debug, Clone, Copy, Subcommand, PartialEq, Eq)]
+#[derive(Debug, Subcommand)]
 pub(super) enum AppCommand {
-  /// Install the latest Stable desktop app.
-  Install,
-  /// Update an installed desktop app to the latest Stable release.
-  Update,
+  /// Install the desktop app from the selected publication channel.
+  Install(AppArguments),
+  /// Update an installed desktop app from the selected publication channel.
+  Update(AppArguments),
+}
+
+#[derive(Debug, Args)]
+pub(super) struct AppArguments {
+  /// Target this computer; also the default when omitted.
+  #[arg(long)]
+  pub local: bool,
+  /// Publication channel; remembered after a successful install or update.
+  #[arg(long, value_enum)]
+  pub channel: Option<crate::components::Channel>,
 }
 
 #[derive(Debug, Args)]
@@ -180,16 +190,70 @@ mod tests {
   use super::*;
 
   #[test]
-  fn app_commands_are_distinct_from_component_commands() {
-    for (argument, expected) in [
-      ("install", AppCommand::Install),
-      ("update", AppCommand::Update),
-    ] {
-      let args = Arguments::try_parse_from(["ctlup", "app", argument]).unwrap();
-      assert!(matches!(args.command, Command::App { command } if command == expected));
-      assert!(
-        Arguments::try_parse_from(["ctlup", "app", argument, "--channel", "nightly"]).is_err()
-      );
+  fn app_install_and_update_accept_channels_and_an_explicit_local_target() {
+    for operation in ["install", "update"] {
+      for local in [false, true] {
+        for channel in [None, Some("nightly"), Some("stable")] {
+          let mut command_line = vec!["ctlup", "app", operation];
+          if local {
+            command_line.push("--local");
+          }
+          if let Some(channel) = channel {
+            command_line.extend(["--channel", channel]);
+          }
+          let args = Arguments::try_parse_from(command_line).unwrap();
+          let Command::App { command } = args.command else {
+            panic!("expected the desktop app command");
+          };
+          let options = match command {
+            AppCommand::Install(options) => {
+              assert_eq!(operation, "install");
+              options
+            }
+            AppCommand::Update(options) => {
+              assert_eq!(operation, "update");
+              options
+            }
+          };
+          assert_eq!(options.local, local);
+          assert_eq!(
+            options
+              .channel
+              .map(|value| value.to_possible_value().unwrap().get_name().to_owned())
+              .as_deref(),
+            channel
+          );
+        }
+      }
+    }
+  }
+
+  #[test]
+  fn app_commands_reject_unsupported_channels_and_keep_global_host_options() {
+    for operation in ["install", "update"] {
+      for flags in [
+        &["--channel", "dev"][..],
+        &["--channel", "unknown"],
+        &["--hosts", "fixture-host"],
+        &["--pr", "1"],
+      ] {
+        assert!(
+          Arguments::try_parse_from([&["ctlup", "app", operation][..], flags].concat()).is_err()
+        );
+      }
+      for option in ["--host", "--destination", "--method"] {
+        let args =
+          Arguments::try_parse_from(["ctlup", "app", operation, "--local", option, "fixture-host"])
+            .unwrap();
+        let selected = match option {
+          "--host" => args.host,
+          "--destination" => args.destination,
+          "--method" => args.method,
+          _ => unreachable!(),
+        };
+        assert_eq!(selected.as_deref(), Some("fixture-host"));
+        assert!(matches!(args.command, Command::App { .. }));
+      }
     }
   }
 

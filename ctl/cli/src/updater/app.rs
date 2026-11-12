@@ -1,6 +1,7 @@
 use super::arguments::AppCommand;
 use ctl_client::installation::app_directory;
 use ctl_client::remote_bundle::desktop::{self, DesktopSigning, DesktopTarget};
+use ctl_core::component_update::BundleChannel;
 use std::{io, path::Path};
 
 mod activation;
@@ -10,6 +11,14 @@ mod linux;
 mod macos;
 
 pub(super) async fn run(home: &Path, command: AppCommand) -> io::Result<()> {
+  let (options, update) = match command {
+    AppCommand::Install(options) => (options, false),
+    AppCommand::Update(options) => (options, true),
+  };
+  // App commands always target this account. --local makes that explicit.
+  let _ = options.local;
+  let channel = super::selected_channel(home, options.channel)?;
+  let explicit_channel = options.channel.map(Into::into);
   let target = DesktopTarget::native()?;
   #[cfg(target_os = "macos")]
   let app_name = macos::APP_NAME;
@@ -19,52 +28,25 @@ pub(super) async fn run(home: &Path, command: AppCommand) -> io::Result<()> {
   let installed = activation::existing(&destination)?;
 
   #[cfg(target_os = "macos")]
-  let installed_version = installed
-    .as_ref()
-    .map(|_| macos::installed_version(&destination))
-    .transpose()?;
+  if installed.is_some() {
+    macos::installed_version(&destination)?;
+  }
   #[cfg(target_os = "linux")]
   if installed.is_some() {
     linux::verify_existing(&destination)?;
   }
-  match (command, installed.is_some()) {
-    (AppCommand::Install, true) => {
-      println!(
-        "ctmux is already installed at {}. Use ctlup app update to update it.",
-        destination.display()
-      );
-      return Ok(());
-    }
-    (AppCommand::Update, false) => {
-      return Err(io::Error::new(
-        io::ErrorKind::NotFound,
-        "ctmux is not installed. Run ctlup app install first.",
-      ));
-    }
-    _ => {}
+  if update && installed.is_none() {
+    return Err(io::Error::new(
+      io::ErrorKind::NotFound,
+      "ctmux is not installed. Run ctlup app install first.",
+    ));
   }
 
-  let release = desktop::latest(target).await?;
+  let release = desktop::latest(channel, target).await?;
   let signing = release.signing();
-  if installed.is_some() {
-    #[cfg(target_os = "macos")]
-    let current = installed_version
-      .as_deref()
-      .map(|version| is_current(&destination, version, &release.bundle_id, signing))
-      .transpose()?
-      .unwrap_or(false);
-    #[cfg(target_os = "linux")]
-    let current = linux::is_executable(&destination)? && release.matches(&destination)?;
-    if current {
-      println!(
-        "ctmux {} is already installed at {}.",
-        release.bundle_id,
-        destination.display()
-      );
-      return Ok(());
-    }
-    #[cfg(target_os = "macos")]
-    require_app_closed(&destination)?;
+  #[cfg(target_os = "linux")]
+  if installed.is_some() && linux::is_executable(&destination)? && release.matches(&destination)? {
+    return report_current(home, explicit_channel, &release.bundle_id, &destination);
   }
 
   app_directory(home, true)?;
@@ -86,18 +68,27 @@ pub(super) async fn run(home: &Path, command: AppCommand) -> io::Result<()> {
   println!("Downloading ctmux {}{signing_note}…", release.bundle_id);
   release.download(&download).await?;
   #[cfg(target_os = "macos")]
-  let staged = macos::stage(&download, workspace.staging(), &release.bundle_id, signing)?;
+  let staged = macos::stage(
+    &download,
+    workspace.staging(),
+    &release.app_version,
+    signing,
+  )?;
   #[cfg(target_os = "linux")]
   let staged = linux::prepare(download)?;
 
   #[cfg(target_os = "macos")]
   if installed.is_some() {
+    if macos::matches(&destination, &staged)? {
+      return report_current(home, explicit_channel, &release.bundle_id, &destination);
+    }
     require_app_closed(&destination)?;
   }
   let previous = workspace.activate(&staged, installed.as_ref())?;
-  let verb = match command {
-    AppCommand::Install => "Installed",
-    AppCommand::Update => "Updated",
+  let verb = if installed.is_some() {
+    "Updated"
+  } else {
+    "Installed"
   };
   println!(
     "{verb} ctmux {} at {}.",
@@ -107,24 +98,31 @@ pub(super) async fn run(home: &Path, command: AppCommand) -> io::Result<()> {
   if let Some(previous) = previous {
     println!("Previous app saved at {}.", previous.display());
   }
+  if let Some(channel) = explicit_channel {
+    ctl_client::installation::set_channel(home, channel).map_err(|error| {
+      io::Error::new(
+        error.kind(),
+        format!("app installed successfully, but could not save its channel preference: {error}"),
+      )
+    })?;
+  }
   Ok(())
 }
 
-#[cfg(target_os = "macos")]
-fn is_current(
-  app: &Path,
-  installed: &str,
-  available: &str,
-  signing: DesktopSigning,
-) -> io::Result<bool> {
-  let installed = semver::Version::parse(installed).map_err(io::Error::other)?;
-  let available_version = semver::Version::parse(available).map_err(io::Error::other)?;
-  if installed.cmp_precedence(&available_version).is_gt() {
-    return Err(io::Error::other(format!(
-      "ctmux {installed} is newer than the Stable release {available}"
-    )));
+fn report_current(
+  home: &Path,
+  channel: Option<BundleChannel>,
+  bundle_id: &str,
+  destination: &Path,
+) -> io::Result<()> {
+  if let Some(channel) = channel {
+    ctl_client::installation::set_channel(home, channel)?;
   }
-  Ok(installed == available_version && macos::verify_existing(app, available, signing).is_ok())
+  println!(
+    "ctmux {bundle_id} is already installed at {}.",
+    destination.display()
+  );
+  Ok(())
 }
 
 #[cfg(target_os = "macos")]

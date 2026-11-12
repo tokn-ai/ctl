@@ -2,7 +2,9 @@ use ctl_client::remote_bundle::desktop::DesktopSigning;
 use flate2::read::MultiGzDecoder;
 use libproc::proc_pid::pidpath;
 use libproc::processes::{ProcFilter, pids_by_type};
+use sha2::{Digest as _, Sha256};
 use std::collections::HashSet;
+use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::{self, Read as _, Seek as _};
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
@@ -96,6 +98,88 @@ pub(super) fn stage(
   let app = unpack(archive, staging)?;
   verify_existing(&app, version, signing)?;
   Ok(app)
+}
+
+pub(super) fn matches(installed: &Path, staged: &Path) -> io::Result<bool> {
+  let compare = || -> io::Result<bool> {
+    let mut pending = vec![(installed.to_owned(), staged.to_owned())];
+    let mut entries = 0;
+    while let Some((installed, staged)) = pending.pop() {
+      entries += 1;
+      if entries > MAX_ENTRIES {
+        return Ok(false);
+      }
+      let actual = fs::symlink_metadata(&installed)?;
+      let expected = fs::symlink_metadata(&staged)?;
+      if actual.file_type() != expected.file_type() {
+        return Ok(false);
+      }
+      if actual.is_symlink() {
+        if fs::read_link(&installed)? != fs::read_link(&staged)? {
+          return Ok(false);
+        }
+        continue;
+      }
+      if actual.permissions().mode() & 0o111 != expected.permissions().mode() & 0o111 {
+        return Ok(false);
+      }
+      if actual.is_dir() {
+        let names = entry_names(&staged)?;
+        if names != entry_names(&installed)? || entries + pending.len() + names.len() > MAX_ENTRIES
+        {
+          return Ok(false);
+        }
+        pending.extend(
+          names
+            .into_iter()
+            .map(|name| (installed.join(&name), staged.join(name))),
+        );
+      } else if actual.is_file() {
+        if actual.len() != expected.len() || expected.len() > MAX_EXPANDED_BYTES {
+          return Ok(false);
+        }
+        let Some(expected_digest) = file_digest(&staged, expected.len())? else {
+          return Ok(false);
+        };
+        if file_digest(&installed, expected.len())? != Some(expected_digest) {
+          return Ok(false);
+        }
+      } else {
+        return Ok(false);
+      }
+    }
+    Ok(true)
+  };
+  match compare() {
+    Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+    result => result,
+  }
+}
+
+fn entry_names(directory: &Path) -> io::Result<Vec<OsString>> {
+  let mut names = fs::read_dir(directory)?
+    .take(MAX_ENTRIES + 1)
+    .map(|entry| entry.map(|entry| entry.file_name()))
+    .collect::<io::Result<Vec<_>>>()?;
+  names.sort_unstable();
+  Ok(names)
+}
+
+fn file_digest(path: &Path, expected_bytes: u64) -> io::Result<Option<[u8; 32]>> {
+  use rustix::fs::{Mode, OFlags};
+
+  let file = File::from(rustix::fs::open(
+    path,
+    OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+    Mode::empty(),
+  )?);
+  let metadata = file.metadata()?;
+  if !metadata.is_file() || metadata.len() != expected_bytes {
+    return Ok(None);
+  }
+  let mut digest = Sha256::new();
+  let bytes = io::copy(&mut file.take(expected_bytes + 1), &mut digest)?;
+  Ok((bytes == expected_bytes).then(|| digest.finalize().into()))
 }
 
 pub(super) fn is_running(app: &Path) -> io::Result<bool> {

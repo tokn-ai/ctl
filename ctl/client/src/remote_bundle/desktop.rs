@@ -1,4 +1,4 @@
-//! Resolve and verify the desktop package for the current stable release.
+//! Resolve and verify desktop packages from a published component channel.
 
 use super::{Error, MAX_BUNDLE_SET_BYTES, RELEASE_ROOT, published, release_http_client};
 use ctl_core::component_update::BundleChannel;
@@ -11,6 +11,8 @@ use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::Path;
 
 const MAX_PACKAGE_BYTES: u64 = 512 * 1024 * 1024;
+
+mod nightly;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DesktopTarget {
@@ -84,11 +86,16 @@ impl DesktopSigning {
 }
 
 pub struct DesktopRelease {
+  pub app_version: String,
   pub bundle_id: String,
-  client: Client,
+  source: PackageSource,
   asset: Asset,
-  url: String,
   signing: DesktopSigning,
+}
+
+enum PackageSource {
+  Release { client: Client, url: String },
+  Workflow(nightly::DownloadedArtifact),
 }
 
 impl DesktopRelease {
@@ -107,17 +114,8 @@ impl DesktopRelease {
   /// # Errors
   /// Reports errors opening or reading a package. The path must be a regular file.
   pub fn matches(&self, path: &Path) -> io::Result<bool> {
-    use rustix::fs::{Mode, OFlags};
-
-    let file = File::from(rustix::fs::open(
-      path,
-      OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
-      Mode::empty(),
-    )?);
+    let file = open_package(path)?;
     let metadata = file.metadata()?;
-    if !metadata.is_file() {
-      return Err(invalid("desktop package must be a regular file"));
-    }
     if metadata.len() > MAX_PACKAGE_BYTES {
       return Ok(false);
     }
@@ -131,40 +129,57 @@ impl DesktopRelease {
   /// # Errors
   /// Rejects unavailable packages, existing destinations, and invalid downloads.
   pub async fn download(&self, destination: &Path) -> io::Result<()> {
-    let response = self
-      .client
-      .get(&self.url)
-      .send()
-      .await
-      .map_err(network_error)?;
-    if response.status() == StatusCode::NOT_FOUND {
-      return Err(io::Error::new(
-        io::ErrorKind::NotFound,
-        format!("desktop package {} is unavailable", self.asset.name),
-      ));
-    }
-    let response = response.error_for_status().map_err(network_error)?;
     let mut file = OpenOptions::new()
       .write(true)
       .create_new(true)
       .mode(0o600)
       .open(destination)?;
     let mut partial = PartialDownload(Some(destination));
-    write_verified(response, &mut file, &self.asset).await?;
+    match &self.source {
+      PackageSource::Release { client, url } => {
+        let response = client.get(url).send().await.map_err(network_error)?;
+        if response.status() == StatusCode::NOT_FOUND {
+          return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("desktop package {} is unavailable", self.asset.name),
+          ));
+        }
+        let response = response.error_for_status().map_err(network_error)?;
+        write_verified(response, &mut file, &self.asset).await?;
+      }
+      PackageSource::Workflow(directory) => {
+        directory.copy_verified(&self.asset, &mut file)?;
+      }
+    }
     file.sync_all()?;
     partial.0 = None;
     Ok(())
   }
 }
 
-/// Resolves the official desktop manifest on the exact stable release tag.
+fn open_package(path: &Path) -> io::Result<File> {
+  use rustix::fs::{Mode, OFlags};
+
+  let file = File::from(rustix::fs::open(
+    path,
+    OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+    Mode::empty(),
+  )?);
+  if !file.metadata()?.is_file() {
+    return Err(invalid("desktop package must be a regular file"));
+  }
+  Ok(file)
+}
+
+/// Resolves the desktop package for the exact publication named by a channel.
 ///
 /// # Errors
 /// Reports unavailable desktop assets and metadata that fails verification.
-pub async fn latest(target: DesktopTarget) -> io::Result<DesktopRelease> {
-  let stable = published::check(BundleChannel::Stable)
-    .await
-    .map_err(io::Error::other)?;
+pub async fn latest(channel: BundleChannel, target: DesktopTarget) -> io::Result<DesktopRelease> {
+  if channel == BundleChannel::Nightly {
+    return nightly::latest(target).await;
+  }
+  let stable = published::check(channel).await.map_err(io::Error::other)?;
   let root = format!("{RELEASE_ROOT}/v{}", stable.app_version);
   let client = release_http_client().map_err(io::Error::other)?;
   let (signing, asset) = discover_asset(
@@ -175,9 +190,12 @@ pub async fn latest(target: DesktopTarget) -> io::Result<DesktopRelease> {
   )
   .await?;
   Ok(DesktopRelease {
+    app_version: stable.app_version,
     bundle_id: stable.bundle_id,
-    url: format!("{root}/{}", asset.name),
-    client,
+    source: PackageSource::Release {
+      url: format!("{root}/{}", asset.name),
+      client,
+    },
     asset,
     signing,
   })
@@ -238,6 +256,19 @@ fn verified_asset(
   bundle_id: &str,
   git_revision: &str,
 ) -> io::Result<Asset> {
+  let manifest = parse_manifest(bytes, target, bundle_id, git_revision)?;
+  if manifest.signing_mode != signing {
+    return Err(invalid("unexpected desktop release signing mode"));
+  }
+  select_asset(manifest.assets, target, bundle_id, signing.suffix())
+}
+
+fn parse_manifest(
+  bytes: &[u8],
+  target: DesktopTarget,
+  bundle_id: &str,
+  git_revision: &str,
+) -> io::Result<Manifest> {
   let manifest: Manifest =
     serde_json::from_slice(bytes).map_err(|_| invalid("invalid desktop release manifest JSON"))?;
   if manifest.schema_version != 1
@@ -246,20 +277,24 @@ fn verified_asset(
     || manifest.git_revision != git_revision
   {
     return Err(invalid(
-      "desktop manifest does not match the selected stable build",
+      "desktop manifest does not match the selected published build",
     ));
   }
-  if manifest.signing_mode != signing {
-    return Err(invalid("unexpected desktop release signing mode"));
-  }
+  Ok(manifest)
+}
+
+fn select_asset(
+  assets: Vec<Asset>,
+  target: DesktopTarget,
+  bundle_id: &str,
+  suffix: &str,
+) -> io::Result<Asset> {
   let expected_name = format!(
-    "ctmux-{bundle_id}-{}{}.{}",
+    "ctmux-{bundle_id}-{}{suffix}.{}",
     target.triple(),
-    signing.suffix(),
     target.package_format()
   );
-  let mut matching = manifest
-    .assets
+  let mut matching = assets
     .into_iter()
     .filter(|asset| asset.name == expected_name);
   let asset = matching

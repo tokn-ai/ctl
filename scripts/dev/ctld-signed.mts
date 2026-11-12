@@ -41,7 +41,6 @@ export interface DevelopmentSigningOptions {
   target: string;
   app_version: string;
   output_directory: string;
-  profile_path?: string;
   env?: NodeJS.ProcessEnv;
   home_directory?: string;
 }
@@ -55,7 +54,7 @@ export async function signDevelopmentHelper(
   const env = developmentEnvironment(options.env ?? process.env);
   const invoke = (command: string, args: string[], extra_env: NodeJS.ProcessEnv = {}, stream_output = false, timeout_ms?: number) =>
     run(command, args, { cwd: options.repository_root, env: { ...env, ...extra_env }, stream_output, timeout_ms });
-  const profile = options.profile_path ?? (await prepareProvisioningProfile({
+  const profile = (await prepareProvisioningProfile({
     repository_root: options.repository_root, target_directory: options.target_directory,
     env, run, home_directory: options.home_directory,
   })).path;

@@ -15,6 +15,7 @@ async function fixture(context: TestContext, target = "x86_64-unknown-linux-gnu"
   context.after(() => rm(root, { recursive: true, force: true }));
   return {
     target,
+    app_version: "0.1.0",
     bundle_id: "0.1.0-dev.0123456789ab",
     git_revision: "0123456789abcdef0123456789abcdef01234567",
     signing_mode: target.endsWith("apple-darwin") ? "unsigned" : "not_applicable",
@@ -81,6 +82,7 @@ test("archives the macOS app with executable modes and relative symlinks intact"
   assert.deepEqual(manifest.assets.map((asset) => asset.name), [".dmg", ".app.tar.gz"].map(
     (extension) => `ctmux-${options.bundle_id}-${options.target}${extension}`,
   ));
+  assert.deepEqual(JSON.parse(await readFile(join(options.output_directory, `desktop-${options.target}.json`), "utf8")), manifest);
   const archive = join(options.output_directory, manifest.assets[1].name);
   const extracted = join(dirname(options.output_directory), "extracted");
   await mkdir(extracted);
@@ -93,6 +95,31 @@ test("archives the macOS app with executable modes and relative symlinks intact"
   for (const asset of manifest.assets) {
     assert.equal(asset.sha256, createHash("sha256").update(await readFile(join(options.output_directory, asset.name))).digest("hex"));
   }
+});
+
+test("keeps unsigned and signed macOS release packages at distinct names", async (context) => {
+  const options = await fixture(context, "aarch64-apple-darwin");
+  options.bundle_id = options.app_version;
+  await macBundle(options);
+
+  const unsigned = await packageDesktopBundle(options);
+  assert.equal(unsigned.signing_mode, "unsigned");
+  assert.deepEqual(unsigned.assets.map((asset) => asset.name), [
+    "ctmux-0.1.0-aarch64-apple-darwin-unsigned.dmg",
+    "ctmux-0.1.0-aarch64-apple-darwin-unsigned.app.tar.gz",
+  ]);
+  assert.deepEqual(JSON.parse(await readFile(join(options.output_directory, "desktop-aarch64-apple-darwin-unsigned.json"), "utf8")), unsigned);
+  for (const asset of unsigned.assets) {
+    assert.equal(await readFile(join(options.output_directory, `${asset.name}.sha256`), "utf8"), `${asset.sha256}  ${asset.name}\n`);
+  }
+
+  const signedDirectory = join(dirname(options.output_directory), "signed");
+  const signed = await packageDesktopBundle({ ...options, signing_mode: "signed", output_directory: signedDirectory });
+  assert.deepEqual(signed.assets.map((asset) => asset.name), [
+    "ctmux-0.1.0-aarch64-apple-darwin.dmg",
+    "ctmux-0.1.0-aarch64-apple-darwin.app.tar.gz",
+  ]);
+  assert.deepEqual(JSON.parse(await readFile(join(signedDirectory, "desktop-aarch64-apple-darwin.json"), "utf8")), signed);
 });
 
 for (const directory of ["deb", "rpm", "appimage"]) {
@@ -138,6 +165,7 @@ test("rejects symlink and empty installers", async (context) => {
 test("rejects invalid identity and signing metadata before reading build output", async (context) => {
   const options = await fixture(context);
   await assert.rejects(packageDesktopBundle({ ...options, target: "../unsupported" }), /unsupported desktop target/);
+  await assert.rejects(packageDesktopBundle({ ...options, app_version: "../../escape" }), /invalid app version/);
   await assert.rejects(packageDesktopBundle({ ...options, bundle_id: "../../escape" }), /invalid bundle ID/);
   await assert.rejects(packageDesktopBundle({ ...options, git_revision: "short" }), /40 hexadecimal/);
   await assert.rejects(packageDesktopBundle({ ...options, signing_mode: "signed" }), /invalid signing mode/);

@@ -358,11 +358,11 @@ Temporary Dev builds for PR branches stay in Actions. Existing release assets
 and manual notes are preserved. See [release bundles](docs/ci-bundles.md) for
 publishing and initial Pages configuration.
 
-Main development builds can produce unsigned macOS desktop packages when Apple
-credentials are incomplete, and their draft notes identify them as unsigned.
-Version-tag macOS builds require distribution signing and fail if the required
-credentials are missing. Standalone `ctld` artifacts always require signing and
-notarization; manual runs can request them with `build_ctld=true`. See
+When Apple credentials are incomplete, the workflow builds unsigned macOS
+desktop packages. Tagged releases identify these downloads with `-unsigned`
+filenames and a note about Gatekeeper and Touch ID. Standalone `ctld` and bundled
+`ctl` downloads require signing and notarization. Manual runs can request the
+standalone helper with `build_ctld=true`. See
 [release bundles and Apple signing](docs/ci-bundles.md) for the credential
 requirements and release asset contract.
 

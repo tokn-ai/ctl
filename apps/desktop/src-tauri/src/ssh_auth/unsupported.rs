@@ -96,13 +96,10 @@ pub fn install_agent(
   _app: tauri::AppHandle,
   _window: String,
   _attempt_id: String,
-  target: ConnectionTargetDto,
+  _target: ConnectionTargetDto,
   _channel: Channel<SshPromptDto>,
   _on_progress: Channel<crate::dto::RemoteAgentInstallProgressDto>,
 ) -> Ready<CommandResult<crate::dto::RemoteAgentInstallResultDto>> {
-  if let Err(error) = connection::require_unix_target(&target, "Remote component installation") {
-    return ready(Err(error));
-  }
   ready(Err(CommandErrorDto::new(
     "remote_agent_install_unsupported",
     "Remote component installation currently requires macOS or Linux.",
@@ -113,12 +110,9 @@ pub fn restart_ctmux(
   _app: tauri::AppHandle,
   _window: String,
   _attempt_id: String,
-  target: ConnectionTargetDto,
+  _target: ConnectionTargetDto,
   _channel: Channel<SshPromptDto>,
 ) -> Ready<CommandResult<ctl_proto::RemoteCtmuxRestartResult>> {
-  if let Err(error) = connection::require_unix_target(&target, "Remote ctmux restart") {
-    return ready(Err(error));
-  }
   ready(Err(CommandErrorDto::new(
     "remote_restart_unsupported",
     "Remote ctmux restart currently requires macOS or Linux.",

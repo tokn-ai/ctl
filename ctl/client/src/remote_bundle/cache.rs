@@ -105,7 +105,10 @@ impl BundleCacheEntry {
       &self.directory.join(manifest.archive_name(&self.target)?),
       MAX_BUNDLE_BYTES,
     )?;
-    manifest.verify_archive(&self.target, archive, bytes)
+    let built_at = super::build_info::read(&self.directory, &manifest)?;
+    let mut bundle = manifest.verify_archive(&self.target, archive, bytes)?;
+    bundle.built_at = built_at;
+    Ok(bundle)
   }
 
   /// Revalidates a bundle before publishing a complete immutable entry. The
@@ -130,6 +133,14 @@ impl BundleCacheEntry {
     let stage = TemporaryDirectory::new(&self.revision_directory, &self.target)?;
     write_private_file(&stage.0.join(BUNDLE_SET_FILE), &bundle.manifest)?;
     write_private_file(&stage.0.join(&bundle.file_name), &bundle.archive)?;
+    if let Some(built_at) = &bundle.built_at {
+      let manifest = BundleSet::parse_intrinsic(&bundle.manifest)?;
+      let info = super::build_info::BuildInfo::new(&manifest, built_at.clone())?;
+      write_private_file(
+        &stage.0.join(super::build_info::FILE_NAME),
+        &serde_json::to_vec(&info).map_err(io::Error::other)?,
+      )?;
+    }
     private_fs::sync_directory(&stage.0)?;
     self.publish(&stage)?;
     private_fs::sync_directory(&self.revision_directory)?;
@@ -269,7 +280,9 @@ fn read_compatible_entry(
     &directory.join(manifest.archive_name(target)?),
     MAX_BUNDLE_BYTES,
   )?;
-  let bundle = manifest.verify_archive(target, archive, bytes)?;
+  let built_at = super::build_info::read(directory, &manifest)?;
+  let mut bundle = manifest.verify_archive(target, archive, bytes)?;
+  bundle.built_at = built_at;
   Ok(Some(bundle))
 }
 

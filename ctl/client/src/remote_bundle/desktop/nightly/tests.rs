@@ -106,6 +106,7 @@ fn resolves_workflow_identity_from_the_current_catalog_publication() {
     app_version: "0.1.3".into(),
     git_revision: REVISION.into(),
     current: true,
+    built_at: None,
   };
   assert_eq!(publication_run(&release).unwrap(), (10, 2));
   for publication_id in [

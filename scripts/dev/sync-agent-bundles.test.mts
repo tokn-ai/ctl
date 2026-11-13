@@ -15,7 +15,7 @@ test("sync stages verified desktop resources without invoking Cargo or changing 
   const home = join(root, "home"), binaries = join(root, "bin"), repository = join(root, "repository");
   for (const path of [home, binaries, repository]) await mkdir(path);
   const publication = publicationFixture(1);
-  const artifacts = await componentSetFixture(root, publication);
+  const artifacts = await componentSetFixture(root, publication, true);
   const windows = await windowsComponentSetFixture(root, publication);
   const config_directory = join(repository, "apps/desktop/src-tauri");
   await mkdir(config_directory, { recursive: true });
@@ -61,5 +61,8 @@ else process.exit(99);`,
   assert.deepEqual(await readFile(join(resources, windowsAgentManifestName)), await readFile(join(windows, windowsAgentManifestName)));
   await sync("");
   await assert.rejects(readFile(join(resources, windowsAgentManifestName)), { code: "ENOENT" });
+  await rm(join(artifacts, "build-info.json"));
+  await sync("");
+  await assert.rejects(readFile(join(resources, "build-info.json")), { code: "ENOENT" });
   assert.deepEqual(await readdir(home), []);
 });

@@ -17,7 +17,10 @@ pub use history::{PublishedRelease, PublishedReleaseDetails, list_releases, view
 
 mod updater;
 pub use updater::{UpdaterInfo, VerifiedUpdater, download_updater_cached, read_updater};
-pub(crate) use updater::{cache_verified, prune_updater_cache, read_cached_updater};
+pub(crate) use updater::{
+  cache_verified_for_manifest, prune_updater_cache, prune_updater_cache_with_pins,
+  read_cached_updater, validate_updater_for_manifest,
+};
 
 pub const ROOT: &str = "https://tokn-ai.dev/ctl/bundles/";
 const MAX_CHANNEL_BYTES: usize = 4 * 1024;
@@ -62,6 +65,8 @@ pub struct PublishedCatalog {
   pub bundle_id: String,
   pub app_version: String,
   pub git_revision: String,
+  pub built_at: Option<String>,
+  pub publication_id: Option<String>,
   pub targets: Vec<PublishedTarget>,
 }
 
@@ -77,6 +82,8 @@ struct Publication {
   manifest: BundleSet,
   bytes: Vec<u8>,
   url: reqwest::Url,
+  built_at: Option<String>,
+  id: Option<String>,
 }
 
 struct Resolver {
@@ -210,10 +217,14 @@ impl Resolver {
         "stable channel points to a development or prerelease bundle".into(),
       ));
     }
+    let built_at = self.build_time(&url, &manifest).await?;
+    let publication_id = publication_id(&url);
     Ok(Publication {
       manifest,
       bytes,
       url,
+      built_at,
+      id: publication_id,
     })
   }
 
@@ -228,6 +239,8 @@ impl Resolver {
       bundle_id: manifest.bundle_id,
       app_version: manifest.app_version,
       git_revision: manifest.git_revision,
+      built_at: publication.built_at,
+      publication_id: publication.id,
       targets,
     })
   }
@@ -240,9 +253,12 @@ impl Resolver {
       .join(publication.manifest.archive_name(target)?)
       .map_err(|error| Error::Invalid(error.to_string()))?;
     let archive = self.read(&archive_url, MAX_BUNDLE_BYTES).await?;
-    publication
+    let mut bundle = publication
       .manifest
-      .verify_archive(target, archive, publication.bytes)
+      .verify_archive(target, archive, publication.bytes)?;
+    bundle.built_at = publication.built_at;
+    bundle.publication_id = publication.id;
+    Ok(bundle)
   }
 
   async fn download_cached(
@@ -330,10 +346,14 @@ impl Resolver {
         "Windows bundle differs from its immutable publication".into(),
       ));
     }
+    let built_at = self.build_time(&url, &manifest).await?;
+    let publication_id = publication_id(&url);
     Ok(Publication {
       manifest,
       bytes,
       url,
+      built_at,
+      id: publication_id,
     })
   }
 
@@ -378,7 +398,7 @@ impl Resolver {
     let cache =
       super::BundleCacheEntry::publication(cache_root, target, expected, &publication.bytes)?;
     let read_cache = cache.clone();
-    if let Some(bundle) = tokio::task::spawn_blocking(move || read_cache.load())
+    if let Some(mut bundle) = tokio::task::spawn_blocking(move || read_cache.load())
       .await
       .map_err(|error| Error::Io(std::io::Error::other(error)))??
     {
@@ -388,6 +408,8 @@ impl Resolver {
         ));
       }
       let size = bundle.archive.len() as u64;
+      bundle.built_at = publication.built_at;
+      bundle.publication_id = publication.id;
       report_progress(progress, size, size);
       return Ok(bundle);
     }
@@ -398,9 +420,11 @@ impl Resolver {
     let archive = self
       .read_with_progress(&archive_url, MAX_BUNDLE_BYTES, None, progress)
       .await?;
-    let bundle = publication
+    let mut bundle = publication
       .manifest
       .verify_archive(target, archive, publication.bytes)?;
+    bundle.built_at = publication.built_at;
+    bundle.publication_id = publication.id;
     let bundle = tokio::task::spawn_blocking(move || {
       cache.store(&bundle)?;
       Ok::<_, Error>(bundle)
@@ -414,6 +438,41 @@ impl Resolver {
 
   async fn read(&self, url: &reqwest::Url, maximum: usize) -> Result<Vec<u8>, Error> {
     self.read_with_progress(url, maximum, None, None).await
+  }
+
+  async fn build_time(
+    &self,
+    url: &reqwest::Url,
+    manifest: &BundleSet,
+  ) -> Result<Option<String>, Error> {
+    self
+      .build_time_for_identity(
+        url,
+        &manifest.app_version,
+        &manifest.bundle_id,
+        &manifest.git_revision,
+      )
+      .await
+  }
+
+  async fn build_time_for_identity(
+    &self,
+    url: &reqwest::Url,
+    app_version: &str,
+    bundle_id: &str,
+    git_revision: &str,
+  ) -> Result<Option<String>, Error> {
+    let url = url
+      .join(super::build_info::FILE_NAME)
+      .map_err(|error| Error::Invalid(error.to_string()))?;
+    match self.read(&url, super::build_info::MAX_BYTES).await {
+      Ok(bytes) => Ok(Some(
+        super::build_info::BuildInfo::parse_identity(&bytes, app_version, bundle_id, git_revision)?
+          .built_at,
+      )),
+      Err(Error::NotAvailable(_)) => Ok(None),
+      Err(error) => Err(error),
+    }
   }
 
   async fn read_with_progress(
@@ -468,6 +527,10 @@ impl Resolver {
     }
     Ok(bytes)
   }
+}
+
+fn publication_id(url: &reqwest::Url) -> Option<String> {
+  url.path_segments()?.rev().nth(1).map(str::to_owned)
 }
 
 fn parse_published_manifest(bytes: &[u8], set_file: &str) -> Result<BundleSet, Error> {

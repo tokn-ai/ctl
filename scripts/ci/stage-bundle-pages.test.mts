@@ -79,7 +79,7 @@ test("migrates a legacy Dev head to Nightly and removes its pointer without chan
   await stageBundlePages(nightly, await componentSetFixture(directory, nightly), next, advanced);
   const migrated = parseBundleCatalog(await readFile(join(advanced, "bundles/catalog.json")));
   assert.deepEqual(migrated.channels, { stable: stable.publication_id, nightly: nightly.publication_id });
-  assert.deepEqual(migrated.publications, [nightly, legacy, stable]);
+  assert.deepEqual(migrated.publications, [nightly, stable]);
 });
 
 test("old main runs and lower release versions cannot roll channels back", async (t) => {
@@ -93,26 +93,23 @@ test("old main runs and lower release versions cannot roll channels back", async
   const stable = publicationFixture(4, "stable", "2.0.0"), lower = publicationFixture(5, "stable", "1.9.9");
   const stable_site = join(directory, "stable");
   await stageBundlePages(stable, await componentSetFixture(directory, stable), previous, stable_site);
-  assert.equal(await stageBundlePages(lower, await componentSetFixture(directory, lower), stable_site, output), true);
-  assert.equal(parseBundleCatalog(await readFile(join(output, "bundles/catalog.json"))).channels.stable, stable.publication_id);
+  assert.equal(await stageBundlePages(lower, await componentSetFixture(directory, lower), stable_site, output), false);
+  await assert.rejects(readFile(join(output, "bundles/catalog.json")), { code: "ENOENT" });
 });
 
-test("a versioned prerelease archive is mirrored without moving the stable pointer", async (t) => {
+test("prerelease tags do not create a channel publication", async (t) => {
   const directory = await root(t);
   const stable = publicationFixture(1, "stable", "1.0.0"), beta = publicationFixture(2, "stable", "2.0.0-beta.1");
   const previous = join(directory, "stable"), output = join(directory, "beta");
   await stageBundlePages(stable, await componentSetFixture(directory, stable), null, previous);
   const input = await componentSetFixture(directory, beta);
-  await stageBundlePages(beta, input, previous, output);
-  const catalog = parseBundleCatalog(await readFile(join(output, "bundles/catalog.json")));
-  assert.equal(catalog.channels.stable, stable.publication_id);
-  await validatedComponentSet(join(output, "bundles/sets", beta.publication_id), beta);
+  assert.equal(await stageBundlePages(beta, input, previous, output), false);
+  await assert.rejects(readFile(join(output, "bundles/catalog.json")), { code: "ENOENT" });
   const only_beta = join(directory, "only-beta");
-  await stageBundlePages(beta, input, null, only_beta);
-  assert.equal(parseBundleCatalog(await readFile(join(only_beta, "bundles/catalog.json"))).channels.stable, undefined);
+  assert.equal(await stageBundlePages(beta, input, null, only_beta), false);
 });
 
-test("retains five Nightly generations and two stable versions without dropping current pointers", async (t) => {
+test("retains only the current Nightly and Stable publications", async (t) => {
   const directory = await root(t);
   let previous: string | null = null;
   for (let run = 1; run <= 9; run += 1) {
@@ -123,9 +120,37 @@ test("retains five Nightly generations and two stable versions without dropping 
   }
   const catalog = parseBundleCatalog(await readFile(join(previous!, "bundles/catalog.json")));
   assert.equal(catalog.publications.filter((entry) => entry.channel === "nightly").length, nightlyRetention);
-  assert.equal(catalog.publications.filter((entry) => entry.channel === "stable").length, 2);
-  assert.equal((await readdir(join(previous!, "bundles/sets"))).length, 7);
+  assert.equal(catalog.publications.filter((entry) => entry.channel === "stable").length, 1);
+  assert.equal((await readdir(join(previous!, "bundles/sets"))).length, 2);
   for (const id of Object.values(catalog.channels)) assert.ok(catalog.publications.some((entry) => entry.publication_id === id));
+});
+
+test("migrates an existing five-Nightly two-Stable catalog to channel heads", async (t) => {
+  const directory = await root(t);
+  const entries = [
+    publicationFixture(1, "stable", "0.1.0"), publicationFixture(2, "stable", "0.2.0"),
+    ...[3, 4, 5, 6, 7].map((run) => publicationFixture(run)),
+  ];
+  const previous = join(directory, "legacy");
+  await stageBundlePages(entries[0], await componentSetFixture(directory, entries[0]), null, previous);
+  for (const entry of entries.slice(1)) {
+    await cp(await componentSetFixture(directory, entry),
+      join(previous, "bundles/sets", entry.publication_id), { recursive: true });
+  }
+  const catalog = parseBundleCatalog(await readFile(join(previous, "bundles/catalog.json")));
+  catalog.publications = entries;
+  catalog.channels = { stable: entries[1].publication_id, nightly: entries[6].publication_id };
+  for (const [channel, id] of Object.entries(catalog.channels)) {
+    await writeFile(join(previous, "bundles/channels", `${channel}.json`), JSON.stringify({
+      schema_version: 1, channel, bundle_set_url: `${bundleRoot}sets/${id}/bundle-set.json`,
+    }));
+  }
+  await writeFile(join(previous, "bundles/catalog.json"), JSON.stringify(catalog));
+  const entry = publicationFixture(8), next = join(directory, "current");
+  await stageBundlePages(entry, await componentSetFixture(directory, entry), previous, next);
+  const current = parseBundleCatalog(await readFile(join(next, "bundles/catalog.json")));
+  assert.deepEqual(current.publications.map((item) => item.publication_id), [entry.publication_id, entries[1].publication_id]);
+  assert.equal(parseBundleCatalog(await readFile(join(previous, "bundles/catalog.json"))).publications.length, 7);
 });
 
 async function treeBytes(path: string): Promise<number> {
@@ -136,13 +161,12 @@ async function treeBytes(path: string): Promise<number> {
   return bytes;
 }
 
-test("byte pressure evicts oldest unselected Nightly generations while pinning channel heads and the newest other tag", async (t) => {
+test("capacity failure preserves both channel heads and the previous site", async (t) => {
   const directory = await root(t);
   const stable = publicationFixture(1, "stable", "1.0.0");
-  const tag = publicationFixture(2, "stable", "2.0.0-beta.1");
   const nightlies = [3, 4, 5].map((run) => publicationFixture(run));
   let previous: string | null = null;
-  for (const entry of [stable, tag, ...nightlies.slice(0, 2)]) {
+  for (const entry of [stable, ...nightlies.slice(0, 2)]) {
     const next = join(directory, `site-${entry.run_id}`);
     await stageBundlePages(entry, await componentSetFixture(directory, entry), previous, next);
     previous = next;
@@ -153,20 +177,18 @@ test("byte pressure evicts oldest unselected Nightly generations while pinning c
   const complete = join(directory, "complete");
   await stageBundlePages(incoming, input, previous, complete);
   const full_size = await treeBytes(complete);
-  const oldest_size = await treeBytes(join(complete, "bundles/sets", nightlies[0].publication_id));
-  const budget = full_size - oldest_size;
   const output = join(directory, "bounded");
-  await stageBundlePages(incoming, input, previous, output, budget);
-  assert.ok(await treeBytes(output) <= budget);
+  await stageBundlePages(incoming, input, previous, output, full_size);
+  assert.ok(await treeBytes(output) <= full_size);
   const catalog = parseBundleCatalog(await readFile(join(output, "bundles/catalog.json")));
-  assert.deepEqual(catalog.publications.map((entry) => entry.publication_id), [incoming, nightlies[1], stable, tag].map((entry) => entry.publication_id));
+  assert.deepEqual(catalog.publications.map((entry) => entry.publication_id), [incoming, stable].map((entry) => entry.publication_id));
   assert.equal(catalog.channels.dev, undefined);
   assert.equal(catalog.channels.nightly, incoming.publication_id);
   assert.equal(catalog.channels.stable, stable.publication_id);
   await assert.rejects(lstat(join(output, "bundles/sets", nightlies[0].publication_id)), { code: "ENOENT" });
   for (const entry of catalog.publications) await validatedComponentSet(join(output, "bundles/sets", entry.publication_id), entry);
   assert.deepEqual(await readFile(join(previous!, "bundles/catalog.json")), before);
-  await validatedComponentSet(join(previous!, "bundles/sets", nightlies[0].publication_id), nightlies[0]);
+  await validatedComponentSet(join(previous!, "bundles/sets", nightlies[1].publication_id), nightlies[1]);
   const impossible = join(directory, "impossible");
   await assert.rejects(stageBundlePages(incoming, input, previous, impossible, 1), /Pinned bundle publications exceed/);
   await assert.rejects(lstat(impossible), { code: "ENOENT" });

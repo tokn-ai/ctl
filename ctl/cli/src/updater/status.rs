@@ -1,4 +1,4 @@
-use super::TargetOptions;
+use super::{TargetOptions, show};
 use ctl_client::installation::InstallationStatus;
 use std::io;
 use std::path::Path;
@@ -9,34 +9,38 @@ pub(super) async fn run(
   rollback: bool,
   json: bool,
 ) -> io::Result<()> {
+  if !rollback && !json {
+    return show::run(home, options, false).await;
+  }
   let is_remote =
     options.host.is_some() || options.destination.is_some() || options.method.is_some();
-  let status = if is_remote {
+  let target = if is_remote {
     crate::bundled::register()?;
-    remote(options, rollback).await?
+    Some(remote_target(options).await?)
+  } else {
+    None
+  };
+  let status = if let Some(target) = &target {
+    remote_status(target, rollback).await?
   } else {
     if rollback {
-      let account = home.to_owned();
-      tokio::task::spawn_blocking(move || {
-        let installs = ctl_core::installations::Installations::new(&account);
-        installs.rollback()?;
-        if let Err(error) = installs.prune() {
-          eprintln!("ctlup: rollback completed; cleanup deferred: {error}");
-        }
-        Ok::<_, io::Error>(())
-      })
-      .await
-      .map_err(io::Error::other)??;
+      rollback_local(home).await?;
     }
     ctl_client::installation::status(home)?
   };
   if json {
+    // Preserve the existing status/rollback JSON contract exactly.
     println!(
       "{}",
       serde_json::to_string(&status).map_err(io::Error::other)?
     );
   } else {
-    print(&status, !is_remote && in_checkout());
+    let snapshot = if let Some(target) = &target {
+      show::remote_snapshot(target, Some(status)).await?
+    } else {
+      ctl_client::installation::show(home)?
+    };
+    show::print(&snapshot, false, !is_remote && in_checkout())?;
     if rollback {
       println!(
         "Previous installation restored. Running services were preserved; restart separately."
@@ -46,22 +50,43 @@ pub(super) async fn run(
   Ok(())
 }
 
-async fn remote(options: TargetOptions<'_>, rollback: bool) -> io::Result<InstallationStatus> {
+async fn rollback_local(home: &Path) -> io::Result<()> {
+  let account = home.to_owned();
+  tokio::task::spawn_blocking(move || {
+    let installs = ctl_core::installations::Installations::new(&account);
+    installs.rollback()?;
+    if let Err(error) = installs.prune() {
+      eprintln!("ctlup: rollback completed; cleanup deferred: {error}");
+    }
+    Ok(())
+  })
+  .await
+  .map_err(io::Error::other)?
+}
+
+pub(super) async fn remote_target(options: TargetOptions<'_>) -> io::Result<super::remote::Target> {
   let mut resolved = crate::target::resolve(options.host, options.destination, options.method)
     .await
     .map_err(io::Error::other)?;
   crate::target::apply_remote_platform(&mut resolved.target, options.platform);
   let target = super::remote::Target::connect(resolved.target).await?;
-  let expected_account = target.expected_account();
-  if expected_account.is_none() {
+  if target.expected_account().is_none() {
     target.verify_account().await?;
   }
+  Ok(target)
+}
+
+async fn remote_status(
+  target: &super::remote::Target,
+  rollback: bool,
+) -> io::Result<InstallationStatus> {
+  let expected = target.expected_account();
   let status = if rollback {
     ctl_client::installation::remote_rollback(
       &target.destination,
       &target.options,
       &target.interaction,
-      expected_account,
+      expected,
     )
     .await
   } else {
@@ -69,18 +94,18 @@ async fn remote(options: TargetOptions<'_>, rollback: bool) -> io::Result<Instal
       &target.destination,
       &target.options,
       &target.interaction,
-      expected_account,
+      expected,
     )
     .await
   }
   .map_err(io::Error::other)?;
-  if rollback && expected_account.is_none() {
+  if rollback && expected.is_none() {
     target.verify_account().await?;
   }
   Ok(status)
 }
 
-fn in_checkout() -> bool {
+pub(super) fn in_checkout() -> bool {
   std::env::current_dir().is_ok_and(|directory| {
     directory.ancestors().any(|root| {
       root.join(".git").exists()
@@ -89,29 +114,4 @@ fn in_checkout() -> bool {
         && root.join("scripts/dev/ctld-signed.mts").is_file()
     })
   })
-}
-
-fn print(status: &InstallationStatus, development: bool) {
-  if status.active.is_none() && status.previous.is_none() {
-    println!("No managed ctl installation.");
-    if development {
-      println!("Run `ctlup dev` to build and install this checkout.");
-    } else {
-      println!("Run `ctlup install --help` for installation options.");
-    }
-    return;
-  }
-  for (label, manifest) in [("Active", &status.active), ("Previous", &status.previous)] {
-    if let Some(manifest) = manifest {
-      let version = &manifest.components["ctl-agent"].build.version;
-      println!(
-        "{label}: {} ({}, {})",
-        crate::table::text(version),
-        manifest.target_triple,
-        manifest.bundle_id
-      );
-    } else {
-      println!("{label}: none");
-    }
-  }
 }

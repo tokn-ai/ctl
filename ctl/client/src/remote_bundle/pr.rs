@@ -246,6 +246,16 @@ pub async fn download_for_target(number: u64, target: &str) -> Result<Downloaded
   let revision = selection.head_sha;
   tokio::task::spawn_blocking(move || {
     verify_download(bundle.directory(), &revision, set_file)?;
+    let bytes = read_bounded_file(&bundle.directory().join(set_file), MAX_BUNDLE_SET_BYTES)?;
+    let manifest = BundleSet::parse_set(&bytes, set_file)?;
+    if super::build_info::read(bundle.directory(), &manifest)?.is_none() {
+      let metadata = super::build_info::BuildInfo::new(&manifest, build.created_at)?;
+      let mut file = private_fs::options()
+        .write(true)
+        .create_new(true)
+        .open(bundle.directory().join(super::build_info::FILE_NAME))?;
+      serde_json::to_writer(&mut file, &metadata).map_err(io::Error::other)?;
+    }
     Ok(bundle)
   })
   .await
@@ -265,6 +275,9 @@ fn verify_download(directory: &Path, revision: &str, set_file: &str) -> Result<(
   // A supplied build directory can also describe a managed bundle. Allow only
   // publisher bundle files so installation always uses the manifest above.
   let mut expected = BTreeSet::from([set_file.to_owned()]);
+  if super::build_info::read(directory, &manifest)?.is_some() {
+    expected.insert(super::build_info::FILE_NAME.into());
+  }
   for target in manifest.targets.keys().map(String::as_str) {
     let archive = manifest.archive_name(target)?;
     let updater_manifest = format!("ctlup-{target}.json");

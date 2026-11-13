@@ -1,5 +1,5 @@
 use super::*;
-use crate::bundles::{Manifest, Source};
+use crate::bundles::{Manifest, Source, Store};
 use crate::component::{ComponentBuildInfo, ComponentInfo, ProtocolInfo};
 use crate::private_fs::options;
 use crate::protocol::ProtocolVersion;
@@ -79,7 +79,11 @@ fn fixture(home: &Path, byte: u8, clients: bool) -> Bundle {
     &files,
   )
   .unwrap();
-  Store::new(home).publish(&manifest, &files).unwrap()
+  let inputs = home.join("fixture-inputs");
+  if !inputs.exists() {
+    crate::private_fs::create_directory(&inputs).unwrap();
+  }
+  Store::new(&inputs).publish(&manifest, &files).unwrap()
 }
 
 #[test]
@@ -148,64 +152,6 @@ fn activation_switches_one_build_and_rollback_preserves_both_payloads() {
   assert_eq!(
     fs::read(installs.root().join("bin/ctl")).unwrap(),
     vec![1; 8]
-  );
-}
-
-#[test]
-fn old_complete_current_is_migrated_and_retained_for_rollback() {
-  let home = Home::new();
-  let installs = Installations::new(&home.0);
-  let old = fixture(&home.0, 1, false);
-  let relative = old.directory.strip_prefix(installs.root()).unwrap();
-  symlink(relative, installs.root().join("current")).unwrap();
-  assert_eq!(installs.active().unwrap().unwrap().manifest, old.manifest);
-  let next = fixture(&home.0, 2, true);
-  installs.activate(&next).unwrap();
-  let previous = installs.previous().unwrap().unwrap();
-  assert_eq!(previous.manifest, old.manifest);
-  assert!(
-    previous
-      .directory
-      .starts_with(installs.root().join("installs"))
-  );
-  assert_eq!(installs.rollback().unwrap().manifest, old.manifest);
-  // Historical service-only builds can be retained, but not newly installed.
-  assert!(installs.activate(&old).is_err());
-}
-
-#[test]
-fn old_local_selection_can_be_migrated_without_a_current_link() {
-  let home = Home::new();
-  let installs = Installations::new(&home.0);
-  let first = fixture(&home.0, 1, true);
-  #[cfg(not(target_os = "macos"))]
-  Store::new(&home.0).select(Purpose::Local, &first).unwrap();
-  #[cfg(target_os = "macos")]
-  {
-    let selected = Store::new(&home.0).root().join("selected");
-    fs::create_dir(&selected).unwrap();
-    fs::set_permissions(
-      &selected,
-      std::os::unix::fs::PermissionsExt::from_mode(0o700),
-    )
-    .unwrap();
-    let path = selected.join(format!("local-{}.json", crate::paths::native_target()));
-    fs::write(
-      &path,
-      serde_json::to_vec(&serde_json::json!({
-        "bundle_id": first.manifest.bundle_id, "target_triple": first.manifest.target_triple,
-      }))
-      .unwrap(),
-    )
-    .unwrap();
-    fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
-  }
-  assert_eq!(installs.active().unwrap().unwrap().manifest, first.manifest);
-  installs.activate(&first).unwrap();
-  assert!(
-    fs::read_link(installs.root().join("current"))
-      .unwrap()
-      .starts_with("installs")
   );
 }
 
@@ -313,6 +259,17 @@ fn interrupted_activation_journal_completes_before_next_operation() {
   let first = installs.activate(&fixture(&home.0, 1, true)).unwrap();
   let second = fixture(&home.0, 2, true);
   let second = filesystem::publish(&installs, &second, None).unwrap();
+  let mut state = catalog::read(&installs).unwrap();
+  state.register(
+    std::slice::from_ref(&second),
+    &CatalogOrigin {
+      channel: "provided".into(),
+      publication_id: Some(second.manifest.bundle_id.clone()),
+      built_at: None,
+    },
+    true,
+  );
+  catalog::commit(&installs, &state, None).unwrap();
   let path = installs.root().join(".activation.json");
   fs::write(
     &path,
@@ -334,6 +291,50 @@ fn interrupted_activation_journal_completes_before_next_operation() {
     first.manifest
   );
   assert!(!path.exists());
+}
+
+#[test]
+fn unrecorded_activation_journals_never_rewrite_selection_or_discard_intent() {
+  let home = Home::new();
+  let installs = Installations::new(&home.0);
+  let first = installs.activate(&fixture(&home.0, 1, true)).unwrap();
+  let second = filesystem::publish(&installs, &fixture(&home.0, 2, true), None).unwrap();
+  let before = fs::read_link(installs.root.join("current")).unwrap();
+  let path = installs.root.join(".activation.json");
+  let intent = serde_json::to_vec(&serde_json::json!({
+    "active": second.manifest.bundle_id,
+    "previous": first.manifest.bundle_id,
+  }))
+  .unwrap();
+  let mut file = options().write(true).create_new(true).open(&path).unwrap();
+  std::io::Write::write_all(&mut file, &intent).unwrap();
+  file.sync_all().unwrap();
+  drop(file);
+  assert!(
+    installs
+      .prune()
+      .unwrap_err()
+      .to_string()
+      .contains("unrecorded installation")
+  );
+  assert_eq!(
+    fs::read_link(installs.root.join("current")).unwrap(),
+    before
+  );
+  assert!(installs.previous().unwrap().is_none());
+  assert_eq!(fs::read(&path).unwrap(), intent);
+  assert!(
+    installs
+      .migrate_catalog()
+      .unwrap_err()
+      .to_string()
+      .contains("previous manager")
+  );
+  assert_eq!(
+    fs::read_link(installs.root.join("current")).unwrap(),
+    before
+  );
+  assert_eq!(fs::read(&path).unwrap(), intent);
 }
 
 #[test]
@@ -384,29 +385,6 @@ fn deployment_cache_is_passive_and_checks_each_storage_parent() {
       .is_err()
   );
   assert!(fs::read_dir(outside).unwrap().next().is_none());
-}
-
-#[test]
-fn original_unmanaged_versions_can_be_superseded_without_claiming_a_rollback() {
-  let home = Home::new();
-  let source = fixture(&home.0, 1, true);
-  let installs = Installations::new(&home.0);
-  let old = installs.root().join("versions/legacy");
-  fs::DirBuilder::new()
-    .recursive(true)
-    .mode(0o700)
-    .create(&old)
-    .unwrap();
-  fs::write(old.join("ctl-agent"), b"old agent").unwrap();
-  symlink("versions/legacy", installs.root().join("current")).unwrap();
-  assert!(installs.active().unwrap().is_none());
-  installs.activate(&source).unwrap();
-  assert!(installs.previous().unwrap().is_none());
-  assert_eq!(fs::read(old.join("ctl-agent")).unwrap(), b"old agent");
-  assert_eq!(
-    installs.active().unwrap().unwrap().manifest,
-    source.manifest
-  );
 }
 
 #[test]
@@ -647,64 +625,4 @@ fn broker_alias_migrates_but_an_unrecognized_regular_command_is_preserved() {
   let error = installs.activate(&source).unwrap_err();
   assert!(error.to_string().contains("managed proxy"));
   assert_eq!(fs::read(command).unwrap(), b"user command");
-}
-
-#[test]
-fn absolute_legacy_agent_pointers_migrate_only_within_the_exact_owned_namespace() {
-  let home = Home::new();
-  let source = fixture(&home.0, 1, true);
-  let installs = Installations::new(&home.0);
-  let relative = Path::new("components/agents")
-    .join(crate::paths::native_target())
-    .join(format!("{}-legacy", "a".repeat(64)));
-  let old = installs.root().join(&relative);
-  fs::DirBuilder::new()
-    .recursive(true)
-    .mode(0o700)
-    .create(&old)
-    .unwrap();
-  fs::write(old.join("ctl-agent"), b"historical agent").unwrap();
-  // The actual old installer uses pwd -P, so its absolute pointer may resolve
-  // an OS-level directory alias above this test account's home.
-  let absolute = installs.root().canonicalize().unwrap().join(&relative);
-  symlink(&absolute, installs.root().join("current")).unwrap();
-  assert!(installs.active().unwrap().is_none());
-  let installed = installs.activate(&source).unwrap();
-  assert!(installs.previous().unwrap().is_none());
-  assert_eq!(
-    fs::read(old.join("ctl-agent")).unwrap(),
-    b"historical agent"
-  );
-  assert_eq!(
-    installs.active().unwrap().unwrap().manifest,
-    installed.manifest
-  );
-
-  fs::remove_file(installs.root().join("current")).unwrap();
-  symlink(
-    installed.directory.canonicalize().unwrap(),
-    installs.root().join("current"),
-  )
-  .unwrap();
-  assert!(
-    installs.active().is_err(),
-    "new installations require relative pointers"
-  );
-  fs::remove_file(installs.root().join("current")).unwrap();
-  symlink(&absolute, installs.root().join("previous")).unwrap();
-  assert!(
-    installs.previous().is_err(),
-    "absolute compatibility applies only to old current"
-  );
-  fs::remove_file(installs.root().join("previous")).unwrap();
-
-  let target = old.parent().unwrap();
-  let real_target = target.with_file_name("relocated-target");
-  fs::rename(target, &real_target).unwrap();
-  symlink(&real_target, target).unwrap();
-  symlink(&absolute, installs.root().join("current")).unwrap();
-  assert!(
-    installs.active().is_err(),
-    "legacy storage parents cannot be links"
-  );
 }

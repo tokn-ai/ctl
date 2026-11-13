@@ -56,6 +56,7 @@ struct BuildOutput {
 /// Reports build/signing failures, mixed source identities, unsafe outputs and
 /// activation failures. Incomplete builds never change the active installation.
 pub async fn install(home: &Path, options: DevelopmentOptions) -> io::Result<PreparedDevelopment> {
+  let preparation = crate::component_update::PreparationSnapshot::capture(home)?;
   let workspace = options.workspace.canonicalize()?;
   let recipe = workspace.join("scripts/dev/build-local-development.mts");
   if !workspace.join("Cargo.toml").is_file() || !recipe.is_file() {
@@ -128,10 +129,13 @@ pub async fn install(home: &Path, options: DevelopmentOptions) -> io::Result<Pre
       "the development updater and runtime must come from the same build",
     ));
   }
+  let origin = crate::component_update::local_build_origin(&bundle)?;
   let (installed, lease) = crate::component_update::install_local_with_manager(
     home,
     &bundle,
     Some(&descriptor.manager_executable),
+    Some(&origin),
+    Some(&preparation),
   )
   .await?;
   let executables = installed_executables(home, &installed);

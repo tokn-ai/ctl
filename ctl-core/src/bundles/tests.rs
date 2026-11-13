@@ -68,6 +68,42 @@ fn fixture(source: Source, byte: u8) -> (Manifest, BTreeMap<String, Vec<u8>>) {
   (manifest, files)
 }
 
+fn runtime_fixture(
+  target: &str,
+  source: Source,
+  byte: u8,
+) -> (Manifest, BTreeMap<String, Vec<u8>>) {
+  use crate::bundle_layout::{ALL, executable_name, required_protocols};
+  let (manifest, _) = fixture(source, byte);
+  let build = manifest.components["ctl-agent"].build.clone();
+  let version = ProtocolVersion::new(1, 0, 1);
+  let components = ALL
+    .into_iter()
+    .map(|name| {
+      (
+        name.into(),
+        ComponentInfo {
+          build: build.clone(),
+          protocols: required_protocols(name)
+            .iter()
+            .map(|&name| ProtocolInfo::new(name, 1, version, &[version]))
+            .collect(),
+        },
+      )
+    })
+    .collect();
+  let mut files = ALL
+    .into_iter()
+    .map(|name| (executable_name(target, name).into_owned(), vec![byte; 8]))
+    .collect::<BTreeMap<_, _>>();
+  if cfg!(target_os = "macos") && target == crate::paths::native_target() {
+    files.insert("ctld.app/Contents/MacOS/ctld".into(), vec![byte; 8]);
+    files.insert("ctld-package.json".into(), b"receipt".to_vec());
+  }
+  let manifest = Manifest::new(target, source, components, &files).unwrap();
+  (manifest, files)
+}
+
 #[test]
 fn absent_selection_is_passive_and_does_not_create_directories() {
   let home = Home::new();
@@ -343,33 +379,23 @@ fn duplicate_manifest_keys_and_missing_executable_permissions_are_rejected() {
 }
 
 #[test]
-fn local_discovery_follows_explicit_selections_and_checks_the_requested_contracts() {
+fn local_discovery_uses_recorded_complete_installations_and_checks_contracts() {
   let home = Home::new();
-  let store = Store::new(&home.0);
+  let cache = Store::cache(&home.0);
+  let installations = crate::installations::Installations::new(&home.0);
   let local = |byte| {
-    let (manifest, mut files) = fixture(Source::Local, byte);
-    if cfg!(target_os = "macos") {
-      files.insert("ctld.app/Contents/MacOS/ctld".into(), vec![byte; 8]);
-      files.insert("ctld-package.json".into(), b"receipt".to_vec());
-    }
-    let manifest = Manifest::new(
-      crate::paths::native_target(),
-      Source::Local,
-      manifest.components,
-      &files,
-    )
-    .unwrap();
-    store.publish(&manifest, &files).unwrap()
+    let (manifest, files) = runtime_fixture(crate::paths::native_target(), Source::Local, byte);
+    cache.publish(&manifest, &files).unwrap()
   };
   let first = local(1);
   let second = local(2);
-  store.select(Purpose::Local, &first).unwrap();
+  let first = installations.activate(&first).unwrap();
   let required = &[("ctmux", &[ProtocolVersion::new(1, 0, 1)][..])];
   assert_eq!(
     selected_executable_at(&home.0, "ctmuxd", required).unwrap(),
     first.executable("ctmuxd")
   );
-  store.select(Purpose::Local, &second).unwrap();
+  let second = installations.activate(&second).unwrap();
   assert_eq!(
     selected_executable_at(&home.0, "ctmuxd", required).unwrap(),
     second.executable("ctmuxd")
@@ -386,29 +412,18 @@ fn local_discovery_follows_explicit_selections_and_checks_the_requested_contract
 
 #[cfg(target_env = "gnu")]
 #[test]
-fn a_native_gnu_client_can_select_one_portable_local_bundle() {
+fn a_native_gnu_client_can_activate_one_complete_portable_bundle() {
   let home = Home::new();
-  let store = Store::new(&home.0);
-  let (manifest, files) = fixture(Source::Ci, 1);
+  let store = Store::cache(&home.0);
   let target = crate::paths::native_target().replace("-gnu", "-musl");
-  let manifest = Manifest::new(&target, Source::Ci, manifest.components, &files).unwrap();
+  let (manifest, files) = runtime_fixture(&target, Source::Ci, 1);
   let bundle = store.publish(&manifest, &files).unwrap();
-  store.select(Purpose::Local, &bundle).unwrap();
+  let installations = crate::installations::Installations::new(&home.0);
+  let installed = installations.activate(&bundle).unwrap();
+  assert_eq!(installations.active().unwrap().unwrap().manifest, manifest);
   assert_eq!(
-    store
-      .selected(Purpose::Local, crate::paths::native_target())
-      .unwrap()
-      .unwrap()
-      .manifest,
-    manifest
-  );
-  assert_eq!(
-    store
-      .selected(Purpose::Local, &target)
-      .unwrap()
-      .unwrap()
-      .manifest,
-    manifest
+    selected_executable_at(&home.0, "ctmuxd", &[]).unwrap(),
+    installed.executable("ctmuxd")
   );
 }
 

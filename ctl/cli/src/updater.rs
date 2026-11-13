@@ -8,11 +8,14 @@ use std::path::PathBuf;
 mod app;
 mod archive;
 mod arguments;
+mod component;
 mod development;
 #[cfg(windows)]
 mod launcher;
+mod migration;
 mod release;
 mod remote;
+mod show;
 mod status;
 pub(crate) mod update;
 
@@ -79,16 +82,7 @@ async fn run(arguments: Arguments) -> io::Result<i32> {
     method: arguments.method.as_deref(),
     platform: arguments.remote_platform,
   };
-  if target.destination.is_some() && (target.host.is_some() || target.method.is_some()) {
-    return Err(io::Error::other(
-      "--destination cannot be combined with --host or --method",
-    ));
-  }
-  if target.platform.is_some() && target.host.is_none() && target.destination.is_none() {
-    return Err(io::Error::other(
-      "--remote-platform requires --host or --destination",
-    ));
-  }
+  validate_target_options(target)?;
   match arguments.command {
     Command::ComponentInfo => unreachable!(),
     Command::Install(options) | Command::Update(options) => {
@@ -106,6 +100,23 @@ async fn run(arguments: Arguments) -> io::Result<i32> {
         ));
       }
     }
+    Command::Component { command } => component::run(&home, target, command).await?,
+    Command::Show { json } => show::run(&home, target, json).await?,
+    Command::Migrate { json } => {
+      require_local(target)?;
+      migration::run(home, json).await?;
+    }
+    Command::CatalogJson => {
+      require_local(target)?;
+      let catalog = ctl_client::installation::InstallationCatalog::new(
+        ctl_core::installations::Installations::new(&home).catalog()?,
+      );
+      catalog.validate()?;
+      println!(
+        "{}",
+        serde_json::to_string(&catalog).map_err(io::Error::other)?
+      );
+    }
     Command::Status { json } => status::run(&home, target, false, json).await?,
     Command::Dev(options) => {
       require_local(target)?;
@@ -122,42 +133,80 @@ async fn run(arguments: Arguments) -> io::Result<i32> {
     }
     Command::Prune { json } => {
       require_local(target)?;
-      let result = tokio::task::spawn_blocking(move || {
-        let installations = ctl_core::installations::Installations::new(&home).prune()?;
-        let cache = ctl_client::installation::prune_caches(&home)?;
-        Ok::<_, io::Error>(serde_json::json!({ "installations": installations, "cache": cache }))
-      })
-      .await
-      .map_err(io::Error::other)??;
-      if json {
-        println!(
-          "{}",
-          serde_json::to_string(&result).map_err(io::Error::other)?
-        );
-      } else {
-        println!("Removed unused installations; active, previous and running builds were kept.");
-      }
+      prune(home, json).await?;
     }
-    Command::InstallArchive => {
+    Command::InstallArchive { origin_hex } => {
       require_local(target)?;
-      archive::install(&home).await?;
+      let origin = origin_hex
+        .as_deref()
+        .map(ctl_client::installation::decode_catalog_origin)
+        .transpose()?;
+      archive::install(&home, origin).await?;
     }
-    Command::ActivateInstalled { bundle_id } => {
+    Command::ActivateInstalled {
+      bundle_id,
+      origin_hex,
+    } => {
       require_local(target)?;
-      return archive::activate(&home, &bundle_id).await;
+      let origin = origin_hex
+        .as_deref()
+        .map(ctl_client::installation::decode_catalog_origin)
+        .transpose()?;
+      return archive::activate(&home, &bundle_id, origin).await;
     }
     #[cfg(windows)]
     Command::UpdaterDigest => {
-      use sha2::{Digest as _, Sha256};
       require_local(target)?;
-      let executable = std::env::current_exe()?;
-      let mut file = std::fs::File::open(executable)?;
-      let mut digest = Sha256::new();
-      io::copy(&mut file, &mut digest)?;
-      println!("{:x}", digest.finalize());
+      updater_digest()?;
     }
   }
   Ok(0)
+}
+
+#[cfg(windows)]
+fn updater_digest() -> io::Result<()> {
+  use sha2::{Digest as _, Sha256};
+  let executable = std::env::current_exe()?;
+  let mut file = std::fs::File::open(executable)?;
+  let mut digest = Sha256::new();
+  io::copy(&mut file, &mut digest)?;
+  println!("{:x}", digest.finalize());
+  Ok(())
+}
+
+async fn prune(home: PathBuf, json: bool) -> io::Result<()> {
+  let result = tokio::task::spawn_blocking(move || {
+    let installations = ctl_core::installations::Installations::new(&home).prune()?;
+    let cache = ctl_client::installation::prune_caches(&home)?;
+    Ok::<_, io::Error>(serde_json::json!({ "installations": installations, "cache": cache }))
+  })
+  .await
+  .map_err(io::Error::other)??;
+  if json {
+    println!(
+      "{}",
+      serde_json::to_string(&result).map_err(io::Error::other)?
+    );
+  } else {
+    println!(
+      "Removed unused installations; channel targets, active, previous and running builds were kept."
+    );
+  }
+  Ok(())
+}
+
+fn validate_target_options(target: TargetOptions<'_>) -> io::Result<()> {
+  if target.destination.is_some() && (target.host.is_some() || target.method.is_some()) {
+    return Err(io::Error::other(
+      "--destination cannot be combined with --host or --method",
+    ));
+  }
+  if target.platform.is_some() && target.host.is_none() && target.destination.is_none() {
+    return Err(io::Error::other(
+      "--remote-platform requires --host or --destination",
+    ));
+  }
+  Ok(())
 }
 
 fn require_local(target: TargetOptions<'_>) -> io::Result<()> {
@@ -213,6 +262,7 @@ async fn check(
       catalog.bundle_id,
       catalog.git_revision
     );
+    println!("Built {}", catalog.built_at.as_deref().unwrap_or("unknown"));
     print_targets(&catalog.targets);
   }
   Ok(())

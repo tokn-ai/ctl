@@ -240,14 +240,10 @@ fn summary(
   let signed_package = !cfg!(target_os = "macos")
     || (manifest.files.contains_key("ctld.app/Contents/MacOS/ctld")
       && manifest.files.contains_key("ctld-package.json"));
-  let complete =
-    manifest.components.contains_key("ctl") && manifest.components.contains_key("ctmux");
   let local_reason = if !compatible {
     Some("Incompatible with this app")
   } else if !ctl_core::bundles::local_target(target) {
     Some("For another platform")
-  } else if !complete {
-    Some("Legacy build lacks ctl and ctmux")
   } else if !signed_package {
     Some("Requires a signed macOS helper package")
   } else {

@@ -1,5 +1,7 @@
 //! Bounded unpacking shared by remote installers, without filesystem writes.
-use ctl_core::bundle_layout::{Layout, MAX_FILE_BYTES, MAX_MANIFEST_BYTES, MAX_TOTAL_BYTES};
+#[cfg(all(test, unix))]
+use ctl_core::bundle_layout::Layout;
+use ctl_core::bundle_layout::{MAX_FILE_BYTES, MAX_MANIFEST_BYTES, MAX_TOTAL_BYTES};
 use std::collections::BTreeMap;
 use std::io::{self, Read as _};
 
@@ -7,6 +9,7 @@ fn invalid(message: &str) -> io::Error {
   io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
+#[cfg(all(test, unix))]
 pub(crate) fn public_layout(files: &mut BTreeMap<String, Vec<u8>>) -> io::Result<Layout> {
   #[derive(serde::Deserialize)]
   struct Header {

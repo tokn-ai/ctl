@@ -40,7 +40,7 @@ export async function legacyPagesCatalog(directory: string, has_nightly_pointer:
   await writeFile(path, JSON.stringify(catalog));
 }
 
-export async function componentSetFixture(root: string, publication: Publication): Promise<string> {
+export async function componentSetFixture(root: string, publication: Publication, build_info = false): Promise<string> {
   const { app_version, bundle_id, git_revision } = publication;
   const identity = { app_version, bundle_id, git_revision };
   const input = join(root, `source-${publication.run_id}-${publication.run_attempt}`);
@@ -51,6 +51,8 @@ export async function componentSetFixture(root: string, publication: Publication
     await runtimeFixture(input, identity, target);
   }
   await assembleAgentBundleSet(identity, input, directory);
+  // Existing release fixtures exercise compatibility with published legacy sets.
+  if (!build_info) await rm(join(directory, "build-info.json"), { force: true });
   return directory;
 }
 

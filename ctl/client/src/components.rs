@@ -360,6 +360,8 @@ pub(crate) fn package_bundle(bundle: &Bundle) -> io::Result<crate::remote_bundle
   }
   let build = &bundle.manifest.components["ctl-agent"].build;
   Ok(crate::remote_bundle::VerifiedBundle {
+    built_at: None,
+    publication_id: None,
     app_version: build.version.clone(),
     bundle_id: bundle
       .manifest

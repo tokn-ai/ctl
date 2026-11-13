@@ -16,7 +16,7 @@ impl Drop for Directory {
 
 fn write_included(directory: &Path) {
   std::fs::create_dir_all(directory).unwrap();
-  let mut fixture = Fixture::new("0.0.9", &"b".repeat(40));
+  let mut fixture = Fixture::new("0.0.9", &"b".repeat(40)).with_clients();
   let targets: Vec<_> = fixture.outer["targets"]
     .as_object()
     .unwrap()
@@ -140,7 +140,7 @@ fn empty_inventory_and_invalid_filters_remain_passive() {
 }
 
 #[test]
-fn active_installation_is_visible_once_and_legacy_upload_pins_are_ignored() {
+fn active_catalog_installation_is_visible_once_alongside_its_cached_copy() {
   let root = Directory::new();
   let home = root.0.join("home");
   std::fs::create_dir_all(&home).unwrap();
@@ -156,11 +156,6 @@ fn active_installation_is_visible_once_and_legacy_upload_pins_are_ignored() {
   #[cfg(windows)]
   installs.install_manager(b"fixture manager").unwrap();
   installs.activate(&cached).unwrap();
-  let legacy = Store::new(&home);
-  let old = legacy.publish(&manifest, &fixture.files).unwrap();
-  legacy
-    .select(ctl_core::bundles::Purpose::Upload, &old)
-    .unwrap();
   let listed = snapshot(&home, None, &[]);
   assert!(listed.errors.is_empty(), "{:?}", listed.errors);
   assert_eq!(listed.bundles.len(), 1);
@@ -173,4 +168,60 @@ fn active_installation_is_visible_once_and_legacy_upload_pins_are_ignored() {
       .all(|selection| selection.selected_upload.is_none())
   );
   assert_eq!(listed.bundles[0].manifest, manifest);
+}
+
+#[test]
+fn unselected_old_store_payloads_are_not_inventoried_or_loadable() {
+  let root = Directory::new();
+  let home = root.0.join("home");
+  std::fs::create_dir_all(&home).unwrap();
+  let fixture = Fixture::new("0.1.2", &"b".repeat(40)).with_clients();
+  let target = "aarch64-unknown-linux-musl";
+  let components = serde_json::from_value(fixture.inner["components"].clone()).unwrap();
+  let manifest = Manifest::new(target, Source::Ci, components, &fixture.files).unwrap();
+  let old = Store::new(&home)
+    .publish(&manifest, &fixture.files)
+    .unwrap();
+  let listed = snapshot(&home, None, &[]);
+  assert!(listed.bundles.is_empty());
+  assert_eq!(listed.errors, [] as [String; 0]);
+  assert!(load_selection(&home, &[], target, &manifest.bundle_id).is_err());
+  assert_eq!(
+    ctl_core::bundles::Bundle::open(&old.directory)
+      .unwrap()
+      .manifest,
+    manifest
+  );
+  assert!(!home.join(".tokn/ctl/catalog.json").exists());
+}
+
+#[test]
+fn service_only_deployment_caches_remain_available_for_repair_but_not_bundle_selection() {
+  let root = Directory::new();
+  let home = root.0.join("home");
+  std::fs::create_dir_all(&home).unwrap();
+  let fixture = Fixture::new("0.1.2", &"b".repeat(40));
+  let target = "aarch64-unknown-linux-musl";
+  let components = serde_json::from_value(fixture.inner["components"].clone()).unwrap();
+  let manifest = Manifest::new(target, Source::Ci, components, &fixture.files).unwrap();
+  let cached = Store::cache(&home)
+    .publish(&manifest, &fixture.files)
+    .unwrap();
+  let listed = scan(&home, None, |selected| {
+    Ok((selected == target).then(|| manifest.clone()))
+  });
+  assert!(listed.errors.is_empty(), "{:?}", listed.errors);
+  assert!(listed.bundles.is_empty());
+  assert!(
+    load_selection(&home, &[], target, &manifest.bundle_id)
+      .unwrap_err()
+      .to_string()
+      .contains("complete build including ctl and ctmux")
+  );
+  assert_eq!(
+    ctl_core::bundles::Bundle::open(&cached.directory)
+      .unwrap()
+      .manifest,
+    manifest
+  );
 }

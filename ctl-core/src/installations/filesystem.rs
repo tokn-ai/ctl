@@ -15,7 +15,8 @@ use std::path::Component;
 mod windows;
 #[cfg(windows)]
 pub(super) use windows::{
-  activate, install_manager, lease_manager_executable, manager_and_lease, pointer, prune_managers,
+  activate, install_manager, lease_manager_executable, manager_and_lease, pointer,
+  prepare_activation, prune_managers,
 };
 
 const JOURNAL: &str = ".activation.json";
@@ -89,14 +90,19 @@ pub(super) fn ensure_root(store: &Installations) -> io::Result<()> {
   ensure_directory(&store.root.join("installs"))
 }
 
-pub(super) fn validate_native(bundle: &Bundle, legacy: bool) -> io::Result<()> {
-  bundle.manifest.validate()?;
+pub(super) fn validate_native(bundle: &Bundle) -> io::Result<()> {
+  validate_complete(bundle)?;
   if !local_target(&bundle.manifest.target_triple) {
     return Err(invalid("an installation must match this computer's target"));
   }
-  if !legacy && bundle.manifest.schema_version != 2 {
+  Ok(())
+}
+
+pub(super) fn validate_complete(bundle: &Bundle) -> io::Result<()> {
+  bundle.manifest.validate()?;
+  if bundle.manifest.schema_version != 2 {
     return Err(invalid(
-      "installations require a complete build including ctl and ctmux",
+      "catalog components require a complete build including ctl and ctmux",
     ));
   }
   Ok(())
@@ -109,59 +115,21 @@ fn pointer_path(store: &Installations, name: &str) -> io::Result<Option<PathBuf>
     return Ok(None);
   }
   let link = fs::read_link(path)?;
-  let absolute = link.is_absolute();
-  let link = if absolute {
-    // The historical agent-only installer resolved the account root with
-    // pwd -P before publishing an absolute current link. Accept that exact
-    // namespace, including an OS alias above the validated account home.
-    let physical = fs::canonicalize(&store.root)?;
-    link
-      .strip_prefix(&physical)
-      .or_else(|_| link.strip_prefix(&store.root))
-      .map_err(|_| invalid("absolute installation pointer is outside legacy agent storage"))?
-      .to_owned()
-  } else {
-    link
-  };
-  if link
-    .components()
-    .any(|part| !matches!(part, Component::Normal(_)))
+  if link.is_absolute()
+    || link
+      .components()
+      .any(|part| !matches!(part, Component::Normal(_)))
   {
     return Err(invalid(
       "installation pointer must be a managed relative link",
     ));
   }
   let parts = link.iter().collect::<Vec<_>>();
-  if absolute {
-    let agent = name == "current"
-      && parts.len() == 4
-      && parts[0] == "components"
-      && parts[1] == "agents"
-      && parts[2]
-        .to_str()
-        .is_some_and(|target| crate::bundles::validate_target(target).is_ok())
-      && parts[3].to_str().is_some_and(|id| {
-        id.split_once('-').is_some_and(|(id, suffix)| {
-          valid_id(id)
-            && suffix.len() == 6
-            && suffix.bytes().all(|byte| byte.is_ascii_alphanumeric())
-        })
-      });
-    if !agent {
-      return Err(invalid(
-        "absolute installation pointer is outside legacy agent storage",
-      ));
-    }
-  }
   let managed =
     parts.len() == 2 && parts[0] == "installs" && parts[1].to_str().is_some_and(valid_id);
-  let legacy = name == "current"
-    && ((parts.len() == 4 && parts[0] == "components" && parts[1] == "bundles")
-      || (parts.len() == 4 && parts[0] == "components" && parts[1] == "agents")
-      || (parts.len() == 2 && parts[0] == "versions"));
-  if !managed && !legacy {
+  if !managed {
     return Err(invalid(
-      "installation pointer is outside managed payload storage",
+      "installation pointer is not a canonical managed selection; run ctlup migrate",
     ));
   }
   let mut parent = store.root.clone();
@@ -173,31 +141,13 @@ fn pointer_path(store: &Installations, name: &str) -> io::Result<Option<PathBuf>
 }
 
 #[cfg(unix)]
-pub(super) fn pointer(
-  store: &Installations,
-  name: &str,
-  legacy: bool,
-) -> io::Result<Option<Bundle>> {
+pub(super) fn pointer(store: &Installations, name: &str) -> io::Result<Option<Bundle>> {
   let Some(path) = pointer_path(store, name)? else {
     return Ok(None);
   };
-  if legacy && path.starts_with(store.root.join("components/agents")) {
-    return Ok(None);
-  }
-  if legacy
-    && path.starts_with(store.root.join("versions"))
-    && !path_exists(&path.join(MANIFEST_FILE))?
-  {
-    // The original SSH installer wrote only manifest.json. It cannot establish
-    // a verified complete managed build, but an explicit install can replace
-    // its pointer without deleting or misrepresenting the old installation.
-    return Ok(None);
-  }
   let bundle = Bundle::open(&path)?;
-  validate_native(&bundle, true)?;
-  if path.starts_with(store.root.join("installs"))
-    && path.file_name().and_then(|name| name.to_str()) != Some(&bundle.manifest.bundle_id)
-  {
+  validate_native(&bundle)?;
+  if path.file_name().and_then(|name| name.to_str()) != Some(&bundle.manifest.bundle_id) {
     return Err(invalid(
       "installation payload identity differs from its path",
     ));
@@ -211,7 +161,7 @@ pub(super) fn load(store: &Installations, id: &str) -> io::Result<Bundle> {
   }
   directory(&store.root.join("installs"))?;
   let bundle = Bundle::open(&store.root.join("installs").join(id))?;
-  validate_native(&bundle, cfg!(unix))?;
+  validate_complete(&bundle)?;
   if bundle.manifest.bundle_id != id {
     return Err(invalid(
       "installation payload identity differs from its path",
@@ -225,7 +175,7 @@ pub(super) fn publish(
   source: &Bundle,
   files: Option<&BTreeMap<String, Vec<u8>>>,
 ) -> io::Result<Bundle> {
-  validate_native(source, true)?;
+  validate_complete(source)?;
   let root = store.root.join("installs");
   let destination = root.join(&source.manifest.bundle_id);
   if path_exists(&destination)? {
@@ -368,15 +318,27 @@ fn prepare_aliases(store: &Installations) -> io::Result<()> {
 }
 
 #[cfg(unix)]
+pub(super) fn prepare_activation(store: &Installations) -> io::Result<()> {
+  prepare_aliases(store)
+}
+
+#[cfg(unix)]
 pub(super) fn activate(
   store: &Installations,
   active: &Bundle,
   previous: Option<&Bundle>,
 ) -> io::Result<()> {
+  validate_native(active)?;
+  if let Some(previous) = previous {
+    validate_native(previous)?;
+  }
   prepare_aliases(store)?;
   let previous =
     previous.filter(|previous| previous.manifest.bundle_id != active.manifest.bundle_id);
-  if pointer_path(store, "current")?.as_deref() == Some(active.directory.as_path()) {
+  let current = store.root.join("current");
+  if path_exists(&current)?
+    && fs::read_link(&current)? == Path::new("installs").join(&active.manifest.bundle_id)
+  {
     return Ok(());
   }
   let transaction = Transaction {
@@ -409,11 +371,29 @@ pub(super) fn recover(store: &Installations) -> io::Result<()> {
   }
   let transaction: Transaction = serde_json::from_slice(&read(&path)?).map_err(io::Error::other)?;
   let active = load(store, &transaction.active)?;
+  validate_native(&active)?;
   let previous = transaction
     .previous
     .as_deref()
     .map(|id| load(store, id))
     .transpose()?;
+  if let Some(previous) = &previous {
+    validate_native(previous)?;
+    if previous.manifest.bundle_id == active.manifest.bundle_id {
+      return Err(invalid("activation and rollback identities must differ"));
+    }
+  }
+  let catalog = super::catalog::read_index(store)?;
+  for bundle in [Some(&active), previous.as_ref()].into_iter().flatten() {
+    if !catalog.entries.iter().any(|entry| {
+      entry.bundle_id == bundle.manifest.bundle_id
+        && entry.target_triple == bundle.manifest.target_triple
+    }) {
+      return Err(invalid(
+        "activation journal selects an unrecorded installation; run ctlup migrate",
+      ));
+    }
+  }
   prepare_aliases(store)?;
   if let Some(previous) = previous {
     replace_link(
@@ -502,7 +482,7 @@ impl Drop for Lock {
   }
 }
 
-struct Temporary(PathBuf);
+pub(super) struct Temporary(pub(super) PathBuf);
 impl Drop for Temporary {
   fn drop(&mut self) {
     let _ = fs::remove_file(&self.0);

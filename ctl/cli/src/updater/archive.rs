@@ -1,10 +1,11 @@
 //! Private SSH deployment entry points. Stdout is the install-progress protocol.
 
+use ctl_core::installations::CatalogOrigin;
 use std::io::{self, Write as _};
 use std::path::Path;
 use tokio::io::AsyncReadExt as _;
 
-pub(super) async fn install(home: &Path) -> io::Result<()> {
+pub(super) async fn install(home: &Path, origin: Option<CatalogOrigin>) -> io::Result<()> {
   emit(ctl_client::RemoteInstallEvent::Receiving { received_bytes: 0 });
   let mut input = tokio::io::stdin();
   let mut bytes = Vec::new();
@@ -24,11 +25,15 @@ pub(super) async fn install(home: &Path) -> io::Result<()> {
       received_bytes: bytes.len() as u64,
     });
   }
-  ctl_client::installation::install_archive_with_progress(home, &bytes, emit).await?;
+  ctl_client::installation::install_archive_with_origin(home, &bytes, origin, emit).await?;
   Ok(())
 }
 
-pub(super) async fn activate(home: &Path, bundle_id: &str) -> io::Result<i32> {
+pub(super) async fn activate(
+  home: &Path,
+  bundle_id: &str,
+  origin: Option<CatalogOrigin>,
+) -> io::Result<i32> {
   let home = home.to_owned();
   let bundle_id = bundle_id.to_owned();
   tokio::task::spawn_blocking(move || {
@@ -38,7 +43,7 @@ pub(super) async fn activate(home: &Path, bundle_id: &str) -> io::Result<i32> {
       Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(10),
       Err(error) => return Err(error),
     };
-    installs.activate(&bundle)?;
+    let (_, _lease) = ctl_client::installation::activate_uploaded(&home, &bundle, origin.as_ref())?;
     if let Err(error) = installs.prune() {
       eprintln!("ctlup: activated successfully; cleanup deferred: {error}");
     }

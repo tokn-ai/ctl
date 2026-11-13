@@ -5,6 +5,7 @@ import { pathToFileURL } from "node:url";
 import { agentTargets, archiveName, inspectAgentArchive, parseAgentBundleSet, parseWindowsAgentBundleSet, readAgentFile, validateAgentIdentity, windowsAgentManifestName, windowsAgentTarget,
   type AgentBundleIdentity, type AgentBundleSet } from "../shared/agent-bundle.mts";
 import { verifyUpdaterTarget } from "../shared/updater-bundle.mts";
+import { writeBuildInfo } from "../shared/build-info.mts";
 
 /** Copy only complete, verified component sets, without executing foreign binaries. */
 export async function assembleAgentBundleSet(identity: AgentBundleIdentity, input_directory: string, output_directory: string): Promise<AgentBundleSet> {
@@ -45,6 +46,10 @@ async function assembleBundleSet(identity: AgentBundleIdentity, input_directory:
   }
   for (const name of updater_assets) await copyFile(join(input_directory, name), join(output_directory, name));
   await writeFile(join(output_directory, windows ? windowsAgentManifestName : "bundle-set.json"), manifestBytes);
+  // Older PR clients require the exact legacy artifact file set.
+  if (!windows && !identity.bundle_id.startsWith(`${identity.app_version}-dev.`)) {
+    await writeBuildInfo(output_directory, identity);
+  }
   return manifest;
 }
 

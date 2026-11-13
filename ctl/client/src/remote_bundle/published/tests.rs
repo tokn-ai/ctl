@@ -156,14 +156,13 @@ async fn release_history_lists_retained_channels_and_accepts_a_legacy_nightly_he
     .list_releases(BundleChannel::Nightly)
     .await
     .unwrap();
-  assert_eq!(nightly.len(), 2);
+  assert_eq!(nightly.len(), 1);
   assert_eq!(
     nightly[0].publication_id,
     latest["publication_id"].as_str().unwrap()
   );
   assert_eq!(nightly[0].channel, BundleChannel::Nightly);
   assert!(nightly[0].current);
-  assert!(!nightly[1].current);
 
   let stable_releases = resolver.list_releases(BundleChannel::Stable).await.unwrap();
   assert_eq!(stable_releases.len(), 1);
@@ -171,7 +170,18 @@ async fn release_history_lists_retained_channels_and_accepts_a_legacy_nightly_he
   assert!(stable_releases[0].current);
   assert_eq!(
     server.requests.lock().unwrap().as_slice(),
-    ["/bundles/catalog.json", "/bundles/catalog.json"]
+    [
+      "/bundles/catalog.json",
+      &format!(
+        "/bundles/sets/{}/build-info.json",
+        latest["publication_id"].as_str().unwrap()
+      ),
+      "/bundles/catalog.json",
+      &format!(
+        "/bundles/sets/{}/build-info.json",
+        stable["publication_id"].as_str().unwrap()
+      )
+    ]
   );
 }
 
@@ -233,6 +243,7 @@ async fn release_view_fetches_only_the_catalog_and_exact_manifest_and_checks_ide
     ));
     let mut expected = vec!["/bundles/catalog.json".into(), manifest_path.clone()];
     if succeeds {
+      expected.push(format!("/bundles/sets/{id}/build-info.json"));
       expected.push(format!("/bundles/sets/{id}/{WINDOWS_BUNDLE_SET_FILE}"));
     }
     expected.push("/bundles/catalog.json".into());
@@ -272,6 +283,7 @@ async fn check_reads_only_channel_and_metadata_while_download_verifies_archive()
     [
       "/bundles/channels/nightly.json",
       "/bundles/sets/test/bundle-set.json",
+      "/bundles/sets/test/build-info.json",
       "/bundles/sets/test/bundle-set-windows.json"
     ]
   );
@@ -479,6 +491,14 @@ fn installation_routes(
   let windows_manifest = (target == WINDOWS_TARGET).then(|| fixture.bind_archive(&archive));
   let mut routes = BTreeMap::from([
     (metadata_url.path().to_owned(), manifest),
+    (
+      format!("/bundles/sets/{id}/build-info.json"),
+      serde_json::to_vec(&serde_json::json!({
+        "schema_version": 1, "app_version": version, "bundle_id": version,
+        "git_revision": revision, "built_at": "2026-11-13T01:02:03Z",
+      }))
+      .unwrap(),
+    ),
     (format!("/bundles/sets/{id}/{archive_name}"), archive),
     (
       format!("/bundles/sets/{id}/ctlup-{target}.json"),
@@ -534,6 +554,25 @@ async fn installation_download_pins_both_assets_when_the_channel_advances() {
     .await
     .unwrap();
   assert_eq!(bundle.git_revision, first_revision);
+  assert_eq!(bundle.built_at.as_deref(), Some("2026-11-13T01:02:03Z"));
+  assert_eq!(bundle.publication_id.as_deref(), Some("first"));
+  let manifest = BundleSet::parse_intrinsic(&bundle.manifest).unwrap();
+  let expected = &manifest
+    .target(target)
+    .unwrap()
+    .components
+    .as_ref()
+    .unwrap()["ctl-agent"]
+    .build;
+  let cache_entry = super::super::BundleCacheEntry::publication(
+    &cache.join("downloads"),
+    target,
+    expected,
+    &bundle.manifest,
+  )
+  .unwrap();
+  let cached = cache_entry.load().unwrap().unwrap();
+  assert_eq!(cached.built_at, bundle.built_at);
   assert_eq!(updater.info.git_revision, bundle.git_revision);
   assert_eq!(updater.bytes, b"fixture updater for first");
   for (artifact, size) in [
@@ -553,7 +592,7 @@ async fn installation_download_pins_both_assets_when_the_channel_advances() {
   {
     let requests = server.requests.lock().unwrap();
     assert_eq!(requests[0], channel_path);
-    assert_eq!(requests.len(), 5);
+    assert_eq!(requests.len(), 6);
     assert!(
       requests[1..]
         .iter()
@@ -567,6 +606,45 @@ async fn installation_download_pins_both_assets_when_the_channel_advances() {
     .unwrap();
   assert_eq!(current.git_revision, second_revision);
   std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test]
+async fn malformed_build_metadata_is_an_error_and_missing_legacy_metadata_is_unknown() {
+  for timestamp in [
+    None,
+    Some("2026-11-13T01:02:03Z"),
+    Some("2026-02-30T01:02:03Z"),
+  ] {
+    let fixture = Fixture::new("0.1.0", &"a".repeat(40));
+    let manifest = serde_json::to_vec(&fixture.outer).unwrap();
+    let server = Server::start(|root| {
+      let mut routes = BTreeMap::from([
+        (
+          "/bundles/channels/nightly.json".into(),
+          serde_json::to_vec(&pointer(root)).unwrap(),
+        ),
+        ("/bundles/sets/test/bundle-set.json".into(), manifest),
+      ]);
+      if let Some(timestamp) = timestamp {
+        routes.insert(
+          "/bundles/sets/test/build-info.json".into(),
+          serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1, "app_version": "0.1.0", "bundle_id": "0.1.0",
+            "git_revision": "a".repeat(40), "built_at": timestamp,
+          }))
+          .unwrap(),
+        );
+      }
+      routes
+    })
+    .await;
+    let result = server.resolver().check(BundleChannel::Nightly).await;
+    if timestamp == Some("2026-02-30T01:02:03Z") {
+      assert!(matches!(result, Err(Error::Invalid(_))));
+    } else {
+      assert_eq!(result.unwrap().built_at.as_deref(), timestamp);
+    }
+  }
 }
 
 #[tokio::test]
@@ -629,6 +707,7 @@ async fn missing_installation_updater_is_reported_before_downloading_runtime() {
     [
       "/bundles/channels/nightly.json",
       "/bundles/sets/test/bundle-set.json",
+      "/bundles/sets/test/build-info.json",
       "/bundles/sets/test/ctlup-aarch64-apple-darwin.json",
     ]
   );

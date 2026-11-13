@@ -30,6 +30,7 @@ ctl-task-proto.workspace = true
 ctl-task-client.workspace = true
 ctl-task-ipc.workspace = true
 thiserror.workspace = true
+time.workspace = true
 tokio.workspace = true
 zeroize.workspace = true
 reqwest = { version = "0.13.4", default-features = false, features = ["native-tls", "system-proxy"] }

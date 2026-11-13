@@ -92,8 +92,22 @@ pub fn scan(
       None
     }
   };
-  let installed = match installs.list() {
-    Ok(bundles) => bundles,
+  let installed = match installs.catalog() {
+    Ok(entries) => entries
+      .into_iter()
+      .map(|entry| entry.bundle_id)
+      .collect::<BTreeSet<_>>()
+      .into_iter()
+      .filter_map(|id| match installs.get(&id) {
+        Ok(bundle) => Some(bundle),
+        Err(error) => {
+          snapshot
+            .errors
+            .push(format!("Installed build {id}: {error}"));
+          None
+        }
+      })
+      .collect::<Vec<_>>(),
     Err(error) => {
       snapshot.errors.push(format!("Installed builds: {error}"));
       Vec::new()
@@ -104,20 +118,18 @@ pub fn scan(
       .as_ref()
       .filter(|bundle| bundle.manifest.target_triple == target)
       .map(|bundle| bundle.manifest.bundle_id.clone());
-    for store in [Store::cache(home), Store::new(home)] {
-      match store.list(target) {
-        Ok(bundles) => {
-          for bundle in bundles {
-            add(
-              &mut snapshot,
-              bundle.manifest,
-              Availability::Stored,
-              local.as_deref(),
-            );
-          }
+    match Store::cache(home).list(target) {
+      Ok(bundles) => {
+        for bundle in bundles {
+          add(
+            &mut snapshot,
+            bundle.manifest,
+            Availability::Stored,
+            local.as_deref(),
+          );
         }
-        Err(error) => snapshot.errors.push(format!("{target}: {error}")),
       }
+      Err(error) => snapshot.errors.push(format!("{target}: {error}")),
     }
     for bundle in installed
       .iter()
@@ -157,6 +169,9 @@ fn add(
   availability: Availability,
   active: Option<&str>,
 ) {
+  if manifest.schema_version != 2 {
+    return;
+  }
   if let Some(existing) = snapshot.bundles.iter_mut().find(|bundle| {
     bundle.manifest.target_triple == manifest.target_triple
       && bundle.manifest.bundle_id == manifest.bundle_id
@@ -203,22 +218,28 @@ pub fn load_selection(
   target: &str,
   id: &str,
 ) -> io::Result<ctl_core::bundles::Bundle> {
-  for store in [Store::cache(home), Store::new(home)] {
-    match store.get(target, id) {
-      Ok(bundle) => return Ok(bundle),
-      Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-      Err(error) => return Err(error),
+  match Store::cache(home).get(target, id) {
+    Ok(bundle) => {
+      require_complete(&bundle.manifest)?;
+      return Ok(bundle);
     }
+    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+    Err(error) => return Err(error),
   }
-  match Installations::new(home).get(id) {
-    Ok(bundle) if bundle.manifest.target_triple == target => return Ok(bundle),
-    Ok(_) => {
+  let installs = Installations::new(home);
+  if let Some(entry) = installs
+    .catalog()?
+    .into_iter()
+    .find(|entry| entry.bundle_id == id)
+  {
+    if entry.target_triple != target {
       return Err(io::Error::other(
         "The installed build has a different target.",
       ));
     }
-    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-    Err(error) => return Err(error),
+    let bundle = installs.get(id)?;
+    require_complete(&bundle.manifest)?;
+    return Ok(bundle);
   }
   let (archive, manifest) = included_bundle(directories, target)
     .map_err(io::Error::other)?
@@ -228,7 +249,18 @@ pub fn load_selection(
         "This included build changed or is unavailable. Refresh bundles and choose again.",
       )
     })?;
+  require_complete(&manifest)?;
   super::import_remote(home, &archive, target, manifest.source).map_err(io::Error::other)
+}
+
+fn require_complete(manifest: &Manifest) -> io::Result<()> {
+  if manifest.schema_version != 2 {
+    return Err(io::Error::new(
+      io::ErrorKind::InvalidData,
+      "bundle selection requires a complete build including ctl and ctmux",
+    ));
+  }
+  Ok(())
 }
 
 #[cfg(test)]

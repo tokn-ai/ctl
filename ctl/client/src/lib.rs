@@ -40,13 +40,12 @@ pub mod ssh_reachability;
 mod ssh_startup;
 pub mod tailscale;
 
+#[cfg(unix)]
+pub use ssh_install::install_ssh_unix_bundle_with_updater;
 pub use ssh_install::{
   RemoteInstallEvent, RemoteInstallPhase, RemoteInstallProgress, RemoteInstallStalled,
-  RemoteInstallWatchdog, install_ssh_unix_agent_interactive,
-  install_ssh_unix_agent_interactive_with_progress, probe_ssh_windows_platform,
+  RemoteInstallWatchdog, probe_ssh_windows_platform,
 };
-#[cfg(unix)]
-pub use ssh_install::{install_ssh_agent_only_with_progress, install_ssh_unix_bundle_with_updater};
 
 const SSH_PROGRAM: &str = "ssh";
 const MAX_SSH_COMMAND_OUTPUT: usize = 8192;

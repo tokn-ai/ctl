@@ -8,6 +8,7 @@ use crate::{
 };
 use base64::Engine as _;
 use sha2::{Digest as _, Sha256};
+use std::io::{self, Write as _};
 use std::time::Duration;
 use tokio::process::Command;
 
@@ -23,7 +24,31 @@ try {
 } finally { $file.Dispose() }
 ";
 
-fn powershell_command(script: &str) -> String {
+fn powershell_command(script: &str) -> io::Result<String> {
+  let command = encoded_powershell_command(script);
+  if command.len() < 8000 {
+    return Ok(command);
+  }
+  // Windows OpenSSH commonly starts commands through cmd.exe. Compress long
+  // scripts rather than exceeding its command-line limit or changing stdin,
+  // which must remain the original binary installation stream.
+  let mut compressor = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+  compressor.write_all(script.as_bytes())?;
+  let encoded = base64::engine::general_purpose::STANDARD.encode(compressor.finish()?);
+  let wrapper = format!(
+    "$b=[Convert]::FromBase64String('{encoded}');$s=[IO.Compression.GZipStream]::new([IO.MemoryStream]::new($b),[IO.Compression.CompressionMode]::Decompress);$r=[IO.StreamReader]::new($s,[Text.Encoding]::UTF8);try{{&([ScriptBlock]::Create($r.ReadToEnd()))}}finally{{$r.Dispose()}}"
+  );
+  let command = encoded_powershell_command(&wrapper);
+  if command.len() >= 8000 {
+    return Err(io::Error::new(
+      io::ErrorKind::InvalidInput,
+      "Windows SSH command exceeds its size limit",
+    ));
+  }
+  Ok(command)
+}
+
+fn encoded_powershell_command(script: &str) -> String {
   let bytes: Vec<_> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
   let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
   format!("powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand {encoded}")
@@ -44,7 +69,10 @@ pub(crate) async fn windows_ssh_command(
   command
     .args(extra)
     .args(prepare_ssh_base_arguments(destination, options, interaction).await?)
-    .arg(powershell_command(script));
+    .arg(
+      powershell_command(script)
+        .map_err(|error| CoreError::InvalidComponentBundle(error.to_string()))?,
+    );
   Ok(command)
 }
 
@@ -115,6 +143,7 @@ pub(super) async fn install(
     bundle_id,
     archive,
     expected_account,
+    origin,
   } = upload;
   let (manifest, layout) = managed_installation(archive, bundle_id)?;
   if manifest.target_triple != crate::remote_bundle::WINDOWS_TARGET
@@ -127,13 +156,15 @@ pub(super) async fn install(
   }
   let digest = format!("{:x}", Sha256::digest(updater));
   let account_guard = account_guard(expected_account)?;
+  let origin_arguments = origin_arguments(origin)?;
   let preflight = format!(
     r#"$ErrorActionPreference = 'Stop'
 {account_guard}
 {MANAGER}
 if (![IO.File]::Exists($manager)) {{ exit 11 }}
 if ((& $manager updater-digest) -ne '{digest}') {{ exit 11 }}
-$confirmation = & $manager activate-installed '{}'
+{origin_arguments}
+$confirmation = & $manager activate-installed '{}' @originArgs
 $code = $LASTEXITCODE
 if ($code -eq 0) {{
   if ($confirmation -cne 'ctl-install-v1') {{ throw 'ctlup did not confirm activation.' }}
@@ -154,22 +185,50 @@ exit $code"#,
     Some(11) => updater,
     _ => return require_updater_success(status, &stdout, &stderr, b"ctl-install-v1\n"),
   };
-  let script = install_script(&digest, prefix.len(), &account_guard);
+  let script = install_script(&digest, prefix.len(), &account_guard, &origin_arguments);
   let command = windows_ssh_command(destination, options, interaction, &script).await?;
   run_package_install_with_prefix(command, prefix, archive, layout.names(), on_progress).await
 }
 
-fn install_script(digest: &str, prefix_size: usize, account_guard: &str) -> String {
+fn origin_arguments(
+  origin: Option<&ctl_core::installations::CatalogOrigin>,
+) -> Result<String, CoreError> {
+  let Some(origin) = origin else {
+    return Ok("$originArgs = @()".into());
+  };
+  let encoded = crate::installation::encode_catalog_origin(origin)
+    .map_err(|error| CoreError::InvalidComponentBundle(error.to_string()))?;
+  Ok(format!(
+    r#"$originArgs = @()
+$origin = '{encoded}'
+$savedPreference = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+$probe = & $manager catalog-json 2>&1
+$probeCode = $LASTEXITCODE
+$ErrorActionPreference = $savedPreference
+if ($probeCode -eq 0) {{ $originArgs = @('--origin-hex', $origin) }}
+elseif ($probeCode -ne 2) {{ throw ('ctlup catalog probe failed: ' + ($probe -join "`n")) }}"#
+  ))
+}
+
+fn install_script(
+  digest: &str,
+  prefix_size: usize,
+  account_guard: &str,
+  origin_arguments: &str,
+) -> String {
   INSTALL_SCRIPT
     .replace("__ACCOUNT_GUARD__", account_guard)
     .replace("__MANAGER__", MANAGER)
     .replace("__UPDATER_SIZE__", &prefix_size.to_string())
     .replace("__UPDATER_SHA256__", digest)
+    .replace("__ORIGIN_ARGUMENTS__", origin_arguments)
 }
 
 #[cfg(test)]
 mod tests {
   use super::*;
+  use std::io::Read as _;
 
   #[test]
   fn installer_fits_in_the_default_windows_ssh_shell_command_line() {
@@ -178,9 +237,55 @@ mod tests {
       &"a".repeat(64),
       ctl_core::bundle_layout::MAX_FILE_BYTES,
       &guard,
+      &origin_arguments(None).unwrap(),
     );
-    let command = powershell_command(&script);
+    let command = powershell_command(&script).unwrap();
     assert!(command.len() < 8000);
     assert!(!script.contains("__"));
+  }
+
+  #[test]
+  fn maximal_provenance_uses_lossless_compression_without_changing_installer_input() {
+    let origin = ctl_core::installations::CatalogOrigin {
+      channel: "pr-18446744073709551615".into(),
+      publication_id: Some("a".repeat(256)),
+      built_at: Some("2026-01-02T03:04:05.123456789Z".into()),
+    };
+    let guard = account_guard(Some("aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa")).unwrap();
+    let script = install_script(
+      &"a".repeat(64),
+      ctl_core::bundle_layout::MAX_FILE_BYTES,
+      &guard,
+      &origin_arguments(Some(&origin)).unwrap(),
+    );
+    assert!(encoded_powershell_command(&script).len() >= 8000);
+    let command = powershell_command(&script).unwrap();
+    assert!(command.len() < 8000);
+    let encoded = command.rsplit_once(' ').unwrap().1;
+    let bytes = base64::engine::general_purpose::STANDARD
+      .decode(encoded)
+      .unwrap();
+    let utf16: Vec<_> = bytes
+      .as_chunks::<2>()
+      .0
+      .iter()
+      .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+      .collect();
+    let wrapper = String::from_utf16(&utf16).unwrap();
+    let compressed = wrapper
+      .split_once("FromBase64String('")
+      .unwrap()
+      .1
+      .split_once('\'')
+      .unwrap()
+      .0;
+    let compressed = base64::engine::general_purpose::STANDARD
+      .decode(compressed)
+      .unwrap();
+    let mut decoded = String::new();
+    flate2::read::GzDecoder::new(compressed.as_slice())
+      .read_to_string(&mut decoded)
+      .unwrap();
+    assert_eq!(decoded, script);
   }
 }

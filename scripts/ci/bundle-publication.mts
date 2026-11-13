@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { agentTargets, maxAgentManifestBytes, parseAgentBundleSet, readAgentFile, readWindowsAgentBundleSet, verifyAgentBundleTarget, windowsAgentManifestName, windowsAgentTarget,
   type AgentBundleIdentity, type AgentBundleSet } from "../shared/agent-bundle.mts";
 import { verifyUpdaterTarget } from "../shared/updater-bundle.mts";
+import { buildInfoName, readBuildInfo } from "../shared/build-info.mts";
 
 export const bundleRoot = "https://tokn-ai.dev/ctl/bundles/";
 export type BundleChannel = "nightly" | "stable";
@@ -17,6 +18,7 @@ export async function validatedComponentSet(directory: string, identity: AgentBu
   const manifest = parseAgentBundleSet(await readAgentFile(join(directory, "bundle-set.json"), maxAgentManifestBytes), expected);
   if (manifest.schema_version === 1) throw new Error("Published component bundles require component metadata");
   const asset_names = ["bundle-set.json"];
+  if (await readBuildInfo(directory, expected)) asset_names.push(buildInfoName);
   let updater_assets = 0;
   for (const target of agentTargets) {
     const entry = manifest.targets[target];

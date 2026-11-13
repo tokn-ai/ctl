@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import { componentIdentity, fileDigest, repositoryName, validatedComponentSet } from "./bundle-publication.mts";
 import { archiveName, parseAgentBundleSet, windowsAgentManifestName, windowsAgentTarget } from "../shared/agent-bundle.mts";
 import { updaterBinaryName, updaterManifestName } from "../shared/updater-bundle.mts";
+import { buildInfoName } from "../shared/build-info.mts";
 import { findRelease, managedLabelPrefix, mergeReleaseNotes, pages, releaseNotes, validateReleaseBundle, verifyReleaseTag,
   type BundleIdentity, type GhRunner } from "./update-draft-release.mts";
 
@@ -53,6 +54,13 @@ async function restoreCanonicalAssets(repository: string, identity: BundleIdenti
       "--clobber", ...names.flatMap((name) => ["--pattern", name])]);
   };
   await download(["bundle-set.json"]);
+  if (assets.some((asset) => asset.name === buildInfoName)) {
+    await download([buildInfoName]);
+  } else {
+    // An older release has no trustworthy build time for its canonical bytes.
+    await rm(join(canonical, buildInfoName), { force: true });
+    await rm(join(directory, buildInfoName), { force: true });
+  }
   await verifyPublishedAsset(assets.find((asset) => asset.name === "bundle-set.json")!, canonical);
   const manifest = parseAgentBundleSet(await readFile(join(canonical, "bundle-set.json")), identity);
   const remote_names = Object.values(manifest.targets).flatMap((entry) => [entry.archive, `${entry.archive}.sha256`]);

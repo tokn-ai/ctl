@@ -183,12 +183,73 @@ fn missing_updater(error: Error, publication: &Publication, target: &str, asset:
 }
 
 pub(crate) fn cache_verified(root: &Path, updater: &VerifiedUpdater) -> Result<(), Error> {
+  validate_updater(updater)?;
+  crate::installation::safe_directory(root)?;
+  let _lock = CacheLock::acquire(root)?;
+  cache_verified_locked(root, updater)
+}
+
+fn validate_updater(updater: &VerifiedUpdater) -> Result<(), Error> {
   let encoded =
     serde_json::to_vec(&updater.info).map_err(|error| Error::Invalid(error.to_string()))?;
   let info = UpdaterInfo::parse(&encoded, &updater.info.target_triple)?;
   info.verify_bytes(&updater.bytes)?;
+  Ok(())
+}
+
+pub(crate) fn validate_updater_for_manifest(
+  manifest: &ctl_core::bundles::Manifest,
+  updater: &VerifiedUpdater,
+) -> Result<(), Error> {
+  manifest.validate()?;
+  validate_updater(updater)?;
+  let build = &manifest.components["ctl-agent"].build;
+  if updater.info.target_triple != manifest.target_triple
+    || updater.info.app_version != build.version
+    || Some(updater.info.git_revision.as_str()) != build.source_revision.as_deref()
+    || manifest
+      .distribution_id
+      .as_ref()
+      .is_some_and(|id| id != &updater.info.bundle_id)
+  {
+    return Err(Error::Invalid(
+      "updater differs from its installed component publication".into(),
+    ));
+  }
+  Ok(())
+}
+
+pub(crate) fn cache_verified_for_manifest(
+  root: &Path,
+  manifest: &ctl_core::bundles::Manifest,
+  updater: &VerifiedUpdater,
+) -> Result<(), Error> {
+  validate_updater_for_manifest(manifest, updater)?;
   crate::installation::safe_directory(root)?;
   let _lock = CacheLock::acquire(root)?;
+  cache_verified_locked(root, updater)?;
+  let records = root.join("records");
+  crate::installation::safe_directory(&records)?;
+  let stage = records.join(format!(".record-{}", uuid::Uuid::new_v4()));
+  let result = (|| {
+    let mut file = private_fs::options()
+      .write(true)
+      .create_new(true)
+      .open(&stage)?;
+    file.write_all(&serde_json::to_vec(&updater.info).map_err(io::Error::other)?)?;
+    file.sync_all()?;
+    drop(file);
+    std::fs::rename(&stage, records.join(format!("{}.json", manifest.bundle_id)))?;
+    private_fs::sync_directory(&records)?;
+    Ok::<_, Error>(())
+  })();
+  if result.is_err() {
+    let _ = std::fs::remove_file(stage);
+  }
+  result
+}
+
+fn cache_verified_locked(root: &Path, updater: &VerifiedUpdater) -> Result<(), Error> {
   if read_cached_updater(root, &updater.info)?.is_some() {
     return Ok(());
   }
@@ -257,11 +318,43 @@ pub(crate) fn read_cached_updater(
 /// Writers and cleanup share one process-held lock, so interrupted writers never
 /// leave a persistent lock directory that blocks a future update.
 pub(crate) fn prune_updater_cache(root: &Path, maximum_bytes: u64) -> io::Result<u64> {
+  prune_updater_cache_with_pins(root, maximum_bytes, &[])
+}
+
+pub(crate) fn prune_updater_cache_with_pins(
+  root: &Path,
+  maximum_bytes: u64,
+  pins: &[ctl_core::bundles::Manifest],
+) -> io::Result<u64> {
   if !existing_cache_path(root)? {
     return Ok(0);
   }
   let _lock = CacheLock::acquire(root)?;
   let (mut blobs, stages) = cache_blobs(root)?;
+  let records = cache_records(root)?;
+  let pinned = records
+    .iter()
+    .filter(|(path, info)| {
+      pins.iter().any(|manifest| {
+        path
+          .file_stem()
+          .is_some_and(|name| name == manifest.bundle_id.as_str())
+          && manifest.target_triple == info.target_triple
+          && manifest
+            .distribution_id
+            .as_ref()
+            .is_none_or(|id| id == &info.bundle_id)
+          && manifest
+            .components
+            .get("ctl-agent")
+            .is_some_and(|component| {
+              component.build.version == info.app_version
+                && component.build.source_revision.as_deref() == Some(info.git_revision.as_str())
+            })
+      })
+    })
+    .map(|(_, info)| info.sha256.as_str())
+    .collect::<std::collections::BTreeSet<_>>();
   blobs.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
   let mut total = blobs.iter().try_fold(0_u64, |total, blob| {
     total
@@ -274,6 +367,9 @@ pub(crate) fn prune_updater_cache(root: &Path, maximum_bytes: u64) -> io::Result
     if total <= maximum_bytes {
       break;
     }
+    if pinned.contains(id.as_str()) {
+      continue;
+    }
     removed_ids.insert(id.as_str());
     total -= size;
     removed_bytes += size;
@@ -285,7 +381,10 @@ pub(crate) fn prune_updater_cache(root: &Path, maximum_bytes: u64) -> io::Result
     .collect::<std::collections::BTreeSet<_>>();
   // Validate all record inputs before the first mutation. A malformed record
   // cannot make cleanup silently follow or remove an unrelated path.
-  let stale = stale_records(root, &retained)?;
+  let stale = records
+    .iter()
+    .filter(|(_, info)| !retained.contains(info.sha256.as_str()))
+    .map(|(path, _)| path);
   for path in stages {
     std::fs::remove_dir_all(path)?;
   }
@@ -342,22 +441,19 @@ fn cache_blobs(root: &Path) -> io::Result<(Vec<CacheBlob>, Vec<std::path::PathBu
   Ok((blobs, stages))
 }
 
-fn stale_records(
-  root: &Path,
-  retained: &std::collections::BTreeSet<&str>,
-) -> io::Result<Vec<std::path::PathBuf>> {
+fn cache_records(root: &Path) -> io::Result<Vec<(std::path::PathBuf, UpdaterInfo)>> {
   let directory = root.join("records");
   if !owned_directory(&directory)? {
     return Ok(Vec::new());
   }
-  let mut stale = Vec::new();
+  let mut records = Vec::new();
   for entry in std::fs::read_dir(&directory)? {
     let entry = entry?;
     let name = entry.file_name();
     let name = name.to_str().ok_or_else(unsafe_cache)?;
     require_owned_file(&std::fs::symlink_metadata(entry.path())?)?;
-    // Record writers publish by rename after writing a bounded private stage.
-    // They do not hold the cache lock; leave an in-flight record stage alone.
+    // Records publish by rename after writing a bounded private stage.
+    // Leave incomplete stages from older concurrent updater versions alone.
     if name.starts_with(".record-") {
       continue;
     }
@@ -367,11 +463,9 @@ fn stale_records(
     let bytes = crate::components::read_input(&entry.path(), 16 * 1024)?;
     let info: UpdaterInfo = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
     let info = UpdaterInfo::parse(&bytes, &info.target_triple).map_err(io::Error::other)?;
-    if !retained.contains(info.sha256.as_str()) {
-      stale.push(entry.path());
-    }
+    records.push((entry.path(), info));
   }
-  Ok(stale)
+  Ok(records)
 }
 
 fn valid_digest(value: &str) -> bool {

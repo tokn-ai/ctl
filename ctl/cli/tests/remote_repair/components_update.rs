@@ -3,6 +3,59 @@ use super::*;
 
 const OTHER_ID: &str = "0c9247af-580a-4e90-9a88-45a4f76c0ca7";
 
+fn catalogued_agent_without_inspect(fixture: &Fixture, remote_id: Option<&str>) -> PathBuf {
+  use ctl_core::bundles::{Manifest, Source, Store};
+  use ctl_core::installations::{CatalogOrigin, Installations};
+
+  let build = ctl_core::component::ComponentBuildInfo {
+    version: "0.0.8".into(),
+    source_revision: Some("b".repeat(40)),
+    source_fingerprint: "b".repeat(64),
+    dirty: false,
+  };
+  let publication = "0.0.8-dev.bbbbbbbbbbbb";
+  let components = serde_json::from_value(Fixture::compatible_components(&build)).unwrap();
+  let files = ctl_core::bundle_layout::ALL
+    .into_iter()
+    .map(|name| {
+      let bytes = if name == "ctl-agent" {
+        b"#!/bin/sh\nprintf \"error: unrecognized subcommand 'inspect'\\n\" >&2\nexit 2\n"
+          .as_slice()
+      } else {
+        b"#!/bin/sh\n# retained companion\nexit 0\n".as_slice()
+      };
+      (name.into(), bytes.to_vec())
+    })
+    .collect();
+  let manifest = Manifest::new(fixture_target(), Source::Ci, components, &files)
+    .unwrap()
+    .with_distribution_id(publication)
+    .unwrap();
+  let home = fixture.0.join("home");
+  let source = Store::cache(&home).publish(&manifest, &files).unwrap();
+  let installed = Installations::new(&home)
+    .activate_with_origin(
+      &source,
+      &CatalogOrigin {
+        channel: "provided".into(),
+        publication_id: Some(publication.into()),
+        built_at: None,
+      },
+    )
+    .unwrap();
+  set_remote_id(fixture, remote_id);
+  installed.directory
+}
+
+fn set_remote_id(fixture: &Fixture, remote_id: Option<&str>) {
+  let path = fixture.0.join("home/.tokn/ctl/remote-id");
+  if let Some(remote_id) = remote_id {
+    fs::write(path, remote_id).unwrap();
+  } else if path.exists() {
+    fs::remove_file(path).unwrap();
+  }
+}
+
 fn legacy_installation(fixture: &Fixture, remote_id: Option<&str>) -> PathBuf {
   let base = fixture.0.join("home/.tokn/ctl");
   let legacy = base.join("versions/legacy");
@@ -23,11 +76,7 @@ fn legacy_installation(fixture: &Fixture, remote_id: Option<&str>) -> PathBuf {
     fs::set_permissions(legacy.join(name), fs::Permissions::from_mode(0o700)).unwrap();
   }
   std::os::unix::fs::symlink("versions/legacy", base.join("current")).unwrap();
-  if let Some(remote_id) = remote_id {
-    fs::write(base.join("remote-id"), remote_id).unwrap();
-  } else if base.join("remote-id").exists() {
-    fs::remove_file(base.join("remote-id")).unwrap();
-  }
+  set_remote_id(fixture, remote_id);
   legacy
 }
 
@@ -111,7 +160,7 @@ async fn a_downloaded_manager_filename_can_deploy_offline_to_its_native_target()
   let _guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = Fixture::new(EXPECTED_ID);
   source(&fixture);
-  legacy_installation(&fixture, Some(EXPECTED_ID));
+  catalogued_agent_without_inspect(&fixture, Some(EXPECTED_ID));
   fixture.prepare_updater();
   let executable = fixture.0.join("ctlup-fixture-manager");
   let broker = fixture.updater_broker();
@@ -142,7 +191,7 @@ async fn old_agent_without_inspect_can_update_the_complete_build_and_verify_acti
   {
     let fixture = Fixture::new(EXPECTED_ID);
     let bundle_id = source(&fixture);
-    let legacy = legacy_installation(&fixture, Some(EXPECTED_ID));
+    let legacy = catalogued_agent_without_inspect(&fixture, Some(EXPECTED_ID));
     let original_hosts = fs::read(fixture.0.join("hosts.json")).unwrap();
     let old_inspect = Command::new(legacy.join("ctl-agent"))
       .arg("inspect")
@@ -174,7 +223,7 @@ async fn missing_or_changed_account_id_blocks_before_platform_source_or_upload()
   let _guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   for remote_id in [None, Some(OTHER_ID)] {
     let fixture = Fixture::new(EXPECTED_ID);
-    let legacy = legacy_installation(&fixture, remote_id);
+    let legacy = catalogued_agent_without_inspect(&fixture, remote_id);
     let original_hosts = fs::read(fixture.0.join("hosts.json")).unwrap();
     let broker = fixture.updater_broker();
     let mut terminal = update(&fixture);
@@ -206,7 +255,7 @@ async fn newly_installed_agent_must_still_report_the_saved_account_and_exact_act
   for changed_account in [true, false] {
     let fixture = Fixture::new(EXPECTED_ID);
     source(&fixture);
-    legacy_installation(&fixture, Some(EXPECTED_ID));
+    catalogued_agent_without_inspect(&fixture, Some(EXPECTED_ID));
     let path = fixture.0.join("upgraded-identity");
     let mut identity: serde_json::Value =
       serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
@@ -234,6 +283,41 @@ async fn newly_installed_agent_must_still_report_the_saved_account_and_exact_act
     );
     broker.await.unwrap();
   }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unmanaged_layout_blocks_update_before_ssh_and_preserves_the_old_installation() {
+  let _guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
+  let fixture = Fixture::new(EXPECTED_ID);
+  source(&fixture);
+  let legacy = legacy_installation(&fixture, Some(EXPECTED_ID));
+  let account = fixture.0.join("home/.tokn/ctl");
+  let current = fs::read_link(account.join("current")).unwrap();
+  let old_payloads = ["ctl-agent", "ctmuxd", "ctl-taskd", "ctld"]
+    .map(|name| (name, fs::read(legacy.join(name)).unwrap()));
+  let original_hosts = fs::read(fixture.0.join("hosts.json")).unwrap();
+  // This fixture shares the local preparation account with its simulated SSH
+  // account. Its old local layout must be refused before opening any channel.
+  let mut terminal = update(&fixture);
+  assert!(!terminal.finish().success(), "{}", terminal.text());
+  assert!(
+    terminal.text().contains("run ctlup migrate"),
+    "{}",
+    terminal.text()
+  );
+  for marker in ["count", "bootstrap", "preflight", "upload", "inspect"] {
+    assert!(!fixture.0.join(marker).exists(), "unexpected {marker}");
+  }
+  assert_eq!(fs::read_link(account.join("current")).unwrap(), current);
+  for (name, bytes) in old_payloads {
+    assert_eq!(fs::read(legacy.join(name)).unwrap(), bytes);
+  }
+  assert!(!account.join("catalog.json").exists());
+  assert!(!account.join("installs").exists());
+  assert_eq!(
+    fs::read(fixture.0.join("hosts.json")).unwrap(),
+    original_hosts
+  );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

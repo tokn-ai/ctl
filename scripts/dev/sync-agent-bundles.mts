@@ -13,6 +13,7 @@ import { join, resolve } from "node:path";
 import { maxAgentManifestBytes, parseAgentBundleSet, readAgentFile, readWindowsAgentBundleSet, verifyAgentBundleTarget, windowsAgentManifestName, windowsAgentTarget,
   type AgentBundleSet } from "../shared/agent-bundle.mts";
 import { updaterBinaryName, updaterManifestName, verifyUpdaterTarget } from "../shared/updater-bundle.mts";
+import { buildInfoName, readBuildInfo } from "../shared/build-info.mts";
 
 const WORKFLOW = "bundles.yml";
 const ARTIFACT = "ctl-agent-bundle-set";
@@ -161,6 +162,7 @@ async function readBundleSet(
     { app_version: appVersion, ...(expectedRevision ? { git_revision: expectedRevision } : {}) },
   );
   await verifyBundleSet(directory, manifest);
+  await readBuildInfo(directory, manifest);
   return manifest;
 }
 
@@ -201,6 +203,10 @@ async function checkBundles(repoRoot: string): Promise<void> {
 
 function installBundleSet(source: string, destination: string, manifest: BundleSet, filename: string): void {
   mkdirSync(destination, { recursive: true });
+  if (filename === BUNDLE_SET_FILE) {
+    if (existsSync(join(source, buildInfoName))) copyFileSync(join(source, buildInfoName), join(destination, buildInfoName));
+    else rmSync(join(destination, buildInfoName), { force: true });
+  }
   for (const [target, { archive }] of Object.entries(manifest.targets)) {
     copyFileSync(join(source, archive), join(destination, archive));
     copyFileSync(join(source, `${archive}.sha256`), join(destination, `${archive}.sha256`));

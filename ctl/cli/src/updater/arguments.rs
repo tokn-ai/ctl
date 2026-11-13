@@ -37,8 +37,23 @@ pub(super) enum Command {
     #[command(subcommand)]
     command: AppCommand,
   },
+  /// Manage complete runtime bundles for individual targets and channels.
+  Component {
+    #[command(subcommand)]
+    command: ComponentCommand,
+  },
   /// Build and install one complete native development build from a checkout.
   Dev(DevelopmentArguments),
+  /// Show installed builds, channels and the active runtime without starting services.
+  Show {
+    #[arg(long)]
+    json: bool,
+  },
+  /// Adopt existing complete builds into the channel catalog once.
+  Migrate {
+    #[arg(long)]
+    json: bool,
+  },
   /// Show the active installation and rollback candidate without starting services.
   Status {
     #[arg(long)]
@@ -58,18 +73,69 @@ pub(super) enum Command {
   },
   /// Browse published releases and manage pull request builds.
   Release(ReleaseArguments),
-  /// Remove unused builds, retaining active, previous and running installations.
+  /// Remove unused builds, retaining channel targets, rollback and running builds.
   Prune {
     #[arg(long)]
     json: bool,
   },
   #[command(hide = true)]
-  InstallArchive,
+  InstallArchive {
+    #[arg(long, hide = true)]
+    origin_hex: Option<String>,
+  },
   #[command(hide = true)]
-  ActivateInstalled { bundle_id: String },
+  ActivateInstalled {
+    bundle_id: String,
+    #[arg(long, hide = true)]
+    origin_hex: Option<String>,
+  },
+  #[command(hide = true)]
+  CatalogJson,
   #[cfg(windows)]
   #[command(hide = true)]
   UpdaterDigest,
+}
+
+#[derive(Debug, Subcommand)]
+pub(super) enum ComponentCommand {
+  /// List available target components with installed markers.
+  List {
+    /// Filter installed provenance; stable and nightly also support --available.
+    #[arg(long)]
+    channel: Option<String>,
+    /// Show only installed targets without accessing the network.
+    #[arg(long, conflicts_with = "available")]
+    installed: bool,
+    /// Check the channel's current publication (the default).
+    #[arg(long)]
+    available: bool,
+    #[arg(long)]
+    json: bool,
+  },
+  /// Install bundle-<target> components without changing active commands.
+  Add {
+    #[arg(required = true, num_args = 1.., value_delimiter = ',')]
+    targets: Vec<String>,
+    #[arg(long, value_enum, conflicts_with_all = ["pr", "from"])]
+    channel: Option<crate::components::Channel>,
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..), conflicts_with = "from")]
+    pr: Option<u64>,
+    /// An explicit offline bundle set or complete build directory.
+    #[arg(long)]
+    from: Option<PathBuf>,
+    #[arg(long)]
+    json: bool,
+  },
+  /// Remove target registrations while preserving rollback and running builds.
+  Remove {
+    #[arg(required = true, num_args = 1.., value_delimiter = ',')]
+    targets: Vec<String>,
+    /// Installed provenance, such as stable, nightly, local, provided, or pr-123.
+    #[arg(long)]
+    channel: Option<String>,
+    #[arg(long)]
+    json: bool,
+  },
 }
 
 #[derive(Debug, Subcommand)]
@@ -194,6 +260,143 @@ pub(super) struct DevelopmentArguments {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn show_and_logical_component_names_have_separate_commands() {
+    let show = Arguments::try_parse_from(["ctlup", "--host", "work", "show", "--json"]).unwrap();
+    assert_eq!(show.host.as_deref(), Some("work"));
+    assert!(matches!(show.command, Command::Show { json: true }));
+    let components = Arguments::try_parse_from(["ctlup", "component", "list"]).unwrap();
+    assert!(matches!(
+      components.command,
+      Command::Component {
+        command: ComponentCommand::List {
+          installed: false,
+          available: false,
+          ..
+        }
+      }
+    ));
+    for operation in ["add", "remove"] {
+      assert!(
+        Arguments::try_parse_from([
+          "ctlup",
+          "component",
+          operation,
+          "bundle-aarch64-apple-darwin",
+          "--channel",
+          "nightly",
+        ])
+        .is_ok()
+      );
+    }
+  }
+
+  #[test]
+  fn catalog_migration_is_an_explicit_local_command() {
+    let args = Arguments::try_parse_from(["ctlup", "migrate", "--json"]).unwrap();
+    assert!(matches!(args.command, Command::Migrate { json: true }));
+    assert!(Arguments::try_parse_from(["ctlup", "show", "--migrate"]).is_err());
+  }
+
+  #[test]
+  fn complete_target_components_accept_channels_and_explicit_pr_sources() {
+    let args = Arguments::try_parse_from([
+      "ctlup",
+      "component",
+      "add",
+      "x86_64-unknown-linux-musl,aarch64-unknown-linux-musl",
+      "--channel",
+      "stable",
+      "--json",
+    ])
+    .unwrap();
+    assert!(
+      matches!(args.command, Command::Component { command: ComponentCommand::Add {
+      targets, channel: Some(crate::components::Channel::Stable), pr: None, from: None, json: true,
+    }} if targets == ["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"])
+    );
+    let args = Arguments::try_parse_from([
+      "ctlup",
+      "component",
+      "add",
+      "x86_64-pc-windows-msvc",
+      "--pr",
+      "123",
+    ])
+    .unwrap();
+    assert!(matches!(
+      args.command,
+      Command::Component {
+        command: ComponentCommand::Add { pr: Some(123), .. }
+      }
+    ));
+    for flags in [
+      vec!["component", "add"],
+      vec![
+        "component",
+        "add",
+        "x86_64-unknown-linux-musl",
+        "--pr",
+        "1",
+        "--channel",
+        "stable",
+      ],
+      vec![
+        "component",
+        "add",
+        "x86_64-unknown-linux-musl",
+        "--from",
+        "/bundle",
+        "--channel",
+        "nightly",
+      ],
+      vec!["component", "list", "--available", "--installed"],
+    ] {
+      assert!(Arguments::try_parse_from([vec!["ctlup"], flags].concat()).is_err());
+    }
+  }
+
+  #[test]
+  fn catalog_inspection_is_read_only_and_origin_flags_are_opt_in() {
+    let args = Arguments::try_parse_from(["ctlup", "catalog-json"]).unwrap();
+    assert!(matches!(args.command, Command::CatalogJson));
+    let args = Arguments::try_parse_from(["ctlup", "install-archive"]).unwrap();
+    assert!(matches!(
+      args.command,
+      Command::InstallArchive { origin_hex: None }
+    ));
+    let args = Arguments::try_parse_from([
+      "ctlup",
+      "activate-installed",
+      "build",
+      "--origin-hex",
+      "7b7d",
+    ])
+    .unwrap();
+    assert!(matches!(
+      args.command,
+      Command::ActivateInstalled {
+        origin_hex: Some(_),
+        ..
+      }
+    ));
+    let args = Arguments::try_parse_from([
+      "ctlup",
+      "component",
+      "list",
+      "--channel",
+      "pr-123",
+      "--installed",
+      "--json",
+    ])
+    .unwrap();
+    assert!(
+      matches!(args.command, Command::Component { command: ComponentCommand::List {
+      channel: Some(channel), installed: true, available: false, json: true,
+    }} if channel == "pr-123")
+    );
+  }
 
   #[test]
   fn app_install_and_update_accept_a_local_build_or_a_publication_channel() {

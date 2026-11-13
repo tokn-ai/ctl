@@ -5,8 +5,8 @@ import { bundleRoot, validatedComponentSet, type BundleChannel } from "./bundle-
 import { validateAgentIdentity, type AgentBundleIdentity } from "../shared/agent-bundle.mts";
 
 export const siteMarker = "ctl-bundle-pages";
-export const nightlyRetention = 5;
-const stableRetention = 2;
+export const nightlyRetention = 1;
+const maximumCatalogPublications = 64;
 const maximumSiteBytes = 900 * 1024 * 1024;
 export const catalogChannels = ["dev", "nightly", "stable"] as const;
 type CatalogChannel = (typeof catalogChannels)[number];
@@ -54,7 +54,7 @@ export function parseBundleCatalog(bytes: Buffer): BundleCatalog {
   if (bytes.length > 64 * 1024) throw new Error("Pages catalog exceeds its size limit");
   const value: unknown = JSON.parse(bytes.toString("utf8"));
   if (!object(value) || value.schema_version !== 1 || value.site !== siteMarker || !Number.isSafeInteger(value.generation) || (value.generation as number) < 1 ||
-    !Array.isArray(value.publications) || value.publications.length > nightlyRetention + stableRetention || !object(value.channels) ||
+    !Array.isArray(value.publications) || value.publications.length > maximumCatalogPublications || !object(value.channels) ||
     Object.keys(value.channels).some((key) => !catalogChannels.some((channel) => channel === key))) throw new Error("Existing Pages site is not a supported managed bundle site");
   const seen = new Set<string>();
   for (const publication of value.publications) {
@@ -160,15 +160,11 @@ export async function stageBundlePages(publication: Publication, incoming: strin
   const { dev: legacy_dev, ...channels } = catalog.channels;
   if (legacy_dev && !channels.nightly) channels.nightly = legacy_dev;
   if (promote) channels[publication.channel] = publication.publication_id;
-  const pinned_stable = retained.find((entry) => entry.publication_id === channels.stable);
-  const stable = retained.filter((entry) => entry.channel === "stable" && entry !== pinned_stable)
-    .sort((a, b) => b.run_number - a.run_number || b.run_attempt - a.run_attempt).slice(0, stableRetention - Number(!!pinned_stable));
-  if (pinned_stable) stable.unshift(pinned_stable);
   catalog = { ...catalog, generation: catalog.generation + 1, channels,
-    publications: [
-      ...retained.filter((entry) => entry.channel === "nightly").sort((a, b) => newer(b, a)).slice(0, nightlyRetention),
-      ...stable,
-    ] };
+    publications: [channels.nightly, channels.stable].flatMap((id) => {
+      const entry = retained.find((entry) => entry.publication_id === id);
+      return entry ? [entry] : [];
+    }) };
   if (!catalog.publications.includes(publication)) return false;
   // Stage into a fresh sibling directory. Never mutate the restored snapshot.
   if (await lstat(output).then(() => true, (error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return false; throw error; })) throw new Error("Pages output directory already exists");
@@ -196,15 +192,8 @@ export async function stageBundlePages(publication: Publication, incoming: strin
       catalog.channels.stable && '<a href="bundles/channels/stable.json">Stable channel</a>',
     ].filter(Boolean).join(" · ");
     await writeFile(join(output, "index.html"), `<!-- ${siteMarker} --><!doctype html><title>ctl component bundles</title><h1>ctl component bundles</h1><p>${links}</p><p>Channel documents reference verified bundle sets and downloadable archives.</p>\n`);
-    // Five Nightly generations are an upper bound. Preserve the channel heads
-    // and the newest other tag before spending space on older Nightly builds.
-    while (await regularTree(output) > maximum_bytes) {
-      const evicted = catalog.publications.filter((entry) => entry.channel === "nightly" && entry.publication_id !== catalog.channels.nightly)
-        .sort((left, right) => newer(left, right))[0];
-      if (!evicted) throw new Error("Pinned bundle publications exceed the Pages safety limit (900 MiB in CI)");
-      await rm(join(sets, evicted.publication_id), { recursive: true, force: true });
-      catalog = { ...catalog, publications: catalog.publications.filter((entry) => entry !== evicted) };
-      await writeFile(join(output, "bundles/catalog.json"), `${JSON.stringify(catalog, null, 2)}\n`);
+    if (await regularTree(output) > maximum_bytes) {
+      throw new Error("Pinned bundle publications exceed the Pages safety limit (900 MiB in CI)");
     }
     return true;
   } catch (error) {

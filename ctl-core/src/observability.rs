@@ -251,6 +251,18 @@ fn run_id() -> Uuid {
 static STORE: OnceLock<Option<Store>> = OnceLock::new();
 static WARNED: AtomicBool = AtomicBool::new(false);
 
+#[cfg(any(test, feature = "test-fixtures"))]
+pub(crate) fn initialize_fixture_store(directory: std::path::PathBuf) -> io::Result<()> {
+  STORE.set(Some(Store::new(directory))).map_err(|_| {
+    io::Error::new(
+      io::ErrorKind::AlreadyExists,
+      "fixture history was already initialized",
+    )
+  })?;
+  initialize();
+  Ok(())
+}
+
 /// Enable recording in a ctld entry point. Library tests do not initialize it.
 pub fn initialize() {
   initialize_component(Component::Ctld);

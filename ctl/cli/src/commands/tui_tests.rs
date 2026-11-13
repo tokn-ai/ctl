@@ -431,7 +431,9 @@ async fn retry_blocked_terminal(tui: &mut Tui, use_picker: bool) -> Result<()> {
     tui.send(b"\x02s")?;
     tui
       .wait_screen("session picker for explicit reconnect", |screen| {
-        screen.contains("broker-reconnect")
+        screen.contains("Sessions —")
+          && screen.contains("Enter opens")
+          && screen.contains("broker-reconnect")
       })
       .await?;
   }
@@ -456,18 +458,7 @@ async fn terminal_ownership_disables_broker_prompts_through_repeated_reconnects(
   let proxy = TestProxy::start(&daemon)?;
   let socket = daemon.directory.join("broker.sock");
   let broker = Broker::start(&socket)?;
-  let mut command = CommandBuilder::new(std::env::current_exe()?);
-  command.args(["--ignored", "--exact", CHILD_TEST, "--nocapture"]);
-  command.env_clear();
-  command.env("HOME", daemon.directory.join("home"));
-  command.env("PATH", "/usr/bin:/bin");
-  command.env("TERM", "xterm-256color");
-  command.env("LANG", "C.UTF-8");
-  command.env("CTLD_SOCKET_PATH", &socket);
-  command.env("CTL_TUI_TEST_SOCKET_PATH", &proxy.socket);
-  command.env("CTL_TUI_TEST_SESSION", &session);
-  command.cwd(&daemon.directory);
-  let mut tui = Tui::spawn(command, 120, 13)?;
+  let mut tui = broker_terminal(&daemon, &proxy, &socket, &session)?;
   tui
     .wait_screen("initial shell and connected footer", |screen| {
       screen.contains("shell:ready") && footer(screen).starts_with(" connected |")
@@ -494,10 +485,17 @@ async fn terminal_ownership_disables_broker_prompts_through_repeated_reconnects(
     tui.send(b"\x02?")?;
     tui
       .wait_screen("prefix help while disconnected", |screen| {
-        screen.contains("Commands") || screen.contains("commands") && screen.contains("detach")
+        screen.contains("Commands after") && screen.contains("any key closes help")
       })
       .await?;
     tui.send(b"\x1b")?;
+    tui
+      .wait_screen("disconnected terminal after closing help", |screen| {
+        !screen.contains("Commands after")
+          && footer(screen).contains("Enter to reconnect")
+          && screen.contains("shell:ready")
+      })
+      .await?;
     // Authentication is nonretryable: periodic refresh and pane maintenance
     // must stop opening broker sockets until an explicit retry.
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -508,7 +506,17 @@ async fn terminal_ownership_disables_broker_prompts_through_repeated_reconnects(
     proxy.resume();
     // Retain session-picker coverage, then reconnect the same view with Enter.
     retry_blocked_terminal(&mut tui, cycle == 0).await?;
-    proxy.wait_attachments(attachments + 1).await?;
+    proxy
+      .wait_attachments(attachments + 1)
+      .await
+      .map_err(|error| {
+        format!(
+          "reconnect cycle {cycle}: {error}; interactive requests {}, authentication checks {}\n{}",
+          broker.observations.interactive.load(Ordering::Acquire),
+          broker.observations.checks.load(Ordering::Acquire),
+          tui.screen().diagnostic(),
+        )
+      })?;
     tui
       .wait_screen("connected screen after cancelling prompts", |screen| {
         footer(screen).starts_with(" connected |")

@@ -11,6 +11,19 @@ use tokio::sync::{Mutex, MutexGuard};
 
 static PROCESSES: Mutex<()> = Mutex::const_new(());
 
+/// Initialize observability with an isolated history store in a fixture child.
+///
+/// Windows resolves home through the OS profile API, so changing a child's
+/// `HOME` cannot isolate the production store there. This opt-in test helper
+/// selects the fixture store before ordinary recorder initialization.
+///
+/// # Errors
+/// Returns an error when the recorder's store has already been initialized.
+#[cfg(feature = "observability")]
+pub fn initialize_history(directory: impl Into<std::path::PathBuf>) -> io::Result<()> {
+  crate::observability::initialize_fixture_store(directory.into())
+}
+
 /// Coordinates executable writes and subprocess lifetimes in one test process.
 pub struct ProcessGuard {
   _guard: MutexGuard<'static, ()>,
@@ -181,5 +194,60 @@ mod tests {
       .output()
       .unwrap_err();
     assert_eq!(error.raw_os_error(), Some(26), "{error}");
+  }
+}
+
+#[cfg(all(test, feature = "observability"))]
+mod history_tests {
+  use super::*;
+  use crate::observability::{Context, Event, Level, Outcome, Store, Stream};
+
+  #[test]
+  fn isolated_history_child() {
+    let Some(directory) = std::env::var_os("CTL_ISOLATED_HISTORY_FIXTURE") else {
+      return;
+    };
+    initialize_history(std::path::PathBuf::from(&directory)).unwrap();
+    assert_eq!(
+      initialize_history(std::path::PathBuf::from(directory))
+        .unwrap_err()
+        .kind(),
+      io::ErrorKind::AlreadyExists
+    );
+    crate::observability::diagnostic_event(
+      "781008b0-0297-4439-b9ad-4c560dc18259",
+      Event::HelperRequest,
+      Level::Info,
+      Context::default(),
+      Outcome::Succeeded,
+      None,
+      None,
+    );
+  }
+
+  #[test]
+  fn fixture_history_is_explicit_and_cannot_be_reinitialized() {
+    let _guard = ProcessGuard::acquire_blocking();
+    let directory =
+      std::env::temp_dir().join(format!("ctl-history-fixture-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&directory).unwrap();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+      .args([
+        "--exact",
+        "test_fixtures::history_tests::isolated_history_child",
+      ])
+      .env("CTL_ISOLATED_HISTORY_FIXTURE", directory.join("history"))
+      .env_remove("CTL_LOG_LEVEL")
+      .output()
+      .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert!(output.stderr.is_empty(), "{output:?}");
+    let history = Store::new(directory.join("history"))
+      .read(Stream::Logs, 10, false)
+      .unwrap();
+    assert!(history.complete);
+    assert_eq!(history.records.len(), 1);
+    assert_eq!(history.records[0].event, Event::HelperRequest);
+    std::fs::remove_dir_all(directory).unwrap();
   }
 }

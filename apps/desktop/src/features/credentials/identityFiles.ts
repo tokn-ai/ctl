@@ -22,10 +22,18 @@ export function identityPassphraseLabel(file: IdentityFile): string {
   }[file.passphrase_state];
 }
 
+function identityErrorCode(failure: unknown): string {
+  const candidate = typeof failure === "object" && failure !== null && "code" in failure ? failure.code : failure;
+  return typeof candidate === "string" ? candidate : "";
+}
+
+export function isIdentityPassphraseError(failure: unknown): boolean {
+  return identityErrorCode(failure) === "identity_unlock_failed";
+}
+
 /** Only known codes are rendered; backend error text may contain the submitted secret. */
 export function identityMutationError(failure: unknown, action: "save" | "forget" = "save"): string {
-  const candidate = typeof failure === "object" && failure !== null && "code" in failure ? failure.code : failure;
-  const code = typeof candidate === "string" ? candidate : "";
+  const code = identityErrorCode(failure);
   const messages: Record<string, string> = {
     identity_invalid_request: "The identity file request is invalid. Refresh and try again.",
     identity_file_changed: "The identity file changed. Refresh and try again with the current file.",

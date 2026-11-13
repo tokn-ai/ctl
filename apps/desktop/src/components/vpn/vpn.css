@@ -153,19 +153,12 @@
   margin: 0 0 8px;
 }
 
-.vpn-error {
-  margin: 8px 12px;
-  padding: 8px;
-  overflow-wrap: anywhere;
+.vpn-editor-form .vpn-field-error {
   color: var(--danger);
-  font-size: 12px;
-  line-height: 1.5;
-  border-left: 2px solid var(--danger);
-  background: color-mix(in srgb, var(--danger) 7%, var(--surface-1));
 }
 
-.vpn-connection > .vpn-error {
-  margin: 0;
+.vpn-sidebar-body > .inline-feedback {
+  margin: 8px 12px;
 }
 
 .vpn-loading {
@@ -251,6 +244,10 @@
   border-color: var(--accent-strong);
 }
 
+.vpn-editor-form input[aria-invalid="true"] {
+  border-color: var(--danger);
+}
+
 .vpn-editor-form label small,
 .vpn-editor-note {
   margin: 0;
@@ -261,10 +258,6 @@
 
 .vpn-editor .vpn-advanced-toggle {
   align-self: flex-start;
-}
-
-.vpn-editor .vpn-error {
-  margin: 0;
 }
 
 .vpn-editor-actions {

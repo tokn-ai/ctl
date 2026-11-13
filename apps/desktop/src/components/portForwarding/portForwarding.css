@@ -155,9 +155,12 @@
   color: var(--warning);
 }
 
-.port-sidebar .port-sidebar-status.error,
-.port-sidebar-error {
+.port-sidebar .port-sidebar-status.error {
   color: var(--danger);
+}
+
+.port-sidebar-group > .inline-feedback {
+  margin: 8px 12px;
 }
 
 .port-sidebar-toggle {
@@ -173,16 +176,6 @@
 .port-sidebar button:focus-visible {
   outline: 1px solid var(--accent-strong);
   outline-offset: -1px;
-}
-
-.port-sidebar-error {
-  margin: 0 12px 6px;
-  padding: 7px 8px;
-  overflow-wrap: anywhere;
-  font-size: 12px;
-  line-height: 1.5;
-  border-left: 2px solid var(--danger);
-  background: color-mix(in srgb, var(--danger) 7%, var(--surface-1));
 }
 
 .port-sidebar-footer {
@@ -340,8 +333,6 @@
   font-size: 12px;
 }
 
-.port-forward-dialog .remote-listener-message.error,
-.port-forward-dialog .remote-listener-message.warning,
 .port-forward-dialog .port-forward-form small.unavailable {
   color: var(--warning);
 }

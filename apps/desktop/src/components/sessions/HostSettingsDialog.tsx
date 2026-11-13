@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { VpnConnection, WorkspaceConnectionMethod, WorkspaceHost } from "../../lib/types";
 import { QuickInputFrame } from "../commands/QuickInputFrame";
+import { InlineFeedback } from "../feedback/InlineFeedback";
 import { Icon } from "../ui/Icon";
 import "./hostSettings.css";
 
@@ -169,7 +170,7 @@ export function HostSettingsDialog({ host, vpn_connections = [], onSave, onAddMe
             </button>
           </> : <button type="button" className="host-settings-remove" disabled={saving} onClick={() => setConfirmRemove(true)}>Remove host…</button>}
         </section> : null}
-        {error ? <p className="quick-input-error" role="alert">{error}</p> : null}
+        {error ? <InlineFeedback>{error}</InlineFeedback> : null}
       </div>
       <footer className="host-settings-actions">
         {on_update_components ? <button type="button" onClick={on_update_components} disabled={saving || dirty || unavailable}>Update components…</button> : null}

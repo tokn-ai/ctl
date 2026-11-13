@@ -4,6 +4,8 @@ import { errorMessage } from "../../lib/errors";
 import { vpnNeedsSignIn, vpnRuntimeId } from "../../features/vpn/status";
 import type { VpnConnection, VpnState, VpnStatus } from "../../lib/types";
 import { Icon } from "../ui/Icon";
+import { InlineFeedback } from "../feedback/InlineFeedback";
+import { useNotificationEnvironment } from "../../features/notifications/NotificationContext";
 
 interface Props {
   connection: VpnConnection | null;
@@ -12,8 +14,8 @@ interface Props {
 }
 
 export function VpnConnectionItem({ connection, runtime, model }: Props) {
+  const notifications = useNotificationEnvironment()?.store;
   const [copied_endpoint, setCopiedEndpoint] = useState<string | null>(null);
-  const [copy_error, setCopyError] = useState<string | null>(null);
   const vpn_id = runtime ? vpnRuntimeId(runtime) : connection?.connection_id ?? "legacy";
   const uncertain = model.uncertain_ids.has(vpn_id) || runtime?.status_unavailable === true;
   const action = model.actions.get(vpn_id);
@@ -45,7 +47,6 @@ export function VpnConnectionItem({ connection, runtime, model }: Props) {
 
   useEffect(() => {
     setCopiedEndpoint(null);
-    setCopyError(null);
   }, [endpoint]);
 
   async function copyEndpoint() {
@@ -54,9 +55,11 @@ export function VpnConnectionItem({ connection, runtime, model }: Props) {
       if (!navigator.clipboard?.writeText) throw new Error("Clipboard access is unavailable.");
       await navigator.clipboard.writeText(endpoint);
       setCopiedEndpoint(endpoint);
-      setCopyError(null);
     } catch (failure) {
-      setCopyError(errorMessage(failure));
+      notifications?.notify(`vpn:copy:${vpn_id}`, {
+        severity: "error", title: "Could not copy SOCKS endpoint", source: "VPN",
+        message: `${name}: ${errorMessage(failure)}`,
+      });
     }
   }
 
@@ -103,9 +106,7 @@ export function VpnConnectionItem({ connection, runtime, model }: Props) {
       {needs_sign_in && !stale ? <small>Finish signing in with your browser. The login is kept for future connections.</small> : null}
       {runtime?.message ? <small>{runtime.message}</small> : null}
       {connection && !provider_supported && model.status_loaded ? <small>Update ctld to connect with {tailscale ? "Tailscale" : "OpenConnect"}.</small> : null}
-      {[action_error, copy_error].filter(Boolean).map((message, index) => (
-        <p className="vpn-error" role="alert" key={`${index}-${message}`}>{message}</p>
-      ))}
+      {action_error ? <InlineFeedback>{action_error}</InlineFeedback> : null}
       <div className="vpn-connection-actions">
         {needs_sign_in ? <button
           type="button"

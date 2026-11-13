@@ -2,10 +2,11 @@ import { useEffect, useRef, useState } from "react";
 import type { TaskDefinition, SavedTaskDefinition, TaskDefinitionScope, TaskDefinitionDraft } from "../../lib/types";
 import type { useWorkspace } from "../workspace/useWorkspace";
 import { generateTaskName } from "./taskName";
-import { sameDefinition, validateDefinition } from "./taskModel";
+import { sameDefinition, definitionValidationError, TaskDefinitionValidationError } from "./taskModel";
 
 import { parseCommandLine, formatCommandLine } from "./commandLine";
 import { definitionScopeKey, type TaskDefinitions } from "./useTaskDefinitions";
+import { persistTaskWorkspace } from "./taskWorkspacePersistence";
 
 type Workspace = ReturnType<typeof useWorkspace>;
 
@@ -154,16 +155,18 @@ export function useTaskEditor(workspace: Workspace, catalog: TaskDefinitions) {
         ? draft.definition.name
         : generateTaskName(draft.definition),
     };
-    const invalid = draft.command_error ?? validateDefinition(definition);
-    if (invalid) throw new Error(invalid);
+    const invalid = draft.command_error
+      ? new TaskDefinitionValidationError("command_line", draft.command_line, draft.command_error)
+      : definitionValidationError(definition);
+    if (invalid) throw invalid;
     if (definition.name !== draft.definition.name) edit(definition);
     // Persist the draft first so a catalog or workspace write failure remains recoverable.
-    await workspace.persist();
+    await persistTaskWorkspace(workspace);
     const value = await catalog.save(scope, definitionId, stored?.base_revision ?? null, definition);
     workspace.update("task_drafts", (drafts) =>
       drafts.filter((item) => item.definition_id !== definitionId || definitionScopeKey(item.scope) !== definitionScopeKey(scope)),
     );
-    await workspace.persist();
+    await persistTaskWorkspace(workspace);
     return value;
   }
 
@@ -173,7 +176,7 @@ export function useTaskEditor(workspace: Workspace, catalog: TaskDefinitions) {
     const snapshot = latest.definitions.find((item) => item.definition_id === definitionId);
     if (!snapshot) throw new Error("The saved definition no longer exists. Your draft has been kept.");
     replaceDraft({ definition_id: definitionId, definition: snapshot.definition, scope, base_revision: snapshot.revision });
-    await workspace.persist();
+    await persistTaskWorkspace(workspace);
   }
 
   function discard(id: string, source: TaskDefinitionScope = scope) {
@@ -184,12 +187,15 @@ export function useTaskEditor(workspace: Workspace, catalog: TaskDefinitions) {
   }
 
   return {
+    owner: selection,
+    isCurrent: () => selectionRef.current === selection,
     definitionId,
     saved,
     draft,
     scope,
     conflict,
     reviewRequired,
+    catalog_error: catalog.error_for(scope),
     reload,
     open,
     create,

@@ -2,6 +2,7 @@ import { ControlPopover } from "../ui/ControlPopover";
 import { Icon } from "../ui/Icon";
 import type { AttachmentViewState } from "../../lib/types";
 import type { ResizeControlStatus } from "../../features/attachment/componentActions";
+import { InlineFeedback } from "../feedback/InlineFeedback";
 
 interface TerminalControlsProps {
   state: AttachmentViewState;
@@ -25,6 +26,7 @@ export function TerminalControls({
   const resizeOwned = resize_control_status === "owned";
   const resizeActive = state.resize_with_window && resizeOwned;
   const resizeAvailable = resize_control_status === "available";
+  const layout_message = state.message_kind === "layout" ? state.message : null;
   const layout_summary = !attached || resize_control_status === "unavailable" ? "Unavailable"
     : resize_control_status === "held_elsewhere" ? "Held elsewhere"
     : resizeActive ? "Auto resize" : state.resize_with_window ? "Waiting for control" : "Fixed size";
@@ -40,6 +42,7 @@ export function TerminalControls({
       ) : null}
       <ControlPopover label={`Layout · ${layout_summary}`} trigger_content={<Icon name="monitor" size={14} />}>
         <span aria-label="Resize control status">Resize: {resizeLabel}</span>
+        {layout_message ? <InlineFeedback severity="warning">{layout_message}</InlineFeedback> : null}
         <button
           type="button"
           onClick={() => onRequestResizeControl(!resizeOwned)}
@@ -66,6 +69,7 @@ export function TerminalControls({
           {state.resize_with_window ? "Auto resize" : "Fixed size"}
         </button>
       </ControlPopover>
+      {layout_message ? <span className="status-item status-tone-warning" role="status" title={layout_message}>Layout needs attention</span> : null}
     </div>
   );
 }

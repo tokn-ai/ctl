@@ -14,6 +14,17 @@ function props() {
 }
 
 describe("terminal toolbar resize controls", () => {
+  it("keeps layout feedback with its controls and leaves unrelated session notices out", () => {
+    const actions = props();
+    const mounted = render(<TerminalControls {...actions} state={{ ...actions.state, message_kind: "layout", message: "Take resize control." }} />);
+    expect(screen.getByRole("status").textContent).toBe("Layout needs attention");
+    fireEvent.click(screen.getByRole("button", { name: /^Layout/ }));
+    expect(screen.getByText("Take resize control.")).toBeTruthy();
+    mounted.rerender(<TerminalControls {...actions} state={{ ...actions.state, message_kind: null, message: "Unrelated session warning" }} />);
+    expect(screen.queryByText("Unrelated session warning")).toBeNull();
+    expect(screen.queryByText("Layout needs attention")).toBeNull();
+  });
+
   it("offers manual resize control independently from fixed canvas size", () => {
     const actions = props();
     render(<TerminalControls {...actions} />);

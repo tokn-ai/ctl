@@ -1,9 +1,11 @@
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useId, useRef, useState } from "react";
 import type { TaskWorkspace } from "../../features/tasks/useTaskWorkspace";
 import type { SavedTaskDefinition } from "../../lib/types";
 import { QuickInputFrame } from "../commands/QuickInputFrame";
 import { definitionScopeLabel } from "../../features/tasks/useTaskDefinitions";
 import { Icon } from "../ui/Icon";
+import { InlineFeedback } from "../feedback/InlineFeedback";
+import type { TaskDefinitionField } from "../../features/tasks/taskModel";
 
 export function TaskEditor({
   model,
@@ -15,6 +17,7 @@ export function TaskEditor({
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmReload, setConfirmReload] = useState(false);
   const [instanceName, setInstanceName] = useState<string | null>(null);
+  const feedback_id = useId();
   const previousFocus = useRef(document.activeElement);
   useEffect(
     () => () => {
@@ -29,6 +32,26 @@ export function TaskEditor({
   const draft = model.draft;
   if (!draft) return null;
   const definition = draft.definition;
+  const command_error = draft.command_error;
+  const form_error = model.editor_validation_error ? null : model.editor_error;
+  function fieldError(field: TaskDefinitionField, argument_index?: number) {
+    if (field === "command_line") return command_error;
+    const failure = model.editor_validation_error;
+    if (!failure || failure.field !== field || failure.argument_index !== argument_index) return null;
+    const value = field === "arguments" ? definition.arguments[argument_index ?? -1] : definition[field] ?? "";
+    return value === failure.field_value ? failure.message : null;
+  }
+  function fieldId(field: TaskDefinitionField, argument_index?: number) {
+    return `${feedback_id}-${field}${argument_index === undefined ? "" : `-${argument_index}`}`;
+  }
+  function fieldAttributes(field: TaskDefinitionField, argument_index?: number) {
+    const error = fieldError(field, argument_index);
+    return { "aria-invalid": !!error, "aria-describedby": error ? fieldId(field, argument_index) : undefined };
+  }
+  function fieldFeedback(field: TaskDefinitionField, argument_index?: number) {
+    const error = fieldError(field, argument_index);
+    return error ? <div id={fieldId(field, argument_index)}><InlineFeedback className="task-feedback">{error}</InlineFeedback></div> : null;
+  }
   const saveStatus = model.draftError
     ? "Draft not saved"
     : model.savingDraft
@@ -82,28 +105,26 @@ export function TaskEditor({
                   value={draft.command_line}
                   placeholder='cargo run --bin "api server"'
                   aria-invalid={!!draft.command_error}
-                  aria-describedby="task-command-help"
+                  aria-describedby={`task-command-help${draft.command_error ? ` ${fieldId("command_line")}` : ""}`}
                   onChange={(event) => model.editCommand(event.target.value)}
                 />
                 <small id="task-command-help">
                   POSIX quoting. Runs directly; no shell expansion.
                 </small>
               </label>
-              {draft.command_error ? (
-                <p className="task-inline-error" role="alert">
-                  {draft.command_error}
-                </p>
-              ) : null}
+              {fieldFeedback("command_line")}
               <label>
                 Name
                 <input
                   value={definition.name}
                   placeholder="Optional: command-folder-random word"
+                  {...fieldAttributes("name")}
                   onChange={(event) =>
                     model.edit({ ...definition, name: event.target.value })
                   }
                 />
               </label>
+              {fieldFeedback("name")}
               <div
                 className="task-mode-picker"
                 role="group"
@@ -136,6 +157,7 @@ export function TaskEditor({
                 Executable
                 <input
                   value={definition.program}
+                  {...fieldAttributes("program")}
                   placeholder={
                     definition.execution_mode === "interactive"
                       ? "bash"
@@ -146,39 +168,44 @@ export function TaskEditor({
                   }
                 />
               </label>
+              {fieldFeedback("program")}
               <div className="task-field-label">
                 Arguments <small>One argument per row.</small>
               </div>
               {definition.arguments.map((argument, index) => (
-                <div className="task-argument" key={index}>
-                  <input
-                    aria-label={`Argument ${index + 1}`}
-                    value={argument}
-                    onChange={(event) =>
-                      model.edit({
-                        ...definition,
-                        arguments: definition.arguments.map(
-                          (value, position) =>
-                            position === index ? event.target.value : value,
-                        ),
-                      })
-                    }
-                  />
-                  <button
-                    type="button"
-                    aria-label={`Remove argument ${index + 1}`}
-                    onClick={() =>
-                      model.edit({
-                        ...definition,
-                        arguments: definition.arguments.filter(
-                          (_, position) => index !== position,
-                        ),
-                      })
-                    }
-                  >
-                    <Icon name="close" size={14} />
-                  </button>
-                </div>
+                <Fragment key={index}>
+                  <div className="task-argument">
+                    <input
+                      aria-label={`Argument ${index + 1}`}
+                      value={argument}
+                      {...fieldAttributes("arguments", index)}
+                      onChange={(event) =>
+                        model.edit({
+                          ...definition,
+                          arguments: definition.arguments.map(
+                            (value, position) =>
+                              position === index ? event.target.value : value,
+                          ),
+                        })
+                      }
+                    />
+                    <button
+                      type="button"
+                      aria-label={`Remove argument ${index + 1}`}
+                      onClick={() =>
+                        model.edit({
+                          ...definition,
+                          arguments: definition.arguments.filter(
+                            (_, position) => index !== position,
+                          ),
+                        })
+                      }
+                    >
+                      <Icon name="close" size={14} />
+                    </button>
+                  </div>
+                  {fieldFeedback("arguments", index)}
+                </Fragment>
               ))}
               <button
                 className="task-text-button"
@@ -197,6 +224,7 @@ export function TaskEditor({
                 <input
                   value={definition.working_directory ?? ""}
                   placeholder="Absolute path (optional)"
+                  {...fieldAttributes("working_directory")}
                   onChange={(event) =>
                     model.edit({
                       ...definition,
@@ -205,6 +233,7 @@ export function TaskEditor({
                   }
                 />
               </label>
+              {fieldFeedback("working_directory")}
               <div className="task-form-actions">
                 <span role="status">{saveStatus}</span>
                 <button type="submit">
@@ -220,19 +249,17 @@ export function TaskEditor({
               </div>
             </fieldset>
           </form>
-          {model.error || model.draftError ? (
-            <div className="task-inline-error" role="alert">
-              {model.error ?? model.draftError}
-            </div>
+          {form_error ? (
+            <InlineFeedback className="task-feedback">{form_error}</InlineFeedback>
           ) : null}
           {model.draftConflict || model.draftReviewRequired ? (
-            <div className="task-inline-error" role="alert">
+            <InlineFeedback severity="warning" className="task-feedback">
               {model.draftReviewRequired
                 ? "This recovered draft needs review before replacing a shared definition."
                 : "The shared definition changed outside this editor. Your draft and its original revision are kept."}
-            </div>
+            </InlineFeedback>
           ) : null}
-          {model.draftConflict || model.draftReviewRequired || model.error ? (
+          {model.draftConflict || model.draftReviewRequired ? (
             <div className="task-secondary-actions">
               <button disabled={model.busy} onClick={() => setConfirmReload(true)}>Reload latest definition…</button>
               <button disabled={model.busy} onClick={() => void model.save()}>Retry save</button>
@@ -275,8 +302,9 @@ export function TaskEditor({
               <button
                 disabled={!instanceName.trim() || model.busy}
                 onClick={() => {
-                  void model.run(saved, true, instanceName, draft.scope);
-                  setInstanceName(null);
+                  void model.runFromEditor(saved, instanceName, draft.scope).then((complete) => {
+                    if (complete) setInstanceName(null);
+                  });
                 }}
               >
                 Create and run

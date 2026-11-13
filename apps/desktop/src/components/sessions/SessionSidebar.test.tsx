@@ -47,7 +47,7 @@ const listedOnlySession: SessionSummary = {
 
 const shellState: ShellStateSummary = {
   shell_type: "zsh",
-  cwd: "/Users/clouds/Projects/Tools/ctl/apps/desktop",
+  cwd: "/workspace/project/apps/desktop",
   running_command: "cargo test -p ctmux-app",
   prompt_phase: "running",
   tui_hint: "inline",
@@ -98,6 +98,16 @@ function renderHostConnection(
 afterEach(() => {
   cleanup();
   vi.useRealTimers();
+});
+
+it("keeps a session refresh error beside remembered data with a local retry", async () => {
+  const on_retry = vi.fn();
+  const user = userEvent.setup();
+  renderHostConnection(undefined, { list_error: "Session service unavailable", on_retry });
+  expect(screen.getByRole("alert").textContent).toContain("Showing the last successful check.");
+  expect(screen.getByRole("button", { name: "Shell — first" })).toBeTruthy();
+  await user.click(screen.getByRole("button", { name: "Retry session list" }));
+  expect(on_retry).toHaveBeenCalledOnce();
 });
 
 describe("SessionSidebar", () => {
@@ -633,7 +643,7 @@ describe("SessionSidebar", () => {
     );
 
     const fullTitle =
-      "/Users/clouds/Projects/Tools/ctl/apps/desktop — cargo test -p ctmux-app";
+      "/workspace/project/apps/desktop — cargo test -p ctmux-app";
     expect(markup).toContain(`title="${fullTitle}"`);
     expect(markup).toContain("<strong>…/desktop — …mux-app</strong>");
     expect(markup).toContain(

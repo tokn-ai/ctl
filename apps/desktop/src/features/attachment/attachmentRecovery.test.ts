@@ -117,6 +117,7 @@ describe("attachment recovery", () => {
       "ctl_agent_not_found",
       "ctl_agent_identity_unsupported",
       "ctl_agent_update_required",
+      "windows_remote_agent_setup_required",
       "ctld_protocol_feature_unsupported",
       "ssh_service_capacity",
       "ssh_authentication_failed",
@@ -133,6 +134,18 @@ describe("attachment recovery", () => {
   it("falls back to a checkpoint when a resume cursor is ahead", () => {
     expect(reconnectSequenceAfterError("sequence_ahead", "42")).toBeNull();
     expect(reconnectSequenceAfterError("backend_error", "42")).toBe("42");
+  });
+
+  it("retains Windows setup guidance until the host has been prepared", () => {
+    const state = attachedState({
+      phase: "error", error_code: "windows_remote_agent_setup_required",
+      message: "Install Windows components with ctlup, then reconnect.",
+    });
+    expect(canRecoverAttachmentOnInteraction(state)).toBe(false);
+    expect(interruptedAttachmentState(state)).toMatchObject({
+      phase: "error", error_code: "windows_remote_agent_setup_required",
+      message: state.message,
+    });
   });
 
   it("recovers a lifecycle interruption from a fresh checkpoint", () => {

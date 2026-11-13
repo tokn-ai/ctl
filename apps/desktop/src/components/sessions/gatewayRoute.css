@@ -167,6 +167,10 @@
   gap: 7px;
 }
 
+.gateway-route-dialog > .inline-feedback {
+  margin: 8px 18px;
+}
+
 .gateway-library > header strong,
 .gateway-library-list span {
   flex: 1;
@@ -206,15 +210,6 @@
 .gateway-form > p {
   grid-column: 1 / -1;
   margin: 0;
-}
-
-.gateway-shared-warning {
-  margin: 8px 18px 0;
-  padding: 8px 10px;
-  color: var(--warning);
-  font-size: 11px;
-  border-left: 2px solid var(--warning);
-  background: #2b271c;
 }
 
 .gateway-dialog-actions {

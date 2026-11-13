@@ -71,6 +71,7 @@ export function transitionAttachment(state: AttachmentViewState, event: Attachme
         // Checkpoint/history events decide whether readable history is missing.
         history_loading: event.history_loading ?? false,
         reconnect_sequence: null, resize_with_window: resizing,
+        message_kind: state.resize_control_desired && !response.layout_lease.owned_by_client && !event.layout_request_pending ? "layout" : null,
         message: state.resize_control_desired && !response.layout_lease.owned_by_client && !event.layout_request_pending
           ? resizeControlNotice(response.layout_lease.held)
           : null,
@@ -80,11 +81,11 @@ export function transitionAttachment(state: AttachmentViewState, event: Attachme
       if (state.phase !== "attached") return state;
       return {
       ...offline, phase: "ended", error_code: null, resize_with_window: false, resize_control_desired: false,
-      message: event.exit_code === null ? "Session ended." : `Session ended with exit code ${event.exit_code}.`,
+      message_kind: null, message: event.exit_code === null ? "Session ended." : `Session ended with exit code ${event.exit_code}.`,
     };
     case "failed":
       if (state.phase === "ended" || state.phase === "idle") return state;
-      return { ...offline, phase: "error", error_code: event.code, message: event.message, reconnect_sequence: event.resume_from, history_loading: false };
+      return { ...offline, phase: "error", error_code: event.code, message_kind: null, message: event.message, reconnect_sequence: event.resume_from, history_loading: false };
     case "closed":
       if (state.phase === "ended") return offline;
       if (state.phase !== "attached") return state;
@@ -95,7 +96,7 @@ export function transitionAttachment(state: AttachmentViewState, event: Attachme
         history_loading: event.reason === "session_ended" && state.history_loading,
         resize_with_window: event.reason === "connection_closed" && state.resize_with_window,
         resize_control_desired: event.reason === "connection_closed" && state.resize_control_desired,
-        message: event.reason === "connection_closed" ? "Connection interrupted." : event.reason === "session_ended" ? "Session ended." : null,
+        message_kind: null, message: event.reason === "connection_closed" ? "Connection interrupted." : event.reason === "session_ended" ? "Session ended." : null,
       };
     case "retry_scheduled":
       if (!state.session || !canAutomaticallyRecoverAttachment(state.error_code) ||
@@ -106,7 +107,7 @@ export function transitionAttachment(state: AttachmentViewState, event: Attachme
       return {
         ...offline, phase: "error", error_code: "automatic_reconnect_timeout",
         history_loading: false,
-        message: "Automatic retries stopped. The remote session's current state is unknown. Retry to reconnect.",
+        message_kind: null, message: "Automatic retries stopped. The remote session's current state is unknown. Retry to reconnect.",
       };
   }
 }

@@ -16,6 +16,7 @@ import type {
   VpnStatus,
 } from "../../lib/types";
 import { QuickInputFrame } from "../commands/QuickInputFrame";
+import { InlineFeedback } from "../feedback/InlineFeedback";
 import "./gatewayRoute.css";
 import { SshRemotePlatformSelect } from "./SshRemotePlatformSelect";
 
@@ -281,12 +282,12 @@ export function GatewayRouteDialog({
           <button type="button" onClick={() => setEditing(null)}>Back</button>
         </header>
         {sharedCount > 1 ? (
-          <p className="gateway-shared-warning" role="status">
+          <InlineFeedback severity="warning">
             This gateway is used by {sharedCount} hosts. Saving changes updates every route that references it.
-          </p>
+          </InlineFeedback>
         ) : null}
         <GatewayForm draft={editing} onChange={setEditing} />
-        {error ? <p className="quick-input-error" role="alert">{error}</p> : null}
+        {error ? <InlineFeedback>{error}</InlineFeedback> : null}
         <footer className="gateway-dialog-actions">
           <button type="button" onClick={() => setEditing(null)}>Cancel</button>
           <button type="button" className="button-primary" onClick={saveGateway}>
@@ -426,8 +427,8 @@ export function GatewayRouteDialog({
           </select>
         </label>
         {vpn_loading ? <p role="status">Loading VPN connections…</p> : null}
-        {vpn_error ? <p role="status">Could not load VPN connections: {vpn_error}</p> : null}
-        {missingVpn ? <p className="quick-input-error" role="alert">The saved VPN is unavailable. Choose another connection before saving.</p> : null}
+        {vpn_error ? <InlineFeedback severity="warning">Could not load VPN connections: {vpn_error}</InlineFeedback> : null}
+        {missingVpn ? <InlineFeedback>The saved VPN is unavailable. Choose another connection before saving.</InlineFeedback> : null}
       </div>
       <p className="quick-input-description">
         Add saved hosts, SSH gateways, and VPNs in connection order. Each VPN starts when needed on the preceding SSH host, or on this computer when it is first. VPNs keep running until disconnected.
@@ -656,7 +657,7 @@ export function GatewayRouteDialog({
         </div>
       </section> : null}
 
-      {error ? <p className="quick-input-error" role="alert">{error}</p> : null}
+      {error && !missingVpn ? <InlineFeedback>{error}</InlineFeedback> : null}
       <footer className="gateway-dialog-actions">
         <button type="button" onClick={onClose} disabled={saving}>{closeLabel}</button>
         <button type="button" className="button-primary" onClick={() => void save()} disabled={saving || missingVpn || (requireGateway && route.length === 0)}>
@@ -713,13 +714,13 @@ function RemoteVpnControls({ connection, owner, owner_label }: {
   return <div className="gateway-remote-vpn">
     {checked ? <small>{unavailable || status?.status_unavailable ? "Status unavailable"
       : status && status.state !== "stopped" ? vpnRouteDetail(connection, [status]) : "Stopped"} on {owner_label}</small> : null}
-    {inventory_warnings.length ? <p role="status">Remote VPN inventory is incomplete: {inventory_warnings.join(" ")}</p> : null}
+    {inventory_warnings.length ? <InlineFeedback severity="warning">Remote VPN inventory is incomplete: {inventory_warnings.join(" ")}</InlineFeedback> : null}
     <div className="gateway-route-controls">
       <button type="button" disabled={busy} onClick={() => void perform("status")}>Check VPN status</button>
       {status?.running ? <button type="button" disabled={busy || unavailable || status.status_unavailable} onClick={() => void perform("stop")}>Disconnect VPN</button> : null}
       {vpnNeedsSignIn(status) ? <button type="button" disabled={busy || unavailable} onClick={() => void perform("sign_in")}>Sign in to VPN</button> : null}
     </div>
-    {error ? <p className="quick-input-error" role="alert">{error}</p> : null}
+    {error ? <InlineFeedback>{error}</InlineFeedback> : null}
   </div>;
 }
 

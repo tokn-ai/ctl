@@ -430,7 +430,8 @@ describe("workspace-backed terminal page", () => {
     const original_color = tab.style.getPropertyValue("--host-color");
     fireEvent.click(picker);
     fireEvent.click(screen.getByRole("button", { name: "Blue" }));
-    await screen.findAllByText("Could not save host color");
+    await screen.findByText("Workspace changes are not being saved. Could not save host color");
+    expect(within(screen.getByRole("log", { name: "Notifications" })).queryByRole("article")).toBeNull();
     expect(tab.style.getPropertyValue("--host-color")).toBe(original_color);
   });
 
@@ -669,14 +670,9 @@ describe("workspace-backed terminal page", () => {
     } else {
       retry = await screen.findByRole("button", { name: "Reconnect" });
       expect((retry as HTMLButtonElement).disabled).toBe(false);
-      const bell = await screen.findByRole("button", { name: "Notifications, 1 unread" });
+      expect(screen.getByRole("button", { name: "Notifications" })).toBeTruthy();
       const log = screen.getByRole("log", { name: "Notifications" });
       expect(within(log).queryByRole("article")).toBeNull();
-      fireEvent.click(bell);
-      const history = screen.getByRole("region", { name: "Notification center" });
-      const card = within(history).getByRole("article", { name: "SSH authentication required" });
-      expect(within(card).getByRole("button", { name: "Connect host" })).toBeTruthy();
-      fireEvent.click(within(history).getByRole("button", { name: "Hide notification center" }));
     }
     fireEvent.click(retry);
     await screen.findByRole("dialog", { name: "Connecting to host" });
@@ -1062,7 +1058,8 @@ describe("workspace-backed terminal page", () => {
       },
     );
     fireEvent.click(screen.getByRole("option", { name: /Restart ctl-taskd/ }));
-    await screen.findByText("Restarting ctl-taskd…");
+    await within(screen.getByLabelText("Workspace status")).findByText("Restarting ctl-taskd…");
+    expect(within(screen.getByRole("log", { name: "Notifications" })).queryByRole("article")).toBeNull();
     nativeCommand(COMMAND_IDS.restartTaskDaemon, 2);
     expect(api.restartTaskDaemon).toHaveBeenCalledTimes(1);
     await act(async () => {
@@ -1091,12 +1088,12 @@ describe("workspace-backed terminal page", () => {
     await screen.findByRole("button", { name: "Connect host" });
     nativeCommand(COMMAND_IDS.restartTaskDaemon);
     await screen.findByText("Stop active tasks before restarting ctl-taskd.");
-    fireEvent.click(screen.getByRole("button", { name: "Hide Tasks notification" }));
+    fireEvent.click(screen.getByRole("button", { name: "Hide Could not restart task daemon notification" }));
     expect(screen.queryByText("Stop active tasks before restarting ctl-taskd.")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Notifications, 1 unread" }));
     const center = screen.getByRole("region", { name: "Notification center" });
     expect(within(center).getByText("Stop active tasks before restarting ctl-taskd.")).toBeTruthy();
-    fireEvent.click(within(center).getByRole("button", { name: "Dismiss Tasks notification" }));
+    fireEvent.click(within(center).getByRole("button", { name: "Dismiss Could not restart task daemon notification" }));
     fireEvent.click(screen.getByRole("button", { name: "Hide notification center" }));
     fireEvent.click(screen.getByRole("button", { name: "Sessions" }));
     fireEvent.click(screen.getByRole("button", { name: "Tasks" }));
@@ -3009,14 +3006,16 @@ describe("workspace-backed terminal page", () => {
     api.inspectKnownSessions.mockRejectedValueOnce(new Error("Remote connection unavailable"));
     const refresh = screen.getByRole("button", { name: "Refresh sessions" });
     fireEvent.click(refresh);
-    await screen.findByText("Remote connection unavailable");
+    const sidebar = screen.getByRole("complementary", { name: "ctmux sessions" });
+    await within(sidebar).findByText(/^Remote connection unavailable/);
+    expect(within(screen.getByRole("log", { name: "Notifications" })).queryByRole("article")).toBeNull();
     expect(latest()).toMatchObject({ last_known_terminal_size: terminal_size, last_seen_at_ms });
 
     const earlier = { ...observed, terminal_size: { ...terminal_size, columns: 80 }, last_seen_at_ms: last_seen_at_ms - 60_000 };
     api.inspectKnownSessions.mockResolvedValueOnce([{ session_id: observed.session_id, session: earlier, shell_state: null, error: null }]);
     fireEvent.click(refresh);
     await waitFor(() => expect(api.inspectKnownSessions).toHaveBeenCalledTimes(2));
-    await waitFor(() => expect(screen.queryByText("Remote connection unavailable")).toBeNull());
+    await waitFor(() => expect(within(sidebar).queryByText(/^Remote connection unavailable/)).toBeNull());
     await waitFor(() => expect(api.updateWorkspace.mock.calls.slice(-1)[0]?.[1].sessions[0]).toMatchObject({
       last_known_terminal_size: terminal_size, last_seen_at_ms,
     }));
@@ -3121,8 +3120,9 @@ describe("workspace-backed terminal page", () => {
     expect(lookup_failed.getAttribute("data-connected")).toBe("true");
     expect(lookup_failed.getAttribute("data-tone")).toBe("warning");
     const log = screen.getByRole("log", { name: "Notifications" });
-    expect(within(log).getByText(failure.message)).toBeTruthy();
-    expect(within(log).queryByRole("button", { name: "Connect host" })).toBeNull();
+    expect(within(log).queryByRole("article")).toBeNull();
+    const sidebar = screen.getByRole("complementary", { name: "ctmux sessions" });
+    expect(within(sidebar).getByText(failure.message, { exact: false })).toBeTruthy();
 
     const known = restoreWorkspace(snapshot().document, hostSnapshot().document).sessions[0];
     api.inspectKnownSessions.mockResolvedValueOnce([{
@@ -3130,13 +3130,12 @@ describe("workspace-backed terminal page", () => {
       shell_state: { shell_type: "zsh", cwd: "/work", running_command: null, prompt_phase: "idle", tui_hint: null, revision: "1", observed_sequence: "1" },
       error: null,
     }]);
-    fireEvent.click(within(log).getByRole("button", { name: "Refresh sessions" }));
-    await waitFor(() => expect(within(log).queryByText(failure.message)).toBeNull());
+    fireEvent.click(within(sidebar).getByRole("button", { name: "Retry host check" }));
+    await waitFor(() => expect(within(sidebar).queryByText(failure.message, { exact: false })).toBeNull());
     expect(screen.getByRole("status", { name: "Host connection for test: SSH connected" })).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: /Notifications, .* unread/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Notifications" }));
     const history = screen.getByRole("region", { name: "Notification center" });
-    expect(within(history).getByText(failure.message)).toBeTruthy();
-    expect(within(history).getByText("Resolved")).toBeTruthy();
+    expect(within(history).getByText("No notifications")).toBeTruthy();
     expect(api.probeSshHost).not.toHaveBeenCalled();
     expect(api.disconnectSshHost).not.toHaveBeenCalled();
     expect(api.killSession).not.toHaveBeenCalled();
@@ -3150,8 +3149,10 @@ describe("workspace-backed terminal page", () => {
     render(<TerminalPage />);
     await screen.findByRole("button", { name: "Connect host" });
     fireEvent.click(screen.getByRole("button", { name: "Refresh sessions" }));
-    await screen.findByText("unreachable", { exact: false });
-    const bell = await screen.findByRole("button", { name: "Notifications, 1 unread" });
+    const sidebar = screen.getByRole("complementary", { name: "ctmux sessions" });
+    await within(sidebar).findByText("unreachable", { exact: false });
+    expect(within(sidebar).getByText(/^Authenticate first/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Notifications" })).toBeTruthy();
     const log = screen.getByRole("log", { name: "Notifications" });
     expect(within(log).queryByRole("article")).toBeNull();
     expect(screen.queryByText("missing", { exact: false })).toBeNull();
@@ -3160,10 +3161,7 @@ describe("workspace-backed terminal page", () => {
     expect(api.respondSshPrompt).not.toHaveBeenCalled();
     expect(screen.queryByRole("dialog")).toBeNull();
 
-    fireEvent.click(bell);
-    const history = screen.getByRole("region", { name: "Notification center" });
-    const card = within(history).getByRole("article", { name: "SSH authentication required" });
-    fireEvent.click(within(card).getByRole("button", { name: "Connect host" }));
+    fireEvent.click(screen.getByRole("button", { name: "Connect host" }));
     await waitFor(() => expect(api.probeSshHost).toHaveBeenCalledExactlyOnceWith(
       expect.objectContaining({ kind: "ssh", host_id: "test-id", destination: "test" }),
       expect.any(String),
@@ -3463,5 +3461,10 @@ describe("workspace-backed terminal page", () => {
     expect(api.killSession).not.toHaveBeenCalled();
     expect(attachment.connect).not.toHaveBeenCalled();
     expect(screen.getByRole("button", { name: "Retry saving" })).toBeTruthy();
+    expect(screen.getByText("Workspace changes are not being saved. disk full")).toBeTruthy();
+    const log = screen.getByRole("log", { name: "Notifications" });
+    expect(within(log).getAllByRole("article")).toHaveLength(1);
+    expect(within(log).getByRole("article", { name: "Shell created; workspace entry not saved" })).toBeTruthy();
+    expect(within(log).queryByRole("article", { name: "Workspace" })).toBeNull();
   });
 });

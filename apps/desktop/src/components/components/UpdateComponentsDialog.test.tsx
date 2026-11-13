@@ -135,5 +135,8 @@ it("requires supplied files and does not turn an unavailable saved host into a d
   await user.click(screen.getByRole("checkbox", { name: "local" }));
   await user.click(screen.getByRole("button", { name: "Update" }));
   expect(screen.getByRole("alert").textContent).toBe("Enter a build directory or archive path.");
+  const input = screen.getByRole("textbox", { name: "Build directory or archive" });
+  expect(input.getAttribute("aria-invalid")).toBe("true");
+  expect(document.getElementById(input.getAttribute("aria-describedby")!)?.contains(screen.getByRole("alert"))).toBe(true);
   expect(updateComponents).not.toHaveBeenCalled();
 });

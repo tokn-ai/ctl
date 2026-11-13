@@ -23,8 +23,14 @@ export class NotificationStore {
     return () => { this.listeners.delete(listener); };
   };
 
+  /** A distinct user operation may fail identically to an earlier operation. */
+  notify(source_key: string, input: NotificationInput, options?: { toast?: boolean }): void {
+    this.reported.delete(source_key);
+    this.report(source_key, input, options);
+  }
+
   /** A dismissed error stays dismissed until its source changes or recovers. */
-  report(source_key: string, input: NotificationInput | null, { toast = true }: { toast?: boolean } = {}): void {
+  report(source_key: string, input: NotificationInput | null, { toast = true, preserve_attention = false }: { toast?: boolean; preserve_attention?: boolean } = {}): void {
     if (input === null) {
       this.reported.delete(source_key);
       this.setActions(source_key, []);
@@ -38,6 +44,14 @@ export class NotificationStore {
         this.update({ ...this.state, entries: this.state.entries.map((entry) =>
           entry === previous ? { ...entry, actions: input.actions } : entry) });
       }
+      return;
+    }
+    // A changing retry diagnostic is still the same incident. Keep dismissal,
+    // read state, occurrence count, and popup visibility until proven recovery.
+    if (preserve_attention && this.reported.has(source_key)) {
+      this.reported.set(source_key, signature);
+      if (previous) this.update({ ...this.state, entries: this.state.entries.map((entry) => entry === previous
+        ? { ...entry, ...input, updated_at: this.now() } : entry) });
       return;
     }
     this.reported.delete(source_key);

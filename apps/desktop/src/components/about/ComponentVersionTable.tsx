@@ -3,6 +3,7 @@ import { componentBuildViews, componentHostFailure, componentHostStatuses, group
 import type { ComponentVersionInfo, ComponentVersionRow, ComponentVersionStatus } from "../../lib/types";
 import { Icon } from "../ui/Icon";
 import { ComponentProtocols } from "./ComponentProtocols";
+import { InlineFeedback } from "../feedback/InlineFeedback";
 
 const status_labels: Record<ComponentVersionStatus, string> = {
   current: "Current",
@@ -73,7 +74,7 @@ function ComponentRows({ row, busy_id, restarting, action_error, on_restart, hid
       <div className="about-component-name">
         <strong title={details}>{label}</strong>
         {row.observation === "last_observed" ? <small className="about-muted">Active connection</small> : null}
-        {errors ? <span className="about-row-error" role="alert" title={[probe_error, errors].filter(Boolean).join("\n")}>{errors}</span> : null}
+        {errors ? <div title={[probe_error, errors].filter(Boolean).join("\n")}><InlineFeedback className="about-row-feedback">{errors}</InlineFeedback></div> : null}
       </div>
     </th> : null}
     <td><span className="about-build-state">{view.label}</span><Version info={view.info} absent="Unknown" /></td>
@@ -99,10 +100,11 @@ function ComponentDetails({ group, ...actions }: ActionProps & { group: Componen
 function HostStatus({ group, action_error }: Pick<Props, "action_error"> & { group: ComponentHostGroup }) {
   const statuses = componentHostStatuses(group.rows);
   const failure = componentHostFailure(group.rows);
+  const maintenance_unsupported = group.rows.some((row) => row.error_code === "remote_windows_maintenance_unsupported");
   const has_action_error = action_error && group.rows.some((row) => row.component_id === action_error.component_id);
   return <>
     <div className="about-host-summary">{statuses.map((status) => <span className={`about-version-status about-status-${status.status}`} key={status.label}>{status.label}</span>)}{has_action_error ? <span className="about-version-status about-status-incompatible">Action failed</span> : null}</div>
-    {failure ? <p className="about-host-error" role="alert" title={failure.detail}>{failure.message}</p> : null}
+    {failure ? <div title={failure.detail}><InlineFeedback severity={maintenance_unsupported ? "info" : "error"} className="about-row-feedback">{failure.message}</InlineFeedback></div> : null}
   </>;
 }
 

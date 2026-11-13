@@ -52,10 +52,14 @@ describe("VPN connection editor", () => {
     render(<VpnConnectionEditor connection={{ ...connection, has_password: false }} saving={false} error={null} on_save={on_save} on_close={vi.fn()} />);
     await user.click(screen.getByRole("button", { name: "Save connection" }));
     expect(screen.getByRole("alert").textContent).toBe("Enter your password.");
+    expect(screen.getByLabelText("Password").getAttribute("aria-invalid")).toBe("true");
+    expect(screen.getByLabelText("Password").getAttribute("aria-describedby")).toBe(screen.getByRole("alert").id);
     await user.type(screen.getByLabelText("Password"), "example-password");
     fireEvent.change(screen.getByLabelText("Connectivity check target"), { target: { value: "192.0.2.999" } });
+    await user.click(screen.getByRole("button", { name: "Hide advanced options" }));
     await user.click(screen.getByRole("button", { name: "Save connection" }));
     expect(screen.getByRole("alert").textContent).toContain("valid IPv4");
+    expect(screen.getByLabelText("Connectivity check target").getAttribute("aria-invalid")).toBe("true");
     expect(on_save).not.toHaveBeenCalled();
   });
 

@@ -3,6 +3,7 @@ import { errorCode, errorMessage } from "../../lib/errors";
 import { connectVpn, deleteVpnConnection, loadVpnConnections, openVpnSignIn, saveVpnConnection, saveVpnEnrollment, stopVpn, vpnStatus } from "../../lib/tauri";
 import type { VpnConnection, VpnConnectionInput, VpnConnectionsSnapshot, VpnProvider, VpnStatus } from "../../lib/types";
 import { vpnNeedsSignIn, vpnRuntimeId } from "./status";
+import { useNotificationEnvironment } from "../notifications/NotificationContext";
 
 export const VPN_STATUS_INTERVAL_MS = 5_000;
 
@@ -62,6 +63,7 @@ export interface VpnController {
 
 /** Observe ctld while the workspace is ready. Component lifetime never owns or stops VPNs. */
 export function useVpn(enabled: boolean): VpnController {
+  const notifications = useNotificationEnvironment()?.store;
   const [catalog, setCatalog] = useState<VpnConnectionsSnapshot>({ revision: null, connections: [] });
   const [catalog_loaded, setCatalogLoaded] = useState(false);
   const [catalog_loading, setCatalogLoading] = useState(false);
@@ -111,6 +113,8 @@ export function useVpn(enabled: boolean): VpnController {
   const editor_ref = useRef<VpnEditor | null>(null);
   const editor_generation = useRef(0);
   const enrollment_connection_id_ref = useRef<string | null>(null);
+  const observed_active = useRef(new Map<string, VpnStatus>());
+  const degraded_runtimes = useRef(new Set<string>());
 
   const publishCatalog = useCallback((next: VpnConnectionsSnapshot) => {
     catalog_ref.current = next;
@@ -207,6 +211,30 @@ export function useVpn(enabled: boolean): VpnController {
             action_errors_ref.current.delete(vpn_id);
           }
         }
+        // A failed or incomplete observation cannot establish that a VPN stopped.
+        for (const [vpn_id, previous] of observed_active.current) {
+          if (previous.connection_id === enrollment_connection_id_ref.current) continue;
+          if (actions_ref.current.has(vpn_id) ||
+            observed_generations.get(vpn_id) !== runtime_generations.current.get(vpn_id)) continue;
+          const observed = snapshot.connections.find((status) => vpnRuntimeId(status) === vpn_id);
+          if (observed?.status_unavailable || !observed && warnings.length > 0) continue;
+          if (observed?.state === "connected") continue;
+          observed_active.current.delete(vpn_id);
+          if (degraded_runtimes.current.has(vpn_id)) continue;
+          degraded_runtimes.current.add(vpn_id);
+          const name = catalog_ref.current.connections.find((connection) => connection.connection_id === previous.connection_id)?.name ?? "VPN connection";
+          notifications?.report(`vpn:runtime:${vpn_id}`, {
+            severity: "warning", title: "VPN disconnected", source: "VPN",
+            message: `${name} is no longer connected.${observed?.message ? ` ${observed.message}` : ""}`,
+          });
+        }
+        for (const [vpn_id, observed] of next) {
+          if (observed.state !== "connected" || !observed.running || observed.status_unavailable ||
+            observed.connection_id === enrollment_connection_id_ref.current ||
+            actions_ref.current.has(vpn_id)) continue;
+          observed_active.current.set(vpn_id, observed);
+          if (degraded_runtimes.current.delete(vpn_id)) notifications?.resolve(`vpn:runtime:${vpn_id}`);
+        }
         publishRuntimes(next);
         supports_multiple_ref.current = snapshot.supports_multiple;
         supported_providers_ref.current = snapshot.supported_providers ?? ["openconnect"];
@@ -236,12 +264,13 @@ export function useVpn(enabled: boolean): VpnController {
     })();
     status_request.current = { generation, pending };
     return pending;
-  }, [publishRuntimes]);
+  }, [notifications, publishRuntimes]);
 
   const setEnrollmentConnectionId = useCallback((connection_id: string | null) => {
     const previous = enrollment_connection_id_ref.current;
     enrollment_connection_id_ref.current = connection_id;
     if (previous && previous !== connection_id && !catalog_ref.current.connections.some((connection) => connection.connection_id === previous)) {
+      observed_active.current.delete(previous);
       // Enrollment reports this change only after native cancellation succeeds.
       // Remove the discarded runtime before revealing synthetic items, and fence
       // any whole-daemon observation that still contains the canceled draft.
@@ -296,6 +325,7 @@ export function useVpn(enabled: boolean): VpnController {
     const started_lifetime = lifetime.current;
     runtime_generations.current.set(vpn_id, generation);
     const previous = statuses_ref.current.get(vpn_id);
+    if (action.kind === "stop") observed_active.current.delete(vpn_id);
     actions_ref.current.set(vpn_id, action);
     action_errors_ref.current.delete(vpn_id);
     sign_in_failed_ids.current.delete(vpn_id);
@@ -506,7 +536,10 @@ export function useVpn(enabled: boolean): VpnController {
         publishCatalog(next);
       }
     } catch (failure) {
-      if (mounted.current) setCatalogError(errorMessage(failure));
+      if (mounted.current) notifications?.notify(`vpn:delete:${connection_id}`, {
+        severity: "error", title: "Could not delete VPN connection", source: "VPN",
+        message: `${catalog_ref.current.connections.find((connection) => connection.connection_id === connection_id)?.name ?? "VPN connection"}: ${errorMessage(failure)}`,
+      });
     } finally {
       profile_busy_ref.current = false;
       if (mounted.current) {
@@ -514,7 +547,7 @@ export function useVpn(enabled: boolean): VpnController {
         setDeletingId(null);
       }
     }
-  }, [isActive, publishCatalog]);
+  }, [isActive, notifications, publishCatalog]);
 
   return {
     connections: catalog.connections,

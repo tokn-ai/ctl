@@ -56,6 +56,62 @@ describe("window notification history", () => {
     expect(store.snapshot().entries).toMatchObject([{ occurrence_count: 1, toast_visible: false, actions: [{ label: "Retry" }] }]);
   });
 
+  it("announces identical distinct operations again after hiding or dismissing the earlier event", () => {
+    const store = new NotificationStore();
+    store.notify("copy", failure);
+    const id = store.snapshot().entries[0].id;
+    store.setCenterOpen(true);
+    store.setCenterOpen(false);
+    store.notify("copy", failure);
+    expect(store.snapshot().entries).toMatchObject([{ id, occurrence_count: 2, read: false, toast_visible: true }]);
+    store.dismiss(id);
+    store.notify("copy", failure);
+    expect(store.snapshot().entries).toMatchObject([{ occurrence_count: 1, read: false, toast_visible: true }]);
+  });
+
+  it("can record a distinct operation silently without a popup", () => {
+    const store = new NotificationStore();
+    store.notify("workspace", failure, { toast: false });
+    store.notify("workspace", failure, { toast: false });
+    expect(store.snapshot().entries).toMatchObject([{ occurrence_count: 2, toast_visible: false }]);
+  });
+
+  it.each(["hide", "review"] as const)("preserves %s and occurrence count when one incident changes diagnostics", (action) => {
+    let time = 1;
+    const store = new NotificationStore(() => time++);
+    store.report("host", failure);
+    const id = store.snapshot().entries[0].id;
+    if (action === "hide") store.hide(id);
+    else {
+      store.setCenterOpen(true);
+      store.setCenterOpen(false);
+    }
+    const updated = { ...failure, message: "Retry timed out.", actions: [{ label: "Retry", command_id: "host.connect" }] };
+    store.report("host", updated, { preserve_attention: true });
+    expect(store.snapshot().entries).toMatchObject([{
+      ...updated, id, created_at: 1, updated_at: 2, occurrence_count: 1,
+      read: action === "review", toast_visible: false, resolved_at: null,
+    }]);
+    store.report("host", { ...updated, severity: "warning", message: "Automatic retries paused." }, { preserve_attention: true });
+    expect(store.snapshot().entries).toMatchObject([{
+      id, occurrence_count: 1, read: action === "review", toast_visible: false, updated_at: 3,
+    }]);
+  });
+
+  it.each(["dismiss", "clear"] as const)("preserves %s across changing diagnostics until recovery or a distinct operation", (action) => {
+    const store = new NotificationStore();
+    store.report("host", failure);
+    if (action === "dismiss") store.dismiss(store.snapshot().entries[0].id);
+    else store.clear();
+    const updated = { ...failure, message: "Automatic retries paused." };
+    store.report("host", updated, { preserve_attention: true });
+    store.report("host", { ...updated, message: "The next retry also failed." }, { preserve_attention: true });
+    expect(store.snapshot().entries).toEqual([]);
+    store.resolve("host");
+    store.report("host", updated, { preserve_attention: true });
+    expect(store.snapshot().entries).toMatchObject([{ message: updated.message, occurrence_count: 1, toast_visible: true }]);
+  });
+
   it("resolves an error into history and treats a later identical failure as active", () => {
     let time = 1;
     const store = new NotificationStore(() => time++);

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { checkComponentUpdates } from "../../lib/tauri";
 import { errorMessage } from "../../lib/errors";
 import type { BundleChannel, ComponentUpdateCatalog } from "../../lib/types";
+import { InlineFeedback } from "../feedback/InlineFeedback";
 
 interface Props {
   visible?: boolean;
@@ -49,8 +50,8 @@ export function PublishedBundleStatus({ visible = true, channel, on_update }: Pr
       {catalog && on_update ? <button type="button" onClick={() => on_update(catalog.channel)}>Install published bundle…</button> : null}
     </div>
     {catalog ? <p role="status">Published {channel_names[catalog.channel]} bundle: <strong>{catalog.bundle_id}</strong>.</p> : null}
-    {catalog?.targets.some((target) => !target.compatible) ? <p>Some published targets require a newer client. Update the client before installing incompatible components.</p> : null}
+    {catalog?.targets.some((target) => !target.compatible) ? <InlineFeedback severity="warning">Some published targets require a newer client. Update the client before installing incompatible components.</InlineFeedback> : null}
     {!channel && snapshot?.local_development ? <p>Linux x64 uploads build this working tree locally. Other remote targets use the {channel_names[snapshot.default_channel]} channel.</p> : null}
-    {error ? <p role="alert">Could not check published bundles: {error}</p> : null}
+    {error ? <InlineFeedback>Could not check published bundles: {error}</InlineFeedback> : null}
   </section>;
 }

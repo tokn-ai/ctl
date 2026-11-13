@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { TaskWorkspace } from "../../features/tasks/useTaskWorkspace";
 import { definitionScopeKey, validProjectRoot } from "../../features/tasks/useTaskDefinitions";
+import { InlineFeedback } from "../feedback/InlineFeedback";
 
 export function TaskDefinitionSource({ model }: { model: TaskWorkspace }) {
   const scope = model.definition_scope;
@@ -46,7 +47,7 @@ export function TaskDefinitionSource({ model }: { model: TaskWorkspace }) {
           {scope.kind !== "project" ? <small>Global definitions remain selected until you open a project.</small> : null}
         </>
       ) : null}
-      {error ? <p className="task-inline-error" role="alert">{error}</p> : null}
+      {error ? <InlineFeedback className="task-feedback">{error}</InlineFeedback> : null}
       {model.definition_path ? <small className="task-definition-path" title={model.definition_path}>{model.definition_path}</small> : null}
     </form>
   );

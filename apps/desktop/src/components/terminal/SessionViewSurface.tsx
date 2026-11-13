@@ -4,6 +4,8 @@ import { createPortal } from "react-dom";
 import { useAttachment } from "../../features/attachment/useAttachment";
 import { resizeSessionPane, setSessionViewZoom, subscribeSessionViews } from "../../features/attachment/componentActions";
 import { useAttachmentNotifications } from "../../features/notifications/useAttachmentNotifications";
+import { useNotificationEnvironment } from "../../features/notifications/NotificationContext";
+import { InlineFeedback } from "../feedback/InlineFeedback";
 import { adjacentPane, swapPanes } from "../../features/terminal/viewLayout";
 import type { XtermRenderer } from "../../features/terminal/XtermRenderer";
 import { sessionKey } from "../../features/targets/targets";
@@ -30,6 +32,7 @@ interface Props extends SurfaceProps {
   renderer?: XtermRenderer | null;
   input_owned?: boolean;
   input_request?: AttachmentViewState["input_lease_request"];
+  input_feedback?: string | null;
   on_toggle_input?(): void;
   on_select_terminal(session: SessionSummary): Promise<void>;
   on_promoted(session: SessionSummary): Promise<void>;
@@ -41,7 +44,7 @@ interface Props extends SurfaceProps {
   on_view?(session: SessionSummary, view: SessionView): void;
 }
 
-export function SessionViewSurface({ controls_container, session, open_session_keys, shell_state, renderer, input_owned, input_request, on_toggle_input, on_select_terminal, on_promoted, prefix_settings, shortcuts_enabled = true, input_enabled = true, on_command, on_pane_commands, on_view, ...surface }: Props) {
+export function SessionViewSurface({ controls_container, session, open_session_keys, shell_state, renderer, input_owned, input_request, input_feedback, on_toggle_input, on_select_terminal, on_promoted, prefix_settings, shortcuts_enabled = true, input_enabled = true, on_command, on_pane_commands, on_view, ...surface }: Props) {
   const on_view_ref = useRef(on_view);
   on_view_ref.current = on_view;
   const [viewport, setViewport] = useState<HTMLDivElement | null>(null);
@@ -94,7 +97,8 @@ export function SessionViewSurface({ controls_container, session, open_session_k
     setView(next);
   };
   const [error, setError] = useState<string | null>(null);
-  const [action_error, setActionError] = useState<string | null>(null);
+  const [refresh_attempt, setRefreshAttempt] = useState(0);
+  const notifications = useNotificationEnvironment()?.store;
   const [busy, setBusy] = useState(false);
   const busy_ref = useRef(false);
   const resize_worker = useRef<{
@@ -105,6 +109,9 @@ export function SessionViewSurface({ controls_container, session, open_session_k
   const session_ref = useRef(session);
   session_ref.current = session;
   const key = session ? sessionKey(session) : "";
+  const notifyActionFailure = useCallback((message: string, title = "Pane operation failed") => {
+    notifications?.notify(`pane_action:${key}:${title}`, { severity: "error", title, source: session?.name ?? "Terminal", message });
+  }, [notifications, key, session?.name]);
   const connected = surface.phase === "attached" || surface.phase === "ended" || !!surface.ended_message;
   const primary_ended = useRef(false);
   primary_ended.current = surface.phase === "ended" || !!surface.ended_message;
@@ -117,7 +124,8 @@ export function SessionViewSurface({ controls_container, session, open_session_k
     setView(null);
     setEndedIds(new Set());
     setError(null);
-    setActionError(null);
+    busy_ref.current = false;
+    setBusy(false);
     setFocusedId(null);
   }, [key]);
 
@@ -183,7 +191,7 @@ export function SessionViewSurface({ controls_container, session, open_session_k
     }
     void refresh();
     return () => { generation.current++; clearTimeout(timer); };
-  }, [key, connected]);
+  }, [key, connected, refresh_attempt]);
 
   const primary_size = `${session?.terminal_size.columns}:${session?.terminal_size.rows}`;
   const previous_size = useRef(primary_size);
@@ -216,7 +224,7 @@ export function SessionViewSurface({ controls_container, session, open_session_k
       }
     } catch (failure) {
       if (errorCode(failure) === "session_not_found") surface.on_dismiss?.();
-      else setActionError(errorMessage(failure));
+      else notifyActionFailure(errorMessage(failure), "Could not close pane");
     }
   }
 
@@ -226,7 +234,6 @@ export function SessionViewSurface({ controls_container, session, open_session_k
     const current = generation.current;
     ++sequence.current;
     setBusy(true);
-    setActionError(null);
     try {
       const next = await sessionView(session.target, action);
       // The exit event retains the final pane until the user dismisses it.
@@ -244,10 +251,12 @@ export function SessionViewSurface({ controls_container, session, open_session_k
         }
       }
     } catch (failure) {
-      if (current === generation.current) setActionError(errorMessage(failure));
+      notifyActionFailure(errorMessage(failure), `Could not ${action.kind === "kill_terminal" ? "terminate pane" : action.kind === "promote" ? "move pane to a session" : action.kind === "split" ? "split pane" : "update pane layout"}`);
     } finally {
-      busy_ref.current = false;
-      setBusy(false);
+      if (current === generation.current) {
+        busy_ref.current = false;
+        setBusy(false);
+      }
     }
   }
 
@@ -269,7 +278,6 @@ export function SessionViewSurface({ controls_container, session, open_session_k
     busy_ref.current = true;
     ++sequence.current;
     setBusy(true);
-    setActionError(null);
     try {
       const next = await setSessionViewZoom(session, terminal_id, baseline);
       if (current !== generation.current) return null;
@@ -280,11 +288,13 @@ export function SessionViewSurface({ controls_container, session, open_session_k
       const confirmed = view_ref.current;
       return confirmed?.zoomed_terminal_id === terminal_id ? confirmed : null;
     } catch (failure) {
-      if (current === generation.current) setActionError(errorMessage(failure));
+      notifyActionFailure(errorMessage(failure), "Could not zoom pane");
       return null;
     } finally {
-      busy_ref.current = false;
-      setBusy(false);
+      if (current === generation.current) {
+        busy_ref.current = false;
+        setBusy(false);
+      }
     }
   }
   const focused_ended = ended_ids.has(focused ?? "") || (focused === primary_id && primary_ended.current);
@@ -303,7 +313,6 @@ export function SessionViewSurface({ controls_container, session, open_session_k
     busy_ref.current = true;
     ++sequence.current;
     setBusy(true);
-    setActionError(null);
     void (async () => {
       const is_current = () => resize_worker.current === worker && worker.generation === generation.current;
       try {
@@ -317,8 +326,8 @@ export function SessionViewSurface({ controls_container, session, open_session_k
       } catch (failure) {
         if (is_current()) {
           worker.pending = [];
-          setActionError(errorMessage(failure));
         }
+        notifyActionFailure(errorMessage(failure), "Could not resize pane");
       } finally {
         if (resize_worker.current === worker) {
           resize_worker.current = null;
@@ -430,7 +439,7 @@ export function SessionViewSurface({ controls_container, session, open_session_k
   const pane_controls = (
     <div className="view-controls" ref={setControlsHost}>
       {primary_id && focused === primary_id && controls(primary_id, shell_state,
-        <InputLeaseButton live={surface.phase === "attached" && !surface.ended_message} owned={input_owned} request={input_request} on_toggle={on_toggle_input} />)}
+        <InputLeaseButton live={surface.phase === "attached" && !surface.ended_message} owned={input_owned} request={input_request} feedback={input_feedback} on_toggle={on_toggle_input} />)}
     </div>
   );
 
@@ -445,8 +454,7 @@ export function SessionViewSurface({ controls_container, session, open_session_k
       {PREFIX_ACTIONS.filter((action) => prefixActionMode(action.id) === prefix.mode && prefix_map.bindings.has(action.id)).map((action) => <span key={action.id}><kbd>{prefix_map.bindings.get(action.id)}</kbd> {action.title}</span>)}
       <span>{prefix.mode === "move" ? "Enter or Esc finishes" : `${prefix_map.label} again sends the prefix · Esc cancels`}</span>
     </div>}
-    {error && <div className="message-banner" role="status">{error}</div>}
-    {action_error && <div className="message-banner" role="alert">{action_error}</div>}
+    {error ? <InlineFeedback className="terminal-local-feedback" action={{ label: "Retry layout", disabled: busy, on_click: () => setRefreshAttempt((attempt) => attempt + 1) }}>Could not refresh pane layout: {error}</InlineFeedback> : null}
     {controls_container ? createPortal(pane_controls, controls_container) : controls_container === undefined ? pane_controls : null}
     <div className="view-viewport" ref={setViewport}>
     <div className="view-panes" style={current_view ? { width: current_view.canvas_size.columns * cell.width, height: current_view.canvas_size.rows * cell.height } : session ? { width: session.terminal_size.columns * cell.width, height: session.terminal_size.rows * cell.height } : { width: "100%", height: "100%" }}>
@@ -455,7 +463,7 @@ export function SessionViewSurface({ controls_container, session, open_session_k
         current_view={() => view_ref.current}
         can_begin={() => !busy_ref.current}
         on_busy={(next) => { busy_ref.current = next; setBusy(next); if (next) { ++sequence.current; prefix.cancel(); } }}
-        on_error={setActionError} on_confirm={(next) => { ++sequence.current; storeView(next); }} />
+        on_error={(message) => { if (message) notifyActionFailure(message, "Could not resize pane"); }} on_confirm={(next) => { ++sequence.current; storeView(next); }} />
       <div className="view-pane" data-active={focused === primary_id} ref={paneRef(primary_id)} onFocusCapture={() => setFocusedId(primary_id ?? null)} style={{ ...paneStyle(primary_rect), ...(takeover_id ? { visibility: "hidden" } : {}) }}>
         <TerminalSurface {...surface} interaction_enabled={input_enabled} onInput={handlePrimaryInput} ended_message={surface.ended_message ?? (surface.phase === "ended" ? "Terminal exited" : surface.phase !== "attached" && ended_ids.has(primary_id ?? "") ? "Terminal no longer exists" : null)} on_dismiss={() => void dismissPane(primary_id)} />
       </div>
@@ -475,20 +483,21 @@ export function SessionViewSurface({ controls_container, session, open_session_k
   </div>;
 }
 
-function InputLeaseButton({ live, owned = false, request, on_toggle }: {
+function InputLeaseButton({ live, owned = false, request, feedback, on_toggle }: {
   live: boolean;
   owned?: boolean;
   request?: AttachmentViewState["input_lease_request"];
+  feedback?: string | null;
   on_toggle?(): void;
 }) {
   const pending = live && request?.status === "pending";
   const denied = live && request?.status === "denied";
   const progress = pending && !request.acquire ? "Releasing input…" : "Requesting input…";
-  return <button disabled={!live || pending} aria-busy={pending} onClick={on_toggle}
+  return <><button disabled={!live || pending} aria-busy={pending} onClick={on_toggle}
     aria-label={pending ? progress : denied ? "Input in use. Request input" : owned ? "Release input" : "Take input"}
     title={pending ? progress : denied ? "Another attachment has input control · Click to try again" : owned ? "Input enabled · Click to release" : "Read only · Click to request input"}>
     <Icon name="keyboard" size={14} />{pending ? progress : denied ? "Input in use" : !owned && "Read only"}
-  </button>;
+  </button>{live && feedback ? <InlineFeedback severity="warning">{feedback}</InlineFeedback> : null}</>;
 }
 
 function AdditionalTerminal({ visible, input_enabled, on_ended, on_dismiss, confirmed_missing, session, detach_registry, input_registry, toggle_registry, render_controls }: {
@@ -541,6 +550,7 @@ function AdditionalTerminal({ visible, input_enabled, on_ended, on_dismiss, conf
       <InputLeaseButton live={attachment.state.phase === "attached" && !ended_message}
         owned={attachment.state.input_lease.owned_by_client}
         request={attachment.state.input_lease_request}
+        feedback={attachment.state.message_kind === "input" ? attachment.state.message : null}
         on_toggle={attachment.toggleInputLease} />)}
     <TerminalSurface ended_message={ended_message} on_dismiss={on_dismiss} phase={attachment.state.phase} hasSession={true}
       has_cached_content={attachment.has_cached_content} interaction_enabled={input_enabled && visible}

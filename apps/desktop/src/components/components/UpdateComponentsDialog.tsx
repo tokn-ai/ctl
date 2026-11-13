@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { QuickInput } from "../commands/QuickInput";
 import { QuickInputFrame } from "../commands/QuickInputFrame";
 import { useCommandScope } from "../../features/commands/CommandContext";
@@ -10,6 +10,7 @@ import type { BundleChannel, ComponentUpdateContext, ComponentUpdateHostResult, 
 import { promptMode, promptTitle } from "../sessions/sshPrompt";
 import { remoteInstallProgressMode } from "../sessions/remoteInstallProgress";
 import { PublishedBundleStatus } from "./PublishedBundleStatus";
+import { InlineFeedback } from "../feedback/InlineFeedback";
 import "./componentUpdate.css";
 
 interface Props {
@@ -42,6 +43,8 @@ export function UpdateComponentsDialog({ targets, context, on_updated, on_close 
   const [running, setRunning] = useState(false);
   const [stopping, setStopping] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [validation, setValidation] = useState<{ field: "hosts" | "path"; message: string } | null>(null);
+  const validation_id = useId();
   const [progress, setProgress] = useState<ComponentUpdateProgress | null>(null);
   const [prompt, setPrompt] = useState<SshPrompt | null>(null);
   const [results, setResults] = useState<ComponentUpdateHostResult[] | null>(null);
@@ -54,6 +57,20 @@ export function UpdateComponentsDialog({ targets, context, on_updated, on_close 
     return () => { mounted.current = false; if (attempt.current) void cancelComponentUpdate(attempt.current).catch(() => undefined); };
   }, []);
 
+  function clearValidation(field: "hosts" | "path") {
+    setValidation((current) => current?.field === field ? null : current);
+  }
+
+  function selectHost(key: string, checked: boolean) {
+    clearValidation("hosts");
+    setSelected((current) => {
+      const next = new Set(current);
+      if (checked) next.add(key);
+      else next.delete(key);
+      return next;
+    });
+  }
+
   function dismiss() {
     if (!running) { on_close(); return; }
     if (stopping || !attempt.current) return;
@@ -65,11 +82,13 @@ export function UpdateComponentsDialog({ targets, context, on_updated, on_close 
 
   async function start() {
     if (attempt.current) return;
+    setError(null);
+    setValidation(null);
     const chosen = [...available.values()].filter((target) => selected.has(targetKey(target)));
     if (!chosen.length || chosen.some((target) => target.kind === "ssh" && target.unavailable)) {
-      setError("Choose at least one available host."); return;
+      setValidation({ field: "hosts", message: "Choose at least one available host." }); return;
     }
-    if (provided && !path.trim()) { setError("Enter a build directory or archive path."); return; }
+    if (provided && !path.trim()) { setValidation({ field: "path", message: "Enter a build directory or archive path." }); return; }
     const source: ComponentUpdateSource = provided
       ? { kind: "provided", path: path.trim(), local_build, ctld_package: local_build && ctld_package.trim() ? ctld_package.trim() : null }
       : published
@@ -118,10 +137,17 @@ export function UpdateComponentsDialog({ targets, context, on_updated, on_close 
       <p>Host {(progress?.host_index ?? 0) + 1} of {submitted_targets.length}</p>
     </div> : results ? <div className="component-update-results">
       <p role="status">{results.filter((result) => result.state === "complete").length} of {submitted_targets.length} hosts updated. Running services were preserved.</p>
-      <ul>{results.map((result) => <li key={result.host_index}><strong>{targetLabel(submitted_targets[result.host_index])}</strong><span>{result.state === "complete" ? "Installed" : result.state === "cancelled" ? "Cancelled" : "Failed"}</span>{result.result ? <p>Bundle {result.result.bundle_id} · {result.result.target_triple}</p> : null}{result.error ? <p role="alert">{result.error}</p> : null}</li>)}</ul>
+      <ul>{results.map((result) => <li key={result.host_index}><strong>{targetLabel(submitted_targets[result.host_index])}</strong><span>{result.state === "complete" ? "Installed" : result.state === "cancelled" ? "Cancelled" : "Failed"}</span>{result.result ? <p>Bundle {result.result.bundle_id} · {result.result.target_triple}</p> : null}{result.error ? <InlineFeedback severity={result.state === "cancelled" ? "warning" : "error"}>{result.error}</InlineFeedback> : null}</li>)}</ul>
     </div> : <form id="component-update-form" onSubmit={(event) => { event.preventDefault(); void start(); }}>
-      <fieldset><legend>Hosts</legend><div className="component-update-hosts">{[...available.values()].map((target) => <label key={targetKey(target)}><input type="checkbox" checked={selected.has(targetKey(target))} disabled={target.kind === "ssh" && !!target.unavailable} onChange={(event) => setSelected((current) => { const next = new Set(current); if (event.target.checked) next.add(targetKey(target)); else next.delete(targetKey(target)); return next; })} /><span>{targetLabel(target)}{target.kind === "ssh" && target.unavailable ? <small>Connection unavailable</small> : null}</span></label>)}</div></fieldset>
-      <label className="component-update-field">Build source<select value={source_choice} onChange={(event) => setSourceChoice(event.target.value as SourceChoice)}>
+      <fieldset aria-invalid={validation?.field === "hosts" || undefined} aria-describedby={validation?.field === "hosts" ? validation_id : undefined}>
+        <legend>Hosts</legend>
+        <div className="component-update-hosts">{[...available.values()].map((target) => <label key={targetKey(target)}>
+          <input type="checkbox" checked={selected.has(targetKey(target))} disabled={target.kind === "ssh" && !!target.unavailable} onChange={(event) => selectHost(targetKey(target), event.target.checked)} />
+          <span>{targetLabel(target)}{target.kind === "ssh" && target.unavailable ? <small>Connection unavailable</small> : null}</span>
+        </label>)}</div>
+        {validation?.field === "hosts" ? <div id={validation_id}><InlineFeedback>{validation.message}</InlineFeedback></div> : null}
+      </fieldset>
+      <label className="component-update-field">Build source<select value={source_choice} onChange={(event) => { clearValidation("path"); setSourceChoice(event.target.value as SourceChoice); }}>
         <option value="automatic">Automatic</option>
         <option value="nightly">Nightly (latest published main build)</option>
         <option value="stable">Latest stable release</option>
@@ -130,7 +156,8 @@ export function UpdateComponentsDialog({ targets, context, on_updated, on_close 
         <option value="provided">Provided build files</option>
       </select></label>
       {provided ? <div className="component-update-source">
-        <label className="component-update-field">Build directory or archive<input value={path} onChange={(event) => setPath(event.target.value)} placeholder="/path/to/build" /></label>
+        <label className="component-update-field">Build directory or archive<input value={path} aria-invalid={validation?.field === "path" || undefined} aria-describedby={validation?.field === "path" ? validation_id : undefined} onChange={(event) => { clearValidation("path"); setPath(event.target.value); }} placeholder="/path/to/build" /></label>
+        {validation?.field === "path" ? <div id={validation_id}><InlineFeedback>{validation.message}</InlineFeedback></div> : null}
         <label><input type="checkbox" checked={local_build} onChange={(event) => setLocalBuild(event.target.checked)} /><span>Native local build<small>A directory of component binaries built for this computer's platform.</small></span></label>
         {local_build ? <label className="component-update-field">Signed ctld package directory (macOS full bundle)<input value={ctld_package} onChange={(event) => setCtldPackage(event.target.value)} placeholder="/path/to/ctld-package" /></label> : <p>Use a complete bundle directory, or a verified archive with its bundle-set.json beside it.</p>}
       </div> : <>
@@ -138,7 +165,7 @@ export function UpdateComponentsDialog({ targets, context, on_updated, on_close 
         {source_choice !== "selected" && source_choice !== "working_tree" ? <PublishedBundleStatus channel={published ? source_choice : undefined} /> : null}
       </>}
     </form>}
-    {error ? <p role="alert" className="quick-input-error">{error}</p> : null}
+    {error ? <InlineFeedback>{error}</InlineFeedback> : null}
     <footer>
       {results?.some((result) => result.state === "failed") ? <button type="button" onClick={() => { setSelected(new Set(results.filter((result) => result.state === "failed").map((result) => targetKey(submitted_targets[result.host_index])))); setResults(null); setError(null); }}>Retry failed hosts…</button> : null}
       <button type="button" onClick={dismiss} disabled={stopping}>{running ? "Stop update" : results ? "Done" : "Cancel"}</button>

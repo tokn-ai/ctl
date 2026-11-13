@@ -753,6 +753,11 @@ button:disabled {
   background: #858585;
 }
 
+.session-list > .inline-feedback,
+.host-group > .inline-feedback {
+  margin: 8px 12px;
+}
+
 .connection-dot.attached {
   background: var(--success);
 }
@@ -766,36 +771,6 @@ button:disabled {
 .connection-dot.error,
 .connection-dot.ended {
   background: var(--danger);
-}
-
-.history-gap-banner,
-.message-banner {
-  padding: 6px 13px;
-  font-size: 11px;
-  line-height: 1.4;
-  border-bottom: 1px solid;
-}
-
-.history-gap-banner {
-  color: #f0d39a;
-  border-color: #554a31;
-  background: #2b271d;
-}
-
-.message-banner {
-  color: #ffb9b9;
-  border-color: #5a3838;
-  background: #2b2022;
-}
-
-.message-banner button {
-  margin-left: 10px;
-  padding: 3px 8px;
-  border: 1px solid currentColor;
-  border-radius: 4px;
-  color: inherit;
-  background: transparent;
-  cursor: pointer;
 }
 
 .terminal-shell {

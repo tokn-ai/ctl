@@ -461,7 +461,6 @@
   margin: 0;
   padding: 0 24px 10px;
 }
-.task-inline-error,
 .task-change-notice {
   color: var(--warning);
   font-size: 12px;
@@ -473,9 +472,11 @@
   margin: 8px;
   overflow-wrap: anywhere;
 }
-.task-inline-error button,
 .task-change-notice button {
   margin-left: 10px;
+}
+.task-feedback {
+  margin: 8px;
 }
 .task-confirm {
   margin: 16px 24px;

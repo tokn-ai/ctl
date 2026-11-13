@@ -1,4 +1,7 @@
 // @vitest-environment jsdom
+import type { ReactElement } from "react";
+import { NotificationProvider } from "../features/notifications/NotificationContext";
+import { NotificationStore } from "../features/notifications/NotificationStore";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CredentialTarget, CredentialsSnapshot, IdentitySnapshot } from "../lib/types";
@@ -20,7 +23,13 @@ const targets: CredentialTarget[] = [];
 const props = () => ({ visible: true, targets, on_close: vi.fn(), on_dialog_change: vi.fn(), on_manage_vpn: vi.fn() });
 const importButton = () => screen.getByRole("button", { name: "Import saved credential metadata" });
 
+let notifications: NotificationStore;
+function renderPage(ui: ReactElement) {
+  return render(ui, { wrapper: ({ children }) => <NotificationProvider store={notifications}>{children}</NotificationProvider> });
+}
+
 beforeEach(() => {
+  notifications = new NotificationStore();
   vi.resetAllMocks();
   api.list.mockResolvedValue(structuredClone(credentials));
   api.identities.mockResolvedValue(structuredClone(identities));
@@ -37,7 +46,7 @@ describe("Saved credential metadata import", () => {
   it.each(["credentials", "identities"])("offers explicit import when %s requires it without importing on open or refresh", async (source) => {
     api.list.mockResolvedValue({ ...credentials, metadata_import_required: source === "credentials" });
     api.identities.mockResolvedValue({ ...identities, metadata_import_required: source === "identities" });
-    render(<CredentialsPage {...props()} />);
+    renderPage(<CredentialsPage {...props()} />);
     await screen.findByRole("button", { name: "Import saved credential metadata" });
     const region = screen.getByRole("region", { name: "Saved credential metadata import" });
     expect(within(region).getByText(/macOS authorization to read names and metadata from older protected SSH entries in Keychain/)).toBeTruthy();
@@ -53,7 +62,7 @@ describe("Saved credential metadata import", () => {
     const { metadata_import_required: _identity_flag, keychain_message: _message, ...older_identities } = identities;
     api.list.mockResolvedValue({ ...older_credentials, credentials: [] });
     api.identities.mockResolvedValue({ ...older_identities, identity_files: [{ ...identities.identity_files[0], passphrase_state: "not_saved" }] });
-    render(<CredentialsPage {...props()} />);
+    renderPage(<CredentialsPage {...props()} />);
     await screen.findByRole("button", { name: "Import saved credential metadata" });
     expect(screen.getByText("Not checked")).toBeTruthy();
     expect(screen.queryByText("Not saved")).toBeNull();
@@ -66,7 +75,7 @@ describe("Saved credential metadata import", () => {
 
   it("shows the sanitized Keychain reason instead of a vague unavailable message", async () => {
     api.identities.mockResolvedValue({ ...identities, metadata_import_required: false, keychain_available: false, keychain_message: "This ctld helper is missing the Keychain access entitlement. Use a properly signed helper." });
-    render(<CredentialsPage {...props()} />);
+    renderPage(<CredentialsPage {...props()} />);
     expect(await screen.findByText("This ctld helper is missing the Keychain access entitlement. Use a properly signed helper.")).toBeTruthy();
     expect(screen.queryByText(/Keychain passphrase storage could not be checked/)).toBeNull();
     expect(screen.queryByRole("button", { name: "Save passphrase for key" })).toBeNull();
@@ -76,7 +85,7 @@ describe("Saved credential metadata import", () => {
   it("keeps file discovery warnings separate from metadata import and Keychain status", async () => {
     api.identities.mockResolvedValueOnce({ ...identities, warning: "A configured identity file could not be read." })
       .mockResolvedValueOnce({ ...identities, metadata_import_required: false });
-    render(<CredentialsPage {...props()} />);
+    renderPage(<CredentialsPage {...props()} />);
     expect(await screen.findByText("A configured identity file could not be read.")).toBeTruthy();
     expect(screen.queryByText("Some identity files could not be checked.")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
@@ -87,7 +96,7 @@ describe("Saved credential metadata import", () => {
     importedSnapshots();
     let complete!: () => void;
     api.import_metadata.mockImplementationOnce(() => new Promise<void>((resolve) => { complete = resolve; }));
-    render(<CredentialsPage {...props()} />);
+    renderPage(<CredentialsPage {...props()} />);
     const reimport = await screen.findByRole("button", { name: "Reimport saved credential metadata" });
     await waitFor(() => expect(reimport).toHaveProperty("disabled", false));
     expect(reimport.getAttribute("aria-describedby")).toBe("credential-reimport-description");
@@ -116,7 +125,7 @@ describe("Saved credential metadata import", () => {
     let complete!: () => void;
     api.import_metadata.mockImplementationOnce(() => new Promise<void>((resolve) => { complete = resolve; }));
     const options = props();
-    render(<CredentialsPage {...options} />);
+    renderPage(<CredentialsPage {...options} />);
     await screen.findByRole("button", { name: "Import saved credential metadata" });
     fireEvent.click(importButton());
     expect(api.import_metadata).toHaveBeenCalledExactlyOnceWith();
@@ -130,6 +139,8 @@ describe("Saved credential metadata import", () => {
     importedSnapshots();
     await act(async () => complete());
     expect(await screen.findByText("Saved credential metadata imported.")).toBeTruthy();
+    expect(within(screen.getByRole("region", { name: "Saved credential metadata reimport" })).getByText("Saved credential metadata imported.")).toBeTruthy();
+    expect(notifications.snapshot().entries).toHaveLength(0);
     expect(api.list).toHaveBeenCalledTimes(2);
     expect(api.identities).toHaveBeenCalledTimes(2);
     expect(screen.queryByRole("button", { name: "Import saved credential metadata" })).toBeNull();
@@ -137,7 +148,7 @@ describe("Saved credential metadata import", () => {
   });
 
   it("keeps import available when a partial result still requires it", async () => {
-    render(<CredentialsPage {...props()} />);
+    renderPage(<CredentialsPage {...props()} />);
     fireEvent.click(await screen.findByRole("button", { name: "Import saved credential metadata" }));
     expect(await screen.findByText("Imported available metadata. Some saved entries still need metadata import.")).toBeTruthy();
     expect(importButton()).toHaveProperty("disabled", false);
@@ -155,9 +166,11 @@ describe("Saved credential metadata import", () => {
     ["constructor", "Could not import saved credential metadata. Check Keychain access and update ctld if needed, then try again."],
   ])("refreshes available metadata after %s without hiding required state", async (code, message) => {
     api.import_metadata.mockRejectedValue({ code, message: "private-error-canary" });
-    render(<CredentialsPage {...props()} />);
+    renderPage(<CredentialsPage {...props()} />);
     fireEvent.click(await screen.findByRole("button", { name: "Import saved credential metadata" }));
     expect(await screen.findByText(message)).toBeTruthy();
+    expect(within(screen.getByRole("region", { name: "Saved credential metadata import" })).getByRole("alert").textContent).toBe(message);
+    expect(notifications.snapshot().entries).toHaveLength(0);
     await waitFor(() => expect(api.identities).toHaveBeenCalledTimes(2));
     expect(api.list).toHaveBeenCalledTimes(2);
     expect(importButton()).toHaveProperty("disabled", false);
@@ -167,7 +180,7 @@ describe("Saved credential metadata import", () => {
   });
 
   it("does not claim full completion when the post-import inventory cannot be refreshed", async () => {
-    render(<CredentialsPage {...props()} />);
+    renderPage(<CredentialsPage {...props()} />);
     await screen.findByRole("button", { name: "Import saved credential metadata" });
     api.list.mockRejectedValue(new Error("Metadata unavailable."));
     api.identities.mockResolvedValue({ ...identities, metadata_import_required: false });
@@ -183,7 +196,7 @@ describe("Saved credential metadata import", () => {
       .mockImplementationOnce(() => new Promise((resolve) => { complete = resolve; }))
       .mockResolvedValueOnce(identities);
     const options = props();
-    const page = render(<CredentialsPage {...options} />);
+    const page = renderPage(<CredentialsPage {...options} />);
     await screen.findByRole("button", { name: "Import saved credential metadata" });
     fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
     page.rerender(<CredentialsPage {...options} visible={false} />);
@@ -201,7 +214,7 @@ describe("Saved credential metadata import", () => {
     let complete!: () => void;
     api.import_metadata.mockImplementationOnce(() => new Promise<void>((resolve) => { complete = resolve; }));
     const options = props();
-    const page = render(<CredentialsPage {...options} />);
+    const page = renderPage(<CredentialsPage {...options} />);
     fireEvent.click(await screen.findByRole("button", { name: "Import saved credential metadata" }));
     page.rerender(<CredentialsPage {...options} visible={false} />);
     expect(screen.queryByRole("dialog")).toBeNull();

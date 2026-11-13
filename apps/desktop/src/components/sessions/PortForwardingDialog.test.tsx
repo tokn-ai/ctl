@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -35,6 +35,23 @@ describe("remote listener forwarding defaults", () => {
     expect(screen.queryByRole("option", { name: "UDP" })).toBeNull();
     expect(screen.queryByRole("region", { name: "Remote TCP/UDP listeners" })).toBeNull();
     expect(listRemoteListeners).not.toHaveBeenCalled();
+  });
+
+  it("keeps failed forward operations on their row and preserves an unrelated form correction", async () => {
+    vi.mocked(listRemoteListeners).mockResolvedValue({ listeners: [], warnings: [] });
+    const onSetEnabled = vi.fn().mockRejectedValueOnce(new Error("SSH unavailable")).mockResolvedValue(undefined);
+    const user = userEvent.setup();
+    const forward: WorkspacePortForward = { forward_id: "database", host_id: "remote", name: "Database", bind_address: "127.0.0.1", local_port: 5432, remote_host: "127.0.0.1", remote_port: 5432, enabled: false };
+    render(<PortForwardingDialog target={{ kind: "ssh", host_id: "remote", destination: "example" }} forwards={[forward]} statuses={new Map()} busy={new Set()} onChange={vi.fn()} onSetEnabled={onSetEnabled} onUpdateAgent={vi.fn()} onClose={vi.fn()} />);
+    await user.click(screen.getByRole("button", { name: "Add stopped forward" }));
+    const row = within(screen.getByText("Database").closest(".port-forward-row") as HTMLElement);
+    await user.click(row.getByRole("button", { name: "Start" }));
+    expect(onSetEnabled).toHaveBeenCalledWith(forward, true, { feedback: "inline" });
+    expect(row.getByRole("alert").textContent).toContain("SSH unavailable");
+    expect(screen.getAllByRole("alert")).toHaveLength(2);
+    await user.click(row.getByRole("button", { name: "Retry forward" }));
+    expect(row.queryByRole("alert")).toBeNull();
+    expect(screen.getByRole("alert").textContent).toContain("Enter a name, remote host, and valid ports");
   });
 
   it.each([

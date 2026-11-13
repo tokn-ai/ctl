@@ -16,7 +16,7 @@ import { XtermRenderer } from "../terminal/XtermRenderer";
 import { useAttachment, type AttachmentActions } from "./useAttachment";
 import { useSessionAttachments } from "./useSessionAttachments";
 import { reconnectComponentAttachments, resetComponentAttachments, resizeSessionDivider, resizeSessionPane, setSessionViewZoom, toggleSessionResizeWithWindow } from "./componentActions";
-import { NotificationProvider, useNotificationEnvironment } from "../notifications/NotificationContext";
+import { NotificationProvider } from "../notifications/NotificationContext";
 import { NotificationStore } from "../notifications/NotificationStore";
 import { useWorkbenchNotifications } from "../notifications/useWorkbenchNotifications";
 import { useAttachmentNotifications } from "../notifications/useAttachmentNotifications";
@@ -545,9 +545,10 @@ describe("background history presentation", () => {
     await act(async () => { await visible.result.current.connect(visible_session); });
     if (!owner_first) {
       expect(visible.result.current.state.message).toBe("Another attachment holds resize control.");
-      expect(store.snapshot().entries).toContainEqual(expect.objectContaining({ message: "Another attachment holds resize control.", toast_visible: true }));
+      expect(visible.result.current.state.message_kind).toBe("layout");
+      expect(store.snapshot().entries).toEqual([]);
       await acquireOwner();
-      expect(store.snapshot().entries).toContainEqual(expect.objectContaining({ message: "Another attachment holds resize control.", toast_visible: false, resolved_at: expect.any(Number) }));
+      expect(store.snapshot().entries).toEqual([]);
     } else {
       expect(store.snapshot().entries).toEqual([]);
     }
@@ -1701,7 +1702,7 @@ describe("connection evidence and transitions", () => {
     expect(result.current.state.phase).toBe("attached");
   });
 
-  it("reports each explicit input denial and allows a new request after the reply", async () => {
+  it("keeps explicit input denials at the input control and allows a new request after the reply", async () => {
     const store = new NotificationStore();
     const { result } = renderHook(() => {
       const attachment = useAttachment(renderer);
@@ -1731,19 +1732,36 @@ describe("connection evidence and transitions", () => {
 
     await emit(input_status);
     expect(result.current.state.input_lease_request?.status).toBe("denied");
-    expect(store.snapshot().entries).toContainEqual(expect.objectContaining({ title: "Input is in use", toast_visible: true }));
-    act(() => store.dismiss(store.snapshot().entries[0].id));
+    expect(store.snapshot().entries).toEqual([]);
 
     await act(async () => { await result.current.toggleInputLease(); });
     await emit(input_status);
     expect(api.acquireAttachmentLease).toHaveBeenCalledTimes(2);
-    expect(store.snapshot().entries).toContainEqual(expect.objectContaining({ title: "Input is in use", toast_visible: true }));
+    expect(result.current.state.input_lease_request?.status).toBe("denied");
+    expect(store.snapshot().entries).toEqual([]);
 
     await act(async () => { await result.current.toggleInputLease(); });
     await emit({ ...input_status, status: { held: true, owned_by_client: true } });
     expect(result.current.state.input_lease.owned_by_client).toBe(true);
     expect(result.current.state.input_lease_request).toBeUndefined();
-    expect(store.snapshot().entries).toContainEqual(expect.objectContaining({ title: "Input is in use", toast_visible: false }));
+    expect(store.snapshot().entries).toEqual([]);
+  });
+
+  it.each([
+    ["layout_lease_required", "layout"],
+    ["input_lease_required", "input"],
+  ] as const)("keeps a server %s failure at its owning control", async (code, message_kind) => {
+    const store = new NotificationStore();
+    const { result } = renderHook(() => {
+      const attachment = useAttachment(renderer);
+      useAttachmentNotifications(attachment);
+      return attachment;
+    }, { wrapper: ({ children }) => <NotificationProvider store={store}>{children}</NotificationProvider> });
+    await act(async () => { await result.current.connect(first); });
+    const message = "Another attachment owns the requested control.";
+    await emit({ event_type: "server_error", attachment_id: result.current.state.attachment_id!, code, message });
+    expect(result.current.state).toMatchObject({ phase: "attached", message, message_kind });
+    expect(store.snapshot().entries).toEqual([]);
   });
 
   it("clears pending input requests on release and attachment replacement", async () => {
@@ -2629,10 +2647,9 @@ describe("opened session channels", () => {
     function TestComponent() {
       attachments = useSessionAttachments(renderer);
       useWorkbenchNotifications(store, {
-        workspace_error: null, workspace_ready: true, keybindings_error: null, session_error: null,
-        targets: [], target_errors: new Map(), storage_error: attachments.storage_error,
-        task_error: null, definitions_error: null, task_status: null, tasks: [], tasks_loaded: false,
-      }, useNotificationEnvironment()!.attachments);
+        workspace_error: null, keybindings_error: null, storage_error: attachments.storage_error,
+        window_error: null, tasks: [], tasks_loaded: false,
+      });
       return <>{attachments.controllers}</>;
     }
     render(<NotificationProvider store={store}><TestComponent /></NotificationProvider>);

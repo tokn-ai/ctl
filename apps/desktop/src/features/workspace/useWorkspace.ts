@@ -51,11 +51,18 @@ export function useWorkspace() {
   const closingRef = useRef(false);
   const isClosing = useCallback(() => closingRef.current, []);
   const closeBlockedRef = useRef<() => boolean>(() => false);
-  const [error, setError] = useState<string | null>(null);
+  const [load_error, setLoadError] = useState<string | null>(null);
+  const [save_error, setSaveError] = useState<string | null>(null);
+  const [close_error, setCloseError] = useState<string | null>(null);
+  const [close_blocked, setCloseBlocked] = useState(false);
+  const [load_attempt, setLoadAttempt] = useState(0);
+  const retryLoad = useCallback(() => setLoadAttempt((attempt) => attempt + 1), []);
+  const error = load_error ?? save_error ?? close_error ?? (close_blocked ? "Wait for ongoing operations before closing the window." : null);
   const mounted = useRef(false);
 
   useEffect(() => {
     mounted.current = true;
+    setLoadError(null);
     let cancelled = false;
     void (async () => {
       try {
@@ -104,14 +111,14 @@ export function useWorkspace() {
         setView(restored);
         setReady(true);
       } catch (failure) {
-        if (!cancelled) setError(errorMessage(failure));
+        if (!cancelled) setLoadError(errorMessage(failure));
       }
     })();
     return () => {
       cancelled = true;
       mounted.current = false;
     };
-  }, []);
+  }, [load_attempt]);
 
   const queueOperation = useCallback((run: (writer: WorkspaceWriter) => Promise<void>, mode: "write" | "read" = "write"): Promise<void> => {
     const writer = writerRef.current;
@@ -125,10 +132,10 @@ export function useWorkspace() {
       .then(() => run(writer))
       .then(
         () => {
-          if (mode === "write" && mounted.current) setError(null);
+          if (mode === "write" && mounted.current) setSaveError(null);
         },
         (failure: unknown) => {
-          if (mode === "write" && mounted.current) setError(errorMessage(failure));
+          if (mode === "write" && mounted.current) setSaveError(errorMessage(failure));
           throw failure;
         },
       )
@@ -273,18 +280,23 @@ export function useWorkspace() {
       event.preventDefault();
       if (closingRef.current) return;
       if (closeBlockedRef.current()) {
-        setError("Wait for ongoing operations before closing the window.");
+        setCloseBlocked(true);
         return;
       }
+      setCloseBlocked(false);
+      setCloseError(null);
       closingRef.current = true;
       setClosing(true);
+      let workspace_saved = false;
       try {
         await persist(true);
+        workspace_saved = true;
         await closeAttachmentWindow();
       } catch (failure) {
         closingRef.current = false;
         setClosing(false);
-        setError(`Window close paused: ${errorMessage(failure)}`);
+        // Failed persistence already owns save_error and its recovery action.
+        if (workspace_saved) setCloseError(`Window close paused: ${errorMessage(failure)}`);
       }
     });
     void registration.then(
@@ -292,7 +304,7 @@ export function useWorkspace() {
         if (disposed) unlisten();
       },
       (failure: unknown) => {
-        if (!disposed) setError(errorMessage(failure));
+        if (!disposed) setCloseError(`Could not handle window closure: ${errorMessage(failure)}`);
       },
     );
     return () => {
@@ -347,6 +359,11 @@ export function useWorkspace() {
     isClosing,
     closeBlockedRef,
     error,
+    load_error,
+    save_error,
+    close_error,
+    close_blocked,
+    retryLoad,
     persist,
     update,
     setTargets,

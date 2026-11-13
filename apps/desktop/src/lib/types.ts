@@ -1139,6 +1139,8 @@ export interface AttachmentViewState {
   /** Manual layout-control preference, independent of automatic canvas sizing. */
   resize_control_desired: boolean;
   message: string | null;
+  /** Frontend-only ownership for feedback that belongs in input or layout controls. */
+  message_kind?: "layout" | "input" | null;
 }
 
 

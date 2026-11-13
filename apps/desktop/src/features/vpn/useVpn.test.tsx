@@ -4,6 +4,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { VpnConnection, VpnConnectionInput, VpnConnectionsSnapshot, VpnSnapshot, VpnStatus } from "../../lib/types";
 import { connectVpn, deleteVpnConnection, loadVpnConnections, openVpnSignIn, saveVpnConnection, saveVpnEnrollment, stopVpn, vpnStatus } from "../../lib/tauri";
 import { useVpn, VPN_STATUS_INTERVAL_MS } from "./useVpn";
+import type { PropsWithChildren } from "react";
+import { NotificationProvider } from "../notifications/NotificationContext";
+import { NotificationStore } from "../notifications/NotificationStore";
 
 vi.mock("../../lib/tauri", () => ({
   connectVpn: vi.fn(), deleteVpnConnection: vi.fn(), loadVpnConnections: vi.fn(),
@@ -65,6 +68,61 @@ beforeEach(() => {
   vi.mocked(deleteVpnConnection).mockResolvedValue({ revision: "revision-2", connections: [research] });
 });
 afterEach(() => { cleanup(); vi.useRealTimers(); });
+
+function notificationWrapper(store: NotificationStore) {
+  return ({ children }: PropsWithChildren) => <NotificationProvider store={store}>{children}</NotificationProvider>;
+}
+
+describe("VPN notification routing", () => {
+  it("notifies a proven loss once until recovery, without interpreting unknown inventory as disconnection", async () => {
+    const store = new NotificationStore();
+    backend = observe(runtime());
+    const { result } = renderHook(() => useVpn(true), { wrapper: notificationWrapper(store) });
+    await ready(result);
+    backend = { ...observe(), discovery_warnings: ["Inventory incomplete"] };
+    await act(async () => { await result.current.refresh(); });
+    expect(store.snapshot().entries).toHaveLength(0);
+    backend = observe(runtime("work", { status_unavailable: true }));
+    await act(async () => { await result.current.refresh(); });
+    expect(store.snapshot().entries).toHaveLength(0);
+    vi.mocked(vpnStatus).mockRejectedValueOnce(new Error("Monitor unavailable"));
+    await act(async () => { await result.current.refresh(); });
+    expect(store.snapshot().entries).toHaveLength(0);
+    backend = observe();
+    await act(async () => { await result.current.refresh(); });
+    expect(store.snapshot().entries).toMatchObject([{ source_key: "vpn:runtime:work", title: "VPN disconnected", occurrence_count: 1 }]);
+    const entry = store.snapshot().entries[0];
+    store.hide(entry.id);
+    await act(async () => { await result.current.refresh(); });
+    expect(store.snapshot().entries[0]).toMatchObject({ occurrence_count: 1, toast_visible: false });
+    backend = observe(runtime());
+    await act(async () => { await result.current.refresh(); });
+    expect(store.snapshot().entries[0].resolved_at).not.toBeNull();
+    backend = observe();
+    await act(async () => { await result.current.refresh(); });
+    expect(store.snapshot().entries[0]).toMatchObject({ occurrence_count: 2, toast_visible: true });
+  });
+
+  it("keeps an intentional disconnect quiet", async () => {
+    const store = new NotificationStore();
+    backend = observe(runtime());
+    const { result } = renderHook(() => useVpn(true), { wrapper: notificationWrapper(store) });
+    await ready(result);
+    await act(async () => { await result.current.stop("work"); await result.current.refresh(); });
+    expect(store.snapshot().entries).toHaveLength(0);
+  });
+
+  it("reports a failed deletion as its own operation without claiming the catalog is unavailable", async () => {
+    const store = new NotificationStore();
+    vi.mocked(deleteVpnConnection).mockRejectedValueOnce(new Error("Delete failed"));
+    const { result } = renderHook(() => useVpn(true), { wrapper: notificationWrapper(store) });
+    await ready(result);
+    await act(async () => { await result.current.deleteConnection("work"); });
+    expect(result.current.catalog_error).toBeNull();
+    expect(result.current.connections).toEqual(catalog.connections);
+    expect(store.snapshot().entries).toMatchObject([{ title: "Could not delete VPN connection", message: "Work: Delete failed" }]);
+  });
+});
 
 describe("VPN controller", () => {
   it("observes only while enabled and never owns a VPN's lifetime", async () => {

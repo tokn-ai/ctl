@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { errorMessage } from "../../lib/errors";
 import { getComponentBundles, selectComponentBundle } from "../../lib/tauri";
 import type { ComponentBundle, ComponentBundlePhase, ComponentBundlesSnapshot } from "../../lib/types";
+import { InlineFeedback } from "../feedback/InlineFeedback";
 
 interface Props {
   visible: boolean;
@@ -40,7 +41,7 @@ export function ComponentBundlePanel({ visible, on_selected }: Props) {
   const [snapshot, setSnapshot] = useState<ComponentBundlesSnapshot | null>(null);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState<{ bundle_id: string; phase: ComponentBundlePhase } | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<{ operation: "refresh" | "install"; message: string } | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const mounted = useRef(false);
   const generation = useRef(0);
@@ -55,7 +56,7 @@ export function ComponentBundlePanel({ visible, on_selected }: Props) {
       const next = await getComponentBundles();
       if (mounted.current && current === generation.current) { setSnapshot(next); setError(null); }
     } catch (failure) {
-      if (mounted.current && current === generation.current) setError(errorMessage(failure));
+      if (mounted.current && current === generation.current) setError({ operation: "refresh", message: errorMessage(failure) });
     } finally {
       if (mounted.current && current === generation.current) setLoading(false);
     }
@@ -85,7 +86,7 @@ export function ComponentBundlePanel({ visible, on_selected }: Props) {
         await refresh();
       }
     } catch (failure) {
-      if (mounted.current) setError(errorMessage(failure));
+      if (mounted.current) setError({ operation: "install", message: errorMessage(failure) });
     } finally {
       selecting.current = false;
       if (mounted.current) setBusy(null);
@@ -95,9 +96,9 @@ export function ComponentBundlePanel({ visible, on_selected }: Props) {
   return <section className="about-section" aria-labelledby="about-bundles">
     <div className="about-bundle-heading"><h2 id="about-bundles">Builds</h2><button type="button" disabled={loading || busy !== null} onClick={() => void refresh()}>{loading ? "Checking builds…" : "Refresh"}</button></div>
     <p className="about-muted">One active build for this computer. Other platforms are cached for remote installation.</p>
-    {error ? <p className="about-error" role="alert">Could not complete the bundle operation: {error}</p> : null}
-    {snapshot?.errors.map((message) => <p className="about-error" role="alert" key={message}>{message}</p>)}
-    {notice ? <p className="about-notice" role="status">{notice}</p> : null}
+    {error ? <InlineFeedback>{error.operation === "refresh" ? "Could not refresh builds" : "Could not install the build"}: {error.message}</InlineFeedback> : null}
+    {snapshot?.errors.map((message) => <InlineFeedback key={message}>{message}</InlineFeedback>)}
+    {notice ? <InlineFeedback severity="success">{notice}</InlineFeedback> : null}
     {busy ? <p role="status">{busy.phase === "verifying" ? "Verifying the complete build…" : "Activating the verified build…"}</p> : null}
     {snapshot?.bundles.length ? <div className="about-table-scroll"><table className="about-bundle-table" aria-label="Component bundles">
       <colgroup><col className="about-bundle-build-column" /><col className="about-bundle-target-column" /><col className="about-bundle-use-column" /></colgroup>

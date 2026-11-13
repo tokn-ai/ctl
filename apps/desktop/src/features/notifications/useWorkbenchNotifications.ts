@@ -1,75 +1,32 @@
 import { useEffect, useRef } from "react";
-import type { ConnectionTarget, ManagedTask, NotificationAction } from "../../lib/types";
-import type { ErrorDetails } from "../../lib/errors";
-import { targetKey, targetLabel } from "../targets/targets";
+import type { ManagedTask, NotificationAction } from "../../lib/types";
 import { COMMAND_IDS } from "../commands/commandIds";
 import type { NotificationStore } from "./NotificationStore";
-import type { AttachmentNotifications } from "./AttachmentNotifications";
 
 interface Sources {
   workspace_error: string | null;
-  workspace_ready: boolean;
   keybindings_error: string | null;
-  session_error: string | null;
-  targets: readonly ConnectionTarget[];
-  target_errors: ReadonlyMap<string, ErrorDetails>;
   storage_error: string | null;
-  task_error: string | null;
-  definitions_error: string | null;
-  task_status: string | null;
+  window_error: string | null;
   tasks: readonly ManagedTask[];
   tasks_loaded: boolean;
 }
 
-export function useWorkbenchNotifications(store: NotificationStore, sources: Sources, attachments: AttachmentNotifications) {
-  const previous_hosts = useRef(new Set<string>());
+/** Only app-owned conditions and runtime events belong here. Forms own their feedback. */
+export function useWorkbenchNotifications(store: NotificationStore, sources: Sources) {
   const previous_runs = useRef<Map<string, string> | null>(null);
-  const previous_task_status = useRef<string | null>(null);
   useEffect(() => {
     const reportError = (key: string, title: string, message: string | null, actions: NotificationAction[] = [], toast = true) => {
-      store.report(key, message ? { severity: "error", title, message, source: title, actions } : null, { toast });
+      if (!message) { store.resolve(key); return; }
+      store.report(key, { severity: "error", title, message, source: title, actions }, { toast });
     };
-    reportError("workspace", "Workspace", sources.workspace_error, sources.workspace_ready
-      ? [{ label: "Retry saving", command_id: COMMAND_IDS.saveWorkspace }] : []);
+    reportError("workspace", "Workspace", sources.workspace_error,
+      [{ label: "Retry saving", command_id: COMMAND_IDS.saveWorkspace }], false);
     reportError("keybindings", "Keyboard shortcuts", sources.keybindings_error
       ? `Keyboard shortcuts: ${sources.keybindings_error} Last valid bindings remain active.` : null,
-    [{ label: "Reload shortcuts", command_id: COMMAND_IDS.reloadKeybindings }]);
-    reportError("sessions", "Sessions", sources.session_error);
+      [{ label: "Reload shortcuts", command_id: COMMAND_IDS.reloadKeybindings }]);
     reportError("session_storage", "Session history", sources.storage_error);
-    const task_status_changed = sources.task_status !== previous_task_status.current;
-    previous_task_status.current = sources.task_status;
-    store.report("tasks", sources.task_error ? {
-      severity: "error", title: "Tasks", message: sources.task_error, source: "Tasks",
-      actions: [{ label: "Retry tasks", command_id: COMMAND_IDS.refreshTasks }],
-    } : task_status_changed && sources.task_status ? {
-      severity: sources.task_status.endsWith("…") ? "info" : "success",
-      title: "Task daemon", message: sources.task_status, source: "Tasks",
-    } : null);
-    reportError("task_definitions", "Task definitions", sources.definitions_error,
-      [{ label: "Retry definitions", command_id: COMMAND_IDS.refreshTasks }]);
-
-    const host_keys = new Set(sources.target_errors.keys());
-    for (const key of previous_hosts.current) {
-      if (!host_keys.has(key)) {
-        store.report(`host:${key}`, null);
-        attachments.reportHostAuthentication(key, null);
-      }
-    }
-    previous_hosts.current = host_keys;
-    for (const [key, error] of sources.target_errors) {
-      const target = sources.targets.find((target) => targetKey(target) === key);
-      if (target?.kind === "ssh" && error.code === "ssh_authentication_required") {
-        store.report(`host:${key}`, null);
-        attachments.reportHostAuthentication(key, target);
-        continue;
-      }
-      attachments.reportHostAuthentication(key, null);
-      reportError(`host:${key}`, target ? `Host · ${targetLabel(target)}` : "Host", error.message,
-        target?.kind === "ssh" && error.code === "ssh_authentication_failed"
-          ? [{ label: "Connect host", command_id: COMMAND_IDS.connectHost, args: { target_key: key } }]
-          : [{ label: "Refresh sessions", command_id: COMMAND_IDS.refreshSessions }],
-        error.code !== "ssh_authentication_required");
-    }
+    reportError("window_close", "Window", sources.window_error);
 
     if (sources.tasks_loaded) {
       const runs = new Map<string, string>();
@@ -79,9 +36,7 @@ export function useWorkbenchNotifications(store: NotificationStore, sources: Sou
         const signature = `${run.run_id}:${run.state}`;
         runs.set(task.task_id, signature);
         if (previous_runs.current && previous_runs.current.get(task.task_id) !== signature && run.state === "failed") {
-          // A distinct run is a new event, even if it fails with the same exit code.
-          store.report(`task_run:${task.task_id}`, null);
-          store.report(`task_run:${task.task_id}`, {
+          store.notify(`task_run:${task.task_id}`, {
             severity: "error", title: "Task failed", source: task.definition.name,
             message: `${task.definition.name} failed${run.exit_code !== null ? ` with exit code ${run.exit_code}` : ""}.`,
             actions: [{ label: "View task", command_id: COMMAND_IDS.openTask, args: { value: task.task_id } }],

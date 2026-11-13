@@ -1,11 +1,14 @@
 // @vitest-environment jsdom
+import type { ReactElement } from "react";
+import { NotificationProvider } from "../features/notifications/NotificationContext";
+import { NotificationStore } from "../features/notifications/NotificationStore";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ComponentVersionInfo, ComponentVersionsSnapshot, ComponentActionPreflight } from "../lib/types";
 import { AboutPage } from "./AboutPage";
 
-const api = vi.hoisted(() => ({ versions: vi.fn(), preflight: vi.fn(), restart: vi.fn(), bundles: vi.fn(), select: vi.fn(), published: vi.fn() }));
-vi.mock("../lib/tauri", () => ({ getComponentVersions: api.versions, preflightComponentAction: api.preflight, executeComponentAction: api.restart, getComponentBundles: api.bundles, selectComponentBundle: api.select, checkComponentUpdates: api.published }));
+const api = vi.hoisted(() => ({ versions: vi.fn(), preflight: vi.fn(), restart: vi.fn(), bundles: vi.fn(), select: vi.fn(), published: vi.fn(), update: vi.fn(), cancel_update: vi.fn() }));
+vi.mock("../lib/tauri", () => ({ getComponentVersions: api.versions, preflightComponentAction: api.preflight, executeComponentAction: api.restart, getComponentBundles: api.bundles, selectComponentBundle: api.select, checkComponentUpdates: api.published, updateComponents: api.update, cancelComponentUpdate: api.cancel_update }));
 
 const current: ComponentVersionInfo = { version: "0.1.0", source_revision: "abcdef123456", source_fingerprint: "current", dirty: false, protocols: [{ name: "ctld", build: 12, version: "1.0.12", supported_versions: ["1.0.12"] }] };
 const snapshot: ComponentVersionsSnapshot = { components: [
@@ -21,13 +24,20 @@ async function expandGroups() {
 
 const props = () => ({ visible: true, on_close: vi.fn(), on_restarted: vi.fn(), on_dialog_change: vi.fn() });
 
+let notifications: NotificationStore;
+function renderPage(ui: ReactElement) {
+  return render(ui, { wrapper: ({ children }) => <NotificationProvider store={notifications}>{children}</NotificationProvider> });
+}
+
 beforeEach(() => {
+  notifications = new NotificationStore();
   vi.clearAllMocks();
   api.bundles.mockResolvedValue({ bundles: [], errors: [] });
   api.published.mockResolvedValue({ default_channel: "nightly", local_development: false, catalog: null, error: null });
   api.versions.mockResolvedValue(structuredClone(snapshot));
   api.preflight.mockResolvedValue(structuredClone(preflight));
   api.restart.mockResolvedValue({ component_id: "owner-1", running: current });
+  api.cancel_update.mockResolvedValue(undefined);
 });
 afterEach(cleanup);
 
@@ -37,7 +47,7 @@ describe("About page", () => {
     next.components[2] = { ...next.components[2], component: "ctmuxd", label: "ctmuxd — Saved host", installed: current, running: null,
       legacy_protocols: [{ name: "ctmux_control", version: 1 }, { name: "ctmux", version: 13 }], restart_required: true, status: "incompatible" };
     api.versions.mockResolvedValue(next);
-    render(<AboutPage {...props()} />);
+    renderPage(<AboutPage {...props()} />);
     await expandGroups();
     const row = (await screen.findByTitle(/ctmuxd — Saved host/)).closest("tbody")!;
     expect(screen.getAllByRole("columnheader", { name: "State / build" })).toHaveLength(2);
@@ -52,7 +62,7 @@ describe("About page", () => {
     const next = structuredClone(snapshot);
     next.components[2] = { ...next.components[2], component_id: "remote:saved:dev:ctl_agent", observation: "not_checked", running: null, installed: null, status: "unavailable", error: "SSH account is not connected." };
     api.versions.mockResolvedValue(next);
-    render(<AboutPage {...props()} remote_targets={[{ kind: "ssh", host_id: "dev", destination: "dev" }]} />);
+    renderPage(<AboutPage {...props()} remote_targets={[{ kind: "ssh", host_id: "dev", destination: "dev" }]} />);
     await expandGroups();
     expect(await screen.findByRole("button", { name: "Update components Development" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Check host Development" })).toBeTruthy();
@@ -70,7 +80,7 @@ describe("About page", () => {
     const reconnect = { ...preflight, component_id: "remote-1", component: "ctl_agent" as const, location: "remote" as const, host_id: "dev", action: "reconnect" as const, label: "ctl-agent — Development", impact: { ...preflight.impact, description: "Reconnects these terminal transports. Remote sessions keep running." } };
     api.preflight.mockResolvedValue(reconnect);
     const execute_action = vi.fn().mockResolvedValue({ detail: "Two terminal transports reconnected." });
-    render(<AboutPage {...props()} execute_action={execute_action} />);
+    renderPage(<AboutPage {...props()} execute_action={execute_action} />);
     await expandGroups();
     expect(await screen.findByRole("button", { name: "Restart ctl-taskd" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Restart ctmux" })).toBeNull();
@@ -80,7 +90,8 @@ describe("About page", () => {
     fireEvent.click(within(dialog).getByRole("button", { name: "Reconnect ctl-agent" }));
     await waitFor(() => expect(execute_action).toHaveBeenCalledWith(reconnect));
     expect(api.restart).not.toHaveBeenCalled();
-    expect(await screen.findByText("Two terminal transports reconnected.")).toBeTruthy();
+    await waitFor(() => expect(notifications.snapshot().entries[0]).toMatchObject({ severity: "success", source: "Components", message: "Two terminal transports reconnected." }));
+    expect(screen.queryByText("Two terminal transports reconnected.")).toBeNull();
   });
 
   it("distinguishes unreported builds from incomplete verification without hiding protocol mismatch", async () => {
@@ -88,7 +99,7 @@ describe("About page", () => {
     legacy.components[1] = { ...legacy.components[1], component: "ctl-taskd", label: "ctl-taskd", status: "unknown", running: { ...current, version: null, source_revision: null, source_fingerprint: null } };
     legacy.components[2].running = { ...current, source_fingerprint: null };
     api.versions.mockResolvedValue(legacy);
-    render(<AboutPage {...props()} />);
+    renderPage(<AboutPage {...props()} />);
     await expandGroups();
     const legacy_row = (await screen.findByText("ctl-taskd")).closest("tbody")!;
     expect(within(legacy_row).getByText("Build not reported")).toBeTruthy();
@@ -100,7 +111,7 @@ describe("About page", () => {
 
   it("checks only when opened, and distinguishes observed build metadata from current versions", async () => {
     const options = props();
-    const page = render(<AboutPage {...options} visible={false} />);
+    const page = renderPage(<AboutPage {...options} visible={false} />);
     expect(api.versions).not.toHaveBeenCalled();
     page.rerender(<AboutPage {...options} />);
     await expandGroups();
@@ -118,7 +129,7 @@ describe("About page", () => {
     partial.components[1].error = "ctld timed out.";
     partial.components[1].running = null;
     api.versions.mockResolvedValue(partial);
-    render(<AboutPage {...props()} />);
+    renderPage(<AboutPage {...props()} />);
     await expandGroups();
     expect(await screen.findByText("ctld timed out.")).toBeTruthy();
     expect(screen.getByTitle(/ctl-agent — Development/)).toBeTruthy();
@@ -127,7 +138,7 @@ describe("About page", () => {
 
   it("preflights before confirming restart, then refreshes versions and connections", async () => {
     const options = props();
-    render(<AboutPage {...options} />);
+    renderPage(<AboutPage {...options} />);
     await expandGroups();
     fireEvent.click(await screen.findByRole("button", { name: "Restart ctld (SSH)" }));
     const dialog = await screen.findByRole("dialog", { name: "Restart ctld (SSH)" });
@@ -143,7 +154,7 @@ describe("About page", () => {
   });
 
   it("canceling the impact confirmation leaves the daemon untouched", async () => {
-    render(<AboutPage {...props()} />);
+    renderPage(<AboutPage {...props()} />);
     await expandGroups();
     fireEvent.click(await screen.findByRole("button", { name: "Restart ctld (SSH)" }));
     const dialog = await screen.findByRole("dialog", { name: "Restart ctld (SSH)" });
@@ -155,10 +166,11 @@ describe("About page", () => {
 
   it("shows preflight errors at their component without opening a confirmation", async () => {
     api.preflight.mockRejectedValue({ message: "Update ctld before it can restart cooperatively." });
-    render(<AboutPage {...props()} />);
+    renderPage(<AboutPage {...props()} />);
     await expandGroups();
     fireEvent.click(await screen.findByRole("button", { name: "Restart ctld (SSH)" }));
     expect(await screen.findByText("Update ctld before it can restart cooperatively.")).toBeTruthy();
+    expect(notifications.snapshot().entries).toHaveLength(0);
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(api.restart).not.toHaveBeenCalled();
   });
@@ -166,18 +178,19 @@ describe("About page", () => {
   it("refreshes observations after restart failure and keeps the error visible", async () => {
     api.restart.mockRejectedValue({ message: "Replacement readiness timed out." });
     const options = props();
-    render(<AboutPage {...options} />);
+    renderPage(<AboutPage {...options} />);
     await expandGroups();
     fireEvent.click(await screen.findByRole("button", { name: "Restart ctld (SSH)" }));
     const dialog = await screen.findByRole("dialog", { name: "Restart ctld (SSH)" });
     fireEvent.click(within(dialog).getByRole("button", { name: "Restart ctld" }));
-    expect(await screen.findByText("Replacement readiness timed out.")).toBeTruthy();
+    await waitFor(() => expect(notifications.snapshot().entries[0]).toMatchObject({ severity: "error", source: "Components", message: "ctld (SSH): Replacement readiness timed out." }));
+    expect(screen.queryByText("Replacement readiness timed out.")).toBeNull();
     await waitFor(() => expect(api.versions).toHaveBeenCalledTimes(2));
     expect(options.on_restarted).toHaveBeenCalledOnce();
   });
 
   it("retains the last successful snapshot when refresh fails", async () => {
-    render(<AboutPage {...props()} />);
+    renderPage(<AboutPage {...props()} />);
     await expandGroups();
     await screen.findAllByText("Different build");
     api.versions.mockRejectedValue({ message: "Version service unavailable." });
@@ -190,7 +203,7 @@ describe("About page", () => {
     const partial = structuredClone(snapshot);
     partial.components[1].running = { ...current, protocols: [], source_fingerprint: "running-build" };
     api.versions.mockResolvedValue(partial);
-    render(<AboutPage {...props()} />);
+    renderPage(<AboutPage {...props()} />);
     await expandGroups();
     const row = (await screen.findByText("ctld (SSH)")).closest("tbody")!;
     expect(within(row).getByTitle(/SSH and VPN broker/)).toBeTruthy();
@@ -206,7 +219,7 @@ describe("About page", () => {
     stale.components[1].required_protocols = [{ name: "ctld", build: 12, version: "1.0.12", supported_versions: ["1.0.12"] }, { name: "ctld_lifecycle", build: 1, version: "1.0.1", supported_versions: ["1.0.1"] }];
     stale.components[1].status = "incompatible";
     api.versions.mockResolvedValue(stale);
-    render(<AboutPage {...props()} />);
+    renderPage(<AboutPage {...props()} />);
     await expandGroups();
     const row = (await screen.findByText("ctld (SSH)")).closest("tbody")!;
     const protocols = within(row).getByRole("list", { name: "Running + on disk protocols" });
@@ -219,7 +232,7 @@ describe("About page", () => {
     let complete!: (value: ComponentVersionsSnapshot) => void;
     api.versions.mockImplementationOnce(() => new Promise((resolve) => { complete = resolve; }));
     const options = props();
-    const page = render(<AboutPage {...options} />);
+    const page = renderPage(<AboutPage {...options} />);
     await waitFor(() => expect(api.versions).toHaveBeenCalledOnce());
     page.rerender(<AboutPage {...options} visible={false} />);
     page.rerender(<AboutPage {...options} />);
@@ -235,7 +248,7 @@ describe("About page", () => {
     let complete!: (value: ComponentActionPreflight) => void;
     api.preflight.mockImplementationOnce(() => new Promise((resolve) => { complete = resolve; }));
     const options = props();
-    const page = render(<AboutPage {...options} />);
+    const page = renderPage(<AboutPage {...options} />);
     await expandGroups();
     fireEvent.click(await screen.findByRole("button", { name: "Restart ctld (SSH)" }));
     await waitFor(() => expect(api.preflight).toHaveBeenCalledOnce());
@@ -249,7 +262,7 @@ describe("About page", () => {
     let complete!: (value: ComponentActionPreflight) => void;
     api.preflight.mockImplementationOnce(() => new Promise((resolve) => { complete = resolve; }));
     const options = props();
-    const page = render(<AboutPage {...options} />);
+    const page = renderPage(<AboutPage {...options} />);
     await expandGroups();
     fireEvent.click(await screen.findByRole("button", { name: "Restart ctld (SSH)" }));
     await waitFor(() => expect(api.preflight).toHaveBeenCalledOnce());
@@ -265,12 +278,13 @@ describe("About page", () => {
   it("reports a successful restart separately from a failed version refresh", async () => {
     api.versions.mockResolvedValueOnce(structuredClone(snapshot)).mockRejectedValueOnce(new Error("Probe timed out."));
     const options = props();
-    render(<AboutPage {...options} />);
+    renderPage(<AboutPage {...options} />);
     await expandGroups();
     fireEvent.click(await screen.findByRole("button", { name: "Restart ctld (SSH)" }));
     const dialog = await screen.findByRole("dialog", { name: "Restart ctld (SSH)" });
     fireEvent.click(within(dialog).getByRole("button", { name: "Restart ctld" }));
-    expect(await screen.findByText("ctld (SSH) restarted.")).toBeTruthy();
+    await waitFor(() => expect(notifications.snapshot().entries[0]).toMatchObject({ severity: "success", message: "ctld (SSH) restarted." }));
+    expect(screen.queryByText("ctld (SSH) restarted.")).toBeNull();
     expect(await screen.findByText(/Could not refresh versions: Probe timed out./)).toBeTruthy();
     expect(screen.getAllByText("Different build").length).toBeGreaterThan(0);
     expect(options.on_restarted).toHaveBeenCalledOnce();
@@ -280,7 +294,7 @@ describe("About page", () => {
     let complete!: (value: unknown) => void;
     api.restart.mockReturnValue(new Promise((resolve) => { complete = resolve; }));
     const options = props();
-    const page = render(<AboutPage {...options} />);
+    const page = renderPage(<AboutPage {...options} />);
     await expandGroups();
     fireEvent.click(await screen.findByRole("button", { name: "Restart ctld (SSH)" }));
     const dialog = await screen.findByRole("dialog", { name: "Restart ctld (SSH)" });
@@ -290,5 +304,20 @@ describe("About page", () => {
     await act(async () => { complete({ component_id: "owner-1", running: current }); });
     expect(options.on_restarted).toHaveBeenCalledOnce();
     expect(api.versions).toHaveBeenCalledTimes(2);
+    expect(notifications.snapshot().entries[0]).toMatchObject({ severity: "success", source: "Components", message: "ctld (SSH) restarted." });
+  });
+
+  it("keeps component update results in the dialog without duplicating its summary on About or in notifications", async () => {
+    api.update.mockResolvedValue([{ host_index: 0, state: "complete", error: null, result: { package: "full_bundle", bundle_id: "verified-build", target_triple: "test-platform", services_preserved: true } }]);
+    renderPage(<AboutPage {...props()} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Update components…" }));
+    const dialog = screen.getByRole("dialog", { name: "Update components" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Update" }));
+    expect(await within(dialog).findByText("1 of 1 hosts updated. Running services were preserved.")).toBeTruthy();
+    expect(screen.queryByText("1 hosts updated. Running services were preserved; restart separately where required.")).toBeNull();
+    expect(notifications.snapshot().entries).toHaveLength(0);
+    fireEvent.click(within(dialog).getByRole("button", { name: "Done" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.queryByText(/hosts updated/)).toBeNull();
   });
 });

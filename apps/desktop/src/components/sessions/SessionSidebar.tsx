@@ -4,6 +4,7 @@ import { Icon } from "../ui/Icon";
 import { SessionIcon, sessionIconLabel } from "./SessionIcon";
 import { HostColorPicker } from "./HostColorPicker";
 import { HostDetailsCard } from "./HostDetailsCard";
+import { InlineFeedback } from "../feedback/InlineFeedback";
 import { hostPresentation } from "../../features/workspace/hostPresentation";
 import { hostColor } from "../../features/workspace/hostColor";
 import { attachmentPhaseLabel } from "../../features/attachment/attachmentState";
@@ -51,6 +52,8 @@ interface SessionSidebarProps {
   selectedSessionKey: string | null;
   openTabSessionKeys: ReadonlySet<string>;
   loading: boolean;
+  list_error?: string | null;
+  on_retry?(): void;
   creating: boolean;
   closingSessionKeys: ReadonlySet<string>;
   disconnectingSessionKey: string | null;
@@ -135,6 +138,8 @@ export function SessionSidebar({
   selectedSessionKey,
   openTabSessionKeys,
   loading,
+  list_error,
+  on_retry,
   creating,
   closingSessionKeys,
   disconnectingSessionKey,
@@ -223,6 +228,9 @@ export function SessionSidebar({
       </div>
 
       <div className="session-list">
+        {list_error ? <InlineFeedback action={{ label: "Retry session list", on_click: on_retry ?? onRefresh, disabled: loading }}>
+          Could not refresh sessions: {list_error}{sessions.length > 0 ? " Showing the last successful check." : ""}
+        </InlineFeedback> : null}
         {loading && sessions.length === 0 ? (
           <p className="sidebar-state">Loading workspace…</p>
         ) : null}
@@ -283,6 +291,7 @@ export function SessionSidebar({
             : undefined;
           const operation = connection?.operation;
           const presentation = hostPresentation(target, connection, targetErrors.get(key));
+          const host_error = targetErrors.get(key);
           const details_description = [presentation.description,
             ...presentation.details.map((detail) => `${detail.label}: ${detail.value}`),
           ].join("\n");
@@ -415,6 +424,9 @@ export function SessionSidebar({
                   </> : null}
                 </div>
               </div>
+              {host_error ? <InlineFeedback action={{ label: "Retry host check", on_click: on_retry ?? onRefresh, disabled: loading }}>
+                {host_error.message}{groupSessions.length > 0 ? " Showing remembered sessions." : ""}
+              </InlineFeedback> : null}
               {can_expand && <div className="host-group-children" id={childrenId} hidden={!expanded}>
                 {groupSessions.map((session) => {
                   const identity = sessionKey(session);

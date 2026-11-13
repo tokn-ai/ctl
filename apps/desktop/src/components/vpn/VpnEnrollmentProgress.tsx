@@ -1,5 +1,6 @@
 import type { useVpnEnrollment } from "../../features/vpn/useVpnEnrollment";
 import { vpnNeedsSignIn } from "../../features/vpn/status";
+import { InlineFeedback } from "../feedback/InlineFeedback";
 
 interface Props {
   enrollment: ReturnType<typeof useVpnEnrollment>;
@@ -37,7 +38,7 @@ export function VpnEnrollmentProgress({ enrollment }: Props) {
     </button> : null}
     {enrollment.cleanup_pending && !enrollment.cancelling ? <button type="button" onClick={() => void enrollment.cancel()}>Retry cleanup</button>
       : enrollment.error && enrollment.snapshot && !enrollment.snapshot.error && !enrollment.cancelling ? <button type="button" onClick={() => void enrollment.refresh()}>Refresh status</button> : null}
-    {failure ? <p className="vpn-error" role="alert">{failure}</p> : null}
-    {enrollment.browser_error ? <p className="vpn-error" role="alert">{enrollment.browser_error} Choose Open browser to try again.</p> : null}
+    {failure ? <InlineFeedback>{failure}</InlineFeedback> : null}
+    {enrollment.browser_error ? <InlineFeedback>{enrollment.browser_error} Choose Open browser to try again.</InlineFeedback> : null}
   </section>;
 }

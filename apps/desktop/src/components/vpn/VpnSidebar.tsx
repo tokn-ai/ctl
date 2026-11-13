@@ -4,6 +4,7 @@ import type { VpnController } from "../../features/vpn/useVpn";
 import { Icon } from "../ui/Icon";
 import { VpnConnectionEditor } from "./VpnConnectionEditor";
 import { VpnConnectionItem } from "./VpnConnectionItem";
+import { InlineFeedback } from "../feedback/InlineFeedback";
 import "./vpn.css";
 
 interface Props {
@@ -16,6 +17,10 @@ export function VpnSidebar({ model }: Props) {
   const assigned_ids = new Set([...model.connections.map((connection) => connection.connection_id), ...model.statuses.map(vpnRuntimeId)]);
   const detached_errors = [...model.action_errors].filter(([vpn_id]) => !assigned_ids.has(vpn_id));
   const refreshing = model.catalog_loading || model.status_loading;
+  const monitoring_errors = [...new Set([model.status_error, ...model.discovery_warnings, model.catalog_error].filter((message): message is string => Boolean(message)))];
+  const monitoring_title = model.status_error || model.status_stale || model.discovery_warnings.length > 0 && model.statuses.length === 0
+    ? "VPN status unavailable." : model.discovery_warnings.length > 0 ? "Some VPN status could not be checked."
+      : model.catalog_loaded ? "Could not refresh saved VPN connections." : "Saved VPN connections unavailable.";
 
   return (
     <>
@@ -31,17 +36,20 @@ export function VpnSidebar({ model }: Props) {
           </button>
         </header>
         <div className="vpn-sidebar-body">
-          {model.statuses.length === 0 && (!model.status_loaded || model.status_stale || model.discovery_warnings.length > 0) ? (
+          {model.statuses.length === 0 && !model.status_loaded && monitoring_errors.length === 0 ? (
             <div className="vpn-notice">
-              <p role="status">{model.status_stale || model.discovery_warnings.length > 0 ? "VPN status unavailable." : "Checking VPN…"}</p>
+              <p role="status">Checking VPN…</p>
             </div>
           ) : null}
           {model.status_loaded && !model.supports_multiple ? (
             <p className="vpn-notice">Update ctld to manage individual VPNs and connect to multiple VPNs at the same time.</p>
           ) : null}
-          {[model.status_error, ...model.discovery_warnings, model.catalog_error, ...detached_errors.map(([, message]) => message)].filter(Boolean).map((message, index) => (
-            <p className="vpn-error" role="alert" key={`${index}-${message}`}>{message}</p>
-          ))}
+          {monitoring_errors.length > 0 || model.status_stale ? <InlineFeedback severity="warning" action={{ label: "Retry VPN check", on_click: () => void model.refresh(), disabled: refreshing }}>
+            <strong>{monitoring_title}</strong>
+            {monitoring_errors.map((message) => <p key={message}>{message}</p>)}
+            {model.catalog_error && model.catalog_loaded ? <p>Showing saved connections from the last successful check.</p> : null}
+          </InlineFeedback> : null}
+          {detached_errors.map(([vpn_id, message]) => <InlineFeedback key={vpn_id}>{message}</InlineFeedback>)}
           {model.catalog_loading && !model.catalog_loaded && external.length === 0 ? <p className="vpn-loading" role="status">Loading saved connections…</p> : null}
           <div className="vpn-connection-list">
             {external.map((runtime) => <VpnConnectionItem key={`runtime-${vpnRuntimeId(runtime)}`} connection={null} runtime={runtime} model={model} />)}

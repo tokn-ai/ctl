@@ -8,6 +8,9 @@ import type {
 } from "../../lib/types";
 import { configurePortForward, listPortForwards } from "../../lib/tauri";
 import { usePortForwarding } from "./usePortForwarding";
+import type { PropsWithChildren } from "react";
+import { NotificationProvider } from "../notifications/NotificationContext";
+import { NotificationStore } from "../notifications/NotificationStore";
 
 vi.mock("../../lib/tauri", () => ({
   configurePortForward: vi.fn(),
@@ -51,6 +54,47 @@ beforeEach(() => {
   vi.mocked(listPortForwards).mockResolvedValue([active]);
 });
 afterEach(cleanup);
+
+function notificationWrapper(store: NotificationStore) {
+  return ({ children }: PropsWithChildren) => <NotificationProvider store={store}>{children}</NotificationProvider>;
+}
+
+describe("port-forward feedback ownership", () => {
+  it("routes a standalone operation to notifications and lets the dialog own inline failures", async () => {
+    const store = new NotificationStore();
+    vi.mocked(configurePortForward).mockRejectedValue(new Error("Forward unavailable"));
+    const { result } = renderHook(() => usePortForwarding(false, [target], [forward], vi.fn()), { wrapper: notificationWrapper(store) });
+    await act(async () => { await expect(result.current.setEnabled(target, forward, true)).rejects.toThrow("Forward unavailable"); });
+    expect(store.snapshot().entries).toMatchObject([{ title: "Could not start port forward", occurrence_count: 1 }]);
+    expect(result.current.hostErrors.size).toBe(0);
+    store.clear();
+    await act(async () => { await expect(result.current.setEnabled(target, forward, true, { feedback: "inline" })).rejects.toThrow("Forward unavailable"); });
+    expect(store.snapshot().entries).toHaveLength(0);
+    expect(result.current.hostErrors.size).toBe(0);
+  });
+
+  it("notifies one failed startup restore and keeps subsequent manual checks local", async () => {
+    const store = new NotificationStore();
+    vi.mocked(configurePortForward).mockRejectedValue(new Error("Unsupported forwarding"));
+    const { result } = renderHook(() => usePortForwarding(true, [target], [forward], vi.fn()), { wrapper: notificationWrapper(store) });
+    await waitFor(() => expect(store.snapshot().entries).toHaveLength(1));
+    expect(result.current.hostErrors.get("remote")).toBe("Unsupported forwarding");
+    await act(async () => { await result.current.refreshAll(); await result.current.refreshTarget(target); });
+    expect(store.snapshot().entries).toMatchObject([{ title: "Could not restore port forwards", occurrence_count: 1 }]);
+    expect(result.current.statuses.has(forward.forward_id)).toBe(false);
+  });
+
+  it("reports a daemon-confirmed restore error while preserving its row state", async () => {
+    const store = new NotificationStore();
+    const failed: PortForwardStatus = { ...active, state: "error", message: "Port already used" };
+    vi.mocked(configurePortForward).mockResolvedValue(failed);
+    vi.mocked(listPortForwards).mockResolvedValue([failed]);
+    const { result } = renderHook(() => usePortForwarding(true, [target], [forward], vi.fn()), { wrapper: notificationWrapper(store) });
+    await waitFor(() => expect(store.snapshot().entries).toHaveLength(1));
+    expect(result.current.statuses.get(forward.forward_id)?.state).toBe("error");
+    expect(result.current.hostErrors.size).toBe(0);
+  });
+});
 
 describe("port forwarding controller", () => {
   it("discovers CLI forwards on refresh without saving or recreating them", async () => {
@@ -100,7 +144,7 @@ describe("port forwarding controller", () => {
     expect(result.current.lastRefreshedAt).not.toBeNull();
   });
 
-  it("persists a successful state change and exposes a failed host operation", async () => {
+  it("persists a successful state change without assigning a forward operation error to the host", async () => {
     const update = vi.fn();
     const { result } = renderHook(() =>
       usePortForwarding(false, [target], [forward], update),
@@ -121,7 +165,7 @@ describe("port forwarding controller", () => {
       }
     });
     expect(failure).toEqual(new Error("offline"));
-    expect(result.current.hostErrors.get("remote")).toBe("offline");
+    expect(result.current.hostErrors.has("remote")).toBe(false);
   });
 
   it("finishes an old in-flight configure before moving forwards, without continuing its stale batch", async () => {

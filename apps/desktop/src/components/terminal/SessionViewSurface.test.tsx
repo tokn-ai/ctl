@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render as renderView, screen, waitFor } from "@testing-library/react";
 import { flushSync } from "react-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AttachmentViewState, SessionSummary, SessionView } from "../../lib/types";
@@ -45,7 +45,12 @@ const split: SessionView = { ...initial, revision: "1", panes: [{ terminal_id: "
 const props = () => ({ session, on_promoted: vi.fn(), on_select_terminal: vi.fn(), phase: "attached" as const, hasSession: true, has_cached_content: true, onInput: vi.fn(), onReady: vi.fn() });
 let stop_control: () => void;
 let captured: WeakMap<HTMLElement, number>;
+let notifications = new NotificationStore();
+function render(ui: Parameters<typeof renderView>[0], options?: Parameters<typeof renderView>[1]) {
+  return renderView(ui, { wrapper: ({ children }) => <NotificationProvider store={notifications}>{children}</NotificationProvider>, ...options });
+}
 beforeEach(() => {
+  notifications = new NotificationStore();
   captured = new WeakMap();
   vi.stubGlobal("PointerEvent", class extends MouseEvent { readonly pointerId = 1; readonly isPrimary = true; });
   Object.defineProperty(HTMLElement.prototype, "setPointerCapture", { configurable: true, value(this: HTMLElement, pointer_id: number) { captured.set(this, pointer_id); } });
@@ -85,6 +90,30 @@ function paneAction(name: string): HTMLButtonElement {
 }
 
 describe("session compositor", () => {
+  it("keeps layout refresh failures local and clears them after an explicit successful retry", async () => {
+    mocks.request.mockRejectedValueOnce(new Error("Layout unavailable")).mockResolvedValue(initial);
+    render(<SessionViewSurface {...props()} />);
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("Layout unavailable"));
+    expect(notifications.snapshot().entries).toEqual([]);
+    fireEvent.click(screen.getByRole("button", { name: "Retry layout" }));
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+    expect(notifications.snapshot().entries).toEqual([]);
+  });
+
+  it("attributes a late pane-operation failure to its original session after switching tabs", async () => {
+    let reject_split!: (error: Error) => void;
+    const pending = new Promise<SessionView>((_resolve, reject) => { reject_split = reject; });
+    mocks.request.mockImplementation((_target, action) => action.kind === "split" ? pending : Promise.resolve({ ...initial, session_id: action.session_id }));
+    const actions = props();
+    const mounted = render(<SessionViewSurface {...actions} />);
+    await waitFor(() => expect(mocks.request).toHaveBeenCalled());
+    fireEvent.click(paneAction("Split right"));
+    mounted.rerender(<SessionViewSurface {...actions} session={{ ...session, session_id: "other", name: "Other" }} />);
+    await act(async () => { reject_split(new Error("Could not spawn shell")); });
+    expect(notifications.snapshot().entries).toMatchObject([{ title: "Could not split pane", source: "Root", message: "Could not spawn shell" }]);
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
   it("reports confirmed layouts without counting retained ended panes", async () => {
     mocks.request.mockResolvedValue(split);
     const on_view = vi.fn();
@@ -323,7 +352,8 @@ describe("session compositor", () => {
       publishSessionView({ session, attachment_id: "primary-owner", view: { ...split, revision: "3", zoomed_terminal_id: "b" } });
       publishPaneResizeResult({ session, attachment_id: "primary-owner", request_id: second_request, view: null, error: { code: "layout_lease_required", message: "Take resize control." } });
     });
-    expect(screen.getByRole("alert").textContent).toBe("Take resize control.");
+    expect(notifications.snapshot().entries).toMatchObject([{ title: "Could not resize pane", message: "Take resize control." }]);
+    expect(screen.queryByRole("alert")).toBeNull();
     expect(second.closest<HTMLElement>(".view-pane")?.style.width).toBe("640px");
     expect(mocks.unmount).not.toHaveBeenCalled();
   });
@@ -645,7 +675,7 @@ describe("session compositor", () => {
     expect(commands).toEqual([]);
   });
 
-  it("keeps a failed split visible across background refreshes until retry", async () => {
+  it("retains a failed split in notifications across successful background refreshes and retry", async () => {
     vi.useFakeTimers();
     mocks.request.mockResolvedValueOnce(initial)
       .mockRejectedValueOnce(new Error("Could not spawn shell"))
@@ -653,9 +683,10 @@ describe("session compositor", () => {
       .mockResolvedValueOnce(split);
     await act(async () => { render(<SessionViewSurface {...props()} />); });
     await act(async () => { fireEvent.click(paneAction("Split right")); });
-    expect(screen.getByRole("alert").textContent).toBe("Could not spawn shell");
+    expect(notifications.snapshot().entries).toMatchObject([{ title: "Could not split pane", message: "Could not spawn shell", occurrence_count: 1 }]);
+    expect(screen.queryByRole("alert")).toBeNull();
     await act(async () => { vi.advanceTimersByTime(2000); });
-    expect(screen.getByRole("alert").textContent).toBe("Could not spawn shell");
+    expect(notifications.snapshot().entries).toMatchObject([{ message: "Could not spawn shell", occurrence_count: 1 }]);
     await act(async () => { fireEvent.click(paneAction("Split right")); });
     expect(screen.queryByRole("alert")).toBeNull();
     expect(screen.getAllByTestId("terminal-surface")).toHaveLength(2);
@@ -840,7 +871,7 @@ describe("session compositor", () => {
     act(() => first.focus());
     fireEvent.keyDown(first, { key: "b", code: "KeyB", ctrlKey: true });
     fireEvent.keyDown(first, { key: "z", code: "KeyZ" });
-    await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("does not support pane zoom"));
+    await waitFor(() => expect(notifications.snapshot().entries[0]?.message).toContain("does not support pane zoom"));
     expect(second.closest<HTMLElement>(".view-pane")?.style.visibility).toBe("visible");
     expect(first.closest<HTMLElement>(".view-pane")?.style.width).toBe("320px");
     expect(mocks.unmount).not.toHaveBeenCalled();
@@ -869,7 +900,7 @@ describe("session compositor", () => {
     await waitFor(() => expect(document.activeElement).toBe(second));
     fireEvent.keyDown(second, { key: "b", code: "KeyB", ctrlKey: true });
     fireEvent.keyDown(second, { key: "ArrowLeft", code: "ArrowLeft" });
-    await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("Take resize control"));
+    await waitFor(() => expect(notifications.snapshot().entries[0]?.message).toContain("Take resize control"));
     expect(mocks.zoom).not.toHaveBeenCalled();
     expect(document.activeElement).toBe(second);
     expect(first.closest<HTMLElement>(".view-pane")?.style.visibility).toBe("hidden");

@@ -215,7 +215,8 @@ mod tests {
     let home = Home::new();
     let target = ctl_core::paths::native_target();
     let bundle = fixture_bundle(&home.0, target, 'a');
-    let upload = crate::components::upload_bundle(&bundle).unwrap();
+    // The receiver accepts native builds independently of publisher upload targets.
+    let upload = crate::components::package_bundle(&bundle).unwrap();
     let origin = CatalogOrigin {
       channel: "nightly".into(),
       publication_id: Some("one".into()),

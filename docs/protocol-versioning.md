@@ -46,6 +46,7 @@ unpublished wire formats.
 | `ctl_remote_vpn` | 1 | `1.0.1` |
 | `ctl_forwarding` | 1 | `1.0.1` |
 | `ctl_transport` | 1 | `1.0.1` |
+| `ctl_files` | 1 | `1.0.1` |
 
 The remote VPN addition starts the next development cycle with ctld `1.1.13`
 (build 13) and helper `1.1.2` (build 2), retaining their frozen initial contracts.
@@ -477,6 +478,32 @@ Product release `v0.1.3` freezes `ctmux` `1.3.23` (build 23), `ctld` `1.2.18`
 (build 1). Release preparation increments no protocol version or internal
 build. The [v0.1.3 protocol map](releases/v0.1.3.md#protocol-contracts) records
 all named contracts and their supported versions.
+
+Read-only file browsing opens the development cycle after `v0.1.3`. It advances
+`ctld` from `1.2.18` (build 18) to `1.3.19` (build 19), retaining every prior
+published contract. The existing `open_service` request adds the `files` service
+value; clients and brokers require selected `1.3.19` before accepting it.
+`ctl_transport` advances from `1.0.1` (build 1) to `1.1.2` (build 2), retaining
+`1.0.1`. Logical service selector 3 selects Files only under `1.1.2`; selectors
+0–2 retain their existing meanings and remain available under both contracts.
+Both peers validate the selected contract before opening or dispatching Files.
+An older selected broker or transport reports the service as unavailable while
+retaining terminal, task, and UDP service support.
+
+The independent `ctl_files 1.0.1` contract (build 1) introduces bounded read-only
+`metadata`, `read_file`, `list_directory`, and `git_status` operations after
+`ctl-file-service\n` and explicit contract selection. Each logical stream owns
+one request and response; concurrent streams share the Files agent group, and
+closing one stream cancels its operation without affecting siblings. The fixed
+`ctl-agent files` endpoint exposes the same framing for direct transports.
+The broker isolates Files in a third group with its own 64-handler/16 MiB
+receive bound and idle lifetime. All three groups total 192 handlers and 48 MiB
+of service receive windows, plus three 256 KiB server admission slots (48.75 MiB).
+Existing agents remain eligible for their prior services without a `ctl_files`
+advertisement; any advertised Files contract must intersect the client's set.
+The identity advertisement gains a protocol entry using its existing fields;
+`ctl_identity`, `ctmux`, `task`, forwarding, helper, lifecycle, storage schema,
+and product release versions are unchanged by this addition.
 
 Every PR description must state its protocol changes, or **None** when there
 are no changes. Include the previous and new contracts and the compatibility

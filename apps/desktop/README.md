@@ -333,12 +333,13 @@ Discovery and saved rules display TCP or UDP. Selecting a discovered endpoint
 prefills its original protocol; creation also offers **Any (TCP/UDP)** to bind
 both transports. Existing saved rules default to TCP. UDP forwarding requires
 the remote agent's `ctl_forwarding 1.0.2` contract. Updated clients use ctld
-`1.2.18` and the agent's `ctl_transport 1.0.1` contract to lazily open two shared
+`1.3.19` and the agent's `ctl_transport 1.1.2` contract to lazily open three shared
 SSH command channels per physical master, including across aliases: Sessions
-carries ctmux and task connections, while Forwarding carries UDP rules. Each has
+carries ctmux and task connections, Forwarding carries UDP rules, and Files
+carries preview, directory, and Git requests. Each has
 its own 64-stream capacity, 16 MiB receive budget, and agent failure handling;
-physical SSH loss affects both. Both active groups consume two SSH exec session
-slots, or three with an optional master lease anchor. TCP forwarding consumes no
+physical SSH loss affects all groups. All three active groups consume three SSH
+exec session slots, or four with an optional master lease anchor. TCP forwarding consumes no
 exec slots; **Any** combines native TCP with UDP on Forwarding. The Forwarding
 agent alone shares a 32 MiB UDP payload budget and 512-socket cap across its rules.
 
@@ -634,6 +635,30 @@ commands (including Cmd-Q) and emergency reload after a renderer crash remain
 platform/recovery operations, outside the configurable app command registry.
 
 ## Visual preview
+
+Cmd-click on macOS or Ctrl-click elsewhere opens terminal file paths in a
+floating, draggable, resizable preview. Paths may include `:line:column`, and
+OSC 8 `file://` links use the same gesture. Files are checked on the originating
+pane's host, with relative paths resolved against that pane's raw shell-reported
+working directory. Missing, unreadable, and unsupported files show an inline
+error. Web links continue opening in the system browser.
+
+Previews support UTF-8 text/code, rendered Markdown with a source toggle, and
+raster images. Text is limited to the first 1 MiB with a visible notice; images
+must fit within 4 MiB. Markdown never executes embedded HTML or fetches images.
+The terminal remains usable beside the preview. Close or Escape cancels pending
+reads; opening another file cancels the previous request. **Open window** moves
+the loaded preview and its scroll position into a dedicated native window.
+That window remains available when the source workspace window closes, and
+closing it releases its snapshot. Preview contents are held only in memory.
+
+The read-only file service also exposes bounded ranged reads, directory pages,
+and structured Git status for file/tree clients. It reuses the existing selected
+SSH master and verifies the pinned remote account before requesting a path.
+Requests use independent cancellable streams and never run through a shell.
+Older brokers and agents retain their terminal services and report Files as
+unavailable until their components are updated. See the
+[file-service proposal](../../docs/proposals/0019-file-service-previews.md).
 
 The workbench keeps a collapsible host/session tree beside compact terminal tabs.
 Icon buttons in the tab row toggle the sidebar and open the command palette. **Tasks** switches the

@@ -34,7 +34,7 @@ pub const SSH_TRANSPORT_PREFACE: &[u8] = b"ctl-ssh-v1\n";
 
 /// Contracts implemented or used by this gateway build, including companion
 /// inspection and maintenance. Running daemons advertise their own contracts.
-pub const COMPONENT_CONTRACTS: [ProtocolContract; 10] = ProtocolContract::join(&[
+pub const COMPONENT_CONTRACTS: [ProtocolContract; 11] = ProtocolContract::join(&[
   &ctl_proto::AGENT_CONTRACTS,
   &ctmux_ipc::COMPONENT_CONTRACTS,
   &[

@@ -50,6 +50,7 @@ clarifications and links may update the existing document.
 | [0016](0016-shared-actions.md) | Shared typed actions across ctl clients | Implemented |
 | [0017](0017-shell-session-management.md) | Manage persistent sessions from ctl shell | Implemented |
 | [0018](0018-daemon-hotreload.md) | Replace daemon code while preserving live work | Proposed |
+| [0019](0019-file-service-previews.md) | Cancellable file services and floating previews | Implemented |
 
 ## Current design and implementation history
 

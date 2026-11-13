@@ -466,7 +466,7 @@ export function SessionViewSurface({ controls_container, session, open_session_k
         on_busy={(next) => { busy_ref.current = next; setBusy(next); if (next) { ++sequence.current; prefix.cancel(); } }}
         on_error={(message) => { if (message) notifyActionFailure(message, "Could not resize pane"); }} on_confirm={(next) => { ++sequence.current; storeView(next); }} />
       <div className="view-pane" data-active={focused === primary_id} ref={paneRef(primary_id)} onFocusCapture={() => setFocusedId(primary_id ?? null)} style={{ ...paneStyle(primary_rect), ...(takeover_id ? { visibility: "hidden" } : {}) }}>
-        <TerminalSurface {...surface} interaction_enabled={input_enabled} onInput={handlePrimaryInput} ended_message={surface.ended_message ?? (surface.phase === "ended" ? "Terminal exited" : surface.phase !== "attached" && ended_ids.has(primary_id ?? "") ? "Terminal no longer exists" : null)} on_dismiss={() => void dismissPane(primary_id)} />
+        <TerminalSurface {...surface} file_context={session ? { target: session.target, cwd: shell_state?.cwd ?? null } : undefined} interaction_enabled={input_enabled} onInput={handlePrimaryInput} ended_message={surface.ended_message ?? (surface.phase === "ended" ? "Terminal exited" : surface.phase !== "attached" && ended_ids.has(primary_id ?? "") ? "Terminal no longer exists" : null)} on_dismiss={() => void dismissPane(primary_id)} />
       </div>
       {[...rendered_views].flatMap(([owner_key, cached]) => {
         const visible = owner_key === key;
@@ -554,6 +554,7 @@ function AdditionalTerminal({ visible, input_enabled, on_ended, on_dismiss, conf
         feedback={attachment.state.message_kind === "input" ? attachment.state.message : null}
         on_toggle={attachment.toggleInputLease} />)}
     <TerminalSurface ended_message={ended_message} on_dismiss={on_dismiss} phase={attachment.state.phase} hasSession={true}
+      file_context={{ target: session.target, cwd: attachment.state.shell_state?.cwd ?? null }}
       has_cached_content={attachment.has_cached_content} interaction_enabled={input_enabled && visible}
       on_reconnect={attachment.reconnect} on_reconnect_interaction={attachment.reconnectOnInteraction}
       reconnect_available={attachment.state.error_code !== "protocol_version_mismatch"}

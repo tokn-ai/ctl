@@ -157,9 +157,10 @@ esac
     let consumed_contracts = components["ctl"]["protocols"].as_array_mut().unwrap();
     for protocol in ctl_ipc::lifecycle::DaemonBinaryInfo::current().protocols {
       let protocol = json!(protocol);
-      if !consumed_contracts.contains(&protocol) {
-        consumed_contracts.push(protocol);
-      }
+      // The client consumes the current broker contract even when the fixture
+      // agent advertises an older compatible version of the same protocol.
+      consumed_contracts.retain(|existing| existing["name"] != protocol["name"]);
+      consumed_contracts.push(protocol);
     }
     components["ctmux"] = components["ctmuxd"].clone();
     self.bundle(build, &components)

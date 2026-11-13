@@ -25,6 +25,7 @@ ctl-task-store.workspace = true
 ctl-task-ipc.workspace = true
 base64.workspace = true
 ctl-client.workspace = true
+ctl-files.workspace = true
 ctl-ipc.workspace = true
 dirs.workspace = true
 glob.workspace = true

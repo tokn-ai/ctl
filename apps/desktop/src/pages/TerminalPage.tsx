@@ -1,4 +1,5 @@
 import { Icon } from "../components/ui/Icon";
+import { useFilePreview } from "../features/files/FilePreview";
 import { WorkspaceSidebar } from "../components/workspace/WorkspaceSidebar";
 import { AboutPage } from "./AboutPage";
 import { CredentialsPage } from "./CredentialsPage";
@@ -188,6 +189,7 @@ export function TerminalPage() {
 }
 
 function TerminalWorkbench() {
+  const preview_focused = useFilePreview()?.focused ?? false;
   const { store: notifications, attachments: attachmentNotifications } = useNotificationEnvironment()!;
   const notifyFailure = useCallback((title: string, source: string, failure: unknown) => {
     if (errorCode(failure) === "attachment_cancelled") return;
@@ -1860,7 +1862,7 @@ function TerminalWorkbench() {
             : result;
         },
       })),
-      workspace.ready && !workspace.closing && keybindings.ready && !dialogOpen,
+      workspace.ready && !workspace.closing && keybindings.ready && !dialogOpen && !preview_focused,
       (error) => notifyFailure("Command failed", "Commands", error),
     );
   });

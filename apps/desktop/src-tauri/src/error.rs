@@ -59,7 +59,8 @@ impl CommandErrorDto {
         ctl_client::connection::Error::AuthenticationRequired => {
           Self::new("ssh_authentication_required", error.to_string())
         }
-        ctl_client::connection::Error::UnsupportedServiceTransport(_) => {
+        ctl_client::connection::Error::UnsupportedServiceTransport(_)
+        | ctl_client::connection::Error::UnsupportedFileService(_) => {
           Self::new("ctld_protocol_feature_unsupported", error.to_string())
         }
         _ => Self::new("local_connection_failed", error.to_string()),

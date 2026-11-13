@@ -29,6 +29,12 @@ channel preserves datagram boundaries and multiplexes separate remote UDP peer
 sockets within one SSH session. The earlier `1.0.1` single-peer contract remains
 supported for existing clients.
 
+`ctl-agent files` serves the negotiated `ctl_files 1.0.1` endpoint for bounded
+metadata, file reads, directory pages, and Git status. The same endpoint runs on
+independent Files streams under `ctl_transport 1.1.2`; earlier `1.0.1` transport
+clients retain terminal, task, and UDP services. Each Files stream owns one
+operation, and closing it cancels the work without affecting sibling requests.
+
 Part of [ctl and ctmux](https://github.com/tokn-ai/ctl). See the
 [repository documentation](https://github.com/tokn-ai/ctl#readme) for setup,
 platform support, and usage.

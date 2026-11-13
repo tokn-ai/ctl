@@ -689,6 +689,7 @@ version = "0.1.3"
 dependencies = [
  "clap",
  "ctl-client",
+ "ctl-files",
  "ctl-ipc",
  "ctl-proto",
  "ctl-task-ipc",
@@ -779,6 +780,17 @@ dependencies = [
  "tokn-ctl-core",
  "uuid",
  "zeroize",
+]
+
+[[package]]
+name = "ctl-files"
+version = "0.1.3"
+dependencies = [
+ "base64 0.22.1",
+ "ctl-proto",
+ "dirs 6.0.0",
+ "rustix",
+ "tokio",
 ]
 
 [[package]]
@@ -955,6 +967,7 @@ version = "0.1.3"
 dependencies = [
  "base64 0.22.1",
  "ctl-client",
+ "ctl-files",
  "ctl-ipc",
  "ctl-proto",
  "ctl-task-client",

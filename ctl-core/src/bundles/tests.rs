@@ -144,6 +144,43 @@ fn publication_is_immutable_and_damaged_selections_fail_without_fallback() {
 }
 
 #[test]
+fn optional_file_and_transport_contracts_validate_the_actual_bundle_peers() {
+  let (manifest, _) = fixture(Source::Local, 1);
+  for (consumer, name) in [
+    ("ctl", "ctl_files"),
+    ("ctl", "ctl_transport"),
+    ("ctld", "ctl_transport"),
+  ] {
+    let mut components = manifest.components.clone();
+    components.insert("ctl".into(), components["ctl-agent"].clone());
+    components.insert("ctmux".into(), components["ctmuxd"].clone());
+    assert!(Layout::WithClients.compatible(&components));
+    let old = ProtocolVersion::new(1, 0, 1);
+    let new = ProtocolVersion::new(1, 1, 2);
+    components
+      .get_mut("ctl-agent")
+      .unwrap()
+      .protocols
+      .push(ProtocolInfo::new(name, 1, old, &[old]));
+    assert!(Layout::WithClients.compatible(&components));
+    components
+      .get_mut(consumer)
+      .unwrap()
+      .protocols
+      .push(ProtocolInfo::new(name, 2, new, &[new]));
+    assert!(!Layout::WithClients.compatible(&components));
+    let provider = components
+      .get_mut("ctl-agent")
+      .unwrap()
+      .protocols
+      .last_mut()
+      .unwrap();
+    *provider = ProtocolInfo::new(name, 2, new, &[old, new]);
+    assert!(Layout::WithClients.compatible(&components));
+  }
+}
+
+#[test]
 fn mixed_builds_missing_components_and_incompatible_companions_are_rejected() {
   let (manifest, files) = fixture(Source::Local, 1);
   for change in 0..5 {

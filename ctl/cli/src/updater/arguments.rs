@@ -44,6 +44,11 @@ pub(super) enum Command {
   },
   /// Build and install one complete native development build from a checkout.
   Dev(DevelopmentArguments),
+  /// Show installed builds, channels and the active runtime without starting services.
+  Show {
+    #[arg(long)]
+    json: bool,
+  },
   /// Show the active installation and rollback candidate without starting services.
   Status {
     #[arg(long)]
@@ -88,21 +93,21 @@ pub(super) enum Command {
 
 #[derive(Debug, Subcommand)]
 pub(super) enum ComponentCommand {
-  /// List installed target bundles, or targets in the current publication.
+  /// List available target components with installed markers.
   List {
     /// Filter installed provenance; stable and nightly also support --available.
     #[arg(long)]
     channel: Option<String>,
-    /// Show installed targets without accessing the network (the default).
+    /// Show only installed targets without accessing the network.
     #[arg(long, conflicts_with = "available")]
     installed: bool,
-    /// Check the channel's current publication without downloading bundles.
+    /// Check the channel's current publication (the default).
     #[arg(long)]
     available: bool,
     #[arg(long)]
     json: bool,
   },
-  /// Install complete target bundles without changing active commands.
+  /// Install bundle-<target> components without changing active commands.
   Add {
     #[arg(required = true, num_args = 1.., value_delimiter = ',')]
     targets: Vec<String>,
@@ -250,6 +255,37 @@ pub(super) struct DevelopmentArguments {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn show_and_logical_component_names_have_separate_commands() {
+    let show = Arguments::try_parse_from(["ctlup", "--host", "work", "show", "--json"]).unwrap();
+    assert_eq!(show.host.as_deref(), Some("work"));
+    assert!(matches!(show.command, Command::Show { json: true }));
+    let components = Arguments::try_parse_from(["ctlup", "component", "list"]).unwrap();
+    assert!(matches!(
+      components.command,
+      Command::Component {
+        command: ComponentCommand::List {
+          installed: false,
+          available: false,
+          ..
+        }
+      }
+    ));
+    for operation in ["add", "remove"] {
+      assert!(
+        Arguments::try_parse_from([
+          "ctlup",
+          "component",
+          operation,
+          "bundle-aarch64-apple-darwin",
+          "--channel",
+          "nightly",
+        ])
+        .is_ok()
+      );
+    }
+  }
 
   #[test]
   fn complete_target_components_accept_channels_and_explicit_pr_sources() {

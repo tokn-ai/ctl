@@ -14,6 +14,7 @@ mod development;
 mod launcher;
 mod release;
 mod remote;
+mod show;
 mod status;
 pub(crate) mod update;
 
@@ -108,6 +109,7 @@ async fn run(arguments: Arguments) -> io::Result<i32> {
       }
     }
     Command::Component { command } => component::run(&home, target, command).await?,
+    Command::Show { json } => show::run(&home, target, json).await?,
     Command::CatalogJson => {
       require_local(target)?;
       let catalog = ctl_client::installation::InstallationCatalog::new(

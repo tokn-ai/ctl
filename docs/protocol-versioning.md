@@ -405,6 +405,13 @@ and retain legacy behavior with older managers. The existing `ctlup-command-v1`
 status and rollback JSON, bundle sets, PR artifact layout, named protocol versions
 and internal builds remain unchanged.
 
+Logical target components and installed builds have separate CLI views.
+`component list --json` has a schema-1 component projection, while `show --json`
+has a schema-1 build inventory with compact verified build metadata. Optional
+remote inspection uses the distinct `ctlup-show-v1` marker and falls back to
+existing status and catalog responses on older managers. Existing status and
+catalog response schemas retain their shapes; no named protocol changes.
+
 ## Discovery and SSH framing
 
 The default ctld socket or Windows pipe is keyed by the protocol major, such as

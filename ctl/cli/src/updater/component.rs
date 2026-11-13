@@ -10,6 +10,8 @@ use std::collections::BTreeSet;
 use std::io;
 use std::path::{Path, PathBuf};
 
+mod list;
+
 pub(super) async fn run(
   home: &Path,
   target: TargetOptions<'_>,
@@ -19,34 +21,25 @@ pub(super) async fn run(
     ComponentCommand::List {
       channel,
       available,
-      installed: _,
+      installed,
       json,
     } => {
-      if available {
+      if available || !installed {
         require_local(target)?;
         return available_targets(home, channel.as_deref(), json).await;
       }
       if let Some(channel) = &channel {
         validate_channel(channel)?;
       }
-      let Some(mut catalog) = status::catalog(home, target).await? else {
+      let Some(catalog) = status::catalog(home, target).await? else {
         return Err(io::Error::other(
           "this host's ctlup does not provide an installation catalog; update ctlup first",
         ));
       };
-      if let Some(channel) = channel {
-        catalog.installations.retain(|entry| {
-          entry
-            .origin
-            .as_ref()
-            .is_some_and(|origin| origin.channel == channel)
-        });
-      }
-      if json {
-        print_json(&catalog)?;
-      } else {
-        status::print_catalog(&catalog);
-      }
+      print_list(
+        &list::installed(&catalog.installations, channel.as_deref()),
+        json,
+      )?;
     }
     ComponentCommand::Add {
       targets,
@@ -174,7 +167,7 @@ async fn add(
         installed.target_triple, installed.bundle_id
       );
     }
-    println!("Run `ctlup component list` to inspect installed channels and targets.");
+    println!("Run `ctlup component list` to inspect installed components.");
   }
   drop(pull_request_files);
   Ok(())
@@ -192,27 +185,20 @@ async fn available_targets(home: &Path, channel: Option<&str>, json: bool) -> io
     None => installation::default_channel(home)?,
   };
   let catalog = published::check(channel).await.map_err(io::Error::other)?;
+  let installed = Installations::new(home).catalog()?;
+  print_list(
+    &list::available(catalog.targets, &installed, channel.name()),
+    json,
+  )
+}
+
+fn print_list(components: &list::ComponentList, json: bool) -> io::Result<()> {
   if json {
-    return print_json(&catalog);
+    print_json(components)
+  } else {
+    println!("{}", components.render());
+    Ok(())
   }
-  println!(
-    "{}: {} (built {})",
-    channel.name(),
-    catalog.bundle_id,
-    catalog.built_at.as_deref().unwrap_or("unknown")
-  );
-  for target in catalog.targets {
-    println!(
-      "  {}{}",
-      target.target_triple,
-      if target.compatible {
-        ""
-      } else {
-        " (incompatible)"
-      }
-    );
-  }
-  Ok(())
 }
 
 fn validated_targets(targets: Vec<String>) -> io::Result<BTreeSet<String>> {
@@ -221,10 +207,14 @@ fn validated_targets(targets: Vec<String>) -> io::Result<BTreeSet<String>> {
       "choose between one and sixteen complete target bundles",
     ));
   }
-  for target in &targets {
-    ctl_core::bundles::validate_target(target)?;
-  }
-  Ok(targets.into_iter().collect())
+  targets
+    .into_iter()
+    .map(|name| {
+      let target = name.strip_prefix("bundle-").unwrap_or(&name);
+      ctl_core::bundles::validate_target(target)?;
+      Ok(target.to_owned())
+    })
+    .collect()
 }
 
 fn validate_channel(channel: &str) -> io::Result<()> {
@@ -252,11 +242,25 @@ mod tests {
   fn selectors_validate_before_preparing_or_removing_targets() {
     assert!(validated_targets(Vec::new()).is_err());
     assert!(validated_targets(vec!["../outside".into()]).is_err());
+    assert!(validated_targets(vec!["bundle-../outside".into()]).is_err());
+    assert!(validated_targets(vec!["bundle-".into()]).is_err());
     assert_eq!(
       validated_targets(vec!["x86_64-unknown-linux-musl".into(); 2])
         .unwrap()
         .len(),
       1
+    );
+    assert_eq!(
+      validated_targets(vec![
+        "bundle-aarch64-apple-darwin".into(),
+        "aarch64-apple-darwin".into(),
+        "bundle-x86_64-unknown-linux-musl".into(),
+      ])
+      .unwrap(),
+      BTreeSet::from([
+        "aarch64-apple-darwin".into(),
+        "x86_64-unknown-linux-musl".into(),
+      ])
     );
     for channel in ["stable", "nightly", "local", "provided", "pr-123"] {
       validate_channel(channel).unwrap();

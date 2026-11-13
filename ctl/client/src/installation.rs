@@ -11,14 +11,17 @@ use std::path::{Path, PathBuf};
 
 mod provenance;
 mod remote;
+mod show;
 #[cfg(test)]
 mod tests;
 mod updater;
 pub(crate) use provenance::single_target_heads;
 pub use provenance::{activate_uploaded, decode_catalog_origin, encode_catalog_origin};
 pub use remote::{
-  InstallationCatalog, remote_account_id, remote_catalog, remote_rollback, remote_status,
+  InstallationCatalog, remote_account_id, remote_catalog, remote_rollback, remote_show,
+  remote_status,
 };
+pub use show::{InstallationShow, InstalledBuild, show};
 pub use updater::{
   provision_manager, provision_manager_from, updater_for_bundle, updater_for_manifest,
 };

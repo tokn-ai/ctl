@@ -149,13 +149,21 @@ commit. Use `--host` to target a remote machine. See
 ctlup component list
 ctlup component list --channel nightly --installed --json
 ctlup component list --channel stable --available
-ctlup component add x86_64-unknown-linux-musl aarch64-unknown-linux-musl --channel nightly
-ctlup component add x86_64-pc-windows-msvc --channel stable
-ctlup component add x86_64-unknown-linux-musl --pr 123
-ctlup component remove aarch64-unknown-linux-musl --channel nightly
+ctlup component add bundle-x86_64-unknown-linux-musl bundle-aarch64-unknown-linux-musl --channel nightly
+ctlup component add bundle-x86_64-pc-windows-msvc --channel stable
+ctlup component add bundle-x86_64-unknown-linux-musl --pr 123
+ctlup component remove bundle-aarch64-unknown-linux-musl --channel nightly
+ctlup show
+ctlup show --host work --json
 ```
 
-A component is a complete runtime bundle for one target. Adding components
+A component is a complete runtime bundle for one target, named `bundle-<target>`.
+`component list` shows available components for the selected channel with installed
+markers. Four historical builds for one target still produce one component row.
+Use `--installed` for an offline list of installed targets; without an explicit
+channel this includes historical builds with unrecorded provenance. Available
+markers represent current registrations in the selected channel. Bare target
+triples remain accepted by `add` and `remove` for compatibility. Adding components
 stores them durably without changing active command aliases or executing foreign
 binaries. Available-target inspection reads publication metadata without downloading
 archives. Installed-component inspection is passive and works offline.
@@ -167,16 +175,21 @@ Target components and their matching updater remain available after cache cleanu
 Removing a registration preserves payloads and provenance needed by active,
 rollback or running processes. PR installations are cataloged separately as
 `pr-NUMBER`; checkout builds use `local`, and explicitly supplied files use
-`provided`. Historical installations with no reliable provenance appear as unknown.
+`provided`. Historical installations with no reliable channel provenance are
+labeled `legacy`; their known build source remains visible separately.
 
-`ctlup status` shows build dates and groups installations by channel and target,
-including retained older payloads. Build dates come from validated build metadata
+`ctlup show` lists the individual installed builds, including retained older
+payloads, with short content IDs, versions, source revisions, channels and
+active/rollback labels. `status` retains its compatible JSON response and uses
+the same detailed build display for human output. Build dates come from validated build metadata
 or a freshly built local bundle; the date embedded in a Nightly version is a
 commit date. Older bundles without build metadata show `unknown`.
 `status --json` retains its original active/previous response for compatibility;
-`component list --installed --json` provides the versioned catalog, including
-channel and build-date fields. Remote inspection supports the same catalog when
-the target updater provides it and leaves legacy dates unknown otherwise.
+`show --json` provides the versioned build inventory, including channel and
+build-date fields. `component list --json` contains logical component names,
+targets and installed markers. Remote inspection uses the detailed inventory
+when supported; older updaters retain their available active/previous details,
+with other build metadata unavailable rather than guessed.
 SSH uploads contain one native target. If the remote channel also registers
 other targets, uploading a new publication fails without changing those
 registrations. Run `ctlup update` on that host to prepare its complete target set.

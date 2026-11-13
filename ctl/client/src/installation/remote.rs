@@ -1,4 +1,5 @@
 use super::InstallationStatus;
+use super::show::{InstallationShow, MAX_SHOW_BYTES};
 use crate::{CoreError, SshConnectionOptions, SshInteraction};
 use ctl_core::installations::CatalogEntry;
 use serde::{Deserialize, Serialize};
@@ -7,6 +8,7 @@ use std::io;
 use std::process::{Output, Stdio};
 
 const CATALOG_MARKER: &[u8] = b"ctlup-catalog-v1\n";
+const SHOW_MARKER: &[u8] = b"ctlup-show-v1\n";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -120,6 +122,22 @@ pub async fn remote_catalog(
   parse_catalog(output.status.code(), &output.stdout, &output.stderr)
 }
 
+/// Reads detailed installed build identities without starting services.
+/// Older managers return `None`; malformed responses and account failures do
+/// not hide behind the optional command's compatibility fallback.
+///
+/// # Errors
+/// Reports SSH, account verification, storage and invalid inventory failures.
+pub async fn remote_show(
+  destination: &str,
+  options: &SshConnectionOptions,
+  interaction: &SshInteraction,
+  expected_account: Option<&str>,
+) -> Result<Option<InstallationShow>, CoreError> {
+  let output = execute(destination, options, interaction, "show", expected_account).await?;
+  parse_show(output.status.code(), &output.stdout, &output.stderr)
+}
+
 /// Reads the selected SSH account's existing identity without starting services.
 ///
 /// # Errors
@@ -168,10 +186,10 @@ async fn execute(
   expected_account: Option<&str>,
 ) -> Result<Output, CoreError> {
   crate::validate_ssh_target(destination, options)?;
-  let marker = if operation == "catalog-json" {
-    "ctlup-catalog-v1"
-  } else {
-    "ctlup-command-v1"
+  let marker = match operation {
+    "catalog-json" => "ctlup-catalog-v1",
+    "show" => "ctlup-show-v1",
+    _ => "ctlup-command-v1",
   };
   let arguments = if operation == "catalog-json" {
     operation.to_owned()
@@ -200,7 +218,7 @@ $ErrorActionPreference = 'Stop'
 {guard}
 $manager = Join-Path $env:USERPROFILE '.tokn\ctl\bin\ctlup.exe'
 if (![IO.File]::Exists($manager)) {{
-  if ('{operation}' -eq 'catalog-json') {{ [Console]::Out.Write("{marker}`n"); exit 2 }}
+  if ('{operation}' -in @('catalog-json', 'show')) {{ [Console]::Out.Write("{marker}`n"); exit 2 }}
   if ('{operation}' -ne 'status') {{ throw 'ctlup is not installed for this account.' }}
   [Console]::Out.Write("ctlup-command-v1`n")
   [Console]::Out.Write('{{"active":null,"previous":null}}')
@@ -229,8 +247,13 @@ exit $LASTEXITCODE
     .stderr
     .take()
     .ok_or_else(|| failure(std::io::Error::other("missing ctlup diagnostics")))?;
+  let maximum = if operation == "show" {
+    MAX_SHOW_BYTES + 8192
+  } else {
+    1024 * 1024
+  };
   let (status, stdout, stderr) = tokio::time::timeout(std::time::Duration::from_secs(30), async {
-    tokio::try_join!(child.wait(), read(stdout, 1024 * 1024), read(stderr, 8192))
+    tokio::try_join!(child.wait(), read(stdout, maximum), read(stderr, 8192))
   })
   .await
   .map_err(|_| {
@@ -275,6 +298,36 @@ fn parse_catalog(
     .validate()
     .map_err(|error| CoreError::InvalidComponentBundle(error.to_string()))?;
   Ok(Some(catalog))
+}
+
+fn parse_show(
+  code: Option<i32>,
+  stdout: &[u8],
+  stderr: &[u8],
+) -> Result<Option<InstallationShow>, CoreError> {
+  let start = stdout
+    .windows(SHOW_MARKER.len())
+    .position(|window| window == SHOW_MARKER)
+    .map(|start| start + SHOW_MARKER.len());
+  if code == Some(2) && start.is_some() {
+    return Ok(None);
+  }
+  if code != Some(0) {
+    return Err(command_error(stderr));
+  }
+  let start =
+    start.ok_or_else(|| CoreError::InvalidComponentBundle("missing ctlup show response".into()))?;
+  if stdout[start..].len() > MAX_SHOW_BYTES {
+    return Err(CoreError::InvalidComponentBundle(
+      "ctlup show response exceeds its size limit".into(),
+    ));
+  }
+  let snapshot: InstallationShow = serde_json::from_slice(&stdout[start..])
+    .map_err(|error| CoreError::InvalidComponentBundle(error.to_string()))?;
+  snapshot
+    .validate()
+    .map_err(|error| CoreError::InvalidComponentBundle(error.to_string()))?;
+  Ok(Some(snapshot))
 }
 
 fn parse_status(stdout: &[u8]) -> Result<InstallationStatus, CoreError> {
@@ -371,6 +424,52 @@ mod tests {
         .to_string();
       assert!(error.contains("account verification failed"));
     }
+  }
+
+  #[test]
+  fn show_response_uses_its_own_optional_capability_and_schema() {
+    let snapshot = InstallationShow {
+      schema_version: 1,
+      active: None,
+      previous: None,
+      installations: Vec::new(),
+      builds: Vec::new(),
+    };
+    let mut stdout = b"Welcome\nctlup-show-v1\n".to_vec();
+    stdout.extend(serde_json::to_vec(&snapshot).unwrap());
+    let result = parse_show(Some(0), &stdout, b"").unwrap().unwrap();
+    assert!(result.builds.is_empty());
+    assert!(
+      parse_show(Some(2), SHOW_MARKER, b"older manager")
+        .unwrap()
+        .is_none()
+    );
+    for (code, stdout) in [
+      (Some(2), b"".as_slice()),
+      (Some(2), CATALOG_MARKER),
+      (Some(1), SHOW_MARKER),
+      (Some(255), SHOW_MARKER),
+    ] {
+      let error = parse_show(code, stdout, b"account verification failed")
+        .unwrap_err()
+        .to_string();
+      assert!(error.contains("account verification failed"));
+    }
+    assert!(parse_show(Some(0), CATALOG_MARKER, b"").is_err());
+    let mut invalid = snapshot;
+    invalid.schema_version = 2;
+    let mut stdout = SHOW_MARKER.to_vec();
+    stdout.extend(serde_json::to_vec(&invalid).unwrap());
+    assert!(parse_show(Some(0), &stdout, b"").is_err());
+    assert!(parse_show(Some(0), b"ctlup-show-v1\nnot json", b"").is_err());
+  }
+
+  #[test]
+  fn show_payload_limit_is_independent_of_wrapper_output() {
+    let mut stdout = SHOW_MARKER.to_vec();
+    stdout.resize(SHOW_MARKER.len() + MAX_SHOW_BYTES + 1, b' ');
+    let error = parse_show(Some(0), &stdout, b"").unwrap_err().to_string();
+    assert!(error.contains("size limit"));
   }
 
   #[test]

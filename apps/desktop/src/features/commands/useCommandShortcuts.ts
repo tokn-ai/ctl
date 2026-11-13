@@ -24,7 +24,8 @@ export function useCommandShortcuts(
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || event.isComposing || event.repeat) {
+      if (event.defaultPrevented || event.isComposing || event.repeat ||
+        event.target instanceof Element && event.target.closest("[data-local-shortcuts]")) {
         return;
       }
       const command = commandsRef.current.find(

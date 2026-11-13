@@ -576,7 +576,12 @@ fn optional_transport_advertisements_must_explicitly_intersect_when_present() {
     .get_mut("ctl-agent")
     .unwrap()
     .protocols
-    .retain(|protocol| !matches!(protocol.name.as_str(), "ctl_forwarding" | "ctl_transport"));
+    .retain(|protocol| {
+      !matches!(
+        protocol.name.as_str(),
+        "ctl_files" | "ctl_forwarding" | "ctl_transport"
+      )
+    });
   let mut check = |components: &BTreeMap<String, ComponentInfo>, expected| {
     assert_eq!(compatible(components), expected);
     #[cfg(unix)]
@@ -588,6 +593,7 @@ fn optional_transport_advertisements_must_explicitly_intersect_when_present() {
   // Original agents remain eligible for their existing command endpoints.
   check(&components, true);
   for (name, supported) in [
+    ("ctl_files", ctl_proto::files::SUPPORTED_PROTOCOL_VERSIONS),
     (
       "ctl_forwarding",
       ctl_proto::forwarding::SUPPORTED_PROTOCOL_VERSIONS,

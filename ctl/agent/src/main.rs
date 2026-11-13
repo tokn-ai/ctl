@@ -32,6 +32,8 @@ enum Command {
   },
   /// Share this SSH channel among fixed local services and UDP forwards.
   Multiplex,
+  /// Perform one read-only file or Git operation supplied on stdin.
+  Files,
   /// List TCP/UDP listeners without exposing process arguments or environment.
   Listeners {
     #[arg(long, value_enum, default_value_t = ctl_agent::listeners::Protocol::Tcp)]
@@ -99,6 +101,7 @@ async fn run(arguments: Arguments) -> Result<(), MainError> {
       config.taskd_bin = companion_binary("ctl-taskd");
       ctl_agent::transport::serve_stdio(&config).await?;
     }
+    Command::Files => run_files().await?,
     command @ (Command::PrepareCtmuxRestart | Command::PrepareCtmuxStop) => {
       run_ctmux_maintenance(command).await?;
     }
@@ -158,6 +161,14 @@ async fn run(arguments: Arguments) -> Result<(), MainError> {
       println!("{}", serde_json::to_string(&catalog)?);
     }
   }
+  Ok(())
+}
+
+async fn run_files() -> Result<(), MainError> {
+  let identity = tokio::task::spawn_blocking(ctl_agent::identity::discover)
+    .await
+    .map_err(std::io::Error::other)??;
+  ctl_agent::transport::serve_files_stdio(&identity).await?;
   Ok(())
 }
 
@@ -311,6 +322,19 @@ mod tests {
     ));
     for argument in ["--socket", "--ctld-bin", "--command", "--service"] {
       assert!(Arguments::try_parse_from(["ctl-agent", "multiplex", argument, "value"]).is_err());
+    }
+  }
+
+  #[test]
+  fn files_accepts_no_path_or_command_arguments() {
+    assert!(matches!(
+      Arguments::try_parse_from(["ctl-agent", "files"])
+        .unwrap()
+        .command,
+      Some(Command::Files)
+    ));
+    for argument in ["--path", "--socket", "--command", "file.txt"] {
+      assert!(Arguments::try_parse_from(["ctl-agent", "files", argument]).is_err());
     }
   }
 

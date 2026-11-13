@@ -2,7 +2,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { encodeTerminalBinary, encodeTerminalText } from "../../lib/bytes";
-import type { SessionSummary, TerminalSize } from "../../lib/types";
+import type { FileLink, SessionSummary, TerminalSize } from "../../lib/types";
 import { sessionKey } from "../targets/targets";
 import { captureHistoryRow } from "./historyStyle";
 import { terminalHistoryBytes } from "./historyBytes";
@@ -111,6 +111,7 @@ export class XtermRenderer {
     initialSize: TerminalSize,
     private readonly on_open_link: (url: string) => void = () => {},
     private readonly on_copy_text: (text: string) => void = () => {},
+    private readonly on_open_file?: (file: FileLink) => void,
   ) {
     this.active = this.createTerminal(initialSize);
     XtermRenderer.renderers.add(this);
@@ -511,7 +512,7 @@ export class XtermRenderer {
     const fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
     terminal.open(mount);
-    const links = installTerminalLinks(terminal, this.on_open_link, this.on_copy_text);
+    const links = installTerminalLinks(terminal, this.on_open_link, this.on_copy_text, this.on_open_file);
     if (!options.background) activate();
     terminal.onData((data) => {
       if (this.active?.container === container && mount.parentElement === container) this.onInput(encodeTerminalText(data));

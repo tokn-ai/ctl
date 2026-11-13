@@ -220,7 +220,7 @@ fn register_provider(provider: DaemonProvider) -> io::Result<()> {
 }
 
 /// Internal evolution counter; advancing it alone does not publish a contract.
-pub const PROTOCOL_BUILD: u16 = 18;
+pub const PROTOCOL_BUILD: u16 = 19;
 pub const CONTRACT_V1_0_12: ProtocolVersion = ProtocolVersion::new(1, 0, 12);
 pub const CONTRACT_V1_1_13: ProtocolVersion = ProtocolVersion::new(1, 1, 13);
 pub const CONTRACT_V1_1_14: ProtocolVersion = ProtocolVersion::new(1, 1, 14);
@@ -228,7 +228,8 @@ pub const CONTRACT_V1_1_15: ProtocolVersion = ProtocolVersion::new(1, 1, 15);
 pub const CONTRACT_V1_1_16: ProtocolVersion = ProtocolVersion::new(1, 1, 16);
 pub const CONTRACT_V1_2_17: ProtocolVersion = ProtocolVersion::new(1, 2, 17);
 pub const CONTRACT_V1_2_18: ProtocolVersion = ProtocolVersion::new(1, 2, 18);
-pub const PROTOCOL_VERSION: ProtocolVersion = CONTRACT_V1_2_18;
+pub const CONTRACT_V1_3_19: ProtocolVersion = ProtocolVersion::new(1, 3, 19);
+pub const PROTOCOL_VERSION: ProtocolVersion = CONTRACT_V1_3_19;
 pub const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[
   CONTRACT_V1_0_12,
   CONTRACT_V1_1_13,
@@ -237,6 +238,7 @@ pub const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[
   CONTRACT_V1_1_16,
   CONTRACT_V1_2_17,
   CONTRACT_V1_2_18,
+  CONTRACT_V1_3_19,
 ];
 
 #[must_use]
@@ -434,6 +436,12 @@ pub fn forwarding_protocol_supported(protocol: ProtocolVersion) -> bool {
 #[must_use]
 pub fn service_streams_supported(protocol: ProtocolVersion) -> bool {
   SUPPORTED_PROTOCOL_VERSIONS.contains(&protocol) && protocol >= CONTRACT_V1_2_18
+}
+
+/// Files are a separately negotiated service added after the original stream handoff.
+#[must_use]
+pub fn file_service_supported(protocol: ProtocolVersion) -> bool {
+  SUPPORTED_PROTOCOL_VERSIONS.contains(&protocol) && protocol >= CONTRACT_V1_3_19
 }
 
 /// Resolve a remote VPN's SSH owner using the exact prefix that reaches it.

@@ -129,6 +129,27 @@ impl Layout {
           .zip(protocol(provider))
           .is_some_and(|(client, server)| server.negotiate(&client.supported_versions).is_some())
       })
+      && [
+        ("ctl", "ctl_transport"),
+        ("ctld", "ctl_transport"),
+        ("ctl", "ctl_files"),
+      ]
+      .into_iter()
+      .all(|(consumer, name)| {
+        let protocol = |id: &str| {
+          components
+            .get(id)?
+            .protocols
+            .iter()
+            .find(|p| p.name == name)
+        };
+        // These services are optional for older executables. When both sides
+        // advertise one, check the actual peer sets rather than inferring
+        // compatibility from versions supported by the inspecting client.
+        protocol(consumer)
+          .zip(protocol("ctl-agent"))
+          .is_none_or(|(client, server)| server.negotiate(&client.supported_versions).is_some())
+      })
   }
 }
 

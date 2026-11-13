@@ -1,4 +1,5 @@
 //! Versioned metadata preceding the service protocol on identified SSH streams.
+pub mod files;
 pub mod forwarding;
 mod identity_contract;
 pub mod maintenance;
@@ -76,7 +77,7 @@ pub fn identity_protocol_offer() -> ProtocolOffer {
 }
 
 /// Protocol contracts implemented by this agent build, independent of release version.
-pub const AGENT_CONTRACTS: [ProtocolContract; 4] = [
+pub const AGENT_CONTRACTS: [ProtocolContract; 5] = [
   ProtocolContract::new(
     "ctl_identity",
     IDENTITY_PROTOCOL_BUILD,
@@ -96,6 +97,7 @@ pub const AGENT_CONTRACTS: [ProtocolContract; 4] = [
     forwarding::SUPPORTED_PROTOCOL_VERSIONS,
   ),
   transport::CONTRACT,
+  files::CONTRACT,
 ];
 
 #[must_use]

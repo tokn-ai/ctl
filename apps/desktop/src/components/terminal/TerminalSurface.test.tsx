@@ -3,7 +3,7 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { TerminalSurface } from "./TerminalSurface";
 import type { ComponentProps } from "react";
-import type { TerminalSize } from "../../lib/types";
+import type { FileLink, TerminalSize } from "../../lib/types";
 import { NotificationProvider } from "../../features/notifications/NotificationContext";
 import { NotificationStore } from "../../features/notifications/NotificationStore";
 
@@ -11,15 +11,19 @@ const mocks = vi.hoisted(() => ({
   input: null as null | ((data: Uint8Array) => void),
   open_link: null as null | ((url: string) => void),
   copy_text: null as null | ((text: string) => void),
+  open_file: null as null | ((file: FileLink) => void),
+  preview: vi.fn(),
   open_external_url: vi.fn<(_: string) => Promise<void>>(),
   dispose: vi.fn(),
 }));
 vi.mock("../../lib/tauri", () => ({ openExternalUrl: mocks.open_external_url }));
+vi.mock("../../features/files/FilePreview", () => ({ useFilePreview: () => ({ open: mocks.preview, focused: false }) }));
 vi.mock("../../features/terminal/XtermRenderer", () => ({ XtermRenderer: class {
-  constructor(_container: HTMLElement, input: (data: Uint8Array) => void, _size: TerminalSize, open_link: (url: string) => void, copy_text: (text: string) => void) {
+  constructor(_container: HTMLElement, input: (data: Uint8Array) => void, _size: TerminalSize, open_link: (url: string) => void, copy_text: (text: string) => void, open_file: (file: FileLink) => void) {
     mocks.input = input;
     mocks.open_link = open_link;
     mocks.copy_text = copy_text;
+    mocks.open_file = open_file;
   }
   dispose = mocks.dispose;
 } }));
@@ -183,6 +187,20 @@ describe("disconnected terminal recovery", () => {
 });
 
 describe("terminal browser links", () => {
+  it("keeps file resolution scoped to the original pane and its raw working directory", () => {
+    const props = { phase: "attached" as const, hasSession: true, has_cached_content: true, onInput: vi.fn(), onReady: vi.fn() };
+    render(<TerminalSurface {...props} file_context={{ target: { kind: "ssh", destination: "test-host" }, cwd: "/remote/project" }} />);
+    const remote = mocks.open_file!;
+    render(<TerminalSurface {...props} file_context={{ target: { kind: "local" }, cwd: "/local/project" }} />);
+    const file = { path: "src/main.rs", line: 12, column: 4 };
+    remote(file);
+    mocks.open_file!(file);
+    expect(mocks.preview.mock.calls.map(([request]) => request)).toEqual([
+      { ...file, target: { kind: "ssh", destination: "test-host" }, cwd: "/remote/project" },
+      { ...file, target: { kind: "local" }, cwd: "/local/project" },
+    ]);
+  });
+
   it("opens the detected URL and reports a failed launch through existing notifications", async () => {
     const { store } = renderSurface();
     const url = "https://example.com/docs?q=one&next=two#links";

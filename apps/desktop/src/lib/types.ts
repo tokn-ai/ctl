@@ -795,6 +795,60 @@ export interface ShellStateSummary {
   observed_sequence: Sequence;
 }
 
+export interface FileLink {
+  path: string;
+  line: number | null;
+  column: number | null;
+}
+
+export interface FilePreviewRequest extends FileLink {
+  target: ConnectionTarget;
+  cwd: string | null;
+}
+
+export type FileOperation =
+  | { kind: "metadata"; path: string; cwd: string | null }
+  | { kind: "read_file"; path: string; cwd: string | null; offset: number; length: number }
+  | { kind: "list_directory"; path: string; cwd: string | null; offset: number; limit: number }
+  | { kind: "git_status"; path: string; cwd: string | null };
+
+export interface FileEntry {
+  name: string;
+  path: string;
+  entry_type: "file" | "directory" | "other";
+  size: number;
+  is_symlink: boolean;
+}
+
+export interface GitFileEntry {
+  path: string;
+  original_path: string | null;
+  index_status: string;
+  worktree_status: string;
+}
+
+export type FileResponse =
+  | { kind: "metadata"; path: string; entry: FileEntry | null }
+  | { kind: "file"; path: string; data_base64: string; offset: number; total_size: number; eof: boolean }
+  | { kind: "directory"; path: string; entries: FileEntry[]; next_offset: number | null }
+  | { kind: "git_status"; path: string; entries: GitFileEntry[] }
+  | { kind: "error"; code: string; message: string };
+
+export interface FileRequest {
+  request_id: string;
+  target: ConnectionTarget;
+  operation: FileOperation;
+}
+
+export interface PreviewSnapshot extends FileLink {
+  target: ConnectionTarget;
+  kind: "text" | "markdown" | "image";
+  content: string;
+  scroll_top: number;
+  title: string;
+  truncated: boolean;
+}
+
 /**
  * A session list plus best-effort non-attaching shell snapshots. Entries can
  * be absent when a session exits during refresh or cannot be inspected.

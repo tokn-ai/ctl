@@ -384,9 +384,10 @@ async fn groups_have_independent_capacity_and_group_specific_recovery() {
   let owner = target("fixture.invalid");
   let registry = Registry::default();
   let starts = Arc::new(AtomicUsize::new(0));
-  let (stopped, mut stops) = mpsc::channel(2);
+  let (stopped, mut stops) = mpsc::channel(3);
   let mut sessions = Vec::new();
   let mut forwards = Vec::new();
+  let mut files = Vec::new();
   for _ in 0..transport::MAX_STREAMS {
     sessions.push(
       registry
@@ -425,7 +426,7 @@ async fn groups_have_independent_capacity_and_group_specific_recovery() {
   }
   let forwarding_error = registry
     .open_with(&owner, &path, Service::Udp, |_| {
-      echo_gateway(Arc::clone(&starts), stopped)
+      echo_gateway(Arc::clone(&starts), stopped.clone())
     })
     .await
     .err()
@@ -438,11 +439,36 @@ async fn groups_have_independent_capacity_and_group_specific_recovery() {
       .contains("Stop an unused UDP or Any forwarding rule")
   );
   assert!(!forwarding_error.to_string().contains("Close an unused"));
-  assert_eq!(starts.load(Ordering::Relaxed), 2);
+  for _ in 0..transport::MAX_STREAMS {
+    files.push(
+      registry
+        .open_with(&owner, &path, Service::Files, |_| {
+          echo_gateway(Arc::clone(&starts), stopped.clone())
+        })
+        .await
+        .unwrap(),
+    );
+  }
+  let file_error = registry
+    .open_with(&owner, &path, Service::Files, |_| {
+      echo_gateway(Arc::clone(&starts), stopped)
+    })
+    .await
+    .err()
+    .expect("file pool capacity");
+  assert_eq!(file_error.kind(), io::ErrorKind::WouldBlock);
+  assert!(file_error.to_string().contains("files pool"));
+  assert!(
+    file_error
+      .to_string()
+      .contains("Cancel an unused file request")
+  );
+  assert_eq!(starts.load(Ordering::Relaxed), 3);
   assert_echo(&mut sessions[0], b"session").await;
   assert_echo(&mut forwards[0], b"forward").await;
+  assert_echo(&mut files[0], b"file").await;
   registry.shutdown();
-  for _ in 0..2 {
+  for _ in 0..3 {
     timeout(Duration::from_secs(2), stops.recv())
       .await
       .unwrap()
@@ -455,6 +481,10 @@ async fn a_group_failure_preserves_and_does_not_restart_its_sibling() {
   for (failed_service, healthy_service) in [
     (Service::Ctmux, Service::Udp),
     (Service::Udp, Service::Ctmux),
+    (Service::Files, Service::Ctmux),
+    (Service::Ctmux, Service::Files),
+    (Service::Files, Service::Udp),
+    (Service::Udp, Service::Files),
   ] {
     let directory = directory();
     let path = directory.0.join("master");
@@ -998,6 +1028,61 @@ fn service_handoff_requires_the_new_local_contract() {
       ctl_ipc::service_streams_supported(*version)
     );
   }
+}
+
+#[tokio::test]
+async fn closing_a_file_request_propagates_eof_through_the_broker_without_closing_siblings() {
+  timeout(Duration::from_secs(3), async {
+    let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+    let (events, mut received) = mpsc::channel(2);
+    let server = tokio::spawn(transport::serve(server_io, move |service, mut stream| {
+      let events = events.clone();
+      async move {
+        if service == Service::Files {
+          stream.read_u8().await?;
+          events.send(()).await.unwrap();
+          let mut byte = [0];
+          assert_eq!(
+            stream.read(&mut byte).await?,
+            0,
+            "broker must forward client closure"
+          );
+          events.send(()).await.unwrap();
+          stream.shutdown().await
+        } else {
+          let (mut reader, mut writer) = tokio::io::split(stream);
+          tokio::io::copy(&mut reader, &mut writer).await?;
+          writer.shutdown().await
+        }
+      }
+    }));
+    let transport = transport::connect(client_io).await.unwrap();
+    let mut files = transport.open(Service::Files).await.unwrap();
+    let (mut client, mut broker) = ctl_ipc::Stream::pair().unwrap();
+    let relay = tokio::spawn(async move {
+      let lifecycle = super::super::target_lifecycle::TargetLifecycle::default();
+      relay_service(&mut broker, &mut files, &mut lifecycle.attempt()).await
+    });
+    assert!(matches!(
+      ctl_ipc::read_frame(&mut client).await.unwrap(),
+      Some(ctl_ipc::ServerMessage::ServiceOpened)
+    ));
+    client.write_u8(1).await.unwrap();
+    received.recv().await.unwrap();
+    let mut sibling = transport.open(Service::Ctmux).await.unwrap();
+    assert_echo(&mut sibling, b"before cancellation").await;
+    drop(client);
+    received.recv().await.unwrap();
+    assert!(matches!(
+      relay.await.unwrap(),
+      Ok(()) | Err(RequestError::ServiceStreamClosed(_))
+    ));
+    assert_echo(&mut sibling, b"after cancellation").await;
+    transport.close();
+    server.await.unwrap().unwrap();
+  })
+  .await
+  .unwrap();
 }
 
 struct BrokenService(bool);

@@ -155,6 +155,7 @@ ctlup component add bundle-x86_64-unknown-linux-musl --pr 123
 ctlup component remove bundle-aarch64-unknown-linux-musl --channel nightly
 ctlup show
 ctlup show --host work --json
+ctlup migrate
 ```
 
 A component is a complete runtime bundle for one target, named `bundle-<target>`.
@@ -182,6 +183,21 @@ rollback or running processes. PR installations are cataloged separately as
 `pr-NUMBER`; checkout builds use `local`, and explicitly supplied files use
 `provided`. Historical installations with no reliable channel provenance are
 labeled `legacy`; their known build source remains visible separately.
+
+`ctlup migrate` performs a one-time catalog adoption for existing complete
+builds. Uncatalogued locally built payloads are assigned to `local`; other
+uncatalogued payloads are imported as `provided`. This assigns their new channel
+membership rather than reconstructing an unrecorded acquisition history.
+Existing recorded channels, active and rollback selections, and running-process
+leases are preserved. Build dates stay unknown when not recorded. Migration
+does not prune payloads or restart services.
+
+The cutover marker is written after the verified catalog is committed. Later
+inspection uses that catalog without rediscovering old selections or classifying
+uncommitted payloads as legacy installations. Repeating `migrate` is safe.
+Incomplete historical four-service bundles require a complete install before
+cutover. Original external source directories remain available to processes
+that may still use their paths.
 
 `ctlup show` lists the individual installed builds, including retained older
 payloads, with short content IDs, versions, source revisions, channels and

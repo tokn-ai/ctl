@@ -129,6 +129,12 @@ fn pointer_path(store: &Installations, name: &str) -> io::Result<Option<PathBuf>
   }
   let link = fs::read_link(path)?;
   let absolute = link.is_absolute();
+  let migrated = super::migration::is_migrated(store)?;
+  if migrated && absolute {
+    return Err(invalid(
+      "migrated installation pointers must use managed relative links",
+    ));
+  }
   let link = if absolute {
     // The historical agent-only installer resolved the account root with
     // pwd -P before publishing an absolute current link. Accept that exact
@@ -174,7 +180,8 @@ fn pointer_path(store: &Installations, name: &str) -> io::Result<Option<PathBuf>
   }
   let managed =
     parts.len() == 2 && parts[0] == "installs" && parts[1].to_str().is_some_and(valid_id);
-  let legacy = name == "current"
+  let legacy = !migrated
+    && name == "current"
     && ((parts.len() == 4 && parts[0] == "components" && parts[1] == "bundles")
       || (parts.len() == 4 && parts[0] == "components" && parts[1] == "agents")
       || (parts.len() == 2 && parts[0] == "versions"));
@@ -213,7 +220,7 @@ pub(super) fn pointer(
     return Ok(None);
   }
   let bundle = Bundle::open(&path)?;
-  validate_native(&bundle, true)?;
+  validate_native(&bundle, !super::migration::is_migrated(store)?)?;
   if path.starts_with(store.root.join("installs"))
     && path.file_name().and_then(|name| name.to_str()) != Some(&bundle.manifest.bundle_id)
   {

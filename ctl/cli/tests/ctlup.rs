@@ -120,6 +120,66 @@ fn archive(revision: char) -> (Manifest, Vec<u8>) {
 }
 
 #[test]
+fn explicit_catalog_migration_preserves_selection_and_records_component_memberships() {
+  let home = Home::new();
+  let (previous, bytes) = archive('a');
+  assert!(home.install(&bytes).status.success());
+  let (active, bytes) = archive('b');
+  assert!(home.install(&bytes).status.success());
+  let root = home.0.join(".tokn/ctl");
+  let selection = fs::read_link(root.join("current")).unwrap();
+  let rollback = fs::read_link(root.join("previous")).unwrap();
+
+  let output = home.command(&["migrate", "--json"]).output().unwrap();
+  assert!(
+    output.status.success(),
+    "{}",
+    String::from_utf8_lossy(&output.stderr)
+  );
+  let catalog: ctl_client::installation::InstallationCatalog =
+    serde_json::from_slice(&output.stdout).unwrap();
+  catalog.validate().unwrap();
+  assert_eq!(catalog.installations.len(), 2);
+  assert!(catalog.installations.iter().all(|entry| {
+    entry
+      .origin
+      .as_ref()
+      .is_some_and(|origin| origin.channel == "provided" && origin.built_at.is_none())
+  }));
+  assert_eq!(fs::read_link(root.join("current")).unwrap(), selection);
+  assert_eq!(fs::read_link(root.join("previous")).unwrap(), rollback);
+  for manifest in [&active, &previous] {
+    assert!(root.join("installs").join(&manifest.bundle_id).is_dir());
+  }
+  let recorded = fs::read(root.join("catalog.json")).unwrap();
+  let repeated = home.command(&["migrate", "--json"]).output().unwrap();
+  assert!(repeated.status.success());
+  assert_eq!(recorded, fs::read(root.join("catalog.json")).unwrap());
+
+  let output = home
+    .command(&["component", "list", "--installed"])
+    .output()
+    .unwrap();
+  assert!(output.status.success());
+  assert_eq!(
+    String::from_utf8(output.stdout).unwrap().trim(),
+    format!("bundle-{} (provided)", ctl_core::paths::native_target())
+  );
+}
+
+#[test]
+fn migration_rejects_remote_options_before_preparing_storage() {
+  let home = Home::new();
+  let output = home
+    .command(&["--host", "unused", "migrate"])
+    .output()
+    .unwrap();
+  assert!(!output.status.success());
+  assert!(String::from_utf8_lossy(&output.stderr).contains("operation is local"));
+  assert!(!home.0.join(".tokn").exists());
+}
+
+#[test]
 fn passive_status_and_metadata_do_not_prepare_an_installation() {
   let home = Home::new();
   let output = home.command(&["status", "--json"]).output().unwrap();

@@ -12,6 +12,7 @@ mod component;
 mod development;
 #[cfg(windows)]
 mod launcher;
+mod migration;
 mod release;
 mod remote;
 mod show;
@@ -81,16 +82,7 @@ async fn run(arguments: Arguments) -> io::Result<i32> {
     method: arguments.method.as_deref(),
     platform: arguments.remote_platform,
   };
-  if target.destination.is_some() && (target.host.is_some() || target.method.is_some()) {
-    return Err(io::Error::other(
-      "--destination cannot be combined with --host or --method",
-    ));
-  }
-  if target.platform.is_some() && target.host.is_none() && target.destination.is_none() {
-    return Err(io::Error::other(
-      "--remote-platform requires --host or --destination",
-    ));
-  }
+  validate_target_options(target)?;
   match arguments.command {
     Command::ComponentInfo => unreachable!(),
     Command::Install(options) | Command::Update(options) => {
@@ -110,6 +102,10 @@ async fn run(arguments: Arguments) -> io::Result<i32> {
     }
     Command::Component { command } => component::run(&home, target, command).await?,
     Command::Show { json } => show::run(&home, target, json).await?,
+    Command::Migrate { json } => {
+      require_local(target)?;
+      migration::run(home, json).await?;
+    }
     Command::CatalogJson => {
       require_local(target)?;
       let catalog = ctl_client::installation::InstallationCatalog::new(
@@ -195,6 +191,20 @@ async fn prune(home: PathBuf, json: bool) -> io::Result<()> {
     println!(
       "Removed unused installations; channel targets, active, previous and running builds were kept."
     );
+  }
+  Ok(())
+}
+
+fn validate_target_options(target: TargetOptions<'_>) -> io::Result<()> {
+  if target.destination.is_some() && (target.host.is_some() || target.method.is_some()) {
+    return Err(io::Error::other(
+      "--destination cannot be combined with --host or --method",
+    ));
+  }
+  if target.platform.is_some() && target.host.is_none() && target.destination.is_none() {
+    return Err(io::Error::other(
+      "--remote-platform requires --host or --destination",
+    ));
   }
   Ok(())
 }

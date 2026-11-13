@@ -49,6 +49,11 @@ pub(super) enum Command {
     #[arg(long)]
     json: bool,
   },
+  /// Adopt existing complete builds into the channel catalog once.
+  Migrate {
+    #[arg(long)]
+    json: bool,
+  },
   /// Show the active installation and rollback candidate without starting services.
   Status {
     #[arg(long)]
@@ -285,6 +290,13 @@ mod tests {
         .is_ok()
       );
     }
+  }
+
+  #[test]
+  fn catalog_migration_is_an_explicit_local_command() {
+    let args = Arguments::try_parse_from(["ctlup", "migrate", "--json"]).unwrap();
+    assert!(matches!(args.command, Command::Migrate { json: true }));
+    assert!(Arguments::try_parse_from(["ctlup", "show", "--migrate"]).is_err());
   }
 
   #[test]

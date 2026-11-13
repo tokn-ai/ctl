@@ -7,6 +7,8 @@ const HEX: &[u8; 16] = b"0123456789abcdef";
 
 /// Activates an uploaded native target without discarding channel components
 /// that the single uploaded archive cannot replace.
+/// After catalog migration, uploads without provenance reuse a known origin or
+/// register an explicit provided source.
 ///
 /// # Errors
 /// Rejects a mixed target cohort, unsafe storage or concurrent channel changes.
@@ -16,7 +18,30 @@ pub fn activate_uploaded(
   origin: Option<&CatalogOrigin>,
 ) -> io::Result<(ctl_core::bundles::Bundle, ctl_core::installations::Lease)> {
   let installations = ctl_core::installations::Installations::new(home);
-  let Some(origin) = origin else {
+  let recovered_origin = if origin.is_none() && installations.is_catalog_migrated()? {
+    Some(
+      installations
+        .catalog()?
+        .into_iter()
+        .filter(|entry| entry.bundle_id == bundle.manifest.bundle_id && entry.origin.is_some())
+        .min_by_key(|entry| !entry.current)
+        .and_then(|entry| entry.origin)
+        .unwrap_or_else(|| CatalogOrigin {
+          channel: "provided".into(),
+          publication_id: Some(
+            bundle
+              .manifest
+              .distribution_id
+              .clone()
+              .unwrap_or_else(|| bundle.manifest.bundle_id.clone()),
+          ),
+          built_at: None,
+        }),
+    )
+  } else {
+    None
+  };
+  let Some(origin) = origin.or(recovered_origin.as_ref()) else {
     return installations.activate_and_lease(bundle);
   };
   let heads = single_target_heads(home, bundle, origin, None)?;
@@ -264,8 +289,9 @@ mod tests {
     let installed = store
       .install_channel(&[native, foreign], &origin, true)
       .unwrap();
+    store.migrate_catalog().unwrap();
     let before = store.catalog().unwrap();
-    let (_, lease) = activate_uploaded(&home.0, &installed[0], Some(&origin)).unwrap();
+    let (_, lease) = activate_uploaded(&home.0, &installed[0], None).unwrap();
     assert_eq!(store.catalog().unwrap(), before);
     let fresh = fixture_bundle(&home.0, target, 'b');
     let fresh_origin = CatalogOrigin {
@@ -284,5 +310,106 @@ mod tests {
       installed[0].manifest
     );
     drop(lease);
+  }
+
+  #[cfg(unix)]
+  #[tokio::test]
+  async fn originless_archive_uses_provided_identity_only_after_explicit_migration() {
+    use ctl_core::bundles::Store;
+    use ctl_core::installations::Installations;
+    let home = Home::new();
+    let target = ctl_core::paths::native_target();
+    let original = fixture_bundle(&home.0, target, 'a');
+    let store = Installations::new(&home.0);
+    let (_, lease) = activate_uploaded(&home.0, &original, None).unwrap();
+    assert!(!store.is_catalog_migrated().unwrap());
+    assert!(
+      store
+        .catalog()
+        .unwrap()
+        .iter()
+        .all(|entry| entry.origin.is_none())
+    );
+    drop(lease);
+
+    store.migrate_catalog().unwrap();
+    let next = fixture_bundle(&home.0, target, 'b');
+    let manifest = next
+      .manifest
+      .clone()
+      .with_distribution_id("published-fixture")
+      .unwrap();
+    let next = Store::cache(&home.0)
+      .publish(&manifest, &next.read_files().unwrap())
+      .unwrap();
+    let upload = crate::components::package_bundle(&next).unwrap();
+    let installed = crate::installation::install_archive(&home.0, &upload.archive)
+      .await
+      .unwrap();
+    let registered = store.component("provided", target).unwrap().unwrap();
+    assert_eq!(registered.manifest, installed.manifest);
+    let entry = store
+      .catalog()
+      .unwrap()
+      .into_iter()
+      .find(|entry| entry.current && entry.bundle_id == installed.manifest.bundle_id)
+      .unwrap();
+    assert_eq!(
+      entry.origin,
+      Some(CatalogOrigin {
+        channel: "provided".into(),
+        publication_id: Some("published-fixture".into()),
+        built_at: None,
+      })
+    );
+    let without_distribution = fixture_bundle(&home.0, target, 'c');
+    let (installed, lease) = activate_uploaded(&home.0, &without_distribution, None).unwrap();
+    assert!(store.catalog().unwrap().iter().any(|entry| {
+      entry.current
+        && entry.bundle_id == installed.manifest.bundle_id
+        && entry.origin.as_ref().is_some_and(|origin| {
+          origin.channel == "provided"
+            && origin.publication_id.as_deref() == Some(installed.manifest.bundle_id.as_str())
+        })
+    }));
+    drop(lease);
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn migrated_originless_upload_does_not_replace_provided_foreign_siblings() {
+    use ctl_core::installations::Installations;
+    let home = Home::new();
+    let target = ctl_core::paths::native_target();
+    let native = fixture_bundle(&home.0, target, 'a');
+    let foreign_target = if target == "aarch64-unknown-linux-musl" {
+      "x86_64-unknown-linux-musl"
+    } else {
+      "aarch64-unknown-linux-musl"
+    };
+    let foreign = fixture_bundle(&home.0, foreign_target, 'a');
+    let store = Installations::new(&home.0);
+    let origin = CatalogOrigin {
+      channel: "provided".into(),
+      publication_id: Some("one".into()),
+      built_at: None,
+    };
+    let installed = store
+      .install_channel(&[native, foreign], &origin, true)
+      .unwrap();
+    store.migrate_catalog().unwrap();
+    let before = store.catalog().unwrap();
+    let fresh = fixture_bundle(&home.0, target, 'b');
+    let error = activate_uploaded(&home.0, &fresh, None).unwrap_err();
+    assert!(
+      error
+        .to_string()
+        .contains("run ctlup update on the target host")
+    );
+    assert_eq!(store.catalog().unwrap(), before);
+    assert_eq!(
+      store.active().unwrap().unwrap().manifest,
+      installed[0].manifest
+    );
   }
 }

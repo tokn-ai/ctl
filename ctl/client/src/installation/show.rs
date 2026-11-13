@@ -1,11 +1,11 @@
 //! Compact build details are separate from the original status and catalog JSON.
 
 use super::{InstallationCatalog, InstallationStatus};
-use ctl_core::bundles::{Manifest, Source};
+use ctl_core::bundles::{Bundle, Manifest, Source};
 use ctl_core::component::ComponentBuildInfo;
 use ctl_core::installations::{CatalogEntry, Installations};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::Path;
 
@@ -157,25 +157,37 @@ impl InstallationShow {
 }
 
 /// Lists verified installed builds and native history without changing storage.
-/// Legacy selections outside the managed payload directory remain visible.
+/// Before explicit catalog migration, verified legacy selections remain visible.
+/// After migration, only authoritative catalog records are included.
 ///
 /// # Errors
 /// Reports unsafe storage, modified builds or a concurrently removed payload.
 pub fn show(home: &Path) -> io::Result<InstallationShow> {
   let store = Installations::new(home);
-  let mut result = InstallationShow::from_status(
-    super::status(home)?,
-    Some(InstallationCatalog::new(store.catalog()?)),
-  )?;
+  let migrated = store.is_catalog_migrated()?;
+  let status = super::status(home)?;
+  let catalog = InstallationCatalog::new(store.catalog()?);
+  if migrated {
+    validate_selected_catalog(&status, &catalog.installations)?;
+  }
+  let mut result = InstallationShow::from_status(status, Some(catalog))?;
   let mut builds = result
     .builds
     .into_iter()
     .map(|build| (build.bundle_id.clone(), build))
     .collect::<BTreeMap<_, _>>();
-  for bundle in store.list()? {
+  for bundle in inspected_bundles(&store, &result.installations, migrated)? {
     let build = InstalledBuild::from_manifest(&bundle.manifest)?;
-    ensure_installation(&mut result.installations, &build);
+    if !migrated {
+      ensure_installation(&mut result.installations, &build);
+    }
     insert_build(&mut builds, build)?;
+  }
+  if store.is_catalog_migrated()? != migrated {
+    return Err(io::Error::new(
+      io::ErrorKind::WouldBlock,
+      "catalog migration changed during inspection; retry the command",
+    ));
   }
   if result
     .installations
@@ -190,6 +202,55 @@ pub fn show(home: &Path) -> io::Result<InstallationShow> {
   result.builds = builds.into_values().collect();
   result.validate()?;
   Ok(result)
+}
+
+fn validate_selected_catalog(
+  status: &InstallationStatus,
+  entries: &[CatalogEntry],
+) -> io::Result<()> {
+  for manifest in [status.active.as_ref(), status.previous.as_ref()]
+    .into_iter()
+    .flatten()
+  {
+    if !entries.iter().any(|entry| {
+      entry.bundle_id == manifest.bundle_id
+        && entry.target_triple == manifest.target_triple
+        && entry.origin.is_some()
+    }) {
+      return Err(invalid(
+        "selected installation has no recorded provenance after catalog migration",
+      ));
+    }
+  }
+  Ok(())
+}
+
+fn inspected_bundles(
+  store: &Installations,
+  entries: &[CatalogEntry],
+  migrated: bool,
+) -> io::Result<Vec<Bundle>> {
+  if !migrated {
+    return store.list();
+  }
+  entries
+    .iter()
+    .map(|entry| entry.bundle_id.as_str())
+    .collect::<BTreeSet<_>>()
+    .into_iter()
+    .map(|id| {
+      store.get(id).map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+          io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "installed builds changed during inspection; retry the command",
+          )
+        } else {
+          error
+        }
+      })
+    })
+    .collect()
 }
 
 fn ensure_installation(installations: &mut Vec<CatalogEntry>, build: &InstalledBuild) {
@@ -251,6 +312,34 @@ mod tests {
     let components = serde_json::from_value(fixture.inner["components"].clone()).unwrap();
     let manifest = Manifest::new(target, Source::Local, components, &fixture.files).unwrap();
     (manifest, fixture.files)
+  }
+
+  fn write_orphan(
+    store: &Installations,
+    manifest: &Manifest,
+    files: &BTreeMap<String, Vec<u8>>,
+  ) -> PathBuf {
+    use std::io::Write as _;
+    let directory = store.root().join("installs").join(&manifest.bundle_id);
+    ctl_core::private_fs::create_directory(&directory).unwrap();
+    for (name, bytes) in files {
+      let mut file = ctl_core::private_fs::options()
+        .write(true)
+        .create_new(true)
+        .open(directory.join(name))
+        .unwrap();
+      file.write_all(bytes).unwrap();
+      if manifest.files[name].executable {
+        ctl_core::private_fs::set_executable(&file).unwrap();
+      }
+    }
+    let file = ctl_core::private_fs::options()
+      .write(true)
+      .create_new(true)
+      .open(directory.join(ctl_core::bundles::MANIFEST_FILE))
+      .unwrap();
+    serde_json::to_writer(file, manifest).unwrap();
+    directory
   }
 
   fn snapshot() -> InstallationShow {
@@ -384,6 +473,84 @@ mod tests {
     assert!(result.installations[0].origin.is_none());
     assert!(!result.installations[0].current);
     assert!(!home.0.join(".tokn/ctl/installs").exists());
+    assert!(!Installations::new(&home.0).is_catalog_migrated().unwrap());
+  }
+
+  #[test]
+  fn migration_makes_catalog_authoritative_without_adopting_later_orphan_payloads() {
+    let home = Home::new();
+    let target = "aarch64-unknown-linux-musl";
+    let (known, files) = fixture(target, 'a');
+    let bundle = Store::cache(&home.0).publish(&known, &files).unwrap();
+    let store = Installations::new(&home.0);
+    store
+      .install_channel(
+        &[bundle],
+        &CatalogOrigin {
+          channel: "provided".into(),
+          publication_id: Some("known".into()),
+          built_at: None,
+        },
+        false,
+      )
+      .unwrap();
+    let (older, older_files) = fixture(target, 'b');
+    write_orphan(&store, &older, &older_files);
+    let before = show(&home.0).unwrap();
+    assert_eq!(before.builds.len(), 2);
+    assert!(
+      before
+        .installations
+        .iter()
+        .any(|entry| entry.bundle_id == older.bundle_id && entry.origin.is_none())
+    );
+    assert!(!store.is_catalog_migrated().unwrap());
+
+    store.migrate_catalog().unwrap();
+    let adopted = show(&home.0).unwrap();
+    assert_eq!(adopted.builds.len(), 2);
+    assert!(
+      adopted
+        .installations
+        .iter()
+        .all(|entry| entry.origin.is_some())
+    );
+    let (orphan, orphan_files) = fixture(target, 'c');
+    let orphan_directory = write_orphan(&store, &orphan, &orphan_files);
+    assert_eq!(store.get(&orphan.bundle_id).unwrap().manifest, orphan);
+    let after = show(&home.0).unwrap();
+    assert_eq!(after.builds, adopted.builds);
+    assert_eq!(after.installations, adopted.installations);
+    // An unregistered payload is outside the authoritative inventory, even if
+    // an older/interrupted writer leaves damaged bytes in the payload store.
+    std::fs::write(orphan_directory.join("ctl-agent"), b"damaged orphan").unwrap();
+    assert_eq!(show(&home.0).unwrap().builds, adopted.builds);
+    assert!(orphan_directory.exists());
+  }
+
+  #[test]
+  fn migrated_native_selections_require_recorded_catalog_provenance() {
+    let (active, _) = fixture("aarch64-unknown-linux-musl", 'a');
+    let (previous, _) = fixture("aarch64-unknown-linux-musl", 'b');
+    let status = InstallationStatus {
+      active: Some(active.clone()),
+      previous: Some(previous.clone()),
+    };
+    assert!(validate_selected_catalog(&status, &[]).is_err());
+    let entry = |manifest: &Manifest| CatalogEntry {
+      bundle_id: manifest.bundle_id.clone(),
+      target_triple: manifest.target_triple.clone(),
+      origin: Some(CatalogOrigin {
+        channel: "local".into(),
+        publication_id: None,
+        built_at: None,
+      }),
+      current: false,
+    };
+    let mut entries = vec![entry(&active), entry(&previous)];
+    validate_selected_catalog(&status, &entries).unwrap();
+    entries[1].origin = None;
+    assert!(validate_selected_catalog(&status, &entries).is_err());
   }
 
   #[test]

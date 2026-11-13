@@ -413,6 +413,13 @@ remote inspection uses the distinct `ctlup-show-v1` marker and falls back to
 existing status and catalog responses on older managers. Existing status and
 catalog response schemas retain their shapes; no named protocol changes.
 
+Explicit `ctlup migrate` uses a separate schema-1 local cutover marker after
+committing adopted channel metadata. It preserves content-addressed bundle bytes
+and existing catalog records. Later readers use the authoritative catalog and
+canonical installation paths rather than repeatedly rediscovering legacy data.
+Schema-1 incomplete managed bundles require a complete install before cutover.
+This local storage migration changes no named wire contract or internal build.
+
 ## Discovery and SSH framing
 
 The default ctld socket or Windows pipe is keyed by the protocol major, such as

@@ -6,6 +6,7 @@
 mod catalog;
 mod filesystem;
 mod leases;
+mod migration;
 #[cfg(all(test, unix))]
 mod tests;
 #[cfg(all(test, windows))]
@@ -60,11 +61,15 @@ impl Installations {
     if !filesystem::root_exists(self)? {
       return Ok(None);
     }
+    let migrated = migration::is_migrated(self)?;
     if let Some(bundle) = filesystem::pointer(self, "current", true)? {
       return Ok(Some(bundle));
     }
     #[cfg(unix)]
     {
+      if migrated {
+        return Ok(None);
+      }
       if filesystem::path_exists(&self.root.join("current"))? {
         // A historical agent-only overlay is not a complete installation. Keep
         // it operational until an explicit complete install supersedes it.
@@ -73,7 +78,10 @@ impl Installations {
       Store::new(&self.home).selected(Purpose::Local, crate::paths::native_target())
     }
     #[cfg(windows)]
-    Ok(None)
+    {
+      let _ = migrated;
+      Ok(None)
+    }
   }
 
   /// Resolves the active installation and keeps it available for a new process.
@@ -185,6 +193,25 @@ impl Installations {
       return Ok(Vec::new());
     }
     catalog::inventory(self)
+  }
+
+  /// Explicitly adopts existing complete installations into a durable catalog.
+  /// Existing provenance, native history and live leases are preserved. Local
+  /// source builds are adopted as local; other uncatalogued builds as provided.
+  /// No historical build date or original acquisition channel is inferred.
+  ///
+  /// # Errors
+  /// Reports unsafe storage, incomplete old builds or failed durable migration.
+  pub fn migrate_catalog(&self) -> io::Result<Vec<CatalogEntry>> {
+    migration::migrate(self)
+  }
+
+  /// Checks the explicit catalog migration marker without changing storage.
+  ///
+  /// # Errors
+  /// Reports malformed markers or a marker whose catalog is missing.
+  pub fn is_catalog_migrated(&self) -> io::Result<bool> {
+    migration::is_migrated(self)
   }
 
   /// Opens the retained current component for a channel and target.
@@ -440,6 +467,18 @@ impl Installations {
     filesystem::ensure_root(self)?;
     let _lock = filesystem::Lock::acquire(self)?;
     catalog::recover(self)?;
+    if origin.is_none()
+      && migration::is_migrated(self)?
+      && !catalog::read(self)?
+        .entries
+        .iter()
+        .any(|entry| entry.bundle_id == bundle.manifest.bundle_id)
+    {
+      return Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "new installations require an explicit catalog origin after migration",
+      ));
+    }
     if let (Some(origin), Some(expected_heads)) = (origin, expected_heads) {
       verify_channel_heads(&catalog::read(self)?, &origin.channel, expected_heads)?;
     }

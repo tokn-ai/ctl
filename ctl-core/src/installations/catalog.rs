@@ -259,6 +259,9 @@ pub(super) fn read(store: &Installations) -> io::Result<State> {
 
 pub(super) fn inventory(store: &Installations) -> io::Result<Vec<CatalogEntry>> {
   let mut entries = read(store)?.entries;
+  if super::migration::is_migrated(store)? {
+    return Ok(entries);
+  }
   for bundle in store.list()? {
     if !entries
       .iter()
@@ -352,7 +355,7 @@ fn read_file<T: for<'de> Deserialize<'de>>(path: &Path) -> io::Result<Option<T>>
     .map_err(io::Error::other)
 }
 
-fn replace(path: &Path, value: &impl Serialize) -> io::Result<()> {
+pub(super) fn replace(path: &Path, value: &impl Serialize) -> io::Result<()> {
   let bytes = serde_json::to_vec(value).map_err(io::Error::other)?;
   if bytes.len() as u64 > MAX_BYTES {
     return Err(invalid("installation catalog exceeds its size limit"));

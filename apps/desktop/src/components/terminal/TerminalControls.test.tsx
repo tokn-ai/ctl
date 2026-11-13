@@ -9,11 +9,16 @@ const session = { target: { kind: "local" as const }, session_id: "session", nam
   terminal_size: { columns: 80, rows: 24, pixel_width: null, pixel_height: null }, next_sequence: "0" };
 function props() {
   return { state: { ...initialAttachmentState(), phase: "attached" as const, session }, resize_control_status: "available" as const,
-    onToggleResizeWithWindow: vi.fn(), onRequestResizeControl: vi.fn(), onReconnect: vi.fn(),
+    onToggleResizeWithWindow: vi.fn(), onRequestResizeControl: vi.fn(),
   };
 }
 
 describe("terminal toolbar resize controls", () => {
+  it("leaves disconnected-session recovery in the session banner", () => {
+    const actions = props();
+    render(<TerminalControls {...actions} state={{ ...actions.state, phase: "error" }} />);
+    expect(screen.queryByRole("button", { name: "Reconnect" })).toBeNull();
+  });
   it("keeps layout feedback with its controls and leaves unrelated session notices out", () => {
     const actions = props();
     const mounted = render(<TerminalControls {...actions} state={{ ...actions.state, message_kind: "layout", message: "Take resize control." }} />);

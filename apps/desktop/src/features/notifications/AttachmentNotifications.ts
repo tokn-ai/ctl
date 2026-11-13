@@ -1,6 +1,7 @@
 import type { AttachmentViewState, NotificationAction, SshConnectionTarget } from "../../lib/types";
 import { COMMAND_IDS } from "../commands/commandIds";
 import { sessionKey, targetKey, targetLabel } from "../targets/targets";
+import { attachmentFeedback } from "../attachment/attachmentFeedback";
 import type { NotificationStore } from "./NotificationStore";
 
 interface AttachmentSource {
@@ -80,26 +81,21 @@ export class AttachmentNotifications {
       this.store.setActions(`attachment:${key}`, []);
     } else {
       const failure = ["error", "disconnected", "retry_wait"].includes(state.phase);
-      const manual_target = this.manualRecoveryTarget(state);
-      const actions: NotificationAction[] = this.recoverySession(owner)
-        ? [{ label: session.target.kind === "ssh" ? "Update remote components" : "Restart local daemon",
+      const feedback = attachmentFeedback(state, this.windows_client);
+      const actions: NotificationAction[] = feedback.action?.kind === "recover_components"
+        ? [{ label: feedback.action.label,
           command_id: COMMAND_IDS.recoverSessionComponents, args: { value: owner } }]
-        : manual_target
-          ? [{ label: "Connect host", command_id: COMMAND_IDS.connectHost, args: { target_key: targetKey(manual_target) } }]
-          : this.canReconnect(owner)
-            ? [{ label: "Reconnect", command_id: COMMAND_IDS.reconnectNotificationAttachment, args: { value: owner } }]
+        : feedback.action?.kind === "connect_host" && session.target.kind === "ssh"
+          ? [{ label: feedback.action.label, command_id: COMMAND_IDS.connectHost, args: { target_key: targetKey(session.target) } }]
+          : feedback.action?.kind === "reconnect"
+            ? [{ label: feedback.action.label, command_id: COMMAND_IDS.reconnectNotificationAttachment, args: { value: owner } }]
             : [];
       if (state.phase === "attached" || state.phase === "ended") this.store.resolve(`attachment:${key}`);
-      if (failure && state.message) {
-        const message = manual_target && state.error_code === "protocol_version_mismatch"
-          ? `${state.message} ${manual_target.remote_platform === "windows"
-            ? "Update the components on the Windows host, then reconnect."
-            : "Update the remote components on the host, then reconnect."}`
-          : state.message;
+      if (failure && feedback.message) {
         this.store.report(`attachment:${key}`, {
           severity: "error",
           title: "Session connection failed",
-          message, source, actions,
+          message: feedback.message, source, actions,
         }, { preserve_attention: true });
       }
     }
@@ -143,23 +139,15 @@ export class AttachmentNotifications {
     return entry && this.sources.get(entry.key) === owner ? entry : undefined;
   }
 
-  private manualRecoveryTarget(state: AttachmentViewState): SshConnectionTarget | undefined {
-    const target = state.session?.target;
-    if (target?.kind !== "ssh" || state.phase !== "error") return;
-    if (state.error_code === "windows_remote_agent_setup_required" ||
-        state.error_code === "protocol_version_mismatch" && (this.windows_client || target.remote_platform === "windows")) return target;
-  }
-
   recoverySession(owner?: string) {
     const state = this.current(owner)?.state;
-    return state?.phase === "error" && state.error_code === "protocol_version_mismatch" && !this.manualRecoveryTarget(state)
+    return state && attachmentFeedback(state, this.windows_client).action?.kind === "recover_components"
       ? state.session : null;
   }
 
   canReconnect(owner?: string): boolean {
     const state = this.current(owner)?.state;
-    return !!state && ["error", "disconnected", "retry_wait"].includes(state.phase) &&
-      !["protocol_version_mismatch", "windows_remote_agent_setup_required"].includes(state.error_code ?? "");
+    return !!state && attachmentFeedback(state, this.windows_client).action?.kind === "reconnect";
   }
 
   async reconnect(owner?: string): Promise<void> {

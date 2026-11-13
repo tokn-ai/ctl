@@ -20,7 +20,7 @@
   position: fixed;
   z-index: 80;
   right: 12px;
-  bottom: 76px;
+  bottom: 38px;
   width: min(400px, calc(100vw - 24px));
   max-height: calc(100dvh - 100px);
 }

@@ -3,10 +3,12 @@
 Messages follow the action or content that owns them. A field, form, row, or
 section keeps its validation and recovery nearby. A standalone operation or an
 unexpected background event uses a bottom-right notification backed by the same
-notification-center entry. App banners are reserved for persistent conditions
-that affect the whole workspace. Global banners, popups, and the notification
-center use translucent floating panels outside the main layout. Showing or
-hiding them never resizes or shifts the main panel.
+notification-center entry. Session connection and error states use a translucent
+floating banner inside the owning session area, below the tab bar. The state,
+diagnostic, and reconnect or other recovery action stay together in that banner
+and follow the selected session. Global popups and the notification center also
+float outside the main layout. Showing or hiding these surfaces never resizes
+or shifts the main panel.
 
 ## Message inventory
 
@@ -31,12 +33,13 @@ hiding them never resizes or shifts the main panel.
 | Component update progress and per-host results | In the retained Update components dialog. Do not repeat the outcome as a popup. |
 | Windows manual setup and unsupported maintenance, VPN, or listener operations | In the owning Connect host flow, About host row, VPN view, or forwarding dialog. Present persistent capability limits as context; hide unavailable actions. |
 | Workspace load failure | A workspace error view with Retry loading. |
-| Workspace save failure | One persistent floating banner at the top with Retry saving, plus a silent notification-center entry. Remove the banner after saving succeeds. |
+| Workspace save failure | An error in the notification center with Retry saving. Do not show a banner or popup; resolve the entry after saving succeeds. |
 | Saving, connecting, reconnecting, enrollment, layout/input ownership, and maintenance progress | In the owning view or status line. Routine progress does not create notifications. |
 | Input or layout refusal and pane-layout refresh failure | In the input/layout controls or terminal area, with Retry layout where applicable. |
-| Disconnected saved tab, authentication required, intentional disconnect/cancellation, missing session, and normal session exit | In the terminal or connection flow, with the relevant local connect action. No popup for an expected state. |
+| Disconnected saved tab, authentication required, and intentional disconnect/cancellation | In the owning session banner or connection flow, with the relevant local connect action. No popup for an expected state. |
+| Missing session and normal session exit | In the terminal, with the relevant close or dismiss action. No popup for an expected state. |
 | Earlier terminal output unavailable | In terminal status and a silent notification-center entry. Archive history gaps stay in the archive view. |
-| Unexpected session connection failure or loss | One popup and center entry owned by that attachment, with Reconnect or a supported component-recovery action. Retain manual Windows setup/update guidance when automated maintenance is unavailable. |
+| Unexpected session connection failure or loss | A floating banner inside the owning session area with the diagnostic and Reconnect or another supported recovery action. Keep the tab bar visible. One popup and center entry may announce the incident; retain manual Windows setup/update guidance when automated maintenance is unavailable. |
 | Proven SSH connection loss without an attachment already owning recovery | One popup and center entry for the host, with Connect host. Polling errors alone do not prove connection loss. |
 | Newly failed task run | One popup and center entry with View task. Existing failed runs found on initial load do not create popups. |
 | Standalone command, pane operation, session action, clipboard, or link-opening failure | One popup and center entry. A command whose form or retained result view owns the failure keeps it there instead. |

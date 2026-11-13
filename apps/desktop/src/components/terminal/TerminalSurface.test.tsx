@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { TerminalSurface } from "./TerminalSurface";
 import type { ComponentProps } from "react";
@@ -91,6 +91,31 @@ describe("disconnected terminal recovery", () => {
     await act(async () => { fireEvent.click(button); });
     expect(reconnect).toHaveBeenCalledOnce();
     expect(interaction).not.toHaveBeenCalled();
+  });
+
+  it("keeps session diagnostics and recovery in the same terminal while retaining its cached renderer", () => {
+    const { container, props, reconnect, rerender } = offline({ reconnect_error: "The SSH transport closed." });
+    const terminal = container.querySelector(".terminal-container");
+    const banner = screen.getByRole("status", { name: "Session connection" });
+    expect(banner.closest(".terminal-shell")?.contains(terminal)).toBe(true);
+    expect(within(banner).getByText("The SSH transport closed.")).toBeTruthy();
+    expect(screen.getAllByRole("button", { name: "Reconnect" })).toHaveLength(1);
+    fireEvent.click(within(banner).getByRole("button", { name: "Reconnect" }));
+    expect(reconnect).toHaveBeenCalledOnce();
+
+    rerender(<div><TerminalSurface {...props} phase="retry_wait" reconnect_error="Retrying the existing session." /></div>);
+    expect(screen.queryByText("The SSH transport closed.")).toBeNull();
+    expect(within(screen.getByRole("status", { name: "Session connection" })).getByText("Retrying the existing session.")).toBeTruthy();
+    expect(container.querySelector(".terminal-container")).toBe(terminal);
+    expect(props.onReady).toHaveBeenCalledOnce();
+    expect(mocks.dispose).not.toHaveBeenCalled();
+
+    rerender(<div><TerminalSurface {...props} phase="attached" reconnect_error={null} /></div>);
+    expect(screen.queryByRole("status", { name: "Session connection" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Reconnect" })).toBeNull();
+    expect(container.querySelector(".terminal-container")).toBe(terminal);
+    expect(props.onReady).toHaveBeenCalledOnce();
+    expect(mocks.dispose).not.toHaveBeenCalled();
   });
 
   it.each([

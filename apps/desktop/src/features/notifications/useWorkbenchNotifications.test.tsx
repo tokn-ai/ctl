@@ -24,7 +24,7 @@ const failedTask: ManagedTask = {
 };
 
 describe("workbench notification sources", () => {
-  it("records workspace save failures silently while the workspace surface owns recovery", () => {
+  it("records workspace save failures in the notification center with a retry action", () => {
     const store = new NotificationStore();
     const hook = renderNotifications(store, { ...sources, workspace_error: "Workspace could not be saved." });
     expect(store.snapshot().entries).toMatchObject([{

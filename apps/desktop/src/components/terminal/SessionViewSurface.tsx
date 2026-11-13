@@ -16,6 +16,7 @@ import { terminalPaneTitle } from "../../lib/shellState";
 import { ControlPopover } from "../ui/ControlPopover";
 import { Icon } from "../ui/Icon";
 import { TerminalSurface } from "./TerminalSurface";
+import { SessionBanner } from "./SessionBanner";
 import { ViewDividers } from "./ViewDividers";
 import "./sessionView.css";
 import { resolvePrefix, prefixActionMode, PREFIX_ACTIONS } from "../../features/commands/prefixKeymap";
@@ -454,7 +455,7 @@ export function SessionViewSurface({ controls_container, session, open_session_k
       {PREFIX_ACTIONS.filter((action) => prefixActionMode(action.id) === prefix.mode && prefix_map.bindings.has(action.id)).map((action) => <span key={action.id}><kbd>{prefix_map.bindings.get(action.id)}</kbd> {action.title}</span>)}
       <span>{prefix.mode === "move" ? "Enter or Esc finishes" : `${prefix_map.label} again sends the prefix · Esc cancels`}</span>
     </div>}
-    {error ? <InlineFeedback className="terminal-local-feedback" action={{ label: "Retry layout", disabled: busy, on_click: () => setRefreshAttempt((attempt) => attempt + 1) }}>Could not refresh pane layout: {error}</InlineFeedback> : null}
+    {error && connected ? <SessionBanner severity="error" title="Could not refresh pane layout" message={error} action={{ label: "Retry layout", disabled: busy, on_click: () => setRefreshAttempt((attempt) => attempt + 1) }} /> : null}
     {controls_container ? createPortal(pane_controls, controls_container) : controls_container === undefined ? pane_controls : null}
     <div className="view-viewport" ref={setViewport}>
     <div className="view-panes" style={current_view ? { width: current_view.canvas_size.columns * cell.width, height: current_view.canvas_size.rows * cell.height } : session ? { width: session.terminal_size.columns * cell.width, height: session.terminal_size.rows * cell.height } : { width: "100%", height: "100%" }}>
@@ -556,6 +557,7 @@ function AdditionalTerminal({ visible, input_enabled, on_ended, on_dismiss, conf
       has_cached_content={attachment.has_cached_content} interaction_enabled={input_enabled && visible}
       on_reconnect={attachment.reconnect} on_reconnect_interaction={attachment.reconnectOnInteraction}
       reconnect_available={attachment.state.error_code !== "protocol_version_mismatch"}
+      connection_state={attachment.state}
       reconnect_error={attachment.state.message} retry_paused={attachment.state.error_code === "automatic_reconnect_timeout"}
       onInput={handleInput} onReady={setRenderer} />
   </>;

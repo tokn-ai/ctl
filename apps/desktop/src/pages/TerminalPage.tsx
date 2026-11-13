@@ -57,6 +57,7 @@ import { NotificationProvider, useNotificationEnvironment } from "../features/no
 import { useWorkbenchNotifications } from "../features/notifications/useWorkbenchNotifications";
 import { useHostConnectionNotifications } from "../features/notifications/useHostConnectionNotifications";
 import { InlineFeedback } from "../components/feedback/InlineFeedback";
+import { SessionBanner } from "../components/terminal/SessionBanner";
 import { TerminalTabs } from "../components/tabs/TerminalTabs";
 import { SessionViewSurface } from "../components/terminal/SessionViewSurface";
 import { TerminalControls } from "../components/terminal/TerminalControls";
@@ -1021,10 +1022,9 @@ function TerminalWorkbench() {
         });
         try {
           await persistWorkspace();
-        } catch (failure) {
-          notifyFailure("Shell created; workspace entry not saved", "Workspace",
-            `Shell ${session.name} was created, but saving its workspace entry failed. Retry saving before closing the app. ${errorMessage(failure)}`,
-          );
+        } catch {
+          // Workspace persistence owns its notification-center error and retry.
+          // Creation succeeded, so retrying the input flow would duplicate it.
           return;
         }
         try {
@@ -1896,9 +1896,6 @@ function TerminalWorkbench() {
             <h2>Could not load workspace</h2>
             <InlineFeedback action={{ label: "Retry loading", on_click: workspace.retryLoad }}>{workspace.load_error}</InlineFeedback>
           </section> : null}
-          {workspace.save_error ? <InlineFeedback className="workspace-feedback" action={{ label: workspace.saving ? "Saving…" : "Retry saving", disabled: workspace.saving || dialogOpen || paletteOpen || workspace.closing, on_click: () => { void persistWorkspace(true).catch(() => {}); } }}>
-            Workspace changes are not being saved. {workspace.save_error}
-          </InlineFeedback> : null}
           <main
             hidden={!!workspace.load_error}
             className={`app-shell${sidebar_visible ? "" : " sidebar-collapsed"}`}
@@ -2089,33 +2086,21 @@ function TerminalWorkbench() {
                   )
                 }
               >
-                <div className="terminal-notices">
-                  {activeTab && attachment.state.session === null ? (
-                    <InlineFeedback severity="info" className="terminal-local-feedback">
-                      {activeTab.target.kind === "ssh"
-                        ? "Connect this host to resume its saved tab. Cached paths are last-known."
-                        : "Local session is not connected. Cached paths are last-known."}
-                      <button
-                        type="button"
-                        onClick={() => {
-                          if (activeTab.target.kind === "ssh") {
-                            executeCommandById(COMMAND_IDS.connectHost, {
-                              target_key: targetKey(activeTab.target),
-                            });
-                          } else {
-                            executeCommandById(COMMAND_IDS.selectSession, {
-                              session_key: sessionKey(activeTab),
-                            });
-                          }
-                        }}
-                      >
-                        {activeTab.target.kind === "ssh"
-                          ? "Connect host"
-                          : "Connect session"}
-                      </button>
-                    </InlineFeedback>
-                  ) : null}
-                </div>
+                {activeTab && attachment.state.session === null ? (
+                  <SessionBanner severity="info" title="Session disconnected" message={activeTab.target.kind === "ssh"
+                    ? "Connect this host to resume its saved tab. Cached paths are last-known."
+                    : "Local session is not connected. Cached paths are last-known."}
+                    action={{
+                      label: activeTab.target.kind === "ssh" ? "Connect host" : "Connect session",
+                      on_click: () => {
+                        if (activeTab.target.kind === "ssh") {
+                          executeCommandById(COMMAND_IDS.connectHost, { target_key: targetKey(activeTab.target) });
+                        } else {
+                          executeCommandById(COMMAND_IDS.selectSession, { session_key: sessionKey(activeTab) });
+                        }
+                      },
+                    }} />
+                ) : null}
                 <SessionViewSurface
                   on_view={session_layouts.observeView}
                   controls_container={pane_controls_host}
@@ -2143,6 +2128,7 @@ function TerminalWorkbench() {
                   on_reconnect_interaction={attachment.reconnectOnInteraction}
                   reconnect_available={attachment.state.error_code !== "protocol_version_mismatch"}
                   reconnect_error={attachment.state.message}
+                  connection_state={attachment.state}
                   retry_paused={attachment.state.error_code === "automatic_reconnect_timeout"}
                   onInput={handleTerminalInput}
                   onReady={setRenderer}
@@ -2196,7 +2182,6 @@ function TerminalWorkbench() {
                   onToggleResizeWithWindow={() =>
                     executeCommandById(COMMAND_IDS.toggleResize)
                   }
-                  onReconnect={() => executeCommandById(COMMAND_IDS.reconnect)}
                 />
             </div>
             <NotificationBell store={notifications} />

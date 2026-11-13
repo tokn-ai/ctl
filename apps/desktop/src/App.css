@@ -56,6 +56,7 @@ button {
   display: none !important;
 }
 .terminal-pane {
+  position: relative;
   display: flex;
   flex: 1;
   flex-direction: column;
@@ -737,14 +738,6 @@ button:disabled {
   flex: 0 0 34px;
   padding: 0;
   font-size: 17px;
-}
-
-.terminal-notices {
-  grid-area: notices;
-}
-
-.terminal-notices:empty {
-  display: none;
 }
 
 .connection-dot {

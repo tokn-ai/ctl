@@ -9,7 +9,6 @@ interface TerminalControlsProps {
   onToggleResizeWithWindow(): void;
   resize_control_status: ResizeControlStatus;
   onRequestResizeControl(acquire: boolean): void;
-  onReconnect(): void;
 }
 
 export function TerminalControls({
@@ -17,12 +16,8 @@ export function TerminalControls({
   onToggleResizeWithWindow,
   resize_control_status,
   onRequestResizeControl,
-  onReconnect,
 }: TerminalControlsProps) {
   const attached = state.phase === "attached";
-  const canReconnect =
-    state.session !== null &&
-    (state.phase === "disconnected" || state.phase === "error");
   const resizeOwned = resize_control_status === "owned";
   const resizeActive = state.resize_with_window && resizeOwned;
   const resizeAvailable = resize_control_status === "available";
@@ -35,11 +30,6 @@ export function TerminalControls({
 
   return (
     <div className="terminal-controls">
-      {canReconnect ? (
-        <button type="button" onClick={onReconnect}>
-          <Icon name="refresh" size={14} /> Reconnect
-        </button>
-      ) : null}
       <ControlPopover label={`Layout · ${layout_summary}`} trigger_content={<Icon name="monitor" size={14} />}>
         <span aria-label="Resize control status">Resize: {resizeLabel}</span>
         {layout_message ? <InlineFeedback severity="warning">{layout_message}</InlineFeedback> : null}

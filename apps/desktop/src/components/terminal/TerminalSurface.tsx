@@ -1,11 +1,12 @@
 import { Icon } from "../ui/Icon";
 import { useEffect, useId, useRef } from "react";
-import type { ConnectionPhase, TerminalSize } from "../../lib/types";
+import type { AttachmentViewState, ConnectionPhase, TerminalSize } from "../../lib/types";
 import { errorMessage } from "../../lib/errors";
 import { openExternalUrl } from "../../lib/tauri";
 import { XtermRenderer } from "../../features/terminal/XtermRenderer";
 import { useNotificationEnvironment } from "../../features/notifications/NotificationContext";
 import "./TerminalSurface.css";
+import { SessionConnectionBanner } from "./SessionBanner";
 
 const INITIAL_SIZE: TerminalSize = {
   columns: 80,
@@ -22,6 +23,7 @@ interface TerminalSurfaceProps {
   on_reconnect_interaction?(): Promise<void> | void;
   reconnect_available?: boolean;
   reconnect_error?: string | null;
+  connection_state?: Pick<AttachmentViewState, "session" | "error_code">;
   retry_paused?: boolean;
   interaction_enabled?: boolean;
   hasSession: boolean;
@@ -38,6 +40,7 @@ export function TerminalSurface({
   on_reconnect_interaction,
   reconnect_available = true,
   reconnect_error,
+  connection_state,
   retry_paused = false,
   interaction_enabled = true,
   hasSession,
@@ -58,7 +61,6 @@ export function TerminalSurface({
   notificationsRef.current = notifications;
   const disconnected = hasSession && !ended_message && (["disconnected", "error", "retry_wait", "reconnecting"].includes(phase) || phase === "connecting" && has_cached_content);
   const can_reconnect = reconnect_available && interaction_enabled && ["disconnected", "error", "retry_wait"].includes(phase);
-  const reconnect_label = phase === "connecting" ? "Connecting…" : phase === "reconnecting" || phase === "retry_wait" ? "Reconnecting…" : retry_paused ? "Retries paused" : "Disconnected";
   const requestReconnect = (callback?: () => Promise<void> | void) => {
     if (!callback) return;
     // Attachment state and notifications own reconnect failures.
@@ -147,12 +149,10 @@ export function TerminalSurface({
       <div className="terminal-scroll-region">
         <div ref={containerRef} className="terminal-container" />
       </div>
-      {disconnected && <div className="terminal-connection" role="status" aria-live="polite" aria-atomic="true">
-        <span className={`terminal-connection-dot${phase === "connecting" || phase === "reconnecting" || phase === "retry_wait" ? " terminal-connection-pending" : ""}`} aria-hidden="true" />
-        <span title={reconnect_error ?? undefined}>{reconnect_label}</span>
-        {on_reconnect && reconnect_available && <button type="button" disabled={!can_reconnect}
-          title={reconnect_error ?? "Reconnect to this terminal"} onClick={() => requestReconnect(on_reconnect)}>Reconnect</button>}
-      </div>}
+      {disconnected && <SessionConnectionBanner
+        state={{ session: connection_state?.session ?? null, error_code: connection_state?.error_code ?? null, phase, message: reconnect_error ?? null }}
+        on_reconnect={on_reconnect ? () => requestReconnect(on_reconnect) : undefined}
+        reconnect_available={reconnect_available} interaction_enabled={interaction_enabled} retry_paused={retry_paused} />}
       {!hasSession && phase === "idle" ? (
         <div className="terminal-placeholder">
           <span className="terminal-mark"><Icon name="terminal" size={64} /></span>

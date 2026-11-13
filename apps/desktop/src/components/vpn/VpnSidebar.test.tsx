@@ -5,6 +5,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { VpnController } from "../../features/vpn/useVpn";
 import type { VpnConnection, VpnStatus } from "../../lib/types";
 import { VpnSidebar } from "./VpnSidebar";
+import { NotificationProvider } from "../../features/notifications/NotificationContext";
+import { NotificationStore } from "../../features/notifications/NotificationStore";
 
 const connection: VpnConnection = {
   connection_id: "work", name: "Work", url: "https://vpn.example.test", username: "example-user",
@@ -210,12 +212,14 @@ describe("VPN sidebar", () => {
     expect(region().getByText(connection.username)).toBeTruthy();
   });
 
-  it("reports copy failures only on the endpoint's item", async () => {
+  it("reports a copy failure as a standalone event without marking either VPN failed", async () => {
     const user = userEvent.setup();
+    const store = new NotificationStore();
     vi.spyOn(navigator.clipboard, "writeText").mockRejectedValueOnce(new Error("Clipboard unavailable"));
-    render(<VpnSidebar model={model({ connections: [connection, research], statuses: [runtime(), runtime("research")] })} />);
+    render(<NotificationProvider store={store}><VpnSidebar model={model({ connections: [connection, research], statuses: [runtime(), runtime("research")] })} /></NotificationProvider>);
     await user.click(region("Research").getByRole("button", { name: "Copy SOCKS endpoint" }));
-    expect(region("Research").getByRole("alert").textContent).toBe("Clipboard unavailable");
+    expect(store.snapshot().entries).toMatchObject([{ title: "Could not copy SOCKS endpoint", message: "Research: Clipboard unavailable" }]);
+    expect(region("Research").queryByRole("alert")).toBeNull();
     expect(region().queryByRole("alert")).toBeNull();
   });
 
@@ -315,12 +319,12 @@ describe("shared VPN container items", () => {
     const state = model({ connections: [connection, research], statuses: [runtime()], discovery_warnings: ["Container inventory unavailable"] });
     const { rerender } = render(<VpnSidebar model={state} />);
     expect(region().getByText("Connected")).toBeTruthy();
-    expect(screen.getByRole("alert").textContent).toBe("Container inventory unavailable");
+    expect(screen.getByRole("status").textContent).toContain("Container inventory unavailable");
     expect((region().getByRole("button", { name: "Disconnect Work" }) as HTMLButtonElement).disabled).toBe(false);
     expect((region("Research").getByRole("button", { name: "Connect Research" }) as HTMLButtonElement).disabled).toBe(false);
     rerender(<VpnSidebar model={{ ...state, connections: [], statuses: [] }} />);
     expect(screen.queryByText("No saved VPN connections.")).toBeNull();
-    expect(screen.getByRole("status").textContent).toBe("VPN status unavailable.");
+    expect(screen.getByRole("status").textContent).toContain("VPN status unavailable.");
   });
 });
 

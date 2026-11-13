@@ -125,6 +125,23 @@ describe("workspace lifecycle", () => {
     expect(api.updateHosts).not.toHaveBeenCalled();
   });
 
+  it("retries an unreadable workspace without replacing it or reporting a save failure", async () => {
+    api.loadWorkspace.mockRejectedValueOnce(new Error("Workspace could not be read."));
+    const { result } = renderHook(() => useWorkspace());
+    await waitFor(() => expect(result.current.load_error).toBe("Workspace could not be read."));
+    expect(result.current.ready).toBe(false);
+    expect(result.current.save_error).toBeNull();
+    expect(result.current.close_error).toBeNull();
+    expect(api.updateWorkspace).not.toHaveBeenCalled();
+    expect(api.updateHosts).not.toHaveBeenCalled();
+    act(() => result.current.retryLoad());
+    await waitFor(() => expect(result.current.ready).toBe(true));
+    expect(result.current.load_error).toBeNull();
+    expect(result.current.sessions[0].name).toBe("remembered");
+    expect(api.loadWorkspace).toHaveBeenCalledTimes(2);
+    expect(api.updateWorkspace).not.toHaveBeenCalled();
+  });
+
   it("projects SSH config aliases on first load without creating either file", async () => {
     api.loadWorkspace.mockResolvedValue({ revision: null, document: workspaceDocument(emptyWorkspaceView()) });
     api.loadHosts.mockResolvedValue(emptyHosts);
@@ -542,6 +559,42 @@ describe("workspace lifecycle", () => {
     expect(result.current.closing).toBe(false);
     expect(result.current.error).toContain("disk full");
     expect(api.closeAttachmentWindow).not.toHaveBeenCalled();
+  });
+
+  it("keeps window-closing failures separate from workspace saves and clears them on a new close attempt", async () => {
+    (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
+    api.closeAttachmentWindow.mockRejectedValueOnce(new Error("Could not close the native window."));
+    const { result } = renderHook(() => useWorkspace());
+    await waitFor(() => expect(nativeWindow.onCloseRequested).toHaveBeenCalledOnce());
+    const close = () => nativeWindow.onCloseRequested.mock.calls[0][0]({ preventDefault: vi.fn() });
+    await act(async () => { await close(); });
+    expect(result.current.close_error).toBe("Window close paused: Could not close the native window.");
+    expect(result.current.load_error).toBeNull();
+    expect(result.current.save_error).toBeNull();
+    expect(result.current.closing).toBe(false);
+    await act(async () => { await result.current.persist(true); });
+    expect(result.current.close_error).toBe("Window close paused: Could not close the native window.");
+    await act(async () => { await close(); });
+    expect(result.current.close_error).toBeNull();
+    expect(api.closeAttachmentWindow).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps a failed save during close in the save channel without replaying it as a window-close error after retry", async () => {
+    (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
+    const { result } = renderHook(() => useWorkspace());
+    await waitFor(() => expect(nativeWindow.onCloseRequested).toHaveBeenCalledOnce());
+    api.updateWorkspace.mockRejectedValueOnce(new Error("Workspace disk full."));
+    act(() => result.current.setTabs([]));
+    await waitFor(() => expect(result.current.save_error).toBe("Workspace disk full."));
+    api.updateWorkspace.mockRejectedValueOnce(new Error("Workspace disk full."));
+    await act(async () => { await nativeWindow.onCloseRequested.mock.calls[0][0]({ preventDefault: vi.fn() }); });
+    expect(result.current.closing).toBe(false);
+    expect(result.current.save_error).toBe("Workspace disk full.");
+    expect(result.current.close_error).toBeNull();
+    expect(api.closeAttachmentWindow).not.toHaveBeenCalled();
+    await act(async () => { await result.current.persist(true); });
+    expect(result.current.save_error).toBeNull();
+    expect(result.current.close_error).toBeNull();
   });
 
   it("does not discard malformed legacy settings", async () => {

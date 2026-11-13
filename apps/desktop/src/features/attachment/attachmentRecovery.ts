@@ -23,6 +23,7 @@ const NON_RECOVERABLE_ERROR_CODES = new Set([
   "ctl_agent_not_found",
   "ctl_agent_identity_unsupported",
   "ctl_agent_update_required",
+  "windows_remote_agent_setup_required",
   "ctld_protocol_feature_unsupported",
   "ssh_service_capacity",
   "ssh_authentication_failed",

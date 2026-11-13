@@ -26,9 +26,9 @@ const history_ready: AttachmentViewState = {
   ...failed, phase: "attached", message: null, error_code: null, history_loading: false,
 };
 
-function setup() {
+function setup(windows_client = false) {
   const store = new NotificationStore();
-  const registry = new AttachmentNotifications(store);
+  const registry = new AttachmentNotifications(store, windows_client);
   const owner = registry.createOwner();
   const reconnect = vi.fn(async () => {});
   const report = (state: AttachmentViewState) => registry.report(owner, state, reconnect);
@@ -43,13 +43,17 @@ describe("attachment notification lifecycle", () => {
     for (let attempt = 0; attempt < 3; attempt++) {
       report(transitionAttachment(failed, { type: "retry_scheduled", retry_at_ms: 1000 }));
       report({ ...connecting, phase: "reconnecting" });
-      report(failed);
+      report({ ...failed, message: `Retry ${attempt + 1} failed with another diagnostic.` });
     }
     expect(store.snapshot().entries.filter((entry) => entry.toast_visible)).toEqual([]);
     expect(store.snapshot().entries).toHaveLength(dismiss === "hide" ? 1 : 0);
     if (dismiss === "hide") expect(store.snapshot().entries[0].occurrence_count).toBe(1);
     report(transitionAttachment(failed, { type: "retry_exhausted" }));
-    expect(store.snapshot().entries[0]).toMatchObject({ title: "Session connection failed", toast_visible: true });
+    if (dismiss === "hide") expect(store.snapshot().entries[0]).toMatchObject({
+      title: "Session connection failed", toast_visible: false, occurrence_count: 1,
+      message: "Automatic retries stopped. The remote session's current state is unknown. Retry to reconnect.",
+    });
+    else expect(store.snapshot().entries).toEqual([]);
   });
 
   it("offers an explicit reconnect when retry_wait is the first observable state", async () => {
@@ -126,7 +130,7 @@ describe("attachment notification lifecycle", () => {
     expect(registry.canReconnect(owner)).toBe(false);
   });
 
-  it("groups SSH authentication requests by host and retains the action until its sessions recover", () => {
+  it("leaves SSH authentication guidance at its host and session controls", () => {
     const { store, report, registry, reconnect } = setup();
     const target = { kind: "ssh" as const, host_id: "build", destination: "build.example" };
     const blocked = {
@@ -141,24 +145,48 @@ describe("attachment notification lifecycle", () => {
     registry.report(other_owner, {
       ...blocked, session: { ...blocked.session, target: { ...target, host_id: "test", destination: "test.example" } },
     }, reconnect);
-    const action = { label: "Connect host", command_id: COMMAND_IDS.connectHost, args: { target_key: "host:build" } };
-    const build_notice = () => store.snapshot().entries.find((entry) => entry.source === "build.example");
-
-    expect(store.snapshot().entries).toHaveLength(2);
-    expect(store.snapshot().entries.every((entry) => !entry.toast_visible)).toBe(true);
-    expect(build_notice()).toMatchObject({ occurrence_count: 1, actions: [action] });
+    expect(store.snapshot().entries).toEqual([]);
 
     report({ ...blocked, phase: "attached", error_code: null, message: null });
-    expect(build_notice()).toMatchObject({ resolved_at: null, actions: [action] });
+    expect(store.snapshot().entries).toEqual([]);
 
     registry.report(second_owner, { ...second, phase: "reconnecting", error_code: null, message: null }, reconnect);
-    expect(build_notice()).toMatchObject({ resolved_at: null });
+    expect(store.snapshot().entries).toEqual([]);
     registry.report(second_owner, {
       ...second, session: { ...second.session, terminal_id: "new-pane" },
       phase: "attached", error_code: null, message: null,
     }, reconnect);
-    expect(build_notice()).toMatchObject({ resolved_at: expect.any(Number), actions: [] });
-    expect(store.snapshot().entries.find((entry) => entry.source === "test.example")).toMatchObject({ resolved_at: null });
+    expect(store.snapshot().entries).toEqual([]);
+  });
+
+  it.each(["attachment_cancelled", "ssh_host_disconnected", "session_not_found"])("keeps %s as local session state", (error_code) => {
+    const { store, report } = setup();
+    report({ ...failed, error_code });
+    expect(store.snapshot().entries).toEqual([]);
+  });
+
+  it("keeps ended sessions, input denials, and layout ownership feedback local", () => {
+    const { store, report } = setup();
+    report({ ...history_ready, phase: "ended", message: "Session ended with exit code 1." });
+    report({ ...history_ready, input_lease_request: { status: "denied" } });
+    report({ ...history_ready, message_kind: "layout", message: "Another attachment holds resize control." });
+    expect(store.snapshot().entries).toEqual([]);
+    report({ ...history_ready, message_kind: null, message: "A separate session warning needs attention." });
+    expect(store.snapshot().entries).toMatchObject([{
+      title: "Session update", severity: "warning", message: "A separate session warning needs attention.", toast_visible: true,
+    }]);
+  });
+
+  it("preserves read state when automatic retry diagnostics change", () => {
+    const { store, report } = setup();
+    report(failed);
+    store.setCenterOpen(true);
+    store.setCenterOpen(false);
+    report({ ...connecting, phase: "reconnecting" });
+    report({ ...failed, message: "The retry timed out." });
+    expect(store.snapshot().entries).toMatchObject([{
+      title: "Session connection failed", message: "The retry timed out.", read: true, toast_visible: false, occurrence_count: 1,
+    }]);
   });
 
   it("retries the specified pane using its latest callback and rejects stale actions", async () => {
@@ -198,6 +226,17 @@ describe("attachment notification lifecycle", () => {
     expect(store.snapshot().entries).toHaveLength(1);
   });
 
+  it("counts an explicit retry as another occurrence of a retained incident", async () => {
+    const { store, report, registry, owner } = setup();
+    report(failed);
+    const id = store.snapshot().entries[0].id;
+    store.hide(id);
+    await registry.reconnect(owner);
+    report({ ...connecting, phase: "reconnecting" });
+    report(failed);
+    expect(store.snapshot().entries).toMatchObject([{ id, occurrence_count: 2, toast_visible: true }]);
+  });
+
   it("retains pane history warnings across retry snapshots and clears obsolete recovery actions", () => {
     const { store, report } = setup();
     report({ ...history_ready, history_gap: true });
@@ -220,7 +259,7 @@ describe("attachment notification lifecycle", () => {
     report({ ...history_ready, history_gap: true });
     const id = store.snapshot().entries[0].id;
     expect(store.snapshot().entries).toMatchObject([{
-      id, title: "Earlier output unavailable", toast_visible: true, resolved_at: null,
+      id, title: "Earlier output unavailable", toast_visible: false, resolved_at: null,
       message: "Some earlier output is unavailable in this view.",
     }]);
 
@@ -233,7 +272,7 @@ describe("attachment notification lifecycle", () => {
     expect(store.snapshot().entries).toMatchObject([{ id, toast_visible: false, resolved_at: expect.any(Number), occurrence_count: 1 }]);
 
     report({ ...history_ready, phase, history_gap: true });
-    expect(store.snapshot().entries).toMatchObject([{ id, toast_visible: true, resolved_at: null, occurrence_count: 2 }]);
+    expect(store.snapshot().entries).toMatchObject([{ id, toast_visible: false, resolved_at: null, occurrence_count: 2 }]);
   });
 
   it.each(["disconnected", "retry_wait", "reconnecting", "error"] as const)("does not treat a %s snapshot with no gap as confirmed recovery", (phase) => {
@@ -268,6 +307,56 @@ describe("attachment notification lifecycle", () => {
       expect(store.snapshot().entries[0].actions).toEqual([]);
     },
   );
+
+  it.each([
+    { name: "Windows host", windows_client: false, remote_platform: "windows" as const, guidance: "Update the components on the Windows host, then reconnect." },
+    { name: "Windows client", windows_client: true, remote_platform: "unix" as const, guidance: "Update the remote components on the host, then reconnect." },
+  ])("offers manual component recovery for a $name", ({ windows_client, remote_platform, guidance }) => {
+    const { store, registry, owner, report } = setup(windows_client);
+    const remote_session = { ...session, target: { kind: "ssh" as const, host_id: "remote", destination: "workstation", remote_platform } };
+    report({ ...failed, session: remote_session, error_code: "protocol_version_mismatch", message: "The daemon protocol does not match this app." });
+    expect(store.snapshot().entries).toMatchObject([{
+      title: "Session connection failed", toast_visible: true,
+      message: `The daemon protocol does not match this app. ${guidance}`,
+      actions: [{ label: "Connect host", command_id: COMMAND_IDS.connectHost, args: { target_key: "host:remote" } }],
+    }]);
+    expect(registry.recoverySession(owner)).toBeNull();
+    expect(registry.canReconnect(owner)).toBe(false);
+    report({ ...history_ready, session: remote_session });
+    expect(store.snapshot().entries[0]).toMatchObject({ resolved_at: expect.any(Number), actions: [] });
+  });
+
+  it("retains Windows setup instructions and offers the host connection flow", () => {
+    const { store, registry, owner, report } = setup();
+    const message = "Install Windows components with ctlup, then reconnect.";
+    report({
+      ...failed, error_code: "windows_remote_agent_setup_required", message,
+      session: { ...session, target: { kind: "ssh", host_id: "remote", destination: "workstation", remote_platform: "windows" } },
+    });
+    expect(store.snapshot().entries).toMatchObject([{
+      message, actions: [{ label: "Connect host", command_id: COMMAND_IDS.connectHost, args: { target_key: "host:remote" } }],
+    }]);
+    expect(registry.recoverySession(owner)).toBeNull();
+    expect(registry.canReconnect(owner)).toBe(false);
+  });
+
+  it("detects Windows clients while preserving local daemon recovery", () => {
+    const platform = vi.spyOn(navigator, "platform", "get").mockReturnValue("Win32");
+    const store = new NotificationStore();
+    const registry = new AttachmentNotifications(store);
+    platform.mockRestore();
+    const owner = registry.createOwner();
+    const reconnect = vi.fn(async () => {});
+    registry.report(owner, { ...failed, error_code: "protocol_version_mismatch" }, reconnect);
+    expect(registry.recoverySession(owner)).toBe(session);
+    expect(store.snapshot().entries[0].actions).toMatchObject([{ label: "Restart local daemon", command_id: COMMAND_IDS.recoverSessionComponents }]);
+    registry.report(owner, {
+      ...failed, error_code: "protocol_version_mismatch",
+      session: { ...session, target: { kind: "ssh", host_id: "remote", destination: "workstation" } },
+    }, reconnect);
+    expect(registry.recoverySession(owner)).toBeNull();
+    expect(store.snapshot().entries[0].actions).toMatchObject([{ label: "Connect host", command_id: COMMAND_IDS.connectHost }]);
+  });
 
   it("does not let a retiring owner clear a replacement pane's failure", () => {
     const { store, report, registry, owner, reconnect } = setup();

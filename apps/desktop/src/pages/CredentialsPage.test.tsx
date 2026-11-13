@@ -1,4 +1,7 @@
 // @vitest-environment jsdom
+import type { ReactElement } from "react";
+import { NotificationProvider } from "../features/notifications/NotificationContext";
+import { NotificationStore } from "../features/notifications/NotificationStore";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CredentialRecord, CredentialsSnapshot, CredentialTarget } from "../lib/types";
@@ -13,7 +16,13 @@ const snapshot: CredentialsSnapshot = { metadata_import_required: false, credent
 const targets: CredentialTarget[] = [{ name: "Development", target: { kind: "ssh", host_id: "development", destination: "dev.example.test" } }];
 const props = () => ({ visible: true, targets, on_close: vi.fn(), on_dialog_change: vi.fn(), on_manage_vpn: vi.fn() });
 
+let notifications: NotificationStore;
+function renderPage(ui: ReactElement) {
+  return render(ui, { wrapper: ({ children }) => <NotificationProvider store={notifications}>{children}</NotificationProvider> });
+}
+
 beforeEach(() => {
+  notifications = new NotificationStore();
   vi.clearAllMocks();
   api.list.mockResolvedValue(structuredClone(snapshot));
   api.forget.mockResolvedValue(undefined);
@@ -30,7 +39,7 @@ describe("Credentials page", () => {
     value.credentials.push({ ...credential, credential_id: "legacy-id", name: "Older SSH item", kind: "ssh_credential", target: null, account: null, updated_at_ms: null });
     value.credentials.push({ ...vpn, credential_id: "tailnet-id", name: "Team network", kind: "tailscale_sign_in", storage: "container_volume", detail: "Sign-in data has not been verified." });
     api.list.mockResolvedValue(value);
-    const page = render(<CredentialsPage {...props()} />);
+    const page = renderPage(<CredentialsPage {...props()} />);
     expect(await screen.findByRole("table")).toBeTruthy();
     expect(api.list).toHaveBeenCalledWith(targets);
     for (const label of ["SSH password", "SSH key passphrase", "Saved SSH credential", "VPN password", "Tailscale sign-in", "VPN settings", "Container volume"]) expect(screen.getByText(label)).toBeTruthy();
@@ -43,7 +52,7 @@ describe("Credentials page", () => {
 
   it("loads only when opened and calls the close and VPN navigation callbacks", async () => {
     const options = props();
-    const page = render(<CredentialsPage {...options} visible={false} />);
+    const page = renderPage(<CredentialsPage {...options} visible={false} />);
     expect(api.list).not.toHaveBeenCalled();
     page.rerender(<CredentialsPage {...options} />);
     fireEvent.click(await screen.findByRole("button", { name: "Manage Work VPN" }));
@@ -56,7 +65,7 @@ describe("Credentials page", () => {
   it("requires confirmation and sends only the opaque ID to forget one Keychain item", async () => {
     const options = props();
     api.list.mockResolvedValueOnce(structuredClone(snapshot)).mockResolvedValueOnce({ ...snapshot, credentials: [vpn] });
-    render(<CredentialsPage {...options} />);
+    renderPage(<CredentialsPage {...options} />);
     fireEvent.click(await screen.findByRole("button", { name: "Forget Development" }));
     const dialog = await screen.findByRole("dialog", { name: "Forget Development" });
     expect(within(dialog).getByText(/Active connections stay connected/)).toBeTruthy();
@@ -65,14 +74,15 @@ describe("Credentials page", () => {
     fireEvent.click(within(dialog).getByRole("button", { name: "Forget credential" }));
     await waitFor(() => expect(api.forget).toHaveBeenCalledExactlyOnceWith("opaque-keychain-id"));
     await waitFor(() => expect(api.list).toHaveBeenCalledTimes(2));
-    expect(await screen.findByText("Forgot Development. Active connections are unchanged.")).toBeTruthy();
+    expect(screen.queryByText("Forgot Development. Active connections are unchanged.")).toBeNull();
+    expect(notifications.snapshot().entries).toHaveLength(0);
     expect(screen.queryByRole("button", { name: "Forget Development" })).toBeNull();
     expect(options.on_dialog_change).toHaveBeenLastCalledWith(false);
   });
 
   it("cancels without deleting and discards unconfirmed deletion when hidden", async () => {
     const options = props();
-    const page = render(<CredentialsPage {...options} />);
+    const page = renderPage(<CredentialsPage {...options} />);
     fireEvent.click(await screen.findByRole("button", { name: "Forget Development" }));
     fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" }));
     expect(screen.queryByRole("dialog")).toBeNull();
@@ -84,7 +94,7 @@ describe("Credentials page", () => {
 
   it("preserves other sources when Keychain cannot be listed", async () => {
     api.list.mockResolvedValue({ ...snapshot, credentials: [vpn], sources: [{ source: "keychain", state: "unavailable", message: "Keychain is locked. Unlock it, then refresh." }, snapshot.sources[1]] });
-    render(<CredentialsPage {...props()} />);
+    renderPage(<CredentialsPage {...props()} />);
     expect(await screen.findByText("Keychain: Keychain is locked. Unlock it, then refresh.")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Manage Work VPN" })).toBeTruthy();
     expect(screen.queryByText("No saved credentials found.")).toBeNull();
@@ -92,7 +102,7 @@ describe("Credentials page", () => {
 
   it("distinguishes an empty inventory from unavailable storage", async () => {
     api.list.mockResolvedValue({ ...snapshot, credentials: [] });
-    render(<CredentialsPage {...props()} />);
+    renderPage(<CredentialsPage {...props()} />);
     expect(await screen.findByText("No saved credentials found.")).toBeTruthy();
     api.list.mockResolvedValue({ ...snapshot, credentials: [], sources: [{ source: "keychain", state: "unsupported", message: null }, snapshot.sources[1]] });
     fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
@@ -101,17 +111,20 @@ describe("Credentials page", () => {
   });
 
   it("keeps the last inventory with an explicit stale message after refresh failure", async () => {
-    render(<CredentialsPage {...props()} />);
+    renderPage(<CredentialsPage {...props()} />);
     await screen.findByRole("table");
     api.list.mockRejectedValue(new Error("Inventory service unavailable."));
     fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
     expect(await screen.findByRole("alert")).toHaveProperty("textContent", "Could not refresh credentials: Inventory service unavailable. Showing the last successful check.");
+    expect(within(screen.getByRole("region", { name: "Saved credential inventory" })).getByRole("alert")).toBeTruthy();
+    expect(within(screen.getByRole("region", { name: "Identity file inventory" })).queryByRole("alert")).toBeNull();
+    expect(notifications.snapshot().entries).toHaveLength(0);
     expect(screen.getByRole("button", { name: "Forget Development" })).toBeTruthy();
   });
 
   it("does not claim the inventory is empty when every source failed", async () => {
     api.list.mockResolvedValue({ ...snapshot, credentials: [], sources: snapshot.sources.map((source) => ({ ...source, state: "unavailable" })) });
-    render(<CredentialsPage {...props()} />);
+    renderPage(<CredentialsPage {...props()} />);
     expect(await screen.findByText("Saved credentials could not be checked.")).toBeTruthy();
     expect(screen.queryByText(/No saved credentials found|No credentials found in available storage/)).toBeNull();
   });
@@ -119,7 +132,7 @@ describe("Credentials page", () => {
   it("never offers Keychain deletion for a VPN record even with an inconsistent action", async () => {
     api.list.mockResolvedValue({ ...snapshot, credentials: [{ ...vpn, action: "forget" }] });
     const options = props();
-    render(<CredentialsPage {...options} />);
+    renderPage(<CredentialsPage {...options} />);
     fireEvent.click(await screen.findByRole("button", { name: "Manage Work VPN" }));
     expect(screen.queryByRole("button", { name: /Forget/ })).toBeNull();
     expect(screen.queryByRole("dialog")).toBeNull();
@@ -129,10 +142,12 @@ describe("Credentials page", () => {
 
   it("reports deletion failure without removing the credential or claiming success", async () => {
     api.forget.mockRejectedValue(new Error("Keychain access was denied."));
-    render(<CredentialsPage {...props()} />);
+    renderPage(<CredentialsPage {...props()} />);
     fireEvent.click(await screen.findByRole("button", { name: "Forget Development" }));
     fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Forget credential" }));
-    expect(await screen.findByRole("alert")).toHaveProperty("textContent", "Could not forget Development: Keychain access was denied.");
+    await waitFor(() => expect(notifications.snapshot().entries).toHaveLength(1));
+    expect(notifications.snapshot().entries[0]).toMatchObject({ severity: "error", source: "Credentials", message: "Could not forget Development: Keychain access was denied." });
+    expect(screen.queryByRole("alert")).toBeNull();
     expect(screen.getByRole("button", { name: "Forget Development" })).toHaveProperty("disabled", false);
     expect(screen.queryByText(/Forgot Development/)).toBeNull();
   });
@@ -141,7 +156,7 @@ describe("Credentials page", () => {
     let complete!: (value: CredentialsSnapshot) => void;
     api.list.mockImplementationOnce(() => new Promise((resolve) => { complete = resolve; }));
     const options = props();
-    const page = render(<CredentialsPage {...options} />);
+    const page = renderPage(<CredentialsPage {...options} />);
     expect(screen.getByText("Checking saved credentials…")).toBeTruthy();
     page.rerender(<CredentialsPage {...options} visible={false} />);
     const next_targets = [{ ...targets[0], name: "Renamed development" }];
@@ -158,12 +173,12 @@ describe("Credentials page", () => {
     api.list.mockResolvedValueOnce(structuredClone(snapshot))
       .mockImplementationOnce(() => new Promise((resolve) => { complete = resolve; }))
       .mockResolvedValueOnce({ ...snapshot, credentials: [vpn] });
-    render(<CredentialsPage {...props()} />);
+    renderPage(<CredentialsPage {...props()} />);
     await screen.findByRole("table");
     fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
     fireEvent.click(screen.getByRole("button", { name: "Forget Development" }));
     fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Forget credential" }));
-    await screen.findByText("Forgot Development. Active connections are unchanged.");
+    await waitFor(() => expect(api.list).toHaveBeenCalledTimes(3));
     await act(async () => complete(structuredClone(snapshot)));
     expect(screen.queryByRole("button", { name: "Forget Development" })).toBeNull();
   });

@@ -654,6 +654,29 @@ Connection and history-recovery warnings take priority, while raw sequence and
 revision values remain diagnostics. The GUI does not request or serialize the
 sensitive editable command buffer.
 
+Desktop feedback follows its operation's owner; the [message inventory](desktop-feedback.md)
+records each placement. Field validation stays beside
+the field; form, row, and section failures retain their local recovery action.
+Refresh failures keep last-known data visibly stale and never create polling
+popups. Connection, input, layout, and progress states stay in their feature or
+the status line. Session connection and error states share a translucent
+floating banner with their reconnect or other recovery action inside the owning
+session area, below the tab bar. The banner follows its session and never
+resizes or shifts the terminal. Global notifications also float outside the main
+layout. Workspace persistence failures appear only in the notification center
+with Retry saving; workspace load errors instead expose a retryable error view.
+
+Standalone command failures, unexpected connection loss, and newly failed task
+runs use one popup backed by the same window-local notification-center entry.
+Normal session exits, explicit cancellation, and routine saves stay local.
+Operations with retained result dialogs show their outcome there; standalone
+maintenance completions notify after their initiating confirmation closes.
+History gaps remain in terminal status and the center without a popup. Retry
+diagnostics update an existing incident without restoring hidden or dismissed
+popups; explicit retry or proven recovery permits a new occurrence. Notification
+contents are not persisted. Input and layout feedback carry frontend ownership
+metadata, independent of the daemon's protocol and message wording.
+
 The renderer adopts daemon-authoritative PTY geometry. Selecting an existing
 session never acquires layout ownership or changes its PTY grid. **Resize with
 window** explicitly acquires the layout lease, measures the terminal container,

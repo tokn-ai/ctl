@@ -4,6 +4,7 @@ import { errorMessage } from "../../lib/errors";
 import { targetKey, targetLabel } from "../../features/targets/targets";
 import type { ConnectionTarget, SessionArchive } from "../../lib/types";
 import { Icon } from "../ui/Icon";
+import { InlineFeedback } from "../feedback/InlineFeedback";
 import "./archiveBrowser.css";
 
 export function ArchiveBrowser({ targets, on_close }: {
@@ -78,9 +79,9 @@ export function ArchiveBrowser({ targets, on_close }: {
     <header><h2>Archived sessions</h2><button type="button" onClick={on_close}>Close</button></header>
     <p>Stored on this device until deleted. Retained text is read only.</p>
     {loading && <p role="status">Loading archive…</p>}
-    {error && <p role="alert">{error}</p>}
+    {error && <InlineFeedback>{error}</InlineFeedback>}
     {!loading && !error && !archives.length && <p>No retained archives on this device.</p>}
-    {history_gap && <p role="status">Earlier output is unavailable. This archive contains the retained portion of the session.</p>}
+    {history_gap && <InlineFeedback severity="warning">Earlier output is unavailable. This archive contains the retained portion of the session.</InlineFeedback>}
     <div className="archive-browser-content">
       <nav aria-label="Retained sessions">{archives.map((archive) => {
         const target = targets.find((candidate) => targetKey(candidate) === archive.host_key);

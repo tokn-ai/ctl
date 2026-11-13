@@ -16,7 +16,10 @@ import { errorMessage } from "../../lib/errors";
 import type { useWorkspace } from "../workspace/useWorkspace";
 import { workspaceTabKey } from "../workspace/workspaceModel";
 import { sessionKey } from "../targets/targets";
-import { sameDefinition } from "./taskModel";
+import { sameDefinition, TaskDefinitionValidationError } from "./taskModel";
+import { useNotificationEnvironment } from "../notifications/NotificationContext";
+import { COMMAND_IDS } from "../commands/commandIds";
+import { persistTaskWorkspace, TaskWorkspaceSaveError } from "./taskWorkspacePersistence";
 
 import { useTaskEditor } from "./useTaskEditor";
 import { definitionScopeKey, definitionScopeLabel, GLOBAL_DEFINITION_SCOPE, useTaskDefinitions } from "./useTaskDefinitions";
@@ -34,8 +37,15 @@ export function useTaskWorkspace(
   const [hasLoaded, setHasLoaded] = useState(false);
   const [busy, setBusy] = useState(false);
   const [daemonStatus, setDaemonStatus] = useState<string | null>(null);
+  const notifications = useNotificationEnvironment()?.store;
   const catalog = useTaskDefinitions(workspace.task_definition_scope, workspace.ready);
   const editor = useTaskEditor(workspace, catalog);
+  const [editorFailure, setEditorFailure] = useState<{ owner: typeof editor.owner; message: string; validation_error?: TaskDefinitionValidationError } | null>(null);
+  const [terminalFailure, setTerminalFailure] = useState<{ tab_key: string; message: string } | null>(null);
+  const [terminalRetry, setTerminalRetry] = useState(0);
+  const editor_error = (editorFailure?.owner === editor.owner ? editorFailure?.message : null)
+    ?? (editor.owner ? editor.catalog_error : null);
+  const editor_validation_error = editorFailure?.owner === editor.owner ? editorFailure?.validation_error ?? null : null;
   useEffect(() => {
     if (definitionScopeKey(catalog.scope) !== definitionScopeKey(workspace.task_definition_scope))
       workspace.update("task_definition_scope", catalog.scope);
@@ -70,7 +80,7 @@ export function useTaskWorkspace(
     if (!activeReference?.definition_id) return;
     const source = activeReference.definition_scope ?? GLOBAL_DEFINITION_SCOPE;
     if (definitionScopeKey(source) === definitionScopeKey(catalog.scope)) return;
-    const refresh = () => { void catalog.load(source).catch((failure: unknown) => setError(errorMessage(failure))); };
+    const refresh = () => { void catalog.load(source).catch(() => undefined); };
     refresh();
     window.addEventListener("focus", refresh);
     return () => window.removeEventListener("focus", refresh);
@@ -143,10 +153,32 @@ export function useTaskWorkspace(
       }
     }
   };
-  const perform = async (operation: () => Promise<void>) => {
+  const notifyFailure = (key: string, title: string, failure: unknown, task_id?: string) => {
+    if (failure instanceof TaskWorkspaceSaveError) return;
+    notifications?.notify(key, {
+      severity: "error", title, message: errorMessage(failure), source: "Tasks",
+      actions: task_id ? [{ label: "View task", command_id: COMMAND_IDS.openTask, args: { value: task_id } }] : [],
+    });
+  };
+  const perform = async (operation: () => Promise<void>, key: string, title: string, task_id?: string) => {
     if (mutation.current) return;
-    try { await performExclusive(operation); }
-    catch { /* Existing task controls show the retained task error. */ }
+    try {
+      await performExclusive(operation);
+    } catch (failure) {
+      notifyFailure(key, title, failure, task_id);
+    }
+  };
+  const performInEditor = async (operation: () => Promise<void>) => {
+    if (mutation.current || !editor.owner) return false;
+    setEditorFailure(null);
+    try {
+      await performExclusive(operation);
+      return true;
+    } catch (failure) {
+      if (!(failure instanceof TaskWorkspaceSaveError) && editor.isCurrent())
+        setEditorFailure({ owner: editor.owner, message: errorMessage(failure), validation_error: failure instanceof TaskDefinitionValidationError ? failure : undefined });
+      return false;
+    }
   };
   const open = (tab: TaskTab) => {
     const view = workspaceRef.current;
@@ -188,7 +220,7 @@ export function useTaskWorkspace(
     const reference = view.task_references.find((item) => item.host_id === "local" && item.task_id === task.task_id);
     const source = reference?.definition_scope ?? GLOBAL_DEFINITION_SCOPE;
     if (reference?.definition_id && !catalog.get(source))
-      void catalog.load(source).catch((failure: unknown) => setError(errorMessage(failure)));
+      void catalog.load(source).catch(() => undefined);
     const oldTab = view.tabs.find(
       (tab) => tab.target.kind === "local" && tab.session_id === sessionId,
     );
@@ -223,7 +255,7 @@ export function useTaskWorkspace(
       definitionScopeKey(item.definition_scope) !== definitionScopeKey(candidates[index].definition_scope))) {
       view.update("task_references", (references) => references.map((item) =>
         canonicalReferences.find((candidate) => candidate.task_id === item.task_id && candidate.host_id === item.host_id) ?? item));
-      await view.persist();
+      await persistTaskWorkspace(view);
     }
     let reference = another
       ? undefined
@@ -247,7 +279,7 @@ export function useTaskWorkspace(
         ...references,
         reference!,
       ]);
-      await view.persist();
+      await persistTaskWorkspace(view);
     }
     const result = await taskRequest({
       type: "register_task",
@@ -265,10 +297,8 @@ export function useTaskWorkspace(
       task,
     ]);
     openTask(task);
-    if (!another && !sameDefinition(task.definition, definition.definition))
-      throw new Error(
-        "Saved definition has changes. Apply them while stopped, or start the registered command.",
-      );
+    // The task detail owns the revision notice and its Apply/Start actions.
+    if (!another && !sameDefinition(task.definition, definition.definition)) return;
     if (!task.active_run) {
       const started = await taskRequest({
         type: "start_task",
@@ -304,7 +334,7 @@ export function useTaskWorkspace(
           current.filter((item) => item.task_id !== task.task_id),
         );
       }
-    });
+    }, `task_action:${type}:${task.task_id}`, "Task action failed", task.task_id);
   const closeNow = (key: string) => {
     const view = workspaceRef.current;
     view.update("task_tabs", (tabs) =>
@@ -315,7 +345,7 @@ export function useTaskWorkspace(
       view.setActiveTabKey(null);
       void detachRef
         .current()
-        .catch((failure: unknown) => setError(errorMessage(failure)));
+        .catch((failure: unknown) => notifyFailure("task_terminal:detach", "Could not detach task terminal", failure));
     }
   };
   const attachmentVersion = useRef(0);
@@ -324,6 +354,8 @@ export function useTaskWorkspace(
   useEffect(() => {
     const version = ++attachmentVersion.current;
     if (!active) return;
+    const tab_key = workspaceTabKey(active);
+    setTerminalFailure(null);
     void (async () => {
       try {
         await detachRef.current();
@@ -339,16 +371,17 @@ export function useTaskWorkspace(
         if (version !== attachmentVersion.current) return;
         if (!result[0]?.session)
           throw new Error("This task's terminal is no longer available.");
-        await connectRef.current(result[0].session);
+        // The attachment owns connection failures and reconnect actions.
+        await connectRef.current(result[0].session).catch(() => undefined);
       } catch (failure) {
         if (version === attachmentVersion.current)
-          setError(errorMessage(failure));
+          setTerminalFailure({ tab_key, message: errorMessage(failure) });
       }
     })();
     return () => {
       attachmentVersion.current += 1;
     };
-  }, [workspace.active_tab_key, desiredSession]);
+  }, [workspace.active_tab_key, desiredSession, terminalRetry]);
 
   const restartDaemon = () =>
     perform(async () => {
@@ -356,12 +389,13 @@ export function useTaskWorkspace(
       try {
         await restartTaskDaemon();
         setRefreshError(null);
-        setDaemonStatus("ctl-taskd restarted.");
-      } catch (failure) {
+        notifications?.notify("task_daemon:restart", {
+          severity: "success", title: "Task daemon restarted", message: "ctl-taskd restarted.", source: "Tasks",
+        });
+      } finally {
         setDaemonStatus(null);
-        throw failure;
       }
-    });
+    }, "task_daemon:restart", "Could not restart task daemon");
 
   return {
     tasks,
@@ -371,6 +405,11 @@ export function useTaskWorkspace(
     connection_error: refreshError,
     error: error ?? refreshError,
     setError,
+    editor_error,
+    editor_validation_error,
+    active_definition_error: activeReference ? catalog.error_for(activeReference.definition_scope ?? GLOBAL_DEFINITION_SCOPE) : null,
+    terminal_error: active && terminalFailure?.tab_key === workspaceTabKey(active) ? terminalFailure.message : null,
+    retry_terminal: () => setTerminalRetry((value) => value + 1),
     loading,
     hasLoaded,
     busy,
@@ -385,7 +424,7 @@ export function useTaskWorkspace(
     openEditor: editor.open,
     drafts: workspace.task_drafts,
     savingDraft: workspace.saving,
-    draftError: workspace.error,
+    draftError: workspace.save_error,
     discardDraft: editor.discard,
     definitions: catalog.definitions,
     definition_scope: catalog.scope,
@@ -394,11 +433,16 @@ export function useTaskWorkspace(
     definitions_loaded: catalog.has_loaded,
     definitions_error: catalog.error,
     refreshDefinitions: catalog.refresh,
+    refreshActiveDefinition: async () => {
+      if (!activeReference) return;
+      try { await catalog.load(activeReference.definition_scope ?? GLOBAL_DEFINITION_SCOPE); }
+      catch { /* The affected task retains the catalog error. */ }
+    },
     selectDefinitionScope: (source: TaskDefinitionScope) => workspace.update("task_definition_scope", source),
     savedForReference: (reference: TaskReference) => catalog.get(reference.definition_scope ?? GLOBAL_DEFINITION_SCOPE)?.definitions.find((item) => item.definition_id === reference.definition_id),
     draftConflict: editor.conflict,
     draftReviewRequired: editor.reviewRequired,
-    reloadDraft: () => perform(editor.reload),
+    reloadDraft: () => performInEditor(editor.reload),
     refresh: async () => { await Promise.all([refresh(), catalog.refresh()]); },
     open,
     openTask,
@@ -409,13 +453,16 @@ export function useTaskWorkspace(
     edit: editor.edit,
     editCommand: editor.editCommand,
     save: (run = false) =>
-      perform(async () => {
+      performInEditor(async () => {
         const result = await editor.save();
         if (run) await startSaved(result, false, undefined, editor.scope);
         editor.close();
       }),
     run: (definition: SavedTaskDefinition, another = false, name?: string, source?: TaskDefinitionScope) =>
-      perform(() => startSaved(definition, another, name, source)),
+      perform(() => startSaved(definition, another, name, source),
+        `task_command:run:${definitionScopeKey(source ?? catalog.scope)}:${definition.definition_id}`, "Could not run task"),
+    runFromEditor: (definition: SavedTaskDefinition, name: string, source: TaskDefinitionScope) =>
+      performInEditor(() => startSaved(definition, true, name, source)),
     saveAsDefinition: (task: ManagedTask) => editor.create(task.definition),
     apply: (task: ManagedTask, definition: SavedTaskDefinition) =>
       perform(async () => {
@@ -431,10 +478,10 @@ export function useTaskWorkspace(
               : item,
           ),
         );
-        await workspace.persist();
-      }),
+        await persistTaskWorkspace(workspace);
+      }, `task_apply:${task.task_id}`, "Could not apply task definition", task.task_id),
     forgetDefinition: (definition_id: string) =>
-      perform(async () => {
+      performInEditor(async () => {
         const source = editor.definitionId === definition_id ? editor.scope : catalog.scope;
         const saved = catalog.get(source)?.definitions.find((item) => item.definition_id === definition_id);
         const expected_revision = editor.definitionId === definition_id ? editor.draft?.base_revision : saved?.revision;
@@ -453,7 +500,7 @@ export function useTaskWorkspace(
               : item,
           ),
         );
-        await workspace.persist();
+        await persistTaskWorkspace(workspace);
       }),
     recreate: (task_id: string) =>
       perform(async () => {
@@ -472,7 +519,7 @@ export function useTaskWorkspace(
           task_id,
           definition: definition.definition,
         });
-      }),
+      }, `task_recreate:${task_id}`, "Could not recreate task", task_id),
   };
 }
 export type TaskWorkspace = ReturnType<typeof useTaskWorkspace>;

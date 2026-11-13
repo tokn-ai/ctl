@@ -14,7 +14,9 @@ import type {
 } from "../../lib/types";
 import { targetLabel } from "../../features/targets/targets";
 import { portForwardProtocolLabel } from "../../features/portForwarding/protocol";
+import type { PortForwardFeedbackOptions } from "../../features/portForwarding/usePortForwarding";
 import { QuickInputFrame } from "../commands/QuickInputFrame";
+import { InlineFeedback } from "../feedback/InlineFeedback";
 import "../portForwarding/portForwarding.css";
 
 interface Props {
@@ -26,6 +28,7 @@ interface Props {
   onSetEnabled(
     forward: WorkspacePortForward,
     enabled: boolean,
+    options?: PortForwardFeedbackOptions,
   ): Promise<void>;
   onUpdateAgent(): void;
   onClose(): void;
@@ -43,6 +46,7 @@ export function PortForwardingDialog({
 }: Props) {
   const windows_target = target.remote_platform === "windows";
   const [error, setError] = useState<string | null>(null);
+  const [action_errors, setActionErrors] = useState<ReadonlyMap<string, { message: string; enabled: boolean }>>(new Map());
   const [name, setName] = useState("");
   const [localPort, setLocalPort] = useState("");
   const [remoteHost, setRemoteHost] = useState("127.0.0.1");
@@ -109,11 +113,15 @@ export function PortForwardingDialog({
   }, [localPort, protocol]);
 
   async function setEnabled(forward: WorkspacePortForward, value: boolean) {
-    setError(null);
+    setActionErrors((current) => {
+      const next = new Map(current);
+      next.delete(forward.forward_id);
+      return next;
+    });
     try {
-      await onSetEnabled(forward, value);
+      await onSetEnabled(forward, value, { feedback: "inline" });
     } catch (failure) {
-      setError(errorMessage(failure));
+      setActionErrors((current) => new Map(current).set(forward.forward_id, { message: errorMessage(failure), enabled: value }));
       throw failure;
     }
   }
@@ -203,7 +211,7 @@ export function PortForwardingDialog({
             <button type="button" onClick={onUpdateAgent}>Update remote components</button>
           </div>
         ) : null}
-        {listenerError ? <p className="remote-listener-message error" role="status">{listenerError}</p> : null}
+        {listenerError ? <InlineFeedback action={{ label: "Retry listener scan", on_click: () => void refreshListeners(), disabled: listenersLoading }}>{listenerError}</InlineFeedback> : null}
         {!listenerError && !listenerUpdateRequired && !listenersLoading && listeners.length === 0 ? (
           <p className="remote-listener-message">No visible TCP/UDP listeners.</p>
         ) : null}
@@ -224,7 +232,7 @@ export function PortForwardingDialog({
           </div>
         ) : null}
         {listenerWarnings.map((warning) => (
-          <p className="remote-listener-message warning" key={warning}>{warning}</p>
+          <InlineFeedback severity="warning" key={warning}>{warning}</InlineFeedback>
         ))}
       </section> : null}
       <div className="port-forward-list">
@@ -233,6 +241,7 @@ export function PortForwardingDialog({
         ) : forwards.map((forward) => {
           const status = statuses.get(forward.forward_id);
           const changing = busy.has(forward.forward_id);
+          const action_error = action_errors.get(forward.forward_id);
           return (
             <div className="port-forward-row" key={forward.forward_id}>
               <div>
@@ -242,6 +251,7 @@ export function PortForwardingDialog({
                   {changing ? "changing…" : status?.state.replace(/_/g, " ") ?? "stopped"}
                   {status?.message ? ` · ${status.message}` : ""}
                 </small>
+                {action_error ? <InlineFeedback action={{ label: "Retry forward", on_click: () => void setEnabled(forward, action_error.enabled).catch(() => undefined), disabled: changing }}>{action_error.message}</InlineFeedback> : null}
               </div>
               <button
                 type="button"
@@ -293,7 +303,7 @@ export function PortForwardingDialog({
         <label>Remote port<input inputMode="numeric" value={remotePort} onChange={(event) => setRemotePort(event.target.value)} placeholder="5432" /></label>
         <button type="submit" className="button-primary">Add stopped forward</button>
       </form>
-      {error ? <p className="quick-input-error" role="alert">{error}</p> : null}
+      {error ? <InlineFeedback>{error}</InlineFeedback> : null}
     </QuickInputFrame>
   );
 }

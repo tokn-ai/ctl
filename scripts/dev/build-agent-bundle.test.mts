@@ -211,7 +211,11 @@ test("abrupt launcher death disconnects the supervisor and stops its engine", as
   let pid: number | undefined;
   try {
     for (let attempt = 0; attempt < 200; attempt += 1) {
-      try { pid = Number(await readFile(pidfile, "utf8")); break; } catch { await delay(10); }
+      try {
+        const candidate = Number(await readFile(pidfile, "utf8"));
+        if (Number.isSafeInteger(candidate) && candidate > 0) { pid = candidate; break; }
+      } catch { /* The engine may not have created its PID file yet. */ }
+      await delay(10);
     }
     assert.ok(pid, "owned engine started");
     driver.kill("SIGKILL");

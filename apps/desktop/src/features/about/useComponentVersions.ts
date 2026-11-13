@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { errorMessage } from "../../lib/errors";
 import { getComponentVersions, preflightComponentAction, executeComponentAction } from "../../lib/tauri";
 import type { ComponentVersionsSnapshot, ComponentActionPreflight, ComponentActionResult } from "../../lib/types";
+import { useNotificationEnvironment } from "../notifications/NotificationContext";
 
 /** Observations never own connections. Closing About must not stop any work. */
 export function useComponentVersions(visible: boolean, on_restarted: (preflight: ComponentActionPreflight) => void, execute_action?: (preflight: ComponentActionPreflight) => Promise<ComponentActionResult>) {
@@ -13,7 +14,9 @@ export function useComponentVersions(visible: boolean, on_restarted: (preflight:
   const [busy_id, setBusyId] = useState<string | null>(null);
   const [restarting, setRestarting] = useState(false);
   const [action_error, setActionError] = useState<{ component_id: string; message: string } | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
+  const notifications = useNotificationEnvironment()?.store;
+  const notifications_ref = useRef(notifications);
+  notifications_ref.current = notifications;
   const mounted = useRef(false);
   const visible_ref = useRef(visible);
   visible_ref.current = visible;
@@ -61,7 +64,6 @@ export function useComponentVersions(visible: boolean, on_restarted: (preflight:
     const request_generation = ++action_generation.current;
     setBusyId(component_id);
     setActionError(null);
-    setNotice(null);
     try {
       const next = await preflightComponentAction(component_id);
       if (request_generation !== action_generation.current) return;
@@ -92,9 +94,15 @@ export function useComponentVersions(visible: boolean, on_restarted: (preflight:
     setRestarting(true);
     try {
       const result = await (execute_action ? execute_action(preflight) : executeComponentAction(preflight.action_token));
-      if (mounted.current) setNotice(result.detail ?? `${preflight.label} ${preflight.action === "reconnect" ? "reconnected" : "restarted"}.`);
+      notifications_ref.current?.notify(`component-action:${preflight.component_id}`, {
+        severity: "success", title: preflight.action === "reconnect" ? "Component reconnected" : "Component restarted", source: "Components",
+        message: result.detail ?? `${preflight.label} ${preflight.action === "reconnect" ? "reconnected" : "restarted"}.`,
+      });
     } catch (failure) {
-      if (mounted.current) setActionError({ component_id: preflight.component_id, message: errorMessage(failure) });
+      notifications_ref.current?.notify(`component-action:${preflight.component_id}`, {
+        severity: "error", title: preflight.action === "reconnect" ? "Component reconnect failed" : "Component restart failed", source: "Components",
+        message: `${preflight.label}: ${errorMessage(failure)}`,
+      });
     } finally {
       // A restart may have taken effect even if its final health check failed.
       restarted.current(preflight);
@@ -108,5 +116,5 @@ export function useComponentVersions(visible: boolean, on_restarted: (preflight:
     }
   }, [preflight, refresh, execute_action]);
 
-  return { snapshot, loading, error, checked_at, preflight, busy_id, restarting, action_error, notice, refresh, requestRestart, cancelRestart, confirmRestart };
+  return { snapshot, loading, error, checked_at, preflight, busy_id, restarting, action_error, refresh, requestRestart, cancelRestart, confirmRestart };
 }

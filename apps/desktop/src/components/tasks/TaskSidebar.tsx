@@ -2,6 +2,7 @@ import type { TaskWorkspace } from "../../features/tasks/useTaskWorkspace";
 import type { SavedTaskDefinition, TaskReference } from "../../lib/types";
 import { definitionScopeKey, definitionScopeLabel, GLOBAL_DEFINITION_SCOPE } from "../../features/tasks/useTaskDefinitions";
 import { TaskDefinitionSource } from "./TaskDefinitionSource";
+import { InlineFeedback } from "../feedback/InlineFeedback";
 import { taskState } from "../../features/tasks/taskModel";
 import { Icon } from "../ui/Icon";
 export function TaskSidebar({
@@ -81,6 +82,9 @@ export function TaskSidebar({
           <h3>
             Saved definitions <span>{definitions.length}</span>
           </h3>
+          {model.definitions_error ? <InlineFeedback className="task-feedback" action={{ label: "Retry definitions", on_click: () => void model.refreshDefinitions(), disabled: model.definitions_loading }}>
+            Could not refresh task definitions: {model.definitions_error}{model.definitions_loaded ? " Showing the last successful check." : ""}
+          </InlineFeedback> : null}
           {!model.definitions_loaded && !model.definitions_error ? (
             <p className="task-sidebar-note">Loading definitions…</p>
           ) : model.definitions_loaded && definitions.length === 0 ? (
@@ -126,9 +130,13 @@ export function TaskSidebar({
           <h3>
             Managed tasks <span>Local</span>
           </h3>
-          {!model.hasLoaded && !model.error ? (
+          {model.connection_error ? <InlineFeedback className="task-feedback" action={{ label: "Retry tasks", on_click: () => void model.refresh(), disabled: model.loading }}>
+            Could not refresh tasks: {model.connection_error}{model.hasLoaded ? " Showing the last successful check." : ""}
+          </InlineFeedback> : null}
+          {model.daemonStatus ? <span className="task-sidebar-note" role="status">{model.daemonStatus}</span> : null}
+          {!model.hasLoaded && !model.connection_error ? (
             <p className="task-sidebar-note">Loading tasks…</p>
-          ) : !model.tasks.length && !model.error ? (
+          ) : !model.tasks.length && !model.connection_error ? (
             <p className="task-sidebar-note">
               Run a saved definition, or create a task with ctl.
             </p>

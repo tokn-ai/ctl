@@ -169,6 +169,7 @@ export function useTaskDefinitions(scope: TaskDefinitionScope, ready: boolean) {
     loading: loading[key] ?? false,
     has_loaded: !!currentCatalog,
     error: errors[key] ?? null,
+    error_for: (source: TaskDefinitionScope) => errors[definitionScopeKey(source)] ?? null,
     get: (source: TaskDefinitionScope) => {
       return catalogs[definitionScopeKey(resolveScope(source))] ?? catalogs[definitionScopeKey(source)];
     },

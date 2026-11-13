@@ -240,7 +240,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
       setState((current) => ({
         ...current,
         resize_with_window: false,
-        message,
+        message, message_kind: "layout",
       }));
 
     },
@@ -279,6 +279,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
         } else {
           setState((current) => ({
             ...current,
+            message_kind: "layout",
             message: `Could not release terminal layout: ${errorMessage(error)}`,
           }));
         }
@@ -644,7 +645,8 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
               } else if (request?.status === "denied" && (event.status.owned_by_client || !event.status.held)) {
                 request = undefined;
               }
-              return { ...current, input_lease: event.status, input_lease_request: request };
+              return { ...current, input_lease: event.status, input_lease_request: request,
+                ...(event.status.owned_by_client && current.message_kind === "input" ? { message: null, message_kind: null } : {}) };
             });
             break;
           }
@@ -676,6 +678,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
             resize_with_window: resizeLost
               ? false
               : current.resize_with_window,
+            message_kind: event.status.owned_by_client ? null : resizeLost || expectedLayoutIntent === true || isResizeControlNotice(current.message) ? "layout" : current.message_kind,
             message: event.status.owned_by_client ? null : resizeLost
               ? event.status.held
                 ? resizeControlNotice(true)
@@ -717,7 +720,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
           if (event.code === "input_lease_required") loseLease("input");
           else if (event.code === "layout_lease_required") loseLease("layout");
           if (stateRef.current.session) publishSessionView({ session: stateRef.current.session, attachment_id: event.attachment_id, error: event.message });
-          setState((current) => ({ ...current, message: event.message }));
+          setState((current) => ({ ...current, message: event.message, message_kind: event.code === "layout_lease_required" ? "layout" : event.code === "input_lease_required" ? "input" : null }));
           break;
         case "session_ended":
           resetRecovery();
@@ -1185,7 +1188,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
       const prepared = (connected: boolean) => {
         if (!isCurrent()) return false;
         if (!connected) setState((current) => activeAttachmentRef.current
-          ? { ...current, message: "Reconnect cancelled." }
+          ? current
           : transitionAttachment(current, {
             type: "failed", code: "attachment_cancelled", message: "Reconnect cancelled.",
             resume_from: current.reconnect_sequence,
@@ -1205,7 +1208,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
           await reconnectCurrent(true, focus_origin);
         } catch (error) {
           if (isCurrent()) setState((current) => activeAttachmentRef.current
-            ? { ...current, message: errorMessage(error) }
+            ? errorCode(error) === "attachment_cancelled" ? current : { ...current, message: errorMessage(error), message_kind: null }
             : transitionAttachment(current, {
               type: "failed", code: errorCode(error), message: errorMessage(error),
               resume_from: current.reconnect_sequence,
@@ -1468,6 +1471,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
     if (!inputPumpRef.current?.push(data)) {
       setState((current) => ({
         ...current,
+        message_kind: null,
         message: "Terminal input paused because the local input queue is full.",
       }));
     }
@@ -1483,7 +1487,8 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
       }
       const acquire = !current.input_lease.owned_by_client;
       const request = { attachment_id: attachmentId, lease: "input" as const };
-      setState({ ...current, input_lease_request: { status: "pending", acquire } });
+      setState({ ...current, input_lease_request: { status: "pending", acquire },
+        ...(current.message_kind === "input" ? { message: null, message_kind: null } : {}) });
       try {
         if (acquire) {
           await acquireAttachmentLease(request);
@@ -1515,7 +1520,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
       setState((current) => ({
         ...current,
         resize_with_window: false,
-        message: null,
+        message: null, message_kind: null,
       }));
       return;
     }
@@ -1524,6 +1529,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
     if (!proposed) {
       setState((current) => ({
         ...current,
+        message_kind: "layout",
         message: "The terminal viewport is not ready for layout measurement.",
       }));
       return;
@@ -1536,7 +1542,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
       ...current,
       resize_with_window: true,
       resize_control_desired: true,
-      message: null,
+      message: null, message_kind: null,
     }));
 
     layoutLeasePumpRef.current?.schedule({

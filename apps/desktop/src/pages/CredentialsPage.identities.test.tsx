@@ -1,4 +1,7 @@
 // @vitest-environment jsdom
+import type { ReactElement } from "react";
+import { NotificationProvider } from "../features/notifications/NotificationContext";
+import { NotificationStore } from "../features/notifications/NotificationStore";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CredentialTarget, IdentityFile, IdentitySnapshot } from "../lib/types";
@@ -12,7 +15,13 @@ const targets: CredentialTarget[] = [{ name: "Development", target: { kind: "ssh
 const props = () => ({ visible: true, targets, on_close: vi.fn(), on_dialog_change: vi.fn(), on_manage_vpn: vi.fn() });
 const makeInventory = (rows: IdentityFile[]): IdentitySnapshot => ({ ...inventory, identity_files: rows });
 
+let notifications: NotificationStore;
+function renderPage(ui: ReactElement) {
+  return render(ui, { wrapper: ({ children }) => <NotificationProvider store={notifications}>{children}</NotificationProvider> });
+}
+
 beforeEach(() => {
+  notifications = new NotificationStore();
   vi.resetAllMocks();
   api.list.mockResolvedValue({ metadata_import_required: false, credentials: [], sources: [{ source: "keychain", state: "ready", message: null }, { source: "vpn", state: "ready", message: null }], checked_at_ms: 3000 });
   api.import_metadata.mockResolvedValue(undefined);
@@ -36,14 +45,14 @@ function submitSave() {
 describe("Identity file credentials", () => {
   it("keeps unavailable host file hints separate from legacy scope matching", async () => {
     const unavailable_targets = [{ ...targets[0], target: { ...targets[0].target, unavailable: "Device unavailable" } }];
-    render(<CredentialsPage {...props()} targets={unavailable_targets} />);
+    renderPage(<CredentialsPage {...props()} targets={unavailable_targets} />);
     await screen.findByRole("table", { name: "Identity files" });
     expect(api.identities).toHaveBeenCalledExactlyOnceWith(unavailable_targets);
     expect(api.list).toHaveBeenCalledExactlyOnceWith([]);
   });
 
   it("shows one row per file with verified metadata, references and storage status", async () => {
-    render(<CredentialsPage {...props()} />);
+    renderPage(<CredentialsPage {...props()} />);
     const table = await screen.findByRole("table", { name: "Identity files" });
     expect(within(table).getAllByRole("row")).toHaveLength(2);
     for (const label of ["id_ed25519", "~/.ssh/id_ed25519", "Ed25519", "SHA256:fixture-fingerprint", "Development, Staging", "Not saved"]) expect(within(table).getByText(label)).toBeTruthy();
@@ -57,7 +66,7 @@ describe("Identity file credentials", () => {
       { ...file, identity_id: "missing", path: "/missing", display_path: "/missing", file_state: "missing", file_version: null, encrypted: null, key_type: null, fingerprint: null, passphrase_state: "saved" },
       { ...file, identity_id: "bad", path: "/bad", display_path: "/bad", file_state: "unsupported", encrypted: null, passphrase_state: "unknown" },
     ]));
-    render(<CredentialsPage {...props()} />);
+    renderPage(<CredentialsPage {...props()} />);
     await screen.findByRole("table", { name: "Identity files" });
     expect(screen.queryByRole("button", { name: /Save passphrase|Replace passphrase/ })).toBeNull();
     expect(screen.getByRole("button", { name: "Forget passphrase for missing" })).toBeTruthy();
@@ -70,7 +79,7 @@ describe("Identity file credentials", () => {
     api.save_identity.mockImplementationOnce(() => new Promise<void>((resolve) => { complete = resolve; }));
     api.identities.mockResolvedValueOnce(inventory).mockResolvedValueOnce(makeInventory([{ ...file, passphrase_state: "saved" }]));
     const options = props();
-    render(<CredentialsPage {...options} />);
+    renderPage(<CredentialsPage {...options} />);
     const input = await openSave();
     expect(input.type).toBe("password");
     submitSave();
@@ -90,7 +99,7 @@ describe("Identity file credentials", () => {
 
   it.each(["cancel", "hide", "unmount"])("clears a detached secret input on %s without saving", async (action) => {
     const options = props();
-    const page = render(<CredentialsPage {...options} />);
+    const page = renderPage(<CredentialsPage {...options} />);
     const input = await openSave();
     if (action === "cancel") fireEvent.click(screen.getByRole("button", { name: "Cancel quick input" }));
     if (action === "hide") page.rerender(<CredentialsPage {...options} visible={false} />);
@@ -103,10 +112,11 @@ describe("Identity file credentials", () => {
 
   it("discards passphrases after rejection and never renders untrusted native error text", async () => {
     api.save_identity.mockRejectedValue(new Error("sample-secret-fixture was invalid"));
-    render(<CredentialsPage {...props()} />);
+    renderPage(<CredentialsPage {...props()} />);
     const input = await openSave();
     submitSave();
-    expect(await screen.findByRole("alert")).toHaveProperty("textContent", "The passphrase could not be saved. Check the passphrase, identity file, and Keychain access, then try again.");
+    await waitFor(() => expect(notifications.snapshot().entries).toHaveLength(1));
+    expect(notifications.snapshot().entries[0].message).toBe("The passphrase could not be saved. Check the passphrase, identity file, and Keychain access, then try again.");
     expect(input.value).toBe("");
     expect(document.body.textContent).not.toContain("sample-secret-fixture");
     expect(screen.queryByRole("dialog")).toBeNull();
@@ -116,20 +126,45 @@ describe("Identity file credentials", () => {
 
   it.each([
     ["identity_file_changed", "The identity file changed. Refresh and try again with the current file."],
-    ["identity_unlock_failed", "The passphrase does not unlock this identity file. Try again."],
     ["identity_keychain_locked", "Keychain access was denied or locked. Unlock it and try again."],
   ])("uses only allowlisted error codes for %s", async (code, message) => {
     api.save_identity.mockRejectedValue({ code, message: "sample-secret-fixture" });
-    render(<CredentialsPage {...props()} />);
+    renderPage(<CredentialsPage {...props()} />);
     await openSave();
     submitSave();
-    expect(await screen.findByRole("alert")).toHaveProperty("textContent", message);
+    await waitFor(() => expect(notifications.snapshot().entries).toHaveLength(1));
+    expect(notifications.snapshot().entries[0].message).toBe(message);
+    expect(screen.queryByRole("alert")).toBeNull();
     expect(document.body.textContent).not.toContain("sample-secret-fixture");
+    expect(JSON.stringify(notifications.snapshot())).not.toContain("sample-secret-fixture");
+  });
+
+  it("returns an incorrect passphrase to its cleared input without creating a notification", async () => {
+    api.save_identity.mockRejectedValueOnce({ code: "identity_unlock_failed", message: "sample-secret-fixture" });
+    api.identities.mockResolvedValueOnce(inventory).mockResolvedValueOnce(makeInventory([{ ...file, passphrase_state: "saved" }]));
+    renderPage(<CredentialsPage {...props()} />);
+    const first_input = await openSave();
+    submitSave();
+    const error = await screen.findByRole("alert");
+    const dialog = screen.getByRole("dialog", { name: "Save passphrase for id_ed25519" });
+    expect(within(dialog).getByRole("alert")).toBe(error);
+    expect(error.textContent).toBe("The passphrase does not unlock this identity file. Try again.");
+    expect(first_input.value).toBe("");
+    const retry_input = within(dialog).getByLabelText("Key passphrase");
+    expect(retry_input).toHaveProperty("value", "");
+    expect(notifications.snapshot().entries).toHaveLength(0);
+    expect(document.body.textContent).not.toContain("sample-secret-fixture");
+    fireEvent.change(retry_input, { target: { value: "corrected-passphrase-fixture" } });
+    submitSave();
+    await screen.findByText("Saved");
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(api.save_identity).toHaveBeenCalledTimes(2);
+    expect(notifications.snapshot().entries).toHaveLength(0);
   });
 
   it("explains replacement when the saved passphrase belongs to an older file", async () => {
     api.identities.mockResolvedValue(makeInventory([{ ...file, passphrase_state: "file_changed" }]));
-    render(<CredentialsPage {...props()} />);
+    renderPage(<CredentialsPage {...props()} />);
     expect(await screen.findByText("File changed · saved for older file")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Replace passphrase for id_ed25519" }));
     expect(screen.getByText(/Verify a passphrase for the current file to replace/)).toBeTruthy();
@@ -139,12 +174,14 @@ describe("Identity file credentials", () => {
 
   it("confirms and forgets only the saved passphrase, then refreshes both sources", async () => {
     api.identities.mockResolvedValueOnce(makeInventory([{ ...file, passphrase_state: "saved" }])).mockResolvedValueOnce(inventory);
-    render(<CredentialsPage {...props()} />);
+    renderPage(<CredentialsPage {...props()} />);
     fireEvent.click(await screen.findByRole("button", { name: "Forget passphrase for id_ed25519" }));
     expect(screen.getByText(/The identity file .* stays in place/)).toBeTruthy();
     expect(api.forget_identity).not.toHaveBeenCalled();
     fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Forget passphrase" }));
-    expect(await screen.findByText("Forgot the passphrase for id_ed25519. The identity file is unchanged.")).toBeTruthy();
+    await waitFor(() => expect(api.identities).toHaveBeenCalledTimes(2));
+    expect(screen.queryByText("Forgot the passphrase for id_ed25519. The identity file is unchanged.")).toBeNull();
+    expect(notifications.snapshot().entries).toHaveLength(0);
     expect(api.forget_identity).toHaveBeenCalledExactlyOnceWith(file.identity_id);
     expect(api.list).toHaveBeenCalledTimes(2);
     expect(api.forget).not.toHaveBeenCalled();
@@ -152,7 +189,7 @@ describe("Identity file credentials", () => {
 
   it("isolates identity discovery errors and disables unavailable Keychain actions", async () => {
     api.identities.mockResolvedValue({ ...inventory, complete: false, keychain_available: false, keychain_message: "Keychain access is locked. Unlock it, then refresh.", warning: "One configured file could not be inspected." });
-    render(<CredentialsPage {...props()} />);
+    renderPage(<CredentialsPage {...props()} />);
     expect(await screen.findByText("One configured file could not be inspected.")).toBeTruthy();
     expect(screen.getByText("Keychain access is locked. Unlock it, then refresh.")).toBeTruthy();
     expect(screen.queryByRole("button", { name: /Save passphrase|Forget passphrase/ })).toBeNull();
@@ -169,7 +206,7 @@ describe("Identity file credentials", () => {
     let complete!: (value: IdentitySnapshot) => void;
     const saved = makeInventory([{ ...file, passphrase_state: "saved" }]);
     api.identities.mockResolvedValueOnce(saved).mockImplementationOnce(() => new Promise((resolve) => { complete = resolve; })).mockResolvedValueOnce(inventory);
-    render(<CredentialsPage {...props()} />);
+    renderPage(<CredentialsPage {...props()} />);
     await screen.findByText("Saved");
     fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
     fireEvent.click(screen.getByRole("button", { name: "Forget passphrase for id_ed25519" }));
@@ -184,7 +221,7 @@ describe("Identity file credentials", () => {
     let complete!: () => void;
     api.save_identity.mockImplementationOnce(() => new Promise<void>((resolve) => { complete = resolve; }));
     const options = props();
-    const page = render(<CredentialsPage {...options} />);
+    const page = renderPage(<CredentialsPage {...options} />);
     const input = await openSave();
     submitSave();
     page.rerender(<CredentialsPage {...options} visible={false} />);
@@ -195,7 +232,9 @@ describe("Identity file credentials", () => {
     expect(screen.getByRole("button", { name: "Save passphrase for id_ed25519" })).toHaveProperty("disabled", true);
     expect(screen.queryByText(/cancelled/i)).toBeNull();
     await act(async () => complete());
-    expect(await screen.findByText("Saved the passphrase for id_ed25519 in Keychain.")).toBeTruthy();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Save passphrase for id_ed25519" })).toHaveProperty("disabled", false));
+    expect(screen.queryByText("Saved the passphrase for id_ed25519 in Keychain.")).toBeNull();
+    expect(notifications.snapshot().entries).toHaveLength(0);
     expect(api.save_identity).toHaveBeenCalledOnce();
   });
 });

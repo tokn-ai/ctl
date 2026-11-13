@@ -140,12 +140,30 @@ it("shows shared SSH failures once per host with a short message and retained di
   render(<ComponentVersionTable {...props()} rows={rows} manageable_host_ids={["dev"]} on_manage_host={vi.fn()} />);
   expect(screen.getAllByRole("alert")).toHaveLength(1);
   expect(screen.getByRole("alert").textContent).toBe("Could not check components. Try Check host.");
-  expect(screen.getByRole("alert").title).toBe(error);
+  expect(screen.getByRole("alert").closest("[title]")?.getAttribute("title")).toBe(error);
   expand();
   expect(screen.getAllByRole("alert")).toHaveLength(1);
   expect(screen.getAllByTitle(error)).toHaveLength(1);
   expect(screen.queryByText(error)).toBeNull();
   expect(within(screen.getByRole("table", { name: "Development — SSH component versions" })).queryByText(/^Running/)).toBeNull();
+});
+
+it("keeps Windows maintenance limitations informational at the host", () => {
+  const error = "Manage components directly on the Windows host.";
+  const rows = (["ctld", "ctl_agent"] as const).map((component) => ({
+    ...row, component_id: component, component, observation: "not_checked" as const, status: "unavailable" as const,
+    running: null, installed: null, action: null, error_code: "remote_windows_maintenance_unsupported", error,
+  }));
+  render(<ComponentVersionTable {...props()} rows={rows} manageable_host_ids={["dev"]} on_manage_host={vi.fn()} />);
+  expect(screen.getByRole("status").textContent).toBe("Check and manage components on the Windows host.");
+  expect(screen.getByRole("status").className).toContain("inline-feedback-info");
+  expect(screen.getByRole("status").closest("[title]")?.getAttribute("title")).toBe(error);
+  expect(screen.queryByRole("alert")).toBeNull();
+  expect(screen.queryByRole("button", { name: "Check host Development — SSH" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Update components Development — SSH" })).toBeNull();
+  expand();
+  expect(screen.getAllByRole("status")).toHaveLength(1);
+  expect(screen.queryByRole("alert")).toBeNull();
 });
 
 it("keeps active connections visible when a separate inspection fails", () => {

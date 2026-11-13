@@ -1,9 +1,10 @@
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 import type { VpnConnection, VpnConnectionInput, VpnProvider } from "../../lib/types";
 import { useVpnEnrollment } from "../../features/vpn/useVpnEnrollment";
 import { VpnEnrollmentProgress } from "./VpnEnrollmentProgress";
 import { errorMessage } from "../../lib/errors";
 import { QuickInputFrame } from "../commands/QuickInputFrame";
+import { InlineFeedback } from "../feedback/InlineFeedback";
 
 interface Props {
   connection: VpnConnection | null;
@@ -15,6 +16,9 @@ interface Props {
   on_enrollment_change?(connection_id: string | null): void;
   on_save_enrollment?(enrollment_id: string): Promise<boolean>;
 }
+
+type ValidationField = "name" | "url" | "username" | "password" | "hostname" | "auth_method" | "target_ip" | "form";
+interface VpnValidation { field: ValidationField; message: string }
 
 /** Passwords remain in the masked input, never in a recoverable React draft. */
 export function VpnConnectionEditor({ connection, saving, error, on_save, on_close, enrollment_supported = false, on_enrollment_change, on_save_enrollment }: Props) {
@@ -30,7 +34,8 @@ export function VpnConnectionEditor({ connection, saving, error, on_save, on_clo
   const [auth_method, setAuthMethod] = useState(openconnect?.auth_method ?? "");
   const [target_ip, setTargetIp] = useState(openconnect?.target_ip ?? "");
   const [advanced, setAdvanced] = useState(Boolean(openconnect?.auth_method || openconnect?.target_ip));
-  const [validation_error, setValidationError] = useState<string | null>(null);
+  const [validation_error, setValidationError] = useState<VpnValidation | null>(null);
+  const validation_id = useId();
   const [password_retry, setPasswordRetry] = useState(false);
   const password_input = useRef<HTMLInputElement>(null);
   const submitting = useRef(false);
@@ -71,9 +76,10 @@ export function VpnConnectionEditor({ connection, saving, error, on_save, on_clo
       auth_method: auth_method.trim() || null,
       target_ip: target_ip.trim() || null,
     };
-    const invalid = validateVpnInput(input, Boolean(openconnect?.has_password) && !password_retry);
+    const invalid = validateVpnFields(input, Boolean(openconnect?.has_password) && !password_retry);
     if (invalid) {
       setValidationError(invalid);
+      if (["hostname", "auth_method", "target_ip"].includes(invalid.field)) setAdvanced(true);
       return;
     }
     setValidationError(null);
@@ -92,12 +98,22 @@ export function VpnConnectionEditor({ connection, saving, error, on_save, on_clo
       const saved = await on_save(input);
       if (!saved && password) setPasswordRetry(true);
     } catch (failure) {
-      setValidationError(errorMessage(failure));
+      setValidationError({ field: "form", message: errorMessage(failure) });
       if (password) setPasswordRetry(true);
     } finally {
       submitting.current = false;
     }
   }
+
+  function fieldError(field: ValidationField) {
+    return validation_error?.field === field ? <small className="vpn-field-error" id={`${validation_id}-${field}`} role="alert">{validation_error.message}</small> : null;
+  }
+
+  function fieldAttributes(field: ValidationField) {
+    return validation_error?.field === field ? { "aria-invalid": true as const, "aria-describedby": `${validation_id}-${field}` } : {};
+  }
+
+  const form_error = validation_error?.field === "form" ? validation_error.message : validation_error ? null : error;
 
   return (
     <QuickInputFrame
@@ -131,20 +147,24 @@ export function VpnConnectionEditor({ connection, saving, error, on_save, on_clo
         </label>
         <label>
           Name
-          <input autoFocus value={name} onChange={(event) => setName(event.target.value)} disabled={locked} autoComplete="off" placeholder="Work VPN" />
+          <input autoFocus aria-label="Name" value={name} onChange={(event) => setName(event.target.value)} disabled={locked} autoComplete="off" placeholder="Work VPN" {...fieldAttributes("name")} />
+          {fieldError("name")}
         </label>
         {provider === "openconnect" ? <>
           <label>
             VPN server
-            <input value={url} onChange={(event) => setUrl(event.target.value)} disabled={locked} autoComplete="off" spellCheck={false} placeholder="https://vpn.example.test" />
+            <input aria-label="VPN server" value={url} onChange={(event) => setUrl(event.target.value)} disabled={locked} autoComplete="off" spellCheck={false} placeholder="https://vpn.example.test" {...fieldAttributes("url")} />
+            {fieldError("url")}
           </label>
           <label>
             Username
-            <input value={username} onChange={(event) => setUsername(event.target.value)} disabled={locked} autoComplete="off" spellCheck={false} />
+            <input aria-label="Username" value={username} onChange={(event) => setUsername(event.target.value)} disabled={locked} autoComplete="off" spellCheck={false} {...fieldAttributes("username")} />
+            {fieldError("username")}
           </label>
           <label>
             Password
-            <input ref={password_input} type="password" aria-label="Password" disabled={locked} autoComplete="new-password" placeholder={openconnect?.has_password ? "Leave blank to keep the saved password" : undefined} />
+            <input ref={password_input} type="password" aria-label="Password" disabled={locked} autoComplete="new-password" placeholder={openconnect?.has_password ? "Leave blank to keep the saved password" : undefined} {...fieldAttributes("password")} />
+            {fieldError("password")}
             {openconnect?.has_password && !password_retry ? <small>Leave blank to keep the saved password.</small> : null}
             {password_retry ? <small>Re-enter the password before retrying the save.</small> : null}
           </label>
@@ -155,12 +175,14 @@ export function VpnConnectionEditor({ connection, saving, error, on_save, on_clo
             <div id="vpn-advanced-fields" className="vpn-advanced-fields">
               <label>
                 Authentication method
-                <input value={auth_method} aria-label="Authentication method" onChange={(event) => setAuthMethod(event.target.value)} disabled={locked} autoComplete="off" spellCheck={false} placeholder="Optional" />
+                <input value={auth_method} aria-label="Authentication method" onChange={(event) => setAuthMethod(event.target.value)} disabled={locked} autoComplete="off" spellCheck={false} placeholder="Optional" {...fieldAttributes("auth_method")} />
+                {fieldError("auth_method")}
                 <small>Use the method name supplied by your VPN provider, if required.</small>
               </label>
               <label>
                 Connectivity check target
-                <input value={target_ip} aria-label="Connectivity check target" onChange={(event) => setTargetIp(event.target.value)} disabled={locked} autoComplete="off" spellCheck={false} placeholder="Optional IPv4 address" />
+                <input value={target_ip} aria-label="Connectivity check target" onChange={(event) => setTargetIp(event.target.value)} disabled={locked} autoComplete="off" spellCheck={false} placeholder="Optional IPv4 address" {...fieldAttributes("target_ip")} />
+                {fieldError("target_ip")}
                 <small>Checks SSH access after connecting. A failed check does not stop the VPN.</small>
               </label>
             </div>
@@ -173,7 +195,8 @@ export function VpnConnectionEditor({ connection, saving, error, on_save, on_clo
           {advanced ? <div id="tailscale-advanced-fields" className="vpn-advanced-fields">
             <label>
               Device name in Tailscale
-              <input value={hostname} aria-label="Device name in Tailscale" onChange={(event) => setHostname(event.target.value)} disabled={locked} autoComplete="off" spellCheck={false} placeholder="Assigned automatically" />
+              <input value={hostname} aria-label="Device name in Tailscale" onChange={(event) => setHostname(event.target.value)} disabled={locked} autoComplete="off" spellCheck={false} placeholder="Assigned automatically" {...fieldAttributes("hostname")} />
+              {fieldError("hostname")}
               <small>The name shown in Tailscale’s device list. Leave blank for ctmux to choose one.</small>
             </label>
             <label className="vpn-checkbox-option">
@@ -183,10 +206,10 @@ export function VpnConnectionEditor({ connection, saving, error, on_save, on_clo
             </label>
           </div> : null}
           {enrolling && enrollment.started ? <VpnEnrollmentProgress enrollment={enrollment} /> : null}
-          {enrolling && !enrollment_supported ? <p className="vpn-error" role="alert">Update and restart ctld to sign in before saving a Tailscale connection.</p> : null}
+          {enrolling && !enrollment_supported ? <InlineFeedback>Update and restart ctld to sign in before saving a Tailscale connection.</InlineFeedback> : null}
         </>}
         <p className="vpn-editor-note">{enrolling ? "Your connection appears in the VPN list after you sign in and choose Save connection." : "Settings are saved privately on this Mac."}</p>
-        {validation_error || error ? <p className="vpn-error" role="alert">{validation_error ?? error}</p> : null}
+        {form_error ? <InlineFeedback>{form_error}</InlineFeedback> : null}
         <footer className="vpn-editor-actions">
           <button type="button" onClick={close} disabled={saving || enrollment.cancelling}>{enrollment.cancelling ? "Canceling…" : "Cancel"}</button>
           <button type="submit" className="button-primary" disabled={saving || (enrolling && (!enrollment_supported || enrollment.starting || enrollment.cancelling || (enrollment.started && !enrollment.ready && !enrollment_failed)))}>
@@ -199,22 +222,31 @@ export function VpnConnectionEditor({ connection, saving, error, on_save, on_clo
 }
 
 export function validateVpnInput(input: VpnConnectionInput, has_password: boolean): string | null {
-  if (!input.name) return "Enter a connection name.";
+  return validateVpnFields(input, has_password)?.message ?? null;
+}
+
+function validateVpnFields(input: VpnConnectionInput, has_password: boolean): VpnValidation | null {
+  if (!input.name) return { field: "name", message: "Enter a connection name." };
   if (input.provider === "tailscale") {
-    if (/[\x00-\x1f\x7f]/u.test(input.name)) return "Use single-line values without control characters.";
+    if (/[\x00-\x1f\x7f]/u.test(input.name)) return { field: "name", message: "Use single-line values without control characters." };
     if (input.hostname !== null && !/^(?=.{1,63}$)[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?$/u.test(input.hostname)) {
-      return "Use a device name with letters, numbers, and hyphens (up to 63 characters).";
+      return { field: "hostname", message: "Use a device name with letters, numbers, and hyphens (up to 63 characters)." };
     }
     return null;
   }
-  if (!input.url) return "Enter the VPN server.";
-  if (!input.username) return "Enter your username.";
-  if (!input.password && !has_password) return "Enter your password.";
-  if ([input.name, input.url, input.username, input.password, input.auth_method, input.target_ip].some((value) => value !== null && /[\r\n\0]/u.test(value))) {
-    return "Use single-line values without control characters.";
+  if (!input.url) return { field: "url", message: "Enter the VPN server." };
+  if (!input.username) return { field: "username", message: "Enter your username." };
+  if (!input.password && !has_password) return { field: "password", message: "Enter your password." };
+  const single_line_fields: [ValidationField, string | null][] = [
+    ["name", input.name], ["url", input.url], ["username", input.username],
+    ["password", input.password], ["auth_method", input.auth_method], ["target_ip", input.target_ip],
+  ];
+  const invalid_line = single_line_fields.find(([, value]) => value !== null && /[\r\n\0]/u.test(value));
+  if (invalid_line) {
+    return { field: invalid_line[0], message: "Use single-line values without control characters." };
   }
-  if (input.url.includes("://") && !input.url.startsWith("https://")) return "Use an HTTPS VPN server address.";
-  if (input.target_ip !== null && !validIpv4(input.target_ip)) return "Enter a valid IPv4 address for the optional connectivity check.";
+  if (input.url.includes("://") && !input.url.startsWith("https://")) return { field: "url", message: "Use an HTTPS VPN server address." };
+  if (input.target_ip !== null && !validIpv4(input.target_ip)) return { field: "target_ip", message: "Enter a valid IPv4 address for the optional connectivity check." };
   return null;
 }
 

@@ -35,7 +35,7 @@ import { hostSelectorChoices } from "../components/sessions/hostChoices";
 import { useWorkspace } from "../features/workspace/useWorkspace";
 import { useWorkspaceConnections } from "../features/workspace/useWorkspaceConnections";
 import { useHostConnections } from "../features/workspace/useHostConnections";
-import { usePortForwarding } from "../features/portForwarding/usePortForwarding";
+import { usePortForwarding, type PortForwardFeedbackOptions } from "../features/portForwarding/usePortForwarding";
 import { useVpn } from "../features/vpn/useVpn";
 import { vpnActivity } from "../features/vpn/status";
 import { VpnSidebar } from "../components/vpn/VpnSidebar";
@@ -56,6 +56,9 @@ import { NotificationBell, Notifications } from "../components/notifications/Not
 import { NotificationStore } from "../features/notifications/NotificationStore";
 import { NotificationProvider, useNotificationEnvironment } from "../features/notifications/NotificationContext";
 import { useWorkbenchNotifications } from "../features/notifications/useWorkbenchNotifications";
+import { useHostConnectionNotifications } from "../features/notifications/useHostConnectionNotifications";
+import { InlineFeedback } from "../components/feedback/InlineFeedback";
+import { SessionBanner } from "../components/terminal/SessionBanner";
 import { TerminalTabs } from "../components/tabs/TerminalTabs";
 import { SessionViewSurface } from "../components/terminal/SessionViewSurface";
 import { TerminalControls } from "../components/terminal/TerminalControls";
@@ -188,6 +191,10 @@ export function TerminalPage() {
 function TerminalWorkbench() {
   const preview_focused = useFilePreview()?.focused ?? false;
   const { store: notifications, attachments: attachmentNotifications } = useNotificationEnvironment()!;
+  const notifyFailure = useCallback((title: string, source: string, failure: unknown) => {
+    if (errorCode(failure) === "attachment_cancelled") return;
+    notifications.notify(`operation:${source}:${title}`, { severity: "error", title, source, message: errorMessage(failure) });
+  }, [notifications]);
   const workspace = useWorkspace();
   const {
     targets,
@@ -323,19 +330,13 @@ function TerminalWorkbench() {
   const restartingDaemonRef = useRef(false);
   const daemonEpochRef = useRef(0);
   useWorkbenchNotifications(notifications, {
-    workspace_error: workspace.error,
-    workspace_ready: workspace.ready,
+    workspace_error: workspace.save_error,
     keybindings_error: keybindings.error,
-    session_error: listError,
-    targets,
-    target_errors: targetErrors,
     storage_error: attachment.storage_error,
-    task_error: taskWorkspace.error,
-    definitions_error: taskWorkspace.definitions_error,
-    task_status: taskWorkspace.daemonStatus,
+    window_error: workspace.save_error ? null : workspace.close_error,
     tasks: taskWorkspace.tasks,
     tasks_loaded: taskWorkspace.hasLoaded,
-  }, attachmentNotifications);
+  });
   const captureDaemonOperation = useCallback((target: ConnectionTarget) => {
     const epoch = daemonEpochRef.current;
     return () => target.kind !== "local" || epoch === daemonEpochRef.current;
@@ -385,6 +386,8 @@ function TerminalWorkbench() {
     },
     onResume: portForwarding.resumeHost,
   });
+  useHostConnectionNotifications(notifications, targets, hostConnections.statuses,
+    new Set(attachment.states.flatMap((state) => state.session?.target.kind === "ssh" && !["idle", "ended"].includes(state.phase) ? [state.session.target.host_id!] : [])));
   const layout_sessions = useMemo(() => [...new Map(
     [...tabs, ...sessions].map((session) => [sessionKey(session), session]),
   ).values()], [sessions, tabs]);
@@ -410,7 +413,6 @@ function TerminalWorkbench() {
       const daemonEpoch = daemonEpochRef.current;
       const token = refreshGuardRef.current.begin();
       setLoading(true);
-      setListError(null);
       try {
         const results = await Promise.all(
           workspace.viewRef.current.targets
@@ -493,19 +495,14 @@ function TerminalWorkbench() {
         const visibleIds = new Set(visible.map(sessionKey));
         sessionsRef.current = visible;
         setSessions(visible);
-        for (const { target } of results) {
-          const key = targetKey(target);
-          if (!errors.has(key)) {
-            notifications.resolve(`host:${key}`);
-            attachmentNotifications.reportHostAuthentication(key, null, true);
-          }
-        }
         setTargetErrors((current) => {
           const next = new Map(current);
           for (const { target } of results) next.delete(targetKey(target));
           for (const [key, message] of errors) next.set(key, message);
           return next;
         });
+        const failed_checks = [...errors.values()].filter((error) => error.code !== "ssh_authentication_required" && error.code !== "ssh_host_disconnected" && error.code !== "session_not_found");
+        setListError(failed_checks.length ? "Some sessions could not be checked. Showing last-known session information." : null);
         setSessionShellStates((current) =>
           mergeShellStateInspections(current, inspections, visibleIds),
         );
@@ -536,8 +533,6 @@ function TerminalWorkbench() {
       setTabs,
       setSessionShellStates,
       hostConnections.isPaused,
-      notifications,
-      attachmentNotifications,
     ],
   );
 
@@ -667,7 +662,6 @@ function TerminalWorkbench() {
         return;
       }
       if (hostConnections.isPaused(requestedSession.target)) {
-        setListError("This host is disconnected. Connect the host to resume its sessions.");
         return;
       }
       const managed =
@@ -749,8 +743,6 @@ function TerminalWorkbench() {
     setTabShellStates((current) => remapStateKeys(current, recovered.key_changes));
     const host_keys = new Set(recovered.view.targets.map(targetKey));
     const recovered_key = targetKey(recovered.target);
-    notifications.resolve(`host:${recovered_key}`);
-    attachmentNotifications.reportHostAuthentication(recovered_key, null, true);
     setTargetErrors((current) => new Map(
       [...current].filter(([key]) => host_keys.has(key) && key !== recovered_key),
     ));
@@ -811,15 +803,21 @@ function TerminalWorkbench() {
       await portForwarding.refreshTarget(verified);
       setPortForwardTarget(verified);
     } catch (failure) {
-      setListError(errorMessage(failure));
+      notifyFailure("Could not open port forwarding", "Port forwarding", failure);
     }
   }
 
-  async function setPortForwardEnabled(target: SshConnectionTarget, forward: WorkspacePortForward, enabled: boolean) {
-    const verified = enabled ? await prepareHostTarget(target) : target;
+  async function setPortForwardEnabled(target: SshConnectionTarget, forward: WorkspacePortForward, enabled: boolean, options?: PortForwardFeedbackOptions) {
+    let verified: ConnectionTarget;
+    try {
+      verified = enabled ? await prepareHostTarget(target) : target;
+      if (enabled && verified.kind === "ssh" && !target.remote_info && verified.remote_info) await portForwarding.refreshTarget(verified);
+    } catch (failure) {
+      if (options?.feedback !== "inline") notifyFailure("Could not change port forwarding", "Port forwarding", failure);
+      throw failure;
+    }
     if (verified.kind !== "ssh") return;
-    if (enabled && !target.remote_info && verified.remote_info) await portForwarding.refreshTarget(verified);
-    await portForwarding.setEnabled(verified, forward, enabled);
+    await portForwarding.setEnabled(verified, forward, enabled, options);
   }
 
   const resumeHost = useWorkspaceConnections({
@@ -891,7 +889,7 @@ function TerminalWorkbench() {
       setSessionShellStates((current) => forgetShellState(current, sessionKey(session)));
       await closeTab(session);
       await persistWorkspace();
-    } catch (failure) { setListError(errorMessage(failure)); }
+    } catch (failure) { notifyFailure("Could not close session", "Sessions", failure); }
     finally { dismissingSessions.current.delete(key); }
   }, [archiveSession, attachment.state.message, closeTab, setSessions, setSessionShellStates, persistWorkspace]);
 
@@ -1009,7 +1007,6 @@ function TerminalWorkbench() {
       creatingRef.current = true;
       creatingTargetRef.current = target;
       setCreating(true);
-      setListError(null);
       try {
         const session = await createSession({
           target,
@@ -1027,10 +1024,9 @@ function TerminalWorkbench() {
         });
         try {
           await persistWorkspace();
-        } catch (failure) {
-          setListError(
-            `Shell ${session.name} was created, but saving its workspace entry failed. Retry saving before closing the app. ${errorMessage(failure)}`,
-          );
+        } catch {
+          // Workspace persistence owns its notification-center error and retry.
+          // Creation succeeded, so retrying the input flow would duplicate it.
           return;
         }
         try {
@@ -1039,7 +1035,7 @@ function TerminalWorkbench() {
           // Creation already succeeded: close the input flow rather than offer
           // a retry that would create a second persistent shell.
           if (isCurrent()) {
-            setListError(
+            notifyFailure("Shell created; tab could not open", "Sessions",
               `Shell ${session.name} was created, but opening its tab failed. Select the existing session to retry. ${errorMessage(failure)}`,
             );
           }
@@ -1066,7 +1062,6 @@ function TerminalWorkbench() {
         return;
       }
       setDisconnectingSessionKey(identity);
-      setListError(null);
       try {
         await closeTab(session);
       } finally {
@@ -1141,7 +1136,6 @@ function TerminalWorkbench() {
         next.add(identity);
         return next;
       });
-      setListError(null);
       try {
         attachment.cancelPendingConnection(session);
         try {
@@ -1154,7 +1148,7 @@ function TerminalWorkbench() {
             return;
           }
           if (errorCode(error) !== "session_not_found") {
-            setListError(errorMessage(error));
+            notifyFailure("Could not terminate session", "Sessions", error);
             return;
           }
         }
@@ -1174,7 +1168,7 @@ function TerminalWorkbench() {
         // The session is hidden after either an accepted kill or a not-found
         // response, which means another actor already achieved the same result.
       } catch (failure) {
-        setListError(errorMessage(failure));
+        notifyFailure("Could not terminate session", "Sessions", failure);
       } finally {
         closingSessionKeysRef.current.delete(identity);
         if (isCurrent()) {
@@ -1287,7 +1281,12 @@ function TerminalWorkbench() {
     setTabShellStates((current) => new Map([...current].filter(([key]) => !affected_keys.has(key))));
     setSessionShellStates((current) => new Map([...current].filter(([key]) => !affected_keys.has(key))));
   });
-  useEffect(() => { if (component_event_error) setListError(component_event_error); }, [component_event_error]);
+  useEffect(() => {
+    if (component_event_error) notifications.report("component_events", {
+      severity: "error", title: "Component maintenance", source: "Component maintenance", message: component_event_error,
+    });
+    else notifications.resolve("component_events");
+  }, [component_event_error, notifications]);
 
   const executeAboutAction = async (preflight: ComponentActionPreflight) => {
     const execute = () => executeComponentAction(preflight.action_token);
@@ -1319,11 +1318,12 @@ function TerminalWorkbench() {
     try {
       await restartLocalDaemon();
       clearLocalDaemonState();
+      notifications.notify("local_daemon_restart", { severity: "success", title: "ctmuxd restarted", source: "Component maintenance", message: "The local daemon restarted." });
     } catch (error) {
       if (!restartFailurePreservesLocalState(errorCode(error))) {
         clearLocalDaemonState();
       }
-      setListError(`Could not restart ctmuxd: ${errorMessage(error)}`);
+      notifyFailure("Could not restart ctmuxd", "Component maintenance", error);
     } finally {
       restartingDaemonRef.current = false;
       setRestartingDaemon(false);
@@ -1567,7 +1567,7 @@ function TerminalWorkbench() {
       openShellTab: () => {
         if (currentWorkingDirectory && activeTab) {
           void create(activeTab.target, currentWorkingDirectory, sessionKey(activeTab)).catch(
-            (failure) => setListError(errorMessage(failure)),
+            (failure) => notifyFailure("Could not create shell", "Sessions", failure),
           );
         }
       },
@@ -1612,7 +1612,7 @@ function TerminalWorkbench() {
         if (target.kind === "ssh") setHostSettingsId(target.host_id!);
       },
       managePortForwards: (target) => { void managePortForwards(target); },
-      saveWorkspace: () => persistWorkspace(true),
+      saveWorkspace: () => persistWorkspace(true).catch(() => {}),
       configureKeybindings: () => setKeybindingsOpen(true),
       reloadKeybindings: keybindings.reload,
     },
@@ -1852,14 +1852,18 @@ function TerminalWorkbench() {
           if (!command.keepPaletteOpen) setPaletteOpen(false);
           if (command.id !== COMMAND_IDS.restartDaemon) cancelDaemonRestart();
           if (utility_page && command.focusTerminalAfterRun !== false) setUtilityPage(null);
-          const result = command.run(args);
+          let result: ReturnType<AppCommand["run"]>;
+          try { result = command.run(args); }
+          catch (failure) { notifyFailure(`${command.title} failed`, command.category, failure); return; }
           if (command.focusTerminalAfterRun !== false)
             requestAnimationFrame(() => renderer?.focus());
-          return result;
+          return result instanceof Promise
+            ? result.catch((failure) => notifyFailure(`${command.title} failed`, command.category, failure))
+            : result;
         },
       })),
       workspace.ready && !workspace.closing && keybindings.ready && !dialogOpen && !preview_focused,
-      (error) => setListError(errorMessage(error)),
+      (error) => notifyFailure("Command failed", "Commands", error),
     );
   });
 
@@ -1890,7 +1894,12 @@ function TerminalWorkbench() {
       >
         <CommandBindings platform={shortcutPlatform} />
         <div className="workbench">
+          {workspace.load_error ? <section className="workspace-load-error" aria-label="Workspace unavailable">
+            <h2>Could not load workspace</h2>
+            <InlineFeedback action={{ label: "Retry loading", on_click: workspace.retryLoad }}>{workspace.load_error}</InlineFeedback>
+          </section> : null}
           <main
+            hidden={!!workspace.load_error}
             className={`app-shell${sidebar_visible ? "" : " sidebar-collapsed"}`}
             inert={
               !workspace.ready || workspace.closing || dialogOpen || paletteOpen
@@ -1925,13 +1934,13 @@ function TerminalWorkbench() {
                   color_picker_disabled={!workspace.ready || workspace.closing}
                   on_host_color_change={(host_id, color) => {
                     void workspace.replaceView((view) => updateHostColor(view, host_id, color))
-                      .catch((failure) => setListError(errorMessage(failure)));
+                      .catch(() => {});
                   }}
                   connectableHostKeys={connectableHostKeys}
                   hostConnections={hostConnections.statuses}
                   attachmentStates={new Map(attachment.states.flatMap((state) => state.session ? [[sessionKey(state.session), state] as const] : []))}
                   onDisconnectHost={(target) => {
-                    void hostConnections.disconnect(target).catch((failure) => setListError(errorMessage(failure)));
+                    void hostConnections.disconnect(target).catch((failure) => notifyFailure("Could not disconnect host", "Hosts", failure));
                   }}
                   targetErrors={targetErrors}
                   sessions={sessions}
@@ -1941,6 +1950,8 @@ function TerminalWorkbench() {
                   selectedSessionKey={activeTabKey}
                   openTabSessionKeys={openTabSessionKeys}
                   loading={loading || !workspace.ready}
+                  list_error={listError}
+                  on_retry={() => { void refresh(); }}
                   creating={creating}
                   closingSessionKeys={closingSessionKeys}
                   disconnectingSessionKey={disconnectingSessionKey}
@@ -2006,7 +2017,7 @@ function TerminalWorkbench() {
                   lastRefreshedAt={portForwarding.lastRefreshedAt}
                   onRefresh={() => void portForwarding.refreshAll()}
                   onSetEnabled={(target, forward, enabled) => {
-                    void setPortForwardEnabled(target, forward, enabled).catch((failure) => setListError(errorMessage(failure)));
+                    void setPortForwardEnabled(target, forward, enabled).catch(() => {});
                   }}
                   onManage={(target) => { void managePortForwards(target); }}
                 />
@@ -2077,33 +2088,21 @@ function TerminalWorkbench() {
                   )
                 }
               >
-                <div className="terminal-notices">
-                  {activeTab && attachment.state.session === null ? (
-                    <div className="message-banner" role="status">
-                      {activeTab.target.kind === "ssh"
-                        ? "Connect this host to resume its saved tab. Cached paths are last-known."
-                        : "Local session is not connected. Cached paths are last-known."}
-                      <button
-                        type="button"
-                        onClick={() => {
-                          if (activeTab.target.kind === "ssh") {
-                            executeCommandById(COMMAND_IDS.connectHost, {
-                              target_key: targetKey(activeTab.target),
-                            });
-                          } else {
-                            executeCommandById(COMMAND_IDS.selectSession, {
-                              session_key: sessionKey(activeTab),
-                            });
-                          }
-                        }}
-                      >
-                        {activeTab.target.kind === "ssh"
-                          ? "Connect host"
-                          : "Connect session"}
-                      </button>
-                    </div>
-                  ) : null}
-                </div>
+                {activeTab && attachment.state.session === null ? (
+                  <SessionBanner severity="info" title="Session disconnected" message={activeTab.target.kind === "ssh"
+                    ? "Connect this host to resume its saved tab. Cached paths are last-known."
+                    : "Local session is not connected. Cached paths are last-known."}
+                    action={{
+                      label: activeTab.target.kind === "ssh" ? "Connect host" : "Connect session",
+                      on_click: () => {
+                        if (activeTab.target.kind === "ssh") {
+                          executeCommandById(COMMAND_IDS.connectHost, { target_key: targetKey(activeTab.target) });
+                        } else {
+                          executeCommandById(COMMAND_IDS.selectSession, { session_key: sessionKey(activeTab) });
+                        }
+                      },
+                    }} />
+                ) : null}
                 <SessionViewSurface
                   on_view={session_layouts.observeView}
                   controls_container={pane_controls_host}
@@ -2118,6 +2117,7 @@ function TerminalWorkbench() {
                   renderer={renderer}
                   input_owned={attachment.state.input_lease.owned_by_client}
                   input_request={attachment.state.input_lease_request}
+                  input_feedback={attachment.state.message_kind === "input" ? attachment.state.message : null}
                   on_toggle_input={attachment.toggleInputLease}
                   on_promoted={(session) => importSession(session, null)}
                   on_select_terminal={(session) => attachment.connect(session, { resize_with_window: true, terminal_id: session.terminal_id })}
@@ -2130,6 +2130,7 @@ function TerminalWorkbench() {
                   on_reconnect_interaction={attachment.reconnectOnInteraction}
                   reconnect_available={attachment.state.error_code !== "protocol_version_mismatch"}
                   reconnect_error={attachment.state.message}
+                  connection_state={attachment.state}
                   retry_paused={attachment.state.error_code === "automatic_reconnect_timeout"}
                   onInput={handleTerminalInput}
                   onReady={setRenderer}
@@ -2171,6 +2172,9 @@ function TerminalWorkbench() {
             context_label={utility_page === "about" ? "About ctmux" : utility_page === "credentials" ? "Credentials" : "Tasks"}
             inert={dialogOpen || paletteOpen || workspace.closing}
           >
+            {workspace.saving ? <span className="status-item" role="status">Saving workspace…</span> : null}
+            {workspace.close_blocked && (creating || restartingDaemon || taskWorkspace.busy) ? <span className="status-item" role="status">Wait for ongoing operations before closing the window.</span> : null}
+            {restartingDaemon || taskWorkspace.daemonStatus?.endsWith("…") ? <span className="status-item" role="status">{restartingDaemon ? "Restarting ctmuxd…" : taskWorkspace.daemonStatus}</span> : null}
             <div className="status-terminal-controls" hidden={!!utility_page || (!!taskWorkspace.active && !(taskWorkspace.activeTask?.definition.execution_mode === "interactive" && taskWorkspace.activeTask.active_run))}>
               <div ref={setPaneControlsHost} />
                 <TerminalControls
@@ -2180,7 +2184,6 @@ function TerminalWorkbench() {
                   onToggleResizeWithWindow={() =>
                     executeCommandById(COMMAND_IDS.toggleResize)
                   }
-                  onReconnect={() => executeCommandById(COMMAND_IDS.reconnect)}
                 />
             </div>
             <NotificationBell store={notifications} />
@@ -2203,8 +2206,8 @@ function TerminalWorkbench() {
             )}
             statuses={portForwarding.statuses}
             busy={portForwarding.busy}
-            onSetEnabled={(forward, enabled) =>
-              setPortForwardEnabled(portForwardTarget, forward, enabled)
+            onSetEnabled={(forward, enabled, options) =>
+              setPortForwardEnabled(portForwardTarget, forward, enabled, options)
             }
             onChange={(forwards) => {
               workspace.update("port_forwards", (current) => [
@@ -2274,7 +2277,7 @@ function TerminalWorkbench() {
               const session = pendingForget;
               setPendingForget(null);
               return forgetSession(session).catch((failure) =>
-                setListError(errorMessage(failure)),
+                notifyFailure("Could not remove session from workspace", "Sessions", failure),
               );
             }}
           />
@@ -2403,7 +2406,7 @@ function TerminalWorkbench() {
                 return;
               }
               void resumeHost(target).catch((failure) =>
-                setListError(errorMessage(failure)),
+                notifyFailure("Could not resume host sessions", "Hosts", failure),
               );
               if (portForwardUpdateTarget && target.kind === "ssh") {
                 setPortForwardTarget(target);

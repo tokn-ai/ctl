@@ -14,6 +14,7 @@
 .component-update-results ul { padding: 0; list-style: none; }
 .component-update-results li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; padding: 10px 0; border-bottom: 1px solid var(--border); }
 .component-update-results li p { grid-column: 1 / -1; margin: 0; overflow-wrap: anywhere; }
+.component-update-results li > .inline-feedback { grid-column: 1 / -1; margin: 0; }
 .component-update-progress progress { width: 100%; }
 .published-bundle-status { border: 1px solid var(--border); border-radius: 6px; padding: 12px; overflow-wrap: anywhere; }
 .published-bundle-actions { display: flex; flex-wrap: wrap; gap: 8px; }

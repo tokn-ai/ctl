@@ -34,7 +34,6 @@
 .about-host-toggle > svg { flex-shrink: 0; }
 .about-host-toggle > strong { overflow-wrap: anywhere; }
 .about-host-summary { display: flex; flex-wrap: wrap; gap: 6px; }
-.about-page .about-host-error { margin-top: 7px; color: var(--danger); font-size: 11px; }
 .about-host-actions { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 6px; }
 .about-version-table { width: 100%; min-width: 780px; table-layout: fixed; border-collapse: collapse; text-align: left; font-size: 12px; }
 .about-component-column { width: 19%; }
@@ -61,7 +60,7 @@
 .about-status-outdated, .about-status-different_build { color: var(--warning); background: #3a3020; }
 .about-status-incompatible { color: #ffa1a1; background: #44282a; }
 .about-status-newer { color: #94c6f5; background: #213244; }
-.about-row-error { color: var(--danger); font-size: 11px; line-height: 1.5; }
+.about-row-feedback { margin: 6px 0 0; font-size: 11px; }
 .about-protocol-list { display: flex; flex-direction: column; gap: 9px; margin: 0; padding: 0; list-style: none; }
 .about-protocol-line { display: grid; grid-template-columns: 14px minmax(0, 1fr) 8.5em; align-items: start; gap: 7px; line-height: 1.5; }
 .about-protocol-marker { display: inline-flex; align-items: center; justify-content: center; height: 1.5em; }
@@ -74,9 +73,6 @@
 .about-protocol-state { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .about-protocol-legend { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 18px; margin-top: 22px; font-size: 11px; }
 .about-protocol-legend > span { display: inline-flex; align-items: center; gap: 6px; }
-.about-error, .about-notice { padding: 12px 14px; margin: 16px 0 !important; border-radius: 4px; }
-.about-error { color: var(--danger); background: #321f23; }
-.about-notice { color: var(--success); background: #202e22; }
 .about-empty { padding: 18px; border: 1px dashed var(--border); border-radius: 4px; color: var(--muted); }
 .about-footnote { margin-top: 28px !important; font-size: 11px; }
 @media (max-width: 1000px) { .about-page-header, .about-content { padding-left: 22px; padding-right: 22px; } }

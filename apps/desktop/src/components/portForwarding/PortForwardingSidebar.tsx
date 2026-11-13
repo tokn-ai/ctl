@@ -6,6 +6,7 @@ import type {
 import { targetLabel } from "../../features/targets/targets";
 import { portForwardProtocolLabel } from "../../features/portForwarding/protocol";
 import { Icon } from "../ui/Icon";
+import { InlineFeedback } from "../feedback/InlineFeedback";
 import "./portForwarding.css";
 
 interface Props {
@@ -84,9 +85,9 @@ export function PortForwardingSidebar({
               <button type="button" onClick={() => onManage(target)}>Manage</button>
             </header>
             {hostErrors.get(target.host_id!) ? (
-              <p className="port-sidebar-error" role="status">
+              <InlineFeedback severity="warning" action={{ label: "Retry forwarding check", on_click: onRefresh, disabled: refreshing }}>
                 {hostErrors.get(target.host_id!)}
-              </p>
+              </InlineFeedback>
             ) : null}
             {hostForwards.map((forward) => {
               const changing = busy.has(forward.forward_id);

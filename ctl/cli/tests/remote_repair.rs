@@ -124,6 +124,10 @@ esac
   }
 
   fn compatible_bundle(&self, build: &ctl_core::component::ComponentBuildInfo) -> String {
+    self.bundle(build, &Self::compatible_components(build))
+  }
+
+  fn compatible_components(build: &ctl_core::component::ComponentBuildInfo) -> serde_json::Value {
     let protocol = |name: &str, build: u16| {
       let version = format!("1.0.{build}");
       json!({"name": name, "build": build, "version": version, "supported_versions": [version]})
@@ -162,7 +166,7 @@ esac
       }
     }
     components["ctmux"] = components["ctmuxd"].clone();
-    self.bundle(build, &components)
+    components
   }
 
   fn stale_sources(&self) -> ctl_core::bundles::Bundle {

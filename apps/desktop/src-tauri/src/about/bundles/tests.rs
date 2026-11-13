@@ -1,5 +1,5 @@
 use super::*;
-use ctl_core::bundles::{Manifest, Purpose, Source, Store};
+use ctl_core::bundles::{Manifest, Source, Store};
 use ctl_core::component::{ComponentInfo, ProtocolInfo};
 use std::collections::BTreeMap;
 
@@ -24,7 +24,7 @@ fn fixture(target: &str) -> (Manifest, BTreeMap<String, Vec<u8>>) {
   let mut build = ctl_core::component::build_info();
   build.dirty = false;
   build.source_revision = Some("a".repeat(40));
-  let components = ctl_core::bundles::COMPONENTS
+  let components = ctl_core::bundle_layout::ALL
     .into_iter()
     .map(|name| {
       (
@@ -36,7 +36,7 @@ fn fixture(target: &str) -> (Manifest, BTreeMap<String, Vec<u8>>) {
       )
     })
     .collect();
-  let files = ctl_core::bundles::COMPONENTS
+  let files = ctl_core::bundle_layout::ALL
     .into_iter()
     .map(|name| (name.into(), name.as_bytes().to_vec()))
     .collect();
@@ -45,7 +45,7 @@ fn fixture(target: &str) -> (Manifest, BTreeMap<String, Vec<u8>>) {
 }
 
 #[test]
-fn included_builds_are_visible_without_import_and_deduplicated_after_selection() {
+fn included_builds_are_visible_without_import_and_deduplicated_after_caching() {
   let home = std::env::temp_dir().join(format!("ctmux-included-snapshot-{}", uuid::Uuid::new_v4()));
   let (manifest, files) = fixture("aarch64-apple-darwin");
   let included = |target: &str| Ok((target == manifest.target_triple).then(|| manifest.clone()));
@@ -55,31 +55,22 @@ fn included_builds_are_visible_without_import_and_deduplicated_after_selection()
   assert!(listed.bundles[0].included);
   assert!(matches!(listed.bundles[0].upload_use, BundleUse::Available));
   assert!(!home.exists(), "Opening About must stay passive");
-  let store = Store::new(&home);
+  let store = Store::cache(&home);
   let stored = store.publish(&manifest, &files).unwrap();
-  store.select(Purpose::Upload, &stored).unwrap();
   let listed = snapshot_with(&home, included);
   assert_eq!(listed.bundles.len(), 1);
   assert!(listed.bundles[0].included);
   assert!(matches!(listed.bundles[0].upload_use, BundleUse::Available));
-  assert_eq!(
-    store
-      .selected(Purpose::Upload, &manifest.target_triple)
-      .unwrap()
-      .unwrap()
-      .manifest,
-    manifest
-  );
+  assert_eq!(stored.manifest, manifest);
   std::fs::remove_dir_all(home).unwrap();
 }
 
 #[test]
-fn an_included_archive_error_keeps_the_stored_selection_visible() {
+fn an_included_archive_error_keeps_the_cached_build_visible() {
   let home = std::env::temp_dir().join(format!("ctmux-included-error-{}", uuid::Uuid::new_v4()));
   let (manifest, files) = fixture("aarch64-apple-darwin");
-  let store = Store::new(&home);
-  let stored = store.publish(&manifest, &files).unwrap();
-  store.select(Purpose::Upload, &stored).unwrap();
+  let store = Store::cache(&home);
+  store.publish(&manifest, &files).unwrap();
   let listed = snapshot_with(&home, |target| {
     if target == manifest.target_triple {
       Err(ctl_client::remote_bundle::Error::Invalid(
@@ -109,19 +100,7 @@ fn missing_or_changed_included_selections_never_create_a_store() {
 #[cfg(target_os = "macos")]
 #[test]
 fn a_flat_included_native_archive_explains_why_local_use_is_unavailable() {
-  let (manifest, mut files) = fixture(ctl_core::paths::native_target());
-  let mut components = manifest.components;
-  components.insert("ctl".into(), components["ctl-agent"].clone());
-  components.insert("ctmux".into(), components["ctmuxd"].clone());
-  files.insert("ctl".into(), b"ctl".to_vec());
-  files.insert("ctmux".into(), b"ctmux".to_vec());
-  let manifest = Manifest::new(
-    ctl_core::paths::native_target(),
-    Source::Release,
-    components,
-    &files,
-  )
-  .unwrap();
+  let (manifest, _) = fixture(ctl_core::paths::native_target());
   let listed = summary(&manifest, None, None, true);
   assert!(listed.compatible);
   assert!(matches!(listed.local_use, BundleUse::Unavailable));
@@ -130,19 +109,6 @@ fn a_flat_included_native_archive_explains_why_local_use_is_unavailable() {
     Some("Requires a signed macOS helper package")
   );
   assert!(matches!(listed.upload_use, BundleUse::Available));
-}
-
-#[test]
-fn legacy_native_builds_are_not_offered_for_installation_but_can_remain_active() {
-  let (manifest, _) = fixture(ctl_core::paths::native_target());
-  let listed = summary(&manifest, None, None, false);
-  assert!(matches!(listed.local_use, BundleUse::Unavailable));
-  assert_eq!(
-    listed.local_unavailable_reason,
-    Some("Legacy build lacks ctl and ctmux")
-  );
-  let active = summary(&manifest, Some(&manifest.bundle_id), None, false);
-  assert!(matches!(active.local_use, BundleUse::Selected));
 }
 
 #[test]
@@ -184,7 +150,7 @@ fn write_included(
     "x86_64-unknown-linux-musl",
   ] {
     let inner = serde_json::to_vec(&serde_json::json!({
-      "schema_version": 2, "app_version": build.version, "bundle_id": build.version,
+      "schema_version": 3, "app_version": build.version, "bundle_id": build.version,
       "git_revision": build.source_revision, "target_triple": target,
       "files": hashes, "components": manifest.components,
     }))
@@ -218,7 +184,7 @@ fn write_included(
   std::fs::write(
     directory.join("bundle-set.json"),
     serde_json::to_vec(&serde_json::json!({
-      "schema_version": 2, "app_version": build.version, "bundle_id": build.version,
+      "schema_version": 3, "app_version": build.version, "bundle_id": build.version,
       "git_revision": build.source_revision, "targets": targets,
     }))
     .unwrap(),
@@ -249,8 +215,8 @@ fn packaged_archives_are_discovered_and_imported_only_when_explicitly_chosen() {
   let imported = load_selection(&home, &directories, target, id).unwrap();
   assert_eq!(imported.manifest.bundle_id, *id);
   assert!(
-    Store::new(&home)
-      .selected(Purpose::Upload, target)
+    Store::cache(&home)
+      .selected(ctl_core::bundles::Purpose::Upload, target)
       .unwrap()
       .is_none()
   );

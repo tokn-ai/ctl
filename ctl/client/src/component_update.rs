@@ -792,7 +792,7 @@ pub fn agent_archive(bundle: &Bundle) -> io::Result<Vec<u8>> {
   Ok(bytes)
 }
 
-#[cfg(unix)]
+#[cfg(all(test, unix))]
 pub(crate) fn inspect_agent_archive(bytes: &[u8]) -> io::Result<AgentSource> {
   let mut files = crate::components::read_archive(bytes)?;
   let metadata = files

@@ -71,6 +71,31 @@ fn private_json(path: &Path, value: &impl Serialize) {
   file.sync_all().unwrap();
 }
 
+#[cfg(unix)]
+fn old_payload(store: &Installations, bundle: &Bundle) -> Bundle {
+  let destination = store.root.join("installs").join(&bundle.manifest.bundle_id);
+  filesystem::ensure_directory(&destination).unwrap();
+  for (name, bytes) in bundle.read_files().unwrap() {
+    let path = destination.join(&name);
+    let mut parent = destination.clone();
+    for part in path.parent().unwrap().strip_prefix(&destination).unwrap() {
+      parent.push(part);
+      filesystem::ensure_directory(&parent).unwrap();
+    }
+    let mut file = options().write(true).create_new(true).open(path).unwrap();
+    file.write_all(&bytes).unwrap();
+    if bundle.manifest.files[&name].executable {
+      crate::private_fs::set_executable(&file).unwrap();
+    }
+    file.sync_all().unwrap();
+  }
+  private_json(
+    &destination.join(crate::bundles::MANIFEST_FILE),
+    &bundle.manifest,
+  );
+  Bundle::open(&destination).unwrap()
+}
+
 fn selection(store: &Installations) -> Vec<u8> {
   #[cfg(unix)]
   {
@@ -101,6 +126,14 @@ fn adoption_preserves_four_local_builds_native_history_and_live_leases() {
     .unwrap()
     .map(|entry| entry.unwrap().file_name())
     .collect::<Vec<_>>();
+  fs::remove_file(store.root.join("catalog.json")).unwrap();
+  assert!(
+    store
+      .active()
+      .unwrap_err()
+      .to_string()
+      .contains("ctlup migrate")
+  );
   let entries = store.migrate_catalog().unwrap();
   assert!(store.is_catalog_migrated().unwrap());
   assert_eq!(entries.len(), 4);
@@ -175,6 +208,11 @@ fn adoption_preserves_known_origins_and_heads_and_uses_provided_for_ambiguous_so
   let before = catalog::read(&store).unwrap().entries;
   let active = fixture(&home, 3, Source::Local, true);
   store.activate(&active).unwrap();
+  let mut state = catalog::read(&store).unwrap();
+  state
+    .entries
+    .retain(|entry| entry.bundle_id != active.manifest.bundle_id);
+  catalog::commit(&store, &state, None).unwrap();
   let release = fixture(&home, 4, Source::Release, true);
   filesystem::publish(&store, &release, None).unwrap();
   let ci = fixture(&home, 5, Source::Ci, true);
@@ -254,37 +292,48 @@ fn interrupted_catalog_commit_recovers_before_publishing_the_migration_marker() 
 }
 
 #[test]
-fn authoritative_catalog_ignores_orphans_and_requires_origins_for_new_activations() {
+fn authoritative_catalog_ignores_orphans_and_originless_writes_record_provided() {
   let home = Home::new();
   let store = home.store();
   let known = fixture(&home, 1, Source::Local, true);
   store.activate(&known).unwrap();
   let entries = store.migrate_catalog().unwrap();
   let orphan = fixture(&home, 2, Source::Local, true);
-  let error = store.activate(&orphan).unwrap_err();
-  assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
-  assert!(
-    !store
-      .root
-      .join("installs")
-      .join(&orphan.manifest.bundle_id)
-      .exists()
-  );
   filesystem::publish(&store, &orphan, None).unwrap();
   assert_eq!(store.catalog().unwrap(), entries);
-  assert_eq!(store.list().unwrap().len(), 2);
+  assert_eq!(store.list().unwrap().len(), 1);
+  assert_eq!(
+    store.get(&orphan.manifest.bundle_id).unwrap_err().kind(),
+    io::ErrorKind::NotFound
+  );
   store.activate(&known).unwrap();
   assert_eq!(store.catalog().unwrap(), entries);
-  filesystem::activate(&store, &orphan, None).unwrap();
+  force_selected_bundle(&store, &orphan);
   assert!(
     store
       .migrate_catalog()
       .unwrap_err()
       .to_string()
-      .contains("uncatalogued selection")
+      .contains("uncatalogued")
   );
   assert_eq!(store.catalog().unwrap(), entries);
-  filesystem::activate(&store, &store.get(&known.manifest.bundle_id).unwrap(), None).unwrap();
+  force_selected_bundle(&store, &store.get(&known.manifest.bundle_id).unwrap());
+  store.activate(&orphan).unwrap();
+  let updated = store.catalog().unwrap();
+  assert_eq!(updated.len(), 2);
+  assert_eq!(
+    updated
+      .iter()
+      .find(|entry| entry.bundle_id == orphan.manifest.bundle_id)
+      .unwrap()
+      .origin
+      .as_ref()
+      .unwrap()
+      .channel,
+    "provided"
+  );
+  store.activate(&known).unwrap();
+  assert_eq!(store.catalog().unwrap(), updated);
   fs::remove_file(store.root.join("catalog.json")).unwrap();
   assert!(
     store
@@ -294,6 +343,37 @@ fn authoritative_catalog_ignores_orphans_and_requires_origins_for_new_activation
       .contains("missing")
   );
   assert!(store.catalog().is_err());
+}
+
+fn force_selected_bundle(store: &Installations, bundle: &Bundle) {
+  // Simulate an older writer without bypassing validation in production code.
+  #[cfg(unix)]
+  {
+    let current = store.root.join("current");
+    fs::remove_file(&current).unwrap();
+    std::os::unix::fs::symlink(
+      Path::new("installs").join(&bundle.manifest.bundle_id),
+      current,
+    )
+    .unwrap();
+  }
+  #[cfg(windows)]
+  {
+    let mut file = crate::private_fs::options()
+      .write(true)
+      .truncate(true)
+      .open(store.root.join(".activation.json"))
+      .unwrap();
+    file
+      .write_all(
+        &serde_json::to_vec(&serde_json::json!({
+          "active": bundle.manifest.bundle_id,
+          "previous": null,
+        }))
+        .unwrap(),
+      )
+      .unwrap();
+  }
 }
 
 #[cfg(unix)]
@@ -307,6 +387,13 @@ fn complete_selected_layout_is_copied_once_and_never_rediscovered_after_cutover(
     .publish(&source.manifest, &source.read_files().unwrap())
     .unwrap();
   legacy.select(Purpose::Local, &source).unwrap();
+  assert!(
+    store
+      .active()
+      .unwrap_err()
+      .to_string()
+      .contains("ctlup migrate")
+  );
   let entries = store.migrate_catalog().unwrap();
   assert_eq!(entries.len(), 1);
   let installed = store.active().unwrap().unwrap();
@@ -337,11 +424,139 @@ fn service_only_manifests_fail_before_catalog_or_marker_publication() {
   let active = fixture(&home, 1, Source::Local, true);
   store.activate(&active).unwrap();
   let old = fixture(&home, 2, Source::Local, false);
-  filesystem::publish(&store, &old, None).unwrap();
+  let old = old_payload(&store, &old);
+  fs::remove_file(store.root.join("catalog.json")).unwrap();
+  let before = fs::read_link(store.root.join("current")).unwrap();
   let error = store.migrate_catalog().unwrap_err().to_string();
-  assert!(error.contains("ctlup update"));
+  assert!(error.contains("clean reinstall"));
   assert!(!store.root.join(MARKER).exists());
   assert!(!store.root.join("catalog.json").exists());
-  assert_eq!(store.active().unwrap().unwrap().manifest, active.manifest);
-  assert!(store.get(&old.manifest.bundle_id).is_ok());
+  assert_eq!(fs::read_link(store.root.join("current")).unwrap(), before);
+  assert_eq!(
+    legacy::active(&store).unwrap().unwrap().manifest,
+    active.manifest
+  );
+  assert!(Bundle::open(&old.directory).is_ok());
+}
+
+#[cfg(unix)]
+#[test]
+fn legacy_current_import_preserves_its_existing_complete_rollback() {
+  let home = Home::new();
+  let store = home.store();
+  let rollback = fixture(&home, 1, Source::Local, true);
+  store.activate(&rollback).unwrap();
+  store
+    .activate(&fixture(&home, 2, Source::Local, true))
+    .unwrap();
+  let source = fixture(&home, 3, Source::Local, true);
+  let legacy_store = Store::new(&home.0);
+  let source = legacy_store
+    .publish(&source.manifest, &source.read_files().unwrap())
+    .unwrap();
+  fs::remove_file(store.root.join("catalog.json")).unwrap();
+  fs::remove_file(store.root.join("current")).unwrap();
+  std::os::unix::fs::symlink(
+    source.directory.strip_prefix(&store.root).unwrap(),
+    store.root.join("current"),
+  )
+  .unwrap();
+  assert!(
+    store
+      .active()
+      .unwrap_err()
+      .to_string()
+      .contains("ctlup migrate")
+  );
+  store.migrate_catalog().unwrap();
+  assert_eq!(store.active().unwrap().unwrap().manifest, source.manifest);
+  assert_eq!(
+    store.previous().unwrap().unwrap().manifest,
+    rollback.manifest
+  );
+  assert!(source.directory.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn old_agent_readers_are_confined_to_migration_and_require_owned_namespaces() {
+  use std::os::unix::fs::symlink;
+  let home = Home::new();
+  let store = home.store();
+  filesystem::ensure_root(&store).unwrap();
+  let relative = Path::new("components/agents")
+    .join(crate::paths::native_target())
+    .join(format!("{}-legacy", "a".repeat(64)));
+  let mut parent = store.root.clone();
+  for part in &relative {
+    parent.push(part);
+    filesystem::ensure_directory(&parent).unwrap();
+  }
+  let old = store.root.join(&relative);
+  let absolute = store.root.canonicalize().unwrap().join(&relative);
+  symlink(&absolute, store.root.join("current")).unwrap();
+  assert!(
+    store
+      .active()
+      .unwrap_err()
+      .to_string()
+      .contains("ctlup migrate")
+  );
+  assert!(legacy::active(&store).unwrap().is_none());
+  assert!(
+    store
+      .migrate_catalog()
+      .unwrap_err()
+      .to_string()
+      .contains("clean reinstall")
+  );
+  assert!(!store.root.join(MARKER).exists());
+  fs::remove_file(store.root.join("current")).unwrap();
+  symlink(&absolute, store.root.join("previous")).unwrap();
+  assert!(legacy::previous(&store).is_err());
+  fs::remove_file(store.root.join("previous")).unwrap();
+  let target = old.parent().unwrap();
+  let relocated = target.with_file_name("relocated-target");
+  fs::rename(target, &relocated).unwrap();
+  symlink(&relocated, target).unwrap();
+  symlink(&absolute, store.root.join("current")).unwrap();
+  assert!(legacy::active(&store).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn unmanaged_version_payloads_require_replacement_before_migration() {
+  let home = Home::new();
+  let store = home.store();
+  filesystem::ensure_root(&store).unwrap();
+  filesystem::ensure_directory(&store.root.join("versions")).unwrap();
+  let old = store.root.join("versions/old-build");
+  filesystem::ensure_directory(&old).unwrap();
+  let mut file = options()
+    .write(true)
+    .create_new(true)
+    .open(old.join("ctl-agent"))
+    .unwrap();
+  file.write_all(b"old unmanaged agent").unwrap();
+  drop(file);
+  std::os::unix::fs::symlink("versions/old-build", store.root.join("current")).unwrap();
+  assert!(
+    store
+      .active()
+      .unwrap_err()
+      .to_string()
+      .contains("ctlup migrate")
+  );
+  assert!(
+    store
+      .migrate_catalog()
+      .unwrap_err()
+      .to_string()
+      .contains("clean reinstall")
+  );
+  assert_eq!(
+    fs::read(old.join("ctl-agent")).unwrap(),
+    b"old unmanaged agent"
+  );
+  assert!(!store.root.join(MARKER).exists());
 }

@@ -24,6 +24,11 @@ pub struct InstalledBuild {
 
 impl InstalledBuild {
   fn from_manifest(manifest: &Manifest) -> io::Result<Self> {
+    if manifest.schema_version != 2 {
+      return Err(invalid(
+        "installed build inspection requires complete schema-2 bundles; update and migrate older installations first",
+      ));
+    }
     manifest.validate()?;
     Ok(Self {
       bundle_id: manifest.bundle_id.clone(),
@@ -69,8 +74,9 @@ pub struct InstallationShow {
 }
 
 impl InstallationShow {
-  /// Combines older status and optional catalog responses without inventing
-  /// source details for builds that the older manager cannot describe.
+  /// Combines optional older CLI responses without inventing memberships.
+  /// Selected schema-2 summaries remain visible when catalog capability is
+  /// absent; unrecorded catalog rows require explicit migration.
   ///
   /// # Errors
   /// Reports invalid manifests, conflicting identities or malformed catalogs.
@@ -78,9 +84,18 @@ impl InstallationShow {
     status: InstallationStatus,
     catalog: Option<InstallationCatalog>,
   ) -> io::Result<Self> {
-    let mut installations = match catalog {
+    let installations = match catalog {
       Some(catalog) => {
         catalog.validate()?;
+        if catalog
+          .installations
+          .iter()
+          .any(|entry| entry.origin.is_none())
+        {
+          return Err(invalid(
+            "installation channel metadata is unavailable; run ctlup migrate on the target host or update its ctlup",
+          ));
+        }
         catalog.installations
       }
       None => Vec::new(),
@@ -91,7 +106,6 @@ impl InstallationShow {
       .flatten()
     {
       let build = InstalledBuild::from_manifest(manifest)?;
-      ensure_installation(&mut installations, &build);
       insert_build(&mut builds, build)?;
     }
     let result = Self {
@@ -106,7 +120,8 @@ impl InstallationShow {
   }
 
   /// Validates bounded source metadata and the inventory's identity joins.
-  /// Missing summaries are allowed only for unselected older catalog entries.
+  /// Memberships require recorded provenance. Selected build summaries may lack
+  /// memberships only for the optional older-manager status response.
   ///
   /// # Errors
   /// Reports unsupported schemas, duplicate identities, conflicting targets,
@@ -116,6 +131,15 @@ impl InstallationShow {
       return Err(invalid("invalid installation show schema or size"));
     }
     InstallationCatalog::new(self.installations.clone()).validate()?;
+    if self
+      .installations
+      .iter()
+      .any(|entry| entry.origin.is_none())
+    {
+      return Err(invalid(
+        "installed catalog memberships require recorded provenance",
+      ));
+    }
     let mut builds = BTreeMap::new();
     for build in &self.builds {
       build.validate()?;
@@ -135,7 +159,11 @@ impl InstallationShow {
         return Err(invalid("installed build and catalog targets differ"));
       }
     }
-    if builds.keys().any(|id| !targets.contains_key(id)) {
+    if builds.keys().any(|id| {
+      !targets.contains_key(id)
+        && self.active.as_deref() != Some(*id)
+        && self.previous.as_deref() != Some(*id)
+    }) {
       return Err(invalid("installed build is absent from the catalog"));
     }
     if [self.active.as_deref(), self.previous.as_deref()]
@@ -157,37 +185,25 @@ impl InstallationShow {
 }
 
 /// Lists verified installed builds and native history without changing storage.
-/// Before explicit catalog migration, verified legacy selections remain visible.
-/// After migration, only authoritative catalog records are included.
+/// Only authoritative catalog records are included. Existing older layouts must
+/// be adopted by the explicit migration command before inspection.
 ///
 /// # Errors
 /// Reports unsafe storage, modified builds or a concurrently removed payload.
 pub fn show(home: &Path) -> io::Result<InstallationShow> {
   let store = Installations::new(home);
-  let migrated = store.is_catalog_migrated()?;
   let status = super::status(home)?;
   let catalog = InstallationCatalog::new(store.catalog()?);
-  if migrated {
-    validate_selected_catalog(&status, &catalog.installations)?;
-  }
+  validate_selected_catalog(&status, &catalog.installations)?;
   let mut result = InstallationShow::from_status(status, Some(catalog))?;
   let mut builds = result
     .builds
     .into_iter()
     .map(|build| (build.bundle_id.clone(), build))
     .collect::<BTreeMap<_, _>>();
-  for bundle in inspected_bundles(&store, &result.installations, migrated)? {
+  for bundle in inspected_bundles(&store, &result.installations)? {
     let build = InstalledBuild::from_manifest(&bundle.manifest)?;
-    if !migrated {
-      ensure_installation(&mut result.installations, &build);
-    }
     insert_build(&mut builds, build)?;
-  }
-  if store.is_catalog_migrated()? != migrated {
-    return Err(io::Error::new(
-      io::ErrorKind::WouldBlock,
-      "catalog migration changed during inspection; retry the command",
-    ));
   }
   if result
     .installations
@@ -218,21 +234,14 @@ fn validate_selected_catalog(
         && entry.origin.is_some()
     }) {
       return Err(invalid(
-        "selected installation has no recorded provenance after catalog migration",
+        "selected installation has no recorded provenance; run ctlup migrate before inspection",
       ));
     }
   }
   Ok(())
 }
 
-fn inspected_bundles(
-  store: &Installations,
-  entries: &[CatalogEntry],
-  migrated: bool,
-) -> io::Result<Vec<Bundle>> {
-  if !migrated {
-    return store.list();
-  }
+fn inspected_bundles(store: &Installations, entries: &[CatalogEntry]) -> io::Result<Vec<Bundle>> {
   entries
     .iter()
     .map(|entry| entry.bundle_id.as_str())
@@ -251,20 +260,6 @@ fn inspected_bundles(
       })
     })
     .collect()
-}
-
-fn ensure_installation(installations: &mut Vec<CatalogEntry>, build: &InstalledBuild) {
-  if !installations
-    .iter()
-    .any(|entry| entry.bundle_id == build.bundle_id)
-  {
-    installations.push(CatalogEntry {
-      bundle_id: build.bundle_id.clone(),
-      target_triple: build.target_triple.clone(),
-      origin: None,
-      current: false,
-    });
-  }
 }
 
 fn insert_build(
@@ -344,12 +339,22 @@ mod tests {
 
   fn snapshot() -> InstallationShow {
     let (manifest, _) = fixture("x86_64-unknown-linux-musl", 'a');
+    let entry = CatalogEntry {
+      bundle_id: manifest.bundle_id.clone(),
+      target_triple: manifest.target_triple.clone(),
+      origin: Some(CatalogOrigin {
+        channel: "local".into(),
+        publication_id: None,
+        built_at: None,
+      }),
+      current: true,
+    };
     InstallationShow::from_status(
       InstallationStatus {
         active: Some(manifest),
         previous: None,
       },
-      None,
+      Some(InstallationCatalog::new(vec![entry])),
     )
     .unwrap()
   }
@@ -366,7 +371,7 @@ mod tests {
   }
 
   #[test]
-  fn fallback_preserves_known_source_and_unknown_extra_builds() {
+  fn older_status_retains_selected_summaries_without_inventing_memberships() {
     let (active, _) = fixture("x86_64-unknown-linux-musl", 'a');
     let (previous, _) = fixture("x86_64-unknown-linux-musl", 'b');
     let extra = CatalogEntry {
@@ -403,14 +408,60 @@ mod tests {
         .iter()
         .filter(|entry| entry.origin.is_none())
         .count(),
-      2
+      0
     );
+    assert_eq!(result.installations.len(), 1);
     assert!(
       !result
         .builds
         .iter()
         .any(|build| build.bundle_id == extra.bundle_id)
     );
+  }
+
+  #[test]
+  fn unrecorded_catalog_rows_require_migration_even_without_selected_builds() {
+    let (active, _) = fixture("x86_64-unknown-linux-musl", 'a');
+    let unrecorded = CatalogEntry {
+      bundle_id: active.bundle_id.clone(),
+      target_triple: active.target_triple.clone(),
+      origin: None,
+      current: false,
+    };
+    for selected in [false, true] {
+      let error = InstallationShow::from_status(
+        InstallationStatus {
+          active: selected.then(|| active.clone()),
+          previous: None,
+        },
+        Some(InstallationCatalog::new(vec![unrecorded.clone()])),
+      )
+      .unwrap_err();
+      assert!(error.to_string().contains("ctlup migrate"));
+    }
+  }
+
+  #[test]
+  fn schema1_selected_bundles_are_rejected_even_for_older_cli_capability_fallback() {
+    let fixture = Fixture::new("0.1.3", &"a".repeat(40));
+    let components = serde_json::from_value(fixture.inner["components"].clone()).unwrap();
+    let manifest = Manifest::new(
+      "x86_64-unknown-linux-musl",
+      Source::Local,
+      components,
+      &fixture.files,
+    )
+    .unwrap();
+    assert_eq!(manifest.schema_version, 1);
+    let error = InstallationShow::from_status(
+      InstallationStatus {
+        active: Some(manifest),
+        previous: None,
+      },
+      None,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("schema-2"));
   }
 
   #[test]
@@ -446,7 +497,7 @@ mod tests {
 
   #[cfg(unix)]
   #[test]
-  fn legacy_native_selection_is_visible_without_migrating_its_payload() {
+  fn older_native_selection_requires_explicit_migration_before_inspection() {
     let home = Home::new();
     let (manifest, mut files) = fixture(ctl_core::paths::native_target(), 'a');
     if cfg!(target_os = "macos") {
@@ -465,19 +516,28 @@ mod tests {
     legacy
       .select(ctl_core::bundles::Purpose::Local, &bundle)
       .unwrap();
+    assert!(
+      show(&home.0)
+        .unwrap_err()
+        .to_string()
+        .contains("ctlup migrate")
+    );
+    assert!(!home.0.join(".tokn/ctl/installs").exists());
+    Installations::new(&home.0).migrate_catalog().unwrap();
     let result = show(&home.0).unwrap();
     assert_eq!(result.active.as_ref(), Some(&manifest.bundle_id));
     assert_eq!(result.builds.len(), 1);
     assert_eq!(result.builds[0].source, Source::Local);
     assert_eq!(result.installations.len(), 1);
-    assert!(result.installations[0].origin.is_none());
-    assert!(!result.installations[0].current);
-    assert!(!home.0.join(".tokn/ctl/installs").exists());
-    assert!(!Installations::new(&home.0).is_catalog_migrated().unwrap());
+    assert_eq!(
+      result.installations[0].origin.as_ref().unwrap().channel,
+      "local"
+    );
+    assert!(result.installations[0].current);
   }
 
   #[test]
-  fn migration_makes_catalog_authoritative_without_adopting_later_orphan_payloads() {
+  fn catalog_is_always_authoritative_and_only_explicit_migration_adopts_orphans() {
     let home = Home::new();
     let target = "aarch64-unknown-linux-musl";
     let (known, files) = fixture(target, 'a');
@@ -497,14 +557,13 @@ mod tests {
     let (older, older_files) = fixture(target, 'b');
     write_orphan(&store, &older, &older_files);
     let before = show(&home.0).unwrap();
-    assert_eq!(before.builds.len(), 2);
+    assert_eq!(before.builds.len(), 1);
     assert!(
       before
         .installations
         .iter()
-        .any(|entry| entry.bundle_id == older.bundle_id && entry.origin.is_none())
+        .all(|entry| entry.bundle_id != older.bundle_id)
     );
-    assert!(!store.is_catalog_migrated().unwrap());
 
     store.migrate_catalog().unwrap();
     let adopted = show(&home.0).unwrap();
@@ -517,7 +576,10 @@ mod tests {
     );
     let (orphan, orphan_files) = fixture(target, 'c');
     let orphan_directory = write_orphan(&store, &orphan, &orphan_files);
-    assert_eq!(store.get(&orphan.bundle_id).unwrap().manifest, orphan);
+    assert_eq!(
+      store.get(&orphan.bundle_id).unwrap_err().kind(),
+      io::ErrorKind::NotFound
+    );
     let after = show(&home.0).unwrap();
     assert_eq!(after.builds, adopted.builds);
     assert_eq!(after.installations, adopted.installations);
@@ -529,7 +591,7 @@ mod tests {
   }
 
   #[test]
-  fn migrated_native_selections_require_recorded_catalog_provenance() {
+  fn native_selections_require_recorded_catalog_provenance() {
     let (active, _) = fixture("aarch64-unknown-linux-musl", 'a');
     let (previous, _) = fixture("aarch64-unknown-linux-musl", 'b');
     let status = InstallationStatus {
@@ -564,6 +626,11 @@ mod tests {
     assert!(invalid.validate().is_err());
     invalid = valid.clone();
     invalid.installations.clear();
+    invalid.validate().unwrap(); // Selected-only summaries support older CLI capabilities.
+    invalid.active = None;
+    assert!(invalid.validate().is_err());
+    invalid = valid.clone();
+    invalid.installations[0].origin = None;
     assert!(invalid.validate().is_err());
     invalid = valid.clone();
     invalid.builds.clear();

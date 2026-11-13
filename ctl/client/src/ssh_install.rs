@@ -12,10 +12,13 @@ use crate::{
   configure_ssh_interaction, prepare_ssh_base_arguments, read_bounded_output, validate_ssh_target,
 };
 
-const UNIX_INSTALL_COMMAND: &str = include_str!("ssh_install.sh");
+#[cfg(test)]
+const UNIX_INSTALL_COMMAND: &str =
+  include_str!("ssh_install/test_fixtures/legacy_bundle_install.sh");
 const UPDATER_BOOTSTRAP_COMMAND: &str = include_str!("ssh_updater_bootstrap.sh");
-#[cfg(unix)]
-const AGENT_INSTALL_COMMAND: &str = include_str!("ssh_agent_install.sh");
+#[cfg(all(test, unix))]
+const AGENT_INSTALL_COMMAND: &str =
+  include_str!("ssh_install/test_fixtures/legacy_agent_install.sh");
 const MAX_PROGRESS_LINE_BYTES: u64 = 256;
 const INITIAL_PROGRESS_MARKER: &[u8] = b"ctl-install-progress-v1 receiving 0\n";
 
@@ -49,32 +52,6 @@ pub enum RemoteInstallEvent {
   Complete,
 }
 
-/// Installs only a verified agent, retaining the active companion paths.
-///
-/// # Errors
-/// Rejects invalid bytes, unsafe paths, SSH failures or invalid progress.
-#[cfg(unix)]
-pub async fn install_ssh_agent_only_with_progress(
-  destination: &str,
-  options: &SshConnectionOptions,
-  interaction: &SshInteraction,
-  archive: &[u8],
-  on_progress: impl Fn(RemoteInstallEvent) + Send + Sync,
-) -> Result<(), CoreError> {
-  validate_ssh_target(destination, options)?;
-  if options.remote_platform != RemotePlatform::Unix {
-    return Err(CoreError::InvalidSshOption("remote_platform".into()));
-  }
-  let script = agent_script(archive, None)?;
-  let mut command = Command::new(SSH_PROGRAM);
-  let extra = configure_ssh_interaction(&mut command, interaction);
-  command
-    .args(extra)
-    .args(prepare_ssh_base_arguments(destination, options, interaction).await?)
-    .arg(posix_install_command(&script));
-  run_package_install(command, archive, &["ctl-agent"], on_progress).await
-}
-
 #[cfg(all(test, unix))]
 pub(crate) async fn install_local_agent(
   home: &std::path::Path,
@@ -87,7 +64,7 @@ pub(crate) async fn install_local_agent(
   run_package_install(command, archive, &["ctl-agent"], |_| {}).await
 }
 
-#[cfg(unix)]
+#[cfg(all(test, unix))]
 fn agent_script(archive: &[u8], companions: Option<&std::path::Path>) -> Result<String, CoreError> {
   use sha2::{Digest as _, Sha256};
   let source = crate::component_update::inspect_agent_archive(archive)
@@ -113,57 +90,6 @@ fn agent_script(archive: &[u8], companions: Option<&std::path::Path>) -> Result<
       )
       .replace("__COMPANION_DIRECTORY__", &quoted),
   )
-}
-
-/// Installs a trusted bundle into the fixed per-user Unix location.
-///
-/// # Errors
-/// Returns validation, SSH startup, remote-command, or output failures.
-pub async fn install_ssh_unix_agent_interactive(
-  destination: &str,
-  options: &SshConnectionOptions,
-  interaction: &SshInteraction,
-  bundle_id: &str,
-  archive: &[u8],
-) -> Result<(), CoreError> {
-  install_ssh_unix_agent_interactive_with_progress(
-    destination,
-    options,
-    interaction,
-    bundle_id,
-    archive,
-    |_| {},
-  )
-  .await
-}
-
-/// Installs a trusted bundle and reports bytes received and remote stages.
-///
-/// Bundle IDs are path-safe build identifiers; callers cannot supply a remote
-/// command or installation path. Dropping the future terminates the SSH child.
-///
-/// # Errors
-/// Returns validation, SSH startup, remote-command, or malformed-progress errors.
-pub async fn install_ssh_unix_agent_interactive_with_progress(
-  destination: &str,
-  options: &SshConnectionOptions,
-  interaction: &SshInteraction,
-  bundle_id: &str,
-  archive: &[u8],
-  on_progress: impl Fn(RemoteInstallEvent) + Send + Sync,
-) -> Result<(), CoreError> {
-  validate_ssh_target(destination, options)?;
-  if options.remote_platform != RemotePlatform::Unix {
-    return Err(CoreError::InvalidSshOption("remote_platform".into()));
-  }
-  let (script, layout) = installation_script(bundle_id, archive)?;
-  let mut command = Command::new(SSH_PROGRAM);
-  let extra = configure_ssh_interaction(&mut command, interaction);
-  command
-    .args(extra)
-    .args(prepare_ssh_base_arguments(destination, options, interaction).await?)
-    .arg(posix_install_command(&script));
-  run_package_install(command, archive, layout.names(), on_progress).await
 }
 
 pub(crate) struct UpdaterUpload<'a> {
@@ -497,6 +423,7 @@ fn install_script(bundle_id: &str, archive_bytes: usize) -> Result<String, CoreE
   build_install_script(bundle_id, archive_bytes, Layout::Services, None)
 }
 
+#[cfg(test)]
 fn build_install_script(
   bundle_id: &str,
   archive_bytes: usize,
@@ -524,10 +451,10 @@ fn build_install_script(
   )
 }
 
+#[cfg(all(test, unix))]
 fn installation_script(bundle_id: &str, archive: &[u8]) -> Result<(String, Layout), CoreError> {
   let invalid = |error: io::Error| CoreError::InvalidComponentBundle(error.to_string());
   let mut files = crate::remote_bundle::archive::read_archive(archive).map_err(invalid)?;
-  #[cfg(unix)]
   if let Some(manifest) = crate::components::inspect_upload_archive(&mut files)
     .map_err(|error| CoreError::InvalidComponentBundle(error.to_string()))?
   {

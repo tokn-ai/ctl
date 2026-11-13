@@ -161,11 +161,10 @@ ctlup migrate
 A component is a complete runtime bundle for one target, named `bundle-<target>`.
 `component list` shows available components for the selected channel, together
 with every locally installed target. Channel markers such as `(stable, nightly)`
-show where each target exists across all installed builds. A target with only
-unrecorded historical builds shows `(legacy)`. Four historical builds for one
-target still produce one component row.
-Use `--installed` for an offline list of installed targets; without an explicit
-channel this includes historical builds with unrecorded provenance. An explicit
+show where each target exists across all recorded installed builds. Multiple
+builds for one target still produce one component row. Existing installations
+without a catalog must run `ctlup migrate` before normal inspection or updates.
+Use `--installed` for an offline list of installed targets. An explicit
 channel filters the installed targets, while each row still lists all its known
 channels. Retained rollback or running payloads continue to count until removed
 from disk. Bare target triples remain accepted by `add` and `remove` for
@@ -181,8 +180,7 @@ Target components and their matching updater remain available after cache cleanu
 Removing a registration preserves payloads and provenance needed by active,
 rollback or running processes. PR installations are cataloged separately as
 `pr-NUMBER`; checkout builds use `local`, and explicitly supplied files use
-`provided`. Historical installations with no reliable channel provenance are
-labeled `legacy`; their known build source remains visible separately.
+`provided`.
 
 `ctlup migrate` performs a one-time catalog adoption for existing complete
 builds. Uncatalogued locally built payloads are assigned to `local`; other
@@ -192,12 +190,16 @@ Existing recorded channels, active and rollback selections, and running-process
 leases are preserved. Build dates stay unknown when not recorded. Migration
 does not prune payloads or restart services.
 
-The cutover marker is written after the verified catalog is committed. Later
-inspection uses that catalog without rediscovering old selections or classifying
-uncommitted payloads as legacy installations. Repeating `migrate` is safe.
-Incomplete historical four-service bundles require a complete install before
-cutover. Original external source directories remain available to processes
-that may still use their paths.
+Only the explicit migrator reads old layouts and selection records. Normal
+runtime lookup, installation and listing use complete schema-2 payloads,
+canonical installation paths and the authoritative catalog. Fresh installs
+create catalog records immediately. Uncommitted payloads are cleanup candidates
+and never appear as installed builds. The migration marker makes the explicit
+import repeatable; it does not switch normal readers between old and new modes.
+Incomplete historical four-service installations must be replaced with a
+complete build using their old manager, or cleanly reinstalled, before adoption.
+Original external source directories remain available to processes that may
+still use their paths.
 
 `ctlup show` lists the individual installed builds, including retained older
 payloads, with short content IDs, versions, source revisions, channels and
@@ -208,7 +210,7 @@ commit date. Older bundles without build metadata show `unknown`.
 `status --json` retains its original active/previous response for compatibility;
 `show --json` provides the versioned build inventory, including channel and
 build-date fields. `component list --json` contains logical component names,
-targets, installed state, known `channels` and a `has_legacy` flag. Remote inspection uses the detailed inventory
+targets, installed state and recorded `channels`. Remote inspection uses the detailed inventory
 when supported; older updaters retain their available active/previous details,
 with other build metadata unavailable rather than guessed.
 SSH uploads contain one native target. If the remote channel also registers
@@ -399,12 +401,12 @@ build and offers local installation of another usable build. Explicitly installe
 target components have durable channel registrations; other downloaded foreign
 artifacts remain deployment cache entries.
 
-Existing verified complete installations and local selections are recognized
-without mutation. The first successful explicit install migrates the previous
-complete build into the new rollback store. Historical four-service installs
-can be retained as rollback candidates; new installs require all six binaries.
-Legacy trees remain intact because processes predating leases may still use
-them. Host identity, saved settings and sessions are preserved.
+Existing complete installations must be adopted with `ctlup migrate` before
+using the current installation engine. Runtime commands do not fall back to old
+selections or accept four-service rollback candidates. The explicit migrator
+preserves complete active/rollback builds and leaves original source trees in
+place for processes that may still use them. Host identity, saved settings and
+sessions are preserved.
 
 ## Inspect, restart and stop from the CLI
 

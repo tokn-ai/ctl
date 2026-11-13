@@ -11,6 +11,8 @@ use std::io::{self, Read as _};
 const MARKER: &str = "catalog-migrated.json";
 const MAX_MARKER_BYTES: u64 = 1024;
 
+mod legacy;
+
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Marker {
@@ -51,21 +53,31 @@ pub(super) fn is_migrated(store: &Installations) -> io::Result<bool> {
 pub(super) fn migrate(store: &Installations) -> io::Result<Vec<CatalogEntry>> {
   filesystem::ensure_root(store)?;
   let _lock = filesystem::Lock::acquire(store)?;
-  catalog::recover(store)?;
   if is_migrated(store)? {
+    #[cfg(unix)]
+    legacy::require_recoverable_activation(store)?;
+    catalog::recover(store)?;
     let entries = catalog::read(store)?.entries;
     validate_recorded_selection(store, &entries)?;
     return Ok(entries);
   }
-  let mut state = catalog::read(store)?;
-  let active = store.active()?;
-  let previous = store.previous()?;
-  reject_incomplete_selection(store, active.as_ref(), previous.as_ref())?;
-  let mut bundles = store
-    .list()?
+  let mut bundles = legacy::managed_bundles(store)?
     .into_iter()
     .map(|bundle| (bundle.manifest.bundle_id.clone(), bundle))
     .collect::<BTreeMap<_, _>>();
+  if bundles
+    .values()
+    .any(|bundle| bundle.manifest.schema_version != 2)
+  {
+    return Err(upgrade_required());
+  }
+  #[cfg(unix)]
+  legacy::require_recoverable_activation(store)?;
+  catalog::recover(store)?;
+  let mut state = catalog::read_for_migration(store)?;
+  let active = legacy::active(store)?;
+  let previous = legacy::previous(store)?;
+  reject_incomplete_selection(store, active.as_ref(), previous.as_ref())?;
   for bundle in [active.as_ref(), previous.as_ref()].into_iter().flatten() {
     bundles
       .entry(bundle.manifest.bundle_id.clone())
@@ -183,7 +195,7 @@ fn import_selection(
         || !bundle.manifest.files.contains_key("ctld-package.json"))
     {
       return Err(filesystem::invalid(
-        "legacy native migration requires the complete signed helper package; run ctlup update first",
+        "native migration requires the complete signed helper package; replace the installation using the old manager before migrating, or perform a clean reinstall",
       ));
     }
   }
@@ -224,7 +236,7 @@ fn validate_recorded_selection(store: &Installations, entries: &[CatalogEntry]) 
 
 fn upgrade_required() -> io::Error {
   filesystem::invalid(
-    "catalog migration requires complete schema-2 builds including ctl and ctmux; run ctlup update before migrating service-only or unmanaged installations",
+    "catalog migration requires complete schema-2 builds including ctl and ctmux; replace service-only or unmanaged installations using the old manager before migrating, or perform a clean reinstall",
   )
 }
 

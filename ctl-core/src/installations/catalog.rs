@@ -94,12 +94,29 @@ impl Default for State {
 
 impl State {
   fn validate(&self, store: &Installations) -> io::Result<()> {
+    self.validate_index()?;
+    for (id, target) in self
+      .entries
+      .iter()
+      .map(|entry| (&entry.bundle_id, &entry.target_triple))
+      .collect::<BTreeMap<_, _>>()
+    {
+      let bundle = filesystem::load(store, id)?;
+      if bundle.manifest.target_triple != *target {
+        return Err(invalid("catalog target differs from its immutable payload"));
+      }
+    }
+    Ok(())
+  }
+
+  fn validate_index(&self) -> io::Result<()> {
     if self.schema_version != 1 || self.entries.len() > MAX_ENTRIES {
       return Err(invalid("unsupported or oversized installation catalog"));
     }
     let mut unique = BTreeSet::new();
     let mut heads = BTreeSet::new();
     let mut publications = BTreeMap::new();
+    let mut targets = BTreeMap::new();
     for entry in &self.entries {
       entry.validate()?;
       let Some(origin) = &entry.origin else {
@@ -109,6 +126,9 @@ impl State {
       };
       if !unique.insert((&origin.channel, &entry.target_triple, &entry.bundle_id))
         || (entry.current && !heads.insert((&origin.channel, &entry.target_triple)))
+        || targets
+          .insert(&entry.bundle_id, &entry.target_triple)
+          .is_some_and(|target| target != &entry.target_triple)
       {
         return Err(invalid("duplicate installation catalog entries"));
       }
@@ -120,10 +140,6 @@ impl State {
         return Err(invalid(
           "a channel contains targets from different publications",
         ));
-      }
-      let bundle = filesystem::load(store, &entry.bundle_id)?;
-      if bundle.manifest.target_triple != entry.target_triple {
-        return Err(invalid("catalog target differs from its immutable payload"));
       }
     }
     Ok(())
@@ -195,7 +211,19 @@ struct Transaction {
 
 impl Transaction {
   fn validate(&self, store: &Installations) -> io::Result<()> {
+    self.validate_index()?;
     self.catalog.validate(store)?;
+    for id in [self.active.as_deref(), self.previous.as_deref()]
+      .into_iter()
+      .flatten()
+    {
+      filesystem::validate_native(&filesystem::load(store, id)?)?;
+    }
+    Ok(())
+  }
+
+  fn validate_index(&self) -> io::Result<()> {
+    self.catalog.validate_index()?;
     let Some(id) = &self.active else {
       return if self.previous.is_none() {
         Ok(())
@@ -205,15 +233,25 @@ impl Transaction {
         ))
       };
     };
-    let active = filesystem::load(store, id)?;
-    filesystem::validate_native(&active, false)?;
-    if let Some(previous) = &self.previous {
-      if previous == id {
+    if self.previous.as_ref() == Some(id) {
+      return Err(invalid(
+        "catalog activation and rollback identities must differ",
+      ));
+    }
+    for id in [self.active.as_deref(), self.previous.as_deref()]
+      .into_iter()
+      .flatten()
+    {
+      if !self
+        .catalog
+        .entries
+        .iter()
+        .any(|entry| entry.bundle_id == id && crate::bundles::local_target(&entry.target_triple))
+      {
         return Err(invalid(
-          "catalog activation and rollback identities must differ",
+          "catalog transaction selection must name a recorded native build",
         ));
       }
-      filesystem::validate_native(&filesystem::load(store, previous)?, true)?;
     }
     Ok(())
   }
@@ -245,37 +283,79 @@ pub(super) fn exists(store: &Installations) -> io::Result<bool> {
 }
 
 pub(super) fn read(store: &Installations) -> io::Result<State> {
-  // A durable journal is the committed intent after interruption. Inspection
-  // uses its complete catalog without mutating pointers or hiding corruption.
-  let state = if let Some(transaction) = read_file::<Transaction>(&store.root.join(JOURNAL))? {
-    transaction.validate(store)?;
-    transaction.catalog
-  } else {
-    read_file(&store.root.join(CATALOG))?.unwrap_or_default()
-  };
+  let state = read_index(store)?;
   state.validate(store)?;
   Ok(state)
 }
 
-pub(super) fn inventory(store: &Installations) -> io::Result<Vec<CatalogEntry>> {
-  let mut entries = read(store)?.entries;
-  if super::migration::is_migrated(store)? {
-    return Ok(entries);
+pub(super) fn read_index(store: &Installations) -> io::Result<State> {
+  let state = existing_state(store)?;
+  if state.is_none() && has_installation_data(store)? {
+    return Err(invalid(
+      "existing installations have no authoritative catalog; run ctlup migrate",
+    ));
   }
-  for bundle in store.list()? {
-    if !entries
-      .iter()
-      .any(|entry| entry.bundle_id == bundle.manifest.bundle_id)
-    {
-      entries.push(CatalogEntry {
-        bundle_id: bundle.manifest.bundle_id,
-        target_triple: bundle.manifest.target_triple,
-        origin: None,
-        current: false,
-      });
+  let state = state.unwrap_or_default();
+  state.validate_index()?;
+  Ok(state)
+}
+
+pub(super) fn read_for_migration(store: &Installations) -> io::Result<State> {
+  let state = existing_state(store)?.unwrap_or_default();
+  state.validate(store)?;
+  Ok(state)
+}
+
+fn existing_state(store: &Installations) -> io::Result<Option<State>> {
+  // A durable journal is the committed intent after interruption. Inspection
+  // uses its complete catalog without mutating pointers or hiding corruption.
+  if let Some(transaction) = read_file::<Transaction>(&store.root.join(JOURNAL))? {
+    transaction.validate_index()?;
+    Ok(Some(transaction.catalog))
+  } else {
+    read_file(&store.root.join(CATALOG))
+  }
+}
+
+fn has_installation_data(store: &Installations) -> io::Result<bool> {
+  for name in ["current", "previous", ".activation.json"] {
+    if filesystem::path_exists(&store.root.join(name))? {
+      return Ok(true);
     }
   }
-  Ok(entries)
+  let target = match crate::paths::native_target() {
+    "x86_64-unknown-linux-gnu" => "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-gnu" => "aarch64-unknown-linux-musl",
+    target => target,
+  };
+  if filesystem::path_exists(
+    &store
+      .root
+      .join("components/selected")
+      .join(format!("local-{target}.json")),
+  )? {
+    return Ok(true);
+  }
+  Ok(!filesystem::entries(store)?.is_empty())
+}
+
+pub(super) fn inventory(store: &Installations) -> io::Result<Vec<CatalogEntry>> {
+  read(store).map(|state| state.entries)
+}
+
+pub(super) fn initialize(store: &Installations, state: &State) -> io::Result<()> {
+  if !exists(store)? {
+    if !state.entries.is_empty() {
+      return Err(invalid(
+        "catalog initialization requires a verified empty state",
+      ));
+    }
+    // The caller holds the installation lock and has already rejected existing
+    // uncatalogued installations. Interrupted first writes may now leave only
+    // ordinary unregistered payloads, rather than an ambiguous old store.
+    commit(store, state, None)?;
+  }
+  Ok(())
 }
 
 pub(super) fn commit(
@@ -285,9 +365,9 @@ pub(super) fn commit(
 ) -> io::Result<()> {
   state.validate(store)?;
   if let Some((active, previous)) = activation {
-    filesystem::validate_native(active, false)?;
+    filesystem::validate_native(active)?;
     if let Some(previous) = previous {
-      filesystem::validate_native(previous, true)?;
+      filesystem::validate_native(previous)?;
     }
     // Detect command collisions before recording durable activation intent.
     // Otherwise a fixable collision could leave every later operation trying
@@ -313,22 +393,32 @@ pub(super) fn commit(
 }
 
 pub(super) fn recover(store: &Installations) -> io::Result<()> {
+  let transaction = read_file::<Transaction>(&store.root.join(JOURNAL))?;
+  if let Some(transaction) = &transaction {
+    transaction.validate(store)?;
+  }
   #[cfg(unix)]
-  filesystem::recover(store)?;
-  let Some(transaction) = read_file::<Transaction>(&store.root.join(JOURNAL))? else {
+  {
+    if transaction.is_none() && filesystem::path_exists(&store.root.join(".activation.json"))? {
+      // A standalone native activation still belongs to this authoritative
+      // catalog. Reject damaged recorded payloads before changing selection.
+      read(store)?;
+    }
+    filesystem::recover(store)?;
+  }
+  let Some(transaction) = transaction else {
     return Ok(());
   };
-  transaction.validate(store)?;
   if let Some(id) = &transaction.active {
     let active = filesystem::load(store, id)?;
-    filesystem::validate_native(&active, false)?;
+    filesystem::validate_native(&active)?;
     let previous = transaction
       .previous
       .as_deref()
       .map(|id| filesystem::load(store, id))
       .transpose()?;
     if let Some(previous) = &previous {
-      filesystem::validate_native(previous, true)?;
+      filesystem::validate_native(previous)?;
     }
     filesystem::activate(store, &active, previous.as_ref())?;
   }

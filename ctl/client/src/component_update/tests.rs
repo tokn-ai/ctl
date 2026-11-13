@@ -320,7 +320,7 @@ fn agent_package_rejects_changed_source_bytes() {
 }
 
 #[tokio::test]
-async fn full_install_after_agent_only_replaces_all_retained_companions() {
+async fn agent_only_overlays_require_explicit_replacement_before_catalog_adoption() {
   let home = Home::new();
   let original = bundle(&home.0, 'a');
   let replacement = bundle(&home.0, 'b');
@@ -331,39 +331,22 @@ async fn full_install_after_agent_only_replaces_all_retained_companions() {
   )
   .await
   .unwrap();
-  // Remote archive activation accepts the verified flat native fixture and
-  // shares the core transaction without provisioning a fake signed helper.
+  let current = home.0.join(".tokn/ctl/current");
+  let selected = std::fs::read_link(&current).unwrap();
   let archive = crate::components::package_bundle(&replacement)
     .unwrap()
     .archive;
-  let installed = crate::installation::install_archive(&home.0, &archive)
+  let error = crate::installation::install_archive(&home.0, &archive)
     .await
-    .unwrap();
-  let current = home.0.join(".tokn/ctl/current");
-  assert_eq!(
-    std::fs::canonicalize(&current).unwrap(),
-    installed.directory.canonicalize().unwrap()
-  );
-  assert_eq!(installed.manifest, replacement.manifest);
-  assert!(
-    installed
-      .directory
-      .starts_with(home.0.join(".tokn/ctl/installs"))
-  );
-  assert!(current.join(MANIFEST_FILE).is_file());
-  assert!(!current.join(SOURCE_FILE).exists());
-  for name in ctl_core::bundle_layout::ALL {
-    assert!(
-      !std::fs::symlink_metadata(current.join(name))
-        .unwrap()
-        .file_type()
-        .is_symlink()
-    );
-    assert_eq!(
-      std::fs::read(current.join(name)).unwrap(),
-      std::fs::read(replacement.directory.join(name)).unwrap()
-    );
-  }
+    .unwrap_err();
+  assert!(error.to_string().contains("ctlup migrate"));
+  assert_eq!(std::fs::read_link(&current).unwrap(), selected);
+  assert!(!home.0.join(".tokn/ctl/catalog.json").exists());
+  let error = ctl_core::installations::Installations::new(&home.0)
+    .migrate_catalog()
+    .unwrap_err();
+  assert!(error.to_string().contains("complete"));
+  assert_eq!(std::fs::read_link(&current).unwrap(), selected);
 }
 
 #[tokio::test]

@@ -13,8 +13,6 @@ mod tests;
 mod windows_tests;
 
 use crate::bundles::{Bundle, Manifest};
-#[cfg(unix)]
-use crate::bundles::{Purpose, Store};
 use serde::Serialize;
 use std::collections::BTreeSet;
 use std::io;
@@ -52,7 +50,7 @@ impl Installations {
     &self.root
   }
 
-  /// Reads the active payload, including a verified pre-ctlup installation.
+  /// Reads the recorded complete active payload through its canonical selection.
   ///
   /// # Errors
   /// A broken pointer, unsafe directory or modified payload is never hidden by
@@ -61,27 +59,7 @@ impl Installations {
     if !filesystem::root_exists(self)? {
       return Ok(None);
     }
-    let migrated = migration::is_migrated(self)?;
-    if let Some(bundle) = filesystem::pointer(self, "current", true)? {
-      return Ok(Some(bundle));
-    }
-    #[cfg(unix)]
-    {
-      if migrated {
-        return Ok(None);
-      }
-      if filesystem::path_exists(&self.root.join("current"))? {
-        // A historical agent-only overlay is not a complete installation. Keep
-        // it operational until an explicit complete install supersedes it.
-        return Ok(None);
-      }
-      Store::new(&self.home).selected(Purpose::Local, crate::paths::native_target())
-    }
-    #[cfg(windows)]
-    {
-      let _ = migrated;
-      Ok(None)
-    }
+    self.recorded_selection("current")
   }
 
   /// Resolves the active installation and keeps it available for a new process.
@@ -128,7 +106,23 @@ impl Installations {
     if !filesystem::root_exists(self)? {
       return Ok(None);
     }
-    filesystem::pointer(self, "previous", false)
+    self.recorded_selection("previous")
+  }
+
+  fn recorded_selection(&self, name: &str) -> io::Result<Option<Bundle>> {
+    let state = catalog::read_index(self)?;
+    let selected = filesystem::pointer(self, name)?;
+    if selected.as_ref().is_some_and(|bundle| {
+      !state.entries.iter().any(|entry| {
+        entry.bundle_id == bundle.manifest.bundle_id
+          && entry.target_triple == bundle.manifest.target_triple
+      })
+    }) {
+      return Err(filesystem::invalid(
+        "uncatalogued installation selection; run ctlup migrate",
+      ));
+    }
+    Ok(selected)
   }
 
   /// Opens one immutable installation by its content identity.
@@ -142,7 +136,24 @@ impl Installations {
         "installation store is absent",
       ));
     }
-    filesystem::load(self, bundle_id)
+    let state = catalog::read_index(self)?;
+    let Some(entry) = state
+      .entries
+      .iter()
+      .find(|entry| entry.bundle_id == bundle_id)
+    else {
+      return Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        "installation is not recorded in the catalog",
+      ));
+    };
+    let bundle = filesystem::load(self, bundle_id)?;
+    if bundle.manifest.target_triple != entry.target_triple {
+      return Err(filesystem::invalid(
+        "catalog target differs from its immutable payload",
+      ));
+    }
+    Ok(bundle)
   }
 
   /// Lists verified installations without changing the active build.
@@ -153,9 +164,21 @@ impl Installations {
     if !filesystem::root_exists(self)? {
       return Ok(Vec::new());
     }
-    filesystem::entries(self)?
+    catalog::read_index(self)?
+      .entries
       .into_iter()
-      .map(|(id, _)| filesystem::load(self, &id))
+      .map(|entry| (entry.bundle_id, entry.target_triple))
+      .collect::<std::collections::BTreeMap<_, _>>()
+      .into_iter()
+      .map(|(id, target)| {
+        let bundle = filesystem::load(self, &id)?;
+        if bundle.manifest.target_triple != target {
+          return Err(filesystem::invalid(
+            "catalog target differs from its immutable payload",
+          ));
+        }
+        Ok(bundle)
+      })
       .collect()
   }
 
@@ -183,8 +206,7 @@ impl Installations {
     operation(&manifests)
   }
 
-  /// Lists installed payloads and their recorded channel provenance.
-  /// Historical installations without provenance remain visible as unknown.
+  /// Lists recorded installations and their channel provenance.
   ///
   /// # Errors
   /// Reports unsafe storage, damaged catalog entries or modified payloads.
@@ -329,10 +351,7 @@ impl Installations {
     if let Some(expected_heads) = expected_heads {
       verify_channel_heads(&state, &origin.channel, expected_heads)?;
     }
-    let installed = bundles
-      .iter()
-      .map(|bundle| filesystem::publish(self, bundle, None))
-      .collect::<io::Result<Vec<_>>>()?;
+    catalog::initialize(self, &state)?;
     let previous = native
       .map(|_| {
         self
@@ -342,6 +361,10 @@ impl Installations {
       })
       .transpose()?
       .flatten();
+    let installed = bundles
+      .iter()
+      .map(|bundle| filesystem::publish(self, bundle, None))
+      .collect::<io::Result<Vec<_>>>()?;
     state.register(&installed, origin, false);
     let activation = native.map(|index| (&installed[index], previous.as_ref()));
     catalog::commit(self, &state, activation)?;
@@ -459,7 +482,7 @@ impl Installations {
     expected_heads: Option<&[CatalogEntry]>,
     prepare: impl FnOnce(&Bundle) -> io::Result<T>,
   ) -> io::Result<(Bundle, T)> {
-    filesystem::validate_native(bundle, false)?;
+    filesystem::validate_native(bundle)?;
     if let Some(origin) = origin {
       origin.validate()?;
     }
@@ -467,21 +490,21 @@ impl Installations {
     filesystem::ensure_root(self)?;
     let _lock = filesystem::Lock::acquire(self)?;
     catalog::recover(self)?;
-    if origin.is_none()
-      && migration::is_migrated(self)?
-      && !catalog::read(self)?
+    let mut state = catalog::read(self)?;
+    if let (Some(origin), Some(expected_heads)) = (origin, expected_heads) {
+      verify_channel_heads(&state, &origin.channel, expected_heads)?;
+    }
+    let inferred_origin = if origin.is_none()
+      && !state
         .entries
         .iter()
         .any(|entry| entry.bundle_id == bundle.manifest.bundle_id)
     {
-      return Err(io::Error::new(
-        io::ErrorKind::InvalidInput,
-        "new installations require an explicit catalog origin after migration",
-      ));
-    }
-    if let (Some(origin), Some(expected_heads)) = (origin, expected_heads) {
-      verify_channel_heads(&catalog::read(self)?, &origin.channel, expected_heads)?;
-    }
+      Some(self.inferred_origin(bundle, &state)?)
+    } else {
+      None
+    };
+    catalog::initialize(self, &state)?;
     let previous = self
       .active()?
       .map(|bundle| filesystem::publish(self, &bundle, None))
@@ -489,13 +512,53 @@ impl Installations {
     let installed = filesystem::publish(self, bundle, Some(&files))?;
     let retained = prepare(&installed)?;
     if let Some(origin) = origin {
-      let mut state = catalog::read(self)?;
       state.register(std::slice::from_ref(&installed), origin, true);
-      catalog::commit(self, &state, Some((&installed, previous.as_ref())))?;
-    } else {
-      filesystem::activate(self, &installed, previous.as_ref())?;
+    } else if let Some(origin) = inferred_origin {
+      state.register(std::slice::from_ref(&installed), &origin, true);
     }
+    catalog::commit(self, &state, Some((&installed, previous.as_ref())))?;
     Ok((installed, retained))
+  }
+
+  fn inferred_origin(&self, bundle: &Bundle, state: &catalog::State) -> io::Result<CatalogOrigin> {
+    let origin = CatalogOrigin {
+      channel: "provided".into(),
+      publication_id: Some(
+        bundle
+          .manifest
+          .distribution_id
+          .as_ref()
+          .unwrap_or(&bundle.manifest.bundle_id)
+          .clone(),
+      ),
+      built_at: None,
+    };
+    for entry in state.entries.iter().filter(|entry| {
+      entry.current
+        && entry.target_triple != bundle.manifest.target_triple
+        && entry
+          .origin
+          .as_ref()
+          .is_some_and(|existing| existing.channel == origin.channel)
+    }) {
+      if entry
+        .origin
+        .as_ref()
+        .and_then(|existing| existing.publication_id.as_ref())
+        != origin.publication_id.as_ref()
+        || filesystem::load(self, &entry.bundle_id)?
+          .manifest
+          .components["ctl-agent"]
+          .build
+          != bundle.manifest.components["ctl-agent"].build
+      {
+        return Err(io::Error::new(
+          io::ErrorKind::InvalidInput,
+          "inferred provided installation cannot replace other target components; install the complete matching channel cohort",
+        ));
+      }
+    }
+    Ok(origin)
   }
 
   /// Switches the complete active and previous payloads, without restarting.

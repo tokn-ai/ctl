@@ -129,6 +129,12 @@ fn explicit_catalog_migration_preserves_selection_and_records_component_membersh
   let root = home.0.join(".tokn/ctl");
   let selection = fs::read_link(root.join("current")).unwrap();
   let rollback = fs::read_link(root.join("previous")).unwrap();
+  // Recreate an older complete installation whose payloads predate the catalog.
+  fs::remove_file(root.join("catalog.json")).unwrap();
+  let inspection = home.command(&["show", "--json"]).output().unwrap();
+  assert!(!inspection.status.success());
+  assert!(String::from_utf8_lossy(&inspection.stderr).contains("ctlup migrate"));
+  assert!(!root.join("catalog.json").exists());
 
   let output = home.command(&["migrate", "--json"]).output().unwrap();
   assert!(

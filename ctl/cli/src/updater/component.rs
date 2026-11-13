@@ -31,8 +31,8 @@ pub(super) async fn run(
       if let Some(channel) = &channel {
         validate_channel(channel)?;
       }
-      let installations = show::snapshot(home, target).await?.installations;
-      print_list(&list::installed(&installations, channel.as_deref()), json)?;
+      let installations = recorded_installations(show::snapshot(home, target).await?)?;
+      print_list(&list::installed(&installations, channel.as_deref())?, json)?;
     }
     ComponentCommand::Add {
       targets,
@@ -178,8 +178,22 @@ async fn available_targets(home: &Path, channel: Option<&str>, json: bool) -> io
     None => installation::default_channel(home)?,
   };
   let catalog = published::check(channel).await.map_err(io::Error::other)?;
-  let installed = installation::show(home)?.installations;
-  print_list(&list::available(catalog.targets, &installed), json)
+  let installed = recorded_installations(installation::show(home)?)?;
+  print_list(&list::available(catalog.targets, &installed)?, json)
+}
+
+fn recorded_installations(
+  snapshot: installation::InstallationShow,
+) -> io::Result<Vec<ctl_core::installations::CatalogEntry>> {
+  if snapshot.builds.iter().any(|build| {
+    !snapshot
+      .installations
+      .iter()
+      .any(|entry| entry.bundle_id == build.bundle_id && entry.origin.is_some())
+  }) {
+    return Err(list::metadata_unavailable());
+  }
+  Ok(snapshot.installations)
 }
 
 fn print_list(components: &list::ComponentList, json: bool) -> io::Result<()> {
@@ -256,5 +270,32 @@ mod tests {
       validate_channel(channel).unwrap();
     }
     assert!(validate_channel("../outside").is_err());
+  }
+
+  #[test]
+  fn selected_remote_builds_need_recorded_channel_memberships() {
+    let snapshot = installation::InstallationShow {
+      schema_version: 1,
+      active: Some("a".repeat(64)),
+      previous: None,
+      installations: Vec::new(),
+      builds: vec![installation::InstalledBuild {
+        bundle_id: "a".repeat(64),
+        target_triple: "aarch64-apple-darwin".into(),
+        source: ctl_core::bundles::Source::Local,
+        build: ctl_core::component::ComponentBuildInfo {
+          version: "0.1.3".into(),
+          source_revision: Some("a".repeat(40)),
+          source_fingerprint: "a".repeat(64),
+          dirty: false,
+        },
+      }],
+    };
+    assert!(
+      recorded_installations(snapshot)
+        .unwrap_err()
+        .to_string()
+        .contains("component channel metadata is unavailable")
+    );
   }
 }

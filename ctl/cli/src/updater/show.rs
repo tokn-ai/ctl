@@ -14,7 +14,7 @@ pub(super) async fn run(home: &Path, target: TargetOptions<'_>, json: bool) -> i
   print(&data, json, !remote && status::in_checkout())
 }
 
-/// Reads a passive inventory that also includes verified legacy selections.
+/// Reads a passive inventory of catalogued installations.
 pub(super) async fn snapshot(
   home: &Path,
   target: TargetOptions<'_>,
@@ -169,7 +169,7 @@ impl BuildRow<'_> {
       }
     }
     if channels.is_empty() {
-      "legacy/unrecorded".into()
+      "unknown".into()
     } else {
       channels
         .into_iter()

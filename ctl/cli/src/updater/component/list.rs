@@ -4,6 +4,7 @@ use ctl_client::remote_bundle::published::PublishedTarget;
 use ctl_core::installations::CatalogEntry;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
+use std::io;
 
 #[derive(Debug, Serialize)]
 pub(super) struct ComponentList {
@@ -17,19 +18,15 @@ struct Component {
   target_triple: String,
   installed: bool,
   channels: Vec<String>,
-  has_legacy: bool,
   #[serde(skip_serializing_if = "Option::is_none")]
   compatible: Option<bool>,
 }
 
-#[derive(Default)]
-struct Membership {
-  channels: BTreeSet<String>,
-  has_legacy: bool,
-}
-
-pub(super) fn installed(entries: &[CatalogEntry], channel: Option<&str>) -> ComponentList {
-  let memberships = memberships(entries);
+pub(super) fn installed(
+  entries: &[CatalogEntry],
+  channel: Option<&str>,
+) -> io::Result<ComponentList> {
+  let memberships = memberships(entries)?;
   let targets = entries
     .iter()
     .filter(|entry| {
@@ -42,17 +39,20 @@ pub(super) fn installed(entries: &[CatalogEntry], channel: Option<&str>) -> Comp
     })
     .map(|entry| entry.target_triple.as_str())
     .collect::<BTreeSet<_>>();
-  ComponentList {
+  Ok(ComponentList {
     schema_version: 1,
     components: targets
       .into_iter()
       .map(|target| Component::new(target.into(), memberships.get(target), None))
       .collect(),
-  }
+  })
 }
 
-pub(super) fn available(targets: Vec<PublishedTarget>, entries: &[CatalogEntry]) -> ComponentList {
-  let memberships = memberships(entries);
+pub(super) fn available(
+  targets: Vec<PublishedTarget>,
+  entries: &[CatalogEntry],
+) -> io::Result<ComponentList> {
+  let memberships = memberships(entries)?;
   let mut components = memberships
     .keys()
     .map(|target| (target.clone(), None))
@@ -62,7 +62,7 @@ pub(super) fn available(targets: Vec<PublishedTarget>, entries: &[CatalogEntry])
       .into_iter()
       .map(|target| (target.target_triple, Some(target.compatible))),
   );
-  ComponentList {
+  Ok(ComponentList {
     schema_version: 1,
     components: components
       .into_iter()
@@ -71,20 +71,26 @@ pub(super) fn available(targets: Vec<PublishedTarget>, entries: &[CatalogEntry])
         Component::new(target, membership, compatible)
       })
       .collect(),
-  }
+  })
 }
 
-fn memberships(entries: &[CatalogEntry]) -> BTreeMap<String, Membership> {
-  let mut memberships = BTreeMap::<String, Membership>::new();
+fn memberships(entries: &[CatalogEntry]) -> io::Result<BTreeMap<String, BTreeSet<String>>> {
+  let mut memberships = BTreeMap::<String, BTreeSet<String>>::new();
   for entry in entries {
-    let membership = memberships.entry(entry.target_triple.clone()).or_default();
-    if let Some(origin) = &entry.origin {
-      membership.channels.insert(origin.channel.clone());
-    } else {
-      membership.has_legacy = true;
-    }
+    let origin = entry.origin.as_ref().ok_or_else(metadata_unavailable)?;
+    memberships
+      .entry(entry.target_triple.clone())
+      .or_default()
+      .insert(origin.channel.clone());
   }
-  memberships
+  Ok(memberships)
+}
+
+pub(super) fn metadata_unavailable() -> io::Error {
+  io::Error::new(
+    io::ErrorKind::InvalidData,
+    "component channel metadata is unavailable; run ctlup migrate on the target host or update its ctlup",
+  )
 }
 
 fn channel_order(channel: &str) -> (u8, &str) {
@@ -99,9 +105,13 @@ fn channel_order(channel: &str) -> (u8, &str) {
 }
 
 impl Component {
-  fn new(target_triple: String, membership: Option<&Membership>, compatible: Option<bool>) -> Self {
+  fn new(
+    target_triple: String,
+    membership: Option<&BTreeSet<String>>,
+    compatible: Option<bool>,
+  ) -> Self {
     let mut channels = membership
-      .map(|membership| membership.channels.iter().cloned().collect::<Vec<_>>())
+      .map(|channels| channels.iter().cloned().collect::<Vec<_>>())
       .unwrap_or_default();
     channels.sort_by(|left, right| channel_order(left).cmp(&channel_order(right)));
     Self {
@@ -109,7 +119,6 @@ impl Component {
       target_triple,
       installed: membership.is_some(),
       channels,
-      has_legacy: membership.is_some_and(|membership| membership.has_legacy),
       compatible,
     }
   }
@@ -125,17 +134,9 @@ impl ComponentList {
       .iter()
       .map(|component| {
         let mut line = component.name.clone();
-        let mut memberships = component
-          .channels
-          .iter()
-          .map(String::as_str)
-          .collect::<Vec<_>>();
-        if component.has_legacy {
-          memberships.push("legacy");
-        }
-        if !memberships.is_empty() {
+        if !component.channels.is_empty() {
           line.push_str(" (");
-          line.push_str(&memberships.join(", "));
+          line.push_str(&component.channels.join(", "));
           line.push(')');
         }
         if component.compatible == Some(false) {
@@ -153,16 +154,16 @@ mod tests {
   use super::*;
   use ctl_core::installations::CatalogOrigin;
 
-  fn entry(target: &str, channel: Option<&str>, id: &str) -> CatalogEntry {
+  fn entry(target: &str, channel: &str, id: &str) -> CatalogEntry {
     CatalogEntry {
       bundle_id: id.into(),
       target_triple: target.into(),
-      origin: channel.map(|channel| CatalogOrigin {
+      origin: Some(CatalogOrigin {
         channel: channel.into(),
         publication_id: Some("fixture-publication".into()),
         built_at: Some("2026-01-01T00:00:00Z".into()),
       }),
-      current: channel.is_some(),
+      current: true,
     }
   }
 
@@ -175,50 +176,50 @@ mod tests {
   }
 
   #[test]
-  fn installed_components_deduplicate_legacy_builds_and_channels() {
-    let mut retained = entry("aarch64-apple-darwin", Some("stable"), "retained-build");
+  fn installed_components_deduplicate_builds_and_channels() {
+    let mut retained = entry("aarch64-apple-darwin", "stable", "retained-build");
     retained.current = false;
     let entries = vec![
-      entry("x86_64-unknown-linux-musl", None, "legacy-build"),
-      entry("aarch64-apple-darwin", Some("nightly"), "nightly-build"),
-      entry("aarch64-apple-darwin", Some("stable"), "stable-build"),
+      entry("x86_64-unknown-linux-musl", "provided", "provided-build"),
+      entry("aarch64-apple-darwin", "nightly", "nightly-build"),
+      entry("aarch64-apple-darwin", "stable", "stable-build"),
       retained,
     ];
-    let components = installed(&entries, None);
+    let components = installed(&entries, None).unwrap();
     assert_eq!(
       components.render(),
-      "bundle-aarch64-apple-darwin (stable, nightly)\nbundle-x86_64-unknown-linux-musl (legacy)"
+      "bundle-aarch64-apple-darwin (stable, nightly)\nbundle-x86_64-unknown-linux-musl (provided)"
     );
     assert_eq!(
       serde_json::to_value(&components).unwrap(),
       serde_json::json!({
         "schema_version": 1,
         "components": [
-          {"name": "bundle-aarch64-apple-darwin", "target_triple": "aarch64-apple-darwin", "installed": true, "channels": ["stable", "nightly"], "has_legacy": false},
-          {"name": "bundle-x86_64-unknown-linux-musl", "target_triple": "x86_64-unknown-linux-musl", "installed": true, "channels": [], "has_legacy": true},
+          {"name": "bundle-aarch64-apple-darwin", "target_triple": "aarch64-apple-darwin", "installed": true, "channels": ["stable", "nightly"]},
+          {"name": "bundle-x86_64-unknown-linux-musl", "target_triple": "x86_64-unknown-linux-musl", "installed": true, "channels": ["provided"]},
         ],
       })
     );
     assert_eq!(
-      installed(&entries, Some("nightly")).render(),
+      installed(&entries, Some("nightly")).unwrap().render(),
       "bundle-aarch64-apple-darwin (stable, nightly)"
     );
     assert_eq!(
-      installed(&entries, Some("local")).render(),
+      installed(&entries, Some("local")).unwrap().render(),
       "No components."
     );
   }
 
   #[test]
-  fn available_components_include_retained_other_channels_and_unpublished_legacy_targets() {
-    let mut retained = entry("x86_64-apple-darwin", Some("nightly"), "retained-build");
+  fn available_components_include_retained_other_channels_and_unpublished_targets() {
+    let mut retained = entry("x86_64-apple-darwin", "nightly", "retained-build");
     retained.current = false;
     let entries = vec![
-      entry("aarch64-apple-darwin", None, "legacy-build"),
+      entry("aarch64-apple-darwin", "local", "local-build"),
       entry(
         "aarch64-unknown-linux-musl",
-        None,
-        "unpublished-legacy-build",
+        "provided",
+        "unpublished-build",
       ),
       retained,
     ];
@@ -229,20 +230,21 @@ mod tests {
         target("aarch64-apple-darwin", true),
       ],
       &entries,
-    );
+    )
+    .unwrap();
     assert_eq!(
       components.render(),
-      "bundle-aarch64-apple-darwin (legacy)\nbundle-aarch64-unknown-linux-musl (legacy)\nbundle-x86_64-apple-darwin (nightly)\nbundle-x86_64-unknown-linux-musl (incompatible)"
+      "bundle-aarch64-apple-darwin (local)\nbundle-aarch64-unknown-linux-musl (provided)\nbundle-x86_64-apple-darwin (nightly)\nbundle-x86_64-unknown-linux-musl (incompatible)"
     );
     assert_eq!(
       serde_json::to_value(&components).unwrap(),
       serde_json::json!({
         "schema_version": 1,
         "components": [
-          {"name": "bundle-aarch64-apple-darwin", "target_triple": "aarch64-apple-darwin", "installed": true, "channels": [], "has_legacy": true, "compatible": true},
-          {"name": "bundle-aarch64-unknown-linux-musl", "target_triple": "aarch64-unknown-linux-musl", "installed": true, "channels": [], "has_legacy": true},
-          {"name": "bundle-x86_64-apple-darwin", "target_triple": "x86_64-apple-darwin", "installed": true, "channels": ["nightly"], "has_legacy": false},
-          {"name": "bundle-x86_64-unknown-linux-musl", "target_triple": "x86_64-unknown-linux-musl", "installed": false, "channels": [], "has_legacy": false, "compatible": false},
+          {"name": "bundle-aarch64-apple-darwin", "target_triple": "aarch64-apple-darwin", "installed": true, "channels": ["local"], "compatible": true},
+          {"name": "bundle-aarch64-unknown-linux-musl", "target_triple": "aarch64-unknown-linux-musl", "installed": true, "channels": ["provided"]},
+          {"name": "bundle-x86_64-apple-darwin", "target_triple": "x86_64-apple-darwin", "installed": true, "channels": ["nightly"]},
+          {"name": "bundle-x86_64-unknown-linux-musl", "target_triple": "x86_64-unknown-linux-musl", "installed": false, "channels": [], "compatible": false},
         ],
       })
     );
@@ -252,12 +254,9 @@ mod tests {
   fn published_installed_components_have_one_marked_entry() {
     let components = available(
       vec![target("aarch64-apple-darwin", false)],
-      &[entry(
-        "aarch64-apple-darwin",
-        Some("stable"),
-        "stable-build",
-      )],
-    );
+      &[entry("aarch64-apple-darwin", "stable", "stable-build")],
+    )
+    .unwrap();
     assert_eq!(components.components.len(), 1);
     assert_eq!(
       components.render(),
@@ -267,31 +266,43 @@ mod tests {
   }
 
   #[test]
-  fn full_memberships_have_stable_order_and_keep_legacy_separate_from_channels() {
-    let mut entries = [
+  fn scoped_target_selection_keeps_all_memberships_in_stable_order() {
+    let entries = [
       "pr-2", "provided", "local", "nightly", "pr-12", "stable", "stable",
     ]
     .into_iter()
     .enumerate()
-    .map(|(index, channel)| {
-      entry(
-        "aarch64-apple-darwin",
-        Some(channel),
-        &format!("build-{index}"),
-      )
-    })
+    .map(|(index, channel)| entry("aarch64-apple-darwin", channel, &format!("build-{index}")))
     .collect::<Vec<_>>();
-    entries.push(entry("aarch64-apple-darwin", None, "legacy-build"));
-    let components = installed(&entries, Some("provided"));
+    let components = installed(&entries, Some("provided")).unwrap();
     assert_eq!(
       components.render(),
-      "bundle-aarch64-apple-darwin (stable, nightly, local, provided, pr-12, pr-2, legacy)"
+      "bundle-aarch64-apple-darwin (stable, nightly, local, provided, pr-12, pr-2)"
     );
     assert_eq!(
       components.components[0].channels,
       ["stable", "nightly", "local", "provided", "pr-12", "pr-2"]
     );
-    assert!(components.components[0].has_legacy);
     assert!(components.components[0].installed);
+  }
+
+  #[test]
+  fn unavailable_channel_metadata_requires_migration_or_a_newer_peer() {
+    let mut unknown = entry("aarch64-apple-darwin", "provided", "unknown-build");
+    unknown.origin = None;
+    unknown.current = false;
+    for result in [
+      installed(std::slice::from_ref(&unknown), None),
+      installed(std::slice::from_ref(&unknown), Some("stable")),
+      available(vec![target("aarch64-apple-darwin", true)], &[unknown]),
+    ] {
+      let error = result.unwrap_err();
+      assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+      assert!(
+        error
+          .to_string()
+          .contains("component channel metadata is unavailable")
+      );
+    }
   }
 }

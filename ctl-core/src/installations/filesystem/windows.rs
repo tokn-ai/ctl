@@ -40,7 +40,6 @@ fn selection(store: &Installations) -> io::Result<Option<Transaction>> {
 pub(in crate::installations) fn pointer(
   store: &Installations,
   name: &str,
-  _legacy: bool,
 ) -> io::Result<Option<Bundle>> {
   let Some(selection) = selection(store)? else {
     return Ok(None);
@@ -53,7 +52,7 @@ pub(in crate::installations) fn pointer(
   id.as_deref()
     .map(|id| {
       let bundle = load(store, id)?;
-      super::validate_native(&bundle, false)?;
+      super::validate_native(&bundle)?;
       Ok(bundle)
     })
     .transpose()
@@ -64,9 +63,9 @@ pub(in crate::installations) fn activate(
   active: &Bundle,
   previous: Option<&Bundle>,
 ) -> io::Result<()> {
-  super::validate_native(active, false)?;
+  super::validate_native(active)?;
   if let Some(previous) = previous {
-    super::validate_native(previous, false)?;
+    super::validate_native(previous)?;
   }
   prepare_aliases(store, None)?;
   let active = &active.manifest.bundle_id;

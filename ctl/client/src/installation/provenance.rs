@@ -7,8 +7,8 @@ const HEX: &[u8; 16] = b"0123456789abcdef";
 
 /// Activates an uploaded native target without discarding channel components
 /// that the single uploaded archive cannot replace.
-/// After catalog migration, uploads without provenance reuse a known origin or
-/// register an explicit provided source.
+/// Uploads without provenance reuse a known origin or register an explicit
+/// provided source.
 ///
 /// # Errors
 /// Rejects a mixed target cohort, unsafe storage or concurrent channel changes.
@@ -18,34 +18,29 @@ pub fn activate_uploaded(
   origin: Option<&CatalogOrigin>,
 ) -> io::Result<(ctl_core::bundles::Bundle, ctl_core::installations::Lease)> {
   let installations = ctl_core::installations::Installations::new(home);
-  let recovered_origin = if origin.is_none() && installations.is_catalog_migrated()? {
-    Some(
-      installations
-        .catalog()?
-        .into_iter()
-        .filter(|entry| entry.bundle_id == bundle.manifest.bundle_id && entry.origin.is_some())
-        .min_by_key(|entry| !entry.current)
-        .and_then(|entry| entry.origin)
-        .unwrap_or_else(|| CatalogOrigin {
-          channel: "provided".into(),
-          publication_id: Some(
-            bundle
-              .manifest
-              .distribution_id
-              .clone()
-              .unwrap_or_else(|| bundle.manifest.bundle_id.clone()),
-          ),
-          built_at: None,
-        }),
-    )
+  let resolved_origin = if let Some(origin) = origin {
+    origin.clone()
   } else {
-    None
+    installations
+      .catalog()?
+      .into_iter()
+      .filter(|entry| entry.bundle_id == bundle.manifest.bundle_id && entry.origin.is_some())
+      .min_by_key(|entry| !entry.current)
+      .and_then(|entry| entry.origin)
+      .unwrap_or_else(|| CatalogOrigin {
+        channel: "provided".into(),
+        publication_id: Some(
+          bundle
+            .manifest
+            .distribution_id
+            .clone()
+            .unwrap_or_else(|| bundle.manifest.bundle_id.clone()),
+        ),
+        built_at: None,
+      })
   };
-  let Some(origin) = origin.or(recovered_origin.as_ref()) else {
-    return installations.activate_and_lease(bundle);
-  };
-  let heads = single_target_heads(home, bundle, origin, None)?;
-  installations.activate_and_lease_with_origin_if_unchanged(bundle, origin, &heads)
+  let heads = single_target_heads(home, bundle, &resolved_origin, None)?;
+  installations.activate_and_lease_with_origin_if_unchanged(bundle, &resolved_origin, &heads)
 }
 
 pub(crate) fn single_target_heads(
@@ -289,7 +284,6 @@ mod tests {
     let installed = store
       .install_channel(&[native, foreign], &origin, true)
       .unwrap();
-    store.migrate_catalog().unwrap();
     let before = store.catalog().unwrap();
     let (_, lease) = activate_uploaded(&home.0, &installed[0], None).unwrap();
     assert_eq!(store.catalog().unwrap(), before);
@@ -314,7 +308,7 @@ mod tests {
 
   #[cfg(unix)]
   #[tokio::test]
-  async fn originless_archive_uses_provided_identity_only_after_explicit_migration() {
+  async fn originless_archives_always_record_explicit_provided_identity() {
     use ctl_core::bundles::Store;
     use ctl_core::installations::Installations;
     let home = Home::new();
@@ -322,17 +316,14 @@ mod tests {
     let original = fixture_bundle(&home.0, target, 'a');
     let store = Installations::new(&home.0);
     let (_, lease) = activate_uploaded(&home.0, &original, None).unwrap();
-    assert!(!store.is_catalog_migrated().unwrap());
-    assert!(
-      store
-        .catalog()
-        .unwrap()
-        .iter()
-        .all(|entry| entry.origin.is_none())
-    );
+    assert!(store.catalog().unwrap().iter().all(|entry| {
+      entry
+        .origin
+        .as_ref()
+        .is_some_and(|origin| origin.channel == "provided" && origin.built_at.is_none())
+    }));
     drop(lease);
 
-    store.migrate_catalog().unwrap();
     let next = fixture_bundle(&home.0, target, 'b');
     let manifest = next
       .manifest
@@ -377,7 +368,7 @@ mod tests {
 
   #[cfg(unix)]
   #[test]
-  fn migrated_originless_upload_does_not_replace_provided_foreign_siblings() {
+  fn originless_upload_does_not_replace_provided_foreign_siblings() {
     use ctl_core::installations::Installations;
     let home = Home::new();
     let target = ctl_core::paths::native_target();
@@ -397,7 +388,6 @@ mod tests {
     let installed = store
       .install_channel(&[native, foreign], &origin, true)
       .unwrap();
-    store.migrate_catalog().unwrap();
     let before = store.catalog().unwrap();
     let fresh = fixture_bundle(&home.0, target, 'b');
     let error = activate_uploaded(&home.0, &fresh, None).unwrap_err();

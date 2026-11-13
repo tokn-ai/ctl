@@ -1,3 +1,4 @@
+# Test-only writer for reproducing historical installation layouts.
 set -eu
 umask 077
 fail() {

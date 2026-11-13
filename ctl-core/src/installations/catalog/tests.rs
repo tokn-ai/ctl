@@ -78,7 +78,7 @@ fn foreign() -> &'static str {
 }
 
 #[test]
-fn inspection_is_passive_and_unknown_installations_keep_unknown_provenance() {
+fn inspection_is_passive_and_first_activation_records_provided_provenance() {
   let home = Home::new();
   let store = home.store();
   assert_eq!(store.catalog().unwrap(), Vec::<CatalogEntry>::new());
@@ -88,8 +88,134 @@ fn inspection_is_passive_and_unknown_installations_keep_unknown_provenance() {
   let inventory = store.catalog().unwrap();
   assert_eq!(inventory.len(), 1);
   assert_eq!(inventory[0].bundle_id, installed.manifest.bundle_id);
-  assert!(inventory[0].origin.is_none());
-  assert!(!exists(&store).unwrap());
+  assert_eq!(
+    inventory[0].origin,
+    Some(CatalogOrigin {
+      channel: "provided".into(),
+      publication_id: Some(installed.manifest.bundle_id),
+      built_at: None,
+    })
+  );
+  assert!(exists(&store).unwrap());
+}
+
+#[test]
+fn unselected_bundles_helper_cache_and_upload_pins_do_not_require_migration() {
+  let home = Home::new();
+  let store = home.store();
+  let source = fixture(&home, crate::paths::native_target(), 1);
+  let old_store = Store::new(&home.0);
+  let unselected = old_store
+    .publish(&source.manifest, &source.read_files().unwrap())
+    .unwrap();
+  old_store
+    .select(crate::bundles::Purpose::Upload, &unselected)
+    .unwrap();
+  crate::private_fs::create_directory(&old_store.root().join("ctld-helper-cache")).unwrap();
+  assert_eq!(store.catalog().unwrap(), Vec::<CatalogEntry>::new());
+  assert!(store.list().unwrap().is_empty());
+  assert!(store.active().unwrap().is_none());
+  assert!(store.previous().unwrap().is_none());
+  store.activate(&source).unwrap();
+  assert_eq!(store.catalog().unwrap().len(), 1);
+}
+
+#[test]
+fn native_lookup_verifies_its_payload_without_reading_foreign_payload_bytes() {
+  let home = Home::new();
+  let store = home.store();
+  let remote = fixture(&home, foreign(), 1);
+  let installed = store
+    .install_channel(&[remote], &origin("stable", "one"), false)
+    .unwrap();
+  let native = fixture(&home, crate::paths::native_target(), 2);
+  store.activate(&native).unwrap();
+  let name = installed[0].manifest.files.keys().next().unwrap();
+  fs::write(
+    installed[0].directory.join(name),
+    b"modified foreign payload",
+  )
+  .unwrap();
+  assert_eq!(store.active().unwrap().unwrap().manifest, native.manifest);
+  assert_eq!(
+    store.get(&native.manifest.bundle_id).unwrap().manifest,
+    native.manifest
+  );
+  assert!(store.get(&installed[0].manifest.bundle_id).is_err());
+  assert!(store.catalog().is_err());
+  assert!(store.list().is_err());
+}
+
+#[test]
+fn failed_initial_activation_leaves_an_authoritative_empty_catalog_and_collectible_orphan() {
+  let home = Home::new();
+  let store = home.store();
+  let source = fixture(&home, crate::paths::native_target(), 1);
+  let result = store.activate_with(&source, None, None, |_| {
+    Err::<(), _>(io::Error::other("lease preparation failed"))
+  });
+  assert!(
+    result
+      .unwrap_err()
+      .to_string()
+      .contains("lease preparation failed")
+  );
+  assert!(exists(&store).unwrap());
+  assert!(!store.is_catalog_migrated().unwrap());
+  assert_eq!(store.catalog().unwrap(), Vec::<CatalogEntry>::new());
+  assert!(store.list().unwrap().is_empty());
+  assert!(store.active().unwrap().is_none());
+  assert_eq!(filesystem::entries(&store).unwrap().len(), 1);
+  assert_eq!(store.prune().unwrap().removed, [source.manifest.bundle_id]);
+
+  let old_home = Home::new();
+  let old_store = old_home.store();
+  let old = fixture(&old_home, crate::paths::native_target(), 2);
+  filesystem::ensure_root(&old_store).unwrap();
+  filesystem::publish(&old_store, &old, None).unwrap();
+  let new = fixture(&old_home, crate::paths::native_target(), 3);
+  assert!(
+    old_store
+      .activate(&new)
+      .unwrap_err()
+      .to_string()
+      .contains("ctlup migrate")
+  );
+  assert!(!exists(&old_store).unwrap());
+  assert!(
+    !old_store
+      .root
+      .join("installs")
+      .join(new.manifest.bundle_id)
+      .exists()
+  );
+}
+
+#[test]
+fn inferred_provided_origin_cannot_replace_a_foreign_channel_head() {
+  let home = Home::new();
+  let store = home.store();
+  let remote = fixture(&home, foreign(), 1);
+  store
+    .install_channel(&[remote], &origin("provided", "foreign-publication"), false)
+    .unwrap();
+  let before = store.catalog().unwrap();
+  let native = fixture(&home, crate::paths::native_target(), 2);
+  let error = store.activate(&native).unwrap_err();
+  assert!(
+    error
+      .to_string()
+      .contains("complete matching channel cohort")
+  );
+  assert_eq!(store.catalog().unwrap(), before);
+  assert!(store.active().unwrap().is_none());
+  assert!(
+    !store
+      .root
+      .join("installs")
+      .join(&native.manifest.bundle_id)
+      .exists()
+  );
 }
 
 #[test]
@@ -589,6 +715,76 @@ fn interrupted_catalog_and_activation_recover_together_before_pruning() {
   assert_eq!(store.active().unwrap().unwrap().manifest, fresh.manifest);
   assert_eq!(store.previous().unwrap().unwrap().manifest, old.manifest);
   assert!(!store.root.join(JOURNAL).exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn interrupted_activation_validates_all_recorded_payloads_before_changing_selection() {
+  for pending_catalog in [false, true] {
+    let home = Home::new();
+    let store = home.store();
+    let old = fixture(&home, crate::paths::native_target(), 1);
+    let old = store
+      .activate_with_origin(&old, &origin("stable", "old"))
+      .unwrap();
+    let fresh = fixture(&home, crate::paths::native_target(), 2);
+    let remote = fixture(&home, foreign(), 2);
+    let lock = filesystem::Lock::acquire(&store).unwrap();
+    let fresh = filesystem::publish(&store, &fresh, None).unwrap();
+    let remote = filesystem::publish(&store, &remote, None).unwrap();
+    let mut state = read(&store).unwrap();
+    state.register(
+      &[fresh.clone(), remote.clone()],
+      &origin("stable", "new"),
+      false,
+    );
+    if pending_catalog {
+      replace(
+        &store.root.join(JOURNAL),
+        &Transaction {
+          catalog: state,
+          active: Some(fresh.manifest.bundle_id.clone()),
+          previous: Some(old.manifest.bundle_id.clone()),
+        },
+      )
+      .unwrap();
+    } else {
+      commit(&store, &state, None).unwrap();
+    }
+    let native_journal = store.root.join(".activation.json");
+    replace(
+      &native_journal,
+      &serde_json::json!({
+        "active": fresh.manifest.bundle_id,
+        "previous": old.manifest.bundle_id,
+      }),
+    )
+    .unwrap();
+    let catalog_path = store
+      .root
+      .join(if pending_catalog { JOURNAL } else { CATALOG });
+    let catalog_intent = fs::read(&catalog_path).unwrap();
+    let native_intent = fs::read(&native_journal).unwrap();
+    let current = fs::read_link(store.root.join("current")).unwrap();
+    let remote_file = remote
+      .directory
+      .join(remote.manifest.files.keys().next().unwrap());
+    let original = fs::read(&remote_file).unwrap();
+    fs::write(&remote_file, b"damaged foreign payload").unwrap();
+    drop(lock);
+
+    assert!(store.prune().is_err());
+    assert_eq!(fs::read_link(store.root.join("current")).unwrap(), current);
+    assert!(!store.root.join("previous").exists());
+    assert_eq!(fs::read(&catalog_path).unwrap(), catalog_intent);
+    assert_eq!(fs::read(&native_journal).unwrap(), native_intent);
+    fs::write(remote_file, original).unwrap();
+    store.prune().unwrap();
+    assert_eq!(store.active().unwrap().unwrap().manifest, fresh.manifest);
+    assert_eq!(store.previous().unwrap().unwrap().manifest, old.manifest);
+    assert!(!native_journal.exists());
+    assert!(!store.root.join(JOURNAL).exists());
+  }
 }
 
 #[test]

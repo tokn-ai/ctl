@@ -144,6 +144,36 @@ async fn fresh_proxy_routes_propagate_preparation_failure_before_starting_ssh() 
 }
 
 #[cfg(unix)]
+fn complete_install_archive() -> (String, Vec<u8>) {
+  let fixture = crate::remote_bundle::compatibility::tests::Fixture::new("0.1.0", &"a".repeat(40))
+    .with_clients();
+  let components = serde_json::from_value(fixture.inner["components"].clone()).unwrap();
+  let manifest = ctl_core::bundles::Manifest::new(
+    ctl_core::paths::native_target(),
+    ctl_core::bundles::Source::Ci,
+    components,
+    &fixture.files,
+  )
+  .unwrap();
+  let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+  let mut archive = tar::Builder::new(encoder);
+  for (name, bytes) in &fixture.files {
+    crate::components::append(&mut archive, name, bytes, manifest.files[name].executable).unwrap();
+  }
+  crate::components::append(
+    &mut archive,
+    ctl_core::bundles::MANIFEST_FILE,
+    &serde_json::to_vec(&manifest).unwrap(),
+    false,
+  )
+  .unwrap();
+  (
+    manifest.bundle_id,
+    archive.into_inner().unwrap().finish().unwrap(),
+  )
+}
+
+#[cfg(unix)]
 #[tokio::test]
 async fn proxy_preparation_child() {
   use std::sync::atomic::AtomicUsize;
@@ -228,17 +258,16 @@ async fn proxy_preparation_child() {
       .await
       .unwrap_err(),
   );
-  let valid_archive =
-    crate::remote_bundle::compatibility::tests::Fixture::new("0.1.0", &"a".repeat(40))
-      .bundle()
-      .archive;
+  let (bundle_id, valid_archive) = complete_install_archive();
   rejected(
-    install_ssh_unix_agent_interactive(
+    install_ssh_unix_bundle_with_updater(
       "fixture",
       &options,
       &SshInteraction::Inherit,
-      "test",
+      b"updater fixture",
+      &bundle_id,
       &valid_archive,
+      |_| {},
     )
     .await
     .unwrap_err(),

@@ -1,3 +1,4 @@
+# Test-only writer for reproducing historical agent overlays.
 set -eu
 umask 077
 fail() {

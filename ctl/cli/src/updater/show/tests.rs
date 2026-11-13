@@ -44,7 +44,7 @@ fn snapshot(manifests: &[Manifest]) -> InstallationShow {
     previous: None,
     installations: manifests
       .iter()
-      .map(|manifest| entry(manifest, None, false))
+      .map(|manifest| entry(manifest, "provided", false))
       .collect(),
     builds: manifests
       .iter()
@@ -58,11 +58,11 @@ fn snapshot(manifests: &[Manifest]) -> InstallationShow {
   }
 }
 
-fn entry(manifest: &Manifest, channel: Option<&str>, current: bool) -> CatalogEntry {
+fn entry(manifest: &Manifest, channel: &str, current: bool) -> CatalogEntry {
   CatalogEntry {
     bundle_id: manifest.bundle_id.clone(),
     target_triple: manifest.target_triple.clone(),
-    origin: channel.map(|channel| CatalogOrigin {
+    origin: Some(CatalogOrigin {
       channel: channel.into(),
       publication_id: Some("fixture-publication".into()),
       built_at: None,
@@ -72,7 +72,7 @@ fn entry(manifest: &Manifest, channel: Option<&str>, current: bool) -> CatalogEn
 }
 
 #[test]
-fn every_legacy_build_remains_visible_for_a_single_logical_component() {
+fn each_physical_build_has_a_row_with_its_source_for_one_logical_component() {
   let manifests = [
     manifest('a', Source::Ci, false),
     manifest('b', Source::Release, false),
@@ -87,10 +87,17 @@ fn every_legacy_build_remains_visible_for_a_single_logical_component() {
     assert!(!text.contains(&manifest.bundle_id));
   }
   assert_eq!(text.matches("bundle-x86_64-unknown-linux-musl").count(), 4);
-  assert_eq!(text.matches("legacy/unrecorded").count(), 4);
+  assert_eq!(text.matches("provided (retained)").count(), 4);
   assert_eq!(text.matches("unknown").count(), 8); // Target suffix plus missing date.
   assert!(text.contains("0.1.3 (dirty)"));
   assert!(text.contains("dddddddddddd"));
+  let rows = build_rows(&snapshot);
+  for (manifest, source) in manifests.iter().zip(["ci", "release", "local", "local"]) {
+    assert_eq!(
+      rows[&manifest.bundle_id].cells(&snapshot, &[&manifest.bundle_id])[3],
+      source
+    );
+  }
 }
 
 #[test]
@@ -104,8 +111,8 @@ fn activation_rollback_and_channel_heads_have_independent_precise_markers() {
   let mut snapshot = snapshot(&manifests);
   snapshot.active = Some(manifests[0].bundle_id.clone());
   snapshot.previous = Some(manifests[1].bundle_id.clone());
-  snapshot.installations[2] = entry(&manifests[2], Some("nightly"), true);
-  snapshot.installations[3] = entry(&manifests[3], Some("provided"), false);
+  snapshot.installations[2] = entry(&manifests[2], "nightly", true);
+  snapshot.installations[3] = entry(&manifests[3], "provided", false);
   let rows = build_rows(&snapshot);
   assert_eq!(rows[&manifests[0].bundle_id].states(&snapshot), ["active"]);
   assert_eq!(
@@ -129,9 +136,9 @@ fn a_shared_payload_appears_once_with_its_source_and_each_recorded_channel() {
   let manifest = manifest('a', Source::Ci, false);
   let mut snapshot = snapshot(std::slice::from_ref(&manifest));
   snapshot.active = Some(manifest.bundle_id.clone());
-  let mut current = entry(&manifest, Some("nightly"), true);
+  let mut current = entry(&manifest, "nightly", true);
   current.origin.as_mut().unwrap().built_at = Some("2026-01-02T03:04:05Z".into());
-  snapshot.installations = vec![current, entry(&manifest, Some("stable"), false)];
+  snapshot.installations = vec![current, entry(&manifest, "stable", false)];
   let rows = build_rows(&snapshot);
   assert_eq!(rows.len(), 1);
   let row = &rows[&manifest.bundle_id];
@@ -153,7 +160,7 @@ fn a_shared_payload_appears_once_with_its_source_and_each_recorded_channel() {
 #[test]
 fn older_remote_metadata_keeps_unknown_builds_in_the_fallback_catalog() {
   let active = manifest('a', Source::Local, true);
-  let retained = entry(&manifest('b', Source::Ci, false), None, false);
+  let retained = entry(&manifest('b', Source::Ci, false), "provided", false);
   let catalog = InstallationCatalog::new(vec![retained.clone()]);
   let snapshot = InstallationShow::from_status(
     InstallationStatus {
@@ -170,10 +177,11 @@ fn older_remote_metadata_keeps_unknown_builds_in_the_fallback_catalog() {
   assert_eq!(unknown[1], "unknown");
   assert_eq!(unknown[2], "unknown");
   assert_eq!(unknown[3], "unknown");
-  assert_eq!(unknown[4], "legacy/unrecorded");
+  assert_eq!(unknown[4], "provided (retained)");
   assert_eq!(unknown[6], "unknown");
   assert_eq!(unknown[7], "retained");
   assert!(render(&snapshot, false).contains("0.1.3 (dirty)"));
+  assert_eq!(rows[&active.bundle_id].channels(), "unknown");
 }
 
 #[test]

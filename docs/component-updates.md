@@ -158,12 +158,17 @@ ctlup show --host work --json
 ```
 
 A component is a complete runtime bundle for one target, named `bundle-<target>`.
-`component list` shows available components for the selected channel with installed
-markers. Four historical builds for one target still produce one component row.
+`component list` shows available components for the selected channel, together
+with every locally installed target. Channel markers such as `(stable, nightly)`
+show where each target exists across all installed builds. A target with only
+unrecorded historical builds shows `(legacy)`. Four historical builds for one
+target still produce one component row.
 Use `--installed` for an offline list of installed targets; without an explicit
-channel this includes historical builds with unrecorded provenance. Available
-markers represent current registrations in the selected channel. Bare target
-triples remain accepted by `add` and `remove` for compatibility. Adding components
+channel this includes historical builds with unrecorded provenance. An explicit
+channel filters the installed targets, while each row still lists all its known
+channels. Retained rollback or running payloads continue to count until removed
+from disk. Bare target triples remain accepted by `add` and `remove` for
+compatibility. Adding components
 stores them durably without changing active command aliases or executing foreign
 binaries. Available-target inspection reads publication metadata without downloading
 archives. Installed-component inspection is passive and works offline.
@@ -187,7 +192,7 @@ commit date. Older bundles without build metadata show `unknown`.
 `status --json` retains its original active/previous response for compatibility;
 `show --json` provides the versioned build inventory, including channel and
 build-date fields. `component list --json` contains logical component names,
-targets and installed markers. Remote inspection uses the detailed inventory
+targets, installed state, known `channels` and a `has_legacy` flag. Remote inspection uses the detailed inventory
 when supported; older updaters retain their available active/previous details,
 with other build metadata unavailable rather than guessed.
 SSH uploads contain one native target. If the remote channel also registers

@@ -271,8 +271,8 @@ mod tests {
     let result = show(&home.0).unwrap();
     assert!(result.active.is_none());
     assert!(result.previous.is_none());
-    assert!(result.installations.is_empty());
-    assert!(result.builds.is_empty());
+    assert_eq!(result.installations, [] as [CatalogEntry; 0]);
+    assert_eq!(result.builds, [] as [InstalledBuild; 0]);
     assert!(!home.0.join(".tokn").exists());
   }
 

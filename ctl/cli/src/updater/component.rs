@@ -1,7 +1,7 @@
 //! Complete target bundles are durable channel components, not executable overlays.
 
 use super::arguments::ComponentCommand;
-use super::{TargetOptions, require_local, status};
+use super::{TargetOptions, require_local, show};
 use ctl_client::component_update::{self, BuildSource, BundleChannel};
 use ctl_client::installation;
 use ctl_client::remote_bundle::{pr, published};
@@ -31,15 +31,8 @@ pub(super) async fn run(
       if let Some(channel) = &channel {
         validate_channel(channel)?;
       }
-      let Some(catalog) = status::catalog(home, target).await? else {
-        return Err(io::Error::other(
-          "this host's ctlup does not provide an installation catalog; update ctlup first",
-        ));
-      };
-      print_list(
-        &list::installed(&catalog.installations, channel.as_deref()),
-        json,
-      )?;
+      let installations = show::snapshot(home, target).await?.installations;
+      print_list(&list::installed(&installations, channel.as_deref()), json)?;
     }
     ComponentCommand::Add {
       targets,
@@ -185,11 +178,8 @@ async fn available_targets(home: &Path, channel: Option<&str>, json: bool) -> io
     None => installation::default_channel(home)?,
   };
   let catalog = published::check(channel).await.map_err(io::Error::other)?;
-  let installed = Installations::new(home).catalog()?;
-  print_list(
-    &list::available(catalog.targets, &installed, channel.name()),
-    json,
-  )
+  let installed = installation::show(home)?.installations;
+  print_list(&list::available(catalog.targets, &installed), json)
 }
 
 fn print_list(components: &list::ComponentList, json: bool) -> io::Result<()> {

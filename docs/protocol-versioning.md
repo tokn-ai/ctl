@@ -406,7 +406,8 @@ status and rollback JSON, bundle sets, PR artifact layout, named protocol versio
 and internal builds remain unchanged.
 
 Logical target components and installed builds have separate CLI views.
-`component list --json` has a schema-1 component projection, while `show --json`
+`component list --json` has a schema-1 component projection with installed state,
+known channel memberships and a separate legacy-provenance flag, while `show --json`
 has a schema-1 build inventory with compact verified build metadata. Optional
 remote inspection uses the distinct `ctlup-show-v1` marker and falls back to
 existing status and catalog responses on older managers. Existing status and

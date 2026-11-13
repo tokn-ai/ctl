@@ -438,7 +438,7 @@ mod tests {
     let mut stdout = b"Welcome\nctlup-show-v1\n".to_vec();
     stdout.extend(serde_json::to_vec(&snapshot).unwrap());
     let result = parse_show(Some(0), &stdout, b"").unwrap().unwrap();
-    assert!(result.builds.is_empty());
+    assert_eq!(result.builds, [] as [super::super::InstalledBuild; 0]);
     assert!(
       parse_show(Some(2), SHOW_MARKER, b"older manager")
         .unwrap()

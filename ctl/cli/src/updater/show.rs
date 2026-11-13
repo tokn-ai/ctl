@@ -10,14 +10,22 @@ use std::path::Path;
 
 pub(super) async fn run(home: &Path, target: TargetOptions<'_>, json: bool) -> io::Result<()> {
   let remote = target.host.is_some() || target.destination.is_some() || target.method.is_some();
-  let snapshot = if remote {
+  let data = snapshot(home, target).await?;
+  print(&data, json, !remote && status::in_checkout())
+}
+
+/// Reads a passive inventory that also includes verified legacy selections.
+pub(super) async fn snapshot(
+  home: &Path,
+  target: TargetOptions<'_>,
+) -> io::Result<InstallationShow> {
+  if target.host.is_some() || target.destination.is_some() || target.method.is_some() {
     crate::bundled::register()?;
     let target = status::remote_target(target).await?;
-    remote_snapshot(&target, None).await?
+    remote_snapshot(&target, None).await
   } else {
-    ctl_client::installation::show(home)?
-  };
-  print(&snapshot, json, !remote && status::in_checkout())
+    ctl_client::installation::show(home)
+  }
 }
 
 pub(super) async fn remote_snapshot(
@@ -78,7 +86,7 @@ pub(super) fn render(snapshot: &InstallationShow, development: bool) -> String {
     } else {
       "Run `ctlup install --help` for installation options."
     };
-    return format!("No managed ctl installations.\n{next}");
+    return format!("No managed ctl installation.\n{next}");
   }
   let ids = rows.keys().map(String::as_str).collect::<Vec<_>>();
   let selection = |id: Option<&str>| id.map_or_else(|| "none".into(), |id| short_id(id, &ids));

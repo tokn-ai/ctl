@@ -1,5 +1,5 @@
 use super::{TargetOptions, show};
-use ctl_client::installation::{InstallationCatalog, InstallationStatus};
+use ctl_client::installation::InstallationStatus;
 use std::io;
 use std::path::Path;
 
@@ -74,29 +74,6 @@ pub(super) async fn remote_target(options: TargetOptions<'_>) -> io::Result<supe
     target.verify_account().await?;
   }
   Ok(target)
-}
-
-/// Reads the optional installed catalog through the same account verification
-/// used by installation status. Older remote managers have no catalog metadata.
-pub(super) async fn catalog(
-  home: &Path,
-  options: TargetOptions<'_>,
-) -> io::Result<Option<InstallationCatalog>> {
-  if options.host.is_none() && options.destination.is_none() && options.method.is_none() {
-    return Ok(Some(InstallationCatalog::new(
-      ctl_core::installations::Installations::new(home).catalog()?,
-    )));
-  }
-  crate::bundled::register()?;
-  let target = remote_target(options).await?;
-  ctl_client::installation::remote_catalog(
-    &target.destination,
-    &target.options,
-    &target.interaction,
-    target.expected_account(),
-  )
-  .await
-  .map_err(io::Error::other)
 }
 
 async fn remote_status(

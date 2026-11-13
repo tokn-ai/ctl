@@ -5,7 +5,7 @@ import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { componentIdentity, fileDigest, repositoryName, validatedComponentSet } from "./bundle-publication.mts";
-import { parseAgentBundleSet } from "../shared/agent-bundle.mts";
+import { archiveName, parseAgentBundleSet, windowsAgentManifestName, windowsAgentTarget } from "../shared/agent-bundle.mts";
 import { updaterBinaryName, updaterManifestName } from "../shared/updater-bundle.mts";
 import { findRelease, managedLabelPrefix, mergeReleaseNotes, pages, releaseNotes, validateReleaseBundle, verifyReleaseTag,
   type BundleIdentity, type GhRunner } from "./update-draft-release.mts";
@@ -21,10 +21,14 @@ async function verifyPublishedAsset(asset: Asset, directory: string): Promise<vo
 }
 
 function additionalManifestName(name: string, bundle_id: string): string | undefined {
-  if (/^(desktop-(?:x86_64|aarch64)-(?:unknown-linux-gnu|apple-darwin(?:-unsigned)?)|(?:ctld|ctl-cli)-(?:x86_64|aarch64)-apple-darwin)\.json$/.test(name)) return name;
+  if (/^(desktop-(?:x86_64|aarch64)-(?:unknown-linux-gnu|apple-darwin(?:-unsigned)?|pc-windows-msvc)|(?:ctld|ctl-cli)-(?:x86_64|aarch64)-apple-darwin)\.json$/.test(name)) return name;
+  const windows_updater = /^ctlup-((?:x86_64|aarch64)-pc-windows-msvc)\.json$/.exec(name);
+  if (windows_updater) return `desktop-${windows_updater[1]}.json`;
   const packages: [string, RegExp, string][] = [
     [`ctmux-${bundle_id}-`, /^((?:x86_64|aarch64)-unknown-linux-gnu)\.(?:deb|rpm|AppImage)(?:\.sha256)?$/, "desktop"],
     [`ctmux-${bundle_id}-`, /^((?:x86_64|aarch64)-apple-darwin(?:-unsigned)?)\.(?:dmg|app\.tar\.gz)(?:\.sha256)?$/, "desktop"],
+    [`ctmux-${bundle_id}-`, /^((?:x86_64|aarch64)-pc-windows-msvc)\.zip(?:\.sha256)?$/, "desktop"],
+    [`ctlup-${bundle_id}-`, /^((?:x86_64|aarch64)-pc-windows-msvc)\.exe(?:\.sha256)?$/, "desktop"],
     [`ctld-${bundle_id}-`, /^((?:x86_64|aarch64)-apple-darwin)\.app\.tar\.gz(?:\.sha256)?$/, "ctld"],
     [`ctl-${bundle_id}-`, /^((?:x86_64|aarch64)-apple-darwin)\.tar\.gz(?:\.sha256)?$/, "ctl-cli"],
   ];
@@ -56,6 +60,10 @@ async function restoreCanonicalAssets(repository: string, identity: BundleIdenti
     const binary = updaterBinaryName(identity, target);
     remote_names.push(binary, `${binary}.sha256`, updaterManifestName(target));
   }
+  const windows_archive = archiveName(identity, windowsAgentTarget);
+  const windows_updater = updaterBinaryName(identity, windowsAgentTarget);
+  remote_names.push(windowsAgentManifestName, windows_archive, `${windows_archive}.sha256`,
+    windows_updater, `${windows_updater}.sha256`, updaterManifestName(windowsAgentTarget));
   const target_manifests = new Set([...incoming.asset_names, ...assets.map((asset) => asset.name)]
     .filter((name) => additionalManifestName(name, identity.bundle_id) === name));
   // A failed upload may have left a subset. Local files can fill missing names
@@ -85,6 +93,7 @@ export async function publishComponentRelease(repository: string, build: BundleI
   const payload = join(temp, "release.json");
   const component_notes = ["<!-- ctmux-ci:start -->", `Built from commit \`${identity.git_revision}\`.`, `Bundle ID: \`${identity.bundle_id}\`.`, "",
     "Contains verified Linux and macOS component bundles for Intel/AMD and ARM64.",
+    ...(names.includes(windowsAgentManifestName) ? ["Contains verified Windows x64 component bundles."] : []),
     "Desktop packages and signed macOS helpers are attached separately when those builds succeed.", "<!-- ctmux-ci:end -->"].join("\n");
   const notes = (body: string | null): string => desktop ? releaseNotes(desktop, body) : mergeReleaseNotes(component_notes, body);
   try {
@@ -125,10 +134,10 @@ export async function publishComponentRelease(repository: string, build: BundleI
       if (identical) matches.add(name);
       else if (!release.draft) throw new Error(`Published asset differs from this build and cannot be replaced: ${name}`);
     }
-    if (release.immutable && names.some((name) => !matches.has(name))) throw new Error("GitHub release immutability prevents appending desktop assets after component publication; no release policy was changed");
+    if (release.immutable && names.some((name) => !matches.has(name))) throw new Error("GitHub release immutability prevents appending assets to this release; no release policy was changed");
     // Upload payloads before their manifests so interrupted uploads remain
     // recoverable without advertising an incomplete target or component set.
-    const upload_rank = (name: string): number => !name.endsWith(".json") ? 0 : name.startsWith("ctl-cli-") ? 2 : 1;
+    const upload_rank = (name: string): number => !name.endsWith(".json") ? 0 : name.startsWith("ctl-cli-") || name === windowsAgentManifestName ? 2 : 1;
     const upload_names = [...names].sort((left, right) => upload_rank(left) - upload_rank(right));
     for (const name of upload_names) {
       if (matches.has(name)) continue;
@@ -154,7 +163,8 @@ export async function publishComponentRelease(repository: string, build: BundleI
         await gh(["api", `repos/${repository}/releases/assets/${asset.id}`, "--method", "DELETE"]);
       }
     }
-    if (release.draft || ((desktop || !canonical_manifest) && notes(latest.body) !== latest.body)) {
+    const appended_windows = names.includes(windowsAgentManifestName) && !assets.some((asset) => asset.name === windowsAgentManifestName);
+    if (release.draft || ((desktop || !canonical_manifest || appended_windows) && notes(latest.body) !== latest.body)) {
       const prerelease = /^\d+\.\d+\.\d+-/.test(identity.app_version);
       await writeFile(payload, JSON.stringify({ tag_name: tag, body: notes(latest.body),
         ...(release.draft ? { draft: false, prerelease, make_latest: prerelease ? "false" : "legacy" } : {}) }));

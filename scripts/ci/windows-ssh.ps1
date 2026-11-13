@@ -164,7 +164,7 @@ New-Item -ItemType Directory -Force $root | Out-Null
 $ctl = (Resolve-Path 'target/debug/ctl.exe').Path
 $catalog = Join-Path $root 'hosts.json'
 $temporary = @('--destination', 'ctl-windows-ci', '--remote-platform', 'windows')
-$saved = @('--host', 'saved-windows-ci', '--remote-platform', 'windows')
+$saved = @('--host', 'saved-windows-ci')
 $sshDirectory = Join-Path $env:USERPROFILE '.ssh'
 New-Item -ItemType Directory -Force $sshDirectory | Out-Null
 $config = Join-Path $sshDirectory 'config'
@@ -325,6 +325,9 @@ $originalConfigText
   $created = (Invoke-Ctl -Arguments @('host', 'create', 'saved-windows-ci', 'ctl-windows-ci', '--ssh-config', '--hostname', '127.0.0.1', '--json')).stdout | ConvertFrom-Json
   Assert-Equal $created.connection_methods[0].ssh_config_alias 'ctl-windows-ci' 'Saved SSH-config alias'
   Assert-Equal $created.connection_methods[0].target.hostname '127.0.0.1' 'Saved hostname override'
+  $savedCatalog = [IO.File]::ReadAllText($catalog) | ConvertFrom-Json -AsHashtable
+  $savedCatalog.document.hosts[0].connection_methods[0].target.remote_platform = 'windows'
+  [IO.File]::WriteAllText($catalog, ($savedCatalog | ConvertTo-Json -Depth 24))
   $result = Invoke-Ctl -Arguments ($saved + @('exec', '--', 'cmd.exe', '/D', '/C', 'echo SAVED_HOST'))
   Assert-Equal $result.stdout.Trim() 'SAVED_HOST' 'Saved host output'
   # An alias and a saved name may collide. The saved route deliberately points
@@ -451,6 +454,17 @@ $originalConfigText
     password = $callerPassword
   } | ConvertTo-Json -Compress)
   Invoke-Ctl -Arguments ($temporary + @('ctmux', 'list')) | Out-Null
+  Write-Host 'Checking native ctlup install, update and rollback over Windows OpenSSH'
+  # The first connection must fail with no ctl-agent.exe on the server PATH.
+  # Subsequent connections find the freshly managed launcher in the SSH account.
+  Remove-Item -LiteralPath (Join-Path $env:WINDIR 'System32\ctl-agent.exe') -Force
+  $originalHostsPath = $env:CTL_HOSTS_PATH
+  try {
+    $env:CTL_HOSTS_PATH = $catalog
+    Invoke-Native -Program 'node' -Arguments @('scripts/ci/windows-ctlup-smoke.mts', 'target/debug', '-', 'ctl-windows-ci', 'saved-windows-ci')
+  } finally {
+    $env:CTL_HOSTS_PATH = $originalHostsPath
+  }
 } catch {
   Stop-Service sshd -ErrorAction SilentlyContinue
   Get-Content "$root\client.log" -Tail 100 -ErrorAction SilentlyContinue

@@ -2,6 +2,7 @@
 
 use super::filesystem::{self, Lock};
 use super::{Store, invalid, valid_digest, validate_target};
+use crate::private_fs::{options, sync_directory};
 use serde::Serialize;
 use std::fs::{self, File};
 use std::io;
@@ -30,7 +31,7 @@ pub(super) fn prepare_lease(store: &Store, target: &str, id: &str) -> io::Result
   }
   filesystem::ensure_directory(&store.root.join("leases"))?;
   filesystem::ensure_directory(&store.root.join("leases").join(target))?;
-  let file = filesystem::options()
+  let file = options()
     .read(true)
     .write(true)
     .create(true)
@@ -46,9 +47,7 @@ pub(super) fn read_guard(store: &Store) -> io::Result<Option<File>> {
   if !store.cache {
     return Ok(None);
   }
-  let file = filesystem::options()
-    .read(true)
-    .open(store.root.join("bundle.lock"))?;
+  let file = options().read(true).open(store.root.join("bundle.lock"))?;
   filesystem::require_file(&file.metadata()?)?;
   file.lock_shared()?;
   Ok(Some(file))
@@ -60,10 +59,7 @@ pub(super) fn lease(store: &Store, target: &str, id: &str) -> io::Result<Option<
   }
   filesystem::require_directory(&store.root.join("leases"))?;
   filesystem::require_directory(&store.root.join("leases").join(target))?;
-  let file = match filesystem::options()
-    .read(true)
-    .open(lease_path(store, target, id))
-  {
+  let file = match options().read(true).open(lease_path(store, target, id)) {
     Ok(file) => file,
     Err(error) if error.kind() == io::ErrorKind::NotFound => {
       return Err(invalid("cached component payload lost its retention lease"));
@@ -79,9 +75,7 @@ pub(super) fn touch(store: &Store, target: &str, id: &str) -> io::Result<()> {
   if !store.cache {
     return Ok(());
   }
-  let file = filesystem::options()
-    .write(true)
-    .open(lease_path(store, target, id))?;
+  let file = options().write(true).open(lease_path(store, target, id))?;
   filesystem::require_file(&file.metadata()?)?;
   file.set_modified(SystemTime::now())
 }
@@ -117,15 +111,13 @@ pub(super) fn prune(store: &Store, max_bytes: u64) -> io::Result<PruneCacheResul
     if result.remaining_bytes <= max_bytes {
       break;
     }
-    let file = filesystem::options()
-      .read(true)
-      .write(true)
-      .open(&entry.lease)?;
+    let file = options().read(true).write(true).open(&entry.lease)?;
     filesystem::require_file(&file.metadata()?)?;
     match file.try_lock() {
       Ok(()) => {
         fs::remove_dir_all(&entry.path)?;
-        File::open(entry.path.parent().unwrap())?.sync_all()?;
+        sync_directory(entry.path.parent().unwrap())?;
+        drop(file);
         fs::remove_file(&entry.lease)?;
         result.remaining_bytes = result.remaining_bytes.saturating_sub(entry.bytes);
         result.removed.push(entry.id);

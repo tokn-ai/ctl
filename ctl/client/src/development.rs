@@ -4,7 +4,6 @@ use ctl_core::component::protocols_match;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io;
-use std::os::unix::fs::DirBuilderExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use tokio::io::AsyncReadExt as _;
@@ -96,12 +95,13 @@ pub async fn install(home: &Path, options: DevelopmentOptions) -> io::Result<Pre
     .arg("--cargo-args-json")
     .arg(serde_json::to_string(&options.cargo_args).map_err(io::Error::other)?)
     .current_dir(&cargo_cwd)
-    .env("CTLUP_DEVELOPMENT_LIFELINE", "1")
     .env_remove("CTL_BUNDLED_CTLD_DIR")
     .env_remove("CTL_BUNDLED_CTLD_MODE")
     .env_remove("CTMUX_DEV_APP_SUPERVISOR")
     .env_remove("CTMUX_DEV_CTLD_EXECUTABLE")
     .env_remove("CTMUX_DEV_APP_FAILURE_MARKER");
+  #[cfg(unix)]
+  command.env("CTLUP_DEVELOPMENT_LIFELINE", "1");
   run_builder(command).await?;
   let descriptor = read_output(&output.0)?;
   let bundle = crate::components::import_local_for_target(
@@ -134,16 +134,7 @@ pub async fn install(home: &Path, options: DevelopmentOptions) -> io::Result<Pre
     Some(&descriptor.manager_executable),
   )
   .await?;
-  let mut executables = BTreeMap::new();
-  for name in ctl_core::bundle_layout::ALL {
-    let executable = if name == "ctld" && cfg!(target_os = "macos") {
-      installed.directory.join("ctld.app/Contents/MacOS/ctld")
-    } else {
-      installed.directory.join(name)
-    };
-    executables.insert(name.into(), executable);
-  }
-  executables.insert("ctlup".into(), home.join(".tokn/ctl/bin/ctlup"));
+  let executables = installed_executables(home, &installed);
   Ok(PreparedDevelopment {
     result: DevelopmentResult {
       schema_version: 1,
@@ -156,12 +147,40 @@ pub async fn install(home: &Path, options: DevelopmentOptions) -> io::Result<Pre
   })
 }
 
+fn installed_executables(
+  home: &Path,
+  installed: &ctl_core::bundles::Bundle,
+) -> BTreeMap<String, PathBuf> {
+  let mut executables = BTreeMap::new();
+  let target = &installed.manifest.target_triple;
+  for name in ctl_core::bundle_layout::ALL {
+    let executable = if name == "ctld" && cfg!(target_os = "macos") {
+      installed.directory.join("ctld.app/Contents/MacOS/ctld")
+    } else {
+      installed
+        .directory
+        .join(ctl_core::bundle_layout::executable_name(target, name).as_ref())
+    };
+    executables.insert(name.into(), executable);
+  }
+  executables.insert(
+    "ctlup".into(),
+    home
+      .join(".tokn/ctl/bin")
+      .join(format!("ctlup{}", std::env::consts::EXE_SUFFIX)),
+  );
+  executables
+}
+
 fn read_output(output: &Path) -> io::Result<BuildOutput> {
   let bytes = crate::components::read_input(&output.join("result.json"), MAX_DESCRIPTOR_BYTES)?;
   let descriptor: BuildOutput = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+  let expected_manager = output
+    .join("bin")
+    .join(format!("ctlup{}", std::env::consts::EXE_SUFFIX));
   if descriptor.schema_version != 1
-    || descriptor.binary_directory != output.join("bin")
-    || descriptor.manager_executable != output.join("bin/ctlup")
+    || !same_output_path(&descriptor.binary_directory, &output.join("bin"))?
+    || !same_output_path(&descriptor.manager_executable, &expected_manager)?
     || descriptor
       .ctld_package
       .as_ref()
@@ -174,13 +193,27 @@ fn read_output(output: &Path) -> io::Result<BuildOutput> {
   Ok(descriptor)
 }
 
+#[cfg(unix)]
+#[expect(
+  clippy::unnecessary_wraps,
+  reason = "Windows normalizes the Win32 and extended path forms"
+)]
+fn same_output_path(reported: &Path, expected: &Path) -> io::Result<bool> {
+  Ok(reported == expected)
+}
+
+#[cfg(windows)]
+fn same_output_path(reported: &Path, expected: &Path) -> io::Result<bool> {
+  Ok(reported.canonicalize()? == expected.canonicalize()?)
+}
+
 pub(crate) struct OutputDirectory(pub(crate) PathBuf);
 
 impl OutputDirectory {
   pub(crate) fn new() -> io::Result<Self> {
     let directory =
       std::env::temp_dir().join(format!("ctlup-development-{}", uuid::Uuid::new_v4()));
-    std::fs::DirBuilder::new().mode(0o700).create(&directory)?;
+    ctl_core::private_fs::create_directory(&directory)?;
     Ok(Self(directory.canonicalize()?))
   }
 }
@@ -191,8 +224,10 @@ impl Drop for OutputDirectory {
   }
 }
 
+#[cfg(unix)]
 struct BuildGroup(Option<rustix::process::Pid>);
 
+#[cfg(unix)]
 impl Drop for BuildGroup {
   fn drop(&mut self) {
     if let Some(group) = self.0 {
@@ -202,37 +237,53 @@ impl Drop for BuildGroup {
 }
 
 async fn run_builder(mut command: tokio::process::Command) -> io::Result<()> {
+  #[cfg(unix)]
+  command.process_group(0).kill_on_drop(true);
   command
     .stdin(Stdio::piped())
     .stdout(Stdio::piped())
-    .stderr(Stdio::piped())
-    .process_group(0)
-    .kill_on_drop(true);
-  let mut child = command.spawn().map_err(|error| {
+    .stderr(Stdio::piped());
+  let start_error = |error: io::Error| {
     io::Error::other(format!(
       "could not start the native development builder (Node 24 and Cargo are required): {error}",
     ))
-  })?;
+  };
+  #[cfg(unix)]
+  let mut child = command.spawn().map_err(start_error)?;
+  #[cfg(windows)]
+  let mut job = {
+    use process_wrap::tokio::{CommandWrap, JobObject, KillOnDrop};
+    CommandWrap::from(command)
+      .wrap(KillOnDrop)
+      .wrap(JobObject)
+      .spawn()
+      .map_err(start_error)?
+  };
+  #[cfg(windows)]
+  let child = job.inner_mut();
+  #[cfg(unix)]
   let mut group = BuildGroup(
     child
       .id()
       .and_then(|pid| rustix::process::Pid::from_raw(i32::try_from(pid).ok()?)),
   );
-  let _lifeline = child
-    .stdin
-    .take()
-    .ok_or_else(|| io::Error::other("missing development build lifeline"))?;
-  let stdout = child
-    .stdout
-    .take()
-    .ok_or_else(|| io::Error::other("missing build output"))?;
-  let stderr = child
-    .stderr
-    .take()
-    .ok_or_else(|| io::Error::other("missing build diagnostics"))?;
+  #[cfg(unix)]
+  let (input, stdout, stderr) = (child.stdin.take(), child.stdout.take(), child.stderr.take());
+  #[cfg(windows)]
+  let (input, stdout, stderr) = (
+    child.stdin().take(),
+    child.stdout().take(),
+    child.stderr().take(),
+  );
+  let _lifeline = input.ok_or_else(|| io::Error::other("missing development build lifeline"))?;
+  let stdout = stdout.ok_or_else(|| io::Error::other("missing build output"))?;
+  let stderr = stderr.ok_or_else(|| io::Error::other("missing build diagnostics"))?;
   let (status, (), diagnostics) =
     tokio::try_join!(child.wait(), drain(stdout), diagnostics(stderr))?;
-  group.0 = None;
+  #[cfg(unix)]
+  {
+    group.0 = None;
+  }
   if !status.success() {
     return Err(io::Error::other(format!(
       "native development build exited {status}; the active installation was kept.\n{}",
@@ -270,5 +321,8 @@ fn invalid(message: &str) -> io::Error {
   io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;
+
+#[cfg(all(test, windows))]
+mod windows_tests;

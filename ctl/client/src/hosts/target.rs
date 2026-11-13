@@ -83,6 +83,8 @@ pub enum ConnectionTargetDto {
   Ssh {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     remote_info: Option<Box<ctl_proto::RemoteIdentity>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    remote_platform: Option<crate::RemotePlatform>,
     destination: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     ssh_config_alias: Option<String>,
@@ -140,6 +142,7 @@ impl ConnectionTargetDto {
   pub fn ssh(destination: impl Into<String>) -> Self {
     Self::Ssh {
       remote_info: None,
+      remote_platform: None,
       destination: destination.into(),
       ssh_config_alias: None,
       use_ssh_config_master: None,
@@ -150,6 +153,17 @@ impl ConnectionTargetDto {
       gateway_route: Vec::new(),
       vpn_connection_id: None,
       gateways: Box::default(),
+    }
+  }
+
+  /// The server's command-shell convention. Unspecified SSH hosts use Unix.
+  #[must_use]
+  pub fn remote_platform(&self) -> crate::RemotePlatform {
+    match self {
+      Self::Ssh {
+        remote_platform, ..
+      } => remote_platform.unwrap_or_default(),
+      Self::Local => crate::RemotePlatform::default(),
     }
   }
 }

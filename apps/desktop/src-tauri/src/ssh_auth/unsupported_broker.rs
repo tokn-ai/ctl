@@ -21,7 +21,10 @@ pub(super) fn connection_status(
 pub(super) use super::forwarding::{configure_port_forward, list_port_forwards};
 
 pub(super) fn list_remote_listeners(
-  _target: &ConnectionTargetDto,
+  target: &ConnectionTargetDto,
 ) -> Ready<CommandResult<ctl_proto::TcpListenerCatalog>> {
+  if let Err(error) = super::connection::require_unix_target(target, "Remote listener discovery") {
+    return ready(Err(error));
+  }
   unsupported()
 }

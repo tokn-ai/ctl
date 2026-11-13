@@ -17,12 +17,14 @@ afterEach(cleanup);
 const host: SshConnectionTarget = { kind: "ssh", host_id: "builder", host_name: "Builder", destination: "builder-alias", gateways: [{ kind: "ssh", gateway_id: "jump", name: "Jump", destination: "jump", mode: "automatic" }] };
 const complete = (host_index: number): ComponentUpdateHostResult => ({ host_index, state: "complete", error: null, result: { package: "full_bundle", bundle_id: "verified-build", target_triple: "aarch64-apple-darwin", services_preserved: true } });
 
-it("prefills a host, permits several hosts, and always installs a complete build from supplied files", async () => {
+it("prefills supported hosts and installs a complete build from supplied files", async () => {
   vi.mocked(updateComponents).mockResolvedValue([complete(0), complete(1)]);
-  render(<UpdateComponentsDialog targets={[host]} context={{ targets: [host] }} on_close={vi.fn()} />);
+  const windows: SshConnectionTarget = { kind: "ssh", destination: "win", remote_platform: "windows" };
+  render(<UpdateComponentsDialog targets={[host, windows]} context={{ targets: [host, windows] }} on_close={vi.fn()} />);
   const user = userEvent.setup();
   expect((screen.getByRole("checkbox", { name: "Builder" }) as HTMLInputElement).checked).toBe(true);
   expect((screen.getByRole("checkbox", { name: "local" }) as HTMLInputElement).checked).toBe(false);
+  expect(screen.queryByRole("checkbox", { name: "win" })).toBeNull();
   expect(screen.queryAllByRole("radio")).toHaveLength(0);
   await user.click(screen.getByRole("checkbox", { name: "local" }));
   await user.selectOptions(screen.getByRole("combobox", { name: "Build source" }), "provided");

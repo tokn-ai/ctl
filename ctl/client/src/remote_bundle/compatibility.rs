@@ -194,7 +194,7 @@ pub(crate) fn verify_archive(
   target: &str,
   bytes: &[u8],
 ) -> Result<(), Error> {
-  let (inner, hashes) = read_archive_payload(manifest, bytes, MAX_TOTAL_BYTES as u64)?;
+  let (inner, hashes) = read_archive_payload(manifest, target, bytes, MAX_TOTAL_BYTES as u64)?;
   if inner.schema_version != manifest.schema_version
     || inner.app_version != manifest.app_version
     || inner.bundle_id != manifest.bundle_id
@@ -235,11 +235,18 @@ pub(crate) fn verify_archive(
 
 fn read_archive_payload(
   manifest: &BundleSet,
+  target: &str,
   bytes: &[u8],
   max_payload_bytes: u64,
 ) -> Result<(ArchiveManifest, BTreeMap<String, String>), Error> {
   let decoder = flate2::read::MultiGzDecoder::new(bytes).take(MAX_TAR_BYTES + 1);
   let mut archive = tar::Archive::new(decoder);
+  let binary_names: BTreeMap<_, _> = manifest
+    .layout()
+    .names()
+    .iter()
+    .map(|&name| (ctl_core::bundle_layout::executable_name(target, name), name))
+    .collect();
   let mut hashes = BTreeMap::new();
   let mut names = BTreeSet::new();
   let mut inner = None;
@@ -252,7 +259,7 @@ fn read_archive_payload(
       .map_err(|_| invalid("non-UTF8 archive path"))?
       .to_owned();
     if entry.header().entry_type() != tar::EntryType::Regular
-      || (!manifest.layout().names().contains(&name.as_str()) && name != "manifest.json")
+      || (!binary_names.contains_key(name.as_str()) && name != "manifest.json")
       || !names.insert(name.clone())
     {
       return Err(invalid(
@@ -284,7 +291,9 @@ fn read_archive_payload(
           .map_err(|_| invalid("invalid archive component manifest"))?,
       );
     } else {
-      if entry.header().mode().map_err(archive_error)? & 0o111 == 0 {
+      if target != super::WINDOWS_TARGET
+        && entry.header().mode().map_err(archive_error)? & 0o111 == 0
+      {
         return Err(invalid("bundle binary is not executable"));
       }
       let mut digest = Sha256::new();
@@ -296,7 +305,10 @@ fn read_archive_payload(
         }
         digest.update(&buffer[..length]);
       }
-      hashes.insert(name, format!("{:x}", digest.finalize()));
+      hashes.insert(
+        binary_names[name.as_str()].to_owned(),
+        format!("{:x}", digest.finalize()),
+      );
     }
   }
   // Drain the gzip trailer to validate its CRC, reject hidden trailing entries,

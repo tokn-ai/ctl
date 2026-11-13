@@ -91,7 +91,8 @@ export function connectionMethodOptions(source: Pick<WorkspaceConnectionMethod,
 }
 
 export function usesSshConfigMaster(target: SshConnectionTarget): boolean {
-  return !hasVpnRoute(target) && !target.gateways?.some((gateway) => gateway.kind === "socks5" || Boolean(gateway.hostname)) &&
+  return target.remote_platform !== "windows" && !hasVpnRoute(target) &&
+    !target.gateways?.some((gateway) => gateway.kind === "socks5" || Boolean(gateway.hostname)) &&
     (target.use_ssh_config_master ?? Boolean(target.ssh_config_alias));
 }
 
@@ -100,6 +101,7 @@ export function connectionSettings(target: SshConnectionTarget): SshConnectionTa
   return {
     kind: "ssh",
     destination: target.destination,
+    ...(target.remote_platform === "windows" ? { remote_platform: target.remote_platform } : {}),
     ...(target.hostname ? { hostname: target.hostname } : {}),
     ...(target.user ? { user: target.user } : {}),
     ...(target.port ? { port: target.port } : {}),

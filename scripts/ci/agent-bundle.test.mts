@@ -42,10 +42,10 @@ test("packages actual executable metadata and assembles all targets without exec
     await chmod(path, 0o755);
   }
   const inspected = new Set<string>();
-  const runner: AgentProcessRunner = async (command, args) => {
+  const runner: AgentProcessRunner = async (command, args, cwd) => {
     if (command === "strip") return { stdout: "", stderr: "" };
     if (args[0] === "--component-info") inspected.add(basename(command));
-    return execute(command, args, { env: { ...process.env, COPYFILE_DISABLE: "1" } });
+    return execute(command, args, { cwd, env: { ...process.env, COPYFILE_DISABLE: "1" } });
   };
   for (const target of agentTargets) {
     const manifest = await packageAgentBundle({ ...agentIdentity, target, binary_directory: binaries, output_directory: input }, runner);

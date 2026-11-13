@@ -132,6 +132,20 @@ async function newHostDetails(user: ReturnType<typeof userEvent.setup>, selectDi
 }
 
 describe("SSH host quick-input flow", () => {
+  it("keeps Windows setup diagnostics and offers a connection retry", async () => {
+    const target = { kind: "ssh", destination: "win", remote_platform: "windows" } as const;
+    vi.mocked(probeSshHost)
+      .mockRejectedValueOnce({ code: "windows_remote_agent_setup_required", message: "Install ctl-agent.exe on the Windows host." })
+      .mockResolvedValueOnce(remoteInfo);
+    const onConnected = vi.fn();
+    render(<SshHostFlow suggestions={[]} warning={null} target={target} autoConnect
+      onConnected={onConnected} onClose={vi.fn()} />);
+    expect(await screen.findByRole("alert")).toHaveProperty("textContent", "Install ctl-agent.exe on the Windows host.");
+    expect(screen.queryByRole("option", { name: /Install remote components|Update remote components|Force restart/ })).toBeNull();
+    await userEvent.setup().click(screen.getByRole("option", { name: "Connect" }));
+    await waitFor(() => expect(onConnected).toHaveBeenCalledWith(target));
+  });
+
   it("verifies a component update without attaching a terminal or restarting sessions", async () => {
     vi.mocked(updateComponents).mockResolvedValue(installed);
     const target = { kind: "ssh" as const, host_id: "saved", destination: "example", remote_info: remoteInfo };
@@ -569,10 +583,12 @@ describe("SSH host quick-input flow", () => {
     expect(saveSshConfigHost).not.toHaveBeenCalled();
   });
 
-  it("takes a selected SSH alias through naming and credentials while preserving its transport settings", async () => {
+  it.each([undefined, "windows"] as const)("verifies and saves an SSH alias with the selected platform (%s)", async (remote_platform) => {
     vi.mocked(probeSshHost).mockResolvedValue(remoteInfo);
     const { user, save } = setupNewHost(["build-alias"]);
     expect(screen.getByRole("group", { name: "SSH config · Virtual" })).toBeTruthy();
+    expect(screen.getByLabelText("Server platform")).toHaveProperty("value", "unix");
+    if (remote_platform) await user.selectOptions(screen.getByLabelText("Server platform"), remote_platform);
     await user.click(screen.getByRole("option", { name: "build-alias" }));
     expect(screen.getByLabelText("Host name")).toHaveProperty("value", "build-alias");
     expect(probeSshHost).not.toHaveBeenCalled();
@@ -581,9 +597,12 @@ describe("SSH host quick-input flow", () => {
     await user.click(screen.getByRole("option", { name: /^Direct/ }));
     await user.click(screen.getByRole("option", { name: /Identity file/ }));
     await user.type(screen.getByRole("combobox", { name: "Identity file" }), "~/.ssh/office{Enter}");
-    await waitFor(() => expect(save).toHaveBeenCalledExactlyOnceWith("Office build machine", {
+    const target = {
       kind: "ssh", destination: "build-alias", identity_file: "~/.ssh/office", ssh_config_alias: "build-alias",
-    }, remoteInfo));
+      ...(remote_platform ? { remote_platform } : {}),
+    };
+    expect(probeSshHost).toHaveBeenCalledExactlyOnceWith(target, expect.any(String), expect.any(Function));
+    await waitFor(() => expect(save).toHaveBeenCalledExactlyOnceWith("Office build machine", target, remoteInfo));
     expect(saveSshConfigHost).not.toHaveBeenCalled();
   });
 
@@ -898,23 +917,26 @@ describe("SSH host quick-input flow", () => {
     expect(saveSshConfigHost).not.toHaveBeenCalled();
   });
 
-  it("prepopulates connection editing and preserves its gateway route during verification", async () => {
+  it.each([undefined, "windows"] as const)("keeps a saved platform and gateway route during connection editing (%s)", async (remote_platform) => {
     vi.mocked(probeSshHost).mockResolvedValue(remoteInfo);
     const onSaveConnection = vi.fn(async () => undefined);
     const user = userEvent.setup();
     render(<SshHostFlow suggestions={[]} warning={null} expectedIdentity={remoteInfo}
       initialTarget={{ kind: "ssh", destination: "build", hostname: "2001:db8::1", user: "deploy", port: 2222,
-        identity_file: "~/.ssh/deploy", gateway_route: [{ gateway_id: "edge", mode: "native_only" }] }}
+        identity_file: "~/.ssh/deploy", remote_platform, gateway_route: [{ gateway_id: "edge", mode: "native_only" }] }}
       gateways={[{ gateway_id: "edge", name: "Edge", destination: "edge.example" }]}
       onSaveConnection={onSaveConnection} onClose={vi.fn()} />);
     expect(screen.getByRole("dialog", { name: "Edit connection method" })).toBeTruthy();
     expect(screen.getByLabelText("SSH host or config alias")).toHaveProperty("value", "deploy@[2001:db8::1]:2222");
     expect(screen.getByLabelText("SSH alias (optional)")).toHaveProperty("value", "build");
     expect(screen.getByLabelText("Identity file (optional)")).toHaveProperty("value", "~/.ssh/deploy");
+    expect(screen.getByLabelText("Server platform")).toHaveProperty("value", remote_platform ?? "unix");
+    if (remote_platform) expect(screen.queryByRole("checkbox", { name: "Use SSH-config master" })).toBeNull();
     await user.click(screen.getByRole("button", { name: "Verify and save" }));
     await waitFor(() => expect(onSaveConnection).toHaveBeenCalledOnce());
     expect(onSaveConnection).toHaveBeenCalledWith(expect.objectContaining({
       hostname: "2001:db8::1", destination: "build", user: "deploy", port: 2222,
+      ...(remote_platform ? { remote_platform } : {}),
       gateway_route: [{ gateway_id: "edge", mode: "native_only" }],
       gateways: [expect.objectContaining({ destination: "edge.example", mode: "native_only" })],
     }), expect.any(Array), remoteInfo);

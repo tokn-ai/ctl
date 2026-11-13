@@ -108,6 +108,64 @@ fn resolves_workflow_identity_from_the_current_catalog_publication() {
     current: true,
   };
   assert_eq!(publication_run(&release).unwrap(), (10, 2));
+  for publication_id in [
+    format!("{BUNDLE_ID}-0-2"),
+    format!("{BUNDLE_ID}-10-0"),
+    format!("{BUNDLE_ID}-other-2"),
+  ] {
+    let invalid = published::PublishedRelease {
+      publication_id,
+      ..release.clone()
+    };
+    assert!(publication_run(&invalid).is_err());
+  }
+}
+
+#[test]
+fn windows_nightly_packages_are_bound_to_the_published_target_and_revision() {
+  let run: WorkflowRun = serde_json::from_value(workflow()).unwrap();
+  for target in [DesktopTarget::WindowsX64, DesktopTarget::WindowsArm64] {
+    let directory = DownloadedArtifact::new().unwrap();
+    let name = format!("ctmux-desktop-{}", target.triple());
+    let artifact: Artifact = serde_json::from_value(json!({
+      "id": 20, "name": name, "expired": false,
+      "workflow_run": { "id": 10, "repository_id": 1, "head_repository_id": 1, "head_branch": "main", "head_sha": REVISION }
+    })).unwrap();
+    assert!(artifact.matches(&name, &run));
+    assert!(!artifact.matches("ctmux-desktop-aarch64-apple-darwin", &run));
+    let manifest = directory
+      .0
+      .join(format!("desktop-{}.json", target.triple()));
+    let mut value = json!({
+      "schema_version": 1, "target": target.triple(), "bundle_id": BUNDLE_ID,
+      "git_revision": REVISION, "signing_mode": "not_applicable",
+      "assets": [{ "name": format!("ctmux-{BUNDLE_ID}-{}.zip", target.triple()), "sha256": "a".repeat(64) }]
+    });
+    fs::write(&manifest, serde_json::to_vec(&value).unwrap()).unwrap();
+    let (signing, asset) = artifact_manifest(&directory.0, target, BUNDLE_ID, REVISION).unwrap();
+    assert_eq!(signing, DesktopSigning::NotApplicable);
+    assert_eq!(
+      asset.name,
+      format!("ctmux-{BUNDLE_ID}-{}.zip", target.triple())
+    );
+    value["git_revision"] = json!("0".repeat(40));
+    fs::write(&manifest, serde_json::to_vec(&value).unwrap()).unwrap();
+    assert!(artifact_manifest(&directory.0, target, BUNDLE_ID, REVISION).is_err());
+  }
+}
+
+#[test]
+fn artifact_sources_must_be_regular_files() {
+  let directory = DownloadedArtifact::new().unwrap();
+  assert!(open_package(&directory.0).is_err());
+  #[cfg(unix)]
+  {
+    let source = directory.0.join("package.zip");
+    fs::write(&source, b"payload").unwrap();
+    let link = directory.0.join("linked.zip");
+    std::os::unix::fs::symlink(&source, &link).unwrap();
+    assert!(open_package(&link).is_err());
+  }
 }
 
 #[test]

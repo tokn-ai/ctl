@@ -31,7 +31,6 @@ fn main() {
     );
     return;
   }
-  #[cfg(unix)]
   let _installation = ctl_core::installations::lease_current_executable().unwrap_or_else(|error| {
     eprintln!("ctl-taskd: could not retain its installation: {error}");
     std::process::exit(1);

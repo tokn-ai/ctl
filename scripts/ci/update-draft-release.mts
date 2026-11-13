@@ -8,8 +8,9 @@ import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
 import { parseHelperProtocols, sameProtocols, type ProtocolInfo } from "../shared/protocol-contract.mts";
-import { maxAgentManifestBytes, parseAgentBundleSet, readAgentFile, verifyAgentBundleTarget } from "../shared/agent-bundle.mts";
-import { verifyUpdaterTarget } from "../shared/updater-bundle.mts";
+import { agentTargets, maxAgentManifestBytes, parseAgentBundleSet, readAgentFile, verifyAgentBundleTarget, windowsAgentManifestName } from "../shared/agent-bundle.mts";
+import { updaterManifestName, verifyUpdaterTarget, windowsUpdaterTargets } from "../shared/updater-bundle.mts";
+import { validatedWindowsComponentSet } from "./bundle-publication.mts";
 import { desktopBundleNames } from "./package-desktop-bundle.mts";
 
 const execFileAsync = promisify(execFile);
@@ -21,12 +22,7 @@ const desktopTargets = [
   "aarch64-unknown-linux-gnu",
   "x86_64-apple-darwin",
   "aarch64-apple-darwin",
-] as const;
-const remoteTargets = [
-  "x86_64-unknown-linux-musl",
-  "aarch64-unknown-linux-musl",
-  "x86_64-apple-darwin",
-  "aarch64-apple-darwin",
+  ...windowsUpdaterTargets,
 ] as const;
 const ctldTargets = ["x86_64-apple-darwin", "aarch64-apple-darwin"] as const;
 
@@ -151,7 +147,7 @@ export async function validateReleaseBundle(
 
   const bundleSet = parseAgentBundleSet(await readAgentFile(join(directory, "bundle-set.json"), maxAgentManifestBytes), identity);
   addNames(["bundle-set.json"]);
-  for (const target of remoteTargets) {
+  for (const target of agentTargets) {
     const asset = bundleSet.targets[target];
     if (!record(asset) || asset.archive !== `ctl-agent-bundle-${identity.bundle_id}-${target}.tar.gz`) {
       throw new Error(`Invalid remote bundle for ${target}`);
@@ -160,55 +156,56 @@ export async function validateReleaseBundle(
     addNames(await validateAsset(directory, asset.archive, asset.sha256));
     addNames(await verifyUpdaterTarget(directory, identity, target));
   }
+  addNames(await validatedWindowsComponentSet(directory, identity));
 
   for (const target of desktopTargets) {
     const isMac = target.endsWith("apple-darwin");
+    const windows = target.endsWith("-pc-windows-msvc");
     const variants = [{ ...desktopBundleNames(identity.bundle_id, target, false), unsigned: false }];
     if (versionBuild && isMac) {
       const unsigned = desktopBundleNames(identity.bundle_id, target, true);
       if (names.has(unsigned.manifest_name)) variants.push({ ...unsigned, unsigned: true });
     }
-    const extensions = isMac ? ["dmg", "app.tar.gz"] : ["deb", "rpm", "AppImage"];
+    const extensions = windows ? ["zip"] : isMac ? ["dmg", "app.tar.gz"] : ["deb", "rpm", "AppImage"];
     for (const { manifest_name, asset_prefix, unsigned } of variants) {
-      if (!names.has(manifest_name) && (options.allow_partial || variants.length > 1)) continue;
+      // Windows groups publish independently of the required Unix desktop set.
+      if (!names.has(manifest_name) && (options.allow_partial || windows || variants.length > 1)) continue;
       const manifest = await readJson(directory, manifest_name);
-      const expectedAssets = new Set(extensions.map((extension) => `${asset_prefix}.${extension}`));
-      if (
-        manifest.schema_version !== 1 ||
-        manifest.target !== target ||
-        manifest.bundle_id !== identity.bundle_id ||
-        manifest.git_revision !== identity.git_revision ||
-        !Array.isArray(manifest.assets)
-      ) {
-        throw new Error(`Desktop manifest does not match the expected build identity: ${manifest_name}`);
+      const expectedAssets = new Set(extensions.map((extension) => asset_prefix + "." + extension));
+      if (manifest.schema_version !== 1 || manifest.target !== target ||
+        manifest.bundle_id !== identity.bundle_id || manifest.git_revision !== identity.git_revision ||
+        !Array.isArray(manifest.assets)) {
+        throw new Error("Desktop manifest does not match the expected build identity: " + manifest_name);
       }
       if (manifest.assets.length !== expectedAssets.size) {
-        throw new Error(`Desktop manifest must contain every required package format: ${manifest_name}`);
+        throw new Error("Desktop manifest must contain every required package format: " + manifest_name);
       }
       if (isMac) {
         const isUnsigned = manifest.signing_mode === "unsigned";
         if (!isUnsigned && manifest.signing_mode !== "signed") {
-          throw new Error(`Invalid macOS signing mode: ${manifest_name}`);
+          throw new Error("Invalid macOS signing mode: " + manifest_name);
         }
         if (versionBuild && isUnsigned !== unsigned) {
-          throw new Error(`macOS signing mode does not match the desktop manifest filename: ${manifest_name}`);
+          throw new Error("macOS signing mode does not match the desktop manifest filename: " + manifest_name);
         }
         if (isUnsigned) unsignedTargets.push(target);
       } else if (manifest.signing_mode !== "not_applicable") {
-        throw new Error(`Invalid Linux signing mode: ${manifest_name}`);
+        throw new Error("Invalid " + (windows ? "Windows" : "Linux") + " signing mode: " + manifest_name);
       }
       addNames([manifest_name]);
       for (const asset of manifest.assets) {
-        if (!record(asset)) {
-          throw new Error(`Invalid asset in ${manifest_name}`);
-        }
+        if (!record(asset)) throw new Error("Invalid asset in " + manifest_name);
         validateName(asset.name);
         if (!expectedAssets.delete(asset.name)) {
-          throw new Error(`Unexpected desktop package filename in ${manifest_name}: ${asset.name}`);
+          throw new Error("Unexpected desktop package filename in " + manifest_name + ": " + asset.name);
         }
         addNames(await validateAsset(directory, asset.name, asset.sha256));
       }
       availableDesktopTargets.add(target);
+    }
+    // Windows x64 runtime and desktop packages share one updater asset group.
+    if (windows && availableDesktopTargets.has(target) && !assetNames.has(updaterManifestName(target))) {
+      addNames(await verifyUpdaterTarget(directory, identity, target, true));
     }
   }
   // Strict validation requires complete helper/CLI pairs when included, and
@@ -311,10 +308,14 @@ export function releaseNotes(bundle: ReleaseBundle, previous: string | null): st
     `Bundle ID: \`${bundle.bundle_id}\`.`,
     "",
     "Contains remote-agent bundles for Linux and macOS on Intel/AMD and ARM64.",
+    ...(bundle.asset_names.includes(windowsAgentManifestName) ? ["Contains verified Windows x64 component bundles."] : []),
     "Each package includes a SHA-256 checksum file. Build manifests record the package hashes and source revision.",
   ];
   if (bundle.desktop_targets.length > 0) {
     lines.push(`Desktop packages: ${bundle.desktop_targets.map((target) => `\`${target}\``).join(", ")}.`);
+    if (bundle.desktop_targets.some((target) => target.endsWith("-pc-windows-msvc"))) {
+      lines.push("Windows desktop ZIPs are portable per-user packages and include separately downloadable ctlup.exe files with matching checksums and manifests.");
+    }
   }
   if (bundle.signed_ctld_targets.length > 0) {
     lines.push(`Includes standalone Developer ID signed, notarized, and stapled ctld.app bundles for: ${bundle.signed_ctld_targets.map((target) => `\`${target}\``).join(", ")}.`);

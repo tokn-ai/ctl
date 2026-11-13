@@ -123,7 +123,8 @@ export function ComponentVersionTable({ rows, busy_id, restarting, action_error,
       {remote.map((group) => {
         const open = expanded === group.key;
         const table_id = `${id}-${encodeURIComponent(group.key)}`;
-        const manageable = group.host_id && manageable_host_ids.includes(group.host_id) && on_manage_host;
+        const manageable = group.host_id && manageable_host_ids.includes(group.host_id) && on_manage_host &&
+          !group.rows.some((row) => row.error_code === "remote_windows_maintenance_unsupported");
         return <tbody key={group.key}>
           <tr className="about-host-row">
             <th scope="row"><button type="button" className="about-host-toggle" onClick={() => setExpanded((previous) => previous === group.key ? null : group.key)} aria-expanded={open} aria-controls={table_id} aria-label={`${open ? "Hide" : "Show"} components for ${group.label}`}>

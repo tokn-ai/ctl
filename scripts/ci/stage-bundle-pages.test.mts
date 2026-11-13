@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { lstat, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { cp, lstat, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
+import { windowsAgentManifestName } from "../shared/agent-bundle.mts";
 import { bundleRoot, validatedComponentSet } from "./bundle-publication.mts";
-import { componentSetFixture, legacyNightlyFixture, legacyPagesCatalog, publicationFixture } from "./bundle-publication.fixtures.mts";
+import { componentSetFixture, legacyNightlyFixture, legacyPagesCatalog, publicationFixture, windowsComponentSetFixture } from "./bundle-publication.fixtures.mts";
 import { compareVersions, nightlyRetention, parseBundleCatalog, stageBundlePages } from "./stage-bundle-pages.mts";
 
 async function root(t: TestContext): Promise<string> {
@@ -37,6 +38,21 @@ test("stages verified dated Nightly archives and Stable archives", async (t) => 
   assert.match(index, /channels\/nightly\.json/);
   assert.match(index, /channels\/stable\.json/);
   assert.doesNotMatch(index, /channels\/dev\.json/);
+});
+
+test("a Stable tag retry publishes its Windows companion alongside the Unix set", async (t) => {
+  const directory = await root(t);
+  const first = publicationFixture(1, "stable");
+  const retry = { ...first, run_attempt: 2, publication_id: `${first.bundle_id}-${first.run_id}-2` };
+  const previous = join(directory, "previous"), next = join(directory, "next");
+  await stageBundlePages(first, await componentSetFixture(directory, first), null, previous);
+  const incoming = await componentSetFixture(directory, retry);
+  await cp(await windowsComponentSetFixture(directory, retry), incoming, { recursive: true });
+  assert.equal(await stageBundlePages(retry, incoming, previous, next), true);
+  const catalog = parseBundleCatalog(await readFile(join(next, "bundles/catalog.json")));
+  assert.equal(catalog.channels.stable, retry.publication_id);
+  await readFile(join(next, "bundles/sets", retry.publication_id, windowsAgentManifestName));
+  await assert.rejects(readFile(join(next, "bundles/sets", first.publication_id, windowsAgentManifestName)), { code: "ENOENT" });
 });
 
 test("migrates a legacy Dev head to Nightly and removes its pointer without changing the previous site", async (t) => {

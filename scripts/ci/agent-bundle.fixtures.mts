@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { gzipSync } from "node:zlib";
-import { agentComponents, type AgentBundleIdentity, type AgentComponentMap } from "../shared/agent-bundle.mts";
+import { agentComponents, executableName, type AgentBundleIdentity, type AgentComponentMap } from "../shared/agent-bundle.mts";
 import type { ComponentInfo } from "../shared/protocol-contract.mts";
 
 export const agentIdentity: AgentBundleIdentity = {
@@ -53,8 +53,8 @@ export function tarFixture(entries: TarFixtureEntry[], terminator = true): Buffe
 
 export function archiveEntriesFixture(target: string, identity = agentIdentity, components: AgentComponentMap = componentMapFixture(identity), schema_version: 2 | 3 = 3): TarFixtureEntry[] {
   const names = agentComponents.filter((name) => schema_version === 3 || (name !== "ctl" && name !== "ctmux"));
-  const entries: TarFixtureEntry[] = names.map((name) => ({ name, bytes: Buffer.from(`fixture ${name} ${target}`) }));
-  const files = Object.fromEntries(entries.map((entry) => [entry.name, createHash("sha256").update(entry.bytes).digest("hex")]));
+  const entries: TarFixtureEntry[] = names.map((name) => ({ name: executableName(name, target), bytes: Buffer.from(`fixture ${name} ${target}`) }));
+  const files = Object.fromEntries(names.map((name, index) => [name, createHash("sha256").update(entries[index].bytes).digest("hex")]));
   entries.push({ name: "manifest.json", bytes: Buffer.from(JSON.stringify({ schema_version, ...identity, target_triple: target, files,
     components: Object.fromEntries(names.map((name) => [name, components[name]])) })) });
   return entries;

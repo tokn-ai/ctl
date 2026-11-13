@@ -5,10 +5,7 @@ struct Home(PathBuf);
 impl Home {
   fn new() -> Self {
     let home = Self(std::env::temp_dir().join(format!("ctlup-settings-{}", uuid::Uuid::new_v4())));
-    std::fs::DirBuilder::new()
-      .mode(0o700)
-      .create(&home.0)
-      .unwrap();
+    private_fs::create_directory(&home.0).unwrap();
     home
   }
 }
@@ -57,6 +54,7 @@ fn channel_inspection_is_passive_and_explicit_choices_are_atomic() {
 }
 
 #[test]
+#[cfg(unix)]
 fn settings_do_not_follow_account_storage_links() {
   let home = Home::new();
   let outside = Home::new();
@@ -76,8 +74,15 @@ fn desktop_storage_is_passive_until_requested_and_rejects_links() {
   assert!(path.is_dir());
 
   std::fs::remove_dir(&path).unwrap();
-  let outside = Home::new();
-  std::os::unix::fs::symlink(&outside.0, &path).unwrap();
+  std::fs::write(&path, b"file").unwrap();
   assert!(app_directory(&home.0, false).is_err());
   assert!(app_directory(&home.0, true).is_err());
+  #[cfg(unix)]
+  {
+    std::fs::remove_file(&path).unwrap();
+    let outside = Home::new();
+    std::os::unix::fs::symlink(&outside.0, &path).unwrap();
+    assert!(app_directory(&home.0, false).is_err());
+    assert!(app_directory(&home.0, true).is_err());
+  }
 }

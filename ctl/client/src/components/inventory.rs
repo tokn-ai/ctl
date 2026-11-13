@@ -74,6 +74,7 @@ pub fn scan(
         "aarch64-unknown-linux-gnu",
         "x86_64-apple-darwin",
         "aarch64-apple-darwin",
+        crate::remote_bundle::WINDOWS_TARGET,
       ]
       .into_iter()
       .collect()

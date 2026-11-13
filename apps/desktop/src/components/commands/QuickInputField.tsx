@@ -18,6 +18,7 @@ export interface QuickInputFieldMode {
   secret?: boolean;
   submit_label?: string;
   suggestions?: QuickInputSuggestions;
+  additional_field?: ReactNode;
 }
 
 interface QuickInputFieldProps {
@@ -160,6 +161,7 @@ export function QuickInputField({
           />
           <button type="submit">{mode.submit_label ?? "Continue"}</button>
         </div>
+        {mode.additional_field}
       </form>
       {suggestions ? (
         <>

@@ -3,8 +3,11 @@
 CI and `pnpm bundles:sync` stage a validated `bundle-set.json` plus
 `ctl-agent-bundle-<bundle-id>-<target>.tar.gz` archives and their `.sha256`
 files here, together with each target's standalone `ctlup` executable,
-checksum and `ctlup-<target>.json` manifest. Release bundle IDs equal the app version. Development IDs append
-the source revision so each build has an immutable remote install directory.
+checksum and `ctlup-<target>.json` manifest. Builds for Windows x64 also include
+`bundle-set-windows.json`, a runtime archive and a standalone `ctlup` with an
+`.exe` suffix. Release bundle IDs equal the app version. Nightly and PR bundle
+IDs include the source revision so each build has an immutable remote install
+directory.
 
 Generated bundle files are ignored. A normal development start performs only a
 local preflight; it never downloads artifacts or dispatches CI implicitly.

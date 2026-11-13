@@ -1002,6 +1002,21 @@ button:disabled {
 .quick-input-warning {
   color: var(--warning);
 }
+.quick-input-ssh-platform {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 12px 12px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.quick-input-ssh-platform select {
+  padding: 4px 6px;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--surface-2);
+}
 .quick-input-detail {
   display: block;
   margin-top: 3px;

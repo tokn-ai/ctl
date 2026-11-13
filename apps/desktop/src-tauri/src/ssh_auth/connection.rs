@@ -3,9 +3,63 @@
 use std::future::Future;
 use std::time::Duration;
 
+use ctl_client::{
+  CoreError, RemotePlatform, RemoteService, SshConnectionOptions, SshInteraction, Transport,
+  open_identified_ssh_service,
+};
+
+use crate::dto::ConnectionTargetDto;
 use crate::error::{CommandErrorDto, CommandResult};
 
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
+
+pub(super) fn require_unix_target(
+  target: &ConnectionTargetDto,
+  operation: &str,
+) -> CommandResult<()> {
+  if target.remote_platform() == RemotePlatform::Windows {
+    return Err(CommandErrorDto::new(
+      "windows_ssh_operation_unsupported",
+      format!("{operation} is unavailable for Windows SSH hosts."),
+    ));
+  }
+  Ok(())
+}
+
+pub(super) async fn open_terminal(
+  target: &ConnectionTargetDto,
+  destination: &str,
+  options: &SshConnectionOptions,
+  interaction: &SshInteraction,
+) -> CommandResult<(Transport, ctl_proto::RemoteIdentity)> {
+  let stream = open_identified_ssh_service(destination, options, interaction, RemoteService::Ctmux)
+    .await
+    .map_err(|error| terminal_error(&error, options.remote_platform))?;
+  let identity = stream
+    .remote_identity
+    .as_deref()
+    .expect("identified transport")
+    .clone();
+  target.verify_remote_identity(&identity)?;
+  Ok((Transport::Ssh(stream), identity))
+}
+
+fn terminal_error(error: &CoreError, platform: RemotePlatform) -> CommandErrorDto {
+  let diagnostic = CommandErrorDto::transport(error);
+  if platform == RemotePlatform::Windows
+    && (matches!(
+      diagnostic.code.as_str(),
+      "ctl_agent_not_found" | "ctl_agent_identity_unsupported"
+    ) || matches!(error, CoreError::SshStartup(message)
+      if message.contains("'ctl-agent.exe' is not recognized")))
+  {
+    return CommandErrorDto::new(
+      "windows_remote_agent_setup_required",
+      "Install the Windows components with `ctlup update --destination <ssh-alias> --remote-platform windows`, then reconnect. Use the default cmd.exe SSH shell.",
+    );
+  }
+  diagnostic
+}
 
 #[cfg(unix)]
 pub(super) enum MasterLookup {
@@ -78,6 +132,36 @@ mod tests {
   use std::future::ready;
   use std::sync::Arc;
   use std::sync::atomic::{AtomicBool, Ordering};
+
+  #[test]
+  fn missing_windows_agent_suggests_ctlup_without_masking_ssh_errors() {
+    for error in [
+      CoreError::AgentNotFound,
+      CoreError::IdentityUnsupported,
+      CoreError::SshStartup(
+        "'ctl-agent.exe' is not recognized as an internal or external command".into(),
+      ),
+    ] {
+      let error = terminal_error(&error, RemotePlatform::Windows);
+      assert_eq!(error.code, "windows_remote_agent_setup_required");
+      assert!(error.message.contains("ctlup update"));
+      assert!(error.message.contains("--remote-platform windows"));
+    }
+    assert_eq!(
+      terminal_error(&CoreError::AgentNotFound, RemotePlatform::Unix).code,
+      "ctl_agent_not_found"
+    );
+    let denied = CoreError::SshStartup("Permission denied (publickey).".into());
+    assert_eq!(
+      terminal_error(&denied, RemotePlatform::Windows).code,
+      "ssh_authentication_failed"
+    );
+    let changed = CoreError::SshStartup("REMOTE HOST IDENTIFICATION HAS CHANGED".into());
+    assert_eq!(
+      terminal_error(&changed, RemotePlatform::Windows).code,
+      "ssh_host_key_failed"
+    );
+  }
 
   struct DropFlag(Arc<AtomicBool>);
 

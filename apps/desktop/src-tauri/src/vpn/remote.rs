@@ -24,6 +24,12 @@ pub(super) async fn client_for_target(
   target: &ConnectionTargetDto,
   connection_id: &str,
 ) -> CommandResult<(ctl_ipc::remote_vpn::Client, String)> {
+  if target.remote_platform() == ctl_client::RemotePlatform::Windows {
+    return Err(CommandErrorDto::new(
+      "remote_vpn_unsupported",
+      "Manage VPNs on the Windows host.",
+    ));
+  }
   let owner = target.to_ssh_target()?;
   let expected_remote_id = match target {
     ConnectionTargetDto::Ssh { remote_info, .. } => remote_info

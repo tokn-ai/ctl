@@ -10,13 +10,14 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { agentTargets, maxAgentManifestBytes, parseAgentBundleSet, readAgentFile, verifyAgentBundleTarget, type AgentBundleSet } from "../shared/agent-bundle.mts";
+import { maxAgentManifestBytes, parseAgentBundleSet, readAgentFile, readWindowsAgentBundleSet, verifyAgentBundleTarget, windowsAgentManifestName, windowsAgentTarget,
+  type AgentBundleSet } from "../shared/agent-bundle.mts";
 import { updaterBinaryName, updaterManifestName, verifyUpdaterTarget } from "../shared/updater-bundle.mts";
 
 const WORKFLOW = "bundles.yml";
 const ARTIFACT = "ctl-agent-bundle-set";
+const WINDOWS_ARTIFACT = "ctl-agent-windows-bundle-set";
 const BUNDLE_SET_FILE = "bundle-set.json";
-const SUPPORTED_TARGETS = agentTargets;
 
 interface WorkflowRun {
   conclusion: string;
@@ -154,19 +155,20 @@ async function readBundleSet(
   directory: string,
   appVersion: string,
   expectedRevision: string | undefined,
-  verifyArchives: boolean,
 ): Promise<BundleSet> {
   const manifest = parseAgentBundleSet(
     await readAgentFile(join(directory, BUNDLE_SET_FILE), maxAgentManifestBytes),
     { app_version: appVersion, ...(expectedRevision ? { git_revision: expectedRevision } : {}) },
   );
-  if (verifyArchives) {
-    for (const target of SUPPORTED_TARGETS) {
-      await verifyAgentBundleTarget(directory, manifest, target, manifest.targets[target]);
-      await verifyUpdaterTarget(directory, manifest, target);
-    }
-  }
+  await verifyBundleSet(directory, manifest);
   return manifest;
+}
+
+async function verifyBundleSet(directory: string, manifest: BundleSet): Promise<void> {
+  for (const [target, entry] of Object.entries(manifest.targets)) {
+    await verifyAgentBundleTarget(directory, manifest, target, entry);
+    await verifyUpdaterTarget(directory, manifest, target, target === windowsAgentTarget);
+  }
 }
 
 function appVersion(repoRoot: string): string {
@@ -187,7 +189,9 @@ async function checkBundles(repoRoot: string): Promise<void> {
     return;
   }
   try {
-    await readBundleSet(destination, appVersion(repoRoot), revision, true);
+    const manifest = await readBundleSet(destination, appVersion(repoRoot), revision);
+    const windows = await readWindowsAgentBundleSet(destination, manifest);
+    if (windows) await verifyBundleSet(destination, windows);
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     console.warn(`Remote install bundles are not current: ${detail}`);
@@ -195,10 +199,9 @@ async function checkBundles(repoRoot: string): Promise<void> {
   }
 }
 
-function installBundleSet(source: string, destination: string, manifest: BundleSet): void {
+function installBundleSet(source: string, destination: string, manifest: BundleSet, filename: string): void {
   mkdirSync(destination, { recursive: true });
-  for (const target of SUPPORTED_TARGETS) {
-    const archive = manifest.targets[target].archive;
+  for (const [target, { archive }] of Object.entries(manifest.targets)) {
     copyFileSync(join(source, archive), join(destination, archive));
     copyFileSync(join(source, `${archive}.sha256`), join(destination, `${archive}.sha256`));
     const metadata = updaterManifestName(target);
@@ -209,10 +212,10 @@ function installBundleSet(source: string, destination: string, manifest: BundleS
   }
   const temporaryManifest = join(
     destination,
-    `.bundle-set-${process.pid}.json`,
+    `.${filename}-${process.pid}.tmp`,
   );
-  copyFileSync(join(source, BUNDLE_SET_FILE), temporaryManifest);
-  renameSync(temporaryManifest, join(destination, BUNDLE_SET_FILE));
+  copyFileSync(join(source, filename), temporaryManifest);
+  renameSync(temporaryManifest, join(destination, filename));
 }
 
 async function syncBundles(repoRoot: string, useMain: boolean): Promise<void> {
@@ -299,18 +302,27 @@ async function syncBundles(repoRoot: string, useMain: boolean): Promise<void> {
         String(run.databaseId),
         "--name",
         ARTIFACT,
+        "--name",
+        WINDOWS_ARTIFACT,
         "--dir",
         temporaryDirectory,
       ],
       repoRoot,
       true,
     );
-    const manifest = await readBundleSet(temporaryDirectory, version, revision, true);
+    const unix_source = join(temporaryDirectory, ARTIFACT);
+    const windows_source = join(temporaryDirectory, WINDOWS_ARTIFACT);
+    const manifest = await readBundleSet(unix_source, version, revision);
+    const windows = await readWindowsAgentBundleSet(windows_source, manifest);
+    if (windows) await verifyBundleSet(windows_source, windows);
+    else if (existsSync(windows_source)) throw new Error("Windows bundle artifact is missing its manifest");
     const destination = join(
       repoRoot,
       "apps/desktop/src-tauri/resources/agent-bundles",
     );
-    installBundleSet(temporaryDirectory, destination, manifest);
+    installBundleSet(unix_source, destination, manifest, BUNDLE_SET_FILE);
+    if (windows) installBundleSet(windows_source, destination, windows, windowsAgentManifestName);
+    else rmSync(join(destination, windowsAgentManifestName), { force: true });
     console.log(
       `Staged verified packaging resources for ${manifest.bundle_id} from run ${run.databaseId} into ${resolve(destination)}`,
     );

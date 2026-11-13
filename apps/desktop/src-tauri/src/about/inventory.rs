@@ -21,6 +21,12 @@ impl Selection {
   }
 
   pub async fn master(&self) -> CommandResult<PathBuf> {
+    if self.target.remote_platform() == ctl_client::RemotePlatform::Windows {
+      return Err(CommandErrorDto::new(
+        "remote_windows_maintenance_unsupported",
+        "Check and manage Windows components on the host.",
+      ));
+    }
     tokio::time::timeout(
       Duration::from_secs(4),
       crate::ssh_auth::existing_master(&self.target),
@@ -260,7 +266,9 @@ fn apply_error(rows: &mut [ComponentVersionRow], error: &CommandErrorDto) {
     ) {
       row.connected = Some(false);
     }
-    row.detail = Some("Refresh reuses an existing SSH connection without starting services. Check host can authenticate and inspect this host.".into());
+    if error.code != "remote_windows_maintenance_unsupported" {
+      row.detail = Some("Refresh reuses an existing SSH connection without starting services. Check host can authenticate and inspect this host.".into());
+    }
     row.error = Some(error.message.clone());
     row.error_code = Some(error.code.clone());
   }

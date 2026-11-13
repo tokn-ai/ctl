@@ -14,6 +14,11 @@ ctlup status --json
 ctlup dev --profile release --target-dir target
 ```
 
+On Windows x64, bootstrap from the MSVC checkout with
+`cargo run -p ctl-cli --bin ctlup -- dev`. The builder requires Node 24 and
+uses the configured native Rust toolchain. It writes `.exe` files into the
+same managed installation store.
+
 The active build lives under `~/.tokn/ctl/installs/`; stable commands are exposed
 through `~/.tokn/ctl/bin`. Add that directory to `PATH`. Development installation
 updates the same active selection as `ctlup update`, so status reports the new

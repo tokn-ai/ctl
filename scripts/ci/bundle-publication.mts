@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { join } from "node:path";
-import { agentTargets, maxAgentManifestBytes, parseAgentBundleSet, readAgentFile, verifyAgentBundleTarget,
+import { agentTargets, maxAgentManifestBytes, parseAgentBundleSet, readAgentFile, readWindowsAgentBundleSet, verifyAgentBundleTarget, windowsAgentManifestName, windowsAgentTarget,
   type AgentBundleIdentity, type AgentBundleSet } from "../shared/agent-bundle.mts";
 import { verifyUpdaterTarget } from "../shared/updater-bundle.mts";
 
@@ -27,7 +27,17 @@ export async function validatedComponentSet(directory: string, identity: AgentBu
     asset_names.push(...updater);
   }
   if (updater_assets !== 0 && updater_assets !== agentTargets.length * 3) throw new Error("component set contains an incomplete ctlup target set");
+  asset_names.push(...await validatedWindowsComponentSet(directory, expected));
   return { manifest, asset_names };
+}
+
+export async function validatedWindowsComponentSet(directory: string, identity: AgentBundleIdentity): Promise<string[]> {
+  const manifest = await readWindowsAgentBundleSet(directory, componentIdentity(identity));
+  if (!manifest) return [];
+  const entry = manifest.targets[windowsAgentTarget];
+  await verifyAgentBundleTarget(directory, identity, windowsAgentTarget, entry);
+  const updater = await verifyUpdaterTarget(directory, identity, windowsAgentTarget, true);
+  return [windowsAgentManifestName, entry.archive, `${entry.archive}.sha256`, ...updater];
 }
 
 export async function fileDigest(path: string): Promise<string> {

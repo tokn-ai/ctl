@@ -153,11 +153,14 @@ async fn run_on_target(mut arguments: Arguments) -> Result<i32, CliError> {
     arguments.method.as_deref(),
   )
   .await?;
-  let platform = match arguments.remote_platform {
-    Some(RemotePlatform::Windows) => ctl_client::RemotePlatform::Windows,
-    _ => ctl_client::RemotePlatform::Unix,
-  };
   let mut settings = resolved.target;
+  crate::target::apply_remote_platform(&mut settings, arguments.remote_platform);
+  let platform = settings.remote_platform();
+  if platform == ctl_client::RemotePlatform::Windows
+    && matches!(arguments.command, Command::Vpn { .. })
+  {
+    return Err(CliError::RemoteVpnUnsupported);
+  }
   let caller_auth = crate::caller_auth::prepare(&mut arguments, &mut settings)
     .await
     .map_err(CliError::CallerAuthentication)?;
@@ -181,11 +184,7 @@ async fn run_on_target(mut arguments: Arguments) -> Result<i32, CliError> {
       _ => {}
     }
   }
-  let mut target = settings.to_core();
-  if let ConnectionTarget::Ssh { options, .. } = &mut target {
-    options.remote_platform = platform;
-  }
-  let mut connector = CtlConnector::new(target, settings);
+  let mut connector = CtlConnector::new(settings.to_core(), settings);
   connector.caller_auth = caller_auth;
   // The updater can reproduce a saved route or an OpenSSH alias. It cannot
   // reproduce temporary SSH account and port overrides supplied to ctl.
@@ -339,20 +338,6 @@ impl CtlConnector {
   }
 
   fn new(target: ConnectionTarget, settings: ctl_client::hosts::ConnectionTargetDto) -> Self {
-    #[cfg(unix)]
-    let mut settings = settings;
-    #[cfg(unix)]
-    if matches!(&target, ConnectionTarget::Ssh { options, .. }
-      if options.remote_platform == ctl_client::RemotePlatform::Windows)
-      && let ctl_client::hosts::ConnectionTargetDto::Ssh {
-        use_ssh_config_master,
-        ..
-      } = &mut settings
-    {
-      // Shared master startup keeps a POSIX shell command alive. Windows
-      // cmd.exe needs the private -N master; endpoint config still applies.
-      *use_ssh_config_master = Some(false);
-    }
     Self {
       caller_auth: None,
       target,
@@ -981,26 +966,29 @@ mod tests {
     }
   }
 
-  #[cfg(unix)]
   #[test]
-  fn unix_clients_preserve_windows_ssh_config_without_posix_master_startup() {
+  fn saved_windows_routes_keep_the_alias_and_allow_an_explicit_unix_override() {
     use ctl_client::hosts::ConnectionTargetDto;
-    for platform in [
-      ctl_client::RemotePlatform::Unix,
-      ctl_client::RemotePlatform::Windows,
+    for (selection, platform) in [
+      (None, ctl_client::RemotePlatform::Windows),
+      (Some(RemotePlatform::Unix), ctl_client::RemotePlatform::Unix),
     ] {
       let mut settings = ConnectionTargetDto::ssh("user@configured");
       if let ConnectionTargetDto::Ssh {
-        ssh_config_alias, ..
+        ssh_config_alias,
+        remote_platform,
+        ..
       } = &mut settings
       {
         *ssh_config_alias = Some("user@configured".into());
+        *remote_platform = Some(ctl_client::RemotePlatform::Windows);
       }
-      let mut target = settings.to_core();
-      if let ConnectionTarget::Ssh { options, .. } = &mut target {
-        options.remote_platform = platform;
-      }
-      let connector = CtlConnector::new(target, settings);
+      crate::target::apply_remote_platform(&mut settings, selection);
+      let connector = CtlConnector::new(settings.to_core(), settings);
+      let ConnectionTarget::Ssh { options, .. } = &connector.target else {
+        panic!("expected SSH transport");
+      };
+      assert_eq!(options.remote_platform, platform);
       let target = connector.settings.to_ssh_target().unwrap();
       assert_eq!(target.destination, "user@configured");
       assert_eq!(target.ssh_config_alias.as_deref(), Some("user@configured"));

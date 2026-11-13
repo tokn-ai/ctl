@@ -57,6 +57,10 @@ Foreign-target binaries are never executed during download or import.
   cache/                            # reusable deployment artifacts
 ```
 
+On Windows x64, `%USERPROFILE%\.tokn\ctl\bin` contains native `.exe` launchers.
+They resolve the active runtime or updater from the installation store. This
+allows `ctlup` to install a new updater while the current process is running.
+
 Add `~/.tokn/ctl/bin` to `PATH`. New managed terminal shells include it
 automatically; existing shells keep their environment. Ordinary SSH login
 configuration remains under the account owner’s control.
@@ -78,6 +82,7 @@ ctlup update --pr 155
 ctlup update --host work
 ctlup update --hosts work,jump-a --local
 ctlup update --destination my-ssh-alias
+ctlup update --destination windows-alias --remote-platform windows
 ctlup update --from /path/to/bundle-set --hosts work,jump-a --json
 ctlup install --from target/debug --local-build --ctld-package /path/to/ctld-package
 ctlup status --json
@@ -92,6 +97,12 @@ this computer. Saved hosts reuse their existing route, connection method and
 SSH authentication. A temporary destination uses OpenSSH configuration without
 adding a saved host. Hosts are processed independently. A failure preserves
 successful hosts and produces a nonzero exit status.
+
+Windows SSH hosts use the platform saved in the connection method. For a
+temporary Windows destination, supply `--remote-platform windows`. The server
+uses the default Windows OpenSSH `cmd.exe` shell. Start a local Windows
+installation by running the standalone x64 `ctlup` executable from the
+publication.
 
 An explicit channel is saved as this account’s preference after a successful
 command. Otherwise automatic updates use that preference or the distribution’s
@@ -133,7 +144,8 @@ tree. Use `--working-tree` to choose that source explicitly for Linux x64 or
 ARM64 targets.
 
 `--from` supplies an exact complete build or publisher bundle-set. Publisher
-archives need their matching `bundle-set.json`. Foreign-target deployment also
+archives need their matching `bundle-set.json` or `bundle-set-windows.json`.
+Foreign-target deployment also
 needs that target’s separately checksummed updater sidecar. Native local builds
 must include all six executables. There are no upload selections or agent-only
 overlay installs. Old `ctl components` mutation commands direct users to `ctlup`.
@@ -161,6 +173,12 @@ preserves the saved publication channel and conflicts with `--channel`.
 Install the checkout's frontend dependencies with `pnpm install --frozen-lockfile`
 before building locally.
 
+Windows supports native x64 (`x86_64-pc-windows-msvc`) and ARM64
+(`aarch64-pc-windows-msvc`). Both use a portable, per-user directory rather than
+MSI or NSIS installation; installing the app does not require administrator
+access. Local builds require Node 24, pnpm, Rust's matching MSVC toolchain, the
+Visual Studio C++ build tools and Windows SDK.
+
 Local macOS app builds and `ctlup dev` use the same helper provisioning and
 signing preparation. They discover an unexpired development profile and can
 renew it through Xcode when the provisioning project has a configured team.
@@ -183,11 +201,42 @@ On macOS, launch the installed app with `open ~/.tokn/ctl/apps/ctmux.app`.
 Quit ctmux before updating it. The installer prefers the signed, notarized
 archive and uses the official unsigned archive when the release has no
 signed manifest. On Linux, launch `~/.tokn/ctl/apps/ctmux.AppImage`.
+On Windows, launch the executable from PowerShell:
+
+```powershell
+& "$env:USERPROFILE\.tokn\ctl\apps\ctmux\ctmux-app.exe"
+```
+
+Close ctmux and the local helpers running from its Windows app directory before
+updating; the updater refuses to replace files that are in use. The portable ZIP contains
+the desktop executable, `ctld.exe`, `ctmuxd.exe`, `ctl-taskd.exe`, resources and a
+`portable.json` inventory binding every file's SHA-256 digest to the app version
+and native target. Keep that directory together when moving a portable copy.
+GUI launch requires Microsoft's
+[WebView2 Evergreen Runtime](https://developer.microsoft.com/microsoft-edge/webview2/).
+`ctlup` installs the app files without installing WebView2; a missing runtime
+must be installed separately before launch.
+
+Windows releases also provide a standalone
+`ctlup-<bundle>-<target>.exe`, its `.sha256` checksum and `ctlup-<target>.json`
+metadata. Download the files for the native architecture from the same release,
+or from the same Nightly desktop Actions artifact. Compare `Get-FileHash -Algorithm
+SHA256` for the executable with the checksum before running it. The metadata
+records the target, app version, bundle identity and exact source revision.
+Run the downloaded executable with `app install` or `app update`; it can remain
+outside the installed app directory.
 
 For published packages, `ctlup` checks the release manifest and the package's
 SHA-256 checksum before replacing the app. An update keeps the previous app at
-the path printed by `ctlup`. Running daemons and their terminal sessions continue
-independently.
+the path printed by `ctlup`. On Windows, the previous directory is retained at
+`~/.tokn/ctl/apps/.ctlup-ctmux/previous`. Windows replacement uses two directory
+renames with a short gap when the app path is absent. It retains an interrupted
+replacement at `.ctlup-ctmux/pending-previous`; the next `ctlup app install` or
+`ctlup app update` restores that directory if the app is missing, or retains it
+as the previous app if activation completed. This is recoverable replacement,
+not an atomic directory exchange. The updater does not stop running apps or
+helpers to make room. On macOS and Linux, independently running daemons and their
+terminal sessions continue.
 Desktop packages can become available after their matching runtime release.
 
 On macOS, `pnpm ctld:build` from a checkout prepares a signed local helper
@@ -257,9 +306,10 @@ verified afterward. A failed post-install check reports that activation may
 have completed; it does not retry, roll back or stop services automatically.
 
 When a Unix host has a missing or recognized outdated agent, `ctl` prints a
-`ctlup update` command for the selected host or SSH alias. Run it from macOS
-or Linux, then reconnect. Windows clients and targets are outside the
-updater's supported platforms.
+`ctlup update` command for the selected host or SSH alias. Run it, then reconnect.
+Whole-runtime installation and deployment support Windows x64 clients and SSH
+targets as well as the supported Unix platforms. Windows ARM64 currently supports
+the local desktop app commands above; ARM64 whole-runtime bundles are unavailable.
 
 ## Desktop and migration
 

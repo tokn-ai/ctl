@@ -1,6 +1,7 @@
 //! Executables and dependency edges in public and managed component bundles.
 
 use crate::component::ComponentInfo;
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 pub const MAX_FILE_BYTES: usize = 128 * 1024 * 1024;
@@ -9,6 +10,20 @@ pub const MAX_TOTAL_BYTES: usize = 512 * 1024 * 1024;
 
 pub const SERVICES: [&str; 4] = ["ctl-agent", "ctmuxd", "ctl-taskd", "ctld"];
 pub const ALL: [&str; 6] = ["ctl-agent", "ctmuxd", "ctl-taskd", "ctld", "ctl", "ctmux"];
+
+pub(crate) fn windows_target(target: &str) -> bool {
+  target.split('-').any(|part| part == "windows")
+}
+
+/// File name of a logical executable for the bundle's target.
+#[must_use]
+pub fn executable_name<'a>(target: &str, component: &'a str) -> Cow<'a, str> {
+  if windows_target(target) {
+    Cow::Owned(format!("{component}.exe"))
+  } else {
+    Cow::Borrowed(component)
+  }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Layout {

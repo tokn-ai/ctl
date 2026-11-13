@@ -134,7 +134,7 @@ jobs:
       - name: Package remote components
         shell: bash
         run: |
-          ./scripts/ci/package-agent-bundle.sh \
+          node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/ci/package-agent-bundle.mts \
           "${{ matrix.target }}" \
           "${{ needs.metadata.outputs.app_version }}" \
           "${{ needs.metadata.outputs.bundle_id }}" \
@@ -153,6 +153,74 @@ jobs:
           name: ctl-agent-bundle-${{ matrix.target }}
           path: target/agent-bundles/*
           if-no-files-found: error
+          overwrite: true
+          retention-days: 30
+
+  remote-agent-windows:
+    name: Remote agent (x86_64-pc-windows-msvc)
+    needs: metadata
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.99.0
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: agent-x86_64-pc-windows-msvc
+
+      - name: Build Windows components
+        run: >-
+          cargo build --locked --release --target x86_64-pc-windows-msvc
+          -p ctl-agent -p ctmuxd -p ctl-taskd -p ctld -p ctl-cli -p ctmux-cli
+
+      - name: Package Windows components
+        shell: pwsh
+        run: |
+          $arguments = @(
+            'x86_64-pc-windows-msvc',
+            '${{ needs.metadata.outputs.app_version }}',
+            '${{ needs.metadata.outputs.bundle_id }}',
+            '${{ needs.metadata.outputs.git_revision }}',
+            'target/agent-bundles'
+          )
+          node scripts/ci/package-agent-bundle.mts @arguments
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/ci/package-updater.mts @arguments
+
+      - name: Exercise the Windows updater against the packaged components
+        run: >-
+          node scripts/ci/windows-ctlup-smoke.mts
+          target/x86_64-pc-windows-msvc/release
+          target/agent-bundles
+
+      - name: Validate and assemble Windows bundle set
+        run: >-
+          node scripts/ci/assemble-agent-bundle-set.mts --windows
+          "${{ needs.metadata.outputs.app_version }}"
+          "${{ needs.metadata.outputs.bundle_id }}"
+          "${{ needs.metadata.outputs.git_revision }}"
+          target/agent-bundles
+          target/agent-windows-bundle-set
+
+      - name: Upload Windows remote-agent bundle set
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctl-agent-windows-bundle-set
+          path: target/agent-windows-bundle-set/*
+          if-no-files-found: error
+          overwrite: true
           retention-days: 30
 
   remote-agent-set:
@@ -169,7 +237,7 @@ jobs:
       - name: Download remote-agent bundles
         uses: actions/download-artifact@v5
         with:
-          pattern: ctl-agent-bundle-*
+          pattern: ctl-agent-bundle-{x86_64,aarch64}-{unknown-linux-musl,apple-darwin}
           path: target/agent-components
           merge-multiple: true
 
@@ -193,12 +261,15 @@ jobs:
           name: ctl-agent-bundle-set
           path: target/agent-bundle-set/*
           if-no-files-found: error
+          overwrite: true
           retention-days: 30
 
   component-release:
     name: Publish versioned component release
-    if: github.repository == 'tokn-ai/ctl' && startsWith(github.ref, 'refs/tags/v')
-    needs: [metadata, remote-agent-set]
+    if: >-
+      !cancelled() && github.repository == 'tokn-ai/ctl' && startsWith(github.ref, 'refs/tags/v') &&
+      needs.metadata.result == 'success' && needs.remote-agent-set.result == 'success'
+    needs: [metadata, remote-agent-set, remote-agent-windows]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -217,8 +288,9 @@ jobs:
       - name: Download component bundle set
         uses: actions/download-artifact@v5
         with:
-          name: ctl-agent-bundle-set
+          pattern: ctl-agent-{bundle-set,windows-bundle-set}
           path: target/component-release
+          merge-multiple: true
       - name: Publish complete component release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -235,6 +307,7 @@ jobs:
           name: ctl-agent-published-bundle-set
           path: target/component-release/*
           if-no-files-found: error
+          overwrite: true
           retention-days: 30
 
   bundle-pages:
@@ -244,7 +317,7 @@ jobs:
       needs.metadata.result == 'success' && needs.remote-agent-set.result == 'success' &&
       (github.ref == 'refs/heads/main' ||
       (startsWith(github.ref, 'refs/tags/v') && needs.component-release.result == 'success'))
-    needs: [metadata, remote-agent-set, component-release]
+    needs: [metadata, remote-agent-set, remote-agent-windows, component-release]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -270,8 +343,9 @@ jobs:
       - name: Download component bundle set
         uses: actions/download-artifact@v5
         with:
-          name: ${{ startsWith(github.ref, 'refs/tags/v') && 'ctl-agent-published-bundle-set' || 'ctl-agent-bundle-set' }}
+          pattern: ${{ startsWith(github.ref, 'refs/tags/v') && 'ctl-agent-published-bundle-set' || 'ctl-agent-{bundle-set,windows-bundle-set}' }}
           path: target/pages-incoming
+          merge-multiple: true
       - name: Configure Pages
         uses: actions/configure-pages@v5
       - name: Restore previous complete bundle site
@@ -488,6 +562,7 @@ jobs:
     needs:
       - metadata
       - remote-agent-set
+      - remote-agent-windows
       - component-release
     strategy:
       fail-fast: false
@@ -548,8 +623,9 @@ jobs:
       - name: Download remote-agent bundles
         uses: actions/download-artifact@v5
         with:
-          name: ${{ startsWith(github.ref, 'refs/tags/v') && github.repository == 'tokn-ai/ctl' && 'ctl-agent-published-bundle-set' || 'ctl-agent-bundle-set' }}
+          pattern: ${{ startsWith(github.ref, 'refs/tags/v') && github.repository == 'tokn-ai/ctl' && 'ctl-agent-published-bundle-set' || 'ctl-agent-{bundle-set,windows-bundle-set}' }}
           path: apps/desktop/src-tauri/resources/agent-bundles
+          merge-multiple: true
 
       - name: Detect Apple signing configuration
         id: signing
@@ -718,6 +794,105 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  windows-desktop:
+    name: Windows desktop (${{ matrix.target }})
+    if: >-
+      always() && needs.metadata.result == 'success' && needs.remote-agent-set.result == 'success' &&
+      (github.event_name == 'push' || inputs.build_desktop) &&
+      (!startsWith(github.ref, 'refs/tags/v') || github.repository != 'tokn-ai/ctl' || needs.component-release.result == 'success')
+    needs:
+      - metadata
+      - remote-agent-set
+      - remote-agent-windows
+      - component-release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
+          - runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Install Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.99.0
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-desktop-${{ matrix.target }}
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Download remote-agent bundles
+        uses: actions/download-artifact@v5
+        with:
+          pattern: ${{ startsWith(github.ref, 'refs/tags/v') && github.repository == 'tokn-ai/ctl' && 'ctl-agent-published-bundle-set' || 'ctl-agent-{bundle-set,windows-bundle-set}' }}
+          path: apps/desktop/src-tauri/resources/agent-bundles
+          merge-multiple: true
+
+      - name: Build native desktop companions and updater
+        run: |
+          cargo build --locked --release --target '${{ matrix.target }}' -p ctld -p ctmuxd -p ctl-taskd -p ctl-cli
+          if ($LASTEXITCODE -ne 0) { throw 'Native companion build failed.' }
+          New-Item -ItemType Directory -Force apps/desktop/src-tauri/binaries | Out-Null
+          foreach ($component in @('ctld', 'ctmuxd', 'ctl-taskd')) {
+            Copy-Item "target/${{ matrix.target }}/release/$component.exe" "apps/desktop/src-tauri/binaries/$component-${{ matrix.target }}.exe"
+          }
+
+      - name: Build the native desktop executable
+        working-directory: apps/desktop
+        run: pnpm --workspace-root desktop:build --target '${{ matrix.target }}' --no-bundle --config src-tauri/tauri.bundle.conf.json --config src-tauri/bundle.windows.conf.json
+
+      - name: Package portable desktop and standalone updater
+        run: |
+          node scripts/ci/package-desktop-bundle.mts '${{ matrix.target }}' '${{ needs.metadata.outputs.app_version }}' '${{ needs.metadata.outputs.bundle_id }}' '${{ needs.metadata.outputs.git_revision }}' not_applicable 'target/${{ matrix.target }}/release' target/desktop-assets apps/desktop/src-tauri/resources/agent-bundles
+          if ($LASTEXITCODE -ne 0) { throw 'Portable desktop packaging failed.' }
+          $updaterManifest = 'ctlup-${{ matrix.target }}.json'
+          $resources = 'apps/desktop/src-tauri/resources/agent-bundles'
+          if ('${{ matrix.target }}' -eq 'x86_64-pc-windows-msvc' -and (Test-Path "$resources/$updaterManifest")) {
+            # The runtime and desktop share the first published x64 updater bytes.
+            $updaterBinary = 'ctlup-${{ needs.metadata.outputs.bundle_id }}-${{ matrix.target }}.exe'
+            foreach ($asset in @($updaterBinary, "$updaterBinary.sha256", $updaterManifest)) {
+              Copy-Item "$resources/$asset" "target/desktop-assets/$asset"
+            }
+          } else {
+            node scripts/ci/package-updater.mts '${{ matrix.target }}' '${{ needs.metadata.outputs.app_version }}' '${{ needs.metadata.outputs.bundle_id }}' '${{ needs.metadata.outputs.git_revision }}' target/desktop-assets
+            if ($LASTEXITCODE -ne 0) { throw 'Standalone updater packaging failed.' }
+          }
+
+      - name: Install, update and repair the packaged desktop in a disposable home
+        run: ./scripts/ci/windows-app.ps1 -Target '${{ matrix.target }}' -Archive 'target/desktop-assets/ctmux-${{ needs.metadata.outputs.bundle_id }}-${{ matrix.target }}.zip'
+
+      - name: Upload portable desktop and updater assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctmux-desktop-${{ matrix.target }}
+          path: target/desktop-assets/*
+          if-no-files-found: error
+          retention-days: 30
+
   draft-release:
     name: Attach available release assets
     if: >-
@@ -730,6 +905,7 @@ jobs:
       - metadata
       - remote-agent-set
       - desktop
+      - windows-desktop
       - ctld
       - component-release
     runs-on: ubuntu-24.04
@@ -759,8 +935,9 @@ jobs:
       - name: Download remote-agent bundle set
         uses: actions/download-artifact@v5
         with:
-          name: ${{ startsWith(github.ref, 'refs/tags/v') && 'ctl-agent-published-bundle-set' || 'ctl-agent-bundle-set' }}
+          pattern: ${{ startsWith(github.ref, 'refs/tags/v') && 'ctl-agent-published-bundle-set' || 'ctl-agent-{bundle-set,windows-bundle-set}' }}
           path: target/release-assets
+          merge-multiple: true
 
       - name: Download standalone ctld assets
         uses: actions/download-artifact@v5

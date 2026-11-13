@@ -3,17 +3,17 @@
 use ctl_core::bundles::{Bundle, MANIFEST_FILE, Manifest};
 use ctl_core::component_update::BundleChannel;
 use ctl_core::installations::Installations;
+use ctl_core::private_fs;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::{self, Write as _};
-use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 
 mod remote;
 #[cfg(test)]
 mod tests;
 mod updater;
-pub use remote::{remote_rollback, remote_status};
+pub use remote::{remote_account_id, remote_rollback, remote_status};
 pub use updater::{
   provision_manager, provision_manager_from, updater_for_bundle, updater_for_manifest,
 };
@@ -116,15 +116,24 @@ pub async fn install_archive_with_progress(
 ) -> io::Result<Bundle> {
   let home = home.to_owned();
   let bytes = bytes.to_vec();
-  tokio::task::spawn_blocking(move || {
+  let (stage, on_progress) = tokio::task::spawn_blocking(move || {
     on_progress(crate::RemoteInstallEvent::Extracting);
     let (manifest, files) = unpack_archive(&bytes)?;
+    if !ctl_core::bundles::local_target(&manifest.target_triple) {
+      return Err(invalid("archive installation requires a native build"));
+    }
     let layout = ctl_core::bundle_layout::Layout::managed(manifest.schema_version)
       .ok_or_else(|| invalid("unknown installation layout"))?;
     for &file_name in layout.names() {
       on_progress(crate::RemoteInstallEvent::Checking { file_name });
     }
-    let stage = StagedBundle::new(&manifest, &files)?;
+    Ok((stage_bundle(&manifest, &files)?, on_progress))
+  })
+  .await
+  .map_err(io::Error::other)??;
+  #[cfg(windows)]
+  provision_manager_from(&home, &std::env::current_exe()?).await?;
+  tokio::task::spawn_blocking(move || {
     on_progress(crate::RemoteInstallEvent::Activating);
     let installations = Installations::new(&home);
     let installed = installations.activate(&Bundle::open(&stage.0)?)?;
@@ -140,48 +149,49 @@ pub async fn install_archive_with_progress(
   .map_err(io::Error::other)?
 }
 
-struct StagedBundle(PathBuf);
-
-impl StagedBundle {
-  fn new(manifest: &Manifest, files: &BTreeMap<String, Vec<u8>>) -> io::Result<Self> {
-    // The installation transaction performs the complete account/path checks.
-    // Stage in the OS temporary directory so an absent account root need not be
-    // provisioned by a second implementation of those checks.
-    let path = std::env::temp_dir().join(format!("ctlup-stage-{}", uuid::Uuid::new_v4()));
-    std::fs::DirBuilder::new().mode(0o700).create(&path)?;
-    let stage = Self(path);
-    for (name, bytes) in files {
-      let destination = stage.0.join(name);
-      if let Some(parent) = destination.parent() {
-        std::fs::create_dir_all(parent)?;
-      }
-      let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&destination)?;
-      file.write_all(bytes)?;
-      file.set_permissions(std::fs::Permissions::from_mode(
-        if manifest.files[name].executable {
-          0o700
-        } else {
-          0o600
-        },
-      ))?;
-      file.sync_all()?;
+fn stage_bundle(
+  manifest: &Manifest,
+  files: &BTreeMap<String, Vec<u8>>,
+) -> io::Result<TemporaryDirectory> {
+  // The installation transaction performs the complete account/path checks.
+  // Stage in the OS temporary directory so an absent account root need not be
+  // provisioned by a second implementation of those checks.
+  let stage = TemporaryDirectory::new("stage")?;
+  for (name, bytes) in files {
+    let destination = stage.0.join(name);
+    if let Some(parent) = destination.parent() {
+      std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(
-      stage.0.join(MANIFEST_FILE),
-      serde_json::to_vec(manifest).map_err(io::Error::other)?,
-    )?;
-    std::fs::set_permissions(
-      stage.0.join(MANIFEST_FILE),
-      std::fs::Permissions::from_mode(0o600),
-    )?;
-    Ok(stage)
+    let mut file = private_fs::options()
+      .write(true)
+      .create_new(true)
+      .open(&destination)?;
+    file.write_all(bytes)?;
+    if manifest.files[name].executable {
+      private_fs::set_executable(&file)?;
+    }
+    file.sync_all()?;
+  }
+  let mut file = private_fs::options()
+    .write(true)
+    .create_new(true)
+    .open(stage.0.join(MANIFEST_FILE))?;
+  serde_json::to_writer(&mut file, manifest).map_err(io::Error::other)?;
+  file.sync_all()?;
+  Ok(stage)
+}
+
+pub(crate) struct TemporaryDirectory(pub(crate) PathBuf);
+
+impl TemporaryDirectory {
+  pub(crate) fn new(kind: &str) -> io::Result<Self> {
+    let path = std::env::temp_dir().join(format!("ctlup-{kind}-{}", uuid::Uuid::new_v4()));
+    private_fs::create_directory(&path)?;
+    Ok(Self(path))
   }
 }
 
-impl Drop for StagedBundle {
+impl Drop for TemporaryDirectory {
   fn drop(&mut self) {
     let _ = std::fs::remove_dir_all(&self.0);
   }
@@ -224,11 +234,9 @@ pub fn set_channel(home: &Path, channel: BundleChannel) -> io::Result<()> {
   safe_directory(&root)?;
   let path = root.join(format!(".ctlup-settings-{}", uuid::Uuid::new_v4()));
   let result = (|| {
-    use std::os::unix::fs::OpenOptionsExt as _;
-    let mut file = std::fs::OpenOptions::new()
+    let mut file = private_fs::options()
       .write(true)
       .create_new(true)
-      .mode(0o600)
       .open(&path)?;
     serde_json::to_writer(
       &mut file,
@@ -238,8 +246,9 @@ pub fn set_channel(home: &Path, channel: BundleChannel) -> io::Result<()> {
       },
     )?;
     file.sync_all()?;
+    drop(file);
     std::fs::rename(&path, root.join("ctlup.json"))?;
-    std::fs::File::open(&root)?.sync_all()
+    private_fs::sync_directory(&root)
   })();
   if result.is_err() {
     let _ = std::fs::remove_file(&path);
@@ -248,7 +257,6 @@ pub fn set_channel(home: &Path, channel: BundleChannel) -> io::Result<()> {
 }
 
 pub(super) fn safe_directory(path: &Path) -> io::Result<()> {
-  use std::os::unix::fs::MetadataExt as _;
   let home = path
     .ancestors()
     .find(|ancestor| ancestor.file_name().is_some_and(|name| name == ".tokn"))
@@ -265,24 +273,18 @@ pub(super) fn safe_directory(path: &Path) -> io::Result<()> {
     }
     match std::fs::symlink_metadata(&directory) {
       Ok(metadata) => {
-        if !metadata.is_dir()
-          || metadata.uid() != rustix::process::getuid().as_raw()
-          || metadata.mode() & 0o022 != 0
-        {
+        if !private_fs::is_directory(&metadata) {
           return Err(invalid(
             "ctlup storage must be owned directories, not links or writable by others",
           ));
         }
       }
       Err(error) if error.kind() == io::ErrorKind::NotFound => {
-        match std::fs::DirBuilder::new().mode(0o700).create(&directory) {
+        match private_fs::create_directory(&directory) {
           Ok(()) => {}
           Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
             let metadata = std::fs::symlink_metadata(&directory)?;
-            if !metadata.is_dir()
-              || metadata.uid() != rustix::process::getuid().as_raw()
-              || metadata.mode() & 0o022 != 0
-            {
+            if !private_fs::is_directory(&metadata) {
               return Err(invalid("unsafe concurrent ctlup storage creation"));
             }
           }
@@ -296,7 +298,6 @@ pub(super) fn safe_directory(path: &Path) -> io::Result<()> {
 }
 
 pub(super) fn storage_exists(path: &Path) -> io::Result<bool> {
-  use std::os::unix::fs::MetadataExt as _;
   let home = path
     .ancestors()
     .find(|ancestor| ancestor.file_name().is_some_and(|name| name == ".tokn"))
@@ -316,10 +317,7 @@ pub(super) fn storage_exists(path: &Path) -> io::Result<bool> {
       Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
       Err(error) => return Err(error),
     };
-    if !metadata.is_dir()
-      || metadata.uid() != rustix::process::getuid().as_raw()
-      || metadata.mode() & 0o022 != 0
-    {
+    if !private_fs::is_directory(&metadata) {
       return Err(invalid(
         "ctlup storage must be owned directories, not links or writable by others",
       ));

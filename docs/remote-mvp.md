@@ -139,11 +139,11 @@ The fixed-command allowlist includes the identity flag without accepting arbitra
 remote commands. See `docs/ctmux-workspace.md` for identity storage and migration.
 
 When `ctl` recognizes a missing or outdated agent on a Unix host, it prints a
-`ctlup update` command. Run it from macOS or Linux, then reconnect. For a saved
+`ctlup update` command. Run it from macOS, Linux, or Windows x64, then reconnect. For a saved
 host, the updater uses the selected VPN or SSH gateway route and verifies the
 machine ID before uploading.
 
-`ctlup` resolves the configured Dev or Stable publication and verifies the
+`ctlup` resolves the configured Nightly or Stable publication and verifies the
 matching runtime and updater for the target. Use `--working-tree` to build
 Linux x64 or ARM64 from a checkout. `CTL_REMOTE_BUNDLES_DIR` is an explicit
 local source override. Network errors do not silently select an older build.
@@ -301,11 +301,11 @@ currently manages local tasks, while remote tasks are available through the CLI.
 - SSH authentication must work for a non-interactive remote command. Password
   and host-key prompts remain OpenSSH behavior, but key, agent, or certificate
   authentication is preferable for unattended reconnects.
-- Windows hosts use `--remote-platform windows` with the server's default
-  cmd.exe shell. Install `ctl-agent.exe`, `ctl-taskd.exe`, and `ctmuxd.exe` together
-  on the remote PATH. Their data endpoints are owner-restricted named pipes. PowerShell/custom
-  server shells and desktop remote-platform selection remain unverified or
-  unimplemented.
+- Use `--remote-platform windows` in the CLI or select **Windows** under
+  **Server platform** in the desktop connection settings. The server uses its
+  default `cmd.exe` SSH shell. Install `ctl-agent.exe`, `ctl-taskd.exe`, and
+  `ctmuxd.exe` together on the remote PATH. Their data endpoints are
+  owner-restricted named pipes. Custom SSH server shells remain unverified.
 - Journals, checkpoints, shell awareness, and reconnect tokens are memory-only.
 - Arbitrary gateway commands, files, port forwarding, desktop streaming, and
   `ctmuxd` maintenance control are not exposed by `ctl-agent`.

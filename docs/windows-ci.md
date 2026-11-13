@@ -15,6 +15,7 @@ platform is Unix, even when the client runs on Windows.
 | Local `ctl ctmux` / `ctmux` | Named-pipe transport and ConPTY sessions | Auto-start, attachment, reconnect, resize, final output and exit status |
 | Local `ctl task` | Named-pipe transport, background Job Objects and managed ConPTY tasks | Auto-start, lifecycle, logs, recovery and descendant cleanup |
 | Local `ctld` | Owner-only named pipe, daemon lifecycle and available local VPN services | Detached startup, status without a container engine, cooperative restart/stop and pipe reuse |
+| Local desktop app and `ctlup app` | Portable per-user x64 and ARM64 installs, with bundled native daemons | Native build, ZIP validation, install, idempotent update and repair in disposable homes |
 | Local SSH forwards | ctld owns loopback listeners and native OpenSSH connections | Authenticated binary transfers, configuration aliases and proxies, enable/update/disable, failure isolation and owner cleanup |
 | Remote ctmux | `ctl-agent.exe connect` routes to `ctmuxd.exe` | Authenticated loopback auto-start, reconnect and both destination selectors |
 | Remote tasks | `ctl-agent.exe connect --service task` routes to `ctl-taskd.exe` | Authenticated loopback lifecycle, log streams, working directory and persistence across channels |
@@ -68,6 +69,62 @@ A separate Windows job builds executables and runs
 authenticated [SSH](../scripts/ci/windows-ssh.ps1) fixtures using PowerShell.
 The SSH test requiring server setup is explicitly invoked with `--ignored` by
 its fixture, rather than counted as covered by ordinary `cargo test`.
+
+## Native desktop packaging and installation
+
+The desktop installation matrix runs on native `windows-2025` x64 and
+`windows-11-arm` ARM64 runners. The ARM64 runner is a
+[GitHub-hosted Windows runner](https://docs.github.com/en/actions/reference/runners/github-hosted-runners),
+so the ARM64 binary and installation fixture execute on ARM64 rather than relying
+on a cross-build result.
+
+[windows-app.ps1](../scripts/ci/windows-app.ps1) invokes an explicitly ignored
+Rust integration fixture that supplies a disposable home to the updater. The
+ordinary CI job builds the frontend and native app once through `ctlup app`'s
+local-build path, then checks installation, update and repair while retaining the
+saved channel. The script also runs the ordinary native activation, storage locking,
+interruption-recovery and Job Object build-cancellation tests before the ignored
+fixture. It leaves `HOME`, `USERPROFILE`, the active app and normal daemon
+owners untouched. To run the fixture locally after installing frontend dependencies:
+
+```powershell
+./scripts/ci/windows-app.ps1 -Target x86_64-pc-windows-msvc
+# On native Windows ARM64:
+./scripts/ci/windows-app.ps1 -Target aarch64-pc-windows-msvc
+```
+
+The [bundle workflow](../.github/workflows/bundles.yml) builds release executables
+for both architectures and assembles `ctmux-<bundle>-<target>.zip`. The archive has
+one `ctmux` directory containing `ctmux-app.exe`, `ctld.exe`, `ctmuxd.exe`,
+`ctl-taskd.exe`, resources and a `portable.json` file inventory. The packaging
+validator checks native PE architecture and file hashes. CI then supplies the
+exact ZIP to the updater's install/update/repair fixture, avoiding a second desktop
+build:
+
+```powershell
+./scripts/ci/windows-app.ps1 -Target x86_64-pc-windows-msvc -Archive path/to/ctmux-bundle-x86_64-pc-windows-msvc.zip
+```
+
+The same artifact includes the architecture's standalone `ctlup-<bundle>-<target>.exe`,
+checksum and source-bound updater metadata. Release attachment validates both the
+portable package and matching updater before advertising that desktop target.
+The installed GUI is `<home>/.tokn/ctl/apps/ctmux/ctmux-app.exe`; MSI, NSIS and
+administrator installation are outside this portable path. See the
+[desktop install guide](component-updates.md#install-or-update-the-desktop-app).
+
+Windows activation refuses replacement while the app or its bundled helpers are
+using installed files. It retains the previous directory at
+`<home>/.tokn/ctl/apps/.ctlup-ctmux/previous`. Replacement has a short directory-rename
+gap; a pending previous directory permits recovery at the next install/update if
+execution stops between renames. Native tests cover that recovery rather than
+claiming an atomic directory exchange.
+
+The script reports whether the WebView2 Evergreen Runtime is installed, using
+Microsoft's documented
+[runtime detection locations](https://learn.microsoft.com/microsoft-edge/webview2/concepts/distribution).
+A missing runtime is a GUI launch prerequisite diagnostic; the fixture validates
+installation without opening a GUI or installing system software. It does not
+establish interactive rendering, keyboard or accessibility behavior.
 
 ## Windows local ctld owner
 
@@ -235,7 +292,9 @@ prefix followed by `exec ctl-agent connect`). CLI clients
 can select `--remote-platform windows` to use the fixed `ctl-agent.exe connect`
 command with the Windows OpenSSH server's default cmd.exe shell. The platform
 is independent of the client OS; arbitrary shell commands remain disallowed.
-The desktop currently selects Unix remote commands.
+The desktop saves the platform with each connection method. Selecting Windows
+uses the same fixed gateway command and OpenSSH configuration, including the
+existing host-key policy and credentials. Older saved methods default to Unix.
 
 [Proposal 0006](proposals/0006-remote-tasks.md) extends this convention to tasks:
 `ctl --host HOST --remote-platform windows task ...` selects
@@ -243,9 +302,11 @@ The desktop currently selects Unix remote commands.
 interactive attachment opens the ordinary ctmux channel on the same target.
 The native SSH fixture exercises both services and both destination selectors.
 
-Windows SSH targets need `ctl-agent.exe` and the relevant companion executables
-installed on the server's `PATH`. Daemon auto-start is supported after installation.
-Bundle updates use `ctlup` on macOS or Linux and support Unix targets.
+Run `ctlup update --destination ALIAS --remote-platform windows` to provision a
+Windows x64 SSH account. SSH prefers the managed agent and also supports an
+existing agent and companion executables on the server's `PATH`. The Windows CI
+fixtures exercise local and OpenSSH installation, updater replacement, and
+runtime rollback.
 
 `ctl-agent` uses the shared IPC stream and only the data endpoint. Its installed
 companion is `ctmuxd.exe` on Windows. Startup requests both `DETACHED_PROCESS`
@@ -284,14 +345,14 @@ not covered by the loopback fixture.
 
 - Remote interactive-task attachment over SSH. Local managed ConPTY tasks and
   remote ctmux attachment are covered separately.
-- Desktop remote-platform selection.
-- Native process inspection and Windows desktop bundle installation checks.
+- End-to-end desktop verification against a Windows SSH server.
+- Native process inspection and interactive desktop rendering checks.
 - Cross-account ACL tests and filesystem ACL hardening for custom data paths.
 - Persistent logs, restart policies, workspace task integration, and other
   unfinished task features shared with Unix.
 
-Whole-workspace Rust checks cover the desktop backend; producing and installing
-a Windows desktop bundle remains separate validation.
+Whole-workspace Rust checks cover the desktop backend. The separate native
+desktop matrix covers producing and installing portable Windows packages.
 
 ## Interactive managed tasks
 

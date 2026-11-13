@@ -1,7 +1,7 @@
 use super::{MAX_DESCRIPTOR_BYTES, run_builder};
+use ctl_core::private_fs;
 use serde::Deserialize;
 use std::io;
-use std::os::unix::fs::DirBuilderExt as _;
 use std::path::{Path, PathBuf};
 
 /// A desktop package built from the current source checkout.
@@ -25,7 +25,7 @@ struct BuildResult {
 /// Reports a missing checkout, build failures, or invalid output metadata.
 pub async fn build_desktop(caller: &Path, output: &Path) -> io::Result<DesktopBuild> {
   let workspace = checkout(caller)?;
-  std::fs::DirBuilder::new().mode(0o700).create(output)?;
+  private_fs::create_directory(output)?;
   let output = output.canonicalize()?;
   let mut command = tokio::process::Command::new(
     std::env::var_os("CTL_NODE_PROGRAM").unwrap_or_else(|| "node".into()),
@@ -46,13 +46,22 @@ pub async fn build_desktop(caller: &Path, output: &Path) -> io::Result<DesktopBu
     .env_remove("CTMUX_DEV_CTLD_EXECUTABLE")
     .env_remove("CTMUX_DEV_APP_FAILURE_MARKER");
   run_builder(command).await?;
-  let bytes = crate::components::read_input(&output.join("result.json"), MAX_DESCRIPTOR_BYTES)?;
-  let result: BuildResult = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
-  let name = if cfg!(target_os = "macos") {
+  read_output(&output, archive_name())
+}
+
+fn archive_name() -> &'static str {
+  if cfg!(target_os = "macos") {
     "ctmux.app.tar.gz"
+  } else if cfg!(windows) {
+    "ctmux.zip"
   } else {
     "ctmux.AppImage"
-  };
+  }
+}
+
+fn read_output(output: &Path, name: &str) -> io::Result<DesktopBuild> {
+  let bytes = crate::components::read_input(&output.join("result.json"), MAX_DESCRIPTOR_BYTES)?;
+  let result: BuildResult = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
   if result.schema_version != 1
     || !crate::remote_bundle::safe_id(&result.app_version)
     || !result
@@ -67,7 +76,10 @@ pub async fn build_desktop(caller: &Path, output: &Path) -> io::Result<DesktopBu
   }
   let archive = output.join(name);
   let metadata = std::fs::symlink_metadata(&archive)?;
-  if !metadata.is_file() || metadata.len() == 0 || metadata.len() > 512 * 1024 * 1024 {
+  if !private_fs::is_owned_file(&metadata)
+    || metadata.len() == 0
+    || metadata.len() > 512 * 1024 * 1024
+  {
     return Err(io::Error::other("invalid local desktop package"));
   }
   Ok(DesktopBuild {
@@ -98,3 +110,6 @@ fn checkout(caller: &Path) -> io::Result<PathBuf> {
       )
     })
 }
+
+#[cfg(test)]
+mod tests;

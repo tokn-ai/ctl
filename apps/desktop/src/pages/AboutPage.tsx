@@ -8,7 +8,7 @@ import { UpdateComponentsDialog } from "../components/components/UpdateComponent
 import { PublishedBundleStatus } from "../components/components/PublishedBundleStatus";
 import { SshHostFlow } from "../components/sessions/SshHostFlow";
 import { useComponentVersions } from "../features/about/useComponentVersions";
-import type { ComponentActionPreflight, ComponentActionResult, ComponentUpdateContext, ConnectionTarget } from "../lib/types";
+import type { ComponentActionPreflight, ComponentActionResult, ComponentUpdateContext, ConnectionTarget, SshConnectionTarget } from "../lib/types";
 import "../components/about/about.css";
 
 interface Props {
@@ -37,6 +37,8 @@ export function AboutPage({ visible, on_close, on_restarted, on_dialog_change, e
   const app = model.snapshot?.components.find((row) => row.component === "ctmux");
   const local = model.snapshot?.components.filter((row) => row.location === "local" && row.component !== "ctmux") ?? [];
   const remote = model.snapshot?.components.filter((row) => row.location === "remote") ?? [];
+  const manageable_targets = remote_targets.filter((target): target is SshConnectionTarget =>
+    target.kind === "ssh" && target.remote_platform !== "windows");
   const table_props = { busy_id: model.busy_id, restarting: model.restarting, action_error: model.action_error, on_restart: (id: string) => void model.requestRestart(id) };
 
   return <>
@@ -57,9 +59,9 @@ export function AboutPage({ visible, on_close, on_restarted, on_dialog_change, e
         <ComponentBundlePanel visible={visible} on_selected={() => void model.refresh()} />
         <section className="about-section" aria-labelledby="about-local"><h2 id="about-local">Local components</h2><p className="about-muted">On disk shows the selected local build. Restart separately to apply it to a running service.</p>{local.length ? <ComponentVersionTable rows={local} {...table_props} /> : !model.loading ? <p className="about-muted">Local component versions are unavailable.</p> : null}</section>
         <section className="about-section" aria-labelledby="about-remote"><h2 id="about-remote">Remote hosts</h2><p className="about-muted">Expand a host to compare its components. Check host authenticates through its preferred route. Updating installs verified components and keeps sessions; restart separately after confirmation.</p>{remote.length ? <ComponentVersionTable rows={remote} {...table_props} on_manage_host={(host_id, mode) => {
-          const target = remote_targets.find((target) => target.kind === "ssh" && target.host_id === host_id);
+          const target = manageable_targets.find((target) => target.host_id === host_id);
           if (target) { setComponentNotice(null); if (mode === "update") setUpdateContext({ targets: [target] }); else setComponentFlow({ target, mode }); }
-        }} manageable_host_ids={remote_targets.flatMap((target) => target.kind === "ssh" && target.host_id ? [target.host_id] : [])} /> : !model.loading ? <p className="about-empty">No saved or connected remote hosts.</p> : null}</section>
+        }} manageable_host_ids={manageable_targets.flatMap((target) => target.host_id ? [target.host_id] : [])} /> : !model.loading ? <p className="about-empty">No saved or connected remote hosts.</p> : null}</section>
         <div className="about-protocol-legend" aria-label="Protocol status legend">
           <span className="about-protocol-current"><Icon name="check" size={14} />Current protocol</span>
           <span className="about-protocol-compatible"><Icon name="check" size={14} />Compatible, different version</span>

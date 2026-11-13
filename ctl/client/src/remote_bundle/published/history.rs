@@ -1,6 +1,6 @@
 use super::{
-  BundleChannel, Error, MAX_BUNDLE_SET_BYTES, PublishedTarget, Resolver, is_prerelease,
-  parse_published_manifest, published_targets,
+  BUNDLE_SET_FILE, BundleChannel, Error, MAX_BUNDLE_SET_BYTES, PublishedTarget, Resolver,
+  is_prerelease, parse_published_manifest,
 };
 use crate::remote_bundle::{safe_id, valid_bundle_id};
 use serde::{Deserialize, Serialize};
@@ -232,7 +232,10 @@ impl Resolver {
       .root
       .join(&format!("sets/{}/bundle-set.json", entry.publication_id))
       .map_err(|error| Error::Invalid(error.to_string()))?;
-    let manifest = parse_published_manifest(&self.read(&url, MAX_BUNDLE_SET_BYTES).await?)?;
+    let manifest = parse_published_manifest(
+      &self.read(&url, MAX_BUNDLE_SET_BYTES).await?,
+      BUNDLE_SET_FILE,
+    )?;
     if manifest.app_version != entry.app_version
       || manifest.bundle_id != entry.bundle_id
       || manifest.git_revision != entry.git_revision
@@ -243,7 +246,7 @@ impl Resolver {
     }
     Ok(PublishedReleaseDetails {
       release: entry.release(current),
-      targets: published_targets(&manifest)?,
+      targets: self.catalog_targets(&url, &manifest).await?,
     })
   }
 }

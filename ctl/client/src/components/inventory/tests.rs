@@ -145,12 +145,16 @@ fn active_installation_is_visible_once_and_legacy_upload_pins_are_ignored() {
   let home = root.0.join("home");
   std::fs::create_dir_all(&home).unwrap();
   let fixture = Fixture::new("0.1.2", &"b".repeat(40)).with_clients();
+  #[cfg(windows)]
+  let fixture = fixture.for_windows();
   let target = ctl_core::paths::native_target();
   let components = serde_json::from_value(fixture.inner["components"].clone()).unwrap();
   let manifest = Manifest::new(target, Source::Ci, components, &fixture.files).unwrap();
   let cache = Store::cache(&home);
   let cached = cache.publish(&manifest, &fixture.files).unwrap();
   let installs = Installations::new(&home);
+  #[cfg(windows)]
+  installs.install_manager(b"fixture manager").unwrap();
   installs.activate(&cached).unwrap();
   let legacy = Store::new(&home);
   let old = legacy.publish(&manifest, &fixture.files).unwrap();

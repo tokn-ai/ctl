@@ -11,6 +11,7 @@ use crate::{CoreError, RemotePlatform, SSH_PROGRAM, SshConnectionOptions, SshInt
 
 mod identity;
 pub use identity::inspect_remote_id;
+pub(crate) use identity::inspect_remote_id_interactive;
 
 const PREPARE_COMMAND: &str = concat!(
   r#"printf 'ctl-maintenance-v1\n'; "#,

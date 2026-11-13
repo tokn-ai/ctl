@@ -1,9 +1,11 @@
 import { createHash } from "node:crypto";
 import { join } from "node:path";
-import { agentTargets, readAgentFile, validateAgentIdentity, type AgentBundleIdentity } from "./agent-bundle.mts";
+import { agentTargets, readAgentFile, validateAgentIdentity, windowsAgentTarget, type AgentBundleIdentity } from "./agent-bundle.mts";
 
 export const maxUpdaterBytes = 128 * 1024 * 1024;
 export const maxUpdaterManifestBytes = 16 * 1024;
+export const windowsUpdaterTargets = [windowsAgentTarget, "aarch64-pc-windows-msvc"] as const;
+const updaterTargets = [...agentTargets, ...windowsUpdaterTargets];
 
 export interface UpdaterManifest extends AgentBundleIdentity {
   schema_version: 1;
@@ -14,7 +16,8 @@ export interface UpdaterManifest extends AgentBundleIdentity {
 }
 
 export const updaterManifestName = (target: string): string => `ctlup-${target}.json`;
-export const updaterBinaryName = (identity: AgentBundleIdentity, target: string): string => `ctlup-${identity.bundle_id}-${target}`;
+export const updaterBinaryName = (identity: AgentBundleIdentity, target: string): string =>
+  `ctlup-${identity.bundle_id}-${target}${target.endsWith("-pc-windows-msvc") ? ".exe" : ""}`;
 export const updaterAssetNames = (manifest: UpdaterManifest): string[] => [manifest.binary, `${manifest.binary}.sha256`, updaterManifestName(manifest.target_triple)];
 
 export function parseUpdaterManifest(bytes: Buffer, identity: AgentBundleIdentity, target: string): UpdaterManifest {
@@ -27,7 +30,7 @@ export function parseUpdaterManifest(bytes: Buffer, identity: AgentBundleIdentit
   if (Object.keys(value).length !== fields.length || fields.some((name) => !Object.hasOwn(value, name)) ||
     manifest.schema_version !== 1 || manifest.app_version !== identity.app_version || manifest.bundle_id !== identity.bundle_id ||
     manifest.git_revision !== identity.git_revision || manifest.target_triple !== target ||
-    !(agentTargets as readonly string[]).includes(target) || manifest.binary !== updaterBinaryName(identity, target) ||
+    !(updaterTargets as readonly string[]).includes(target) || manifest.binary !== updaterBinaryName(identity, target) ||
     typeof manifest.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(manifest.sha256) ||
     !Number.isSafeInteger(manifest.size) || manifest.size < 1 || manifest.size > maxUpdaterBytes) {
     throw new Error("ctlup manifest does not match the publication identity");

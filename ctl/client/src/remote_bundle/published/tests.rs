@@ -231,14 +231,12 @@ async fn release_view_fetches_only_the_catalog_and_exact_manifest_and_checks_ide
         .await,
       Err(Error::NotAvailable(_))
     ));
-    assert_eq!(
-      server.requests.lock().unwrap().as_slice(),
-      [
-        "/bundles/catalog.json",
-        manifest_path.as_str(),
-        "/bundles/catalog.json"
-      ]
-    );
+    let mut expected = vec!["/bundles/catalog.json".into(), manifest_path.clone()];
+    if succeeds {
+      expected.push(format!("/bundles/sets/{id}/{WINDOWS_BUNDLE_SET_FILE}"));
+    }
+    expected.push("/bundles/catalog.json".into());
+    assert_eq!(*server.requests.lock().unwrap(), expected);
   }
 }
 
@@ -273,7 +271,8 @@ async fn check_reads_only_channel_and_metadata_while_download_verifies_archive()
     server.requests.lock().unwrap().as_slice(),
     [
       "/bundles/channels/nightly.json",
-      "/bundles/sets/test/bundle-set.json"
+      "/bundles/sets/test/bundle-set.json",
+      "/bundles/sets/test/bundle-set-windows.json"
     ]
   );
   let bundle = resolver
@@ -439,7 +438,6 @@ async fn exact_publication_cache_avoids_archive_redownload_but_not_fresh_discove
   std::fs::remove_dir_all(root).unwrap();
 }
 
-#[cfg(unix)]
 fn installation_routes(
   root: &reqwest::Url,
   target: &str,
@@ -449,6 +447,12 @@ fn installation_routes(
 ) -> (Vec<u8>, BTreeMap<String, Vec<u8>>) {
   use sha2::{Digest as _, Sha256};
   let fixture = Fixture::new(version, revision).with_clients();
+  let manifest = fixture.bind_archive(&fixture.archive());
+  let fixture = if target == WINDOWS_TARGET {
+    fixture.for_windows()
+  } else {
+    fixture
+  };
   let archive = fixture.archive();
   let archive_name = fixture.outer["targets"][target]["archive"]
     .as_str()
@@ -459,7 +463,9 @@ fn installation_routes(
   }))
   .unwrap();
   let updater = format!("fixture updater for {id}").into_bytes();
-  let binary = format!("ctlup-{version}-{target}");
+  let binary =
+    ctl_core::bundle_layout::executable_name(target, &format!("ctlup-{version}-{target}"))
+      .into_owned();
   let sidecar = UpdaterInfo {
     schema_version: 1,
     app_version: version.into(),
@@ -470,11 +476,9 @@ fn installation_routes(
     sha256: format!("{:x}", Sha256::digest(&updater)),
     size: updater.len() as u64,
   };
-  let routes = BTreeMap::from([
-    (
-      metadata_url.path().to_owned(),
-      fixture.bind_archive(&archive),
-    ),
+  let windows_manifest = (target == WINDOWS_TARGET).then(|| fixture.bind_archive(&archive));
+  let mut routes = BTreeMap::from([
+    (metadata_url.path().to_owned(), manifest),
     (format!("/bundles/sets/{id}/{archive_name}"), archive),
     (
       format!("/bundles/sets/{id}/ctlup-{target}.json"),
@@ -482,21 +486,20 @@ fn installation_routes(
     ),
     (format!("/bundles/sets/{id}/{binary}"), updater),
   ]);
+  if let Some(windows_manifest) = windows_manifest {
+    let metadata_url = metadata_url.join(WINDOWS_BUNDLE_SET_FILE).unwrap();
+    routes.insert(metadata_url.path().to_owned(), windows_manifest);
+  }
   (pointer, routes)
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn installation_download_pins_both_assets_when_the_channel_advances() {
-  use std::os::unix::fs::DirBuilderExt as _;
   let home = std::env::temp_dir().join(format!(
     "ctl-installation-publication-{}",
     uuid::Uuid::new_v4()
   ));
-  std::fs::DirBuilder::new()
-    .mode(0o700)
-    .create(&home)
-    .unwrap();
+  ctl_core::private_fs::create_directory(&home).unwrap();
   let target = "aarch64-apple-darwin";
   let channel_path = "/bundles/channels/nightly.json";
   let first_revision = "a".repeat(40);
@@ -564,6 +567,43 @@ async fn installation_download_pins_both_assets_when_the_channel_advances() {
     .unwrap();
   assert_eq!(current.git_revision, second_revision);
   std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test]
+async fn windows_installation_resolves_both_assets_from_its_companion_set() {
+  let revision = "a".repeat(40);
+  let server = Server::start(|root| {
+    let (pointer, mut routes) =
+      installation_routes(root, WINDOWS_TARGET, "first", "0.1.0", &revision);
+    routes.insert("/bundles/channels/nightly.json".into(), pointer);
+    routes
+  })
+  .await;
+  let home = crate::installation::TemporaryDirectory::new("windows-publication-test").unwrap();
+  let cache = home.0.join(".tokn/ctl/cache");
+  let resolver = server.resolver();
+  let (bundle, updater) = resolver
+    .download_installation_cached(
+      BundleChannel::Nightly,
+      WINDOWS_TARGET,
+      &cache.join("downloads"),
+      &cache.join("updaters"),
+      &|_| {},
+    )
+    .await
+    .unwrap();
+  assert_eq!(
+    updater.info.binary,
+    format!("ctlup-0.1.0-{WINDOWS_TARGET}.exe")
+  );
+  assert_eq!(bundle.git_revision, updater.info.git_revision);
+  let catalog = resolver.check(BundleChannel::Nightly).await.unwrap();
+  assert!(
+    catalog
+      .targets
+      .iter()
+      .any(|target| target.target_triple == WINDOWS_TARGET && target.compatible)
+  );
 }
 
 #[cfg(unix)]

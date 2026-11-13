@@ -63,6 +63,29 @@ fn direct_transports_use_the_same_alias_or_endpoint_as_the_broker() {
 }
 
 #[test]
+fn saved_methods_preserve_the_remote_platform_and_default_old_settings_to_unix() {
+  let mut value = serde_json::to_value(catalog()).unwrap();
+  value["hosts"][0]["connection_methods"][1]["target"]["remote_platform"] = json!("windows");
+  let decoded: HostCatalogDocument = serde_json::from_value(value.clone()).unwrap();
+  decoded.validate().unwrap();
+  assert_eq!(serde_json::to_value(&decoded).unwrap(), value);
+
+  for (method, platform) in [
+    ("office", crate::RemotePlatform::Unix),
+    ("lan", crate::RemotePlatform::Windows),
+  ] {
+    let resolved = resolve(&decoded, "work", Some(method)).unwrap();
+    let crate::ConnectionTarget::Ssh { options, .. } = resolved.target.to_core() else {
+      panic!("expected SSH transport");
+    };
+    assert_eq!(options.remote_platform, platform);
+  }
+
+  value["hosts"][0]["connection_methods"][1]["target"]["remote_platform"] = json!("unknown");
+  assert!(serde_json::from_value::<HostCatalogDocument>(value).is_err());
+}
+
+#[test]
 fn explicit_user_overrides_the_saved_account() {
   let resolved = resolve(&catalog(), "bob@work", None).unwrap();
   assert_eq!(

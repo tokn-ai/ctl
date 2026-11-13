@@ -3,7 +3,6 @@ use clap::ValueEnum;
 use ctl_client::component_update::{
   BuildSource, Package, PreparationPhase, PreparedUpdate, UpdateResult,
 };
-use ctl_client::hosts::ConnectionTargetDto;
 use ctl_client::remote_bundle::pr;
 use ctl_core::bundles::Purpose;
 use serde::Serialize;
@@ -38,6 +37,38 @@ enum Choice {
   Local,
   Saved(String),
   Destination(String),
+}
+
+struct PrBuilds {
+  number: u64,
+  unix: Option<pr::DownloadedPrBundle>,
+  windows: Option<pr::DownloadedPrBundle>,
+}
+
+impl PrBuilds {
+  async fn source(&mut self, target: &str) -> io::Result<BuildSource> {
+    let cached = if target == ctl_client::remote_bundle::WINDOWS_TARGET {
+      &mut self.windows
+    } else {
+      &mut self.unix
+    };
+    if cached.is_none() {
+      eprintln!(
+        "ctlup: Downloading the current build for PR #{} ({target})…",
+        self.number
+      );
+      *cached = Some(
+        pr::download_for_target(self.number, target)
+          .await
+          .map_err(io::Error::other)?,
+      );
+    }
+    Ok(BuildSource::Provided {
+      path: cached.as_ref().unwrap().directory().to_owned(),
+      local_build: false,
+      ctld_package: None,
+    })
+  }
 }
 
 impl Choice {
@@ -77,27 +108,14 @@ pub(super) async fn run(
       "--method requires --host; --hosts uses each host's preferred method",
     ));
   }
-  if matches!(platform, Some(crate::RemotePlatform::Windows)) {
-    return Err(io::Error::other(
-      "component uploads currently require a Unix SSH host",
-    ));
-  }
   let choices = choices(options.hosts, options.local, host, destination)?;
-  let pr_bundle = if let Some(number) = options.pr {
-    eprintln!("ctlup: Downloading the current build for PR #{number}…");
-    Some(tokio::select! {
-      result = pr::download(number) => result.map_err(io::Error::other)?,
-      _ = tokio::signal::ctrl_c() => return Err(io::Error::new(io::ErrorKind::Interrupted, "PR bundle download cancelled.")),
-    })
-  } else {
-    None
-  };
+  let mut pr_builds = options.pr.map(|number| PrBuilds {
+    number,
+    unix: None,
+    windows: None,
+  });
   let explicit_channel = options.channel.map(Into::into);
-  let provided = pr_bundle
-    .as_ref()
-    .map(|bundle| bundle.directory().to_owned())
-    .or(options.from);
-  let source = if let Some(path) = provided {
+  let source = if let Some(path) = options.from {
     BuildSource::Provided {
       path,
       local_build: options.local_build,
@@ -118,14 +136,15 @@ pub(super) async fn run(
   for choice in choices {
     let label = choice.label().to_owned();
     eprintln!("ctlup: Updating {label} (full bundle)…");
-    let operation = update_host(
-      home,
-      choice.host(),
-      choice.destination(),
-      if choice.host() == host { method } else { None },
-      Package::FullBundle,
-      &source,
-    );
+    let selected =
+      choice.host().is_some_and(|name| Some(name) == host) || choice.destination().is_some();
+    let target = TargetOptions {
+      host: choice.host(),
+      destination: choice.destination(),
+      method: if selected { method } else { None },
+      platform: if selected { platform } else { None },
+    };
+    let operation = update_host(home, target, &source, pr_builds.as_mut());
     let outcome = tokio::select! {
       result = operation => result,
       _ = tokio::signal::ctrl_c() => return Err(io::Error::new(io::ErrorKind::Interrupted, "Update cancelled. Refresh component status before retrying; an activation may already have completed.")),
@@ -195,122 +214,42 @@ fn choices(
 
 async fn update_host(
   home: &Path,
-  host: Option<&str>,
-  destination: Option<&str>,
-  method: Option<&str>,
-  package: Package,
+  selection: TargetOptions<'_>,
   source: &BuildSource,
+  pr: Option<&mut PrBuilds>,
 ) -> io::Result<UpdateResult> {
-  let resolved = crate::target::resolve(host, destination, method)
-    .await
-    .map_err(io::Error::other)?;
-  let target = resolved.target;
-  if target.is_local() {
-    let prepared = prepare(
-      home,
-      ctl_core::paths::native_target(),
-      Purpose::Local,
-      source,
-    )
-    .await?;
+  let mut resolved =
+    crate::target::resolve(selection.host, selection.destination, selection.method)
+      .await
+      .map_err(io::Error::other)?;
+  crate::target::apply_remote_platform(&mut resolved.target, selection.platform);
+  let remote = if resolved.target.is_local() {
+    None
+  } else {
+    let remote = super::remote::Target::connect(resolved.target).await?;
+    remote.verify_account().await?;
+    Some(remote)
+  };
+  let (triple, purpose) = if let Some(remote) = &remote {
+    (remote.target_triple().await?, Purpose::Upload)
+  } else {
+    (ctl_core::paths::native_target(), Purpose::Local)
+  };
+  let pr_source = if let Some(pr) = pr {
+    Some(pr.source(triple).await?)
+  } else {
+    None
+  };
+  let prepared = prepare(home, triple, purpose, pr_source.as_ref().unwrap_or(source)).await?;
+  let package = Package::FullBundle;
+  let Some(remote) = remote else {
     return ctl_client::component_update::install_prepared_local(home, prepared, package).await;
-  }
-  crate::target::ensure_vpn(&target)
-    .await
-    .map_err(io::Error::other)?;
-  let control_path =
-    crate::ssh_broker::ensure_master(target.to_ssh_target().map_err(io::Error::other)?)
-      .await
-      .map_err(io::Error::other)?;
-  let ctl_client::ConnectionTarget::Ssh {
-    destination,
-    options,
-  } = target.to_core()
-  else {
-    unreachable!()
   };
-  if matches!(
-    target,
-    ConnectionTargetDto::Ssh {
-      remote_info: Some(_),
-      ..
-    }
-  ) {
-    let remote_id =
-      ctl_client::maintenance::inspect_remote_id(&destination, &options, &control_path)
-        .await
-        .map_err(io::Error::other)?;
-    target
-      .verify_remote_id(&remote_id)
-      .map_err(io::Error::other)?;
-  }
-  let interaction = ctl_client::SshInteraction::Multiplexed {
-    control_path: control_path.clone(),
-  };
-  let output = tokio::time::timeout(
-    Duration::from_mins(1),
-    ctl_client::probe_ssh_unix_platform_interactive(&destination, &options, &interaction),
-  )
-  .await
-  .map_err(io::Error::other)?
-  .map_err(io::Error::other)?;
-  let platform =
-    ctl_client::remote_bundle::Platform::parse_probe(&output).map_err(io::Error::other)?;
-  let target_triple = platform.target_triple().map_err(io::Error::other)?;
-  let prepared = prepare(home, target_triple, Purpose::Upload, source).await?;
-  let result =
-    install_with_progress(&destination, &options, &interaction, &prepared, package).await?;
-  if matches!(
-    target,
-    ConnectionTargetDto::Ssh {
-      remote_info: Some(_),
-      ..
-    }
-  ) {
-    let identity = ctl_client::maintenance::inspect_agent(&destination, &options, &control_path)
-      .await
-      .map_err(io::Error::other)?;
-    target
-      .verify_remote_identity(&identity)
-      .map_err(io::Error::other)?;
-    verify_activation(&prepared.bundle, &identity, package)?;
+  let result = install_with_progress(&remote, &prepared, package).await?;
+  if remote.pinned() {
+    remote.verify_activation(&prepared.bundle).await?;
   }
   Ok(result)
-}
-
-fn verify_activation(
-  bundle: &ctl_core::bundles::Bundle,
-  identity: &ctl_proto::RemoteIdentity,
-  package: Package,
-) -> io::Result<()> {
-  let expected = bundle
-    .manifest
-    .distribution_id
-    .as_ref()
-    .unwrap_or(&bundle.manifest.bundle_id);
-  let agent_matches =
-    ctl_client::component_update::agent_matches(&bundle.manifest.components["ctl-agent"], identity);
-  let activated = if package == Package::CtlAgent {
-    agent_matches
-  } else {
-    identity.bundle.as_ref().is_some_and(|installed| {
-      installed.bundle_id == *expected
-        && installed.app_version == bundle.manifest.components["ctl-agent"].build.version
-        && installed.target_triple == bundle.manifest.target_triple
-        && installed.git_revision
-          == bundle.manifest.components["ctl-agent"]
-            .build
-            .source_revision
-            .as_deref()
-            .unwrap_or_default()
-    })
-  };
-  if !activated {
-    return Err(io::Error::other(
-      "Components installed, but activation could not be verified. Running sessions were preserved; refresh status before retrying.",
-    ));
-  }
-  Ok(())
 }
 
 async fn prepare(
@@ -386,9 +325,7 @@ fn bundle_directories(home: &Path) -> io::Result<Vec<PathBuf>> {
 }
 
 async fn install_with_progress(
-  destination: &str,
-  options: &ctl_client::SshConnectionOptions,
-  interaction: &ctl_client::SshInteraction,
+  remote: &super::remote::Target,
   prepared: &PreparedUpdate,
   package: Package,
 ) -> io::Result<UpdateResult> {
@@ -396,12 +333,13 @@ async fn install_with_progress(
     phase: ctl_client::RemoteInstallPhase::VerifyingBundle,
     ..ctl_client::RemoteInstallProgress::default()
   });
-  let upload = ctl_client::component_update::install_prepared_remote(
-    destination,
-    options,
-    interaction,
+  let upload = ctl_client::component_update::install_prepared_remote_for_account(
+    &remote.destination,
+    &remote.options,
+    &remote.interaction,
     prepared,
     package,
+    remote.expected_account(),
     |progress| {
       updates.send_replace(progress);
     },
@@ -432,9 +370,32 @@ struct ProgressDisplay {
   active: bool,
   phase: Option<ctl_client::RemoteInstallPhase>,
   file_name: Option<String>,
+  last_render: Option<Instant>,
+  last_rendered_bytes: u64,
 }
 
 impl ProgressDisplay {
+  fn transfer_due(
+    &mut self,
+    progress: &ctl_client::RemoteInstallProgress,
+    changed: bool,
+    now: Instant,
+  ) -> bool {
+    let completed = progress.transferred_bytes >= progress.total_bytes
+      && progress.transferred_bytes != self.last_rendered_bytes;
+    if !changed
+      && !completed
+      && self
+        .last_render
+        .is_some_and(|last| now.saturating_duration_since(last) < Duration::from_millis(500))
+    {
+      return false;
+    }
+    self.last_render = Some(now);
+    self.last_rendered_bytes = progress.transferred_bytes;
+    true
+  }
+
   fn show(&mut self, progress: &ctl_client::RemoteInstallProgress) {
     use ctl_client::RemoteInstallPhase as Phase;
     let file = crate::table::text(progress.file_name.as_deref().unwrap_or("remote components"));
@@ -445,6 +406,11 @@ impl ProgressDisplay {
       self.file_name.clone_from(&progress.file_name);
     }
     let message = if progress.phase == Phase::Transferring {
+      // Receiver reports may arrive for every small block. Keep observing them
+      // for the watchdog, but bound redraws and redirected diagnostic volume.
+      if !self.transfer_due(progress, changed, Instant::now()) {
+        return;
+      }
       if changed {
         eprintln!("ctlup: Sending {file}");
       }
@@ -500,6 +466,33 @@ impl Drop for ProgressDisplay {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn transfer_redraws_are_bounded_without_delaying_completion_or_phase_changes() {
+    let start = Instant::now();
+    let mut display = ProgressDisplay::default();
+    let mut progress = ctl_client::RemoteInstallProgress {
+      phase: ctl_client::RemoteInstallPhase::Transferring,
+      total_bytes: 10_000,
+      ..ctl_client::RemoteInstallProgress::default()
+    };
+    let mut rendered = 0;
+    for tick in 0..10_000 {
+      progress.transferred_bytes = tick;
+      rendered += usize::from(display.transfer_due(
+        &progress,
+        tick == 0,
+        start + Duration::from_micros(tick * 100),
+      ));
+    }
+    assert_eq!(rendered, 2);
+    progress.transferred_bytes = progress.total_bytes;
+    assert!(display.transfer_due(&progress, false, start + Duration::from_secs(1)));
+    assert!(!display.transfer_due(&progress, false, start + Duration::from_secs(1)));
+    progress.transferred_bytes = 0;
+    assert!(display.transfer_due(&progress, true, start + Duration::from_secs(1)));
+  }
+
   #[test]
   fn default_local_and_explicit_batch_targets_are_distinct() {
     assert_eq!(

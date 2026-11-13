@@ -26,7 +26,6 @@ struct Arguments {
 
 #[tokio::main]
 async fn main() {
-  #[cfg(unix)]
   let _installation = if std::env::args_os().any(|argument| argument == "--component-info") {
     None
   } else {

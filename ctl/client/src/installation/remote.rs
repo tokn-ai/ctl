@@ -10,8 +10,16 @@ pub async fn remote_status(
   destination: &str,
   options: &SshConnectionOptions,
   interaction: &SshInteraction,
+  expected_account: Option<&str>,
 ) -> Result<InstallationStatus, CoreError> {
-  run(destination, options, interaction, "status").await
+  run(
+    destination,
+    options,
+    interaction,
+    "status",
+    expected_account,
+  )
+  .await
 }
 
 /// Atomically restore the remote account's previous build, preserving services.
@@ -23,8 +31,35 @@ pub async fn remote_rollback(
   destination: &str,
   options: &SshConnectionOptions,
   interaction: &SshInteraction,
+  expected_account: Option<&str>,
 ) -> Result<InstallationStatus, CoreError> {
-  run(destination, options, interaction, "rollback").await
+  run(
+    destination,
+    options,
+    interaction,
+    "rollback",
+    expected_account,
+  )
+  .await
+}
+
+/// Reads the selected SSH account's existing identity without starting services.
+///
+/// # Errors
+/// Reports SSH failures and missing or invalid account identities.
+pub async fn remote_account_id(
+  destination: &str,
+  options: &SshConnectionOptions,
+  interaction: &SshInteraction,
+) -> Result<String, CoreError> {
+  match options.remote_platform {
+    crate::RemotePlatform::Unix => {
+      crate::maintenance::inspect_remote_id_interactive(destination, options, interaction).await
+    }
+    crate::RemotePlatform::Windows => {
+      crate::ssh_install::read_remote_id(destination, options, interaction).await
+    }
+  }
 }
 
 async fn run(
@@ -32,20 +67,45 @@ async fn run(
   options: &SshConnectionOptions,
   interaction: &SshInteraction,
   operation: &str,
+  expected_account: Option<&str>,
 ) -> Result<InstallationStatus, CoreError> {
   crate::validate_ssh_target(destination, options)?;
-  if options.remote_platform != crate::RemotePlatform::Unix {
-    return Err(CoreError::InvalidSshOption("remote_platform".into()));
-  }
-  let mut command = tokio::process::Command::new(crate::SSH_PROGRAM);
-  let extra = crate::configure_ssh_interaction(&mut command, interaction);
-  let script = format!(
-    "test -x \"$HOME/.tokn/ctl/bin/ctlup\" || {{ printf 'ctlup is not installed; run ctlup update for this host first\\n' >&2; exit 127; }}; printf 'ctlup-command-v1\\n'; exec \"$HOME/.tokn/ctl/bin/ctlup\" {operation} --json"
-  );
+  let mut command = match options.remote_platform {
+    crate::RemotePlatform::Unix => {
+      let mut command = tokio::process::Command::new(crate::SSH_PROGRAM);
+      let extra = crate::configure_ssh_interaction(&mut command, interaction);
+      let guard = crate::ssh_install::unix_account_guard(expected_account)?;
+      let script = format!(
+        "{guard}test -x \"$HOME/.tokn/ctl/bin/ctlup\" || {{ printf 'ctlup is not installed; run ctlup update for this host first\\n' >&2; exit 127; }}; printf 'ctlup-command-v1\\n'; exec \"$HOME/.tokn/ctl/bin/ctlup\" {operation} --json"
+      );
+      command
+        .args(extra)
+        .args(crate::prepare_ssh_base_arguments(destination, options, interaction).await?)
+        .arg(format!("exec sh -c '{}'", script.replace('\'', "'\\''")));
+      command
+    }
+    crate::RemotePlatform::Windows => {
+      let guard = crate::ssh_install::windows_account_guard(expected_account)?;
+      let script = format!(
+        r#"
+$ErrorActionPreference = 'Stop'
+{guard}
+$manager = Join-Path $env:USERPROFILE '.tokn\ctl\bin\ctlup.exe'
+if (![IO.File]::Exists($manager)) {{
+  if ('{operation}' -ne 'status') {{ throw 'ctlup is not installed for this account.' }}
+  [Console]::Out.Write("ctlup-command-v1`n")
+  [Console]::Out.Write('{{"active":null,"previous":null}}')
+  exit 0
+}}
+[Console]::Out.Write("ctlup-command-v1`n")
+& $manager {operation} --json
+exit $LASTEXITCODE
+"#
+      );
+      crate::ssh_install::windows_ssh_command(destination, options, interaction, &script).await?
+    }
+  };
   command
-    .args(extra)
-    .args(crate::prepare_ssh_base_arguments(destination, options, interaction).await?)
-    .arg(format!("exec sh -c '{}'", script.replace('\'', "'\\''")))
     .stdin(Stdio::null())
     .stdout(Stdio::piped())
     .stderr(Stdio::piped())

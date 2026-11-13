@@ -17,6 +17,9 @@ pub(super) struct Arguments {
   /// Select one saved host's connection method.
   #[arg(long, global = true)]
   pub method: Option<String>,
+  /// Override the SSH host platform for this invocation.
+  #[arg(long, global = true, value_enum)]
+  pub remote_platform: Option<crate::RemotePlatform>,
   #[command(subcommand)]
   pub command: Command,
 }
@@ -64,6 +67,9 @@ pub(super) enum Command {
   InstallArchive,
   #[command(hide = true)]
   ActivateInstalled { bundle_id: String },
+  #[cfg(windows)]
+  #[command(hide = true)]
+  UpdaterDigest,
 }
 
 #[derive(Debug, Subcommand)]

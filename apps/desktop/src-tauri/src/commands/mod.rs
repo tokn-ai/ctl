@@ -333,6 +333,7 @@ async fn open_reserved_attachment(
         crate::about::observations::RemoteObservation {
           identity,
           handshake: attached.handshake_info.clone(),
+          remote_platform: request.target.remote_platform(),
           label: request.target.label().into(),
           host_id: request
             .cache_host_key
@@ -668,6 +669,7 @@ mod tests {
       ssh_config_alias: None,
       use_ssh_config_master: None,
       remote_info: None,
+      remote_platform: None,
       destination,
       hostname: std::env::var("CTMUX_TEST_SSH_HOSTNAME").ok(),
       user: std::env::var("CTMUX_TEST_SSH_USER").ok(),

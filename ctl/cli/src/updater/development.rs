@@ -55,8 +55,10 @@ pub(super) async fn run(home: &Path, options: DevelopmentArguments) -> io::Resul
   Ok(())
 }
 
+#[cfg(unix)]
 type LeaseInput = Box<dyn tokio::io::AsyncRead + Send + Unpin>;
 
+#[cfg(unix)]
 fn lease_pipe() -> io::Result<LeaseInput> {
   use std::os::fd::AsFd as _;
   let descriptor = io::stdin().as_fd().try_clone_to_owned()?;
@@ -78,6 +80,7 @@ fn lease_pipe() -> io::Result<LeaseInput> {
   }
 }
 
+#[cfg(unix)]
 async fn read_lease_input(mut input: LeaseInput) -> io::Result<()> {
   use tokio::io::AsyncReadExt as _;
   if input.read(&mut [0]).await? == 0 {
@@ -88,6 +91,46 @@ async fn read_lease_input(mut input: LeaseInput) -> io::Result<()> {
       "development lease input must remain empty",
     ))
   }
+}
+
+#[cfg(windows)]
+type LeaseInput = tokio::sync::oneshot::Receiver<io::Result<()>>;
+
+#[cfg(windows)]
+fn lease_pipe() -> io::Result<LeaseInput> {
+  use std::io::{IsTerminal as _, Read as _};
+  use std::os::windows::io::AsHandle as _;
+  if io::stdin().is_terminal() {
+    return Err(io::Error::new(
+      io::ErrorKind::InvalidInput,
+      "development lease requires redirected stdin",
+    ));
+  }
+  let handle = io::stdin().as_handle().try_clone_to_owned()?;
+  let (tx, rx) = tokio::sync::oneshot::channel();
+  std::thread::Builder::new()
+    .name("ctlup-lease-input".into())
+    .spawn(move || {
+      let result = std::fs::File::from(handle)
+        .read(&mut [0])
+        .and_then(|count| {
+          if count == 0 {
+            Ok(())
+          } else {
+            Err(io::Error::new(
+              io::ErrorKind::InvalidInput,
+              "development lease input must remain empty",
+            ))
+          }
+        });
+      let _ = tx.send(result);
+    })?;
+  Ok(rx)
+}
+
+#[cfg(windows)]
+async fn read_lease_input(input: LeaseInput) -> io::Result<()> {
+  input.await.map_err(io::Error::other)?
 }
 
 fn cargo_arguments(options: &DevelopmentArguments) -> io::Result<Vec<String>> {

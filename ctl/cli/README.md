@@ -227,11 +227,14 @@ ordinary SSH login, use `~/.tokn/ctl/bin/ctl who` or add `~/.tokn/ctl/bin`
 to `PATH`. Installation preserves the user's login shell configuration.
 
 If a Unix host needs a component update, `ctl` prints a `ctlup update`
-command for the selected host or SSH alias. Run it from macOS or Linux and
+command for the selected host or SSH alias. Run it and
 then reconnect. The updater verifies any saved machine ID and downloads the
 runtime and updater from the same publication. Use `--working-tree` to build
 for Linux x64 or ARM64 from a checkout, or `--from` for supplied build files.
-Windows remote companions require manual installation.
+Windows x64 SSH hosts also support managed installation; use
+`ctlup update --destination ALIAS --remote-platform windows` for a temporary
+destination. Windows ARM64 currently supports portable desktop installation,
+without whole-runtime bundles.
 
 On macOS, Touch ID-protected credential storage
 requires the signed, provisioned `ctld` helper; Cargo installation alone does
@@ -343,13 +346,17 @@ use `ctlup` without changing files. See the
 for source formats, cancellation, and per-host results.
 
 Use `ctlup app install` and `ctlup app update` for the local ctmux desktop app
-on macOS and Linux. Both accept `--local` and `--channel stable|nightly`.
+on macOS, Linux and Windows (native x64 or ARM64). Both accept `--local` and `--channel stable|nightly`.
 `--local` builds from the current source checkout and conflicts with `--channel`.
 Published installs use the saved runtime bundle channel preference and remember
 an explicit channel after success. Nightly desktop downloads require
 authenticated `gh` access to the Actions artifact for the selected source revision. See the
 [desktop app install guide](https://github.com/tokn-ai/ctl/blob/main/docs/component-updates.md#install-or-update-the-desktop-app)
-for install locations and platform requirements.
+for install locations and platform requirements. Windows uses a portable per-user
+installation at `~/.tokn/ctl/apps/ctmux/ctmux-app.exe`, with no MSI, NSIS or
+administrator requirement. GUI launch requires the WebView2 Evergreen Runtime.
+Each Windows desktop release also includes a standalone `ctlup.exe` download
+named for its bundle and native target, with matching metadata and checksum.
 
 VPN profiles remain in the local catalog. Use `ctl --host GATEWAY vpn start NAME_OR_ID`,
 `vpn list`, and `vpn stop NAME_OR_ID` to run and manage a profile on an SSH host.

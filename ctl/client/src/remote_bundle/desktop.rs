@@ -2,12 +2,12 @@
 
 use super::{Error, MAX_BUNDLE_SET_BYTES, RELEASE_ROOT, published, release_http_client};
 use ctl_core::component_update::BundleChannel;
+use ctl_core::private_fs;
 use reqwest::{Client, Response, StatusCode};
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{self, Read as _, Write as _};
-use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::Path;
 
 const MAX_PACKAGE_BYTES: u64 = 512 * 1024 * 1024;
@@ -20,6 +20,8 @@ pub enum DesktopTarget {
   MacArm64,
   LinuxX64,
   LinuxArm64,
+  WindowsX64,
+  WindowsArm64,
 }
 
 impl DesktopTarget {
@@ -31,6 +33,8 @@ impl DesktopTarget {
       ("macos", "aarch64") => Ok(Self::MacArm64),
       ("linux", "x86_64") => Ok(Self::LinuxX64),
       ("linux", "aarch64") => Ok(Self::LinuxArm64),
+      ("windows", "x86_64") => Ok(Self::WindowsX64),
+      ("windows", "aarch64") => Ok(Self::WindowsArm64),
       (os, arch) => Err(io::Error::new(
         io::ErrorKind::Unsupported,
         format!("no desktop package is available for {os} {arch}"),
@@ -42,20 +46,23 @@ impl DesktopTarget {
     matches!(self, Self::MacX64 | Self::MacArm64)
   }
 
-  const fn triple(self) -> &'static str {
+  #[must_use]
+  pub const fn triple(self) -> &'static str {
     match self {
       Self::MacX64 => "x86_64-apple-darwin",
       Self::MacArm64 => "aarch64-apple-darwin",
       Self::LinuxX64 => "x86_64-unknown-linux-gnu",
       Self::LinuxArm64 => "aarch64-unknown-linux-gnu",
+      Self::WindowsX64 => "x86_64-pc-windows-msvc",
+      Self::WindowsArm64 => "aarch64-pc-windows-msvc",
     }
   }
 
   const fn package_format(self) -> &'static str {
-    if self.is_macos() {
-      "app.tar.gz"
-    } else {
-      "AppImage"
+    match self {
+      Self::MacX64 | Self::MacArm64 => "app.tar.gz",
+      Self::LinuxX64 | Self::LinuxArm64 => "AppImage",
+      Self::WindowsX64 | Self::WindowsArm64 => "zip",
     }
   }
 
@@ -129,10 +136,9 @@ impl DesktopRelease {
   /// # Errors
   /// Rejects unavailable packages, existing destinations, and invalid downloads.
   pub async fn download(&self, destination: &Path) -> io::Result<()> {
-    let mut file = OpenOptions::new()
+    let mut file = private_fs::options()
       .write(true)
       .create_new(true)
-      .mode(0o600)
       .open(destination)?;
     let mut partial = PartialDownload(Some(destination));
     match &self.source {
@@ -158,15 +164,12 @@ impl DesktopRelease {
 }
 
 fn open_package(path: &Path) -> io::Result<File> {
-  use rustix::fs::{Mode, OFlags};
-
-  let file = File::from(rustix::fs::open(
-    path,
-    OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
-    Mode::empty(),
-  )?);
-  if !file.metadata()?.is_file() {
-    return Err(invalid("desktop package must be a regular file"));
+  let file = private_fs::options().read(true).open(path)?;
+  let metadata = file.metadata()?;
+  if !private_fs::is_owned_file(&metadata) {
+    return Err(invalid(
+      "desktop package must be an owned regular file without links",
+    ));
   }
   Ok(file)
 }
@@ -444,6 +447,18 @@ mod tests {
         "not_applicable",
         "AppImage",
       ),
+      (
+        DesktopTarget::WindowsX64,
+        &["msi", "zip"],
+        "not_applicable",
+        "zip",
+      ),
+      (
+        DesktopTarget::WindowsArm64,
+        &["msi", "zip"],
+        "not_applicable",
+        "zip",
+      ),
     ];
     for &(target, formats, signing_mode, extension) in cases {
       let value = manifest(target, formats, signing_mode);
@@ -496,6 +511,31 @@ mod tests {
     value["asset_count"] = json!(1);
     value["assets"][0]["size"] = json!(1);
     assert!(verify(&value, target).is_ok());
+  }
+
+  #[test]
+  fn windows_packages_require_the_exact_architecture_name_and_checksum() {
+    for target in [DesktopTarget::WindowsX64, DesktopTarget::WindowsArm64] {
+      let value = manifest(target, &["zip"], "not_applicable");
+      assert!(verify(&value, target).is_ok());
+      for (field, changed) in [
+        ("target", json!(DesktopTarget::MacArm64.triple())),
+        ("git_revision", json!("0".repeat(40))),
+        ("signing_mode", json!("signed")),
+      ] {
+        let mut bad = value.clone();
+        bad[field] = changed;
+        assert!(verify(&bad, target).is_err(), "{field}");
+      }
+      for name in ["../ctmux.zip", "ctmux.zip:stream", "C:\\ctmux.zip"] {
+        let mut bad = value.clone();
+        bad["assets"][0]["name"] = json!(name);
+        assert!(verify(&bad, target).is_err(), "{name}");
+      }
+      let mut bad = value;
+      bad["assets"][0]["sha256"] = json!("g".repeat(64));
+      assert!(verify(&bad, target).is_err());
+    }
   }
 
   #[tokio::test]

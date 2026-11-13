@@ -1,10 +1,12 @@
 import { createHash } from "node:crypto";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { agentTargets } from "../shared/agent-bundle.mts";
-import { assembleAgentBundleSet } from "./assemble-agent-bundle-set.mts";
+import { agentTargets, archiveName, windowsAgentTarget } from "../shared/agent-bundle.mts";
+import { assembleAgentBundleSet, assembleWindowsAgentBundleSet } from "./assemble-agent-bundle-set.mts";
 import { bundleRoot } from "./bundle-publication.mts";
-import { archiveEntriesFixture, tarFixture } from "./agent-bundle.fixtures.mts";
+import { archiveEntriesFixture, componentMapFixture, tarFixture } from "./agent-bundle.fixtures.mts";
+import { packageUpdater } from "./package-updater.mts";
+import { windowsExecutableFixture } from "../shared/windows-portable.fixtures.mts";
 import { parseBundleCatalog, type Publication } from "./stage-bundle-pages.mts";
 
 export function publicationFixture(run_number: number, channel: Publication["channel"] = "nightly", app_version = "0.1.0", git_revision = `${run_number.toString(16).padStart(12, "0")}${"a".repeat(28)}`): Publication {
@@ -46,11 +48,30 @@ export async function componentSetFixture(root: string, publication: Publication
   const directory = join(root, `incoming-${publication.run_id}-${publication.run_attempt}`);
   await mkdir(directory);
   for (const target of agentTargets) {
-    const name = `ctl-agent-bundle-${identity.bundle_id}-${target}.tar.gz`;
-    const archive = tarFixture(archiveEntriesFixture(target, identity));
-    await writeFile(join(input, name), archive);
-    await writeFile(join(input, `${name}.sha256`), `${createHash("sha256").update(archive).digest("hex")}  ${name}\n`);
+    await runtimeFixture(input, identity, target);
   }
   await assembleAgentBundleSet(identity, input, directory);
   return directory;
+}
+
+async function runtimeFixture(input: string, identity: Pick<Publication, "app_version" | "bundle_id" | "git_revision">, target: string): Promise<void> {
+  const name = archiveName(identity, target);
+  const archive = tarFixture(archiveEntriesFixture(target, identity));
+  await writeFile(join(input, name), archive);
+  await writeFile(join(input, `${name}.sha256`), `${createHash("sha256").update(archive).digest("hex")}  ${name}\n`);
+}
+
+export async function windowsComponentSetFixture(root: string, publication: Publication): Promise<string> {
+  const { app_version, bundle_id, git_revision } = publication;
+  const identity = { app_version, bundle_id, git_revision };
+  const input = join(root, `windows-source-${publication.run_id}-${publication.run_attempt}`);
+  await mkdir(input);
+  await runtimeFixture(input, identity, windowsAgentTarget);
+  await writeFile(join(input, "ctlup.exe"), windowsExecutableFixture(windowsAgentTarget));
+  await packageUpdater({ ...identity, target: windowsAgentTarget, binary_directory: input, output_directory: input }, async () => ({
+    stdout: JSON.stringify(componentMapFixture(identity).ctl), stderr: "",
+  }));
+  const output = join(root, `windows-incoming-${publication.run_id}-${publication.run_attempt}`);
+  await assembleWindowsAgentBundleSet(identity, input, output);
+  return output;
 }

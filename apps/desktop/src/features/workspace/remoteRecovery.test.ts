@@ -241,6 +241,14 @@ describe("SSH endpoint comparison", () => {
     expect(sameSshEndpoint(target, { ...target, use_ssh_config_master: !default_policy })).toBe(false);
   });
 
+  it("compares the effective server platform without changing the host identity", () => {
+    const target: SshConnectionTarget = { kind: "ssh", destination: "build", ssh_config_alias: "build" };
+    const windows: SshConnectionTarget = { ...target, remote_platform: "windows" };
+    expect(sameSshEndpoint(target, { ...target, remote_platform: "unix" })).toBe(true);
+    expect(sameSshEndpoint(target, windows)).toBe(false);
+    expect(sameSshEndpoint(windows, { ...windows, use_ssh_config_master: false })).toBe(true);
+  });
+
   it("ignores host labels but detects a changed resolved gateway", () => {
     const before: SshConnectionTarget = {
       kind: "ssh",

@@ -53,6 +53,7 @@ mod tests {
       ssh_config_alias: None,
       use_ssh_config_master: None,
       remote_info: None,
+      remote_platform: Some(ctl_client::RemotePlatform::Windows),
       destination: "ctmux-remote-test".into(),
       hostname: Some("127.0.0.1".into()),
       user: Some("ctmux".into()),
@@ -69,7 +70,7 @@ mod tests {
         // A direct method without an SSH-config alias selects its explicit endpoint.
         destination: "127.0.0.1".into(),
         options: SshConnectionOptions {
-          remote_platform: ctl_client::RemotePlatform::Unix,
+          remote_platform: ctl_client::RemotePlatform::Windows,
           hostname: Some("127.0.0.1".into()),
           user: Some("ctmux".into()),
           port: Some(2222),

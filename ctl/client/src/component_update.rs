@@ -104,7 +104,7 @@ pub async fn prepare_update(
 ///
 /// # Errors
 /// Rejects wrong-target, incomplete, corrupt or incompatible builds.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 async fn prepare(
   home: &Path,
   target: &str,
@@ -251,7 +251,7 @@ async fn development_build(
     PreparationPhase::Building,
     format!("Building {target} from the working tree"),
   ));
-  let output = crate::development::OutputDirectory::new()?;
+  let output = crate::installation::TemporaryDirectory::new("development")?;
   let mut command = tokio::process::Command::new("node");
   command
     .args([
@@ -469,28 +469,28 @@ fn included_build(
 ) -> io::Result<Bundle> {
   let target = publisher_target(target, purpose);
   let target = target.as_ref();
-  let candidate = if purpose == Purpose::Upload {
-    crate::remote_bundle::read_shared_service_bundle(directories, target)
-  } else {
-    crate::remote_bundle::read_compatible_bundle(directories, target)
-  }
-  .map_err(io::Error::other)?
-  .ok_or_else(|| {
-    invalid(
-      "no selected or included compatible build; provide build files or select a bundle in About",
-    )
-  })?;
-  let source = if candidate.bundle_id == candidate.app_version {
-    Source::Release
-  } else {
-    Source::Ci
-  };
-  let imported =
-    crate::components::import_remote(home, &candidate, target, source).map_err(io::Error::other)?;
   for directory in directories {
+    let directories = std::slice::from_ref(directory);
+    let candidate = if purpose == Purpose::Upload {
+      crate::remote_bundle::read_shared_service_bundle(directories, target)
+    } else {
+      crate::remote_bundle::read_compatible_bundle(directories, target)
+    }
+    .map_err(io::Error::other)?;
+    let Some(candidate) = candidate else { continue };
+    let source = if candidate.bundle_id == candidate.app_version {
+      Source::Release
+    } else {
+      Source::Ci
+    };
+    let imported = crate::components::import_remote(home, &candidate, target, source)
+      .map_err(io::Error::other)?;
     crate::installation::remember_supplied_updater(home, &imported, directory)?;
+    return Ok(imported);
   }
-  Ok(imported)
+  Err(invalid(
+    "no selected or included compatible build; provide build files or select a bundle in About",
+  ))
 }
 
 fn provided_build(home: &Path, path: &Path, target: &str, purpose: Purpose) -> io::Result<Bundle> {
@@ -502,9 +502,7 @@ fn provided_build(home: &Path, path: &Path, target: &str, purpose: Purpose) -> i
       crate::installation::remember_supplied_updater(home, &imported, path)?;
       return Ok(imported);
     }
-    let imported = included_build(home, &[path.to_owned()], target, purpose)?;
-    crate::installation::remember_supplied_updater(home, &imported, path)?;
-    return Ok(imported);
+    return included_build(home, &[path.to_owned()], target, purpose);
   }
   let bytes = crate::components::read_input(path, MAX_FILE_BYTES)?;
   let mut files = crate::components::read_archive(&bytes)?;
@@ -560,11 +558,15 @@ pub fn agent_archive(bundle: &Bundle) -> io::Result<Vec<u8>> {
     schema_version: 1,
     source_bundle: bundle.manifest.clone(),
   };
-  let agent = &files["ctl-agent"];
+  let agent_name =
+    ctl_core::bundle_layout::executable_name(&bundle.manifest.target_triple, "ctl-agent");
+  let agent = files
+    .get(agent_name.as_ref())
+    .ok_or_else(|| invalid("missing agent binary"))?;
   source.verify(agent)?;
   let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
   let mut archive = tar::Builder::new(encoder);
-  crate::components::append(&mut archive, "ctl-agent", agent, true)?;
+  crate::components::append(&mut archive, &agent_name, agent, true)?;
   crate::components::append(
     &mut archive,
     SOURCE_FILE,
@@ -578,6 +580,7 @@ pub fn agent_archive(bundle: &Bundle) -> io::Result<Vec<u8>> {
   Ok(bytes)
 }
 
+#[cfg(unix)]
 pub(crate) fn inspect_agent_archive(bytes: &[u8]) -> io::Result<AgentSource> {
   let mut files = crate::components::read_archive(bytes)?;
   let metadata = files
@@ -589,9 +592,11 @@ pub(crate) fn inspect_agent_archive(bytes: &[u8]) -> io::Result<AgentSource> {
     ));
   }
   let source: AgentSource = serde_json::from_slice(&metadata).map_err(io::Error::other)?;
+  let agent_name =
+    ctl_core::bundle_layout::executable_name(&source.source_bundle.target_triple, "ctl-agent");
   source.verify(
     files
-      .get("ctl-agent")
+      .get(agent_name.as_ref())
       .ok_or_else(|| invalid("missing agent binary"))?,
   )?;
   Ok(source)
@@ -721,6 +726,31 @@ pub async fn install_prepared_remote(
   package: Package,
   on_progress: impl Fn(crate::RemoteInstallProgress) + Send + Sync,
 ) -> Result<UpdateResult, crate::CoreError> {
+  install_prepared_remote_for_account(
+    destination,
+    options,
+    interaction,
+    prepared,
+    package,
+    None,
+    on_progress,
+  )
+  .await
+}
+
+/// Installs a prepared bundle, checking the account pin in the mutation channel.
+///
+/// # Errors
+/// Reports a changed account identity, invalid bundle, or failed activation.
+pub async fn install_prepared_remote_for_account(
+  destination: &str,
+  options: &crate::SshConnectionOptions,
+  interaction: &crate::SshInteraction,
+  prepared: &PreparedUpdate,
+  package: Package,
+  expected_account: Option<&str>,
+  on_progress: impl Fn(crate::RemoteInstallProgress) + Send + Sync,
+) -> Result<UpdateResult, crate::CoreError> {
   use crate::{RemoteInstallEvent as Event, RemoteInstallPhase as Phase, RemoteInstallProgress};
   use std::sync::atomic::{AtomicU64, Ordering};
   let invalid = |error: io::Error| crate::CoreError::InvalidComponentBundle(error.to_string());
@@ -789,13 +819,17 @@ pub async fn install_prepared_remote(
       .distribution_id
       .as_ref()
       .unwrap_or(&bundle.manifest.bundle_id);
-    crate::install_ssh_unix_bundle_with_updater(
+    let upload = crate::ssh_install::UpdaterUpload {
+      updater,
+      bundle_id: id,
+      archive,
+      expected_account,
+    };
+    crate::ssh_install::install_ssh_bundle_with_updater(
       destination,
       options,
       interaction,
-      updater,
-      id,
-      archive,
+      upload,
       report,
     )
     .await?;
@@ -822,5 +856,5 @@ fn invalid(message: &str) -> io::Error {
   io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;

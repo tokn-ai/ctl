@@ -16,6 +16,8 @@
   --surface-1: #202224;
   --surface-2: #27292c;
   --surface-3: #33373c;
+  --notification-surface: rgb(39 41 44 / 82%);
+  --notification-border: rgb(160 165 173 / 30%);
   --border: #303337;
   --muted: #a0a5ad;
   --text: #dedfe2;

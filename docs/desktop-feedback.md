@@ -4,7 +4,9 @@ Messages follow the action or content that owns them. A field, form, row, or
 section keeps its validation and recovery nearby. A standalone operation or an
 unexpected background event uses a bottom-right notification backed by the same
 notification-center entry. App banners are reserved for persistent conditions
-that affect the whole workspace.
+that affect the whole workspace. Global banners, popups, and the notification
+center use translucent floating panels outside the main layout. Showing or
+hiding them never resizes or shifts the main panel.
 
 ## Message inventory
 
@@ -29,7 +31,7 @@ that affect the whole workspace.
 | Component update progress and per-host results | In the retained Update components dialog. Do not repeat the outcome as a popup. |
 | Windows manual setup and unsupported maintenance, VPN, or listener operations | In the owning Connect host flow, About host row, VPN view, or forwarding dialog. Present persistent capability limits as context; hide unavailable actions. |
 | Workspace load failure | A workspace error view with Retry loading. |
-| Workspace save failure | One persistent app banner with Retry saving, plus a silent notification-center entry. Remove the banner after saving succeeds. |
+| Workspace save failure | One persistent floating banner at the top with Retry saving, plus a silent notification-center entry. Remove the banner after saving succeeds. |
 | Saving, connecting, reconnecting, enrollment, layout/input ownership, and maintenance progress | In the owning view or status line. Routine progress does not create notifications. |
 | Input or layout refusal and pane-layout refresh failure | In the input/layout controls or terminal area, with Retry layout where applicable. |
 | Disconnected saved tab, authentication required, intentional disconnect/cancellation, missing session, and normal session exit | In the terminal or connection flow, with the relevant local connect action. No popup for an expected state. |

@@ -14,6 +14,28 @@
 .inline-feedback-success { color: var(--success); }
 .inline-feedback button { flex: 0 0 auto; padding: 4px 8px; color: var(--text); background: var(--surface-3); border: 1px solid var(--border); border-radius: 3px; font-size: inherit; cursor: pointer; }
 .inline-feedback button:disabled { opacity: .55; cursor: default; }
-.workspace-feedback { flex: 0 0 auto; margin: 0; padding: 9px 14px; border-bottom: 1px solid var(--border); background: var(--surface-2); }
+.workspace-feedback {
+  position: fixed;
+  z-index: 80;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(720px, calc(100vw - 24px));
+  max-height: calc(100dvh - 100px);
+  overflow: auto;
+  margin: 0;
+  padding: 10px 14px;
+  border: 1px solid var(--notification-border);
+  border-radius: 4px;
+  background: var(--notification-surface);
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+  box-shadow: 0 8px 24px #0005;
+}
 .workspace-load-error { flex: 1; align-self: center; width: min(600px, 100%); padding: 24px; }
 .terminal-local-feedback { padding: 0 10px; }
+
+@media (max-width: 480px) {
+  .workspace-feedback { flex-direction: column; }
+  .workspace-feedback > button { align-self: flex-end; }
+}

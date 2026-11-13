@@ -659,9 +659,10 @@ records each placement. Field validation stays beside
 the field; form, row, and section failures retain their local recovery action.
 Refresh failures keep last-known data visibly stale and never create polling
 popups. Connection, input, layout, and progress states stay in their feature or
-the status line. Workspace persistence failures have one persistent app banner
-with Retry saving and a silent notification-center entry; workspace load errors
-instead expose a retryable error view.
+the status line. Global notifications use translucent floating panels that do
+not resize or shift the main layout. Workspace persistence failures have one
+persistent app banner with Retry saving and a silent notification-center entry;
+workspace load errors instead expose a retryable error view.
 
 Standalone command failures, unexpected connection loss, and newly failed task
 runs use one popup backed by the same window-local notification-center entry.

@@ -37,9 +37,11 @@
   min-width: 0;
   padding: 10px 12px 12px;
   color: var(--text);
-  background: var(--surface-2);
-  border: 1px solid #454545;
+  background: var(--notification-surface);
+  border: 1px solid var(--notification-border);
   border-radius: 4px;
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
   box-shadow: 0 8px 24px #0005;
   pointer-events: auto;
   overflow-wrap: anywhere;
@@ -72,12 +74,30 @@
 .notification-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; margin-top: 12px; }
 .notification-actions button { padding: 5px 10px; color: white; background: var(--accent); border: 1px solid transparent; border-radius: 2px; font-size: 11px; cursor: pointer; }
 .notification-actions button:hover:not(:disabled) { background: var(--accent-strong); }
-.notification-center { display: flex; flex-direction: column; border: 1px solid #454545; border-radius: 4px; background: var(--surface-2); box-shadow: 0 12px 36px #0007; overflow: hidden; }
+.notification-center {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--notification-border);
+  border-radius: 4px;
+  background: var(--notification-surface);
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+  box-shadow: 0 12px 36px #0007;
+  overflow: hidden;
+}
 .notification-center-heading { flex: 0 0 auto; padding: 9px 12px; border-bottom: 1px solid var(--border); }
 .notification-center-heading strong { flex: 1; font-size: 12px; font-weight: 600; }
 .notification-center-heading strong span { margin-left: 5px; color: var(--muted); font-size: 10px; font-weight: 400; }
 .notification-history { min-height: 0; max-height: 460px; overflow: auto; }
-.notification-history .notification-card { border: 0; border-bottom: 1px solid var(--border); border-radius: 0; box-shadow: none; }
+.notification-history .notification-card {
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+  background: transparent;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  box-shadow: none;
+}
 .notification-history .notification-card:last-child { border-bottom: 0; }
 .notification-empty { display: flex; flex-direction: column; align-items: center; padding: 34px 20px; gap: 12px; color: var(--muted); font-size: 12px; }
 .notification-empty > svg { width: 24px; height: 24px; }

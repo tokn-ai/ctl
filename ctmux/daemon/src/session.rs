@@ -169,6 +169,13 @@ struct TerminalHistory {
 }
 
 impl TerminalState {
+  fn needs_geometry_checkpoint(&self, sequence: u64, revision: Option<u64>) -> bool {
+    revision.is_none_or(|revision| revision < self.geometry_revision)
+      && self
+        .last_geometry_change_sequence
+        .is_some_and(|boundary| sequence <= boundary)
+  }
+
   fn new(
     terminal_size: TerminalSize,
     journal_capacity_bytes: usize,
@@ -664,6 +671,22 @@ impl Terminal {
     self.snapshot_for_delivery(requested, None)
   }
 
+  /// Size of the pending raw output, or None when a delivery snapshot must
+  /// check the cursor or select a replacement checkpoint.
+  pub(crate) fn pending_output_bytes(
+    &self,
+    sequence: u64,
+    geometry_revision: Option<u64>,
+  ) -> Option<u64> {
+    let terminal = lock(&self.state);
+    if sequence < terminal.journal.earliest_sequence()
+      || terminal.needs_geometry_checkpoint(sequence, geometry_revision)
+    {
+      return None;
+    }
+    terminal.journal.next_sequence().checked_sub(sequence)
+  }
+
   pub fn snapshot_for_delivery(
     &self,
     requested: Option<u64>,
@@ -680,13 +703,9 @@ impl Terminal {
       });
     }
 
-    let geometry_checkpoint_required = checkpoint_geometry_revision
-      .is_none_or(|revision| revision < terminal.geometry_revision)
-      && requested.is_some_and(|sequence| {
-        terminal
-          .last_geometry_change_sequence
-          .is_some_and(|boundary| sequence <= boundary)
-      });
+    let geometry_checkpoint_required = requested.is_some_and(|sequence| {
+      terminal.needs_geometry_checkpoint(sequence, checkpoint_geometry_revision)
+    });
     let journal_checkpoint_required = requested.is_none_or(|sequence| sequence < earliest_sequence);
     let (
       checkpoint,
@@ -3212,6 +3231,11 @@ mod tests {
       );
       (captured, prefix_bytes, state.journal.next_sequence())
     };
+    assert_eq!(terminal.pending_output_bytes(0, None), None);
+    assert_eq!(
+      terminal.pending_output_bytes(captured.sequence, Some(u64::MAX)),
+      Some(current_sequence - captured.sequence)
+    );
     let snapshot = terminal.snapshot_for_delivery(Some(0), None).unwrap();
     assert_eq!(snapshot.checkpoint.as_ref(), Some(&captured));
     assert_eq!(snapshot.checkpoint_keyboard_prefix_bytes, prefix_bytes);

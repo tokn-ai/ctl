@@ -1,0 +1,22 @@
+[package]
+name = "ctl-files"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Bounded read-only file and Git operations for local and SSH ctl clients"
+readme = "README.md"
+publish = ["crates-io"]
+
+[dependencies]
+base64.workspace = true
+ctl-proto.workspace = true
+dirs.workspace = true
+tokio = { workspace = true, features = ["fs"] }
+
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true
+
+[lints]
+workspace = true

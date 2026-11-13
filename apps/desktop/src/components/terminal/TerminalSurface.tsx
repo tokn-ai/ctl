@@ -1,10 +1,11 @@
 import { Icon } from "../ui/Icon";
 import { useEffect, useId, useRef } from "react";
-import type { ConnectionPhase, TerminalSize } from "../../lib/types";
+import type { ConnectionPhase, ConnectionTarget, TerminalSize } from "../../lib/types";
 import { errorMessage } from "../../lib/errors";
 import { openExternalUrl } from "../../lib/tauri";
 import { XtermRenderer } from "../../features/terminal/XtermRenderer";
 import { useNotificationEnvironment } from "../../features/notifications/NotificationContext";
+import { useFilePreview } from "../../features/files/FilePreview";
 import "./TerminalSurface.css";
 
 const INITIAL_SIZE: TerminalSize = {
@@ -28,6 +29,7 @@ interface TerminalSurfaceProps {
   has_cached_content: boolean;
   onInput(data: Uint8Array): void;
   onReady(renderer: XtermRenderer | null): void;
+  file_context?: { target: ConnectionTarget; cwd: string | null };
 }
 
 export function TerminalSurface({
@@ -44,6 +46,7 @@ export function TerminalSurface({
   has_cached_content,
   onInput,
   onReady,
+  file_context,
 }: TerminalSurfaceProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef(onInput);
@@ -53,6 +56,9 @@ export function TerminalSurface({
   const copy_notification_key = `terminal-copy:${surface_id}`;
   const notifications = useNotificationEnvironment()?.store;
   const notificationsRef = useRef(notifications);
+  const previews = useFilePreview();
+  const file_preview_ref = useRef({ previews, file_context });
+  file_preview_ref.current = { previews, file_context };
   inputRef.current = ended_message || phase !== "attached" ? () => {} : onInput;
   readyRef.current = onReady;
   notificationsRef.current = notifications;
@@ -112,6 +118,10 @@ export function TerminalSurface({
         });
       },
       (text) => { void copyText(text); },
+      (file) => {
+        const { previews, file_context } = file_preview_ref.current;
+        if (!disposed && previews && file_context) previews.open({ ...file, ...file_context });
+      },
     );
     readyRef.current(renderer);
     return () => {

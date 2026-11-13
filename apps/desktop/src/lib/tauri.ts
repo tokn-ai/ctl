@@ -88,6 +88,43 @@ export function openExternalUrl(url: string): Promise<void> {
   return invoke("open_external_url", { url });
 }
 
+let file_document: Promise<string> | null = null;
+
+function fileDocument(): Promise<string> {
+  if (!file_document) file_document = invoke<string>("file_document").catch((failure) => { file_document = null; throw failure; });
+  return file_document;
+}
+
+export async function fileRequest(
+  request: import("./types").FileRequest,
+  signal?: AbortSignal,
+): Promise<import("./types").FileResponse> {
+  if (signal?.aborted) throw new DOMException("Request cancelled", "AbortError");
+  const document_id = await fileDocument();
+  if (signal?.aborted) throw new DOMException("Request cancelled", "AbortError");
+  const cancel = () => { void invoke("cancel_file_request", { request: { request_id: request.request_id, document_id } }).catch(() => {}); };
+  signal?.addEventListener("abort", cancel, { once: true });
+  try {
+    const response = await invoke<import("./types").FileResponse>("file_request", { request: { ...request, document_id } });
+    if (signal?.aborted) throw new DOMException("Request cancelled", "AbortError");
+    return response;
+  } finally {
+    signal?.removeEventListener("abort", cancel);
+  }
+}
+
+export function openPreviewWindow(snapshot: import("./types").PreviewSnapshot): Promise<string> {
+  return invoke("open_preview_window", { request: { snapshot } });
+}
+
+export function loadPreviewWindow(): Promise<import("./types").PreviewSnapshot> {
+  return invoke("load_preview_window");
+}
+
+export async function closePreviewWindow(): Promise<void> {
+  await getCurrentWindow().destroy();
+}
+
 export async function getComponentVersions(host_id?: string): Promise<ComponentVersionsSnapshot> {
   return invoke("get_component_versions", host_id ? { host_id } : undefined);
 }

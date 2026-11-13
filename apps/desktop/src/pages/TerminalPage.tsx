@@ -1,4 +1,5 @@
 import { Icon } from "../components/ui/Icon";
+import { useFilePreview } from "../features/files/FilePreview";
 import { WorkspaceSidebar } from "../components/workspace/WorkspaceSidebar";
 import { AboutPage } from "./AboutPage";
 import { CredentialsPage } from "./CredentialsPage";
@@ -185,6 +186,7 @@ export function TerminalPage() {
 }
 
 function TerminalWorkbench() {
+  const preview_focused = useFilePreview()?.focused ?? false;
   const { store: notifications, attachments: attachmentNotifications } = useNotificationEnvironment()!;
   const workspace = useWorkspace();
   const {
@@ -1856,7 +1858,7 @@ function TerminalWorkbench() {
           return result;
         },
       })),
-      workspace.ready && !workspace.closing && keybindings.ready && !dialogOpen,
+      workspace.ready && !workspace.closing && keybindings.ready && !dialogOpen && !preview_focused,
       (error) => setListError(errorMessage(error)),
     );
   });

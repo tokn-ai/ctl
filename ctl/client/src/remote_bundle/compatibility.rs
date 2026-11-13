@@ -130,6 +130,7 @@ pub(crate) fn compatible(components: &BTreeMap<String, ComponentInfo>) -> bool {
   // Older agents remain eligible for their existing services. An optional
   // transport advertisement must explicitly intersect the client's set.
   let optional = [
+    ("ctl_files", ctl_proto::files::SUPPORTED_PROTOCOL_VERSIONS),
     (
       "ctl_forwarding",
       ctl_proto::forwarding::SUPPORTED_PROTOCOL_VERSIONS,

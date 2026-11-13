@@ -109,42 +109,46 @@ replacement channel and uses the `ctmux-proto` attachment token described below.
 
 ## Remote command
 
-Updated broker-backed clients lazily open two shared `ctl-agent multiplex` SSH
+Updated broker-backed clients lazily open three shared `ctl-agent multiplex` SSH
 command channels for the selected physical OpenSSH control socket. The Sessions
 transport carries ctmux views, task connections, and their supplemental service
-requests; the Forwarding transport carries UDP rules. Aliases resolving to the
-same socket reuse these two groups. Each channel independently negotiates the
-`ctl_transport 1.0.1` contract after `ctl-service-transport\n`; Yamux then carries
-independently flow-controlled logical streams. Each stream selects ctmux, task,
-or UDP before exchanging that service's existing framing.
+requests; the Forwarding transport carries UDP rules; the Files transport carries
+read-only file, directory, and Git status requests. Aliases resolving to the
+same socket reuse these groups. Each channel independently negotiates the
+`ctl_transport 1.1.2` contract after `ctl-service-transport\n`; Yamux then carries
+independently flow-controlled logical streams. Each stream selects ctmux (0),
+task (1), UDP (2), or files (3) before exchanging that service's framing. Files
+requires selected `1.1.2`; retained `1.0.1` accepts only selectors 0–2.
 
-When both groups are active, they consume two SSH exec session slots on the
-physical master, or three when the master also has a lease anchor. Adding views
-or UDP rules within a group adds logical streams rather than SSH exec sessions.
+When all groups are active, they consume three SSH exec session slots on the
+physical master, or four when the master also has a lease anchor. Adding views,
+UDP rules, or file requests within a group adds logical streams rather than SSH
+exec sessions.
 TCP forwarding uses native OpenSSH forwarding channels and consumes no exec
 session slots. An Any rule combines native TCP with UDP on the Forwarding group.
 
 The dedicated local ctld `open_service` request requires ctld `1.2.18` and pins
-both the target and selected control path. After `service_opened`, the broker
+both the target and selected control path. Selecting `files` additionally
+requires ctld `1.3.19`. After `service_opened`, the broker
 socket carries only that logical service until it closes. Closing a view closes
 its stream while other views and rules retain their streams. Disconnecting a
 target closes that target's streams; another alias sharing the socket retains
 its streams. Each group has its own capacity, failure handling, and buffering:
 at most 64 active service handlers and a 16 MiB aggregate service receive window.
-Across both groups these limits total 128 handlers and 32 MiB. Each server also
+Across all groups these limits total 192 handlers and 48 MiB. Each server also
 reserves one 256 KiB internal admission slot to reject excess replacements
 without closing sibling services, bringing the combined server receive bound
-to 32.5 MiB. A full or failed group leaves the other group available; both still
+to 48.75 MiB. A full or failed group leaves the other groups available; all still
 share the physical SSH connection's network bandwidth.
 The broker closes each idle transport after five seconds. Losing one agent
 transport closes its group's streams; losing the physical SSH master affects
-both groups. Both continue to use the exact authenticated OpenSSH master.
+all groups. All continue to use the exact authenticated OpenSSH master.
 Earlier brokers and agents retain their published direct command endpoints.
 
 UDP services on the remote Forwarding agent share a 32 MiB datagram payload
 budget and at most 512 sockets, including setup sockets. Receive buffers are
 separately bounded to 32 MiB across those sockets. These UDP budgets belong only
-to the Forwarding group and are not duplicated for Sessions. Excess UDP data is
+to the Forwarding group and are not duplicated for Sessions or Files. Excess UDP data is
 dropped; new services or peers are rejected through existing forwarding responses
 when the socket budget is exhausted. Other service streams remain available.
 
@@ -170,6 +174,35 @@ no arbitrary local socket, forwarded address, or service outside the ctmux/task
 enum. The sibling owner-only `ctmuxd` maintenance endpoint is never exposed.
 Taskd accesses that endpoint locally for managed interactive-session lifecycle;
 the gateway itself cannot route to it.
+
+### Read-only files and Git status
+
+Each Files logical stream handles one independently cancellable operation. It
+first performs the existing `ctl_identity` negotiation and publishes the account
+identity, which the caller verifies before sending a file operation. The agent
+then emits `ctl-file-service\n` and a bounded length-prefixed JSON offer for
+`ctl_files 1.0.1` (build 1). After the client selects that contract, one bounded
+JSON request and response use the same four-byte big-endian length framing.
+The fixed `ctl-agent files` command exposes the same protocol without Yamux.
+It accepts no path or arbitrary command in SSH command arguments.
+
+Requests select `metadata`, `read_file`, `list_directory`, or `git_status` with
+`path` and optional `cwd`. Relative paths require an absolute working directory
+from the originating terminal. File reads add byte `offset` and `length` and
+return base64 bytes with total size and EOF; directory requests add `offset`
+and `limit` and return entries and an optional next offset. Git status returns
+structured path/status entries. Failures return a typed error code and message.
+The service performs no file writes or Git mutations.
+
+Paths are limited to 16 KiB, file reads to 4 MiB, directory pages to 1,000 entries,
+directory offsets to 100,000, and frames to 16 MiB. Startup has a ten-second
+deadline and operations a thirty-second deadline. Concurrent requests use
+separate logical streams over the shared Files transport. Each Files agent
+admits at most eight operations through response delivery and returns `busy`
+when that budget is exhausted. Closing one stream
+cancels that request, including its Git subprocess, and leaves other requests
+and terminal streams active. Closing the owning preview or collapsing a tree
+request can therefore release remote work without disconnecting the host.
 
 ### Port discovery and UDP forwarding
 

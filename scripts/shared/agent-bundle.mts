@@ -120,6 +120,13 @@ export function validateBundleProtocols(components: AgentComponentMap, names: re
       check(consumer, "ctl-agent", ["ctl_transport"]);
     }
   }
+  // File support is optional for legacy clients; a raw broker does not consume
+  // this contract. Consumers advertising file operations must share a contract
+  // with the agent when that agent also advertises the service.
+  if (components.ctl?.protocols.some((entry) => entry.name === "ctl_files") &&
+    components["ctl-agent"]?.protocols.some((entry) => entry.name === "ctl_files")) {
+    check("ctl", "ctl-agent", ["ctl_files"]);
+  }
 }
 
 export function parseAgentComponents(value: unknown, identity: AgentBundleIdentity, schema: MetadataSchema = 3): AgentComponentMap {

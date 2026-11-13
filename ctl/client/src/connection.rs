@@ -376,9 +376,16 @@ fn validate_request_contract(
     return Err(Error::UnsupportedForwardingProtocol(protocol));
   }
   match message {
-    ClientMessage::OpenService { target, .. } => {
+    ClientMessage::OpenService {
+      target, service, ..
+    } => {
       if !ctl_ipc::service_streams_supported(protocol) {
         return Err(Error::UnsupportedServiceTransport(protocol));
+      }
+      if *service == ctl_proto::transport::Service::Files
+        && !ctl_ipc::file_service_supported(protocol)
+      {
+        return Err(Error::UnsupportedFileService(protocol));
       }
       validate_route(target, protocol)
     }
@@ -468,6 +475,8 @@ pub enum Error {
     "Shared SSH services require local protocol 1.2.18, but ctld selected {0}. Update and restart ctld."
   )]
   UnsupportedServiceTransport(ProtocolVersion),
+  #[error("file services require ctld 1.3.19; selected contract is {0}")]
+  UnsupportedFileService(ProtocolVersion),
   #[error(
     "SSH authentication is required. Detach and reconnect to answer the authentication prompt."
   )]
@@ -483,6 +492,67 @@ pub enum Error {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[tokio::test]
+  async fn files_require_the_selected_broker_contract_before_sending_a_request() {
+    for selected in ctl_ipc::SUPPORTED_PROTOCOL_VERSIONS.iter().copied() {
+      let (mut client, mut server) = tokio::io::duplex(4096);
+      let peer = tokio::spawn(async move {
+        assert!(matches!(
+          ctl_ipc::read_frame::<_, ClientMessage>(&mut server)
+            .await
+            .unwrap(),
+          Some(ClientMessage::Handshake { .. })
+        ));
+        ctl_ipc::write_frame(
+          &mut server,
+          &ServerMessage::HandshakeAccepted {
+            protocol_version: selected,
+          },
+        )
+        .await
+        .unwrap();
+        let request = ctl_ipc::read_frame::<_, ClientMessage>(&mut server)
+          .await
+          .unwrap();
+        if ctl_ipc::file_service_supported(selected) {
+          assert!(matches!(
+            request,
+            Some(ClientMessage::OpenService {
+              service: ctl_proto::transport::Service::Files,
+              ..
+            })
+          ));
+          ctl_ipc::write_frame(&mut server, &ServerMessage::ServiceOpened)
+            .await
+            .unwrap();
+        } else {
+          assert!(
+            request.is_none(),
+            "unsupported Files must send no broker request"
+          );
+        }
+      });
+      let result = open_service_on(
+        &mut client,
+        fixture_target(),
+        "/fixture/shared-master".into(),
+        ctl_proto::transport::Service::Files,
+      )
+      .await;
+      if ctl_ipc::file_service_supported(selected) {
+        result.unwrap();
+      } else if ctl_ipc::service_streams_supported(selected) {
+        assert!(matches!(result, Err(Error::UnsupportedFileService(actual)) if actual == selected));
+      } else {
+        assert!(
+          matches!(result, Err(Error::UnsupportedServiceTransport(actual)) if actual == selected)
+        );
+      }
+      drop(client);
+      peer.await.unwrap();
+    }
+  }
 
   #[tokio::test]
   async fn shared_services_require_the_selected_contract_before_sending_a_request() {

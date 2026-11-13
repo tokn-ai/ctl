@@ -813,6 +813,18 @@ fn validate_request_contract(
       "shared SSH services require ctld 1.2.18",
     ));
   }
+  if matches!(
+    request,
+    ClientMessage::OpenService {
+      service: ctl_proto::transport::Service::Files,
+      ..
+    }
+  ) && !ctl_ipc::file_service_supported(protocol)
+  {
+    return Err(RequestError::InvalidRequest(
+      "file services require ctld 1.3.19",
+    ));
+  }
   let forwarding_protocol = match request {
     ClientMessage::ConfigurePortForward { forward, .. } => forward.protocol,
     ClientMessage::ListRemoteListeners { protocol, .. } => *protocol,
@@ -3001,7 +3013,11 @@ mod tests {
   async fn handshake_selects_an_explicit_common_contract_below_the_client_latest() {
     let (mut client, mut server) = ctl_ipc::Stream::pair().unwrap();
     let server = tokio::spawn(async move { handshake_server(&mut server).await });
-    let newer = ctl_core::protocol::ProtocolVersion::new(1, 2, ctl_ipc::PROTOCOL_BUILD + 1);
+    let newer = ctl_core::protocol::ProtocolVersion::new(
+      ctl_ipc::PROTOCOL_VERSION.major,
+      ctl_ipc::PROTOCOL_VERSION.minor,
+      ctl_ipc::PROTOCOL_BUILD + 1,
+    );
     ctl_ipc::write_frame(
       &mut client,
       &ClientMessage::Handshake {
@@ -3169,6 +3185,29 @@ mod tests {
       local_port: 15432,
       remote_host: "localhost".into(),
       remote_port: 5432,
+    }
+  }
+
+  #[test]
+  fn file_services_require_the_selected_contract() {
+    for selected in ctl_ipc::SUPPORTED_PROTOCOL_VERSIONS.iter().copied() {
+      for service in [
+        ctl_proto::transport::Service::Ctmux,
+        ctl_proto::transport::Service::Files,
+      ] {
+        let request = ClientMessage::OpenService {
+          target: target(),
+          control_path: PathBuf::from("/fixture/shared-master"),
+          service,
+        };
+        let result = validate_request_contract(&request, selected);
+        let required = if service == ctl_proto::transport::Service::Files {
+          ctl_ipc::CONTRACT_V1_3_19
+        } else {
+          ctl_ipc::CONTRACT_V1_2_18
+        };
+        assert_eq!(result.is_ok(), selected >= required);
+      }
     }
   }
 

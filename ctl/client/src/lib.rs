@@ -27,6 +27,7 @@ use tokio::sync::watch;
 mod broker_transport;
 pub mod caller_auth;
 pub mod connection;
+pub mod files;
 pub mod hosts;
 pub mod local_credentials;
 pub mod maintenance;

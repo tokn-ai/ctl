@@ -216,6 +216,37 @@ describe("retained terminal content", () => {
 });
 
 describe("terminal links", () => {
+  it("detects wrapped file paths after wide characters and uses the shared modifier gesture", async () => {
+    renderer.dispose();
+    const on_file = vi.fn();
+    renderer = new XtermRenderer(container, on_input, size, on_open_link, on_copy_text, on_file);
+    await renderer.write(encoder.encode("界 (src/terminal/main.rs:12:3),"), "1", "0");
+    const terminal = activeTerminal();
+    for (const row of [1, 2]) expect(linksAt(terminal, row).map(({ text, range }) => ({ text, range }))).toEqual([
+      { text: "src/terminal/main.rs:12:3", range: { start: { x: 5, y: 1 }, end: { x: 9, y: 2 } } },
+    ]);
+    const mouse = terminalMouse(terminal);
+    mouse("mousemove", 6);
+    mouse("mousedown", 6, 1, { metaKey: true, buttons: 1 });
+    mouse("mouseup", 6, 1, { metaKey: true });
+    expect(on_file).toHaveBeenCalledExactlyOnceWith({ path: "src/terminal/main.rs", line: 12, column: 3 });
+    expect(on_open_link).not.toHaveBeenCalled();
+  });
+
+  it("previews OSC 8 file URLs on the owning terminal without sending them to a browser", async () => {
+    renderer.dispose();
+    const on_file = vi.fn();
+    renderer = new XtermRenderer(container, on_input, size, on_open_link, on_copy_text, on_file);
+    await renderer.write(encoder.encode("\u001b]8;;file://terminal-host/work/a%20b.rs#L9\u0007Open source\u001b]8;;\u0007"), "1", "0");
+    const terminal = activeTerminal();
+    const mouse = terminalMouse(terminal);
+    mouse("mousemove", 2);
+    mouse("mousedown", 2, 1, { metaKey: true, buttons: 1 });
+    mouse("mouseup", 2, 1, { metaKey: true });
+    expect(on_file).toHaveBeenCalledExactlyOnceWith({ path: "/work/a b.rs", line: 9, column: null });
+    expect(on_open_link).not.toHaveBeenCalled();
+  });
+
   it("detects naturally wrapped URLs with wide Unicode prefixes and surrounding punctuation", async () => {
     const url = "https://example.com/docs?q=one#part";
     await renderer.write(encoder.encode(`界 (${url}),`), "1", "0");

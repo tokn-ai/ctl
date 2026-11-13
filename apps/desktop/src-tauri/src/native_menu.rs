@@ -92,6 +92,12 @@ pub fn handle(app_handle: &AppHandle, event: &tauri::menu::MenuEvent) {
     .find(|window| window.is_focused().unwrap_or(false))
     .or_else(|| app_handle.get_webview_window("main"));
   if let Some(window) = target {
+    if window.label().starts_with("preview-") {
+      if command_id == "session.disconnect" {
+        let _ignored = window.close();
+      }
+      return;
+    }
     let _ignored = window.emit(NATIVE_COMMAND_EVENT, command_id);
   }
 }

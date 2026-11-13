@@ -35,7 +35,10 @@ pub(super) async fn open(
   from_stream(stream, identified).await.map(Some)
 }
 
-async fn from_stream(stream: ctl_ipc::Stream, identified: bool) -> Result<SshTransport, CoreError> {
+pub(super) async fn from_stream(
+  stream: ctl_ipc::Stream,
+  identified: bool,
+) -> Result<SshTransport, CoreError> {
   let (reader, mut stdin) = tokio::io::split(stream);
   let mut stdout = BufReader::new(reader);
   let identity = tokio::time::timeout(

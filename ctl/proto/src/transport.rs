@@ -16,10 +16,11 @@ use tokio::task::JoinSet;
 use tokio::time::{Instant, timeout};
 use tokio_util::compat::{Compat, FuturesAsyncReadCompatExt as _, TokioAsyncReadCompatExt as _};
 
-pub const PROTOCOL_BUILD: u16 = 1;
+pub const PROTOCOL_BUILD: u16 = 2;
 pub const CONTRACT_V1_0_1: ProtocolVersion = ProtocolVersion::new(1, 0, 1);
-pub const PROTOCOL_VERSION: ProtocolVersion = CONTRACT_V1_0_1;
-pub const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[CONTRACT_V1_0_1];
+pub const CONTRACT_V1_1_2: ProtocolVersion = ProtocolVersion::new(1, 1, 2);
+pub const PROTOCOL_VERSION: ProtocolVersion = CONTRACT_V1_1_2;
+pub const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[CONTRACT_V1_0_1, CONTRACT_V1_1_2];
 pub const CONTRACT: ctl_core::component::ProtocolContract =
   ctl_core::component::ProtocolContract::new(
     "ctl_transport",
@@ -43,6 +44,7 @@ pub enum Service {
   Ctmux = 0,
   Task = 1,
   Udp = 2,
+  Files = 3,
 }
 
 impl Service {
@@ -51,12 +53,29 @@ impl Service {
       0 => Ok(Self::Ctmux),
       1 => Ok(Self::Task),
       2 => Ok(Self::Udp),
+      3 => Ok(Self::Files),
       _ => Err(io::Error::new(
         io::ErrorKind::InvalidData,
         "Unknown shared transport service",
       )),
     }
   }
+}
+
+/// File services are additive and must not be sent on the retained transport contract.
+#[must_use]
+pub fn files_supported(protocol: ProtocolVersion) -> bool {
+  SUPPORTED_PROTOCOL_VERSIONS.contains(&protocol) && protocol >= CONTRACT_V1_1_2
+}
+
+fn validate_service(service: Service, protocol: ProtocolVersion) -> io::Result<()> {
+  if service == Service::Files && !files_supported(protocol) {
+    return Err(io::Error::new(
+      io::ErrorKind::Unsupported,
+      "File services require ctl_transport 1.1.2. Update the remote components, then reconnect.",
+    ));
+  }
+  Ok(())
 }
 
 /// One independently flow-controlled logical service connection.
@@ -178,6 +197,7 @@ struct OpenRequest {
 pub struct Client {
   requests: mpsc::Sender<OpenRequest>,
   state: Arc<State>,
+  protocol: ProtocolVersion,
 }
 
 impl Client {
@@ -186,6 +206,7 @@ impl Client {
   /// # Errors
   /// Returns closure, capacity, negotiation, or timeout errors.
   pub async fn open(&self, service: Service) -> io::Result<Stream> {
+    validate_service(service, self.protocol)?;
     timeout(STARTUP_TIMEOUT, async {
       if self.is_closed() {
         return Err(closed());
@@ -236,11 +257,18 @@ impl Client {
 ///
 /// # Errors
 /// Rejects unavailable, incompatible, oversized, or stalled protocol offers.
-pub async fn connect<I>(mut io: I) -> io::Result<Client>
+pub async fn connect<I>(io: I) -> io::Result<Client>
 where
   I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-  timeout(STARTUP_TIMEOUT, async {
+  connect_with_contracts(io, SUPPORTED_PROTOCOL_VERSIONS).await
+}
+
+async fn connect_with_contracts<I>(mut io: I, supported: &[ProtocolVersion]) -> io::Result<Client>
+where
+  I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+  let protocol = timeout(STARTUP_TIMEOUT, async {
     let mut marker = [0; PREFACE.len()];
     io.read_exact(&mut marker).await?;
     if marker != PREFACE {
@@ -250,16 +278,15 @@ where
       ));
     }
     let offer: ProtocolOffer = read_message(&mut io).await?;
-    let selected = offer
-      .negotiate(SUPPORTED_PROTOCOL_VERSIONS)
-      .ok_or_else(incompatible)?;
+    let selected = offer.negotiate(supported).ok_or_else(incompatible)?;
     write_message(
       &mut io,
       &Selection {
         protocol_version: selected,
       },
     )
-    .await
+    .await?;
+    Ok::<_, io::Error>(selected)
   })
   .await
   .map_err(|_| {
@@ -283,7 +310,11 @@ where
     let _closed_on_exit = closed_on_exit;
     drive_client(io, receiver, driver_state).await;
   });
-  Ok(Client { requests, state })
+  Ok(Client {
+    requests,
+    state,
+    protocol,
+  })
 }
 
 async fn drive_client<I>(io: I, mut requests: mpsc::Receiver<OpenRequest>, state: Arc<State>)
@@ -381,7 +412,7 @@ where
   H: Fn(Service, Stream) -> F + Send + Sync + 'static,
   F: Future<Output = io::Result<()>> + Send + 'static,
 {
-  timeout(STARTUP_TIMEOUT, async {
+  let protocol = timeout(STARTUP_TIMEOUT, async {
     io.write_all(PREFACE).await?;
     write_message(
       &mut io,
@@ -396,7 +427,7 @@ where
     if !SUPPORTED_PROTOCOL_VERSIONS.contains(&selection.protocol_version) {
       return Err(incompatible());
     }
-    Ok(())
+    Ok(selection.protocol_version)
   })
   .await
   .map_err(|_| {
@@ -437,7 +468,9 @@ where
               let mut stream = Stream { inner: stream.compat(), _lifetime: None };
               let selector = timeout(STARTUP_TIMEOUT, stream.read_u8()).await
                 .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "Shared service selection timed out"))??;
-              handler(Service::decode(selector)?, stream).await
+              let service = Service::decode(selector)?;
+              validate_service(service, protocol)?;
+              handler(service, stream).await
             });
           },
           Some(Err(error)) => break Err(io::Error::other(error)),
@@ -533,10 +566,11 @@ mod tests {
       let (client, server) = echo_pair().await;
       let mut streams = Vec::new();
       for index in 0..32 {
-        let service = match index % 3 {
+        let service = match index % 4 {
           0 => Service::Ctmux,
           1 => Service::Task,
-          _ => Service::Udp,
+          2 => Service::Udp,
+          _ => Service::Files,
         };
         let stream = client.open(service).await.unwrap();
         streams.push((stream, service, index));
@@ -649,6 +683,46 @@ mod tests {
       .expect("unsupported contract");
     assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     peer.await.unwrap();
+  }
+
+  #[tokio::test]
+  async fn retained_contract_rejects_files_on_both_peers_and_preserves_other_services() {
+    timeout(Duration::from_secs(5), async {
+      let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+      let server = tokio::spawn(serve(server_io, |service, mut stream| async move {
+        assert_ne!(
+          service,
+          Service::Files,
+          "Files must be rejected before dispatch"
+        );
+        stream.write_u8(service as u8).await?;
+        stream.shutdown().await
+      }));
+      let mut client = connect_with_contracts(client_io, &[CONTRACT_V1_0_1])
+        .await
+        .unwrap();
+      assert_eq!(client.protocol, CONTRACT_V1_0_1);
+      assert_eq!(
+        client.open(Service::Files).await.err().unwrap().kind(),
+        io::ErrorKind::Unsupported
+      );
+      assert_eq!(client.state.active.load(Ordering::Relaxed), 0);
+
+      // Simulate a peer ignoring its selected contract; the server must enforce it too.
+      client.protocol = CONTRACT_V1_1_2;
+      let mut rejected = client.open(Service::Files).await.unwrap();
+      let mut byte = [0];
+      assert!(matches!(rejected.read(&mut byte).await, Ok(0) | Err(_)));
+      for service in [Service::Ctmux, Service::Task, Service::Udp] {
+        let mut stream = client.open(service).await.unwrap();
+        assert_eq!(stream.read_u8().await.unwrap(), service as u8);
+      }
+      assert!(!client.is_closed());
+      client.close();
+      server.await.unwrap().unwrap();
+    })
+    .await
+    .unwrap();
   }
 
   #[tokio::test]

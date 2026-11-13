@@ -1,4 +1,4 @@
-//! Session and UDP service pools share an authenticated master independently.
+//! Session, UDP, and file service pools share an authenticated master independently.
 
 #[cfg(all(test, unix))]
 mod tests;
@@ -104,6 +104,7 @@ impl MasterGateway {
 enum Group {
   Sessions,
   Forwarding,
+  Files,
 }
 
 impl Group {
@@ -111,6 +112,7 @@ impl Group {
     match service {
       Service::Ctmux | Service::Task => Self::Sessions,
       Service::Udp => Self::Forwarding,
+      Service::Files => Self::Files,
     }
   }
 
@@ -124,6 +126,7 @@ impl Group {
         "UDP forwarding",
         "Stop an unused UDP or Any forwarding rule",
       ),
+      Self::Files => ("files", "Cancel an unused file request"),
     };
     io::Error::new(
       io::ErrorKind::WouldBlock,

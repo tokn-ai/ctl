@@ -9,15 +9,23 @@ use std::collections::BTreeMap;
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 
+mod provenance;
 mod remote;
 #[cfg(test)]
 mod tests;
 mod updater;
-pub use remote::{remote_account_id, remote_rollback, remote_status};
+pub(crate) use provenance::single_target_heads;
+pub use provenance::{activate_uploaded, decode_catalog_origin, encode_catalog_origin};
+pub use remote::{
+  InstallationCatalog, remote_account_id, remote_catalog, remote_rollback, remote_status,
+};
 pub use updater::{
   provision_manager, provision_manager_from, updater_for_bundle, updater_for_manifest,
 };
-pub(crate) use updater::{provision_manager_bytes, remember_supplied_updater};
+pub(crate) use updater::{
+  provision_manager_bytes, remember_supplied_updater, remember_verified_updater,
+  supplied_updater_info,
+};
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -45,10 +53,14 @@ pub fn prune_caches(home: &Path) -> io::Result<CachePruneResult> {
     256 * 1024 * 1024,
   )?;
   let result = ctl_core::bundles::Store::cache(home).prune_cache(512 * 1024 * 1024)?;
-  let updater_bytes = crate::remote_bundle::published::prune_updater_cache(
-    &home.join(".tokn/ctl/cache/updaters"),
-    128 * 1024 * 1024,
-  )?;
+  let updater_bytes = Installations::new(home).with_locked_manifests(|pins| {
+    let root = home.join(".tokn/ctl/cache/updaters");
+    if pins.is_empty() {
+      crate::remote_bundle::published::prune_updater_cache(&root, 128 * 1024 * 1024)
+    } else {
+      crate::remote_bundle::published::prune_updater_cache_with_pins(&root, 128 * 1024 * 1024, pins)
+    }
+  })?;
   Ok(CachePruneResult {
     download_bytes,
     extracted_bytes: result.remaining_bytes,
@@ -114,6 +126,23 @@ pub async fn install_archive_with_progress(
   bytes: &[u8],
   on_progress: impl Fn(crate::RemoteInstallEvent) + Send + Sync + 'static,
 ) -> io::Result<Bundle> {
+  install_archive_with_origin(home, bytes, None, on_progress).await
+}
+
+/// Activate an uploaded complete build with its separately validated provenance.
+/// Existing progress framing and archive bytes remain unchanged.
+///
+/// # Errors
+/// Reports malformed provenance, verification, staging or activation failures.
+pub async fn install_archive_with_origin(
+  home: &Path,
+  bytes: &[u8],
+  origin: Option<ctl_core::installations::CatalogOrigin>,
+  on_progress: impl Fn(crate::RemoteInstallEvent) + Send + Sync + 'static,
+) -> io::Result<Bundle> {
+  if let Some(origin) = &origin {
+    origin.validate()?;
+  }
   let home = home.to_owned();
   let bytes = bytes.to_vec();
   let (stage, on_progress) = tokio::task::spawn_blocking(move || {
@@ -136,7 +165,8 @@ pub async fn install_archive_with_progress(
   tokio::task::spawn_blocking(move || {
     on_progress(crate::RemoteInstallEvent::Activating);
     let installations = Installations::new(&home);
-    let installed = installations.activate(&Bundle::open(&stage.0)?)?;
+    let bundle = Bundle::open(&stage.0)?;
+    let (installed, _lease) = activate_uploaded(&home, &bundle, origin.as_ref())?;
     // Cleanup cannot turn an already successful activation into an apparent
     // failed update. A later explicit cleanup can retry it safely.
     if let Err(error) = installations.prune() {

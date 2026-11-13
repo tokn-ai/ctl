@@ -74,7 +74,7 @@ test("restores a deployed legacy snapshot with both pointers while Pages CDN is 
 test("expired snapshots recover actual archives and all channel pointers from the managed HTTPS site", async (t) => {
   const directory = await root(t), first = publicationFixture(1), second = publicationFixture(2, "stable");
   const old = join(directory, "old"), site = join(directory, "site"), output = join(directory, "restore");
-  await stageBundlePages(first, await componentSetFixture(directory, first), null, old);
+  await stageBundlePages(first, await componentSetFixture(directory, first, true), null, old);
   await stageBundlePages(second, await componentSetFixture(directory, second), old, site);
   assert.equal(await restoreBundlePages("tokn-ai/ctl", output, github({ deployed: true }), publicSite(site)), true);
   assert.deepEqual(parseBundleCatalog(await readFile(join(output, "bundles/catalog.json"))).channels,
@@ -84,6 +84,8 @@ test("expired snapshots recover actual archives and all channel pointers from th
     assert.deepEqual(await readFile(join(output, relative)), await readFile(join(site, relative)));
   }
   for (const entry of [first, second]) await validatedComponentSet(join(output, "bundles/sets", entry.publication_id), entry);
+  assert.deepEqual(await readFile(join(output, "bundles/sets", first.publication_id, "build-info.json")),
+    await readFile(join(site, "bundles/sets", first.publication_id, "build-info.json")));
   await writeFile(join(site, "bundles/channels/nightly.json"), await readFile(join(site, "bundles/channels/stable.json")));
   await assert.rejects(restoreBundlePages("tokn-ai/ctl", join(directory, "corrupt"), github(), publicSite(site)), /channel and catalog disagree/);
 });

@@ -171,6 +171,7 @@ pub(crate) struct UpdaterUpload<'a> {
   pub bundle_id: &'a str,
   pub archive: &'a [u8],
   pub expected_account: Option<&'a str>,
+  pub origin: Option<&'a ctl_core::installations::CatalogOrigin>,
 }
 
 /// Installs a complete build through the independent target-native updater.
@@ -215,6 +216,7 @@ pub async fn install_ssh_unix_bundle_with_updater(
     bundle_id,
     archive,
     expected_account: None,
+    origin: None,
   };
   install_unix_bundle_with_updater(destination, options, interaction, upload, on_progress).await
 }
@@ -231,6 +233,7 @@ async fn install_unix_bundle_with_updater(
     bundle_id,
     archive,
     expected_account,
+    origin,
   } = upload;
   validate_ssh_target(destination, options)?;
   if options.remote_platform != RemotePlatform::Unix {
@@ -250,10 +253,11 @@ async fn install_unix_bundle_with_updater(
   } else {
     require_updater_success(status, &stdout, &stderr, b"ctlup-bootstrap-v1\n")?;
   }
-  let script = format!(
-    "{guard}exec \"$HOME/.tokn/ctl/bin/ctlup\" activate-installed '{}'",
-    manifest.bundle_id,
-  );
+  let activation = unix_updater_invocation(
+    &format!("activate-installed '{}'", manifest.bundle_id),
+    origin,
+  )?;
+  let script = format!("{guard}{activation}");
   let command = updater_ssh_command(destination, options, interaction, &script).await?;
   let (status, stdout, stderr) = run_updater_command(command, &[], |_| {}).await?;
   if status.success() {
@@ -268,10 +272,29 @@ async fn install_unix_bundle_with_updater(
     destination,
     options,
     interaction,
-    &format!("{guard}exec \"$HOME/.tokn/ctl/bin/ctlup\" install-archive"),
+    &format!(
+      "{guard}{}",
+      unix_updater_invocation("install-archive", origin)?
+    ),
   )
   .await?;
   run_package_install(command, archive, layout.names(), on_progress).await
+}
+
+fn unix_updater_invocation(
+  operation: &str,
+  origin: Option<&ctl_core::installations::CatalogOrigin>,
+) -> Result<String, CoreError> {
+  let mut script = format!("manager=\"$HOME/.tokn/ctl/bin/ctlup\"\nset -- {operation}\n");
+  if let Some(origin) = origin {
+    let encoded = crate::installation::encode_catalog_origin(origin)
+      .map_err(|error| CoreError::InvalidComponentBundle(error.to_string()))?;
+    script = format!(
+      "{script}if \"$manager\" catalog-json </dev/null >/dev/null; then\n  set -- \"$@\" --origin-hex '{encoded}'\nelse\n  status=$?\n  [ \"$status\" -eq 2 ] || exit \"$status\"\nfi\n"
+    );
+  }
+  script.push_str("exec \"$manager\" \"$@\"");
+  Ok(script)
 }
 
 pub(crate) fn unix_account_guard(expected: Option<&str>) -> Result<String, CoreError> {

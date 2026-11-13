@@ -41,6 +41,22 @@ fn fixture() -> VerifiedUpdater {
   }
 }
 
+fn matching_runtime(updater: &VerifiedUpdater) -> ctl_core::bundles::Manifest {
+  let mut fixture = crate::remote_bundle::compatibility::tests::Fixture::new(
+    &updater.info.app_version,
+    &updater.info.git_revision,
+  );
+  fixture.inner["target_triple"] = serde_json::json!(&updater.info.target_triple);
+  crate::components::inspect_remote(
+    &fixture.bundle(),
+    &updater.info.target_triple,
+    ctl_core::bundles::Source::Ci,
+  )
+  .unwrap()
+  .with_distribution_id(&updater.info.bundle_id)
+  .unwrap()
+}
+
 #[test]
 fn updater_metadata_rejects_other_targets_source_identity_and_changed_bytes() {
   let updater = fixture();
@@ -174,6 +190,84 @@ fn updater_cache_budget_evicts_old_blobs_and_their_records_but_keeps_newer_conte
   assert!(records.join(format!("{}.json", "b".repeat(64))).exists());
   assert_eq!(prune_updater_cache(&root, 0).unwrap(), new.info.size);
   assert_eq!(std::fs::read_dir(records).unwrap().count(), 0);
+}
+
+#[test]
+fn installed_component_pins_keep_their_matching_updater_even_above_budget() {
+  let home = Home::new();
+  let updater = fixture();
+  let root = home.cache();
+  cache_verified(&root, &updater).unwrap();
+  let records = root.join("records");
+  crate::installation::safe_directory(&records).unwrap();
+  let manifest = matching_runtime(&updater);
+  let record = records.join(format!("{}.json", manifest.bundle_id));
+  std::fs::write(&record, serde_json::to_vec(&updater.info).unwrap()).unwrap();
+  std::fs::set_permissions(&record, std::fs::Permissions::from_mode(0o600)).unwrap();
+  assert_eq!(
+    prune_updater_cache_with_pins(&root, 0, &[manifest]).unwrap(),
+    0
+  );
+  assert!(read_cached_updater(&root, &updater.info).unwrap().is_some());
+  assert!(record.exists());
+  assert_eq!(prune_updater_cache(&root, 0).unwrap(), updater.info.size);
+}
+
+#[test]
+fn updater_blob_and_cohort_record_publish_together_without_nested_locking() {
+  let home = Home::new();
+  let updater = fixture();
+  let manifest = matching_runtime(&updater);
+  let root = home.cache();
+  let write_root = root.clone();
+  let write_manifest = manifest.clone();
+  let write_updater = updater.clone();
+  let (sent, received) = std::sync::mpsc::channel();
+  let writer = std::thread::spawn(move || {
+    let result = (|| {
+      cache_verified_for_manifest(&write_root, &write_manifest, &write_updater)?;
+      cache_verified_for_manifest(&write_root, &write_manifest, &write_updater)
+    })();
+    sent.send(result).unwrap();
+  });
+  received
+    .recv_timeout(std::time::Duration::from_secs(10))
+    .expect("atomic cache publication must not acquire the cache lock recursively")
+    .unwrap();
+  writer.join().unwrap();
+  let bytes = std::fs::read(
+    root
+      .join("records")
+      .join(format!("{}.json", manifest.bundle_id)),
+  )
+  .unwrap();
+  let info = UpdaterInfo::parse(&bytes, &manifest.target_triple).unwrap();
+  assert_eq!(info.sha256, updater.info.sha256);
+  assert_eq!(
+    read_cached_updater(&root, &info).unwrap().unwrap().bytes,
+    updater.bytes
+  );
+  assert_eq!(
+    prune_updater_cache_with_pins(&root, 0, &[manifest]).unwrap(),
+    0
+  );
+}
+
+#[test]
+fn mismatched_publications_and_corrupt_updater_bytes_never_create_records() {
+  let home = Home::new();
+  let updater = fixture();
+  let manifest = matching_runtime(&updater)
+    .with_distribution_id("other-publication")
+    .unwrap();
+  let root = home.cache();
+  assert!(cache_verified_for_manifest(&root, &manifest, &updater).is_err());
+  assert!(!root.exists());
+  let manifest = matching_runtime(&updater);
+  let mut corrupt = updater;
+  corrupt.bytes.push(0);
+  assert!(cache_verified_for_manifest(&root, &manifest, &corrupt).is_err());
+  assert!(!root.exists());
 }
 
 #[test]

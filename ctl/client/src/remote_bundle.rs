@@ -25,6 +25,7 @@ const SUPPORTED_TARGETS: [&str; 4] = [
 ];
 
 pub(crate) mod archive;
+pub(crate) mod build_info;
 mod cache;
 pub(crate) mod compatibility;
 pub mod desktop;
@@ -299,6 +300,8 @@ impl BundleSet {
       app_version: self.app_version.clone(),
       bundle_id: self.bundle_id.clone(),
       git_revision: self.git_revision.clone(),
+      built_at: None,
+      publication_id: None,
       archive,
       file_name: entry.archive.clone(),
       manifest,
@@ -311,6 +314,8 @@ pub struct VerifiedBundle {
   pub app_version: String,
   pub bundle_id: String,
   pub git_revision: String,
+  pub built_at: Option<String>,
+  pub publication_id: Option<String>,
   pub archive: Vec<u8>,
   pub file_name: String,
   /// The bounded, validated bundle-set document that authenticated this archive.
@@ -359,7 +364,10 @@ pub fn read_verified_bundle(
       &directory.join(&manifest.target(target)?.archive),
       MAX_BUNDLE_BYTES,
     )?;
-    return manifest.verify_archive(target, archive, bytes).map(Some);
+    let built_at = build_info::read(directory, &manifest)?;
+    let mut bundle = manifest.verify_archive(target, archive, bytes)?;
+    bundle.built_at = built_at;
+    return Ok(Some(bundle));
   }
   Ok(None)
 }
@@ -426,7 +434,10 @@ fn read_reusable(
         &directory.join(manifest.archive_name(target)?),
         MAX_BUNDLE_BYTES,
       )?;
-      return manifest.verify_archive(target, archive, bytes).map(Some);
+      let built_at = build_info::read(directory, &manifest)?;
+      let mut bundle = manifest.verify_archive(target, archive, bytes)?;
+      bundle.built_at = built_at;
+      return Ok(Some(bundle));
     }
   }
   Ok(None)
@@ -471,7 +482,20 @@ pub async fn download_release_bundle(
     MAX_BUNDLE_BYTES,
   )
   .await?;
-  manifest.verify_archive(target, archive, bytes)
+  let built_at = match download(
+    &client,
+    &format!("{root}/{}", build_info::FILE_NAME),
+    build_info::MAX_BYTES,
+  )
+  .await
+  {
+    Ok(metadata) => Some(build_info::BuildInfo::parse(&metadata, &manifest)?.built_at),
+    Err(Error::NotAvailable(_)) => None,
+    Err(error) => return Err(error),
+  };
+  let mut bundle = manifest.verify_archive(target, archive, bytes)?;
+  bundle.built_at = built_at;
+  Ok(bundle)
 }
 
 pub(crate) fn safe_id(value: &str) -> bool {

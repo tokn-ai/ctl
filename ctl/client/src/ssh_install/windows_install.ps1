@@ -38,9 +38,10 @@ try {
       throw 'The selected ctlup changed during the update.'
     }
   }
+  __ORIGIN_ARGUMENTS__
   $start = New-Object Diagnostics.ProcessStartInfo
   $start.FileName = $manager
-  $start.Arguments = 'install-archive'
+  $start.Arguments = ('install-archive ' + ($originArgs -join ' ')).TrimEnd()
   $start.UseShellExecute = $false
   # Redirect output only so the child inherits the original binary input handle.
   $start.RedirectStandardOutput = $true

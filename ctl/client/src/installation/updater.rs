@@ -204,6 +204,8 @@ pub async fn updater_for_manifest(
   )
   .await
   .map_err(io::Error::other)?;
+  verify_supplied_identity(manifest, &updater.info)?;
+  remember_verified_updater(home, manifest, &updater)?;
   Ok(updater.bytes)
 }
 
@@ -218,50 +220,57 @@ pub(crate) fn remember_supplied_updater(
   home: &Path,
   bundle: &Bundle,
   directory: &Path,
-) -> io::Result<()> {
+) -> io::Result<Option<crate::remote_bundle::published::VerifiedUpdater>> {
   let target = &bundle.manifest.target_triple;
   // Native builds such as GNU Linux do not have publisher updater sidecars.
   // Their manager is resolved from the native executable during provisioning.
   if ctl_core::bundles::local_target(target) && !crate::remote_bundle::supported_target(target) {
-    return Ok(());
+    return Ok(None);
   }
   let updater = match crate::remote_bundle::published::read_updater(directory, target) {
     Ok(updater) => updater,
     Err(crate::remote_bundle::Error::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
-      return Ok(());
+      return Ok(None);
     }
     Err(error) => return Err(io::Error::other(error)),
   };
-  verify_supplied_identity(&bundle.manifest, &updater.info)?;
-  let root = home.join(".tokn/ctl/cache/updaters");
-  crate::remote_bundle::published::cache_verified(&root, &updater).map_err(io::Error::other)?;
-  let records = root.join("records");
-  super::safe_directory(&records)?;
-  let stage = records.join(format!(".record-{}", uuid::Uuid::new_v4()));
-  let result = (|| {
-    let mut file = private_fs::options()
-      .write(true)
-      .create_new(true)
-      .open(&stage)?;
-    serde_json::to_writer(&mut file, &updater.info)?;
-    file.sync_all()?;
-    drop(file);
-    std::fs::rename(
-      &stage,
-      records.join(format!("{}.json", bundle.manifest.bundle_id)),
-    )?;
-    private_fs::sync_directory(&records)
-  })();
-  if result.is_err() {
-    let _ = std::fs::remove_file(stage);
-  }
-  result
+  remember_verified_updater(home, &bundle.manifest, &updater)?;
+  Ok(Some(updater))
+}
+
+pub(crate) fn remember_verified_updater(
+  home: &Path,
+  manifest: &ctl_core::bundles::Manifest,
+  updater: &crate::remote_bundle::published::VerifiedUpdater,
+) -> io::Result<()> {
+  verify_supplied_identity(manifest, &updater.info)?;
+  crate::remote_bundle::published::cache_verified_for_manifest(
+    &home.join(".tokn/ctl/cache/updaters"),
+    manifest,
+    updater,
+  )
+  .map_err(io::Error::other)
 }
 
 fn supplied_updater(
   home: &Path,
   manifest: &ctl_core::bundles::Manifest,
 ) -> io::Result<Option<Vec<u8>>> {
+  let Some(info) = supplied_updater_info(home, manifest)? else {
+    return Ok(None);
+  };
+  crate::remote_bundle::published::read_cached_updater(
+    &home.join(".tokn/ctl/cache/updaters"),
+    &info,
+  )
+  .map(|updater| updater.map(|updater| updater.bytes))
+  .map_err(io::Error::other)
+}
+
+pub(crate) fn supplied_updater_info(
+  home: &Path,
+  manifest: &ctl_core::bundles::Manifest,
+) -> io::Result<Option<crate::remote_bundle::published::UpdaterInfo>> {
   let root = home.join(".tokn/ctl/cache/updaters");
   if !super::storage_exists(&root.join("records"))? {
     return Ok(None);
@@ -280,9 +289,7 @@ fn supplied_updater(
     crate::remote_bundle::published::UpdaterInfo::parse(&metadata, &manifest.target_triple)
       .map_err(io::Error::other)?;
   verify_supplied_identity(manifest, &info)?;
-  crate::remote_bundle::published::read_cached_updater(&root, &info)
-    .map(|updater| updater.map(|updater| updater.bytes))
-    .map_err(io::Error::other)
+  Ok(Some(info))
 }
 
 fn verify_supplied_identity(
@@ -290,7 +297,8 @@ fn verify_supplied_identity(
   updater: &crate::remote_bundle::published::UpdaterInfo,
 ) -> io::Result<()> {
   let build = &manifest.components["ctl-agent"].build;
-  if updater.app_version != build.version
+  if updater.target_triple != manifest.target_triple
+    || updater.app_version != build.version
     || Some(updater.git_revision.as_str()) != build.source_revision.as_deref()
     || manifest
       .distribution_id
@@ -387,7 +395,7 @@ mod tests {
     let bundle = ctl_core::bundles::Store::cache(&root.0)
       .publish(&manifest, &fixture.files)
       .unwrap();
-    remember_supplied_updater(&root.0, &bundle, &root.0).unwrap();
+    let _ = remember_supplied_updater(&root.0, &bundle, &root.0).unwrap();
     assert!(supplied_updater(&root.0, &manifest).unwrap().is_none());
     assert!(!root.0.join(".tokn/ctl/cache/updaters").exists());
 
@@ -480,7 +488,7 @@ mod tests {
         serde_json::to_vec(&info).unwrap(),
       )
       .unwrap();
-      remember_supplied_updater(&root, &bundle, &provided).unwrap();
+      let _ = remember_supplied_updater(&root, &bundle, &provided).unwrap();
       let outcome = provision_manager(&root, &bundle).await;
       let installed = root.join(".tokn/ctl/bin/ctlup");
       if name == "ctlup" {

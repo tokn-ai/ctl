@@ -27,9 +27,10 @@ pub(super) async fn run(home: &Path, options: ReleaseArguments) -> io::Result<()
       } else {
         for release in releases {
           println!(
-            "{}{}",
+            "{}{} (built {})",
             release.publication_id,
-            if release.current { " (current)" } else { "" }
+            if release.current { " (current)" } else { "" },
+            release.built_at.as_deref().unwrap_or("unknown")
           );
         }
       }
@@ -59,6 +60,7 @@ pub(super) async fn run(home: &Path, options: ReleaseArguments) -> io::Result<()
         );
         println!("Version {}", release.bundle_id);
         println!("Revision {}", release.git_revision);
+        println!("Built {}", release.built_at.as_deref().unwrap_or("unknown"));
         print_targets(&details.targets);
       }
       Ok(())

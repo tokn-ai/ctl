@@ -395,6 +395,16 @@ retained Nightly bundles keep their original IDs. Temporary PR builds are resolv
 through GitHub Actions. The named service contracts, internal protocol builds,
 SSH framing and daemon negotiation remain unchanged.
 
+Channel installations add an independent installation-catalog schema 1 and an
+optional publication `build-info.json` schema 1. Catalog records identify the
+channel, target, publication and UTC build date without changing content-addressed
+bundle manifests. Earlier installations remain readable with unknown provenance.
+The opt-in `catalog-json` command uses the `ctlup-catalog-v1` response marker;
+updated clients probe support before sending optional installation provenance,
+and retain legacy behavior with older managers. The existing `ctlup-command-v1`
+status and rollback JSON, bundle sets, PR artifact layout, named protocol versions
+and internal builds remain unchanged.
+
 ## Discovery and SSH framing
 
 The default ctld socket or Windows pipe is keyed by the protocol major, such as

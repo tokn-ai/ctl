@@ -15,7 +15,8 @@ use std::path::Component;
 mod windows;
 #[cfg(windows)]
 pub(super) use windows::{
-  activate, install_manager, lease_manager_executable, manager_and_lease, pointer, prune_managers,
+  activate, install_manager, lease_manager_executable, manager_and_lease, pointer,
+  prepare_activation, prune_managers,
 };
 
 const JOURNAL: &str = ".activation.json";
@@ -100,6 +101,24 @@ pub(super) fn validate_native(bundle: &Bundle, legacy: bool) -> io::Result<()> {
     ));
   }
   Ok(())
+}
+
+pub(super) fn validate_complete(bundle: &Bundle) -> io::Result<()> {
+  bundle.manifest.validate()?;
+  if bundle.manifest.schema_version != 2 {
+    return Err(invalid(
+      "catalog components require a complete build including ctl and ctmux",
+    ));
+  }
+  Ok(())
+}
+
+fn validate_stored(bundle: &Bundle) -> io::Result<()> {
+  if cfg!(unix) && bundle.manifest.schema_version == 1 {
+    validate_native(bundle, true)
+  } else {
+    validate_complete(bundle)
+  }
 }
 
 #[cfg(unix)]
@@ -211,7 +230,7 @@ pub(super) fn load(store: &Installations, id: &str) -> io::Result<Bundle> {
   }
   directory(&store.root.join("installs"))?;
   let bundle = Bundle::open(&store.root.join("installs").join(id))?;
-  validate_native(&bundle, cfg!(unix))?;
+  validate_stored(&bundle)?;
   if bundle.manifest.bundle_id != id {
     return Err(invalid(
       "installation payload identity differs from its path",
@@ -225,7 +244,7 @@ pub(super) fn publish(
   source: &Bundle,
   files: Option<&BTreeMap<String, Vec<u8>>>,
 ) -> io::Result<Bundle> {
-  validate_native(source, true)?;
+  validate_stored(source)?;
   let root = store.root.join("installs");
   let destination = root.join(&source.manifest.bundle_id);
   if path_exists(&destination)? {
@@ -368,11 +387,20 @@ fn prepare_aliases(store: &Installations) -> io::Result<()> {
 }
 
 #[cfg(unix)]
+pub(super) fn prepare_activation(store: &Installations) -> io::Result<()> {
+  prepare_aliases(store)
+}
+
+#[cfg(unix)]
 pub(super) fn activate(
   store: &Installations,
   active: &Bundle,
   previous: Option<&Bundle>,
 ) -> io::Result<()> {
+  validate_native(active, true)?;
+  if let Some(previous) = previous {
+    validate_native(previous, true)?;
+  }
   prepare_aliases(store)?;
   let previous =
     previous.filter(|previous| previous.manifest.bundle_id != active.manifest.bundle_id);
@@ -409,11 +437,15 @@ pub(super) fn recover(store: &Installations) -> io::Result<()> {
   }
   let transaction: Transaction = serde_json::from_slice(&read(&path)?).map_err(io::Error::other)?;
   let active = load(store, &transaction.active)?;
+  validate_native(&active, true)?;
   let previous = transaction
     .previous
     .as_deref()
     .map(|id| load(store, id))
     .transpose()?;
+  if let Some(previous) = &previous {
+    validate_native(previous, true)?;
+  }
   prepare_aliases(store)?;
   if let Some(previous) = previous {
     replace_link(
@@ -502,7 +534,7 @@ impl Drop for Lock {
   }
 }
 
-struct Temporary(PathBuf);
+pub(super) struct Temporary(pub(super) PathBuf);
 impl Drop for Temporary {
   fn drop(&mut self) {
     let _ = fs::remove_file(&self.0);

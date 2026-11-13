@@ -14,6 +14,10 @@ const LAUNCHER: &str = ".ctl-launcher.exe";
 const MANAGER: &str = "ctlup.exe";
 const MANAGER_STORE: &str = "updaters";
 
+pub(in crate::installations) fn prepare_activation(store: &Installations) -> io::Result<()> {
+  prepare_aliases(store, None)
+}
+
 fn selection(store: &Installations) -> io::Result<Option<Transaction>> {
   let path = store.root.join(JOURNAL);
   let bytes = match read(&path) {
@@ -46,7 +50,13 @@ pub(in crate::installations) fn pointer(
   } else {
     selection.previous
   };
-  id.as_deref().map(|id| load(store, id)).transpose()
+  id.as_deref()
+    .map(|id| {
+      let bundle = load(store, id)?;
+      super::validate_native(&bundle, false)?;
+      Ok(bundle)
+    })
+    .transpose()
 }
 
 pub(in crate::installations) fn activate(
@@ -54,6 +64,10 @@ pub(in crate::installations) fn activate(
   active: &Bundle,
   previous: Option<&Bundle>,
 ) -> io::Result<()> {
+  super::validate_native(active, false)?;
+  if let Some(previous) = previous {
+    super::validate_native(previous, false)?;
+  }
   prepare_aliases(store, None)?;
   let active = &active.manifest.bundle_id;
   if selection(store)?.is_some_and(|selection| selection.active == *active) {

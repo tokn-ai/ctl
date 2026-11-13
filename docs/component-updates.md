@@ -34,13 +34,15 @@ host without a verified saved identity asks for **Check host** to verify its acc
 A legacy numeric protocol is labeled **legacy**, independently of published
 contract versions.
 
-## One active installation
+## Installed channels and active runtime
 
 `ctlup` installs and updates complete builds. `ctl` and `ctmux` perform runtime
 operations. The desktop uses the same Rust installation engine as `ctlup`.
 
-Each account has one active build containing `ctl`, `ctmux`, `ctl-agent`,
-`ctmuxd`, `ctl-taskd`, and `ctld`. Builds are immutable and verified against
+Each channel selects one publication containing complete bundles for its
+installed targets. A target component contains `ctl`, `ctmux`, `ctl-agent`,
+`ctmuxd`, `ctl-taskd`, and `ctld`. Each account selects one native bundle for
+active commands. Builds are immutable and verified against
 their file checksums, build identity, target and shared protocol contracts.
 Foreign-target binaries are never executed during download or import.
 
@@ -52,6 +54,7 @@ Foreign-target binaries are never executed during download or import.
   bin/ctl-agent -> ../current/ctl-agent
   current -> installs/<content-id>
   previous -> installs/<previous-id>
+  catalog.json                      # channel, target and build-date metadata
   installs/<content-id>/bundle.json
   installs/<content-id>/<executables>
   cache/                            # reusable deployment artifacts
@@ -66,8 +69,9 @@ automatically; existing shells keep their environment. Ordinary SSH login
 configuration remains under the account owner’s control.
 
 Activation atomically changes `current`. The previous complete build is kept
-for rollback. Older installations remain only while live processes hold leases
-on them; OS-held locks release after a crash. Installing never restarts daemons
+for rollback. Current target components for every installed channel remain
+available. Older payloads remain only for rollback or while live processes hold
+leases on them; OS-held locks release after a crash. Installing never restarts daemons
 or ends sessions. Existing agent channels use their original process until
 reconnect. A terminal-daemon restart remains a separate confirmed action.
 
@@ -110,10 +114,10 @@ compiled default. Stable tracks tagged releases and Nightly tracks the latest
 successfully published CI build from `main`. Nightly versions include the UTC
 commit date, for example `0.1.2-nightly.20261110+g7f380d40f15e`.
 
-Use `ctlup release list` to see the recent releases retained for your selected
-channel. Each row shows the publication ID and marks the current release. Use
-`ctlup release view` to inspect the current release, or pass a publication ID
-from the list to inspect a specific build and its target compatibility.
+Use `ctlup release list` to see the current publication for your selected
+channel. Stable and Nightly each expose one current publication, including its
+target bundles. `ctlup release view` shows that publication's compatibility and
+build date. PR builds are listed separately.
 
 ```sh
 ctlup release list --channel nightly
@@ -138,6 +142,44 @@ for the same commit when available. `release view --pr` shows the PR and its
 build status. `update --pr` uses `gh` to download the bundle for the current
 commit. Use `--host` to target a remote machine. See
 [install a temporary PR build](ci-bundles.md#install-a-temporary-pr-build).
+
+## Target components and the installation catalog
+
+```sh
+ctlup component list
+ctlup component list --channel nightly --installed --json
+ctlup component list --channel stable --available
+ctlup component add x86_64-unknown-linux-musl aarch64-unknown-linux-musl --channel nightly
+ctlup component add x86_64-pc-windows-msvc --channel stable
+ctlup component add x86_64-unknown-linux-musl --pr 123
+ctlup component remove aarch64-unknown-linux-musl --channel nightly
+```
+
+A component is a complete runtime bundle for one target. Adding components
+stores them durably without changing active command aliases or executing foreign
+binaries. Available-target inspection reads publication metadata without downloading
+archives. Installed-component inspection is passive and works offline.
+
+Updating a channel prepares all its registered targets from the same publication
+before committing its new catalog. A missing target, changed publication or
+concurrent catalog change leaves the previous channel selection available.
+Target components and their matching updater remain available after cache cleanup.
+Removing a registration preserves payloads and provenance needed by active,
+rollback or running processes. PR installations are cataloged separately as
+`pr-NUMBER`; checkout builds use `local`, and explicitly supplied files use
+`provided`. Historical installations with no reliable provenance appear as unknown.
+
+`ctlup status` shows build dates and groups installations by channel and target,
+including retained older payloads. Build dates come from validated build metadata
+or a freshly built local bundle; the date embedded in a Nightly version is a
+commit date. Older bundles without build metadata show `unknown`.
+`status --json` retains its original active/previous response for compatibility;
+`component list --installed --json` provides the versioned catalog, including
+channel and build-date fields. Remote inspection supports the same catalog when
+the target updater provides it and leaves legacy dates unknown otherwise.
+SSH uploads contain one native target. If the remote channel also registers
+other targets, uploading a new publication fails without changing those
+registrations. Run `ctlup update` on that host to prepare its complete target set.
 
 In a development checkout, automatic Linux x64 remote updates build the working
 tree. Use `--working-tree` to choose that source explicitly for Linux x64 or
@@ -290,7 +332,8 @@ Cached archives live under `cache/downloads`, extracted deployment builds under
 Automatic cleanup budgets compressed runtime downloads at 256 MiB, extracted
 payloads at 512 MiB, and updater binaries at 128 MiB. Prepared extracted builds
 hold shared leases and can temporarily exceed the budget until users release
-them. Active and rollback installations are separate from deployment cache.
+them. Installed channel components, active and rollback payloads are separate
+from deployment cache; matching installed updaters remain pinned during cleanup.
 
 ## Remote deployment
 
@@ -318,8 +361,9 @@ Choose hosts and a channel, provided files, or an included offline build.
 Development builds can also cross-build Linux x64 and ARM64 from the checkout.
 The dialog reports preparation progress before SSH transfer begins. Every
 update installs a complete build. About’s bundle list shows the active native
-build and offers local installation of another usable build; foreign artifacts
-are deployment cache entries, not independent upload profiles.
+build and offers local installation of another usable build. Explicitly installed
+target components have durable channel registrations; other downloaded foreign
+artifacts remain deployment cache entries.
 
 Existing verified complete installations and local selections are recognized
 without mutation. The first successful explicit install migrates the previous

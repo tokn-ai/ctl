@@ -543,7 +543,11 @@ pub(super) fn invalid(message: &str) -> io::Error {
   io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
-pub(crate) fn validate_target(target: &str) -> io::Result<()> {
+/// Validates a supported target before resolving or changing bundle storage.
+///
+/// # Errors
+/// Rejects malformed or unsupported target triples.
+pub fn validate_target(target: &str) -> io::Result<()> {
   if target.is_empty()
     || target.len() > 128
     || !target

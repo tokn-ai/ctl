@@ -10,6 +10,7 @@ import { maxAgentManifestBytes, parseAgentBundleSet, parseWindowsAgentBundleSet,
 import { maxUpdaterBytes, maxUpdaterManifestBytes, parseUpdaterManifest, updaterManifestName } from "../shared/updater-bundle.mts";
 import { catalogChannels, parseBundleCatalog, siteMarker, verifyChannelPointer, type BundleCatalog } from "./stage-bundle-pages.mts";
 import { pages, type GhRunner } from "./update-draft-release.mts";
+import { buildInfoName, maxBuildInfoBytes, parseBuildInfo } from "../shared/build-info.mts";
 
 export const pagesJobName = "Publish bundle channels";
 export const pagesDeployStep = "Deploy bundle Pages";
@@ -75,6 +76,11 @@ async function restorePublished(catalog: BundleCatalog, directory: string, fetch
     await writeFile(join(local, "bundle-set.json"), manifest_bytes!);
     // Validate names and identity before using archive filenames in URLs/paths.
     const parsed = parseAgentBundleSet(manifest_bytes!, componentIdentity(entry));
+    const build_info = await download(new URL(`${relative}${buildInfoName}`, bundleRoot), maxBuildInfoBytes, fetcher, true);
+    if (build_info) {
+      parseBuildInfo(build_info, componentIdentity(entry));
+      await writeFile(join(local, buildInfoName), build_info);
+    }
     if (parsed.schema_version === 1) throw new Error("Published Pages set lacks component metadata");
     const windows_bytes = await download(new URL(`${relative}${windowsAgentManifestName}`, bundleRoot), maxAgentManifestBytes, fetcher, true);
     const targets = { ...parsed.targets };

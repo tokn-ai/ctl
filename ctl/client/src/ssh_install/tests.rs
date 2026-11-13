@@ -4,6 +4,61 @@ const VALID_PROGRESS: &[u8] = b"ctl-install-progress-v1 receiving 0\nctl-install
 
 #[cfg(unix)]
 #[tokio::test]
+async fn provenance_negotiation_preserves_archive_input_and_only_falls_back_for_old_clap() {
+  use std::os::unix::fs::PermissionsExt as _;
+  let fixture = BundleFixture::new();
+  let home = fixture.directory.join("origin-home");
+  let manager = home.join(".tokn/ctl/bin/ctlup");
+  std::fs::create_dir_all(manager.parent().unwrap()).unwrap();
+  std::fs::write(&manager, b"#!/bin/sh\ncase \"$1\" in\n catalog-json) exit \"$PROBE_CODE\";;\n *) printf '%s\\n' \"$@\" > \"$HOME/arguments\"; cat > \"$HOME/archive\";;\nesac\n").unwrap();
+  std::fs::set_permissions(&manager, std::fs::Permissions::from_mode(0o700)).unwrap();
+  let origin = ctl_core::installations::CatalogOrigin {
+    channel: "nightly".into(),
+    publication_id: Some("one".into()),
+    built_at: None,
+  };
+  let encoded = crate::installation::encode_catalog_origin(&origin).unwrap();
+  for operation in ["install-archive", "activate-installed aaaaaaaa"] {
+    for probe_code in [0, 2, 7] {
+      let mut command = Command::new("sh");
+      command
+        .args([
+          "-c",
+          &unix_updater_invocation(operation, Some(&origin)).unwrap(),
+        ])
+        .env("HOME", &home)
+        .env("PROBE_CODE", probe_code.to_string());
+      let (status, _, _) = run_updater_command(command, b"archive\x00bytes", |_| {})
+        .await
+        .unwrap();
+      if probe_code == 7 {
+        assert_eq!(status.code(), Some(7));
+        assert!(!home.join("arguments").exists());
+      } else {
+        assert!(status.success());
+        let mut expected = operation.split_whitespace().collect::<Vec<_>>().join("\n");
+        if probe_code == 0 {
+          expected.push_str("\n--origin-hex\n");
+          expected.push_str(&encoded);
+        }
+        expected.push('\n');
+        assert_eq!(
+          std::fs::read_to_string(home.join("arguments")).unwrap(),
+          expected
+        );
+        assert_eq!(
+          std::fs::read(home.join("archive")).unwrap(),
+          b"archive\x00bytes"
+        );
+        std::fs::remove_file(home.join("arguments")).unwrap();
+        std::fs::remove_file(home.join("archive")).unwrap();
+      }
+    }
+  }
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn updater_bootstrap_verifies_bytes_and_executable_before_replacing_the_manager() {
   use std::os::unix::fs::PermissionsExt as _;
   let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;

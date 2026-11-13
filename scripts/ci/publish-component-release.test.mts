@@ -456,6 +456,20 @@ test("published component bytes are immutable and an identical retry performs no
   assert.ok(!mismatch.calls.some((args) => args.includes("POST") || args.includes("PATCH") || args.includes("DELETE")));
 });
 
+test("tag retries retain the original canonical build timestamp", async (t) => {
+  const root = await fixture(t);
+  const canonical = await componentSetFixture(root, identity, true);
+  const rebuilt = join(root, "rebuilt-with-new-date");
+  await cp(canonical, rebuilt, { recursive: true });
+  const metadata = JSON.parse(await readFile(join(rebuilt, "build-info.json"), "utf8"));
+  metadata.built_at = "2099-01-01T00:00:00Z";
+  await writeFile(join(rebuilt, "build-info.json"), JSON.stringify(metadata));
+  const api = github({ release: published, assets: await existingComponents(canonical), canonical_directory: canonical });
+  await publishComponentRelease("tokn-ai/ctl", identity, rebuilt, "components", api.gh);
+  assert.deepEqual(await readFile(join(rebuilt, "build-info.json")), await readFile(join(canonical, "build-info.json")));
+  assert.ok(!api.calls.some((args) => args.includes("POST") || args.includes("DELETE")));
+});
+
 test("missing/moved release tags and manual collisions cannot publish", async (t) => {
   const directory = await componentSetFixture(await fixture(t), identity);
   const bad_tag = github({ bad_tag: true });

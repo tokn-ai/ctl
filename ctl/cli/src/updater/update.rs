@@ -218,6 +218,7 @@ async fn update_host(
   source: &BuildSource,
   pr: Option<&mut PrBuilds>,
 ) -> io::Result<UpdateResult> {
+  let snapshot = ctl_client::component_update::PreparationSnapshot::capture(home)?;
   let mut resolved =
     crate::target::resolve(selection.host, selection.destination, selection.method)
       .await
@@ -235,12 +236,25 @@ async fn update_host(
   } else {
     (ctl_core::paths::native_target(), Purpose::Local)
   };
+  let pr_number = pr.as_ref().map(|build| build.number);
   let pr_source = if let Some(pr) = pr {
     Some(pr.source(triple).await?)
   } else {
     None
   };
-  let prepared = prepare(home, triple, purpose, pr_source.as_ref().unwrap_or(source)).await?;
+  let mut prepared = prepare(home, triple, purpose, pr_source.as_ref().unwrap_or(source)).await?;
+  prepared.retain_earlier_snapshot(&snapshot);
+  if let Some(number) = pr_number {
+    let origin = prepared
+      .origin
+      .get_or_insert_with(|| ctl_core::installations::CatalogOrigin {
+        channel: "provided".into(),
+        publication_id: prepared.bundle.manifest.distribution_id.clone(),
+        built_at: None,
+      });
+    origin.channel = format!("pr-{number}");
+    origin.validate()?;
+  }
   let package = Package::FullBundle;
   let Some(remote) = remote else {
     return ctl_client::component_update::install_prepared_local(home, prepared, package).await;

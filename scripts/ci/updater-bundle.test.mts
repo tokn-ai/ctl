@@ -67,7 +67,8 @@ test("complete updater sidecars survive assembly and Pages staging outside runti
   const assembled = join(root, "assembled");
   const { app_version, bundle_id, git_revision } = publication;
   await assembleAgentBundleSet({ app_version, bundle_id, git_revision }, incoming, assembled);
-  assert.equal((await readdir(assembled)).length, 21);
+  assert.equal((await readdir(assembled)).length, 22);
+  assert.ok((await readdir(assembled)).includes("build-info.json"));
 
   // The Windows companion carries the same clean source identity, while the
   // manifest and asset layout consumed by existing Unix clients stay intact.
@@ -100,7 +101,7 @@ test("complete updater sidecars survive assembly and Pages staging outside runti
   assert.throws(() => parseAgentBundleSet(companion), /bundle-set targets/);
   assert.deepEqual(Object.keys(parseWindowsAgentBundleSet(companion).targets), [windowsAgentTarget]);
   assert.deepEqual(await readFile(join(assembled, "bundle-set.json")), original);
-  assert.equal((await validatedComponentSet(assembled, publication)).asset_names.length, 27);
+  assert.equal((await validatedComponentSet(assembled, publication)).asset_names.length, 28);
 
   const site = join(root, "site");
   await stageBundlePages(publication, assembled, null, site);

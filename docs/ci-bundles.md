@@ -24,7 +24,7 @@ Manually maintained release notes and attachments are preserved.
   credentials are configured and produce unsigned packages when credentials are
   missing. Component bundles publish first. Successful desktop, signed helper,
   and CLI targets append their assets later. A prerelease tag publishes a GitHub
-  prerelease and versioned Pages archives without advancing the Stable channel.
+  prerelease without advancing the Stable channel or retaining another Pages publication.
 - A manual run builds remote-agent bundles. `build_desktop` defaults to `true`;
   setting it to `false` supports the remote-only workflow used by agent syncing.
   `build_ctld=true` additionally builds standalone signed macOS helpers and
@@ -134,8 +134,8 @@ Nightly tracks the latest **successfully published** build from `main`.
 A later main commit that fails to build leaves the previous publication available.
 Run number and attempt fences prevent a delayed older run from replacing a newer
 successful publication. Stable advances by semantic release version. Lower
-release tags and prereleases leave its pointer unchanged. Prerelease archives remain
-available through their retained versioned Pages directory and GitHub prerelease.
+release tags and prereleases leave its pointer unchanged. Their versioned archives
+remain available in GitHub Releases without adding another Pages publication.
 
 The Pages publisher retires the legacy `dev.json` alias. The Dev list in `ctlup`
 uses PR and Actions metadata from GitHub.
@@ -157,15 +157,22 @@ After snapshot expiry, restoration downloads and verifies the managed published
 HTTPS catalog, archives and updater sidecars. Network errors, corrupt state, and an existing
 unmanaged site abort publication rather than initialize an empty replacement.
 
-Pages retains up to five Nightly publications, the current Stable publication,
-and the newest other tagged publication. The current Nightly and Stable sets and
-the newest other tag are pinned. If the staged site would exceed 900 MiB, older
-unselected Nightly publications are removed oldest first until it fits. If pinned
-publications alone exceed the budget, publication fails without changing the
-deployed site. Retention changes occur only in a complete replacement site;
-historical tagged archives also remain in GitHub Releases.
-`ctlup release list` and `ctlup release view` use the retained Pages catalog for
-Nightly and Stable. Older retained Nightly builds keep their original bundle IDs.
+Pages retains one current Nightly publication and one current Stable publication,
+each containing its available target bundles. If those publications exceed the
+900 MiB site budget, publication fails without changing the deployed site.
+Restoration accepts older catalogs before applying the current retention rule.
+Retention changes occur only in a complete replacement site; historical tagged
+archives remain in GitHub Releases. `ctlup release list` and `ctlup release view`
+show the current publication for each normal channel. PR artifacts keep their
+separate Actions lifecycle.
+
+New channel publications include an optional `build-info.json` sidecar with a
+schema-1 UTC build date bound to their version, bundle ID and source revision.
+It is copied and verified during publication and restoration. Existing strict
+bundle manifests and content identities retain their formats. PR artifact layouts
+also retain their format; new clients derive their build date from validated
+artifact metadata. Legacy publications without the sidecar report an unknown
+build date.
 
 Version publication validates all component archives before creating or updating
 a release. Existing main-draft development packages are removed before the tag

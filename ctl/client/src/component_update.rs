@@ -2,8 +2,12 @@
 
 use ctl_core::bundles::agent::{AgentSource, SOURCE_FILE};
 use ctl_core::bundles::{Bundle, MANIFEST_FILE, MAX_FILE_BYTES, Manifest, Purpose, Source, Store};
+use ctl_core::installations::{CatalogEntry, CatalogOrigin, Installations};
 use std::io;
 use std::path::{Path, PathBuf};
+
+mod catalog;
+pub use catalog::install_prepared_components;
 
 pub use ctl_core::component_update::{
   BuildSource, BundleChannel, Package, UpdateOptions, UpdateResult,
@@ -43,8 +47,152 @@ fn preparation(phase: PreparationPhase, detail: impl Into<String>) -> Preparatio
 /// A verified runtime and the exact updater selected during preparation.
 pub struct PreparedUpdate {
   pub bundle: Bundle,
+  pub origin: Option<CatalogOrigin>,
+  source: BuildSource,
   updater: Option<Vec<u8>>,
+  updater_info: Option<crate::remote_bundle::published::UpdaterInfo>,
   remote_archive: Option<Vec<u8>>,
+  snapshot: PreparationSnapshot,
+}
+
+/// Installed channel state captured before resolving or building an update.
+#[derive(Debug, Clone)]
+pub struct PreparationSnapshot {
+  entries: Vec<CatalogEntry>,
+  started: std::time::Instant,
+}
+
+impl PreparationSnapshot {
+  /// Captures the account catalog before any source preparation begins.
+  ///
+  /// # Errors
+  /// Reports unsafe catalog storage or modified installed payloads.
+  pub fn capture(home: &Path) -> io::Result<Self> {
+    let started = std::time::Instant::now();
+    Ok(Self {
+      entries: Installations::new(home).catalog()?,
+      started,
+    })
+  }
+}
+
+impl PreparedUpdate {
+  /// Extends conflict detection to an earlier operation boundary, such as a PR
+  /// download that happened before preparing this target's archive.
+  pub fn retain_earlier_snapshot(&mut self, snapshot: &PreparationSnapshot) {
+    if snapshot.started < self.snapshot.started {
+      self.snapshot = snapshot.clone();
+    }
+  }
+}
+
+type PreparedSource = (
+  Bundle,
+  Option<Vec<u8>>,
+  Option<CatalogOrigin>,
+  Option<crate::remote_bundle::published::UpdaterInfo>,
+);
+type ImportedSource = (
+  Bundle,
+  Option<crate::remote_bundle::published::VerifiedUpdater>,
+);
+
+/// Prepare a complete target bundle for durable local storage, without
+/// constructing an SSH archive or selecting it for native execution.
+///
+/// # Errors
+/// Rejects unavailable, corrupt or incompatible target bundles and updaters.
+pub async fn prepare_component(
+  home: &Path,
+  target: &str,
+  source: &BuildSource,
+  included: &[PathBuf],
+  on_progress: impl Fn(PreparationProgress) + Send + Sync,
+) -> io::Result<PreparedUpdate> {
+  let snapshot = PreparationSnapshot::capture(home)?;
+  let (bundle, mut updater, origin, updater_info) = prepare_source(
+    home,
+    target,
+    Purpose::Upload,
+    source,
+    included,
+    &on_progress,
+  )
+  .await?;
+  verify_source(&bundle.manifest, target, Purpose::Upload)?;
+  if updater.is_none() {
+    updater = Some(crate::installation::updater_for_bundle(home, &bundle).await?);
+  }
+  let updater_info = updater_info.or(crate::installation::supplied_updater_info(
+    home,
+    &bundle.manifest,
+  )?);
+  Ok(PreparedUpdate {
+    bundle,
+    origin,
+    source: source.clone(),
+    updater,
+    updater_info,
+    remote_archive: None,
+    snapshot,
+  })
+}
+
+pub(crate) fn local_build_origin(bundle: &Bundle) -> io::Result<CatalogOrigin> {
+  let build = &bundle.manifest.components["ctl-agent"].build;
+  let built_at = time::OffsetDateTime::now_utc()
+    .replace_nanosecond(0)
+    .map_err(io::Error::other)?
+    .format(&time::format_description::well_known::Rfc3339)
+    .map_err(io::Error::other)?;
+  let origin = CatalogOrigin {
+    channel: "local".into(),
+    publication_id: Some(format!("local.{}", build.source_fingerprint)),
+    built_at: Some(built_at),
+  };
+  origin.validate()?;
+  Ok(origin)
+}
+
+fn provided_origin(bundle: &Bundle, path: &Path) -> io::Result<CatalogOrigin> {
+  use crate::remote_bundle::{build_info, read_bounded_file};
+  let directory = if path.is_dir() {
+    path
+  } else {
+    path
+      .parent()
+      .ok_or_else(|| invalid("provided build has no parent"))?
+  };
+  let id = bundle
+    .manifest
+    .distribution_id
+    .as_ref()
+    .unwrap_or(&bundle.manifest.bundle_id);
+  let build = &bundle.manifest.components["ctl-agent"].build;
+  let built_at = match read_bounded_file(
+    &directory.join(build_info::FILE_NAME),
+    build_info::MAX_BYTES,
+  ) {
+    Ok(bytes) => Some(
+      build_info::BuildInfo::parse_identity(
+        &bytes,
+        &build.version,
+        id,
+        build.source_revision.as_deref().unwrap_or_default(),
+      )
+      .map_err(io::Error::other)?
+      .built_at,
+    ),
+    Err(crate::remote_bundle::Error::Io(error)) if error.kind() == io::ErrorKind::NotFound => None,
+    Err(error) => return Err(io::Error::other(error)),
+  };
+  let origin = CatalogOrigin {
+    channel: "provided".into(),
+    publication_id: Some(id.clone()),
+    built_at,
+  };
+  origin.validate()?;
+  Ok(origin)
 }
 
 /// Prepare artifacts before starting the remote installation watchdog.
@@ -58,11 +206,12 @@ pub async fn prepare_update(
   included: &[PathBuf],
   on_progress: impl Fn(PreparationProgress) + Send + Sync,
 ) -> io::Result<PreparedUpdate> {
+  let snapshot = PreparationSnapshot::capture(home)?;
   on_progress(preparation(
     PreparationPhase::Resolving,
     "Resolving component bundle",
   ));
-  let (bundle, mut updater) =
+  let (bundle, mut updater, origin, updater_info) =
     prepare_source(home, target, purpose, source, included, &on_progress).await?;
   verify_source(&bundle.manifest, target, purpose)?;
   let remote_archive = if purpose == Purpose::Upload {
@@ -90,10 +239,18 @@ pub async fn prepare_update(
   } else {
     None
   };
+  let updater_info = updater_info.or(crate::installation::supplied_updater_info(
+    home,
+    &bundle.manifest,
+  )?);
   Ok(PreparedUpdate {
     bundle,
+    origin,
+    source: source.clone(),
     updater,
+    updater_info,
     remote_archive,
+    snapshot,
   })
 }
 
@@ -112,7 +269,7 @@ async fn prepare(
   source: &BuildSource,
   included: &[PathBuf],
 ) -> io::Result<Bundle> {
-  let (bundle, _) = prepare_source(home, target, purpose, source, included, &|_| {}).await?;
+  let (bundle, _, _, _) = prepare_source(home, target, purpose, source, included, &|_| {}).await?;
   verify_source(&bundle.manifest, target, purpose)?;
   Ok(bundle)
 }
@@ -124,39 +281,18 @@ async fn prepare_source(
   source: &BuildSource,
   included: &[PathBuf],
   on_progress: &(impl Fn(PreparationProgress) + Send + Sync),
-) -> io::Result<(Bundle, Option<Vec<u8>>)> {
+) -> io::Result<PreparedSource> {
   let published_target = publisher_target(target, purpose);
   let working_tree = matches!(source, BuildSource::WorkingTree)
     || (matches!(source, BuildSource::Automatic)
       && published_target == "x86_64-unknown-linux-musl"
       && development_workspace().is_some());
   if working_tree {
-    if !matches!(
-      published_target.as_ref(),
-      "x86_64-unknown-linux-musl" | "aarch64-unknown-linux-musl"
-    ) {
-      return Err(invalid(
-        "working-tree bundles require a Linux x64 or ARM64 SSH target; use ctlup dev for native builds",
-      ));
-    }
-    let caller_workspace = || {
-      std::env::current_dir()
-        .ok()?
-        .ancestors()
-        .find(|root| root.join("scripts/dev/build-agent-bundle.mts").is_file())
-        .map(Path::to_owned)
-    };
-    let workspace = if matches!(source, BuildSource::WorkingTree) {
-      caller_workspace().or_else(development_workspace)
-    } else {
-      development_workspace()
-    }
-    .ok_or_else(|| invalid("run the working-tree update from a ctl source checkout"))?;
-    return development_build(
+    return prepare_working_tree(
       home,
       published_target.as_ref(),
       purpose,
-      &workspace,
+      source,
       on_progress,
     )
     .await;
@@ -185,9 +321,9 @@ async fn prepare_source(
       PreparationPhase::Verifying,
       "Verifying the native build",
     ));
-    return crate::components::import_local(home, path, ctld_package.as_deref())
-      .await
-      .map(|bundle| (bundle, None));
+    let bundle = crate::components::import_local(home, path, ctld_package.as_deref()).await?;
+    let origin = provided_origin(&bundle, path)?;
+    return Ok((bundle, None, Some(origin), None));
   }
   on_progress(preparation(
     PreparationPhase::Verifying,
@@ -198,27 +334,76 @@ async fn prepare_source(
   let source = source.clone();
   let included = included.to_vec();
   tokio::task::spawn_blocking(move || {
-    let bundle = match source {
+    let (bundle, updater) = match &source {
       BuildSource::Automatic => {
         if purpose == Purpose::Local
           && let Some(bundle) = ctl_core::installations::Installations::new(&home).active()?
         {
-          bundle
+          (bundle, None)
         } else {
           included_build(&home, &included, &target, purpose)?
         }
       }
       BuildSource::Selected => included_build(&home, &included, &target, purpose)?,
-      BuildSource::Provided { path, .. } => provided_build(&home, &path, &target, purpose)?,
+      BuildSource::Provided { path, .. } => provided_build(&home, path, &target, purpose)?,
       BuildSource::Published { .. } | BuildSource::WorkingTree => {
         unreachable!("published and working-tree sources resolved before filesystem preparation")
       }
     };
     verify_source(&bundle.manifest, &target, purpose)?;
-    Ok((bundle, None))
+    let origin = match &source {
+      BuildSource::Provided { path, .. } => Some(provided_origin(&bundle, path)?),
+      _ => ctl_core::installations::Installations::new(&home)
+        .catalog()?
+        .into_iter()
+        .find(|entry| entry.bundle_id == bundle.manifest.bundle_id && entry.current)
+        .and_then(|entry| entry.origin),
+    };
+    let updater_info = if let Some(updater) = &updater {
+      Some(updater.info.clone())
+    } else {
+      crate::installation::supplied_updater_info(&home, &bundle.manifest)?
+    };
+    Ok((
+      bundle,
+      updater.map(|updater| updater.bytes),
+      origin,
+      updater_info,
+    ))
   })
   .await
   .map_err(io::Error::other)?
+}
+
+async fn prepare_working_tree(
+  home: &Path,
+  target: &str,
+  purpose: Purpose,
+  source: &BuildSource,
+  on_progress: &(impl Fn(PreparationProgress) + Send + Sync),
+) -> io::Result<PreparedSource> {
+  if !matches!(
+    target,
+    "x86_64-unknown-linux-musl" | "aarch64-unknown-linux-musl"
+  ) {
+    return Err(invalid(
+      "working-tree bundles require a Linux x64 or ARM64 SSH target; use ctlup dev for native builds",
+    ));
+  }
+  let caller_workspace = || {
+    std::env::current_dir()
+      .ok()?
+      .ancestors()
+      .find(|root| root.join("scripts/dev/build-agent-bundle.mts").is_file())
+      .map(Path::to_owned)
+  };
+  let workspace = if matches!(source, BuildSource::WorkingTree) {
+    caller_workspace().or_else(development_workspace)
+  } else {
+    development_workspace()
+  }
+  .ok_or_else(|| invalid("run the working-tree update from a ctl source checkout"))?;
+  development_build(home, target, purpose, &workspace, on_progress).await
 }
 
 /// Identifies a debug source checkout without creating or changing any files.
@@ -246,7 +431,7 @@ async fn development_build(
   purpose: Purpose,
   workspace: &Path,
   on_progress: &(impl Fn(PreparationProgress) + Send + Sync),
-) -> io::Result<(Bundle, Option<Vec<u8>>)> {
+) -> io::Result<PreparedSource> {
   on_progress(preparation(
     PreparationPhase::Building,
     format!("Building {target} from the working tree"),
@@ -274,7 +459,7 @@ async fn development_build(
   let home = home.to_owned();
   let target = target.to_owned();
   tokio::task::spawn_blocking(move || {
-    let bundle = provided_build(&home, &path, &target, purpose)?;
+    let (bundle, _) = provided_build(&home, &path, &target, purpose)?;
     let updater = crate::remote_bundle::published::read_updater(&updater_path, &target)
       .map_err(io::Error::other)?;
     let build = &bundle.manifest.components["ctl-agent"].build;
@@ -285,7 +470,16 @@ async fn development_build(
         "working-tree updater differs from the runtime build",
       ));
     }
-    Ok((bundle, Some(updater.bytes)))
+    let mut origin = local_build_origin(&bundle)?;
+    if let Some(date) = provided_origin(&bundle, &path)?.built_at {
+      origin.built_at = Some(date);
+    }
+    Ok((
+      bundle,
+      Some(updater.bytes),
+      Some(origin),
+      Some(updater.info),
+    ))
   })
   .await
   .map_err(io::Error::other)?
@@ -376,7 +570,7 @@ async fn published_build(
   target: &str,
   channel: BundleChannel,
   on_progress: &(impl Fn(PreparationProgress) + Send + Sync),
-) -> io::Result<(Bundle, Option<Vec<u8>>)> {
+) -> io::Result<PreparedSource> {
   use crate::remote_bundle::published::DownloadArtifact;
   let (bundle, updater) = crate::remote_bundle::published::download_installation_cached(
     channel,
@@ -403,6 +597,15 @@ async fn published_build(
   } else {
     Source::Ci
   };
+  let origin = CatalogOrigin {
+    channel: channel.name().into(),
+    publication_id: bundle
+      .publication_id
+      .clone()
+      .or_else(|| Some(bundle.bundle_id.clone())),
+    built_at: bundle.built_at.clone(),
+  };
+  origin.validate()?;
   let home = home.to_owned();
   let target = target.to_owned();
   on_progress(preparation(
@@ -414,10 +617,12 @@ async fn published_build(
   tokio::task::spawn_blocking(move || {
     let imported = crate::components::import_remote(&home, &bundle, &target, source)
       .map_err(io::Error::other)?;
-    if let Err(error) = crate::installation::prune_caches(&home) {
-      eprintln!("ctlup: cache cleanup deferred: {error}");
-    }
-    Ok((imported, Some(updater.bytes)))
+    Ok((
+      imported,
+      Some(updater.bytes),
+      Some(origin),
+      Some(updater.info),
+    ))
   })
   .await
   .map_err(io::Error::other)?
@@ -466,7 +671,7 @@ fn included_build(
   directories: &[PathBuf],
   target: &str,
   purpose: Purpose,
-) -> io::Result<Bundle> {
+) -> io::Result<ImportedSource> {
   let target = publisher_target(target, purpose);
   let target = target.as_ref();
   for directory in directories {
@@ -485,22 +690,27 @@ fn included_build(
     };
     let imported = crate::components::import_remote(home, &candidate, target, source)
       .map_err(io::Error::other)?;
-    crate::installation::remember_supplied_updater(home, &imported, directory)?;
-    return Ok(imported);
+    let updater = crate::installation::remember_supplied_updater(home, &imported, directory)?;
+    return Ok((imported, updater));
   }
   Err(invalid(
     "no selected or included compatible build; provide build files or select a bundle in About",
   ))
 }
 
-fn provided_build(home: &Path, path: &Path, target: &str, purpose: Purpose) -> io::Result<Bundle> {
+fn provided_build(
+  home: &Path,
+  path: &Path,
+  target: &str,
+  purpose: Purpose,
+) -> io::Result<ImportedSource> {
   if path.is_dir() {
     if path.join(MANIFEST_FILE).exists() {
       let bundle = Bundle::open(path)?;
       verify_source(&bundle.manifest, target, purpose)?;
       let imported = Store::cache(home).publish(&bundle.manifest, &bundle.read_files()?)?;
-      crate::installation::remember_supplied_updater(home, &imported, path)?;
-      return Ok(imported);
+      let updater = crate::installation::remember_supplied_updater(home, &imported, path)?;
+      return Ok((imported, updater));
     }
     return included_build(home, &[path.to_owned()], target, purpose);
   }
@@ -513,10 +723,12 @@ fn provided_build(home: &Path, path: &Path, target: &str, purpose: Purpose) -> i
     let manifest: Manifest = serde_json::from_slice(&metadata).map_err(io::Error::other)?;
     verify_source(&manifest, target, purpose)?;
     let imported = Store::cache(home).publish(&manifest, &files)?;
-    if let Some(parent) = path.parent() {
-      crate::installation::remember_supplied_updater(home, &imported, parent)?;
-    }
-    return Ok(imported);
+    let updater = path
+      .parent()
+      .map(|parent| crate::installation::remember_supplied_updater(home, &imported, parent))
+      .transpose()?
+      .flatten();
+    return Ok((imported, updater));
   }
   // A publisher archive needs its matching bundle-set.json next to it. Verify
   // the named file, rather than accidentally accepting a different sibling.
@@ -540,8 +752,8 @@ fn provided_build(home: &Path, path: &Path, target: &str, purpose: Purpose) -> i
   };
   let imported =
     crate::components::import_remote(home, &candidate, target, source).map_err(io::Error::other)?;
-  crate::installation::remember_supplied_updater(home, &imported, parent)?;
-  Ok(imported)
+  let updater = crate::installation::remember_supplied_updater(home, &imported, parent)?;
+  Ok((imported, updater))
 }
 
 /// Packages only the agent from a verified complete source; retained daemons
@@ -620,7 +832,7 @@ pub async fn install_local(
       "agent-only overlays are no longer installed; use a complete ctlup update",
     ));
   }
-  let _installation = install_local_with_manager(home, bundle, None).await?;
+  let _installation = install_local_with_manager(home, bundle, None, None, None).await?;
   Ok(result(bundle, package))
 }
 
@@ -632,23 +844,19 @@ pub async fn install_prepared_local(
   prepared: PreparedUpdate,
   package: Package,
 ) -> io::Result<UpdateResult> {
-  let PreparedUpdate {
-    bundle, updater, ..
-  } = prepared;
-  let Some(updater) = updater else {
-    return install_local(home, &bundle, package).await;
-  };
   if package != Package::FullBundle
-    || !ctl_core::bundles::local_target(&bundle.manifest.target_triple)
+    || !ctl_core::bundles::local_target(&prepared.bundle.manifest.target_triple)
   {
     return Err(invalid(
       "local installation requires a complete native build",
     ));
   }
-  crate::components::verify_local(home, &bundle).await?;
-  crate::installation::provision_manager_bytes(home, updater).await?;
-  let _installation = activate_local(home, &bundle).await?;
-  Ok(result(&bundle, package))
+  let target = prepared.bundle.manifest.target_triple.clone();
+  install_prepared_components(home, vec![prepared], None, true)
+    .await?
+    .into_iter()
+    .find(|result| result.target_triple == target)
+    .ok_or_else(|| invalid("the native component was not installed"))
 }
 
 /// Install a verified native cohort using its freshly built independent manager.
@@ -659,28 +867,49 @@ pub(crate) async fn install_local_with_manager(
   home: &Path,
   bundle: &Bundle,
   manager: Option<&Path>,
+  origin: Option<&CatalogOrigin>,
+  preparation: Option<&PreparationSnapshot>,
 ) -> io::Result<(Bundle, ctl_core::installations::Lease)> {
   if !ctl_core::bundles::local_target(&bundle.manifest.target_triple) {
     return Err(invalid("this build cannot run on the local host"));
   }
+  let installations = ctl_core::installations::Installations::new(home);
+  let inventory = installations.catalog()?;
+  let origin = origin
+    .cloned()
+    .or_else(|| catalog::known_origin(&inventory, bundle))
+    .unwrap_or_else(|| catalog::unknown_origin(bundle));
+  origin.validate()?;
+  let expected_heads = crate::installation::single_target_heads(
+    home,
+    bundle,
+    &origin,
+    preparation.map(|snapshot| snapshot.entries.as_slice()),
+  )?;
   crate::components::verify_local(home, bundle).await?;
   if let Some(manager) = manager {
     crate::installation::provision_manager_from(home, manager).await?;
   } else {
     crate::installation::provision_manager(home, bundle).await?;
   }
-  activate_local(home, bundle).await
+  activate_local(home, bundle, origin, expected_heads).await
 }
 
 async fn activate_local(
   home: &Path,
   bundle: &Bundle,
+  origin: CatalogOrigin,
+  expected_heads: Vec<ctl_core::installations::CatalogEntry>,
 ) -> io::Result<(Bundle, ctl_core::installations::Lease)> {
   let account = home.to_owned();
   let snapshot = bundle.clone();
   let installed = tokio::task::spawn_blocking(move || {
     let installations = ctl_core::installations::Installations::new(&account);
-    let installed = installations.activate_and_lease(&snapshot)?;
+    let installed = installations.activate_and_lease_with_origin_if_unchanged(
+      &snapshot,
+      &origin,
+      &expected_heads,
+    )?;
     if let Err(error) = installations.prune() {
       eprintln!("ctlup: installed successfully; cleanup deferred: {error}");
     }
@@ -820,6 +1049,7 @@ pub async fn install_prepared_remote_for_account(
       .as_ref()
       .unwrap_or(&bundle.manifest.bundle_id);
     let upload = crate::ssh_install::UpdaterUpload {
+      origin: prepared.origin.as_ref(),
       updater,
       bundle_id: id,
       archive,

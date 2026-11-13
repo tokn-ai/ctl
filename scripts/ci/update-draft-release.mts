@@ -12,6 +12,7 @@ import { agentTargets, maxAgentManifestBytes, parseAgentBundleSet, readAgentFile
 import { updaterManifestName, verifyUpdaterTarget, windowsUpdaterTargets } from "../shared/updater-bundle.mts";
 import { validatedWindowsComponentSet } from "./bundle-publication.mts";
 import { desktopBundleNames } from "./package-desktop-bundle.mts";
+import { buildInfoName, readBuildInfo } from "../shared/build-info.mts";
 
 const execFileAsync = promisify(execFile);
 export const managedLabelPrefix = "ctmux-ci: ";
@@ -147,6 +148,7 @@ export async function validateReleaseBundle(
 
   const bundleSet = parseAgentBundleSet(await readAgentFile(join(directory, "bundle-set.json"), maxAgentManifestBytes), identity);
   addNames(["bundle-set.json"]);
+  if (await readBuildInfo(directory, identity)) addNames([buildInfoName]);
   for (const target of agentTargets) {
     const asset = bundleSet.targets[target];
     if (!record(asset) || asset.archive !== `ctl-agent-bundle-${identity.bundle_id}-${target}.tar.gz`) {

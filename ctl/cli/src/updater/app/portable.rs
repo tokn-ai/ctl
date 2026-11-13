@@ -370,4 +370,7 @@ fn invalid(message: &str) -> io::Error {
 }
 
 #[cfg(test)]
+pub(super) mod fixtures;
+
+#[cfg(test)]
 mod tests;

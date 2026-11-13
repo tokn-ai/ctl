@@ -73,6 +73,15 @@ async fn local_source_install_and_repair_preserve_the_saved_channel() {
   assert!(!home.0.join(".tokn/ctl/current").exists());
 }
 
+#[test]
+fn portable_archive_install_update_and_repair() {
+  for target in [portable::fixtures::X64, portable::fixtures::ARM64] {
+    let source = Home::new();
+    let archive = portable::fixtures::package(&source.0, target, portable::fixtures::files(target));
+    verify_portable_archive_install_update_and_repair(&archive, target);
+  }
+}
+
 #[cfg(windows)]
 #[test]
 #[ignore = "requires CTLUP_TEST_DESKTOP_ARCHIVE pointing at a native Windows portable ZIP"]
@@ -80,16 +89,22 @@ fn prebuilt_windows_archive_install_update_and_repair() {
   let archive = PathBuf::from(
     std::env::var_os("CTLUP_TEST_DESKTOP_ARCHIVE").expect("native portable archive fixture"),
   );
+  verify_portable_archive_install_update_and_repair(
+    &archive,
+    DesktopTarget::native().unwrap().triple(),
+  );
+}
+
+fn verify_portable_archive_install_update_and_repair(archive: &Path, target: &str) {
   let home = Home::new();
   ctl_client::desktop_storage::set_channel(&home.0, BundleChannel::Stable).unwrap();
   let destination = app_directory(&home.0, true).unwrap().join("ctmux");
-  let target = DesktopTarget::native().unwrap();
   let mut version = String::new();
   // This caller-provided package still passes the production target, PE and
   // inventory checks; the archive manifest supplies only its product version.
   {
     use std::io::Read as _;
-    let mut zip = zip::ZipArchive::new(fs::File::open(&archive).unwrap()).unwrap();
+    let mut zip = zip::ZipArchive::new(fs::File::open(archive).unwrap()).unwrap();
     zip
       .by_name("ctmux/portable.json")
       .unwrap()
@@ -101,8 +116,7 @@ fn prebuilt_windows_archive_install_update_and_repair() {
   let version = metadata["app_version"].as_str().unwrap();
   for iteration in 0..3 {
     let mut work = activation::Workspace::begin(&destination).unwrap();
-    let installed = activation::existing(&destination).unwrap();
-    let payload = portable::stage(&archive, work.staging(), version, target.triple()).unwrap();
+    let payload = portable::stage(archive, work.staging(), version, target).unwrap();
     if iteration == 1 {
       assert!(portable::matches(&destination, &payload).unwrap());
       fs::write(destination.join("repair-fixture"), b"changed").unwrap();
@@ -110,8 +124,11 @@ fn prebuilt_windows_archive_install_update_and_repair() {
     if iteration == 2 {
       fs::write(destination.join("ctld.exe"), b"damaged").unwrap();
     }
+    // Repair starts from the deliberately damaged app. Changes after this
+    // snapshot must still be rejected by activation's concurrency check.
+    let installed = activation::existing(&destination).unwrap();
     let previous = work.activate(&payload, installed.as_ref()).unwrap();
-    portable::verify(&destination, version, target.triple()).unwrap();
+    portable::verify(&destination, version, target).unwrap();
     assert_eq!(previous.is_some(), iteration > 0);
     assert!(!destination.join("repair-fixture").exists());
   }

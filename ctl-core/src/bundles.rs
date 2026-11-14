@@ -332,7 +332,6 @@ impl Bundle {
 
 #[derive(Debug, Clone)]
 pub struct Store {
-  home: PathBuf,
   root: PathBuf,
   cache: bool,
 }
@@ -342,8 +341,7 @@ impl Store {
   #[must_use]
   pub fn new(home: &Path) -> Self {
     Self {
-      home: home.to_owned(),
-      root: home.join(".tokn/ctl/components"),
+      root: crate::paths::directory_for_account(home).join("components"),
       cache: false,
     }
   }
@@ -353,8 +351,7 @@ impl Store {
   #[must_use]
   pub fn cache(home: &Path) -> Self {
     Self {
-      home: home.to_owned(),
-      root: home.join(".tokn/ctl/cache/components"),
+      root: crate::paths::directory_for_account(home).join("cache/components"),
       cache: true,
     }
   }

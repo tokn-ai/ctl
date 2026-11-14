@@ -199,7 +199,7 @@ pub struct SaveKeybindingsRequest {
 
 #[tauri::command]
 pub async fn load_keybindings(_app: tauri::AppHandle) -> CommandResult<KeybindingsSnapshot> {
-  let directory = ctl_core::paths::directory().map_err(CommandErrorDto::backend)?;
+  let directory = ctl_core::paths::config_directory().map_err(CommandErrorDto::backend)?;
   tauri::async_runtime::spawn_blocking(move || read(&directory))
     .await
     .map_err(CommandErrorDto::backend)?
@@ -210,7 +210,7 @@ pub async fn save_keybindings(
   _app: tauri::AppHandle,
   request: SaveKeybindingsRequest,
 ) -> CommandResult<KeybindingsSnapshot> {
-  let directory = ctl_core::paths::directory().map_err(CommandErrorDto::backend)?;
+  let directory = ctl_core::paths::config_directory().map_err(CommandErrorDto::backend)?;
   tauri::async_runtime::spawn_blocking(move || save(&directory, &request))
     .await
     .map_err(CommandErrorDto::backend)?

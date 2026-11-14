@@ -575,8 +575,8 @@ async fn published_build(
   let (bundle, updater) = crate::remote_bundle::published::download_installation_cached(
     channel,
     target,
-    &home.join(".tokn/ctl/cache/downloads"),
-    &home.join(".tokn/ctl/cache/updaters"),
+    &ctl_core::paths::directory_for_account(home).join("cache/downloads"),
+    &ctl_core::paths::directory_for_account(home).join("cache/updaters"),
     |progress| {
       let artifact = match progress.artifact {
         DownloadArtifact::Runtime => "Runtime bundle",

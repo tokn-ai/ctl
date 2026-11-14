@@ -41,8 +41,26 @@ impl Installations {
   pub fn new(home: &Path) -> Self {
     Self {
       home: home.to_owned(),
-      root: home.join(".tokn/ctl"),
+      root: crate::paths::directory_for_account(home),
     }
+  }
+
+  fn from_executable_root(root: &Path) -> Option<Self> {
+    if let Some(selected) = crate::paths::data_override()
+      && selected.canonicalize().ok().as_deref() == Some(root)
+    {
+      return Some(Self {
+        home: selected.clone(),
+        root: selected,
+      });
+    }
+    if !root.ends_with(".tokn/ctl") {
+      return None;
+    }
+    Some(Self {
+      home: root.parent()?.parent()?.to_owned(),
+      root: root.to_owned(),
+    })
   }
 
   #[must_use]

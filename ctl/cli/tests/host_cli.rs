@@ -60,6 +60,38 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn config_override_takes_precedence_over_the_full_storage_root() {
+  let fixture = Fixture::new();
+  let data = fixture.0.join("data");
+  let config = fixture.0.join("config");
+  for (paths, expected) in [
+    ((None, None), fixture.0.as_path()),
+    ((Some(data.as_path()), None), data.as_path()),
+    (
+      (Some(data.as_path()), Some(config.as_path())),
+      config.as_path(),
+    ),
+  ] {
+    let mut command = fixture.command(&["host", "create", "demo", "example.test", "--json"]);
+    command
+      .env_remove("CTL_DATA_DIR")
+      .env_remove("CTL_CONFIG_DIR");
+    if let Some(path) = paths.0 {
+      command
+        .env("CTL_DATA_DIR", path)
+        .env_remove("CTL_HOSTS_PATH");
+    }
+    if let Some(path) = paths.1 {
+      command.env("CTL_CONFIG_DIR", path);
+    }
+    let output = command.output().unwrap();
+    assert!(output.status.success(), "{:?}", output);
+    assert!(expected.join("hosts.json").is_file());
+    fs::remove_file(expected.join("hosts.json")).unwrap();
+  }
+}
+
+#[test]
 fn removed_add_command_does_not_create_or_modify_the_catalog() {
   for existing_catalog in [false, true] {
     let fixture = Fixture::new();

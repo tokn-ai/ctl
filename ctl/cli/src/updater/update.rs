@@ -334,7 +334,7 @@ fn bundle_directories(home: &Path) -> io::Result<Vec<PathBuf>> {
   if let Some(parent) = std::env::current_exe()?.parent() {
     directories.push(parent.join("resources/agent-bundles"));
   }
-  directories.push(home.join(".tokn/ctl/agent-bundles"));
+  directories.push(ctl_core::paths::directory_for_account(home).join("agent-bundles"));
   Ok(directories)
 }
 

@@ -48,8 +48,7 @@ impl Config {
         "expected a Tailscale profile",
       ));
     };
-    let home =
-      dirs::home_dir().ok_or_else(|| io::Error::other("could not locate VPN state owner"))?;
+    let home = crate::vpn_container::owner()?;
     let container_name = container_name(&home, &connection.connection_id);
     Ok(Self {
       hostname: hostname

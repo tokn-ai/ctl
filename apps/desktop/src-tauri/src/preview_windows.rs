@@ -117,6 +117,7 @@ impl PreviewWindows {
 #[serde(deny_unknown_fields)]
 pub struct OpenPreviewRequest {
   snapshot: PreviewSnapshot,
+  window_title: Option<String>,
 }
 
 #[tauri::command]
@@ -125,7 +126,12 @@ pub async fn open_preview_window(
   state: State<'_, PreviewWindows>,
   request: OpenPreviewRequest,
 ) -> CommandResult<String> {
-  let title = format!("{} — Preview", request.snapshot.title);
+  let title = request
+    .window_title
+    .filter(|title| {
+      !title.is_empty() && title.len() <= 2048 && !title.chars().any(char::is_control)
+    })
+    .unwrap_or_else(|| format!("{} — Preview", request.snapshot.title));
   let (preview_id, label) = state.reserve(request.snapshot)?;
   // The URL contains no file path, content, SSH target, or authentication data.
   let result = WebviewWindowBuilder::new(

@@ -1,3 +1,4 @@
+import { message } from "../../features/i18n/messages";
 // @vitest-environment jsdom
 import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -218,7 +219,7 @@ describe("VPN sidebar", () => {
     vi.spyOn(navigator.clipboard, "writeText").mockRejectedValueOnce(new Error("Clipboard unavailable"));
     render(<NotificationProvider store={store}><VpnSidebar model={model({ connections: [connection, research], statuses: [runtime(), runtime("research")] })} /></NotificationProvider>);
     await user.click(region("Research").getByRole("button", { name: "Copy SOCKS endpoint" }));
-    expect(store.snapshot().entries).toMatchObject([{ title: "Could not copy SOCKS endpoint", message: "Research: Clipboard unavailable" }]);
+    expect(store.snapshot().entries).toMatchObject([{ title: message("vpn.copy_failed"), message: message("vpn.named_error", { name: "Research", error: "Clipboard unavailable" }) }]);
     expect(region("Research").queryByRole("alert")).toBeNull();
     expect(region().queryByRole("alert")).toBeNull();
   });

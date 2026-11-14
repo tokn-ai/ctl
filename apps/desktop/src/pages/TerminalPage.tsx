@@ -74,7 +74,9 @@ import {
   buildTerminalCommands,
   COMMAND_IDS,
 } from "../features/commands/terminalCommands";
-import type { AppCommand, CommandArguments } from "../features/commands/types";
+import { localizeCommand, type AppCommand, type CommandArguments, type LocalizedCommand } from "../features/commands/types";
+import { useLocale } from "../features/i18n/LocaleContext";
+import { LocalizedError, message, textSignature, type DisplayText } from "../features/i18n/messages";
 import { CommandDispatcher } from "../features/commands/CommandDispatcher";
 import { CommandProvider } from "../features/commands/CommandContext";
 import { CommandBindings } from "../features/commands/CommandBindings";
@@ -111,7 +113,7 @@ import {
   targetKeyFromSessionKey,
 } from "../features/targets/targets";
 import { useWindowTitle } from "../features/window/useWindowTitle";
-import { errorCode, errorDetails, errorMessage, type ErrorDetails } from "../lib/errors";
+import { errorCode, errorDetails, localizedErrorText, type ErrorDetails } from "../lib/errors";
 import { displayWorkingDirectory } from "../lib/shellState";
 import {
   sessionCache,
@@ -176,10 +178,10 @@ async function verifyHostConnectionStatus(target: SshConnectionTarget): Promise<
     throw failure;
   }
   if (connection.manually_disconnected) {
-    throw new Error("This host was disconnected. Connect again to resume.");
+    throw new LocalizedError("shell.host_disconnected");
   }
   if (!connection.connected) {
-    throw new Error("The SSH connection ended before verification completed. Try connecting again.");
+    throw new LocalizedError("shell.ssh_ended");
   }
 }
 
@@ -189,11 +191,13 @@ export function TerminalPage() {
 }
 
 function TerminalWorkbench() {
+  const { t, locale, formatText } = useLocale();
   const preview_focused = useFilePreview()?.focused ?? false;
   const { store: notifications, attachments: attachmentNotifications } = useNotificationEnvironment()!;
-  const notifyFailure = useCallback((title: string, source: string, failure: unknown) => {
+  const notifyFailure = useCallback((title: DisplayText, source: DisplayText, failure: unknown, detail?: DisplayText, operation_id?: string) => {
     if (errorCode(failure) === "attachment_cancelled") return;
-    notifications.notify(`operation:${source}:${title}`, { severity: "error", title, source, message: errorMessage(failure) });
+    const key = operation_id ?? JSON.stringify([textSignature(source), textSignature(title)]);
+    notifications.notify(`operation:${key}`, { severity: "error", title, source, message: detail ?? localizedErrorText(failure) });
   }, [notifications]);
   const workspace = useWorkspace();
   const {
@@ -254,8 +258,8 @@ function TerminalWorkbench() {
   const currentWorkingDirectoryDisplay = currentShellState
     ? displayWorkingDirectory(currentShellState)
     : null;
-  const { sshConfigHosts, sshConfigWarning, tailscaleDevices, tailscaleWarning } = workspace;
-  const discoveryWarning = [sshConfigWarning, tailscaleWarning].filter(Boolean).join("\n") || null;
+  const { sshConfigHosts, sshConfigWarning, tailscaleDevices, tailscaleWarnings } = workspace;
+  const discoveryWarning = [sshConfigWarning, ...tailscaleWarnings.map(formatText)].filter(Boolean).join("\n") || null;
   const [targetErrors, setTargetErrors] = useState<ReadonlyMap<string, ErrorDetails>>(
     () => new Map(),
   );
@@ -263,7 +267,7 @@ function TerminalWorkbench() {
     ReadonlyMap<string, ShellStateSummary>
   >(() => new Map());
   const [loading, setLoading] = useState(false);
-  const [listError, setListError] = useState<string | null>(null);
+  const [listError, setListError] = useState<DisplayText | null>(null);
   const [creating, setCreating] = useState(false);
   const [newShellOpen, setNewShellOpen] = useState(false);
   const [new_shell_target_key, setNewShellTargetKey] = useState<string | undefined>();
@@ -484,7 +488,7 @@ function TerminalWorkbench() {
             } else if (inspection.error?.code !== "session_not_found") {
               errors.set(
                 key,
-                inspection.error ?? errorDetails("Could not inspect session."),
+                inspection.error ?? { code: null, message: message("shell.inspect_failed") },
               );
             }
           }
@@ -502,7 +506,7 @@ function TerminalWorkbench() {
           return next;
         });
         const failed_checks = [...errors.values()].filter((error) => error.code !== "ssh_authentication_required" && error.code !== "ssh_host_disconnected" && error.code !== "session_not_found");
-        setListError(failed_checks.length ? "Some sessions could not be checked. Showing last-known session information." : null);
+        setListError(failed_checks.length ? message("shell.sessions_stale") : null);
         setSessionShellStates((current) =>
           mergeShellStateInspections(current, inspections, visibleIds),
         );
@@ -572,7 +576,7 @@ function TerminalWorkbench() {
       host.host_id === projected_id && isVirtualHost(host));
     const expected = projected ? expectedHostIdentity(projected) : undefined;
     if (expected && expected.remote_id !== remote_info.remote_id)
-      throw new Error("This discovered host now reaches a different remote environment. Restore its original connection before saving.");
+      throw new LocalizedError("shell.discovered_identity_changed");
     const host = promoteHost(projected ? {
       ...projected,
       name,
@@ -605,15 +609,15 @@ function TerminalWorkbench() {
     gateways: WorkspaceSshGateway[],
     remote_info: RemoteIdentity,
   ) {
-    if (!methodDraft || !workspace.ready) throw new Error("Workspace is not available.");
+    if (!methodDraft || !workspace.ready) throw new LocalizedError("shell.workspace_unavailable");
     const current = workspace.viewRef.current;
     const existing = current.hosts.find((host) => host.host_id === methodDraft.host_id);
-    if (methodDraft.host_id && !existing) throw new Error("This host was removed while connecting.");
+    if (methodDraft.host_id && !existing) throw new LocalizedError("shell.host_removed_during_connect");
     const expected = existing ? expectedHostIdentity(existing) : undefined;
     if (expected && expected.remote_id !== remote_info.remote_id)
-      throw new Error("This method reaches a different account or remote environment. Add a separate host for it.");
+      throw new LocalizedError("shell.method_identity_changed");
     if (methodDraft.method_id && !existing?.connection_methods.some((method) => method.method_id === methodDraft.method_id))
-      throw new Error("This connection method was removed while connecting.");
+      throw new LocalizedError("shell.method_removed_during_connect");
     const method: WorkspaceConnectionMethod = {
       method_id: methodDraft.method_id ?? crypto.randomUUID(),
       name: methodDraft.method_name,
@@ -737,7 +741,7 @@ function TerminalWorkbench() {
     );
     if (!recovered) return null;
     await workspace.replaceView((current) => recoverRemoteHost(current, candidate, remote_info)!.view);
-    if (workspace.isClosing()) throw new Error("Workspace is closing.");
+    if (workspace.isClosing()) throw new LocalizedError("shell.workspace_closing");
     refreshGuardRef.current.recordMutation();
     renderer?.remapSessions(recovered.key_changes);
     setTabShellStates((current) => remapStateKeys(current, recovered.key_changes));
@@ -751,7 +755,7 @@ function TerminalWorkbench() {
     activeTabKeyRef.current = workspace.viewRef.current.active_tab_key;
     portForwarding.resumeHost(candidate.host_id!);
     await portForwarding.refreshTarget(recovered.target);
-    if (workspace.isClosing()) throw new Error("Workspace is closing.");
+    if (workspace.isClosing()) throw new LocalizedError("shell.workspace_closing");
     await verifyHostConnectionStatus(recovered.target);
     return recovered.target;
   };
@@ -774,14 +778,14 @@ function TerminalWorkbench() {
       const identity = await Promise.race([
         probeSshHost(target, attempt_id, () => {
           void cancelSshProbe(attempt_id).catch(() => undefined);
-          promptRequired(new Error("Authentication is required. Use Connect host to authenticate, then try again."));
+          promptRequired(new LocalizedError("shell.authenticate_first"));
         }),
         prompted,
       ]);
       let verified: ConnectionTarget = target;
       await workspace.replaceView((current) => {
         const recovered = recoverRemoteHost(current, target, identity);
-        if (!recovered) throw new Error("This host is no longer available.");
+        if (!recovered) throw new LocalizedError("shell.host_unavailable");
         verified = recovered.target;
         return recovered.view;
       });
@@ -803,7 +807,7 @@ function TerminalWorkbench() {
       await portForwarding.refreshTarget(verified);
       setPortForwardTarget(verified);
     } catch (failure) {
-      notifyFailure("Could not open port forwarding", "Port forwarding", failure);
+      notifyFailure(message("shell.open_forwarding_failed"), message("shell.port_forwarding"), failure);
     }
   }
 
@@ -813,7 +817,7 @@ function TerminalWorkbench() {
       verified = enabled ? await prepareHostTarget(target) : target;
       if (enabled && verified.kind === "ssh" && !target.remote_info && verified.remote_info) await portForwarding.refreshTarget(verified);
     } catch (failure) {
-      if (options?.feedback !== "inline") notifyFailure("Could not change port forwarding", "Port forwarding", failure);
+      if (options?.feedback !== "inline") notifyFailure(message("shell.change_forwarding_failed"), message("shell.port_forwarding"), failure);
       throw failure;
     }
     if (verified.kind !== "ssh") return;
@@ -844,7 +848,7 @@ function TerminalWorkbench() {
       }
 
       await attachment.closeSession(session);
-      await sessionCache({ kind: "archive", host_key: targetKey(session.target), session_id: session.session_id, reason: "Tab closed" });
+      await sessionCache({ kind: "archive", host_key: targetKey(session.target), session_id: session.session_id, reason: t("shell.tab_closed") });
       const wasActive = activeTabKeyRef.current === identity;
       const closed = closeTerminalTab(tabsRef.current, identity);
       tabsRef.current = closed.tabs;
@@ -883,15 +887,15 @@ function TerminalWorkbench() {
     if (dismissingSessions.current.has(key)) return;
     dismissingSessions.current.add(key);
     try {
-      await archiveSession(session, attachment.state.message ?? "Session no longer exists");
+      await archiveSession(session, formatText(attachment.state.message ?? message("shell.session_missing")));
       refreshGuardRef.current.recordMutation();
       setSessions((current) => removeSession(current, sessionKey(session)));
       setSessionShellStates((current) => forgetShellState(current, sessionKey(session)));
       await closeTab(session);
       await persistWorkspace();
-    } catch (failure) { notifyFailure("Could not close session", "Sessions", failure); }
+    } catch (failure) { notifyFailure(message("shell.close_session_failed"), message("command.category_sessions"), failure); }
     finally { dismissingSessions.current.delete(key); }
-  }, [archiveSession, attachment.state.message, closeTab, setSessions, setSessionShellStates, persistWorkspace]);
+  }, [archiveSession, attachment.state.message, closeTab, formatText, notifyFailure, setSessions, setSessionShellStates, persistWorkspace]);
 
   const removeHost = useCallback(
     async (target: ConnectionTarget) => {
@@ -903,7 +907,7 @@ function TerminalWorkbench() {
         host.connection_methods.some((method) => method.target.gateway_route?.some((step) =>
           isHostRouteStep(step) && step.host_id === target.host_id)));
       if (dependents.length) {
-        throw new Error(`This host is used as a hop by ${dependents.map((host) => host.name).join(", ")}. Edit those routes before removing it.`);
+        throw new LocalizedError("shell.host_used_as_hop", { v1: dependents.map((host) => host.name).join(", ") });
       }
       for (const forward of workspace.port_forwards.filter(
         (item) => item.host_id === target.host_id && item.enabled,
@@ -915,7 +919,7 @@ function TerminalWorkbench() {
       const routes = hostRouteSnapshots(workspace.viewRef.current, live_targets);
       const removed_routes = routes.filter((route) => route.host_id === host_id);
       const retained_routes = routes.filter((route) => route.host_id !== host_id);
-      await attachment.disconnectHost(host_id, "Host removed");
+      await attachment.disconnectHost(host_id, t("shell.host_removed"));
       if (removed_routes.length) await disconnectSshHost(removed_routes, retained_routes);
       for (const credentialTarget of removableHostCredentials(
         workspace.viewRef.current, host_id, attachment.state.session?.target,
@@ -999,9 +1003,7 @@ function TerminalWorkbench() {
         daemonRestartConfirmationRef.current ||
         restartingDaemonRef.current
       ) {
-        throw new Error(
-          "Shell creation is currently unavailable. Try again when the workspace is ready.",
-        );
+        throw new LocalizedError("shell.creation_unavailable");
       }
       const isCurrent = captureDaemonOperation(target);
       creatingRef.current = true;
@@ -1035,8 +1037,8 @@ function TerminalWorkbench() {
           // Creation already succeeded: close the input flow rather than offer
           // a retry that would create a second persistent shell.
           if (isCurrent()) {
-            notifyFailure("Shell created; tab could not open", "Sessions",
-              `Shell ${session.name} was created, but opening its tab failed. Select the existing session to retry. ${errorMessage(failure)}`,
+            notifyFailure(message("shell.tab_open_failed"), message("command.category_sessions"), failure,
+              message("shell.tab_open_failed_detail", { session: session.name, detail: localizedErrorText(failure) }),
             );
           }
         }
@@ -1101,7 +1103,7 @@ function TerminalWorkbench() {
       if (daemonRestartBlocksInteractions()) return;
       attachment.cancelPendingConnection(session);
       refreshGuardRef.current.recordMutation();
-      await archiveSession(session, "Removed from this client");
+      await archiveSession(session, t("shell.removed_from_client"));
       await closeTab(session);
       setSessions((current) => removeSession(current, sessionKey(session)));
       setSessionShellStates((current) =>
@@ -1148,14 +1150,14 @@ function TerminalWorkbench() {
             return;
           }
           if (errorCode(error) !== "session_not_found") {
-            notifyFailure("Could not terminate session", "Sessions", error);
+            notifyFailure(message("shell.terminate_failed"), message("command.category_sessions"), error);
             return;
           }
         }
         if (!isCurrent()) {
           return;
         }
-        await archiveSession(session, "Session terminated");
+        await archiveSession(session, t("shell.session_terminated"));
         refreshGuardRef.current.recordMutation();
         setSessions((current) => {
           const next = removeSession(current, identity);
@@ -1168,7 +1170,7 @@ function TerminalWorkbench() {
         // The session is hidden after either an accepted kill or a not-found
         // response, which means another actor already achieved the same result.
       } catch (failure) {
-        notifyFailure("Could not terminate session", "Sessions", failure);
+        notifyFailure(message("shell.terminate_failed"), message("command.category_sessions"), failure);
       } finally {
         closingSessionKeysRef.current.delete(identity);
         if (isCurrent()) {
@@ -1283,7 +1285,7 @@ function TerminalWorkbench() {
   });
   useEffect(() => {
     if (component_event_error) notifications.report("component_events", {
-      severity: "error", title: "Component maintenance", source: "Component maintenance", message: component_event_error,
+      severity: "error", title: message("shell.maintenance"), source: message("shell.maintenance"), message: component_event_error,
     });
     else notifications.resolve("component_events");
   }, [component_event_error, notifications]);
@@ -1292,7 +1294,7 @@ function TerminalWorkbench() {
     const execute = () => executeComponentAction(preflight.action_token);
     if (preflight.component === "ctl-taskd" && preflight.location === "local") return taskWorkspace.performComponentAction(execute);
     if (preflight.component !== "ctmuxd" || preflight.location !== "local") return execute();
-    if (restartingDaemonRef.current || creatingRef.current) throw new Error("Wait for the current local session operation to finish.");
+    if (restartingDaemonRef.current || creatingRef.current) throw new LocalizedError("shell.wait_local_operation");
     restartingDaemonRef.current = true;
     setRestartingDaemon(true);
     const before = daemonEpochRef.current;
@@ -1318,12 +1320,12 @@ function TerminalWorkbench() {
     try {
       await restartLocalDaemon();
       clearLocalDaemonState();
-      notifications.notify("local_daemon_restart", { severity: "success", title: "ctmuxd restarted", source: "Component maintenance", message: "The local daemon restarted." });
+      notifications.notify("local_daemon_restart", { severity: "success", title: message("shell.daemon_restarted"), source: message("shell.maintenance"), message: message("shell.daemon_restart_complete") });
     } catch (error) {
       if (!restartFailurePreservesLocalState(errorCode(error))) {
         clearLocalDaemonState();
       }
-      notifyFailure("Could not restart ctmuxd", "Component maintenance", error);
+      notifyFailure(message("shell.restart_failed"), message("shell.maintenance"), error);
     } finally {
       restartingDaemonRef.current = false;
       setRestartingDaemon(false);
@@ -1520,10 +1522,10 @@ function TerminalWorkbench() {
   }
   const activeTitle = formatTerminalTitle(activeTab, activeShellState);
   useWindowTitle(
-    utility_page ? (utility_page === "about" ? "About ctmux" : "Credentials") : taskWorkspace.active
+    utility_page ? (utility_page === "about" ? t("command.category_about") : t("command.category_credentials")) : taskWorkspace.active
       ? (taskWorkspace.activeTask?.definition.name ??
           taskWorkspace.saved?.definition.name ??
-          "Task definition")
+          t("shell.task_definition"))
       : compactTerminalTitleParts(activeTitle),
   );
 
@@ -1567,7 +1569,7 @@ function TerminalWorkbench() {
       openShellTab: () => {
         if (currentWorkingDirectory && activeTab) {
           void create(activeTab.target, currentWorkingDirectory, sessionKey(activeTab)).catch(
-            (failure) => notifyFailure("Could not create shell", "Sessions", failure),
+            (failure) => notifyFailure(message("shell.create_failed"), message("command.category_sessions"), failure),
           );
         }
       },
@@ -1616,6 +1618,7 @@ function TerminalWorkbench() {
       configureKeybindings: () => setKeybindingsOpen(true),
       reloadKeybindings: keybindings.reload,
     },
+    locale,
   ).map((command) => {
     const base = {
       ...command,
@@ -1624,7 +1627,8 @@ function TerminalWorkbench() {
     if (command.id === COMMAND_IDS.disconnect && taskWorkspace.active)
       return {
         ...base,
-        title: "Close tab",
+        title: t("shell.close_tab"),
+        title_text: message("shell.close_tab"),
         enabled: true,
         isEnabled: () => true,
         focusTerminalAfterRun: false,
@@ -1663,11 +1667,14 @@ function TerminalWorkbench() {
     if (index >= 0) commands[index] = command;
     else commands.push(command);
   }
-  commands.push({
+  const addCommands = (...definitions: LocalizedCommand[]) => {
+    commands.push(...definitions.map((definition) => localizeCommand(locale, definition)));
+  };
+  addCommands({
     id: COMMAND_IDS.updateComponents,
-    category: "App",
-    title: "Update components…",
-    detail: "Install ctl-agent or a full bundle on local and remote hosts.",
+    category: message("command.category_app"),
+    title: message("shell.update_components"),
+    detail: t("shell.update_components_detail"),
     keywords: ["bundle", "install", "sync", "upgrade", "ctld", "ctmuxd"],
     enabled: workspace.ready,
     keybinding: keybindings.bindings.get(COMMAND_IDS.updateComponents),
@@ -1678,40 +1685,40 @@ function TerminalWorkbench() {
       setComponentUpdateContext(target ? { targets: [target] } : {});
     },
   });
-  commands.push({
+  addCommands({
     id: COMMAND_IDS.about,
-    category: "App",
-    title: "About ctmux",
-    detail: "Check app, daemon, and connected host versions.",
+    category: message("command.category_app"),
+    title: message("command.category_about"),
+    detail: t("shell.about_detail"),
     keywords: ["version", "protocol", "ctld", "ctmuxd", "ctl-taskd", "update", "restart"],
     enabled: workspace.ready,
     keybinding: keybindings.bindings.get(COMMAND_IDS.about),
     focusTerminalAfterRun: false,
     run: () => setUtilityPage("about"),
   });
-  commands.push({
+  addCommands({
     id: COMMAND_IDS.credentials,
-    category: "App",
-    title: "Credentials",
-    detail: "Manage saved credential names and metadata.",
+    category: message("command.category_app"),
+    title: message("command.category_credentials"),
+    detail: t("shell.credentials_detail"),
     keywords: ["keychain", "password", "passphrase", "ssh", "vpn", "forget"],
     enabled: workspace.ready,
     keybinding: keybindings.bindings.get(COMMAND_IDS.credentials),
     focusTerminalAfterRun: false,
     run: () => setUtilityPage("credentials"),
   });
-  commands.push({
+  addCommands({
     id: COMMAND_IDS.showNotifications,
-    category: "View",
-    title: "Show Notifications",
+    category: message("command.category_view"),
+    title: message("shell.show_notifications"),
     enabled: true,
     keybinding: keybindings.bindings.get(COMMAND_IDS.showNotifications),
     focusTerminalAfterRun: false,
     run: () => notifications.setCenterOpen(true),
   }, {
     id: COMMAND_IDS.recoverSessionComponents,
-    category: "Session",
-    title: "Recover Session Components",
+    category: message("command.category_session"),
+    title: message("shell.recover_components"),
     enabled: false,
     visibleInPalette: false,
     focusTerminalAfterRun: false,
@@ -1725,8 +1732,8 @@ function TerminalWorkbench() {
   }, {
     id: COMMAND_IDS.reconnectNotificationAttachment,
     allow_concurrent: true,
-    category: "Session",
-    title: "Reconnect Notification Attachment",
+    category: message("command.category_session"),
+    title: message("shell.reconnect_notification"),
     enabled: false,
     visibleInPalette: false,
     focusTerminalAfterRun: false,
@@ -1734,16 +1741,16 @@ function TerminalWorkbench() {
     run: (args) => attachmentNotifications.reconnect(args?.value),
   }, {
     id: COMMAND_IDS.refreshTasks,
-    category: "Tasks",
-    title: "Refresh Tasks and Definitions",
+    category: message("command.category_tasks"),
+    title: message("shell.refresh_tasks"),
     enabled: workspace.ready && !taskWorkspace.busy && !taskWorkspace.loading,
     keybinding: keybindings.bindings.get(COMMAND_IDS.refreshTasks),
     focusTerminalAfterRun: false,
     run: taskWorkspace.refresh,
   }, {
     id: COMMAND_IDS.openTask,
-    category: "Tasks",
-    title: "View Task",
+    category: message("command.category_tasks"),
+    title: message("shell.view_task"),
     enabled: false,
     visibleInPalette: false,
     focusTerminalAfterRun: false,
@@ -1753,11 +1760,11 @@ function TerminalWorkbench() {
       if (task) { setUtilityPage(null); taskWorkspace.openTask(task); }
     },
   });
-  commands.push({
+  addCommands({
     id: COMMAND_IDS.restartTaskDaemon,
-    category: "Tasks",
-    title: "Restart ctl-taskd",
-    detail: "Restart the local task daemon. Stop active tasks first.",
+    category: message("command.category_tasks"),
+    title: message("shell.restart_task_daemon"),
+    detail: t("shell.restart_task_daemon_detail"),
     enabled: workspace.ready && !taskWorkspace.busy,
     keybinding: keybindings.bindings.get(COMMAND_IDS.restartTaskDaemon),
     focusTerminalAfterRun: false,
@@ -1766,24 +1773,24 @@ function TerminalWorkbench() {
       return taskWorkspace.restartDaemon();
     },
   });
-  commands.push({
+  addCommands({
     id: "task.new",
-    category: "Tasks",
-    title: "New task definition",
+    category: message("command.category_tasks"),
+    title: message("shell.new_task_definition"),
     enabled: workspace.ready && !taskWorkspace.busy,
     focusTerminalAfterRun: false,
     run: taskWorkspace.newDefinition,
   });
   for (const action of ["start_task", "stop_task", "restart_task"] as const) {
-    commands.push({
+    addCommands({
       id: `task.${action}`,
-      category: "Tasks",
+      category: message("command.category_tasks"),
       title:
         action === "start_task"
-          ? "Start task"
+          ? message("shell.start_task")
           : action === "stop_task"
-            ? "Stop task"
-            : "Restart task",
+            ? message("shell.stop_task")
+            : message("shell.restart_task"),
       enabled:
         !!taskWorkspace.activeTask &&
         !taskWorkspace.busy &&
@@ -1823,7 +1830,7 @@ function TerminalWorkbench() {
   useManualReconnectHandler((target, signal) => {
     if (signal.aborted || workspace.isClosing() || !workspace.ready) return Promise.resolve(false);
     if (dialogOpen || hostFlowRef.current || manualReconnectFlow.current || daemonRestartBlocksInteractions()) {
-      return Promise.reject({ code: "manual_reconnect_busy", message: "Finish the current dialog before reconnecting this session." });
+      return Promise.reject({ code: "manual_reconnect_busy", message: t("shell.finish_dialog") });
     }
     return new Promise<boolean>((resolve) => {
       const id = ++nextManualReconnectId.current;
@@ -1852,18 +1859,22 @@ function TerminalWorkbench() {
           if (!command.keepPaletteOpen) setPaletteOpen(false);
           if (command.id !== COMMAND_IDS.restartDaemon) cancelDaemonRestart();
           if (utility_page && command.focusTerminalAfterRun !== false) setUtilityPage(null);
+          const onFailure = (failure: unknown) => notifyFailure(
+            command.title_text ? message("shell.command_failed_named", { title: command.title_text }) : message("shell.command_failed"),
+            command.category_text ?? message("command.category_commands"), failure, undefined, command.id,
+          );
           let result: ReturnType<AppCommand["run"]>;
           try { result = command.run(args); }
-          catch (failure) { notifyFailure(`${command.title} failed`, command.category, failure); return; }
+          catch (failure) { onFailure(failure); return; }
           if (command.focusTerminalAfterRun !== false)
             requestAnimationFrame(() => renderer?.focus());
           return result instanceof Promise
-            ? result.catch((failure) => notifyFailure(`${command.title} failed`, command.category, failure))
+            ? result.catch(onFailure)
             : result;
         },
       })),
       workspace.ready && !workspace.closing && keybindings.ready && !dialogOpen && !preview_focused,
-      (error) => notifyFailure("Command failed", "Commands", error),
+      (error) => notifyFailure(message("shell.command_failed"), message("command.category_commands"), error),
     );
   });
 
@@ -1894,9 +1905,9 @@ function TerminalWorkbench() {
       >
         <CommandBindings platform={shortcutPlatform} />
         <div className="workbench">
-          {workspace.load_error ? <section className="workspace-load-error" aria-label="Workspace unavailable">
-            <h2>Could not load workspace</h2>
-            <InlineFeedback action={{ label: "Retry loading", on_click: workspace.retryLoad }}>{workspace.load_error}</InlineFeedback>
+          {workspace.load_error ? <section className="workspace-load-error" aria-label={t("shell.workspace_load_region")}>
+            <h2>{t("shell.workspace_loading_failed")}</h2>
+            <InlineFeedback action={{ label: t("shell.retry_loading"), on_click: workspace.retryLoad }}>{formatText(workspace.load_error)}</InlineFeedback>
           </section> : null}
           <main
             hidden={!!workspace.load_error}
@@ -1940,7 +1951,7 @@ function TerminalWorkbench() {
                   hostConnections={hostConnections.statuses}
                   attachmentStates={new Map(attachment.states.flatMap((state) => state.session ? [[sessionKey(state.session), state] as const] : []))}
                   onDisconnectHost={(target) => {
-                    void hostConnections.disconnect(target).catch((failure) => notifyFailure("Could not disconnect host", "Hosts", failure));
+                    void hostConnections.disconnect(target).catch((failure) => notifyFailure(message("shell.disconnect_host_failed"), message("command.category_hosts"), failure));
                   }}
                   targetErrors={targetErrors}
                   sessions={sessions}
@@ -1950,7 +1961,7 @@ function TerminalWorkbench() {
                   selectedSessionKey={activeTabKey}
                   openTabSessionKeys={openTabSessionKeys}
                   loading={loading || !workspace.ready}
-                  list_error={listError}
+                  list_error={listError === null ? null : formatText(listError)}
                   on_retry={() => { void refresh(); }}
                   creating={creating}
                   closingSessionKeys={closingSessionKeys}
@@ -2025,8 +2036,8 @@ function TerminalWorkbench() {
             />
             <div className="workspace-main">
               <TerminalTabs
-                leading_actions={<button type="button" id="workspace-sidebar-toggle" className="terminal-tab-new" aria-label={sidebar_visible ? "Hide sidebar" : "Show sidebar"} title={sidebar_visible ? "Hide sidebar" : "Show sidebar"} aria-expanded={sidebar_visible} aria-controls="workspace-sidebar" onClick={() => setSidebarVisible((visible) => !visible)}><Icon name="panel_left" /></button>}
-                trailing_actions={<button type="button" className="terminal-tab-new" aria-label="Commands" title={`Commands (${paletteShortcutLabel})`} onClick={() => executeCommandById(COMMAND_IDS.showPalette)}><Icon name="command" /></button>}
+                leading_actions={<button type="button" id="workspace-sidebar-toggle" className="terminal-tab-new" aria-label={sidebar_visible ? t("shell.hide_sidebar") : t("shell.show_sidebar")} title={sidebar_visible ? t("shell.hide_sidebar") : t("shell.show_sidebar")} aria-expanded={sidebar_visible} aria-controls="workspace-sidebar" onClick={() => setSidebarVisible((visible) => !visible)}><Icon name="panel_left" /></button>}
+                trailing_actions={<button type="button" className="terminal-tab-new" aria-label={t("command.category_commands")} title={t("shell.commands_shortcut", { v1: paletteShortcutLabel })} onClick={() => executeCommandById(COMMAND_IDS.showPalette)}><Icon name="command" /></button>}
                 tabs={tabs}
                 host_colors={workspace.host_colors}
                 extra_tabs={workspace.task_tabs.map((tab) => {
@@ -2035,8 +2046,8 @@ function TerminalWorkbench() {
                   );
                   return {
                     tab_key: workspaceTabKey(tab),
-                    title: task?.definition.name ?? "Saved task",
-                    host: tab.host_id === "local" ? "Local" : tab.host_id,
+                    title: task?.definition.name ?? t("shell.saved_task"),
+                    host: tab.host_id === "local" ? t("shell.local") : tab.host_id,
                     host_id: tab.host_id,
                     status: task ? taskState(task) : "unknown",
                   };
@@ -2089,11 +2100,11 @@ function TerminalWorkbench() {
                 }
               >
                 {activeTab && attachment.state.session === null ? (
-                  <SessionBanner severity="info" title="Session disconnected" message={activeTab.target.kind === "ssh"
-                    ? "Connect this host to resume its saved tab. Cached paths are last-known."
-                    : "Local session is not connected. Cached paths are last-known."}
+                  <SessionBanner severity="info" title={t("shell.session_disconnected")} message={activeTab.target.kind === "ssh"
+                    ? t("shell.resume_saved_tab")
+                    : t("shell.local_not_connected")}
                     action={{
-                      label: activeTab.target.kind === "ssh" ? "Connect host" : "Connect session",
+                      label: activeTab.target.kind === "ssh" ? t("shell.connect_host") : t("shell.connect_session"),
                       on_click: () => {
                         if (activeTab.target.kind === "ssh") {
                           executeCommandById(COMMAND_IDS.connectHost, { target_key: targetKey(activeTab.target) });
@@ -2121,7 +2132,7 @@ function TerminalWorkbench() {
                   on_toggle_input={attachment.toggleInputLease}
                   on_promoted={(session) => importSession(session, null)}
                   on_select_terminal={(session) => attachment.connect(session, { resize_with_window: true, terminal_id: session.terminal_id })}
-                  ended_message={attachment.state.phase === "ended" ? attachment.state.message ?? "Session exited" : attachment.state.error_code === "session_not_found" ? "Session no longer exists" : null}
+                  ended_message={attachment.state.phase === "ended" ? attachment.state.message ?? t("shell.session_exited") : attachment.state.error_code === "session_not_found" ? t("shell.session_missing") : null}
                   on_dismiss={() => { if (attachment.state.session) void dismissSession(attachment.state.session); }}
                   phase={attachment.state.phase}
                   hasSession={attachment.state.session !== null}
@@ -2169,12 +2180,12 @@ function TerminalWorkbench() {
             show_terminal={!utility_page && (!taskWorkspace.active || (
               taskWorkspace.activeTask?.definition.execution_mode === "interactive" && !!taskWorkspace.activeTask.active_run
             ))}
-            context_label={utility_page === "about" ? "About ctmux" : utility_page === "credentials" ? "Credentials" : "Tasks"}
+            context_label={utility_page === "about" ? t("command.category_about") : utility_page === "credentials" ? t("command.category_credentials") : t("command.category_tasks")}
             inert={dialogOpen || paletteOpen || workspace.closing}
           >
-            {workspace.saving ? <span className="status-item" role="status">Saving workspace…</span> : null}
-            {workspace.close_blocked && (creating || restartingDaemon || taskWorkspace.busy) ? <span className="status-item" role="status">Wait for ongoing operations before closing the window.</span> : null}
-            {restartingDaemon || taskWorkspace.daemonStatus?.endsWith("…") ? <span className="status-item" role="status">{restartingDaemon ? "Restarting ctmuxd…" : taskWorkspace.daemonStatus}</span> : null}
+            {workspace.saving ? <span className="status-item" role="status">{t("shell.workspace_saving")}</span> : null}
+            {workspace.close_blocked && (creating || restartingDaemon || taskWorkspace.busy) ? <span className="status-item" role="status">{t("shell.wait_before_close")}</span> : null}
+            {restartingDaemon || taskWorkspace.daemonStatus === "restarting" ? <span className="status-item" role="status">{restartingDaemon ? t("shell.restarting_daemon") : t("tasks.daemon_restarting")}</span> : null}
             <div className="status-terminal-controls" hidden={!!utility_page || (!!taskWorkspace.active && !(taskWorkspace.activeTask?.definition.execution_mode === "interactive" && taskWorkspace.activeTask.active_run))}>
               <div ref={setPaneControlsHost} />
                 <TerminalControls
@@ -2246,7 +2257,7 @@ function TerminalWorkbench() {
             targets={connectionTargets}
             hosts={workspace.hosts}
             gateways={workspace.ssh_gateways}
-            discoveryMessage={discoveryWarning ?? (workspace.discoveryLoading ? "Discovering Tailscale devices…" : null)}
+            discoveryMessage={discoveryWarning ?? (workspace.discoveryLoading ? t("shell.discovering_tailscale") : null)}
             onVerifyHost={recoverHost}
             onConnectionChange={hostConnections.connectionChanged}
             onCreate={create}
@@ -2260,7 +2271,7 @@ function TerminalWorkbench() {
             targets={connectionTargets}
             hosts={workspace.hosts}
             gateways={workspace.ssh_gateways}
-            discoveryMessage={discoveryWarning ?? (workspace.discoveryLoading ? "Discovering Tailscale devices…" : null)}
+            discoveryMessage={discoveryWarning ?? (workspace.discoveryLoading ? t("shell.discovering_tailscale") : null)}
             known={sessions}
             onVerifyHost={recoverHost}
             onConnectionChange={hostConnections.connectionChanged}
@@ -2269,25 +2280,25 @@ function TerminalWorkbench() {
           />
         ) : pendingForget ? (
           <QuickInput
-            title="Remove from workspace"
-            description={`Forget ${pendingForget.name} and close its tab? Its shell will keep running. You can add it again through discovery.`}
-            mode={{ kind: "confirm", confirm_label: "Remove from workspace" }}
+            title={t("shell.remove_from_workspace")}
+            description={t("shell.forget_and_close", { v1: pendingForget.name })}
+            mode={{ kind: "confirm", confirm_label: t("shell.remove_from_workspace") }}
             onCancel={() => setPendingForget(null)}
             onSubmit={() => {
               const session = pendingForget;
               setPendingForget(null);
               return forgetSession(session).catch((failure) =>
-                notifyFailure("Could not remove session from workspace", "Sessions", failure),
+                notifyFailure(message("shell.remove_session_failed"), message("command.category_sessions"), failure),
               );
             }}
           />
         ) : connectHostOpen ? (
           <QuickInput
-            title="Connect host"
-            description={`Choose a saved host or a discovered SSH/Tailscale device.${discoveryWarning ? `\n${discoveryWarning}` : workspace.discoveryLoading ? "\nDiscovering Tailscale devices…" : ""}`}
+            title={t("shell.connect_host")}
+            description={[t("shell.choose_host"), discoveryWarning || (workspace.discoveryLoading ? t("shell.discovering_tailscale") : "")].filter(Boolean).join("\n")}
             mode={{
               kind: "pick",
-              choices: hostSelectorChoices(connectableTargets, workspace.hosts),
+              choices: hostSelectorChoices(connectableTargets, workspace.hosts, undefined, locale),
             }}
             onCancel={() => setConnectHostOpen(false)}
             onSubmit={(key) => {
@@ -2316,9 +2327,9 @@ function TerminalWorkbench() {
         ) : methodDraft && methodNameOpen ? (
           <QuickInput
             key="method-name"
-            title={`Connection method · ${methodDraft.host_name}`}
-            description="Give this method a name, such as Office network or Via gateway."
-            mode={{ kind: "input", label: "Method name", initial_value: methodDraft.method_name }}
+            title={t("shell.connection_method", { v1: methodDraft.host_name })}
+            description={t("shell.method_name_help")}
+            mode={{ kind: "input", label: t("shell.method_name"), initial_value: methodDraft.method_name }}
             onCancel={() => { setMethodDraft(null); setMethodNameOpen(false); }}
             onSubmit={(value) => {
               const name = value.trim();
@@ -2388,12 +2399,12 @@ function TerminalWorkbench() {
               const id = hostFlow.manual_reconnect_id;
               const isCurrent = () => id === undefined ||
                 (manualReconnectFlow.current?.id === id && !manualReconnectFlow.current.signal.aborted);
-              if (!isCurrent()) throw { code: "attachment_cancelled", message: "Reconnect cancelled." };
+              if (!isCurrent()) throw { code: "attachment_cancelled", message: t("shell.reconnect_cancelled") };
               if (id !== undefined && !sameSshEndpoint(target, hostFlow.target)) {
-                throw new Error("The connection route changed while reconnecting this session.");
+                throw new LocalizedError("shell.reconnect_route_changed");
               }
               const recovered = await recoverHost(target, remote_info);
-              if (!isCurrent()) throw { code: "attachment_cancelled", message: "Reconnect cancelled." };
+              if (!isCurrent()) throw { code: "attachment_cancelled", message: t("shell.reconnect_cancelled") };
               return recovered;
             }}
             onConnectionChange={hostConnections.connectionChanged}
@@ -2406,7 +2417,7 @@ function TerminalWorkbench() {
                 return;
               }
               void resumeHost(target).catch((failure) =>
-                notifyFailure("Could not resume host sessions", "Hosts", failure),
+                notifyFailure(message("shell.resume_failed"), message("command.category_hosts"), failure),
               );
               if (portForwardUpdateTarget && target.kind === "ssh") {
                 setPortForwardTarget(target);
@@ -2426,12 +2437,12 @@ function TerminalWorkbench() {
           />
         ) : pendingCloseSessionKey ? (
           <QuickInput
-            title="Terminate session"
-            description={`Terminate ${sessions.find((session) => sessionKey(session) === pendingCloseSessionKey)?.name ?? "this session"} for all clients? This cannot be undone.${closeShortcutLabel ? ` Press ${closeShortcutLabel} to confirm.` : ""}`}
+            title={t("shell.terminate_session")}
+            description={t("shell.terminate_confirm", { v1: sessions.find((session) => sessionKey(session) === pendingCloseSessionKey)?.name ?? t("shell.this_session"), v2: closeShortcutLabel ? t("shell.confirm_shortcut", { v1: closeShortcutLabel }) : "" })}
             confirm_command_id={COMMAND_IDS.close}
             mode={{
               kind: "confirm",
-              confirm_label: "Terminate session",
+              confirm_label: t("shell.terminate_session"),
               destructive: true,
             }}
             onCancel={cancelClose}
@@ -2445,11 +2456,11 @@ function TerminalWorkbench() {
           />
         ) : daemonRestartConfirmationPending ? (
           <QuickInput
-            title="Restart ctmuxd"
-            description="Terminate every local ctmux session, including sessions opened by other apps, and start a new daemon? This cannot be undone."
+            title={t("command.restart_daemon")}
+            description={t("shell.restart_confirm")}
             mode={{
               kind: "confirm",
-              confirm_label: "Restart ctmuxd",
+              confirm_label: t("command.restart_daemon"),
               destructive: true,
             }}
             onCancel={cancelDaemonRestart}

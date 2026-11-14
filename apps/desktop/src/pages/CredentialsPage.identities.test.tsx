@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { formatText } from "../features/i18n/messages";
 import type { ReactElement } from "react";
 import { NotificationProvider } from "../features/notifications/NotificationContext";
 import { NotificationStore } from "../features/notifications/NotificationStore";
@@ -55,7 +56,7 @@ describe("Identity file credentials", () => {
     renderPage(<CredentialsPage {...props()} />);
     const table = await screen.findByRole("table", { name: "Identity files" });
     expect(within(table).getAllByRole("row")).toHaveLength(2);
-    for (const label of ["id_ed25519", "~/.ssh/id_ed25519", "Ed25519", "SHA256:fixture-fingerprint", "Development, Staging", "Not saved"]) expect(within(table).getByText(label)).toBeTruthy();
+    for (const label of ["id_ed25519", "~/.ssh/id_ed25519", "Ed25519", "SHA256:fixture-fingerprint", "Development and Staging", "Not saved"]) expect(within(table).getByText(label)).toBeTruthy();
     expect(api.identities).toHaveBeenCalledExactlyOnceWith(targets);
     expect(screen.queryByRole("button", { name: /reveal|copy|delete file/i })).toBeNull();
   });
@@ -116,7 +117,7 @@ describe("Identity file credentials", () => {
     const input = await openSave();
     submitSave();
     await waitFor(() => expect(notifications.snapshot().entries).toHaveLength(1));
-    expect(notifications.snapshot().entries[0].message).toBe("The passphrase could not be saved. Check the passphrase, identity file, and Keychain access, then try again.");
+    expect(formatText("en", notifications.snapshot().entries[0].message)).toBe("The passphrase could not be saved. Check the passphrase, identity file, and Keychain access, then try again.");
     expect(input.value).toBe("");
     expect(document.body.textContent).not.toContain("sample-secret-fixture");
     expect(screen.queryByRole("dialog")).toBeNull();
@@ -133,7 +134,7 @@ describe("Identity file credentials", () => {
     await openSave();
     submitSave();
     await waitFor(() => expect(notifications.snapshot().entries).toHaveLength(1));
-    expect(notifications.snapshot().entries[0].message).toBe(message);
+    expect(formatText("en", notifications.snapshot().entries[0].message)).toBe(message);
     expect(screen.queryByRole("alert")).toBeNull();
     expect(document.body.textContent).not.toContain("sample-secret-fixture");
     expect(JSON.stringify(notifications.snapshot())).not.toContain("sample-secret-fixture");

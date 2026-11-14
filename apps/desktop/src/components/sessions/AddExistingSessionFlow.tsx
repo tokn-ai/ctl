@@ -1,3 +1,5 @@
+import { message, type DisplayText } from "../../features/i18n/messages";
+import { useLocale } from "../../features/i18n/LocaleContext";
 import { useEffect, useRef, useState } from "react";
 import { QuickInput } from "../commands/QuickInput";
 import { ConnectHostFlow } from "./ConnectHostFlow";
@@ -8,7 +10,7 @@ import {
   targetLabel,
 } from "../../features/targets/targets";
 import { listSessions } from "../../lib/tauri";
-import { errorMessage } from "../../lib/errors";
+import { localizedErrorText } from "../../lib/errors";
 import type {
   ConnectionTarget,
   RemoteIdentity,
@@ -40,6 +42,7 @@ interface AddExistingSessionFlowProps {
 
 /** Enumeration is confined to this explicit, single-host import flow. */
 export function AddExistingSessionFlow(props: AddExistingSessionFlowProps) {
+  const { t, locale } = useLocale();
   const [target, setTarget] = useState<ConnectionTarget | null>(null);
   const [connectedTarget, setConnectedTarget] = useState<ConnectionTarget | null>(null);
   const [retryMethodId, setRetryMethodId] = useState<string | undefined>();
@@ -92,11 +95,11 @@ export function AddExistingSessionFlow(props: AddExistingSessionFlowProps) {
   }
   return (
     <QuickInput
-      title="Add existing session — host"
-      description={`Choose one host to discover its running sessions. Other hosts will not be contacted.${props.discoveryMessage ? `\n${props.discoveryMessage}` : ""}`}
+      title={t("session_import.host")}
+      description={`${t("session_import.host_hint")}${props.discoveryMessage ? `\n${props.discoveryMessage}` : ""}`}
       mode={{
         kind: "pick",
-        choices: hostSelectorChoices(props.targets, props.hosts),
+        choices: hostSelectorChoices(props.targets, props.hosts, undefined, locale),
       }}
       onSubmit={(key) =>
         setTarget(
@@ -121,8 +124,9 @@ function SessionChoices({
   onBack(): void;
   onReconnect(): void;
 }) {
+  const { t, locale, formatText } = useLocale();
   const [catalog, setCatalog] = useState<SessionListResponse | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<DisplayText | null>(null);
   const [attempt, setAttempt] = useState(0);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -140,7 +144,7 @@ function SessionChoices({
       },
       (failure: unknown) => {
         if (!cancelled) {
-          setError(errorMessage(failure));
+          setError(localizedErrorText(failure));
           setLoading(false);
         }
       },
@@ -175,7 +179,7 @@ function SessionChoices({
       setAdded((current) => current + 1);
     } catch (failure) {
       setError(
-        `Could not save the entry: ${errorMessage(failure)}. Close this picker and use Retry saving.`,
+        message("session_import.save_failed", { detail: localizedErrorText(failure) }),
       );
     } finally {
       setSaving(false);
@@ -185,22 +189,22 @@ function SessionChoices({
   return (
     <QuickInput
       key={`${attempt}:${loading}:${saving}:${added}`}
-      title={`Add existing session — ${targetLabel(target)}`}
+      title={t("session_import.title", { host: targetLabel(target, locale) })}
       description={
         loading
           ? undefined
           : catalog
-            ? `${added ? `${added} added. ` : ""}${available.length ? "Choose sessions to remember without attaching. Select Done when finished." : "No additional running sessions. Existing workspace entries are hidden."}`
-            : "Discovery failed. Retry to reconnect to this host and discover its sessions."
+            ? t(available.length ? "session_import.available" : "session_import.no_more", { count: added })
+            : t("session_import.failed")
       }
-      error={error}
+      error={error ? formatText(error) : null}
       mode={
         loading || saving
           ? {
               kind: "progress",
               message: saving
-                ? "Saving workspace…"
-                : "Discovering sessions on this host…",
+                ? t("session_import.saving")
+                : t("session_import.discovering"),
             }
           : {
               kind: "pick",
@@ -214,9 +218,9 @@ function SessionChoices({
                     session.session_id,
                 })),
                 ...(!catalog
-                  ? [{ id: "retry", label: "Retry discovery" }]
+                  ? [{ id: "retry", label: t("session_import.retry") }]
                   : []),
-                { id: "done", label: "Done" },
+                { id: "done", label: t("session_import.done") },
               ],
             }
       }

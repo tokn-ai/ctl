@@ -1,3 +1,4 @@
+import { LocalizedError } from "../i18n/messages";
 import type { ComponentReconnectResult, ComponentSessionsReset, DividerResize, LeaseStatus, ResizeDirection, SessionSummary, SessionView, TerminalSize } from "../../lib/types";
 import { sameTarget } from "../targets/targets";
 
@@ -85,7 +86,7 @@ function preferredControl(attached: AttachmentControl[], session: SessionSummary
 export async function toggleSessionResizeWithWindow(session: SessionSummary, preferred_attachment_id?: string | null): Promise<void> {
   const attached = attachedControls(session);
   const control = attached.find((candidate) => candidate.layoutOwned()) ?? preferredControl(attached, session, preferred_attachment_id);
-  if (!control) throw new Error("Attach to a running session before resizing with the window.");
+  if (!control) throw new LocalizedError("pane.attach_to_resize");
   await control.toggleResizeWithWindow(proposeSessionViewportSize(session, preferred_attachment_id) ?? undefined);
 }
 
@@ -141,7 +142,7 @@ export async function requestSessionResizeControl(
   if (owner) { await owner.requestResizeControl(acquire); return; }
   if (!acquire) return;
   const primary = preferredControl(attached, session, preferred_attachment_id);
-  if (!primary) throw new Error("Attach to a running session before taking resize control.");
+  if (!primary) throw new LocalizedError("pane.attach_to_take_resize");
   await primary.requestResizeControl(true);
 }
 
@@ -161,7 +162,7 @@ export async function setSessionViewZoom(
   baseline: Pick<SessionView, "view_id" | "revision" | "zoomed_terminal_id">,
 ): Promise<SessionView> {
   const owner = layoutOwner(session);
-  if (!owner) throw new Error("Take resize control to zoom panes.");
+  if (!owner) throw new LocalizedError("pane.zoom_control_required");
   const attachment_id = owner.attachmentId()!;
   const baseline_revision = BigInt(baseline.revision);
   const changed = baseline.zoomed_terminal_id !== terminal_id;
@@ -184,7 +185,7 @@ export async function setSessionViewZoom(
         finish(event.view);
       }
     });
-    const timer = setTimeout(() => finish(null, new Error("The server did not confirm the pane zoom change. Reconnect and try again.")), 5000);
+    const timer = setTimeout(() => finish(null, new LocalizedError("pane.zoom_confirmation_timeout")), 5000);
     try {
       void owner.setViewZoom(terminal_id).catch((failure) => finish(null, failure));
     } catch (failure) {
@@ -224,7 +225,7 @@ function confirmResize(
   send: (owner: AttachmentControl, request_id: string) => Promise<void>,
 ): Promise<SessionView> {
   const owner = layoutOwner(session);
-  if (!owner) return Promise.reject(new Error("Take resize control to resize panes."));
+  if (!owner) return Promise.reject(new LocalizedError("pane.resize_control_required"));
   const attachment_id = owner.attachmentId()!;
   const request_id = crypto.randomUUID();
   return new Promise<SessionView>((resolve, reject) => {
@@ -243,7 +244,7 @@ function confirmResize(
       else if (event.view.session_id === session.session_id) finish(event.view);
     };
     resize_listeners.add(listener);
-    const timer = setTimeout(() => finish(null, new Error("The server did not confirm the pane resize. Reconnect and try again.")), 5000);
+    const timer = setTimeout(() => finish(null, new LocalizedError("pane.resize_confirmation_timeout")), 5000);
     try {
       void send(owner, request_id).catch((failure) => finish(null, failure));
     } catch (failure) { finish(null, failure); }

@@ -8,6 +8,8 @@ import {
   waitFor,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { LocaleProvider } from "../i18n/LocaleContext";
+import { message } from "../i18n/messages";
 import { CommandBindings } from "./CommandBindings";
 import { CommandProvider } from "./CommandContext";
 import { CommandDispatcher } from "./CommandDispatcher";
@@ -39,6 +41,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   cleanup();
+  localStorage.removeItem("ctmux.desktop.language");
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -71,14 +74,14 @@ describe("native and webview command adapters", () => {
     );
     await waitFor(() => expect(report).toHaveBeenLastCalledWith("native_shortcuts", {
       severity: "warning",
-      title: "Some menu commands are unavailable",
-      message: "Restart ctl-taskd: Invalid native command descriptor.",
-      source: "Keyboard shortcuts",
+      title: message("native_menu.commands_unavailable"),
+      message: message("native_menu.rejected_commands", { detail: message("native_menu.diagnostic_rows", { first: message("native_menu.diagnostic", { command: COMMAND_IDS.restartTaskDaemon, detail: "Invalid native command descriptor." }), second: "", third: "" }), count: 0 }),
+      source: message("native_menu.keyboard_shortcuts"),
     }));
     expect(api.sync).toHaveBeenLastCalledWith(expect.arrayContaining([
       expect.objectContaining({ command_id: COMMAND_IDS.showPalette, enabled: true, keybinding: { code: "KeyP", primary: true, shift: true } }),
       expect.objectContaining({ command_id: COMMAND_IDS.newTab, enabled: true, keybinding: { code: "KeyT", primary: true, shift: false } }),
-    ]));
+    ]), expect.objectContaining({ commands: "Commands" }));
     fireEvent.keyDown(window, { code: "KeyP", metaKey: true, shiftKey: true });
     fireEvent.keyDown(window, { code: "KeyT", metaKey: true });
     expect(palette).not.toHaveBeenCalled();
@@ -113,14 +116,43 @@ describe("native and webview command adapters", () => {
     );
     await waitFor(() => expect(report).toHaveBeenLastCalledWith("native_shortcuts", {
       severity: "error",
-      title: "Native shortcuts",
-      message: "Could not update native shortcuts: The application menu is unavailable.",
-      source: "Keyboard shortcuts",
+      title: message("native_menu.native_shortcuts"),
+      message: message("native_menu.sync_failed", { detail: "The application menu is unavailable." }),
+      source: message("native_menu.keyboard_shortcuts"),
     }));
     fireEvent.keyDown(window, { code: "KeyP", metaKey: true, shiftKey: true });
     expect(run).not.toHaveBeenCalled();
     act(() => api.listener!({ payload: COMMAND_IDS.showPalette }));
     expect(run).toHaveBeenCalledOnce();
+  });
+
+  it("updates native labels when another window changes the app language", async () => {
+    const dispatcher = new CommandDispatcher();
+    const notifications = new NotificationStore();
+    const bindings = defaultKeybindings("macos");
+    const report = vi.spyOn(notifications, "report");
+    const command = { id: COMMAND_IDS.close, title: "Close", category: "Test", enabled: true, run: vi.fn() };
+    dispatcher.update([command], true, vi.fn());
+    api.sync.mockResolvedValue({ rejected: [{ command_id: command.id, index: 0, message: "Native failure." }] });
+    localStorage.setItem("ctmux.desktop.language", "en");
+    render(<LocaleProvider><NotificationProvider store={notifications}>
+      <CommandProvider value={{ dispatcher, keybinding: (id) => bindings.get(id) }}>
+        <CommandBindings platform="macos" />
+      </CommandProvider>
+    </NotificationProvider></LocaleProvider>);
+    await waitFor(() => expect(notifications.snapshot().entries).toHaveLength(1));
+    expect(api.sync).toHaveBeenLastCalledWith(expect.any(Array), expect.objectContaining({ about: "About ctmux", edit: "Edit" }));
+    const entry = notifications.snapshot().entries[0];
+    act(() => notifications.dismiss(entry.id));
+    report.mockClear();
+    act(() => {
+      localStorage.setItem("ctmux.desktop.language", "zh-Hans");
+      window.dispatchEvent(new StorageEvent("storage", { key: "ctmux.desktop.language" }));
+      dispatcher.update([{ ...command, title: "关闭" }], true, vi.fn());
+    });
+    await waitFor(() => expect(api.sync).toHaveBeenLastCalledWith([expect.objectContaining({ title: "关闭" })], expect.objectContaining({ about: "关于 ctmux", edit: "编辑" })));
+    await waitFor(() => expect(report.mock.calls.length).toBeGreaterThan(1));
+    expect(notifications.snapshot().entries).toHaveLength(0);
   });
 
   it("updates native accelerators from the keymap and never double-dispatches a native key", async () => {
@@ -154,7 +186,7 @@ describe("native and webview command adapters", () => {
           command_id: COMMAND_IDS.close,
           keybinding: expect.objectContaining({ code: "KeyE" }),
         }),
-      ]),
+      ], expect.objectContaining({ commands: "Commands" })),
     );
     fireEvent.keyDown(window, { code: "KeyE", metaKey: true });
     expect(run).not.toHaveBeenCalled();
@@ -167,14 +199,14 @@ describe("native and webview command adapters", () => {
         expect.objectContaining({
           keybinding: { code: "KeyY", primary: true },
         }),
-      ]),
+      ], expect.objectContaining({ commands: "Commands" })),
     );
     bindings.delete(COMMAND_IDS.close);
     rendered.rerender(view());
     await waitFor(() =>
       expect(api.sync).toHaveBeenLastCalledWith([
         expect.objectContaining({ keybinding: null }),
-      ]),
+      ], expect.objectContaining({ commands: "Commands" })),
     );
   });
 

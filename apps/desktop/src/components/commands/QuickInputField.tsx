@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useId, useRef, useState, type ReactNode, type RefObject } from "react";
+import { useLocale } from "../../features/i18n/LocaleContext";
 
 export interface QuickInputSuggestions {
   label: string;
@@ -61,16 +62,17 @@ export function QuickInputField({
   onChange,
   submissionValue,
 }: QuickInputFieldProps) {
+  const { t, locale } = useLocale();
   const [value, setValue] = useState(mode.initial_value ?? "");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const listId = useId();
   const listRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const suggestions = mode.secret ? undefined : mode.suggestions;
-  const query = mode.secret ? "" : value.trim().toLowerCase();
+  const query = mode.secret ? "" : value.trim().toLocaleLowerCase(locale);
   const items =
     suggestions?.items.filter((item) =>
-      [item.label, item.id, item.detail].some((text) => text?.toLowerCase().includes(query)),
+      [item.label, item.id, item.detail].some((text) => text?.toLocaleLowerCase(locale).includes(query)),
     ) ?? [];
   const selectedIndex = items.findIndex((item) => item.id === selectedId);
   const selected = items[selectedIndex];
@@ -87,12 +89,12 @@ export function QuickInputField({
     };
   }, [mode.secret]);
   const status = suggestions?.loading
-    ? (suggestions.loading_message ?? "Loading suggestions…")
+    ? (suggestions.loading_message ?? t("dialog.loading_suggestions"))
     : items.length === 0 && suggestions
       ? query
         ? (suggestions.no_match_message ??
-          "No matching suggestions. You can still enter a value manually.")
-        : (suggestions.empty_message ?? "No suggestions available.")
+          t("dialog.no_matching_suggestions"))
+        : (suggestions.empty_message ?? t("dialog.no_suggestions"))
       : undefined;
 
   return (
@@ -159,7 +161,7 @@ export function QuickInputField({
             autoComplete="off"
             spellCheck={false}
           />
-          <button type="submit">{mode.submit_label ?? "Continue"}</button>
+          <button type="submit">{mode.submit_label ?? t("dialog.continue")}</button>
         </div>
         {mode.additional_field}
       </form>

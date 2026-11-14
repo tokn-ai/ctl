@@ -1,3 +1,4 @@
+import { useLocale } from "../../features/i18n/LocaleContext";
 import { useState } from "react";
 import { QuickInput } from "../commands/QuickInput";
 import { SshHostFlow, type SshHostFlowProps } from "./SshHostFlow";
@@ -21,6 +22,7 @@ export function ConnectHostFlow({
   gateways = [],
   ...props
 }: ConnectHostFlowProps) {
+  const { t, locale } = useLocale();
   const [chosenMethodId, setChosenMethodId] = useState<string | null>(() =>
     host?.connection_methods.length === 1 ? host.connection_methods[0].method_id : null);
   const method_id = selected_method_id ?? chosenMethodId ??
@@ -29,18 +31,18 @@ export function ConnectHostFlow({
   let unavailable = target.kind === "ssh" && (!host || props.updateRequired) ? target.unavailable : undefined;
   if (host && !props.updateRequired) {
     if (host.source === "unavailable") {
-      unavailable = "This host is no longer available. Restore its saved definition before connecting.";
+      unavailable = t("host_connect.missing");
     } else if (!host.connection_methods.length) {
-      unavailable = "This host has no connection methods. Add a connection method in Host settings before connecting.";
+      unavailable = t("host_connect.no_methods");
     } else if (method_id) {
       if (!host.connection_methods.some((method) => method.method_id === method_id)) {
-        unavailable = "This connection method is no longer saved on the host. Choose a current method from Host settings.";
+        unavailable = t("host_connect.missing_method");
       } else {
         try {
           candidate = hostTarget(host, gateways, method_id, props.hosts);
           if (candidate.kind === "ssh") unavailable = candidate.unavailable;
         } catch (failure) {
-          unavailable = errorMessage(failure);
+          unavailable = errorMessage(failure, locale);
         }
       }
     }
@@ -50,9 +52,9 @@ export function ConnectHostFlow({
     return (
       <QuickInput
         key="unavailable"
-        title="Connection unavailable"
+        title={t("host_connect.unavailable")}
         error={unavailable}
-        mode={{ kind: "pick", choices: [{ id: "close", label: "Close" }] }}
+        mode={{ kind: "pick", choices: [{ id: "close", label: t("host_connect.close") }] }}
         onSubmit={props.onClose}
         onCancel={props.onClose}
       />
@@ -67,17 +69,17 @@ export function ConnectHostFlow({
     return (
       <QuickInput
         key={`methods:${host.host_id}`}
-        title={`Connect to ${host.name}`}
-        description="Choose a connection method. The preferred method is selected by default."
+        title={t("host_connect.connect_to", { host: host.name })}
+        description={t("host_connect.choose_method")}
         mode={{
           kind: "pick",
           choices: methods.map((method) => ({
             id: method.method_id,
             label: method.name,
             detail: [
-              method.method_id === host.preferred_method_id ? "Preferred" : null,
+              method.method_id === host.preferred_method_id ? t("host_settings.preferred") : null,
               methodEndpoint(method),
-              method.target.unavailable ? connectionUnavailableLabel(method) : null,
+              method.target.unavailable ? connectionUnavailableLabel(method, locale) : null,
             ].filter(Boolean).join(" · "),
           })),
         }}

@@ -1,3 +1,4 @@
+import { LocalizedError } from "../i18n/messages";
 import type {
   WorkspaceTab,
   TaskTab,
@@ -144,7 +145,7 @@ export function hostTarget(
 ): ConnectionTarget {
   if (host.host_id === "local") return LOCAL_TARGET;
   const method = host.connection_methods.find((item) => item.method_id === method_id);
-  if (!method) throw new Error(`Choose a connection method for ${host.name}.`);
+  if (!method) throw new LocalizedError("workspace.choose_method", { host: host.name });
   if (host.source === "unavailable" || method.target.unavailable) return {
     ...connectionSettings(method.target),
     host_id: host.host_id,
@@ -248,7 +249,7 @@ function restoreSshConfigBinding(
 
 /** Saving a customization claims the projected identity without renaming references. */
 export function promoteHost(host: WorkspaceHost): WorkspaceHost {
-  if (host.source === "unavailable") throw new Error("Restore this host before saving its settings.");
+  if (host.source === "unavailable") throw new LocalizedError("workspace.restore_first");
   return {
     ...host,
     source: "saved",
@@ -427,7 +428,7 @@ export function refreshHostCatalog(
 /** Editing metadata never changes the transport used by existing sessions. */
 export function updateHostSettings(view: WorkspaceView, host: WorkspaceHost): WorkspaceView {
   if (!view.hosts.some((known) => known.host_id === host.host_id))
-    throw new Error("This host is no longer in the workspace.");
+    throw new LocalizedError("workspace.host_missing");
   const rename = (target: ConnectionTarget): ConnectionTarget =>
     target.kind === "ssh" && target.host_id === host.host_id
       ? { ...target, host_name: host.name }
@@ -444,9 +445,9 @@ export function updateHostSettings(view: WorkspaceView, host: WorkspaceHost): Wo
 /** Appearance does not claim a discovered host or rewrite its connection settings. */
 export function updateHostColor(view: WorkspaceView, host_id: string, color: string | undefined): WorkspaceView {
   if (!host_id || host_id.length > 4096 || /[\u0000-\u001f\u007f-\u009f]/.test(host_id))
-    throw new Error("Choose a valid host identity.");
+    throw new LocalizedError("workspace.invalid_identity");
   const normalized = normalizeHostColor(color);
-  if (color !== undefined && !normalized) throw new Error("Choose a six-digit hexadecimal color.");
+  if (color !== undefined && !normalized) throw new LocalizedError("workspace.invalid_color");
   const host_colors = normalized ? { ...view.host_colors, [host_id]: normalized } : { ...view.host_colors };
   if (!normalized) delete host_colors[host_id];
   return { ...view, host_colors };

@@ -1,3 +1,4 @@
+import { LocalizedError } from "../i18n/messages";
 import { resolvePrefix } from "./prefixKeymap";
 import type { KeybindingsDocument } from "../../lib/types";
 import {
@@ -94,9 +95,7 @@ export function parseKeybinding(text: string): Keybinding | null {
     ) ||
     (modifiers.includes("alt") && modifiers.includes("option"))
   ) {
-    throw new Error(
-      "Use a shortcut such as Primary+Shift+E, Alt+F2, or Escape.",
-    );
+    throw new LocalizedError("shortcuts.invalid_example");
   }
   const code = /^[a-z]$/i.test(key)
     ? `Key${key.toUpperCase()}`
@@ -106,7 +105,7 @@ export function parseKeybinding(text: string): Keybinding | null {
         ? key
         : (SPECIAL_KEYS[key.toLowerCase()] ?? key.toUpperCase());
   if (!VALID_CODE.test(code))
-    throw new Error(`Unsupported shortcut key: ${key}`);
+    throw new LocalizedError("shortcuts.unsupported_key", { key });
   return {
     code,
     primary: primary.length === 1,
@@ -129,7 +128,7 @@ export function resolveKeymap(
     !Array.isArray(document.overrides) ||
     document.overrides.length > CONFIGURABLE_COMMAND_IDS.length
   )
-    throw new Error("Unsupported keyboard shortcut settings.");
+    throw new LocalizedError("shortcuts.unsupported_settings");
   const bindings = new Map(defaultKeybindings(platform));
   const seen = new Set<string>();
   for (const override of document.overrides) {
@@ -137,7 +136,7 @@ export function resolveKeymap(
       !CONFIGURABLE_COMMAND_IDS.includes(override.command_id) ||
       seen.has(override.command_id)
     )
-      throw new Error(`Unknown or duplicate command: ${override.command_id}`);
+      throw new LocalizedError("shortcuts.unknown_command", { command: override.command_id });
     seen.add(override.command_id);
     const key = override.keybinding;
     if (
@@ -147,7 +146,7 @@ export function resolveKeymap(
         (key.shift !== undefined && typeof key.shift !== "boolean") ||
         (key.alt !== undefined && typeof key.alt !== "boolean"))
     )
-      throw new Error(`Invalid shortcut for ${override.command_id}`);
+      throw new LocalizedError("shortcuts.invalid_for_command", { command: override.command_id });
     if (key) bindings.set(override.command_id, key);
     else bindings.delete(override.command_id);
   }
@@ -160,9 +159,7 @@ export function resolveKeymap(
       !binding.alt &&
       !/^F\d+$/.test(binding.code)
     )
-      throw new Error(
-        `${id} needs Primary, Alt, or a function key to avoid capturing terminal typing.`,
-      );
+      throw new LocalizedError("shortcuts.requires_modifier", { command: id });
     // Native edit/window equivalents remain owned by the platform.
     if (
       platform === "macos" &&
@@ -182,16 +179,12 @@ export function resolveKeymap(
         (!binding.alt && binding.shift && binding.code === "KeyZ") ||
         (binding.alt && !binding.shift && binding.code === "KeyH"))
     )
-      throw new Error(
-        `${formatKeybinding(binding, platform)} is reserved for native editing or window commands.`,
-      );
+      throw new LocalizedError("shortcuts.reserved_binding", { key: formatKeybinding(binding, platform) });
     // Keep native menu equivalents unambiguous, including dialog redirects.
     const signature = formatKeybinding(binding, "other");
     const other = occupied.get(signature);
     if (other)
-      throw new Error(
-        `${formatKeybinding(binding, platform)} is already assigned to ${other}. Unbind that command first.`,
-      );
+      throw new LocalizedError("shortcuts.occupied_binding", { key: formatKeybinding(binding, platform), command: other });
     occupied.set(signature, id);
   }
   resolvePrefix(document, bindings, platform);

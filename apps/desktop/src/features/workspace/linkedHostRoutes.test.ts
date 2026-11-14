@@ -1,3 +1,4 @@
+import { message } from "../i18n/messages";
 import { describe, expect, it } from "vitest";
 import type { HostCatalogDocument, SshConnectionTarget, WorkspaceDocument, WorkspaceHost } from "../../lib/types";
 import { expandSshRoute, localVpnConnectionId, resolvedVpnExecutionTarget, vpnExecutionTarget } from "./sshRoute";
@@ -46,7 +47,7 @@ describe("linked saved host routes", () => {
     expect(snapshot.gateway_route).toEqual(target.connection_methods[0].target.gateway_route);
     // A removed link blocks new scopes but a retained master can still be stopped.
     expect(hostConnectionTargets(target, { gateways: [], hosts: [target], targets: [snapshot] }))
-      .toEqual([{ name: "Previous connection", target: snapshot }]);
+      .toEqual([{ name: message("host_observation.previous_connection"), target: snapshot }]);
   });
 
   it("retains repeated host links and gives explicit user settings precedence over address user", () => {

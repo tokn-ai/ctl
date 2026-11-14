@@ -1,3 +1,4 @@
+import { formatText, translate, type DisplayText, type Locale } from "../i18n/messages";
 import type { ErrorDetails } from "../../lib/errors";
 import type { ConnectionTarget, HostConnectionStatus } from "../../lib/types";
 import { isObservationTime } from "../sessions/sessionObservation";
@@ -13,39 +14,41 @@ export interface HostPresentation {
   description: string;
 }
 
-function operationLabel(connection: HostConnectionStatus | undefined): string | null {
+function operationLabel(connection: HostConnectionStatus | undefined, locale: Locale): string | null {
+  const t = (id: string) => translate(locale, id);
   const operation = connection?.operation;
   if (operation?.kind && operation.state === "pending")
-    return operation.kind === "connect" ? "Connecting…" : "Disconnecting…";
+    return operation.kind === "connect" ? t("host_state.connecting") : t("host_state.disconnecting");
   if (operation?.kind && operation.state === "failed")
-    return operation.kind === "connect" ? "Connect failed" : "Disconnect failed";
-  if (connection?.state === "connecting") return "Connecting…";
-  if (connection?.state === "disconnecting") return "Disconnecting…";
+    return operation.kind === "connect" ? t("host_state.connect_failed") : t("host_state.disconnect_failed");
+  if (connection?.state === "connecting") return t("host_state.connecting");
+  if (connection?.state === "disconnecting") return t("host_state.disconnecting");
   return null;
 }
 
-function connectionLabel(connection: HostConnectionStatus | undefined, connected: boolean): string {
-  if (connection?.manually_disconnected) return "Disconnected manually";
-  if (connected) return "SSH connected";
+function connectionLabelId(connection: HostConnectionStatus | undefined, connected: boolean): string {
+  if (connection?.manually_disconnected) return "host_state.manual";
+  if (connected) return "host_state.connected";
   const observation = connection?.observation;
-  if (observation?.stale) return "SSH status unknown";
-  if (observation?.availability === "unavailable") return "SSH disconnected";
-  if (observation) return observation.completeness === "pending" ? "Checking SSH…" : "SSH status unknown";
-  if (connection?.state === "disconnected") return "SSH disconnected";
-  if (connection?.state === "error") return "Connection error";
-  return connection?.state === "checking" || !connection ? "Checking SSH…" : "SSH status unknown";
+  if (observation?.stale) return "host_state.unknown";
+  if (observation?.availability === "unavailable") return "host_state.disconnected";
+  if (observation) return observation.completeness === "pending" ? "host_state.checking" : "host_state.unknown";
+  if (connection?.state === "disconnected") return "host_state.disconnected";
+  if (connection?.state === "error") return "host_state.error";
+  return connection?.state === "checking" || !connection ? "host_state.checking" : "host_state.unknown";
 }
 
-function reachabilityLabel(connection: HostConnectionStatus | undefined): string | null {
+function reachabilityLabel(connection: HostConnectionStatus | undefined, locale: Locale): string | null {
+  const t = (id: string) => translate(locale, id);
   const reachability = connection?.reachability;
   if (!reachability) return null;
-  if (reachability.reason === "vpn_disconnected") return "VPN disconnected";
+  if (reachability.reason === "vpn_disconnected") return t("host_state.vpn_disconnected");
   return {
-    available: "SSH available",
-    unavailable: "SSH unavailable",
-    checking: "Checking SSH…",
-    not_checked: "SSH not checked",
-    unknown: "SSH reachability unknown",
+    available: t("host_state.available"),
+    unavailable: t("host_state.unavailable"),
+    checking: t("host_state.checking"),
+    not_checked: t("host_state.not_checked"),
+    unknown: t("host_state.reachability_unknown"),
   }[reachability.state];
 }
 
@@ -54,7 +57,9 @@ export function hostPresentation(
   target: ConnectionTarget,
   connection: HostConnectionStatus | undefined,
   session_error?: ErrorDetails,
+  locale: Locale = "en",
 ): HostPresentation {
+  const t = (id: string) => translate(locale, id);
   const local = target.kind === "local";
   const observation = local ? undefined : connection?.observation;
   const reachability = local ? undefined : connection?.reachability;
@@ -63,9 +68,10 @@ export function hostPresentation(
   const lookup_error = session_error?.message && session_error.message !== unavailable ? session_error : undefined;
   const connected = local || Boolean(!connection?.manually_disconnected && !observation?.stale &&
     (observation ? observation.availability === "available" : connection?.state === "connected"));
-  const connection_label = local ? "Local" : connectionLabel(connection, connected);
-  const operation_label = local ? null : operationLabel(connection);
-  const reachability_label = local ? null : reachabilityLabel(connection);
+  const connection_label_id = local ? "host_state.local" : connectionLabelId(connection, connected);
+  const connection_label = t(connection_label_id);
+  const operation_label = local ? null : operationLabel(connection, locale);
+  const reachability_label = local ? null : reachabilityLabel(connection, locale);
   const pending = operation?.state === "pending" ||
     !local && (connection?.state === "connecting" || connection?.state === "disconnecting");
   const observation_uncertain = Boolean(observation && (observation.stale ||
@@ -87,68 +93,69 @@ export function hostPresentation(
 
   let label = connection_label;
   if (operation_label) label = operation_label;
-  else if (unavailable && !connected && target.kind === "ssh") label = connectionUnavailableLabel(target);
-  else if (connection_failed) label = "Connection error";
-  else if (lookup_error) label = "Session lookup failed";
+  else if (unavailable && !connected && target.kind === "ssh") label = connectionUnavailableLabel(target, locale);
+  else if (connection_failed) label = t("host_state.error");
+  else if (lookup_error) label = t("host_state.lookup_failed");
   else if (!connected && !connection?.manually_disconnected && !observation?.stale && reachability_label)
     label = reachability_label;
 
+  const display = (value: DisplayText) => formatText(locale, value);
   const details: HostPresentation["details"] = [];
-  const add = (label: string, value: string | null | undefined) => {
-    if (value) details.push({ label, value });
+  const add = (label: string, value: DisplayText | null | undefined) => {
+    if (value) details.push({ label, value: display(value) });
   };
-  add("Connection", connection_label);
-  add("Reachability", reachability_label);
-  add("Operation", operation_label);
-  add("Operation method", operation?.method_name);
-  add("Operation details", operation?.message);
+  add(t("host_state.connection"), connection_label);
+  add(t("host_state.reachability"), reachability_label);
+  add(t("host_state.operation"), operation_label);
+  add(t("host_state.operation_method"), operation?.method_name);
+  add(t("host_state.operation_details"), operation?.message);
   if (!local) {
-    add("Connected methods", (observation?.method_names ?? connection?.method_names)?.join(", "));
-    add("Available methods", reachability?.method_names.join(", "));
-    add("Status unknown for", observation?.failed_method_names.join(", "));
-    add("Route", unavailable);
+    add(t("host_state.connected_methods"), (observation?.method_names ?? connection?.method_names)?.map(display).join(", "));
+    add(t("host_state.available_methods"), reachability?.method_names.join(", "));
+    add(t("host_state.unknown_methods"), observation?.failed_method_names.map(display).join(", "));
+    add(t("host_state.route"), unavailable);
     const connection_message = observation?.message ?? connection?.message;
     if (connection_message !== unavailable && connection_message !== operation?.message)
-      add("Connection details", connection_message);
+      add(t("host_state.connection_details"), connection_message);
     if (connection?.message !== connection_message && connection?.message !== unavailable && connection?.message !== operation?.message)
-      add("Connection error", connection?.message);
-    add("Reachability details", reachability?.message);
-    if (observation?.completeness === "partial") add("Observation", "Some connection methods couldn't be checked.");
-    if (observation?.stale) add("Observation", "Connection settings changed; the previous check is no longer current.");
+      add(t("host_state.error"), connection?.message);
+    add(t("host_state.reachability_details"), reachability?.message);
+    if (observation?.completeness === "partial") add(t("host_state.observation"), t("host_state.partial"));
+    if (observation?.stale) add(t("host_state.observation"), t("host_state.stale"));
     if (isObservationTime(observation?.checked_at_ms))
-      add("SSH connection checked", new Date(observation.checked_at_ms!).toLocaleString());
+      add(t("host_state.connection_checked"), new Date(observation.checked_at_ms!).toLocaleString(locale));
     if (isObservationTime(reachability?.checked_at_ms))
-      add("SSH reachability checked", new Date(reachability.checked_at_ms!).toLocaleString());
+      add(t("host_state.reachability_checked"), new Date(reachability.checked_at_ms!).toLocaleString(locale));
   }
-  add("Sessions", lookup_error?.message);
-  add("Session error code", lookup_error?.code);
+  add(t("host_state.sessions"), lookup_error?.message);
+  add(t("host_state.session_code"), lookup_error?.code);
   if (target.kind === "ssh") {
-    add("Address", target.destination);
-    if (target.hostname && target.hostname !== target.destination) add("Hostname", target.hostname);
-    add("User", target.user);
-    add("Port", target.port?.toString());
-    add("Agent", target.remote_info?.agent_version);
-    add("Remote ID", target.remote_info?.remote_id);
-    add("Bundle", target.remote_info?.bundle?.bundle_id);
-    add("Revision", target.remote_info?.bundle?.git_revision);
+    add(t("host_state.address"), target.destination);
+    if (target.hostname && target.hostname !== target.destination) add(t("host_state.hostname"), target.hostname);
+    add(t("host_state.user"), target.user);
+    add(t("host_state.port"), target.port?.toString());
+    add(t("host_state.agent"), target.remote_info?.agent_version);
+    add(t("host_state.remote_id"), target.remote_info?.remote_id);
+    add(t("host_state.bundle"), target.remote_info?.bundle?.bundle_id);
+    add(t("host_state.revision"), target.remote_info?.bundle?.git_revision);
   }
 
   const description = [...new Set([
-    local ? "Local workspace." : connected
-      ? "The local SSH control connection is open. This check does not freshly verify remote responsiveness or terminal health."
-      : connection?.manually_disconnected ? "This host is paused by a manual disconnect."
-      : observation?.stale ? "The previous SSH connection observation is no longer current."
-      : connection_label === "SSH disconnected" ? "No open SSH control connection was observed."
-      : "An open SSH control connection has not been confirmed.",
-    reachability?.state === "available" ? "The endpoint answered with an SSH greeting. Authentication has not been checked." : null,
+    local ? t("host_state.local_hint") : connected
+      ? t("host_state.connected_hint")
+      : connection?.manually_disconnected ? t("host_state.manual_hint")
+      : observation?.stale ? t("host_state.stale_hint")
+      : connection_label_id === "host_state.disconnected" ? t("host_state.disconnected_hint")
+      : t("host_state.unconfirmed_hint"),
+    reachability?.state === "available" ? t("host_state.available_hint") : null,
     operation_label,
     operation?.message,
     unavailable,
-    observation?.completeness === "partial" ? "Some connection methods couldn't be checked." : null,
+    observation?.completeness === "partial" ? t("host_state.partial") : null,
     observation?.message,
     !local ? connection?.message : null,
-    lookup_error ? local ? "The local session lookup failed." : "The session lookup failed independently of the SSH connection status." : null,
+    lookup_error ? local ? t("host_state.local_lookup_hint") : t("host_state.remote_lookup_hint") : null,
     lookup_error?.message,
-  ].filter(Boolean))].join(" ");
+  ].flatMap((text) => text ? [display(text)] : []))].join(" ");
   return { connected, tone, label, connection_label, operation_label, details, description };
 }

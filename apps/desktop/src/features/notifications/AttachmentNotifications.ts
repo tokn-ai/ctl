@@ -1,4 +1,5 @@
 import type { AttachmentViewState, NotificationAction, SshConnectionTarget } from "../../lib/types";
+import { message } from "../i18n/messages";
 import { COMMAND_IDS } from "../commands/commandIds";
 import { sessionKey, targetKey, targetLabel } from "../targets/targets";
 import { attachmentFeedback } from "../attachment/attachmentFeedback";
@@ -68,7 +69,10 @@ export class AttachmentNotifications {
       this.store.report(`history:${key}`, null);
       this.sources.set(key, owner);
     }
-    const source = `${targetLabel(session.target)} · ${session.name}${session.terminal_id ? ` · ${session.terminal_id}` : ""}`;
+    const pane = session.terminal_id ? ` · ${session.terminal_id}` : "";
+    const source = session.target.kind === "local"
+      ? message("attachment.local_source", { name: session.name, pane })
+      : `${targetLabel(session.target)} · ${session.name}${pane}`;
     const authentication = authenticationTarget(state);
     const local_state = authentication || ["attachment_cancelled", "ssh_host_disconnected", "session_not_found"].includes(state.error_code ?? "");
     if (local_state) {
@@ -94,14 +98,14 @@ export class AttachmentNotifications {
       if (failure && feedback.message) {
         this.store.report(`attachment:${key}`, {
           severity: "error",
-          title: "Session connection failed",
+          title: message("attachment.connection_failed"),
           message: feedback.message, source, actions,
         }, { preserve_attention: true });
       }
     }
     const notice_key = `session_notice:${key}`;
     if (state.phase === "attached" && state.message && !state.message_kind) {
-      this.store.report(notice_key, { severity: "warning", title: "Session update", message: state.message, source }, { preserve_attention: true });
+      this.store.report(notice_key, { severity: "warning", title: message("attachment.session_update"), message: state.message, source }, { preserve_attention: true });
     } else if (state.phase === "attached" || state.phase === "ended") this.store.resolve(notice_key);
     const history_key = `history:${key}`;
     if (state.history_loading) {
@@ -111,8 +115,8 @@ export class AttachmentNotifications {
       if (warning?.toast_visible) this.store.hide(warning.id);
     } else if (state.history_gap) {
       this.store.report(history_key, {
-        severity: "warning", title: "Earlier output unavailable", source,
-        message: "Some earlier output is unavailable in this view.",
+        severity: "warning", title: message("attachment.earlier_output"), source,
+        message: message("attachment.earlier_output_detail"),
       }, { toast: false });
     } else if (state.phase === "attached" || state.phase === "ended") {
       this.store.resolve(history_key);

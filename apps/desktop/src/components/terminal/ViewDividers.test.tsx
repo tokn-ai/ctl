@@ -362,7 +362,7 @@ describe("GUI divider dragging", () => {
     render(<Fixture />);
     const handle = down();
     expect(handle.getAttribute("aria-disabled")).toBe("true");
-    expect(errors).toHaveBeenLastCalledWith("Take resize control to resize panes.");
+    expect(errors).toHaveBeenLastCalledWith({ id: "pane.resize_control_required" });
     expect(resize).not.toHaveBeenCalled();
     owned = true; await act(async () => publishLayoutOwnerChange());
     resize.mockRejectedValueOnce(new Error("This server does not support pane resizing."));

@@ -1,3 +1,5 @@
+import { message, type DisplayText } from "../../features/i18n/messages";
+import { useLocale } from "../../features/i18n/LocaleContext";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ComponentProps, ReactNode } from "react";
 import { createPortal } from "react-dom";
@@ -9,7 +11,7 @@ import { InlineFeedback } from "../feedback/InlineFeedback";
 import { adjacentPane, swapPanes } from "../../features/terminal/viewLayout";
 import type { XtermRenderer } from "../../features/terminal/XtermRenderer";
 import { sessionKey } from "../../features/targets/targets";
-import { errorCode, errorMessage } from "../../lib/errors";
+import { errorCode, localizedErrorText } from "../../lib/errors";
 import { sessionView } from "../../lib/tauri";
 import type { AttachmentViewState, ResizeDirection, SessionSummary, SessionView, ShellStateSummary, ViewAction } from "../../lib/types";
 import { terminalPaneTitle } from "../../lib/shellState";
@@ -19,10 +21,10 @@ import { TerminalSurface } from "./TerminalSurface";
 import { SessionBanner } from "./SessionBanner";
 import { ViewDividers } from "./ViewDividers";
 import "./sessionView.css";
-import { resolvePrefix, prefixActionMode, PREFIX_ACTIONS } from "../../features/commands/prefixKeymap";
+import { resolvePrefix, prefixActionMode, prefixActionTitle, PREFIX_ACTIONS } from "../../features/commands/prefixKeymap";
 import { useTerminalPrefix } from "../../features/commands/useTerminalPrefix";
 import type { KeybindingsDocument } from "../../lib/types";
-import type { AppCommand, Keybinding, ShortcutPlatform } from "../../features/commands/types";
+import { localizeCommand, type AppCommand, type Keybinding, type ShortcutPlatform } from "../../features/commands/types";
 
 type SurfaceProps = ComponentProps<typeof TerminalSurface>;
 interface Props extends SurfaceProps {
@@ -33,7 +35,7 @@ interface Props extends SurfaceProps {
   renderer?: XtermRenderer | null;
   input_owned?: boolean;
   input_request?: AttachmentViewState["input_lease_request"];
-  input_feedback?: string | null;
+  input_feedback?: DisplayText | null;
   on_toggle_input?(): void;
   on_select_terminal(session: SessionSummary): Promise<void>;
   on_promoted(session: SessionSummary): Promise<void>;
@@ -46,6 +48,7 @@ interface Props extends SurfaceProps {
 }
 
 export function SessionViewSurface({ controls_container, session, open_session_keys, shell_state, renderer, input_owned, input_request, input_feedback, on_toggle_input, on_select_terminal, on_promoted, prefix_settings, shortcuts_enabled = true, input_enabled = true, on_command, on_pane_commands, on_view, ...surface }: Props) {
+  const { t, locale, formatText } = useLocale();
   const on_view_ref = useRef(on_view);
   on_view_ref.current = on_view;
   const [viewport, setViewport] = useState<HTMLDivElement | null>(null);
@@ -97,7 +100,7 @@ export function SessionViewSurface({ controls_container, session, open_session_k
     view_ref.current = next;
     setView(next);
   };
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<DisplayText | null>(null);
   const [refresh_attempt, setRefreshAttempt] = useState(0);
   const notifications = useNotificationEnvironment()?.store;
   const [busy, setBusy] = useState(false);
@@ -110,8 +113,8 @@ export function SessionViewSurface({ controls_container, session, open_session_k
   const session_ref = useRef(session);
   session_ref.current = session;
   const key = session ? sessionKey(session) : "";
-  const notifyActionFailure = useCallback((message: string, title = "Pane operation failed") => {
-    notifications?.notify(`pane_action:${key}:${title}`, { severity: "error", title, source: session?.name ?? "Terminal", message });
+  const notifyActionFailure = useCallback((detail: DisplayText, id = "pane.operation_failed") => {
+    notifications?.notify(`pane_action:${key}:${id}`, { severity: "error", title: message(id), source: session?.name ?? message("session.terminal"), message: detail });
   }, [notifications, key, session?.name]);
   const connected = surface.phase === "attached" || surface.phase === "ended" || !!surface.ended_message;
   const primary_ended = useRef(false);
@@ -184,7 +187,7 @@ export function SessionViewSurface({ controls_container, session, open_session_k
         if (generation.current === current && request_sequence === sequence.current) {
           if (errorCode(failure) === "session_not_found") {
             setEndedIds((previous) => new Set([...previous, ...(view_ref.current?.terminals.map((terminal) => terminal.terminal_id) ?? [root.terminal_id ?? root.session_id])]));
-          } else setError(errorMessage(failure));
+          } else setError(localizedErrorText(failure));
         }
       } finally {
         if (generation.current === current) timer = setTimeout(() => void refresh(), 2000);
@@ -225,7 +228,7 @@ export function SessionViewSurface({ controls_container, session, open_session_k
       }
     } catch (failure) {
       if (errorCode(failure) === "session_not_found") surface.on_dismiss?.();
-      else notifyActionFailure(errorMessage(failure), "Could not close pane");
+      else notifyActionFailure(localizedErrorText(failure), "pane.close_failed");
     }
   }
 
@@ -252,7 +255,7 @@ export function SessionViewSurface({ controls_container, session, open_session_k
         }
       }
     } catch (failure) {
-      notifyActionFailure(errorMessage(failure), `Could not ${action.kind === "kill_terminal" ? "terminate pane" : action.kind === "promote" ? "move pane to a session" : action.kind === "split" ? "split pane" : "update pane layout"}`);
+      notifyActionFailure(localizedErrorText(failure), action.kind === "kill_terminal" ? "pane.terminate_failed" : action.kind === "promote" ? "pane.promote_failed" : action.kind === "split" ? "pane.split_failed" : "pane.layout_failed");
     } finally {
       if (current === generation.current) {
         busy_ref.current = false;
@@ -289,7 +292,7 @@ export function SessionViewSurface({ controls_container, session, open_session_k
       const confirmed = view_ref.current;
       return confirmed?.zoomed_terminal_id === terminal_id ? confirmed : null;
     } catch (failure) {
-      notifyActionFailure(errorMessage(failure), "Could not zoom pane");
+      notifyActionFailure(localizedErrorText(failure), "pane.zoom_failed");
       return null;
     } finally {
       if (current === generation.current) {
@@ -328,7 +331,7 @@ export function SessionViewSurface({ controls_container, session, open_session_k
         if (is_current()) {
           worker.pending = [];
         }
-        notifyActionFailure(errorMessage(failure), "Could not resize pane");
+        notifyActionFailure(localizedErrorText(failure), "pane.resize_failed");
       } finally {
         if (resize_worker.current === worker) {
           resize_worker.current = null;
@@ -351,17 +354,19 @@ export function SessionViewSurface({ controls_container, session, open_session_k
     requestAnimationFrame(() => focused && pane_elements.current.get(focused)?.querySelector<HTMLTextAreaElement>("textarea")?.focus());
   };
   useEffect(() => {
-    on_pane_commands?.([
-      { id: "terminal.toggle_input", category: "Pane", title: "Toggle pane input", enabled: can_split, focusTerminalAfterRun: false, run: () => toggle_focused.current() },
-      ...(["left", "right", "up", "down"] as const).map((direction) => ({
-        id: `pane.resize_${direction}`, category: "Pane", title: `Resize pane ${direction}`,
+    if (!on_pane_commands) return;
+    const category = message("pane.category");
+    on_pane_commands([
+      localizeCommand(locale, { id: "terminal.toggle_input", category, title: message("pane.toggle_input"), enabled: can_split, focusTerminalAfterRun: false, run: () => toggle_focused.current() }),
+      ...(["left", "right", "up", "down"] as const).map((direction) => localizeCommand(locale, {
+        id: `pane.resize_${direction}`, category, title: message(`pane.resize_${direction}`),
         keywords: ["resize", "divider"], enabled: can_resize, focusTerminalAfterRun: false,
         run: () => resize_focused.current(direction, 1),
       })),
-      { id: "pane.split_right", category: "Pane", title: "Split pane right", keywords: ["split right", "horizontal"], enabled: can_split, focusTerminalAfterRun: false, run: () => split_focused.current("horizontal") },
-      { id: "pane.split_below", category: "Pane", title: "Split pane below", keywords: ["split below", "vertical"], enabled: can_split, focusTerminalAfterRun: false, run: () => split_focused.current("vertical") },
+      localizeCommand(locale, { id: "pane.split_right", category, title: message("pane.split_right"), keywords: ["split right", "horizontal"], enabled: can_split, focusTerminalAfterRun: false, run: () => split_focused.current("horizontal") }),
+      localizeCommand(locale, { id: "pane.split_below", category, title: message("pane.split_below"), keywords: ["split below", "vertical"], enabled: can_split, focusTerminalAfterRun: false, run: () => split_focused.current("vertical") }),
     ]);
-  }, [on_pane_commands, can_split, can_resize]);
+  }, [on_pane_commands, can_split, can_resize, locale]);
   useEffect(() => () => on_pane_commands?.([]), [on_pane_commands]);
   const prefix_map = resolvePrefix(prefix_settings?.document ?? { schema_version: 1, overrides: [], prefix: { key: null, bindings: [] } }, prefix_settings?.bindings ?? new Map(), prefix_settings?.platform ?? "other");
   const prefix = useTerminalPrefix({
@@ -420,15 +425,15 @@ export function SessionViewSurface({ controls_container, session, open_session_k
   } : { inset: 0 };
 
   function controls(terminal_id: string, state?: ShellStateSummary | null, input_control?: ReactNode) {
-    const label = terminalPaneTitle(state);
+    const label = terminalPaneTitle(state, locale);
     return <div className="view-pane-toolbar">
       {input_control}
-      <ControlPopover key={terminal_id} label="Pane actions" trigger_content={<Icon name="more" size={14} />}>
+      <ControlPopover key={terminal_id} label={t("pane.action_menu")} trigger_content={<Icon name="more" size={14} />}>
         <span>{label}</span>
-        <button disabled={!connected || busy || ended_ids.size > 0 || primary_ended.current} title="Split side by side" onClick={() => void mutate({ kind: "split", terminal_id, axis: "horizontal", terminal_size: session!.terminal_size, working_directory: null })}>Split right</button>
-        <button disabled={!connected || busy || ended_ids.size > 0 || primary_ended.current} title="Split vertically" onClick={() => void mutate({ kind: "split", terminal_id, axis: "vertical", terminal_size: session!.terminal_size, working_directory: null })}>Split below</button>
-        <button disabled={!connected || busy || ended_ids.size > 0 || primary_ended.current} onClick={() => void mutate({ kind: "kill_terminal", terminal_id })}>Terminate pane</button>
-        {panes.length > 1 && <button disabled={!connected || busy || ended_ids.size > 0 || primary_ended.current} onClick={() => void mutate({ kind: "promote", terminal_id, name: null })}>Move to new session</button>}
+        <button disabled={!connected || busy || ended_ids.size > 0 || primary_ended.current} title={t("pane.split_right_hint")} onClick={() => void mutate({ kind: "split", terminal_id, axis: "horizontal", terminal_size: session!.terminal_size, working_directory: null })}>{t("pane.split_right_button")}</button>
+        <button disabled={!connected || busy || ended_ids.size > 0 || primary_ended.current} title={t("pane.split_below_hint")} onClick={() => void mutate({ kind: "split", terminal_id, axis: "vertical", terminal_size: session!.terminal_size, working_directory: null })}>{t("pane.split_below_button")}</button>
+        <button disabled={!connected || busy || ended_ids.size > 0 || primary_ended.current} onClick={() => void mutate({ kind: "kill_terminal", terminal_id })}>{t("pane.terminate")}</button>
+        {panes.length > 1 && <button disabled={!connected || busy || ended_ids.size > 0 || primary_ended.current} onClick={() => void mutate({ kind: "promote", terminal_id, name: null })}>{t("pane.promote")}</button>}
       </ControlPopover>
     </div>;
   }
@@ -451,11 +456,11 @@ export function SessionViewSurface({ controls_container, session, open_session_k
     if (!(event.relatedTarget instanceof Element) || !event.currentTarget.contains(event.relatedTarget) || !event.relatedTarget.closest(".terminal-container")) prefix.cancel();
   }}>
     {prefix.mode && <div className="terminal-prefix-hints" role="status" aria-live="polite">
-      <strong>{prefix_map.label}{prefix.mode === "move" ? " · Move pane" : ""}</strong>
-      {PREFIX_ACTIONS.filter((action) => prefixActionMode(action.id) === prefix.mode && prefix_map.bindings.has(action.id)).map((action) => <span key={action.id}><kbd>{prefix_map.bindings.get(action.id)}</kbd> {action.title}</span>)}
-      <span>{prefix.mode === "move" ? "Enter or Esc finishes" : `${prefix_map.label} again sends the prefix · Esc cancels`}</span>
+      <strong>{prefix_map.label}{prefix.mode === "move" ? t("pane.move_mode") : ""}</strong>
+      {PREFIX_ACTIONS.filter((action) => prefixActionMode(action.id) === prefix.mode && prefix_map.bindings.has(action.id)).map((action) => <span key={action.id}><kbd>{prefix_map.bindings.get(action.id)}</kbd> {prefixActionTitle(action, locale)}</span>)}
+      <span>{prefix.mode === "move" ? t("pane.move_finished") : t("pane.prefix_hint", { key: prefix_map.label })}</span>
     </div>}
-    {error && connected ? <SessionBanner severity="error" title="Could not refresh pane layout" message={error} action={{ label: "Retry layout", disabled: busy, on_click: () => setRefreshAttempt((attempt) => attempt + 1) }} /> : null}
+    {error && connected ? <SessionBanner severity="error" title={t("pane.refresh_failed")} message={formatText(error)} action={{ label: t("pane.retry_layout"), disabled: busy, on_click: () => setRefreshAttempt((attempt) => attempt + 1) }} /> : null}
     {controls_container ? createPortal(pane_controls, controls_container) : controls_container === undefined ? pane_controls : null}
     <div className="view-viewport" ref={setViewport}>
     <div className="view-panes" style={current_view ? { width: current_view.canvas_size.columns * cell.width, height: current_view.canvas_size.rows * cell.height } : session ? { width: session.terminal_size.columns * cell.width, height: session.terminal_size.rows * cell.height } : { width: "100%", height: "100%" }}>
@@ -464,9 +469,9 @@ export function SessionViewSurface({ controls_container, session, open_session_k
         current_view={() => view_ref.current}
         can_begin={() => !busy_ref.current}
         on_busy={(next) => { busy_ref.current = next; setBusy(next); if (next) { ++sequence.current; prefix.cancel(); } }}
-        on_error={(message) => { if (message) notifyActionFailure(message, "Could not resize pane"); }} on_confirm={(next) => { ++sequence.current; storeView(next); }} />
+        on_error={(message) => { if (message) notifyActionFailure(message, "pane.resize_failed"); }} on_confirm={(next) => { ++sequence.current; storeView(next); }} />
       <div className="view-pane" data-active={focused === primary_id} ref={paneRef(primary_id)} onFocusCapture={() => setFocusedId(primary_id ?? null)} style={{ ...paneStyle(primary_rect), ...(takeover_id ? { visibility: "hidden" } : {}) }}>
-        <TerminalSurface {...surface} file_context={session ? { target: session.target, cwd: shell_state?.cwd ?? null } : undefined} interaction_enabled={input_enabled} onInput={handlePrimaryInput} ended_message={surface.ended_message ?? (surface.phase === "ended" ? "Terminal exited" : surface.phase !== "attached" && ended_ids.has(primary_id ?? "") ? "Terminal no longer exists" : null)} on_dismiss={() => void dismissPane(primary_id)} />
+        <TerminalSurface {...surface} file_context={session ? { target: session.target, cwd: shell_state?.cwd ?? null } : undefined} interaction_enabled={input_enabled} onInput={handlePrimaryInput} ended_message={surface.ended_message ?? (surface.phase === "ended" ? t("pane.exited") : surface.phase !== "attached" && ended_ids.has(primary_id ?? "") ? t("pane.missing") : null)} on_dismiss={() => void dismissPane(primary_id)} />
       </div>
       {[...rendered_views].flatMap(([owner_key, cached]) => {
         const visible = owner_key === key;
@@ -488,17 +493,18 @@ function InputLeaseButton({ live, owned = false, request, feedback, on_toggle }:
   live: boolean;
   owned?: boolean;
   request?: AttachmentViewState["input_lease_request"];
-  feedback?: string | null;
+  feedback?: DisplayText | null;
   on_toggle?(): void;
 }) {
+  const { t, formatText } = useLocale();
   const pending = live && request?.status === "pending";
   const denied = live && request?.status === "denied";
-  const progress = pending && !request.acquire ? "Releasing input…" : "Requesting input…";
+  const progress = pending && !request.acquire ? t("pane.release_request") : t("pane.input_request");
   return <><button disabled={!live || pending} aria-busy={pending} onClick={on_toggle}
-    aria-label={pending ? progress : denied ? "Input in use. Request input" : owned ? "Release input" : "Take input"}
-    title={pending ? progress : denied ? "Another attachment has input control · Click to try again" : owned ? "Input enabled · Click to release" : "Read only · Click to request input"}>
-    <Icon name="keyboard" size={14} />{pending ? progress : denied ? "Input in use" : !owned && "Read only"}
-  </button>{live && feedback ? <InlineFeedback severity="warning">{feedback}</InlineFeedback> : null}</>;
+    aria-label={pending ? progress : denied ? t("pane.input_in_use_request") : owned ? t("pane.release_input") : t("pane.take_input")}
+    title={pending ? progress : denied ? t("pane.input_occupied_hint") : owned ? t("pane.input_enabled_hint") : t("pane.read_only_hint")}>
+    <Icon name="keyboard" size={14} />{pending ? progress : denied ? t("pane.input_in_use") : !owned && t("pane.read_only")}
+  </button>{live && feedback ? <InlineFeedback severity="warning">{formatText(feedback)}</InlineFeedback> : null}</>;
 }
 
 function AdditionalTerminal({ visible, input_enabled, on_ended, on_dismiss, confirmed_missing, session, detach_registry, input_registry, toggle_registry, render_controls }: {
@@ -513,13 +519,14 @@ function AdditionalTerminal({ visible, input_enabled, on_ended, on_dismiss, conf
   detach_registry: { current: Map<string, () => Promise<void>> };
   input_registry: { current: Map<string, (data: Uint8Array) => void> };
 }) {
+  const { t } = useLocale();
   const [renderer, setRenderer] = useState<XtermRenderer | null>(null);
   const attachment = useAttachment(renderer);
   useAttachmentNotifications(attachment);
   const on_ended_ref = useRef(on_ended);
   on_ended_ref.current = on_ended;
-  const ended_message = attachment.state.phase === "ended" ? attachment.state.message ?? "Terminal exited"
-    : (confirmed_missing && attachment.state.phase !== "attached") || attachment.state.error_code === "session_not_found" ? "Terminal no longer exists" : null;
+  const ended_message = attachment.state.phase === "ended" ? attachment.state.message ?? t("pane.exited")
+    : (confirmed_missing && attachment.state.phase !== "attached") || attachment.state.error_code === "session_not_found" ? t("pane.missing") : null;
   useEffect(() => { if (ended_message && visible) on_ended_ref.current(); }, [ended_message, visible]);
   const actions = useRef(attachment);
   actions.current = attachment;

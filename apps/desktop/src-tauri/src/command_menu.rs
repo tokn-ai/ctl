@@ -14,6 +14,65 @@ pub struct NativeCommandBinding {
   pub enabled: bool,
 }
 
+#[derive(Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeMenuLabels {
+  pub about: String,
+  pub commands: String,
+  pub edit: String,
+  pub view: String,
+  pub window: String,
+  pub help: String,
+  pub services: String,
+  pub hide: String,
+  pub hide_others: String,
+  pub quit: String,
+  pub undo: String,
+  pub redo: String,
+  pub cut: String,
+  pub copy: String,
+  pub paste: String,
+  pub select_all: String,
+  pub fullscreen: String,
+  pub minimize: String,
+  pub maximize: String,
+}
+
+impl NativeMenuLabels {
+  fn validate(&self) -> CommandResult<()> {
+    if [
+      &self.about,
+      &self.commands,
+      &self.edit,
+      &self.view,
+      &self.window,
+      &self.help,
+      &self.services,
+      &self.hide,
+      &self.hide_others,
+      &self.quit,
+      &self.undo,
+      &self.redo,
+      &self.cut,
+      &self.copy,
+      &self.paste,
+      &self.select_all,
+      &self.fullscreen,
+      &self.minimize,
+      &self.maximize,
+    ]
+    .into_iter()
+    .all(|title| valid_title(title))
+    {
+      return Ok(());
+    }
+    Err(CommandErrorDto::new(
+      "invalid_command_menu",
+      "Invalid native menu label.",
+    ))
+  }
+}
+
 #[derive(Debug, Serialize)]
 pub struct RejectedNativeCommand {
   pub command_id: Option<String>,
@@ -66,17 +125,21 @@ impl PreparedCommandMenu {
 pub async fn sync_command_menu(
   app: tauri::AppHandle,
   bindings: Vec<Value>,
+  labels: Option<NativeMenuLabels>,
 ) -> CommandResult<NativeCommandMenuResult> {
   // Decode entries individually: even a malformed descriptor must not prevent
   // unrelated shortcuts from reaching the native menu.
   let prepared = prepare(bindings)?;
+  if let Some(labels) = &labels {
+    labels.validate()?;
+  }
   #[cfg(target_os = "macos")]
   {
     let (sender, receiver) = tokio::sync::oneshot::channel();
     let handle = app.clone();
     app
       .run_on_main_thread(move || {
-        let _ignored = sender.send(crate::native_menu::sync(&handle, prepared));
+        let _ignored = sender.send(crate::native_menu::sync(&handle, prepared, labels));
       })
       .map_err(CommandErrorDto::backend)?;
     receiver.await.map_err(CommandErrorDto::backend)?
@@ -86,6 +149,10 @@ pub async fn sync_command_menu(
     let _ = app;
     Ok(prepared.install(|_| Ok(())))
   }
+}
+
+fn valid_title(title: &str) -> bool {
+  !title.is_empty() && title.len() <= 256 && !title.chars().any(char::is_control)
 }
 
 fn prepare(bindings: Vec<Value>) -> CommandResult<PreparedCommandMenu> {
@@ -122,10 +189,7 @@ fn prepare(bindings: Vec<Value>) -> CommandResult<PreparedCommandMenu> {
         {
           return Err("Duplicate command ID.".into());
         }
-        if binding.title.is_empty()
-          || binding.title.len() > 256
-          || binding.title.chars().any(char::is_control)
-        {
+        if !valid_title(&binding.title) {
           return Err("Invalid command title.".into());
         }
         let accelerator = binding

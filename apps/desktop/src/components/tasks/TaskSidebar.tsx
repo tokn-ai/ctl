@@ -1,3 +1,4 @@
+import { useLocale } from "../../features/i18n/LocaleContext";
 import type { TaskWorkspace } from "../../features/tasks/useTaskWorkspace";
 import type { SavedTaskDefinition, TaskReference } from "../../lib/types";
 import { definitionScopeKey, definitionScopeLabel, GLOBAL_DEFINITION_SCOPE } from "../../features/tasks/useTaskDefinitions";
@@ -14,14 +15,15 @@ export function TaskSidebar({
   definitions: SavedTaskDefinition[];
   references: TaskReference[];
 }) {
+  const { t, locale, intl } = useLocale();
   return (
-    <section className="task-sidebar" aria-label="Tasks">
+    <section className="task-sidebar" aria-label={t("tasks.title")}>
       <header>
-        <strong>Tasks</strong>
+        <strong>{t("tasks.title")}</strong>
         <button
           type="button"
-          aria-label="Refresh tasks"
-          title="Refresh tasks"
+          aria-label={t("tasks.refresh")}
+          title={t("tasks.refresh")}
           disabled={model.loading || model.busy}
           onClick={() => void model.refresh()}
         >
@@ -29,8 +31,8 @@ export function TaskSidebar({
         </button>
         <button
           type="button"
-          aria-label="New task definition"
-          title="New task definition"
+          aria-label={t("tasks.new_definition")}
+          title={t("tasks.new_definition")}
           disabled={model.busy}
           onClick={model.newDefinition}
         >
@@ -47,7 +49,7 @@ export function TaskSidebar({
               ),
           ).length ? (
             <>
-              <h3>Drafts</h3>
+              <h3>{t("tasks.drafts")}</h3>
               {model.drafts
                 .filter(
                   (draft) =>
@@ -59,18 +61,18 @@ export function TaskSidebar({
                   <div className="task-sidebar-row" key={`${definitionScopeKey(draft.scope)}:${draft.definition_id}`}>
                     <button
                       className="task-row-main"
-                      aria-label={`Resume draft ${draft.definition.name || "Untitled task"}`}
+                      aria-label={t("tasks.resume_draft", { name: draft.definition.name || t("tasks.untitled") })}
                       onClick={() => model.openEditor(draft.definition_id, draft.scope ?? GLOBAL_DEFINITION_SCOPE)}
                     >
                       <Icon name="tasks" class_name="task-definition-icon" />
                       <span>
-                        {draft.definition.name || "Untitled task"}
-                        <small>Draft · {definitionScopeLabel(draft.scope ?? GLOBAL_DEFINITION_SCOPE)}</small>
+                        {draft.definition.name || t("tasks.untitled")}
+                        <small>{t("tasks.draft_scope", { scope: definitionScopeLabel(draft.scope ?? GLOBAL_DEFINITION_SCOPE, locale) })}</small>
                       </span>
                     </button>
                     <button
                       className="task-row-run"
-                      aria-label={`Delete draft ${draft.definition.name || "Untitled task"}`}
+                      aria-label={t("tasks.delete_draft", { name: draft.definition.name || t("tasks.untitled") })}
                       onClick={() => model.discardDraft(draft.definition_id, draft.scope ?? GLOBAL_DEFINITION_SCOPE)}
                     >
                       <Icon name="close" size={14} />
@@ -79,17 +81,16 @@ export function TaskSidebar({
                 ))}
             </>
           ) : null}
-          <h3>
-            Saved definitions <span>{definitions.length}</span>
+          <h3>{t("tasks.saved_definitions")}{" "}<span>{intl.formatNumber(definitions.length)}</span>
           </h3>
-          {model.definitions_error ? <InlineFeedback className="task-feedback" action={{ label: "Retry definitions", on_click: () => void model.refreshDefinitions(), disabled: model.definitions_loading }}>
-            Could not refresh task definitions: {model.definitions_error}{model.definitions_loaded ? " Showing the last successful check." : ""}
+          {model.definitions_error ? <InlineFeedback className="task-feedback" action={{ label: t("tasks.retry_definitions"), on_click: () => void model.refreshDefinitions(), disabled: model.definitions_loading }}>
+            {t("tasks.definitions_refresh_error", { error: model.definitions_error, stale: String(model.definitions_loaded) })}
           </InlineFeedback> : null}
           {!model.definitions_loaded && !model.definitions_error ? (
-            <p className="task-sidebar-note">Loading definitions…</p>
+            <p className="task-sidebar-note">{t("tasks.loading_definitions")}</p>
           ) : model.definitions_loaded && definitions.length === 0 ? (
             <button className="task-empty-action" onClick={model.newDefinition}>
-              <Icon name="plus" size={14} /> Create a task definition
+              <Icon name="plus" size={14} />{t("tasks.create_definition_action")}
             </button>
           ) : (
             definitions.map((saved) => (
@@ -108,15 +109,15 @@ export function TaskSidebar({
                       {model.drafts.some(
                         (draft) => draft.definition_id === saved.definition_id && definitionScopeKey(draft.scope) === definitionScopeKey(model.definition_scope),
                       )
-                        ? "Draft changes"
-                        : saved.definition.execution_mode}
+                        ? t("tasks.draft_changes")
+                        : t(`tasks.state_${saved.definition.execution_mode}`)}
                     </small>
                   </span>
                 </button>
                 <button
                   className="task-row-run"
-                  title={`Run ${saved.definition.name}`}
-                  aria-label={`Run ${saved.definition.name}`}
+                  title={t("tasks.run_definition", { name: saved.definition.name })}
+                  aria-label={t("tasks.run_definition", { name: saved.definition.name })}
                   disabled={model.busy}
                   onClick={() => void model.run(saved)}
                 >
@@ -127,18 +128,16 @@ export function TaskSidebar({
           )}
         </div>
         <div className="task-runs">
-          <h3>
-            Managed tasks <span>Local</span>
+          <h3>{t("tasks.managed_tasks")}{" "}<span>{t("tasks.local")}</span>
           </h3>
-          {model.connection_error ? <InlineFeedback className="task-feedback" action={{ label: "Retry tasks", on_click: () => void model.refresh(), disabled: model.loading }}>
-            Could not refresh tasks: {model.connection_error}{model.hasLoaded ? " Showing the last successful check." : ""}
+          {model.connection_error ? <InlineFeedback className="task-feedback" action={{ label: t("tasks.retry_tasks"), on_click: () => void model.refresh(), disabled: model.loading }}>
+            {t("tasks.refresh_error", { error: model.connection_error, stale: String(model.hasLoaded) })}
           </InlineFeedback> : null}
-          {model.daemonStatus ? <span className="task-sidebar-note" role="status">{model.daemonStatus}</span> : null}
+          {model.daemonStatus ? <span className="task-sidebar-note" role="status">{t("tasks.daemon_restarting")}</span> : null}
           {!model.hasLoaded && !model.connection_error ? (
-            <p className="task-sidebar-note">Loading tasks…</p>
+            <p className="task-sidebar-note">{t("tasks.loading")}</p>
           ) : !model.tasks.length && !model.connection_error ? (
-            <p className="task-sidebar-note">
-              Run a saved definition, or create a task with ctl.
+            <p className="task-sidebar-note">{t("tasks.empty_list")}
             </p>
           ) : null}
           {model.tasks.map((task) => (
@@ -150,7 +149,7 @@ export function TaskSidebar({
               <span className={`task-state-dot ${taskState(task)}`} />
               <span>
                 {task.definition.name}
-                <small>{taskState(task)}</small>
+                <small>{t(`tasks.state_${taskState(task)}`)}</small>
               </span>
             </button>
           ))}
@@ -174,13 +173,13 @@ export function TaskSidebar({
               >
                 <span className="task-state-dot unknown" />
                 <span>
-                  {model.savedForReference(reference)?.definition.name ?? "Saved task"}
+                  {model.savedForReference(reference)?.definition.name ?? t("tasks.saved_task")}
                   <small>
                     {reference.host_id === "local"
                       ? model.connection_error
-                        ? "Unavailable"
-                        : "Not registered"
-                      : "Remote · unsupported"}
+                        ? t("tasks.unavailable")
+                        : t("tasks.not_registered")
+                      : t("tasks.remote_unsupported")}
                   </small>
                 </span>
               </button>

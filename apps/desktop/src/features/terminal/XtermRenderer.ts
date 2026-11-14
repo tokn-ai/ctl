@@ -6,6 +6,7 @@ import type { FileLink, SessionSummary, TerminalSize } from "../../lib/types";
 import { sessionKey } from "../targets/targets";
 import { captureHistoryRow } from "./historyStyle";
 import { terminalHistoryBytes } from "./historyBytes";
+import { translate, type Locale } from "../i18n/messages";
 import { installTerminalLinks } from "./terminalLinks";
 import {
   TerminalPresenter,
@@ -104,6 +105,7 @@ export class XtermRenderer {
   private readonly sessions = new Map<string, CachedTerminal>();
   private active: CachedTerminal | null;
   private selected_key: string | null = null;
+  private locale: Locale;
 
   constructor(
     private readonly container: HTMLElement,
@@ -112,9 +114,22 @@ export class XtermRenderer {
     private readonly on_open_link: (url: string) => void = () => {},
     private readonly on_copy_text: (text: string) => void = () => {},
     private readonly on_open_file?: (file: FileLink) => void,
+    locale: Locale = "en",
   ) {
+    this.locale = locale;
     this.active = this.createTerminal(initialSize);
     XtermRenderer.renderers.add(this);
+  }
+
+  setLocale(locale: Locale): void {
+    if (locale === this.locale) return;
+    this.locale = locale;
+    const terminals = new Set([this.active, ...this.sessions.values()]);
+    for (const terminal of terminals) {
+      terminal?.container.querySelector(".xterm-helper-textarea")?.setAttribute("aria-label", translate(locale, "session.terminal_input"));
+      terminal?.container.querySelector(".xterm")?.removeAttribute("title");
+    }
+    Terminal.strings.tooMuchOutput = translate(locale, "session.output_announcement_limit");
   }
 
   /** A stream writes only to its own terminal, independently of the visible tab. */
@@ -465,6 +480,7 @@ export class XtermRenderer {
       const restore_focus = container.contains(document.activeElement);
       if (mount.parentElement !== container) {
         container.querySelectorAll(".xterm-screen").forEach((screen) => this.cellObserver?.unobserve(screen));
+        mount.querySelector(".xterm-helper-textarea")?.setAttribute("aria-label", translate(this.locale, "session.terminal_input"));
         container.replaceChildren(mount);
         measurement_host.remove();
         const screen = mount.querySelector(".xterm-screen");
@@ -511,8 +527,10 @@ export class XtermRenderer {
     });
     const fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
+    Terminal.strings.promptLabel = translate(this.locale, "session.terminal_input");
+    Terminal.strings.tooMuchOutput = translate(this.locale, "session.output_announcement_limit");
     terminal.open(mount);
-    const links = installTerminalLinks(terminal, this.on_open_link, this.on_copy_text, this.on_open_file);
+    const links = installTerminalLinks(terminal, this.on_open_link, this.on_copy_text, this.on_open_file, () => this.locale);
     if (!options.background) activate();
     terminal.onData((data) => {
       if (this.active?.container === container && mount.parentElement === container) this.onInput(encodeTerminalText(data));

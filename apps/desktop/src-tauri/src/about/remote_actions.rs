@@ -6,7 +6,10 @@ use std::sync::Arc;
 use tauri::Emitter as _;
 
 use super::{
-  models::{ComponentAction, ComponentVersionInfo, ComponentVersionRow, ProtocolVersion},
+  models::{
+    ComponentAction, ComponentActionSummary, ComponentImpactKind, ComponentVersionInfo,
+    ComponentVersionRow, ProtocolVersion,
+  },
   observations,
 };
 use crate::{
@@ -23,6 +26,7 @@ pub struct RemoteActionPreview {
   pub running: Option<ComponentVersionInfo>,
   pub available: Option<ComponentVersionInfo>,
   pub attachment_count: u32,
+  pub impact_kind: ComponentImpactKind,
   pub detail: String,
 }
 
@@ -42,6 +46,7 @@ enum Operation {
 pub struct RemoteActionOutcome {
   pub running: Option<ComponentVersionInfo>,
   pub detail: String,
+  pub summary: ComponentActionSummary,
 }
 
 pub async fn prepare(
@@ -89,6 +94,11 @@ pub async fn prepare(
     running: row.running,
     available: None,
     attachment_count: u32::try_from(actors.len()).unwrap_or(u32::MAX),
+    impact_kind: if row.component == "ctmuxd" {
+      ComponentImpactKind::RemoteTerminal
+    } else {
+      ComponentImpactKind::RemoteReconnect
+    },
     detail: String::new(),
   };
   let operation = if preview.component == "ctmuxd" {
@@ -178,6 +188,7 @@ async fn prepare_saved(
     preview: RemoteActionPreview {
       component_id: component_id.into(), label: format!("ctmuxd — {}", selected.label), component: "ctmuxd", host_id: Some(selected.host_id.clone()), action: ComponentAction::Restart,
       running: Some(running), available: Some(version(prepared.info.available.clone())), attachment_count: u32::try_from(actors.len()).unwrap_or(u32::MAX),
+      impact_kind: ComponentImpactKind::RemoteSavedTerminal,
       detail: "Ends every terminal session owned by this remote account, including sessions in other windows and clients. Applies the installed daemon without installing components.".into(),
     },
     actors, remote_id, operation: Operation::Restart(Box::new(prepared)), selection: Some(selected),
@@ -220,6 +231,9 @@ impl PreparedRemoteAction {
             reset_sessions(app, &environment, &self.remote_id)?;
             Ok(RemoteActionOutcome {
               running: Some(version(result.after)),
+              summary: ComponentActionSummary::RemoteTerminalRestart {
+                ended_sessions: result.terminated_sessions,
+              },
               detail: format!(
                 "Restarted the remote daemon and verified its replacement build. Ended {} terminal session(s).",
                 result.terminated_sessions

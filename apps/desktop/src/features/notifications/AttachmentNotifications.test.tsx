@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { formatText } from "../i18n/messages";
 import { act, cleanup, renderHook } from "@testing-library/react";
 import { StrictMode, type ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -50,8 +51,8 @@ describe("attachment notification lifecycle", () => {
     if (dismiss === "hide") expect(store.snapshot().entries[0].occurrence_count).toBe(1);
     report(transitionAttachment(failed, { type: "retry_exhausted" }));
     if (dismiss === "hide") expect(store.snapshot().entries[0]).toMatchObject({
-      title: "Session connection failed", toast_visible: false, occurrence_count: 1,
-      message: "Automatic retries stopped. The remote session's current state is unknown. Retry to reconnect.",
+      title: { id: "attachment.connection_failed" }, toast_visible: false, occurrence_count: 1,
+      message: { id: "attachment.retries_exhausted" },
     });
     else expect(store.snapshot().entries).toEqual([]);
   });
@@ -59,8 +60,8 @@ describe("attachment notification lifecycle", () => {
   it("offers an explicit reconnect when retry_wait is the first observable state", async () => {
     const { store, report, registry, owner, reconnect } = setup();
     report(transitionAttachment(failed, { type: "retry_scheduled", retry_at_ms: 1000 }));
-    expect(store.snapshot().entries).toMatchObject([{ severity: "error", title: "Session connection failed",
-      actions: [{ label: "Reconnect", command_id: COMMAND_IDS.reconnectNotificationAttachment, args: { value: owner } }],
+    expect(store.snapshot().entries).toMatchObject([{ severity: "error", title: { id: "attachment.connection_failed" },
+      actions: [{ label: { id: "session.reconnect" }, command_id: COMMAND_IDS.reconnectNotificationAttachment, args: { value: owner } }],
     }]);
     expect(registry.canReconnect(owner)).toBe(true);
     await registry.reconnect(owner);
@@ -173,7 +174,7 @@ describe("attachment notification lifecycle", () => {
     expect(store.snapshot().entries).toEqual([]);
     report({ ...history_ready, message_kind: null, message: "A separate session warning needs attention." });
     expect(store.snapshot().entries).toMatchObject([{
-      title: "Session update", severity: "warning", message: "A separate session warning needs attention.", toast_visible: true,
+      title: { id: "attachment.session_update" }, severity: "warning", message: "A separate session warning needs attention.", toast_visible: true,
     }]);
   });
 
@@ -185,7 +186,7 @@ describe("attachment notification lifecycle", () => {
     report({ ...connecting, phase: "reconnecting" });
     report({ ...failed, message: "The retry timed out." });
     expect(store.snapshot().entries).toMatchObject([{
-      title: "Session connection failed", message: "The retry timed out.", read: true, toast_visible: false, occurrence_count: 1,
+      title: { id: "attachment.connection_failed" }, message: "The retry timed out.", read: true, toast_visible: false, occurrence_count: 1,
     }]);
   });
 
@@ -259,8 +260,8 @@ describe("attachment notification lifecycle", () => {
     report({ ...history_ready, history_gap: true });
     const id = store.snapshot().entries[0].id;
     expect(store.snapshot().entries).toMatchObject([{
-      id, title: "Earlier output unavailable", toast_visible: false, resolved_at: null,
-      message: "Some earlier output is unavailable in this view.",
+      id, title: { id: "attachment.earlier_output" }, toast_visible: false, resolved_at: null,
+      message: { id: "attachment.earlier_output_detail" },
     }]);
 
     report({ ...history_ready, history_gap: true, history_loading: true });
@@ -316,10 +317,17 @@ describe("attachment notification lifecycle", () => {
     const remote_session = { ...session, target: { kind: "ssh" as const, host_id: "remote", destination: "workstation", remote_platform } };
     report({ ...failed, session: remote_session, error_code: "protocol_version_mismatch", message: "The daemon protocol does not match this app." });
     expect(store.snapshot().entries).toMatchObject([{
-      title: "Session connection failed", toast_visible: true,
-      message: `The daemon protocol does not match this app. ${guidance}`,
-      actions: [{ label: "Connect host", command_id: COMMAND_IDS.connectHost, args: { target_key: "host:remote" } }],
+      title: { id: "attachment.connection_failed" }, toast_visible: true,
+      message: { id: remote_platform === "windows" ? "attachment.windows_guidance" : "attachment.remote_guidance",
+        values: { detail: "The daemon protocol does not match this app." } },
+      actions: [{ label: { id: "attachment.connect_host" }, command_id: COMMAND_IDS.connectHost, args: { target_key: "host:remote" } }],
     }]);
+    const original = store.snapshot().entries[0];
+    expect(formatText("en", original.message)).toBe(`The daemon protocol does not match this app. ${guidance}`);
+    expect(formatText("zh-Hans", original.title)).toBe("会话连接失败");
+    store.hide(original.id);
+    report({ ...failed, session: remote_session, error_code: "protocol_version_mismatch", message: "The daemon protocol does not match this app." });
+    expect(store.snapshot().entries[0]).toMatchObject({ id: original.id, toast_visible: false, occurrence_count: 1 });
     expect(registry.recoverySession(owner)).toBeNull();
     expect(registry.canReconnect(owner)).toBe(false);
     report({ ...history_ready, session: remote_session });
@@ -334,7 +342,7 @@ describe("attachment notification lifecycle", () => {
       session: { ...session, target: { kind: "ssh", host_id: "remote", destination: "workstation", remote_platform: "windows" } },
     });
     expect(store.snapshot().entries).toMatchObject([{
-      message, actions: [{ label: "Connect host", command_id: COMMAND_IDS.connectHost, args: { target_key: "host:remote" } }],
+      message, actions: [{ label: { id: "attachment.connect_host" }, command_id: COMMAND_IDS.connectHost, args: { target_key: "host:remote" } }],
     }]);
     expect(registry.recoverySession(owner)).toBeNull();
     expect(registry.canReconnect(owner)).toBe(false);
@@ -349,13 +357,13 @@ describe("attachment notification lifecycle", () => {
     const reconnect = vi.fn(async () => {});
     registry.report(owner, { ...failed, error_code: "protocol_version_mismatch" }, reconnect);
     expect(registry.recoverySession(owner)).toBe(session);
-    expect(store.snapshot().entries[0].actions).toMatchObject([{ label: "Restart local daemon", command_id: COMMAND_IDS.recoverSessionComponents }]);
+    expect(store.snapshot().entries[0].actions).toMatchObject([{ label: { id: "attachment.restart_local" }, command_id: COMMAND_IDS.recoverSessionComponents }]);
     registry.report(owner, {
       ...failed, error_code: "protocol_version_mismatch",
       session: { ...session, target: { kind: "ssh", host_id: "remote", destination: "workstation" } },
     }, reconnect);
     expect(registry.recoverySession(owner)).toBeNull();
-    expect(store.snapshot().entries[0].actions).toMatchObject([{ label: "Connect host", command_id: COMMAND_IDS.connectHost }]);
+    expect(store.snapshot().entries[0].actions).toMatchObject([{ label: { id: "attachment.connect_host" }, command_id: COMMAND_IDS.connectHost }]);
   });
 
   it("does not let a retiring owner clear a replacement pane's failure", () => {

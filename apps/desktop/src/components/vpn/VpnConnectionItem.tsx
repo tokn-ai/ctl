@@ -1,8 +1,10 @@
+import { LocalizedError, message } from "../../features/i18n/messages";
+import { useLocale } from "../../features/i18n/LocaleContext";
 import { useEffect, useState } from "react";
 import type { VpnController } from "../../features/vpn/useVpn";
-import { errorMessage } from "../../lib/errors";
-import { vpnNeedsSignIn, vpnRuntimeId } from "../../features/vpn/status";
-import type { VpnConnection, VpnState, VpnStatus } from "../../lib/types";
+import { localizedErrorText } from "../../lib/errors";
+import { vpnNeedsSignIn, vpnRuntimeId, vpnStateLabel } from "../../features/vpn/status";
+import type { VpnConnection, VpnStatus } from "../../lib/types";
 import { Icon } from "../ui/Icon";
 import { InlineFeedback } from "../feedback/InlineFeedback";
 import { useNotificationEnvironment } from "../../features/notifications/NotificationContext";
@@ -14,6 +16,7 @@ interface Props {
 }
 
 export function VpnConnectionItem({ connection, runtime, model }: Props) {
+  const { t, locale, formatText } = useLocale();
   const notifications = useNotificationEnvironment()?.store;
   const [copied_endpoint, setCopiedEndpoint] = useState<string | null>(null);
   const vpn_id = runtime ? vpnRuntimeId(runtime) : connection?.connection_id ?? "legacy";
@@ -23,13 +26,14 @@ export function VpnConnectionItem({ connection, runtime, model }: Props) {
   const active = runtime !== null || uncertain || action !== undefined;
   const action_error = model.action_errors.get(vpn_id);
   const state = action?.kind === "stop" ? "stopping" : action?.kind === "connect" && !runtime ? "starting" : runtime?.state ?? "stopped";
-  const name = connection?.name ?? (state === "connected" ? "Connected VPN" : "VPN connection");
+  const connection_name = connection?.name ?? message(state === "connected" ? "vpn.connected_vpn" : "vpn.connection");
+  const name = formatText(connection_name);
   const stopping = state === "stopping";
   const checking = (!model.status_loaded || uncertain) && !action;
   const stale = (model.status_stale || (uncertain && runtime !== null)) && !action;
   const needs_sign_in = state === "starting" && vpnNeedsSignIn(runtime);
   const signing_in = model.signing_in_ids.has(vpn_id);
-  const status_label = stale ? "Status unavailable" : checking ? "Checking…" : needs_sign_in ? "Sign-in required" : statusLabel(state);
+  const status_label = stale ? t("vpn.status_unavailable") : checking ? t("vpn.checking") : needs_sign_in ? t("vpn.sign_in_required") : vpnStateLabel(state, locale);
   const provider = runtime?.provider ?? connection?.provider ?? "openconnect";
   const tailscale = provider === "tailscale";
   const provider_supported = model.supported_providers.includes(provider);
@@ -41,9 +45,9 @@ export function VpnConnectionItem({ connection, runtime, model }: Props) {
   const username = runtime?.username ?? saved_openconnect?.username;
   const can_connect = provider_supported && model.status_loaded && !model.status_stale && !action &&
     !uncertain && (model.supports_multiple || (model.statuses.length === 0 && model.actions.size === 0 && model.uncertain_ids.size === 0));
-  const source_note = model.catalog_loading && !model.catalog_loaded ? "Loading saved connections…"
-    : !model.catalog_loaded || model.catalog_error ? "Saved connection unavailable"
-      : "Not saved in this app";
+  const source_note = model.catalog_loading && !model.catalog_loaded ? t("vpn.loading_saved")
+    : !model.catalog_loaded || model.catalog_error ? t("vpn.saved_unavailable")
+      : t("vpn.not_saved");
 
   useEffect(() => {
     setCopiedEndpoint(null);
@@ -52,13 +56,13 @@ export function VpnConnectionItem({ connection, runtime, model }: Props) {
   async function copyEndpoint() {
     if (!endpoint) return;
     try {
-      if (!navigator.clipboard?.writeText) throw new Error("Clipboard access is unavailable.");
+      if (!navigator.clipboard?.writeText) throw new LocalizedError("vpn.clipboard_unavailable");
       await navigator.clipboard.writeText(endpoint);
       setCopiedEndpoint(endpoint);
     } catch (failure) {
       notifications?.notify(`vpn:copy:${vpn_id}`, {
-        severity: "error", title: "Could not copy SOCKS endpoint", source: "VPN",
-        message: `${name}: ${errorMessage(failure)}`,
+        severity: "error", title: message("vpn.copy_failed"), source: message("vpn.source"),
+        message: message("vpn.named_error", { name: connection_name, error: localizedErrorText(failure) }),
       });
     }
   }
@@ -75,83 +79,74 @@ export function VpnConnectionItem({ connection, runtime, model }: Props) {
         <span>{status_label}</span>
       </div>
       {!connection ? <small>{source_note}</small> : null}
-      {runtime?.shared_container ? <small>{foreign ? "Shared VPN · This ctld is not keeping it connected." : runtime.locally_connected === true ? "Shared VPN · Kept connected by this ctld." : "Shared VPN"}</small> : null}
-      {runtime && stale && model.status_loaded ? <small>Last known state: {statusLabel(runtime.state)}</small> : null}
+      {runtime?.shared_container ? <small>{foreign ? t("vpn.shared_foreign") : runtime.locally_connected === true ? t("vpn.shared_local") : t("vpn.shared")}</small> : null}
+      {runtime && stale && model.status_loaded ? <small>{t("vpn.last_known_state", { state: vpnStateLabel(runtime.state, locale) })}</small> : null}
       <dl className="vpn-connection-details">
         {tailscale ? <>
-          <div><dt>Device name in Tailscale</dt><dd>{hostname ?? "Assigned when connected"}</dd></div>
-          {runtime?.tailnet ? <div><dt>Tailnet</dt><dd>{runtime.tailnet}</dd></div> : null}
+          <div><dt>{t("vpn.tailscale_device_name")}</dt><dd>{hostname ?? t("vpn.device_name_later")}</dd></div>
+          {runtime?.tailnet ? <div><dt>{t("vpn.tailnet")}</dt><dd>{runtime.tailnet}</dd></div> : null}
         </> : <div>
-          <dt>VPN server</dt>
-          <dd>{vpn_url ?? "Unavailable"}</dd>
+          <dt>{t("vpn.server")}</dt>
+          <dd>{vpn_url ?? t("vpn.unavailable")}</dd>
         </div>}
         <div>
-          <dt>Username</dt>
-          <dd>{username ?? "Unavailable"}</dd>
+          <dt>{t("vpn.username")}</dt>
+          <dd>{username ?? t("vpn.unavailable")}</dd>
         </div>
         {active ? (
           <div>
             <dt className="vpn-endpoint-heading">
-              <span>SOCKS5 endpoint</span>
+              <span>{t("vpn.socks_endpoint")}</span>
               {endpoint ? (
-                <button type="button" onClick={() => void copyEndpoint()} disabled={model.status_stale || uncertain || state !== "connected"} aria-label="Copy SOCKS endpoint" title="Copy SOCKS endpoint">
+                <button type="button" onClick={() => void copyEndpoint()} disabled={model.status_stale || uncertain || state !== "connected"} aria-label={t("vpn.copy_endpoint")} title={t("vpn.copy_endpoint")}>
                   <Icon name={copied_endpoint === endpoint ? "check" : "copy"} size={12} />
                 </button>
               ) : null}
             </dt>
-            <dd><code>{endpoint ?? (state === "starting" ? "Pending" : "Unavailable")}</code></dd>
+            <dd><code>{endpoint ?? (state === "starting" ? t("vpn.pending") : t("vpn.unavailable"))}</code></dd>
           </div>
         ) : null}
       </dl>
-      {needs_sign_in && !stale ? <small>Finish signing in with your browser. The login is kept for future connections.</small> : null}
+      {needs_sign_in && !stale ? <small>{t("vpn.finish_sign_in_persistent")}</small> : null}
       {runtime?.message ? <small>{runtime.message}</small> : null}
-      {connection && !provider_supported && model.status_loaded ? <small>Update ctld to connect with {tailscale ? "Tailscale" : "OpenConnect"}.</small> : null}
-      {action_error ? <InlineFeedback>{action_error}</InlineFeedback> : null}
+      {connection && !provider_supported && model.status_loaded ? <small>{t("vpn.provider_requires_update", { provider: tailscale ? "Tailscale" : "OpenConnect" })}</small> : null}
+      {action_error ? <InlineFeedback>{formatText(action_error)}</InlineFeedback> : null}
       <div className="vpn-connection-actions">
         {needs_sign_in ? <button
           type="button"
           disabled={stale || checking || stopping || signing_in}
           onClick={() => void model.signIn(vpn_id)}
-          aria-label={`Sign in to ${connection?.name ?? "Tailscale"}`}
-        >{signing_in ? "Opening browser…" : "Sign in"}</button> : null}
+          aria-label={t("vpn.sign_in_named", { name: connection?.name ?? "Tailscale" })}
+        >{signing_in ? t("vpn.opening_browser") : t("vpn.sign_in")}</button> : null}
         {active ? (
           <button
             type="button"
             disabled={stopping || (foreign && !connecting) || !model.supports_multiple}
-            title={foreign && !connecting ? "This ctld has no connection to release." : !model.supports_multiple ? "Update ctld to disconnect this VPN safely." : undefined}
+            title={foreign && !connecting ? t("vpn.no_local_connection") : !model.supports_multiple ? t("vpn.safe_disconnect_requires_update") : undefined}
             onClick={() => void model.stop(vpn_id)}
             aria-label={connection
-              ? `${state === "starting" || connecting ? "Cancel connection to" : "Disconnect"} ${connection.name}`
-              : state === "starting" || connecting ? "Cancel connection" : "Disconnect VPN"}
+              ? t("vpn.cancel_or_disconnect", { canceling: String(state === "starting" || connecting), name: connection.name })
+              : state === "starting" || connecting ? t("vpn.cancel_connection") : t("vpn.disconnect_vpn")}
           >
-            {stopping ? "Disconnecting…" : state === "starting" || connecting ? "Cancel connection" : "Disconnect"}
+            {stopping ? t("vpn.disconnecting") : state === "starting" || connecting ? t("vpn.cancel_connection") : t("vpn.disconnect")}
           </button>
         ) : null}
         {connection && (!active || foreign) ? (
-          <button type="button" disabled={!can_connect || model.profile_busy || (!tailscale && !saved_openconnect?.has_password)} onClick={() => void model.connect(connection.connection_id)} aria-label={`Connect ${connection.name}`}>
-            {action?.kind === "connect" ? "Connecting…" : "Connect"}
+          <button type="button" disabled={!can_connect || model.profile_busy || (!tailscale && !saved_openconnect?.has_password)} onClick={() => void model.connect(connection.connection_id)} aria-label={t("vpn.connect_named", { name: connection.name })}>
+            {action?.kind === "connect" ? t("vpn.connecting") : t("vpn.connect")}
           </button>
         ) : null}
         {connection ? (
           <>
-            <button type="button" disabled={model.profile_busy || active || model.discovery_warnings.length > 0} onClick={() => model.editConnection(connection)} aria-label={`Edit ${connection.name}`} title={active ? "Wait until this VPN container stops before editing its connection." : "Edit connection"}>Edit</button>
-            <button type="button" disabled={model.profile_busy || active || model.discovery_warnings.length > 0} onClick={() => void model.deleteConnection(connection.connection_id)} aria-label={`Delete ${connection.name}`}>
-              {model.deleting_id === connection.connection_id ? "Deleting…" : "Delete"}
+            <button type="button" disabled={model.profile_busy || active || model.discovery_warnings.length > 0} onClick={() => model.editConnection(connection)} aria-label={t("vpn.edit_named", { name: connection.name })} title={active ? t("vpn.edit_wait") : t("vpn.edit")}>{t("vpn.edit_action")}</button>
+            <button type="button" disabled={model.profile_busy || active || model.discovery_warnings.length > 0} onClick={() => void model.deleteConnection(connection.connection_id)} aria-label={t("vpn.delete_named", { name: connection.name })}>
+              {model.deleting_id === connection.connection_id ? t("vpn.deleting") : t("vpn.delete")}
             </button>
           </>
         ) : null}
       </div>
     </section>
   );
-}
-
-function statusLabel(state: VpnState): string {
-  switch (state) {
-    case "starting": return "Connecting…";
-    case "connected": return "Connected";
-    case "stopping": return "Disconnecting…";
-    case "stopped": return "Disconnected";
-  }
 }
 
 function vpnServerLabel(value: string | null | undefined): string | null {

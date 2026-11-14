@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import type { ReactElement } from "react";
 import { NotificationProvider } from "../features/notifications/NotificationContext";
+import { formatText } from "../features/i18n/messages";
 import { NotificationStore } from "../features/notifications/NotificationStore";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -146,7 +147,10 @@ describe("Credentials page", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Forget Development" }));
     fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Forget credential" }));
     await waitFor(() => expect(notifications.snapshot().entries).toHaveLength(1));
-    expect(notifications.snapshot().entries[0]).toMatchObject({ severity: "error", source: "Credentials", message: "Could not forget Development: Keychain access was denied." });
+    const entry = notifications.snapshot().entries[0];
+    expect(entry.severity).toBe("error");
+    expect(formatText("en", entry.source)).toBe("Credentials");
+    expect(formatText("en", entry.message)).toBe("Could not forget Development: Keychain access was denied.");
     expect(screen.queryByRole("alert")).toBeNull();
     expect(screen.getByRole("button", { name: "Forget Development" })).toHaveProperty("disabled", false);
     expect(screen.queryByText(/Forgot Development/)).toBeNull();

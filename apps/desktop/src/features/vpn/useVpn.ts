@@ -1,5 +1,6 @@
+import { message, type DisplayText } from "../i18n/messages";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { errorCode, errorMessage } from "../../lib/errors";
+import { errorCode, errorMessage, localizedErrorText } from "../../lib/errors";
 import { connectVpn, deleteVpnConnection, loadVpnConnections, openVpnSignIn, saveVpnConnection, saveVpnEnrollment, stopVpn, vpnStatus } from "../../lib/tauri";
 import type { VpnConnection, VpnConnectionInput, VpnConnectionsSnapshot, VpnProvider, VpnStatus } from "../../lib/types";
 import { vpnNeedsSignIn, vpnRuntimeId } from "./status";
@@ -46,7 +47,7 @@ export interface VpnController {
   profile_busy: boolean;
   deleting_id: string | null;
   editor: VpnEditor | null;
-  editor_error: string | null;
+  editor_error: DisplayText | null;
   editor_saving: boolean;
   refresh(): Promise<void>;
   connect(connection_id: string): Promise<void>;
@@ -86,7 +87,7 @@ export function useVpn(enabled: boolean): VpnController {
   const [profile_busy, setProfileBusy] = useState(false);
   const [deleting_id, setDeletingId] = useState<string | null>(null);
   const [editor, setEditor] = useState<VpnEditor | null>(null);
-  const [editor_error, setEditorError] = useState<string | null>(null);
+  const [editor_error, setEditorError] = useState<DisplayText | null>(null);
   const [editor_saving, setEditorSaving] = useState(false);
   const mounted = useRef(false);
   const lifetime = useRef(0);
@@ -222,10 +223,14 @@ export function useVpn(enabled: boolean): VpnController {
           observed_active.current.delete(vpn_id);
           if (degraded_runtimes.current.has(vpn_id)) continue;
           degraded_runtimes.current.add(vpn_id);
-          const name = catalog_ref.current.connections.find((connection) => connection.connection_id === previous.connection_id)?.name ?? "VPN connection";
+          const name = catalog_ref.current.connections.find((connection) => connection.connection_id === previous.connection_id)?.name ?? message("vpn.connection");
+          const error = observed?.message;
+          const feedback = error
+            ? message("vpn.unexpected_disconnect_diagnostic", { name, error })
+            : message("vpn.unexpected_disconnect_detail", { name });
           notifications?.report(`vpn:runtime:${vpn_id}`, {
-            severity: "warning", title: "VPN disconnected", source: "VPN",
-            message: `${name} is no longer connected.${observed?.message ? ` ${observed.message}` : ""}`,
+            severity: "warning", title: message("vpn.unexpected_disconnect"), source: message("vpn.source"),
+            message: feedback,
           });
         }
         for (const [vpn_id, observed] of next) {
@@ -482,7 +487,7 @@ export function useVpn(enabled: boolean): VpnController {
       return true;
     } catch (failure) {
       if (mounted.current && editor_ref.current?.editor_id === selected.editor_id) {
-        setEditorError(errorMessage(failure));
+        setEditorError(localizedErrorText(failure));
         if (refresh_enrollment_conflict && errorCode(failure) === "vpn_connections_conflict") {
           try {
             const latest = await loadVpnConnections();
@@ -492,10 +497,10 @@ export function useVpn(enabled: boolean): VpnController {
               const updated = { ...selected, expected_revision: latest.revision };
               editor_ref.current = updated;
               setEditor(updated);
-              setEditorError("Connections changed. Review this connection and save again.");
+              setEditorError(message("vpn.save_conflict"));
             }
           } catch (refresh_failure) {
-            if (mounted.current && editor_ref.current?.editor_id === selected.editor_id) setEditorError(errorMessage(refresh_failure));
+            if (mounted.current && editor_ref.current?.editor_id === selected.editor_id) setEditorError(localizedErrorText(refresh_failure));
           }
         }
       }
@@ -511,7 +516,7 @@ export function useVpn(enabled: boolean): VpnController {
 
   const saveConnection = useCallback(async (connection: VpnConnectionInput) => {
     if (isActive(connection.connection_id)) {
-      setEditorError("Disconnect this VPN before changing its settings.");
+      setEditorError(message("vpn.must_disconnect"));
       return false;
     }
     return saveEditor((expected_revision) => saveVpnConnection(expected_revision, connection));
@@ -536,10 +541,14 @@ export function useVpn(enabled: boolean): VpnController {
         publishCatalog(next);
       }
     } catch (failure) {
-      if (mounted.current) notifications?.notify(`vpn:delete:${connection_id}`, {
-        severity: "error", title: "Could not delete VPN connection", source: "VPN",
-        message: `${catalog_ref.current.connections.find((connection) => connection.connection_id === connection_id)?.name ?? "VPN connection"}: ${errorMessage(failure)}`,
-      });
+      if (mounted.current) {
+        const name = catalog_ref.current.connections.find((connection) => connection.connection_id === connection_id)?.name ?? message("vpn.connection");
+        const error = localizedErrorText(failure);
+        notifications?.notify(`vpn:delete:${connection_id}`, {
+          severity: "error", title: message("vpn.delete_failed"), source: message("vpn.source"),
+          message: message("vpn.named_error", { name, error }),
+        });
+      }
     } finally {
       profile_busy_ref.current = false;
       if (mounted.current) {

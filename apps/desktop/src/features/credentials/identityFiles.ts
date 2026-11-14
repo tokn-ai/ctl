@@ -1,3 +1,4 @@
+import { message, translate, type Locale } from "../i18n/messages";
 import type { IdentityFile } from "../../lib/types";
 
 export function identityName(file: IdentityFile): string {
@@ -12,14 +13,18 @@ export function canForgetIdentity(file: IdentityFile, keychain_available: boolea
   return keychain_available && (file.passphrase_state === "saved" || file.passphrase_state === "file_changed");
 }
 
-export function identityPassphraseLabel(file: IdentityFile): string {
+export function identityPassphraseMessage(file: IdentityFile) {
   return {
-    saved: "Saved",
-    not_saved: "Not saved",
-    not_required: "Not required",
-    file_changed: "File changed · saved for older file",
-    unknown: "Not checked",
+    saved: message("credentials.passphrase_state.saved"),
+    not_saved: message("credentials.passphrase_state.not_saved"),
+    not_required: message("credentials.passphrase_state.not_required"),
+    file_changed: message("credentials.passphrase_state.file_changed"),
+    unknown: message("credentials.passphrase_state.unknown"),
   }[file.passphrase_state];
+}
+
+export function identityMutationError(failure: unknown, action: "save" | "forget" = "save", locale: Locale = "en"): string {
+  return translate(locale, identityMutationMessage(failure, action).id);
 }
 
 function identityErrorCode(failure: unknown): string {
@@ -32,30 +37,28 @@ export function isIdentityPassphraseError(failure: unknown): boolean {
 }
 
 /** Only known codes are rendered; backend error text may contain the submitted secret. */
-export function identityMutationError(failure: unknown, action: "save" | "forget" = "save"): string {
+export function identityMutationMessage(failure: unknown, action: "save" | "forget" = "save") {
   const code = identityErrorCode(failure);
   const messages: Record<string, string> = {
-    identity_invalid_request: "The identity file request is invalid. Refresh and try again.",
-    identity_file_changed: "The identity file changed. Refresh and try again with the current file.",
-    identity_file_missing: "The identity file is missing. Check its path, then refresh.",
-    identity_file_unreadable: "The identity file could not be read. Check its permissions, then refresh.",
-    identity_unlock_failed: "The passphrase does not unlock this identity file. Try again.",
-    credential_store_busy: "Another Keychain request is still active. Complete or cancel it, then try again.",
-    identity_keychain_busy: "Another Keychain request is still active. Complete or cancel it, then try again.",
-    identity_keychain_missing_entitlement: "The credential helper is not authorized for Keychain access. Use the signed ctld app with its matching provisioning profile, then try again.",
-    identity_keychain_unavailable: "Keychain access is unavailable. Check your macOS login session and try again.",
-    identity_keychain_locked: "Keychain access was denied or locked. Unlock it and try again.",
-    identity_unsupported: "This identity file or platform does not support saved passphrases.",
-    identity_save_failed: "The verified passphrase could not be saved to Keychain. Check access and try again.",
-    identity_forget_failed: "The saved passphrase could not be forgotten. Check Keychain access and try again.",
-    identity_list_failed: "Identity file metadata could not be checked. Refresh and try again.",
-    credential_helper_unavailable: "The credential helper is unavailable. Rebuild or update ctld and try again.",
-    credential_helper_unsupported: "This version of ctld does not support identity passphrases. Update ctld and try again.",
-    credential_helper_invalid_response: "The credential helper returned an invalid response. Update ctld and try again.",
-    credential_helper_timeout: "The credential operation timed out. Refresh to check the current state before trying again.",
+    identity_invalid_request: "credentials.mutation.identity_invalid_request",
+    identity_file_changed: "credentials.mutation.identity_file_changed",
+    identity_file_missing: "credentials.mutation.identity_file_missing",
+    identity_file_unreadable: "credentials.mutation.identity_file_unreadable",
+    identity_unlock_failed: "credentials.mutation.identity_unlock_failed",
+    credential_store_busy: "credentials.mutation.keychain_busy",
+    identity_keychain_busy: "credentials.mutation.keychain_busy",
+    identity_keychain_missing_entitlement: "credentials.mutation.identity_keychain_missing_entitlement",
+    identity_keychain_unavailable: "credentials.mutation.identity_keychain_unavailable",
+    identity_keychain_locked: "credentials.mutation.identity_keychain_locked",
+    identity_unsupported: "credentials.mutation.identity_unsupported",
+    identity_save_failed: "credentials.mutation.identity_save_failed",
+    identity_forget_failed: "credentials.mutation.identity_forget_failed",
+    identity_list_failed: "credentials.mutation.identity_list_failed",
+    credential_helper_unavailable: "credentials.mutation.credential_helper_unavailable",
+    credential_helper_unsupported: "credentials.mutation.credential_helper_unsupported",
+    credential_helper_invalid_response: "credentials.mutation.credential_helper_invalid_response",
+    credential_helper_timeout: "credentials.mutation.credential_helper_timeout",
   };
-  if (Object.prototype.hasOwnProperty.call(messages, code)) return messages[code];
-  return action === "forget"
-    ? "The saved passphrase could not be forgotten. Check Keychain access and try again."
-    : "The passphrase could not be saved. Check the passphrase, identity file, and Keychain access, then try again.";
+  if (Object.prototype.hasOwnProperty.call(messages, code)) return message(messages[code]);
+  return message(action === "forget" ? "credentials.mutation.identity_forget_failed" : "credentials.mutation.save_unknown");
 }

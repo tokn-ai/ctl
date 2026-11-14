@@ -12,7 +12,9 @@ import {
   restartTaskDaemon,
   taskRequest,
 } from "../../lib/tauri";
-import { errorMessage } from "../../lib/errors";
+import { errorMessage, localizedErrorText } from "../../lib/errors";
+import { LocalizedError, message, type DisplayText, type LocalizedMessage } from "../i18n/messages";
+import { useLocale } from "../i18n/LocaleContext";
 import type { useWorkspace } from "../workspace/useWorkspace";
 import { workspaceTabKey } from "../workspace/workspaceModel";
 import { sessionKey } from "../targets/targets";
@@ -22,7 +24,7 @@ import { COMMAND_IDS } from "../commands/commandIds";
 import { persistTaskWorkspace, TaskWorkspaceSaveError } from "./taskWorkspacePersistence";
 
 import { useTaskEditor } from "./useTaskEditor";
-import { definitionScopeKey, definitionScopeLabel, GLOBAL_DEFINITION_SCOPE, useTaskDefinitions } from "./useTaskDefinitions";
+import { definitionScopeKey, GLOBAL_DEFINITION_SCOPE, useTaskDefinitions } from "./useTaskDefinitions";
 
 type Workspace = ReturnType<typeof useWorkspace>;
 export function useTaskWorkspace(
@@ -30,18 +32,19 @@ export function useTaskWorkspace(
   connect: (session: SessionSummary) => Promise<void>,
   detach: () => Promise<void>,
 ) {
+  const { formatText } = useLocale();
   const [tasks, setTasks] = useState<ManagedTask[]>([]);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<DisplayText | null>(null);
   const [refreshError, setRefreshError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [hasLoaded, setHasLoaded] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [daemonStatus, setDaemonStatus] = useState<string | null>(null);
+  const [daemonStatus, setDaemonStatus] = useState<"restarting" | null>(null);
   const notifications = useNotificationEnvironment()?.store;
   const catalog = useTaskDefinitions(workspace.task_definition_scope, workspace.ready);
   const editor = useTaskEditor(workspace, catalog);
-  const [editorFailure, setEditorFailure] = useState<{ owner: typeof editor.owner; message: string; validation_error?: TaskDefinitionValidationError } | null>(null);
-  const [terminalFailure, setTerminalFailure] = useState<{ tab_key: string; message: string } | null>(null);
+  const [editorFailure, setEditorFailure] = useState<{ owner: typeof editor.owner; message: DisplayText; validation_error?: TaskDefinitionValidationError } | null>(null);
+  const [terminalFailure, setTerminalFailure] = useState<{ tab_key: string; message: DisplayText } | null>(null);
   const [terminalRetry, setTerminalRetry] = useState(0);
   const editor_error = (editorFailure?.owner === editor.owner ? editorFailure?.message : null)
     ?? (editor.owner ? editor.catalog_error : null);
@@ -133,7 +136,7 @@ export function useTaskWorkspace(
   }, [workspace.ready, refresh]);
 
   const performExclusive = async <T,>(operation: () => Promise<T>): Promise<T> => {
-    if (mutation.current) throw new Error("A task operation is already in progress. Wait for it to finish.");
+    if (mutation.current) throw new LocalizedError("tasks.busy");
     mutation.current = true;
     epoch.current += 1;
     setBusy(true);
@@ -142,7 +145,7 @@ export function useTaskWorkspace(
     try {
       return await operation();
     } catch (failure) {
-      setError(errorMessage(failure));
+      setError(localizedErrorText(failure));
       throw failure;
     } finally {
       mutation.current = false;
@@ -153,14 +156,14 @@ export function useTaskWorkspace(
       }
     }
   };
-  const notifyFailure = (key: string, title: string, failure: unknown, task_id?: string) => {
+  const notifyFailure = (key: string, title: LocalizedMessage, failure: unknown, task_id?: string) => {
     if (failure instanceof TaskWorkspaceSaveError) return;
     notifications?.notify(key, {
-      severity: "error", title, message: errorMessage(failure), source: "Tasks",
-      actions: task_id ? [{ label: "View task", command_id: COMMAND_IDS.openTask, args: { value: task_id } }] : [],
+      severity: "error", title, message: localizedErrorText(failure), source: message("tasks.title"),
+      actions: task_id ? [{ label: message("tasks.view_task"), command_id: COMMAND_IDS.openTask, args: { value: task_id } }] : [],
     });
   };
-  const perform = async (operation: () => Promise<void>, key: string, title: string, task_id?: string) => {
+  const perform = async (operation: () => Promise<void>, key: string, title: LocalizedMessage, task_id?: string) => {
     if (mutation.current) return;
     try {
       await performExclusive(operation);
@@ -176,7 +179,7 @@ export function useTaskWorkspace(
       return true;
     } catch (failure) {
       if (!(failure instanceof TaskWorkspaceSaveError) && editor.isCurrent())
-        setEditorFailure({ owner: editor.owner, message: errorMessage(failure), validation_error: failure instanceof TaskDefinitionValidationError ? failure : undefined });
+        setEditorFailure({ owner: editor.owner, message: localizedErrorText(failure), validation_error: failure instanceof TaskDefinitionValidationError ? failure : undefined });
       return false;
     }
   };
@@ -290,7 +293,7 @@ export function useTaskWorkspace(
       },
     });
     if (result.type !== "task_created")
-      throw new Error("Unexpected task registration response.");
+      throw new LocalizedError("tasks.register_unexpected");
     let task = result.task;
     setTasks((current) => [
       ...current.filter((item) => item.task_id !== task.task_id),
@@ -334,7 +337,7 @@ export function useTaskWorkspace(
           current.filter((item) => item.task_id !== task.task_id),
         );
       }
-    }, `task_action:${type}:${task.task_id}`, "Task action failed", task.task_id);
+    }, `task_action:${type}:${task.task_id}`, message("tasks.action_failed"), task.task_id);
   const closeNow = (key: string) => {
     const view = workspaceRef.current;
     view.update("task_tabs", (tabs) =>
@@ -345,7 +348,7 @@ export function useTaskWorkspace(
       view.setActiveTabKey(null);
       void detachRef
         .current()
-        .catch((failure: unknown) => notifyFailure("task_terminal:detach", "Could not detach task terminal", failure));
+        .catch((failure: unknown) => notifyFailure("task_terminal:detach", message("tasks.detach_failed"), failure));
     }
   };
   const attachmentVersion = useRef(0);
@@ -370,12 +373,12 @@ export function useTaskWorkspace(
         ]);
         if (version !== attachmentVersion.current) return;
         if (!result[0]?.session)
-          throw new Error("This task's terminal is no longer available.");
+          throw new LocalizedError("tasks.terminal_missing");
         // The attachment owns connection failures and reconnect actions.
         await connectRef.current(result[0].session).catch(() => undefined);
       } catch (failure) {
         if (version === attachmentVersion.current)
-          setTerminalFailure({ tab_key, message: errorMessage(failure) });
+          setTerminalFailure({ tab_key, message: localizedErrorText(failure) });
       }
     })();
     return () => {
@@ -385,17 +388,17 @@ export function useTaskWorkspace(
 
   const restartDaemon = () =>
     perform(async () => {
-      setDaemonStatus("Restarting ctl-taskd…");
+      setDaemonStatus("restarting");
       try {
         await restartTaskDaemon();
         setRefreshError(null);
         notifications?.notify("task_daemon:restart", {
-          severity: "success", title: "Task daemon restarted", message: "ctl-taskd restarted.", source: "Tasks",
+          severity: "success", title: message("tasks.daemon_restarted_title"), message: message("tasks.daemon_restarted"), source: message("tasks.title"),
         });
       } finally {
         setDaemonStatus(null);
       }
-    }, "task_daemon:restart", "Could not restart task daemon");
+    }, "task_daemon:restart", message("tasks.restart_failed"));
 
   return {
     tasks,
@@ -403,12 +406,12 @@ export function useTaskWorkspace(
     restartDaemon,
     performComponentAction: performExclusive,
     connection_error: refreshError,
-    error: error ?? refreshError,
+    error: error === null ? refreshError : formatText(error),
     setError,
-    editor_error,
+    editor_error: editor_error === null ? null : formatText(editor_error),
     editor_validation_error,
     active_definition_error: activeReference ? catalog.error_for(activeReference.definition_scope ?? GLOBAL_DEFINITION_SCOPE) : null,
-    terminal_error: active && terminalFailure?.tab_key === workspaceTabKey(active) ? terminalFailure.message : null,
+    terminal_error: active && terminalFailure?.tab_key === workspaceTabKey(active) ? formatText(terminalFailure.message) : null,
     retry_terminal: () => setTerminalRetry((value) => value + 1),
     loading,
     hasLoaded,
@@ -460,7 +463,7 @@ export function useTaskWorkspace(
       }),
     run: (definition: SavedTaskDefinition, another = false, name?: string, source?: TaskDefinitionScope) =>
       perform(() => startSaved(definition, another, name, source),
-        `task_command:run:${definitionScopeKey(source ?? catalog.scope)}:${definition.definition_id}`, "Could not run task"),
+        `task_command:run:${definitionScopeKey(source ?? catalog.scope)}:${definition.definition_id}`, message("tasks.run_failed")),
     runFromEditor: (definition: SavedTaskDefinition, name: string, source: TaskDefinitionScope) =>
       performInEditor(() => startSaved(definition, true, name, source)),
     saveAsDefinition: (task: ManagedTask) => editor.create(task.definition),
@@ -479,13 +482,13 @@ export function useTaskWorkspace(
           ),
         );
         await persistTaskWorkspace(workspace);
-      }, `task_apply:${task.task_id}`, "Could not apply task definition", task.task_id),
+      }, `task_apply:${task.task_id}`, message("tasks.apply_failed"), task.task_id),
     forgetDefinition: (definition_id: string) =>
       performInEditor(async () => {
         const source = editor.definitionId === definition_id ? editor.scope : catalog.scope;
         const saved = catalog.get(source)?.definitions.find((item) => item.definition_id === definition_id);
         const expected_revision = editor.definitionId === definition_id ? editor.draft?.base_revision : saved?.revision;
-        if (typeof expected_revision !== "string") throw new Error("Reload the saved definition before deleting it.");
+        if (typeof expected_revision !== "string") throw new LocalizedError("tasks.reload_before_delete");
         await catalog.remove(source, definition_id, expected_revision);
         editor.discard(definition_id, source);
         workspace.update("task_references", (references) =>
@@ -513,13 +516,15 @@ export function useTaskWorkspace(
           (item) => item.definition_id === reference?.definition_id,
         );
         if (!definition)
-          throw new Error(`No saved definition is available for this task in ${definitionScopeLabel(source)}.`);
+          throw source.kind === "global"
+            ? new LocalizedError("tasks.definition_unavailable_global")
+            : new LocalizedError("tasks.definition_unavailable_project", { path: source.project_root });
         await taskRequest({
           type: "register_task",
           task_id,
           definition: definition.definition,
         });
-      }, `task_recreate:${task_id}`, "Could not recreate task", task_id),
+      }, `task_recreate:${task_id}`, message("tasks.recreate_failed"), task_id),
   };
 }
 export type TaskWorkspace = ReturnType<typeof useTaskWorkspace>;

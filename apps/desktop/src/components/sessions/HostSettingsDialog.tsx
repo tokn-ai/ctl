@@ -1,3 +1,6 @@
+import { localizedErrorText } from "../../lib/errors";
+import { type DisplayText } from "../../features/i18n/messages";
+import { useLocale } from "../../features/i18n/LocaleContext";
 import { useState } from "react";
 import type { VpnConnection, WorkspaceConnectionMethod, WorkspaceHost } from "../../lib/types";
 import { QuickInputFrame } from "../commands/QuickInputFrame";
@@ -18,12 +21,13 @@ interface Props {
 }
 
 export function HostSettingsDialog({ host, vpn_connections = [], onSave, onAddMethod, onEditMethod, onConnect, on_update_components, on_remove, onClose }: Props) {
+  const { t, formatText } = useLocale();
   const [draft, setDraft] = useState<WorkspaceHost>(() => ({
     ...host,
     connection_methods: host.connection_methods.map((method) => ({ ...method })),
   }));
   const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<DisplayText | null>(null);
   const [confirm_remove, setConfirmRemove] = useState(false);
   const unavailable = host.source === "unavailable";
   const removable = Boolean(on_remove) && host.host_id !== "local" && host.source !== "ssh_config" && host.source !== "tailscale";
@@ -53,7 +57,7 @@ export function HostSettingsDialog({ host, vpn_connections = [], onSave, onAddMe
       await on_remove();
       onClose();
     } catch (failure) {
-      setError(failure instanceof Error ? failure.message : String(failure));
+      setError(localizedErrorText(failure));
       setSaving(false);
     }
   }
@@ -70,14 +74,14 @@ export function HostSettingsDialog({ host, vpn_connections = [], onSave, onAddMe
       });
       onClose();
     } catch (failure) {
-      setError(failure instanceof Error ? failure.message : String(failure));
+      setError(localizedErrorText(failure));
       setSaving(false);
     }
   }
 
   return (
     <QuickInputFrame
-      title={`Host settings · ${host.name}`}
+      title={t("host_settings.for_host", { host: host.name })}
       className="host-settings-dialog"
       onDismiss={close}
       onKeyDown={(event) => {
@@ -88,12 +92,12 @@ export function HostSettingsDialog({ host, vpn_connections = [], onSave, onAddMe
       }}
     >
       <header className="quick-input-heading">
-        <strong>Host settings</strong>
-        <button type="button" onClick={close} disabled={saving}>Cancel</button>
+        <strong>{t("host_settings.title")}</strong>
+        <button type="button" onClick={close} disabled={saving}>{t("host_settings.cancel")}</button>
       </header>
       <div className="host-settings-content">
         <label className="host-settings-name">
-          Host name
+          {t("host_settings.name")}
           <input
             autoFocus
             value={draft.name}
@@ -101,33 +105,33 @@ export function HostSettingsDialog({ host, vpn_connections = [], onSave, onAddMe
             disabled={saving || unavailable}
           />
         </label>
-        {unavailable ? <p className="host-settings-description">This host is unavailable. Restore its connection before editing, or remove it from the workspace below.</p> : null}
-        <p className="host-settings-description">One machine and remote account. Choose how to reach it; sessions stay with this host.</p>
-        {host.source === "ssh_config" ? <p className="host-settings-description">From SSH config. Customizing this host saves a copy in hosts.json; your SSH config stays unchanged.</p> : null}
-        {host.source === "tailscale" ? <p className="host-settings-description">Discovered from Tailscale. Customizing this virtual host saves it in hosts.json.</p> : null}
+        {unavailable ? <p className="host-settings-description">{t("host_settings.unavailable")}</p> : null}
+        <p className="host-settings-description">{t("host_settings.description")}</p>
+        {host.source === "ssh_config" ? <p className="host-settings-description">{t("host_settings.ssh_config_description")}</p> : null}
+        {host.source === "tailscale" ? <p className="host-settings-description">{t("host_settings.tailscale_description")}</p> : null}
         <div className="host-settings-section-heading">
-          <strong>Connection methods</strong>
+          <strong>{t("host_settings.methods")}</strong>
           <button type="button" onClick={onAddMethod} disabled={saving || dirty || unavailable}>
-            <Icon name="plus" size={14} /> Add connection
+            <Icon name="plus" size={14} /> {t("host_settings.add_method")}
           </button>
         </div>
-        <p className="host-settings-description">Connect uses the preferred method. Choose another method explicitly when needed.</p>
+        <p className="host-settings-description">{t("host_settings.preferred_description")}</p>
         <div className="host-method-list">
           {draft.connection_methods.map((method) => {
             const preferred = method.method_id === draft.preferred_method_id;
             const steps = method.target.gateway_route?.length ?? 0;
             const vpn = vpn_connections.find((connection) => connection.connection_id === method.target.vpn_connection_id);
             const route = method.target.vpn_connection_id
-              ? `Via VPN · ${vpn?.name ?? "Unavailable saved VPN"}`
-              : steps ? `Via ${steps} route step${steps === 1 ? "" : "s"}` : "Direct SSH";
+              ? t("host_settings.vpn", { vpn: vpn?.name ?? t("host_settings.unavailable_vpn") })
+              : steps ? t("host_settings.steps", { count: steps }) : t("host_settings.direct");
             return (
               <section className="host-method" key={method.method_id} aria-label={method.name}>
                 <div className="host-method-heading">
                   <Icon name="plug" size={16} />
                   <label>
-                    <span className="host-method-label">Connection name</span>
+                    <span className="host-method-label">{t("host_settings.method_name")}</span>
                     <input
-                      aria-label={`Connection name for ${method.name}`}
+                      aria-label={t("host_settings.method_name_for", { method: method.name })}
                       value={method.name}
                       disabled={saving || unavailable}
                       onChange={(event) => setDraft((current) => ({
@@ -138,45 +142,45 @@ export function HostSettingsDialog({ host, vpn_connections = [], onSave, onAddMe
                       }))}
                     />
                   </label>
-                  {preferred ? <span className="host-method-preferred"><Icon name="check" size={12} /> Preferred</span> : null}
+                  {preferred ? <span className="host-method-preferred"><Icon name="check" size={12} /> {t("host_settings.preferred")}</span> : null}
                 </div>
                 <p className="host-method-endpoint">{endpoint(method)} · {route}</p>
                 {method.target.unavailable ? <p className="quick-input-error" role="status">{method.target.unavailable}</p> : null}
                 <div className="host-method-actions">
-                  <button type="button" disabled={saving || dirty || unavailable || Boolean(method.target.unavailable)} onClick={() => onConnect(method)}>Connect using</button>
-                  <button type="button" disabled={saving || dirty || unavailable} onClick={() => onEditMethod(method)}>Edit connection</button>
-                  <button type="button" disabled={saving || preferred || unavailable} onClick={() => setDraft((current) => ({ ...current, preferred_method_id: method.method_id }))}>Make preferred</button>
+                  <button type="button" disabled={saving || dirty || unavailable || Boolean(method.target.unavailable)} onClick={() => onConnect(method)}>{t("host_settings.connect_using")}</button>
+                  <button type="button" disabled={saving || dirty || unavailable} onClick={() => onEditMethod(method)}>{t("host_settings.edit_method")}</button>
+                  <button type="button" disabled={saving || preferred || unavailable} onClick={() => setDraft((current) => ({ ...current, preferred_method_id: method.method_id }))}>{t("host_settings.make_preferred")}</button>
                   <button
                     type="button"
                     className="host-method-remove"
                     disabled={saving || unavailable || draft.connection_methods.length <= 1}
-                    title={draft.connection_methods.length <= 1 ? "Keep at least one connection method." : "Remove this saved connection method."}
+                    title={draft.connection_methods.length <= 1 ? t("host_settings.keep_one") : t("host_settings.remove_method_hint")}
                     onClick={() => removeMethod(method.method_id)}
-                  >Remove</button>
+                  >{t("host_settings.remove")}</button>
                 </div>
               </section>
             );
           })}
         </div>
-        {dirty ? <p className="host-settings-description" role="status">Save or cancel these changes before adding, editing, or connecting through a method.</p> : null}
-        {removable ? <section className="host-settings-danger-zone" aria-label="Danger zone">
-          <strong>Danger zone</strong>
-          <p className="host-settings-description">Remove this host, its workspace session entries, tabs, port forwards, and saved SSH credentials. Remote shells keep running.</p>
+        {dirty ? <p className="host-settings-description" role="status">{t("host_settings.save_before_connect")}</p> : null}
+        {removable ? <section className="host-settings-danger-zone" aria-label={t("host_settings.danger_zone")}>
+          <strong>{t("host_settings.danger_zone")}</strong>
+          <p className="host-settings-description">{t("host_settings.remove_description")}</p>
           {confirm_remove ? <>
-            <p>Remove {host.name} from this workspace?</p>
-            <button type="button" disabled={saving} onClick={() => setConfirmRemove(false)}>Keep host</button>
+            <p>{t("host_settings.confirm_description", { host: host.name })}</p>
+            <button type="button" disabled={saving} onClick={() => setConfirmRemove(false)}>{t("host_settings.keep")}</button>
             <button type="button" className="host-settings-remove" disabled={saving} onClick={() => void remove()}>
-              {saving ? "Removing…" : "Confirm remove host"}
+              {saving ? t("host_settings.removing") : t("host_settings.confirm_remove")}
             </button>
-          </> : <button type="button" className="host-settings-remove" disabled={saving} onClick={() => setConfirmRemove(true)}>Remove host…</button>}
+          </> : <button type="button" className="host-settings-remove" disabled={saving} onClick={() => setConfirmRemove(true)}>{t("host_settings.remove_host")}</button>}
         </section> : null}
-        {error ? <InlineFeedback>{error}</InlineFeedback> : null}
+        {error ? <InlineFeedback>{formatText(error)}</InlineFeedback> : null}
       </div>
       <footer className="host-settings-actions">
-        {on_update_components ? <button type="button" onClick={on_update_components} disabled={saving || dirty || unavailable}>Update components…</button> : null}
-        <button type="button" onClick={close} disabled={saving}>Cancel</button>
+        {on_update_components ? <button type="button" onClick={on_update_components} disabled={saving || dirty || unavailable}>{t("host_settings.update_components")}</button> : null}
+        <button type="button" onClick={close} disabled={saving}>{t("host_settings.cancel")}</button>
         <button type="button" className="button-primary" onClick={() => void save()} disabled={saving || unavailable || !dirty || !valid}>
-          {saving ? "Saving…" : "Save changes"}
+          {saving ? t("host_settings.saving") : t("host_settings.save")}
         </button>
       </footer>
     </QuickInputFrame>

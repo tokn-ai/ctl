@@ -1,4 +1,5 @@
 import { Component, type ErrorInfo, type ReactNode } from "react";
+import { useLocale } from "../../features/i18n/LocaleContext";
 
 interface AppErrorBoundaryProps {
   children: ReactNode;
@@ -31,17 +32,16 @@ export class AppErrorBoundary extends Component<
 }
 
 export function AppCrashFallback({ error }: { error: Error }) {
+  const { t } = useLocale();
   return (
     <main className="app-crash" role="alert">
       <span className="app-crash-product">ctmux</span>
-      <h1>The interface stopped unexpectedly.</h1>
+      <h1>{t("crash.heading")}</h1>
       <p>
-        Your ctmux sessions are still running. Reload the window to reconnect.
-      </p>
+        {t("crash.detail")}</p>
       <code>{error.message || error.name}</code>
       <button type="button" onClick={() => window.location.reload()}>
-        Reload ctmux
-      </button>
+        {t("crash.reload")}</button>
     </main>
   );
 }

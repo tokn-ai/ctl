@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { disconnectSshHost, sshConnectionStatus } from "../../lib/tauri";
-import { errorMessage } from "../../lib/errors";
+import { localizedErrorText } from "../../lib/errors";
+import { LocalizedError, message, type DisplayText } from "../i18n/messages";
 import type {
   ConnectionTarget,
   HostConnectionChange,
@@ -47,7 +48,7 @@ async function observeSshMaster(target: SshConnectionTarget): Promise<SshConnect
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     const deadline = new Promise<never>((_resolve, reject) => {
-      timer = setTimeout(() => reject(new Error("SSH status query timed out.")), HOST_STATUS_TIMEOUT_MS);
+      timer = setTimeout(() => reject(new LocalizedError("host_observation.status_timeout")), HOST_STATUS_TIMEOUT_MS);
     });
     // Late native results are consumed by this settled race and cannot publish.
     return await Promise.race([sshConnectionStatus(target), deadline]);
@@ -62,12 +63,16 @@ type RouteOptions = Pick<Options, "targets" | "gateways"> & { hosts?: readonly W
 export function hostConnectionTargets(host: WorkspaceHost, options: RouteOptions) {
   const candidates = hostConnectionCandidates(host, options);
   const resolved = candidates.flatMap((method) => method.target ? [{ target: method.target, name: method.name }] : []);
-  if (!resolved.length && candidates.length) throw new Error(candidates[0].error ?? "This SSH method could not be resolved.");
+  if (!resolved.length && candidates.length) {
+    const failure = candidates[0].error;
+    if (typeof failure === "string") throw new Error(failure);
+    throw new LocalizedError(failure?.id ?? "host_observation.method_unresolved", failure?.values);
+  }
   return resolved;
 }
 
 function hostConnectionCandidates(host: WorkspaceHost, options: RouteOptions) {
-  const methods: { target: SshConnectionTarget | null; name: string; error: string | null }[] = [];
+  const methods: { target: SshConnectionTarget | null; name: DisplayText; error: DisplayText | null }[] = [];
   for (const method of host.connection_methods) {
     try {
       const target = hostTarget(host, options.gateways, method.method_id, options.hosts);
@@ -75,13 +80,13 @@ function hostConnectionCandidates(host: WorkspaceHost, options: RouteOptions) {
         ? { target: null, name: method.name, error: target.unavailable }
         : { target, name: method.name, error: null });
     } catch (failure) {
-      methods.push({ target: null, name: method.name, error: errorMessage(failure) });
+      methods.push({ target: null, name: method.name, error: localizedErrorText(failure) });
     }
   }
   for (const target of options.targets) {
     if (target.kind !== "ssh" || target.unavailable || target.host_id !== host.host_id ||
       methods.some((method) => method.target && sameSshEndpoint(method.target, target))) continue;
-    methods.push({ target, name: "Previous connection", error: null });
+    methods.push({ target, name: message("host_observation.previous_connection"), error: null });
   }
   return methods;
 }
@@ -145,7 +150,7 @@ export function useHostConnections(options: Options) {
         const observations = await Promise.all(methods.map(async (method) => {
           if (!method.target) return { name: method.name, status: null, error: method.error };
           try { return { name: method.name, status: await observeSshMaster(method.target), error: null }; }
-          catch (failure) { return { name: method.name, status: null, error: errorMessage(failure) }; }
+          catch (failure) { return { name: method.name, status: null, error: localizedErrorText(failure) }; }
         }));
         if (!isCurrent()) return;
         const result = aggregateHostObservations(observations, Date.now());
@@ -155,7 +160,7 @@ export function useHostConnections(options: Options) {
           publish(host_id, observeHostConnection(model(host_id), result));
           try { await current.current.onPause(host_id); }
           catch (failure) {
-            if (isCurrent()) publish(host_id, failHostOperation(observeHostConnection(model(host_id), result), "disconnect", errorMessage(failure)));
+            if (isCurrent()) publish(host_id, failHostOperation(observeHostConnection(model(host_id), result), "disconnect", localizedErrorText(failure)));
             return;
           }
           if (!isCurrent()) return;
@@ -199,7 +204,7 @@ export function useHostConnections(options: Options) {
     return () => { clearInterval(timer); window.removeEventListener("focus", onFocus); };
   }, [configurationKey, refresh]);
 
-  const connectionChanged = useCallback<HostConnectionChange>((target, state, message) => {
+  const connectionChanged = useCallback<HostConnectionChange>((target, state, diagnostic) => {
     if (target.kind !== "ssh" || !target.host_id) return;
     const host_id = target.host_id;
     const host = current.current.hosts.find((item) => item.host_id === host_id);
@@ -216,7 +221,7 @@ export function useHostConnections(options: Options) {
       const name = host.connection_methods.find((method) => method.method_id === target.method_id)?.name ?? null;
       publish(host_id, beginHostOperation(previous, "connect", name));
     } else if (state === "error") {
-      publish(host_id, failHostOperation(previous, "connect", message ?? "Connection failed."));
+      publish(host_id, failHostOperation(previous, "connect", diagnostic ?? message("host_observation.connect_error")));
     } else {
       attempts.current.delete(host_id);
       if (state === "connected" && paused.current.delete(host_id)) current.current.onResume(host_id);
@@ -231,7 +236,7 @@ export function useHostConnections(options: Options) {
     const previous = model(host_id);
     if (previous.operation.kind === "disconnect" && previous.operation.state === "pending") return;
     const host = current.current.hosts.find((item) => item.host_id === host_id);
-    if (!host) throw new Error("This host is no longer available.");
+    if (!host) throw new LocalizedError("host_observation.host_missing");
     const targets = hostConnectionTargets(host, current.current).map((method) => method.target);
     const generation = invalidate(host_id);
     const selectedConfiguration = configuration.current.generation;
@@ -254,7 +259,7 @@ export function useHostConnections(options: Options) {
         // A failed disconnect can have partially changed the masters. Preserve
         // the error, but do not present pre-disconnect evidence as current.
         const evidence = requested ? emptyHostConnection(true) : model(host_id);
-        publish(host_id, failHostOperation(evidence, "disconnect", errorMessage(failure)));
+        publish(host_id, failHostOperation(evidence, "disconnect", localizedErrorText(failure)));
       }
       throw failure;
     }

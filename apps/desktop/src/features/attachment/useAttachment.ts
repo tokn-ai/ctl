@@ -1,3 +1,4 @@
+import { message, LocalizedError, type DisplayText } from "../i18n/messages";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { decodeBase64, encodeBase64, sequenceAtLeast } from "../../lib/bytes";
 import {
@@ -14,7 +15,7 @@ import {
   sessionCache,
   setAttachmentViewZoom,
 } from "../../lib/tauri";
-import { errorCode, errorMessage } from "../../lib/errors";
+import { errorCode, localizedErrorText } from "../../lib/errors";
 import type {
   AttachmentEvent,
   AttachmentViewState,
@@ -208,8 +209,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
     lastRecoveryAttemptAtRef.current = null;
   }, [clearRecoveryTimer]);
 
-  const setFailure = useCallback((error: unknown) => {
-    const code = errorCode(error);
+  const setFailure = useCallback((error: unknown, code = errorCode(error)) => {
     // The native actor can stop accepting commands before its ordered exit
     // event arrives. Let that event determine whether to resume the attachment.
     if (code === "attachment_closing" || stateRef.current.phase === "ended") return;
@@ -228,13 +228,13 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
     resizeCoordinatorRef.current?.reset();
     if (attachment_id) void detachAttachment({ attachment_id }).catch(() => undefined);
     setState((current) => transitionAttachment(current, {
-      type: "failed", code, message: errorMessage(error),
+      type: "failed", code, message: localizedErrorText(error),
       resume_from: reconnectSequenceAfterError(code, current.reconnect_sequence),
     }));
   }, [cancelPendingHistory, closeChannel]);
 
   const stopResizeWithMessage = useCallback(
-    (message: string) => {
+    (message: DisplayText) => {
       resizeWithWindowRef.current = false;
       resizeCoordinatorRef.current?.stop();
       setState((current) => ({
@@ -275,12 +275,12 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
           return;
         }
         if (command.acquire) {
-          stopResizeWithMessage(`Could not acquire resize control: ${errorMessage(error)}`);
+          stopResizeWithMessage(message("attachment.resize_acquire_failed", { detail: localizedErrorText(error) }));
         } else {
           setState((current) => ({
             ...current,
             message_kind: "layout",
-            message: `Could not release terminal layout: ${errorMessage(error)}`,
+            message: message("attachment.layout_release_failed", { detail: localizedErrorText(error) }),
           }));
         }
       },
@@ -311,7 +311,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
           errorCode(error) !== "attachment_closing"
         ) {
           stopResizeWithMessage(
-            `Could not resize terminal: ${errorMessage(error)}`,
+            message("attachment.resize_failed", { detail: localizedErrorText(error) }),
           );
         }
       },
@@ -486,7 +486,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
       }
       if (stateRef.current.phase === "ended" && event.event_type !== "attachment_exited" && event.event_type !== "history_synced") return;
       if (!renderer) {
-        throw new Error("The terminal renderer is not available.");
+        throw new LocalizedError("pane.renderer_unavailable");
       }
 
       switch (event.event_type) {
@@ -682,7 +682,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
             message: event.status.owned_by_client ? null : resizeLost
               ? event.status.held
                 ? resizeControlNotice(true)
-                : "Resize with window stopped because layout ownership was released."
+                : message("attachment.layout_released")
               : (expectedLayoutIntent === true || isResizeControlNotice(current.message))
                 ? resizeControlNotice(event.status.held)
               : current.message,
@@ -846,7 +846,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
         }
       } catch (error) {
         if (generation !== generationRef.current) return;
-        setFailure({ code: "local_cache_failed", message: errorMessage(error) });
+        setFailure(error, "local_cache_failed");
         return;
       }
       appliedSequenceRef.current = resumeFrom;
@@ -912,10 +912,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
             openingAbort.signal,
             () => {
               if (generation !== generationRef.current || attempt !== openingAttempt) return;
-              setFailure({
-                code: "attachment_delivery_stalled",
-                message: "The terminal stopped receiving events. Reconnecting.",
-              });
+              setFailure(new LocalizedError("attachment.delivery_stalled"), "attachment_delivery_stalled");
               if (unclaimed_attachment_id) {
                 void detachAttachment({ attachment_id: unclaimed_attachment_id }).catch(() => undefined);
                 unclaimed_attachment_id = null;
@@ -1190,7 +1187,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
         if (!connected) setState((current) => activeAttachmentRef.current
           ? current
           : transitionAttachment(current, {
-            type: "failed", code: "attachment_cancelled", message: "Reconnect cancelled.",
+            type: "failed", code: "attachment_cancelled", message: message("attachment.reconnect_cancelled"),
             resume_from: current.reconnect_sequence,
           }));
         return connected;
@@ -1208,9 +1205,9 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
           await reconnectCurrent(true, focus_origin);
         } catch (error) {
           if (isCurrent()) setState((current) => activeAttachmentRef.current
-            ? errorCode(error) === "attachment_cancelled" ? current : { ...current, message: errorMessage(error), message_kind: null }
+            ? errorCode(error) === "attachment_cancelled" ? current : { ...current, message: localizedErrorText(error), message_kind: null }
             : transitionAttachment(current, {
-              type: "failed", code: errorCode(error), message: errorMessage(error),
+              type: "failed", code: errorCode(error), message: localizedErrorText(error),
               resume_from: current.reconnect_sequence,
             }));
         } finally {
@@ -1367,7 +1364,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
       } catch (error) {
         if (generation === generationRef.current) {
           setState((current) => ({ ...transitionAttachment(current, {
-            type: "failed", code: "explicit_detach_failed", message: errorMessage(error), resume_from: null,
+            type: "failed", code: "explicit_detach_failed", message: localizedErrorText(error), resume_from: null,
           }), resize_with_window: false }));
         }
         return;
@@ -1406,7 +1403,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
 
   const requestResizeControl = useCallback(async (acquire: boolean) => {
     const attachment_id = activeAttachmentRef.current;
-    if (!attachment_id || stateRef.current.phase !== "attached") throw new Error("Attach to a running session before requesting resize control.");
+    if (!attachment_id || stateRef.current.phase !== "attached") throw new LocalizedError("pane.attach_to_request_resize");
     if (!acquire) {
       resizeWithWindowRef.current = false;
       resizeCoordinatorRef.current?.stop();
@@ -1434,21 +1431,21 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
     resizeDivider: async (divider, request_id) => {
       const attachment_id = activeAttachmentRef.current;
       if (!attachment_id || stateRef.current.phase !== "attached" || !layoutLeaseOwnedRef.current) {
-        throw new Error("Take resize control to resize panes.");
+        throw new LocalizedError("pane.resize_control_required");
       }
       await resizeAttachmentDivider({ attachment_id, request_id, ...divider });
     },
     resizePane: async (terminal_id, direction, amount, request_id) => {
       const attachment_id = activeAttachmentRef.current;
       if (!attachment_id || stateRef.current.phase !== "attached" || !layoutLeaseOwnedRef.current) {
-        throw new Error("Take resize control to resize panes.");
+        throw new LocalizedError("pane.resize_control_required");
       }
       await resizeAttachmentPane({ attachment_id, terminal_id, direction, amount, request_id });
     },
     setViewZoom: async (terminal_id) => {
       const attachment_id = activeAttachmentRef.current;
       if (!attachment_id || stateRef.current.phase !== "attached" || !layoutLeaseOwnedRef.current) {
-        throw new Error("Take resize control to zoom panes.");
+        throw new LocalizedError("pane.zoom_control_required");
       }
       await setAttachmentViewZoom({ attachment_id, terminal_id });
     },
@@ -1472,7 +1469,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
       setState((current) => ({
         ...current,
         message_kind: null,
-        message: "Terminal input paused because the local input queue is full.",
+        message: message("attachment.input_queue_full"),
       }));
     }
   }, []);
@@ -1530,7 +1527,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
       setState((current) => ({
         ...current,
         message_kind: "layout",
-        message: "The terminal viewport is not ready for layout measurement.",
+        message: message("attachment.viewport_unready"),
       }));
       return;
     }

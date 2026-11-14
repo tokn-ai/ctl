@@ -1,3 +1,5 @@
+import { type DisplayText } from "../../features/i18n/messages";
+import { useLocale } from "../../features/i18n/LocaleContext";
 import { useEffect, useRef, useState } from "react";
 import { QuickInput } from "../commands/QuickInput";
 import { ConnectHostFlow } from "./ConnectHostFlow";
@@ -7,7 +9,7 @@ import {
   targetKey,
   targetLabel,
 } from "../../features/targets/targets";
-import { errorMessage } from "../../lib/errors";
+import { localizedErrorText } from "../../lib/errors";
 import type { ConnectionTarget, HostConnectionChange, RemoteIdentity, WorkspaceHost, WorkspaceSshGateway } from "../../lib/types";
 
 interface NewShellFlowProps {
@@ -41,12 +43,13 @@ export function NewShellFlow({
   onCreate,
   onClose,
 }: NewShellFlowProps) {
+  const { t, locale, formatText } = useLocale();
   const [selectedTargetKey, setSelectedTargetKey] = useState<string | null>(
     initial_target_key ?? null,
   );
   const [workingDirectory, setWorkingDirectory] = useState("");
   const [creating, setCreating] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<DisplayText | null>(null);
   const [connecting, setConnecting] = useState<ConnectionTarget | null>(null);
   const pendingDirectoryRef = useRef<{ working_directory: string | null } | null>(null);
   const busyRef = useRef(false);
@@ -97,7 +100,7 @@ export function NewShellFlow({
         onClose();
       }
     } catch (failure) {
-      if (!closedRef.current) setError(errorMessage(failure));
+      if (!closedRef.current) setError(localizedErrorText(failure));
     } finally {
       busyRef.current = false;
       if (!closedRef.current) setCreating(false);
@@ -137,11 +140,11 @@ export function NewShellFlow({
     return (
       <QuickInput
         key="creating"
-        title="New shell — creating"
-        description="Creation has started and cannot be cancelled. Please wait for the result before trying again."
+        title={t("new_shell.in_progress")}
+        description={t("new_shell.in_progress_hint")}
         mode={{
           kind: "progress",
-          message: `Creating and opening a shell on ${target ? targetLabel(target) : "the selected host"}…`,
+          message: t("new_shell.creating", { host: target ? targetLabel(target, locale) : t("new_shell.selected_host") }),
         }}
         cancel_disabled
         onSubmit={() => {}}
@@ -154,16 +157,16 @@ export function NewShellFlow({
     return (
       <QuickInput
         key="host"
-        title="New shell — host · 1/2"
-        description={`Choose where to create the shell. Local is the default; hosts are not contacted until you create.${discoveryMessage ? `\n${discoveryMessage}` : ""}`}
+        title={t("new_shell.pick_host")}
+        description={`${t("new_shell.pick_host_hint")}${discoveryMessage ? `\n${discoveryMessage}` : ""}`}
         error={
           selectedTargetKey
-            ? "That host is no longer available. Choose another host."
+            ? t("new_shell.host_unavailable")
             : null
         }
         mode={{
           kind: "pick",
-          choices: hostSelectorChoices(choices, hosts, "Local"),
+          choices: hostSelectorChoices(choices, hosts, t("new_shell.local"), locale),
         }}
         onSubmit={(key) => {
           if (closedRef.current) return;
@@ -178,15 +181,15 @@ export function NewShellFlow({
   return (
     <QuickInput
       key={`directory:${targetKey(target)}`}
-      title="New shell — working directory · 2/2"
-      description={`Create on ${targetLabel(target)}. Leave blank for its home directory.${target.kind === "ssh" ? " You’ll be prompted if SSH authentication is needed." : ""}`}
-      error={error}
+      title={t("new_shell.directory")}
+      description={t("new_shell.directory_hint", { host: targetLabel(target, locale), ssh: String(target.kind === "ssh") })}
+      error={error ? formatText(error) : null}
       mode={{
         kind: "input",
-        label: "Working directory",
+        label: t("new_shell.working_directory"),
         initial_value: workingDirectory,
-        placeholder: "home directory",
-        submit_label: "Create shell",
+        placeholder: t("new_shell.home_directory"),
+        submit_label: t("new_shell.create"),
       }}
       onChange={setWorkingDirectory}
       onSubmit={submit}

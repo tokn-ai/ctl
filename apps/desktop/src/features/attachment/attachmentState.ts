@@ -1,3 +1,4 @@
+import { message, translate, type DisplayText, type LocalizedMessage, type Locale } from "../i18n/messages";
 import type { AttachmentViewState, OpenAttachmentResponse, SessionSummary } from "../../lib/types";
 import { canAutomaticallyRecoverAttachment } from "./attachmentRecovery";
 import { sameSession } from "../targets/targets";
@@ -7,7 +8,7 @@ export type ConnectionIntent = "attach" | "reconnect";
 export type AttachmentTransition =
   | { type: "begin"; intent: ConnectionIntent; session: SessionSummary; resume_from: string | null; resize_with_window: boolean; resize_control_desired?: boolean }
   | { type: "attached"; response: OpenAttachmentResponse; resize_with_window: boolean; layout_request_pending?: boolean; history_loading?: boolean }
-  | { type: "failed"; code: string | null; message: string; resume_from: string | null }
+  | { type: "failed"; code: string | null; message: DisplayText; resume_from: string | null }
   | { type: "closed"; reason: "connection_closed" | "detached" | "session_ended"; next_sequence: string | null }
   | { type: "ended"; exit_code: number | null }
   | { type: "retry_scheduled"; retry_at_ms: number }
@@ -15,16 +16,16 @@ export type AttachmentTransition =
   | { type: "reset" };
 
 const EMPTY_LEASE = { held: false, owned_by_client: false };
-const RESIZE_CONTROL_HELD_MESSAGE = "Another attachment holds resize control.";
-const RESIZE_CONTROL_AVAILABLE_MESSAGE = "Resize control is available. Take resize control to resize panes.";
+const RESIZE_CONTROL_HELD = "attachment.resize_held";
+const RESIZE_CONTROL_AVAILABLE = "attachment.resize_available";
 
-export function resizeControlNotice(held: boolean): string {
-  return held ? RESIZE_CONTROL_HELD_MESSAGE : RESIZE_CONTROL_AVAILABLE_MESSAGE;
+export function resizeControlNotice(held: boolean): LocalizedMessage {
+  return message(held ? RESIZE_CONTROL_HELD : RESIZE_CONTROL_AVAILABLE);
 }
 
 /** Identify generated ownership notices without concealing other action errors. */
-export function isResizeControlNotice(message: string | null): boolean {
-  return message === RESIZE_CONTROL_HELD_MESSAGE || message === RESIZE_CONTROL_AVAILABLE_MESSAGE;
+export function isResizeControlNotice(text: DisplayText | null): boolean {
+  return text !== null && typeof text !== "string" && (text.id === RESIZE_CONTROL_HELD || text.id === RESIZE_CONTROL_AVAILABLE);
 }
 
 export function initialAttachmentState(): AttachmentViewState {
@@ -81,7 +82,7 @@ export function transitionAttachment(state: AttachmentViewState, event: Attachme
       if (state.phase !== "attached") return state;
       return {
       ...offline, phase: "ended", error_code: null, resize_with_window: false, resize_control_desired: false,
-      message_kind: null, message: event.exit_code === null ? "Session ended." : `Session ended with exit code ${event.exit_code}.`,
+      message_kind: null, message: event.exit_code === null ? message("attachment.ended") : message("attachment.exit_code", { code: event.exit_code }),
     };
     case "failed":
       if (state.phase === "ended" || state.phase === "idle") return state;
@@ -96,7 +97,7 @@ export function transitionAttachment(state: AttachmentViewState, event: Attachme
         history_loading: event.reason === "session_ended" && state.history_loading,
         resize_with_window: event.reason === "connection_closed" && state.resize_with_window,
         resize_control_desired: event.reason === "connection_closed" && state.resize_control_desired,
-        message_kind: null, message: event.reason === "connection_closed" ? "Connection interrupted." : event.reason === "session_ended" ? "Session ended." : null,
+        message_kind: null, message: event.reason === "connection_closed" ? message("attachment.connection_interrupted") : event.reason === "session_ended" ? message("attachment.ended") : null,
       };
     case "retry_scheduled":
       if (!state.session || !canAutomaticallyRecoverAttachment(state.error_code) ||
@@ -107,20 +108,11 @@ export function transitionAttachment(state: AttachmentViewState, event: Attachme
       return {
         ...offline, phase: "error", error_code: "automatic_reconnect_timeout",
         history_loading: false,
-        message_kind: null, message: "Automatic retries stopped. The remote session's current state is unknown. Retry to reconnect.",
+        message_kind: null, message: message("attachment.retries_exhausted"),
       };
   }
 }
 
-export function attachmentPhaseLabel(phase: AttachmentViewState["phase"]): string {
-  switch (phase) {
-    case "idle": return "Not attached";
-    case "connecting": return "Connecting…";
-    case "reconnecting": return "Reconnecting…";
-    case "retry_wait": return "Waiting to retry…";
-    case "attached": return "Attached";
-    case "disconnected": return "Disconnected";
-    case "ended": return "Session ended";
-    case "error": return "Connection failed";
-  }
+export function attachmentPhaseLabel(phase: AttachmentViewState["phase"], locale: Locale = "en"): string {
+  return translate(locale, `attachment_phase.${phase}`);
 }

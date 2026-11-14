@@ -1,8 +1,10 @@
+import { message, type DisplayText } from "../../features/i18n/messages";
+import { useLocale } from "../../features/i18n/LocaleContext";
 import { vpnNeedsSignIn, vpnRouteDetail } from "../../features/vpn/status";
 import { isHostRouteStep, isVpnRouteStep, orderedSshRoute, resolvedVpnExecutionTarget } from "../../features/workspace/sshRoute";
 import { resolveSshGateways } from "../../features/workspace/workspaceModel";
 import { openVpnSignIn, stopVpn, vpnStatus } from "../../lib/tauri";
-import { errorMessage } from "../../lib/errors";
+import { localizedErrorText } from "../../lib/errors";
 import { useMemo, useState } from "react";
 import type {
   SshConnectionTarget,
@@ -96,10 +98,11 @@ export function GatewayRouteDialog({
   readonlyExisting = false,
   readonlyGatewayIds,
   requireGateway = false,
-  closeLabel = "Close",
+  closeLabel,
   onSave,
   onClose,
 }: Props) {
+  const { t, locale, formatText } = useLocale();
   const [draftGateways, setDraftGateways] = useState<WorkspaceSshGateway[]>(
     () => gateways.map((gateway) => ({ ...gateway })),
   );
@@ -116,7 +119,7 @@ export function GatewayRouteDialog({
     route.some(isVpnRouteStep);
   const [editing, setEditing] = useState<GatewayDraft | null>(null);
   const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<DisplayText | null>(null);
   const usage_targets = useMemo(() => [...targets, ...hosts.flatMap((host) =>
     host.connection_methods.map((method) => ({ ...method.target, host_id: host.host_id })))], [targets, hosts]);
   const usage = useMemo(() => gatewayUsage(usage_targets, gateways, hosts), [usage_targets, gateways, hosts]);
@@ -139,7 +142,7 @@ export function GatewayRouteDialog({
         error: null,
       };
     } catch (failure) {
-      return { gateways: [], error: failure instanceof Error ? failure.message : String(failure) };
+      return { gateways: [], error: localizedErrorText(failure) };
     }
   }
 
@@ -175,7 +178,7 @@ export function GatewayRouteDialog({
     if (!editing) return;
     const gateway = fromDraft(editing);
     if (!gateway) {
-      setError("Enter a name, gateway address, and a valid port from 1 to 65535.");
+      setError(message("route.invalid_fields"));
       return;
     }
     const duplicate = draftGateways.some(
@@ -184,7 +187,7 @@ export function GatewayRouteDialog({
         item.name.toLocaleLowerCase() === gateway.name.toLocaleLowerCase(),
     );
     if (duplicate) {
-      setError("Gateway names must be unique.");
+      setError(message("route.duplicate_name"));
       return;
     }
     const existing = draftGateways.find(
@@ -228,19 +231,19 @@ export function GatewayRouteDialog({
 
   async function save() {
     if (missingVpn) {
-      setError("The saved VPN is unavailable. Choose another connection before saving.");
+      setError(message("route.vpn_unavailable_save"));
       return;
     }
     for (const [index, step] of route.entries()) {
       if ("gateway_id" in step && !draftGateways.some((gateway) => gateway.gateway_id === step.gateway_id)) {
-        setError("A saved gateway is unavailable. Remove or replace it before saving.");
+        setError(message("route.gateway_unavailable_save"));
         return;
       }
       if (!isVpnRouteStep(step) || index === 0) continue;
       const preceding = route[index - 1];
       if (isVpnRouteStep(preceding) || "gateway_id" in preceding &&
         draftGateways.find((gateway) => gateway.gateway_id === preceding.gateway_id)?.kind === "socks5") {
-        setError("A remote VPN must immediately follow an SSH gateway. Consecutive VPN steps are not supported.");
+        setError(message("route.invalid_remote_vpn"));
         return;
       }
     }
@@ -249,7 +252,7 @@ export function GatewayRouteDialog({
       return;
     }
     if (requireGateway && route.length === 0) {
-      setError("Add at least one gateway to this route.");
+      setError(message("route.gateway_required"));
       return;
     }
     setSaving(true);
@@ -258,7 +261,7 @@ export function GatewayRouteDialog({
       if (onlyVpn) await onSave(draftGateways, [], onlyVpn);
       else await onSave(draftGateways, route);
     } catch (failure) {
-      setError(errorMessage(failure));
+      setError(localizedErrorText(failure));
       setSaving(false);
     }
   }
@@ -267,7 +270,7 @@ export function GatewayRouteDialog({
     const sharedCount = usage.get(editing.gateway_id) ?? 0;
     return (
       <QuickInputFrame
-        title="Edit gateway"
+        title={t("route.edit_gateway")}
         onDismiss={() => setEditing(null)}
         onKeyDown={(event) => {
           if (event.key === "Escape") {
@@ -278,20 +281,20 @@ export function GatewayRouteDialog({
         className="gateway-route-dialog"
       >
         <header className="quick-input-heading">
-          <strong>{sharedCount > 1 ? "Edit shared gateway" : "Gateway"}</strong>
-          <button type="button" onClick={() => setEditing(null)}>Back</button>
+          <strong>{sharedCount > 1 ? t("route.edit_shared") : t("route.gateway")}</strong>
+          <button type="button" onClick={() => setEditing(null)}>{t("route.back")}</button>
         </header>
         {sharedCount > 1 ? (
           <InlineFeedback severity="warning">
-            This gateway is used by {sharedCount} hosts. Saving changes updates every route that references it.
+            {t("route.gateway_in_use", { count: sharedCount })}
           </InlineFeedback>
         ) : null}
         <GatewayForm draft={editing} onChange={setEditing} />
-        {error ? <InlineFeedback>{error}</InlineFeedback> : null}
+        {error ? <InlineFeedback>{formatText(error)}</InlineFeedback> : null}
         <footer className="gateway-dialog-actions">
-          <button type="button" onClick={() => setEditing(null)}>Cancel</button>
+          <button type="button" onClick={() => setEditing(null)}>{t("route.cancel")}</button>
           <button type="button" className="button-primary" onClick={saveGateway}>
-            Save gateway
+            {t("route.save_gateway")}
           </button>
         </footer>
       </QuickInputFrame>
@@ -300,7 +303,7 @@ export function GatewayRouteDialog({
 
   return (
     <QuickInputFrame
-      title={title ?? (hostSetup ? "Add host with gateways" : "Connection route")}
+      title={title ?? (hostSetup ? t("route.add_host_with_gateways") : t("route.title"))}
       onDismiss={onClose}
       onKeyDown={(event) => {
         if (event.key === "Escape" && !saving) {
@@ -311,24 +314,24 @@ export function GatewayRouteDialog({
       className="gateway-route-dialog"
     >
       <header className="quick-input-heading">
-        <strong>{title ?? (hostSetup ? "Add host with gateways" : `Connection route · ${target.destination}`)}</strong>
-        <button type="button" onClick={onClose} disabled={saving}>{closeLabel}</button>
+        <strong>{title ?? (hostSetup ? t("route.add_host_with_gateways") : t("route.for_destination", { destination: target.destination }))}</strong>
+        <button type="button" onClick={onClose} disabled={saving}>{closeLabel ?? t("route.close")}</button>
       </header>
       {hostSetup ? (
-        <section className="gateway-host-form" aria-label="Host details">
+        <section className="gateway-host-form" aria-label={t("route.host_details")}>
           <label>
-            SSH host or config alias
+            {t("route.ssh_address")}
             <input
               autoFocus
               list="routed-host-suggestions"
               value={hostSetup.address}
               onChange={(event) => hostSetup.onAddressChange(event.target.value)}
-              placeholder={hostSetup.default_address ? `Preferred: ${hostSetup.default_address}` : "operator@server.internal:2222"}
+              placeholder={hostSetup.default_address ? t("route.preferred_address", { address: hostSetup.default_address }) : "operator@server.internal:2222"}
               aria-describedby={hostSetup.default_address ? "preferred-ssh-endpoint" : undefined}
             />
           </label>
           {hostSetup.default_address ? <p id="preferred-ssh-endpoint">
-            Leave blank to use the preferred connection's SSH endpoint and settings.
+            {t("route.use_preferred")}
           </p> : null}
           <datalist id="routed-host-suggestions">
             {hostSetup.suggestions.map((suggestion) => (
@@ -336,18 +339,18 @@ export function GatewayRouteDialog({
             ))}
           </datalist>
           <label>
-            SSH alias (optional)
+            {t("route.optional_alias")}
             <input
               value={hostSetup.alias}
               onChange={(event) => hostSetup.onAliasChange(event.target.value)}
-              placeholder={hostSetup.default_alias ? `Defaults to ${hostSetup.default_alias}` : "Defaults to the SSH host"}
+              placeholder={hostSetup.default_alias ? t("route.default_alias", { alias: hostSetup.default_alias }) : t("route.default_host")}
             />
           </label>
           <label>
-            Identity file (optional)
+            {t("route.optional_identity")}
             <input
               list="connection-identity-suggestions"
-              aria-label="Identity file (optional)"
+              aria-label={t("route.optional_identity")}
               value={hostSetup.identity_file}
               onChange={(event) => hostSetup.onIdentityFileChange(event.target.value)}
               placeholder={hostSetup.default_identity_file ?? "~/.ssh/id_ed25519"}
@@ -355,7 +358,7 @@ export function GatewayRouteDialog({
             <datalist id="connection-identity-suggestions">
               {hostSetup.identity_files?.map((file) => <option key={file.path} value={file.path}>{file.display_path}</option>)}
             </datalist>
-            {hostSetup.identity_loading ? <span>Loading identity files…</span> : null}
+            {hostSetup.identity_loading ? <span>{t("route.loading_identity")}</span> : null}
             {hostSetup.identity_warning ? <span role="status">{hostSetup.identity_warning}</span> : null}
           </label>
           <SshRemotePlatformSelect value={hostSetup.remote_platform} onChange={hostSetup.onRemotePlatformChange} />
@@ -363,19 +366,19 @@ export function GatewayRouteDialog({
             <label className="gateway-checkbox-option">
               <input
                 type="checkbox"
-                aria-label="Use SSH-config master"
+                aria-label={t("route.ssh_master")}
                 aria-describedby="ssh-config-master-description"
                 checked={hostSetup.ssh_config_master.checked && !privateMaster}
                 disabled={privateMaster}
                 onChange={(event) => hostSetup.ssh_config_master?.onChange(event.target.checked)}
               />
-              Use SSH-config master
+              {t("route.ssh_master")}
               <small id="ssh-config-master-description">
                 {privateMaster
-                  ? "VPN, SOCKS5, and hostname override routes use a private SSH master to preserve the selected route."
+                  ? t("route.private_master_route")
                   : hostSetup.ssh_config_master.checked
-                    ? "Use OpenSSH sharing settings, with an ctmux private master when sharing is not configured."
-                    : "Use an ctmux private master for this connection."}
+                    ? t("route.ssh_master_description")
+                    : t("route.private_master")}
               </small>
             </label>
           ) : null}
@@ -383,14 +386,14 @@ export function GatewayRouteDialog({
             <label className="gateway-checkbox-option">
               <input
                 type="checkbox"
-                aria-label="Also save to OpenSSH config"
+                aria-label={t("route.export_ssh")}
                 checked={hostSetup.export_to_ssh_config.checked && route.length === 0 && hostSetup.export_to_ssh_config.allowed}
                 disabled={route.length > 0 || !hostSetup.export_to_ssh_config.allowed}
                 onChange={(event) => hostSetup.export_to_ssh_config?.onChange(event.target.checked)}
               />
-              Also save to OpenSSH config
+              {t("route.export_ssh")}
               {route.length > 0 || !hostSetup.export_to_ssh_config.allowed
-                ? <small>Available for a new direct SSH alias.</small>
+                ? <small>{t("route.export_ssh_description")}</small>
                 : null}
             </label>
           ) : null}
@@ -399,9 +402,9 @@ export function GatewayRouteDialog({
       ) : null}
       <div className="gateway-host-form">
         <label>
-          Connect through
+          {t("route.connect_through")}
           <select
-            aria-label="Connect through"
+            aria-label={t("route.connect_through")}
             value={onlyVpn ? `vpn:${onlyVpn}` : route.length ? "gateway_route" : "direct"}
             onChange={(event) => {
               const value = event.target.value;
@@ -411,31 +414,31 @@ export function GatewayRouteDialog({
                 : value.startsWith("gateway:") ? [{ gateway_id: value.slice(8), mode: "automatic" }] : []);
             }}
           >
-            <option value="direct">Direct</option>
-            {route.length ? <option value="gateway_route">Gateway route · {route.length} hop{route.length === 1 ? "" : "s"}</option> : null}
-            {onlyVpn && missingVpn ? <option value={`vpn:${onlyVpn}`}>Unavailable saved VPN</option> : null}
-            {vpn_connections.length ? <optgroup label="Saved VPNs">
+            <option value="direct">{t("route.direct")}</option>
+            {route.length ? <option value="gateway_route">{t("route.hop_count", { count: route.length })}</option> : null}
+            {onlyVpn && missingVpn ? <option value={`vpn:${onlyVpn}`}>{t("route.missing_vpn")}</option> : null}
+            {vpn_connections.length ? <optgroup label={t("route.saved_vpns")}>
               {vpn_connections.map((connection) => <option key={connection.connection_id} value={`vpn:${connection.connection_id}`}>
-                {connection.name} · {vpnRouteDetail(connection, vpn_statuses)}
+                {connection.name} · {vpnRouteDetail(connection, vpn_statuses, locale)}
               </option>)}
             </optgroup> : null}
-            {draftGateways.length ? <optgroup label="Saved gateways">
+            {draftGateways.length ? <optgroup label={t("route.saved_gateways")}>
               {draftGateways.map((gateway) => <option key={gateway.gateway_id} value={`gateway:${gateway.gateway_id}`}>
                 {gateway.name} · {gateway.kind === "socks5" ? "SOCKS5" : "SSH"}
               </option>)}
             </optgroup> : null}
           </select>
         </label>
-        {vpn_loading ? <p role="status">Loading VPN connections…</p> : null}
-        {vpn_error ? <InlineFeedback severity="warning">Could not load VPN connections: {vpn_error}</InlineFeedback> : null}
-        {missingVpn ? <InlineFeedback>The saved VPN is unavailable. Choose another connection before saving.</InlineFeedback> : null}
+        {vpn_loading ? <p role="status">{t("route.loading_vpn")}</p> : null}
+        {vpn_error ? <InlineFeedback severity="warning">{t("route.vpn_load_failed", { detail: vpn_error })}</InlineFeedback> : null}
+        {missingVpn ? <InlineFeedback>{t("route.vpn_unavailable_save")}</InlineFeedback> : null}
       </div>
       <p className="quick-input-description">
-        Add saved hosts, SSH gateways, and VPNs in connection order. Each VPN starts when needed on the preceding SSH host, or on this computer when it is first. VPNs keep running until disconnected.
+        {t("route.description")}
       </p>
 
       <div className="gateway-route-path">
-        <RouteNode label="This computer" detail="Start of route" />
+        <RouteNode label={t("route.computer")} detail={t("route.start")} />
         {route.map((step, index) => {
           if (isVpnRouteStep(step)) {
             const vpn = vpn_connections.find((connection) => connection.connection_id === step.vpn_connection_id);
@@ -443,20 +446,20 @@ export function GatewayRouteDialog({
               .find((gateway) => gateway.kind !== "vpn" && gateway.kind !== "socks5");
             const execution = resolveRoute(route.slice(0, index + 1)).gateways;
             const owner = resolvedVpnExecutionTarget(execution, execution.length - 1);
-            const ownerLabel = previousSsh?.name ?? "This computer";
-            const name = vpn?.name ?? "Unavailable saved VPN";
+            const ownerLabel = previousSsh?.name ?? t("route.computer");
+            const name = vpn?.name ?? t("route.missing_vpn");
             return (
               <div className="gateway-route-step" key={`vpn:${index}:${step.vpn_connection_id}`}>
                 <div className="gateway-route-connector" aria-hidden="true">↓</div>
                 <div className="gateway-route-card">
-                  <div><strong>{index + 1}. {name}</strong><small>VPN · Runs on {ownerLabel}</small></div>
+                  <div><strong>{index + 1}. {name}</strong><small>{t("route.vpn_on", { owner: ownerLabel })}</small></div>
                   <div className="gateway-route-controls">
-                    <button type="button" onClick={() => move(index, -1)} disabled={index === 0} aria-label={`Move ${name} up`}>↑</button>
-                    <button type="button" onClick={() => move(index, 1)} disabled={index === route.length - 1} aria-label={`Move ${name} down`}>↓</button>
-                    <button type="button" onClick={() => setRoute((current) => current.filter((_, itemIndex) => itemIndex !== index))} aria-label={`Remove ${name} from route`}>Remove</button>
+                    <button type="button" onClick={() => move(index, -1)} disabled={index === 0} aria-label={t("route.move_up", { name: name })}>↑</button>
+                    <button type="button" onClick={() => move(index, 1)} disabled={index === route.length - 1} aria-label={t("route.move_down", { name: name })}>↓</button>
+                    <button type="button" onClick={() => setRoute((current) => current.filter((_, itemIndex) => itemIndex !== index))} aria-label={t("route.remove_from_route", { name: name })}>{t("route.remove")}</button>
                   </div>
                   {owner && vpn ? <RemoteVpnControls key={JSON.stringify(owner)} connection={vpn} owner={owner} owner_label={ownerLabel} />
-                    : index === 0 && vpn ? <small>{vpnRouteDetail(vpn, vpn_statuses)} · Manage from the VPN page</small> : null}
+                    : index === 0 && vpn ? <small>{t("route.manage_vpn", { detail: vpnRouteDetail(vpn, vpn_statuses, locale) })}</small> : null}
                 </div>
               </div>
             );
@@ -464,7 +467,7 @@ export function GatewayRouteDialog({
           if (isHostRouteStep(step)) {
             const host = hosts.find((candidate) => candidate.host_id === step.host_id);
             const method = host?.connection_methods.find((candidate) => candidate.method_id === step.method_id);
-            const name = host?.name ?? "Unavailable saved host";
+            const name = host?.name ?? t("route.missing_host");
             const prefix = resolveRoute(route.slice(0, index + 1));
             const inherited_start = resolveRoute(route.slice(0, index)).gateways.length;
             const inherited = prefix.gateways.slice(inherited_start, -1);
@@ -473,13 +476,13 @@ export function GatewayRouteDialog({
               <div className="gateway-route-card">
                 <div>
                   <strong>{index + 1}. {name}</strong>
-                  <small>Saved host · {method?.name ?? "Unavailable connection method"}</small>
+                  <small>{t("route.saved_host_method", { method: method?.name ?? t("route.missing_method") })}</small>
                   {method ? <small>{endpointLabel({ ...method.target, gateway_id: step.host_id, name })}</small> : null}
-                  <small>Linked to this method. Changes to its settings update future connections.</small>
-                  {inherited.length ? <small>Via {inherited.map((gateway) => gateway.kind === "vpn"
-                    ? vpn_connections.find((connection) => connection.connection_id === gateway.vpn_connection_id)?.name ?? "Unavailable saved VPN"
-                    : gateway.name).join(" → ")}</small> : null}
-                  {prefix.error ? <small role="status">{prefix.error}</small> : null}
+                  <small>{t("route.linked_method")}</small>
+                  {inherited.length ? <small>{t("route.via_vpn", { vpn: inherited.map((gateway) => gateway.kind === "vpn"
+                    ? vpn_connections.find((connection) => connection.connection_id === gateway.vpn_connection_id)?.name ?? t("route.missing_vpn")
+                    : gateway.name).join(" → ") })}</small> : null}
+                  {prefix.error ? <small role="status">{formatText(prefix.error)}</small> : null}
                 </div>
                 {inherited.map((gateway, inherited_index) => {
                   if (gateway.kind !== "vpn") return null;
@@ -487,33 +490,33 @@ export function GatewayRouteDialog({
                   if (!vpn) return null;
                   const expanded_index = inherited_start + inherited_index;
                   const owner = resolvedVpnExecutionTarget(prefix.gateways, expanded_index);
-                  const owner_label = prefix.gateways[expanded_index - 1]?.name ?? "This computer";
+                  const owner_label = prefix.gateways[expanded_index - 1]?.name ?? t("route.computer");
                   return <div className="gateway-inherited-vpn" key={`inherited-vpn:${expanded_index}`}>
-                    <small>{vpn.name} · Runs on {owner_label}</small>
+                    <small>{t("route.inherited_vpn", { name: vpn.name, owner: owner_label })}</small>
                     {owner ? <RemoteVpnControls key={JSON.stringify(owner)} connection={vpn} owner={owner} owner_label={owner_label} />
-                      : <small>{vpnRouteDetail(vpn, vpn_statuses)} · Manage from the VPN page</small>}
+                      : <small>{t("route.manage_vpn", { detail: vpnRouteDetail(vpn, vpn_statuses, locale) })}</small>}
                   </div>;
                 })}
                 <div className="gateway-route-controls">
-                  <button type="button" onClick={() => move(index, -1)} disabled={index === 0} aria-label={`Move ${name} up`}>↑</button>
-                  <button type="button" onClick={() => move(index, 1)} disabled={index === route.length - 1} aria-label={`Move ${name} down`}>↓</button>
-                  <button type="button" onClick={() => setRoute((current) => current.filter((_, itemIndex) => itemIndex !== index))} aria-label={`Remove ${name} from route`}>Remove</button>
+                  <button type="button" onClick={() => move(index, -1)} disabled={index === 0} aria-label={t("route.move_up", { name: name })}>↑</button>
+                  <button type="button" onClick={() => move(index, 1)} disabled={index === route.length - 1} aria-label={t("route.move_down", { name: name })}>↓</button>
+                  <button type="button" onClick={() => setRoute((current) => current.filter((_, itemIndex) => itemIndex !== index))} aria-label={t("route.remove_from_route", { name: name })}>{t("route.remove")}</button>
                 </div>
                 {host ? <label>
-                  {name} connection method
+                  {t("route.method_label", { name })}
                   <select value={step.method_id} onChange={(event) => setRoute((current) => current.map((item, itemIndex) =>
                     itemIndex === index ? { ...step, method_id: event.target.value } : item))}>
-                    {!method ? <option value={step.method_id}>Unavailable connection method</option> : null}
+                    {!method ? <option value={step.method_id}>{t("route.missing_method")}</option> : null}
                     {host.connection_methods.map((candidate) => <option key={candidate.method_id} value={candidate.method_id}>{candidate.name}</option>)}
                   </select>
                 </label> : null}
                 <label>
-                  Connection to next host
+                  {t("route.next_connection")}
                   <select value={step.mode} onChange={(event) => setRoute((current) => current.map((item, itemIndex) =>
                     itemIndex === index ? { ...step, mode: event.target.value as SshGatewayMode } : item))}>
-                    <option value="automatic">Automatic · native forwarding</option>
-                    <option value="native_only">Native SSH forwarding only</option>
-                    <option value="agent_relay_only" disabled>Managed agent relay only · coming next</option>
+                    <option value="automatic">{t("route.automatic_forward")}</option>
+                    <option value="native_only">{t("route.ssh_forward")}</option>
+                    <option value="agent_relay_only" disabled>{t("route.managed_relay")}</option>
                   </select>
                 </label>
               </div>
@@ -525,8 +528,8 @@ export function GatewayRouteDialog({
           if (!gateway) return <div className="gateway-route-step" key={step.gateway_id}>
             <div className="gateway-route-connector" aria-hidden="true">↓</div>
             <div className="gateway-route-card">
-              <strong>{index + 1}. Unavailable saved gateway</strong>
-              <button type="button" onClick={() => setRoute((current) => current.filter((_, itemIndex) => itemIndex !== index))}>Remove unavailable gateway</button>
+              <strong>{t("route.missing_gateway", { index: index + 1 })}</strong>
+              <button type="button" onClick={() => setRoute((current) => current.filter((_, itemIndex) => itemIndex !== index))}>{t("route.remove_missing_gateway")}</button>
             </div>
           </div>;
           return (
@@ -538,24 +541,24 @@ export function GatewayRouteDialog({
                   <small>{endpointLabel(gateway)}</small>
                 </div>
                 <div className="gateway-route-controls">
-                  <button type="button" onClick={() => move(index, -1)} disabled={index === 0} aria-label={`Move ${gateway.name} up`}>↑</button>
-                  <button type="button" onClick={() => move(index, 1)} disabled={index === route.length - 1} aria-label={`Move ${gateway.name} down`}>↓</button>
+                  <button type="button" onClick={() => move(index, -1)} disabled={index === 0} aria-label={t("route.move_up", { name: gateway.name })}>↑</button>
+                  <button type="button" onClick={() => move(index, 1)} disabled={index === route.length - 1} aria-label={t("route.move_down", { name: gateway.name })}>↓</button>
                   <button
                     type="button"
                     onClick={() => editGateway(gateway)}
                     disabled={readonlyExisting && existingIds.has(gateway.gateway_id)}
-                  >Edit</button>
+                  >{t("route.edit")}</button>
                   <button
                     type="button"
                     onClick={() => setRoute((current) =>
                       current.filter((_, itemIndex) => itemIndex !== index))}
-                    aria-label={`Remove ${gateway.name} from route`}
+                    aria-label={t("route.remove_from_route", { name: gateway.name })}
                   >
-                    Remove
+                    {t("route.remove")}
                   </button>
                 </div>
                 {gateway.kind !== "socks5" ? <label>
-                  Connection to next host
+                  {t("route.next_connection")}
                   <select
                     value={step.mode}
                     onChange={(event) => setRoute((current) =>
@@ -564,22 +567,22 @@ export function GatewayRouteDialog({
                           ? { ...item, mode: event.target.value as SshGatewayMode }
                           : item))}
                   >
-                    <option value="automatic">Automatic · native forwarding</option>
-                    <option value="native_only">Native SSH forwarding only</option>
-                    <option value="agent_relay_only" disabled>Managed agent relay only · coming next</option>
+                    <option value="automatic">{t("route.automatic_forward")}</option>
+                    <option value="native_only">{t("route.ssh_forward")}</option>
+                    <option value="agent_relay_only" disabled>{t("route.managed_relay")}</option>
                   </select>
-                </label> : <small>SOCKS5 CONNECT to the next hop</small>}
+                </label> : <small>{t("route.socks_forward")}</small>}
               </div>
             </div>
           );
         })}
         <div className="gateway-route-connector" aria-hidden="true">↓</div>
-        <RouteNode label={hostSetup?.address.trim() || target.destination} detail="Destination" />
+        <RouteNode label={hostSetup?.address.trim() || target.destination} detail={t("route.destination")} />
       </div>
 
       {saved_hosts.length ? <section className="gateway-library" aria-labelledby="host-library-heading">
-        <header><strong id="host-library-heading">Saved hosts</strong></header>
-        <p>Choose a host and connection method. Its saved route is included before this hop.</p>
+        <header><strong id="host-library-heading">{t("route.saved_hosts")}</strong></header>
+        <p>{t("route.pick_saved_host")}</p>
         <div className="gateway-library-list gateway-host-library">
           {saved_hosts.map((host) => {
             const method_id = selectedHostMethod(host);
@@ -588,18 +591,18 @@ export function GatewayRouteDialog({
               : resolveRoute([...route, { host_id: host.host_id, method_id, mode: "automatic" }]).error;
             return <div key={host.host_id}>
               <span><strong>{host.name}</strong>{method ? <small>{endpointLabel({ ...method.target, gateway_id: host.host_id, name: host.name })}</small> : null}
-                {reason ? <small role="status">{reason}</small> : null}</span>
+                {reason ? <small role="status">{formatText(reason)}</small> : null}</span>
               <label>
-                Connection method
-                <select aria-label={`Connection method for ${host.name}`} value={method_id}
+                {t("route.method")}
+                <select aria-label={t("route.host_method", { host: host.name })} value={method_id}
                   onChange={(event) => setHostMethods((current) => ({ ...current, [host.host_id]: event.target.value }))}>
                   {host.connection_methods.map((candidate) => <option key={candidate.method_id} value={candidate.method_id}>
-                    {candidate.name}{candidate.method_id === host.preferred_method_id ? " · Preferred" : ""}
+                    {candidate.method_id === host.preferred_method_id ? t("route.preferred_method", { name: candidate.name }) : candidate.name}
                   </option>)}
                 </select>
               </label>
-              <button type="button" aria-label={`Add ${host.name} as hop`} onClick={() => addHost(host)}
-                disabled={routeHostIds.has(host.host_id) || Boolean(reason)}>{routeHostIds.has(host.host_id) ? "Added" : "Add host"}</button>
+              <button type="button" aria-label={t("route.add_hop", { host: host.name })} onClick={() => addHost(host)}
+                disabled={routeHostIds.has(host.host_id) || Boolean(reason)}>{routeHostIds.has(host.host_id) ? t("route.added") : t("route.add_host")}</button>
             </div>;
           })}
         </div>
@@ -607,13 +610,13 @@ export function GatewayRouteDialog({
 
       <section className="gateway-library" aria-labelledby="gateway-library-heading">
         <header>
-          <strong id="gateway-library-heading">Saved gateways</strong>
+          <strong id="gateway-library-heading">{t("route.saved_gateways")}</strong>
           <button type="button" onClick={() => setEditing(emptyDraft())} disabled={route.length >= 8}>
-            + New gateway
+            {t("route.new_gateway")}
           </button>
         </header>
         {draftGateways.length === 0 ? (
-          <p>No saved gateways. Choose a saved host or add a gateway to build this route.</p>
+          <p>{t("route.no_saved_gateways")}</p>
         ) : (
           <div className="gateway-library-list">
             {draftGateways.map((gateway) => (
@@ -623,20 +626,20 @@ export function GatewayRouteDialog({
                   type="button"
                   onClick={() => editGateway(gateway)}
                   disabled={readonlyExisting && existingIds.has(gateway.gateway_id)}
-                >Edit</button>
+                >{t("route.edit")}</button>
                 <button
                   type="button"
                   onClick={() => deleteGateway(gateway)}
                   disabled={(readonlyExisting && existingIds.has(gateway.gateway_id)) ||
                     (otherUsage.get(gateway.gateway_id) ?? 0) > 0 || routeIds.has(gateway.gateway_id)}
                   title={(otherUsage.get(gateway.gateway_id) ?? 0) > 0 || routeIds.has(gateway.gateway_id)
-                    ? "Remove this gateway from every route before deleting it."
-                    : "Delete saved gateway"}
+                    ? t("route.remove_gateway_first")
+                    : t("route.delete_gateway")}
                 >
-                  Delete
+                  {t("route.delete")}
                 </button>
                 <button type="button" onClick={() => addExisting(gateway)} disabled={routeIds.has(gateway.gateway_id) || route.length >= 8}>
-                  {routeIds.has(gateway.gateway_id) ? "Added" : "Add"}
+                  {routeIds.has(gateway.gateway_id) ? t("route.added") : t("route.add")}
                 </button>
               </div>
             ))}
@@ -644,24 +647,24 @@ export function GatewayRouteDialog({
         )}
       </section>
       {vpn_connections.length ? <section className="gateway-library" aria-labelledby="vpn-library-heading">
-        <header><strong id="vpn-library-heading">Saved VPNs</strong></header>
+        <header><strong id="vpn-library-heading">{t("route.saved_vpns")}</strong></header>
         <div className="gateway-library-list">
           {vpn_connections.map((connection) => <div key={connection.connection_id}>
-            <span><strong>{connection.name}</strong><small>Starts on the preceding SSH host</small></span>
-            <button type="button" aria-label={`Add ${connection.name} to route`}
+            <span><strong>{connection.name}</strong><small>{t("route.vpn_start_host")}</small></span>
+            <button type="button" aria-label={t("route.add_vpn_route", { vpn: connection.name })}
               onClick={() => setRoute((current) => [...current, { vpn_connection_id: connection.connection_id }])}
               disabled={route.length >= 8 || !canAddVpn}>
-              Add VPN
+              {t("route.add_vpn")}
             </button>
           </div>)}
         </div>
       </section> : null}
 
-      {error && !missingVpn ? <InlineFeedback>{error}</InlineFeedback> : null}
+      {error && !missingVpn ? <InlineFeedback>{formatText(error)}</InlineFeedback> : null}
       <footer className="gateway-dialog-actions">
-        <button type="button" onClick={onClose} disabled={saving}>{closeLabel}</button>
+        <button type="button" onClick={onClose} disabled={saving}>{closeLabel ?? t("route.close")}</button>
         <button type="button" className="button-primary" onClick={() => void save()} disabled={saving || missingVpn || (requireGateway && route.length === 0)}>
-          {saving ? (hostSetup ? "Connecting…" : "Saving…") : (submitLabel ?? (hostSetup ? "Connect" : "Done"))}
+          {saving ? (hostSetup ? t("route.connecting") : t("route.saving")) : (submitLabel ?? (hostSetup ? t("route.connect") : t("route.done")))}
         </button>
       </footer>
     </QuickInputFrame>
@@ -677,12 +680,13 @@ function RemoteVpnControls({ connection, owner, owner_label }: {
   owner: SshConnectionTarget;
   owner_label: string;
 }) {
+  const { t, locale, formatText } = useLocale();
   const [status, setStatus] = useState<VpnStatus | null>(null);
   const [checked, setChecked] = useState(false);
   const [unavailable, setUnavailable] = useState(false);
   const [inventory_warnings, setInventoryWarnings] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<DisplayText | null>(null);
   async function perform(action: "status" | "stop" | "sign_in") {
     setBusy(true);
     setError(null);
@@ -702,7 +706,7 @@ function RemoteVpnControls({ connection, owner, owner_label }: {
         setChecked(true);
       }
     } catch (failure) {
-      setError(errorMessage(failure));
+      setError(localizedErrorText(failure));
       if (action !== "sign_in") {
         setUnavailable(true);
         setChecked(true);
@@ -712,15 +716,15 @@ function RemoteVpnControls({ connection, owner, owner_label }: {
     }
   }
   return <div className="gateway-remote-vpn">
-    {checked ? <small>{unavailable || status?.status_unavailable ? "Status unavailable"
-      : status && status.state !== "stopped" ? vpnRouteDetail(connection, [status]) : "Stopped"} on {owner_label}</small> : null}
-    {inventory_warnings.length ? <InlineFeedback severity="warning">Remote VPN inventory is incomplete: {inventory_warnings.join(" ")}</InlineFeedback> : null}
+    {checked ? <small>{t("route.vpn_owner_status", { owner: owner_label, status: unavailable || status?.status_unavailable
+      ? t("route.status_unavailable") : status && status.state !== "stopped" ? vpnRouteDetail(connection, [status], locale) : t("route.vpn_stopped") })}</small> : null}
+    {inventory_warnings.length ? <InlineFeedback severity="warning">{t("route.remote_inventory_partial", { detail: inventory_warnings.join(" ") })}</InlineFeedback> : null}
     <div className="gateway-route-controls">
-      <button type="button" disabled={busy} onClick={() => void perform("status")}>Check VPN status</button>
-      {status?.running ? <button type="button" disabled={busy || unavailable || status.status_unavailable} onClick={() => void perform("stop")}>Disconnect VPN</button> : null}
-      {vpnNeedsSignIn(status) ? <button type="button" disabled={busy || unavailable} onClick={() => void perform("sign_in")}>Sign in to VPN</button> : null}
+      <button type="button" disabled={busy} onClick={() => void perform("status")}>{t("route.check_vpn")}</button>
+      {status?.running ? <button type="button" disabled={busy || unavailable || status.status_unavailable} onClick={() => void perform("stop")}>{t("route.disconnect_vpn")}</button> : null}
+      {vpnNeedsSignIn(status) ? <button type="button" disabled={busy || unavailable} onClick={() => void perform("sign_in")}>{t("route.sign_in_vpn")}</button> : null}
     </div>
-    {error ? <InlineFeedback>{error}</InlineFeedback> : null}
+    {error ? <InlineFeedback>{formatText(error)}</InlineFeedback> : null}
   </div>;
 }
 
@@ -731,26 +735,27 @@ function GatewayForm({
   draft: GatewayDraft;
   onChange(draft: GatewayDraft): void;
 }) {
+  const { t } = useLocale();
   const field = (key: keyof GatewayDraft) =>
     (event: React.ChangeEvent<HTMLInputElement>) =>
       onChange({ ...draft, [key]: event.target.value });
   return (
     <form className="gateway-form" onSubmit={(event) => event.preventDefault()}>
-      <label>Type
+      <label>{t("route.type")}
         <select value={draft.kind} onChange={(event) => onChange({ ...draft, kind: event.target.value as GatewayDraft["kind"], hostname: "", identity_file: "", port: "" })}>
           <option value="ssh">SSH</option>
           <option value="socks5">SOCKS5</option>
         </select>
       </label>
-      <label>Name<input value={draft.name} onChange={field("name")} placeholder="Office gateway" /></label>
-      <label>{draft.kind === "socks5" ? "SOCKS5 proxy address" : "SSH destination / alias"}<input value={draft.destination} onChange={field("destination")} placeholder="edge.example" /></label>
-      {draft.kind === "ssh" ? <label>Hostname override<input value={draft.hostname} onChange={field("hostname")} placeholder="Optional" /></label> : null}
-      <label>{draft.kind === "socks5" ? "Username (optional)" : "User"}<input value={draft.user} onChange={field("user")} placeholder={draft.kind === "socks5" ? "Prompts for password when connecting" : "From SSH config"} /></label>
-      <label>Port<input inputMode="numeric" value={draft.port} onChange={field("port")} placeholder={draft.kind === "socks5" ? "1080" : "22"} /></label>
+      <label>{t("route.name")}<input value={draft.name} onChange={field("name")} placeholder={t("route.name_example")} /></label>
+      <label>{draft.kind === "socks5" ? t("route.proxy_address") : t("route.ssh_destination")}<input value={draft.destination} onChange={field("destination")} placeholder="edge.example" /></label>
+      {draft.kind === "ssh" ? <label>{t("route.override")}<input value={draft.hostname} onChange={field("hostname")} placeholder={t("route.optional")} /></label> : null}
+      <label>{draft.kind === "socks5" ? t("route.optional_user") : t("route.user")}<input value={draft.user} onChange={field("user")} placeholder={draft.kind === "socks5" ? t("route.prompt_password") : t("route.from_config")} /></label>
+      <label>{t("route.port")}<input inputMode="numeric" value={draft.port} onChange={field("port")} placeholder={draft.kind === "socks5" ? "1080" : "22"} /></label>
       <p className="quick-input-description">
         {draft.kind === "socks5"
-          ? "Hostnames are resolved by the proxy. If a username is set, the password is requested when connecting."
-          : "Configure a gateway-specific identity file in your OpenSSH config. Per-gateway identity selection will be enabled with managed relay."}
+          ? t("route.socks_hint")
+          : t("route.ssh_hint")}
       </p>
     </form>
   );

@@ -85,7 +85,7 @@ fn config_override_takes_precedence_over_the_full_storage_root() {
       command.env("CTL_CONFIG_DIR", path);
     }
     let output = command.output().unwrap();
-    assert!(output.status.success(), "{:?}", output);
+    assert!(output.status.success(), "{output:?}");
     assert!(expected.join("hosts.json").is_file());
     fs::remove_file(expected.join("hosts.json")).unwrap();
   }

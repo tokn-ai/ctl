@@ -285,7 +285,7 @@ fn full_storage_override_provisions_an_independent_installation() {
     .unwrap();
   child.stdin.take().unwrap().write_all(&bytes).unwrap();
   let output = child.wait_with_output().unwrap();
-  assert!(output.status.success(), "{:?}", output);
+  assert!(output.status.success(), "{output:?}");
   assert!(root.join("installs").join(manifest.bundle_id).is_dir());
   assert!(root.join("bin/ctl").is_file());
   let output = home
@@ -293,7 +293,7 @@ fn full_storage_override_provisions_an_independent_installation() {
     .env("CTL_DATA_DIR", &root)
     .output()
     .unwrap();
-  assert!(output.status.success(), "{:?}", output);
+  assert!(output.status.success(), "{output:?}");
   let status: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
   assert!(!status["active"].is_null());
   assert!(!home.0.join(".tokn").exists());

@@ -39,8 +39,16 @@ impl StaticMenuItems {
   }
 }
 
-pub fn build(app_handle: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
-  let package = app_handle.package_info();
+struct ApplicationMenu {
+  submenu: Submenu<tauri::Wry>,
+  about: MenuItem<tauri::Wry>,
+  services: PredefinedMenuItem<tauri::Wry>,
+  hide: PredefinedMenuItem<tauri::Wry>,
+  hide_others: PredefinedMenuItem<tauri::Wry>,
+  quit: PredefinedMenuItem<tauri::Wry>,
+}
+
+fn build_application_menu(app_handle: &AppHandle) -> tauri::Result<ApplicationMenu> {
   let about = MenuItem::with_id(
     app_handle,
     "ctmux.command.app.about",
@@ -52,9 +60,9 @@ pub fn build(app_handle: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
   let hide = PredefinedMenuItem::hide(app_handle, None)?;
   let hide_others = PredefinedMenuItem::hide_others(app_handle, None)?;
   let quit = PredefinedMenuItem::quit(app_handle, None)?;
-  let app_menu = Submenu::with_items(
+  let submenu = Submenu::with_items(
     app_handle,
-    package.name.clone(),
+    app_handle.package_info().name.clone(),
     true,
     &[
       &about,
@@ -67,6 +75,18 @@ pub fn build(app_handle: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
       &quit,
     ],
   )?;
+  Ok(ApplicationMenu {
+    submenu,
+    about,
+    services,
+    hide,
+    hide_others,
+    quit,
+  })
+}
+
+pub fn build(app_handle: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
+  let application = build_application_menu(app_handle)?;
   let file_menu = Submenu::with_id_and_items(app_handle, COMMAND_MENU_ID, "Commands", true, &[])?;
   let undo = PredefinedMenuItem::undo(app_handle, None)?;
   let redo = PredefinedMenuItem::redo(app_handle, None)?;
@@ -104,7 +124,7 @@ pub fn build(app_handle: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
   let menu = Menu::with_items(
     app_handle,
     &[
-      &app_menu,
+      &application.submenu,
       &file_menu,
       &edit_menu,
       &view_menu,
@@ -114,19 +134,26 @@ pub fn build(app_handle: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
   )?;
   app_handle.manage(StaticMenuItems {
     items: vec![
-      (MenuItemKind::MenuItem(about), |labels| &labels.about),
+      (MenuItemKind::MenuItem(application.about), |labels| {
+        &labels.about
+      }),
       (MenuItemKind::Submenu(edit_menu), |labels| &labels.edit),
       (MenuItemKind::Submenu(view_menu), |labels| &labels.view),
       (MenuItemKind::Submenu(window_menu), |labels| &labels.window),
       (MenuItemKind::Submenu(help_menu), |labels| &labels.help),
-      (MenuItemKind::Predefined(services), |labels| {
+      (MenuItemKind::Predefined(application.services), |labels| {
         &labels.services
       }),
-      (MenuItemKind::Predefined(hide), |labels| &labels.hide),
-      (MenuItemKind::Predefined(hide_others), |labels| {
-        &labels.hide_others
+      (MenuItemKind::Predefined(application.hide), |labels| {
+        &labels.hide
       }),
-      (MenuItemKind::Predefined(quit), |labels| &labels.quit),
+      (
+        MenuItemKind::Predefined(application.hide_others),
+        |labels| &labels.hide_others,
+      ),
+      (MenuItemKind::Predefined(application.quit), |labels| {
+        &labels.quit
+      }),
       (MenuItemKind::Predefined(undo), |labels| &labels.undo),
       (MenuItemKind::Predefined(redo), |labels| &labels.redo),
       (MenuItemKind::Predefined(cut), |labels| &labels.cut),

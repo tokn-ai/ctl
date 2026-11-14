@@ -145,9 +145,10 @@ async fn nested_fixture(daemon: &TestDaemon) -> Result<(String, [String; 3])> {
 async fn prefix(tui: &mut Tui, key: &[u8]) -> Result<()> {
   tui.send(b"\x02")?;
   tui
-    .wait_screen("pane-move prefix table is active", |screen| {
-      footer(screen).contains("PREFIX")
-    })
+    .wait_screen(
+      "pane-move prefix table is active on the connected pane",
+      |screen| footer(screen).starts_with(" connected |") && footer(screen).contains("PREFIX"),
+    )
     .await?;
   tui.send(key)
 }
@@ -409,6 +410,16 @@ async fn swaps_preserve_nested_weighted_slots_and_focus_policy_across_reconnect(
   let recovered = view(&daemon, &session).await?;
   assert_slots(&original, &recovered, [&first, &third, &second]);
   visible_slots(&mut owner, &recovered, &tags).await?;
+  // Cached panes and the layout lease can be visible while the focused
+  // attachment is still recovering. Prove it can carry input before swapping.
+  input_in_pane(
+    &mut owner,
+    &recovered,
+    &tags,
+    "second",
+    "ready-after-reconnect",
+  )
+  .await?;
   prefix(&mut owner, b"}").await?;
   let expected = nested_layout([&second, &third, &first], &[71, 48], &[9, 14]);
   let after_reconnect = wait_view(

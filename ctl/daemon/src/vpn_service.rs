@@ -69,7 +69,7 @@ impl VpnService {
     self.stop_for_contract(Some(vpn_id), true).await
   }
 
-  #[cfg(test)]
+  #[cfg(all(test, unix))]
   pub(super) fn disable_discovery_for_test(&mut self) {
     self.discover_containers = false;
   }

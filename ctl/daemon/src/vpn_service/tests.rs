@@ -242,7 +242,7 @@ impl TestFixture {
 
 fn startup_cancellation(config: Config) -> oneshot::Receiver<()> {
   match config {
-    Config::Openconnect(config) => config.cancellation.unwrap(),
+    Config::Tun(config) => config.cancellation.unwrap(),
     Config::Tailscale(config) => config.cancellation.unwrap(),
   }
 }
@@ -360,7 +360,7 @@ async fn registry_capacity_is_bounded_and_targeted_stop_releases_only_its_entry(
   assert!(result.await.unwrap().unwrap_err().contains("At most 16"));
   assert_eq!(registry.snapshot().connections.len(), MAX_CONNECTIONS);
   let (reply, stopped) = oneshot::channel();
-  registry.stop(Some("profile-0".into()), reply);
+  registry.stop(Some("profile-0".into()), true, reply);
   let (id, event) = poll_fn(|cx| registry.poll_event(cx)).await;
   registry.event(id, event);
   assert_eq!(stopped.await.unwrap().unwrap(), VpnStatus::default());
@@ -383,6 +383,57 @@ async fn registry_capacity_is_bounded_and_targeted_stop_releases_only_its_entry(
   for result in results {
     assert!(result.await.unwrap().unwrap_err().contains("cancelled"));
   }
+}
+
+#[tokio::test]
+async fn legacy_stop_cannot_release_an_openvpn_connection() {
+  let mut registry = Registry::new(|config| async move {
+    let _ = startup_cancellation(config).await;
+    Err::<FakeLease, _>(io::Error::new(io::ErrorKind::Interrupted, "cancelled"))
+  });
+  let mut connection = saved_connection();
+  connection.connection_id = "new-provider".into();
+  connection.settings = VpnSettings::Openvpn {
+    config: zeroize::Zeroizing::new(
+      "client\nremote vpn.example.test\n<ca>\nfixture\n</ca>\n".into(),
+    ),
+    username: None,
+    password: None,
+  };
+  let (reply, openvpn_start) = oneshot::channel();
+  registry.start(Source::Connection(connection), reply);
+  let (reply, old_start) = oneshot::channel();
+  registry.start(Source::Connection(saved_connection()), reply);
+
+  let (reply, targeted) = oneshot::channel();
+  registry.stop(Some("new-provider".into()), false, reply);
+  assert!(targeted.await.unwrap().unwrap_err().contains("OpenVPN"));
+
+  let (reply, untargeted) = oneshot::channel();
+  registry.stop(None, false, reply);
+  let (id, event) = poll_fn(|cx| registry.poll_event(cx)).await;
+  assert_ne!(id, "new-provider");
+  registry.event(id, event);
+  assert_eq!(untargeted.await.unwrap().unwrap(), VpnStatus::default());
+  assert!(old_start.await.unwrap().unwrap_err().contains("cancelled"));
+  let snapshot = registry.snapshot();
+  assert_eq!(snapshot.connections.len(), 1);
+  assert_eq!(snapshot.connections[0].provider, VpnProvider::Openvpn);
+
+  let (reply, targeted) = oneshot::channel();
+  registry.stop(Some("new-provider".into()), true, reply);
+  let (id, event) = poll_fn(|cx| registry.poll_event(cx)).await;
+  assert_eq!(id, "new-provider");
+  registry.event(id, event);
+  assert_eq!(targeted.await.unwrap().unwrap(), VpnStatus::default());
+  assert!(
+    openvpn_start
+      .await
+      .unwrap()
+      .unwrap_err()
+      .contains("cancelled")
+  );
+  assert_eq!(registry.snapshot().connections, []);
 }
 
 #[tokio::test]
@@ -733,7 +784,11 @@ async fn browser_login_remains_owned_and_idempotent_until_stop_or_daemon_shutdow
     assert!(fixture.starts.try_recv().is_err());
     assert_eq!(
       fixture.service.list().await.unwrap().supported_providers,
-      vec![VpnProvider::Openconnect, VpnProvider::Tailscale]
+      vec![
+        VpnProvider::Openconnect,
+        VpnProvider::Tailscale,
+        VpnProvider::Openvpn
+      ]
     );
     if explicit_stop {
       fixture

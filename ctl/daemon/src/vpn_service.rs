@@ -12,7 +12,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::openconnect::{self, Metadata};
-use crate::tailscale;
+use crate::{openvpn, tailscale};
 
 type Reply = oneshot::Sender<Result<VpnStatus, String>>;
 const MAX_CONNECTIONS: usize = 16;
@@ -26,6 +26,7 @@ enum Request {
   },
   Stop {
     vpn_id: Option<String>,
+    allow_openvpn: bool,
     reply: Reply,
   },
   List(oneshot::Sender<Result<VpnSnapshot, String>>),
@@ -58,16 +59,30 @@ impl VpnService {
     self.request(Request::Start { source, reply }, result).await
   }
 
+  #[cfg(test)]
   pub(super) async fn stop(&self) -> Result<VpnStatus, String> {
-    self.stop_selected(None).await
+    self.stop_for_contract(None, true).await
   }
 
+  #[cfg(test)]
   pub(super) async fn stop_id(&self, vpn_id: String) -> Result<VpnStatus, String> {
-    self.stop_selected(Some(vpn_id)).await
+    self.stop_for_contract(Some(vpn_id), true).await
   }
 
-  async fn stop_selected(&self, vpn_id: Option<String>) -> Result<VpnStatus, String> {
-    let local = self.local_list().await?;
+  #[cfg(all(test, unix))]
+  pub(super) fn disable_discovery_for_test(&mut self) {
+    self.discover_containers = false;
+  }
+
+  pub(super) async fn stop_for_contract(
+    &self,
+    vpn_id: Option<String>,
+    allow_openvpn: bool,
+  ) -> Result<VpnStatus, String> {
+    let mut local = self.local_list().await?;
+    local
+      .connections
+      .retain(|status| allow_openvpn || status.provider != VpnProvider::Openvpn);
     let selected = vpn_id.clone().or_else(|| {
       (local.connections.len() == 1)
         .then(|| local.connections[0].vpn_id.clone())
@@ -75,7 +90,14 @@ impl VpnService {
     });
     let (reply, result) = oneshot::channel();
     let released = self
-      .request(Request::Stop { vpn_id, reply }, result)
+      .request(
+        Request::Stop {
+          vpn_id,
+          allow_openvpn,
+          reply,
+        },
+        result,
+      )
       .await?;
     // Releasing one daemon's interest does not promise global disconnection.
     if self.discover_containers
@@ -85,11 +107,10 @@ impl VpnService {
       if !snapshot.discovery_warnings.is_empty() {
         return released_without_inventory(&local, &id);
       }
-      if let Some(mut status) = snapshot
-        .connections
-        .into_iter()
-        .find(|status| status.vpn_id.as_deref() == Some(&id))
-      {
+      if let Some(mut status) = snapshot.connections.into_iter().find(|status| {
+        status.vpn_id.as_deref() == Some(&id)
+          && (allow_openvpn || status.provider != VpnProvider::Openvpn)
+      }) {
         status.locally_connected = Some(false);
         status.message = Some("Released by this ctld; the VPN remains available while another ctld sends heartbeats, or until the heartbeat timeout.".into());
         return Ok(status);
@@ -223,14 +244,14 @@ pub(super) fn spawn() -> (VpnService, VpnOwner) {
 }
 
 enum Config {
-  Openconnect(openconnect::Config),
+  Tun(openconnect::Config),
   Tailscale(tailscale::Config),
 }
 
 impl Config {
   fn cancellation(&mut self) -> oneshot::Sender<()> {
     match self {
-      Self::Openconnect(config) => {
+      Self::Tun(config) => {
         let (cancel, cancellation) = oneshot::channel();
         config.cancellation = Some(cancellation);
         cancel
@@ -244,29 +265,29 @@ impl Config {
   }
   fn metadata(&self) -> Metadata {
     match self {
-      Self::Openconnect(config) => config.metadata.clone(),
+      Self::Tun(config) => config.metadata.clone(),
       Self::Tailscale(_) => Metadata::default(),
     }
   }
 
   fn provider(&self) -> VpnProvider {
     match self {
-      Self::Openconnect(_) => VpnProvider::Openconnect,
+      Self::Tun(config) => config.runtime.provider,
       Self::Tailscale(_) => VpnProvider::Tailscale,
     }
   }
 }
 
 enum ManagedVpn {
-  Openconnect(Box<openconnect::ManagedVpn>),
+  Tun(Box<openconnect::ManagedVpn>),
   Tailscale(Box<tailscale::ManagedVpn>),
 }
 
 async fn start_provider(config: Config) -> io::Result<ManagedVpn> {
   match config {
-    Config::Openconnect(config) => openconnect::start(config)
+    Config::Tun(config) => openconnect::start(config)
       .await
-      .map(|vpn| ManagedVpn::Openconnect(Box::new(vpn))),
+      .map(|vpn| ManagedVpn::Tun(Box::new(vpn))),
     Config::Tailscale(config) => tailscale::start(config)
       .await
       .map(|vpn| ManagedVpn::Tailscale(Box::new(vpn))),
@@ -302,10 +323,11 @@ async fn discover_containers() -> Result<Vec<VpnStatus>, String> {
 }
 
 async fn observe_container(container: crate::vpn_container::ContainerDescriptor) -> VpnStatus {
-  let mut status = if container.metadata.provider == VpnProvider::Openconnect {
-    openconnect::discovered_status(&container).await
-  } else {
-    container.basic_status()
+  let mut status = match container.metadata.provider {
+    VpnProvider::Openconnect | VpnProvider::Openvpn => {
+      openconnect::discovered_status(&container).await
+    }
+    VpnProvider::Tailscale => container.basic_status(),
   };
   if container.running
     && container.metadata.provider == VpnProvider::Tailscale
@@ -366,21 +388,21 @@ trait Lease: Send {
 impl Lease for ManagedVpn {
   fn status(&self) -> VpnStatus {
     match self {
-      Self::Openconnect(lease) => lease.status(),
+      Self::Tun(lease) => lease.status(),
       Self::Tailscale(lease) => lease.status(),
     }
   }
 
   async fn exited(&mut self) -> io::Result<()> {
     match self {
-      Self::Openconnect(lease) => lease.exited().await.map(|_| ()),
+      Self::Tun(lease) => lease.exited().await.map(|_| ()),
       Self::Tailscale(lease) => lease.exited().await.map(|_| ()),
     }
   }
 
   async fn shutdown(&mut self) {
     match self {
-      Self::Openconnect(lease) => lease.shutdown().await,
+      Self::Tun(lease) => lease.shutdown().await,
       Self::Tailscale(lease) => lease.shutdown().await,
     }
   }
@@ -544,7 +566,7 @@ where
             .map_err(|error| error.to_string())?;
           Ok(Prepared {
             identity: Identity::EnvFile(path),
-            config: Config::Openconnect(config),
+            config: Config::Tun(config),
           })
         });
         self.entries.insert(
@@ -603,17 +625,22 @@ where
     );
   }
 
-  fn stop(&mut self, vpn_id: Option<String>, reply: Reply) {
+  fn stop(&mut self, vpn_id: Option<String>, allow_openvpn: bool, reply: Reply) {
     let id = if let Some(id) = vpn_id {
       id
     } else {
-      if self.entries.len() > 1 {
+      let mut visible = self
+        .entries
+        .iter()
+        .filter(|(_, entry)| allow_openvpn || entry.provider != VpnProvider::Openvpn);
+      let first = visible.next().map(|(id, _)| id.clone());
+      if visible.next().is_some() {
         let _ = reply.send(Err(
           "Multiple VPN connections are active; specify a VPN ID to disconnect".into(),
         ));
         return;
       }
-      self.entries.keys().next().cloned().unwrap_or_default()
+      first.unwrap_or_default()
     };
     let id = if self.entries.contains_key(&id) {
       id
@@ -624,6 +651,15 @@ where
         .find(|(key, entry)| entry.status(key).vpn_id.as_deref() == Some(&id))
         .map_or(id.clone(), |(key, _)| key.clone())
     };
+    if !allow_openvpn
+      && self
+        .entries
+        .get(&id)
+        .is_some_and(|entry| entry.provider == VpnProvider::Openvpn)
+    {
+      let _ = reply.send(Err("OpenVPN requires an updated ctld client".into()));
+      return;
+    }
     self.stop_entry(&id, Some(reply));
   }
 
@@ -809,8 +845,9 @@ where
 fn prepare_connection(connection: VpnConnection) -> Result<Prepared, String> {
   let config = match &connection.settings {
     VpnSettings::Openconnect { .. } => {
-      openconnect::Config::from_connection(&connection).map(Config::Openconnect)
+      openconnect::Config::from_connection(&connection).map(Config::Tun)
     }
+    VpnSettings::Openvpn { .. } => openvpn::prepare(&connection).map(Config::Tun),
     VpnSettings::Tailscale { .. } => {
       tailscale::Config::from_connection(&connection).map(Config::Tailscale)
     }
@@ -876,7 +913,7 @@ where
         (id, event) = poll_fn(|cx| registry.poll_event(cx)) => registry.event(id, event),
         request = receiver.recv() => match request {
           Some(Request::Start { source, reply }) => registry.start(source, reply),
-          Some(Request::Stop { vpn_id, reply }) => registry.stop(vpn_id, reply),
+          Some(Request::Stop { vpn_id, allow_openvpn, reply }) => registry.stop(vpn_id, allow_openvpn, reply),
           Some(Request::List(reply)) => { let _ = reply.send(Ok(registry.snapshot())); }
           Some(Request::ForgetTailscaleIdentity { connection_id, reply }) => {
             registry.forget_identity(connection_id, reply, &forget);

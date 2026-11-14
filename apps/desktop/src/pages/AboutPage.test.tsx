@@ -145,12 +145,12 @@ describe("About page", () => {
     expect(api.preflight).toHaveBeenCalledWith("owner-1");
     expect(api.restart).not.toHaveBeenCalled();
     expect(within(dialog).getByText(/Stops 2 managed VPN connections/)).toBeTruthy();
-    expect(options.on_dialog_change).toHaveBeenLastCalledWith(true);
+    await waitFor(() => expect(options.on_dialog_change).toHaveBeenLastCalledWith(true));
     fireEvent.click(within(dialog).getByRole("button", { name: "Restart ctld" }));
     await waitFor(() => expect(api.restart).toHaveBeenCalledWith("native-owner-token"));
     await waitFor(() => expect(api.versions).toHaveBeenCalledTimes(2));
     expect(options.on_restarted).toHaveBeenCalledOnce();
-    expect(options.on_dialog_change).toHaveBeenLastCalledWith(false);
+    await waitFor(() => expect(options.on_dialog_change).toHaveBeenLastCalledWith(false));
   });
 
   it("canceling the impact confirmation leaves the daemon untouched", async () => {

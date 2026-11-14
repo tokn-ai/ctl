@@ -24,6 +24,9 @@ pub(super) enum VpnSettingsSummary {
     hostname: Option<String>,
     accept_routes: bool,
   },
+  Openvpn {
+    has_credentials: bool,
+  },
 }
 
 impl From<&VpnConnection> for VpnConnectionSummary {
@@ -49,6 +52,9 @@ impl From<&VpnConnection> for VpnConnectionSummary {
         hostname: hostname.clone(),
         accept_routes: *accept_routes,
       },
+      VpnSettings::Openvpn { username, .. } => VpnSettingsSummary::Openvpn {
+        has_credentials: username.is_some(),
+      },
     };
     Self {
       connection_id: connection.connection_id.clone(),
@@ -64,7 +70,7 @@ pub struct VpnConnectionsSnapshot {
   pub(super) connections: Vec<VpnConnectionSummary>,
 }
 
-// Password-bearing types deliberately do not implement Debug or Serialize.
+// Secret-bearing types deliberately do not implement Debug or Serialize.
 pub struct VpnConnectionInput {
   pub(super) connection_id: String,
   pub(super) name: String,
@@ -85,6 +91,13 @@ pub(super) enum VpnSettingsInput {
     hostname: Option<String>,
     #[serde(default)]
     accept_routes: bool,
+  },
+  Openvpn {
+    config: Option<Zeroizing<String>>,
+    #[serde(default)]
+    replace_credentials: bool,
+    username: Option<String>,
+    password: Option<Zeroizing<String>>,
   },
 }
 

@@ -83,6 +83,90 @@ describe("VPN connection editor", () => {
   });
 });
 
+describe("OpenVPN connection editor", () => {
+  it("reads only the selected configuration on save and clears the password field", async () => {
+    const user = userEvent.setup();
+    const on_save = vi.fn().mockResolvedValue(true);
+    render(<VpnConnectionEditor connection={null} saving={false} error={null} on_save={on_save} on_close={vi.fn()} />);
+    await user.selectOptions(screen.getByRole("combobox", { name: "Provider" }), "openvpn");
+    await user.type(screen.getByLabelText("Name"), "Office VPN");
+    await user.click(screen.getByRole("button", { name: "Save connection" }));
+    expect(screen.getByRole("alert").textContent).toBe("Choose an OpenVPN configuration file.");
+
+    const config = "client\ndev tun\nremote vpn.example.test 1194\n";
+    const file = new File([config], "test.ovpn");
+    const read = vi.fn().mockResolvedValue(config);
+    Object.defineProperty(file, "text", { value: read });
+    await user.upload(screen.getByLabelText(/OpenVPN configuration/), file);
+    expect(read).not.toHaveBeenCalled();
+    await user.type(screen.getByLabelText("Username"), "example-user");
+    const password = screen.getByLabelText("Password") as HTMLInputElement;
+    await user.type(password, "example-password");
+    await user.click(screen.getByRole("button", { name: "Save connection" }));
+    expect(read).toHaveBeenCalledOnce();
+    expect(on_save).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      provider: "openvpn", name: "Office VPN", config, replace_credentials: true,
+      username: "example-user", password: "example-password",
+    }));
+    expect(password.value).toBe("");
+    expect(screen.queryByText(config)).toBeNull();
+  });
+
+  it("preserves existing settings unless credential removal is chosen", async () => {
+    const user = userEvent.setup();
+    const on_save = vi.fn().mockResolvedValue(true);
+    const openvpn: VpnConnection = { provider: "openvpn", connection_id: "office", name: "Office VPN", has_credentials: true };
+    render(<VpnConnectionEditor connection={openvpn} saving={false} error={null} on_save={on_save} on_close={vi.fn()} />);
+    expect(screen.queryByLabelText("Username")).toBeNull();
+    expect(screen.queryByLabelText("Password")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Save connection" }));
+    expect(on_save).toHaveBeenLastCalledWith({
+      provider: "openvpn", connection_id: "office", name: "Office VPN", config: null,
+      replace_credentials: false, username: null, password: null,
+    });
+    await user.click(screen.getByRole("checkbox", { name: "Change saved username and password" }));
+    await user.click(screen.getByRole("button", { name: "Save connection" }));
+    expect(on_save).toHaveBeenLastCalledWith(expect.objectContaining({
+      config: null, replace_credentials: true, username: null, password: null,
+    }));
+  });
+
+  it("rejects oversized files without trying to read them", async () => {
+    const user = userEvent.setup();
+    const on_save = vi.fn();
+    const openvpn: VpnConnection = { provider: "openvpn", connection_id: "office", name: "Office VPN", has_credentials: false };
+    render(<VpnConnectionEditor connection={openvpn} saving={false} error={null} on_save={on_save} on_close={vi.fn()} />);
+    const file = new File([new Uint8Array(24 * 1024 + 1)], "test.ovpn");
+    const read = vi.fn();
+    Object.defineProperty(file, "text", { value: read });
+    await user.upload(screen.getByLabelText(/OpenVPN configuration/), file);
+    await user.click(screen.getByRole("button", { name: "Save connection" }));
+    expect(screen.getByRole("alert").textContent).toContain("24 KiB");
+    expect(read).not.toHaveBeenCalled();
+    expect(on_save).not.toHaveBeenCalled();
+  });
+
+  it("discards an in-flight import when the editor is removed", async () => {
+    const user = userEvent.setup();
+    const on_save = vi.fn();
+    const { unmount } = render(<VpnConnectionEditor connection={null} saving={false} error={null} on_save={on_save} on_close={vi.fn()} />);
+    await user.selectOptions(screen.getByRole("combobox", { name: "Provider" }), "openvpn");
+    await user.type(screen.getByLabelText("Name"), "Office VPN");
+    const config = "client\ndev tun\nremote vpn.example.test 1194\n";
+    const file = new File([config], "test.ovpn");
+    let finish!: (config: string) => void;
+    const reading = new Promise<string>((resolve) => { finish = resolve; });
+    Object.defineProperty(file, "text", { value: () => reading });
+    await user.upload(screen.getByLabelText(/OpenVPN configuration/), file);
+    await user.click(screen.getByRole("button", { name: "Save connection" }));
+    expect(screen.getByRole("button", { name: "Reading configuration…" })).toBeTruthy();
+    unmount();
+    finish(config);
+    await reading;
+    expect(on_save).not.toHaveBeenCalled();
+  });
+});
+
 
 vi.mock("../../lib/tauri", () => ({
   beginVpnEnrollment: vi.fn(), cancelVpnEnrollment: vi.fn(), openVpnSignIn: vi.fn(), vpnEnrollmentStatus: vi.fn(),

@@ -531,6 +531,21 @@ The identity advertisement gains a protocol entry using its existing fields;
 `ctl_identity`, `ctmux`, `task`, forwarding, helper, lifecycle, storage schema,
 and product release versions are unchanged by this addition.
 
+OpenVPN support advances `ctld` from `1.3.19` (build 19) to `1.3.20` (build 20)
+and `ctl_remote_vpn` from `1.1.2` (build 2) to `1.2.3` (build 3). Both retain
+every earlier contract in their major. A start request may carry the new
+`openvpn` provider, with a bounded self-contained client profile and optional
+username and password, only under the new contracts. Responses on earlier
+contracts omit OpenVPN providers and connections. Older selections retain
+VPN control and routes for OpenConnect and Tailscale. The remote channel's
+client identity selection also remains available from `1.1.2` onward.
+
+The local container manager uses the OpenVPN image's shared-runtime marker `2`
+and retains marker `1` for OpenConnect and Tailscale. Saved profile documents
+keep schema `2` and gain an OpenVPN variant. Clients from before the addition
+cannot read documents containing the new variant. Other named wire contracts
+and the product release version stay the same.
+
 Every PR description must state its protocol changes, or **None** when there
 are no changes. Include the previous and new contracts and the compatibility
 impact. Keep PR titles brief; put protocol details in the description.

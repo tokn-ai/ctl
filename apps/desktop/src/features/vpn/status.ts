@@ -1,4 +1,10 @@
-import type { VpnConnection, VpnState, VpnStatus } from "../../lib/types";
+import type { VpnConnection, VpnProvider, VpnState, VpnStatus } from "../../lib/types";
+
+export const vpn_provider_labels: Record<VpnProvider, string> = {
+  openconnect: "OpenConnect",
+  tailscale: "Tailscale",
+  openvpn: "OpenVPN",
+};
 
 export function vpnRuntimeId(status: VpnStatus): string {
   return status.vpn_id ?? status.connection_id ?? status.container_name ?? "legacy";
@@ -32,5 +38,6 @@ export function vpnRouteDetail(connection: VpnConnection, statuses: readonly Vpn
   if (vpnNeedsSignIn(runtime)) return "Sign in from the VPN page";
   if (runtime?.state === "connected") return "Connected";
   if (runtime?.state === "starting") return "Connecting…";
-  return connection.provider === "tailscale" ? "Tailscale · Connect when needed" : "Connect when needed";
+  const provider = connection.provider ?? "openconnect";
+  return provider === "openconnect" ? "Connect when needed" : `${vpn_provider_labels[provider]} · Connect when needed`;
 }

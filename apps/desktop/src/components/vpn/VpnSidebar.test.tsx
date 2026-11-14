@@ -39,6 +39,19 @@ function region(name = "Work") { return within(screen.getByRole("region", { name
 afterEach(cleanup);
 
 describe("VPN sidebar", () => {
+  it("connects an imported OpenVPN profile without requiring a separate password", async () => {
+    const user = userEvent.setup();
+    const openvpn: VpnConnection = { provider: "openvpn", connection_id: "office", name: "Office", has_credentials: false };
+    const state = model({ connections: [openvpn], supported_providers: ["openconnect", "tailscale", "openvpn"] });
+    const { rerender } = render(<VpnSidebar model={state} />);
+    expect(region("Office").getByText("OpenVPN")).toBeTruthy();
+    await user.click(region("Office").getByRole("button", { name: "Connect Office" }));
+    expect(state.connect).toHaveBeenCalledExactlyOnceWith("office");
+    rerender(<VpnSidebar model={{ ...state, supported_providers: ["openconnect", "tailscale"] }} />);
+    expect(region("Office").getByText("Update ctld to connect with OpenVPN.")).toBeTruthy();
+    expect((region("Office").getByRole("button", { name: "Connect Office" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
   it("manages a saved connection without exposing a password or env control", async () => {
     const user = userEvent.setup();
     const state = model();

@@ -187,7 +187,7 @@ async fn vpn_status_observes_shared_inventory_once_per_request() {
   assert_eq!(
     calls
       .iter()
-      .filter(|call| call.contains("label=io.ctl.vpn.protocol=1"))
+      .filter(|call| call.contains("--filter label=io.ctl.vpn.protocol "))
       .count(),
     1,
   );

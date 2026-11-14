@@ -233,8 +233,8 @@ contracts keep TCP-only messages and semantics.
 ### Remote VPN requests
 
 `ctl-agent vpn` is a separate, narrow SSH command. It emits the stable `ctl-vpn\n`
-marker and a bounded published-contract offer. The client selects remote VPN
-contract `1.0.1`; the agent validates the selection before writing the bounded
+marker and a bounded published-contract offer. The client selects a retained
+remote VPN contract. The agent validates the selection before writing the bounded
 account identity. The client checks the saved owner identity before sending
 settings or credentials. A
 single length-prefixed JSON request selects `list`, `start` with a structured
@@ -242,6 +242,12 @@ saved profile, `stop` with an exact runtime VPN ID, or `connect` with a saved
 profile ID and TCP destination. Responses use bounded JSON frames; successful
 `connect` switches to raw bidirectional bytes. DNS names are passed to the VPN's
 SOCKS listener and resolved remotely.
+
+OpenVPN profiles require remote VPN contract `1.2.3` and broker contract
+`1.3.20` at the VPN owner. Earlier contracts show OpenConnect and Tailscale
+connections and expose only those providers to stop and route requests. The
+agent negotiates a corresponding legacy broker contract when relaying one
+of these earlier remote requests.
 
 The agent selects its account's fixed local ctld endpoint. List, stop, and
 connect never start ctld or a VPN; start may start the installed sibling ctld.

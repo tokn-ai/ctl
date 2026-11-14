@@ -139,6 +139,9 @@ impl Repository {
         ) | (
           VpnSettings::Tailscale { .. },
           VpnSettingsInput::Tailscale { .. }
+        ) | (
+          VpnSettings::Openvpn { .. },
+          VpnSettingsInput::Openvpn { .. }
         )
       )
     {
@@ -160,7 +163,7 @@ impl Repository {
             existing.and_then(
               |index| match &current.document.connections[index].settings {
                 VpnSettings::Openconnect { password, .. } => Some(password.clone()),
-                VpnSettings::Tailscale { .. } => None,
+                VpnSettings::Tailscale { .. } | VpnSettings::Openvpn { .. } => None,
               },
             )
           })
@@ -180,6 +183,18 @@ impl Repository {
         hostname,
         accept_routes,
       },
+      VpnSettingsInput::Openvpn {
+        config,
+        replace_credentials,
+        username,
+        password,
+      } => openvpn_settings(
+        config,
+        replace_credentials,
+        username,
+        password,
+        existing.map(|index| &current.document.connections[index].settings),
+      )?,
     };
     let connection = VpnConnection {
       connection_id: input.connection_id,
@@ -328,6 +343,36 @@ impl Repository {
       .snapshot(),
     )
   }
+}
+
+fn openvpn_settings(
+  config: Option<Zeroizing<String>>,
+  replace_credentials: bool,
+  username: Option<String>,
+  password: Option<Zeroizing<String>>,
+  existing: Option<&VpnSettings>,
+) -> CommandResult<VpnSettings> {
+  let (saved_config, saved_username, saved_password) = match existing {
+    Some(VpnSettings::Openvpn {
+      config,
+      username,
+      password,
+    }) => (Some(config), username.as_ref(), password.as_ref()),
+    _ => (None, None, None),
+  };
+  let config = config
+    .or_else(|| saved_config.cloned())
+    .ok_or_else(|| invalid("Choose an OpenVPN configuration file."))?;
+  let (username, password) = if replace_credentials || existing.is_none() {
+    (username, password)
+  } else {
+    (saved_username.cloned(), saved_password.cloned())
+  };
+  Ok(VpnSettings::Openvpn {
+    config,
+    username,
+    password,
+  })
 }
 
 fn private_options() -> OpenOptions {

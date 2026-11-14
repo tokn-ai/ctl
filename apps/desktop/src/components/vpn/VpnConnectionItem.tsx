@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import type { VpnController } from "../../features/vpn/useVpn";
 import { errorMessage } from "../../lib/errors";
-import { vpnNeedsSignIn, vpnRuntimeId } from "../../features/vpn/status";
+import { vpnNeedsSignIn, vpnRuntimeId, vpn_provider_labels } from "../../features/vpn/status";
 import type { VpnConnection, VpnState, VpnStatus } from "../../lib/types";
 import { Icon } from "../ui/Icon";
 import { InlineFeedback } from "../feedback/InlineFeedback";
@@ -33,7 +33,7 @@ export function VpnConnectionItem({ connection, runtime, model }: Props) {
   const provider = runtime?.provider ?? connection?.provider ?? "openconnect";
   const tailscale = provider === "tailscale";
   const provider_supported = model.supported_providers.includes(provider);
-  const saved_openconnect = connection?.provider === "tailscale" ? null : connection;
+  const saved_openconnect = connection?.provider === "tailscale" || connection?.provider === "openvpn" ? null : connection;
   const hostname = runtime?.hostname ?? (connection?.provider === "tailscale" ? connection.hostname : null);
   const endpoint = runtime?.endpoint;
   const foreign = runtime?.locally_connected === false;
@@ -68,7 +68,7 @@ export function VpnConnectionItem({ connection, runtime, model }: Props) {
       <div className="vpn-connection-heading">
         <Icon name="vpn" size={16} />
         <strong>{name}</strong>
-        <span className="vpn-provider">{tailscale ? "Tailscale" : "OpenConnect"}</span>
+        <span className="vpn-provider">{vpn_provider_labels[provider]}</span>
       </div>
       <div className="vpn-connection-status" aria-live="polite">
         <span className={`vpn-indicator ${stale ? "stale" : checking ? "unknown" : state}`} aria-hidden="true" />
@@ -81,14 +81,14 @@ export function VpnConnectionItem({ connection, runtime, model }: Props) {
         {tailscale ? <>
           <div><dt>Device name in Tailscale</dt><dd>{hostname ?? "Assigned when connected"}</dd></div>
           {runtime?.tailnet ? <div><dt>Tailnet</dt><dd>{runtime.tailnet}</dd></div> : null}
-        </> : <div>
+        </> : provider === "openconnect" ? <div>
           <dt>VPN server</dt>
           <dd>{vpn_url ?? "Unavailable"}</dd>
-        </div>}
-        <div>
+        </div> : null}
+        {provider !== "openvpn" ? <div>
           <dt>Username</dt>
           <dd>{username ?? "Unavailable"}</dd>
-        </div>
+        </div> : null}
         {active ? (
           <div>
             <dt className="vpn-endpoint-heading">
@@ -105,7 +105,7 @@ export function VpnConnectionItem({ connection, runtime, model }: Props) {
       </dl>
       {needs_sign_in && !stale ? <small>Finish signing in with your browser. The login is kept for future connections.</small> : null}
       {runtime?.message ? <small>{runtime.message}</small> : null}
-      {connection && !provider_supported && model.status_loaded ? <small>Update ctld to connect with {tailscale ? "Tailscale" : "OpenConnect"}.</small> : null}
+      {connection && !provider_supported && model.status_loaded ? <small>Update ctld to connect with {vpn_provider_labels[provider]}.</small> : null}
       {action_error ? <InlineFeedback>{action_error}</InlineFeedback> : null}
       <div className="vpn-connection-actions">
         {needs_sign_in ? <button
@@ -128,7 +128,7 @@ export function VpnConnectionItem({ connection, runtime, model }: Props) {
           </button>
         ) : null}
         {connection && (!active || foreign) ? (
-          <button type="button" disabled={!can_connect || model.profile_busy || (!tailscale && !saved_openconnect?.has_password)} onClick={() => void model.connect(connection.connection_id)} aria-label={`Connect ${connection.name}`}>
+          <button type="button" disabled={!can_connect || model.profile_busy || (provider === "openconnect" && !saved_openconnect?.has_password)} onClick={() => void model.connect(connection.connection_id)} aria-label={`Connect ${connection.name}`}>
             {action?.kind === "connect" ? "Connecting…" : "Connect"}
           </button>
         ) : null}

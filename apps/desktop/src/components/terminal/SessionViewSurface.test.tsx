@@ -110,7 +110,7 @@ describe("session compositor", () => {
     fireEvent.click(paneAction("Split right"));
     mounted.rerender(<SessionViewSurface {...actions} session={{ ...session, session_id: "other", name: "Other" }} />);
     await act(async () => { reject_split(new Error("Could not spawn shell")); });
-    expect(notifications.snapshot().entries).toMatchObject([{ title: "Could not split pane", source: "Root", message: "Could not spawn shell" }]);
+    expect(notifications.snapshot().entries).toMatchObject([{ title: { id: "pane.split_failed" }, source: "Root", message: "Could not spawn shell" }]);
     expect(screen.queryByRole("alert")).toBeNull();
   });
 
@@ -354,7 +354,7 @@ describe("session compositor", () => {
       publishSessionView({ session, attachment_id: "primary-owner", view: { ...split, revision: "3", zoomed_terminal_id: "b" } });
       publishPaneResizeResult({ session, attachment_id: "primary-owner", request_id: second_request, view: null, error: { code: "layout_lease_required", message: "Take resize control." } });
     });
-    expect(notifications.snapshot().entries).toMatchObject([{ title: "Could not resize pane", message: "Take resize control." }]);
+    expect(notifications.snapshot().entries).toMatchObject([{ title: { id: "pane.resize_failed" }, message: "Take resize control." }]);
     expect(screen.queryByRole("alert")).toBeNull();
     expect(second.closest<HTMLElement>(".view-pane")?.style.width).toBe("640px");
     expect(mocks.unmount).not.toHaveBeenCalled();
@@ -447,7 +447,7 @@ describe("session compositor", () => {
     mounted.rerender(view(other));
     await waitFor(() => expect(store.snapshot().entries).toHaveLength(1));
     expect(screen.queryByText("Secondary authentication failed")).toBeNull();
-    expect(store.snapshot().entries[0]).toMatchObject({ title: "Session connection failed", source: "local · Root · b" });
+    expect(store.snapshot().entries[0]).toMatchObject({ title: { id: "attachment.connection_failed" }, source: { id: "attachment.local_source", values: { name: "Root", pane: " · b" } } });
     const owner = store.snapshot().entries[0].actions![0].args!.value;
     await act(async () => registry.reconnect(owner));
     expect(mocks.reconnect).toHaveBeenCalledOnce();
@@ -685,7 +685,7 @@ describe("session compositor", () => {
       .mockResolvedValueOnce(split);
     await act(async () => { render(<SessionViewSurface {...props()} />); });
     await act(async () => { fireEvent.click(paneAction("Split right")); });
-    expect(notifications.snapshot().entries).toMatchObject([{ title: "Could not split pane", message: "Could not spawn shell", occurrence_count: 1 }]);
+    expect(notifications.snapshot().entries).toMatchObject([{ title: { id: "pane.split_failed" }, message: "Could not spawn shell", occurrence_count: 1 }]);
     expect(screen.queryByRole("alert")).toBeNull();
     await act(async () => { vi.advanceTimersByTime(2000); });
     expect(notifications.snapshot().entries).toMatchObject([{ message: "Could not spawn shell", occurrence_count: 1 }]);
@@ -902,7 +902,7 @@ describe("session compositor", () => {
     await waitFor(() => expect(document.activeElement).toBe(second));
     fireEvent.keyDown(second, { key: "b", code: "KeyB", ctrlKey: true });
     fireEvent.keyDown(second, { key: "ArrowLeft", code: "ArrowLeft" });
-    await waitFor(() => expect(notifications.snapshot().entries[0]?.message).toContain("Take resize control"));
+    await waitFor(() => expect(notifications.snapshot().entries[0]?.message).toEqual({ id: "pane.zoom_control_required" }));
     expect(mocks.zoom).not.toHaveBeenCalled();
     expect(document.activeElement).toBe(second);
     expect(first.closest<HTMLElement>(".view-pane")?.style.visibility).toBe("hidden");

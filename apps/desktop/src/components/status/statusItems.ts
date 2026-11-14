@@ -1,3 +1,4 @@
+import { translate, type Locale, type MessageValues } from "../../features/i18n/messages";
 import type {
   AttachmentViewState,
   ConnectionPhase,
@@ -38,28 +39,30 @@ function item(
   };
 }
 
-function connectionStatus(phase: ConnectionPhase): StatusItem | null {
+type Translate = (id: string, values?: MessageValues) => string;
+
+function connectionStatus(phase: ConnectionPhase, t: Translate): StatusItem | null {
   switch (phase) {
     case "connecting":
-      return item("connection", "CONNECTING", "Connecting to the ctmux session.", {
+      return item("connection", t("status_detail.connecting"), t("status_detail.connecting_hint"), {
         tone: "warning",
       });
     case "reconnecting":
-      return item("connection", "RECONNECTING", "Restoring the ctmux attachment.", {
+      return item("connection", t("status_detail.reconnecting"), t("status_detail.reconnecting_hint"), {
         tone: "warning",
       });
     case "retry_wait":
-      return item("connection", "WAITING TO RETRY", "The terminal is disconnected; a reconnect attempt is scheduled.", { tone: "warning" });
+      return item("connection", t("status_detail.waiting"), t("status_detail.waiting_hint"), { tone: "warning" });
     case "disconnected":
-      return item("connection", "DISCONNECTED", "The ctmux attachment is disconnected.", {
+      return item("connection", t("status_detail.disconnected"), t("status_detail.disconnected_hint"), {
         tone: "warning",
       });
     case "ended":
-      return item("connection", "ENDED", "The shell session has ended.", {
+      return item("connection", t("status_detail.ended"), t("status_detail.ended_hint"), {
         tone: "warning",
       });
     case "error":
-      return item("connection", "ERROR", "The ctmux attachment encountered an error.", {
+      return item("connection", t("status_detail.error"), t("status_detail.error_hint"), {
         tone: "danger",
       });
     case "idle":
@@ -68,18 +71,18 @@ function connectionStatus(phase: ConnectionPhase): StatusItem | null {
   }
 }
 
-function promptStatus(promptPhase: PromptPhase): StatusItem | null {
+function promptStatus(promptPhase: PromptPhase, t: Translate): StatusItem | null {
   switch (promptPhase) {
     case "at_prompt":
-      return item("activity", "READY", "The shell is ready at an empty prompt.", {
+      return item("activity", t("status_detail.ready"), t("status_detail.ready_hint"), {
         priority: "medium",
       });
     case "editing":
-      return item("activity", "EDITING", "The shell is editing a command line.", {
+      return item("activity", t("status_detail.editing"), t("status_detail.editing_hint"), {
         priority: "medium",
       });
     case "running":
-      return item("activity", "RUNNING", "The shell is waiting for a command to finish.", {
+      return item("activity", t("status_detail.running"), t("status_detail.running_hint"), {
         priority: "medium",
       });
     case "unknown":
@@ -87,58 +90,59 @@ function promptStatus(promptPhase: PromptPhase): StatusItem | null {
   }
 }
 
-function inputStatus(state: AttachmentViewState): StatusItem | null {
+function inputStatus(state: AttachmentViewState, t: Translate): StatusItem | null {
   if (state.phase !== "attached") {
     return null;
   }
   if (state.input_lease.owned_by_client) {
-    return item("input", "INPUT", "This window owns terminal input.");
+    return item("input", t("status_detail.input"), t("status_detail.input_hint"));
   }
 
   const title = state.input_lease.held
-    ? "View only: another attachment owns terminal input."
-    : "View only: this window does not own terminal input.";
-  return item("input", "VIEW", title, { tone: "warning" });
+    ? t("status_detail.view_other_hint")
+    : t("status_detail.view_not_owned_hint");
+  return item("input", t("status_detail.view"), title, { tone: "warning" });
 }
 
-function layoutStatus(state: AttachmentViewState): StatusItem | null {
+function layoutStatus(state: AttachmentViewState, t: Translate): StatusItem | null {
   if (state.phase !== "attached") {
     return null;
   }
   if (state.resize_with_window && state.layout_lease.owned_by_client) {
     return item(
       "layout",
-      "WINDOW",
-      "This window owns resize control and sizes the shared view to its full canvas viewport.",
+      t("status_detail.layout_window"),
+      t("status_detail.layout_window_hint"),
     );
   }
   if (state.layout_lease.held && !state.layout_lease.owned_by_client) {
     return item(
       "layout",
-      "OTHER SIZE",
-      "Another client owns shared view resize control.",
+      t("status_detail.layout_other"),
+      t("status_detail.layout_other_hint"),
       { priority: "medium" },
     );
   }
   if (state.resize_with_window) {
     return item(
       "layout",
-      "STARTING SIZE",
-      "Waiting to acquire layout ownership for window resizing.",
+      t("status_detail.layout_waiting"),
+      t("status_detail.layout_waiting_hint"),
       { priority: "medium", tone: "warning" },
     );
   }
   return item(
     "layout",
-    "FIXED",
+    t("status_detail.layout_fixed"),
     state.layout_lease.owned_by_client
-      ? "This window owns resize control; the shared view stays fixed until you resize it or enable auto resize."
-      : "The shared view keeps its current size until a client resizes it.",
+      ? t("status_detail.layout_fixed_owned_hint")
+      : t("status_detail.layout_fixed_hint"),
     { priority: "medium" },
   );
 }
 
-export function createStatusGroups(state: AttachmentViewState): StatusGroups {
+export function createStatusGroups(state: AttachmentViewState, locale: Locale = "en"): StatusGroups {
+  const t: Translate = (id, values) => translate(locale, id, values);
   const context: StatusItem[] = [];
   const indicators: StatusItem[] = [];
   const alerts: StatusItem[] = [];
@@ -146,7 +150,7 @@ export function createStatusGroups(state: AttachmentViewState): StatusGroups {
   const size = state.session?.terminal_size;
 
   if (shell && shell.shell_type !== "unknown") {
-    context.push(item("shell", shell.shell_type, `Shell: ${shell.shell_type}`, {
+    context.push(item("shell", shell.shell_type, t("status_detail.shell", { shell: shell.shell_type }), {
       priority: "low",
     }));
   }
@@ -155,41 +159,41 @@ export function createStatusGroups(state: AttachmentViewState): StatusGroups {
     context.push(item("cwd", cwdDisplay, cwdDisplay, { flexible: true }));
   }
 
-  const connection = connectionStatus(state.phase);
+  const connection = connectionStatus(state.phase, t);
   if (connection) {
     alerts.push(connection);
   }
   if (state.history_gap && !state.history_loading) {
     alerts.push(item(
       "history",
-      "HISTORY GAP",
-      "Some earlier output is unavailable in this view.",
+      t("status_detail.history_gap"),
+      t("status_detail.history_gap_hint"),
       { tone: "warning" },
     ));
   }
 
   if (shell && state.phase === "attached") {
-    const activity = promptStatus(shell.prompt_phase);
+    const activity = promptStatus(shell.prompt_phase, t);
     if (activity) {
       indicators.push(activity);
     }
     if (shell.tui_hint === "alternate_screen") {
       indicators.push(item(
         "tui",
-        "TUI",
-        "The terminal parser observed the alternate screen buffer.",
+        t("status_detail.tui"),
+        t("status_detail.tui_hint"),
         { priority: "medium" },
       ));
     }
   } else if (shell) {
-    indicators.push(item("activity", "LAST KNOWN", "Shell activity and working directory were observed before this attachment stopped being live.", { tone: "warning", priority: "medium" }));
+    indicators.push(item("activity", t("status_detail.last_known"), t("status_detail.last_known_hint"), { tone: "warning", priority: "medium" }));
   }
 
-  const input = inputStatus(state);
+  const input = inputStatus(state, t);
   if (input) {
     indicators.push(input);
   }
-  const layout = layoutStatus(state);
+  const layout = layoutStatus(state, t);
   if (layout) {
     indicators.push(layout);
   }
@@ -197,7 +201,7 @@ export function createStatusGroups(state: AttachmentViewState): StatusGroups {
     indicators.push(item(
       "size",
       `${size.columns}×${size.rows}`,
-      `PTY size: ${size.columns} columns by ${size.rows} rows.`,
+      t("status_detail.pty_size", { columns: size.columns, rows: size.rows }),
     ));
   }
   indicators.push(...alerts);

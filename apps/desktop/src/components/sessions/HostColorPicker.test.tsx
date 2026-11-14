@@ -51,7 +51,7 @@ describe("HostColorPicker", () => {
     expect(dot.style.background).toBe("currentcolor");
     expect(dot.style.color).toBe(original_color);
     await user.click(screen.getByRole("button", { name: "Blue" }));
-    expect(on_change).toHaveBeenCalledExactlyOnceWith(HOST_COLOR_PALETTE.find(({ name }) => name === "Blue")?.color);
+    expect(on_change).toHaveBeenCalledExactlyOnceWith(HOST_COLOR_PALETTE.find(({ label_id }) => label_id === "host_color.preset_blue")?.color);
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(document.activeElement).toBe(trigger);
   });
@@ -70,7 +70,7 @@ describe("HostColorPicker", () => {
     expect(document.activeElement).toBe(screen.getByRole("button", { name: "Coral" }));
     expect(screen.getByRole("button", { name: "Coral" }).getAttribute("aria-pressed")).toBe("true");
     await user.click(screen.getByRole("button", { name: "Blue" }));
-    expect(on_change).toHaveBeenCalledWith(HOST_COLOR_PALETTE.find(({ name }) => name === "Blue")?.color);
+    expect(on_change).toHaveBeenCalledWith(HOST_COLOR_PALETTE.find(({ label_id }) => label_id === "host_color.preset_blue")?.color);
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(document.activeElement).toBe(trigger);
   });

@@ -1,29 +1,31 @@
+import { message } from "../i18n/messages";
+
 /** Older snapshots cannot prove that protected metadata has been imported. */
 export function metadataImportRequired(snapshot: { metadata_import_required?: boolean } | null): boolean {
   return snapshot !== null && snapshot.metadata_import_required !== false;
 }
 
 /** Only known codes are rendered; native diagnostics never become UI copy. */
-export function credentialImportError(failure: unknown): string {
+export function credentialImportError(failure: unknown) {
   const candidate = typeof failure === "object" && failure !== null && "code" in failure ? failure.code : failure;
   const code = typeof candidate === "string" ? candidate : "";
   const messages: Record<string, string> = {
-    credential_import_failed: "Saved credential metadata could not be fully imported. Existing credentials are unchanged; try importing again.",
-    credential_store_busy: "Another Keychain request is still active. Complete or cancel it, then try importing again.",
-    identity_keychain_busy: "Another Keychain request is still active. Complete or cancel it, then try importing again.",
-    credential_store_locked: "Metadata import was not completed because Keychain access was locked, denied, or cancelled. Try again when ready to allow access.",
-    identity_keychain_locked: "Metadata import was not completed because Keychain access was locked, denied, or cancelled. Try again when ready to allow access.",
-    credential_store_missing_entitlement: "The credential helper is not authorized for Keychain access. Use the signed ctld app with its matching provisioning profile, then try the import again.",
-    identity_keychain_missing_entitlement: "The credential helper is not authorized for Keychain access. Use the signed ctld app with its matching provisioning profile, then try the import again.",
-    credential_store_unavailable: "Keychain access is unavailable. Check your macOS login session, then try the import again.",
-    identity_keychain_unavailable: "Keychain access is unavailable. Check your macOS login session, then try the import again.",
-    credentials_unsupported: "Importing saved credential metadata requires macOS Keychain.",
-    credential_store_unsupported: "Importing saved credential metadata requires macOS Keychain.",
-    credential_helper_unavailable: "The credential helper is unavailable. Update or rebuild ctld, then try the import again.",
-    credential_helper_unsupported: "This version of ctld does not support metadata import. Update ctld and try again.",
-    credential_helper_invalid_response: "The credential helper returned an invalid response. Update ctld and try the import again.",
-    credential_helper_timeout: "Metadata import timed out. Available metadata has been refreshed; remaining entries may still need import.",
+    credential_import_failed: "credentials.metadata_import.failed",
+    credential_store_busy: "credentials.metadata_import.busy",
+    identity_keychain_busy: "credentials.metadata_import.busy",
+    credential_store_locked: "credentials.metadata_import.locked",
+    identity_keychain_locked: "credentials.metadata_import.locked",
+    credential_store_missing_entitlement: "credentials.metadata_import.missing_entitlement",
+    identity_keychain_missing_entitlement: "credentials.metadata_import.missing_entitlement",
+    credential_store_unavailable: "credentials.metadata_import.unavailable",
+    identity_keychain_unavailable: "credentials.metadata_import.unavailable",
+    credentials_unsupported: "credentials.metadata_import.unsupported",
+    credential_store_unsupported: "credentials.metadata_import.unsupported",
+    credential_helper_unavailable: "credentials.metadata_import.helper_unavailable",
+    credential_helper_unsupported: "credentials.metadata_import.helper_unsupported",
+    credential_helper_invalid_response: "credentials.metadata_import.helper_invalid_response",
+    credential_helper_timeout: "credentials.metadata_import.helper_timeout",
   };
-  if (Object.prototype.hasOwnProperty.call(messages, code)) return messages[code];
-  return "Could not import saved credential metadata. Check Keychain access and update ctld if needed, then try again.";
+  if (Object.prototype.hasOwnProperty.call(messages, code)) return message(messages[code]);
+  return message("credentials.metadata_import.unknown");
 }

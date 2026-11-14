@@ -3,6 +3,7 @@ import type { AppNotification, NotificationAction } from "../../lib/types";
 import type { NotificationStore } from "../../features/notifications/NotificationStore";
 import { useCommandEnvironment, useCommandScope, useEffectiveCommands } from "../../features/commands/CommandContext";
 import { QUICK_INPUT_IDS } from "../../features/commands/commandIds";
+import { useLocale } from "../../features/i18n/LocaleContext";
 import "./notifications.css";
 
 export function NotificationIcon({ kind }: { kind: string }) {
@@ -18,21 +19,22 @@ export function NotificationIcon({ kind }: { kind: string }) {
 }
 
 export function NotificationBell({ store, disabled = false }: { store: NotificationStore; disabled?: boolean }) {
+  const { t, intl } = useLocale();
   const state = useSyncExternalStore(store.subscribe, store.snapshot);
   const unread = state.entries.filter((entry) => !entry.read).length;
   return <button
     type="button"
     id="notification-bell"
     className={`notification-bell ${state.center_open ? "active" : ""}`}
-    aria-label={`Notifications${unread ? `, ${unread} unread` : ""}`}
-    title={state.center_open ? "Hide notification center" : "Show notification center"}
+    aria-label={unread ? t("notifications.unread", { count: unread }) : t("notifications.title")}
+    title={state.center_open ? t("notifications.hide_center") : t("notifications.show_center")}
     aria-expanded={state.center_open}
     aria-controls={state.center_open ? "notification-center" : undefined}
     disabled={disabled}
     onClick={() => store.setCenterOpen(!state.center_open)}
   >
     <NotificationIcon kind="bell" />
-    {unread > 0 ? <span className="notification-badge" aria-hidden="true">{unread > 99 ? "99+" : unread}</span> : null}
+    {unread > 0 ? <span className="notification-badge" aria-hidden="true">{unread > 99 ? "99+" : intl.formatNumber(unread)}</span> : null}
   </button>;
 }
 
@@ -43,6 +45,9 @@ function NotificationCard({ entry, store, toast, execute, canExecute }: {
   execute(action: NotificationAction, id: string): void;
   canExecute(action: NotificationAction): boolean;
 }) {
+  const { t, intl, formatText } = useLocale();
+  const title = formatText(entry.title);
+  const source = formatText(entry.source);
   const [hovered, setHovered] = useState(false);
   const [focused, setFocused] = useState(false);
   const [visible, setVisible] = useState(document.visibilityState !== "hidden");
@@ -72,33 +77,41 @@ function NotificationCard({ entry, store, toast, execute, canExecute }: {
   }, [toast, hovered, focused, visible, entry.id, entry.severity, entry.updated_at, store]);
   return <article
     className={`notification-card notification-${entry.severity}`}
-    aria-label={entry.title}
+    aria-label={title}
     onMouseEnter={() => setHovered(true)}
     onMouseLeave={() => setHovered(false)}
     onFocus={() => setFocused(true)}
     onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) setFocused(false); }}
   >
     <div className="notification-card-heading">
-      <span className="notification-severity" title={entry.severity}><NotificationIcon kind={entry.severity} /></span>
-      <strong>{entry.title}</strong>
+      <span className="notification-severity" title={t(`notifications.severity_${entry.severity}`)}><NotificationIcon kind={entry.severity} /></span>
+      <strong>{title}</strong>
       <div className="notification-controls">
-        {toast ? <button type="button" aria-label={`Hide ${entry.title} notification`} title="Hide card; keep in notification center" onClick={(event) => remove(event.currentTarget, true)}><NotificationIcon kind="hide" /></button> : null}
-        <button type="button" aria-label={`Dismiss ${entry.title} notification`} title="Dismiss notification" onClick={(event) => remove(event.currentTarget, false)}><NotificationIcon kind="close" /></button>
+        {toast ? <button type="button" aria-label={t("notifications.hide_named", { title })} title={t("notifications.hide_hint")} onClick={(event) => remove(event.currentTarget, true)}><NotificationIcon kind="hide" /></button> : null}
+        <button type="button" aria-label={t("notifications.dismiss_named", { title })} title={t("notifications.dismiss")} onClick={(event) => remove(event.currentTarget, false)}><NotificationIcon kind="close" /></button>
       </div>
     </div>
-    <p className="notification-message">{entry.message}</p>
-    <div className="notification-meta"><span title={entry.source}>{entry.source}</span>{entry.resolved_at !== null ? <span title={`Resolved at ${new Date(entry.resolved_at).toLocaleString()}`}>Resolved</span> : null}<time dateTime={new Date(entry.updated_at).toISOString()} title={new Date(entry.updated_at).toLocaleString()}>{new Date(entry.updated_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time>{entry.occurrence_count > 1 ? <span title="Occurrences">×{entry.occurrence_count}</span> : null}</div>
-    {entry.actions?.length ? <div className="notification-actions">{entry.actions.map((action) => <button type="button" key={`${action.command_id}:${action.label}`} disabled={!canExecute(action)} onClick={() => execute(action, entry.id)}>{action.label}</button>)}</div> : null}
+    <p className="notification-message">{formatText(entry.message)}</p>
+    <div className="notification-meta">
+      <span title={source}>{source}</span>
+      {entry.resolved_at !== null ? <span title={t("notifications.resolved_at", { date: entry.resolved_at })}>{t("notifications.resolved")}</span> : null}
+      <time dateTime={new Date(entry.updated_at).toISOString()} title={intl.formatDate(entry.updated_at, { dateStyle: "medium", timeStyle: "medium" })}>
+        {intl.formatTime(entry.updated_at, { hour: "2-digit", minute: "2-digit" })}
+      </time>
+      {entry.occurrence_count > 1 ? <span title={t("notifications.occurrences")}>×{intl.formatNumber(entry.occurrence_count)}</span> : null}
+    </div>
+    {entry.actions?.length ? <div className="notification-actions">{entry.actions.map((action) => <button type="button" key={`${action.command_id}:${JSON.stringify(action.args)}`} disabled={!canExecute(action)} onClick={() => execute(action, entry.id)}>{formatText(action.label)}</button>)}</div> : null}
   </article>;
 }
 
 function NotificationCenter({ store, children, count }: { store: NotificationStore; children: ReactNode; count: number }) {
+  const { t, intl } = useLocale();
   const panel = useRef<HTMLElement>(null);
   const dismiss = () => store.setCenterOpen(false);
   const scope = useMemo(() => ({ allow_app_commands: true, commands: [{
-    id: QUICK_INPUT_IDS.cancel, title: "Hide Notification Center", category: "Notifications", enabled: true,
+    id: QUICK_INPUT_IDS.cancel, title: t("notifications.hide_center"), category: t("notifications.title"), enabled: true,
     run: () => store.setCenterOpen(false),
-  }] }), [store]);
+  }] }), [store, t]);
   useCommandScope(scope);
   useEffect(() => {
     const previous = document.activeElement;
@@ -108,13 +121,18 @@ function NotificationCenter({ store, children, count }: { store: NotificationSto
       if ((current?.contains(document.activeElement) || document.activeElement === document.body) && previous instanceof HTMLElement && previous.isConnected) previous.focus();
     };
   }, []);
-  return <section id="notification-center" className="notification-center" aria-label="Notification center" ref={panel} tabIndex={-1}>
-    <header className="notification-center-heading"><strong>Notifications <span>{count}</span></strong><button type="button" aria-label="Dismiss all notifications" title="Dismiss all notifications" disabled={count === 0} onClick={() => store.clear()}><NotificationIcon kind="clear" /></button><button type="button" aria-label="Hide notification center" title="Hide notification center" onClick={dismiss}><NotificationIcon kind="hide" /></button></header>
-    <div className="notification-history">{count ? children : <div className="notification-empty"><NotificationIcon kind="bell" /><strong>No notifications</strong><p>New notifications will appear here.</p></div>}</div>
+  return <section id="notification-center" className="notification-center" aria-label={t("notifications.center")} ref={panel} tabIndex={-1}>
+    <header className="notification-center-heading">
+      <strong>{t("notifications.title")} <span>{intl.formatNumber(count)}</span></strong>
+      <button type="button" aria-label={t("notifications.dismiss_all")} title={t("notifications.dismiss_all")} disabled={count === 0} onClick={() => store.clear()}><NotificationIcon kind="clear" /></button>
+      <button type="button" aria-label={t("notifications.hide_center")} title={t("notifications.hide_center")} onClick={dismiss}><NotificationIcon kind="hide" /></button>
+    </header>
+    <div className="notification-history">{count ? children : <div className="notification-empty"><NotificationIcon kind="bell" /><strong>{t("notifications.empty")}</strong><p>{t("notifications.empty_hint")}</p></div>}</div>
   </section>;
 }
 
 export function Notifications({ store, blocked }: { store: NotificationStore; blocked: boolean }) {
+  const { t } = useLocale();
   const state = useSyncExternalStore(store.subscribe, store.snapshot);
   const environment = useCommandEnvironment()!;
   useEffectiveCommands(environment.dispatcher);
@@ -134,5 +152,5 @@ export function Notifications({ store, blocked }: { store: NotificationStore; bl
   />);
   return state.center_open
     ? <NotificationCenter store={store} count={state.entries.length}>{cards}</NotificationCenter>
-    : <div className="notification-toasts" role="log" aria-label="Notifications" aria-live="polite" aria-relevant="additions text">{cards}</div>;
+    : <div className="notification-toasts" role="log" aria-label={t("notifications.title")} aria-live="polite" aria-relevant="additions text">{cards}</div>;
 }

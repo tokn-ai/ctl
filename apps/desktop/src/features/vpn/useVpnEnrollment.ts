@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { errorCode, errorMessage } from "../../lib/errors";
+import { message, type DisplayText } from "../i18n/messages";
+import { errorCode, errorMessage, localizedErrorText } from "../../lib/errors";
 import { beginVpnEnrollment, cancelVpnEnrollment, openVpnSignIn, vpnEnrollmentStatus } from "../../lib/tauri";
 import type { VpnEnrollmentInput, VpnEnrollmentSnapshot } from "../../lib/types";
 import { vpnNeedsSignIn } from "./status";
@@ -20,7 +21,7 @@ export function useVpnEnrollment(options: Options) {
   const [cancelling, setCancelling] = useState(false);
   const [cleanup_pending, setCleanupPending] = useState(false);
   const [opening_browser, setOpeningBrowser] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<DisplayText | null>(null);
   const [browser_error, setBrowserError] = useState<string | null>(null);
   const mounted = useRef(false);
   const callbacks = useRef(options);
@@ -83,7 +84,7 @@ export function useVpnEnrollment(options: Options) {
         const next = await vpnEnrollmentStatus(enrollment.enrollment_id);
         if (mounted.current && !cancel_requested.current && current.current?.enrollment_id === enrollment.enrollment_id) publish(next);
       } catch (failure) {
-        if (mounted.current && !cancel_requested.current && current.current?.enrollment_id === enrollment.enrollment_id) setError(errorMessage(failure));
+        if (mounted.current && !cancel_requested.current && current.current?.enrollment_id === enrollment.enrollment_id) setError(localizedErrorText(failure));
       }
     })();
     status_pending.current = pending;
@@ -146,7 +147,7 @@ export function useVpnEnrollment(options: Options) {
         const next = await beginVpnEnrollment(input);
         publish(next);
       } catch (failure) {
-        if (mounted.current && !cancel_requested.current) setError(errorMessage(failure));
+        if (mounted.current && !cancel_requested.current) setError(localizedErrorText(failure));
       } finally {
         if (mounted.current) setStarting(false);
       }
@@ -173,7 +174,7 @@ export function useVpnEnrollment(options: Options) {
         if (mounted.current) {
           const pending_cleanup = errorCode(failure) === "vpn_cleanup_pending";
           setCleanupPending(pending_cleanup);
-          setError(pending_cleanup ? errorMessage(failure) : `Could not cancel this sign-in: ${errorMessage(failure)}`);
+          setError(pending_cleanup ? localizedErrorText(failure) : message("vpn.cancel_sign_in_failed", { error: localizedErrorText(failure) }));
         }
       } finally {
         if (mounted.current) setCancelling(false);

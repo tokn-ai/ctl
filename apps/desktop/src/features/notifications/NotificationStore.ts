@@ -1,4 +1,5 @@
 import type { AppNotification, NotificationAction, NotificationInput } from "../../lib/types";
+import { textSignature } from "../i18n/messages";
 
 export const MAX_NOTIFICATIONS = 100;
 export const MAX_NOTIFICATION_TOASTS = 3;
@@ -36,7 +37,7 @@ export class NotificationStore {
       this.setActions(source_key, []);
       return;
     }
-    const signature = JSON.stringify([input.severity, input.title, input.message, input.source, toast]);
+    const signature = JSON.stringify([input.severity, textSignature(input.title), textSignature(input.message), textSignature(input.source), toast]);
     const previous = this.state.entries.find((entry) => entry.source_key === source_key);
     if (this.reported.get(source_key) === signature) {
       // Availability or context can change without being a new occurrence.
@@ -60,7 +61,8 @@ export class NotificationStore {
       this.reported.delete(this.reported.keys().next().value!);
     }
     const repeated = previous?.severity === input.severity &&
-      previous.title === input.title && previous.message === input.message;
+      JSON.stringify([textSignature(previous.title), textSignature(previous.message)]) ===
+        JSON.stringify([textSignature(input.title), textSignature(input.message)]);
     const time = this.now();
     const notification: AppNotification = {
       ...input,

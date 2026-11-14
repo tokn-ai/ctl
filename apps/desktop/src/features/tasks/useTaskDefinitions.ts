@@ -7,6 +7,7 @@ import type {
 } from "../../lib/types";
 import { loadTaskDefinitions, removeTaskDefinition, saveTaskDefinition } from "../../lib/tauri";
 import { errorMessage } from "../../lib/errors";
+import { translate, type Locale } from "../i18n/messages";
 
 export const GLOBAL_DEFINITION_SCOPE: TaskDefinitionScope = { kind: "global" };
 
@@ -14,8 +15,8 @@ export function definitionScopeKey(scope: TaskDefinitionScope = GLOBAL_DEFINITIO
   return scope.kind === "global" ? "global" : `project:${scope.project_root}`;
 }
 
-export function definitionScopeLabel(scope: TaskDefinitionScope): string {
-  return scope.kind === "global" ? "Global" : `Project · ${scope.project_root}`;
+export function definitionScopeLabel(scope: TaskDefinitionScope, locale: Locale = "en"): string {
+  return scope.kind === "global" ? translate(locale, "tasks.global") : translate(locale, "tasks.project_scope", { path: scope.project_root });
 }
 
 export function validProjectRoot(project_root: string): boolean {

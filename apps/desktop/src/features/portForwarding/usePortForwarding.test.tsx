@@ -1,3 +1,4 @@
+import { message } from "../i18n/messages";
 // @vitest-environment jsdom
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -65,7 +66,7 @@ describe("port-forward feedback ownership", () => {
     vi.mocked(configurePortForward).mockRejectedValue(new Error("Forward unavailable"));
     const { result } = renderHook(() => usePortForwarding(false, [target], [forward], vi.fn()), { wrapper: notificationWrapper(store) });
     await act(async () => { await expect(result.current.setEnabled(target, forward, true)).rejects.toThrow("Forward unavailable"); });
-    expect(store.snapshot().entries).toMatchObject([{ title: "Could not start port forward", occurrence_count: 1 }]);
+    expect(store.snapshot().entries).toMatchObject([{ title: message("ports.start_failed"), occurrence_count: 1 }]);
     expect(result.current.hostErrors.size).toBe(0);
     store.clear();
     await act(async () => { await expect(result.current.setEnabled(target, forward, true, { feedback: "inline" })).rejects.toThrow("Forward unavailable"); });
@@ -80,7 +81,7 @@ describe("port-forward feedback ownership", () => {
     await waitFor(() => expect(store.snapshot().entries).toHaveLength(1));
     expect(result.current.hostErrors.get("remote")).toBe("Unsupported forwarding");
     await act(async () => { await result.current.refreshAll(); await result.current.refreshTarget(target); });
-    expect(store.snapshot().entries).toMatchObject([{ title: "Could not restore port forwards", occurrence_count: 1 }]);
+    expect(store.snapshot().entries).toMatchObject([{ title: message("ports.restore_failed"), occurrence_count: 1 }]);
     expect(result.current.statuses.has(forward.forward_id)).toBe(false);
   });
 
@@ -364,7 +365,7 @@ describe("port forwarding controller", () => {
     await act(async () => result.current.pauseHost(target.host_id!));
     expect(result.current.statuses.get(forward.forward_id)).toMatchObject({
       state: "waiting_for_authentication",
-      message: "Host disconnected. Connect this host to resume forwarding.",
+      message: message("ports.paused"),
     });
     vi.mocked(configurePortForward).mockClear();
     vi.mocked(listPortForwards).mockClear();

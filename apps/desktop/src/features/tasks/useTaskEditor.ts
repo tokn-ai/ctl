@@ -3,14 +3,17 @@ import type { TaskDefinition, SavedTaskDefinition, TaskDefinitionScope, TaskDefi
 import type { useWorkspace } from "../workspace/useWorkspace";
 import { generateTaskName } from "./taskName";
 import { sameDefinition, definitionValidationError, TaskDefinitionValidationError } from "./taskModel";
+import { LocalizedError } from "../i18n/messages";
+import { useLocale } from "../i18n/LocaleContext";
 
-import { parseCommandLine, formatCommandLine } from "./commandLine";
+import { parseCommandLineWithFeedback, formatCommandLine } from "./commandLine";
 import { definitionScopeKey, type TaskDefinitions } from "./useTaskDefinitions";
 import { persistTaskWorkspace } from "./taskWorkspacePersistence";
 
 type Workspace = ReturnType<typeof useWorkspace>;
 
 export function useTaskEditor(workspace: Workspace, catalog: TaskDefinitions) {
+  const { formatText } = useLocale();
   const [selection, setSelection] = useState<{ definition_id: string; scope: TaskDefinitionScope } | null>(null);
   const selectionRef = useRef(selection);
   const definitionId = selection?.definition_id ?? null;
@@ -24,8 +27,8 @@ export function useTaskEditor(workspace: Workspace, catalog: TaskDefinitions) {
   const command_line =
     stored?.command_line ??
     (source ? formatCommandLine(source.program, source.arguments) : "");
-  const parsed = parseCommandLine(command_line);
-  const command_error = parsed.error;
+  const parsed = parseCommandLineWithFeedback(command_line);
+  const command_error = parsed.error ? formatText(parsed.error) : null;
   const definition = source
     ? {
         ...source,
@@ -123,7 +126,7 @@ export function useTaskEditor(workspace: Workspace, catalog: TaskDefinitions) {
 
   function editCommand(command_line: string) {
     if (!definition) return;
-    const parsed = parseCommandLine(command_line);
+    const parsed = parseCommandLineWithFeedback(command_line);
     edit(
       {
         ...definition,
@@ -147,16 +150,16 @@ export function useTaskEditor(workspace: Workspace, catalog: TaskDefinitions) {
   }
 
   async function save(): Promise<SavedTaskDefinition> {
-    if (!definitionId || !draft) throw new Error("No task draft is open.");
-    if (reviewRequired) throw new Error("This recovered draft has no original revision. Your draft is kept; reload the saved definition before saving, or keep it for later review.");
+    if (!definitionId || !draft) throw new LocalizedError("tasks.no_draft");
+    if (reviewRequired) throw new LocalizedError("tasks.review_legacy_draft");
     const definition = {
       ...draft.definition,
       name: draft.definition.name.trim()
         ? draft.definition.name
         : generateTaskName(draft.definition),
     };
-    const invalid = draft.command_error
-      ? new TaskDefinitionValidationError("command_line", draft.command_line, draft.command_error)
+    const invalid = parsed.error
+      ? new TaskDefinitionValidationError("command_line", draft.command_line, parsed.error.id, undefined, parsed.error.values)
       : definitionValidationError(definition);
     if (invalid) throw invalid;
     if (definition.name !== draft.definition.name) edit(definition);
@@ -174,7 +177,7 @@ export function useTaskEditor(workspace: Workspace, catalog: TaskDefinitions) {
     if (!definitionId) return;
     const latest = await catalog.load(scope);
     const snapshot = latest.definitions.find((item) => item.definition_id === definitionId);
-    if (!snapshot) throw new Error("The saved definition no longer exists. Your draft has been kept.");
+    if (!snapshot) throw new LocalizedError("tasks.missing_definition");
     replaceDraft({ definition_id: definitionId, definition: snapshot.definition, scope, base_revision: snapshot.revision });
     await persistTaskWorkspace(workspace);
   }

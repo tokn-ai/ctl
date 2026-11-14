@@ -113,8 +113,8 @@ export async function fileRequest(
   }
 }
 
-export function openPreviewWindow(snapshot: import("./types").PreviewSnapshot): Promise<string> {
-  return invoke("open_preview_window", { request: { snapshot } });
+export function openPreviewWindow(snapshot: import("./types").PreviewSnapshot, window_title?: string): Promise<string> {
+  return invoke("open_preview_window", { request: { snapshot, window_title } });
 }
 
 export function loadPreviewWindow(): Promise<import("./types").PreviewSnapshot> {
@@ -281,11 +281,18 @@ export async function saveKeybindings(
   });
 }
 
+export type NativeMenuLabels = Record<
+  "about" | "commands" | "edit" | "view" | "window" | "help" | "services" | "hide" |
+  "hide_others" | "quit" | "undo" | "redo" | "cut" | "copy" | "paste" | "select_all" |
+  "fullscreen" | "minimize" | "maximize", string
+>;
+
 export async function syncCommandMenu(
   bindings: NativeCommandBinding[],
+  labels?: NativeMenuLabels,
 ): Promise<NativeCommandMenuResult> {
   if (!("__TAURI_INTERNALS__" in window)) return { rejected: [] };
-  return invoke("sync_command_menu", { bindings });
+  return invoke("sync_command_menu", { bindings, labels });
 }
 
 export async function loadWorkspace(): Promise<WorkspaceSnapshot> {

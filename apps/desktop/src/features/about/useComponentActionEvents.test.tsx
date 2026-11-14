@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { formatText } from "../i18n/messages";
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { COMPONENT_RECONNECT_EVENT, COMPONENT_RESET_EVENT, useComponentActionEvents } from "./useComponentActionEvents";
@@ -44,6 +45,6 @@ it("surfaces acknowledgement failure without retrying a reconnect that may alrea
   api.acknowledgeComponentReconnect.mockRejectedValue(new Error("Action expired."));
   const { result } = renderHook(() => useComponentActionEvents(vi.fn()));
   act(() => events.listeners.get(COMPONENT_RECONNECT_EVENT)!({ payload: { action_id: "expired", attachment_ids: [] } }));
-  await waitFor(() => expect(result.current).toContain("Action expired."));
+  await waitFor(() => expect(result.current && formatText("en", result.current)).toContain("Action expired."));
   expect(api.reconnectComponentAttachments).toHaveBeenCalledOnce();
 });

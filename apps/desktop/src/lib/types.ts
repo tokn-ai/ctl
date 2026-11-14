@@ -1,3 +1,5 @@
+import type { DisplayText } from "../features/i18n/messages";
+
 export type Sequence = string;
 
 export type ComponentUpdatePackage = "ctl_agent" | "full_bundle";
@@ -178,6 +180,8 @@ export interface ComponentActionPreflight {
     port_forwards: number | null;
     vpn_connections: number | null;
     terminal_sessions: number | null;
+    kind?: "local_terminal" | "local_tasks" | "local_broker" | "remote_terminal" | "remote_saved_terminal" | "remote_reconnect" | null;
+    active_transports?: number | null;
     description: string;
   };
 }
@@ -190,6 +194,10 @@ export interface ComponentActionResult {
   action: ComponentActionKind;
   running: ComponentVersionInfo | null;
   detail: string | null;
+  summary?:
+    | { kind: "local_terminal_restart" | "remote_terminal_restart"; ended_sessions: number }
+    | { kind: "remote_reconnect"; verified_transports: number }
+    | null;
 }
 
 export interface ComponentSessionsReset {
@@ -375,14 +383,14 @@ export interface HostReachabilityObservation {
   reason: SshReachability["reason"];
   /** Methods whose endpoint answered with an SSH greeting; these are not authenticated connections. */
   method_names: string[];
-  message: string | null;
+  message: DisplayText | null;
   checked_at_ms: number | null;
 }
 
 export interface HostConnectionStatus {
   state: "checking" | "connected" | "connecting" | "disconnecting" | "disconnected" | "error";
-  method_names: string[];
-  message: string | null;
+  method_names: DisplayText[];
+  message: DisplayText | null;
   /** Manual pause policy is independent of observed SSH-master availability. */
   manually_disconnected?: boolean;
   /** Runtime SSH-master evidence; this does not establish terminal/network health. */
@@ -396,9 +404,9 @@ export interface HostConnectionStatus {
 export interface HostConnectionObservation {
   availability: "available" | "unavailable" | "unknown";
   completeness: "complete" | "partial" | "failed" | "pending";
-  method_names: string[];
-  failed_method_names: string[];
-  message: string | null;
+  method_names: DisplayText[];
+  failed_method_names: DisplayText[];
+  message: DisplayText | null;
   checked_at_ms: number | null;
   /** A route/configuration change invalidated the previous observation. */
   stale: boolean;
@@ -408,13 +416,13 @@ export interface HostConnectionOperation {
   kind: "connect" | "disconnect" | null;
   state: "idle" | "pending" | "failed";
   method_name: string | null;
-  message: string | null;
+  message: DisplayText | null;
 }
 
 export type HostConnectionChange = (
   target: ConnectionTarget,
   state: "connecting" | "connected" | "error" | "cancelled",
-  message?: string,
+  message?: DisplayText,
 ) => void;
 
 export interface WorkspaceHost {
@@ -884,16 +892,16 @@ export interface RestartLocalDaemonResponse {
 export type NotificationSeverity = "info" | "success" | "warning" | "error";
 
 export interface NotificationAction {
-  label: string;
+  label: DisplayText;
   command_id: string;
   args?: { session_key?: string; target_key?: string; value?: string };
 }
 
 export interface NotificationInput {
   severity: NotificationSeverity;
-  title: string;
-  message: string;
-  source: string;
+  title: DisplayText;
+  message: DisplayText;
+  source: DisplayText;
   actions?: readonly NotificationAction[];
 }
 
@@ -1193,7 +1201,7 @@ export interface AttachmentViewState {
   resize_with_window: boolean;
   /** Manual layout-control preference, independent of automatic canvas sizing. */
   resize_control_desired: boolean;
-  message: string | null;
+  message: DisplayText | null;
   /** Frontend-only ownership for feedback that belongs in input or layout controls. */
   message_kind?: "layout" | "input" | null;
 }

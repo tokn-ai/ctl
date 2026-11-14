@@ -1,4 +1,4 @@
-import { DEFAULT_PREFIX, TMUX_PREFIX, PREFIX_ACTIONS, resolvePrefix } from "../../features/commands/prefixKeymap";
+import { DEFAULT_PREFIX, TMUX_PREFIX, PREFIX_ACTIONS, prefixActionTitle, resolvePrefix } from "../../features/commands/prefixKeymap";
 import { useRef, useState } from "react";
 import { QuickInput } from "./QuickInput";
 import type {
@@ -16,13 +16,15 @@ import {
   resolveKeymap,
 } from "../../features/commands/keymap";
 import { formatKeybinding } from "../../features/commands/keybindings";
-import { errorMessage } from "../../lib/errors";
+import { localizedErrorText } from "../../lib/errors";
+import { useLocale } from "../../features/i18n/LocaleContext";
+import type { DisplayText } from "../../features/i18n/messages";
 
 interface Props {
   commands: readonly AppCommand[];
   document: KeybindingsDocument;
   path: string;
-  error: string | null;
+  error: DisplayText | null;
   platform: ShortcutPlatform;
   onSave(document: KeybindingsDocument): Promise<void>;
   onClose(): void;
@@ -37,24 +39,25 @@ export function KeybindingsFlow({
   onSave,
   onClose,
 }: Props) {
+  const { t, locale, formatText } = useLocale();
   const [selected, setSelected] = useState<string | null>(null);
-  const [failure, setFailure] = useState<string | null>(null);
+  const [failure, setFailure] = useState<DisplayText | null>(null);
   const [saving, setSaving] = useState(false);
   const [draft, setDraft] = useState("");
   const busy = useRef(false);
   const bindings = resolveKeymap(document, platform);
   const prefix = resolvePrefix(document, bindings, platform);
   const choices = [
-    { id: "preset.ctmux", title: "Use ctmux prefix preset" },
-    { id: "preset.tmux", title: "Use tmux-style prefix preset" },
-    { id: "prefix.key", title: "Terminal prefix" },
-    ...PREFIX_ACTIONS.map((action) => ({ id: `prefix.${action.id}`, title: `Prefix · ${action.title}` })),
+    { id: "preset.ctmux", title: t("shortcuts.ctmux_preset") },
+    { id: "preset.tmux", title: t("shortcuts.tmux_preset") },
+    { id: "prefix.key", title: t("shortcuts.prefix") },
+    ...PREFIX_ACTIONS.map((action) => ({ id: `prefix.${action.id}`, title: t("shortcuts.prefix_action", { v1: prefixActionTitle(action, locale) }) })),
     ...commands.filter((command) =>
       CONFIGURABLE_COMMAND_IDS.includes(command.id),
     ),
-    { id: QUICK_INPUT_IDS.accept, title: "Accept Quick Input" },
-    { id: QUICK_INPUT_IDS.cancel, title: "Cancel Quick Input" },
-    { id: QUICK_INPUT_IDS.back, title: "Previous Quick Input Step" },
+    { id: QUICK_INPUT_IDS.accept, title: t("dialog.command_accept") },
+    { id: QUICK_INPUT_IDS.cancel, title: t("dialog.command_cancel") },
+    { id: QUICK_INPUT_IDS.back, title: t("shortcuts.previous_step") },
   ];
   async function applyPreset(tmux: boolean) {
     if (busy.current) return;
@@ -65,7 +68,7 @@ export function KeybindingsFlow({
       const next = { ...document, prefix: tmux ? TMUX_PREFIX : DEFAULT_PREFIX };
       resolveKeymap(next, platform);
       await onSave(next);
-    } catch (problem) { setFailure(errorMessage(problem)); }
+    } catch (problem) { setFailure(localizedErrorText(problem)); }
     finally { busy.current = false; setSaving(false); }
   }
   async function save(value: string) {
@@ -99,47 +102,48 @@ export function KeybindingsFlow({
       await onSave(next);
       setSelected(null);
     } catch (problem) {
-      setFailure(errorMessage(problem));
+      setFailure(localizedErrorText(problem));
     } finally {
       busy.current = false;
       setSaving(false);
     }
   }
+  const issue = failure ?? error;
   return (
     <QuickInput
       key={selected ?? "commands"}
       title={
         selected
-          ? `Keyboard shortcut — ${choices.find((choice) => choice.id === selected)?.title ?? selected}`
-          : "Keyboard shortcuts"
+          ? t("shortcuts.edit_title", { v1: choices.find((choice) => choice.id === selected)?.title ?? selected })
+          : t("shortcuts.title")
       }
       description={
         selected
           ? selected.startsWith("prefix.")
-            ? (selected === "prefix.key" ? "Enter Ctrl+letter or Alt+letter. Press it twice to send it to the terminal. Blank disables; default restores Ctrl+B." : "Enter a letter, digit, arrow name (optionally Ctrl+ or Alt+), !, :, %, or a double quote. Escape cancels a sequence. Blank disables; default restores the binding.")
-            : "Enter Primary+Shift+E, Alt+F2, etc. Primary means Cmd on macOS and Ctrl elsewhere. Blank disables the shortcut; default restores it."
-          : `Choose an app command to change its shortcut. Native editing/window shortcuts are reserved.${path ? ` Saved in ${path}.` : ""}`
+            ? (selected === "prefix.key" ? t("shortcuts.prefix_help") : t("shortcuts.prefix_action_help"))
+            : t("shortcuts.binding_help")
+          : [t("shortcuts.choose_help"), path && t("shortcuts.saved_in", { path })].filter(Boolean).join(" ")
       }
-      error={failure ?? error}
+      error={issue === null ? null : formatText(issue)}
       cancel_disabled={saving}
       mode={
         saving
-          ? { kind: "progress", message: "Saving keyboard shortcuts…" }
+          ? { kind: "progress", message: t("shortcuts.saving") }
           : selected
             ? {
                 kind: "input",
-                label: "Shortcut",
+                label: t("shortcuts.field"),
                 initial_value: draft,
-                submit_label: "Save shortcut",
+                submit_label: t("shortcuts.save"),
               }
             : {
                 kind: "pick",
                 choices: choices.map((choice) => ({
                   id: choice.id,
                   label: choice.title,
-                  detail: choice.id.startsWith("preset.") ? "Reset prefix and prefix actions; keep app shortcuts" : choice.id === "prefix.key" ? prefix.label : choice.id.startsWith("prefix.") ? prefix.bindings.get(choice.id.slice(7)) ?? "Unbound" : bindings.has(choice.id)
+                  detail: choice.id.startsWith("preset.") ? t("shortcuts.reset_prefix") : choice.id === "prefix.key" ? prefix.label ?? t("shortcuts.disabled") : choice.id.startsWith("prefix.") ? prefix.bindings.get(choice.id.slice(7)) ?? t("shortcuts.unbound") : bindings.has(choice.id)
                     ? formatKeybinding(bindings.get(choice.id)!, platform)
-                    : "Unbound",
+                    : t("shortcuts.unbound"),
                 })),
               }
       }

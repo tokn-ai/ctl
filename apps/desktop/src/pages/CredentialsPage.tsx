@@ -1,3 +1,4 @@
+import { useLocale } from "../features/i18n/LocaleContext";
 import { useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 import { QuickInput } from "../components/commands/QuickInput";
@@ -18,18 +19,19 @@ interface Props {
   on_manage_vpn(connection_id: string | null): void;
 }
 
-function sourceMessage(source: CredentialSourceStatus): string {
-  const name = source.source === "keychain" ? "Keychain" : "VPN credentials";
-  if (source.message) return `${name}: ${source.message}`;
+function sourceMessage(source: CredentialSourceStatus, t: ReturnType<typeof useLocale>["t"]): string {
+  const name = t(source.source === "keychain" ? "credentials.keychain" : "credentials.vpn_credentials");
+  if (source.message) return t("credentials.source_detail", { name, detail: source.message });
   return {
-    ready: `${name} checked.`,
-    partial: `Some ${name === "Keychain" ? "Keychain items" : "VPN credentials"} could not be listed.`,
-    unavailable: `${name} could not be checked.`,
-    unsupported: `${name} cannot be listed on this platform.`,
+    ready: t("credentials.source_checked", { name }),
+    partial: t(source.source === "keychain" ? "credentials.partial_keychain" : "credentials.partial_vpn"),
+    unavailable: t("credentials.source_unavailable", { name }),
+    unsupported: t("credentials.source_unsupported", { name }),
   }[source.state];
 }
 
 export function CredentialsPage({ visible, targets, on_close, on_dialog_change, on_manage_vpn }: Props) {
+  const { t, formatText, locale } = useLocale();
   const model = useCredentials(visible, targets);
   const heading = useRef<HTMLHeadingElement>(null);
   const has_dialog = visible && (model.pending !== null || model.identity_dialog !== null || model.metadata_importing);
@@ -41,56 +43,56 @@ export function CredentialsPage({ visible, targets, on_close, on_dialog_change, 
   }, [has_dialog, on_dialog_change]);
   const incomplete = model.snapshot?.sources.filter((source) => source.state !== "ready") ?? [];
   const has_available_source = model.snapshot?.sources.some((source) => source.state === "ready" || source.state === "partial") ?? false;
-  const empty_message = model.snapshot && model.snapshot.metadata_import_required !== false ? "Import saved metadata to check for additional credentials."
-    : !has_available_source ? "Saved credentials could not be checked."
-    : incomplete.length ? "No credentials found in available storage." : "No saved credentials found.";
+  const empty_message = model.snapshot && model.snapshot.metadata_import_required !== false ? t("credentials.all_empty_import")
+    : !has_available_source ? t("credentials.all_empty_unavailable")
+    : incomplete.length ? t("credentials.all_empty_partial") : t("credentials.all_empty");
   const identity_warning = model.identities?.warning ?? (model.identities && !model.identities.complete
     && model.identities.metadata_import_required === false && model.identities.keychain_available
-    && !model.identities.keychain_message ? "Some identity files could not be checked." : null);
+    && !model.identities.keychain_message ? t("credentials.identity_partial") : null);
   const import_feedback = model.import_feedback
-    ? <InlineFeedback severity={model.import_feedback.severity}>{model.import_feedback.message}</InlineFeedback> : null;
+    ? <InlineFeedback severity={model.import_feedback.severity}>{formatText(model.import_feedback.message)}</InlineFeedback> : null;
 
   return <>
-    <section className="credentials-page" aria-label="Credentials" hidden={!visible}>
+    <section className="credentials-page" aria-label={t("credentials.title")} hidden={!visible}>
       <header className="credentials-page-header">
-        <div><h1 ref={heading} tabIndex={-1}>Credentials</h1><p>Identity files and saved credentials. Names and metadata only.</p></div>
-        <button type="button" onClick={on_close}><Icon name="close" />Back to workspace</button>
+        <div><h1 ref={heading} tabIndex={-1}>{t("credentials.title")}</h1><p>{t("credentials.intro")}</p></div>
+        <button type="button" onClick={on_close}><Icon name="close" />{t("credentials.back")}</button>
       </header>
       <div className="credentials-content">
-        <div className="credentials-refresh-row"><p>{model.snapshot ? `Last checked ${new Date(model.snapshot.checked_at_ms).toLocaleTimeString()}` : "Saved credentials have not been checked."}</p><button type="button" disabled={model.loading || interactions_disabled} onClick={() => void model.refresh()}><Icon name="refresh" />{model.loading ? "Checking…" : "Refresh"}</button></div>
-        <div className="credentials-import-area" role="region" aria-label={model.metadata_import_required ? "Saved credential metadata import" : "Saved credential metadata reimport"}>
+        <div className="credentials-refresh-row"><p>{model.snapshot ? t("credentials.last_checked", { time: new Date(model.snapshot.checked_at_ms).toLocaleTimeString(locale) }) : t("credentials.unchecked")}</p><button type="button" disabled={model.loading || interactions_disabled} onClick={() => void model.refresh()}><Icon name="refresh" />{model.loading ? t("credentials.checking") : t("credentials.refresh")}</button></div>
+        <div className="credentials-import-area" role="region" aria-label={model.metadata_import_required ? t("credentials.import_region") : t("credentials.reimport_region")}>
           {model.metadata_import_required ? <div className="credentials-import">
-            <p id="credential-import-description">A one-time import needs macOS authorization to read names and metadata from older protected SSH entries in Keychain. Password contents are never displayed. Refresh does not request authentication.</p>
-            <button type="button" aria-describedby="credential-import-description" disabled={model.loading || interactions_disabled} onClick={() => void model.importMetadata()}>{model.metadata_importing ? "Importing metadata…" : "Import saved credential metadata"}</button>
+            <p id="credential-import-description">{t("credentials.import_description")}</p>
+            <button type="button" aria-describedby="credential-import-description" disabled={model.loading || interactions_disabled} onClick={() => void model.importMetadata()}>{model.metadata_importing ? t("credentials.importing") : t("credentials.import")}</button>
           </div> : <div className="credentials-reimport">
-            <button type="button" aria-describedby="credential-reimport-description" disabled={model.loading || interactions_disabled} onClick={() => void model.importMetadata()}>{model.metadata_importing ? "Importing metadata…" : "Reimport saved credential metadata"}</button>
-            <p id="credential-reimport-description">Import again if credentials were saved using an older ctld. macOS may ask you to authorize access to their names and metadata.</p>
+            <button type="button" aria-describedby="credential-reimport-description" disabled={model.loading || interactions_disabled} onClick={() => void model.importMetadata()}>{model.metadata_importing ? t("credentials.importing") : t("credentials.reimport")}</button>
+            <p id="credential-reimport-description">{t("credentials.reimport_description")}</p>
           </div>}
           {import_feedback}
         </div>
-        <section className="credentials-section" aria-label="Identity file inventory">
-          <h2>Identity files</h2>
-          {model.identity_error ? <InlineFeedback>Could not refresh identity files: {model.identity_error}{model.identities ? " Showing the last successful check." : ""}</InlineFeedback> : null}
+        <section className="credentials-section" aria-label={t("credentials.identity_inventory")}>
+          <h2>{t("credentials.identity_files")}</h2>
+          {model.identity_error ? <InlineFeedback>{t(model.identities ? "credentials.identity_refresh_stale" : "credentials.identity_refresh_failed", { error: model.identity_error })}</InlineFeedback> : null}
           {identity_warning ? <InlineFeedback severity="warning">{identity_warning}</InlineFeedback> : null}
           {model.identities?.keychain_message ? <InlineFeedback severity="warning">{model.identities.keychain_message}</InlineFeedback>
-            : model.identities && !model.identities.keychain_available ? <InlineFeedback severity="warning">Keychain access could not be checked. Refresh or update ctld to get the reason.</InlineFeedback> : null}
-          {model.loading && !model.identities ? <p role="status">Checking identity files…</p> : null}
+            : model.identities && !model.identities.keychain_available ? <InlineFeedback severity="warning">{t("credentials.identity_keychain_check")}</InlineFeedback> : null}
+          {model.loading && !model.identities ? <p role="status">{t("credentials.checking_identities")}</p> : null}
           {model.identities?.identity_files.length ? <IdentityFilesTable identity_files={model.identities.identity_files} metadata_import_required={model.identities.metadata_import_required !== false} keychain_available={model.identities.keychain_available && !model.identity_error} disabled={interactions_disabled} on_save={model.requestIdentitySave} on_forget={model.requestIdentityForget} />
-            : model.identities && !model.loading ? <p className="credentials-empty">{model.identities.metadata_import_required !== false ? "Import saved metadata to check for additional identity files." : model.identities.complete ? "No identity files found." : "No identity files found in the locations checked."}</p> : null}
+            : model.identities && !model.loading ? <p className="credentials-empty">{model.identities.metadata_import_required !== false ? t("credentials.identity_empty_import") : model.identities.complete ? t("credentials.identity_empty") : t("credentials.identity_empty_checked")}</p> : null}
         </section>
-        <section className="credentials-section" aria-label="Saved credential inventory">
-          <h2>Saved credentials</h2>
-          {model.error ? <InlineFeedback>Could not refresh credentials: {model.error}{model.snapshot ? " Showing the last successful check." : ""}</InlineFeedback> : null}
-          {incomplete.map((source) => <InlineFeedback key={source.source} severity="warning">{sourceMessage(source)}</InlineFeedback>)}
-          {model.loading && !model.snapshot ? <p role="status">Checking saved credentials…</p> : null}
+        <section className="credentials-section" aria-label={t("credentials.saved_inventory")}>
+          <h2>{t("credentials.saved_credentials")}</h2>
+          {model.error ? <InlineFeedback>{t(model.snapshot ? "credentials.refresh_stale" : "credentials.refresh_failed", { error: model.error })}</InlineFeedback> : null}
+          {incomplete.map((source) => <InlineFeedback key={source.source} severity="warning">{sourceMessage(source, t)}</InlineFeedback>)}
+          {model.loading && !model.snapshot ? <p role="status">{t("credentials.checking_saved")}</p> : null}
           {model.snapshot?.credentials.length ? <CredentialTable credentials={model.snapshot.credentials} busy_id={model.busy_id ?? (has_dialog ? "dialog" : null)} on_forget={model.requestForget} on_manage_vpn={on_manage_vpn} />
             : model.snapshot && !model.loading ? <p className="credentials-empty">{empty_message}</p> : null}
         </section>
-        <p className="credentials-footnote">Identity files include configured paths and keys discovered in ~/.ssh. “Used by” lists recorded host references. Keychain contains saved SSH passwords and key passphrases. VPN passwords use private VPN settings; Tailscale sign-in belongs to its container volume. Tailscale entries identify saved profiles; sign-in data has not been verified.</p>
+        <p className="credentials-footnote">{t("credentials.footnote")}</p>
       </div>
     </section>
-    {visible && model.pending ? createPortal(<QuickInput title={`Forget ${model.pending.name}`} description="Remove this saved credential from Keychain. Active connections stay connected. A future connection may ask for the password or passphrase again." mode={{ kind: "confirm", confirm_label: "Forget credential", destructive: true }} onCancel={model.cancelForget} onSubmit={model.confirmForget} />, document.body) : null}
-    {visible && model.metadata_importing ? createPortal(<QuickInput title="Import saved credential metadata" description="Accessing names and metadata for older saved SSH passwords and key passphrases in Keychain." mode={{ kind: "progress", message: "Authorize metadata import in macOS…", detail: "Password contents are never displayed. This operation continues if you leave Credentials." }} cancel_disabled onCancel={() => {}} onSubmit={() => {}} />, document.body) : null}
+    {visible && model.pending ? createPortal(<QuickInput title={t("credentials.forget_named", { name: model.pending.name })} description={t("credentials.forget_description")} mode={{ kind: "confirm", confirm_label: t("credentials.forget_credential"), destructive: true }} onCancel={model.cancelForget} onSubmit={model.confirmForget} />, document.body) : null}
+    {visible && model.metadata_importing ? createPortal(<QuickInput title={t("credentials.import")} description={t("credentials.import_progress_description")} mode={{ kind: "progress", message: t("credentials.import_authorize"), detail: t("credentials.import_detail") }} cancel_disabled onCancel={() => {}} onSubmit={() => {}} />, document.body) : null}
     {visible && model.identity_dialog ? createPortal(<IdentityFileDialog {...model.identity_dialog} on_save={model.confirmIdentitySave} on_forget={model.confirmIdentityForget} on_cancel={model.cancelDialog} />, document.body) : null}
   </>;
 }

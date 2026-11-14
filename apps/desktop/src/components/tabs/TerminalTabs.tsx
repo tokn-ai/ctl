@@ -1,3 +1,4 @@
+import { useLocale } from "../../features/i18n/LocaleContext";
 import type { CSSProperties, KeyboardEvent, ReactNode } from "react";
 import type { SessionSummary, ShellStateSummary, ViewLayout } from "../../lib/types";
 import { formatTerminalTitle } from "../../features/tabs/terminalTitle";
@@ -51,6 +52,7 @@ function WorkspaceTab({
   active, title, host, host_color, description, close_label, close_hint, icon, children,
   on_select, on_close,
 }: WorkspaceTabProps) {
+  const { t } = useLocale();
   return (
     <div
       className={`terminal-tab ${active ? "active" : ""}`}
@@ -61,9 +63,9 @@ function WorkspaceTab({
         type="button"
         role="tab"
         aria-selected={active}
-        aria-label={`${title} on ${host}`}
+        aria-label={t("tabs.select_label", { title: title, host: host })}
         aria-description={description}
-        title={`${title} · ${host}`}
+        title={t("tabs.title", { title: title, host: host })}
         onClick={on_select}
       >
         {icon}
@@ -116,6 +118,7 @@ export function TerminalTabs({
   onClose,
   onCreate,
 }: TerminalTabsProps) {
+  const { t, locale } = useLocale();
   const terminalNodes = tabs.map((tab) => {
     const key = sessionKey(tab);
     const host_id = tab.target.kind === "local" ? "local" : tab.target.host_id ?? targetKey(tab.target);
@@ -129,11 +132,11 @@ export function TerminalTabs({
           key={key}
           active={key === activeSessionKey}
           title={title.text}
-          host={targetLabel(tab.target)}
+          host={targetLabel(tab.target, locale)}
           host_color={hostColor(tab.target, host_colors[host_id])}
-          description={sessionIconLabel(shell_state?.shell_type, layout)}
-          close_label={`Close ${tab.name} tab`}
-          close_hint="Close tab; keep session running"
+          description={sessionIconLabel(shell_state?.shell_type, layout, locale)}
+          close_label={t("tabs.close", { name: tab.name })}
+          close_hint={t("tabs.close_session_hint")}
           icon={(
             <SessionIcon
               shell_type={shell_state?.shell_type}
@@ -166,8 +169,8 @@ export function TerminalTabs({
           title={tab.title}
           host={tab.host}
           host_color={hostIdColor(host_id, host_colors[host_id])}
-          close_label={`Close ${tab.title} tab`}
-          close_hint="Close view; keep task running"
+          close_label={t("tabs.close", { name: tab.title })}
+          close_hint={t("tabs.close_task_hint")}
           icon={<span className={`task-state-dot ${tab.status}`} />}
           on_select={() => on_select_extra?.(tab.tab_key)}
           on_close={() => on_close_extra?.(tab.tab_key)}
@@ -183,7 +186,7 @@ export function TerminalTabs({
     return (first < 0 ? Infinity : first) - (second < 0 ? Infinity : second);
   });
   return (
-    <nav className="terminal-tabs" aria-label="Workspace tabs">
+    <nav className="terminal-tabs" aria-label={t("tabs.workspace_tabs")}>
       {leading_actions}
       <div className="terminal-tab-list" role="tablist" onKeyDown={navigateTabs}>
         {nodes.map((item) => item.node)}
@@ -191,8 +194,8 @@ export function TerminalTabs({
       <button
         className="terminal-tab-new"
         type="button"
-        aria-label="New tab in current folder"
-        title="New tab in current folder"
+        aria-label={t("tabs.new_tab")}
+        title={t("tabs.new_tab")}
         disabled={!canCreate}
         onClick={onCreate}
       >

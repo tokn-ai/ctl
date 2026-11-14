@@ -620,5 +620,4 @@ import.meta.hot?.dispose(() => clearInterval(statistics_timer));
 
 // Dynamic import ensures the native window API sees mockWindows first.
 const { default: App } = await import("../src/App");
-const { AppErrorBoundary } = await import("../src/components/errors/AppErrorBoundary");
-createRoot(document.getElementById("root")!).render(<AppErrorBoundary><App /></AppErrorBoundary>);
+createRoot(document.getElementById("root")!).render(<App />);

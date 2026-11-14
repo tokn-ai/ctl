@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { message } from "../i18n/messages";
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { disconnectSshHost, probeSshHost, sshConnectionStatus, sshReachability } from "../../lib/tauri";
@@ -160,7 +161,7 @@ describe("live host connections", () => {
       method.kind === "ssh" ? method.destination : "local")).toEqual(["direct", "vpn", "old-route"]);
     expect(methods).toEqual(saved);
     expect(result.current.statuses.get(host.host_id)).toMatchObject({
-      state: "disconnected", method_names: [], message: expect.stringContaining("Disconnected manually"),
+      state: "disconnected", method_names: [], message: message("host_observation.manual_resume"),
       manually_disconnected: true,
     });
   });
@@ -196,7 +197,7 @@ describe("live host connections", () => {
       candidate.kind === "ssh" && candidate.use_ssh_config_master === false ? disconnected : connected);
     const { result } = setup({ hosts: [updated], targets: [previous] });
     await waitFor(() => expect(result.current.statuses.get(host.host_id)).toMatchObject({
-      state: "connected", method_names: ["Previous connection"],
+      state: "connected", method_names: [message("host_observation.previous_connection")],
     }));
     await act(async () => result.current.disconnect(previous));
     expect(disconnectSshHost).toHaveBeenCalledExactlyOnceWith([
@@ -274,7 +275,7 @@ describe("live host connections", () => {
       else pause.reject(new Error("Old host pause failed"));
     });
     expect(result.current.statuses.get(host.host_id)?.message).not.toBe("Old host pause failed");
-    expect(result.current.statuses.get(host.host_id)?.message ?? "").not.toContain("Disconnected manually");
+    expect(result.current.statuses.get(host.host_id)?.message).not.toEqual(message("host_observation.manual_resume"));
 
     await act(async () => result.current.refresh());
     expect(result.current.statuses.get(host.host_id)?.state).toBe("disconnected");
@@ -324,7 +325,7 @@ describe("live host connections", () => {
     vi.mocked(sshConnectionStatus).mockResolvedValue({ connected: true, manually_disconnected: true });
     const { result, initial } = setup();
     await waitFor(() => expect(result.current.statuses.get(host.host_id)).toMatchObject({
-      state: "error", method_names: ["Direct"], message: expect.stringContaining("still open"),
+      state: "error", method_names: ["Direct"], message: message("host_observation.incomplete_disconnect"),
       manually_disconnected: true,
       observation: { availability: "available" },
     }));
@@ -529,7 +530,7 @@ it("bounds a stalled broker query and ignores its late connected result", async 
   });
   expect(result.current.statuses.get(host.host_id)).toMatchObject({
     state: "error", method_names: [],
-    observation: { availability: "unknown", completeness: "failed", message: "SSH status query timed out." },
+    observation: { availability: "unknown", completeness: "failed", message: message("host_observation.status_timeout") },
   });
   await act(async () => { stalled.resolve(connected); });
   expect(result.current.statuses.get(host.host_id)?.observation?.availability).toBe("unknown");

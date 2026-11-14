@@ -1,3 +1,4 @@
+import { LocalizedError, message } from "../i18n/messages";
 import type {
   ResolvedVpnGateway,
   ResolvedSshGateway,
@@ -62,31 +63,31 @@ export function expandSshRoute(
   const resolved: ResolvedSshGateway[] = [];
   const active_hosts = new Set(target.host_id ? [target.host_id] : []);
   const append = (gateway: ResolvedSshGateway) => {
-    if (resolved.length >= 8) throw new Error("This connection route expands to more than 8 hops. Remove a hop or shorten a linked host's route.");
+    if (resolved.length >= 8) throw new LocalizedError("workspace.route_too_long");
     const preceding = resolved[resolved.length - 1];
     if (gateway.kind === "vpn" && resolved.length &&
       (preceding?.kind === "vpn" || preceding?.kind === "socks5")) {
-      throw new Error("A VPN must be the first hop or immediately follow an SSH hop. VPN after VPN or SOCKS is not supported.");
+      throw new LocalizedError("workspace.route_vpn_position");
     }
     resolved.push(gateway);
   };
   const expand = (route: readonly SshGatewayRouteStep[], depth = 0) => {
     for (const step of route) {
       if (isVpnRouteStep(step)) {
-        if (!step.vpn_connection_id?.trim()) throw new Error("A VPN profile in this route is missing. Choose a saved VPN profile.");
+        if (!step.vpn_connection_id?.trim()) throw new LocalizedError("workspace.route_vpn_missing");
         append(resolveVpnRouteStep(step));
       } else if (isHostRouteStep(step)) {
         const host = host_by_id.get(step.host_id);
-        if (!host || host.host_id === "local") throw new Error("A saved SSH host in this route is missing. Restore it or choose another hop.");
-        if (active_hosts.has(host.host_id)) throw new Error(`This connection route contains a cycle through ${host.name}. Remove the linked hop that returns to this host.`);
-        if (depth >= 8) throw new Error("This connection route expands to more than 8 hops. Remove a hop or shorten a linked host's route.");
+        if (!host || host.host_id === "local") throw new LocalizedError("workspace.route_host_missing");
+        if (active_hosts.has(host.host_id)) throw new LocalizedError("workspace.route_cycle", { host: host.name });
+        if (depth >= 8) throw new LocalizedError("workspace.route_too_long");
         const method = host.connection_methods.find((candidate) => candidate.method_id === step.method_id);
-        if (!method) throw new Error(`The selected connection method for SSH hop ${host.name} is missing. Choose a current method for this hop.`);
+        if (!method) throw new LocalizedError("workspace.route_method_missing", { host: host.name });
         if (host.source === "unavailable" || method.target.unavailable) {
-          throw new Error(`SSH hop ${host.name} is unavailable: ${method.target.unavailable ?? "Restore its saved definition before connecting."}`);
+          throw new LocalizedError("workspace.route_hop_unavailable", { host: host.name, detail: method.target.unavailable ?? message("workspace.route_restore_hop") });
         }
         if (method.target.identity_file) {
-          throw new Error(`The connection method ${method.name} for SSH hop ${host.name} uses a private key file. Private key files are not supported for linked SSH hops yet; choose another method.`);
+          throw new LocalizedError("workspace.route_identity_file", { method: method.name, host: host.name });
         }
         active_hosts.add(host.host_id);
         expand(orderedSshRoute(method.target), depth + 1);
@@ -97,7 +98,7 @@ export function expandSshRoute(
         const destination = separator < 0 ? address : address.slice(separator + 1);
         const user = endpoint.user ?? (separator < 0 ? undefined : address.slice(0, separator));
         if (!destination || (separator >= 0 && (!user || user.includes("@")))) {
-          throw new Error(`The SSH address for hop ${host.name} is invalid. Edit the selected connection method before using it as a hop.`);
+          throw new LocalizedError("workspace.route_address", { host: host.name });
         }
         const remote_info = host.expected_remote_info ?? host.remote_info;
         append({
@@ -113,7 +114,7 @@ export function expandSshRoute(
         });
       } else {
         const gateway = gateway_by_id.get(step.gateway_id);
-        if (!gateway) throw new Error("A gateway for this connection method is missing. Edit the method before connecting.");
+        if (!gateway) throw new LocalizedError("workspace.route_gateway_missing");
         append({ ...gateway, mode: step.mode });
       }
     }

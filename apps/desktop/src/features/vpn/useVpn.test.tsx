@@ -1,3 +1,4 @@
+import { message } from "../i18n/messages";
 // @vitest-environment jsdom
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -90,7 +91,7 @@ describe("VPN notification routing", () => {
     expect(store.snapshot().entries).toHaveLength(0);
     backend = observe();
     await act(async () => { await result.current.refresh(); });
-    expect(store.snapshot().entries).toMatchObject([{ source_key: "vpn:runtime:work", title: "VPN disconnected", occurrence_count: 1 }]);
+    expect(store.snapshot().entries).toMatchObject([{ source_key: "vpn:runtime:work", title: message("vpn.unexpected_disconnect"), occurrence_count: 1 }]);
     const entry = store.snapshot().entries[0];
     store.hide(entry.id);
     await act(async () => { await result.current.refresh(); });
@@ -120,7 +121,7 @@ describe("VPN notification routing", () => {
     await act(async () => { await result.current.deleteConnection("work"); });
     expect(result.current.catalog_error).toBeNull();
     expect(result.current.connections).toEqual(catalog.connections);
-    expect(store.snapshot().entries).toMatchObject([{ title: "Could not delete VPN connection", message: "Work: Delete failed" }]);
+    expect(store.snapshot().entries).toMatchObject([{ title: message("vpn.delete_failed"), message: message("vpn.named_error", { name: "Work", error: "Delete failed" }) }]);
   });
 });
 
@@ -496,7 +497,7 @@ describe("adopting an authenticated Tailscale enrollment", () => {
     vi.mocked(loadVpnConnections).mockResolvedValue({ ...catalog, revision: "revision-2" });
     await act(async () => { expect(await result.current.saveEnrollment("draft-one")).toBe(false); });
     expect(result.current.editor?.expected_revision).toBe("revision-2");
-    expect(result.current.editor_error).toBe("Connections changed. Review this connection and save again.");
+    expect(result.current.editor_error).toEqual(message("vpn.save_conflict"));
     expect(result.current.enrollment_connection_id).toBe("enrolled");
     await act(async () => { expect(await result.current.saveEnrollment("draft-one")).toBe(true); });
     expect(saveVpnEnrollment).toHaveBeenNthCalledWith(1, "draft-one", "revision-1");

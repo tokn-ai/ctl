@@ -1,3 +1,5 @@
+import { translate, type Locale } from "../../features/i18n/messages";
+import { useLocale } from "../../features/i18n/LocaleContext";
 import { ControlPopover } from "../ui/ControlPopover";
 import { useId, useState } from "react";
 import { Icon } from "../ui/Icon";
@@ -78,6 +80,7 @@ interface SessionSidebarProps {
 function sidebarTitle(
   session: SessionSummary,
   shellState: ShellStateSummary | null,
+  locale: Locale,
 ): { fullTitle: string; compactTitle: string } {
   const title = formatTerminalTitle(session, shellState);
 
@@ -86,7 +89,7 @@ function sidebarTitle(
   // instead, so an unobserved shell remains visually neutral rather than
   // repeating the same `session-1` label twice.
   if (!shellState?.cwd) {
-    const fullTitle = title.command ?? "Shell";
+    const fullTitle = title.command ?? translate(locale, "sidebar.shell");
     return {
       fullTitle,
       compactTitle: compactTerminalTitle(
@@ -104,17 +107,17 @@ function sidebarTitle(
   };
 }
 
-function hostTitle(target: ConnectionTarget): string {
-  const lines = [targetLabel(target)];
+function hostTitle(target: ConnectionTarget, locale: Locale): string {
+  const lines = [targetLabel(target, locale)];
   if (target.kind === "ssh" && target.remote_info) {
     lines.push(
-      `Agent ${target.remote_info.agent_version}`,
-      `Remote ID: ${target.remote_info.remote_id}`,
+      translate(locale, "sidebar.agent", { version: target.remote_info.agent_version }),
+      translate(locale, "sidebar.remote_id", { id: target.remote_info.remote_id }),
     );
     if (target.remote_info.bundle) {
       lines.push(
-        `Bundle: ${target.remote_info.bundle.bundle_id}`,
-        `Revision: ${target.remote_info.bundle.git_revision}`,
+        translate(locale, "sidebar.bundle", { bundle: target.remote_info.bundle.bundle_id }),
+        translate(locale, "sidebar.revision", { revision: target.remote_info.bundle.git_revision }),
       );
     }
   }
@@ -160,6 +163,7 @@ export function SessionSidebar({
   onSelectTask,
   onStopTask,
 }: SessionSidebarProps) {
+  const { t, locale, formatText } = useLocale();
   const groupId = useId();
   const [collapsedHosts, setCollapsedHosts] = useState<ReadonlySet<string>>(
     () => new Set(),
@@ -200,25 +204,25 @@ export function SessionSidebar({
   }
 
   return (
-    <aside className="session-sidebar" aria-label="ctmux sessions">
+    <aside className="session-sidebar" aria-label={t("sidebar.sessions_panel")}>
       <div className="sidebar-connections">
         <header className="sidebar-header">
-          <strong>Hosts</strong>
+          <strong>{t("sidebar.hosts")}</strong>
           <div className="sidebar-header-actions">
-            <ControlPopover label="Add or manage sessions" trigger_content={<Icon name="plus" />} placement="below" close_on_select>
-              <button type="button" onClick={() => onNewShell()} disabled={creating}><Icon name="terminal" />New shell</button>
-              <button type="button" onClick={onAddExisting} aria-label="Add existing session"><Icon name="plug" />Attach session</button>
-              <button type="button" onClick={onAddHost}><Icon name="server" />Add host</button>
-              {onChooseHost && <button type="button" onClick={onChooseHost} aria-label="Choose host to connect"><Icon name="plug" />Connect host</button>}
-              {on_archives && <button type="button" onClick={on_archives} aria-label="Archived sessions"><Icon name="archive" />Archives</button>}
+            <ControlPopover label={t("sidebar.manage_sessions")} trigger_content={<Icon name="plus" />} placement="below" close_on_select>
+              <button type="button" onClick={() => onNewShell()} disabled={creating}><Icon name="terminal" />{t("sidebar.new_shell")}</button>
+              <button type="button" onClick={onAddExisting} aria-label={t("sidebar.add_existing")}><Icon name="plug" />{t("sidebar.attach")}</button>
+              <button type="button" onClick={onAddHost}><Icon name="server" />{t("sidebar.add_host")}</button>
+              {onChooseHost && <button type="button" onClick={onChooseHost} aria-label={t("sidebar.choose_host")}><Icon name="plug" />{t("sidebar.connect_host")}</button>}
+              {on_archives && <button type="button" onClick={on_archives} aria-label={t("sidebar.archives_label")}><Icon name="archive" />{t("sidebar.archives")}</button>}
             </ControlPopover>
             <button
               className="icon-button"
               type="button"
               onClick={onRefresh}
               disabled={loading}
-              aria-label="Refresh sessions"
-              title="Refresh sessions"
+              aria-label={t("sidebar.refresh")}
+              title={t("sidebar.refresh")}
             >
               <Icon name="refresh" />
             </button>
@@ -228,17 +232,17 @@ export function SessionSidebar({
       </div>
 
       <div className="session-list">
-        {list_error ? <InlineFeedback action={{ label: "Retry session list", on_click: on_retry ?? onRefresh, disabled: loading }}>
-          Could not refresh sessions: {list_error}{sessions.length > 0 ? " Showing the last successful check." : ""}
+        {list_error ? <InlineFeedback action={{ label: t("sidebar.retry_sessions"), on_click: on_retry ?? onRefresh, disabled: loading }}>
+          {t("sidebar.refresh_failed", { detail: list_error, cached: String(sessions.length > 0) })}
         </InlineFeedback> : null}
         {loading && sessions.length === 0 ? (
-          <p className="sidebar-state">Loading workspace…</p>
+          <p className="sidebar-state">{t("sidebar.loading")}</p>
         ) : null}
 
         {taskSessions.length > 0 ? (
           <section className="session-group" aria-labelledby="session-group-tasks">
             <h3 id="session-group-tasks">
-              Tasks <span>{taskSessions.length}</span>
+              {t("sidebar.tasks")} <span>{taskSessions.length}</span>
             </h3>
             {taskSessions.map((task) => {
               const run = task.active_run!;
@@ -254,13 +258,13 @@ export function SessionSidebar({
                     type="button"
                     onClick={() => onSelectTask?.(task)}
                     aria-current={selected ? "true" : undefined}
-                    aria-label={`${task.definition.name} — interactive task`}
+                    aria-label={t("sidebar.interactive_task", { name: task.definition.name })}
                     title={task.definition.name}
                   >
                     <Icon name="tasks" class_name="session-icon" />
                     <span className="session-copy">
                       <strong>{task.definition.name}</strong>
-                      <small>Interactive · {run.state}</small>
+                      <small>{t("sidebar.task_status", { status: t(`tasks.state_${run.state}`) })}</small>
                     </span>
                   </button>
                   <div className="session-actions">
@@ -268,8 +272,8 @@ export function SessionSidebar({
                       className="session-action session-close"
                       type="button"
                       onClick={() => onStopTask?.(task)}
-                      aria-label={`Stop ${task.definition.name}`}
-                      title="Stop the task and its terminal"
+                      aria-label={t("sidebar.stop_task", { name: task.definition.name })}
+                      title={t("sidebar.stop_task_hint")}
                     >
                       <Icon name="stop" size={14} />
                     </button>
@@ -290,10 +294,10 @@ export function SessionSidebar({
             ? hostConnections?.get(target.host_id ?? "")
             : undefined;
           const operation = connection?.operation;
-          const presentation = hostPresentation(target, connection, targetErrors.get(key));
+          const presentation = hostPresentation(target, connection, targetErrors.get(key), locale);
           const host_error = targetErrors.get(key);
           const details_description = [presentation.description,
-            ...presentation.details.map((detail) => `${detail.label}: ${detail.value}`),
+            ...presentation.details.map((detail) => t("sidebar.detail", { label: detail.label, value: detail.value })),
           ].join("\n");
           const connectionBusy = connection?.state === "connecting" ||
             connection?.state === "disconnecting" || operation?.state === "pending";
@@ -310,13 +314,13 @@ export function SessionSidebar({
               <span
                 className="host-group-name"
                 role={target.kind === "ssh" ? "status" : undefined}
-                aria-label={target.kind === "ssh" ? `Host connection for ${targetLabel(target)}: ${presentation.label}` : undefined}
+                aria-label={target.kind === "ssh" ? t("sidebar.host_status", { host: targetLabel(target, locale), status: presentation.label }) : undefined}
                 aria-description={details_description}
                 data-tone={presentation.tone}
                 data-connected={presentation.connected}
-              >{target.kind === "local" ? "Local" : targetLabel(target)}</span>
-              {host?.source === "ssh_config" ? <span className="host-config-source" title="From SSH config; saved only when customized">SSH</span> : null}
-              {host?.source === "tailscale" ? <span className="host-config-source" title="Discovered from Tailscale; saved only when customized">Tailscale</span> : null}
+              >{target.kind === "local" ? t("sidebar.local") : targetLabel(target, locale)}</span>
+              {host?.source === "ssh_config" ? <span className="host-config-source" title={t("sidebar.ssh_config_source")}>SSH</span> : null}
+              {host?.source === "tailscale" ? <span className="host-config-source" title={t("sidebar.tailscale_source")}>Tailscale</span> : null}
               {can_expand && <span className="host-group-count">{groupSessions.length}</span>}
             </span>
           </>;
@@ -324,11 +328,11 @@ export function SessionSidebar({
             <section
               className="session-group host-group"
               key={key}
-              aria-label={`${targetLabel(target)} sessions`}
+              aria-label={t("sidebar.host_sessions", { host: targetLabel(target, locale) })}
             >
               <div className="host-group-header">
                 <HostDetailsCard
-                  host_name={target.kind === "local" ? "Local" : targetLabel(target)}
+                  host_name={target.kind === "local" ? t("sidebar.local") : targetLabel(target, locale)}
                   label={presentation.label}
                   tone={presentation.tone}
                   details={presentation.details}
@@ -339,7 +343,7 @@ export function SessionSidebar({
                   type="button"
                   aria-expanded={expanded}
                   aria-controls={childrenId}
-                  aria-label={`${expanded ? "Collapse" : "Expand"} ${targetLabel(target)}`}
+                  aria-label={t("sidebar.toggle_host", { expanded: String(expanded), host: targetLabel(target, locale) })}
                   aria-description={details_description}
                   onClick={() => toggleHost(key)}
                 >
@@ -348,14 +352,14 @@ export function SessionSidebar({
                   {...trigger_props}
                   className="host-group-label"
                   tabIndex={0}
-                  aria-label={target.kind === "local" ? "Local" : targetLabel(target)}
+                  aria-label={target.kind === "local" ? t("sidebar.local") : targetLabel(target, locale)}
                   aria-description={details_description}
                 >{heading}</div>}</HostDetailsCard>
                 <div className="host-color-control">
-                  {target.kind === "local" ? <span className="host-color-fixed" title="Local · white" aria-hidden="true">
+                  {target.kind === "local" ? <span className="host-color-fixed" title={t("sidebar.local_color")} aria-hidden="true">
                     <span className="host-color-dot" style={{ background: hostColor(target) }} />
                   </span> : <HostColorPicker
-                    host_name={targetLabel(target)}
+                    host_name={targetLabel(target, locale)}
                     color={hostColor(target, host_colors[host_id])}
                     connected={presentation.connected}
                     default_color={hostColor(target)}
@@ -369,8 +373,8 @@ export function SessionSidebar({
                     type="button"
                     onClick={() => onNewShell(target)}
                     disabled={creating || Boolean(target.kind === "ssh" && target.unavailable)}
-                    aria-label={`New shell on ${targetLabel(target)}`}
-                    title={`New shell on ${targetLabel(target)}`}
+                    aria-label={t("sidebar.new_on_host", { host: targetLabel(target, locale) })}
+                    title={t("sidebar.new_on_host", { host: targetLabel(target, locale) })}
                   >
                     <Icon name="plus" size={14} />
                   </button>
@@ -381,8 +385,8 @@ export function SessionSidebar({
                         type="button"
                         onClick={() => onDisconnectHost?.(target)}
                         disabled={connectionBusy}
-                        aria-label={`Disconnect host ${targetLabel(target)}`}
-                        title="Close the shared SSH connection and pause forwards. Remote sessions keep running."
+                        aria-label={t("sidebar.disconnect_host", { host: targetLabel(target, locale) })}
+                        title={t("sidebar.disconnect_host_hint")}
                       >
                         <Icon name="unplug" size={14} />
                       </button>
@@ -392,8 +396,8 @@ export function SessionSidebar({
                         type="button"
                         onClick={() => onConnectHost(target)}
                         disabled={!(connectableHostKeys?.has(key) ?? !target.unavailable) || connectionBusy}
-                        aria-label={`Connect to ${targetLabel(target)}`}
-                        title={`Connect to ${hostTitle(target)}`}
+                        aria-label={t("sidebar.connect_to", { host: targetLabel(target, locale) })}
+                        title={t("sidebar.connect_to", { host: hostTitle(target, locale) })}
                       >
                         <Icon name="plug" size={14} />
                       </button>
@@ -404,8 +408,8 @@ export function SessionSidebar({
                         type="button"
                         onClick={() => onPortForward(target)}
                         disabled={Boolean(target.unavailable)}
-                        aria-label={`Port forwarding for ${targetLabel(target)}`}
-                        title={`Port forwarding for ${targetLabel(target)}`}
+                        aria-label={t("sidebar.forwards_for", { host: targetLabel(target, locale) })}
+                        title={t("sidebar.forwards_for", { host: targetLabel(target, locale) })}
                       >
                         <Icon name="ports" size={14} />
                       </button>
@@ -415,8 +419,8 @@ export function SessionSidebar({
                         className="session-action"
                         type="button"
                         onClick={() => onHostSettings(target)}
-                        aria-label={`Host settings for ${targetLabel(target)}`}
-                        title={`Host settings for ${targetLabel(target)}`}
+                        aria-label={t("sidebar.settings_for", { host: targetLabel(target, locale) })}
+                        title={t("sidebar.settings_for", { host: targetLabel(target, locale) })}
                       >
                         <Icon name="settings" size={14} />
                       </button>
@@ -424,8 +428,8 @@ export function SessionSidebar({
                   </> : null}
                 </div>
               </div>
-              {host_error ? <InlineFeedback action={{ label: "Retry host check", on_click: on_retry ?? onRefresh, disabled: loading }}>
-                {host_error.message}{groupSessions.length > 0 ? " Showing remembered sessions." : ""}
+              {host_error ? <InlineFeedback action={{ label: t("sidebar.retry_host"), on_click: on_retry ?? onRefresh, disabled: loading }}>
+                {t("sidebar.host_failed", { detail: formatText(host_error.message), cached: String(groupSessions.length > 0) })}
               </InlineFeedback> : null}
               {can_expand && <div className="host-group-children" id={childrenId} hidden={!expanded}>
                 {groupSessions.map((session) => {
@@ -433,27 +437,26 @@ export function SessionSidebar({
                   const { fullTitle, compactTitle } = sidebarTitle(
                     session,
                     shellStates.get(identity) ?? null,
+                    locale,
                   );
                   const selected = identity === selectedSessionKey;
                   const closing = closingSessionKeys.has(identity);
                   const disconnecting = identity === disconnectingSessionKey;
                   const canDisconnect = openTabSessionKeys.has(identity);
                   const attachment = attachmentStates?.get(identity);
-                  const observed_status = session.status === "unknown"
-                    ? "unverified"
-                    : session.status;
+                  const observed_status = t(`sidebar.observed_${session.status}`);
                   const status = attachment?.phase === "error" && attachment.error_code === "automatic_reconnect_timeout"
-                    ? "Reconnect failed"
-                    : attachment ? attachmentPhaseLabel(attachment.phase)
-                    : session.status === "running" ? "Last seen running" : observed_status;
-                  const age = attachment?.phase === "attached" ? null : lastSeenAge(session.last_seen_at_ms, now_ms);
+                    ? t("sidebar.reconnect_failed")
+                    : attachment ? attachmentPhaseLabel(attachment.phase, locale)
+                    : session.status === "running" ? t("sidebar.last_running") : observed_status;
+                  const age = attachment?.phase === "attached" ? null : lastSeenAge(session.last_seen_at_ms, now_ms, locale);
                   const observed_at = age !== null && isObservationTime(session.last_seen_at_ms)
                     ? new Date(session.last_seen_at_ms).toISOString() : null;
-                  const observation_title = observed_at ? `Last observed by this app: ${observed_at}` : undefined;
+                  const observation_title = observed_at ? t("sidebar.observed_at", { time: observed_at }) : undefined;
                   const dimensions = attachment?.phase === "attached" || hasKnownTerminalSize(session)
                     ? ` · ${session.terminal_size.columns}×${session.terminal_size.rows}`
                     : "";
-                  const details_title = [`${session.name} · ${status}${dimensions} · Session last reported ${observed_status}`, attachment?.message, observation_title].filter(Boolean).join("\n");
+                  const details_title = [t("sidebar.observed_status", { name: session.name, status: status, dimensions: dimensions, observed: observed_status }), attachment?.message ? formatText(attachment.message) : null, observation_title].filter(Boolean).join("\n");
                   return (
                     <div
                       className={`session-row ${selected ? "active" : ""}`}
@@ -465,8 +468,8 @@ export function SessionSidebar({
                         onClick={() => onSelect(session)}
                         disabled={closing}
                         aria-current={selected ? "true" : undefined}
-                        aria-label={`${fullTitle} — ${session.name}`}
-                        aria-description={[sessionIconLabel(shellStates.get(identity)?.shell_type, session_layouts?.get(identity)), observation_title].filter(Boolean).join(". ")}
+                        aria-label={t("sidebar.session_label", { title: fullTitle, name: session.name })}
+                        aria-description={[sessionIconLabel(shellStates.get(identity)?.shell_type, session_layouts?.get(identity), locale), observation_title].filter(Boolean).join(". ")}
                         title={fullTitle}
                       >
                         <span aria-label={status} title={details_title}><SessionIcon
@@ -495,8 +498,8 @@ export function SessionSidebar({
                           type="button"
                           onClick={() => onForget(session)}
                           disabled={closing || disconnecting}
-                          aria-label={`Remove ${session.name} from workspace`}
-                          title="Remove from workspace; keep the shell running"
+                          aria-label={t("sidebar.forget_session", { name: session.name })}
+                          title={t("sidebar.forget_hint")}
                         >
                           <Icon name="minus" size={14} />
                         </button>
@@ -506,8 +509,8 @@ export function SessionSidebar({
                             type="button"
                             onClick={() => onDisconnect(session)}
                             disabled={disconnecting || closing}
-                            aria-label={`Disconnect from ${session.name}`}
-                            title="Disconnect this tab; keep the session running"
+                            aria-label={t("sidebar.disconnect_session", { name: session.name })}
+                            title={t("sidebar.disconnect_session_hint")}
                           >
                             {disconnecting ? (
                               <span aria-hidden="true">…</span>
@@ -521,8 +524,8 @@ export function SessionSidebar({
                           type="button"
                           onClick={() => onRequestClose(session)}
                           disabled={closing || disconnecting}
-                          aria-label={`Terminate ${session.name}`}
-                          title="Terminate the session and its shell"
+                          aria-label={t("sidebar.terminate_session", { name: session.name })}
+                          title={t("sidebar.terminate_session_hint")}
                         >
                           {closing ? (
                             <span aria-hidden="true">…</span>

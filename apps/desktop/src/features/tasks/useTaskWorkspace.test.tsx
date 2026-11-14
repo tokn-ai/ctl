@@ -1,3 +1,4 @@
+import { message } from "../i18n/messages";
 // @vitest-environment jsdom
 import { act, cleanup, render, renderHook, screen, waitFor } from "@testing-library/react";
 import { useRef, useState, type PropsWithChildren, type SetStateAction } from "react";
@@ -202,8 +203,8 @@ describe("task message ownership", () => {
     await act(async () => { await result.current.model.action(task, "start_task"); });
     expect(result.current.model.editor_error).toBeNull();
     expect(store.snapshot().entries).toEqual([expect.objectContaining({
-      title: "Task action failed", message: "Task cannot start.", toast_visible: true,
-      actions: [{ label: "View task", command_id: "task.open", args: { value: task.task_id } }],
+      title: message("tasks.action_failed"), message: "Task cannot start.", toast_visible: true,
+      actions: [{ label: message("tasks.view_task"), command_id: "task.open", args: { value: task.task_id } }],
     })]);
   });
 
@@ -281,11 +282,11 @@ describe("task message ownership", () => {
     await waitFor(() => expect(result.current.model.hasLoaded).toBe(true));
     let pending!: Promise<void>;
     act(() => { pending = result.current.model.restartDaemon(); });
-    expect(result.current.model.daemonStatus).toBe("Restarting ctl-taskd…");
+    expect(result.current.model.daemonStatus).toBe("restarting");
     expect(store.snapshot().entries).toEqual([]);
     await act(async () => { finish(); await pending; });
     expect(result.current.model.daemonStatus).toBeNull();
-    expect(store.snapshot().entries).toEqual([expect.objectContaining({ title: "Task daemon restarted", severity: "success" })]);
+    expect(store.snapshot().entries).toEqual([expect.objectContaining({ title: message("tasks.daemon_restarted_title"), severity: "success" })]);
   });
 });
 

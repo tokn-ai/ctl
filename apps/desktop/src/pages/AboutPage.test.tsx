@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
 import type { ReactElement } from "react";
 import { NotificationProvider } from "../features/notifications/NotificationContext";
+import { LocaleProvider } from "../features/i18n/LocaleContext";
+import { formatText } from "../features/i18n/messages";
 import { NotificationStore } from "../features/notifications/NotificationStore";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -25,6 +27,11 @@ async function expandGroups() {
 const props = () => ({ visible: true, on_close: vi.fn(), on_restarted: vi.fn(), on_dialog_change: vi.fn() });
 
 let notifications: NotificationStore;
+
+function firstNotification() {
+  const entry = notifications.snapshot().entries[0];
+  return entry && { severity: entry.severity, source: formatText("en", entry.source), message: formatText("en", entry.message) };
+}
 function renderPage(ui: ReactElement) {
   return render(ui, { wrapper: ({ children }) => <NotificationProvider store={notifications}>{children}</NotificationProvider> });
 }
@@ -39,9 +46,29 @@ beforeEach(() => {
   api.restart.mockResolvedValue({ component_id: "owner-1", running: current });
   api.cancel_update.mockResolvedValue(undefined);
 });
-afterEach(cleanup);
+afterEach(() => { cleanup(); localStorage.removeItem("ctmux.desktop.language"); });
 
 describe("About page", () => {
+  it("renders native maintenance details and result counts in the selected language", async () => {
+    localStorage.setItem("ctmux.desktop.language", "zh-Hans");
+    const component = { ...snapshot.components[1], component_id: "ctmuxd", component: "ctmuxd", label: "ctmuxd" };
+    api.versions.mockResolvedValue({ components: [snapshot.components[0], component] });
+    api.preflight.mockResolvedValue({ ...preflight, component_id: "ctmuxd", component: "ctmuxd", label: "ctmuxd",
+      impact: { ...preflight.impact, kind: "local_terminal" } });
+    api.restart.mockResolvedValue({
+      component_id: "ctmuxd",
+      running: current,
+      summary: { kind: "local_terminal_restart", ended_sessions: 2 },
+    });
+    renderPage(<LocaleProvider><AboutPage {...props()} /></LocaleProvider>);
+    fireEvent.click(await screen.findByRole("button", { name: "重启 ctmuxd" }));
+    const dialog = await screen.findByRole("dialog", { name: "重启 ctmuxd" });
+    expect(within(dialog).getByText(/结束所有本地终端会话/)).toBeTruthy();
+    fireEvent.click(within(dialog).getByRole("button", { name: "重启 ctmuxd" }));
+    await waitFor(() => expect(notifications.snapshot().entries).toHaveLength(1));
+    expect(formatText("zh-Hans", notifications.snapshot().entries[0].message)).toContain("已结束 2 个终端会话");
+  });
+
   it("shows installed remote builds without treating this app's reference as an installation", async () => {
     const next = structuredClone(snapshot);
     next.components[2] = { ...next.components[2], component: "ctmuxd", label: "ctmuxd — Saved host", installed: current, running: null,
@@ -90,7 +117,7 @@ describe("About page", () => {
     fireEvent.click(within(dialog).getByRole("button", { name: "Reconnect ctl-agent" }));
     await waitFor(() => expect(execute_action).toHaveBeenCalledWith(reconnect));
     expect(api.restart).not.toHaveBeenCalled();
-    await waitFor(() => expect(notifications.snapshot().entries[0]).toMatchObject({ severity: "success", source: "Components", message: "Two terminal transports reconnected." }));
+    await waitFor(() => expect(firstNotification()).toMatchObject({ severity: "success", source: "Components", message: "Two terminal transports reconnected." }));
     expect(screen.queryByText("Two terminal transports reconnected.")).toBeNull();
   });
 
@@ -183,7 +210,7 @@ describe("About page", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Restart ctld (SSH)" }));
     const dialog = await screen.findByRole("dialog", { name: "Restart ctld (SSH)" });
     fireEvent.click(within(dialog).getByRole("button", { name: "Restart ctld" }));
-    await waitFor(() => expect(notifications.snapshot().entries[0]).toMatchObject({ severity: "error", source: "Components", message: "ctld (SSH): Replacement readiness timed out." }));
+    await waitFor(() => expect(firstNotification()).toMatchObject({ severity: "error", source: "Components", message: "ctld (SSH): Replacement readiness timed out." }));
     expect(screen.queryByText("Replacement readiness timed out.")).toBeNull();
     await waitFor(() => expect(api.versions).toHaveBeenCalledTimes(2));
     expect(options.on_restarted).toHaveBeenCalledOnce();
@@ -283,7 +310,7 @@ describe("About page", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Restart ctld (SSH)" }));
     const dialog = await screen.findByRole("dialog", { name: "Restart ctld (SSH)" });
     fireEvent.click(within(dialog).getByRole("button", { name: "Restart ctld" }));
-    await waitFor(() => expect(notifications.snapshot().entries[0]).toMatchObject({ severity: "success", message: "ctld (SSH) restarted." }));
+    await waitFor(() => expect(firstNotification()).toMatchObject({ severity: "success", message: "ctld (SSH) restarted." }));
     expect(screen.queryByText("ctld (SSH) restarted.")).toBeNull();
     expect(await screen.findByText(/Could not refresh versions: Probe timed out./)).toBeTruthy();
     expect(screen.getAllByText("Different build").length).toBeGreaterThan(0);
@@ -304,7 +331,7 @@ describe("About page", () => {
     await act(async () => { complete({ component_id: "owner-1", running: current }); });
     expect(options.on_restarted).toHaveBeenCalledOnce();
     expect(api.versions).toHaveBeenCalledTimes(2);
-    expect(notifications.snapshot().entries[0]).toMatchObject({ severity: "success", source: "Components", message: "ctld (SSH) restarted." });
+    expect(firstNotification()).toMatchObject({ severity: "success", source: "Components", message: "ctld (SSH) restarted." });
   });
 
   it("keeps component update results in the dialog without duplicating its summary on About or in notifications", async () => {

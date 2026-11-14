@@ -1,3 +1,4 @@
+import { useLocale } from "../../features/i18n/LocaleContext";
 import { ControlPopover } from "../ui/ControlPopover";
 import { Icon } from "../ui/Icon";
 import type { AttachmentViewState } from "../../lib/types";
@@ -17,34 +18,35 @@ export function TerminalControls({
   resize_control_status,
   onRequestResizeControl,
 }: TerminalControlsProps) {
+  const { t, formatText } = useLocale();
   const attached = state.phase === "attached";
   const resizeOwned = resize_control_status === "owned";
   const resizeActive = state.resize_with_window && resizeOwned;
   const resizeAvailable = resize_control_status === "available";
   const layout_message = state.message_kind === "layout" ? state.message : null;
-  const layout_summary = !attached || resize_control_status === "unavailable" ? "Unavailable"
-    : resize_control_status === "held_elsewhere" ? "Held elsewhere"
-    : resizeActive ? "Auto resize" : state.resize_with_window ? "Waiting for control" : "Fixed size";
-  const resizeLabel = resizeOwned ? "Owned here" : resizeAvailable ? "Available"
-    : resize_control_status === "held_elsewhere" ? "Held elsewhere" : "Unavailable";
+  const layout_summary = !attached || resize_control_status === "unavailable" ? t("layout.unavailable")
+    : resize_control_status === "held_elsewhere" ? t("layout.held_elsewhere")
+    : resizeActive ? t("layout.auto_resize") : state.resize_with_window ? t("layout.waiting") : t("layout.fixed_size");
+  const resizeLabel = resizeOwned ? t("layout.owned_here") : resizeAvailable ? t("layout.available")
+    : resize_control_status === "held_elsewhere" ? t("layout.held_elsewhere") : t("layout.unavailable");
 
   return (
     <div className="terminal-controls">
-      <ControlPopover label={`Layout · ${layout_summary}`} trigger_content={<Icon name="monitor" size={14} />}>
-        <span aria-label="Resize control status">Resize: {resizeLabel}</span>
-        {layout_message ? <InlineFeedback severity="warning">{layout_message}</InlineFeedback> : null}
+      <ControlPopover label={t("layout.summary", { summary: layout_summary })} trigger_content={<Icon name="monitor" size={14} />}>
+        <span aria-label={t("layout.resize_status_label")}>{t("layout.resize_status", { status: resizeLabel })}</span>
+        {layout_message ? <InlineFeedback severity="warning">{formatText(layout_message)}</InlineFeedback> : null}
         <button
           type="button"
           onClick={() => onRequestResizeControl(!resizeOwned)}
           disabled={!attached || resize_control_status === "unavailable"}
           className={resizeOwned ? "active-control" : ""}
           aria-pressed={resizeOwned}
-          title={resizeOwned ? "Release shared view resize control" : resizeAvailable
-            ? "Take shared view resize control for pane sizing and zoom"
-            : resize_control_status === "held_elsewhere" ? "Request resize control; the current owner must release it first" : "Attach to a running session before taking resize control"}
+          title={resizeOwned ? t("layout.release_hint") : resizeAvailable
+            ? t("layout.take_hint")
+            : resize_control_status === "held_elsewhere" ? t("layout.request_hint") : t("layout.attach_hint")}
         >
           <Icon name="monitor" size={14} />
-          {resizeOwned ? "Release resize control" : "Take resize control"}
+          {resizeOwned ? t("layout.release") : t("layout.take")}
         </button>
         <button
           type="button"
@@ -52,14 +54,14 @@ export function TerminalControls({
           disabled={!attached}
           className={resizeActive ? "active-control" : ""}
           aria-pressed={state.resize_with_window}
-          aria-label={state.resize_with_window ? "Use fixed size" : "Resize with window"}
-          title={state.resize_with_window ? "Stop following window size and retain resize control" : "Follow this window size automatically"}
+          aria-label={state.resize_with_window ? t("layout.use_fixed") : t("layout.resize_with_window")}
+          title={state.resize_with_window ? t("layout.stop_following_window") : t("layout.follow_window")}
         >
           <Icon name="monitor" size={14} />
-          {state.resize_with_window ? "Auto resize" : "Fixed size"}
+          {state.resize_with_window ? t("layout.auto_resize") : t("layout.fixed_size")}
         </button>
       </ControlPopover>
-      {layout_message ? <span className="status-item status-tone-warning" role="status" title={layout_message}>Layout needs attention</span> : null}
+      {layout_message ? <span className="status-item status-tone-warning" role="status" title={formatText(layout_message)}>{t("layout.attention")}</span> : null}
     </div>
   );
 }

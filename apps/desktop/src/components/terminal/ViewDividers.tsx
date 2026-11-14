@@ -1,3 +1,5 @@
+import type { DisplayText } from "../../features/i18n/messages";
+import { useLocale } from "../../features/i18n/LocaleContext";
 import type { SessionSummary, SessionView } from "../../lib/types";
 import { useDividerDrag } from "../../features/terminal/useDividerDrag";
 import { viewDividers } from "../../features/terminal/viewLayout";
@@ -10,12 +12,13 @@ interface Props {
   current_view?(): SessionView | null;
   can_begin(): boolean;
   on_busy(busy: boolean): void;
-  on_error(message: string | null): void;
+  on_error(message: DisplayText | null): void;
   on_confirm(view: SessionView): void;
 }
 
 /** Keep hit areas over the daemon's gaps; only confirmed views resize panes. */
 export function ViewDividers(props: Props) {
+  const { t } = useLocale();
   const { view, cell, enabled } = props;
   const { handlers, preview, owned } = useDividerDrag(props);
   if (!view || view.zoomed_terminal_id) return null;
@@ -27,7 +30,7 @@ export function ViewDividers(props: Props) {
     return <div key={divider.path}>
       <div {...handlers(divider)} className="view-divider-handle" data-divider-path={divider.path}
         data-vertical={divider.vertical} data-active={active} role="separator"
-        aria-label={`Resize pane divider ${index + 1}`} aria-orientation={divider.vertical ? "vertical" : "horizontal"}
+        aria-label={t("session.resize_divider", { index: index + 1 })} aria-orientation={divider.vertical ? "vertical" : "horizontal"}
         aria-valuenow={position} aria-valuemin={0} aria-valuemax={extent - 1}
         aria-disabled={!enabled || !owned} tabIndex={enabled && owned ? 0 : -1}
         style={{ left: divider.left * cell.width - (divider.vertical ? 4 : 0),

@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { KeyboardEvent, PointerEvent } from "react";
 import type { SessionSummary, SessionView } from "../../lib/types";
-import { errorMessage } from "../../lib/errors";
+import { message, type DisplayText } from "../i18n/messages";
+import { localizedErrorText } from "../../lib/errors";
 import { resizeSessionDivider, sessionLayoutOwned, subscribeLayoutOwners, suspendSessionViewportResize } from "../attachment/componentActions";
 import { sessionKey } from "../targets/targets";
 import { layoutTopology, type ViewDivider } from "./viewLayout";
@@ -14,7 +15,7 @@ interface Options {
   current_view?(): SessionView | null;
   can_begin(): boolean;
   on_busy(busy: boolean): void;
-  on_error(message: string | null): void;
+  on_error(message: DisplayText | null): void;
   on_confirm(view: SessionView): void;
 }
 
@@ -133,7 +134,7 @@ export function useDividerDrag(options: Options) {
       }
     } catch (failure) {
       if (drag.current === worker) {
-        latest.current.on_error(errorMessage(failure));
+        latest.current.on_error(localizedErrorText(failure));
         finish(worker);
       }
     } finally {
@@ -153,7 +154,7 @@ export function useDividerDrag(options: Options) {
     // newer synchronous view can guard ACKs, but cannot reinterpret this handle.
     const rendered = latest.current.view;
     if (rendered?.view_id !== view.view_id || rendered.revision !== view.revision) return null;
-    if (!sessionLayoutOwned(session)) { latest.current.on_error("Take resize control to resize panes."); return null; }
+    if (!sessionLayoutOwned(session)) { latest.current.on_error(message("pane.resize_control_required")); return null; }
     const position = Math.floor(divider.vertical ? divider.left : divider.top);
     const worker: Drag = {
       divider, baseline: view, session, signature: signature(latest.current), element,

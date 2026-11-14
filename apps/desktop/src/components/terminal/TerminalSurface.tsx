@@ -1,7 +1,9 @@
+import { useLocale } from "../../features/i18n/LocaleContext";
+import { message, type DisplayText } from "../../features/i18n/messages";
 import { Icon } from "../ui/Icon";
 import { useEffect, useId, useRef } from "react";
 import type { AttachmentViewState, ConnectionPhase, ConnectionTarget, TerminalSize } from "../../lib/types";
-import { errorMessage } from "../../lib/errors";
+import { localizedErrorText } from "../../lib/errors";
 import { openExternalUrl } from "../../lib/tauri";
 import { XtermRenderer } from "../../features/terminal/XtermRenderer";
 import { useNotificationEnvironment } from "../../features/notifications/NotificationContext";
@@ -18,12 +20,12 @@ const INITIAL_SIZE: TerminalSize = {
 
 interface TerminalSurfaceProps {
   phase: ConnectionPhase;
-  ended_message?: string | null;
+  ended_message?: DisplayText | null;
   on_dismiss?(): void;
   on_reconnect?(): Promise<void> | void;
   on_reconnect_interaction?(): Promise<void> | void;
   reconnect_available?: boolean;
-  reconnect_error?: string | null;
+  reconnect_error?: DisplayText | null;
   connection_state?: Pick<AttachmentViewState, "session" | "error_code">;
   retry_paused?: boolean;
   interaction_enabled?: boolean;
@@ -51,6 +53,10 @@ export function TerminalSurface({
   onReady,
   file_context,
 }: TerminalSurfaceProps) {
+  const { t, locale } = useLocale();
+  const locale_ref = useRef(locale);
+  locale_ref.current = locale;
+  const renderer_ref = useRef<XtermRenderer | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef(onInput);
   const readyRef = useRef(onReady);
@@ -86,16 +92,22 @@ export function TerminalSurface({
       const generation = ++copy_generation;
       const store = notificationsRef.current;
       store?.report(copy_notification_key, null);
+      if (!navigator.clipboard?.writeText) {
+        store?.report(copy_notification_key, {
+          severity: "error", title: message("session.copy_failed"),
+          message: message("session.clipboard_unavailable"), source: message("session.terminal"),
+        });
+        return;
+      }
       try {
-        if (!navigator.clipboard?.writeText) throw new Error("Clipboard access is unavailable.");
         await navigator.clipboard.writeText(text);
         if (!disposed && generation === copy_generation) store?.resolve(copy_notification_key);
       } catch (failure) {
         if (!disposed && generation === copy_generation) store?.report(copy_notification_key, {
           severity: "error",
-          title: "Could not copy selection",
-          message: errorMessage(failure),
-          source: "Terminal",
+          title: message("session.copy_failed"),
+          message: localizedErrorText(failure),
+          source: message("session.terminal"),
         });
       }
     };
@@ -113,9 +125,9 @@ export function TerminalSurface({
         }, (failure) => {
           if (!disposed && generation === open_generation) store?.report(link_notification_key, {
             severity: "error",
-            title: "Could not open link",
-            message: errorMessage(failure),
-            source: "Terminal",
+            title: message("session.open_link_failed"),
+            message: localizedErrorText(failure),
+            source: message("session.terminal"),
           });
         });
       },
@@ -124,14 +136,19 @@ export function TerminalSurface({
         const { previews, file_context } = file_preview_ref.current;
         if (!disposed && previews && file_context) previews.open({ ...file, ...file_context });
       },
+      locale_ref.current,
     );
+    renderer_ref.current = renderer;
     readyRef.current(renderer);
     return () => {
       disposed = true;
+      renderer_ref.current = null;
       readyRef.current(null);
       renderer.dispose();
     };
   }, [link_notification_key, copy_notification_key]);
+
+  useEffect(() => { renderer_ref.current?.setLocale(locale); }, [locale]);
 
   return (
     <div className={`terminal-shell${disconnected ? " terminal-disconnected" : ""}`} onKeyDownCapture={(event) => {
@@ -153,8 +170,8 @@ export function TerminalSurface({
       if (can_reconnect && !event.repeat) requestReconnect(on_reconnect_interaction);
     }}>
       {ended_message && <div className="pane-message" role="status">
-        {ended_message} — press any key to close.
-        <button type="button" onClick={on_dismiss}>Close</button>
+        {t("session.close_ended", { reason: ended_message })}
+        <button type="button" onClick={on_dismiss}>{t("session.close")}</button>
       </div>}
       <div className="terminal-scroll-region">
         <div ref={containerRef} className="terminal-container" />
@@ -166,14 +183,14 @@ export function TerminalSurface({
       {!hasSession && phase === "idle" ? (
         <div className="terminal-placeholder">
           <span className="terminal-mark"><Icon name="terminal" size={64} /></span>
-          <h2>A terminal that outlives its window.</h2>
-          <p>Select a remembered session to connect, or create a new shell.</p>
+          <h2>{t("session.welcome")}</h2>
+          <p>{t("session.welcome_hint")}</p>
         </div>
       ) : null}
       {!has_cached_content && phase === "connecting" ? (
         <div className="terminal-overlay">
           <span className="spinner" aria-hidden="true" />
-          Attaching…
+          {t("session.attaching")}
         </div>
       ) : null}
     </div>

@@ -225,6 +225,7 @@ function hostSnapshot(): HostCatalogSnapshot {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  api.createSession.mockReset();
   api.getComponentVersions.mockResolvedValue({ components: [] });
   api.checkComponentUpdates.mockResolvedValue({ default_channel: "nightly", local_development: false, catalog: null, error: null });
   attachment.state.phase = "idle";
@@ -3391,7 +3392,7 @@ describe("workspace-backed terminal page", () => {
     const rendered = render(<TerminalPage />);
     await waitFor(() => expect(api.syncCommandMenu).toHaveBeenLastCalledWith(expect.arrayContaining([
       expect.objectContaining({ command_id: COMMAND_IDS.newTab, enabled: true }),
-    ])));
+    ]), expect.objectContaining({ commands: "Commands" })));
     if (trigger === "shortcut") nativeCommand(COMMAND_IDS.newTab);
     else fireEvent.click(screen.getByRole("button", { name: "New tab in current folder" }));
 
@@ -3427,7 +3428,7 @@ describe("workspace-backed terminal page", () => {
     render(<TerminalPage />);
     await waitFor(() => expect(api.syncCommandMenu).toHaveBeenLastCalledWith(expect.arrayContaining([
       expect.objectContaining({ command_id: COMMAND_IDS.newTab, enabled: true }),
-    ])));
+    ]), expect.objectContaining({ commands: "Commands" })));
     nativeCommand(COMMAND_IDS.newTab);
     await waitFor(() => expect(api.createSession).toHaveBeenCalledOnce());
     if (action === "switch") fireEvent.click(screen.getByRole("tab", { name: "/first on local" }));

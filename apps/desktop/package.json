@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "check": "tsc --noEmit && node scripts/check-catalogs.mts",
     "preview": "vite preview",
     "tauri": "tauri"
   },
@@ -16,9 +17,11 @@
     "@xterm/xterm": "6.0.0",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
+    "react-intl": "^12.1.7",
     "react-markdown": "^10.1.0"
   },
   "devDependencies": {
+    "@formatjs/cli": "^6.19.0",
     "@tauri-apps/cli": "^2",
     "@testing-library/react": "^16.3.3",
     "@testing-library/user-event": "^14.6.7",

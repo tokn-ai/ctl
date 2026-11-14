@@ -46,6 +46,9 @@ active commands. Builds are immutable and verified against
 their file checksums, build identity, target and shared protocol contracts.
 Foreign-target binaries are never executed during download or import.
 
+The example uses the default data root. With `CTL_DATA_DIR` set, the same layout
+is created inside the selected profile.
+
 ```text
 ~/.tokn/ctl/
   bin/ctlup                         # independent updater executable
@@ -53,11 +56,15 @@ Foreign-target binaries are never executed during download or import.
   bin/ctmux -> ../current/ctmux
   bin/ctl-agent -> ../current/ctl-agent
   current -> installs/<content-id>
-  previous -> installs/<previous-id>
   catalog.json                      # channel, target and build-date metadata
-  installs/<content-id>/bundle.json
-  installs/<content-id>/<executables>
-  cache/                            # reusable deployment artifacts
+  development.json                  # current build ID for each checkout
+  installs/stable/<version>/<target>
+  installs/nightly/<version>/<target>
+  installs/dev/<checkout-hash>
+  installs/dev/pr-<number>/<version>/<target>
+  installs/dev/provided/<version>/<target>
+  installs/<content-id>/            # immutable bundle bytes, shared by references
+  cache/downloads/<publication-hash>/
 ```
 
 On Windows x64, `%USERPROFILE%\.tokn\ctl\bin` contains native `.exe` launchers.
@@ -68,14 +75,22 @@ Add `~/.tokn/ctl/bin` to `PATH`. New managed terminal shells include it
 automatically; existing shells keep their environment. Ordinary SSH login
 configuration remains under the account owner’s control.
 
-Activation atomically changes `current`. The previous complete build is kept
-for rollback. Current target components for every installed channel remain
-available. Older payloads remain only for rollback or while live processes hold
-leases on them; OS-held locks release after a crash. Installing never restarts daemons
-or ends sessions. Existing agent channels use their original process until
-reconnect. A terminal-daemon restart remains a separate confirmed action.
+The readable version paths and checkout paths are relative links on Unix and
+`.json` references on Windows. They share immutable content rather than copying
+it. Nightly uses the published version, including the revision suffix. The
+current local channel build gets a reference under `installs/dev/unassigned`
+if its checkout is unknown. Existing installations acquire these paths during
+the first operation that checks or manages the local runtime.
 
-## Install, update and roll back
+Activation atomically changes `current`. Pruning retains current channel
+components, the latest build for each checkout, the active bundle, and builds
+leased by live processes. OS-held locks release after a crash. The old runtime
+rollback command is retired. A new activation or prune clears the old previous
+selection. Installing keeps daemons and sessions running. Existing agent
+channels use their original process until reconnect. A terminal-daemon restart
+remains a separate confirmed action.
+
+## Install and update
 
 ```sh
 ctlup install
@@ -90,8 +105,6 @@ ctlup update --destination windows-alias --remote-platform windows
 ctlup update --from /path/to/bundle-set --hosts work,jump-a --json
 ctlup install --from target/debug --local-build --ctld-package /path/to/ctld-package
 ctlup status --json
-ctlup rollback
-ctlup rollback --host work
 ctlup prune
 ```
 
@@ -155,47 +168,42 @@ ctlup component add bundle-x86_64-unknown-linux-musl --pr 123
 ctlup component remove bundle-aarch64-unknown-linux-musl --channel nightly
 ctlup show
 ctlup show --host work --json
-ctlup migrate
 ```
 
 A component is a complete runtime bundle for one target, named `bundle-<target>`.
 `component list` shows available components for the selected channel, together
 with every locally installed target. Channel markers such as `(stable, nightly)`
 show where each target exists across all recorded installed builds. Multiple
-builds for one target still produce one component row. Existing installations
-without a catalog must run `ctlup migrate` before normal inspection or updates.
+builds for one target still produce one component row.
 Use `--installed` for an offline list of installed targets. An explicit
 channel filters the installed targets, while each row still lists all its known
-channels. Retained rollback or running payloads continue to count until removed
+channels. Retained checkout and running payloads continue to count until removed
 from disk. Bare target triples remain accepted by `add` and `remove` for
 compatibility. Adding components
 stores them durably without changing active command aliases or executing foreign
 binaries. Available-target inspection reads publication metadata without downloading
-archives. Installed-component inspection is passive and works offline.
+archives. Installed-component inspection works offline.
 
 Updating a channel prepares all its registered targets from the same publication
 before committing its new catalog. A missing target, changed publication or
 concurrent catalog change leaves the previous channel selection available.
 Target components and their matching updater remain available after cache cleanup.
-Removing a registration preserves payloads and provenance needed by active,
-rollback or running processes. PR installations are cataloged separately as
-`pr-NUMBER`; checkout builds use `local`, and explicitly supplied files use
-`provided`.
+Removing a registration preserves payloads and provenance needed by the active
+installation or running processes. Removing a target with `--channel local`
+also unregisters the checkout builds for that target. PR installations are
+cataloged separately as `pr-NUMBER`; checkout builds use `local`, and explicitly
+supplied files use `provided`.
 
-`ctlup migrate` performs a one-time catalog adoption for existing complete
-builds. Uncatalogued locally built payloads are assigned to `local`; other
-uncatalogued payloads are imported as `provided`. This assigns their new channel
-membership rather than reconstructing an unrecorded acquisition history.
-Existing recorded channels, active and rollback selections, and running-process
-leases are preserved. Build dates stay unknown when not recorded. Migration
-does not prune payloads or restart services.
+Existing complete builds are adopted into the catalog automatically, once per
+storage root. Uncatalogued locally built payloads are assigned to `local`; other
+uncatalogued payloads are imported as `provided`. Existing recorded channels,
+active and legacy previous selections, and running-process leases are preserved.
+Unrecorded build dates remain unknown. Services keep running during adoption.
 
-Only the explicit migrator reads old layouts and selection records. Normal
-runtime lookup, installation and listing use complete schema-2 payloads,
+After adoption, installation and listing use complete schema-2 payloads,
 canonical installation paths and the authoritative catalog. Fresh installs
 create catalog records immediately. Uncommitted payloads are cleanup candidates
-and never appear as installed builds. The migration marker makes the explicit
-import repeatable; it does not switch normal readers between old and new modes.
+and stay outside the catalog.
 Incomplete historical four-service installations must be replaced with a
 complete build using their old manager, or cleanly reinstalled, before adoption.
 Original external source directories remain available to processes that may
@@ -203,7 +211,7 @@ still use their paths.
 
 `ctlup show` lists the individual installed builds, including retained older
 payloads, with short content IDs, versions, source revisions, channels and
-active/rollback labels. `status` retains its compatible JSON response and uses
+active and retained labels. `status` retains its compatible JSON response and uses
 the same detailed build display for human output. Build dates come from validated build metadata
 or a freshly built local bundle; the date embedded in a Nightly version is a
 commit date. Older bundles without build metadata show `unknown`.
@@ -335,6 +343,12 @@ ctlup dev --renew-signing
 
 `dev` builds the six native runtime components and the independent updater from
 one checkout. On macOS it signs and verifies the complete `ctld.app` package.
+Each canonical checkout path has a SHA-256 identity and one current build.
+Rebuilding the checkout replaces that registration, and other checkouts keep
+their latest builds. The checkout identity is stored as a hash. Local runtime
+installs retain a compatible updater when the bundle supplies an older one.
+Use an updated updater for any mutation of a store with checkout registrations,
+including when choosing an updater for SSH deployment to that store.
 Only a successful complete build becomes active; compilation, signing or
 verification failure leaves the previous installation and running services
 intact. `ctlup status` then reports that development installation. Foreign
@@ -346,9 +360,8 @@ The updater reuses an unexpired profile for the helper's Apple Team or asks
 Xcode to renew it using that team. Xcode must be signed in for automatic
 renewal. You can also supply a matching profile with `CTLD_PROVISIONING_PROFILE`.
 The renewed helper gets a new bundle identity when the signed files change.
-It keeps the original build date and channel registrations, and the previous
-bundle remains available for rollback. Restart `ctld` separately to use the
-renewed signature.
+It keeps the original build date and channel and checkout registrations. Restart
+`ctld` separately to use the renewed signature.
 
 The desktop development launcher bootstraps a private native `ctlup` executable
 with Cargo, then delegates preparation to `ctlup dev`. It passes Cargo's original
@@ -374,12 +387,12 @@ for this computer from a published Nightly bundle set. Verify the executable
 against its SHA-256 sidecar, make it executable, and run it with
 `update --channel nightly` to install the bundle and updater together.
 
-Cached archives live under `cache/downloads`, extracted deployment builds under
+Cached archives use a publication hash under `cache/downloads`, extracted deployment builds under
 `cache/components`, and standalone updater binaries under `cache/updaters`.
 Automatic cleanup budgets compressed runtime downloads at 256 MiB, extracted
 payloads at 512 MiB, and updater binaries at 128 MiB. Prepared extracted builds
 hold shared leases and can temporarily exceed the budget until users release
-them. Installed channel components, active and rollback payloads are separate
+them. Installed channel components, checkout builds and active payloads are separate
 from deployment cache; matching installed updaters remain pinned during cleanup.
 
 ## Remote deployment
@@ -412,12 +425,9 @@ build and offers local installation of another usable build. Explicitly installe
 target components have durable channel registrations; other downloaded foreign
 artifacts remain deployment cache entries.
 
-Existing complete installations must be adopted with `ctlup migrate` before
-using the current installation engine. Runtime commands do not fall back to old
-selections or accept four-service rollback candidates. The explicit migrator
-preserves complete active/rollback builds and leaves original source trees in
-place for processes that may still use them. Host identity, saved settings and
-sessions are preserved.
+The runtime installation engine automatically adopts existing complete builds and
+leaves original source trees in place for processes that may still use them.
+Host identity, saved settings and sessions are preserved.
 
 ## Inspect, restart and stop from the CLI
 

@@ -38,6 +38,8 @@ pub(super) async fn activate(
   let bundle_id = bundle_id.to_owned();
   tokio::task::spawn_blocking(move || {
     let installs = ctl_core::installations::Installations::new(&home);
+    // Failed migration is distinct from the requested bundle being absent.
+    installs.migrate_once_if_needed()?;
     let bundle = match installs.get(&bundle_id) {
       Ok(bundle) => bundle,
       Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(10),

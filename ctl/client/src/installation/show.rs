@@ -76,7 +76,7 @@ pub struct InstallationShow {
 impl InstallationShow {
   /// Combines optional older CLI responses without inventing memberships.
   /// Selected schema-2 summaries remain visible when catalog capability is
-  /// absent; unrecorded catalog rows require explicit migration.
+  /// absent; older managers may need an update to provide channel metadata.
   ///
   /// # Errors
   /// Reports invalid manifests, conflicting identities or malformed catalogs.
@@ -93,7 +93,7 @@ impl InstallationShow {
           .any(|entry| entry.origin.is_none())
         {
           return Err(invalid(
-            "installation channel metadata is unavailable; run ctlup migrate on the target host or update its ctlup",
+            "installation channel metadata is unavailable; update ctlup on the target host",
           ));
         }
         catalog.installations
@@ -184,9 +184,8 @@ impl InstallationShow {
   }
 }
 
-/// Lists verified installed builds and native history without changing storage.
-/// Only authoritative catalog records are included. Existing older layouts must
-/// be adopted by the explicit migration command before inspection.
+/// Lists verified installed builds and native history from the authoritative
+/// catalog. Older complete installations are adopted on first inspection.
 ///
 /// # Errors
 /// Reports unsafe storage, modified builds or a concurrently removed payload.
@@ -233,9 +232,7 @@ fn validate_selected_catalog(
         && entry.target_triple == manifest.target_triple
         && entry.origin.is_some()
     }) {
-      return Err(invalid(
-        "selected installation has no recorded provenance; run ctlup migrate before inspection",
-      ));
+      return Err(invalid("selected installation has no recorded provenance"));
     }
   }
   Ok(())
@@ -420,7 +417,7 @@ mod tests {
   }
 
   #[test]
-  fn unrecorded_catalog_rows_require_migration_even_without_selected_builds() {
+  fn unrecorded_remote_catalog_rows_require_updated_metadata() {
     let (active, _) = fixture("x86_64-unknown-linux-musl", 'a');
     let unrecorded = CatalogEntry {
       bundle_id: active.bundle_id.clone(),
@@ -437,7 +434,11 @@ mod tests {
         Some(InstallationCatalog::new(vec![unrecorded.clone()])),
       )
       .unwrap_err();
-      assert!(error.to_string().contains("ctlup migrate"));
+      assert!(
+        error
+          .to_string()
+          .contains("update ctlup on the target host")
+      );
     }
   }
 
@@ -497,7 +498,7 @@ mod tests {
 
   #[cfg(unix)]
   #[test]
-  fn older_native_selection_requires_explicit_migration_before_inspection() {
+  fn inspection_adopts_an_older_native_selection() {
     let home = Home::new();
     let (manifest, mut files) = fixture(ctl_core::paths::native_target(), 'a');
     if cfg!(target_os = "macos") {
@@ -516,14 +517,7 @@ mod tests {
     legacy
       .select(ctl_core::bundles::Purpose::Local, &bundle)
       .unwrap();
-    assert!(
-      show(&home.0)
-        .unwrap_err()
-        .to_string()
-        .contains("ctlup migrate")
-    );
     assert!(!home.0.join(".tokn/ctl/installs").exists());
-    Installations::new(&home.0).migrate_catalog().unwrap();
     let result = show(&home.0).unwrap();
     assert_eq!(result.active.as_ref(), Some(&manifest.bundle_id));
     assert_eq!(result.builds.len(), 1);
@@ -537,7 +531,7 @@ mod tests {
   }
 
   #[test]
-  fn catalog_is_always_authoritative_and_only_explicit_migration_adopts_orphans() {
+  fn inspection_ignores_uncatalogued_payloads_when_a_catalog_already_exists() {
     let home = Home::new();
     let target = "aarch64-unknown-linux-musl";
     let (known, files) = fixture(target, 'a');
@@ -565,28 +559,17 @@ mod tests {
         .all(|entry| entry.bundle_id != older.bundle_id)
     );
 
-    store.migrate_catalog().unwrap();
-    let adopted = show(&home.0).unwrap();
-    assert_eq!(adopted.builds.len(), 2);
-    assert!(
-      adopted
-        .installations
-        .iter()
-        .all(|entry| entry.origin.is_some())
-    );
-    let (orphan, orphan_files) = fixture(target, 'c');
-    let orphan_directory = write_orphan(&store, &orphan, &orphan_files);
+    let orphan_directory = store.root().join("installs").join(&older.bundle_id);
     assert_eq!(
-      store.get(&orphan.bundle_id).unwrap_err().kind(),
+      store.get(&older.bundle_id).unwrap_err().kind(),
       io::ErrorKind::NotFound
     );
-    let after = show(&home.0).unwrap();
-    assert_eq!(after.builds, adopted.builds);
-    assert_eq!(after.installations, adopted.installations);
     // An unregistered payload is outside the authoritative inventory, even if
     // an older/interrupted writer leaves damaged bytes in the payload store.
     std::fs::write(orphan_directory.join("ctl-agent"), b"damaged orphan").unwrap();
-    assert_eq!(show(&home.0).unwrap().builds, adopted.builds);
+    let after = show(&home.0).unwrap();
+    assert_eq!(after.builds, before.builds);
+    assert_eq!(after.installations, before.installations);
     assert!(orphan_directory.exists());
   }
 

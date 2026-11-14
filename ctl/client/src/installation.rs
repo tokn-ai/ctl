@@ -18,8 +18,7 @@ mod updater;
 pub(crate) use provenance::single_target_heads;
 pub use provenance::{activate_uploaded, decode_catalog_origin, encode_catalog_origin};
 pub use remote::{
-  InstallationCatalog, remote_account_id, remote_catalog, remote_rollback, remote_show,
-  remote_status,
+  InstallationCatalog, remote_account_id, remote_catalog, remote_show, remote_status,
 };
 pub use show::{InstallationShow, InstalledBuild, show};
 pub use updater::{
@@ -71,7 +70,7 @@ pub fn prune_caches(home: &Path) -> io::Result<CachePruneResult> {
   })
 }
 
-/// Inspect the active and rollback builds without changing files or services.
+/// Inspect the active build and any legacy previous selection without starting services.
 ///
 /// # Errors
 /// Reports corrupt or inaccessible installation state.

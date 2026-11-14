@@ -40,14 +40,13 @@ The current six-executable remote bundle installs `ctl` and `ctmux` together
 with its services. In an ordinary SSH login, invoke `~/.tokn/ctl/bin/ctl`
 or `~/.tokn/ctl/bin/ctmux`, or add `~/.tokn/ctl/bin` to `PATH`.
 
-`ctlup` owns install, update, rollback, channel checks and pruning.
-`ctlup status --json` reports the active installation and previous rollback
-candidate without starting services. `ctlup rollback` restores the previous
-build for future launches; running daemons and sessions keep their owners.
+`ctlup` owns install, update, channel checks and pruning.
+`ctlup status --json` reports the active installation without starting services.
+Running daemons and sessions keep their owners through an update.
 `ctl components status/restart/stop` are runtime maintenance commands.
 Do not use the removed component sync/select or agent-only installation paths.
 The manager is distributed separately. To upgrade it, run a fresh downloaded
-`ctlup` with `install` or a local `update`; runtime rollback leaves it available.
+`ctlup` with `install` or a local `update`.
 
 For an authorized published CLI setup on macOS:
 

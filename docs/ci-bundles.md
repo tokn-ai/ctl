@@ -239,9 +239,9 @@ Clients obtain and verify the target updater locally. When it is absent or its
 checksum differs on the receiving account, they bootstrap it over authenticated
 SSH without requiring remote internet access. The updater verifies a retained
 runtime before deciding whether an archive upload is needed, then applies the
-same installation transaction as a local `ctlup install`. The previous complete
-build is retained for rollback, and process-held leases preserve builds still
-used by running clients or daemons. Updates never restart those processes.
+same installation transaction as a local `ctlup install`. Process-held leases
+preserve builds still used by running clients or daemons. Updates keep those
+processes running.
 
 Component metadata probes execute the packaged bytes, including Intel macOS
 executables through Rosetta on ARM runners. The bundle workflow sets

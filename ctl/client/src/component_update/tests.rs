@@ -339,14 +339,9 @@ async fn agent_only_overlays_require_explicit_replacement_before_catalog_adoptio
   let error = crate::installation::install_archive(&home.0, &archive)
     .await
     .unwrap_err();
-  assert!(error.to_string().contains("ctlup migrate"));
-  assert_eq!(std::fs::read_link(&current).unwrap(), selected);
-  assert!(!home.0.join(".tokn/ctl/catalog.json").exists());
-  let error = ctl_core::installations::Installations::new(&home.0)
-    .migrate_catalog()
-    .unwrap_err();
   assert!(error.to_string().contains("complete"));
   assert_eq!(std::fs::read_link(&current).unwrap(), selected);
+  assert!(!home.0.join(".tokn/ctl/catalog.json").exists());
 }
 
 #[tokio::test]

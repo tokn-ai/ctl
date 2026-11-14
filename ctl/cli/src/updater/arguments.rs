@@ -28,7 +28,7 @@ pub(super) struct Arguments {
 pub(super) enum Command {
   #[command(long_flag = "component-info", hide = true)]
   ComponentInfo,
-  /// Install a complete build and expose commands in ~/.tokn/ctl/bin.
+  /// Install a complete build and expose commands in the storage root's bin directory.
   Install(UpdateArguments),
   /// Update a complete installation; running sessions keep their current owner.
   Update(UpdateArguments),
@@ -49,18 +49,8 @@ pub(super) enum Command {
     #[arg(long)]
     json: bool,
   },
-  /// Adopt existing complete builds into the channel catalog once.
-  Migrate {
-    #[arg(long)]
-    json: bool,
-  },
-  /// Show the active installation and rollback candidate without starting services.
+  /// Show the active installation and installed builds without starting services.
   Status {
-    #[arg(long)]
-    json: bool,
-  },
-  /// Restore the previous installation without restarting services.
-  Rollback {
     #[arg(long)]
     json: bool,
   },
@@ -73,7 +63,7 @@ pub(super) enum Command {
   },
   /// Browse published releases and manage pull request builds.
   Release(ReleaseArguments),
-  /// Remove unused builds, retaining channel targets, rollback and running builds.
+  /// Remove unused builds while retaining selected, development and running builds.
   Prune {
     #[arg(long)]
     json: bool,
@@ -91,6 +81,8 @@ pub(super) enum Command {
   },
   #[command(hide = true)]
   CatalogJson,
+  #[command(hide = true)]
+  InstallationLayoutVersion,
   #[cfg(windows)]
   #[command(hide = true)]
   UpdaterDigest,
@@ -126,7 +118,7 @@ pub(super) enum ComponentCommand {
     #[arg(long)]
     json: bool,
   },
-  /// Remove target registrations while preserving rollback and running builds.
+  /// Remove target registrations while preserving active and running builds.
   Remove {
     #[arg(required = true, num_args = 1.., value_delimiter = ',')]
     targets: Vec<String>,
@@ -300,10 +292,9 @@ mod tests {
   }
 
   #[test]
-  fn catalog_migration_is_an_explicit_local_command() {
-    let args = Arguments::try_parse_from(["ctlup", "migrate", "--json"]).unwrap();
-    assert!(matches!(args.command, Command::Migrate { json: true }));
-    assert!(Arguments::try_parse_from(["ctlup", "show", "--migrate"]).is_err());
+  fn catalog_migration_has_no_manual_command() {
+    let error = Arguments::try_parse_from(["ctlup", "migrate"]).unwrap_err();
+    assert_eq!(error.kind(), clap::error::ErrorKind::InvalidSubcommand);
   }
 
   #[test]
@@ -641,11 +632,10 @@ mod tests {
   }
 
   #[test]
-  fn remote_inspection_and_rollback_use_the_same_saved_host_options() {
-    for command in ["status", "rollback"] {
-      let args = Arguments::try_parse_from(["ctlup", "--host", "work", command, "--json"]).unwrap();
-      assert_eq!(args.host.as_deref(), Some("work"));
-    }
+  fn remote_status_accepts_saved_host_options() {
+    let args = Arguments::try_parse_from(["ctlup", "--host", "work", "status", "--json"]).unwrap();
+    assert_eq!(args.host.as_deref(), Some("work"));
+    assert!(matches!(args.command, Command::Status { json: true }));
     assert!(
       Arguments::try_parse_from([
         "ctlup",
@@ -657,6 +647,12 @@ mod tests {
       ])
       .is_err()
     );
+  }
+
+  #[test]
+  fn rollback_is_no_longer_a_command() {
+    let error = Arguments::try_parse_from(["ctlup", "rollback"]).unwrap_err();
+    assert_eq!(error.kind(), clap::error::ErrorKind::InvalidSubcommand);
   }
 
   #[test]

@@ -1,4 +1,4 @@
-//! The updater is distributed separately so runtime rollback never replaces it.
+//! The updater is distributed separately from runtime bundles.
 
 use super::{AssetProgress, BundleChannel, Error, Publication, Resolver, report_progress};
 use ctl_core::{bundle_layout, private_fs};

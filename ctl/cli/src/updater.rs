@@ -12,7 +12,6 @@ mod component;
 mod development;
 #[cfg(windows)]
 mod launcher;
-mod migration;
 mod release;
 mod remote;
 mod show;
@@ -41,6 +40,10 @@ pub(crate) fn main() {
     }
   }
   let arguments = Arguments::parse();
+  if matches!(arguments.command, Command::InstallationLayoutVersion) {
+    println!("{}", ctl_core::installations::DEVELOPMENT_LAYOUT_VERSION);
+    return;
+  }
   if matches!(arguments.command, Command::ComponentInfo) {
     if let Err(error) = crate::component_info::print() {
       eprintln!("ctlup: {error}");
@@ -84,7 +87,7 @@ async fn run(arguments: Arguments) -> io::Result<i32> {
   };
   validate_target_options(target)?;
   match arguments.command {
-    Command::ComponentInfo => unreachable!(),
+    Command::ComponentInfo | Command::InstallationLayoutVersion => unreachable!(),
     Command::Install(options) | Command::Update(options) => {
       update::run(&home, options, target).await?;
     }
@@ -102,10 +105,6 @@ async fn run(arguments: Arguments) -> io::Result<i32> {
     }
     Command::Component { command } => component::run(&home, target, command).await?,
     Command::Show { json } => show::run(&home, target, json).await?,
-    Command::Migrate { json } => {
-      require_local(target)?;
-      migration::run(home, json).await?;
-    }
     Command::CatalogJson => {
       require_local(target)?;
       let catalog = ctl_client::installation::InstallationCatalog::new(
@@ -117,12 +116,11 @@ async fn run(arguments: Arguments) -> io::Result<i32> {
         serde_json::to_string(&catalog).map_err(io::Error::other)?
       );
     }
-    Command::Status { json } => status::run(&home, target, false, json).await?,
+    Command::Status { json } => status::run(&home, target, json).await?,
     Command::Dev(options) => {
       require_local(target)?;
       development::run(&home, options).await?;
     }
-    Command::Rollback { json } => status::run(&home, target, true, json).await?,
     Command::Check { channel, json } => {
       require_local(target)?;
       check(&home, channel, json).await?;
@@ -189,7 +187,7 @@ async fn prune(home: PathBuf, json: bool) -> io::Result<()> {
     );
   } else {
     println!(
-      "Removed unused installations; channel targets, active, previous and running builds were kept."
+      "Removed unused installations. Kept channel targets, checkout builds, the active build, and running builds."
     );
   }
   Ok(())

@@ -107,6 +107,7 @@ fn local_provenance_is_complete_and_retains_a_legacy_agent_identity() {
     components,
     files,
     &[],
+    None,
   )
   .unwrap();
   assert_eq!(bundle.manifest.source, Source::Local);
@@ -229,9 +230,15 @@ async fn explicit_foreign_local_build_targets_are_rejected_before_any_probe() {
   } else {
     "aarch64-unknown-linux-musl"
   };
-  let error = import_local_for_target(&home.0, &home.0.join("missing-binaries"), None, target)
-    .await
-    .unwrap_err();
+  let error = import_local_for_target(
+    &home.0,
+    &home.0.join("missing-binaries"),
+    None,
+    target,
+    None,
+  )
+  .await
+  .unwrap_err();
   assert!(
     error
       .to_string()
@@ -265,7 +272,7 @@ async fn an_explicit_portable_build_keeps_its_musl_identity_on_a_gnu_host() {
       .strip_suffix("-gnu")
       .unwrap()
   );
-  let bundle = import_local_for_target(&home.0, &source, None, &target)
+  let bundle = import_local_for_target(&home.0, &source, None, &target, None)
     .await
     .unwrap();
   assert_eq!(bundle.manifest.target_triple, target);

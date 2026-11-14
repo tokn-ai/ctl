@@ -15,7 +15,7 @@ use std::path::Component;
 mod windows;
 #[cfg(windows)]
 pub(super) use windows::{
-  activate, install_manager, lease_manager_executable, manager_and_lease, pointer,
+  activate, clear_previous, install_manager, lease_manager_executable, manager_and_lease, pointer,
   prepare_activation, prune_managers,
 };
 
@@ -147,7 +147,7 @@ fn pointer_path(store: &Installations, name: &str) -> io::Result<Option<PathBuf>
     parts.len() == 2 && parts[0] == "installs" && parts[1].to_str().is_some_and(valid_id);
   if !managed {
     return Err(invalid(
-      "installation pointer is not a canonical managed selection; run ctlup migrate",
+      "installation pointer is not a canonical managed selection",
     ));
   }
   let mut parent = store.root.clone();
@@ -357,6 +357,10 @@ pub(super) fn activate(
   if path_exists(&current)?
     && fs::read_link(&current)? == Path::new("installs").join(&active.manifest.bundle_id)
   {
+    // Re-selecting the current payload also retires legacy rollback state.
+    if previous.is_none() {
+      clear_previous(store)?;
+    }
     return Ok(());
   }
   let transaction = Transaction {
@@ -408,7 +412,7 @@ pub(super) fn recover(store: &Installations) -> io::Result<()> {
         && entry.target_triple == bundle.manifest.target_triple
     }) {
       return Err(invalid(
-        "activation journal selects an unrecorded installation; run ctlup migrate",
+        "activation journal selects an unrecorded installation",
       ));
     }
   }
@@ -418,9 +422,8 @@ pub(super) fn recover(store: &Installations) -> io::Result<()> {
       &store.root.join("previous"),
       &Path::new("installs").join(previous.manifest.bundle_id),
     )?;
-  } else if path_exists(&store.root.join("previous"))? {
-    fs::read_link(store.root.join("previous"))?;
-    fs::remove_file(store.root.join("previous"))?;
+  } else {
+    clear_previous(store)?;
   }
   replace_link(
     &store.root.join("current"),
@@ -428,6 +431,19 @@ pub(super) fn recover(store: &Installations) -> io::Result<()> {
   )?;
   fs::remove_file(path)?;
   File::open(&store.root)?.sync_all()
+}
+
+#[cfg(unix)]
+pub(super) fn clear_previous(store: &Installations) -> io::Result<()> {
+  let path = store.root.join("previous");
+  if path_exists(&path)? {
+    // Accept only our canonical relative link so cleanup cannot remove an
+    // unrelated file at this location.
+    pointer_path(store, "previous")?;
+    fs::remove_file(path)?;
+    sync_directory(&store.root)?;
+  }
+  Ok(())
 }
 
 pub(super) fn entries(store: &Installations) -> io::Result<Vec<(String, PathBuf)>> {

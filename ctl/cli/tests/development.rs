@@ -36,6 +36,8 @@ impl Fixture {
       .arg(&self.0)
       .env("HOME", &self.0)
       .env("USERPROFILE", &self.0)
+      .env_remove("CTL_DATA_DIR")
+      .env_remove("CTL_CONFIG_DIR")
       .env("CTL_NODE_PROGRAM", self.0.join("builder"))
       .stdout(Stdio::piped())
       .stderr(Stdio::piped());
@@ -111,6 +113,8 @@ child.once("close", (code) => {
       .env("FIXTURE_CTLUP", env!("CARGO_BIN_EXE_ctlup"))
       .env("HOME", &fixture.0)
       .env("USERPROFILE", &fixture.0)
+      .env_remove("CTL_DATA_DIR")
+      .env_remove("CTL_CONFIG_DIR")
       .env("CTL_NODE_PROGRAM", fixture.0.join("builder"))
       .stdin(Stdio::null())
       .stdout(Stdio::piped())

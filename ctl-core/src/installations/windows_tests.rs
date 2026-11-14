@@ -74,16 +74,11 @@ fn stable_launchers_follow_selection_while_a_lease_pins_a_superseded_payload() {
   );
 
   let second = installs.activate(&bundle(&home.0, 2)).unwrap();
-  assert_eq!(installs.rollback().unwrap().directory, first.directory);
   assert_eq!(
     installs.active().unwrap().unwrap().directory,
-    first.directory
-  );
-  assert_eq!(
-    installs.previous().unwrap().unwrap().directory,
     second.directory
   );
-  assert_eq!(installs.rollback().unwrap().directory, second.directory);
+  assert!(installs.previous().unwrap().is_none());
   installs.activate(&bundle(&home.0, 3)).unwrap();
   assert_eq!(
     installs.prune().unwrap().retained_in_use,

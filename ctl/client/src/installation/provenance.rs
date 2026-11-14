@@ -39,7 +39,7 @@ pub fn activate_uploaded(
         built_at: None,
       })
   };
-  let heads = single_target_heads(home, bundle, &resolved_origin, None)?;
+  let heads = single_target_heads(home, bundle, &resolved_origin)?;
   installations.activate_and_lease_with_origin_if_unchanged(bundle, &resolved_origin, &heads)
 }
 
@@ -47,7 +47,6 @@ pub(crate) fn single_target_heads(
   home: &Path,
   bundle: &ctl_core::bundles::Bundle,
   origin: &CatalogOrigin,
-  snapshot: Option<&[ctl_core::installations::CatalogEntry]>,
 ) -> io::Result<Vec<ctl_core::installations::CatalogEntry>> {
   origin.validate()?;
   let installations = ctl_core::installations::Installations::new(home);
@@ -62,25 +61,6 @@ pub(crate) fn single_target_heads(
           .is_some_and(|existing| existing.channel == origin.channel)
     })
     .collect::<Vec<_>>();
-  if let Some(snapshot) = snapshot {
-    let expected = snapshot
-      .iter()
-      .filter(|entry| {
-        entry.current
-          && entry
-            .origin
-            .as_ref()
-            .is_some_and(|existing| existing.channel == origin.channel)
-      })
-      .cloned()
-      .collect::<Vec<_>>();
-    if expected != heads {
-      return Err(io::Error::new(
-        io::ErrorKind::WouldBlock,
-        "the channel's installed targets changed while preparing the build; retry the update",
-      ));
-    }
-  }
   for head in &heads {
     if head.target_triple == bundle.manifest.target_triple {
       continue;

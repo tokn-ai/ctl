@@ -399,11 +399,11 @@ SSH framing and daemon negotiation remain unchanged.
 Channel installations add an independent installation-catalog schema 1 and an
 optional publication `build-info.json` schema 1. Catalog records identify the
 channel, target, publication and UTC build date without changing content-addressed
-bundle manifests. Earlier complete installations require explicit catalog adoption.
+bundle manifests. Earlier complete installations are adopted automatically.
 The opt-in `catalog-json` command uses the `ctlup-catalog-v1` response marker;
 updated clients probe support before sending optional installation provenance,
 and retain legacy behavior with older managers. The existing `ctlup-command-v1`
-status and rollback JSON, bundle sets, PR artifact layout, named protocol versions
+status JSON, bundle sets, PR artifact layout, named protocol versions
 and internal builds remain unchanged.
 
 Logical target components and installed builds have separate CLI views.
@@ -414,13 +414,19 @@ remote inspection uses the distinct `ctlup-show-v1` marker and falls back to
 existing status and catalog responses on older managers. Existing status and
 catalog response schemas retain their shapes; no named protocol changes.
 
-Explicit `ctlup migrate` uses a separate schema-1 local cutover marker after
-committing adopted channel metadata. It preserves content-addressed bundle bytes
-and existing catalog records. Only this explicit migrator reads old installation
-layouts; normal readers require the authoritative catalog and canonical schema-2
-installation paths, independently of the marker. Schema-1 incomplete managed
-bundles must be replaced or cleanly reinstalled before adoption.
+One-time automatic adoption uses a local cutover marker after committing adopted
+channel metadata. It preserves content-addressed bundle bytes and existing
+catalog records. After adoption, normal readers use the authoritative catalog
+and canonical schema-2 installation paths. Schema-1 incomplete managed bundles
+must be replaced or cleanly reinstalled before adoption.
 This local storage migration changes no named wire contract or internal build.
+
+Readable installation paths and checkout registrations extend local storage.
+`catalog.json` and `ctlup-command-v1` status, `ctlup-catalog-v1`, and `ctlup-show-v1` responses
+retain their shapes. `ctlup rollback` is retired, including invocation through
+SSH. Status still returns `previous` for older stores until their previous
+selection is cleared by activation or pruning. Use an updated `ctlup` for
+mutations after creating checkout registrations so pruning can retain them.
 
 ## Discovery and SSH framing
 

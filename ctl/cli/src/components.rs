@@ -190,6 +190,6 @@ pub async fn run(
 
 fn updater_required() -> io::Error {
   io::Error::other(
-    "Installation management moved to ctlup. Use ctlup install, update, status or rollback; ctl components manages running services.",
+    "Use ctlup install, update or status to manage installations. Use ctl components to manage running services.",
   )
 }

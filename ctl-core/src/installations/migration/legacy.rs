@@ -80,7 +80,7 @@ pub(super) fn active(store: &Installations) -> io::Result<Option<Bundle>> {
   if filesystem::path_exists(&store.root.join("current"))? {
     return Ok(None);
   }
-  Store::new(&store.home).selected(Purpose::Local, crate::paths::native_target())
+  Store::from_data_root(&store.root).selected(Purpose::Local, crate::paths::native_target())
 }
 
 #[cfg(unix)]

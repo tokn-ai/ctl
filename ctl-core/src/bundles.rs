@@ -340,8 +340,12 @@ impl Store {
   /// No filesystem work is performed until an explicit import or selection.
   #[must_use]
   pub fn new(home: &Path) -> Self {
+    Self::from_data_root(&crate::paths::directory_for_account(home))
+  }
+
+  pub(crate) fn from_data_root(root: &Path) -> Self {
     Self {
-      root: crate::paths::directory_for_account(home).join("components"),
+      root: root.join("components"),
       cache: false,
     }
   }

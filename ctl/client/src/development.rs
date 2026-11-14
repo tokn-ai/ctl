@@ -13,6 +13,24 @@ const MAX_DIAGNOSTIC_BYTES: usize = 32 * 1024;
 
 mod desktop;
 pub use desktop::{DesktopBuild, build_desktop};
+#[cfg(target_os = "macos")]
+mod renewal;
+#[cfg(target_os = "macos")]
+pub use renewal::renew_signing;
+
+/// Returns an unsupported platform error for macOS helper signing renewal.
+/// # Errors
+/// Always reports that this operation requires macOS.
+#[cfg(not(target_os = "macos"))]
+pub fn renew_signing(
+  _home: &Path,
+  _workspace: &Path,
+) -> std::future::Ready<io::Result<PreparedDevelopment>> {
+  std::future::ready(Err(io::Error::new(
+    io::ErrorKind::Unsupported,
+    "ctld signing renewal requires macOS",
+  )))
+}
 
 #[derive(Debug, Clone)]
 pub struct DevelopmentOptions {
@@ -76,15 +94,8 @@ pub async fn install(home: &Path, options: DevelopmentOptions) -> io::Result<Pre
   } else {
     workspace.clone()
   };
-  let mut command = tokio::process::Command::new(
-    std::env::var_os("CTL_NODE_PROGRAM").unwrap_or_else(|| "node".into()),
-  );
+  let mut command = recipe_command(&recipe, &cargo_cwd);
   command
-    .args([
-      "--experimental-strip-types",
-      "--disable-warning=ExperimentalWarning",
-    ])
-    .arg(recipe)
     .arg("--workspace")
     .arg(&workspace)
     .arg("--cargo-cwd")
@@ -94,16 +105,8 @@ pub async fn install(home: &Path, options: DevelopmentOptions) -> io::Result<Pre
     .arg("--output")
     .arg(&output.0)
     .arg("--cargo-args-json")
-    .arg(serde_json::to_string(&options.cargo_args).map_err(io::Error::other)?)
-    .current_dir(&cargo_cwd)
-    .env_remove("CTL_BUNDLED_CTLD_DIR")
-    .env_remove("CTL_BUNDLED_CTLD_MODE")
-    .env_remove("CTMUX_DEV_APP_SUPERVISOR")
-    .env_remove("CTMUX_DEV_CTLD_EXECUTABLE")
-    .env_remove("CTMUX_DEV_APP_FAILURE_MARKER");
-  #[cfg(unix)]
-  command.env("CTLUP_DEVELOPMENT_LIFELINE", "1");
-  run_builder(command).await?;
+    .arg(serde_json::to_string(&options.cargo_args).map_err(io::Error::other)?);
+  run_recipe(command, "native development build").await?;
   let descriptor = read_output(&output.0)?;
   let bundle = crate::components::import_local_for_target(
     home,
@@ -138,17 +141,45 @@ pub async fn install(home: &Path, options: DevelopmentOptions) -> io::Result<Pre
     Some(&preparation),
   )
   .await?;
-  let executables = installed_executables(home, &installed);
-  Ok(PreparedDevelopment {
+  Ok(prepared_result(home, &installed, lease))
+}
+
+fn prepared_result(
+  home: &Path,
+  installed: &ctl_core::bundles::Bundle,
+  lease: ctl_core::installations::Lease,
+) -> PreparedDevelopment {
+  PreparedDevelopment {
     result: DevelopmentResult {
       schema_version: 1,
-      bundle_id: installed.manifest.bundle_id,
-      target_triple: installed.manifest.target_triple,
-      executables,
+      bundle_id: installed.manifest.bundle_id.clone(),
+      target_triple: installed.manifest.target_triple.clone(),
+      executables: installed_executables(home, installed),
       services_preserved: true,
     },
     _lease: lease,
-  })
+  }
+}
+
+fn recipe_command(recipe: &Path, cwd: &Path) -> tokio::process::Command {
+  let mut command = tokio::process::Command::new(
+    std::env::var_os("CTL_NODE_PROGRAM").unwrap_or_else(|| "node".into()),
+  );
+  command
+    .args([
+      "--experimental-strip-types",
+      "--disable-warning=ExperimentalWarning",
+    ])
+    .arg(recipe)
+    .current_dir(cwd)
+    .env_remove("CTL_BUNDLED_CTLD_DIR")
+    .env_remove("CTL_BUNDLED_CTLD_MODE")
+    .env_remove("CTMUX_DEV_APP_SUPERVISOR")
+    .env_remove("CTMUX_DEV_CTLD_EXECUTABLE")
+    .env_remove("CTMUX_DEV_APP_FAILURE_MARKER");
+  #[cfg(unix)]
+  command.env("CTLUP_DEVELOPMENT_LIFELINE", "1");
+  command
 }
 
 fn installed_executables(
@@ -240,7 +271,7 @@ impl Drop for BuildGroup {
   }
 }
 
-async fn run_builder(mut command: tokio::process::Command) -> io::Result<()> {
+async fn run_recipe(mut command: tokio::process::Command, operation: &str) -> io::Result<()> {
   #[cfg(unix)]
   command.process_group(0).kill_on_drop(true);
   command
@@ -249,7 +280,7 @@ async fn run_builder(mut command: tokio::process::Command) -> io::Result<()> {
     .stderr(Stdio::piped());
   let start_error = |error: io::Error| {
     io::Error::other(format!(
-      "could not start the native development builder (Node 24 and Cargo are required): {error}",
+      "could not start {operation} (Node 24 is required): {error}",
     ))
   };
   #[cfg(unix)]
@@ -290,7 +321,7 @@ async fn run_builder(mut command: tokio::process::Command) -> io::Result<()> {
   }
   if !status.success() {
     return Err(io::Error::other(format!(
-      "native development build exited {status}; the active installation was kept.\n{}",
+      "{operation} exited {status}; the active installation was kept.\n{}",
       diagnostics.trim(),
     )));
   }

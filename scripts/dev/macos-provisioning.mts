@@ -40,6 +40,7 @@ export interface ProvisioningOptions {
   env?: NodeJS.ProcessEnv;
   run?: MacosCommandRunner;
   provision_command?: string;
+  expected_team?: string;
   /** Alternative profile locations allow isolated developer tooling and tests. */
   home_directory?: string;
   now?: Date;
@@ -48,6 +49,7 @@ export interface ProvisioningOptions {
 export interface ProvisioningProfile {
   path: string;
   expires_at: Date;
+  close?: () => Promise<void>;
 }
 
 function invoke(options: ProvisioningOptions, command: string, args: string[], stream_output = false) {
@@ -136,7 +138,8 @@ export async function findProvisioningProfile(options: ProvisioningOptions): Pro
           "-c", `Print ${key}`, decoded,
         ])).stdout.trim();
         const application = await plistValue(":Entitlements:com.apple.application-identifier");
-        if (!application.endsWith(`.${bundle_identifier}`)) continue;
+        if (!application.endsWith(`.${bundle_identifier}`) ||
+          (options.expected_team && application !== `${options.expected_team}.${bundle_identifier}`)) continue;
         const expires = new Date(await plistValue(":ExpirationDate"));
         if (!Number.isNaN(expires.valueOf()) && expires > (options.now ?? new Date())) {
           matches.push({ path: candidate, expires_at: expires });
@@ -155,23 +158,65 @@ export async function findProvisioningProfile(options: ProvisioningOptions): Pro
 /** Reuse Xcode's profile and refresh a configured Personal Team when it expires. */
 export async function prepareProvisioningProfile(options: ProvisioningOptions): Promise<ProvisioningProfile> {
   let profile = await findProvisioningProfile(options);
-  if (!profile && await configuredProvisioningProject(options)) {
-    console.log("Refreshing ctld provisioning with Xcode…");
-    await invoke(options, "xcodebuild", [
-      "-project", provisioningProject(options), "-scheme", "ctld-provisioning",
-      "-configuration", "Debug", "-destination", "platform=macOS",
-      "-derivedDataPath", path.join(options.target_directory, "ctld-provisioning-derived"),
-      "-allowProvisioningUpdates", "-allowProvisioningDeviceRegistration", "build",
-    ], true);
+  if (!profile && options.expected_team && !(options.env ?? process.env).CTLD_PROVISIONING_PROFILE) {
+    profile = await renewInstalledProfile(options);
+  } else if (!profile && !options.expected_team && await configuredProvisioningProject(options)) {
+    await refreshProfile(options, provisioningProject(options), path.join(options.target_directory, "ctld-provisioning-derived"));
     profile = await findProvisioningProfile(options);
   }
   if (!profile) {
+    const required_identity = options.expected_team ? `${bundle_identifier} for the installed helper's Apple Team` : bundle_identifier;
     throw new Error(
-      `No unexpired provisioning profile authorizes ${bundle_identifier}. ` +
+      `No unexpired provisioning profile authorizes ${required_identity}. ` +
       `Run \`${options.provision_command ?? "pnpm ctld:provision"}\`, ` +
       "select your Personal Team under Signing & Capabilities, and build the target once. " +
       "Free Personal Team profiles expire after seven days.",
     );
   }
   return profile;
+}
+
+async function renewInstalledProfile(options: ProvisioningOptions): Promise<ProvisioningProfile | undefined> {
+  // The installed helper already identifies the Apple Team. Use a private
+  // copy so renewal can run without a configured checkout or a Cargo build.
+  const scratch = await mkdtemp(path.join(options.target_directory, "ctld-provision-renewal-"));
+  const close = () => rm(scratch, { recursive: true, force: true });
+  let retained = false;
+  try {
+    const project = path.join(scratch, "ctld-provisioning.xcodeproj");
+    const products = path.join(scratch, "products");
+    await cp(path.join(options.repository_root, "scripts/dev/macos/ctld-provisioning"), scratch, { recursive: true });
+    try {
+      await refreshProfile(options, project, path.join(scratch, "derived"), [
+        `DEVELOPMENT_TEAM=${options.expected_team}`, `CONFIGURATION_BUILD_DIR=${products}`,
+      ]);
+    } catch (cause) {
+      const detail = cause instanceof Error ? cause.message : String(cause);
+      throw new Error(
+        "Xcode could not renew ctld provisioning. Sign into Xcode with the installed helper's Apple Team " +
+        `or run \`pnpm ctld:provision\` with that team.\n${detail}`,
+        { cause },
+      );
+    }
+    const embedded = path.join(products, "ctld-provisioning.app/Contents/embedded.provisionprofile");
+    const profile = await findProvisioningProfile({
+      ...options, env: { ...(options.env ?? process.env), CTLD_PROVISIONING_PROFILE: embedded },
+    });
+    if (profile) {
+      retained = true;
+      return { ...profile, close };
+    }
+    return await findProvisioningProfile(options);
+  } finally {
+    if (!retained) await close();
+  }
+}
+
+async function refreshProfile(options: ProvisioningOptions, project: string, derived: string, settings: string[] = []): Promise<void> {
+  console.error("Refreshing ctld provisioning with Xcode…");
+  await invoke(options, "xcodebuild", [
+    "-project", project, "-scheme", "ctld-provisioning", "-configuration", "Debug",
+    "-destination", "platform=macOS", "-derivedDataPath", derived,
+    "-allowProvisioningUpdates", "-allowProvisioningDeviceRegistration", ...settings, "build",
+  ], true);
 }

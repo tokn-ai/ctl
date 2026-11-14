@@ -138,6 +138,29 @@ pub async fn inspect_ctld_package(
   Ok(macos::verify_helper(&session).await?.info)
 }
 
+/// Reads the signing team from a receipt in a hash-verified development bundle.
+/// Its component identity must agree with the installed runtime manifest.
+#[cfg(target_os = "macos")]
+pub(crate) fn development_signing_team(
+  receipt: &[u8],
+  target: &str,
+  component: &ctl_core::component::ComponentInfo,
+) -> Result<String, Error> {
+  let build = &component.build;
+  let receipt = manifest::Manifest::parse_development(receipt, &build.version, target)?;
+  if build.source_revision.as_deref() != Some(receipt.git_revision.as_str())
+    || !receipt.development.as_ref().is_some_and(|identity| {
+      identity.source_fingerprint == build.source_fingerprint && identity.dirty == build.dirty
+    })
+    || !receipt.matches_protocols(&component.protocols)
+  {
+    return Err(Error::Verification(
+      "development helper receipt differs from the installed build".into(),
+    ));
+  }
+  Ok(receipt.team_identifier)
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum SetupEvent {
   Manifest,

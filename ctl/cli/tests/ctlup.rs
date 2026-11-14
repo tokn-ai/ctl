@@ -50,7 +50,7 @@ impl Drop for Home {
   }
 }
 
-fn archive(revision: char) -> (Manifest, Vec<u8>) {
+fn fixture_payload(revision: char) -> (BTreeMap<String, ComponentInfo>, BTreeMap<String, Vec<u8>>) {
   let build = ComponentBuildInfo {
     version: "0.1.2".into(),
     source_revision: Some(revision.to_string().repeat(40)),
@@ -87,7 +87,7 @@ fn archive(revision: char) -> (Manifest, Vec<u8>) {
       )
     })
     .collect();
-  let files: BTreeMap<String, Vec<u8>> = ctl_core::bundle_layout::ALL
+  let files = ctl_core::bundle_layout::ALL
     .into_iter()
     .map(|name| {
       (
@@ -96,6 +96,11 @@ fn archive(revision: char) -> (Manifest, Vec<u8>) {
       )
     })
     .collect();
+  (components, files)
+}
+
+fn archive(revision: char) -> (Manifest, Vec<u8>) {
+  let (components, files) = fixture_payload(revision);
   let manifest = Manifest::new(
     ctl_core::paths::native_target(),
     Source::Ci,
@@ -397,6 +402,135 @@ fn failed_archive_and_missing_preflight_do_not_change_the_active_installation() 
     fs::read_link(home.0.join(".tokn/ctl/current")).unwrap(),
     previous
   );
+}
+
+#[cfg(target_os = "macos")]
+fn development_payload() -> (Manifest, BTreeMap<String, Vec<u8>>) {
+  let (components, mut files) = fixture_payload('b');
+  let helper = &components["ctld"];
+  let target = ctl_core::paths::native_target();
+  let version = &helper.build.version;
+  let archive_digest = "d".repeat(64);
+  let executable = b"#!/bin/sh\ntouch \"$HOME/helper-executed\"\nexit 19\n".to_vec();
+  files.insert("ctld".into(), executable.clone());
+  files.insert("ctld.app/Contents/MacOS/ctld".into(), executable);
+  let receipt = serde_json::json!({
+    "schema_version": 1,
+    "component": "ctld",
+    "app_version": version,
+    "bundle_id": format!("dev.{archive_digest}"),
+    "git_revision": helper.build.source_revision,
+    "target": target,
+    "bundle_identifier": "dev.tokn-ai.ctl.ctld",
+    "team_identifier": "ABCDEFGHIJ",
+    "signing_mode": "development",
+    "notarized": false,
+    "archive": format!("ctld-{version}-{target}.app.tar.gz"),
+    "sha256": archive_digest,
+    "archive_size": 1,
+    "development": {
+      "source_fingerprint": helper.build.source_fingerprint,
+      "dirty": helper.build.dirty,
+    },
+    "protocols": helper.protocols,
+  });
+  files.insert(
+    "ctld-package.json".into(),
+    serde_json::to_vec(&receipt).unwrap(),
+  );
+  let manifest = Manifest::new(target, Source::Local, components, &files).unwrap();
+  (manifest, files)
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn failed_renewal_passes_verified_signing_input_and_preserves_the_installation() {
+  use ctl_core::bundles::Store;
+  use ctl_core::installations::{CatalogOrigin, Installations};
+  use sha2::{Digest as _, Sha256};
+
+  let home = Home::new();
+  let (previous, bytes) = archive('a');
+  assert!(home.install(&bytes).status.success());
+  let installations = Installations::new(&home.0);
+  let (manifest, files) = development_payload();
+  let pending = Store::cache(&home.0).publish(&manifest, &files).unwrap();
+  let installed = installations
+    .activate_with_origin(
+      &pending,
+      &CatalogOrigin {
+        channel: "local".into(),
+        publication_id: Some(format!(
+          "local.{}",
+          manifest.components["ctld"].build.source_fingerprint
+        )),
+        built_at: Some("2026-01-02T03:04:05Z".into()),
+      },
+    )
+    .unwrap();
+  let catalog_path = installations.root().join("catalog.json");
+  let catalog = fs::read(&catalog_path).unwrap();
+
+  let workspace = home.0.join("checkout with spaces");
+  fs::create_dir_all(workspace.join("scripts/dev")).unwrap();
+  fs::write(workspace.join("scripts/dev/ctld-signed.mts"), []).unwrap();
+  let signer = home.0.join("signer");
+  fs::write(
+    &signer,
+    r#"#!/bin/sh
+set -eu
+test "$#" -eq 5
+test "$3" = "$(pwd -P)/scripts/dev/ctld-signed.mts"
+test "$4" = --renew-signing
+artifact=$(/usr/bin/plutil -extract artifact raw -o - "$5")
+test -x "$artifact"
+cp "$5" "$HOME/signing-input.json"
+cp "$artifact" "$HOME/staged-ctld"
+printf 'fixture signing failure\n' >&2
+exit 17
+"#,
+  )
+  .unwrap();
+  fs::set_permissions(&signer, fs::Permissions::from_mode(0o700)).unwrap();
+  let output = home
+    .command(&["dev", "--renew-signing", "--json", "--workspace"])
+    .arg(&workspace)
+    .env("CTL_NODE_PROGRAM", &signer)
+    .output()
+    .unwrap();
+  let diagnostics = String::from_utf8_lossy(&output.stderr);
+  assert!(!output.status.success());
+  assert!(
+    diagnostics.contains("fixture signing failure"),
+    "{diagnostics}"
+  );
+  assert_eq!(output.stdout, [] as [u8; 0]);
+  let request: serde_json::Value =
+    serde_json::from_slice(&fs::read(home.0.join("signing-input.json")).unwrap()).unwrap();
+  assert_eq!(request["target"], manifest.target_triple);
+  assert_eq!(request["expected_team"], "ABCDEFGHIJ");
+  assert_eq!(
+    request["expected_component"],
+    serde_json::to_value(&manifest.components["ctld"]).unwrap()
+  );
+  let helper = "ctld.app/Contents/MacOS/ctld";
+  let artifact = PathBuf::from(request["artifact"].as_str().unwrap());
+  assert_ne!(artifact, installed.directory.join(helper));
+  assert_eq!(
+    format!(
+      "{:x}",
+      Sha256::digest(fs::read(home.0.join("staged-ctld")).unwrap())
+    ),
+    manifest.files[helper].sha256
+  );
+  assert!(!home.0.join("helper-executed").exists());
+  assert_eq!(installations.active().unwrap().unwrap().manifest, manifest);
+  assert_eq!(
+    installations.previous().unwrap().unwrap().manifest,
+    previous
+  );
+  assert_eq!(fs::read(catalog_path).unwrap(), catalog);
+  assert_eq!(installed.read_files().unwrap(), files);
 }
 
 #[test]

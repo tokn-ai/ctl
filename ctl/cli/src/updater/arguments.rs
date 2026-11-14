@@ -42,7 +42,7 @@ pub(super) enum Command {
     #[command(subcommand)]
     command: ComponentCommand,
   },
-  /// Build and install one complete native development build from a checkout.
+  /// Build and install a native development build, or renew its macOS helper signing.
   Dev(DevelopmentArguments),
   /// Show installed builds, channels and the active runtime without starting services.
   Show {
@@ -234,10 +234,17 @@ pub(super) struct UpdateArguments {
 }
 
 #[derive(Debug, Args)]
+#[expect(
+  clippy::struct_excessive_bools,
+  reason = "clap parses independent command-line flags"
+)]
 pub(super) struct DevelopmentArguments {
   /// Source checkout; defaults to the current directory.
   #[arg(long)]
   pub workspace: Option<PathBuf>,
+  /// Renew the active macOS development helper's signature without recompiling.
+  #[arg(long, conflicts_with_all = ["release", "profile", "target_dir", "target", "cargo_args_json"])]
+  pub renew_signing: bool,
   #[arg(long, conflicts_with_all = ["profile", "cargo_args_json"])]
   pub release: bool,
   #[arg(long, conflicts_with = "cargo_args_json")]
@@ -683,5 +690,35 @@ mod tests {
     }
     assert!(Arguments::try_parse_from(["ctlup", "dev", "--lease"]).is_err());
     assert!(Arguments::try_parse_from(["ctlup", "dev", "--lease", "--json"]).is_ok());
+  }
+
+  #[test]
+  fn signing_renewal_accepts_workspace_and_output_flags_but_rejects_cargo_options() {
+    let args = Arguments::try_parse_from([
+      "ctlup",
+      "dev",
+      "--renew-signing",
+      "--workspace",
+      "checkout",
+      "--json",
+      "--lease",
+    ])
+    .unwrap();
+    assert!(matches!(args.command, Command::Dev(DevelopmentArguments {
+      renew_signing: true, workspace: Some(workspace), json: true, lease: true, ..
+    }) if workspace.as_os_str() == "checkout"));
+    for flags in [
+      &["--release"][..],
+      &["--profile", "custom"],
+      &["--target-dir", "output"],
+      &["--target", "aarch64-apple-darwin"],
+      &["--cargo-args-json", "[]"],
+    ] {
+      let command_line = [&["ctlup", "dev", "--renew-signing"][..], flags].concat();
+      assert_eq!(
+        Arguments::try_parse_from(command_line).unwrap_err().kind(),
+        clap::error::ErrorKind::ArgumentConflict
+      );
+    }
   }
 }

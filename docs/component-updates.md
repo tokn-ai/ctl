@@ -330,6 +330,7 @@ signing is independent of the helper selection.
 ctlup dev --workspace /path/to/checkout
 ctlup dev --release
 ctlup dev --profile custom --target-dir /path/to/build-output --json
+ctlup dev --renew-signing
 ```
 
 `dev` builds the six native runtime components and the independent updater from
@@ -338,6 +339,16 @@ Only a successful complete build becomes active; compilation, signing or
 verification failure leaves the previous installation and running services
 intact. `ctlup status` then reports that development installation. Foreign
 targets are rejected because this command prepares the current computer.
+
+On macOS, run `ctlup dev --renew-signing` from a ctl checkout to re-sign the
+active local development helper without recompiling any runtime component.
+The updater reuses an unexpired profile for the helper's Apple Team or asks
+Xcode to renew it using that team. Xcode must be signed in for automatic
+renewal. You can also supply a matching profile with `CTLD_PROVISIONING_PROFILE`.
+The renewed helper gets a new bundle identity when the signed files change.
+It keeps the original build date and channel registrations, and the previous
+bundle remains available for rollback. Restart `ctld` separately to use the
+renewed signature.
 
 The desktop development launcher bootstraps a private native `ctlup` executable
 with Cargo, then delegates preparation to `ctlup dev`. It passes Cargo's original

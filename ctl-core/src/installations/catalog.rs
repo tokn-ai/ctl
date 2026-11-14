@@ -186,6 +186,49 @@ impl State {
         current: true,
       });
     }
+    self.sort_entries();
+  }
+
+  #[cfg(target_os = "macos")]
+  pub(super) fn replace_helper_memberships(
+    &mut self,
+    previous_id: &str,
+    renewed_id: &str,
+  ) -> io::Result<()> {
+    let mut renewed_entries = Vec::new();
+    for entry in self
+      .entries
+      .iter_mut()
+      .filter(|entry| entry.bundle_id == previous_id)
+    {
+      let mut renewed = entry.clone();
+      renewed.bundle_id = renewed_id.into();
+      renewed_entries.push(renewed);
+      entry.current = false;
+    }
+    for entry in renewed_entries {
+      let channel = entry.origin.as_ref().map(|origin| &origin.channel);
+      if let Some(existing) = self.entries.iter_mut().find(|existing| {
+        existing.bundle_id == renewed_id
+          && existing.origin.as_ref().map(|origin| &origin.channel) == channel
+      }) {
+        if existing.origin != entry.origin {
+          return Err(invalid(
+            "renewed helper already has different provenance in this channel",
+          ));
+        }
+        // Renewing after rollback can select a bundle that is still the head
+        // of this channel, even though its predecessor was merely retained.
+        existing.current |= entry.current;
+      } else {
+        self.entries.push(entry);
+      }
+    }
+    self.sort_entries();
+    self.validate_index()
+  }
+
+  fn sort_entries(&mut self) {
     self.entries.sort_by(|left, right| {
       (
         &left.origin.as_ref().map(|origin| &origin.channel),

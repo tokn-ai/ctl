@@ -475,6 +475,44 @@ impl Installations {
     })
   }
 
+  /// Activates a verified re-signing of the active local macOS build. Carries
+  /// its catalog provenance forward and retains the old bundle for rollback.
+  /// The caller verifies the replacement's platform signature and identity.
+  ///
+  /// # Errors
+  /// Rejects changes outside the helper package, conflicting catalog records,
+  /// an active selection changed during signing, or failed storage operations.
+  #[cfg(target_os = "macos")]
+  pub fn activate_renewed_helper(
+    &self,
+    bundle: &Bundle,
+    expected_active: &str,
+  ) -> io::Result<(Bundle, Lease)> {
+    filesystem::validate_native(bundle)?;
+    let files = bundle.read_files()?;
+    if !filesystem::root_exists(self)? {
+      return Err(helper_selection_changed());
+    }
+    let _lock = filesystem::Lock::acquire(self)?;
+    catalog::recover(self)?;
+    let previous = self
+      .active()?
+      .filter(|active| active.manifest.bundle_id == expected_active)
+      .ok_or_else(helper_selection_changed)?;
+    validate_helper_renewal(&previous.manifest, &bundle.manifest)?;
+    if previous.manifest.bundle_id == bundle.manifest.bundle_id {
+      let lease = leases::acquire_locked(self, &previous)?;
+      return Ok((previous, lease));
+    }
+
+    let mut state = catalog::read(self)?;
+    state.replace_helper_memberships(expected_active, &bundle.manifest.bundle_id)?;
+    let installed = filesystem::publish(self, bundle, Some(&files))?;
+    let lease = leases::acquire_locked(self, &installed)?;
+    catalog::commit(self, &state, Some((&installed, Some(&previous))))?;
+    Ok((installed, lease))
+  }
+
   fn activate_with<T>(
     &self,
     bundle: &Bundle,
@@ -645,6 +683,53 @@ impl Installations {
   pub fn lease(&self, bundle: &Bundle) -> io::Result<Lease> {
     leases::acquire(self, bundle)
   }
+}
+
+#[cfg(target_os = "macos")]
+fn helper_selection_changed() -> io::Error {
+  io::Error::new(
+    io::ErrorKind::WouldBlock,
+    "the active installation changed during ctld signing; retry renewal",
+  )
+}
+
+#[cfg(target_os = "macos")]
+fn validate_helper_renewal(previous: &Manifest, renewed: &Manifest) -> io::Result<()> {
+  const PACKAGE_FILES: [&str; 5] = [
+    "ctld-package.json",
+    "ctld.app/Contents/Info.plist",
+    "ctld.app/Contents/MacOS/ctld",
+    "ctld.app/Contents/_CodeSignature/CodeResources",
+    "ctld.app/Contents/embedded.provisionprofile",
+  ];
+  let signed_local = |manifest: &Manifest| {
+    manifest.source == crate::bundles::Source::Local
+      && PACKAGE_FILES
+        .iter()
+        .all(|name| manifest.files.contains_key(*name))
+  };
+  if !signed_local(previous) || !signed_local(renewed) {
+    return Err(filesystem::invalid(
+      "signing renewal requires a complete local ctld app package and receipt",
+    ));
+  }
+  let helper_file = |name: &str| {
+    name == "ctld" || name == "ctld-package.json" || name.starts_with("ctld.app/Contents/")
+  };
+  if renewed.target_triple != previous.target_triple
+    || renewed.distribution_id != previous.distribution_id
+    || renewed.components != previous.components
+    || previous
+      .files
+      .iter()
+      .filter(|(name, _)| !helper_file(name))
+      .ne(renewed.files.iter().filter(|(name, _)| !helper_file(name)))
+  {
+    return Err(filesystem::invalid(
+      "signing renewal changed files or metadata outside the ctld helper package",
+    ));
+  }
+  Ok(())
 }
 
 fn verify_channel_heads(

@@ -1,4 +1,4 @@
-use super::{MAX_DESCRIPTOR_BYTES, run_builder};
+use super::{MAX_DESCRIPTOR_BYTES, run_recipe};
 use ctl_core::private_fs;
 use serde::Deserialize;
 use std::io;
@@ -45,7 +45,7 @@ pub async fn build_desktop(caller: &Path, output: &Path) -> io::Result<DesktopBu
     .env_remove("CTMUX_DEV_APP_SUPERVISOR")
     .env_remove("CTMUX_DEV_CTLD_EXECUTABLE")
     .env_remove("CTMUX_DEV_APP_FAILURE_MARKER");
-  run_builder(command).await?;
+  run_recipe(command, "desktop development build").await?;
   read_output(&output, archive_name())
 }
 

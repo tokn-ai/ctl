@@ -74,10 +74,9 @@ The desktop bundle identifier is `dev.tokn-ai.ctl.ctmux`, and its signed connect
 helper uses `dev.tokn-ai.ctl.ctld`. Signing the helper requires a matching
 provisioning profile.
 Product releases, internal protocol builds, and published contracts are separate.
-Current contracts include ctmux `1.0.13`, task `1.0.4`, ctld `1.1.13`, ctld
-helper `1.1.2`, and remote VPN `1.0.1`. Compatible builds retain earlier published
-contracts within each major. Remote VPN routes require the new broker and helper
-contracts and an updated remote bundle. See [protocol versioning](docs/protocol-versioning.md).
+Compatible builds retain earlier published contracts within each major. Remote
+VPN routes negotiate the broker, helper, and remote agent contracts for the
+requested provider. See [protocol versioning](docs/protocol-versioning.md).
 
 ## Configuration and persistent state
 
@@ -911,7 +910,8 @@ adopted or cancelled across those registries.
 
 ## Managed VPN
 
-Manage local OpenConnect and Tailscale containers through `ctld` using the `ctl` CLI:
+Manage local OpenConnect, OpenVPN, and Tailscale containers through `ctld` using
+the `ctl` CLI:
 
 ```sh
 ctl vpn create
@@ -920,8 +920,9 @@ ctl vpn start NAME_OR_ID
 ctl vpn stop NAME_OR_ID
 ```
 
-`create` opens an interactive questionnaire for an OpenConnect or Tailscale
-profile. It masks password input and saves the profile privately to
+`create` opens an interactive questionnaire. For OpenVPN, it imports a
+self-contained `.ovpn` client profile and accepts optional credentials. It masks
+password input and saves the profile privately to
 `~/.tokn/ctl/vpns.json`, shared with the desktop VPN page. Use `CTL_VPNS_PATH` to
 select another catalog. Creation only saves settings; it does not start `ctld`,
 build an image, or connect a VPN. Cancelling leaves the catalog unchanged.
@@ -958,13 +959,14 @@ Create remains interactive and returns only saved metadata, with prompts on
 stderr. List JSON includes merged `entries`, raw runtime `connections`, capability
 fields, and discovery warnings. If the saved catalog
 cannot be read, runtime entries remain available with `profile_warnings`.
-Saved metadata excludes passwords and URL credentials, paths, queries, and
-fragments. Start launches `ctld` if needed. Stop leaves `ctld` running and
-releases that daemon's heartbeat interest. A shared container remains available
-while another daemon uses it, then exits after the final heartbeat expires. See the
-[OpenConnect setup](docker/openconnect/README.md) for building the image and
-creating a saved profile, or the [Tailscale guide](docker/tailscale/README.md)
-for browser sign-in and persistent container state.
+Saved metadata excludes passwords, OpenVPN configuration contents, and URL
+credentials, paths, queries, and fragments. Start launches `ctld` if needed.
+Stop releases that daemon's heartbeat interest. A shared container remains
+available while another daemon uses it, then exits after the final heartbeat
+expires. See the [OpenConnect setup](docker/openconnect/README.md) or the
+[OpenVPN setup](docker/openvpn/README.md) for building an image and creating a
+saved profile. The [Tailscale guide](docker/tailscale/README.md) covers browser
+sign-in and persistent container state.
 
 To delete a saved profile, run:
 

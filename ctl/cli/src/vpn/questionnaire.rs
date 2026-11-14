@@ -1,6 +1,7 @@
-use std::io::{self, IsTerminal as _};
+use std::io::{self, IsTerminal as _, Read as _};
+use std::path::Path;
 
-use ctl_ipc::{VpnConnection, VpnProvider, VpnSettings};
+use ctl_ipc::{VpnConnection, VpnProvider, VpnSettings, openvpn_profile};
 use zeroize::Zeroizing;
 
 pub(super) fn available() -> bool {
@@ -30,6 +31,11 @@ pub(super) fn create(names: Vec<String>) -> Result<Option<VpnConnection>, super:
         VpnProvider::Tailscale,
         "Tailscale",
         "Browser sign-in when started",
+      )
+      .item(
+        VpnProvider::Openvpn,
+        "OpenVPN",
+        "Import a self-contained .ovpn profile",
       )
       .interact()?;
     let settings = match provider {
@@ -81,6 +87,7 @@ pub(super) fn create(names: Vec<String>) -> Result<Option<VpnConnection>, super:
           accept_routes,
         }
       }
+      VpnProvider::Openvpn => openvpn_settings()?,
     };
     Ok(VpnConnection {
       connection_id: uuid::Uuid::new_v4().to_string(),
@@ -89,6 +96,74 @@ pub(super) fn create(names: Vec<String>) -> Result<Option<VpnConnection>, super:
     })
   })();
   cancelled(result)
+}
+
+fn openvpn_settings() -> io::Result<VpnSettings> {
+  let path: String = cliclack::input("Path to the .ovpn profile")
+    .validate(|value: &String| text(value, 4096, false))
+    .interact()?;
+  let config = read_openvpn_profile(Path::new(path.trim()))?;
+  let username: String = cliclack::input("OpenVPN username (optional)")
+    .required(false)
+    .validate(|value: &String| text(value, 254, true))
+    .interact()?;
+  let username = optional(&username);
+  let password = if username.is_some() {
+    Some(Zeroizing::new(
+      cliclack::password("OpenVPN password")
+        .validate(|value: &String| text(value, 254, false))
+        .interact()?,
+    ))
+  } else {
+    None
+  };
+  openvpn_profile::validate(
+    &config,
+    username.as_deref(),
+    password.as_ref().map(|value| value.as_str()),
+  )
+  .map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))?;
+  Ok(VpnSettings::Openvpn {
+    config,
+    username,
+    password,
+  })
+}
+
+fn read_openvpn_profile(path: &Path) -> io::Result<Zeroizing<String>> {
+  #[cfg(unix)]
+  let file = rustix::fs::open(
+    path,
+    rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NONBLOCK | rustix::fs::OFlags::CLOEXEC,
+    rustix::fs::Mode::empty(),
+  )
+  .map(std::fs::File::from);
+  #[cfg(not(unix))]
+  let file = std::fs::File::open(path);
+  let file = file.map_err(|_| io::Error::other("Could not open the OpenVPN profile"))?;
+  if !file.metadata()?.is_file() {
+    return Err(io::Error::new(
+      io::ErrorKind::InvalidInput,
+      "OpenVPN profile must be a regular file",
+    ));
+  }
+  let mut config = Zeroizing::new(String::new());
+  file
+    .take((openvpn_profile::MAX_CONFIG_BYTES + 1) as u64)
+    .read_to_string(&mut config)
+    .map_err(|_| {
+      io::Error::new(
+        io::ErrorKind::InvalidData,
+        "Could not read the OpenVPN profile as UTF-8",
+      )
+    })?;
+  if config.len() > openvpn_profile::MAX_CONFIG_BYTES {
+    return Err(io::Error::new(
+      io::ErrorKind::InvalidData,
+      "OpenVPN profile must be at most 24 KiB",
+    ));
+  }
+  Ok(config)
 }
 
 pub(super) fn pick(

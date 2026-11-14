@@ -407,7 +407,8 @@ export function useVpn(enabled: boolean): VpnController {
     await runAction(vpn_id, { kind: "connect", connection_id }, existing ?? {
       vpn_id: connection_id, connection_id, state: "starting", running: false,
       provider: connection.provider ?? "openconnect",
-      ...(connection.provider === "tailscale" ? { hostname: connection.hostname } : { vpn_url: connection.url, username: connection.username }),
+      ...(connection.provider === "tailscale" ? { hostname: connection.hostname }
+        : connection.provider === "openvpn" ? {} : { vpn_url: connection.url, username: connection.username }),
       endpoint: null, container_name: null,
     }, () => connectVpn(connection_id));
     if (connection.provider === "tailscale" && vpnNeedsSignIn(statuses_ref.current.get(vpn_id))) await signIn(vpn_id);

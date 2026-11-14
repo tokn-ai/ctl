@@ -14,13 +14,15 @@ use tokio::process::{ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
-use crate::{SshTarget, VpnConnection, VpnSnapshot, VpnStatus};
+use crate::{SshTarget, VpnConnection, VpnProvider, VpnSnapshot, VpnStatus};
 
-pub const PROTOCOL_BUILD: u16 = 2;
+pub const PROTOCOL_BUILD: u16 = 3;
 pub const CONTRACT_V1_0_1: ProtocolVersion = ProtocolVersion::new(1, 0, 1);
 pub const CONTRACT_V1_1_2: ProtocolVersion = ProtocolVersion::new(1, 1, 2);
-pub const PROTOCOL_VERSION: ProtocolVersion = CONTRACT_V1_1_2;
-pub const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[CONTRACT_V1_0_1, CONTRACT_V1_1_2];
+pub const CONTRACT_V1_2_3: ProtocolVersion = ProtocolVersion::new(1, 2, 3);
+pub const PROTOCOL_VERSION: ProtocolVersion = CONTRACT_V1_2_3;
+pub const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] =
+  &[CONTRACT_V1_0_1, CONTRACT_V1_1_2, CONTRACT_V1_2_3];
 pub const CONTRACT: ctl_core::component::ProtocolContract =
   ctl_core::component::ProtocolContract::new(
     "ctl_remote_vpn",
@@ -57,6 +59,12 @@ pub fn protocol_offer() -> ProtocolOffer {
   )
 }
 
+/// `OpenVPN` profiles are supported only on the new remote VPN contract.
+#[must_use]
+pub fn openvpn_supported(protocol: ProtocolVersion) -> bool {
+  SUPPORTED_PROTOCOL_VERSIONS.contains(&protocol) && protocol >= CONTRACT_V1_2_3
+}
+
 /// Selects an explicitly implemented contract before identity or VPN input.
 ///
 /// # Errors
@@ -75,7 +83,7 @@ pub async fn negotiate_contract(
     writer,
     &ProtocolSelection {
       protocol_version: selected,
-      client_identity: (selected == CONTRACT_V1_1_2)
+      client_identity: (selected >= CONTRACT_V1_1_2)
         .then(|| ctl_core::presence::process_identity(env!("CARGO_PKG_VERSION"))),
     },
   )
@@ -117,7 +125,7 @@ pub async fn accept_contract_with_client(
   if selection
     .client_identity
     .as_ref()
-    .is_some_and(|client| !client.validate() || selection.protocol_version != CONTRACT_V1_1_2)
+    .is_some_and(|client| !client.validate() || selection.protocol_version < CONTRACT_V1_1_2)
   {
     return Err(Error::UnsupportedProtocol);
   }
@@ -153,6 +161,13 @@ pub enum Response {
 }
 
 impl Request {
+  /// Check whether these request fields belong to the negotiated contract.
+  #[must_use]
+  pub fn supported_by(&self, protocol: ProtocolVersion) -> bool {
+    !matches!(self, Self::Start { connection } if connection.provider() == VpnProvider::Openvpn)
+      || openvpn_supported(protocol)
+  }
+
   /// Validate without returning profile secrets or supplied addresses in errors.
   ///
   /// # Errors
@@ -558,6 +573,12 @@ async fn send_request(
   request: &Request,
   deadline: Duration,
 ) -> Result<Response, Error> {
+  if !request.supported_by(stream.protocol_version()) {
+    return Err(Error::Remote {
+      code: "remote_vpn_components_update_required".into(),
+      message: "The remote agent does not support OpenVPN; update the remote components".into(),
+    });
+  }
   tokio::time::timeout(deadline, async {
     crate::write_frame(stream, request).await?;
     match crate::read_frame(stream).await? {

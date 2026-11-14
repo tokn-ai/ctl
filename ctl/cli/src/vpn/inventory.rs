@@ -102,7 +102,7 @@ fn entry(
         (Some(url.as_str()), Some(username.as_str()), None)
       }
       Some(VpnSettings::Tailscale { hostname, .. }) => (None, None, hostname.as_deref()),
-      None => (None, None, None),
+      Some(VpnSettings::Openvpn { .. }) | None => (None, None, None),
     };
   let hostname = runtime
     .and_then(|runtime| runtime.hostname.as_deref())
@@ -117,6 +117,7 @@ fn entry(
       .and_then(|runtime| runtime.tailnet.as_deref())
       .map(str::to_owned)
       .or_else(|| hostname.clone()),
+    VpnProvider::Openvpn => None,
   };
   let state = runtime.map_or_else(
     || {
@@ -201,6 +202,7 @@ pub(super) fn format(entries: &[Entry]) -> String {
     let provider = match entry.provider {
       VpnProvider::Openconnect => "OpenConnect",
       VpnProvider::Tailscale => "Tailscale",
+      VpnProvider::Openvpn => "OpenVPN",
     };
     [
       value(entry.name.as_deref()),

@@ -48,6 +48,7 @@ pub(crate) fn credential_metadata(snapshot: &VpnConnectionsSnapshot) -> Vec<Cred
         models::VpnSettingsSummary::Tailscale { hostname, .. } => CredentialSettings::Tailscale {
           hostname: hostname.clone(),
         },
+        models::VpnSettingsSummary::Openvpn { .. } => CredentialSettings::Openvpn,
       };
       CredentialMetadata {
         connection_id: connection.connection_id.clone(),
@@ -73,6 +74,7 @@ pub(crate) enum CredentialSettings {
   Tailscale {
     hostname: Option<String>,
   },
+  Openvpn,
 }
 
 // Each VPN coordinates independently across windows, including profile loading.

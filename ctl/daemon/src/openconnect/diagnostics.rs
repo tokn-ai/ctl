@@ -7,6 +7,8 @@ use tokio::io::{AsyncRead, AsyncReadExt as _};
 use tokio::task::JoinHandle;
 use zeroize::Zeroizing;
 
+use super::TunImage;
+
 const READ_BYTES: usize = 2048;
 const DRAIN_TIMEOUT: Duration = Duration::from_millis(250);
 
@@ -15,6 +17,9 @@ const DRAIN_TIMEOUT: Duration = Duration::from_millis(250);
 enum Failure {
   Connection,
   Dns,
+  TunnelDevice,
+  ProxyFirewall,
+  ResolverSettings,
   Authentication,
   Certificate,
   Configuration,
@@ -24,13 +29,22 @@ enum Failure {
 }
 
 impl Failure {
-  const fn message(self) -> &'static str {
+  fn message(self, image: TunImage) -> String {
     match self {
       Self::Connection => {
         "The VPN gateway could not be reached. Check the server address, network connection, and any required port."
       }
       Self::Dns => {
         "The VPN server name could not be resolved. Check the server address and DNS connection."
+      }
+      Self::TunnelDevice => {
+        "The container engine could not open the Linux TUN device. Check the device and its permissions."
+      }
+      Self::ProxyFirewall => {
+        "The container engine could not isolate OpenVPN proxy traffic. Check the kernel's nftables support."
+      }
+      Self::ResolverSettings => {
+        "The OpenVPN DNS settings could not be installed. Check that the container's resolver file is writable."
       }
       Self::Authentication => {
         "VPN authentication did not complete. Check the username, password, and authentication method in the connection settings."
@@ -39,18 +53,20 @@ impl Failure {
         "The VPN server certificate could not be verified. Check the server address and certificate trust configuration."
       }
       Self::Configuration => {
-        "The VPN container could not load its configuration. Rebuild the image with docker/openconnect/run.sh build and try again."
+        return format!(
+          "The VPN container could not load its configuration. Rebuild the image with {} and try again.",
+          image.build_command,
+        );
       }
+      Self::MissingImage => image.missing,
       Self::HeartbeatExpired => {
         "The VPN container stopped because ctld heartbeats expired. Check ctld and the container engine, then reconnect."
-      }
-      Self::MissingImage => {
-        "The OpenConnect container image is missing. Build it with docker/openconnect/run.sh build."
       }
       Self::EngineUnavailable => {
         "The container engine is unavailable. Start Docker or the Podman machine and try again."
       }
     }
+    .into()
   }
 }
 
@@ -67,12 +83,24 @@ const SIGNATURES: &[(&[u8], Failure)] = &[
   (b"name or service not known", Failure::Dns),
   (b"temporary failure in name resolution", Failure::Dns),
   (b"nodename nor servname provided", Failure::Dns),
+  (b"cannot open tun/tap dev", Failure::TunnelDevice),
+  (b"requires a linux tun device", Failure::TunnelDevice),
+  (
+    b"could not isolate openvpn proxy traffic",
+    Failure::ProxyFirewall,
+  ),
+  (
+    b"could not install openvpn dns settings",
+    Failure::ResolverSettings,
+  ),
   (b"login failed", Failure::Authentication),
   (b"authentication failed", Failure::Authentication),
+  (b"auth_failed", Failure::Authentication),
   (b"login denied", Failure::Authentication),
   (b"server certificate verify failed", Failure::Certificate),
   (b"certificate verification failed", Failure::Certificate),
   (b"certificate verify failed", Failure::Certificate),
+  (b"verify error:", Failure::Certificate),
   (
     b"vpn configuration was not received",
     Failure::Configuration,
@@ -116,7 +144,7 @@ impl Diagnostics {
     Self { failure, readers }
   }
 
-  pub(super) async fn finish(&mut self) -> Option<&'static str> {
+  pub(super) async fn finish_for(&mut self, image: TunImage) -> Option<String> {
     // A grandchild could keep a pipe open after the engine exits. Never let
     // diagnostic collection delay cancellation or container cleanup indefinitely.
     let _ = tokio::time::timeout(DRAIN_TIMEOUT, async {
@@ -133,7 +161,12 @@ impl Diagnostics {
       .failure
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner)
-      .map(Failure::message)
+      .map(|failure| failure.message(image))
+  }
+
+  #[cfg(test)]
+  async fn finish(&mut self) -> Option<String> {
+    self.finish_for(super::OPENCONNECT_IMAGE).await
   }
 }
 
@@ -295,7 +328,10 @@ mod tests {
     output.await.unwrap();
     error.await.unwrap();
     let message = diagnostics.finish().await.unwrap();
-    assert_eq!(message, Failure::Certificate.message());
+    assert_eq!(
+      message,
+      Failure::Certificate.message(super::super::OPENCONNECT_IMAGE)
+    );
     assert!(!message.contains("private"));
   }
 
@@ -319,7 +355,10 @@ mod tests {
     });
     error.await.unwrap();
     let message = diagnostics.finish().await.unwrap();
-    assert_eq!(message, Failure::HeartbeatExpired.message());
+    assert_eq!(
+      message,
+      Failure::HeartbeatExpired.message(super::super::OPENCONNECT_IMAGE)
+    );
     assert!(!message.contains("private"));
   }
 

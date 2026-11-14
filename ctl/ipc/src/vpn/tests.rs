@@ -167,6 +167,7 @@ async fn structured_connection_round_trips_and_preserves_lifecycle_state() {
     &ClientMessage::StartVpnConnection {
       connection: connection(),
     },
+    true,
   )
   .await
   .unwrap();
@@ -194,7 +195,7 @@ async fn handshake_rejects_mismatched_protocol_and_preserves_daemon_error_codes(
       let _: Option<ClientMessage> = crate::read_frame(&mut server).await.unwrap();
       crate::write_frame(&mut server, &response).await.unwrap();
     });
-    let error = exchange(&mut client, &ClientMessage::VpnStatus)
+    let error = exchange(&mut client, &ClientMessage::VpnStatus, true)
       .await
       .unwrap_err();
     assert!(matches!(
@@ -203,6 +204,48 @@ async fn handshake_rejects_mismatched_protocol_and_preserves_daemon_error_codes(
     ));
     daemon.await.unwrap();
   }
+}
+
+#[tokio::test]
+async fn legacy_contract_never_receives_an_openvpn_profile() {
+  let (mut client, mut server) = tokio::io::duplex(1024);
+  let daemon = tokio::spawn(async move {
+    let Some(ClientMessage::Handshake { protocol }) = crate::read_frame(&mut server).await.unwrap()
+    else {
+      panic!("expected a protocol offer");
+    };
+    assert!(protocol.accepts(crate::CONTRACT_V1_3_19));
+    crate::write_frame(
+      &mut server,
+      &ServerMessage::HandshakeAccepted {
+        protocol_version: crate::CONTRACT_V1_3_19,
+      },
+    )
+    .await
+    .unwrap();
+    assert!(
+      crate::read_frame::<_, ClientMessage>(&mut server)
+        .await
+        .unwrap()
+        .is_none()
+    );
+  });
+  let mut connection = connection();
+  connection.settings = VpnSettings::Openvpn {
+    config: Zeroizing::new("fixture profile".into()),
+    username: None,
+    password: None,
+  };
+  let error = exchange(
+    &mut client,
+    &ClientMessage::StartVpnConnection { connection },
+    true,
+  )
+  .await
+  .unwrap_err();
+  assert_eq!(error.code(), "vpn_provider_unsupported");
+  drop(client);
+  daemon.await.unwrap();
 }
 
 #[test]

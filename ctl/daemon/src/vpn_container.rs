@@ -23,6 +23,7 @@ const INVENTORY_TIMEOUT: Duration = Duration::from_secs(12);
 const MAX_CONTAINERS: usize = 128;
 const INSPECT_CONCURRENCY: usize = 16;
 pub(super) const PROTOCOL: &str = "1";
+pub(super) const OPENVPN_PROTOCOL: &str = "2";
 pub(super) const LABEL_PROTOCOL: &str = "io.ctl.vpn.protocol";
 const LABEL_USER: &str = "io.ctl.vpn.user";
 const LABEL_ID: &str = "io.ctl.vpn.id";
@@ -69,6 +70,14 @@ impl RuntimeMetadata {
         accept_routes,
       } => (
         serde_json::json!(["tailscale", hostname, accept_routes]),
+        None,
+        None,
+      ),
+      VpnSettings::Openvpn { config, .. } => (
+        serde_json::json!([
+          "openvpn",
+          ctl_ipc::openvpn_profile::public_settings(config).map_err(invalid)?
+        ]),
         None,
         None,
       ),
@@ -163,6 +172,7 @@ pub(super) fn container_name(metadata: &RuntimeMetadata) -> io::Result<String> {
   key.extend(metadata.connection_id.as_bytes());
   let provider = match metadata.provider {
     VpnProvider::Openconnect => "openconnect",
+    VpnProvider::Openvpn => "openvpn",
     VpnProvider::Tailscale => "tailscale",
   };
   Ok(format!("ctld-{provider}-{}", digest(&key)))
@@ -171,7 +181,7 @@ pub(super) fn container_name(metadata: &RuntimeMetadata) -> io::Result<String> {
 pub(super) fn labels_arguments(metadata: &RuntimeMetadata) -> io::Result<Vec<String>> {
   Ok(
     [
-      (LABEL_PROTOCOL, PROTOCOL.to_owned()),
+      (LABEL_PROTOCOL, protocol(metadata.provider).to_owned()),
       (LABEL_USER, namespace()?),
       (LABEL_ID, metadata.connection_id.clone()),
       (LABEL_METADATA, serde_json::to_string(metadata)?),
@@ -180,6 +190,13 @@ pub(super) fn labels_arguments(metadata: &RuntimeMetadata) -> io::Result<Vec<Str
     .flat_map(|(key, value)| ["--label".into(), format!("{key}={value}")])
     .collect(),
   )
+}
+
+const fn protocol(provider: VpnProvider) -> &'static str {
+  match provider {
+    VpnProvider::Openconnect | VpnProvider::Tailscale => PROTOCOL,
+    VpnProvider::Openvpn => OPENVPN_PROTOCOL,
+  }
 }
 
 #[derive(Clone, Debug)]
@@ -335,36 +352,47 @@ pub(super) async fn list(engine: &Path) -> io::Result<Vec<ContainerDescriptor>> 
 }
 
 async fn list_bounded(engine: &Path) -> io::Result<Vec<ContainerDescriptor>> {
-  let ids = inventory_ids(
-    engine,
-    &[
-      format!("label={LABEL_PROTOCOL}={PROTOCOL}"),
-      format!("label={LABEL_USER}={}", namespace()?),
-    ],
-  )
-  .await?;
+  let ids = inventory_ids(engine).await?;
   let mut containers = inspect_inventory(engine, ids).await?;
   containers.sort_by(|left, right| left.id.cmp(&right.id));
   Ok(containers)
 }
 
-async fn inventory_ids(engine: &Path, filters: &[String]) -> io::Result<Vec<String>> {
+async fn inventory_ids(engine: &Path) -> io::Result<Vec<String>> {
+  // List both supported markers in one owner-scoped query without relying
+  // on the engine to match either of two label values.
+  let marker_filter = format!("label={LABEL_PROTOCOL}");
+  let owner_filter = format!("label={LABEL_USER}={}", namespace()?);
+  let format = format!("{{{{.ID}}}} {{{{.Label \"{LABEL_PROTOCOL}\"}}}}");
   let mut command = engine_command(engine);
-  command.args(["ps", "--all", "--quiet", "--no-trunc"]);
-  for filter in filters {
-    command.args(["--filter", filter]);
-  }
+  command.args([
+    "ps",
+    "--all",
+    "--no-trunc",
+    "--filter",
+    &marker_filter,
+    "--filter",
+    &owner_filter,
+    "--format",
+    &format,
+  ]);
   let output = timeout(COMMAND_TIMEOUT, command.output()).await??;
   if !output.status.success() {
     return Err(io::Error::other("Could not list managed VPN containers"));
   }
-  let ids =
+  let inventory =
     std::str::from_utf8(&output.stdout).map_err(|_| invalid("Invalid container inventory"))?;
   let mut unique = HashSet::new();
   let mut pending = Vec::new();
-  for id in ids.lines().filter(|id| !id.is_empty()) {
+  for line in inventory.lines().filter(|line| !line.is_empty()) {
+    let (id, marker) = line
+      .split_once(' ')
+      .ok_or_else(|| invalid("Invalid container inventory"))?;
     if !immutable_id(id) {
       return Err(invalid("Invalid container identity"));
+    }
+    if !matches!(marker, PROTOCOL | OPENVPN_PROTOCOL) {
+      continue;
     }
     if unique.insert(id) {
       pending.push(id.to_owned());
@@ -491,7 +519,8 @@ fn parse_descriptor(
   }
   let raw = values.pop().expect("one inspected container");
   let labels = &raw.config.labels;
-  if labels.get(LABEL_PROTOCOL).map(String::as_str) != Some(PROTOCOL) {
+  let advertised = labels.get(LABEL_PROTOCOL).map(String::as_str);
+  if !matches!(advertised, Some(PROTOCOL | OPENVPN_PROTOCOL)) {
     return Err(io::Error::new(
       io::ErrorKind::Unsupported,
       "This VPN container cannot share heartbeats; disconnect and recreate legacy VPN containers before sharing",
@@ -511,6 +540,12 @@ fn parse_descriptor(
       .get(LABEL_METADATA)
       .ok_or_else(|| invalid("VPN runtime metadata is missing"))?,
   )?;
+  if advertised != Some(protocol(metadata.provider)) {
+    return Err(io::Error::new(
+      io::ErrorKind::Unsupported,
+      "The VPN container protocol does not match its provider",
+    ));
+  }
   let name = raw.name.trim_start_matches('/').to_owned();
   if labels.get(LABEL_ID) != Some(&metadata.connection_id) || name != container_name(&metadata)? {
     return Err(io::Error::new(

@@ -60,7 +60,7 @@ export interface CredentialTarget {
 export interface CredentialRecord {
   credential_id: string;
   name: string;
-  kind: "ssh_password" | "ssh_key_passphrase" | "ssh_credential" | "vpn_password" | "tailscale_sign_in";
+  kind: "ssh_password" | "ssh_key_passphrase" | "ssh_credential" | "vpn_password" | "tailscale_sign_in" | "openvpn_profile";
   storage: "keychain" | "vpn_settings" | "container_volume";
   target: string | null;
   account: string | null;
@@ -503,10 +503,10 @@ export interface HostCatalogSnapshot {
 
 export type WorkspaceSidebarView = "sessions" | "tasks" | "ports" | "vpn";
 
-export type VpnProvider = "openconnect" | "tailscale";
+export type VpnProvider = "openconnect" | "tailscale" | "openvpn";
 
-/** Saved connection metadata. Passwords are never returned to the webview. */
-export type VpnConnection = OpenconnectVpnConnection | TailscaleVpnConnection;
+/** Saved connection metadata. Passwords and OpenVPN configurations are omitted. */
+export type VpnConnection = OpenconnectVpnConnection | TailscaleVpnConnection | OpenvpnVpnConnection;
 
 export interface OpenconnectVpnConnection {
   /** Missing on legacy OpenConnect profiles. */
@@ -528,7 +528,25 @@ export interface TailscaleVpnConnection {
   accept_routes: boolean;
 }
 
-export type VpnConnectionInput = OpenconnectVpnConnectionInput | TailscaleVpnConnection;
+export interface OpenvpnVpnConnection {
+  provider: "openvpn";
+  connection_id: string;
+  name: string;
+  has_credentials: boolean;
+}
+
+export type VpnConnectionInput = OpenconnectVpnConnectionInput | TailscaleVpnConnection | OpenvpnVpnConnectionInput;
+
+export interface OpenvpnVpnConnectionInput {
+  provider: "openvpn";
+  connection_id: string;
+  name: string;
+  /** Null preserves the imported configuration when editing a connection. */
+  config: string | null;
+  replace_credentials: boolean;
+  username: string | null;
+  password: string | null;
+}
 
 export interface OpenconnectVpnConnectionInput {
   provider?: "openconnect";

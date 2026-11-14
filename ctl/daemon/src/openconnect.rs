@@ -8,7 +8,7 @@ use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use ctl_ipc::{VpnState, VpnStatus};
+use ctl_ipc::{VpnProvider, VpnState, VpnStatus};
 use serde::Deserialize;
 use tokio::io::AsyncWriteExt as _;
 use tokio::process::{Child, Command};
@@ -33,6 +33,48 @@ const IMAGE_MISSING: &str =
 const IMAGE_OUTDATED: &str = "The OpenConnect container image does not support shared VPN heartbeats. Rebuild it with docker/openconnect/run.sh build.";
 const IMAGE_INSPECTION_FAILED: &str = "Could not verify the OpenConnect container image. Start Docker or the Podman machine and try again.";
 
+#[derive(Clone, Copy)]
+struct TunImage {
+  name: &'static str,
+  provider: &'static str,
+  build_command: &'static str,
+  protocol: &'static str,
+  missing: &'static str,
+  outdated: &'static str,
+  inspection_failed: &'static str,
+}
+
+const OPENCONNECT_IMAGE: TunImage = TunImage {
+  name: IMAGE,
+  provider: "OpenConnect",
+  build_command: "docker/openconnect/run.sh build",
+  protocol: vpn_container::PROTOCOL,
+  missing: IMAGE_MISSING,
+  outdated: IMAGE_OUTDATED,
+  inspection_failed: IMAGE_INSPECTION_FAILED,
+};
+
+const OPENVPN_IMAGE: TunImage = TunImage {
+  name: "localhost/ctl-openvpn:local",
+  provider: "OpenVPN",
+  build_command: "docker/openvpn/run.sh build",
+  protocol: vpn_container::OPENVPN_PROTOCOL,
+  missing: "The OpenVPN container image is missing. Build it with docker/openvpn/run.sh build.",
+  outdated: "The OpenVPN container image is incompatible. Rebuild it with docker/openvpn/run.sh build.",
+  inspection_failed: "Could not verify the OpenVPN container image. Start Docker or the Podman machine and try again.",
+};
+
+fn tun_image(provider: VpnProvider) -> io::Result<TunImage> {
+  match provider {
+    VpnProvider::Openconnect => Ok(OPENCONNECT_IMAGE),
+    VpnProvider::Openvpn => Ok(OPENVPN_IMAGE),
+    VpnProvider::Tailscale => Err(io::Error::new(
+      io::ErrorKind::InvalidInput,
+      "expected an OpenConnect or OpenVPN container",
+    )),
+  }
+}
+
 /// Each daemon owns only its renewal task. Container lifetime is decided by
 /// the in-container watchdog after every interested daemon stops renewing.
 pub struct ManagedVpn {
@@ -46,6 +88,7 @@ pub struct ManagedVpn {
   engine: PathBuf,
   diagnostics: Option<Diagnostics>,
   runtime: RuntimeMetadata,
+  image: TunImage,
   creation: Option<vpn_container::CreationGuard>,
 }
 
@@ -57,6 +100,7 @@ impl ManagedVpn {
       .as_ref()
       .map_or_else(VpnStatus::default, ContainerDescriptor::basic_status);
     status.vpn_id = Some(self.runtime.connection_id.clone());
+    status.provider = self.runtime.provider;
     status.connection_id = self
       .runtime
       .saved_profile
@@ -82,9 +126,10 @@ impl ManagedVpn {
   pub async fn exited(&mut self) -> io::Result<ExitStatus> {
     match self.monitor.as_mut() {
       Some(monitor) => monitor.await.map_err(io::Error::other)?,
-      None => Err(io::Error::other(
-        "OpenConnect container monitor is unavailable",
-      )),
+      None => Err(io::Error::other(format!(
+        "{} container monitor is unavailable",
+        self.image.provider
+      ))),
     }
   }
 
@@ -106,9 +151,9 @@ impl ManagedVpn {
     }
   }
 
-  async fn diagnostic(&mut self) -> Option<&'static str> {
+  async fn diagnostic(&mut self) -> Option<String> {
     match self.diagnostics.as_mut() {
-      Some(diagnostics) => diagnostics.finish().await,
+      Some(diagnostics) => diagnostics.finish_for(self.image).await,
       None => None,
     }
   }
@@ -118,10 +163,12 @@ impl ManagedVpn {
       Ok(result) => result,
       Err(_) => Err(io::Error::new(
         io::ErrorKind::TimedOut,
-        self
-          .diagnostic()
-          .await
-          .unwrap_or("OpenConnect VPN and SOCKS5 listener did not become ready within 75 seconds"),
+        self.diagnostic().await.unwrap_or_else(|| {
+          format!(
+            "{} VPN and SOCKS5 listener did not become ready within 75 seconds",
+            self.image.provider
+          )
+        }),
       )),
     }
   }
@@ -166,8 +213,13 @@ impl ManagedVpn {
             .as_mut()
             .is_some_and(|child| child.try_wait().ok().flatten().is_some())
         {
-          return Err(io::Error::other(self.diagnostic().await.unwrap_or(
-            "OpenConnect container exited before its VPN became ready",
+          return Err(io::Error::other(self.diagnostic().await.unwrap_or_else(
+            || {
+              format!(
+                "{} container exited before its VPN became ready",
+                self.image.provider
+              )
+            },
           )));
         }
         self.container = Some(container);
@@ -180,11 +232,15 @@ impl ManagedVpn {
         let deadline =
           adoption_deadline.get_or_insert_with(|| Instant::now() + CREATOR_ADOPTION_TIMEOUT);
         if Instant::now() >= *deadline {
-          let reason = self.diagnostic().await.unwrap_or(
-            "Build the image with docker/openconnect/run.sh build and check the VPN settings",
-          );
+          let reason = self.diagnostic().await.unwrap_or_else(|| {
+            format!(
+              "Build the image with {} and check the VPN settings",
+              self.image.build_command
+            )
+          });
           return Err(io::Error::other(format!(
-            "OpenConnect container exited ({status}): {reason}"
+            "{} container exited ({status}): {reason}",
+            self.image.provider
           )));
         }
       }
@@ -244,7 +300,7 @@ pub(super) fn engine_command(engine: &Path) -> Command {
   command
 }
 
-/// Starts an opt-in Array VPN from an immutable configuration snapshot.
+/// Starts a containerized TUN client from an immutable configuration snapshot.
 ///
 /// # Errors
 /// Returns engine failures or VPN readiness failures.
@@ -253,6 +309,7 @@ pub(super) async fn start(config: Config) -> io::Result<ManagedVpn> {
 }
 
 async fn start_config(mut config: Config, engine: &Path) -> io::Result<ManagedVpn> {
+  let image = tun_image(config.runtime.provider)?;
   let cancellation = config.cancellation.take();
   let container_name = vpn_container::container_name(&config.runtime)?;
   let mut child = None;
@@ -263,7 +320,7 @@ async fn start_config(mut config: Config, engine: &Path) -> io::Result<ManagedVp
     .await?
     .is_none()
   {
-    let image_id = verify_shared_image(engine).await?;
+    let image_id = verify_shared_image(engine, image).await?;
     let mut command = engine_command(engine);
     command.args([
       "run",
@@ -275,10 +332,6 @@ async fn start_config(mut config: Config, engine: &Path) -> io::Result<ManagedVp
       "--restart=no",
       "--name",
       &container_name,
-      "--security-opt",
-      "label=disable",
-      "--cap-add",
-      "NET_ADMIN",
       "--device",
       "/dev/net/tun",
       "--publish",
@@ -298,6 +351,7 @@ async fn start_config(mut config: Config, engine: &Path) -> io::Result<ManagedVp
       "--tmpfs",
       "/run/secrets:rw,noexec,nosuid,nodev,mode=0700,size=65536",
     ]);
+    command.args(container_permissions(config.runtime.provider));
     let mut payload = zeroize::Zeroizing::new(BASE64.encode(config.content.as_bytes()));
     payload.push('\n');
     let mut created = command
@@ -328,6 +382,7 @@ async fn start_config(mut config: Config, engine: &Path) -> io::Result<ManagedVp
     engine: engine.to_path_buf(),
     diagnostics,
     runtime: config.runtime,
+    image,
     creation,
   };
   let cancelled = async move {
@@ -339,13 +394,40 @@ async fn start_config(mut config: Config, engine: &Path) -> io::Result<ManagedVp
   };
   let result = tokio::select! {
     result = vpn.wait_ready() => result,
-    () = cancelled => Err(io::Error::new(io::ErrorKind::Interrupted, "OpenConnect startup was cancelled")),
+    () = cancelled => Err(io::Error::new(io::ErrorKind::Interrupted, format!("{} startup was cancelled", image.provider))),
   };
   if let Err(error) = result {
     vpn.shutdown().await;
     return Err(error);
   }
   Ok(vpn)
+}
+
+fn container_permissions(provider: VpnProvider) -> &'static [&'static str] {
+  if provider == VpnProvider::Openvpn {
+    &[
+      "--tmpfs",
+      "/run/ctl/heartbeat:rw,noexec,nosuid,nodev,mode=0700,size=65536",
+      "--tmpfs",
+      "/run/openvpn:rw,noexec,nosuid,nodev,mode=0700,size=65536",
+      "--security-opt",
+      "no-new-privileges",
+      "--security-opt",
+      "label=disable",
+      "--cap-drop",
+      "ALL",
+      "--cap-add",
+      "NET_ADMIN",
+      "--cap-add",
+      "SETUID",
+      "--cap-add",
+      "SETGID",
+      "--cap-add",
+      "KILL",
+    ]
+  } else {
+    &["--security-opt", "label=disable", "--cap-add", "NET_ADMIN"]
+  }
 }
 
 #[derive(Deserialize)]
@@ -362,20 +444,20 @@ struct ImageConfiguration {
   labels: Option<HashMap<String, String>>,
 }
 
-async fn verify_shared_image(engine: &Path) -> io::Result<String> {
+async fn verify_shared_image(engine: &Path, image: TunImage) -> io::Result<String> {
   // Runtime labels are supplied by ctld, so they cannot prove that an old local
   // image contains the shared heartbeat entrypoint. Check the image itself
   // before creating a container or handing its process any credentials.
   let output = timeout(
     COMMAND_TIMEOUT,
     engine_command(engine)
-      .args(["image", "inspect", IMAGE])
+      .args(["image", "inspect", image.name])
       .stderr(Stdio::piped())
       .output(),
   )
   .await
-  .map_err(|_| io::Error::other(IMAGE_INSPECTION_FAILED))?
-  .map_err(|_| io::Error::other(IMAGE_INSPECTION_FAILED))?;
+  .map_err(|_| io::Error::other(image.inspection_failed))?
+  .map_err(|_| io::Error::other(image.inspection_failed))?;
   if !output.status.success() {
     // Inspect errors can include engine addresses or supplied text. Match only
     // fixed missing-image signatures and never return raw output to the client.
@@ -385,36 +467,39 @@ async fn verify_shared_image(engine: &Path) -> io::Result<String> {
         || message.contains("image not known")
         || message.contains("no such object")
       {
-        io::Error::new(io::ErrorKind::NotFound, IMAGE_MISSING)
+        io::Error::new(io::ErrorKind::NotFound, image.missing)
       } else {
-        io::Error::other(IMAGE_INSPECTION_FAILED)
+        io::Error::other(image.inspection_failed)
       },
     );
   }
   let images: Vec<ImageCapability> = serde_json::from_slice(&output.stdout)
-    .map_err(|_| io::Error::new(io::ErrorKind::Unsupported, IMAGE_OUTDATED))?;
+    .map_err(|_| io::Error::new(io::ErrorKind::Unsupported, image.outdated))?;
   if images.len() != 1 {
-    return Err(io::Error::other(IMAGE_INSPECTION_FAILED));
+    return Err(io::Error::other(image.inspection_failed));
   }
-  let image = images.into_iter().next().expect("one inspected image");
-  if image
+  let inspected = images.into_iter().next().expect("one inspected image");
+  if inspected
     .config
     .labels
     .as_ref()
     .and_then(|labels| labels.get(vpn_container::LABEL_PROTOCOL))
     .map(String::as_str)
-    != Some(vpn_container::PROTOCOL)
+    != Some(image.protocol)
   {
-    return Err(io::Error::new(io::ErrorKind::Unsupported, IMAGE_OUTDATED));
+    return Err(io::Error::new(io::ErrorKind::Unsupported, image.outdated));
   }
   // Freeze the verified image contents across any concurrent tag replacement.
-  let id = image.id.strip_prefix("sha256:").unwrap_or(&image.id);
+  let id = inspected
+    .id
+    .strip_prefix("sha256:")
+    .unwrap_or(&inspected.id);
   if id.len() != 64
     || !id
       .bytes()
       .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
   {
-    return Err(io::Error::other(IMAGE_INSPECTION_FAILED));
+    return Err(io::Error::other(image.inspection_failed));
   }
   Ok(id.into())
 }

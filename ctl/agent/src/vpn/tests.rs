@@ -91,6 +91,63 @@ async fn unsupported_contracts_never_send_identity_or_open_the_vpn_daemon() {
 }
 
 #[cfg(unix)]
+#[tokio::test]
+async fn old_remote_vpn_contracts_hide_openvpn_and_do_not_forward_profile_data() {
+  let (mut channel, server) = negotiation_channel();
+  read_offer(&mut channel).await;
+  ctl_ipc::write_frame(
+    &mut channel,
+    &ctl_ipc::remote_vpn::ProtocolSelection {
+      protocol_version: ctl_ipc::remote_vpn::CONTRACT_V1_1_2,
+      client_identity: None,
+    },
+  )
+  .await
+  .unwrap();
+  ctl_proto::read_identity(&mut channel).await.unwrap();
+  ctl_ipc::write_frame(&mut channel, &Request::List)
+    .await
+    .unwrap();
+  assert!(matches!(
+    ctl_ipc::read_frame::<_, Response>(&mut channel).await.unwrap(),
+    Some(Response::Snapshot { snapshot }) if !snapshot.supported_providers.contains(&ctl_ipc::VpnProvider::Openvpn)
+  ));
+  server.await.unwrap().unwrap();
+
+  let (mut channel, server) = negotiation_channel();
+  read_offer(&mut channel).await;
+  ctl_ipc::write_frame(
+    &mut channel,
+    &ctl_ipc::remote_vpn::ProtocolSelection {
+      protocol_version: ctl_ipc::remote_vpn::CONTRACT_V1_1_2,
+      client_identity: None,
+    },
+  )
+  .await
+  .unwrap();
+  ctl_proto::read_identity(&mut channel).await.unwrap();
+  ctl_ipc::write_frame(
+    &mut channel,
+    &serde_json::json!({
+      "type": "start",
+      "connection": {
+        "connection_id": "fixture",
+        "name": "Fixture",
+        "provider": "openvpn",
+        "config": "fixture profile",
+      },
+    }),
+  )
+  .await
+  .unwrap();
+  assert!(matches!(
+    ctl_ipc::read_frame::<_, Response>(&mut channel).await.unwrap(),
+    Some(Response::Error { code, .. }) if code == "vpn_provider_unsupported"
+  ));
+  server.await.unwrap().unwrap();
+}
+
+#[cfg(unix)]
 fn negotiation_channel() -> (
   tokio::io::DuplexStream,
   tokio::task::JoinHandle<io::Result<()>>,

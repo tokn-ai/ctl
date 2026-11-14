@@ -382,6 +382,13 @@ fn vpn_record(connection: CredentialMetadata) -> Option<CredentialRecord> {
       None,
       "Saved Tailscale connection. Sign-in state is unverified; any persisted sign-in is held in its container volume.",
     ),
+    CredentialSettings::Openvpn => (
+      CredentialKind::OpenvpnProfile,
+      CredentialStorage::VpnSettings,
+      None,
+      None,
+      "OpenVPN configuration saved in VPN settings. Manage it on the VPN page.",
+    ),
   };
   Some(CredentialRecord {
     credential_id: format!("vpn:{}", connection.connection_id),

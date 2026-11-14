@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 import type { VpnConnection, VpnConnectionInput, VpnProvider } from "../../lib/types";
 import { useVpnEnrollment } from "../../features/vpn/useVpnEnrollment";
+import { vpn_provider_labels } from "../../features/vpn/status";
 import { VpnEnrollmentProgress } from "./VpnEnrollmentProgress";
 import { errorMessage } from "../../lib/errors";
 import { QuickInputFrame } from "../commands/QuickInputFrame";
@@ -17,14 +18,17 @@ interface Props {
   on_save_enrollment?(enrollment_id: string): Promise<boolean>;
 }
 
-type ValidationField = "name" | "url" | "username" | "password" | "hostname" | "auth_method" | "target_ip" | "form";
+type ValidationField = "name" | "url" | "username" | "password" | "hostname" | "auth_method" | "target_ip" | "config" | "form";
 interface VpnValidation { field: ValidationField; message: string }
+// Keep in sync with ctl_ipc::openvpn_profile::MAX_CONFIG_BYTES.
+const openvpn_config_max_bytes = 24 * 1024;
 
 /** Passwords remain in the masked input, never in a recoverable React draft. */
 export function VpnConnectionEditor({ connection, saving, error, on_save, on_close, enrollment_supported = false, on_enrollment_change, on_save_enrollment }: Props) {
   const [connection_id] = useState(() => connection?.connection_id ?? crypto.randomUUID());
-  const openconnect = connection?.provider === "tailscale" ? null : connection;
+  const openconnect = connection?.provider === "tailscale" || connection?.provider === "openvpn" ? null : connection;
   const tailscale = connection?.provider === "tailscale" ? connection : null;
+  const openvpn = connection?.provider === "openvpn" ? connection : null;
   const [provider, setProvider] = useState<VpnProvider>(connection?.provider ?? "openconnect");
   const [hostname, setHostname] = useState(tailscale?.hostname ?? "");
   const [accept_routes, setAcceptRoutes] = useState(tailscale?.accept_routes ?? false);
@@ -37,16 +41,25 @@ export function VpnConnectionEditor({ connection, saving, error, on_save, on_clo
   const [validation_error, setValidationError] = useState<VpnValidation | null>(null);
   const validation_id = useId();
   const [password_retry, setPasswordRetry] = useState(false);
+  const [config_file, setConfigFile] = useState<File | null>(null);
+  const [reading_config, setReadingConfig] = useState(false);
+  const [replace_credentials, setReplaceCredentials] = useState(false);
   const password_input = useRef<HTMLInputElement>(null);
+  const openvpn_username_input = useRef<HTMLInputElement>(null);
+  const mounted = useRef(false);
   const submitting = useRef(false);
   const enrollment = useVpnEnrollment({ on_connection_id: on_enrollment_change, on_save: on_save_enrollment, on_close });
   const enrolling = !connection && provider === "tailscale";
-  const locked = saving || (enrolling && enrollment.started);
+  const locked = saving || reading_config || (enrolling && enrollment.started);
   const enrollment_failed = Boolean(enrollment.snapshot?.error || (enrollment.error && !enrollment.snapshot));
 
   useEffect(() => {
+    mounted.current = true;
     const input = password_input.current;
-    return () => { if (input) input.value = ""; };
+    return () => {
+      mounted.current = false;
+      if (input) input.value = "";
+    };
   }, []);
 
   function clearPassword() {
@@ -64,22 +77,40 @@ export function VpnConnectionEditor({ connection, saving, error, on_save, on_clo
     event.preventDefault();
     if (saving || submitting.current) return;
     const password = password_input.current?.value ?? "";
-    const input: VpnConnectionInput = provider === "tailscale" ? {
-      provider, connection_id, name: name.trim(), hostname: hostname.trim() || null, accept_routes,
-    } : {
-      provider,
-      connection_id,
-      name: name.trim(),
-      url: url.trim(),
-      username: username.trim(),
-      password: password || null,
-      auth_method: auth_method.trim() || null,
-      target_ip: target_ip.trim() || null,
-    };
+    const common = { provider, connection_id, name: name.trim() };
+    let input: VpnConnectionInput;
+    switch (provider) {
+      case "tailscale":
+        input = { ...common, provider, hostname: hostname.trim() || null, accept_routes };
+        break;
+      case "openvpn":
+        input = {
+          ...common, provider, config: null,
+          replace_credentials: replace_credentials || !openvpn?.has_credentials,
+          username: openvpn_username_input.current?.value || null,
+          password: password || null,
+        };
+        break;
+      case "openconnect":
+        input = {
+          ...common, provider,
+          url: url.trim(), username: username.trim(), password: password || null,
+          auth_method: auth_method.trim() || null, target_ip: target_ip.trim() || null,
+        };
+        break;
+    }
     const invalid = validateVpnFields(input, Boolean(openconnect?.has_password) && !password_retry);
     if (invalid) {
       setValidationError(invalid);
       if (["hostname", "auth_method", "target_ip"].includes(invalid.field)) setAdvanced(true);
+      return;
+    }
+    if (input.provider === "openvpn" && !openvpn && !config_file) {
+      setValidationError({ field: "config", message: "Choose an OpenVPN configuration file." });
+      return;
+    }
+    if (input.provider === "openvpn" && config_file && (config_file.size === 0 || config_file.size > openvpn_config_max_bytes)) {
+      setValidationError({ field: "config", message: "Choose a nonempty .ovpn file up to 24 KiB." });
       return;
     }
     setValidationError(null);
@@ -93,6 +124,19 @@ export function VpnConnectionEditor({ connection, saving, error, on_save, on_clo
       return;
     }
     submitting.current = true;
+    if (input.provider === "openvpn" && config_file) {
+      setReadingConfig(true);
+      try {
+        input.config = await config_file.text();
+      } catch {
+        if (mounted.current) setValidationError({ field: "config", message: "Could not read the OpenVPN configuration file." });
+        submitting.current = false;
+        return;
+      } finally {
+        if (mounted.current) setReadingConfig(false);
+      }
+      if (!mounted.current) return;
+    }
     clearPassword();
     try {
       const saved = await on_save(input);
@@ -130,18 +174,18 @@ export function VpnConnectionEditor({ connection, saving, error, on_save, on_clo
     >
       <header className="quick-input-heading vpn-editor-heading">
         <strong>{connection ? "Edit VPN connection" : "Add VPN connection"}</strong>
-        <button type="button" onClick={close} disabled={saving}>Close</button>
+        <button type="button" onClick={close} disabled={saving || reading_config}>Close</button>
       </header>
       <form className="vpn-editor-form" onSubmit={(event) => void save(event)}>
         <label>
           Provider
           <select value={provider} disabled={locked || Boolean(connection)} onChange={(event) => {
             clearPassword();
+            setConfigFile(null);
             setValidationError(null);
             setProvider(event.target.value as VpnProvider);
           }}>
-            <option value="openconnect">OpenConnect</option>
-            <option value="tailscale">Tailscale</option>
+            {Object.entries(vpn_provider_labels).map(([key, label]) => <option key={key} value={key}>{label}</option>)}
           </select>
           {connection ? <small>Create a new connection to use a different provider.</small> : null}
         </label>
@@ -187,6 +231,38 @@ export function VpnConnectionEditor({ connection, saving, error, on_save, on_clo
               </label>
             </div>
           ) : null}
+        </> : provider === "openvpn" ? <>
+          <label>
+            OpenVPN configuration
+            <input type="file" accept=".ovpn" disabled={locked} onChange={(event) => {
+              setConfigFile(event.currentTarget.files?.[0] ?? null);
+              setValidationError(null);
+            }} {...fieldAttributes("config")} />
+            {fieldError("config")}
+            <small>{openvpn ? "Leave blank to keep the imported configuration." : "Choose a self-contained .ovpn file with certificates and keys included."}</small>
+          </label>
+          {openvpn?.has_credentials ? <label className="vpn-checkbox-option">
+            <input type="checkbox" checked={replace_credentials} disabled={locked} onChange={(event) => {
+              clearPassword();
+              setReplaceCredentials(event.target.checked);
+              setValidationError(null);
+            }} />
+            <span>Change saved username and password</span>
+          </label> : null}
+          {(!openvpn?.has_credentials || replace_credentials) ? <>
+            <label>
+              Username (optional)
+              <input ref={openvpn_username_input} aria-label="Username" disabled={locked} autoComplete="off" spellCheck={false} {...fieldAttributes("username")} />
+              {fieldError("username")}
+            </label>
+            <label>
+              Password (optional)
+              <input ref={password_input} type="password" aria-label="Password" disabled={locked} autoComplete="new-password" {...fieldAttributes("password")} />
+              {fieldError("password")}
+              {openvpn?.has_credentials && replace_credentials ? <small>Leave both fields blank to remove the saved username and password.</small> : null}
+              {password_retry ? <small>Re-enter the password before retrying the save.</small> : null}
+            </label>
+          </> : null}
         </> : <>
           <p className="vpn-editor-note">Sign in with your Tailscale account. This connection keeps its login across restarts.</p>
           <button type="button" className="vpn-advanced-toggle" aria-expanded={advanced} aria-controls="tailscale-advanced-fields" onClick={() => setAdvanced((current) => !current)} disabled={saving}>
@@ -211,9 +287,9 @@ export function VpnConnectionEditor({ connection, saving, error, on_save, on_clo
         <p className="vpn-editor-note">{enrolling ? "Your connection appears in the VPN list after you sign in and choose Save connection." : "Settings are saved privately on this Mac."}</p>
         {form_error ? <InlineFeedback>{form_error}</InlineFeedback> : null}
         <footer className="vpn-editor-actions">
-          <button type="button" onClick={close} disabled={saving || enrollment.cancelling}>{enrollment.cancelling ? "Canceling…" : "Cancel"}</button>
-          <button type="submit" className="button-primary" disabled={saving || (enrolling && (!enrollment_supported || enrollment.starting || enrollment.cancelling || (enrollment.started && !enrollment.ready && !enrollment_failed)))}>
-            {saving ? "Saving…" : !enrolling || enrollment.ready ? "Save connection" : enrollment_failed ? "Try again" : enrollment.started ? "Waiting for sign-in…" : "Sign in with Tailscale"}
+          <button type="button" onClick={close} disabled={saving || reading_config || enrollment.cancelling}>{enrollment.cancelling ? "Canceling…" : "Cancel"}</button>
+          <button type="submit" className="button-primary" disabled={saving || reading_config || (enrolling && (!enrollment_supported || enrollment.starting || enrollment.cancelling || (enrollment.started && !enrollment.ready && !enrollment_failed)))}>
+            {reading_config ? "Reading configuration…" : saving ? "Saving…" : !enrolling || enrollment.ready ? "Save connection" : enrollment_failed ? "Try again" : enrollment.started ? "Waiting for sign-in…" : "Sign in with Tailscale"}
           </button>
         </footer>
       </form>
@@ -227,6 +303,12 @@ export function validateVpnInput(input: VpnConnectionInput, has_password: boolea
 
 function validateVpnFields(input: VpnConnectionInput, has_password: boolean): VpnValidation | null {
   if (!input.name) return { field: "name", message: "Enter a connection name." };
+  if (input.provider === "openvpn") {
+    if (/[\r\n\0]/u.test(input.name)) return { field: "name", message: "Use a single-line connection name." };
+    if (input.username && !input.password) return { field: "password", message: "Enter the password for this username." };
+    if (!input.username && input.password) return { field: "username", message: "Enter the username for this password." };
+    return null;
+  }
   if (input.provider === "tailscale") {
     if (/[\x00-\x1f\x7f]/u.test(input.name)) return { field: "name", message: "Use single-line values without control characters." };
     if (input.hostname !== null && !/^(?=.{1,63}$)[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?$/u.test(input.hostname)) {

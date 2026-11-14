@@ -282,7 +282,10 @@ actors against the original environment and session before reporting success.
 ### Managed VPNs
 
 `ctl vpn create` opens a provider-specific questionnaire and saves a private
-OpenConnect or Tailscale profile without starting a daemon or container.
+OpenConnect, OpenVPN, or Tailscale profile without starting a daemon or container.
+OpenVPN imports a self-contained `.ovpn` client profile. The desktop VPN editor
+offers the same import. See [OpenVPN setup](../docker/openvpn/README.md) for the
+container and supported profile options.
 `ctl vpn start NAME_OR_ID` asks the local `ctld` to acquire heartbeat interest in
 the saved profile's container, starting the daemon and recreating a missing
 container when needed. Its SOCKS5 listener uses a
@@ -292,9 +295,9 @@ machine-readable output. Create remains interactive and returns only saved metad
 on stderr. `ctl vpn list` combines saved profiles with local interests and compatible
 shared containers, retaining runtime entries without saved profiles. Its JSON
 snapshot adds sanitized merged `entries` to the runtime `connections`, capability
-fields, and discovery warnings. Saved metadata excludes passwords and URL
-credentials, paths, queries, and fragments. A saved profile without a runtime
-connection is disconnected only when inventory is complete; otherwise it is
+fields, and discovery warnings. Saved metadata excludes OpenVPN profile contents,
+passwords, and URL credentials, paths, queries, and fragments. A saved profile
+without a runtime connection is disconnected only when inventory is complete; otherwise it is
 unavailable. If the catalog cannot be read, runtime entries remain available with
 `profile_warnings`. `ctl vpn stop NAME_OR_ID` accepts a saved profile's exact ID
 or unique exact name, or a runtime VPN ID, and releases only the selected local

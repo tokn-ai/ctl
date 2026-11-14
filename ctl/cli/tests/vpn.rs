@@ -2053,6 +2053,50 @@ async fn create_tailscale_in_a_terminal_saves_provider_settings_without_contacti
 }
 
 #[tokio::test]
+async fn create_openvpn_imports_a_profile_without_exposing_secrets_or_contacting_ctld() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
+  let fixture = Fixture::new();
+  let listener = UnixListener::bind(fixture.socket()).unwrap();
+  let config = "client\ndev tun\nremote vpn.example.test 1194\nauth-user-pass\n\
+                <ca>\nprivate-import-fixture\n</ca>\n";
+  std::fs::write(fixture.directory.join("fixture.ovpn"), config).unwrap();
+  let mut terminal = Terminal::new(&fixture, &["vpn", "create", "--json"]);
+  terminal.wait_for("VPN name");
+  terminal.send("Imported VPN\r");
+  terminal.wait_for("VPN provider");
+  terminal.send("\u{1b}[B\u{1b}[B\r");
+  terminal.wait_for("Path to the .ovpn profile");
+  terminal.send("fixture.ovpn\r");
+  terminal.wait_for("OpenVPN username");
+  terminal.send("fixture-openvpn-user\r");
+  terminal.wait_for("OpenVPN password");
+  terminal.send("private-openvpn-password\r");
+  terminal.wait_for("VPN profile saved.");
+  assert!(terminal.finish().success());
+  let transcript = String::from_utf8_lossy(&terminal.transcript);
+  assert!(!transcript.contains("private-openvpn-password"));
+  assert!(!transcript.contains("private-import-fixture"));
+  let output = transcript
+    .lines()
+    .find_map(|line| {
+      let start = line.find("{\"vpn_id\":")?;
+      serde_json::from_str::<serde_json::Value>(&line[start..]).ok()
+    })
+    .unwrap();
+  assert_eq!(output["provider"], "openvpn");
+  assert!(output["username"].is_null());
+  assert!(output.get("config").is_none());
+  let document: serde_json::Value =
+    serde_json::from_slice(&std::fs::read(fixture.profiles_path()).unwrap()).unwrap();
+  assert_eq!(document["connections"][0]["config"], config);
+  assert_eq!(
+    document["connections"][0]["password"],
+    "private-openvpn-password"
+  );
+  assert_no_daemon_contact(&listener).await;
+}
+
+#[tokio::test]
 async fn cancelling_create_during_password_input_keeps_saved_profiles_and_never_contacts_ctld() {
   let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = Fixture::new();

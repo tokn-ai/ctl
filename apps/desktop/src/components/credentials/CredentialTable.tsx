@@ -6,6 +6,7 @@ const kind_labels: Record<CredentialRecord["kind"], string> = {
   ssh_credential: "Saved SSH credential",
   vpn_password: "VPN password",
   tailscale_sign_in: "Tailscale sign-in",
+  openvpn_profile: "OpenVPN profile",
 };
 
 const storage_labels: Record<CredentialRecord["storage"], string> = {

@@ -63,6 +63,14 @@ async fn serve_with_presence<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
   })
   .await
   .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "Remote VPN negotiation timed out"))??;
+  let allow_openvpn = ctl_ipc::remote_vpn::openvpn_supported(selection.protocol_version);
+  let legacy_client;
+  let client = if allow_openvpn {
+    client
+  } else {
+    legacy_client = client.clone().without_openvpn();
+    &legacy_client
+  };
   let _presence = if record_presence {
     super::register_connection(selection.client_identity, "vpn")
   } else {
@@ -81,6 +89,14 @@ async fn serve_with_presence<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     Ok(Err(_)) => return failure(writer, "invalid_request", "Invalid remote VPN request").await,
     Err(_) => return failure(writer, "request_timeout", "Remote VPN request timed out").await,
   };
+  if !request.supported_by(selection.protocol_version) {
+    return failure(
+      writer,
+      "vpn_provider_unsupported",
+      "OpenVPN requires remote VPN contract 1.2.3",
+    )
+    .await;
+  }
   if let Err(message) = request.validate() {
     return failure(writer, "invalid_request", &message).await;
   }
@@ -101,40 +117,49 @@ async fn serve_with_presence<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
       connection_id,
       host,
       port,
-    } => {
-      let connected = tokio::time::timeout(
-        Duration::from_secs(25),
-        connect(client, &connection_id, &host, port),
+    } => relay(reader, writer, client, &connection_id, &host, port).await,
+  }
+}
+
+async fn relay(
+  reader: &mut (impl AsyncRead + Unpin),
+  writer: &mut (impl AsyncWrite + Unpin),
+  client: &ctl_ipc::vpn::Client,
+  connection_id: &str,
+  host: &str,
+  port: u16,
+) -> io::Result<()> {
+  let connected = tokio::time::timeout(
+    Duration::from_secs(25),
+    connect(client, connection_id, host, port),
+  )
+  .await;
+  let mut stream = match connected {
+    Ok(Ok(stream)) => stream,
+    Ok(Err(error)) => {
+      return failure(writer, "vpn_connection_failed", &error.to_string()).await;
+    }
+    Err(_) => {
+      return failure(
+        writer,
+        "vpn_connection_timeout",
+        "Remote VPN connection timed out",
       )
       .await;
-      let mut stream = match connected {
-        Ok(Ok(stream)) => stream,
-        Ok(Err(error)) => {
-          return failure(writer, "vpn_connection_failed", &error.to_string()).await;
-        }
-        Err(_) => {
-          return failure(
-            writer,
-            "vpn_connection_timeout",
-            "Remote VPN connection timed out",
-          )
-          .await;
-        }
-      };
-      response(writer, &Response::Connected).await?;
-      let (mut upstream, mut downstream) = stream.split();
-      let upload = async {
-        tokio::io::copy(reader, &mut downstream).await?;
-        downstream.shutdown().await
-      };
-      let download = async {
-        tokio::io::copy(&mut upstream, writer).await?;
-        writer.shutdown().await
-      };
-      tokio::try_join!(upload, download)?;
-      Ok(())
     }
-  }
+  };
+  response(writer, &Response::Connected).await?;
+  let (mut upstream, mut downstream) = stream.split();
+  let upload = async {
+    tokio::io::copy(reader, &mut downstream).await?;
+    downstream.shutdown().await
+  };
+  let download = async {
+    tokio::io::copy(&mut upstream, writer).await?;
+    writer.shutdown().await
+  };
+  tokio::try_join!(upload, download)?;
+  Ok(())
 }
 
 async fn response(writer: &mut (impl AsyncWrite + Unpin), value: &Response) -> io::Result<()> {
@@ -164,6 +189,14 @@ async fn vpn_failure(
 ) -> io::Result<()> {
   match error {
     ctl_ipc::vpn::VpnError::Daemon { code, message } => failure(writer, &code, &message).await,
+    ctl_ipc::vpn::VpnError::OpenvpnUnsupported => {
+      failure(
+        writer,
+        "remote_vpn_components_update_required",
+        &error.to_string(),
+      )
+      .await
+    }
     error => failure(writer, "vpn_operation_failed", &error.to_string()).await,
   }
 }

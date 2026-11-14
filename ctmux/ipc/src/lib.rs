@@ -117,6 +117,10 @@ pub fn runtime_directory() -> PathBuf {
     return PathBuf::from(directory);
   }
 
+  if let Some(directory) = ctl_core::paths::data_override() {
+    return directory.join("run/ctmux");
+  }
+
   if let Some(directory) = env::var_os("XDG_RUNTIME_DIR") {
     return PathBuf::from(directory).join("ctmux");
   }

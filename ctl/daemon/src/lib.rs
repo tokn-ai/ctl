@@ -27,6 +27,7 @@ mod master_ownership;
 #[cfg(any(windows, test))]
 mod native_forwarding;
 mod openconnect;
+mod openvpn;
 mod port_forwarding;
 pub mod proxy_route;
 #[cfg(any(target_os = "macos", test))]
@@ -739,7 +740,7 @@ async fn handle_request(
       | ClientMessage::StopVpnById { .. }
       | ClientMessage::ForgetTailscaleIdentity { .. }
       | ClientMessage::StopVpn
-      | ClientMessage::VpnStatus) => handle_vpn_request(stream, state, request).await,
+      | ClientMessage::VpnStatus) => handle_vpn_request(stream, state, request, protocol).await,
       ClientMessage::Askpass {
         token,
         message,
@@ -806,6 +807,16 @@ fn validate_request_contract(
   request: &ClientMessage,
   protocol: ProtocolVersion,
 ) -> Result<(), RequestError> {
+  if matches!(
+    request,
+    ClientMessage::StartVpnConnection { connection }
+      if connection.provider() == ctl_ipc::VpnProvider::Openvpn
+  ) && !ctl_ipc::openvpn_supported(protocol)
+  {
+    return Err(RequestError::InvalidRequest(
+      "OpenVPN requires ctld protocol 1.3.20",
+    ));
+  }
   if matches!(request, ClientMessage::OpenService { .. })
     && !ctl_ipc::service_streams_supported(protocol)
   {
@@ -874,27 +885,25 @@ async fn handle_vpn_request(
   stream: &mut ctl_ipc::Stream,
   state: &State,
   request: ClientMessage,
+  protocol: ProtocolVersion,
 ) -> Result<(), RequestError> {
   let service = state
     .vpn_service
     .as_ref()
     .ok_or_else(|| RequestError::VpnFailed("VPN service is unavailable".into()))?;
-  let (status, snapshot) = match request {
-    ClientMessage::VpnStatus => {
-      // One observation supplies both wire forms. Repeating discovery can exceed
-      // the client's deadline and make an otherwise healthy inventory disappear.
-      let snapshot = service.list().await.map_err(RequestError::VpnFailed)?;
-      let status = snapshot.connections.first().cloned().unwrap_or_default();
-      (status, snapshot)
-    }
+  let allow_openvpn = ctl_ipc::openvpn_supported(protocol);
+  let status = match request {
+    ClientMessage::VpnStatus => None,
     request => {
       let status = match request {
         ClientMessage::StartVpn { env_file } => service.start(env_file).await,
         ClientMessage::StartVpnConnection { connection } => {
           service.start_connection(connection).await
         }
-        ClientMessage::StopVpn => service.stop().await,
-        ClientMessage::StopVpnById { vpn_id } => service.stop_id(vpn_id).await,
+        ClientMessage::StopVpn => service.stop_for_contract(None, allow_openvpn).await,
+        ClientMessage::StopVpnById { vpn_id } => {
+          service.stop_for_contract(Some(vpn_id), allow_openvpn).await
+        }
         ClientMessage::ForgetTailscaleIdentity { connection_id } => {
           service
             .forget_tailscale_identity(connection_id)
@@ -907,10 +916,16 @@ async fn handle_vpn_request(
         _ => return Err(RequestError::InvalidRequest("expected a VPN request")),
       }
       .map_err(RequestError::VpnFailed)?;
-      let snapshot = service.list().await.map_err(RequestError::VpnFailed)?;
-      (status, snapshot)
+      Some(status)
     }
   };
+  // One observation supplies both wire forms. Legacy clients cannot decode
+  // the new provider even when it belongs to a separate active profile.
+  let mut snapshot = service.list().await.map_err(RequestError::VpnFailed)?;
+  if !allow_openvpn {
+    snapshot.omit_openvpn();
+  }
+  let status = status.unwrap_or_else(|| snapshot.connections.first().cloned().unwrap_or_default());
   ctl_ipc::write_frame(
     stream,
     &ServerMessage::VpnStatus {
@@ -2985,6 +3000,65 @@ mod tests {
       Some(ServerMessage::Error { code, .. }) if code == "vpn_failed"
     ));
     assert!(server.await.unwrap().is_err());
+  }
+
+  #[cfg(unix)]
+  #[tokio::test]
+  async fn openvpn_provider_starts_and_inventory_use_only_the_new_contract() {
+    let (mut service, mut owner) = vpn_service::spawn();
+    service.disable_discovery_for_test();
+    let state = Arc::new(State {
+      vpn_service: Some(service),
+      ..State::default()
+    });
+    for selected in [ctl_ipc::CONTRACT_V1_3_19, ctl_ipc::CONTRACT_V1_3_20] {
+      let (mut client, server) = ctl_ipc::Stream::pair().unwrap();
+      let server = tokio::spawn(handle_connection(server, Arc::clone(&state)));
+      ctl_ipc::write_frame(
+        &mut client,
+        &ClientMessage::Handshake {
+          protocol: ctl_core::protocol::ProtocolOffer::new(selected.build, selected, &[selected]),
+        },
+      )
+      .await
+      .unwrap();
+      assert!(matches!(
+        ctl_ipc::read_frame::<_, ServerMessage>(&mut client).await.unwrap(),
+        Some(ServerMessage::HandshakeAccepted { protocol_version }) if protocol_version == selected
+      ));
+      ctl_ipc::write_frame(&mut client, &ClientMessage::VpnStatus)
+        .await
+        .unwrap();
+      let Some(ServerMessage::VpnStatus {
+        snapshot: Some(snapshot),
+        ..
+      }) = ctl_ipc::read_frame(&mut client).await.unwrap()
+      else {
+        panic!("expected a VPN inventory");
+      };
+      assert_eq!(
+        snapshot
+          .supported_providers
+          .contains(&ctl_ipc::VpnProvider::Openvpn),
+        selected == ctl_ipc::CONTRACT_V1_3_20,
+      );
+      drop(client);
+      server.await.unwrap().unwrap();
+    }
+    owner.shutdown().await;
+    let request = ClientMessage::StartVpnConnection {
+      connection: ctl_ipc::VpnConnection {
+        connection_id: "fixture".into(),
+        name: "Fixture".into(),
+        settings: ctl_ipc::VpnSettings::Openvpn {
+          config: zeroize::Zeroizing::new("fixture profile".into()),
+          username: None,
+          password: None,
+        },
+      },
+    };
+    assert!(validate_request_contract(&request, ctl_ipc::CONTRACT_V1_3_19).is_err());
+    assert!(validate_request_contract(&request, ctl_ipc::CONTRACT_V1_3_20).is_ok());
   }
 
   #[cfg(unix)]

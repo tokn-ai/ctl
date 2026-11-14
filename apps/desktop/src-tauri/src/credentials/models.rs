@@ -29,6 +29,7 @@ pub enum CredentialKind {
   SshCredential,
   VpnPassword,
   TailscaleSignIn,
+  OpenvpnProfile,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

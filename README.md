@@ -74,10 +74,9 @@ The desktop bundle identifier is `dev.tokn-ai.ctl.ctmux`, and its signed connect
 helper uses `dev.tokn-ai.ctl.ctld`. Signing the helper requires a matching
 provisioning profile.
 Product releases, internal protocol builds, and published contracts are separate.
-Current contracts include ctmux `1.0.13`, task `1.0.4`, ctld `1.1.13`, ctld
-helper `1.1.2`, and remote VPN `1.0.1`. Compatible builds retain earlier published
-contracts within each major. Remote VPN routes require the new broker and helper
-contracts and an updated remote bundle. See [protocol versioning](docs/protocol-versioning.md).
+Compatible builds retain earlier published contracts within each major. Remote
+VPN routes negotiate the broker, helper, and remote agent contracts for the
+requested provider. See [protocol versioning](docs/protocol-versioning.md).
 
 ## Configuration and persistent state
 
@@ -95,13 +94,31 @@ on every platform, independently of the desktop bundle identifier:
 | `ctmux/desktop/sessions/` | Desktop session output cache and durable archives |
 | `ctmux/desktop/archives/`, `ctmux/tui/archives/` | Client-specific text archives |
 
-Project task definitions stay in `<project-root>/.ctl/tasks.json`. Explicit
-`CTL_HOSTS_PATH`, `CTL_VPNS_PATH`, `CTL_TASKD_DATA_DIR`, and
-`CTMUX_ARCHIVE_DIRECTORY` overrides retain their existing behavior. Old storage
-locations are not read or migrated. SSH credentials remain in macOS Keychain;
-runtime sockets continue to use private OS-specific runtime directories.
-Remote identity and installations use this root as `remote-id`, `installs/`,
-`current`, and `previous`; stable commands are exposed through `bin/`.
+Set either variable in the launch environment of the CLI or desktop:
+
+| Variable | Scope |
+| --- | --- |
+| `CTL_DATA_DIR` | Full local storage root. A fresh directory has independent settings, installations, caches, histories, task state, VPN container namespace, and daemon endpoints. Keep this variable set when running binaries from its `bin/` directory. |
+| `CTL_CONFIG_DIR` | Settings only. Redirects the desktop layout, saved hosts and VPN profiles, keybindings, TUI settings, global task definitions, and update channel. Shares the selected data root's installations, history, and daemons. |
+
+Configuration checks `CTL_CONFIG_DIR`, then `CTL_DATA_DIR`, then the default.
+Use absolute, owner-controlled directories. Create the full root before using
+`ctlup install`, and keep its path short enough for Unix sockets.
+
+```sh
+CTL_CONFIG_DIR="$(mktemp -d /tmp/ctl-config.XXXXXX)" pnpm desktop:dev
+export CTL_DATA_DIR="$(mktemp -d /tmp/ctl-data.XXXXXX)"
+ctlup status
+```
+
+The existing per-file CLI overrides (`CTL_HOSTS_PATH`, `CTL_VPNS_PATH`,
+`CTMUX_CONFIG_FILE`) and component-specific data and endpoint overrides still
+take precedence. Project task definitions stay in `<project-root>/.ctl/tasks.json`.
+Alternate desktop profiles skip automatic import of legacy browser settings and
+discovery of the account's SSH aliases. Explicit OpenSSH connections still use
+the OS account's SSH settings, and macOS Keychain credentials remain account-wide.
+The overrides apply to local processes. SSH commands use the remote account's
+standard installation unless that account configures its own environment.
 
 ## Repository commands
 
@@ -137,6 +154,8 @@ The desktop package's standard scripts can also be invoked from the root with
 `pnpm --filter ctmux-app dev` or `pnpm --filter ctmux-app build`.
 Native startup checks staged bundles before launching the app; frontend-only
 development and the sample preview do not require remote bundles.
+For landing-page footage, see the [demo scripts and recording workflow](docs/demos.md).
+`pnpm demo --help` lists sample-workspace, capture, and export commands.
 `desktop:dev` and `desktop:preview` select an available port, starting at a random
 port. The native launcher passes Vite's actual URL to Tauri and its development
 security policy; hot reload shares that port. Parallel launches can coexist.
@@ -911,7 +930,8 @@ adopted or cancelled across those registries.
 
 ## Managed VPN
 
-Manage local OpenConnect and Tailscale containers through `ctld` using the `ctl` CLI:
+Manage local OpenConnect, OpenVPN, and Tailscale containers through `ctld` using
+the `ctl` CLI:
 
 ```sh
 ctl vpn create
@@ -920,8 +940,9 @@ ctl vpn start NAME_OR_ID
 ctl vpn stop NAME_OR_ID
 ```
 
-`create` opens an interactive questionnaire for an OpenConnect or Tailscale
-profile. It masks password input and saves the profile privately to
+`create` opens an interactive questionnaire. For OpenVPN, it imports a
+self-contained `.ovpn` client profile and accepts optional credentials. It masks
+password input and saves the profile privately to
 `~/.tokn/ctl/vpns.json`, shared with the desktop VPN page. Use `CTL_VPNS_PATH` to
 select another catalog. Creation only saves settings; it does not start `ctld`,
 build an image, or connect a VPN. Cancelling leaves the catalog unchanged.
@@ -958,13 +979,14 @@ Create remains interactive and returns only saved metadata, with prompts on
 stderr. List JSON includes merged `entries`, raw runtime `connections`, capability
 fields, and discovery warnings. If the saved catalog
 cannot be read, runtime entries remain available with `profile_warnings`.
-Saved metadata excludes passwords and URL credentials, paths, queries, and
-fragments. Start launches `ctld` if needed. Stop leaves `ctld` running and
-releases that daemon's heartbeat interest. A shared container remains available
-while another daemon uses it, then exits after the final heartbeat expires. See the
-[OpenConnect setup](docker/openconnect/README.md) for building the image and
-creating a saved profile, or the [Tailscale guide](docker/tailscale/README.md)
-for browser sign-in and persistent container state.
+Saved metadata excludes passwords, OpenVPN configuration contents, and URL
+credentials, paths, queries, and fragments. Start launches `ctld` if needed.
+Stop releases that daemon's heartbeat interest. A shared container remains
+available while another daemon uses it, then exits after the final heartbeat
+expires. See the [OpenConnect setup](docker/openconnect/README.md) or the
+[OpenVPN setup](docker/openvpn/README.md) for building an image and creating a
+saved profile. The [Tailscale guide](docker/tailscale/README.md) covers browser
+sign-in and persistent container state.
 
 To delete a saved profile, run:
 

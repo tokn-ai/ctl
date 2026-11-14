@@ -2,6 +2,7 @@
 import type { ReactElement } from "react";
 import { NotificationProvider } from "../features/notifications/NotificationContext";
 import { formatText } from "../features/i18n/messages";
+import { LocaleProvider } from "../features/i18n/LocaleContext";
 import { NotificationStore } from "../features/notifications/NotificationStore";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -61,6 +62,25 @@ describe("Credentials page", () => {
     expect(api.forget).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Back to workspace" }));
     expect(options.on_close).toHaveBeenCalledOnce();
+  });
+
+  it("localizes OpenVPN profile metadata and preserves VPN navigation", async () => {
+    const options = props();
+    const profile: CredentialRecord = {
+      ...vpn, credential_id: "openvpn-id", name: "Example VPN", kind: "openvpn_profile", vpn_connection_id: "example-openvpn",
+    };
+    api.list.mockResolvedValue({ ...snapshot, credentials: [profile] });
+    window.localStorage.setItem("ctmux.desktop.language", "zh-Hans");
+    try {
+      renderPage(<LocaleProvider><CredentialsPage {...options} /></LocaleProvider>);
+      const label = await screen.findByText("OpenVPN 配置");
+      expect(label.title).toBe("OpenVPN 配置保存在 VPN 设置中，可在 VPN 页面管理。");
+      fireEvent.click(within(label.closest("tr")!).getByRole("button"));
+      expect(options.on_manage_vpn).toHaveBeenCalledWith("example-openvpn");
+    } finally {
+      window.localStorage.removeItem("ctmux.desktop.language");
+      document.documentElement.lang = "";
+    }
   });
 
   it("requires confirmation and sends only the opaque ID to forget one Keychain item", async () => {

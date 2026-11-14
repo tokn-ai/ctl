@@ -1,5 +1,11 @@
 import { translate, type Locale } from "../i18n/messages";
-import type { VpnConnection, VpnState, VpnStatus } from "../../lib/types";
+import type { VpnConnection, VpnProvider, VpnState, VpnStatus } from "../../lib/types";
+
+export const vpn_provider_labels: Record<VpnProvider, string> = {
+  openconnect: "OpenConnect",
+  tailscale: "Tailscale",
+  openvpn: "OpenVPN",
+};
 
 export function vpnRuntimeId(status: VpnStatus): string {
   return status.vpn_id ?? status.connection_id ?? status.container_name ?? "legacy";
@@ -44,5 +50,7 @@ export function vpnRouteDetail(connection: VpnConnection, statuses: readonly Vpn
   if (vpnNeedsSignIn(runtime)) return translate(locale, "vpn.sign_in_page");
   if (runtime?.state === "connected") return translate(locale, "vpn.connected");
   if (runtime?.state === "starting") return translate(locale, "vpn.connecting");
-  return translate(locale, connection.provider === "tailscale" ? "vpn.tailscale_connect_when_needed" : "vpn.connect_when_needed");
+  const provider = connection.provider ?? "openconnect";
+  return provider === "openconnect" ? translate(locale, "vpn.connect_when_needed")
+    : translate(locale, "vpn.provider_connect_when_needed", { provider: vpn_provider_labels[provider] });
 }

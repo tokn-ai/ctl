@@ -175,14 +175,9 @@ pub(in crate::installations) fn lease_manager_executable(
   else {
     return Ok(None);
   };
-  let Some(account_store) = root.parent().filter(|parent| parent.ends_with(".tokn/ctl")) else {
+  let Some(store) = root.parent().and_then(Installations::from_executable_root) else {
     return Ok(None);
   };
-  let home = account_store
-    .parent()
-    .and_then(Path::parent)
-    .ok_or_else(|| invalid("managed updater has no account directory"))?;
-  let store = Installations::new(home);
   if !super::root_exists(&store)? {
     return Err(invalid("managed updater has no installation store"));
   }

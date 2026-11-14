@@ -74,7 +74,8 @@ pub(super) fn private_file(metadata: &Metadata) -> io::Result<()> {
 }
 
 pub(super) fn root_exists(store: &Installations) -> io::Result<bool> {
-  for path in [&store.home, &store.home.join(".tokn"), &store.root] {
+  let anchor = crate::paths::managed_storage_anchor(&store.root)?;
+  for path in storage_directories(anchor, &store.root)? {
     if !path_exists(path)? {
       return Ok(false);
     }
@@ -84,10 +85,27 @@ pub(super) fn root_exists(store: &Installations) -> io::Result<bool> {
 }
 
 pub(super) fn ensure_root(store: &Installations) -> io::Result<()> {
-  directory(&store.home)?;
-  ensure_directory(&store.home.join(".tokn"))?;
-  ensure_directory(&store.root)?;
+  let anchor = crate::paths::managed_storage_anchor(&store.root)?;
+  directory(anchor)?;
+  for path in storage_directories(anchor, &store.root)?
+    .into_iter()
+    .skip(1)
+  {
+    ensure_directory(path)?;
+  }
   ensure_directory(&store.root.join("installs"))
+}
+
+fn storage_directories<'a>(anchor: &Path, root: &'a Path) -> io::Result<Vec<&'a Path>> {
+  let mut paths = Vec::new();
+  for path in root.ancestors() {
+    paths.push(path);
+    if path == anchor {
+      paths.reverse();
+      return Ok(paths);
+    }
+  }
+  Err(invalid("installation is outside its storage directory"))
 }
 
 pub(super) fn validate_native(bundle: &Bundle) -> io::Result<()> {

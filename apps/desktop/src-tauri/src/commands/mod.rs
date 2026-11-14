@@ -48,6 +48,12 @@ pub async fn list_ssh_identity_files() -> CommandResult<crate::dto::SshIdentityF
 
 #[tauri::command]
 pub async fn list_ssh_config_hosts() -> CommandResult<SshConfigHostCatalogDto> {
+  if ctl_core::paths::config_override().is_some() || ctl_core::paths::data_override().is_some() {
+    return Ok(SshConfigHostCatalogDto {
+      hosts: Vec::new(),
+      warnings: Vec::new(),
+    });
+  }
   let discovery = tauri::async_runtime::spawn_blocking(ssh_config::discover_hosts)
     .await
     .map_err(CommandErrorDto::backend)?

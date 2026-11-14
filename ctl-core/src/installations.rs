@@ -25,7 +25,6 @@ pub use leases::{Lease, lease_current_executable};
 /// Catalogued foreign targets are retained for deployment without execution.
 #[derive(Debug, Clone)]
 pub struct Installations {
-  home: PathBuf,
   root: PathBuf,
 }
 
@@ -40,9 +39,22 @@ impl Installations {
   #[must_use]
   pub fn new(home: &Path) -> Self {
     Self {
-      home: home.to_owned(),
-      root: home.join(".tokn/ctl"),
+      root: crate::paths::directory_for_account(home),
     }
+  }
+
+  fn from_executable_root(root: &Path) -> Option<Self> {
+    if let Some(selected) = crate::paths::data_override()
+      && selected.canonicalize().ok().as_deref() == Some(root)
+    {
+      return Some(Self { root: selected });
+    }
+    if !root.ends_with(".tokn/ctl") {
+      return None;
+    }
+    Some(Self {
+      root: root.to_owned(),
+    })
   }
 
   #[must_use]

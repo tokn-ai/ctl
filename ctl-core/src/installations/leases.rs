@@ -138,17 +138,12 @@ pub(super) fn lease_executable(executable: &Path) -> io::Result<Option<Lease>> {
     else {
       continue;
     };
-    let Some(root) = installs
+    let Some(store) = installs
       .parent()
-      .filter(|parent| parent.ends_with(".tokn/ctl"))
+      .and_then(Installations::from_executable_root)
     else {
       continue;
     };
-    let home = root
-      .parent()
-      .and_then(std::path::Path::parent)
-      .ok_or_else(|| filesystem::invalid("managed executable has no account directory"))?;
-    let store = Installations::new(home);
     filesystem::ensure_root(&store)?;
     let _lock = Lock::acquire(&store)?;
     let bundle = store.get(id)?;

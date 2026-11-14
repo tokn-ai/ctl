@@ -476,11 +476,7 @@ fn valid_digest(value: &str) -> bool {
 }
 
 fn existing_cache_path(path: &Path) -> io::Result<bool> {
-  let home = path
-    .ancestors()
-    .find(|ancestor| ancestor.file_name().is_some_and(|name| name == ".tokn"))
-    .and_then(Path::parent)
-    .ok_or_else(unsafe_cache)?;
+  let home = ctl_core::paths::managed_storage_anchor(path)?;
   let mut directory = home.to_owned();
   for part in std::iter::once(None).chain(
     path

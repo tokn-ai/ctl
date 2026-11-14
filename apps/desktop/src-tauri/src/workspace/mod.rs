@@ -533,11 +533,24 @@ pub struct UpdateWorkspaceRequest {
 }
 
 #[tauri::command]
-pub async fn load_workspace(app: tauri::AppHandle) -> CommandResult<WorkspaceSnapshot> {
+pub async fn load_workspace(app: tauri::AppHandle) -> CommandResult<LoadedWorkspace> {
   let repository = workspace_repository(&app)?;
-  tauri::async_runtime::spawn_blocking(move || repository.load())
-    .await
-    .map_err(CommandErrorDto::backend)?
+  tauri::async_runtime::spawn_blocking(move || {
+    Ok(LoadedWorkspace {
+      snapshot: repository.load()?,
+      isolated_config: ctl_core::paths::config_override().is_some()
+        || ctl_core::paths::data_override().is_some(),
+    })
+  })
+  .await
+  .map_err(CommandErrorDto::backend)?
+}
+
+#[derive(Serialize)]
+pub struct LoadedWorkspace {
+  #[serde(flatten)]
+  snapshot: WorkspaceSnapshot,
+  isolated_config: bool,
 }
 
 #[tauri::command]
@@ -571,7 +584,7 @@ pub async fn update_hosts(
 }
 
 fn workspace_repository(_app: &tauri::AppHandle) -> CommandResult<repository::Repository> {
-  let directory = ctl_core::paths::directory().map_err(|_| {
+  let directory = ctl_core::paths::config_directory().map_err(|_| {
     CommandErrorDto::new(
       "home_directory_unavailable",
       "Could not find the home directory for the workspace.",

@@ -1,0 +1,5 @@
+PS1='orbit $ '
+PS2='> '
+HISTFILE=/dev/null
+set +o history
+printf '\033[2J\033[H'

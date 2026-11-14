@@ -325,18 +325,19 @@ fn selection_path(store: &Store, purpose: Purpose, target: &str) -> PathBuf {
     .join(format!("{}-{target}.json", purpose.name()))
 }
 
-fn ancestors(store: &Store) -> Vec<PathBuf> {
-  let mut paths = vec![store.home.clone()];
-  let mut path = store.home.clone();
-  for part in store.root.strip_prefix(&store.home).unwrap() {
+fn ancestors(store: &Store) -> io::Result<Vec<PathBuf>> {
+  let anchor = crate::paths::managed_storage_anchor(&store.root)?;
+  let mut paths = vec![anchor.to_owned()];
+  let mut path = anchor.to_owned();
+  for part in store.root.strip_prefix(anchor).map_err(io::Error::other)? {
     path.push(part);
     paths.push(path.clone());
   }
-  paths
+  Ok(paths)
 }
 
 pub(super) fn root_exists(store: &Store) -> io::Result<bool> {
-  for path in ancestors(store) {
+  for path in ancestors(store)? {
     if !directory_exists(&path)? {
       return Ok(false);
     }
@@ -345,7 +346,7 @@ pub(super) fn root_exists(store: &Store) -> io::Result<bool> {
 }
 
 fn ensure_root(store: &Store) -> io::Result<()> {
-  for path in ancestors(store) {
+  for path in ancestors(store)? {
     ensure_directory(&path)?;
   }
   Ok(())

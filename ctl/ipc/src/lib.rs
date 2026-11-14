@@ -10,6 +10,7 @@ mod daemon_startup;
 pub mod identities;
 pub mod lifecycle;
 pub mod managed;
+pub mod openvpn_profile;
 pub mod remote_vpn;
 pub mod resolver;
 #[cfg(unix)]
@@ -220,7 +221,7 @@ fn register_provider(provider: DaemonProvider) -> io::Result<()> {
 }
 
 /// Internal evolution counter; advancing it alone does not publish a contract.
-pub const PROTOCOL_BUILD: u16 = 19;
+pub const PROTOCOL_BUILD: u16 = 20;
 pub const CONTRACT_V1_0_12: ProtocolVersion = ProtocolVersion::new(1, 0, 12);
 pub const CONTRACT_V1_1_13: ProtocolVersion = ProtocolVersion::new(1, 1, 13);
 pub const CONTRACT_V1_1_14: ProtocolVersion = ProtocolVersion::new(1, 1, 14);
@@ -229,7 +230,8 @@ pub const CONTRACT_V1_1_16: ProtocolVersion = ProtocolVersion::new(1, 1, 16);
 pub const CONTRACT_V1_2_17: ProtocolVersion = ProtocolVersion::new(1, 2, 17);
 pub const CONTRACT_V1_2_18: ProtocolVersion = ProtocolVersion::new(1, 2, 18);
 pub const CONTRACT_V1_3_19: ProtocolVersion = ProtocolVersion::new(1, 3, 19);
-pub const PROTOCOL_VERSION: ProtocolVersion = CONTRACT_V1_3_19;
+pub const CONTRACT_V1_3_20: ProtocolVersion = ProtocolVersion::new(1, 3, 20);
+pub const PROTOCOL_VERSION: ProtocolVersion = CONTRACT_V1_3_20;
 pub const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[
   CONTRACT_V1_0_12,
   CONTRACT_V1_1_13,
@@ -239,6 +241,7 @@ pub const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[
   CONTRACT_V1_2_17,
   CONTRACT_V1_2_18,
   CONTRACT_V1_3_19,
+  CONTRACT_V1_3_20,
 ];
 
 #[must_use]
@@ -442,6 +445,12 @@ pub fn service_streams_supported(protocol: ProtocolVersion) -> bool {
 #[must_use]
 pub fn file_service_supported(protocol: ProtocolVersion) -> bool {
   SUPPORTED_PROTOCOL_VERSIONS.contains(&protocol) && protocol >= CONTRACT_V1_3_19
+}
+
+/// `OpenVPN` profile requests and provider values require the new broker contract.
+#[must_use]
+pub fn openvpn_supported(protocol: ProtocolVersion) -> bool {
+  SUPPORTED_PROTOCOL_VERSIONS.contains(&protocol) && protocol >= CONTRACT_V1_3_20
 }
 
 /// Resolve a remote VPN's SSH owner using the exact prefix that reaches it.
@@ -655,10 +664,26 @@ impl Default for VpnSnapshot {
     Self {
       connections: Vec::new(),
       supports_multiple: true,
-      supported_providers: vec![VpnProvider::Openconnect, VpnProvider::Tailscale],
+      supported_providers: vec![
+        VpnProvider::Openconnect,
+        VpnProvider::Tailscale,
+        VpnProvider::Openvpn,
+      ],
       supports_tailscale_enrollment: true,
       discovery_warnings: Vec::new(),
     }
+  }
+}
+
+impl VpnSnapshot {
+  /// Retain only provider values that older clients can decode.
+  pub fn omit_openvpn(&mut self) {
+    self
+      .connections
+      .retain(|status| status.provider != VpnProvider::Openvpn);
+    self
+      .supported_providers
+      .retain(|provider| *provider != VpnProvider::Openvpn);
   }
 }
 
@@ -877,12 +902,15 @@ pub fn socket_path() -> PathBuf {
 }
 
 /// Resolves the normal per-user endpoint without `CTLD_SOCKET_PATH` or
-/// `CTLD_RUNTIME_DIR` overrides. Unix still respects `XDG_RUNTIME_DIR`.
+/// `CTLD_RUNTIME_DIR` overrides. The full data profile still applies.
 #[must_use]
 pub fn default_socket_path() -> PathBuf {
   #[cfg(unix)]
   {
     let socket_name = format!("ctld-v{}.sock", PROTOCOL_VERSION.major);
+    if let Some(directory) = ctl_core::paths::data_override() {
+      return directory.join("run/ctld").join(socket_name);
+    }
     if let Some(directory) = env::var_os("XDG_RUNTIME_DIR") {
       return PathBuf::from(directory).join("ctld").join(socket_name);
     }
@@ -893,7 +921,10 @@ pub fn default_socket_path() -> PathBuf {
   }
   #[cfg(windows)]
   {
-    let directory = dirs::data_local_dir().unwrap_or_else(env::temp_dir);
+    let directory = ctl_core::paths::data_override()
+      .map(|path| path.join("run/ctld"))
+      .or_else(dirs::data_local_dir)
+      .unwrap_or_else(env::temp_dir);
     windows::endpoint(&directory)
   }
 }

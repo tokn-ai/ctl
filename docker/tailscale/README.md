@@ -7,7 +7,7 @@ administration console. Saving keeps the same authenticated device identity;
 no auth key is stored in the profile.
 
 The first start downloads the pinned official image
-`docker.io/tailscale/tailscale:v1.94.2` if it is missing. Docker or Podman must be
+`docker.io/tailscale/tailscale:v1.104.7` if it is missing. Docker or Podman must be
 running. There is no local image build step.
 
 The container uses Tailscale's userspace networking and SOCKS5 listener. It does

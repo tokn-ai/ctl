@@ -64,7 +64,9 @@ elif command=='container' and args[1]=='inspect':
   if (root/'exited').exists(): data[0]['State'].update(Running=False,Status='exited')
   print(json.dumps(data))
 elif command=='ps':
-  if path.exists(): print('a'*64)
+  if path.exists():
+    container=json.loads(path.read_text())[0]
+    print(container['Id'], container['Config']['Labels']['io.ctl.vpn.protocol'])
 elif command=='exec':
   with (root/'exec.calls').open('a') as stream: stream.write('\n'.join(args)+'\n')
   if args[-1]=='/run/ctl/heartbeat.sh':

@@ -60,11 +60,27 @@ async fn check_bindings(port: u16, protocol: PortForwardProtocol) -> std::io::Re
 #[cfg(test)]
 mod tests {
   use super::*;
+  use tokio::net::{TcpListener, UdpSocket};
+
+  async fn reserve_tcp_and_udp() -> (TcpListener, UdpSocket) {
+    // A kernel-assigned TCP port may already be occupied by UDP.
+    for _ in 0..16 {
+      let tcp = TcpListener::bind("127.0.0.1:0").await.unwrap();
+      let address = tcp.local_addr().unwrap();
+      match UdpSocket::bind(address).await {
+        Ok(udp) => return (tcp, udp),
+        Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {}
+        Err(error) => panic!("could not reserve UDP test socket: {error}"),
+      }
+    }
+    panic!("could not reserve a port for both TCP and UDP");
+  }
 
   #[tokio::test]
   async fn availability_checks_only_the_requested_protocols() {
-    let tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let (tcp, udp) = reserve_tcp_and_udp().await;
     let port = tcp.local_addr().unwrap().port();
+    drop(udp);
     assert!(
       check_bindings(port, PortForwardProtocol::Tcp)
         .await
@@ -76,11 +92,9 @@ mod tests {
         .is_err()
     );
     assert!(check_bindings(port, PortForwardProtocol::Udp).await.is_ok());
-    drop(tcp);
-
-    let udp = tokio::net::UdpSocket::bind(("127.0.0.1", port))
-      .await
-      .unwrap();
+    let (other_tcp, udp) = reserve_tcp_and_udp().await;
+    let port = udp.local_addr().unwrap().port();
+    drop(other_tcp);
     assert!(check_bindings(port, PortForwardProtocol::Tcp).await.is_ok());
     assert!(
       check_bindings(port, PortForwardProtocol::Udp)
@@ -92,8 +106,8 @@ mod tests {
         .await
         .is_err()
     );
-    drop(udp);
-    assert!(check_bindings(port, PortForwardProtocol::Any).await.is_ok());
+    // Port zero is internal here, so each probe gets a free kernel-assigned port.
+    assert!(check_bindings(0, PortForwardProtocol::Any).await.is_ok());
   }
 
   #[test]

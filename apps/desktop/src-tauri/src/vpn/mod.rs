@@ -48,6 +48,7 @@ pub(crate) fn credential_metadata(snapshot: &VpnConnectionsSnapshot) -> Vec<Cred
         models::VpnSettingsSummary::Tailscale { hostname, .. } => CredentialSettings::Tailscale {
           hostname: hostname.clone(),
         },
+        models::VpnSettingsSummary::Openvpn { .. } => CredentialSettings::Openvpn,
       };
       CredentialMetadata {
         connection_id: connection.connection_id.clone(),
@@ -73,6 +74,7 @@ pub(crate) enum CredentialSettings {
   Tailscale {
     hostname: Option<String>,
   },
+  Openvpn,
 }
 
 // Each VPN coordinates independently across windows, including profile loading.
@@ -218,7 +220,7 @@ fn require_connected(status: &VpnStatus) -> CommandResult<()> {
 }
 
 fn directory(_app: &tauri::AppHandle) -> CommandResult<PathBuf> {
-  ctl_core::paths::directory()
+  ctl_core::paths::config_directory()
     .map_err(|_| CommandErrorDto::new("vpn_storage_unavailable", "Could not locate VPN settings."))
 }
 

@@ -522,6 +522,7 @@ fn provider_name(provider: ctl_ipc::VpnProvider) -> &'static str {
   match provider {
     ctl_ipc::VpnProvider::Openconnect => "OpenConnect",
     ctl_ipc::VpnProvider::Tailscale => "Tailscale",
+    ctl_ipc::VpnProvider::Openvpn => "OpenVPN",
   }
 }
 

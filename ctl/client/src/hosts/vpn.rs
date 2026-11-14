@@ -44,7 +44,7 @@ impl SavedVpnDocument {
     for connection in &self.connections {
       if self.schema_version == 1 && connection.provider() != VpnProvider::Openconnect {
         return Err(invalid(
-          "Tailscale connections require VPN settings version 2.",
+          "This VPN provider requires VPN settings version 2.",
         ));
       }
       connection.validate().map_err(invalid)?;

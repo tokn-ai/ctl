@@ -58,7 +58,10 @@ impl Settings {
     let (path, optional) = match std::env::var_os("CTMUX_CONFIG_FILE") {
       Some(path) if path.is_empty() => return Err("CTMUX_CONFIG_FILE must name a file".into()),
       Some(path) => (PathBuf::from(path), false),
-      None => (ctl_core::paths::directory()?.join("ctmux.json"), true),
+      None => (
+        ctl_core::paths::config_directory()?.join("ctmux.json"),
+        true,
+      ),
     };
     Self::read(&path, optional)
       .map_err(|error| format!("could not load ctmux settings {}: {error}", path.display()).into())

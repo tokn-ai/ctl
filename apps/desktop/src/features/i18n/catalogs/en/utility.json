@@ -301,6 +301,8 @@
   "credentials.name": "Name",
   "credentials.not_checked": "Not checked",
   "credentials.not_recorded": "Not recorded",
+  "credentials.openvpn_profile": "OpenVPN profile",
+  "credentials.openvpn_profile_detail": "OpenVPN configuration saved in VPN settings. Manage it on the VPN page.",
   "credentials.not_verified": "Not verified",
   "credentials.partial_keychain": "Some Keychain items could not be listed.",
   "credentials.partial_vpn": "Some VPN credentials could not be listed.",

@@ -1,0 +1,13 @@
+*
+!docker/
+!docker/openvpn/
+!docker/openvpn/Dockerfile
+!docker/openvpn/entrypoint.sh
+!docker/openvpn/vpn-network.sh
+!docker/openvpn/healthcheck.sh
+!ctl/
+!ctl/daemon/
+!ctl/daemon/assets/
+!ctl/daemon/assets/vpn/
+!ctl/daemon/assets/vpn/heartbeat.sh
+!ctl/daemon/assets/vpn/watchdog.sh

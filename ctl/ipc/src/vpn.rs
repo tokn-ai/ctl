@@ -29,6 +29,7 @@ fn select_socket_path(vpn_override: Option<PathBuf>, inherited: PathBuf) -> Path
 pub struct Client {
   socket_path: PathBuf,
   daemon_executable: Option<PathBuf>,
+  allow_openvpn: bool,
 }
 
 impl Client {
@@ -37,6 +38,7 @@ impl Client {
     Self {
       socket_path,
       daemon_executable: None,
+      allow_openvpn: true,
     }
   }
 
@@ -44,6 +46,15 @@ impl Client {
   #[must_use]
   pub fn with_daemon_executable(mut self, executable: PathBuf) -> Self {
     self.daemon_executable = Some(executable);
+    self
+  }
+
+  /// Limit the broker exchange to contracts without `OpenVPN` provider values.
+  /// The remote VPN gateway uses this for older SSH VPN channels so the broker
+  /// limits inventory and stops atomically to the providers the caller knows.
+  #[must_use]
+  pub fn without_openvpn(mut self) -> Self {
+    self.allow_openvpn = false;
     self
   }
 
@@ -250,17 +261,21 @@ impl Client {
               io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
             ) =>
         {
+          let mut snapshot = VpnSnapshot {
+            discovery_warnings: vec!["The selected ctld is not running; VPN container inventory is unavailable. Connect a saved VPN or start ctld to inspect it.".into()],
+            ..VpnSnapshot::default()
+          };
+          if !self.allow_openvpn {
+            snapshot.omit_openvpn();
+          }
           return Ok(Response {
             status: VpnStatus::default(),
-            snapshot: Some(VpnSnapshot {
-              discovery_warnings: vec!["The selected ctld is not running; VPN container inventory is unavailable. Connect a saved VPN or start ctld to inspect it.".into()],
-              ..VpnSnapshot::default()
-            }),
+            snapshot: Some(snapshot),
           });
         }
         Err(error) => return Err(error.into()),
       };
-      exchange(&mut stream, &message).await
+      exchange(&mut stream, &message, self.allow_openvpn).await
     })
     .await
     .map_err(|_| VpnError::Timeout)?
@@ -379,24 +394,41 @@ fn normalize_status(mut status: VpnStatus) -> VpnStatus {
   status
 }
 
-async fn exchange<S>(stream: &mut S, message: &ClientMessage) -> Result<Response, VpnError>
+async fn exchange<S>(
+  stream: &mut S,
+  message: &ClientMessage,
+  allow_openvpn: bool,
+) -> Result<Response, VpnError>
 where
   S: AsyncRead + AsyncWrite + Unpin,
 {
+  let mut protocol = crate::protocol_offer();
+  if !allow_openvpn {
+    protocol.version = crate::CONTRACT_V1_3_19;
+    protocol.build = protocol.version.build;
+    protocol
+      .supported_versions
+      .retain(|version| !crate::openvpn_supported(*version));
+  }
   crate::write_frame(
     stream,
     &ClientMessage::Handshake {
-      protocol: crate::protocol_offer(),
+      protocol: protocol.clone(),
     },
   )
   .await?;
   match crate::read_frame::<_, ServerMessage>(stream).await? {
     Some(ServerMessage::HandshakeAccepted { protocol_version }) => {
-      if !crate::protocol_offer().accepts(protocol_version) {
+      if !protocol.accepts(protocol_version) {
         return Err(VpnError::ProtocolVersionMismatch {
-          expected: crate::PROTOCOL_VERSION,
+          expected: protocol.version,
           actual: protocol_version,
         });
+      }
+      if matches!(message, ClientMessage::StartVpnConnection { connection } if connection.provider() == VpnProvider::Openvpn)
+        && !crate::openvpn_supported(protocol_version)
+      {
+        return Err(VpnError::OpenvpnUnsupported);
       }
     }
     Some(ServerMessage::Error { code, message }) => return Err(VpnError::Daemon { code, message }),
@@ -431,6 +463,8 @@ where
 pub enum VpnError {
   #[error("This ctld does not support Tailscale; update and restart ctld")]
   TailscaleUnsupported,
+  #[error("This ctld does not support OpenVPN; update and restart ctld")]
+  OpenvpnUnsupported,
   #[error("could not resolve the VPN settings file: {0}")]
   EnvFile(#[source] io::Error),
   #[error("{0}")]
@@ -462,7 +496,7 @@ impl VpnError {
   #[must_use]
   pub fn code(&self) -> &str {
     match self {
-      Self::TailscaleUnsupported => "vpn_provider_unsupported",
+      Self::TailscaleUnsupported | Self::OpenvpnUnsupported => "vpn_provider_unsupported",
       Self::EnvFile(_) | Self::InvalidConnection(_) => "vpn_invalid_connection",
       Self::Connect(_) => "ctld_connection_failed",
       Self::Codec(_) | Self::UnexpectedResponse => "ctld_protocol_error",

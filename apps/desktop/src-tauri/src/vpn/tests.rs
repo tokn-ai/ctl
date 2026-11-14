@@ -46,7 +46,9 @@ fn input(password: Option<&str>) -> VpnConnectionInput {
 fn password(connection: &VpnConnection) -> &str {
   match &connection.settings {
     VpnSettings::Openconnect { password, .. } => password,
-    VpnSettings::Tailscale { .. } => panic!("expected OpenConnect password"),
+    VpnSettings::Tailscale { .. } | VpnSettings::Openvpn { .. } => {
+      panic!("expected OpenConnect password")
+    }
   }
 }
 
@@ -91,6 +93,75 @@ fn round_trip_returns_summaries_and_an_opaque_revision() {
   for field in ["endpoint", "running", "state", "container_name"] {
     assert!(stored["connections"][0].get(field).is_none());
   }
+}
+
+#[test]
+fn openvpn_import_keeps_configuration_and_credentials_out_of_summaries() {
+  const CONFIG: &str =
+    "client\ndev tun\nremote vpn.example.test 1194\n<ca>\ncertificate-fixture\n</ca>\n";
+  let fixture = Fixture::new();
+  let repository = fixture.repository();
+  let request = |expected_revision, config, replace_credentials, username, password| {
+    serde_json::from_value::<SaveVpnConnectionRequest>(json!({
+      "expected_revision": expected_revision,
+      "connection": {
+        "connection_id": "openvpn-fixture", "name": "OpenVPN fixture",
+        "provider": "openvpn", "config": config, "replace_credentials": replace_credentials,
+        "username": username, "password": password,
+      }
+    }))
+    .unwrap()
+  };
+  let missing = repository
+    .save(request(None, None, false, None, None))
+    .unwrap_err();
+  assert_eq!(missing.code, "vpn_connections_invalid");
+  let saved = repository
+    .save(request(
+      None,
+      Some(CONFIG),
+      true,
+      Some("account-fixture"),
+      Some("password-fixture"),
+    ))
+    .unwrap();
+  let edited = repository
+    .save(request(saved.revision, None, false, None, None))
+    .unwrap();
+  let summary = serde_json::to_value(&edited).unwrap();
+  assert_eq!(
+    summary["connections"][0],
+    json!({"connection_id": "openvpn-fixture", "name": "OpenVPN fixture", "provider": "openvpn", "has_credentials": true}),
+  );
+  let connection = repository.connection("openvpn-fixture").unwrap();
+  let VpnSettings::Openvpn {
+    config,
+    username,
+    password,
+  } = connection.settings
+  else {
+    panic!("expected OpenVPN profile");
+  };
+  assert_eq!(&*config, CONFIG);
+  assert_eq!(username.as_deref(), Some("account-fixture"));
+  assert_eq!(
+    password.as_ref().map(|secret| secret.as_str()),
+    Some("password-fixture")
+  );
+  let removed = repository
+    .save(request(edited.revision, None, true, None, None))
+    .unwrap();
+  assert!(matches!(
+    removed.connections[0].settings,
+    models::VpnSettingsSummary::Openvpn {
+      has_credentials: false
+    },
+  ));
+  assert!(
+    !String::from_utf8(fixture.bytes())
+      .unwrap()
+      .contains("password-fixture")
+  );
 }
 
 #[test]

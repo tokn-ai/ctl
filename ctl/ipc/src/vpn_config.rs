@@ -9,9 +9,10 @@ pub enum VpnProvider {
   #[default]
   Openconnect,
   Tailscale,
+  Openvpn,
 }
 
-/// Intentionally has no Debug implementation: `OpenConnect` contains a password.
+/// Intentionally has no Debug implementation because profiles can contain secrets.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "provider", rename_all = "snake_case", deny_unknown_fields)]
 pub enum VpnSettings {
@@ -26,6 +27,13 @@ pub enum VpnSettings {
     hostname: Option<String>,
     #[serde(default)]
     accept_routes: bool,
+  },
+  Openvpn {
+    config: Zeroizing<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    username: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    password: Option<Zeroizing<String>>,
   },
 }
 
@@ -90,6 +98,7 @@ impl VpnConnection {
     match &self.settings {
       VpnSettings::Openconnect { .. } => VpnProvider::Openconnect,
       VpnSettings::Tailscale { .. } => VpnProvider::Tailscale,
+      VpnSettings::Openvpn { .. } => VpnProvider::Openvpn,
     }
   }
 
@@ -153,6 +162,20 @@ impl VpnConnection {
         {
           return Err("Device name must be 1–63 letters, digits, or interior hyphens".into());
         }
+      }
+      VpnSettings::Openvpn {
+        config,
+        username,
+        password,
+      } => {
+        if self.connection_id.chars().any(char::is_whitespace) {
+          return Err("Connection ID cannot contain whitespace".into());
+        }
+        crate::openvpn_profile::validate(
+          config,
+          username.as_deref(),
+          password.as_ref().map(|value| value.as_str()),
+        )?;
       }
     }
     Ok(())

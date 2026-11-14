@@ -25,6 +25,25 @@ async fn presence_selection_carries_bounded_client_metadata_and_preserves_reques
     .unwrap();
   assert_eq!(selection.client_identity, Some(identity.clone()));
   assert_eq!(reader, &[0, 255, 1, 2]);
+  let mut offer = Vec::new();
+  crate::write_frame(&mut offer, &protocol_offer())
+    .await
+    .unwrap();
+  let mut output = Vec::new();
+  assert_eq!(
+    negotiate_contract(&mut offer.as_slice(), &mut output)
+      .await
+      .unwrap(),
+    CONTRACT_V1_2_3,
+  );
+  assert!(
+    crate::read_frame::<_, ProtocolSelection>(&mut output.as_slice())
+      .await
+      .unwrap()
+      .unwrap()
+      .client_identity
+      .is_some()
+  );
   for (version, mut client) in [
     (CONTRACT_V1_0_1, identity.clone()),
     (CONTRACT_V1_1_2, identity),
@@ -47,6 +66,29 @@ async fn presence_selection_carries_bounded_client_metadata_and_preserves_reques
         .await
         .is_err()
     );
+  }
+}
+
+fn openvpn_start() -> Request {
+  Request::Start {
+    connection: VpnConnection {
+      connection_id: "fixture".into(),
+      name: "Fixture".into(),
+      settings: crate::VpnSettings::Openvpn {
+        config: zeroize::Zeroizing::new("fixture profile".into()),
+        username: None,
+        password: None,
+      },
+    },
+  }
+}
+
+#[test]
+fn openvpn_is_a_new_remote_vpn_operation_capability() {
+  let request = openvpn_start();
+  for &version in SUPPORTED_PROTOCOL_VERSIONS {
+    assert_eq!(request.supported_by(version), version == CONTRACT_V1_2_3);
+    assert!(Request::List.supported_by(version));
   }
 }
 
@@ -157,7 +199,18 @@ async fn negotiation_peer_child() {
   }
   let (mut reader, mut writer) = crate::stdio::take().unwrap();
   writer.write_all(PREFACE).await.unwrap();
-  accept_contract(&mut reader, &mut writer).await.unwrap();
+  if mode == "legacy_openvpn" {
+    crate::write_frame(
+      &mut writer,
+      &ProtocolOffer::new(2, CONTRACT_V1_1_2, &[CONTRACT_V1_0_1, CONTRACT_V1_1_2]),
+    )
+    .await
+    .unwrap();
+    let selected: ProtocolSelection = crate::read_frame(&mut reader).await.unwrap().unwrap();
+    assert_eq!(selected.protocol_version, CONTRACT_V1_1_2);
+  } else {
+    accept_contract(&mut reader, &mut writer).await.unwrap();
+  }
   if mode == "close_identity" {
     return;
   }
@@ -172,6 +225,15 @@ async fn negotiation_peer_child() {
   ctl_proto::write_identity(&mut writer, &identity)
     .await
     .unwrap();
+  if mode == "legacy_openvpn" {
+    assert!(
+      crate::read_frame::<_, Request>(&mut reader)
+        .await
+        .unwrap()
+        .is_none()
+    );
+    return;
+  }
   assert!(matches!(
     crate::read_frame::<_, Request>(&mut reader).await.unwrap(),
     Some(Request::List)
@@ -182,6 +244,22 @@ async fn negotiation_peer_child() {
       .await
       .unwrap();
   }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn remote_client_does_not_send_openvpn_profile_bytes_to_an_old_agent() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
+  let client = Client::new(fixture_target(), None).with_terminal_interaction(false);
+  let mut stream = client
+    .open_command(negotiation_command("legacy_openvpn"))
+    .await
+    .unwrap();
+  assert!(matches!(
+    send_request(&mut stream, &openvpn_start(), Duration::from_secs(1)).await,
+    Err(Error::Remote { code, .. }) if code == "remote_vpn_components_update_required"
+  ));
+  stream.finish().await.unwrap();
 }
 
 #[cfg(unix)]
@@ -466,11 +544,11 @@ async fn old_or_missing_agent_prefaces_produce_an_update_instruction() {
 async fn negotiation_selects_only_explicit_published_contracts_before_any_vpn_input() {
   use ctl_core::protocol::{ProtocolOffer, ProtocolVersion};
   let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
-  let newer = ProtocolVersion::new(1, 1, 3);
+  let newer = ProtocolVersion::new(1, PROTOCOL_VERSION.minor, PROTOCOL_BUILD + 1);
   let mut bytes = Vec::new();
   crate::write_frame(
     &mut bytes,
-    &ProtocolOffer::new(3, newer, &[CONTRACT_V1_0_1, newer]),
+    &ProtocolOffer::new(newer.build, newer, &[CONTRACT_V1_0_1, newer]),
   )
   .await
   .unwrap();
@@ -493,7 +571,7 @@ async fn negotiation_selects_only_explicit_published_contracts_before_any_vpn_in
     let mut bytes = Vec::new();
     crate::write_frame(
       &mut bytes,
-      &ProtocolOffer::new(3, unsupported, &[unsupported]),
+      &ProtocolOffer::new(unsupported.build, unsupported, &[unsupported]),
     )
     .await
     .unwrap();

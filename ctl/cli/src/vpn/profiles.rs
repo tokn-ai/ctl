@@ -12,7 +12,7 @@ const MAX_BYTES: u64 = 2 * 1024 * 1024;
 pub(crate) fn path() -> Result<PathBuf, Error> {
   std::env::var_os("CTL_VPNS_PATH").map_or_else(
     || {
-      ctl_core::paths::directory()
+      ctl_core::paths::config_directory()
         .map(|directory| directory.join("vpns.json"))
         .map_err(|_| Error::HomeUnavailable)
     },

@@ -144,7 +144,7 @@ async fn shared_inventory_inspections_are_parallel_with_a_fixed_concurrency_limi
     let mut profile = connection();
     profile.connection_id = format!("profile-{index}");
     let metadata = RuntimeMetadata::for_connection(&profile).unwrap();
-    writeln!(inventory, "{id}").unwrap();
+    writeln!(inventory, "{id} {PROTOCOL}").unwrap();
     fixture.inspect(&id, &inspection(&metadata, &id, true, "running"));
   }
   fs::write(fixture.root.join("inventory"), inventory).unwrap();
@@ -295,6 +295,48 @@ fn tailscale_preserves_existing_profile_name_and_checks_public_settings() {
 }
 
 #[test]
+fn openvpn_inventory_requires_provider_protocol_and_omits_credentials() {
+  let profile = "client\ndev tun\nremote vpn.invalid\nauth-user-pass\n<ca>\npublic-ca\n</ca>\n<key>\nprivate-key\n</key>\n";
+  let connection = |config: &str, username: &str, password: &str| VpnConnection {
+    connection_id: "openvpn-profile".into(),
+    name: "OpenVPN test".into(),
+    settings: VpnSettings::Openvpn {
+      config: config.to_owned().into(),
+      username: Some(username.into()),
+      password: Some(password.to_owned().into()),
+    },
+  };
+  let metadata =
+    RuntimeMetadata::for_connection(&connection(profile, "private-user", "private-password"))
+      .unwrap();
+  let changed = RuntimeMetadata::for_connection(&connection(
+    &profile.replace("private-key", "new-key"),
+    "new-user",
+    "new-password",
+  ))
+  .unwrap();
+  assert_eq!(metadata, changed);
+  assert!(metadata.username.is_none());
+  assert!(metadata.vpn_url.is_none());
+  assert!(
+    !labels_arguments(&metadata)
+      .unwrap()
+      .join(" ")
+      .contains("private-")
+  );
+  let mut inspected = inspection(&metadata, ID, true, "running");
+  let parse = |value: &serde_json::Value| {
+    parse_descriptor(Path::new("engine"), ID, &serde_json::to_vec(value).unwrap())
+  };
+  assert_eq!(
+    parse(&inspected).unwrap().metadata.provider,
+    VpnProvider::Openvpn
+  );
+  inspected[0]["Config"]["Labels"][LABEL_PROTOCOL] = PROTOCOL.into();
+  assert!(parse(&inspected).is_err());
+}
+
+#[test]
 fn inspection_verifies_protocol_owner_profile_and_immutable_identity() {
   let metadata = RuntimeMetadata::for_connection(&connection()).unwrap();
   let original = inspection(&metadata, ID, true, "running");
@@ -362,7 +404,7 @@ async fn inventory_is_read_only_and_deduplicates_container_ids() {
   fixture.inspect(ID, &inspection(&metadata, ID, true, "running"));
   fs::write(
     fixture.root.join("inventory"),
-    format!("{ID}\n{ID}\n{OTHER_ID}\n"),
+    format!("{ID} {PROTOCOL}\n{ID} {PROTOCOL}\n{OTHER_ID} {PROTOCOL}\n"),
   )
   .unwrap();
   let containers = list(&fixture.engine).await.unwrap();
@@ -378,11 +420,43 @@ async fn inventory_is_read_only_and_deduplicates_container_ids() {
 }
 
 #[tokio::test]
+async fn inventory_lists_both_supported_markers_and_skips_unknown_markers() {
+  let fixture = Fixture::new();
+  let legacy = RuntimeMetadata::for_connection(&connection()).unwrap();
+  let openvpn = RuntimeMetadata {
+    connection_id: "test-openvpn".into(),
+    provider: VpnProvider::Openvpn,
+    vpn_url: None,
+    username: None,
+    ..legacy.clone()
+  };
+  fixture.inspect(ID, &inspection(&legacy, ID, true, "running"));
+  fixture.inspect(OTHER_ID, &inspection(&openvpn, OTHER_ID, true, "running"));
+  let future_id = "c".repeat(64);
+  fs::write(
+    fixture.root.join("inventory"),
+    format!("{ID} {PROTOCOL}\n{OTHER_ID} {OPENVPN_PROTOCOL}\n{future_id} 3\n"),
+  )
+  .unwrap();
+  let containers = list(&fixture.engine).await.unwrap();
+  assert_eq!(
+    containers
+      .iter()
+      .map(|container| container.metadata.provider)
+      .collect::<Vec<_>>(),
+    [VpnProvider::Openconnect, VpnProvider::Openvpn],
+  );
+  let calls = fixture.calls();
+  assert_eq!(calls.len(), 3);
+  assert!(calls.iter().all(|call| !call.contains(&future_id)));
+}
+
+#[tokio::test]
 async fn inventory_rejects_unverified_protocol_and_owner_without_acquiring_interest() {
   let fixture = Fixture::new();
   let metadata = RuntimeMetadata::for_connection(&connection()).unwrap();
   let verified = inspection(&metadata, ID, true, "running");
-  fs::write(fixture.root.join("inventory"), format!("{ID}\n")).unwrap();
+  fs::write(fixture.root.join("inventory"), format!("{ID} {PROTOCOL}\n")).unwrap();
   // The fixture intentionally ignores engine filters. Inspection must still
   // reject an unrelated or incompatible resource returned by that inventory.
   for (label, value) in [(LABEL_USER, "foreign-owner"), (LABEL_PROTOCOL, "2")] {
@@ -401,8 +475,13 @@ async fn inventory_rejects_unverified_protocol_and_owner_without_acquiring_inter
       .iter()
       .all(|call| call.starts_with("ps ") || call.starts_with("container inspect "))
   );
-  for inventory in calls.iter().filter(|call| call.starts_with("ps ")) {
-    assert!(inventory.contains("--filter label=io.ctl.vpn.protocol=1"));
+  let inventories: Vec<_> = calls
+    .iter()
+    .filter(|call| call.starts_with("ps "))
+    .collect();
+  assert_eq!(inventories.len(), 3);
+  for inventory in inventories {
+    assert!(inventory.contains(&format!("--filter label={LABEL_PROTOCOL} ")));
     assert!(inventory.contains(&format!(
       "--filter label=io.ctl.vpn.user={}",
       namespace().unwrap()
@@ -415,7 +494,7 @@ async fn inventory_limit_fails_instead_of_silently_hiding_connections() {
   let fixture = Fixture::new();
   let mut inventory = String::new();
   for id in 0..=MAX_CONTAINERS {
-    writeln!(inventory, "{id:064x}").unwrap();
+    writeln!(inventory, "{id:064x} {PROTOCOL}").unwrap();
   }
   fs::write(fixture.root.join("inventory"), inventory).unwrap();
   assert!(
@@ -425,7 +504,9 @@ async fn inventory_limit_fails_instead_of_silently_hiding_connections() {
       .to_string()
       .contains("safety limit")
   );
-  assert_eq!(fixture.calls().len(), 1);
+  let calls = fixture.calls();
+  assert_eq!(calls.len(), 1);
+  assert!(calls[0].starts_with("ps "));
 }
 
 #[tokio::test]

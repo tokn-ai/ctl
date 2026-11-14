@@ -33,7 +33,7 @@ impl DefinitionScope {
 /// # Errors
 /// Returns an error when the current user's home directory is unavailable.
 pub fn global_path() -> Result<PathBuf, StoreError> {
-  ctl_core::paths::directory()
+  ctl_core::paths::config_directory()
     .map(|directory| directory.join("tasks.json"))
     .map_err(|_| StoreError::ConfigDirectoryUnavailable)
 }

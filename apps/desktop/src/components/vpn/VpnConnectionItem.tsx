@@ -3,7 +3,7 @@ import { useLocale } from "../../features/i18n/LocaleContext";
 import { useEffect, useState } from "react";
 import type { VpnController } from "../../features/vpn/useVpn";
 import { localizedErrorText } from "../../lib/errors";
-import { vpnNeedsSignIn, vpnRuntimeId, vpnStateLabel } from "../../features/vpn/status";
+import { vpnNeedsSignIn, vpnRuntimeId, vpnStateLabel, vpn_provider_labels } from "../../features/vpn/status";
 import type { VpnConnection, VpnStatus } from "../../lib/types";
 import { Icon } from "../ui/Icon";
 import { InlineFeedback } from "../feedback/InlineFeedback";
@@ -37,7 +37,7 @@ export function VpnConnectionItem({ connection, runtime, model }: Props) {
   const provider = runtime?.provider ?? connection?.provider ?? "openconnect";
   const tailscale = provider === "tailscale";
   const provider_supported = model.supported_providers.includes(provider);
-  const saved_openconnect = connection?.provider === "tailscale" ? null : connection;
+  const saved_openconnect = connection?.provider === "tailscale" || connection?.provider === "openvpn" ? null : connection;
   const hostname = runtime?.hostname ?? (connection?.provider === "tailscale" ? connection.hostname : null);
   const endpoint = runtime?.endpoint;
   const foreign = runtime?.locally_connected === false;
@@ -72,7 +72,7 @@ export function VpnConnectionItem({ connection, runtime, model }: Props) {
       <div className="vpn-connection-heading">
         <Icon name="vpn" size={16} />
         <strong>{name}</strong>
-        <span className="vpn-provider">{tailscale ? "Tailscale" : "OpenConnect"}</span>
+        <span className="vpn-provider">{vpn_provider_labels[provider]}</span>
       </div>
       <div className="vpn-connection-status" aria-live="polite">
         <span className={`vpn-indicator ${stale ? "stale" : checking ? "unknown" : state}`} aria-hidden="true" />
@@ -85,14 +85,14 @@ export function VpnConnectionItem({ connection, runtime, model }: Props) {
         {tailscale ? <>
           <div><dt>{t("vpn.tailscale_device_name")}</dt><dd>{hostname ?? t("vpn.device_name_later")}</dd></div>
           {runtime?.tailnet ? <div><dt>{t("vpn.tailnet")}</dt><dd>{runtime.tailnet}</dd></div> : null}
-        </> : <div>
+        </> : provider === "openconnect" ? <div>
           <dt>{t("vpn.server")}</dt>
           <dd>{vpn_url ?? t("vpn.unavailable")}</dd>
-        </div>}
-        <div>
+        </div> : null}
+        {provider !== "openvpn" ? <div>
           <dt>{t("vpn.username")}</dt>
           <dd>{username ?? t("vpn.unavailable")}</dd>
-        </div>
+        </div> : null}
         {active ? (
           <div>
             <dt className="vpn-endpoint-heading">
@@ -109,7 +109,7 @@ export function VpnConnectionItem({ connection, runtime, model }: Props) {
       </dl>
       {needs_sign_in && !stale ? <small>{t("vpn.finish_sign_in_persistent")}</small> : null}
       {runtime?.message ? <small>{runtime.message}</small> : null}
-      {connection && !provider_supported && model.status_loaded ? <small>{t("vpn.provider_requires_update", { provider: tailscale ? "Tailscale" : "OpenConnect" })}</small> : null}
+      {connection && !provider_supported && model.status_loaded ? <small>{t("vpn.provider_requires_update", { provider: vpn_provider_labels[provider] })}</small> : null}
       {action_error ? <InlineFeedback>{formatText(action_error)}</InlineFeedback> : null}
       <div className="vpn-connection-actions">
         {needs_sign_in ? <button
@@ -132,7 +132,7 @@ export function VpnConnectionItem({ connection, runtime, model }: Props) {
           </button>
         ) : null}
         {connection && (!active || foreign) ? (
-          <button type="button" disabled={!can_connect || model.profile_busy || (!tailscale && !saved_openconnect?.has_password)} onClick={() => void model.connect(connection.connection_id)} aria-label={t("vpn.connect_named", { name: connection.name })}>
+          <button type="button" disabled={!can_connect || model.profile_busy || (provider === "openconnect" && !saved_openconnect?.has_password)} onClick={() => void model.connect(connection.connection_id)} aria-label={t("vpn.connect_named", { name: connection.name })}>
             {action?.kind === "connect" ? t("vpn.connecting") : t("vpn.connect")}
           </button>
         ) : null}

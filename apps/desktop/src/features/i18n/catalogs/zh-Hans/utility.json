@@ -301,6 +301,8 @@
   "credentials.name": "名称",
   "credentials.not_checked": "未检查",
   "credentials.not_recorded": "未记录",
+  "credentials.openvpn_profile": "OpenVPN 配置",
+  "credentials.openvpn_profile_detail": "OpenVPN 配置保存在 VPN 设置中，可在 VPN 页面管理。",
   "credentials.not_verified": "未验证",
   "credentials.partial_keychain": "无法列出部分钥匙串项目。",
   "credentials.partial_vpn": "无法列出部分 VPN 凭据。",

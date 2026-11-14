@@ -332,12 +332,14 @@ describe("session compositor", () => {
   });
 
   it("queues repeated resize deltas while awaiting an exact acknowledgement and keeps zoom on rejection", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
     mocks.request.mockResolvedValue({ ...split, zoomed_terminal_id: "b" });
     mocks.resize.mockImplementation(async () => {});
     const prefix_settings = { document: { schema_version: 1 as const, overrides: [] }, bindings: new Map(), platform: "other" as const };
     render(<SessionViewSurface {...props()} prefix_settings={prefix_settings} />);
     await waitFor(() => expect(screen.getAllByLabelText("Terminal input")).toHaveLength(2));
     const second = screen.getAllByLabelText("Terminal input")[1];
+    await waitFor(() => expect(document.activeElement).toBe(second));
     fireEvent.keyDown(second, { key: "b", code: "KeyB", ctrlKey: true });
     fireEvent.keyDown(second, { key: "ArrowRight", altKey: true });
     fireEvent.keyDown(second, { key: "ArrowRight", altKey: true, repeat: true });

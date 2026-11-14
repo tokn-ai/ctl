@@ -30,7 +30,8 @@ export function CredentialTable({ credentials, busy_id, on_forget, on_manage_vpn
     <thead><tr><th scope="col">{t("credentials.name")}</th><th scope="col">{t("credentials.type")}</th><th scope="col">{t("credentials.account_target")}</th><th scope="col">{t("credentials.storage")}</th><th scope="col">{t("credentials.updated")}</th><th scope="col"><span className="credentials-sr-only">{t("credentials.actions")}</span></th></tr></thead>
     <tbody>{credentials.map((credential) => {
       const detail = credential.kind === "openvpn_profile" ? t("credentials.openvpn_profile_detail") : credential.detail;
-              <th scope="row"><span title={[credential.name, detail].filter(Boolean).join("\n")}>{credential.name}</span></th>
+      return <tr key={credential.credential_id}>
+        <th scope="row"><span title={[credential.name, detail].filter(Boolean).join("\n")}>{credential.name}</span></th>
         <td><span title={detail ?? undefined}>{t(kind_labels[credential.kind])}</span></td>
         <td><span title={[credential.account, credential.target].filter(Boolean).join(" · ") || undefined}>{[credential.account, credential.target].filter(Boolean).join(" · ") || t("credentials.not_recorded")}</span></td>
         <td><span title={credential.storage === "vpn_settings" ? t("credentials.vpn_storage_detail") : credential.storage === "container_volume" ? t("credentials.tailscale_storage_detail") : t("credentials.keychain_storage_detail")}>{t(storage_labels[credential.storage])}</span></td>

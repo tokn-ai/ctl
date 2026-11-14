@@ -47,7 +47,7 @@ pub async fn provision_manager_from(home: &Path, executable: &Path) -> io::Resul
 
 pub(crate) async fn provision_manager_bytes(home: &Path, bytes: Vec<u8>) -> io::Result<()> {
   let home = home.to_owned();
-  let directory = home.join(".tokn/ctl/bin");
+  let directory = ctl_core::paths::directory_for_account(&home).join("bin");
   let stage = tokio::task::spawn_blocking(move || {
     use std::io::Write as _;
     super::safe_directory(&directory)?;
@@ -139,7 +139,9 @@ pub async fn updater_for_manifest(
     };
     let paths = std::iter::once(source);
     #[cfg(unix)]
-    let paths = paths.chain(std::iter::once(home.join(".tokn/ctl/bin/ctlup")));
+    let paths = paths.chain(std::iter::once(
+      ctl_core::paths::directory_for_account(home).join("bin/ctlup"),
+    ));
     for path in paths {
       match native_updater(&path).await {
         Ok(bytes) => return Ok(bytes),
@@ -200,7 +202,7 @@ pub async fn updater_for_manifest(
   let updater = crate::remote_bundle::published::download_updater_cached(
     channel,
     target,
-    &home.join(".tokn/ctl/cache/updaters"),
+    &ctl_core::paths::directory_for_account(home).join("cache/updaters"),
   )
   .await
   .map_err(io::Error::other)?;
@@ -245,7 +247,7 @@ pub(crate) fn remember_verified_updater(
 ) -> io::Result<()> {
   verify_supplied_identity(manifest, &updater.info)?;
   crate::remote_bundle::published::cache_verified_for_manifest(
-    &home.join(".tokn/ctl/cache/updaters"),
+    &ctl_core::paths::directory_for_account(home).join("cache/updaters"),
     manifest,
     updater,
   )
@@ -260,7 +262,7 @@ fn supplied_updater(
     return Ok(None);
   };
   crate::remote_bundle::published::read_cached_updater(
-    &home.join(".tokn/ctl/cache/updaters"),
+    &ctl_core::paths::directory_for_account(home).join("cache/updaters"),
     &info,
   )
   .map(|updater| updater.map(|updater| updater.bytes))
@@ -271,7 +273,7 @@ pub(crate) fn supplied_updater_info(
   home: &Path,
   manifest: &ctl_core::bundles::Manifest,
 ) -> io::Result<Option<crate::remote_bundle::published::UpdaterInfo>> {
-  let root = home.join(".tokn/ctl/cache/updaters");
+  let root = ctl_core::paths::directory_for_account(home).join("cache/updaters");
   if !super::storage_exists(&root.join("records"))? {
     return Ok(None);
   }

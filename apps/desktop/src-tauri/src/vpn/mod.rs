@@ -220,7 +220,7 @@ fn require_connected(status: &VpnStatus) -> CommandResult<()> {
 }
 
 fn directory(_app: &tauri::AppHandle) -> CommandResult<PathBuf> {
-  ctl_core::paths::directory()
+  ctl_core::paths::config_directory()
     .map_err(|_| CommandErrorDto::new("vpn_storage_unavailable", "Could not locate VPN settings."))
 }
 

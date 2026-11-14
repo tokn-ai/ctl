@@ -332,7 +332,6 @@ impl Bundle {
 
 #[derive(Debug, Clone)]
 pub struct Store {
-  home: PathBuf,
   root: PathBuf,
   cache: bool,
 }
@@ -341,9 +340,12 @@ impl Store {
   /// No filesystem work is performed until an explicit import or selection.
   #[must_use]
   pub fn new(home: &Path) -> Self {
+    Self::from_data_root(&crate::paths::directory_for_account(home))
+  }
+
+  pub(crate) fn from_data_root(root: &Path) -> Self {
     Self {
-      home: home.to_owned(),
-      root: home.join(".tokn/ctl/components"),
+      root: root.join("components"),
       cache: false,
     }
   }
@@ -353,8 +355,7 @@ impl Store {
   #[must_use]
   pub fn cache(home: &Path) -> Self {
     Self {
-      home: home.to_owned(),
-      root: home.join(".tokn/ctl/cache/components"),
+      root: crate::paths::directory_for_account(home).join("cache/components"),
       cache: true,
     }
   }

@@ -77,7 +77,7 @@ export function useWorkspace() {
         // Normalize native field order before comparing serialized snapshots.
         let savedCatalog = hostCatalogDocument(restored);
         const hostWriter = new WorkspaceWriter({ ...catalog, document: savedCatalog }, updateHosts);
-        if (snapshot.revision === null) {
+        if (snapshot.revision === null && !snapshot.isolated_config) {
           const legacy = readLegacyRemoteTargets(browserStorage());
           const additions = legacy.filter((target) => !restored.hosts.some((host) =>
             (!host.source || host.source === "saved") && host.connection_methods.some((method) =>

@@ -200,8 +200,8 @@ fn installed_executables(
   }
   executables.insert(
     "ctlup".into(),
-    home
-      .join(".tokn/ctl/bin")
+    ctl_core::paths::directory_for_account(home)
+      .join("bin")
       .join(format!("ctlup{}", std::env::consts::EXE_SUFFIX)),
   );
   executables

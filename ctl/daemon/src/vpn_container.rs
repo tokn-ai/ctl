@@ -159,8 +159,11 @@ fn digest(value: &[u8]) -> String {
 fn invalid(message: impl Into<String>) -> io::Error {
   io::Error::new(io::ErrorKind::InvalidInput, message.into())
 }
-fn owner() -> io::Result<PathBuf> {
-  dirs::home_dir().ok_or_else(|| io::Error::other("Could not locate the VPN owner"))
+pub(super) fn owner() -> io::Result<PathBuf> {
+  ctl_core::paths::data_override().map_or_else(
+    || dirs::home_dir().ok_or_else(|| io::Error::other("Could not locate the VPN owner")),
+    Ok,
+  )
 }
 pub(super) fn namespace() -> io::Result<String> {
   Ok(digest(owner()?.as_os_str().as_encoded_bytes()))

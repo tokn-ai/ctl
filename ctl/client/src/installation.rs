@@ -52,12 +52,12 @@ pub struct CachePruneResult {
 /// already completed installation and report cleanup independently.
 pub fn prune_caches(home: &Path) -> io::Result<CachePruneResult> {
   let download_bytes = crate::remote_bundle::prune_download_cache(
-    &home.join(".tokn/ctl/cache/downloads"),
+    &ctl_core::paths::directory_for_account(home).join("cache/downloads"),
     256 * 1024 * 1024,
   )?;
   let result = ctl_core::bundles::Store::cache(home).prune_cache(512 * 1024 * 1024)?;
   let updater_bytes = Installations::new(home).with_locked_manifests(|pins| {
-    let root = home.join(".tokn/ctl/cache/updaters");
+    let root = ctl_core::paths::directory_for_account(home).join("cache/updaters");
     if pins.is_empty() {
       crate::remote_bundle::published::prune_updater_cache(&root, 128 * 1024 * 1024)
     } else {
@@ -242,10 +242,12 @@ struct Settings {
 /// # Errors
 /// Reports invalid or unsafe account settings rather than silently replacing them.
 pub fn default_channel(home: &Path) -> io::Result<BundleChannel> {
-  if !storage_exists(&home.join(".tokn/ctl"))? {
+  let root = settings_directory(home);
+  let anchor = settings_anchor(&root)?;
+  if !storage_exists_at(&root, anchor)? {
     return Ok(BundleChannel::default());
   }
-  let path = home.join(".tokn/ctl/ctlup.json");
+  let path = root.join("ctlup.json");
   let bytes = match crate::components::read_input(&path, 4096) {
     Ok(bytes) => bytes,
     Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(BundleChannel::default()),
@@ -263,8 +265,8 @@ pub fn default_channel(home: &Path) -> io::Result<BundleChannel> {
 /// # Errors
 /// Reports unsafe storage or failed atomic settings publication.
 pub fn set_channel(home: &Path, channel: BundleChannel) -> io::Result<()> {
-  let root = home.join(".tokn/ctl");
-  safe_directory(&root)?;
+  let root = settings_directory(home);
+  safe_directory_at(&root, settings_anchor(&root)?)?;
   let path = root.join(format!(".ctlup-settings-{}", uuid::Uuid::new_v4()));
   let result = (|| {
     let mut file = private_fs::options()
@@ -289,12 +291,32 @@ pub fn set_channel(home: &Path, channel: BundleChannel) -> io::Result<()> {
   result
 }
 
+fn settings_directory(home: &Path) -> PathBuf {
+  ctl_core::paths::config_override().unwrap_or_else(|| ctl_core::paths::directory_for_account(home))
+}
+
+fn settings_anchor(root: &Path) -> io::Result<&Path> {
+  if ctl_core::paths::config_override().is_some() {
+    if !root.is_absolute()
+      || root
+        .components()
+        .any(|part| part == std::path::Component::ParentDir)
+    {
+      return Err(invalid(
+        "CTL_CONFIG_DIR must be an absolute directory without parent traversals",
+      ));
+    }
+    Ok(root)
+  } else {
+    ctl_core::paths::managed_storage_anchor(root)
+  }
+}
+
 pub(super) fn safe_directory(path: &Path) -> io::Result<()> {
-  let home = path
-    .ancestors()
-    .find(|ancestor| ancestor.file_name().is_some_and(|name| name == ".tokn"))
-    .and_then(Path::parent)
-    .ok_or_else(|| invalid("ctlup storage must be inside the account directory"))?;
+  safe_directory_at(path, ctl_core::paths::managed_storage_anchor(path)?)
+}
+
+fn safe_directory_at(path: &Path, home: &Path) -> io::Result<()> {
   let mut directory = home.to_owned();
   let relative = path.strip_prefix(home).map_err(io::Error::other)?;
   for part in std::iter::once(None).chain(relative.components().map(Some)) {
@@ -331,11 +353,10 @@ pub(super) fn safe_directory(path: &Path) -> io::Result<()> {
 }
 
 pub(super) fn storage_exists(path: &Path) -> io::Result<bool> {
-  let home = path
-    .ancestors()
-    .find(|ancestor| ancestor.file_name().is_some_and(|name| name == ".tokn"))
-    .and_then(Path::parent)
-    .ok_or_else(|| invalid("ctlup storage must be inside the account directory"))?;
+  storage_exists_at(path, ctl_core::paths::managed_storage_anchor(path)?)
+}
+
+fn storage_exists_at(path: &Path, home: &Path) -> io::Result<bool> {
   let mut directory = home.to_owned();
   let relative = path.strip_prefix(home).map_err(io::Error::other)?;
   for part in std::iter::once(None).chain(relative.components().map(Some)) {

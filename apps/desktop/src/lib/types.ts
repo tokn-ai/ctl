@@ -661,6 +661,7 @@ export interface LocalPortAvailability {
 }
 
 export interface WorkspaceSnapshot {
+  isolated_config?: boolean;
   revision: string | null;
   document: WorkspaceDocument;
 }

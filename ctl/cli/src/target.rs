@@ -112,7 +112,7 @@ pub fn catalog_path() -> Result<PathBuf, HostError> {
   std::env::var_os("CTL_HOSTS_PATH")
     .map_or_else(
       || {
-        ctl_core::paths::directory()
+        ctl_core::paths::config_directory()
           .ok()
           .map(|directory| directory.join("hosts.json"))
       },

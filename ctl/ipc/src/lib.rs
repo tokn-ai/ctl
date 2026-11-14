@@ -902,12 +902,15 @@ pub fn socket_path() -> PathBuf {
 }
 
 /// Resolves the normal per-user endpoint without `CTLD_SOCKET_PATH` or
-/// `CTLD_RUNTIME_DIR` overrides. Unix still respects `XDG_RUNTIME_DIR`.
+/// `CTLD_RUNTIME_DIR` overrides. The full data profile still applies.
 #[must_use]
 pub fn default_socket_path() -> PathBuf {
   #[cfg(unix)]
   {
     let socket_name = format!("ctld-v{}.sock", PROTOCOL_VERSION.major);
+    if let Some(directory) = ctl_core::paths::data_override() {
+      return directory.join("run/ctld").join(socket_name);
+    }
     if let Some(directory) = env::var_os("XDG_RUNTIME_DIR") {
       return PathBuf::from(directory).join("ctld").join(socket_name);
     }
@@ -918,7 +921,10 @@ pub fn default_socket_path() -> PathBuf {
   }
   #[cfg(windows)]
   {
-    let directory = dirs::data_local_dir().unwrap_or_else(env::temp_dir);
+    let directory = ctl_core::paths::data_override()
+      .map(|path| path.join("run/ctld"))
+      .or_else(dirs::data_local_dir)
+      .unwrap_or_else(env::temp_dir);
     windows::endpoint(&directory)
   }
 }

@@ -1,3 +1,5 @@
+import { translate, type Locale } from "../features/i18n/messages";
+import { useLocale } from "../features/i18n/LocaleContext";
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { ComponentBundlePanel } from "../components/about/ComponentBundlePanel";
@@ -21,12 +23,21 @@ interface Props {
   remote_targets?: readonly ConnectionTarget[];
 }
 
-function actionDescription(preflight: ComponentActionPreflight): string {
-  return `${preflight.impact.description} Running: ${versionLabel(preflight.running)}. Replacement: ${versionLabel(preflight.available)}. Confirm within 20 seconds; otherwise check the component again.`;
+function actionDescription(preflight: ComponentActionPreflight, locale: Locale): string {
+  const { kind, active_transports, description } = preflight.impact;
+  const impact_id = kind === "remote_reconnect" && !preflight.available
+    ? "about.impact_remote_reconnect_unverified"
+    : kind ? `about.impact_${kind}` : null;
+  return translate(locale, "about.action_description", {
+    impact: impact_id ? translate(locale, impact_id, { count: active_transports ?? 0 }) : description,
+    running: versionLabel(preflight.running, locale),
+    replacement: versionLabel(preflight.available, locale),
+  });
 }
 
 /** Remains mounted when hidden so a requested restart is observed to completion. */
 export function AboutPage({ visible, on_close, on_restarted, on_dialog_change, execute_action, remote_targets = [] }: Props) {
+  const { t, locale, intl, formatText } = useLocale();
   const model = useComponentVersions(visible, on_restarted, execute_action);
   const [component_flow, setComponentFlow] = useState<{ target: ConnectionTarget; mode: "inspect" | "update" } | null>(null);
   const [update_context, setUpdateContext] = useState<ComponentUpdateContext | null>(null);
@@ -42,36 +53,36 @@ export function AboutPage({ visible, on_close, on_restarted, on_dialog_change, e
   const table_props = { busy_id: model.busy_id, restarting: model.restarting, action_error: model.action_error, on_restart: (id: string) => void model.requestRestart(id) };
 
   return <>
-    <section className="about-page" aria-label="About ctmux" hidden={!visible}>
+    <section className="about-page" aria-label={t("about.title")} hidden={!visible}>
       <header className="about-page-header">
-        <div><p className="about-eyebrow">CTMUX</p><h1 ref={heading} tabIndex={-1}>About ctmux</h1><p className="about-muted">Installed components, running processes, and updates.</p></div>
-        <button type="button" onClick={on_close} className="about-back"><Icon name="close" />Back to workspace</button>
+        <div><p className="about-eyebrow">CTMUX</p><h1 ref={heading} tabIndex={-1}>{t("about.title")}</h1><p className="about-muted">{t("about.intro")}</p></div>
+        <button type="button" onClick={on_close} className="about-back"><Icon name="close" />{t("about.back")}</button>
       </header>
       <div className="about-content">
-        <div className="about-app-card"><Icon name="terminal" size={36} /><div><strong>ctmux</strong><p>{app ? versionLabel(app.running) : model.loading ? "Checking app version…" : "Version unavailable"}</p><small>Desktop application</small></div></div>
-        <section aria-label="Component version checks">
-          <div className="about-refresh-row"><button type="button" onClick={() => setUpdateContext({})}>Update components…</button><p>{model.checked_at === null ? "Component versions have not been checked." : `Last checked ${new Date(model.checked_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`}</p><button type="button" onClick={() => void model.refresh()} disabled={model.loading || model.busy_id !== null}><Icon name="refresh" />{model.loading ? "Checking…" : "Refresh versions"}</button></div>
-          {model.error ? <InlineFeedback>Could not refresh versions: {model.error}{model.snapshot ? " Showing the last successful check." : ""}</InlineFeedback> : null}
-          {model.action_error && !model.snapshot?.components.some((row) => row.component_id === model.action_error!.component_id) ? <InlineFeedback>{model.action_error.message}</InlineFeedback> : null}
-          {model.loading && !model.snapshot ? <p role="status">Checking local components and saved hosts…</p> : null}
+        <div className="about-app-card"><Icon name="terminal" size={36} /><div><strong>ctmux</strong><p>{app ? versionLabel(app.running, locale) : model.loading ? t("about.checking_app") : t("about.unknown_version")}</p><small>{t("about.desktop")}</small></div></div>
+        <section aria-label={t("about.version_checks")}>
+          <div className="about-refresh-row"><button type="button" onClick={() => setUpdateContext({})}>{t("about.action_update")}</button><p>{model.checked_at === null ? t("about.unchecked") : t("about.last_checked", { time: intl.formatTime(model.checked_at, { hour: "2-digit", minute: "2-digit", second: "2-digit" }) })}</p><button type="button" onClick={() => void model.refresh()} disabled={model.loading || model.busy_id !== null}><Icon name="refresh" />{model.loading ? t("about.checking") : t("about.refresh_versions")}</button></div>
+          {model.error ? <InlineFeedback>{t(model.snapshot ? "about.refresh_failed_cached" : "about.refresh_failed", { detail: model.error })}</InlineFeedback> : null}
+          {model.action_error && !model.snapshot?.components.some((row) => row.component_id === model.action_error!.component_id) ? <InlineFeedback>{formatText(model.action_error.message)}</InlineFeedback> : null}
+          {model.loading && !model.snapshot ? <p role="status">{t("about.checking_local_remote")}</p> : null}
         </section>
         <PublishedBundleStatus visible={visible} on_update={(channel) => setUpdateContext({ source: { kind: "published", channel } })} />
         <ComponentBundlePanel visible={visible} on_selected={() => void model.refresh()} />
-        <section className="about-section" aria-labelledby="about-local"><h2 id="about-local">Local components</h2><p className="about-muted">On disk shows the selected local build. Restart separately to apply it to a running service.</p>{local.length ? <ComponentVersionTable rows={local} {...table_props} /> : !model.loading ? <p className="about-muted">Local component versions are unavailable.</p> : null}</section>
-        <section className="about-section" aria-labelledby="about-remote"><h2 id="about-remote">Remote hosts</h2><p className="about-muted">Expand a host to compare its components. Check host authenticates through its preferred route. Updating installs verified components and keeps sessions; restart separately after confirmation.</p>{remote.length ? <ComponentVersionTable rows={remote} {...table_props} on_manage_host={(host_id, mode) => {
+        <section className="about-section" aria-labelledby="about-local"><h2 id="about-local">{t("about.local_components")}</h2><p className="about-muted">{t("about.local_help")}</p>{local.length ? <ComponentVersionTable rows={local} {...table_props} /> : !model.loading ? <p className="about-muted">{t("about.no_local_components")}</p> : null}</section>
+        <section className="about-section" aria-labelledby="about-remote"><h2 id="about-remote">{t("about.remote_hosts")}</h2><p className="about-muted">{t("about.remote_help")}</p>{remote.length ? <ComponentVersionTable rows={remote} {...table_props} on_manage_host={(host_id, mode) => {
           const target = manageable_targets.find((target) => target.host_id === host_id);
           if (target) { if (mode === "update") setUpdateContext({ targets: [target] }); else setComponentFlow({ target, mode }); }
-        }} manageable_host_ids={manageable_targets.flatMap((target) => target.host_id ? [target.host_id] : [])} /> : !model.loading ? <p className="about-empty">No saved or connected remote hosts.</p> : null}</section>
-        <div className="about-protocol-legend" aria-label="Protocol status legend">
-          <span className="about-protocol-current"><Icon name="check" size={14} />Current protocol</span>
-          <span className="about-protocol-compatible"><Icon name="check" size={14} />Compatible, different version</span>
-          <span className="about-protocol-incompatible"><Icon name="close" size={14} />Incompatible protocol</span>
-          <span className="about-muted">? Unreported or unverified</span>
+        }} manageable_host_ids={manageable_targets.flatMap((target) => target.host_id ? [target.host_id] : [])} /> : !model.loading ? <p className="about-empty">{t("about.no_remote_hosts")}</p> : null}</section>
+        <div className="about-protocol-legend" aria-label={t("about.protocol_legend")}>
+          <span className="about-protocol-current"><Icon name="check" size={14} />{t("about.current_protocol")}</span>
+          <span className="about-protocol-compatible"><Icon name="check" size={14} />{t("about.compatible_protocol")}</span>
+          <span className="about-protocol-incompatible"><Icon name="close" size={14} />{t("about.incompatible_protocol")}</span>
+          <span className="about-muted">{t("about.unverified_protocol")}</span>
         </div>
-        <p className="about-footnote">“Different build” means the source differs; it does not establish which build is newer. Unknown versions cannot be compared.</p>
+        <p className="about-footnote">{t("about.comparison_footnote")}</p>
       </div>
     </section>
-    {model.preflight ? createPortal(<QuickInput title={`${model.preflight.action === "reconnect" ? "Reconnect" : "Restart"} ${model.preflight.label}`} description={actionDescription(model.preflight)} mode={{ kind: "confirm", confirm_label: `${model.preflight.action === "reconnect" ? "Reconnect" : "Restart"} ${model.preflight.component === "ctl_agent" ? "ctl-agent" : model.preflight.component}`, destructive: model.preflight.action === "restart" }} onCancel={model.cancelRestart} onSubmit={model.confirmRestart} />, document.body) : null}
+    {model.preflight ? createPortal(<QuickInput title={t(model.preflight.action === "reconnect" ? "about.reconnect_component" : "about.restart_component", { name: model.preflight.label })} description={actionDescription(model.preflight, locale)} mode={{ kind: "confirm", confirm_label: t(model.preflight.action === "reconnect" ? "about.reconnect_component" : "about.restart_component", { name: model.preflight.component === "ctl_agent" ? "ctl-agent" : model.preflight.component }), destructive: model.preflight.action === "restart" }} onCancel={model.cancelRestart} onSubmit={model.confirmRestart} />, document.body) : null}
     {update_context ? createPortal(<UpdateComponentsDialog targets={remote_targets} context={update_context} on_updated={() => {
       void model.refresh();
     }} on_close={() => setUpdateContext(null)} />, document.body) : null}

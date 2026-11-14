@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { message } from "../i18n/messages";
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { sshReachability } from "../../lib/tauri";
@@ -74,7 +75,7 @@ describe("SSH greeting observations", () => {
       ? { state: "not_checked", reason: "route_requires_connection", message: "An SSH gateway would need a connection." } : available);
     const { result } = setup({ hosts: [multiple] });
     await waitFor(() => expect(result.current.statuses.get(host.host_id)).toMatchObject({
-      state: "available", method_names: ["Direct"], message: "Gateway: An SSH gateway would need a connection.",
+      state: "available", method_names: ["Direct"], message: message("host_observation.named_diagnostic", { name: "Gateway", detail: "An SSH gateway would need a connection." }),
     }));
   });
 

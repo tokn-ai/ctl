@@ -1,3 +1,4 @@
+import { LocalizedError, message, type DisplayText } from "../i18n/messages";
 import {
   useCallback,
   useEffect,
@@ -8,7 +9,7 @@ import {
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { closeAttachmentWindow, loadHosts, loadWorkspace, listSshConfigHosts, listTailscaleDevices, updateHosts, updateWorkspace } from "../../lib/tauri";
 import type { HostCatalogDocument, SessionSummary, SshConfigHost, TailscaleDeviceCatalog } from "../../lib/types";
-import { errorMessage } from "../../lib/errors";
+import { errorMessage, localizedErrorText } from "../../lib/errors";
 import {
   browserStorage,
   clearLegacyRemoteTargets,
@@ -38,7 +39,7 @@ export function useWorkspace() {
   const savedCatalogRef = useRef<HostCatalogDocument>({ schema_version: 1, hosts: [], ssh_gateways: [] });
   const [sshConfigHosts, setSshConfigHosts] = useState<SshConfigHost[]>([]);
   const [sshConfigWarning, setSshConfigWarning] = useState<string | null>(null);
-  const [tailscaleCatalog, setTailscaleCatalog] = useState<TailscaleDeviceCatalog>({ devices: [], warnings: [], state: "not_installed" });
+  const [tailscaleCatalog, setTailscaleCatalog] = useState<Omit<TailscaleDeviceCatalog, "warnings"> & { warnings: DisplayText[] }>({ devices: [], warnings: [], state: "not_installed" });
   const sshConfigHostsRef = useRef<SshConfigHost[]>([]);
   const discoveryGeneration = useRef(0);
   const [discoveryLoading, setDiscoveryLoading] = useState(false);
@@ -51,13 +52,13 @@ export function useWorkspace() {
   const closingRef = useRef(false);
   const isClosing = useCallback(() => closingRef.current, []);
   const closeBlockedRef = useRef<() => boolean>(() => false);
-  const [load_error, setLoadError] = useState<string | null>(null);
-  const [save_error, setSaveError] = useState<string | null>(null);
-  const [close_error, setCloseError] = useState<string | null>(null);
+  const [load_error, setLoadError] = useState<DisplayText | null>(null);
+  const [save_error, setSaveError] = useState<DisplayText | null>(null);
+  const [close_error, setCloseError] = useState<DisplayText | null>(null);
   const [close_blocked, setCloseBlocked] = useState(false);
   const [load_attempt, setLoadAttempt] = useState(0);
   const retryLoad = useCallback(() => setLoadAttempt((attempt) => attempt + 1), []);
-  const error = load_error ?? save_error ?? close_error ?? (close_blocked ? "Wait for ongoing operations before closing the window." : null);
+  const error = load_error ?? save_error ?? close_error ?? (close_blocked ? message("shell.wait_before_close") : null);
   const mounted = useRef(false);
 
   useEffect(() => {
@@ -111,7 +112,7 @@ export function useWorkspace() {
         setView(restored);
         setReady(true);
       } catch (failure) {
-        if (!cancelled) setLoadError(errorMessage(failure));
+        if (!cancelled) setLoadError(localizedErrorText(failure));
       }
     })();
     return () => {
@@ -122,7 +123,7 @@ export function useWorkspace() {
 
   const queueOperation = useCallback((run: (writer: WorkspaceWriter) => Promise<void>, mode: "write" | "read" = "write"): Promise<void> => {
     const writer = writerRef.current;
-    if (!writer) return Promise.reject(new Error("Workspace is not loaded."));
+    if (!writer) return Promise.reject(new LocalizedError("workspace.not_loaded"));
     if (mode === "write") {
       pendingWrites.current += 1;
       setSaving(true);
@@ -135,7 +136,7 @@ export function useWorkspace() {
           if (mode === "write" && mounted.current) setSaveError(null);
         },
         (failure: unknown) => {
-          if (mode === "write" && mounted.current) setSaveError(errorMessage(failure));
+          if (mode === "write" && mounted.current) setSaveError(localizedErrorText(failure));
           throw failure;
         },
       )
@@ -153,7 +154,7 @@ export function useWorkspace() {
     const document = hostCatalogDocument(next);
     if (JSON.stringify(document) === JSON.stringify(savedCatalogRef.current)) return false;
     const writer = hostWriterRef.current;
-    if (!writer) throw new Error("Hosts are not loaded.");
+    if (!writer) throw new LocalizedError("workspace.hosts_not_loaded");
     await writer.write(document, retry);
     savedCatalogRef.current = document;
     return true;
@@ -175,7 +176,7 @@ export function useWorkspace() {
   }, [persist]);
 
   const replaceView = useCallback((replace: (current: WorkspaceView) => WorkspaceView) => {
-    if (!writerRef.current || closingRef.current) throw new Error("Workspace is not available.");
+    if (!writerRef.current || closingRef.current) throw new LocalizedError("workspace.not_available");
     return queueOperation(async (writer) => {
       const proposed = replace(viewRef.current);
       const catalogChanged = await persistCatalog(proposed, true);
@@ -199,8 +200,8 @@ export function useWorkspace() {
         include_ssh ? listSshConfigHosts().catch((failure: unknown) => ({
           hosts: sshConfigHostsRef.current, warnings: [errorMessage(failure)],
         })) : Promise.resolve(null),
-        listTailscaleDevices().catch((failure: unknown): TailscaleDeviceCatalog => ({
-          devices: [], warnings: [`Tailscale discovery: ${errorMessage(failure)}`], state: "error",
+        listTailscaleDevices().catch((failure: unknown) => ({
+          devices: [], warnings: [message("workspace.tailscale_discovery", { detail: localizedErrorText(failure) })], state: "error" as const,
         })),
       ]);
       if (!mounted.current || generation !== discoveryGeneration.current) return;
@@ -221,7 +222,7 @@ export function useWorkspace() {
       }, "read");
     } catch (failure) {
       if (mounted.current && generation === discoveryGeneration.current)
-        setTailscaleCatalog({ devices: [], warnings: [errorMessage(failure)], state: "error" });
+        setTailscaleCatalog({ devices: [], warnings: [localizedErrorText(failure)], state: "error" });
     } finally {
       if (mounted.current && generation === discoveryGeneration.current) setDiscoveryLoading(false);
     }
@@ -296,7 +297,7 @@ export function useWorkspace() {
         closingRef.current = false;
         setClosing(false);
         // Failed persistence already owns save_error and its recovery action.
-        if (workspace_saved) setCloseError(`Window close paused: ${errorMessage(failure)}`);
+        if (workspace_saved) setCloseError(message("workspace.close_paused", { detail: localizedErrorText(failure) }));
       }
     });
     void registration.then(
@@ -304,7 +305,7 @@ export function useWorkspace() {
         if (disposed) unlisten();
       },
       (failure: unknown) => {
-        if (!disposed) setCloseError(`Could not handle window closure: ${errorMessage(failure)}`);
+        if (!disposed) setCloseError(message("workspace.close_failed", { detail: localizedErrorText(failure) }));
       },
     );
     return () => {
@@ -349,7 +350,7 @@ export function useWorkspace() {
     sshConfigHosts,
     sshConfigWarning,
     tailscaleDevices: tailscaleCatalog.devices,
-    tailscaleWarning: tailscaleCatalog.warnings.join("\n") || null,
+    tailscaleWarnings: tailscaleCatalog.warnings,
     tailscaleState: tailscaleCatalog.state,
     discoveryLoading,
     refreshHostDiscovery,

@@ -1,3 +1,4 @@
+import { useLocale } from "../../features/i18n/LocaleContext";
 import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { HOST_COLOR_PALETTE, normalizeHostColor, randomHostColors } from "../../features/workspace/hostColor";
@@ -13,6 +14,7 @@ interface Props {
 }
 
 export function HostColorPicker({ host_name, color, default_color, on_change, disabled = false, connected = true }: Props) {
+  const { t } = useLocale();
   const [open, setOpen] = useState(false);
   const [suggestions, setSuggestions] = useState<string[]>([]);
   const [position, setPosition] = useState({ top: 0, left: 0 });
@@ -78,7 +80,7 @@ export function HostColorPicker({ host_name, color, default_color, on_change, di
       className="host-color-swatch"
       type="button"
       aria-label={name}
-      title={`${name} · ${swatch_color}`}
+      title={t("host_color.swatch", { name: name, color: swatch_color })}
       aria-pressed={current_color === swatch_color}
       onClick={() => choose(swatch_color)}
     >
@@ -91,9 +93,9 @@ export function HostColorPicker({ host_name, color, default_color, on_change, di
       ref={trigger}
       className="host-color-trigger"
       type="button"
-      aria-label={`Change color for ${host_name}`}
-      aria-description={connected ? "Connected" : "Not connected"}
-      title={`Change color for ${host_name}`}
+      aria-label={t("host_color.change", { host: host_name })}
+      aria-description={connected ? t("host_color.connected") : t("host_color.disconnected")}
+      title={t("host_color.change", { host: host_name })}
       aria-haspopup="dialog"
       aria-expanded={open}
       aria-controls={open ? id : undefined}
@@ -112,7 +114,7 @@ export function HostColorPicker({ host_name, color, default_color, on_change, di
         id={id}
         className="host-color-popover"
         role="dialog"
-        aria-label={`Color for ${host_name}`}
+        aria-label={t("host_color.for_host", { host: host_name })}
         style={position}
         onKeyDown={(event) => {
           if (event.key !== "Escape") return;
@@ -122,19 +124,19 @@ export function HostColorPicker({ host_name, color, default_color, on_change, di
           trigger.current?.focus();
         }}
       >
-        <div className="host-color-swatches" role="group" aria-label="Preset colors">
-          {HOST_COLOR_PALETTE.map(({ name, color: preset }) => swatch(name, preset))}
+        <div className="host-color-swatches" role="group" aria-label={t("host_color.preset")}>
+          {HOST_COLOR_PALETTE.map(({ label_id, color: preset }) => swatch(t(label_id), preset))}
         </div>
         <div className="host-color-random-heading">
-          <span>Random</span>
-          <button type="button" onClick={() => setSuggestions(randomHostColors())}>Shuffle</button>
+          <span>{t("host_color.random")}</span>
+          <button type="button" onClick={() => setSuggestions(randomHostColors())}>{t("host_color.shuffle")}</button>
         </div>
-        <div className="host-color-swatches host-color-suggestions" role="group" aria-label="Random colors">
-          {suggestions.map((suggestion) => swatch(`Color ${suggestion}`, suggestion))}
+        <div className="host-color-swatches host-color-suggestions" role="group" aria-label={t("host_color.random_colors")}>
+          {suggestions.map((suggestion) => swatch(t("host_color.suggestion", { color: suggestion }), suggestion))}
         </div>
-        <button className="host-color-reset" type="button" onClick={() => choose(undefined)} title="Reset to the default host color">
+        <button className="host-color-reset" type="button" onClick={() => choose(undefined)} title={t("host_color.reset_hint")}>
           <span className="host-color-dot" style={{ background: default_color }} aria-hidden="true" />
-          Reset
+          {t("host_color.reset")}
         </button>
       </div>,
       document.body,

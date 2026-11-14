@@ -1,3 +1,4 @@
+import { LocalizedError } from "../i18n/messages";
 import type {
   ConnectionTarget,
   RemoteIdentity,
@@ -51,16 +52,16 @@ export function recoverRemoteHost(
 ) {
   if (!candidate.host_id) return null;
   const host = view.hosts.find((item) => item.host_id === candidate.host_id);
-  if (!host) throw new Error("This host is no longer in the workspace.");
+  if (!host) throw new LocalizedError("workspace.host_missing");
   if (candidate.unavailable || host.source === "unavailable")
-    throw new Error(candidate.unavailable ?? "This host is unavailable. Restore its definition before connecting.");
+    throw candidate.unavailable ? new Error(candidate.unavailable) : new LocalizedError("workspace.restore_unavailable");
   const expected = expectedHostIdentity(host);
   if (expected && expected.remote_id !== remote_info.remote_id)
-    throw new Error("This connection reaches a different remote environment. Each host supports one account; add a separate host for another account.");
+    throw new LocalizedError("workspace.account_mismatch");
   const method_id = candidate.method_id ?? host.preferred_method_id;
   const method = host.connection_methods.find((method) => method.method_id === method_id);
   if (!method)
-    throw new Error("This connection method is no longer saved on the host.");
+    throw new LocalizedError("workspace.saved_method_missing");
   if (method.target.unavailable) throw new Error(method.target.unavailable);
   const save_ssh_user = host.source === "tailscale" && Boolean(candidate.user?.trim()) &&
     candidate.user !== method.target.user;

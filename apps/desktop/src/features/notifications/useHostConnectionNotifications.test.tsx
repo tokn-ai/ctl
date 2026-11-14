@@ -2,6 +2,7 @@
 import { cleanup, renderHook } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import type { HostConnectionStatus, SshConnectionTarget } from "../../lib/types";
+import { message } from "../i18n/messages";
 import { NotificationStore } from "./NotificationStore";
 import { useHostConnectionNotifications } from "./useHostConnectionNotifications";
 
@@ -28,8 +29,8 @@ describe("host connection notification ownership", () => {
     hook.rerender({ connection: status("available"), attached_host_keys: new Set() });
     hook.rerender({ connection: status("unavailable"), attached_host_keys: new Set() });
     expect(store.snapshot().entries).toMatchObject([{
-      source_key: "host-connection:remote", title: "SSH connection lost", occurrence_count: 1,
-      actions: [{ label: "Connect host", args: { target_key: "host:remote" } }],
+      source_key: "host-connection:remote", title: message("notifications.ssh_lost"), occurrence_count: 1,
+      actions: [{ label: message("shell.connect_host"), args: { target_key: "host:remote" } }],
     }]);
     const entry = store.snapshot().entries[0];
     store.hide(entry.id);

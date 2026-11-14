@@ -2,6 +2,7 @@
 import { cleanup, renderHook } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ManagedTask } from "../../lib/types";
+import { formatText } from "../i18n/messages";
 import { NotificationStore } from "./NotificationStore";
 import { useWorkbenchNotifications } from "./useWorkbenchNotifications";
 import { COMMAND_IDS } from "../commands/commandIds";
@@ -17,6 +18,15 @@ function renderNotifications(store: NotificationStore, initialProps: typeof sour
   return renderHook((props) => useWorkbenchNotifications(store, props), { initialProps });
 }
 
+function englishEntries(store: NotificationStore) {
+  return store.snapshot().entries.map((entry) => ({
+    ...entry,
+    title: formatText("en", entry.title),
+    message: formatText("en", entry.message),
+    actions: entry.actions?.map((action) => ({ ...action, label: formatText("en", action.label) })),
+  }));
+}
+
 const failedTask: ManagedTask = {
   task_id: "build", definition: { name: "Build", program: "cargo", arguments: ["build"], working_directory: null, execution_mode: "background" },
   desired_state: "stopped", active_run: null,
@@ -27,19 +37,19 @@ describe("workbench notification sources", () => {
   it("records workspace save failures in the notification center with a retry action", () => {
     const store = new NotificationStore();
     const hook = renderNotifications(store, { ...sources, workspace_error: "Workspace could not be saved." });
-    expect(store.snapshot().entries).toMatchObject([{
+    expect(englishEntries(store)).toMatchObject([{
       title: "Workspace", message: "Workspace could not be saved.", severity: "error", toast_visible: false,
       actions: [{ label: "Retry saving", command_id: COMMAND_IDS.saveWorkspace }],
     }]);
     hook.rerender(sources);
-    expect(store.snapshot().entries).toMatchObject([{ resolved_at: expect.any(Number), toast_visible: false, actions: [] }]);
+    expect(englishEntries(store)).toMatchObject([{ resolved_at: expect.any(Number), toast_visible: false, actions: [] }]);
   });
 
   it("reports shortcut failures with retained-bindings context and a reload action", () => {
     const store = new NotificationStore();
     const initial = { ...sources, keybindings_error: "Invalid shortcut document." };
     const hook = renderNotifications(store, initial);
-    expect(store.snapshot().entries).toMatchObject([{
+    expect(englishEntries(store)).toMatchObject([{
       title: "Keyboard shortcuts", severity: "error", toast_visible: true,
       message: "Keyboard shortcuts: Invalid shortcut document. Last valid bindings remain active.",
       actions: [{ label: "Reload shortcuts", command_id: COMMAND_IDS.reloadKeybindings }],
@@ -57,7 +67,7 @@ describe("workbench notification sources", () => {
     const hook = renderNotifications(store, {
       ...sources, storage_error: "Archive failed: disk full", window_error: "Window could not be closed.",
     });
-    expect(store.snapshot().entries).toMatchObject([
+    expect(englishEntries(store)).toMatchObject([
       { severity: "error", title: "Window", message: "Window could not be closed.", toast_visible: true },
       { severity: "error", title: "Session history", message: "Archive failed: disk full", toast_visible: true },
     ]);
@@ -71,7 +81,7 @@ describe("workbench notification sources", () => {
     expect(store.snapshot().entries).toEqual([]);
     const failedAgain = { ...failedTask, last_run: { ...failedTask.last_run!, run_id: "two" } };
     hook.rerender({ ...sources, tasks_loaded: true, tasks: [failedAgain] });
-    expect(store.snapshot().entries).toMatchObject([{
+    expect(englishEntries(store)).toMatchObject([{
       title: "Task failed", occurrence_count: 1, message: "Build failed with exit code 1.",
       actions: [{ label: "View task", command_id: COMMAND_IDS.openTask, args: { value: "build" } }],
     }]);
@@ -79,7 +89,7 @@ describe("workbench notification sources", () => {
     hook.rerender({ ...sources, tasks_loaded: true, tasks: [{ ...failedAgain }] });
     expect(store.snapshot().entries[0].toast_visible).toBe(false);
     hook.rerender({ ...sources, tasks_loaded: true, tasks: [{ ...failedTask, last_run: { ...failedTask.last_run!, run_id: "three" } }] });
-    expect(store.snapshot().entries).toMatchObject([{ title: "Task failed", occurrence_count: 2, toast_visible: true }]);
+    expect(englishEntries(store)).toMatchObject([{ title: "Task failed", occurrence_count: 2, toast_visible: true }]);
   });
 
   it("does not mistake unloaded historical tasks or normal completion for a new failure", () => {
@@ -99,11 +109,11 @@ describe("workbench notification sources", () => {
     const hook = renderNotifications(store, { ...sources, tasks_loaded: true, tasks: [running] });
     const failed = { ...failedTask, last_run: { ...failedTask.last_run!, exit_code: null } };
     hook.rerender({ ...sources, tasks_loaded: true, tasks: [failed] });
-    expect(store.snapshot().entries).toMatchObject([{ title: "Task failed", message: "Build failed." }]);
+    expect(englishEntries(store)).toMatchObject([{ title: "Task failed", message: "Build failed." }]);
     store.dismiss(store.snapshot().entries[0].id);
     hook.rerender({ ...sources, tasks_loaded: true, tasks: [{ ...failed }] });
     expect(store.snapshot().entries).toEqual([]);
     hook.rerender({ ...sources, tasks_loaded: true, tasks: [{ ...failed, last_run: { ...failed.last_run!, run_id: "another" } }] });
-    expect(store.snapshot().entries).toMatchObject([{ title: "Task failed", toast_visible: true }]);
+    expect(englishEntries(store)).toMatchObject([{ title: "Task failed", toast_visible: true }]);
   });
 });

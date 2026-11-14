@@ -1,3 +1,4 @@
+import { translate, type Locale } from "../features/i18n/messages";
 import type { ShellStateSummary } from "./types";
 
 /**
@@ -11,9 +12,9 @@ export function displayWorkingDirectory(
   return shellState.cwd_display ?? shellState.cwd;
 }
 
-export function terminalPaneTitle(state: ShellStateSummary | null | undefined): string {
+export function terminalPaneTitle(state: ShellStateSummary | null | undefined, locale: Locale = "en"): string {
   const activity = state?.running_command?.trim() ||
-    (state?.shell_type && state.shell_type !== "unknown" ? state.shell_type : "Terminal");
+    (state?.shell_type && state.shell_type !== "unknown" ? state.shell_type : translate(locale, "session.terminal"));
   const directory = state ? displayWorkingDirectory(state) : null;
   return directory ? `${activity} · ${directory}` : activity;
 }

@@ -3,11 +3,12 @@ import type { AppCommand } from "./types";
 export function searchCommands(
   commands: readonly AppCommand[],
   query: string,
+  locale?: string,
 ): AppCommand[] {
   const visible = commands.filter(
     (command) => command.visibleInPalette !== false,
   );
-  const normalizedQuery = normalize(query).replace(/^>\s*/, "");
+  const normalizedQuery = normalize(query, locale).replace(/^>\s*/, "");
   if (!normalizedQuery) {
     return [...visible];
   }
@@ -16,7 +17,7 @@ export function searchCommands(
     .map((command, index) => ({
       command,
       index,
-      score: commandScore(command, normalizedQuery),
+      score: commandScore(command, normalizedQuery, locale),
     }))
     .filter((entry) => entry.score !== null)
     .sort((left, right) =>
@@ -53,9 +54,9 @@ export function nextEnabledIndex(
   return -1;
 }
 
-function commandScore(command: AppCommand, query: string): number | null {
-  const title = normalize(command.title);
-  const category = normalize(command.category);
+function commandScore(command: AppCommand, query: string, locale?: string): number | null {
+  const title = normalize(command.title, locale);
+  const category = normalize(command.category, locale);
   const haystack = normalize(
     [
       command.category,
@@ -63,6 +64,7 @@ function commandScore(command: AppCommand, query: string): number | null {
       command.detail ?? "",
       ...(command.keywords ?? []),
     ].join(" "),
+    locale,
   );
   const terms = query.split(/\s+/).filter(Boolean);
 
@@ -97,6 +99,6 @@ function isSubsequence(query: string, candidate: string): boolean {
   return query.length === 0;
 }
 
-function normalize(value: string): string {
-  return value.trim().toLocaleLowerCase();
+function normalize(value: string, locale?: string): string {
+  return value.normalize("NFKC").trim().toLocaleLowerCase(locale);
 }

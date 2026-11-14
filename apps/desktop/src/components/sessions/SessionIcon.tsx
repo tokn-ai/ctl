@@ -1,3 +1,5 @@
+import { useLocale } from "../../features/i18n/LocaleContext";
+import { translate, type Locale } from "../../features/i18n/messages";
 import type { ReactNode } from "react";
 import type { ShellType, ViewLayout } from "../../lib/types";
 
@@ -8,14 +10,11 @@ interface Props {
   class_name?: string;
 }
 
-const shell_names: Record<ShellType, string> = {
+const shell_names: Partial<Record<ShellType, string>> = {
   bash: "Bash",
   zsh: "Zsh",
   fish: "Fish",
   pwsh: "PowerShell",
-  cmd: "Command Prompt",
-  sh: "POSIX shell",
-  unknown: "Terminal",
 };
 
 const dollar = <path d="M14.5 8.5h-4a2 2 0 0 0 0 4h3a2 2 0 0 1 0 4h-4M12 7v11" />;
@@ -35,9 +34,11 @@ function paneCount(layout: ViewLayout): number {
     : layout.children.reduce((total, child) => total + paneCount(child), 0);
 }
 
-export function sessionIconLabel(shell_type: ShellType = "unknown", layout?: ViewLayout | null): string {
+export function sessionIconLabel(shell_type: ShellType = "unknown", layout?: ViewLayout | null, locale: Locale = "en"): string {
   const pane_count = layout ? paneCount(layout) : 0;
-  return pane_count > 1 ? `${pane_count}-pane session layout` : `${shell_names[shell_type]} session`;
+  return pane_count > 1
+    ? translate(locale, "session.split_icon", { count: pane_count })
+    : translate(locale, "session.shell_icon", { shell: shell_names[shell_type] ?? translate(locale, `session.shell_${shell_type}`) });
 }
 
 interface Region {
@@ -108,7 +109,8 @@ function layoutDividers(layout: ViewLayout, region: Region, paths: string[]): vo
 export function SessionIcon({ shell_type = "unknown", layout, size = 16, class_name }: Props) {
   const pane_count = layout ? paneCount(layout) : 0;
   const is_split = pane_count > 1;
-  const label = sessionIconLabel(shell_type, layout);
+  const { locale } = useLocale();
+  const label = sessionIconLabel(shell_type, layout, locale);
   const dividers: string[] = [];
   if (layout && is_split) {
     layoutDividers(layout, { x: 3, y: 4, width: 18, height: 16 }, dividers);

@@ -1,3 +1,4 @@
+import { LocalizedError, translate, type Locale } from "../i18n/messages";
 import type {
   ConnectionTarget,
   SessionSummary,
@@ -37,13 +38,13 @@ export function targetKey(target: ConnectionTarget): string {
       : `ssh:${target.destination}`;
 }
 
-export function targetLabel(target: ConnectionTarget): string {
-  return target.kind === "local" ? "local" : target.host_name ?? target.destination;
+export function targetLabel(target: ConnectionTarget, locale: Locale = "en"): string {
+  return target.kind === "local" ? translate(locale, "target.local") : target.host_name ?? target.destination;
 }
 
 /** Compact availability label; keep the detailed reason separate. */
-export function connectionUnavailableLabel(binding: Pick<SshConnectionTarget, "tailscale_node_id">): string {
-  return binding.tailscale_node_id ? "Tailscale unavailable" : "Unavailable";
+export function connectionUnavailableLabel(binding: Pick<SshConnectionTarget, "tailscale_node_id">, locale: Locale = "en"): string {
+  return translate(locale, binding.tailscale_node_id ? "target.tailscale_unavailable" : "target.unavailable");
 }
 
 export function sameTarget(
@@ -140,9 +141,7 @@ export function readLegacyRemoteTargets(
   if (!encoded) return [];
   const value: unknown = JSON.parse(encoded);
   if (!isStoredRemoteHostsV1(value) && !isStoredRemoteHostsV2(value)) {
-    throw new Error(
-      "The previous host settings could not be migrated. Their local-storage copy has been preserved.",
-    );
+    throw new LocalizedError("target.legacy_migration_failed");
   }
   const valid = isStoredRemoteHostsV1(value)
     ? value.ssh_destinations.every(
@@ -152,9 +151,7 @@ export function readLegacyRemoteTargets(
         (host) => normalizeSshTarget({ kind: "ssh", ...host }) !== null,
       );
   if (!valid) {
-    throw new Error(
-      "Previous host settings contain invalid entries. Their local-storage copy has been preserved.",
-    );
+    throw new LocalizedError("target.legacy_invalid_entries");
   }
   return loadRemoteTargets(storage);
 }

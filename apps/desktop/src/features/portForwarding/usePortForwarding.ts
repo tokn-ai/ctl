@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { configurePortForward, listPortForwards } from "../../lib/tauri";
-import { errorMessage } from "../../lib/errors";
+import { localizedErrorText } from "../../lib/errors";
+import { LocalizedError, message, type DisplayText } from "../i18n/messages";
 import { sameSshEndpoint } from "../workspace/remoteRecovery";
 import { useNotificationEnvironment } from "../notifications/NotificationContext";
 import type {
@@ -24,11 +25,15 @@ export interface PortForwardFeedbackOptions {
   feedback?: "inline" | "notification";
 }
 
+export type PortForwardObservation = Omit<PortForwardStatus, "message"> & { message: DisplayText | null };
+
+const PAUSED_FORWARD = message("ports.paused");
+
 export interface PortForwardingController {
   runtime_forwards: readonly WorkspacePortForward[];
-  statuses: ReadonlyMap<string, PortForwardStatus>;
+  statuses: ReadonlyMap<string, PortForwardObservation>;
   busy: ReadonlySet<string>;
-  hostErrors: ReadonlyMap<string, string>;
+  hostErrors: ReadonlyMap<string, DisplayText>;
   refreshing: boolean;
   lastRefreshedAt: number | null;
   refreshAll(): Promise<void>;
@@ -54,11 +59,11 @@ export function usePortForwarding(
     target: SshConnectionTarget;
     statuses: readonly PortForwardStatus[];
   }>>(new Map());
-  const [statuses, setStatuses] = useState<ReadonlyMap<string, PortForwardStatus>>(
+  const [statuses, setStatuses] = useState<ReadonlyMap<string, PortForwardObservation>>(
     new Map(),
   );
   const [busy, setBusy] = useState<ReadonlySet<string>>(new Set());
-  const [hostErrors, setHostErrors] = useState<ReadonlyMap<string, string>>(
+  const [hostErrors, setHostErrors] = useState<ReadonlyMap<string, DisplayText>>(
     new Map(),
   );
   const [refreshing, setRefreshing] = useState(false);
@@ -92,7 +97,7 @@ export function usePortForwarding(
   // refreshTarget (used after an explicit connection) selects a new method.
   const selectedTarget = useCallback((target: SshConnectionTarget) => {
     const current = runtimeTargetsRef.current.get(target.host_id!);
-    if (!current) throw new Error("This host is no longer in the workspace.");
+    if (!current) throw new LocalizedError("ports.host_missing");
     return operationsRef.current.get(target.host_id!)?.target ?? current;
   }, []);
 
@@ -140,17 +145,17 @@ export function usePortForwarding(
     if (pausedHostsRef.current.has(target.host_id!)) return Promise.resolve();
     return runHostOperation(target, async (isCurrent) => {
       const hostId = target.host_id!;
-      const reportRestoreFailure = (message: string) => {
+      const host = target.host_name ?? target.destination;
+      const reportRestoreFailure = (feedback: DisplayText) => {
         if (restore && forwardsRef.current.some((forward) => forward.host_id === hostId && forward.enabled)) {
           notifications?.notify(`port:restore:${hostId}`, {
-            severity: "error", title: "Could not restore port forwards", source: "Port forwarding",
-            message: `${target.host_name ?? target.destination}: ${message}`,
+            severity: "error", title: message("ports.restore_failed"), source: message("ports.title"), message: feedback,
           });
         }
       };
       setHostErrors((current) => isCurrent() ? withoutKey(current, hostId) : current);
       try {
-        const restore_errors: string[] = [];
+        const restore_failures: { name: string; error: string | null }[] = [];
         for (const forward of forwardsRef.current) {
           if (!isCurrent()) return;
           if (forward.host_id === hostId && forward.enabled) {
@@ -159,13 +164,19 @@ export function usePortForwarding(
               await configurePortForward(target, forward, false);
               return;
             }
-            if (status.state === "error") restore_errors.push(`${forward.name}: ${status.message ?? "Could not start forwarding."}`);
+            if (status.state === "error") restore_failures.push({ name: forward.name, error: status.message });
           }
         }
         if (!isCurrent()) return;
         const next = await listPortForwards(target);
         if (!isCurrent()) return;
-        if (restore_errors.length > 0) reportRestoreFailure(restore_errors.join(" "));
+        if (restore_failures.length > 0) {
+          const names = restore_failures.map(({ name }) => name).join(", ");
+          const details = restore_failures.flatMap(({ name, error }) => error ? [`${name} — ${error}`] : []).join(" ");
+          reportRestoreFailure(details
+            ? message("ports.restore_failed_list", { host, names, details })
+            : message("ports.restore_failed_no_detail", { host, names }));
+        }
         const hostForwardIds = new Set(
           forwardsRef.current
             .filter((forward) => forward.host_id === hostId)
@@ -189,8 +200,8 @@ export function usePortForwarding(
       } catch (failure) {
         if (!isCurrent()) return;
         setRuntimeForwards((current) => withoutKey(current, hostId));
-        setHostErrors((current) => isCurrent() ? new Map(current).set(hostId, errorMessage(failure)) : current);
-        reportRestoreFailure(errorMessage(failure));
+        setHostErrors((current) => isCurrent() ? new Map(current).set(hostId, localizedErrorText(failure)) : current);
+        reportRestoreFailure(message("ports.diagnostic", { name: host, error: localizedErrorText(failure) }));
         const hostForwardIds = new Set(
           forwardsRef.current
             .filter((forward) => forward.host_id === hostId)
@@ -237,15 +248,17 @@ export function usePortForwarding(
     ) => {
       target = selectedTarget(target);
       const hostId = target.host_id!;
-      const notifyFailure = (failure: unknown) => {
+      const notifyFailure = (detail: DisplayText) => {
         if (feedback === "notification") notifications?.notify(`port:operation:${forward.forward_id}`, {
-          severity: "error", title: `Could not ${enabled ? "start" : "stop"} port forward`, source: "Port forwarding",
-          message: `${forward.name}: ${errorMessage(failure)}`,
+          severity: "error",
+          title: message(enabled ? "ports.start_failed" : "ports.stop_failed"),
+          source: message("ports.title"),
+          message: detail,
         });
       };
       if (enabled && pausedHostsRef.current.has(hostId)) {
-        const failure = new Error("Connect this host before starting forwards.");
-        notifyFailure(failure);
+        const failure = new LocalizedError("ports.connect_first");
+        notifyFailure(message("ports.connect_first_summary", { name: forward.name }));
         throw failure;
       }
       busyCountsRef.current.set(forward.forward_id, (busyCountsRef.current.get(forward.forward_id) ?? 0) + 1);
@@ -259,7 +272,11 @@ export function usePortForwarding(
               if (enabled) await configurePortForward(target, forward, false);
               return;
             }
-            if (status.state === "error") notifyFailure(new Error(status.message ?? "Could not start forwarding."));
+            if (status.state === "error") {
+              notifyFailure(status.message
+                ? message("ports.diagnostic", { name: forward.name, error: status.message })
+                : message(enabled ? "ports.start_failed_summary" : "ports.stop_failed_summary", { name: forward.name }));
+            }
             setStatuses((current) => {
               if (!isCurrent()) return current;
               const next = new Map(current);
@@ -290,7 +307,7 @@ export function usePortForwarding(
             );
           } catch (failure) {
             if (!isCurrent()) return;
-            notifyFailure(failure);
+            notifyFailure(message("ports.diagnostic", { name: forward.name, error: localizedErrorText(failure) }));
             throw failure;
           }
         });
@@ -373,12 +390,11 @@ export function usePortForwarding(
 }
 
 function pausedStatuses(
-  current: ReadonlyMap<string, PortForwardStatus>,
+  current: ReadonlyMap<string, PortForwardObservation>,
   forwards: readonly WorkspacePortForward[],
   pausedHosts: ReadonlySet<string>,
-): ReadonlyMap<string, PortForwardStatus> {
-  let next: Map<string, PortForwardStatus> | undefined;
-  const message = "Host disconnected. Connect this host to resume forwarding.";
+): ReadonlyMap<string, PortForwardObservation> {
+  let next: Map<string, PortForwardObservation> | undefined;
   for (const forward of forwards) {
     if (!pausedHosts.has(forward.host_id)) continue;
     const status = (next ?? current).get(forward.forward_id);
@@ -387,7 +403,7 @@ function pausedStatuses(
         next ??= new Map(current);
         next.delete(forward.forward_id);
       }
-    } else if (status?.state !== "waiting_for_authentication" || status.message !== message ||
+    } else if (status?.state !== "waiting_for_authentication" || status.message !== PAUSED_FORWARD ||
       status.forward.bind_address !== forward.bind_address ||
       status.forward.local_port !== forward.local_port ||
       status.forward.remote_host !== forward.remote_host ||
@@ -397,7 +413,7 @@ function pausedStatuses(
       next.set(forward.forward_id, {
         forward,
         state: "waiting_for_authentication",
-        message,
+        message: PAUSED_FORWARD,
       });
     }
   }

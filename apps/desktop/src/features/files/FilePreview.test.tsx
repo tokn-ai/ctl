@@ -2,6 +2,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { FilePreviewRequest, PreviewSnapshot } from "../../lib/types";
+import { LocaleProvider } from "../i18n/LocaleContext";
 import { FilePreviewProvider, PreviewPanel, PreviewWindowPage, useFilePreview } from "./FilePreview";
 
 const api = vi.hoisted(() => ({ openPreviewWindow: vi.fn(), closePreviewWindow: vi.fn(), openExternalUrl: vi.fn(), loadPreviewWindow: vi.fn(), loadFilePreview: vi.fn() }));
@@ -13,7 +14,7 @@ const snapshot: PreviewSnapshot = { target: { kind: "local" }, path: "/work/read
 const request: FilePreviewRequest = { target: { kind: "local" }, path: "readme.md", cwd: "/work", line: null, column: null };
 
 beforeEach(() => { vi.clearAllMocks(); api.openPreviewWindow.mockResolvedValue("preview-id"); api.openExternalUrl.mockResolvedValue(undefined); api.closePreviewWindow.mockResolvedValue(undefined); });
-afterEach(() => { cleanup(); vi.restoreAllMocks(); });
+afterEach(() => { cleanup(); localStorage.removeItem("ctmux.desktop.language"); vi.restoreAllMocks(); });
 
 function Actions() {
   const previews = useFilePreview()!;
@@ -128,7 +129,17 @@ describe("file preview", () => {
     view.container.querySelector<HTMLDivElement>(".file-preview-content")!.scrollTop = 240;
     fireEvent.click(screen.getByRole("button", { name: "Open window" }));
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-    expect(api.openPreviewWindow).toHaveBeenCalledExactlyOnceWith({ ...snapshot, scroll_top: 240 });
+    expect(api.openPreviewWindow).toHaveBeenCalledExactlyOnceWith({ ...snapshot, scroll_top: 240 }, "readme.md — Preview");
+  });
+
+  it("passes the chosen language to the native title and preserves the file name and contents", async () => {
+    localStorage.setItem("ctmux.desktop.language", "zh-Hans");
+    api.loadFilePreview.mockResolvedValue({ snapshot, truncated: false });
+    render(<LocaleProvider><FilePreviewProvider><Actions /></FilePreviewProvider></LocaleProvider>);
+    fireEvent.click(screen.getByText("First"));
+    await screen.findByRole("heading", { name: "Read me" });
+    fireEvent.click(screen.getByRole("button", { name: "打开窗口" }));
+    await waitFor(() => expect(api.openPreviewWindow).toHaveBeenCalledExactlyOnceWith(snapshot, "readme.md — 预览"));
   });
 
   it("renders Markdown without running HTML or loading referenced images", async () => {

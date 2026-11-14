@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { formatText, type DisplayText } from "../i18n/messages";
 import { act, cleanup, fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useRef, useState, type ReactNode } from "react";
@@ -39,6 +40,8 @@ vi.mock("@xterm/xterm", async () => {
   const { Terminal } = await import("@xterm/headless");
   return {
     Terminal: class {
+      static strings = { promptLabel: "Terminal input", tooMuchOutput: "" };
+
       constructor(options: ConstructorParameters<typeof Terminal>[0]) {
         const terminal = new Terminal({ ...options, allowProposedApi: true });
         const dispose = vi.fn(() => terminal.dispose());
@@ -341,11 +344,11 @@ function DividerAttachmentFixture({ actions, observer_renderer }: {
   const [view, setView] = useState(dividerView);
   const [busy, setBusy] = useState(false);
   const busy_ref = useRef(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<DisplayText | null>(null);
   return <div>
     <output data-testid="divider-busy">{String(busy)}</output>
     <output data-testid="divider-geometry">{view.panes[0].columns}</output>
-    {error && <div role="alert">{error}</div>}
+    {error && <div role="alert">{formatText("en", error)}</div>}
     <ViewDividers session={owner.state.session} view={view} cell={{ width: 8, height: 16 }}
       enabled={owner.state.phase === "attached"} can_begin={() => !busy_ref.current}
       on_busy={(next) => { busy_ref.current = next; setBusy(next); }} on_error={setError} on_confirm={setView} />
@@ -512,9 +515,9 @@ describe("background history presentation", () => {
     });
     const { result } = renderHook(() => useAttachment(renderer, true));
     await act(async () => { await result.current.connect(first); });
-    expect(result.current.state.message).toBe("Another attachment holds resize control.");
+    expect(result.current.state.message).toEqual({ id: "attachment.resize_held" });
     await emit({ event_type: "lease_status", attachment_id: result.current.state.attachment_id!, lease: "layout", notification: true, status: { held: false, owned_by_client: false } });
-    expect(result.current.state.message).toBe("Resize control is available. Take resize control to resize panes.");
+    expect(result.current.state.message).toEqual({ id: "attachment.resize_available" });
     expect(api.acquireAttachmentLease).not.toHaveBeenCalled();
   });
 
@@ -544,7 +547,7 @@ describe("background history presentation", () => {
     }, { wrapper: ({ children }: { children: ReactNode }) => <NotificationProvider store={store}>{children}</NotificationProvider> });
     await act(async () => { await visible.result.current.connect(visible_session); });
     if (!owner_first) {
-      expect(visible.result.current.state.message).toBe("Another attachment holds resize control.");
+      expect(visible.result.current.state.message).toEqual({ id: "attachment.resize_held" });
       expect(visible.result.current.state.message_kind).toBe("layout");
       expect(store.snapshot().entries).toEqual([]);
       await acquireOwner();
@@ -1641,7 +1644,7 @@ describe("connection evidence and transitions", () => {
       send({ event_type: "attachment_error", attachment_id, code: "backend_error", message: "Pipe closed" });
       send({ event_type: "attachment_exited", attachment_id, reason: "connection_closed", exit_code: null, next_sequence: null, received_sequence: "0" });
     });
-    expect(result.current.state).toMatchObject({ phase: "ended", message: "Session ended with exit code 7.", attachment_id: null });
+    expect(result.current.state).toMatchObject({ phase: "ended", message: { id: "attachment.exit_code", values: { code: 7 } }, attachment_id: null });
     expect(api.openAttachment).toHaveBeenCalledOnce();
     expect(result.current.state.retry_at_ms).toBeNull();
   });
@@ -2663,7 +2666,7 @@ describe("opened session channels", () => {
     await waitFor(() => expect(attachments.storage_error).toBe("Archive failed: disk full"));
     expect(attachments.state.session).toBeNull();
     expect(attachments.state.message).toBeNull();
-    expect(store.snapshot().entries).toContainEqual(expect.objectContaining({ title: "Session history", severity: "error", message: "Archive failed: disk full" }));
+    expect(store.snapshot().entries).toContainEqual(expect.objectContaining({ title: { id: "notifications.session_history" }, severity: "error", message: "Archive failed: disk full" }));
   });
 
   it("reports failures from a background session's real attachment controller", async () => {

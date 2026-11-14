@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import type { ConnectionTarget, HostConnectionStatus } from "../../lib/types";
 import { COMMAND_IDS } from "../commands/commandIds";
+import { message } from "../i18n/messages";
 import { targetKey, targetLabel } from "../targets/targets";
 import type { NotificationStore } from "./NotificationStore";
 
@@ -35,9 +36,9 @@ export function useHostConnectionNotifications(
         lost_hosts.current.add(host_id);
         if (attached_host_keys.has(host_id)) continue;
         store?.report(source_key, {
-          severity: "warning", title: "SSH connection lost", source: targetLabel(target),
-          message: observation.message ?? "The SSH connection is no longer open. Connect this host to resume.",
-          actions: [{ label: "Connect host", command_id: COMMAND_IDS.connectHost, args: { target_key: targetKey(target) } }],
+          severity: "warning", title: message("notifications.ssh_lost"), source: targetLabel(target),
+          message: observation.message ?? message("notifications.ssh_lost_detail"),
+          actions: [{ label: message("shell.connect_host"), command_id: COMMAND_IDS.connectHost, args: { target_key: targetKey(target) } }],
         });
       }
     }

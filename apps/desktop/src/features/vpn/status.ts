@@ -1,3 +1,4 @@
+import { translate, type Locale } from "../i18n/messages";
 import type { VpnConnection, VpnProvider, VpnState, VpnStatus } from "../../lib/types";
 
 export const vpn_provider_labels: Record<VpnProvider, string> = {
@@ -32,12 +33,24 @@ export function vpnNeedsSignIn(status: VpnStatus | null | undefined): boolean {
   return status?.provider === "tailscale" && !status.status_unavailable && status.state === "starting" && Boolean(status.auth_url);
 }
 
-export function vpnRouteDetail(connection: VpnConnection, statuses: readonly VpnStatus[]): string {
+const STATE_MESSAGES: Record<VpnState, string> = {
+  starting: "vpn.connecting",
+  connected: "vpn.connected",
+  stopping: "vpn.disconnecting",
+  stopped: "vpn.disconnected",
+};
+
+export function vpnStateLabel(state: VpnState, locale: Locale): string {
+  return translate(locale, STATE_MESSAGES[state]);
+}
+
+export function vpnRouteDetail(connection: VpnConnection, statuses: readonly VpnStatus[], locale: Locale = "en"): string {
   const runtime = statuses.find((status) => status.connection_id === connection.connection_id);
-  if (runtime?.status_unavailable) return "Status unavailable";
-  if (vpnNeedsSignIn(runtime)) return "Sign in from the VPN page";
-  if (runtime?.state === "connected") return "Connected";
-  if (runtime?.state === "starting") return "Connecting…";
+  if (runtime?.status_unavailable) return translate(locale, "vpn.status_unavailable");
+  if (vpnNeedsSignIn(runtime)) return translate(locale, "vpn.sign_in_page");
+  if (runtime?.state === "connected") return translate(locale, "vpn.connected");
+  if (runtime?.state === "starting") return translate(locale, "vpn.connecting");
   const provider = connection.provider ?? "openconnect";
-  return provider === "openconnect" ? "Connect when needed" : `${vpn_provider_labels[provider]} · Connect when needed`;
+  return provider === "openconnect" ? translate(locale, "vpn.connect_when_needed")
+    : translate(locale, "vpn.provider_connect_when_needed", { provider: vpn_provider_labels[provider] });
 }

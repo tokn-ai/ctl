@@ -1,8 +1,12 @@
+import { formatText, message, type Locale, type LocalizedMessage } from "../i18n/messages";
+
 /** POSIX word quoting only: no shell execution, expansion, or operators. */
-export function parseCommandLine(input: string): {
-  words: string[];
-  error: string | null;
-} {
+export function parseCommandLine(input: string, locale: Locale = "en"): { words: string[]; error: string | null } {
+  const { words, error } = parseCommandLineWithFeedback(input);
+  return { words, error: error ? formatText(locale, error) : null };
+}
+
+export function parseCommandLineWithFeedback(input: string): { words: string[]; error: LocalizedMessage | null } {
   const words: string[] = [];
   let word = "";
   let started = false;
@@ -10,14 +14,14 @@ export function parseCommandLine(input: string): {
   for (let i = 0; i < input.length; i += 1) {
     const character = input[i];
     if (character === "\0")
-      return { words: [], error: "Commands cannot contain null characters." };
+      return { words: [], error: message("tasks.command_null") };
     if (quote === "'") {
       if (character === "'") quote = null;
       else word += character;
     } else if (character === "\\") {
       const next = input[i + 1];
       if (next === undefined)
-        return { words: [], error: "Finish the escape after the backslash." };
+        return { words: [], error: message("tasks.command_escape") };
       if (quote === '"' && !["$", "`", '"', "\\", "\n"].includes(next)) {
         word += character;
       } else {
@@ -42,8 +46,7 @@ export function parseCommandLine(input: string): {
     } else if ("|&;<>()".includes(character)) {
       return {
         words: [],
-        error:
-          "Shell operators require an explicit shell, for example sh -c 'command | other'.",
+        error: message("tasks.command_operators"),
       };
     } else {
       started = true;
@@ -53,7 +56,7 @@ export function parseCommandLine(input: string): {
   if (quote)
     return {
       words: [],
-      error: `Close the ${quote === "'" ? "single" : "double"} quote.`,
+      error: message("tasks.command_close_quote", { quote: quote === "'" ? "single" : "double" }),
     };
   if (started) words.push(word);
   return { words, error: null };

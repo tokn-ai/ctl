@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { sshReachability } from "../../lib/tauri";
-import { errorMessage } from "../../lib/errors";
+import { localizedErrorText } from "../../lib/errors";
+import { message, type DisplayText } from "../i18n/messages";
 import type {
   HostConnectionStatus,
   HostReachabilityObservation,
@@ -27,10 +28,12 @@ interface Options {
   vpn_status_stale?: boolean;
 }
 
+type ReachabilityResult = Omit<SshReachability, "message"> & { message: DisplayText | null };
+
 interface ProbeMethod {
   name: string;
   target: SshConnectionTarget | null;
-  error: string | null;
+  error: DisplayText | null;
 }
 
 interface ProbeConfiguration {
@@ -44,30 +47,32 @@ const checkingReachability = (): HostReachabilityObservation => ({
   state: "checking", reason: null, method_names: [], message: null, checked_at_ms: null,
 });
 
-function aggregateReachability(results: readonly { name: string; result: SshReachability }[]): HostReachabilityObservation {
+function aggregateReachability(results: readonly { name: string; result: ReachabilityResult }[]): HostReachabilityObservation {
   const available = results.filter(({ result }) => result.state === "available");
   const unknown = results.find(({ result }) => result.state === "unknown");
   const skipped = results.find(({ result }) => result.reason === "vpn_disconnected") ??
     results.find(({ result }) => result.state === "not_checked");
   const selected = available[0] ?? unknown ?? skipped ?? results[0];
+  const diagnostics = results.flatMap(({ name, result }) => result.message ? [message("host_observation.named_diagnostic", { name, detail: result.message })] : []);
   return {
     state: selected?.result.state ?? "not_checked",
     reason: selected?.result.reason ?? null,
     method_names: available.map(({ name }) => name),
-    message: results.filter(({ result }) => result.message).map(({ name, result }) => `${name}: ${result.message}`).join("\n") || null,
+    message: diagnostics.reduce<DisplayText | null>((first, next) =>
+      first === null ? next : message("host_observation.combine_reachability", { first, next }), null),
     checked_at_ms: Date.now(),
   };
 }
 
-async function checkSshGreeting(target: SshConnectionTarget): Promise<SshReachability> {
+async function checkSshGreeting(target: SshConnectionTarget): Promise<ReachabilityResult> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    const deadline = new Promise<SshReachability>((resolve) => {
-      timer = setTimeout(() => resolve({ state: "unknown", reason: "check_failed", message: "SSH reachability query timed out." }), HOST_REACHABILITY_TIMEOUT_MS);
+    const deadline = new Promise<ReachabilityResult>((resolve) => {
+      timer = setTimeout(() => resolve({ state: "unknown", reason: "check_failed", message: message("host_observation.reachability_timeout") }), HOST_REACHABILITY_TIMEOUT_MS);
     });
     return await Promise.race([sshReachability(target), deadline]);
   } catch (failure) {
-    return { state: "unknown", reason: "check_failed", message: errorMessage(failure) };
+    return { state: "unknown", reason: "check_failed", message: localizedErrorText(failure) };
   } finally {
     if (timer !== undefined) clearTimeout(timer);
   }
@@ -96,7 +101,7 @@ export function useHostReachability(options: Options) {
           ? { name: method.name, target, error: null }
           : { name: method.name, target: null, error: target.kind === "ssh" ? target.unavailable ?? null : null };
       } catch (failure) {
-        return { name: method.name, target: null, error: errorMessage(failure) };
+        return { name: method.name, target: null, error: localizedErrorText(failure) };
       }
     });
     const vpnIds = new Set(methods.flatMap(({ target }) => {
@@ -134,7 +139,7 @@ export function useHostReachability(options: Options) {
         const results = await Promise.all(configuration.methods.map(async (method) => {
           if (!method.target) return { name: method.name, result: {
             state: "not_checked", reason: "unsupported_configuration", message: method.error,
-          } as SshReachability };
+          } as ReachabilityResult };
           // Transfer the occupied slot directly to the next waiter so a newly
           // enqueued request cannot overtake it and exceed the concurrency bound.
           if (active.current < MAX_CONCURRENT_PROBES) active.current += 1;
@@ -142,7 +147,7 @@ export function useHostReachability(options: Options) {
           try {
             return { name: method.name, result: isCurrent() ? await checkSshGreeting(method.target) : {
               state: "not_checked", reason: null, message: null,
-            } as SshReachability };
+            } as ReachabilityResult };
           } finally {
             const resume = waiting.current.shift();
             if (resume) resume();

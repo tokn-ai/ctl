@@ -68,7 +68,7 @@ describe("attachment lifecycle", () => {
       input_lease: { held: false, owned_by_client: false }, layout_lease: { held, owned_by_client: false },
       shell_state: { shell_type: "unknown", cwd: null, running_command: null, prompt_phase: "unknown", tui_hint: "unknown", revision: "0", observed_sequence: "0" },
     } });
-    expect(next.message).toBe(held ? "Another attachment holds resize control." : "Resize control is available. Take resize control to resize panes.");
+    expect(next.message).toEqual({ id: held ? "attachment.resize_held" : "attachment.resize_available" });
     expect(next.resize_control_desired).toBe(true);
   });
   it.each([null, "0", "123"])("derives connection intent independently of cursor %s", (resume_from) => {
@@ -97,7 +97,7 @@ describe("attachment lifecycle", () => {
     const ended = transitionAttachment(opened, { type: "ended", exit_code: 7 });
     const failed = transitionAttachment(ended, { type: "failed", code: "backend_error", message: "Pipe closed", resume_from: null });
     const closed = transitionAttachment(failed, { type: "closed", reason: "connection_closed", next_sequence: "42" });
-    expect(closed).toMatchObject({ phase: "ended", message: "Session ended with exit code 7.", attachment_id: null });
+    expect(closed).toMatchObject({ phase: "ended", message: { id: "attachment.exit_code", values: { code: 7 } }, attachment_id: null });
     expect(transitionAttachment(closed, { type: "retry_scheduled", retry_at_ms: 1_000 })).toEqual(closed);
     expect(transitionAttachment(closed, { type: "retry_exhausted" })).toEqual(closed);
   });

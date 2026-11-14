@@ -244,12 +244,25 @@ pub struct ExecuteComponentActionRequest {
   pub action_token: String,
 }
 
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ComponentImpactKind {
+  LocalTerminal,
+  LocalTasks,
+  LocalBroker,
+  RemoteTerminal,
+  RemoteSavedTerminal,
+  RemoteReconnect,
+}
+
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ComponentActionImpact {
   pub ssh_connections: Option<u32>,
   pub port_forwards: Option<u32>,
   pub vpn_connections: Option<u32>,
   pub terminal_sessions: Option<u32>,
+  pub kind: Option<ComponentImpactKind>,
+  pub active_transports: Option<u32>,
   pub description: String,
 }
 
@@ -268,6 +281,14 @@ pub struct ComponentActionPreflight {
 }
 
 #[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ComponentActionSummary {
+  LocalTerminalRestart { ended_sessions: u32 },
+  RemoteTerminalRestart { ended_sessions: u32 },
+  RemoteReconnect { verified_transports: usize },
+}
+
+#[derive(Debug, Serialize)]
 pub struct ComponentActionResult {
   pub component_id: String,
   pub component: &'static str,
@@ -276,6 +297,7 @@ pub struct ComponentActionResult {
   pub action: ComponentAction,
   pub running: Option<ComponentVersionInfo>,
   pub detail: Option<String>,
+  pub summary: Option<ComponentActionSummary>,
 }
 
 fn compare(

@@ -7,6 +7,17 @@ Connection indicators distinguish observed SSH availability, active terminal
 attachments, and last-known session activity. See the
 [state definitions and transition rules](../../docs/connection-state.md).
 
+## Display language
+
+Open **Settings → Language** to pick **System**, **English**, or **简体中文**.
+System follows the first supported system language and falls back to English.
+Language changes apply immediately, and the app remembers the selection.
+
+Add app messages to the matching catalogs in
+`src/features/i18n/catalogs/en` and `src/features/i18n/catalogs/zh-Hans`.
+Keep the same message IDs and ICU argument names in both. Run
+`pnpm desktop:check` from the repository root to validate the catalogs.
+
 ## About and component versions
 
 Open **About ctmux** from the info button, command palette, or macOS app menu.

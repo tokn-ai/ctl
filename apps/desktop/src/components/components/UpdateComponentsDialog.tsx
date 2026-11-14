@@ -1,3 +1,5 @@
+import type { DisplayText } from "../../features/i18n/messages";
+import { useLocale } from "../../features/i18n/LocaleContext";
 import { useEffect, useId, useRef, useState } from "react";
 import { QuickInput } from "../commands/QuickInput";
 import { QuickInputFrame } from "../commands/QuickInputFrame";
@@ -5,7 +7,7 @@ import { useCommandScope } from "../../features/commands/CommandContext";
 import { QUICK_INPUT_IDS } from "../../features/commands/commandIds";
 import { LOCAL_TARGET, targetKey, targetLabel } from "../../features/targets/targets";
 import { cancelComponentUpdate, respondSshPrompt, updateComponents } from "../../lib/tauri";
-import { errorMessage } from "../../lib/errors";
+import { localizedErrorText } from "../../lib/errors";
 import type { BundleChannel, ComponentUpdateContext, ComponentUpdateHostResult, ComponentUpdateProgress, ComponentUpdateSource, ConnectionTarget, SshPrompt } from "../../lib/types";
 import { promptMode, promptTitle } from "../sessions/sshPrompt";
 import { remoteInstallProgressMode } from "../sessions/remoteInstallProgress";
@@ -27,6 +29,7 @@ function sourceChoice(source?: ComponentUpdateSource): SourceChoice {
 }
 
 export function UpdateComponentsDialog({ targets, context, on_updated, on_close }: Props) {
+  const { t, locale, formatText } = useLocale();
   const available = new Map([LOCAL_TARGET, ...targets, ...(context?.targets ?? [])]
     .filter((target) => target.kind !== "ssh" || target.remote_platform !== "windows")
     .map((target) => [targetKey(target), target]));
@@ -42,8 +45,8 @@ export function UpdateComponentsDialog({ targets, context, on_updated, on_close 
   const [ctld_package, setCtldPackage] = useState(initial_source?.kind === "provided" ? initial_source.ctld_package ?? "" : "");
   const [running, setRunning] = useState(false);
   const [stopping, setStopping] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [validation, setValidation] = useState<{ field: "hosts" | "path"; message: string } | null>(null);
+  const [error, setError] = useState<DisplayText | null>(null);
+  const [validation, setValidation] = useState<{ field: "hosts" | "path"; message_id: string } | null>(null);
   const validation_id = useId();
   const [progress, setProgress] = useState<ComponentUpdateProgress | null>(null);
   const [prompt, setPrompt] = useState<SshPrompt | null>(null);
@@ -76,7 +79,7 @@ export function UpdateComponentsDialog({ targets, context, on_updated, on_close 
     if (stopping || !attempt.current) return;
     setStopping(true);
     void cancelComponentUpdate(attempt.current).catch((failure) => {
-      if (mounted.current) { setStopping(false); setError(errorMessage(failure)); }
+      if (mounted.current) { setStopping(false); setError(localizedErrorText(failure)); }
     });
   }
 
@@ -86,9 +89,9 @@ export function UpdateComponentsDialog({ targets, context, on_updated, on_close 
     setValidation(null);
     const chosen = [...available.values()].filter((target) => selected.has(targetKey(target)));
     if (!chosen.length || chosen.some((target) => target.kind === "ssh" && target.unavailable)) {
-      setValidation({ field: "hosts", message: "Choose at least one available host." }); return;
+      setValidation({ field: "hosts", message_id: "about.update_invalid_hosts" }); return;
     }
-    if (provided && !path.trim()) { setValidation({ field: "path", message: "Enter a build directory or archive path." }); return; }
+    if (provided && !path.trim()) { setValidation({ field: "path", message_id: "about.update_invalid_path" }); return; }
     const source: ComponentUpdateSource = provided
       ? { kind: "provided", path: path.trim(), local_build, ctld_package: local_build && ctld_package.trim() ? ctld_package.trim() : null }
       : published
@@ -107,7 +110,7 @@ export function UpdateComponentsDialog({ targets, context, on_updated, on_close 
       if (!mounted.current) return;
       setResults(updated);
       on_updated?.(updated, chosen);
-    } catch (failure) { if (mounted.current) setError(errorMessage(failure)); }
+    } catch (failure) { if (mounted.current) setError(localizedErrorText(failure)); }
     finally {
       attempt.current = null;
       if (mounted.current) { setRunning(false); setStopping(false); setPrompt(null); }
@@ -115,61 +118,61 @@ export function UpdateComponentsDialog({ targets, context, on_updated, on_close 
   }
 
   useCommandScope({ commands: [
-    { id: QUICK_INPUT_IDS.cancel, category: "Dialog", title: "Cancel", enabled: !stopping, run: dismiss },
-    { id: QUICK_INPUT_IDS.accept, category: "Dialog", title: "Update components", enabled: !running && results === null, run: start },
+    { id: QUICK_INPUT_IDS.cancel, category: t("about.update_dialog_category"), title: t("about.update_cancel"), enabled: !stopping, run: dismiss },
+    { id: QUICK_INPUT_IDS.accept, category: t("about.update_dialog_category"), title: t("about.update_title"), enabled: !running && results === null, run: start },
   ] });
 
-  if (prompt && running) return <QuickInput key={prompt.prompt_id} title={promptTitle(prompt)} description={prompt.message} warning={prompt.warning} mode={promptMode(prompt)} error={error} cancel_disabled={stopping} onCancel={dismiss} onSubmit={async (response) => {
+  if (prompt && running) return <QuickInput key={prompt.prompt_id} title={promptTitle(prompt, locale)} description={prompt.message} warning={prompt.warning} mode={promptMode(prompt, locale)} error={error ? formatText(error) : null} cancel_disabled={stopping} onCancel={dismiss} onSubmit={async (response) => {
     const current = attempt.current;
     if (!current) return;
     try { await respondSshPrompt(`${current}:${host_index.current}`, prompt.prompt_id, prompt.kind === "confirm" ? "yes" : response); setPrompt(null); }
-    catch (failure) { setError(errorMessage(failure)); }
+    catch (failure) { setError(localizedErrorText(failure)); }
   }} />;
 
-  const install_progress = progress?.progress ? remoteInstallProgressMode(progress.progress) : null;
-  return <QuickInputFrame title="Update components" className="component-update-dialog" onDismiss={dismiss}>
-    <header><h2>Update components</h2><p>Install on selected hosts. Running sessions are kept; restart or reconnect separately.</p></header>
+  const install_progress = progress?.progress ? remoteInstallProgressMode(progress.progress, locale) : null;
+  return <QuickInputFrame title={t("about.update_title")} className="component-update-dialog" onDismiss={dismiss}>
+    <header><h2>{t("about.update_title")}</h2><p>{t("about.update_intro")}</p></header>
     {running ? <div role="status" className="component-update-progress">
-      <strong>{stopping ? "Stopping update…" : `Updating ${targetLabel(submitted_targets[progress?.host_index ?? 0])}`}</strong>
-      <p>{install_progress?.message ?? "Preparing the build and connection…"}</p>
+      <strong>{stopping ? t("about.update_stopping") : t("about.updating_host", { host: targetLabel(submitted_targets[progress?.host_index ?? 0], locale) })}</strong>
+      <p>{install_progress?.message ?? t("about.update_preparing")}</p>
       {install_progress?.detail ? <p>{install_progress.detail}</p> : null}
       {install_progress?.progress ? <progress max={install_progress.progress.max} value={install_progress.progress.value} aria-label={install_progress.progress.label} /> : null}
-      <p>Host {(progress?.host_index ?? 0) + 1} of {submitted_targets.length}</p>
+      <p>{t("about.updating_host_count", { index: (progress?.host_index ?? 0) + 1, total: submitted_targets.length })}</p>
     </div> : results ? <div className="component-update-results">
-      <p role="status">{results.filter((result) => result.state === "complete").length} of {submitted_targets.length} hosts updated. Running services were preserved.</p>
-      <ul>{results.map((result) => <li key={result.host_index}><strong>{targetLabel(submitted_targets[result.host_index])}</strong><span>{result.state === "complete" ? "Installed" : result.state === "cancelled" ? "Cancelled" : "Failed"}</span>{result.result ? <p>Bundle {result.result.bundle_id} · {result.result.target_triple}</p> : null}{result.error ? <InlineFeedback severity={result.state === "cancelled" ? "warning" : "error"}>{result.error}</InlineFeedback> : null}</li>)}</ul>
+      <p role="status">{t("about.updated_count", { count: results.filter((result) => result.state === "complete").length, total: submitted_targets.length })}</p>
+      <ul>{results.map((result) => <li key={result.host_index}><strong>{targetLabel(submitted_targets[result.host_index], locale)}</strong><span>{result.state === "complete" ? t("about.update_installed") : result.state === "cancelled" ? t("about.update_cancelled") : t("about.update_failed")}</span>{result.result ? <p>{t("about.updated_bundle", { bundle: result.result.bundle_id, target: result.result.target_triple })}</p> : null}{result.error ? <InlineFeedback severity={result.state === "cancelled" ? "warning" : "error"}>{result.error}</InlineFeedback> : null}</li>)}</ul>
     </div> : <form id="component-update-form" onSubmit={(event) => { event.preventDefault(); void start(); }}>
       <fieldset aria-invalid={validation?.field === "hosts" || undefined} aria-describedby={validation?.field === "hosts" ? validation_id : undefined}>
-        <legend>Hosts</legend>
+        <legend>{t("about.update_hosts")}</legend>
         <div className="component-update-hosts">{[...available.values()].map((target) => <label key={targetKey(target)}>
           <input type="checkbox" checked={selected.has(targetKey(target))} disabled={target.kind === "ssh" && !!target.unavailable} onChange={(event) => selectHost(targetKey(target), event.target.checked)} />
-          <span>{targetLabel(target)}{target.kind === "ssh" && target.unavailable ? <small>Connection unavailable</small> : null}</span>
+          <span>{targetLabel(target, locale)}{target.kind === "ssh" && target.unavailable ? <small>{t("about.update_connection_unavailable")}</small> : null}</span>
         </label>)}</div>
-        {validation?.field === "hosts" ? <div id={validation_id}><InlineFeedback>{validation.message}</InlineFeedback></div> : null}
+        {validation?.field === "hosts" ? <div id={validation_id}><InlineFeedback>{t(validation.message_id)}</InlineFeedback></div> : null}
       </fieldset>
-      <label className="component-update-field">Build source<select value={source_choice} onChange={(event) => { clearValidation("path"); setSourceChoice(event.target.value as SourceChoice); }}>
-        <option value="automatic">Automatic</option>
-        <option value="nightly">Nightly (latest published main build)</option>
-        <option value="stable">Latest stable release</option>
-        {import.meta.env.DEV || source_choice === "working_tree" ? <option value="working_tree">Build from checkout</option> : null}
-        <option value="selected">Included build (offline)</option>
-        <option value="provided">Provided build files</option>
+      <label className="component-update-field">{t("about.build_source")}<select value={source_choice} onChange={(event) => { clearValidation("path"); setSourceChoice(event.target.value as SourceChoice); }}>
+        <option value="automatic">{t("about.build_automatic")}</option>
+        <option value="nightly">{t("about.build_nightly")}</option>
+        <option value="stable">{t("about.build_stable")}</option>
+        {import.meta.env.DEV || source_choice === "working_tree" ? <option value="working_tree">{t("about.build_checkout")}</option> : null}
+        <option value="selected">{t("about.build_offline")}</option>
+        <option value="provided">{t("about.build_provided")}</option>
       </select></label>
       {provided ? <div className="component-update-source">
-        <label className="component-update-field">Build directory or archive<input value={path} aria-invalid={validation?.field === "path" || undefined} aria-describedby={validation?.field === "path" ? validation_id : undefined} onChange={(event) => { clearValidation("path"); setPath(event.target.value); }} placeholder="/path/to/build" /></label>
-        {validation?.field === "path" ? <div id={validation_id}><InlineFeedback>{validation.message}</InlineFeedback></div> : null}
-        <label><input type="checkbox" checked={local_build} onChange={(event) => setLocalBuild(event.target.checked)} /><span>Native local build<small>A directory of component binaries built for this computer's platform.</small></span></label>
-        {local_build ? <label className="component-update-field">Signed ctld package directory (macOS full bundle)<input value={ctld_package} onChange={(event) => setCtldPackage(event.target.value)} placeholder="/path/to/ctld-package" /></label> : <p>Use a complete bundle directory, or a verified archive with its bundle-set.json beside it.</p>}
+        <label className="component-update-field">{t("about.build_archive")}<input value={path} aria-invalid={validation?.field === "path" || undefined} aria-describedby={validation?.field === "path" ? validation_id : undefined} onChange={(event) => { clearValidation("path"); setPath(event.target.value); }} placeholder="/path/to/build" /></label>
+        {validation?.field === "path" ? <div id={validation_id}><InlineFeedback>{t(validation.message_id)}</InlineFeedback></div> : null}
+        <label><input type="checkbox" checked={local_build} onChange={(event) => setLocalBuild(event.target.checked)} /><span>{t("about.build_native")}<small>{t("about.build_native_help")}</small></span></label>
+        {local_build ? <label className="component-update-field">{t("about.build_signed_ctld")}<input value={ctld_package} onChange={(event) => setCtldPackage(event.target.value)} placeholder="/path/to/ctld-package" /></label> : <p>{t("about.build_provided_help")}</p>}
       </div> : <>
-        <p className="component-update-hint">{source_choice === "working_tree" ? "Builds for Linux x64 or ARM64 from the current checkout." : source_choice === "selected" ? "Installs the complete build included with this app." : source_choice === "automatic" ? "Uses the configured channel. Development Linux x64 builds use the working tree." : "Downloads this channel’s complete build for each platform."}</p>
+        <p className="component-update-hint">{source_choice === "working_tree" ? t("about.build_checkout_help") : source_choice === "selected" ? t("about.build_offline_help") : source_choice === "automatic" ? t("about.build_automatic_help") : t("about.build_channel_help")}</p>
         {source_choice !== "selected" && source_choice !== "working_tree" ? <PublishedBundleStatus channel={published ? source_choice : undefined} /> : null}
       </>}
     </form>}
-    {error ? <InlineFeedback>{error}</InlineFeedback> : null}
+    {error ? <InlineFeedback>{formatText(error)}</InlineFeedback> : null}
     <footer>
-      {results?.some((result) => result.state === "failed") ? <button type="button" onClick={() => { setSelected(new Set(results.filter((result) => result.state === "failed").map((result) => targetKey(submitted_targets[result.host_index])))); setResults(null); setError(null); }}>Retry failed hosts…</button> : null}
-      <button type="button" onClick={dismiss} disabled={stopping}>{running ? "Stop update" : results ? "Done" : "Cancel"}</button>
-      {!running && !results ? <button type="submit" form="component-update-form" disabled={!selected.size}>Update</button> : null}
+      {results?.some((result) => result.state === "failed") ? <button type="button" onClick={() => { setSelected(new Set(results.filter((result) => result.state === "failed").map((result) => targetKey(submitted_targets[result.host_index])))); setResults(null); setError(null); }}>{t("about.update_retry")}</button> : null}
+      <button type="button" onClick={dismiss} disabled={stopping}>{running ? t("about.update_stop") : results ? t("about.update_done") : t("about.update_cancel")}</button>
+      {!running && !results ? <button type="submit" form="component-update-form" disabled={!selected.size}>{t("about.update_confirm")}</button> : null}
     </footer>
   </QuickInputFrame>;
 }

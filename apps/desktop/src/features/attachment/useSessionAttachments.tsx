@@ -1,8 +1,9 @@
+import type { DisplayText } from "../i18n/messages";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import type { AttachmentViewState, SessionSummary } from "../../lib/types";
 import { sessionCache } from "../../lib/tauri";
-import { errorMessage } from "../../lib/errors";
+import { localizedErrorText } from "../../lib/errors";
 import { sessionKey, targetKey } from "../targets/targets";
 import { sameSshEndpoint } from "../workspace/remoteRecovery";
 import type { XtermRenderer } from "../terminal/XtermRenderer";
@@ -47,7 +48,7 @@ function SessionAttachment({ entry, renderer, onChange }: {
 export function useSessionAttachments(renderer: XtermRenderer | null): AttachmentActions & {
   controllers: ReactNode;
   states: readonly AttachmentViewState[];
-  storage_error: string | null;
+  storage_error: DisplayText | null;
   session_keys: ReadonlySet<string>;
   closeSession(session: SessionSummary): Promise<void>;
   retainSessions(keys: ReadonlySet<string>): void;
@@ -59,7 +60,7 @@ export function useSessionAttachments(renderer: XtermRenderer | null): Attachmen
   const entries = useRef(new Map<string, Entry>());
   const selected = useRef<string | null>(null);
   const archiving = useRef(new Set<string>());
-  const [storage_error, setStorageError] = useState<string | null>(null);
+  const [storage_error, setStorageError] = useState<DisplayText | null>(null);
   const [revision, refresh] = useState(0);
   const notify = useCallback(() => refresh((revision) => revision + 1), []);
   const renderer_ref = useRef(renderer);
@@ -117,7 +118,7 @@ export function useSessionAttachments(renderer: XtermRenderer | null): Attachmen
       await closeSession(session);
       await sessionCache({ kind: "archive", host_key: targetKey(session.target), session_id: session.session_id, reason });
     } catch (error) {
-      setStorageError(errorMessage(error));
+      setStorageError(localizedErrorText(error));
     }
   }, [closeSession]);
 

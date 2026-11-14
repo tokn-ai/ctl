@@ -1,15 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { errorMessage } from "../../lib/errors";
+import { localizedErrorText } from "../../lib/errors";
 import { forgetIdentityPassphrase, forgetSavedCredential, importCredentialMetadata, listIdentityFiles, listSavedCredentials, saveIdentityPassphrase } from "../../lib/tauri";
 import type { CredentialRecord, CredentialTarget, CredentialsSnapshot, IdentityFile, IdentitySnapshot } from "../../lib/types";
 import { credentialImportError, metadataImportRequired } from "./metadataImport";
-import { canForgetIdentity, canSaveIdentity, identityMutationError, isIdentityPassphraseError } from "./identityFiles";
+import { canForgetIdentity, canSaveIdentity, identityMutationMessage, isIdentityPassphraseError } from "./identityFiles";
+import { message, type DisplayText } from "../i18n/messages";
 import { useNotificationEnvironment } from "../notifications/NotificationContext";
 
 interface IdentityDialog {
   file: IdentityFile;
   action: "save" | "forget" | "saving" | "forgetting";
-  error?: string;
+  error?: DisplayText;
 }
 
 /** Inventories contain metadata only. A submitted passphrase is sent directly to native verification. */
@@ -17,12 +18,12 @@ export function useCredentials(visible: boolean, targets: CredentialTarget[]) {
   const [snapshot, setSnapshot] = useState<CredentialsSnapshot | null>(null);
   const [identities, setIdentities] = useState<IdentitySnapshot | null>(null);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [identity_error, setIdentityError] = useState<string | null>(null);
+  const [error, setError] = useState<DisplayText | null>(null);
+  const [identity_error, setIdentityError] = useState<DisplayText | null>(null);
   const [pending, setPending] = useState<CredentialRecord | null>(null);
   const [identity_dialog, setIdentityDialog] = useState<IdentityDialog | null>(null);
   const [busy_id, setBusyId] = useState<string | null>(null);
-  const [import_feedback, setImportFeedback] = useState<{ severity: "success" | "warning" | "info" | "error"; message: string } | null>(null);
+  const [import_feedback, setImportFeedback] = useState<{ severity: "success" | "warning" | "info" | "error"; message: DisplayText } | null>(null);
   const notifications = useNotificationEnvironment()?.store;
   const notifications_ref = useRef(notifications);
   notifications_ref.current = notifications;
@@ -52,11 +53,11 @@ export function useCredentials(visible: boolean, targets: CredentialTarget[]) {
     if (credentials_result.status === "fulfilled") {
       setSnapshot(credentials_result.value);
       setError(null);
-    } else setError(errorMessage(credentials_result.reason));
+    } else setError(localizedErrorText(credentials_result.reason));
     if (identities_result.status === "fulfilled") {
       setIdentities(identities_result.value);
       setIdentityError(null);
-    } else setIdentityError(errorMessage(identities_result.reason));
+    } else setIdentityError(localizedErrorText(identities_result.reason));
     setLoading(false);
     const import_flags = [
       credentials_result.status === "fulfilled" ? metadataImportRequired(credentials_result.value) : null,
@@ -128,9 +129,9 @@ export function useCredentials(visible: boolean, targets: CredentialTarget[]) {
       if (!mounted.current || !imported) return;
       setImportFeedback({
         severity: still_required === false ? "success" : still_required === true ? "warning" : "info",
-        message: still_required === false ? "Saved credential metadata imported."
-          : still_required === true ? "Imported available metadata. Some saved entries still need metadata import."
-            : "Metadata import finished. Refresh to check whether all saved entries were imported.",
+        message: still_required === false ? message("credentials.import_success")
+          : still_required === true ? message("credentials.import_partial")
+            : message("credentials.import_finished"),
       });
     } finally { finishMutation(); }
   }, [openDialog, beginMutation, finishMutation, refresh]);
@@ -148,8 +149,8 @@ export function useCredentials(visible: boolean, targets: CredentialTarget[]) {
       await refresh();
     } catch (failure) {
       if (mounted.current) notifications_ref.current?.notify(`credential-forget:${pending.credential_id}`, {
-        severity: "error", title: "Could not forget credential", source: "Credentials",
-        message: `Could not forget ${pending.name}: ${errorMessage(failure)}`,
+        severity: "error", title: message("credentials.forget_error_title"), source: message("credentials.title"),
+        message: message("credentials.forget_error", { name: pending.name, detail: localizedErrorText(failure) }),
       });
     } finally { finishMutation(); }
   }, [pending, beginMutation, finishMutation, refresh]);
@@ -183,11 +184,11 @@ export function useCredentials(visible: boolean, targets: CredentialTarget[]) {
       await refresh();
     } catch (failure) {
       if (mounted.current) {
-        const message = identityMutationError(failure);
+        const display_text = identityMutationMessage(failure);
         if (isIdentityPassphraseError(failure)) {
-          retry_dialog = { file, action: "save", error: message };
+          retry_dialog = { file, action: "save", error: display_text };
         } else notifications_ref.current?.notify(`identity-save:${file.identity_id}`, {
-          severity: "error", title: "Could not save passphrase", source: "Credentials", message,
+          severity: "error", title: message("credentials.save_passphrase_error_title"), source: message("credentials.title"), message: display_text,
         });
       }
     } finally { finishMutation(retry_dialog); }
@@ -208,7 +209,7 @@ export function useCredentials(visible: boolean, targets: CredentialTarget[]) {
       await refresh();
     } catch (failure) {
       if (mounted.current) notifications_ref.current?.notify(`identity-forget:${file.identity_id}`, {
-        severity: "error", title: "Could not forget passphrase", source: "Credentials", message: identityMutationError(failure, "forget"),
+        severity: "error", title: message("credentials.forget_passphrase_error_title"), source: message("credentials.title"), message: identityMutationMessage(failure, "forget"),
       });
     } finally { finishMutation(); }
   }, [identity_dialog, beginMutation, finishMutation, refresh]);

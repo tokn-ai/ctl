@@ -1,13 +1,14 @@
 import { useEffect, useRef } from "react";
 import type { ManagedTask, NotificationAction } from "../../lib/types";
 import { COMMAND_IDS } from "../commands/commandIds";
+import { message, type DisplayText } from "../i18n/messages";
 import type { NotificationStore } from "./NotificationStore";
 
 interface Sources {
-  workspace_error: string | null;
-  keybindings_error: string | null;
-  storage_error: string | null;
-  window_error: string | null;
+  workspace_error: DisplayText | null;
+  keybindings_error: DisplayText | null;
+  storage_error: DisplayText | null;
+  window_error: DisplayText | null;
   tasks: readonly ManagedTask[];
   tasks_loaded: boolean;
 }
@@ -16,17 +17,17 @@ interface Sources {
 export function useWorkbenchNotifications(store: NotificationStore, sources: Sources) {
   const previous_runs = useRef<Map<string, string> | null>(null);
   useEffect(() => {
-    const reportError = (key: string, title: string, message: string | null, actions: NotificationAction[] = [], toast = true) => {
-      if (!message) { store.resolve(key); return; }
-      store.report(key, { severity: "error", title, message, source: title, actions }, { toast });
+    const reportError = (key: string, title: DisplayText, detail: DisplayText | null, actions: NotificationAction[] = [], toast = true) => {
+      if (!detail) { store.resolve(key); return; }
+      store.report(key, { severity: "error", title, message: detail, source: title, actions }, { toast });
     };
-    reportError("workspace", "Workspace", sources.workspace_error,
-      [{ label: "Retry saving", command_id: COMMAND_IDS.saveWorkspace }], false);
-    reportError("keybindings", "Keyboard shortcuts", sources.keybindings_error
-      ? `Keyboard shortcuts: ${sources.keybindings_error} Last valid bindings remain active.` : null,
-      [{ label: "Reload shortcuts", command_id: COMMAND_IDS.reloadKeybindings }]);
-    reportError("session_storage", "Session history", sources.storage_error);
-    reportError("window_close", "Window", sources.window_error);
+    reportError("workspace", message("command.category_workspace"), sources.workspace_error,
+      [{ label: message("notifications.retry_save"), command_id: COMMAND_IDS.saveWorkspace }], false);
+    reportError("keybindings", message("shortcuts.title"), sources.keybindings_error
+      ? message("notifications.keybindings_error", { detail: sources.keybindings_error }) : null,
+      [{ label: message("notifications.reload_shortcuts"), command_id: COMMAND_IDS.reloadKeybindings }]);
+    reportError("session_storage", message("notifications.session_history"), sources.storage_error);
+    reportError("window_close", message("notifications.window"), sources.window_error);
 
     if (sources.tasks_loaded) {
       const runs = new Map<string, string>();
@@ -37,9 +38,11 @@ export function useWorkbenchNotifications(store: NotificationStore, sources: Sou
         runs.set(task.task_id, signature);
         if (previous_runs.current && previous_runs.current.get(task.task_id) !== signature && run.state === "failed") {
           store.notify(`task_run:${task.task_id}`, {
-            severity: "error", title: "Task failed", source: task.definition.name,
-            message: `${task.definition.name} failed${run.exit_code !== null ? ` with exit code ${run.exit_code}` : ""}.`,
-            actions: [{ label: "View task", command_id: COMMAND_IDS.openTask, args: { value: task.task_id } }],
+            severity: "error", title: message("notifications.task_failed"), source: task.definition.name,
+            message: run.exit_code === null
+              ? message("notifications.task_failed_named", { name: task.definition.name })
+              : message("notifications.task_failed_with_exit", { name: task.definition.name, exit_code: run.exit_code }),
+            actions: [{ label: message("notifications.view_task"), command_id: COMMAND_IDS.openTask, args: { value: task.task_id } }],
           });
         }
       }

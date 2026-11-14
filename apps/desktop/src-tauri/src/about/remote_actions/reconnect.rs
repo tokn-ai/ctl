@@ -7,6 +7,7 @@ use tauri::Emitter as _;
 use tokio::sync::{Mutex, oneshot};
 
 use super::{RemoteActionOutcome, agent_version};
+use crate::about::models::ComponentActionSummary;
 use crate::{
   about::observations::RemoteObservation,
   error::{CommandErrorDto, CommandResult},
@@ -204,6 +205,9 @@ pub(super) async fn execute(
     });
   Ok(RemoteActionOutcome {
     running,
+    summary: ComponentActionSummary::RemoteReconnect {
+      verified_transports: observations.len(),
+    },
     detail: format!(
       "Reconnected and verified {} ctl-agent transport(s). Remote terminal sessions were preserved.",
       observations.len()

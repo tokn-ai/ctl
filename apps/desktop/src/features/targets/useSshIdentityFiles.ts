@@ -1,9 +1,11 @@
 import { useEffect, useState } from "react";
-import { errorMessage } from "../../lib/errors";
+import { message, type DisplayText } from "../i18n/messages";
+import { localizedErrorText } from "../../lib/errors";
 import { listSshIdentityFiles } from "../../lib/tauri";
 import type { SshIdentityFileCatalog } from "../../lib/types";
 
-interface IdentityFileDiscovery extends SshIdentityFileCatalog {
+interface IdentityFileDiscovery extends Omit<SshIdentityFileCatalog, "warnings"> {
+  warnings: DisplayText[];
   loading: boolean;
 }
 
@@ -26,7 +28,7 @@ export function useSshIdentityFiles(enabled: boolean): IdentityFileDiscovery {
           setDiscovery({
             identity_files: [],
             warnings: [
-              `Could not list ~/.ssh: ${errorMessage(error)}. Enter a path manually.`,
+              message("ssh_flow.identity_discovery_failed", { detail: localizedErrorText(error) }),
             ],
             loading: false,
           });

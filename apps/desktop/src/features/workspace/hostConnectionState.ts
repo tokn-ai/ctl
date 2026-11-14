@@ -1,3 +1,4 @@
+import { message, textSignature, type DisplayText } from "../i18n/messages";
 import type {
   HostConnectionObservation,
   HostConnectionOperation,
@@ -13,9 +14,9 @@ export interface HostConnectionModel {
 }
 
 export interface MethodObservation {
-  name: string;
+  name: DisplayText;
   status: SshConnectionStatus | null;
-  error: string | null;
+  error: DisplayText | null;
 }
 
 export interface HostObservationResult {
@@ -49,14 +50,19 @@ export function aggregateHostObservations(methods: readonly MethodObservation[],
   const complete = methods.length > 0 && failures.length === 0;
   const manually_disconnected = complete && !usable_connection &&
     methods.some((method) => method.status?.manually_disconnected);
+  const errors = new Map(failures.map(({ error }) => {
+    const diagnostic = error ?? message("host_observation.status_check_failed");
+    return [JSON.stringify(textSignature(diagnostic)), diagnostic];
+  }));
+  const diagnostic = [...errors.values()].reduce<DisplayText | null>((first, next) =>
+    first === null ? next : message("host_observation.combine_diagnostics", { first, next }), null);
   return {
     observation: {
       availability: connected.length ? "available" : complete ? "unavailable" : "unknown",
       completeness: complete ? "complete" : failures.length === methods.length ? "failed" : "partial",
       method_names: connected.map((method) => method.name),
       failed_method_names: failures.map((method) => method.name),
-      message: methods.length ? [...new Set(failures.map((method) => method.error ?? "SSH status could not be checked."))].join("; ") || null
-        : "No SSH connection methods are available.",
+      message: methods.length ? diagnostic : message("host_observation.no_ssh_methods"),
       checked_at_ms,
       stale: false,
     },
@@ -79,7 +85,7 @@ export function beginHostOperation(model: HostConnectionModel, kind: "connect" |
   return { ...model, operation: { kind, state: "pending", method_name, message: null } };
 }
 
-export function failHostOperation(model: HostConnectionModel, kind: "connect" | "disconnect", message: string): HostConnectionModel {
+export function failHostOperation(model: HostConnectionModel, kind: "connect" | "disconnect", message: DisplayText): HostConnectionModel {
   return { ...model, operation: { ...model.operation, kind, state: "failed", message } };
 }
 
@@ -110,10 +116,10 @@ export function hostConnectionStatus(model: HostConnectionModel): HostConnection
     : operation.kind === "connect" && operation.state === "pending" ? "connecting"
     : operation.state === "failed" || observation.completeness === "failed" || observation.completeness === "partial" ? "error"
     : observation.availability === "unavailable" ? "disconnected" : "checking";
-  const message = operation.message ?? observation.message ?? (
-    model.disconnect_incomplete ? "The SSH connection is still open after a disconnect. Retry Disconnect host or connect again."
-      : model.manually_disconnected && operation.state === "idle" ? "Disconnected manually. Connect this host to resume." : null
+  const diagnostic = operation.message ?? observation.message ?? (
+    model.disconnect_incomplete ? message("host_observation.incomplete_disconnect")
+      : model.manually_disconnected && operation.state === "idle" ? message("host_observation.manual_resume") : null
   );
-  return { state, method_names: observation.method_names, message,
+  return { state, method_names: observation.method_names, message: diagnostic,
     manually_disconnected: model.manually_disconnected, observation, operation };
 }

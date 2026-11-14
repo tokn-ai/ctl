@@ -1,3 +1,4 @@
+import { message } from "../i18n/messages";
 import type { AttachmentViewState } from "../../lib/types";
 
 export const INITIAL_ATTACHMENT_RECOVERY_DELAY_MS = 250;
@@ -83,7 +84,7 @@ export function interruptedAttachmentState(
     layout_lease: EMPTY_LEASE,
     reconnect_sequence: recoverable ? null : state.reconnect_sequence,
     message: recoverable
-      ? "Attachment interrupted."
+      ? message("attachment.interrupted")
       : state.message,
   };
 }

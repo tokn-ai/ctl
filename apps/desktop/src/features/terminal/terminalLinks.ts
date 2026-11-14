@@ -1,3 +1,4 @@
+import { translate, type Locale } from "../i18n/messages";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import type { IBufferRange, IDisposable, Terminal } from "@xterm/xterm";
 import { installTerminalMouse } from "./terminalMouse";
@@ -27,6 +28,7 @@ export function installTerminalLinks(
   on_open_link: (url: string) => void,
   on_copy_text: (text: string) => void = () => {},
   on_open_file?: (file: FileLink) => void,
+  getLocale: () => Locale = () => "en",
 ): IDisposable {
   const element = terminal.element;
   if (!element) throw new Error("Terminal must be opened before installing links");
@@ -46,7 +48,9 @@ export function installTerminalLinks(
       return;
     }
     hovered = { url, range };
-    element.title = `${is_mac ? "Cmd" : "Ctrl"}-click to ${validWebUrl(url) ? "open" : "preview"}\n${url}`;
+    element.title = translate(getLocale(), validWebUrl(url) ? "session.open_link_hint" : "session.preview_link_hint", {
+      key: is_mac ? "Cmd" : "Ctrl", url,
+    });
   };
   // Activation belongs to the shared click/drag gesture, never xterm's plain click.
   const activate = () => {};

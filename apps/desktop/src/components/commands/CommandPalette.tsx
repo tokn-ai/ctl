@@ -1,4 +1,5 @@
 import { useMemo, useRef, useState } from "react";
+import { useLocale } from "../../features/i18n/LocaleContext";
 import {
   firstEnabledIndex,
   nextEnabledIndex,
@@ -31,6 +32,7 @@ export function CommandPalette({
   onDismiss,
   onExecute,
 }: CommandPaletteProps) {
+  const { t, locale } = useLocale();
   const [query, setQuery] = useState("");
   const [selectedCommandId, setSelectedCommandId] = useState<string | null>(
     null,
@@ -41,8 +43,8 @@ export function CommandPalette({
     ? environment.keybinding(QUICK_INPUT_IDS.cancel)
     : defaultKeybindings(platform).get(QUICK_INPUT_IDS.cancel);
   const filteredCommands = useMemo(
-    () => searchCommands(commands, query),
-    [commands, query],
+    () => searchCommands(commands, query, locale),
+    [commands, query, locale],
   );
   const explicitIndex = filteredCommands.findIndex(
     (command) => command.id === selectedCommandId && command.enabled,
@@ -79,15 +81,15 @@ export function CommandPalette({
     commands: [
       {
         id: QUICK_INPUT_IDS.cancel,
-        category: "Dialog",
-        title: "Close Command Palette",
+        category: t("command.category_dialog"),
+        title: t("command.palette_close"),
         enabled: true,
         run: onDismiss,
       },
       {
         id: QUICK_INPUT_IDS.accept,
-        category: "Dialog",
-        title: "Run Selected Command",
+        category: t("command.category_dialog"),
+        title: t("command.palette_run"),
         enabled: selectedCommand !== null,
         run: () => execute(selectedCommand),
       },
@@ -96,7 +98,7 @@ export function CommandPalette({
 
   return (
     <QuickInputFrame
-      title="Command palette"
+      title={t("palette.name")}
       onDismiss={() => {
         dispatcher.execute(QUICK_INPUT_IDS.cancel);
       }}
@@ -135,24 +137,24 @@ export function CommandPalette({
             setSelectedCommandId(null);
           }}
           role="combobox"
-          aria-label="Search commands"
+          aria-label={t("palette.search")}
           aria-autocomplete="list"
           aria-controls="command-palette-results"
           aria-expanded="true"
           aria-activedescendant={
             selectedCommand ? optionId(selectedCommand.id) : undefined
           }
-          placeholder="Type a command"
+          placeholder={t("palette.placeholder")}
           autoComplete="off"
           spellCheck={false}
           autoFocus
         />
         <button
           type="button"
-          aria-label="Close command palette"
+          aria-label={t("palette.close")}
           onClick={() => dispatcher.execute(QUICK_INPUT_IDS.cancel)}
         >
-          {cancelKey ? formatKeybinding(cancelKey, platform) : "Close"}
+          {cancelKey ? formatKeybinding(cancelKey, platform) : t("common.close")}
         </button>
       </div>
 
@@ -190,7 +192,7 @@ export function CommandPalette({
         }}
       >
         {filteredCommands.length === 0 ? (
-          <div className="command-palette-empty">No matching commands.</div>
+          <div className="command-palette-empty">{t("palette.no_matches")}</div>
         ) : null}
         {filteredCommands.map((command, index) => {
           const selected = index === selectedIndex;

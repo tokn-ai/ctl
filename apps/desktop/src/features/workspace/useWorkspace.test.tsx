@@ -3,6 +3,7 @@ import { StrictMode } from "react";
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useWorkspace } from "./useWorkspace";
+import { formatText } from "../i18n/messages";
 import {
   emptyWorkspaceView,
   projectedHostId,
@@ -544,7 +545,7 @@ describe("workspace lifecycle", () => {
       }),
     );
     expect(api.closeAttachmentWindow).not.toHaveBeenCalled();
-    expect(result.current.error).toContain("ongoing operations");
+    expect(formatText("en", result.current.error!)).toContain("ongoing operations");
     result.current.closeBlockedRef.current = () => false;
     api.updateWorkspace.mockRejectedValue({
       code: "workspace_io_failed",
@@ -568,12 +569,12 @@ describe("workspace lifecycle", () => {
     await waitFor(() => expect(nativeWindow.onCloseRequested).toHaveBeenCalledOnce());
     const close = () => nativeWindow.onCloseRequested.mock.calls[0][0]({ preventDefault: vi.fn() });
     await act(async () => { await close(); });
-    expect(result.current.close_error).toBe("Window close paused: Could not close the native window.");
+    expect(formatText("en", result.current.close_error!)).toBe("Window close paused: Could not close the native window.");
     expect(result.current.load_error).toBeNull();
     expect(result.current.save_error).toBeNull();
     expect(result.current.closing).toBe(false);
     await act(async () => { await result.current.persist(true); });
-    expect(result.current.close_error).toBe("Window close paused: Could not close the native window.");
+    expect(formatText("en", result.current.close_error!)).toBe("Window close paused: Could not close the native window.");
     await act(async () => { await close(); });
     expect(result.current.close_error).toBeNull();
     expect(api.closeAttachmentWindow).toHaveBeenCalledTimes(2);
@@ -609,7 +610,10 @@ describe("workspace lifecycle", () => {
     });
     window.localStorage.setItem("ctmux.remote_hosts", legacy);
     const { result } = renderHook(() => useWorkspace());
-    await waitFor(() => expect(result.current.error).toContain("preserved"));
+    await waitFor(() => {
+      expect(result.current.error).not.toBeNull();
+      expect(formatText("en", result.current.error!)).toContain("preserved");
+    });
     expect(api.updateWorkspace).not.toHaveBeenCalled();
     expect(api.updateHosts).not.toHaveBeenCalled();
     expect(window.localStorage.getItem("ctmux.remote_hosts")).toBe(legacy);
@@ -640,7 +644,7 @@ describe("optional Tailscale discovery", () => {
   it("reports optional discovery errors without disabling workspace persistence", async () => {
     api.listTailscaleDevices.mockRejectedValue(new Error("client timed out"));
     const { result } = renderHook(() => useWorkspace());
-    await waitFor(() => expect(result.current.tailscaleWarning).toContain("client timed out"));
+    await waitFor(() => expect(result.current.tailscaleWarnings.map((warning) => formatText("en", warning)).join("\n")).toContain("client timed out"));
     expect(result.current.ready).toBe(true);
     expect(result.current.error).toBeNull();
     await act(async () => result.current.persist());
@@ -656,7 +660,7 @@ describe("optional Tailscale discovery", () => {
     await act(async () => result.current.refreshHostDiscovery());
     await act(async () => finish({ devices: [], warnings: ["old failure"], state: "error" }));
     expect(result.current.tailscaleDevices).toEqual(tailscaleCatalog.devices);
-    expect(result.current.tailscaleWarning).toBeNull();
+    expect(result.current.tailscaleWarnings).toEqual([]);
     expect(result.current.hosts.some((host) => host.host_id === tailscaleHostId("n-builder"))).toBe(true);
   });
 });

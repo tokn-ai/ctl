@@ -1,4 +1,5 @@
 import { useRef, useState } from "react";
+import { useLocale } from "../../features/i18n/LocaleContext";
 import {
   useCommandEnvironment,
   useCommandScope,
@@ -55,9 +56,11 @@ export function QuickInput({
   onBack,
   onChange,
   cancel_disabled = false,
-  cancel_label = "Cancel",
+  cancel_label: provided_cancel_label,
   confirm_command_id,
 }: QuickInputProps) {
+  const { t } = useLocale();
+  const cancel_label = provided_cancel_label ?? t("dialog.cancel");
   const [selectedId, setSelectedId] = useState(() => mode.kind === "pick"
     ? mode.initial_choice_id ?? mode.choices[0]?.id
     : undefined);
@@ -71,22 +74,22 @@ export function QuickInput({
     commands: [
       {
         id: QUICK_INPUT_IDS.cancel,
-        category: "Dialog",
-        title: "Cancel Quick Input",
+        category: t("command.category_dialog"),
+        title: t("dialog.command_cancel"),
         enabled: !cancel_disabled,
         run: onCancel,
       },
       {
         id: QUICK_INPUT_IDS.back,
-        category: "Dialog",
-        title: "Previous Step",
+        category: t("command.category_dialog"),
+        title: t("dialog.command_back"),
         enabled: Boolean(onBack) && !cancel_disabled,
         run: onBack ?? (() => {}),
       },
       {
         id: QUICK_INPUT_IDS.accept,
-        category: "Dialog",
-        title: "Accept Quick Input",
+        category: t("command.category_dialog"),
+        title: t("dialog.command_accept"),
         enabled:
           mode.kind !== "progress" &&
           (mode.kind !== "pick" || mode.choices.length > 0),
@@ -146,7 +149,7 @@ export function QuickInput({
         {onBack ? (
           <button
             type="button"
-            aria-label="Previous step"
+            aria-label={t("dialog.previous")}
             onClick={() => dispatcher.execute(QUICK_INPUT_IDS.back)}
           >
             ←
@@ -157,9 +160,9 @@ export function QuickInput({
           type="button"
           onClick={cancel}
           disabled={cancel_disabled}
-          aria-label="Cancel quick input"
+          aria-label={t("dialog.cancel_input")}
         >
-          {cancelKey ? formatKeybinding(cancelKey, platform) : "Cancel"}
+          {cancelKey ? formatKeybinding(cancelKey, platform) : t("dialog.cancel")}
         </button>
       </header>
       {description ? (
@@ -227,7 +230,7 @@ export function QuickInput({
       {mode.kind === "progress" ? (
         <div className="quick-input-progress">
           <p className="quick-input-description" role="status">
-            {mode.message ?? "Connecting…"}
+            {mode.message ?? t("dialog.connecting")}
           </p>
           {mode.progress ? (
             <progress

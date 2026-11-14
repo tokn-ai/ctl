@@ -1,10 +1,12 @@
+import { LocalizedError, formatText, message, type DisplayText, type Locale } from "../features/i18n/messages";
+
 export interface ErrorDetails {
   code: string | null;
-  message: string;
+  message: DisplayText;
 }
 
 export function errorDetails(error: unknown): ErrorDetails {
-  return { code: errorCode(error), message: errorMessage(error) };
+  return { code: errorCode(error), message: localizedErrorText(error) };
 }
 
 export function errorCode(error: unknown): string | null {
@@ -19,7 +21,12 @@ export function errorCode(error: unknown): string | null {
   return null;
 }
 
-export function errorMessage(error: unknown): string {
+export function errorMessage(error: unknown, locale: Locale = "en"): string {
+  return formatText(locale, localizedErrorText(error));
+}
+
+export function localizedErrorText(error: unknown): DisplayText {
+  if (error instanceof LocalizedError) return error.text;
   if (typeof error === "string") {
     return error;
   }
@@ -34,5 +41,5 @@ export function errorMessage(error: unknown): string {
   ) {
     return error.message;
   }
-  return "An unexpected ctmux error occurred.";
+  return message("shell.unexpected_error");
 }

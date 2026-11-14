@@ -145,9 +145,10 @@ async fn nested_fixture(daemon: &TestDaemon) -> Result<(String, [String; 3])> {
 async fn prefix(tui: &mut Tui, key: &[u8]) -> Result<()> {
   tui.send(b"\x02")?;
   tui
-    .wait_screen("pane-move prefix table is active", |screen| {
-      footer(screen).contains("PREFIX")
-    })
+    .wait_screen(
+      "pane-move prefix table is active on the connected pane",
+      |screen| footer(screen).starts_with(" connected |") && footer(screen).contains("PREFIX"),
+    )
     .await?;
   tui.send(key)
 }
@@ -329,6 +330,37 @@ async fn reconnect_panes(proxy: &TestProxy, tui: &mut Tui, pane_count: usize) ->
   Ok(())
 }
 
+async fn verify_swap_after_reconnect(
+  daemon: &TestDaemon,
+  session: &str,
+  owner: &mut Tui,
+  observer: &mut Tui,
+  original: &ViewInfo,
+  [first, second, third]: [&str; 3],
+  tags: &[(&str, &str)],
+) -> Result<()> {
+  let recovered = view(daemon, session).await?;
+  assert_slots(original, &recovered, [first, third, second]);
+  visible_slots(owner, &recovered, tags).await?;
+  // Cached panes and the layout lease can be visible while the focused
+  // attachment is still recovering. Prove it can carry input before swapping.
+  input_in_pane(owner, &recovered, tags, "second", "ready-after-reconnect").await?;
+  prefix(owner, b"}").await?;
+  let expected = nested_layout([second, third, first], &[71, 48], &[9, 14]);
+  let swapped = wait_view(
+    daemon,
+    session,
+    "recovered owner can still swap panes",
+    |view| view.revision > recovered.revision && view.layout == expected,
+  )
+  .await
+  .map_err(|error| format!("{error}; owner footer: {}", footer(&owner.screen())))?;
+  assert_slots(original, &swapped, [second, third, first]);
+  visible_slots(owner, &swapped, tags).await?;
+  visible_slots(observer, &swapped, tags).await?;
+  input_in_pane(owner, &swapped, tags, "second", "identity-after-reconnect").await
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn swaps_preserve_nested_weighted_slots_and_focus_policy_across_reconnect() -> Result<()> {
   let mut daemon = TestDaemon::start().await?;
@@ -406,24 +438,16 @@ async fn swaps_preserve_nested_weighted_slots_and_focus_policy_across_reconnect(
   }
 
   reconnect_panes(&proxy, &mut owner, original.panes.len()).await?;
-  let recovered = view(&daemon, &session).await?;
-  assert_slots(&original, &recovered, [&first, &third, &second]);
-  visible_slots(&mut owner, &recovered, &tags).await?;
-  prefix(&mut owner, b"}").await?;
-  let expected = nested_layout([&second, &third, &first], &[71, 48], &[9, 14]);
-  let after_reconnect = wait_view(
+  verify_swap_after_reconnect(
     &daemon,
     &session,
-    "recovered owner can still swap panes",
-    |view| view.revision > recovered.revision && view.layout == expected,
+    &mut owner,
+    &mut observer,
+    &original,
+    [&first, &second, &third],
+    &tags,
   )
-  .await
-  .map_err(|error| format!("{error}; owner footer: {}", footer(&owner.screen())))?;
-  assert_slots(&original, &after_reconnect, [&second, &third, &first]);
-  visible_slots(&mut owner, &after_reconnect, &tags).await?;
-  visible_slots(&mut observer, &after_reconnect, &tags).await?;
-  let marker = "identity-after-reconnect";
-  input_in_pane(&mut owner, &after_reconnect, &tags, "second", marker).await?;
+  .await?;
   detach(&mut observer).await?;
   drop(observer);
   detach(&mut owner).await?;

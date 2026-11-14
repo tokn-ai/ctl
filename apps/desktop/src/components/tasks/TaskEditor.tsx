@@ -1,3 +1,4 @@
+import { useLocale } from "../../features/i18n/LocaleContext";
 import { Fragment, useEffect, useId, useRef, useState } from "react";
 import type { TaskWorkspace } from "../../features/tasks/useTaskWorkspace";
 import type { SavedTaskDefinition } from "../../lib/types";
@@ -14,6 +15,7 @@ export function TaskEditor({
   model: TaskWorkspace;
   saved?: SavedTaskDefinition;
 }) {
+  const { t, locale, formatText } = useLocale();
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmReload, setConfirmReload] = useState(false);
   const [instanceName, setInstanceName] = useState<string | null>(null);
@@ -39,7 +41,7 @@ export function TaskEditor({
     const failure = model.editor_validation_error;
     if (!failure || failure.field !== field || failure.argument_index !== argument_index) return null;
     const value = field === "arguments" ? definition.arguments[argument_index ?? -1] : definition[field] ?? "";
-    return value === failure.field_value ? failure.message : null;
+    return value === failure.field_value ? formatText(failure.text) : null;
   }
   function fieldId(field: TaskDefinitionField, argument_index?: number) {
     return `${feedback_id}-${field}${argument_index === undefined ? "" : `-${argument_index}`}`;
@@ -53,16 +55,16 @@ export function TaskEditor({
     return error ? <div id={fieldId(field, argument_index)}><InlineFeedback className="task-feedback">{error}</InlineFeedback></div> : null;
   }
   const saveStatus = model.draftError
-    ? "Draft not saved"
+    ? t("tasks.draft_unsaved")
     : model.savingDraft
-      ? "Saving draft…"
+      ? t("tasks.draft_saving")
       : draft.dirty
-        ? "Draft saved"
-        : "Saved";
+        ? t("tasks.draft_saved")
+        : t("tasks.saved");
   return (
     <div className="task-dialog-layer">
       <QuickInputFrame
-        title={saved ? "Edit task definition" : "Create task"}
+        title={saved ? t("tasks.edit_definition") : t("tasks.create_task")}
         onDismiss={model.closeEditor}
         onKeyDown={(event) => {
           if (event.key === "Escape") {
@@ -75,16 +77,15 @@ export function TaskEditor({
         <div className="task-editor">
           <header className="task-page-heading">
             <div>
-              <span className="task-eyebrow">TASK DEFINITION · {definitionScopeLabel(draft.scope)}</span>
-              <h1>{saved ? "Edit task definition" : "Create task"}</h1>
-              <p>
-                Shared with ctl. Your draft saves automatically; Save updates the definition.
+              <span className="task-eyebrow">{t("tasks.editor_eyebrow", { scope: definitionScopeLabel(draft.scope, locale) })}</span>
+              <h1>{saved ? t("tasks.edit_definition") : t("tasks.create_task")}</h1>
+              <p>{t("tasks.draft_help")}
               </p>
             </div>
             <button
               className="task-dialog-close"
               type="button"
-              aria-label="Close task editor"
+              aria-label={t("tasks.close_editor")}
               onClick={model.closeEditor}
             >
               <Icon name="close" />
@@ -97,27 +98,24 @@ export function TaskEditor({
             }}
           >
             <fieldset disabled={model.busy}>
-              <label>
-                Command line
+              <label>{t("tasks.command_line")}
                 <input
                   autoFocus
-                  aria-label="Command line"
+                  aria-label={t("tasks.command_line")}
                   value={draft.command_line}
                   placeholder='cargo run --bin "api server"'
                   aria-invalid={!!draft.command_error}
                   aria-describedby={`task-command-help${draft.command_error ? ` ${fieldId("command_line")}` : ""}`}
                   onChange={(event) => model.editCommand(event.target.value)}
                 />
-                <small id="task-command-help">
-                  POSIX quoting. Runs directly; no shell expansion.
+                <small id="task-command-help">{t("tasks.command_quoting")}
                 </small>
               </label>
               {fieldFeedback("command_line")}
-              <label>
-                Name
+              <label>{t("tasks.name")}
                 <input
                   value={definition.name}
-                  placeholder="Optional: command-folder-random word"
+                  placeholder={t("tasks.optional_name")}
                   {...fieldAttributes("name")}
                   onChange={(event) =>
                     model.edit({ ...definition, name: event.target.value })
@@ -128,7 +126,7 @@ export function TaskEditor({
               <div
                 className="task-mode-picker"
                 role="group"
-                aria-label="Execution mode"
+                aria-label={t("tasks.execution_mode")}
               >
                 {(["background", "interactive"] as const).map((mode) => (
                   <button
@@ -143,18 +141,17 @@ export function TaskEditor({
                     }
                   >
                     <strong>
-                      {mode === "background" ? "Background" : "Interactive"}
+                      {mode === "background" ? t("tasks.background") : t("tasks.interactive")}
                     </strong>
                     <span>
                       {mode === "background"
-                        ? "Jobs and services with log output"
-                        : "Commands that need a terminal"}
+                        ? t("tasks.background_hint")
+                        : t("tasks.interactive_hint")}
                     </span>
                   </button>
                 ))}
               </div>
-              <label>
-                Executable
+              <label>{t("tasks.executable")}
                 <input
                   value={definition.program}
                   {...fieldAttributes("program")}
@@ -169,14 +166,13 @@ export function TaskEditor({
                 />
               </label>
               {fieldFeedback("program")}
-              <div className="task-field-label">
-                Arguments <small>One argument per row.</small>
+              <div className="task-field-label">{t("tasks.arguments")}{" "}<small>{t("tasks.arguments_hint")}</small>
               </div>
               {definition.arguments.map((argument, index) => (
                 <Fragment key={index}>
                   <div className="task-argument">
                     <input
-                      aria-label={`Argument ${index + 1}`}
+                      aria-label={t("tasks.argument_number", { index: index + 1 })}
                       value={argument}
                       {...fieldAttributes("arguments", index)}
                       onChange={(event) =>
@@ -191,7 +187,7 @@ export function TaskEditor({
                     />
                     <button
                       type="button"
-                      aria-label={`Remove argument ${index + 1}`}
+                      aria-label={t("tasks.remove_argument", { index: index + 1 })}
                       onClick={() =>
                         model.edit({
                           ...definition,
@@ -217,13 +213,12 @@ export function TaskEditor({
                   })
                 }
               >
-                <Icon name="plus" size={14} /> Add argument
+                <Icon name="plus" size={14} />{t("tasks.add_argument")}
               </button>
-              <label>
-                Working directory
+              <label>{t("tasks.working_directory")}
                 <input
                   value={definition.working_directory ?? ""}
-                  placeholder="Absolute path (optional)"
+                  placeholder={t("tasks.optional_directory")}
                   {...fieldAttributes("working_directory")}
                   onChange={(event) =>
                     model.edit({
@@ -237,39 +232,39 @@ export function TaskEditor({
               <div className="task-form-actions">
                 <span role="status">{saveStatus}</span>
                 <button type="submit">
-                  {saved ? "Save changes" : "Create definition"}
+                  {saved ? t("tasks.save_changes") : t("tasks.create_definition")}
                 </button>
                 <button
                   className="task-primary"
                   type="button"
                   onClick={() => void model.save(true)}
                 >
-                  {saved ? "Save and run" : "Create and run"}
+                  {saved ? t("tasks.save_run") : t("tasks.create_run")}
                 </button>
               </div>
             </fieldset>
           </form>
           {form_error ? (
-            <InlineFeedback className="task-feedback">{form_error}</InlineFeedback>
+            <InlineFeedback className="task-feedback">{formatText(form_error)}</InlineFeedback>
           ) : null}
           {model.draftConflict || model.draftReviewRequired ? (
             <InlineFeedback severity="warning" className="task-feedback">
               {model.draftReviewRequired
-                ? "This recovered draft needs review before replacing a shared definition."
-                : "The shared definition changed outside this editor. Your draft and its original revision are kept."}
+                ? t("tasks.review_draft")
+                : t("tasks.draft_conflict")}
             </InlineFeedback>
           ) : null}
           {model.draftConflict || model.draftReviewRequired ? (
             <div className="task-secondary-actions">
-              <button disabled={model.busy} onClick={() => setConfirmReload(true)}>Reload latest definition…</button>
-              <button disabled={model.busy} onClick={() => void model.save()}>Retry save</button>
+              <button disabled={model.busy} onClick={() => setConfirmReload(true)}>{t("tasks.reload_latest")}</button>
+              <button disabled={model.busy} onClick={() => void model.save()}>{t("tasks.retry_save")}</button>
             </div>
           ) : null}
           {confirmReload ? (
             <div className="task-confirm">
-              <p>Replace this draft with the latest saved definition? Your draft edits will be discarded.</p>
-              <button disabled={model.busy} onClick={() => { void model.reloadDraft(); setConfirmReload(false); }}>Replace draft with latest</button>
-              <button onClick={() => setConfirmReload(false)}>Keep draft</button>
+              <p>{t("tasks.replace_confirm")}</p>
+              <button disabled={model.busy} onClick={() => { void model.reloadDraft(); setConfirmReload(false); }}>{t("tasks.replace_draft")}</button>
+              <button onClick={() => setConfirmReload(false)}>{t("tasks.keep_draft")}</button>
             </div>
           ) : null}
           {saved ? (
@@ -277,22 +272,19 @@ export function TaskEditor({
               <button
                 disabled={model.busy || draft.dirty}
                 onClick={() => setInstanceName(`${saved.definition.name} (2)`)}
-              >
-                Run another instance…
+              >{t("tasks.run_another")}
               </button>
               <button
                 className="task-danger"
                 disabled={model.busy}
                 onClick={() => setConfirmDelete(true)}
-              >
-                Delete definition…
+              >{t("tasks.delete_definition_dialog")}
               </button>
             </div>
           ) : null}
           {instanceName !== null && saved ? (
             <div className="task-confirm">
-              <label>
-                New task name
+              <label>{t("tasks.new_task_name")}
                 <input
                   autoFocus
                   value={instanceName}
@@ -306,25 +298,22 @@ export function TaskEditor({
                     if (complete) setInstanceName(null);
                   });
                 }}
-              >
-                Create and run
+              >{t("tasks.create_run")}
               </button>
-              <button onClick={() => setInstanceName(null)}>Cancel</button>
+              <button onClick={() => setInstanceName(null)}>{t("tasks.cancel")}</button>
             </div>
           ) : null}
           {confirmDelete && saved ? (
             <div className="task-confirm">
               <p>
-                Delete “{saved.definition.name}” from {definitionScopeLabel(draft.scope)} definitions? Its
-                managed tasks will remain.
+                {t("tasks.definition_changes_confirm", { name: saved.definition.name, scope: definitionScopeLabel(draft.scope, locale) })}
               </p>
               <button
                 disabled={model.busy}
                 onClick={() => void model.forgetDefinition(saved.definition_id)}
-              >
-                Delete definition
+              >{t("tasks.delete_definition")}
               </button>
-              <button onClick={() => setConfirmDelete(false)}>Cancel</button>
+              <button onClick={() => setConfirmDelete(false)}>{t("tasks.cancel")}</button>
             </div>
           ) : null}
         </div>

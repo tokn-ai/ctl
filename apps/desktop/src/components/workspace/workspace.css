@@ -75,6 +75,25 @@
   padding-top: 12px;
 }
 
+.workspace-language {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: 12px;
+  padding: 7px 8px;
+  font-size: 12px;
+}
+
+.workspace-language select {
+  min-width: 0;
+  padding: 4px 6px;
+  color: var(--text);
+  font: inherit;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface-3);
+}
+
 .workspace-sidebar .control-popover-content > button {
   display: flex;
   align-items: center;

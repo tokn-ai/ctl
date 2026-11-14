@@ -1,7 +1,8 @@
+import { LocalizedError, type DisplayText } from "../i18n/messages";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { loadKeybindings, saveKeybindings } from "../../lib/tauri";
 import type { KeybindingsDocument, KeybindingsSnapshot } from "../../lib/types";
-import { errorMessage } from "../../lib/errors";
+import { localizedErrorText } from "../../lib/errors";
 import { EMPTY_KEYBINDINGS, resolveKeymap } from "./keymap";
 import type { ShortcutPlatform } from "./types";
 
@@ -11,7 +12,7 @@ export function useKeybindings(platform: ShortcutPlatform) {
     revision: null,
     document: EMPTY_KEYBINDINGS,
   });
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<DisplayText | null>(null);
   const [ready, setReady] = useState(false);
   const latest = useRef(snapshot);
   const busy = useRef(false);
@@ -26,7 +27,7 @@ export function useKeybindings(platform: ShortcutPlatform) {
       setSnapshot(loaded);
       setError(null);
     } catch (failure) {
-      if (token === epoch.current) setError(errorMessage(failure));
+      if (token === epoch.current) setError(localizedErrorText(failure));
     } finally {
       if (token === epoch.current) setReady(true);
     }
@@ -40,7 +41,7 @@ export function useKeybindings(platform: ShortcutPlatform) {
   const save = useCallback(
     async (document: KeybindingsDocument) => {
       if (busy.current)
-        throw new Error("Keyboard shortcuts are already being saved.");
+        throw new LocalizedError("shortcuts.save_in_progress");
       resolveKeymap(document, platform);
       busy.current = true;
       const token = ++epoch.current;

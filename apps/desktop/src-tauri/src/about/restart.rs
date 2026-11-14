@@ -10,7 +10,8 @@ use tokio::sync::Mutex;
 use super::local::{Owner, ctld_version, owners};
 use super::models::{
   ComponentAction, ComponentActionImpact, ComponentActionPreflight, ComponentActionResult,
-  ComponentVersionInfo, ExecuteComponentActionRequest, PreflightRestartRequest, ProtocolVersion,
+  ComponentActionSummary, ComponentImpactKind, ComponentVersionInfo, ExecuteComponentActionRequest,
+  PreflightRestartRequest, ProtocolVersion,
 };
 use super::remote_actions::PreparedRemoteAction;
 use crate::error::{CommandErrorDto, CommandResult};
@@ -115,6 +116,7 @@ async fn prepare(
       response.available = Some(ComponentVersionInfo::from_component(
         prepared.available.clone(),
       ));
+      response.impact.kind = Some(ComponentImpactKind::LocalTerminal);
       response.impact.description = "Ends all local terminal sessions, including sessions in other windows or apps and interactive tasks. The replacement daemon starts with its default runtime options.".into();
       Operation::Ctmuxd {
         socket,
@@ -135,6 +137,7 @@ async fn prepare(
       response.available = Some(ComponentVersionInfo::from_component(
         prepared.available.clone(),
       ));
+      response.impact.kind = Some(ComponentImpactKind::LocalTasks);
       response.impact.description = "Restarts the local task daemon only when no tasks are running. Task definitions, history, storage location, and its terminal-daemon endpoint are preserved.".into();
       Operation::Taskd {
         socket,
@@ -153,6 +156,8 @@ async fn prepare(
       response.action = preview.action;
       response.running.clone_from(&preview.running);
       response.available.clone_from(&preview.available);
+      response.impact.kind = Some(preview.impact_kind);
+      response.impact.active_transports = Some(preview.attachment_count);
       response.impact.description = format!(
         "{} Active app transports: {}.",
         preview.detail, preview.attachment_count
@@ -172,6 +177,7 @@ async fn prepare(
       response.running = Some(ctld_version(before.binary.clone()));
       response.available = Some(ctld_version(prepared.available.info.clone()));
       response.impact.vpn_connections = Some(before.active_vpn_count);
+      response.impact.kind = Some(ComponentImpactKind::LocalBroker);
       response.impact.description = "Stops this broker's port forwards, releases its VPN connections, and may interrupt SSH connections. Shared VPN containers remain available while another ctld keeps them alive, then expire after their heartbeat timeout. Surviving SSH connections can be reused; remote terminal sessions remain on their host.".into();
       Operation::Ctld { owner, prepared }
     }
@@ -209,7 +215,7 @@ async fn execute(
   state: &AppState,
 ) -> CommandResult<ComponentActionResult> {
   let response = prepared.response;
-  let (running, detail) = match prepared.operation {
+  let (running, detail, summary) = match prepared.operation {
     Operation::Ctld { owner, prepared } => {
       if selected_owner(&owner.id)? != owner {
         return Err(selection_changed());
@@ -218,7 +224,7 @@ async fn execute(
         .restart()
         .await
         .map_err(|error| CommandErrorDto::new(error.code(), error.to_string()))?;
-      (Some(ctld_version(outcome.after.binary)), None)
+      (Some(ctld_version(outcome.after.binary)), None, None)
     }
     Operation::Ctmuxd {
       socket,
@@ -249,6 +255,9 @@ async fn execute(
           "Restarted ctmuxd; {} terminal sessions ended.",
           outcome.terminated_sessions
         )),
+        Some(ComponentActionSummary::LocalTerminalRestart {
+          ended_sessions: outcome.terminated_sessions,
+        }),
       )
     }
     Operation::Taskd {
@@ -272,11 +281,12 @@ async fn execute(
       (
         Some(ComponentVersionInfo::from_component(outcome.after)),
         None,
+        None,
       )
     }
     Operation::Remote(prepared) => {
       let outcome = prepared.execute(app, state).await?;
-      (outcome.running, Some(outcome.detail))
+      (outcome.running, Some(outcome.detail), Some(outcome.summary))
     }
   };
   Ok(ComponentActionResult {
@@ -287,6 +297,7 @@ async fn execute(
     action: response.action,
     running,
     detail,
+    summary,
   })
 }
 

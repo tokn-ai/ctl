@@ -4,18 +4,18 @@ import { targetKey } from "../targets/targets";
 const LOCAL_HOST_COLOR = "#ffffff";
 
 export const HOST_COLOR_PALETTE = [
-  { name: "Coral", color: "#f18f8f" },
-  { name: "Orange", color: "#f3ad76" },
-  { name: "Amber", color: "#ebc66c" },
-  { name: "Lime", color: "#bdd879" },
-  { name: "Green", color: "#83d5a4" },
-  { name: "Teal", color: "#75cfbd" },
-  { name: "Cyan", color: "#7ec9e7" },
-  { name: "Blue", color: "#91b7f2" },
-  { name: "Indigo", color: "#aaa2ef" },
-  { name: "Purple", color: "#c39aeb" },
-  { name: "Pink", color: "#e79acb" },
-  { name: "Rose", color: "#eb92ad" },
+  { label_id: "host_color.preset_coral", color: "#f18f8f" },
+  { label_id: "host_color.preset_orange", color: "#f3ad76" },
+  { label_id: "host_color.preset_amber", color: "#ebc66c" },
+  { label_id: "host_color.preset_lime", color: "#bdd879" },
+  { label_id: "host_color.preset_green", color: "#83d5a4" },
+  { label_id: "host_color.preset_teal", color: "#75cfbd" },
+  { label_id: "host_color.preset_cyan", color: "#7ec9e7" },
+  { label_id: "host_color.preset_blue", color: "#91b7f2" },
+  { label_id: "host_color.preset_indigo", color: "#aaa2ef" },
+  { label_id: "host_color.preset_purple", color: "#c39aeb" },
+  { label_id: "host_color.preset_pink", color: "#e79acb" },
+  { label_id: "host_color.preset_rose", color: "#eb92ad" },
 ] as const;
 
 export function normalizeHostColor(value: unknown): string | undefined {

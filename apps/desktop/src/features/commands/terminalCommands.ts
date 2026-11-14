@@ -3,7 +3,8 @@ import type {
   ConnectionTarget,
   SessionSummary,
 } from "../../lib/types";
-import type { AppCommand, CommandArguments, ShortcutPlatform } from "./types";
+import { localizeCommand, type AppCommand, type CommandArguments, type LocalizedCommand, type ShortcutPlatform } from "./types";
+import { formatter, message, translate, type Locale, type MessageValues } from "../i18n/messages";
 import { sessionKey, targetKey, targetLabel } from "../targets/targets";
 
 import { COMMAND_IDS } from "./commandIds";
@@ -69,7 +70,10 @@ interface TerminalCommandActions {
 export function buildTerminalCommands(
   context: TerminalCommandContext,
   actions: TerminalCommandActions,
+  locale: Locale = "en",
 ): AppCommand[] {
+  const t = (id: string, values?: MessageValues) => translate(locale, id, values);
+  const intl = formatter(locale);
   const activeSession =
     context.sessions.find(
       (session) => sessionKey(session) === context.activeSessionKey,
@@ -107,8 +111,8 @@ export function buildTerminalCommands(
   const daemonRestartInteractionBlocked =
     context.daemonRestartConfirmationPending || context.restartingDaemon;
   const daemonRestartInteractionDisabledReason = context.restartingDaemon
-    ? "ctmuxd is restarting."
-    : "Confirm or cancel the pending ctmuxd restart first.";
+    ? t("command.daemon_restarting")
+    : t("command.confirm_daemon_restart");
   const sessionFor = (args: CommandArguments = {}) =>
     args.session_key === undefined
       ? activeSession
@@ -133,18 +137,18 @@ export function buildTerminalCommands(
   const daemonRestartBlocked =
     context.creating || context.newShellOpen || daemonRestartInteractionBlocked;
   const daemonRestartDisabledReason = context.restartingDaemon
-    ? "ctmuxd is already restarting."
+    ? t("command.already_restarting")
     : context.daemonRestartConfirmationPending
       ? daemonRestartInteractionDisabledReason
       : context.creating
-        ? "Wait for the shell being created to finish."
-        : "Close the new-shell dialog before restarting ctmuxd.";
+        ? t("command.wait_for_shell")
+        : t("command.close_shell_dialog");
 
-  const commands: AppCommand[] = [
+  const commands: LocalizedCommand[] = [
     {
       id: COMMAND_IDS.addExistingSession,
-      category: "Session",
-      title: "Add existing session",
+      category: message("command.category_session"),
+      title: message("command.add_existing"),
       keywords: ["import", "discover", "known", "workspace"],
       enabled: !daemonRestartInteractionBlocked,
       focusTerminalAfterRun: false,
@@ -152,9 +156,9 @@ export function buildTerminalCommands(
     },
     {
       id: COMMAND_IDS.forgetSession,
-      category: "Workspace",
-      title: "Remove Active Session from Workspace",
-      detail: "Forget this entry without terminating its shell.",
+      category: message("command.category_workspace"),
+      title: message("command.forget_active"),
+      detail: t("command.forget_detail"),
       keywords: ["forget", "remove"],
       enabled:
         activeSession !== null &&
@@ -170,9 +174,9 @@ export function buildTerminalCommands(
     },
     {
       id: COMMAND_IDS.addHost,
-      category: "Host",
-      title: "Add Host",
-      detail: "Enter an SSH address, name the host, and authenticate.",
+      category: message("command.category_host"),
+      title: message("command.add_host"),
+      detail: t("command.add_host_detail"),
       keywords: ["remote", "ssh", "connect", "gateway", "route"],
       enabled: !daemonRestartInteractionBlocked,
       focusTerminalAfterRun: false,
@@ -180,8 +184,8 @@ export function buildTerminalCommands(
     },
     {
       id: COMMAND_IDS.addRoutedHost,
-      category: "Host",
-      title: "Add SSH Host with Gateways",
+      category: message("command.category_host"),
+      title: message("command.add_routed_host"),
       // Existing keybindings still open the unified host setup flow.
       visibleInPalette: false,
       keywords: ["remote", "ssh", "jump", "bastion", "gateway", "route"],
@@ -191,8 +195,8 @@ export function buildTerminalCommands(
     },
     {
       id: COMMAND_IDS.showPalette,
-      category: "View",
-      title: "Show Command Palette",
+      category: message("command.category_view"),
+      title: message("command.palette"),
       enabled: true,
       visibleInPalette: false,
       focusTerminalAfterRun: false,
@@ -200,8 +204,8 @@ export function buildTerminalCommands(
     },
     {
       id: COMMAND_IDS.newShell,
-      category: "Session",
-      title: "New Shell",
+      category: message("command.category_session"),
+      title: message("command.new_shell"),
       keywords: ["create", "start"],
       enabled:
         !context.creating &&
@@ -209,12 +213,12 @@ export function buildTerminalCommands(
         !context.daemonRestartConfirmationPending &&
         !context.restartingDaemon,
       disabledReason: context.restartingDaemon
-        ? "ctmuxd is restarting."
+        ? t("command.daemon_restarting")
         : context.daemonRestartConfirmationPending
-          ? "Confirm or cancel the pending ctmuxd restart first."
+          ? t("command.confirm_daemon_restart")
           : context.creating
-            ? "A shell is being created."
-            : "The new-shell dialog is already open.",
+            ? t("command.shell_creating")
+            : t("command.new_shell_open"),
       focusTerminalAfterRun: false,
       run: (args) => {
         if (args?.target_key) {
@@ -226,8 +230,8 @@ export function buildTerminalCommands(
     },
     {
       id: COMMAND_IDS.newTab,
-      category: "Terminal",
-      title: "New Tab in Current Folder",
+      category: message("command.category_terminal"),
+      title: message("command.new_tab_here"),
       detail: context.currentWorkingDirectoryDisplay ?? undefined,
       keywords: ["shell", "terminal", "cwd", "folder"],
       enabled:
@@ -236,35 +240,35 @@ export function buildTerminalCommands(
         !context.daemonRestartConfirmationPending &&
         !context.restartingDaemon,
       disabledReason: context.restartingDaemon
-        ? "ctmuxd is restarting."
+        ? t("command.daemon_restarting")
         : context.daemonRestartConfirmationPending
-          ? "Confirm or cancel the pending ctmuxd restart first."
+          ? t("command.confirm_daemon_restart")
           : context.creating
-            ? "A terminal tab is already being created."
-            : "The current shell has not reported its working directory.",
+            ? t("command.tab_creating")
+            : t("command.working_dir_unknown"),
       focusTerminalAfterRun: false,
       run: actions.openShellTab,
     },
     {
       id: COMMAND_IDS.refreshSessions,
-      category: "Session",
-      title: "Refresh Known Sessions",
+      category: message("command.category_session"),
+      title: message("command.refresh_sessions"),
       keywords: ["reload"],
       enabled: !context.listLoading && !daemonRestartInteractionBlocked,
       disabledReason: daemonRestartInteractionBlocked
         ? daemonRestartInteractionDisabledReason
-        : "The session list is already refreshing.",
+        : t("command.refresh_busy"),
       run: actions.refreshSessions,
     },
     {
       id: COMMAND_IDS.nextTab,
       allow_concurrent: true,
-      category: "Terminal",
-      title: "Switch to Next Tab",
+      category: message("command.category_terminal"),
+      title: message("command.next_tab"),
       enabled: nextTab !== null && !daemonRestartInteractionBlocked,
       disabledReason: daemonRestartInteractionBlocked
         ? daemonRestartInteractionDisabledReason
-        : "There is no other tab to select.",
+        : t("command.no_other_tabs"),
       run: () => {
         if (nextTab) {
           return actions.selectSession(nextTab);
@@ -274,12 +278,12 @@ export function buildTerminalCommands(
     {
       id: COMMAND_IDS.previousTab,
       allow_concurrent: true,
-      category: "Terminal",
-      title: "Switch to Previous Tab",
+      category: message("command.category_terminal"),
+      title: message("command.previous_tab"),
       enabled: previousTab !== null && !daemonRestartInteractionBlocked,
       disabledReason: daemonRestartInteractionBlocked
         ? daemonRestartInteractionDisabledReason
-        : "There is no other tab to select.",
+        : t("command.no_other_tabs"),
       run: () => {
         if (previousTab) {
           return actions.selectSession(previousTab);
@@ -291,8 +295,8 @@ export function buildTerminalCommands(
       // Closing may connect a neighboring tab after cleanup.
       // That connection must not block closing another tab.
       allow_concurrent: true,
-      category: "Session",
-      title: "Detach Active Tab",
+      category: message("command.category_session"),
+      title: message("command.detach_active"),
       detail: activeSession?.name,
       keywords: ["detach", "disconnect"],
       enabled:
@@ -304,8 +308,8 @@ export function buildTerminalCommands(
       disabledReason: daemonRestartInteractionBlocked
         ? daemonRestartInteractionDisabledReason
         : activeSession
-          ? "The active tab cannot be detached right now."
-          : "No session is active.",
+          ? t("command.cannot_detach")
+          : t("command.no_active_session"),
       isEnabled: (args) => {
         const session = sessionFor(args);
         return (
@@ -322,10 +326,10 @@ export function buildTerminalCommands(
     },
     {
       id: COMMAND_IDS.close,
-      category: "Session",
+      category: message("command.category_session"),
       title: closeConfirmationPending
-        ? "Confirm Terminate Session"
-        : "Terminate Active Session",
+        ? message("command.confirm_terminate")
+        : message("command.terminate_active"),
       detail: closeSession?.name,
       keywords: ["exit", "kill", "terminate", "close"],
       enabled:
@@ -335,10 +339,10 @@ export function buildTerminalCommands(
       disabledReason: daemonRestartInteractionBlocked
         ? daemonRestartInteractionDisabledReason
         : closeSession
-          ? "The session is already changing state."
+          ? t("command.session_changing")
           : closeConfirmationPending
-            ? "The session awaiting confirmation is no longer available."
-            : "No session is active.",
+            ? t("command.confirmation_session_gone")
+            : t("command.no_active_session"),
       focusTerminalAfterRun: false,
       isEnabled: (args) =>
         sessionAvailable(
@@ -357,68 +361,68 @@ export function buildTerminalCommands(
     },
     {
       id: COMMAND_IDS.toggleInput,
-      category: "Terminal",
-      title: context.inputOwned ? "Release Input" : "Request Input",
+      category: message("command.category_terminal"),
+      title: context.inputOwned ? message("command.release_input") : message("command.request_input"),
       keywords: ["lease", "ownership"],
       enabled: activeTabAttached && !daemonRestartInteractionBlocked,
       disabledReason: daemonRestartInteractionBlocked
         ? daemonRestartInteractionDisabledReason
-        : "Attach to a running session first.",
+        : t("command.attach_first"),
       run: actions.toggleInput,
     },
     {
       id: COMMAND_IDS.toggleResizeControl,
-      category: "Terminal",
-      title: context.resizeControlStatus === "owned" ? "Release Resize Control" : "Take Resize Control",
-      detail: context.resizeControlStatus === "held_elsewhere" ? "The current owner must release resize control first." : undefined,
+      category: message("command.category_terminal"),
+      title: context.resizeControlStatus === "owned" ? message("command.release_resize") : message("command.take_resize"),
+      detail: context.resizeControlStatus === "held_elsewhere" ? t("command.resize_held") : undefined,
       keywords: ["layout", "lease", "ownership", "panes", "zoom"],
       enabled: activeTabAttached && !daemonRestartInteractionBlocked &&
         context.resizeControlStatus !== "unavailable",
       disabledReason: daemonRestartInteractionBlocked ? daemonRestartInteractionDisabledReason
-        : "Attach to a running session first.",
+        : t("command.attach_first"),
       focusTerminalAfterRun: false,
       run: () => actions.requestResizeControl(context.resizeControlStatus !== "owned"),
     },
     {
       id: COMMAND_IDS.toggleResize,
-      category: "Terminal",
+      category: message("command.category_terminal"),
       title: context.resizeWithWindow
-        ? "Stop Resizing with Window"
-        : "Resize with Window",
+        ? message("command.stop_resize")
+        : message("command.resize_with_window"),
       keywords: ["layout", "window", "automatic", "fixed"],
       enabled: activeTabAttached && !daemonRestartInteractionBlocked,
       disabledReason: daemonRestartInteractionBlocked
         ? daemonRestartInteractionDisabledReason
-        : "Attach to a running session first.",
+        : t("command.attach_first"),
       run: actions.toggleResizeWithWindow,
     },
     {
       id: COMMAND_IDS.reconnect,
-      category: "Terminal",
-      title: "Reconnect to Active Session",
+      category: message("command.category_terminal"),
+      title: message("command.reconnect_active"),
       detail: activeSession?.name,
       enabled: canReconnect && !daemonRestartInteractionBlocked,
       disabledReason: daemonRestartInteractionBlocked
         ? daemonRestartInteractionDisabledReason
         : activeSession
-          ? "The active session is not disconnected."
-          : "No session is active.",
+          ? t("command.active_not_disconnected")
+          : t("command.no_active_session"),
       run: actions.reconnect,
     },
     {
       id: COMMAND_IDS.focus,
-      category: "Terminal",
-      title: "Focus Terminal",
+      category: message("command.category_terminal"),
+      title: message("command.focus_terminal"),
       enabled: context.terminalReady,
-      disabledReason: "The terminal renderer is not ready.",
+      disabledReason: t("command.renderer_not_ready"),
       run: actions.focusTerminal,
     },
     {
       id: COMMAND_IDS.restartDaemon,
-      category: "Daemon",
-      title: "Restart ctmuxd",
+      category: message("command.category_daemon"),
+      title: message("command.restart_daemon"),
       detail:
-        "Terminate every local ctmux session, including other apps’ sessions, and start a new daemon.",
+        t("command.restart_daemon_detail"),
       keywords: ["daemon", "restart", "protocol", "version", "recover"],
       enabled: !daemonRestartBlocked,
       disabledReason: daemonRestartDisabledReason,
@@ -431,9 +435,9 @@ export function buildTerminalCommands(
   commands.push(
     {
       id: COMMAND_IDS.configureHost,
-      category: "Host",
-      title: "Host Settings",
-      detail: "Rename this host and manage its connection methods.",
+      category: message("command.category_host"),
+      title: message("command.host_settings"),
+      detail: t("command.host_settings_detail"),
       keywords: ["connection", "method", "preferred", "gateway", "rename"],
       enabled: targetFor()?.kind === "ssh" && !daemonRestartInteractionBlocked,
       isEnabled: (args) => targetFor(args)?.kind === "ssh" && !daemonRestartInteractionBlocked,
@@ -446,8 +450,8 @@ export function buildTerminalCommands(
     {
       id: COMMAND_IDS.selectSession,
       allow_concurrent: true,
-      category: "Session",
-      title: "Connect Active Session",
+      category: message("command.category_session"),
+      title: message("command.connect_active"),
       enabled: sessionAvailable(activeSession),
       isEnabled: (args) => sessionAvailable(sessionFor(args)),
       run: (args) => {
@@ -457,14 +461,14 @@ export function buildTerminalCommands(
     },
     {
       id: COMMAND_IDS.connectHost,
-      category: "Host",
-      title: "Connect Host",
-      detail: "Choose a saved host or SSH config alias.",
+      category: message("command.category_host"),
+      title: message("command.connect_host"),
+      detail: t("command.connect_host_detail"),
       keywords: ["ssh", "remote", "alias"],
       enabled: hasConnectableHost,
       disabledReason: daemonRestartInteractionBlocked
         ? daemonRestartInteractionDisabledReason
-        : "No SSH hosts are available.",
+        : t("command.no_ssh_hosts"),
       isEnabled: (args) => args.target_key === undefined
         ? hasConnectableHost
         : canConnectHost(targetFor(args)),
@@ -480,9 +484,9 @@ export function buildTerminalCommands(
     },
     {
       id: COMMAND_IDS.removeHost,
-      category: "Host",
-      title: "Remove Active Host from Workspace…",
-      detail: "Open Host settings to review and confirm removal in the danger zone.",
+      category: message("command.category_host"),
+      title: message("command.remove_active_host"),
+      detail: t("command.remove_active_host_detail"),
       enabled: targetFor()?.kind === "ssh" && !daemonRestartInteractionBlocked,
       isEnabled: (args) =>
         targetFor(args)?.kind === "ssh" && !daemonRestartInteractionBlocked,
@@ -494,8 +498,8 @@ export function buildTerminalCommands(
     },
     {
       id: COMMAND_IDS.managePortForwards,
-      category: "Host",
-      title: "Manage Port Forwarding",
+      category: message("command.category_host"),
+      title: message("command.manage_ports"),
       keywords: ["ssh", "local", "tunnel", "forward"],
       enabled: targetFor()?.kind === "ssh" && !daemonRestartInteractionBlocked,
       isEnabled: (args) =>
@@ -508,15 +512,15 @@ export function buildTerminalCommands(
     },
     {
       id: COMMAND_IDS.saveWorkspace,
-      category: "Workspace",
-      title: "Retry Saving Workspace",
+      category: message("command.category_workspace"),
+      title: message("command.retry_workspace"),
       enabled: !daemonRestartInteractionBlocked,
       run: actions.saveWorkspace,
     },
     {
       id: COMMAND_IDS.configureKeybindings,
-      category: "Settings",
-      title: "Configure Keyboard Shortcuts",
+      category: message("command.category_settings"),
+      title: message("command.configure_shortcuts"),
       keywords: ["keybindings", "keys", "settings"],
       enabled: true,
       focusTerminalAfterRun: false,
@@ -524,8 +528,8 @@ export function buildTerminalCommands(
     },
     {
       id: COMMAND_IDS.reloadKeybindings,
-      category: "Settings",
-      title: "Reload Keyboard Shortcuts",
+      category: message("command.category_settings"),
+      title: message("command.reload_shortcuts"),
       enabled: true,
       run: actions.reloadKeybindings,
     },
@@ -543,22 +547,22 @@ export function buildTerminalCommands(
     const retryable = selected && !attaching && !sessionAttached && !ended;
     const title = retryable
       ? matchesAttachment
-        ? `Reconnect to ${session.name}`
-        : `Attach to ${session.name}`
-      : `Switch to ${session.name}`;
+        ? message("command.reconnect_session", { v1: session.name })
+        : message("command.attach_session", { v1: session.name })
+      : message("command.switch_session", { v1: session.name });
     const detail = selected
       ? attaching
-        ? "Attaching…"
+        ? t("command.attaching")
         : sessionAttached
-          ? "Current session"
+          ? t("command.current_session")
           : ended
-            ? "Session ended"
-            : "Retry attachment"
-      : `${targetLabel(session.target)} · ${session.terminal_size.columns}×${session.terminal_size.rows} · ${session.status}`;
+            ? t("command.ended_session")
+            : t("command.retry_attachment")
+      : `${targetLabel(session.target, locale)} · ${intl.formatNumber(session.terminal_size.columns)}×${intl.formatNumber(session.terminal_size.rows)} · ${t(`command.session_status_${session.status}`)}`;
     commands.push({
       id: sessionSwitchCommandId(session),
       allow_concurrent: true,
-      category: "Session",
+      category: message("command.category_session"),
       title,
       detail,
       keywords: ["attach", session.name],
@@ -569,19 +573,19 @@ export function buildTerminalCommands(
       disabledReason: daemonRestartInteractionBlocked
         ? daemonRestartInteractionDisabledReason
         : context.closingSessionKeys.has(identity)
-          ? "This session is closing."
+          ? t("command.session_closing")
           : attaching
-            ? "This session is already attaching."
+            ? t("command.session_attaching")
             : sessionAttached
-              ? "This session is already active."
-              : "This session has ended.",
+              ? t("command.session_active")
+              : t("command.session_ended"),
       run: () => actions.selectSession(session),
     });
   }
 
   const defaults = defaultKeybindings(context.shortcutPlatform);
   return commands.map((command) => ({
-    ...command,
+    ...localizeCommand(locale, command),
     keybinding: defaults.get(command.id),
   }));
 }

@@ -4,6 +4,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { TerminalSurface } from "./TerminalSurface";
 import type { ComponentProps } from "react";
 import type { FileLink, TerminalSize } from "../../lib/types";
+import { LocaleProvider, useLocale } from "../../features/i18n/LocaleContext";
+import { message } from "../../features/i18n/messages";
 import { NotificationProvider } from "../../features/notifications/NotificationContext";
 import { NotificationStore } from "../../features/notifications/NotificationStore";
 
@@ -25,6 +27,7 @@ vi.mock("../../features/terminal/XtermRenderer", () => ({ XtermRenderer: class {
     mocks.copy_text = copy_text;
     mocks.open_file = open_file;
   }
+  setLocale() {}
   dispose = mocks.dispose;
 } }));
 afterEach(() => { cleanup(); vi.clearAllMocks(); vi.unstubAllGlobals(); });
@@ -36,6 +39,34 @@ function renderSurface() {
   </NotificationProvider>);
   return { ...mounted, store };
 }
+describe("terminal language changes", () => {
+  it("relabels a mounted terminal banner without restarting its renderer", () => {
+    function TestTerminal() {
+      const { setPreference } = useLocale();
+      return <>
+        <button type="button" onClick={() => setPreference("zh-Hans")}>Use Chinese</button>
+        <TerminalSurface phase="disconnected" hasSession has_cached_content onInput={() => {}}
+          onReady={() => {}} reconnect_error={message("attachment.connection_interrupted")} on_reconnect={() => {}} />
+      </>;
+    }
+
+    try {
+      render(<LocaleProvider><TestTerminal /></LocaleProvider>);
+      expect(screen.getByRole("button", { name: "Reconnect" })).toBeTruthy();
+      expect(screen.getByText("Connection interrupted.")).toBeTruthy();
+
+      fireEvent.click(screen.getByRole("button", { name: "Use Chinese" }));
+
+      expect(screen.getByRole("button", { name: "重新连接" })).toBeTruthy();
+      expect(screen.getByText("连接已中断。")).toBeTruthy();
+      expect(mocks.dispose).not.toHaveBeenCalled();
+    } finally {
+      localStorage.removeItem("ctmux.desktop.language");
+      document.documentElement.removeAttribute("lang");
+    }
+  });
+});
+
 describe("terminal exit acknowledgement", () => {
   it("retains the renderer, blocks PTY input, and consumes the dismissal key", () => {
     const input = vi.fn(), dismiss = vi.fn(), ready = vi.fn(), parent = vi.fn();
@@ -233,7 +264,7 @@ describe("terminal browser links", () => {
     await act(async () => { mocks.open_link?.(url); });
     expect(mocks.open_external_url).toHaveBeenCalledExactlyOnceWith(url);
     expect(store.snapshot().entries).toEqual([expect.objectContaining({
-      title: "Could not open link", message: "Browser unavailable.", severity: "error", toast_visible: true,
+      title: { id: "session.open_link_failed" }, message: "Browser unavailable.", severity: "error", toast_visible: true,
     })]);
 
     mocks.open_external_url.mockResolvedValueOnce();
@@ -295,7 +326,7 @@ describe("terminal selection copying", () => {
     write_text.mockRejectedValueOnce(new Error("Clipboard permission denied."));
     await act(async () => { mocks.copy_text?.("selected text"); });
     expect(store.snapshot().entries).toEqual([expect.objectContaining({
-      title: "Could not copy selection", message: "Clipboard permission denied.", severity: "error", toast_visible: true,
+      title: { id: "session.copy_failed" }, message: "Clipboard permission denied.", severity: "error", toast_visible: true,
     })]);
 
     mocks.open_external_url.mockResolvedValueOnce();
@@ -314,7 +345,7 @@ describe("terminal selection copying", () => {
     const { store } = renderSurface();
     await act(async () => { mocks.copy_text?.("selected text"); });
     expect(store.snapshot().entries).toEqual([expect.objectContaining({
-      title: "Could not copy selection", message: "Clipboard access is unavailable.",
+      title: { id: "session.copy_failed" }, message: { id: "session.clipboard_unavailable" },
     })]);
   });
 

@@ -306,7 +306,7 @@ Run `ctlup update --destination ALIAS --remote-platform windows` to provision a
 Windows x64 SSH account. SSH prefers the managed agent and also supports an
 existing agent and companion executables on the server's `PATH`. The Windows CI
 fixtures exercise local and OpenSSH installation, updater replacement, and
-runtime rollback.
+retained runtime selection.
 
 `ctl-agent` uses the shared IPC stream and only the data endpoint. Its installed
 companion is `ctmuxd.exe` on Windows. Startup requests both `DETACHED_PROCESS`

@@ -314,11 +314,10 @@ installs; `current` selects one verified immutable build under `installs/`.
 To upgrade the manager itself, run a newly downloaded `ctlup` executable with
 `install` or a local `update`. `ctlup update` does not automatically fetch a newer
 manager for itself.
-The previous build is retained for rollback, together with any older installation
-leased by a running process. Unused installations are pruned after activation.
-Signed macOS helper apps are retained intact. An update or rollback changes
-future launches and preserves running services and sessions; restart or
-reconnect separately.
+Current channel and checkout builds and installations leased by running
+processes are retained. Unused installations are pruned after activation.
+Signed macOS helper apps are retained intact. An update changes future launches
+and preserves running services and sessions. Restart or reconnect separately.
 
 ```sh
 ctlup install
@@ -328,8 +327,6 @@ ctlup update --hosts work,jump-a --channel stable
 ctlup --host work --method vpn update
 ctlup --destination my-ssh-alias update
 ctlup update --hosts work --from /path/to/bundle-set --json
-ctlup rollback
-ctlup --host work rollback --json
 ctlup prune
 ```
 

@@ -832,7 +832,14 @@ pub async fn install_local(
       "agent-only overlays are no longer installed; use a complete ctlup update",
     ));
   }
-  let _installation = install_local_with_manager(home, bundle, None, None, None).await?;
+  let installations = Installations::new(home);
+  let inventory = installations.catalog()?;
+  let origin =
+    catalog::known_origin(&inventory, bundle).unwrap_or_else(|| catalog::unknown_origin(bundle));
+  let expected_heads = crate::installation::single_target_heads(home, bundle, &origin)?;
+  crate::components::verify_local(home, bundle).await?;
+  crate::installation::provision_manager(home, bundle).await?;
+  let _installation = activate_local(home, bundle, origin, expected_heads).await?;
   Ok(result(bundle, package))
 }
 
@@ -857,42 +864,6 @@ pub async fn install_prepared_local(
     .into_iter()
     .find(|result| result.target_triple == target)
     .ok_or_else(|| invalid("the native component was not installed"))
-}
-
-/// Install a verified native cohort using its freshly built independent manager.
-///
-/// # Errors
-/// Rejects invalid native signing, unsafe storage or a failed activation.
-pub(crate) async fn install_local_with_manager(
-  home: &Path,
-  bundle: &Bundle,
-  manager: Option<&Path>,
-  origin: Option<&CatalogOrigin>,
-  preparation: Option<&PreparationSnapshot>,
-) -> io::Result<(Bundle, ctl_core::installations::Lease)> {
-  if !ctl_core::bundles::local_target(&bundle.manifest.target_triple) {
-    return Err(invalid("this build cannot run on the local host"));
-  }
-  let installations = ctl_core::installations::Installations::new(home);
-  let inventory = installations.catalog()?;
-  let origin = origin
-    .cloned()
-    .or_else(|| catalog::known_origin(&inventory, bundle))
-    .unwrap_or_else(|| catalog::unknown_origin(bundle));
-  origin.validate()?;
-  let expected_heads = crate::installation::single_target_heads(
-    home,
-    bundle,
-    &origin,
-    preparation.map(|snapshot| snapshot.entries.as_slice()),
-  )?;
-  crate::components::verify_local(home, bundle).await?;
-  if let Some(manager) = manager {
-    crate::installation::provision_manager_from(home, manager).await?;
-  } else {
-    crate::installation::provision_manager(home, bundle).await?;
-  }
-  activate_local(home, bundle, origin, expected_heads).await
 }
 
 async fn activate_local(
@@ -1072,7 +1043,7 @@ fn invalid_data(message: &str) -> io::Error {
   io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
-async fn prune_after_update(home: &Path) {
+pub(crate) async fn prune_after_update(home: &Path) {
   let home = home.to_owned();
   let result = tokio::task::spawn_blocking(move || crate::installation::prune_caches(&home)).await;
   match result {

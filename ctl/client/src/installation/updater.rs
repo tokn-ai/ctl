@@ -1,4 +1,5 @@
 use ctl_core::bundles::Bundle;
+use ctl_core::installations::{DEVELOPMENT_LAYOUT_VERSION, Installations};
 use ctl_core::private_fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -14,7 +15,7 @@ pub async fn updater_for_bundle(home: &Path, bundle: &Bundle) -> io::Result<Vec<
 }
 
 /// Provision the independent native manager for both CLI and desktop installs.
-/// Runtime activation never changes this entry point during a rollback.
+/// The updater entry point is independent of runtime activation.
 ///
 /// # Errors
 /// Rejects foreign installs, unavailable managers, unsafe storage or an invalid
@@ -37,7 +38,8 @@ pub async fn provision_manager(home: &Path, bundle: &Bundle) -> io::Result<()> {
   provision_manager_bytes(home, bytes).await
 }
 
-/// Provision the exact verified native manager produced with a development build.
+/// Provision a verified native manager from a development build or bootstrap.
+/// Keep a compatible manager if the candidate cannot retain checkout builds.
 ///
 /// # Errors
 /// Rejects invalid executables or unsafe manager storage before activation.
@@ -46,9 +48,77 @@ pub async fn provision_manager_from(home: &Path, executable: &Path) -> io::Resul
 }
 
 pub(crate) async fn provision_manager_bytes(home: &Path, bytes: Vec<u8>) -> io::Result<()> {
+  let mut stage = stage_manager(home, bytes).await?;
+  // Probe the exact staged bytes, including architecture and command identity.
+  let mut verified = native_updater(&stage.0).await?;
+  let capable = supports_development_layout(&stage.0).await;
+  let lock = lock_manager_provisioning(home).await?;
+  if !capable {
+    // Older bundles can still run, but their updater can prune checkout builds
+    // it cannot see. Keep a capable manager independently of the runtime.
+    if installed_supports_development_layout(home).await? {
+      return Ok(());
+    }
+    let executable = std::env::current_exe()?;
+    if updater_path(&executable) && supports_development_layout(&executable).await {
+      stage = stage_manager(home, native_updater(&executable).await?).await?;
+      verified = native_updater(&stage.0).await?;
+      if !supports_development_layout(&stage.0).await {
+        return Err(io::Error::other(
+          "the running updater changed during provisioning",
+        ));
+      }
+    } else if Installations::new(home).has_development_heads()? {
+      return Err(io::Error::other(
+        "the bundled updater cannot retain checkout builds; run the installation with a newer ctlup",
+      ));
+    }
+  }
   let home = home.to_owned();
-  let directory = ctl_core::paths::directory_for_account(&home).join("bin");
-  let stage = tokio::task::spawn_blocking(move || {
+  tokio::task::spawn_blocking(move || {
+    let _lock = lock;
+    #[cfg(windows)]
+    {
+      Installations::new(&home).install_manager(&verified)
+    }
+    #[cfg(unix)]
+    {
+      let _ = (home, verified);
+      let directory = stage
+        .0
+        .parent()
+        .ok_or_else(|| io::Error::other("missing manager directory"))?;
+      manager_destination(&directory.join("ctlup"))?;
+      std::fs::rename(&stage.0, directory.join("ctlup"))?;
+      private_fs::sync_directory(directory)
+    }
+  })
+  .await
+  .map_err(io::Error::other)?
+}
+
+async fn lock_manager_provisioning(home: &Path) -> io::Result<std::fs::File> {
+  let path = ctl_core::paths::directory_for_account(home).join("bin/.manager.lock");
+  tokio::task::spawn_blocking(move || {
+    let file = private_fs::options()
+      .read(true)
+      .write(true)
+      .create(true)
+      .truncate(false)
+      .open(path)?;
+    if !private_fs::is_private_file(&file.metadata()?) {
+      return Err(io::Error::other("unsafe manager provisioning lock"));
+    }
+    file.lock()?;
+    Ok(file)
+  })
+  .await
+  .map_err(io::Error::other)?
+}
+
+async fn stage_manager(home: &Path, bytes: Vec<u8>) -> io::Result<TemporaryManager> {
+  let directory = ctl_core::paths::directory_for_account(home).join("bin");
+  tokio::task::spawn_blocking(move || {
     use std::io::Write as _;
     super::safe_directory(&directory)?;
     #[cfg(unix)]
@@ -68,28 +138,29 @@ pub(crate) async fn provision_manager_bytes(home: &Path, bytes: Vec<u8>) -> io::
     Ok::<_, io::Error>(stage)
   })
   .await
-  .map_err(io::Error::other)??;
-  // Probe the exact staged bytes, including architecture and command identity.
-  let verified = native_updater(&stage.0).await?;
-  tokio::task::spawn_blocking(move || {
-    #[cfg(windows)]
-    {
-      ctl_core::installations::Installations::new(&home).install_manager(&verified)
-    }
-    #[cfg(unix)]
-    {
-      let _ = (home, verified);
-      let directory = stage
-        .0
-        .parent()
-        .ok_or_else(|| io::Error::other("missing manager directory"))?;
-      manager_destination(&directory.join("ctlup"))?;
-      std::fs::rename(&stage.0, directory.join("ctlup"))?;
-      private_fs::sync_directory(directory)
-    }
-  })
-  .await
   .map_err(io::Error::other)?
+}
+
+async fn installed_supports_development_layout(home: &Path) -> io::Result<bool> {
+  #[cfg(windows)]
+  let Some((path, _lease)) = Installations::new(home).manager_and_lease()? else {
+    return Ok(false);
+  };
+  #[cfg(unix)]
+  let path = ctl_core::paths::directory_for_account(home).join("bin/ctlup");
+  #[cfg(unix)]
+  manager_destination(&path)?;
+  Ok(supports_development_layout(&path).await)
+}
+
+async fn supports_development_layout(path: &Path) -> bool {
+  updater_output(path, "installation-layout-version")
+    .await
+    .ok()
+    .flatten()
+    .and_then(|output| String::from_utf8(output).ok())
+    .and_then(|output| output.trim().parse::<u16>().ok())
+    .is_some_and(|version| version >= DEVELOPMENT_LAYOUT_VERSION)
 }
 
 #[cfg(unix)]
@@ -329,9 +400,19 @@ async fn native_updater(path: &Path) -> io::Result<Vec<u8>> {
 }
 
 async fn verify_updater_name(path: &Path) -> io::Result<()> {
+  if updater_output(path, "--version")
+    .await?
+    .is_none_or(|stdout| !stdout.starts_with(b"ctlup "))
+  {
+    return Err(io::Error::other("selected updater executable is not ctlup"));
+  }
+  Ok(())
+}
+
+async fn updater_output(path: &Path, argument: &str) -> io::Result<Option<Vec<u8>>> {
   use std::process::Stdio;
   let mut child = tokio::process::Command::new(path)
-    .arg("--version")
+    .arg(argument)
     .stdin(Stdio::null())
     .stdout(Stdio::piped())
     .stderr(Stdio::piped())
@@ -355,10 +436,7 @@ async fn verify_updater_name(path: &Path) -> io::Result<()> {
       "updater version inspection timed out",
     )
   })??;
-  if !status.success() || !stdout.starts_with(b"ctlup ") {
-    return Err(io::Error::other("selected updater executable is not ctlup"));
-  }
-  Ok(())
+  Ok(status.success().then_some(stdout))
 }
 
 async fn read_version(reader: impl tokio::io::AsyncRead + Unpin) -> io::Result<Vec<u8>> {
@@ -437,6 +515,35 @@ mod tests {
       }
     }
     std::fs::remove_dir_all(root).unwrap();
+  }
+
+  #[tokio::test]
+  async fn older_bundle_manager_does_not_replace_a_checkout_aware_manager() {
+    let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
+    let home = super::super::TemporaryDirectory::new("updater-layout").unwrap();
+    let fixture =
+      crate::remote_bundle::compatibility::tests::Fixture::new("0.1.0", &"a".repeat(40))
+        .with_clients();
+    let metadata = &fixture.outer["targets"]["aarch64-apple-darwin"]["components"]["ctl"];
+    let manager = |version: Option<u16>, marker: &str| {
+      let probe = version
+        .map(|version| format!("installation-layout-version) printf '{version}\\n';;"))
+        .unwrap_or_default();
+      format!(
+        "#!/bin/sh\n# {marker}\ncase \"$1\" in --component-info) cat <<'METADATA'\n{metadata}\nMETADATA\n;; --version) printf 'ctlup 0.1.0\\n';; {probe} *) exit 1;; esac\n"
+      )
+      .into_bytes()
+    };
+    let old = manager(None, "older publication");
+    let capable = manager(Some(DEVELOPMENT_LAYOUT_VERSION), "development build");
+    let next = manager(Some(DEVELOPMENT_LAYOUT_VERSION), "new publication");
+    let installed = ctl_core::paths::directory_for_account(&home.0).join("bin/ctlup");
+    for (candidate, expected) in [(&capable, &capable), (&old, &capable), (&next, &next)] {
+      provision_manager_bytes(&home.0, candidate.clone())
+        .await
+        .unwrap();
+      assert_eq!(&std::fs::read(&installed).unwrap(), expected);
+    }
   }
 
   #[tokio::test]

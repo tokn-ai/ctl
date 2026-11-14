@@ -66,42 +66,24 @@ pub async fn remote_status(
   interaction: &SshInteraction,
   expected_account: Option<&str>,
 ) -> Result<InstallationStatus, CoreError> {
-  run(
+  let output = execute(
     destination,
     options,
     interaction,
     "status",
     expected_account,
   )
-  .await
-}
-
-/// Atomically restore the remote account's previous build, preserving services.
-/// Callers must verify saved account identity before issuing this mutation.
-///
-/// # Errors
-/// Reports SSH, unavailable rollback or uncertain activation results; never retries.
-pub async fn remote_rollback(
-  destination: &str,
-  options: &SshConnectionOptions,
-  interaction: &SshInteraction,
-  expected_account: Option<&str>,
-) -> Result<InstallationStatus, CoreError> {
-  run(
-    destination,
-    options,
-    interaction,
-    "rollback",
-    expected_account,
-  )
-  .await
+  .await?;
+  if !output.status.success() {
+    return Err(command_error(&output.stderr));
+  }
+  parse_status(&output.stdout)
 }
 
 /// Reads the remote manager's verified catalog without starting services.
 ///
 /// Older managers and absent Windows managers return `None` because they do not
-/// expose this optional command. Existing status and rollback use their original
-/// response independently.
+/// expose this optional command. Status uses its original response independently.
 ///
 /// # Errors
 /// Reports SSH, account verification, storage and invalid catalog failures.
@@ -155,27 +137,6 @@ pub async fn remote_account_id(
       crate::ssh_install::read_remote_id(destination, options, interaction).await
     }
   }
-}
-
-async fn run(
-  destination: &str,
-  options: &SshConnectionOptions,
-  interaction: &SshInteraction,
-  operation: &str,
-  expected_account: Option<&str>,
-) -> Result<InstallationStatus, CoreError> {
-  let output = execute(
-    destination,
-    options,
-    interaction,
-    operation,
-    expected_account,
-  )
-  .await?;
-  if !output.status.success() {
-    return Err(command_error(&output.stderr));
-  }
-  parse_status(&output.stdout)
 }
 
 async fn execute(

@@ -69,9 +69,6 @@ pub(in crate::installations) fn activate(
   }
   prepare_aliases(store, None)?;
   let active = &active.manifest.bundle_id;
-  if selection(store)?.is_some_and(|selection| selection.active == *active) {
-    return Ok(());
-  }
   let transaction = Transaction {
     active: active.clone(),
     previous: previous
@@ -79,6 +76,11 @@ pub(in crate::installations) fn activate(
       .filter(|id| *id != active)
       .cloned(),
   };
+  if selection(store)?.is_some_and(|selection| {
+    selection.active == transaction.active && selection.previous == transaction.previous
+  }) {
+    return Ok(());
+  }
   // Both IDs are switched in one replacement. Existing processes use paths
   // inside their leased version and the stable launchers are never replaced.
   replace(
@@ -86,6 +88,19 @@ pub(in crate::installations) fn activate(
     &serde_json::to_vec(&transaction).map_err(io::Error::other)?,
     false,
   )
+}
+
+pub(in crate::installations) fn clear_previous(store: &Installations) -> io::Result<()> {
+  if let Some(mut selection) = selection(store)?
+    && selection.previous.take().is_some()
+  {
+    replace(
+      &store.root.join(JOURNAL),
+      &serde_json::to_vec(&selection).map_err(io::Error::other)?,
+      false,
+    )?;
+  }
+  Ok(())
 }
 
 pub(in crate::installations) fn install_manager(

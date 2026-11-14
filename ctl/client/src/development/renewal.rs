@@ -4,7 +4,7 @@ use super::{
   MAX_DESCRIPTOR_BYTES, OutputDirectory, PreparedDevelopment, invalid, prepared_result,
   recipe_command, run_recipe,
 };
-use ctl_core::bundles::{Bundle, Manifest, Source, Store};
+use ctl_core::bundles::{Bundle, Manifest, Source};
 use ctl_core::component::ComponentInfo;
 use ctl_core::installations::{Installations, Lease};
 use ctl_core::private_fs;
@@ -121,11 +121,12 @@ pub async fn renew_signing(home: &Path, workspace: &Path) -> io::Result<Prepared
   }
   // Verify the exact repackaged bytes in private staging before making the
   // replacement visible to installation readers.
-  let bundle = Store::cache(&output.0).publish(&replacement, &files)?;
+  let bundle = Bundle::stage(&output.0, &replacement, &files)?;
   drop(files);
   crate::components::verify_local(home, &bundle).await?;
 
-  let (installed, lease) = activate(installations, bundle, active.manifest.bundle_id).await?;
+  let (installed, lease) =
+    activate(installations, bundle, active.manifest.bundle_id, output).await?;
   Ok(prepared_result(home, &installed, lease))
 }
 
@@ -133,9 +134,14 @@ async fn activate(
   installations: Installations,
   bundle: Bundle,
   expected: String,
+  output: OutputDirectory,
 ) -> io::Result<(Bundle, Lease)> {
   tokio::task::spawn_blocking(move || {
-    let (installed, lease) = installations.activate_renewed_helper(&bundle, &expected)?;
+    // Keep staging available if the outer future is cancelled mid-activation.
+    let activated = installations.activate_renewed_helper(&bundle, &expected);
+    drop(bundle);
+    drop(output);
+    let (installed, lease) = activated?;
     if installed.manifest.bundle_id != expected
       && let Err(error) = installations.prune()
     {

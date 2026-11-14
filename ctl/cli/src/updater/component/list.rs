@@ -89,7 +89,7 @@ fn memberships(entries: &[CatalogEntry]) -> io::Result<BTreeMap<String, BTreeSet
 pub(super) fn metadata_unavailable() -> io::Error {
   io::Error::new(
     io::ErrorKind::InvalidData,
-    "component channel metadata is unavailable; run ctlup migrate on the target host or update its ctlup",
+    "component channel metadata is unavailable; update ctlup on the target host",
   )
 }
 
@@ -287,7 +287,7 @@ mod tests {
   }
 
   #[test]
-  fn unavailable_channel_metadata_requires_migration_or_a_newer_peer() {
+  fn unavailable_channel_metadata_requires_a_newer_peer() {
     let mut unknown = entry("aarch64-apple-darwin", "provided", "unknown-build");
     unknown.origin = None;
     unknown.current = false;

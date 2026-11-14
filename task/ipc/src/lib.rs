@@ -38,6 +38,9 @@ pub fn socket_path() -> PathBuf {
     if let Some(directory) = env::var_os("CTL_TASKD_RUNTIME_DIR") {
       return PathBuf::from(directory).join("ctl-taskd.sock");
     }
+    if let Some(directory) = ctl_core::paths::data_override() {
+      return directory.join("run/ctl-taskd/ctl-taskd.sock");
+    }
     if let Some(directory) = env::var_os("XDG_RUNTIME_DIR") {
       return PathBuf::from(directory).join("ctl-taskd/ctl-taskd.sock");
     }
@@ -48,14 +51,14 @@ pub fn socket_path() -> PathBuf {
   {
     use std::os::windows::ffi::OsStrExt;
     // A stable namespace, not an authentication secret; the pipe ACL controls access.
-    let directory = env::var_os("CTL_TASKD_RUNTIME_DIR").map_or_else(
-      || {
+    let directory = env::var_os("CTL_TASKD_RUNTIME_DIR")
+      .map(PathBuf::from)
+      .or_else(|| ctl_core::paths::data_override().map(|path| path.join("run/ctl-taskd")))
+      .unwrap_or_else(|| {
         dirs::data_local_dir()
           .expect("Windows user has a local data directory")
           .join("ctl-taskd")
-      },
-      PathBuf::from,
-    );
+      });
     let bytes: Vec<u8> = directory
       .as_os_str()
       .encode_wide()

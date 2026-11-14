@@ -8,6 +8,7 @@
     "pnpm": ">=10.30.3 <11"
   },
   "scripts": {
+    "demo": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/dev/demo.mts",
     "check": "pnpm scripts:check && pnpm desktop:check",
     "test": "pnpm scripts:test && pnpm desktop:test",
     "desktop:dev": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/dev/tauri-signed.mts",

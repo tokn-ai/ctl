@@ -11,7 +11,7 @@ import path from "node:path";
 import { constants } from "node:os";
 import { serveAppSupervisor } from "./signed-app-supervisor.mts";
 import { SignedDaemon } from "./signed-daemon.mts";
-import { createSignedSupervisorDirectory, prepareSignedRuntime } from "./signed-runtime.mts";
+import { createSignedSupervisorDirectory, ensurePrivateDirectory, prepareSignedRuntime } from "./signed-runtime.mts";
 import { desktopDevArguments } from "./desktop-dev-config.mts";
 import { startFrontendProcess } from "./frontend-process.mts";
 
@@ -67,7 +67,15 @@ async function main(): Promise<void> {
     }
   };
   try {
-    const runtimeDirectory = await prepareSignedRuntime(repositoryRoot);
+    const dataDirectory = process.env.CTL_DATA_DIR;
+    const runtimeDirectory = dataDirectory
+      ? path.join(dataDirectory, "run", "ctld")
+      : await prepareSignedRuntime(repositoryRoot);
+    if (dataDirectory) {
+      await ensurePrivateDirectory(dataDirectory);
+      await ensurePrivateDirectory(path.dirname(runtimeDirectory));
+      await ensurePrivateDirectory(runtimeDirectory);
+    }
     daemon = new SignedDaemon({
       runtime_directory: runtimeDirectory,
     });

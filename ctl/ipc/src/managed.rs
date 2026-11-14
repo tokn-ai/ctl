@@ -24,7 +24,7 @@ pub use selection::{
 /// Returns the installation directory without inspecting the filesystem.
 #[must_use]
 pub fn component_directory(home: &Path) -> PathBuf {
-  home.join(".tokn/ctl/components/ctld")
+  ctl_core::paths::directory_for_account(home).join("components/ctld")
 }
 
 /// Returns the selected bundle's executable without resolving `current`.
@@ -46,8 +46,6 @@ mod filesystem {
   use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _};
   use std::path::{Component, Path, PathBuf};
 
-  const ANCESTORS: [&str; 4] = [".tokn", "ctl", "components", "ctld"];
-
   /// Creates private managed directories without changing existing permissions.
   ///
   /// # Errors
@@ -55,11 +53,7 @@ mod filesystem {
   /// can be modified by another user. Existing `ctld` and `versions`
   /// directories must grant access only to their owner.
   pub fn ensure_component_directory(home: &Path) -> io::Result<PathBuf> {
-    let mut directory = checked_home(home)?;
-    for name in ANCESTORS {
-      directory.push(name);
-      ensure_directory(&directory, name == "ctld")?;
-    }
+    let directory = component_path(home, ensure_directory)?;
     ensure_directory(&directory.join("versions"), true)?;
     Ok(directory)
   }
@@ -258,18 +252,25 @@ mod filesystem {
   }
 
   pub(super) fn checked_component_directory(home: &Path) -> io::Result<PathBuf> {
-    let mut directory = checked_home(home)?;
-    for name in ANCESTORS {
-      directory.push(name);
-      check_directory(&directory, name == "ctld")?;
-    }
-    Ok(directory)
+    component_path(home, check_directory)
   }
 
-  fn checked_home(home: &Path) -> io::Result<PathBuf> {
-    let home = home.canonicalize()?;
-    check_directory(&home, false)?;
-    Ok(home)
+  fn component_path(
+    home: &Path,
+    visit: impl Fn(&Path, bool) -> io::Result<()>,
+  ) -> io::Result<PathBuf> {
+    let path = super::component_directory(home);
+    let anchor = ctl_core::paths::managed_storage_anchor(&path)?;
+    if ctl_core::paths::data_override().as_deref() == Some(anchor) {
+      check_directory(anchor, false)?;
+    }
+    let mut directory = anchor.canonicalize()?;
+    check_directory(&directory, false)?;
+    for name in path.strip_prefix(anchor).map_err(io::Error::other)? {
+      directory.push(name);
+      visit(&directory, directory.ends_with("ctld"))?;
+    }
+    Ok(directory)
   }
 
   pub(super) fn ensure_directory(path: &Path, private: bool) -> io::Result<()> {

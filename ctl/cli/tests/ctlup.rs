@@ -269,6 +269,36 @@ fn updater_executable_preserves_the_shared_private_askpass_entrypoint() {
   assert!(!home.0.join(".tokn").exists());
 }
 
+#[test]
+fn full_storage_override_provisions_an_independent_installation() {
+  let home = Home::new();
+  let root = home.0.join("alternate");
+  fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+  let (manifest, bytes) = archive('a');
+  let mut child = home
+    .command(&["install-archive"])
+    .env("CTL_DATA_DIR", &root)
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .spawn()
+    .unwrap();
+  child.stdin.take().unwrap().write_all(&bytes).unwrap();
+  let output = child.wait_with_output().unwrap();
+  assert!(output.status.success(), "{output:?}");
+  assert!(root.join("installs").join(manifest.bundle_id).is_dir());
+  assert!(root.join("bin/ctl").is_file());
+  let output = home
+    .command(&["status", "--json"])
+    .env("CTL_DATA_DIR", &root)
+    .output()
+    .unwrap();
+  assert!(output.status.success(), "{output:?}");
+  let status: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+  assert!(!status["active"].is_null());
+  assert!(!home.0.join(".tokn").exists());
+}
+
 #[cfg(not(target_os = "macos"))]
 #[test]
 fn install_from_files_provisions_the_independent_manager_and_complete_commands() {
@@ -285,6 +315,7 @@ fn install_from_files_provisions_the_independent_manager_and_complete_commands()
   fs::copy(env!("CARGO_BIN_EXE_ctlup"), &executable).unwrap();
   let stripped = Command::new("strip").arg(&executable).output().unwrap();
   assert!(stripped.status.success(), "{stripped:?}");
+  let root = home.0.join(".tokn/ctl");
   let output = home
     .command_at(
       &executable,
@@ -300,17 +331,16 @@ fn install_from_files_provisions_the_independent_manager_and_complete_commands()
   let results: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
   assert!(results[0]["error"].is_null());
   assert_eq!(results[0]["result"]["services_preserved"], true);
-  let manager = home.0.join(".tokn/ctl/bin/ctlup");
+  let manager = root.join("bin/ctlup");
   assert!(fs::symlink_metadata(&manager).unwrap().is_file());
-  let output = Command::new(manager)
-    .args(["status", "--json"])
-    .env("HOME", &home.0)
+  let output = home
+    .command_at(&manager, &["status", "--json"])
     .output()
     .unwrap();
   assert!(output.status.success());
   let status: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
   assert!(!status["active"].is_null());
-  assert!(!home.0.join(".tokn/ctl/components/selected").exists());
+  assert!(!root.join("components/selected").exists());
 }
 
 #[test]

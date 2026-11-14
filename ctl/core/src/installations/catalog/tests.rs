@@ -26,6 +26,10 @@ impl Drop for Home {
 }
 
 fn fixture(home: &Home, target: &str, byte: u8) -> Bundle {
+  fixture_with_source(home, target, byte, Source::Ci)
+}
+
+fn fixture_with_source(home: &Home, target: &str, byte: u8, source: Source) -> Bundle {
   #[cfg(windows)]
   if target == crate::paths::native_target() {
     home.store().install_manager(b"launcher").unwrap();
@@ -57,7 +61,7 @@ fn fixture(home: &Home, target: &str, byte: u8) -> Bundle {
     .into_iter()
     .map(|name| (executable_name(target, name).into_owned(), vec![byte]))
     .collect();
-  let manifest = Manifest::new(target, Source::Ci, components, &files).unwrap();
+  let manifest = Manifest::new(target, source, components, &files).unwrap();
   Store::cache(&home.0).publish(&manifest, &files).unwrap()
 }
 
@@ -104,7 +108,7 @@ fn helper_fixture(home: &Home, source: &Bundle, signature: u8) -> Bundle {
 
 #[cfg(target_os = "macos")]
 #[test]
-fn renewing_a_helper_preserves_catalog_and_rollback_across_retries() {
+fn renewing_a_helper_preserves_catalog_and_checkout_heads_across_retries() {
   let home = Home::new();
   let store = home.store();
   let native = fixture(&home, crate::paths::native_target(), 1);
@@ -115,6 +119,14 @@ fn renewing_a_helper_preserves_catalog_and_rollback_across_retries() {
   let provided = origin("provided", "development-publication");
   store
     .install_channel(&[original.clone(), remote.clone()], &local, true)
+    .unwrap();
+  let checkout_one = "a".repeat(64);
+  let checkout_two = "b".repeat(64);
+  store
+    .activate_development(&original, &local, &checkout_one, None)
+    .unwrap();
+  store
+    .activate_development(&original, &local, &checkout_two, None)
     .unwrap();
   store.activate_with_origin(&original, &provided).unwrap();
   store
@@ -129,10 +141,7 @@ fn renewing_a_helper_preserves_catalog_and_rollback_across_retries() {
     .unwrap();
   assert_eq!(installed.manifest, renewed.manifest);
   assert_eq!(store.active().unwrap().unwrap().manifest, renewed.manifest);
-  assert_eq!(
-    store.previous().unwrap().unwrap().manifest,
-    original.manifest
-  );
+  assert!(store.previous().unwrap().is_none());
   let mut expected = Vec::new();
   for mut entry in before {
     if entry.bundle_id == *original_id {
@@ -146,25 +155,27 @@ fn renewing_a_helper_preserves_catalog_and_rollback_across_retries() {
   let mut expected_state = State {
     schema_version: 1,
     entries: expected,
+    development: [
+      (checkout_one.clone(), renewed_id.clone()),
+      (checkout_two.clone(), renewed_id.clone()),
+    ]
+    .into(),
   };
   expected_state.sort_entries();
   assert_eq!(store.catalog().unwrap(), expected_state.entries);
+  assert_eq!(
+    read(&store).unwrap().development,
+    expected_state.development
+  );
 
   store.activate_renewed_helper(&renewed, renewed_id).unwrap();
-  assert_eq!(
-    store.previous().unwrap().unwrap().manifest,
-    original.manifest
-  );
-  store.rollback().unwrap();
-  store
-    .activate_renewed_helper(&renewed, original_id)
-    .unwrap();
   assert_eq!(store.active().unwrap().unwrap().manifest, renewed.manifest);
-  assert_eq!(
-    store.previous().unwrap().unwrap().manifest,
-    original.manifest
-  );
+  assert!(store.previous().unwrap().is_none());
   assert_eq!(store.catalog().unwrap(), expected_state.entries);
+  assert_eq!(
+    read(&store).unwrap().development,
+    expected_state.development
+  );
 }
 
 #[cfg(target_os = "macos")]
@@ -202,10 +213,7 @@ fn renewing_a_helper_rejects_changed_runtime_and_stale_selection() {
   assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
   assert_eq!(store.catalog().unwrap(), before);
   assert_eq!(store.active().unwrap().unwrap().manifest, other.manifest);
-  assert_eq!(
-    store.previous().unwrap().unwrap().manifest,
-    original.manifest
-  );
+  assert!(store.previous().unwrap().is_none());
   assert!(
     !store
       .root()
@@ -268,6 +276,9 @@ fn native_lookup_verifies_its_payload_without_reading_foreign_payload_bytes() {
     .unwrap();
   let native = fixture(&home, crate::paths::native_target(), 2);
   store.activate(&native).unwrap();
+  // A native lookup must stay independent of foreign payload bytes even when
+  // it is the first operation to open a catalog from an older manager.
+  fs::remove_file(store.root.join("install-layout-migrated.json")).unwrap();
   let name = installed[0].manifest.files.keys().next().unwrap();
   fs::write(
     installed[0].directory.join(name),
@@ -289,9 +300,13 @@ fn failed_initial_activation_leaves_an_authoritative_empty_catalog_and_collectib
   let home = Home::new();
   let store = home.store();
   let source = fixture(&home, crate::paths::native_target(), 1);
-  let result = store.activate_with(&source, None, None, |_| {
-    Err::<(), _>(io::Error::other("lease preparation failed"))
-  });
+  let result = store.activate_with(
+    &source,
+    None,
+    None,
+    |_| Ok(()),
+    |_| Err::<(), _>(io::Error::other("lease preparation failed")),
+  );
   assert!(
     result
       .unwrap_err()
@@ -299,33 +314,26 @@ fn failed_initial_activation_leaves_an_authoritative_empty_catalog_and_collectib
       .contains("lease preparation failed")
   );
   assert!(exists(&store).unwrap());
-  assert!(!store.is_catalog_migrated().unwrap());
   assert_eq!(store.catalog().unwrap(), Vec::<CatalogEntry>::new());
   assert!(store.list().unwrap().is_empty());
   assert!(store.active().unwrap().is_none());
   assert_eq!(filesystem::entries(&store).unwrap().len(), 1);
   assert_eq!(store.prune().unwrap().removed, [source.manifest.bundle_id]);
+}
 
+#[test]
+fn activation_migrates_an_uncatalogued_store_first() {
   let old_home = Home::new();
   let old_store = old_home.store();
   let old = fixture(&old_home, crate::paths::native_target(), 2);
   filesystem::ensure_root(&old_store).unwrap();
   filesystem::publish(&old_store, &old, None).unwrap();
   let new = fixture(&old_home, crate::paths::native_target(), 3);
-  assert!(
-    old_store
-      .activate(&new)
-      .unwrap_err()
-      .to_string()
-      .contains("ctlup migrate")
-  );
-  assert!(!exists(&old_store).unwrap());
-  assert!(
-    !old_store
-      .root
-      .join("installs")
-      .join(new.manifest.bundle_id)
-      .exists()
+  assert_eq!(old_store.activate(&new).unwrap().manifest, new.manifest);
+  assert_eq!(old_store.active().unwrap().unwrap().manifest, new.manifest);
+  assert_eq!(
+    old_store.get(&old.manifest.bundle_id).unwrap().manifest,
+    old.manifest
   );
 }
 
@@ -679,7 +687,167 @@ fn existing_activation_keeps_recorded_provenance_for_the_same_payload() {
 }
 
 #[test]
-fn native_rollback_and_process_leases_keep_old_catalog_provenance() {
+fn development_checkouts_keep_one_build_each_until_unregistered() {
+  let home = Home::new();
+  let store = home.store();
+  let target = crate::paths::native_target();
+  let first = fixture_with_source(&home, target, 1, Source::Local);
+  let second = fixture_with_source(&home, target, 2, Source::Local);
+  let third = fixture_with_source(&home, target, 3, Source::Local);
+  let stale = fixture_with_source(&home, target, 4, Source::Local);
+  let checkout_one = "a".repeat(64);
+  let checkout_two = "b".repeat(64);
+  let origin = origin("local", "development");
+  assert!(store.development_head(&checkout_one).unwrap().is_none());
+  assert!(store.development_head("../other-checkout").is_err());
+  let (first, lease) = store
+    .activate_development(&first, &origin, &checkout_one, None)
+    .unwrap();
+  store
+    .activate_development(&second, &origin, &checkout_two, None)
+    .unwrap();
+  let before = fs::read(store.root.join(DEVELOPMENT)).unwrap();
+  let error = store
+    .activate_development(&stale, &origin, &checkout_one, None)
+    .unwrap_err();
+  assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+  assert_eq!(fs::read(store.root.join(DEVELOPMENT)).unwrap(), before);
+  assert!(
+    !store
+      .root
+      .join("installs")
+      .join(stale.manifest.bundle_id)
+      .exists()
+  );
+  assert_eq!(store.active().unwrap().unwrap().manifest, second.manifest);
+  store
+    .activate_development(
+      &third,
+      &origin,
+      &checkout_one,
+      Some(&first.manifest.bundle_id),
+    )
+    .unwrap();
+  assert_eq!(
+    store.development_head(&checkout_one).unwrap(),
+    Some(third.manifest.bundle_id.clone())
+  );
+  assert_eq!(
+    store.development_head(&checkout_two).unwrap(),
+    Some(second.manifest.bundle_id.clone())
+  );
+  assert!(store.previous().unwrap().is_none());
+  let catalog: serde_json::Value =
+    serde_json::from_slice(&fs::read(store.root.join(CATALOG)).unwrap()).unwrap();
+  assert!(catalog.get("development").is_none());
+  assert_eq!(
+    store.prune().unwrap().retained_in_use,
+    std::slice::from_ref(&first.manifest.bundle_id)
+  );
+  drop(lease);
+  assert_eq!(store.prune().unwrap().removed, [first.manifest.bundle_id]);
+  assert!(store.get(&second.manifest.bundle_id).is_ok());
+
+  assert!(store.remove_component("local", target).unwrap());
+  assert!(store.development_head(&checkout_one).unwrap().is_none());
+  assert!(store.development_head(&checkout_two).unwrap().is_none());
+  assert_eq!(store.prune().unwrap().removed, [second.manifest.bundle_id]);
+  assert_eq!(store.active().unwrap().unwrap().manifest, third.manifest);
+}
+
+#[test]
+fn development_recovery_commits_only_intents_with_a_catalog_journal() {
+  let home = Home::new();
+  let store = home.store();
+  let target = crate::paths::native_target();
+  let orig = origin("local", "development");
+  let checkout = "a".repeat(64);
+  let first = fixture_with_source(&home, target, 1, Source::Local);
+  let second = fixture_with_source(&home, target, 2, Source::Local);
+  store
+    .activate_development(&first, &orig, &checkout, None)
+    .unwrap();
+  let lock = filesystem::Lock::acquire(&store).unwrap();
+  let second = filesystem::publish(&store, &second, None).unwrap();
+  let mut state = read(&store).unwrap();
+  state.register(std::slice::from_ref(&second), &orig, true);
+  state
+    .development
+    .insert(checkout.clone(), second.manifest.bundle_id.clone());
+  let transaction = Transaction {
+    catalog: state,
+    active: Some(second.manifest.bundle_id.clone()),
+    previous: None,
+  };
+  let intent = DevelopmentIntent {
+    catalog_digest: transaction_digest(&transaction).unwrap(),
+    development: transaction.catalog.development.clone(),
+  };
+  let intent_path = store.root.join(DEVELOPMENT_JOURNAL);
+  replace(&intent_path, &intent).unwrap();
+  assert_eq!(
+    read(&store).unwrap().development[&checkout],
+    first.manifest.bundle_id
+  );
+  recover(&store).unwrap();
+  assert!(!intent_path.exists());
+  assert_eq!(
+    read(&store).unwrap().development[&checkout],
+    first.manifest.bundle_id
+  );
+
+  replace(&intent_path, &intent).unwrap();
+  replace(&store.root.join(JOURNAL), &transaction).unwrap();
+  assert_eq!(
+    read(&store).unwrap().development[&checkout],
+    second.manifest.bundle_id
+  );
+  let committed_catalog = fs::read(store.root.join(CATALOG)).unwrap();
+  let development_path = store.root.join(DEVELOPMENT);
+  let backup = store.root.join("development-test-backup");
+  fs::rename(&development_path, &backup).unwrap();
+  fs::create_dir(&development_path).unwrap();
+  // Existing launchers can still read the ordinary catalog and pin their
+  // current payload while recovery awaits a safe destination for the sidecar.
+  assert!(store.get_recorded(&first.manifest.bundle_id).is_ok());
+  assert!(read_index(&store).unwrap().development.is_empty());
+  assert!(recover(&store).is_err());
+  assert!(intent_path.exists());
+  assert!(store.root.join(JOURNAL).exists());
+  assert_eq!(
+    fs::read(store.root.join(CATALOG)).unwrap(),
+    committed_catalog
+  );
+  assert_eq!(
+    store
+      .recorded_selection("current")
+      .unwrap()
+      .unwrap()
+      .manifest,
+    first.manifest
+  );
+  fs::remove_dir(&development_path).unwrap();
+  fs::rename(&backup, &development_path).unwrap();
+  recover(&store).unwrap();
+  assert!(!intent_path.exists());
+  assert!(!store.root.join(JOURNAL).exists());
+  assert_eq!(
+    read(&store).unwrap().development[&checkout],
+    second.manifest.bundle_id
+  );
+  assert_eq!(
+    store
+      .recorded_selection("current")
+      .unwrap()
+      .unwrap()
+      .manifest,
+    second.manifest
+  );
+  drop(lock);
+}
+
+#[test]
+fn process_leases_keep_old_catalog_provenance() {
   let home = Home::new();
   let store = home.store();
   let first = fixture(&home, crate::paths::native_target(), 1);
@@ -697,11 +865,10 @@ fn native_rollback_and_process_leases_keep_old_catalog_provenance() {
     std::slice::from_ref(&first.manifest.bundle_id)
   );
   let inventory = store.catalog().unwrap();
-  assert_eq!(inventory.len(), 3);
+  assert_eq!(inventory.len(), 2);
   assert_eq!(inventory.iter().filter(|entry| entry.current).count(), 1);
   assert!(inventory.iter().all(|entry| entry.origin.is_some()));
   let newest = store.active().unwrap().unwrap();
-  store.rollback().unwrap();
   assert_eq!(
     store
       .component("nightly", crate::paths::native_target())
@@ -713,7 +880,7 @@ fn native_rollback_and_process_leases_keep_old_catalog_provenance() {
   );
   drop(lease);
   assert_eq!(store.prune().unwrap().removed, [first.manifest.bundle_id]);
-  assert_eq!(store.catalog().unwrap().len(), 2);
+  assert_eq!(store.catalog().unwrap().len(), 1);
 }
 
 #[test]
@@ -811,7 +978,7 @@ fn singleton_activation_merges_targets_only_for_the_same_publication() {
     .activate_with_origin(&native, &origin("nightly", "two"))
     .unwrap();
   assert!(store.component("nightly", foreign()).unwrap().is_none());
-  assert_eq!(store.prune().unwrap().removed, [remote_id]);
+  assert!(store.prune().unwrap().removed.contains(&remote_id));
 }
 
 #[test]
@@ -851,7 +1018,7 @@ fn interrupted_catalog_and_activation_recover_together_before_pruning() {
   );
   store.prune().unwrap();
   assert_eq!(store.active().unwrap().unwrap().manifest, fresh.manifest);
-  assert_eq!(store.previous().unwrap().unwrap().manifest, old.manifest);
+  assert!(store.previous().unwrap().is_none());
   assert!(!store.root.join(JOURNAL).exists());
 }
 
@@ -919,7 +1086,7 @@ fn interrupted_activation_validates_all_recorded_payloads_before_changing_select
     fs::write(remote_file, original).unwrap();
     store.prune().unwrap();
     assert_eq!(store.active().unwrap().unwrap().manifest, fresh.manifest);
-    assert_eq!(store.previous().unwrap().unwrap().manifest, old.manifest);
+    assert!(store.previous().unwrap().is_none());
     assert!(!native_journal.exists());
     assert!(!store.root.join(JOURNAL).exists());
   }

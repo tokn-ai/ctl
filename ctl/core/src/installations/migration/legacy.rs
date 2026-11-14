@@ -1,4 +1,4 @@
-//! Old storage is read only by the explicit migrator.
+//! Old storage is read only during one-time adoption.
 
 use super::{Bundle, Installations, filesystem};
 #[cfg(unix)]

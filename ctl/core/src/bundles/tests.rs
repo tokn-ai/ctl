@@ -118,6 +118,40 @@ fn absent_selection_is_passive_and_does_not_create_directories() {
 }
 
 #[test]
+fn staging_uses_the_supplied_private_directory_even_with_a_profile() {
+  const CHILD_ROOT: &str = "CTL_TEST_BUNDLE_STAGING_ROOT";
+  if let Some(directory) = std::env::var_os(CHILD_ROOT) {
+    let directory = PathBuf::from(directory);
+    let (manifest, files) = fixture(Source::Local, 1);
+    let staged = Bundle::stage(&directory, &manifest, &files).unwrap();
+    assert!(staged.directory.starts_with(&directory));
+    assert_eq!(staged.read_files().unwrap(), files);
+    let cache = Store::cache(&directory);
+    assert_eq!(
+      cache.root(),
+      directory.with_file_name("profile").join("cache/components")
+    );
+    assert!(!cache.root().exists());
+    return;
+  }
+  let home = Home::new();
+  let scratch = home.0.join("scratch");
+  let profile = home.0.join("profile");
+  crate::private_fs::create_directory(&scratch).unwrap();
+  crate::private_fs::create_directory(&profile).unwrap();
+  let status = std::process::Command::new(std::env::current_exe().unwrap())
+    .args([
+      "--exact",
+      "bundles::tests::staging_uses_the_supplied_private_directory_even_with_a_profile",
+    ])
+    .env(CHILD_ROOT, &scratch)
+    .env("CTL_DATA_DIR", &profile)
+    .status()
+    .unwrap();
+  assert!(status.success());
+}
+
+#[test]
 fn imports_never_select_and_selection_changes_only_explicitly() {
   let home = Home::new();
   let store = Store::new(&home.0);

@@ -101,7 +101,7 @@ fn status_is_passive_and_missing_installations_are_distinct() {
 }
 
 #[test]
-fn activation_switches_one_build_and_rollback_preserves_both_payloads() {
+fn activation_switches_stable_commands_without_keeping_a_previous_build() {
   let home = Home::new();
   let installs = Installations::new(&home.0);
   let first = fixture(&home.0, 1, true);
@@ -130,28 +130,21 @@ fn activation_switches_one_build_and_rollback_preserves_both_payloads() {
     );
   }
   let second = installs.activate(&fixture(&home.0, 2, true)).unwrap();
-  assert_eq!(
-    installs.previous().unwrap().unwrap().manifest,
-    first.manifest
-  );
+  assert!(installs.previous().unwrap().is_none());
   assert_eq!(
     installs.active().unwrap().unwrap().manifest,
     second.manifest
   );
-  // Repeating an installation must not destroy the rollback candidate.
+  // Repeating an installation must keep commands on the selected build.
   installs.activate(&second).unwrap();
-  assert_eq!(
-    installs.previous().unwrap().unwrap().manifest,
-    first.manifest
-  );
-  assert_eq!(installs.rollback().unwrap().manifest, first.manifest);
-  assert_eq!(
-    installs.previous().unwrap().unwrap().manifest,
-    second.manifest
-  );
+  assert!(installs.previous().unwrap().is_none());
   assert_eq!(
     fs::read(installs.root().join("bin/ctl")).unwrap(),
-    vec![1; 8]
+    vec![2; 8]
+  );
+  assert_eq!(
+    installs.prune().unwrap().removed,
+    [first.manifest.bundle_id]
   );
 }
 
@@ -176,7 +169,7 @@ fn leases_retain_old_payloads_until_their_users_release_them() {
     vec![first.manifest.bundle_id]
   );
   assert!(!first.directory.exists());
-  assert_eq!(installs.list().unwrap().len(), 2);
+  assert_eq!(installs.list().unwrap().len(), 1);
 }
 
 #[test]
@@ -286,10 +279,8 @@ fn interrupted_activation_journal_completes_before_next_operation() {
     installs.active().unwrap().unwrap().manifest,
     second.manifest
   );
-  assert_eq!(
-    installs.previous().unwrap().unwrap().manifest,
-    first.manifest
-  );
+  assert!(installs.previous().unwrap().is_none());
+  assert!(!first.directory.exists());
   assert!(!path.exists());
 }
 
@@ -315,17 +306,17 @@ fn unrecorded_activation_journals_never_rewrite_selection_or_discard_intent() {
       .prune()
       .unwrap_err()
       .to_string()
-      .contains("unrecorded installation")
+      .contains("pending activation has no catalog record")
   );
   assert_eq!(
     fs::read_link(installs.root.join("current")).unwrap(),
     before
   );
-  assert!(installs.previous().unwrap().is_none());
+  assert!(installs.recorded_selection("previous").unwrap().is_none());
   assert_eq!(fs::read(&path).unwrap(), intent);
   assert!(
     installs
-      .migrate_catalog()
+      .migrate_once_if_needed()
       .unwrap_err()
       .to_string()
       .contains("previous manager")
@@ -605,7 +596,7 @@ fn broker_proxy_stays_constant_across_package_shapes_and_failed_activation() {
   installs.activate(&signed).unwrap();
   assert_eq!(run(), "signed\n<one>\n<two words>\n");
   assert_eq!(fs::metadata(&command).unwrap().ino(), inode);
-  installs.rollback().unwrap();
+  installs.activate(&flat).unwrap();
   assert_eq!(run(), "flat\n<one>\n<two words>\n");
   assert_eq!(fs::read(&command).unwrap(), proxy);
 }

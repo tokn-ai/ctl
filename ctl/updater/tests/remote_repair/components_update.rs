@@ -337,6 +337,7 @@ fn assert_installed_bundle(fixture: &Fixture, bundle_id: &str) {
     fs::read_link(&current).unwrap(),
     PathBuf::from("installs").join(&installed.manifest.bundle_id)
   );
+  assert!(!account.join("previous").is_symlink());
   assert_eq!(
     fs::read_to_string(account.join("remote-id")).unwrap(),
     EXPECTED_ID
@@ -521,7 +522,7 @@ async fn unmanaged_layout_blocks_update_before_ssh_and_preserves_the_old_install
   let output = update(&fixture).await;
   let diagnostics = String::from_utf8_lossy(&output.stderr);
   assert!(!output.status.success(), "{diagnostics}");
-  assert!(diagnostics.contains("run ctlup migrate"), "{diagnostics}");
+  assert!(diagnostics.contains("complete"), "{diagnostics}");
   for marker in ["count", "bootstrap", "preflight", "upload", "inspect"] {
     assert!(!fixture.0.join(marker).exists(), "unexpected {marker}");
   }

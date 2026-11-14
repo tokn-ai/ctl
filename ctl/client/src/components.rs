@@ -75,12 +75,19 @@ pub async fn import_local(
   directory: &Path,
   helper: Option<&Path>,
 ) -> io::Result<Bundle> {
-  import_local_for_target(home, directory, helper, ctl_core::paths::native_target()).await
+  import_local_for_target(
+    home,
+    directory,
+    helper,
+    ctl_core::paths::native_target(),
+    None,
+  )
+  .await
 }
 
 /// Snapshots a locally executable build whose target was established by Cargo.
 /// GNU Linux development can explicitly prepare its same-architecture musl
-/// artifacts without relabeling them as the updater's own GNU target.
+/// artifacts. A staging directory keeps the snapshot private to this operation.
 ///
 /// # Errors
 /// Rejects foreign targets before probing, mismatched builds or invalid signing.
@@ -89,6 +96,7 @@ pub(crate) async fn import_local_for_target(
   directory: &Path,
   helper: Option<&Path>,
   target: &str,
+  staging: Option<std::sync::Arc<crate::development::OutputDirectory>>,
 ) -> io::Result<Bundle> {
   if !ctl_core::bundles::local_target(target) {
     return Err(invalid("local build target must run on this computer"));
@@ -161,7 +169,15 @@ pub(crate) async fn import_local_for_target(
   let home = home.to_owned();
   let target = target.to_owned();
   tokio::task::spawn_blocking(move || {
-    publish_local(&home, &target, components, files, &app_executables)
+    // This task can outlive the importing future. It also owns any staging guard.
+    publish_local(
+      &home,
+      &target,
+      components,
+      files,
+      &app_executables,
+      staging.as_deref().map(|output| output.0.as_path()),
+    )
   })
   .await
   .map_err(io::Error::other)?
@@ -173,6 +189,7 @@ fn publish_local(
   components: BTreeMap<String, ComponentInfo>,
   mut files: BTreeMap<String, Vec<u8>>,
   app_executables: &[String],
+  staging: Option<&Path>,
 ) -> io::Result<Bundle> {
   let manifest =
     Manifest::new(target, Source::Local, components, &files)?.with_executables(app_executables)?;
@@ -192,7 +209,11 @@ fn publish_local(
   let manifest = Manifest::new(target, Source::Local, manifest.components, &files)?
     .with_executables(app_executables)?
     .with_distribution_id(&publisher_id)?;
-  Store::cache(home).publish(&manifest, &files)
+  if let Some(staging) = staging {
+    Bundle::stage(staging, &manifest, &files)
+  } else {
+    Store::cache(home).publish(&manifest, &files)
+  }
 }
 
 /// Selects an imported complete build, without starting or restarting services.

@@ -1,7 +1,7 @@
 //! Installed builds are separate from the stable logical component names.
 
 use super::{TargetOptions, remote::Target, status};
-use ctl_client::installation::{InstallationShow, InstallationStatus, InstalledBuild};
+use ctl_client::installation::{InstallationShow, InstalledBuild};
 use ctl_core::bundles::Source;
 use ctl_core::installations::CatalogEntry;
 use std::collections::{BTreeMap, BTreeSet};
@@ -22,16 +22,13 @@ pub(super) async fn snapshot(
   if target.host.is_some() || target.destination.is_some() || target.method.is_some() {
     crate::bundled::register()?;
     let target = status::remote_target(target).await?;
-    remote_snapshot(&target, None).await
+    remote_snapshot(&target).await
   } else {
     ctl_client::installation::show(home)
   }
 }
 
-pub(super) async fn remote_snapshot(
-  target: &Target,
-  status: Option<InstallationStatus>,
-) -> io::Result<InstallationShow> {
+async fn remote_snapshot(target: &Target) -> io::Result<InstallationShow> {
   let expected = target.expected_account();
   if let Some(snapshot) = ctl_client::installation::remote_show(
     &target.destination,
@@ -44,17 +41,14 @@ pub(super) async fn remote_snapshot(
   {
     return Ok(snapshot);
   }
-  let status = match status {
-    Some(status) => status,
-    None => ctl_client::installation::remote_status(
-      &target.destination,
-      &target.options,
-      &target.interaction,
-      expected,
-    )
-    .await
-    .map_err(io::Error::other)?,
-  };
+  let status = ctl_client::installation::remote_status(
+    &target.destination,
+    &target.options,
+    &target.interaction,
+    expected,
+  )
+  .await
+  .map_err(io::Error::other)?;
   let catalog = ctl_client::installation::remote_catalog(
     &target.destination,
     &target.options,

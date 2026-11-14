@@ -1,11 +1,14 @@
 //! Native development builds use the same verified installation as releases.
 
 use ctl_core::component::protocols_match;
+use ctl_core::installations::Installations;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
 use tokio::io::AsyncReadExt as _;
 
 const MAX_DESCRIPTOR_BYTES: usize = 64 * 1024;
@@ -74,7 +77,6 @@ struct BuildOutput {
 /// Reports build/signing failures, mixed source identities, unsafe outputs and
 /// activation failures. Incomplete builds never change the active installation.
 pub async fn install(home: &Path, options: DevelopmentOptions) -> io::Result<PreparedDevelopment> {
-  let preparation = crate::component_update::PreparationSnapshot::capture(home)?;
   let workspace = options.workspace.canonicalize()?;
   let recipe = workspace.join("scripts/dev/build-local-development.mts");
   if !workspace.join("Cargo.toml").is_file() || !recipe.is_file() {
@@ -87,7 +89,13 @@ pub async fn install(home: &Path, options: DevelopmentOptions) -> io::Result<Pre
   {
     return Err(invalid("development Cargo arguments exceed their limit"));
   }
-  let output = OutputDirectory::new()?;
+  let checkout_id = format!(
+    "{:x}",
+    Sha256::digest(workspace.as_os_str().as_encoded_bytes())
+  );
+  let installations = Installations::new(home);
+  let expected_head = installations.development_head(&checkout_id)?;
+  let output = Arc::new(OutputDirectory::new()?);
   let caller = std::env::current_dir()?.canonicalize()?;
   let cargo_cwd = if caller.starts_with(&workspace) {
     caller
@@ -113,6 +121,7 @@ pub async fn install(home: &Path, options: DevelopmentOptions) -> io::Result<Pre
     &descriptor.binary_directory,
     descriptor.ctld_package.as_deref(),
     &descriptor.target_triple,
+    Some(Arc::clone(&output)),
   )
   .await?;
   if bundle.manifest.target_triple != descriptor.target_triple {
@@ -133,14 +142,30 @@ pub async fn install(home: &Path, options: DevelopmentOptions) -> io::Result<Pre
     ));
   }
   let origin = crate::component_update::local_build_origin(&bundle)?;
-  let (installed, lease) = crate::component_update::install_local_with_manager(
-    home,
-    &bundle,
-    Some(&descriptor.manager_executable),
-    Some(&origin),
-    Some(&preparation),
-  )
-  .await?;
+  crate::components::verify_local(home, &bundle).await?;
+  if installations.development_head(&checkout_id)? != expected_head {
+    return Err(io::Error::new(
+      io::ErrorKind::WouldBlock,
+      "the checkout's installed build changed while preparing the source; retry the build",
+    ));
+  }
+  crate::installation::provision_manager_from(home, &descriptor.manager_executable).await?;
+  let (installed, lease) = tokio::task::spawn_blocking(move || {
+    // Keep the verified snapshot alive even if the caller drops its future
+    // while the installation transaction is running.
+    let activated =
+      installations.activate_development(&bundle, &origin, &checkout_id, expected_head.as_deref());
+    drop(bundle);
+    drop(output);
+    let activated = activated?;
+    if let Err(error) = installations.prune() {
+      eprintln!("ctlup: installed successfully; cleanup deferred: {error}");
+    }
+    Ok::<_, io::Error>(activated)
+  })
+  .await
+  .map_err(io::Error::other)??;
+  crate::component_update::prune_after_update(home).await;
   Ok(prepared_result(home, &installed, lease))
 }
 

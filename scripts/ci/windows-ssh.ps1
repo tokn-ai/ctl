@@ -454,7 +454,7 @@ $originalConfigText
     password = $callerPassword
   } | ConvertTo-Json -Compress)
   Invoke-Ctl -Arguments ($temporary + @('ctmux', 'list')) | Out-Null
-  Write-Host 'Checking native ctlup install, update and rollback over Windows OpenSSH'
+  Write-Host 'Checking native ctlup install and update over Windows OpenSSH'
   # The first connection must fail with no ctl-agent.exe on the server PATH.
   # Subsequent connections find the freshly managed launcher in the SSH account.
   Remove-Item -LiteralPath (Join-Path $env:WINDIR 'System32\ctl-agent.exe') -Force

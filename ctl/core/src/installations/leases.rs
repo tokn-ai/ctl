@@ -144,9 +144,10 @@ pub(super) fn lease_executable(executable: &Path) -> io::Result<Option<Lease>> {
     else {
       continue;
     };
+    store.migrate_once_if_needed()?;
     filesystem::ensure_root(&store)?;
     let _lock = Lock::acquire(&store)?;
-    let bundle = store.get(id)?;
+    let bundle = store.get_recorded(id)?;
     return retain(&store.root.join("leases"), &bundle.manifest.bundle_id).map(Some);
   }
   Ok(None)

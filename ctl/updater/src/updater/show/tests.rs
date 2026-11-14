@@ -1,5 +1,5 @@
 use super::*;
-use ctl_client::installation::InstallationCatalog;
+use ctl_client::installation::{InstallationCatalog, InstallationStatus};
 use ctl_core::bundle_layout::{ALL, required_protocols};
 use ctl_core::bundles::Manifest;
 use ctl_core::component::{ComponentBuildInfo, ComponentInfo, ProtocolInfo};

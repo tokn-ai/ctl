@@ -11,9 +11,14 @@ import type { MacosCommandContext, MacosCommandRunner } from "./macos-provisioni
 const execute = promisify(execFile);
 const protocols = [{ name: "ctld", build: 12, version: "1.0.12", supported_versions: ["1.0.12"] },
   ...["ctld_lifecycle", "ctld_helper"].map((name) => ({ name, build: 1, version: "1.0.1", supported_versions: ["1.0.1"] }))];
+const installed_component = { build: { version: "0.1.0", source_revision: "b".repeat(40),
+  source_fingerprint: "c".repeat(64), dirty: true }, protocols };
+const renewal = { expected_component: installed_component, expected_team: "TEAM123ABC" };
 
 async function fixture(t: TestContext, settings: {
   failure?: "metadata" | "signing" | "architecture" | "signed-metadata";
+  expired_binary?: boolean;
+  signed_team?: string;
   mutate_original?: boolean;
   native_binary?: boolean;
   profile_expired?: boolean;
@@ -28,7 +33,6 @@ async function fixture(t: TestContext, settings: {
   await writeFile(profile, "fixture provisioned profile");
   await mkdir(target_directory);
   const target = settings.native_binary && process.arch === "x64" ? "x86_64-apple-darwin" : "aarch64-apple-darwin";
-  let probes = 0;
   let expiration = settings.profile_expired ? "2000-01-01T00:00:00Z" : "2099-01-01T00:00:00Z";
   const calls: { command: string; args: string[]; context: MacosCommandContext }[] = [];
   const run: MacosCommandRunner = async (command, args, context) => {
@@ -43,12 +47,13 @@ async function fixture(t: TestContext, settings: {
     }
     if (args[0] === "--component-info") {
       assert.notEqual(command, artifact, "signing probes its own immutable copy");
+      const signed = command === join(output, "ctld.app/Contents/MacOS/ctld");
+      if (settings.expired_binary && !signed) throw new Error("macOS refused to run the expired helper");
       assert.deepEqual(await readFile(command), bytes);
-      probes += 1;
       if (settings.mutate_original) await writeFile(artifact, "concurrent Cargo replacement");
-      return { stdout: JSON.stringify({ build: { version: "0.1.0", source_revision: "b".repeat(40),
+      return { stdout: JSON.stringify({ build: { ...installed_component.build,
         source_fingerprint: settings.failure === "metadata" ? "malformed" :
-          settings.failure === "signed-metadata" && probes > 1 ? "d".repeat(64) : "c".repeat(64), dirty: true }, protocols }), stderr: "" };
+          settings.failure === "signed-metadata" && signed ? "d".repeat(64) : installed_component.build.source_fingerprint }, protocols }), stderr: "" };
     }
     if (command === "/bin/sh") {
       if (settings.failure === "signing") throw new Error("fixture helper signing failed");
@@ -73,7 +78,7 @@ async function fixture(t: TestContext, settings: {
       if (settings.failure === "architecture") throw new Error("fixture architecture mismatch");
       return settings.native_binary ? execute("/usr/bin/lipo", args) : empty;
     }
-    if (command === "codesign") return args.includes("-d") ? { stdout: "", stderr: "TeamIdentifier=TEAM123ABC\n" } : empty;
+    if (command === "codesign") return args.includes("-d") ? { stdout: "", stderr: `TeamIdentifier=${settings.signed_team ?? renewal.expected_team}\n` } : empty;
     if (command === "env") return execute(command, args);
     throw new Error(`Unexpected signing operation: ${command}`);
   };
@@ -98,6 +103,32 @@ test("signing a prebuilt helper preserves source identity and emits a complete r
   assert.deepEqual((await readdir(input.output)).sort(), ["ctld.app", "installation.json"]);
   assert.deepEqual(await readdir(input.target_directory), []);
   assert.equal(input.calls.some((call) => ["cargo", "git", "xcodebuild", "spctl"].includes(call.command)), false);
+});
+
+test("renewal signs the expired executable before checking its installed build and protocols", async (t) => {
+  const input = await fixture(t, { expired_binary: true });
+  const result = await signDevelopmentHelper({ ...input.options, renewal }, input.run);
+
+  const probe_calls = input.calls.filter((call) => call.args[0] === "--component-info");
+  assert.equal(probe_calls.length, 1);
+  assert.equal(probe_calls[0]?.command, join(result.app, "Contents/MacOS/ctld"));
+  assert.ok(input.calls.findIndex((call) => call.command === "/bin/sh") < input.calls.indexOf(probe_calls[0]!));
+  assert.equal(result.manifest.team_identifier, renewal.expected_team);
+  assert.equal(result.manifest.git_revision, installed_component.build.source_revision);
+  assert.deepEqual(result.manifest.protocols, installed_component.protocols);
+  assert.deepEqual(await readFile(input.artifact), input.bytes);
+});
+
+test("renewal rejects a different signing Team or component build without publishing a receipt", async (t) => {
+  for (const [settings, message] of [
+    [{ signed_team: "TEAM999ABC" }, /must use the installed helper's Apple Team/],
+    [{ failure: "signed-metadata" }, /signed helper differs from the prebuilt component/],
+  ] as const) {
+    const input = await fixture(t, { expired_binary: true, ...settings });
+    await assert.rejects(signDevelopmentHelper({ ...input.options, renewal }, input.run), message);
+    await assert.rejects(readFile(join(input.output, "installation.json")), { code: "ENOENT" });
+    assert.deepEqual(await readFile(input.artifact), input.bytes);
+  }
 });
 
 async function configureProvisioning(input: Awaited<ReturnType<typeof fixture>>): Promise<void> {

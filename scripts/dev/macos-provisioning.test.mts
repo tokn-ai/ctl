@@ -81,6 +81,75 @@ test("configured Personal Team provisioning automatically refreshes an expired p
   assert.equal(refresh[refresh.indexOf("-project") + 1], project);
 });
 
+test("renewal selects a profile for the installed helper's team even when another team expires later", async (t) => {
+  const input = await fixture(t);
+  input.options.expected_team = "TEAM123ABC";
+  const matching = await addProfile(input, "same-team.profile", { application: identifier, expiration: "2028-01-01T00:00:00Z" });
+  const other = await addProfile(input, "other-team.profile", { application: "TEAM999ABC.dev.tokn-ai.ctl.ctld", expiration: "2099-01-01T00:00:00Z" });
+  assert.equal((await prepareProvisioningProfile(input.options)).path, matching);
+
+  input.options.env = { CTLD_PROVISIONING_PROFILE: other };
+  await assert.rejects(prepareProvisioningProfile(input.options), /installed helper's Apple Team/);
+  assert.equal(input.calls.some((call) => call[0] === "xcodebuild"), false);
+});
+
+test("renewal refreshes an expired profile in a private copy of the provisioning project", async (t) => {
+  const input = await fixture(t);
+  input.options.expected_team = "TEAM123ABC";
+  await mkdir(input.options.target_directory);
+  const template = join(input.options.repository_root, "scripts/dev/macos/ctld-provisioning");
+  const project = join(template, "ctld-provisioning.xcodeproj/project.pbxproj");
+  const source = join(template, "ctld-provisioning/App.swift");
+  for (const file of [project, source]) {
+    await mkdir(dirname(file), { recursive: true });
+    await writeFile(file, "provisioning fixture");
+  }
+  const expired = await addProfile(input, "expired.profile", { application: identifier, expiration: "2026-01-01T00:00:00Z" });
+  const run = input.options.run!;
+  let copy;
+  input.options.run = async (command, args, context) => {
+    if (command === "xcodebuild") {
+      copy = dirname(args[args.indexOf("-project") + 1]!);
+      assert.notEqual(copy, template);
+      assert.equal(await readFile(join(copy, "ctld-provisioning/App.swift"), "utf8"), "provisioning fixture");
+      assert.ok(args.includes("DEVELOPMENT_TEAM=TEAM123ABC"));
+    }
+    return run(command, args, context);
+  };
+  assert.equal((await prepareProvisioningProfile(input.options)).path, expired);
+  assert.ok(copy);
+  await assert.rejects(readFile(join(copy, "ctld-provisioning/App.swift")), { code: "ENOENT" });
+  assert.equal(await readFile(source, "utf8"), "provisioning fixture");
+});
+
+test("renewal retains an embedded profile until the signer has used it", async (t) => {
+  const input = await fixture(t);
+  input.options.expected_team = "TEAM123ABC";
+  await mkdir(input.options.target_directory);
+  const template = join(input.options.repository_root, "scripts/dev/macos/ctld-provisioning");
+  await mkdir(template, { recursive: true });
+  const run = input.options.run!;
+  let embedded: string | undefined;
+  input.options.run = async (command, args, context) => {
+    if (command === "xcodebuild") {
+      const products = args.find((arg) => arg.startsWith("CONFIGURATION_BUILD_DIR="))?.slice("CONFIGURATION_BUILD_DIR=".length);
+      assert.ok(products);
+      embedded = join(products, "ctld-provisioning.app/Contents/embedded.provisionprofile");
+      await mkdir(dirname(embedded), { recursive: true });
+      await writeFile(embedded, "fixture CMS profile");
+      input.profiles.set(embedded, { application: identifier, expiration: "2099-01-01T00:00:00Z" });
+      return { stdout: "", stderr: "" };
+    }
+    return run(command, args, context);
+  };
+  const profile = await prepareProvisioningProfile(input.options);
+  assert.equal(profile.path, embedded);
+  assert.equal(await readFile(profile.path, "utf8"), "fixture CMS profile");
+  assert.ok(profile.close);
+  await profile.close();
+  await assert.rejects(readFile(profile.path), { code: "ENOENT" });
+});
+
 test("provisioning opens a copied Xcode project and preserves the saved team selection", async (t) => {
   const input = await fixture(t);
   const template = join(input.options.repository_root, "scripts/dev/macos/ctld-provisioning/ctld-provisioning.xcodeproj");

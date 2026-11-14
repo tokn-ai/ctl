@@ -77,6 +77,144 @@ fn foreign() -> &'static str {
   }
 }
 
+#[cfg(target_os = "macos")]
+fn helper_fixture(home: &Home, source: &Bundle, signature: u8) -> Bundle {
+  let mut files = source.read_files().unwrap();
+  for name in [
+    "ctld",
+    "ctld-package.json",
+    "ctld.app/Contents/Info.plist",
+    "ctld.app/Contents/MacOS/ctld",
+    "ctld.app/Contents/_CodeSignature/CodeResources",
+    "ctld.app/Contents/embedded.provisionprofile",
+  ] {
+    files.insert(name.into(), vec![signature]);
+  }
+  let manifest = Manifest::new(
+    &source.manifest.target_triple,
+    Source::Local,
+    source.manifest.components.clone(),
+    &files,
+  )
+  .unwrap()
+  .with_distribution_id("development-publication")
+  .unwrap();
+  Store::cache(&home.0).publish(&manifest, &files).unwrap()
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn renewing_a_helper_preserves_catalog_and_rollback_across_retries() {
+  let home = Home::new();
+  let store = home.store();
+  let native = fixture(&home, crate::paths::native_target(), 1);
+  let original = helper_fixture(&home, &native, 1);
+  let renewed = helper_fixture(&home, &native, 2);
+  let remote = fixture(&home, foreign(), 1);
+  let local = origin("local", "development-publication");
+  let provided = origin("provided", "development-publication");
+  store
+    .install_channel(&[original.clone(), remote.clone()], &local, true)
+    .unwrap();
+  store.activate_with_origin(&original, &provided).unwrap();
+  store
+    .remove_component("provided", crate::paths::native_target())
+    .unwrap();
+
+  let original_id = &original.manifest.bundle_id;
+  let renewed_id = &renewed.manifest.bundle_id;
+  let before = store.catalog().unwrap();
+  let (installed, _lease) = store
+    .activate_renewed_helper(&renewed, original_id)
+    .unwrap();
+  assert_eq!(installed.manifest, renewed.manifest);
+  assert_eq!(store.active().unwrap().unwrap().manifest, renewed.manifest);
+  assert_eq!(
+    store.previous().unwrap().unwrap().manifest,
+    original.manifest
+  );
+  let mut expected = Vec::new();
+  for mut entry in before {
+    if entry.bundle_id == *original_id {
+      let mut renewed_entry = entry.clone();
+      renewed_entry.bundle_id.clone_from(renewed_id);
+      expected.push(renewed_entry);
+      entry.current = false;
+    }
+    expected.push(entry);
+  }
+  let mut expected_state = State {
+    schema_version: 1,
+    entries: expected,
+  };
+  expected_state.sort_entries();
+  assert_eq!(store.catalog().unwrap(), expected_state.entries);
+
+  store.activate_renewed_helper(&renewed, renewed_id).unwrap();
+  assert_eq!(
+    store.previous().unwrap().unwrap().manifest,
+    original.manifest
+  );
+  store.rollback().unwrap();
+  store
+    .activate_renewed_helper(&renewed, original_id)
+    .unwrap();
+  assert_eq!(store.active().unwrap().unwrap().manifest, renewed.manifest);
+  assert_eq!(
+    store.previous().unwrap().unwrap().manifest,
+    original.manifest
+  );
+  assert_eq!(store.catalog().unwrap(), expected_state.entries);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn renewing_a_helper_rejects_changed_runtime_and_stale_selection() {
+  let home = Home::new();
+  let store = home.store();
+  let original = helper_fixture(&home, &fixture(&home, crate::paths::native_target(), 1), 1);
+  let other = helper_fixture(&home, &fixture(&home, crate::paths::native_target(), 2), 2);
+  let renewed = helper_fixture(&home, &original, 3);
+  store
+    .activate_with_origin(&original, &origin("local", "one"))
+    .unwrap();
+  let original_id = &original.manifest.bundle_id;
+  let before = store.catalog().unwrap();
+  let error = store
+    .activate_renewed_helper(&other, original_id)
+    .unwrap_err();
+  assert!(
+    error
+      .to_string()
+      .contains("outside the ctld helper package")
+  );
+  assert_eq!(store.catalog().unwrap(), before);
+  assert_eq!(store.active().unwrap().unwrap().manifest, original.manifest);
+  assert!(store.previous().unwrap().is_none());
+
+  store
+    .activate_with_origin(&other, &origin("local", "two"))
+    .unwrap();
+  let before = store.catalog().unwrap();
+  let error = store
+    .activate_renewed_helper(&renewed, original_id)
+    .unwrap_err();
+  assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+  assert_eq!(store.catalog().unwrap(), before);
+  assert_eq!(store.active().unwrap().unwrap().manifest, other.manifest);
+  assert_eq!(
+    store.previous().unwrap().unwrap().manifest,
+    original.manifest
+  );
+  assert!(
+    !store
+      .root()
+      .join("installs")
+      .join(renewed.manifest.bundle_id)
+      .exists()
+  );
+}
+
 #[test]
 fn inspection_is_passive_and_first_activation_records_provided_provenance() {
   let home = Home::new();

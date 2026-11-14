@@ -23,7 +23,10 @@ impl Drop for Output {
 async fn failed_windows_builds_preserve_diagnostics() {
   let mut command = tokio::process::Command::new("node");
   command.args(["-e", "process.stdout.write('discarded stdout'); process.stderr.write('fixture compiler failed'); process.exitCode = 17"]);
-  let error = run_builder(command).await.unwrap_err().to_string();
+  let error = run_recipe(command, "native development build")
+    .await
+    .unwrap_err()
+    .to_string();
   assert!(error.contains("17"));
   assert!(error.contains("fixture compiler failed"));
   assert!(!error.contains("discarded stdout"));
@@ -48,7 +51,7 @@ async fn cancelling_a_windows_build_terminates_its_descendants() {
     ])
     .env("STARTED", &started)
     .env("ESCAPED", &escaped);
-  let task = tokio::spawn(run_builder(command));
+  let task = tokio::spawn(run_recipe(command, "native development build"));
   tokio::time::timeout(Duration::from_secs(10), async {
     while !started.exists() {
       tokio::time::sleep(Duration::from_millis(10)).await;

@@ -8,13 +8,20 @@ pub(super) async fn run(home: &Path, options: DevelopmentArguments) -> io::Resul
     .clone()
     .map_or_else(std::env::current_dir, Ok)?;
   let lease_input = options.lease.then(lease_pipe).transpose()?;
-  let installation = ctl_client::development::install(
-    home,
-    ctl_client::development::DevelopmentOptions {
-      workspace,
-      cargo_args: cargo_arguments(&options)?,
-    },
-  );
+  let installation = async {
+    if options.renew_signing {
+      ctl_client::development::renew_signing(home, &workspace).await
+    } else {
+      ctl_client::development::install(
+        home,
+        ctl_client::development::DevelopmentOptions {
+          workspace,
+          cargo_args: cargo_arguments(&options)?,
+        },
+      )
+      .await
+    }
+  };
   let input = async {
     if let Some(input) = lease_input {
       read_lease_input(input).await
@@ -39,6 +46,11 @@ pub(super) async fn run(home: &Path, options: DevelopmentArguments) -> io::Resul
     serde_json::to_writer(&mut output, result).map_err(io::Error::other)?;
     writeln!(output)?;
     output.flush()?;
+  } else if options.renew_signing {
+    println!(
+      "Renewed ctld signing in development build {} ({}). Running services were preserved; restart separately.",
+      result.bundle_id, result.target_triple
+    );
   } else {
     println!(
       "Installed development build {} ({}). Running services were preserved; restart separately.",
@@ -170,6 +182,7 @@ mod tests {
   fn desktop_cargo_arguments_remain_structured_and_invalid_json_is_rejected() {
     let mut options = DevelopmentArguments {
       workspace: None,
+      renew_signing: false,
       release: false,
       profile: None,
       target_dir: None,

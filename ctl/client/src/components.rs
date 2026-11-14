@@ -454,7 +454,7 @@ fn safe_input_file(metadata: &std::fs::Metadata) -> bool {
 }
 
 #[cfg(target_os = "macos")]
-fn collect_app(
+pub(crate) fn collect_app(
   root: &Path,
   directory: &Path,
   files: &mut BTreeMap<String, Vec<u8>>,

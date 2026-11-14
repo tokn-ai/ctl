@@ -37,7 +37,10 @@ async fn failed_builds_preserve_bounded_compiler_diagnostics() {
     "-c",
     "printf 'discarded stdout'; printf 'fixture compiler failed\\n' >&2; exit 17",
   ]);
-  let error = run_builder(command).await.unwrap_err().to_string();
+  let error = run_recipe(command, "native development build")
+    .await
+    .unwrap_err()
+    .to_string();
   assert!(error.contains("17"));
   assert!(error.contains("fixture compiler failed"));
   assert!(error.contains("active installation was kept"));
@@ -58,7 +61,7 @@ async fn cancelling_a_build_terminates_its_descendants() {
     ])
     .env("STARTED", &started)
     .env("ESCAPED", &escaped);
-  let task = tokio::spawn(run_builder(command));
+  let task = tokio::spawn(run_recipe(command, "native development build"));
   tokio::time::timeout(Duration::from_secs(5), async {
     while !started.exists() {
       tokio::time::sleep(Duration::from_millis(5)).await;

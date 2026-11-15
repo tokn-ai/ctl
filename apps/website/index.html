@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Keep terminal sessions running, return to your SSH work, and manage access through saved VPN routes with ctl.">
+  <meta name="theme-color" content="#f5f5ed">
+  <title>ctl — A terminal that outlives its window</title>
+  <link rel="icon" href="./app-icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="./site.css">
+</head>
+<body>
+  <div class="page">
+    <header class="masthead">
+      <a class="brand" href="./" aria-label="ctl home"><img src="./app-icon.svg" alt="" width="32" height="32">ctl</a>
+      <nav aria-label="Primary">
+        <a href="#demo">Demo</a>
+        <a href="#features">Features</a>
+        <a class="repo" href="https://github.com/tokn-ai/ctl">GitHub ↗</a>
+      </nav>
+    </header>
+
+    <main>
+      <section class="hero" aria-labelledby="headline">
+        <div class="intro">
+          <h1 id="headline">A terminal that<br class="wide-break"> outlives its window<span>.</span></h1>
+          <div class="intro-detail">
+            <p>Keep shells running on your machine and over SSH. Close the tab, come back later, and pick up where you left off.</p>
+            <div class="actions">
+              <a class="button" href="#demo">Watch the demo <span aria-hidden="true">↓</span></a>
+              <a class="text-link" href="https://github.com/tokn-ai/ctl#build">Get started <span aria-hidden="true">↗</span></a>
+            </div>
+          </div>
+        </div>
+
+        <figure class="demo" id="demo" aria-labelledby="demo-title">
+          <div class="demo-head">
+            <h2 id="demo-title"><span class="status-dot" aria-hidden="true"></span> Session persistence</h2>
+            <span class="mono">ctmux desktop</span>
+          </div>
+          <!-- demo:media -->
+          <figcaption id="demo-description">A heartbeat prints once a second. Close its tab, reopen the session, and see the output it produced while you were away.</figcaption>
+        </figure>
+      </section>
+
+      <section class="features" id="features" aria-labelledby="feature-title">
+        <h2 id="feature-title">Your sessions, across machines.</h2>
+        <div class="feature-grid">
+          <article>
+            <span class="feature-icon" aria-hidden="true">&gt;_</span>
+            <h3>Persistent shells</h3>
+            <p>Detach from a running session and reattach later with its output history.</p>
+            <a href="#demo">See it in action <span aria-hidden="true">↑</span></a>
+          </article>
+          <article>
+            <span class="feature-icon" aria-hidden="true">⇄</span>
+            <h3>Local and remote</h3>
+            <p>Switch between local and SSH sessions in one workspace. Preview a remote file right from terminal output.</p>
+          </article>
+          <article>
+            <span class="feature-icon" aria-hidden="true">◎</span>
+            <h3>Private host access</h3>
+            <p>Connect a saved OpenConnect or Tailscale profile and route selected SSH hosts through it.</p>
+          </article>
+        </div>
+      </section>
+      <!-- demo:gallery -->
+    </main>
+
+    <footer>
+      <a class="brand" href="./"><img src="./app-icon.svg" alt="" width="26" height="26">ctl</a>
+      <a href="https://github.com/tokn-ai/ctl">Source on GitHub ↗</a>
+    </footer>
+  </div>
+</body>
+</html>

@@ -1,0 +1,46 @@
+name: Deploy landing page
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'apps/website/**'
+      - 'apps/desktop/app-icon.svg'
+      - '.github/workflows/website.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.3.13'
+      - name: Build landing page and check public media
+        env:
+          CTL_WEBSITE_MEDIA_HOST: ${{ vars.CTL_WEBSITE_MEDIA_HOST }}
+        run: bun apps/website/site.ts build --verify-media
+      - name: Upload site
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: apps/website/dist
+      - name: Deploy site
+        id: deployment
+        uses: actions/deploy-pages@v4

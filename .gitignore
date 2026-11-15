@@ -9,3 +9,6 @@ node_modules/
 
 # Local demo recordings and capture metadata
 /.demo-recordings/
+
+# Local landing-page output (may contain recorded media)
+/apps/website/dist/

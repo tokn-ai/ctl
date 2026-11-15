@@ -218,15 +218,16 @@ async function main(): Promise<void> {
       // Re-select the verified cached payload with the same updater.
       await json(installed, update);
       assert.deepEqual(await status(installed, pinned_target), updated);
+      await assert_digest(alternate.sha256);
       const test = "ssh_install::published::tests::windows_openssh_streams_each_cached_publication_artifact";
       const result = await execute("cargo", ["test", "--locked", "-p", "ctl-client", "--lib", test, "--", "--ignored", "--exact", "--color", "never"], {
         env: { ...process.env, CTL_TEST_SSH_HOST: destination, CTL_TEST_WINDOWS_DESKTOP_BUNDLE: second_bundle, CTL_TEST_WINDOWS_ACCOUNT_ID: account_id },
         timeout: 600_000,
       });
       assert.ok(result.stdout.split(/\r?\n/).includes(`test ${test} ... ok`), result.stdout);
+      assert.deepEqual(await status(installed, pinned_target), updated);
       assert.deepEqual(await bootstrapFiles(home), before_bootstrap);
     }
-    await assert_digest(alternate.sha256);
     console.log(`Windows ctlup install and update passed${destination ? " over OpenSSH" : ""}.`);
   } finally {
     if (catalog_restore) await writeFile(catalog_restore.path, catalog_restore.contents);

@@ -210,6 +210,72 @@ fn write_included(directory: &Path, target: &str, revision: char) {
 }
 
 #[tokio::test]
+async fn automatic_native_recovery_prepares_only_the_missing_active_build_from_cache() {
+  let home = Home::new();
+  let target = ctl_core::paths::native_target();
+  let source = bundle(&home.0, 'a');
+  let mut files = source.read_files().unwrap();
+  if target.ends_with("-apple-darwin") {
+    // Exercise cache selection independently of the native signature check
+    // that runs before activation.
+    files.insert("ctld.app/Contents/MacOS/ctld".into(), files["ctld"].clone());
+    files.insert("ctld-package.json".into(), b"receipt fixture".to_vec());
+  }
+  let expected = Manifest::new(
+    target,
+    Source::Local,
+    source.manifest.components.clone(),
+    &files,
+  )
+  .unwrap();
+  let cached = Store::cache(&home.0).publish(&expected, &files).unwrap();
+  let origin = local_build_origin(&cached).unwrap();
+  let installations = Installations::new(&home.0);
+  let installed = installations
+    .activate_with_origin(&cached, &origin)
+    .unwrap();
+  let _other_cached_build = bundle(&home.0, 'b');
+  std::fs::remove_dir_all(installed.directory).unwrap();
+
+  let prepared = prepare_update(
+    &home.0,
+    target,
+    Purpose::Local,
+    &BuildSource::Automatic,
+    &[],
+    |_| {},
+  )
+  .await
+  .unwrap();
+  assert_eq!(prepared.bundle.manifest, expected);
+  assert_eq!(prepared.origin.as_ref(), Some(&origin));
+  assert_eq!(prepared.bundle.directory, cached.directory);
+  assert!(installations.active_selection().unwrap().1.is_none());
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn automatic_recovery_without_a_signed_mac_build_explains_how_to_reinstall() {
+  let home = Home::new();
+  let source = bundle(&home.0, 'a');
+  let installations = Installations::new(&home.0);
+  let installed = installations.activate(&source).unwrap();
+  std::fs::remove_dir_all(installed.directory).unwrap();
+  let error = prepare(
+    &home.0,
+    ctl_core::paths::native_target(),
+    Purpose::Local,
+    &BuildSource::Automatic,
+    &[],
+  )
+  .await
+  .unwrap_err();
+  let message = error.to_string();
+  assert!(message.contains("ctlup dev"), "{message}");
+  assert!(message.contains("--ctld-package"), "{message}");
+}
+
+#[tokio::test]
 async fn selected_source_uses_included_build_even_when_an_older_native_build_is_active() {
   let home = Home::new();
   let old = bundle(&home.0, 'a');

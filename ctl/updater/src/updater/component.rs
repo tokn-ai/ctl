@@ -65,7 +65,7 @@ pub(super) async fn run(
             removed.push(target);
           }
         }
-        if let Err(error) = installs.prune() {
+        if let Err(error) = installs.prune_unused() {
           eprintln!("ctlup: registrations removed; installation cleanup deferred: {error}");
         }
         if let Err(error) = installation::prune_caches(&account) {
@@ -193,7 +193,14 @@ fn recorded_installations(
   }) {
     return Err(list::metadata_unavailable());
   }
-  Ok(snapshot.installations)
+  let missing = snapshot.missing_builds.iter().collect::<BTreeSet<_>>();
+  Ok(
+    snapshot
+      .installations
+      .into_iter()
+      .filter(|entry| !missing.contains(&entry.bundle_id))
+      .collect(),
+  )
 }
 
 fn print_list(components: &list::ComponentList, json: bool) -> io::Result<()> {
@@ -279,6 +286,7 @@ mod tests {
       active: Some("a".repeat(64)),
       previous: None,
       installations: Vec::new(),
+      missing_builds: Vec::new(),
       builds: vec![installation::InstalledBuild {
         bundle_id: "a".repeat(64),
         target_triple: "aarch64-apple-darwin".into(),
@@ -297,5 +305,31 @@ mod tests {
         .to_string()
         .contains("component channel metadata is unavailable")
     );
+  }
+
+  #[test]
+  fn missing_catalog_memberships_are_not_listed_as_installed() {
+    let missing = "a".repeat(64);
+    let target = "x86_64-unknown-linux-musl";
+    let entry = |id, channel: &str| ctl_core::installations::CatalogEntry {
+      bundle_id: id,
+      target_triple: target.into(),
+      origin: Some(CatalogOrigin {
+        channel: channel.into(),
+        publication_id: None,
+        built_at: None,
+      }),
+      current: true,
+    };
+    let installed = entry("b".repeat(64), "provided");
+    let snapshot = installation::InstallationShow {
+      schema_version: 1,
+      active: Some(missing.clone()),
+      previous: None,
+      installations: vec![entry(missing.clone(), "stable"), installed.clone()],
+      builds: Vec::new(),
+      missing_builds: vec![missing],
+    };
+    assert_eq!(recorded_installations(snapshot).unwrap(), [installed]);
   }
 }

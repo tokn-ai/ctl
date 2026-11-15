@@ -153,13 +153,13 @@ fn renewing_a_helper_preserves_catalog_and_checkout_heads_across_retries() {
     expected.push(entry);
   }
   let mut expected_state = State {
-    schema_version: 1,
     entries: expected,
     development: [
       (checkout_one.clone(), renewed_id.clone()),
       (checkout_two.clone(), renewed_id.clone()),
     ]
     .into(),
+    ..State::default()
   };
   expected_state.sort_entries();
   assert_eq!(store.catalog().unwrap(), expected_state.entries);
@@ -373,10 +373,11 @@ fn manifest_maintenance_holds_the_installation_lock_until_its_callback_returns()
   let store = home.store();
   assert_eq!(
     store
-      .with_locked_manifests(|manifests| Ok(manifests.len()))
+      .with_locked_manifests(|manifests, missing| Ok(manifests.len() + missing.len()))
       .unwrap(),
     0
   );
+  assert!(!store.root().exists());
   let first = fixture(&home, foreign(), 1);
   let installed = store
     .install_channel(&[first], &origin("nightly", "one"), false)
@@ -388,8 +389,9 @@ fn manifest_maintenance_holds_the_installation_lock_until_its_callback_returns()
   let (finished, result) = mpsc::channel();
   let mut worker = None;
   let observed = store
-    .with_locked_manifests(|manifests| {
+    .with_locked_manifests(|manifests, missing| {
       assert_eq!(manifests, std::slice::from_ref(&installed[0].manifest));
+      assert_eq!(missing, &[]);
       let independent_lock = options()
         .read(true)
         .write(true)
@@ -782,6 +784,7 @@ fn development_recovery_commits_only_intents_with_a_catalog_journal() {
   let intent = DevelopmentIntent {
     catalog_digest: transaction_digest(&transaction).unwrap(),
     development: transaction.catalog.development.clone(),
+    clear_active: None,
   };
   let intent_path = store.root.join(DEVELOPMENT_JOURNAL);
   replace(&intent_path, &intent).unwrap();
@@ -1129,6 +1132,274 @@ fn invalid_provenance_and_duplicate_targets_fail_before_catalog_publication() {
   );
   assert!(!exists(&store).unwrap());
   assert!(store.list().unwrap().is_empty());
+}
+
+#[test]
+fn missing_active_payload_does_not_block_a_verified_channel_update() {
+  let home = Home::new();
+  let store = home.store();
+  let target = crate::paths::native_target();
+  let first = fixture(&home, target, 1);
+  let first_origin = origin("nightly", "first");
+  let installed = store.activate_with_origin(&first, &first_origin).unwrap();
+  let sibling = fixture(&home, foreign(), 2);
+  let sibling_origin = origin("stable", "sibling");
+  let preserved = store
+    .install_channel(&[sibling], &sibling_origin, false)
+    .unwrap();
+  fs::remove_dir_all(&installed.directory).unwrap();
+
+  let inspection = store.inspect().unwrap();
+  assert_eq!(
+    inspection.active.as_deref(),
+    Some(installed.manifest.bundle_id.as_str())
+  );
+  assert_eq!(
+    inspection.missing,
+    std::slice::from_ref(&installed.manifest.bundle_id)
+  );
+  assert_eq!(inspection.bundles[0].manifest, preserved[0].manifest);
+  assert!(store.inspect_status().unwrap().bundles.is_empty());
+  assert!(
+    store
+      .get_available(&installed.manifest.bundle_id)
+      .unwrap()
+      .is_none()
+  );
+  assert_eq!(store.active().unwrap_err().kind(), io::ErrorKind::NotFound);
+  let (id, active) = store.active_selection().unwrap();
+  assert_eq!(id.as_ref(), Some(&installed.manifest.bundle_id));
+  assert!(active.is_none());
+  let heads = store
+    .catalog_index()
+    .unwrap()
+    .into_iter()
+    .filter(|entry| entry.origin.as_ref() == Some(&first_origin))
+    .collect::<Vec<_>>();
+  let native = fixture(&home, target, 3);
+  let next_origin = origin("nightly", "next");
+  assert_eq!(
+    store
+      .install_channel_if_unchanged(std::slice::from_ref(&native), &next_origin, true, &[])
+      .unwrap_err()
+      .kind(),
+    io::ErrorKind::WouldBlock
+  );
+  store
+    .install_channel_if_unchanged(std::slice::from_ref(&native), &next_origin, true, &heads)
+    .unwrap();
+  assert_eq!(store.active().unwrap().unwrap().manifest, native.manifest);
+  assert_eq!(store.prune_unused().unwrap().removed, Vec::<String>::new());
+  let inspection = store.inspect().unwrap();
+  assert_eq!(
+    inspection.missing,
+    std::slice::from_ref(&installed.manifest.bundle_id)
+  );
+  assert!(inspection.entries.iter().any(|entry| {
+    entry.bundle_id == installed.manifest.bundle_id
+      && !entry.current
+      && entry.origin.as_ref() == Some(&first_origin)
+  }));
+  assert!(
+    inspection
+      .bundles
+      .iter()
+      .any(|bundle| bundle.manifest == preserved[0].manifest)
+  );
+}
+
+#[test]
+fn a_missing_checkout_can_be_replaced_but_an_incomplete_payload_cannot() {
+  let home = Home::new();
+  let store = home.store();
+  let target = crate::paths::native_target();
+  let first = fixture_with_source(&home, target, 1, Source::Local);
+  let next = fixture_with_source(&home, target, 2, Source::Local);
+  let origin = origin("local", "checkout");
+  let checkout = "a".repeat(64);
+  let (first, lease) = store
+    .activate_development(&first, &origin, &checkout, None)
+    .unwrap();
+  drop(lease);
+  fs::remove_file(first.directory.join(crate::bundles::MANIFEST_FILE)).unwrap();
+  assert_eq!(
+    store
+      .get_available(&first.manifest.bundle_id)
+      .unwrap_err()
+      .kind(),
+    io::ErrorKind::InvalidData
+  );
+  assert_eq!(
+    store
+      .activate_development(&next, &origin, &checkout, Some(&first.manifest.bundle_id))
+      .unwrap_err()
+      .kind(),
+    io::ErrorKind::InvalidData
+  );
+  assert_eq!(
+    store.inspect().unwrap_err().kind(),
+    io::ErrorKind::InvalidData
+  );
+  fs::remove_dir_all(store.root.join("installs")).unwrap();
+  assert_eq!(
+    store.development_head(&checkout).unwrap().as_ref(),
+    Some(&first.manifest.bundle_id)
+  );
+  assert_eq!(
+    store.inspect().unwrap().missing,
+    std::slice::from_ref(&first.manifest.bundle_id)
+  );
+  assert!(!store.root.join("installs").exists());
+  let (installed, _lease) = store
+    .activate_development(&next, &origin, &checkout, Some(&first.manifest.bundle_id))
+    .unwrap();
+  assert_eq!(installed.manifest, next.manifest);
+  assert_eq!(store.active().unwrap().unwrap().manifest, next.manifest);
+  assert_eq!(
+    store.development_head(&checkout).unwrap().as_ref(),
+    Some(&next.manifest.bundle_id)
+  );
+}
+
+#[test]
+fn automatic_prune_reports_missing_builds_and_removes_only_unused_present_payloads() {
+  let home = Home::new();
+  let store = home.store();
+  let target = crate::paths::native_target();
+  let first = fixture(&home, target, 1);
+  let second = fixture(&home, target, 2);
+  let third = fixture(&home, target, 3);
+  let missing_origin = origin("nightly", "one");
+  let missing = store.activate_with_origin(&first, &missing_origin).unwrap();
+  let unused = store
+    .activate_with_origin(&second, &origin("nightly", "two"))
+    .unwrap();
+  let active = store
+    .activate_with_origin(&third, &origin("nightly", "three"))
+    .unwrap();
+  fs::remove_dir_all(&missing.directory).unwrap();
+
+  let result = store.prune_unused().unwrap();
+  assert_eq!(
+    result.missing_builds,
+    std::slice::from_ref(&missing.manifest.bundle_id)
+  );
+  assert_eq!(result.removed, [unused.manifest.bundle_id]);
+  assert_eq!(result.retained_in_use, Vec::<String>::new());
+  assert!(!unused.directory.exists());
+  assert!(active.directory.exists());
+  assert!(store.catalog_index().unwrap().iter().any(|entry| {
+    entry.bundle_id == missing.manifest.bundle_id
+      && entry.origin.as_ref() == Some(&missing_origin)
+      && !entry.current
+  }));
+  store
+    .with_locked_manifests(|present, absent| {
+      assert_eq!(present, std::slice::from_ref(&active.manifest));
+      assert_eq!(absent.len(), 1);
+      assert_eq!(absent[0].target_triple, target);
+      assert_eq!(absent[0].bundle_id, missing.manifest.bundle_id);
+      assert_eq!(absent[0].origin.as_ref(), Some(&missing_origin));
+      Ok(())
+    })
+    .unwrap();
+
+  let installs = store.root.join("installs");
+  fs::remove_dir_all(&installs).unwrap();
+  let result = store.prune_unused().unwrap();
+  let mut expected = vec![missing.manifest.bundle_id, active.manifest.bundle_id];
+  expected.sort();
+  assert_eq!(result.missing_builds, expected);
+  assert_eq!(result.removed, Vec::<String>::new());
+  assert!(!installs.exists());
+}
+
+#[test]
+fn explicit_prune_forgets_missing_selections_and_checkout_pins() {
+  let home = Home::new();
+  let store = home.store();
+  let target = crate::paths::native_target();
+  let history = fixture(&home, target, 1);
+  let active = fixture_with_source(&home, target, 2, Source::Local);
+  let retained = fixture(&home, foreign(), 3);
+  let history = store
+    .activate_with_origin(&history, &origin("nightly", "one"))
+    .unwrap();
+  let retained = store
+    .install_channel(&[retained], &origin("stable", "one"), false)
+    .unwrap();
+  let checkout = "a".repeat(64);
+  let (active, lease) = store
+    .activate_development(&active, &origin("local", "dev"), &checkout, None)
+    .unwrap();
+  drop(lease);
+  fs::remove_dir_all(&history.directory).unwrap();
+  fs::remove_dir_all(&active.directory).unwrap();
+
+  let result = store.prune().unwrap();
+  let mut forgotten = vec![history.manifest.bundle_id, active.manifest.bundle_id];
+  forgotten.sort();
+  assert_eq!(result.forgotten_missing_builds, forgotten);
+  assert_eq!(result.missing_builds, Vec::<String>::new());
+  assert!(store.active().unwrap().is_none());
+  assert!(store.development_head(&checkout).unwrap().is_none());
+  let remaining = store.catalog().unwrap();
+  assert_eq!(remaining.len(), 1);
+  assert_eq!(remaining[0].bundle_id, retained[0].manifest.bundle_id);
+  assert!(remaining[0].current);
+  assert_eq!(store.prune().unwrap(), super::super::PruneResult::default());
+}
+
+#[test]
+fn replay_clears_a_missing_selection_before_publishing_the_pruned_catalog() {
+  let home = Home::new();
+  let store = home.store();
+  let source = fixture(&home, crate::paths::native_target(), 1);
+  let installed = store.activate(&source).unwrap();
+  store.migrate_once_if_needed().unwrap();
+  fs::remove_dir_all(&installed.directory).unwrap();
+  let lock = filesystem::Lock::acquire(&store).unwrap();
+  let transaction = Transaction {
+    catalog: State::default(),
+    active: None,
+    previous: None,
+  };
+  let intent = DevelopmentIntent {
+    catalog_digest: transaction_digest(&transaction).unwrap(),
+    development: transaction.catalog.development.clone(),
+    clear_active: Some(source.manifest.bundle_id.clone()),
+  };
+  replace(&store.root.join(DEVELOPMENT_JOURNAL), &intent).unwrap();
+  replace(&store.root.join(JOURNAL), &transaction).unwrap();
+  drop(lock);
+  let inspection = store.inspect().unwrap();
+  assert!(inspection.active.is_none());
+  assert_eq!(inspection.entries, Vec::<CatalogEntry>::new());
+  assert!(store.root.join(JOURNAL).exists());
+  let lock = filesystem::Lock::acquire(&store).unwrap();
+  // If the exact payload was restored before recovery, keep both intents and
+  // require an operator to resolve the conflicting change.
+  let restored = filesystem::publish(&store, &source, None).unwrap();
+  assert!(recover(&store).is_err());
+  assert!(store.root.join(DEVELOPMENT_JOURNAL).exists());
+  assert!(store.root.join(JOURNAL).exists());
+  assert_eq!(
+    filesystem::selection_id(&store, "current")
+      .unwrap()
+      .as_ref(),
+    Some(&source.manifest.bundle_id)
+  );
+  fs::remove_dir_all(&restored.directory).unwrap();
+  recover(&store).unwrap();
+  assert!(
+    filesystem::selection_id(&store, "current")
+      .unwrap()
+      .is_none()
+  );
+  assert!(!store.root.join(DEVELOPMENT_JOURNAL).exists());
+  assert!(!store.root.join(JOURNAL).exists());
+  drop(lock);
+  assert_eq!(store.catalog().unwrap(), Vec::<CatalogEntry>::new());
 }
 
 #[test]

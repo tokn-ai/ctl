@@ -11,7 +11,7 @@
   "about.build_archive": "Build directory or archive",
   "about.build_automatic": "Automatic",
   "about.build_automatic_help": "Remote updates use the configured publication channel.",
-  "about.build_automatic_macos_help": "This Mac uses its active component build or the included offline build if none is active. Installation requires a signed helper.",
+  "about.build_automatic_macos_help": "This Mac uses its active signed component build or a verified cached copy of that build. To install a new signed build, use ctlup dev or provide native build files with a signed helper.",
   "about.build_channel_help": "Use this channel’s complete build for each selected platform.",
   "about.build_checkout": "Build from checkout",
   "about.build_checkout_help": "Build ctlup and the components from the checkout used to build this app, then upload them over SSH for Linux x64 or ARM64.",

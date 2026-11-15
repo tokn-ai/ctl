@@ -1,6 +1,6 @@
 use super::{
   Bundle, Installations, JOURNAL, Lock, Temporary, Transaction, directory, ensure_directory,
-  ensure_root, invalid, load, path_exists, private_file, read, valid_id, write,
+  ensure_root, invalid, path_exists, private_file, read, valid_id, write,
 };
 use crate::bundle_layout::{ALL, MAX_FILE_BYTES, executable_name};
 use crate::bundles::{digest, valid_digest};
@@ -37,25 +37,18 @@ fn selection(store: &Installations) -> io::Result<Option<Transaction>> {
   Ok(Some(transaction))
 }
 
-pub(in crate::installations) fn pointer(
+pub(in crate::installations) fn selection_id(
   store: &Installations,
   name: &str,
-) -> io::Result<Option<Bundle>> {
+) -> io::Result<Option<String>> {
   let Some(selection) = selection(store)? else {
     return Ok(None);
   };
-  let id = if name == "current" {
+  Ok(if name == "current" {
     Some(selection.active)
   } else {
     selection.previous
-  };
-  id.as_deref()
-    .map(|id| {
-      let bundle = load(store, id)?;
-      super::validate_native(&bundle)?;
-      Ok(bundle)
-    })
-    .transpose()
+  })
 }
 
 pub(in crate::installations) fn activate(
@@ -99,6 +92,13 @@ pub(in crate::installations) fn clear_previous(store: &Installations) -> io::Res
       &serde_json::to_vec(&selection).map_err(io::Error::other)?,
       false,
     )?;
+  }
+  Ok(())
+}
+
+pub(in crate::installations) fn clear_active(store: &Installations) -> io::Result<()> {
+  if selection(store)?.is_some() {
+    fs::remove_file(store.root.join(JOURNAL))?;
   }
   Ok(())
 }

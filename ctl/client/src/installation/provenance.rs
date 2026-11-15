@@ -22,7 +22,7 @@ pub fn activate_uploaded(
     origin.clone()
   } else {
     installations
-      .catalog()?
+      .catalog_index()?
       .into_iter()
       .filter(|entry| entry.bundle_id == bundle.manifest.bundle_id && entry.origin.is_some())
       .min_by_key(|entry| !entry.current)
@@ -51,7 +51,7 @@ pub(crate) fn single_target_heads(
   origin.validate()?;
   let installations = ctl_core::installations::Installations::new(home);
   let heads = installations
-    .catalog()?
+    .catalog_index()?
     .into_iter()
     .filter(|entry| {
       entry.current
@@ -70,8 +70,12 @@ pub(crate) fn single_target_heads(
       .as_ref()
       .and_then(|origin| origin.publication_id.as_ref())
       != origin.publication_id.as_ref()
-      || installations.get(&head.bundle_id)?.manifest.components["ctl-agent"].build
-        != bundle.manifest.components["ctl-agent"].build
+      || installations
+        .get_available(&head.bundle_id)?
+        .is_none_or(|sibling| {
+          sibling.manifest.components["ctl-agent"].build
+            != bundle.manifest.components["ctl-agent"].build
+        })
     {
       return Err(io::Error::new(
         io::ErrorKind::InvalidInput,

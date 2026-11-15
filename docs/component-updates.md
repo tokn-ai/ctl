@@ -109,6 +109,12 @@ ctlup prune
 ```
 
 `install` and `update` share the same verification and activation transaction.
+If a recorded bundle directory is deleted, `ctlup status` reports the missing
+build. Use the normal install, update, or development command to recover it.
+An automatic update can reuse an exact verified cached bundle. An explicit
+channel or bundle source supplies the replacement, and `ctlup dev` rebuilds
+the selected checkout. Replacement activation preserves other catalog entries,
+so any builds that still need recovery remain visible in status.
 No host option means this account. With a remote target, `--local` also includes
 this computer. Saved hosts reuse their existing route, connection method and
 SSH authentication. A temporary destination uses OpenSSH configuration without
@@ -222,7 +228,9 @@ active and retained labels. `status` retains its compatible JSON response and us
 the same detailed build display for human output. Build dates come from validated build metadata
 or a freshly built local bundle; the date embedded in a Nightly version is a
 commit date. Older bundles without build metadata show `unknown`.
-`status --json` retains its original active/previous response for compatibility;
+`status --json` includes `active` and `previous` manifests when the selected
+payloads are present. Both `status --json` and `show --json` include a
+`missing_builds` list of build IDs when recorded payloads are absent.
 `show --json` provides the versioned build inventory, including channel and
 build-date fields. `component list --json` contains logical component names,
 targets, installed state and recorded `channels`. Remote inspection uses the detailed inventory
@@ -345,9 +353,10 @@ complete `ctld.app` package.
 Each canonical checkout path has a SHA-256 identity and one current build.
 Rebuilding the checkout replaces that registration, and other checkouts keep
 their latest builds. Local runtime installs retain a compatible updater when
-the bundle supplies an older one.
-Use an updated updater for any mutation of a store with checkout registrations,
-including when choosing an updater for SSH deployment to that store.
+the bundle supplies an older one. For SSH updates to an account with checkout
+registrations, choose a publication or supplied build with a compatible updater.
+The SSH installer checks for layout support before replacing the target updater
+or activating the build.
 
 Only a successful complete build becomes active; compilation, signing or
 verification failure leaves the previous installation and running services
@@ -404,7 +413,11 @@ Automatic cleanup budgets compressed runtime downloads at 256 MiB, extracted
 payloads at 512 MiB, and updater binaries at 128 MiB. Prepared extracted builds
 hold shared leases and can temporarily exceed the budget until users release
 them. Installed channel components, checkout builds and active payloads are separate
-from deployment cache; matching installed updaters remain pinned during cleanup.
+from deployment cache. Cleanup after installs and updates protects exact cached
+recovery copies and matching updaters while their catalog records exist. An
+explicit `ctlup prune` drops missing builds from the catalog and clears any
+selections that refer to them. Their cached copies then follow the usual cache
+budgets. `ctlup prune --json` reports those IDs in `forgotten_missing_builds`.
 
 ## Remote deployment
 

@@ -158,7 +158,7 @@ pub async fn install(home: &Path, options: DevelopmentOptions) -> io::Result<Pre
     drop(bundle);
     drop(output);
     let activated = activated?;
-    if let Err(error) = installations.prune() {
+    if let Err(error) = installations.prune_unused() {
       eprintln!("ctlup: installed successfully; cleanup deferred: {error}");
     }
     Ok::<_, io::Error>(activated)

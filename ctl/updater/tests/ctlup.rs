@@ -250,6 +250,89 @@ fn standalone_migration_command_is_removed() {
 }
 
 #[test]
+fn status_reports_missing_installed_bundles_and_archive_install_restores_them() {
+  let home = Home::new();
+  let (manifest, bytes) = archive('a');
+  let installed = home.install(&bytes);
+  assert!(installed.status.success(), "{installed:?}");
+  let root = home.0.join(".tokn/ctl");
+  let catalog = fs::read(root.join("catalog.json")).unwrap();
+  let selection = fs::read_link(root.join("current")).unwrap();
+  fs::rename(root.join("installs"), home.0.join("saved-installs")).unwrap();
+
+  let output = home.command(&["status", "--json"]).output().unwrap();
+  assert!(output.status.success(), "{output:?}");
+  let status: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+  assert!(status["active"].is_null());
+  assert_eq!(
+    status["missing_builds"],
+    serde_json::json!([manifest.bundle_id])
+  );
+  let human = home.command(&["status"]).output().unwrap();
+  assert!(human.status.success(), "{human:?}");
+  let text = String::from_utf8(human.stdout).unwrap();
+  assert!(
+    text.contains(&format!("Active: {} (missing)", &manifest.bundle_id[..12])),
+    "{text}"
+  );
+  let show = home.command(&["show", "--json"]).output().unwrap();
+  assert!(show.status.success(), "{show:?}");
+  let show: serde_json::Value = serde_json::from_slice(&show.stdout).unwrap();
+  assert_eq!(show["active"], manifest.bundle_id);
+  assert_eq!(show["installations"][0]["bundle_id"], manifest.bundle_id);
+  assert_eq!(show["missing_builds"], status["missing_builds"]);
+  assert_eq!(show["builds"], serde_json::json!([]));
+  assert_eq!(fs::read(root.join("catalog.json")).unwrap(), catalog);
+  assert_eq!(fs::read_link(root.join("current")).unwrap(), selection);
+  assert!(!root.join("installs").exists());
+
+  let probe = home
+    .command(&["activate-installed", &manifest.bundle_id])
+    .output()
+    .unwrap();
+  assert_eq!(probe.status.code(), Some(10), "{probe:?}");
+  let recovered = home.install(&bytes);
+  assert!(recovered.status.success(), "{recovered:?}");
+  assert!(root.join(&selection).is_dir());
+  let output = home.command(&["status", "--json"]).output().unwrap();
+  assert!(output.status.success(), "{output:?}");
+  let status: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+  assert_eq!(status["active"]["bundle_id"], manifest.bundle_id);
+  assert!(status.get("missing_builds").is_none());
+}
+
+#[test]
+fn explicit_prune_forgets_a_missing_active_build() {
+  let home = Home::new();
+  let (manifest, bytes) = archive('a');
+  assert!(home.install(&bytes).status.success());
+  let root = home.0.join(".tokn/ctl");
+  fs::remove_dir_all(root.join("installs")).unwrap();
+  fs::DirBuilder::new()
+    .mode(0o700)
+    .create(root.join("cache"))
+    .unwrap();
+
+  let pruned = home.command(&["prune", "--json"]).output().unwrap();
+  assert!(pruned.status.success(), "{pruned:?}");
+  let pruned: serde_json::Value = serde_json::from_slice(&pruned.stdout).unwrap();
+  assert_eq!(
+    pruned["installations"]["forgotten_missing_builds"],
+    serde_json::json!([manifest.bundle_id])
+  );
+  assert_eq!(pruned["installations"]["removed"], serde_json::json!([]));
+  assert!(fs::symlink_metadata(root.join("current")).is_err());
+  assert!(!root.join("installs").exists());
+
+  let status = home.command(&["status", "--json"]).output().unwrap();
+  assert!(status.status.success(), "{status:?}");
+  let status: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+  assert!(status["active"].is_null());
+  assert!(status.get("missing_builds").is_none());
+  assert!(home.install(&bytes).status.success());
+}
+
+#[test]
 fn passive_status_and_metadata_do_not_prepare_an_installation() {
   let home = Home::new();
   let output = home.command(&["status", "--json"]).output().unwrap();
@@ -398,8 +481,10 @@ fn install_from_files_provisions_the_independent_manager_and_complete_commands()
   // size bound; Linux debug information alone can exceed that bound.
   let executable = home.0.join("ctlup-downloaded-target");
   fs::copy(env!("CARGO_BIN_EXE_ctlup"), &executable).unwrap();
-  let stripped = Command::new("strip").arg(&executable).output().unwrap();
-  assert!(stripped.status.success(), "{stripped:?}");
+  if fs::metadata(&executable).unwrap().len() > ctl_core::bundles::MAX_FILE_BYTES as u64 {
+    let stripped = Command::new("strip").arg(&executable).output().unwrap();
+    assert!(stripped.status.success(), "{stripped:?}");
+  }
   let root = home.0.join(".tokn/ctl");
   let output = home
     .command_at(
@@ -426,6 +511,88 @@ fn install_from_files_provisions_the_independent_manager_and_complete_commands()
   let status: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
   assert!(!status["active"].is_null());
   assert!(!root.join("components/selected").exists());
+
+  let active = fs::read_link(root.join("current")).unwrap();
+  for verb in ["update", "install"] {
+    fs::remove_dir_all(root.join("installs")).unwrap();
+    let result = home
+      .command_at(
+        &manager,
+        &[verb, "--from", provided.to_str().unwrap(), "--json"],
+      )
+      .output()
+      .unwrap();
+    assert!(result.status.success(), "{result:?}");
+    assert!(root.join(&active).is_dir());
+    assert_eq!(fs::read_link(root.join("current")).unwrap(), active);
+  }
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn dev_rebuilds_the_current_checkout_when_its_payload_is_missing() {
+  let home = Home::new();
+  let workspace = home.0.join("workspace");
+  fs::create_dir_all(workspace.join("scripts/dev")).unwrap();
+  fs::write(workspace.join("Cargo.toml"), "fixture").unwrap();
+  fs::write(
+    workspace.join("scripts/dev/build-local-development.mts"),
+    "fixture",
+  )
+  .unwrap();
+  let bin = workspace.join("bin");
+  fs::create_dir(&bin).unwrap();
+  let write_components = |revision| {
+    let (info, _) = fixture_payload(revision);
+    for name in ctl_core::bundle_layout::ALL.into_iter().chain(["ctlup"]) {
+      let metadata = serde_json::to_string(&info["ctl"]).unwrap();
+      let executable = bin.join(name);
+      fs::write(&executable, format!(
+        "#!/bin/sh\ncase \"$1\" in\n--component-info) printf '%s\\n' '{metadata}';;\n--version) printf '%s\\n' '{name} 0.1.2';;\ninstallation-layout-version) printf '1\\n';;\n*) exit 1;;\nesac\n"
+      )).unwrap();
+      fs::set_permissions(executable, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+  };
+  let builder = workspace.join("builder");
+  fs::write(&builder, r#"#!/bin/sh
+set -eu
+umask 077
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --output) output=$2; shift ;;
+    --native-target) target=$2; shift ;;
+  esac
+  shift
+done
+mkdir "$output/bin"
+cp bin/* "$output/bin/"
+printf '{"schema_version":1,"binary_directory":"%s/bin","manager_executable":"%s/bin/ctlup","target_triple":"%s","ctld_package":null}\n' "$output" "$output" "$target" > "$output/result.json"
+"#).unwrap();
+  fs::set_permissions(&builder, fs::Permissions::from_mode(0o700)).unwrap();
+  let dev = || {
+    let output = home
+      .command(&["dev", "--workspace", workspace.to_str().unwrap(), "--json"])
+      .env("CTL_NODE_PROGRAM", &builder)
+      .output()
+      .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+  };
+  write_components('a');
+  let first = dev();
+  let root = home.0.join(".tokn/ctl");
+  fs::remove_dir_all(root.join("installs")).unwrap();
+  write_components('b');
+  let rebuilt = dev();
+  assert_ne!(first["bundle_id"], rebuilt["bundle_id"]);
+  assert!(Path::new(rebuilt["executables"]["ctl"].as_str().unwrap()).is_file());
+  let registrations: BTreeMap<String, String> =
+    serde_json::from_slice(&fs::read(root.join("development.json")).unwrap()).unwrap();
+  assert_eq!(registrations.len(), 1);
+  assert_eq!(
+    registrations.values().next().unwrap(),
+    rebuilt["bundle_id"].as_str().unwrap()
+  );
 }
 
 #[test]

@@ -66,7 +66,7 @@ pub(super) enum Command {
   },
   /// Browse published releases and manage pull request builds.
   Release(ReleaseArguments),
-  /// Remove unused builds while retaining selected, development and running builds.
+  /// Remove unused builds and forget missing installations.
   Prune {
     #[arg(long)]
     json: bool,

@@ -183,22 +183,32 @@ fn updater_digest() -> io::Result<()> {
 }
 
 async fn prune(home: PathBuf, json: bool) -> io::Result<()> {
-  let result = tokio::task::spawn_blocking(move || {
+  let (installations, cache) = tokio::task::spawn_blocking(move || {
     let installations = ctl_core::installations::Installations::new(&home).prune()?;
-    let cache = ctl_client::installation::prune_caches(&home)?;
-    Ok::<_, io::Error>(serde_json::json!({ "installations": installations, "cache": cache }))
+    let cache = ctl_client::installation::prune_caches(&home).map_err(|error| {
+      io::Error::new(
+        error.kind(),
+        format!("installation cleanup completed, but cache cleanup failed: {error}"),
+      )
+    })?;
+    Ok::<_, io::Error>((installations, cache))
   })
   .await
   .map_err(io::Error::other)??;
   if json {
+    let result = serde_json::json!({ "installations": installations, "cache": cache });
     println!(
       "{}",
       serde_json::to_string(&result).map_err(io::Error::other)?
     );
   } else {
-    println!(
-      "Removed unused installations. Kept channel targets, checkout builds, the active build, and running builds."
-    );
+    println!("Removed {} unused builds.", installations.removed.len());
+    if !installations.forgotten_missing_builds.is_empty() {
+      println!(
+        "Removed {} missing builds from the catalog.",
+        installations.forgotten_missing_builds.len()
+      );
+    }
   }
   Ok(())
 }

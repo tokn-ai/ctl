@@ -143,7 +143,7 @@ async fn activate(
     drop(output);
     let (installed, lease) = activated?;
     if installed.manifest.bundle_id != expected
-      && let Err(error) = installations.prune()
+      && let Err(error) = installations.prune_unused()
     {
       eprintln!("ctlup: renewed ctld signing successfully; cleanup deferred: {error}");
     }

@@ -337,6 +337,25 @@ fn update_preparation_leaves_fresh_stores_without_migration_metadata() {
 }
 
 #[test]
+fn update_preparation_accepts_an_absent_payload_but_rejects_a_damaged_one() {
+  let home = Home::new();
+  let store = home.store();
+  let bundle = fixture(&home, 1, Source::Local, true);
+  let active = store.activate(&bundle).unwrap();
+  let entries = catalog::read_index(&store).unwrap().entries;
+  let removed = home.0.join("removed");
+  fs::rename(&active.directory, &removed).unwrap();
+
+  assert_eq!(store.migrate_catalog_if_missing().unwrap(), entries);
+  assert!(read_marker(&store, LAYOUT_MARKER).unwrap());
+  assert!(!active.directory.exists());
+
+  fs::rename(&removed, &active.directory).unwrap();
+  fs::write(active.executable("ctl-agent").unwrap(), b"damaged agent").unwrap();
+  assert!(store.migrate_catalog_if_missing().is_err());
+}
+
+#[test]
 fn adoption_preserves_four_local_builds_native_history_and_live_leases() {
   let home = Home::new();
   let store = home.store();

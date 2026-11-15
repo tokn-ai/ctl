@@ -95,6 +95,8 @@ try {
     }
     if ((Get-Item -LiteralPath $file).Length -ne $size -or (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash -ne $sha) { throw 'Published ctlup size or checksum mismatch.' }
   }
+  __CHECKOUT_LAYOUT_GUARD__
+  Assert-CheckoutLayout $file
   $ErrorActionPreference = 'Continue'
   $help = $null | & $file install-publication --help 2>&1
   $code = $LASTEXITCODE

@@ -64,12 +64,23 @@ pub(super) fn require_recoverable_activation(store: &Installations) -> io::Resul
 
 #[cfg(windows)]
 pub(super) fn active(store: &Installations) -> io::Result<Option<Bundle>> {
-  filesystem::pointer(store, "current")
+  selected_bundle(store, "current")
 }
 
 #[cfg(windows)]
 pub(super) fn previous(store: &Installations) -> io::Result<Option<Bundle>> {
-  filesystem::pointer(store, "previous")
+  selected_bundle(store, "previous")
+}
+
+#[cfg(windows)]
+fn selected_bundle(store: &Installations, name: &str) -> io::Result<Option<Bundle>> {
+  filesystem::selection_id(store, name)?
+    .map(|id| {
+      let bundle = filesystem::load(store, &id)?;
+      filesystem::validate_native(&bundle)?;
+      Ok(bundle)
+    })
+    .transpose()
 }
 
 #[cfg(unix)]

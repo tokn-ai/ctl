@@ -35,7 +35,9 @@ pub(super) fn refresh(store: &Installations, state: &State) {
 /// The snapshot tracks ownership and makes an interrupted refresh retryable.
 pub(super) fn sync(store: &Installations, state: &State) -> io::Result<()> {
   let root = store.root.join("installs");
-  filesystem::directory(&root)?;
+  if !filesystem::directory_if_present(&root)? {
+    return Ok(());
+  }
   let desired = references(&root, state)?;
   let snapshot_path = root.join(SNAPSHOT);
   let snapshot = read_json::<Snapshot>(&snapshot_path, MAX_SNAPSHOT_BYTES)?.unwrap_or_default();
@@ -132,7 +134,9 @@ fn references(root: &Path, state: &State) -> io::Result<References> {
           return Err(invalid("invalid installation reference identity"));
         }
         let payload = root.join(&entry.bundle_id);
-        filesystem::directory(&payload)?;
+        if !filesystem::directory_if_present(&payload)? {
+          continue;
+        }
         let manifest: Manifest = read_json(&payload.join(MANIFEST_FILE), MAX_MANIFEST_BYTES)?
           .ok_or_else(|| invalid("installation reference payload has no manifest"))?;
         manifest.validate()?;
@@ -166,7 +170,9 @@ fn references(root: &Path, state: &State) -> io::Result<References> {
     .map(|(name, (_, _, id))| (name, id.to_owned()))
     .collect();
   for (checkout, id) in &state.development {
-    references.insert(format!("dev/{checkout}"), id.clone());
+    if filesystem::directory_if_present(&root.join(id))? {
+      references.insert(format!("dev/{checkout}"), id.clone());
+    }
   }
   validate_references(&references)?;
   Ok(references)

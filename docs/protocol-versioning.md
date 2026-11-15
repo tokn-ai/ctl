@@ -403,17 +403,15 @@ channel, target, publication and UTC build date without changing content-address
 bundle manifests. Earlier complete installations are adopted automatically.
 The opt-in `catalog-json` command uses the `ctlup-catalog-v1` response marker;
 updated clients probe support before sending optional installation provenance,
-and retain legacy behavior with older managers. The existing `ctlup-command-v1`
-status JSON, bundle sets, PR artifact layout, named protocol versions
-and internal builds remain unchanged.
+and retain legacy behavior with older managers. Bundle sets, PR artifact
+layout, named protocol versions and internal builds retain their versions.
 
 Logical target components and installed builds have separate CLI views.
 `component list --json` has a schema-1 component projection with installed state,
 recorded channel memberships, while `show --json`
 has a schema-1 build inventory with compact verified build metadata. Optional
 remote inspection uses the distinct `ctlup-show-v1` marker and falls back to
-existing status and catalog responses on older managers. Existing status and
-catalog response schemas retain their shapes; no named protocol changes.
+existing status and catalog responses on older managers.
 
 One-time automatic adoption uses a local cutover marker after committing adopted
 channel metadata. It preserves content-addressed bundle bytes and existing
@@ -440,12 +438,21 @@ uses `ctl-published-unavailable-v1` and exit code 12. Older updaters use the
 existing SSH archive installer. These markers are private to the deployment
 command. Named service protocol versions and internal builds are unchanged.
 
-Readable installation paths and checkout registrations extend local storage.
-`catalog.json` and `ctlup-command-v1` status, `ctlup-catalog-v1`, and `ctlup-show-v1` responses
-retain their shapes. `ctlup rollback` is retired, including invocation through
-SSH. Status still returns `previous` for older stores until their previous
-selection is cleared by activation or pruning. Use an updated `ctlup` for
-mutations after creating checkout registrations so pruning can retain them.
+Readable installation paths and checkout registrations extend local storage
+without changing `catalog.json` or `ctlup-catalog-v1` responses. `ctlup rollback`
+is retired, including invocation through SSH. Status still returns `previous`
+for older stores until their previous selection is cleared by activation or
+pruning. SSH installers probe `installation-layout-version` when the target
+has checkout metadata or a pending checkout transaction. Version 1 is the
+first version that can retain checkout builds during cleanup.
+
+Recovery of a missing runtime payload keeps the installation catalog schema.
+The `ctlup-command-v1` status and `ctlup-show-v1` inventory responses may include
+`missing_builds` with the recorded bundle IDs that have no payload directory.
+Healthy stores omit the field, and updated readers accept older responses.
+Readers that reject unknown fields need an update to inspect a store with
+missing payloads. Explicit `ctlup prune --json` reports any discarded missing
+records in the optional `installations.forgotten_missing_builds` field.
 
 ## Discovery and SSH framing
 

@@ -68,11 +68,11 @@ impl PreparationSnapshot {
   /// Captures the account catalog before any source preparation begins.
   ///
   /// # Errors
-  /// Reports unsafe catalog storage or modified installed payloads.
+  /// Reports unsafe storage or malformed installation metadata.
   pub fn capture(home: &Path) -> io::Result<Self> {
     let started = std::time::Instant::now();
     Ok(Self {
-      entries: Installations::new(home).catalog()?,
+      entries: Installations::new(home).catalog_index()?,
       started,
     })
   }
@@ -333,6 +333,12 @@ async fn prepare_source(
   included: &[PathBuf],
   on_progress: &(impl Fn(PreparationProgress) + Send + Sync),
 ) -> io::Result<PreparedSource> {
+  if matches!(source, BuildSource::Automatic)
+    && purpose == Purpose::Local
+    && let Some(prepared) = automatic_native(home, target, on_progress).await?
+  {
+    return Ok(prepared);
+  }
   let published_target = publisher_target(target, purpose);
   if matches!(source, BuildSource::WorkingTree) {
     return prepare_working_tree(home, published_target.as_ref(), purpose, None, on_progress).await;
@@ -365,6 +371,13 @@ async fn prepare_source(
     let origin = provided_origin(&bundle, path)?;
     return Ok((bundle, None, Some(origin), None));
   }
+  if matches!(source, BuildSource::Automatic) {
+    // Included and published macOS runtime archives contain the flat SSH
+    // payload, which cannot supply a locally signed helper.
+    return Err(invalid(&format!(
+      "no compatible signed macOS runtime is available. {SIGNED_MAC_RUNTIME_REBUILD}"
+    )));
+  }
   on_progress(preparation(
     PreparationPhase::Verifying,
     "Verifying the requested component bundle",
@@ -375,26 +388,19 @@ async fn prepare_source(
   let included = included.to_vec();
   tokio::task::spawn_blocking(move || {
     let (bundle, updater) = match &source {
-      BuildSource::Automatic => {
-        if purpose == Purpose::Local
-          && let Some(bundle) = ctl_core::installations::Installations::new(&home).active()?
-        {
-          (bundle, None)
-        } else {
-          included_build(&home, &included, &target, purpose)?
-        }
-      }
       BuildSource::Selected => included_build(&home, &included, &target, purpose)?,
       BuildSource::Provided { path, .. } => provided_build(&home, path, &target, purpose)?,
-      BuildSource::Published { .. } | BuildSource::WorkingTree => {
-        unreachable!("published and working-tree sources resolved before filesystem preparation")
+      BuildSource::Automatic | BuildSource::Published { .. } | BuildSource::WorkingTree => {
+        unreachable!(
+          "automatic, published and working-tree sources resolved before filesystem preparation"
+        )
       }
     };
     verify_source(&bundle.manifest, &target, purpose)?;
     let origin = match &source {
       BuildSource::Provided { path, .. } => Some(provided_origin(&bundle, path)?),
-      _ => ctl_core::installations::Installations::new(&home)
-        .catalog()?
+      _ => Installations::new(&home)
+        .catalog_index()?
         .into_iter()
         .find(|entry| entry.bundle_id == bundle.manifest.bundle_id && entry.current)
         .and_then(|entry| entry.origin),
@@ -414,6 +420,84 @@ async fn prepare_source(
   .await
   .map_err(io::Error::other)?
 }
+
+async fn automatic_native(
+  home: &Path,
+  target: &str,
+  on_progress: &(impl Fn(PreparationProgress) + Send + Sync),
+) -> io::Result<Option<PreparedSource>> {
+  let account = home.to_owned();
+  let target = target.to_owned();
+  let candidate = tokio::task::spawn_blocking(move || {
+    let installations = Installations::new(&account);
+    let (active_id, active) = installations.active_selection()?;
+    if let Some(bundle) = active {
+      if !target.ends_with("-apple-darwin") {
+        return Ok(None);
+      }
+      let origin = catalog::known_origin(&installations.catalog_index()?, &bundle);
+      return Ok(Some((bundle, origin, false)));
+    }
+    let Some(id) = active_id else {
+      return Ok(None);
+    };
+    let entries = installations.catalog_index()?;
+    let entry = entries
+      .iter()
+      .find(|entry| entry.bundle_id == id)
+      .ok_or_else(|| {
+        io::Error::new(
+          io::ErrorKind::WouldBlock,
+          "active installation changed; retry the update",
+        )
+      })?;
+    let Some(bundle) = cached_exact(&account, entry)? else {
+      return Ok(None);
+    };
+    if bundle.manifest.schema_version != 2
+      || verify_source(&bundle.manifest, &target, Purpose::Local).is_err()
+      || (target.ends_with("-apple-darwin") && !has_signed_helper(&bundle))
+    {
+      return Ok(None);
+    }
+    let origin = catalog::known_origin(&entries, &bundle);
+    Ok::<_, io::Error>(Some((bundle, origin, true)))
+  })
+  .await
+  .map_err(io::Error::other)??;
+  let Some((bundle, origin, restoring)) = candidate else {
+    return Ok(None);
+  };
+  on_progress(preparation(
+    PreparationPhase::Verifying,
+    if restoring {
+      "Verifying the cached copy of the active build"
+    } else {
+      "Verifying the active component bundle"
+    },
+  ));
+  let updater_info = crate::installation::supplied_updater_info(home, &bundle.manifest)?;
+  Ok(Some((bundle, None, origin, updater_info)))
+}
+
+fn cached_exact(home: &Path, entry: &CatalogEntry) -> io::Result<Option<Bundle>> {
+  let cache = Store::cache(home);
+  match cache.get(&entry.target_triple, &entry.bundle_id) {
+    Ok(bundle) => Ok(Some(bundle)),
+    Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+    Err(error) => Err(error),
+  }
+}
+
+fn has_signed_helper(bundle: &Bundle) -> bool {
+  bundle.manifest.files.contains_key("ctld-package.json")
+    && bundle
+      .manifest
+      .files
+      .contains_key("ctld.app/Contents/MacOS/ctld")
+}
+
+const SIGNED_MAC_RUNTIME_REBUILD: &str = "Run ctlup dev from a source checkout or supply native binaries with --from, --local-build and --ctld-package.";
 
 async fn prepare_working_tree(
   home: &Path,
@@ -934,7 +1018,7 @@ pub async fn install_local(
     ));
   }
   let installations = Installations::new(home);
-  let inventory = installations.catalog()?;
+  let inventory = installations.inspect()?.entries;
   let origin =
     catalog::known_origin(&inventory, bundle).unwrap_or_else(|| catalog::unknown_origin(bundle));
   let expected_heads = crate::installation::single_target_heads(home, bundle, &origin)?;
@@ -982,7 +1066,7 @@ async fn activate_local(
       &origin,
       &expected_heads,
     )?;
-    if let Err(error) = installations.prune() {
+    if let Err(error) = installations.prune_unused() {
       eprintln!("ctlup: installed successfully; cleanup deferred: {error}");
     }
     Ok::<_, io::Error>(installed)

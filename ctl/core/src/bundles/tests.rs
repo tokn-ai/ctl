@@ -105,6 +105,33 @@ fn runtime_fixture(
 }
 
 #[test]
+fn cache_prune_retains_exact_recovery_copy_with_zero_budget() {
+  let home = Home::new();
+  let cache = Store::cache(&home.0);
+  let (keep, files) = fixture(Source::Local, 1);
+  let restored = cache.publish(&keep, &files).unwrap().directory;
+  let (unused, files) = fixture(Source::Local, 2);
+  let unused_dir = cache.publish(&unused, &files).unwrap().directory;
+  let pins = std::collections::BTreeSet::from([
+    (keep.bundle_id.as_str(), keep.target_triple.as_str()),
+    (unused.bundle_id.as_str(), "x86_64-pc-windows-msvc"),
+  ]);
+
+  let result = cache.prune_cache_with_pins(0, &pins).unwrap();
+  assert_eq!(result.removed, [unused.bundle_id]);
+  assert!(result.remaining_bytes > 0);
+  assert!(restored.is_dir());
+  assert!(!unused_dir.exists());
+  assert_eq!(
+    cache
+      .get(&keep.target_triple, &keep.bundle_id)
+      .unwrap()
+      .manifest,
+    keep
+  );
+}
+
+#[test]
 fn absent_selection_is_passive_and_does_not_create_directories() {
   let home = Home::new();
   let store = Store::new(&home.0);

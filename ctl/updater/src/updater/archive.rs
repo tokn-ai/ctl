@@ -87,15 +87,13 @@ pub(super) async fn activate(
   let bundle_id = bundle_id.to_owned();
   tokio::task::spawn_blocking(move || {
     let installs = ctl_core::installations::Installations::new(&home);
-    // Failed migration is distinct from the requested bundle being absent.
-    installs.migrate_once_if_needed()?;
-    let bundle = match installs.get(&bundle_id) {
-      Ok(bundle) => bundle,
-      Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(10),
-      Err(error) => return Err(error),
+    // An absent payload can be uploaded again. A damaged payload must fail
+    // the preflight instead of inviting the sender to replace it.
+    let Some(bundle) = installs.get_available(&bundle_id)? else {
+      return Ok(10);
     };
     let (_, _lease) = ctl_client::installation::activate_uploaded(&home, &bundle, origin.as_ref())?;
-    if let Err(error) = installs.prune() {
+    if let Err(error) = installs.prune_unused() {
       eprintln!("ctlup: activated successfully; cleanup deferred: {error}");
     }
     emit(ctl_client::RemoteInstallEvent::Complete);

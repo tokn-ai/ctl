@@ -325,14 +325,9 @@ fn parse_status(stdout: &[u8]) -> Result<InstallationStatus, CoreError> {
     .ok_or_else(|| CoreError::InvalidComponentBundle("missing ctlup command response".into()))?;
   let snapshot: InstallationStatus = serde_json::from_slice(&stdout[start..])
     .map_err(|error| CoreError::InvalidComponentBundle(error.to_string()))?;
-  for manifest in [snapshot.active.as_ref(), snapshot.previous.as_ref()]
-    .into_iter()
-    .flatten()
-  {
-    manifest
-      .validate()
-      .map_err(|error| CoreError::InvalidComponentBundle(error.to_string()))?;
-  }
+  snapshot
+    .validate()
+    .map_err(|error| CoreError::InvalidComponentBundle(error.to_string()))?;
   Ok(snapshot)
 }
 
@@ -420,6 +415,7 @@ mod tests {
       previous: None,
       installations: Vec::new(),
       builds: Vec::new(),
+      missing_builds: Vec::new(),
     };
     let mut stdout = b"Welcome\nctlup-show-v1\n".to_vec();
     stdout.extend(serde_json::to_vec(&snapshot).unwrap());
@@ -490,10 +486,26 @@ mod tests {
     .unwrap();
     assert!(status.active.is_none());
     assert!(status.previous.is_none());
+    assert_eq!(status.missing_builds, [] as [String; 0]);
     assert!(parse_status(b"{\"active\":null,\"previous\":null}").is_err());
     assert!(
       parse_status(b"ctlup-command-v1\n{\"active\":null,\"previous\":null,\"untrusted\":true}")
         .is_err()
     );
+  }
+
+  #[test]
+  fn status_accepts_bounded_missing_build_ids() {
+    let id = "a".repeat(64);
+    let payload = |ids| {
+      format!(
+        "ctlup-command-v1\n{}",
+        serde_json::json!({"active": null, "previous": null, "missing_builds": ids})
+      )
+    };
+    let status = parse_status(payload(vec![id.as_str()]).as_bytes()).unwrap();
+    assert_eq!(status.missing_builds, [id.as_str()]);
+    assert!(parse_status(payload(vec!["../invalid"]).as_bytes()).is_err());
+    assert!(parse_status(payload(vec![id.as_str(); 2]).as_bytes()).is_err());
   }
 }

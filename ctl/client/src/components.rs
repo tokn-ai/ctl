@@ -246,7 +246,7 @@ pub async fn select_with_progress(
   tokio::task::spawn_blocking(move || {
     let installations = ctl_core::installations::Installations::new(&home);
     installations.activate(&bundle)?;
-    if let Err(error) = installations.prune() {
+    if let Err(error) = installations.prune_unused() {
       eprintln!("ctlup: installed successfully; cleanup deferred: {error}");
     }
     Ok(())

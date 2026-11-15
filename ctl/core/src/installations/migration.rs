@@ -57,10 +57,14 @@ pub(super) fn migrate_once_if_needed(store: &Installations) -> io::Result<()> {
   {
     return Ok(());
   }
-  migrate_if_missing(store).map(drop)
+  migrate(store, false).map(drop)
 }
 
 pub(super) fn migrate_if_missing(store: &Installations) -> io::Result<Vec<CatalogEntry>> {
+  migrate(store, true)
+}
+
+fn migrate(store: &Installations, verify_existing_payloads: bool) -> io::Result<Vec<CatalogEntry>> {
   if !filesystem::root_exists(store)? || !has_migratable_data(store)? {
     return Ok(Vec::new());
   }
@@ -69,7 +73,7 @@ pub(super) fn migrate_if_missing(store: &Installations) -> io::Result<Vec<Catalo
   let adopted = read_marker(store, MARKER)?;
   let projected = read_marker(store, LAYOUT_MARKER)?;
   let state = if adopted || catalog::exists(store)? || catalog::has_transaction(store)? {
-    recover_catalog(store)?
+    recover_catalog(store, verify_existing_payloads)?
   } else if catalog::has_installation_data(store)? {
     adopt_legacy(store)?
   } else {
@@ -82,7 +86,6 @@ pub(super) fn migrate_if_missing(store: &Installations) -> io::Result<Vec<Catalo
 }
 
 fn project_layout(store: &Installations, state: &catalog::State) -> io::Result<()> {
-  filesystem::ensure_directory(&store.root.join("installs"))?;
   if let Err(error) = super::layout::sync(store, state) {
     eprintln!("ctlup: installation paths could not be refreshed: {error}");
     return Ok(());
@@ -103,13 +106,22 @@ fn has_migratable_data(store: &Installations) -> io::Result<bool> {
   )
 }
 
-fn recover_catalog(store: &Installations) -> io::Result<catalog::State> {
+fn recover_catalog(
+  store: &Installations,
+  verify_existing_payloads: bool,
+) -> io::Result<catalog::State> {
   #[cfg(unix)]
   legacy::require_recoverable_activation(store)?;
   catalog::recover(store)?;
-  let state = catalog::read(store)?;
-  let active = store.recorded_selection("current")?;
-  let previous = store.recorded_selection("previous")?;
+  // The SSH preflight verifies all present payloads before sending an archive.
+  // First-use layout projection needs only the index and native selections.
+  let state = if verify_existing_payloads {
+    catalog::read(store)?
+  } else {
+    catalog::read_development_index(store)?
+  };
+  let (active, _) = store.load_selection(&state, "current")?;
+  let (previous, _) = store.load_selection(&state, "previous")?;
   if active.is_none() && previous.is_some() {
     return Err(filesystem::invalid(
       "previous installation has no active build",

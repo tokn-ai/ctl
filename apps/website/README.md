@@ -14,21 +14,23 @@ optional `poster.png`. A checkout without a recording builds with a placeholder.
 The video uses native controls and starts only on request. Both recordings
 and generated output are ignored by Git.
 
-The gallery loads `remote.png`, `vpn.png`, and `vpn-preview.mp4` from
-`.demo-recordings/website/`. Use `CTL_WEBSITE_GALLERY_DIR` to select another
-directory with those assets. The gallery omits any missing media. The included
-VPN walkthrough uses simulated preview states, and the screenshots use the
-desktop preview's fictional workspace.
+The sample workspace screenshot is `remote.png` in
+`.demo-recordings/website/`. Set `CTL_WEBSITE_GALLERY_DIR` to change its
+location. The released recordings and their posters are in
+`.demo-recordings/website-release-v1/`. Set `CTL_WEBSITE_RELEASE_DIR` to
+point at another local copy. The preview omits missing recordings.
 
 For GitHub Pages, set `CTL_WEBSITE_MEDIA_HOST` under the repository's
 `github-pages` environment variables. Use the public Cloudflare hostname
-without a scheme or path. Publish `demo.mp4`, `poster.png`, `remote.png`,
-`vpn.png`, and `vpn-preview.mp4` at that host's root with their respective
-`video/mp4` and `image/png` content types.
+without a scheme or path. Keep `demo.mp4`, `poster.png`, and `remote.png`
+at the host's root. Add the released `vpn-v1`, `reconnect-v1`, and
+`cli-v1` files there before merging the page update. Each release includes
+an MP4 (`video/mp4`) and a PNG poster (`image/png`). Leave previous media
+available while published pages can still link to them.
 
 The bundle workflow builds the landing page using
 `bun apps/website/site.ts build --verify-media`. The hosted build links to
-these five files over HTTPS and checks their responses before publishing.
+the released media over HTTPS and checks their responses before publishing.
 It publishes the HTML, stylesheet, and icon together with the runtime bundle
 registry in one GitHub Pages artifact. Select **GitHub Actions** as the Pages
 publishing source. To republish the landing page with the last successful

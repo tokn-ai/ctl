@@ -8,7 +8,7 @@ import { isDeepStrictEqual, promisify } from "node:util";
 import { bundleRoot, componentIdentity, repositoryName, validatedComponentSet } from "./bundle-publication.mts";
 import { maxAgentManifestBytes, parseAgentBundleSet, parseWindowsAgentBundleSet, windowsAgentManifestName } from "../shared/agent-bundle.mts";
 import { maxUpdaterBytes, maxUpdaterManifestBytes, parseUpdaterManifest, updaterManifestName } from "../shared/updater-bundle.mts";
-import { catalogChannels, parseBundleCatalog, siteMarker, verifyChannelPointer, type BundleCatalog } from "./stage-bundle-pages.mts";
+import { catalogChannels, parseBundleCatalog, siteMarker, validateBundlePagesSite, verifyChannelPointer, type BundleCatalog } from "./stage-bundle-pages.mts";
 import { pages, type GhRunner } from "./update-draft-release.mts";
 import { buildInfoName, maxBuildInfoBytes, parseBuildInfo } from "../shared/build-info.mts";
 
@@ -134,7 +134,7 @@ async function previouslyPublished(repository: string, gh: GhRunner): Promise<bo
 }
 
 /** Missing/transient/corrupt state never silently becomes an empty deployment. */
-export async function restoreBundlePages(repository: string, output: string, gh: GhRunner, fetcher: Fetch = fetch): Promise<boolean> {
+export async function restoreBundlePages(repository: string, output: string, gh: GhRunner, fetcher: Fetch = fetch, snapshot_only = false): Promise<boolean> {
   repositoryName(repository);
   const site = JSON.parse(await gh(["api", `repos/${repository}/pages`]));
   const expected = new URL("../", bundleRoot);
@@ -147,15 +147,18 @@ export async function restoreBundlePages(repository: string, output: string, gh:
   const temp = await mkdtemp(join(tmpdir(), "ctl-bundle-pages-"));
   try {
     const artifact = await successfulSnapshot(repository, gh);
+    if (snapshot_only && !artifact) throw new Error("No successful bundle Pages snapshot is available for recovery");
     let artifact_catalog: BundleCatalog | null = null;
     const snapshot = join(temp, "snapshot");
     if (artifact) {
       await gh(["run", "download", String(artifact.workflow_run.id), "--repo", repository, "--name", artifact.name, "--dir", snapshot]);
-      artifact_catalog = parseBundleCatalog(await readFile(join(snapshot, "bundles/catalog.json")));
+      artifact_catalog = snapshot_only
+        ? await validateBundlePagesSite(snapshot)
+        : parseBundleCatalog(await readFile(join(snapshot, "bundles/catalog.json")));
       const match = /^bundle-pages-state-(\d+)-(\d+)$/.exec(artifact.name)!;
       if (!artifact_catalog.publications.some((entry) => entry.run_id === match[1] && entry.run_attempt === Number(match[2]))) throw new Error("Downloaded Pages snapshot does not belong to its deployment attempt");
     }
-    const published_bytes = await download(new URL("catalog.json", bundleRoot), 64 * 1024, fetcher, true);
+    const published_bytes = snapshot_only ? null : await download(new URL("catalog.json", bundleRoot), 64 * 1024, fetcher, true);
     const published = published_bytes ? parseBundleCatalog(published_bytes) : null;
     if (artifact_catalog && published && artifact_catalog.generation === published.generation && !isDeepStrictEqual(artifact_catalog, published)) {
       throw new Error("Pages snapshot and published catalog have conflicting content at the same generation");
@@ -180,11 +183,13 @@ export async function restoreBundlePages(repository: string, output: string, gh:
 }
 
 async function main(): Promise<void> {
-  const [output, ...extra] = process.argv.slice(2);
-  if (!output || extra.length) throw new Error("usage: restore-bundle-pages.mts OUTPUT");
+  const [output, mode, ...extra] = process.argv.slice(2);
+  if (!output || output.startsWith("--") || (mode !== undefined && mode !== "--snapshot-only") || extra.length) {
+    throw new Error("usage: restore-bundle-pages.mts OUTPUT [--snapshot-only]");
+  }
   const run = promisify(execFile);
   const restored = await restoreBundlePages(process.env.GH_REPO ?? process.env.GITHUB_REPOSITORY ?? "", resolve(output),
-    async (args) => (await run("gh", args, { maxBuffer: 16 * 1024 * 1024 })).stdout);
+    async (args) => (await run("gh", args, { maxBuffer: 16 * 1024 * 1024 })).stdout, fetch, mode === "--snapshot-only");
   if (process.env.GITHUB_OUTPUT) await appendFile(process.env.GITHUB_OUTPUT, `previous=${restored ? resolve(output) : "-"}\n`);
   console.log(restored ? "Restored the last complete bundle Pages site" : "No previous Pages deployment exists; starting the managed bundle site");
 }

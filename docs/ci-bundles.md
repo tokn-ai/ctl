@@ -148,14 +148,26 @@ never overwrite an existing directory.
 
 The Pages job serializes publication across main and tags with a queued concurrency
 group. It restores the complete last successful site, verifies retained component
-sets, stages every new archive and updater, then writes channel pointers and
-uploads one complete Pages artifact. A separate 90-day Actions snapshot records
-the full site. Restoration requires the exact
-attempt's successful Pages deployment step, even if a later desktop job failed or
-the overall workflow is still running. Failed deployment candidates are ignored.
+sets, stages every new archive and updater, and writes channel pointers. The job
+adds the landing page to the same Pages artifact and verifies the public page,
+channel pointers, and runtime archive URLs after deployment.
+A separate 90-day Actions snapshot keeps the bundle catalog and assets for
+recovery. Restoration requires the exact attempt's successful Pages deployment
+step, even if a later desktop job failed or the overall workflow is still
+running. Failed deployment candidates are ignored.
 After snapshot expiry, restoration downloads and verifies the managed published
 HTTPS catalog, archives and updater sidecars. Network errors, corrupt state, and an existing
 unmanaged site abort publication rather than initialize an empty replacement.
+
+If the public bundle registry is unavailable, dispatch a recovery on `main`:
+
+```sh
+gh workflow run bundles.yml --ref main -f recover_pages=true
+```
+
+Recovery verifies the last successful bundle snapshot and republishes it with
+the current landing page. It uses the saved channel pointers and needs no
+runtime rebuild.
 
 Pages retains one current Nightly publication and one current Stable publication,
 each containing its available target bundles. If those publications exceed the

@@ -9,15 +9,41 @@ const media = process.env.CTL_WEBSITE_MEDIA_DIR ??
   join(repository, ".demo-recordings/persistence/fitted");
 const gallery_root = process.env.CTL_WEBSITE_GALLERY_DIR ??
   join(repository, ".demo-recordings/website");
+const release_root = process.env.CTL_WEBSITE_RELEASE_DIR ??
+  join(repository, ".demo-recordings/website-release-v1");
 const media_files = {
   "demo.mp4": media,
   "poster.png": media,
   "remote.png": gallery_root,
-  "vpn.png": gallery_root,
-  "vpn-preview.mp4": gallery_root,
+  "vpn-v1.mp4": release_root,
+  "vpn-v1.png": release_root,
+  "reconnect-v1.mp4": release_root,
+  "reconnect-v1.png": release_root,
+  "cli-v1.mp4": release_root,
+  "cli-v1.png": release_root,
 };
 type MediaName = keyof typeof media_files;
 const media_names = Object.keys(media_files) as MediaName[];
+const walkthroughs = [
+  {
+    video: "vpn-v1.mp4",
+    poster: "vpn-v1.png",
+    title: "Connect through a saved VPN",
+    detail: "Open a private staging session from the app.",
+  },
+  {
+    video: "reconnect-v1.mp4",
+    poster: "reconnect-v1.png",
+    title: "Scroll offline and reconnect",
+    detail: "Read retained output and return to the same SSH session.",
+  },
+  {
+    video: "cli-v1.mp4",
+    poster: "cli-v1.png",
+    title: "Transfer and verify a release",
+    detail: "Connect, run a command, and copy files with the CLI.",
+  },
+] as const;
 
 const mode = Bun.argv[2] ?? "serve";
 if (mode !== "build" && mode !== "serve") throw new Error("Usage: bun apps/website/site.ts [serve|build]");
@@ -67,20 +93,16 @@ const media_markup = hasMedia("demo.mp4")
           </video>`
   : '<div class="demo-placeholder"><span class="mono">ctmux</span><p>The persistence demo video is not included in this build.</p></div>';
 const gallery = [
+  ...walkthroughs.filter(({ video }) => hasMedia(video)).map(({ video, poster, title, detail }) => `<figure>
+    <video controls playsinline preload="none" aria-label="${title}"${posterAttribute(poster)}>
+      <source src="${mediaUrl(video)}" type="video/mp4">
+      <a href="${mediaUrl(video)}">Download the video</a>
+    </video>
+    <figcaption><strong>${title}</strong><span>${detail}</span></figcaption>
+  </figure>`),
   hasMedia("remote.png") && `<figure>
     <a href="${mediaUrl("remote.png")}"><img width="1280" height="800" loading="lazy" src="${mediaUrl("remote.png")}" alt="Sample ctmux workspace with local and development server sessions"></a>
     <figcaption><strong>Local and remote sessions</strong><span>Sample workspace</span></figcaption>
-  </figure>`,
-  hasMedia("vpn.png") && `<figure>
-    <a href="${mediaUrl("vpn.png")}"><img width="1280" height="800" loading="lazy" src="${mediaUrl("vpn.png")}" alt="VPN panel showing a connected sample OpenConnect profile"></a>
-    <figcaption><strong>Saved VPN profiles</strong><span>Sample workspace</span></figcaption>
-  </figure>`,
-  hasMedia("vpn-preview.mp4") && `<figure class="gallery-video">
-    <video controls playsinline preload="none" aria-label="Simulated VPN connection walkthrough"${posterAttribute("vpn.png")}>
-      <source src="${mediaUrl("vpn-preview.mp4")}" type="video/mp4">
-      <a href="${mediaUrl("vpn-preview.mp4")}">Download the VPN walkthrough</a>
-    </video>
-    <figcaption><strong>Connecting a saved VPN</strong><span>Illustrated with simulated states</span></figcaption>
   </figure>`,
 ].filter(Boolean);
 const template = await readFile(join(root, "index.html"), "utf8");
@@ -92,7 +114,7 @@ const page = template.replace("<!-- demo:media -->", media_markup).replace("<!--
 
 if (mode === "build") {
   await mkdir(output, { recursive: true });
-  for (const name of media_names) {
+  for (const name of [...media_names, "vpn.png", "vpn-preview.mp4"]) {
     if (!files.has("/" + name)) await Bun.file(join(output, name)).delete().catch((error) => {
       if (error.code !== "ENOENT") throw error;
     });

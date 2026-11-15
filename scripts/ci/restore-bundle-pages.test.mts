@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { cp, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
+import { archiveName } from "../shared/agent-bundle.mts";
 import { componentSetFixture, legacyNightlyFixture, legacyPagesCatalog, publicationFixture } from "./bundle-publication.fixtures.mts";
 import { bundleRoot, validatedComponentSet } from "./bundle-publication.mts";
 import { pagesDeployStep, pagesJobName, restoreBundlePages, successfulSnapshot } from "./restore-bundle-pages.mts";
@@ -69,6 +70,47 @@ test("restores a deployed legacy snapshot with both pointers while Pages CDN is 
   assert.deepEqual(catalog.channels, { nightly: entry.publication_id, dev: entry.publication_id });
   assert.equal(catalog.publications[0].channel, "dev");
   await validatedComponentSet(join(output, "bundles/sets", entry.publication_id), entry);
+});
+
+test("snapshot-only recovery restores both published channels without consulting the Pages site", async (t) => {
+  const directory = await root(t), nightly = publicationFixture(1), stable = publicationFixture(2, "stable");
+  const previous = join(directory, "previous"), site = join(directory, "site"), output = join(directory, "restore");
+  await stageBundlePages(stable, await componentSetFixture(directory, stable), null, previous);
+  await stageBundlePages(nightly, await componentSetFixture(directory, nightly), previous, site);
+  const broken_site: typeof fetch = async () => new Response("offline", { status: 503 });
+  const gh = github({ artifact_site: site });
+  await assert.rejects(restoreBundlePages("tokn-ai/ctl", output, gh, broken_site), /HTTP 503/);
+  assert.equal(await restoreBundlePages("tokn-ai/ctl", output, gh, broken_site, true), true);
+  const restored = parseBundleCatalog(await readFile(join(output, "bundles/catalog.json")));
+  assert.deepEqual(restored.channels, { nightly: nightly.publication_id, stable: stable.publication_id });
+  for (const entry of [nightly, stable]) {
+    const archive = join("bundles/sets", entry.publication_id, archiveName(entry, "aarch64-apple-darwin"));
+    assert.deepEqual(await readFile(join(output, archive)), await readFile(join(site, archive)));
+  }
+});
+
+test("snapshot-only recovery rejects missing or damaged bundle snapshots", async (t) => {
+  const directory = await root(t), entry = publicationFixture(1);
+  const site = join(directory, "site"), output = join(directory, "restore");
+  const unused: typeof fetch = async () => assert.fail("snapshot-only recovery fetched the Pages site");
+  await assert.rejects(restoreBundlePages("tokn-ai/ctl", output, github(), unused, true), /No successful bundle Pages snapshot/);
+
+  await stageBundlePages(entry, await componentSetFixture(directory, entry), null, site);
+  const gh = github({ artifact_site: site });
+  const pointer = join(site, "bundles/channels/nightly.json");
+  const original = await readFile(pointer);
+  await writeFile(pointer, original.toString().replace(entry.publication_id, "different"));
+  await assert.rejects(restoreBundlePages("tokn-ai/ctl", output, gh, unused, true), /channel and catalog disagree/);
+  await writeFile(pointer, original);
+
+  const foreign = join(site, "unexpected.html");
+  await writeFile(foreign, "unknown file");
+  await assert.rejects(restoreBundlePages("tokn-ai/ctl", output, gh, unused, true), /non-bundle Pages content/);
+  await rm(foreign);
+
+  await rm(join(site, "bundles/sets", entry.publication_id, archiveName(entry, "aarch64-apple-darwin")));
+  await assert.rejects(restoreBundlePages("tokn-ai/ctl", output, gh, unused, true), { code: "ENOENT" });
+  await assert.rejects(readFile(join(output, "bundles/catalog.json")), { code: "ENOENT" });
 });
 
 test("expired snapshots recover actual archives and all channel pointers from the managed HTTPS site", async (t) => {
@@ -188,4 +230,27 @@ test("workflow advances Nightly from main component builds and keeps PR builds i
   const release = workflow.split("  component-release:")[1]!.split("  bundle-pages:")[0]!;
   assert.ok(release.includes("needs: [metadata, remote-agent-set, remote-agent-windows]"));
   assert.ok(!release.includes("needs.remote-agent-windows.result"));
+});
+
+test("the only Pages publisher adds the landing page after staging or restoring bundles", async () => {
+  const directory = new URL("../../.github/workflows/", import.meta.url);
+  const workflows = (await readdir(directory)).filter((name) => /\.ya?ml$/.test(name));
+  const publishers: string[] = [];
+  for (const name of workflows) {
+    const workflow = await readFile(new URL(name, directory), "utf8");
+    if (/uses: actions\/deploy-pages@/.test(workflow)) publishers.push(name);
+  }
+  assert.deepEqual(publishers, ["bundles.yml"]);
+  const workflow = await readFile(new URL("bundles.yml", directory), "utf8");
+  const pages = workflow.split("  bundle-pages:")[1]!.split("  ctld:")[0]!;
+  assert.match(pages, /inputs\.recover_pages && github\.ref == 'refs\/heads\/main'/);
+  const stages = [
+    "target/bundle-pages-site --snapshot-only",
+    "Save complete site snapshot",
+    "stage-pages-landing.mts target/bundle-pages-site apps/website/dist",
+    "Upload combined Pages artifact",
+    `name: ${pagesDeployStep}`,
+    "for path in bundles/sets/*/*.tar.gz",
+  ].map((step) => pages.indexOf(step));
+  assert.ok(stages.every((position, index) => position >= 0 && (index === 0 || position > stages[index - 1]!)));
 });

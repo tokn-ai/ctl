@@ -26,9 +26,11 @@ without a scheme or path. Publish `demo.mp4`, `poster.png`, `remote.png`,
 `vpn.png`, and `vpn-preview.mp4` at that host's root with their respective
 `video/mp4` and `image/png` content types.
 
-The deploy workflow builds from `main` using
+The bundle workflow builds the landing page using
 `bun apps/website/site.ts build --verify-media`. The hosted build links to
 these five files over HTTPS and checks their responses before publishing.
-The GitHub Pages artifact contains only the HTML, stylesheet, and icon.
-Select **GitHub Actions** as the GitHub Pages publishing source. Run the
-workflow manually from `main` after changing the configured hostname.
+It publishes the HTML, stylesheet, and icon together with the runtime bundle
+registry in one GitHub Pages artifact. Select **GitHub Actions** as the Pages
+publishing source. To republish the landing page with the last successful
+bundle snapshot after a configuration change, run the bundle workflow from
+`main` with `recover_pages` enabled.

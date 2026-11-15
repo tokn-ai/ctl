@@ -2,12 +2,12 @@ import { appendFile, copyFile, cp, lstat, mkdir, readFile, readdir, rm, writeFil
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { bundleRoot, validatedComponentSet, type BundleChannel } from "./bundle-publication.mts";
-import { validateAgentIdentity, type AgentBundleIdentity } from "../shared/agent-bundle.mts";
+import { readAgentFile, validateAgentIdentity, type AgentBundleIdentity } from "../shared/agent-bundle.mts";
 
 export const siteMarker = "ctl-bundle-pages";
 export const nightlyRetention = 1;
 const maximumCatalogPublications = 64;
-const maximumSiteBytes = 900 * 1024 * 1024;
+export const maximumSiteBytes = 900 * 1024 * 1024;
 export const catalogChannels = ["dev", "nightly", "stable"] as const;
 type CatalogChannel = (typeof catalogChannels)[number];
 
@@ -115,13 +115,37 @@ function newer(left: CatalogPublication, right: CatalogPublication): number {
   return (left.channel === "stable" ? compareVersions(left.app_version, right.app_version) : 0) || left.run_number - right.run_number || left.run_attempt - right.run_attempt;
 }
 
-async function regularTree(path: string): Promise<number> {
+export async function regularTree(path: string): Promise<number> {
   const info = await lstat(path);
   if (info.isFile()) return info.size;
   if (!info.isDirectory()) throw new Error(`Pages contains a symlink or non-regular entry: ${path}`);
   let bytes = 0;
   for (const name of await readdir(path)) bytes += await regularTree(join(path, name));
   return bytes;
+}
+
+/** Verify a bundle-only snapshot before copying or changing it. */
+export async function validateBundlePagesSite(directory: string): Promise<BundleCatalog> {
+  if (await regularTree(directory) > maximumSiteBytes) {
+    throw new Error("Pinned bundle publications exceed the Pages safety limit (900 MiB in CI)");
+  }
+  const catalog = parseBundleCatalog(await readAgentFile(join(directory, "bundles/catalog.json"), 64 * 1024));
+  const unknown = (await readdir(directory)).filter((name) => !["bundles", "index.html", ".nojekyll"].includes(name));
+  if (unknown.length) throw new Error(`Refusing to replace non-bundle Pages content: ${unknown.join(", ")}`);
+  if (!(await readFile(join(directory, "index.html"), "utf8")).includes(`<!-- ${siteMarker} -->`)) throw new Error("Refusing to replace a non-managed Pages index");
+  if ((await readdir(join(directory, "bundles"))).some((name) => !["catalog.json", "channels", "sets"].includes(name)) ||
+    (await readdir(join(directory, "bundles/sets"))).some((name) => !catalog.publications.some((entry) => entry.publication_id === name)) ||
+    (await readdir(join(directory, "bundles/channels"))).some((name) => !Object.keys(catalog.channels).some((channel) => name === `${channel}.json`))) throw new Error("Refusing to replace unrecognized content in the bundle Pages site");
+  for (const entry of catalog.publications) {
+    const set = join(directory, "bundles/sets", entry.publication_id);
+    const { asset_names } = await validatedComponentSet(set, entry);
+    if ((await readdir(set)).some((name) => !asset_names.includes(name))) throw new Error("Unrecognized content in an immutable bundle set");
+  }
+  for (const channel of catalogChannels) {
+    const id = catalog.channels[channel];
+    if (id) verifyChannelPointer(await readAgentFile(join(directory, "bundles/channels", `${channel}.json`), 4096), channel, id);
+  }
+  return catalog;
 }
 
 /** Fail closed before touching output; each pointer is built with all its archives. */
@@ -131,23 +155,7 @@ export async function stageBundlePages(publication: Publication, incoming: strin
   await validatedComponentSet(incoming, publication);
   let catalog: BundleCatalog = { schema_version: 1, site: siteMarker, generation: 0, publications: [], channels: {} };
   if (previous) {
-    catalog = parseBundleCatalog(await readFile(join(previous, "bundles/catalog.json")));
-    const unknown = (await readdir(previous)).filter((name) => !["bundles", "index.html", ".nojekyll"].includes(name));
-    if (unknown.length) throw new Error(`Refusing to replace non-bundle Pages content: ${unknown.join(", ")}`);
-    if (!(await readFile(join(previous, "index.html"), "utf8")).includes(`<!-- ${siteMarker} -->`)) throw new Error("Refusing to replace a non-managed Pages index");
-    if ((await readdir(join(previous, "bundles"))).some((name) => !["catalog.json", "channels", "sets"].includes(name)) ||
-      (await readdir(join(previous, "bundles/sets"))).some((name) => !catalog.publications.some((entry) => entry.publication_id === name)) ||
-      (await readdir(join(previous, "bundles/channels"))).some((name) => !Object.keys(catalog.channels).some((channel) => name === `${channel}.json`))) throw new Error("Refusing to replace unrecognized content in the bundle Pages site");
-    await regularTree(previous);
-    for (const entry of catalog.publications) {
-      const directory = join(previous, "bundles/sets", entry.publication_id);
-      const { asset_names } = await validatedComponentSet(directory, entry);
-      if ((await readdir(directory)).some((name) => !asset_names.includes(name))) throw new Error("Unrecognized content in an immutable bundle set");
-    }
-    for (const channel of catalogChannels) {
-      const id = catalog.channels[channel];
-      if (id) verifyChannelPointer(await readFile(join(previous, "bundles/channels", `${channel}.json`)), channel, id);
-    }
+    catalog = await validateBundlePagesSite(previous);
   }
   const current_id = publication.channel === "nightly" ? catalog.channels.nightly ?? catalog.channels.dev : catalog.channels.stable;
   const current = catalog.publications.find((entry) => entry.publication_id === current_id);

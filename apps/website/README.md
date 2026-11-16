@@ -7,6 +7,13 @@ Run `bun apps/website/site.ts build` to produce a static site in
 `apps/website/dist/`. The preview server and static build use the same markup
 and assets.
 
+The navbar assets come from the
+[Tokn design kit at `2058eb4d7439`](https://github.com/tokn-ai/tokn-ai.github.io/tree/2058eb4d7439).
+Run `bun run export:design -- <destination>` in that source checkout to refresh
+`tokn.css` and the browser-ready `navigation.js`. Copy the exported logos as
+`tokn-logo.svg` and `tokn-logo-icon.svg`. The asset map in `site.ts` serves
+these files locally and includes them in the static build.
+
 Both commands use the fitted persistence take from
 `.demo-recordings/persistence/fitted/` when present. Set
 `CTL_WEBSITE_MEDIA_DIR` to use another directory containing `demo.mp4` and an
@@ -31,7 +38,7 @@ available while published pages can still link to them.
 The bundle workflow builds the landing page using
 `bun apps/website/site.ts build --verify-media`. The hosted build links to
 the released media over HTTPS and checks their responses before publishing.
-It publishes the HTML, stylesheet, and icon together with the runtime bundle
+It publishes the landing page and its assets together with the runtime bundle
 registry in one GitHub Pages artifact. Select **GitHub Actions** as the Pages
 publishing source. To republish the landing page with the last successful
 bundle snapshot after a configuration change, run the bundle workflow from

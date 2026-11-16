@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import test, { type TestContext } from "node:test";
 import { validatedComponentSet } from "./bundle-publication.mts";
 import { componentSetFixture, publicationFixture } from "./bundle-publication.fixtures.mts";
@@ -22,16 +22,33 @@ async function fixture(t: TestContext) {
   return { directory, site, landing, stable, index };
 }
 
-test("a Pages artifact keeps the installed bundle paths alongside the landing page", async (t) => {
+test("a Pages artifact copies navbar assets and preserves the bundle registry byte for byte", async (t) => {
   const { site, landing, stable, index } = await fixture(t);
-  const pointer = join(site, "bundles/channels/stable.json");
-  const expected_pointer = await readFile(pointer);
+  const assets = {
+    "tokn.css": ".tokn-nav { color: inherit; }",
+    "navigation.js": "export const navigation = [];",
+    "tokn-logo.svg": '<svg xmlns="http://www.w3.org/2000/svg"><title>Tokn</title></svg>',
+    "tokn-logo-icon.svg": '<svg xmlns="http://www.w3.org/2000/svg"><title>Tokn icon</title></svg>',
+  };
+  await Promise.all(Object.entries(assets).map(([name, bytes]) => writeFile(join(landing, name), bytes)));
+  const bundles = join(site, "bundles");
+  const bundleFiles = async () => {
+    const entries = await readdir(bundles, { recursive: true, withFileTypes: true });
+    return new Map(await Promise.all(entries.filter((entry) => entry.isFile()).map(async (entry) => {
+      const path = join(entry.parentPath, entry.name);
+      return [relative(bundles, path), await readFile(path)] as const;
+    })));
+  };
+  const expected_bundles = await bundleFiles();
 
   await stagePagesLanding(site, landing);
 
   assert.equal(await readFile(join(site, "index.html"), "utf8"), `<!-- ctl-bundle-pages -->\n${index}`);
   assert.equal(await readFile(join(site, "assets", "site.css"), "utf8"), "body { color: black; }");
-  assert.deepEqual(await readFile(pointer), expected_pointer);
+  for (const [name, bytes] of Object.entries(assets)) {
+    assert.equal(await readFile(join(site, name), "utf8"), bytes);
+  }
+  assert.deepEqual(await bundleFiles(), expected_bundles);
   assert.equal(await readFile(join(site, ".nojekyll"), "utf8"), "");
   assert.equal(await readFile(join(landing, "index.html"), "utf8"), index);
   await validatedComponentSet(join(site, "bundles/sets", stable.publication_id), stable);

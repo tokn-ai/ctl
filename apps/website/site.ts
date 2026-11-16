@@ -54,6 +54,10 @@ if (media_host && !/^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]*
 
 const files = new Map([
   ["/site.css", Bun.file(join(root, "site.css"))],
+  ["/tokn.css", Bun.file(join(root, "tokn.css"))],
+  ["/navigation.js", Bun.file(join(root, "navigation.js"))],
+  ["/tokn-logo.svg", Bun.file(join(root, "tokn-logo.svg"))],
+  ["/tokn-logo-icon.svg", Bun.file(join(root, "tokn-logo-icon.svg"))],
   ["/app-icon.svg", Bun.file(join(repository, "apps/desktop/app-icon.svg"))],
 ]);
 if (!media_host) {

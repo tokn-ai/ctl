@@ -293,6 +293,9 @@ impl Drop for ManagedVpn {
 
 pub(super) fn engine_command(engine: &Path) -> Command {
   let mut command = Command::new(engine);
+  // The desktop polls container status from a daemon with no attached console.
+  #[cfg(windows)]
+  command.creation_flags(windows::Win32::System::Threading::CREATE_NO_WINDOW.0);
   command
     .stdin(Stdio::null())
     .stderr(Stdio::null())

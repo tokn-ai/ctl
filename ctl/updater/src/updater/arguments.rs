@@ -43,7 +43,9 @@ pub(super) enum Command {
     #[command(subcommand)]
     command: ComponentCommand,
   },
-  /// Build and install a native development build, or renew its macOS helper signing.
+  /// Build and install from a checkout, or renew macOS development helper signing.
+  ///
+  /// Use --host, --hosts, or --destination to build and deploy to Linux x64 or ARM64.
   Dev(DevelopmentArguments),
   /// Show installed builds, channels and the active runtime without starting services.
   Show {
@@ -141,17 +143,14 @@ pub(super) enum ComponentCommand {
 
 #[derive(Debug, Subcommand)]
 pub(super) enum AppCommand {
-  /// Install the desktop app from a publication channel or the local checkout.
+  /// Install the desktop app from a publication channel.
   Install(AppArguments),
-  /// Update the desktop app from a publication channel or the local checkout.
+  /// Update the desktop app from a publication channel.
   Update(AppArguments),
 }
 
 #[derive(Debug, Args)]
 pub(super) struct AppArguments {
-  /// Build the desktop app from the current source checkout.
-  #[arg(long, conflicts_with = "channel")]
-  pub local: bool,
   /// Publication channel; remembered after a successful install or update.
   #[arg(long, value_enum)]
   pub channel: Option<Channel>,
@@ -201,10 +200,6 @@ pub(super) enum ReleaseListChannel {
 }
 
 #[derive(Debug, Args)]
-#[expect(
-  clippy::struct_excessive_bools,
-  reason = "clap parses independent command-line flags"
-)]
 pub(super) struct UpdateArguments {
   /// Saved host names or IDs; repeat or separate with commas.
   #[arg(long, value_delimiter = ',', num_args = 1..)]
@@ -213,16 +208,13 @@ pub(super) struct UpdateArguments {
   #[arg(long)]
   pub local: bool,
   /// Publication channel; remembered after a successful update.
-  #[arg(long, value_enum, conflicts_with_all = ["from", "working_tree"])]
+  #[arg(long, value_enum, conflicts_with = "from")]
   pub channel: Option<Channel>,
   /// Complete build directory or archive for an explicit offline installation.
-  #[arg(long, conflicts_with_all = ["channel", "working_tree"])]
-  pub from: Option<PathBuf>,
-  /// Cross-build a Linux x64 or ARM64 bundle from this checkout.
   #[arg(long)]
-  pub working_tree: bool,
+  pub from: Option<PathBuf>,
   /// Install the current build of a pull request.
-  #[arg(long, value_parser = clap::value_parser!(u64).range(1..), conflicts_with_all = ["channel", "from", "working_tree"])]
+  #[arg(long, value_parser = clap::value_parser!(u64).range(1..), conflicts_with_all = ["channel", "from"])]
   pub pr: Option<u64>,
   /// Inspect and snapshot native binaries from --from.
   #[arg(long, requires = "from")]
@@ -240,9 +232,15 @@ pub(super) struct UpdateArguments {
   reason = "clap parses independent command-line flags"
 )]
 pub(super) struct DevelopmentArguments {
+  /// Build and deploy to these saved Linux hosts; repeat or separate with commas.
+  #[arg(long, value_delimiter = ',', num_args = 1..)]
+  pub hosts: Vec<String>,
   /// Source checkout; defaults to the current directory.
   #[arg(long)]
   pub workspace: Option<PathBuf>,
+  /// Build and install the native desktop app in the development profile.
+  #[arg(long, conflicts_with_all = ["renew_signing", "release", "profile", "target_dir", "target", "cargo_args_json", "lease"])]
+  pub app: bool,
   /// Renew the active macOS development helper's signature without recompiling.
   #[arg(long, conflicts_with_all = ["release", "profile", "target_dir", "target", "cargo_args_json"])]
   pub renew_signing: bool,
@@ -407,13 +405,12 @@ mod tests {
   }
 
   #[test]
-  fn app_install_and_update_accept_a_local_build_or_a_publication_channel() {
+  fn app_install_and_update_accept_a_publication_channel() {
     for operation in ["install", "update"] {
-      for (flags, local, channel) in [
-        (&[][..], false, None),
-        (&["--local"][..], true, None),
-        (&["--channel", "nightly"][..], false, Some("nightly")),
-        (&["--channel", "stable"][..], false, Some("stable")),
+      for (flags, channel) in [
+        (&[][..], None),
+        (&["--channel", "nightly"][..], Some("nightly")),
+        (&["--channel", "stable"][..], Some("stable")),
       ] {
         let command_line = [&["ctlup", "app", operation][..], flags].concat();
         let args = Arguments::try_parse_from(command_line).unwrap();
@@ -430,7 +427,6 @@ mod tests {
             options
           }
         };
-        assert_eq!(options.local, local);
         assert_eq!(
           options
             .channel
@@ -443,26 +439,12 @@ mod tests {
   }
 
   #[test]
-  fn app_local_builds_conflict_with_publication_channels_in_either_order() {
-    for operation in ["install", "update"] {
-      for channel in ["stable", "nightly"] {
-        for flags in [
-          ["--local", "--channel", channel],
-          ["--channel", channel, "--local"],
-        ] {
-          let command_line = [&["ctlup", "app", operation][..], &flags].concat();
-          assert!(Arguments::try_parse_from(command_line).is_err());
-        }
-      }
-    }
-  }
-
-  #[test]
   fn app_commands_reject_unsupported_channels_and_keep_global_host_options() {
     for operation in ["install", "update"] {
       for flags in [
         &["--channel", "dev"][..],
         &["--channel", "unknown"],
+        &["--local"],
         &["--hosts", "fixture-host"],
         &["--pr", "1"],
       ] {
@@ -472,8 +454,7 @@ mod tests {
       }
       for option in ["--host", "--destination", "--method"] {
         let args =
-          Arguments::try_parse_from(["ctlup", "app", operation, "--local", option, "fixture-host"])
-            .unwrap();
+          Arguments::try_parse_from(["ctlup", "app", operation, option, "fixture-host"]).unwrap();
         let selected = match option {
           "--host" => args.host,
           "--destination" => args.destination,
@@ -604,11 +585,7 @@ mod tests {
         Arguments::try_parse_from(["ctlup", command, "--channel", "nightly", "--from", "/build"])
           .is_err()
       );
-      assert!(Arguments::try_parse_from(["ctlup", command, "--working-tree"]).is_ok());
-      assert!(
-        Arguments::try_parse_from(["ctlup", command, "--working-tree", "--channel", "nightly"])
-          .is_err()
-      );
+      assert!(Arguments::try_parse_from(["ctlup", command, "--working-tree"]).is_err());
       assert!(Arguments::try_parse_from(["ctlup", command, "--package", "ctl-agent"]).is_err());
       assert!(Arguments::try_parse_from(["ctlup", command, "--selected"]).is_err());
     }
@@ -691,6 +668,51 @@ mod tests {
     }
     assert!(Arguments::try_parse_from(["ctlup", "dev", "--lease"]).is_err());
     assert!(Arguments::try_parse_from(["ctlup", "dev", "--lease", "--json"]).is_ok());
+  }
+
+  #[test]
+  fn desktop_development_uses_its_own_build_profile() {
+    let args =
+      Arguments::try_parse_from(["ctlup", "dev", "--app", "--workspace", "checkout", "--json"])
+        .unwrap();
+    assert!(matches!(
+      args.command,
+      Command::Dev(DevelopmentArguments { app: true, workspace: Some(workspace), json: true, .. })
+        if workspace.as_os_str() == "checkout"
+    ));
+    for flags in [
+      &["--renew-signing"][..],
+      &["--release"],
+      &["--profile", "custom"],
+      &["--target-dir", "output"],
+      &["--target", "aarch64-apple-darwin"],
+      &["--cargo-args-json", "[]"],
+      &["--lease", "--json"],
+    ] {
+      let command_line = [&["ctlup", "dev", "--app"][..], flags].concat();
+      assert_eq!(
+        Arguments::try_parse_from(command_line).unwrap_err().kind(),
+        clap::error::ErrorKind::ArgumentConflict
+      );
+    }
+  }
+
+  #[test]
+  fn remote_development_accepts_saved_hosts_and_a_checkout() {
+    let args = Arguments::try_parse_from([
+      "ctlup",
+      "dev",
+      "--hosts",
+      "work,lab",
+      "--workspace",
+      "checkout",
+    ])
+    .unwrap();
+    assert!(matches!(
+      args.command,
+      Command::Dev(DevelopmentArguments { hosts, workspace: Some(workspace), .. })
+        if hosts == ["work", "lab"] && workspace.as_os_str() == "checkout"
+    ));
   }
 
   #[test]

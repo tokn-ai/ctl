@@ -119,10 +119,7 @@ async fn run(arguments: Arguments) -> io::Result<i32> {
       );
     }
     Command::Status { json } => status::run(&home, target, false, json).await?,
-    Command::Dev(options) => {
-      require_local(target)?;
-      development::run(&home, options).await?;
-    }
+    Command::Dev(options) => development::run(&home, options, target).await?,
     Command::Rollback { json } => status::run(&home, target, true, json).await?,
     Command::Check { channel, json } => {
       require_local(target)?;

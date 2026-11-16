@@ -144,9 +144,10 @@ host, the updater uses the selected VPN or SSH gateway route and verifies the
 machine ID before uploading.
 
 `ctlup` resolves the configured Nightly or Stable publication and verifies the
-matching runtime and updater for the target. Use `--working-tree` to build
-Linux x64 or ARM64 from a checkout. `CTL_REMOTE_BUNDLES_DIR` is an explicit
-local source override. Network errors do not silently select an older build.
+matching runtime and updater for the target. Use `ctlup dev --host NAME` or
+`ctlup dev --destination ALIAS` to build a checkout for Linux x64 or ARM64 and
+install it over SSH. `CTL_REMOTE_BUNDLES_DIR` supplies explicit build files.
+Network errors do not silently select an older build.
 
 New schema-3 remote bundles contain `ctl-agent`, `ctmuxd`, `ctl-taskd`, `ctld`,
 `ctl`, and `ctmux`. Existing schema-2 bundles contain the four service binaries.

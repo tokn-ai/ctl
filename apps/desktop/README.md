@@ -168,19 +168,19 @@ platform, adding helper signing and supervision on macOS. Direct
 
 Development startup also performs a local-only bundle preflight. It warns but does
 not block local or already-provisioned SSH work when remote install bundles are
-absent. Development Linux x64 uploads now build the working tree locally,
-including uncommitted changes. To prepare the same bundle explicitly, start
-Docker or Podman and run:
+absent. Choose **Build from checkout** in the component update dialog to
+build the working tree for a Linux x64 or ARM64 host. To prepare that bundle
+for a later install, run:
 
 ```sh
 pnpm bundles:build
 ```
 
 The result lives in `target/development-bundles/x86_64-unknown-linux-musl` and
-contains the four services plus the `ctl` and `ctmux` commands. Other remote
-targets follow the app's network channel. About and Update components can check
-Nightly for the latest published `main` build or Stable for a release. Explicit
-channel choices bypass the working-tree build.
+contains the four services plus the `ctl` and `ctmux` commands. Automatic remote
+updates use the app's configured publication channel. About and Update
+components can check Nightly for the latest published `main` build or Stable for
+a release.
 `pnpm bundles:sync` remains an explicit CI-resource packaging/offline tool.
 
 The app may also use the path in `CTMUXD_BIN`. A saved host represents a named

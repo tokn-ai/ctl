@@ -211,8 +211,57 @@ pub async fn prepare_update(
     PreparationPhase::Resolving,
     "Resolving component bundle",
   ));
-  let (bundle, mut updater, origin, updater_info) =
-    prepare_source(home, target, purpose, source, included, &on_progress).await?;
+  let prepared = prepare_source(home, target, purpose, source, included, &on_progress).await?;
+  prepare_resolved_update(
+    home,
+    target,
+    purpose,
+    source,
+    prepared,
+    snapshot,
+    &on_progress,
+  )
+  .await
+}
+
+/// Builds a Linux SSH bundle from the specified checkout and prepares it for upload.
+///
+/// # Errors
+/// Reports an unsupported target, missing checkout, build, verification or packaging failure.
+pub async fn prepare_working_tree_update(
+  home: &Path,
+  target: &str,
+  workspace: Option<&Path>,
+  on_progress: impl Fn(PreparationProgress) + Send + Sync,
+) -> io::Result<PreparedUpdate> {
+  let snapshot = PreparationSnapshot::capture(home)?;
+  on_progress(preparation(
+    PreparationPhase::Resolving,
+    "Resolving component bundle",
+  ));
+  let purpose = Purpose::Upload;
+  let prepared = prepare_working_tree(home, target, purpose, workspace, &on_progress).await?;
+  prepare_resolved_update(
+    home,
+    target,
+    purpose,
+    &BuildSource::WorkingTree,
+    prepared,
+    snapshot,
+    &on_progress,
+  )
+  .await
+}
+
+async fn prepare_resolved_update(
+  home: &Path,
+  target: &str,
+  purpose: Purpose,
+  source: &BuildSource,
+  (bundle, mut updater, origin, updater_info): PreparedSource,
+  snapshot: PreparationSnapshot,
+  on_progress: &(impl Fn(PreparationProgress) + Send + Sync),
+) -> io::Result<PreparedUpdate> {
   verify_source(&bundle.manifest, target, purpose)?;
   let remote_archive = if purpose == Purpose::Upload {
     if updater.is_none() {
@@ -255,8 +304,8 @@ pub async fn prepare_update(
 }
 
 /// Resolves the requested source without replacing running services. Automatic
-/// sources use current development output or a fresh named publication. Explicit
-/// Selected sources use included offline resources without consulting old pins.
+/// sources use a fresh named publication. Explicit Selected sources use
+/// included offline resources without consulting old pins.
 /// Local macOS keeps its signed active build because remote archives omit its app.
 ///
 /// # Errors
@@ -283,19 +332,8 @@ async fn prepare_source(
   on_progress: &(impl Fn(PreparationProgress) + Send + Sync),
 ) -> io::Result<PreparedSource> {
   let published_target = publisher_target(target, purpose);
-  let working_tree = matches!(source, BuildSource::WorkingTree)
-    || (matches!(source, BuildSource::Automatic)
-      && published_target == "x86_64-unknown-linux-musl"
-      && development_workspace().is_some());
-  if working_tree {
-    return prepare_working_tree(
-      home,
-      published_target.as_ref(),
-      purpose,
-      source,
-      on_progress,
-    )
-    .await;
+  if matches!(source, BuildSource::WorkingTree) {
+    return prepare_working_tree(home, published_target.as_ref(), purpose, None, on_progress).await;
   }
   if matches!(source, BuildSource::Automatic)
     && (purpose == Purpose::Upload || !target.ends_with("-apple-darwin"))
@@ -379,7 +417,7 @@ async fn prepare_working_tree(
   home: &Path,
   target: &str,
   purpose: Purpose,
-  source: &BuildSource,
+  workspace: Option<&Path>,
   on_progress: &(impl Fn(PreparationProgress) + Send + Sync),
 ) -> io::Result<PreparedSource> {
   if !matches!(
@@ -390,19 +428,23 @@ async fn prepare_working_tree(
       "working-tree bundles require a Linux x64 or ARM64 SSH target; use ctlup dev for native builds",
     ));
   }
-  let caller_workspace = || {
-    std::env::current_dir()
-      .ok()?
-      .ancestors()
-      .find(|root| root.join("scripts/dev/build-agent-bundle.mts").is_file())
-      .map(Path::to_owned)
-  };
-  let workspace = if matches!(source, BuildSource::WorkingTree) {
-    caller_workspace().or_else(development_workspace)
+  let workspace = if let Some(workspace) = workspace {
+    workspace
+      .canonicalize()
+      .ok()
+      .filter(|root| root.join("scripts/dev/build-agent-bundle.mts").is_file())
   } else {
-    development_workspace()
+    std::env::current_dir()
+      .ok()
+      .and_then(|caller| {
+        caller
+          .ancestors()
+          .find(|root| root.join("scripts/dev/build-agent-bundle.mts").is_file())
+          .map(Path::to_owned)
+      })
+      .or_else(development_workspace)
   }
-  .ok_or_else(|| invalid("run the working-tree update from a ctl source checkout"))?;
+  .ok_or_else(|| invalid("run ctlup dev from a ctl source checkout or pass --workspace"))?;
   development_build(home, target, purpose, &workspace, on_progress).await
 }
 

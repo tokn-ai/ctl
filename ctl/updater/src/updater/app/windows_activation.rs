@@ -42,7 +42,7 @@ impl Workspace {
     lock.try_lock().map_err(|error| match error {
       fs::TryLockError::WouldBlock => io::Error::new(
         io::ErrorKind::WouldBlock,
-        "another ctlup app install or update is in progress",
+        "another ctmux app installation is in progress",
       ),
       fs::TryLockError::Error(error) => error,
     })?;
@@ -129,7 +129,7 @@ impl Workspace {
       ) {
         Ok(()) => Err(error),
         Err(restore) => Err(io::Error::other(format!(
-          "app activation failed: {error}; rollback is retained at {} but restoration failed: {restore}. Run ctlup app install again to recover.",
+          "app activation failed: {error}; rollback is retained at {} but restoration failed: {restore}. Retry installation to recover.",
           pending.display()
         ))),
       };

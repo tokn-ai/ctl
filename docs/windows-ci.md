@@ -80,8 +80,8 @@ on a cross-build result.
 
 [windows-app.ps1](../scripts/ci/windows-app.ps1) invokes an explicitly ignored
 Rust integration fixture that supplies a disposable home to the updater. The
-ordinary CI job builds the frontend and native app once through `ctlup app`'s
-local-build path, then checks installation, update and repair while retaining the
+ordinary CI job exercises the development app installation used by
+`ctlup dev --app` and checks repair while retaining the
 saved channel. The script also runs the ordinary native activation, storage locking,
 interruption-recovery and Job Object build-cancellation tests before the ignored
 fixture. It leaves `HOME`, `USERPROFILE`, the active app and normal daemon

@@ -149,18 +149,63 @@ fn private_development_lease_rejects_non_pipe_input_before_building() {
 }
 
 #[test]
-fn development_preparation_rejects_remote_targets_before_building() {
+fn remote_development_rejects_local_modes_before_building() {
   let fixture = Fixture::new();
-  let output = finish(
-    fixture
+  for option in ["--app", "--renew-signing", "--release"] {
+    let output = fixture
       .command()
-      .args(["--destination", "fixture-host"])
-      .stdin(Stdio::null())
-      .spawn()
-      .unwrap(),
-  );
+      .args(["--destination", "fixture-host", option])
+      .output()
+      .unwrap();
+    assert!(!output.status.success());
+    let diagnostics = String::from_utf8_lossy(&output.stderr);
+    assert!(
+      diagnostics.contains("require a local build"),
+      "{diagnostics}"
+    );
+    assert!(!diagnostics.contains("fixture build failure"));
+  }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn desktop_development_dispatches_the_requested_checkout() {
+  let fixture = Fixture::new();
+  fs::create_dir_all(fixture.0.join("apps/desktop/src-tauri")).unwrap();
+  fs::write(
+    fixture.0.join("apps/desktop/src-tauri/tauri.conf.json"),
+    "{}",
+  )
+  .unwrap();
+  fs::write(
+    fixture.0.join("scripts/dev/build-desktop-app.mts"),
+    "fixture",
+  )
+  .unwrap();
+  let builder = fixture.0.join("builder");
+  fs::write(
+    builder,
+    r#"#!/bin/sh
+set -eu
+case "$3" in */build-desktop-app.mts) ;; *) exit 18 ;; esac
+test "$4" = --workspace
+test -f "$5/apps/desktop/src-tauri/tauri.conf.json"
+printf 'fixture desktop build failure\n' >&2
+exit 17
+"#,
+  )
+  .unwrap();
+  let output = fixture
+    .command()
+    .args(["--app", "--json"])
+    .output()
+    .unwrap();
   assert!(!output.status.success());
   let diagnostics = String::from_utf8_lossy(&output.stderr);
-  assert!(diagnostics.contains("local"), "{diagnostics}");
-  assert!(!diagnostics.contains("fixture build failure"));
+  assert!(
+    diagnostics.contains("fixture desktop build failure"),
+    "{diagnostics}"
+  );
+  assert_eq!(output.stdout, [] as [u8; 0]);
+  assert!(!fixture.0.join(".tokn/ctl/current").exists());
 }

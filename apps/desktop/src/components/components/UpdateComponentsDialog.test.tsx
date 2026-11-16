@@ -67,6 +67,7 @@ it("offers Nightly as the main build choice and sends it to discovery and instal
   const user = userEvent.setup();
   const select = screen.getByRole("combobox", { name: "Build source" }) as HTMLSelectElement;
   expect(select.value).toBe("automatic");
+  expect(screen.getByText("Remote updates use the configured publication channel.")).toBeTruthy();
   expect(Array.from(select.options, (option) => option.value)).not.toContain("dev");
   await user.selectOptions(select, screen.getByRole("option", { name: "Nightly (latest published main build)" }));
   await waitFor(() => expect(checkComponentUpdates).toHaveBeenLastCalledWith("nightly", false));

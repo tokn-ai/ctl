@@ -106,7 +106,7 @@ fn checkout(caller: &Path) -> io::Result<PathBuf> {
     .ok_or_else(|| {
       io::Error::new(
         io::ErrorKind::NotFound,
-        "run ctlup app --local from a ctl source checkout",
+        "run ctlup dev --app from a ctl source checkout or specify one with --workspace",
       )
     })
 }

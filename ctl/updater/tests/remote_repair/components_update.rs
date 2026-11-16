@@ -1,7 +1,65 @@
 //! Explicit updates bootstrap an old agent through its persistent account ID.
 use super::*;
+use std::path::Path;
 
 const OTHER_ID: &str = "0c9247af-580a-4e90-9a88-45a4f76c0ca7";
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remote_dev_builds_from_the_explicit_workspace_after_verifying_the_account() {
+  let _guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
+  let fixture = Fixture::new(EXPECTED_ID);
+  let workspace = fixture.0.join("dev checkout");
+  fs::create_dir_all(workspace.join("scripts/dev")).unwrap();
+  fs::write(workspace.join("scripts/dev/build-agent-bundle.mts"), "").unwrap();
+  fixture.script(
+    "uname",
+    r#"case "$1" in -s) printf 'Linux\n' ;; -m) printf 'aarch64\n' ;; *) exit 1 ;; esac"#,
+  );
+  fixture.script(
+    "node",
+    r#"
+test -f "$CTL_TEST_DIR/account-id"
+test -f "$CTL_TEST_DIR/platform"
+checkout=$(cd "$CTL_TEST_DIR/dev checkout" && pwd -P)
+test "$(pwd -P)" = "$checkout"
+test "$3" = "$checkout/scripts/dev/build-agent-bundle.mts"
+test "$4" = --target
+test "$5" = aarch64-unknown-linux-musl
+touch "$CTL_TEST_DIR/builder-called"
+printf 'fixture cross-build failed\n' >&2
+exit 1
+"#,
+  );
+  let broker = fixture.updater_broker();
+  let output = fixture
+    .command(
+      &[
+        "--host",
+        "work",
+        "dev",
+        "--workspace",
+        workspace.to_str().unwrap(),
+        "--json",
+      ],
+      Path::new(env!("CARGO_BIN_EXE_ctlup")),
+      None,
+    )
+    .await;
+  let diagnostics = String::from_utf8_lossy(&output.stderr);
+  assert!(!output.status.success(), "{diagnostics}");
+  assert!(
+    diagnostics.contains("fixture cross-build failed"),
+    "{diagnostics}"
+  );
+  let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+  assert_eq!(result[0]["host"], "work");
+  assert!(result[0]["result"].is_null());
+  assert!(fixture.0.join("builder-called").is_file());
+  assert!(!fixture.0.join("upload").exists());
+  assert!(!fixture.0.join("gh-called").exists());
+  fixture.assert_managed_channels(2);
+  broker.await.unwrap();
+}
 
 fn catalogued_agent_without_inspect(fixture: &Fixture, remote_id: Option<&str>) -> PathBuf {
   use ctl_core::bundles::{Manifest, Source, Store};

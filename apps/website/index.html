@@ -7,20 +7,46 @@
   <meta name="theme-color" content="#f5f5ed">
   <title>ctl — A terminal that outlives its window</title>
   <link rel="icon" href="./app-icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="./tokn.css">
   <link rel="stylesheet" href="./site.css">
+  <script type="module" src="./navigation.js"></script>
 </head>
 <body>
-  <div class="page">
-    <header class="masthead">
-      <a class="brand" href="./" aria-label="ctl home"><img src="./app-icon.svg" alt="" width="32" height="32">ctl</a>
-      <nav aria-label="Primary">
-        <a href="#demo">Demo</a>
-        <a href="#features">Features</a>
-        <a class="repo" href="https://github.com/tokn-ai/ctl">GitHub ↗</a>
-      </nav>
-    </header>
+  <a class="tokn-skip" href="#main">Skip to content</a>
+  <header class="tokn-navbar tokn-site">
+    <tokn-navbar>
+      <div class="tokn-nav-inner">
+        <div class="tokn-nav-identity tokn-nav-has-product">
+          <a class="tokn-nav-brand" href="https://tokn-ai.dev/" aria-label="Tokn AI home">
+            <img class="tokn-nav-wordmark" src="./tokn-logo.svg" width="118" height="32" alt="">
+            <img class="tokn-nav-mark" src="./tokn-logo-icon.svg" width="32" height="32" alt="">
+          </a>
+          <span class="tokn-nav-divider" aria-hidden="true">/</span>
+          <a class="tokn-nav-product" href="./" aria-current="page">ctl</a>
+        </div>
+        <nav class="tokn-nav-desktop" aria-label="Main navigation">
+          <a href="#demo">Demo</a>
+          <a href="#features">Features</a>
+        </nav>
+        <div class="tokn-nav-utilities">
+          <a class="tokn-nav-repository" href="https://github.com/tokn-ai/ctl">GitHub <span aria-hidden="true">↗</span></a>
+          <a class="tokn-nav-action" href="https://github.com/tokn-ai/ctl/releases/latest">Download <span aria-hidden="true">↗</span></a>
+        </div>
+        <details class="tokn-nav-menu" data-nav-menu>
+          <summary><span>Menu</span><svg viewBox="0 0 20 20" width="18" height="18" fill="none" aria-hidden="true"><path d="M3 6h14M3 14h14" /></svg></summary>
+          <nav class="tokn-nav-panel" aria-label="Main navigation">
+            <a href="#demo">Demo</a>
+            <a href="#features">Features</a>
+            <a class="tokn-nav-mobile-repository" href="https://github.com/tokn-ai/ctl">GitHub <span aria-hidden="true">↗</span></a>
+            <a class="tokn-nav-action" href="https://github.com/tokn-ai/ctl/releases/latest">Download <span aria-hidden="true">↗</span></a>
+          </nav>
+        </details>
+      </div>
+    </tokn-navbar>
+  </header>
 
-    <main>
+  <div class="page">
+    <main id="main" tabindex="-1">
       <section class="hero" aria-labelledby="headline">
         <div class="intro">
           <h1 id="headline">A terminal that<br class="wide-break"> outlives its window<span>.</span></h1>

@@ -16,15 +16,13 @@
 body { margin: 0; }
 a { color: inherit; }
 a:focus-visible, video:focus-visible { outline: 3px solid #267247; outline-offset: 5px; }
+.tokn-navbar :is(.tokn-nav-brand, .tokn-nav-product) { min-inline-size: 44px; }
 .page { width: min(100% - 88px, 1160px); margin-inline: auto; }
-.masthead, footer { display: flex; align-items: center; justify-content: space-between; gap: 20px; }
-.masthead { min-height: 80px; border-bottom: 1px solid var(--line); }
+footer { display: flex; align-items: center; justify-content: space-between; gap: 20px; min-height: 76px; border-top: 1px solid var(--line); }
 .brand { display: inline-flex; align-items: center; gap: 9px; text-decoration: none; font-family: var(--mono); font-size: 25px; font-weight: 700; letter-spacing: -.09em; }
 .brand img { display: block; }
-nav { display: flex; align-items: center; gap: clamp(16px, 3vw, 32px); }
-nav a, footer > a:last-child { font-size: 14px; text-decoration: none; }
-nav a:hover, footer > a:last-child:hover { text-decoration: underline; text-underline-offset: 4px; }
-.repo { border: 1px solid var(--line); border-radius: 6px; padding: 9px 13px; }
+footer > a:last-child { font-size: 14px; text-decoration: none; }
+footer > a:last-child:hover { text-decoration: underline; text-underline-offset: 4px; }
 
 .hero { padding-top: clamp(42px, 7vw, 96px); }
 .intro { display: grid; grid-template-columns: minmax(0, 1fr) minmax(275px, .45fr); align-items: end; gap: 30px; margin-bottom: clamp(32px, 5vw, 58px); }
@@ -56,7 +54,6 @@ h1 span { color: #367948; }
 .feature-grid h3 { margin: 16px 0 7px; font-size: 20px; letter-spacing: -.03em; }
 .feature-grid p { margin: 0; color: var(--muted); font-size: 15px; line-height: 1.55; }
 .feature-grid a { display: inline-block; margin-top: 14px; font-size: 14px; text-underline-offset: 4px; }
-footer { min-height: 76px; border-top: 1px solid var(--line); }
 
 @media (max-width: 850px) {
   .intro { grid-template-columns: 1fr; gap: 20px; }
@@ -64,10 +61,6 @@ footer { min-height: 76px; border-top: 1px solid var(--line); }
 }
 @media (max-width: 560px) {
   .page { width: calc(100% - 36px); }
-  .masthead { min-height: 64px; }
-  nav { gap: 12px; }
-  nav a { font-size: 13px; }
-  .repo { padding: 7px; }
   .wide-break { display: none; }
   .feature-grid { grid-template-columns: 1fr; }
   .feature-grid article + article { border-left: 0; border-top: 1px solid var(--line); }

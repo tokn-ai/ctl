@@ -4,6 +4,8 @@
 //! authentication, host verification, proxying, and connection multiplexing
 //! belong to the user's OpenSSH installation and configuration.
 
+#[cfg(feature = "cli")]
+pub mod cli;
 pub mod component_status;
 pub mod component_update;
 pub mod components;

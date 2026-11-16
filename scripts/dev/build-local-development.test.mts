@@ -127,7 +127,9 @@ test("one native build snapshots all runtime commands and ctlup from Cargo's act
   assert.ok(build.args.includes("custom-profile"));
   assert.ok(build.args.includes("config with spaces.toml"));
   assert.ok(!build.args.includes("app-only"));
-  assert.deepEqual(build.args.flatMap((arg, index) => arg === "-p" ? [build.args[index + 1]] : []), [...agentCargoPackages]);
+  const packages = build.args.flatMap((arg, index) => arg === "-p" ? [build.args[index + 1]] : []);
+  assert.deepEqual(packages, [...agentCargoPackages]);
+  assert.ok(packages.includes("ctlup"), "the standalone updater is selected explicitly");
   for (const name of names) assert.equal(await readFile(join(result.binary_directory, name), "utf8"), `compiled ${name}:stripped`);
   for (const path of input.original_paths) assert.equal(await readFile(path, "utf8"), "concurrent Cargo replacement");
   assert.deepEqual(await readdir(input.home), []);

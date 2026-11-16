@@ -11,7 +11,7 @@ export function isLinuxBundleTarget(value: string): value is LinuxBundleTarget {
   return Object.hasOwn(machines, value);
 }
 
-// Keep the byte record encoding in sync with ctl-core/src/component/embedded.rs.
+// Keep the byte record encoding in sync with ctl/core/src/component/embedded.rs.
 const marker = Buffer.from("\0tokn-ctl-component\0\x01", "ascii");
 const decoder = new TextDecoder("utf-8", { fatal: true });
 

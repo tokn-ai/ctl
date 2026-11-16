@@ -16,6 +16,9 @@ The watch requires ctld 1.1.16; older contracts keep their existing quiet behavi
 starting it or discovering a replacement helper. CLI and desktop adapters keep
 their own availability and presentation rules.
 
+The opt-in `cli` feature exposes terminal adapters used by `ctl` and `ctlup`
+under `ctl_client::cli`.
+
 Part of [ctl and ctmux](https://github.com/tokn-ai/ctl). See the
 [repository documentation](https://github.com/tokn-ai/ctl#readme) for setup,
 platform support, and usage.

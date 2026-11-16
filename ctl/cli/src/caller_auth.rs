@@ -1,16 +1,12 @@
 //! Caller-owned credentials never enter ctld, saved-host storage or audit metadata.
-mod channel;
-mod host_trust;
 use crate::{Arguments, Command};
+use ctl_client::cli::caller_auth::{channel, has_controlling_terminal};
 use ctl_client::{
   caller_auth::{Authentication, Credential},
   hosts::ConnectionTargetDto,
 };
-use std::io::Write as _;
-use std::{io, path::PathBuf, sync::Arc};
+use std::{io, sync::Arc};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-
-pub const ASKPASS_MODE: &str = "CTL_CALLER_ASKPASS";
 
 pub fn claim(arguments: &mut Arguments) -> io::Result<()> {
   validate(arguments)?;
@@ -146,7 +142,7 @@ pub async fn prepare(
       credential,
       host_options,
       prompt_program: std::env::current_exe()?,
-      allow_host_key_confirmation: host_trust::has_controlling_terminal(),
+      allow_host_key_confirmation: has_controlling_terminal(),
     },
     task,
   })))
@@ -248,7 +244,7 @@ async fn query_config(target: &ConnectionTargetDto, defaults: bool) -> io::Resul
       "-o",
       "RemoteCommand=none",
     ])
-    .args(crate::connection::target_arguments(&ssh).map_err(io::Error::other)?)
+    .args(ctl_client::cli::connection::target_arguments(&ssh).map_err(io::Error::other)?)
     .arg("--")
     .arg(&ssh.destination)
     .stdin(std::process::Stdio::null())
@@ -281,53 +277,4 @@ async fn query_config(target: &ConnectionTargetDto, defaults: bool) -> io::Resul
     .await
     .map_err(|_| channel::invalid("SSH configuration lookup timed out"))??;
   String::from_utf8(output).map_err(|_| channel::invalid("Invalid SSH configuration output"))
-}
-
-pub async fn askpass() -> io::Result<()> {
-  let prompt = std::env::args().nth(1).unwrap_or_default();
-  // OpenSSH's first-use host prompt uses RP_ECHO, not the separate
-  // SSH_ASKPASS_PROMPT=confirm permission mechanism (e.g. security keys).
-  if std::env::var_os("SSH_ASKPASS_PROMPT").is_some() {
-    return Err(channel::invalid(
-      "This SSH authentication prompt is not supported with a supplied credential",
-    ));
-  }
-  if let Some(fingerprint) = host_trust::fingerprint(&prompt) {
-    if std::env::var("CTL_CALLER_CONFIRM_TTY").ok().as_deref() != Some("1") {
-      return Err(host_trust::terminal_required());
-    }
-    let response = host_trust::confirm(&prompt, fingerprint)?;
-    return writeln!(std::io::stdout().lock(), "{response}");
-  }
-  if prompt.starts_with("The authenticity of host '") {
-    return Err(channel::invalid(
-      "Unrecognized SSH host-key confirmation format; refusing to answer with a supplied credential",
-    ));
-  }
-  if !prompt.trim_end().ends_with("'s password:")
-    || prompt.contains(['\r', '\n'])
-    || std::env::var_os("CTL_CALLER_ENDPOINT").is_none()
-  {
-    return Err(channel::invalid(
-      "Only the supplied SSH credential may authenticate this connection; passphrase, PIN and other prompts are disabled",
-    ));
-  }
-  let endpoint = PathBuf::from(
-    std::env::var_os("CTL_CALLER_ENDPOINT")
-      .ok_or_else(|| channel::invalid("Missing askpass endpoint"))?,
-  );
-  let token =
-    std::env::var("CTL_CALLER_TOKEN").map_err(|_| channel::invalid("Missing askpass token"))?;
-  if token.len() != 36 {
-    return Err(channel::invalid("Invalid askpass token"));
-  }
-  #[cfg(unix)]
-  let mut stream = tokio::net::UnixStream::connect(endpoint).await?;
-  #[cfg(windows)]
-  let mut stream = tokio::net::windows::named_pipe::ClientOptions::new().open(endpoint)?;
-  stream.write_all(token.as_bytes()).await?;
-  let secret = channel::password(stream).await?;
-  let mut output = std::io::stdout().lock();
-  output.write_all(&secret)?;
-  output.write_all(b"\n")
 }

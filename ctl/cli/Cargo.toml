@@ -16,17 +16,12 @@ publish = ["crates-io"]
 name = "ctl"
 path = "src/main.rs"
 
-[[bin]]
-name = "ctlup"
-path = "src/ctlup.rs"
-
 [dependencies]
 time.workspace = true
 ctl-core = { workspace = true, features = ["observability", "presence"] }
 clap.workspace = true
 cliclack = "0.5.6"
-comfy-table.workspace = true
-ctl-client.workspace = true
+ctl-client = { workspace = true, features = ["cli"] }
 ctl-proto.workspace = true
 ctl-ipc.workspace = true
 dirs.workspace = true
@@ -45,35 +40,19 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["fs"] }
 url = "2.5.8"
 zeroize.workspace = true
-zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+
+[build-dependencies]
+ctl-core = { workspace = true, features = ["ctld-bundle-build"] }
 
 [dev-dependencies]
 rusqlite.workspace = true
 ctl-core = { workspace = true, features = ["test-fixtures"] }
 portable-pty.workspace = true
 unicode-width.workspace = true
-flate2 = "1.1.9"
-tar = { version = "0.4.46", default-features = false }
-
-[build-dependencies]
-ctl-core = { workspace = true, features = ["development"] }
-serde.workspace = true
-serde_json.workspace = true
-sha2.workspace = true
 
 [target.'cfg(unix)'.dependencies]
-rpassword.workspace = true
 rustix.workspace = true
-nix = { workspace = true, features = ["fs", "signal"] }
-filedescriptor = "0.8.3"
-
-[target.'cfg(target_os = "macos")'.dependencies]
-flate2 = "1.1.9"
-libproc = "0.14.11"
-tar = { version = "0.4.46", default-features = false }
-
-[target.'cfg(unix)'.build-dependencies]
-rustix.workspace = true
+nix = { workspace = true, features = ["signal"] }
 
 [target.'cfg(unix)'.dev-dependencies]
 avt.workspace = true

@@ -42,6 +42,8 @@ processes; its interactive tasks use ctmuxd's PTYs and normal ctmux attachments.
 
 ## Crate boundaries
 
+- `tokn-ctl-core`: shared component identity, storage paths, and installation
+  primitives for `ctl`, `ctmux`, `task`, and the apps. Its source lives in `ctl/core`.
 - `ctmux-process-info`: read-only, best-effort shell cwd and foreground-job inspection
   on macOS/Linux, independent of ctmux protocols, PTY ownership, and shell hooks.
 - `ctmux-proto`: versioned, platform-independent wire messages and framing.
@@ -57,7 +59,11 @@ processes; its interactive tasks use ctmuxd's PTYs and normal ctmux attachments.
   xterm rendering, viewport, and local scrollback.
 - `ctl-client`: local/SSH transport selector. Its remote path owns an OpenSSH
   child, invokes one fixed `ctl-agent connect` command, and exposes the resulting
-  byte stream to the selected control-domain client.
+  byte stream to the selected control-domain client. The opt-in `cli` feature
+  provides the host selection, SSH and VPN preparation, and terminal adapters
+  shared by `ctl` and `ctlup`.
+- `ctlup`: the installation and update manager for local and remote builds,
+  built from `ctl/updater`.
 - `ctl-agent`: per-connection SSH remote-command adapter for the fixed local ctmux
   data and task endpoints.
 - `ctl`: control router. `ctl ctmux` redirects the canonical ctmux command

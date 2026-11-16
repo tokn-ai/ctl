@@ -57,7 +57,7 @@ if ($runtimeVersion) {
 if ($LASTEXITCODE -ne 0) { throw "The native desktop build cancellation tests failed with exit code $LASTEXITCODE." }
 & cargo test --locked --target $Target -p ctl-client --lib desktop_storage::tests
 if ($LASTEXITCODE -ne 0) { throw "The native desktop storage tests failed with exit code $LASTEXITCODE." }
-& cargo test --locked --target $Target -p ctl-cli --lib updater::app
+& cargo test --locked --target $Target -p ctlup --lib updater::app
 if ($LASTEXITCODE -ne 0) { throw "The native desktop updater tests failed with exit code $LASTEXITCODE." }
 
 $previousArchive = [Environment]::GetEnvironmentVariable('CTLUP_TEST_DESKTOP_ARCHIVE', 'Process')
@@ -78,11 +78,11 @@ try {
     Remove-Item Env:CTLUP_TEST_DESKTOP_ARCHIVE -ErrorAction SilentlyContinue
     $fixture = 'updater::app::tests::local_source_install_and_repair_preserve_the_saved_channel'
   }
-  $available = & cargo test --locked --target $Target -p ctl-cli --lib $fixture -- --list
+  $available = & cargo test --locked --target $Target -p ctlup --lib $fixture -- --list
   if ($LASTEXITCODE -ne 0 -or @($available | Where-Object { $_ -ceq "${fixture}: test" }).Count -ne 1) {
     throw "The native desktop fixture is missing: $fixture."
   }
-  & cargo test --locked --target $Target -p ctl-cli --lib $fixture -- --ignored --exact --nocapture
+  & cargo test --locked --target $Target -p ctlup --lib $fixture -- --ignored --exact --nocapture
   if ($LASTEXITCODE -ne 0) { throw "The native desktop install/update/repair fixture failed with exit code $LASTEXITCODE." }
 } finally {
   if ($null -eq $previousArchive) {

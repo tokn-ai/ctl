@@ -52,6 +52,7 @@ Cargo package names and installed command names are intentionally separate:
 | Cargo package | Installed command |
 | --- | --- |
 | `ctl-cli` | `ctl` |
+| `ctlup` | `ctlup` |
 | `ctld` | `ctld` |
 | `ctl-agent` | `ctl-agent` |
 | `ctl-taskd` | `ctl-taskd` |
@@ -169,11 +170,11 @@ Rust 1.97 or newer is required. The Rust packages use the MIT license.
 See [Cargo publishing](docs/publishing.md) for package verification, installation,
 and the dependency order for the first crates.io release.
 
-After the packages and matching GitHub release are published, install the CLI
-and its local terminal/task companions on macOS:
+After the packages and matching GitHub release are published, install the CLI,
+updater, and local terminal/task companions on macOS:
 
 ```sh
-cargo install --locked ctl-cli ctmuxd ctl-taskd
+cargo install --locked ctl-cli ctlup ctmuxd ctl-taskd
 ctl setup
 ```
 
@@ -295,7 +296,7 @@ See [apps/tui](apps/tui/README.md) for controls and shared-view behavior.
 For the Windows local CLI and daemon slice:
 
 ```sh
-cargo build -p ctl-cli -p ctl-agent -p ctl-taskd -p ctmux-cli -p ctmuxd
+cargo build -p ctl-cli -p ctlup -p ctl-agent -p ctl-taskd -p ctmux-cli -p ctmuxd
 ```
 
 The `ctmux` and `ctmuxd` binaries must be installed beside one another, or
@@ -318,11 +319,12 @@ cargo install --path ctl/agent
 cargo install --path ctl/daemon
 ```
 
-On a Linux client, install `ctl` and `ctld` together from the checkout:
+On a Linux client, install `ctl`, `ctld`, and `ctlup` from the checkout:
 
 ```sh
 cargo install --path ctl/daemon
 cargo install --path ctl/cli
+cargo install --path ctl/updater
 ```
 
 For the official signed macOS helper, use the published CLI installation and
@@ -437,7 +439,7 @@ while running.
 
 On macOS and Linux, `ctmuxd` observes the managed shell's physical cwd and
 foreground job on a background worker, including while detached. The reusable
-[`ctmux-process-info`](ctmux-process-info/README.md) crate reads OS process metadata without
+[`ctmux-process-info`](ctmux/process-info/README.md) crate reads OS process metadata without
 shell hooks, arguments, environment, or dotfile changes. Unavailable information
 stays unknown; a process name is not a command line or prompt-state report.
 

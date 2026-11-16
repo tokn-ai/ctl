@@ -6,7 +6,7 @@ WORKDIR /workspace
 COPY . .
 RUN --mount=type=cache,id=ctmux-cargo-registry,target=/usr/local/cargo/registry \
   --mount=type=cache,id=ctmux-cargo-target,target=/workspace/target \
-  cargo build --locked --release -p ctl-agent -p ctl-cli -p ctmux-cli -p ctmuxd -p ctl-taskd -p ctld \
+  cargo build --locked --release -p ctl-agent -p ctl-cli -p ctmux-cli -p ctmuxd -p ctl-taskd -p ctld -p ctlup \
   && install -D -m 0755 /workspace/target/release/ctl-agent /out/ctl-agent \
   && install -D -m 0755 /workspace/target/release/ctl /out/ctl \
   && install -D -m 0755 /workspace/target/release/ctlup /out/ctlup \

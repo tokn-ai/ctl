@@ -189,16 +189,15 @@ Once the packages are published:
 
 ```sh
 # macOS: install the matching signed helper from its published GitHub release.
-cargo install --locked ctl-cli ctmuxd ctl-taskd
+cargo install --locked ctl-cli ctlup ctmuxd ctl-taskd
 ctl setup
 
 # Other Unix and Windows clients.
-cargo install --locked ctl-cli ctld ctmuxd ctl-taskd
+cargo install --locked ctl-cli ctlup ctld ctmuxd ctl-taskd
 ```
 
-The `ctl-cli` package installs both `ctl` and the standalone installation manager
-`ctlup`. Cargo installs only the selected packages' executables. `ctld`, `ctmuxd`, and
-`ctl-taskd` are companion daemons and must be installed separately from `ctl-cli`.
+The `ctl-cli` package installs `ctl`. The separate `ctlup` package installs the
+installation manager. `ctld`, `ctmuxd`, and `ctl-taskd` each have their own packages.
 Keep terminal/task companion versions aligned with the CLI. These daemons should
 share the CLI's binary directory; `ctl setup` installs the macOS helper under
 `~/.tokn/ctl/components/ctld/` after verifying the complete signed app bundle.

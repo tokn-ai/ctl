@@ -1,28 +1,23 @@
 mod bundled;
 mod caller_auth;
 mod commands;
-mod component_info;
 mod components;
 mod connection;
 mod history;
 mod host;
-mod openssh;
 mod passwords;
 mod port;
 mod remote;
 mod setup;
 mod skill;
-mod ssh_broker;
-mod table;
-mod target;
-mod updater;
 mod vpn;
 mod who;
 
 #[doc(hidden)]
 pub use component_info::CONTRACTS as COMPONENT_CONTRACTS;
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
+use ctl_client::cli::{RemotePlatform, component_info, openssh, ssh_broker, table, target};
 use ctl_task_cli::Command as TaskCommand;
 use ctmux_cli::Command as CtmuxCommand;
 
@@ -88,21 +83,6 @@ struct Arguments {
 impl Arguments {
   fn has_remote_target(&self) -> bool {
     self.host.is_some() || self.destination.is_some()
-  }
-}
-
-#[derive(Debug, Clone, Copy, ValueEnum)]
-enum RemotePlatform {
-  Unix,
-  Windows,
-}
-
-impl From<RemotePlatform> for ctl_client::RemotePlatform {
-  fn from(platform: RemotePlatform) -> Self {
-    match platform {
-      RemotePlatform::Unix => Self::Unix,
-      RemotePlatform::Windows => Self::Windows,
-    }
   }
 }
 
@@ -209,27 +189,23 @@ enum TaskdCommand {
 
 /// Runs the runtime CLI entry point.
 pub fn run() {
-  // Claim caller descriptors before Tokio allocates internal descriptors. An
-  // invalid inherited FD must never accidentally select a runtime-owned socket.
-  let arguments = if std::env::var_os(caller_auth::ASKPASS_MODE).is_some()
-    || std::env::var_os(openssh::SCP_TRANSPORT_ENV).is_some()
-  {
-    None
-  } else {
-    let mut arguments = Arguments::parse();
-    if matches!(arguments.command, Command::ComponentInfo) {
-      if let Err(error) = component_info::print() {
-        eprintln!("ctl: {error}");
-        std::process::exit(1);
-      }
-      return;
-    }
-    if let Err(error) = caller_auth::claim(&mut arguments) {
+  if let Some(code) = openssh::run_transport_helper(bundled::register) {
+    std::process::exit(code);
+  }
+  let mut arguments = Arguments::parse();
+  if matches!(arguments.command, Command::ComponentInfo) {
+    if let Err(error) = component_info::print() {
       eprintln!("ctl: {error}");
       std::process::exit(1);
     }
-    Some(arguments)
-  };
+    return;
+  }
+  // Claim caller descriptors before Tokio allocates internal descriptors. An
+  // invalid inherited FD must never accidentally select a runtime-owned socket.
+  if let Err(error) = caller_auth::claim(&mut arguments) {
+    eprintln!("ctl: {error}");
+    std::process::exit(1);
+  }
   let installation = ctl_core::installations::lease_current_executable().unwrap_or_else(|error| {
     eprintln!("ctl: could not retain its installation: {error}");
     std::process::exit(1);
@@ -248,41 +224,12 @@ pub fn run() {
   std::process::exit(code);
 }
 
-/// Runs the standalone installation manager entry point.
-pub fn run_updater() {
-  if std::env::var_os(caller_auth::ASKPASS_MODE).is_some()
-    || std::env::var_os(openssh::SCP_TRANSPORT_ENV).is_some()
-  {
-    run();
-    return;
-  }
-  updater::main();
-}
-
-async fn run_main(arguments: Option<Arguments>) -> i32 {
-  if std::env::var_os(caller_auth::ASKPASS_MODE).is_some() {
-    return match caller_auth::askpass().await {
-      Ok(()) => 0,
-      Err(error) => {
-        eprintln!("ctl: {error}");
-        1
-      }
-    };
-  }
+async fn run_main(arguments: Arguments) -> i32 {
   if let Err(error) = bundled::register() {
     eprintln!("ctl: {error}");
     return 1;
   }
-  let result = if std::env::var_os(openssh::SCP_TRANSPORT_ENV).is_some() {
-    openssh::run_ssh(
-      std::env::args_os().skip(1).collect(),
-      std::env::var("CTL_SCP_METHOD").ok().as_deref(),
-    )
-    .await
-    .map_err(commands::CliError::from)
-  } else {
-    commands::run(arguments.expect("ordinary invocations have parsed arguments")).await
-  };
+  let result = commands::run(arguments).await;
   match result {
     Ok(code) => code,
     Err(error) => {

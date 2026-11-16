@@ -48,7 +48,7 @@ export async function prepareDevelopment(cargo_args: string[], cwd: string, envi
   const build_args = withoutTarget(selectDaemonBuildArguments(cargo_args));
   const output = await run("cargo", [
     "build", ...(build_args.includes("--locked") || build_args.includes("--frozen") ? [] : ["--locked"]), ...build_args,
-    "--target", host, "--package", "ctl-cli", "--bin", "ctlup", "--message-format=json-render-diagnostics",
+    "--target", host, "--package", "ctlup", "--bin", "ctlup", "--message-format=json-render-diagnostics",
   ], cwd, env);
   const artifact = updaterArtifact(output, cwd);
   const temporary = await mkdtemp(path.join(path.dirname(artifact), ".ctlup-bootstrap-"));

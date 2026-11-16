@@ -48,6 +48,7 @@ test("bootstrap builds only the native manager, preserving original Cargo settin
     assert.equal(build[build.indexOf("--target") + 1], "fixture-host");
     assert.equal(build[build.indexOf("--target-dir") + 1], "custom output");
     assert.equal(build[build.indexOf("--config") + 1], "relative.toml");
+    assert.equal(build[build.indexOf("--package") + 1], "ctlup");
     assert.equal(build[build.indexOf("--bin") + 1], "ctlup");
     const manager_call = JSON.parse((await readFile(data.manager_log, "utf8")).trim()) as { args: string[]; cwd: string; executable: string };
     assert.deepEqual(JSON.parse(manager_call.args[manager_call.args.indexOf("--cargo-args-json") + 1]!), cargo_args);

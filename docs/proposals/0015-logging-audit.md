@@ -96,5 +96,5 @@ remote aggregation require separate designs if pursued.
 ## Detailed specifications
 
 - [Logging, privacy, retention, and failure behavior](../logging-audit.md)
-- [Recorder implementation](../../ctl-core/src/observability.rs)
+- [Recorder implementation](../../ctl/core/src/observability.rs)
 - [Protocol/storage version separation](../protocol-versioning.md)

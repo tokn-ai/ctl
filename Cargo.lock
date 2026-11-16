@@ -715,7 +715,6 @@ version = "0.1.3"
 dependencies = [
  "clap",
  "cliclack",
- "comfy-table",
  "ctl-client",
  "ctl-ipc",
  "ctl-proto",
@@ -731,12 +730,45 @@ dependencies = [
  "ctmuxd",
  "dirs 6.0.0",
  "filedescriptor",
- "flate2",
- "libproc",
  "nix 0.29.0",
  "portable-pty",
- "rpassword",
  "rusqlite",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.20",
+ "time",
+ "tokio",
+ "tokn-ctl-core",
+ "unicode-width 0.1.14",
+ "url",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
+name = "ctl-client"
+version = "0.1.3"
+dependencies = [
+ "base64 0.22.1",
+ "clap",
+ "comfy-table",
+ "ctl-ipc",
+ "ctl-proto",
+ "ctl-task-client",
+ "ctl-task-ipc",
+ "ctl-task-proto",
+ "ctmux-ipc",
+ "ctmux-proto",
+ "dirs 6.0.0",
+ "filedescriptor",
+ "flate2",
+ "glob",
+ "nix 0.29.0",
+ "process-wrap",
+ "reqwest",
+ "rpassword",
  "rustix",
  "serde",
  "serde_json",
@@ -747,38 +779,6 @@ dependencies = [
  "tokio",
  "tokn-ctl-core",
  "unicode-width 0.1.14",
- "url",
- "uuid",
- "zeroize",
- "zip",
-]
-
-[[package]]
-name = "ctl-client"
-version = "0.1.3"
-dependencies = [
- "base64 0.22.1",
- "ctl-ipc",
- "ctl-proto",
- "ctl-task-client",
- "ctl-task-ipc",
- "ctl-task-proto",
- "ctmux-ipc",
- "ctmux-proto",
- "dirs 6.0.0",
- "flate2",
- "glob",
- "process-wrap",
- "reqwest",
- "rustix",
- "serde",
- "serde_json",
- "sha2",
- "tar",
- "thiserror 2.0.20",
- "time",
- "tokio",
- "tokn-ctl-core",
  "uuid",
  "zeroize",
 ]
@@ -960,6 +960,31 @@ dependencies = [
  "uuid",
  "windows",
  "zeroize",
+]
+
+[[package]]
+name = "ctlup"
+version = "0.1.3"
+dependencies = [
+ "clap",
+ "ctl-client",
+ "ctl-ipc",
+ "ctl-proto",
+ "ctl-task-proto",
+ "ctmux-ipc",
+ "ctmux-proto",
+ "dirs 6.0.0",
+ "flate2",
+ "libproc",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tar",
+ "tokio",
+ "tokn-ctl-core",
+ "uuid",
+ "zip",
 ]
 
 [[package]]

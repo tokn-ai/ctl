@@ -134,7 +134,7 @@ jobs:
       - name: Build remote components
         run: >-
           cargo build --locked --release --target ${{ matrix.target }}
-          -p ctl-agent -p ctmuxd -p ctl-taskd -p ctld -p ctl-cli -p ctmux-cli
+          -p ctl-agent -p ctmuxd -p ctl-taskd -p ctld -p ctl-cli -p ctmux-cli -p ctlup
 
       - name: Package remote components
         shell: bash
@@ -188,7 +188,7 @@ jobs:
       - name: Build Windows components
         run: >-
           cargo build --locked --release --target x86_64-pc-windows-msvc
-          -p ctl-agent -p ctmuxd -p ctl-taskd -p ctld -p ctl-cli -p ctmux-cli
+          -p ctl-agent -p ctmuxd -p ctl-taskd -p ctld -p ctl-cli -p ctmux-cli -p ctlup
 
       - name: Package Windows components
         shell: pwsh
@@ -890,7 +890,7 @@ jobs:
 
       - name: Build native desktop companions and updater
         run: |
-          cargo build --locked --release --target '${{ matrix.target }}' -p ctld -p ctmuxd -p ctl-taskd -p ctl-cli
+          cargo build --locked --release --target '${{ matrix.target }}' -p ctld -p ctmuxd -p ctl-taskd -p ctl-cli -p ctlup
           if ($LASTEXITCODE -ne 0) { throw 'Native companion build failed.' }
           New-Item -ItemType Directory -Force apps/desktop/src-tauri/binaries | Out-Null
           foreach ($component in @('ctld', 'ctmuxd', 'ctl-taskd')) {

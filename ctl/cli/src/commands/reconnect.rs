@@ -1,5 +1,6 @@
 //! Reconnect policy includes the VPN and broker prerequisites of an attachment.
 
+use ctl_client::cli::vpn_runtime;
 use ctl_core::connection::is_transient_io_error;
 use ctl_ipc::{CodecError, ConnectError};
 
@@ -32,11 +33,7 @@ pub(super) fn is_authentication_required(_error: &CtlConnectError) -> bool {
 #[cfg(unix)]
 fn target_requires_authentication(error: &crate::target::Error) -> bool {
   match error {
-    crate::target::Error::Runtime(crate::vpn::Error::Preparation(error)) => {
-      target_requires_authentication(error)
-    }
-    crate::target::Error::Runtime(crate::vpn::Error::Broker(error))
-    | crate::target::Error::Broker(error) => broker_requires_authentication(error),
+    crate::target::Error::Broker(error) => broker_requires_authentication(error),
     _ => false,
   }
 }
@@ -49,22 +46,14 @@ fn broker_requires_authentication(error: &crate::ssh_broker::Error) -> bool {
 fn target_is_retryable(error: &crate::target::Error) -> bool {
   match error {
     crate::target::Error::Connect(error) => connect_is_retryable(error),
-    crate::target::Error::Vpn(error) => local_vpn_is_retryable(error),
-    crate::target::Error::Runtime(error) => vpn_is_retryable(error),
+    crate::target::Error::Runtime(vpn_runtime::Error::Local(error)) => {
+      local_vpn_is_retryable(error)
+    }
+    crate::target::Error::Runtime(vpn_runtime::Error::Remote(error)) => {
+      error.is_retryable_connection()
+    }
     #[cfg(unix)]
     crate::target::Error::Broker(error) => broker_is_retryable(error),
-    _ => false,
-  }
-}
-
-fn vpn_is_retryable(error: &crate::vpn::Error) -> bool {
-  match error {
-    crate::vpn::Error::Remote(error) => error.is_retryable_connection(),
-    #[cfg(unix)]
-    crate::vpn::Error::Preparation(error) => target_is_retryable(error),
-    crate::vpn::Error::Vpn(error) => local_vpn_is_retryable(error),
-    #[cfg(unix)]
-    crate::vpn::Error::Broker(error) => broker_is_retryable(error),
     _ => false,
   }
 }

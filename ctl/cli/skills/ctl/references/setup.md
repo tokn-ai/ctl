@@ -52,7 +52,7 @@ The manager is distributed separately. To upgrade it, run a fresh downloaded
 For an authorized published CLI setup on macOS:
 
 ```sh
-cargo install --locked ctl-cli ctmuxd ctl-taskd
+cargo install --locked ctl-cli ctlup ctmuxd ctl-taskd
 ctl setup
 ```
 
@@ -94,7 +94,7 @@ checkout helper before shared discovery; release builds use shared discovery.
 When working from the ctl source checkout, a local CLI/service build is:
 
 ```sh
-cargo build -p ctl-cli -p ctmux-cli -p ctld -p ctmuxd -p ctl-taskd -p ctl-agent
+cargo build -p ctl-cli -p ctlup -p ctmux-cli -p ctld -p ctmuxd -p ctl-taskd -p ctl-agent
 ./target/debug/ctl --help
 ```
 

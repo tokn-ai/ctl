@@ -25,15 +25,7 @@ fn main() {
   let revision = git(&["rev-parse", "HEAD"]).unwrap_or_default();
   println!("cargo:rustc-env=CTMUX_SOURCE_REVISION={revision}");
   let root = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("../../..");
-  for path in [
-    "ctl",
-    "ctmux",
-    "task",
-    "ctl-core",
-    "ctmux-process-info",
-    "Cargo.toml",
-    "Cargo.lock",
-  ] {
+  for path in ["ctl", "ctmux", "task", "Cargo.toml", "Cargo.lock"] {
     println!("cargo:rerun-if-changed={}", root.join(path).display());
   }
   let dirty = git(&[
@@ -44,8 +36,6 @@ fn main() {
     "../../../ctl",
     "../../../ctmux",
     "../../../task",
-    "../../../ctl-core",
-    "../../../ctmux-process-info",
     "../../../Cargo.toml",
     "../../../Cargo.lock",
   ])

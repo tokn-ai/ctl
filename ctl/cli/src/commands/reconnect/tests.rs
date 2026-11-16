@@ -21,9 +21,11 @@ fn retryable(error: &CtlConnectError) -> bool {
 }
 
 fn remote_vpn(error: ctl_ipc::remote_vpn::Error) -> CtlConnectError {
-  CtlConnectError::Target(crate::target::Error::Runtime(crate::vpn::Error::Remote(
-    error,
-  )))
+  CtlConnectError::Target(crate::target::Error::Runtime(error.into()))
+}
+
+fn local_vpn(error: ctl_ipc::vpn::VpnError) -> CtlConnectError {
+  CtlConnectError::Target(crate::target::Error::Runtime(error.into()))
 }
 
 #[test]
@@ -45,14 +47,6 @@ fn remote_vpn_prerequisite_interruptions_keep_the_attachment_reconnect_loop_aliv
   assert!(retryable(&remote_vpn(ctl_ipc::remote_vpn::Error::Codec(
     CodecError::Io(ErrorKind::UnexpectedEof.into()),
   ))));
-  #[cfg(unix)]
-  assert!(retryable(&CtlConnectError::Target(
-    crate::target::Error::Runtime(crate::vpn::Error::Preparation(Box::new(
-      crate::target::Error::Runtime(crate::vpn::Error::Remote(
-        ctl_ipc::remote_vpn::Error::Timeout,
-      )),
-    ))),
-  )));
 }
 
 #[test]
@@ -110,9 +104,7 @@ fn broker_restart_and_transport_failures_can_recover_without_hiding_authenticati
     ))),
   )));
   assert!(retryable(&CtlConnectError::Target(
-    crate::target::Error::Runtime(crate::vpn::Error::Broker(
-      crate::ssh_broker::Error::ConnectionClosed,
-    )),
+    crate::target::Error::Broker(crate::ssh_broker::Error::ConnectionClosed),
   )));
   for code in ["ssh_timeout", "ssh_connection_failed"] {
     assert!(retryable(&CtlConnectError::Broker(
@@ -159,30 +151,24 @@ fn inconclusive_master_observations_retry_without_becoming_authentication() {
     });
     assert!(retryable(&direct));
     assert!(!is_authentication_required(&direct));
-    let nested = CtlConnectError::Target(crate::target::Error::Runtime(
-      crate::vpn::Error::Preparation(Box::new(crate::target::Error::Broker(
-        crate::ssh_broker::Error::Daemon {
-          code: "ssh_status_unknown".into(),
-          message: message.into(),
-        },
-      ))),
+    let route = CtlConnectError::Target(crate::target::Error::Broker(
+      crate::ssh_broker::Error::Daemon {
+        code: "ssh_status_unknown".into(),
+        message: message.into(),
+      },
     ));
-    assert!(retryable(&nested));
-    assert!(!is_authentication_required(&nested));
+    assert!(retryable(&route));
+    assert!(!is_authentication_required(&route));
   }
 }
 
 #[test]
 fn local_vpn_transport_interruptions_follow_the_same_reconnect_policy() {
-  assert!(retryable(&CtlConnectError::Target(
-    crate::target::Error::Vpn(ctl_ipc::vpn::VpnError::Codec(CodecError::Io(
-      ErrorKind::UnexpectedEof.into(),
-    ))),
-  )));
-  assert!(!retryable(&CtlConnectError::Target(
-    crate::target::Error::Vpn(ctl_ipc::vpn::VpnError::InvalidConnection(
-      "Invalid saved VPN".into(),
-    )),
+  assert!(retryable(&local_vpn(ctl_ipc::vpn::VpnError::Codec(
+    CodecError::Io(ErrorKind::UnexpectedEof.into()),
+  ))));
+  assert!(!retryable(&local_vpn(
+    ctl_ipc::vpn::VpnError::InvalidConnection("Invalid saved VPN".into()),
   )));
 }
 
@@ -193,9 +179,7 @@ fn recovery_authorization_resumes_only_typed_ssh_authentication_blockers() {
     crate::ssh_broker::Error::AuthenticationRequired,
   )));
   assert!(is_authentication_required(&CtlConnectError::Target(
-    crate::target::Error::Runtime(crate::vpn::Error::Preparation(Box::new(
-      crate::target::Error::Broker(crate::ssh_broker::Error::AuthenticationRequired),
-    ))),
+    crate::target::Error::Broker(crate::ssh_broker::Error::AuthenticationRequired),
   )));
   for code in [
     "ssh_authentication_failed",

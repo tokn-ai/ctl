@@ -15,7 +15,7 @@ ctlup dev --profile release --target-dir target
 ```
 
 On Windows x64, bootstrap from the MSVC checkout with
-`cargo run -p ctl-cli --bin ctlup -- dev`. The builder requires Node 24 and
+`cargo run -p ctlup -- dev`. The builder requires Node 24 and
 uses the configured native Rust toolchain. It writes `.exe` files into the
 same managed installation store.
 

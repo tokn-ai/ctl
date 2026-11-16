@@ -55,6 +55,24 @@ impl Drop for Fixture {
   }
 }
 
+#[cfg(unix)]
+#[test]
+fn runtime_cli_redirects_installation_commands_without_writing_files() {
+  let _guard = ctl_core::test_fixtures::ProcessGuard::acquire_blocking();
+  let fixture = Fixture::new();
+  let output = fixture
+    .command(&["components", "update", "--from", "/missing-build"])
+    .output()
+    .unwrap();
+  assert!(!output.status.success());
+  assert!(
+    String::from_utf8_lossy(&output.stderr)
+      .to_lowercase()
+      .contains("use ctlup")
+  );
+  fixture.assert_untouched();
+}
+
 #[test]
 fn status_preserves_absent_owners_and_reports_missing_replacements_individually() {
   let _guard = ctl_core::test_fixtures::ProcessGuard::acquire_blocking();

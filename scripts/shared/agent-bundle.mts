@@ -16,7 +16,8 @@ export const isAgentTarget = (target: string): boolean => target === windowsAgen
 export const executableName = (name: string, target: string): string => target === windowsAgentTarget ? `${name}.exe` : name;
 const serviceComponents = ["ctl-agent", "ctmuxd", "ctl-taskd", "ctld"] as const;
 export const agentComponents = [...serviceComponents, "ctl", "ctmux"] as const;
-export const agentCargoPackages = [...serviceComponents, "ctl-cli", "ctmux-cli"] as const;
+// The build also emits ctlup as a separate artifact from the runtime archive.
+export const agentCargoPackages = [...serviceComponents, "ctl-cli", "ctmux-cli", "ctlup"] as const;
 type MetadataSchema = 2 | 3;
 type ComponentName = typeof agentComponents[number];
 type BundledEntries<T> = Record<typeof serviceComponents[number], T> & Partial<Record<"ctl" | "ctmux", T>>;

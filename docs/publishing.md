@@ -67,6 +67,7 @@ ctl-agent
 ctmux-cli
 ctl-task-cli
 ctl-cli
+ctlup
 ```
 
 This order covers target-specific and development dependencies as well as normal
@@ -86,12 +87,12 @@ family locally. Do not bypass verification with `--no-verify` when publishing.
 After publication, install the required companion executables explicitly:
 
 ```sh
-# macOS client: ctl, terminal/task daemons, then the signed connection helper.
-cargo install --locked ctl-cli ctmuxd ctl-taskd
+# macOS client: ctl, updater, terminal/task daemons, then the signed connection helper.
+cargo install --locked ctl-cli ctlup ctmuxd ctl-taskd
 ctl setup
 
-# Other Unix clients: source-built connection, terminal, and task daemons.
-cargo install --locked ctl-cli ctld ctmuxd ctl-taskd
+# Other Unix clients: ctl, updater, and source-built connection, terminal, and task daemons.
+cargo install --locked ctl-cli ctlup ctld ctmuxd ctl-taskd
 
 # Remote machine: SSH gateway plus persistent terminal and task daemons.
 cargo install --locked ctl-agent ctmuxd ctl-taskd

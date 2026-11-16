@@ -1,12 +1,18 @@
 use clap::Subcommand;
+#[cfg(unix)]
 use clap::ValueEnum;
+use ctl_client::cli::Channel;
 use std::io;
 #[cfg(unix)]
 use std::path::PathBuf;
 
 mod maintenance;
 #[cfg(unix)]
-pub use crate::updater::update::UpdatePackage;
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum UpdatePackage {
+  CtlAgent,
+  FullBundle,
+}
 
 #[derive(Clone, Copy)]
 pub(crate) struct TargetOptions<'a> {
@@ -28,20 +34,6 @@ pub enum Origin {
   Ci,
   Release,
 }
-#[derive(Debug, Clone, Copy, ValueEnum)]
-pub enum Channel {
-  Nightly,
-  Stable,
-}
-impl From<Channel> for ctl_core::component_update::BundleChannel {
-  fn from(value: Channel) -> Self {
-    match value {
-      Channel::Nightly => Self::Nightly,
-      Channel::Stable => Self::Stable,
-    }
-  }
-}
-
 #[derive(Debug, Subcommand)]
 pub enum Command {
   /// Check published channel metadata without downloading or installing components.

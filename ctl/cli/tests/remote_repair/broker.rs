@@ -4,20 +4,14 @@ use super::*;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::task::{JoinHandle, JoinSet};
 
-pub(super) fn spawn(
-  fixture: &Fixture,
-  failure: Option<&'static str>,
-) -> JoinHandle<ctl_ipc::SshTarget> {
+pub(super) fn spawn(fixture: &Fixture, failure: &'static str) -> JoinHandle<ctl_ipc::SshTarget> {
   let listener = UnixListener::bind(fixture.0.join("ctld.sock")).unwrap();
   let directory = fixture.0.clone();
   tokio::spawn(async move {
     tokio::time::timeout(Duration::from_secs(20), async {
       let (mut control, _) = listener.accept().await.unwrap();
       handshake(&mut control).await;
-      let target = master(&mut control, &directory, failure.is_some()).await;
-      let Some(failure) = failure else {
-        return target;
-      };
+      let target = master(&mut control, &directory).await;
       let mut services = JoinSet::new();
       let mut count = 0;
       loop {
@@ -65,30 +59,20 @@ async fn handshake(stream: &mut UnixStream) {
   .unwrap();
 }
 
-async fn master(
-  stream: &mut UnixStream,
-  directory: &std::path::Path,
-  observe: bool,
-) -> ctl_ipc::SshTarget {
-  let observed = if observe {
-    let Some(ClientMessage::MasterStatus { target }) = ctl_ipc::read_frame(stream).await.unwrap()
-    else {
-      panic!("expected a passive managed master observation");
-    };
-    ctl_ipc::write_frame(stream, &ServerMessage::AuthenticationRequired)
-      .await
-      .unwrap();
-    Some(target)
-  } else {
-    None
+async fn master(stream: &mut UnixStream, directory: &std::path::Path) -> ctl_ipc::SshTarget {
+  let Some(ClientMessage::MasterStatus { target: observed }) =
+    ctl_ipc::read_frame(stream).await.unwrap()
+  else {
+    panic!("expected a passive managed master observation");
   };
+  ctl_ipc::write_frame(stream, &ServerMessage::AuthenticationRequired)
+    .await
+    .unwrap();
   let Some(ClientMessage::EnsureMaster { target }) = ctl_ipc::read_frame(stream).await.unwrap()
   else {
     panic!("expected one managed master request");
   };
-  if let Some(observed) = observed {
-    assert_eq!(target, observed);
-  }
+  assert_eq!(target, observed);
   ctl_ipc::write_frame(
     stream,
     &ServerMessage::MasterReady {

@@ -13,8 +13,13 @@ publish = ["crates-io"]
 # Repository deployment fixture; the Docker wrapper is not part of this crate.
 exclude = ["tests/forced_command.rs"]
 
+[features]
+cli = ["dep:clap", "dep:comfy-table", "dep:filedescriptor", "dep:nix", "dep:rpassword"]
+
 [dependencies]
 base64.workspace = true
+clap = { workspace = true, optional = true }
+comfy-table = { workspace = true, optional = true }
 ctl-core = { workspace = true, features = ["executable", "presence"] }
 dirs.workspace = true
 glob.workspace = true
@@ -41,12 +46,16 @@ tar = { version = "0.4.46", default-features = false }
 [dev-dependencies]
 ctl-core = { workspace = true, features = ["test-fixtures"] }
 serde_json.workspace = true
+unicode-width.workspace = true
 
 [target.'cfg(all(target_os = "linux", target_env = "musl"))'.dependencies]
 # Portable remote clients link OpenSSL for the target and load the account's system CA store at runtime.
 reqwest = { version = "0.13.4", default-features = false, features = ["native-tls-vendored"] }
 
 [target.'cfg(unix)'.dependencies]
+filedescriptor = { version = "0.8.3", optional = true }
+nix = { workspace = true, optional = true }
+rpassword = { workspace = true, optional = true }
 rustix.workspace = true
 
 [target.'cfg(windows)'.dependencies]

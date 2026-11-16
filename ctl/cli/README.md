@@ -228,8 +228,9 @@ to `PATH`. Installation preserves the user's login shell configuration.
 If a Unix host needs a component update, `ctl` prints a `ctlup update`
 command for the selected host or SSH alias. Run it and
 then reconnect. The updater verifies any saved machine ID and downloads the
-runtime and updater from the same publication. Use `--working-tree` to build
-for Linux x64 or ARM64 from a checkout, or `--from` for supplied build files.
+runtime and updater from the same publication. Use `ctlup dev --host NAME`
+to build a checkout for Linux x64 or ARM64 and install it on a saved host.
+Use `ctlup update --from` for supplied build files.
 Windows x64 SSH hosts also support managed installation; use
 `ctlup update --destination ALIAS --remote-platform windows` for a temporary
 destination. Windows ARM64 currently supports portable desktop installation,
@@ -334,19 +335,20 @@ ctlup prune
 
 `--from` supplies a complete build directory or archive for an explicit offline
 installation. Use `--local-build` for native binaries; local macOS builds also
-require `--ctld-package` with the signed app and its receipt. Automatic updates
-resolve the configured publication channel, or build a development Linux x64
-working tree locally. Explicit `--channel` chooses a published source and records
-the choice after success. Foreign-target artifacts are deployment cache entries,
+require `--ctld-package` with the signed app and its receipt. Automatic remote
+updates resolve the configured publication channel. Explicit `--channel`
+chooses a published source and records the choice after success. Foreign-target
+artifacts are deployment cache entries,
 with no separate upload selection. Agent-only overlays and `--selected` are not
 part of the updater. Old `ctl components` installation commands report a hint to
 use `ctlup` without changing files. See the
 [component update guide](https://github.com/tokn-ai/ctl/blob/main/docs/component-updates.md)
 for source formats, cancellation, and per-host results.
 
-Use `ctlup app install` and `ctlup app update` for the local ctmux desktop app
-on macOS, Linux and Windows (native x64 or ARM64). Both accept `--local` and `--channel stable|nightly`.
-`--local` builds from the current source checkout and conflicts with `--channel`.
+Use `ctlup app install` and `ctlup app update` for the published ctmux desktop
+app on macOS, Linux and Windows (native x64 or ARM64). Both accept
+`--channel stable|nightly`. Use `ctlup dev --app` to build and install the app
+from the current source checkout.
 Published installs use the saved runtime bundle channel preference and remember
 an explicit channel after success. Nightly desktop downloads require
 authenticated `gh` access to the Actions artifact for the selected source revision. See the

@@ -248,7 +248,8 @@ For native GUI development, run `pnpm desktop:dev`. On macOS and Linux its
 launcher delegates each native preparation to `ctlup dev`, including macOS
 signing, and preserves running services. The macOS worktree daemon also survives
 app reloads. A separate `ctld:build` is unnecessary. Windows uses ordinary native
-Tauri development.
+Tauri development. Use `ctlup dev --app` to build and install the desktop app
+from your checkout.
 
 `pnpm ctld:build` bootstraps `ctlup` and delegates to the same native builder.
 It builds all six runtime commands and the manager from one source identity,
@@ -347,18 +348,17 @@ pnpm install
 pnpm desktop:dev
 ```
 
-Linux x64 remote updates from a development checkout build and package the
-working tree locally, including uncommitted changes. To prepare that bundle
-explicitly, start Docker or Podman and run:
+Use `ctlup dev --host NAME` to build the current checkout and install it on a
+Linux x64 or ARM64 host. To prepare a bundle for a later install, run:
 
 ```sh
 pnpm bundles:build
 ```
 
-Other remote targets follow the configured publication channel. Explicit
-`--channel nightly` or the app's **Nightly** source downloads the published
-`main` build, including for Linux x64. `pnpm bundles:sync` remains available for
-packaging and offline selection. See [local bundles](docs/local-bundles.md).
+`ctlup update` resolves the configured publication channel. Choose
+`--channel nightly` or the app's **Nightly** source to download the published
+`main` build. `pnpm bundles:sync` remains available for packaging and offline
+selection. See [local bundles](docs/local-bundles.md).
 
 The `Desktop, control daemon, and remote-agent bundles` workflow builds static
 Linux and native macOS remote bundles and desktop packages for x86-64 and ARM64. Main-branch
@@ -835,8 +835,8 @@ When a Unix host needs a component update, `ctl` prints the corresponding
 `ctlup update` command. Run it from macOS, Linux, or Windows x64, then reconnect. The
 updater verifies any saved machine ID, uses the selected SSH route, and shows
 download and installation progress. It preserves running daemons.
-`CTL_REMOTE_BUNDLES_DIR` supplies an explicit local source. Use
-`ctlup update --working-tree` to build for Linux x64 or ARM64 from a checkout.
+`CTL_REMOTE_BUNDLES_DIR` supplies explicit build files. Use
+`ctlup dev --host NAME` to build from a checkout for a Linux x64 or ARM64 host.
 `ctlup check --channel nightly` checks metadata without
 opening SSH or downloading binaries. The current publication is resolved before
 using its verified download cache. `ctlup update` manages complete local or remote

@@ -1,5 +1,4 @@
 use super::*;
-use crate::updater::arguments::AppArguments;
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::DirBuilderExt as _;
@@ -32,11 +31,10 @@ impl Drop for Home {
 async fn local_source_install_and_repair_preserve_the_saved_channel() {
   let home = Home::new();
   ctl_client::desktop_storage::set_channel(&home.0, BundleChannel::Stable).unwrap();
-  let options = || AppArguments {
-    local: true,
-    channel: None,
-  };
-  run(&home.0, AppCommand::Install(options())).await.unwrap();
+  let checkout = std::env::current_dir().unwrap();
+  install_development(&home.0, &checkout, false)
+    .await
+    .unwrap();
   let directory = app_directory(&home.0, false).unwrap();
   #[cfg(target_os = "macos")]
   let app = directory.join("ctmux.app");
@@ -63,7 +61,9 @@ async fn local_source_install_and_repair_preserve_the_saved_channel() {
       .write_all(b"extra local bytes")
       .unwrap();
   }
-  run(&home.0, AppCommand::Update(options())).await.unwrap();
+  install_development(&home.0, &checkout, false)
+    .await
+    .unwrap();
   #[cfg(any(target_os = "macos", windows))]
   assert!(!changed.exists());
   assert_eq!(

@@ -1,12 +1,44 @@
-use super::arguments::DevelopmentArguments;
+use super::{TargetOptions, arguments::DevelopmentArguments};
 use std::io::{self, Write as _};
 use std::path::Path;
 
-pub(super) async fn run(home: &Path, options: DevelopmentArguments) -> io::Result<()> {
+pub(super) async fn run(
+  home: &Path,
+  options: DevelopmentArguments,
+  target: TargetOptions<'_>,
+) -> io::Result<()> {
+  if target.host.is_some() || target.destination.is_some() || !options.hosts.is_empty() {
+    if options.app
+      || options.renew_signing
+      || options.release
+      || options.profile.is_some()
+      || options.target_dir.is_some()
+      || options.target.is_some()
+      || options.cargo_args_json.is_some()
+      || options.lease
+    {
+      return Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "Desktop, signing, and native Cargo options require a local build. Remote development accepts host options, --workspace, and --json.",
+      ));
+    }
+    return super::update::run_development(
+      home,
+      target,
+      options.hosts,
+      options.workspace.as_deref(),
+      options.json,
+    )
+    .await;
+  }
+  super::require_local(target)?;
   let workspace = options
     .workspace
     .clone()
     .map_or_else(std::env::current_dir, Ok)?;
+  if options.app {
+    return install_app(home, &workspace, options.json).await;
+  }
   let lease_input = options.lease.then(lease_pipe).transpose()?;
   let installation = async {
     if options.renew_signing {
@@ -65,6 +97,27 @@ pub(super) async fn run(home: &Path, options: DevelopmentArguments) -> io::Resul
   }
   drop(prepared);
   Ok(())
+}
+
+async fn install_app(home: &Path, workspace: &Path, json: bool) -> io::Result<()> {
+  #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+  {
+    tokio::select! {
+      result = super::app::install_development(home, workspace, json) => result,
+      _ = tokio::signal::ctrl_c() => Err(io::Error::new(
+        io::ErrorKind::Interrupted,
+        "Desktop development build cancelled.",
+      )),
+    }
+  }
+  #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+  {
+    let _ = (home, workspace, json);
+    Err(io::Error::new(
+      io::ErrorKind::Unsupported,
+      "Desktop development builds require macOS, Linux or Windows.",
+    ))
+  }
 }
 
 #[cfg(unix)]
@@ -181,7 +234,9 @@ mod tests {
   #[test]
   fn desktop_cargo_arguments_remain_structured_and_invalid_json_is_rejected() {
     let mut options = DevelopmentArguments {
+      hosts: vec![],
       workspace: None,
+      app: false,
       renew_signing: false,
       release: false,
       profile: None,

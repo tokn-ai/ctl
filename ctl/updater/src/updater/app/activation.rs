@@ -163,7 +163,7 @@ fn lock(storage: &Path) -> io::Result<File> {
   file.try_lock().map_err(|error| match error {
     fs::TryLockError::WouldBlock => io::Error::new(
       io::ErrorKind::WouldBlock,
-      "another ctlup app install or update is in progress at this destination",
+      "another ctmux app installation is in progress at this destination",
     ),
     fs::TryLockError::Error(error) => error,
   })?;

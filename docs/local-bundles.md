@@ -33,12 +33,6 @@ CLI work; it is unnecessary before `desktop:dev`. Provision once with
 `pnpm ctld:provision`, choose a team in Xcode, and build the provisioning target.
 Development signing needs no notarization credentials and disables timestamps.
 
-`ctlup app install --local` and `ctlup app update --local` use the same helper
-profile discovery and signing preparation. After the Xcode provisioning project
-has a configured team, both build paths can renew an expired profile through
-Xcode. On macOS, native runtime installation requires a successfully signed helper.
-The app build can bundle an unsigned helper if provisioning or signing fails.
-
 Cargo configuration, custom profiles, `CARGO_TARGET_DIR`, and explicit
 `--target-dir` are preserved. The builder consumes Cargo's actual executable
 paths and uses a cache under
@@ -47,6 +41,21 @@ runtime compilation separate. Only targets compatible with the running native
 manager are accepted; cross-platform remote bundles use the separate path below.
 Build and signing failures leave the active installation unchanged. Cancellation
 stops owned build processes; completed activations preserve running services.
+
+## Install a desktop development build
+
+```sh
+pnpm install --frozen-lockfile
+ctlup dev --app
+ctlup dev --app --workspace /path/to/checkout --json
+```
+
+`dev --app` builds the native debug app with its frontend and bundled daemons
+and installs it on this computer. It preserves the selected publication
+channel. On macOS it uses the development helper profile for signing and can
+renew an expired profile through Xcode. If provisioning or signing fails, the
+app can bundle an unsigned helper. `ctlup dev --renew-signing` renews the
+active runtime helper's signature separately.
 
 ## Build a local Linux bundle
 
@@ -60,9 +69,12 @@ It prepares files for a later install. The default target is
 pnpm bundles:build --target aarch64-unknown-linux-musl
 ```
 
-To build for a saved Linux host and install in one step, run
-`ctlup --host NAME update --working-tree` from the checkout. The desktop
-development build offers **Build from checkout** in the update dialog.
+To build for a Linux host and install in one step, run
+`ctlup dev --host NAME` for a saved host or `ctlup dev --destination ALIAS`
+for an OpenSSH alias. Use `ctlup dev --hosts work,lab` for multiple saved hosts
+and `--workspace` to select a checkout. To install on this computer, run
+`ctlup dev` separately. The desktop development build offers
+**Build from checkout** in the update dialog.
 
 Install Zig, `cargo-zigbuild`, rustup, Make, and Perl with `FindBin` and
 `IPC::Cmd` for a host build. The script installs the Linux Rust target on first

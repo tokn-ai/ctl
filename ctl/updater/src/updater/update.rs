@@ -1,6 +1,6 @@
 use super::{TargetOptions, arguments::UpdateArguments, source_with_bundle_override};
 use ctl_client::component_update::{
-  BuildSource, Package, PreparationPhase, PreparedUpdate, UpdateResult,
+  BuildSource, Package, PreparationPhase, PreparationProgress, PreparedUpdate, UpdateResult,
 };
 use ctl_client::remote_bundle::pr;
 use ctl_core::bundles::Purpose;
@@ -22,6 +22,16 @@ enum Choice {
   Local,
   Saved(String),
   Destination(String),
+}
+
+enum UpdateSource<'a> {
+  Artifacts {
+    source: &'a BuildSource,
+    pr: Option<&'a mut PrBuilds>,
+  },
+  Checkout {
+    workspace: Option<&'a Path>,
+  },
 }
 
 struct PrBuilds {
@@ -70,10 +80,6 @@ impl Choice {
       _ => None,
     }
   }
-
-  fn label(&self) -> &str {
-    self.host().or(self.destination()).unwrap_or("local")
-  }
 }
 
 pub(super) async fn run(
@@ -81,19 +87,6 @@ pub(super) async fn run(
   options: UpdateArguments,
   target_options: TargetOptions<'_>,
 ) -> io::Result<()> {
-  crate::bundled::register()?;
-  let TargetOptions {
-    host,
-    destination,
-    method,
-    platform,
-  } = target_options;
-  if method.is_some() && host.is_none() {
-    return Err(io::Error::other(
-      "--method requires --host; --hosts uses each host's preferred method",
-    ));
-  }
-  let choices = choices(options.hosts, options.local, host, destination)?;
   let mut pr_builds = options.pr.map(|number| PrBuilds {
     number,
     unix: None,
@@ -108,8 +101,6 @@ pub(super) async fn run(
     }
   } else if let Some(channel) = explicit_channel {
     BuildSource::Published { channel }
-  } else if options.working_tree {
-    BuildSource::WorkingTree
   } else {
     BuildSource::Automatic
   };
@@ -117,10 +108,65 @@ pub(super) async fn run(
     source,
     std::env::var_os("CTL_REMOTE_BUNDLES_DIR").map(PathBuf::from),
   );
+  run_batch(
+    home,
+    target_options,
+    options.hosts,
+    options.local,
+    UpdateSource::Artifacts {
+      source: &source,
+      pr: pr_builds.as_mut(),
+    },
+    options.json,
+  )
+  .await?;
+  if let Some(channel) = explicit_channel {
+    ctl_client::installation::set_channel(home, channel)?;
+  }
+  Ok(())
+}
+
+pub(super) async fn run_development(
+  home: &Path,
+  target_options: TargetOptions<'_>,
+  hosts: Vec<String>,
+  workspace: Option<&Path>,
+  json: bool,
+) -> io::Result<()> {
+  run_batch(
+    home,
+    target_options,
+    hosts,
+    false,
+    UpdateSource::Checkout { workspace },
+    json,
+  )
+  .await
+}
+
+async fn run_batch(
+  home: &Path,
+  target_options: TargetOptions<'_>,
+  hosts: Vec<String>,
+  local: bool,
+  mut source: UpdateSource<'_>,
+  json: bool,
+) -> io::Result<()> {
+  crate::bundled::register()?;
+  let TargetOptions {
+    host,
+    destination,
+    method,
+    platform,
+  } = target_options;
+  if method.is_some() && host.is_none() {
+    return Err(io::Error::other(
+      "--method requires --host; --hosts uses each host's preferred method",
+    ));
+  }
+  let choices = choices(hosts, local, host, destination)?;
   let mut results = Vec::new();
   for choice in choices {
-    let label = choice.label().to_owned();
-    eprintln!("ctlup: Updating {label} (full bundle)…");
     let selected =
       choice.host().is_some_and(|name| Some(name) == host) || choice.destination().is_some();
     let target = TargetOptions {
@@ -129,28 +175,9 @@ pub(super) async fn run(
       method: if selected { method } else { None },
       platform: if selected { platform } else { None },
     };
-    let operation = update_host(home, target, &source, pr_builds.as_mut());
-    let outcome = tokio::select! {
-      result = operation => result,
-      _ = tokio::signal::ctrl_c() => return Err(io::Error::new(io::ErrorKind::Interrupted, "Update cancelled. Refresh component status before retrying; an activation may already have completed.")),
-    };
-    let (result, error) = match outcome {
-      Ok(result) => {
-        eprintln!("ctlup: {label}: installed; running services preserved. Restart separately.");
-        (Some(result), None)
-      }
-      Err(error) => {
-        eprintln!("ctlup: {label}: {error}");
-        (None, Some(error.to_string()))
-      }
-    };
-    results.push(HostResult {
-      host: label,
-      result,
-      error,
-    });
+    results.push(run_host(home, target, &mut source).await?);
   }
-  if options.json {
+  if json {
     println!(
       "{}",
       serde_json::to_string(&results).map_err(io::Error::other)?
@@ -161,10 +188,39 @@ pub(super) async fn run(
       "some component updates failed; successful hosts were kept",
     ));
   }
-  if let Some(channel) = explicit_channel {
-    ctl_client::installation::set_channel(home, channel)?;
-  }
   Ok(())
+}
+
+async fn run_host(
+  home: &Path,
+  target: TargetOptions<'_>,
+  source: &mut UpdateSource<'_>,
+) -> io::Result<HostResult> {
+  let label = target.host.or(target.destination).unwrap_or("local");
+  if matches!(source, UpdateSource::Checkout { .. }) {
+    eprintln!("ctlup: Building and updating {label} (full bundle)…");
+  } else {
+    eprintln!("ctlup: Updating {label} (full bundle)…");
+  }
+  let outcome = tokio::select! {
+    result = update_host(home, target, source) => result,
+    _ = tokio::signal::ctrl_c() => return Err(io::Error::new(io::ErrorKind::Interrupted, "Update cancelled. Refresh component status before retrying; an activation may already have completed.")),
+  };
+  let (result, error) = match outcome {
+    Ok(result) => {
+      eprintln!("ctlup: {label}: installed; running services preserved. Restart separately.");
+      (Some(result), None)
+    }
+    Err(error) => {
+      eprintln!("ctlup: {label}: {error}");
+      (None, Some(error.to_string()))
+    }
+  };
+  Ok(HostResult {
+    host: label.to_owned(),
+    result,
+    error,
+  })
 }
 
 fn choices(
@@ -200,8 +256,7 @@ fn choices(
 async fn update_host(
   home: &Path,
   selection: TargetOptions<'_>,
-  source: &BuildSource,
-  pr: Option<&mut PrBuilds>,
+  source: &mut UpdateSource<'_>,
 ) -> io::Result<UpdateResult> {
   let snapshot = ctl_client::component_update::PreparationSnapshot::capture(home)?;
   let mut resolved =
@@ -221,13 +276,7 @@ async fn update_host(
   } else {
     (ctl_core::paths::native_target(), Purpose::Local)
   };
-  let pr_number = pr.as_ref().map(|build| build.number);
-  let pr_source = if let Some(pr) = pr {
-    Some(pr.source(triple).await?)
-  } else {
-    None
-  };
-  let mut prepared = prepare(home, triple, purpose, pr_source.as_ref().unwrap_or(source)).await?;
+  let (mut prepared, pr_number) = prepare(home, triple, purpose, source).await?;
   prepared.retain_earlier_snapshot(&snapshot);
   if let Some(number) = pr_number {
     let origin = prepared
@@ -255,41 +304,68 @@ async fn prepare(
   home: &Path,
   target: &str,
   purpose: Purpose,
-  source: &BuildSource,
-) -> io::Result<PreparedUpdate> {
+  source: &mut UpdateSource<'_>,
+) -> io::Result<(PreparedUpdate, Option<u64>)> {
   let last_download_report = Mutex::new(None::<Instant>);
-  let prepared = ctl_client::component_update::prepare_update(
-    home,
-    target,
-    purpose,
-    source,
-    &bundle_directories(home)?,
-    |progress| match progress.phase {
-      // Cargo's build diagnostics already go to stderr.
-      PreparationPhase::Building => {}
-      PreparationPhase::Downloading => {
-        let received = progress.received_bytes;
-        let total = progress.total_bytes;
-        let mut last_report = last_download_report.lock().unwrap();
-        if received == 0 && total == 0 {
-          eprintln!("ctlup: Preparing {}", progress.detail);
-          *last_report = Some(Instant::now());
-        } else if received != 0
-          && (received == total
-            || last_report.is_none_or(|last| last.elapsed() >= Duration::from_secs(1)))
-        {
-          if total == 0 {
-            eprintln!("ctlup: {} ({received} bytes)", progress.detail);
-          } else {
-            eprintln!("ctlup: {} ({received}/{total} bytes)", progress.detail);
-          }
-          *last_report = Some(Instant::now());
+  let on_progress = |progress: PreparationProgress| match progress.phase {
+    // Cargo's build diagnostics already go to stderr.
+    PreparationPhase::Building => {}
+    PreparationPhase::Downloading => {
+      let received = progress.received_bytes;
+      let total = progress.total_bytes;
+      let mut last_report = last_download_report.lock().unwrap();
+      if received == 0 && total == 0 {
+        eprintln!("ctlup: Preparing {}", progress.detail);
+        *last_report = Some(Instant::now());
+      } else if received != 0
+        && (received == total
+          || last_report.is_none_or(|last| last.elapsed() >= Duration::from_secs(1)))
+      {
+        if total == 0 {
+          eprintln!("ctlup: {} ({received} bytes)", progress.detail);
+        } else {
+          eprintln!("ctlup: {} ({received}/{total} bytes)", progress.detail);
         }
+        *last_report = Some(Instant::now());
       }
-      _ => eprintln!("ctlup: {progress}"),
-    },
-  )
-  .await?;
+    }
+    _ => eprintln!("ctlup: {progress}"),
+  };
+  let (prepared, pr_number) = match source {
+    UpdateSource::Artifacts { source, pr } => {
+      let pr_number = pr.as_ref().map(|build| build.number);
+      let pr_source = if let Some(pr) = pr {
+        Some(pr.source(target).await?)
+      } else {
+        None
+      };
+      let prepared = ctl_client::component_update::prepare_update(
+        home,
+        target,
+        purpose,
+        pr_source.as_ref().unwrap_or(source),
+        &bundle_directories(home)?,
+        on_progress,
+      )
+      .await?;
+      (prepared, pr_number)
+    }
+    UpdateSource::Checkout { workspace } => {
+      if purpose != Purpose::Upload {
+        return Err(io::Error::other(
+          "working-tree bundles require a Linux x64 or ARM64 SSH target",
+        ));
+      }
+      let prepared = ctl_client::component_update::prepare_working_tree_update(
+        home,
+        target,
+        *workspace,
+        on_progress,
+      )
+      .await?;
+      (prepared, None)
+    }
+  };
   if purpose == Purpose::Upload {
     let manifest = &prepared.bundle.manifest;
     eprintln!(
@@ -302,7 +378,7 @@ async fn prepare(
         .unwrap_or("unknown")
     );
   }
-  Ok(prepared)
+  Ok((prepared, pr_number))
 }
 
 fn bundle_directories(home: &Path) -> io::Result<Vec<PathBuf>> {
@@ -524,7 +600,6 @@ mod tests {
       );
       assert_eq!(targets[0].host(), None);
       assert_eq!(targets[0].destination(), Some(destination));
-      assert_eq!(targets[0].label(), destination);
     }
   }
 

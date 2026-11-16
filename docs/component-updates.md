@@ -217,9 +217,11 @@ SSH uploads contain one native target. If the remote channel also registers
 other targets, uploading a new publication fails without changing those
 registrations. Run `ctlup update` on that host to prepare its complete target set.
 
-In a development checkout, automatic Linux x64 remote updates build the working
-tree. Use `--working-tree` to choose that source explicitly for Linux x64 or
-ARM64 targets.
+Automatic remote updates use the configured publication channel. To build
+and deploy a checkout to Linux x64 or ARM64, use `ctlup dev --host NAME` or
+`ctlup dev --destination ALIAS`. Use `ctlup dev --hosts work,lab` for multiple
+saved hosts. See [local development builds](local-bundles.md) for prerequisites
+and offline bundles.
 
 `--from` supplies an exact complete build or publisher bundle-set. Publisher
 archives need their matching `bundle-set.json` or `bundle-set-windows.json`.
@@ -238,31 +240,17 @@ do not replace an independently provisioned signed local helper.
 ```sh
 ctlup app install
 ctlup app install --channel stable
-ctlup app install --local
 ctlup app update
 ctlup app update --channel nightly
-ctlup app update --local
 ```
 
-These commands install on this computer. `--local` builds a native debug app
-from the current source checkout, including its frontend and bundled daemons.
-Run it inside a ctl checkout. A local build
-preserves the saved publication channel and conflicts with `--channel`.
-Install the checkout's frontend dependencies with `pnpm install --frozen-lockfile`
-before building locally.
+These commands install published desktop packages on this computer. Use
+`ctlup dev --app` to build the desktop app from a checkout.
 
 Windows supports native x64 (`x86_64-pc-windows-msvc`) and ARM64
 (`aarch64-pc-windows-msvc`). Both use a portable, per-user directory rather than
 MSI or NSIS installation; installing the app does not require administrator
-access. Local builds require Node 24, pnpm, Rust's matching MSVC toolchain, the
-Visual Studio C++ build tools and Windows SDK.
-
-Local macOS app builds and `ctlup dev` use the same helper provisioning and
-signing preparation. They discover an unexpired development profile and can
-renew it through Xcode when the provisioning project has a configured team.
-`ctlup dev` requires successful helper signing before activating its runtime
-build. App builds can use an unsigned bundled helper when provisioning or
-signing fails.
+access.
 
 Published installs use the same saved channel preference as runtime bundle
 updates, with the distribution's compiled default when no preference is saved.
@@ -330,6 +318,7 @@ signing is independent of the helper selection.
 ctlup dev --workspace /path/to/checkout
 ctlup dev --release
 ctlup dev --profile custom --target-dir /path/to/build-output --json
+ctlup dev --app
 ctlup dev --renew-signing
 ```
 
@@ -337,8 +326,19 @@ ctlup dev --renew-signing
 one checkout. On macOS it signs and verifies the complete `ctld.app` package.
 Only a successful complete build becomes active; compilation, signing or
 verification failure leaves the previous installation and running services
-intact. `ctlup status` then reports that development installation. Foreign
-targets are rejected because this command prepares the current computer.
+intact. `ctlup status` then reports that development installation.
+
+`ctlup dev --app` builds and installs the native desktop app, including its
+frontend and bundled daemons. It preserves the saved publication channel.
+Install the checkout's frontend dependencies with `pnpm install --frozen-lockfile`
+before building. On Windows, development app builds also require Node 24,
+pnpm, the matching Rust MSVC toolchain, the Visual Studio C++ build tools,
+and the Windows SDK.
+
+On macOS, both development paths look for an unexpired helper provisioning
+profile and can renew it through Xcode when the project has a configured team.
+Runtime activation requires a signed helper. The desktop build can bundle an
+unsigned helper if provisioning or signing fails.
 
 On macOS, run `ctlup dev --renew-signing` from a ctl checkout to re-sign the
 active local development helper without recompiling any runtime component.

@@ -252,11 +252,11 @@ confirmation warning that all ctmux sessions for the remote account will end,
 including sessions used by other clients. **Not now** preserves those sessions.
 The agent advertises restart support in identity metadata; older agents default
 to unsupported, and the desktop checks this before offering confirmation and
-again before sending the command. Development Linux x64 uploads build the
-working tree locally, including uncommitted changes; other remote targets use
-the app's published development or stable channel. Explicit channel choices
-bypass the local build. Remote installation verifies the selected publication's
-own metadata and compatible contracts without requiring the desktop's revision.
+again before sending the command. Automatic remote updates use the configured
+publication channel. In a development checkout, explicitly select **Build from
+checkout** to include uncommitted changes in a Linux x64 or ARM64 bundle.
+Remote installation verifies the selected bundle's own metadata and compatible
+contracts without requiring the desktop's revision.
 After confirmation, the fixed `ctl-agent restart-ctmux` operation checks the remote
 identity, requests shutdown through the owner-only control endpoint, starts the
 installed companion daemon, and re-verifies the connection. It never signals

@@ -546,6 +546,12 @@ keep schema `2` and gain an OpenVPN variant. Clients from before the addition
 cannot read documents containing the new variant. Other named wire contracts
 and the product release version stay the same.
 
+Product release `v0.1.4` freezes `ctld` `1.3.20` (build 20),
+`ctl_remote_vpn` `1.2.3` (build 3), `ctl_transport` `1.1.2` (build 2), and
+`ctl_files` `1.0.1` (build 1). The [v0.1.4 protocol map](releases/v0.1.4.md#protocol-contracts)
+records the existing named contracts, internal builds, and exact supported sets
+shipped in the release.
+
 Every PR description must state its protocol changes, or **None** when there
 are no changes. Include the previous and new contracts and the compatibility
 impact. Keep PR titles brief; put protocol details in the description.

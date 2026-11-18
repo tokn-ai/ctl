@@ -240,6 +240,17 @@ impl Installations {
     migration::migrate(self)
   }
 
+  /// Prepares an explicit update by adopting an older uncatalogued installation.
+  /// Existing catalogs and committed transactions remain authoritative. Empty
+  /// stores need no migration, and unrecorded payloads are never adopted once
+  /// authoritative catalog state exists.
+  ///
+  /// # Errors
+  /// Reports unsafe storage, corrupt metadata or incomplete older builds.
+  pub fn migrate_catalog_if_missing(&self) -> io::Result<Vec<CatalogEntry>> {
+    migration::migrate_if_missing(self)
+  }
+
   /// Checks the explicit catalog migration marker without changing storage.
   ///
   /// # Errors

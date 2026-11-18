@@ -94,6 +94,8 @@ pub(super) enum Command {
   },
   #[command(hide = true)]
   CatalogJson,
+  #[command(hide = true)]
+  PrepareInstall,
   #[cfg(windows)]
   #[command(hide = true)]
   UpdaterDigest,

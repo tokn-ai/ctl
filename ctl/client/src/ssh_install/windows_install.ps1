@@ -38,7 +38,7 @@ try {
       throw 'The selected ctlup changed during the update.'
     }
   }
-  __ORIGIN_ARGUMENTS__
+  __UPDATE_PREPARATION__
   $start = New-Object Diagnostics.ProcessStartInfo
   $start.FileName = $manager
   $start.Arguments = ('install-archive ' + ($originArgs -join ' ')).TrimEnd()

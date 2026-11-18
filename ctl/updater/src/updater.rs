@@ -118,6 +118,14 @@ async fn run(arguments: Arguments) -> io::Result<i32> {
         serde_json::to_string(&catalog).map_err(io::Error::other)?
       );
     }
+    Command::PrepareInstall => {
+      require_local(target)?;
+      tokio::task::spawn_blocking(move || {
+        ctl_core::installations::Installations::new(&home).migrate_catalog_if_missing()
+      })
+      .await
+      .map_err(io::Error::other)??;
+    }
     Command::Status { json } => status::run(&home, target, false, json).await?,
     Command::Dev(options) => development::run(&home, options, target).await?,
     Command::Rollback { json } => status::run(&home, target, true, json).await?,

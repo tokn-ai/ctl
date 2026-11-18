@@ -53,6 +53,30 @@ pub(super) fn is_migrated(store: &Installations) -> io::Result<bool> {
 pub(super) fn migrate(store: &Installations) -> io::Result<Vec<CatalogEntry>> {
   filesystem::ensure_root(store)?;
   let _lock = filesystem::Lock::acquire(store)?;
+  migrate_locked(store)
+}
+
+pub(super) fn migrate_if_missing(store: &Installations) -> io::Result<Vec<CatalogEntry>> {
+  if !filesystem::root_exists(store)? {
+    return Ok(Vec::new());
+  }
+  filesystem::ensure_root(store)?;
+  let _lock = filesystem::Lock::acquire(store)?;
+  // A completed cutover cannot fall back to adoption if its catalog disappears.
+  is_migrated(store)?;
+  if catalog::existing_state(store)?.is_some() {
+    catalog::recover(store)?;
+    let entries = catalog::read(store)?.entries;
+    validate_recorded_selection(store, &entries)?;
+    return Ok(entries);
+  }
+  if !catalog::has_installation_data(store)? {
+    return Ok(Vec::new());
+  }
+  migrate_locked(store)
+}
+
+fn migrate_locked(store: &Installations) -> io::Result<Vec<CatalogEntry>> {
   if is_migrated(store)? {
     #[cfg(unix)]
     legacy::require_recoverable_activation(store)?;

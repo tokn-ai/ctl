@@ -32,7 +32,7 @@ fn powershell_command(script: &str) -> io::Result<String> {
   // Windows OpenSSH commonly starts commands through cmd.exe. Compress long
   // scripts rather than exceeding its command-line limit or changing stdin,
   // which must remain the original binary installation stream.
-  let mut compressor = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+  let mut compressor = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
   compressor.write_all(script.as_bytes())?;
   let encoded = base64::engine::general_purpose::STANDARD.encode(compressor.finish()?);
   let wrapper = format!(

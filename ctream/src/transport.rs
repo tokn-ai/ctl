@@ -1,4 +1,7 @@
-use crate::protocol::{Session, Target, VERSION};
+use crate::protocol::{
+  Action, ActionResult, DISPLAY_VERSION, Element, Session, Target, VERSION, Window, valid_window_id,
+};
+use serde::de::DeserializeOwned;
 use std::{
   io::{self, Read, Write},
   process::{Child, ChildStdout, Command, Stdio},
@@ -8,6 +11,10 @@ pub enum Request {
   Discover,
   Capture(Target),
   Input(Target),
+  Windows(Target),
+  CaptureWindow(Target, String),
+  Elements(Target, String),
+  Action(Target, String),
 }
 
 pub struct Channel {
@@ -51,13 +58,16 @@ impl Drop for SshReader {
 
 impl Transport for Ssh {
   fn open(&self, request: Request) -> io::Result<Channel> {
-    let args = match request {
-      Request::Discover => "discover".to_owned(),
-      Request::Capture(target) => format!("capture {target}"),
-      Request::Input(target) => format!("input {target}"),
+    let command = match request {
+      Request::Discover => format!("{DISPLAY_VERSION} discover"),
+      Request::Capture(target) => format!("{DISPLAY_VERSION} capture {target}"),
+      Request::Input(target) => format!("{DISPLAY_VERSION} input {target}"),
+      Request::Windows(target) => format!("{VERSION} windows {target}"),
+      Request::CaptureWindow(target, id) => window_command("capture-window", target, &id)?,
+      Request::Elements(target, id) => window_command("elements", target, &id)?,
+      Request::Action(target, id) => window_command("action", target, &id)?,
     };
-    // Request arguments are fixed words and formatted numeric display names.
-    let remote = format!(r#"exec env PATH="$PATH:$HOME/.local/bin" ctream-agent {VERSION} {args}"#);
+    let remote = format!(r#"exec env PATH="$PATH:$HOME/.local/bin" ctream-agent {command}"#);
     let mut child = Command::new("ssh")
       .args([
         "-T",
@@ -82,16 +92,48 @@ impl Transport for Ssh {
   }
 }
 
-pub fn discover(transport: &dyn Transport) -> io::Result<Vec<Session>> {
-  let Channel { reader, writer } = transport.open(Request::Discover)?;
+fn window_command(operation: &str, target: Target, id: &str) -> io::Result<String> {
+  if !valid_window_id(id) {
+    return Err(io::Error::other("invalid window identifier"));
+  }
+  Ok(format!("{VERSION} {operation} {target} {id}"))
+}
+
+fn json_response<T: DeserializeOwned>(channel: Channel) -> io::Result<T> {
+  let Channel { reader, writer } = channel;
   drop(writer);
   let mut data = Vec::new();
   const LIMIT: usize = 1024 * 1024;
   reader.take((LIMIT + 1) as u64).read_to_end(&mut data)?;
   if data.len() > LIMIT {
-    return Err(io::Error::other(
-      "ctream agent discovery response exceeds 1 MiB",
-    ));
+    return Err(io::Error::other("ctream agent response exceeds 1 MiB"));
   }
   serde_json::from_slice(&data).map_err(io::Error::other)
+}
+
+pub fn discover(transport: &dyn Transport) -> io::Result<Vec<Session>> {
+  json_response(transport.open(Request::Discover)?)
+}
+
+pub fn windows(transport: &dyn Transport, target: Target) -> io::Result<Vec<Window>> {
+  json_response(transport.open(Request::Windows(target))?)
+}
+
+pub fn elements(transport: &dyn Transport, target: Target, id: String) -> io::Result<Vec<Element>> {
+  json_response(transport.open(Request::Elements(target, id))?)
+}
+
+pub fn action(
+  transport: &dyn Transport,
+  target: Target,
+  id: String,
+  action: Action,
+) -> io::Result<ActionResult> {
+  let data = serde_json::to_vec(&action)?;
+  if data.len() > 65536 {
+    return Err(io::Error::other("action exceeds the request limit"));
+  }
+  let mut channel = transport.open(Request::Action(target, id))?;
+  channel.writer.write_all(&data)?;
+  json_response(channel)
 }

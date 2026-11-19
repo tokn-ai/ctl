@@ -1,10 +1,11 @@
 mod capture;
 use ctream::{
   Display,
-  protocol::{Session, Target, X11_FRAME_SIZE},
+  protocol::{Session, Target, Window, X11_FRAME_SIZE},
   transport::{self, Channel, Request, Ssh, Transport},
 };
 mod input;
+mod semantic;
 
 use eframe::egui;
 use std::{
@@ -34,12 +35,23 @@ struct Preview {
 }
 
 impl Preview {
-  fn connect(transport: &dyn Transport, target: Target, ctx: egui::Context) -> io::Result<Self> {
-    let (input, input_error) = match input::Input::connect(transport, target) {
-      Ok(input) => (Some(input), None),
-      Err(error) => (None, Some(format!("View only ({error})"))),
+  fn connect(
+    transport: &dyn Transport,
+    target: Target,
+    window: Option<Window>,
+    ctx: egui::Context,
+  ) -> io::Result<Self> {
+    let (request, input, input_error) = match window {
+      Some(window) => (Request::CaptureWindow(target, window.id), None, None),
+      None => {
+        let (input, error) = match input::Input::connect(transport, target) {
+          Ok(input) => (Some(input), None),
+          Err(error) => (None, Some(format!("View only ({error})"))),
+        };
+        (Request::Capture(target), input, error)
+      }
     };
-    let Channel { reader, writer } = transport.open(Request::Capture(target))?;
+    let Channel { reader, writer } = transport.open(request)?;
     let mut stdout = BufReader::new(reader);
     let stream = Arc::new(Mutex::new(Stream::default()));
     let reader = Arc::clone(&stream);
@@ -134,6 +146,8 @@ impl eframe::App for Preview {
 enum State {
   Discovering(Receiver<io::Result<Vec<Session>>>),
   Selecting(Vec<Session>),
+  FindingWindows(Target, Receiver<io::Result<Vec<Window>>>),
+  ChoosingWindow(Target, Vec<Window>),
   Connecting(Receiver<io::Result<Preview>>),
   Viewing(Preview),
   Failed(String),
@@ -155,21 +169,34 @@ fn background<T: Send + 'static>(
 struct Viewer {
   transport: Arc<dyn Transport + Send + Sync>,
   state: State,
+  semantic: Option<semantic::Panel>,
 }
 
 impl Viewer {
   fn discover(&mut self, ctx: &egui::Context) {
+    self.semantic = None;
     let transport = Arc::clone(&self.transport);
     self.state = State::Discovering(background(ctx, move || {
       transport::discover(transport.as_ref())
     }));
   }
 
-  fn connect(&mut self, target: Target, ctx: &egui::Context) {
+  fn windows(&mut self, target: Target, ctx: &egui::Context) {
+    let transport = Arc::clone(&self.transport);
+    self.state = State::FindingWindows(
+      target,
+      background(ctx, move || transport::windows(transport.as_ref(), target)),
+    );
+  }
+
+  fn connect(&mut self, target: Target, window: Option<Window>, ctx: &egui::Context) {
+    self.semantic = window
+      .as_ref()
+      .map(|window| semantic::Panel::new(target, window.id.clone()));
     let transport = Arc::clone(&self.transport);
     let render = ctx.clone();
     self.state = State::Connecting(background(ctx, move || {
-      Preview::connect(transport.as_ref(), target, render)
+      Preview::connect(transport.as_ref(), target, window, render)
     }));
   }
 }
@@ -190,6 +217,9 @@ impl eframe::App for Viewer {
   fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
     let next = match &self.state {
       State::Discovering(result) => receive(result.try_recv(), State::Selecting),
+      State::FindingWindows(target, result) => receive(result.try_recv(), |windows| {
+        State::ChoosingWindow(*target, windows)
+      }),
       State::Connecting(result) => receive(result.try_recv(), State::Viewing),
       _ => None,
     };
@@ -197,15 +227,51 @@ impl eframe::App for Viewer {
       self.state = next;
     }
     if let State::Viewing(preview) = &mut self.state {
+      if let Some(semantic) = &mut self.semantic {
+        let mut back = false;
+        egui::TopBottomPanel::top("window_navigation").show(ctx, |ui| {
+          back = ui.button("Back to windows").clicked();
+        });
+        if back {
+          let target = semantic.target();
+          self.semantic = None;
+          self.windows(target, ctx);
+          ctx.request_repaint();
+          return;
+        }
+        semantic.show(ctx, &self.transport);
+      }
       preview.update(ctx, frame);
       return;
     }
     let mut selected = None;
+    let mut select_window = None;
     let mut refresh = false;
     egui::CentralPanel::default().show(ctx, |ui| match &self.state {
       State::Discovering(_) => {
         ui.spinner();
         ui.label("Discovering remote displays…");
+      }
+      State::FindingWindows(_, _) => {
+        ui.spinner();
+        ui.label("Finding windows…");
+      }
+      State::ChoosingWindow(target, windows) => {
+        if windows.is_empty() {
+          ui.label("No capturable windows found.");
+        }
+        for window in windows {
+          let label = if window.title.is_empty() {
+            &window.app_id
+          } else {
+            &window.title
+          };
+          if ui.button(label).on_hover_text(&window.app_id).clicked() {
+            selected = Some((*target, Some(window.clone())));
+          }
+        }
+        select_window = ui.button("Refresh windows").clicked().then_some(*target);
+        refresh = ui.button("Back to displays").clicked();
       }
       State::Connecting(_) => {
         ui.spinner();
@@ -226,15 +292,25 @@ impl eframe::App for Viewer {
               )
             }
           };
-          if ui
-            .add_enabled(
-              session.selectable && target.is_some(),
-              egui::Button::new(label),
-            )
-            .clicked()
-          {
-            selected = target;
-          }
+          ui.horizontal(|ui| {
+            if ui
+              .add_enabled(
+                session.selectable && target.is_some(),
+                egui::Button::new(label),
+              )
+              .clicked()
+              && let Some(target) = target
+            {
+              selected = Some((target, None));
+            }
+            if let Some(target @ Target::Wayland(_)) = target
+              && ui
+                .add_enabled(session.selectable, egui::Button::new("Windows…"))
+                .clicked()
+            {
+              select_window = Some(target);
+            }
+          });
         }
         refresh = ui.button("Refresh").clicked();
       }
@@ -244,8 +320,10 @@ impl eframe::App for Viewer {
       }
       State::Viewing(_) => unreachable!(),
     });
-    if let Some(target) = selected {
-      self.connect(target, ctx);
+    if let Some((target, window)) = selected {
+      self.connect(target, window, ctx);
+    } else if let Some(target) = select_window {
+      self.windows(target, ctx);
     } else if refresh {
       self.discover(ctx);
     }
@@ -254,10 +332,11 @@ impl eframe::App for Viewer {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
   let args: Vec<_> = env::args().skip(1).collect();
-  let (host, target) = match args.as_slice() {
-    [host] => (host, None),
-    [host, display] => (host, Some(Target::parse(display)?)),
-    _ => return Err("usage: ctream-preview SSH_HOST [DISPLAY]".into()),
+  let (host, target, windows) = match args.as_slice() {
+    [host] => (host, None, false),
+    [host, display] => (host, Some(Target::parse(display)?), false),
+    [host, display, flag] if flag == "--windows" => (host, Some(Target::parse(display)?), true),
+    _ => return Err("usage: ctream-preview SSH_HOST [DISPLAY [--windows]]".into()),
   };
   let title = format!("ctream · {host}");
   let options = eframe::NativeOptions {
@@ -274,9 +353,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
       let mut viewer = Viewer {
         transport,
         state: State::Selecting(Vec::new()),
+        semantic: None,
       };
       if let Some(target) = target {
-        viewer.connect(target, &cc.egui_ctx);
+        if windows {
+          viewer.windows(target, &cc.egui_ctx);
+        } else {
+          viewer.connect(target, None, &cc.egui_ctx);
+        }
       } else {
         viewer.discover(&cc.egui_ctx);
       }

@@ -1,4 +1,6 @@
-use ctream::protocol::{Session, Target, VERSION, X11_FRAME_SIZE};
+use ctream::protocol::{
+  DISPLAY_VERSION, Session, Target, VERSION, Window, X11_FRAME_SIZE, valid_window_id,
+};
 use std::{
   env, fs, io,
   os::unix::{fs::MetadataExt, process::CommandExt},
@@ -52,12 +54,17 @@ fn channel_closed(closed: &Receiver<()>, delay: Duration) -> bool {
   !matches!(closed.recv_timeout(delay), Err(RecvTimeoutError::Timeout))
 }
 
-fn capture(target: Target) -> io::Result<()> {
+fn capture_lifetime() -> Receiver<()> {
   let (notify, closed) = mpsc::channel();
   thread::spawn(move || {
     let _ = io::copy(&mut io::stdin().lock(), &mut io::sink());
     let _ = notify.send(());
   });
+  closed
+}
+
+fn capture(target: Target) -> io::Result<()> {
+  let closed = capture_lifetime();
   match target {
     Target::X11(display) => {
       let output = x11_helper(display)
@@ -118,10 +125,78 @@ fn capture(target: Target) -> io::Result<()> {
   Ok(())
 }
 
+fn wayland_window(target: Target) -> io::Result<Command> {
+  let Target::Wayland(_) = target else {
+    return Err(io::Error::other(
+      "window operations currently require a supported Wayland compositor",
+    ));
+  };
+  let mut command = Command::new("ctream-wayland-window");
+  command
+    .env_remove("WAYLAND_SOCKET")
+    .env("WAYLAND_DISPLAY", target.to_string());
+  Ok(command)
+}
+
+fn list_windows(target: Target) -> Result<Vec<Window>, Box<dyn std::error::Error>> {
+  let output = wayland_window(target)?
+    .arg("list")
+    .stdin(Stdio::null())
+    .output()?;
+  if !output.status.success() {
+    return Err(
+      format!(
+        "window discovery failed: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+      )
+      .into(),
+    );
+  }
+  let mut windows: Vec<Window> = serde_json::from_slice(&output.stdout)?;
+  windows.retain(|window| valid_window_id(&window.id));
+  Ok(windows)
+}
+
+fn window_operation(
+  operation: &str,
+  target: Target,
+  id: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+  if !valid_window_id(id) {
+    return Err("invalid window identifier".into());
+  }
+  if operation == "capture-window" {
+    run_capture(
+      wayland_window(target)?.args(["capture", id]),
+      &capture_lifetime(),
+    )?;
+    return Ok(());
+  }
+  let window = list_windows(target)?
+    .into_iter()
+    .find(|window| window.id == id)
+    .ok_or("selected window is no longer available")?;
+  Err(
+    Command::new("python3")
+      .args([
+        "-u",
+        "-c",
+        include_str!("../atspi.py"),
+        operation,
+        id,
+        &window.title,
+      ])
+      .exec()
+      .into(),
+  )
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
   let args: Vec<_> = env::args().skip(1).collect();
   match args.as_slice() {
-    [version, operation] if version == VERSION && operation == "discover" => {
+    [version, operation]
+      if matches!(version.as_str(), VERSION | DISPLAY_VERSION) && operation == "discover" =>
+    {
       let runtime_uid = env::var_os("XDG_RUNTIME_DIR")
         .and_then(|path| fs::metadata(path).ok())
         .map(|metadata| metadata.uid());
@@ -141,17 +216,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect();
       serde_json::to_writer(io::stdout().lock(), &sessions)?;
     }
-    [version, operation, target] if version == VERSION => {
+    [version, operation, target] if matches!(version.as_str(), VERSION | DISPLAY_VERSION) => {
       let target = Target::parse(target)?;
       match operation.as_str() {
         "capture" => capture(target)?,
         "input" => input(target)?,
+        "windows" if version == VERSION => {
+          serde_json::to_writer(io::stdout().lock(), &list_windows(target)?)?
+        }
         _ => return Err("unknown ctream-agent operation".into()),
       }
     }
-    _ => {
-      return Err("usage: ctream-agent 1.0.1 (discover | capture DISPLAY | input DISPLAY)".into());
+    [version, operation, target, id]
+      if version == VERSION
+        && matches!(operation.as_str(), "capture-window" | "elements" | "action") =>
+    {
+      window_operation(operation, Target::parse(target)?, id)?;
     }
+    _ => return Err("usage: ctream-agent VERSION OPERATION [DISPLAY [WINDOW]]".into()),
   }
   Ok(())
 }

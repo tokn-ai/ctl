@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-pub const VERSION: &str = "1.0.1";
+pub const VERSION: &str = "1.0.2";
 pub const X11_FRAME_SIZE: [usize; 2] = [960, 540];
 
 #[derive(Clone, Copy)]
@@ -45,4 +45,50 @@ pub struct Session {
   pub display: super::Display,
   pub class: Option<String>,
   pub selectable: bool,
+}
+
+pub const DISPLAY_VERSION: &str = "1.0.1";
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct Window {
+  pub id: String,
+  pub title: String,
+  pub app_id: String,
+}
+
+pub fn valid_window_id(id: &str) -> bool {
+  !id.is_empty()
+    && id.len() <= 128
+    && id
+      .bytes()
+      .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_'))
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct Element {
+  pub path: String,
+  pub name: String,
+  pub role: String,
+  pub actions: Vec<String>,
+  pub editable: bool,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(tag = "operation", rename_all = "snake_case")]
+pub enum Action {
+  Invoke {
+    path: String,
+    index: usize,
+    name: String,
+  },
+  SetText {
+    path: String,
+    text: String,
+  },
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct ActionResult {
+  pub applied: bool,
+  pub error: Option<String>,
 }

@@ -2,6 +2,7 @@
 
 [package]
 name = "ctream-wayland-input"
+default-run = "ctream-wayland-input"
 version = "0.1.0"
 edition = "2024"
 publish = false
@@ -12,3 +13,6 @@ wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 wayland-protocols-misc = { version = "0.3", features = ["client"] }
 tempfile = "3"
 xkbcommon = "0.9"
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

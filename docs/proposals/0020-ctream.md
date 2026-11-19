@@ -66,6 +66,51 @@ input, and whether the backend can associate two endpoints with one desktop.
 On Wayland, evaluate the RemoteDesktop portal from within the target user's
 graphical session. Test consent, cancellation, and session closure.
 
+### Window streaming
+
+Install the window helper on the remote host with
+`cargo install --locked --path ctream/wayland-input --bin ctream-wayland-window --root ~/.local`.
+Open the display picker and choose **Windows…** beside the Wayland display,
+or launch the viewer with `HOST wayland-N --windows`.
+
+After selecting a display, the viewer can request its top-level windows from
+the remote agent and open a capture stream for one of them. Expose titles and
+application identifiers as labels. Bind the capture to an opaque target
+identifier scoped to its display. If the window closes or its identity can no
+longer be verified, end the stream and require a fresh selection.
+
+Start with the user-owned nested Sway session. Discover windows through
+`ext_foreign_toplevel_list_v1` and capture the selected toplevel through
+`ext_foreign_toplevel_image_capture_source_manager_v1` and
+`ext_image_copy_capture_manager_v1`. The test session advertises all three
+interfaces. For X11, evaluate FFmpeg's `x11grab` with `window_id` for a
+prototype. Its capture region stays at the initial size, so test growth,
+shrink, unmap, and close before choosing the long-term backend. A Wayland
+session may also offer window selection through the ScreenCast portal when
+its backend advertises that source type.
+
+Verify capture with two distinct windows. Move, resize, and cover the selected
+window and check that only its content is streamed. Verify what happens when
+it becomes hidden and when it closes. Keep the viewer's frame handling and
+transport independent of the capture backend.
+
+### Semantic actions
+
+Choose **Inspect controls** in the window preview to list available actions.
+The Sway backend requires `swaymsg`, Python 3 with PyGObject and the AT-SPI
+typelib, and access to the user's accessibility bus.
+
+Model semantic actions as requests that identify the selected window and an
+application element or command. Return an explicit result. AT-SPI is the
+first candidate for applications that expose accessible controls. Probe
+element discovery, invoking a button action, and setting an editable field
+in one test application. An application that exposes its own messages or
+commands can use an application-specific adapter if that becomes a priority.
+
+Resolve each request against the selected window and validate the object's
+identity before dispatch. Report unavailable capabilities and stale objects
+explicitly. Window capture can work independently of semantic actions.
+
 ## Invariants
 
 - Discovery alone never sends input.
@@ -79,12 +124,23 @@ graphical session. Test consent, cancellation, and session closure.
   input operations to callers.
 - [libobs frontend API](https://docs.obsproject.com/frontends) describes the
   capture engine and preview lifecycle if ctream needs a live desktop view.
+- [Sway's Wayland server](https://github.com/swaywm/sway/blob/master/sway/server.c)
+  registers the foreign-toplevel capture source manager.
+- [FFmpeg x11grab](https://www.ffmpeg.org/ffplay-all.html#x11grab) documents
+  window selection and capture size limits.
+- [ScreenCast portal](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.ScreenCast.html)
+  describes window source selection and session lifetime.
+- [AT-SPI Action](https://gnome.pages.gitlab.gnome.org/at-spi2-core/devel-docs/doc-org.a11y.atspi.Action.html)
+  and [EditableText](https://gnome.pages.gitlab.gnome.org/at-spi2-core/libatspi/iface.EditableText.html)
+  define operations exposed by accessible elements.
 
 ## Open questions
 
 - Does the first release forward input locally, over SSH, or both?
 - Which sessions should be discoverable from an SSH login with no graphical
   session environment?
+- Should semantic actions prioritize accessible controls or messages defined
+  by a particular application?
 
 ## Protocol impact
 
@@ -92,3 +148,8 @@ The standalone `ctream_agent` contract starts at 1.0.1 (internal build 1).
 It provides discovery as JSON, capture as RGB frames, and input as a line-based
 stream. This is the first version of the contract. Existing ctl contracts
 retain their current versions.
+
+The window milestone advances `ctream_agent` from 1.0.1 (build 1) to 1.0.2
+(build 2). It adds window discovery, window capture, accessibility element
+discovery, and semantic action requests. The agent continues to accept
+display-level operations under 1.0.1.

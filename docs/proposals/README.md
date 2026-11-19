@@ -51,6 +51,7 @@ clarifications and links may update the existing document.
 | [0017](0017-shell-session-management.md) | Manage persistent sessions from ctl shell | Implemented |
 | [0018](0018-daemon-hotreload.md) | Replace daemon code while preserving live work | Proposed |
 | [0019](0019-file-service-previews.md) | Cancellable file services and floating previews | Implemented |
+| [0020](0020-ctream.md) | Graphical session control with ctream | Proposed |
 
 ## Current design and implementation history
 

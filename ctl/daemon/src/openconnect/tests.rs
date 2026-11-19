@@ -77,6 +77,38 @@ fn windows_engine_search_uses_native_executables_and_absolute_directories() {
   assert_eq!(paths.len(), 4);
 }
 
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_engine_command_has_no_console_window() {
+  let powershell = PathBuf::from(std::env::var_os("SystemRoot").expect("missing SystemRoot"))
+    .join(r"System32\WindowsPowerShell\v1.0\powershell.exe");
+  // Query the window handle without opening a console device in the child.
+  let probe = r#"
+    $ErrorActionPreference = 'Stop'
+    Add-Type -Namespace ConsoleProbe -Name Native -MemberDefinition '
+      [DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow();
+    '
+    [ConsoleProbe.Native]::GetConsoleWindow().ToInt64()
+  "#;
+
+  let output = timeout(
+    Duration::from_secs(30),
+    engine_command(&powershell)
+      .args(["-NoProfile", "-NonInteractive", "-Command", probe])
+      .stderr(Stdio::piped())
+      .output(),
+  )
+  .await
+  .expect("console probe timed out")
+  .expect("could not run console probe");
+  assert!(
+    output.status.success(),
+    "{}",
+    String::from_utf8_lossy(&output.stderr)
+  );
+  assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "0");
+}
+
 #[test]
 fn accepts_only_a_single_nonzero_loopback_port() {
   assert_eq!(

@@ -74,6 +74,11 @@ Open the display picker and choose **Windows…** beside an X11 or Wayland
 display, or launch the viewer with `HOST DISPLAY --windows`. The separate
 window helper is only required for the Wayland backend.
 
+From the CLI, run `ctream windows DISPLAY` on the display host, or
+`ctream windows DISPLAY --host SSH_HOST` to query through the remote agent.
+The command lists window IDs, application IDs, and titles. Add `--json` for
+structured output.
+
 After selecting a display, the viewer can request its top-level windows from
 the remote agent and open a capture stream for one of them. Expose titles and
 application identifiers as labels. Bind the capture to an opaque target

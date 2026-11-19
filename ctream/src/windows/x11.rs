@@ -1,8 +1,7 @@
-use ctream::protocol::Window;
+use crate::protocol::Window;
 use std::{
   error::Error,
   io::{self, Write},
-  sync::mpsc::Receiver,
   time::{Duration, Instant},
 };
 use x11rb::{
@@ -117,7 +116,11 @@ pub fn list(display: &str) -> Result<Vec<Window>, Box<dyn Error>> {
   Ok(windows)
 }
 
-pub fn capture(display: &str, id: &str, closed: &Receiver<()>) -> Result<(), Box<dyn Error>> {
+pub fn capture(
+  display: &str,
+  id: &str,
+  mut closed: impl FnMut(Duration) -> bool,
+) -> Result<(), Box<dyn Error>> {
   let id = id
     .strip_prefix("x11-")
     .ok_or("invalid X11 window identifier")?;
@@ -198,7 +201,7 @@ pub fn capture(display: &str, id: &str, closed: &Receiver<()>) -> Result<(), Box
         Err(error) => return Err(error.into()),
       }
     }
-    if super::channel_closed(closed, interval.saturating_sub(started.elapsed())) {
+    if closed(interval.saturating_sub(started.elapsed())) {
       return Ok(());
     }
   }

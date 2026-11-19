@@ -1,10 +1,8 @@
-#[path = "ctream-agent/x11_window.rs"]
-mod x11_window;
-
 use ctream::protocol::{
-  DISPLAY_VERSION, Session, Target, VERSION, WAYLAND_WINDOW_VERSION, Window, X11_FRAME_SIZE,
+  DISPLAY_VERSION, Session, Target, VERSION, WAYLAND_WINDOW_VERSION, X11_FRAME_SIZE,
   valid_window_id,
 };
+use ctream::windows::{self, wayland_window};
 use std::{
   env, fs, io,
   os::unix::{fs::MetadataExt, process::CommandExt},
@@ -129,41 +127,6 @@ fn capture(target: Target) -> io::Result<()> {
   Ok(())
 }
 
-fn wayland_window(target: Target) -> io::Result<Command> {
-  let Target::Wayland(_) = target else {
-    return Err(io::Error::other(
-      "window operations currently require a supported Wayland compositor",
-    ));
-  };
-  let mut command = Command::new("ctream-wayland-window");
-  command
-    .env_remove("WAYLAND_SOCKET")
-    .env("WAYLAND_DISPLAY", target.to_string());
-  Ok(command)
-}
-
-fn list_windows(target: Target) -> Result<Vec<Window>, Box<dyn std::error::Error>> {
-  if matches!(target, Target::X11(_)) {
-    return x11_window::list(&target.to_string());
-  }
-  let output = wayland_window(target)?
-    .arg("list")
-    .stdin(Stdio::null())
-    .output()?;
-  if !output.status.success() {
-    return Err(
-      format!(
-        "window discovery failed: {}",
-        String::from_utf8_lossy(&output.stderr).trim()
-      )
-      .into(),
-    );
-  }
-  let mut windows: Vec<Window> = serde_json::from_slice(&output.stdout)?;
-  windows.retain(|window| valid_window_id(&window.id));
-  Ok(windows)
-}
-
 fn window_operation(
   operation: &str,
   target: Target,
@@ -174,7 +137,10 @@ fn window_operation(
   }
   if operation == "capture-window" {
     if matches!(target, Target::X11(_)) {
-      return x11_window::capture(&target.to_string(), id, &capture_lifetime());
+      let closed = capture_lifetime();
+      return windows::x11::capture(&target.to_string(), id, |delay| {
+        channel_closed(&closed, delay)
+      });
     }
     run_capture(
       wayland_window(target)?.args(["capture", id]),
@@ -185,7 +151,7 @@ fn window_operation(
   if matches!(target, Target::X11(_)) {
     return Err("semantic actions currently require a supported Wayland compositor".into());
   }
-  let window = list_windows(target)?
+  let window = windows::list(target)?
     .into_iter()
     .find(|window| window.id == id)
     .ok_or("selected window is no longer available")?;
@@ -247,7 +213,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "capture" => capture(target)?,
         "input" => input(target)?,
         "windows" if supports_windows(version, target) => {
-          serde_json::to_writer(io::stdout().lock(), &list_windows(target)?)?
+          serde_json::to_writer(io::stdout().lock(), &windows::list(target)?)?
         }
         _ => return Err("unknown ctream-agent operation".into()),
       }

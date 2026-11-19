@@ -422,6 +422,14 @@ installation paths, independently of the marker. Schema-1 incomplete managed
 bundles must be replaced or cleanly reinstalled before adoption.
 This local storage migration changes no named wire contract or internal build.
 
+Remote bundle uploads optionally call `prepare-install` on the verified target
+updater before catalog negotiation. It adopts complete older installations only
+when authoritative catalog state is absent, using the same locked migrator.
+Existing catalogs and pending catalog transactions retain their recorded inventory.
+Older updaters that reject this optional CLI command retain their existing upload
+behavior. Installation progress markers, catalog schemas and named protocol builds
+retain their versions.
+
 ## Discovery and SSH framing
 
 The default ctld socket or Windows pipe is keyed by the protocol major, such as

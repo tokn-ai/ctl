@@ -110,6 +110,143 @@ fn selection(store: &Installations) -> Vec<u8> {
 }
 
 #[test]
+fn update_preparation_adopts_older_complete_builds_and_preserves_selection() {
+  let home = Home::new();
+  let store = home.store();
+  let previous = fixture(&home, 1, Source::Ci, true);
+  let active = fixture(&home, 2, Source::Local, true);
+  store.activate(&previous).unwrap();
+  let (_, lease) = store.activate_and_lease(&active).unwrap();
+  let before = selection(&store);
+  fs::remove_file(store.root.join("catalog.json")).unwrap();
+
+  let entries = store.migrate_catalog_if_missing().unwrap();
+  assert_eq!(entries.len(), 2);
+  assert_eq!(selection(&store), before);
+  assert!(store.is_catalog_migrated().unwrap());
+  assert!(super::super::leases::in_use(&store, &active.manifest.bundle_id).unwrap());
+  for (bundle, channel) in [(&previous, "provided"), (&active, "local")] {
+    let entry = entries
+      .iter()
+      .find(|entry| entry.bundle_id == bundle.manifest.bundle_id)
+      .unwrap();
+    assert_eq!(entry.origin.as_ref().unwrap().channel, channel);
+    assert_eq!(entry.origin.as_ref().unwrap().built_at, None);
+  }
+  assert_eq!(store.migrate_catalog_if_missing().unwrap(), entries);
+  assert_eq!(selection(&store), before);
+  drop(lease);
+}
+
+#[test]
+fn update_preparation_keeps_an_unmarked_catalog_authoritative_and_ignores_orphans() {
+  let home = Home::new();
+  let store = home.store();
+  store
+    .activate(&fixture(&home, 1, Source::Local, true))
+    .unwrap();
+  let entries = store.catalog().unwrap();
+  let catalog = fs::read(store.root.join("catalog.json")).unwrap();
+  let orphan = fixture(&home, 2, Source::Local, true);
+  let orphan = filesystem::publish(&store, &orphan, None).unwrap();
+  fs::write(
+    orphan
+      .directory
+      .join(executable_name(crate::paths::native_target(), "ctl-agent").as_ref()),
+    b"damaged orphan",
+  )
+  .unwrap();
+
+  assert_eq!(store.migrate_catalog_if_missing().unwrap(), entries);
+  assert_eq!(fs::read(store.root.join("catalog.json")).unwrap(), catalog);
+  assert!(!store.root.join(MARKER).exists());
+  assert!(orphan.directory.exists());
+}
+
+#[test]
+fn update_preparation_recovers_a_committed_catalog_without_adopting_orphans() {
+  let home = Home::new();
+  let store = home.store();
+  store
+    .activate(&fixture(&home, 1, Source::Local, true))
+    .unwrap();
+  let entries = store.catalog().unwrap();
+  let orphan = fixture(&home, 2, Source::Local, true);
+  let orphan = filesystem::publish(&store, &orphan, None).unwrap();
+  let before = fs::read(store.root.join("catalog.json")).unwrap();
+  fs::remove_file(store.root.join("catalog.json")).unwrap();
+  private_json(
+    &store.root.join(".catalog-transaction.json"),
+    &serde_json::json!({
+      "catalog": {"schema_version": 1, "entries": entries},
+      "active": null,
+      "previous": null,
+    }),
+  );
+
+  assert_eq!(store.migrate_catalog_if_missing().unwrap(), entries);
+  assert_eq!(fs::read(store.root.join("catalog.json")).unwrap(), before);
+  assert!(!store.root.join(".catalog-transaction.json").exists());
+  assert!(!store.root.join(MARKER).exists());
+  assert!(orphan.directory.exists());
+  assert_eq!(store.list().unwrap().len(), 1);
+}
+
+#[test]
+fn update_preparation_rejects_corrupt_catalog_state_without_replacing_it() {
+  for name in ["catalog.json", ".catalog-transaction.json"] {
+    let home = Home::new();
+    let store = home.store();
+    store
+      .activate(&fixture(&home, 1, Source::Local, true))
+      .unwrap();
+    let path = store.root.join(name);
+    if name == "catalog.json" {
+      fs::write(&path, b"invalid catalog").unwrap();
+    } else {
+      let mut file = options().write(true).create_new(true).open(&path).unwrap();
+      file.write_all(b"invalid transaction").unwrap();
+    }
+    let before = fs::read(&path).unwrap();
+    assert!(store.migrate_catalog_if_missing().is_err());
+    assert_eq!(fs::read(&path).unwrap(), before);
+    assert!(!store.root.join(MARKER).exists());
+  }
+}
+
+#[test]
+fn update_preparation_rejects_a_missing_catalog_after_completed_migration() {
+  let home = Home::new();
+  let store = home.store();
+  store
+    .activate(&fixture(&home, 1, Source::Local, true))
+    .unwrap();
+  store.migrate_catalog().unwrap();
+  fs::remove_file(store.root.join("catalog.json")).unwrap();
+
+  assert!(
+    store
+      .migrate_catalog_if_missing()
+      .unwrap_err()
+      .to_string()
+      .contains("migrated installation catalog is missing")
+  );
+  assert!(!store.root.join("catalog.json").exists());
+}
+
+#[test]
+fn update_preparation_leaves_fresh_stores_without_migration_metadata() {
+  let home = Home::new();
+  let store = home.store();
+  assert_eq!(store.migrate_catalog_if_missing().unwrap(), []);
+  assert!(!store.root.exists());
+  filesystem::ensure_root(&store).unwrap();
+  assert_eq!(store.migrate_catalog_if_missing().unwrap(), []);
+  assert!(!store.root.join("catalog.json").exists());
+  assert!(!store.root.join(MARKER).exists());
+}
+
+#[test]
 fn adoption_preserves_four_local_builds_native_history_and_live_leases() {
   let home = Home::new();
   let store = home.store();

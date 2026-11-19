@@ -179,6 +179,54 @@ fn explicit_catalog_migration_preserves_selection_and_records_component_membersh
 }
 
 #[test]
+fn remote_update_preparation_adopts_complete_builds_before_installing_a_replacement() {
+  let home = Home::new();
+  let (previous, bytes) = archive('a');
+  assert!(home.install(&bytes).status.success());
+  let (active, bytes) = archive('b');
+  assert!(home.install(&bytes).status.success());
+  let root = home.0.join(".tokn/ctl");
+  let selection = fs::read_link(root.join("current")).unwrap();
+  let rollback = fs::read_link(root.join("previous")).unwrap();
+  fs::remove_file(root.join("catalog.json")).unwrap();
+
+  let inspection = home.command(&["catalog-json"]).output().unwrap();
+  assert!(!inspection.status.success());
+  assert!(!root.join("catalog.json").exists());
+  let preparation = home.command(&["prepare-install"]).output().unwrap();
+  assert!(
+    preparation.status.success(),
+    "{}",
+    String::from_utf8_lossy(&preparation.stderr)
+  );
+  assert_eq!(preparation.stdout, b"");
+  assert_eq!(fs::read_link(root.join("current")).unwrap(), selection);
+  assert_eq!(fs::read_link(root.join("previous")).unwrap(), rollback);
+  let inspection = home.command(&["catalog-json"]).output().unwrap();
+  assert!(inspection.status.success());
+  let catalog: ctl_client::installation::InstallationCatalog =
+    serde_json::from_slice(&inspection.stdout).unwrap();
+  catalog.validate().unwrap();
+  assert_eq!(catalog.installations.len(), 2);
+  for bundle in [&active, &previous] {
+    assert!(catalog.installations.iter().any(|entry| {
+      entry.bundle_id == bundle.bundle_id && entry.origin.as_ref().unwrap().channel == "provided"
+    }));
+  }
+
+  let (replacement, bytes) = archive('c');
+  let installed = home.install(&bytes);
+  assert!(
+    installed.status.success(),
+    "{}",
+    String::from_utf8_lossy(&installed.stderr)
+  );
+  let installs = ctl_core::installations::Installations::new(&home.0);
+  assert_eq!(installs.active().unwrap().unwrap().manifest, replacement);
+  assert_eq!(installs.previous().unwrap().unwrap().manifest, active);
+}
+
+#[test]
 fn migration_rejects_remote_options_before_preparing_storage() {
   let home = Home::new();
   let output = home

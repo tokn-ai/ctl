@@ -3,14 +3,32 @@ use super::*;
 const VALID_PROGRESS: &[u8] = b"ctl-install-progress-v1 receiving 0\nctl-install-progress-v1 receiving 5\nctl-install-progress-v1 receiving 10\nctl-install-progress-v1 extracting\nctl-install-progress-v1 checking ctl-agent\nctl-install-progress-v1 checking ctmuxd\nctl-install-progress-v1 checking ctl-taskd\nctl-install-progress-v1 checking ctld\nctl-install-progress-v1 activating\nctl-install-v1\n";
 
 #[cfg(unix)]
+const PREPARATION_UPDATER_FIXTURE: &[u8] = br#"#!/bin/sh
+printf '%s\n' "$1" >> "$HOME/calls"
+case "$1" in
+  prepare-install)
+    cat > "$HOME/preparation-input"
+    printf 'preparation output\n'
+    printf 'preparation diagnostic\n' >&2
+    exit "$PREPARATION_CODE";;
+  catalog-json)
+    cat > "$HOME/catalog-input"
+    exit "$PROBE_CODE";;
+  *)
+    printf '%s\n' "$@" > "$HOME/arguments"
+    cat > "$HOME/archive";;
+esac
+"#;
+
+#[cfg(unix)]
 #[tokio::test]
-async fn provenance_negotiation_preserves_archive_input_and_only_falls_back_for_old_clap() {
+async fn updater_preparation_preserves_archive_input_and_only_falls_back_for_old_clap() {
   use std::os::unix::fs::PermissionsExt as _;
   let fixture = BundleFixture::new();
   let home = fixture.directory.join("origin-home");
   let manager = home.join(".tokn/ctl/bin/ctlup");
   std::fs::create_dir_all(manager.parent().unwrap()).unwrap();
-  std::fs::write(&manager, b"#!/bin/sh\ncase \"$1\" in\n catalog-json) exit \"$PROBE_CODE\";;\n *) printf '%s\\n' \"$@\" > \"$HOME/arguments\"; cat > \"$HOME/archive\";;\nesac\n").unwrap();
+  std::fs::write(&manager, PREPARATION_UPDATER_FIXTURE).unwrap();
   std::fs::set_permissions(&manager, std::fs::Permissions::from_mode(0o700)).unwrap();
   let origin = ctl_core::installations::CatalogOrigin {
     channel: "nightly".into(),
@@ -19,39 +37,71 @@ async fn provenance_negotiation_preserves_archive_input_and_only_falls_back_for_
   };
   let encoded = crate::installation::encode_catalog_origin(&origin).unwrap();
   for operation in ["install-archive", "activate-installed aaaaaaaa"] {
-    for probe_code in [0, 2, 7] {
-      let mut command = Command::new("sh");
-      command
-        .args([
-          "-c",
-          &unix_updater_invocation(operation, Some(&origin)).unwrap(),
-        ])
-        .env("HOME", &home)
-        .env("PROBE_CODE", probe_code.to_string());
-      let (status, _, _) = run_updater_command(command, b"archive\x00bytes", |_| {})
-        .await
-        .unwrap();
-      if probe_code == 7 {
-        assert_eq!(status.code(), Some(7));
-        assert!(!home.join("arguments").exists());
-      } else {
-        assert!(status.success());
-        let mut expected = operation.split_whitespace().collect::<Vec<_>>().join("\n");
-        if probe_code == 0 {
-          expected.push_str("\n--origin-hex\n");
-          expected.push_str(&encoded);
+    for selected_origin in [None, Some(&origin)] {
+      for (preparation_code, probe_code) in [(0, 0), (2, 2), (2, 0), (0, 2), (7, 0), (0, 7)] {
+        let mut command = Command::new("sh");
+        command
+          .args([
+            "-c",
+            &unix_updater_invocation(operation, selected_origin).unwrap(),
+          ])
+          .env("HOME", &home)
+          .env("PREPARATION_CODE", preparation_code.to_string())
+          .env("PROBE_CODE", probe_code.to_string());
+        let (status, stdout, stderr) = run_updater_command(command, b"archive\x00bytes", |_| {})
+          .await
+          .unwrap();
+        assert_eq!(stdout, b"");
+        let preparation_input = std::fs::read(home.join("preparation-input")).unwrap();
+        assert_eq!(preparation_input, b"");
+        let mut expected_calls = vec!["prepare-install"];
+        if preparation_code != 7 && selected_origin.is_some() {
+          expected_calls.push("catalog-json");
+          let catalog_input = std::fs::read(home.join("catalog-input")).unwrap();
+          assert_eq!(catalog_input, b"");
         }
-        expected.push('\n');
+        if preparation_code == 7 || (selected_origin.is_some() && probe_code == 7) {
+          assert_eq!(status.code(), Some(7));
+          assert!(!home.join("arguments").exists());
+          assert!(!home.join("archive").exists());
+          if preparation_code == 7 {
+            assert!(String::from_utf8_lossy(&stderr).contains("preparation diagnostic"));
+          }
+        } else {
+          assert!(status.success());
+          assert_eq!(stderr, b"");
+          expected_calls.push(operation.split_whitespace().next().unwrap());
+          let mut expected = operation.split_whitespace().collect::<Vec<_>>().join("\n");
+          if selected_origin.is_some() && probe_code == 0 {
+            expected.push_str("\n--origin-hex\n");
+            expected.push_str(&encoded);
+          }
+          expected.push('\n');
+          assert_eq!(
+            std::fs::read_to_string(home.join("arguments")).unwrap(),
+            expected
+          );
+          assert_eq!(
+            std::fs::read(home.join("archive")).unwrap(),
+            b"archive\x00bytes"
+          );
+        }
         assert_eq!(
-          std::fs::read_to_string(home.join("arguments")).unwrap(),
-          expected
+          std::fs::read_to_string(home.join("calls")).unwrap(),
+          expected_calls.join("\n") + "\n"
         );
-        assert_eq!(
-          std::fs::read(home.join("archive")).unwrap(),
-          b"archive\x00bytes"
-        );
-        std::fs::remove_file(home.join("arguments")).unwrap();
-        std::fs::remove_file(home.join("archive")).unwrap();
+        for name in [
+          "calls",
+          "preparation-input",
+          "catalog-input",
+          "arguments",
+          "archive",
+        ] {
+          let path = home.join(name);
+          if path.exists() {
+            std::fs::remove_file(path).unwrap();
+          }
+        }
       }
     }
   }

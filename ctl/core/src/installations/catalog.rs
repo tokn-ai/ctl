@@ -349,7 +349,7 @@ pub(super) fn read_for_migration(store: &Installations) -> io::Result<State> {
   Ok(state)
 }
 
-fn existing_state(store: &Installations) -> io::Result<Option<State>> {
+pub(super) fn existing_state(store: &Installations) -> io::Result<Option<State>> {
   // A durable journal is the committed intent after interruption. Inspection
   // uses its complete catalog without mutating pointers or hiding corruption.
   if let Some(transaction) = read_file::<Transaction>(&store.root.join(JOURNAL))? {
@@ -360,7 +360,7 @@ fn existing_state(store: &Installations) -> io::Result<Option<State>> {
   }
 }
 
-fn has_installation_data(store: &Installations) -> io::Result<bool> {
+pub(super) fn has_installation_data(store: &Installations) -> io::Result<bool> {
   for name in ["current", "previous", ".activation.json"] {
     if filesystem::path_exists(&store.root.join(name))? {
       return Ok(true);

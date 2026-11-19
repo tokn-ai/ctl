@@ -32,7 +32,7 @@ fn powershell_command(script: &str) -> io::Result<String> {
   // Windows OpenSSH commonly starts commands through cmd.exe. Compress long
   // scripts rather than exceeding its command-line limit or changing stdin,
   // which must remain the original binary installation stream.
-  let mut compressor = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+  let mut compressor = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
   compressor.write_all(script.as_bytes())?;
   let encoded = base64::engine::general_purpose::STANDARD.encode(compressor.finish()?);
   let wrapper = format!(
@@ -156,14 +156,14 @@ pub(super) async fn install(
   }
   let digest = format!("{:x}", Sha256::digest(updater));
   let account_guard = account_guard(expected_account)?;
-  let origin_arguments = origin_arguments(origin)?;
+  let preparation = updater_preparation(origin)?;
   let preflight = format!(
     r#"$ErrorActionPreference = 'Stop'
 {account_guard}
 {MANAGER}
 if (![IO.File]::Exists($manager)) {{ exit 11 }}
 if ((& $manager updater-digest) -ne '{digest}') {{ exit 11 }}
-{origin_arguments}
+{preparation}
 $confirmation = & $manager activate-installed '{}' @originArgs
 $code = $LASTEXITCODE
 if ($code -eq 0) {{
@@ -185,21 +185,30 @@ exit $code"#,
     Some(11) => updater,
     _ => return require_updater_success(status, &stdout, &stderr, b"ctl-install-v1\n"),
   };
-  let script = install_script(&digest, prefix.len(), &account_guard, &origin_arguments);
+  let script = install_script(&digest, prefix.len(), &account_guard, &preparation);
   let command = windows_ssh_command(destination, options, interaction, &script).await?;
   run_package_install_with_prefix(command, prefix, archive, layout.names(), on_progress).await
 }
 
-fn origin_arguments(
+fn updater_preparation(
   origin: Option<&ctl_core::installations::CatalogOrigin>,
 ) -> Result<String, CoreError> {
+  let preparation = r#"$originArgs = @()
+$savedPreference = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+$preparation = & $manager prepare-install 2>&1
+$preparationCode = $LASTEXITCODE
+$ErrorActionPreference = $savedPreference
+if ($preparationCode -ne 0 -and $preparationCode -ne 2) {
+  throw ('ctlup installation preparation failed: ' + ($preparation -join "`n"))
+}"#;
   let Some(origin) = origin else {
-    return Ok("$originArgs = @()".into());
+    return Ok(preparation.into());
   };
   let encoded = crate::installation::encode_catalog_origin(origin)
     .map_err(|error| CoreError::InvalidComponentBundle(error.to_string()))?;
   Ok(format!(
-    r#"$originArgs = @()
+    r#"{preparation}
 $origin = '{encoded}'
 $savedPreference = $ErrorActionPreference
 $ErrorActionPreference = 'Continue'
@@ -215,14 +224,14 @@ fn install_script(
   digest: &str,
   prefix_size: usize,
   account_guard: &str,
-  origin_arguments: &str,
+  preparation: &str,
 ) -> String {
   INSTALL_SCRIPT
     .replace("__ACCOUNT_GUARD__", account_guard)
     .replace("__MANAGER__", MANAGER)
     .replace("__UPDATER_SIZE__", &prefix_size.to_string())
     .replace("__UPDATER_SHA256__", digest)
-    .replace("__ORIGIN_ARGUMENTS__", origin_arguments)
+    .replace("__UPDATE_PREPARATION__", preparation)
 }
 
 #[cfg(test)]
@@ -237,7 +246,7 @@ mod tests {
       &"a".repeat(64),
       ctl_core::bundle_layout::MAX_FILE_BYTES,
       &guard,
-      &origin_arguments(None).unwrap(),
+      &updater_preparation(None).unwrap(),
     );
     let command = powershell_command(&script).unwrap();
     assert!(command.len() < 8000);
@@ -256,7 +265,7 @@ mod tests {
       &"a".repeat(64),
       ctl_core::bundle_layout::MAX_FILE_BYTES,
       &guard,
-      &origin_arguments(Some(&origin)).unwrap(),
+      &updater_preparation(Some(&origin)).unwrap(),
     );
     assert!(encoded_powershell_command(&script).len() >= 8000);
     let command = powershell_command(&script).unwrap();

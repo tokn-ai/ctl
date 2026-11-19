@@ -211,12 +211,31 @@ fn unix_updater_invocation(
   operation: &str,
   origin: Option<&ctl_core::installations::CatalogOrigin>,
 ) -> Result<String, CoreError> {
-  let mut script = format!("manager=\"$HOME/.tokn/ctl/bin/ctlup\"\nset -- {operation}\n");
+  let mut script = format!(
+    r#"manager="$HOME/.tokn/ctl/bin/ctlup"
+if preparation=$("$manager" prepare-install </dev/null 2>&1); then
+  :
+else
+  status=$?
+  if [ "$status" -ne 2 ]; then
+    printf '%s\n' "$preparation" >&2
+    exit "$status"
+  fi
+fi
+set -- {operation}
+"#
+  );
   if let Some(origin) = origin {
     let encoded = crate::installation::encode_catalog_origin(origin)
       .map_err(|error| CoreError::InvalidComponentBundle(error.to_string()))?;
     script = format!(
-      "{script}if \"$manager\" catalog-json </dev/null >/dev/null; then\n  set -- \"$@\" --origin-hex '{encoded}'\nelse\n  status=$?\n  [ \"$status\" -eq 2 ] || exit \"$status\"\nfi\n"
+      r#"{script}if "$manager" catalog-json </dev/null >/dev/null; then
+  set -- "$@" --origin-hex '{encoded}'
+else
+  status=$?
+  [ "$status" -eq 2 ] || exit "$status"
+fi
+"#
     );
   }
   script.push_str("exec \"$manager\" \"$@\"");

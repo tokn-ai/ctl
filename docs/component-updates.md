@@ -163,7 +163,9 @@ A component is a complete runtime bundle for one target, named `bundle-<target>`
 with every locally installed target. Channel markers such as `(stable, nightly)`
 show where each target exists across all recorded installed builds. Multiple
 builds for one target still produce one component row. Existing installations
-without a catalog must run `ctlup migrate` before normal inspection or updates.
+without a catalog must run `ctlup migrate` before normal inspection or local updates.
+An explicit remote bundle update prepares its verified target updater to adopt
+older complete installations whose catalog is missing before activation or upload.
 Use `--installed` for an offline list of installed targets. An explicit
 channel filters the installed targets, while each row still lists all its known
 channels. Retained rollback or running payloads continue to count until removed
@@ -196,6 +198,10 @@ canonical installation paths and the authoritative catalog. Fresh installs
 create catalog records immediately. Uncommitted payloads are cleanup candidates
 and never appear as installed builds. The migration marker makes the explicit
 import repeatable; it does not switch normal readers between old and new modes.
+Remote update preparation calls the same migrator only when authoritative catalog
+state is absent. An existing catalog or pending catalog transaction remains
+authoritative, and corrupt metadata fails the update. Preparation preserves
+archive stdin and falls back for older updaters without this optional operation.
 Incomplete historical four-service installations must be replaced with a
 complete build using their old manager, or cleanly reinstalled, before adoption.
 Original external source directories remain available to processes that may

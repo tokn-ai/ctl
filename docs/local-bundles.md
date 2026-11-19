@@ -2,10 +2,15 @@
 
 ## Install a native development build
 
-`ctlup dev` builds and installs the current checkout, including uncommitted
-changes. It prepares all six runtime commands and the separate `ctlup` manager
-as one verified source cohort. On macOS it signs the complete `ctld.app` using
-the shared development provisioning profile.
+Run `ctlup dev` from the root of the ctl checkout you want to build, including
+its uncommitted changes. The command fails if the current directory is outside
+that root or in a subdirectory. Use `--workspace /path/to/checkout` to select a
+root explicitly. The same rule applies to `--app`, `--renew-signing`, and
+remote development builds.
+
+The native build prepares all six runtime commands and the separate `ctlup`
+manager together. On macOS it signs the complete `ctld.app` using the shared
+development provisioning profile.
 
 ```sh
 ctlup dev

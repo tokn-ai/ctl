@@ -278,6 +278,7 @@ fn empty_status_explains_managed_installations_and_scopes_the_development_hint()
     ".git",
     "Cargo.toml",
     "ctl/cli/Cargo.toml",
+    "scripts/dev/build-local-development.mts",
     "scripts/dev/ctld-signed.mts",
   ] {
     fs::write(checkout.join(path), b"fixture").unwrap();
@@ -285,6 +286,16 @@ fn empty_status_explains_managed_installations_and_scopes_the_development_hint()
   let output = home
     .command(&["status"])
     .current_dir(checkout.join("ctl/cli"))
+    .output()
+    .unwrap();
+  assert!(output.status.success());
+  let text = String::from_utf8(output.stdout).unwrap();
+  assert!(text.contains("No managed ctl installation."));
+  assert!(!text.contains("ctlup dev"));
+
+  let output = home
+    .command(&["status"])
+    .current_dir(&checkout)
     .output()
     .unwrap();
   assert!(output.status.success());
@@ -551,6 +562,7 @@ fn failed_renewal_passes_verified_signing_input_and_preserves_the_installation()
 
   let workspace = home.0.join("checkout with spaces");
   fs::create_dir_all(workspace.join("scripts/dev")).unwrap();
+  fs::write(workspace.join("Cargo.toml"), "[workspace]\n").unwrap();
   fs::write(workspace.join("scripts/dev/ctld-signed.mts"), []).unwrap();
   let signer = home.0.join("signer");
   fs::write(

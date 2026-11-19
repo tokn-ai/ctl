@@ -328,8 +328,10 @@ ctlup dev --app
 ctlup dev --renew-signing
 ```
 
-`dev` builds the six native runtime components and the independent updater from
-one checkout. On macOS it signs and verifies the complete `ctld.app` package.
+`dev` requires a ctl checkout root as the current directory or as the path
+passed to `--workspace`. It builds the six native runtime components and the
+independent updater from that checkout. On macOS it signs and verifies the
+complete `ctld.app` package.
 Only a successful complete build becomes active; compilation, signing or
 verification failure leaves the previous installation and running services
 intact. `ctlup status` then reports that development installation.

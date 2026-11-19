@@ -1,13 +1,16 @@
 use super::{TargetOptions, arguments::DevelopmentArguments};
 use std::io::{self, Write as _};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+const NATIVE_BUILDER: &str = "scripts/dev/build-local-development.mts";
 
 pub(super) async fn run(
   home: &Path,
   options: DevelopmentArguments,
   target: TargetOptions<'_>,
 ) -> io::Result<()> {
-  if target.host.is_some() || target.destination.is_some() || !options.hosts.is_empty() {
+  let remote = target.host.is_some() || target.destination.is_some() || !options.hosts.is_empty();
+  if remote {
     if options.app
       || options.renew_signing
       || options.release
@@ -22,20 +25,26 @@ pub(super) async fn run(
         "Desktop, signing, and native Cargo options require a local build. Remote development accepts host options, --workspace, and --json.",
       ));
     }
-    return super::update::run_development(
-      home,
-      target,
-      options.hosts,
-      options.workspace.as_deref(),
-      options.json,
-    )
-    .await;
+  } else {
+    super::require_local(target)?;
   }
-  super::require_local(target)?;
-  let workspace = options
-    .workspace
-    .clone()
-    .map_or_else(std::env::current_dir, Ok)?;
+  let required: &[&str] = if remote {
+    &["scripts/dev/build-agent-bundle.mts"]
+  } else if options.app {
+    &[
+      "scripts/dev/build-desktop-app.mts",
+      "apps/desktop/src-tauri/tauri.conf.json",
+    ]
+  } else if options.renew_signing {
+    &["scripts/dev/ctld-signed.mts"]
+  } else {
+    &[NATIVE_BUILDER]
+  };
+  let workspace = checkout_root(options.workspace.as_deref(), required)?;
+  if remote {
+    return super::update::run_development(home, target, options.hosts, &workspace, options.json)
+      .await;
+  }
   if options.app {
     return install_app(home, &workspace, options.json).await;
   }
@@ -97,6 +106,29 @@ pub(super) async fn run(
   }
   drop(prepared);
   Ok(())
+}
+
+pub(super) fn in_native_checkout() -> bool {
+  checkout_root(None, &[NATIVE_BUILDER]).is_ok()
+}
+
+fn checkout_root(explicit: Option<&Path>, required: &[&str]) -> io::Result<PathBuf> {
+  let directory = explicit.map_or_else(std::env::current_dir, |path| Ok(path.to_owned()))?;
+  let workspace = directory.canonicalize().map_err(|error| {
+    io::Error::new(
+      error.kind(),
+      format!("could not open the ctl checkout root: {error}"),
+    )
+  })?;
+  if !workspace.join("Cargo.toml").is_file()
+    || required.iter().any(|file| !workspace.join(file).is_file())
+  {
+    return Err(io::Error::new(
+      io::ErrorKind::InvalidInput,
+      "run ctlup dev from a ctl checkout root or pass its path with --workspace",
+    ));
+  }
+  Ok(workspace)
 }
 
 async fn install_app(home: &Path, workspace: &Path, json: bool) -> io::Result<()> {

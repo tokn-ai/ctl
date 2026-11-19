@@ -237,7 +237,7 @@ pub(super) struct DevelopmentArguments {
   /// Build and deploy to these saved Linux hosts; repeat or separate with commas.
   #[arg(long, value_delimiter = ',', num_args = 1..)]
   pub hosts: Vec<String>,
-  /// Source checkout; defaults to the current directory.
+  /// Path to a ctl checkout root. Defaults to the current directory.
   #[arg(long)]
   pub workspace: Option<PathBuf>,
   /// Build and install the native desktop app in the development profile.

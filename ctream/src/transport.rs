@@ -1,5 +1,6 @@
 use crate::protocol::{
-  Action, ActionResult, DISPLAY_VERSION, Element, Session, Target, VERSION, Window, valid_window_id,
+  Action, ActionResult, DISPLAY_VERSION, Element, Session, Target, VERSION, WAYLAND_WINDOW_VERSION,
+  Window, valid_window_id,
 };
 use serde::de::DeserializeOwned;
 use std::{
@@ -62,7 +63,7 @@ impl Transport for Ssh {
       Request::Discover => format!("{DISPLAY_VERSION} discover"),
       Request::Capture(target) => format!("{DISPLAY_VERSION} capture {target}"),
       Request::Input(target) => format!("{DISPLAY_VERSION} input {target}"),
-      Request::Windows(target) => format!("{VERSION} windows {target}"),
+      Request::Windows(target) => format!("{} windows {target}", window_version(target)),
       Request::CaptureWindow(target, id) => window_command("capture-window", target, &id)?,
       Request::Elements(target, id) => window_command("elements", target, &id)?,
       Request::Action(target, id) => window_command("action", target, &id)?,
@@ -92,11 +93,21 @@ impl Transport for Ssh {
   }
 }
 
+fn window_version(target: Target) -> &'static str {
+  match target {
+    Target::X11(_) => VERSION,
+    Target::Wayland(_) => WAYLAND_WINDOW_VERSION,
+  }
+}
+
 fn window_command(operation: &str, target: Target, id: &str) -> io::Result<String> {
   if !valid_window_id(id) {
     return Err(io::Error::other("invalid window identifier"));
   }
-  Ok(format!("{VERSION} {operation} {target} {id}"))
+  Ok(format!(
+    "{} {operation} {target} {id}",
+    window_version(target)
+  ))
 }
 
 fn json_response<T: DeserializeOwned>(channel: Channel) -> io::Result<T> {

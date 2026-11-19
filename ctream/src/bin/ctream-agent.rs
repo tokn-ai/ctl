@@ -1,5 +1,9 @@
+#[path = "ctream-agent/x11_window.rs"]
+mod x11_window;
+
 use ctream::protocol::{
-  DISPLAY_VERSION, Session, Target, VERSION, Window, X11_FRAME_SIZE, valid_window_id,
+  DISPLAY_VERSION, Session, Target, VERSION, WAYLAND_WINDOW_VERSION, Window, X11_FRAME_SIZE,
+  valid_window_id,
 };
 use std::{
   env, fs, io,
@@ -139,6 +143,9 @@ fn wayland_window(target: Target) -> io::Result<Command> {
 }
 
 fn list_windows(target: Target) -> Result<Vec<Window>, Box<dyn std::error::Error>> {
+  if matches!(target, Target::X11(_)) {
+    return x11_window::list(&target.to_string());
+  }
   let output = wayland_window(target)?
     .arg("list")
     .stdin(Stdio::null())
@@ -166,11 +173,17 @@ fn window_operation(
     return Err("invalid window identifier".into());
   }
   if operation == "capture-window" {
+    if matches!(target, Target::X11(_)) {
+      return x11_window::capture(&target.to_string(), id, &capture_lifetime());
+    }
     run_capture(
       wayland_window(target)?.args(["capture", id]),
       &capture_lifetime(),
     )?;
     return Ok(());
+  }
+  if matches!(target, Target::X11(_)) {
+    return Err("semantic actions currently require a supported Wayland compositor".into());
   }
   let window = list_windows(target)?
     .into_iter()
@@ -191,11 +204,18 @@ fn window_operation(
   )
 }
 
+fn supports_windows(version: &str, target: Target) -> bool {
+  version == VERSION || (version == WAYLAND_WINDOW_VERSION && matches!(target, Target::Wayland(_)))
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
   let args: Vec<_> = env::args().skip(1).collect();
   match args.as_slice() {
     [version, operation]
-      if matches!(version.as_str(), VERSION | DISPLAY_VERSION) && operation == "discover" =>
+      if matches!(
+        version.as_str(),
+        VERSION | WAYLAND_WINDOW_VERSION | DISPLAY_VERSION
+      ) && operation == "discover" =>
     {
       let runtime_uid = env::var_os("XDG_RUNTIME_DIR")
         .and_then(|path| fs::metadata(path).ok())
@@ -216,22 +236,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect();
       serde_json::to_writer(io::stdout().lock(), &sessions)?;
     }
-    [version, operation, target] if matches!(version.as_str(), VERSION | DISPLAY_VERSION) => {
+    [version, operation, target]
+      if matches!(
+        version.as_str(),
+        VERSION | WAYLAND_WINDOW_VERSION | DISPLAY_VERSION
+      ) =>
+    {
       let target = Target::parse(target)?;
       match operation.as_str() {
         "capture" => capture(target)?,
         "input" => input(target)?,
-        "windows" if version == VERSION => {
+        "windows" if supports_windows(version, target) => {
           serde_json::to_writer(io::stdout().lock(), &list_windows(target)?)?
         }
         _ => return Err("unknown ctream-agent operation".into()),
       }
     }
     [version, operation, target, id]
-      if version == VERSION
-        && matches!(operation.as_str(), "capture-window" | "elements" | "action") =>
+      if matches!(operation.as_str(), "capture-window" | "elements" | "action") =>
     {
-      window_operation(operation, Target::parse(target)?, id)?;
+      let target = Target::parse(target)?;
+      if !supports_windows(version, target) {
+        return Err("window operation unavailable in requested agent version".into());
+      }
+      window_operation(operation, target, id)?;
     }
     _ => return Err("usage: ctream-agent VERSION OPERATION [DISPLAY [WINDOW]]".into()),
   }

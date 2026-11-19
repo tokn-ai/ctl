@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-pub const VERSION: &str = "1.0.2";
+pub const VERSION: &str = "1.0.3";
+pub const WAYLAND_WINDOW_VERSION: &str = "1.0.2";
 pub const X11_FRAME_SIZE: [usize; 2] = [960, 540];
 
 #[derive(Clone, Copy)]

@@ -34,10 +34,6 @@ fn result<T>(receiver: &Receiver<io::Result<T>>) -> Option<io::Result<T>> {
 }
 
 impl Panel {
-  pub fn target(&self) -> Target {
-    self.target
-  }
-
   pub fn new(target: Target, window: String) -> Self {
     Self {
       target,

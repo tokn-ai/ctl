@@ -70,8 +70,9 @@ graphical session. Test consent, cancellation, and session closure.
 
 Install the window helper on the remote host with
 `cargo install --locked --path ctream/wayland-input --bin ctream-wayland-window --root ~/.local`.
-Open the display picker and choose **Windows…** beside the Wayland display,
-or launch the viewer with `HOST wayland-N --windows`.
+Open the display picker and choose **Windows…** beside an X11 or Wayland
+display, or launch the viewer with `HOST DISPLAY --windows`. The separate
+window helper is only required for the Wayland backend.
 
 After selecting a display, the viewer can request its top-level windows from
 the remote agent and open a capture stream for one of them. Expose titles and
@@ -83,11 +84,12 @@ Start with the user-owned nested Sway session. Discover windows through
 `ext_foreign_toplevel_list_v1` and capture the selected toplevel through
 `ext_foreign_toplevel_image_capture_source_manager_v1` and
 `ext_image_copy_capture_manager_v1`. The test session advertises all three
-interfaces. For X11, evaluate FFmpeg's `x11grab` with `window_id` for a
-prototype. Its capture region stays at the initial size, so test growth,
-shrink, unmap, and close before choosing the long-term backend. A Wayland
-session may also offer window selection through the ScreenCast portal when
-its backend advertises that source type.
+interfaces. On X11, the agent enumerates top-level windows and reads the
+selected window's offscreen backing pixmap through X Composite. Each frame
+carries its current dimensions. A mapped window can be captured while
+covered, and the stream pauses while the window is unmapped. The X11 window
+preview is view-only. A Wayland session may also offer window selection
+through the ScreenCast portal when its backend advertises that source type.
 
 Verify capture with two distinct windows. Move, resize, and cover the selected
 window and check that only its content is streamed. Verify what happens when
@@ -126,8 +128,8 @@ explicitly. Window capture can work independently of semantic actions.
   capture engine and preview lifecycle if ctream needs a live desktop view.
 - [Sway's Wayland server](https://github.com/swaywm/sway/blob/master/sway/server.c)
   registers the foreign-toplevel capture source manager.
-- [FFmpeg x11grab](https://www.ffmpeg.org/ffplay-all.html#x11grab) documents
-  window selection and capture size limits.
+- [X Composite](https://man.archlinux.org/man/XCompositeNameWindowPixmap.3.en)
+  documents the offscreen backing pixmap and its lifetime.
 - [ScreenCast portal](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.ScreenCast.html)
   describes window source selection and session lifetime.
 - [AT-SPI Action](https://gnome.pages.gitlab.gnome.org/at-spi2-core/devel-docs/doc-org.a11y.atspi.Action.html)
@@ -153,3 +155,7 @@ The window milestone advances `ctream_agent` from 1.0.1 (build 1) to 1.0.2
 (build 2). It adds window discovery, window capture, accessibility element
 discovery, and semantic action requests. The agent continues to accept
 display-level operations under 1.0.1.
+
+Version 1.0.3 (build 3) adds X11 targets to window discovery and capture,
+with dimensioned PPM frames following the existing Wayland window format.
+The agent retains the 1.0.1 and 1.0.2 contracts.

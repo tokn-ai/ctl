@@ -41,6 +41,7 @@ impl Preview {
     window: Option<Window>,
     ctx: egui::Context,
   ) -> io::Result<Self> {
+    let format = capture::FrameFormat::for_capture(target, window.is_some());
     let (request, input, input_error) = match window {
       Some(window) => (Request::CaptureWindow(target, window.id), None, None),
       None => {
@@ -58,7 +59,7 @@ impl Preview {
     thread::spawn(move || {
       let mut buffer = Vec::new();
       loop {
-        let image = match capture::read_frame(&mut stdout, &target, &mut buffer) {
+        let image = match capture::read_frame(&mut stdout, format, &mut buffer) {
           Ok(image) => image,
           Err(error) => {
             reader.lock().unwrap().error = Some(format!(
@@ -170,11 +171,13 @@ struct Viewer {
   transport: Arc<dyn Transport + Send + Sync>,
   state: State,
   semantic: Option<semantic::Panel>,
+  window_display: Option<Target>,
 }
 
 impl Viewer {
   fn discover(&mut self, ctx: &egui::Context) {
     self.semantic = None;
+    self.window_display = None;
     let transport = Arc::clone(&self.transport);
     self.state = State::Discovering(background(ctx, move || {
       transport::discover(transport.as_ref())
@@ -190,8 +193,10 @@ impl Viewer {
   }
 
   fn connect(&mut self, target: Target, window: Option<Window>, ctx: &egui::Context) {
+    self.window_display = window.as_ref().map(|_| target);
     self.semantic = window
       .as_ref()
+      .filter(|_| matches!(target, Target::Wayland(_)))
       .map(|window| semantic::Panel::new(target, window.id.clone()));
     let transport = Arc::clone(&self.transport);
     let render = ctx.clone();
@@ -227,18 +232,20 @@ impl eframe::App for Viewer {
       self.state = next;
     }
     if let State::Viewing(preview) = &mut self.state {
-      if let Some(semantic) = &mut self.semantic {
+      if let Some(target) = self.window_display {
         let mut back = false;
         egui::TopBottomPanel::top("window_navigation").show(ctx, |ui| {
           back = ui.button("Back to windows").clicked();
         });
         if back {
-          let target = semantic.target();
           self.semantic = None;
+          self.window_display = None;
           self.windows(target, ctx);
           ctx.request_repaint();
           return;
         }
+      }
+      if let Some(semantic) = &mut self.semantic {
         semantic.show(ctx, &self.transport);
       }
       preview.update(ctx, frame);
@@ -303,7 +310,7 @@ impl eframe::App for Viewer {
             {
               selected = Some((target, None));
             }
-            if let Some(target @ Target::Wayland(_)) = target
+            if let Some(target) = target
               && ui
                 .add_enabled(session.selectable, egui::Button::new("Windows…"))
                 .clicked()
@@ -354,6 +361,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         transport,
         state: State::Selecting(Vec::new()),
         semantic: None,
+        window_display: None,
       };
       if let Some(target) = target {
         if windows {

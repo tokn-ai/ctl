@@ -94,8 +94,7 @@ pub fn list(display: &str) -> Result<Vec<Window>, Box<dyn Error>> {
     .value;
     let app_id = class
       .split(|byte| *byte == 0)
-      .filter(|part| !part.is_empty())
-      .next_back()
+      .rfind(|part| !part.is_empty())
       .map(|part| part.iter().copied().map(char::from).collect())
       .unwrap_or_default();
     Ok(Some(Window {

@@ -2,10 +2,11 @@
 
 [![CI](https://github.com/tokn-ai/ctl/actions/workflows/ci.yml/badge.svg)](https://github.com/tokn-ai/ctl/actions/workflows/ci.yml)
 
-This repository will contain two independently useful products:
+The root Cargo workspace includes these tools.
 
-- `ctmux`: persistent local terminal sessions;
-- `ctl`: local and SSH-authorized access to terminal sessions and managed tasks.
+- `ctmux` provides persistent local terminal sessions.
+- `ctl` provides local and SSH-authorized access to terminal sessions and managed tasks.
+- `ctream` discovers, streams, and controls X11 and Wayland sessions independently of `ctld`.
 
 The current MVP supports local `ctmux` sessions plus mixed local/SSH sessions
 in both the desktop app and `ctl` on macOS and other Unix platforms. Windows
@@ -60,6 +61,9 @@ Cargo package names and installed command names are intentionally separate:
 | `ctmuxd` | `ctmuxd` |
 | `ctmux-tui` | `ctmux-tui` |
 | `ctmux-app` | desktop app `ctmux` |
+| `ctream` | `ctream`, `ctream-agent` |
+| `ctream-preview` | `ctream-preview` |
+| `ctream-wayland-input` | `ctream-wayland-input`, `ctream-wayland-window` (Linux) |
 
 For example, `cargo build -p ctl-cli -p ctmux-cli` builds `ctl` and `ctmux`.
 The terminal subcommand is `ctl ctmux`; task-daemon maintenance remains
@@ -274,6 +278,11 @@ to use the replacement. See [local development builds](docs/local-bundles.md).
 ```sh
 cargo build --workspace
 ```
+
+To build just the ctream CLI and remote agent, run `cargo build -p ctream`.
+After installing the agent on the Linux display host, run
+`cargo run -p ctream-preview -- SSH_HOST` from the repository root to open the
+local wgpu viewer. See the [ctream setup instructions](docs/proposals/0020-ctream.md#design).
 
 For the tmux-style terminal UI (local sessions, including when run inside SSH):
 

@@ -1,7 +1,8 @@
 # Tests and CI
 
 Use Node 24, pnpm 10, and the Rust toolchain pinned in `rust-toolchain.toml`.
-On Linux, install the Tauri system dependencies listed in `.github/workflows/ci.yml`.
+On Linux, install the system dependencies listed in `.github/workflows/ci.yml`,
+including `libxkbcommon-dev` for the ctream Wayland helpers.
 
 On Linux or macOS, run the shared check entry point from the repository root:
 

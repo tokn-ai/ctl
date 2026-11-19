@@ -15,7 +15,7 @@ use std::{
 fn x11_helper(display: u32) -> Command {
   let mut command = Command::new("python3");
   command
-    .args(["-u", "-c", include_str!("../x11_input.py")])
+    .args(["-u", "-c", include_str!("../../x11_input.py")])
     .env("DISPLAY", format!(":{display}"));
   command
 }
@@ -166,7 +166,7 @@ fn window_operation(
       .args([
         "-u",
         "-c",
-        include_str!("../atspi.py"),
+        include_str!("../../atspi.py"),
         helper_operation,
         id,
         &window.title,
@@ -188,7 +188,7 @@ fn supports_displays(version: &str) -> bool {
   )
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+pub(super) fn run() -> Result<(), Box<dyn std::error::Error>> {
   let args: Vec<_> = env::args().skip(1).collect();
   match args.as_slice() {
     [version, operation] if supports_displays(version) && operation == "discover" => {

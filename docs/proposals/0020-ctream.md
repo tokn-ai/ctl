@@ -5,10 +5,11 @@
 
 ## Summary
 
-Develop `ctream` as a standalone Rust project for discovering X11 and Wayland
-instances and forwarding control to a selected instance. Provide a CLI and a
-native wgpu GUI. Once the standalone tool is stable, add lifecycle management
-through `ctld`.
+`ctream` discovers X11 and Wayland instances and forwards control to a selected
+instance through a CLI and a native wgpu viewer. Its CLI and agent (`ctream`),
+viewer (`ctream-preview`), and Linux helpers (`ctream-wayland-input`) are members
+of the root Cargo workspace and share its lockfile. They run independently of
+`ctld`. Lifecycle management through `ctld` is planned once the tool is stable.
 
 ## Motivation
 
@@ -32,10 +33,11 @@ runtime directory. Report the two X11 listeners as one display. Label a
 greeter separately when session metadata identifies it, and distinguish an
 observed listener from a display that accepted a client connection.
 
-Install `ctream-agent` on the remote Linux host with
+From the repository root on the remote Linux host, install `ctream-agent` with
 `cargo install --locked --path ctream --bin ctream-agent --root ~/.local`.
-From the ctream workspace, run `cargo run -p ctream-preview -- HOST` to
-discover remote displays and select one in the viewer. Append `:DISPLAY` or
+From the repository root on the viewer machine, run
+`cargo run -p ctream-preview -- HOST` to discover remote displays and select
+one in the viewer. Append `:DISPLAY` or
 `wayland-N` to open a target directly.
 
 The viewer opens a transport channel for each agent operation. The SSH

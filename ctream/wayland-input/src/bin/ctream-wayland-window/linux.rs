@@ -148,7 +148,7 @@ delegate_noop!(State: ignore wl_shm::WlShm);
 delegate_noop!(State: ignore wl_shm_pool::WlShmPool);
 delegate_noop!(State: ignore wl_buffer::WlBuffer);
 
-fn run(id: Option<&str>) -> Result<(), Box<dyn Error>> {
+pub(super) fn run(id: Option<&str>) -> Result<(), Box<dyn Error>> {
   let connection = Connection::connect_to_env()?;
   let (globals, mut queue) = registry_queue_init::<State>(&connection)?;
   let qh = queue.handle();
@@ -226,8 +226,8 @@ fn run(id: Option<&str>) -> Result<(), Box<dyn Error>> {
     pixels.resize((count * 4) as usize, 0);
     file.read_exact_at(&mut pixels, 0)?;
     rgb.clear();
-    for pixel in pixels.chunks_exact(4) {
-      let [_, red, green, blue] = u32::from_ne_bytes(pixel.try_into()?).to_be_bytes();
+    for &pixel in pixels.as_chunks::<4>().0 {
+      let [_, red, green, blue] = u32::from_ne_bytes(pixel).to_be_bytes();
       rgb.extend_from_slice(&[red, green, blue]);
     }
     write!(out, "P6\n{width} {height}\n255\n")?;
@@ -236,13 +236,4 @@ fn run(id: Option<&str>) -> Result<(), Box<dyn Error>> {
   }
   session.destroy();
   Ok(())
-}
-
-fn main() -> Result<(), Box<dyn Error>> {
-  let args: Vec<_> = std::env::args().skip(1).collect();
-  match args.as_slice() {
-    [operation] if operation == "list" => run(None),
-    [operation, id] if operation == "capture" => run(Some(id)),
-    _ => Err("usage: ctream-wayland-window list | capture ID".into()),
-  }
 }

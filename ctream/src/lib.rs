@@ -31,26 +31,22 @@ fn listeners(table: &[u8]) -> BTreeSet<Display> {
     if fields.next().is_some() {
       continue;
     }
-    if let Some(number) = path
+    if let Some(display) = path
       .trim_start_matches('@')
       .strip_prefix("/tmp/.X11-unix/X")
+      .and_then(decimal)
     {
-      if let Some(display) = decimal(number) {
-        displays.insert(Display::X11(display));
-      }
+      displays.insert(Display::X11(display));
     } else if let Some((user, socket)) = path
       .strip_prefix("/run/user/")
       .and_then(|p| p.split_once('/'))
+      && let Some(uid) = decimal(user)
+      && socket.strip_prefix("wayland-").and_then(decimal).is_some()
     {
-      if let (Some(uid), Some(_)) = (
-        decimal(user),
-        socket.strip_prefix("wayland-").and_then(decimal),
-      ) {
-        displays.insert(Display::Wayland {
-          uid,
-          socket: socket.to_owned(),
-        });
-      }
+      displays.insert(Display::Wayland {
+        uid,
+        socket: socket.to_owned(),
+      });
     }
   }
   displays

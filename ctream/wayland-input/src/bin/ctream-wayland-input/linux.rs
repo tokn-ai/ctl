@@ -158,7 +158,7 @@ impl Devices {
   }
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
+pub(super) fn run() -> Result<(), Box<dyn Error>> {
   let conn = Connection::connect_to_env()?;
   let (globals, mut queue) = registry_queue_init::<Client>(&conn)?;
   let qh = queue.handle();

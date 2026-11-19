@@ -1,168 +1,291 @@
-use crate::protocol::{
-  Action, ActionResult, DISPLAY_VERSION, Element, Session, Target, VERSION, WAYLAND_WINDOW_VERSION,
-  Window, X11_WINDOW_VERSION, valid_window_id,
-};
-use serde::de::DeserializeOwned;
 use std::{
-  io::{self, Read, Write},
-  process::{Child, ChildStdout, Command, Stdio},
+  io::{self, Read},
+  path::PathBuf,
+  process::{Child, ChildStdin, ChildStdout, Command, Stdio},
+  sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+  },
+  thread,
+  time::{Duration, Instant},
 };
 
-pub enum Request {
-  Discover,
-  Capture(Target),
-  Input(Target),
-  Windows(Target),
-  CaptureWindow(Target, String),
-  Elements(Target, String),
-  ElementsWithBounds(Target, String),
-  Action(Target, String),
+pub struct Channel<R, W> {
+  pub reader: R,
+  pub writer: W,
+  pub cancellation: Cancellation,
 }
 
-pub struct Channel {
-  pub reader: Box<dyn Read + Send>,
-  pub writer: Box<dyn Write + Send>,
+/// Requests cleanup after closing the channel input. Process transports allow a
+/// bounded grace period for the agent to release its resources before killing it.
+#[derive(Clone, Default)]
+pub struct Cancellation(Option<Arc<CancellationState>>);
+
+struct CancellationState {
+  requested: AtomicBool,
+  cancel: Box<dyn Fn() + Send + Sync>,
 }
 
+impl Cancellation {
+  pub fn new(cancel: impl Fn() + Send + Sync + 'static) -> Self {
+    Self(Some(Arc::new(CancellationState {
+      requested: AtomicBool::new(false),
+      cancel: Box::new(cancel),
+    })))
+  }
+
+  pub fn cancel(&self) {
+    if let Some(state) = &self.0
+      && !state.requested.swap(true, Ordering::AcqRel)
+    {
+      (state.cancel)();
+    }
+  }
+}
+
+struct Process {
+  child: Mutex<Child>,
+  closing: AtomicBool,
+}
+
+impl Process {
+  fn close(self: &Arc<Self>) {
+    if self.closing.swap(true, Ordering::AcqRel) {
+      return;
+    }
+    let process = Arc::clone(self);
+    thread::spawn(move || {
+      let deadline = Instant::now() + Duration::from_secs(1);
+      loop {
+        let mut child = process
+          .child
+          .lock()
+          .unwrap_or_else(|error| error.into_inner());
+        if matches!(child.try_wait(), Ok(Some(_))) {
+          return;
+        }
+        if Instant::now() >= deadline {
+          let _ = child.kill();
+          let _ = child.wait();
+          return;
+        }
+        drop(child);
+        thread::sleep(Duration::from_millis(10));
+      }
+    });
+  }
+
+  fn wait(&self) -> io::Result<()> {
+    loop {
+      let status = self
+        .child
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .try_wait()?;
+      if let Some(status) = status {
+        return if status.success() {
+          Ok(())
+        } else {
+          Err(io::Error::other(format!(
+            "agent channel exited with {status}"
+          )))
+        };
+      }
+      thread::sleep(Duration::from_millis(10));
+    }
+  }
+}
+
+/// Opens a duplex agent channel. Arguments are chosen by the protocol client.
 pub trait Transport {
-  fn open(&self, request: Request) -> io::Result<Channel>;
+  type Reader: Read + Send + 'static;
+  type Writer: io::Write + Send + 'static;
+
+  fn open(&self, arguments: &[String]) -> io::Result<Channel<Self::Reader, Self::Writer>>;
 }
 
 pub struct Ssh(pub String);
 
-struct SshReader {
-  child: Child,
+/// Agent subprocess connected through local standard-input/output pipes.
+pub struct Local {
+  pub agent: PathBuf,
+}
+
+impl Default for Local {
+  fn default() -> Self {
+    let name = format!("ctream-agent{}", std::env::consts::EXE_SUFFIX);
+    let agent = std::env::current_exe()
+      .ok()
+      .map(|executable| executable.with_file_name(&name))
+      .filter(|agent| agent.is_file())
+      .unwrap_or_else(|| PathBuf::from(name));
+    Self { agent }
+  }
+}
+
+pub struct ProcessReader {
+  process: Arc<Process>,
   stdout: ChildStdout,
 }
 
-impl Read for SshReader {
+impl Read for ProcessReader {
   fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
     if buffer.is_empty() {
       return Ok(0);
     }
     let count = self.stdout.read(buffer)?;
     if count == 0 {
-      let status = self.child.wait()?;
-      if !status.success() {
-        return Err(io::Error::other(format!("SSH agent exited with {status}")));
-      }
+      self.process.close();
+      self.process.wait()?;
     }
     Ok(count)
   }
 }
 
-impl Drop for SshReader {
+impl Drop for ProcessReader {
   fn drop(&mut self) {
-    let _ = self.child.kill();
-    let _ = self.child.wait();
+    self.process.close();
   }
 }
 
-impl Transport for Ssh {
-  fn open(&self, request: Request) -> io::Result<Channel> {
-    let command = match request {
-      Request::Discover => format!("{DISPLAY_VERSION} discover"),
-      Request::Capture(target) => format!("{DISPLAY_VERSION} capture {target}"),
-      Request::Input(target) => format!("{DISPLAY_VERSION} input {target}"),
-      Request::Windows(target) => format!("{} windows {target}", window_version(target)),
-      Request::CaptureWindow(target, id) => window_command("capture-window", target, &id)?,
-      Request::Elements(target, id) => window_command("elements", target, &id)?,
-      Request::ElementsWithBounds(target, id) => {
-        window_command_at(VERSION, "elements", target, &id)?
-      }
-      Request::Action(target, id) => window_command("action", target, &id)?,
-    };
-    let remote = format!(r#"exec env PATH="$PATH:$HOME/.local/bin" ctream-agent {command}"#);
-    let mut child = Command::new("ssh")
-      .args([
-        "-T",
-        "-C",
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "ConnectTimeout=10",
-        "--",
-        &self.0,
-        &remote,
-      ])
-      .stdin(Stdio::piped())
-      .stdout(Stdio::piped())
-      .spawn()?;
-    let writer = Box::new(child.stdin.take().expect("piped SSH input"));
-    let stdout = child.stdout.take().expect("piped SSH output");
-    Ok(Channel {
-      reader: Box::new(SshReader { child, stdout }),
-      writer,
-    })
-  }
-}
-
-fn window_version(target: Target) -> &'static str {
-  match target {
-    Target::X11(_) => X11_WINDOW_VERSION,
-    Target::Wayland(_) => WAYLAND_WINDOW_VERSION,
-  }
-}
-
-fn window_command(operation: &str, target: Target, id: &str) -> io::Result<String> {
-  window_command_at(window_version(target), operation, target, id)
-}
-
-fn window_command_at(
-  version: &str,
-  operation: &str,
-  target: Target,
-  id: &str,
-) -> io::Result<String> {
-  if !valid_window_id(id) {
-    return Err(io::Error::other("invalid window identifier"));
-  }
-  Ok(format!("{version} {operation} {target} {id}"))
-}
-
-fn json_response<T: DeserializeOwned>(channel: Channel) -> io::Result<T> {
-  let Channel { reader, writer } = channel;
-  drop(writer);
-  let mut data = Vec::new();
-  const LIMIT: usize = 1024 * 1024;
-  reader.take((LIMIT + 1) as u64).read_to_end(&mut data)?;
-  if data.len() > LIMIT {
-    return Err(io::Error::other("ctream agent response exceeds 1 MiB"));
-  }
-  serde_json::from_slice(&data).map_err(io::Error::other)
-}
-
-pub fn discover(transport: &dyn Transport) -> io::Result<Vec<Session>> {
-  json_response(transport.open(Request::Discover)?)
-}
-
-pub fn windows(transport: &dyn Transport, target: Target) -> io::Result<Vec<Window>> {
-  json_response(transport.open(Request::Windows(target))?)
-}
-
-pub fn elements(transport: &dyn Transport, target: Target, id: String) -> io::Result<Vec<Element>> {
-  let inspection = transport
-    .open(Request::ElementsWithBounds(target, id.clone()))
-    .and_then(json_response);
-  inspection.or_else(|error| {
-    transport
-      .open(Request::Elements(target, id))
-      .and_then(json_response)
-      .map_err(|_| error)
+fn spawn(command: &mut Command) -> io::Result<Channel<ProcessReader, ChildStdin>> {
+  let mut child = command
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .spawn()?;
+  let writer = child.stdin.take().expect("piped agent input");
+  let stdout = child.stdout.take().expect("piped agent output");
+  let process = Arc::new(Process {
+    child: Mutex::new(child),
+    closing: AtomicBool::new(false),
+  });
+  let cleanup = Arc::clone(&process);
+  Ok(Channel {
+    reader: ProcessReader { process, stdout },
+    writer,
+    cancellation: Cancellation::new(move || cleanup.close()),
   })
 }
 
-pub fn action(
-  transport: &dyn Transport,
-  target: Target,
-  id: String,
-  action: Action,
-) -> io::Result<ActionResult> {
-  let data = serde_json::to_vec(&action)?;
-  if data.len() > 65536 {
-    return Err(io::Error::other("action exceeds the request limit"));
+fn shell_argument(value: &str) -> String {
+  format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+impl Transport for Ssh {
+  type Reader = ProcessReader;
+  type Writer = ChildStdin;
+
+  fn open(&self, arguments: &[String]) -> io::Result<Channel<Self::Reader, Self::Writer>> {
+    if self.0.is_empty() || self.0.starts_with('-') {
+      return Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "invalid SSH destination",
+      ));
+    }
+    let arguments = arguments
+      .iter()
+      .map(|arg| shell_argument(arg))
+      .collect::<Vec<_>>()
+      .join(" ");
+    let remote = format!(r#"exec env PATH="$PATH:$HOME/.local/bin" ctream-agent {arguments}"#);
+    spawn(Command::new("ssh").args([
+      "-T",
+      "-C",
+      "-o",
+      "BatchMode=yes",
+      "-o",
+      "ConnectTimeout=10",
+      "--",
+      &self.0,
+      &remote,
+    ]))
   }
-  let mut channel = transport.open(Request::Action(target, id))?;
-  channel.writer.write_all(&data)?;
-  json_response(channel)
+}
+
+impl Transport for Local {
+  type Reader = ProcessReader;
+  type Writer = ChildStdin;
+
+  fn open(&self, arguments: &[String]) -> io::Result<Channel<Self::Reader, Self::Writer>> {
+    spawn(Command::new(&self.agent).args(arguments))
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  #[cfg(unix)]
+  use std::io::Write;
+
+  #[test]
+  fn shell_arguments_preserve_metacharacters_as_literal_text() {
+    assert_eq!(
+      shell_argument("a'b $(command); value"),
+      "'a'\\''b $(command); value'"
+    );
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn local_channel_is_duplex_and_reports_process_failure() {
+    let local = Local {
+      agent: PathBuf::from("/bin/sh"),
+    };
+    let Channel {
+      mut reader,
+      mut writer,
+      ..
+    } = local
+      .open(&["-c".into(), "read value; printf '%s' \"$value\"".into()])
+      .unwrap();
+    writer.write_all(b"literal input\n").unwrap();
+    drop(writer);
+    let mut response = String::new();
+    reader.read_to_string(&mut response).unwrap();
+    assert_eq!(response, "literal input");
+    let Channel {
+      mut reader, writer, ..
+    } = local.open(&["-c".into(), "exit 9".into()]).unwrap();
+    drop(writer);
+    assert!(reader.read_to_string(&mut String::new()).is_err());
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn output_eof_reaps_a_process_that_keeps_running() {
+    let local = Local {
+      agent: PathBuf::from("/bin/sh"),
+    };
+    let Channel {
+      mut reader, writer, ..
+    } = local
+      .open(&["-c".into(), "exec 1>&-; exec sleep 30".into()])
+      .unwrap();
+    drop(writer);
+    let started = Instant::now();
+    assert!(reader.read_to_end(&mut Vec::new()).is_err());
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert!(
+      reader
+        .process
+        .child
+        .lock()
+        .unwrap()
+        .try_wait()
+        .unwrap()
+        .is_some()
+    );
+  }
+
+  #[test]
+  fn cancellation_callback_runs_once_across_clones() {
+    let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed = Arc::clone(&count);
+    let cancellation = Cancellation::new(move || {
+      observed.fetch_add(1, Ordering::SeqCst);
+    });
+    cancellation.clone().cancel();
+    cancellation.cancel();
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+  }
 }

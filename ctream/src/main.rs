@@ -1,4 +1,4 @@
-use ctream::{Display, discover, protocol::Target, transport, windows};
+use ctream::{Display, client::Client, discover, protocol::Target, transport::Ssh, windows};
 use std::{env, ffi::OsString, io, process::ExitCode};
 
 const USAGE: &str = "Usage: ctream list
@@ -36,7 +36,7 @@ fn list_windows(
   json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
   let windows = if let Some(host) = host {
-    transport::windows(&transport::Ssh(host.to_owned()), target)?
+    Client::new(Ssh(host.to_owned())).windows(target)?
   } else {
     windows::list(target)?
   };

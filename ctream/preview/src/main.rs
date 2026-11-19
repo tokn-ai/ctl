@@ -1,17 +1,18 @@
-mod capture;
 use ctream::{
   Display,
-  protocol::{Element, Session, Target, Window, X11_FRAME_SIZE},
-  transport::{self, Channel, Request, Ssh, Transport},
+  client::{Client, Session},
+  media::{CaptureLifetime, Frame, VideoSource},
+  protocol::{Element, Session as DisplaySession, Target, Window, X11_FRAME_SIZE},
+  transport::{Local, Ssh, Transport},
 };
 mod input;
 mod overlay;
 mod semantic;
+mod view;
 
 use eframe::egui;
 use std::{
-  env,
-  io::{self, BufReader, Write},
+  env, io,
   sync::{
     Arc, Mutex,
     mpsc::{self, Receiver, TryRecvError},
@@ -25,51 +26,40 @@ struct Stream {
   error: Option<String>,
 }
 
-struct Preview {
-  input: Option<input::Input>,
+struct Preview<T: Transport> {
+  input: Option<input::Input<T::Reader, T::Writer>>,
   forwarding: bool,
   input_error: Option<String>,
-  _capture_lifetime: Box<dyn Write + Send>,
+  _capture_lifetime: CaptureLifetime<T::Writer>,
   stream: Arc<Mutex<Stream>>,
   texture: Option<egui::TextureHandle>,
   frames: u64,
 }
 
-impl Preview {
-  fn connect(
-    transport: &dyn Transport,
-    target: Target,
-    window: Option<Window>,
-    ctx: egui::Context,
-  ) -> io::Result<Self> {
-    let format = capture::FrameFormat::for_capture(target, window.is_some());
-    let (request, input, input_error) = match window {
-      Some(window) => (Request::CaptureWindow(target, window.id), None, None),
-      None => {
-        let (input, error) = match input::Input::connect(transport, target) {
-          Ok(input) => (Some(input), None),
-          Err(error) => (None, Some(format!("View only ({error})"))),
-        };
-        (Request::Capture(target), input, error)
+impl<T: Transport> Preview<T> {
+  fn connect(session: Session<T>, ctx: egui::Context) -> io::Result<Self> {
+    let (input, input_error) = if session.supports_input() {
+      match session.input() {
+        Ok(input) => (Some(input::Input::new(input)), None),
+        Err(error) => (None, Some(format!("View only ({error})"))),
       }
+    } else {
+      (None, None)
     };
-    let Channel { reader, writer } = transport.open(request)?;
-    let mut stdout = BufReader::new(reader);
+    let (mut source, lifetime) = session.capture()?.split();
     let stream = Arc::new(Mutex::new(Stream::default()));
     let reader = Arc::clone(&stream);
     thread::spawn(move || {
-      let mut buffer = Vec::new();
+      let mut frame = Frame::default();
       loop {
-        let image = match capture::read_frame(&mut stdout, format, &mut buffer) {
-          Ok(image) => image,
-          Err(error) => {
-            reader.lock().unwrap().error = Some(format!(
-              "Capture ended ({error}). See terminal for remote diagnostics."
-            ));
-            ctx.request_repaint();
-            break;
-          }
-        };
+        if let Err(error) = source.read_frame(&mut frame) {
+          reader.lock().unwrap().error = Some(format!(
+            "Capture ended ({error}). See terminal for remote diagnostics."
+          ));
+          ctx.request_repaint();
+          break;
+        }
+        let image = egui::ColorImage::from_rgb(frame.size, &frame.pixels);
         reader.lock().unwrap().frame = Some(image);
         ctx.request_repaint();
       }
@@ -78,7 +68,7 @@ impl Preview {
       input,
       forwarding: false,
       input_error,
-      _capture_lifetime: writer,
+      _capture_lifetime: lifetime,
       stream,
       texture: None,
       frames: 0,
@@ -118,7 +108,19 @@ impl Preview {
           .as_ref()
           .and_then(input::Input::desktop_size)
           .unwrap_or_else(|| texture.size().map(|v| v as u32));
-        let rect = input::image_rect(ui.available_rect_before_wrap(), size);
+        let Some(image) = view::fit(ui.available_rect_before_wrap(), size) else {
+          if self.forwarding
+            && let Some(input) = &mut self.input
+          {
+            self.forwarding = false;
+            self.input_error = input
+              .reset()
+              .err()
+              .map(|error| format!("Input disconnected ({error})"));
+          }
+          return;
+        };
+        let rect = view::rect(image.viewport());
         ui.painter().image(
           texture.id(),
           rect,
@@ -126,7 +128,7 @@ impl Preview {
           egui::Color32::WHITE,
         );
         if error.is_none() {
-          overlay::paint(ui.painter(), rect, elements);
+          overlay::paint(ui.painter(), &image, elements);
         }
         if let Some(input) = &mut self.input
           && ctx.current_pass_index() == 0
@@ -134,7 +136,7 @@ impl Preview {
         {
           let active = error.is_none() && ctx.input(|i| i.focused);
           let result = if active {
-            ctx.input(|i| input.forward(rect, size, &i.raw.events, i.modifiers))
+            ctx.input(|i| input.forward(&image, &i.raw.events, i.modifiers))
           } else if self.forwarding {
             input.reset()
           } else {
@@ -150,13 +152,13 @@ impl Preview {
   }
 }
 
-enum State {
-  Discovering(Receiver<io::Result<Vec<Session>>>),
-  Selecting(Vec<Session>),
+enum State<T: Transport> {
+  Discovering(Receiver<io::Result<Vec<DisplaySession>>>),
+  Selecting(Vec<DisplaySession>),
   FindingWindows(Target, Receiver<io::Result<Vec<Window>>>),
   ChoosingWindow(Target, Vec<Window>),
-  Connecting(Receiver<io::Result<Preview>>),
-  Viewing(Preview),
+  Connecting(Receiver<io::Result<Preview<T>>>),
+  Viewing(Preview<T>),
   Failed(String),
 }
 
@@ -173,49 +175,41 @@ fn background<T: Send + 'static>(
   receiver
 }
 
-struct Viewer {
-  transport: Arc<dyn Transport + Send + Sync>,
-  state: State,
-  semantic: Option<semantic::Panel>,
+struct Viewer<T: Transport> {
+  client: Client<T>,
+  state: State<T>,
+  semantic: Option<semantic::Panel<T>>,
   window_display: Option<Target>,
 }
 
-impl Viewer {
+impl<T: Transport + Send + Sync + 'static> Viewer<T> {
   fn discover(&mut self, ctx: &egui::Context) {
     self.semantic = None;
     self.window_display = None;
-    let transport = Arc::clone(&self.transport);
-    self.state = State::Discovering(background(ctx, move || {
-      transport::discover(transport.as_ref())
-    }));
+    let client = self.client.clone();
+    self.state = State::Discovering(background(ctx, move || client.discover()));
   }
 
   fn windows(&mut self, target: Target, ctx: &egui::Context) {
-    let transport = Arc::clone(&self.transport);
-    self.state = State::FindingWindows(
-      target,
-      background(ctx, move || transport::windows(transport.as_ref(), target)),
-    );
+    let client = self.client.clone();
+    self.state = State::FindingWindows(target, background(ctx, move || client.windows(target)));
   }
 
   fn connect(&mut self, target: Target, window: Option<Window>, ctx: &egui::Context) {
     self.window_display = window.as_ref().map(|_| target);
-    self.semantic = window
-      .as_ref()
-      .filter(|_| matches!(target, Target::Wayland(_)))
-      .map(|window| semantic::Panel::new(target, window.id.clone()));
-    let transport = Arc::clone(&self.transport);
+    let session = self.client.session(target, window);
+    self.semantic = session
+      .supports_semantics()
+      .then(|| semantic::Panel::new(session.clone()));
     let render = ctx.clone();
-    self.state = State::Connecting(background(ctx, move || {
-      Preview::connect(transport.as_ref(), target, window, render)
-    }));
+    self.state = State::Connecting(background(ctx, move || Preview::connect(session, render)));
   }
 }
 
-fn receive<T>(
+fn receive<T, V: Transport>(
   result: Result<io::Result<T>, TryRecvError>,
-  success: impl FnOnce(T) -> State,
-) -> Option<State> {
+  success: impl FnOnce(T) -> State<V>,
+) -> Option<State<V>> {
   match result {
     Ok(Ok(value)) => Some(success(value)),
     Ok(Err(error)) => Some(State::Failed(error.to_string())),
@@ -224,7 +218,7 @@ fn receive<T>(
   }
 }
 
-impl eframe::App for Viewer {
+impl<T: Transport + Send + Sync + 'static> eframe::App for Viewer<T> {
   fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
     let next = match &self.state {
       State::Discovering(result) => receive(result.try_recv(), State::Selecting),
@@ -258,7 +252,7 @@ impl eframe::App for Viewer {
         None
       };
       let elements = if let Some(semantic) = &mut self.semantic {
-        semantic.show(ctx, &self.transport, frame_size);
+        semantic.show(ctx, frame_size);
         semantic.overlay_elements()
       } else {
         &[]
@@ -352,15 +346,12 @@ impl eframe::App for Viewer {
   }
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-  let args: Vec<_> = env::args().skip(1).collect();
-  let (host, target, windows) = match args.as_slice() {
-    [host] => (host, None, false),
-    [host, display] => (host, Some(Target::parse(display)?), false),
-    [host, display, flag] if flag == "--windows" => (host, Some(Target::parse(display)?), true),
-    _ => return Err("usage: ctream-preview SSH_HOST [DISPLAY [--windows]]".into()),
-  };
-  let title = format!("ctream · {host}");
+fn run<T: Transport + Send + Sync + 'static>(
+  title: &str,
+  transport: T,
+  target: Option<Target>,
+  windows: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
   let options = eframe::NativeOptions {
     renderer: eframe::Renderer::Wgpu,
     viewport: egui::ViewportBuilder::default()
@@ -368,12 +359,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ..Default::default()
   };
   eframe::run_native(
-    &title,
+    title,
     options,
-    Box::new(|cc| {
-      let transport: Arc<dyn Transport + Send + Sync> = Arc::new(Ssh(host.clone()));
+    Box::new(move |cc| {
       let mut viewer = Viewer {
-        transport,
+        client: Client::new(transport),
         state: State::Selecting(Vec::new()),
         semantic: None,
         window_display: None,
@@ -391,4 +381,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }),
   )?;
   Ok(())
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+  let args: Vec<_> = env::args().skip(1).collect();
+  let (endpoint, target, windows) = match args.as_slice() {
+    [endpoint] => (endpoint, None, false),
+    [endpoint, display] => (endpoint, Some(Target::parse(display)?), false),
+    [endpoint, display, flag] if flag == "--windows" => {
+      (endpoint, Some(Target::parse(display)?), true)
+    }
+    _ => return Err("usage: ctream-preview SSH_HOST|--local [DISPLAY [--windows]]".into()),
+  };
+  if endpoint == "--local" {
+    run("ctream · local", Local::default(), target, windows)
+  } else {
+    run(
+      &format!("ctream · {endpoint}"),
+      Ssh(endpoint.clone()),
+      target,
+      windows,
+    )
+  }
 }

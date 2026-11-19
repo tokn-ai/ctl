@@ -1,14 +1,12 @@
 use ctream::{
-  protocol::{Action, ActionResult, Element, Target},
-  transport::{self, Transport},
+  client::Session,
+  protocol::{Action, ActionResult, Element},
+  transport::Transport,
 };
 use eframe::egui;
 use std::{
   io,
-  sync::{
-    Arc,
-    mpsc::{Receiver, TryRecvError},
-  },
+  sync::mpsc::{Receiver, TryRecvError},
 };
 
 enum Pending {
@@ -16,9 +14,8 @@ enum Pending {
   Action(Receiver<io::Result<ActionResult>>),
 }
 
-pub struct Panel {
-  target: Target,
-  window: String,
+pub struct Panel<T: Transport> {
+  session: Session<T>,
   elements: Vec<Element>,
   pending: Option<Pending>,
   status: Option<String>,
@@ -34,11 +31,10 @@ fn result<T>(receiver: &Receiver<io::Result<T>>) -> Option<io::Result<T>> {
   }
 }
 
-impl Panel {
-  pub fn new(target: Target, window: String) -> Self {
+impl<T: Transport + Send + Sync + 'static> Panel<T> {
+  pub fn new(session: Session<T>) -> Self {
     Self {
-      target,
-      window,
+      session,
       elements: Vec::new(),
       pending: None,
       status: None,
@@ -55,12 +51,7 @@ impl Panel {
     }
   }
 
-  pub fn show(
-    &mut self,
-    ctx: &egui::Context,
-    transport: &Arc<dyn Transport + Send + Sync>,
-    frame_size: Option<[usize; 2]>,
-  ) {
+  pub fn show(&mut self, ctx: &egui::Context, frame_size: Option<[usize; 2]>) {
     // The control geometry is a snapshot of the remote layout. Local panel and
     // window resizes keep the same frame size and can reuse the snapshot.
     if self.inspected_size != frame_size {
@@ -150,19 +141,16 @@ impl Panel {
           ui.label(status);
         }
       });
-    let target = self.target;
     if refresh {
       self.inspected_size = frame_size;
-      let transport = Arc::clone(transport);
-      let id = self.window.clone();
+      let session = self.session.clone();
       self.pending = Some(Pending::Elements(super::background(ctx, move || {
-        transport::elements(transport.as_ref(), target, id)
+        session.elements()
       })));
     } else if let Some(action) = action {
-      let transport = Arc::clone(transport);
-      let id = self.window.clone();
+      let session = self.session.clone();
       self.pending = Some(Pending::Action(super::background(ctx, move || {
-        transport::action(transport.as_ref(), target, id, action)
+        session.action(action)
       })));
     }
   }

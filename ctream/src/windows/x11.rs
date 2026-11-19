@@ -118,6 +118,15 @@ pub fn list(display: &str) -> Result<Vec<Window>, Box<dyn Error>> {
 pub fn capture(
   display: &str,
   id: &str,
+  closed: impl FnMut(Duration) -> bool,
+) -> Result<(), Box<dyn Error>> {
+  capture_to(display, id, &mut io::stdout().lock(), closed)
+}
+
+pub fn capture_to(
+  display: &str,
+  id: &str,
+  out: &mut impl Write,
   mut closed: impl FnMut(Duration) -> bool,
 ) -> Result<(), Box<dyn Error>> {
   let id = id
@@ -152,7 +161,6 @@ pub fn capture(
     .composite_redirect_window(window, Redirect::AUTOMATIC)?
     .check()?;
 
-  let mut out = io::stdout().lock();
   let mut rgb = Vec::new();
   let interval = Duration::from_millis(125);
   let mut viewable = attrs.map_state == MapState::VIEWABLE;

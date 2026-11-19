@@ -1,4 +1,10 @@
+pub mod client;
+pub mod geometry;
+pub mod input;
+pub mod media;
 pub mod protocol;
+#[cfg(unix)]
+pub mod providers;
 pub mod transport;
 pub mod windows;
 

@@ -20,11 +20,54 @@ Linux desktop throughout development.
 
 ## Design
 
-Place the project under `ctream/` with a shared Rust library. Both frontends
-use the same discovery, selection, and input operations. The CLI lists targets
-and accepts an explicit target for control. The GUI presents the same list and
-uses wgpu for rendering. Keep capture, if needed, behind a separate interface
-so CLI discovery can run without initializing a renderer.
+The shared Rust library exposes a typed client, native capability providers,
+media frames, and coordinate transforms. The CLI queries windows through that
+client over SSH. The wgpu viewer uses the same client for discovery, capture,
+input, and semantic actions.
+
+### Current architecture
+
+| Component | Location | Responsibility |
+| --- | --- | --- |
+| `client::Client<T>` | Client process | Select wire contracts, validate requests, decode typed replies |
+| `client::Session<T>` | Client process | Bind operations to a selected display or window |
+| `transport::Ssh`, `transport::Local` | Client process | Open duplex agent channels and manage their child processes |
+| `providers` | Display host | Open X11 and Wayland sessions and their capture, input, and accessibility capabilities |
+| `ctream-agent` | Display host | Validate the requested contract and dispatch operations to providers |
+| `media` | Client process | Decode bounded RGB frames through a generic video source |
+| `geometry` and viewer overlays | Client process | Share one transform for the image, control outlines, and pointer mapping |
+
+Providers use an associated session type. Each capability has its own trait,
+and capture capabilities return an associated source. The agent dispatches a
+selected provider through those interfaces. Native capture can write into a
+caller-supplied output, which also allows testing without a graphical viewer.
+
+`Client<T>` is generic over a transport with associated reader and writer
+types. A JSON query associates its reply type with its command. Version
+selection and frame formats belong to the client. Both SSH and local subprocess
+stdio carry the same agent protocol.
+
+`Frame<B>` carries dimensions and pixel storage. `VideoSource::Buffer`
+defines the storage used by a source, and the current RGB reader reuses a
+`Vec<u8>` between frames. The preview converts completed frames into egui
+images and keeps only the latest pending image.
+
+`Point<Space>`, `Rect<Space>`, and `Transform<From, To>` distinguish
+coordinate spaces. A fitted image geometry provides the forward transform
+used by overlays and the inverse transform used by input. Bounds are clipped
+to the displayed image. Local resizing recomputes this geometry.
+
+Each operation owns its channel. Capture separates its frame reader from a
+lifetime guard held by the viewer. Dropping the guard closes the control pipe
+so the agent can stop capture. Process transports allow a bounded cleanup
+period before terminating a stalled child. Input closure lets the helper
+release held keys and buttons.
+
+This step implements the existing display and window capabilities. Audio,
+encoding, capability negotiation, and a shared remote session runtime are
+future additions. The current client session groups a target selection across
+independent agent operations. The existing protocol adapter supports deployed
+agents during development.
 
 The first milestone is read-only discovery of both X11 and Wayland from an SSH
 login. An initial Linux host check found a reachable Xorg display with both
@@ -39,6 +82,12 @@ From the repository root on the viewer machine, run
 `cargo run -p ctream-preview -- HOST` to discover remote displays and select
 one in the viewer. Append `:DISPLAY` or
 `wayland-N` to open a target directly.
+
+For a display on the viewer machine, build with
+`cargo build -p ctream -p ctream-preview` and run
+`cargo run -p ctream-preview -- --local`. The local transport finds the agent
+beside the viewer executable, falling back to `PATH`, and launches it over
+stdio IPC. It uses the same operation contracts as SSH.
 
 The viewer opens a transport channel for each agent operation. The SSH
 transport starts a standalone `ctream-agent` process per channel under the
@@ -132,10 +181,14 @@ explicitly. Window capture can work independently of semantic actions.
 
 ## References
 
-- [AUV](https://github.com/moeru-ai/auv) provides a reference for exposing OS
-  input operations to callers.
-- [libobs frontend API](https://docs.obsproject.com/frontends) describes the
-  capture engine and preview lifecycle if ctream needs a live desktop view.
+- [AUV driver traits](https://github.com/moeru-ai/auv/blob/main/crates/auv-driver-common/src/traits.rs)
+  associate providers with their sessions.
+- [AUV capture model](https://github.com/moeru-ai/auv/blob/main/crates/auv-driver-common/src/capture.rs)
+  retains capture origin and geometry alongside image data.
+- [libobs backend design](https://docs.obsproject.com/backend-design)
+  provides the source, encoding, and output boundaries for future media work.
+- [libobs scenes](https://docs.obsproject.com/reference-scenes)
+  compose sources through explicit transforms.
 - [Sway's Wayland server](https://github.com/swaywm/sway/blob/master/sway/server.c)
   registers the foreign-toplevel capture source manager.
 - [X Composite](https://man.archlinux.org/man/XCompositeNameWindowPixmap.3.en)
@@ -148,11 +201,9 @@ explicitly. Window capture can work independently of semantic actions.
 
 ## Open questions
 
-- Does the first release forward input locally, over SSH, or both?
-- Which sessions should be discoverable from an SSH login with no graphical
-  session environment?
-- Should semantic actions prioritize accessible controls or messages defined
-  by a particular application?
+- How should providers report capability and permission changes during a session?
+- Which operations need shared remote session state beyond independent channels?
+- How should a fresh accessibility observation be associated with a video frame?
 
 ## Protocol impact
 
@@ -174,3 +225,7 @@ Version 1.0.4 (build 4) adds optional normalized control bounds to the
 Wayland `elements` response for the local overlay. The agent retains
 contracts 1.0.1 through 1.0.3. The viewer can inspect controls on earlier
 agents using the existing 1.0.2 response.
+
+The provider, client, media, geometry, and local transport refactor uses
+`ctream_agent` 1.0.4 (build 4) with the same retained contracts.
+Protocol changes: none.

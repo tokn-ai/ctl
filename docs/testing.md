@@ -84,3 +84,16 @@ must still execute; a native launch must remain pending until the writer and
 guard are released. On Linux, bypassing coordination must produce `ETXTBSY`.
 These tests use an explicitly polled pending acquisition rather than sleeps to
 establish ordering; a timeout only detects a launch that never resumes.
+
+## Ctream Linux sessions
+
+Run `bash docker/ctream/run.sh` from the repository checkout to test the
+current client and agent against disposable Xvfb and headless Sway sessions.
+The script uses a local Docker-compatible engine, builds the Linux binaries,
+and runs the opt-in `ctream` integration test through local stdio IPC.
+It also checks accessible controls in a GTK fixture.
+
+The image supplies a compositor with the foreign-toplevel capture protocols
+used by the Wayland helper. The test covers display discovery, display and
+window frames, input initialization, and capture cancellation. Geometry unit
+tests cover the common overlay and pointer transform when the preview resizes.

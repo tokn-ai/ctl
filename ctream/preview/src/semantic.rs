@@ -23,6 +23,7 @@ pub struct Panel {
   pending: Option<Pending>,
   status: Option<String>,
   text: std::collections::HashMap<String, String>,
+  inspected_size: Option<[usize; 2]>,
 }
 
 fn result<T>(receiver: &Receiver<io::Result<T>>) -> Option<io::Result<T>> {
@@ -42,10 +43,29 @@ impl Panel {
       pending: None,
       status: None,
       text: Default::default(),
+      inspected_size: None,
     }
   }
 
-  pub fn show(&mut self, ctx: &egui::Context, transport: &Arc<dyn Transport + Send + Sync>) {
+  pub fn overlay_elements(&self) -> &[Element] {
+    if self.inspected_size.is_some() && !matches!(self.pending, Some(Pending::Elements(_))) {
+      &self.elements
+    } else {
+      &[]
+    }
+  }
+
+  pub fn show(
+    &mut self,
+    ctx: &egui::Context,
+    transport: &Arc<dyn Transport + Send + Sync>,
+    frame_size: Option<[usize; 2]>,
+  ) {
+    // The control geometry is a snapshot of the remote layout. Local panel and
+    // window resizes keep the same frame size and can reuse the snapshot.
+    if self.inspected_size != frame_size {
+      self.inspected_size = None;
+    }
     match &self.pending {
       Some(Pending::Elements(receiver)) => {
         if let Some(response) = result(receiver) {
@@ -54,13 +74,17 @@ impl Panel {
             Ok(elements) => {
               self.elements = elements;
               self.text.clear();
-              self
-                .elements
-                .is_empty()
-                .then(|| "No accessible actions found.".into())
+              if self.elements.is_empty() {
+                Some("No accessible actions found.".into())
+              } else if self.elements.iter().all(|element| element.bounds.is_none()) {
+                Some("No control locations available.".into())
+              } else {
+                None
+              }
             }
             Err(error) => {
               self.elements.clear();
+              self.inspected_size = None;
               Some(format!("Accessible controls unavailable ({error})"))
             }
           };
@@ -128,6 +152,7 @@ impl Panel {
       });
     let target = self.target;
     if refresh {
+      self.inspected_size = frame_size;
       let transport = Arc::clone(transport);
       let id = self.window.clone();
       self.pending = Some(Pending::Elements(super::background(ctx, move || {

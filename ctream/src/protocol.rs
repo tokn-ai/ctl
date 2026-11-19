@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-pub const VERSION: &str = "1.0.3";
+pub const VERSION: &str = "1.0.4";
+pub const X11_WINDOW_VERSION: &str = "1.0.3";
 pub const WAYLAND_WINDOW_VERSION: &str = "1.0.2";
 pub const X11_FRAME_SIZE: [usize; 2] = [960, 540];
 
@@ -72,6 +73,17 @@ pub struct Element {
   pub role: String,
   pub actions: Vec<String>,
   pub editable: bool,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub bounds: Option<ControlBounds>,
+}
+
+/// Window capture coordinates expressed as fractions of the image dimensions.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+pub struct ControlBounds {
+  pub x: f32,
+  pub y: f32,
+  pub width: f32,
+  pub height: f32,
 }
 
 #[derive(Debug, Deserialize, Serialize)]

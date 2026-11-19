@@ -1,6 +1,6 @@
 use ctream::protocol::{
   DISPLAY_VERSION, Session, Target, VERSION, WAYLAND_WINDOW_VERSION, X11_FRAME_SIZE,
-  valid_window_id,
+  X11_WINDOW_VERSION, valid_window_id,
 };
 use ctream::windows::{self, wayland_window};
 use std::{
@@ -128,6 +128,7 @@ fn capture(target: Target) -> io::Result<()> {
 }
 
 fn window_operation(
+  version: &str,
   operation: &str,
   target: Target,
   id: &str,
@@ -155,13 +156,18 @@ fn window_operation(
     .into_iter()
     .find(|window| window.id == id)
     .ok_or("selected window is no longer available")?;
+  let helper_operation = if version == VERSION && operation == "elements" {
+    "elements-with-bounds"
+  } else {
+    operation
+  };
   Err(
     Command::new("python3")
       .args([
         "-u",
         "-c",
         include_str!("../atspi.py"),
-        operation,
+        helper_operation,
         id,
         &window.title,
       ])
@@ -171,18 +177,21 @@ fn window_operation(
 }
 
 fn supports_windows(version: &str, target: Target) -> bool {
-  version == VERSION || (version == WAYLAND_WINDOW_VERSION && matches!(target, Target::Wayland(_)))
+  matches!(version, VERSION | X11_WINDOW_VERSION)
+    || (version == WAYLAND_WINDOW_VERSION && matches!(target, Target::Wayland(_)))
+}
+
+fn supports_displays(version: &str) -> bool {
+  matches!(
+    version,
+    VERSION | X11_WINDOW_VERSION | WAYLAND_WINDOW_VERSION | DISPLAY_VERSION
+  )
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
   let args: Vec<_> = env::args().skip(1).collect();
   match args.as_slice() {
-    [version, operation]
-      if matches!(
-        version.as_str(),
-        VERSION | WAYLAND_WINDOW_VERSION | DISPLAY_VERSION
-      ) && operation == "discover" =>
-    {
+    [version, operation] if supports_displays(version) && operation == "discover" => {
       let runtime_uid = env::var_os("XDG_RUNTIME_DIR")
         .and_then(|path| fs::metadata(path).ok())
         .map(|metadata| metadata.uid());
@@ -202,12 +211,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect();
       serde_json::to_writer(io::stdout().lock(), &sessions)?;
     }
-    [version, operation, target]
-      if matches!(
-        version.as_str(),
-        VERSION | WAYLAND_WINDOW_VERSION | DISPLAY_VERSION
-      ) =>
-    {
+    [version, operation, target] if supports_displays(version) => {
       let target = Target::parse(target)?;
       match operation.as_str() {
         "capture" => capture(target)?,
@@ -225,7 +229,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
       if !supports_windows(version, target) {
         return Err("window operation unavailable in requested agent version".into());
       }
-      window_operation(operation, target, id)?;
+      window_operation(version, operation, target, id)?;
     }
     _ => return Err("usage: ctream-agent VERSION OPERATION [DISPLAY [WINDOW]]".into()),
   }

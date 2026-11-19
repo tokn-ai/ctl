@@ -103,9 +103,12 @@ transport independent of the capture backend.
 
 ### Semantic actions
 
-Choose **Inspect controls** in the window preview to list available actions.
-The Sway backend requires `swaymsg`, Python 3 with PyGObject and the AT-SPI
-typelib, and access to the user's accessibility bus.
+Choose **Inspect controls** in the window preview to list available actions
+and highlight controls with known bounds. The viewer draws the outlines over
+the video using the same fitted rectangle, so they follow local preview
+resizes. Inspect again after the remote window changes its layout. The Sway
+backend requires `swaymsg`, Python 3 with PyGObject and the AT-SPI typelib,
+and access to the user's accessibility bus.
 
 Model semantic actions as requests that identify the selected window and an
 application element or command. Return an explicit result. AT-SPI is the
@@ -164,3 +167,8 @@ display-level operations under 1.0.1.
 Version 1.0.3 (build 3) adds X11 targets to window discovery and capture,
 with dimensioned PPM frames following the existing Wayland window format.
 The agent retains the 1.0.1 and 1.0.2 contracts.
+
+Version 1.0.4 (build 4) adds optional normalized control bounds to the
+Wayland `elements` response for the local overlay. The agent retains
+contracts 1.0.1 through 1.0.3. The viewer can inspect controls on earlier
+agents using the existing 1.0.2 response.

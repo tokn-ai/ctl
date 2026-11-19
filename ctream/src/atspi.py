@@ -7,7 +7,7 @@ import sys
 
 import gi
 gi.require_version("Atspi", "2.0")
-from gi.repository import Atspi
+from gi.repository import Atspi, GLib
 
 
 def descendants(node):
@@ -70,18 +70,62 @@ def action_names(node):
   return [node.get_action_name(index) for index in range(node.get_n_actions())]
 
 
+def visible_extents(node):
+  try:
+    if not node.is_component():
+      return None
+    states = node.get_state_set()
+    if states is None or not (
+        states.contains(Atspi.StateType.VISIBLE) and states.contains(Atspi.StateType.SHOWING)):
+      return None
+    rect = node.get_extents(Atspi.CoordType.WINDOW)
+  except GLib.Error:
+    # An object can disappear, or its provider may reject this coordinate type.
+    return None
+  if rect is None or rect.width <= 0 or rect.height <= 0:
+    return None
+  if rect.x == -(2**31) or rect.y == -(2**31):
+    return None
+  return rect.x, rect.y, rect.width, rect.height
+
+
+def relative_bounds(window, control):
+  window_x, window_y, window_width, window_height = window
+  x, y, width, height = control
+  left = max(x - window_x, 0)
+  top = max(y - window_y, 0)
+  right = min(x - window_x + width, window_width)
+  bottom = min(y - window_y + height, window_height)
+  if left >= right or top >= bottom:
+    return None
+  return dict(x=left / window_width, y=top / window_height,
+              width=(right - left) / window_width, height=(bottom - top) / window_height)
+
+
 def run(operation, window_id, title):
   Atspi.init()
   Atspi.set_timeout(2000, 3000)
   root = accessible_root(window_pid(window_id, title), title)
-  if operation == "elements":
+  if operation in ("elements", "elements-with-bounds"):
+    # WINDOW coordinates keep this independent of the window's screen position.
+    # Normalize against the accessible window so capture and viewer scales can differ.
+    window = visible_extents(root) if operation == "elements-with-bounds" else None
     result = []
     for node in descendants(root):
       actions = action_names(node)
       editable = node.is_editable_text()
       if actions or editable:
-        result.append(dict(path=node.path, name=node.get_name(),
-                           role=node.get_role_name(), actions=actions, editable=editable))
+        element = dict(path=node.path, name=node.get_name(), role=node.get_role_name(),
+                       actions=actions, editable=editable)
+        if window is not None:
+          control = visible_extents(node)
+          bounds = relative_bounds(window, control) if control is not None else None
+          if bounds is not None:
+            element["bounds"] = bounds
+        result.append(element)
+    if window is not None and visible_extents(root) != window:
+      for element in result:
+        element.pop("bounds", None)
     return result
 
   raw = sys.stdin.buffer.read(65537)

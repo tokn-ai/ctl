@@ -1,10 +1,11 @@
 mod capture;
 use ctream::{
   Display,
-  protocol::{Session, Target, Window, X11_FRAME_SIZE},
+  protocol::{Element, Session, Target, Window, X11_FRAME_SIZE},
   transport::{self, Channel, Request, Ssh, Transport},
 };
 mod input;
+mod overlay;
 mod semantic;
 
 use eframe::egui;
@@ -83,10 +84,8 @@ impl Preview {
       frames: 0,
     })
   }
-}
 
-impl eframe::App for Preview {
-  fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+  fn update_texture(&mut self, ctx: &egui::Context) -> Option<String> {
     let (frame, error) = {
       let mut stream = self.stream.lock().unwrap();
       (stream.frame.take(), stream.error.clone())
@@ -102,8 +101,12 @@ impl eframe::App for Preview {
         eprintln!("Live preview received two frames on the wgpu renderer.");
       }
     }
+    error
+  }
+
+  fn show(&mut self, ctx: &egui::Context, error: Option<&str>, elements: &[Element]) {
     egui::CentralPanel::default().show(ctx, |ui| {
-      if let Some(error) = error.as_ref().or(self.input_error.as_ref()) {
+      if let Some(error) = error.or(self.input_error.as_deref()) {
         ui.label(error);
       } else if self.texture.is_none() {
         ui.spinner();
@@ -122,6 +125,9 @@ impl eframe::App for Preview {
           egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
           egui::Color32::WHITE,
         );
+        if error.is_none() {
+          overlay::paint(ui.painter(), rect, elements);
+        }
         if let Some(input) = &mut self.input
           && ctx.current_pass_index() == 0
           && self.input_error.is_none()
@@ -219,7 +225,7 @@ fn receive<T>(
 }
 
 impl eframe::App for Viewer {
-  fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+  fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
     let next = match &self.state {
       State::Discovering(result) => receive(result.try_recv(), State::Selecting),
       State::FindingWindows(target, result) => receive(result.try_recv(), |windows| {
@@ -245,10 +251,19 @@ impl eframe::App for Viewer {
           return;
         }
       }
-      if let Some(semantic) = &mut self.semantic {
-        semantic.show(ctx, &self.transport);
-      }
-      preview.update(ctx, frame);
+      let error = preview.update_texture(ctx);
+      let frame_size = if error.is_none() {
+        preview.texture.as_ref().map(egui::TextureHandle::size)
+      } else {
+        None
+      };
+      let elements = if let Some(semantic) = &mut self.semantic {
+        semantic.show(ctx, &self.transport, frame_size);
+        semantic.overlay_elements()
+      } else {
+        &[]
+      };
+      preview.show(ctx, error.as_deref(), elements);
       return;
     }
     let mut selected = None;

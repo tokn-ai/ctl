@@ -1,6 +1,6 @@
 use crate::protocol::{
   Action, ActionResult, DISPLAY_VERSION, Element, Session, Target, VERSION, WAYLAND_WINDOW_VERSION,
-  Window, valid_window_id,
+  Window, X11_WINDOW_VERSION, valid_window_id,
 };
 use serde::de::DeserializeOwned;
 use std::{
@@ -15,6 +15,7 @@ pub enum Request {
   Windows(Target),
   CaptureWindow(Target, String),
   Elements(Target, String),
+  ElementsWithBounds(Target, String),
   Action(Target, String),
 }
 
@@ -66,6 +67,9 @@ impl Transport for Ssh {
       Request::Windows(target) => format!("{} windows {target}", window_version(target)),
       Request::CaptureWindow(target, id) => window_command("capture-window", target, &id)?,
       Request::Elements(target, id) => window_command("elements", target, &id)?,
+      Request::ElementsWithBounds(target, id) => {
+        window_command_at(VERSION, "elements", target, &id)?
+      }
       Request::Action(target, id) => window_command("action", target, &id)?,
     };
     let remote = format!(r#"exec env PATH="$PATH:$HOME/.local/bin" ctream-agent {command}"#);
@@ -95,19 +99,25 @@ impl Transport for Ssh {
 
 fn window_version(target: Target) -> &'static str {
   match target {
-    Target::X11(_) => VERSION,
+    Target::X11(_) => X11_WINDOW_VERSION,
     Target::Wayland(_) => WAYLAND_WINDOW_VERSION,
   }
 }
 
 fn window_command(operation: &str, target: Target, id: &str) -> io::Result<String> {
+  window_command_at(window_version(target), operation, target, id)
+}
+
+fn window_command_at(
+  version: &str,
+  operation: &str,
+  target: Target,
+  id: &str,
+) -> io::Result<String> {
   if !valid_window_id(id) {
     return Err(io::Error::other("invalid window identifier"));
   }
-  Ok(format!(
-    "{} {operation} {target} {id}",
-    window_version(target)
-  ))
+  Ok(format!("{version} {operation} {target} {id}"))
 }
 
 fn json_response<T: DeserializeOwned>(channel: Channel) -> io::Result<T> {
@@ -131,7 +141,15 @@ pub fn windows(transport: &dyn Transport, target: Target) -> io::Result<Vec<Wind
 }
 
 pub fn elements(transport: &dyn Transport, target: Target, id: String) -> io::Result<Vec<Element>> {
-  json_response(transport.open(Request::Elements(target, id))?)
+  let inspection = transport
+    .open(Request::ElementsWithBounds(target, id.clone()))
+    .and_then(json_response);
+  inspection.or_else(|error| {
+    transport
+      .open(Request::Elements(target, id))
+      .and_then(json_response)
+      .map_err(|_| error)
+  })
 }
 
 pub fn action(

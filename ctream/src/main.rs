@@ -2,7 +2,7 @@ use ctream::{Display, discover, protocol::Target, transport, windows};
 use std::{env, ffi::OsString, io, process::ExitCode};
 
 const USAGE: &str = "Usage: ctream list
-       ctream windows DISPLAY [--host SSH_HOST] [--json]
+       ctream [--host SSH_HOST] windows DISPLAY [--json]
 
 List listening displays or query a single display's top-level windows.
 Use :DISPLAY for X11 or wayland-N for Wayland.";
@@ -61,28 +61,17 @@ fn usage_error(error: &str) -> ExitCode {
   ExitCode::from(2)
 }
 
-fn run_windows(args: &[OsString]) -> ExitCode {
+fn run_windows(host: Option<&str>, args: &[OsString]) -> ExitCode {
   let mut target = None;
-  let mut host = None;
   let mut json = false;
-  let mut args = args.iter();
-  while let Some(arg) = args.next() {
+  for arg in args {
     match arg.to_str() {
       Some("--help" | "-h") => {
         println!("{USAGE}");
         return ExitCode::SUCCESS;
       }
       Some("--json") if !json => json = true,
-      Some("--host") if host.is_none() => {
-        let Some(value) = args
-          .next()
-          .and_then(|arg| arg.to_str())
-          .filter(|value| !value.is_empty() && !value.starts_with('-'))
-        else {
-          return usage_error("--host needs an SSH destination");
-        };
-        host = Some(value);
-      }
+      Some("--host") => return usage_error("--host must appear before windows"),
       Some(display) if target.is_none() && !display.starts_with('-') => {
         match Target::parse(display) {
           Ok(display) => target = Some(display),
@@ -118,7 +107,17 @@ fn main() -> ExitCode {
         ExitCode::FAILURE
       }
     },
-    [arg, rest @ ..] if arg == "windows" => run_windows(rest),
+    [arg, rest @ ..] if arg == "windows" => run_windows(None, rest),
+    [flag, host, command, rest @ ..] if flag == "--host" && command == "windows" => {
+      let Some(host) = host
+        .to_str()
+        .filter(|host| !host.is_empty() && !host.starts_with('-'))
+      else {
+        return usage_error("--host needs an SSH destination");
+      };
+      run_windows(Some(host), rest)
+    }
+    [flag, ..] if flag == "--host" => usage_error("expected --host SSH_HOST windows"),
     _ => usage_error("expected list or windows"),
   }
 }

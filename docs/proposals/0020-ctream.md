@@ -75,7 +75,7 @@ display, or launch the viewer with `HOST DISPLAY --windows`. The separate
 window helper is only required for the Wayland backend.
 
 From the CLI, run `ctream windows DISPLAY` on the display host, or
-`ctream windows DISPLAY --host SSH_HOST` to query through the remote agent.
+`ctream --host SSH_HOST windows DISPLAY` to query through the remote agent.
 The command lists window IDs, application IDs, and titles. Add `--json` for
 structured output.
 

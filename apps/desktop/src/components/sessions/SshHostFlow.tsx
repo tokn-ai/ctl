@@ -350,19 +350,26 @@ export function SshHostFlow({
       attemptRef.current = null;
       setPrompt(null);
       const code = errorCode(failure);
-      setError(localizedErrorText(failure));
       setNeedsVpnSignIn(code === "vpn_sign_in_required");
       setNeedsRemoteVpnSignIn(code === "remote_vpn_sign_in_required");
       const vpn_owner = remoteVpnUpdateOwner(candidate, failure);
       setVpnUpdateOwner(!windows_client && vpn_owner?.target.remote_platform !== "windows" ? vpn_owner : null);
-      onConnectionChange?.(candidate, "error", localizedErrorText(failure));
       const update = code === "ctl_agent_identity_unsupported" || code === "ctl_agent_update_required" || code === "protocol_version_mismatch";
-      const can_manage = !windows_client && (candidate.kind !== "ssh" || candidate.remote_platform !== "windows");
-      const restart = can_manage && code === "protocol_version_mismatch" && componentsUpdatedRef.current !== null
+      const windows_target = candidate.kind === "ssh" && candidate.remote_platform === "windows";
+      const can_manage = !windows_client && !windows_target;
+      const still_incompatible = code === "protocol_version_mismatch" && componentsUpdatedRef.current !== null
         && sameSshEndpoint(candidate, componentsUpdatedRef.current);
+      const restart = can_manage && still_incompatible;
+      const windows_setup = windows_target && !component_mode && !still_incompatible
+        && (code === "windows_remote_agent_setup_required" || update);
+      const detail = windows_setup && code === "windows_remote_agent_setup_required"
+        ? message("ssh_flow.windows_default_shell")
+        : localizedErrorText(failure);
+      setError(detail);
+      onConnectionChange?.(candidate, "error", detail);
       setNeedsUpdate(update);
       setNeedsDaemonRestart(restart);
-      setCanInstallAgent(can_manage && !restart && (component_mode !== undefined || update || code === "ctl_agent_not_found"));
+      setCanInstallAgent(windows_setup || (can_manage && !restart && (component_mode !== undefined || update || code === "ctl_agent_not_found")));
       if (restart) await checkRestart(candidate);
       else setStep("retry");
     } finally {
@@ -1115,7 +1122,8 @@ export function SshHostFlow({
     }
   }
 
-  if (pending_update) return <UpdateComponentsDialog targets={update_targets} context={{ targets: [pending_update.target] }} on_updated={(results, selected) => {
+  if (pending_update) return <UpdateComponentsDialog targets={update_targets} context={{ targets: [pending_update.target] }}
+    windows_bootstrap={pending_update.target.kind === "ssh" && pending_update.target.remote_platform === "windows"} on_updated={(results, selected) => {
     if (!results.some((result) => result.state === "complete" && sameSshEndpoint(selected[result.host_index], pending_update.target))) return;
     componentsUpdatedRef.current = pending_update.target;
     candidateRef.current = pending_update.reconnect_candidate;

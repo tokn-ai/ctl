@@ -18,6 +18,7 @@ import "./componentUpdate.css";
 interface Props {
   targets: readonly ConnectionTarget[];
   context?: ComponentUpdateContext;
+  windows_bootstrap?: boolean;
   on_updated?(results: ComponentUpdateHostResult[], targets: readonly ConnectionTarget[]): void;
   on_close(): void;
 }
@@ -28,15 +29,17 @@ function sourceChoice(source?: ComponentUpdateSource): SourceChoice {
   return source?.kind === "published" ? source.channel : source?.kind ?? "automatic";
 }
 
-export function UpdateComponentsDialog({ targets, context, on_updated, on_close }: Props) {
+export function UpdateComponentsDialog({ targets, context, windows_bootstrap = false, on_updated, on_close }: Props) {
   const { t, locale, formatText } = useLocale();
-  const available = new Map([LOCAL_TARGET, ...targets, ...(context?.targets ?? [])]
-    .filter((target) => target.kind !== "ssh" || target.remote_platform !== "windows")
+  const context_targets = context?.targets ?? [];
+  const supportsTarget = (target: ConnectionTarget) => windows_bootstrap === (target.kind === "ssh" && target.remote_platform === "windows");
+  const available = new Map((windows_bootstrap ? context_targets : [LOCAL_TARGET, ...targets, ...context_targets])
+    .filter(supportsTarget)
     .map((target) => [targetKey(target), target]));
   const [selected, setSelected] = useState(() => new Set((context?.targets ?? [LOCAL_TARGET])
-    .filter((target) => target.kind !== "ssh" || (target.remote_platform !== "windows" && !target.unavailable))
+    .filter((target) => supportsTarget(target) && (target.kind !== "ssh" || !target.unavailable))
     .map(targetKey)));
-  const initial_source = context?.source;
+  const initial_source = windows_bootstrap && context?.source?.kind === "working_tree" ? undefined : context?.source;
   const [source_choice, setSourceChoice] = useState<SourceChoice>(() => sourceChoice(initial_source));
   const published = source_choice === "nightly" || source_choice === "stable";
   const provided = source_choice === "provided";
@@ -154,7 +157,7 @@ export function UpdateComponentsDialog({ targets, context, on_updated, on_close 
         <option value="automatic">{t("about.build_automatic")}</option>
         <option value="nightly">{t("about.build_nightly")}</option>
         <option value="stable">{t("about.build_stable")}</option>
-        {import.meta.env.DEV || source_choice === "working_tree" ? <option value="working_tree">{t("about.build_checkout")}</option> : null}
+        {!windows_bootstrap && (import.meta.env.DEV || source_choice === "working_tree") ? <option value="working_tree">{t("about.build_checkout")}</option> : null}
         <option value="selected">{t("about.build_offline")}</option>
         <option value="provided">{t("about.build_provided")}</option>
       </select></label>

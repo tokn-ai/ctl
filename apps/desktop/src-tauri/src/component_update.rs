@@ -16,13 +16,6 @@ use tokio::sync::watch;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-#[cfg_attr(
-  windows,
-  expect(
-    dead_code,
-    reason = "Windows parses the shared IPC request before reporting unsupported component updates"
-  )
-)]
 pub struct UpdateRequest {
   targets: Vec<ConnectionTargetDto>,
   attempt_id: String,
@@ -31,13 +24,6 @@ pub struct UpdateRequest {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-#[cfg_attr(
-  all(windows, not(test)),
-  expect(
-    dead_code,
-    reason = "Update wire states remain shared while Windows reports component updates as unsupported"
-  )
-)]
 enum State {
   Updating,
   Complete,
@@ -72,7 +58,6 @@ struct Registry {
   pending_cancel: BTreeMap<Key, Instant>,
 }
 impl Registry {
-  #[cfg(any(unix, test))]
   fn register(&mut self, key: Key, cancel: watch::Sender<bool>) -> CommandResult<()> {
     if self.active.contains_key(&key) {
       return Err(CommandErrorDto::new(
@@ -110,9 +95,7 @@ fn registry() -> &'static Mutex<Registry> {
   REGISTRY.get_or_init(Mutex::default)
 }
 
-#[cfg(unix)]
 struct Guard(Key);
-#[cfg(unix)]
 impl Drop for Guard {
   fn drop(&mut self) {
     registry().lock().unwrap().active.remove(&self.0);
@@ -127,65 +110,61 @@ pub async fn update_components(
   on_prompt: Channel<crate::ssh_auth::SshPromptDto>,
   on_progress: Channel<UpdateProgress>,
 ) -> CommandResult<Vec<HostResult>> {
-  #[cfg(unix)]
+  if request.targets.is_empty()
+    || request.targets.len() > 64
+    || request.attempt_id.is_empty()
+    || request.attempt_id.len() > 128
   {
-    if request.targets.is_empty()
-      || request.targets.len() > 64
-      || request.attempt_id.is_empty()
-      || request.attempt_id.len() > 128
-    {
-      return Err(CommandErrorDto::new(
-        "invalid_component_update",
-        "Choose between one and 64 hosts.",
-      ));
-    }
-    let key = (window.label().to_owned(), request.attempt_id.clone());
-    let (cancel, mut cancelled) = watch::channel(false);
-    registry().lock().unwrap().register(key.clone(), cancel)?;
-    let _guard = Guard(key);
-    let context = Context {
-      app: &app,
-      window: window.label(),
-      attempt_id: &request.attempt_id,
-      on_prompt,
-      on_progress: &on_progress,
-    };
-    run_batch(
-      request.targets,
-      &mut cancelled,
-      |host_index, target| context.update_host(host_index, target, request.options.clone()),
-      |host_index, state| {
-        on_progress
-          .send(UpdateProgress {
-            host_index,
-            state,
-            progress: None,
-          })
-          .map_err(CommandErrorDto::backend)
-      },
-    )
-    .await
+    return Err(CommandErrorDto::new(
+      "invalid_component_update",
+      "Choose between one and 64 hosts.",
+    ));
   }
+  let key = (window.label().to_owned(), request.attempt_id.clone());
+  let (cancel, mut cancelled) = watch::channel(false);
+  registry().lock().unwrap().register(key.clone(), cancel)?;
+  let _guard = Guard(key);
   #[cfg(not(unix))]
-  {
-    let _ = (app, window, request, on_prompt, on_progress);
-    Err(CommandErrorDto::new(
-      "component_update_unsupported",
-      "Component updates currently require macOS or Linux.",
-    ))
-  }
+  let _ = on_prompt;
+  let context = Context {
+    app: &app,
+    #[cfg(unix)]
+    window: window.label(),
+    #[cfg(unix)]
+    attempt_id: &request.attempt_id,
+    #[cfg(unix)]
+    on_prompt,
+    on_progress: &on_progress,
+  };
+  Box::pin(run_batch(
+    request.targets,
+    &mut cancelled,
+    |host_index, target| context.update_host(host_index, target, request.options.clone()),
+    |host_index, state| {
+      on_progress
+        .send(UpdateProgress {
+          host_index,
+          state,
+          progress: None,
+        })
+        .map_err(CommandErrorDto::backend)
+    },
+  ))
+  .await
 }
 
-#[cfg(unix)]
 struct Context<'a> {
   app: &'a AppHandle,
+  #[cfg(unix)]
   window: &'a str,
+  #[cfg(unix)]
   attempt_id: &'a str,
+  #[cfg(unix)]
   on_prompt: Channel<crate::ssh_auth::SshPromptDto>,
   on_progress: &'a Channel<UpdateProgress>,
 }
-#[cfg(unix)]
 impl Context<'_> {
+  #[cfg(unix)]
   async fn update_host(
     &self,
     host_index: usize,
@@ -246,6 +225,56 @@ impl Context<'_> {
       }
     }
   }
+
+  #[cfg(not(unix))]
+  async fn update_host(
+    &self,
+    host_index: usize,
+    target: ConnectionTargetDto,
+    options: UpdateOptions,
+  ) -> CommandResult<UpdateResult> {
+    install_windows_host(
+      &target,
+      &options,
+      &crate::remote_agent::bundle_directories(self.app)?,
+      |progress| {
+        self
+          .on_progress
+          .send(UpdateProgress {
+            host_index,
+            state: State::Updating,
+            progress: Some(progress),
+          })
+          .map_err(CommandErrorDto::backend)
+      },
+    )
+    .await
+  }
+}
+
+#[cfg(not(unix))]
+pub(crate) async fn install_windows_host(
+  target: &ConnectionTargetDto,
+  options: &UpdateOptions,
+  included_bundles: &[std::path::PathBuf],
+  on_progress: impl Fn(RemoteAgentInstallProgressDto) -> CommandResult<()>,
+) -> CommandResult<UpdateResult> {
+  if target.remote_platform() != ctl_client::RemotePlatform::Windows {
+    return Err(CommandErrorDto::new(
+      "component_update_unsupported",
+      "This app can install components on Windows SSH hosts.",
+    ));
+  }
+  crate::remote_agent::install(
+    target,
+    &ctl_client::SshInteraction::Batch,
+    options,
+    included_bundles,
+    on_progress,
+    || false,
+  )
+  .await
+  .map(|installed| installed.result)
 }
 
 #[tauri::command]
@@ -266,7 +295,6 @@ pub(crate) fn close_window(window: &str) {
     .retain(|(label, _), _| label != window);
 }
 
-#[cfg(any(unix, test))]
 async fn run_batch<T, F, Fut>(
   targets: Vec<T>,
   cancelled: &mut watch::Receiver<bool>,

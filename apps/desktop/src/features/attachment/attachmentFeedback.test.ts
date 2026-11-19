@@ -65,10 +65,17 @@ describe("attachment feedback recovery capabilities", () => {
     });
   });
 
-  it("retains the Windows setup instructions and connects through the host flow", () => {
+  it("keeps the CLI fallback when the session lacks a Windows connection route", () => {
     const message = "Install the Windows components with ctlup, then reconnect.";
     expect(displayedFeedback(state({ error_code: "windows_remote_agent_setup_required", message }), false)).toEqual({
       message, action: { kind: "connect_host", label: "Connect host" },
+    });
+  });
+
+  it("explains Windows setup without a CLI command when the host flow is available", () => {
+    const session = { ...remote_session, target: { kind: "ssh" as const, host_id: "remote", destination: "example", remote_platform: "windows" as const } };
+    expect(displayedFeedback(state({ session, error_code: "windows_remote_agent_setup_required" }), false)).toEqual({
+      message: "Install the remote components for this Windows SSH account.", action: { kind: "connect_host", label: "Connect host" },
     });
   });
 

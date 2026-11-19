@@ -7,6 +7,8 @@ pub mod commands;
 mod connection;
 #[path = "forwarding.rs"]
 mod forwarding;
+#[path = "install_identity.rs"]
+pub(crate) mod install_identity;
 #[path = "verification.rs"]
 mod verification;
 
@@ -84,8 +86,12 @@ pub async fn probe(
   if restart_check {
     connection::require_unix_target(&target, "Remote ctmux restart")?;
   }
+  probe_terminal(&target).await
+}
+
+async fn probe_terminal(target: &ConnectionTargetDto) -> CommandResult<ctl_proto::RemoteIdentity> {
   connection::remote_service(async {
-    let (stream, identity) = connect_identified(&target).await?;
+    let (stream, identity) = connect_identified(target).await?;
     verification::verify(stream, target.label()).await?;
     Ok(identity)
   })
@@ -144,6 +150,59 @@ pub fn disconnect(_targets: &[ConnectionTargetDto]) -> std::future::Ready<Comman
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[cfg(windows)]
+  #[tokio::test]
+  #[ignore = "requires the ephemeral Windows OpenSSH CI fixture and verified bundle"]
+  async fn openssh_setup_installs_and_reconnects_windows_target() {
+    use ctl_core::component_update::{BuildSource, Package, UpdateOptions};
+
+    let destination = std::env::var("CTL_TEST_SSH_HOST").expect("set CTL_TEST_SSH_HOST");
+    let bundle_path = std::env::var_os("CTL_TEST_WINDOWS_DESKTOP_BUNDLE")
+      .expect("set CTL_TEST_WINDOWS_DESKTOP_BUNDLE");
+    let expected_bundle = std::env::var("CTL_TEST_WINDOWS_DESKTOP_BUNDLE_ID")
+      .expect("set CTL_TEST_WINDOWS_DESKTOP_BUNDLE_ID");
+    let target = serde_json::from_value(serde_json::json!({
+      "kind": "ssh",
+      "destination": destination,
+      "remote_platform": "windows",
+    }))
+    .unwrap();
+
+    let missing = probe_terminal(&target).await.unwrap_err();
+    assert_eq!(
+      missing.code, "windows_remote_agent_setup_required",
+      "{missing:?}"
+    );
+
+    let result = crate::component_update::install_windows_host(
+      &target,
+      &UpdateOptions {
+        package: Package::FullBundle,
+        source: BuildSource::Provided {
+          path: bundle_path.into(),
+          local_build: false,
+          ctld_package: None,
+        },
+      },
+      &[],
+      |_| Ok(()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+      result.target_triple,
+      ctl_client::remote_bundle::WINDOWS_TARGET
+    );
+    assert!(result.services_preserved);
+
+    let identity = probe_terminal(&target).await.unwrap();
+    let bundle = identity
+      .bundle
+      .expect("the installed agent must report its bundle");
+    assert_eq!(bundle.bundle_id, expected_bundle);
+    assert_eq!(bundle.target_triple, result.target_triple);
+  }
 
   #[tokio::test]
   async fn disabling_a_shared_master_keeps_direct_ssh_destination_validation() {

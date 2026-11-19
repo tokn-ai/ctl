@@ -76,6 +76,23 @@ async function bootstrapFiles(home: string): Promise<string[]> {
   return (await readdir(home)).filter((name) => /^ctlup-[0-9a-f]{32}\.exe$/i.test(name)).sort();
 }
 
+async function verifyDesktopSetup(destination: string, bundle: string, bundle_id: string): Promise<void> {
+  const test = "ssh_auth::tests::openssh_setup_installs_and_reconnects_windows_target";
+  const { stdout } = await execute("cargo", [
+    "test", "--locked", "-p", "ctmux-app", "--lib", test, "--", "--ignored", "--exact", "--color", "never",
+  ], {
+    env: {
+      ...process.env,
+      CTL_TEST_SSH_HOST: destination,
+      CTL_TEST_WINDOWS_DESKTOP_BUNDLE: bundle,
+      CTL_TEST_WINDOWS_DESKTOP_BUNDLE_ID: bundle_id,
+    },
+    timeout: 600_000,
+  });
+  assert.ok(stdout.split(/\r?\n/).includes(`test ${test} ... ok`), stdout);
+  console.log("Windows desktop installed the component bundle over OpenSSH and reconnected.");
+}
+
 async function main(): Promise<void> {
   if (process.platform !== "win32" || process.env.GITHUB_ACTIONS !== "true") throw new Error("Run this fixture on an ephemeral GitHub Windows runner");
   const [binaries, packages, destination, saved_host, ...extra] = process.argv.slice(2);
@@ -90,7 +107,13 @@ async function main(): Promise<void> {
   const target = destination ? ["--destination", destination, "--remote-platform", "windows"] : [];
   const home = homedir();
   const root = join(home, ".tokn", "ctl");
-  const managed_entries = ["bin", "installs", "leases", "updaters", ".activation.json", "installations.lock"];
+  const managed_entries = [
+    "bin", "installs", "leases", "updaters", ".activation.json", "installations.lock",
+    "catalog.json", "catalog-migrated.json", ".catalog-transaction.json",
+  ];
+  const clear_managed_entries = async (): Promise<void> => {
+    for (const entry of managed_entries) await rm(join(root, entry), { recursive: true, force: true, maxRetries: 3 });
+  };
   for (const entry of managed_entries) {
     const existing = await lstat(join(root, entry)).catch((error: NodeJS.ErrnoException) => {
       if (error.code !== "ENOENT") throw error;
@@ -138,7 +161,10 @@ async function main(): Promise<void> {
     const list_sessions = [...target, "ctmux", "list"];
 
     assert.deepEqual(await status(bootstrap, target), { active: null, previous: null });
-    if (destination) await assert.rejects(execute(join(binary_directory, "ctl.exe"), list_sessions, { timeout: 30_000 }));
+    if (destination) {
+      await assert.rejects(execute(join(binary_directory, "ctl.exe"), list_sessions, { timeout: 30_000 }));
+      await verifyDesktopSetup(destination, first_bundle, first.bundle_id);
+    }
     await json(bootstrap, [...target, "install", "--from", first_bundle, "--json"]);
     await assert_digest(initial_digest);
     assert.deepEqual(await bootstrapFiles(home), before_bootstrap);
@@ -197,9 +223,8 @@ async function main(): Promise<void> {
     console.log(`Windows ctlup install, update and rollback passed${destination ? " over OpenSSH" : ""}.`);
   } finally {
     if (catalog_restore) await writeFile(catalog_restore.path, catalog_restore.contents);
-    for (const path of [fixture, ...managed_entries.map((entry) => join(root, entry))]) {
-      await rm(path, { recursive: true, force: true, maxRetries: 3 });
-    }
+    await rm(fixture, { recursive: true, force: true, maxRetries: 3 });
+    await clear_managed_entries();
   }
 }
 

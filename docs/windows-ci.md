@@ -302,11 +302,16 @@ existing host-key policy and credentials. Older saved methods default to Unix.
 interactive attachment opens the ordinary ctmux channel on the same target.
 The native SSH fixture exercises both services and both destination selectors.
 
-Run `ctlup update --destination ALIAS --remote-platform windows` to provision a
-Windows x64 SSH account. SSH prefers the managed agent and also supports an
+When the desktop connection reports that a Windows x64 SSH account needs
+components, choose **Install remote components**, then reconnect. The installer
+uses the selected SSH route and verifies the active bundle on the target. A
+Windows desktop client uses its existing noninteractive OpenSSH configuration.
+From a terminal, `ctlup update --destination ALIAS --remote-platform windows`
+provisions the same account. SSH prefers the managed agent and also supports an
 existing agent and companion executables on the server's `PATH`. The Windows CI
-fixtures exercise local and OpenSSH installation, updater replacement, and
-runtime rollback.
+fixtures exercise the desktop installer against an SSH account without a
+managed installation, then reconnect and verify the installed bundle identity.
+They also cover updater replacement and runtime rollback.
 
 `ctl-agent` uses the shared IPC stream and only the data endpoint. Its installed
 companion is `ctmuxd.exe` on Windows. Startup requests both `DETACHED_PROCESS`

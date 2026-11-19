@@ -19,7 +19,7 @@ pub(crate) use provenance::single_target_heads;
 pub use provenance::{activate_uploaded, decode_catalog_origin, encode_catalog_origin};
 pub use remote::{
   InstallationCatalog, remote_account_id, remote_catalog, remote_rollback, remote_show,
-  remote_status,
+  remote_status, verify_remote_activation,
 };
 pub use show::{InstallationShow, InstalledBuild, show};
 pub use updater::{

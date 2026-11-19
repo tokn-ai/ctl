@@ -17,7 +17,6 @@ mod local_transport;
 mod native_menu;
 mod port_forwarding;
 mod preview_windows;
-#[cfg(unix)]
 mod remote_agent;
 #[cfg(unix)]
 mod ssh_auth;

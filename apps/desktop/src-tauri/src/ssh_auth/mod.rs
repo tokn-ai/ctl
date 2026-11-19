@@ -7,7 +7,7 @@ pub(crate) use broker::{check_route_support, ensure_target_master};
 pub mod commands;
 mod connection;
 mod forwarding;
-mod install_identity;
+pub(crate) mod install_identity;
 mod verification;
 
 use std::collections::HashMap;
@@ -247,7 +247,6 @@ pub(crate) async fn install_components(
   update: ctl_client::component_update::UpdateOptions,
   on_progress: impl Fn(crate::dto::RemoteAgentInstallProgressDto) -> CommandResult<()> + Send + Sync,
 ) -> CommandResult<crate::remote_agent::Installation> {
-  connection::require_unix_target(&target, "Remote component installation")?;
   let key = (window, attempt_id);
   let (cancel, mut cancelled) = watch::channel(false);
   let attempt = Arc::new(Attempt {
@@ -286,14 +285,25 @@ pub(crate) async fn install_components(
         "Select a remote SSH host.",
       ));
     };
+    let included_bundles = crate::remote_agent::bundle_directories(&app)?;
+    if options.remote_platform == ctl_client::RemotePlatform::Windows {
+      return crate::remote_agent::install(
+        &target,
+        &interaction,
+        &update,
+        &included_bundles,
+        on_progress,
+        || !attempt.responses.lock().unwrap().is_empty(),
+      )
+      .await;
+    }
     let installed =
       install_identity::upload(&target, &destination, &options, &control_path, || {
         crate::remote_agent::install(
-          &app,
-          &destination,
-          &options,
+          &target,
           &interaction,
           &update,
+          &included_bundles,
           on_progress,
           || !attempt.responses.lock().unwrap().is_empty(),
         )

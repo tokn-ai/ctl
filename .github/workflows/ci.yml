@@ -55,7 +55,7 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v6
 
-      - name: Install Tauri system dependencies
+      - name: Install Linux build dependencies
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
@@ -64,7 +64,8 @@ jobs:
             librsvg2-dev \
             libssl-dev \
             libwebkit2gtk-4.1-dev \
-            libxdo-dev
+            libxdo-dev \
+            libxkbcommon-dev
 
       - name: Install Node.js
         uses: actions/setup-node@v6
@@ -97,7 +98,7 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v6
 
-      - name: Install Tauri system dependencies
+      - name: Install Linux build dependencies
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
@@ -106,7 +107,8 @@ jobs:
             librsvg2-dev \
             libssl-dev \
             libwebkit2gtk-4.1-dev \
-            libxdo-dev
+            libxdo-dev \
+            libxkbcommon-dev
 
       - name: Install Node.js
         uses: actions/setup-node@v6

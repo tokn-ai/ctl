@@ -94,7 +94,7 @@ try {
     "", "[patch.crates-io]", ...patches, "",
   ].join("\n"));
   // Retain the checkout's external dependency versions while allowing Cargo to
-  // remove the excluded desktop package from this isolated validation workspace.
+  // remove unpublished packages from this isolated validation workspace.
   copyFileSync(join(root, "Cargo.lock"), join(directory, "Cargo.lock"));
   const target = join(metadata.target_directory, "publish-check");
   // Cargo archives normalize source timestamps, so a new extraction can reuse

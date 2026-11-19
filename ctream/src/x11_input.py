@@ -11,17 +11,21 @@ def bind(lib, name, result, *args):
 
 
 x11 = c.CDLL("libX11.so.6")
-xtst = c.CDLL("libXtst.so.6")
 ptr, num, ulong = c.c_void_p, c.c_int, c.c_ulong
 display = bind(x11, "XOpenDisplay", ptr, c.c_char_p)(None)
 if not display:
   sys.exit("Cannot open selected X11 display")
-extension = bind(xtst, "XTestQueryExtension", num, ptr, *([c.POINTER(num)] * 4))
-if not extension(display, *(c.byref(num()) for _ in range(4))):
-  sys.exit("Selected display does not support XTEST")
 screen = bind(x11, "XDefaultScreen", num, ptr)(display)
 width = bind(x11, "XDisplayWidth", num, ptr, num)(display, screen)
 height = bind(x11, "XDisplayHeight", num, ptr, num)(display, screen)
+if sys.argv[1:] == ["--geometry"]:
+  print(width, height)
+  bind(x11, "XCloseDisplay", num, ptr)(display)
+  sys.exit(0)
+xtst = c.CDLL("libXtst.so.6")
+extension = bind(xtst, "XTestQueryExtension", num, ptr, *([c.POINTER(num)] * 4))
+if not extension(display, *(c.byref(num()) for _ in range(4))):
+  sys.exit("Selected display does not support XTEST")
 motion = bind(xtst, "XTestFakeMotionEvent", num, ptr, num, num, num, ulong)
 button = bind(xtst, "XTestFakeButtonEvent", num, ptr, c.c_uint, num, ulong)
 key = bind(xtst, "XTestFakeKeyEvent", num, ptr, c.c_uint, num, ulong)

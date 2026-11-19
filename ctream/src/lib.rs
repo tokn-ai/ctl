@@ -1,7 +1,12 @@
+pub mod protocol;
+pub mod transport;
+
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::{fs, io, process::Command};
 
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
 pub enum Display {
   X11(u32),
   Wayland { uid: u32, socket: String },

@@ -1,31 +1,7 @@
 use eframe::egui::ColorImage;
 use std::io::{self, BufRead, Read};
 
-pub enum Target {
-  X11(u32),
-  Wayland(u32),
-}
-
-impl Target {
-  pub fn parse(name: &str) -> Result<Self, &'static str> {
-    let (digits, wayland) = if let Some(digits) = name.strip_prefix(':') {
-      (digits, false)
-    } else if let Some(digits) = name.strip_prefix("wayland-") {
-      (digits, true)
-    } else {
-      return Err("expected :DISPLAY or wayland-N");
-    };
-    if !digits.bytes().all(|b| b.is_ascii_digit()) {
-      return Err("invalid display number");
-    }
-    let number = digits.parse().map_err(|_| "invalid display number")?;
-    Ok(if wayland {
-      Self::Wayland(number)
-    } else {
-      Self::X11(number)
-    })
-  }
-}
+use ctream::protocol::{Target, X11_FRAME_SIZE};
 
 // grim writes a P6 header for every frame, including after an output resize.
 fn header_line(reader: &mut impl BufRead) -> io::Result<String> {
@@ -43,7 +19,7 @@ pub fn read_frame(
   pixels: &mut Vec<u8>,
 ) -> io::Result<ColorImage> {
   let size = match target {
-    Target::X11(_) => [super::WIDTH, super::HEIGHT],
+    Target::X11(_) => X11_FRAME_SIZE,
     Target::Wayland(_) => {
       if header_line(reader)?.trim_end() != "P6" {
         return Err(io::Error::other("expected RGB frame from grim"));

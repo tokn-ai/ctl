@@ -1,13 +1,12 @@
+use ctream::transport::{Channel, Request, Transport};
 use eframe::egui::{self, Event, Key, Modifiers, Pos2, Rect, Vec2};
 use std::{
   fmt::Write as _,
-  io::{self, BufRead, BufReader, Write},
-  process::{Child, ChildStdin, Stdio},
+  io::{self, BufRead, BufReader, Read, Write},
 };
 
 pub struct Input {
-  child: Child,
-  pipe: Option<ChildStdin>,
+  channel: Option<Channel>,
   size: Option<[u32; 2]>,
   modifiers: Modifiers,
   pointer: Option<Pos2>,
@@ -68,23 +67,15 @@ fn keysym(key: Key) -> String {
 }
 
 impl Input {
-  pub fn connect(host: &str, target: &super::Target) -> io::Result<Self> {
-    let remote = match target {
-      super::Target::X11(display) => {
-        let script = include_str!("x11_input.py").replace('\'', "'\\''");
-        format!("exec env DISPLAY=:{display} python3 -u -c '{script}'")
-      }
-      super::Target::Wayland(number) => format!(
-        r#"exec env PATH="$PATH:$HOME/.local/bin" WAYLAND_DISPLAY=wayland-{number} ctream-wayland-input"#
-      ),
-    };
-    let mut child = super::ssh(host)
-      .arg(remote)
-      .stdin(Stdio::piped())
-      .stdout(Stdio::piped())
-      .spawn()?;
+  pub fn connect(transport: &dyn Transport, target: super::Target) -> io::Result<Self> {
+    let mut channel = transport.open(Request::Input(target))?;
     let mut header = String::new();
-    BufReader::new(child.stdout.take().unwrap()).read_line(&mut header)?;
+    BufReader::new(channel.reader.by_ref())
+      .take(128)
+      .read_line(&mut header)?;
+    if !header.ends_with('\n') {
+      return Err(io::Error::other("incomplete remote input handshake"));
+    }
     let size = match target {
       super::Target::Wayland(_) if header.trim_end() == "ready" => None,
       super::Target::X11(_) => {
@@ -92,24 +83,18 @@ impl Input {
         match dims.as_slice() {
           [Ok(w), Ok(h)] if *w > 0 && *h > 0 => Some([*w, *h]),
           _ => {
-            drop(child.stdin.take());
-            let _ = child.wait();
             return Err(io::Error::other("X11 input initialization failed"));
           }
         }
       }
       _ => {
-        drop(child.stdin.take());
-        let _ = child.wait();
         return Err(io::Error::other(
           "Wayland input unavailable; check the remote helper and compositor protocols",
         ));
       }
     };
-    let pipe = child.stdin.take();
     Ok(Self {
-      child,
-      pipe,
+      channel: Some(channel),
       size,
       modifiers: Modifiers::NONE,
       pointer: None,
@@ -148,7 +133,12 @@ impl Input {
     self.modifiers = Modifiers::NONE;
     self.pointer = None;
     self.scroll = Vec2::ZERO;
-    self.pipe.as_mut().unwrap().write_all(b"reset\n")
+    self
+      .channel
+      .as_mut()
+      .expect("open input channel")
+      .writer
+      .write_all(b"reset\n")
   }
 
   pub fn forward(
@@ -243,14 +233,22 @@ impl Input {
       }
     }
     self.sync_modifiers(modifiers, &mut out);
-    self.pipe.as_mut().unwrap().write_all(out.as_bytes())
+    self
+      .channel
+      .as_mut()
+      .expect("open input channel")
+      .writer
+      .write_all(out.as_bytes())
   }
 }
 
 impl Drop for Input {
   fn drop(&mut self) {
-    drop(self.pipe.take());
-    let _ = self.child.wait();
+    let Channel { mut reader, writer } = self.channel.take().expect("open input channel");
+    drop(writer); // EOF makes the remote helper release all held input.
+    std::thread::spawn(move || {
+      let _ = io::copy(&mut reader, &mut io::sink());
+    });
   }
 }
 

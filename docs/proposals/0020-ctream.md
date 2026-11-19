@@ -32,14 +32,23 @@ runtime directory. Report the two X11 listeners as one display. Label a
 greeter separately when session metadata identifies it, and distinguish an
 observed listener from a display that accepted a client connection.
 
-For the first live preview, run `cargo run -p ctream-preview -- HOST :DISPLAY`
-from the ctream workspace. The viewer starts FFmpeg with x11grab through SSH
-and displays the frames in a local wgpu window. While focused, the viewer
-forwards keyboard and pointer events over a second SSH channel. The host needs
-Python 3, libX11, libXtst, and access to the selected X11 display with XTEST.
-The viewer fits the desktop to the window and uses the same rectangle to
-map clicks to X11 pixels. Closing the window releases held inputs and ends
-both channels.
+Install `ctream-agent` on the remote Linux host with
+`cargo install --locked --path ctream --bin ctream-agent --root ~/.local`.
+From the ctream workspace, run `cargo run -p ctream-preview -- HOST` to
+discover remote displays and select one in the viewer. Append `:DISPLAY` or
+`wayland-N` to open a target directly.
+
+The viewer opens a transport channel for each agent operation. The SSH
+transport starts a standalone `ctream-agent` process per channel under the
+remote account. Discovery returns structured display metadata. Capture streams
+frames on a separate channel, and input uses its own duplex channel. Closing
+the capture channel cancels its backend process. Closing the input channel
+releases held inputs.
+
+The agent uses FFmpeg with x11grab for X11 capture. X11 capture needs Python 3,
+libX11, and access to the selected display. X11 input also requires libXtst
+and XTEST. The local wgpu viewer uses the same rectangle for drawing the
+desktop and mapping clicks to display pixels.
 
 For a user-owned Sway session, select `wayland-N` in the same command. Capture
 uses `grim`. To enable input, install the helper on the Linux host with
@@ -79,4 +88,7 @@ graphical session. Test consent, cancellation, and session closure.
 
 ## Protocol impact
 
-Protocol changes: none.
+The standalone `ctream_agent` contract starts at 1.0.1 (internal build 1).
+It provides discovery as JSON, capture as RGB frames, and input as a line-based
+stream. This is the first version of the contract. Existing ctl contracts
+retain their current versions.

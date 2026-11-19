@@ -1,18 +1,21 @@
 mod capture;
-use capture::Target;
+use ctream::{
+  Display,
+  protocol::{Session, Target, X11_FRAME_SIZE},
+  transport::{self, Channel, Request, Ssh, Transport},
+};
 mod input;
 
 use eframe::egui;
 use std::{
   env,
-  io::{self, BufReader},
-  process::{Child, Command, Stdio},
-  sync::{Arc, Mutex},
+  io::{self, BufReader, Write},
+  sync::{
+    Arc, Mutex,
+    mpsc::{self, Receiver, TryRecvError},
+  },
   thread,
 };
-
-const WIDTH: usize = 960;
-const HEIGHT: usize = 540;
 
 #[derive(Default)]
 struct Stream {
@@ -20,61 +23,24 @@ struct Stream {
   error: Option<String>,
 }
 
-fn ssh(host: &str) -> Command {
-  let mut command = Command::new("ssh");
-  command.args([
-    "-C",
-    "-T",
-    "-o",
-    "BatchMode=yes",
-    "-o",
-    "ConnectTimeout=10",
-    "--",
-    host,
-  ]);
-  command
-}
-
 struct Preview {
   input: Option<input::Input>,
   forwarding: bool,
   input_error: Option<String>,
-  ssh: Child,
+  _capture_lifetime: Box<dyn Write + Send>,
   stream: Arc<Mutex<Stream>>,
   texture: Option<egui::TextureHandle>,
   frames: u64,
 }
 
 impl Preview {
-  fn connect(host: &str, target: Target, ctx: egui::Context) -> io::Result<Self> {
-    let mut input_error = None;
-    let (input, capture) = match target {
-      Target::X11(display) => {
-        let input = input::Input::connect(host, &target)?;
-        let [w, h] = input.desktop_size().expect("X11 geometry");
-        let capture = format!(
-          "exec ffmpeg -nostdin -hide_banner -loglevel error -f x11grab -framerate 8 -video_size {w}x{h} -i :{display} \
-           -vf 'scale={WIDTH}:{HEIGHT}' -pix_fmt rgb24 -f rawvideo pipe:1"
-        );
-        (Some(input), capture)
-      }
-      Target::Wayland(number) => (
-        input::Input::connect(host, &target)
-          .map_err(|error| {
-            input_error = Some(format!("View only ({error})"));
-          })
-          .ok(),
-        format!(
-          r#"exec env WAYLAND_DISPLAY=wayland-{number} sh -c 'PATH="$PATH:$HOME/.local/bin"; export PATH; while grim -t ppm -; do sleep 0.125; done'"#
-        ),
-      ),
+  fn connect(transport: &dyn Transport, target: Target, ctx: egui::Context) -> io::Result<Self> {
+    let (input, input_error) = match input::Input::connect(transport, target) {
+      Ok(input) => (Some(input), None),
+      Err(error) => (None, Some(format!("View only ({error})"))),
     };
-    let mut ssh = ssh(host)
-      .arg(capture)
-      .stdin(Stdio::null())
-      .stdout(Stdio::piped())
-      .spawn()?;
-    let mut stdout = BufReader::new(ssh.stdout.take().expect("piped SSH output"));
+    let Channel { reader, writer } = transport.open(Request::Capture(target))?;
+    let mut stdout = BufReader::new(reader);
     let stream = Arc::new(Mutex::new(Stream::default()));
     let reader = Arc::clone(&stream);
     thread::spawn(move || {
@@ -98,18 +64,11 @@ impl Preview {
       input,
       forwarding: false,
       input_error,
-      ssh,
+      _capture_lifetime: writer,
       stream,
       texture: None,
       frames: 0,
     })
-  }
-}
-
-impl Drop for Preview {
-  fn drop(&mut self) {
-    let _ = self.ssh.kill();
-    let _ = self.ssh.wait();
   }
 }
 
@@ -172,31 +131,156 @@ impl eframe::App for Preview {
   }
 }
 
+enum State {
+  Discovering(Receiver<io::Result<Vec<Session>>>),
+  Selecting(Vec<Session>),
+  Connecting(Receiver<io::Result<Preview>>),
+  Viewing(Preview),
+  Failed(String),
+}
+
+fn background<T: Send + 'static>(
+  ctx: &egui::Context,
+  task: impl FnOnce() -> io::Result<T> + Send + 'static,
+) -> Receiver<io::Result<T>> {
+  let ctx = ctx.clone();
+  let (sender, receiver) = mpsc::channel();
+  thread::spawn(move || {
+    let _ = sender.send(task());
+    ctx.request_repaint();
+  });
+  receiver
+}
+
+struct Viewer {
+  transport: Arc<dyn Transport + Send + Sync>,
+  state: State,
+}
+
+impl Viewer {
+  fn discover(&mut self, ctx: &egui::Context) {
+    let transport = Arc::clone(&self.transport);
+    self.state = State::Discovering(background(ctx, move || {
+      transport::discover(transport.as_ref())
+    }));
+  }
+
+  fn connect(&mut self, target: Target, ctx: &egui::Context) {
+    let transport = Arc::clone(&self.transport);
+    let render = ctx.clone();
+    self.state = State::Connecting(background(ctx, move || {
+      Preview::connect(transport.as_ref(), target, render)
+    }));
+  }
+}
+
+fn receive<T>(
+  result: Result<io::Result<T>, TryRecvError>,
+  success: impl FnOnce(T) -> State,
+) -> Option<State> {
+  match result {
+    Ok(Ok(value)) => Some(success(value)),
+    Ok(Err(error)) => Some(State::Failed(error.to_string())),
+    Err(TryRecvError::Empty) => None,
+    Err(TryRecvError::Disconnected) => Some(State::Failed("Agent connection task ended".into())),
+  }
+}
+
+impl eframe::App for Viewer {
+  fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+    let next = match &self.state {
+      State::Discovering(result) => receive(result.try_recv(), State::Selecting),
+      State::Connecting(result) => receive(result.try_recv(), State::Viewing),
+      _ => None,
+    };
+    if let Some(next) = next {
+      self.state = next;
+    }
+    if let State::Viewing(preview) = &mut self.state {
+      preview.update(ctx, frame);
+      return;
+    }
+    let mut selected = None;
+    let mut refresh = false;
+    egui::CentralPanel::default().show(ctx, |ui| match &self.state {
+      State::Discovering(_) => {
+        ui.spinner();
+        ui.label("Discovering remote displays…");
+      }
+      State::Connecting(_) => {
+        ui.spinner();
+        ui.label("Connecting to display…");
+      }
+      State::Selecting(sessions) => {
+        if sessions.is_empty() {
+          ui.label("No X11 or Wayland displays found.");
+        }
+        for session in sessions {
+          let (label, target) = match &session.display {
+            Display::X11(number) => (format!("X11 :{number}"), Some(Target::X11(*number))),
+            Display::Wayland { uid, socket } => {
+              let class = session.class.as_deref().unwrap_or("unknown session class");
+              (
+                format!("Wayland {socket} · UID {uid} · {class}"),
+                Target::parse(socket).ok(),
+              )
+            }
+          };
+          if ui
+            .add_enabled(
+              session.selectable && target.is_some(),
+              egui::Button::new(label),
+            )
+            .clicked()
+          {
+            selected = target;
+          }
+        }
+        refresh = ui.button("Refresh").clicked();
+      }
+      State::Failed(error) => {
+        ui.label(error);
+        refresh = ui.button("Discover displays").clicked();
+      }
+      State::Viewing(_) => unreachable!(),
+    });
+    if let Some(target) = selected {
+      self.connect(target, ctx);
+    } else if refresh {
+      self.discover(ctx);
+    }
+  }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
   let args: Vec<_> = env::args().skip(1).collect();
-  let [host, display] = args.as_slice() else {
-    return Err("usage: ctream-preview SSH_HOST (:DISPLAY | wayland-N)".into());
+  let (host, target) = match args.as_slice() {
+    [host] => (host, None),
+    [host, display] => (host, Some(Target::parse(display)?)),
+    _ => return Err("usage: ctream-preview SSH_HOST [DISPLAY]".into()),
   };
-  let target = Target::parse(display)?;
-  let mode = match target {
-    Target::X11(_) => "control",
-    Target::Wayland(_) => "preview",
-  };
-  let title = format!("ctream {mode} · {host} {display}");
+  let title = format!("ctream · {host}");
   let options = eframe::NativeOptions {
     renderer: eframe::Renderer::Wgpu,
-    viewport: egui::ViewportBuilder::default().with_inner_size([WIDTH as f32, HEIGHT as f32]),
+    viewport: egui::ViewportBuilder::default()
+      .with_inner_size(X11_FRAME_SIZE.map(|size| size as f32)),
     ..Default::default()
   };
   eframe::run_native(
     &title,
     options,
     Box::new(|cc| {
-      Ok(Box::new(Preview::connect(
-        host,
-        target,
-        cc.egui_ctx.clone(),
-      )?))
+      let transport: Arc<dyn Transport + Send + Sync> = Arc::new(Ssh(host.clone()));
+      let mut viewer = Viewer {
+        transport,
+        state: State::Selecting(Vec::new()),
+      };
+      if let Some(target) = target {
+        viewer.connect(target, &cc.egui_ctx);
+      } else {
+        viewer.discover(&cc.egui_ctx);
+      }
+      Ok(Box::new(viewer))
     }),
   )?;
   Ok(())

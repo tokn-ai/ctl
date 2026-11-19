@@ -32,9 +32,12 @@ export function attachmentFeedback(
     };
   }
   if (error_code === "windows_remote_agent_setup_required") {
+    const { target } = session;
+    const can_connect = phase === "error" && target.kind === "ssh";
     return {
-      message: detail,
-      action: phase === "error" && session.target.kind === "ssh" ? { kind: "connect_host", label: message("attachment.connect_host") } : null,
+      message: can_connect && target.remote_platform === "windows" && !target.unavailable
+        ? message("attachment.windows_setup_required") : detail,
+      action: can_connect ? { kind: "connect_host", label: message("attachment.connect_host") } : null,
     };
   }
   return { message: detail, action: { kind: "reconnect", label: message("session.reconnect") } };

@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 
 use ctl_client::{
-  SshConnectionOptions, SshInteraction, probe_ssh_unix_platform_interactive,
+  ConnectionTarget, RemotePlatform, SshInteraction, probe_ssh_unix_platform_interactive,
+  probe_ssh_windows_platform,
   remote_bundle::{self, Platform},
 };
 #[cfg(test)]
@@ -9,31 +10,34 @@ use ctl_core::component::ComponentBuildInfo;
 use tauri::{AppHandle, Manager as _, path::BaseDirectory};
 use tokio::sync::watch;
 
-use crate::dto::{RemoteAgentInstallProgressDto as Progress, RemoteAgentInstallResultDto};
+#[cfg(unix)]
+use crate::dto::RemoteAgentInstallResultDto;
+use crate::dto::{ConnectionTargetDto, RemoteAgentInstallProgressDto as Progress};
 use crate::error::{CommandErrorDto, CommandResult};
+use crate::ssh_auth::install_identity;
 
 mod progress;
-#[cfg(unix)]
 pub(crate) use progress::preparation_progress;
 
 pub(crate) struct Installation {
+  #[cfg(unix)]
   pub version: RemoteAgentInstallResultDto,
+  #[cfg(unix)]
   pub agent: ctl_core::component::ComponentInfo,
   pub result: ctl_core::component_update::UpdateResult,
 }
 
 pub async fn install(
-  app: &AppHandle,
-  destination: &str,
-  options: &SshConnectionOptions,
+  target: &ConnectionTargetDto,
   interaction: &SshInteraction,
   update: &ctl_client::component_update::UpdateOptions,
+  included_bundles: &[PathBuf],
   on_progress: impl Fn(Progress) -> CommandResult<()>,
   authenticating: impl Fn() -> bool,
 ) -> CommandResult<Installation> {
   let (updates, receiver) = watch::channel(progress::initial());
   progress::monitor(
-    install_bundle(app, destination, options, interaction, update, &updates),
+    install_bundle(target, interaction, update, included_bundles, &updates),
     receiver,
     &on_progress,
     authenticating,
@@ -42,17 +46,43 @@ pub async fn install(
 }
 
 async fn install_bundle(
-  app: &AppHandle,
-  destination: &str,
-  options: &SshConnectionOptions,
+  target: &ConnectionTargetDto,
   interaction: &SshInteraction,
   update: &ctl_client::component_update::UpdateOptions,
+  included_bundles: &[PathBuf],
   updates: &watch::Sender<Progress>,
 ) -> CommandResult<Installation> {
-  let platform = probe_ssh_unix_platform_interactive(destination, options, interaction)
-    .await
-    .map_err(|error| CommandErrorDto::new("remote_platform_probe_failed", error.to_string()))?;
-  let platform = parse_platform(&platform)?;
+  let ConnectionTarget::Ssh {
+    destination,
+    options,
+  } = target.to_core()
+  else {
+    return Err(CommandErrorDto::new(
+      "invalid_ssh_target",
+      "Select a remote SSH host.",
+    ));
+  };
+  let platform_error = |error: ctl_client::CoreError| {
+    CommandErrorDto::new("remote_platform_probe_failed", error.to_string())
+  };
+  let (platform, expected_account) = match options.remote_platform {
+    RemotePlatform::Unix => {
+      let output = probe_ssh_unix_platform_interactive(&destination, &options, interaction)
+        .await
+        .map_err(platform_error)?;
+      (parse_platform(&output)?, None)
+    }
+    RemotePlatform::Windows => {
+      let expected_account = install_identity::verify_account(target, || {
+        ctl_client::installation::remote_account_id(&destination, &options, interaction)
+      })
+      .await?;
+      let platform = probe_ssh_windows_platform(&destination, &options, interaction)
+        .await
+        .map_err(platform_error)?;
+      (platform, expected_account)
+    }
+  };
   let target_triple = platform.target_triple().map_err(bundle_error)?;
   let home = dirs::home_dir().ok_or_else(bundle_unavailable)?;
   let prepared = ctl_client::component_update::prepare_update(
@@ -60,19 +90,20 @@ async fn install_bundle(
     target_triple,
     ctl_core::bundles::Purpose::Upload,
     &update.source,
-    &bundle_directories(app)?,
+    included_bundles,
     |progress| {
       updates.send_replace(preparation_progress(progress));
     },
   )
   .await
   .map_err(CommandErrorDto::backend)?;
-  ctl_client::component_update::install_prepared_remote(
-    destination,
-    options,
+  let result = ctl_client::component_update::install_prepared_remote_for_account(
+    &destination,
+    &options,
     interaction,
     &prepared,
     update.package,
+    expected_account,
     |progress| {
       updates.send_replace(progress::desktop_progress(progress));
     },
@@ -80,10 +111,26 @@ async fn install_bundle(
   .await
   .map_err(|error| CommandErrorDto::new("remote_agent_install_failed", error.to_string()))?;
 
+  if options.remote_platform == RemotePlatform::Windows {
+    ctl_client::installation::verify_remote_activation(
+      &destination,
+      &options,
+      interaction,
+      expected_account,
+      &prepared.bundle.manifest,
+    )
+    .await
+    .map_err(|error| {
+      CommandErrorDto::new("remote_install_verification_failed", error.to_string())
+    })?;
+  }
+  #[cfg(unix)]
   let bundle = prepared.bundle;
   Ok(Installation {
+    #[cfg(unix)]
     agent: bundle.manifest.components["ctl-agent"].clone(),
-    result: ctl_client::component_update::result(&bundle, update.package),
+    result,
+    #[cfg(unix)]
     version: RemoteAgentInstallResultDto {
       app_version: bundle.manifest.components["ctl-agent"]
         .build

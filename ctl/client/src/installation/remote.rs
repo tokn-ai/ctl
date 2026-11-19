@@ -76,6 +76,31 @@ pub async fn remote_status(
   .await
 }
 
+/// Confirms that the remote updater activated the verified installation archive.
+/// # Errors
+/// Reports SSH failures, invalid status or an active build that differs from the archive.
+pub async fn verify_remote_activation(
+  destination: &str,
+  options: &SshConnectionOptions,
+  interaction: &SshInteraction,
+  expected_account: Option<&str>,
+  expected: &ctl_core::bundles::Manifest,
+) -> io::Result<()> {
+  let status = remote_status(destination, options, interaction, expected_account)
+    .await
+    .map_err(|error| {
+      io::Error::other(format!(
+        "Components installed, but activation could not be verified. Refresh status before retrying: {error}"
+      ))
+    })?;
+  if status.active.as_ref() != Some(expected) {
+    return Err(io::Error::other(
+      "Components installed, but activation could not be verified. Refresh status before retrying.",
+    ));
+  }
+  Ok(())
+}
+
 /// Atomically restore the remote account's previous build, preserving services.
 /// Callers must verify saved account identity before issuing this mutation.
 ///

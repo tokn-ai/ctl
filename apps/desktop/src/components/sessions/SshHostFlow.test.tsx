@@ -132,18 +132,35 @@ async function newHostDetails(user: ReturnType<typeof userEvent.setup>, selectDi
 }
 
 describe("SSH host quick-input flow", () => {
-  it("keeps Windows setup diagnostics and offers a connection retry", async () => {
-    const target = { kind: "ssh", destination: "win", remote_platform: "windows" } as const;
-    vi.mocked(probeSshHost)
-      .mockRejectedValueOnce({ code: "windows_remote_agent_setup_required", message: "Install ctl-agent.exe on the Windows host." })
-      .mockResolvedValueOnce(remoteInfo);
-    const onConnected = vi.fn();
-    render(<SshHostFlow suggestions={[]} warning={null} target={target} autoConnect
-      onConnected={onConnected} onClose={vi.fn()} />);
-    expect(await screen.findByRole("alert")).toHaveProperty("textContent", "Install ctl-agent.exe on the Windows host.");
-    expect(screen.queryByRole("option", { name: /Install remote components|Update remote components|Force restart/ })).toBeNull();
-    await userEvent.setup().click(screen.getByRole("option", { name: "Connect" }));
-    await waitFor(() => expect(onConnected).toHaveBeenCalledWith(target));
+  it.each(["MacIntel", "Win32"])("installs missing Windows components and reconnects using the original SSH settings from %s", async (client_platform) => {
+    const platform = vi.spyOn(window.navigator, "platform", "get").mockReturnValue(client_platform);
+    try {
+      const target: SshConnectionTarget = { kind: "ssh", destination: "win", hostname: "windows.example", port: 2222, user: "operator", remote_platform: "windows" };
+      vi.mocked(probeSshHost)
+        .mockRejectedValueOnce({ code: "windows_remote_agent_setup_required", message: "Install the Windows components with ctlup update, then reconnect." })
+        .mockResolvedValueOnce(remoteInfo);
+      vi.mocked(updateComponents).mockResolvedValue([{ host_index: 0, state: "complete", result: {
+        package: "full_bundle", bundle_id: "windows-build", target_triple: "x86_64-pc-windows-msvc", services_preserved: true,
+      }, error: null }]);
+      const onConnected = vi.fn();
+      render(<SshHostFlow suggestions={[]} warning={null} target={target} autoConnect
+        update_targets={[{ ...target, destination: "other" }]} onConnected={onConnected} onClose={vi.fn()} />);
+      expect(await screen.findByRole("alert")).toHaveProperty("textContent", "Windows OpenSSH must use cmd.exe as its default shell.");
+      expect(screen.queryByText(/ctlup update/)).toBeNull();
+      expect(screen.queryByRole("option", { name: /Force restart/ })).toBeNull();
+      const user = userEvent.setup();
+      await user.click(screen.getByRole("option", { name: /Install remote components/ }));
+      expect((screen.getByRole("checkbox", { name: "win" }) as HTMLInputElement).checked).toBe(true);
+      expect(screen.getAllByRole("checkbox")).toHaveLength(1);
+      expect(screen.queryByRole("option", { name: "Build from checkout" })).toBeNull();
+      await installAndReconnect(user);
+      await waitFor(() => expect(onConnected).toHaveBeenCalledExactlyOnceWith(target));
+      expect(updateComponents).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ targets: [target] }), expect.any(Function), expect.any(Function));
+      expect(vi.mocked(probeSshHost).mock.calls.map(([candidate]) => candidate)).toEqual([target, target]);
+      expect(screen.queryByRole("alert")).toBeNull();
+    } finally {
+      platform.mockRestore();
+    }
   });
 
   it("verifies a component update without attaching a terminal or restarting sessions", async () => {

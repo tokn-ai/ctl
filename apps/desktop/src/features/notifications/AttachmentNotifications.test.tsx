@@ -334,7 +334,7 @@ describe("attachment notification lifecycle", () => {
     expect(store.snapshot().entries[0]).toMatchObject({ resolved_at: expect.any(Number), actions: [] });
   });
 
-  it("retains Windows setup instructions and offers the host connection flow", () => {
+  it("offers the host connection flow to set up Windows components", () => {
     const { store, registry, owner, report } = setup();
     const message = "Install Windows components with ctlup, then reconnect.";
     report({
@@ -342,7 +342,8 @@ describe("attachment notification lifecycle", () => {
       session: { ...session, target: { kind: "ssh", host_id: "remote", destination: "workstation", remote_platform: "windows" } },
     });
     expect(store.snapshot().entries).toMatchObject([{
-      message, actions: [{ label: { id: "attachment.connect_host" }, command_id: COMMAND_IDS.connectHost, args: { target_key: "host:remote" } }],
+      message: { id: "attachment.windows_setup_required" },
+      actions: [{ label: { id: "attachment.connect_host" }, command_id: COMMAND_IDS.connectHost, args: { target_key: "host:remote" } }],
     }]);
     expect(registry.recoverySession(owner)).toBeNull();
     expect(registry.canReconnect(owner)).toBe(false);

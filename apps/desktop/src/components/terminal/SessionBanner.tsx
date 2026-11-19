@@ -62,5 +62,6 @@ export function SessionConnectionBanner({ state, on_reconnect, reconnect_availab
       (!state.session || opening) && !["protocol_version_mismatch", "windows_remote_agent_setup_required"].includes(state.error_code ?? ""))) {
     action = { label: t("session.reconnect"), disabled: !interaction_enabled || opening, on_click: on_reconnect };
   }
-  return <SessionBanner title={title} message={feedback.message === null ? null : formatText(feedback.message)} action={action} label={t("session.connection")} />;
+  const detail = state.error_code === "windows_remote_agent_setup_required" && action?.disabled ? state.message : feedback.message;
+  return <SessionBanner title={title} message={detail === null ? null : formatText(detail)} action={action} label={t("session.connection")} />;
 }

@@ -1,13 +1,17 @@
 //! Component uploads must verify a saved account pin without opening a service.
 
 use std::future::Future;
+#[cfg(unix)]
 use std::path::Path;
 
-use ctl_client::{CoreError, SshConnectionOptions};
+use ctl_client::CoreError;
+#[cfg(unix)]
+use ctl_client::SshConnectionOptions;
 
 use crate::dto::ConnectionTargetDto;
 use crate::error::{CommandErrorDto, CommandResult};
 
+#[cfg(any(unix, test))]
 pub(super) fn verify_installed(
   installed: &crate::dto::RemoteAgentInstallResultDto,
   identity: &ctl_proto::RemoteIdentity,
@@ -31,6 +35,7 @@ pub(super) fn verify_installed(
   ))
 }
 
+#[cfg(unix)]
 pub(super) async fn upload<T, F, U>(
   target: &ConnectionTargetDto,
   destination: &str,
@@ -50,6 +55,7 @@ where
   .await
 }
 
+#[cfg(any(unix, test))]
 async fn verify_then_upload<T, I, F, U>(
   target: &ConnectionTargetDto,
   read_remote_id: impl FnOnce() -> I,
@@ -60,24 +66,34 @@ where
   F: FnOnce() -> U,
   U: Future<Output = CommandResult<T>>,
 {
-  if matches!(
-    target,
-    ConnectionTargetDto::Ssh {
-      remote_info: Some(_),
-      ..
-    }
-  ) {
-    let remote_id = read_remote_id().await.map_err(|error| {
-      CommandErrorDto::new(
-        "remote_update_identity_verification_failed",
-        format!(
-          "Could not verify this SSH account before updating its components. No components were uploaded. Reconnect to the expected account and check that its saved ctl identity is present and readable: {error}"
-        ),
-      )
-    })?;
-    target.verify_remote_id(&remote_id)?;
-  }
+  verify_account(target, read_remote_id).await?;
   upload().await
+}
+
+pub(crate) async fn verify_account<I>(
+  target: &ConnectionTargetDto,
+  read_remote_id: impl FnOnce() -> I,
+) -> CommandResult<Option<&str>>
+where
+  I: Future<Output = Result<String, CoreError>>,
+{
+  let ConnectionTargetDto::Ssh {
+    remote_info: Some(identity),
+    ..
+  } = target
+  else {
+    return Ok(None);
+  };
+  let remote_id = read_remote_id().await.map_err(|error| {
+    CommandErrorDto::new(
+      "remote_update_identity_verification_failed",
+      format!(
+        "Could not verify this SSH account before updating its components. No components were uploaded. Reconnect to the expected account and check that its saved ctl identity is present and readable: {error}"
+      ),
+    )
+  })?;
+  target.verify_remote_id(&remote_id)?;
+  Ok(Some(&identity.remote_id))
 }
 
 #[cfg(test)]

@@ -101,15 +101,14 @@ impl Target {
           && Some(installed.git_revision.as_str()) == build.source_revision.as_deref()
       })
     } else {
-      let status = ctl_client::installation::remote_status(
+      return ctl_client::installation::verify_remote_activation(
         &self.destination,
         &self.options,
         &self.interaction,
         self.expected_account(),
+        &bundle.manifest,
       )
-      .await
-      .map_err(io::Error::other)?;
-      status.active.as_ref() == Some(&bundle.manifest)
+      .await;
     };
     if !active {
       return Err(io::Error::other(

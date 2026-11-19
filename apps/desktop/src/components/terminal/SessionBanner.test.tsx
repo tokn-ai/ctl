@@ -68,14 +68,17 @@ describe("session banner recovery", () => {
     expect(reconnect).not.toHaveBeenCalled();
   });
 
-  it("preserves Windows setup instructions and avoids a bare attachment reconnect", () => {
+  it("offers the host flow for Windows setup and keeps the CLI fallback if the command is unavailable", () => {
     const run = vi.fn();
     const message = "Install Windows components with ctlup, then reconnect.";
-    const { reconnect } = renderConnection(state({ error_code: "windows_remote_agent_setup_required", message }), [{
-      id: COMMAND_IDS.connectHost, category: "Host", title: "Connect host", enabled: true, run,
-    }]);
+    const session = { ...remote_session, target: { ...remote_session.target, remote_platform: "windows" as const } };
+    const command = { id: COMMAND_IDS.connectHost, category: "Host", title: "Connect host", enabled: true, run };
+    const { reconnect, dispatcher } = renderConnection(state({ session, error_code: "windows_remote_agent_setup_required", message }));
     const banner = screen.getByRole("status", { name: "Session connection" });
     expect(within(banner).getByText(message)).toBeTruthy();
+    act(() => dispatcher.update([command], true, vi.fn()));
+    expect(within(banner).getByText("Install the remote components for this Windows SSH account.")).toBeTruthy();
+    expect(within(banner).queryByText(message)).toBeNull();
     expect(within(banner).queryByRole("button", { name: "Reconnect" })).toBeNull();
     fireEvent.click(within(banner).getByRole("button", { name: "Connect host" }));
     expect(run).toHaveBeenCalledExactlyOnceWith({ target_key: "host:runtime-host" });

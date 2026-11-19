@@ -31,7 +31,7 @@ impl Drop for Home {
 async fn local_source_install_and_repair_preserve_the_saved_channel() {
   let home = Home::new();
   ctl_client::desktop_storage::set_channel(&home.0, BundleChannel::Stable).unwrap();
-  let checkout = std::env::current_dir().unwrap();
+  let checkout = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
   install_development(&home.0, &checkout, false)
     .await
     .unwrap();

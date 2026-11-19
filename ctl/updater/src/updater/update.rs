@@ -30,7 +30,7 @@ enum UpdateSource<'a> {
     pr: Option<&'a mut PrBuilds>,
   },
   Checkout {
-    workspace: Option<&'a Path>,
+    workspace: &'a Path,
   },
 }
 
@@ -130,7 +130,7 @@ pub(super) async fn run_development(
   home: &Path,
   target_options: TargetOptions<'_>,
   hosts: Vec<String>,
-  workspace: Option<&Path>,
+  workspace: &Path,
   json: bool,
 ) -> io::Result<()> {
   run_batch(
@@ -359,7 +359,7 @@ async fn prepare(
       let prepared = ctl_client::component_update::prepare_working_tree_update(
         home,
         target,
-        *workspace,
+        Some(workspace),
         on_progress,
       )
       .await?;

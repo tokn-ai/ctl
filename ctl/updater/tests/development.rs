@@ -22,23 +22,40 @@ impl Fixture {
     let builder = root.join("builder");
     fs::write(
       &builder,
-      "#!/bin/sh\nsleep 0.1\nprintf 'fixture build failure\\n' >&2\nexit 17\n",
+      r#"#!/bin/sh
+set -eu
+checkout=$(cd "$HOME" && pwd -P)
+test "$(pwd -P)" = "$checkout"
+test "$3" = "$checkout/scripts/dev/build-local-development.mts"
+test "$4" = --workspace
+test "$5" = "$checkout"
+sleep 0.1
+printf 'fixture build failure\n' >&2
+exit 17
+"#,
     )
     .unwrap();
     fs::set_permissions(builder, fs::Permissions::from_mode(0o700)).unwrap();
     Self(root)
   }
 
-  fn command(&self) -> Command {
+  fn dev(&self) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_ctlup"));
     command
-      .args(["dev", "--workspace"])
-      .arg(&self.0)
+      .arg("dev")
       .env("HOME", &self.0)
       .env("USERPROFILE", &self.0)
       .env("CTL_NODE_PROGRAM", self.0.join("builder"))
+      .env_remove("CTL_DATA_DIR")
+      .env_remove("CTL_CONFIG_DIR")
       .stdout(Stdio::piped())
       .stderr(Stdio::piped());
+    command
+  }
+
+  fn command(&self) -> Command {
+    let mut command = self.dev();
+    command.arg("--workspace").arg(&self.0);
     command
   }
 }
@@ -64,6 +81,61 @@ fn finish(mut child: Child) -> Output {
       );
     }
     std::thread::sleep(Duration::from_millis(10));
+  }
+}
+
+#[test]
+fn development_builds_from_checkout_root_or_explicit_workspace() {
+  let fixture = Fixture::new();
+  for output in [
+    fixture.dev().current_dir(&fixture.0).output().unwrap(),
+    fixture
+      .command()
+      .current_dir(std::env::temp_dir())
+      .output()
+      .unwrap(),
+  ] {
+    assert!(!output.status.success());
+    let diagnostics = String::from_utf8_lossy(&output.stderr);
+    assert!(
+      diagnostics.contains("fixture build failure"),
+      "{diagnostics}"
+    );
+  }
+}
+
+#[test]
+fn development_rejects_nested_and_unrelated_directories_before_building() {
+  let fixture = Fixture::new();
+  let nested = fixture.0.join("nested");
+  fs::create_dir(&nested).unwrap();
+  fs::create_dir_all(fixture.0.join("apps/desktop/src-tauri")).unwrap();
+  for path in [
+    "apps/desktop/src-tauri/tauri.conf.json",
+    "scripts/dev/build-desktop-app.mts",
+    "scripts/dev/ctld-signed.mts",
+  ] {
+    fs::write(fixture.0.join(path), "fixture").unwrap();
+  }
+  for directory in [&nested, &std::env::temp_dir()] {
+    for options in [
+      [].as_slice(),
+      &["--app"],
+      &["--renew-signing"],
+      &["--workspace", nested.to_str().unwrap()],
+    ] {
+      let output = fixture
+        .dev()
+        .args(options)
+        .current_dir(directory)
+        .output()
+        .unwrap();
+      assert!(!output.status.success());
+      let diagnostics = String::from_utf8_lossy(&output.stderr);
+      assert!(diagnostics.contains("ctl checkout root"), "{diagnostics}");
+      assert!(!diagnostics.contains("fixture build failure"));
+      assert!(!fixture.0.join(".tokn").exists());
+    }
   }
 }
 

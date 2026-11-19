@@ -10,6 +10,7 @@ async fn remote_dev_builds_from_the_explicit_workspace_after_verifying_the_accou
   let fixture = Fixture::new(EXPECTED_ID);
   let workspace = fixture.0.join("dev checkout");
   fs::create_dir_all(workspace.join("scripts/dev")).unwrap();
+  fs::write(workspace.join("Cargo.toml"), "[workspace]\n").unwrap();
   fs::write(workspace.join("scripts/dev/build-agent-bundle.mts"), "").unwrap();
   fixture.script(
     "uname",
@@ -59,6 +60,25 @@ exit 1
   assert!(!fixture.0.join("gh-called").exists());
   fixture.assert_managed_channels(2);
   broker.await.unwrap();
+}
+
+#[tokio::test]
+async fn remote_development_rejects_unrelated_cwd_before_ssh() {
+  let fixture = Fixture::new(EXPECTED_ID);
+  let output = fixture
+    .command(
+      &["--host", "work", "dev", "--json"],
+      Path::new(env!("CARGO_BIN_EXE_ctlup")),
+      None,
+    )
+    .await;
+  let diagnostics = String::from_utf8_lossy(&output.stderr);
+  assert!(!output.status.success(), "{diagnostics}");
+  assert!(diagnostics.contains("ctl checkout root"), "{diagnostics}");
+  assert_eq!(output.stdout, [] as [u8; 0]);
+  for marker in ["ssh-1.args", "account-id", "platform", "builder-called"] {
+    assert!(!fixture.0.join(marker).exists(), "unexpected {marker}");
+  }
 }
 
 fn catalogued_agent_without_inspect(fixture: &Fixture, remote_id: Option<&str>) -> PathBuf {

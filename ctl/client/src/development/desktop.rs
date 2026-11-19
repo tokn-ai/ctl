@@ -23,8 +23,8 @@ struct BuildResult {
 /// Builds a native desktop package into a fresh private output directory.
 /// # Errors
 /// Reports a missing checkout, build failures, or invalid output metadata.
-pub async fn build_desktop(caller: &Path, output: &Path) -> io::Result<DesktopBuild> {
-  let workspace = checkout(caller)?;
+pub async fn build_desktop(workspace: &Path, output: &Path) -> io::Result<DesktopBuild> {
+  let workspace = checkout(workspace)?;
   private_fs::create_directory(output)?;
   let output = output.canonicalize()?;
   let mut command = tokio::process::Command::new(
@@ -89,26 +89,23 @@ fn read_output(output: &Path, name: &str) -> io::Result<DesktopBuild> {
   })
 }
 
-fn checkout(caller: &Path) -> io::Result<PathBuf> {
-  caller
-    .canonicalize()?
-    .ancestors()
-    .find(|directory| {
-      directory.join("Cargo.toml").is_file()
-        && directory
-          .join("apps/desktop/src-tauri/tauri.conf.json")
-          .is_file()
-        && directory
-          .join("scripts/dev/build-desktop-app.mts")
-          .is_file()
-    })
-    .map(Path::to_owned)
-    .ok_or_else(|| {
-      io::Error::new(
-        io::ErrorKind::NotFound,
-        "run ctlup dev --app from a ctl source checkout or specify one with --workspace",
-      )
-    })
+fn checkout(workspace: &Path) -> io::Result<PathBuf> {
+  let workspace = workspace.canonicalize()?;
+  if [
+    "Cargo.toml",
+    "apps/desktop/src-tauri/tauri.conf.json",
+    "scripts/dev/build-desktop-app.mts",
+  ]
+  .iter()
+  .all(|file| workspace.join(file).is_file())
+  {
+    Ok(workspace)
+  } else {
+    Err(io::Error::new(
+      io::ErrorKind::InvalidInput,
+      "desktop development builds require a ctl checkout root",
+    ))
+  }
 }
 
 #[cfg(test)]

@@ -106,12 +106,5 @@ async fn remote_status(
 }
 
 pub(super) fn in_checkout() -> bool {
-  std::env::current_dir().is_ok_and(|directory| {
-    directory.ancestors().any(|root| {
-      root.join(".git").exists()
-        && root.join("Cargo.toml").is_file()
-        && root.join("ctl/cli/Cargo.toml").is_file()
-        && root.join("scripts/dev/ctld-signed.mts").is_file()
-    })
-  })
+  super::development::in_native_checkout()
 }

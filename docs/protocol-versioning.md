@@ -592,6 +592,40 @@ to use `1.0.5` for Windows displays and discovery, with discovery fallback to
 `ForwardWindowInput` capability has no effect on existing custom drivers.
 Other named protocols and product release versions remain unchanged.
 
+Capture driver selection advances `ctream_agent` from `1.0.6` (build 6) to
+`1.0.7` (build 7). It adds two operations:
+
+- `capture-drivers DISPLAY` returns JSON entries with `id`, `name`, and
+  `scopes`, where each scope is `display` or `window`. The catalog lists
+  compiled providers for the target platform; it does not guarantee runtime
+  access, installed helpers, or compositor support.
+- `capture-with-driver DISPLAY DRIVER [WINDOW]` selects a display or window
+  capture provider. `auto` chooses the stock default for that source scope.
+  An explicit provider ID never silently falls back to another backend.
+  Before frame bytes, a JSON line of at most 4096 bytes including its newline
+  identifies the actual `driver`
+  and `format`: `{"type":"ppm"}` or
+  `{"type":"fixed_rgb","size":[960,540]}`. The handshake is emitted when
+  the source first writes frame bytes, after lazy initialization succeeds.
+
+Stock display defaults are `linux.x11.ffmpeg`, `linux.wayland.grim`, and
+`windows.dxgi`; their window counterparts are `linux.x11.composite`,
+`linux.wayland.image_copy`, and `windows.wgc`. Catalog entries report their
+supported scopes; WGC display capture is not implemented in this step.
+Invalid, unknown, or incompatible provider choices fail before a successful
+capture handshake. Input selection and its existing handshake remain separate.
+Provider IDs are extensible strings of 1–128 ASCII letters, digits, dots,
+hyphens, or underscores. `auto` is a request selector, never an actual driver
+reported by a successful handshake.
+
+Contracts `1.0.1`–`1.0.6` retain their operations, frame bytes without the new
+prefix, default providers, and input behavior. Clients can use retained capture
+operations with earlier agents when **Auto** is selected. Explicit provider
+selection requires `1.0.7` and cannot be claimed after a legacy fallback.
+The welcome preview/Start lifecycle and public Rust backend module split
+introduce no additional wire changes. Other named protocols and product
+release versions remain unchanged.
+
 Every PR description must state its protocol changes, or **None** when there
 are no changes. Include the previous and new contracts and the compatibility
 impact. Keep PR titles brief; put protocol details in the description.

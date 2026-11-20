@@ -12,9 +12,10 @@ use crate::{
   transport::{Channel, Transport},
 };
 use ctream_proto::{
-  Action, ActionResult, BOUNDS_VERSION, DISPLAY_VERSION, Element, Session as DisplaySession,
-  Target, WAYLAND_WINDOW_VERSION, WINDOWS_DISPLAY_VERSION, WINDOWS_WINDOW_VERSION, Window,
-  X11_FRAME_SIZE, X11_WINDOW_VERSION, valid_window_id,
+  Action, ActionResult, BOUNDS_VERSION, CAPTURE_DRIVER_VERSION, CaptureDriverInfo, DISPLAY_VERSION,
+  Element, Session as DisplaySession, Target, WAYLAND_WINDOW_VERSION, WINDOWS_DISPLAY_VERSION,
+  WINDOWS_WINDOW_VERSION, Window, X11_FRAME_SIZE, X11_WINDOW_VERSION, valid_capture_driver,
+  valid_window_id,
 };
 use serde::de::DeserializeOwned;
 use std::{
@@ -54,6 +55,20 @@ impl Query for LegacyDiscover {
 }
 
 pub struct Windows(pub Target);
+
+pub struct CaptureDrivers(pub Target);
+
+impl Query for CaptureDrivers {
+  type Reply = Vec<CaptureDriverInfo>;
+
+  fn arguments(&self) -> io::Result<Vec<String>> {
+    Ok(vec![
+      CAPTURE_DRIVER_VERSION.into(),
+      "capture-drivers".into(),
+      self.0.to_string(),
+    ])
+  }
+}
 
 impl Query for Windows {
   type Reply = Vec<Window>;
@@ -165,6 +180,10 @@ impl<T: Transport> Client<T> {
     self.query(Windows(target))
   }
 
+  pub fn capture_drivers(&self, target: Target) -> io::Result<Vec<CaptureDriverInfo>> {
+    self.query(CaptureDrivers(target))
+  }
+
   pub fn session(&self, target: Target, window: Option<Window>) -> Session<T> {
     Session {
       client: self.clone(),
@@ -193,6 +212,31 @@ impl<T> Clone for Session<T> {
 }
 
 impl<T: Transport> Session<T> {
+  pub fn capture_with_driver(&self, driver: &str) -> io::Result<Capture<T::Reader, T::Writer>> {
+    if !valid_capture_driver(driver) {
+      return Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "invalid capture driver identifier",
+      ));
+    }
+    let mut arguments = vec![
+      CAPTURE_DRIVER_VERSION.into(),
+      "capture-with-driver".into(),
+      self.target.to_string(),
+      driver.into(),
+    ];
+    if let Some(window) = &self.window {
+      if !valid_window_id(&window.id) {
+        return Err(io::Error::new(
+          io::ErrorKind::InvalidInput,
+          "invalid window identifier",
+        ));
+      }
+      arguments.push(window.id.clone());
+    }
+    Capture::started(self.client.transport.open(&arguments)?, driver)
+  }
+
   pub fn supports_input(&self) -> bool {
     self.window.is_none() || matches!(self.target, Target::Windows(_))
   }
@@ -542,6 +586,49 @@ mod tests {
         ],
       ]
     );
+  }
+
+  #[test]
+  fn capture_catalog_and_selection_report_actual_driver_without_changing_legacy_capture() {
+    use crate::media::{Frame, VideoSource};
+    let (client, observed) = client(&[
+      r#"[{"id":"user.capture","name":"User provider","scopes":["window"]}]"#,
+      "{\"driver\":\"user.capture\",\"format\":{\"type\":\"ppm\"}}\nP6\n1 1\n255\nabc",
+      "{\"driver\":\"linux.x11.ffmpeg\",\"format\":{\"type\":\"fixed_rgb\",\"size\":[1,1]}}\nxyz",
+    ]);
+    assert_eq!(
+      client.capture_drivers(Target::Windows(2)).unwrap()[0].id,
+      "user.capture"
+    );
+    let session = client.session(Target::Windows(2), Some(window()));
+    let mut capture = session.capture_with_driver("user.capture").unwrap();
+    assert_eq!(capture.driver(), Some("user.capture"));
+    let mut frame = Frame::default();
+    capture.read_frame(&mut frame).unwrap();
+    assert_eq!(frame.pixels, b"abc");
+    let mut capture = client
+      .session(Target::X11(7), None)
+      .capture_with_driver("auto")
+      .unwrap();
+    assert_eq!(capture.driver(), Some("linux.x11.ffmpeg"));
+    capture.read_frame(&mut frame).unwrap();
+    assert_eq!(frame.pixels, b"xyz");
+    assert_eq!(
+      *observed.requests.lock().unwrap(),
+      [
+        vec![CAPTURE_DRIVER_VERSION, "capture-drivers", "windows-2"],
+        vec![
+          CAPTURE_DRIVER_VERSION,
+          "capture-with-driver",
+          "windows-2",
+          "user.capture",
+          "window_1"
+        ],
+        vec![CAPTURE_DRIVER_VERSION, "capture-with-driver", ":7", "auto"],
+      ]
+    );
+    assert!(session.capture_with_driver("bad;id").is_err());
+    assert_eq!(observed.requests.lock().unwrap().len(), 3);
   }
 
   #[test]

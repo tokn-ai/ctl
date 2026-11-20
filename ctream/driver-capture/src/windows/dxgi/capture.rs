@@ -1,10 +1,10 @@
-use super::{
-  Output,
-  dpi::PhysicalPixels,
+use super::super::{
   pixels::{self, Rotation},
   readback::TextureReader,
 };
+use super::Output;
 use ctream_driver::{CaptureLifetime, CaptureSource, Result};
+use ctream_windows::PhysicalPixels;
 use std::{
   io::Write,
   time::{Duration, Instant},
@@ -54,7 +54,7 @@ pub struct DxgiCapture {
 impl DxgiCapture {
   pub(super) fn new(output: &Output) -> Result<Self> {
     let _physical = PhysicalPixels::enter()?;
-    let reader = TextureReader::new(&output.adapter)?;
+    let reader = TextureReader::new(Some(&output.adapter))?;
     let duplication = unsafe {
       output
         .output

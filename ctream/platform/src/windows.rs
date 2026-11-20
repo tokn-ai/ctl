@@ -7,20 +7,16 @@ pub fn list(target: Target) -> Result<Vec<Window>> {
   use ctream_driver_capture::linux::{wayland, x11};
 
   match target {
-    Target::X11(display) => x11::Driver.open(&display)?.windows(),
-    Target::Wayland(display) => wayland::Driver.open(&display)?.windows(),
+    Target::X11(display) => x11::composite::Driver.open(&display)?.windows(),
+    Target::Wayland(display) => wayland::image_copy::Driver.open(&display)?.windows(),
     Target::Windows(_) => Err("Windows windows require a native Windows agent".into()),
   }
 }
 
 #[cfg(windows)]
 pub fn list(target: Target) -> Result<Vec<Window>> {
-  use ctream_driver::{DiscoverWindows, Driver};
-
   match target {
-    Target::Windows(display) => ctream_driver_capture::windows::Driver
-      .open(&display)?
-      .windows(),
+    Target::Windows(display) => ctream_windows::list_windows(display),
     _ => Err("Linux windows require a Linux agent".into()),
   }
 }

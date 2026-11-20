@@ -3,13 +3,52 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-pub const VERSION: &str = "1.0.6";
+pub const VERSION: &str = "1.0.7";
+pub const CAPTURE_DRIVER_VERSION: &str = "1.0.7";
 pub const WINDOWS_WINDOW_VERSION: &str = "1.0.6";
 pub const WINDOWS_DISPLAY_VERSION: &str = "1.0.5";
 pub const BOUNDS_VERSION: &str = "1.0.4";
 pub const X11_WINDOW_VERSION: &str = "1.0.3";
 pub const WAYLAND_WINDOW_VERSION: &str = "1.0.2";
 pub const X11_FRAME_SIZE: [usize; 2] = [960, 540];
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptureScope {
+  Display,
+  Window,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct CaptureDriverInfo {
+  pub id: String,
+  pub name: String,
+  pub scopes: Vec<CaptureScope>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum CaptureFormat {
+  Ppm,
+  FixedRgb { size: [usize; 2] },
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct CaptureStarted {
+  pub driver: String,
+  pub format: CaptureFormat,
+}
+
+pub const CAPTURE_STARTED_LIMIT: usize = 4096;
+
+/// Provider IDs remain extensible strings, independent of the bundled catalog.
+pub fn valid_capture_driver(id: &str) -> bool {
+  !id.is_empty()
+    && id.len() <= 128
+    && id
+      .bytes()
+      .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'-' | b'_'))
+}
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]

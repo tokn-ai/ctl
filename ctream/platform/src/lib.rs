@@ -52,7 +52,7 @@ pub fn discover_sessions() -> ctream_driver::Result<Vec<ctream_proto::Session>> 
 pub fn discover_sessions() -> ctream_driver::Result<Vec<ctream_proto::Session>> {
   use ctream_proto::{Display, Session};
   Ok(
-    ctream_driver_capture::windows::discover()?
+    ctream_windows::list_displays()?
       .into_iter()
       .map(|display| Session {
         display: Display::Windows {

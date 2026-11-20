@@ -1493,6 +1493,7 @@ dependencies = [
  "ctream-driver",
  "ctream-driver-capture",
  "ctream-proto",
+ "ctream-windows",
 ]
 
 [[package]]

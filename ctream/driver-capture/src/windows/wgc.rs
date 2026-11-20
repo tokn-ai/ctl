@@ -1,9 +1,10 @@
+//! Captures selected window surfaces with Windows Graphics Capture.
+
 use super::{
-  Output,
   pixels::{self, Rotation},
   readback::{TextureReader, WindowReadback},
 };
-use ctream_driver::{CaptureLifetime, CaptureSource, Result};
+use ctream_driver::{CaptureLifetime, CaptureSource, CaptureWindow, Result};
 use ctream_windows::{PhysicalPixels, WindowTarget};
 use std::{
   io::Write,
@@ -26,10 +27,7 @@ use windows::{
     SizeInt32,
   },
   Win32::{
-    Graphics::{
-      Direct3D11::ID3D11Texture2D,
-      Dxgi::{IDXGIAdapter1, IDXGIDevice},
-    },
+    Graphics::{Direct3D11::ID3D11Texture2D, Dxgi::IDXGIDevice},
     System::WinRT::{
       Direct3D11::{CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess},
       Graphics::Capture::IGraphicsCaptureItemInterop,
@@ -43,6 +41,33 @@ const FORMAT: DirectXPixelFormat = DirectXPixelFormat::B8G8R8A8UIntNormalized;
 const FRAME_INTERVAL: Duration = Duration::from_millis(125);
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 const FRAME_RECOVERY: Duration = Duration::from_secs(10);
+
+pub struct Driver;
+
+/// A Win32 display scope used to select a window, independent of DXGI outputs.
+pub struct Session {
+  display: u32,
+}
+
+impl ctream_driver::Driver for Driver {
+  type Target = u32;
+  type Session = Session;
+
+  fn open(&self, display: &u32) -> Result<Session> {
+    ctream_windows::display(*display)?;
+    Ok(Session { display: *display })
+  }
+}
+
+impl CaptureWindow for Session {
+  type Source = WgcCapture;
+
+  fn capture_window(&self, id: &str) -> Result<WgcCapture> {
+    Ok(WgcCapture {
+      target: WindowTarget::open(self.display, id)?,
+    })
+  }
+}
 
 struct Runtime(PhantomData<Rc<()>>);
 
@@ -150,16 +175,6 @@ fn dimensions(size: SizeInt32) -> Result<[usize; 2]> {
 /// Captures a selected window's compositor surface, independent of its occlusion.
 pub struct WgcCapture {
   target: WindowTarget,
-  adapter: IDXGIAdapter1,
-}
-
-impl WgcCapture {
-  pub(super) fn new(output: &Output, id: &str) -> Result<Self> {
-    Ok(Self {
-      target: WindowTarget::open(output.info.number, id)?,
-      adapter: output.adapter.clone(),
-    })
-  }
 }
 
 impl CaptureSource for WgcCapture {
@@ -171,7 +186,9 @@ impl CaptureSource for WgcCapture {
       return Err("Windows Graphics Capture is unavailable in this desktop session".into());
     }
     self.target.validate()?;
-    let mut reader = TextureReader::new(&self.adapter)?;
+    // WGC accepts a native D3D11 device independently of monitor duplication.
+    // Default hardware selection also permits capture after the window moves.
+    let mut reader = TextureReader::new(None)?;
     reader.enable_thread_protection()?;
     let device: IDirect3DDevice =
       unsafe { CreateDirect3D11DeviceFromDXGIDevice(&reader.device().cast::<IDXGIDevice>()?) }?

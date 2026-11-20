@@ -118,7 +118,9 @@ impl RestoreInput {
       return Err("F8 or the left mouse button is already held; no input was sent".into());
     }
     let mut cursor = POINT::default();
-    unsafe { GetCursorPos(&mut cursor) }?;
+    unsafe { GetCursorPos(&mut cursor) }.map_err(|error| {
+      format!("cannot read the interactive desktop cursor before input: {error}")
+    })?;
     Ok(Self {
       cursor,
       last_cursor: None,
@@ -194,7 +196,8 @@ fn focus_owned(
   if unsafe { WindowFromPoint(expected) } != hwnd {
     return Err("owned activation point is obscured; no click sent".into());
   }
-  unsafe { SetCursorPos(expected.x, expected.y) }?;
+  unsafe { SetCursorPos(expected.x, expected.y) }
+    .map_err(|error| format!("cannot position the cursor over the owned fixture: {error}"))?;
   let mut actual = POINT::default();
   unsafe { GetCursorPos(&mut actual) }?;
   if actual.x.abs_diff(expected.x) > 1 || actual.y.abs_diff(expected.y) > 1 {
@@ -449,7 +452,21 @@ impl Exercise {
     let session = self
       .client
       .session(Target::Windows(self.number), Some(window));
-    let (mut capture, lifetime) = session.capture()?.split();
+    let catalog = self.client.capture_drivers(Target::Windows(self.number))?;
+    if !catalog.iter().any(|driver| {
+      driver.id == "windows.wgc" && driver.scopes.contains(&ctream_proto::CaptureScope::Window)
+    }) {
+      return Err("Windows capture catalog does not offer WGC window capture".into());
+    }
+    let capture = session.capture_with_driver("auto")?;
+    if capture.driver() != Some("windows.wgc") {
+      return Err("automatic Windows window capture did not select WGC".into());
+    }
+    milestone(
+      "capture_driver",
+      json!({"requested": "auto", "actual": capture.driver()}),
+    );
+    let (mut capture, lifetime) = capture.split();
     let original = Geometry::read(hwnd)?;
     verify_colors(&mut capture, &original, 0, "capture_initial")?;
     let grown = resize(&self.ui, hwnd, [640, 440])?;
@@ -467,6 +484,15 @@ impl Exercise {
       return Err("opaque fixture did not cover the selected window".into());
     }
     verify_colors(&mut capture, &shrunk, 1, "capture_covered")?;
+
+    let explicit = session.capture_with_driver("windows.wgc")?;
+    if explicit.driver() != Some("windows.wgc") {
+      return Err("explicit Windows window capture did not select WGC".into());
+    }
+    let (mut explicit, explicit_lifetime) = explicit.split();
+    verify_colors(&mut explicit, &shrunk, 1, "capture_explicit_covered")?;
+    drop(explicit_lifetime);
+    drop(explicit);
 
     // Focus changes begin only at the explicit input stage, and only to our own windows.
     let mut restore = RestoreInput::new()?;
@@ -535,7 +561,11 @@ impl Exercise {
     )?;
     restore.held_f8 = false;
 
-    let (mut closing_capture, closing_lifetime) = session.capture()?.split();
+    let capture = session.capture_with_driver("windows.wgc")?;
+    if capture.driver() != Some("windows.wgc") {
+      return Err("explicit WGC selection was not retained".into());
+    }
+    let (mut closing_capture, closing_lifetime) = capture.split();
     verify_colors(&mut closing_capture, &resized_input, 1, "capture_reopen")?;
     let mut closing_input = session.input()?;
     if unsafe { GetForegroundWindow() } != hwnd {
@@ -566,6 +596,7 @@ impl Exercise {
     drop(closing_lifetime);
     Ok(json!({"display": format!("windows-{}", self.number),
       "frame_sizes": [original.size, grown.size, shrunk.size, resized_input.size],
+      "capture_driver": "windows.wgc", "automatic_and_explicit_driver_verified": true,
       "selected_window_colors_verified": true, "opaque_cover_verified": true,
       "covered_hover_preserves_focus": true, "click_viewport_sizes": viewports,
       "capture_eof_while_key_held_verified": true, "input_eof_releases_key_verified": true,

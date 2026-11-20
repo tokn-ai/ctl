@@ -101,6 +101,77 @@ cancellation. They do not implement a real device backend. Official driver
 process tests cover helper ownership and cleanup; platform-specific tests need
 the matching operating system.
 
+## Ctream welcome and driver selection
+
+Run the protocol, client, agent, and viewer checks for backend selection and
+welcome-window changes:
+
+```sh
+cargo test --locked -p ctream-proto -p ctream-client -p ctream-agent -p ctream-preview
+```
+
+The welcome window uses the local agent when launched without arguments.
+Existing endpoint arguments configure a remote agent; a display, `--windows`,
+or `--window ID` preselects a source, and `--capture-driver ID` preselects its
+capture provider. All launches first show a view-only preview. **Start** requires
+a live frame, keeps that capture, and opens supported input in the full viewer.
+**Back** closes input and retains the stream as a view-only welcome preview.
+
+Check these boundaries with a recording transport and deliberately delayed
+responses before running a live desktop test:
+
+| Case | Required observation |
+| --- | --- |
+| Welcome discovery and live preview | Queries and capture may open; neither `input` nor `input-window` opens before Start. Preview pointer, button, wheel, and keyboard events send no remote input. |
+| Start and Back | Start keeps the selected capture and opens input once. Back closes input and releases held keys/buttons while capture continues. Starting again opens a new input channel for that same selection. |
+| Driver, display, or window change | Cancel the previous capture, clear its image, and wait for a frame from the new choice before enabling Start. |
+| Late asynchronous completion | Complete an old discovery, catalog, window query, or capture connection after a newer selection. Its data, frames, and errors must not replace the new selection; a late capture must be dropped and cancelled. |
+| Failure or close | Closing welcome cancels pending work. Capture EOF in the full viewer closes input, including when a key is held. A connection failure cannot enable Start using a stale frame. |
+| Explicit driver choice | Only providers supporting the selected scope are offered. Unknown IDs and display/window mismatches fail without opening a different provider. The actual-driver label follows the successful handshake. |
+| Legacy agent | Auto uses retained capture operations and their original frame format. No explicit driver is reported as honored when the catalog or new handshake is unavailable. |
+
+The `1.0.7` protocol tests should verify catalog fields and scope filtering,
+bounded and malformed handshakes, reported driver/format validation, and
+rejection of incompatible or unknown IDs. Verify that a source which fails
+during lazy initialization never reports a successful handshake. Existing
+`1.0.1`–`1.0.6` requests must retain their response shapes and frame prefixes.
+Test with slow or failed operations as well as immediate responses: successful
+frame rendering alone does not verify cancellation or stale-result handling.
+
+For a live check, use a disposable Linux session or the owned Windows fixture
+below. Select a display and then a window, observe the welcome preview, switch
+sources while capture is opening, and resize the welcome window. Verify that
+clicking or typing in that preview does not reach the fixture. Then choose
+Start, resize the full viewer through wide and tall aspect ratios, and verify
+fixture clicks. Return with Back and verify input stops while frames continue.
+Choose explicit valid and incompatible providers to check the reported backend
+and failure path. Close during connection and during streaming, then verify
+that temporary capture/input processes are gone. These are validation
+requirements, not a record of completed welcome-window live checks.
+
+For the capture-driver and welcome-window step, 73 host tests passed, including
+13 preview tests and six welcome lifecycle tests. The welcome tests cover
+view-only interactions, retaining capture across Start/Back, continued frames
+after Back, cancellation of pending input, stale source requests, explicit
+driver failures, and legacy Auto behavior. The disposable Linux Docker suite
+also passed its new and retained capture/input contracts.
+
+The native Windows fixture on a secondary display passed Win32 discovery,
+automatic and explicit WGC capture, growth, shrinkage, and full occlusion by
+its owned cover window. The input portion of this rerun did not complete:
+`SetCursorPos` returned access denied during fixture activation, before the
+agent input channel opened.
+
+A local native wgpu lifecycle harness observed zero input channels during
+setup, one input channel after Start with the same capture, input closure
+with capture continuing after Back, and capture EOF after app close. Native
+Metal screenshots verified setup at 860×620 and 600×460 and the viewer at
+1100×720: source controls and Start remain visible, and the preview retains
+its aspect ratio inside its pane. The real welcome window also received live
+WGC frames through the WSL endpoint; its owned remote processes showed one
+capture channel and zero input channels during setup. Temporary preview and
+fixture processes were closed after the check.
+
 ## Ctream Linux sessions
 
 Run `bash docker/ctream/run.sh` from the repository checkout to test the
@@ -249,8 +320,9 @@ The example is not run by ordinary `cargo test`; its pure rotation, coordinate,
 input-state, and protocol checks run without a Windows desktop. Use
 `bash docker/ctream/run.sh` to verify the retained Linux session behavior.
 
-The local wgpu preview received frames over the WSL SSH launcher. The isolated
-native fixture then passed on a secondary display: discovery and capture agreed
+In the earlier Windows display milestone, the local wgpu preview received
+frames over the WSL SSH launcher. The isolated native fixture then passed on
+a secondary display: discovery and capture agreed
 on physical dimensions, capture colors and both preview aspect ratios matched,
 and keyboard delivery and key release on EOF succeeded. Temporary processes and
 test files were removed. Display discovery does not imply permission to control
@@ -278,7 +350,8 @@ passed to `ctream-preview --host SSH_HOST DISPLAY --window WINDOW_ID` with the
 same agent/SSH launcher options. The maximum serve duration is 90 seconds.
 Captured images stay in memory; the fixture reports metadata and assertions.
 
-The Windows window fixture passed on a secondary display through WSL interop:
+Before the capture-driver and welcome-window changes, the Windows window
+fixture passed on a secondary display through WSL interop:
 discovery, physical capture bounds, growth/shrinkage, live colors beneath the
 opaque cover, wide/tall click mapping, keyboard delivery, EOF cleanup, and
 release on target closure with the input channel still open. The local wgpu

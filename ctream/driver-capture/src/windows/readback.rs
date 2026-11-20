@@ -3,13 +3,13 @@ use ctream_driver::Result;
 use windows::Win32::{
   Foundation::HMODULE,
   Graphics::{
-    Direct3D::D3D_DRIVER_TYPE_UNKNOWN,
+    Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_UNKNOWN},
     Direct3D11::{
       D3D11_BOX, D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAP_READ,
       D3D11_MAPPED_SUBRESOURCE, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
       D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Multithread, ID3D11Texture2D,
     },
-    Dxgi::{Common::DXGI_FORMAT_B8G8R8A8_UNORM, IDXGIAdapter1},
+    Dxgi::{Common::DXGI_FORMAT_B8G8R8A8_UNORM, IDXGIAdapter, IDXGIAdapter1},
   },
 };
 use windows::core::Interface;
@@ -37,13 +37,21 @@ pub(super) struct TextureReader {
 }
 
 impl TextureReader {
-  pub fn new(adapter: &IDXGIAdapter1) -> Result<Self> {
+  pub fn new(adapter: Option<&IDXGIAdapter1>) -> Result<Self> {
+    let driver_type = if adapter.is_some() {
+      D3D_DRIVER_TYPE_UNKNOWN
+    } else {
+      D3D_DRIVER_TYPE_HARDWARE
+    };
+    let adapter = adapter
+      .map(|adapter| adapter.cast::<IDXGIAdapter>())
+      .transpose()?;
     let mut device = None;
     let mut context = None;
     unsafe {
       D3D11CreateDevice(
-        adapter,
-        D3D_DRIVER_TYPE_UNKNOWN,
+        adapter.as_ref(),
+        driver_type,
         HMODULE::default(),
         D3D11_CREATE_DEVICE_BGRA_SUPPORT,
         None,

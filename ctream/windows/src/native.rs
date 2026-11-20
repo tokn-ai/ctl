@@ -1,11 +1,11 @@
-use crate::{Result, id::Identity, watch::WindowWatch};
+use crate::{Result, id::Identity, monitors::monitor_info, watch::WindowWatch};
 use ctream_proto::Window;
 use windows::{
   Win32::{
     Foundation::{CloseHandle, FILETIME, HANDLE, HWND, LPARAM, RECT},
     Graphics::{
       Dwm::{DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute},
-      Gdi::{GetMonitorInfoW, MONITOR_DEFAULTTONULL, MONITORINFOEXW, MonitorFromWindow},
+      Gdi::{MONITOR_DEFAULTTONULL, MonitorFromWindow},
     },
     System::Threading::{GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
     UI::{
@@ -98,20 +98,7 @@ fn display_of(hwnd: HWND) -> Result<u32> {
   if monitor.0.is_null() {
     return Err("Windows window is not on an attached display".into());
   }
-  let mut info = MONITORINFOEXW::default();
-  info.monitorInfo.cbSize = size_of::<MONITORINFOEXW>() as u32;
-  unsafe { GetMonitorInfoW(monitor, &mut info.monitorInfo) }.ok()?;
-  let end = info
-    .szDevice
-    .iter()
-    .position(|unit| *unit == 0)
-    .unwrap_or(info.szDevice.len());
-  let name = String::from_utf16(&info.szDevice[..end])?;
-  let number = name
-    .strip_prefix(r"\\.\DISPLAY")
-    .ok_or("unsupported Windows display identifier")?
-    .parse()?;
-  Ok(number)
+  Ok(monitor_info(monitor)?.number)
 }
 
 /// A window bound to its HWND, process generation, and observed lifetime.
@@ -204,9 +191,7 @@ unsafe extern "system" fn collect(hwnd: HWND, state: LPARAM) -> BOOL {
 
 /// Visible application windows assigned once to the monitor with their largest overlap.
 pub fn list_windows(display: u32) -> Result<Vec<Window>> {
-  if display == 0 {
-    return Err("invalid Windows display identifier".into());
-  }
+  crate::display(display)?;
   let _physical = PhysicalPixels::enter()?;
   let mut handles = Vec::<HWND>::new();
   unsafe {

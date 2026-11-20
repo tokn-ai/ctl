@@ -3,10 +3,16 @@
 #[cfg(any(windows, test))]
 mod id;
 #[cfg(windows)]
+mod monitors;
+#[cfg(windows)]
 mod native;
 #[cfg(windows)]
 mod watch;
 
+#[cfg(windows)]
+pub use id::display_number;
+#[cfg(windows)]
+pub use monitors::{DisplayInfo, display, list_displays};
 #[cfg(windows)]
 pub use native::{PhysicalPixels, WindowTarget, list_windows};
 

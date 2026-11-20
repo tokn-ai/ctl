@@ -20,10 +20,10 @@ Linux desktop throughout development.
 
 ## Design
 
-Separate Rust libraries expose the protocol types, typed client, and native
-capability providers. The CLI queries windows through the client over SSH and
-uses the platform library for local queries. The wgpu viewer uses the same
-client for discovery, capture, input, and semantic actions.
+Separate Rust libraries expose the protocol types, typed client, shared driver
+traits, and official capability drivers. The CLI queries windows through the
+client over SSH and uses the platform library for local queries. The wgpu
+viewer uses the same client for discovery, capture, input, and semantic actions.
 
 ### Current architecture
 
@@ -31,23 +31,57 @@ client for discovery, capture, input, and semantic actions.
 | --- | --- | --- | --- | --- |
 | `ctream-proto` | `ctream/proto` | Client and display host processes | None | Shared display, window, control, and wire contract types |
 | `ctream-client` | `ctream/client` | CLI or viewer process | `ctream-proto` | Typed sessions, SSH/local transports, frame decoding, input forwarding, and coordinate transforms |
-| `ctream-platform` | `ctream/platform` | Agent or local CLI on the display host | `ctream-proto` | Native discovery and X11, Wayland, and AT-SPI providers |
+| `ctream-driver` | `ctream/driver` | Display host process | `ctream-proto` | Platform-neutral driver and capability traits, with capture cancellation |
+| `ctream-driver-capture` | `ctream/driver-capture` | Linux display host | `ctream-driver`, `ctream-proto` | Official capture drivers and capturable-window enumeration |
+| `ctream-driver-input` | `ctream/driver-input` | Linux display host | `ctream-driver` | Official input drivers |
+| `ctream-platform` | `ctream/platform` | Agent or local CLI on the display host | `ctream-driver`, `ctream-proto`, `ctream-driver-capture` (Linux) | Display discovery, window-query dispatch, and AT-SPI controls |
 | `ctream-cli` | `ctream/cli` | Display host for local queries; client machine for SSH queries | `ctream-client`, `ctream-platform`, `ctream-proto` | The `ctream` command |
-| `ctream-agent` | `ctream/agent` | Display host | `ctream-platform`, `ctream-proto` | Validate contracts and dispatch operations to providers |
+| `ctream-agent` | `ctream/agent` | Linux display host | `ctream-driver`, `ctream-proto`; `ctream-driver-capture`, `ctream-driver-input`, `ctream-platform` (Linux) | Reusable request validation and stock-agent operation routing |
 | `ctream-preview` | `ctream/preview` | Viewer machine | `ctream-client`, `ctream-proto` | Native wgpu preview, controls, and overlays |
 | `ctream-wayland-input` | `ctream/wayland-input` | Linux display host | `ctream-proto` (Linux) | Wayland input and window capture helper binaries |
 
-The dependency direction keeps native providers out of the client library and
+The dependency direction keeps native drivers out of the client library and
 viewer. `Client<T>` selects wire contracts, validates requests, and decodes typed
 replies. `Session<T>` binds operations to a selected display or window. The
 client's `media` module decodes bounded RGB frames, while `geometry` supplies
 the shared transform used by the preview image, control outlines, and pointer
 mapping.
 
-Providers use an associated session type. Each capability has its own trait,
-and capture capabilities return an associated source. The agent dispatches a
-selected provider through those interfaces. Native capture can write into a
-caller-supplied output, which also allows testing without a graphical viewer.
+### Driver composition
+
+Official driver crates are organized by capability, then platform and backend.
+For example, `ctream_driver_capture::linux::wayland::Driver` implements capture,
+and `ctream_driver_input::linux::wayland::Driver` implements input. Both crates
+also expose `linux::x11`. Capture drivers enumerate their capturable windows;
+the platform library dispatches window queries and resolves AT-SPI controls.
+
+`ctream_driver::Driver` associates a `Target` with a `Session` and opens that
+session from a borrowed target. Each capability has its own trait and resource
+type. The agent's generic helpers require only the capability they execute, so
+a capture-only session can be used without implementing input or discovery.
+The stock agent selects the official capture and input drivers independently.
+
+A user crate can group several capabilities under its own modules, such as
+`user_ctream_driver_android::{capture, input}` from a package named
+`user-ctream-driver-android`. This is a packaging example; Android support is
+not implemented. Such a crate implements the shared traits and is compiled
+into a custom agent. It can define its own associated target type, including
+device identifiers, without depending on an official driver crate.
+
+A driver's associated `Target` is separate from `ctream_proto::Target`, which
+currently represents only the existing X11 and Wayland wire targets. The stock
+agent does not load user drivers automatically. A custom agent supplies its
+driver selection, routing, and protocol adaptation. It can reuse
+`ctream_agent::protocol::parse` for the existing requests; adding a wire target
+also requires corresponding protocol and client support.
+
+Capture sources currently write encoded frame bytes into a caller-supplied
+output and observe a cancellation lifetime. The existing raw RGB and PPM
+formats remain selected by the protocol adapter. Input and accessibility helper
+adapters retain their standard-IO endpoints. The driver interfaces do not yet
+provide typed frame or input-event APIs.
+
+### Client sessions
 
 `Client<T>` is generic over a transport with associated reader and writer
 types. A JSON query associates its reply type with its command. Version
@@ -105,10 +139,10 @@ frames on a separate channel, and input uses its own duplex channel. Closing
 the capture channel cancels its backend process. Closing the input channel
 releases held inputs.
 
-The agent uses FFmpeg with x11grab for X11 capture. X11 capture needs Python 3,
-libX11, and access to the selected display. X11 input also requires libXtst
-and XTEST. The local wgpu viewer uses the same rectangle for drawing the
-desktop and mapping clicks to display pixels.
+The agent uses FFmpeg with x11grab for X11 display capture and reads display
+geometry through x11rb. X11 input needs Python 3, libX11, libXtst, XTEST, and
+access to the selected display. The local wgpu viewer uses the same rectangle
+for drawing the desktop and mapping clicks to display pixels.
 
 For a user-owned Sway session, select `wayland-N` in the same command. Capture
 uses `grim`. To enable input, install the helper on the Linux host with
@@ -235,6 +269,7 @@ Wayland `elements` response for the local overlay. The agent retains
 contracts 1.0.1 through 1.0.3. The viewer can inspect controls on earlier
 agents using the existing 1.0.2 response.
 
-The provider, client, media, geometry, and local transport refactor and the
-crate split use `ctream_agent` 1.0.4 (build 4) with the same retained contracts.
+The provider, client, media, geometry, and local transport refactor, crate split,
+and driver composition use `ctream_agent` 1.0.4 (build 4) with the same retained
+contracts.
 Protocol changes: none.

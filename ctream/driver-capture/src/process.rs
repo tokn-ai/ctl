@@ -1,43 +1,11 @@
-use super::{CaptureSource, InputSource, Result};
+use ctream_driver::{CaptureLifetime, CaptureSource, Result};
 use std::{
-  io::{self, Read, Write},
+  io::{self, Write},
   process::{Child, Command, Stdio},
-  sync::mpsc::{self, Receiver, RecvTimeoutError},
+  sync::mpsc,
   thread,
   time::Duration,
 };
-
-/// EOF on the operation's input cancels its capture resource.
-pub struct CaptureLifetime {
-  closed: Receiver<()>,
-}
-
-impl CaptureLifetime {
-  pub fn from_reader(mut input: impl Read + Send + 'static) -> Self {
-    let (notify, closed) = mpsc::channel();
-    thread::spawn(move || {
-      let _ = io::copy(&mut input, &mut io::sink());
-      let _ = notify.send(());
-    });
-    Self { closed }
-  }
-
-  pub fn cancelled(&self, delay: Duration) -> bool {
-    !matches!(
-      self.closed.recv_timeout(delay),
-      Err(RecvTimeoutError::Timeout)
-    )
-  }
-}
-
-/// The existing input helpers own stdin and release held inputs when it closes.
-pub struct InputProcess(pub Command);
-
-impl InputSource for InputProcess {
-  fn run(self) -> Result<()> {
-    run_operation(self.0)
-  }
-}
 
 struct RunningProcess(Child);
 
@@ -46,15 +14,6 @@ impl Drop for RunningProcess {
     let _ = self.0.kill();
     let _ = self.0.wait();
   }
-}
-
-pub(super) fn run_operation(mut command: Command) -> Result<()> {
-  let mut child = RunningProcess(command.spawn()?);
-  let status = child.0.wait()?;
-  if !status.success() {
-    return Err(io::Error::other(format!("operation backend exited with {status}")).into());
-  }
-  Ok(())
 }
 
 /// A streaming helper, or a still-image helper sampled at a fixed interval.
@@ -140,7 +99,7 @@ impl CaptureSource for ProcessCapture {
   }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
   use super::*;
   use std::time::Instant;
@@ -148,7 +107,7 @@ mod tests {
   #[test]
   fn cancellation_stops_a_capture_process() {
     let (notify, closed) = mpsc::channel();
-    let lifetime = CaptureLifetime { closed };
+    let lifetime = CaptureLifetime::from_receiver(closed);
     let mut command = Command::new("sleep");
     command.arg("30");
     thread::spawn(move || {
@@ -164,7 +123,7 @@ mod tests {
   fn already_closed_capture_does_not_start_a_helper() {
     let (notify, closed) = mpsc::channel();
     drop(notify);
-    let lifetime = CaptureLifetime { closed };
+    let lifetime = CaptureLifetime::from_receiver(closed);
     let mut command = Command::new("missing-ctream-capture-helper");
     assert!(!run_child(&mut command, &mut Vec::new(), &lifetime).unwrap());
   }
@@ -172,7 +131,7 @@ mod tests {
   #[test]
   fn helper_frames_are_written_to_the_selected_output() {
     let (_notify, closed) = mpsc::channel();
-    let lifetime = CaptureLifetime { closed };
+    let lifetime = CaptureLifetime::from_receiver(closed);
     let mut command = Command::new("printf");
     command.arg("P6\n1 1\n255\nabc");
     let mut output = Vec::new();
@@ -196,19 +155,12 @@ mod tests {
     }
 
     let (_notify, closed) = mpsc::channel();
-    let lifetime = CaptureLifetime { closed };
+    let lifetime = CaptureLifetime::from_receiver(closed);
     let mut command = Command::new("sh");
     command.args(["-c", "printf frame; exec sleep 30"]);
     let started = Instant::now();
     let error = run_child(&mut command, &mut FailedOutput, &lifetime).unwrap_err();
     assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
     assert!(started.elapsed() < Duration::from_secs(5));
-  }
-
-  #[test]
-  fn input_helpers_return_to_the_owner_and_report_failure() {
-    InputProcess(Command::new("true")).run().unwrap();
-    let result = InputProcess(Command::new("false")).run();
-    assert!(result.is_err());
   }
 }

@@ -1,44 +1,38 @@
-use super::{
-  CaptureDisplay, CaptureLifetime, CaptureSource, CaptureWindow, DiscoverWindows, ForwardInput,
-  Provider, Result,
-  process::{InputProcess, ProcessCapture},
+//! X11 display capture through ffmpeg and window capture through Composite.
+
+mod windows;
+
+use crate::process::ProcessCapture;
+use ctream_driver::{
+  CaptureDisplay, CaptureLifetime, CaptureSource, CaptureWindow, DiscoverWindows, Result,
 };
-use crate::windows;
 use ctream_proto::{Window, X11_FRAME_SIZE, valid_window_id};
 use std::{
   io::{self, Write},
-  process::{Command, Stdio},
+  process::Command,
 };
+use x11rb::{connection::Connection, protocol::xproto::ConnectionExt};
 
-pub struct X11;
+pub struct Driver;
 
 pub struct Session {
   display: String,
 }
 
-impl Provider for X11 {
+impl ctream_driver::Driver for Driver {
+  type Target = u32;
   type Session = Session;
 
-  fn open(&self, display: u32) -> Session {
-    Session {
+  fn open(&self, display: &u32) -> Result<Session> {
+    Ok(Session {
       display: format!(":{display}"),
-    }
-  }
-}
-
-impl Session {
-  fn helper(&self) -> Command {
-    let mut command = Command::new("python3");
-    command
-      .args(["-u", "-c", include_str!("../x11_input.py")])
-      .env("DISPLAY", &self.display);
-    command
+    })
   }
 }
 
 impl DiscoverWindows for Session {
   fn windows(&self) -> Result<Vec<Window>> {
-    windows::x11::list(&self.display)
+    windows::list(&self.display)
   }
 }
 
@@ -46,27 +40,11 @@ impl CaptureDisplay for Session {
   type Source = ProcessCapture;
 
   fn capture_display(&self) -> Result<ProcessCapture> {
-    let output = self
-      .helper()
-      .arg("--geometry")
-      .stdin(Stdio::null())
-      .output()?;
-    let geometry = String::from_utf8_lossy(&output.stdout);
-    let dimensions: Vec<_> = geometry
-      .split_ascii_whitespace()
-      .map(str::parse::<u32>)
-      .collect();
-    let [Ok(width), Ok(height)] = dimensions.as_slice() else {
-      return Err(
-        io::Error::other(format!(
-          "cannot read X11 geometry for {}: {}",
-          self.display,
-          String::from_utf8_lossy(&output.stderr).trim()
-        ))
-        .into(),
-      );
-    };
-    if !output.status.success() || *width == 0 || *height == 0 {
+    let (connection, screen) = x11rb::connect(Some(&self.display))?;
+    let root = connection.setup().roots[screen].root;
+    let geometry = connection.get_geometry(root)?.reply()?;
+    let (width, height) = (geometry.width, geometry.height);
+    if width == 0 || height == 0 {
       return Err(io::Error::other("invalid X11 geometry").into());
     }
     let [w, h] = X11_FRAME_SIZE;
@@ -103,7 +81,7 @@ pub struct CompositeCapture {
 
 impl CaptureSource for CompositeCapture {
   fn run<W: Write + Send>(self, output: &mut W, lifetime: &CaptureLifetime) -> Result<()> {
-    windows::x11::capture_to(&self.display, &self.window, output, |delay| {
+    windows::capture_to(&self.display, &self.window, output, |delay| {
       lifetime.cancelled(delay)
     })
   }
@@ -120,13 +98,5 @@ impl CaptureWindow for Session {
       display: self.display.clone(),
       window: id.to_owned(),
     })
-  }
-}
-
-impl ForwardInput for Session {
-  type Input = InputProcess;
-
-  fn input(&self) -> Result<InputProcess> {
-    Ok(InputProcess(self.helper()))
   }
 }

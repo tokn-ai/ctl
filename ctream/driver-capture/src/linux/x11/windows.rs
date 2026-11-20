@@ -1,7 +1,7 @@
 use ctream_proto::Window;
 use std::{
   error::Error,
-  io::{self, Write},
+  io::Write,
   time::{Duration, Instant},
 };
 use x11rb::{
@@ -113,14 +113,6 @@ pub fn list(display: &str) -> Result<Vec<Window>, Box<dyn Error>> {
     }
   }
   Ok(windows)
-}
-
-pub fn capture(
-  display: &str,
-  id: &str,
-  closed: impl FnMut(Duration) -> bool,
-) -> Result<(), Box<dyn Error>> {
-  capture_to(display, id, &mut io::stdout().lock(), closed)
 }
 
 pub fn capture_to(

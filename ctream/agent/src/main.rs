@@ -1,13 +1,13 @@
-#[cfg(unix)]
-mod unix;
+#[cfg(target_os = "linux")]
+mod linux;
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-  unix::run()
+  linux::run()
 }
 
-#[cfg(not(unix))]
+#[cfg(not(target_os = "linux"))]
 fn main() -> std::process::ExitCode {
-  eprintln!("ctream-agent needs a Unix display host");
+  eprintln!("ctream-agent's bundled drivers require a Linux display host");
   std::process::ExitCode::FAILURE
 }

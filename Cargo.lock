@@ -1430,6 +1430,9 @@ name = "ctream-agent"
 version = "0.1.0"
 dependencies = [
  "ctream-client",
+ "ctream-driver",
+ "ctream-driver-capture",
+ "ctream-driver-input",
  "ctream-platform",
  "ctream-proto",
  "serde_json",
@@ -1455,12 +1458,36 @@ dependencies = [
 ]
 
 [[package]]
-name = "ctream-platform"
+name = "ctream-driver"
 version = "0.1.0"
 dependencies = [
  "ctream-proto",
+]
+
+[[package]]
+name = "ctream-driver-capture"
+version = "0.1.0"
+dependencies = [
+ "ctream-driver",
+ "ctream-proto",
  "serde_json",
  "x11rb",
+]
+
+[[package]]
+name = "ctream-driver-input"
+version = "0.1.0"
+dependencies = [
+ "ctream-driver",
+]
+
+[[package]]
+name = "ctream-platform"
+version = "0.1.0"
+dependencies = [
+ "ctream-driver",
+ "ctream-driver-capture",
+ "ctream-proto",
 ]
 
 [[package]]

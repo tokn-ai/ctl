@@ -7,9 +7,14 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
-[target.'cfg(unix)'.dependencies]
-ctream-platform.workspace = true
+[dependencies]
+ctream-driver.workspace = true
 ctream-proto.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ctream-driver-capture.workspace = true
+ctream-driver-input.workspace = true
+ctream-platform.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]

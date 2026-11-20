@@ -1,21 +1,16 @@
-use ctream_platform::providers::{
-  self, AccessibleControls, CaptureDisplay, CaptureLifetime, CaptureSource, CaptureWindow,
-  ControlOperation, ControlSource, DiscoverWindows, ForwardInput, InputSource, Provider, Result,
-  Wayland, X11,
-};
+use ctream_driver::{ControlOperation, Result};
 use ctream_proto::{
   DISPLAY_VERSION, Target, VERSION, WAYLAND_WINDOW_VERSION, X11_WINDOW_VERSION, valid_window_id,
 };
-use std::{env, io};
 
-enum TargetOperation<'a> {
+pub enum TargetOperation<'a> {
   Capture,
   Input,
   Windows,
   CaptureWindow(&'a str),
 }
 
-enum Request<'a> {
+pub enum Request<'a> {
   Discover,
   Target(Target, TargetOperation<'a>),
   Controls(Target, &'a str, ControlOperation),
@@ -33,7 +28,7 @@ fn supports_displays(version: &str) -> bool {
   )
 }
 
-fn parse(args: &[String]) -> Result<Request<'_>> {
+pub fn parse(args: &[String]) -> Result<Request<'_>> {
   match args {
     [version, operation] if supports_displays(version) && operation == "discover" => {
       Ok(Request::Discover)
@@ -72,57 +67,6 @@ fn parse(args: &[String]) -> Result<Request<'_>> {
       Ok(request)
     }
     _ => Err("usage: ctream-agent VERSION OPERATION [DISPLAY [WINDOW]]".into()),
-  }
-}
-
-fn run_session<S>(session: S, operation: TargetOperation<'_>) -> Result<()>
-where
-  S: DiscoverWindows + CaptureDisplay + CaptureWindow + ForwardInput,
-{
-  match operation {
-    TargetOperation::Capture => {
-      let lifetime = CaptureLifetime::from_reader(io::stdin());
-      session.capture_display()?.run(&mut io::stdout(), &lifetime)
-    }
-    TargetOperation::Input => session.input()?.run(),
-    TargetOperation::Windows => {
-      serde_json::to_writer(io::stdout().lock(), &session.windows()?)?;
-      Ok(())
-    }
-    TargetOperation::CaptureWindow(id) => {
-      let lifetime = CaptureLifetime::from_reader(io::stdin());
-      session
-        .capture_window(id)?
-        .run(&mut io::stdout(), &lifetime)
-    }
-  }
-}
-
-fn run_controls<S: AccessibleControls>(
-  session: S,
-  id: &str,
-  operation: ControlOperation,
-) -> Result<()> {
-  session.controls(id)?.run(operation)
-}
-
-pub(super) fn run() -> Result<()> {
-  let args: Vec<_> = env::args().skip(1).collect();
-  match parse(&args)? {
-    Request::Discover => {
-      serde_json::to_writer(io::stdout().lock(), &providers::discover_sessions()?)?;
-      Ok(())
-    }
-    Request::Target(target, operation) => match target {
-      Target::X11(display) => run_session(X11.open(display), operation),
-      Target::Wayland(display) => run_session(Wayland.open(display), operation),
-    },
-    Request::Controls(target, id, operation) => match target {
-      Target::Wayland(display) => run_controls(Wayland.open(display), id, operation),
-      Target::X11(_) => {
-        Err("semantic actions currently require a supported Wayland compositor".into())
-      }
-    },
   }
 }
 

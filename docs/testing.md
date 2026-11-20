@@ -85,13 +85,30 @@ guard are released. On Linux, bypassing coordination must produce `ETXTBSY`.
 These tests use an explicitly polled pending acquisition rather than sleeps to
 establish ordering; a timeout only detects a launch that never resumes.
 
+## Ctream drivers
+
+Run the shared driver API, official driver, client, and agent tests with:
+
+```sh
+cargo test --locked -p ctream-driver -p ctream-driver-capture \
+  -p ctream-driver-input -p ctream-client -p ctream-agent
+```
+
+`ctream/driver/tests/user_driver.rs` exercises the public API from a separate
+integration-test crate. Its synthetic drivers cover a capture-only session,
+custom and borrowed target types, an independent input capability, and capture
+cancellation. They do not implement a real device backend. Official driver
+process tests cover helper ownership and cleanup; platform-specific tests need
+the matching operating system.
+
 ## Ctream Linux sessions
 
 Run `bash docker/ctream/run.sh` from the repository checkout to test the
-current client and agent against disposable Xvfb and headless Sway sessions.
-The script uses a local Docker-compatible engine, builds the Linux binaries,
-and runs the opt-in `ctream-agent` integration test through local stdio IPC.
-It also checks accessible controls in a GTK fixture.
+current client, official drivers, and agent against disposable Xvfb and headless
+Sway sessions. The script uses a local Docker-compatible engine, builds the
+Linux binaries, and runs the driver, platform, client, and agent tests. It then
+runs the opt-in `ctream-agent` integration test through local stdio IPC,
+including accessible controls in a GTK fixture.
 
 The fixture lives in `ctream/agent/tests/linux_session.rs`, so Cargo supplies
 the current agent executable directly to the test. It uses `ctream-client`

@@ -22,6 +22,9 @@ members = [
   "ctmux/proto",
   "ctream/proto",
   "ctream/client",
+  "ctream/driver",
+  "ctream/driver-capture",
+  "ctream/driver-input",
   "ctream/platform",
   "ctream/cli",
   "ctream/agent",
@@ -46,6 +49,9 @@ repository = "https://github.com/tokn-ai/ctl"
 [workspace.dependencies]
 ctream-proto = { path = "ctream/proto" }
 ctream-client = { path = "ctream/client" }
+ctream-driver = { path = "ctream/driver" }
+ctream-driver-capture = { path = "ctream/driver-capture" }
+ctream-driver-input = { path = "ctream/driver-input" }
 ctream-platform = { path = "ctream/platform" }
 ctl-core = { package = "tokn-ctl-core", path = "ctl/core", version = "=0.1.4" }
 clap = { version = "4.6.6", features = ["derive"] }

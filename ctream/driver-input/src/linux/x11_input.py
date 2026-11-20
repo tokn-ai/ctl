@@ -18,10 +18,6 @@ if not display:
 screen = bind(x11, "XDefaultScreen", num, ptr)(display)
 width = bind(x11, "XDisplayWidth", num, ptr, num)(display, screen)
 height = bind(x11, "XDisplayHeight", num, ptr, num)(display, screen)
-if sys.argv[1:] == ["--geometry"]:
-  print(width, height)
-  bind(x11, "XCloseDisplay", num, ptr)(display)
-  sys.exit(0)
 xtst = c.CDLL("libXtst.so.6")
 extension = bind(xtst, "XTestQueryExtension", num, ptr, *([c.POINTER(num)] * 4))
 if not extension(display, *(c.byref(num()) for _ in range(4))):

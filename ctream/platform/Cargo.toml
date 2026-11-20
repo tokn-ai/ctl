@@ -8,6 +8,8 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+ctream-driver.workspace = true
 ctream-proto.workspace = true
-serde_json.workspace = true
-x11rb = { version = "0.13.2", features = ["composite", "image"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ctream-driver-capture.workspace = true

@@ -148,29 +148,25 @@ impl Installation {
     manifest: ctl_core::bundles::Manifest,
     package: component_update::Package,
   ) -> Self {
-    let result = component_update::UpdateResult {
-      package,
-      bundle_id: manifest.bundle_id.clone(),
-      target_triple: manifest.target_triple.clone(),
-      services_preserved: true,
-    };
+    #[cfg(unix)]
+    let agent = &manifest.components["ctl-agent"];
     Self {
       #[cfg(unix)]
-      agent: manifest.components["ctl-agent"].clone(),
-      result,
+      agent: agent.clone(),
       #[cfg(unix)]
       version: RemoteAgentInstallResultDto {
-        app_version: manifest.components["ctl-agent"].build.version.clone(),
+        app_version: agent.build.version.clone(),
         bundle_id: manifest
           .distribution_id
-          .clone()
-          .unwrap_or(manifest.bundle_id),
-        git_revision: manifest.components["ctl-agent"]
-          .build
-          .source_revision
-          .clone()
-          .unwrap_or_default(),
+          .unwrap_or_else(|| manifest.bundle_id.clone()),
+        git_revision: agent.build.source_revision.clone().unwrap_or_default(),
+        target_triple: manifest.target_triple.clone(),
+      },
+      result: component_update::UpdateResult {
+        package,
+        bundle_id: manifest.bundle_id,
         target_triple: manifest.target_triple,
+        services_preserved: true,
       },
     }
   }

@@ -12,12 +12,12 @@ pub use process::CaptureLifetime;
 pub use wayland::Wayland;
 pub use x11::X11;
 
-use crate::protocol::Window;
+use ctream_proto::{Display, Session, Window};
 use std::{env, fs, io::Write, os::unix::fs::MetadataExt};
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
-pub fn discover_sessions() -> Result<Vec<crate::protocol::Session>> {
+pub fn discover_sessions() -> Result<Vec<Session>> {
   let runtime_uid = env::var_os("XDG_RUNTIME_DIR")
     .and_then(|path| fs::metadata(path).ok())
     .map(|metadata| metadata.uid());
@@ -26,10 +26,10 @@ pub fn discover_sessions() -> Result<Vec<crate::protocol::Session>> {
       .into_iter()
       .map(|(display, class)| {
         let selectable = match &display {
-          crate::Display::X11(_) => true,
-          crate::Display::Wayland { uid, .. } => runtime_uid == Some(*uid),
+          Display::X11(_) => true,
+          Display::Wayland { uid, .. } => runtime_uid == Some(*uid),
         };
-        crate::protocol::Session {
+        Session {
           display,
           class,
           selectable,

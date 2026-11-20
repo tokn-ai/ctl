@@ -4,10 +4,8 @@ use super::{
   atspi::AtspiWindow,
   process::{InputProcess, ProcessCapture},
 };
-use crate::{
-  protocol::{Target, Window, valid_window_id},
-  windows,
-};
+use crate::windows;
+use ctream_proto::{Target, Window, valid_window_id};
 use std::{process::Command, time::Duration};
 
 pub struct Wayland;

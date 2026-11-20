@@ -1,3 +1,5 @@
+//! Shared data and wire contracts for ctream clients and agents.
+
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -5,6 +7,13 @@ pub const VERSION: &str = "1.0.4";
 pub const X11_WINDOW_VERSION: &str = "1.0.3";
 pub const WAYLAND_WINDOW_VERSION: &str = "1.0.2";
 pub const X11_FRAME_SIZE: [usize; 2] = [960, 540];
+
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum Display {
+  X11(u32),
+  Wayland { uid: u32, socket: String },
+}
 
 #[derive(Clone, Copy)]
 pub enum Target {
@@ -44,14 +53,14 @@ impl fmt::Display for Target {
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Session {
-  pub display: super::Display,
+  pub display: Display,
   pub class: Option<String>,
   pub selectable: bool,
 }
 
 pub const DISPLAY_VERSION: &str = "1.0.1";
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Window {
   pub id: String,
   pub title: String,

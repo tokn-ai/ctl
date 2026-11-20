@@ -3,10 +3,8 @@ use super::{
   Provider, Result,
   process::{InputProcess, ProcessCapture},
 };
-use crate::{
-  protocol::{Window, X11_FRAME_SIZE, valid_window_id},
-  windows,
-};
+use crate::windows;
+use ctream_proto::{Window, X11_FRAME_SIZE, valid_window_id};
 use std::{
   io::{self, Write},
   process::{Command, Stdio},

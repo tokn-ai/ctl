@@ -1,4 +1,4 @@
-use ctream::geometry::{ImageGeometry, Point, Rect, ViewportSpace};
+use ctream_client::geometry::{ImageGeometry, Point, Rect, ViewportSpace};
 use eframe::egui;
 
 pub fn fit(area: egui::Rect, size: [u32; 2]) -> Option<ImageGeometry> {

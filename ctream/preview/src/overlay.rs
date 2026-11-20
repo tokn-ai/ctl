@@ -1,4 +1,5 @@
-use ctream::{geometry::ImageGeometry, protocol::Element};
+use ctream_client::geometry::ImageGeometry;
+use ctream_proto::Element;
 use eframe::egui::{Color32, Painter, Stroke, StrokeKind};
 
 pub fn paint(painter: &Painter, image: &ImageGeometry, elements: &[Element]) {

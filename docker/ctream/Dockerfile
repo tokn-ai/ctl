@@ -25,6 +25,8 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/rustup.sh 
   && chmod 700 /run/user/1000 \
   && chmod 1777 /tmp/.X11-unix
 
-ENV PATH="/root/.cargo/bin:${PATH}" CARGO_TARGET_DIR=/build
+# The fixture only needs the installed compiler. Avoid fetching the repository's
+# optional formatting and linting components when starting a disposable run.
+ENV PATH="/root/.cargo/bin:${PATH}" CARGO_TARGET_DIR=/build RUSTUP_TOOLCHAIN=1.99.0
 WORKDIR /workspace
 ENTRYPOINT ["bash", "/workspace/docker/ctream/test.sh"]

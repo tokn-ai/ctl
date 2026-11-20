@@ -1,4 +1,4 @@
-use crate::protocol::Window;
+use ctream_proto::Window;
 use std::{
   error::Error,
   io::{self, Write},

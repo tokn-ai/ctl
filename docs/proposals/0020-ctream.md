@@ -6,10 +6,10 @@
 ## Summary
 
 `ctream` discovers X11 and Wayland instances and forwards control to a selected
-instance through a CLI and a native wgpu viewer. Its CLI and agent (`ctream`),
-viewer (`ctream-preview`), and Linux helpers (`ctream-wayland-input`) are members
-of the root Cargo workspace and share its lockfile. They run independently of
-`ctld`. Lifecycle management through `ctld` is planned once the tool is stable.
+instance through a CLI and a native wgpu viewer. Its crates live under `ctream/`
+as members of the root Cargo workspace and share its lockfile. The CLI, agent,
+viewer, and Linux helpers run independently of `ctld`. Lifecycle management
+through `ctld` is planned once the tool is stable.
 
 ## Motivation
 
@@ -20,22 +20,29 @@ Linux desktop throughout development.
 
 ## Design
 
-The shared Rust library exposes a typed client, native capability providers,
-media frames, and coordinate transforms. The CLI queries windows through that
-client over SSH. The wgpu viewer uses the same client for discovery, capture,
-input, and semantic actions.
+Separate Rust libraries expose the protocol types, typed client, and native
+capability providers. The CLI queries windows through the client over SSH and
+uses the platform library for local queries. The wgpu viewer uses the same
+client for discovery, capture, input, and semantic actions.
 
 ### Current architecture
 
-| Component | Location | Responsibility |
-| --- | --- | --- |
-| `client::Client<T>` | Client process | Select wire contracts, validate requests, decode typed replies |
-| `client::Session<T>` | Client process | Bind operations to a selected display or window |
-| `transport::Ssh`, `transport::Local` | Client process | Open duplex agent channels and manage their child processes |
-| `providers` | Display host | Open X11 and Wayland sessions and their capture, input, and accessibility capabilities |
-| `ctream-agent` | Display host | Validate the requested contract and dispatch operations to providers |
-| `media` | Client process | Decode bounded RGB frames through a generic video source |
-| `geometry` and viewer overlays | Client process | Share one transform for the image, control outlines, and pointer mapping |
+| Crate | Directory | Runs in | Ctream dependencies | Responsibility |
+| --- | --- | --- | --- | --- |
+| `ctream-proto` | `ctream/proto` | Client and display host processes | None | Shared display, window, control, and wire contract types |
+| `ctream-client` | `ctream/client` | CLI or viewer process | `ctream-proto` | Typed sessions, SSH/local transports, frame decoding, input forwarding, and coordinate transforms |
+| `ctream-platform` | `ctream/platform` | Agent or local CLI on the display host | `ctream-proto` | Native discovery and X11, Wayland, and AT-SPI providers |
+| `ctream-cli` | `ctream/cli` | Display host for local queries; client machine for SSH queries | `ctream-client`, `ctream-platform`, `ctream-proto` | The `ctream` command |
+| `ctream-agent` | `ctream/agent` | Display host | `ctream-platform`, `ctream-proto` | Validate contracts and dispatch operations to providers |
+| `ctream-preview` | `ctream/preview` | Viewer machine | `ctream-client`, `ctream-proto` | Native wgpu preview, controls, and overlays |
+| `ctream-wayland-input` | `ctream/wayland-input` | Linux display host | `ctream-proto` (Linux) | Wayland input and window capture helper binaries |
+
+The dependency direction keeps native providers out of the client library and
+viewer. `Client<T>` selects wire contracts, validates requests, and decodes typed
+replies. `Session<T>` binds operations to a selected display or window. The
+client's `media` module decodes bounded RGB frames, while `geometry` supplies
+the shared transform used by the preview image, control outlines, and pointer
+mapping.
 
 Providers use an associated session type. Each capability has its own trait,
 and capture capabilities return an associated source. The agent dispatches a
@@ -77,14 +84,16 @@ greeter separately when session metadata identifies it, and distinguish an
 observed listener from a display that accepted a client connection.
 
 From the repository root on the remote Linux host, install `ctream-agent` with
-`cargo install --locked --path ctream --bin ctream-agent --root ~/.local`.
+`cargo install --locked --path ctream/agent --root ~/.local`.
+Install the CLI separately with
+`cargo install --locked --path ctream/cli --root ~/.local`.
 From the repository root on the viewer machine, run
 `cargo run -p ctream-preview -- HOST` to discover remote displays and select
 one in the viewer. Append `:DISPLAY` or
 `wayland-N` to open a target directly.
 
 For a display on the viewer machine, build with
-`cargo build -p ctream -p ctream-preview` and run
+`cargo build -p ctream-agent -p ctream-preview` and run
 `cargo run -p ctream-preview -- --local`. The local transport finds the agent
 beside the viewer executable, falling back to `PATH`, and launches it over
 stdio IPC. It uses the same operation contracts as SSH.
@@ -226,6 +235,6 @@ Wayland `elements` response for the local overlay. The agent retains
 contracts 1.0.1 through 1.0.3. The viewer can inspect controls on earlier
 agents using the existing 1.0.2 response.
 
-The provider, client, media, geometry, and local transport refactor uses
-`ctream_agent` 1.0.4 (build 4) with the same retained contracts.
+The provider, client, media, geometry, and local transport refactor and the
+crate split use `ctream_agent` 1.0.4 (build 4) with the same retained contracts.
 Protocol changes: none.

@@ -1,10 +1,9 @@
-use ctream::{
-  Display,
-  client::{Client, Session},
+use ctream_client::{
+  Client, Session,
   media::{CaptureLifetime, Frame, VideoSource},
-  protocol::{Element, Session as DisplaySession, Target, Window, X11_FRAME_SIZE},
   transport::{Local, Ssh, Transport},
 };
+use ctream_proto::{Display, Element, Session as DisplaySession, Target, Window, X11_FRAME_SIZE};
 mod input;
 mod overlay;
 mod semantic;

@@ -90,8 +90,13 @@ establish ordering; a timeout only detects a launch that never resumes.
 Run `bash docker/ctream/run.sh` from the repository checkout to test the
 current client and agent against disposable Xvfb and headless Sway sessions.
 The script uses a local Docker-compatible engine, builds the Linux binaries,
-and runs the opt-in `ctream` integration test through local stdio IPC.
+and runs the opt-in `ctream-agent` integration test through local stdio IPC.
 It also checks accessible controls in a GTK fixture.
+
+The fixture lives in `ctream/agent/tests/linux_session.rs`, so Cargo supplies
+the current agent executable directly to the test. It uses `ctream-client`
+as a development dependency and builds the CLI and Wayland helpers for the
+session setup.
 
 The image supplies a compositor with the foreign-toplevel capture protocols
 used by the Wayland helper. The test covers display discovery, display and

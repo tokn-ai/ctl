@@ -1,6 +1,6 @@
 pub mod x11;
 
-use crate::protocol::{Target, Window, valid_window_id};
+use ctream_proto::{Target, Window, valid_window_id};
 use std::{
   io,
   process::{Command, Stdio},

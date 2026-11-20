@@ -1,11 +1,18 @@
+//! Typed session operations, transports, and media handling for ctream clients.
+
+pub mod geometry;
+pub mod input;
+pub mod media;
+pub mod transport;
+
 use crate::{
   input::{Input, InputFormat},
   media::{Capture, FrameFormat},
-  protocol::{
-    Action, ActionResult, DISPLAY_VERSION, Element, Session as DisplaySession, Target, VERSION,
-    WAYLAND_WINDOW_VERSION, Window, X11_FRAME_SIZE, X11_WINDOW_VERSION, valid_window_id,
-  },
   transport::{Channel, Transport},
+};
+use ctream_proto::{
+  Action, ActionResult, DISPLAY_VERSION, Element, Session as DisplaySession, Target, VERSION,
+  WAYLAND_WINDOW_VERSION, Window, X11_FRAME_SIZE, X11_WINDOW_VERSION, valid_window_id,
 };
 use serde::de::DeserializeOwned;
 use std::{

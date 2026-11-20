@@ -2,8 +2,8 @@
 set -euo pipefail
 
 # The checkout is mounted read-only. Cargo artifacts stay in the build volume.
-cargo build --locked -p ctream -p ctream-wayland-input --bins
-test_binary=$(cargo test --locked -p ctream --test linux_session --no-run --message-format=json |
+cargo build --locked -p ctream-cli -p ctream-agent -p ctream-wayland-input --bins
+test_binary=$(cargo test --locked -p ctream-agent --test linux_session --no-run --message-format=json |
   python3 -c '
 import json, sys
 executable = None

@@ -9,11 +9,11 @@ repository.workspace = true
 publish = false
 
 [target.'cfg(target_os = "linux")'.dependencies]
+ctream-proto.workspace = true
 wayland-client = "0.31"
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 wayland-protocols-misc = { version = "0.3", features = ["client"] }
 tempfile = "3"
 xkbcommon = "0.9"
 wayland-protocols = { version = "0.32", features = ["client", "staging"] }
-serde.workspace = true
 serde_json.workspace = true

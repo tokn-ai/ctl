@@ -1,23 +1,6 @@
-pub mod client;
-pub mod geometry;
-pub mod input;
-pub mod media;
-pub mod protocol;
-#[cfg(unix)]
-pub mod providers;
-pub mod transport;
-pub mod windows;
-
-use serde::{Deserialize, Serialize};
+use ctream_proto::Display;
 use std::collections::{BTreeMap, BTreeSet};
 use std::{fs, io, process::Command};
-
-#[derive(Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
-#[serde(rename_all = "snake_case")]
-pub enum Display {
-  X11(u32),
-  Wayland { uid: u32, socket: String },
-}
 
 fn listeners(table: &[u8]) -> BTreeSet<Display> {
   let mut displays = BTreeSet::new();

@@ -1,4 +1,4 @@
-use ctream::{
+use ctream_client::{
   geometry::{ImageGeometry, Point},
   input::Input as RemoteInput,
 };

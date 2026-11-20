@@ -1,8 +1,5 @@
-use ctream::{
-  client::Session,
-  protocol::{Action, ActionResult, Element},
-  transport::Transport,
-};
+use ctream_client::{Session, transport::Transport};
+use ctream_proto::{Action, ActionResult, Element};
 use eframe::egui;
 use std::{
   io,

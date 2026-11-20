@@ -1,12 +1,10 @@
-use ctream::{
-  protocol::{
-    DISPLAY_VERSION, Target, VERSION, WAYLAND_WINDOW_VERSION, X11_WINDOW_VERSION, valid_window_id,
-  },
-  providers::{
-    self, AccessibleControls, CaptureDisplay, CaptureLifetime, CaptureSource, CaptureWindow,
-    ControlOperation, ControlSource, DiscoverWindows, ForwardInput, InputSource, Provider, Result,
-    Wayland, X11,
-  },
+use ctream_platform::providers::{
+  self, AccessibleControls, CaptureDisplay, CaptureLifetime, CaptureSource, CaptureWindow,
+  ControlOperation, ControlSource, DiscoverWindows, ForwardInput, InputSource, Provider, Result,
+  Wayland, X11,
+};
+use ctream_proto::{
+  DISPLAY_VERSION, Target, VERSION, WAYLAND_WINDOW_VERSION, X11_WINDOW_VERSION, valid_window_id,
 };
 use std::{env, io};
 

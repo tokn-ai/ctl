@@ -1,4 +1,6 @@
-use ctream::{Display, client::Client, discover, protocol::Target, transport::Ssh, windows};
+use ctream_client::{Client, transport::Ssh};
+use ctream_platform::{discover, windows};
+use ctream_proto::{Display, Target};
 use std::{env, ffi::OsString, io, process::ExitCode};
 
 const USAGE: &str = "Usage: ctream list

@@ -1,11 +1,11 @@
 #![cfg(target_os = "linux")]
 
-use ctream::{
-  client::Client,
+use ctream_client::{
+  Client,
   media::{Frame, VideoSource},
-  protocol::{Action, Target},
   transport::Local,
 };
+use ctream_proto::{Action, Display, Target};
 use std::{
   env, io,
   path::PathBuf,
@@ -25,7 +25,7 @@ fn native_sessions_stream_through_local_ipc() -> io::Result<()> {
     displays
       .iter()
       .filter(|session| match &session.display {
-        ctream::Display::X11(number) => format!(":{number}") == x11,
+        Display::X11(number) => format!(":{number}") == x11,
         _ => false,
       })
       .count(),
@@ -33,7 +33,7 @@ fn native_sessions_stream_through_local_ipc() -> io::Result<()> {
     "filesystem and abstract X11 sockets must identify one display",
   );
   assert!(displays.iter().any(|session| match &session.display {
-    ctream::Display::Wayland { socket, .. } => socket == &wayland,
+    Display::Wayland { socket, .. } => socket == &wayland,
     _ => false,
   }));
   for display in [x11, wayland] {

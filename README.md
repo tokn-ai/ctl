@@ -61,7 +61,8 @@ Cargo package names and installed command names are intentionally separate:
 | `ctmuxd` | `ctmuxd` |
 | `ctmux-tui` | `ctmux-tui` |
 | `ctmux-app` | desktop app `ctmux` |
-| `ctream` | `ctream`, `ctream-agent` |
+| `ctream-cli` | `ctream` |
+| `ctream-agent` | `ctream-agent` |
 | `ctream-preview` | `ctream-preview` |
 | `ctream-wayland-input` | `ctream-wayland-input`, `ctream-wayland-window` (Linux) |
 
@@ -279,7 +280,8 @@ to use the replacement. See [local development builds](docs/local-bundles.md).
 cargo build --workspace
 ```
 
-To build just the ctream CLI and remote agent, run `cargo build -p ctream`.
+To build just the ctream CLI and remote agent, run
+`cargo build -p ctream-cli -p ctream-agent`.
 After installing the agent on the Linux display host, run
 `cargo run -p ctream-preview -- SSH_HOST` from the repository root to open the
 local wgpu viewer. See the [ctream setup instructions](docs/proposals/0020-ctream.md#design).

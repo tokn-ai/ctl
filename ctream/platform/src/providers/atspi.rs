@@ -1,5 +1,5 @@
 use super::{ControlOperation, ControlSource, Result, process::run_operation};
-use crate::protocol::Window;
+use ctream_proto::Window;
 use std::process::Command;
 
 /// An accessible window resolved through the selected compositor session.

@@ -11,6 +11,7 @@
   "about.build_archive": "构建目录或归档文件",
   "about.build_automatic": "自动",
   "about.build_automatic_help": "远程更新使用配置的发布渠道。",
+  "about.build_automatic_macos_help": "此 Mac 使用已启用的组件构建。若没有已启用的构建，则使用应用内置的离线构建。安装需要已签名的辅助程序。",
   "about.build_channel_help": "下载此渠道为各平台提供的完整构建。",
   "about.build_checkout": "从当前检出版本构建",
   "about.build_checkout_help": "从当前检出版本为 Linux x64 或 ARM64 构建组件。",

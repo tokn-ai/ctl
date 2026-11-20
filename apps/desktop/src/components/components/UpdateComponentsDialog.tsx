@@ -43,6 +43,11 @@ export function UpdateComponentsDialog({ targets, context, windows_bootstrap = f
   const [source_choice, setSourceChoice] = useState<SourceChoice>(() => sourceChoice(initial_source));
   const published = source_choice === "nightly" || source_choice === "stable";
   const provided = source_choice === "provided";
+  const chosen = [...available.values()].filter((target) => selected.has(targetKey(target)));
+  const macos = /^Mac/i.test(navigator.platform);
+  const local_macos_automatic = source_choice === "automatic" && macos && chosen.some((target) => target.kind === "local");
+  const automatic_publication = source_choice === "automatic" && chosen.some((target) =>
+    target.kind === "local" ? !macos : !target.unavailable);
   const [path, setPath] = useState(initial_source?.kind === "provided" ? initial_source.path : "");
   const [local_build, setLocalBuild] = useState(initial_source?.kind === "provided" && initial_source.local_build);
   const [ctld_package, setCtldPackage] = useState(initial_source?.kind === "provided" ? initial_source.ctld_package ?? "" : "");
@@ -90,7 +95,6 @@ export function UpdateComponentsDialog({ targets, context, windows_bootstrap = f
     if (attempt.current) return;
     setError(null);
     setValidation(null);
-    const chosen = [...available.values()].filter((target) => selected.has(targetKey(target)));
     if (!chosen.length || chosen.some((target) => target.kind === "ssh" && target.unavailable)) {
       setValidation({ field: "hosts", message_id: "about.update_invalid_hosts" }); return;
     }
@@ -167,8 +171,9 @@ export function UpdateComponentsDialog({ targets, context, windows_bootstrap = f
         <label><input type="checkbox" checked={local_build} onChange={(event) => setLocalBuild(event.target.checked)} /><span>{t("about.build_native")}<small>{t("about.build_native_help")}</small></span></label>
         {local_build ? <label className="component-update-field">{t("about.build_signed_ctld")}<input value={ctld_package} onChange={(event) => setCtldPackage(event.target.value)} placeholder="/path/to/ctld-package" /></label> : <p>{t("about.build_provided_help")}</p>}
       </div> : <>
-        <p className="component-update-hint">{source_choice === "working_tree" ? t("about.build_checkout_help") : source_choice === "selected" ? t("about.build_offline_help") : source_choice === "automatic" ? t("about.build_automatic_help") : t("about.build_channel_help")}</p>
-        {source_choice !== "selected" && source_choice !== "working_tree" ? <PublishedBundleStatus channel={published ? source_choice : undefined} /> : null}
+        {local_macos_automatic ? <p className="component-update-hint">{t("about.build_automatic_macos_help")}</p> : null}
+        {source_choice !== "automatic" || automatic_publication ? <p className="component-update-hint">{source_choice === "working_tree" ? t("about.build_checkout_help") : source_choice === "selected" ? t("about.build_offline_help") : source_choice === "automatic" ? t("about.build_automatic_help") : t("about.build_channel_help")}</p> : null}
+        {published || automatic_publication ? <PublishedBundleStatus channel={published ? source_choice : undefined} /> : null}
       </>}
     </form>}
     {error ? <InlineFeedback>{formatText(error)}</InlineFeedback> : null}

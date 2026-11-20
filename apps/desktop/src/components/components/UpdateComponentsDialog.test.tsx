@@ -13,7 +13,7 @@ beforeEach(() => {
   vi.mocked(respondSshPrompt).mockResolvedValue(undefined);
   vi.mocked(checkComponentUpdates).mockResolvedValue({ default_channel: "nightly", local_development: false, catalog: null, error: null });
 });
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 const host: SshConnectionTarget = { kind: "ssh", host_id: "builder", host_name: "Builder", destination: "builder-alias", gateways: [{ kind: "ssh", gateway_id: "jump", name: "Jump", destination: "jump", mode: "automatic" }] };
 const complete = (host_index: number): ComponentUpdateHostResult => ({ host_index, state: "complete", error: null, result: { package: "full_bundle", bundle_id: "verified-build", target_triple: "aarch64-apple-darwin", services_preserved: true } });
 
@@ -74,6 +74,27 @@ it("offers Nightly as the main build choice and sends it to discovery and instal
   await user.click(screen.getByRole("button", { name: "Update" }));
   await screen.findByText("1 of 1 hosts updated. Running services were preserved.");
   expect(vi.mocked(updateComponents).mock.calls[0][0].options.source).toEqual({ kind: "published", channel: "nightly" });
+});
+
+it("checks the publication for selected remote hosts while explaining the local macOS source", async () => {
+  vi.spyOn(navigator, "platform", "get").mockReturnValue("MacIntel");
+  render(<UpdateComponentsDialog targets={[host]} on_close={vi.fn()} />);
+  const user = userEvent.setup();
+  const mac_hint = /This Mac uses its active component build or the included offline build/;
+  const remote_hint = "Remote updates use the configured publication channel.";
+  expect(screen.getByText(mac_hint)).toBeTruthy();
+  expect(screen.queryByText(remote_hint)).toBeNull();
+  expect(screen.queryByRole("region", { name: "Published component bundles" })).toBeNull();
+  expect(checkComponentUpdates).not.toHaveBeenCalled();
+
+  await user.click(screen.getByRole("checkbox", { name: "Builder" }));
+  expect(screen.getByText(mac_hint)).toBeTruthy();
+  expect(screen.getByText(remote_hint)).toBeTruthy();
+  expect(await screen.findByRole("button", { name: "Check for bundle updates" })).toBeTruthy();
+  expect(checkComponentUpdates).toHaveBeenCalledExactlyOnceWith(undefined, false);
+
+  await user.click(screen.getByRole("checkbox", { name: "Builder" }));
+  expect(screen.queryByRole("region", { name: "Published component bundles" })).toBeNull();
 });
 
 it("keeps an explicit offline install available without a network check", async () => {

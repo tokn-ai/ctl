@@ -11,6 +11,7 @@
   "about.build_archive": "Build directory or archive",
   "about.build_automatic": "Automatic",
   "about.build_automatic_help": "Remote updates use the configured publication channel.",
+  "about.build_automatic_macos_help": "This Mac uses its active component build or the included offline build if none is active. Installation requires a signed helper.",
   "about.build_channel_help": "Downloads this channel’s complete build for each platform.",
   "about.build_checkout": "Build from checkout",
   "about.build_checkout_help": "Builds for Linux x64 or ARM64 from the current checkout.",

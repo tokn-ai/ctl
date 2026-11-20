@@ -1,5 +1,6 @@
 //! Read-only publication discovery, warmed at startup without delaying the UI.
 
+use crate::error::{CommandErrorDto, CommandResult};
 use ctl_client::remote_bundle::published::{self, PublishedCatalog};
 use ctl_core::component_update::BundleChannel;
 use serde::{Deserialize, Serialize};
@@ -74,17 +75,31 @@ fn local_development() -> bool {
   false
 }
 
+async fn resolve_channel(channel: Option<BundleChannel>) -> CommandResult<BundleChannel> {
+  if let Some(channel) = channel {
+    return Ok(channel);
+  }
+  tokio::task::spawn_blocking(|| {
+    let home =
+      dirs::home_dir().ok_or_else(|| CommandErrorDto::backend("Home directory is unavailable."))?;
+    ctl_client::installation::default_channel(&home).map_err(CommandErrorDto::backend)
+  })
+  .await
+  .map_err(CommandErrorDto::backend)?
+}
+
 pub(crate) fn start() {
   tauri::async_runtime::spawn(async {
-    let _ = snapshot(published::default_channel(), false).await;
+    if let Ok(channel) = resolve_channel(None).await {
+      let _ = snapshot(channel, false).await;
+    }
   });
 }
 
 #[tauri::command(rename_all = "snake_case")]
-pub(crate) async fn check_component_updates(request: CheckRequest) -> CatalogSnapshot {
-  snapshot(
-    request.channel.unwrap_or_else(published::default_channel),
-    request.refresh,
-  )
-  .await
+pub(crate) async fn check_component_updates(
+  request: CheckRequest,
+) -> CommandResult<CatalogSnapshot> {
+  let channel = resolve_channel(request.channel).await?;
+  Ok(snapshot(channel, request.refresh).await)
 }

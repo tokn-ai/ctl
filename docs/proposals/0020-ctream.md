@@ -269,6 +269,10 @@ other desktop activity. Closing/resetting input releases this channel's held
 keys and buttons. Windows accessibility/message-based actions are separate
 future capabilities.
 
+If Windows denies foreground activation, a physical click can still use normal
+mouse activation when the selected window is visible at the verified cursor
+position and no other window owns mouse capture. Scrolling has no such fallback.
+
 Verify capture with two distinct windows. Move, resize, and cover the selected
 window and check that only its content is streamed. Verify what happens when
 it becomes hidden and when it closes. Keep the viewer's frame handling and

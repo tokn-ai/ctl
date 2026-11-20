@@ -1,4 +1,4 @@
-//! Windows display control through physical, per-monitor DPI-aware input.
+//! Windows display and window control through physical, per-monitor DPI-aware input.
 //!
 //! Keyboard events represent physical keys; Windows applies the remote keyboard
 //! layout. SendInput respects Windows integrity levels and cannot control an

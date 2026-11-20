@@ -1,7 +1,7 @@
 //! Windows display capture through DXGI and window capture through WGC.
 //!
-//! Frames are RGB PPM in the selected display's physical orientation. A separate
-//! hardware cursor is not composited into the image by this initial provider.
+//! Frames are RGB PPM with physical dimensions. DXGI display capture omits the
+//! separate hardware cursor; WGC window capture retains the OS cursor policy.
 
 mod capture;
 mod dpi;

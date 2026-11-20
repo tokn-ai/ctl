@@ -151,10 +151,17 @@ release held keys and buttons.
 
 ### Welcome window and viewer lifecycle
 
-The viewer starts with a small native wgpu welcome window. Select a display,
-a compatible capture driver, and either the whole display or a discovered
-window. A live preview shows the current selection before control begins.
+The viewer starts with a small native wgpu welcome window. Choose a capture
+driver first, then select one of its compatible sources. Every provider
+advertised by the connected agent appears as a card with platform/session and
+Display/Window capability tags. Drivers with no accessible matching session
+remain visible with a **No sources** tag. A driver supporting just one scope
+sets that scope directly; only Automatic and drivers supporting both scopes
+need an additional source-type choice. A live preview shows the selection
+before control begins.
 Target arguments preselect the welcome controls; they do not bypass Start.
+An incompatible window preselection stays an error until an explicit driver
+choice changes its scope; catalog discovery never widens it to display capture.
 With no arguments the welcome window uses the local agent. Existing `--host`,
 `--agent`, `--ssh-program`, and `--ssh-arg` options configure its endpoint;
 this step does not add an endpoint editor. `--capture-driver ID` preselects
@@ -169,18 +176,23 @@ reported without discarding a usable capture stream. **Back** closes input and
 returns the retained capture to a view-only welcome preview.
 
 Changing the source or driver cancels the previous preview capture and clears
-its image. Discovery, window queries, connection results, frames, and errors
-belong to the selection that requested them. A late result must not replace
-a newer choice or keep a discarded capture alive. Start remains unavailable
+its image. The agent-wide driver catalog has its own request lifetime, so
+changing a source keeps the full provider list. Window queries, connection
+results, frames, and errors belong to the selection that requested them.
+A late result must not replace a newer choice or keep a discarded capture
+alive. Start remains unavailable
 until the current capture has produced a live frame. Closing the
 welcome window cancels its outstanding work; closing or leaving the full
 viewer also closes input and releases held keys and buttons. A terminal
 capture failure closes input before offering a new selection.
 
-Agents without the capture catalog remain usable through **Auto** and their
-retained capture contracts. An explicit driver override requires the new
-catalog and capture handshake; the client must not pretend an older agent
-honored a backend choice.
+The target-independent catalog uses `ctream_agent` 1.0.8 (build 8), with
+explicit system metadata so custom driver IDs need no platform naming
+convention. With a 1.0.7 agent, the viewer combines catalogs from discovered
+targets; it cannot show providers for systems with no discovered session.
+Older agents remain usable through **Auto** and their retained capture
+contracts. An explicit driver override requires the 1.0.7 capture handshake;
+the client must not pretend an older agent honored a backend choice.
 
 ### Windows through a WSL endpoint
 

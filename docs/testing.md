@@ -127,7 +127,9 @@ responses before running a live desktop test:
 | Driver, display, or window change | Cancel the previous capture, clear its image, and wait for a frame from the new choice before enabling Start. |
 | Late asynchronous completion | Complete an old discovery, catalog, window query, or capture connection after a newer selection. Its data, frames, and errors must not replace the new selection; a late capture must be dropped and cancelled. |
 | Failure or close | Closing welcome cancels pending work. Capture EOF in the full viewer closes input, including when a key is held. A connection failure cannot enable Start using a stale frame. |
-| Explicit driver choice | Only providers supporting the selected scope are offered. Unknown IDs and display/window mismatches fail without opening a different provider. The actual-driver label follows the successful handshake. |
+| Driver-first choice | All advertised providers appear before a source is chosen, with system and capability tags. Choosing a single-scope driver sets its scope; incompatible sources are excluded. Drivers without accessible matching sessions remain visible with a No sources tag. |
+| Explicit driver choice | Unknown IDs and unsupported sources fail without opening a different provider. The actual-driver label follows the successful handshake. |
+| Independent catalog lifetime | Changing a driver or source preserves the full catalog. Refresh cancels the old catalog; a late result cannot replace the current list. Custom driver IDs use system/scope metadata rather than naming conventions. |
 | Legacy agent | Auto uses retained capture operations and their original frame format. No explicit driver is reported as honored when the catalog or new handshake is unavailable. |
 
 The `1.0.7` protocol tests should verify catalog fields and scope filtering,
@@ -139,7 +141,7 @@ Test with slow or failed operations as well as immediate responses: successful
 frame rendering alone does not verify cancellation or stale-result handling.
 
 For a live check, use a disposable Linux session or the owned Windows fixture
-below. Select a display and then a window, observe the welcome preview, switch
+below. Select a driver and then its source, observe the welcome preview, switch
 sources while capture is opening, and resize the welcome window. Verify that
 clicking or typing in that preview does not reach the fixture. Then choose
 Start, resize the full viewer through wide and tall aspect ratios, and verify
@@ -171,6 +173,19 @@ its aspect ratio inside its pane. The real welcome window also received live
 WGC frames through the WSL endpoint; its owned remote processes showed one
 capture channel and zero input channels during setup. Temporary preview and
 fixture processes were closed after the check.
+
+The driver-first catalog tests additionally cover the `1.0.8` agent-wide
+catalog, retention of the `1.0.7` targeted response shape, custom identifiers,
+catalog refresh races, metadata-driven scope switching, and tagged cards
+before source selection. Conflicting window/driver preselection never widens
+to display capture without an explicit card click, and pending display
+discovery cannot start a stale source query. A `1.0.7` fallback combines the catalogs of discovered
+targets without claiming to discover providers for absent systems. The Linux
+Docker check verifies all four compiled providers before session discovery.
+These tests and the Windows/Linux cross-target Clippy checks passed. Native
+wgpu checks also verified the Windows and Linux driver lists at 860×620 and
+600×460, including No sources tags, scrollable source controls, and unchanged
+view-only setup and Start/Back input lifecycles.
 
 ## Ctream Linux sessions
 

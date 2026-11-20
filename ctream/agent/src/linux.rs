@@ -12,6 +12,10 @@ use std::{env, io};
 pub(super) fn run() -> Result<()> {
   let args: Vec<_> = env::args().skip(1).collect();
   match parse(&args)? {
+    Request::CaptureCatalog => {
+      serde_json::to_writer(io::stdout().lock(), &catalog::catalog())?;
+      Ok(())
+    }
     Request::CaptureDrivers(Target::Windows(_))
     | Request::CaptureWithDriver {
       target: Target::Windows(_),

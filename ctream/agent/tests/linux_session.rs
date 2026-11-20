@@ -5,7 +5,7 @@ use ctream_client::{
   media::{Frame, VideoSource},
   transport::Local,
 };
-use ctream_proto::{Action, CaptureScope, Display, Target};
+use ctream_proto::{Action, CaptureScope, CaptureSystem, Display, Target};
 use std::{
   env, io,
   path::PathBuf,
@@ -18,6 +18,26 @@ fn native_sessions_stream_through_local_ipc() -> io::Result<()> {
   let client = Client::new(Local {
     agent: PathBuf::from(env!("CARGO_BIN_EXE_ctream-agent")),
   });
+  let catalog = client.capture_catalog()?;
+  assert_eq!(catalog.len(), 4, "all compiled Linux capture providers");
+  assert!(catalog.iter().all(|driver| driver.systems.len() == 1));
+  for system in [CaptureSystem::X11, CaptureSystem::Wayland] {
+    let drivers: Vec<_> = catalog
+      .iter()
+      .filter(|driver| driver.systems.contains(&system))
+      .collect();
+    assert_eq!(drivers.len(), 2);
+    assert!(
+      drivers
+        .iter()
+        .any(|driver| driver.info.scopes == [CaptureScope::Display])
+    );
+    assert!(
+      drivers
+        .iter()
+        .any(|driver| driver.info.scopes == [CaptureScope::Window])
+    );
+  }
   let x11 = env::var("CTREAM_TEST_X11").unwrap_or_else(|_| ":98".into());
   let wayland = env::var("WAYLAND_DISPLAY").expect("fixture Wayland display");
   let displays = client.discover()?;
@@ -43,6 +63,15 @@ fn native_sessions_stream_through_local_ipc() -> io::Result<()> {
     input.reset()?;
     drop(input);
     let drivers = client.capture_drivers(target)?;
+    assert_eq!(
+      drivers,
+      catalog
+        .iter()
+        .filter(|driver| driver.systems.contains(&target.system()))
+        .map(|driver| driver.info.clone())
+        .collect::<Vec<_>>(),
+      "retained target catalog must match the platform-wide descriptors",
+    );
     let display_driver = drivers
       .iter()
       .find(|driver| driver.scopes.contains(&CaptureScope::Display))

@@ -4,7 +4,10 @@
 //! `runtime::capture_with_metadata`; no global registry is required.
 
 use ctream_driver::Result;
-use ctream_proto::{CaptureDriverInfo, CaptureFormat, CaptureScope, Target, X11_FRAME_SIZE};
+use ctream_proto::{
+  CaptureDriverDescriptor, CaptureDriverInfo, CaptureFormat, CaptureScope, CaptureSystem, Target,
+  X11_FRAME_SIZE,
+};
 
 pub struct Selection {
   pub id: &'static str,
@@ -13,9 +16,9 @@ pub struct Selection {
   pub format: CaptureFormat,
 }
 
-fn entries(target: Target) -> [Selection; 2] {
-  let (display, display_name, window, window_name, format) = match target {
-    Target::X11(_) => (
+fn entries(system: CaptureSystem) -> [Selection; 2] {
+  let (display, display_name, window, window_name, format) = match system {
+    CaptureSystem::X11 => (
       "linux.x11.ffmpeg",
       "FFmpeg X11",
       "linux.x11.composite",
@@ -24,14 +27,14 @@ fn entries(target: Target) -> [Selection; 2] {
         size: X11_FRAME_SIZE,
       },
     ),
-    Target::Wayland(_) => (
+    CaptureSystem::Wayland => (
       "linux.wayland.grim",
       "Grim",
       "linux.wayland.image_copy",
       "Wayland image copy",
       CaptureFormat::Ppm,
     ),
-    Target::Windows(_) => (
+    CaptureSystem::Windows => (
       "windows.dxgi",
       "DXGI Desktop Duplication",
       "windows.wgc",
@@ -58,14 +61,34 @@ fn entries(target: Target) -> [Selection; 2] {
 /// The platform host must validate its target platform before returning this
 /// compile-supplied catalog. Runtime permissions are checked when capture opens.
 pub fn list(target: Target) -> Vec<CaptureDriverInfo> {
-  entries(target)
+  descriptors(target.system())
     .into_iter()
-    .map(|entry| CaptureDriverInfo {
+    .map(|descriptor| descriptor.info)
+    .collect()
+}
+
+fn descriptors(system: CaptureSystem) -> [CaptureDriverDescriptor; 2] {
+  entries(system).map(|entry| CaptureDriverDescriptor {
+    info: CaptureDriverInfo {
       id: entry.id.into(),
       name: entry.name.into(),
       scopes: vec![entry.scope],
-    })
-    .collect()
+    },
+    systems: vec![system],
+  })
+}
+
+/// Every provider compiled into the stock platform agent, even with no running
+/// displays. This is capability metadata; opening a source checks runtime access.
+pub fn catalog() -> Vec<CaptureDriverDescriptor> {
+  let systems: &[CaptureSystem] = if cfg!(target_os = "linux") {
+    &[CaptureSystem::X11, CaptureSystem::Wayland]
+  } else if cfg!(windows) {
+    &[CaptureSystem::Windows]
+  } else {
+    &[]
+  };
+  systems.iter().copied().flat_map(descriptors).collect()
 }
 
 pub fn select(target: Target, requested: &str, window: bool) -> Result<Selection> {
@@ -74,7 +97,7 @@ pub fn select(target: Target, requested: &str, window: bool) -> Result<Selection
   } else {
     CaptureScope::Display
   };
-  entries(target)
+  entries(target.system())
     .into_iter()
     .find(|entry| entry.scope == scope && (requested == "auto" || requested == entry.id))
     .ok_or_else(|| {
@@ -85,6 +108,40 @@ pub fn select(target: Target, requested: &str, window: bool) -> Result<Selection
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn catalog_reports_compiled_systems_without_resolving_display_instances() {
+    let catalog = catalog();
+    let expected = if cfg!(target_os = "linux") {
+      vec![
+        "linux.x11.ffmpeg",
+        "linux.x11.composite",
+        "linux.wayland.grim",
+        "linux.wayland.image_copy",
+      ]
+    } else if cfg!(windows) {
+      vec!["windows.dxgi", "windows.wgc"]
+    } else {
+      vec![]
+    };
+    assert_eq!(
+      catalog
+        .iter()
+        .map(|driver| driver.info.id.as_str())
+        .collect::<Vec<_>>(),
+      expected
+    );
+    for system in [
+      CaptureSystem::X11,
+      CaptureSystem::Wayland,
+      CaptureSystem::Windows,
+    ] {
+      let descriptors = descriptors(system);
+      assert!(descriptors.iter().all(|driver| driver.systems == [system]));
+      assert_eq!(descriptors[0].info.scopes, [CaptureScope::Display]);
+      assert_eq!(descriptors[1].info.scopes, [CaptureScope::Window]);
+    }
+  }
 
   #[test]
   fn defaults_and_explicit_selection_preserve_scope_without_fallback() {

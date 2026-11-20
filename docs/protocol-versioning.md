@@ -626,6 +626,30 @@ The welcome preview/Start lifecycle and public Rust backend module split
 introduce no additional wire changes. Other named protocols and product
 release versions remain unchanged.
 
+The driver-first catalog advances `ctream_agent` from `1.0.7` (build 7) to
+`1.0.8` (build 8). The new `1.0.8 capture-drivers` operation takes no display
+argument and returns every provider compiled into the connected agent, even
+when no compatible display session is running. Each JSON descriptor contains
+`id`, `name`, `scopes`, and `systems`; `systems` is an array of `x11`, `wayland`,
+or `windows`. The existing `display`/`window` scopes are unchanged. A provider
+may declare multiple systems and scopes. Clients use this explicit metadata
+for tags and source matching rather than interpreting provider IDs, so custom
+provider names follow the same contract as bundled drivers.
+
+The stock Linux agent advertises its X11 and Wayland providers; the native
+Windows agent advertises DXGI and WGC. Catalog discovery does not open a GPU,
+capture a frame, launch a helper, or validate session permissions. Source
+discovery and capture initialization remain responsible for runtime access.
+
+All contracts `1.0.1`–`1.0.7` retain their operations and response shapes.
+In particular, `1.0.7 capture-drivers DISPLAY` still returns only `id`, `name`,
+and `scopes`, and `capture-with-driver` still uses `1.0.7` and its existing
+startup handshake. Clients may fall back to per-target `1.0.7` queries against
+discovered sessions when the full catalog is unavailable; that fallback cannot
+discover providers for systems with no discovered session. Older agents still
+support Automatic through retained capture operations. Input, capture frame
+formats, other named protocols, and product release versions are unchanged.
+
 Every PR description must state its protocol changes, or **None** when there
 are no changes. Include the previous and new contracts and the compatibility
 impact. Keep PR titles brief; put protocol details in the description.

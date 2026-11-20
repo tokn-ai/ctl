@@ -12,10 +12,10 @@ use crate::{
   transport::{Channel, Transport},
 };
 use ctream_proto::{
-  Action, ActionResult, BOUNDS_VERSION, CAPTURE_DRIVER_VERSION, CaptureDriverInfo, DISPLAY_VERSION,
-  Element, Session as DisplaySession, Target, WAYLAND_WINDOW_VERSION, WINDOWS_DISPLAY_VERSION,
-  WINDOWS_WINDOW_VERSION, Window, X11_FRAME_SIZE, X11_WINDOW_VERSION, valid_capture_driver,
-  valid_window_id,
+  Action, ActionResult, BOUNDS_VERSION, CAPTURE_CATALOG_VERSION, CAPTURE_DRIVER_VERSION,
+  CaptureDriverDescriptor, CaptureDriverInfo, DISPLAY_VERSION, Element, Session as DisplaySession,
+  Target, WAYLAND_WINDOW_VERSION, WINDOWS_DISPLAY_VERSION, WINDOWS_WINDOW_VERSION, Window,
+  X11_FRAME_SIZE, X11_WINDOW_VERSION, valid_capture_driver, valid_window_id,
 };
 use serde::de::DeserializeOwned;
 use std::{
@@ -57,6 +57,19 @@ impl Query for LegacyDiscover {
 pub struct Windows(pub Target);
 
 pub struct CaptureDrivers(pub Target);
+
+pub struct CaptureCatalog;
+
+impl Query for CaptureCatalog {
+  type Reply = Vec<CaptureDriverDescriptor>;
+
+  fn arguments(&self) -> io::Result<Vec<String>> {
+    Ok(vec![
+      CAPTURE_CATALOG_VERSION.into(),
+      "capture-drivers".into(),
+    ])
+  }
+}
 
 impl Query for CaptureDrivers {
   type Reply = Vec<CaptureDriverInfo>;
@@ -182,6 +195,11 @@ impl<T: Transport> Client<T> {
 
   pub fn capture_drivers(&self, target: Target) -> io::Result<Vec<CaptureDriverInfo>> {
     self.query(CaptureDrivers(target))
+  }
+
+  /// List compiled providers without selecting or opening a display session.
+  pub fn capture_catalog(&self) -> io::Result<Vec<CaptureDriverDescriptor>> {
+    self.query(CaptureCatalog)
   }
 
   pub fn session(&self, target: Target, window: Option<Window>) -> Session<T> {
@@ -585,6 +603,29 @@ mod tests {
           "window_1"
         ],
       ]
+    );
+  }
+
+  #[test]
+  fn capture_catalog_queries_without_a_target_and_preserves_custom_metadata() {
+    use ctream_proto::{CaptureScope, CaptureSystem};
+    let (client, observed) = client(&[
+      r#"[{"id":"user.surface","name":"User surface","scopes":["display","window"],"systems":["x11","wayland"]}]"#,
+    ]);
+    let catalog = client.capture_catalog().unwrap();
+    assert_eq!(catalog.len(), 1);
+    assert_eq!(catalog[0].info.id, "user.surface");
+    assert_eq!(
+      catalog[0].systems,
+      [CaptureSystem::X11, CaptureSystem::Wayland]
+    );
+    assert_eq!(
+      catalog[0].info.scopes,
+      [CaptureScope::Display, CaptureScope::Window]
+    );
+    assert_eq!(
+      *observed.requests.lock().unwrap(),
+      [vec![CAPTURE_CATALOG_VERSION, "capture-drivers"]]
     );
   }
 

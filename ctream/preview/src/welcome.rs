@@ -1,11 +1,11 @@
 use super::{
-  Preview, background, input,
+  Preview, background, drivers, input,
   requests::{Requests, Scoped},
   semantic,
 };
 use ctream_client::{Client, transport::Transport};
 use ctream_proto::{
-  CaptureDriverInfo, CaptureScope, Display, Session as DisplaySession, Target, Window,
+  CaptureDriverDescriptor, CaptureScope, Display, Session as DisplaySession, Target, Window,
 };
 use eframe::egui;
 use std::{
@@ -19,6 +19,44 @@ use std::{
 
 type Pending<V> = Option<Receiver<io::Result<V>>>;
 type Control<T> = ctream_client::input::Input<<T as Transport>::Reader, <T as Transport>::Writer>;
+
+struct Catalog {
+  drivers: Vec<CaptureDriverDescriptor>,
+  // None is an agent-wide catalog. Older agents can only advertise providers
+  // for targets we have discovered; other targets retain legacy Automatic.
+  targets: Option<Vec<Target>>,
+}
+
+fn legacy_catalog<T: Transport>(client: &Client<T>, targets: Vec<Target>) -> Catalog {
+  let mut drivers: Vec<CaptureDriverDescriptor> = Vec::new();
+  let mut supported = Vec::new();
+  for target in targets {
+    if let Ok(entries) = client.capture_drivers(target) {
+      supported.push(target);
+      for info in entries {
+        if let Some(existing) = drivers.iter_mut().find(|driver| driver.info.id == info.id) {
+          if !existing.systems.contains(&target.system()) {
+            existing.systems.push(target.system());
+          }
+          for scope in info.scopes {
+            if !existing.info.scopes.contains(&scope) {
+              existing.info.scopes.push(scope);
+            }
+          }
+        } else {
+          drivers.push(CaptureDriverDescriptor {
+            info,
+            systems: vec![target.system()],
+          });
+        }
+      }
+    }
+  }
+  Catalog {
+    drivers,
+    targets: Some(supported),
+  }
+}
 
 fn receive<V>(pending: &mut Pending<V>) -> Option<io::Result<V>> {
   let result = match pending.as_ref()?.try_recv() {
@@ -65,8 +103,11 @@ pub(super) struct Viewer<T: Transport> {
   windows: Vec<Window>,
   window_query: Pending<Vec<Window>>,
   window_error: Option<String>,
-  drivers: Vec<CaptureDriverInfo>,
-  driver_query: Pending<Vec<CaptureDriverInfo>>,
+  drivers: Vec<CaptureDriverDescriptor>,
+  driver_query: Pending<Catalog>,
+  catalog_requests: Option<Requests>,
+  catalog_targets: Option<Vec<Target>>,
+  catalog_fallback: bool,
   driver_error: Option<String>,
   catalog_ready: bool,
   client: Option<Client<Scoped<T>>>,
@@ -105,6 +146,9 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
       window_error: None,
       drivers: Vec::new(),
       driver_query: None,
+      catalog_requests: None,
+      catalog_targets: Some(Vec::new()),
+      catalog_fallback: false,
       driver_error: None,
       catalog_ready: false,
       client: None,
@@ -136,16 +180,12 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
   fn clear_source(&mut self) {
     self.discard_preview();
     self.window_query.take();
-    self.driver_query.take();
     self.client = None;
-    // Active captures close stdin first. This guard also cancels requests still
-    // waiting for a catalog reply or the first capture frame.
+    // Active captures close stdin first. The catalog has its own lifetime so
+    // selecting a source cannot hide other providers or cancel their discovery.
     self.requests = None;
     self.windows.clear();
-    self.drivers.clear();
     self.window_error = None;
-    self.driver_error = None;
-    self.catalog_ready = false;
   }
 
   fn discover(&mut self, ctx: &egui::Context) {
@@ -154,21 +194,38 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
     self.discovery = None;
     self.discovery_requests = None;
     self.discovery_error = None;
+    self.driver_query = None;
+    self.catalog_requests = None;
+    self.drivers.clear();
+    self.driver_error = None;
+    self.catalog_ready = false;
+    self.catalog_fallback = false;
+    self.catalog_targets = Some(Vec::new());
     let requests = Requests::new();
     let client = requests.client(Arc::clone(&self.transport));
     self.discovery = Some(background(ctx, move || client.discover()));
     self.discovery_requests = Some(requests);
+    let requests = Requests::new();
+    let client = requests.client(Arc::clone(&self.transport));
+    self.driver_query = Some(background(ctx, move || {
+      client.capture_catalog().map(|drivers| Catalog {
+        drivers,
+        targets: None,
+      })
+    }));
+    self.catalog_requests = Some(requests);
   }
 
   fn load_target(&mut self, ctx: &egui::Context) {
     self.clear_source();
+    if self.discovery.is_some() {
+      return;
+    }
     let Some(target) = self.selected else { return };
     let requests = Requests::new();
     let client = requests.client(Arc::clone(&self.transport));
     let query = client.clone();
     self.window_query = Some(background(ctx, move || query.windows(target)));
-    let query = client.clone();
-    self.driver_query = Some(background(ctx, move || query.capture_drivers(target)));
     self.client = Some(client);
     self.requests = Some(requests);
   }
@@ -181,8 +238,85 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
     }
   }
 
+  fn compatible(&self, target: Target) -> bool {
+    self.driver == "auto"
+      || self
+        .drivers
+        .iter()
+        .any(|driver| driver.info.id == self.driver && driver.systems.contains(&target.system()))
+  }
+
+  fn choose_driver(&mut self, id: &str) {
+    self.driver = id.into();
+    if let Some(driver) = self.drivers.iter().find(|driver| driver.info.id == id) {
+      match driver.info.scopes.as_slice() {
+        [CaptureScope::Display] => self.window_mode = false,
+        [CaptureScope::Window] => self.window_mode = true,
+        _ => {}
+      }
+      if self
+        .selected
+        .is_some_and(|target| !driver.systems.contains(&target.system()))
+      {
+        self.selected = None;
+        self.selected_window = None;
+      }
+    }
+  }
+
+  fn available_scopes(&self) -> Vec<CaptureScope> {
+    if self.driver == "auto" {
+      return vec![CaptureScope::Display, CaptureScope::Window];
+    }
+    self
+      .drivers
+      .iter()
+      .find(|driver| driver.info.id == self.driver)
+      .map(|driver| driver.info.scopes.clone())
+      .unwrap_or_default()
+  }
+
+  fn selected_catalog_supported(&self) -> bool {
+    self.catalog_targets.as_ref().is_none_or(|targets| {
+      self
+        .selected
+        .is_some_and(|target| targets.contains(&target))
+    })
+  }
+
   fn selection_error(&self) -> Option<String> {
-    let selected = self.selected?;
+    if !self.catalog_ready {
+      return Some("Finding capture drivers…".into());
+    }
+    if self.driver != "auto" {
+      match self.drivers.iter().find(|driver| driver.info.id == self.driver) {
+        Some(driver) if driver.info.scopes.contains(&self.scope()) => {}
+        Some(_) => return Some("This driver does not support the requested source type. Select a driver card to choose a compatible source.".into()),
+        None => return Some("This agent does not offer the selected driver. Choose another driver.".into()),
+      }
+    }
+    let Some(selected) = self.selected else {
+      return Some(
+        if self
+          .displays
+          .iter()
+          .filter(|session| session.selectable)
+          .filter_map(target)
+          .any(|target| self.compatible(target))
+        {
+          "Choose a source for this driver."
+        } else {
+          "No compatible sources are available for this driver."
+        }
+        .into(),
+      );
+    };
+    if !self.compatible(selected) {
+      return Some("Choose a source supported by this driver.".into());
+    }
+    if self.driver != "auto" && !self.selected_catalog_supported() {
+      return Some("This source cannot select an explicit driver with the current agent.".into());
+    }
     if !self
       .displays
       .iter()
@@ -210,21 +344,6 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
           }
           .into(),
         );
-      }
-    }
-    if !self.catalog_ready {
-      return Some("Finding capture drivers…".into());
-    }
-    if self.driver != "auto" {
-      match self.drivers.iter().find(|driver| driver.id == self.driver) {
-        Some(driver) if driver.scopes.contains(&self.scope()) => {}
-        Some(_) => return Some("This driver does not support the selected source type.".into()),
-        None => {
-          return Some(
-            "This agent does not offer the selected driver. Choose Automatic or another driver."
-              .into(),
-          );
-        }
       }
     }
     None
@@ -256,9 +375,11 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
       })
       .flatten();
     let session = client.session(self.selected.expect("selected display"), window);
-    // A catalog failure retains a view-only legacy Auto path. Explicit choices
+    // A catalog failure retains a legacy Auto path. Explicit choices
     // always require the new contract and are never silently substituted.
-    let driver = self.driver_error.is_none().then(|| self.driver.clone());
+    let driver = self
+      .selected_catalog_supported()
+      .then(|| self.driver.clone());
     let render = ctx.clone();
     self.connecting = Some(background(ctx, move || {
       Preview::connect(session, driver.as_deref(), render)
@@ -277,6 +398,7 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
               .iter()
               .any(|session| session.selectable && target(session) == Some(selected))
           }) {
+            self.clear_source();
             self.selected = None;
             self.selected_window = None;
             self.discovery_error =
@@ -296,11 +418,48 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
       }
     }
     if let Some(result) = receive(&mut self.driver_query) {
-      self.catalog_ready = true;
       match result {
-        Ok(drivers) => self.drivers = drivers,
-        Err(error) => self.driver_error = Some(error.to_string()),
+        Ok(catalog) => {
+          self.catalog_requests = None;
+          self.catalog_ready = true;
+          self.drivers = catalog.drivers;
+          self.catalog_targets = catalog.targets;
+          if !self.drivers.is_empty() {
+            self.driver_error = None;
+          }
+          let before = (self.selected, self.window_mode);
+          // Metadata may narrow an unqualified source to a window. It must not
+          // widen a requested window into whole-display capture: only an
+          // explicit card click can change that intent.
+          if !self.window_mode
+            || self.drivers.iter().any(|driver| {
+              driver.info.id == self.driver && driver.info.scopes.contains(&CaptureScope::Window)
+            })
+          {
+            self.choose_driver(&self.driver.clone());
+          }
+          if self.discovery.is_none() && before != (self.selected, self.window_mode) {
+            self.load_target(ctx);
+          }
+        }
+        Err(error) => {
+          self.catalog_requests = None;
+          self.driver_error = Some(error.to_string());
+          // A failed legacy query is terminal. An unsupported new catalog gets
+          // one fallback once display discovery has supplied the old targets.
+          self.catalog_ready = self.catalog_fallback;
+        }
       }
+    }
+    if !self.catalog_ready && self.driver_query.is_none() && self.discovery.is_none() {
+      self.catalog_fallback = true;
+      let targets = self.displays.iter().filter_map(target).collect();
+      let requests = Requests::new();
+      let client = requests.client(Arc::clone(&self.transport));
+      self.driver_query = Some(background(ctx, move || {
+        Ok(legacy_catalog(&client, targets))
+      }));
+      self.catalog_requests = Some(requests);
     }
     if let Some(result) = receive(&mut self.connecting) {
       match result {
@@ -386,26 +545,56 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
       self.driver.clone(),
     );
     ui.label(
+      egui::RichText::new("CAPTURE DRIVER")
+        .small()
+        .strong()
+        .color(ui.visuals().weak_text_color()),
+    );
+    ui.add_space(8.0);
+    if let Some(id) = drivers::chooser(ui, &self.drivers, &self.driver, &self.displays) {
+      self.choose_driver(&id);
+    }
+    if !self.catalog_ready {
+      ui.horizontal(|ui| {
+        ui.spinner();
+        ui.label("Finding capture drivers…");
+      });
+    } else if let Some(error) = &self.driver_error {
+      ui.small("Driver catalog unavailable. Automatic uses the agent’s default.")
+        .on_hover_text(error);
+    }
+    ui.add_space(18.0);
+    ui.label(
       egui::RichText::new("SOURCE")
         .small()
         .strong()
         .color(ui.visuals().weak_text_color()),
     );
-    ui.add_space(12.0);
-    ui.label("Display");
+    ui.add_space(8.0);
+    // Scope is a property of a provider. Only a provider supporting both needs
+    // a second choice; selecting a single-scope provider sets it directly.
+    let scopes = self.available_scopes();
+    if scopes.contains(&CaptureScope::Display) && scopes.contains(&CaptureScope::Window) {
+      ui.horizontal(|ui| {
+        ui.selectable_value(&mut self.window_mode, false, "Display");
+        ui.selectable_value(&mut self.window_mode, true, "Window");
+      });
+      ui.add_space(8.0);
+    }
+    ui.label("Display / session");
     let label = self
       .displays
       .iter()
       .find(|session| session.selectable && target(session) == self.selected)
       .map(display_label)
-      .unwrap_or_else(|| "Choose a display…".into());
+      .unwrap_or_else(|| "Choose a source…".into());
     egui::ComboBox::from_id_salt("display")
       .selected_text(label)
       .truncate()
       .width(ui.available_width())
       .show_ui(ui, |ui| {
         for session in &self.displays {
-          if let Some(candidate) = target(session) {
+          if let Some(candidate) = target(session).filter(|candidate| self.compatible(*candidate)) {
             ui.add_enabled_ui(session.selectable, |ui| {
               ui.selectable_value(&mut self.selected, Some(candidate), display_label(session))
                 .on_hover_text(if session.selectable {
@@ -417,12 +606,6 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
           }
         }
       });
-    ui.add_space(14.0);
-    ui.label("Capture");
-    ui.horizontal(|ui| {
-      ui.selectable_value(&mut self.window_mode, false, "Display");
-      ui.selectable_value(&mut self.window_mode, true, "Window");
-    });
     if self.window_mode {
       ui.add_space(10.0);
       ui.label("Window");
@@ -454,37 +637,6 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
           }
         });
     }
-    ui.add_space(18.0);
-    ui.label("Capture driver");
-    let label = if self.driver == "auto" {
-      "Automatic".into()
-    } else {
-      self
-        .drivers
-        .iter()
-        .find(|driver| driver.id == self.driver)
-        .map(|driver| driver.name.clone())
-        .unwrap_or_else(|| self.driver.clone())
-    };
-    let scope = self.scope();
-    egui::ComboBox::from_id_salt("driver")
-      .selected_text(label)
-      .truncate()
-      .width(ui.available_width())
-      .show_ui(ui, |ui| {
-        ui.selectable_value(&mut self.driver, "auto".into(), "Automatic");
-        for driver in &self.drivers {
-          ui.add_enabled_ui(driver.scopes.contains(&scope), |ui| {
-            ui.selectable_value(&mut self.driver, driver.id.clone(), &driver.name)
-              .on_hover_text(&driver.id);
-          });
-        }
-      });
-    if let Some(error) = &self.driver_error {
-      ui.add_space(6.0);
-      ui.small("Driver list unavailable. Automatic uses the agent’s default.")
-        .on_hover_text(error);
-    }
     ui.add_space(16.0);
     let refresh = ui
       .add_enabled(
@@ -515,10 +667,10 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
       ui.horizontal(|ui| {
         ui.heading("ctream");
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-          refresh = ui.button("Refresh displays").clicked();
+          refresh = ui.button("Refresh drivers and sources").clicked();
         });
       });
-      ui.label("Choose a display or window, check the preview, then start.");
+      ui.label("Choose a capture driver, select its source, then start.");
       ui.add_space(8.0);
     });
     egui::TopBottomPanel::bottom("setup_actions").show(ctx, |ui| {
@@ -571,11 +723,9 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
           .id_salt("setup_selectors")
           .auto_shrink([false, false])
           .show(ui, |ui| {
-            ui.add_enabled_ui(self.discovery.is_none(), |ui| {
-              let selected = self.selectors(ui);
-              reload |= selected.0;
-              changed |= selected.1;
-            });
+            let selected = self.selectors(ui);
+            reload |= selected.0;
+            changed |= selected.1;
           });
       });
       ui.scope_builder(egui::UiBuilder::new().max_rect(pane), |ui| {
@@ -728,6 +878,8 @@ impl<T: Transport> Drop for Viewer<T> {
     self.requests = None;
     self.discovery = None;
     self.discovery_requests = None;
+    self.driver_query = None;
+    self.catalog_requests = None;
   }
 }
 

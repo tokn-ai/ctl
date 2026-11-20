@@ -3,7 +3,8 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-pub const VERSION: &str = "1.0.7";
+pub const VERSION: &str = "1.0.8";
+pub const CAPTURE_CATALOG_VERSION: &str = "1.0.8";
 pub const CAPTURE_DRIVER_VERSION: &str = "1.0.7";
 pub const WINDOWS_WINDOW_VERSION: &str = "1.0.6";
 pub const WINDOWS_DISPLAY_VERSION: &str = "1.0.5";
@@ -24,6 +25,23 @@ pub struct CaptureDriverInfo {
   pub id: String,
   pub name: String,
   pub scopes: Vec<CaptureScope>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptureSystem {
+  X11,
+  Wayland,
+  Windows,
+}
+
+/// A compiled provider's capabilities, independent of any running session.
+/// Custom providers declare their systems explicitly; IDs carry no semantics.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct CaptureDriverDescriptor {
+  #[serde(flatten)]
+  pub info: CaptureDriverInfo,
+  pub systems: Vec<CaptureSystem>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -74,6 +92,14 @@ pub enum Target {
 }
 
 impl Target {
+  pub const fn system(self) -> CaptureSystem {
+    match self {
+      Self::X11(_) => CaptureSystem::X11,
+      Self::Wayland(_) => CaptureSystem::Wayland,
+      Self::Windows(_) => CaptureSystem::Windows,
+    }
+  }
+
   pub fn parse(name: &str) -> Result<Self, &'static str> {
     let (digits, constructor): (_, fn(u32) -> Self) = if let Some(digits) = name.strip_prefix(':') {
       (digits, Self::X11)
@@ -176,8 +202,13 @@ mod tests {
 
   #[test]
   fn target_names_round_trip_and_reject_shell_text() {
-    for target in [Target::X11(0), Target::Wayland(1), Target::Windows(2)] {
+    for (target, system) in [
+      (Target::X11(0), CaptureSystem::X11),
+      (Target::Wayland(1), CaptureSystem::Wayland),
+      (Target::Windows(2), CaptureSystem::Windows),
+    ] {
       assert_eq!(Target::parse(&target.to_string()).unwrap(), target);
+      assert_eq!(target.system(), system);
     }
     for invalid in [
       "windows-0",
@@ -188,6 +219,25 @@ mod tests {
     ] {
       assert!(Target::parse(invalid).is_err(), "{invalid}");
     }
+  }
+
+  #[test]
+  fn catalog_metadata_is_explicit_for_custom_multisystem_drivers() {
+    let wire = r#"{"id":"user.surface","name":"User surface","scopes":["display","window"],"systems":["x11","windows"]}"#;
+    let driver: CaptureDriverDescriptor = serde_json::from_str(wire).unwrap();
+    assert_eq!(driver.info.id, "user.surface");
+    assert_eq!(driver.systems, [CaptureSystem::X11, CaptureSystem::Windows]);
+    assert_eq!(
+      driver.info.scopes,
+      [CaptureScope::Display, CaptureScope::Window]
+    );
+    assert_eq!(serde_json::to_string(&driver).unwrap(), wire);
+
+    // The retained target catalog keeps its original fields and has no systems.
+    assert_eq!(
+      serde_json::to_string(&driver.info).unwrap(),
+      r#"{"id":"user.surface","name":"User surface","scopes":["display","window"]}"#
+    );
   }
 
   #[test]

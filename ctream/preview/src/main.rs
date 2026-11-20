@@ -5,6 +5,7 @@ use ctream_client::{
   transport::Transport,
 };
 use ctream_proto::{Element, Target, valid_capture_driver, valid_window_id};
+mod drivers;
 mod input;
 mod overlay;
 mod requests;

@@ -20,6 +20,10 @@ use std::{
 type Pending<V> = Option<Receiver<io::Result<V>>>;
 type Control<T> = ctream_client::input::Input<<T as Transport>::Reader, <T as Transport>::Writer>;
 
+fn viewer_id() -> egui::ViewportId {
+  egui::ViewportId::from_hash_of("ctream_viewer")
+}
+
 struct Catalog {
   drivers: Vec<CaptureDriverDescriptor>,
   // None is an agent-wide catalog. Older agents can only advertise providers
@@ -88,8 +92,8 @@ fn display_label(session: &DisplaySession) -> String {
   }
 }
 
-/// One native window owns setup and viewing. Request generations isolate stale
-/// queries, while a successful Start retains exactly the capture being previewed.
+/// Setup owns the capture and a separate native viewer temporarily owns control.
+/// Request generations isolate stale queries; Start retains the preview stream.
 pub(super) struct Viewer<T: Transport> {
   transport: Arc<T>,
   displays: Vec<DisplaySession>,
@@ -119,6 +123,7 @@ pub(super) struct Viewer<T: Transport> {
   control: Pending<Control<T>>,
   control_requests: Option<Requests>,
   viewing: bool,
+  viewer_opening: bool,
   semantic: Option<semantic::Panel<Scoped<T>>>,
 }
 
@@ -160,6 +165,7 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
       control: None,
       control_requests: None,
       viewing: false,
+      viewer_opening: false,
       semantic: None,
     };
     viewer.discover(ctx);
@@ -174,6 +180,7 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
     self.control_requests = None;
     self.preview_error = None;
     self.viewing = false;
+    self.viewer_opening = false;
     self.preview_after = Instant::now() + Duration::from_millis(180);
   }
 
@@ -189,6 +196,9 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
   }
 
   fn discover(&mut self, ctx: &egui::Context) {
+    if self.viewing {
+      return;
+    }
     self.clear_source();
     self.displays.clear();
     self.discovery = None;
@@ -217,6 +227,9 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
   }
 
   fn load_target(&mut self, ctx: &egui::Context) {
+    if self.viewing {
+      return;
+    }
     self.clear_source();
     if self.discovery.is_some() {
       return;
@@ -247,6 +260,9 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
   }
 
   fn choose_driver(&mut self, id: &str) {
+    if self.viewing {
+      return;
+    }
     self.driver = id.into();
     if let Some(driver) = self.drivers.iter().find(|driver| driver.info.id == id) {
       match driver.info.scopes.as_slice() {
@@ -515,6 +531,7 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
       .flatten();
     let session = client.session(target, window);
     self.viewing = true;
+    self.viewer_opening = true;
     if session.supports_input() {
       let control = session.clone();
       self.control = Some(background(ctx, move || control.input()));
@@ -523,10 +540,10 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
       self.semantic = Some(semantic::Panel::new(session));
     }
     self.control_requests = Some(requests);
-    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(1100.0, 720.0)));
+    ctx.request_repaint_of(egui::ViewportId::ROOT);
   }
 
-  fn back(&mut self, ctx: &egui::Context) {
+  fn close_viewer(&mut self, ctx: &egui::Context) {
     self.control = None;
     if let Some(preview) = &mut self.preview {
       preview.stop_control();
@@ -534,7 +551,15 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
     self.semantic = None;
     self.control_requests = None;
     self.viewing = false;
-    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(860.0, 620.0)));
+    self.viewer_opening = false;
+    ctx.send_viewport_cmd_to(viewer_id(), egui::ViewportCommand::Visible(false));
+    ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Visible(true));
+    ctx.send_viewport_cmd_to(
+      egui::ViewportId::ROOT,
+      egui::ViewportCommand::Minimized(false),
+    );
+    ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
+    ctx.request_repaint_of(egui::ViewportId::ROOT);
   }
 
   fn selectors(&mut self, ui: &mut egui::Ui) -> (bool, bool) {
@@ -658,6 +683,9 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
   }
 
   fn show_setup(&mut self, ctx: &egui::Context) {
+    if self.viewing {
+      return;
+    }
     let mut start = false;
     let mut refresh = false;
     let mut reload = false;
@@ -779,7 +807,7 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
         ui.add_space(8.0);
         ui.add(
           egui::Label::new(
-            egui::RichText::new("View only · Mouse and keyboard stay local until Start.").small(),
+            egui::RichText::new("View only · Start opens a separate viewer with control.").small(),
           )
           .wrap(),
         );
@@ -803,11 +831,8 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
   }
 
   fn show_viewer(&mut self, ctx: &egui::Context) {
-    let mut back = false;
     egui::TopBottomPanel::top("viewer_navigation").show(ctx, |ui| {
       ui.horizontal(|ui| {
-        back = ui.button("Back to setup").clicked();
-        ui.separator();
         ui.label(if self.control.is_some() {
           "Enabling control…"
         } else if self
@@ -826,10 +851,6 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
         }
       });
     });
-    if back {
-      self.back(ctx);
-      return;
-    }
     let frame_size = self
       .preview
       .as_ref()
@@ -854,21 +875,67 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
       }
     });
   }
-}
 
-impl<T: Transport + Send + Sync + 'static> eframe::App for Viewer<T> {
-  fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+  fn show_viewer_window(&mut self, ctx: &egui::Context) {
+    let builder = egui::ViewportBuilder::default()
+      .with_title("ctream viewer")
+      .with_inner_size([1100.0, 720.0])
+      .with_min_inner_size([600.0, 400.0])
+      .with_active(true);
+    ctx.show_viewport_immediate(viewer_id(), builder, |child, class| {
+      if class == egui::ViewportClass::Embedded {
+        self.close_viewer(child);
+        self.preview_error =
+          Some("This backend cannot open a separate native viewer window.".into());
+        return;
+      }
+      if child.input(|input| input.viewport().close_requested()) {
+        self.close_viewer(child);
+        return;
+      }
+      if self.viewer_opening {
+        // Wait until the native child exists before hiding its parent. Scope
+        // every command explicitly so a child event cannot close the app.
+        child.send_viewport_cmd_to(
+          egui::ViewportId::ROOT,
+          egui::ViewportCommand::Visible(false),
+        );
+        child.send_viewport_cmd_to(viewer_id(), egui::ViewportCommand::Focus);
+        self.viewer_opening = false;
+      }
+      self.show_viewer(child);
+    });
+  }
+
+  fn update_ui(&mut self, ctx: &egui::Context) {
+    if ctx.input(|input| input.viewport().close_requested()) {
+      self.shutdown();
+      return;
+    }
     self.poll(ctx);
+    let setup_shown = !self.viewing;
+    if setup_shown {
+      self.show_setup(ctx);
+    }
     if self.viewing {
-      self.show_viewer(ctx);
-    } else {
+      self.show_viewer_window(ctx);
+    }
+    if !setup_shown && !self.viewing {
+      // Paint the retained setup in the same pass that makes ROOT visible,
+      // rather than briefly restoring an empty hidden-window frame.
       self.show_setup(ctx);
     }
   }
 }
 
-impl<T: Transport> Drop for Viewer<T> {
-  fn drop(&mut self) {
+impl<T: Transport + Send + Sync + 'static> eframe::App for Viewer<T> {
+  fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+    self.update_ui(ctx);
+  }
+}
+
+impl<T: Transport> Viewer<T> {
+  fn shutdown(&mut self) {
     // Close active stdin streams before cancelling any outstanding requests.
     self.preview = None;
     self.semantic = None;
@@ -880,6 +947,14 @@ impl<T: Transport> Drop for Viewer<T> {
     self.discovery_requests = None;
     self.driver_query = None;
     self.catalog_requests = None;
+    self.viewing = false;
+    self.viewer_opening = false;
+  }
+}
+
+impl<T: Transport> Drop for Viewer<T> {
+  fn drop(&mut self) {
+    self.shutdown();
   }
 }
 

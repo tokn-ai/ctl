@@ -60,12 +60,12 @@ impl<T: Transport> Preview<T> {
           reader.lock().unwrap().error = Some(format!(
             "Capture ended ({error}). See terminal for remote diagnostics."
           ));
-          ctx.request_repaint();
+          ctx.request_repaint_of(egui::ViewportId::ROOT);
           break;
         }
         let image = egui::ColorImage::from_rgb(frame.size, &frame.pixels);
         reader.lock().unwrap().frame = Some(image);
-        ctx.request_repaint();
+        ctx.request_repaint_of(egui::ViewportId::ROOT);
       }
     });
     Ok(Self {
@@ -139,7 +139,8 @@ impl<T: Transport> Preview<T> {
         .and_then(input::Input::desktop_size)
         .unwrap_or_else(|| texture.size().map(|v| v as u32));
       let Some(image) = view::fit(ui.available_rect_before_wrap(), size) else {
-        if self.forwarding
+        if interactive
+          && self.forwarding
           && let Some(input) = &mut self.input
         {
           self.forwarding = false;
@@ -163,12 +164,12 @@ impl<T: Transport> Preview<T> {
       if error.is_none() {
         overlay::paint(ui.painter(), &image, elements);
       }
-      if let Some(input) = &mut self.input
+      if interactive
+        && let Some(input) = &mut self.input
         && ctx.current_pass_index() == 0
         && self.input_error.is_none()
       {
-        let active =
-          interactive && error.is_none() && ctx.input(|i| i.focused) && !ctx.wants_keyboard_input();
+        let active = error.is_none() && ctx.input(|i| i.focused) && !ctx.wants_keyboard_input();
         let result = if active {
           ctx.input(|i| input.forward(&image, &i.raw.events, i.modifiers))
         } else if self.forwarding {
@@ -193,7 +194,7 @@ fn background<T: Send + 'static>(
   let (sender, receiver) = mpsc::channel();
   thread::spawn(move || {
     let _ = sender.send(task());
-    ctx.request_repaint();
+    ctx.request_repaint_of(egui::ViewportId::ROOT);
   });
   receiver
 }
@@ -235,7 +236,7 @@ const USAGE: &str =
   --capture-driver ID   Capture backend, or auto (default)
 
 DISPLAY is :DISPLAY, wayland-N, or windows-N. Without an endpoint, use the local agent.
-Selections open a view-only setup preview. Start opens the viewer and enables control.";
+Selections open a view-only setup preview. Start hides setup and opens a separate viewer.\nClosing the viewer releases control and restores setup.";
 
 enum Endpoint {
   Local,

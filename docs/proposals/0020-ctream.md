@@ -38,7 +38,7 @@ viewer uses the same client for discovery, capture, input, and semantic actions.
 | `ctream-platform` | `ctream/platform` | Agent or local CLI on the display host | `ctream-driver`, `ctream-proto`, `ctream-driver-capture` (Linux/Windows) | Display discovery, window-query dispatch, and AT-SPI controls |
 | `ctream-cli` | `ctream/cli` | Display host for local queries; client machine for SSH queries | `ctream-client`, `ctream-platform`, `ctream-proto` | The `ctream` command |
 | `ctream-agent` | `ctream/agent` | Linux display host or Windows interactive session | `ctream-driver`, `ctream-proto`; `ctream-driver-capture`, `ctream-driver-input`, `ctream-platform` (Linux/Windows) | Reusable request validation, stdio hosting, and stock-agent operation routing |
-| `ctream-preview` | `ctream/preview` | Viewer machine | `ctream-client`, `ctream-proto` | Native wgpu welcome window, view-only source preview, full viewer, controls, and overlays |
+| `ctream-preview` | `ctream/preview` | Viewer machine | `ctream-client`, `ctream-proto` | Native wgpu setup and viewer windows, view-only source preview, controls, and overlays |
 | `ctream-wayland-input` | `ctream/wayland-input` | Linux display host | `ctream-proto` (Linux) | Wayland input and window capture helper binaries |
 
 The dependency direction keeps native drivers out of the client library and
@@ -169,22 +169,38 @@ an explicit provider, while omission selects **Auto**.
 
 The welcome preview opens capture only. Pointer movement, clicks, scrolling,
 and typing in the welcome window never open an input channel or send remote
-input. **Start** promotes the same live capture into the full viewer and enables
-mouse and keyboard forwarding where that source supports it. A view-only
-source can still open in the full viewer. Input initialization failure is
-reported without discarding a usable capture stream. **Back** closes input and
-returns the retained capture to a view-only welcome preview.
+input. **Start** opens a separate native viewer window, hides setup, and enables
+mouse and keyboard forwarding where that source supports it. Setup retains the
+same capture and source selection; driver/source changes are locked while the
+viewer is open. A view-only source can still open in the viewer. Input
+initialization failure is reported without discarding a usable capture stream.
+Closing the viewer with its native window close control releases input,
+restores and activates setup, and keeps the same stream available as a view-only
+preview. There is no Back button. The two windows keep their own dimensions;
+the setup window is not resized into the viewer.
+
+Both windows use the same egui context and wgpu renderer. The native viewer is
+an immediate child viewport, so its events and repaint requests run through
+the root setup viewport even while setup is hidden. Only the viewer viewport
+forwards input; painting a view-only preview must not reset viewer-held keys
+or buttons. Capture workers explicitly request root repaints.
+
+On a **local native Wayland viewer**, winit 0.30.13 implements window visibility
+and focus requests as no-ops. Automatic setup hiding and activation therefore
+cannot be guaranteed on that backend. This is a local window-management
+limitation: it does not affect capturing or controlling a remote Wayland
+session from a viewer on another platform.
 
 Changing the source or driver cancels the previous preview capture and clears
 its image. The agent-wide driver catalog has its own request lifetime, so
 changing a source keeps the full provider list. Window queries, connection
 results, frames, and errors belong to the selection that requested them.
 A late result must not replace a newer choice or keep a discarded capture
-alive. Start remains unavailable
-until the current capture has produced a live frame. Closing the
-welcome window cancels its outstanding work; closing or leaving the full
-viewer also closes input and releases held keys and buttons. A terminal
-capture failure closes input before offering a new selection.
+alive. Start remains unavailable until the current capture has produced a
+live frame. Closing setup or quitting the application cancels capture, input,
+and pending requests. Closing the viewer cancels its input initialization and
+releases held keys/buttons while retaining capture for setup. A terminal
+capture failure closes input; after closing the viewer, setup can retry capture.
 
 The target-independent catalog uses `ctream_agent` 1.0.8 (build 8), with
 explicit system metadata so custom driver IDs need no platform naming
@@ -193,6 +209,10 @@ targets; it cannot show providers for systems with no discovered session.
 Older agents remain usable through **Auto** and their retained capture
 contracts. An explicit driver override requires the 1.0.7 capture handshake;
 the client must not pretend an older agent honored a backend choice.
+
+Protocol changes: none. The separate-window lifecycle keeps `ctream_agent`
+at 1.0.8 (build 8); capture and input operations, handshakes, and transport
+behavior retain their existing contracts.
 
 ### Windows through a WSL endpoint
 

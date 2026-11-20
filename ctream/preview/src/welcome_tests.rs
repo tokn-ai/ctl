@@ -1,8 +1,10 @@
 use super::*;
 use ctream_client::transport::{Cancellation, Channel};
 use std::{
+  cell::RefCell,
   collections::VecDeque,
   io::{Read, Write},
+  rc::Rc,
   sync::{Condvar, Mutex},
   thread,
 };
@@ -384,7 +386,19 @@ fn render(
   ctx: &egui::Context,
   events: Vec<egui::Event>,
 ) -> egui::FullOutput {
-  ctx.run(raw(events), |ctx| {
+  let mut input = raw(events);
+  if viewer.viewing {
+    input.viewport_id = viewer_id();
+    input.viewports.insert(
+      viewer_id(),
+      egui::ViewportInfo {
+        parent: Some(egui::ViewportId::ROOT),
+        focused: Some(true),
+        ..Default::default()
+      },
+    );
+  }
+  ctx.run(input, |ctx| {
     viewer.poll(ctx);
     if viewer.viewing {
       viewer.show_viewer(ctx);
@@ -392,6 +406,76 @@ fn render(
       viewer.show_setup(ctx);
     }
   })
+}
+
+struct NativeFrame {
+  root: egui::FullOutput,
+  children: Vec<(egui::ViewportId, egui::FullOutput)>,
+}
+
+impl NativeFrame {
+  fn commands(&self, id: egui::ViewportId) -> impl Iterator<Item = &egui::ViewportCommand> {
+    std::iter::once(&self.root)
+      .chain(self.children.iter().map(|(_, output)| output))
+      .filter_map(move |output| output.viewport_output.get(&id))
+      .flat_map(|output| &output.commands)
+  }
+
+  fn child(&self) -> &egui::FullOutput {
+    &self
+      .children
+      .last()
+      .expect("native viewer must be rendered")
+      .1
+  }
+}
+
+/// Exercise the production immediate-viewport path while replacing just the OS
+/// renderer. Child input and output retain their own viewport identities.
+fn native_frame(
+  viewer: &mut Viewer<Mock>,
+  ctx: &egui::Context,
+  root_input: egui::RawInput,
+  child_input: egui::RawInput,
+) -> NativeFrame {
+  ctx.set_embed_viewports(false);
+  let input = Rc::new(RefCell::new(child_input));
+  let children = Rc::new(RefCell::new(Vec::new()));
+  let recorded = Rc::clone(&children);
+  egui::Context::set_immediate_viewport_renderer(move |ctx, mut viewport| {
+    let mut input = input.borrow_mut().take();
+    input.viewport_id = viewport.ids.this;
+    input.viewports.entry(viewport.ids.this).or_default().parent = Some(viewport.ids.parent);
+    let output = ctx.run(input, |ctx| (viewport.viewport_ui_cb)(ctx));
+    recorded.borrow_mut().push((viewport.ids.this, output));
+  });
+  let root = ctx.run(root_input, |ctx| viewer.update_ui(ctx));
+  NativeFrame {
+    root,
+    children: std::mem::take(&mut *children.borrow_mut()),
+  }
+}
+
+fn close_input(id: egui::ViewportId) -> egui::RawInput {
+  let mut input = raw(Vec::new());
+  input
+    .viewports
+    .entry(id)
+    .or_default()
+    .events
+    .push(egui::ViewportEvent::Close);
+  input
+}
+
+fn rendered_image(output: &egui::FullOutput, texture: egui::TextureId) -> egui::Rect {
+  output
+    .shapes
+    .iter()
+    .find_map(|shape| match &shape.shape {
+      egui::epaint::Shape::Mesh(mesh) if mesh.texture_id == texture => Some(mesh.calc_bounds()),
+      _ => None,
+    })
+    .expect("preview image must be drawn")
 }
 
 fn label_center(output: &egui::FullOutput, label: &str) -> egui::Pos2 {
@@ -492,7 +576,297 @@ fn interactions(at: egui::Pos2, hold_key: bool) -> Vec<egui::Event> {
 }
 
 #[test]
-fn welcome_interactions_stay_local_and_start_back_reuse_the_capture() {
+fn native_viewer_hides_setup_and_close_restores_it_without_reopening_capture() {
+  let mock = Mock::default();
+  let ctx = egui::Context::default();
+  let mut viewer = create(&mock, &ctx, false, "auto");
+  poll_until(&mut viewer, &ctx, ready);
+  let capture = mock.captures().pop().unwrap();
+  viewer.start(&ctx);
+  poll_until(&mut viewer, &ctx, |viewer| {
+    viewer.preview.as_ref().unwrap().input.is_some()
+  });
+  let input = mock.inputs().pop().unwrap();
+  let opened = native_frame(&mut viewer, &ctx, raw(Vec::new()), raw(Vec::new()));
+  assert_ne!(viewer_id(), egui::ViewportId::ROOT);
+  assert!(opened.children.iter().all(|(id, _)| *id == viewer_id()));
+  assert_eq!(
+    opened.root.viewport_output[&viewer_id()].parent,
+    egui::ViewportId::ROOT
+  );
+  assert_eq!(
+    opened.root.viewport_output[&viewer_id()].builder.inner_size,
+    Some(egui::vec2(1100.0, 720.0))
+  );
+  assert!(
+    opened
+      .commands(egui::ViewportId::ROOT)
+      .any(|command| matches!(command, egui::ViewportCommand::Visible(false)))
+  );
+  assert!(
+    opened
+      .commands(viewer_id())
+      .any(|command| matches!(command, egui::ViewportCommand::Focus))
+  );
+  assert!(
+    !opened
+      .commands(egui::ViewportId::ROOT)
+      .any(|command| matches!(command, egui::ViewportCommand::InnerSize(_)))
+  );
+  assert!(
+    !opened
+      .child()
+      .shapes
+      .iter()
+      .any(|shape| matches!(&shape.shape,
+    egui::epaint::Shape::Text(text) if text.galley.text().contains("Back")))
+  );
+
+  // A hidden setup cannot replace the active source, even if a stale event
+  // attempts a driver change or refresh while the child is running.
+  let old_driver = viewer.driver.clone();
+  let windows_queries = mock.records("windows").len();
+  viewer.choose_driver("windows.wgc");
+  viewer.load_target(&ctx);
+  viewer.discover(&ctx);
+  assert_eq!(viewer.driver, old_driver);
+  assert_eq!(mock.records("windows").len(), windows_queries);
+  assert!(!capture.closed() && !input.closed());
+
+  let texture = viewer
+    .preview
+    .as_ref()
+    .unwrap()
+    .texture
+    .as_ref()
+    .unwrap()
+    .id();
+  let at = rendered_image(opened.child(), texture).center();
+  native_frame(
+    &mut viewer,
+    &ctx,
+    raw(Vec::new()),
+    raw(interactions(at, true)),
+  );
+  assert!(input.sent().contains("key F8 1\n"));
+  let before_close = input.sent();
+  let mut closing = close_input(viewer_id());
+  closing.events = interactions(at, false);
+  let closed = native_frame(&mut viewer, &ctx, raw(Vec::new()), closing);
+  assert!(!viewer.viewing);
+  assert!(input.closed() && input.cancelled());
+  assert_eq!(
+    input.sent(),
+    before_close,
+    "a close event must not forward accompanying input"
+  );
+  assert!(!capture.closed() && !capture.cancelled());
+  assert!(
+    closed
+      .commands(egui::ViewportId::ROOT)
+      .any(|command| matches!(command, egui::ViewportCommand::Visible(true)))
+  );
+  assert!(
+    closed
+      .commands(egui::ViewportId::ROOT)
+      .any(|command| matches!(command, egui::ViewportCommand::Minimized(false)))
+  );
+  assert!(
+    closed
+      .commands(egui::ViewportId::ROOT)
+      .any(|command| matches!(command, egui::ViewportCommand::Focus))
+  );
+  assert!(
+    !closed
+      .commands(egui::ViewportId::ROOT)
+      .any(|command| matches!(command, egui::ViewportCommand::Close))
+  );
+  assert!(ready(&viewer));
+  let setup = native_frame(&mut viewer, &ctx, raw(Vec::new()), raw(Vec::new()));
+  assert!(setup.children.is_empty());
+  label_center(&setup.root, "CAPTURE DRIVER");
+  assert_eq!(mock.captures().len(), 1);
+  viewer.start(&ctx);
+  poll_until(&mut viewer, &ctx, |viewer| {
+    viewer.preview.as_ref().unwrap().input.is_some()
+  });
+  let reopened = native_frame(&mut viewer, &ctx, raw(Vec::new()), raw(Vec::new()));
+  assert!(
+    reopened
+      .commands(egui::ViewportId::ROOT)
+      .any(|command| matches!(command, egui::ViewportCommand::Visible(false)))
+  );
+  assert_eq!(mock.inputs().len(), 2);
+  assert_eq!(mock.captures().len(), 1);
+  native_frame(&mut viewer, &ctx, raw(Vec::new()), close_input(viewer_id()));
+  viewer.choose_driver("windows.wgc");
+  assert_eq!(
+    viewer.driver, "windows.wgc",
+    "closing the child unlocks setup"
+  );
+}
+
+#[test]
+fn viewer_input_isolated_from_setup_and_focus_loss_releases_held_state() {
+  let mock = Mock::default();
+  let ctx = egui::Context::default();
+  let mut viewer = create(&mock, &ctx, true, "auto");
+  poll_until(&mut viewer, &ctx, ready);
+  viewer.start(&ctx);
+  poll_until(&mut viewer, &ctx, |viewer| {
+    viewer.preview.as_ref().unwrap().input.is_some()
+  });
+  let input = mock.inputs().pop().unwrap();
+  let opened = native_frame(&mut viewer, &ctx, raw(Vec::new()), raw(Vec::new()));
+  let texture = viewer
+    .preview
+    .as_ref()
+    .unwrap()
+    .texture
+    .as_ref()
+    .unwrap()
+    .id();
+  let at = rendered_image(opened.child(), texture).center();
+  let before = input.sent();
+  native_frame(
+    &mut viewer,
+    &ctx,
+    raw(interactions(at, false)),
+    raw(Vec::new()),
+  );
+  assert_eq!(
+    input.sent(),
+    before,
+    "root events must never reach the viewer's input channel"
+  );
+  native_frame(
+    &mut viewer,
+    &ctx,
+    raw(Vec::new()),
+    raw(interactions(at, true)),
+  );
+  assert!(input.sent().contains("key F8 1\n"));
+  assert!(viewer.preview.as_ref().unwrap().forwarding);
+
+  // Painting another view of the shared texture must not reset the viewer's
+  // held input, including when the read-only pane cannot fit an image.
+  let held = input.sent();
+  for size in [egui::vec2(860.0, 620.0), egui::vec2(1.0, 1.0)] {
+    let mut source_input = raw(interactions(at, false));
+    source_input.screen_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size));
+    let _ = ctx.run(source_input, |ctx| {
+      egui::CentralPanel::default().show(ctx, |ui| {
+        viewer.preview.as_mut().unwrap().show(ui, None, &[], false);
+      });
+    });
+    assert_eq!(input.sent(), held);
+    assert!(viewer.preview.as_ref().unwrap().forwarding);
+  }
+  let mut unfocused = raw(vec![egui::Event::WindowFocused(false)]);
+  unfocused.focused = false;
+  native_frame(&mut viewer, &ctx, raw(Vec::new()), unfocused.clone());
+  assert!(input.sent().ends_with("reset\n"));
+  assert!(!viewer.preview.as_ref().unwrap().forwarding);
+  let released = input.sent();
+  native_frame(&mut viewer, &ctx, raw(Vec::new()), unfocused);
+  assert_eq!(
+    input.sent(),
+    released,
+    "idle unfocused paints must not repeatedly reset"
+  );
+  assert!(!input.closed());
+  native_frame(&mut viewer, &ctx, raw(Vec::new()), close_input(viewer_id()));
+  assert!(input.closed() && input.cancelled());
+}
+
+#[test]
+fn resized_native_viewer_maps_clicks_using_its_own_image_rectangle() {
+  let mock = Mock::default();
+  let ctx = egui::Context::default();
+  let mut viewer = create(&mock, &ctx, true, "auto");
+  poll_until(&mut viewer, &ctx, ready);
+  viewer.start(&ctx);
+  poll_until(&mut viewer, &ctx, |viewer| {
+    viewer.preview.as_ref().unwrap().input.is_some()
+  });
+  let input = mock.inputs().pop().unwrap();
+  let texture = viewer
+    .preview
+    .as_ref()
+    .unwrap()
+    .texture
+    .as_ref()
+    .unwrap()
+    .id();
+  for size in [egui::vec2(1000.0, 400.0), egui::vec2(400.0, 800.0)] {
+    let mut child = raw(Vec::new());
+    child.screen_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size));
+    let output = native_frame(&mut viewer, &ctx, raw(Vec::new()), child.clone());
+    let rect = rendered_image(output.child(), texture);
+    let at = rect.min + rect.size() * egui::vec2(0.75, 0.5);
+    let before = input.sent().len();
+    child.events = vec![
+      egui::Event::PointerMoved(at),
+      egui::Event::PointerButton {
+        pos: at,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+      },
+      egui::Event::PointerButton {
+        pos: at,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+      },
+    ];
+    native_frame(&mut viewer, &ctx, raw(Vec::new()), child);
+    let sent = input.sent();
+    assert!(
+      sent[before..].contains("move 1 0 2 1\n"),
+      "{size:?}: {}",
+      &sent[before..]
+    );
+    assert!(sent[before..].contains("button 1 1\n"));
+    assert!(sent[before..].contains("button 1 0\n"));
+  }
+}
+
+#[test]
+fn closing_setup_shuts_down_the_viewer_and_capture_without_restoring_setup() {
+  let mock = Mock::default();
+  let ctx = egui::Context::default();
+  let mut viewer = create(&mock, &ctx, false, "auto");
+  poll_until(&mut viewer, &ctx, ready);
+  viewer.start(&ctx);
+  poll_until(&mut viewer, &ctx, |viewer| {
+    viewer.preview.as_ref().unwrap().input.is_some()
+  });
+  let capture = mock.captures().pop().unwrap();
+  let input = mock.inputs().pop().unwrap();
+  native_frame(&mut viewer, &ctx, raw(Vec::new()), raw(Vec::new()));
+  let output = native_frame(
+    &mut viewer,
+    &ctx,
+    close_input(egui::ViewportId::ROOT),
+    raw(Vec::new()),
+  );
+  assert!(!viewer.viewing && viewer.preview.is_none());
+  assert!(capture.closed() && capture.cancelled());
+  assert!(input.closed() && input.cancelled());
+  assert!(output.children.is_empty());
+  assert!(
+    !output
+      .commands(egui::ViewportId::ROOT)
+      .any(|command| matches!(
+        command,
+        egui::ViewportCommand::Visible(true) | egui::ViewportCommand::CancelClose
+      ))
+  );
+}
+
+#[test]
+fn welcome_interactions_stay_local_and_start_close_reuse_the_capture() {
   for window in [false, true] {
     let mock = Mock::default();
     let ctx = egui::Context::default();
@@ -527,10 +901,10 @@ fn welcome_interactions_stay_local_and_start_back_reuse_the_capture() {
     render(&mut viewer, &ctx, interactions(at, true));
     assert!(input.sent().contains("button 1 1\n"));
     assert!(input.sent().contains("key F8 1\n"));
-    viewer.back(&ctx);
+    viewer.close_viewer(&ctx);
     assert!(
       input.closed() && input.cancelled(),
-      "Back must close the channel holding F8"
+      "Viewer close must close the channel holding F8"
     );
     assert!(!capture.closed() && !capture.cancelled());
     assert!(ready(&viewer));
@@ -620,7 +994,7 @@ fn switching_sources_cancels_capture_and_ignores_late_connections_and_queries() 
 }
 
 #[test]
-fn back_during_input_handshake_cancels_control_without_stopping_capture() {
+fn close_during_input_handshake_cancels_control_without_stopping_capture() {
   let mock = Mock::default();
   mock.0.config.lock().unwrap().wait_input = true;
   let ctx = egui::Context::default();
@@ -635,7 +1009,8 @@ fn back_during_input_handshake_cancels_control_without_stopping_capture() {
       .any(|input| input.wire.lock().unwrap().waiting)
   });
   let input = mock.inputs().pop().unwrap();
-  viewer.back(&ctx);
+  native_frame(&mut viewer, &ctx, raw(Vec::new()), raw(Vec::new()));
+  native_frame(&mut viewer, &ctx, raw(Vec::new()), close_input(viewer_id()));
   poll_until(&mut viewer, &ctx, |_| input.closed() && input.cancelled());
   assert!(!viewer.viewing && viewer.control.is_none());
   assert!(ready(&viewer));

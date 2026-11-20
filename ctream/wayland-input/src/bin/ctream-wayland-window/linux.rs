@@ -1,4 +1,4 @@
-use serde::Serialize;
+use ctream_proto::Window;
 use std::{
   collections::HashMap,
   error::Error,
@@ -24,18 +24,15 @@ use wayland_protocols::ext::{
   },
 };
 
-#[derive(Default, Serialize)]
-struct Window {
-  id: String,
-  title: String,
-  app_id: String,
-  #[serde(skip)]
+#[derive(Default)]
+struct WindowState {
+  info: Window,
   ready: bool,
 }
 
 #[derive(Default)]
 struct State {
-  windows: HashMap<handle::ExtForeignToplevelHandleV1, Window>,
+  windows: HashMap<handle::ExtForeignToplevelHandleV1, WindowState>,
   finished: bool,
   size: (u32, u32),
   format: Option<wl_shm::Format>,
@@ -90,9 +87,9 @@ impl Dispatch<handle::ExtForeignToplevelHandleV1, ()> for State {
     }
     let window = state.windows.entry(proxy.clone()).or_default();
     match event {
-      handle::Event::Identifier { identifier } => window.id = identifier,
-      handle::Event::Title { title } => window.title = title,
-      handle::Event::AppId { app_id } => window.app_id = app_id,
+      handle::Event::Identifier { identifier } => window.info.id = identifier,
+      handle::Event::Title { title } => window.info.title = title,
+      handle::Event::AppId { app_id } => window.info.app_id = app_id,
       handle::Event::Done => window.ready = true,
       _ => {}
     }
@@ -160,9 +157,14 @@ pub(super) fn run(id: Option<&str>) -> Result<(), Box<dyn Error>> {
   if state.finished {
     return Err("compositor denied the window list".into());
   }
-  let available = |window: &&Window| window.ready && !window.id.is_empty();
+  let available = |window: &&WindowState| window.ready && !window.info.id.is_empty();
   let Some(id) = id else {
-    let mut windows: Vec<_> = state.windows.values().filter(available).collect();
+    let mut windows: Vec<_> = state
+      .windows
+      .values()
+      .filter(available)
+      .map(|window| &window.info)
+      .collect();
     windows.sort_by(|a, b| (&a.app_id, &a.title, &a.id).cmp(&(&b.app_id, &b.title, &b.id)));
     serde_json::to_writer(io::stdout().lock(), &windows)?;
     return Ok(());
@@ -170,7 +172,7 @@ pub(super) fn run(id: Option<&str>) -> Result<(), Box<dyn Error>> {
   let window = state
     .windows
     .iter()
-    .find(|(_, w)| available(w) && w.id == id)
+    .find(|(_, w)| available(w) && w.info.id == id)
     .map(|(proxy, _)| proxy.clone())
     .ok_or("selected window is no longer available")?;
   let shm: wl_shm::WlShm = globals.bind(&qh, 1..=1, ())?;

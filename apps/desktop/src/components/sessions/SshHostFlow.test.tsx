@@ -57,6 +57,7 @@ function remoteVpnRecoveryFixture() {
 }
 
 vi.mock("../../lib/tauri", () => ({
+  componentUpdateCheckoutAvailable: vi.fn(async () => false),
   checkComponentUpdates: vi.fn(async () => ({ default_channel: "nightly", local_development: false, catalog: null, error: null })),
   probeSshHost: vi.fn(),
   cancelSshProbe: vi.fn(async () => undefined),
@@ -144,7 +145,7 @@ describe("SSH host quick-input flow", () => {
       }, error: null }]);
       const onConnected = vi.fn();
       render(<SshHostFlow suggestions={[]} warning={null} target={target} autoConnect
-        update_targets={[{ ...target, destination: "other" }]} onConnected={onConnected} onClose={vi.fn()} />);
+        onConnected={onConnected} onClose={vi.fn()} />);
       expect(await screen.findByRole("alert")).toHaveProperty("textContent", "Windows OpenSSH must use cmd.exe as its default shell.");
       expect(screen.queryByText(/ctlup update/)).toBeNull();
       expect(screen.queryByRole("option", { name: /Force restart/ })).toBeNull();
@@ -172,6 +173,7 @@ describe("SSH host quick-input flow", () => {
     const user = userEvent.setup();
     await user.click(screen.getByRole("option", { name: /Update remote components/ }));
     expect((screen.getByRole("checkbox", { name: "example" }) as HTMLInputElement).checked).toBe(true);
+    expect(screen.getAllByRole("checkbox")).toHaveLength(1);
     await user.click(screen.getByRole("button", { name: "Update" }));
     await waitFor(() => expect(complete).toHaveBeenCalledExactlyOnceWith(true));
     expect(updateComponents).toHaveBeenCalledWith(expect.objectContaining({ targets: [target], options: { package: "full_bundle", source: { kind: "automatic" } } }), expect.any(Function), expect.any(Function));
@@ -1816,7 +1818,7 @@ describe("SSH host quick-input flow", () => {
     act(() => report({ host_index: 0, state: "updating", progress: { phase: "transferring", file_name: "bundle.tar.gz", transferred_bytes: 2 * 1024 * 1024, total_bytes: 8 * 1024 * 1024, bytes_per_second: 256 * 1024 } }));
     expect(screen.getByRole("progressbar").getAttribute("value")).toBe(String(2 * 1024 * 1024));
     expect(screen.getByText("2 MiB / 8 MiB · 25% · 256 KiB/s")).toBeTruthy();
-    expect(screen.getByText("Sending bundle.tar.gz…")).toBeTruthy();
+    expect(screen.getByText("Uploading bundle.tar.gz over SSH…")).toBeTruthy();
     expect(probeSshHost).toHaveBeenCalledOnce();
   });
 
@@ -1835,7 +1837,7 @@ describe("SSH host quick-input flow", () => {
     await act(async () => fail(new Error("Transfer stalled")));
     await user.click(screen.getByRole("button", { name: "Update" }));
     act(() => reporters[0](old));
-    expect(screen.queryByText(/Sending old.tar.gz/)).toBeNull();
+    expect(screen.queryByText(/old\.tar\.gz/)).toBeNull();
   });
 
 });

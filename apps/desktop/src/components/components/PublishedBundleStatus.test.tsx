@@ -58,7 +58,7 @@ it("ignores an old channel response after the channel changes", async () => {
 
 it("points to the explicit checkout build and reports published incompatibility", async () => {
   vi.mocked(checkComponentUpdates).mockResolvedValue({ ...available, local_development: true, catalog: { ...available.catalog!, targets: [{ ...available.catalog!.targets[0], compatible: false }] } });
-  render(<PublishedBundleStatus />);
+  render(<PublishedBundleStatus on_update={vi.fn()} />);
   expect(await screen.findByText("Choose Build from checkout in Update components to build for Linux x64 or ARM64.")).toBeTruthy();
   expect(screen.getByText(/Some published targets require a newer client/)).toBeTruthy();
 });

@@ -60,13 +60,15 @@ async fn snapshot(channel: BundleChannel, refresh: bool) -> CatalogSnapshot {
     .result;
   CatalogSnapshot {
     default_channel: published::default_channel(),
-    local_development: local_development(),
+    local_development: component_update_checkout_available(),
     catalog: result.as_ref().ok().cloned(),
     error: result.as_ref().err().cloned(),
   }
 }
 
-fn local_development() -> bool {
+/// Checks this installation's source checkout without contacting the publisher.
+#[tauri::command]
+pub(crate) fn component_update_checkout_available() -> bool {
   #[cfg(unix)]
   {
     ctl_client::component_update::working_tree_available()

@@ -212,9 +212,14 @@ restores access without losing session or task references.
 To connect to a Windows SSH server, select **Windows** under **Server platform**
 in Add host or when editing a connection method. The setting is saved with the
 method. Existing methods default to Unix. Use the server's default `cmd.exe`
-SSH shell and install `ctl-agent.exe` and `ctmuxd.exe` together on the remote
-user's PATH. The app uses the existing OpenSSH config, host trust, and
-credentials. Manage Windows agent installation and daemon restarts on the host.
+SSH shell. For first-time setup, choose **Install remote components** when connecting,
+then reconnect. For a saved host, choose **Update components** in Host settings
+or About. Published updates use verified local files when available and let
+the Windows host fetch missing files. If the host cannot fetch them, the app
+uploads them over the selected SSH route. The account's `ctlup.exe` verifies
+and activates the build. Inspect running components and restart daemons
+directly on the Windows host. The Windows desktop app supports component
+updates on Windows SSH destinations.
 
 The connection-method editor supports direct SSH, saved VPNs, optional
 identity-file paths, and ordered routes through reusable gateways. **Verify and save** verifies the

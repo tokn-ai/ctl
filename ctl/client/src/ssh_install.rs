@@ -23,6 +23,8 @@ const MAX_PROGRESS_LINE_BYTES: u64 = 256;
 const INITIAL_PROGRESS_MARKER: &[u8] = b"ctl-install-progress-v1 receiving 0\n";
 
 mod progress;
+mod published;
+pub use published::{PublishedInstallStage, try_install_published_remote};
 mod windows;
 pub use progress::{
   RemoteInstallPhase, RemoteInstallProgress, RemoteInstallStalled, RemoteInstallWatchdog,
@@ -34,6 +36,8 @@ pub(crate) use windows::{read_remote_id, windows_ssh_command};
 /// SSH bootstrap and receiver-confirmed runtime installation progress.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RemoteInstallEvent {
+  /// The SSH host is checking its managed updater and installed bundle.
+  CheckingRemoteInstallation,
   /// Bytes written to SSH stdin while bootstrapping the target updater.
   SendingUpdater {
     sent_bytes: u64,
@@ -50,6 +54,8 @@ pub enum RemoteInstallEvent {
   },
   Activating,
   Complete,
+  /// The remote updater confirmed activation of a retained installation.
+  Reused,
 }
 
 #[cfg(all(test, unix))]
@@ -169,6 +175,7 @@ async fn install_unix_bundle_with_updater(
   let (manifest, layout) = managed_installation(archive, bundle_id)?;
   let guard = unix_account_guard(expected_account)?;
   let preflight = format!("{guard}{}", updater_bootstrap_script(updater, true)?);
+  on_progress(RemoteInstallEvent::CheckingRemoteInstallation);
   let command = updater_ssh_command(destination, options, interaction, &preflight).await?;
   let (status, stdout, stderr) = run_updater_command(command, &[], |_| {}).await?;
   if status.code() == Some(10) {
@@ -176,6 +183,7 @@ async fn install_unix_bundle_with_updater(
     let command = updater_ssh_command(destination, options, interaction, &bootstrap).await?;
     let (status, stdout, stderr) = run_updater_command(command, updater, &on_progress).await?;
     require_updater_success(status, &stdout, &stderr, b"ctlup-bootstrap-v1\n")?;
+    on_progress(RemoteInstallEvent::CheckingRemoteInstallation);
   } else {
     require_updater_success(status, &stdout, &stderr, b"ctlup-bootstrap-v1\n")?;
   }
@@ -188,7 +196,7 @@ async fn install_unix_bundle_with_updater(
   let (status, stdout, stderr) = run_updater_command(command, &[], |_| {}).await?;
   if status.success() {
     require_updater_success(status, &stdout, &stderr, b"ctl-install-v1\n")?;
-    report_reused(archive, layout, &on_progress);
+    on_progress(RemoteInstallEvent::Reused);
     return Ok(());
   }
   if status.code() != Some(10) {
@@ -253,19 +261,6 @@ pub(crate) fn unix_account_guard(expected: Option<&str>) -> Result<String, CoreE
   Ok(format!(
     "identity=\"$HOME/.tokn/ctl/remote-id\"\nif ! [ -f \"$identity\" ] || ! [ \"$(wc -c < \"$identity\")\" -eq 36 ] || [ \"$(dd if=\"$identity\" bs=1 count=36 2>/dev/null; printf x)\" != '{expected}x' ]; then printf 'The SSH account identity changed.\\n' >&2; exit 1; fi\n"
   ))
-}
-
-fn report_reused(archive: &[u8], layout: Layout, on_progress: &impl Fn(RemoteInstallEvent)) {
-  on_progress(RemoteInstallEvent::Receiving { received_bytes: 0 });
-  on_progress(RemoteInstallEvent::Receiving {
-    received_bytes: archive.len() as u64,
-  });
-  on_progress(RemoteInstallEvent::Extracting);
-  for &file_name in layout.names() {
-    on_progress(RemoteInstallEvent::Checking { file_name });
-  }
-  on_progress(RemoteInstallEvent::Activating);
-  on_progress(RemoteInstallEvent::Complete);
 }
 
 fn managed_installation(

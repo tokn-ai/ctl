@@ -109,6 +109,7 @@ import {
   sameSession,
   sameTarget,
   sessionKey,
+  supportsComponentUpdate,
   targetKey,
   targetKeyFromSessionKey,
 } from "../features/targets/targets";
@@ -552,6 +553,7 @@ function TerminalWorkbench() {
   const connectableTargets = connectionTargets.filter((target): target is SshConnectionTarget =>
     target.kind === "ssh" && connectableHostKeys.has(targetKey(target)));
   const settingsHost = workspace.hosts.find((host) => host.host_id === hostSettingsId);
+  const settingsTarget = settingsHost && connectionTargets.find((target) => target.kind === "ssh" && target.host_id === settingsHost.host_id);
   const methodHost = workspace.hosts.find((host) => host.host_id === methodDraft?.host_id);
 
   function editMethod(host: WorkspaceHost, method?: WorkspaceConnectionMethod) {
@@ -2310,7 +2312,6 @@ function TerminalWorkbench() {
           />
         ) : addHostOpen ? (
           <SshHostFlow
-            update_targets={connectionTargets}
             suggestions={hostSuggestions}
             tailscaleDevices={tailscaleDevices}
             discoveryLoading={workspace.discoveryLoading}
@@ -2340,7 +2341,6 @@ function TerminalWorkbench() {
           />
         ) : methodDraft ? (
           <SshHostFlow
-            update_targets={connectionTargets}
             suggestions={hostSuggestions}
             warning={discoveryWarning}
             gateways={workspace.ssh_gateways}
@@ -2370,11 +2370,9 @@ function TerminalWorkbench() {
             onAddMethod={() => editMethod(settingsHost)}
             onEditMethod={(method) => editMethod(settingsHost, method)}
             onConnect={(method) => connectHostMethod(hostTarget(settingsHost, workspace.ssh_gateways, method.method_id, workspace.hosts), method.method_id)}
-            on_update_components={settingsHost.connection_methods.some((method) =>
-              method.method_id === settingsHost.preferred_method_id && method.target.remote_platform !== "windows") ? () => {
-              const target = hostTarget(settingsHost, workspace.ssh_gateways, undefined, workspace.hosts);
+            on_update_components={settingsTarget?.kind === "ssh" && !settingsTarget.unavailable && supportsComponentUpdate(settingsTarget) ? () => {
               setHostSettingsId(null);
-              setComponentUpdateContext({ targets: [target] });
+              setComponentUpdateContext({ targets: [settingsTarget] });
             } : undefined}
             on_remove={settingsHost.source !== "ssh_config" && settingsHost.source !== "tailscale" ? async () => {
               await removeHost(hostTarget(settingsHost, workspace.ssh_gateways, undefined, workspace.hosts));
@@ -2383,7 +2381,6 @@ function TerminalWorkbench() {
           />
         ) : hostFlow !== null ? (
           <ConnectHostFlow
-            update_targets={connectionTargets}
             key={hostFlow.manual_reconnect_id ?? "connect-host"}
             suggestions={hostSuggestions}
             warning={discoveryWarning}

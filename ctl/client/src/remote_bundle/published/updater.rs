@@ -91,10 +91,17 @@ pub fn read_updater(directory: &Path, target: &str) -> Result<VerifiedUpdater, E
     super::MAX_BUNDLE_SET_BYTES,
   )?;
   let info = UpdaterInfo::parse(&bytes, target)?;
-  info.verify(crate::components::read_input(
-    &directory.join(&info.binary),
-    super::MAX_BUNDLE_BYTES,
-  )?)
+  let binary =
+    crate::components::read_input(&directory.join(&info.binary), super::MAX_BUNDLE_BYTES).map_err(
+      |error| match error.kind() {
+        io::ErrorKind::NotFound => Error::Invalid(format!(
+          "updater metadata exists but its binary {} is missing",
+          info.binary
+        )),
+        _ => Error::Io(error),
+      },
+    )?;
+  info.verify(binary)
 }
 
 /// Resolve the account's channel and download its separate updater on a cache miss.
@@ -121,7 +128,17 @@ impl Resolver {
     cache_root: &Path,
     progress: AssetProgress<'_>,
   ) -> Result<VerifiedUpdater, Error> {
-    report_progress(progress, 0, 0);
+    let info = self.updater_metadata(publication, target).await?;
+    self
+      .pinned_updater_cached(publication, info, cache_root, progress)
+      .await
+  }
+
+  pub(super) async fn updater_metadata(
+    &self,
+    publication: &Publication,
+    target: &str,
+  ) -> Result<UpdaterInfo, Error> {
     let url = publication
       .url
       .join(&format!("ctlup-{target}.json"))
@@ -139,15 +156,18 @@ impl Resolver {
         "updater differs from its immutable publication".into(),
       ));
     }
+    Ok(info)
+  }
+
+  pub(super) async fn pinned_updater_cached(
+    &self,
+    publication: &Publication,
+    info: UpdaterInfo,
+    cache_root: &Path,
+    progress: AssetProgress<'_>,
+  ) -> Result<VerifiedUpdater, Error> {
     let root = cache_root.to_owned();
-    let read_root = root.clone();
-    let read_info = info.clone();
-    if let Some(verified) =
-      tokio::task::spawn_blocking(move || read_cached_updater(&read_root, &read_info))
-        .await
-        .map_err(|error| Error::Io(io::Error::other(error)))??
-    {
-      report_progress(progress, info.size, info.size);
+    if let Some(verified) = cached_updater(cache_root, &info).await? {
       return Ok(verified);
     }
     let binary_url = publication
@@ -159,7 +179,7 @@ impl Resolver {
     let bytes = self
       .read_with_progress(&binary_url, maximum, Some(info.size), progress)
       .await
-      .map_err(|error| missing_updater(error, publication, target, "executable"))?;
+      .map_err(|error| missing_updater(error, publication, &info.target_triple, "executable"))?;
     let verified = tokio::task::spawn_blocking(move || {
       let verified = info.verify(bytes)?;
       cache_verified(&root, &verified)?;
@@ -170,6 +190,17 @@ impl Resolver {
     report_progress(progress, verified.info.size, verified.info.size);
     Ok(verified)
   }
+}
+
+pub(super) async fn cached_updater(
+  cache_root: &Path,
+  info: &UpdaterInfo,
+) -> Result<Option<VerifiedUpdater>, Error> {
+  let root = cache_root.to_owned();
+  let info = info.clone();
+  tokio::task::spawn_blocking(move || read_cached_updater(&root, &info))
+    .await
+    .map_err(|error| Error::Io(io::Error::other(error)))?
 }
 
 fn missing_updater(error: Error, publication: &Publication, target: &str, asset: &str) -> Error {

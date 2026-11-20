@@ -51,7 +51,6 @@ export interface SshHostFlowProps {
   component_mode?: "inspect" | "update";
   on_components_complete?(updated: boolean): void;
   suggestions: readonly string[];
-  update_targets?: readonly ConnectionTarget[];
   tailscaleDevices?: readonly TailscaleDevice[];
   discoveryLoading?: boolean;
   warning: string | null;
@@ -125,7 +124,6 @@ type Step =
 
 export function SshHostFlow({
   suggestions,
-  update_targets = [],
   component_mode,
   on_components_complete,
   tailscaleDevices = [],
@@ -1122,8 +1120,8 @@ export function SshHostFlow({
     }
   }
 
-  if (pending_update) return <UpdateComponentsDialog targets={update_targets} context={{ targets: [pending_update.target] }}
-    windows_bootstrap={pending_update.target.kind === "ssh" && pending_update.target.remote_platform === "windows"} on_updated={(results, selected) => {
+  if (pending_update) return <UpdateComponentsDialog targets={[]} context={{ targets: [pending_update.target] }}
+    connection_install on_updated={(results, selected) => {
     if (!results.some((result) => result.state === "complete" && sameSshEndpoint(selected[result.host_index], pending_update.target))) return;
     componentsUpdatedRef.current = pending_update.target;
     candidateRef.current = pending_update.reconnect_candidate;

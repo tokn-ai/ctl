@@ -297,6 +297,66 @@ async fn provided_source_caches_verified_files_without_changing_the_active_build
   );
 }
 
+#[test]
+fn provided_development_directory_resolves_its_sibling_updater_after_relocation() {
+  use sha2::{Digest as _, Sha256};
+
+  let source = Home::new();
+  let account = Home::new();
+  let target = "x86_64-unknown-linux-musl";
+  let version = "0.1.0";
+  let revision = "a".repeat(40);
+  let fixture = Fixture::new(version, &revision).with_clients();
+  let components = serde_json::from_value(fixture.inner["components"].clone()).unwrap();
+  let manifest = Manifest::new(target, Source::Local, components, &fixture.files).unwrap();
+  let bundle = Store::cache(&source.0)
+    .publish(&manifest, &fixture.files)
+    .unwrap();
+  let output = source.0.join("copied build");
+  let directory = output.join(target);
+  let sidecars = output.join("updaters").join(target);
+  std::fs::create_dir_all(&sidecars).unwrap();
+  std::fs::rename(&bundle.directory, &directory).unwrap();
+
+  let binary = b"matching updater";
+  let write_updater = |revision: &str| {
+    let id = format!("{version}-dev.{}", &revision[..12]);
+    let name = format!("ctlup-{id}-{target}");
+    let metadata = serde_json::json!({
+      "schema_version": 1, "app_version": version, "bundle_id": id, "git_revision": revision,
+      "target_triple": target, "binary": name, "size": binary.len(),
+      "sha256": format!("{:x}", Sha256::digest(binary)),
+    });
+    std::fs::write(
+      sidecars.join(format!("ctlup-{target}.json")),
+      metadata.to_string(),
+    )
+    .unwrap();
+    std::fs::write(sidecars.join(&name), binary).unwrap();
+
+    name
+  };
+  let prepare = || provided_build(&account.0, &directory, target, Purpose::Upload);
+  let name = write_updater(&revision);
+  let (imported, updater) = prepare().unwrap();
+  assert_eq!(imported.manifest, manifest);
+  assert_eq!(updater.unwrap().bytes, binary);
+  let pinned = crate::installation::supplied_updater_info(&account.0, &manifest)
+    .unwrap()
+    .unwrap();
+  assert_eq!(pinned.binary, name);
+
+  std::fs::remove_file(sidecars.join(&name)).unwrap();
+  assert!(prepare().unwrap_err().to_string().contains("its binary"));
+  write_updater(&"b".repeat(40));
+  assert!(
+    prepare()
+      .unwrap_err()
+      .to_string()
+      .contains("differs from the runtime")
+  );
+}
+
 #[tokio::test]
 async fn agent_only_updates_are_rejected_without_changing_active_files() {
   let home = Home::new();

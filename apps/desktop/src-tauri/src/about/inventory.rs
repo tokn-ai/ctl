@@ -24,7 +24,7 @@ impl Selection {
     if self.target.remote_platform() == ctl_client::RemotePlatform::Windows {
       return Err(CommandErrorDto::new(
         "remote_windows_maintenance_unsupported",
-        "Check and manage Windows components on the host.",
+        "Inspect running components directly on the Windows host.",
       ));
     }
     tokio::time::timeout(

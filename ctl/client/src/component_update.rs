@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 
 mod catalog;
 pub use catalog::install_prepared_components;
+mod remote_publication;
+pub use remote_publication::{PublicationDeployment, PublicationTarget, deploy_remote_publication};
 
 pub use ctl_core::component_update::{
   BuildSource, BundleChannel, Package, UpdateOptions, UpdateResult,
@@ -493,7 +495,6 @@ async fn development_build(
     .current_dir(workspace);
   run_development_builder(command, on_progress).await?;
   let path = output.0.join(target);
-  let updater_path = output.0.join("updaters").join(target);
   on_progress(preparation(
     PreparationPhase::Verifying,
     "Verifying the working-tree runtime and updater",
@@ -501,17 +502,8 @@ async fn development_build(
   let home = home.to_owned();
   let target = target.to_owned();
   tokio::task::spawn_blocking(move || {
-    let (bundle, _) = provided_build(&home, &path, &target, purpose)?;
-    let updater = crate::remote_bundle::published::read_updater(&updater_path, &target)
-      .map_err(io::Error::other)?;
-    let build = &bundle.manifest.components["ctl-agent"].build;
-    if updater.info.app_version != build.version
-      || Some(updater.info.git_revision.as_str()) != build.source_revision.as_deref()
-    {
-      return Err(invalid(
-        "working-tree updater differs from the runtime build",
-      ));
-    }
+    let (bundle, updater) = provided_build(&home, &path, &target, purpose)?;
+    let updater = updater.ok_or_else(|| invalid("working-tree build is missing its updater"))?;
     let mut origin = local_build_origin(&bundle)?;
     if let Some(date) = provided_origin(&bundle, &path)?.built_at {
       origin.built_at = Some(date);
@@ -613,41 +605,97 @@ async fn published_build(
   channel: BundleChannel,
   on_progress: &(impl Fn(PreparationProgress) + Send + Sync),
 ) -> io::Result<PreparedSource> {
-  use crate::remote_bundle::published::DownloadArtifact;
-  let (bundle, updater) = crate::remote_bundle::published::download_installation_cached(
-    channel,
-    target,
-    &ctl_core::paths::directory_for_account(home).join("cache/downloads"),
-    &ctl_core::paths::directory_for_account(home).join("cache/updaters"),
-    |progress| {
-      let artifact = match progress.artifact {
-        DownloadArtifact::Runtime => "Runtime bundle",
-        DownloadArtifact::Updater => "ctlup",
-      };
-      on_progress(PreparationProgress {
-        phase: PreparationPhase::Downloading,
-        detail: format!("{artifact} for {target}"),
-        received_bytes: progress.received_bytes,
-        total_bytes: progress.total_bytes,
-      });
+  let plan = crate::remote_bundle::published::resolve_target_installation(channel, target)
+    .await
+    .map_err(io::Error::other)?;
+  published_plan_source(home, &plan, None, None, on_progress).await
+}
+
+/// Prepares the pinned SSH upload using any already-read cache entries.
+///
+/// # Errors
+/// Rejects cached artifacts from a different publication and reports preparation failures.
+pub(crate) async fn prepare_published_upload_with_cached(
+  home: &Path,
+  plan: &crate::remote_bundle::published::InstallationPlan,
+  runtime: Option<crate::remote_bundle::VerifiedBundle>,
+  updater: Option<crate::remote_bundle::published::VerifiedUpdater>,
+  on_progress: impl Fn(PreparationProgress) + Send + Sync,
+) -> io::Result<PreparedUpdate> {
+  let snapshot = PreparationSnapshot::capture(home)?;
+  let prepared = published_plan_source(home, plan, runtime, updater, &on_progress).await?;
+  prepare_resolved_update(
+    home,
+    plan.target(),
+    Purpose::Upload,
+    &BuildSource::Published {
+      channel: plan.channel(),
     },
+    prepared,
+    snapshot,
+    &on_progress,
   )
   .await
-  .map_err(io::Error::other)?;
+}
+
+async fn published_plan_source(
+  home: &Path,
+  plan: &crate::remote_bundle::published::InstallationPlan,
+  runtime: Option<crate::remote_bundle::VerifiedBundle>,
+  updater: Option<crate::remote_bundle::published::VerifiedUpdater>,
+  on_progress: &(impl Fn(PreparationProgress) + Send + Sync),
+) -> io::Result<PreparedSource> {
+  use crate::remote_bundle::published::DownloadArtifact;
+  let target = plan.target();
+  let report = |progress: crate::remote_bundle::published::DownloadProgress| {
+    let artifact = match progress.artifact {
+      DownloadArtifact::Runtime => "Runtime bundle",
+      DownloadArtifact::Updater => "ctlup",
+    };
+    on_progress(PreparationProgress {
+      phase: PreparationPhase::Downloading,
+      detail: format!("{artifact} for {target}"),
+      received_bytes: progress.received_bytes,
+      total_bytes: progress.total_bytes,
+    });
+  };
+  let cache = ctl_core::paths::directory_for_account(home).join("cache");
+  let updater = if let Some(cached) = updater {
+    let info = plan.updater_info().clone();
+    tokio::task::spawn_blocking(move || info.verify(cached.bytes))
+      .await
+      .map_err(io::Error::other)?
+      .map_err(io::Error::other)?
+  } else {
+    plan
+      .download_updater(&cache.join("updaters"), report)
+      .await
+      .map_err(io::Error::other)?
+  };
+  let bundle = if let Some(cached) = runtime {
+    let expected = plan.updater_info();
+    if cached.manifest != plan.manifest_bytes()
+      || cached.bundle_id != expected.bundle_id
+      || cached.app_version != expected.app_version
+      || cached.git_revision != expected.git_revision
+    {
+      return Err(invalid(
+        "cached runtime differs from the pinned publication",
+      ));
+    }
+    cached
+  } else {
+    plan
+      .download_runtime(&cache.join("downloads"), report)
+      .await
+      .map_err(io::Error::other)?
+  };
   let source = if bundle.bundle_id == bundle.app_version {
     Source::Release
   } else {
     Source::Ci
   };
-  let origin = CatalogOrigin {
-    channel: channel.name().into(),
-    publication_id: bundle
-      .publication_id
-      .clone()
-      .or_else(|| Some(bundle.bundle_id.clone())),
-    built_at: bundle.built_at.clone(),
-  };
-  origin.validate()?;
+  let origin = plan.origin().clone();
   let home = home.to_owned();
   let target = target.to_owned();
   on_progress(preparation(
@@ -751,7 +799,18 @@ fn provided_build(
       let bundle = Bundle::open(path)?;
       verify_source(&bundle.manifest, target, purpose)?;
       let imported = Store::cache(home).publish(&bundle.manifest, &bundle.read_files()?)?;
-      let updater = crate::installation::remember_supplied_updater(home, &imported, path)?;
+      let mut updater = crate::installation::remember_supplied_updater(home, &imported, path)?;
+      if updater.is_none() && imported.manifest.source == Source::Local {
+        // The development builder keeps the runtime tree immutable and puts
+        // its manager in a sibling tree under the same output root.
+        let directory = path.canonicalize()?;
+        if directory.ends_with(&imported.manifest.target_triple)
+          && let Some(root) = directory.parent()
+        {
+          let sidecars = root.join("updaters").join(&imported.manifest.target_triple);
+          updater = crate::installation::remember_supplied_updater(home, &imported, &sidecars)?;
+        }
+      }
       return Ok((imported, updater));
     }
     return included_build(home, &[path.to_owned()], target, purpose);
@@ -1039,13 +1098,19 @@ pub async fn install_prepared_remote_for_account(
     )));
   };
   let transferred = AtomicU64::new(0);
-  on_progress(RemoteInstallProgress {
-    phase: Phase::Connecting,
-    total_bytes: archive.len() as u64,
-    ..RemoteInstallProgress::default()
-  });
+  let report_stage = |phase, file_name| {
+    on_progress(RemoteInstallProgress {
+      phase,
+      file_name,
+      ..RemoteInstallProgress::default()
+    });
+  };
+  report_stage(Phase::Connecting, None);
   let report = |event| {
     let (phase, file_name) = match event {
+      Event::CheckingRemoteInstallation => {
+        return report_stage(Phase::CheckingRemoteInstallation, None);
+      }
       Event::SendingUpdater {
         sent_bytes,
         total_bytes,
@@ -1059,14 +1124,8 @@ pub async fn install_prepared_remote_for_account(
         });
         return;
       }
-      Event::CheckingUpdater => {
-        on_progress(RemoteInstallProgress {
-          phase: Phase::Checking,
-          file_name: Some("ctlup".into()),
-          ..RemoteInstallProgress::default()
-        });
-        return;
-      }
+      Event::CheckingUpdater => return report_stage(Phase::Checking, Some("ctlup".into())),
+      Event::Reused => return report_stage(Phase::Reused, None),
       Event::Receiving { received_bytes } => {
         transferred.store(received_bytes, Ordering::Relaxed);
         (Phase::Transferring, None)

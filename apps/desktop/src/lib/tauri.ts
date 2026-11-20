@@ -137,6 +137,10 @@ export async function checkComponentUpdates(channel?: BundleChannel, refresh = f
   return invoke("check_component_updates", { request: { channel: channel ?? null, refresh } });
 }
 
+export function componentUpdateCheckoutAvailable(): Promise<boolean> {
+  return invoke("component_update_checkout_available");
+}
+
 export async function selectComponentBundle(
   request: ComponentBundleSelection,
   on_progress: (phase: ComponentBundlePhase) => void,

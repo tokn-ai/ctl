@@ -77,6 +77,7 @@ const api = vi.hoisted(() => ({
   forgetSavedCredential: vi.fn(),
   getComponentVersions: vi.fn(),
   checkComponentUpdates: vi.fn(),
+  updateComponents: vi.fn(),
   preflightComponentAction: vi.fn(),
   executeComponentAction: vi.fn(),
   acknowledgeComponentReconnect: vi.fn(),
@@ -2486,6 +2487,26 @@ describe("workspace-backed terminal page", () => {
     expect(host.connection_methods).toHaveLength(2);
     expect(host.connection_methods.filter((method) => method.name === "VPN")).toHaveLength(1);
     expect(attachment.connect).not.toHaveBeenCalled();
+  });
+
+  it("opens component updates for the saved Windows method from Host settings", async () => {
+    const catalog = hostSnapshot();
+    const method = catalog.document.hosts[0].connection_methods[0];
+    method.target = { ...method.target, remote_platform: "windows", port: 2022 };
+    const pin = { remote_id: "saved-account", agent_version: "test" };
+    catalog.document.hosts[0].remote_info = pin;
+    api.loadHosts.mockResolvedValue(catalog);
+    api.updateComponents.mockResolvedValueOnce([{ host_index: 0, state: "failed", result: null, error: "SSH account identity changed." }]);
+    render(<TerminalPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "Host settings for test" }));
+    fireEvent.click(screen.getByRole("button", { name: "Update components…" }));
+    const dialog = await screen.findByRole("dialog", { name: "Update components" });
+    expect(within(dialog).getByRole("checkbox", { name: "test" })).toHaveProperty("checked", true);
+    fireEvent.click(within(dialog).getByRole("button", { name: "Update" }));
+    await within(dialog).findByText("SSH account identity changed.");
+    expect(api.updateComponents.mock.calls[0][0].targets).toMatchObject([{
+      ...method.target, host_id: "test-id", method_id: method.method_id, remote_info: pin,
+    }]);
   });
 
   it("keeps host settings draft retryable after a failed save", async () => {

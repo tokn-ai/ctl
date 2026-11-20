@@ -10,7 +10,7 @@ import type { ComponentVersionInfo, ComponentVersionsSnapshot, ComponentActionPr
 import { AboutPage } from "./AboutPage";
 
 const api = vi.hoisted(() => ({ versions: vi.fn(), preflight: vi.fn(), restart: vi.fn(), bundles: vi.fn(), select: vi.fn(), published: vi.fn(), update: vi.fn(), cancel_update: vi.fn() }));
-vi.mock("../lib/tauri", () => ({ getComponentVersions: api.versions, preflightComponentAction: api.preflight, executeComponentAction: api.restart, getComponentBundles: api.bundles, selectComponentBundle: api.select, checkComponentUpdates: api.published, updateComponents: api.update, cancelComponentUpdate: api.cancel_update }));
+vi.mock("../lib/tauri", () => ({ getComponentVersions: api.versions, preflightComponentAction: api.preflight, executeComponentAction: api.restart, getComponentBundles: api.bundles, selectComponentBundle: api.select, checkComponentUpdates: api.published, componentUpdateCheckoutAvailable: vi.fn(async () => false), updateComponents: api.update, cancelComponentUpdate: api.cancel_update }));
 
 const current: ComponentVersionInfo = { version: "0.1.0", source_revision: "abcdef123456", source_fingerprint: "current", dirty: false, protocols: [{ name: "ctld", build: 12, version: "1.0.12", supported_versions: ["1.0.12"] }] };
 const snapshot: ComponentVersionsSnapshot = { components: [
@@ -95,6 +95,22 @@ describe("About page", () => {
     expect(screen.getByRole("button", { name: "Check host Development" })).toBeTruthy();
     expect(screen.getAllByText("Not checked").length).toBeGreaterThan(0);
     expect(api.preflight).not.toHaveBeenCalled();
+    expect(api.restart).not.toHaveBeenCalled();
+  });
+
+  it("updates a saved Windows host through its pinned route without offering inspection", async () => {
+    const target = { kind: "ssh" as const, host_id: "dev", host_name: "Development", destination: "win",
+      remote_platform: "windows" as const, port: 2022, method_id: "tunnel",
+      remote_info: { remote_id: "saved-account", agent_version: "test" } };
+    api.update.mockResolvedValueOnce([{ host_index: 0, state: "failed", result: null, error: "SSH account identity changed." }]);
+    renderPage(<AboutPage {...props()} remote_targets={[target]} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Update components Development" }));
+    expect(screen.queryByRole("button", { name: "Check host Development" })).toBeNull();
+    const dialog = await screen.findByRole("dialog", { name: "Update components" });
+    expect(within(dialog).getByRole("checkbox", { name: "Development" })).toHaveProperty("checked", true);
+    fireEvent.click(within(dialog).getByRole("button", { name: "Update" }));
+    await within(dialog).findByText("SSH account identity changed.");
+    expect(api.update).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ targets: [target] }), expect.any(Function), expect.any(Function));
     expect(api.restart).not.toHaveBeenCalled();
   });
 

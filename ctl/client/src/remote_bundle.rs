@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 const MAX_BUNDLE_BYTES: usize = 128 * 1024 * 1024;
-const MAX_BUNDLE_SET_BYTES: usize = 64 * 1024;
+pub const MAX_BUNDLE_SET_BYTES: usize = 64 * 1024;
 // Reserve space for tar headers and padding beyond the managed payload limit.
 const MAX_TAR_BYTES: u64 = ctl_core::bundle_layout::MAX_TOTAL_BYTES as u64 + 1024 * 1024;
 const BUNDLE_SET_FILE: &str = "bundle-set.json";
@@ -30,6 +30,9 @@ mod cache;
 pub(crate) mod compatibility;
 pub mod desktop;
 mod github;
+mod host_install;
+pub use host_install::install_host_publication;
+pub(crate) mod host_download;
 pub mod pr;
 pub mod published;
 pub(crate) use cache::prune_download_cache;
@@ -239,6 +242,22 @@ impl BundleSet {
       .expect("validated bundle-set schema")
   }
 
+  fn require_remote_installation(&self, target: &str) -> Result<(), Error> {
+    if self.layout() != ctl_core::bundle_layout::Layout::WithClients
+      || !self.is_compatible(target)?
+      || !self
+        .target(target)?
+        .components
+        .as_ref()
+        .is_some_and(compatibility::supports_shared_services)
+    {
+      return Err(Error::Invalid(
+        "remote updates require a complete compatible build with shared services".into(),
+      ));
+    }
+    Ok(())
+  }
+
   fn parse_set(bytes: &[u8], set_file: &str) -> Result<Self, Error> {
     let manifest = Self::parse_intrinsic(bytes)?;
     if manifest.targets.contains_key(WINDOWS_TARGET) != (set_file == WINDOWS_BUNDLE_SET_FILE) {
@@ -320,6 +339,26 @@ pub struct VerifiedBundle {
   pub file_name: String,
   /// The bounded, validated bundle-set document that authenticated this archive.
   pub manifest: Vec<u8>,
+}
+
+/// Verifies a published runtime for remote installation against its pinned bundle-set metadata.
+///
+/// # Errors
+/// Rejects a wrong platform, unsupported layout or contracts, incorrect digest, and
+/// inconsistent file contents before the runtime is imported.
+pub fn verify_installation_archive(
+  manifest: Vec<u8>,
+  target: &str,
+  archive: Vec<u8>,
+) -> Result<VerifiedBundle, Error> {
+  let set_file = if target == WINDOWS_TARGET {
+    WINDOWS_BUNDLE_SET_FILE
+  } else {
+    BUNDLE_SET_FILE
+  };
+  let set = BundleSet::parse_set(&manifest, set_file)?;
+  set.require_remote_installation(target)?;
+  set.verify_archive(target, archive, manifest)
 }
 
 #[derive(Debug, thiserror::Error)]

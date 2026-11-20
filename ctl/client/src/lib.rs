@@ -45,8 +45,9 @@ pub mod tailscale;
 #[cfg(unix)]
 pub use ssh_install::install_ssh_unix_bundle_with_updater;
 pub use ssh_install::{
-  RemoteInstallEvent, RemoteInstallPhase, RemoteInstallProgress, RemoteInstallStalled,
-  RemoteInstallWatchdog, probe_ssh_windows_platform,
+  PublishedInstallStage, RemoteInstallEvent, RemoteInstallPhase, RemoteInstallProgress,
+  RemoteInstallStalled, RemoteInstallWatchdog, probe_ssh_windows_platform,
+  try_install_published_remote,
 };
 
 const SSH_PROGRAM: &str = "ssh";

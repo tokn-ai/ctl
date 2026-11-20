@@ -15,6 +15,10 @@ use super::{
 mod history;
 pub use history::{PublishedRelease, PublishedReleaseDetails, list_releases, view_release};
 
+mod installation;
+pub(crate) use installation::resolve_target_installation;
+pub use installation::{InstallationPlan, resolve_installation};
+
 mod updater;
 pub use updater::{UpdaterInfo, VerifiedUpdater, download_updater_cached, read_updater};
 pub(crate) use updater::{
@@ -86,6 +90,41 @@ struct Publication {
   id: Option<String>,
 }
 
+impl Publication {
+  fn cache_entry(&self, target: &str, cache_root: &Path) -> Result<super::BundleCacheEntry, Error> {
+    let expected = &self
+      .manifest
+      .target(target)?
+      .components
+      .as_ref()
+      .ok_or_else(|| Error::Invalid("publication lacks component metadata".into()))?["ctl-agent"]
+      .build;
+    super::BundleCacheEntry::publication(cache_root, target, expected, &self.bytes)
+  }
+
+  async fn cached_archive(
+    &self,
+    cache: &super::BundleCacheEntry,
+  ) -> Result<Option<VerifiedBundle>, Error> {
+    let cache = cache.clone();
+    let Some(mut bundle) = tokio::task::spawn_blocking(move || cache.load())
+      .await
+      .map_err(|error| Error::Io(std::io::Error::other(error)))??
+    else {
+      return Ok(None);
+    };
+    if bundle.manifest != self.bytes {
+      return Err(Error::Invalid(
+        "cached publication differs from its content identity".into(),
+      ));
+    }
+    bundle.built_at.clone_from(&self.built_at);
+    bundle.publication_id.clone_from(&self.id);
+    Ok(Some(bundle))
+  }
+}
+
+#[derive(Clone)]
 struct Resolver {
   root: reqwest::Url,
   client: reqwest::Client,
@@ -270,7 +309,7 @@ impl Resolver {
     let publication = self.target_publication(channel, target).await?;
     Self::require_compatible(&publication, target)?;
     self
-      .archive_cached(publication, target, cache_root, None)
+      .archive_cached(&publication, target, cache_root, None)
       .await
   }
 
@@ -282,24 +321,9 @@ impl Resolver {
     updaters_root: &Path,
     on_progress: DownloadObserver<'_>,
   ) -> Result<(VerifiedBundle, VerifiedUpdater), Error> {
-    let publication = self.target_publication(channel, target).await?;
-    Self::require_compatible(&publication, target)?;
-    let updater = self
-      .updater_cached(
-        &publication,
-        target,
-        updaters_root,
-        Some((DownloadArtifact::Updater, on_progress)),
-      )
-      .await?;
-    let bundle = self
-      .archive_cached(
-        publication,
-        target,
-        downloads_root,
-        Some((DownloadArtifact::Runtime, on_progress)),
-      )
-      .await?;
+    let plan = self.installation_plan(channel, target).await?;
+    let updater = plan.download_updater(updaters_root, on_progress).await?;
+    let bundle = plan.download_runtime(downloads_root, on_progress).await?;
     Ok((bundle, updater))
   }
 
@@ -371,46 +395,30 @@ impl Resolver {
     Ok(targets)
   }
 
-  fn require_compatible(publication: &Publication, target: &str) -> Result<(), Error> {
-    if !publication.manifest.is_compatible(target)? {
-      return Err(Error::NotAvailable(
-        "published components do not support this client's contracts".into(),
-      ));
-    }
-    Ok(())
-  }
-
-  async fn archive_cached(
-    &self,
-    publication: Publication,
+  fn require_compatible<'a>(
+    publication: &'a Publication,
     target: &str,
-    cache_root: &Path,
-    progress: AssetProgress<'_>,
-  ) -> Result<VerifiedBundle, Error> {
-    report_progress(progress, 0, 0);
-    let expected = &publication
+  ) -> Result<&'a BTreeMap<String, ComponentInfo>, Error> {
+    publication
       .manifest
       .target(target)?
       .components
       .as_ref()
-      .ok_or_else(|| Error::Invalid("publication lacks component metadata".into()))?["ctl-agent"]
-      .build;
-    let cache =
-      super::BundleCacheEntry::publication(cache_root, target, expected, &publication.bytes)?;
-    let read_cache = cache.clone();
-    if let Some(mut bundle) = tokio::task::spawn_blocking(move || read_cache.load())
-      .await
-      .map_err(|error| Error::Io(std::io::Error::other(error)))??
-    {
-      if bundle.manifest != publication.bytes {
-        return Err(Error::Invalid(
-          "cached publication differs from its content identity".into(),
-        ));
-      }
-      let size = bundle.archive.len() as u64;
-      bundle.built_at = publication.built_at;
-      bundle.publication_id = publication.id;
-      report_progress(progress, size, size);
+      .filter(|components| super::compatibility::compatible(components))
+      .ok_or_else(|| {
+        Error::NotAvailable("published components do not support this client's contracts".into())
+      })
+  }
+
+  async fn archive_cached(
+    &self,
+    publication: &Publication,
+    target: &str,
+    cache_root: &Path,
+    progress: AssetProgress<'_>,
+  ) -> Result<VerifiedBundle, Error> {
+    let cache = publication.cache_entry(target, cache_root)?;
+    if let Some(bundle) = publication.cached_archive(&cache).await? {
       return Ok(bundle);
     }
     let archive_url = publication
@@ -420,11 +428,12 @@ impl Resolver {
     let archive = self
       .read_with_progress(&archive_url, MAX_BUNDLE_BYTES, None, progress)
       .await?;
-    let mut bundle = publication
-      .manifest
-      .verify_archive(target, archive, publication.bytes)?;
-    bundle.built_at = publication.built_at;
-    bundle.publication_id = publication.id;
+    let mut bundle =
+      publication
+        .manifest
+        .verify_archive(target, archive, publication.bytes.clone())?;
+    bundle.built_at.clone_from(&publication.built_at);
+    bundle.publication_id.clone_from(&publication.id);
     let bundle = tokio::task::spawn_blocking(move || {
       cache.store(&bundle)?;
       Ok::<_, Error>(bundle)
@@ -485,6 +494,7 @@ impl Resolver {
     if !trusted(url, &self.root) {
       return Err(Error::Invalid("untrusted component publication URL".into()));
     }
+    report_progress(progress, 0, expected_size.unwrap_or_default());
     let response = self
       .client
       .get(url.clone())
@@ -564,7 +574,7 @@ fn is_prerelease(version: &str) -> bool {
   version.split('+').next().unwrap_or(version).contains('-')
 }
 
-fn trusted(url: &reqwest::Url, root: &reqwest::Url) -> bool {
+pub(super) fn trusted(url: &reqwest::Url, root: &reqwest::Url) -> bool {
   url.origin() == root.origin()
     && url.username().is_empty()
     && url.password().is_none()

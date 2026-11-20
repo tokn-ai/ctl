@@ -2,6 +2,129 @@
 use super::*;
 use std::path::Path;
 
+fn run_published_receiver(
+  fixture: &Fixture,
+  archive_name: &str,
+  supplied: Option<&[u8]>,
+) -> std::process::Output {
+  use std::io::Write as _;
+  use std::process::Stdio;
+
+  let target = fixture_target();
+  let url = format!(
+    "{}sets/demo/{archive_name}",
+    ctl_client::remote_bundle::published::ROOT
+  );
+  let manifest = fs::read(fixture.0.join("bundles/bundle-set.json")).unwrap();
+  let origin =
+    ctl_client::installation::encode_catalog_origin(&ctl_core::installations::CatalogOrigin {
+      channel: "nightly".into(),
+      built_at: None,
+      publication_id: Some("demo".into()),
+    })
+    .unwrap();
+  let mut command = Command::new(fixture.0.join("ctlup-fixture-manager"));
+  command
+    .args([
+      "install-publication",
+      "--origin-hex",
+      &origin,
+      "--target",
+      target,
+      "--archive-url",
+      &url,
+      "--manifest-bytes",
+      &manifest.len().to_string(),
+    ])
+    .env("HOME", fixture.0.join("home"))
+    .env_remove("CTL_DATA_DIR")
+    .env("PATH", format!("{}:/usr/bin:/bin", fixture.0.display()))
+    .env("TEST_ARCHIVE", fixture.0.join("bundles").join(archive_name))
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
+  if supplied.is_some() {
+    command.arg("--archive-stdin");
+  }
+  let mut child = command.spawn().unwrap();
+  let mut stdin = child.stdin.take().unwrap();
+  stdin.write_all(&manifest).unwrap();
+  if let Some(bytes) = supplied {
+    stdin.write_all(bytes).unwrap();
+  }
+  drop(stdin);
+  child.wait_with_output().unwrap()
+}
+
+#[test]
+fn published_receiver_checks_the_download_then_reuses_the_installed_build() {
+  let fixture = Fixture::new(EXPECTED_ID);
+  fixture.prepare_updater();
+  let build = ctl_core::component::ComponentBuildInfo {
+    version: "0.1.0".into(),
+    source_revision: Some("a".repeat(40)),
+    source_fingerprint: "b".repeat(64),
+    dirty: false,
+  };
+  let publication = fixture.compatible_bundle(&build);
+  let target = fixture_target();
+  let name = format!("ctl-agent-bundle-{publication}-{target}.tar.gz");
+  let run = |supplied: Option<&[u8]>| run_published_receiver(&fixture, &name, supplied);
+  fixture.script("curl", "exit 7");
+  fixture.script("wget", "exit 4");
+  let unavailable = run(None);
+  assert_eq!(unavailable.status.code(), Some(12), "{unavailable:?}");
+  assert_eq!(unavailable.stdout, b"ctl-published-unavailable-v1\n");
+  let damaged = run(Some(b"corrupt cached archive"));
+  assert_eq!(damaged.status.code(), Some(1), "{damaged:?}");
+  assert_eq!(damaged.stdout, b"");
+  let home = fixture.0.join("home");
+  let installations = ctl_core::installations::Installations::new(&home);
+  assert!(installations.active().unwrap().is_none());
+  assert!(!home.join(".tokn/ctl/bin/ctlup").exists());
+
+  fixture.script("wget", "exec cat \"$TEST_ARCHIVE\"");
+  let installed = run(None);
+  assert!(installed.status.success(), "{installed:?}");
+  let encoded = installed
+    .stdout
+    .strip_prefix(b"ctl-published-install-v1\n")
+    .unwrap();
+  let installed: ctl_core::bundles::Manifest = serde_json::from_slice(encoded).unwrap();
+  assert_eq!(installations.active().unwrap().unwrap().manifest, installed);
+  assert_eq!(
+    installed.distribution_id.as_deref(),
+    Some(publication.as_str())
+  );
+  assert!(home.join(".tokn/ctl/bin/ctlup").is_file());
+  assert!(
+    installations
+      .catalog()
+      .unwrap()
+      .iter()
+      .any(|entry| entry.current
+        && entry
+          .origin
+          .as_ref()
+          .is_some_and(|origin| origin.channel == "nightly"
+            && origin.publication_id.as_deref() == Some("demo")))
+  );
+  fixture.script("wget", "exit 8");
+  let manager = home.join(".tokn/ctl/bin/ctlup");
+  let before = std::os::unix::fs::MetadataExt::ino(&fs::metadata(&manager).unwrap());
+  let reused = run(None);
+  assert!(reused.status.success(), "{reused:?}");
+  assert_eq!(
+    std::os::unix::fs::MetadataExt::ino(&fs::metadata(manager).unwrap()),
+    before
+  );
+  assert!(
+    reused
+      .stdout
+      .starts_with(b"ctl-published-reused-v1\nctl-published-install-v1\n")
+  );
+}
+
 const OTHER_ID: &str = "0c9247af-580a-4e90-9a88-45a4f76c0ca7";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -297,6 +420,22 @@ async fn old_agent_without_inspect_can_update_the_complete_build_and_verify_acti
       original_hosts
     );
     assert_selection(&fixture, None);
+    broker.await.unwrap();
+
+    // Repeat the update through the same saved route. The remote account
+    // already has both the target updater and the verified installation.
+    fs::remove_file(fixture.0.join("ctld.sock")).unwrap();
+    fs::remove_file(fixture.0.join("allow-upload")).unwrap();
+    let broker = fixture.updater_broker();
+    let output = update(&fixture).await;
+    let diagnostics = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{diagnostics}");
+    assert!(
+      diagnostics.contains("Reused installed remote components"),
+      "{diagnostics}"
+    );
+    assert!(!diagnostics.contains("ctlup: Sending"), "{diagnostics}");
+    assert!(!diagnostics.contains("ctlup: Extracting"), "{diagnostics}");
     broker.await.unwrap();
   }
 }

@@ -14,11 +14,13 @@ pub enum RemoteInstallPhase {
   DetectingPlatform,
   VerifyingBundle,
   Connecting,
+  CheckingRemoteInstallation,
   Transferring,
   Extracting,
   Checking,
   Activating,
   Complete,
+  Reused,
 }
 
 impl RemoteInstallPhase {
@@ -28,11 +30,13 @@ impl RemoteInstallPhase {
       Self::DetectingPlatform => "platform detection",
       Self::VerifyingBundle => "bundle verification",
       Self::Connecting => "SSH connection",
+      Self::CheckingRemoteInstallation => "remote installation check",
       Self::Transferring => "upload",
       Self::Extracting => "archive extraction",
       Self::Checking => "component verification",
       Self::Activating => "activation",
       Self::Complete => "completion",
+      Self::Reused => "installed bundle reuse",
     }
   }
 }
@@ -150,14 +154,15 @@ impl RemoteInstallWatchdog {
   fn idle_budget(&self) -> Duration {
     match self.progress.phase {
       RemoteInstallPhase::Transferring => self.transfer_idle,
-      RemoteInstallPhase::DetectingPlatform | RemoteInstallPhase::Connecting => {
-        Duration::from_mins(1)
-      }
+      RemoteInstallPhase::DetectingPlatform
+      | RemoteInstallPhase::Connecting
+      | RemoteInstallPhase::CheckingRemoteInstallation => Duration::from_mins(1),
       RemoteInstallPhase::Extracting => Duration::from_mins(2),
       RemoteInstallPhase::VerifyingBundle
       | RemoteInstallPhase::Checking
       | RemoteInstallPhase::Activating
-      | RemoteInstallPhase::Complete => Duration::from_secs(30),
+      | RemoteInstallPhase::Complete
+      | RemoteInstallPhase::Reused => Duration::from_secs(30),
     }
   }
 }

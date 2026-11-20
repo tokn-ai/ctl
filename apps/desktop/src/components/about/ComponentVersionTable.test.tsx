@@ -7,6 +7,7 @@ import { ComponentVersionTable } from "./ComponentVersionTable";
 const protocol = (name: string, version: string, supported_versions = [version]): ComponentProtocolVersion => ({ name, version, build: Number(version.split(".")[2]), supported_versions });
 const info: ComponentVersionInfo = { version: "0.1.0", source_revision: "abcdef123456", source_fingerprint: "same-build", dirty: false, protocols: [protocol("ctld", "1.0.12")] };
 const unreported: ComponentVersionInfo = { ...info, version: null, source_revision: null, source_fingerprint: null, protocols: [] };
+const target = { kind: "ssh" as const, host_id: "dev", destination: "dev" };
 const row: ComponentVersionRow = {
   component_id: "remote:saved:dev:ctld", component: "ctld", label: "ctld — Development — SSH", location: "remote", host_id: "dev",
   host_key: "saved:dev", host_name: "Development — SSH", observation: "running", status: "current", running: info, installed: info, available: info,
@@ -18,7 +19,7 @@ afterEach(cleanup);
 
 it("starts collapsed, summarizes outdated hosts, and exposes host actions once for the whole group", () => {
   const manage = vi.fn();
-  render(<ComponentVersionTable {...props()} rows={[{ ...row, status: "outdated" }, { ...row, component_id: "agent", component: "ctl_agent", action: null }]} manageable_host_ids={["dev"]} on_manage_host={manage} />);
+  render(<ComponentVersionTable {...props()} rows={[{ ...row, status: "outdated" }, { ...row, component_id: "agent", component: "ctl_agent", action: null }]} targets={[target]} on_manage_host={manage} />);
   expect(screen.getByRole("button", { name: "Show components for Development — SSH" }).getAttribute("aria-expanded")).toBe("false");
   expect(screen.queryByRole("table", { name: "Development — SSH component versions" })).toBeNull();
   const hosts = within(screen.getByRole("table", { name: "Remote component hosts" }));
@@ -27,9 +28,9 @@ it("starts collapsed, summarizes outdated hosts, and exposes host actions once f
   expect(hosts.getByRole("columnheader", { name: "Actions" })).toBeTruthy();
   expect(within(screen.getByRole("button", { name: "Show components for Development — SSH" }).closest("tr")!).getByText("Outdated")).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "Check host Development — SSH" }));
-  expect(manage).toHaveBeenCalledWith("dev", "inspect");
+  expect(manage).toHaveBeenCalledWith(target, "inspect");
   fireEvent.click(screen.getByRole("button", { name: "Update components Development — SSH" }));
-  expect(manage).toHaveBeenCalledWith("dev", "update");
+  expect(manage).toHaveBeenCalledWith(target, "update");
   expand();
   const table = screen.getByRole("table", { name: "Development — SSH component versions" });
   expect(within(table).getByRole("rowheader", { name: "ctld" })).toBeTruthy();
@@ -107,11 +108,11 @@ it("shows only installed contracts when a legacy running build is unknown", () =
 it("keeps owner-specific restart actions and disables management during an action", () => {
   const options = props();
   const manage = vi.fn();
-  const view = render(<ComponentVersionTable {...options} rows={[row]} manageable_host_ids={["dev"]} on_manage_host={manage} />);
+  const view = render(<ComponentVersionTable {...options} rows={[row]} targets={[target]} on_manage_host={manage} />);
   expand();
   fireEvent.click(screen.getByRole("button", { name: "Restart ctld — Development — SSH" }));
   expect(options.on_restart).toHaveBeenCalledWith(row.component_id);
-  view.rerender(<ComponentVersionTable {...options} busy_id={row.component_id} restarting rows={[row]} manageable_host_ids={["dev"]} on_manage_host={manage} />);
+  view.rerender(<ComponentVersionTable {...options} busy_id={row.component_id} restarting rows={[row]} targets={[target]} on_manage_host={manage} />);
   expect((screen.getByRole("button", { name: "Check host Development — SSH" }) as HTMLButtonElement).disabled).toBe(true);
   expect((screen.getByRole("button", { name: "Restart ctld — Development — SSH" }) as HTMLButtonElement).disabled).toBe(true);
   expect(screen.getByText("Restarting…")).toBeTruthy();
@@ -137,7 +138,7 @@ it("keeps local components open while allowing only one remote host open", () =>
 it("shows shared SSH failures once per host with a short message and retained diagnostic", () => {
   const error = "Could not inspect companions or running owners. Check the connection and component inspection support before updating. unexpected end of file";
   const rows = ["ctl_agent", "ctmuxd", "ctl-taskd"].map((component) => ({ ...row, component_id: component, component: component as ComponentVersionRow["component"], observation: "not_checked" as const, status: "unavailable" as const, running: null, installed: null, action: null, error }));
-  render(<ComponentVersionTable {...props()} rows={rows} manageable_host_ids={["dev"]} on_manage_host={vi.fn()} />);
+  render(<ComponentVersionTable {...props()} rows={rows} targets={[target]} on_manage_host={vi.fn()} />);
   expect(screen.getAllByRole("alert")).toHaveLength(1);
   expect(screen.getByRole("alert").textContent).toBe("Could not check components. Try Check host.");
   expect(screen.getByRole("alert").closest("[title]")?.getAttribute("title")).toBe(error);
@@ -149,18 +150,18 @@ it("shows shared SSH failures once per host with a short message and retained di
 });
 
 it("keeps Windows maintenance limitations informational at the host", () => {
-  const error = "Manage components directly on the Windows host.";
+  const error = "Inspect running components directly on the Windows host.";
   const rows = (["ctld", "ctl_agent"] as const).map((component) => ({
     ...row, component_id: component, component, observation: "not_checked" as const, status: "unavailable" as const,
     running: null, installed: null, action: null, error_code: "remote_windows_maintenance_unsupported", error,
   }));
-  render(<ComponentVersionTable {...props()} rows={rows} manageable_host_ids={["dev"]} on_manage_host={vi.fn()} />);
-  expect(screen.getByRole("status").textContent).toBe("Check and manage components on the Windows host.");
+  render(<ComponentVersionTable {...props()} rows={rows} targets={[{ ...target, remote_platform: "windows" }]} on_manage_host={vi.fn()} />);
+  expect(screen.getByRole("status").textContent).toBe(error);
   expect(screen.getByRole("status").className).toContain("inline-feedback-info");
   expect(screen.getByRole("status").closest("[title]")?.getAttribute("title")).toBe(error);
   expect(screen.queryByRole("alert")).toBeNull();
   expect(screen.queryByRole("button", { name: "Check host Development — SSH" })).toBeNull();
-  expect(screen.queryByRole("button", { name: "Update components Development — SSH" })).toBeNull();
+  expect(screen.getByRole("button", { name: "Update components Development — SSH" })).toBeTruthy();
   expand();
   expect(screen.getAllByRole("status")).toHaveLength(1);
   expect(screen.queryByRole("alert")).toBeNull();

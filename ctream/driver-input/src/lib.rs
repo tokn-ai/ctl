@@ -6,3 +6,6 @@
 #[cfg(target_os = "linux")]
 pub mod linux;
 pub mod process;
+
+#[cfg(any(windows, test))]
+pub mod windows;

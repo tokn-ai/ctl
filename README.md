@@ -285,6 +285,9 @@ To build just the ctream CLI and remote agent, run
 After installing the agent on the Linux display host, run
 `cargo run -p ctream-preview -- SSH_HOST` from the repository root to open the
 local wgpu viewer. See the [ctream setup instructions](docs/proposals/0020-ctream.md#design).
+For Windows through a WSL SSH endpoint, build a native `ctream-agent.exe` and
+select its mounted path with `--agent`. Display discovery, preview, and input
+run in the Windows interactive session; see [Windows setup](docs/proposals/0020-ctream.md#windows-through-a-wsl-endpoint).
 
 For the tmux-style terminal UI (local sessions, including when run inside SSH):
 

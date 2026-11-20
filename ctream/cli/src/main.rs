@@ -1,28 +1,95 @@
-use ctream_client::{Client, transport::Ssh};
-use ctream_platform::{discover, windows};
-use ctream_proto::{Display, Target};
+use ctream_client::{Client, options::ConnectionOptions};
+use ctream_platform::{discover_sessions, windows};
+use ctream_proto::{Display, Session, Target, Window};
 use std::{env, ffi::OsString, io, process::ExitCode};
 
-const USAGE: &str = "Usage: ctream list
-       ctream [--host SSH_HOST] windows DISPLAY [--json]
+const USAGE: &str = "Usage: ctream [OPTIONS] list [--json]
+       ctream [OPTIONS] windows DISPLAY [--json]
 
-List listening displays or query a single display's top-level windows.
-Use :DISPLAY for X11 or wayland-N for Wayland.";
+Options (before list/windows):
+  --host SSH_HOST       Remote SSH endpoint
+  --agent EXECUTABLE    Agent executable; use a mounted Windows path through WSL
+  --ssh-program PROGRAM  SSH-compatible launcher (default: ssh)
+  --ssh-arg ARG         Launcher prefix argument; repeat as needed
 
-fn list_displays() -> io::Result<()> {
-  let displays = discover()
-    .map_err(|error| io::Error::other(format!("cannot discover Linux display sockets: {error}")))?;
-  println!("PROTOCOL\tDISPLAY\tUID\tSESSION CLASS");
-  for (display, class) in displays {
-    match display {
-      Display::X11(number) => println!("X11\t:{number}\t-\t-"),
-      Display::Wayland { uid, socket } => println!(
-        "Wayland\t{socket}\t{uid}\t{}",
-        class.as_deref().unwrap_or("unknown")
-      ),
+Use :DISPLAY for X11, wayland-N for Wayland, or windows-N for a Windows display.
+Windows window queries are not supported yet.";
+
+enum Operation {
+  List,
+  Windows(Target),
+}
+
+struct Options {
+  connection: ConnectionOptions,
+  host: Option<String>,
+  operation: Operation,
+  json: bool,
+}
+
+fn invalid(message: &str) -> io::Error {
+  io::Error::new(io::ErrorKind::InvalidInput, message)
+}
+
+fn parse(arguments: impl IntoIterator<Item = OsString>) -> io::Result<Option<Options>> {
+  let mut arguments = arguments.into_iter();
+  let mut connection = ConnectionOptions::default();
+  let mut host = None;
+  let command = loop {
+    let argument = arguments
+      .next()
+      .ok_or_else(|| invalid("expected list or windows"))?;
+    let argument = argument
+      .to_str()
+      .ok_or_else(|| invalid("invalid command argument"))?;
+    match argument {
+      "--help" | "-h" => return Ok(None),
+      "--host" if host.is_none() => {
+        let value = arguments
+          .next()
+          .ok_or_else(|| invalid("--host needs an SSH destination"))?;
+        let value = value
+          .to_str()
+          .filter(|value| !value.is_empty() && !value.starts_with('-'))
+          .ok_or_else(|| invalid("--host needs an SSH destination"))?;
+        host = Some(value.to_owned());
+      }
+      "list" | "windows" => break argument.to_owned(),
+      argument if connection.parse_option(argument, &mut arguments)? => {}
+      _ => return Err(invalid("unexpected global option")),
+    }
+  };
+  let mut json = false;
+  let mut target = None;
+  for argument in arguments {
+    match argument.to_str() {
+      Some("--help" | "-h") => return Ok(None),
+      Some("--json") if !json => json = true,
+      Some("--host" | "--agent" | "--ssh-program" | "--ssh-arg") => {
+        return Err(invalid(
+          "connection options must appear before list/windows",
+        ));
+      }
+      Some(value) if command == "windows" && target.is_none() && !value.starts_with('-') => {
+        target = Some(Target::parse(value).map_err(invalid)?);
+      }
+      _ => return Err(invalid("unexpected command argument")),
     }
   }
-  Ok(())
+  let operation = if command == "list" {
+    Operation::List
+  } else {
+    Operation::Windows(target.ok_or_else(|| invalid("windows needs a display"))?)
+  };
+  if host.is_none() {
+    connection.local()?;
+  }
+  Ok(Some(Options {
+    connection,
+    host,
+    operation,
+    json,
+  }))
 }
 
 fn one_line(text: &str) -> String {
@@ -32,16 +99,37 @@ fn one_line(text: &str) -> String {
     .collect()
 }
 
-fn list_windows(
-  target: Target,
-  host: Option<&str>,
-  json: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
-  let windows = if let Some(host) = host {
-    Client::new(Ssh(host.to_owned())).windows(target)?
-  } else {
-    windows::list(target)?
-  };
+fn print_displays(sessions: Vec<Session>, json: bool) -> io::Result<()> {
+  if json {
+    println!("{}", serde_json::to_string(&sessions)?);
+    return Ok(());
+  }
+  println!("PROTOCOL\tDISPLAY\tUID\tSESSION CLASS\tDETAILS");
+  for session in sessions {
+    let class = one_line(session.class.as_deref().unwrap_or("-"));
+    match session.display {
+      Display::X11(number) => println!("X11\t:{number}\t-\t{class}\t-"),
+      Display::Wayland { uid, socket } => {
+        println!("Wayland\t{}\t{uid}\t{class}\t-", one_line(&socket))
+      }
+      Display::Windows {
+        number,
+        name,
+        bounds,
+      } => println!(
+        "Windows\twindows-{number}\t-\t{class}\t{} · {}x{} @ {},{}",
+        one_line(&name),
+        i64::from(bounds[2]) - i64::from(bounds[0]),
+        i64::from(bounds[3]) - i64::from(bounds[1]),
+        bounds[0],
+        bounds[1],
+      ),
+    }
+  }
+  Ok(())
+}
+
+fn print_windows(windows: Vec<Window>, json: bool) -> io::Result<()> {
   if json {
     println!("{}", serde_json::to_string(&windows)?);
   } else {
@@ -49,7 +137,7 @@ fn list_windows(
     for window in windows {
       println!(
         "{}\t{}\t{}",
-        window.id,
+        one_line(&window.id),
         one_line(&window.app_id),
         one_line(&window.title)
       );
@@ -58,68 +146,97 @@ fn list_windows(
   Ok(())
 }
 
-fn usage_error(error: &str) -> ExitCode {
-  eprintln!("ctream: {error}\n{USAGE}");
-  ExitCode::from(2)
-}
-
-fn run_windows(host: Option<&str>, args: &[OsString]) -> ExitCode {
-  let mut target = None;
-  let mut json = false;
-  for arg in args {
-    match arg.to_str() {
-      Some("--help" | "-h") => {
-        println!("{USAGE}");
-        return ExitCode::SUCCESS;
+fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
+  match options.operation {
+    Operation::List => {
+      let sessions = if let Some(host) = &options.host {
+        Client::new(options.connection.ssh(host)?).discover()?
+      } else if options.connection.agent_is_explicit() {
+        Client::new(options.connection.local()?).discover()?
+      } else {
+        discover_sessions()?
+      };
+      print_displays(sessions, options.json)?;
+    }
+    Operation::Windows(target) => {
+      if matches!(target, Target::Windows(_)) {
+        return Err("Windows window queries are not supported yet".into());
       }
-      Some("--json") if !json => json = true,
-      Some("--host") => return usage_error("--host must appear before windows"),
-      Some(display) if target.is_none() && !display.starts_with('-') => {
-        match Target::parse(display) {
-          Ok(display) => target = Some(display),
-          Err(error) => return usage_error(error),
-        }
-      }
-      _ => return usage_error("unexpected windows argument"),
+      let windows = if let Some(host) = &options.host {
+        Client::new(options.connection.ssh(host)?).windows(target)?
+      } else if options.connection.agent_is_explicit() {
+        Client::new(options.connection.local()?).windows(target)?
+      } else {
+        windows::list(target)?
+      };
+      print_windows(windows, options.json)?;
     }
   }
-  let Some(target) = target else {
-    return usage_error("windows needs a display");
+  Ok(())
+}
+
+fn main() -> ExitCode {
+  let options = match parse(env::args_os().skip(1)) {
+    Ok(Some(options)) => options,
+    Ok(None) => {
+      println!("{USAGE}");
+      return ExitCode::SUCCESS;
+    }
+    Err(error) => {
+      eprintln!("ctream: {error}\n{USAGE}");
+      return ExitCode::from(2);
+    }
   };
-  match list_windows(target, host, json) {
+  match run(options) {
     Ok(()) => ExitCode::SUCCESS,
     Err(error) => {
-      eprintln!("ctream: cannot query windows on {target}: {error}");
+      eprintln!("ctream: {error}");
       ExitCode::FAILURE
     }
   }
 }
 
-fn main() -> ExitCode {
-  let args: Vec<_> = env::args_os().skip(1).collect();
-  match args.as_slice() {
-    [arg] if arg == "--help" || arg == "-h" => {
-      println!("{USAGE}");
-      ExitCode::SUCCESS
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  fn args(arguments: &[&str]) -> Vec<OsString> {
+    arguments.iter().map(OsString::from).collect()
+  }
+
+  #[test]
+  fn remote_discovery_accepts_launcher_options_before_the_command() {
+    let options = parse(args(&[
+      "--host",
+      "test-host",
+      "--ssh-program",
+      "ctl",
+      "--ssh-arg",
+      "ssh",
+      "--agent",
+      "/mounted drive/agent.exe",
+      "list",
+      "--json",
+    ]))
+    .unwrap()
+    .unwrap();
+    assert_eq!(options.host.as_deref(), Some("test-host"));
+    assert!(options.json);
+    assert!(matches!(options.operation, Operation::List));
+    assert!(options.connection.agent_is_explicit());
+  }
+
+  #[test]
+  fn connection_options_after_command_and_invalid_combinations_are_rejected() {
+    for arguments in [
+      vec!["windows", ":1", "--host", "test-host"],
+      vec!["list", "--agent", "agent"],
+      vec!["--ssh-program", "ctl", "list"],
+      vec!["--host", "test-host", "--host", "another", "list"],
+      vec!["list", "windows-1"],
+      vec!["windows"],
+    ] {
+      assert!(parse(args(&arguments)).is_err(), "{arguments:?}");
     }
-    [arg] if arg == "list" => match list_displays() {
-      Ok(()) => ExitCode::SUCCESS,
-      Err(error) => {
-        eprintln!("ctream: {error}");
-        ExitCode::FAILURE
-      }
-    },
-    [arg, rest @ ..] if arg == "windows" => run_windows(None, rest),
-    [flag, host, command, rest @ ..] if flag == "--host" && command == "windows" => {
-      let Some(host) = host
-        .to_str()
-        .filter(|host| !host.is_empty() && !host.starts_with('-'))
-      else {
-        return usage_error("--host needs an SSH destination");
-      };
-      run_windows(Some(host), rest)
-    }
-    [flag, ..] if flag == "--host" => usage_error("expected --host SSH_HOST windows"),
-    _ => usage_error("expected list or windows"),
   }
 }

@@ -1436,6 +1436,7 @@ dependencies = [
  "ctream-platform",
  "ctream-proto",
  "serde_json",
+ "windows 0.62.2",
 ]
 
 [[package]]
@@ -1471,6 +1472,7 @@ dependencies = [
  "ctream-driver",
  "ctream-proto",
  "serde_json",
+ "windows 0.62.2",
  "x11rb",
 ]
 
@@ -1479,6 +1481,7 @@ name = "ctream-driver-input"
 version = "0.1.0"
 dependencies = [
  "ctream-driver",
+ "windows 0.62.2",
 ]
 
 [[package]]
@@ -1505,6 +1508,7 @@ name = "ctream-proto"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "serde_json",
 ]
 
 [[package]]

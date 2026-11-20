@@ -5,6 +5,7 @@ use std::io::{self, BufRead, BufReader, Read, Write};
 pub enum InputFormat {
   X11,
   Wayland,
+  Windows,
 }
 
 /// An opened input capability. Dropping its writer asks the agent to release held input.
@@ -42,7 +43,7 @@ impl<R: Read + Send + 'static, W: Write + Send + 'static> Input<R, W> {
       return Err(io::Error::other("incomplete remote input handshake"));
     }
     match format {
-      InputFormat::Wayland if header.trim_end() == "ready" => Ok(None),
+      InputFormat::Wayland | InputFormat::Windows if header.trim_end() == "ready" => Ok(None),
       InputFormat::X11 => {
         let dimensions: Vec<_> = header.split_whitespace().map(str::parse::<u32>).collect();
         match dimensions.as_slice() {
@@ -50,7 +51,7 @@ impl<R: Read + Send + 'static, W: Write + Send + 'static> Input<R, W> {
           _ => Err(io::Error::other("X11 input initialization failed")),
         }
       }
-      _ => Err(io::Error::other("Wayland input initialization failed")),
+      _ => Err(io::Error::other("remote input initialization failed")),
     }
   }
 
@@ -143,6 +144,7 @@ mod tests {
     for (format, header, expected) in [
       (InputFormat::X11, "800 600\n", "move 400 300\n"),
       (InputFormat::Wayland, "ready\n", "move 400 300 800 600\n"),
+      (InputFormat::Windows, "ready\n", "move 400 300 800 600\n"),
     ] {
       let bytes = Arc::new(Mutex::new(Vec::new()));
       let channel = Channel {

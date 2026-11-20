@@ -1,6 +1,7 @@
 use ctream_driver::{ControlOperation, Result};
 use ctream_proto::{
-  DISPLAY_VERSION, Target, VERSION, WAYLAND_WINDOW_VERSION, X11_WINDOW_VERSION, valid_window_id,
+  BOUNDS_VERSION, DISPLAY_VERSION, Target, VERSION, WAYLAND_WINDOW_VERSION,
+  WINDOWS_DISPLAY_VERSION, X11_WINDOW_VERSION, valid_window_id,
 };
 
 pub enum TargetOperation<'a> {
@@ -11,30 +12,41 @@ pub enum TargetOperation<'a> {
 }
 
 pub enum Request<'a> {
-  Discover,
+  Discover { windows_displays: bool },
   Target(Target, TargetOperation<'a>),
   Controls(Target, &'a str, ControlOperation),
 }
 
 fn supports_windows(version: &str, target: Target) -> bool {
-  matches!(version, VERSION | X11_WINDOW_VERSION)
-    || (version == WAYLAND_WINDOW_VERSION && matches!(target, Target::Wayland(_)))
+  !matches!(target, Target::Windows(_))
+    && (matches!(version, VERSION | BOUNDS_VERSION | X11_WINDOW_VERSION)
+      || (version == WAYLAND_WINDOW_VERSION && matches!(target, Target::Wayland(_))))
 }
 
 fn supports_displays(version: &str) -> bool {
   matches!(
     version,
-    VERSION | X11_WINDOW_VERSION | WAYLAND_WINDOW_VERSION | DISPLAY_VERSION
+    VERSION | BOUNDS_VERSION | X11_WINDOW_VERSION | WAYLAND_WINDOW_VERSION | DISPLAY_VERSION
   )
+}
+
+fn parse_target(version: &str, value: &str) -> Result<Target> {
+  let target = Target::parse(value)?;
+  if matches!(target, Target::Windows(_)) && version != WINDOWS_DISPLAY_VERSION {
+    return Err("Windows displays require ctream_agent 1.0.5".into());
+  }
+  Ok(target)
 }
 
 pub fn parse(args: &[String]) -> Result<Request<'_>> {
   match args {
     [version, operation] if supports_displays(version) && operation == "discover" => {
-      Ok(Request::Discover)
+      Ok(Request::Discover {
+        windows_displays: version == WINDOWS_DISPLAY_VERSION,
+      })
     }
     [version, operation, target] if supports_displays(version) => {
-      let target = Target::parse(target)?;
+      let target = parse_target(version, target)?;
       let operation = match operation.as_str() {
         "capture" => TargetOperation::Capture,
         "input" => TargetOperation::Input,
@@ -46,7 +58,7 @@ pub fn parse(args: &[String]) -> Result<Request<'_>> {
     [version, operation, target, id]
       if matches!(operation.as_str(), "capture-window" | "elements" | "action") =>
     {
-      let target = Target::parse(target)?;
+      let target = parse_target(version, target)?;
       if !supports_windows(version, target) {
         return Err("window operation unavailable in requested agent version".into());
       }
@@ -59,7 +71,7 @@ pub fn parse(args: &[String]) -> Result<Request<'_>> {
           target,
           id,
           ControlOperation::Inspect {
-            bounds: version == VERSION,
+            bounds: matches!(version.as_str(), BOUNDS_VERSION | VERSION),
           },
         ),
         _ => Request::Controls(target, id, ControlOperation::Act),
@@ -84,6 +96,7 @@ mod tests {
       DISPLAY_VERSION,
       WAYLAND_WINDOW_VERSION,
       X11_WINDOW_VERSION,
+      BOUNDS_VERSION,
       VERSION,
     ] {
       assert!(parse(&args(&[version, "discover"])).is_ok());
@@ -104,16 +117,48 @@ mod tests {
 
   #[test]
   fn bounds_are_requested_only_under_the_bounds_contract() {
-    for version in [WAYLAND_WINDOW_VERSION, X11_WINDOW_VERSION, VERSION] {
+    for version in [
+      WAYLAND_WINDOW_VERSION,
+      X11_WINDOW_VERSION,
+      BOUNDS_VERSION,
+      VERSION,
+    ] {
       let arguments = args(&[version, "elements", "wayland-1", "window-1"]);
       let Request::Controls(_, _, ControlOperation::Inspect { bounds }) =
         parse(&arguments).unwrap()
       else {
         panic!("expected inspection");
       };
-      assert_eq!(bounds, version == VERSION);
+      assert_eq!(bounds, matches!(version, BOUNDS_VERSION | VERSION));
     }
     assert!(parse(&args(&[VERSION, "capture-window", ":7", "invalid/id"])).is_err());
     assert!(parse(&args(&["9.0.9", "capture", ":7"])).is_err());
+  }
+
+  #[test]
+  fn windows_displays_require_their_contract_and_reject_window_operations() {
+    for version in [
+      DISPLAY_VERSION,
+      WAYLAND_WINDOW_VERSION,
+      X11_WINDOW_VERSION,
+      BOUNDS_VERSION,
+      VERSION,
+    ] {
+      let arguments = args(&[version, "discover"]);
+      let Request::Discover { windows_displays } = parse(&arguments).unwrap() else {
+        panic!("expected discovery");
+      };
+      assert_eq!(windows_displays, version == WINDOWS_DISPLAY_VERSION);
+      for operation in ["capture", "input"] {
+        assert_eq!(
+          parse(&args(&[version, operation, "windows-1"])).is_ok(),
+          windows_displays
+        );
+      }
+      assert!(parse(&args(&[version, "windows", "windows-1"])).is_err());
+      for operation in ["capture-window", "elements", "action"] {
+        assert!(parse(&args(&[version, operation, "windows-1", "window-1"])).is_err());
+      }
+    }
   }
 }

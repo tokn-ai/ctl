@@ -119,3 +119,139 @@ The image supplies a compositor with the foreign-toplevel capture protocols
 used by the Wayland helper. The test covers display discovery, display and
 window frames, input initialization, and capture cancellation. Geometry unit
 tests cover the common overlay and pointer transform when the preview resizes.
+
+## Ctream Windows capture experiment
+
+Build the diagnostic on Windows with
+`cargo build --locked -p ctream-driver-capture --example windows-probe --release`.
+It reports the process and console sessions, window station, desktop, DXGI
+adapters, and attached outputs. For each attached output it attempts Desktop
+Duplication with a 1.5-second frame wait, reads the frame back to CPU memory,
+and reports dimensions, a nonblack-pixel count, and a checksum. It saves no
+captured pixels and sends no input.
+
+The probe requests per-monitor v2 DPI awareness before enumerating outputs and
+reports whether it took effect. Only a verified `physical_pixels` coordinate
+space should be compared with capture dimensions, accounting for output rotation;
+an `unverified` result can contain DPI-virtualized desktop rectangles. See
+[DXGI output geometry](https://learn.microsoft.com/en-us/windows/win32/api/dxgi/nf-dxgi-idxgioutput-getdesc).
+
+Run it directly in the context being investigated:
+
+```powershell
+./target/release/examples/windows-probe.exe
+```
+
+For an explicit comparison with the same account's existing interactive login,
+use the runner:
+
+```powershell
+powershell.exe -NoProfile -File ctream/driver-capture/examples/windows_probe/run.ps1 `
+  -ProbePath target/release/examples/windows-probe.exe -Interactive
+```
+
+When all scopes in `Get-ExecutionPolicy -List` are `Undefined`, Windows clients
+default to blocking script files. For this reviewed script, add
+`-ExecutionPolicy RemoteSigned` before `-File` to set the policy for that process
+only. This does not persist a policy change or override Group Policy. See
+[PowerShell execution policies](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_execution_policies?view=powershell-5.1).
+
+The runner creates a temporary task with an interactive,
+limited principal, waits up to 20 seconds for the report, and removes its task
+and temporary result files. The task also has a 30-second execution limit.
+This requires Task Scheduler permission and an interactive login for the
+current account. It does not elevate the process or create a login session.
+
+Compare `context.process_session_id`, `same_session_as_console`, and the
+window-station visibility with each output's capture result. A usable frame
+has `capture.status = "frame_acquired"` and `readback.status = "read"`.
+HRESULTs identify failed enumeration, device creation, duplication, or readback.
+A frame timeout means no new frame arrived within the wait; it is distinct
+from an access error.
+
+Windows services and interactive desktops occupy separate sessions. A capture
+helper in the user's interactive session can communicate with an SSH-facing
+agent through IPC. See Microsoft's [interactive services guidance](https://learn.microsoft.com/en-us/windows/win32/services/interactive-services)
+and [Desktop Duplication API](https://learn.microsoft.com/en-us/windows/win32/direct3ddxgi/desktop-dup-api).
+This probe evaluates that boundary. Use the native agent check below to exercise
+the Windows drivers and agent protocol.
+
+The live experiment confirmed this distinction: the SSH process could create
+D3D11 devices but DXGI output enumeration returned `0x887A0022`
+(`DXGI_ERROR_NOT_CURRENTLY_AVAILABLE`). The same executable, launched by the
+limited interactive task, acquired and read nonblack frames from the attached
+outputs. The runner removed its task and result files after completion.
+Enabling per-monitor v2 awareness also made the scaled output's desktop
+rectangle agree with its capture dimensions. This must be preserved when
+introducing input coordinates into a Windows driver.
+
+### Launching through WSL
+
+A Windows executable launched through WSL interop can reach a different Windows
+session from one launched by Windows OpenSSH. The live WSL experiment reached
+the interactive window station directly and captured the attached outputs with
+physical-pixel geometry. No scheduled task was needed. Treat the reported
+session and window station as evidence for that launch, rather than inferring
+desktop access from the SSH endpoint's operating system.
+
+Use `windows-probe --echo-stdio` to check the same launch path without capturing
+the desktop. This portable diagnostic echoes raw bytes immediately, reports
+readiness and EOF byte counts as JSON on stderr, and exits after at most 30
+seconds. The timeout is a guard against orphaned test processes, not evidence
+that a transport handles cancellation.
+
+The Bun checker accepts the complete command that launches this mode. For
+example, replacing the host and executable path with the test environment:
+
+```sh
+bun ctream/driver-capture/examples/windows_probe/check_stdio.ts \
+  ssh -T wsl-host '/mnt/c/ctream-test/windows-probe.exe --echo-stdio'
+```
+
+It checks an 8 MiB deterministic binary payload in differently sized chunks,
+requires replies before closing stdin, verifies clean EOF and the remote byte
+count, then tests disconnecting a second command. Check the reported remote
+PIDs independently immediately afterward; successful local command termination
+does not prove remote process cleanup.
+
+The live WSL checks passed byte-for-byte and both Windows processes were absent
+before the watchdog deadline. Capture also succeeded in a separate SSH command.
+WSL restart, Windows sign-out, and session switching remain untested. The native
+client now uses explicit executable selection and the same binary stdio and
+cancellation behavior; the diagnostic probe itself has no agent protocol impact.
+
+## Ctream native Windows agent check
+
+Build the Windows agent and opt-in integration example on Windows:
+
+```powershell
+cargo build --locked --release -p ctream-agent --bin ctream-agent --example windows-session-check
+./target/release/examples/windows-session-check.exe ./target/release/ctream-agent.exe windows-2
+```
+
+Replace `windows-2` with an idle test display from discovery. An explicit Windows
+display is required; the fixture never defaults to the primary display. Windows
+shares one pointer and keyboard across monitors, so the short input check still
+needs an interval when moving the pointer and focusing its test window is acceptable.
+Run it in the interactive desktop session, directly or through WSL interop. The
+agent argument must be a Windows path when the example itself runs on Windows;
+WSL's `wslpath -w` can translate a mounted executable path before invoking it.
+This test opens its own temporary Win32 window and sends input only after
+verifying that its click points and foreground window belong to the fixture.
+It verifies changing fixture colors in captured pixels, capture cancellation,
+click locations through wide and tall preview geometries, key delivery, and
+release of a held key when the input channel closes. It closes its window and
+agent channels and restores the pointer when it remains at the test position.
+
+An overall deadline cancels blocked channels; a final watchdog bounds the
+example's lifetime. Check that the test processes are absent after a failure.
+The example is not run by ordinary `cargo test`; its pure rotation, coordinate,
+input-state, and protocol checks run without a Windows desktop. Use
+`bash docker/ctream/run.sh` to verify the retained Linux session behavior.
+
+The local wgpu preview received frames over the WSL SSH launcher. The isolated
+native fixture then passed on a secondary display: discovery and capture agreed
+on physical dimensions, capture colors and both preview aspect ratios matched,
+and keyboard delivery and key release on EOF succeeded. Temporary processes and
+test files were removed. Display discovery does not imply permission to control
+elevated applications or a secure desktop.

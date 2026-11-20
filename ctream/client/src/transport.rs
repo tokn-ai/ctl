@@ -1,4 +1,5 @@
 use std::{
+  ffi::OsString,
   io::{self, Read},
   path::PathBuf,
   process::{Child, ChildStdin, ChildStdout, Command, Stdio},
@@ -106,6 +107,114 @@ pub trait Transport {
 
 pub struct Ssh(pub String);
 
+/// The executable launched by a POSIX remote shell, independent of its platform.
+/// An explicit WSL path can name a Windows executable without changing transport.
+#[derive(Clone, Debug)]
+pub struct AgentLaunch {
+  executable: String,
+  search_user_bin: bool,
+}
+
+impl Default for AgentLaunch {
+  fn default() -> Self {
+    Self {
+      executable: "ctream-agent".into(),
+      search_user_bin: true,
+    }
+  }
+}
+
+impl AgentLaunch {
+  pub fn executable(executable: impl Into<String>) -> io::Result<Self> {
+    let executable = executable.into();
+    if executable.is_empty() || executable.starts_with('-') || executable.contains('\0') {
+      return Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "invalid agent executable",
+      ));
+    }
+    Ok(Self {
+      executable,
+      search_user_bin: false,
+    })
+  }
+
+  fn command(&self, arguments: &[String]) -> String {
+    let mut command = if self.search_user_bin {
+      r#"exec env PATH="$PATH:$HOME/.local/bin" "#.to_owned()
+    } else {
+      "exec ".to_owned()
+    };
+    command.push_str(&shell_argument(&self.executable));
+    for argument in arguments {
+      command.push(' ');
+      command.push_str(&shell_argument(argument));
+    }
+    command
+  }
+}
+
+/// SSH-compatible subprocess with an explicit executable and argument prefix.
+pub struct SshCommand {
+  destination: String,
+  program: PathBuf,
+  prefix_arguments: Vec<OsString>,
+  standard_options: bool,
+  agent: AgentLaunch,
+}
+
+impl SshCommand {
+  pub fn new(destination: impl Into<String>) -> Self {
+    Self {
+      destination: destination.into(),
+      program: PathBuf::from("ssh"),
+      prefix_arguments: Vec::new(),
+      standard_options: true,
+      agent: AgentLaunch::default(),
+    }
+  }
+
+  /// Custom programs receive `-T HOST COMMAND` after this prefix. Their own
+  /// authentication and connection policy remains in control of the launcher.
+  pub fn with_program(mut self, program: PathBuf) -> Self {
+    self.program = program;
+    self.standard_options = false;
+    self
+  }
+
+  pub fn with_arguments(mut self, arguments: Vec<OsString>) -> Self {
+    self.prefix_arguments = arguments;
+    self
+  }
+
+  pub fn with_agent(mut self, agent: AgentLaunch) -> Self {
+    self.agent = agent;
+    self
+  }
+
+  fn command(&self, arguments: &[String]) -> io::Result<Command> {
+    if self.destination.is_empty()
+      || self.destination.starts_with('-')
+      || self.destination.contains('\0')
+      || self.program.as_os_str().is_empty()
+    {
+      return Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "invalid SSH command or destination",
+      ));
+    }
+    let mut command = Command::new(&self.program);
+    command.args(&self.prefix_arguments).arg("-T");
+    if self.standard_options {
+      command.args(["-C", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "--"]);
+    }
+    command
+      .arg(&self.destination)
+      .arg(self.agent.command(arguments));
+    Ok(command)
+  }
+}
+
 /// Agent subprocess connected through local standard-input/output pipes.
 pub struct Local {
   pub agent: PathBuf,
@@ -176,29 +285,16 @@ impl Transport for Ssh {
   type Writer = ChildStdin;
 
   fn open(&self, arguments: &[String]) -> io::Result<Channel<Self::Reader, Self::Writer>> {
-    if self.0.is_empty() || self.0.starts_with('-') {
-      return Err(io::Error::new(
-        io::ErrorKind::InvalidInput,
-        "invalid SSH destination",
-      ));
-    }
-    let arguments = arguments
-      .iter()
-      .map(|arg| shell_argument(arg))
-      .collect::<Vec<_>>()
-      .join(" ");
-    let remote = format!(r#"exec env PATH="$PATH:$HOME/.local/bin" ctream-agent {arguments}"#);
-    spawn(Command::new("ssh").args([
-      "-T",
-      "-C",
-      "-o",
-      "BatchMode=yes",
-      "-o",
-      "ConnectTimeout=10",
-      "--",
-      &self.0,
-      &remote,
-    ]))
+    SshCommand::new(self.0.clone()).open(arguments)
+  }
+}
+
+impl Transport for SshCommand {
+  type Reader = ProcessReader;
+  type Writer = ChildStdin;
+
+  fn open(&self, arguments: &[String]) -> io::Result<Channel<Self::Reader, Self::Writer>> {
+    spawn(&mut self.command(arguments)?)
   }
 }
 
@@ -223,6 +319,52 @@ mod tests {
       shell_argument("a'b $(command); value"),
       "'a'\\''b $(command); value'"
     );
+  }
+
+  #[test]
+  fn ssh_program_prefix_and_agent_path_remain_separate_arguments() {
+    let transport = SshCommand::new("test-host")
+      .with_program(PathBuf::from("launcher"))
+      .with_arguments(vec!["ssh".into()])
+      .with_agent(AgentLaunch::executable("/mounted drive/agent's.exe").unwrap());
+    let command = transport
+      .command(&["1.0.5".into(), "capture".into(), "windows-1".into()])
+      .unwrap();
+    assert_eq!(command.get_program(), "launcher");
+    assert_eq!(
+      command.get_args().collect::<Vec<_>>(),
+      [
+        "ssh",
+        "-T",
+        "test-host",
+        "exec '/mounted drive/agent'\\''s.exe' '1.0.5' 'capture' 'windows-1'",
+      ]
+    );
+    let standard = SshCommand::new("test-host").command(&[]).unwrap();
+    assert!(
+      standard
+        .get_args()
+        .any(|argument| argument == "BatchMode=yes")
+    );
+    assert!(
+      SshCommand::new("-oProxyCommand=anything")
+        .command(&[])
+        .is_err()
+    );
+    assert!(AgentLaunch::executable("-invalid").is_err());
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn remote_shell_preserves_literal_executable_and_arguments() {
+    let launch = AgentLaunch::executable("/usr/bin/printf").unwrap();
+    let command = launch.command(&["%s".into(), "a'b $(printf unexpected); literal".into()]);
+    let output = Command::new("/bin/sh")
+      .args(["-c", &command])
+      .output()
+      .unwrap();
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"a'b $(printf unexpected); literal");
   }
 
   #[cfg(unix)]

@@ -23,6 +23,7 @@ ctream-client.workspace = true
 [target.'cfg(windows)'.dev-dependencies]
 windows = { version = "0.62.2", features = [
   "Win32_Foundation",
+  "Win32_Graphics_Dwm",
   "Win32_Graphics_Gdi",
   "Win32_System_LibraryLoader",
   "Win32_System_Threading",
@@ -34,3 +35,7 @@ windows = { version = "0.62.2", features = [
 [[example]]
 name = "windows-session-check"
 path = "examples/windows_session_check/main.rs"
+
+[[example]]
+name = "windows-window-check"
+path = "examples/windows_window_check/main.rs"

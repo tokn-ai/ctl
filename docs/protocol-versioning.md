@@ -577,6 +577,21 @@ variant. WSL executable launch and configurable SSH command selection are
 client settings, independent of the wire contract. Other named contracts and
 product release versions remain unchanged.
 
+Windows window support advances `ctream_agent` from `1.0.5` (build 5) to
+`1.0.6` (build 6). The `windows` and `capture-window` operations now accept
+`windows-N` targets. The new `input-window DISPLAY WINDOW` operation uses the
+same `ready` handshake and dimensioned pointer/button/key/reset commands as
+Windows display input, scoped to the selected window. Window IDs are opaque;
+clients return the discovered ID unchanged. Window frames remain dimensioned
+P6 RGB. Accessibility operations remain unavailable on Windows.
+
+All earlier contracts `1.0.1`–`1.0.5` retain their operations and shapes,
+including Linux accessibility bounds under `1.0.4` and `1.0.5`. Clients continue
+to use `1.0.5` for Windows displays and discovery, with discovery fallback to
+`1.0.1`; Windows window operations require `1.0.6`. The new optional Rust
+`ForwardWindowInput` capability has no effect on existing custom drivers.
+Other named protocols and product release versions remain unchanged.
+
 Every PR description must state its protocol changes, or **None** when there
 are no changes. Include the previous and new contracts and the compatibility
 impact. Keep PR titles brief; put protocol details in the description.

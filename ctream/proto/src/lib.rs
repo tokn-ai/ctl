@@ -3,7 +3,8 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-pub const VERSION: &str = "1.0.5";
+pub const VERSION: &str = "1.0.6";
+pub const WINDOWS_WINDOW_VERSION: &str = "1.0.6";
 pub const WINDOWS_DISPLAY_VERSION: &str = "1.0.5";
 pub const BOUNDS_VERSION: &str = "1.0.4";
 pub const X11_WINDOW_VERSION: &str = "1.0.3";

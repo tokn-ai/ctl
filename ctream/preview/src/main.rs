@@ -4,7 +4,9 @@ use ctream_client::{
   options::ConnectionOptions,
   transport::Transport,
 };
-use ctream_proto::{Display, Element, Session as DisplaySession, Target, Window, X11_FRAME_SIZE};
+use ctream_proto::{
+  Display, Element, Session as DisplaySession, Target, Window, X11_FRAME_SIZE, valid_window_id,
+};
 mod input;
 mod overlay;
 mod semantic;
@@ -32,7 +34,7 @@ struct Preview<T: Transport> {
   input: Option<input::Input<T::Reader, T::Writer>>,
   forwarding: bool,
   input_error: Option<String>,
-  _capture_lifetime: CaptureLifetime<T::Writer>,
+  capture_lifetime: Option<CaptureLifetime<T::Writer>>,
   stream: Arc<Mutex<Stream>>,
   texture: Option<egui::TextureHandle>,
   frames: u64,
@@ -70,7 +72,7 @@ impl<T: Transport> Preview<T> {
       input,
       forwarding: false,
       input_error,
-      _capture_lifetime: lifetime,
+      capture_lifetime: Some(lifetime),
       stream,
       texture: None,
       frames: 0,
@@ -92,6 +94,13 @@ impl<T: Transport> Preview<T> {
       if self.frames == 2 {
         eprintln!("Live preview received two frames on the wgpu renderer.");
       }
+    }
+    if error.is_some() {
+      // Capture and input use independent channels. A failed capture must not
+      // leave an input agent alive behind a frozen preview.
+      self.input.take();
+      self.capture_lifetime.take();
+      self.forwarding = false;
     }
     error
   }
@@ -334,7 +343,6 @@ impl<T: Transport + Send + Sync + 'static> eframe::App for Viewer<T> {
               selected = Some((target, None));
             }
             if let Some(target) = target
-              && !matches!(target, Target::Windows(_))
               && ui
                 .add_enabled(session.selectable, egui::Button::new("Windows…"))
                 .clicked()
@@ -366,6 +374,7 @@ fn run<T: Transport + Send + Sync + 'static>(
   transport: T,
   target: Option<Target>,
   windows: bool,
+  window: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
   let options = eframe::NativeOptions {
     renderer: eframe::Renderer::Wgpu,
@@ -387,7 +396,14 @@ fn run<T: Transport + Send + Sync + 'static>(
         if windows {
           viewer.windows(target, &cc.egui_ctx);
         } else {
-          viewer.connect(target, None, &cc.egui_ctx);
+          viewer.connect(
+            target,
+            window.map(|id| Window {
+              id,
+              ..Default::default()
+            }),
+            &cc.egui_ctx,
+          );
         }
       } else {
         viewer.discover(&cc.egui_ctx);
@@ -398,15 +414,17 @@ fn run<T: Transport + Send + Sync + 'static>(
   Ok(())
 }
 
-const USAGE: &str = "Usage: ctream-preview [OPTIONS] SSH_HOST|--local [DISPLAY [--windows]]
+const USAGE: &str =
+  "Usage: ctream-preview [OPTIONS] SSH_HOST|--local [DISPLAY [--windows | --window ID]]
 
   --host SSH_HOST        Alternative to the positional SSH endpoint
   --agent EXECUTABLE     Agent executable; use a mounted Windows path through WSL
   --ssh-program PROGRAM  SSH-compatible launcher (default: ssh)
   --ssh-arg ARG          Launcher prefix argument; repeat as needed
+  --window ID           Open a window ID returned by ctream windows
 
 DISPLAY is :DISPLAY, wayland-N, or windows-N. Omit it to discover displays.
-Individual Windows window capture is not supported yet.";
+Use --windows to choose an individual window on the display.";
 
 enum Endpoint {
   Local,
@@ -418,6 +436,7 @@ struct Options {
   connection: ConnectionOptions,
   target: Option<Target>,
   windows: bool,
+  window: Option<String>,
 }
 
 fn invalid(message: &str) -> io::Error {
@@ -429,6 +448,7 @@ fn parse(arguments: impl IntoIterator<Item = OsString>) -> io::Result<Option<Opt
   let mut endpoint = None;
   let mut target = None;
   let mut windows = false;
+  let mut window = None;
   let mut connection = ConnectionOptions::default();
   while let Some(argument) = arguments.next() {
     let argument = argument
@@ -448,6 +468,16 @@ fn parse(arguments: impl IntoIterator<Item = OsString>) -> io::Result<Option<Opt
         endpoint = Some(Endpoint::Ssh(host.to_owned()));
       }
       "--windows" if !windows => windows = true,
+      "--window" if window.is_none() => {
+        let id = arguments
+          .next()
+          .ok_or_else(|| invalid("--window needs a window ID"))?;
+        let id = id
+          .to_str()
+          .filter(|id| valid_window_id(id))
+          .ok_or_else(|| invalid("invalid window ID"))?;
+        window = Some(id.to_owned());
+      }
       option if connection.parse_option(option, &mut arguments)? => {}
       value if !value.starts_with('-') && endpoint.is_none() => {
         endpoint = Some(Endpoint::Ssh(value.to_owned()))
@@ -459,8 +489,11 @@ fn parse(arguments: impl IntoIterator<Item = OsString>) -> io::Result<Option<Opt
     }
   }
   let endpoint = endpoint.ok_or_else(|| invalid("expected an SSH endpoint or --local"))?;
-  if windows && (target.is_none() || matches!(target, Some(Target::Windows(_)))) {
-    return Err(invalid("--windows requires an X11 or Wayland display"));
+  if (windows || window.is_some()) && target.is_none() {
+    return Err(invalid("window selection requires a display"));
+  }
+  if windows && window.is_some() {
+    return Err(invalid("choose either --windows or --window ID"));
   }
   match &endpoint {
     Endpoint::Local => {
@@ -475,6 +508,7 @@ fn parse(arguments: impl IntoIterator<Item = OsString>) -> io::Result<Option<Opt
     connection,
     target,
     windows,
+    window,
   }))
 }
 
@@ -490,13 +524,150 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
       options.connection.local()?,
       options.target,
       options.windows,
+      options.window,
     ),
     Endpoint::Ssh(host) => run(
       &format!("ctream · {host}"),
       options.connection.ssh(&host)?,
       options.target,
       options.windows,
+      options.window,
     ),
+  }
+}
+
+#[cfg(test)]
+mod test_support {
+  use super::*;
+  use ctream_client::transport::{Cancellation, Channel};
+  use std::io::{Cursor, Write};
+
+  #[derive(Default)]
+  pub struct Observed {
+    pub bytes: Mutex<Vec<u8>>,
+    pub lifecycle: Mutex<Vec<String>>,
+  }
+
+  pub struct Writer {
+    operation: String,
+    observed: Arc<Observed>,
+  }
+
+  impl Write for Writer {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+      self.observed.bytes.lock().unwrap().extend_from_slice(bytes);
+      Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+      Ok(())
+    }
+  }
+
+  impl Drop for Writer {
+    fn drop(&mut self) {
+      self
+        .observed
+        .lifecycle
+        .lock()
+        .unwrap()
+        .push(format!("close {}", self.operation));
+    }
+  }
+
+  pub struct Mock {
+    observed: Arc<Observed>,
+    capture: &'static [u8],
+  }
+
+  impl Transport for Mock {
+    type Reader = Cursor<&'static [u8]>;
+    type Writer = Writer;
+
+    fn open(&self, arguments: &[String]) -> io::Result<Channel<Self::Reader, Self::Writer>> {
+      let operation = arguments[1].clone();
+      let response = match operation.as_str() {
+        "input" | "input-window" => &b"ready\n"[..],
+        "capture" | "capture-window" => self.capture,
+        _ => return Err(io::Error::other("unexpected operation")),
+      };
+      let observed = Arc::clone(&self.observed);
+      let cancelled = operation.clone();
+      Ok(Channel {
+        reader: Cursor::new(response),
+        writer: Writer {
+          operation,
+          observed: Arc::clone(&observed),
+        },
+        cancellation: Cancellation::new(move || {
+          observed
+            .lifecycle
+            .lock()
+            .unwrap()
+            .push(format!("cancel {cancelled}"));
+        }),
+      })
+    }
+  }
+
+  pub fn session(capture: &'static [u8]) -> (Session<Mock>, Arc<Observed>) {
+    let observed = Arc::new(Observed::default());
+    let client = Client::new(Mock {
+      observed: Arc::clone(&observed),
+      capture,
+    });
+    (
+      client.session(
+        Target::Windows(2),
+        Some(Window {
+          id: "window_1".into(),
+          ..Default::default()
+        }),
+      ),
+      observed,
+    )
+  }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+  use super::*;
+  use std::time::{Duration, Instant};
+
+  #[test]
+  fn terminal_capture_error_closes_both_channels_before_preview_is_dropped() {
+    for bytes in [&b"P6\n1 1\n255\nabc"[..], &b""[..]] {
+      let (session, observed) = test_support::session(bytes);
+      let context = egui::Context::default();
+      let mut preview = Preview::connect(session, context.clone()).unwrap();
+      preview.forwarding = true;
+      let deadline = Instant::now() + Duration::from_secs(2);
+      while preview.stream.lock().unwrap().error.is_none() {
+        assert!(Instant::now() < deadline, "capture worker did not finish");
+        thread::sleep(Duration::from_millis(1));
+      }
+      assert!(observed.lifecycle.lock().unwrap().is_empty());
+      assert!(
+        preview
+          .update_texture(&context)
+          .unwrap()
+          .contains("Capture ended")
+      );
+      assert!(preview.input.is_none());
+      assert!(preview.capture_lifetime.is_none());
+      assert!(!preview.forwarding);
+      assert_eq!(preview.texture.is_some(), !bytes.is_empty());
+      let expected = [
+        "close input-window",
+        "cancel input-window",
+        "close capture-window",
+        "cancel capture-window",
+      ];
+      assert_eq!(*observed.lifecycle.lock().unwrap(), expected);
+      assert!(preview.update_texture(&context).is_some());
+      drop(preview);
+      assert_eq!(*observed.lifecycle.lock().unwrap(), expected);
+    }
   }
 }
 
@@ -536,13 +707,23 @@ mod argument_tests {
       .unwrap()
       .unwrap();
     assert!(matches!(options.endpoint, Endpoint::Local));
+    let options = parse(args(&["test-host", "windows-2", "--windows"]))
+      .unwrap()
+      .unwrap();
+    assert!(options.windows);
+    let options = parse(args(&["test-host", "windows-2", "--window", "win-123"]))
+      .unwrap()
+      .unwrap();
+    assert_eq!(options.window.as_deref(), Some("win-123"));
   }
 
   #[test]
   fn unsupported_and_conflicting_preview_modes_are_rejected() {
     for arguments in [
-      vec!["test-host", "windows-1", "--windows"],
       vec!["test-host", "--windows"],
+      vec!["test-host", "--window", "win-1"],
+      vec!["test-host", "windows-2", "--windows", "--window", "win-1"],
+      vec!["test-host", "windows-2", "--window", "bad/id"],
       vec!["--local", "--ssh-program", "ctl"],
       vec!["--host", "test-host", "--local"],
       vec!["--host"],

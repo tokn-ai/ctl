@@ -1,4 +1,4 @@
-//! Windows display capture through DXGI Desktop Duplication.
+//! Windows display capture through DXGI and window capture through WGC.
 //!
 //! Frames are RGB PPM in the selected display's physical orientation. A separate
 //! hardware cursor is not composited into the image by this initial provider.
@@ -7,10 +7,13 @@ mod capture;
 mod dpi;
 mod id;
 mod pixels;
+mod readback;
+mod window;
 
 pub use capture::DxgiCapture;
+pub use window::WgcCapture;
 
-use ctream_driver::{CaptureDisplay, Result};
+use ctream_driver::{CaptureDisplay, CaptureWindow, DiscoverWindows, Result};
 use dpi::PhysicalPixels;
 use id::display_number;
 use std::collections::BTreeMap;
@@ -125,5 +128,19 @@ impl CaptureDisplay for Session {
 
   fn capture_display(&self) -> Result<DxgiCapture> {
     DxgiCapture::new(&self.output)
+  }
+}
+
+impl DiscoverWindows for Session {
+  fn windows(&self) -> Result<Vec<ctream_proto::Window>> {
+    ctream_windows::list_windows(self.output.info.number)
+  }
+}
+
+impl CaptureWindow for Session {
+  type Source = WgcCapture;
+
+  fn capture_window(&self, id: &str) -> Result<WgcCapture> {
+    WgcCapture::new(&self.output, id)
   }
 }

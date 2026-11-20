@@ -32,8 +32,9 @@ viewer uses the same client for discovery, capture, input, and semantic actions.
 | `ctream-proto` | `ctream/proto` | Client and display host processes | None | Shared display, window, control, and wire contract types |
 | `ctream-client` | `ctream/client` | CLI or viewer process | `ctream-proto` | Typed sessions, SSH/local transports, frame decoding, input forwarding, and coordinate transforms |
 | `ctream-driver` | `ctream/driver` | Display host process | `ctream-proto` | Platform-neutral driver and capability traits, with capture cancellation |
-| `ctream-driver-capture` | `ctream/driver-capture` | Linux or Windows display host | `ctream-driver`, `ctream-proto` | Official capture drivers and Linux capturable-window enumeration |
-| `ctream-driver-input` | `ctream/driver-input` | Linux or Windows display host | `ctream-driver` | Official input drivers |
+| `ctream-driver-capture` | `ctream/driver-capture` | Linux or Windows display host | `ctream-driver`, `ctream-proto`, `ctream-windows` (Windows) | Official capture drivers and capturable-window enumeration |
+| `ctream-driver-input` | `ctream/driver-input` | Linux or Windows display host | `ctream-driver`, `ctream-windows` (Windows) | Official input drivers |
+| `ctream-windows` | `ctream/windows` | Windows interactive session | `ctream-proto` | Shared window identity, enumeration, and physical geometry for native drivers |
 | `ctream-platform` | `ctream/platform` | Agent or local CLI on the display host | `ctream-driver`, `ctream-proto`, `ctream-driver-capture` (Linux/Windows) | Display discovery, window-query dispatch, and AT-SPI controls |
 | `ctream-cli` | `ctream/cli` | Display host for local queries; client machine for SSH queries | `ctream-client`, `ctream-platform`, `ctream-proto` | The `ctream` command |
 | `ctream-agent` | `ctream/agent` | Linux display host or Windows interactive session | `ctream-driver`, `ctream-proto`; `ctream-driver-capture`, `ctream-driver-input`, `ctream-platform` (Linux/Windows) | Reusable request validation, stdio hosting, and stock-agent operation routing |
@@ -53,7 +54,8 @@ Official driver crates are organized by capability, then platform and backend.
 For example, `ctream_driver_capture::linux::wayland::Driver` implements capture,
 and `ctream_driver_input::linux::wayland::Driver` implements input. Both crates
 also expose `linux::x11` and `windows`. Windows capture uses DXGI Desktop
-Duplication, and input uses `SendInput`. Capture drivers enumerate their capturable windows;
+Duplication for displays and Windows Graphics Capture for windows; input uses
+`SendInput`. Capture drivers enumerate their capturable windows;
 the platform library dispatches window queries and resolves AT-SPI controls.
 
 `ctream_driver::Driver` associates a `Target` with a `Session` and opens that
@@ -61,6 +63,9 @@ session from a borrowed target. Each capability has its own trait and resource
 type. The agent's generic helpers require only the capability they execute, so
 a capture-only session can be used without implementing input or discovery.
 The stock agent selects the official capture and input drivers independently.
+`ForwardWindowInput` is a separate optional capability from display input.
+The Windows drivers share native window utilities through `ctream-windows`;
+neither capability driver depends on the other.
 
 A user crate can group several capabilities under its own modules, such as
 `user_ctream_driver_android::{capture, input}` from a package named
@@ -149,10 +154,9 @@ and the virtual desktop, including negative origins and mixed DPI settings.
 Physical key events use the Windows keyboard layout. Closing or resetting the
 input channel releases keys and buttons injected by that channel.
 
-This initial Windows implementation supports displays. Individual-window
-capture, accessibility actions, audio, and hardware video encoding remain
-future work. A separately rendered hardware cursor is not composited into the
-captured image. Windows integrity restrictions still apply to elevated apps
+Windows supports displays and individual windows. Accessibility actions, audio,
+and hardware video encoding remain future work. A separately rendered hardware
+cursor is not composited into the DXGI display image. Windows integrity restrictions still apply to elevated apps
 and secure desktops. Display reconfiguration or desktop access loss requires
 reconnecting; input rejects a changed display layout before sending new events.
 WSL restart, Windows sign-out, and session switching require further live checks.
@@ -217,7 +221,7 @@ graphical session. Test consent, cancellation, and session closure.
 
 Install the window helper on the remote host with
 `cargo install --locked --path ctream/wayland-input --bin ctream-wayland-window --root ~/.local`.
-Open the display picker and choose **Windows…** beside an X11 or Wayland
+Open the display picker and choose **Windows…** beside an X11, Wayland, or Windows
 display, or launch the viewer with `HOST DISPLAY --windows`. The separate
 window helper is only required for the Wayland backend.
 
@@ -225,6 +229,10 @@ From the CLI, run `ctream windows DISPLAY` on the display host, or
 `ctream --host SSH_HOST windows DISPLAY` to query through the remote agent.
 The command lists window IDs, application IDs, and titles. Add `--json` for
 structured output.
+
+To open a previously discovered ID directly, use
+`ctream-preview --host SSH_HOST DISPLAY --window WINDOW_ID`. The same agent and
+SSH launcher options apply to this command and to the window picker.
 
 After selecting a display, the viewer can request its top-level windows from
 the remote agent and open a capture stream for one of them. Expose titles and
@@ -242,6 +250,24 @@ carries its current dimensions. A mapped window can be captured while
 covered, and the stream pauses while the window is unmapped. The X11 window
 preview is view-only. A Wayland session may also offer window selection
 through the ScreenCast portal when its backend advertises that source type.
+
+On Windows, enumerate visible top-level windows on the selected monitor and
+capture a chosen window through Windows Graphics Capture (Windows 10 1903 or
+newer). The stream follows resizing and remains bound to the window when another
+window covers it. Minimizing requires restoring and reconnecting; closing the
+window ends capture. The provider keeps the operating system's capture border.
+Discovery selects the display with greatest window overlap; an established
+window stream can follow it to another display.
+
+Windows window input uses physical DWM frame bounds shared with capture.
+The viewer maps its fitted image into those bounds after resizing. An explicit
+click or wheel action may activate the selected window; hover never activates
+it, and keyboard input requires it to be foreground. Foreground and hit tests
+reject input that would reach an unrelated window. `SendInput` still uses the
+shared desktop cursor and focus; these checks cannot make injection atomic with
+other desktop activity. Closing/resetting input releases this channel's held
+keys and buttons. Windows accessibility/message-based actions are separate
+future capabilities.
 
 Verify capture with two distinct windows. Move, resize, and cover the selected
 window and check that only its content is streamed. Verify what happens when
@@ -341,3 +367,12 @@ operations require 1.0.5; selecting an earlier contract never returns the new
 Windows discovery variant. Executable selection and WSL launch configuration
 are local transport settings. Other named protocols and product versions are
 unchanged.
+
+Windows window support advances `ctream_agent` from 1.0.5 (build 5) to 1.0.6
+(build 6). It enables `windows` and `capture-window` for Windows targets and adds
+`input-window DISPLAY WINDOW`. That channel uses `ready` and the existing Windows
+dimensioned move/button/key/reset format, with coordinates relative to the window
+capture. Frames remain P6 RGB. Windows accessibility is still unavailable.
+Contracts 1.0.1 through 1.0.5 remain supported unchanged; clients select 1.0.5 for
+Windows display operations and 1.0.6 only for Windows window operations.
+Other named protocols and product versions remain unchanged.

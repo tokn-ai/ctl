@@ -60,6 +60,13 @@ pub trait ForwardInput {
   fn input(&self) -> Result<Self::Input>;
 }
 
+/// Positional input scoped to an individual window selected within a session.
+pub trait ForwardWindowInput {
+  type Input: InputSource;
+
+  fn input_window(&self, id: &str) -> Result<Self::Input>;
+}
+
 #[derive(Clone, Copy)]
 pub enum ControlOperation {
   Inspect { bounds: bool },

@@ -255,3 +255,32 @@ on physical dimensions, capture colors and both preview aspect ratios matched,
 and keyboard delivery and key release on EOF succeeded. Temporary processes and
 test files were removed. Display discovery does not imply permission to control
 elevated applications or a secure desktop.
+
+For individual windows, build and run the separate bounded fixture:
+
+```powershell
+cargo build --locked --release -p ctream-agent --bin ctream-agent --example windows-window-check
+./target/release/examples/windows-window-check.exe ./target/release/ctream-agent.exe windows-2
+```
+
+It requires an explicitly selected idle display and creates its own window and
+opaque cover. The check compares captured pixels and physical DWM bounds before
+and after growth, shrinkage, and covering; then checks pointer mapping through
+wide and tall preview areas, keyboard delivery, capture/input EOF, and target
+closure while a key is held. Input starts only at the explicit input stage and
+is restricted to the owned windows. The same shared-cursor constraint applies.
+The fixture has a deadline, cancels agent channels, closes its windows, and
+conditionally restores the pointer.
+
+Append `--serve 60` to leave the fixture visible for a bounded preview check
+without automatic input. It prints the discovered window ID, which can be
+passed to `ctream-preview --host SSH_HOST DISPLAY --window WINDOW_ID` with the
+same agent/SSH launcher options. The maximum serve duration is 90 seconds.
+Captured images stay in memory; the fixture reports metadata and assertions.
+
+The Windows window fixture passed on a secondary display through WSL interop:
+discovery, physical capture bounds, growth/shrinkage, live colors beneath the
+opaque cover, wide/tall click mapping, keyboard delivery, EOF cleanup, and
+release on target closure with the input channel still open. The local wgpu
+viewer also rendered the selected window over SSH, and the CLI returned its ID
+exactly once. Temporary windows, processes, and executable files were removed.

@@ -183,19 +183,46 @@ pub(super) fn absolute_position(
   monitor: [i32; 4],
   desktop: [i32; 4],
 ) -> io::Result<[i32; 2]> {
+  for axis in 0..2 {
+    if monitor[axis] < desktop[axis] || monitor[axis + 2] > desktop[axis + 2] {
+      return Err(invalid("monitor is outside the virtual desktop"));
+    }
+  }
+  normalize_position(frame_position(point, frame, monitor)?, desktop)
+}
+
+/// Map capture pixels to current physical bounds, including windows which have
+/// moved or resized since the last captured frame.
+pub(super) fn frame_position(
+  point: [u32; 2],
+  frame: [u32; 2],
+  bounds: [i32; 4],
+) -> io::Result<[i32; 2]> {
   if !valid_frame(point, frame) {
     return Err(invalid("pointer is outside valid capture dimensions"));
   }
+  let mut physical = [0; 2];
+  for axis in 0..2 {
+    let start = i64::from(bounds[axis]);
+    let size = i64::from(bounds[axis + 2]) - start;
+    if size <= 0 {
+      return Err(invalid("target has invalid physical bounds"));
+    }
+    physical[axis] =
+      (start + ((2 * i64::from(point[axis]) + 1) * size / (2 * i64::from(frame[axis])))) as i32;
+  }
+  Ok(physical)
+}
+
+pub(super) fn normalize_position(point: [i32; 2], desktop: [i32; 4]) -> io::Result<[i32; 2]> {
   let mut absolute = [0; 2];
   for axis in 0..2 {
     let origin = i64::from(desktop[axis]);
     let extent = i64::from(desktop[axis + 2]) - origin;
-    let start = i64::from(monitor[axis]);
-    let size = i64::from(monitor[axis + 2]) - start;
-    if size <= 0 || extent <= 0 || start < origin || start + size > origin + extent {
-      return Err(invalid("monitor is outside the virtual desktop"));
+    let pixel = i64::from(point[axis]);
+    if extent <= 0 || pixel < origin || pixel >= origin + extent {
+      return Err(invalid("pointer is outside the virtual desktop"));
     }
-    let pixel = start + ((2 * i64::from(point[axis]) + 1) * size / (2 * i64::from(frame[axis])));
     absolute[axis] = (((2 * (pixel - origin) + 1) * 65536) / (2 * extent)).min(65535) as i32;
   }
   Ok(absolute)

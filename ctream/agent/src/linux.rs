@@ -15,6 +15,7 @@ pub(super) fn run() -> Result<()> {
     }
     Request::Target(target, operation) => match (target, operation) {
       (Target::Windows(_), _) => Err("Windows displays require a native Windows agent".into()),
+      (_, TargetOperation::InputWindow(_)) => Err("window input requires Windows".into()),
       (target, TargetOperation::Windows) => {
         serde_json::to_writer(
           io::stdout().lock(),

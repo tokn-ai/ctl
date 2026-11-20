@@ -6,8 +6,9 @@
 
 mod protocol;
 mod state;
+mod window;
 
 #[cfg(windows)]
 mod native;
 #[cfg(windows)]
-pub use native::{Driver, Input, Session};
+pub use native::{Driver, Input, Session, WindowInput};

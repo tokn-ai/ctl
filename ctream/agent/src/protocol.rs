@@ -1,7 +1,7 @@
 use ctream_driver::{ControlOperation, Result};
 use ctream_proto::{
   BOUNDS_VERSION, DISPLAY_VERSION, Target, VERSION, WAYLAND_WINDOW_VERSION,
-  WINDOWS_DISPLAY_VERSION, X11_WINDOW_VERSION, valid_window_id,
+  WINDOWS_DISPLAY_VERSION, WINDOWS_WINDOW_VERSION, X11_WINDOW_VERSION, valid_window_id,
 };
 
 pub enum TargetOperation<'a> {
@@ -9,6 +9,7 @@ pub enum TargetOperation<'a> {
   Input,
   Windows,
   CaptureWindow(&'a str),
+  InputWindow(&'a str),
 }
 
 pub enum Request<'a> {
@@ -18,21 +19,34 @@ pub enum Request<'a> {
 }
 
 fn supports_windows(version: &str, target: Target) -> bool {
-  !matches!(target, Target::Windows(_))
-    && (matches!(version, VERSION | BOUNDS_VERSION | X11_WINDOW_VERSION)
-      || (version == WAYLAND_WINDOW_VERSION && matches!(target, Target::Wayland(_))))
+  match target {
+    Target::Windows(_) => version == WINDOWS_WINDOW_VERSION,
+    _ => {
+      matches!(
+        version,
+        VERSION | WINDOWS_DISPLAY_VERSION | BOUNDS_VERSION | X11_WINDOW_VERSION
+      ) || (version == WAYLAND_WINDOW_VERSION && matches!(target, Target::Wayland(_)))
+    }
+  }
 }
 
 fn supports_displays(version: &str) -> bool {
   matches!(
     version,
-    VERSION | BOUNDS_VERSION | X11_WINDOW_VERSION | WAYLAND_WINDOW_VERSION | DISPLAY_VERSION
+    VERSION
+      | WINDOWS_DISPLAY_VERSION
+      | BOUNDS_VERSION
+      | X11_WINDOW_VERSION
+      | WAYLAND_WINDOW_VERSION
+      | DISPLAY_VERSION
   )
 }
 
 fn parse_target(version: &str, value: &str) -> Result<Target> {
   let target = Target::parse(value)?;
-  if matches!(target, Target::Windows(_)) && version != WINDOWS_DISPLAY_VERSION {
+  if matches!(target, Target::Windows(_))
+    && !matches!(version, WINDOWS_DISPLAY_VERSION | WINDOWS_WINDOW_VERSION)
+  {
     return Err("Windows displays require ctream_agent 1.0.5".into());
   }
   Ok(target)
@@ -42,7 +56,10 @@ pub fn parse(args: &[String]) -> Result<Request<'_>> {
   match args {
     [version, operation] if supports_displays(version) && operation == "discover" => {
       Ok(Request::Discover {
-        windows_displays: version == WINDOWS_DISPLAY_VERSION,
+        windows_displays: matches!(
+          version.as_str(),
+          WINDOWS_DISPLAY_VERSION | WINDOWS_WINDOW_VERSION
+        ),
       })
     }
     [version, operation, target] if supports_displays(version) => {
@@ -56,7 +73,10 @@ pub fn parse(args: &[String]) -> Result<Request<'_>> {
       Ok(Request::Target(target, operation))
     }
     [version, operation, target, id]
-      if matches!(operation.as_str(), "capture-window" | "elements" | "action") =>
+      if matches!(
+        operation.as_str(),
+        "capture-window" | "input-window" | "elements" | "action"
+      ) =>
     {
       let target = parse_target(version, target)?;
       if !supports_windows(version, target) {
@@ -67,11 +87,21 @@ pub fn parse(args: &[String]) -> Result<Request<'_>> {
       }
       let request = match operation.as_str() {
         "capture-window" => Request::Target(target, TargetOperation::CaptureWindow(id)),
+        "input-window" if matches!(target, Target::Windows(_)) => {
+          Request::Target(target, TargetOperation::InputWindow(id))
+        }
+        "input-window" => return Err("window input requires a Windows window".into()),
+        _ if matches!(target, Target::Windows(_)) => {
+          return Err("Windows accessibility operations are not supported".into());
+        }
         "elements" => Request::Controls(
           target,
           id,
           ControlOperation::Inspect {
-            bounds: matches!(version.as_str(), BOUNDS_VERSION | VERSION),
+            bounds: matches!(
+              version.as_str(),
+              BOUNDS_VERSION | WINDOWS_DISPLAY_VERSION | VERSION
+            ),
           },
         ),
         _ => Request::Controls(target, id, ControlOperation::Act),
@@ -97,6 +127,7 @@ mod tests {
       WAYLAND_WINDOW_VERSION,
       X11_WINDOW_VERSION,
       BOUNDS_VERSION,
+      WINDOWS_DISPLAY_VERSION,
       VERSION,
     ] {
       assert!(parse(&args(&[version, "discover"])).is_ok());
@@ -111,6 +142,7 @@ mod tests {
           parse(&args(&[version, "capture-window", target, "window-1"])).is_ok(),
           windows
         );
+        assert!(parse(&args(&[version, "input-window", target, "window-1"])).is_err());
       }
     }
   }
@@ -121,6 +153,7 @@ mod tests {
       WAYLAND_WINDOW_VERSION,
       X11_WINDOW_VERSION,
       BOUNDS_VERSION,
+      WINDOWS_DISPLAY_VERSION,
       VERSION,
     ] {
       let arguments = args(&[version, "elements", "wayland-1", "window-1"]);
@@ -129,36 +162,54 @@ mod tests {
       else {
         panic!("expected inspection");
       };
-      assert_eq!(bounds, matches!(version, BOUNDS_VERSION | VERSION));
+      assert_eq!(
+        bounds,
+        matches!(version, BOUNDS_VERSION | WINDOWS_DISPLAY_VERSION | VERSION)
+      );
     }
     assert!(parse(&args(&[VERSION, "capture-window", ":7", "invalid/id"])).is_err());
     assert!(parse(&args(&["9.0.9", "capture", ":7"])).is_err());
   }
 
   #[test]
-  fn windows_displays_require_their_contract_and_reject_window_operations() {
+  fn windows_display_and_window_operations_require_their_own_contracts() {
     for version in [
       DISPLAY_VERSION,
       WAYLAND_WINDOW_VERSION,
       X11_WINDOW_VERSION,
       BOUNDS_VERSION,
+      WINDOWS_DISPLAY_VERSION,
       VERSION,
     ] {
       let arguments = args(&[version, "discover"]);
       let Request::Discover { windows_displays } = parse(&arguments).unwrap() else {
         panic!("expected discovery");
       };
-      assert_eq!(windows_displays, version == WINDOWS_DISPLAY_VERSION);
+      assert_eq!(
+        windows_displays,
+        matches!(version, WINDOWS_DISPLAY_VERSION | WINDOWS_WINDOW_VERSION)
+      );
       for operation in ["capture", "input"] {
         assert_eq!(
           parse(&args(&[version, operation, "windows-1"])).is_ok(),
           windows_displays
         );
       }
-      assert!(parse(&args(&[version, "windows", "windows-1"])).is_err());
-      for operation in ["capture-window", "elements", "action"] {
+      let window_operations = version == WINDOWS_WINDOW_VERSION;
+      assert_eq!(
+        parse(&args(&[version, "windows", "windows-1"])).is_ok(),
+        window_operations
+      );
+      for operation in ["capture-window", "input-window"] {
+        assert_eq!(
+          parse(&args(&[version, operation, "windows-1", "window-1"])).is_ok(),
+          window_operations
+        );
+      }
+      for operation in ["elements", "action"] {
         assert!(parse(&args(&[version, operation, "windows-1", "window-1"])).is_err());
       }
     }
+    assert!(parse(&args(&[VERSION, "input-window", "windows-1", "invalid/id"])).is_err());
   }
 }

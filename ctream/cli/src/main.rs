@@ -12,8 +12,7 @@ Options (before list/windows):
   --ssh-program PROGRAM  SSH-compatible launcher (default: ssh)
   --ssh-arg ARG         Launcher prefix argument; repeat as needed
 
-Use :DISPLAY for X11, wayland-N for Wayland, or windows-N for a Windows display.
-Windows window queries are not supported yet.";
+Use :DISPLAY for X11, wayland-N for Wayland, or windows-N for a Windows display.";
 
 enum Operation {
   List,
@@ -159,9 +158,6 @@ fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
       print_displays(sessions, options.json)?;
     }
     Operation::Windows(target) => {
-      if matches!(target, Target::Windows(_)) {
-        return Err("Windows window queries are not supported yet".into());
-      }
       let windows = if let Some(host) = &options.host {
         Client::new(options.connection.ssh(host)?).windows(target)?
       } else if options.connection.agent_is_explicit() {

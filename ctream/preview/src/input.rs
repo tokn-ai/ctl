@@ -132,6 +132,9 @@ impl<R: Read + Send + 'static, W: Write + Send + 'static> Input<R, W> {
           .pointer
           .is_some_and(|point| pixel(image, point).is_some()) =>
         {
+          if let Some([x, y]) = self.pointer.and_then(|point| pixel(image, point)) {
+            self.control.move_pointer(x, y, image.size())?;
+          }
           self.sync_modifiers(modifiers)?;
           self.scroll += delta
             * match unit {
@@ -176,5 +179,55 @@ impl<R: Read + Send + 'static, W: Write + Send + 'static> Input<R, W> {
       }
     }
     self.sync_modifiers(modifiers)
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn wheel_remaps_stationary_pointer_after_viewport_and_capture_resize() {
+    let (session, observed) = crate::test_support::session(b"");
+    let mut input = Input::new(session.input().unwrap());
+    let geometry = |width, height, frame| {
+      crate::view::fit(
+        egui::Rect::from_min_size(Pos2::ZERO, egui::vec2(width, height)),
+        frame,
+      )
+      .unwrap()
+    };
+    input
+      .forward(
+        &geometry(800.0, 600.0, [800, 400]),
+        &[Event::PointerMoved(egui::pos2(200.0, 300.0))],
+        Modifiers::NONE,
+      )
+      .unwrap();
+    assert_eq!(*observed.bytes.lock().unwrap(), b"move 200 200 800 400\n");
+
+    let wheel = Event::MouseWheel {
+      unit: egui::MouseWheelUnit::Line,
+      delta: egui::vec2(0.0, 1.0),
+      modifiers: Modifiers::NONE,
+    };
+    for (image, expected) in [
+      (
+        geometry(400.0, 600.0, [800, 400]),
+        "move 400 200 800 400\nbutton 4 1\nbutton 4 0\n",
+      ),
+      (
+        geometry(400.0, 600.0, [400, 800]),
+        "move 200 400 400 800\nbutton 4 1\nbutton 4 0\n",
+      ),
+      (geometry(100.0, 100.0, [400, 800]), ""),
+    ] {
+      observed.bytes.lock().unwrap().clear();
+      // No PointerMoved event arrives between these geometry changes.
+      input
+        .forward(&image, std::slice::from_ref(&wheel), Modifiers::NONE)
+        .unwrap();
+      assert_eq!(*observed.bytes.lock().unwrap(), expected.as_bytes());
+    }
   }
 }

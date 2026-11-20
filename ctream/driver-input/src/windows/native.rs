@@ -1,12 +1,21 @@
 use super::{
   protocol::{Key, Topology, absolute_position},
   state::{self, Backend},
+  window::{self, Capture, Routing, WindowBackend},
 };
-use ctream_driver::{ForwardInput, InputSource, Result};
-use std::{io, marker::PhantomData, mem::size_of, rc::Rc};
+use ctream_driver::{ForwardInput, ForwardWindowInput, InputSource, Result};
+use ctream_windows::WindowTarget;
+use std::{
+  io,
+  marker::PhantomData,
+  mem::size_of,
+  rc::Rc,
+  thread,
+  time::{Duration, Instant},
+};
 use windows::{
   Win32::{
-    Foundation::{LPARAM, RECT, SetLastError, WIN32_ERROR},
+    Foundation::{HWND, LPARAM, POINT, RECT, SetLastError, WIN32_ERROR},
     Graphics::Gdi::{EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFOEXW},
     UI::{
       HiDpi::{
@@ -21,6 +30,10 @@ use windows::{
         MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN,
         MOUSEEVENTF_XUP, MOUSEINPUT, SendInput, VIRTUAL_KEY,
       },
+      WindowsAndMessaging::{
+        GA_ROOT, GUITHREADINFO, GetAncestor, GetCursorPos, GetForegroundWindow, GetGUIThreadInfo,
+        SetForegroundWindow, WindowFromPoint,
+      },
     },
   },
   core::{BOOL, Error},
@@ -33,6 +46,9 @@ pub struct Session {
 }
 pub struct Input {
   display: u32,
+}
+pub struct WindowInput {
+  target: WindowTarget,
 }
 
 impl ctream_driver::Driver for Driver {
@@ -53,6 +69,31 @@ impl ForwardInput for Session {
     Ok(Input {
       display: self.display,
     })
+  }
+}
+
+impl ForwardWindowInput for Session {
+  type Input = WindowInput;
+
+  fn input_window(&self, id: &str) -> Result<WindowInput> {
+    Ok(WindowInput {
+      target: WindowTarget::open(self.display, id)?,
+    })
+  }
+}
+
+impl InputSource for WindowInput {
+  fn run(self) -> Result<()> {
+    let _dpi = Dpi::enter()?;
+    self.target.validate()?;
+    state::run_monitored(
+      window::Window::new(NativeWindow {
+        target: self.target,
+      }),
+      io::BufReader::new(io::stdin()),
+      &mut io::stdout().lock(),
+    )?;
+    Ok(())
   }
 }
 
@@ -153,8 +194,23 @@ fn monitors(display: u32) -> io::Result<Topology> {
       "Windows display numbers start at 1",
     ));
   }
+  let query = query_monitors(format!(r"\\.\DISPLAY{display}").encode_utf16().collect())?;
+  match (query.selected, query.desktop) {
+    (Some(monitor), Some(desktop)) => Ok(Topology {
+      monitor_token: query.selected_token,
+      monitor,
+      desktop,
+    }),
+    _ => Err(io::Error::new(
+      io::ErrorKind::NotFound,
+      "selected Windows display is not attached to this desktop",
+    )),
+  }
+}
+
+fn query_monitors(name: Vec<u16>) -> io::Result<Monitors> {
   let mut query = Monitors {
-    name: format!(r"\\.\DISPLAY{display}").encode_utf16().collect(),
+    name,
     selected: None,
     selected_token: 0,
     desktop: None,
@@ -174,17 +230,7 @@ fn monitors(display: u32) -> io::Result<Topology> {
   if !result.as_bool() {
     return Err(io::Error::other(Error::from_thread()));
   }
-  match (query.selected, query.desktop) {
-    (Some(monitor), Some(desktop)) => Ok(Topology {
-      monitor_token: query.selected_token,
-      monitor,
-      desktop,
-    }),
-    _ => Err(io::Error::new(
-      io::ErrorKind::NotFound,
-      "selected Windows display is not attached to this desktop",
-    )),
-  }
+  Ok(query)
 }
 
 fn send(input: INPUT) -> io::Result<()> {
@@ -235,80 +281,200 @@ impl Backend for Native {
   }
 
   fn key(&mut self, key: Key, pressed: bool) -> io::Result<()> {
-    let (virtual_key, scan, mut flags) = match key {
-      Key::Scan { code, extended } => (
-        0,
-        code,
-        KEYEVENTF_SCANCODE
-          | if extended {
-            KEYEVENTF_EXTENDEDKEY
-          } else {
-            KEYBD_EVENT_FLAGS(0)
-          },
-      ),
-      Key::Virtual(code) => (code, 0, KEYBD_EVENT_FLAGS(0)),
-    };
-    if !pressed {
-      flags |= KEYEVENTF_KEYUP;
-    }
-    send(INPUT {
-      r#type: INPUT_KEYBOARD,
-      Anonymous: INPUT_0 {
-        ki: KEYBDINPUT {
-          wVk: VIRTUAL_KEY(virtual_key),
-          wScan: scan,
-          dwFlags: flags,
-          ..Default::default()
+    inject_key(key, pressed)
+  }
+
+  fn button(&mut self, code: u8, pressed: bool) -> io::Result<()> {
+    inject_button(code, pressed)
+  }
+}
+
+fn inject_key(key: Key, pressed: bool) -> io::Result<()> {
+  let (virtual_key, scan, mut flags) = match key {
+    Key::Scan { code, extended } => (
+      0,
+      code,
+      KEYEVENTF_SCANCODE
+        | if extended {
+          KEYEVENTF_EXTENDEDKEY
+        } else {
+          KEYBD_EVENT_FLAGS(0)
         },
+    ),
+    Key::Virtual(code) => (code, 0, KEYBD_EVENT_FLAGS(0)),
+  };
+  if !pressed {
+    flags |= KEYEVENTF_KEYUP;
+  }
+  send(INPUT {
+    r#type: INPUT_KEYBOARD,
+    Anonymous: INPUT_0 {
+      ki: KEYBDINPUT {
+        wVk: VIRTUAL_KEY(virtual_key),
+        wScan: scan,
+        dwFlags: flags,
+        ..Default::default()
+      },
+    },
+  })
+}
+
+fn inject_button(code: u8, pressed: bool) -> io::Result<()> {
+  let (flags, data) = match code {
+    1 => (
+      if pressed {
+        MOUSEEVENTF_LEFTDOWN
+      } else {
+        MOUSEEVENTF_LEFTUP
+      },
+      0,
+    ),
+    2 => (
+      if pressed {
+        MOUSEEVENTF_MIDDLEDOWN
+      } else {
+        MOUSEEVENTF_MIDDLEUP
+      },
+      0,
+    ),
+    3 => (
+      if pressed {
+        MOUSEEVENTF_RIGHTDOWN
+      } else {
+        MOUSEEVENTF_RIGHTUP
+      },
+      0,
+    ),
+    4 => (MOUSEEVENTF_WHEEL, 120),
+    5 => (MOUSEEVENTF_WHEEL, (-120_i32) as u32),
+    6 => (MOUSEEVENTF_HWHEEL, (-120_i32) as u32),
+    7 => (MOUSEEVENTF_HWHEEL, 120),
+    8 | 9 => (
+      if pressed {
+        MOUSEEVENTF_XDOWN
+      } else {
+        MOUSEEVENTF_XUP
+      },
+      u32::from(code - 7),
+    ),
+    _ => {
+      return Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "unknown button",
+      ));
+    }
+  };
+  mouse(flags, data, [0, 0])
+}
+
+struct NativeWindow {
+  target: WindowTarget,
+}
+
+fn root(hwnd: HWND) -> HWND {
+  if hwnd.0.is_null() {
+    hwnd
+  } else {
+    unsafe { GetAncestor(hwnd, GA_ROOT) }
+  }
+}
+
+impl WindowBackend for NativeWindow {
+  fn validate(&mut self) -> io::Result<()> {
+    self
+      .target
+      .validate()
+      .map_err(|error| io::Error::other(error.to_string()))
+  }
+
+  fn geometry(&mut self) -> io::Result<([i32; 4], [i32; 4])> {
+    let bounds = self
+      .target
+      .bounds()
+      .map_err(|error| io::Error::other(error.to_string()))?;
+    // The selected display limits which window can be opened. Once opened,
+    // its physical frame can move across the current virtual desktop.
+    let desktop = query_monitors(Vec::new())?.desktop.ok_or_else(|| {
+      io::Error::new(
+        io::ErrorKind::NotFound,
+        "Windows desktop has no attached displays",
+      )
+    })?;
+    Ok((bounds, desktop))
+  }
+
+  fn routing(&mut self) -> io::Result<Routing> {
+    let target = self.target.hwnd();
+    let foreground = unsafe { GetForegroundWindow() };
+    let mut info = GUITHREADINFO {
+      cbSize: size_of::<GUITHREADINFO>() as u32,
+      ..Default::default()
+    };
+    // Query even a foreign foreground thread: its capture can redirect a click
+    // away from an otherwise visible selected window.
+    unsafe { GetGUIThreadInfo(0, &mut info) }.map_err(io::Error::other)?;
+    if unsafe { GetForegroundWindow() } != foreground {
+      return Err(io::Error::other(
+        "foreground window changed while checking input routing; input was not sent",
+      ));
+    }
+    Ok(Routing {
+      foreground: root(info.hwndActive) == target && root(foreground) == target,
+      focus: root(info.hwndFocus) == target,
+      capture: if info.hwndCapture.0.is_null() {
+        Capture::None
+      } else if root(info.hwndCapture) == target {
+        Capture::Target
+      } else {
+        Capture::Other
       },
     })
   }
 
-  fn button(&mut self, code: u8, pressed: bool) -> io::Result<()> {
-    let (flags, data) = match code {
-      1 => (
-        if pressed {
-          MOUSEEVENTF_LEFTDOWN
-        } else {
-          MOUSEEVENTF_LEFTUP
-        },
-        0,
-      ),
-      2 => (
-        if pressed {
-          MOUSEEVENTF_MIDDLEDOWN
-        } else {
-          MOUSEEVENTF_MIDDLEUP
-        },
-        0,
-      ),
-      3 => (
-        if pressed {
-          MOUSEEVENTF_RIGHTDOWN
-        } else {
-          MOUSEEVENTF_RIGHTUP
-        },
-        0,
-      ),
-      4 => (MOUSEEVENTF_WHEEL, 120),
-      5 => (MOUSEEVENTF_WHEEL, (-120_i32) as u32),
-      6 => (MOUSEEVENTF_HWHEEL, (-120_i32) as u32),
-      7 => (MOUSEEVENTF_HWHEEL, 120),
-      8 | 9 => (
-        if pressed {
-          MOUSEEVENTF_XDOWN
-        } else {
-          MOUSEEVENTF_XUP
-        },
-        u32::from(code - 7),
-      ),
-      _ => {
-        return Err(io::Error::new(
-          io::ErrorKind::InvalidInput,
-          "unknown button",
+  fn activate(&mut self) -> io::Result<()> {
+    self.validate()?;
+    if !unsafe { SetForegroundWindow(self.target.hwnd()) }.as_bool() {
+      return Err(io::Error::other(
+        "Windows denied activation of the selected window; click a visible part of it before scrolling or typing",
+      ));
+    }
+    Ok(())
+  }
+
+  fn hit_target(&mut self, [x, y]: [i32; 2]) -> io::Result<bool> {
+    Ok(root(unsafe { WindowFromPoint(POINT { x, y }) }) == self.target.hwnd())
+  }
+
+  fn move_pointer(&mut self, absolute: [i32; 2]) -> io::Result<()> {
+    mouse(
+      MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
+      0,
+      absolute,
+    )
+  }
+
+  fn wait_pointer(&mut self, physical: [i32; 2]) -> io::Result<()> {
+    let deadline = Instant::now() + Duration::from_millis(50);
+    loop {
+      let mut point = POINT::default();
+      unsafe { GetCursorPos(&mut point) }.map_err(io::Error::other)?;
+      if [point.x, point.y] == physical {
+        return Ok(());
+      }
+      if Instant::now() >= deadline {
+        return Err(io::Error::other(
+          "cursor did not reach the selected window point; input was not sent",
         ));
       }
-    };
-    mouse(flags, data, [0, 0])
+      thread::sleep(Duration::from_millis(1));
+    }
+  }
+
+  fn key(&mut self, key: Key, pressed: bool) -> io::Result<()> {
+    inject_key(key, pressed)
+  }
+
+  fn button(&mut self, code: u8, pressed: bool) -> io::Result<()> {
+    inject_button(code, pressed)
   }
 }

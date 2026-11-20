@@ -1,6 +1,6 @@
 use ctream_agent::{
   protocol::{Request, TargetOperation, parse},
-  runtime::{capture_display, forward_input},
+  runtime::{capture_display, capture_window, forward_input, forward_window_input},
 };
 use ctream_driver::Result;
 use ctream_driver_capture::windows as capture;
@@ -26,6 +26,19 @@ pub(super) fn run() -> Result<()> {
     Request::Target(Target::Windows(display), TargetOperation::Input) => {
       forward_input(input::Driver, &display)
     }
-    _ => Err("this agent supports Windows display capture and input".into()),
+    Request::Target(target @ Target::Windows(_), TargetOperation::Windows) => {
+      serde_json::to_writer(
+        io::stdout().lock(),
+        &ctream_platform::windows::list(target)?,
+      )?;
+      Ok(())
+    }
+    Request::Target(Target::Windows(display), TargetOperation::CaptureWindow(id)) => {
+      capture_window(capture::Driver, &display, id)
+    }
+    Request::Target(Target::Windows(display), TargetOperation::InputWindow(id)) => {
+      forward_window_input(input::Driver, &display, id)
+    }
+    _ => Err("this agent supports Windows display and window capture/input".into()),
   }
 }

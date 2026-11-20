@@ -2,6 +2,9 @@ use super::protocol::{Event, Key, read_event};
 use std::{
   collections::BTreeSet,
   io::{self, BufRead, Write},
+  sync::mpsc::{self, Receiver, RecvTimeoutError},
+  thread,
+  time::{Duration, Instant},
 };
 
 pub(super) trait Backend {
@@ -117,6 +120,53 @@ pub(super) fn run(
   output.flush()?;
   while let Some(event) = read_event(input)? {
     state.apply(event)?;
+  }
+  state.reset()
+}
+
+/// Stdin is process-scoped. Reading it separately lets an idle window session
+/// release held input promptly when its target disappears. On error the agent
+/// exits; a pending stdin read cannot delay target cleanup or process shutdown.
+pub(super) fn run_monitored(
+  backend: impl Backend,
+  mut input: impl BufRead + Send + 'static,
+  output: &mut impl Write,
+) -> io::Result<()> {
+  let (sender, receiver) = mpsc::sync_channel(32);
+  thread::Builder::new()
+    .name("ctream-window-input".into())
+    .spawn(move || {
+      loop {
+        let event = read_event(&mut input);
+        let done = !matches!(event, Ok(Some(_)));
+        if sender.send(event).is_err() || done {
+          break;
+        }
+      }
+    })?;
+  run_received(backend, receiver, output)
+}
+
+fn run_received(
+  backend: impl Backend,
+  receiver: Receiver<io::Result<Option<Event>>>,
+  output: &mut impl Write,
+) -> io::Result<()> {
+  let mut state = Held::new(backend);
+  output.write_all(b"ready\n")?;
+  output.flush()?;
+  let mut next_check = Instant::now() + Duration::from_millis(50);
+  loop {
+    if Instant::now() >= next_check {
+      state.backend.validate_target()?;
+      next_check = Instant::now() + Duration::from_millis(50);
+    }
+    match receiver.recv_timeout(next_check.saturating_duration_since(Instant::now())) {
+      Ok(Ok(Some(event))) => state.apply(event)?,
+      Ok(Ok(None)) | Err(RecvTimeoutError::Disconnected) => break,
+      Ok(Err(error)) => return Err(error),
+      Err(RecvTimeoutError::Timeout) => continue,
+    }
   }
   state.reset()
 }
@@ -310,5 +360,49 @@ mod tests {
         ]
       );
     }
+  }
+
+  #[test]
+  fn idle_window_liveness_failure_releases_held_inputs_without_stdin_eof() {
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let backend = Fake {
+      events: events.clone(),
+      fail_key_down: false,
+      fail_key_up_once: false,
+      invalidate_after: Some(2),
+    };
+    let key = super::super::protocol::key("F8").unwrap();
+    let (sender, receiver) = mpsc::channel();
+    sender.send(Ok(Some(Event::Key(key, true)))).unwrap();
+    sender.send(Ok(Some(Event::Button(1, true)))).unwrap();
+    assert!(run_received(backend, receiver, &mut Vec::new()).is_err());
+    assert_eq!(
+      *events.borrow(),
+      [
+        Event::Key(key, true),
+        Event::Button(1, true),
+        Event::Key(key, false),
+        Event::Button(1, false),
+      ]
+    );
+    drop(sender);
+  }
+
+  #[test]
+  fn monitored_input_still_handles_handshake_events_and_eof() {
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let backend = Fake {
+      events: events.clone(),
+      fail_key_down: false,
+      fail_key_up_once: false,
+      invalidate_after: None,
+    };
+    let mut output = Vec::new();
+    run_monitored(backend, io::Cursor::new(b"button 1 1\n"), &mut output).unwrap();
+    assert_eq!(output, b"ready\n");
+    assert_eq!(
+      *events.borrow(),
+      [Event::Button(1, true), Event::Button(1, false)]
+    );
   }
 }

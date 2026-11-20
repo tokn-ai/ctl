@@ -1,8 +1,8 @@
 //! Stdio hosting for drivers composed into an agent.
 
 use ctream_driver::{
-  CaptureDisplay, CaptureLifetime, CaptureSource, CaptureWindow, Driver, ForwardInput, InputSource,
-  Result,
+  CaptureDisplay, CaptureLifetime, CaptureSource, CaptureWindow, Driver, ForwardInput,
+  ForwardWindowInput, InputSource, Result,
 };
 use std::io;
 
@@ -33,4 +33,11 @@ where
   D::Session: ForwardInput,
 {
   driver.open(target)?.input()?.run()
+}
+
+pub fn forward_window_input<D: Driver>(driver: D, target: &D::Target, id: &str) -> Result<()>
+where
+  D::Session: ForwardWindowInput,
+{
+  driver.open(target)?.input_window(id)?.run()
 }

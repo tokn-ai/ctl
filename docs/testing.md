@@ -184,3 +184,38 @@ outputs. The runner removed its task and result files after completion.
 Enabling per-monitor v2 awareness also made the scaled output's desktop
 rectangle agree with its capture dimensions. This must be preserved when
 introducing input coordinates into a Windows driver.
+
+### Launching through WSL
+
+A Windows executable launched through WSL interop can reach a different Windows
+session from one launched by Windows OpenSSH. The live WSL experiment reached
+the interactive window station directly and captured the attached outputs with
+physical-pixel geometry. No scheduled task was needed. Treat the reported
+session and window station as evidence for that launch, rather than inferring
+desktop access from the SSH endpoint's operating system.
+
+Use `windows-probe --echo-stdio` to check the same launch path without capturing
+the desktop. This portable diagnostic echoes raw bytes immediately, reports
+readiness and EOF byte counts as JSON on stderr, and exits after at most 30
+seconds. The timeout is a guard against orphaned test processes, not evidence
+that a transport handles cancellation.
+
+The Bun checker accepts the complete command that launches this mode. For
+example, replacing the host and executable path with the test environment:
+
+```sh
+bun ctream/driver-capture/examples/windows_probe/check_stdio.ts \
+  ssh -T wsl-host '/mnt/c/ctream-test/windows-probe.exe --echo-stdio'
+```
+
+It checks an 8 MiB deterministic binary payload in differently sized chunks,
+requires replies before closing stdin, verifies clean EOF and the remote byte
+count, then tests disconnecting a second command. Check the reported remote
+PIDs independently immediately afterward; successful local command termination
+does not prove remote process cleanup.
+
+The live WSL checks passed byte-for-byte and both Windows processes were absent
+before the watchdog deadline. Capture also succeeded in a separate SSH command.
+WSL restart, Windows sign-out, and session switching remain untested. A future
+production launcher needs explicit executable selection, binary stdio and
+cancellation handling; this experiment adds none of those to the agent protocol.

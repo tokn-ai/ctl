@@ -101,6 +101,128 @@ cancellation. They do not implement a real device backend. Official driver
 process tests cover helper ownership and cleanup; platform-specific tests need
 the matching operating system.
 
+## Ctream welcome and driver selection
+
+Run the protocol, client, agent, and viewer checks for backend selection and
+welcome-window changes:
+
+```sh
+cargo test --locked -p ctream-proto -p ctream-client -p ctream-agent -p ctream-preview
+```
+
+The welcome window uses the local agent when launched without arguments.
+Existing endpoint arguments configure a remote agent; a display, `--windows`,
+or `--window ID` preselects a source, and `--capture-driver ID` preselects its
+capture provider. All launches first show a view-only preview. **Start** requires
+a live frame, keeps that capture, hides setup, and opens supported input in a
+separate native viewer window. Setup stays on the active source while the
+viewer is open. The viewer's native close control releases input, restores and
+activates setup, and retains the stream as a view-only preview. There is no
+Back button. Closing setup or quitting the application cancels all work.
+
+Protocol changes: none. The window lifecycle keeps `ctream_agent` at 1.0.8
+(build 8), including its existing capture/input operations and handshakes.
+
+Check these boundaries with a recording transport and deliberately delayed
+responses before running a live desktop test:
+
+| Case | Required observation |
+| --- | --- |
+| Welcome discovery and live preview | Queries and capture may open; neither `input` nor `input-window` opens before Start. Preview pointer, button, wheel, and keyboard events send no remote input. |
+| Start and native viewer close | Start keeps the selected capture and opens input once in a separate native viewport. Native viewer close releases held keys/buttons and restores setup while capture continues. Starting again opens a new input channel for the same selection. |
+| Window ownership and source lock | Setup and viewer have different native window identities. Start hides setup and preserves its dimensions. Source/driver refresh and selection cannot change the active source while viewing. Viewer close restores and activates setup without opening another capture. |
+| Driver, display, or window change | After returning to setup, changing a source cancels the previous capture, clears its image, and waits for a frame from the new choice before enabling Start. |
+| Late asynchronous completion | Complete an old discovery, catalog, window query, or capture connection after a newer selection. Its data, frames, and errors must not replace the new selection; a late capture must be dropped and cancelled. |
+| Failure or application close | Closing setup or quitting cancels capture, input, and pending requests. Capture EOF in the viewer closes input, including when a key is held. A connection failure cannot enable Start using a stale frame. |
+| Close during input initialization | Close the native viewer while its input handshake is pending, then complete that handshake late. Input must be cancelled without interrupting the retained setup capture or reopening the viewer. |
+| Viewport input isolation | Setup events never send remote input or reset viewer-held input. Only the focused viewer forwards events; focus loss releases held state. Its own dimensions govern pointer mapping after resize. |
+| Driver-first choice | All advertised providers appear before a source is chosen, with system and capability tags. Choosing a single-scope driver sets its scope; incompatible sources are excluded. Drivers without accessible matching sessions remain visible with a No sources tag. |
+| Explicit driver choice | Unknown IDs and unsupported sources fail without opening a different provider. The actual-driver label follows the successful handshake. |
+| Independent catalog lifetime | Changing a driver or source preserves the full catalog. Refresh cancels the old catalog; a late result cannot replace the current list. Custom driver IDs use system/scope metadata rather than naming conventions. |
+| Legacy agent | Auto uses retained capture operations and their original frame format. No explicit driver is reported as honored when the catalog or new handshake is unavailable. |
+
+The `1.0.7` protocol tests should verify catalog fields and scope filtering,
+bounded and malformed handshakes, reported driver/format validation, and
+rejection of incompatible or unknown IDs. Verify that a source which fails
+during lazy initialization never reports a successful handshake. Existing
+`1.0.1`–`1.0.6` requests must retain their response shapes and frame prefixes.
+Test with slow or failed operations as well as immediate responses: successful
+frame rendering alone does not verify cancellation or stale-result handling.
+
+For a live check, use a disposable Linux session or the owned Windows fixture
+below. Select a driver and then its source, observe the welcome preview, switch
+sources while capture is opening, and resize the welcome window. Verify that
+clicking or typing in that preview does not reach the fixture. Then choose
+Start and verify a distinct native viewer appears while setup hides. Resize
+the viewer through wide and tall aspect ratios and verify fixture clicks.
+Close it with the native window control and verify setup returns with its
+original dimensions, input stops, and frames continue on the same capture.
+Reopen the viewer, close it during input initialization, and verify the late
+handshake cannot restore control. Finally close setup or quit the application.
+Choose explicit valid and incompatible providers to check the reported backend
+and failure path. Close during connection and during streaming, then verify
+that temporary capture/input processes are gone.
+
+For a local native Wayland viewer, winit 0.30.13's visibility and focus methods
+are no-ops, so record automatic hide/activation as unsupported rather than a
+successful window-management check. A remote Wayland capture target is a
+separate concern and does not impose that limitation on a viewer running on
+another platform.
+
+The separate-window step passed all 24 preview tests and all-target preview
+Clippy. Headless viewport tests cover distinct viewport events, root visibility
+commands, held-key release, focus loss, closing during input initialization,
+source locking, and pointer mapping after resize.
+
+A native macOS wgpu harness also verified distinct native window identities:
+setup retained its 860×620 size and hid while the viewer was visible and focused.
+Closing the viewer through its native window control restored and activated
+the same setup window, closed input, and retained capture. Reopening reused
+that capture and opened fresh input. Closing the application with the viewer
+open cleaned both channels. A held key survived hidden-root repaints, and
+clicks in wide and tall viewer layouts mapped to the expected source pixel.
+Owned-window screenshots confirmed fitted frames, restored setup, and no Back
+button. The harness used a local synthetic source and exited cleanly; this step
+did not repeat remote capture or input tests.
+
+### Historical single-window validation
+
+For the capture-driver and welcome-window step, 73 host tests passed, including
+13 preview tests and six welcome lifecycle tests. The welcome tests cover
+view-only interactions, retaining capture across Start/Back, continued frames
+after Back, cancellation of pending input, stale source requests, explicit
+driver failures, and legacy Auto behavior. The disposable Linux Docker suite
+also passed its new and retained capture/input contracts.
+
+The native Windows fixture on a secondary display passed Win32 discovery,
+automatic and explicit WGC capture, growth, shrinkage, and full occlusion by
+its owned cover window. The input portion of this rerun did not complete:
+`SetCursorPos` returned access denied during fixture activation, before the
+agent input channel opened.
+
+A local native wgpu lifecycle harness observed zero input channels during
+setup, one input channel after Start with the same capture, input closure
+with capture continuing after Back, and capture EOF after app close. Native
+Metal screenshots verified setup at 860×620 and 600×460 and the viewer at
+1100×720: source controls and Start remain visible, and the preview retains
+its aspect ratio inside its pane. The real welcome window also received live
+WGC frames through the WSL endpoint; its owned remote processes showed one
+capture channel and zero input channels during setup. Temporary preview and
+fixture processes were closed after the check.
+
+The driver-first catalog tests additionally cover the `1.0.8` agent-wide
+catalog, retention of the `1.0.7` targeted response shape, custom identifiers,
+catalog refresh races, metadata-driven scope switching, and tagged cards
+before source selection. Conflicting window/driver preselection never widens
+to display capture without an explicit card click, and pending display
+discovery cannot start a stale source query. A `1.0.7` fallback combines the catalogs of discovered
+targets without claiming to discover providers for absent systems. The Linux
+Docker check verifies all four compiled providers before session discovery.
+These tests and the Windows/Linux cross-target Clippy checks passed. Native
+wgpu checks also verified the Windows and Linux driver lists at 860×620 and
+600×460, including No sources tags, scrollable source controls, and unchanged
+view-only setup and Start/Back input lifecycles.
+
 ## Ctream Linux sessions
 
 Run `bash docker/ctream/run.sh` from the repository checkout to test the
@@ -249,9 +371,40 @@ The example is not run by ordinary `cargo test`; its pure rotation, coordinate,
 input-state, and protocol checks run without a Windows desktop. Use
 `bash docker/ctream/run.sh` to verify the retained Linux session behavior.
 
-The local wgpu preview received frames over the WSL SSH launcher. The isolated
-native fixture then passed on a secondary display: discovery and capture agreed
+In the earlier Windows display milestone, the local wgpu preview received
+frames over the WSL SSH launcher. The isolated native fixture then passed on
+a secondary display: discovery and capture agreed
 on physical dimensions, capture colors and both preview aspect ratios matched,
 and keyboard delivery and key release on EOF succeeded. Temporary processes and
 test files were removed. Display discovery does not imply permission to control
 elevated applications or a secure desktop.
+
+For individual windows, build and run the separate bounded fixture:
+
+```powershell
+cargo build --locked --release -p ctream-agent --bin ctream-agent --example windows-window-check
+./target/release/examples/windows-window-check.exe ./target/release/ctream-agent.exe windows-2
+```
+
+It requires an explicitly selected idle display and creates its own window and
+opaque cover. The check compares captured pixels and physical DWM bounds before
+and after growth, shrinkage, and covering; then checks pointer mapping through
+wide and tall preview areas, keyboard delivery, capture/input EOF, and target
+closure while a key is held. Input starts only at the explicit input stage and
+is restricted to the owned windows. The same shared-cursor constraint applies.
+The fixture has a deadline, cancels agent channels, closes its windows, and
+conditionally restores the pointer.
+
+Append `--serve 60` to leave the fixture visible for a bounded preview check
+without automatic input. It prints the discovered window ID, which can be
+passed to `ctream-preview --host SSH_HOST DISPLAY --window WINDOW_ID` with the
+same agent/SSH launcher options. The maximum serve duration is 90 seconds.
+Captured images stay in memory; the fixture reports metadata and assertions.
+
+Before the capture-driver and welcome-window changes, the Windows window
+fixture passed on a secondary display through WSL interop:
+discovery, physical capture bounds, growth/shrinkage, live colors beneath the
+opaque cover, wide/tall click mapping, keyboard delivery, EOF cleanup, and
+release on target closure with the input channel still open. The local wgpu
+viewer also rendered the selected window over SSH, and the CLI returned its ID
+exactly once. Temporary windows, processes, and executable files were removed.

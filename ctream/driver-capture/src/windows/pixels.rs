@@ -34,6 +34,17 @@ pub(super) fn mapped_length(size: [usize; 2], row_pitch: usize) -> io::Result<us
   needed.ok_or_else(|| io::Error::other("invalid Windows capture memory layout"))
 }
 
+/// A WGC texture may straddle a pool resize. Only the content rectangle is
+/// initialized; a texture smaller in either axis cannot provide a complete frame.
+pub(super) fn window_content_size(
+  texture: [usize; 2],
+  content: [usize; 2],
+) -> io::Result<Option<[usize; 2]>> {
+  output_size(texture, Rotation::Identity)?;
+  output_size(content, Rotation::Identity)?;
+  Ok((texture[0] >= content[0] && texture[1] >= content[1]).then_some(content))
+}
+
 /// Convert initialized pixel rows, without reading the GPU's undefined row padding.
 pub(super) fn convert_rows(
   rows: &[&[u8]],
@@ -94,6 +105,26 @@ mod tests {
       source.extend([0xee; 4]);
     }
     source
+  }
+
+  #[test]
+  fn window_resize_reads_only_complete_initialized_content() {
+    // Old buffers arriving after growth must not yield a clipped frame.
+    assert_eq!(window_content_size([404, 292], [624, 432]).unwrap(), None);
+    assert_eq!(window_content_size([624, 252], [344, 432]).unwrap(), None);
+    assert_eq!(window_content_size([344, 432], [624, 252]).unwrap(), None);
+    // Shrink can retain a larger texture, but bytes outside content are undefined.
+    assert_eq!(
+      window_content_size([624, 432], [344, 252]).unwrap(),
+      Some([344, 252])
+    );
+    assert_eq!(
+      window_content_size([624, 432], [624, 432]).unwrap(),
+      Some([624, 432])
+    );
+    assert!(window_content_size([0, 432], [344, 252]).is_err());
+    assert!(window_content_size([624, 432], [0, 252]).is_err());
+    assert!(window_content_size([usize::MAX, 432], [344, 252]).is_err());
   }
 
   #[test]

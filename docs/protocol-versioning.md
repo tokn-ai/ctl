@@ -577,6 +577,79 @@ variant. WSL executable launch and configurable SSH command selection are
 client settings, independent of the wire contract. Other named contracts and
 product release versions remain unchanged.
 
+Windows window support advances `ctream_agent` from `1.0.5` (build 5) to
+`1.0.6` (build 6). The `windows` and `capture-window` operations now accept
+`windows-N` targets. The new `input-window DISPLAY WINDOW` operation uses the
+same `ready` handshake and dimensioned pointer/button/key/reset commands as
+Windows display input, scoped to the selected window. Window IDs are opaque;
+clients return the discovered ID unchanged. Window frames remain dimensioned
+P6 RGB. Accessibility operations remain unavailable on Windows.
+
+All earlier contracts `1.0.1`–`1.0.5` retain their operations and shapes,
+including Linux accessibility bounds under `1.0.4` and `1.0.5`. Clients continue
+to use `1.0.5` for Windows displays and discovery, with discovery fallback to
+`1.0.1`; Windows window operations require `1.0.6`. The new optional Rust
+`ForwardWindowInput` capability has no effect on existing custom drivers.
+Other named protocols and product release versions remain unchanged.
+
+Capture driver selection advances `ctream_agent` from `1.0.6` (build 6) to
+`1.0.7` (build 7). It adds two operations:
+
+- `capture-drivers DISPLAY` returns JSON entries with `id`, `name`, and
+  `scopes`, where each scope is `display` or `window`. The catalog lists
+  compiled providers for the target platform; it does not guarantee runtime
+  access, installed helpers, or compositor support.
+- `capture-with-driver DISPLAY DRIVER [WINDOW]` selects a display or window
+  capture provider. `auto` chooses the stock default for that source scope.
+  An explicit provider ID never silently falls back to another backend.
+  Before frame bytes, a JSON line of at most 4096 bytes including its newline
+  identifies the actual `driver`
+  and `format`: `{"type":"ppm"}` or
+  `{"type":"fixed_rgb","size":[960,540]}`. The handshake is emitted when
+  the source first writes frame bytes, after lazy initialization succeeds.
+
+Stock display defaults are `linux.x11.ffmpeg`, `linux.wayland.grim`, and
+`windows.dxgi`; their window counterparts are `linux.x11.composite`,
+`linux.wayland.image_copy`, and `windows.wgc`. Catalog entries report their
+supported scopes; WGC display capture is not implemented in this step.
+Invalid, unknown, or incompatible provider choices fail before a successful
+capture handshake. Input selection and its existing handshake remain separate.
+Provider IDs are extensible strings of 1–128 ASCII letters, digits, dots,
+hyphens, or underscores. `auto` is a request selector, never an actual driver
+reported by a successful handshake.
+
+Contracts `1.0.1`–`1.0.6` retain their operations, frame bytes without the new
+prefix, default providers, and input behavior. Clients can use retained capture
+operations with earlier agents when **Auto** is selected. Explicit provider
+selection requires `1.0.7` and cannot be claimed after a legacy fallback.
+The welcome preview/Start lifecycle and public Rust backend module split
+introduce no additional wire changes. Other named protocols and product
+release versions remain unchanged.
+
+The driver-first catalog advances `ctream_agent` from `1.0.7` (build 7) to
+`1.0.8` (build 8). The new `1.0.8 capture-drivers` operation takes no display
+argument and returns every provider compiled into the connected agent, even
+when no compatible display session is running. Each JSON descriptor contains
+`id`, `name`, `scopes`, and `systems`; `systems` is an array of `x11`, `wayland`,
+or `windows`. The existing `display`/`window` scopes are unchanged. A provider
+may declare multiple systems and scopes. Clients use this explicit metadata
+for tags and source matching rather than interpreting provider IDs, so custom
+provider names follow the same contract as bundled drivers.
+
+The stock Linux agent advertises its X11 and Wayland providers; the native
+Windows agent advertises DXGI and WGC. Catalog discovery does not open a GPU,
+capture a frame, launch a helper, or validate session permissions. Source
+discovery and capture initialization remain responsible for runtime access.
+
+All contracts `1.0.1`–`1.0.7` retain their operations and response shapes.
+In particular, `1.0.7 capture-drivers DISPLAY` still returns only `id`, `name`,
+and `scopes`, and `capture-with-driver` still uses `1.0.7` and its existing
+startup handshake. Clients may fall back to per-target `1.0.7` queries against
+discovered sessions when the full catalog is unavailable; that fallback cannot
+discover providers for systems with no discovered session. Older agents still
+support Automatic through retained capture operations. Input, capture frame
+formats, other named protocols, and product release versions are unchanged.
+
 Every PR description must state its protocol changes, or **None** when there
 are no changes. Include the previous and new contracts and the compatibility
 impact. Keep PR titles brief; put protocol details in the description.

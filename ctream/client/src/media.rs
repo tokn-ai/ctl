@@ -1,4 +1,5 @@
 use crate::transport::{Cancellation, Channel};
+use ctream_proto::{CAPTURE_STARTED_LIMIT, CaptureFormat, CaptureStarted, valid_capture_driver};
 use std::io::{self, BufRead, BufReader, Read, Write};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -21,8 +22,11 @@ pub trait VideoSource {
 
 /// A capture owns both frame delivery and the channel that keeps its producer alive.
 pub struct Capture<R: Read, W: Write> {
-  frames: FrameReader<R>,
+  // Fields drop in declaration order: close stdin before a process reader's
+  // destructor can request cancellation of the capture producer.
   lifetime: CaptureLifetime<W>,
+  frames: FrameReader<R>,
+  driver: Option<String>,
 }
 
 pub struct CaptureLifetime<W: Write> {
@@ -40,12 +44,65 @@ impl<W: Write> Drop for CaptureLifetime<W> {
 impl<R: Read, W: Write> Capture<R, W> {
   pub fn new(channel: Channel<R, W>, format: FrameFormat) -> Self {
     Self {
-      frames: FrameReader::new(channel.reader, format),
       lifetime: CaptureLifetime {
         writer: Some(channel.writer),
         cancellation: channel.cancellation,
       },
+      frames: FrameReader::new(channel.reader, format),
+      driver: None,
     }
+  }
+
+  pub fn driver(&self) -> Option<&str> {
+    self.driver.as_deref()
+  }
+
+  /// Keep the handshake reader for frames: its buffer may already contain the
+  /// first image. Failed negotiation closes stdin before requesting cancellation.
+  pub(crate) fn started(channel: Channel<R, W>, requested: &str) -> io::Result<Self> {
+    let Channel {
+      reader,
+      writer,
+      cancellation,
+    } = channel;
+    let mut reader = BufReader::new(reader);
+    // Locals drop in reverse declaration order on every handshake error.
+    // The lifetime must close stdin before the buffered reader is dropped.
+    let lifetime = CaptureLifetime {
+      writer: Some(writer),
+      cancellation,
+    };
+    let mut header = String::new();
+    reader
+      .by_ref()
+      .take((CAPTURE_STARTED_LIMIT + 1) as u64)
+      .read_line(&mut header)?;
+    if header.len() > CAPTURE_STARTED_LIMIT || !header.ends_with('\n') {
+      return Err(io::Error::other(
+        "invalid or oversized capture startup handshake",
+      ));
+    }
+    let started: CaptureStarted = serde_json::from_str(&header).map_err(io::Error::other)?;
+    if !valid_capture_driver(&started.driver)
+      || started.driver == "auto"
+      || (requested != "auto" && started.driver != requested)
+    {
+      return Err(io::Error::other(
+        "agent reported an unexpected capture driver",
+      ));
+    }
+    let format = match started.format {
+      CaptureFormat::Ppm => FrameFormat::Ppm,
+      CaptureFormat::FixedRgb { size } => {
+        pixel_count(size)?;
+        FrameFormat::FixedRgb { size }
+      }
+    };
+    Ok(Self {
+      lifetime,
+      frames: FrameReader { reader, format },
+      driver: Some(started.driver),
+    })
   }
 
   /// Retain the writer with the viewer. Closing it tells the agent to stop capture
@@ -131,6 +188,115 @@ impl<R: Read> VideoSource for FrameReader<R> {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use std::sync::{Arc, Mutex};
+
+  type Events = Arc<Mutex<Vec<&'static str>>>;
+
+  struct RecordingReader {
+    bytes: io::Cursor<Vec<u8>>,
+    events: Events,
+    cancellation: Cancellation,
+    fail: bool,
+  }
+
+  impl Read for RecordingReader {
+    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+      if self.fail {
+        return Err(io::Error::other("capture handshake read failed"));
+      }
+      self.bytes.read(output)
+    }
+  }
+
+  impl Drop for RecordingReader {
+    fn drop(&mut self) {
+      self.events.lock().unwrap().push("reader");
+      // ProcessReader also requests cancellation when its reader is dropped.
+      self.cancellation.cancel();
+    }
+  }
+
+  struct RecordingWriter(Events);
+
+  impl Write for RecordingWriter {
+    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+      Ok(data.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+      Ok(())
+    }
+  }
+
+  impl Drop for RecordingWriter {
+    fn drop(&mut self) {
+      self.0.lock().unwrap().push("writer");
+    }
+  }
+
+  fn recording_channel(bytes: Vec<u8>) -> (Channel<RecordingReader, RecordingWriter>, Events) {
+    let events = Events::default();
+    let cancelled = Arc::clone(&events);
+    let cancellation = Cancellation::new(move || cancelled.lock().unwrap().push("cancel"));
+    (
+      Channel {
+        reader: RecordingReader {
+          bytes: io::Cursor::new(bytes),
+          events: Arc::clone(&events),
+          cancellation: cancellation.clone(),
+          fail: false,
+        },
+        writer: RecordingWriter(Arc::clone(&events)),
+        cancellation,
+      },
+      events,
+    )
+  }
+
+  #[test]
+  fn invalid_capture_startup_closes_writer_before_cancellation_and_reader() {
+    for header in [
+      "".into(),
+      "{}\n".into(),
+      "x".repeat(CAPTURE_STARTED_LIMIT + 1),
+      "{\"driver\":\"provider\",\"format\":{\"type\":\"ppm\"}}".into(),
+      "{\"driver\":\"auto\",\"format\":{\"type\":\"ppm\"}}\n".into(),
+      "{\"driver\":\"other\",\"format\":{\"type\":\"ppm\"}}\n".into(),
+      "{\"driver\":\"provider\",\"format\":{\"type\":\"unknown\"}}\n".into(),
+      "{\"driver\":\"provider\",\"format\":{\"type\":\"fixed_rgb\",\"size\":[0,1]}}\n".into(),
+    ] {
+      let (channel, events) = recording_channel(header.into_bytes());
+      assert!(Capture::started(channel, "provider").is_err());
+      assert_eq!(*events.lock().unwrap(), ["writer", "cancel", "reader"]);
+    }
+    let (mut channel, events) = recording_channel(Vec::new());
+    channel.reader.fail = true;
+    assert!(Capture::started(channel, "provider").is_err());
+    assert_eq!(*events.lock().unwrap(), ["writer", "cancel", "reader"]);
+  }
+
+  #[test]
+  fn dropping_capture_closes_writer_before_cancellation_and_reader() {
+    for negotiated in [false, true] {
+      let mut bytes = Vec::new();
+      if negotiated {
+        bytes.extend_from_slice(b"{\"driver\":\"provider\",\"format\":{\"type\":\"ppm\"}}\n");
+      }
+      bytes.extend_from_slice(b"P6\n1 1\n255\nabc");
+      let (channel, events) = recording_channel(bytes);
+      let mut capture = if negotiated {
+        Capture::started(channel, "provider").unwrap()
+      } else {
+        Capture::new(channel, FrameFormat::Ppm)
+      };
+      assert_eq!(capture.driver(), negotiated.then_some("provider"));
+      let mut frame = Frame::default();
+      capture.read_frame(&mut frame).unwrap();
+      assert_eq!(frame.pixels, b"abc");
+      assert!(events.lock().unwrap().is_empty());
+      drop(capture);
+      assert_eq!(*events.lock().unwrap(), ["writer", "cancel", "reader"]);
+    }
+  }
 
   #[test]
   fn successive_frames_resize_and_keep_binary_pixels() {

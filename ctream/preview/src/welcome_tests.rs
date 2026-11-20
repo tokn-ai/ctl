@@ -1,0 +1,1371 @@
+use super::*;
+use ctream_client::transport::{Cancellation, Channel};
+use std::{
+  cell::RefCell,
+  collections::VecDeque,
+  io::{Read, Write},
+  rc::Rc,
+  sync::{Condvar, Mutex},
+  thread,
+};
+
+const DEADLINE: Duration = Duration::from_secs(4);
+const DISPLAYS: &str = concat!(
+  r#"[{"display":{"windows":{"number":1,"name":"test one","bounds":[0,0,4,2]}},"class":null,"selectable":true},"#,
+  r#"{"display":{"windows":{"number":2,"name":"test two","bounds":[4,0,8,2]}},"class":null,"selectable":true}]"#,
+);
+const DRIVERS: &str = concat!(
+  r#"[{"id":"windows.dxgi","name":"DXGI","scopes":["display"]},"#,
+  r#"{"id":"windows.wgc","name":"WGC","scopes":["window"]}]"#,
+);
+const CATALOG: &str = concat!(
+  r#"[{"id":"windows.dxgi","name":"DXGI","scopes":["display"],"systems":["windows"]},"#,
+  r#"{"id":"windows.wgc","name":"WGC","scopes":["window"],"systems":["windows"]}]"#,
+);
+
+#[derive(Default)]
+struct Wire {
+  incoming: VecDeque<u8>,
+  eof: bool,
+  waiting: bool,
+  cancelled: bool,
+  writer_closed: bool,
+  sent: Vec<u8>,
+}
+
+struct Record {
+  arguments: Vec<String>,
+  wire: Mutex<Wire>,
+  wake: Condvar,
+}
+
+impl Record {
+  fn operation(&self) -> &str {
+    &self.arguments[1]
+  }
+  fn target(&self) -> Option<&str> {
+    self.arguments.get(2).map(String::as_str)
+  }
+  fn closed(&self) -> bool {
+    self.wire.lock().unwrap().writer_closed
+  }
+  fn cancelled(&self) -> bool {
+    self.wire.lock().unwrap().cancelled
+  }
+  fn sent(&self) -> String {
+    String::from_utf8(self.wire.lock().unwrap().sent.clone()).unwrap()
+  }
+  fn push_frame(&self) {
+    let mut wire = self.wire.lock().unwrap();
+    assert!(
+      !wire.eof,
+      "cannot deliver another frame after capture closes"
+    );
+    wire.incoming.extend(b"P6\n2 1\n255\nghijkl");
+    self.wake.notify_all();
+  }
+}
+
+struct Reader(Arc<Record>);
+
+impl Read for Reader {
+  fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+    if output.is_empty() {
+      return Ok(0);
+    }
+    let mut wire = self.0.wire.lock().unwrap();
+    if wire.incoming.is_empty() && !wire.eof {
+      wire.waiting = true;
+      let (updated, timeout) = self
+        .0
+        .wake
+        .wait_timeout_while(wire, DEADLINE, |wire| wire.incoming.is_empty() && !wire.eof)
+        .unwrap();
+      wire = updated;
+      if timeout.timed_out() && wire.incoming.is_empty() && !wire.eof {
+        return Err(io::Error::new(
+          io::ErrorKind::TimedOut,
+          "mock channel was not closed",
+        ));
+      }
+    }
+    let count = output.len().min(wire.incoming.len());
+    for byte in &mut output[..count] {
+      *byte = wire.incoming.pop_front().unwrap();
+    }
+    Ok(count)
+  }
+}
+
+struct Writer(Arc<Record>);
+
+impl Write for Writer {
+  fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+    self.0.wire.lock().unwrap().sent.extend_from_slice(bytes);
+    Ok(bytes.len())
+  }
+  fn flush(&mut self) -> io::Result<()> {
+    Ok(())
+  }
+}
+
+impl Drop for Writer {
+  fn drop(&mut self) {
+    let mut wire = self.0.wire.lock().unwrap();
+    wire.writer_closed = true;
+    wire.eof = true;
+    self.0.wake.notify_all();
+  }
+}
+
+#[derive(Default)]
+struct Gate {
+  released: Mutex<bool>,
+  wake: Condvar,
+}
+
+impl Gate {
+  fn release(&self) {
+    *self.released.lock().unwrap() = true;
+    self.wake.notify_all();
+  }
+
+  fn wait(&self) -> io::Result<()> {
+    let (released, _) = self
+      .wake
+      .wait_timeout_while(self.released.lock().unwrap(), DEADLINE, |released| {
+        !*released
+      })
+      .unwrap();
+    if *released {
+      Ok(())
+    } else {
+      Err(io::Error::other("mock open was not released"))
+    }
+  }
+}
+
+#[derive(Default)]
+struct Config {
+  legacy: bool,
+  per_target_catalog_only: bool,
+  catalog: Option<String>,
+  displays: Option<String>,
+  capture_failure: bool,
+  wait_input: bool,
+  gates: Vec<(String, String, Arc<Gate>)>,
+}
+
+#[derive(Default)]
+struct Observed {
+  records: Mutex<Vec<Arc<Record>>>,
+  config: Mutex<Config>,
+}
+
+#[derive(Clone, Default)]
+struct Mock(Arc<Observed>);
+
+impl Mock {
+  fn records(&self, operation: &str) -> Vec<Arc<Record>> {
+    self
+      .0
+      .records
+      .lock()
+      .unwrap()
+      .iter()
+      .filter(|record| record.operation() == operation)
+      .cloned()
+      .collect()
+  }
+
+  fn captures(&self) -> Vec<Arc<Record>> {
+    self
+      .0
+      .records
+      .lock()
+      .unwrap()
+      .iter()
+      .filter(|record| {
+        matches!(
+          record.operation(),
+          "capture" | "capture-window" | "capture-with-driver"
+        )
+      })
+      .cloned()
+      .collect()
+  }
+
+  fn inputs(&self) -> Vec<Arc<Record>> {
+    self
+      .0
+      .records
+      .lock()
+      .unwrap()
+      .iter()
+      .filter(|record| matches!(record.operation(), "input" | "input-window"))
+      .cloned()
+      .collect()
+  }
+
+  fn delay(&self, operation: &str, target: &str) -> Arc<Gate> {
+    let gate = Arc::new(Gate::default());
+    self
+      .0
+      .config
+      .lock()
+      .unwrap()
+      .gates
+      .push((operation.into(), target.into(), Arc::clone(&gate)));
+    gate
+  }
+}
+
+impl Transport for Mock {
+  type Reader = Reader;
+  type Writer = Writer;
+
+  fn open(&self, arguments: &[String]) -> io::Result<Channel<Reader, Writer>> {
+    let operation = arguments[1].as_str();
+    let target = arguments.get(2).map(String::as_str).unwrap_or("");
+    let mut config = self.0.config.lock().unwrap();
+    let (mut incoming, eof) = match operation {
+      "discover" => (
+        config
+          .displays
+          .as_deref()
+          .unwrap_or(DISPLAYS)
+          .as_bytes()
+          .to_vec(),
+        true,
+      ),
+      "windows" => (
+        format!(
+          r#"[{{"id":"window-{}","title":"Owned fixture","app_id":"fixture"}}]"#,
+          target.trim_start_matches("windows-")
+        )
+        .into_bytes(),
+        true,
+      ),
+      "capture-drivers" => (
+        if config.legacy || (target.is_empty() && config.per_target_catalog_only) {
+          Vec::new()
+        } else if target.is_empty() {
+          config
+            .catalog
+            .as_deref()
+            .unwrap_or(CATALOG)
+            .as_bytes()
+            .to_vec()
+        } else {
+          DRIVERS.as_bytes().to_vec()
+        },
+        true,
+      ),
+      "input" | "input-window" => (
+        if config.wait_input {
+          Vec::new()
+        } else {
+          b"ready\n".to_vec()
+        },
+        false,
+      ),
+      "capture-with-driver" if config.capture_failure => (b"backend unavailable\n".to_vec(), true),
+      "capture-with-driver" => {
+        let driver = if arguments[3] == "auto" {
+          if arguments.len() == 5 {
+            "windows.wgc"
+          } else {
+            "windows.dxgi"
+          }
+        } else {
+          &arguments[3]
+        };
+        (
+          format!("{{\"driver\":\"{driver}\",\"format\":{{\"type\":\"ppm\"}}}}\n").into_bytes(),
+          false,
+        )
+      }
+      "capture" | "capture-window" => (Vec::new(), false),
+      _ => return Err(io::Error::other("unexpected mock operation")),
+    };
+    if matches!(
+      operation,
+      "capture" | "capture-window" | "capture-with-driver"
+    ) && !eof
+    {
+      incoming.extend_from_slice(if target == "windows-2" {
+        b"P6\n3 1\n255\nabcdefghi"
+      } else {
+        b"P6\n2 1\n255\nabcdef"
+      });
+    }
+    let gate = config
+      .gates
+      .iter()
+      .position(|(op, display, _)| op == operation && display == target)
+      .map(|index| config.gates.remove(index).2);
+    drop(config);
+    let record = Arc::new(Record {
+      arguments: arguments.to_vec(),
+      wire: Mutex::new(Wire {
+        incoming: incoming.into(),
+        eof,
+        ..Default::default()
+      }),
+      wake: Condvar::new(),
+    });
+    self.0.records.lock().unwrap().push(Arc::clone(&record));
+    if let Some(gate) = gate {
+      gate.wait()?;
+    }
+    let cancelled = Arc::clone(&record);
+    Ok(Channel {
+      reader: Reader(Arc::clone(&record)),
+      writer: Writer(record),
+      cancellation: Cancellation::new(move || {
+        let mut wire = cancelled.wire.lock().unwrap();
+        wire.cancelled = true;
+        wire.eof = true;
+        cancelled.wake.notify_all();
+      }),
+    })
+  }
+}
+
+fn raw(events: Vec<egui::Event>) -> egui::RawInput {
+  egui::RawInput {
+    screen_rect: Some(egui::Rect::from_min_size(
+      egui::Pos2::ZERO,
+      egui::vec2(860.0, 620.0),
+    )),
+    focused: true,
+    events,
+    ..Default::default()
+  }
+}
+
+fn poll_until(
+  viewer: &mut Viewer<Mock>,
+  ctx: &egui::Context,
+  done: impl Fn(&Viewer<Mock>) -> bool,
+) {
+  let deadline = Instant::now() + DEADLINE;
+  loop {
+    let _ = ctx.run(raw(Vec::new()), |ctx| viewer.poll(ctx));
+    if done(viewer) {
+      return;
+    }
+    assert!(
+      Instant::now() < deadline,
+      "welcome condition timed out; discovery={:?}, preview={:?}, selection={:?}",
+      viewer.discovery_error,
+      viewer.preview_error,
+      viewer.selection_error()
+    );
+    thread::sleep(Duration::from_millis(2));
+  }
+}
+
+fn ready(viewer: &Viewer<Mock>) -> bool {
+  viewer.preview.as_ref().is_some_and(Preview::ready)
+}
+
+fn create(mock: &Mock, ctx: &egui::Context, window: bool, driver: &str) -> Viewer<Mock> {
+  Viewer::new(
+    mock.clone(),
+    Some(Target::Windows(1)),
+    window,
+    window.then(|| "window-1".into()),
+    driver.into(),
+    ctx,
+  )
+}
+
+fn render(
+  viewer: &mut Viewer<Mock>,
+  ctx: &egui::Context,
+  events: Vec<egui::Event>,
+) -> egui::FullOutput {
+  let mut input = raw(events);
+  if viewer.viewing {
+    input.viewport_id = viewer_id();
+    input.viewports.insert(
+      viewer_id(),
+      egui::ViewportInfo {
+        parent: Some(egui::ViewportId::ROOT),
+        focused: Some(true),
+        ..Default::default()
+      },
+    );
+  }
+  ctx.run(input, |ctx| {
+    viewer.poll(ctx);
+    if viewer.viewing {
+      viewer.show_viewer(ctx);
+    } else {
+      viewer.show_setup(ctx);
+    }
+  })
+}
+
+struct NativeFrame {
+  root: egui::FullOutput,
+  children: Vec<(egui::ViewportId, egui::FullOutput)>,
+}
+
+impl NativeFrame {
+  fn commands(&self, id: egui::ViewportId) -> impl Iterator<Item = &egui::ViewportCommand> {
+    std::iter::once(&self.root)
+      .chain(self.children.iter().map(|(_, output)| output))
+      .filter_map(move |output| output.viewport_output.get(&id))
+      .flat_map(|output| &output.commands)
+  }
+
+  fn child(&self) -> &egui::FullOutput {
+    &self
+      .children
+      .last()
+      .expect("native viewer must be rendered")
+      .1
+  }
+}
+
+/// Exercise the production immediate-viewport path while replacing just the OS
+/// renderer. Child input and output retain their own viewport identities.
+fn native_frame(
+  viewer: &mut Viewer<Mock>,
+  ctx: &egui::Context,
+  root_input: egui::RawInput,
+  child_input: egui::RawInput,
+) -> NativeFrame {
+  ctx.set_embed_viewports(false);
+  let input = Rc::new(RefCell::new(child_input));
+  let children = Rc::new(RefCell::new(Vec::new()));
+  let recorded = Rc::clone(&children);
+  egui::Context::set_immediate_viewport_renderer(move |ctx, mut viewport| {
+    let mut input = input.borrow_mut().take();
+    input.viewport_id = viewport.ids.this;
+    input.viewports.entry(viewport.ids.this).or_default().parent = Some(viewport.ids.parent);
+    let output = ctx.run(input, |ctx| (viewport.viewport_ui_cb)(ctx));
+    recorded.borrow_mut().push((viewport.ids.this, output));
+  });
+  let root = ctx.run(root_input, |ctx| viewer.update_ui(ctx));
+  NativeFrame {
+    root,
+    children: std::mem::take(&mut *children.borrow_mut()),
+  }
+}
+
+fn close_input(id: egui::ViewportId) -> egui::RawInput {
+  let mut input = raw(Vec::new());
+  input
+    .viewports
+    .entry(id)
+    .or_default()
+    .events
+    .push(egui::ViewportEvent::Close);
+  input
+}
+
+fn rendered_image(output: &egui::FullOutput, texture: egui::TextureId) -> egui::Rect {
+  output
+    .shapes
+    .iter()
+    .find_map(|shape| match &shape.shape {
+      egui::epaint::Shape::Mesh(mesh) if mesh.texture_id == texture => Some(mesh.calc_bounds()),
+      _ => None,
+    })
+    .expect("preview image must be drawn")
+}
+
+fn label_center(output: &egui::FullOutput, label: &str) -> egui::Pos2 {
+  output
+    .shapes
+    .iter()
+    .find_map(|shape| match &shape.shape {
+      egui::epaint::Shape::Text(text) if text.galley.text() == label => {
+        Some(text.pos + text.galley.rect.center().to_vec2())
+      }
+      _ => None,
+    })
+    .unwrap_or_else(|| panic!("expected rendered label {label:?}"))
+}
+
+fn click_driver(viewer: &mut Viewer<Mock>, ctx: &egui::Context, name: &str) {
+  let at = label_center(&render(viewer, ctx, Vec::new()), name);
+  render(
+    viewer,
+    ctx,
+    vec![
+      egui::Event::PointerMoved(at),
+      egui::Event::PointerButton {
+        pos: at,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+      },
+      egui::Event::PointerButton {
+        pos: at,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+      },
+    ],
+  );
+}
+
+fn image_center(viewer: &mut Viewer<Mock>, ctx: &egui::Context) -> egui::Pos2 {
+  let texture = viewer
+    .preview
+    .as_ref()
+    .unwrap()
+    .texture
+    .as_ref()
+    .unwrap()
+    .id();
+  render(viewer, ctx, Vec::new())
+    .shapes
+    .iter()
+    .find_map(|shape| match &shape.shape {
+      egui::epaint::Shape::Mesh(mesh) if mesh.texture_id == texture => {
+        Some(mesh.calc_bounds().center())
+      }
+      _ => None,
+    })
+    .expect("preview image must be drawn")
+}
+
+fn interactions(at: egui::Pos2, hold_key: bool) -> Vec<egui::Event> {
+  let mut events = vec![
+    egui::Event::PointerMoved(at),
+    egui::Event::PointerButton {
+      pos: at,
+      button: egui::PointerButton::Primary,
+      pressed: true,
+      modifiers: egui::Modifiers::NONE,
+    },
+    egui::Event::PointerButton {
+      pos: at,
+      button: egui::PointerButton::Primary,
+      pressed: false,
+      modifiers: egui::Modifiers::NONE,
+    },
+    egui::Event::MouseWheel {
+      unit: egui::MouseWheelUnit::Line,
+      delta: egui::vec2(0.0, 1.0),
+      modifiers: egui::Modifiers::NONE,
+    },
+    egui::Event::Key {
+      key: egui::Key::F8,
+      physical_key: Some(egui::Key::F8),
+      pressed: true,
+      repeat: false,
+      modifiers: egui::Modifiers::NONE,
+    },
+  ];
+  if !hold_key {
+    events.push(egui::Event::Key {
+      key: egui::Key::F8,
+      physical_key: Some(egui::Key::F8),
+      pressed: false,
+      repeat: false,
+      modifiers: egui::Modifiers::NONE,
+    });
+  }
+  events
+}
+
+#[test]
+fn native_viewer_hides_setup_and_close_restores_it_without_reopening_capture() {
+  let mock = Mock::default();
+  let ctx = egui::Context::default();
+  let mut viewer = create(&mock, &ctx, false, "auto");
+  poll_until(&mut viewer, &ctx, ready);
+  let capture = mock.captures().pop().unwrap();
+  viewer.start(&ctx);
+  poll_until(&mut viewer, &ctx, |viewer| {
+    viewer.preview.as_ref().unwrap().input.is_some()
+  });
+  let input = mock.inputs().pop().unwrap();
+  let opened = native_frame(&mut viewer, &ctx, raw(Vec::new()), raw(Vec::new()));
+  assert_ne!(viewer_id(), egui::ViewportId::ROOT);
+  assert!(opened.children.iter().all(|(id, _)| *id == viewer_id()));
+  assert_eq!(
+    opened.root.viewport_output[&viewer_id()].parent,
+    egui::ViewportId::ROOT
+  );
+  assert_eq!(
+    opened.root.viewport_output[&viewer_id()].builder.inner_size,
+    Some(egui::vec2(1100.0, 720.0))
+  );
+  assert!(
+    opened
+      .commands(egui::ViewportId::ROOT)
+      .any(|command| matches!(command, egui::ViewportCommand::Visible(false)))
+  );
+  assert!(
+    opened
+      .commands(viewer_id())
+      .any(|command| matches!(command, egui::ViewportCommand::Focus))
+  );
+  assert!(
+    !opened
+      .commands(egui::ViewportId::ROOT)
+      .any(|command| matches!(command, egui::ViewportCommand::InnerSize(_)))
+  );
+  assert!(
+    !opened
+      .child()
+      .shapes
+      .iter()
+      .any(|shape| matches!(&shape.shape,
+    egui::epaint::Shape::Text(text) if text.galley.text().contains("Back")))
+  );
+
+  // A hidden setup cannot replace the active source, even if a stale event
+  // attempts a driver change or refresh while the child is running.
+  let old_driver = viewer.driver.clone();
+  let windows_queries = mock.records("windows").len();
+  viewer.choose_driver("windows.wgc");
+  viewer.load_target(&ctx);
+  viewer.discover(&ctx);
+  assert_eq!(viewer.driver, old_driver);
+  assert_eq!(mock.records("windows").len(), windows_queries);
+  assert!(!capture.closed() && !input.closed());
+
+  let texture = viewer
+    .preview
+    .as_ref()
+    .unwrap()
+    .texture
+    .as_ref()
+    .unwrap()
+    .id();
+  let at = rendered_image(opened.child(), texture).center();
+  native_frame(
+    &mut viewer,
+    &ctx,
+    raw(Vec::new()),
+    raw(interactions(at, true)),
+  );
+  assert!(input.sent().contains("key F8 1\n"));
+  let before_close = input.sent();
+  let mut closing = close_input(viewer_id());
+  closing.events = interactions(at, false);
+  let closed = native_frame(&mut viewer, &ctx, raw(Vec::new()), closing);
+  assert!(!viewer.viewing);
+  assert!(input.closed() && input.cancelled());
+  assert_eq!(
+    input.sent(),
+    before_close,
+    "a close event must not forward accompanying input"
+  );
+  assert!(!capture.closed() && !capture.cancelled());
+  assert!(
+    closed
+      .commands(egui::ViewportId::ROOT)
+      .any(|command| matches!(command, egui::ViewportCommand::Visible(true)))
+  );
+  assert!(
+    closed
+      .commands(egui::ViewportId::ROOT)
+      .any(|command| matches!(command, egui::ViewportCommand::Minimized(false)))
+  );
+  assert!(
+    closed
+      .commands(egui::ViewportId::ROOT)
+      .any(|command| matches!(command, egui::ViewportCommand::Focus))
+  );
+  assert!(
+    !closed
+      .commands(egui::ViewportId::ROOT)
+      .any(|command| matches!(command, egui::ViewportCommand::Close))
+  );
+  assert!(ready(&viewer));
+  let setup = native_frame(&mut viewer, &ctx, raw(Vec::new()), raw(Vec::new()));
+  assert!(setup.children.is_empty());
+  label_center(&setup.root, "CAPTURE DRIVER");
+  assert_eq!(mock.captures().len(), 1);
+  viewer.start(&ctx);
+  poll_until(&mut viewer, &ctx, |viewer| {
+    viewer.preview.as_ref().unwrap().input.is_some()
+  });
+  let reopened = native_frame(&mut viewer, &ctx, raw(Vec::new()), raw(Vec::new()));
+  assert!(
+    reopened
+      .commands(egui::ViewportId::ROOT)
+      .any(|command| matches!(command, egui::ViewportCommand::Visible(false)))
+  );
+  assert_eq!(mock.inputs().len(), 2);
+  assert_eq!(mock.captures().len(), 1);
+  native_frame(&mut viewer, &ctx, raw(Vec::new()), close_input(viewer_id()));
+  viewer.choose_driver("windows.wgc");
+  assert_eq!(
+    viewer.driver, "windows.wgc",
+    "closing the child unlocks setup"
+  );
+}
+
+#[test]
+fn viewer_input_isolated_from_setup_and_focus_loss_releases_held_state() {
+  let mock = Mock::default();
+  let ctx = egui::Context::default();
+  let mut viewer = create(&mock, &ctx, true, "auto");
+  poll_until(&mut viewer, &ctx, ready);
+  viewer.start(&ctx);
+  poll_until(&mut viewer, &ctx, |viewer| {
+    viewer.preview.as_ref().unwrap().input.is_some()
+  });
+  let input = mock.inputs().pop().unwrap();
+  let opened = native_frame(&mut viewer, &ctx, raw(Vec::new()), raw(Vec::new()));
+  let texture = viewer
+    .preview
+    .as_ref()
+    .unwrap()
+    .texture
+    .as_ref()
+    .unwrap()
+    .id();
+  let at = rendered_image(opened.child(), texture).center();
+  let before = input.sent();
+  native_frame(
+    &mut viewer,
+    &ctx,
+    raw(interactions(at, false)),
+    raw(Vec::new()),
+  );
+  assert_eq!(
+    input.sent(),
+    before,
+    "root events must never reach the viewer's input channel"
+  );
+  native_frame(
+    &mut viewer,
+    &ctx,
+    raw(Vec::new()),
+    raw(interactions(at, true)),
+  );
+  assert!(input.sent().contains("key F8 1\n"));
+  assert!(viewer.preview.as_ref().unwrap().forwarding);
+
+  // Painting another view of the shared texture must not reset the viewer's
+  // held input, including when the read-only pane cannot fit an image.
+  let held = input.sent();
+  for size in [egui::vec2(860.0, 620.0), egui::vec2(1.0, 1.0)] {
+    let mut source_input = raw(interactions(at, false));
+    source_input.screen_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size));
+    let _ = ctx.run(source_input, |ctx| {
+      egui::CentralPanel::default().show(ctx, |ui| {
+        viewer.preview.as_mut().unwrap().show(ui, None, &[], false);
+      });
+    });
+    assert_eq!(input.sent(), held);
+    assert!(viewer.preview.as_ref().unwrap().forwarding);
+  }
+  let mut unfocused = raw(vec![egui::Event::WindowFocused(false)]);
+  unfocused.focused = false;
+  native_frame(&mut viewer, &ctx, raw(Vec::new()), unfocused.clone());
+  assert!(input.sent().ends_with("reset\n"));
+  assert!(!viewer.preview.as_ref().unwrap().forwarding);
+  let released = input.sent();
+  native_frame(&mut viewer, &ctx, raw(Vec::new()), unfocused);
+  assert_eq!(
+    input.sent(),
+    released,
+    "idle unfocused paints must not repeatedly reset"
+  );
+  assert!(!input.closed());
+  native_frame(&mut viewer, &ctx, raw(Vec::new()), close_input(viewer_id()));
+  assert!(input.closed() && input.cancelled());
+}
+
+#[test]
+fn resized_native_viewer_maps_clicks_using_its_own_image_rectangle() {
+  let mock = Mock::default();
+  let ctx = egui::Context::default();
+  let mut viewer = create(&mock, &ctx, true, "auto");
+  poll_until(&mut viewer, &ctx, ready);
+  viewer.start(&ctx);
+  poll_until(&mut viewer, &ctx, |viewer| {
+    viewer.preview.as_ref().unwrap().input.is_some()
+  });
+  let input = mock.inputs().pop().unwrap();
+  let texture = viewer
+    .preview
+    .as_ref()
+    .unwrap()
+    .texture
+    .as_ref()
+    .unwrap()
+    .id();
+  for size in [egui::vec2(1000.0, 400.0), egui::vec2(400.0, 800.0)] {
+    let mut child = raw(Vec::new());
+    child.screen_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size));
+    let output = native_frame(&mut viewer, &ctx, raw(Vec::new()), child.clone());
+    let rect = rendered_image(output.child(), texture);
+    let at = rect.min + rect.size() * egui::vec2(0.75, 0.5);
+    let before = input.sent().len();
+    child.events = vec![
+      egui::Event::PointerMoved(at),
+      egui::Event::PointerButton {
+        pos: at,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+      },
+      egui::Event::PointerButton {
+        pos: at,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+      },
+    ];
+    native_frame(&mut viewer, &ctx, raw(Vec::new()), child);
+    let sent = input.sent();
+    assert!(
+      sent[before..].contains("move 1 0 2 1\n"),
+      "{size:?}: {}",
+      &sent[before..]
+    );
+    assert!(sent[before..].contains("button 1 1\n"));
+    assert!(sent[before..].contains("button 1 0\n"));
+  }
+}
+
+#[test]
+fn closing_setup_shuts_down_the_viewer_and_capture_without_restoring_setup() {
+  let mock = Mock::default();
+  let ctx = egui::Context::default();
+  let mut viewer = create(&mock, &ctx, false, "auto");
+  poll_until(&mut viewer, &ctx, ready);
+  viewer.start(&ctx);
+  poll_until(&mut viewer, &ctx, |viewer| {
+    viewer.preview.as_ref().unwrap().input.is_some()
+  });
+  let capture = mock.captures().pop().unwrap();
+  let input = mock.inputs().pop().unwrap();
+  native_frame(&mut viewer, &ctx, raw(Vec::new()), raw(Vec::new()));
+  let output = native_frame(
+    &mut viewer,
+    &ctx,
+    close_input(egui::ViewportId::ROOT),
+    raw(Vec::new()),
+  );
+  assert!(!viewer.viewing && viewer.preview.is_none());
+  assert!(capture.closed() && capture.cancelled());
+  assert!(input.closed() && input.cancelled());
+  assert!(output.children.is_empty());
+  assert!(
+    !output
+      .commands(egui::ViewportId::ROOT)
+      .any(|command| matches!(
+        command,
+        egui::ViewportCommand::Visible(true) | egui::ViewportCommand::CancelClose
+      ))
+  );
+}
+
+#[test]
+fn welcome_interactions_stay_local_and_start_close_reuse_the_capture() {
+  for window in [false, true] {
+    let mock = Mock::default();
+    let ctx = egui::Context::default();
+    let mut viewer = create(&mock, &ctx, window, "auto");
+    viewer.start(&ctx);
+    assert!(!viewer.viewing, "Start must wait for a live frame");
+    poll_until(&mut viewer, &ctx, ready);
+    let stream = Arc::clone(&viewer.preview.as_ref().unwrap().stream);
+    let capture = mock.captures().pop().unwrap();
+    let at = image_center(&mut viewer, &ctx);
+    render(&mut viewer, &ctx, interactions(at, false));
+    assert!(
+      mock.inputs().is_empty(),
+      "welcome gestures must never open input"
+    );
+    assert!(!viewer.viewing);
+    viewer.start(&ctx);
+    poll_until(&mut viewer, &ctx, |viewer| {
+      viewer.preview.as_ref().unwrap().input.is_some()
+    });
+    assert!(Arc::ptr_eq(
+      &stream,
+      &viewer.preview.as_ref().unwrap().stream
+    ));
+    assert_eq!(mock.captures().len(), 1);
+    let input = mock.inputs().pop().unwrap();
+    assert_eq!(
+      input.operation(),
+      if window { "input-window" } else { "input" }
+    );
+    let at = image_center(&mut viewer, &ctx);
+    render(&mut viewer, &ctx, interactions(at, true));
+    assert!(input.sent().contains("button 1 1\n"));
+    assert!(input.sent().contains("key F8 1\n"));
+    viewer.close_viewer(&ctx);
+    assert!(
+      input.closed() && input.cancelled(),
+      "Viewer close must close the channel holding F8"
+    );
+    assert!(!capture.closed() && !capture.cancelled());
+    assert!(ready(&viewer));
+    let frames = viewer.preview.as_ref().unwrap().frames;
+    capture.push_frame();
+    poll_until(&mut viewer, &ctx, |viewer| {
+      viewer.preview.as_ref().unwrap().frames > frames
+    });
+    assert!(Arc::ptr_eq(
+      &stream,
+      &viewer.preview.as_ref().unwrap().stream
+    ));
+    let before = input.sent();
+    let at = image_center(&mut viewer, &ctx);
+    render(&mut viewer, &ctx, interactions(at, false));
+    assert_eq!(mock.inputs().len(), 1);
+    assert_eq!(input.sent(), before);
+    viewer.start(&ctx);
+    poll_until(&mut viewer, &ctx, |viewer| {
+      viewer.preview.as_ref().unwrap().input.is_some()
+    });
+    assert_eq!(mock.inputs().len(), 2);
+    assert_eq!(mock.captures().len(), 1);
+    drop(viewer);
+    assert!(capture.closed() && capture.cancelled());
+    assert!(
+      mock
+        .inputs()
+        .iter()
+        .all(|input| input.closed() && input.cancelled())
+    );
+  }
+}
+
+#[test]
+fn switching_sources_cancels_capture_and_ignores_late_connections_and_queries() {
+  let mock = Mock::default();
+  let ctx = egui::Context::default();
+  let mut viewer = create(&mock, &ctx, false, "auto");
+  poll_until(&mut viewer, &ctx, ready);
+  let original = mock.captures().pop().unwrap();
+  let capture_gate = mock.delay("capture-with-driver", "windows-2");
+  let windows_gate = mock.delay("windows", "windows-2");
+  viewer.selected = Some(Target::Windows(2));
+  viewer.load_target(&ctx);
+  assert!(original.closed() && original.cancelled());
+  assert!(viewer.preview.is_none());
+  poll_until(&mut viewer, &ctx, |_| {
+    mock
+      .captures()
+      .iter()
+      .any(|record| record.target() == Some("windows-2"))
+  });
+  let stale = mock
+    .captures()
+    .into_iter()
+    .find(|record| record.target() == Some("windows-2"))
+    .unwrap();
+  viewer.selected = Some(Target::Windows(1));
+  viewer.load_target(&ctx);
+  poll_until(&mut viewer, &ctx, ready);
+  let current = Arc::clone(&viewer.preview.as_ref().unwrap().stream);
+  capture_gate.release();
+  windows_gate.release();
+  poll_until(&mut viewer, &ctx, |viewer| {
+    stale.closed() && stale.cancelled() && viewer.window_query.is_none()
+  });
+  assert_eq!(viewer.selected, Some(Target::Windows(1)));
+  assert_eq!(viewer.windows[0].id, "window-1");
+  assert!(Arc::ptr_eq(
+    &current,
+    &viewer.preview.as_ref().unwrap().stream
+  ));
+  assert_eq!(
+    viewer
+      .preview
+      .as_ref()
+      .unwrap()
+      .texture
+      .as_ref()
+      .unwrap()
+      .size(),
+    [2, 1]
+  );
+  assert!(viewer.preview_error.is_none());
+  assert!(mock.inputs().is_empty());
+}
+
+#[test]
+fn close_during_input_handshake_cancels_control_without_stopping_capture() {
+  let mock = Mock::default();
+  mock.0.config.lock().unwrap().wait_input = true;
+  let ctx = egui::Context::default();
+  let mut viewer = create(&mock, &ctx, false, "auto");
+  poll_until(&mut viewer, &ctx, ready);
+  let capture = mock.captures().pop().unwrap();
+  viewer.start(&ctx);
+  poll_until(&mut viewer, &ctx, |_| {
+    mock
+      .inputs()
+      .iter()
+      .any(|input| input.wire.lock().unwrap().waiting)
+  });
+  let input = mock.inputs().pop().unwrap();
+  native_frame(&mut viewer, &ctx, raw(Vec::new()), raw(Vec::new()));
+  native_frame(&mut viewer, &ctx, raw(Vec::new()), close_input(viewer_id()));
+  poll_until(&mut viewer, &ctx, |_| input.closed() && input.cancelled());
+  assert!(!viewer.viewing && viewer.control.is_none());
+  assert!(ready(&viewer));
+  assert!(viewer.preview.as_ref().unwrap().input.is_none());
+  assert!(viewer.preview.as_ref().unwrap().input_error.is_none());
+  assert!(!capture.closed() && !capture.cancelled());
+  assert_eq!(mock.captures().len(), 1);
+  let frames = viewer.preview.as_ref().unwrap().frames;
+  capture.push_frame();
+  poll_until(&mut viewer, &ctx, |viewer| {
+    viewer.preview.as_ref().unwrap().frames > frames
+  });
+}
+
+#[test]
+fn explicit_failed_driver_never_retries_auto_or_legacy_capture() {
+  let mock = Mock::default();
+  mock.0.config.lock().unwrap().capture_failure = true;
+  let ctx = egui::Context::default();
+  let mut viewer = create(&mock, &ctx, false, "windows.dxgi");
+  poll_until(&mut viewer, &ctx, |viewer| viewer.preview_error.is_some());
+  let captures = mock.captures();
+  assert_eq!(captures.len(), 1);
+  assert_eq!(captures[0].operation(), "capture-with-driver");
+  assert_eq!(captures[0].arguments[3], "windows.dxgi");
+  assert!(captures[0].closed() && captures[0].cancelled());
+  viewer.start(&ctx);
+  assert!(!viewer.viewing && mock.inputs().is_empty());
+}
+
+#[test]
+fn requested_window_is_never_broadened_by_display_driver_metadata() {
+  for (window_mode, window) in [(false, Some("window-1")), (true, None)] {
+    let mock = Mock::default();
+    let ctx = egui::Context::default();
+    let mut viewer = Viewer::new(
+      mock.clone(),
+      Some(Target::Windows(1)),
+      window_mode,
+      window.map(str::to_owned),
+      "windows.dxgi".into(),
+      &ctx,
+    );
+    poll_until(&mut viewer, &ctx, |viewer| {
+      viewer.catalog_ready && viewer.discovery.is_none() && viewer.window_query.is_none()
+    });
+    assert!(viewer.window_mode);
+    assert_eq!(viewer.selected_window.as_deref(), window);
+    assert!(
+      viewer
+        .selection_error()
+        .unwrap()
+        .contains("requested source type")
+    );
+    assert!(viewer.connecting.is_none() && mock.captures().is_empty());
+    viewer.start(&ctx);
+    assert!(!viewer.viewing && mock.inputs().is_empty());
+
+    // Selecting this same card is an explicit change of scope, unlike merely
+    // receiving its catalog metadata after a command-line window selection.
+    click_driver(&mut viewer, &ctx, "DXGI");
+    assert!(!viewer.window_mode);
+    poll_until(&mut viewer, &ctx, ready);
+    assert_eq!(mock.captures().len(), 1);
+    assert_eq!(mock.captures()[0].arguments[3..], ["windows.dxgi"]);
+    assert!(mock.inputs().is_empty());
+  }
+}
+
+#[test]
+fn catalog_and_card_choices_wait_for_display_discovery_before_opening_sources() {
+  let mock = Mock::default();
+  let discovery = mock.delay("discover", "");
+  let ctx = egui::Context::default();
+  let mut viewer = Viewer::new(
+    mock.clone(),
+    Some(Target::Windows(3)),
+    false,
+    None,
+    "windows.wgc".into(),
+    &ctx,
+  );
+  poll_until(&mut viewer, &ctx, |viewer| viewer.catalog_ready);
+  assert!(viewer.discovery.is_some());
+  assert!(viewer.window_mode);
+  assert_eq!(viewer.selected, Some(Target::Windows(3)));
+  assert!(viewer.client.is_none() && viewer.requests.is_none());
+  assert!(viewer.window_query.is_none());
+  assert!(mock.records("windows").is_empty() && mock.captures().is_empty());
+
+  // The driver list remains usable while discovery is pending, but choosing a
+  // card must not start queries against an unvalidated, preselected display.
+  click_driver(&mut viewer, &ctx, "DXGI");
+  assert_eq!(viewer.driver, "windows.dxgi");
+  assert!(!viewer.window_mode);
+  assert!(viewer.client.is_none() && viewer.requests.is_none());
+  assert!(viewer.window_query.is_none());
+  assert!(mock.records("windows").is_empty() && mock.captures().is_empty());
+  click_driver(&mut viewer, &ctx, "WGC");
+  assert_eq!(viewer.driver, "windows.wgc");
+  assert!(viewer.window_mode);
+
+  discovery.release();
+  poll_until(&mut viewer, &ctx, |viewer| viewer.discovery.is_none());
+  assert!(viewer.selected.is_none() && viewer.selected_window.is_none());
+  assert!(viewer.discovery_error.is_some());
+  assert!(viewer.client.is_none() && viewer.requests.is_none());
+  assert!(viewer.window_query.is_none() && viewer.connecting.is_none());
+  assert!(viewer.windows.is_empty() && viewer.preview.is_none());
+  assert!(mock.records("windows").is_empty() && mock.captures().is_empty());
+  assert!(mock.inputs().is_empty());
+}
+
+#[test]
+fn unavailable_driver_or_missing_window_never_opens_capture() {
+  for (driver, legacy) in [
+    ("custom.missing", false),
+    ("windows.wgc", false),
+    ("windows.dxgi", true),
+  ] {
+    let mock = Mock::default();
+    mock.0.config.lock().unwrap().legacy = legacy;
+    let ctx = egui::Context::default();
+    let mut viewer = create(&mock, &ctx, false, driver);
+    poll_until(&mut viewer, &ctx, |viewer| viewer.catalog_ready);
+    assert!(viewer.selection_error().is_some());
+    assert!(viewer.connecting.is_none());
+    assert!(mock.captures().is_empty());
+    viewer.start(&ctx);
+    assert!(!viewer.viewing && mock.inputs().is_empty());
+  }
+}
+
+#[test]
+fn legacy_auto_uses_unprefixed_capture_without_claiming_a_driver() {
+  let mock = Mock::default();
+  mock.0.config.lock().unwrap().legacy = true;
+  let ctx = egui::Context::default();
+  let mut viewer = create(&mock, &ctx, false, "auto");
+  poll_until(&mut viewer, &ctx, ready);
+  assert!(viewer.driver_error.is_some());
+  assert!(viewer.preview.as_ref().unwrap().driver.is_none());
+  assert_eq!(mock.records("capture").len(), 1);
+  assert!(mock.records("capture-with-driver").is_empty());
+  assert!(mock.inputs().is_empty());
+}
+
+#[test]
+fn complete_driver_catalog_and_tags_are_shown_before_selecting_a_source() {
+  let mock = Mock::default();
+  mock.0.config.lock().unwrap().catalog = Some(concat!(
+    r#"[{"id":"custom.desktop","name":"Custom desktop","scopes":["display"],"systems":["windows"]},"#,
+    r#"{"id":"custom.surface","name":"Custom surface","scopes":["window"],"systems":["wayland"]}]"#,
+  ).into());
+  let ctx = egui::Context::default();
+  let mut viewer = Viewer::new(mock.clone(), None, false, None, "auto".into(), &ctx);
+  poll_until(&mut viewer, &ctx, |viewer| {
+    viewer.catalog_ready && viewer.discovery.is_none()
+  });
+  assert_eq!(viewer.drivers.len(), 2);
+  assert!(viewer.selected.is_none());
+  assert!(mock.captures().is_empty() && mock.inputs().is_empty());
+  let output = render(&mut viewer, &ctx, Vec::new());
+  for label in [
+    "Custom desktop",
+    "Custom surface",
+    "Windows",
+    "Linux",
+    "Wayland",
+    "Display",
+    "Window",
+    "No sources",
+  ] {
+    label_center(&output, label);
+  }
+  click_driver(&mut viewer, &ctx, "Custom surface");
+  assert_eq!(viewer.driver, "custom.surface");
+  assert!(viewer.window_mode && viewer.selected.is_none());
+  assert!(
+    viewer
+      .selection_error()
+      .unwrap()
+      .contains("No compatible sources")
+  );
+  assert_eq!(
+    viewer.drivers.len(),
+    2,
+    "unavailable providers remain visible"
+  );
+  assert!(mock.captures().is_empty() && mock.inputs().is_empty());
+  mock.0.config.lock().unwrap().displays = Some(
+    r#"[{"display":{"windows":{"number":1,"name":"inaccessible","bounds":[0,0,4,2]}},"class":null,"selectable":false}]"#.into(),
+  );
+  viewer.choose_driver("custom.desktop");
+  viewer.discover(&ctx);
+  poll_until(&mut viewer, &ctx, |viewer| {
+    viewer.catalog_ready && viewer.discovery.is_none()
+  });
+  assert!(
+    viewer
+      .selection_error()
+      .unwrap()
+      .contains("No compatible sources")
+  );
+  mock.0.config.lock().unwrap().displays = Some("[]".into());
+  viewer.discover(&ctx);
+  poll_until(&mut viewer, &ctx, |viewer| {
+    viewer.catalog_ready && viewer.discovery.is_none()
+  });
+  assert!(viewer.displays.is_empty());
+  assert_eq!(
+    viewer.drivers.len(),
+    2,
+    "driver discovery does not need a display"
+  );
+  assert!(mock.captures().is_empty() && mock.inputs().is_empty());
+}
+
+#[test]
+fn driver_cards_set_the_scope_and_keep_the_complete_catalog() {
+  let mock = Mock::default();
+  let ctx = egui::Context::default();
+  let mut viewer = create(&mock, &ctx, false, "windows.dxgi");
+  poll_until(&mut viewer, &ctx, ready);
+  let original = mock.captures().pop().unwrap();
+  let catalog_queries = mock.records("capture-drivers").len();
+  click_driver(&mut viewer, &ctx, "WGC");
+  assert_eq!(viewer.driver, "windows.wgc");
+  assert!(viewer.window_mode);
+  assert_eq!(viewer.selected, Some(Target::Windows(1)));
+  assert!(original.closed() && original.cancelled());
+  assert!(!ready(&viewer));
+  assert_eq!(viewer.drivers.len(), 2);
+  viewer.selected_window = Some("window-1".into());
+  poll_until(&mut viewer, &ctx, ready);
+  let window_capture = mock.captures().pop().unwrap();
+  assert_eq!(window_capture.arguments[3..], ["windows.wgc", "window-1"]);
+  click_driver(&mut viewer, &ctx, "DXGI");
+  assert_eq!(viewer.driver, "windows.dxgi");
+  assert!(!viewer.window_mode);
+  assert!(window_capture.closed() && window_capture.cancelled());
+  poll_until(&mut viewer, &ctx, ready);
+  assert_eq!(
+    mock.captures().pop().unwrap().arguments[3..],
+    ["windows.dxgi"]
+  );
+  assert_eq!(mock.records("capture-drivers").len(), catalog_queries);
+  assert_eq!(viewer.drivers.len(), 2);
+  assert!(mock.inputs().is_empty());
+}
+
+#[test]
+fn custom_driver_metadata_controls_compatibility_and_multiple_scopes() {
+  let mock = Mock::default();
+  mock.0.config.lock().unwrap().catalog = Some(concat!(
+    r#"[{"id":"linux.user_backend","name":"Custom multiple sources","scopes":["display","window"],"systems":["windows"]},"#,
+    r#"{"id":"windows.user_backend","name":"Custom other system","scopes":["window"],"systems":["x11"]}]"#,
+  ).into());
+  let ctx = egui::Context::default();
+  let mut viewer = create(&mock, &ctx, false, "linux.user_backend");
+  poll_until(&mut viewer, &ctx, ready);
+  assert_eq!(
+    viewer.available_scopes(),
+    [CaptureScope::Display, CaptureScope::Window]
+  );
+  assert!(viewer.compatible(Target::Windows(2)));
+  assert!(!viewer.compatible(Target::X11(7)));
+  let original = mock.captures().pop().unwrap();
+  viewer.window_mode = true;
+  viewer.selected_window = Some("window-1".into());
+  viewer.load_target(&ctx);
+  poll_until(&mut viewer, &ctx, ready);
+  assert!(original.closed() && original.cancelled());
+  let window_capture = mock.captures().pop().unwrap();
+  assert_eq!(
+    window_capture.arguments[3..],
+    ["linux.user_backend", "window-1"]
+  );
+  viewer.choose_driver("windows.user_backend");
+  viewer.load_target(&ctx);
+  assert!(viewer.selected.is_none() && viewer.selected_window.is_none());
+  assert!(viewer.preview.is_none());
+  assert!(window_capture.closed() && window_capture.cancelled());
+  assert!(viewer.compatible(Target::X11(7)));
+  assert!(!viewer.compatible(Target::Windows(2)));
+  assert_eq!(viewer.drivers.len(), 2);
+  assert!(mock.inputs().is_empty());
+}
+
+#[test]
+fn refreshing_discovery_ignores_a_late_global_catalog() {
+  let mock = Mock::default();
+  let gate = mock.delay("capture-drivers", "");
+  let ctx = egui::Context::default();
+  let mut viewer = Viewer::new(mock.clone(), None, false, None, "auto".into(), &ctx);
+  poll_until(&mut viewer, &ctx, |_| {
+    !mock.records("capture-drivers").is_empty()
+  });
+  let stale = mock.records("capture-drivers").pop().unwrap();
+  mock.0.config.lock().unwrap().catalog = Some(
+    r#"[{"id":"custom.fresh","name":"Fresh catalog","scopes":["display"],"systems":["windows"]}]"#
+      .into(),
+  );
+  viewer.discover(&ctx);
+  poll_until(&mut viewer, &ctx, |viewer| viewer.catalog_ready);
+  assert_eq!(viewer.drivers.len(), 1);
+  assert_eq!(viewer.drivers[0].info.id, "custom.fresh");
+  gate.release();
+  poll_until(&mut viewer, &ctx, |_| stale.closed() && stale.cancelled());
+  assert_eq!(viewer.drivers.len(), 1);
+  assert_eq!(viewer.drivers[0].info.id, "custom.fresh");
+  assert_eq!(mock.records("capture-drivers").len(), 2);
+  assert!(mock.captures().is_empty() && mock.inputs().is_empty());
+}
+
+#[test]
+fn targeted_catalog_fallback_merges_discovered_sources_before_selection() {
+  let mock = Mock::default();
+  mock.0.config.lock().unwrap().per_target_catalog_only = true;
+  let ctx = egui::Context::default();
+  let mut viewer = Viewer::new(mock.clone(), None, false, None, "auto".into(), &ctx);
+  poll_until(&mut viewer, &ctx, |viewer| viewer.catalog_ready);
+  assert_eq!(viewer.drivers.len(), 2);
+  assert!(viewer.selected.is_none());
+  assert!(mock.captures().is_empty());
+  let catalogs = mock.records("capture-drivers");
+  assert_eq!(catalogs.len(), 3);
+  assert_eq!(catalogs[0].arguments, ["1.0.8", "capture-drivers"]);
+  for target in ["windows-1", "windows-2"] {
+    assert!(
+      catalogs
+        .iter()
+        .any(|catalog| catalog.arguments == ["1.0.7", "capture-drivers", target])
+    );
+  }
+  viewer.choose_driver("windows.wgc");
+  viewer.selected = Some(Target::Windows(2));
+  viewer.selected_window = Some("window-2".into());
+  viewer.load_target(&ctx);
+  poll_until(&mut viewer, &ctx, ready);
+  let capture = mock.captures().pop().unwrap();
+  assert_eq!(
+    capture.arguments,
+    [
+      "1.0.7",
+      "capture-with-driver",
+      "windows-2",
+      "windows.wgc",
+      "window-2"
+    ]
+  );
+  assert_eq!(
+    viewer.preview.as_ref().unwrap().driver.as_deref(),
+    Some("windows.wgc")
+  );
+  assert_eq!(mock.records("capture-drivers").len(), 3);
+  assert!(mock.inputs().is_empty());
+}

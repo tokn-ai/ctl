@@ -6,7 +6,7 @@
 ## Summary
 
 `ctream` discovers X11, Wayland, and Windows displays and forwards control to a
-selected display through a CLI and a native wgpu viewer. Its crates live under `ctream/`
+selected display or window through a CLI and a native wgpu viewer. Its crates live under `ctream/`
 as members of the root Cargo workspace and share its lockfile. The CLI, agent,
 viewer, native Windows drivers, and Linux helpers run independently of `ctld`. Lifecycle management
 through `ctld` is planned once the tool is stable.
@@ -29,15 +29,16 @@ viewer uses the same client for discovery, capture, input, and semantic actions.
 
 | Crate | Directory | Runs in | Ctream dependencies | Responsibility |
 | --- | --- | --- | --- | --- |
-| `ctream-proto` | `ctream/proto` | Client and display host processes | None | Shared display, window, control, and wire contract types |
+| `ctream-proto` | `ctream/proto` | Client and display host processes | None | Shared display, window, capture-driver catalog, control, and wire contract types |
 | `ctream-client` | `ctream/client` | CLI or viewer process | `ctream-proto` | Typed sessions, SSH/local transports, frame decoding, input forwarding, and coordinate transforms |
 | `ctream-driver` | `ctream/driver` | Display host process | `ctream-proto` | Platform-neutral driver and capability traits, with capture cancellation |
-| `ctream-driver-capture` | `ctream/driver-capture` | Linux or Windows display host | `ctream-driver`, `ctream-proto` | Official capture drivers and Linux capturable-window enumeration |
-| `ctream-driver-input` | `ctream/driver-input` | Linux or Windows display host | `ctream-driver` | Official input drivers |
+| `ctream-driver-capture` | `ctream/driver-capture` | Linux or Windows display host | `ctream-driver`, `ctream-proto`, `ctream-windows` (Windows) | Official capture drivers and capturable-window enumeration |
+| `ctream-driver-input` | `ctream/driver-input` | Linux or Windows display host | `ctream-driver`, `ctream-windows` (Windows) | Official input drivers |
+| `ctream-windows` | `ctream/windows` | Windows interactive session | `ctream-proto` | Shared window identity, enumeration, and physical geometry for native drivers |
 | `ctream-platform` | `ctream/platform` | Agent or local CLI on the display host | `ctream-driver`, `ctream-proto`, `ctream-driver-capture` (Linux/Windows) | Display discovery, window-query dispatch, and AT-SPI controls |
 | `ctream-cli` | `ctream/cli` | Display host for local queries; client machine for SSH queries | `ctream-client`, `ctream-platform`, `ctream-proto` | The `ctream` command |
 | `ctream-agent` | `ctream/agent` | Linux display host or Windows interactive session | `ctream-driver`, `ctream-proto`; `ctream-driver-capture`, `ctream-driver-input`, `ctream-platform` (Linux/Windows) | Reusable request validation, stdio hosting, and stock-agent operation routing |
-| `ctream-preview` | `ctream/preview` | Viewer machine | `ctream-client`, `ctream-proto` | Native wgpu preview, controls, and overlays |
+| `ctream-preview` | `ctream/preview` | Viewer machine | `ctream-client`, `ctream-proto` | Native wgpu setup and viewer windows, view-only source preview, controls, and overlays |
 | `ctream-wayland-input` | `ctream/wayland-input` | Linux display host | `ctream-proto` (Linux) | Wayland input and window capture helper binaries |
 
 The dependency direction keeps native drivers out of the client library and
@@ -50,17 +51,49 @@ mapping.
 ### Driver composition
 
 Official driver crates are organized by capability, then platform and backend.
-For example, `ctream_driver_capture::linux::wayland::Driver` implements capture,
-and `ctream_driver_input::linux::wayland::Driver` implements input. Both crates
-also expose `linux::x11` and `windows`. Windows capture uses DXGI Desktop
-Duplication, and input uses `SendInput`. Capture drivers enumerate their capturable windows;
-the platform library dispatches window queries and resolves AT-SPI controls.
+Each capture backend has its own concrete `Driver` and associated session type.
+The paths below are relative to `ctream_driver_capture`; these are the current
+stock-agent providers, not a promise that every backend supports every source.
+
+| Public driver path | Wire ID | Source and default | Runs in |
+| --- | --- | --- | --- |
+| `linux::x11::ffmpeg::Driver` | `linux.x11.ffmpeg` | X11 display capture; display default | Linux display host |
+| `linux::x11::composite::Driver` | `linux.x11.composite` | X Composite window capture; window default | Linux display host |
+| `linux::wayland::grim::Driver` | `linux.wayland.grim` | Wayland display capture; display default | Linux display host |
+| `linux::wayland::image_copy::Driver` | `linux.wayland.image_copy` | Foreign-toplevel image-copy capture; window default | Linux display host |
+| `windows::dxgi::Driver` | `windows.dxgi` | DXGI Desktop Duplication; display default | Windows interactive session |
+| `windows::wgc::Driver` | `windows.wgc` | Windows Graphics Capture; window default | Windows interactive session |
+
+Input remains a separate capability crate, with
+`ctream_driver_input::{linux::x11, linux::wayland, windows}::Driver`.
+Windows input uses `SendInput`. Window enumeration belongs to providers that
+support it, and the platform library dispatches queries and resolves AT-SPI
+controls. Windows display discovery uses a shared native display catalog;
+enumerating a display does not require creating a DXGI capture session.
 
 `ctream_driver::Driver` associates a `Target` with a `Session` and opens that
 session from a borrowed target. Each capability has its own trait and resource
 type. The agent's generic helpers require only the capability they execute, so
 a capture-only session can be used without implementing input or discovery.
 The stock agent selects the official capture and input drivers independently.
+`ForwardWindowInput` is a separate optional capability from display input.
+The Windows drivers share native window utilities through `ctream-windows`;
+neither capability driver depends on the other.
+
+The capture catalog lists the compiled providers applicable to a display and
+their supported `display` or `window` scopes. It describes available code,
+not a successful permission or compositor-capability check. Selecting `auto`
+uses the default in the table for the chosen source. An explicit ID selects
+exactly that backend; an unknown ID, incompatible scope, missing dependency,
+or initialization failure is reported rather than silently choosing another
+provider. The capture handshake reports the actual driver and frame format.
+Input selection continues to follow the target independently of capture.
+
+The earlier bundled capture paths `linux::x11::Driver`,
+`linux::wayland::Driver`, and `windows::Driver` are replaced by the concrete
+backend paths above. Custom agents must update those Rust imports. This is a
+compile-time API change; retained agent wire contracts keep their default
+capture behavior.
 
 A user crate can group several capabilities under its own modules, such as
 `user_ctream_driver_android::{capture, input}` from a package named
@@ -75,6 +108,10 @@ agent does not load user drivers automatically. A custom agent supplies its
 driver selection, routing, and protocol adaptation. It can reuse
 `ctream_agent::protocol::parse` for the existing requests; adding a wire target
 also requires corresponding protocol and client support.
+Catalog IDs are extensible strings, so a custom agent can advertise and route
+its own compiled providers using the same source scopes and frame contracts.
+Those wire IDs do not replace the concrete Rust `Driver`, associated target,
+session, and capability types behind each routing adapter.
 
 Capture sources currently write encoded frame bytes into a caller-supplied
 output and observe a cancellation lifetime. The existing raw RGB and PPM
@@ -112,6 +149,71 @@ so the agent can stop capture. Process transports allow a bounded cleanup
 period before terminating a stalled child. Input closure lets the helper
 release held keys and buttons.
 
+### Welcome window and viewer lifecycle
+
+The viewer starts with a small native wgpu welcome window. Choose a capture
+driver first, then select one of its compatible sources. Every provider
+advertised by the connected agent appears as a card with platform/session and
+Display/Window capability tags. Drivers with no accessible matching session
+remain visible with a **No sources** tag. A driver supporting just one scope
+sets that scope directly; only Automatic and drivers supporting both scopes
+need an additional source-type choice. A live preview shows the selection
+before control begins.
+Target arguments preselect the welcome controls; they do not bypass Start.
+An incompatible window preselection stays an error until an explicit driver
+choice changes its scope; catalog discovery never widens it to display capture.
+With no arguments the welcome window uses the local agent. Existing `--host`,
+`--agent`, `--ssh-program`, and `--ssh-arg` options configure its endpoint;
+this step does not add an endpoint editor. `--capture-driver ID` preselects
+an explicit provider, while omission selects **Auto**.
+
+The welcome preview opens capture only. Pointer movement, clicks, scrolling,
+and typing in the welcome window never open an input channel or send remote
+input. **Start** opens a separate native viewer window, hides setup, and enables
+mouse and keyboard forwarding where that source supports it. Setup retains the
+same capture and source selection; driver/source changes are locked while the
+viewer is open. A view-only source can still open in the viewer. Input
+initialization failure is reported without discarding a usable capture stream.
+Closing the viewer with its native window close control releases input,
+restores and activates setup, and keeps the same stream available as a view-only
+preview. There is no Back button. The two windows keep their own dimensions;
+the setup window is not resized into the viewer.
+
+Both windows use the same egui context and wgpu renderer. The native viewer is
+an immediate child viewport, so its events and repaint requests run through
+the root setup viewport even while setup is hidden. Only the viewer viewport
+forwards input; painting a view-only preview must not reset viewer-held keys
+or buttons. Capture workers explicitly request root repaints.
+
+On a **local native Wayland viewer**, winit 0.30.13 implements window visibility
+and focus requests as no-ops. Automatic setup hiding and activation therefore
+cannot be guaranteed on that backend. This is a local window-management
+limitation: it does not affect capturing or controlling a remote Wayland
+session from a viewer on another platform.
+
+Changing the source or driver cancels the previous preview capture and clears
+its image. The agent-wide driver catalog has its own request lifetime, so
+changing a source keeps the full provider list. Window queries, connection
+results, frames, and errors belong to the selection that requested them.
+A late result must not replace a newer choice or keep a discarded capture
+alive. Start remains unavailable until the current capture has produced a
+live frame. Closing setup or quitting the application cancels capture, input,
+and pending requests. Closing the viewer cancels its input initialization and
+releases held keys/buttons while retaining capture for setup. A terminal
+capture failure closes input; after closing the viewer, setup can retry capture.
+
+The target-independent catalog uses `ctream_agent` 1.0.8 (build 8), with
+explicit system metadata so custom driver IDs need no platform naming
+convention. With a 1.0.7 agent, the viewer combines catalogs from discovered
+targets; it cannot show providers for systems with no discovered session.
+Older agents remain usable through **Auto** and their retained capture
+contracts. An explicit driver override requires the 1.0.7 capture handshake;
+the client must not pretend an older agent honored a backend choice.
+
+Protocol changes: none. The separate-window lifecycle keeps `ctream_agent`
+at 1.0.8 (build 8); capture and input operations, handshakes, and transport
+behavior retain their existing contracts.
+
 ### Windows through a WSL endpoint
 
 Build `ctream-agent.exe` on Windows with `cargo build --release -p ctream-agent`.
@@ -127,7 +229,7 @@ desktop without a scheduled task.
 | --- | --- |
 | CLI, wgpu viewer, overlays, frame decoding | Client machine |
 | SSH server and executable launch | WSL distribution |
-| `ctream-agent.exe`, DXGI capture, `SendInput` | Windows interactive session |
+| `ctream-agent.exe`, DXGI/WGC capture, `SendInput` | Windows interactive session |
 
 For example, replacing the host and mounted executable path with the installation:
 
@@ -149,16 +251,15 @@ and the virtual desktop, including negative origins and mixed DPI settings.
 Physical key events use the Windows keyboard layout. Closing or resetting the
 input channel releases keys and buttons injected by that channel.
 
-This initial Windows implementation supports displays. Individual-window
-capture, accessibility actions, audio, and hardware video encoding remain
-future work. A separately rendered hardware cursor is not composited into the
-captured image. Windows integrity restrictions still apply to elevated apps
+Windows supports displays and individual windows. Accessibility actions, audio,
+and hardware video encoding remain future work. A separately rendered hardware
+cursor is not composited into the DXGI display image. Windows integrity restrictions still apply to elevated apps
 and secure desktops. Display reconfiguration or desktop access loss requires
 reconnecting; input rejects a changed display layout before sending new events.
 WSL restart, Windows sign-out, and session switching require further live checks.
 
 This step implements the existing display and window capabilities. Audio,
-encoding, capability negotiation, and a shared remote session runtime are
+encoding, broader capability negotiation, and a shared remote session runtime are
 future additions. The current client session groups a target selection across
 independent agent operations. The existing protocol adapter supports deployed
 agents during development.
@@ -176,8 +277,8 @@ Install the CLI separately with
 `cargo install --locked --path ctream/cli --root ~/.local`.
 From the repository root on the viewer machine, run
 `cargo run -p ctream-preview -- HOST` to discover remote displays and select
-one in the viewer. Append `:DISPLAY` or
-`wayland-N` to open a target directly.
+one in the welcome window. Append `:DISPLAY` or `wayland-N` to preselect a
+target, verify its live preview, and choose **Start**.
 
 For a display on the viewer machine, build with
 `cargo build -p ctream-agent -p ctream-preview` and run
@@ -217,14 +318,20 @@ graphical session. Test consent, cancellation, and session closure.
 
 Install the window helper on the remote host with
 `cargo install --locked --path ctream/wayland-input --bin ctream-wayland-window --root ~/.local`.
-Open the display picker and choose **Windows…** beside an X11 or Wayland
-display, or launch the viewer with `HOST DISPLAY --windows`. The separate
+Choose a window source in the welcome window for an X11, Wayland, or Windows
+display, or launch the viewer with `HOST DISPLAY --windows` to preselect
+window selection. The separate
 window helper is only required for the Wayland backend.
 
 From the CLI, run `ctream windows DISPLAY` on the display host, or
 `ctream --host SSH_HOST windows DISPLAY` to query through the remote agent.
 The command lists window IDs, application IDs, and titles. Add `--json` for
 structured output.
+
+To preselect a previously discovered ID, use
+`ctream-preview --host SSH_HOST DISPLAY --window WINDOW_ID`. The same agent and
+SSH launcher options apply to this command and to the window picker. Its live
+preview remains view-only until **Start**.
 
 After selecting a display, the viewer can request its top-level windows from
 the remote agent and open a capture stream for one of them. Expose titles and
@@ -242,6 +349,28 @@ carries its current dimensions. A mapped window can be captured while
 covered, and the stream pauses while the window is unmapped. The X11 window
 preview is view-only. A Wayland session may also offer window selection
 through the ScreenCast portal when its backend advertises that source type.
+
+On Windows, enumerate visible top-level windows on the selected monitor and
+capture a chosen window through Windows Graphics Capture (Windows 10 1903 or
+newer). The stream follows resizing and remains bound to the window when another
+window covers it. Minimizing requires restoring and reconnecting; closing the
+window ends capture. The provider keeps the operating system's capture border.
+Discovery selects the display with greatest window overlap; an established
+window stream can follow it to another display.
+
+Windows window input uses physical DWM frame bounds shared with capture.
+The viewer maps its fitted image into those bounds after resizing. An explicit
+click or wheel action may activate the selected window; hover never activates
+it, and keyboard input requires it to be foreground. Foreground and hit tests
+reject input that would reach an unrelated window. `SendInput` still uses the
+shared desktop cursor and focus; these checks cannot make injection atomic with
+other desktop activity. Closing/resetting input releases this channel's held
+keys and buttons. Windows accessibility/message-based actions are separate
+future capabilities.
+
+If Windows denies foreground activation, a physical click can still use normal
+mouse activation when the selected window is visible at the verified cursor
+position and no other window owns mouse capture. Scrolling has no such fallback.
 
 Verify capture with two distinct windows. Move, resize, and cover the selected
 window and check that only its content is streamed. Verify what happens when
@@ -271,6 +400,10 @@ explicitly. Window capture can work independently of semantic actions.
 ## Invariants
 
 - Discovery alone never sends input.
+- Welcome previews never open input; Start is the explicit transition into the
+  full viewer's control lifecycle.
+- Source and driver changes discard old capture lifetimes and stale results.
+- An explicit driver selection never silently falls back to a different backend.
 - Forward input only to the selected instance. If it disappears, stop
   forwarding and report the loss to the caller.
 - Both interfaces run independently of ctld during development.
@@ -341,3 +474,23 @@ operations require 1.0.5; selecting an earlier contract never returns the new
 Windows discovery variant. Executable selection and WSL launch configuration
 are local transport settings. Other named protocols and product versions are
 unchanged.
+
+Windows window support advances `ctream_agent` from 1.0.5 (build 5) to 1.0.6
+(build 6). It enables `windows` and `capture-window` for Windows targets and adds
+`input-window DISPLAY WINDOW`. That channel uses `ready` and the existing Windows
+dimensioned move/button/key/reset format, with coordinates relative to the window
+capture. Frames remain P6 RGB. Windows accessibility is still unavailable.
+Contracts 1.0.1 through 1.0.5 remain supported unchanged; clients select 1.0.5 for
+Windows display operations and 1.0.6 only for Windows window operations.
+Other named protocols and product versions remain unchanged.
+
+Capture driver selection advances `ctream_agent` from 1.0.6 (build 6) to 1.0.7
+(build 7). `capture-drivers DISPLAY` lists compiled capture providers and their
+source scopes. `capture-with-driver DISPLAY DRIVER [WINDOW]` accepts `auto` or
+an explicit provider ID and prefixes its existing frame bytes with a bounded
+JSON line identifying the actual `driver` and `format`. Initialization must
+succeed before the handshake reports a driver. Earlier contracts 1.0.1 through
+1.0.6 retain their request and frame shapes, default capture providers, and
+input behavior. Welcome-window staging and the Rust module split do not add
+input operations or change input permissions. Other named contracts and
+product release versions remain unchanged.

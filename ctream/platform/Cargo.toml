@@ -11,5 +11,8 @@ publish = false
 ctream-driver.workspace = true
 ctream-proto.workspace = true
 
-[target.'cfg(any(target_os = "linux", windows))'.dependencies]
+[target.'cfg(target_os = "linux")'.dependencies]
 ctream-driver-capture.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+ctream-windows.workspace = true

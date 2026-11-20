@@ -5,7 +5,7 @@ use ctream_client::{
   media::{Frame, VideoSource},
   transport::Local,
 };
-use ctream_proto::{Action, Display, Target};
+use ctream_proto::{Action, CaptureScope, CaptureSystem, Display, Target};
 use std::{
   env, io,
   path::PathBuf,
@@ -18,6 +18,26 @@ fn native_sessions_stream_through_local_ipc() -> io::Result<()> {
   let client = Client::new(Local {
     agent: PathBuf::from(env!("CARGO_BIN_EXE_ctream-agent")),
   });
+  let catalog = client.capture_catalog()?;
+  assert_eq!(catalog.len(), 4, "all compiled Linux capture providers");
+  assert!(catalog.iter().all(|driver| driver.systems.len() == 1));
+  for system in [CaptureSystem::X11, CaptureSystem::Wayland] {
+    let drivers: Vec<_> = catalog
+      .iter()
+      .filter(|driver| driver.systems.contains(&system))
+      .collect();
+    assert_eq!(drivers.len(), 2);
+    assert!(
+      drivers
+        .iter()
+        .any(|driver| driver.info.scopes == [CaptureScope::Display])
+    );
+    assert!(
+      drivers
+        .iter()
+        .any(|driver| driver.info.scopes == [CaptureScope::Window])
+    );
+  }
   let x11 = env::var("CTREAM_TEST_X11").unwrap_or_else(|_| ":98".into());
   let wayland = env::var("WAYLAND_DISPLAY").expect("fixture Wayland display");
   let displays = client.discover()?;
@@ -42,6 +62,35 @@ fn native_sessions_stream_through_local_ipc() -> io::Result<()> {
     let mut input = session.input()?;
     input.reset()?;
     drop(input);
+    let drivers = client.capture_drivers(target)?;
+    assert_eq!(
+      drivers,
+      catalog
+        .iter()
+        .filter(|driver| driver.systems.contains(&target.system()))
+        .map(|driver| driver.info.clone())
+        .collect::<Vec<_>>(),
+      "retained target catalog must match the platform-wide descriptors",
+    );
+    let display_driver = drivers
+      .iter()
+      .find(|driver| driver.scopes.contains(&CaptureScope::Display))
+      .expect("display provider");
+    let window_driver = drivers
+      .iter()
+      .find(|driver| driver.scopes.contains(&CaptureScope::Window))
+      .expect("window provider");
+    assert!(session.capture_with_driver(&window_driver.id).is_err());
+    assert!(session.capture_with_driver("user.missing").is_err());
+    let mut selected = session.capture_with_driver("auto")?;
+    assert_eq!(selected.driver(), Some(display_driver.id.as_str()));
+    let mut selected_frame = Frame::default();
+    selected.read_frame(&mut selected_frame)?;
+    assert_eq!(
+      selected_frame.pixels.len(),
+      selected_frame.size[0] * selected_frame.size[1] * 3
+    );
+    drop(selected);
     let (mut capture, lifetime) = session.capture()?.split();
     let mut frame = Frame::default();
     for _ in 0..2 {
@@ -64,6 +113,21 @@ fn native_sessions_stream_through_local_ipc() -> io::Result<()> {
       .next()
       .expect("fixture window");
     let session = client.session(target, Some(window));
+    assert!(session.capture_with_driver(&display_driver.id).is_err());
+    let selected = session.capture_with_driver(&window_driver.id)?;
+    assert_eq!(selected.driver(), Some(window_driver.id.as_str()));
+    let (mut selected, selected_lifetime) = selected.split();
+    selected.read_frame(&mut frame)?;
+    assert_eq!(frame.pixels.len(), frame.size[0] * frame.size[1] * 3);
+    drop(selected_lifetime);
+    let closed = Instant::now();
+    while selected.read_frame(&mut frame).is_ok() {
+      assert!(
+        closed.elapsed() < Duration::from_secs(5),
+        "selected capture did not stop"
+      );
+    }
+    assert!(closed.elapsed() < Duration::from_secs(5));
     let (mut capture, lifetime) = session.capture()?.split();
     capture.read_frame(&mut frame)?;
     assert_eq!(frame.pixels.len(), frame.size[0] * frame.size[1] * 3);

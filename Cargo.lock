@@ -1471,6 +1471,7 @@ version = "0.1.0"
 dependencies = [
  "ctream-driver",
  "ctream-proto",
+ "ctream-windows",
  "serde_json",
  "windows 0.62.2",
  "x11rb",
@@ -1481,6 +1482,7 @@ name = "ctream-driver-input"
 version = "0.1.0"
 dependencies = [
  "ctream-driver",
+ "ctream-windows",
  "windows 0.62.2",
 ]
 
@@ -1491,6 +1493,7 @@ dependencies = [
  "ctream-driver",
  "ctream-driver-capture",
  "ctream-proto",
+ "ctream-windows",
 ]
 
 [[package]]
@@ -1523,6 +1526,14 @@ dependencies = [
  "wayland-protocols-misc",
  "wayland-protocols-wlr",
  "xkbcommon",
+]
+
+[[package]]
+name = "ctream-windows"
+version = "0.1.0"
+dependencies = [
+ "ctream-proto",
+ "windows 0.62.2",
 ]
 
 [[package]]

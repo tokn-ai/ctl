@@ -1,7 +1,8 @@
 use ctream_driver::{ControlOperation, Result};
 use ctream_proto::{
-  BOUNDS_VERSION, DISPLAY_VERSION, Target, VERSION, WAYLAND_WINDOW_VERSION,
-  WINDOWS_DISPLAY_VERSION, X11_WINDOW_VERSION, valid_window_id,
+  BOUNDS_VERSION, CAPTURE_CATALOG_VERSION, CAPTURE_DRIVER_VERSION, DISPLAY_VERSION, Target,
+  VERSION, WAYLAND_WINDOW_VERSION, WINDOWS_DISPLAY_VERSION, WINDOWS_WINDOW_VERSION,
+  X11_WINDOW_VERSION, valid_capture_driver, valid_window_id,
 };
 
 pub enum TargetOperation<'a> {
@@ -9,30 +10,66 @@ pub enum TargetOperation<'a> {
   Input,
   Windows,
   CaptureWindow(&'a str),
+  InputWindow(&'a str),
 }
 
 pub enum Request<'a> {
-  Discover { windows_displays: bool },
+  Discover {
+    windows_displays: bool,
+  },
+  CaptureCatalog,
+  CaptureDrivers(Target),
+  CaptureWithDriver {
+    target: Target,
+    driver: &'a str,
+    window: Option<&'a str>,
+  },
   Target(Target, TargetOperation<'a>),
   Controls(Target, &'a str, ControlOperation),
 }
 
 fn supports_windows(version: &str, target: Target) -> bool {
-  !matches!(target, Target::Windows(_))
-    && (matches!(version, VERSION | BOUNDS_VERSION | X11_WINDOW_VERSION)
-      || (version == WAYLAND_WINDOW_VERSION && matches!(target, Target::Wayland(_))))
+  match target {
+    Target::Windows(_) => matches!(
+      version,
+      WINDOWS_WINDOW_VERSION | CAPTURE_DRIVER_VERSION | VERSION
+    ),
+    _ => {
+      matches!(
+        version,
+        VERSION
+          | CAPTURE_DRIVER_VERSION
+          | WINDOWS_WINDOW_VERSION
+          | WINDOWS_DISPLAY_VERSION
+          | BOUNDS_VERSION
+          | X11_WINDOW_VERSION
+      ) || (version == WAYLAND_WINDOW_VERSION && matches!(target, Target::Wayland(_)))
+    }
+  }
 }
 
 fn supports_displays(version: &str) -> bool {
   matches!(
     version,
-    VERSION | BOUNDS_VERSION | X11_WINDOW_VERSION | WAYLAND_WINDOW_VERSION | DISPLAY_VERSION
+    VERSION
+      | CAPTURE_DRIVER_VERSION
+      | WINDOWS_WINDOW_VERSION
+      | WINDOWS_DISPLAY_VERSION
+      | BOUNDS_VERSION
+      | X11_WINDOW_VERSION
+      | WAYLAND_WINDOW_VERSION
+      | DISPLAY_VERSION
   )
 }
 
 fn parse_target(version: &str, value: &str) -> Result<Target> {
   let target = Target::parse(value)?;
-  if matches!(target, Target::Windows(_)) && version != WINDOWS_DISPLAY_VERSION {
+  if matches!(target, Target::Windows(_))
+    && !matches!(
+      version,
+      WINDOWS_DISPLAY_VERSION | WINDOWS_WINDOW_VERSION | CAPTURE_DRIVER_VERSION | VERSION
+    )
+  {
     return Err("Windows displays require ctream_agent 1.0.5".into());
   }
   Ok(target)
@@ -40,9 +77,40 @@ fn parse_target(version: &str, value: &str) -> Result<Target> {
 
 pub fn parse(args: &[String]) -> Result<Request<'_>> {
   match args {
+    [version, operation]
+      if version == CAPTURE_CATALOG_VERSION && operation == "capture-drivers" =>
+    {
+      Ok(Request::CaptureCatalog)
+    }
+    [version, operation, target]
+      if version == CAPTURE_DRIVER_VERSION && operation == "capture-drivers" =>
+    {
+      Ok(Request::CaptureDrivers(parse_target(version, target)?))
+    }
+    [version, operation, target, driver, tail @ ..]
+      if version == CAPTURE_DRIVER_VERSION
+        && operation == "capture-with-driver"
+        && tail.len() <= 1 =>
+    {
+      if !valid_capture_driver(driver) {
+        return Err("invalid capture driver identifier".into());
+      }
+      let window = tail.first().map(String::as_str);
+      if window.is_some_and(|id| !valid_window_id(id)) {
+        return Err("invalid window identifier".into());
+      }
+      Ok(Request::CaptureWithDriver {
+        target: parse_target(version, target)?,
+        driver,
+        window,
+      })
+    }
     [version, operation] if supports_displays(version) && operation == "discover" => {
       Ok(Request::Discover {
-        windows_displays: version == WINDOWS_DISPLAY_VERSION,
+        windows_displays: matches!(
+          version.as_str(),
+          WINDOWS_DISPLAY_VERSION | WINDOWS_WINDOW_VERSION | CAPTURE_DRIVER_VERSION | VERSION
+        ),
       })
     }
     [version, operation, target] if supports_displays(version) => {
@@ -56,7 +124,10 @@ pub fn parse(args: &[String]) -> Result<Request<'_>> {
       Ok(Request::Target(target, operation))
     }
     [version, operation, target, id]
-      if matches!(operation.as_str(), "capture-window" | "elements" | "action") =>
+      if matches!(
+        operation.as_str(),
+        "capture-window" | "input-window" | "elements" | "action"
+      ) =>
     {
       let target = parse_target(version, target)?;
       if !supports_windows(version, target) {
@@ -67,11 +138,25 @@ pub fn parse(args: &[String]) -> Result<Request<'_>> {
       }
       let request = match operation.as_str() {
         "capture-window" => Request::Target(target, TargetOperation::CaptureWindow(id)),
+        "input-window" if matches!(target, Target::Windows(_)) => {
+          Request::Target(target, TargetOperation::InputWindow(id))
+        }
+        "input-window" => return Err("window input requires a Windows window".into()),
+        _ if matches!(target, Target::Windows(_)) => {
+          return Err("Windows accessibility operations are not supported".into());
+        }
         "elements" => Request::Controls(
           target,
           id,
           ControlOperation::Inspect {
-            bounds: matches!(version.as_str(), BOUNDS_VERSION | VERSION),
+            bounds: matches!(
+              version.as_str(),
+              BOUNDS_VERSION
+                | WINDOWS_DISPLAY_VERSION
+                | WINDOWS_WINDOW_VERSION
+                | CAPTURE_DRIVER_VERSION
+                | VERSION
+            ),
           },
         ),
         _ => Request::Controls(target, id, ControlOperation::Act),
@@ -97,6 +182,9 @@ mod tests {
       WAYLAND_WINDOW_VERSION,
       X11_WINDOW_VERSION,
       BOUNDS_VERSION,
+      WINDOWS_DISPLAY_VERSION,
+      WINDOWS_WINDOW_VERSION,
+      CAPTURE_DRIVER_VERSION,
       VERSION,
     ] {
       assert!(parse(&args(&[version, "discover"])).is_ok());
@@ -111,6 +199,7 @@ mod tests {
           parse(&args(&[version, "capture-window", target, "window-1"])).is_ok(),
           windows
         );
+        assert!(parse(&args(&[version, "input-window", target, "window-1"])).is_err());
       }
     }
   }
@@ -121,6 +210,9 @@ mod tests {
       WAYLAND_WINDOW_VERSION,
       X11_WINDOW_VERSION,
       BOUNDS_VERSION,
+      WINDOWS_DISPLAY_VERSION,
+      WINDOWS_WINDOW_VERSION,
+      CAPTURE_DRIVER_VERSION,
       VERSION,
     ] {
       let arguments = args(&[version, "elements", "wayland-1", "window-1"]);
@@ -129,36 +221,166 @@ mod tests {
       else {
         panic!("expected inspection");
       };
-      assert_eq!(bounds, matches!(version, BOUNDS_VERSION | VERSION));
+      assert_eq!(
+        bounds,
+        matches!(
+          version,
+          BOUNDS_VERSION
+            | WINDOWS_DISPLAY_VERSION
+            | WINDOWS_WINDOW_VERSION
+            | CAPTURE_DRIVER_VERSION
+            | VERSION
+        )
+      );
     }
     assert!(parse(&args(&[VERSION, "capture-window", ":7", "invalid/id"])).is_err());
     assert!(parse(&args(&["9.0.9", "capture", ":7"])).is_err());
   }
 
   #[test]
-  fn windows_displays_require_their_contract_and_reject_window_operations() {
+  fn windows_display_and_window_operations_require_their_own_contracts() {
     for version in [
       DISPLAY_VERSION,
       WAYLAND_WINDOW_VERSION,
       X11_WINDOW_VERSION,
       BOUNDS_VERSION,
+      WINDOWS_DISPLAY_VERSION,
+      WINDOWS_WINDOW_VERSION,
+      CAPTURE_DRIVER_VERSION,
       VERSION,
     ] {
       let arguments = args(&[version, "discover"]);
       let Request::Discover { windows_displays } = parse(&arguments).unwrap() else {
         panic!("expected discovery");
       };
-      assert_eq!(windows_displays, version == WINDOWS_DISPLAY_VERSION);
+      assert_eq!(
+        windows_displays,
+        matches!(
+          version,
+          WINDOWS_DISPLAY_VERSION | WINDOWS_WINDOW_VERSION | CAPTURE_DRIVER_VERSION | VERSION
+        )
+      );
       for operation in ["capture", "input"] {
         assert_eq!(
           parse(&args(&[version, operation, "windows-1"])).is_ok(),
           windows_displays
         );
       }
-      assert!(parse(&args(&[version, "windows", "windows-1"])).is_err());
-      for operation in ["capture-window", "elements", "action"] {
+      let window_operations = matches!(
+        version,
+        WINDOWS_WINDOW_VERSION | CAPTURE_DRIVER_VERSION | VERSION
+      );
+      assert_eq!(
+        parse(&args(&[version, "windows", "windows-1"])).is_ok(),
+        window_operations
+      );
+      for operation in ["capture-window", "input-window"] {
+        assert_eq!(
+          parse(&args(&[version, operation, "windows-1", "window-1"])).is_ok(),
+          window_operations
+        );
+      }
+      for operation in ["elements", "action"] {
         assert!(parse(&args(&[version, operation, "windows-1", "window-1"])).is_err());
       }
+    }
+    assert!(parse(&args(&[VERSION, "input-window", "windows-1", "invalid/id"])).is_err());
+  }
+
+  #[test]
+  fn target_independent_catalog_requires_its_own_contract_and_exact_shape() {
+    assert!(matches!(
+      parse(&args(&[CAPTURE_CATALOG_VERSION, "capture-drivers"])).unwrap(),
+      Request::CaptureCatalog
+    ));
+    for old in [
+      DISPLAY_VERSION,
+      WAYLAND_WINDOW_VERSION,
+      X11_WINDOW_VERSION,
+      BOUNDS_VERSION,
+      WINDOWS_DISPLAY_VERSION,
+      WINDOWS_WINDOW_VERSION,
+      CAPTURE_DRIVER_VERSION,
+    ] {
+      assert!(parse(&args(&[old, "capture-drivers"])).is_err());
+    }
+    for target in [":7", "wayland-1", "windows-2"] {
+      assert!(parse(&args(&[CAPTURE_CATALOG_VERSION, "capture-drivers", target])).is_err());
+      assert!(matches!(
+        parse(&args(&[CAPTURE_DRIVER_VERSION, "capture-drivers", target])).unwrap(),
+        Request::CaptureDrivers(_)
+      ));
+    }
+  }
+
+  #[test]
+  fn capture_selection_requires_its_contract_and_bounded_identifiers() {
+    for target in [":7", "wayland-1", "windows-2"] {
+      assert!(matches!(
+        parse(&args(&[CAPTURE_DRIVER_VERSION, "capture-drivers", target])).unwrap(),
+        Request::CaptureDrivers(_)
+      ));
+      assert!(matches!(
+        parse(&args(&[
+          CAPTURE_DRIVER_VERSION,
+          "capture-with-driver",
+          target,
+          "user.capture"
+        ]))
+        .unwrap(),
+        Request::CaptureWithDriver { window: None, .. }
+      ));
+      assert!(matches!(
+        parse(&args(&[
+          CAPTURE_DRIVER_VERSION,
+          "capture-with-driver",
+          target,
+          "auto",
+          "window-1"
+        ]))
+        .unwrap(),
+        Request::CaptureWithDriver {
+          window: Some("window-1"),
+          ..
+        }
+      ));
+      for old in [
+        DISPLAY_VERSION,
+        WAYLAND_WINDOW_VERSION,
+        X11_WINDOW_VERSION,
+        BOUNDS_VERSION,
+        WINDOWS_DISPLAY_VERSION,
+        WINDOWS_WINDOW_VERSION,
+      ] {
+        assert!(parse(&args(&[old, "capture-drivers", target])).is_err());
+        assert!(parse(&args(&[old, "capture-with-driver", target, "auto"])).is_err());
+      }
+    }
+    for arguments in [
+      vec![CAPTURE_DRIVER_VERSION, "capture-with-driver", ":7", ""],
+      vec![
+        CAPTURE_DRIVER_VERSION,
+        "capture-with-driver",
+        ":7",
+        "driver;command",
+      ],
+      vec![
+        CAPTURE_DRIVER_VERSION,
+        "capture-with-driver",
+        ":7",
+        "auto",
+        "bad/id",
+      ],
+      vec![
+        CAPTURE_DRIVER_VERSION,
+        "capture-with-driver",
+        ":7",
+        "auto",
+        "window-1",
+        "extra",
+      ],
+    ] {
+      assert!(parse(&args(&arguments)).is_err());
     }
   }
 }

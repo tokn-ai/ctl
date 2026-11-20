@@ -1,12 +1,10 @@
-//! Wayland display capture through grim and foreign-toplevel window capture.
+//! Foreign-toplevel discovery and window capture through image-copy capture.
 
+use super::helper;
 use crate::process::ProcessCapture;
-use ctream_driver::{CaptureDisplay, CaptureWindow, DiscoverWindows, Result};
+use ctream_driver::{CaptureWindow, DiscoverWindows, Result};
 use ctream_proto::{Window, valid_window_id};
-use std::{
-  process::{Command, Stdio},
-  time::Duration,
-};
+use std::process::Stdio;
 
 pub struct Driver;
 
@@ -23,20 +21,9 @@ impl ctream_driver::Driver for Driver {
   }
 }
 
-impl Session {
-  fn helper(&self, name: &str) -> Command {
-    let mut command = Command::new(name);
-    command
-      .env_remove("WAYLAND_SOCKET")
-      .env("WAYLAND_DISPLAY", format!("wayland-{}", self.display));
-    command
-  }
-}
-
 impl DiscoverWindows for Session {
   fn windows(&self) -> Result<Vec<Window>> {
-    let output = self
-      .helper("ctream-wayland-window")
+    let output = helper(self.display, "ctream-wayland-window")
       .arg("list")
       .stdin(Stdio::null())
       .output()?;
@@ -55,16 +42,6 @@ impl DiscoverWindows for Session {
   }
 }
 
-impl CaptureDisplay for Session {
-  type Source = ProcessCapture;
-
-  fn capture_display(&self) -> Result<ProcessCapture> {
-    let mut command = self.helper("grim");
-    command.args(["-t", "ppm", "-"]);
-    Ok(ProcessCapture::sampled(command, Duration::from_millis(125)))
-  }
-}
-
 impl CaptureWindow for Session {
   type Source = ProcessCapture;
 
@@ -72,7 +49,7 @@ impl CaptureWindow for Session {
     if !valid_window_id(id) {
       return Err("invalid window identifier".into());
     }
-    let mut command = self.helper("ctream-wayland-window");
+    let mut command = helper(self.display, "ctream-wayland-window");
     command.args(["capture", id]);
     Ok(ProcessCapture::stream(command))
   }

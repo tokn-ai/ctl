@@ -12,9 +12,10 @@ use crate::{
   transport::{Channel, Transport},
 };
 use ctream_proto::{
-  Action, ActionResult, BOUNDS_VERSION, DISPLAY_VERSION, Element, Session as DisplaySession,
-  Target, WAYLAND_WINDOW_VERSION, WINDOWS_DISPLAY_VERSION, Window, X11_FRAME_SIZE,
-  X11_WINDOW_VERSION, valid_window_id,
+  Action, ActionResult, BOUNDS_VERSION, CAPTURE_CATALOG_VERSION, CAPTURE_DRIVER_VERSION,
+  CaptureDriverDescriptor, CaptureDriverInfo, DISPLAY_VERSION, Element, Session as DisplaySession,
+  Target, WAYLAND_WINDOW_VERSION, WINDOWS_DISPLAY_VERSION, WINDOWS_WINDOW_VERSION, Window,
+  X11_FRAME_SIZE, X11_WINDOW_VERSION, valid_capture_driver, valid_window_id,
 };
 use serde::de::DeserializeOwned;
 use std::{
@@ -55,12 +56,39 @@ impl Query for LegacyDiscover {
 
 pub struct Windows(pub Target);
 
+pub struct CaptureDrivers(pub Target);
+
+pub struct CaptureCatalog;
+
+impl Query for CaptureCatalog {
+  type Reply = Vec<CaptureDriverDescriptor>;
+
+  fn arguments(&self) -> io::Result<Vec<String>> {
+    Ok(vec![
+      CAPTURE_CATALOG_VERSION.into(),
+      "capture-drivers".into(),
+    ])
+  }
+}
+
+impl Query for CaptureDrivers {
+  type Reply = Vec<CaptureDriverInfo>;
+
+  fn arguments(&self) -> io::Result<Vec<String>> {
+    Ok(vec![
+      CAPTURE_DRIVER_VERSION.into(),
+      "capture-drivers".into(),
+      self.0.to_string(),
+    ])
+  }
+}
+
 impl Query for Windows {
   type Reply = Vec<Window>;
 
   fn arguments(&self) -> io::Result<Vec<String>> {
     Ok(vec![
-      window_version(self.0)?.into(),
+      window_version(self.0).into(),
       "windows".into(),
       self.0.to_string(),
     ])
@@ -92,7 +120,7 @@ impl Query for ApplyAction<'_> {
 
   fn arguments(&self) -> io::Result<Vec<String>> {
     window_arguments(
-      window_version(self.target)?,
+      window_version(self.target),
       "action",
       self.target,
       self.window,
@@ -165,6 +193,15 @@ impl<T: Transport> Client<T> {
     self.query(Windows(target))
   }
 
+  pub fn capture_drivers(&self, target: Target) -> io::Result<Vec<CaptureDriverInfo>> {
+    self.query(CaptureDrivers(target))
+  }
+
+  /// List compiled providers without selecting or opening a display session.
+  pub fn capture_catalog(&self) -> io::Result<Vec<CaptureDriverDescriptor>> {
+    self.query(CaptureCatalog)
+  }
+
   pub fn session(&self, target: Target, window: Option<Window>) -> Session<T> {
     Session {
       client: self.clone(),
@@ -193,8 +230,33 @@ impl<T> Clone for Session<T> {
 }
 
 impl<T: Transport> Session<T> {
+  pub fn capture_with_driver(&self, driver: &str) -> io::Result<Capture<T::Reader, T::Writer>> {
+    if !valid_capture_driver(driver) {
+      return Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "invalid capture driver identifier",
+      ));
+    }
+    let mut arguments = vec![
+      CAPTURE_DRIVER_VERSION.into(),
+      "capture-with-driver".into(),
+      self.target.to_string(),
+      driver.into(),
+    ];
+    if let Some(window) = &self.window {
+      if !valid_window_id(&window.id) {
+        return Err(io::Error::new(
+          io::ErrorKind::InvalidInput,
+          "invalid window identifier",
+        ));
+      }
+      arguments.push(window.id.clone());
+    }
+    Capture::started(self.client.transport.open(&arguments)?, driver)
+  }
+
   pub fn supports_input(&self) -> bool {
-    self.window.is_none()
+    self.window.is_none() || matches!(self.target, Target::Windows(_))
   }
 
   pub fn supports_semantics(&self) -> bool {
@@ -205,7 +267,7 @@ impl<T: Transport> Session<T> {
     let (arguments, format) = if let Some(window) = &self.window {
       (
         window_arguments(
-          window_version(self.target)?,
+          window_version(self.target),
           "capture-window",
           self.target,
           &window.id,
@@ -238,7 +300,7 @@ impl<T: Transport> Session<T> {
     if !self.supports_input() {
       return Err(io::Error::new(
         io::ErrorKind::Unsupported,
-        "pointer and keyboard input require a display session",
+        "pointer and keyboard input require a display or Windows window session",
       ));
     }
     let format = match self.target {
@@ -246,11 +308,20 @@ impl<T: Transport> Session<T> {
       Target::Wayland(_) => InputFormat::Wayland,
       Target::Windows(_) => InputFormat::Windows,
     };
-    let arguments = [
-      display_version(self.target).into(),
-      "input".into(),
-      self.target.to_string(),
-    ];
+    let arguments = if let Some(window) = &self.window {
+      window_arguments(
+        WINDOWS_WINDOW_VERSION,
+        "input-window",
+        self.target,
+        &window.id,
+      )?
+    } else {
+      vec![
+        display_version(self.target).into(),
+        "input".into(),
+        self.target.to_string(),
+      ]
+    };
     Input::open(self.client.transport.open(&arguments)?, format)
   }
 
@@ -302,17 +373,12 @@ fn display_version(target: Target) -> &'static str {
   }
 }
 
-fn window_version(target: Target) -> io::Result<&'static str> {
-  Ok(match target {
+fn window_version(target: Target) -> &'static str {
+  match target {
     Target::X11(_) => X11_WINDOW_VERSION,
     Target::Wayland(_) => WAYLAND_WINDOW_VERSION,
-    Target::Windows(_) => {
-      return Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "Windows window capture and inspection are not supported yet",
-      ));
-    }
-  })
+    Target::Windows(_) => WINDOWS_WINDOW_VERSION,
+  }
 }
 
 fn window_arguments(
@@ -501,15 +567,119 @@ mod tests {
   }
 
   #[test]
+  fn windows_window_channels_share_selection_and_follow_frame_resizing() {
+    use crate::media::{Frame, VideoSource};
+
+    let (client, observed) = client(&["[]", "P6\n2 1\n255\nabcdefP6\n1 2\n255\nghijkl", "ready\n"]);
+    assert!(client.windows(Target::Windows(2)).unwrap().is_empty());
+    let session = client.session(Target::Windows(2), Some(window()));
+    assert!(session.supports_input());
+    assert!(!session.supports_semantics());
+    let mut capture = session.capture().unwrap();
+    let mut frame = Frame::default();
+    capture.read_frame(&mut frame).unwrap();
+    assert_eq!(frame.size, [2, 1]);
+    capture.read_frame(&mut frame).unwrap();
+    assert_eq!(frame.size, [1, 2]);
+    let mut input = session.input().unwrap();
+    input
+      .move_pointer(0, 1, frame.size.map(|value| value as u32))
+      .unwrap();
+    assert_eq!(*observed.payloads.lock().unwrap(), b"move 0 1 1 2\n");
+    assert_eq!(
+      *observed.requests.lock().unwrap(),
+      [
+        vec![WINDOWS_WINDOW_VERSION, "windows", "windows-2"],
+        vec![
+          WINDOWS_WINDOW_VERSION,
+          "capture-window",
+          "windows-2",
+          "window_1"
+        ],
+        vec![
+          WINDOWS_WINDOW_VERSION,
+          "input-window",
+          "windows-2",
+          "window_1"
+        ],
+      ]
+    );
+  }
+
+  #[test]
+  fn capture_catalog_queries_without_a_target_and_preserves_custom_metadata() {
+    use ctream_proto::{CaptureScope, CaptureSystem};
+    let (client, observed) = client(&[
+      r#"[{"id":"user.surface","name":"User surface","scopes":["display","window"],"systems":["x11","wayland"]}]"#,
+    ]);
+    let catalog = client.capture_catalog().unwrap();
+    assert_eq!(catalog.len(), 1);
+    assert_eq!(catalog[0].info.id, "user.surface");
+    assert_eq!(
+      catalog[0].systems,
+      [CaptureSystem::X11, CaptureSystem::Wayland]
+    );
+    assert_eq!(
+      catalog[0].info.scopes,
+      [CaptureScope::Display, CaptureScope::Window]
+    );
+    assert_eq!(
+      *observed.requests.lock().unwrap(),
+      [vec![CAPTURE_CATALOG_VERSION, "capture-drivers"]]
+    );
+  }
+
+  #[test]
+  fn capture_catalog_and_selection_report_actual_driver_without_changing_legacy_capture() {
+    use crate::media::{Frame, VideoSource};
+    let (client, observed) = client(&[
+      r#"[{"id":"user.capture","name":"User provider","scopes":["window"]}]"#,
+      "{\"driver\":\"user.capture\",\"format\":{\"type\":\"ppm\"}}\nP6\n1 1\n255\nabc",
+      "{\"driver\":\"linux.x11.ffmpeg\",\"format\":{\"type\":\"fixed_rgb\",\"size\":[1,1]}}\nxyz",
+    ]);
+    assert_eq!(
+      client.capture_drivers(Target::Windows(2)).unwrap()[0].id,
+      "user.capture"
+    );
+    let session = client.session(Target::Windows(2), Some(window()));
+    let mut capture = session.capture_with_driver("user.capture").unwrap();
+    assert_eq!(capture.driver(), Some("user.capture"));
+    let mut frame = Frame::default();
+    capture.read_frame(&mut frame).unwrap();
+    assert_eq!(frame.pixels, b"abc");
+    let mut capture = client
+      .session(Target::X11(7), None)
+      .capture_with_driver("auto")
+      .unwrap();
+    assert_eq!(capture.driver(), Some("linux.x11.ffmpeg"));
+    capture.read_frame(&mut frame).unwrap();
+    assert_eq!(frame.pixels, b"xyz");
+    assert_eq!(
+      *observed.requests.lock().unwrap(),
+      [
+        vec![CAPTURE_DRIVER_VERSION, "capture-drivers", "windows-2"],
+        vec![
+          CAPTURE_DRIVER_VERSION,
+          "capture-with-driver",
+          "windows-2",
+          "user.capture",
+          "window_1"
+        ],
+        vec![CAPTURE_DRIVER_VERSION, "capture-with-driver", ":7", "auto"],
+      ]
+    );
+    assert!(session.capture_with_driver("bad;id").is_err());
+    assert_eq!(observed.requests.lock().unwrap().len(), 3);
+  }
+
+  #[test]
   fn unsupported_scope_and_invalid_window_never_open_channels() {
     let (client, observed) = client(&[]);
     let session = client.session(Target::Wayland(1), Some(window()));
     assert!(session.input().is_err());
     let session = client.session(Target::X11(1), Some(window()));
     assert!(session.elements().is_err());
-    assert!(client.windows(Target::Windows(1)).is_err());
     let session = client.session(Target::Windows(1), Some(window()));
-    assert!(session.capture().is_err());
     assert!(session.elements().is_err());
     let mut invalid = window();
     invalid.id = "window;command".into();
@@ -519,6 +689,12 @@ mod tests {
         .capture()
         .is_err()
     );
+    assert!(observed.requests.lock().unwrap().is_empty());
+    let mut invalid = window();
+    invalid.id = "window;command".into();
+    let session = client.session(Target::Windows(1), Some(invalid));
+    assert!(session.capture().is_err());
+    assert!(session.input().is_err());
     assert!(observed.requests.lock().unwrap().is_empty());
   }
 }

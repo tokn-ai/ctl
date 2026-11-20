@@ -173,8 +173,8 @@ Windows services and interactive desktops occupy separate sessions. A capture
 helper in the user's interactive session can communicate with an SSH-facing
 agent through IPC. See Microsoft's [interactive services guidance](https://learn.microsoft.com/en-us/windows/win32/services/interactive-services)
 and [Desktop Duplication API](https://learn.microsoft.com/en-us/windows/win32/direct3ddxgi/desktop-dup-api).
-This example evaluates that boundary; it does not yet add a Windows wire
-target, viewer connection, or production capture driver.
+This probe evaluates that boundary. Use the native agent check below to exercise
+the Windows drivers and agent protocol.
 
 The live experiment confirmed this distinction: the SSH process could create
 D3D11 devices but DXGI output enumeration returned `0x887A0022`
@@ -216,6 +216,42 @@ does not prove remote process cleanup.
 
 The live WSL checks passed byte-for-byte and both Windows processes were absent
 before the watchdog deadline. Capture also succeeded in a separate SSH command.
-WSL restart, Windows sign-out, and session switching remain untested. A future
-production launcher needs explicit executable selection, binary stdio and
-cancellation handling; this experiment adds none of those to the agent protocol.
+WSL restart, Windows sign-out, and session switching remain untested. The native
+client now uses explicit executable selection and the same binary stdio and
+cancellation behavior; the diagnostic probe itself has no agent protocol impact.
+
+## Ctream native Windows agent check
+
+Build the Windows agent and opt-in integration example on Windows:
+
+```powershell
+cargo build --locked --release -p ctream-agent --bin ctream-agent --example windows-session-check
+./target/release/examples/windows-session-check.exe ./target/release/ctream-agent.exe windows-2
+```
+
+Replace `windows-2` with an idle test display from discovery. An explicit Windows
+display is required; the fixture never defaults to the primary display. Windows
+shares one pointer and keyboard across monitors, so the short input check still
+needs an interval when moving the pointer and focusing its test window is acceptable.
+Run it in the interactive desktop session, directly or through WSL interop. The
+agent argument must be a Windows path when the example itself runs on Windows;
+WSL's `wslpath -w` can translate a mounted executable path before invoking it.
+This test opens its own temporary Win32 window and sends input only after
+verifying that its click points and foreground window belong to the fixture.
+It verifies changing fixture colors in captured pixels, capture cancellation,
+click locations through wide and tall preview geometries, key delivery, and
+release of a held key when the input channel closes. It closes its window and
+agent channels and restores the pointer when it remains at the test position.
+
+An overall deadline cancels blocked channels; a final watchdog bounds the
+example's lifetime. Check that the test processes are absent after a failure.
+The example is not run by ordinary `cargo test`; its pure rotation, coordinate,
+input-state, and protocol checks run without a Windows desktop. Use
+`bash docker/ctream/run.sh` to verify the retained Linux session behavior.
+
+The local wgpu preview received frames over the WSL SSH launcher. The isolated
+native fixture then passed on a secondary display: discovery and capture agreed
+on physical dimensions, capture colors and both preview aspect ratios matched,
+and keyboard delivery and key release on EOF succeeded. Temporary processes and
+test files were removed. Display discovery does not imply permission to control
+elevated applications or a secure desktop.

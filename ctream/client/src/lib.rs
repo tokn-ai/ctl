@@ -3,6 +3,7 @@
 pub mod geometry;
 pub mod input;
 pub mod media;
+pub mod options;
 pub mod transport;
 
 use crate::{
@@ -11,8 +12,9 @@ use crate::{
   transport::{Channel, Transport},
 };
 use ctream_proto::{
-  Action, ActionResult, DISPLAY_VERSION, Element, Session as DisplaySession, Target, VERSION,
-  WAYLAND_WINDOW_VERSION, Window, X11_FRAME_SIZE, X11_WINDOW_VERSION, valid_window_id,
+  Action, ActionResult, BOUNDS_VERSION, DISPLAY_VERSION, Element, Session as DisplaySession,
+  Target, WAYLAND_WINDOW_VERSION, WINDOWS_DISPLAY_VERSION, Window, X11_FRAME_SIZE,
+  X11_WINDOW_VERSION, valid_window_id,
 };
 use serde::de::DeserializeOwned;
 use std::{
@@ -37,6 +39,16 @@ impl Query for Discover {
   type Reply = Vec<DisplaySession>;
 
   fn arguments(&self) -> io::Result<Vec<String>> {
+    Ok(vec![WINDOWS_DISPLAY_VERSION.into(), "discover".into()])
+  }
+}
+
+struct LegacyDiscover;
+
+impl Query for LegacyDiscover {
+  type Reply = Vec<DisplaySession>;
+
+  fn arguments(&self) -> io::Result<Vec<String>> {
     Ok(vec![DISPLAY_VERSION.into(), "discover".into()])
   }
 }
@@ -48,7 +60,7 @@ impl Query for Windows {
 
   fn arguments(&self) -> io::Result<Vec<String>> {
     Ok(vec![
-      window_version(self.0).into(),
+      window_version(self.0)?.into(),
       "windows".into(),
       self.0.to_string(),
     ])
@@ -80,7 +92,7 @@ impl Query for ApplyAction<'_> {
 
   fn arguments(&self) -> io::Result<Vec<String>> {
     window_arguments(
-      window_version(self.target),
+      window_version(self.target)?,
       "action",
       self.target,
       self.window,
@@ -144,7 +156,9 @@ impl<T: Transport> Client<T> {
   }
 
   pub fn discover(&self) -> io::Result<Vec<DisplaySession>> {
-    self.query(Discover)
+    self
+      .query(Discover)
+      .or_else(|error| self.query(LegacyDiscover).map_err(|_| error))
   }
 
   pub fn windows(&self, target: Target) -> io::Result<Vec<Window>> {
@@ -191,7 +205,7 @@ impl<T: Transport> Session<T> {
     let (arguments, format) = if let Some(window) = &self.window {
       (
         window_arguments(
-          window_version(self.target),
+          window_version(self.target)?,
           "capture-window",
           self.target,
           &window.id,
@@ -203,11 +217,11 @@ impl<T: Transport> Session<T> {
         Target::X11(_) => FrameFormat::FixedRgb {
           size: X11_FRAME_SIZE,
         },
-        Target::Wayland(_) => FrameFormat::Ppm,
+        Target::Wayland(_) | Target::Windows(_) => FrameFormat::Ppm,
       };
       (
         vec![
-          DISPLAY_VERSION.into(),
+          display_version(self.target).into(),
           "capture".into(),
           self.target.to_string(),
         ],
@@ -230,9 +244,10 @@ impl<T: Transport> Session<T> {
     let format = match self.target {
       Target::X11(_) => InputFormat::X11,
       Target::Wayland(_) => InputFormat::Wayland,
+      Target::Windows(_) => InputFormat::Windows,
     };
     let arguments = [
-      DISPLAY_VERSION.into(),
+      display_version(self.target).into(),
       "input".into(),
       self.target.to_string(),
     ];
@@ -256,7 +271,7 @@ impl<T: Transport> Session<T> {
       .query(Elements {
         target: self.target,
         window,
-        version: VERSION,
+        version: BOUNDS_VERSION,
       })
       .or_else(|error| {
         self
@@ -279,11 +294,25 @@ impl<T: Transport> Session<T> {
   }
 }
 
-fn window_version(target: Target) -> &'static str {
-  match target {
+fn display_version(target: Target) -> &'static str {
+  if matches!(target, Target::Windows(_)) {
+    WINDOWS_DISPLAY_VERSION
+  } else {
+    DISPLAY_VERSION
+  }
+}
+
+fn window_version(target: Target) -> io::Result<&'static str> {
+  Ok(match target {
     Target::X11(_) => X11_WINDOW_VERSION,
     Target::Wayland(_) => WAYLAND_WINDOW_VERSION,
-  }
+    Target::Windows(_) => {
+      return Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "Windows window capture and inspection are not supported yet",
+      ));
+    }
+  })
 }
 
 fn window_arguments(
@@ -404,9 +433,46 @@ mod tests {
     assert_eq!(
       *observed.requests.lock().unwrap(),
       [
-        vec!["1.0.1", "discover"],
+        vec![WINDOWS_DISPLAY_VERSION, "discover"],
         vec!["1.0.3", "windows", ":1"],
         vec!["1.0.2", "windows", "wayland-1"],
+      ]
+    );
+  }
+
+  #[test]
+  fn discovery_falls_back_to_the_original_linux_contract() {
+    let (client, observed) = client(&["unsupported contract", "[]"]);
+    assert!(client.discover().unwrap().is_empty());
+    assert_eq!(
+      *observed.requests.lock().unwrap(),
+      [
+        vec![WINDOWS_DISPLAY_VERSION, "discover"],
+        vec![DISPLAY_VERSION, "discover"],
+      ]
+    );
+  }
+
+  #[test]
+  fn windows_display_uses_ppm_and_normalized_input_under_its_contract() {
+    use crate::media::{Frame, VideoSource};
+
+    let (client, observed) = client(&["P6\n2 1\n255\nabcdef", "ready\n"]);
+    let session = client.session(Target::Windows(2), None);
+    let mut capture = session.capture().unwrap();
+    let mut frame = Frame::default();
+    capture.read_frame(&mut frame).unwrap();
+    assert_eq!(frame.size, [2, 1]);
+    assert_eq!(frame.pixels, b"abcdef");
+    let mut input = session.input().unwrap();
+    assert_eq!(input.dimensions(), None);
+    input.move_pointer(1, 0, [2, 1]).unwrap();
+    assert_eq!(*observed.payloads.lock().unwrap(), b"move 1 0 2 1\n");
+    assert_eq!(
+      *observed.requests.lock().unwrap(),
+      [
+        vec![WINDOWS_DISPLAY_VERSION, "capture", "windows-2"],
+        vec![WINDOWS_DISPLAY_VERSION, "input", "windows-2"],
       ]
     );
   }
@@ -426,7 +492,7 @@ mod tests {
     );
     let requests = observed.requests.lock().unwrap();
     assert_eq!(requests.len(), 3);
-    assert_eq!(requests[0][0], VERSION);
+    assert_eq!(requests[0][0], BOUNDS_VERSION);
     assert_eq!(requests[1][0], WAYLAND_WINDOW_VERSION);
     assert_eq!(requests[2][1], "action");
     let payload: serde_json::Value =
@@ -440,6 +506,10 @@ mod tests {
     let session = client.session(Target::Wayland(1), Some(window()));
     assert!(session.input().is_err());
     let session = client.session(Target::X11(1), Some(window()));
+    assert!(session.elements().is_err());
+    assert!(client.windows(Target::Windows(1)).is_err());
+    let session = client.session(Target::Windows(1), Some(window()));
+    assert!(session.capture().is_err());
     assert!(session.elements().is_err());
     let mut invalid = window();
     invalid.id = "window;command".into();

@@ -47,6 +47,7 @@ unpublished wire formats.
 | `ctl_forwarding` | 1 | `1.0.1` |
 | `ctl_transport` | 1 | `1.0.1` |
 | `ctl_files` | 1 | `1.0.1` |
+| `ctream_agent` | 1 | `1.0.1` |
 
 The remote VPN addition starts the next development cycle with ctld `1.1.13`
 (build 13) and helper `1.1.2` (build 2), retaining their frozen initial contracts.
@@ -559,6 +560,22 @@ Product release `v0.1.4` freezes `ctld` `1.3.20` (build 20),
 `ctl_files` `1.0.1` (build 1). The [v0.1.4 protocol map](releases/v0.1.4.md#protocol-contracts)
 records the existing named contracts, internal builds, and exact supported sets
 shipped in the release.
+
+Windows display support advances the standalone `ctream_agent` protocol from
+`1.0.4` (build 4) to `1.0.5` (build 5). The new contract adds the `windows-N`
+display target to capture and input and a `windows` discovery variant with
+`number`, `name`, and physical desktop `bounds`. Capture uses dimensioned P6 RGB
+frames. Input uses the `ready` handshake and dimensioned pointer moves, button,
+physical key, and reset commands. Windows window capture and accessibility
+operations are not part of this contract.
+
+The agent retains Linux contracts `1.0.1`, `1.0.2`, `1.0.3`, and `1.0.4`,
+including the `1.0.4` normalized accessibility bounds. New clients attempt
+`1.0.5` discovery and fall back to `1.0.1` for older agents; Windows discovery
+and operations require `1.0.5`. Earlier selections never emit the new display
+variant. WSL executable launch and configurable SSH command selection are
+client settings, independent of the wire contract. Other named contracts and
+product release versions remain unchanged.
 
 Every PR description must state its protocol changes, or **None** when there
 are no changes. Include the previous and new contracts and the compatibility

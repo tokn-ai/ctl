@@ -3,7 +3,9 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-pub const VERSION: &str = "1.0.4";
+pub const VERSION: &str = "1.0.5";
+pub const WINDOWS_DISPLAY_VERSION: &str = "1.0.5";
+pub const BOUNDS_VERSION: &str = "1.0.4";
 pub const X11_WINDOW_VERSION: &str = "1.0.3";
 pub const WAYLAND_WINDOW_VERSION: &str = "1.0.2";
 pub const X11_FRAME_SIZE: [usize; 2] = [960, 540];
@@ -12,33 +14,45 @@ pub const X11_FRAME_SIZE: [usize; 2] = [960, 540];
 #[serde(rename_all = "snake_case")]
 pub enum Display {
   X11(u32),
-  Wayland { uid: u32, socket: String },
+  Wayland {
+    uid: u32,
+    socket: String,
+  },
+  Windows {
+    number: u32,
+    name: String,
+    /// Physical desktop coordinates: left, top, right, bottom.
+    bounds: [i32; 4],
+  },
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Target {
   X11(u32),
   Wayland(u32),
+  Windows(u32),
 }
 
 impl Target {
   pub fn parse(name: &str) -> Result<Self, &'static str> {
-    let (digits, wayland) = if let Some(digits) = name.strip_prefix(':') {
-      (digits, false)
+    let (digits, constructor): (_, fn(u32) -> Self) = if let Some(digits) = name.strip_prefix(':') {
+      (digits, Self::X11)
     } else if let Some(digits) = name.strip_prefix("wayland-") {
-      (digits, true)
+      (digits, Self::Wayland)
+    } else if let Some(digits) = name.strip_prefix("windows-") {
+      (digits, Self::Windows)
     } else {
-      return Err("expected :DISPLAY or wayland-N");
+      return Err("expected :DISPLAY, wayland-N, or windows-N");
     };
     if !digits.bytes().all(|b| b.is_ascii_digit()) {
       return Err("invalid display number");
     }
     let number = digits.parse().map_err(|_| "invalid display number")?;
-    Ok(if wayland {
-      Self::Wayland(number)
-    } else {
-      Self::X11(number)
-    })
+    let target = constructor(number);
+    if target == Self::Windows(0) {
+      return Err("Windows display numbers start at 1");
+    }
+    Ok(target)
   }
 }
 
@@ -47,6 +61,7 @@ impl fmt::Display for Target {
     match self {
       Self::X11(number) => write!(f, ":{number}"),
       Self::Wayland(number) => write!(f, "wayland-{number}"),
+      Self::Windows(number) => write!(f, "windows-{number}"),
     }
   }
 }
@@ -113,4 +128,40 @@ pub enum Action {
 pub struct ActionResult {
   pub applied: bool,
   pub error: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn target_names_round_trip_and_reject_shell_text() {
+    for target in [Target::X11(0), Target::Wayland(1), Target::Windows(2)] {
+      assert_eq!(Target::parse(&target.to_string()).unwrap(), target);
+    }
+    for invalid in [
+      "windows-0",
+      "windows-",
+      "windows--1",
+      "windows-1;id",
+      "windows-4294967296",
+    ] {
+      assert!(Target::parse(invalid).is_err(), "{invalid}");
+    }
+  }
+
+  #[test]
+  fn windows_discovery_preserves_physical_bounds_and_linux_shapes() {
+    let display = Display::Windows {
+      number: 2,
+      name: "display".into(),
+      bounds: [-1920, 0, 0, 1080],
+    };
+    let bytes = serde_json::to_vec(&display).unwrap();
+    assert_eq!(serde_json::from_slice::<Display>(&bytes).unwrap(), display);
+    assert_eq!(
+      serde_json::to_string(&Display::X11(7)).unwrap(),
+      r#"{"x11":7}"#
+    );
+  }
 }

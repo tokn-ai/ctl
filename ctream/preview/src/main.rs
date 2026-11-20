@@ -1,7 +1,8 @@
 use ctream_client::{
   Client, Session,
   media::{CaptureLifetime, Frame, VideoSource},
-  transport::{Local, Ssh, Transport},
+  options::ConnectionOptions,
+  transport::Transport,
 };
 use ctream_proto::{Display, Element, Session as DisplaySession, Target, Window, X11_FRAME_SIZE};
 mod input;
@@ -11,7 +12,9 @@ mod view;
 
 use eframe::egui;
 use std::{
-  env, io,
+  env,
+  ffi::OsString,
+  io,
   sync::{
     Arc, Mutex,
     mpsc::{self, Receiver, TryRecvError},
@@ -294,7 +297,7 @@ impl<T: Transport + Send + Sync + 'static> eframe::App for Viewer<T> {
       }
       State::Selecting(sessions) => {
         if sessions.is_empty() {
-          ui.label("No X11 or Wayland displays found.");
+          ui.label("No displays found.");
         }
         for session in sessions {
           let (label, target) = match &session.display {
@@ -306,6 +309,18 @@ impl<T: Transport + Send + Sync + 'static> eframe::App for Viewer<T> {
                 Target::parse(socket).ok(),
               )
             }
+            Display::Windows {
+              number,
+              name,
+              bounds,
+            } => (
+              format!(
+                "Windows windows-{number} · {name} · {}×{}",
+                i64::from(bounds[2]) - i64::from(bounds[0]),
+                i64::from(bounds[3]) - i64::from(bounds[1]),
+              ),
+              Some(Target::Windows(*number)),
+            ),
           };
           ui.horizontal(|ui| {
             if ui
@@ -319,6 +334,7 @@ impl<T: Transport + Send + Sync + 'static> eframe::App for Viewer<T> {
               selected = Some((target, None));
             }
             if let Some(target) = target
+              && !matches!(target, Target::Windows(_))
               && ui
                 .add_enabled(session.selectable, egui::Button::new("Windows…"))
                 .clicked()
@@ -382,24 +398,156 @@ fn run<T: Transport + Send + Sync + 'static>(
   Ok(())
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-  let args: Vec<_> = env::args().skip(1).collect();
-  let (endpoint, target, windows) = match args.as_slice() {
-    [endpoint] => (endpoint, None, false),
-    [endpoint, display] => (endpoint, Some(Target::parse(display)?), false),
-    [endpoint, display, flag] if flag == "--windows" => {
-      (endpoint, Some(Target::parse(display)?), true)
+const USAGE: &str = "Usage: ctream-preview [OPTIONS] SSH_HOST|--local [DISPLAY [--windows]]
+
+  --host SSH_HOST        Alternative to the positional SSH endpoint
+  --agent EXECUTABLE     Agent executable; use a mounted Windows path through WSL
+  --ssh-program PROGRAM  SSH-compatible launcher (default: ssh)
+  --ssh-arg ARG          Launcher prefix argument; repeat as needed
+
+DISPLAY is :DISPLAY, wayland-N, or windows-N. Omit it to discover displays.
+Individual Windows window capture is not supported yet.";
+
+enum Endpoint {
+  Local,
+  Ssh(String),
+}
+
+struct Options {
+  endpoint: Endpoint,
+  connection: ConnectionOptions,
+  target: Option<Target>,
+  windows: bool,
+}
+
+fn invalid(message: &str) -> io::Error {
+  io::Error::new(io::ErrorKind::InvalidInput, message)
+}
+
+fn parse(arguments: impl IntoIterator<Item = OsString>) -> io::Result<Option<Options>> {
+  let mut arguments = arguments.into_iter();
+  let mut endpoint = None;
+  let mut target = None;
+  let mut windows = false;
+  let mut connection = ConnectionOptions::default();
+  while let Some(argument) = arguments.next() {
+    let argument = argument
+      .to_str()
+      .ok_or_else(|| invalid("invalid preview argument"))?;
+    match argument {
+      "--help" | "-h" => return Ok(None),
+      "--local" if endpoint.is_none() => endpoint = Some(Endpoint::Local),
+      "--host" if endpoint.is_none() => {
+        let host = arguments
+          .next()
+          .ok_or_else(|| invalid("--host needs an SSH destination"))?;
+        let host = host
+          .to_str()
+          .filter(|host| !host.is_empty() && !host.starts_with('-'))
+          .ok_or_else(|| invalid("--host needs an SSH destination"))?;
+        endpoint = Some(Endpoint::Ssh(host.to_owned()));
+      }
+      "--windows" if !windows => windows = true,
+      option if connection.parse_option(option, &mut arguments)? => {}
+      value if !value.starts_with('-') && endpoint.is_none() => {
+        endpoint = Some(Endpoint::Ssh(value.to_owned()))
+      }
+      value if !value.starts_with('-') && target.is_none() => {
+        target = Some(Target::parse(value).map_err(invalid)?)
+      }
+      _ => return Err(invalid("unexpected preview argument")),
     }
-    _ => return Err("usage: ctream-preview SSH_HOST|--local [DISPLAY [--windows]]".into()),
+  }
+  let endpoint = endpoint.ok_or_else(|| invalid("expected an SSH endpoint or --local"))?;
+  if windows && (target.is_none() || matches!(target, Some(Target::Windows(_)))) {
+    return Err(invalid("--windows requires an X11 or Wayland display"));
+  }
+  match &endpoint {
+    Endpoint::Local => {
+      connection.local()?;
+    }
+    Endpoint::Ssh(host) => {
+      connection.ssh(host)?;
+    }
+  }
+  Ok(Some(Options {
+    endpoint,
+    connection,
+    target,
+    windows,
+  }))
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+  let Some(options) = parse(env::args_os().skip(1)).map_err(|error| format!("{error}\n{USAGE}"))?
+  else {
+    println!("{USAGE}");
+    return Ok(());
   };
-  if endpoint == "--local" {
-    run("ctream · local", Local::default(), target, windows)
-  } else {
-    run(
-      &format!("ctream · {endpoint}"),
-      Ssh(endpoint.clone()),
-      target,
-      windows,
-    )
+  match options.endpoint {
+    Endpoint::Local => run(
+      "ctream · local",
+      options.connection.local()?,
+      options.target,
+      options.windows,
+    ),
+    Endpoint::Ssh(host) => run(
+      &format!("ctream · {host}"),
+      options.connection.ssh(&host)?,
+      options.target,
+      options.windows,
+    ),
+  }
+}
+
+#[cfg(test)]
+mod argument_tests {
+  use super::*;
+
+  fn args(arguments: &[&str]) -> Vec<OsString> {
+    arguments.iter().map(OsString::from).collect()
+  }
+
+  #[test]
+  fn positional_and_explicit_hosts_support_windows_agent_launching() {
+    for arguments in [
+      vec![
+        "test-host",
+        "windows-2",
+        "--agent",
+        "/mounted drive/agent.exe",
+      ],
+      vec![
+        "--host",
+        "test-host",
+        "--ssh-program",
+        "ctl",
+        "--ssh-arg",
+        "ssh",
+        "windows-2",
+      ],
+    ] {
+      let options = parse(args(&arguments)).unwrap().unwrap();
+      assert!(matches!(options.endpoint, Endpoint::Ssh(_)));
+      assert!(matches!(options.target, Some(Target::Windows(2))));
+      assert!(!options.windows);
+    }
+    let options = parse(args(&["--local", "--agent", "agent", ":1"]))
+      .unwrap()
+      .unwrap();
+    assert!(matches!(options.endpoint, Endpoint::Local));
+  }
+
+  #[test]
+  fn unsupported_and_conflicting_preview_modes_are_rejected() {
+    for arguments in [
+      vec!["test-host", "windows-1", "--windows"],
+      vec!["test-host", "--windows"],
+      vec!["--local", "--ssh-program", "ctl"],
+      vec!["--host", "test-host", "--local"],
+      vec!["--host"],
+    ] {
+      assert!(parse(args(&arguments)).is_err(), "{arguments:?}");
+    }
   }
 }

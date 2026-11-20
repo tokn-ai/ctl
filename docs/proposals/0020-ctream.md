@@ -5,10 +5,10 @@
 
 ## Summary
 
-`ctream` discovers X11 and Wayland instances and forwards control to a selected
-instance through a CLI and a native wgpu viewer. Its crates live under `ctream/`
+`ctream` discovers X11, Wayland, and Windows displays and forwards control to a
+selected display through a CLI and a native wgpu viewer. Its crates live under `ctream/`
 as members of the root Cargo workspace and share its lockfile. The CLI, agent,
-viewer, and Linux helpers run independently of `ctld`. Lifecycle management
+viewer, native Windows drivers, and Linux helpers run independently of `ctld`. Lifecycle management
 through `ctld` is planned once the tool is stable.
 
 ## Motivation
@@ -16,12 +16,12 @@ through `ctld` is planned once the tool is stable.
 A host can have several graphical sessions. An operator needs to identify the
 intended desktop and direct input to it from either interface. Keeping ctream
 independently buildable and runnable allows backend changes to be tested on a
-Linux desktop throughout development.
+Linux or Windows desktop throughout development.
 
 ## Design
 
 Separate Rust libraries expose the protocol types, typed client, shared driver
-traits, and official capability drivers. The CLI queries windows through the
+traits, and official capability drivers. The CLI queries displays and windows through the
 client over SSH and uses the platform library for local queries. The wgpu
 viewer uses the same client for discovery, capture, input, and semantic actions.
 
@@ -32,11 +32,11 @@ viewer uses the same client for discovery, capture, input, and semantic actions.
 | `ctream-proto` | `ctream/proto` | Client and display host processes | None | Shared display, window, control, and wire contract types |
 | `ctream-client` | `ctream/client` | CLI or viewer process | `ctream-proto` | Typed sessions, SSH/local transports, frame decoding, input forwarding, and coordinate transforms |
 | `ctream-driver` | `ctream/driver` | Display host process | `ctream-proto` | Platform-neutral driver and capability traits, with capture cancellation |
-| `ctream-driver-capture` | `ctream/driver-capture` | Linux display host | `ctream-driver`, `ctream-proto` | Official capture drivers and capturable-window enumeration |
-| `ctream-driver-input` | `ctream/driver-input` | Linux display host | `ctream-driver` | Official input drivers |
-| `ctream-platform` | `ctream/platform` | Agent or local CLI on the display host | `ctream-driver`, `ctream-proto`, `ctream-driver-capture` (Linux) | Display discovery, window-query dispatch, and AT-SPI controls |
+| `ctream-driver-capture` | `ctream/driver-capture` | Linux or Windows display host | `ctream-driver`, `ctream-proto` | Official capture drivers and Linux capturable-window enumeration |
+| `ctream-driver-input` | `ctream/driver-input` | Linux or Windows display host | `ctream-driver` | Official input drivers |
+| `ctream-platform` | `ctream/platform` | Agent or local CLI on the display host | `ctream-driver`, `ctream-proto`, `ctream-driver-capture` (Linux/Windows) | Display discovery, window-query dispatch, and AT-SPI controls |
 | `ctream-cli` | `ctream/cli` | Display host for local queries; client machine for SSH queries | `ctream-client`, `ctream-platform`, `ctream-proto` | The `ctream` command |
-| `ctream-agent` | `ctream/agent` | Linux display host | `ctream-driver`, `ctream-proto`; `ctream-driver-capture`, `ctream-driver-input`, `ctream-platform` (Linux) | Reusable request validation and stock-agent operation routing |
+| `ctream-agent` | `ctream/agent` | Linux display host or Windows interactive session | `ctream-driver`, `ctream-proto`; `ctream-driver-capture`, `ctream-driver-input`, `ctream-platform` (Linux/Windows) | Reusable request validation, stdio hosting, and stock-agent operation routing |
 | `ctream-preview` | `ctream/preview` | Viewer machine | `ctream-client`, `ctream-proto` | Native wgpu preview, controls, and overlays |
 | `ctream-wayland-input` | `ctream/wayland-input` | Linux display host | `ctream-proto` (Linux) | Wayland input and window capture helper binaries |
 
@@ -52,7 +52,8 @@ mapping.
 Official driver crates are organized by capability, then platform and backend.
 For example, `ctream_driver_capture::linux::wayland::Driver` implements capture,
 and `ctream_driver_input::linux::wayland::Driver` implements input. Both crates
-also expose `linux::x11`. Capture drivers enumerate their capturable windows;
+also expose `linux::x11` and `windows`. Windows capture uses DXGI Desktop
+Duplication, and input uses `SendInput`. Capture drivers enumerate their capturable windows;
 the platform library dispatches window queries and resolves AT-SPI controls.
 
 `ctream_driver::Driver` associates a `Target` with a `Session` and opens that
@@ -69,7 +70,7 @@ into a custom agent. It can define its own associated target type, including
 device identifiers, without depending on an official driver crate.
 
 A driver's associated `Target` is separate from `ctream_proto::Target`, which
-currently represents only the existing X11 and Wayland wire targets. The stock
+currently represents X11, Wayland, and Windows display wire targets. The stock
 agent does not load user drivers automatically. A custom agent supplies its
 driver selection, routing, and protocol adaptation. It can reuse
 `ctream_agent::protocol::parse` for the existing requests; adding a wire target
@@ -88,6 +89,13 @@ types. A JSON query associates its reply type with its command. Version
 selection and frame formats belong to the client. Both SSH and local subprocess
 stdio carry the same agent protocol.
 
+`AgentLaunch` selects one executable independently of the transport and target
+platform. `SshCommand` configures an SSH-compatible program and argument prefix;
+`Ssh` retains the default OpenSSH behavior. The CLI and viewer share `--agent`,
+`--ssh-program`, and repeated `--ssh-arg` options. Executable paths and protocol
+arguments are quoted as individual POSIX shell arguments, including Windows
+executables launched from a WSL shell. No shell-script launcher is required.
+
 `Frame<B>` carries dimensions and pixel storage. `VideoSource::Buffer`
 defines the storage used by a source, and the current RGB reader reuses a
 `Vec<u8>` between frames. The preview converts completed frames into egui
@@ -103,6 +111,51 @@ lifetime guard held by the viewer. Dropping the guard closes the control pipe
 so the agent can stop capture. Process transports allow a bounded cleanup
 period before terminating a stalled child. Input closure lets the helper
 release held keys and buttons.
+
+### Windows through a WSL endpoint
+
+Build `ctream-agent.exe` on Windows with `cargo build --release -p ctream-agent`.
+Place it in a user-owned Windows directory that WSL can access. A Windows binary
+is required: a Linux agent running in WSL does not use the native Windows drivers.
+The WSL SSH endpoint launches the executable through interop and carries the
+same binary stdio protocol. The agent must reach the intended interactive
+Windows session. Direct Windows OpenSSH launches in session 0 did not expose
+desktop outputs in the initial experiment; the WSL route reached the interactive
+desktop without a scheduled task.
+
+| Component | Runs where |
+| --- | --- |
+| CLI, wgpu viewer, overlays, frame decoding | Client machine |
+| SSH server and executable launch | WSL distribution |
+| `ctream-agent.exe`, DXGI capture, `SendInput` | Windows interactive session |
+
+For example, replacing the host and mounted executable path with the installation:
+
+```sh
+ctream --host wsl-host --agent /mnt/c/ctream/bin/ctream-agent.exe list --json
+ctream-preview --host wsl-host --agent /mnt/c/ctream/bin/ctream-agent.exe windows-1
+```
+
+When using a saved ctl host, add `--ssh-program ctl --ssh-arg ssh` before the
+CLI command or preview target. This invokes the installed `ctl ssh` command;
+ctream still has no dependency on ctld or its lifecycle.
+
+Display names use the number in the Windows GDI device name (`windows-1` for
+`DISPLAY1`), rather than the order in which GPUs are enumerated. Discovery
+includes physical desktop bounds. Capture returns full-resolution RGB PPM
+frames in the display's visible orientation, with a ceiling of eight frames
+per second. Input maps the preview's fitted image into that selected display
+and the virtual desktop, including negative origins and mixed DPI settings.
+Physical key events use the Windows keyboard layout. Closing or resetting the
+input channel releases keys and buttons injected by that channel.
+
+This initial Windows implementation supports displays. Individual-window
+capture, accessibility actions, audio, and hardware video encoding remain
+future work. A separately rendered hardware cursor is not composited into the
+captured image. Windows integrity restrictions still apply to elevated apps
+and secure desktops. Display reconfiguration or desktop access loss requires
+reconnecting; input rejects a changed display layout before sending new events.
+WSL restart, Windows sign-out, and session switching require further live checks.
 
 This step implements the existing display and window capabilities. Audio,
 encoding, capability negotiation, and a shared remote session runtime are
@@ -273,3 +326,18 @@ The provider, client, media, geometry, and local transport refactor, crate split
 and driver composition use `ctream_agent` 1.0.4 (build 4) with the same retained
 contracts.
 Protocol changes: none.
+
+Windows display support advances `ctream_agent` from 1.0.4 (build 4) to 1.0.5
+(build 5). It adds the `windows-N` target for `capture` and `input` and a
+`windows` discovery variant containing `number`, `name`, and physical `bounds`.
+Windows frames use the existing dimensioned P6 RGB format. Its input channel
+starts with `ready` and accepts dimensioned `move`, `button`, `key`, and `reset`
+commands. Windows window and accessibility operations remain unavailable.
+
+All Linux contracts 1.0.1 through 1.0.4 remain supported with their existing
+wire shapes, including normalized control bounds under 1.0.4. New clients try
+1.0.5 discovery and fall back to 1.0.1 for earlier agents. Windows display
+operations require 1.0.5; selecting an earlier contract never returns the new
+Windows discovery variant. Executable selection and WSL launch configuration
+are local transport settings. Other named protocols and product versions are
+unchanged.

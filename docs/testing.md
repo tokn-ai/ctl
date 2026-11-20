@@ -119,3 +119,68 @@ The image supplies a compositor with the foreign-toplevel capture protocols
 used by the Wayland helper. The test covers display discovery, display and
 window frames, input initialization, and capture cancellation. Geometry unit
 tests cover the common overlay and pointer transform when the preview resizes.
+
+## Ctream Windows capture experiment
+
+Build the diagnostic on Windows with
+`cargo build --locked -p ctream-driver-capture --example windows-probe --release`.
+It reports the process and console sessions, window station, desktop, DXGI
+adapters, and attached outputs. For each attached output it attempts Desktop
+Duplication with a 1.5-second frame wait, reads the frame back to CPU memory,
+and reports dimensions, a nonblack-pixel count, and a checksum. It saves no
+captured pixels and sends no input.
+
+The probe requests per-monitor v2 DPI awareness before enumerating outputs and
+reports whether it took effect. Only a verified `physical_pixels` coordinate
+space should be compared with capture dimensions, accounting for output rotation;
+an `unverified` result can contain DPI-virtualized desktop rectangles. See
+[DXGI output geometry](https://learn.microsoft.com/en-us/windows/win32/api/dxgi/nf-dxgi-idxgioutput-getdesc).
+
+Run it directly in the context being investigated:
+
+```powershell
+./target/release/examples/windows-probe.exe
+```
+
+For an explicit comparison with the same account's existing interactive login,
+use the runner:
+
+```powershell
+powershell.exe -NoProfile -File ctream/driver-capture/examples/windows_probe/run.ps1 `
+  -ProbePath target/release/examples/windows-probe.exe -Interactive
+```
+
+When all scopes in `Get-ExecutionPolicy -List` are `Undefined`, Windows clients
+default to blocking script files. For this reviewed script, add
+`-ExecutionPolicy RemoteSigned` before `-File` to set the policy for that process
+only. This does not persist a policy change or override Group Policy. See
+[PowerShell execution policies](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_execution_policies?view=powershell-5.1).
+
+The runner creates a temporary task with an interactive,
+limited principal, waits up to 20 seconds for the report, and removes its task
+and temporary result files. The task also has a 30-second execution limit.
+This requires Task Scheduler permission and an interactive login for the
+current account. It does not elevate the process or create a login session.
+
+Compare `context.process_session_id`, `same_session_as_console`, and the
+window-station visibility with each output's capture result. A usable frame
+has `capture.status = "frame_acquired"` and `readback.status = "read"`.
+HRESULTs identify failed enumeration, device creation, duplication, or readback.
+A frame timeout means no new frame arrived within the wait; it is distinct
+from an access error.
+
+Windows services and interactive desktops occupy separate sessions. A capture
+helper in the user's interactive session can communicate with an SSH-facing
+agent through IPC. See Microsoft's [interactive services guidance](https://learn.microsoft.com/en-us/windows/win32/services/interactive-services)
+and [Desktop Duplication API](https://learn.microsoft.com/en-us/windows/win32/direct3ddxgi/desktop-dup-api).
+This example evaluates that boundary; it does not yet add a Windows wire
+target, viewer connection, or production capture driver.
+
+The live experiment confirmed this distinction: the SSH process could create
+D3D11 devices but DXGI output enumeration returned `0x887A0022`
+(`DXGI_ERROR_NOT_CURRENTLY_AVAILABLE`). The same executable, launched by the
+limited interactive task, acquired and read nonblack frames from the attached
+outputs. The runner removed its task and result files after completion.
+Enabling per-monitor v2 awareness also made the scaled output's desktop
+rectangle agree with its capture dimensions. This must be preserved when
+introducing input coordinates into a Windows driver.

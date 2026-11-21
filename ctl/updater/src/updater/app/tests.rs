@@ -104,6 +104,14 @@ async fn verify_install_update_and_repair(archive: &Path) {
     fs::canonicalize(&status.launch_entry).unwrap(),
     fs::canonicalize(object.join(payload_name())).unwrap()
   );
+  #[cfg(windows)]
+  {
+    let target = dunce::canonicalize(object.join(payload_name()).join("ctmux-app.exe")).unwrap();
+    let link = lnks::Shortcut::load(&status.launch_entry).unwrap();
+    assert_eq!(link.target_path.as_deref(), Some(target.as_path()));
+    assert_eq!(link.working_dir.as_deref(), target.parent());
+    assert!(link.arguments.is_none());
+  }
   fs::remove_dir_all(&object).unwrap();
   assert!(app_status(&home.0, Some(selected.clone())).unwrap().missing);
   update(&home.0, false, false).await.unwrap();

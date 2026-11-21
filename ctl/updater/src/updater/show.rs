@@ -1,7 +1,7 @@
 //! Installed builds are separate from the stable logical component names.
 
 use super::{TargetOptions, remote::Target, status};
-use ctl_client::installation::{InstallationShow, InstallationStatus, InstalledBuild};
+use ctl_client::installation::{InstallationShow, InstalledBuild};
 use ctl_core::bundles::Source;
 use ctl_core::installations::CatalogEntry;
 use std::collections::{BTreeMap, BTreeSet};
@@ -22,16 +22,13 @@ pub(super) async fn snapshot(
   if target.host.is_some() || target.destination.is_some() || target.method.is_some() {
     crate::bundled::register()?;
     let target = status::remote_target(target).await?;
-    remote_snapshot(&target, None).await
+    remote_snapshot(&target).await
   } else {
     ctl_client::installation::show(home)
   }
 }
 
-pub(super) async fn remote_snapshot(
-  target: &Target,
-  status: Option<InstallationStatus>,
-) -> io::Result<InstallationShow> {
+async fn remote_snapshot(target: &Target) -> io::Result<InstallationShow> {
   let expected = target.expected_account();
   if let Some(snapshot) = ctl_client::installation::remote_show(
     &target.destination,
@@ -44,17 +41,14 @@ pub(super) async fn remote_snapshot(
   {
     return Ok(snapshot);
   }
-  let status = match status {
-    Some(status) => status,
-    None => ctl_client::installation::remote_status(
-      &target.destination,
-      &target.options,
-      &target.interaction,
-      expected,
-    )
-    .await
-    .map_err(io::Error::other)?,
-  };
+  let status = ctl_client::installation::remote_status(
+    &target.destination,
+    &target.options,
+    &target.interaction,
+    expected,
+  )
+  .await
+  .map_err(io::Error::other)?;
   let catalog = ctl_client::installation::remote_catalog(
     &target.destination,
     &target.options,
@@ -89,7 +83,17 @@ pub(super) fn render(snapshot: &InstallationShow, development: bool) -> String {
     return format!("No managed ctl installation.\n{next}");
   }
   let ids = rows.keys().map(String::as_str).collect::<Vec<_>>();
-  let selection = |id: Option<&str>| id.map_or_else(|| "none".into(), |id| short_id(id, &ids));
+  let selection = |id: Option<&str>| {
+    let Some(id) = id else {
+      return "none".into();
+    };
+    let short = short_id(id, &ids);
+    if rows.get(id).is_some_and(|row| row.missing) {
+      format!("{short} (missing)")
+    } else {
+      short
+    }
+  };
   let mut ordered = rows.values().collect::<Vec<_>>();
   ordered.sort_by_key(|row| (row.rank(snapshot), row.target(), row.id));
   let table = crate::table::format(
@@ -105,17 +109,24 @@ pub(super) fn render(snapshot: &InstallationShow, development: bool) -> String {
     ],
     ordered.into_iter().map(|row| row.cells(snapshot, &ids)),
   );
-  format!(
+  let mut text = format!(
     "Active: {}\nPrevious: {}\n\nInstalled builds\n{table}",
     selection(snapshot.active.as_deref()),
     selection(snapshot.previous.as_deref())
-  )
+  );
+  if !snapshot.missing_builds.is_empty() {
+    text.push_str(
+      "\n\nOn the machine with the missing builds, use `ctlup update` for a release or `ctlup dev` for a checkout build. Reinstall supplied builds from their original source.",
+    );
+  }
+  text
 }
 
 struct BuildRow<'a> {
   id: &'a str,
   build: Option<&'a InstalledBuild>,
   entries: Vec<&'a CatalogEntry>,
+  missing: bool,
 }
 
 impl BuildRow<'_> {
@@ -145,6 +156,9 @@ impl BuildRow<'_> {
     }
     if states.is_empty() {
       states.push("retained");
+    }
+    if self.missing {
+      states.push("missing");
     }
     states
   }
@@ -236,6 +250,7 @@ impl BuildRow<'_> {
 
 fn build_rows(snapshot: &InstallationShow) -> BTreeMap<String, BuildRow<'_>> {
   let mut rows = BTreeMap::new();
+  let missing: BTreeSet<_> = snapshot.missing_builds.iter().map(String::as_str).collect();
   for build in &snapshot.builds {
     rows.insert(
       build.bundle_id.clone(),
@@ -243,29 +258,22 @@ fn build_rows(snapshot: &InstallationShow) -> BTreeMap<String, BuildRow<'_>> {
         id: &build.bundle_id,
         build: Some(build),
         entries: Vec::new(),
+        missing: false,
       },
     );
   }
   for entry in &snapshot.installations {
+    let id = entry.bundle_id.as_str();
     rows
       .entry(entry.bundle_id.clone())
       .or_insert_with(|| BuildRow {
-        id: &entry.bundle_id,
+        id,
         build: None,
         entries: Vec::new(),
+        missing: missing.contains(id),
       })
       .entries
       .push(entry);
-  }
-  for id in [snapshot.active.as_ref(), snapshot.previous.as_ref()]
-    .into_iter()
-    .flatten()
-  {
-    rows.entry(id.clone()).or_insert_with(|| BuildRow {
-      id,
-      build: None,
-      entries: Vec::new(),
-    });
   }
   rows
 }

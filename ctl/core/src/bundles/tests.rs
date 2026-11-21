@@ -105,6 +105,33 @@ fn runtime_fixture(
 }
 
 #[test]
+fn cache_prune_retains_exact_recovery_copy_with_zero_budget() {
+  let home = Home::new();
+  let cache = Store::cache(&home.0);
+  let (keep, files) = fixture(Source::Local, 1);
+  let restored = cache.publish(&keep, &files).unwrap().directory;
+  let (unused, files) = fixture(Source::Local, 2);
+  let unused_dir = cache.publish(&unused, &files).unwrap().directory;
+  let pins = std::collections::BTreeSet::from([
+    (keep.bundle_id.as_str(), keep.target_triple.as_str()),
+    (unused.bundle_id.as_str(), "x86_64-pc-windows-msvc"),
+  ]);
+
+  let result = cache.prune_cache_with_pins(0, &pins).unwrap();
+  assert_eq!(result.removed, [unused.bundle_id]);
+  assert!(result.remaining_bytes > 0);
+  assert!(restored.is_dir());
+  assert!(!unused_dir.exists());
+  assert_eq!(
+    cache
+      .get(&keep.target_triple, &keep.bundle_id)
+      .unwrap()
+      .manifest,
+    keep
+  );
+}
+
+#[test]
 fn absent_selection_is_passive_and_does_not_create_directories() {
   let home = Home::new();
   let store = Store::new(&home.0);
@@ -115,6 +142,40 @@ fn absent_selection_is_passive_and_does_not_create_directories() {
       .is_none()
   );
   assert!(!home.0.join(".tokn").exists());
+}
+
+#[test]
+fn staging_uses_the_supplied_private_directory_even_with_a_profile() {
+  const CHILD_ROOT: &str = "CTL_TEST_BUNDLE_STAGING_ROOT";
+  if let Some(directory) = std::env::var_os(CHILD_ROOT) {
+    let directory = PathBuf::from(directory);
+    let (manifest, files) = fixture(Source::Local, 1);
+    let staged = Bundle::stage(&directory, &manifest, &files).unwrap();
+    assert!(staged.directory.starts_with(&directory));
+    assert_eq!(staged.read_files().unwrap(), files);
+    let cache = Store::cache(&directory);
+    assert_eq!(
+      cache.root(),
+      directory.with_file_name("profile").join("cache/components")
+    );
+    assert!(!cache.root().exists());
+    return;
+  }
+  let home = Home::new();
+  let scratch = home.0.join("scratch");
+  let profile = home.0.join("profile");
+  crate::private_fs::create_directory(&scratch).unwrap();
+  crate::private_fs::create_directory(&profile).unwrap();
+  let status = std::process::Command::new(std::env::current_exe().unwrap())
+    .args([
+      "--exact",
+      "bundles::tests::staging_uses_the_supplied_private_directory_even_with_a_profile",
+    ])
+    .env(CHILD_ROOT, &scratch)
+    .env("CTL_DATA_DIR", &profile)
+    .status()
+    .unwrap();
+  assert!(status.success());
 }
 
 #[test]

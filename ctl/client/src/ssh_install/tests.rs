@@ -187,6 +187,48 @@ async fn updater_bootstrap_verifies_bytes_and_executable_before_replacing_the_ma
 
 #[cfg(unix)]
 #[tokio::test]
+async fn bootstrap_protects_checkout_metadata_from_an_older_updater() {
+  use std::os::unix::fs::PermissionsExt as _;
+
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
+  let fixture = BundleFixture::new();
+  let home = fixture.directory.join("home");
+  let root = home.join(".tokn/ctl");
+  let manager = root.join("bin/ctlup");
+  let old = "#!/bin/sh\ncase \"$1\" in --component-info) exit 0;; --version) printf 'ctlup 0.0.0\\n';; *) exit 2;; esac\n";
+  let compatible = format!(
+    "#!/bin/sh\nif [ \"$1\" = installation-layout-version ]; then printf '%s\\n' {}; exit; fi\n{}",
+    ctl_core::installations::DEVELOPMENT_LAYOUT_VERSION,
+    old.lines().nth(1).unwrap()
+  );
+  std::fs::create_dir_all(manager.parent().unwrap()).unwrap();
+  std::fs::write(&manager, &compatible).unwrap();
+  std::fs::set_permissions(&manager, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+  for metadata in ["development.json", ".development-transaction.json"] {
+    let marker = root.join(metadata);
+    let mut command = Command::new("sh");
+    command
+      .args([
+        "-c",
+        &updater_bootstrap_script(old.as_bytes(), false).unwrap(),
+      ])
+      .env("HOME", &home);
+    std::fs::write(&marker, b"{}").unwrap();
+    let (status, stdout, stderr) = run_updater_command(command, old.as_bytes(), |_| {})
+      .await
+      .unwrap();
+    assert_eq!(status.code(), Some(1));
+    assert_eq!(stdout, b"");
+    assert!(String::from_utf8_lossy(&stderr).contains("cannot preserve checkout installations"));
+    assert_eq!(std::fs::read(&manager).unwrap(), compatible.as_bytes());
+    assert_eq!(std::fs::read(&marker).unwrap(), b"{}");
+    std::fs::remove_file(marker).unwrap();
+  }
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn updater_upload_reports_partial_input_before_checking() {
   use std::sync::Mutex;
 

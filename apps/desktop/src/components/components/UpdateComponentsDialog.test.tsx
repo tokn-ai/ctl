@@ -104,7 +104,7 @@ it("checks the publication for selected remote hosts while explaining the local 
   vi.spyOn(navigator, "platform", "get").mockReturnValue("MacIntel");
   render(<UpdateComponentsDialog targets={[host]} on_close={vi.fn()} />);
   const user = userEvent.setup();
-  const mac_hint = /This Mac uses its active component build or the included offline build/;
+  const mac_hint = /This Mac uses its active signed component build or a verified cached copy of that build/;
   const remote_hint = "Remote updates use the configured publication channel.";
   expect(screen.getByText(mac_hint)).toBeTruthy();
   expect(screen.queryByText(remote_hint)).toBeNull();

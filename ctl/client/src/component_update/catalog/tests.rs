@@ -95,6 +95,26 @@ async fn adding_a_target_keeps_same_publication_siblings_without_executing_forei
 }
 
 #[tokio::test]
+async fn adding_a_target_restores_its_missing_matching_cached_sibling() {
+  let home = Home::new();
+  let first = prepared(&home, "aarch64-unknown-linux-musl", 'a', "one");
+  let first_id = first.bundle.manifest.bundle_id.clone();
+  install_prepared_components(&home.0, vec![first], None, false)
+    .await
+    .unwrap();
+  let store = Installations::new(&home.0);
+  let missing = store.get(&first_id).unwrap();
+  std::fs::remove_dir_all(missing.directory).unwrap();
+
+  let second = prepared(&home, "x86_64-unknown-linux-musl", 'a', "one");
+  let restored = install_prepared_components(&home.0, vec![second], None, false)
+    .await
+    .unwrap();
+  assert_eq!(restored.len(), 2);
+  assert!(store.get(&first_id).is_ok());
+}
+
+#[tokio::test]
 async fn a_complete_new_cohort_replaces_all_targets_and_removes_old_payloads() {
   let home = Home::new();
   let targets = ["aarch64-unknown-linux-musl", "x86_64-unknown-linux-musl"];

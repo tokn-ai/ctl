@@ -12,6 +12,8 @@ use std::path::Path;
 
 const CATALOG: &str = "catalog.json";
 const JOURNAL: &str = ".catalog-transaction.json";
+const DEVELOPMENT: &str = "development.json";
+const DEVELOPMENT_JOURNAL: &str = ".development-transaction.json";
 const MAX_BYTES: u64 = 1024 * 1024;
 const MAX_ENTRIES: usize = 4096;
 
@@ -81,6 +83,12 @@ impl CatalogEntry {
 pub(super) struct State {
   schema_version: u16,
   pub(super) entries: Vec<CatalogEntry>,
+  // Older runtime binaries read the catalog while acquiring process leases.
+  // Keep checkout registrations in a sidecar so those readers remain usable.
+  #[serde(skip)]
+  pub(super) development: BTreeMap<String, String>,
+  #[serde(skip)]
+  clear_active: Option<String>,
 }
 
 impl Default for State {
@@ -88,35 +96,77 @@ impl Default for State {
     Self {
       schema_version: 1,
       entries: Vec::new(),
+      development: BTreeMap::new(),
+      clear_active: None,
     }
   }
 }
 
 impl State {
   fn validate(&self, store: &Installations) -> io::Result<()> {
+    self.load_payloads(store, false).map(|_| ())
+  }
+
+  pub(super) fn inspect_payloads(
+    &self,
+    store: &Installations,
+  ) -> io::Result<(Vec<Bundle>, Vec<String>)> {
+    self.load_payloads(store, true)
+  }
+
+  pub(super) fn hides_selection(&self, id: &str) -> bool {
+    self.clear_active.as_deref() == Some(id)
+  }
+
+  fn validate_present_payloads(&self, store: &Installations) -> io::Result<()> {
+    self.load_payloads(store, true).map(|_| ())
+  }
+
+  fn load_payloads(
+    &self,
+    store: &Installations,
+    allow_missing: bool,
+  ) -> io::Result<(Vec<Bundle>, Vec<String>)> {
     self.validate_index()?;
+    let dev_ids = self.development.values().collect::<BTreeSet<_>>();
+    let mut bundles = Vec::new();
+    let mut missing = Vec::new();
     for (id, target) in self
       .entries
       .iter()
       .map(|entry| (&entry.bundle_id, &entry.target_triple))
       .collect::<BTreeMap<_, _>>()
     {
-      let bundle = filesystem::load(store, id)?;
+      let Some(bundle) = filesystem::load_available(store, id)? else {
+        if !allow_missing {
+          return Err(filesystem::missing_payload(id));
+        }
+        missing.push(id.clone());
+        continue;
+      };
       if bundle.manifest.target_triple != *target {
         return Err(invalid("catalog target differs from its immutable payload"));
       }
+      if dev_ids.contains(id) && bundle.manifest.source != crate::bundles::Source::Local {
+        return Err(invalid("development checkout requires a local build"));
+      }
+      bundles.push(bundle);
     }
-    Ok(())
+    Ok((bundles, missing))
   }
 
   fn validate_index(&self) -> io::Result<()> {
-    if self.schema_version != 1 || self.entries.len() > MAX_ENTRIES {
+    if self.schema_version != 1
+      || self.entries.len() > MAX_ENTRIES
+      || self.development.len() > MAX_ENTRIES
+    {
       return Err(invalid("unsupported or oversized installation catalog"));
     }
     let mut unique = BTreeSet::new();
     let mut heads = BTreeSet::new();
     let mut publications = BTreeMap::new();
     let mut targets = BTreeMap::new();
+    let mut dev_bundles = BTreeSet::new();
     for entry in &self.entries {
       entry.validate()?;
       let Some(origin) = &entry.origin else {
@@ -139,6 +189,17 @@ impl State {
       {
         return Err(invalid(
           "a channel contains targets from different publications",
+        ));
+      }
+      if origin.channel == "local" && crate::bundles::local_target(&entry.target_triple) {
+        dev_bundles.insert(entry.bundle_id.as_str());
+      }
+    }
+    for (checkout, id) in &self.development {
+      validate_checkout_id(checkout)?;
+      if !dev_bundles.contains(id.as_str()) {
+        return Err(invalid(
+          "development checkout has no recorded local native build",
         ));
       }
     }
@@ -195,6 +256,11 @@ impl State {
     previous_id: &str,
     renewed_id: &str,
   ) -> io::Result<()> {
+    for id in self.development.values_mut() {
+      if id == previous_id {
+        *id = renewed_id.into();
+      }
+    }
     let mut renewed_entries = Vec::new();
     for entry in self
       .entries
@@ -217,8 +283,7 @@ impl State {
             "renewed helper already has different provenance in this channel",
           ));
         }
-        // Renewing after rollback can select a bundle that is still the head
-        // of this channel, even though its predecessor was merely retained.
+        // Retain any current channel membership already held by the replacement.
         existing.current |= entry.current;
       } else {
         self.entries.push(entry);
@@ -252,10 +317,19 @@ struct Transaction {
   previous: Option<String>,
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DevelopmentIntent {
+  catalog_digest: String,
+  development: BTreeMap<String, String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  clear_active: Option<String>,
+}
+
 impl Transaction {
   fn validate(&self, store: &Installations) -> io::Result<()> {
     self.validate_index()?;
-    self.catalog.validate(store)?;
+    self.catalog.validate_present_payloads(store)?;
     for id in [self.active.as_deref(), self.previous.as_deref()]
       .into_iter()
       .flatten()
@@ -314,6 +388,13 @@ pub(super) fn validate_channel(channel: &str) -> io::Result<()> {
   Ok(())
 }
 
+pub(super) fn validate_checkout_id(checkout: &str) -> io::Result<()> {
+  if !crate::bundles::valid_digest(checkout) {
+    return Err(invalid("invalid development checkout identity"));
+  }
+  Ok(())
+}
+
 fn utc_timestamp(date: &str) -> bool {
   (20..=30).contains(&date.len())
     && date.ends_with('Z')
@@ -325,39 +406,110 @@ pub(super) fn exists(store: &Installations) -> io::Result<bool> {
   filesystem::path_exists(&store.root.join(CATALOG))
 }
 
+pub(super) fn has_transaction(store: &Installations) -> io::Result<bool> {
+  filesystem::path_exists(&store.root.join(JOURNAL))
+}
+
 pub(super) fn read(store: &Installations) -> io::Result<State> {
-  let state = read_index(store)?;
-  state.validate(store)?;
+  let state = read_development_index(store)?;
+  state.validate_present_payloads(store)?;
   Ok(state)
 }
 
-pub(super) fn read_index(store: &Installations) -> io::Result<State> {
-  let state = existing_state(store)?;
-  if state.is_none() && has_installation_data(store)? {
-    return Err(invalid(
-      "existing installations have no authoritative catalog; run ctlup migrate",
-    ));
+pub(super) fn read_development_index(store: &Installations) -> io::Result<State> {
+  let transaction = read_file::<Transaction>(&store.root.join(JOURNAL))?;
+  let mut state = if let Some(transaction) = &transaction {
+    transaction.validate_index()?;
+    transaction.catalog.clone()
+  } else {
+    read_committed(store)?
+  };
+  if let Some(transaction) = transaction
+    && let Some(intent) = read_intent(store, Some(&transaction))?
+  {
+    if let Some(id) = intent.clear_active.as_deref() {
+      validate_cleared_selection(store, &transaction, id)?;
+    }
+    state.development = intent.development;
+    state.clear_active = intent.clear_active;
+  } else {
+    state.development = read_development(store, None)?;
   }
-  let state = state.unwrap_or_default();
+  state.validate_index()?;
+  Ok(state)
+}
+
+pub(super) fn has_development_heads(store: &Installations) -> io::Result<bool> {
+  let transaction = read_file::<Transaction>(&store.root.join(JOURNAL))?;
+  Ok(!read_development(store, transaction.as_ref())?.is_empty())
+}
+
+pub(super) fn read_index(store: &Installations) -> io::Result<State> {
+  let state = if let Some(transaction) = read_file::<Transaction>(&store.root.join(JOURNAL))? {
+    // A durable journal is the committed intent after interruption.
+    transaction.validate_index()?;
+    transaction.catalog
+  } else {
+    read_committed(store)?
+  };
   state.validate_index()?;
   Ok(state)
 }
 
 pub(super) fn read_for_migration(store: &Installations) -> io::Result<State> {
-  let state = existing_state(store)?.unwrap_or_default();
+  let transaction = read_file::<Transaction>(&store.root.join(JOURNAL))?;
+  let mut state = if let Some(transaction) = &transaction {
+    transaction.validate_index()?;
+    transaction.catalog.clone()
+  } else {
+    read_file(&store.root.join(CATALOG))?.unwrap_or_default()
+  };
+  state.development = read_development(store, transaction.as_ref())?;
   state.validate(store)?;
   Ok(state)
 }
 
-pub(super) fn existing_state(store: &Installations) -> io::Result<Option<State>> {
-  // A durable journal is the committed intent after interruption. Inspection
-  // uses its complete catalog without mutating pointers or hiding corruption.
-  if let Some(transaction) = read_file::<Transaction>(&store.root.join(JOURNAL))? {
-    transaction.validate_index()?;
-    Ok(Some(transaction.catalog))
-  } else {
-    read_file(&store.root.join(CATALOG))
+fn read_committed(store: &Installations) -> io::Result<State> {
+  let state = read_file(&store.root.join(CATALOG))?;
+  if state.is_none() && has_installation_data(store)? {
+    return Err(invalid(
+      "existing installations have no authoritative catalog",
+    ));
   }
+  Ok(state.unwrap_or_default())
+}
+
+fn transaction_digest(transaction: &Transaction) -> io::Result<String> {
+  Ok(crate::bundles::digest(
+    &serde_json::to_vec(transaction).map_err(io::Error::other)?,
+  ))
+}
+
+fn read_development(
+  store: &Installations,
+  transaction: Option<&Transaction>,
+) -> io::Result<BTreeMap<String, String>> {
+  if let Some(intent) = read_intent(store, transaction)? {
+    return Ok(intent.development);
+  }
+  Ok(read_file(&store.root.join(DEVELOPMENT))?.unwrap_or_default())
+}
+
+fn read_intent(
+  store: &Installations,
+  transaction: Option<&Transaction>,
+) -> io::Result<Option<DevelopmentIntent>> {
+  if let Some(transaction) = transaction
+    && let Some(intent) = read_file::<DevelopmentIntent>(&store.root.join(DEVELOPMENT_JOURNAL))?
+  {
+    if intent.catalog_digest != transaction_digest(transaction)? {
+      return Err(invalid(
+        "installation journal differs from the catalog transaction",
+      ));
+    }
+    return Ok(Some(intent));
+  }
+  Ok(None)
 }
 
 pub(super) fn has_installation_data(store: &Installations) -> io::Result<bool> {
@@ -383,7 +535,9 @@ pub(super) fn has_installation_data(store: &Installations) -> io::Result<bool> {
 }
 
 pub(super) fn inventory(store: &Installations) -> io::Result<Vec<CatalogEntry>> {
-  read(store).map(|state| state.entries)
+  let state = read_index(store)?;
+  state.validate(store)?;
+  Ok(state.entries)
 }
 
 pub(super) fn initialize(store: &Installations, state: &State) -> io::Result<()> {
@@ -406,7 +560,24 @@ pub(super) fn commit(
   state: &State,
   activation: Option<(&Bundle, Option<&Bundle>)>,
 ) -> io::Result<()> {
-  state.validate(store)?;
+  commit_with_selection(store, state, activation, None)
+}
+
+pub(super) fn commit_prune(
+  store: &Installations,
+  state: &State,
+  clear_active: Option<&str>,
+) -> io::Result<()> {
+  commit_with_selection(store, state, None, clear_active)
+}
+
+fn commit_with_selection(
+  store: &Installations,
+  state: &State,
+  activation: Option<(&Bundle, Option<&Bundle>)>,
+  clear_active: Option<&str>,
+) -> io::Result<()> {
+  state.validate_present_payloads(store)?;
   if let Some((active, previous)) = activation {
     filesystem::validate_native(active)?;
     if let Some(previous) = previous {
@@ -431,14 +602,46 @@ pub(super) fn commit(
       "installation catalog transaction was not recovered",
     ));
   }
+  let persisted = read_development(store, None)?;
+  if let Some(id) = clear_active {
+    validate_cleared_selection(store, &transaction, id)?;
+  }
+  if transaction.catalog.development == persisted && clear_active.is_none() {
+    clear_development_intent(store)?;
+  } else {
+    replace(
+      &store.root.join(DEVELOPMENT_JOURNAL),
+      &DevelopmentIntent {
+        catalog_digest: transaction_digest(&transaction)?,
+        development: transaction.catalog.development.clone(),
+        clear_active: clear_active.map(str::to_owned),
+      },
+    )?;
+  }
+  // The ordinary journal is the commit point for both files. Existing runtime
+  // binaries can still read its version-1 schema and acquire leases.
   replace(&store.root.join(JOURNAL), &transaction)?;
   recover(store)
 }
 
 pub(super) fn recover(store: &Installations) -> io::Result<()> {
-  let transaction = read_file::<Transaction>(&store.root.join(JOURNAL))?;
-  if let Some(transaction) = &transaction {
+  let mut transaction = read_file::<Transaction>(&store.root.join(JOURNAL))?;
+  let intent = read_intent(store, transaction.as_ref())?;
+  let (development, clear_active) = if let Some(intent) = intent {
+    (intent.development, intent.clear_active)
+  } else {
+    (read_development(store, None)?, None)
+  };
+  if let Some(transaction) = &mut transaction {
+    transaction.catalog.development = development;
     transaction.validate(store)?;
+    if let Some(id) = &clear_active {
+      validate_cleared_selection(store, transaction, id)?;
+    }
+    validate_destination(&store.root.join(CATALOG))?;
+    if filesystem::path_exists(&store.root.join(DEVELOPMENT_JOURNAL))? {
+      validate_destination(&store.root.join(DEVELOPMENT))?;
+    }
   }
   #[cfg(unix)]
   {
@@ -450,8 +653,11 @@ pub(super) fn recover(store: &Installations) -> io::Result<()> {
     filesystem::recover(store)?;
   }
   let Some(transaction) = transaction else {
-    return Ok(());
+    return clear_development_intent(store);
   };
+  if clear_active.is_some() {
+    filesystem::clear_active(store)?;
+  }
   if let Some(id) = &transaction.active {
     let active = filesystem::load(store, id)?;
     filesystem::validate_native(&active)?;
@@ -466,8 +672,49 @@ pub(super) fn recover(store: &Installations) -> io::Result<()> {
     filesystem::activate(store, &active, previous.as_ref())?;
   }
   replace(&store.root.join(CATALOG), &transaction.catalog)?;
+  if filesystem::path_exists(&store.root.join(DEVELOPMENT_JOURNAL))? {
+    replace(
+      &store.root.join(DEVELOPMENT),
+      &transaction.catalog.development,
+    )?;
+  }
   fs::remove_file(store.root.join(JOURNAL))?;
-  sync_directory(&store.root)
+  sync_directory(&store.root)?;
+  clear_development_intent(store)?;
+  super::layout::refresh(store, &transaction.catalog);
+  Ok(())
+}
+
+fn validate_cleared_selection(
+  store: &Installations,
+  transaction: &Transaction,
+  id: &str,
+) -> io::Result<()> {
+  if transaction.active.is_some()
+    || transaction
+      .catalog
+      .entries
+      .iter()
+      .any(|entry| entry.bundle_id == id)
+    || filesystem::payload_dir(store, id)?.is_some()
+    || filesystem::selection_id(store, "current")?.is_some_and(|selected| selected != id)
+    || filesystem::selection_id(store, "previous")?.is_some()
+  {
+    return Err(invalid(
+      "prune transaction cannot clear the active selection",
+    ));
+  }
+  Ok(())
+}
+
+fn clear_development_intent(store: &Installations) -> io::Result<()> {
+  let path = store.root.join(DEVELOPMENT_JOURNAL);
+  if filesystem::path_exists(&path)? {
+    filesystem::private_file(&fs::symlink_metadata(&path)?)?;
+    fs::remove_file(path)?;
+    sync_directory(&store.root)?;
+  }
+  Ok(())
 }
 
 fn read_file<T: for<'de> Deserialize<'de>>(path: &Path) -> io::Result<Option<T>> {
@@ -476,7 +723,13 @@ fn read_file<T: for<'de> Deserialize<'de>>(path: &Path) -> io::Result<Option<T>>
     Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
     Err(error) => return Err(error),
   }
-  let file = options().read(true).open(path)?;
+  let file = match options().read(true).open(path) {
+    Ok(file) => file,
+    // Lock-free readers can race removal of a completed journal. Its catalog
+    // replacement is already visible by the time this removal occurs.
+    Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+    Err(error) => return Err(error),
+  };
   filesystem::private_file(&file.metadata()?)?;
   let mut bytes = Vec::new();
   file.take(MAX_BYTES + 1).read_to_end(&mut bytes)?;
@@ -493,9 +746,7 @@ pub(super) fn replace(path: &Path, value: &impl Serialize) -> io::Result<()> {
   if bytes.len() as u64 > MAX_BYTES {
     return Err(invalid("installation catalog exceeds its size limit"));
   }
-  if filesystem::path_exists(path)? {
-    filesystem::private_file(&fs::symlink_metadata(path)?)?;
-  }
+  validate_destination(path)?;
   let temporary =
     filesystem::Temporary(path.with_file_name(format!(".catalog-next-{}", uuid::Uuid::new_v4())));
   let mut file = options().write(true).create_new(true).open(&temporary.0)?;
@@ -504,6 +755,14 @@ pub(super) fn replace(path: &Path, value: &impl Serialize) -> io::Result<()> {
   drop(file);
   fs::rename(&temporary.0, path)?;
   sync_directory(path.parent().unwrap())
+}
+
+fn validate_destination(path: &Path) -> io::Result<()> {
+  match fs::symlink_metadata(path) {
+    Ok(metadata) => filesystem::private_file(&metadata),
+    Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+    Err(error) => Err(error),
+  }
 }
 
 #[cfg(test)]

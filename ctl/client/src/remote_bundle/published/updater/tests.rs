@@ -205,12 +205,64 @@ fn installed_component_pins_keep_their_matching_updater_even_above_budget() {
   std::fs::write(&record, serde_json::to_vec(&updater.info).unwrap()).unwrap();
   std::fs::set_permissions(&record, std::fs::Permissions::from_mode(0o600)).unwrap();
   assert_eq!(
-    prune_updater_cache_with_pins(&root, 0, &[manifest]).unwrap(),
+    prune_updater_cache_with_pins(&root, 0, &[manifest], &BTreeSet::new()).unwrap(),
     0
   );
   assert!(read_cached_updater(&root, &updater.info).unwrap().is_some());
   assert!(record.exists());
   assert_eq!(prune_updater_cache(&root, 0).unwrap(), updater.info.size);
+}
+
+#[test]
+fn missing_component_pins_keep_only_the_exact_target_and_content_record() {
+  let home = Home::new();
+  let root = home.cache();
+  let records = root.join("records");
+  crate::installation::safe_directory(&records).unwrap();
+  let expected = fixture();
+  let mut wrong_id = fixture();
+  wrong_id.bytes = b"separate cached updater".to_vec();
+  wrong_id.info.sha256 = format!("{:x}", Sha256::digest(&wrong_id.bytes));
+  wrong_id.info.size = wrong_id.bytes.len() as u64;
+  let mut wrong_target = wrong_id.clone();
+  wrong_target.bytes = b"cached updater for another target".to_vec();
+  wrong_target.info.sha256 = format!("{:x}", Sha256::digest(&wrong_target.bytes));
+  wrong_target.info.size = wrong_target.bytes.len() as u64;
+  wrong_target.info.target_triple = "aarch64-unknown-linux-musl".into();
+  wrong_target.info.binary = format!(
+    "ctlup-{}-{}",
+    wrong_target.info.bundle_id, wrong_target.info.target_triple
+  );
+  let expected_id = "a".repeat(64);
+  let wrong_id_record = "b".repeat(64);
+  let wrong_target_record = "c".repeat(64);
+  for (id, updater) in [
+    (&expected_id, &expected),
+    (&wrong_id_record, &wrong_id),
+    (&wrong_target_record, &wrong_target),
+  ] {
+    cache_verified(&root, updater).unwrap();
+    let path = records.join(format!("{id}.json"));
+    std::fs::write(&path, serde_json::to_vec(&updater.info).unwrap()).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+  }
+  let target = expected.info.target_triple.as_str();
+  let missing = BTreeSet::from([
+    (expected_id.as_str(), target),
+    (wrong_target_record.as_str(), target),
+  ]);
+  assert_eq!(
+    prune_updater_cache_with_pins(&root, 0, &[], &missing).unwrap(),
+    wrong_id.info.size + wrong_target.info.size
+  );
+  assert!(
+    read_cached_updater(&root, &expected.info)
+      .unwrap()
+      .is_some()
+  );
+  assert!(records.join(format!("{expected_id}.json")).exists());
+  assert!(!records.join(format!("{wrong_id_record}.json")).exists());
+  assert!(!records.join(format!("{wrong_target_record}.json")).exists());
 }
 
 #[test]
@@ -248,7 +300,7 @@ fn updater_blob_and_cohort_record_publish_together_without_nested_locking() {
     updater.bytes
   );
   assert_eq!(
-    prune_updater_cache_with_pins(&root, 0, &[manifest]).unwrap(),
+    prune_updater_cache_with_pins(&root, 0, &[manifest], &BTreeSet::new()).unwrap(),
     0
   );
 }

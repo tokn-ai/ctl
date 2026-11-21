@@ -4,6 +4,7 @@ use super::filesystem::{self, Lock};
 use super::{Store, invalid, valid_digest, validate_target};
 use crate::private_fs::{options, sync_directory};
 use serde::Serialize;
+use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -82,15 +83,26 @@ pub(super) fn touch(store: &Store, target: &str, id: &str) -> io::Result<()> {
 
 struct Candidate {
   id: String,
+  target: String,
   path: PathBuf,
   lease: PathBuf,
   last_used: SystemTime,
   bytes: u64,
 }
 
-pub(super) fn prune(store: &Store, max_bytes: u64) -> io::Result<PruneCacheResult> {
+pub(super) fn prune(
+  store: &Store,
+  max_bytes: u64,
+  pins: &BTreeSet<(&str, &str)>,
+) -> io::Result<PruneCacheResult> {
   if !store.cache {
     return Err(invalid("only deployment caches can be pruned"));
+  }
+  for (id, target) in pins {
+    if !valid_digest(id) {
+      return Err(invalid("invalid pinned cache identity"));
+    }
+    validate_target(target)?;
   }
   if !filesystem::root_exists(store)? {
     return Ok(PruneCacheResult::default());
@@ -110,6 +122,9 @@ pub(super) fn prune(store: &Store, max_bytes: u64) -> io::Result<PruneCacheResul
   for entry in candidates {
     if result.remaining_bytes <= max_bytes {
       break;
+    }
+    if pins.contains(&(entry.id.as_str(), entry.target.as_str())) {
+      continue;
     }
     let file = options().read(true).write(true).open(&entry.lease)?;
     filesystem::require_file(&file.metadata()?)?;
@@ -174,6 +189,7 @@ fn candidates(store: &Store) -> io::Result<Vec<Candidate>> {
       let bytes = tree_bytes(&path, 0)?;
       candidates.push(Candidate {
         id,
+        target: target_name.clone(),
         path,
         lease,
         last_used: metadata.modified()?,

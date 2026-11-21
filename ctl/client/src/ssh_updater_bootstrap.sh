@@ -4,6 +4,7 @@ fail() {
   printf 'ctlup bootstrap: %s\n' "$1" >&2
   exit 1
 }
+__CHECKOUT_LAYOUT_GUARD__
 base="$HOME/.tokn/ctl"
 for directory in "$HOME" "$HOME/.tokn" "$base" "$base/bin"; do
   test ! -L "$directory" || fail 'installation directory is a symbolic link'
@@ -25,6 +26,7 @@ if [ '__CHECK_ONLY__' = yes ]; then
   if [ -f "$destination" ] && [ -x "$destination" ]; then
     if command -v sha256sum >/dev/null 2>&1; then actual=$(sha256sum "$destination"); else actual=$(shasum -a 256 "$destination"); fi
     if [ "${actual%% *}" = '__UPDATER_SHA256__' ]; then
+      require_checkout_layout "$destination"
       printf 'ctlup-bootstrap-v1\n'
       exit 0
     fi
@@ -50,6 +52,7 @@ case "$version" in
   'ctlup '*) ;;
   *) fail 'uploaded executable is not ctlup' ;;
 esac
+require_checkout_layout "$temporary"
 mv -f "$temporary" "$destination"
 trap - EXIT HUP INT TERM
 printf 'ctlup-bootstrap-v1\n'

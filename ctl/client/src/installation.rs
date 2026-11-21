@@ -5,7 +5,7 @@ use ctl_core::component_update::BundleChannel;
 use ctl_core::installations::Installations;
 use ctl_core::private_fs;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 
@@ -18,8 +18,8 @@ mod updater;
 pub(crate) use provenance::single_target_heads;
 pub use provenance::{activate_uploaded, decode_catalog_origin, encode_catalog_origin};
 pub use remote::{
-  InstallationCatalog, remote_account_id, remote_catalog, remote_rollback, remote_show,
-  remote_status, verify_remote_activation,
+  InstallationCatalog, remote_account_id, remote_catalog, remote_show, remote_status,
+  verify_remote_activation,
 };
 pub use show::{InstallationShow, InstalledBuild, show};
 pub use updater::{
@@ -35,9 +35,45 @@ pub(crate) use updater::{
 pub struct InstallationStatus {
   pub active: Option<Manifest>,
   pub previous: Option<Manifest>,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub missing_builds: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
+impl InstallationStatus {
+  fn validate(&self) -> io::Result<()> {
+    let missing = validate_missing_builds(&self.missing_builds)?;
+    for manifest in [self.active.as_ref(), self.previous.as_ref()]
+      .into_iter()
+      .flatten()
+    {
+      manifest.validate()?;
+      if missing.contains(manifest.bundle_id.as_str()) {
+        return Err(invalid("selected build is both present and missing"));
+      }
+    }
+    Ok(())
+  }
+}
+
+const MAX_INSPECTED_BUILDS: usize = 4096;
+
+fn validate_missing_builds(builds: &[String]) -> io::Result<BTreeSet<&str>> {
+  if builds.len() > MAX_INSPECTED_BUILDS {
+    return Err(invalid("too many missing installed builds"));
+  }
+  let mut missing = BTreeSet::new();
+  for id in builds {
+    if id.len() != 64 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+      return Err(invalid("invalid missing installation identity"));
+    }
+    if !missing.insert(id.as_str()) {
+      return Err(invalid("duplicate missing installation identity"));
+    }
+  }
+  Ok(missing)
+}
+
+#[derive(Debug, Default, Serialize)]
 pub struct CachePruneResult {
   pub download_bytes: u64,
   pub extracted_bytes: u64,
@@ -46,41 +82,59 @@ pub struct CachePruneResult {
 
 /// Keep cached deployment data bounded without touching active installations.
 /// Prepared extracted builds hold OS leases, so another update can finish safely.
+/// Exact cached bundles and updater records for missing builds remain available
+/// for recovery, even if doing so exceeds their cache budgets.
 ///
 /// # Errors
 /// Reports unsafe cache entries or failed cleanup; callers must preserve any
 /// already completed installation and report cleanup independently.
 pub fn prune_caches(home: &Path) -> io::Result<CachePruneResult> {
-  let download_bytes = crate::remote_bundle::prune_download_cache(
-    &ctl_core::paths::directory_for_account(home).join("cache/downloads"),
-    256 * 1024 * 1024,
-  )?;
-  let result = ctl_core::bundles::Store::cache(home).prune_cache(512 * 1024 * 1024)?;
-  let updater_bytes = Installations::new(home).with_locked_manifests(|pins| {
-    let root = ctl_core::paths::directory_for_account(home).join("cache/updaters");
-    if pins.is_empty() {
-      crate::remote_bundle::published::prune_updater_cache(&root, 128 * 1024 * 1024)
-    } else {
-      crate::remote_bundle::published::prune_updater_cache_with_pins(&root, 128 * 1024 * 1024, pins)
-    }
-  })?;
-  Ok(CachePruneResult {
-    download_bytes,
-    extracted_bytes: result.remaining_bytes,
-    updater_bytes,
+  let store = Installations::new(home);
+  let root = store.root().join("cache");
+  if !storage_exists(&root)? {
+    return Ok(CachePruneResult::default());
+  }
+  store.with_locked_manifests(|manifests, missing| {
+    let recovery_pins = missing
+      .iter()
+      .map(|entry| (entry.bundle_id.as_str(), entry.target_triple.as_str()))
+      .collect::<BTreeSet<_>>();
+    let download_bytes =
+      crate::remote_bundle::prune_download_cache(&root.join("downloads"), 256 * 1024 * 1024)?;
+    let extracted = ctl_core::bundles::Store::cache(home)
+      .prune_cache_with_pins(512 * 1024 * 1024, &recovery_pins)?;
+    let updater_bytes = crate::remote_bundle::published::prune_updater_cache_with_pins(
+      &root.join("updaters"),
+      128 * 1024 * 1024,
+      manifests,
+      &recovery_pins,
+    )?;
+    Ok(CachePruneResult {
+      download_bytes,
+      extracted_bytes: extracted.remaining_bytes,
+      updater_bytes,
+    })
   })
 }
 
-/// Inspect the active and rollback builds without changing files or services.
+/// Inspect native selections and report missing installed payloads.
 ///
 /// # Errors
 /// Reports corrupt or inaccessible installation state.
 pub fn status(home: &Path) -> io::Result<InstallationStatus> {
-  let installations = Installations::new(home);
-  Ok(InstallationStatus {
-    active: installations.active()?.map(|bundle| bundle.manifest),
-    previous: installations.previous()?.map(|bundle| bundle.manifest),
-  })
+  let inspection = Installations::new(home).inspect_status()?;
+  let mut manifests = inspection
+    .bundles
+    .into_iter()
+    .map(|bundle| (bundle.manifest.bundle_id.clone(), bundle.manifest))
+    .collect::<BTreeMap<_, _>>();
+  let status = InstallationStatus {
+    active: inspection.active.and_then(|id| manifests.remove(&id)),
+    previous: inspection.previous.and_then(|id| manifests.remove(&id)),
+    missing_builds: inspection.missing,
+  };
+  status.validate()?;
+  Ok(status)
 }
 
 /// Resolves the account's desktop app directory.
@@ -172,7 +226,7 @@ pub async fn install_archive_with_origin(
     let (installed, _lease) = activate_uploaded(&home, &bundle, origin.as_ref())?;
     // Cleanup cannot turn an already successful activation into an apparent
     // failed update. A later explicit cleanup can retry it safely.
-    if let Err(error) = installations.prune() {
+    if let Err(error) = installations.prune_unused() {
       eprintln!("ctlup: installed successfully; cleanup deferred: {error}");
     }
     on_progress(crate::RemoteInstallEvent::Complete);

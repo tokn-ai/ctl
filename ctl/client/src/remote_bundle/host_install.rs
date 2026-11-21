@@ -85,13 +85,12 @@ pub async fn install_host_publication(
       .map_err(io::Error::other)?;
     let installations = Installations::new(&store_home);
     installations.migrate_catalog_if_missing()?;
-    match installations.get(&bundle.manifest.bundle_id) {
-      Ok(existing) if existing.manifest == bundle.manifest => Ok((existing, true)),
-      Ok(_) => Err(io::Error::other(
+    match installations.get_available(&bundle.manifest.bundle_id)? {
+      Some(existing) if existing.manifest == bundle.manifest => Ok((existing, true)),
+      Some(_) => Err(io::Error::other(
         "installed build differs from the verified publication",
       )),
-      Err(error) if error.kind() == io::ErrorKind::NotFound => Ok((bundle, false)),
-      Err(error) => Err(error),
+      None => Ok((bundle, false)),
     }
   })
   .await
@@ -100,7 +99,7 @@ pub async fn install_host_publication(
   let activated = tokio::task::spawn_blocking(move || {
     let (installed, _lease) =
       crate::installation::activate_uploaded(&home, &bundle, Some(&origin))?;
-    if let Err(error) = Installations::new(&home).prune() {
+    if let Err(error) = Installations::new(&home).prune_unused() {
       eprintln!("ctlup: activated successfully; cleanup deferred: {error}");
     }
     if let Err(error) = crate::installation::prune_caches(&home) {

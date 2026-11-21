@@ -1,9 +1,10 @@
-//! The updater is distributed separately so runtime rollback never replaces it.
+//! The updater is distributed separately from runtime bundles.
 
 use super::{AssetProgress, BundleChannel, Error, Publication, Resolver, report_progress};
 use ctl_core::{bundle_layout, private_fs};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
+use std::collections::BTreeSet;
 use std::io::{self, Write as _};
 use std::path::Path;
 
@@ -345,17 +346,19 @@ pub(crate) fn read_cached_updater(
   }
 }
 
-/// Bound deployment-only updater blobs; active runtime installations are separate.
-/// Writers and cleanup share one process-held lock, so interrupted writers never
-/// leave a persistent lock directory that blocks a future update.
+#[cfg(all(test, unix))]
 pub(crate) fn prune_updater_cache(root: &Path, maximum_bytes: u64) -> io::Result<u64> {
-  prune_updater_cache_with_pins(root, maximum_bytes, &[])
+  prune_updater_cache_with_pins(root, maximum_bytes, &[], &BTreeSet::new())
 }
 
+/// Bounds deployment-only updater blobs under the process-held cache lock.
+/// Missing runtime pins retain recovery inputs by their exact recorded identity.
+/// Future installations still verify the updater against the recovered manifest.
 pub(crate) fn prune_updater_cache_with_pins(
   root: &Path,
   maximum_bytes: u64,
   pins: &[ctl_core::bundles::Manifest],
+  missing: &BTreeSet<(&str, &str)>,
 ) -> io::Result<u64> {
   if !existing_cache_path(root)? {
     return Ok(0);
@@ -366,10 +369,14 @@ pub(crate) fn prune_updater_cache_with_pins(
   let pinned = records
     .iter()
     .filter(|(path, info)| {
+      let Some(bundle_id) = path.file_stem().and_then(std::ffi::OsStr::to_str) else {
+        return false;
+      };
+      if missing.contains(&(bundle_id, info.target_triple.as_str())) {
+        return true;
+      }
       pins.iter().any(|manifest| {
-        path
-          .file_stem()
-          .is_some_and(|name| name == manifest.bundle_id.as_str())
+        bundle_id == manifest.bundle_id
           && manifest.target_triple == info.target_triple
           && manifest
             .distribution_id
@@ -385,14 +392,14 @@ pub(crate) fn prune_updater_cache_with_pins(
       })
     })
     .map(|(_, info)| info.sha256.as_str())
-    .collect::<std::collections::BTreeSet<_>>();
+    .collect::<BTreeSet<_>>();
   blobs.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
   let mut total = blobs.iter().try_fold(0_u64, |total, blob| {
     total
       .checked_add(blob.2)
       .ok_or_else(|| io::Error::other("updater cache size overflow"))
   })?;
-  let mut removed_ids = std::collections::BTreeSet::new();
+  let mut removed_ids = BTreeSet::new();
   let mut removed_bytes = 0_u64;
   for (_, id, size) in &blobs {
     if total <= maximum_bytes {
@@ -409,7 +416,7 @@ pub(crate) fn prune_updater_cache_with_pins(
     .iter()
     .filter(|(_, id, _)| !removed_ids.contains(id.as_str()))
     .map(|(_, id, _)| id.as_str())
-    .collect::<std::collections::BTreeSet<_>>();
+    .collect::<BTreeSet<_>>();
   // Validate all record inputs before the first mutation. A malformed record
   // cannot make cleanup silently follow or remove an unrelated path.
   let stale = records

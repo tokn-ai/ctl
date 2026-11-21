@@ -82,7 +82,7 @@ command registry/parser; related UI flows may still use the operation.
 | `component.inspect` | `components status` | Component versions/About | No direct command | Existing maintenance services; passive |
 | `component.update` | `ctlup update` | Component update flow | No direct command | Shared installation engine |
 | `component.restart` | `components restart`; `taskd restart` | Component controls; `daemon.restart`; `ctl-taskd.restart` | No direct command | Existing maintenance services |
-| `component_bundle.list/import/select` | `ctlup status/install/rollback` | Installation inventory and activation | No direct command | One active installation |
+| `component_bundle.list/import/select` | `ctlup status/install` | Installation inventory and activation | No direct command | One active installation |
 | `history.logs/audit.read` | `logs`; `audit` | Credential/audit UI | No direct command | Local history reader |
 | `ui.session.select` | Interactive selection | `session.select` | `switch-client` | Client UI |
 | `ui.pane.focus` | Interactive focus | `terminal.focus` and pane focus controls | `select-pane`; `last-pane` | Client UI |
@@ -110,7 +110,7 @@ the proposal status.
 | `ctmux state`; desktop session metadata | `ctmux_client::get_shell_state` | Target selection and presentation |
 | Local `components status`; desktop local About rows | `ctl_client::component_status::observe_local` passively inspects the chosen owner endpoint | Available-helper discovery, compatibility/status presentation, and desktop SSH/VPN owner selection |
 | Remote `components status` and remote `ctmuxd` restart | `ctl_client::maintenance` inspection and prepared restart | CLI target selection and confirmation; desktop remote observation and confirmation |
-| `ctlup status/install/rollback`; desktop bundle inventory and installation | `ctl_core::installations`, `ctl_client::components` | Source discovery, progress, and output |
+| `ctlup status/install`; desktop bundle inventory and installation | `ctl_core::installations`, `ctl_client::components` | Source discovery, progress, and output |
 | `ctlup update`; desktop component update | `ctl_client::component_update` prepare and install | Target orchestration, prompts, and progress |
 | Local `components restart`; desktop local component restart | Owner lifecycle preflight/restart APIs, called by each adapter | Shared typed local restart action; preserve pinned owner and confirmation semantics |
 | `vpn list/start/stop`; desktop VPN runtime operations | Typed local/remote clients in `ctl_ipc::vpn` and `ctl_ipc::remote_vpn` | Owner selection, enrollment UI, cancellation, and runtime coordination |

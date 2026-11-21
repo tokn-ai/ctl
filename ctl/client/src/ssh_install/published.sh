@@ -95,6 +95,8 @@ else
   verified || fail 'Downloaded ctlup size or checksum differs from the publication.'
 fi
 chmod 700 "$file"
+__CHECKOUT_LAYOUT_GUARD__
+require_checkout_layout "$file"
 code=0
 help=$("$file" install-publication --help </dev/null 2>&1) || code=$?
 if [ "$code" -ne 0 ]; then

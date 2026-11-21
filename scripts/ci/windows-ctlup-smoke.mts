@@ -95,6 +95,9 @@ async function verifyDesktopSetup(destination: string, bundle: string, bundle_id
 
 async function main(): Promise<void> {
   if (process.platform !== "win32" || process.env.GITHUB_ACTIONS !== "true") throw new Error("Run this fixture on an ephemeral GitHub Windows runner");
+  if (process.env.CTL_DATA_DIR || process.env.CTL_CONFIG_DIR) {
+    throw new Error("Unset CTL_DATA_DIR and CTL_CONFIG_DIR to test the default Windows storage paths");
+  }
   const [binaries, packages, destination, saved_host, ...extra] = process.argv.slice(2);
   if (!binaries || !packages || !!destination !== !!saved_host || extra.length) {
     throw new Error("usage: windows-ctlup-smoke.mts BINARY_DIRECTORY PACKAGE_DIRECTORY|- [SSH_DESTINATION SAVED_HOST]");
@@ -108,8 +111,9 @@ async function main(): Promise<void> {
   const home = homedir();
   const root = join(home, ".tokn", "ctl");
   const managed_entries = [
-    "bin", "installs", "leases", "updaters", ".activation.json", "installations.lock",
-    "catalog.json", "catalog-migrated.json", ".catalog-transaction.json",
+    "bin", "installs", "leases", "updaters", "catalog.json", ".activation.json",
+    ".catalog-transaction.json", "development.json", ".development-transaction.json",
+    "catalog-migrated.json", "install-layout-migrated.json", "installations.lock",
   ];
   const clear_managed_entries = async (): Promise<void> => {
     for (const entry of managed_entries) await rm(join(root, entry), { recursive: true, force: true, maxRetries: 3 });
@@ -196,38 +200,35 @@ async function main(): Promise<void> {
     }
 
     const update = [...pinned_target, "update", "--from", second_bundle, "--json"];
-    const rollback = [...pinned_target, "rollback", "--json"];
     await json(installed, update);
     await assert_digest(alternate.sha256);
     const updated = await status(installed, pinned_target);
     assert.deepEqual(await bootstrapFiles(home), before_bootstrap);
     assert.equal(updated.active?.distribution_id, second.bundle_id);
-    assert.equal(updated.previous?.distribution_id, first.bundle_id);
+    assert.equal(updated.previous, null);
     if (set_pin && account_id) {
       await set_pin(randomUUID());
-      await assert.rejects(json(installed, rollback), /SSH account identity changed/i);
+      await assert.rejects(status(installed, pinned_target), /SSH account identity changed/i);
+      await assert.rejects(json(installed, update), /different remote environment/i);
       assert.deepEqual(await status(installed, target), updated);
       await set_pin(account_id);
     }
-    await json(installed, rollback);
-    const rolled_back = await status(installed, pinned_target);
-    assert.equal(rolled_back.active?.distribution_id, first.bundle_id);
-    assert.equal(rolled_back.previous?.distribution_id, second.bundle_id);
-    await assert_digest(alternate.sha256);
     if (destination) {
       assert.ok(account_id);
-      // Re-select the cached installation after rollback with the same updater.
+      // Re-select the verified cached payload with the same updater.
       await json(installed, update);
       assert.deepEqual(await status(installed, pinned_target), updated);
+      await assert_digest(alternate.sha256);
       const test = "ssh_install::published::tests::windows_openssh_streams_each_cached_publication_artifact";
       const result = await execute("cargo", ["test", "--locked", "-p", "ctl-client", "--lib", test, "--", "--ignored", "--exact", "--color", "never"], {
         env: { ...process.env, CTL_TEST_SSH_HOST: destination, CTL_TEST_WINDOWS_DESKTOP_BUNDLE: second_bundle, CTL_TEST_WINDOWS_ACCOUNT_ID: account_id },
         timeout: 600_000,
       });
       assert.ok(result.stdout.split(/\r?\n/).includes(`test ${test} ... ok`), result.stdout);
+      assert.deepEqual(await status(installed, pinned_target), updated);
       assert.deepEqual(await bootstrapFiles(home), before_bootstrap);
     }
-    console.log(`Windows ctlup install, update and rollback passed${destination ? " over OpenSSH" : ""}.`);
+    console.log(`Windows ctlup install and update passed${destination ? " over OpenSSH" : ""}.`);
   } finally {
     if (catalog_restore) await writeFile(catalog_restore.path, catalog_restore.contents);
     await rm(fixture, { recursive: true, force: true, maxRetries: 3 });

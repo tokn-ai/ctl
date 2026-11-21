@@ -326,7 +326,10 @@ fn selection_path(store: &Store, purpose: Purpose, target: &str) -> PathBuf {
 }
 
 fn ancestors(store: &Store) -> io::Result<Vec<PathBuf>> {
-  let anchor = crate::paths::managed_storage_anchor(&store.root)?;
+  let anchor = match &store.staging {
+    Some(staging) => staging,
+    None => crate::paths::managed_storage_anchor(&store.root)?,
+  };
   let mut paths = vec![anchor.to_owned()];
   let mut path = anchor.to_owned();
   for part in store.root.strip_prefix(anchor).map_err(io::Error::other)? {
@@ -346,6 +349,11 @@ pub(super) fn root_exists(store: &Store) -> io::Result<bool> {
 }
 
 fn ensure_root(store: &Store) -> io::Result<()> {
+  if let Some(staging) = &store.staging {
+    // The caller's scratch directory must still exist when publishing starts.
+    require_directory(staging)?;
+    return ensure_directory(&store.root);
+  }
   for path in ancestors(store)? {
     ensure_directory(&path)?;
   }

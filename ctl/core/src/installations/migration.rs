@@ -1,4 +1,4 @@
-//! Explicit adoption separates old discovery from the authoritative catalog.
+//! One-time adoption separates old discovery from the authoritative catalog.
 
 use super::{CatalogEntry, CatalogOrigin, Installations, catalog, filesystem};
 use crate::bundles::{Bundle, Manifest, Source};
@@ -9,6 +9,7 @@ use std::fs;
 use std::io::{self, Read as _};
 
 const MARKER: &str = "catalog-migrated.json";
+const LAYOUT_MARKER: &str = "install-layout-migrated.json";
 const MAX_MARKER_BYTES: u64 = 1024;
 
 mod legacy;
@@ -19,11 +20,8 @@ struct Marker {
   schema_version: u16,
 }
 
-pub(super) fn is_migrated(store: &Installations) -> io::Result<bool> {
-  if !filesystem::root_exists(store)? {
-    return Ok(false);
-  }
-  let path = store.root.join(MARKER);
+fn read_marker(store: &Installations, name: &str) -> io::Result<bool> {
+  let path = store.root.join(name);
   match fs::symlink_metadata(&path) {
     Ok(metadata) => filesystem::private_file(&metadata)?,
     Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
@@ -35,12 +33,14 @@ pub(super) fn is_migrated(store: &Installations) -> io::Result<bool> {
   file.take(MAX_MARKER_BYTES + 1).read_to_end(&mut bytes)?;
   if bytes.len() as u64 > MAX_MARKER_BYTES {
     return Err(filesystem::invalid(
-      "catalog migration marker exceeds its size limit",
+      "installation migration marker exceeds its size limit",
     ));
   }
   let marker: Marker = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
   if marker.schema_version != 1 {
-    return Err(filesystem::invalid("unsupported catalog migration marker"));
+    return Err(filesystem::invalid(
+      "unsupported installation migration marker",
+    ));
   }
   if !catalog::exists(store)? {
     return Err(filesystem::invalid(
@@ -50,41 +50,87 @@ pub(super) fn is_migrated(store: &Installations) -> io::Result<bool> {
   Ok(true)
 }
 
-pub(super) fn migrate(store: &Installations) -> io::Result<Vec<CatalogEntry>> {
-  filesystem::ensure_root(store)?;
-  let _lock = filesystem::Lock::acquire(store)?;
-  migrate_locked(store)
+pub(super) fn migrate_once_if_needed(store: &Installations) -> io::Result<()> {
+  if !filesystem::root_exists(store)?
+    || read_marker(store, LAYOUT_MARKER)?
+    || !has_migratable_data(store)?
+  {
+    return Ok(());
+  }
+  migrate(store, false).map(drop)
 }
 
 pub(super) fn migrate_if_missing(store: &Installations) -> io::Result<Vec<CatalogEntry>> {
-  if !filesystem::root_exists(store)? {
-    return Ok(Vec::new());
-  }
-  filesystem::ensure_root(store)?;
-  let _lock = filesystem::Lock::acquire(store)?;
-  // A completed cutover cannot fall back to adoption if its catalog disappears.
-  is_migrated(store)?;
-  if catalog::existing_state(store)?.is_some() {
-    catalog::recover(store)?;
-    let entries = catalog::read(store)?.entries;
-    validate_recorded_selection(store, &entries)?;
-    return Ok(entries);
-  }
-  if !catalog::has_installation_data(store)? {
-    return Ok(Vec::new());
-  }
-  migrate_locked(store)
+  migrate(store, true)
 }
 
-fn migrate_locked(store: &Installations) -> io::Result<Vec<CatalogEntry>> {
-  if is_migrated(store)? {
-    #[cfg(unix)]
-    legacy::require_recoverable_activation(store)?;
-    catalog::recover(store)?;
-    let entries = catalog::read(store)?.entries;
-    validate_recorded_selection(store, &entries)?;
-    return Ok(entries);
+fn migrate(store: &Installations, verify_existing_payloads: bool) -> io::Result<Vec<CatalogEntry>> {
+  if !filesystem::root_exists(store)? || !has_migratable_data(store)? {
+    return Ok(Vec::new());
   }
+  let _lock = filesystem::Lock::acquire(store)?;
+  // A completed cutover cannot fall back to adoption if its catalog disappears.
+  let adopted = read_marker(store, MARKER)?;
+  let projected = read_marker(store, LAYOUT_MARKER)?;
+  let state = if adopted || catalog::exists(store)? || catalog::has_transaction(store)? {
+    recover_catalog(store, verify_existing_payloads)?
+  } else if catalog::has_installation_data(store)? {
+    adopt_legacy(store)?
+  } else {
+    return Ok(Vec::new());
+  };
+  if !projected {
+    project_layout(store, &state)?;
+  }
+  Ok(state.entries)
+}
+
+fn project_layout(store: &Installations, state: &catalog::State) -> io::Result<()> {
+  if let Err(error) = super::layout::sync(store, state) {
+    eprintln!("ctlup: installation paths could not be refreshed: {error}");
+    return Ok(());
+  }
+  catalog::replace(
+    &store.root.join(LAYOUT_MARKER),
+    &Marker { schema_version: 1 },
+  )
+}
+
+fn has_migratable_data(store: &Installations) -> io::Result<bool> {
+  Ok(
+    filesystem::path_exists(&store.root.join(MARKER))?
+      || filesystem::path_exists(&store.root.join(LAYOUT_MARKER))?
+      || catalog::exists(store)?
+      || catalog::has_transaction(store)?
+      || catalog::has_installation_data(store)?,
+  )
+}
+
+fn recover_catalog(
+  store: &Installations,
+  verify_existing_payloads: bool,
+) -> io::Result<catalog::State> {
+  #[cfg(unix)]
+  legacy::require_recoverable_activation(store)?;
+  catalog::recover(store)?;
+  // The SSH preflight verifies all present payloads before sending an archive.
+  // First-use layout projection needs only the index and native selections.
+  let state = if verify_existing_payloads {
+    catalog::read(store)?
+  } else {
+    catalog::read_development_index(store)?
+  };
+  let (active, _) = store.load_selection(&state, "current")?;
+  let (previous, _) = store.load_selection(&state, "previous")?;
+  if active.is_none() && previous.is_some() {
+    return Err(filesystem::invalid(
+      "previous installation has no active build",
+    ));
+  }
+  Ok(state)
+}
+
+fn adopt_legacy(store: &Installations) -> io::Result<catalog::State> {
   let mut bundles = legacy::managed_bundles(store)?
     .into_iter()
     .map(|bundle| (bundle.manifest.bundle_id.clone(), bundle))
@@ -116,6 +162,7 @@ fn migrate_locked(store: &Installations) -> io::Result<Vec<CatalogEntry>> {
     filesystem::validate_complete(bundle)?;
     drop(bundle.read_files()?);
   }
+  filesystem::ensure_directory(&store.root.join("installs"))?;
   let (active, previous, canonicalize) = import_selection(store, active, previous)?;
   for bundle in bundles.values() {
     if state
@@ -152,7 +199,7 @@ fn migrate_locked(store: &Installations) -> io::Result<Vec<CatalogEntry>> {
   // Both catalog and canonical selection are durable before this cutover. A
   // crash before the marker simply repeats an idempotent verified adoption.
   catalog::replace(&store.root.join(MARKER), &Marker { schema_version: 1 })?;
-  Ok(state.entries)
+  Ok(state)
 }
 
 fn adopted_origin(manifest: &Manifest) -> io::Result<CatalogOrigin> {
@@ -235,27 +282,6 @@ fn import_selection(
   let active = active.map(&mut import).transpose()?;
   let previous = previous.map(&mut import).transpose()?;
   Ok((active, previous, canonicalize))
-}
-
-fn validate_recorded_selection(store: &Installations, entries: &[CatalogEntry]) -> io::Result<()> {
-  let active = store.active()?;
-  let previous = store.previous()?;
-  if active.is_none() && previous.is_some() {
-    return Err(filesystem::invalid(
-      "rollback installation has no active build",
-    ));
-  }
-  for bundle in [active, previous].into_iter().flatten() {
-    if !entries.iter().any(|entry| {
-      entry.bundle_id == bundle.manifest.bundle_id
-        && entry.target_triple == bundle.manifest.target_triple
-    }) {
-      return Err(filesystem::invalid(
-        "uncatalogued selection; install a complete build with ctlup update",
-      ));
-    }
-  }
-  Ok(())
 }
 
 fn upgrade_required() -> io::Error {

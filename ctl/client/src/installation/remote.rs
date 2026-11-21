@@ -66,14 +66,18 @@ pub async fn remote_status(
   interaction: &SshInteraction,
   expected_account: Option<&str>,
 ) -> Result<InstallationStatus, CoreError> {
-  run(
+  let output = execute(
     destination,
     options,
     interaction,
     "status",
     expected_account,
   )
-  .await
+  .await?;
+  if !output.status.success() {
+    return Err(command_error(&output.stderr));
+  }
+  parse_status(&output.stdout)
 }
 
 /// Confirms that the remote updater activated the verified installation archive.
@@ -101,32 +105,10 @@ pub async fn verify_remote_activation(
   Ok(())
 }
 
-/// Atomically restore the remote account's previous build, preserving services.
-/// Callers must verify saved account identity before issuing this mutation.
-///
-/// # Errors
-/// Reports SSH, unavailable rollback or uncertain activation results; never retries.
-pub async fn remote_rollback(
-  destination: &str,
-  options: &SshConnectionOptions,
-  interaction: &SshInteraction,
-  expected_account: Option<&str>,
-) -> Result<InstallationStatus, CoreError> {
-  run(
-    destination,
-    options,
-    interaction,
-    "rollback",
-    expected_account,
-  )
-  .await
-}
-
 /// Reads the remote manager's verified catalog without starting services.
 ///
 /// Older managers and absent Windows managers return `None` because they do not
-/// expose this optional command. Existing status and rollback use their original
-/// response independently.
+/// expose this optional command. Status uses its original response independently.
 ///
 /// # Errors
 /// Reports SSH, account verification, storage and invalid catalog failures.
@@ -180,27 +162,6 @@ pub async fn remote_account_id(
       crate::ssh_install::read_remote_id(destination, options, interaction).await
     }
   }
-}
-
-async fn run(
-  destination: &str,
-  options: &SshConnectionOptions,
-  interaction: &SshInteraction,
-  operation: &str,
-  expected_account: Option<&str>,
-) -> Result<InstallationStatus, CoreError> {
-  let output = execute(
-    destination,
-    options,
-    interaction,
-    operation,
-    expected_account,
-  )
-  .await?;
-  if !output.status.success() {
-    return Err(command_error(&output.stderr));
-  }
-  parse_status(&output.stdout)
 }
 
 async fn execute(
@@ -364,14 +325,9 @@ fn parse_status(stdout: &[u8]) -> Result<InstallationStatus, CoreError> {
     .ok_or_else(|| CoreError::InvalidComponentBundle("missing ctlup command response".into()))?;
   let snapshot: InstallationStatus = serde_json::from_slice(&stdout[start..])
     .map_err(|error| CoreError::InvalidComponentBundle(error.to_string()))?;
-  for manifest in [snapshot.active.as_ref(), snapshot.previous.as_ref()]
-    .into_iter()
-    .flatten()
-  {
-    manifest
-      .validate()
-      .map_err(|error| CoreError::InvalidComponentBundle(error.to_string()))?;
-  }
+  snapshot
+    .validate()
+    .map_err(|error| CoreError::InvalidComponentBundle(error.to_string()))?;
   Ok(snapshot)
 }
 
@@ -459,6 +415,7 @@ mod tests {
       previous: None,
       installations: Vec::new(),
       builds: Vec::new(),
+      missing_builds: Vec::new(),
     };
     let mut stdout = b"Welcome\nctlup-show-v1\n".to_vec();
     stdout.extend(serde_json::to_vec(&snapshot).unwrap());
@@ -529,10 +486,26 @@ mod tests {
     .unwrap();
     assert!(status.active.is_none());
     assert!(status.previous.is_none());
+    assert_eq!(status.missing_builds, [] as [String; 0]);
     assert!(parse_status(b"{\"active\":null,\"previous\":null}").is_err());
     assert!(
       parse_status(b"ctlup-command-v1\n{\"active\":null,\"previous\":null,\"untrusted\":true}")
         .is_err()
     );
+  }
+
+  #[test]
+  fn status_accepts_bounded_missing_build_ids() {
+    let id = "a".repeat(64);
+    let payload = |ids| {
+      format!(
+        "ctlup-command-v1\n{}",
+        serde_json::json!({"active": null, "previous": null, "missing_builds": ids})
+      )
+    };
+    let status = parse_status(payload(vec![id.as_str()]).as_bytes()).unwrap();
+    assert_eq!(status.missing_builds, [id.as_str()]);
+    assert!(parse_status(payload(vec!["../invalid"]).as_bytes()).is_err());
+    assert!(parse_status(payload(vec![id.as_str(); 2]).as_bytes()).is_err());
   }
 }

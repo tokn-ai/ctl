@@ -297,6 +297,34 @@ pub struct Bundle {
 }
 
 impl Bundle {
+  /// Publishes verified bytes beneath an existing private staging directory.
+  /// The caller owns the directory and its lifetime, regardless of profile.
+  ///
+  /// # Errors
+  /// Rejects invalid data, unsafe directories or a changed staged bundle.
+  pub fn stage(
+    directory: &Path,
+    manifest: &Manifest,
+    files: &BTreeMap<String, Vec<u8>>,
+  ) -> io::Result<Self> {
+    if !directory.is_absolute()
+      || directory
+        .components()
+        .any(|part| part == std::path::Component::ParentDir)
+    {
+      return Err(invalid("staging requires an absolute private directory"));
+    }
+    filesystem::publish(
+      &Store {
+        root: directory.join("prepared"),
+        cache: false,
+        staging: Some(directory.to_owned()),
+      },
+      manifest,
+      files,
+    )
+  }
+
   /// Opens a directory pinned by its executable, verifying all payload bytes.
   ///
   /// # Errors
@@ -334,6 +362,7 @@ impl Bundle {
 pub struct Store {
   root: PathBuf,
   cache: bool,
+  staging: Option<PathBuf>,
 }
 
 impl Store {
@@ -347,6 +376,7 @@ impl Store {
     Self {
       root: root.join("components"),
       cache: false,
+      staging: None,
     }
   }
 
@@ -357,6 +387,7 @@ impl Store {
     Self {
       root: crate::paths::directory_for_account(home).join("cache/components"),
       cache: true,
+      staging: None,
     }
   }
 
@@ -417,7 +448,20 @@ impl Store {
   /// # Errors
   /// Refuses unsafe paths and never prunes the legacy installation store.
   pub fn prune_cache(&self, max_bytes: u64) -> io::Result<PruneCacheResult> {
-    cache::prune(self, max_bytes)
+    self.prune_cache_with_pins(max_bytes, &std::collections::BTreeSet::new())
+  }
+
+  /// Prunes the deployment cache while keeping exact recovery copies for
+  /// the supplied `(bundle_id, target_triple)` pairs.
+  ///
+  /// # Errors
+  /// Refuses unsafe paths and invalid pinned identities or targets.
+  pub fn prune_cache_with_pins(
+    &self,
+    max_bytes: u64,
+    pins: &std::collections::BTreeSet<(&str, &str)>,
+  ) -> io::Result<PruneCacheResult> {
+    cache::prune(self, max_bytes, pins)
   }
 
   /// Atomically selects one already verified complete bundle for a purpose.

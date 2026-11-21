@@ -43,8 +43,11 @@ use tauri::Manager as _;
 ///
 /// # Panics
 ///
-/// Panics when Tauri cannot initialize or run the configured application.
+/// Panics when the installed package cannot be retained or Tauri cannot initialize
+/// or run the configured application.
 pub fn run() {
+  let _package_lease = ctl_core::installations::lease_current_executable()
+    .expect("could not retain the managed ctmux desktop package");
   #[cfg(unix)]
   let _development_installation = development_installation::retain();
   let builder = tauri::Builder::default()

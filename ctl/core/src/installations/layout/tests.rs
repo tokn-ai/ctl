@@ -21,7 +21,7 @@ impl TestStore {
   }
 
   fn root(&self) -> PathBuf {
-    self.store().root.join("installs")
+    self.store().updater_root().join("refs/runtime")
   }
 
   fn fixture(&self, version: &str, distribution: Option<&str>, byte: u8) -> String {
@@ -100,7 +100,9 @@ fn groups_versions_and_checkout_heads_without_copying_payloads() {
     entry(&id, "provided", None, true),
     entry(&id, "local", None, true),
   ];
-  state.development.insert(checkout.clone(), id.clone());
+  state
+    .development
+    .insert(format!("{checkout}/{TARGET}"), id.clone());
   sync(&store, &state).unwrap();
   let root = home.root();
   for path in [
@@ -108,13 +110,20 @@ fn groups_versions_and_checkout_heads_without_copying_payloads() {
     format!("nightly/{nightly}/{TARGET}"),
     format!("dev/pr-7/0.1.2/{TARGET}"),
     format!("dev/provided/0.1.2/{TARGET}"),
-    format!("dev/{checkout}"),
+    format!("dev/{checkout}/{TARGET}"),
   ] {
     assert_eq!(read_reference(&root, &path).unwrap().as_ref(), Some(&id));
-    #[cfg(unix)]
+    let reference: ReferenceFile = read_json(&reference_path(&root, &path), 1024)
+      .unwrap()
+      .unwrap();
     assert_eq!(
-      reference_path(&root, &path).canonicalize().unwrap(),
-      root.join(&id).canonicalize().unwrap()
+      reference_path(&root, &path)
+        .parent()
+        .unwrap()
+        .join(reference.relative_path)
+        .canonicalize()
+        .unwrap(),
+      store.runtime_root().join(&id).canonicalize().unwrap()
     );
   }
   assert!(!root.join("dev/unassigned").exists());
@@ -145,7 +154,7 @@ fn refresh_replaces_owned_refs_and_preserves_unrelated_paths() {
   sync(&store, &state).unwrap();
   assert!(read_reference(&root, &path).unwrap().is_none());
   assert_eq!(fs::read(&note).unwrap(), b"owned by the account");
-  assert!(root.join(first).is_dir());
+  assert!(store.runtime_root().join(first).is_dir());
 
   fs::write(reference_path(&root, &path), b"user file").unwrap();
   state
@@ -200,7 +209,7 @@ fn invalid_labels_are_safely_named_and_case_sensitive_versions_distinguish_on_di
     entry(&lower, "provided", None, true),
     entry(&invalid, "provided", None, false),
   ];
-  let paths = references(&home.root(), &state).unwrap();
+  let paths = references(&home.store().runtime_root(), &state).unwrap();
   assert_eq!(paths.len(), 3);
   assert_eq!(
     paths[&format!("dev/provided/0.1.2+_41_4c_50_48_41/{TARGET}")],
@@ -219,7 +228,8 @@ fn refuses_to_follow_an_existing_channel_symlink() {
   let home = TestStore::new();
   let id = home.fixture("0.1.2", None, 1);
   let root = home.root();
-  let elsewhere = root.join("elsewhere");
+  let elsewhere = home.0.join("elsewhere");
+  std::fs::create_dir_all(&root).unwrap();
   filesystem::ensure_directory(&elsewhere).unwrap();
   std::os::unix::fs::symlink(&elsewhere, root.join("stable")).unwrap();
   let mut state = State::default();

@@ -1,7 +1,7 @@
 use super::arguments::{ReleaseArguments, ReleaseCommand, ReleaseListChannel};
 use super::{print_targets, selected_channel};
 use ctl_client::cli::Channel;
-use ctl_client::remote_bundle::pr::{self, PullRequestBuildRequestStatus, PullRequestBuildStatus};
+use ctl_client::remote_bundle::pr::{self, PullRequestBuildStatus};
 use ctl_client::remote_bundle::published;
 use serde::Serialize;
 use std::io;
@@ -36,18 +36,21 @@ pub(super) async fn run(home: &Path, options: ReleaseArguments) -> io::Result<()
       }
       Ok(())
     }
-    ReleaseCommand::View {
+    ReleaseCommand::Show {
       pr: Some(number), ..
     } => view_pr(number, options.json).await,
-    ReleaseCommand::View {
+    ReleaseCommand::Show {
       channel,
       publication_id,
       pr: None,
     } => {
-      let channel = selected_channel(home, channel)?;
-      let details = published::view_release(channel, publication_id.as_deref())
-        .await
-        .map_err(io::Error::other)?;
+      let details = if let (None, Some(publication_id)) = (channel, publication_id.as_deref()) {
+        published::view_retained_release(publication_id).await
+      } else {
+        let channel = selected_channel(home, channel)?;
+        published::view_release(channel, publication_id.as_deref()).await
+      }
+      .map_err(io::Error::other)?;
       if options.json {
         print_json(&details)?;
       } else {
@@ -65,7 +68,6 @@ pub(super) async fn run(home: &Path, options: ReleaseArguments) -> io::Result<()
       }
       Ok(())
     }
-    ReleaseCommand::Build { pr: number } => build_pr(number, options.json).await,
   }
 }
 
@@ -109,26 +111,6 @@ async fn view_pr(number: u64, json: bool) -> io::Result<()> {
     println!("Outdated build available for an earlier commit.");
   } else {
     println!("No build for this commit.");
-  }
-  Ok(())
-}
-
-async fn build_pr(number: u64, json: bool) -> io::Result<()> {
-  let request = pr::trigger_build(number).await.map_err(io::Error::other)?;
-  if json {
-    return print_json(&request);
-  }
-  match request.status {
-    PullRequestBuildRequestStatus::Queued => println!("Queued a build for PR #{number}."),
-    PullRequestBuildRequestStatus::AlreadyBuilt => {
-      println!("PR #{number} already has a bundle for its current commit.");
-    }
-    PullRequestBuildRequestStatus::InProgress => {
-      println!("A build for the current commit of PR #{number} is already in progress.");
-    }
-  }
-  if let Some(url) = request.url {
-    println!("{url}");
   }
   Ok(())
 }

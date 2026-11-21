@@ -87,7 +87,7 @@ async fn remote_repairs_reject_legacy_sources_before_upload_or_selection_changes
   .expect("legacy source must fail before packaging");
   assert!(provided.to_string().contains("ctl_transport 1.0.1"));
   assert!(!account.0.join(".tokn/ctl/components").exists());
-  assert!(!account.0.join(".tokn/ctl/cache/components").exists());
+  assert!(!account.0.join(".tokn/ctl/ctlup/cache/unpacked").exists());
   assert_eq!(
     store
       .selected(Purpose::Upload, target)
@@ -446,7 +446,7 @@ fn agent_package_rejects_changed_source_bytes() {
 }
 
 #[tokio::test]
-async fn agent_only_overlays_require_explicit_replacement_before_catalog_adoption() {
+async fn complete_installation_keeps_the_previous_overlay_outside_the_store() {
   let home = Home::new();
   let original = bundle(&home.0, 'a');
   let replacement = bundle(&home.0, 'b');
@@ -462,12 +462,18 @@ async fn agent_only_overlays_require_explicit_replacement_before_catalog_adoptio
   let archive = crate::components::package_bundle(&replacement)
     .unwrap()
     .archive;
-  let error = crate::installation::install_archive(&home.0, &archive)
+  let installed = crate::installation::install_archive(&home.0, &archive)
     .await
-    .unwrap_err();
-  assert!(error.to_string().contains("complete"));
+    .unwrap();
   assert_eq!(std::fs::read_link(&current).unwrap(), selected);
-  assert!(!home.0.join(".tokn/ctl/catalog.json").exists());
+  assert_eq!(
+    Installations::new(&home.0)
+      .active()
+      .unwrap()
+      .unwrap()
+      .manifest,
+    installed.manifest
+  );
 }
 
 #[tokio::test]
@@ -490,7 +496,7 @@ async fn wrong_target_provided_source_is_rejected_before_importing_or_selecting(
       .await
       .is_err()
   );
-  assert!(!account.0.join(".tokn/ctl/cache/components").exists());
+  assert!(!account.0.join(".tokn/ctl/ctlup/cache/unpacked").exists());
 }
 
 #[tokio::test]

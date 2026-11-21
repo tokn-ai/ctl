@@ -1,7 +1,9 @@
 # ctlup
 
-`ctlup` installs, updates, and rolls back complete ctl and ctmux builds. It
-manages release channels and target bundles for local and SSH destinations.
+`ctlup install` selects a source for a complete runtime bundle or the desktop
+app. `ctlup update` follows the channel recorded by the selected installation.
+Use `--host` for a saved host and `--ssh` for an SSH address or alias. Each
+profile stores installed payloads and cache files under its `ctlup/` directory.
 
 ```sh
 cargo install --locked ctlup

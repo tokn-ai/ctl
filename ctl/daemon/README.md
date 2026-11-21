@@ -76,7 +76,7 @@ metadata are still checked against its own installation manifest.
 Prepare a native development installation with `ctlup dev`, or use
 `pnpm ctld:build` to bootstrap and delegate to it on macOS. This builds all six
 runtime commands and the manager, signs the copied `ctld.app`, and activates
-the verified build under `~/.tokn/ctl/installs/`. Commands are exposed through
+the verified build under `~/.tokn/ctl/ctlup/store/runtime/`. Commands are exposed through
 `~/.tokn/ctl/bin`; the desktop launcher delegates to the same builder.
 Preparation preserves running services. See
 [local development builds](../../docs/local-bundles.md).

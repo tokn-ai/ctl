@@ -430,7 +430,7 @@ launcher asks Xcode to refresh an expired profile automatically.
 The CLI and GUI share this provisioning project and profile discovery.
 From the repository root, `pnpm ctld:build` delegates to `ctlup dev` to prepare
 a complete native installation, including signed `ctld.app`. The manager
-activates the verified build under `~/.tokn/ctl/installs/` and exposes stable
+activates the verified build under `~/.tokn/ctl/ctlup/store/runtime/` and exposes stable
 commands in `~/.tokn/ctl/bin`; see the
 [development instructions](../../README.md#build).
 

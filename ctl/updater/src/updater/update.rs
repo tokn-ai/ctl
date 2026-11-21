@@ -1,13 +1,15 @@
-use super::{TargetOptions, arguments::UpdateArguments, source_with_bundle_override};
+use super::{TargetOptions, arguments::InstallArguments};
 use ctl_client::component_update::{
   BuildSource, BundleChannel, Package, PreparationPhase, PreparationProgress, PreparedUpdate,
   UpdateResult,
 };
-use ctl_client::remote_bundle::pr;
-use ctl_core::bundles::Purpose;
+use ctl_client::installation::{self, RuntimeSource};
+use ctl_client::remote_bundle::{pr, published};
+use ctl_core::bundles::{Purpose, Store};
+use ctl_core::installations::CatalogOrigin;
 use serde::Serialize;
 use std::io::{self, Write as _};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -15,17 +17,56 @@ use std::time::{Duration, Instant};
 struct HostResult {
   host: String,
   result: Option<UpdateResult>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  check: Option<ChannelCheck>,
   error: Option<String>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
-enum Choice {
-  Local,
-  Saved(String),
-  Destination(String),
+enum Outcome {
+  Installed(UpdateResult),
+  Checked(ChannelCheck),
 }
 
-enum UpdateSource<'a> {
+#[derive(Serialize)]
+struct ChannelCheck {
+  channel: Option<BundleChannel>,
+  active: Option<String>,
+  installed_publication: Option<String>,
+  available_publication: Option<String>,
+  state: CheckState,
+}
+
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CheckState {
+  Uninstalled,
+  Pinned,
+  Missing,
+  Unavailable,
+  Current,
+  UpdateAvailable,
+}
+
+impl CheckState {
+  fn description(self) -> &'static str {
+    match self {
+      Self::Uninstalled => "No runtime installed. Run ctlup install.",
+      Self::Pinned => "The runtime is pinned. Use ctlup install to select a new source.",
+      Self::Missing => "The active runtime is missing.",
+      Self::Unavailable => "The tracked channel has no compatible runtime for this target.",
+      Self::Current => "The tracked runtime is current.",
+      Self::UpdateAvailable => "An update is available.",
+    }
+  }
+}
+
+enum Operation<'a> {
+  Install(InstallSource<'a>),
+  Update,
+  Check,
+}
+
+enum InstallSource<'a> {
   Artifacts {
     source: &'a BuildSource,
     pr: Option<&'a mut PrBuilds>,
@@ -35,17 +76,25 @@ enum UpdateSource<'a> {
   },
 }
 
-impl UpdateSource<'_> {
-  fn publication_channel(&self, home: &Path) -> io::Result<Option<BundleChannel>> {
-    let Self::Artifacts { source, pr: None } = self else {
-      return Ok(None);
-    };
-    Ok(match source {
-      BuildSource::Published { channel } => Some(*channel),
-      BuildSource::Automatic => Some(ctl_client::installation::default_channel(home)?),
+impl<'a> InstallSource<'a> {
+  fn publication(&self) -> Option<Publication<'a>> {
+    match self {
+      Self::Artifacts {
+        source: BuildSource::Published { channel },
+        pr: None,
+      } => Some(Publication::Channel(*channel)),
+      Self::Artifacts {
+        source: BuildSource::Release { publication_id },
+        pr: None,
+      } => Some(Publication::Release(publication_id)),
       _ => None,
-    })
+    }
   }
+}
+
+enum Publication<'a> {
+  Channel(BundleChannel),
+  Release(&'a str),
 }
 
 struct PrBuilds {
@@ -80,79 +129,77 @@ impl PrBuilds {
   }
 }
 
-impl Choice {
-  fn host(&self) -> Option<&str> {
-    match self {
-      Self::Saved(host) => Some(host),
-      _ => None,
-    }
-  }
-
-  fn destination(&self) -> Option<&str> {
-    match self {
-      Self::Destination(destination) => Some(destination),
-      _ => None,
-    }
-  }
-}
-
-pub(super) async fn run(
+pub(super) async fn install(
   home: &Path,
-  options: UpdateArguments,
-  target_options: TargetOptions<'_>,
+  options: &InstallArguments,
+  targets: &[TargetOptions<'_>],
 ) -> io::Result<()> {
   let mut pr_builds = options.pr.map(|number| PrBuilds {
     number,
     unix: None,
     windows: None,
   });
-  let explicit_channel = options.channel.map(Into::into);
-  let source = if let Some(path) = options.from {
+  let source = if let Some(path) = options.from.clone() {
     BuildSource::Provided {
       path,
       local_build: options.local_build,
-      ctld_package: options.ctld_package,
+      ctld_package: options.ctld_package.clone(),
     }
-  } else if let Some(channel) = explicit_channel {
-    BuildSource::Published { channel }
+  } else if let Some(publication_id) = options.release.clone() {
+    BuildSource::Release { publication_id }
+  } else if let Some(channel) = options.channel {
+    BuildSource::Published {
+      channel: channel.into(),
+    }
+  } else if let Some(path) =
+    std::env::var_os("CTL_REMOTE_BUNDLES_DIR").filter(|_| pr_builds.is_none())
+  {
+    BuildSource::Provided {
+      path: path.into(),
+      local_build: false,
+      ctld_package: None,
+    }
   } else {
-    BuildSource::Automatic
+    BuildSource::Published {
+      channel: BundleChannel::default(),
+    }
   };
-  let source = source_with_bundle_override(
-    source,
-    std::env::var_os("CTL_REMOTE_BUNDLES_DIR").map(PathBuf::from),
-  );
   run_batch(
     home,
-    target_options,
-    options.hosts,
-    options.local,
-    UpdateSource::Artifacts {
+    targets,
+    Operation::Install(InstallSource::Artifacts {
       source: &source,
       pr: pr_builds.as_mut(),
-    },
+    }),
     options.json,
   )
-  .await?;
-  if let Some(channel) = explicit_channel {
-    ctl_client::installation::set_channel(home, channel)?;
-  }
-  Ok(())
+  .await
+}
+
+pub(super) async fn run(
+  home: &Path,
+  targets: &[TargetOptions<'_>],
+  check: bool,
+  json: bool,
+) -> io::Result<()> {
+  let operation = if check {
+    Operation::Check
+  } else {
+    Operation::Update
+  };
+  run_batch(home, targets, operation, json).await
 }
 
 pub(super) async fn run_development(
   home: &Path,
-  target_options: TargetOptions<'_>,
-  hosts: Vec<String>,
+  targets: &[TargetOptions<'_>],
   workspace: &Path,
   json: bool,
 ) -> io::Result<()> {
   run_batch(
     home,
-    target_options,
-    hosts,
-    false,
-    UpdateSource::Checkout { workspace },
+    targets,
+    Operation::Install(InstallSource::Checkout { workspace }),
     json,
   )
   .await
@@ -160,46 +207,29 @@ pub(super) async fn run_development(
 
 async fn run_batch(
   home: &Path,
-  target_options: TargetOptions<'_>,
-  hosts: Vec<String>,
-  local: bool,
-  mut source: UpdateSource<'_>,
+  targets: &[TargetOptions<'_>],
+  mut operation: Operation<'_>,
   json: bool,
 ) -> io::Result<()> {
-  crate::bundled::register()?;
-  let TargetOptions {
-    host,
-    destination,
-    method,
-    platform,
-  } = target_options;
-  if method.is_some() && host.is_none() {
-    return Err(io::Error::other(
-      "--method requires --host; --hosts uses each host's preferred method",
-    ));
+  if targets.iter().any(TargetOptions::remote) {
+    crate::bundled::register()?;
   }
-  let choices = choices(hosts, local, host, destination)?;
   let mut results = Vec::new();
-  for choice in choices {
-    let selected =
-      choice.host().is_some_and(|name| Some(name) == host) || choice.destination().is_some();
-    let target = TargetOptions {
-      host: choice.host(),
-      destination: choice.destination(),
-      method: if selected { method } else { None },
-      platform: if selected { platform } else { None },
-    };
-    results.push(run_host(home, target, &mut source).await?);
+  for &target in targets {
+    results.push(run_host(home, target, &mut operation).await?);
   }
   if json {
-    println!(
-      "{}",
-      serde_json::to_string(&results).map_err(io::Error::other)?
-    );
+    super::print_json(&results)?;
+  } else {
+    for result in &results {
+      if let Some(check) = &result.check {
+        println!("{}: {}", result.host, check.state.description());
+      }
+    }
   }
   if results.iter().any(|result| result.error.is_some()) {
     return Err(io::Error::other(
-      "some component updates failed; successful hosts were kept",
+      "the operation failed on some hosts; successful hosts were kept",
     ));
   }
   Ok(())
@@ -208,116 +238,256 @@ async fn run_batch(
 async fn run_host(
   home: &Path,
   target: TargetOptions<'_>,
-  source: &mut UpdateSource<'_>,
+  operation: &mut Operation<'_>,
 ) -> io::Result<HostResult> {
-  let label = target.host.or(target.destination).unwrap_or("local");
-  if matches!(source, UpdateSource::Checkout { .. }) {
-    eprintln!("ctlup: Building and updating {label} (full bundle)…");
-  } else {
-    eprintln!("ctlup: Updating {label} (full bundle)…");
-  }
-  let outcome = tokio::select! {
-    result = update_host(home, target, source) => result,
-    _ = tokio::signal::ctrl_c() => return Err(io::Error::new(io::ErrorKind::Interrupted, "Update cancelled. Refresh component status before retrying; an activation may already have completed.")),
+  let label = target.label();
+  let action = match operation {
+    Operation::Install(InstallSource::Checkout { .. }) => "Building for",
+    Operation::Install(_) => "Installing on",
+    Operation::Update => "Updating",
+    Operation::Check => "Checking",
   };
-  let (result, error) = match outcome {
-    Ok(result) => {
+  eprintln!("ctlup: {action} {label}…");
+  let outcome = tokio::select! {
+    result = update_host(home, target, operation) => result,
+    _ = tokio::signal::ctrl_c() => return Err(io::Error::new(io::ErrorKind::Interrupted, "Operation cancelled. Check status before retrying.")),
+  };
+  let mut response = HostResult {
+    host: label.to_owned(),
+    result: None,
+    check: None,
+    error: None,
+  };
+  match outcome {
+    Ok(Outcome::Installed(result)) => {
       eprintln!("ctlup: {label}: installed; running services preserved. Restart separately.");
-      (Some(result), None)
+      response.result = Some(result);
     }
+    Ok(Outcome::Checked(check)) => response.check = Some(check),
     Err(error) => {
       eprintln!("ctlup: {label}: {error}");
-      (None, Some(error.to_string()))
+      response.error = Some(error.to_string());
     }
-  };
-  Ok(HostResult {
-    host: label.to_owned(),
-    result,
-    error,
-  })
+  }
+  Ok(response)
 }
 
-fn choices(
-  hosts: Vec<String>,
-  local: bool,
-  host: Option<&str>,
-  destination: Option<&str>,
-) -> io::Result<Vec<Choice>> {
-  if destination.is_some() && (host.is_some() || !hosts.is_empty()) {
-    return Err(io::Error::other(
-      "--destination cannot be combined with --host or --hosts",
-    ));
-  }
-  let mut choices = Vec::new();
-  if let Some(host) = host {
-    choices.push(Choice::Saved(host.to_owned()));
-  }
-  if let Some(destination) = destination {
-    choices.push(Choice::Destination(destination.to_owned()));
-  }
-  for host in hosts {
-    let choice = Choice::Saved(host);
-    if !choices.contains(&choice) {
-      choices.push(choice);
+struct Endpoint {
+  remote: Option<super::remote::Target>,
+  triple: &'static str,
+  purpose: Purpose,
+}
+
+impl Endpoint {
+  async fn connect(selection: TargetOptions<'_>) -> io::Result<Self> {
+    let resolved = selection.resolve().await?;
+    if resolved.is_local() {
+      return Ok(Self {
+        remote: None,
+        triple: ctl_core::paths::native_target(),
+        purpose: Purpose::Local,
+      });
     }
+    let remote = super::remote::Target::connect(resolved).await?;
+    remote.verify_account().await?;
+    let triple = remote.target_triple().await?;
+    Ok(Self {
+      remote: Some(remote),
+      triple,
+      purpose: Purpose::Upload,
+    })
   }
-  if local || choices.is_empty() {
-    choices.push(Choice::Local);
+
+  async fn runtime_source(&self, home: &Path) -> io::Result<RuntimeSource> {
+    let Some(remote) = &self.remote else {
+      return installation::runtime_source(home);
+    };
+    installation::remote_runtime_source(
+      &remote.destination,
+      &remote.options,
+      &remote.interaction,
+      remote.expected_account(),
+    )
+    .await
+    .map_err(io::Error::other)
   }
-  Ok(choices)
 }
 
 async fn update_host(
   home: &Path,
   selection: TargetOptions<'_>,
-  source: &mut UpdateSource<'_>,
-) -> io::Result<UpdateResult> {
-  let snapshot = ctl_client::component_update::PreparationSnapshot::capture(home)?;
-  let mut resolved =
-    crate::target::resolve(selection.host, selection.destination, selection.method)
-      .await
-      .map_err(io::Error::other)?;
-  crate::target::apply_remote_platform(&mut resolved.target, selection.platform);
-  let remote = if resolved.target.is_local() {
+  operation: &mut Operation<'_>,
+) -> io::Result<Outcome> {
+  // Capture local source heads before resolving SSH, so preparation still
+  // rejects a newer installation made while the connection was in flight.
+  let snapshot = if matches!(operation, Operation::Check) {
     None
   } else {
-    let remote = super::remote::Target::connect(resolved.target).await?;
-    remote.verify_account().await?;
-    Some(remote)
+    Some(ctl_client::component_update::PreparationSnapshot::capture(
+      home,
+    )?)
   };
-  let (triple, purpose) = if let Some(remote) = &remote {
-    (remote.target_triple().await?, Purpose::Upload)
+  let endpoint = Endpoint::connect(selection).await?;
+  if let Operation::Check = operation {
+    return check(&endpoint.runtime_source(home).await?)
+      .await
+      .map(Outcome::Checked);
+  }
+  let snapshot = snapshot.expect("install and update capture a source snapshot");
+  if let Operation::Install(source) = operation {
+    return install_selected(home, &endpoint, source, &snapshot, None)
+      .await
+      .map(Outcome::Installed);
+  }
+
+  let tracked = endpoint.runtime_source(home).await?;
+  let result = if let Some(channel) = super::tracked_channel(tracked.origin.as_ref()) {
+    let source = BuildSource::Published { channel };
+    install_selected(
+      home,
+      &endpoint,
+      &mut InstallSource::Artifacts {
+        source: &source,
+        pr: None,
+      },
+      &snapshot,
+      None,
+    )
+    .await?
+  } else if tracked.missing {
+    restore_pinned(home, &endpoint, tracked, &snapshot).await?
+  } else if tracked.active.is_some() {
+    return check(&tracked).await.map(Outcome::Checked);
   } else {
-    (ctl_core::paths::native_target(), Purpose::Local)
+    return Err(io::Error::other(
+      "no runtime is installed; run ctlup install first",
+    ));
   };
+  Ok(Outcome::Installed(result))
+}
+
+async fn check(tracked: &RuntimeSource) -> io::Result<ChannelCheck> {
+  let channel = super::tracked_channel(tracked.origin.as_ref());
+  let installed_publication = tracked
+    .origin
+    .as_ref()
+    .and_then(|origin| origin.publication_id.clone());
+  let (available_publication, compatible) = if let Some(channel) = channel {
+    let catalog = published::check(channel).await.map_err(io::Error::other)?;
+    let compatible = tracked.target_triple.as_deref().is_none_or(|triple| {
+      catalog
+        .targets
+        .iter()
+        .any(|target| target.target_triple == triple && target.compatible)
+    });
+    (catalog.publication_id, compatible)
+  } else {
+    (None, false)
+  };
+  let state = if tracked.active.is_none() {
+    CheckState::Uninstalled
+  } else if tracked.missing {
+    CheckState::Missing
+  } else if channel.is_none() {
+    CheckState::Pinned
+  } else if !compatible {
+    CheckState::Unavailable
+  } else if installed_publication == available_publication && installed_publication.is_some() {
+    CheckState::Current
+  } else {
+    CheckState::UpdateAvailable
+  };
+  Ok(ChannelCheck {
+    channel,
+    active: tracked.active.clone(),
+    installed_publication,
+    available_publication,
+    state,
+  })
+}
+
+async fn restore_pinned(
+  home: &Path,
+  endpoint: &Endpoint,
+  tracked: RuntimeSource,
+  snapshot: &ctl_client::component_update::PreparationSnapshot,
+) -> io::Result<UpdateResult> {
+  let Some(active) = tracked.active else {
+    return Err(io::Error::other(
+      "no runtime is installed; run ctlup install first",
+    ));
+  };
+  let target = tracked.target_triple.as_deref().unwrap_or(endpoint.triple);
+  let bundle = Store::cache(home).get(target, &active).map_err(|error| {
+    if error.kind() == io::ErrorKind::NotFound {
+      io::Error::other("the pinned runtime is missing and its exact cache entry is unavailable; reinstall from its original source")
+    } else {
+      error
+    }
+  })?;
+  let source = BuildSource::Provided {
+    path: bundle.directory.clone(),
+    local_build: false,
+    ctld_package: None,
+  };
+  let origin = tracked.origin.unwrap_or(CatalogOrigin {
+    channel: "provided".into(),
+    publication_id: bundle.manifest.distribution_id.clone(),
+    built_at: None,
+  });
+  install_selected(
+    home,
+    endpoint,
+    &mut InstallSource::Artifacts {
+      source: &source,
+      pr: None,
+    },
+    snapshot,
+    Some((&active, origin)),
+  )
+  .await
+}
+
+async fn install_selected(
+  home: &Path,
+  endpoint: &Endpoint,
+  source: &mut InstallSource<'_>,
+  snapshot: &ctl_client::component_update::PreparationSnapshot,
+  restore: Option<(&str, CatalogOrigin)>,
+) -> io::Result<UpdateResult> {
   let last_download = Mutex::new(None);
   let report = |progress| report_preparation(&progress, &last_download);
-  if let Some(remote) = &remote
-    && let Some(channel) = source.publication_channel(home)?
+  if let Some(remote) = &endpoint.remote
+    && let Some(publication) = source.publication()
   {
-    return update_remote_publication(home, remote, triple, channel, report).await;
+    return update_remote_publication(home, remote, endpoint.triple, publication, report).await;
   }
-  let (mut prepared, pr_number) = prepare(home, triple, purpose, source, report).await?;
-  prepared.retain_earlier_snapshot(&snapshot);
+  let (mut prepared, pr_number) =
+    prepare(home, endpoint.triple, endpoint.purpose, source, report).await?;
+  prepared.retain_earlier_snapshot(snapshot);
+  if let Some((active, origin)) = restore {
+    if prepared.bundle.manifest.bundle_id != active {
+      return Err(io::Error::other(
+        "the cached runtime differs from the recorded active build",
+      ));
+    }
+    prepared.origin = Some(origin);
+  }
   if let Some(number) = pr_number {
-    let origin = prepared
-      .origin
-      .get_or_insert_with(|| ctl_core::installations::CatalogOrigin {
-        channel: "provided".into(),
-        publication_id: prepared.bundle.manifest.distribution_id.clone(),
-        built_at: None,
-      });
+    let origin = prepared.origin.get_or_insert_with(|| CatalogOrigin {
+      channel: "provided".into(),
+      publication_id: prepared.bundle.manifest.distribution_id.clone(),
+      built_at: None,
+    });
     origin.channel = format!("pr-{number}");
     origin.validate()?;
   }
   let package = Package::FullBundle;
-  let Some(remote) = remote else {
+  let Some(remote) = &endpoint.remote else {
     return ctl_client::component_update::install_prepared_local(home, prepared, package).await;
   };
-  let result = install_with_progress(&remote, &prepared, package).await?;
-  if remote.pinned() {
-    remote.verify_activation(&prepared.bundle.manifest).await?;
-  }
+  let result = install_with_progress(remote, &prepared, package).await?;
+  verify_remote_install(remote, &prepared.bundle.manifest).await?;
   Ok(result)
 }
 
@@ -325,11 +495,11 @@ async fn update_remote_publication(
   home: &Path,
   remote: &super::remote::Target,
   target: &str,
-  channel: BundleChannel,
+  publication: Publication<'_>,
   report: impl Fn(PreparationProgress) + Send + Sync,
 ) -> io::Result<UpdateResult> {
   use ctl_client::component_update::{
-    PublicationDeployment, PublicationTarget, deploy_remote_publication,
+    PublicationDeployment, PublicationTarget, deploy_remote_publication, deploy_remote_release,
   };
   let target = PublicationTarget {
     destination: &remote.destination,
@@ -339,14 +509,13 @@ async fn update_remote_publication(
     target_triple: target,
   };
   let last_upload = Mutex::new(None);
-  let deployed = deploy_remote_publication(
-    home,
-    &target,
-    channel,
-    |stage| report_publication(stage, &last_upload),
-    report,
-  )
-  .await?;
+  let stage = |stage| report_publication(stage, &last_upload);
+  let deployed = match publication {
+    Publication::Channel(channel) => {
+      deploy_remote_publication(home, &target, channel, stage, report).await?
+    }
+    Publication::Release(id) => deploy_remote_release(home, &target, id, stage, report).await?,
+  };
   let package = Package::FullBundle;
   let manifest = match deployed {
     PublicationDeployment::Installed(manifest) => manifest,
@@ -355,21 +524,29 @@ async fn update_remote_publication(
       prepared.bundle.manifest
     }
   };
-  remote.verify_active_manifest(&manifest).await?;
-  if remote.pinned()
-    && matches!(
-      remote.interaction,
-      ctl_client::SshInteraction::Multiplexed { .. }
-    )
-  {
-    remote.verify_activation(&manifest).await?;
-  }
+  verify_remote_install(remote, &manifest).await?;
   Ok(UpdateResult {
     package,
     bundle_id: manifest.bundle_id,
     target_triple: manifest.target_triple,
     services_preserved: true,
   })
+}
+
+async fn verify_remote_install(
+  remote: &super::remote::Target,
+  manifest: &ctl_core::bundles::Manifest,
+) -> io::Result<()> {
+  remote.verify_active_manifest(manifest).await?;
+  if remote.pinned()
+    && matches!(
+      remote.interaction,
+      ctl_client::SshInteraction::Multiplexed { .. }
+    )
+  {
+    remote.verify_activation(manifest).await?;
+  }
+  Ok(())
 }
 
 fn report_publication(
@@ -440,11 +617,11 @@ async fn prepare(
   home: &Path,
   target: &str,
   purpose: Purpose,
-  source: &mut UpdateSource<'_>,
+  source: &mut InstallSource<'_>,
   on_progress: impl Fn(PreparationProgress) + Send + Sync,
 ) -> io::Result<(PreparedUpdate, Option<u64>)> {
   let (prepared, pr_number) = match source {
-    UpdateSource::Artifacts { source, pr } => {
+    InstallSource::Artifacts { source, pr } => {
       let pr_number = pr.as_ref().map(|build| build.number);
       let pr_source = if let Some(pr) = pr {
         Some(pr.source(target).await?)
@@ -456,13 +633,13 @@ async fn prepare(
         target,
         purpose,
         pr_source.as_ref().unwrap_or(source),
-        &bundle_directories(home)?,
+        &[],
         on_progress,
       )
       .await?;
       (prepared, pr_number)
     }
-    UpdateSource::Checkout { workspace } => {
+    InstallSource::Checkout { workspace } => {
       if purpose != Purpose::Upload {
         return Err(io::Error::other(
           "working-tree bundles require a Linux x64 or ARM64 SSH target",
@@ -491,24 +668,6 @@ async fn prepare(
     );
   }
   Ok((prepared, pr_number))
-}
-
-fn bundle_directories(home: &Path) -> io::Result<Vec<PathBuf>> {
-  if let Some(directory) = std::env::var_os("CTL_REMOTE_BUNDLES_DIR") {
-    return Ok(vec![PathBuf::from(directory)]);
-  }
-  let mut directories = Vec::new();
-  if cfg!(debug_assertions) {
-    directories.push(
-      PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../apps/desktop/src-tauri/resources/agent-bundles"),
-    );
-  }
-  if let Some(parent) = std::env::current_exe()?.parent() {
-    directories.push(parent.join("resources/agent-bundles"));
-  }
-  directories.push(ctl_core::paths::directory_for_account(home).join("agent-bundles"));
-  Ok(directories)
 }
 
 async fn install_with_progress(
@@ -662,52 +821,49 @@ mod tests {
   use super::*;
 
   #[test]
-  fn remote_publication_uses_the_requested_channel_only_for_published_sources() {
-    let home = std::env::temp_dir().join(format!("ctlup-remote-source-{}", uuid::Uuid::new_v4()));
-    ctl_core::private_fs::create_directory(&home).unwrap();
-    ctl_client::installation::set_channel(&home, BundleChannel::Nightly).unwrap();
-    let channel = |source: &BuildSource| {
-      UpdateSource::Artifacts { source, pr: None }
-        .publication_channel(&home)
-        .unwrap()
-    };
-    assert_eq!(
-      channel(&BuildSource::Automatic),
-      Some(BundleChannel::Nightly)
-    );
-    assert_eq!(
-      channel(&BuildSource::Published {
+  fn remote_publication_uses_the_requested_release_identity_only_for_published_sources() {
+    fn selected(source: &BuildSource) -> Option<Publication<'_>> {
+      InstallSource::Artifacts { source, pr: None }.publication()
+    }
+    assert!(matches!(
+      selected(&BuildSource::Published {
         channel: BundleChannel::Stable
       }),
-      Some(BundleChannel::Stable)
-    );
+      Some(Publication::Channel(BundleChannel::Stable))
+    ));
+    assert!(matches!(
+      selected(&BuildSource::Release {
+        publication_id: "release-1".into()
+      }),
+      Some(Publication::Release("release-1"))
+    ));
+    let workspace = Path::new("test-profile");
     for source in [
+      BuildSource::Automatic,
       BuildSource::Selected,
       BuildSource::Provided {
-        path: home.clone(),
+        path: workspace.into(),
         local_build: false,
         ctld_package: None,
       },
     ] {
-      assert_eq!(channel(&source), None);
+      assert!(selected(&source).is_none());
     }
     let mut pr = PrBuilds {
       number: 1,
       unix: None,
       windows: None,
     };
-    let pr_source = UpdateSource::Artifacts {
+    let pr_source = InstallSource::Artifacts {
       source: &BuildSource::Automatic,
       pr: Some(&mut pr),
     };
-    assert_eq!(pr_source.publication_channel(&home).unwrap(), None);
-    assert_eq!(
-      UpdateSource::Checkout { workspace: &home }
-        .publication_channel(&home)
-        .unwrap(),
-      None
+    assert!(pr_source.publication().is_none());
+    assert!(
+      InstallSource::Checkout { workspace }
+        .publication()
+        .is_none()
     );
-    std::fs::remove_dir_all(home).unwrap();
   }
 
   #[test]
@@ -738,42 +894,32 @@ mod tests {
 
   #[test]
   fn default_local_and_explicit_batch_targets_are_distinct() {
+    let local = super::super::target_options(&[], None, None, None).unwrap();
+    assert_eq!(local[0].label(), "local");
+    assert!(!local[0].remote());
+
+    let hosts = ["a".into(), "b".into(), "a".into()];
+    let batch = super::super::target_options(&hosts, None, None, None).unwrap();
     assert_eq!(
-      choices(vec![], false, None, None).unwrap(),
-      vec![Choice::Local]
+      batch.iter().map(TargetOptions::label).collect::<Vec<_>>(),
+      ["a", "b"]
     );
-    assert_eq!(
-      choices(
-        vec!["a".into(), "b".into(), "a".into()],
-        true,
-        Some("a"),
-        None,
-      )
-      .unwrap(),
-      vec![
-        Choice::Saved("a".into()),
-        Choice::Saved("b".into()),
-        Choice::Local
-      ]
-    );
+    assert!(batch.iter().all(TargetOptions::remote));
   }
 
   #[test]
-  fn temporary_destination_can_include_local_without_becoming_a_saved_host() {
-    for destination in ["192.0.2.1", "server.example.com", "ssh-config-alias"] {
-      let targets = choices(vec![], true, None, Some(destination)).unwrap();
-      assert_eq!(
-        targets,
-        vec![Choice::Destination(destination.into()), Choice::Local]
-      );
-      assert_eq!(targets[0].host(), None);
-      assert_eq!(targets[0].destination(), Some(destination));
-    }
-  }
-
-  #[test]
-  fn temporary_destination_rejects_saved_host_selections() {
-    assert!(choices(vec![], false, Some("work"), Some("server")).is_err());
-    assert!(choices(vec!["work".into()], false, None, Some("server")).is_err());
+  fn temporary_destination_is_not_a_saved_host() {
+    let targets = super::super::target_options(
+      &[],
+      Some("ssh://user@windows.example:2022"),
+      None,
+      Some(crate::RemotePlatform::Windows),
+    )
+    .unwrap();
+    assert_eq!(targets[0].host, None);
+    assert_eq!(
+      targets[0].destination,
+      Some("ssh://user@windows.example:2022")
+    );
   }
 }

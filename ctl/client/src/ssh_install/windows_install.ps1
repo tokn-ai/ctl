@@ -1,6 +1,7 @@
 $ErrorActionPreference = 'Stop'
 __ACCOUNT_GUARD__
 __MANAGER__
+__UPDATER_STAGING__
 # ConsoleStream blocks on OpenSSH pipes; keep raw stdin open for the child.
 Add-Type -TypeDefinition @'
 using System;
@@ -16,7 +17,7 @@ $remaining = __UPDATER_SIZE__
 $stage = $null
 try {
   if ($remaining) {
-    $path = Join-Path $env:USERPROFILE ('ctlup-' + [Guid]::NewGuid().ToString('N') + '.exe')
+    $path = Join-Path (Get-UpdaterStaging) ('ctlup-' + [Guid]::NewGuid().ToString('N') + '.exe')
     $file = [IO.File]::Open($path, 'CreateNew', 'Write', 'None')
     $stage = $path
     try {
@@ -33,7 +34,7 @@ try {
     }
     $manager = $stage
   } else {
-    $manager = Join-Path $env:USERPROFILE '.tokn\ctl\updaters\__UPDATER_SHA256__\ctlup.exe'
+    $manager = Join-Path $env:USERPROFILE '.tokn\ctl\ctlup\store\updater\__UPDATER_SHA256__\ctlup.exe'
     if ((Get-FileHash -LiteralPath $manager -Algorithm SHA256).Hash -ne '__UPDATER_SHA256__') {
       throw 'The selected ctlup changed during the update.'
     }

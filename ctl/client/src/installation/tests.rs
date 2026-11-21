@@ -17,51 +17,14 @@ impl Drop for Home {
 }
 
 #[test]
-fn channel_inspection_is_passive_and_explicit_choices_are_atomic() {
+fn runtime_source_inspection_is_passive_on_a_fresh_profile() {
   let home = Home::new();
+  let source = runtime_source(&home.0).unwrap();
+  assert!(source.active.is_none());
+  assert!(source.origin.is_none());
+  assert!(!source.missing);
   assert_eq!(default_channel(&home.0).unwrap(), BundleChannel::default());
   assert!(!home.0.join(".tokn").exists());
-  set_channel(&home.0, BundleChannel::Stable).unwrap();
-  assert_eq!(default_channel(&home.0).unwrap(), BundleChannel::Stable);
-  set_channel(&home.0, BundleChannel::Nightly).unwrap();
-  assert_eq!(default_channel(&home.0).unwrap(), BundleChannel::Nightly);
-  let settings = std::fs::read(home.0.join(".tokn/ctl/ctlup.json")).unwrap();
-  assert_eq!(
-    serde_json::from_slice::<serde_json::Value>(&settings).unwrap()["channel"],
-    "nightly"
-  );
-  assert!(
-    !std::fs::read_dir(home.0.join(".tokn/ctl"))
-      .unwrap()
-      .any(|entry| entry
-        .unwrap()
-        .file_name()
-        .to_string_lossy()
-        .starts_with(".ctlup-settings-"))
-  );
-  std::fs::write(
-    home.0.join(".tokn/ctl/ctlup.json"),
-    br#"{"schema_version":1,"channel":"dev"}"#,
-  )
-  .unwrap();
-  assert_eq!(default_channel(&home.0).unwrap(), BundleChannel::Nightly);
-  std::fs::write(
-    home.0.join(".tokn/ctl/ctlup.json"),
-    br#"{"schema_version":99,"channel":"stable"}"#,
-  )
-  .unwrap();
-  assert!(default_channel(&home.0).is_err());
-}
-
-#[test]
-#[cfg(unix)]
-fn settings_do_not_follow_account_storage_links() {
-  let home = Home::new();
-  let outside = Home::new();
-  std::os::unix::fs::symlink(&outside.0, home.0.join(".tokn")).unwrap();
-  assert!(set_channel(&home.0, BundleChannel::Stable).is_err());
-  assert!(default_channel(&home.0).is_err());
-  assert!(!outside.0.join("ctl").exists());
 }
 
 #[test]

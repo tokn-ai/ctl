@@ -124,15 +124,15 @@ helper through setup.
 The helper is installed without `sudo` at
 `~/.tokn/ctl/components/ctld/versions/<version>-<target>/ctld.app`; the component's
 `current` symlink and architecture/API selection are each updated atomically after
-verification. Remote agent
-`~/.tokn/ctl/versions/` and `current` paths are independent. Setup never restarts
+verification. The complete runtime store under `~/.tokn/ctl/ctlup/` uses its own
+selection. Setup never restarts
 the daemon or existing connections. Repeating setup checks and reuses the same
 immutable version when its release metadata matches.
 
 `CTLD_BIN` continues to override discovery. For source development,
 `pnpm ctld:build` delegates to `ctlup dev`: it builds the complete native command
 set, signs `ctld.app`, and activates the verified installation under
-`~/.tokn/ctl/installs/`. The macOS desktop launcher uses the same preparation
+`~/.tokn/ctl/ctlup/store/runtime/`. The macOS desktop launcher uses the same preparation
 path automatically. Neither consumer needs signing. This updates the active
 complete build while preserving running services; it does not publish a
 release. Older checkout helper selections remain readable for compatibility.

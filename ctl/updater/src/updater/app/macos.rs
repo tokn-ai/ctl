@@ -100,8 +100,14 @@ pub(super) fn stage(
   Ok(app)
 }
 
-pub(super) fn stage_local(archive: &Path, staging: &Path, version: &str) -> io::Result<PathBuf> {
-  let app = stage(archive, staging, version, DesktopSigning::Unsigned)?;
+pub(super) fn stage_provided(
+  archive: &Path,
+  staging: &Path,
+  version: Option<&str>,
+) -> io::Result<PathBuf> {
+  let app = unpack(archive, staging)?;
+  let actual = installed_version(&app)?;
+  verify_existing(&app, version.unwrap_or(&actual), DesktopSigning::Unsigned)?;
   let native_architectures: &[&str] = match std::env::consts::ARCH {
     "aarch64" => &["arm64", "arm64e"],
     "x86_64" => &["x86_64"],

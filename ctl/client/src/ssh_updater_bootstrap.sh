@@ -5,35 +5,20 @@ fail() {
   exit 1
 }
 __CHECKOUT_LAYOUT_GUARD__
+__UPDATER_STAGING__
 base="$HOME/.tokn/ctl"
-for directory in "$HOME" "$HOME/.tokn" "$base" "$base/bin"; do
-  test ! -L "$directory" || fail 'installation directory is a symbolic link'
-  mkdir -p "$directory"
-  test -d "$directory" || fail 'installation path is not a directory'
-  case "$(uname -s)" in
-    Linux) metadata=$(stat -c '%u %a' "$directory") ;;
-    Darwin) metadata=$(stat -f '%u %Lp' "$directory") ;;
-    *) fail 'unsupported installation platform' ;;
-  esac
-  test "${metadata%% *}" -eq "$(id -u)" || fail 'installation directory is not owned by this account'
-  mode=$((0${metadata#* }))
-  test "$((mode & 022))" -eq 0 || fail 'installation directory is writable by group or others'
-done
-destination="$base/bin/ctlup"
-test ! -L "$destination" || fail 'updater entry point is a symbolic link'
-if [ -e "$destination" ]; then test -f "$destination" || fail 'updater entry point is not a regular file'; fi
 if [ '__CHECK_ONLY__' = yes ]; then
-  if [ -f "$destination" ] && [ -x "$destination" ]; then
-    if command -v sha256sum >/dev/null 2>&1; then actual=$(sha256sum "$destination"); else actual=$(shasum -a 256 "$destination"); fi
-    if [ "${actual%% *}" = '__UPDATER_SHA256__' ]; then
-      require_checkout_layout "$destination"
-      printf 'ctlup-bootstrap-v1\n'
-      exit 0
-    fi
+  destination="$base/bin/ctlup"
+  if [ -x "$destination" ] && digest=$("$destination" updater-digest </dev/null 2>/dev/null) &&
+     [ "$digest" = '__UPDATER_SHA256__' ]; then
+    require_checkout_layout "$destination"
+    printf 'ctlup-bootstrap-v1\n'
+    exit 0
   fi
   exit 10
 fi
-temporary="$base/bin/.ctlup-__TOKEN__"
+prepare_updater_staging
+temporary="$updater_staging/ctlup-__TOKEN__"
 test ! -e "$temporary" && test ! -L "$temporary" || fail 'bootstrap staging path already exists'
 trap 'rm -f "$temporary"' EXIT HUP INT TERM
 # noclobber prevents accepting a raced-in link or other existing path.
@@ -53,6 +38,5 @@ case "$version" in
   *) fail 'uploaded executable is not ctlup' ;;
 esac
 require_checkout_layout "$temporary"
-mv -f "$temporary" "$destination"
-trap - EXIT HUP INT TERM
+"$temporary" install-manager </dev/null
 printf 'ctlup-bootstrap-v1\n'

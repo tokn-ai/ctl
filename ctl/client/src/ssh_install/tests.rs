@@ -4,6 +4,7 @@ const VALID_PROGRESS: &[u8] = b"ctl-install-progress-v1 receiving 0\nctl-install
 
 #[cfg(unix)]
 const PREPARATION_UPDATER_FIXTURE: &[u8] = br#"#!/bin/sh
+if [ "$1" = installation-layout-version ]; then printf '2\n'; exit 0; fi
 printf '%s\n' "$1" >> "$HOME/calls"
 case "$1" in
   prepare-install)
@@ -115,7 +116,22 @@ async fn updater_bootstrap_verifies_bytes_and_executable_before_replacing_the_ma
   let fixture = BundleFixture::new();
   let home = fixture.directory.join("home");
   let binary = home.join(".tokn/ctl/bin/ctlup");
-  let updater = b"#!/bin/sh\ncase \"$1\" in --component-info) exit 0;; --version) printf 'ctlup 0.0.0\\n';; *) exit 1;; esac\n";
+  let updater = br#"#!/bin/sh
+case "$1" in
+  --component-info) exit 0;;
+  --version) printf 'ctlup 0.0.0\n';;
+  installation-layout-version) printf '2\n';;
+  updater-digest)
+    if command -v sha256sum >/dev/null 2>&1; then hash=$(sha256sum "$0"); else hash=$(shasum -a 256 "$0"); fi
+    printf '%s\n' "${hash%% *}";;
+  install-manager)
+    destination="$HOME/.tokn/ctl/bin/ctlup"
+    [ ! -L "$destination" ] || exit 1
+    mkdir -p "${destination%/*}"
+    cp "$0" "$destination";;
+  *) exit 1;;
+esac
+"#;
   let run = |script: String| {
     let mut command = Command::new("sh");
     command.args(["-c", &script]).env("HOME", &home);
@@ -220,7 +236,7 @@ async fn bootstrap_protects_checkout_metadata_from_an_older_updater() {
       .unwrap();
     assert_eq!(status.code(), Some(1));
     assert_eq!(stdout, b"");
-    assert!(String::from_utf8_lossy(&stderr).contains("cannot preserve checkout installations"));
+    assert!(String::from_utf8_lossy(&stderr).contains("cannot use this installation layout"));
     assert_eq!(std::fs::read(&manager).unwrap(), compatible.as_bytes());
     assert_eq!(std::fs::read(&marker).unwrap(), b"{}");
     std::fs::remove_file(marker).unwrap();
@@ -1081,7 +1097,7 @@ async fn full_schema3_archive_activates_and_reports_both_clients() {
 async fn managed_installer_uses_the_shared_store_and_preserves_selection_on_damage() {
   use crate::components;
   use crate::remote_bundle::compatibility::tests::Fixture;
-  use ctl_core::bundles::{Source, Store};
+  use ctl_core::bundles::Source;
   use std::os::unix::fs::MetadataExt as _;
   let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = BundleFixture::new();
@@ -1126,8 +1142,7 @@ async fn managed_installer_uses_the_shared_store_and_preserves_selection_on_dama
     inode
   );
   assert_eq!(
-    Store::new(&home)
-      .get("aarch64-apple-darwin", &bundle.manifest.bundle_id)
+    ctl_core::bundles::Bundle::open(&destination)
       .unwrap()
       .manifest,
     bundle.manifest

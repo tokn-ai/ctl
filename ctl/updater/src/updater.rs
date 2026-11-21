@@ -2,6 +2,7 @@
 
 use clap::Parser;
 use ctl_client::cli::Channel;
+use ctl_client::component_update::BundleChannel;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -12,7 +13,7 @@ mod arguments;
 mod component;
 mod ctream;
 mod development;
-#[cfg(windows)]
+#[cfg(any(unix, windows))]
 mod launcher;
 mod release;
 mod remote;
@@ -32,7 +33,7 @@ pub(crate) struct TargetOptions<'a> {
 }
 
 pub(crate) fn main() {
-  #[cfg(windows)]
+  #[cfg(any(unix, windows))]
   match launcher::dispatch() {
     Ok(Some(code)) => std::process::exit(code),
     Ok(None) => {}
@@ -40,6 +41,9 @@ pub(crate) fn main() {
       eprintln!("ctlup: {error}");
       std::process::exit(1);
     }
+  }
+  if let Some(code) = ctl_client::cli::openssh::run_transport_helper(crate::bundled::register) {
+    std::process::exit(code);
   }
   let arguments = Arguments::parse();
   if matches!(arguments.command, Command::InstallationLayoutVersion) {
@@ -53,7 +57,7 @@ pub(crate) fn main() {
     }
     return;
   }
-  #[cfg(windows)]
+  #[cfg(any(unix, windows))]
   let installation = ctl_core::installations::lease_current_executable().unwrap_or_else(|error| {
     eprintln!("ctlup: could not retain its installation: {error}");
     std::process::exit(1);
@@ -67,7 +71,7 @@ pub(crate) fn main() {
     });
   let result = runtime.block_on(run(arguments));
   drop(runtime);
-  #[cfg(windows)]
+  #[cfg(any(unix, windows))]
   drop(installation);
   let code = match result {
     Ok(code) => code,
@@ -81,64 +85,48 @@ pub(crate) fn main() {
 
 async fn run(arguments: Arguments) -> io::Result<i32> {
   let home = dirs::home_dir().ok_or_else(|| io::Error::other("home directory is unavailable"))?;
-  let target = TargetOptions {
-    host: arguments.host.as_deref(),
-    destination: arguments.destination.as_deref(),
-    method: arguments.method.as_deref(),
-    platform: arguments.remote_platform,
-  };
-  validate_target_options(target)?;
   match arguments.command {
     Command::ComponentInfo | Command::InstallationLayoutVersion => unreachable!(),
-    Command::Install(options) | Command::Update(options) => {
-      update::run(&home, options, target).await?;
-    }
-    Command::App { command } => {
-      require_local(target)?;
-      #[cfg(any(target_os = "macos", target_os = "linux", windows))]
-      app::run(&home, command).await?;
-      #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
-      {
-        let _ = command;
-        return Err(io::Error::other(
-          "ctlup app installation currently requires macOS, Linux or Windows",
-        ));
-      }
-    }
-    Command::Component { command } => component::run(&home, target, command).await?,
+    Command::Install(options) => run_install(&home, &options).await?,
+    Command::Update(options) => run_update(&home, &options).await?,
+    Command::Bundle { command } => component::run(&home, command).await?,
     Command::Ctream { command } => {
-      require_local(target)?;
       return ctream::run(&home, command).await;
     }
-    Command::Show { json } => show::run(&home, target, json).await?,
     Command::CatalogJson => {
-      require_local(target)?;
       print_catalog(&home)?;
     }
     Command::PrepareInstall => {
-      require_local(target)?;
       tokio::task::spawn_blocking(move || {
-        ctl_core::installations::Installations::new(&home).migrate_catalog_if_missing()
+        ctl_core::installations::Installations::new(&home).prepare_installation()
       })
       .await
       .map_err(io::Error::other)??;
     }
-    Command::Status { json } => status::run(&home, target, json).await?,
-    Command::Dev(options) => development::run(&home, options, target).await?,
-    Command::Check { channel, json } => {
-      require_local(target)?;
-      check(&home, channel, json).await?;
+    Command::Status(options) => run_status(&home, &options).await?,
+    Command::InspectRuntime { json } => {
+      if !json {
+        return Err(io::Error::other("inspect-runtime requires --json"));
+      }
+      print_json(&ctl_client::installation::status(&home)?)?;
     }
+    Command::RuntimeSource => {
+      print_json(&ctl_client::installation::runtime_source(&home)?)?;
+    }
+    Command::InstallManager => {
+      ctl_client::installation::provision_manager_from(&home, &std::env::current_exe()?).await?;
+    }
+    Command::Dev(options) => development::run(&home, options).await?,
     Command::Release(options) => {
-      require_local(target)?;
       release::run(&home, options).await?;
     }
-    Command::Prune { json } => {
-      require_local(target)?;
-      prune(home, json).await?;
+    Command::Prune {
+      forget_missing,
+      json,
+    } => {
+      prune(home, forget_missing, json).await?;
     }
     Command::InstallArchive { origin_hex } => {
-      require_local(target)?;
       let origin = origin_hex
         .as_deref()
         .map(ctl_client::installation::decode_catalog_origin)
@@ -149,7 +137,6 @@ async fn run(arguments: Arguments) -> io::Result<i32> {
       bundle_id,
       origin_hex,
     } => {
-      require_local(target)?;
       let origin = origin_hex
         .as_deref()
         .map(ctl_client::installation::decode_catalog_origin)
@@ -157,16 +144,76 @@ async fn run(arguments: Arguments) -> io::Result<i32> {
       return archive::activate(&home, &bundle_id, origin).await;
     }
     Command::InstallPublication(request) => {
-      require_local(target)?;
       return archive::install_publication(&home, request).await;
     }
-    #[cfg(windows)]
     Command::UpdaterDigest => {
-      require_local(target)?;
       updater_digest()?;
     }
   }
   Ok(0)
+}
+
+async fn run_install(home: &Path, options: &arguments::InstallArguments) -> io::Result<()> {
+  let targets = options.destination.resolve()?;
+  if options.package == arguments::PackageSelection::Runtime {
+    return update::install(home, options, &targets).await;
+  }
+  require_local(targets[0])?;
+  if options.local_build || options.ctld_package.is_some() {
+    return Err(io::Error::other(
+      "native runtime file options require the runtime package",
+    ));
+  }
+  #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+  {
+    app::install(
+      home,
+      options.channel,
+      options.release.as_deref(),
+      options.pr,
+      options.from.as_deref(),
+      options.json,
+    )
+    .await
+  }
+  #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+  Err(unsupported_app())
+}
+
+async fn run_update(home: &Path, options: &arguments::UpdateArguments) -> io::Result<()> {
+  let targets = options.destination.resolve()?;
+  if options.package == arguments::PackageSelection::Runtime {
+    return update::run(home, &targets, options.check, options.json).await;
+  }
+  require_local(targets[0])?;
+  #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+  {
+    app::update(home, options.check, options.json).await
+  }
+  #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+  Err(unsupported_app())
+}
+
+async fn run_status(home: &Path, options: &arguments::StatusArguments) -> io::Result<()> {
+  let targets = options.destination.resolve()?;
+  if options.package == arguments::PackageSelection::Runtime {
+    return status::run(home, &targets, options.json).await;
+  }
+  require_local(targets[0])?;
+  #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+  {
+    app::status(home, options.json)
+  }
+  #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+  Err(unsupported_app())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+fn unsupported_app() -> io::Error {
+  io::Error::new(
+    io::ErrorKind::Unsupported,
+    "desktop installation requires macOS, Linux or Windows",
+  )
 }
 
 fn print_catalog(home: &Path) -> io::Result<()> {
@@ -174,14 +221,17 @@ fn print_catalog(home: &Path) -> io::Result<()> {
     ctl_core::installations::Installations::new(home).catalog()?,
   );
   catalog.validate()?;
+  print_json(&catalog)
+}
+
+fn print_json(value: &impl serde::Serialize) -> io::Result<()> {
   println!(
     "{}",
-    serde_json::to_string(&catalog).map_err(io::Error::other)?
+    serde_json::to_string(value).map_err(io::Error::other)?
   );
   Ok(())
 }
 
-#[cfg(windows)]
 fn updater_digest() -> io::Result<()> {
   use sha2::{Digest as _, Sha256};
   let executable = std::env::current_exe()?;
@@ -192,9 +242,14 @@ fn updater_digest() -> io::Result<()> {
   Ok(())
 }
 
-async fn prune(home: PathBuf, json: bool) -> io::Result<()> {
+async fn prune(home: PathBuf, forget_missing: bool, json: bool) -> io::Result<()> {
   let (installations, cache) = tokio::task::spawn_blocking(move || {
-    let installations = ctl_core::installations::Installations::new(&home).prune()?;
+    let store = ctl_core::installations::Installations::new(&home);
+    let collect = || store.prune_all(forget_missing);
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+    let installations = app::with_current_launch_entry(&home, collect)?;
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+    let installations = collect()?;
     let cache = ctl_client::installation::prune_caches(&home).map_err(|error| {
       io::Error::new(
         error.kind(),
@@ -206,13 +261,18 @@ async fn prune(home: PathBuf, json: bool) -> io::Result<()> {
   .await
   .map_err(io::Error::other)??;
   if json {
-    let result = serde_json::json!({ "installations": installations, "cache": cache });
-    println!(
-      "{}",
-      serde_json::to_string(&result).map_err(io::Error::other)?
-    );
+    print_json(&serde_json::json!({ "installations": installations, "cache": cache }))?;
   } else {
-    println!("Removed {} unused builds.", installations.removed.len());
+    println!(
+      "Removed {} unused runtime builds.",
+      installations.removed.len()
+    );
+    if !installations.missing_builds.is_empty() {
+      println!(
+        "Kept {} missing build records for repair.",
+        installations.missing_builds.len()
+      );
+    }
     if !installations.forgotten_missing_builds.is_empty() {
       println!(
         "Removed {} missing builds from the catalog.",
@@ -223,73 +283,123 @@ async fn prune(home: PathBuf, json: bool) -> io::Result<()> {
   Ok(())
 }
 
-fn validate_target_options(target: TargetOptions<'_>) -> io::Result<()> {
-  if target.destination.is_some() && (target.host.is_some() || target.method.is_some()) {
+impl arguments::DestinationArguments {
+  fn resolve(&self) -> io::Result<Vec<TargetOptions<'_>>> {
+    target_options(
+      &self.host,
+      self.ssh.as_deref(),
+      self.method.as_deref(),
+      self.remote_platform,
+    )
+  }
+}
+
+fn target_options<'a>(
+  hosts: &'a [String],
+  ssh: Option<&'a str>,
+  method: Option<&'a str>,
+  platform: Option<crate::RemotePlatform>,
+) -> io::Result<Vec<TargetOptions<'a>>> {
+  if platform.is_some() && ssh.is_none() && hosts.is_empty() {
     return Err(io::Error::other(
-      "--destination cannot be combined with --host or --method",
+      "--remote-platform requires --host or --ssh",
     ));
   }
-  if target.platform.is_some() && target.host.is_none() && target.destination.is_none() {
+  if hosts.len() > 1 && (method.is_some() || platform.is_some()) {
     return Err(io::Error::other(
-      "--remote-platform requires --host or --destination",
+      "--method and --remote-platform require a single destination",
     ));
   }
-  Ok(())
+  let mut targets = Vec::new();
+  if hosts.is_empty() {
+    targets.push(TargetOptions {
+      host: None,
+      destination: ssh,
+      method: None,
+      platform,
+    });
+  } else {
+    for host in hosts {
+      if targets
+        .iter()
+        .any(|target| target.host == Some(host.as_str()))
+      {
+        continue;
+      }
+      targets.push(TargetOptions {
+        host: Some(host),
+        destination: None,
+        method,
+        platform,
+      });
+    }
+  }
+  Ok(targets)
+}
+
+impl TargetOptions<'_> {
+  fn label(&self) -> &str {
+    self.host.or(self.destination).unwrap_or("local")
+  }
+
+  fn remote(&self) -> bool {
+    self.host.is_some() || self.destination.is_some()
+  }
+
+  async fn resolve(&self) -> io::Result<ctl_client::hosts::ConnectionTargetDto> {
+    let mut resolved = crate::target::resolve(self.host, self.destination, self.method)
+      .await
+      .map_err(target_error)?;
+    crate::target::apply_remote_platform(&mut resolved.target, self.platform);
+    Ok(resolved.target)
+  }
+}
+
+fn target_error(mut error: ctl_client::hosts::HostError) -> io::Error {
+  const OLD_HINT: &str = "use --destination for an SSH address or config alias.";
+  match error.code.as_str() {
+    "host_not_found" => {
+      if let Some(prefix) = error.message.strip_suffix(OLD_HINT) {
+        error.message = format!("{prefix}use --ssh for an SSH address or config alias.");
+      }
+    }
+    "target_conflict" => {
+      error.message = "--ssh cannot be combined with --host or --method.".into();
+    }
+    "invalid_ssh_target"
+      if error.message == "Use a valid SSH destination or config alias with --destination." =>
+    {
+      error.message = "Use a valid SSH address or config alias with --ssh.".into();
+    }
+    _ => {}
+  }
+  io::Error::other(error)
 }
 
 fn require_local(target: TargetOptions<'_>) -> io::Result<()> {
-  if target.host.is_some() || target.destination.is_some() || target.method.is_some() {
+  if target.remote() {
     return Err(io::Error::other(
-      "this ctlup operation is local; omit host options",
+      "this ctlup operation is local; omit --host and --ssh",
     ));
   }
   Ok(())
 }
 
-pub(crate) fn source_with_bundle_override(
-  source: ctl_client::component_update::BuildSource,
-  directory: Option<PathBuf>,
-) -> ctl_client::component_update::BuildSource {
-  use ctl_client::component_update::BuildSource;
-  match (source, directory) {
-    (BuildSource::Automatic, Some(path)) => BuildSource::Provided {
-      path,
-      local_build: false,
-      ctld_package: None,
-    },
-    (source, _) => source,
+fn tracked_channel(
+  origin: Option<&ctl_core::installations::CatalogOrigin>,
+) -> Option<BundleChannel> {
+  match origin?.channel.as_str() {
+    "stable" => Some(BundleChannel::Stable),
+    "nightly" => Some(BundleChannel::Nightly),
+    _ => None,
   }
 }
 
-fn selected_channel(
-  home: &Path,
-  channel: Option<Channel>,
-) -> io::Result<ctl_core::component_update::BundleChannel> {
+fn selected_channel(home: &Path, channel: Option<Channel>) -> io::Result<BundleChannel> {
   channel.map_or_else(
     || ctl_client::installation::default_channel(home),
     |channel| Ok(channel.into()),
   )
-}
-
-async fn check(home: &Path, channel: Option<Channel>, json: bool) -> io::Result<()> {
-  let channel = selected_channel(home, channel)?;
-  let catalog = published::check(channel).await.map_err(io::Error::other)?;
-  if json {
-    println!(
-      "{}",
-      serde_json::to_string(&catalog).map_err(io::Error::other)?
-    );
-  } else {
-    println!(
-      "{}: {} (revision {})",
-      catalog.channel.name(),
-      catalog.bundle_id,
-      catalog.git_revision
-    );
-    println!("Built {}", catalog.built_at.as_deref().unwrap_or("unknown"));
-    print_targets(&catalog.targets);
-  }
-  Ok(())
 }
 
 fn print_targets(targets: &[published::PublishedTarget]) {

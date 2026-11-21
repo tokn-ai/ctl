@@ -1,41 +1,35 @@
-use super::{TargetOptions, arguments::DevelopmentArguments};
+use super::arguments::{DevAction, DevelopmentArguments};
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 
 const NATIVE_BUILDER: &str = "scripts/dev/build-local-development.mts";
 
-pub(super) async fn run(
-  home: &Path,
-  options: DevelopmentArguments,
-  target: TargetOptions<'_>,
-) -> io::Result<()> {
-  let remote = target.host.is_some() || target.destination.is_some() || !options.hosts.is_empty();
-  if remote {
-    if options.app
+pub(super) async fn run(home: &Path, options: DevelopmentArguments) -> io::Result<()> {
+  let targets = options.destination.resolve()?;
+  let remote = targets[0].remote();
+  let signing = options.action == Some(DevAction::Sign);
+  if remote
+    && (options.app
       || options.ctream
-      || options.renew_signing
+      || signing
       || options.release
       || options.profile.is_some()
       || options.target_dir.is_some()
       || options.target.is_some()
       || options.cargo_args_json.is_some()
-      || options.lease
-    {
-      return Err(io::Error::new(
-        io::ErrorKind::InvalidInput,
-        "Desktop, ctream, signing, and native Cargo options require a local build. Remote development accepts host options, --workspace, and --json.",
-      ));
-    }
-  } else {
-    super::require_local(target)?;
+      || options.lease)
+  {
+    return Err(io::Error::new(
+      io::ErrorKind::InvalidInput,
+      "Desktop, ctream, signing, and native Cargo options require a local build. Remote development accepts host options, --workspace, and --json.",
+    ));
   }
   let workspace = checkout_root(
     options.workspace.as_deref(),
     checkout_requirements(&options, remote),
   )?;
   if remote {
-    return super::update::run_development(home, target, options.hosts, &workspace, options.json)
-      .await;
+    return super::update::run_development(home, &targets, &workspace, options.json).await;
   }
   if options.app {
     return install_app(home, &workspace, options.json).await;
@@ -45,7 +39,7 @@ pub(super) async fn run(
   }
   let lease_input = options.lease.then(lease_pipe).transpose()?;
   let installation = async {
-    if options.renew_signing {
+    if signing {
       ctl_client::development::renew_signing(home, &workspace).await
     } else {
       ctl_client::development::install(
@@ -82,7 +76,7 @@ pub(super) async fn run(
     serde_json::to_writer(&mut output, result).map_err(io::Error::other)?;
     writeln!(output)?;
     output.flush()?;
-  } else if options.renew_signing {
+  } else if signing {
     println!(
       "Renewed ctld signing in development build {} ({}). Running services were preserved; restart separately.",
       result.bundle_id, result.target_triple
@@ -121,7 +115,7 @@ fn checkout_requirements(options: &DevelopmentArguments, remote: bool) -> &'stat
       "ctream/cli/Cargo.toml",
       "ctream/agent/Cargo.toml",
     ]
-  } else if options.renew_signing {
+  } else if options.action == Some(DevAction::Sign) {
     &["scripts/dev/ctld-signed.mts"]
   } else {
     &[NATIVE_BUILDER]
@@ -282,12 +276,12 @@ mod tests {
   #[test]
   fn desktop_cargo_arguments_remain_structured_and_invalid_json_is_rejected() {
     let mut options = DevelopmentArguments {
-      hosts: vec![],
       workspace: None,
       app: false,
       ctream: false,
       ctream_agent_targets: vec![],
-      renew_signing: false,
+      action: None,
+      destination: crate::updater::arguments::DestinationArguments::default(),
       release: false,
       profile: None,
       target_dir: None,

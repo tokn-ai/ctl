@@ -293,6 +293,7 @@ fn updater_bootstrap_script(updater: &[u8], check_only: bool) -> Result<String, 
   }
   Ok(
     UPDATER_BOOTSTRAP_COMMAND
+      .replace("__UPDATER_STAGING__", updater_staging(RemotePlatform::Unix))
       .replace(
         "__CHECKOUT_LAYOUT_GUARD__",
         &checkout_layout_guard(RemotePlatform::Unix),
@@ -305,6 +306,13 @@ fn updater_bootstrap_script(updater: &[u8], check_only: bool) -> Result<String, 
         &format!("{:x}", Sha256::digest(updater)),
       ),
   )
+}
+
+fn updater_staging(platform: RemotePlatform) -> &'static str {
+  match platform {
+    RemotePlatform::Unix => include_str!("ssh_install/updater_staging.sh"),
+    RemotePlatform::Windows => include_str!("ssh_install/updater_staging.ps1"),
+  }
 }
 
 fn checkout_layout_guard(platform: RemotePlatform) -> String {

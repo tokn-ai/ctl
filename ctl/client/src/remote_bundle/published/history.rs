@@ -45,6 +45,16 @@ pub async fn view_release(
     .await
 }
 
+/// Reads an immutable publication by its exact ID from the release catalog.
+///
+/// # Errors
+/// Reports expired, untrusted or inconsistent publication metadata.
+pub async fn view_retained_release(publication_id: &str) -> Result<PublishedReleaseDetails, Error> {
+  let resolver = Resolver::production()?;
+  let (entry, current) = resolver.retained_release_entry(publication_id).await?;
+  resolver.release_details(&entry, current.as_deref()).await
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ReleaseCatalog {
@@ -182,6 +192,39 @@ impl Resolver {
     ReleaseCatalog::parse(&self.read(&url, MAX_RELEASE_CATALOG_BYTES).await?)
   }
 
+  async fn retained_release_entry(
+    &self,
+    publication_id: &str,
+  ) -> Result<(RetainedPublication, Option<String>), Error> {
+    let catalog = self.release_catalog().await?;
+    let entry = catalog
+      .publications
+      .into_iter()
+      .find(|entry| entry.publication_id == publication_id && entry.belongs_to(entry.channel))
+      .ok_or_else(|| Error::NotAvailable("the requested release is no longer published".into()))?;
+    let current = catalog.channels.get(entry.channel).map(str::to_owned);
+    Ok((entry, current))
+  }
+
+  pub(super) async fn retained_publication(
+    &self,
+    publication_id: &str,
+  ) -> Result<(BundleChannel, super::Publication), Error> {
+    let (entry, _) = self.retained_release_entry(publication_id).await?;
+    let (url, bytes, manifest) = self.release_manifest(&entry).await?;
+    let built_at = self.build_time(&url, &manifest).await?;
+    Ok((
+      entry.channel,
+      super::Publication {
+        url,
+        bytes,
+        manifest,
+        built_at,
+        id: Some(entry.publication_id),
+      },
+    ))
+  }
+
   pub(super) async fn list_releases(
     &self,
     channel: BundleChannel,
@@ -242,14 +285,25 @@ impl Resolver {
     entry: &RetainedPublication,
     current: Option<&str>,
   ) -> Result<PublishedReleaseDetails, Error> {
+    let (url, _, manifest) = self.release_manifest(entry).await?;
+    let mut release = entry.release(current);
+    release.built_at = self.build_time(&url, &manifest).await?;
+    Ok(PublishedReleaseDetails {
+      release,
+      targets: self.catalog_targets(&url, &manifest).await?,
+    })
+  }
+
+  async fn release_manifest(
+    &self,
+    entry: &RetainedPublication,
+  ) -> Result<(reqwest::Url, Vec<u8>, crate::remote_bundle::BundleSet), Error> {
     let url = self
       .root
       .join(&format!("sets/{}/bundle-set.json", entry.publication_id))
       .map_err(|error| Error::Invalid(error.to_string()))?;
-    let manifest = parse_published_manifest(
-      &self.read(&url, MAX_BUNDLE_SET_BYTES).await?,
-      BUNDLE_SET_FILE,
-    )?;
+    let bytes = self.read(&url, MAX_BUNDLE_SET_BYTES).await?;
+    let manifest = parse_published_manifest(&bytes, BUNDLE_SET_FILE)?;
     if manifest.app_version != entry.app_version
       || manifest.bundle_id != entry.bundle_id
       || manifest.git_revision != entry.git_revision
@@ -258,11 +312,6 @@ impl Resolver {
         "release catalog and bundle manifest identities differ".into(),
       ));
     }
-    let mut release = entry.release(current);
-    release.built_at = self.build_time(&url, &manifest).await?;
-    Ok(PublishedReleaseDetails {
-      release,
-      targets: self.catalog_targets(&url, &manifest).await?,
-    })
+    Ok((url, bytes, manifest))
   }
 }

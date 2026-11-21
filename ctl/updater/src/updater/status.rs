@@ -2,38 +2,53 @@ use super::{TargetOptions, show};
 use std::io;
 use std::path::Path;
 
-pub(super) async fn run(home: &Path, options: TargetOptions<'_>, json: bool) -> io::Result<()> {
-  if !json {
-    return show::run(home, options, false).await;
+pub(super) async fn run(home: &Path, targets: &[TargetOptions<'_>], json: bool) -> io::Result<()> {
+  if targets.len() == 1 {
+    let target = targets[0];
+    return show::print(
+      &show::snapshot(home, target).await?,
+      json,
+      !target.remote() && in_checkout(),
+    );
   }
-  let status =
-    if options.host.is_some() || options.destination.is_some() || options.method.is_some() {
-      crate::bundled::register()?;
-      let target = remote_target(options).await?;
-      ctl_client::installation::remote_status(
-        &target.destination,
-        &target.options,
-        &target.interaction,
-        target.expected_account(),
-      )
-      .await
-      .map_err(io::Error::other)?
-    } else {
-      ctl_client::installation::status(home)?
-    };
-  println!(
-    "{}",
-    serde_json::to_string(&status).map_err(io::Error::other)?
-  );
+  let mut inventories = Vec::new();
+  let mut failed = false;
+  for &target in targets {
+    match show::snapshot(home, target).await {
+      Ok(inventory) if json => inventories.push(serde_json::json!({
+        "host": target.label(), "inventory": inventory,
+      })),
+      Ok(inventory) => {
+        println!(
+          "{}
+{}",
+          target.label(),
+          show::render(&inventory, false)
+        );
+      }
+      Err(error) => {
+        failed = true;
+        if json {
+          inventories.push(serde_json::json!({
+            "host": target.label(), "error": error.to_string(),
+          }));
+        } else {
+          eprintln!("ctlup: {}: {error}", target.label());
+        }
+      }
+    }
+  }
+  if json {
+    super::print_json(&inventories)?;
+  }
+  if failed {
+    return Err(io::Error::other("some hosts could not be inspected"));
+  }
   Ok(())
 }
 
 pub(super) async fn remote_target(options: TargetOptions<'_>) -> io::Result<super::remote::Target> {
-  let mut resolved = crate::target::resolve(options.host, options.destination, options.method)
-    .await
-    .map_err(io::Error::other)?;
-  crate::target::apply_remote_platform(&mut resolved.target, options.platform);
-  let target = super::remote::Target::connect(resolved.target).await?;
+  let target = super::remote::Target::connect(options.resolve().await?).await?;
   if target.expected_account().is_none() {
     target.verify_account().await?;
   }

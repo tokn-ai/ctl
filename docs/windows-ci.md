@@ -15,7 +15,7 @@ platform is Unix, even when the client runs on Windows.
 | Local `ctl ctmux` / `ctmux` | Named-pipe transport and ConPTY sessions | Auto-start, attachment, reconnect, resize, final output and exit status |
 | Local `ctl task` | Named-pipe transport, background Job Objects and managed ConPTY tasks | Auto-start, lifecycle, logs, recovery and descendant cleanup |
 | Local `ctld` | Owner-only named pipe, daemon lifecycle and available local VPN services | Detached startup, status without a container engine, cooperative restart/stop and pipe reuse |
-| Local desktop app and `ctlup app` | Portable per-user x64 and ARM64 installs, with bundled native daemons | Native build, ZIP validation, install, idempotent update and repair in disposable homes |
+| Local desktop app and `ctlup install app` | Portable per-user x64 and ARM64 installs, with bundled native daemons | Native build, ZIP validation, install, and repair in disposable homes |
 | Local SSH forwards | ctld owns loopback listeners and native OpenSSH connections | Authenticated binary transfers, configuration aliases and proxies, enable/update/disable, failure isolation and owner cleanup |
 | Remote ctmux | `ctl-agent.exe connect` routes to `ctmuxd.exe` | Authenticated loopback auto-start, reconnect and both destination selectors |
 | Remote tasks | `ctl-agent.exe connect --service task` routes to `ctl-taskd.exe` | Authenticated loopback lifecycle, log streams, working directory and persistence across channels |
@@ -81,10 +81,9 @@ on a cross-build result.
 [windows-app.ps1](../scripts/ci/windows-app.ps1) invokes an explicitly ignored
 Rust integration fixture that supplies a disposable home to the updater. The
 ordinary CI job exercises the development app installation used by
-`ctlup dev --app` and checks repair while retaining the
-saved channel. The script also runs the ordinary native activation, storage locking,
-interruption-recovery and Job Object build-cancellation tests before the ignored
-fixture. It leaves `HOME`, `USERPROFILE`, the active app and normal daemon
+`ctlup dev --app` and checks that repair preserves the pinned checkout. The
+script also runs native activation, storage, and Job Object build-cancellation
+tests before the ignored fixture. It leaves `HOME`, `USERPROFILE`, the active app and normal daemon
 owners untouched. To run the fixture locally after installing frontend dependencies:
 
 ```powershell
@@ -108,16 +107,12 @@ build:
 The same artifact includes the architecture's standalone `ctlup-<bundle>-<target>.exe`,
 checksum and source-bound updater metadata. Release attachment validates both the
 portable package and matching updater before advertising that desktop target.
-The installed GUI is `<home>/.tokn/ctl/apps/ctmux/ctmux-app.exe`; MSI, NSIS and
-administrator installation are outside this portable path. See the
+Open the installed GUI through `<home>/.tokn/ctl/apps/ctmux.lnk`. The shortcut
+opens the verified app payload under `~/.tokn/ctl/ctlup/store/desktop/` directly.
+The updater selects the new payload for future launches and keeps builds in use
+by existing processes. The fixture deletes the selected payload and checks that
+`ctlup update app` restores it from the cached archive. See the
 [desktop install guide](component-updates.md#install-or-update-the-desktop-app).
-
-Windows activation refuses replacement while the app or its bundled helpers are
-using installed files. It retains the previous directory at
-`<home>/.tokn/ctl/apps/.ctlup-ctmux/previous`. Replacement has a short directory-rename
-gap; a pending previous directory permits recovery at the next install/update if
-execution stops between renames. Native tests cover that recovery rather than
-claiming an atomic directory exchange.
 
 The script reports whether the WebView2 Evergreen Runtime is installed, using
 Microsoft's documented
@@ -306,7 +301,7 @@ When the desktop connection reports that a Windows x64 SSH account needs
 components, choose **Install remote components**, then reconnect. The installer
 uses the selected SSH route and verifies the active bundle on the target. A
 Windows desktop client uses its existing noninteractive OpenSSH configuration.
-From a terminal, `ctlup update --destination ALIAS --remote-platform windows`
+From a terminal, `ctlup install --ssh ALIAS --remote-platform windows`
 provisions the same account. SSH prefers the managed agent and also supports an
 existing agent and companion executables on the server's `PATH`. The Windows CI
 fixtures exercise the desktop installer against an SSH account without a

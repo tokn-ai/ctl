@@ -397,62 +397,30 @@ retained Nightly bundles keep their original IDs. Temporary PR builds are resolv
 through GitHub Actions. The named service contracts, internal protocol builds,
 SSH framing and daemon negotiation remain unchanged.
 
-Channel installations add an independent installation-catalog schema 1 and an
-optional publication `build-info.json` schema 1. Catalog records identify the
-channel, target, publication and UTC build date without changing content-addressed
-bundle manifests. Earlier complete installations are adopted automatically.
-The opt-in `catalog-json` command uses the `ctlup-catalog-v1` response marker;
-updated clients probe support before sending optional installation provenance,
-and retain legacy behavior with older managers. Bundle sets, PR artifact
-layout, named protocol versions and internal builds retain their versions.
+The updater state under `ctlup/state/installations.json` has storage schema 2.
+It contains active runtime, desktop, and updater selections, source metadata,
+and retained runtime registrations. A verified manager advertises storage
+layout 2 through `installation-layout-version`. SSH installations require
+a target updater that can write the new layout. This is a breaking change
+for older updater binaries.
 
-Logical target components and installed builds have separate CLI views.
-`component list --json` has a schema-1 component projection with installed state,
-recorded channel memberships, while `show --json`
-has a schema-1 build inventory with compact verified build metadata. Optional
-remote inspection uses the distinct `ctlup-show-v1` marker and falls back to
-existing status and catalog responses on older managers.
+Inventory uses schema 2 and the private `ctlup-show-v2` marker. The previous
+`ctlup-show-v1` schema did not carry the exact active origin. New inventory
+from `status --json` includes optional `active_origin` and reports missing
+payloads through `missing_builds`. The private `inspect-runtime --json`
+retains the `ctlup-command-v1` status payload for activation verification.
+The private `runtime-source` command adds the `ctlup-runtime-source-v1` reply
+with the selected ID, origin, target, and missing flag. It lets an update use
+the destination's tracked channel. The private `catalog-json` response
+continues to use `ctlup-catalog-v1`.
 
-One-time automatic adoption uses a local cutover marker after committing adopted
-channel metadata. It preserves content-addressed bundle bytes and existing
-catalog records. After adoption, normal readers use the authoritative catalog
-and canonical schema-2 installation paths. Schema-1 incomplete managed bundles
-must be replaced or cleanly reinstalled before adoption.
-This local storage migration changes no named wire contract or internal build.
-
-Remote bundle uploads optionally call `prepare-install` on the verified target
-updater before catalog negotiation. It shares the locked migrator with local
-operations and adopts complete older installations when authoritative catalog
-state is absent. Existing catalogs and pending catalog transactions retain their
-recorded inventory.
-Older updaters that reject this optional CLI command retain their existing upload
-behavior. Installation progress markers, catalog schemas and named protocol builds
-retain their versions.
-
-Published SSH updates can probe the target updater for the optional private
-`install-publication` command. The client pins the release, sends the exact
-bundle-set metadata, and can supply cached archive bytes on the same stream.
-The target verifies the archive before activation and returns the managed
-manifest with `ctl-published-install-v1`. Explicit pre-install unavailability
-uses `ctl-published-unavailable-v1` and exit code 12. Older updaters use the
-existing SSH archive installer. These markers are private to the deployment
-command. Named service protocol versions and internal builds are unchanged.
-
-Readable installation paths and checkout registrations extend local storage
-without changing `catalog.json` or `ctlup-catalog-v1` responses. `ctlup rollback`
-is retired, including invocation through SSH. Status still returns `previous`
-for older stores until their previous selection is cleared by activation or
-pruning. SSH installers probe `installation-layout-version` when the target
-has checkout metadata or a pending checkout transaction. Version 1 is the
-first version that can retain checkout builds during cleanup.
-
-Recovery of a missing runtime payload keeps the installation catalog schema.
-The `ctlup-command-v1` status and `ctlup-show-v1` inventory responses may include
-`missing_builds` with the recorded bundle IDs that have no payload directory.
-Healthy stores omit the field, and updated readers accept older responses.
-Readers that reject unknown fields need an update to inspect a store with
-missing payloads. Explicit `ctlup prune --json` reports any discarded missing
-records in the optional `installations.forgotten_missing_builds` field.
+The private `prepare-install` operation validates the registry before transfer.
+For direct published installs, the client sends the exact bundle-set metadata
+and can supply cached bytes. The target verifies the archive and replies with
+`ctl-published-install-v1`. Pre-install download unavailability uses
+`ctl-published-unavailable-v1` and exit code 12. Installation progress, bundle
+manifests, named service protocol versions, and their internal builds keep
+their existing formats and versions.
 
 ## Discovery and SSH framing
 

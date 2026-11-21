@@ -1,8 +1,13 @@
 use super::*;
+use ctl_core::component_update::BundleChannel;
 use serde_json::{Value, json};
 
 const REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
 const BUNDLE_ID: &str = "0.1.3-nightly.20261112+g0123456789ab";
+
+fn download_fixture() -> DownloadedArtifact {
+  DownloadedArtifact::new(&std::env::temp_dir()).unwrap()
+}
 
 fn workflow() -> Value {
   json!({
@@ -126,7 +131,7 @@ fn resolves_workflow_identity_from_the_current_catalog_publication() {
 fn windows_nightly_packages_are_bound_to_the_published_target_and_revision() {
   let run: WorkflowRun = serde_json::from_value(workflow()).unwrap();
   for target in [DesktopTarget::WindowsX64, DesktopTarget::WindowsArm64] {
-    let directory = DownloadedArtifact::new().unwrap();
+    let directory = download_fixture();
     let name = format!("ctmux-desktop-{}", target.triple());
     let artifact: Artifact = serde_json::from_value(json!({
       "id": 20, "name": name, "expired": false,
@@ -157,7 +162,7 @@ fn windows_nightly_packages_are_bound_to_the_published_target_and_revision() {
 
 #[test]
 fn artifact_sources_must_be_regular_files() {
-  let directory = DownloadedArtifact::new().unwrap();
+  let directory = download_fixture();
   assert!(open_package(&directory.0).is_err());
   #[cfg(unix)]
   {
@@ -171,7 +176,7 @@ fn artifact_sources_must_be_regular_files() {
 
 #[test]
 fn hashes_the_selected_artifact_when_copying_it_to_staging() {
-  let directory = DownloadedArtifact::new().unwrap();
+  let directory = download_fixture();
   let payload = b"nightly desktop package";
   let asset = Asset {
     name: "ctmux-0.1.3-nightly.20261112+g0123456789ab-aarch64-apple-darwin.app.tar.gz".into(),
@@ -187,7 +192,7 @@ fn hashes_the_selected_artifact_when_copying_it_to_staging() {
 
 #[test]
 fn accepts_canonical_and_explicit_unsigned_nightly_packages() {
-  let directory = DownloadedArtifact::new().unwrap();
+  let directory = download_fixture();
   let target = DesktopTarget::MacArm64;
   let canonical = directory.0.join("desktop-aarch64-apple-darwin.json");
   let unsigned = directory

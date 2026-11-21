@@ -97,8 +97,8 @@ the fingerprint above. Once `ctl-agent connect --identity` succeeds, choose **Op
 reusable managed `Host` block, or **This app only** to keep those settings in
 the app's native workspace file. The latter still invokes the system SSH client and does
 not store the key contents. An app with a synchronized bundle set can install
-the matching remote build and retry. `~/.tokn/ctl/current` selects the active
-bundle, and `~/.tokn/ctl/remote-id` stores the stable environment ID. Release
+the matching remote build and retry. `~/.tokn/ctl/ctlup/state/installations.json`
+records the active bundle, and `~/.tokn/ctl/remote-id` stores the stable environment ID. Release
 bundles use the app version as their immutable
 install ID; development bundles include their Git revision so one source build
 cannot silently reuse another build's binaries.
@@ -139,13 +139,14 @@ The fixed-command allowlist includes the identity flag without accepting arbitra
 remote commands. See `docs/ctmux-workspace.md` for identity storage and migration.
 
 When `ctl` recognizes a missing or outdated agent on a Unix host, it prints a
-`ctlup update` command. Run it from macOS, Linux, or Windows x64, then reconnect. For a saved
+`ctlup install` command. Run it from macOS, Linux, or Windows x64, then reconnect. For a saved
 host, the updater uses the selected VPN or SSH gateway route and verifies the
 machine ID before uploading.
 
-`ctlup` resolves the configured Nightly or Stable publication and verifies the
-matching runtime and updater for the target. Use `ctlup dev --host NAME` or
-`ctlup dev --destination ALIAS` to build a checkout for Linux x64 or ARM64 and
+`ctlup install` resolves the chosen Nightly or Stable publication and verifies the
+matching runtime and updater for the target. `ctlup update` follows the source
+recorded on the target. Use `ctlup dev --host NAME` or
+`ctlup dev --ssh ALIAS` to build a checkout for Linux x64 or ARM64 and
 install it over SSH. `CTL_REMOTE_BUNDLES_DIR` supplies explicit build files.
 Network errors do not silently select an older build.
 
@@ -161,7 +162,7 @@ depends on advertised contracts, independently of source equality.
 Legacy schema-1 artifacts cannot become a complete managed selection.
 
 Publication and installation use private staging and atomic rename. Corrupt or
-incompatible published bundles stop the update. Use `ctlup update --from <directory>`
+incompatible published bundles stop the update. Use `ctlup install --from <directory>`
 for an explicit offline installation. The separate target updater sidecar must
 accompany foreign-target files. Remote bootstrap prepares `~/.tokn/ctl/bin/ctlup`,
 which uses the same installation engine as local updates.
@@ -170,8 +171,8 @@ See [Components and updates](component-updates.md) for layout and local use.
 Upload progress shows the archive, received bytes, speed, and installation
 stage. A healthy transfer has no overall time limit. Ctrl-C cancels the update.
 
-Installation selects `~/.tokn/ctl/current` without restarting running daemons or
-replacing a different existing bundle with the same ID. Existing old `rmux`
+Installation records the active bundle in the updater registry and keeps
+running daemons and existing payloads intact. Existing old `rmux`
 sessions can keep running separately. If a running service still has an
 incompatible protocol after installation, reconnecting reports that
 error; inspect its sessions before considering a disruptive restart.

@@ -52,6 +52,9 @@ pub enum BuildSource {
   Published {
     channel: BundleChannel,
   },
+  Release {
+    publication_id: String,
+  },
   WorkingTree,
   Selected,
   Provided {

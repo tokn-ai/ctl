@@ -117,6 +117,28 @@ pub async fn view(number: u64) -> Result<PullRequestBuild, Error> {
     .await
 }
 
+pub(super) async fn download_named_artifact(
+  number: u64,
+  name: &str,
+  directory: &Path,
+) -> Result<String, Error> {
+  let github = Github::new()?;
+  let selection = github.view(number, name).await?;
+  let build = selection.build.ok_or_else(|| {
+    Error::NotAvailable(format!(
+      "PR #{number} has no {name} build for {}",
+      selection.head_sha
+    ))
+  })?;
+  download_artifact(build.run_id, name, directory).await?;
+  if github.pull(number).await?.head.sha != selection.head_sha {
+    return Err(Error::Stale(format!(
+      "PR #{number} changed while downloading its desktop build"
+    )));
+  }
+  Ok(selection.head_sha)
+}
+
 /// Request the bundle workflow on a PR branch through the authenticated GitHub CLI.
 /// # Errors
 /// Reports unavailable or changed branches, GitHub metadata failures, or dispatch failures.

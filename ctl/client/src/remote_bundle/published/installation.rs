@@ -46,6 +46,27 @@ pub(crate) async fn resolve_target_installation(
     .await
 }
 
+pub(crate) async fn resolve_release_installation(
+  publication_id: &str,
+  target: &str,
+  remote: bool,
+) -> Result<InstallationPlan, Error> {
+  super::super::validate_target(target)?;
+  let resolver = Resolver::production()?;
+  let (channel, mut publication) = resolver.retained_publication(publication_id).await?;
+  if target == super::WINDOWS_TARGET {
+    publication = resolver
+      .windows_publication(&publication.url, &publication.manifest)
+      .await?;
+  }
+  if remote {
+    publication.manifest.require_remote_installation(target)?;
+  }
+  resolver
+    .plan_from_publication(channel, publication, target, "release")
+    .await
+}
+
 impl Resolver {
   pub(super) async fn installation_plan(
     &self,
@@ -53,6 +74,18 @@ impl Resolver {
     target: &str,
   ) -> Result<InstallationPlan, Error> {
     let publication = self.target_publication(channel, target).await?;
+    self
+      .plan_from_publication(channel, publication, target, channel.name())
+      .await
+  }
+
+  async fn plan_from_publication(
+    &self,
+    channel: BundleChannel,
+    publication: Publication,
+    target: &str,
+    origin_channel: &str,
+  ) -> Result<InstallationPlan, Error> {
     let entry = publication.manifest.target(target)?;
     let components = Self::require_compatible(&publication, target)?.clone();
     let updater = self.updater_metadata(&publication, target).await?;
@@ -65,7 +98,7 @@ impl Resolver {
       .join(&updater.binary)
       .map_err(|error| Error::Invalid(error.to_string()))?;
     let origin = CatalogOrigin {
-      channel: channel.name().into(),
+      channel: origin_channel.into(),
       publication_id: publication
         .id
         .clone()

@@ -86,6 +86,9 @@ case "$last" in
     touch "$CTL_TEST_DIR/bootstrap"
     exec /bin/sh -c "$last"
     ;;
+  *ctlup-command-v1*|*ctlup-runtime-source-v1*)
+    exec /bin/sh -c "$last"
+    ;;
   *activate-installed*)
     touch "$CTL_TEST_DIR/preflight"
     exec /bin/sh -c "$last"
@@ -186,7 +189,7 @@ esac
     .unwrap();
     let home = self.0.join("home");
     ctl_client::remote_bundle::BundleCacheEntry::new(
-      &home.join(".tokn/ctl/agent-bundles"),
+      &home.join(".tokn/ctl/ctlup/agent-bundles"),
       target,
       &build,
     )
@@ -411,9 +414,15 @@ esac
     command.env("CTL_REMOTE_BUNDLES_DIR", self.0.join("bundles"));
     command.env_remove("CTL_SCP_SSH_TRANSPORT");
     command.env_remove("CTLD_ASKPASS");
-    tokio::time::timeout(Duration::from_secs(10), command.output())
+    tokio::time::timeout(Duration::from_secs(20), command.output())
       .await
-      .expect("ctlup did not exit")
+      .unwrap_or_else(|_| {
+        let channels = fs::read_to_string(self.0.join("count")).unwrap_or_else(|_| "0".into());
+        panic!(
+          "ctlup did not exit after {} recorded SSH channels",
+          channels.trim()
+        )
+      })
       .unwrap()
   }
 

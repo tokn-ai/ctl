@@ -3,10 +3,11 @@ $env:WGET_ASKPASS = $null
 $env:SSH_ASKPASS = $null
 __ARGUMENTS__
 __ACCOUNT_GUARD__
+__UPDATER_STAGING__
 function Phase($name) { [Console]::Out.Write("ctl-published-stage-v1 $name`n") }
 function Unavailable { [Console]::Out.Write("ctl-published-unavailable-v1`n"); exit 12 }
 Phase 'checking-updater'
-$dir = Join-Path $env:USERPROFILE ('.ctlup-fetch-' + [guid]::NewGuid().ToString('N'))
+$dir = Join-Path (Get-UpdaterStaging) ('.ctlup-fetch-' + [guid]::NewGuid().ToString('N'))
 $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User
 $acl = New-Object Security.AccessControl.DirectorySecurity
 $acl.SetAccessRuleProtection($true, $false)
@@ -46,7 +47,7 @@ function Fetch($program, $arguments) {
   }
 }
 try {
-  $managed = Join-Path $env:USERPROFILE ".tokn\ctl\updaters\$sha\ctlup.exe"
+  $managed = Join-Path $env:USERPROFILE ".tokn\ctl\ctlup\store\updater\$sha\ctlup.exe"
   $ready = $false
   if ([IO.File]::Exists($managed)) {
     $source = [IO.File]::Open($managed, 'Open', 'Read', 'Read')

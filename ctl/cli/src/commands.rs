@@ -1091,7 +1091,7 @@ mod tests {
       caller_auth: None,
       target: target.clone(),
       settings: ctl_client::hosts::ConnectionTargetDto::ssh("task-server"),
-      update_command: Some("ctlup update --host='task-server'".into()),
+      update_command: Some("ctlup install --host='task-server'".into()),
       terminal_ui_active: Arc::default(),
       #[cfg(unix)]
       recovery_watch: Arc::default(),

@@ -236,7 +236,7 @@ pub async fn select_with_progress(
 ) -> io::Result<()> {
   if purpose == Purpose::Upload {
     return Err(invalid(
-      "upload selections were replaced by deployment cache entries; use ctlup update --from",
+      "upload selections were replaced by deployment cache entries; use ctlup install --from",
     ));
   }
   verify_local(home, bundle).await?;

@@ -48,7 +48,12 @@ async fn compatible_different_build_is_imported_without_selecting_or_running_it(
       .unwrap(),
     bundle.manifest
   );
-  assert!(home.0.join(".tokn/ctl/cache/components/bundles").is_dir());
+  assert!(
+    home
+      .0
+      .join(".tokn/ctl/ctlup/cache/unpacked/bundles")
+      .is_dir()
+  );
   assert!(!home.0.join(".tokn/ctl/agent-bundles").exists());
 }
 

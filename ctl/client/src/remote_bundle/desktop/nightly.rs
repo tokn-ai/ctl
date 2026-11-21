@@ -2,8 +2,7 @@ use super::{
   Asset, DesktopRelease, DesktopSigning, DesktopTarget, MAX_PACKAGE_BYTES, PackageSource, invalid,
   open_package, parse_manifest, select_asset,
 };
-use crate::remote_bundle::{Error, MAX_BUNDLE_SET_BYTES, github, published, read_bounded_file};
-use ctl_core::component_update::BundleChannel;
+use crate::remote_bundle::{Error, MAX_BUNDLE_SET_BYTES, github, pr, published, read_bounded_file};
 use ctl_core::private_fs;
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
@@ -14,13 +13,60 @@ use std::path::{Path, PathBuf};
 const REPOSITORY: &str = "tokn-ai/ctl";
 const PAGE_SIZE: usize = 100;
 
-pub(super) async fn latest(target: DesktopTarget) -> io::Result<DesktopRelease> {
-  let publication = published::view_release(BundleChannel::Nightly, None)
-    .await
-    .map_err(io::Error::other)?
-    .release;
-  let (run_id, run_attempt) = publication_run(&publication)?;
+pub(super) async fn resolve(
+  publication: published::PublishedRelease,
+  target: DesktopTarget,
+  staging: &Path,
+) -> io::Result<DesktopRelease> {
   let github = github::Github::new().map_err(io::Error::other)?;
+  let (run_id, run_attempt, artifact_name) = artifact(&github, &publication, target).await?;
+  let directory = DownloadedArtifact::new(staging)?;
+  github::download_artifact(run_id, &artifact_name, &directory.0)
+    .await
+    .map_err(io::Error::other)?;
+  let current: WorkflowRun = github
+    .get(&format!("actions/runs/{run_id}"), &[])
+    .await
+    .map_err(io::Error::other)?;
+  if !current.matches(run_id, run_attempt, &publication.git_revision) {
+    return Err(invalid(
+      "Nightly workflow changed while downloading its desktop artifact; retry",
+    ));
+  }
+  let (signing, asset) = artifact_manifest(
+    &directory.0,
+    target,
+    &publication.bundle_id,
+    &publication.git_revision,
+  )?;
+  Ok(DesktopRelease {
+    app_version: publication.app_version,
+    bundle_id: publication.bundle_id,
+    publication_id: Some(publication.publication_id),
+    asset,
+    signing,
+    source: PackageSource::Workflow(directory),
+  })
+}
+
+pub(super) async fn available(
+  publication: &published::PublishedRelease,
+  target: DesktopTarget,
+) -> io::Result<bool> {
+  let github = github::Github::new().map_err(io::Error::other)?;
+  match artifact(&github, publication, target).await {
+    Ok(_) => Ok(true),
+    Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+    Err(error) => Err(error),
+  }
+}
+
+async fn artifact(
+  github: &github::Github,
+  publication: &published::PublishedRelease,
+  target: DesktopTarget,
+) -> io::Result<(u64, u64, String)> {
+  let (run_id, run_attempt) = publication_run(publication)?;
   let run: WorkflowRun = github
     .get(&format!("actions/runs/{run_id}"), &[])
     .await
@@ -60,32 +106,60 @@ pub(super) async fn latest(target: DesktopTarget) -> io::Result<DesktopRelease> 
   if !selected {
     return Err(unavailable(&publication.bundle_id, target));
   }
-  let directory = DownloadedArtifact::new()?;
-  github::download_artifact(run_id, &artifact_name, &directory.0)
+  Ok((run_id, run_attempt, artifact_name))
+}
+
+pub(super) async fn pull_request(
+  number: u64,
+  target: DesktopTarget,
+  staging: &Path,
+) -> io::Result<DesktopRelease> {
+  let name = format!("ctmux-desktop-{}", target.triple());
+  let directory = DownloadedArtifact::new(staging)?;
+  let revision = pr::download_named_artifact(number, &name, &directory.0)
     .await
     .map_err(io::Error::other)?;
-  let current: WorkflowRun = github
-    .get(&format!("actions/runs/{run_id}"), &[])
-    .await
-    .map_err(io::Error::other)?;
-  if !current.matches(run_id, run_attempt, &publication.git_revision) {
+  let (version, bundle_id) = artifact_identity(&directory.0, target)?;
+  if bundle_id != format!("{version}-dev.{}", &revision[..12]) {
     return Err(invalid(
-      "Nightly workflow changed while downloading its desktop artifact; retry",
+      "desktop package does not match the current PR head",
     ));
   }
-  let (signing, asset) = artifact_manifest(
-    &directory.0,
-    target,
-    &publication.bundle_id,
-    &publication.git_revision,
-  )?;
+  let (signing, asset) = artifact_manifest(&directory.0, target, &bundle_id, &revision)?;
   Ok(DesktopRelease {
-    app_version: publication.app_version,
-    bundle_id: publication.bundle_id,
+    app_version: version,
+    bundle_id,
+    publication_id: None,
     asset,
     signing,
     source: PackageSource::Workflow(directory),
   })
+}
+
+fn artifact_identity(directory: &Path, target: DesktopTarget) -> io::Result<(String, String)> {
+  let mut suffixes = vec![""];
+  if target.is_macos() {
+    suffixes.push("-unsigned");
+  }
+  for suffix in suffixes {
+    let path = directory.join(format!("desktop-{}{suffix}.json", target.triple()));
+    let bytes = match read_bounded_file(&path, MAX_BUNDLE_SET_BYTES) {
+      Err(Error::Io(error)) if error.kind() == io::ErrorKind::NotFound => continue,
+      result => result.map_err(io::Error::other)?,
+    };
+    let manifest: super::Manifest = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+    let (version, _) = manifest
+      .bundle_id
+      .split_once("-dev.")
+      .ok_or_else(|| invalid("desktop PR artifact has an invalid build identity"))?;
+    if !crate::remote_bundle::safe_id(version) {
+      return Err(invalid("desktop PR artifact has an invalid app version"));
+    }
+    return Ok((version.to_owned(), manifest.bundle_id));
+  }
+  Err(invalid(
+    "desktop PR artifact does not contain a package manifest",
+  ))
 }
 
 fn artifact_manifest(
@@ -119,8 +193,8 @@ fn artifact_manifest(
 pub(super) struct DownloadedArtifact(PathBuf);
 
 impl DownloadedArtifact {
-  fn new() -> io::Result<Self> {
-    let path = std::env::temp_dir().join(format!("ctlup-desktop-{}", uuid::Uuid::new_v4()));
+  fn new(staging: &Path) -> io::Result<Self> {
+    let path = staging.join(format!("workflow-{}", uuid::Uuid::new_v4()));
     private_fs::create_directory(&path)?;
     Ok(Self(path))
   }

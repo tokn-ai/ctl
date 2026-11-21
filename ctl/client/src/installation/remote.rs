@@ -8,7 +8,7 @@ use std::io;
 use std::process::{Output, Stdio};
 
 const CATALOG_MARKER: &[u8] = b"ctlup-catalog-v1\n";
-const SHOW_MARKER: &[u8] = b"ctlup-show-v1\n";
+const SHOW_MARKER: &[u8] = b"ctlup-show-v2\n";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -70,7 +70,7 @@ pub async fn remote_status(
     destination,
     options,
     interaction,
-    "status",
+    "inspect-runtime",
     expected_account,
   )
   .await?;
@@ -78,6 +78,45 @@ pub async fn remote_status(
     return Err(command_error(&output.stderr));
   }
   parse_status(&output.stdout)
+}
+
+/// Reads the runtime source stored by the selected SSH account.
+///
+/// # Errors
+/// Reports failed SSH operations, invalid source metadata or identity mismatch.
+pub async fn remote_runtime_source(
+  destination: &str,
+  options: &SshConnectionOptions,
+  interaction: &SshInteraction,
+  expected_account: Option<&str>,
+) -> Result<super::RuntimeSource, CoreError> {
+  let output = execute(
+    destination,
+    options,
+    interaction,
+    "runtime-source",
+    expected_account,
+  )
+  .await?;
+  if !output.status.success() {
+    return Err(command_error(&output.stderr));
+  }
+  let marker = b"ctlup-runtime-source-v1\n";
+  let start = output
+    .stdout
+    .windows(marker.len())
+    .position(|window| window == marker)
+    .map(|start| start + marker.len())
+    .ok_or_else(|| {
+      CoreError::InvalidComponentBundle("missing ctlup runtime source response".into())
+    })?;
+  let bytes = &output.stdout[start..];
+  let source: super::RuntimeSource = serde_json::from_slice(bytes)
+    .map_err(|error| CoreError::InvalidComponentBundle(error.to_string()))?;
+  source
+    .validate()
+    .map_err(|error| CoreError::InvalidComponentBundle(error.to_string()))?;
+  Ok(source)
 }
 
 /// Confirms that the remote updater activated the verified installation archive.
@@ -130,8 +169,8 @@ pub async fn remote_catalog(
 }
 
 /// Reads detailed installed build identities without starting services.
-/// Older managers return `None`; malformed responses and account failures do
-/// not hide behind the optional command's compatibility fallback.
+/// Returns `None` when the authenticated manager reports that the command is
+/// unavailable. Replies must use the current inventory schema.
 ///
 /// # Errors
 /// Reports SSH, account verification, storage and invalid inventory failures.
@@ -141,7 +180,14 @@ pub async fn remote_show(
   interaction: &SshInteraction,
   expected_account: Option<&str>,
 ) -> Result<Option<InstallationShow>, CoreError> {
-  let output = execute(destination, options, interaction, "show", expected_account).await?;
+  let output = execute(
+    destination,
+    options,
+    interaction,
+    "status",
+    expected_account,
+  )
+  .await?;
   parse_show(output.status.code(), &output.stdout, &output.stderr)
 }
 
@@ -174,10 +220,11 @@ async fn execute(
   crate::validate_ssh_target(destination, options)?;
   let marker = match operation {
     "catalog-json" => "ctlup-catalog-v1",
-    "show" => "ctlup-show-v1",
+    "status" => "ctlup-show-v2",
+    "runtime-source" => "ctlup-runtime-source-v1",
     _ => "ctlup-command-v1",
   };
-  let arguments = if operation == "catalog-json" {
+  let arguments = if matches!(operation, "catalog-json" | "runtime-source") {
     operation.to_owned()
   } else {
     format!("{operation} --json")
@@ -187,8 +234,14 @@ async fn execute(
       let mut command = tokio::process::Command::new(crate::SSH_PROGRAM);
       let extra = crate::configure_ssh_interaction(&mut command, interaction);
       let guard = crate::ssh_install::unix_account_guard(expected_account)?;
+      let missing = if operation == "runtime-source" {
+        format!("printf '%s\\n' '{marker}' '{{\"active\":null,\"missing\":false}}'; exit 0;")
+      } else {
+        "printf 'ctlup is not installed; run ctlup install for this host first\\n' >&2; exit 127;"
+          .into()
+      };
       let script = format!(
-        "{guard}test -x \"$HOME/.tokn/ctl/bin/ctlup\" || {{ printf 'ctlup is not installed; run ctlup update for this host first\\n' >&2; exit 127; }}; printf '{marker}\\n'; exec \"$HOME/.tokn/ctl/bin/ctlup\" {arguments}"
+        "{guard}test -x \"$HOME/.tokn/ctl/bin/ctlup\" || {{ {missing} }}; printf '{marker}\\n'; exec \"$HOME/.tokn/ctl/bin/ctlup\" {arguments}"
       );
       command
         .args(extra)
@@ -204,8 +257,13 @@ $ErrorActionPreference = 'Stop'
 {guard}
 $manager = Join-Path $env:USERPROFILE '.tokn\ctl\bin\ctlup.exe'
 if (![IO.File]::Exists($manager)) {{
-  if ('{operation}' -in @('catalog-json', 'show')) {{ [Console]::Out.Write("{marker}`n"); exit 2 }}
-  if ('{operation}' -ne 'status') {{ throw 'ctlup is not installed for this account.' }}
+  if ('{operation}' -in @('catalog-json', 'status')) {{ [Console]::Out.Write("{marker}`n"); exit 2 }}
+  if ('{operation}' -eq 'runtime-source') {{
+    [Console]::Out.Write("{marker}`n")
+    [Console]::Out.Write('{{"active":null,"missing":false}}')
+    exit 0
+  }}
+  if ('{operation}' -ne 'inspect-runtime') {{ throw 'ctlup is not installed for this account.' }}
   [Console]::Out.Write("ctlup-command-v1`n")
   [Console]::Out.Write('{{"active":null,"previous":null}}')
   exit 0
@@ -233,7 +291,7 @@ exit $LASTEXITCODE
     .stderr
     .take()
     .ok_or_else(|| failure(std::io::Error::other("missing ctlup diagnostics")))?;
-  let maximum = if operation == "show" {
+  let maximum = if operation == "status" {
     MAX_SHOW_BYTES + 8192
   } else {
     1024 * 1024
@@ -410,14 +468,15 @@ mod tests {
   #[test]
   fn show_response_uses_its_own_optional_capability_and_schema() {
     let snapshot = InstallationShow {
-      schema_version: 1,
+      schema_version: 2,
+      active_origin: None,
       active: None,
       previous: None,
       installations: Vec::new(),
       builds: Vec::new(),
       missing_builds: Vec::new(),
     };
-    let mut stdout = b"Welcome\nctlup-show-v1\n".to_vec();
+    let mut stdout = b"Welcome\nctlup-show-v2\n".to_vec();
     stdout.extend(serde_json::to_vec(&snapshot).unwrap());
     let result = parse_show(Some(0), &stdout, b"").unwrap().unwrap();
     assert_eq!(result.builds, [] as [super::super::InstalledBuild; 0]);
@@ -439,11 +498,11 @@ mod tests {
     }
     assert!(parse_show(Some(0), CATALOG_MARKER, b"").is_err());
     let mut invalid = snapshot;
-    invalid.schema_version = 2;
+    invalid.schema_version = 1;
     let mut stdout = SHOW_MARKER.to_vec();
     stdout.extend(serde_json::to_vec(&invalid).unwrap());
     assert!(parse_show(Some(0), &stdout, b"").is_err());
-    assert!(parse_show(Some(0), b"ctlup-show-v1\nnot json", b"").is_err());
+    assert!(parse_show(Some(0), b"ctlup-show-v2\nnot json", b"").is_err());
   }
 
   #[test]

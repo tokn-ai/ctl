@@ -14,15 +14,11 @@ local_runtime=$9
 fail() { printf '%s\n' "$1" >&2; exit 1; }
 unavailable() { printf 'ctl-published-unavailable-v1\n'; exit 12; }
 __ACCOUNT_GUARD__
+__UPDATER_STAGING__
 printf 'ctl-published-stage-v1 checking-updater\n'
 # A mode-0700 directory prevents a verified executable being replaced before use.
-case "$(uname -s)" in
-  Linux) home_stat=$(stat -c '%u %a' "$HOME");;
-  Darwin) home_stat=$(stat -f '%u %Lp' "$HOME");;
-  *) fail 'Unsupported updater bootstrap platform.';;
-esac
-test ! -L "$HOME" && test "${home_stat%% *}" = "$(id -u)" && test $((0${home_stat#* } & 022)) -eq 0 || fail 'Unsafe account home for ctlup staging.'
-stage=$(mktemp -d "$HOME/.ctlup-fetch.XXXXXXXX")
+prepare_updater_staging
+stage=$(mktemp -d "$updater_staging/.ctlup-fetch.XXXXXXXX")
 file="$stage/ctlup"
 download_pid=''
 timer_pid=''
@@ -44,7 +40,7 @@ verified() {
 }
 # File-size limits bound writes even for chunked responses or older clients.
 blocks=$(( (size + 511) / 512 ))
-managed="$HOME/.tokn/ctl/bin/ctlup"
+managed="$HOME/.tokn/ctl/ctlup/store/updater/$sha/ctlup"
 if [ -f "$managed" ] && [ ! -L "$managed" ] && [ "$(length "$managed")" -eq "$size" ] &&
    (ulimit -f "$blocks" && cp "$managed" "$file") && verified; then
   printf 'ctl-published-stage-v1 using-installed-updater\n'

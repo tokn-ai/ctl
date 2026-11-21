@@ -47,10 +47,15 @@ fn unique_files<'de, D: Deserializer<'de>>(
   deserializer.deserialize_map(Unique)
 }
 
-pub(super) fn stage(
+#[cfg(test)]
+fn stage(archive: &Path, staging: &Path, version: &str, target: &str) -> io::Result<PathBuf> {
+  stage_package(archive, staging, Some(version), target)
+}
+
+pub(super) fn stage_package(
   archive: &Path,
   staging: &Path,
-  version: &str,
+  version: Option<&str>,
   target: &str,
 ) -> io::Result<PathBuf> {
   let mut zip = zip::ZipArchive::new(open_regular(archive)?).map_err(io::Error::other)?;
@@ -112,7 +117,8 @@ pub(super) fn stage(
       output.sync_all()?;
     }
   }
-  verify(&root, version, target)?;
+  let actual = manifest(&root)?.app_version;
+  verify(&root, version.unwrap_or(&actual), target)?;
   Ok(root)
 }
 
@@ -171,23 +177,6 @@ pub(super) fn verify(root: &Path, version: &str, target: &str) -> io::Result<()>
   for executable in EXECUTABLES {
     verify_pe(&root.join(executable), machine(target)?)?;
   }
-  Ok(())
-}
-
-#[cfg(windows)]
-pub(super) fn verify_existing(root: &Path, target: &str) -> io::Result<()> {
-  let metadata = fs::symlink_metadata(root)?;
-  if !private_fs::is_directory(&metadata) {
-    return Err(invalid(
-      "installed portable app must be a directory without reparse points",
-    ));
-  }
-  if manifest(root)?.target_triple != target {
-    return Err(invalid("installed portable app has a different target"));
-  }
-  // A changed/missing payload can be repaired, but never follow links while
-  // inspecting or retaining the installed tree.
-  inventory(root)?;
   Ok(())
 }
 

@@ -183,11 +183,12 @@ The viewer opens without a title bar. Hover at its top edge to reveal the
 window controls. Drag the bar to move the viewer, or use its minimize,
 maximize, and close buttons. Closing the viewer releases input, activates
 setup, and keeps the same stream available as a view-only preview. On macOS
-the controls appear in an attached panel above the viewer, or below it when
-there is only room below. The panel follows the viewer and the video keeps its
-screen position and size as the controls appear and hide. Windows, Linux, and
-macOS windows without room for the panel use a separate strip inside the
-viewer, above the video. A resizable viewer grows to make room for that strip.
+the controls appear in an attached panel flush with the top of the viewer, or
+with the bottom when there is only room below. The panel stays visible while
+you drag it to move the viewer. The video keeps its screen position and size
+as the controls appear and hide. Windows, Linux, and macOS windows without room
+for the panel use a separate strip inside the viewer, above the video.
+A resizable viewer grows to make room for that strip.
 Video clicks use the image rectangle in either layout. The viewer opens at the
 source aspect ratio and adjusts its inner size after a source resize or a
 manual window resize. Use

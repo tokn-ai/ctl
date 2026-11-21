@@ -1,15 +1,58 @@
 use super::chrome::{CONTROLS_TITLE, VIEWER_TITLE};
-use objc2::{MainThreadMarker, rc::Retained};
+use block2::RcBlock;
+use eframe::egui;
+use objc2::{MainThreadMarker, rc::Retained, runtime::AnyObject};
 use objc2_app_kit::{
-  NSApplication, NSEvent, NSEventType, NSWindow, NSWindowCollectionBehavior, NSWindowOrderingMode,
+  NSApplication, NSEvent, NSEventMask, NSEventType, NSScreen, NSWindow, NSWindowCollectionBehavior,
+  NSWindowOrderingMode,
 };
 use objc2_foundation::{NSContainsRect, NSPoint, NSPointInRect, NSRect, NSSize, NSString};
+use std::{cell::Cell, ptr::NonNull, rc::Rc};
 
-const GAP: f64 = 4.0;
-
+#[derive(Clone)]
 pub(super) struct ViewerWindow {
   application: Retained<NSApplication>,
   window: Retained<NSWindow>,
+}
+
+pub(super) struct AttachedPanel {
+  viewer: ViewerWindow,
+  panel: Retained<NSWindow>,
+  monitor: Retained<AnyObject>,
+  drag: Rc<Cell<Option<Drag>>>,
+}
+
+#[derive(Clone, Copy)]
+struct Drag {
+  press: NSPoint,
+  viewer_origin: NSPoint,
+  panel_origin: NSPoint,
+}
+
+impl Drag {
+  fn viewer_at(self, pointer: NSPoint) -> NSPoint {
+    NSPoint::new(
+      self.viewer_origin.x + (pointer.x - self.press.x),
+      self.viewer_origin.y + (pointer.y - self.press.y),
+    )
+  }
+
+  fn panel_at(self, viewer: NSPoint) -> NSPoint {
+    NSPoint::new(
+      self.panel_origin.x + (viewer.x - self.viewer_origin.x),
+      self.panel_origin.y + (viewer.y - self.viewer_origin.y),
+    )
+  }
+
+  fn keep_panel_in_work_area(self, mut viewer: NSPoint, height: f64, area: NSRect) -> NSPoint {
+    let bottom = area.min().y;
+    let top = area.max().y - height;
+    if bottom <= top {
+      let y = self.panel_at(viewer).y;
+      viewer.y += y.clamp(bottom, top) - y;
+    }
+    viewer
+  }
 }
 
 fn own_window(application: &NSApplication, title: &str) -> Option<Retained<NSWindow>> {
@@ -39,7 +82,7 @@ fn panel_frame(video: NSRect, work_area: NSRect, height: f64) -> Option<NSRect> 
     .min()
     .x
     .clamp(work_area.min().x, work_area.max().x - width);
-  for y in [video.max().y + GAP, video.min().y - GAP - height] {
+  for y in [video.max().y, video.min().y - height] {
     let frame = NSRect::new(NSPoint::new(x, y), NSSize::new(width, height));
     if NSContainsRect(work_area, frame) {
       return Some(frame);
@@ -53,7 +96,7 @@ impl ViewerWindow {
     self.application.isActive() && self.window.isVisible() && !self.window.isMiniaturized()
   }
 
-  pub(super) fn panel_frame(&self, height: f32) -> Option<NSRect> {
+  fn panel_frame(&self, height: f32) -> Option<NSRect> {
     panel_frame(
       self.window.frame(),
       self.window.screen()?.visibleFrame(),
@@ -65,110 +108,185 @@ impl ViewerWindow {
     self.panel_frame(height).is_some()
   }
 
-  pub(super) fn hovering(&self, shown: bool, height: f32, reveal: f32) -> bool {
-    if !self.active() {
-      return false;
+  pub(super) fn attach_controls(
+    &self,
+    height: f32,
+    button_strip_width: f32,
+    ctx: &egui::Context,
+  ) -> Option<AttachedPanel> {
+    let frame = self.panel_frame(height)?;
+    let panel = own_window(&self.application, CONTROLS_TITLE)?;
+    let drag = Rc::new(Cell::new(None));
+    let monitor = monitor_drag(&self.window, &panel, &drag, button_strip_width, ctx)?;
+    panel.setFrame_display(frame, false);
+    panel.setHasShadow(false);
+    panel.setExcludedFromWindowsMenu(true);
+    panel.setCollectionBehavior(
+      NSWindowCollectionBehavior::Transient
+        | NSWindowCollectionBehavior::IgnoresCycle
+        | NSWindowCollectionBehavior::FullScreenAuxiliary,
+    );
+    panel.setHidesOnDeactivate(true);
+    // The viewer and controls are distinct windows owned by our application.
+    unsafe {
+      self
+        .window
+        .addChildWindow_ordered(&panel, NSWindowOrderingMode::Above);
     }
-    let Some(panel) = self.panel_frame(height) else {
-      return false;
+    panel.orderFront(None);
+    Some(AttachedPanel {
+      viewer: self.clone(),
+      panel,
+      monitor,
+      drag,
+    })
+  }
+}
+
+fn drag_hit(point: NSPoint, size: NSSize, button_strip_width: f32) -> bool {
+  NSPointInRect(
+    point,
+    NSRect::new(
+      NSPoint::ZERO,
+      NSSize::new(
+        (size.width - f64::from(button_strip_width)).max(0.0),
+        size.height,
+      ),
+    ),
+  )
+}
+
+fn monitor_drag(
+  viewer: &Retained<NSWindow>,
+  panel: &Retained<NSWindow>,
+  drag: &Rc<Cell<Option<Drag>>>,
+  button_strip_width: f32,
+  ctx: &egui::Context,
+) -> Option<Retained<AnyObject>> {
+  let mtm = MainThreadMarker::new()?;
+  let viewer = viewer.clone();
+  let panel = panel.clone();
+  let drag = Rc::clone(drag);
+  let ctx = ctx.clone();
+  let handler = RcBlock::new(move |event: NonNull<NSEvent>| {
+    // AppKit supplies a live event on the main thread for this call.
+    let report = unsafe { event.as_ref() };
+    let location = report.locationInWindow();
+    let screen_point = || {
+      report
+        .window(mtm)
+        .map_or(location, |window| window.convertPointToScreen(location))
     };
-    let pointer = NSEvent::mouseLocation();
-    let video = self.window.frame();
-    let above = panel.min().y > video.max().y;
-    if NSPointInRect(pointer, video) {
-      return (shown && !above) || pointer.y >= video.max().y - f64::from(reveal);
+    match report.r#type() {
+      NSEventType::LeftMouseDown => {
+        drag.set(None);
+        if report.windowNumber() != panel.windowNumber()
+          || !drag_hit(
+            location,
+            panel.frame().size,
+            button_strip_width * ctx.zoom_factor(),
+          )
+        {
+          return event.as_ptr();
+        }
+        drag.set(Some(Drag {
+          press: screen_point(),
+          viewer_origin: viewer.frame().origin,
+          panel_origin: panel.frame().origin,
+        }));
+      }
+      NSEventType::LeftMouseDragged | NSEventType::LeftMouseUp => {
+        let tracked = if report.r#type() == NSEventType::LeftMouseUp {
+          drag.take()
+        } else {
+          drag.get()
+        };
+        let Some(tracked) = tracked else {
+          return event.as_ptr();
+        };
+        // Queued mouse events can still carry coordinates relative to the
+        // panel's previous origin. Sample the pointer in screen coordinates.
+        let pointer = NSEvent::mouseLocation();
+        let origin = tracked.viewer_at(pointer);
+        let screen = NSScreen::screens(mtm)
+          .to_vec()
+          .into_iter()
+          .find(|screen| NSPointInRect(pointer, screen.frame()))
+          .or_else(|| viewer.screen());
+        // Reserve room vertically for the grabbed strip. AppKit would
+        // otherwise constrain the child independently at the menu bar or Dock.
+        let origin = screen.map_or(origin, |screen| {
+          tracked.keep_panel_in_work_area(origin, panel.frame().size.height, screen.visibleFrame())
+        });
+        if origin != viewer.frame().origin {
+          viewer.setFrameOrigin(origin);
+        }
+        let origin = tracked.panel_at(viewer.frame().origin);
+        if origin != panel.frame().origin {
+          panel.setFrameOrigin(origin);
+        }
+      }
+      _ => return event.as_ptr(),
     }
-    if !shown {
-      return false;
-    }
-    // Keep the panel while the pointer crosses the small gap between windows.
-    // A panel placed below the viewer stays open as the pointer crosses the
-    // video from the top-edge reveal strip to the panel.
-    let origin = NSPoint::new(
-      panel.min().x,
-      if above { video.max().y } else { panel.min().y },
-    );
-    let bridge = NSRect::new(
-      origin,
-      NSSize::new(panel.size.width, panel.size.height + GAP),
-    );
-    NSPointInRect(pointer, bridge)
+    ctx.request_repaint_of(egui::ViewportId::ROOT);
+    std::ptr::null_mut()
+  });
+  // Return the provided event unchanged, or null to consume a tracked drag.
+  unsafe {
+    NSEvent::addLocalMonitorForEventsMatchingMask_handler(
+      NSEventMask::LeftMouseDown | NSEventMask::LeftMouseDragged | NSEventMask::LeftMouseUp,
+      &handler,
+    )
+  }
+}
+
+impl AttachedPanel {
+  pub(super) fn dragging(&self) -> bool {
+    self.drag.get().is_some()
   }
 
-  pub(super) fn attach_controls(&self, height: f32) -> bool {
-    let Some(frame) = self.panel_frame(height) else {
+  pub(super) fn hovering(&self, reveal: f32) -> bool {
+    let pointer = NSEvent::mouseLocation();
+    let video = self.viewer.window.frame();
+    let panel = self.panel.frame();
+    // A panel below the viewer needs to stay open while the pointer crosses
+    // the video from the top-edge reveal strip.
+    let below = panel.max().y <= video.min().y;
+    NSPointInRect(pointer, panel)
+      || (NSPointInRect(pointer, video)
+        && (below || pointer.y >= video.max().y - f64::from(reveal)))
+  }
+
+  pub(super) fn place(&self, height: f32) -> bool {
+    let Some(frame) = self.viewer.panel_frame(height) else {
       return false;
     };
-    let Some(panel) = own_window(&self.application, CONTROLS_TITLE) else {
-      return false;
-    };
-    if panel.frame() != frame {
-      panel.setFrame_display(frame, false);
-    }
-    if panel.parentWindow().is_none() {
-      panel.setExcludedFromWindowsMenu(true);
-      panel.setCollectionBehavior(
-        NSWindowCollectionBehavior::Transient
-          | NSWindowCollectionBehavior::IgnoresCycle
-          | NSWindowCollectionBehavior::FullScreenAuxiliary,
-      );
-      panel.setHidesOnDeactivate(true);
-      // Both windows belong to our application, have distinct titles, and
-      // only the viewer can be the parent.
-      unsafe {
-        self
-          .window
-          .addChildWindow_ordered(&panel, NSWindowOrderingMode::Above);
-      }
-    }
-    if !panel.isVisible() && self.active() {
-      panel.orderFront(None);
+    if self.panel.frame() != frame {
+      self.panel.setFrame_display(frame, false);
     }
     true
   }
 
   pub(super) fn restore_focus(&self) {
-    if self.active()
-      && own_window(&self.application, CONTROLS_TITLE).is_some_and(|panel| panel.isKeyWindow())
-    {
-      self.window.makeKeyWindow();
-    }
-  }
-
-  pub(super) fn start_drag(&self) {
-    let Some(event) = self.application.currentEvent() else {
-      return;
-    };
-    if event.r#type() == NSEventType::LeftMouseDown
-      && own_window(&self.application, CONTROLS_TITLE)
-        .is_some_and(|panel| event.windowNumber() == panel.windowNumber())
-    {
-      self.window.performWindowDragWithEvent(&event);
+    if self.panel.isKeyWindow() && self.viewer.active() {
+      self.viewer.window.makeKeyWindow();
     }
   }
 }
 
-pub(super) fn hide_controls() {
-  let Some(main_thread) = MainThreadMarker::new() else {
-    return;
-  };
-  let application = NSApplication::sharedApplication(main_thread);
-  let Some(panel) = own_window(&application, CONTROLS_TITLE) else {
-    return;
-  };
-  let panel_was_key = panel.isKeyWindow();
-  let parent = panel.parentWindow();
-  if let Some(parent) = &parent {
-    parent.removeChildWindow(&panel);
-  }
-  if panel.isVisible() {
-    panel.orderOut(None);
-  }
-  if panel_was_key
-    && application.isActive()
-    && let Some(parent) = parent.filter(|window| window.isVisible() && !window.isMiniaturized())
-  {
-    parent.makeKeyWindow();
+impl Drop for AttachedPanel {
+  fn drop(&mut self) {
+    // Remove this panel's monitor before hiding the window and dropping the
+    // retained objects captured by the handler.
+    unsafe {
+      NSEvent::removeMonitor(&self.monitor);
+    }
+    let panel_was_key = self.panel.isKeyWindow();
+    self.viewer.window.removeChildWindow(&self.panel);
+    self.panel.orderOut(None);
+    if panel_was_key && self.viewer.active() {
+      self.viewer.window.makeKeyWindow();
+    }
   }
 }
 
@@ -186,7 +304,7 @@ mod tests {
     let video = rect(-720.0, 180.0, 640.0, 360.0);
     assert_eq!(
       panel_frame(video, desktop, 34.0),
-      Some(rect(-720.0, 544.0, 640.0, 34.0))
+      Some(rect(-720.0, 540.0, 640.0, 34.0))
     );
   }
 
@@ -196,8 +314,51 @@ mod tests {
     let video = rect(100.0, 200.0, 640.0, 400.0);
     assert_eq!(
       panel_frame(video, desktop, 34.0),
-      Some(rect(100.0, 162.0, 640.0, 34.0))
+      Some(rect(100.0, 166.0, 640.0, 34.0))
     );
     assert_eq!(panel_frame(desktop, desktop, 34.0), None);
+  }
+
+  #[test]
+  fn viewer_moves_from_the_original_screen_anchor() {
+    let drag = Drag {
+      press: NSPoint::new(-402.0, 420.0),
+      viewer_origin: NSPoint::new(-550.0, 205.0),
+      panel_origin: NSPoint::new(-550.0, 565.0),
+    };
+    assert_eq!(drag.viewer_at(drag.press), drag.viewer_origin);
+    let moved = drag.viewer_at(NSPoint::new(101.0, 380.0));
+    assert_eq!(moved, NSPoint::new(-47.0, 165.0));
+    assert_eq!(drag.panel_at(moved), NSPoint::new(-47.0, 525.0));
+  }
+
+  #[test]
+  fn native_drag_area_excludes_the_window_buttons() {
+    let size = NSSize::new(400.0, 34.0);
+    assert!(drag_hit(NSPoint::new(279.0, 17.0), size, 120.0));
+    assert!(!drag_hit(NSPoint::new(280.0, 17.0), size, 120.0));
+    assert!(!drag_hit(NSPoint::new(300.0, 17.0), size, 120.0));
+  }
+
+  #[test]
+  fn dragging_keeps_the_grabbed_edge_inside_the_work_area() {
+    let area = rect(0.0, 40.0, 800.0, 560.0);
+    let above = Drag {
+      press: NSPoint::ZERO,
+      viewer_origin: NSPoint::new(100.0, 100.0),
+      panel_origin: NSPoint::new(100.0, 460.0),
+    };
+    let desired = NSPoint::new(200.0, 300.0);
+    let moved = above.keep_panel_in_work_area(desired, 34.0, area);
+    assert_eq!(moved, NSPoint::new(200.0, 206.0));
+    assert_eq!(above.panel_at(moved), NSPoint::new(200.0, 566.0));
+
+    let below = Drag {
+      panel_origin: NSPoint::new(100.0, 66.0),
+      ..above
+    };
+    let moved = below.keep_panel_in_work_area(NSPoint::new(200.0, 0.0), 34.0, area);
+    assert_eq!(moved, NSPoint::new(200.0, 74.0));
+    assert_eq!(below.panel_at(moved), NSPoint::new(200.0, 40.0));
   }
 }

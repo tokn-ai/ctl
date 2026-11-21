@@ -4,6 +4,7 @@ use std::time::Duration;
 pub(super) const REVEAL_HEIGHT: f32 = 8.0;
 pub(super) const BAR_HEIGHT: f32 = 34.0;
 pub(super) const BUTTON_WIDTH: f32 = 40.0;
+const BUTTON_STRIP_WIDTH: f32 = 3.0 * BUTTON_WIDTH;
 pub(super) const VIEWER_TITLE: &str = "ctream viewer";
 #[cfg(any(target_os = "macos", test))]
 pub(super) const CONTROLS_TITLE: &str = "ctream viewer controls";
@@ -49,7 +50,7 @@ pub(super) struct Chrome {
   fixed: bool,
   resize: Option<Resize>,
   #[cfg(target_os = "macos")]
-  attached_shown: bool,
+  attached: Option<super::macos_chrome::AttachedPanel>,
   #[cfg(test)]
   pub test_attached_hover: Option<bool>,
 }
@@ -116,7 +117,7 @@ impl Chrome {
   pub fn show(&mut self, ctx: &egui::Context, status: Status<'_>) -> Frame {
     #[cfg(test)]
     if let Some(hovered) = self.test_attached_hover {
-      let action = hovered.then(|| show_controls(ctx, status)).flatten();
+      let action = hovered.then(|| show_controls(ctx, status, true)).flatten();
       return Frame::attached(action.is_some_and(|action| action.apply(ctx)));
     }
     #[cfg(target_os = "macos")]
@@ -142,16 +143,15 @@ impl Chrome {
         resize_grip(ctx, window, hovered),
       ],
       close: self.shown
-        && title_bar(ctx, bar, status, maximized(ctx)).is_some_and(|action| action.apply(ctx)),
+        && title_bar(ctx, bar, status, maximized(ctx), true)
+          .is_some_and(|action| action.apply(ctx)),
       resizing: self.resize.is_some(),
     }
   }
 
   pub fn dismiss(&mut self) {
     #[cfg(target_os = "macos")]
-    if std::mem::take(&mut self.attached_shown) {
-      super::macos_chrome::hide_controls();
-    }
+    self.attached.take();
   }
 
   #[cfg(target_os = "macos")]
@@ -159,48 +159,54 @@ impl Chrome {
     let viewer = super::macos_chrome::viewer()?;
     let height = BAR_HEIGHT * ctx.zoom_factor();
     let reveal = REVEAL_HEIGHT * ctx.zoom_factor();
-    if !viewer.can_attach(height) {
-      return None;
-    }
-    let window = ctx.content_rect();
-    let top = Rect::from_min_size(window.min, egui::vec2(window.width(), REVEAL_HEIGHT));
-    let enter = ctx.input(|input| {
-      !input.pointer.any_down()
-        && input
-          .pointer
-          .hover_pos()
-          .is_some_and(|pos| top.contains(pos))
-    });
-    let hovered = if self.attached_shown {
-      viewer.hovering(true, height, reveal)
-    } else {
-      viewer.active() && enter
-    };
-    if !hovered {
+    if !viewer.active() {
       self.dismiss();
       return Some(Frame::attached(false));
     }
-    let action = show_controls(ctx, status);
-    self.attached_shown = viewer.attach_controls(height);
-    if !self.attached_shown {
-      super::macos_chrome::hide_controls();
-      return None;
-    }
-    let close = match action {
-      Some(Action::Drag) => {
-        viewer.start_drag();
-        false
+    if let Some(panel) = &self.attached {
+      // AppKit moves the child with its parent. Keep the same attachment even
+      // when the pointer leaves the strip or the viewer reaches a screen edge.
+      if !panel.dragging() {
+        if !panel.hovering(reveal) {
+          self.dismiss();
+          return Some(Frame::attached(false));
+        }
+        if !panel.place(height) {
+          return None;
+        }
       }
-      Some(action) => action.apply(ctx),
-      None => false,
-    };
+    } else {
+      if !viewer.can_attach(height) {
+        return None;
+      }
+      let window = ctx.content_rect();
+      let top = Rect::from_min_size(window.min, egui::vec2(window.width(), REVEAL_HEIGHT));
+      let enter = ctx.input(|input| {
+        !input.pointer.any_down()
+          && input
+            .pointer
+            .hover_pos()
+            .is_some_and(|pos| top.contains(pos))
+      });
+      if !enter {
+        return Some(Frame::attached(false));
+      }
+    }
+
+    let action = show_controls(ctx, status, false);
+    if self.attached.is_none() {
+      self.attached = Some(viewer.attach_controls(height, BUTTON_STRIP_WIDTH, ctx)?);
+    }
+    let close = action.is_some_and(|action| action.apply(ctx));
     if close || matches!(action, Some(Action::Minimize)) {
       self.dismiss();
     } else {
-      // The pointer can leave through the gap between the two windows.
-      if action.is_some() {
-        viewer.restore_focus();
+      if action.is_some()
+        && let Some(panel) = &self.attached
+      {
+        panel.restore_focus();
       }
+      // Leaving both native windows may produce no further pointer events.
       ctx.request_repaint_after_for(Duration::from_millis(33), egui::ViewportId::ROOT);
     }
     Some(Frame::attached(close))
@@ -255,7 +261,7 @@ pub(super) fn controls_id() -> egui::ViewportId {
 }
 
 #[cfg(any(target_os = "macos", test))]
-fn show_controls(ctx: &egui::Context, status: Status<'_>) -> Option<Action> {
+fn show_controls(ctx: &egui::Context, status: Status<'_>, draggable: bool) -> Option<Action> {
   let maximized = maximized(ctx);
   let builder = egui::ViewportBuilder::default()
     .with_title(CONTROLS_TITLE)
@@ -271,7 +277,7 @@ fn show_controls(ctx: &egui::Context, status: Status<'_>) -> Option<Action> {
     if panel.input(|input| input.viewport().close_requested()) {
       return Some(Action::Close);
     }
-    title_bar(panel, panel.content_rect(), status, maximized)
+    title_bar(panel, panel.content_rect(), status, maximized, draggable)
   })
 }
 
@@ -280,10 +286,11 @@ fn title_bar(
   bounds: Rect,
   status: Status<'_>,
   maximized: bool,
+  draggable: bool,
 ) -> Option<Action> {
-  let buttons_left = bounds.right() - 3.0 * BUTTON_WIDTH;
+  let buttons_left = bounds.right() - BUTTON_STRIP_WIDTH;
   let title = Rect::from_min_max(bounds.min, egui::pos2(buttons_left, bounds.bottom()));
-  let dragging = primary_press_in(ctx, title);
+  let dragging = draggable && primary_press_in(ctx, title);
   egui::TopBottomPanel::top("ctream_title_bar")
     .exact_height(BAR_HEIGHT)
     .frame(egui::Frame::NONE.fill(ctx.style().visuals.panel_fill))

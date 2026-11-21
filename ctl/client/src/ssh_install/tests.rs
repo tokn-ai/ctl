@@ -111,24 +111,27 @@ async fn updater_preparation_preserves_archive_input_and_only_falls_back_for_old
 #[cfg(unix)]
 #[tokio::test]
 async fn updater_bootstrap_verifies_bytes_and_executable_before_replacing_the_manager() {
-  use std::os::unix::fs::PermissionsExt as _;
+  use std::os::unix::fs::{PermissionsExt as _, symlink};
   let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = BundleFixture::new();
   let home = fixture.directory.join("home");
   let binary = home.join(".tokn/ctl/bin/ctlup");
+  let launcher = binary.with_file_name(".ctl-launcher");
   let updater = br#"#!/bin/sh
 case "$1" in
   --component-info) exit 0;;
   --version) printf 'ctlup 0.0.0\n';;
   installation-layout-version) printf '2\n';;
   updater-digest)
+    touch "$HOME/probed"
     if command -v sha256sum >/dev/null 2>&1; then hash=$(sha256sum "$0"); else hash=$(shasum -a 256 "$0"); fi
     printf '%s\n' "${hash%% *}";;
   install-manager)
     destination="$HOME/.tokn/ctl/bin/ctlup"
-    [ ! -L "$destination" ] || exit 1
+    if [ -L "$destination" ]; then [ "$(readlink "$destination")" = .ctl-launcher ] || exit 1; fi
     mkdir -p "${destination%/*}"
-    cp "$0" "$destination";;
+    cp "$0" "${destination%/*}/.ctl-launcher"
+    if [ ! -L "$destination" ]; then ln -s .ctl-launcher "$destination"; fi;;
   *) exit 1;;
 esac
 "#;
@@ -145,6 +148,7 @@ esac
   .await
   .unwrap();
   assert_eq!(status.code(), Some(10));
+  assert!(!home.join(".tokn").exists());
   let (status, stdout, stderr) = run_updater_command(
     run(updater_bootstrap_script(updater, false).unwrap()),
     updater,
@@ -162,6 +166,8 @@ esac
   .await
   .unwrap();
   require_updater_success(status, &stdout, &stderr, b"ctlup-bootstrap-v1\n").unwrap();
+  assert!(home.join("probed").exists());
+  std::fs::remove_file(home.join("probed")).unwrap();
   assert_eq!(
     std::fs::metadata(&binary).unwrap().permissions().mode() & 0o777,
     0o700
@@ -183,13 +189,34 @@ esac
     assert_eq!(std::fs::read(&binary).unwrap(), updater);
     assert_eq!(
       std::fs::read_dir(binary.parent().unwrap()).unwrap().count(),
-      1
+      2
     );
   }
+  std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o770)).unwrap();
+  let (status, _, _) = run_updater_command(
+    run(updater_bootstrap_script(updater, true).unwrap()),
+    &[],
+    |_| {},
+  )
+  .await
+  .unwrap();
+  assert_eq!(status.code(), Some(1));
+  assert!(!home.join("probed").exists());
+
   std::fs::remove_file(&binary).unwrap();
   let outside = fixture.directory.join("outside");
-  std::fs::write(&outside, b"untouched").unwrap();
-  std::os::unix::fs::symlink(&outside, &binary).unwrap();
+  std::fs::write(&outside, updater).unwrap();
+  std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o700)).unwrap();
+  symlink(&outside, &binary).unwrap();
+  let (status, _, _) = run_updater_command(
+    run(updater_bootstrap_script(updater, true).unwrap()),
+    &[],
+    |_| {},
+  )
+  .await
+  .unwrap();
+  assert_eq!(status.code(), Some(1));
+  assert!(!home.join("probed").exists());
   let (status, _, _) = run_updater_command(
     run(updater_bootstrap_script(updater, false).unwrap()),
     updater,
@@ -198,7 +225,7 @@ esac
   .await
   .unwrap();
   assert!(!status.success());
-  assert_eq!(std::fs::read(&outside).unwrap(), b"untouched");
+  assert_eq!(std::fs::read(&outside).unwrap(), updater);
 }
 
 #[cfg(unix)]

@@ -147,7 +147,7 @@ async fn run(arguments: Arguments) -> io::Result<i32> {
       return archive::install_publication(&home, request).await;
     }
     Command::UpdaterDigest => {
-      updater_digest()?;
+      print_updater_digest(&std::env::current_exe()?)?;
     }
   }
   Ok(0)
@@ -232,9 +232,8 @@ fn print_json(value: &impl serde::Serialize) -> io::Result<()> {
   Ok(())
 }
 
-fn updater_digest() -> io::Result<()> {
+fn print_updater_digest(executable: &Path) -> io::Result<()> {
   use sha2::{Digest as _, Sha256};
-  let executable = std::env::current_exe()?;
   let mut file = std::fs::File::open(executable)?;
   let mut digest = Sha256::new();
   io::copy(&mut file, &mut digest)?;

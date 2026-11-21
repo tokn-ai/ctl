@@ -52,6 +52,14 @@ pub(super) fn dispatch() -> io::Result<Option<i32>> {
     };
     (path, lease)
   };
+  let mut arguments = env::args_os().skip(1);
+  if name == "ctlup"
+    && arguments.len() == 1
+    && arguments.next().as_deref() == Some("updater-digest".as_ref())
+  {
+    super::print_updater_digest(&path)?;
+    return Ok(Some(0));
+  }
   let status = Command::new(path).args(env::args_os().skip(1)).status()?;
   #[cfg(unix)]
   let code = status.code().or_else(|| {

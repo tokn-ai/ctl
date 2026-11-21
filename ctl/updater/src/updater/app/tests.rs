@@ -73,7 +73,14 @@ async fn managed_desktop_launch_entry_and_exact_repair_use_the_registry() {
 }
 
 async fn verify_install_update_and_repair(archive: &Path) {
+  #[cfg(not(windows))]
   let home = Home::new();
+  #[cfg(windows)]
+  let home = {
+    let path = std::env::temp_dir().join(format!("ctlup app 彩-{}", uuid::Uuid::new_v4()));
+    private_fs::create_directory(&path).unwrap();
+    Home(path)
+  };
   let store = Installations::new(&home.0);
   install(&home.0, None, None, None, Some(archive), false)
     .await
@@ -111,6 +118,7 @@ async fn verify_install_update_and_repair(archive: &Path) {
     assert_eq!(link.target_path.as_deref(), Some(target.as_path()));
     assert_eq!(link.working_dir.as_deref(), target.parent());
     assert!(link.arguments.is_none());
+    assert_eq!(link.window_state, lnks::WindowState::Normal);
   }
   fs::remove_dir_all(&object).unwrap();
   assert!(app_status(&home.0, Some(selected.clone())).unwrap().missing);

@@ -1,8 +1,9 @@
 use std::path::PathBuf;
 
 use ctl_client::{
-  ConnectionTarget, RemotePlatform, SshInteraction, probe_ssh_unix_platform_interactive,
-  probe_ssh_windows_platform,
+  ConnectionTarget, RemotePlatform, SshInteraction,
+  component_update::{self, BuildSource},
+  probe_ssh_unix_platform_interactive, probe_ssh_windows_platform,
   remote_bundle::{self, Platform},
 };
 #[cfg(test)]
@@ -70,7 +71,14 @@ async fn install_bundle(
       let output = probe_ssh_unix_platform_interactive(&destination, &options, interaction)
         .await
         .map_err(platform_error)?;
-      (parse_platform(&output)?, None)
+      let account = match target {
+        ConnectionTargetDto::Ssh {
+          remote_info: Some(identity),
+          ..
+        } => Some(identity.remote_id.as_str()),
+        _ => None,
+      };
+      (parse_platform(&output)?, account)
     }
     RemotePlatform::Windows => {
       let expected_account = install_identity::verify_account(target, || {
@@ -85,31 +93,39 @@ async fn install_bundle(
   };
   let target_triple = platform.target_triple().map_err(bundle_error)?;
   let home = dirs::home_dir().ok_or_else(bundle_unavailable)?;
-  let prepared = ctl_client::component_update::prepare_update(
-    &home,
-    target_triple,
-    ctl_core::bundles::Purpose::Upload,
-    &update.source,
-    included_bundles,
-    |progress| {
-      updates.send_replace(preparation_progress(progress));
-    },
-  )
-  .await
-  .map_err(CommandErrorDto::backend)?;
-  let result = ctl_client::component_update::install_prepared_remote_for_account(
-    &destination,
-    &options,
+  if update.package != component_update::Package::FullBundle {
+    return Err(CommandErrorDto::backend(
+      "Remote updates require a complete component bundle.",
+    ));
+  }
+  let remote = component_update::PublicationTarget {
+    destination: &destination,
+    options: &options,
     interaction,
-    &prepared,
-    update.package,
     expected_account,
-    |progress| {
-      updates.send_replace(progress::desktop_progress(progress));
-    },
-  )
-  .await
-  .map_err(|error| CommandErrorDto::new("remote_agent_install_failed", error.to_string()))?;
+    target_triple,
+  };
+  let deployment =
+    prepare_deployment(&home, &remote, &update.source, included_bundles, updates).await?;
+  let manifest = match deployment {
+    component_update::PublicationDeployment::Installed(manifest) => manifest,
+    component_update::PublicationDeployment::Upload(prepared) => {
+      component_update::install_prepared_remote_for_account(
+        &destination,
+        &options,
+        interaction,
+        &prepared,
+        update.package,
+        expected_account,
+        |progress| {
+          progress::publish(updates, progress::desktop_progress(progress));
+        },
+      )
+      .await
+      .map_err(|error| CommandErrorDto::new("remote_agent_install_failed", error.to_string()))?;
+      prepared.bundle.manifest
+    }
+  };
 
   if options.remote_platform == RemotePlatform::Windows {
     ctl_client::installation::verify_remote_activation(
@@ -117,38 +133,99 @@ async fn install_bundle(
       &options,
       interaction,
       expected_account,
-      &prepared.bundle.manifest,
+      &manifest,
     )
     .await
     .map_err(|error| {
       CommandErrorDto::new("remote_install_verification_failed", error.to_string())
     })?;
   }
-  #[cfg(unix)]
-  let bundle = prepared.bundle;
-  Ok(Installation {
+  Ok(Installation::from_manifest(manifest, update.package))
+}
+
+impl Installation {
+  fn from_manifest(
+    manifest: ctl_core::bundles::Manifest,
+    package: component_update::Package,
+  ) -> Self {
     #[cfg(unix)]
-    agent: bundle.manifest.components["ctl-agent"].clone(),
-    result,
-    #[cfg(unix)]
-    version: RemoteAgentInstallResultDto {
-      app_version: bundle.manifest.components["ctl-agent"]
-        .build
-        .version
-        .clone(),
-      bundle_id: bundle
-        .manifest
-        .distribution_id
-        .clone()
-        .unwrap_or(bundle.manifest.bundle_id),
-      git_revision: bundle.manifest.components["ctl-agent"]
-        .build
-        .source_revision
-        .clone()
-        .unwrap_or_default(),
-      target_triple: target_triple.into(),
-    },
-  })
+    let agent = &manifest.components["ctl-agent"];
+    Self {
+      #[cfg(unix)]
+      agent: agent.clone(),
+      #[cfg(unix)]
+      version: RemoteAgentInstallResultDto {
+        app_version: agent.build.version.clone(),
+        bundle_id: manifest
+          .distribution_id
+          .unwrap_or_else(|| manifest.bundle_id.clone()),
+        git_revision: agent.build.source_revision.clone().unwrap_or_default(),
+        target_triple: manifest.target_triple.clone(),
+      },
+      result: component_update::UpdateResult {
+        package,
+        bundle_id: manifest.bundle_id,
+        target_triple: manifest.target_triple,
+        services_preserved: true,
+      },
+    }
+  }
+}
+
+async fn prepare_deployment(
+  home: &std::path::Path,
+  remote: &component_update::PublicationTarget<'_>,
+  source: &BuildSource,
+  included_bundles: &[PathBuf],
+  updates: &watch::Sender<Progress>,
+) -> CommandResult<component_update::PublicationDeployment> {
+  let report = |next| progress::publish(updates, preparation_progress(next));
+  let channel = match source {
+    BuildSource::Automatic => {
+      Some(ctl_client::installation::default_channel(home).map_err(CommandErrorDto::backend)?)
+    }
+    BuildSource::Published { channel } => Some(*channel),
+    _ => None,
+  };
+  if let Some(channel) = channel {
+    return component_update::deploy_remote_publication(
+      home,
+      remote,
+      channel,
+      |stage| {
+        progress::publish(updates, progress::publication_progress(stage));
+      },
+      report,
+    )
+    .await
+    .map_err(CommandErrorDto::backend);
+  }
+  let prepared = if matches!(source, BuildSource::WorkingTree) {
+    let workspace = component_update::development_workspace().ok_or_else(|| {
+      CommandErrorDto::backend("The source checkout used to build this app is unavailable.")
+    })?;
+    component_update::prepare_working_tree_update(
+      home,
+      remote.target_triple,
+      Some(&workspace),
+      report,
+    )
+    .await
+  } else {
+    component_update::prepare_update(
+      home,
+      remote.target_triple,
+      ctl_core::bundles::Purpose::Upload,
+      source,
+      included_bundles,
+      report,
+    )
+    .await
+  }
+  .map_err(CommandErrorDto::backend)?;
+  Ok(component_update::PublicationDeployment::Upload(Box::new(
+    prepared,
+  )))
 }
 
 fn parse_platform(output: &str) -> CommandResult<Platform> {

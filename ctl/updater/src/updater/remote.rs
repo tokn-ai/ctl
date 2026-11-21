@@ -78,7 +78,7 @@ impl Target {
     Ok(())
   }
 
-  pub async fn verify_activation(&self, bundle: &ctl_core::bundles::Bundle) -> io::Result<()> {
+  pub async fn verify_activation(&self, manifest: &ctl_core::bundles::Manifest) -> io::Result<()> {
     let active = if let SshInteraction::Multiplexed { control_path } = &self.interaction {
       let identity =
         ctl_client::maintenance::inspect_agent(&self.destination, &self.options, control_path)
@@ -88,7 +88,6 @@ impl Target {
         .host
         .verify_remote_identity(&identity)
         .map_err(io::Error::other)?;
-      let manifest = &bundle.manifest;
       let build = &manifest.components["ctl-agent"].build;
       identity.bundle.as_ref().is_some_and(|installed| {
         installed.bundle_id
@@ -101,14 +100,7 @@ impl Target {
           && Some(installed.git_revision.as_str()) == build.source_revision.as_deref()
       })
     } else {
-      return ctl_client::installation::verify_remote_activation(
-        &self.destination,
-        &self.options,
-        &self.interaction,
-        self.expected_account(),
-        &bundle.manifest,
-      )
-      .await;
+      return self.verify_active_manifest(manifest).await;
     };
     if !active {
       return Err(io::Error::other(
@@ -116,6 +108,20 @@ impl Target {
       ));
     }
     Ok(())
+  }
+
+  pub async fn verify_active_manifest(
+    &self,
+    manifest: &ctl_core::bundles::Manifest,
+  ) -> io::Result<()> {
+    ctl_client::installation::verify_remote_activation(
+      &self.destination,
+      &self.options,
+      &self.interaction,
+      self.expected_account(),
+      manifest,
+    )
+    .await
   }
 
   pub async fn target_triple(&self) -> io::Result<&'static str> {

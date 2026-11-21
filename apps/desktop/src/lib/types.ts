@@ -45,7 +45,13 @@ export interface ComponentUpdateProgress {
 export interface ComponentUpdateHostResult {
   host_index: number;
   state: ComponentUpdateState;
-  result: { package: ComponentUpdatePackage; bundle_id: string; target_triple: string; services_preserved: boolean } | null;
+  result: {
+    package: ComponentUpdatePackage;
+    bundle_id: string;
+    target_triple: string;
+    services_preserved: boolean;
+    remote_archive_reused?: boolean;
+  } | null;
   error: string | null;
 }
 export interface ComponentUpdateContext {
@@ -745,6 +751,7 @@ export interface RemoteAgentInstallResult {
 }
 
 export interface RemoteAgentInstallProgress {
+  ssh_upload_fallback?: boolean;
   phase:
     | "detecting_platform"
     | "preparing_bundle"
@@ -753,10 +760,20 @@ export interface RemoteAgentInstallProgress {
     | "checking_bundle"
     | "verifying_bundle"
     | "connecting"
+    | "checking_remote_installation"
+    | "checking_local_cache"
+    | "using_local_cache"
+    | "remote_download_updater"
+    | "using_remote_updater"
+    | "remote_install_runtime"
+    | "upload_cached_updater"
+    | "upload_cached_runtime"
+    | "upload_fallback"
     | "transferring"
     | "extracting"
     | "checking"
     | "activating"
+    | "reused"
     | "complete";
   file_name: string | null;
   transferred_bytes: number;

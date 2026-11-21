@@ -6,14 +6,17 @@ fn desktop_adapter_preserves_all_shared_progress_fields_and_phases() {
     Phase::DetectingPlatform,
     Phase::VerifyingBundle,
     Phase::Connecting,
+    Phase::CheckingRemoteInstallation,
     Phase::Transferring,
     Phase::Extracting,
     Phase::Checking,
     Phase::Activating,
     Phase::Complete,
+    Phase::Reused,
   ] {
     let progress = Progress {
       phase,
+      ssh_upload_fallback: false,
       file_name: Some("bundle.tar.gz".into()),
       transferred_bytes: 1234,
       total_bytes: 5678,
@@ -28,6 +31,61 @@ fn desktop_adapter_preserves_all_shared_progress_fields_and_phases() {
     initial(),
     desktop_progress(RemoteInstallProgress::default())
   );
+}
+
+#[test]
+fn cached_upload_reports_only_the_current_artifact_byte_counts() {
+  use ctl_client::PublishedInstallStage as Stage;
+  for (stage, phase, bytes) in [
+    (
+      Stage::UploadingUpdaterBytes {
+        sent: 18,
+        total: 20,
+      },
+      Phase::UploadCachedUpdater,
+      (18, 20),
+    ),
+    (Stage::UploadingRuntime, Phase::UploadCachedRuntime, (0, 0)),
+    (
+      Stage::UploadingRuntimeBytes {
+        sent: 9,
+        total: 100,
+      },
+      Phase::UploadCachedRuntime,
+      (9, 100),
+    ),
+    (
+      Stage::InstallingRuntime,
+      Phase::RemoteInstallRuntime,
+      (0, 0),
+    ),
+  ] {
+    let progress = publication_progress(stage);
+    assert_eq!(progress.phase, phase);
+    assert_eq!((progress.transferred_bytes, progress.total_bytes), bytes);
+  }
+}
+
+#[test]
+fn fallback_route_survives_skipped_progress_and_transfer_rate_calculation() {
+  let (sender, receiver) = watch::channel(initial());
+  publish(
+    &sender,
+    publication_progress(ctl_client::PublishedInstallStage::UploadFallback),
+  );
+  let mut next = initial();
+  next.phase = Phase::Transferring;
+  publish(&sender, next);
+  let now = Instant::now();
+  let event = observe(
+    &mut RemoteInstallWatchdog::new(now),
+    receiver.borrow().clone(),
+    now,
+    false,
+  )
+  .unwrap();
+  assert_eq!(event.phase, Phase::Transferring);
+  assert!(event.ssh_upload_fallback);
 }
 
 #[test]
@@ -64,6 +122,32 @@ fn source_preparation_can_exceed_the_installation_deadline_without_disabling_ssh
     )
     .is_err()
   );
+}
+
+#[tokio::test]
+async fn completion_preserves_confirmed_bundle_reuse_without_transfer() {
+  let (updates, receiver) = watch::channel(initial());
+  let reports = std::sync::Mutex::new(Vec::new());
+  monitor(
+    async {
+      let mut reused = initial();
+      reused.phase = Phase::Reused;
+      updates.send_replace(reused);
+      Ok(())
+    },
+    receiver,
+    |event| {
+      reports.lock().unwrap().push(event);
+      Ok(())
+    },
+    || false,
+  )
+  .await
+  .unwrap();
+  let reports = reports.into_inner().unwrap();
+  let last = reports.last().unwrap();
+  assert_eq!(last.phase, Phase::Reused);
+  assert_eq!((last.transferred_bytes, last.total_bytes), (0, 0));
 }
 
 #[tokio::test]

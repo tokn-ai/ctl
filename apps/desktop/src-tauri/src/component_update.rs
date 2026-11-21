@@ -4,11 +4,12 @@
 
 pub(crate) mod catalog;
 
-use crate::dto::{ConnectionTargetDto, RemoteAgentInstallProgressDto};
+use crate::dto::{ConnectionTargetDto, RemoteAgentInstallPhase, RemoteAgentInstallProgressDto};
 use crate::error::{CommandErrorDto, CommandResult};
 use ctl_core::component_update::{UpdateOptions, UpdateResult};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, WebviewWindow, ipc::Channel};
@@ -42,8 +43,16 @@ pub struct UpdateProgress {
 pub struct HostResult {
   host_index: usize,
   state: State,
-  result: Option<UpdateResult>,
+  result: Option<InstalledUpdate>,
   error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct InstalledUpdate {
+  #[serde(flatten)]
+  update: UpdateResult,
+  #[serde(skip_serializing_if = "std::ops::Not::not")]
+  remote_archive_reused: bool,
 }
 
 #[derive(Deserialize)]
@@ -164,21 +173,28 @@ struct Context<'a> {
   on_progress: &'a Channel<UpdateProgress>,
 }
 impl Context<'_> {
-  #[cfg(unix)]
   async fn update_host(
     &self,
     host_index: usize,
     target: ConnectionTargetDto,
     options: UpdateOptions,
-  ) -> CommandResult<UpdateResult> {
-    let Self {
-      app,
-      window,
-      attempt_id,
-      on_prompt,
-      on_progress,
-    } = self;
-    match target {
+  ) -> CommandResult<InstalledUpdate> {
+    let reused = AtomicBool::new(false);
+    let report = |progress: RemoteAgentInstallProgressDto| {
+      if progress.phase == RemoteAgentInstallPhase::Reused {
+        reused.store(true, Ordering::Relaxed);
+      }
+      self
+        .on_progress
+        .send(UpdateProgress {
+          host_index,
+          state: State::Updating,
+          progress: Some(progress),
+        })
+        .map_err(CommandErrorDto::backend)
+    };
+    #[cfg(unix)]
+    let update = match target {
       ConnectionTargetDto::Local => {
         let home = dirs::home_dir()
           .ok_or_else(|| CommandErrorDto::backend("Home directory is unavailable."))?;
@@ -187,13 +203,9 @@ impl Context<'_> {
           ctl_core::paths::native_target(),
           ctl_core::bundles::Purpose::Local,
           &options.source,
-          &crate::remote_agent::bundle_directories(app)?,
+          &crate::remote_agent::bundle_directories(self.app)?,
           |progress| {
-            let _ = on_progress.send(UpdateProgress {
-              host_index,
-              state: State::Updating,
-              progress: Some(crate::remote_agent::preparation_progress(progress)),
-            });
+            let _ = report(crate::remote_agent::preparation_progress(progress));
           },
         )
         .await
@@ -204,51 +216,30 @@ impl Context<'_> {
       }
       target @ ConnectionTargetDto::Ssh { .. } => {
         let installed = crate::ssh_auth::install_components(
-          (*app).clone(),
-          (*window).into(),
-          format!("{attempt_id}:{host_index}"),
+          self.app.clone(),
+          self.window.into(),
+          format!("{}:{host_index}", self.attempt_id),
           target,
-          on_prompt.clone(),
+          self.on_prompt.clone(),
           options,
-          |progress| {
-            on_progress
-              .send(UpdateProgress {
-                host_index,
-                state: State::Updating,
-                progress: Some(progress),
-              })
-              .map_err(CommandErrorDto::backend)
-          },
+          report,
         )
         .await?;
         Ok(installed.result)
       }
-    }
-  }
-
-  #[cfg(not(unix))]
-  async fn update_host(
-    &self,
-    host_index: usize,
-    target: ConnectionTargetDto,
-    options: UpdateOptions,
-  ) -> CommandResult<UpdateResult> {
-    install_windows_host(
+    }?;
+    #[cfg(not(unix))]
+    let update = install_windows_host(
       &target,
       &options,
       &crate::remote_agent::bundle_directories(self.app)?,
-      |progress| {
-        self
-          .on_progress
-          .send(UpdateProgress {
-            host_index,
-            state: State::Updating,
-            progress: Some(progress),
-          })
-          .map_err(CommandErrorDto::backend)
-      },
+      report,
     )
-    .await
+    .await?;
+    Ok(InstalledUpdate {
+      update,
+      remote_archive_reused: reused.into_inner(),
+    })
   }
 }
 
@@ -303,7 +294,7 @@ async fn run_batch<T, F, Fut>(
 ) -> CommandResult<Vec<HostResult>>
 where
   F: FnMut(usize, T) -> Fut,
-  Fut: std::future::Future<Output = CommandResult<UpdateResult>>,
+  Fut: std::future::Future<Output = CommandResult<InstalledUpdate>>,
 {
   let mut results = Vec::new();
   for (host_index, target) in targets.into_iter().enumerate() {

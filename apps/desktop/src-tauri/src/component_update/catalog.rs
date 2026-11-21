@@ -1,5 +1,6 @@
 //! Read-only publication discovery, warmed at startup without delaying the UI.
 
+use crate::error::{CommandErrorDto, CommandResult};
 use ctl_client::remote_bundle::published::{self, PublishedCatalog};
 use ctl_core::component_update::BundleChannel;
 use serde::{Deserialize, Serialize};
@@ -59,13 +60,15 @@ async fn snapshot(channel: BundleChannel, refresh: bool) -> CatalogSnapshot {
     .result;
   CatalogSnapshot {
     default_channel: published::default_channel(),
-    local_development: local_development(),
+    local_development: component_update_checkout_available(),
     catalog: result.as_ref().ok().cloned(),
     error: result.as_ref().err().cloned(),
   }
 }
 
-fn local_development() -> bool {
+/// Checks this installation's source checkout without contacting the publisher.
+#[tauri::command]
+pub(crate) fn component_update_checkout_available() -> bool {
   #[cfg(unix)]
   {
     ctl_client::component_update::working_tree_available()
@@ -74,17 +77,31 @@ fn local_development() -> bool {
   false
 }
 
+async fn resolve_channel(channel: Option<BundleChannel>) -> CommandResult<BundleChannel> {
+  if let Some(channel) = channel {
+    return Ok(channel);
+  }
+  tokio::task::spawn_blocking(|| {
+    let home =
+      dirs::home_dir().ok_or_else(|| CommandErrorDto::backend("Home directory is unavailable."))?;
+    ctl_client::installation::default_channel(&home).map_err(CommandErrorDto::backend)
+  })
+  .await
+  .map_err(CommandErrorDto::backend)?
+}
+
 pub(crate) fn start() {
   tauri::async_runtime::spawn(async {
-    let _ = snapshot(published::default_channel(), false).await;
+    if let Ok(channel) = resolve_channel(None).await {
+      let _ = snapshot(channel, false).await;
+    }
   });
 }
 
 #[tauri::command(rename_all = "snake_case")]
-pub(crate) async fn check_component_updates(request: CheckRequest) -> CatalogSnapshot {
-  snapshot(
-    request.channel.unwrap_or_else(published::default_channel),
-    request.refresh,
-  )
-  .await
+pub(crate) async fn check_component_updates(
+  request: CheckRequest,
+) -> CommandResult<CatalogSnapshot> {
+  let channel = resolve_channel(request.channel).await?;
+  Ok(snapshot(channel, request.refresh).await)
 }

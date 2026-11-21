@@ -392,12 +392,21 @@ from deployment cache; matching installed updaters remain pinned during cleanup.
 
 ## Remote deployment
 
-The client downloads and verifies files locally, then uploads through the
-authenticated SSH route. The remote host needs no internet access. A small
-bootstrap atomically prepares `bin/ctlup` when absent or changed. That updater
-uses the same installation transaction and crash-releasing OS lock as a local
-update. Verified identical installed builds are activated without reuploading
-the runtime archive. A changed same-ID payload fails rather than being replaced.
+For a published update, the desktop or `ctlup update --host NAME` resolves the
+channel to one release and checks this computer’s cache separately for the
+target’s updater and runtime archive. It can send either verified file over SSH.
+For example, if only the runtime is cached on this computer, the host can fetch
+`ctlup` and receive the runtime over SSH. The host can also reuse a matching
+installed updater or verified archive. When it needs to download a file, it
+tries `curl`, then `wget`. If the host cannot reach the release, lacks download
+tools, or has an older updater without direct-install support, this computer
+retrieves any missing files and uploads the same release. Integrity, account
+identity and activation failures stop the update.
+
+Provided and development builds travel from this computer over SSH. The remote
+`ctlup` activates the verified build using the installation lock. The desktop
+shows **Activated existing build** when the remote updater confirms reuse.
+A changed same-ID payload fails verification.
 
 Saved account identity is checked before mutation and the installed agent is
 verified afterward. A failed post-install check reports that activation may
@@ -413,8 +422,13 @@ the local desktop app commands above; ARM64 whole-runtime bundles are unavailabl
 
 Use **Update components…** in the command palette, About, or host settings.
 Choose hosts and a channel, provided files, or an included offline build.
-Development builds can also cross-build Linux x64 and ARM64 from the checkout.
-The dialog reports preparation progress before SSH transfer begins. Every
+In a development app, select a Linux x64 or ARM64 SSH host and choose
+**Build from checkout** to compile on this computer from the checkout used to
+build the app and upload the result. Choose **Provided build files** to upload a
+[previously packaged development build](local-bundles.md#build-a-local-linux-bundle).
+When installing from the connection prompt, the dialog targets the SSH route
+that needs the components. Progress identifies which computer is downloading,
+which files travel over SSH, and when the remote host activates the build. Every
 update installs a complete build. About’s bundle list shows the active native
 build and offers local installation of another usable build. Explicitly installed
 target components have durable channel registrations; other downloaded foreign

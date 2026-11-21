@@ -87,6 +87,8 @@ pub(super) enum Command {
     origin_hex: Option<String>,
   },
   #[command(hide = true)]
+  InstallPublication(PublicationArguments),
+  #[command(hide = true)]
   ActivateInstalled {
     bundle_id: String,
     #[arg(long, hide = true)]
@@ -99,6 +101,20 @@ pub(super) enum Command {
   #[cfg(windows)]
   #[command(hide = true)]
   UpdaterDigest,
+}
+
+#[derive(Debug, Args)]
+pub(super) struct PublicationArguments {
+  #[arg(long)]
+  pub origin_hex: String,
+  #[arg(long)]
+  pub archive_url: String,
+  #[arg(long)]
+  pub target: String,
+  #[arg(long)]
+  pub manifest_bytes: usize,
+  #[arg(long)]
+  pub archive_stdin: bool,
 }
 
 #[derive(Debug, Subcommand)]

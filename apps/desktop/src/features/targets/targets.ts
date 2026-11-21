@@ -9,6 +9,11 @@ import type {
 
 export const LOCAL_TARGET: ConnectionTarget = Object.freeze({ kind: "local" });
 
+/** The Windows desktop updater supports Windows SSH destinations. */
+export function supportsComponentUpdate(target: ConnectionTarget): boolean {
+  return !/^Win/i.test(navigator.platform) || (target.kind === "ssh" && target.remote_platform === "windows");
+}
+
 const STORAGE_KEY = "ctmux.remote_hosts";
 const STORAGE_SCHEMA_VERSION = 2;
 

@@ -2,12 +2,15 @@ use super::*;
 use ctl_core::component_update::Package;
 use std::cell::RefCell;
 
-fn installed() -> UpdateResult {
-  UpdateResult {
-    package: Package::FullBundle,
-    bundle_id: "fixture".into(),
-    target_triple: "aarch64-apple-darwin".into(),
-    services_preserved: true,
+fn installed(remote_archive_reused: bool) -> InstalledUpdate {
+  InstalledUpdate {
+    update: UpdateResult {
+      package: Package::FullBundle,
+      bundle_id: "fixture".into(),
+      target_triple: "aarch64-apple-darwin".into(),
+      services_preserved: true,
+    },
+    remote_archive_reused,
   }
 }
 
@@ -22,7 +25,7 @@ async fn a_failed_host_does_not_discard_successes_or_skip_later_hosts() {
       if target == 1 {
         Err(CommandErrorDto::backend("fixture failure"))
       } else {
-        Ok(installed())
+        Ok(installed(target == 2))
       }
     },
     |index, state| {
@@ -40,8 +43,11 @@ async fn a_failed_host_does_not_discard_successes_or_skip_later_hosts() {
     [State::Complete, State::Failed, State::Complete]
   );
   assert_eq!(results[1].error.as_deref(), Some("fixture failure"));
-  assert!(results[0].result.is_some());
-  assert!(results[2].result.is_some());
+  let ordinary = serde_json::to_value(results[0].result.as_ref().unwrap()).unwrap();
+  assert_eq!(ordinary["bundle_id"], "fixture");
+  assert!(ordinary.get("remote_archive_reused").is_none());
+  let reused = serde_json::to_value(results[2].result.as_ref().unwrap()).unwrap();
+  assert_eq!(reused["remote_archive_reused"], true);
   assert_eq!(
     *reports.borrow(),
     [
@@ -70,7 +76,7 @@ async fn stopping_an_active_host_preserves_completed_hosts_and_skips_the_rest() 
           cancel.send_replace(true);
           std::future::pending::<()>().await;
         }
-        Ok(installed())
+        Ok(installed(false))
       }
     },
     |_, _| Ok(()),

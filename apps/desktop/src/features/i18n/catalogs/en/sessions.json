@@ -587,7 +587,7 @@
   "ssh_flow.vpn_update": "The VPN execution host {host} needs updated components. Update that SSH host, then ctl will retry this connection through its VPN. Running sessions are preserved.",
   "ssh_flow.wait_discovery": "Wait for Tailscale discovery to finish before choosing a device.",
   "ssh_flow.windows_default_shell": "Windows OpenSSH must use cmd.exe as its default shell.",
-  "ssh_flow.windows_direct": "Manage remote components directly on this Windows host.",
+  "ssh_flow.windows_direct": "Inspect running components directly on the Windows host.",
   "ssh_prompt.authentication": "SSH authentication",
   "ssh_prompt.continue": "Continue",
   "ssh_prompt.never": "Never",

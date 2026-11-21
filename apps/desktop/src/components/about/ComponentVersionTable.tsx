@@ -2,7 +2,7 @@ import { translate, type DisplayText, type Locale } from "../../features/i18n/me
 import { useLocale } from "../../features/i18n/LocaleContext";
 import { useId, useState } from "react";
 import { componentBuildViews, componentHostFailure, componentHostStatuses, groupComponentHosts, type ComponentHostGroup } from "../../features/about/componentVersions";
-import type { ComponentVersionInfo, ComponentVersionRow, ComponentVersionStatus } from "../../lib/types";
+import type { ComponentVersionInfo, ComponentVersionRow, ComponentVersionStatus, SshConnectionTarget } from "../../lib/types";
 import { Icon } from "../ui/Icon";
 import { ComponentProtocols } from "./ComponentProtocols";
 import { InlineFeedback } from "../feedback/InlineFeedback";
@@ -58,8 +58,8 @@ interface Props {
   restarting: boolean;
   action_error: { component_id: string; message: DisplayText } | null;
   on_restart(component_id: string): void;
-  manageable_host_ids?: readonly string[];
-  on_manage_host?(host_id: string, mode: "inspect" | "update"): void;
+  targets?: readonly SshConnectionTarget[];
+  on_manage_host?(target: SshConnectionTarget, mode: "inspect" | "update"): void;
 }
 
 type ActionProps = Pick<Props, "busy_id" | "restarting" | "action_error" | "on_restart">;
@@ -114,7 +114,7 @@ function HostStatus({ group, action_error }: Pick<Props, "action_error"> & { gro
   </>;
 }
 
-export function ComponentVersionTable({ rows, busy_id, restarting, action_error, on_restart, manageable_host_ids = [], on_manage_host }: Props) {
+export function ComponentVersionTable({ rows, busy_id, restarting, action_error, on_restart, targets = [], on_manage_host }: Props) {
   const { t, locale } = useLocale();
   const [expanded, setExpanded] = useState<string | null>(null);
   const id = useId();
@@ -132,8 +132,8 @@ export function ComponentVersionTable({ rows, busy_id, restarting, action_error,
       {remote.map((group) => {
         const open = expanded === group.key;
         const table_id = `${id}-${encodeURIComponent(group.key)}`;
-        const manageable = group.host_id && manageable_host_ids.includes(group.host_id) && on_manage_host &&
-          !group.rows.some((row) => row.error_code === "remote_windows_maintenance_unsupported");
+        const target = group.host_id && targets.find((target) => target.host_id === group.host_id);
+        const can_inspect = target && target.remote_platform !== "windows" && !group.rows.some((row) => row.error_code === "remote_windows_maintenance_unsupported");
         return <tbody key={group.key}>
           <tr className="about-host-row">
             <th scope="row"><button type="button" className="about-host-toggle" onClick={() => setExpanded((previous) => previous === group.key ? null : group.key)} aria-expanded={open} aria-controls={table_id} aria-label={t(open ? "about.hide_host_components" : "about.show_host_components", { host: group.label })}>
@@ -141,9 +141,9 @@ export function ComponentVersionTable({ rows, busy_id, restarting, action_error,
               <strong>{group.label}</strong>
             </button></th>
             <td><HostStatus group={group} action_error={action_error} /></td>
-            <td>{manageable ? <div className="about-host-actions">
-              <button type="button" disabled={busy_id !== null} onClick={() => on_manage_host(group.host_id!, "inspect")} aria-label={t("about.check_named_host", { host: group.label })}>{t("about.check_host")}</button>
-              <button type="button" disabled={busy_id !== null} onClick={() => on_manage_host(group.host_id!, "update")} aria-label={t("about.update_named_host", { host: group.label })}>{t("about.update_short")}</button>
+            <td>{target && on_manage_host ? <div className="about-host-actions">
+              {can_inspect ? <button type="button" disabled={busy_id !== null || !!target.unavailable} onClick={() => on_manage_host(target, "inspect")} aria-label={t("about.check_named_host", { host: group.label })}>{t("about.check_host")}</button> : null}
+              <button type="button" disabled={busy_id !== null || !!target.unavailable} onClick={() => on_manage_host(target, "update")} aria-label={t("about.update_named_host", { host: group.label })}>{t("about.update_short")}</button>
             </div> : <span className="about-muted">—</span>}</td>
           </tr>
           <tr hidden={!open} className="about-host-details"><td colSpan={3}><div id={table_id}><ComponentDetails group={group} {...actions} /></div></td></tr>

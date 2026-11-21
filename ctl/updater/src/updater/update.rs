@@ -1,6 +1,7 @@
 use super::{TargetOptions, arguments::UpdateArguments, source_with_bundle_override};
 use ctl_client::component_update::{
-  BuildSource, Package, PreparationPhase, PreparationProgress, PreparedUpdate, UpdateResult,
+  BuildSource, BundleChannel, Package, PreparationPhase, PreparationProgress, PreparedUpdate,
+  UpdateResult,
 };
 use ctl_client::remote_bundle::pr;
 use ctl_core::bundles::Purpose;
@@ -32,6 +33,19 @@ enum UpdateSource<'a> {
   Checkout {
     workspace: &'a Path,
   },
+}
+
+impl UpdateSource<'_> {
+  fn publication_channel(&self, home: &Path) -> io::Result<Option<BundleChannel>> {
+    let Self::Artifacts { source, pr: None } = self else {
+      return Ok(None);
+    };
+    Ok(match source {
+      BuildSource::Published { channel } => Some(*channel),
+      BuildSource::Automatic => Some(ctl_client::installation::default_channel(home)?),
+      _ => None,
+    })
+  }
 }
 
 struct PrBuilds {
@@ -276,7 +290,14 @@ async fn update_host(
   } else {
     (ctl_core::paths::native_target(), Purpose::Local)
   };
-  let (mut prepared, pr_number) = prepare(home, triple, purpose, source).await?;
+  let last_download = Mutex::new(None);
+  let report = |progress| report_preparation(&progress, &last_download);
+  if let Some(remote) = &remote
+    && let Some(channel) = source.publication_channel(home)?
+  {
+    return update_remote_publication(home, remote, triple, channel, report).await;
+  }
+  let (mut prepared, pr_number) = prepare(home, triple, purpose, source, report).await?;
   prepared.retain_earlier_snapshot(&snapshot);
   if let Some(number) = pr_number {
     let origin = prepared
@@ -295,9 +316,124 @@ async fn update_host(
   };
   let result = install_with_progress(&remote, &prepared, package).await?;
   if remote.pinned() {
-    remote.verify_activation(&prepared.bundle).await?;
+    remote.verify_activation(&prepared.bundle.manifest).await?;
   }
   Ok(result)
+}
+
+async fn update_remote_publication(
+  home: &Path,
+  remote: &super::remote::Target,
+  target: &str,
+  channel: BundleChannel,
+  report: impl Fn(PreparationProgress) + Send + Sync,
+) -> io::Result<UpdateResult> {
+  use ctl_client::component_update::{
+    PublicationDeployment, PublicationTarget, deploy_remote_publication,
+  };
+  let target = PublicationTarget {
+    destination: &remote.destination,
+    options: &remote.options,
+    interaction: &remote.interaction,
+    expected_account: remote.expected_account(),
+    target_triple: target,
+  };
+  let last_upload = Mutex::new(None);
+  let deployed = deploy_remote_publication(
+    home,
+    &target,
+    channel,
+    |stage| report_publication(stage, &last_upload),
+    report,
+  )
+  .await?;
+  let package = Package::FullBundle;
+  let manifest = match deployed {
+    PublicationDeployment::Installed(manifest) => manifest,
+    PublicationDeployment::Upload(prepared) => {
+      install_with_progress(remote, &prepared, package).await?;
+      prepared.bundle.manifest
+    }
+  };
+  remote.verify_active_manifest(&manifest).await?;
+  if remote.pinned()
+    && matches!(
+      remote.interaction,
+      ctl_client::SshInteraction::Multiplexed { .. }
+    )
+  {
+    remote.verify_activation(&manifest).await?;
+  }
+  Ok(UpdateResult {
+    package,
+    bundle_id: manifest.bundle_id,
+    target_triple: manifest.target_triple,
+    services_preserved: true,
+  })
+}
+
+fn report_publication(
+  stage: ctl_client::PublishedInstallStage,
+  last_upload: &Mutex<Option<Instant>>,
+) {
+  use ctl_client::PublishedInstallStage as Stage;
+  let message = match stage {
+    Stage::CheckingLocalCache => "Checking the publication and local cache",
+    Stage::UsingLocalCache => "Using the verified updater and runtime from the local cache",
+    Stage::UploadFallback => "Switching to local preparation and upload over SSH",
+    Stage::CheckingUpdater => "Checking ctlup on the remote host",
+    Stage::DownloadingUpdater => "Downloading ctlup on the remote host with curl or wget",
+    Stage::UploadingUpdater => "Uploading cached ctlup over SSH",
+    Stage::UploadingUpdaterBytes { sent, total } => {
+      return report_bytes("ctlup over SSH", sent, total, last_upload);
+    }
+    Stage::UsingInstalledUpdater => "Using the verified ctlup already on the remote host",
+    Stage::InstallingRuntime => {
+      "Checking the remote runtime and downloading it there with curl or wget if needed"
+    }
+    Stage::UploadingRuntime => "Uploading the cached runtime over SSH",
+    Stage::UploadingRuntimeBytes { sent, total } => {
+      return report_bytes("Runtime bundle over SSH", sent, total, last_upload);
+    }
+    Stage::ReusedRuntime => "Reusing the verified runtime already installed on the remote host",
+  };
+  eprintln!("ctlup: {message}");
+}
+
+fn report_preparation(
+  progress: &PreparationProgress,
+  last_download_report: &Mutex<Option<Instant>>,
+) {
+  match progress.phase {
+    // Cargo's build diagnostics already go to stderr.
+    PreparationPhase::Building => {}
+    PreparationPhase::Downloading => {
+      let received = progress.received_bytes;
+      let total = progress.total_bytes;
+      if received == 0 && total == 0 {
+        eprintln!("ctlup: Downloading {} on this computer", progress.detail);
+        *last_download_report.lock().unwrap() = Some(Instant::now());
+      } else {
+        report_bytes(&progress.detail, received, total, last_download_report);
+      }
+    }
+    _ => eprintln!("ctlup: {progress}"),
+  }
+}
+
+fn report_bytes(label: &str, bytes: u64, total: u64, last: &Mutex<Option<Instant>>) {
+  let mut last = last.lock().unwrap();
+  if bytes == 0
+    || (bytes != total && last.is_some_and(|last| last.elapsed() < Duration::from_secs(1)))
+  {
+    return;
+  }
+  if total == 0 {
+    eprintln!("ctlup: {label} ({bytes} bytes)");
+  } else {
+    eprintln!("ctlup: {label} ({bytes}/{total} bytes)");
+  }
+  *last = Some(Instant::now());
 }
 
 async fn prepare(
@@ -305,32 +441,8 @@ async fn prepare(
   target: &str,
   purpose: Purpose,
   source: &mut UpdateSource<'_>,
+  on_progress: impl Fn(PreparationProgress) + Send + Sync,
 ) -> io::Result<(PreparedUpdate, Option<u64>)> {
-  let last_download_report = Mutex::new(None::<Instant>);
-  let on_progress = |progress: PreparationProgress| match progress.phase {
-    // Cargo's build diagnostics already go to stderr.
-    PreparationPhase::Building => {}
-    PreparationPhase::Downloading => {
-      let received = progress.received_bytes;
-      let total = progress.total_bytes;
-      let mut last_report = last_download_report.lock().unwrap();
-      if received == 0 && total == 0 {
-        eprintln!("ctlup: Preparing {}", progress.detail);
-        *last_report = Some(Instant::now());
-      } else if received != 0
-        && (received == total
-          || last_report.is_none_or(|last| last.elapsed() >= Duration::from_secs(1)))
-      {
-        if total == 0 {
-          eprintln!("ctlup: {} ({received} bytes)", progress.detail);
-        } else {
-          eprintln!("ctlup: {} ({received}/{total} bytes)", progress.detail);
-        }
-        *last_report = Some(Instant::now());
-      }
-    }
-    _ => eprintln!("ctlup: {progress}"),
-  };
   let (prepared, pr_number) = match source {
     UpdateSource::Artifacts { source, pr } => {
       let pr_number = pr.as_ref().map(|build| build.number);
@@ -425,7 +537,12 @@ async fn install_with_progress(
   let mut display = ProgressDisplay::default();
   loop {
     tokio::select! {
-      result = &mut upload => return result.map_err(io::Error::other),
+      result = &mut upload => {
+        if result.is_ok() {
+          display.show(&receiver.borrow());
+        }
+        return result.map_err(io::Error::other);
+      },
       _ = tick.tick() => {},
       changed = receiver.changed() => {
         if changed.is_err() {
@@ -510,10 +627,12 @@ impl ProgressDisplay {
         Phase::DetectingPlatform => "Detecting platform",
         Phase::VerifyingBundle => "Verifying bundle",
         Phase::Connecting => "Opening upload channel",
+        Phase::CheckingRemoteInstallation => "Checking installed ctlup and",
         Phase::Extracting => "Extracting",
         Phase::Checking => "Checking",
         Phase::Activating => "Activating",
         Phase::Complete => "Installed",
+        Phase::Reused => "Reused installed",
         Phase::Transferring => unreachable!(),
       };
       eprintln!("ctlup: {stage} {file}");
@@ -541,6 +660,55 @@ impl Drop for ProgressDisplay {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn remote_publication_uses_the_requested_channel_only_for_published_sources() {
+    let home = std::env::temp_dir().join(format!("ctlup-remote-source-{}", uuid::Uuid::new_v4()));
+    ctl_core::private_fs::create_directory(&home).unwrap();
+    ctl_client::installation::set_channel(&home, BundleChannel::Nightly).unwrap();
+    let channel = |source: &BuildSource| {
+      UpdateSource::Artifacts { source, pr: None }
+        .publication_channel(&home)
+        .unwrap()
+    };
+    assert_eq!(
+      channel(&BuildSource::Automatic),
+      Some(BundleChannel::Nightly)
+    );
+    assert_eq!(
+      channel(&BuildSource::Published {
+        channel: BundleChannel::Stable
+      }),
+      Some(BundleChannel::Stable)
+    );
+    for source in [
+      BuildSource::Selected,
+      BuildSource::Provided {
+        path: home.clone(),
+        local_build: false,
+        ctld_package: None,
+      },
+    ] {
+      assert_eq!(channel(&source), None);
+    }
+    let mut pr = PrBuilds {
+      number: 1,
+      unix: None,
+      windows: None,
+    };
+    let pr_source = UpdateSource::Artifacts {
+      source: &BuildSource::Automatic,
+      pr: Some(&mut pr),
+    };
+    assert_eq!(pr_source.publication_channel(&home).unwrap(), None);
+    assert_eq!(
+      UpdateSource::Checkout { workspace: &home }
+        .publication_channel(&home)
+        .unwrap(),
+      None
+    );
+    std::fs::remove_dir_all(home).unwrap();
+  }
 
   #[test]
   fn transfer_redraws_are_bounded_without_delaying_completion_or_phase_changes() {

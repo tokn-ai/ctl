@@ -100,16 +100,28 @@ pub enum RemoteAgentInstallPhase {
   CheckingBundle,
   VerifyingBundle,
   Connecting,
+  CheckingRemoteInstallation,
+  CheckingLocalCache,
+  UsingLocalCache,
+  RemoteDownloadUpdater,
+  UsingRemoteUpdater,
+  RemoteInstallRuntime,
+  UploadCachedUpdater,
+  UploadCachedRuntime,
+  UploadFallback,
   Transferring,
   Extracting,
   Checking,
   Activating,
   Complete,
+  Reused,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RemoteAgentInstallProgressDto {
   pub phase: RemoteAgentInstallPhase,
+  #[serde(skip_serializing_if = "std::ops::Not::not")]
+  pub ssh_upload_fallback: bool,
   pub file_name: Option<String>,
   pub transferred_bytes: u64,
   pub total_bytes: u64,
@@ -1038,6 +1050,7 @@ mod tests {
   #[test]
   fn remote_agent_progress_uses_frontend_phase_and_byte_fields() {
     let json = serde_json::to_value(RemoteAgentInstallProgressDto {
+      ssh_upload_fallback: false,
       phase: RemoteAgentInstallPhase::Transferring,
       file_name: Some("bundle.tar.gz".into()),
       transferred_bytes: 1024,

@@ -78,8 +78,9 @@ To build for a Linux host and install in one step, run
 `ctlup dev --host NAME` for a saved host or `ctlup dev --destination ALIAS`
 for an OpenSSH alias. Use `ctlup dev --hosts work,lab` for multiple saved hosts
 and `--workspace` to select a checkout. To install on this computer, run
-`ctlup dev` separately. The desktop development build offers
-**Build from checkout** in the update dialog.
+`ctlup dev` separately. In a desktop app installed with `ctlup dev --app`,
+select a Linux x64 or ARM64 SSH host and choose **Build from checkout**.
+The app builds from the checkout used to compile it, then uploads to the host.
 
 Install Zig, `cargo-zigbuild`, rustup, Make, and Perl with `FindBin` and
 `IPC::Cmd` for a host build. The script installs the Linux Rust target on first
@@ -116,18 +117,19 @@ target/development-bundles/updaters/<target>/
   ctlup-<target>.json
 ```
 
-Use that directory as **Provided build files** in the component update dialog,
-or pass it to `ctlup update --host NAME --from DIRECTORY`. Do not
-enable **Native local build**: the directory is already packaged for Linux.
-Updates preserve running sessions; restarting an existing daemon remains a
-separate action.
+In the component update dialog, choose **Provided build files** and enter the
+path to `<target>/`. Leave **Native local build** unchecked for this packaged
+Linux build. From the CLI, run `ctlup update --host NAME --from DIRECTORY`
+with the same directory.
 
-Debug checkout builds discover the adjacent target updater automatically. When
-using these files with a standalone `ctlup` or an offline desktop build, retain
-the updater sidecars and set `CTLUP_BUNDLES_DIR` to their directory. The updater
-metadata and bytes are verified before SSH bootstrap; no remote download is
-required. Copying only the six runtime executables is insufficient to bootstrap
-an updater for a foreign target offline.
+To use a copied build, keep `<target>/` and `updaters/<target>/` under the same
+parent directory. The app and standalone `ctlup` discover the matching updater
+in that layout, including outside a checkout. For separately stored updater
+files, set `CTLUP_BUNDLES_DIR` to the directory containing `ctlup-<target>.json`
+and its binary. The client checks the target, version, revision, and checksum
+locally before transferring the required files over SSH. Both computers can
+be offline from the publication server. Restart a running daemon separately
+when ready to use the installed build.
 
 Failed or cancelled builds do not replace the previous output. Consumers must
 check the command's exit status rather than reuse that output after a failure.

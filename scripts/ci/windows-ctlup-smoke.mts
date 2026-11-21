@@ -73,7 +73,7 @@ async function status(program: string, target: string[]): Promise<Status> {
 }
 
 async function bootstrapFiles(home: string): Promise<string[]> {
-  return (await readdir(home)).filter((name) => /^ctlup-[0-9a-f]{32}\.exe$/i.test(name)).sort();
+  return (await readdir(home)).filter((name) => /^(ctlup-[0-9a-f]{32}\.exe|\.ctlup-fetch-[0-9a-f]{32})$/i.test(name)).sort();
 }
 
 async function verifyDesktopSetup(destination: string, bundle: string, bundle_id: string): Promise<void> {
@@ -215,9 +215,16 @@ async function main(): Promise<void> {
     assert.equal(rolled_back.previous?.distribution_id, second.bundle_id);
     await assert_digest(alternate.sha256);
     if (destination) {
+      assert.ok(account_id);
       // Re-select the cached installation after rollback with the same updater.
       await json(installed, update);
       assert.deepEqual(await status(installed, pinned_target), updated);
+      const test = "ssh_install::published::tests::windows_openssh_streams_each_cached_publication_artifact";
+      const result = await execute("cargo", ["test", "--locked", "-p", "ctl-client", "--lib", test, "--", "--ignored", "--exact", "--color", "never"], {
+        env: { ...process.env, CTL_TEST_SSH_HOST: destination, CTL_TEST_WINDOWS_DESKTOP_BUNDLE: second_bundle, CTL_TEST_WINDOWS_ACCOUNT_ID: account_id },
+        timeout: 600_000,
+      });
+      assert.ok(result.stdout.split(/\r?\n/).includes(`test ${test} ... ok`), result.stdout);
       assert.deepEqual(await bootstrapFiles(home), before_bootstrap);
     }
     console.log(`Windows ctlup install, update and rollback passed${destination ? " over OpenSSH" : ""}.`);

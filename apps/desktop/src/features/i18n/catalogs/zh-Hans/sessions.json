@@ -587,7 +587,7 @@
   "ssh_flow.vpn_update": "运行 VPN 的主机 {host} 需要更新组件。更新该 SSH 主机后，ctl 会通过其 VPN 重试连接。正在运行的会话会保留。",
   "ssh_flow.wait_discovery": "请等待 Tailscale 完成发现，再选择设备。",
   "ssh_flow.windows_default_shell": "Windows OpenSSH 必须使用 cmd.exe 作为默认 Shell。",
-  "ssh_flow.windows_direct": "请直接在此 Windows 主机上管理远程组件。",
+  "ssh_flow.windows_direct": "请在 Windows 主机上直接检查运行中的组件。",
   "ssh_prompt.authentication": "SSH 身份验证",
   "ssh_prompt.continue": "继续",
   "ssh_prompt.never": "永不",

@@ -78,13 +78,22 @@ pub(crate) async fn provision_manager_bytes(home: &Path, bytes: Vec<u8>) -> io::
     }
     #[cfg(unix)]
     {
-      let _ = (home, verified);
+      use std::os::unix::fs::PermissionsExt as _;
+      let _ = home;
       let directory = stage
         .0
         .parent()
         .ok_or_else(|| io::Error::other("missing manager directory"))?;
-      manager_destination(&directory.join("ctlup"))?;
-      std::fs::rename(&stage.0, directory.join("ctlup"))?;
+      let destination = directory.join("ctlup");
+      manager_destination(&destination)?;
+      if std::fs::symlink_metadata(&destination).is_ok_and(|file| {
+        file.len() == verified.len() as u64 && file.permissions().mode() & 0o100 != 0
+      }) && crate::components::read_input(&destination, ctl_core::bundles::MAX_FILE_BYTES)?
+        == verified
+      {
+        return Ok(());
+      }
+      std::fs::rename(&stage.0, destination)?;
       private_fs::sync_directory(directory)
     }
   })
@@ -156,13 +165,11 @@ pub async fn updater_for_manifest(
       return native_updater(&path).await;
     }
   }
+  let configured = ["CTL_REMOTE_BUNDLES_DIR", "CTLUP_BUNDLES_DIR"]
+    .into_iter()
+    .filter_map(std::env::var_os)
+    .map(PathBuf::from);
   let mut directories = Vec::new();
-  if let Some(directory) = std::env::var_os("CTL_REMOTE_BUNDLES_DIR") {
-    directories.push(PathBuf::from(directory));
-  }
-  if let Some(directory) = std::env::var_os("CTLUP_BUNDLES_DIR") {
-    directories.push(PathBuf::from(directory));
-  }
   if let Some(workspace) = crate::component_update::development_workspace() {
     directories.push(
       workspace
@@ -175,9 +182,20 @@ pub async fn updater_for_manifest(
     directories.push(parent.join("resources/agent-bundles"));
     directories.push(parent.join("../Resources/agent-bundles"));
   }
-  for directory in directories {
+  for (directory, explicit) in configured
+    .map(|path| (path, true))
+    .chain(directories.into_iter().map(|path| (path, false)))
+  {
     match crate::remote_bundle::published::read_updater(&directory, target) {
-      Ok(updater) => return Ok(updater.bytes),
+      Ok(updater) => {
+        // An app or debug checkout may include an unrelated publication.
+        // A sidecar explicitly provided by the caller must match.
+        if !explicit && verify_supplied_identity(manifest, &updater.info).is_err() {
+          continue;
+        }
+        remember_verified_updater(home, manifest, &updater)?;
+        return Ok(updater.bytes);
+      }
       Err(crate::remote_bundle::Error::Io(error)) if error.kind() == io::ErrorKind::NotFound => {}
       Err(error) => return Err(io::Error::other(error)),
     }
@@ -206,7 +224,6 @@ pub async fn updater_for_manifest(
   )
   .await
   .map_err(io::Error::other)?;
-  verify_supplied_identity(manifest, &updater.info)?;
   remember_verified_updater(home, manifest, &updater)?;
   Ok(updater.bytes)
 }

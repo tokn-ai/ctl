@@ -6,6 +6,39 @@ pub(super) const VERSION: &str = "0.1.0";
 pub(super) const REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
 pub(super) const TARGET: &str = "aarch64-apple-darwin";
 
+#[test]
+fn remote_installer_verifies_pinned_archives_for_each_manifest_layout() {
+  use compatibility::tests::Fixture;
+  for (target, fixture) in [
+    (TARGET, Fixture::new(VERSION, REVISION).with_clients()),
+    (
+      WINDOWS_TARGET,
+      Fixture::new(VERSION, REVISION).with_clients().for_windows(),
+    ),
+  ] {
+    let archive = fixture.archive();
+    let manifest = fixture.bind_archive(&archive);
+    let actual = verify_installation_archive(manifest.clone(), target, archive.clone()).unwrap();
+    assert_eq!(actual.git_revision, REVISION);
+    assert!(verify_installation_archive(manifest.clone(), target, b"corrupt".to_vec()).is_err());
+    let other = if target == TARGET {
+      WINDOWS_TARGET
+    } else {
+      TARGET
+    };
+    assert!(verify_installation_archive(manifest, other, archive).is_err());
+  }
+  for old in [
+    Fixture::new(VERSION, REVISION),
+    Fixture::new(VERSION, REVISION)
+      .with_clients()
+      .without_shared_services(),
+  ] {
+    let archive = old.archive();
+    assert!(verify_installation_archive(old.bind_archive(&archive), TARGET, archive).is_err());
+  }
+}
+
 pub(super) fn build() -> ComponentBuildInfo {
   ComponentBuildInfo {
     version: VERSION.into(),

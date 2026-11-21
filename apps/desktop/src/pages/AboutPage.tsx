@@ -11,6 +11,7 @@ import { UpdateComponentsDialog } from "../components/components/UpdateComponent
 import { PublishedBundleStatus } from "../components/components/PublishedBundleStatus";
 import { SshHostFlow } from "../components/sessions/SshHostFlow";
 import { useComponentVersions } from "../features/about/useComponentVersions";
+import { supportsComponentUpdate } from "../features/targets/targets";
 import type { ComponentActionPreflight, ComponentActionResult, ComponentUpdateContext, ConnectionTarget, SshConnectionTarget } from "../lib/types";
 import "../components/about/about.css";
 
@@ -49,7 +50,7 @@ export function AboutPage({ visible, on_close, on_restarted, on_dialog_change, e
   const local = model.snapshot?.components.filter((row) => row.location === "local" && row.component !== "ctmux") ?? [];
   const remote = model.snapshot?.components.filter((row) => row.location === "remote") ?? [];
   const manageable_targets = remote_targets.filter((target): target is SshConnectionTarget =>
-    target.kind === "ssh" && target.remote_platform !== "windows");
+    target.kind === "ssh" && supportsComponentUpdate(target));
   const table_props = { busy_id: model.busy_id, restarting: model.restarting, action_error: model.action_error, on_restart: (id: string) => void model.requestRestart(id) };
 
   return <>
@@ -69,10 +70,9 @@ export function AboutPage({ visible, on_close, on_restarted, on_dialog_change, e
         <PublishedBundleStatus visible={visible} on_update={(channel) => setUpdateContext({ source: { kind: "published", channel } })} />
         <ComponentBundlePanel visible={visible} on_selected={() => void model.refresh()} />
         <section className="about-section" aria-labelledby="about-local"><h2 id="about-local">{t("about.local_components")}</h2><p className="about-muted">{t("about.local_help")}</p>{local.length ? <ComponentVersionTable rows={local} {...table_props} /> : !model.loading ? <p className="about-muted">{t("about.no_local_components")}</p> : null}</section>
-        <section className="about-section" aria-labelledby="about-remote"><h2 id="about-remote">{t("about.remote_hosts")}</h2><p className="about-muted">{t("about.remote_help")}</p>{remote.length ? <ComponentVersionTable rows={remote} {...table_props} on_manage_host={(host_id, mode) => {
-          const target = manageable_targets.find((target) => target.host_id === host_id);
-          if (target) { if (mode === "update") setUpdateContext({ targets: [target] }); else setComponentFlow({ target, mode }); }
-        }} manageable_host_ids={manageable_targets.flatMap((target) => target.host_id ? [target.host_id] : [])} /> : !model.loading ? <p className="about-empty">{t("about.no_remote_hosts")}</p> : null}</section>
+        <section className="about-section" aria-labelledby="about-remote"><h2 id="about-remote">{t("about.remote_hosts")}</h2><p className="about-muted">{t("about.remote_help")}</p>{remote.length ? <ComponentVersionTable rows={remote} {...table_props} targets={manageable_targets} on_manage_host={(target, mode) => {
+          if (mode === "update") setUpdateContext({ targets: [target] }); else setComponentFlow({ target, mode });
+        }} /> : !model.loading ? <p className="about-empty">{t("about.no_remote_hosts")}</p> : null}</section>
         <div className="about-protocol-legend" aria-label={t("about.protocol_legend")}>
           <span className="about-protocol-current"><Icon name="check" size={14} />{t("about.current_protocol")}</span>
           <span className="about-protocol-compatible"><Icon name="check" size={14} />{t("about.compatible_protocol")}</span>

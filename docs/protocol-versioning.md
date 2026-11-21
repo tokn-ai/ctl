@@ -431,6 +431,15 @@ Older updaters that reject this optional CLI command retain their existing uploa
 behavior. Installation progress markers, catalog schemas and named protocol builds
 retain their versions.
 
+Published SSH updates can probe the target updater for the optional private
+`install-publication` command. The client pins the release, sends the exact
+bundle-set metadata, and can supply cached archive bytes on the same stream.
+The target verifies the archive before activation and returns the managed
+manifest with `ctl-published-install-v1`. Explicit pre-install unavailability
+uses `ctl-published-unavailable-v1` and exit code 12. Older updaters use the
+existing SSH archive installer. These markers are private to the deployment
+command. Named service protocol versions and internal builds are unchanged.
+
 ## Discovery and SSH framing
 
 The default ctld socket or Windows pipe is keyed by the protocol major, such as

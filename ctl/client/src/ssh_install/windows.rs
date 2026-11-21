@@ -1,6 +1,6 @@
 use super::{
-  UpdaterUpload, managed_installation, report_reused, require_updater_success,
-  run_package_install_with_prefix, run_updater_command,
+  UpdaterUpload, managed_installation, require_updater_success, run_package_install_with_prefix,
+  run_updater_command,
 };
 use crate::{
   CoreError, RemoteInstallEvent, RemotePlatform, SSH_PROGRAM, SshConnectionOptions, SshInteraction,
@@ -24,7 +24,7 @@ try {
 } finally { $file.Dispose() }
 ";
 
-fn powershell_command(script: &str) -> io::Result<String> {
+pub(super) fn powershell_command(script: &str) -> io::Result<String> {
   let command = encoded_powershell_command(script);
   if command.len() < 8000 {
     return Ok(command);
@@ -36,9 +36,12 @@ fn powershell_command(script: &str) -> io::Result<String> {
   compressor.write_all(script.as_bytes())?;
   let encoded = base64::engine::general_purpose::STANDARD.encode(compressor.finish()?);
   let wrapper = format!(
-    "$b=[Convert]::FromBase64String('{encoded}');$s=[IO.Compression.GZipStream]::new([IO.MemoryStream]::new($b),[IO.Compression.CompressionMode]::Decompress);$r=[IO.StreamReader]::new($s,[Text.Encoding]::UTF8);try{{&([ScriptBlock]::Create($r.ReadToEnd()))}}finally{{$r.Dispose()}}"
+    "$b=[Convert]::FromBase64String('{encoded}');$s=[IO.Compression.GZipStream]::new([IO.MemoryStream]::new($b),[IO.Compression.CompressionMode]::Decompress);$r=[IO.StreamReader]::new($s,[Text.Encoding]::UTF8);try{{&([ScriptBlock]::Create($r.ReadToEnd()));exit $LASTEXITCODE}}catch{{[Console]::Error.WriteLine($_);exit 1}}finally{{$r.Dispose()}}"
   );
-  let command = encoded_powershell_command(&wrapper);
+  // This wrapper contains only fixed ASCII and base64. A single cmd.exe
+  // quoted argument avoids doubling the compressed payload's encoding again.
+  let command =
+    format!(r#"powershell.exe -NoLogo -NoProfile -NonInteractive -Command "{wrapper}""#);
   if command.len() >= 8000 {
     return Err(io::Error::new(
       io::ErrorKind::InvalidInput,
@@ -173,12 +176,13 @@ if ($code -eq 0) {{
 exit $code"#,
     manifest.bundle_id,
   );
+  on_progress(RemoteInstallEvent::CheckingRemoteInstallation);
   let command = windows_ssh_command(destination, options, interaction, &preflight).await?;
   let (status, stdout, stderr) = run_updater_command(command, &[], |_| {}).await?;
   let prefix = match status.code() {
     Some(0) => {
       require_updater_success(status, &stdout, &stderr, b"ctl-install-v1\n")?;
-      report_reused(archive, layout, &on_progress);
+      on_progress(RemoteInstallEvent::Reused);
       return Ok(());
     }
     Some(10) => &[],
@@ -270,18 +274,7 @@ mod tests {
     assert!(encoded_powershell_command(&script).len() >= 8000);
     let command = powershell_command(&script).unwrap();
     assert!(command.len() < 8000);
-    let encoded = command.rsplit_once(' ').unwrap().1;
-    let bytes = base64::engine::general_purpose::STANDARD
-      .decode(encoded)
-      .unwrap();
-    let utf16: Vec<_> = bytes
-      .as_chunks::<2>()
-      .0
-      .iter()
-      .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
-      .collect();
-    let wrapper = String::from_utf16(&utf16).unwrap();
-    let compressed = wrapper
+    let compressed = command
       .split_once("FromBase64String('")
       .unwrap()
       .1

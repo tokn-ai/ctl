@@ -513,22 +513,15 @@ fn installation_routes(
   (pointer, routes)
 }
 
-#[tokio::test]
-async fn installation_download_pins_both_assets_when_the_channel_advances() {
-  let home = std::env::temp_dir().join(format!(
-    "ctl-installation-publication-{}",
-    uuid::Uuid::new_v4()
-  ));
-  ctl_core::private_fs::create_directory(&home).unwrap();
-  let target = "aarch64-apple-darwin";
-  let channel_path = "/bundles/channels/nightly.json";
-  let first_revision = "a".repeat(40);
-  let second_revision = "b".repeat(40);
-  let server = Server::start_with(|root| {
-    let (initial, mut routes) =
-      installation_routes(root, target, "first", "0.1.0", &first_revision);
-    let (next, next_routes) =
-      installation_routes(root, target, "second", "0.1.1", &second_revision);
+async fn advancing_installation_server(
+  channel_path: &'static str,
+  target: &str,
+  first_revision: &str,
+  second_revision: &str,
+) -> Server {
+  Server::start_with(|root| {
+    let (initial, mut routes) = installation_routes(root, target, "first", "0.1.0", first_revision);
+    let (next, next_routes) = installation_routes(root, target, "second", "0.1.1", second_revision);
     routes.extend(next_routes);
     let mut initial = Some(initial);
     move |path: &str| {
@@ -539,31 +532,73 @@ async fn installation_download_pins_both_assets_when_the_channel_advances() {
       }
     }
   })
-  .await;
+  .await
+}
+
+fn assert_completed_downloads(
+  progress: &[DownloadProgress],
+  updater: &VerifiedUpdater,
+  bundle: &VerifiedBundle,
+) {
+  for (artifact, size) in [
+    (DownloadArtifact::Updater, updater.info.size),
+    (DownloadArtifact::Runtime, bundle.archive.len() as u64),
+  ] {
+    let complete = progress
+      .iter()
+      .rfind(|event| event.artifact == artifact)
+      .unwrap();
+    assert_eq!(
+      (complete.received_bytes, complete.total_bytes),
+      (size, size)
+    );
+  }
+}
+
+#[tokio::test]
+async fn installation_download_pins_both_assets_when_the_channel_advances() {
+  let temp = crate::installation::TemporaryDirectory::new("publication-test").unwrap();
+  let home = &temp.0;
+  let target = "aarch64-apple-darwin";
+  let channel_path = "/bundles/channels/nightly.json";
+  let first_revision = "a".repeat(40);
+  let second_revision = "b".repeat(40);
+  let server =
+    advancing_installation_server(channel_path, target, &first_revision, &second_revision).await;
   let cache = home.join(".tokn/ctl/cache");
   let progress = Mutex::new(Vec::new());
-  let (bundle, updater) = server
+  let plan = server
     .resolver()
-    .download_installation_cached(
-      BundleChannel::Nightly,
-      target,
-      &cache.join("downloads"),
-      &cache.join("updaters"),
-      &|event| progress.lock().unwrap().push(event),
-    )
+    .installation_plan(BundleChannel::Nightly, target)
     .await
     .unwrap();
+  let requests = server.requests.lock().unwrap().clone();
+  assert_eq!(
+    requests,
+    [
+      channel_path,
+      "/bundles/sets/first/bundle-set.json",
+      "/bundles/sets/first/build-info.json",
+      &format!("/bundles/sets/first/ctlup-{target}.json")
+    ]
+  );
+  assert!(plan.archive_url().contains("/sets/first/"));
+  assert!(plan.updater_url().contains("/sets/first/"));
+  let report = |event| progress.lock().unwrap().push(event);
+  let updater = plan
+    .download_updater(&cache.join("updaters"), report)
+    .await
+    .unwrap();
+  let bundle = plan
+    .download_runtime(&cache.join("downloads"), report)
+    .await
+    .unwrap();
+  assert_eq!(bundle.manifest, plan.manifest_bytes());
+  assert_eq!(plan.updater_info().sha256, updater.info.sha256);
   assert_eq!(bundle.git_revision, first_revision);
   assert_eq!(bundle.built_at.as_deref(), Some("2026-11-13T01:02:03Z"));
   assert_eq!(bundle.publication_id.as_deref(), Some("first"));
-  let manifest = BundleSet::parse_intrinsic(&bundle.manifest).unwrap();
-  let expected = &manifest
-    .target(target)
-    .unwrap()
-    .components
-    .as_ref()
-    .unwrap()["ctl-agent"]
-    .build;
+  let expected = &plan.components()["ctl-agent"].build;
   let cache_entry = super::super::BundleCacheEntry::publication(
     &cache.join("downloads"),
     target,
@@ -575,20 +610,7 @@ async fn installation_download_pins_both_assets_when_the_channel_advances() {
   assert_eq!(cached.built_at, bundle.built_at);
   assert_eq!(updater.info.git_revision, bundle.git_revision);
   assert_eq!(updater.bytes, b"fixture updater for first");
-  for (artifact, size) in [
-    (DownloadArtifact::Updater, updater.info.size),
-    (DownloadArtifact::Runtime, bundle.archive.len() as u64),
-  ] {
-    let progress = progress.lock().unwrap();
-    let complete = progress
-      .iter()
-      .rfind(|event| event.artifact == artifact)
-      .unwrap();
-    assert_eq!(
-      (complete.received_bytes, complete.total_bytes),
-      (size, size)
-    );
-  }
+  assert_completed_downloads(&progress.lock().unwrap(), &updater, &bundle);
   {
     let requests = server.requests.lock().unwrap();
     assert_eq!(requests[0], channel_path);
@@ -605,7 +627,69 @@ async fn installation_download_pins_both_assets_when_the_channel_advances() {
     .await
     .unwrap();
   assert_eq!(current.git_revision, second_revision);
-  std::fs::remove_dir_all(home).unwrap();
+  let previous_requests = server.requests.lock().unwrap().len();
+  let upload = crate::component_update::prepare_published_upload_with_cached(
+    home,
+    &plan,
+    Some(bundle),
+    Some(updater),
+    |_| {},
+  )
+  .await
+  .unwrap();
+  assert_eq!(upload.origin.as_ref(), Some(plan.origin()));
+  assert_eq!(
+    upload.bundle.manifest.components["ctl-agent"]
+      .build
+      .source_revision
+      .as_deref(),
+    Some(first_revision.as_str())
+  );
+  assert_eq!(server.requests.lock().unwrap().len(), previous_requests);
+}
+
+#[tokio::test]
+async fn pinned_local_cache_probes_are_independent_and_never_fetch_damaged_files() {
+  use sha2::{Digest as _, Sha256};
+  let target = WINDOWS_TARGET;
+  let server = Server::start(|root| {
+    let (channel, mut routes) =
+      installation_routes(root, target, "first", "0.1.0", &"a".repeat(40));
+    routes.insert("/bundles/channels/nightly.json".into(), channel);
+    routes
+  })
+  .await;
+  let home = crate::installation::TemporaryDirectory::new("partial-cache").unwrap();
+  let downloads = home.0.join(".tokn/ctl/cache/downloads");
+  let updaters = home.0.join(".tokn/ctl/cache/updaters");
+  let plan = server
+    .resolver()
+    .installation_plan(BundleChannel::Nightly, target)
+    .await
+    .unwrap();
+  let metadata_count = server.requests.lock().unwrap().len();
+  assert!(plan.cached_runtime(&downloads).await.unwrap().is_none());
+  assert!(plan.cached_updater(&updaters).await.unwrap().is_none());
+  assert!(!downloads.exists() && !updaters.exists());
+
+  let runtime = plan.download_runtime(&downloads, |_| {}).await.unwrap();
+  assert!(plan.cached_runtime(&downloads).await.unwrap().is_some());
+  assert!(plan.cached_updater(&updaters).await.unwrap().is_none());
+  let archive = downloads
+    .join(format!("{:x}", Sha256::digest(plan.manifest_bytes())))
+    .join(target)
+    .join(runtime.file_name);
+  std::fs::write(archive, b"damaged archive").unwrap();
+  let updater = plan.download_updater(&updaters, |_| {}).await.unwrap();
+  assert!(plan.cached_runtime(&downloads).await.unwrap().is_none());
+  assert!(plan.cached_updater(&updaters).await.unwrap().is_some());
+  std::fs::write(
+    updaters.join(updater.info.sha256).join("ctlup"),
+    b"damaged updater",
+  )
+  .unwrap();
+  assert!(plan.cached_updater(&updaters).await.unwrap().is_none());
+  assert_eq!(server.requests.lock().unwrap().len(), metadata_count + 2);
 }
 
 #[tokio::test]
@@ -675,6 +759,21 @@ async fn windows_installation_resolves_both_assets_from_its_companion_set() {
     format!("ctlup-0.1.0-{WINDOWS_TARGET}.exe")
   );
   assert_eq!(bundle.git_revision, updater.info.git_revision);
+  let cached_progress = Mutex::new(Vec::new());
+  resolver
+    .download_installation_cached(
+      BundleChannel::Nightly,
+      WINDOWS_TARGET,
+      &cache.join("downloads"),
+      &cache.join("updaters"),
+      &|event| cached_progress.lock().unwrap().push(event),
+    )
+    .await
+    .unwrap();
+  assert!(
+    cached_progress.lock().unwrap().is_empty(),
+    "verified local files should not report any downloaded bytes"
+  );
   let catalog = resolver.check(BundleChannel::Nightly).await.unwrap();
   assert!(
     catalog

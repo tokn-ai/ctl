@@ -160,6 +160,10 @@ async fn run(arguments: Arguments) -> io::Result<i32> {
         .transpose()?;
       return archive::activate(&home, &bundle_id, origin).await;
     }
+    Command::InstallPublication(request) => {
+      require_local(target)?;
+      return archive::install_publication(&home, request).await;
+    }
     #[cfg(windows)]
     Command::UpdaterDigest => {
       require_local(target)?;

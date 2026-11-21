@@ -29,6 +29,55 @@ pub(super) async fn install(home: &Path, origin: Option<CatalogOrigin>) -> io::R
   Ok(())
 }
 
+pub(super) async fn install_publication(
+  home: &Path,
+  request: super::arguments::PublicationArguments,
+) -> io::Result<i32> {
+  let origin = ctl_client::installation::decode_catalog_origin(&request.origin_hex)?;
+  let manifest_bytes = request.manifest_bytes;
+  if !(1..=ctl_client::remote_bundle::MAX_BUNDLE_SET_BYTES).contains(&manifest_bytes) {
+    return Err(io::Error::other("invalid publication manifest length"));
+  }
+  let mut input = tokio::io::stdin();
+  let mut manifest = vec![0; manifest_bytes];
+  input.read_exact(&mut manifest).await?;
+  let archive = if request.archive_stdin {
+    let mut archive = Vec::new();
+    let maximum = ctl_core::bundles::MAX_FILE_BYTES;
+    input
+      .take(maximum as u64 + 1)
+      .read_to_end(&mut archive)
+      .await?;
+    if archive.len() > maximum {
+      return Err(io::Error::other("published archive exceeds its size limit"));
+    }
+    Some(archive)
+  } else {
+    None
+  };
+  let Some((installed, reused)) = ctl_client::remote_bundle::install_host_publication(
+    home,
+    &request.target,
+    &request.archive_url,
+    origin,
+    manifest,
+    archive,
+  )
+  .await?
+  else {
+    println!("ctl-published-unavailable-v1");
+    return Ok(12);
+  };
+  if reused {
+    println!("ctl-published-reused-v1");
+  }
+  println!(
+    "ctl-published-install-v1\n{}",
+    serde_json::to_string(&installed).map_err(io::Error::other)?
+  );
+  Ok(0)
+}
+
 pub(super) async fn activate(
   home: &Path,
   bundle_id: &str,
@@ -57,7 +106,10 @@ pub(super) async fn activate(
 fn emit(event: ctl_client::RemoteInstallEvent) {
   use ctl_client::RemoteInstallEvent as Event;
   let line = match event {
-    Event::SendingUpdater { .. } | Event::CheckingUpdater => return,
+    Event::SendingUpdater { .. }
+    | Event::CheckingUpdater
+    | Event::CheckingRemoteInstallation
+    | Event::Reused => return,
     Event::Receiving { received_bytes } => {
       format!("ctl-install-progress-v1 receiving {received_bytes}")
     }

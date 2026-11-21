@@ -18,6 +18,7 @@ pub fn register(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wr
     component_update::update_components,
     component_update::cancel_component_update,
     component_update::catalog::check_component_updates,
+    component_update::catalog::component_update_checkout_available,
     about::bundles::get_component_bundles,
     about::bundles::select_component_bundle,
     about::restart::preflight_component_action,

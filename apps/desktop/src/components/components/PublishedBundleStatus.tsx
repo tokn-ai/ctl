@@ -49,7 +49,7 @@ export function PublishedBundleStatus({ visible = true, channel, on_update }: Pr
     </div>
     {catalog ? <p role="status">{intl.formatMessage({ id: "about.published_bundle" }, { channel: t(`about.channel_${catalog.channel}`), bundle: catalog.bundle_id, strong: (chunks) => <strong>{chunks}</strong> })}</p> : null}
     {catalog?.targets.some((target) => !target.compatible) ? <InlineFeedback severity="warning">{t("about.published_incompatible")}</InlineFeedback> : null}
-    {!channel && import.meta.env.DEV && snapshot?.local_development ? <p>{t("about.published_development")}</p> : null}
+    {on_update && !channel && snapshot?.local_development ? <p>{t("about.published_development")}</p> : null}
     {error ? <InlineFeedback>{t("about.published_check_error", { detail: error })}</InlineFeedback> : null}
   </section>;
 }

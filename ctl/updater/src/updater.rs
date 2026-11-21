@@ -3,7 +3,7 @@
 use clap::Parser;
 use ctl_client::cli::Channel;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[cfg(any(target_os = "macos", target_os = "linux", windows))]
 mod app;
@@ -114,14 +114,7 @@ async fn run(arguments: Arguments) -> io::Result<i32> {
     }
     Command::CatalogJson => {
       require_local(target)?;
-      let catalog = ctl_client::installation::InstallationCatalog::new(
-        ctl_core::installations::Installations::new(&home).catalog()?,
-      );
-      catalog.validate()?;
-      println!(
-        "{}",
-        serde_json::to_string(&catalog).map_err(io::Error::other)?
-      );
+      print_catalog(&home)?;
     }
     Command::PrepareInstall => {
       require_local(target)?;
@@ -176,6 +169,18 @@ async fn run(arguments: Arguments) -> io::Result<i32> {
     }
   }
   Ok(0)
+}
+
+fn print_catalog(home: &Path) -> io::Result<()> {
+  let catalog = ctl_client::installation::InstallationCatalog::new(
+    ctl_core::installations::Installations::new(home).catalog()?,
+  );
+  catalog.validate()?;
+  println!(
+    "{}",
+    serde_json::to_string(&catalog).map_err(io::Error::other)?
+  );
+  Ok(())
 }
 
 #[cfg(windows)]
@@ -249,7 +254,7 @@ pub(crate) fn source_with_bundle_override(
 }
 
 fn selected_channel(
-  home: &std::path::Path,
+  home: &Path,
   channel: Option<Channel>,
 ) -> io::Result<ctl_core::component_update::BundleChannel> {
   channel.map_or_else(
@@ -258,7 +263,7 @@ fn selected_channel(
   )
 }
 
-async fn check(home: &std::path::Path, channel: Option<Channel>, json: bool) -> io::Result<()> {
+async fn check(home: &Path, channel: Option<Channel>, json: bool) -> io::Result<()> {
   let channel = selected_channel(home, channel)?;
   let catalog = published::check(channel).await.map_err(io::Error::other)?;
   if json {

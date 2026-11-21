@@ -1,4 +1,4 @@
-use super::chrome::{CONTROLS_TITLE, VIEWER_TITLE};
+use super::chrome::{CONTROLS_TITLE, VIEWER_TITLE, button_strip_width};
 use block2::RcBlock;
 use eframe::egui;
 use objc2::{MainThreadMarker, rc::Retained, runtime::AnyObject};
@@ -6,7 +6,7 @@ use objc2_app_kit::{
   NSApplication, NSEvent, NSEventMask, NSEventType, NSScreen, NSWindow, NSWindowCollectionBehavior,
   NSWindowOrderingMode,
 };
-use objc2_foundation::{NSContainsRect, NSPoint, NSPointInRect, NSRect, NSSize, NSString};
+use objc2_foundation::{NSPoint, NSPointInRect, NSRect, NSSize, NSString};
 use std::{cell::Cell, ptr::NonNull, rc::Rc};
 
 #[derive(Clone)]
@@ -26,7 +26,7 @@ pub(super) struct AttachedPanel {
 struct Drag {
   press: NSPoint,
   viewer_origin: NSPoint,
-  panel_origin: NSPoint,
+  panel_offset_y: f64,
 }
 
 impl Drag {
@@ -37,18 +37,11 @@ impl Drag {
     )
   }
 
-  fn panel_at(self, viewer: NSPoint) -> NSPoint {
-    NSPoint::new(
-      self.panel_origin.x + (viewer.x - self.viewer_origin.x),
-      self.panel_origin.y + (viewer.y - self.viewer_origin.y),
-    )
-  }
-
   fn keep_panel_in_work_area(self, mut viewer: NSPoint, height: f64, area: NSRect) -> NSPoint {
     let bottom = area.min().y;
     let top = area.max().y - height;
     if bottom <= top {
-      let y = self.panel_at(viewer).y;
+      let y = viewer.y + self.panel_offset_y;
       viewer.y += y.clamp(bottom, top) - y;
     }
     viewer
@@ -73,22 +66,38 @@ pub(super) fn viewer() -> Option<ViewerWindow> {
   })
 }
 
-fn panel_frame(video: NSRect, work_area: NSRect, height: f64) -> Option<NSRect> {
+fn horizontal_panel_frame(
+  video: NSRect,
+  y: f64,
+  height: f64,
+  work_areas: impl Iterator<Item = NSRect>,
+) -> Option<NSRect> {
+  let mut left = f64::INFINITY;
+  let mut right = f64::NEG_INFINITY;
+  for area in work_areas.filter(|area| y >= area.min().y && y + height <= area.max().y) {
+    let visible_left = video.min().x.max(area.min().x);
+    let visible_right = video.max().x.min(area.max().x);
+    if visible_left < visible_right {
+      left = left.min(visible_left);
+      right = right.max(visible_right);
+    }
+  }
+  (left < right).then(|| NSRect::new(NSPoint::new(left, y), NSSize::new(right - left, height)))
+}
+
+fn panel_frame(
+  video: NSRect,
+  work_area: NSRect,
+  height: f64,
+  work_areas: impl Iterator<Item = NSRect> + Clone,
+) -> Option<NSRect> {
   if video.is_empty() || work_area.is_empty() || height <= 0.0 {
     return None;
   }
-  let width = video.size.width.min(work_area.size.width);
-  let x = video
-    .min()
-    .x
-    .clamp(work_area.min().x, work_area.max().x - width);
-  for y in [video.max().y, video.min().y - height] {
-    let frame = NSRect::new(NSPoint::new(x, y), NSSize::new(width, height));
-    if NSContainsRect(work_area, frame) {
-      return Some(frame);
-    }
-  }
-  None
+  [video.max().y, video.min().y - height]
+    .into_iter()
+    .filter(|&y| y >= work_area.min().y && y + height <= work_area.max().y)
+    .find_map(|y| horizontal_panel_frame(video, y, height, work_areas.clone()))
 }
 
 impl ViewerWindow {
@@ -97,27 +106,24 @@ impl ViewerWindow {
   }
 
   fn panel_frame(&self, height: f32) -> Option<NSRect> {
+    let screens = NSScreen::screens(MainThreadMarker::new()?).to_vec();
     panel_frame(
       self.window.frame(),
       self.window.screen()?.visibleFrame(),
       f64::from(height),
+      screens.iter().map(|screen| screen.visibleFrame()),
     )
   }
 
-  pub(super) fn can_attach(&self, height: f32) -> bool {
-    self.panel_frame(height).is_some()
+  pub(super) fn panel_width(&self, height: f32) -> Option<f64> {
+    Some(self.panel_frame(height)?.size.width)
   }
 
-  pub(super) fn attach_controls(
-    &self,
-    height: f32,
-    button_strip_width: f32,
-    ctx: &egui::Context,
-  ) -> Option<AttachedPanel> {
+  pub(super) fn attach_controls(&self, height: f32, ctx: &egui::Context) -> Option<AttachedPanel> {
     let frame = self.panel_frame(height)?;
     let panel = own_window(&self.application, CONTROLS_TITLE)?;
     let drag = Rc::new(Cell::new(None));
-    let monitor = monitor_drag(&self.window, &panel, &drag, button_strip_width, ctx)?;
+    let monitor = monitor_drag(&self.window, &panel, &drag, ctx)?;
     panel.setFrame_display(frame, false);
     panel.setHasShadow(false);
     panel.setExcludedFromWindowsMenu(true);
@@ -160,7 +166,6 @@ fn monitor_drag(
   viewer: &Retained<NSWindow>,
   panel: &Retained<NSWindow>,
   drag: &Rc<Cell<Option<Drag>>>,
-  button_strip_width: f32,
   ctx: &egui::Context,
 ) -> Option<Retained<AnyObject>> {
   let mtm = MainThreadMarker::new()?;
@@ -180,19 +185,22 @@ fn monitor_drag(
     match report.r#type() {
       NSEventType::LeftMouseDown => {
         drag.set(None);
+        let panel_frame = panel.frame();
+        let zoom = ctx.zoom_factor();
         if report.windowNumber() != panel.windowNumber()
           || !drag_hit(
             location,
-            panel.frame().size,
-            button_strip_width * ctx.zoom_factor(),
+            panel_frame.size,
+            button_strip_width(panel_frame.size.width as f32 / zoom) * zoom,
           )
         {
           return event.as_ptr();
         }
+        let viewer_origin = viewer.frame().origin;
         drag.set(Some(Drag {
           press: screen_point(),
-          viewer_origin: viewer.frame().origin,
-          panel_origin: panel.frame().origin,
+          viewer_origin,
+          panel_offset_y: panel_frame.origin.y - viewer_origin.y,
         }));
       }
       NSEventType::LeftMouseDragged | NSEventType::LeftMouseUp => {
@@ -208,22 +216,30 @@ fn monitor_drag(
         // panel's previous origin. Sample the pointer in screen coordinates.
         let pointer = NSEvent::mouseLocation();
         let origin = tracked.viewer_at(pointer);
-        let screen = NSScreen::screens(mtm)
-          .to_vec()
-          .into_iter()
+        let screens = NSScreen::screens(mtm).to_vec();
+        let screen = screens
+          .iter()
           .find(|screen| NSPointInRect(pointer, screen.frame()))
+          .cloned()
           .or_else(|| viewer.screen());
         // Reserve room vertically for the grabbed strip. AppKit would
         // otherwise constrain the child independently at the menu bar or Dock.
+        let height = panel.frame().size.height;
         let origin = screen.map_or(origin, |screen| {
-          tracked.keep_panel_in_work_area(origin, panel.frame().size.height, screen.visibleFrame())
+          tracked.keep_panel_in_work_area(origin, height, screen.visibleFrame())
         });
         if origin != viewer.frame().origin {
           viewer.setFrameOrigin(origin);
         }
-        let origin = tracked.panel_at(viewer.frame().origin);
-        if origin != panel.frame().origin {
-          panel.setFrameOrigin(origin);
+        let video = viewer.frame();
+        if let Some(frame) = horizontal_panel_frame(
+          video,
+          video.min().y + tracked.panel_offset_y,
+          height,
+          screens.iter().map(|screen| screen.visibleFrame()),
+        ) && frame != panel.frame()
+        {
+          panel.setFrame_display(frame, false);
         }
       }
       _ => return event.as_ptr(),
@@ -303,7 +319,7 @@ mod tests {
     let desktop = rect(-800.0, 24.0, 800.0, 580.0);
     let video = rect(-720.0, 180.0, 640.0, 360.0);
     assert_eq!(
-      panel_frame(video, desktop, 34.0),
+      panel_frame(video, desktop, 34.0, [desktop].into_iter()),
       Some(rect(-720.0, 540.0, 640.0, 34.0))
     );
   }
@@ -313,10 +329,44 @@ mod tests {
     let desktop = rect(0.0, 40.0, 800.0, 560.0);
     let video = rect(100.0, 200.0, 640.0, 400.0);
     assert_eq!(
-      panel_frame(video, desktop, 34.0),
+      panel_frame(video, desktop, 34.0, [desktop].into_iter()),
       Some(rect(100.0, 166.0, 640.0, 34.0))
     );
-    assert_eq!(panel_frame(desktop, desktop, 34.0), None);
+    assert_eq!(
+      panel_frame(desktop, desktop, 34.0, [desktop].into_iter()),
+      None
+    );
+  }
+
+  #[test]
+  fn title_panel_ends_at_the_visible_video_edges() {
+    let desktop = rect(0.0, 40.0, 1440.0, 820.0);
+    for (video, expected) in [
+      (
+        rect(-180.0, 100.0, 620.0, 360.0),
+        rect(0.0, 460.0, 440.0, 34.0),
+      ),
+      (
+        rect(1040.0, 100.0, 620.0, 360.0),
+        rect(1040.0, 460.0, 400.0, 34.0),
+      ),
+    ] {
+      assert_eq!(
+        panel_frame(video, desktop, 34.0, [desktop].into_iter()),
+        Some(expected)
+      );
+    }
+  }
+
+  #[test]
+  fn title_panel_can_span_an_adjacent_display() {
+    let left = rect(-800.0, 40.0, 800.0, 820.0);
+    let right = rect(0.0, 40.0, 1440.0, 820.0);
+    let video = rect(-180.0, 100.0, 620.0, 360.0);
+    assert_eq!(
+      panel_frame(video, right, 34.0, [left, right].into_iter()),
+      Some(rect(-180.0, 460.0, 620.0, 34.0))
+    );
   }
 
   #[test]
@@ -324,12 +374,12 @@ mod tests {
     let drag = Drag {
       press: NSPoint::new(-402.0, 420.0),
       viewer_origin: NSPoint::new(-550.0, 205.0),
-      panel_origin: NSPoint::new(-550.0, 565.0),
+      panel_offset_y: 360.0,
     };
     assert_eq!(drag.viewer_at(drag.press), drag.viewer_origin);
     let moved = drag.viewer_at(NSPoint::new(101.0, 380.0));
     assert_eq!(moved, NSPoint::new(-47.0, 165.0));
-    assert_eq!(drag.panel_at(moved), NSPoint::new(-47.0, 525.0));
+    assert_eq!(moved.y + drag.panel_offset_y, 525.0);
   }
 
   #[test]
@@ -346,19 +396,19 @@ mod tests {
     let above = Drag {
       press: NSPoint::ZERO,
       viewer_origin: NSPoint::new(100.0, 100.0),
-      panel_origin: NSPoint::new(100.0, 460.0),
+      panel_offset_y: 360.0,
     };
     let desired = NSPoint::new(200.0, 300.0);
     let moved = above.keep_panel_in_work_area(desired, 34.0, area);
     assert_eq!(moved, NSPoint::new(200.0, 206.0));
-    assert_eq!(above.panel_at(moved), NSPoint::new(200.0, 566.0));
+    assert_eq!(moved.y + above.panel_offset_y, 566.0);
 
     let below = Drag {
-      panel_origin: NSPoint::new(100.0, 66.0),
+      panel_offset_y: -34.0,
       ..above
     };
     let moved = below.keep_panel_in_work_area(NSPoint::new(200.0, 0.0), 34.0, area);
     assert_eq!(moved, NSPoint::new(200.0, 74.0));
-    assert_eq!(below.panel_at(moved), NSPoint::new(200.0, 40.0));
+    assert_eq!(moved.y + below.panel_offset_y, 40.0);
   }
 }

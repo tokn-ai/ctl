@@ -4,7 +4,6 @@ use std::time::Duration;
 pub(super) const REVEAL_HEIGHT: f32 = 8.0;
 pub(super) const BAR_HEIGHT: f32 = 34.0;
 pub(super) const BUTTON_WIDTH: f32 = 40.0;
-const BUTTON_STRIP_WIDTH: f32 = 3.0 * BUTTON_WIDTH;
 pub(super) const VIEWER_TITLE: &str = "ctream viewer";
 #[cfg(any(target_os = "macos", test))]
 pub(super) const CONTROLS_TITLE: &str = "ctream viewer controls";
@@ -117,7 +116,9 @@ impl Chrome {
   pub fn show(&mut self, ctx: &egui::Context, status: Status<'_>) -> Frame {
     #[cfg(test)]
     if let Some(hovered) = self.test_attached_hover {
-      let action = hovered.then(|| show_controls(ctx, status, true)).flatten();
+      let action = hovered
+        .then(|| show_controls(ctx, status, true, Some(ctx.content_rect().width())))
+        .flatten();
       return Frame::attached(action.is_some_and(|action| action.apply(ctx)));
     }
     #[cfg(target_os = "macos")]
@@ -163,7 +164,7 @@ impl Chrome {
       self.dismiss();
       return Some(Frame::attached(false));
     }
-    if let Some(panel) = &self.attached {
+    let initial_width = if let Some(panel) = &self.attached {
       // AppKit moves the child with its parent. Keep the same attachment even
       // when the pointer leaves the strip or the viewer reaches a screen edge.
       if !panel.dragging() {
@@ -175,10 +176,9 @@ impl Chrome {
           return None;
         }
       }
+      None
     } else {
-      if !viewer.can_attach(height) {
-        return None;
-      }
+      let width = viewer.panel_width(height)?;
       let window = ctx.content_rect();
       let top = Rect::from_min_size(window.min, egui::vec2(window.width(), REVEAL_HEIGHT));
       let enter = ctx.input(|input| {
@@ -191,11 +191,12 @@ impl Chrome {
       if !enter {
         return Some(Frame::attached(false));
       }
-    }
+      Some(width as f32 / ctx.zoom_factor())
+    };
 
-    let action = show_controls(ctx, status, false);
+    let action = show_controls(ctx, status, false, initial_width);
     if self.attached.is_none() {
-      self.attached = Some(viewer.attach_controls(height, BUTTON_STRIP_WIDTH, ctx)?);
+      self.attached = Some(viewer.attach_controls(height, ctx)?);
     }
     let close = action.is_some_and(|action| action.apply(ctx));
     if close || matches!(action, Some(Action::Minimize)) {
@@ -261,15 +262,23 @@ pub(super) fn controls_id() -> egui::ViewportId {
 }
 
 #[cfg(any(target_os = "macos", test))]
-fn show_controls(ctx: &egui::Context, status: Status<'_>, draggable: bool) -> Option<Action> {
+fn show_controls(
+  ctx: &egui::Context,
+  status: Status<'_>,
+  draggable: bool,
+  initial_width: Option<f32>,
+) -> Option<Action> {
   let maximized = maximized(ctx);
-  let builder = egui::ViewportBuilder::default()
+  let mut builder = egui::ViewportBuilder::default()
     .with_title(CONTROLS_TITLE)
     .with_decorations(false)
     .with_resizable(false)
     .with_active(false)
-    .with_visible(false)
-    .with_inner_size([ctx.content_rect().width(), BAR_HEIGHT]);
+    .with_visible(false);
+  // AppKit owns placement once attached, including the clipped panel width.
+  if let Some(width) = initial_width {
+    builder = builder.with_inner_size([width, BAR_HEIGHT]);
+  }
   ctx.show_viewport_immediate(controls_id(), builder, |panel, class| {
     if class == egui::ViewportClass::Embedded {
       return None;
@@ -288,7 +297,7 @@ fn title_bar(
   maximized: bool,
   draggable: bool,
 ) -> Option<Action> {
-  let buttons_left = bounds.right() - BUTTON_STRIP_WIDTH;
+  let buttons_left = bounds.right() - button_strip_width(bounds.width());
   let title = Rect::from_min_max(bounds.min, egui::pos2(buttons_left, bounds.bottom()));
   let dragging = draggable && primary_press_in(ctx, title);
   egui::TopBottomPanel::top("ctream_title_bar")
@@ -303,12 +312,14 @@ fn title_bar(
         bounds.bottom(),
         ui.visuals().widgets.noninteractive.bg_stroke,
       );
-      ui.scope_builder(
-        egui::UiBuilder::new()
-          .max_rect(title.shrink2(egui::vec2(10.0, 0.0)))
-          .layout(egui::Layout::left_to_right(Align::Center)),
-        |ui| show_status(ui, status),
-      );
+      if title.width() > 20.0 {
+        ui.scope_builder(
+          egui::UiBuilder::new()
+            .max_rect(title.shrink2(egui::vec2(10.0, 0.0)))
+            .layout(egui::Layout::left_to_right(Align::Center)),
+          |ui| show_status(ui, status),
+        );
+      }
       if control(ui, bounds, 2, "−", "Minimize") {
         return Some(Action::Minimize);
       }
@@ -347,15 +358,24 @@ fn show_status(ui: &mut egui::Ui, status: Status<'_>) {
   }
 }
 
+fn button_width(width: f32) -> f32 {
+  BUTTON_WIDTH.min(width * 0.25)
+}
+
+pub(super) fn button_strip_width(width: f32) -> f32 {
+  3.0 * button_width(width)
+}
+
 fn control(ui: &mut egui::Ui, bounds: Rect, index: u8, icon: &str, label: &str) -> bool {
-  let right = bounds.right() - f32::from(index) * BUTTON_WIDTH;
+  let width = button_width(bounds.width());
+  let right = bounds.right() - f32::from(index) * width;
   let slot = Rect::from_min_size(
-    egui::pos2(right - BUTTON_WIDTH, bounds.top()),
-    egui::vec2(BUTTON_WIDTH, BAR_HEIGHT),
+    egui::pos2(right - width, bounds.top()),
+    egui::vec2(width, BAR_HEIGHT),
   );
   ui.put(
-    slot.shrink2(egui::vec2(2.0, 3.0)),
-    egui::Button::new(egui::RichText::new(icon).size(17.0)),
+    slot.shrink2(egui::vec2(2.0_f32.min(width * 0.10), 3.0)),
+    egui::Button::new(egui::RichText::new(icon).size(17.0_f32.min(width * 0.7))).truncate(),
   )
   .on_hover_text(label)
   .clicked()

@@ -24,7 +24,6 @@ pub fn rect(rect: Rect<ViewportSpace>) -> egui::Rect {
   )
 }
 
-pub const TOOLBAR_HEIGHT: f32 = 28.0;
 pub const MIN_WINDOW: egui::Vec2 = egui::vec2(200.0, 140.0);
 const PREFERRED_WINDOW: egui::Vec2 = egui::vec2(1100.0, 720.0);
 const RESIZE_SETTLE: Duration = Duration::from_millis(120);
@@ -34,8 +33,7 @@ fn aspect([width, height]: [u32; 2]) -> Option<f32> {
 }
 
 fn monitor_limit(monitor: Option<egui::Vec2>) -> egui::Vec2 {
-  // Leave space for the platform title bar and taskbar/dock, which are not
-  // included in egui's requested inner size.
+  // Leave space for the taskbar or dock when the monitor size includes it.
   monitor.map_or(egui::Vec2::INFINITY, |size| size * 0.94)
 }
 
@@ -55,12 +53,7 @@ pub fn initial_window(
 ) -> egui::Vec2 {
   let limit = PREFERRED_WINDOW.min(monitor_limit(monitor));
   aspect(source).map_or(limit, |aspect| {
-    sized_window(
-      aspect,
-      egui::vec2(sidebar_width, TOOLBAR_HEIGHT),
-      limit,
-      f32::INFINITY,
-    )
+    sized_window(aspect, egui::vec2(sidebar_width, 0.0), limit, f32::INFINITY)
   })
 }
 

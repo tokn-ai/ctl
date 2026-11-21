@@ -6,9 +6,12 @@ use ctream_client::{
 };
 use ctream_proto::{Element, Target, valid_capture_driver, valid_window_id};
 mod agent_sync;
+mod chrome;
 mod drivers;
 mod fonts;
 mod input;
+#[cfg(target_os = "macos")]
+mod macos_chrome;
 mod overlay;
 mod requests;
 mod semantic;
@@ -46,9 +49,12 @@ struct Preview<T: Transport> {
   driver: Option<String>,
 }
 
-enum PreviewMode {
+enum PreviewMode<'a> {
   Setup,
-  Viewer { interactive: bool },
+  Viewer {
+    interactive: bool,
+    pointer_regions: &'a [egui::Rect],
+  },
 }
 
 impl<T: Transport> Preview<T> {
@@ -145,10 +151,10 @@ impl<T: Transport> Preview<T> {
     ui: &mut egui::Ui,
     error: Option<&str>,
     elements: &[Element],
-    mode: PreviewMode,
+    mode: PreviewMode<'_>,
   ) {
     let ctx = ui.ctx().clone();
-    let interactive = match mode {
+    let (interactive, pointer_regions) = match mode {
       PreviewMode::Setup => {
         if let Some(error) = error {
           ui.label(error);
@@ -156,9 +162,12 @@ impl<T: Transport> Preview<T> {
           ui.spinner();
           ui.label("Waiting for the first frame…");
         }
-        false
+        (false, &[][..])
       }
-      PreviewMode::Viewer { interactive } => interactive,
+      PreviewMode::Viewer {
+        interactive,
+        pointer_regions,
+      } => (interactive, pointer_regions),
     };
     if let (Some(texture), Some(size)) = (&self.texture, self.image_size()) {
       let area = ui.available_rect_before_wrap();
@@ -201,7 +210,7 @@ impl<T: Transport> Preview<T> {
       {
         let active = error.is_none() && ctx.input(|i| i.focused) && !ctx.wants_keyboard_input();
         let result = if active {
-          ctx.input(|i| input.forward(&image, &i.raw.events, i.modifiers))
+          ctx.input(|i| input.forward(&image, &i.raw.events, i.modifiers, pointer_regions))
         } else if self.forwarding {
           input.reset()
         } else {
@@ -262,7 +271,8 @@ const USAGE: &str =
 TARGET is :DISPLAY, wayland-N, windows-N, or windows for the Windows desktop window list.
 Without an endpoint, choose a workspace host.
 Use --local to open the local agent directly.
-Selections open a view-only setup preview. Start hides setup and opens a separate viewer.\nClosing the viewer releases control and restores setup.";
+Selections open a view-only setup preview. Start hides setup and opens a separate viewer.
+Hover over the viewer's top edge for window controls. Closing it releases control and restores setup.";
 
 enum Endpoint {
   Workspace,

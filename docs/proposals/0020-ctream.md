@@ -179,12 +179,21 @@ mouse and keyboard forwarding where that source supports it. Setup retains the
 same capture and source selection; driver/source changes are locked while the
 viewer is open. A view-only source can still open in the viewer. Input
 initialization failure is reported without discarding a usable capture stream.
-Closing the viewer with its native window close control releases input,
-restores and activates setup, and keeps the same stream available as a view-only
-preview. The viewer opens at the source aspect ratio and adjusts its inner
-size after a source resize or a manual window resize. The video fills the
-canvas, with the toolbar and inspector outside it. The compositor can
-constrain window sizes, especially when maximized or fullscreen.
+The viewer opens without a title bar. Hover at its top edge to reveal the
+window controls. Drag the bar to move the viewer, or use its minimize,
+maximize, and close buttons. Closing the viewer releases input, activates
+setup, and keeps the same stream available as a view-only preview. On macOS
+the controls appear in an attached panel above the viewer, or below it when
+there is only room below. The panel follows the viewer and the video keeps its
+screen position and size as the controls appear and hide. Windows, Linux, and
+macOS windows without room for the panel use a separate strip inside the
+viewer, above the video. A resizable viewer grows to make room for that strip.
+Video clicks use the image rectangle in either layout. The viewer opens at the
+source aspect ratio and adjusts its inner size after a source resize or a
+manual window resize. Use
+the native resize edges on macOS or the bottom-right resize grip on Linux and
+Windows. The inspector keeps its own panel. The compositor can constrain
+window sizes, especially when maximized or fullscreen.
 
 Both windows use the same egui context and wgpu renderer. The native viewer is
 an immediate child viewport, so its events and repaint requests run through

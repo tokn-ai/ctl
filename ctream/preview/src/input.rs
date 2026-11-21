@@ -9,11 +9,16 @@ pub struct Input<R: Read + Send + 'static, W: Write + Send + 'static> {
   control: RemoteInput<R, W>,
   modifiers: Modifiers,
   pointer: Option<Pos2>,
+  buttons: [bool; egui::NUM_POINTER_BUTTONS],
   scroll: Vec2,
 }
 
 fn pixel(image: &ImageGeometry, pos: Pos2) -> Option<[u32; 2]> {
   image.pixel(Point::new(f64::from(pos.x), f64::from(pos.y)))
+}
+
+fn is_local(pos: Pos2, regions: &[egui::Rect]) -> bool {
+  regions.iter().any(|region| region.contains(pos))
 }
 
 fn keysym(key: Key) -> String {
@@ -54,6 +59,7 @@ impl<R: Read + Send + 'static, W: Write + Send + 'static> Input<R, W> {
       control,
       modifiers: Modifiers::NONE,
       pointer: None,
+      buttons: [false; egui::NUM_POINTER_BUTTONS],
       scroll: Vec2::ZERO,
     }
   }
@@ -81,8 +87,46 @@ impl<R: Read + Send + 'static, W: Write + Send + 'static> Input<R, W> {
   pub fn reset(&mut self) -> io::Result<()> {
     self.modifiers = Modifiers::NONE;
     self.pointer = None;
+    self.buttons.fill(false);
     self.scroll = Vec2::ZERO;
     self.control.reset()
+  }
+
+  fn forward_button(
+    &mut self,
+    image: &ImageGeometry,
+    pos: Pos2,
+    button: egui::PointerButton,
+    pressed: bool,
+    modifiers: Modifiers,
+    pointer_regions: &[egui::Rect],
+  ) -> io::Result<()> {
+    self.pointer = Some(pos);
+    let point = pixel(image, pos);
+    let held = &mut self.buttons[button as usize];
+    // The press owns the gesture. Always release an already forwarded button,
+    // even if the pointer is now over the local controls or outside the image.
+    let forward = if pressed {
+      point.is_some() && !is_local(pos, pointer_regions)
+    } else {
+      *held
+    };
+    if !forward {
+      return Ok(());
+    }
+    *held = pressed;
+    self.sync_modifiers(modifiers)?;
+    if let Some([x, y]) = point {
+      self.control.move_pointer(x, y, image.size())?;
+    }
+    let code = match button {
+      egui::PointerButton::Primary => 1,
+      egui::PointerButton::Middle => 2,
+      egui::PointerButton::Secondary => 3,
+      egui::PointerButton::Extra1 => 8,
+      egui::PointerButton::Extra2 => 9,
+    };
+    self.control.button(code, pressed)
   }
 
   pub fn forward(
@@ -90,13 +134,16 @@ impl<R: Read + Send + 'static, W: Write + Send + 'static> Input<R, W> {
     image: &ImageGeometry,
     events: &[Event],
     modifiers: Modifiers,
+    pointer_regions: &[egui::Rect],
   ) -> io::Result<()> {
     for event in events {
       match *event {
         Event::PointerGone => self.pointer = None,
         Event::PointerMoved(pos) => {
           self.pointer = Some(pos);
-          if let Some([x, y]) = pixel(image, pos) {
+          if (!is_local(pos, pointer_regions) || self.buttons.contains(&true))
+            && let Some([x, y]) = pixel(image, pos)
+          {
             self.control.move_pointer(x, y, image.size())?;
           }
         }
@@ -106,23 +153,7 @@ impl<R: Read + Send + 'static, W: Write + Send + 'static> Input<R, W> {
           pressed,
           modifiers,
         } => {
-          self.pointer = Some(pos);
-          let point = pixel(image, pos);
-          if pressed && point.is_none() {
-            continue;
-          }
-          self.sync_modifiers(modifiers)?;
-          if let Some([x, y]) = point {
-            self.control.move_pointer(x, y, image.size())?;
-          }
-          let code = match button {
-            egui::PointerButton::Primary => 1,
-            egui::PointerButton::Middle => 2,
-            egui::PointerButton::Secondary => 3,
-            egui::PointerButton::Extra1 => 8,
-            egui::PointerButton::Extra2 => 9,
-          };
-          self.control.button(code, pressed)?;
+          self.forward_button(image, pos, button, pressed, modifiers, pointer_regions)?;
         }
         Event::MouseWheel {
           unit,
@@ -130,7 +161,7 @@ impl<R: Read + Send + 'static, W: Write + Send + 'static> Input<R, W> {
           modifiers,
         } if self
           .pointer
-          .is_some_and(|point| pixel(image, point).is_some()) =>
+          .is_some_and(|pos| !is_local(pos, pointer_regions) && pixel(image, pos).is_some()) =>
         {
           if let Some([x, y]) = self.pointer.and_then(|point| pixel(image, point)) {
             self.control.move_pointer(x, y, image.size())?;
@@ -202,6 +233,7 @@ mod tests {
         &geometry(800.0, 600.0, [800, 400]),
         &[Event::PointerMoved(egui::pos2(200.0, 300.0))],
         Modifiers::NONE,
+        &[],
       )
       .unwrap();
     assert_eq!(*observed.bytes.lock().unwrap(), b"move 200 200 800 400\n");
@@ -225,7 +257,7 @@ mod tests {
       observed.bytes.lock().unwrap().clear();
       // No PointerMoved event arrives between these geometry changes.
       input
-        .forward(&image, std::slice::from_ref(&wheel), Modifiers::NONE)
+        .forward(&image, std::slice::from_ref(&wheel), Modifiers::NONE, &[])
         .unwrap();
       assert_eq!(*observed.bytes.lock().unwrap(), expected.as_bytes());
     }

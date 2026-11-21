@@ -18,3 +18,8 @@ serde_json.workspace = true
 sha2.workspace = true
 # Enable native GPU backends when eframe's default features are disabled.
 wgpu = { version = "27", default-features = false, features = ["metal", "vulkan", "dx12"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.4"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSApplication", "NSEvent", "NSGraphics", "NSResponder", "NSScreen", "NSWindow"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSGeometry", "NSString"] }

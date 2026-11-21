@@ -58,6 +58,8 @@ pub(super) fn managed(path: &Path, store: &Path) -> io::Result<bool> {
 
 fn shell_item(target: &Path, staging: &Path) -> io::Result<Vec<u8>> {
   const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+  // Windows PowerShell passes its temporary directory to the native compiler.
+  let staging = shell_path(dunce::canonicalize(staging)?);
   let system_root = std::env::var_os("SystemRoot")
     .ok_or_else(|| io::Error::other("Windows system directory is unavailable"))?;
   let powershell = Path::new(&system_root).join("System32/WindowsPowerShell/v1.0/powershell.exe");
@@ -73,8 +75,8 @@ fn shell_item(target: &Path, staging: &Path) -> io::Result<Vec<u8>> {
     ])
     .env("CTLUP_SHORTCUT_SCRIPT", include_str!("shortcut_pidl.ps1"))
     .env("CTLUP_SHORTCUT_TARGET", target)
-    .env("TEMP", staging)
-    .env("TMP", staging)
+    .env("TEMP", &staging)
+    .env("TMP", &staging)
     .stdin(Stdio::null())
     .output()?;
   if !output.status.success() {

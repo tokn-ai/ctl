@@ -19,10 +19,7 @@ pub(super) fn create(destination: &Path, target: &Path) -> io::Result<()> {
   let working_dir = target
     .parent()
     .ok_or_else(|| io::Error::other("desktop executable needs a parent directory"))?;
-  let staging = destination
-    .parent()
-    .ok_or_else(|| io::Error::other("desktop shortcut needs a staging directory"))?;
-  let id_list = shell_item(&target, staging)?;
+  let id_list = shell_item(&target)?;
   let target_path = target.as_os_str().encode_wide().collect::<Vec<_>>();
   let working_dir = working_dir.as_os_str().encode_wide().collect::<Vec<_>>();
   let bytes = encode(&id_list, &target_path, &working_dir)?;
@@ -56,10 +53,8 @@ pub(super) fn managed(path: &Path, store: &Path) -> io::Result<bool> {
   Ok(valid_digest && components.as_path() == Path::new(r"ctmux\ctmux-app.exe"))
 }
 
-fn shell_item(target: &Path, staging: &Path) -> io::Result<Vec<u8>> {
+fn shell_item(target: &Path) -> io::Result<Vec<u8>> {
   const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-  // Windows PowerShell passes its temporary directory to the native compiler.
-  let staging = shell_path(dunce::canonicalize(staging)?);
   let system_root = std::env::var_os("SystemRoot")
     .ok_or_else(|| io::Error::other("Windows system directory is unavailable"))?;
   let powershell = Path::new(&system_root).join("System32/WindowsPowerShell/v1.0/powershell.exe");
@@ -75,8 +70,6 @@ fn shell_item(target: &Path, staging: &Path) -> io::Result<Vec<u8>> {
     ])
     .env("CTLUP_SHORTCUT_SCRIPT", include_str!("shortcut_pidl.ps1"))
     .env("CTLUP_SHORTCUT_TARGET", target)
-    .env("TEMP", &staging)
-    .env("TMP", &staging)
     .stdin(Stdio::null())
     .output()?;
   if !output.status.success() {

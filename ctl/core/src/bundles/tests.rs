@@ -156,7 +156,9 @@ fn staging_uses_the_supplied_private_directory_even_with_a_profile() {
     let cache = Store::cache(&directory);
     assert_eq!(
       cache.root(),
-      directory.with_file_name("profile").join("cache/components")
+      directory
+        .with_file_name("profile")
+        .join("ctlup/cache/unpacked")
     );
     assert!(!cache.root().exists());
     return;

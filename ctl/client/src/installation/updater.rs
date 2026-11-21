@@ -54,60 +54,36 @@ pub(crate) async fn provision_manager_bytes(home: &Path, bytes: Vec<u8>) -> io::
   let capable = supports_development_layout(&stage.0).await;
   let lock = lock_manager_provisioning(home).await?;
   if !capable {
-    // Older bundles can still run, but their updater can prune checkout builds
-    // it cannot see. Keep a capable manager independently of the runtime.
     if installed_supports_development_layout(home).await? {
       return Ok(());
     }
     let executable = std::env::current_exe()?;
-    if updater_path(&executable) && supports_development_layout(&executable).await {
-      stage = stage_manager(home, native_updater(&executable).await?).await?;
-      verified = native_updater(&stage.0).await?;
-      if !supports_development_layout(&stage.0).await {
-        return Err(io::Error::other(
-          "the running updater changed during provisioning",
-        ));
-      }
-    } else if Installations::new(home).has_development_heads()? {
+    if !updater_path(&executable) || !supports_development_layout(&executable).await {
       return Err(io::Error::other(
-        "the bundled updater cannot retain checkout builds; run the installation with a newer ctlup",
+        "this publication requires a compatible ctlup; install an updater that supports storage layout 2",
+      ));
+    }
+    stage = stage_manager(home, native_updater(&executable).await?).await?;
+    verified = native_updater(&stage.0).await?;
+    if !supports_development_layout(&stage.0).await {
+      return Err(io::Error::other(
+        "the running updater changed during provisioning",
       ));
     }
   }
   let home = home.to_owned();
   tokio::task::spawn_blocking(move || {
     let _lock = lock;
-    #[cfg(windows)]
-    {
-      Installations::new(&home).install_manager(&verified)
-    }
-    #[cfg(unix)]
-    {
-      use std::os::unix::fs::PermissionsExt as _;
-      let _ = home;
-      let directory = stage
-        .0
-        .parent()
-        .ok_or_else(|| io::Error::other("missing manager directory"))?;
-      let destination = directory.join("ctlup");
-      manager_destination(&destination)?;
-      if std::fs::symlink_metadata(&destination).is_ok_and(|file| {
-        file.len() == verified.len() as u64 && file.permissions().mode() & 0o100 != 0
-      }) && crate::components::read_input(&destination, ctl_core::bundles::MAX_FILE_BYTES)?
-        == verified
-      {
-        return Ok(());
-      }
-      std::fs::rename(&stage.0, destination)?;
-      private_fs::sync_directory(directory)
-    }
+    Installations::new(&home).install_manager(&verified)
   })
   .await
   .map_err(io::Error::other)?
 }
 
 async fn lock_manager_provisioning(home: &Path) -> io::Result<std::fs::File> {
-  let path = ctl_core::paths::directory_for_account(home).join("bin/.manager.lock");
+  let directory = ctl_core::paths::updater_directory_for_account(home).join("state");
+  super::safe_directory(&directory)?;
+  let path = directory.join("manager.lock");
   tokio::task::spawn_blocking(move || {
     let file = private_fs::options()
       .read(true)
@@ -126,12 +102,10 @@ async fn lock_manager_provisioning(home: &Path) -> io::Result<std::fs::File> {
 }
 
 async fn stage_manager(home: &Path, bytes: Vec<u8>) -> io::Result<TemporaryManager> {
-  let directory = ctl_core::paths::directory_for_account(home).join("bin");
+  let directory = ctl_core::paths::updater_directory_for_account(home).join("staging");
   tokio::task::spawn_blocking(move || {
     use std::io::Write as _;
     super::safe_directory(&directory)?;
-    #[cfg(unix)]
-    manager_destination(&directory.join("ctlup"))?;
     let stage = TemporaryManager(directory.join(format!(
       ".ctlup-{}{}",
       uuid::Uuid::new_v4(),
@@ -151,14 +125,9 @@ async fn stage_manager(home: &Path, bytes: Vec<u8>) -> io::Result<TemporaryManag
 }
 
 async fn installed_supports_development_layout(home: &Path) -> io::Result<bool> {
-  #[cfg(windows)]
   let Some((path, _lease)) = Installations::new(home).manager_and_lease()? else {
     return Ok(false);
   };
-  #[cfg(unix)]
-  let path = ctl_core::paths::directory_for_account(home).join("bin/ctlup");
-  #[cfg(unix)]
-  manager_destination(&path)?;
   Ok(supports_development_layout(&path).await)
 }
 
@@ -172,20 +141,8 @@ async fn supports_development_layout(path: &Path) -> bool {
     .is_some_and(|version| version >= DEVELOPMENT_LAYOUT_VERSION)
 }
 
-#[cfg(unix)]
-fn manager_destination(path: &Path) -> io::Result<()> {
-  match std::fs::symlink_metadata(path) {
-    Ok(metadata) if !private_fs::is_owned_file(&metadata) => Err(io::Error::new(
-      io::ErrorKind::PermissionDenied,
-      "manager entry point must be an owned regular file, not a link or writable by others",
-    )),
-    Ok(_) => Ok(()),
-    Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-    Err(error) => Err(error),
-  }
-}
-
 struct TemporaryManager(PathBuf);
+
 impl Drop for TemporaryManager {
   fn drop(&mut self) {
     let _ = std::fs::remove_file(&self.0);
@@ -217,19 +174,13 @@ pub async fn updater_for_manifest(
     } else {
       executable.with_file_name(format!("ctlup{}", std::env::consts::EXE_SUFFIX))
     };
-    let paths = std::iter::once(source);
-    #[cfg(unix)]
-    let paths = paths.chain(std::iter::once(
-      ctl_core::paths::directory_for_account(home).join("bin/ctlup"),
-    ));
-    for path in paths {
-      match native_updater(&path).await {
+    {
+      match native_updater(&source).await {
         Ok(bytes) => return Ok(bytes),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(error),
       }
     }
-    #[cfg(windows)]
     if let Some((path, _lease)) =
       ctl_core::installations::Installations::new(home).manager_and_lease()?
     {
@@ -291,7 +242,7 @@ pub async fn updater_for_manifest(
   let updater = crate::remote_bundle::published::download_updater_cached(
     channel,
     target,
-    &ctl_core::paths::directory_for_account(home).join("cache/updaters"),
+    &ctl_core::paths::updater_directory_for_account(home).join("cache/updaters"),
   )
   .await
   .map_err(io::Error::other)?;
@@ -335,7 +286,7 @@ pub(crate) fn remember_verified_updater(
 ) -> io::Result<()> {
   verify_supplied_identity(manifest, &updater.info)?;
   crate::remote_bundle::published::cache_verified_for_manifest(
-    &ctl_core::paths::directory_for_account(home).join("cache/updaters"),
+    &ctl_core::paths::updater_directory_for_account(home).join("cache/updaters"),
     manifest,
     updater,
   )
@@ -350,7 +301,7 @@ fn supplied_updater(
     return Ok(None);
   };
   crate::remote_bundle::published::read_cached_updater(
-    &ctl_core::paths::directory_for_account(home).join("cache/updaters"),
+    &ctl_core::paths::updater_directory_for_account(home).join("cache/updaters"),
     &info,
   )
   .map(|updater| updater.map(|updater| updater.bytes))
@@ -361,7 +312,7 @@ pub(crate) fn supplied_updater_info(
   home: &Path,
   manifest: &ctl_core::bundles::Manifest,
 ) -> io::Result<Option<crate::remote_bundle::published::UpdaterInfo>> {
-  let root = ctl_core::paths::directory_for_account(home).join("cache/updaters");
+  let root = ctl_core::paths::updater_directory_for_account(home).join("cache/updaters");
   if !super::storage_exists(&root.join("records"))? {
     return Ok(None);
   }
@@ -494,7 +445,7 @@ mod tests {
       .unwrap();
     let _ = remember_supplied_updater(&root.0, &bundle, &root.0).unwrap();
     assert!(supplied_updater(&root.0, &manifest).unwrap().is_none());
-    assert!(!root.0.join(".tokn/ctl/cache/updaters").exists());
+    assert!(!root.0.join(".tokn/ctl/ctlup/cache/updaters").exists());
 
     // Explicit publisher lookups still reject GNU targets, even without files.
     for target in ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"] {
@@ -554,11 +505,12 @@ mod tests {
     let old = manager(None, "older publication");
     let capable = manager(Some(DEVELOPMENT_LAYOUT_VERSION), "development build");
     let next = manager(Some(DEVELOPMENT_LAYOUT_VERSION), "new publication");
-    let installed = ctl_core::paths::directory_for_account(&home.0).join("bin/ctlup");
+    let store = Installations::new(&home.0);
     for (candidate, expected) in [(&capable, &capable), (&old, &capable), (&next, &next)] {
       provision_manager_bytes(&home.0, candidate.clone())
         .await
         .unwrap();
+      let (installed, _lease) = store.manager_and_lease().unwrap().unwrap();
       assert_eq!(&std::fs::read(&installed).unwrap(), expected);
     }
   }
@@ -601,7 +553,7 @@ mod tests {
     let mut previous = Vec::new();
     for name in ["ctlup", "ctl"] {
       let script = format!(
-        "#!/bin/sh\ncase \"$1\" in --component-info) cat <<'METADATA'\n{metadata}\nMETADATA\n;; --version) printf '{name} 0.1.0\\n';; *) exit 1;; esac\n"
+        "#!/bin/sh\ncase \"$1\" in --component-info) cat <<'METADATA'\n{metadata}\nMETADATA\n;; --version) printf '{name} 0.1.0\\n';; installation-layout-version) printf '{DEVELOPMENT_LAYOUT_VERSION}\\n';; *) exit 1;; esac\n"
       );
       std::fs::write(provided.join(&binary), &script).unwrap();
       let info = serde_json::json!({
@@ -616,9 +568,12 @@ mod tests {
       .unwrap();
       let _ = remember_supplied_updater(&root, &bundle, &provided).unwrap();
       let outcome = provision_manager(&root, &bundle).await;
-      let installed = root.join(".tokn/ctl/bin/ctlup");
       if name == "ctlup" {
         outcome.unwrap();
+        let (installed, _lease) = Installations::new(&root)
+          .manager_and_lease()
+          .unwrap()
+          .unwrap();
         previous = std::fs::read(&installed).unwrap();
         assert_eq!(previous, script.as_bytes());
         assert!(
@@ -629,6 +584,10 @@ mod tests {
         );
       } else {
         assert!(outcome.unwrap_err().to_string().contains("not ctlup"));
+        let (installed, _lease) = Installations::new(&root)
+          .manager_and_lease()
+          .unwrap()
+          .unwrap();
         assert_eq!(std::fs::read(installed).unwrap(), previous);
       }
     }

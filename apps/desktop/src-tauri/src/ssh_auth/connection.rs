@@ -55,7 +55,7 @@ fn terminal_error(error: &CoreError, platform: RemotePlatform) -> CommandErrorDt
   {
     return CommandErrorDto::new(
       "windows_remote_agent_setup_required",
-      "Install the Windows components with `ctlup update --destination <ssh-alias> --remote-platform windows`, then reconnect. Use the default cmd.exe SSH shell.",
+      "Install the Windows components with `ctlup install --ssh <ssh-alias> --remote-platform windows`, then reconnect. Use the default cmd.exe SSH shell.",
     );
   }
   diagnostic
@@ -144,7 +144,7 @@ mod tests {
     ] {
       let error = terminal_error(&error, RemotePlatform::Windows);
       assert_eq!(error.code, "windows_remote_agent_setup_required");
-      assert!(error.message.contains("ctlup update"));
+      assert!(error.message.contains("ctlup install"));
       assert!(error.message.contains("--remote-platform windows"));
     }
     assert_eq!(

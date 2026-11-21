@@ -69,6 +69,8 @@ impl InstalledBuild {
 pub struct InstallationShow {
   pub schema_version: u16,
   pub active: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub active_origin: Option<ctl_core::installations::CatalogOrigin>,
   pub previous: Option<String>,
   pub installations: Vec<CatalogEntry>,
   pub builds: Vec<InstalledBuild>,
@@ -113,8 +115,9 @@ impl InstallationShow {
       insert_build(&mut builds, build)?;
     }
     let result = Self {
-      schema_version: 1,
+      schema_version: 2,
       active: status.active.map(|manifest| manifest.bundle_id),
+      active_origin: None,
       previous: status.previous.map(|manifest| manifest.bundle_id),
       installations,
       builds: builds.into_values().collect(),
@@ -132,8 +135,14 @@ impl InstallationShow {
   /// Reports unsupported schemas, duplicate identities, conflicting targets,
   /// missing selected builds or an oversized response.
   pub fn validate(&self) -> io::Result<()> {
-    if self.schema_version != 1 || self.builds.len() > MAX_INSPECTED_BUILDS {
+    if self.schema_version != 2 || self.builds.len() > MAX_INSPECTED_BUILDS {
       return Err(invalid("invalid installation show schema or size"));
+    }
+    if let Some(origin) = &self.active_origin {
+      origin.validate()?;
+      if self.active.is_none() {
+        return Err(invalid("source requires an active runtime selection"));
+      }
     }
     let missing = validate_missing_builds(&self.missing_builds)?;
     InstallationCatalog::new(self.installations.clone()).validate()?;
@@ -196,8 +205,7 @@ impl InstallationShow {
   }
 }
 
-/// Lists verified installed builds and native history from the authoritative
-/// catalog. Older complete installations are adopted on first inspection.
+/// Lists verified installed builds and the active runtime from the registry.
 ///
 /// # Errors
 /// Reports unsafe storage, modified builds or invalid catalog selections.
@@ -209,8 +217,9 @@ pub fn show(home: &Path) -> io::Result<InstallationShow> {
     .map(|bundle| InstalledBuild::from_manifest(&bundle.manifest))
     .collect::<io::Result<Vec<_>>>()?;
   let result = InstallationShow {
-    schema_version: 1,
+    schema_version: 2,
     active: inspection.active,
+    active_origin: inspection.active_origin,
     previous: inspection.previous,
     installations: inspection.entries,
     builds,
@@ -273,7 +282,10 @@ mod tests {
     files: &BTreeMap<String, Vec<u8>>,
   ) -> PathBuf {
     use std::io::Write as _;
-    let directory = store.root().join("installs").join(&manifest.bundle_id);
+    let directory = store
+      .updater_root()
+      .join("store/runtime")
+      .join(&manifest.bundle_id);
     ctl_core::private_fs::create_directory(&directory).unwrap();
     for (name, bytes) in files {
       let mut file = ctl_core::private_fs::options()
@@ -463,7 +475,7 @@ mod tests {
 
   #[cfg(unix)]
   #[test]
-  fn inspection_adopts_an_older_native_selection() {
+  fn inspection_ignores_a_build_in_the_import_cache() {
     let home = Home::new();
     let (manifest, mut files) = fixture(ctl_core::paths::native_target(), 'a');
     if cfg!(target_os = "macos") {
@@ -482,17 +494,10 @@ mod tests {
     legacy
       .select(ctl_core::bundles::Purpose::Local, &bundle)
       .unwrap();
-    assert!(!home.0.join(".tokn/ctl/installs").exists());
     let result = show(&home.0).unwrap();
-    assert_eq!(result.active.as_ref(), Some(&manifest.bundle_id));
-    assert_eq!(result.builds.len(), 1);
-    assert_eq!(result.builds[0].source, Source::Local);
-    assert_eq!(result.installations.len(), 1);
-    assert_eq!(
-      result.installations[0].origin.as_ref().unwrap().channel,
-      "local"
-    );
-    assert!(result.installations[0].current);
+    assert!(result.active.is_none());
+    assert_eq!(result.builds, []);
+    assert_eq!(result.installations, []);
   }
 
   #[test]
@@ -524,7 +529,10 @@ mod tests {
         .all(|entry| entry.bundle_id != older.bundle_id)
     );
 
-    let orphan_directory = store.root().join("installs").join(&older.bundle_id);
+    let orphan_directory = store
+      .updater_root()
+      .join("store/runtime")
+      .join(&older.bundle_id);
     assert_eq!(
       store.get(&older.bundle_id).unwrap_err().kind(),
       io::ErrorKind::NotFound
@@ -587,7 +595,7 @@ mod tests {
     invalid.builds[0].build.version.push('\n');
     assert!(invalid.validate().is_err());
     invalid = valid.clone();
-    invalid.schema_version = 2;
+    invalid.schema_version = 1;
     assert!(invalid.validate().is_err());
 
     let mut mismatched = valid.installations[0].clone();

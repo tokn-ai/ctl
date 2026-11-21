@@ -75,12 +75,7 @@ mod unix {
   use super::*;
   use crate::remote_bundle::compatibility::tests::Fixture;
   use sha2::{Digest, Sha256};
-  use std::{
-    fs,
-    os::unix::fs::PermissionsExt,
-    path::{Path, PathBuf},
-    sync::Mutex,
-  };
+  use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf, sync::Mutex};
 
   const TARGET: &str = "aarch64-unknown-linux-musl";
   const URL: &str = "https://assets.test/pinned/ctl'up";
@@ -88,6 +83,7 @@ mod unix {
   const MANIFEST: &[u8] = br#"{"original": true}"#;
   const HELPER: &[u8] = br#"#!/bin/sh
 set -eu
+if [ "$1" = installation-layout-version ]; then printf '2\n'; exit 0; fi
 if [ "$2" = --help ]; then
   if [ -f "$HOME/old" ]; then echo "error: unrecognized subcommand 'install-publication'" >&2; exit 2; fi
   if [ -f "$HOME/broken" ]; then echo 'failed to inspect executable' >&2; exit 2; fi
@@ -264,6 +260,7 @@ cat "$HOME/managed-manifest"
   #[tokio::test]
   async fn cached_bytes_cross_ssh_only_for_the_requested_artifact() {
     use PublishedInstallStage as Stage;
+    use sha2::{Digest as _, Sha256};
 
     let host = Host::new();
     let (result, phases) = host.install(Some(HELPER), None).await;
@@ -274,7 +271,12 @@ cat "$HOME/managed-manifest"
     assert!(phases.contains(&Stage::UploadingUpdaterBytes { sent: total, total }));
     assert!(!host.0.join("curl-args").exists());
     assert_eq!(fs::read(host.0.join("received")).unwrap(), MANIFEST);
-    let managed = host.0.join(Path::new(".tokn/ctl/bin/ctlup"));
+    let hash = format!("{:x}", Sha256::digest(HELPER));
+    let managed = host
+      .0
+      .join(".tokn/ctl/ctlup/store/updater")
+      .join(hash)
+      .join("ctlup");
     fs::create_dir_all(managed.parent().unwrap()).unwrap();
     fs::write(managed, HELPER).unwrap();
     fs::write(host.0.join("reused"), b"").unwrap();

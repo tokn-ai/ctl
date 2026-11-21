@@ -225,14 +225,14 @@ can appear with an unknown label. From an
 ordinary SSH login, use `~/.tokn/ctl/bin/ctl who` or add `~/.tokn/ctl/bin`
 to `PATH`. Installation preserves the user's login shell configuration.
 
-If a Unix host needs a component update, `ctl` prints a `ctlup update`
-command for the selected host or SSH alias. Run it and
+When `ctl` recognizes a missing or outdated agent on a Unix host, it prints a
+`ctlup install` command for the selected host or SSH alias. Run it and
 then reconnect. The updater verifies any saved machine ID and downloads the
 runtime and updater from the same publication. Use `ctlup dev --host NAME`
 to build a checkout for Linux x64 or ARM64 and install it on a saved host.
-Use `ctlup update --from` for supplied build files.
+Use `ctlup install --from` for supplied build files.
 Windows x64 SSH hosts also support managed installation; use
-`ctlup update --destination ALIAS --remote-platform windows` for a temporary
+`ctlup install --ssh ALIAS --remote-platform windows` for a temporary
 destination. Windows ARM64 currently supports portable desktop installation,
 without whole-runtime bundles.
 
@@ -277,7 +277,7 @@ pnpm ctld:build
 
 The command bootstraps `ctlup` and delegates to `ctlup dev`. The manager builds
 the complete native command set, signs the copied `ctld.app`, and activates one
-verified installation under `~/.tokn/ctl/installs/`. Stable commands live in
+verified installation under `~/.tokn/ctl/ctlup/store/runtime/`. Stable commands live in
 `~/.tokn/ctl/bin`. This uses the same active selection as other `ctlup` updates,
 and status reports the development build immediately. Cargo profiles and target
 directory configuration are preserved. The macOS desktop launcher delegates
@@ -302,57 +302,49 @@ identifies a path. None proves a helper was rebuilt after source edits.
 Setup preserves all running owners; existing daemons require an explicit
 restart to use the selected replacement.
 
-Use `ctlup` to install and update complete builds. It defaults to this computer;
-`--hosts work,jump-a` updates saved hosts through their existing authentication
-and preferred routes, and `--local` includes this computer in the batch. The
-GUI uses the same updater. Runtime operations remain in `ctl` and `ctmux`;
-`ctl components status/restart/stop` inspect and control running services.
+Use `ctlup install` to select a source for a complete build and `ctlup update`
+to follow the recorded channel. Both default to this computer. Repeat `--host`
+to select saved hosts through their existing authentication and preferred
+routes, or use `--ssh` for a temporary SSH destination. The GUI uses the same
+updater. `ctl components status/restart/stop` inspect and control running services.
 
-`ctlup` exposes stable commands under `~/.tokn/ctl/bin`. Only that directory
-needs to be on `PATH`. The manager remains there independently of runtime
-installs; `current` selects one verified immutable build under `installs/`.
-To upgrade the manager itself, run a newly downloaded `ctlup` executable with
-`install` or a local `update`. `ctlup update` does not automatically fetch a newer
-manager for itself.
-Current channel and checkout builds and installations leased by running
-processes are retained. Unused installations are pruned after activation.
-Signed macOS helper apps are retained intact. An update changes future launches
-and preserves running services and sessions. Restart or reconnect separately.
+Add `~/.tokn/ctl/bin` to `PATH` for the stable commands. Launchers use the profile's
+`ctlup/state/installations.json` to find the selected runtime and the independent
+updater. Current channel and checkout builds and installations leased by running
+processes are retained. Signed macOS helper apps are retained intact. An update
+changes future launches and preserves running services and sessions. Restart or
+reconnect separately.
 
 ```sh
 ctlup install
 ctlup status --json
-ctlup check --channel stable
-ctlup update --hosts work,jump-a --channel stable
-ctlup --host work --method vpn update
-ctlup --destination my-ssh-alias update
-ctlup update --hosts work --from /path/to/bundle-set --json
+ctlup update --check
+ctlup release show --channel stable
+ctlup install --host work --host jump-a --channel stable
+ctlup update --host work --method vpn
+ctlup install --ssh my-ssh-alias
+ctlup install --host work --from /path/to/bundle-set --json
 ctlup prune
 ```
 
 `--from` supplies a complete build directory or archive for an explicit offline
 installation. Use `--local-build` for native binaries; local macOS builds also
-require `--ctld-package` with the signed app and its receipt. Automatic remote
-updates resolve the configured publication channel. Explicit `--channel`
-chooses a published source and records the choice after success. Foreign-target
-artifacts are deployment cache entries,
-with no separate upload selection. Agent-only overlays and `--selected` are not
-part of the updater. Old `ctl components` installation commands report a hint to
-use `ctlup` without changing files. See the
+require `--ctld-package` with the signed app and its receipt. `install --channel`
+records a published source after success. Use `ctlup bundle fetch` to retain
+complete target bundles for deployment. See the
 [component update guide](https://github.com/tokn-ai/ctl/blob/main/docs/component-updates.md)
 for source formats, cancellation, and per-host results.
 
-Use `ctlup app install` and `ctlup app update` for the published ctmux desktop
-app on macOS, Linux and Windows (native x64 or ARM64). Both accept
-`--channel stable|nightly`. Use `ctlup dev --app` to build and install the app
-from the current source checkout.
-Published installs use the saved runtime bundle channel preference and remember
-an explicit channel after success. Nightly desktop downloads require
-authenticated `gh` access to the Actions artifact for the selected source revision. See the
+Use `ctlup install app --channel stable` or `ctlup install app --channel nightly`
+to install the published ctmux desktop app on macOS, Linux, and Windows (native
+x64 or ARM64). `ctlup update app` follows the app's recorded channel. Use
+`ctlup dev --app` to build and install the app from the current source checkout.
+Nightly desktop downloads require authenticated `gh` access to the Actions
+artifact for the selected source revision. See the
 [desktop app install guide](https://github.com/tokn-ai/ctl/blob/main/docs/component-updates.md#install-or-update-the-desktop-app)
-for install locations and platform requirements. Windows uses a portable per-user
-installation at `~/.tokn/ctl/apps/ctmux/ctmux-app.exe`, with no MSI, NSIS or
-administrator requirement. GUI launch requires the WebView2 Evergreen Runtime.
+for install locations and platform requirements. On Windows, launch the portable
+per-user install from `~/.tokn/ctl/apps/ctmux.lnk`. GUI launch requires the
+WebView2 Evergreen Runtime.
 Each Windows desktop release also includes a standalone `ctlup.exe` download
 named for its bundle and native target, with matching metadata and checksum.
 

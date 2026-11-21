@@ -32,7 +32,7 @@ pub async fn install_host_publication(
     .and_then(|components| components.get("ctl-agent"))
     .ok_or_else(|| io::Error::other("publication lacks ctl-agent metadata"))?
     .build;
-  let account = ctl_core::paths::directory_for_account(home);
+  let account = ctl_core::paths::updater_directory_for_account(home);
   let cache =
     BundleCacheEntry::publication(&account.join("cache/downloads"), target, build, &manifest)
       .map_err(io::Error::other)?;
@@ -84,7 +84,7 @@ pub async fn install_host_publication(
     let bundle = crate::components::import_remote(&store_home, &verified, &target, source)
       .map_err(io::Error::other)?;
     let installations = Installations::new(&store_home);
-    installations.migrate_catalog_if_missing()?;
+    installations.prepare_installation()?;
     match installations.get_available(&bundle.manifest.bundle_id)? {
       Some(existing) if existing.manifest == bundle.manifest => Ok((existing, true)),
       Some(_) => Err(io::Error::other(
@@ -129,7 +129,7 @@ fn validate_request(
     || !published::trusted(&url, &root)
     || segments.next() != Some(set.archive_name(target).map_err(io::Error::other)?)
     || segments.next() != origin.publication_id.as_deref()
-    || !matches!(origin.channel.as_str(), "stable" | "nightly")
+    || !matches!(origin.channel.as_str(), "stable" | "nightly" | "release")
     || (origin.channel == "stable"
       && (set.bundle_id != set.app_version
         || set

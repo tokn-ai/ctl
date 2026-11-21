@@ -252,6 +252,52 @@ async fn release_view_fetches_only_the_catalog_and_exact_manifest_and_checks_ide
 }
 
 #[tokio::test]
+async fn exact_release_uses_retained_publication_after_channel_advances() {
+  let retained = retained_release("nightly", "0.1.0", 1);
+  let current = retained_release("nightly", "0.1.0", 2);
+  let id = retained["publication_id"].as_str().unwrap();
+  let mut fixture = Fixture::new("0.1.0", &"a".repeat(40));
+  let bundle_id = retained["bundle_id"].as_str().unwrap();
+  fixture.outer["bundle_id"] = serde_json::json!(bundle_id);
+  for (target, value) in fixture.outer["targets"].as_object_mut().unwrap() {
+    value["archive"] = serde_json::json!(format!("ctl-agent-bundle-{bundle_id}-{target}.tar.gz"));
+  }
+  let catalog = serde_json::json!({
+    "schema_version": 1,
+    "site": "ctl-bundle-pages",
+    "generation": 2,
+    "channels": {"nightly": current["publication_id"]},
+    "publications": [retained, current],
+  });
+  let manifest_path = format!("/bundles/sets/{id}/bundle-set.json");
+  let server = Server::start(|_| {
+    BTreeMap::from([
+      (
+        "/bundles/catalog.json".into(),
+        serde_json::to_vec(&catalog).unwrap(),
+      ),
+      (
+        manifest_path.clone(),
+        fixture.bind_archive(&fixture.archive()),
+      ),
+    ])
+  })
+  .await;
+  let (channel, publication) = server.resolver().retained_publication(id).await.unwrap();
+  assert_eq!(channel, BundleChannel::Nightly);
+  assert_eq!(publication.id.as_deref(), Some(id));
+  assert_eq!(publication.manifest.bundle_id, bundle_id);
+  assert_eq!(
+    *server.requests.lock().unwrap(),
+    [
+      "/bundles/catalog.json".to_owned(),
+      manifest_path,
+      format!("/bundles/sets/{id}/build-info.json")
+    ],
+  );
+}
+
+#[tokio::test]
 async fn check_names_the_channel_when_its_pointer_is_missing() {
   let server = Server::start(|_| BTreeMap::new()).await;
   let resolver = server.resolver();
@@ -565,7 +611,7 @@ async fn installation_download_pins_both_assets_when_the_channel_advances() {
   let second_revision = "b".repeat(40);
   let server =
     advancing_installation_server(channel_path, target, &first_revision, &second_revision).await;
-  let cache = home.join(".tokn/ctl/cache");
+  let cache = home.join(".tokn/ctl/ctlup/cache");
   let progress = Mutex::new(Vec::new());
   let plan = server
     .resolver()
@@ -660,8 +706,8 @@ async fn pinned_local_cache_probes_are_independent_and_never_fetch_damaged_files
   })
   .await;
   let home = crate::installation::TemporaryDirectory::new("partial-cache").unwrap();
-  let downloads = home.0.join(".tokn/ctl/cache/downloads");
-  let updaters = home.0.join(".tokn/ctl/cache/updaters");
+  let downloads = home.0.join(".tokn/ctl/ctlup/cache/downloads");
+  let updaters = home.0.join(".tokn/ctl/ctlup/cache/updaters");
   let plan = server
     .resolver()
     .installation_plan(BundleChannel::Nightly, target)
@@ -742,7 +788,7 @@ async fn windows_installation_resolves_both_assets_from_its_companion_set() {
   })
   .await;
   let home = crate::installation::TemporaryDirectory::new("windows-publication-test").unwrap();
-  let cache = home.0.join(".tokn/ctl/cache");
+  let cache = home.0.join(".tokn/ctl/ctlup/cache");
   let resolver = server.resolver();
   let (bundle, updater) = resolver
     .download_installation_cached(

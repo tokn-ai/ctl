@@ -40,7 +40,7 @@ pub(super) fn update_required(
   };
   let guidance = command.map_or_else(
     || {
-      "Use ctlup update from macOS or Linux with the same SSH account and route, then reconnect."
+      "Use ctlup install from macOS or Linux with the same SSH account and route, then reconnect."
         .into()
     },
     |command| format!("Update this host from macOS or Linux, then reconnect.\n{command}"),
@@ -56,7 +56,7 @@ pub(super) fn update_command(
   match (host, destination, method) {
     (Some(host), None, method) => {
       let host = quoted_selector(host)?;
-      let mut command = format!("ctlup update --host={host}");
+      let mut command = format!("ctlup install --host={host}");
       if let Some(method) = method {
         command.push_str(" --method=");
         command.push_str(&quoted_selector(method)?);
@@ -72,7 +72,7 @@ pub(super) fn update_command(
         return None;
       }
       Some(format!(
-        "ctlup update --destination={}",
+        "ctlup install --ssh={}",
         quoted_selector(destination)?
       ))
     }

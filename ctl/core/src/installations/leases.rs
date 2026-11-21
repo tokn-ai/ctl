@@ -40,7 +40,7 @@ pub(super) fn acquire_locked(store: &Installations, bundle: &Bundle) -> io::Resu
       "process lease must pin this immutable installation",
     ));
   }
-  retain(&store.root.join("leases"), &installed.manifest.bundle_id)
+  retain(&store.runtime_leases(), &installed.manifest.bundle_id)
 }
 
 // The caller holds the installation lock from verification until publication.
@@ -65,7 +65,7 @@ pub(super) fn retain(leases: &Path, id: &str) -> io::Result<Lease> {
 }
 
 pub(super) fn in_use(store: &Installations, id: &str) -> io::Result<bool> {
-  in_use_at(&store.root.join("leases"), id)
+  in_use_at(&store.runtime_leases(), id)
 }
 
 pub(super) fn in_use_at(leases: &Path, id: &str) -> io::Result<bool> {
@@ -117,14 +117,25 @@ pub(super) fn in_use_at(leases: &Path, id: &str) -> io::Result<bool> {
 /// rather than running without retention protection.
 pub fn lease_current_executable() -> io::Result<Option<Lease>> {
   let executable = std::env::current_exe()?.canonicalize()?;
-  lease_executable(&executable)
+  let lease = lease_executable(&executable)?;
+  #[cfg(target_os = "linux")]
+  if lease.is_none()
+    && let Some(image) = std::env::var_os("APPIMAGE")
+    && let Ok(image) = PathBuf::from(image).canonicalize()
+    && image.ends_with("ctmux.AppImage")
+    && image
+      .parent()
+      .and_then(Path::parent)
+      .is_some_and(|parent| parent.ends_with("ctlup/store/desktop"))
+  {
+    // AppImage executes the GUI from its private mount. APPIMAGE records the
+    // outer file whose managed payload must stay available for that process.
+    return lease_executable(&image);
+  }
+  Ok(lease)
 }
 
 pub(super) fn lease_executable(executable: &Path) -> io::Result<Option<Lease>> {
-  #[cfg(windows)]
-  if let Some(lease) = filesystem::lease_manager_executable(executable)? {
-    return Ok(Some(lease));
-  }
   for directory in executable.ancestors().skip(1) {
     let Some(id) = directory.file_name().and_then(|name| name.to_str()) else {
       continue;
@@ -132,23 +143,61 @@ pub(super) fn lease_executable(executable: &Path) -> io::Result<Option<Lease>> {
     if !filesystem::valid_id(id) {
       continue;
     }
-    let Some(installs) = directory
-      .parent()
-      .filter(|parent| parent.ends_with("installs"))
+    let Some(package_root) = directory.parent() else {
+      continue;
+    };
+    let Some(package) = package_root
+      .file_name()
+      .and_then(|name| name.to_str())
+      .filter(|name| matches!(*name, "runtime" | "desktop" | "updater"))
     else {
       continue;
     };
-    let Some(store) = installs
+    let Some(updater_root) = package_root
+      .parent()
+      .filter(|root| root.ends_with("ctlup/store"))
+      .and_then(Path::parent)
+    else {
+      continue;
+    };
+    let Some(store) = updater_root
       .parent()
       .and_then(Installations::from_executable_root)
     else {
       continue;
     };
-    store.migrate_once_if_needed()?;
-    filesystem::ensure_root(&store)?;
+    if !filesystem::root_exists(&store)? {
+      return Err(filesystem::invalid(
+        "managed executable has no installation registry",
+      ));
+    }
+    filesystem::directory(&updater_root.join("store"))?;
     let _lock = Lock::acquire(&store)?;
-    let bundle = store.get_recorded(id)?;
-    return retain(&store.root.join("leases"), &bundle.manifest.bundle_id).map(Some);
+    let leases_root = match package {
+      "runtime" => {
+        store.get_recorded(id)?;
+        store.runtime_leases()
+      }
+      "updater" => {
+        let path = filesystem::verified_manager(package_root, id)?.canonicalize()?;
+        if path != executable {
+          return Err(filesystem::invalid(
+            "managed updater executable does not match its payload",
+          ));
+        }
+        store.manager_leases()
+      }
+      "desktop" => {
+        filesystem::directory(package_root)?;
+        filesystem::directory(directory)?;
+        if !crate::private_fs::is_owned_file(&fs::symlink_metadata(executable)?) {
+          return Err(filesystem::invalid("unsafe executable in desktop payload"));
+        }
+        store.desktop_leases()
+      }
+      _ => unreachable!(),
+    };
+    return retain(&leases_root, id).map(Some);
   }
   Ok(None)
 }

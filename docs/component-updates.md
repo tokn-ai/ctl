@@ -46,294 +46,115 @@ active commands. Builds are immutable and verified against
 their file checksums, build identity, target and shared protocol contracts.
 Foreign-target binaries are never executed during download or import.
 
-The example uses the default data root. With `CTL_DATA_DIR` set, the same layout
-is created inside the selected profile.
+The example uses the default data root. With `CTL_DATA_DIR` set, the updater
+root is `$CTL_DATA_DIR/ctlup`.
 
 ```text
 ~/.tokn/ctl/
-  bin/ctlup                         # independent updater executable
-  bin/ctl -> ../current/ctl          # stable command aliases
-  bin/ctmux -> ../current/ctmux
-  bin/ctl-agent -> ../current/ctl-agent
-  current -> installs/<content-id>
-  catalog.json                      # channel, target and build-date metadata
-  development.json                  # current build ID for each checkout
-  installs/stable/<version>/<target>
-  installs/nightly/<version>/<target>
-  installs/dev/<checkout-hash>
-  installs/dev/pr-<number>/<version>/<target>
-  installs/dev/provided/<version>/<target>
-  installs/<content-id>/            # immutable bundle bytes, shared by references
-  cache/downloads/<publication-hash>/
+  bin/                              # public ctl, ctmux, and ctlup launchers
+  apps/                             # public desktop launch entries
+  ctlup/
+    state/installations.json        # active selections, sources, and retained builds
+    state/leases/                   # builds used by running processes
+    store/runtime/<content-id>/     # verified complete runtime
+    store/desktop/<content-id>/     # verified native desktop package
+    store/updater/<content-id>/     # independent ctlup executable
+    refs/runtime/                   # readable channel and checkout references
+    cache/downloads/                # verified publication archives
+    cache/unpacked/                 # verified extracted runtime bundles
+    cache/updaters/                 # verified downloaded updater bytes and metadata
+    staging/
 ```
 
-On Windows x64, `%USERPROFILE%\.tokn\ctl\bin` contains native `.exe` launchers.
-They resolve the active runtime or updater from the installation store. This
-allows `ctlup` to install a new updater while the current process is running.
+The registry records one active native runtime, desktop, and updater per
+profile. Launchers resolve selected payloads through the registry. Channel and
+checkout references are generated views of that state. Stable and Nightly
+references use the version and target. Development references pin the latest
+build for each canonical checkout and target.
 
-Add `~/.tokn/ctl/bin` to `PATH`. New managed terminal shells include it
-automatically; existing shells keep their environment. Ordinary SSH login
-configuration remains under the account owner’s control.
+Installations verify immutable bytes before committing a selection. Running
+processes keep their original builds through leases. Public commands are
+available through `~/.tokn/ctl/bin` or the selected profile's `bin`.
 
-The readable version paths and checkout paths are relative links on Unix and
-`.json` references on Windows. They share immutable content rather than copying
-it. Nightly uses the published version, including the revision suffix. The
-current local channel build gets a reference under `installs/dev/unassigned`
-if its checkout is unknown. Existing installations acquire these paths during
-the first operation that checks or manages the local runtime.
-
-Activation atomically changes `current`. Pruning retains current channel
-components, the latest build for each checkout, the active bundle, and builds
-leased by live processes. OS-held locks release after a crash. The old runtime
-rollback command is retired. A new activation or prune clears the old previous
-selection. Installing keeps daemons and sessions running. Existing agent
-channels use their original process until reconnect. A terminal-daemon restart
-remains a separate confirmed action.
+The new store starts on first install. Existing files outside `ctlup/` stay
+on disk and are outside the updater's cleanup boundary.
 
 ## Install and update
 
 ```sh
-ctlup install
-ctlup update
-ctlup update --channel stable
-ctlup update --channel nightly
-ctlup update --pr 155
-ctlup update --host work
-ctlup update --hosts work,jump-a --local
-ctlup update --destination my-ssh-alias
-ctlup update --destination windows-alias --remote-platform windows
-ctlup update --from /path/to/bundle-set --hosts work,jump-a --json
-ctlup install --from target/debug --local-build --ctld-package /path/to/ctld-package
-ctlup status --json
-ctlup prune
+ctlup install --channel stable
+ctlup install --ssh 'ssh://operator@windows.example:2222' --remote-platform windows
+ctlup install --host work --release PUBLICATION_ID
+ctlup install --host work --pr PR_NUMBER
+ctlup install --from /path/to/bundle-set
+ctlup update --host work --host lab
+ctlup update --check
+ctlup status --host work --json
+ctlup prune --forget-missing
 ```
 
-`install` and `update` share the same verification and activation transaction.
-If a recorded bundle directory is deleted, `ctlup status` reports the missing
-build. Use the normal install, update, or development command to recover it.
-An automatic update can reuse an exact verified cached bundle. An explicit
-channel or bundle source supplies the replacement, and `ctlup dev` rebuilds
-the selected checkout. Replacement activation preserves other catalog entries,
-so any builds that still need recovery remain visible in status.
-No host option means this account. With a remote target, `--local` also includes
-this computer. Saved hosts reuse their existing route, connection method and
-SSH authentication. A temporary destination uses OpenSSH configuration without
-adding a saved host. Hosts are processed independently. A failure preserves
-successful hosts and produces a nonzero exit status.
+`install` chooses the source and can provision an account that has no ctl
+components yet. Supply an SSH address or OpenSSH alias with `--ssh`, or select a
+saved ctl account with `--host`. No selector means this computer. The explicit
+sources are a published channel, an immutable release ID, a PR build, or files
+from this computer. Each channel or pin is recorded on the destination for the
+selected package.
 
-Windows SSH hosts use the platform saved in the connection method. For a
-temporary Windows destination, supply `--remote-platform windows`. The server
-uses the default Windows OpenSSH `cmd.exe` shell. Start a local Windows
-installation by running the standalone x64 `ctlup` executable from the
-publication.
+`update` follows the recorded channel. Explicitly pinned builds stay on the
+selected build. If a recorded bundle directory disappears, `status` shows the
+missing build and `update` can repair it from the exact verified cache when
+available. Install from an explicit source to select a replacement. Ordinary
+pruning keeps records and available recovery copies for missing builds.
+`prune --forget-missing` clears those records.
 
-An explicit channel is saved as this account’s preference after a successful
-command. Otherwise automatic updates use that preference or the distribution’s
-compiled default. Stable tracks tagged releases and Nightly tracks the latest
-successfully published CI build from `main`. Nightly versions include the UTC
-commit date, for example `0.1.2-nightly.20261110+g7f380d40f15e`.
+On Windows SSH, use `--remote-platform windows` for a temporary destination.
+Saved hosts use the platform on the connection method. Use the default
+`cmd.exe` shell on the server. The runtime is supported on Windows x64.
 
-Use `ctlup release list` to see the current publication for your selected
-channel. Stable and Nightly each expose one current publication, including its
-target bundles. `ctlup release view` shows that publication's compatibility and
-build date. PR builds are listed separately.
+An offline runtime archive needs its matching `bundle-set.json` or
+`bundle-set-windows.json`. Foreign-target builds need their matching updater
+sidecar. For a macOS native build, `--local-build --ctld-package PATH` supplies
+the six runtime executables and the verified signed helper package. A flat SSH
+archive cannot supply the locally signed helper.
+
+## Publications and retained bundles
 
 ```sh
 ctlup release list --channel nightly
-ctlup release view --channel nightly
-ctlup release view PUBLICATION_ID --channel nightly --json
-ctlup release list --channel stable
-ctlup release list --channel dev
-ctlup release build --pr PR_NUMBER
-ctlup release view --pr 155
+ctlup release show PUBLICATION_ID
+ctlup release show --pr PR_NUMBER
+ctlup bundle list
+ctlup bundle fetch --target aarch64-unknown-linux-musl --channel nightly
+ctlup bundle remove --target aarch64-unknown-linux-musl --channel nightly
 ```
 
-Both commands read publication metadata. `ctlup check` still checks the current
-channel directly. Stable becomes available after CI publishes a complete bundle
-set from a release tag, including a matching updater for each target.
-
-The Dev list shows the 10 most recently updated PRs. An unexpired bundle for
-the current commit is marked `built`. One for an earlier commit on the branch
-is marked `outdated`. A branch without an unexpired bundle shows `no build`.
-`release build --pr` uses the authenticated GitHub CLI (`gh`) to queue a build
-for a branch in this repository. It reports an existing bundle or active build
-for the same commit when available. `release view --pr` shows the PR and its
-build status. `update --pr` uses `gh` to download the bundle for the current
-commit. Use `--host` to target a remote machine. See
-[install a temporary PR build](ci-bundles.md#install-a-temporary-pr-build).
-
-## Target components and the installation catalog
-
-```sh
-ctlup component list
-ctlup component list --channel nightly --installed --json
-ctlup component list --channel stable --available
-ctlup component add bundle-x86_64-unknown-linux-musl bundle-aarch64-unknown-linux-musl --channel nightly
-ctlup component add bundle-x86_64-pc-windows-msvc --channel stable
-ctlup component add bundle-x86_64-unknown-linux-musl --pr 123
-ctlup component remove bundle-aarch64-unknown-linux-musl --channel nightly
-ctlup show
-ctlup show --host work --json
-```
-
-A component is a complete runtime bundle for one target, named `bundle-<target>`.
-`component list` shows available components for the selected channel, together
-with every locally installed target. Channel markers such as `(stable, nightly)`
-show where each target exists across all recorded installed builds. Multiple
-builds for one target still produce one component row.
-Use `--installed` for an offline list of installed targets. An explicit
-channel filters the installed targets, while each row still lists all its known
-channels. Retained checkout and running payloads continue to count until removed
-from disk. Bare target triples remain accepted by `add` and `remove` for
-compatibility. Adding components
-stores them durably without changing active command aliases or executing foreign
-binaries. Available-target inspection reads publication metadata without downloading
-archives. Installed-component inspection works offline.
-
-Updating a channel prepares all its registered targets from the same publication
-before committing its new catalog. A missing target, changed publication or
-concurrent catalog change leaves the previous channel selection available.
-Target components and their matching updater remain available after cache cleanup.
-Removing a registration preserves payloads and provenance needed by the active
-installation or running processes. Removing a target with `--channel local`
-also unregisters the checkout builds for that target. PR installations are
-cataloged separately as `pr-NUMBER`; checkout builds use `local`, and explicitly
-supplied files use `provided`.
-
-Existing complete builds are adopted into the catalog automatically, once per
-storage root. Uncatalogued locally built payloads are assigned to `local`; other
-uncatalogued payloads are imported as `provided`. Existing recorded channels,
-active and legacy previous selections, and running-process leases are preserved.
-Unrecorded build dates remain unknown. Services keep running during adoption.
-
-After adoption, installation and listing use complete schema-2 payloads,
-canonical installation paths and the authoritative catalog. Fresh installs
-create catalog records immediately. Uncommitted payloads stay outside the catalog
-and are eligible for cleanup.
-
-The verified target updater uses the same migration during remote update
-preparation and direct publication installs. An existing catalog or pending
-catalog transaction remains authoritative, and corrupt metadata fails the update.
-The upload path still supports older target updaters that lack the preparation
-command.
-
-Incomplete historical four-service installations must be replaced with a
-complete build using their old manager, or cleanly reinstalled, before adoption.
-Original external source directories remain available to processes that may
-still use their paths.
-
-`ctlup show` lists the individual installed builds, including retained older
-payloads, with short content IDs, versions, source revisions, channels and
-active and retained labels. `status` retains its compatible JSON response and uses
-the same detailed build display for human output. Build dates come from validated build metadata
-or a freshly built local bundle; the date embedded in a Nightly version is a
-commit date. Older bundles without build metadata show `unknown`.
-`status --json` includes `active` and `previous` manifests when the selected
-payloads are present. Both `status --json` and `show --json` include a
-`missing_builds` list of build IDs when recorded payloads are absent.
-`show --json` provides the versioned build inventory, including channel and
-build-date fields. `component list --json` contains logical component names,
-targets, installed state and recorded `channels`. Remote inspection uses the detailed inventory
-when supported; older updaters retain their available active/previous details,
-with other build metadata unavailable rather than guessed.
-SSH uploads contain one native target. If the remote channel also registers
-other targets, uploading a new publication fails without changing those
-registrations. Run `ctlup update` on that host to prepare its complete target set.
-
-Automatic remote updates use the configured publication channel. To build
-and deploy a checkout to Linux x64 or ARM64, use `ctlup dev --host NAME` or
-`ctlup dev --destination ALIAS`. Use `ctlup dev --hosts work,lab` for multiple
-saved hosts. See [local development builds](local-bundles.md) for prerequisites
-and offline bundles.
-
-`--from` supplies an exact complete build or publisher bundle-set. Publisher
-archives need their matching `bundle-set.json` or `bundle-set-windows.json`.
-Foreign-target deployment also
-needs that target’s separately checksummed updater sidecar. Native local builds
-must include all six executables. There are no upload selections or agent-only
-overlay installs. Old `ctl components` mutation commands direct users to `ctlup`.
-
-On macOS, a local service installation requires the complete verified signed
-`ctld.app` and receipt. `--ctld-package` supplies these for a native build.
-The package remains intact inside the installation. Flat remote macOS bundles
-do not replace an independently provisioned signed local helper.
+Bundle fetching retains a complete target and its matching updater for
+deployment. It preserves the active native commands and can stage foreign
+targets without executing them. The runtime status also lists retained and
+missing builds with their source metadata. Publication IDs distinguish builds
+that share a version string.
 
 ## Install or update the desktop app
 
 ```sh
-ctlup app install
-ctlup app install --channel stable
-ctlup app update
-ctlup app update --channel nightly
+ctlup install app --channel stable
+ctlup install app --release PUBLICATION_ID
+ctlup install app --pr PR_NUMBER
+ctlup install app --from /path/to/desktop-package
+ctlup update app
+ctlup update app --check
+ctlup status app
 ```
 
-These commands install published desktop packages on this computer. Use
-`ctlup dev --app` to build the desktop app from a checkout.
+The app is installed on this computer and follows its own recorded publication
+channel. Local or PR packages stay pinned. Stable packages come from the tagged
+release. Nightly and PR packages use the verified GitHub Actions artifact for
+the selected revision. macOS signatures and Windows portable package checks
+remain part of package verification.
 
-Windows supports native x64 (`x86_64-pc-windows-msvc`) and ARM64
-(`aarch64-pc-windows-msvc`). Both use a portable, per-user directory rather than
-MSI or NSIS installation; installing the app does not require administrator
-access.
-
-Published installs use the same saved channel preference as runtime bundle
-updates, with the distribution's compiled default when no preference is saved.
-`--channel stable` or `--channel nightly` selects the published source and saves
-that choice after a successful install or update.
-
-Stable uses the desktop package attached to the matching tagged release.
-Nightly uses authenticated GitHub CLI (`gh`) access to download the desktop
-Actions artifact for the exact source revision selected by the Nightly channel.
-If that build's desktop package is unavailable for this computer, the command
-reports the missing package.
-
-On macOS, launch the installed app with `open ~/.tokn/ctl/apps/ctmux.app`.
-Quit ctmux before updating it. The installer prefers the signed, notarized
-archive and uses the official unsigned archive when the release has no
-signed manifest. On Linux, launch `~/.tokn/ctl/apps/ctmux.AppImage`.
-On Windows, launch the executable from PowerShell:
-
-```powershell
-& "$env:USERPROFILE\.tokn\ctl\apps\ctmux\ctmux-app.exe"
-```
-
-Close ctmux and the local helpers running from its Windows app directory before
-updating; the updater refuses to replace files that are in use. The portable ZIP contains
-the desktop executable, `ctld.exe`, `ctmuxd.exe`, `ctl-taskd.exe`, resources and a
-`portable.json` inventory binding every file's SHA-256 digest to the app version
-and native target. Keep that directory together when moving a portable copy.
-GUI launch requires Microsoft's
-[WebView2 Evergreen Runtime](https://developer.microsoft.com/microsoft-edge/webview2/).
-`ctlup` installs the app files without installing WebView2; a missing runtime
-must be installed separately before launch.
-
-Windows releases also provide a standalone
-`ctlup-<bundle>-<target>.exe`, its `.sha256` checksum and `ctlup-<target>.json`
-metadata. Download the files for the native architecture from the same release,
-or from the same Nightly desktop Actions artifact. Compare `Get-FileHash -Algorithm
-SHA256` for the executable with the checksum before running it. The metadata
-records the target, app version, bundle identity and exact source revision.
-Run the downloaded executable with `app install` or `app update`; it can remain
-outside the installed app directory.
-
-For published packages, `ctlup` checks the release manifest and the package's
-SHA-256 checksum before replacing the app. An update keeps the previous app at
-the path printed by `ctlup`. On Windows, the previous directory is retained at
-`~/.tokn/ctl/apps/.ctlup-ctmux/previous`. Windows replacement uses two directory
-renames with a short gap when the app path is absent. It retains an interrupted
-replacement at `.ctlup-ctmux/pending-previous`; the next `ctlup app install` or
-`ctlup app update` restores that directory if the app is missing, or retains it
-as the previous app if activation completed. This is recoverable replacement,
-not an atomic directory exchange. The updater does not stop running apps or
-helpers to make room. On macOS and Linux, independently running daemons and their
-terminal sessions continue.
-Desktop packages can become available after their matching runtime release.
-
-On macOS, `pnpm ctld:build` from a checkout prepares a signed local helper
-through `ctlup dev`. At the next daemon startup, the desktop prefers the
-selected signed helper, then a compatible separately provisioned signed
-helper, then its bundled helper. The desktop can use a fallback if a
-development provisioning profile has expired. The app's own release
-signing is independent of the helper selection.
+Open the desktop from the profile's `apps/` directory. The public launch entry
+is `ctmux.app` on macOS, `ctmux.AppImage` on Linux, or `ctmux.lnk` on Windows.
+Use `ctlup dev --app` to build and install the desktop from a checkout.
 
 ## Native development builds
 
@@ -342,7 +163,7 @@ ctlup dev --workspace /path/to/checkout
 ctlup dev --release
 ctlup dev --profile custom --target-dir /path/to/build-output --json
 ctlup dev --app
-ctlup dev --renew-signing
+ctlup dev sign
 ```
 
 `dev` requires a ctl checkout root as the current directory or as the path
@@ -374,7 +195,7 @@ profile and can renew it through Xcode when the project has a configured team.
 Runtime activation requires a signed helper. The desktop build can bundle an
 unsigned helper if provisioning or signing fails.
 
-On macOS, run `ctlup dev --renew-signing` from a ctl checkout to re-sign the
+On macOS, run `ctlup dev sign` from a ctl checkout to re-sign the
 active local development helper without recompiling any runtime component.
 The updater reuses an unexpired profile for the helper's Apple Team or asks
 Xcode to renew it using that team. Xcode must be signed in for automatic
@@ -402,20 +223,21 @@ Channel discovery is refreshed before cache reuse. Network errors remain
 errors. For offline updates, choose provided files or the desktop’s included
 build explicitly.
 
-If an older `ctlup` rejects dated Nightly versions, use the standalone `ctlup`
-for this computer from a published Nightly bundle set. Verify the executable
-against its SHA-256 sidecar, make it executable, and run it with
-`update --channel nightly` to install the bundle and updater together.
+To bootstrap from a published bundle set, use its standalone `ctlup` for this
+computer. Verify its checksum against the sidecar and run
+`install --channel nightly`. SSH installation requires a publication or
+supplied bundle whose target updater supports storage layout 2.
 
-Cached archives use a publication hash under `cache/downloads`, extracted deployment builds under
-`cache/components`, and standalone updater binaries under `cache/updaters`.
+Within `ctlup/`, cached archives use a publication hash under
+`cache/downloads`, extracted deployment builds use `cache/unpacked`, and
+downloaded updater binaries use `cache/updaters`.
 Automatic cleanup budgets compressed runtime downloads at 256 MiB, extracted
 payloads at 512 MiB, and updater binaries at 128 MiB. Prepared extracted builds
 hold shared leases and can temporarily exceed the budget until users release
 them. Installed channel components, checkout builds and active payloads are separate
 from deployment cache. Cleanup after installs and updates protects exact cached
 recovery copies and matching updaters while their catalog records exist. An
-explicit `ctlup prune` drops missing builds from the catalog and clears any
+explicit `ctlup prune --forget-missing` drops missing builds and clears any
 selections that refer to them. Their cached copies then follow the usual cache
 budgets. `ctlup prune --json` reports those IDs in `forgotten_missing_builds`.
 
@@ -428,7 +250,7 @@ For example, if only the runtime is cached on this computer, the host can fetch
 `ctlup` and receive the runtime over SSH. The host can also reuse a matching
 installed updater or verified archive. When it needs to download a file, it
 tries `curl`, then `wget`. If the host cannot reach the release, lacks download
-tools, or has an older updater without direct-install support, this computer
+tools, or cannot use direct download, this computer
 retrieves any missing files and uploads the same release. Integrity, account
 identity and activation failures stop the update.
 
@@ -442,12 +264,12 @@ verified afterward. A failed post-install check reports whether activation may
 have completed and leaves running services in place.
 
 When a Unix host has a missing or recognized outdated agent, `ctl` prints a
-`ctlup update` command for the selected host or SSH alias. Run it, then reconnect.
+`ctlup install` command for the selected host or SSH alias. Run it, then reconnect.
 Whole-runtime installation and deployment support Windows x64 clients and SSH
 targets as well as the supported Unix platforms. Windows ARM64 currently supports
 the local desktop app commands above; ARM64 whole-runtime bundles are unavailable.
 
-## Desktop and migration
+## Desktop component updates
 
 Use **Update components…** in the command palette, About, or host settings.
 Choose hosts and a channel, provided files, or an included offline build.
@@ -462,10 +284,6 @@ update installs a complete build. About’s bundle list shows the active native
 build and offers local installation of another usable build. Explicitly installed
 target components have durable channel registrations; other downloaded foreign
 artifacts remain deployment cache entries.
-
-The runtime installation engine automatically adopts existing complete builds and
-leaves original source trees in place for processes that may still use them.
-Host identity, saved settings and sessions are preserved.
 
 ## Inspect, restart and stop from the CLI
 

@@ -1236,8 +1236,10 @@ dependencies = [
  "ctmux-ipc",
  "ctmux-proto",
  "dirs 6.0.0",
+ "dunce",
  "flate2",
  "libproc",
+ "lnks",
  "rustix 1.1.4",
  "serde",
  "serde_json",
@@ -2010,6 +2012,26 @@ name = "encode_unicode"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "34aa73646ffb006b8f5147f3dc182bd4bcb190227ce861fc4a4844bf8e3cb2c0"
+
+[[package]]
+name = "enumflags2"
+version = "0.7.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1027f7680c853e056ebcec683615fb6fbbc07dbaa13b4d5d9442b146ded4ecef"
+dependencies = [
+ "enumflags2_derive",
+]
+
+[[package]]
+name = "enumflags2_derive"
+version = "0.7.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "67c78a4d8fdf9953a5c9d458f9efe940fd97a0cab0941c075a813ac594733827"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
 
 [[package]]
 name = "epaint"
@@ -3580,6 +3602,20 @@ name = "litrs"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
+
+[[package]]
+name = "lnks"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "21e27be0ff79a98fe15d5c15f44cd4a1a4516523fcf985908c734d7491133f5c"
+dependencies = [
+ "dunce",
+ "enumflags2",
+ "num_enum",
+ "thiserror 2.0.20",
+ "widestring",
+ "windows 0.62.2",
+]
 
 [[package]]
 name = "lock_api"

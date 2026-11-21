@@ -21,7 +21,7 @@ are rejected for `skill`; it always reads the local binary's bundled documents.
 
 | Need | Command or child skill |
 | --- | --- |
-| Install or update a complete local/remote build | `ctlup install` / `ctlup --host HOST update`; [setup reference](references/setup.md) |
+| Install or update a complete local/remote build | `ctlup install` / `ctlup install --host HOST`; [setup reference](references/setup.md) |
 | Install the signed macOS connection helper for this CLI version | `ctl setup`; [setup reference](references/setup.md) |
 | Run once, stream output, preserve exit status | `ctl exec -- PROGRAM ARGS...`; guidance below |
 | Ordinary SSH login or file copy | `ctl ssh` / `ctl scp`; guidance below |

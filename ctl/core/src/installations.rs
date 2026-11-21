@@ -7,7 +7,6 @@ mod catalog;
 mod filesystem;
 mod layout;
 mod leases;
-mod migration;
 #[cfg(all(test, unix))]
 mod tests;
 #[cfg(all(test, windows))]
@@ -19,11 +18,11 @@ use std::collections::BTreeSet;
 use std::io;
 use std::path::{Path, PathBuf};
 
-pub use catalog::{CatalogEntry, CatalogOrigin};
+pub use catalog::{CatalogEntry, CatalogOrigin, DesktopSelection, DesktopSource};
 pub use leases::{Lease, lease_current_executable};
 
 /// Local updater capability for preserving development checkout registrations.
-pub const DEVELOPMENT_LAYOUT_VERSION: u16 = 1;
+pub const DEVELOPMENT_LAYOUT_VERSION: u16 = 2;
 
 /// Complete installations for one account, with one native execution selection.
 /// Catalogued foreign targets are retained for deployment without execution.
@@ -47,6 +46,7 @@ pub struct PruneResult {
 pub struct Inspection {
   pub entries: Vec<CatalogEntry>,
   pub active: Option<String>,
+  pub active_origin: Option<CatalogOrigin>,
   pub previous: Option<String>,
   pub bundles: Vec<Bundle>,
   pub missing: Vec<String>,
@@ -80,17 +80,124 @@ impl Installations {
     &self.root
   }
 
+  /// Root of all updater-managed state and payloads for this profile.
+  #[must_use]
+  pub fn updater_root(&self) -> PathBuf {
+    crate::paths::updater_directory_for_profile(&self.root)
+  }
+
+  fn state_root(&self) -> PathBuf {
+    self.updater_root().join("state")
+  }
+
+  fn runtime_root(&self) -> PathBuf {
+    self.updater_root().join("store/runtime")
+  }
+
+  fn manager_root(&self) -> PathBuf {
+    self.updater_root().join("store/updater")
+  }
+
+  fn desktop_root(&self) -> PathBuf {
+    self.updater_root().join("store/desktop")
+  }
+
+  fn staging_root(&self) -> PathBuf {
+    self.updater_root().join("staging")
+  }
+
+  fn runtime_leases(&self) -> PathBuf {
+    self.state_root().join("leases/runtime")
+  }
+
+  fn manager_leases(&self) -> PathBuf {
+    self.state_root().join("leases/updater")
+  }
+
+  fn desktop_leases(&self) -> PathBuf {
+    self.state_root().join("leases/desktop")
+  }
+
+  /// Returns the active runtime source, including when its bytes are missing.
+  ///
+  /// # Errors
+  /// Reports unsafe storage or invalid registry metadata.
+  pub fn active_origin(&self) -> io::Result<Option<CatalogOrigin>> {
+    if !filesystem::root_exists(self)? {
+      return Ok(None);
+    }
+    let _lock = filesystem::Lock::acquire(self)?;
+    Ok(
+      catalog::read_index(self)?
+        .active_runtime
+        .map(|selection| selection.origin),
+    )
+  }
+
+  /// Reads the authoritative desktop selection.
+  ///
+  /// # Errors
+  /// Reports unsafe storage or invalid registry metadata.
+  pub fn desktop_selection(&self) -> io::Result<Option<DesktopSelection>> {
+    if !filesystem::root_exists(self)? {
+      return Ok(None);
+    }
+    let _lock = filesystem::Lock::acquire(self)?;
+    Ok(catalog::read_index(self)?.desktop)
+  }
+
+  /// Publishes a staged desktop bundle and its selection under the registry lock.
+  ///
+  /// # Errors
+  /// Reports an invalid selection, a concurrent update, unsafe directories,
+  /// publication failures, or a failed registry commit.
+  pub fn publish_desktop<T>(
+    &self,
+    expected: Option<&DesktopSelection>,
+    selection: &DesktopSelection,
+    publish: impl FnOnce() -> io::Result<T>,
+  ) -> io::Result<T> {
+    selection.validate()?;
+    filesystem::ensure_root(self)?;
+    let _lock = filesystem::Lock::acquire(self)?;
+    let mut state = catalog::read_index(self)?;
+    if state.desktop.as_ref() != expected {
+      return Err(io::Error::new(
+        io::ErrorKind::WouldBlock,
+        "desktop selection changed during preparation",
+      ));
+    }
+    catalog::initialize(self, &state)?;
+    filesystem::ensure_directory(&self.desktop_root())?;
+    let published = publish()?;
+    filesystem::directory(&self.desktop_root().join(&selection.content_id))?;
+    state.desktop = Some(selection.clone());
+    catalog::commit_metadata(self, &state)?;
+    Ok(published)
+  }
+
+  /// Returns the selected updater's content identity.
+  ///
+  /// # Errors
+  /// Reports unsafe storage or invalid registry metadata.
+  pub fn active_manager_id(&self) -> io::Result<Option<String>> {
+    if !filesystem::root_exists(self)? {
+      return Ok(None);
+    }
+    let _lock = filesystem::Lock::acquire(self)?;
+    Ok(catalog::read_index(self)?.updater)
+  }
+
   /// Reads the recorded complete active payload through its canonical selection.
   ///
   /// # Errors
-  /// A broken pointer, unsafe directory or modified payload is never hidden by
-  /// selecting a different installation.
+  /// Reports unsafe metadata, unavailable bytes or damaged payloads.
   pub fn active(&self) -> io::Result<Option<Bundle>> {
     if !filesystem::root_exists(self)? {
       return Ok(None);
     }
-    self.migrate_once_if_needed()?;
-    self.recorded_selection("current")
+    let _lock = filesystem::Lock::acquire(self)?;
+    self.recorded_selection()
   }
 
   /// Reads the active identity and its verified payload, when available.
@@ -101,93 +208,74 @@ impl Installations {
     if !filesystem::root_exists(self)? {
       return Ok((None, None));
     }
-    self.migrate_once_if_needed()?;
     let _lock = filesystem::Lock::acquire(self)?;
     let state = catalog::read_index(self)?;
-    self.load_selection(&state, "current")
+    self.load_selection(&state)
   }
 
   /// Resolves the active installation and keeps it available for a new process.
   ///
   /// # Errors
   /// Reports damaged installations or unavailable storage or leases.
-  #[cfg(windows)]
   pub fn active_and_lease(&self) -> io::Result<Option<(Bundle, Lease)>> {
     if !filesystem::root_exists(self)? {
       return Ok(None);
     }
-    self.migrate_once_if_needed()?;
     let _lock = filesystem::Lock::acquire(self)?;
-    let Some(bundle) = self.recorded_selection("current")? else {
+    let Some(bundle) = self.recorded_selection()? else {
       return Ok(None);
     };
-    let lease = leases::retain(&self.root.join("leases"), &bundle.manifest.bundle_id)?;
+    let lease = leases::retain(&self.runtime_leases(), &bundle.manifest.bundle_id)?;
     Ok(Some((bundle, lease)))
   }
 
-  /// Publishes a verified Windows updater and selects it for future invocations.
+  /// Publishes a verified updater and selects it for future invocations.
   /// Existing invocations continue using their leased updater payloads.
   ///
   /// # Errors
   /// Reports unsafe storage, damaged aliases or collisions with other commands.
-  #[cfg(windows)]
   pub fn install_manager(&self, updater: &[u8]) -> io::Result<()> {
     filesystem::install_manager(self, updater)
   }
 
-  /// Resolves and pins the active Windows updater for a new invocation.
+  /// Resolves and pins the active updater for a new invocation.
   ///
   /// # Errors
   /// Reports unsafe storage, damaged updater content or unavailable leases.
-  #[cfg(windows)]
   pub fn manager_and_lease(&self) -> io::Result<Option<(PathBuf, Lease)>> {
     filesystem::manager_and_lease(self)
   }
 
-  /// Reads a legacy previous selection without changing its pointer.
+  /// Returns the previous selection field retained by status clients.
   ///
   /// # Errors
-  /// Reports an unsafe, damaged or incompatible previous payload.
+  /// Reports unsafe or invalid registry metadata.
   pub fn previous(&self) -> io::Result<Option<Bundle>> {
-    if !filesystem::root_exists(self)? {
-      return Ok(None);
+    if filesystem::root_exists(self)? {
+      let _lock = filesystem::Lock::acquire(self)?;
+      catalog::read_index(self)?;
     }
-    self.migrate_once_if_needed()?;
-    self.recorded_selection("previous")
+    Ok(None)
   }
 
-  fn recorded_selection(&self, name: &str) -> io::Result<Option<Bundle>> {
+  fn recorded_selection(&self) -> io::Result<Option<Bundle>> {
     let state = catalog::read_index(self)?;
-    let (id, bundle) = self.load_selection(&state, name)?;
+    let (id, bundle) = self.load_selection(&state)?;
     match (id, bundle) {
       (Some(id), None) => Err(filesystem::missing_payload(&id)),
       (_, bundle) => Ok(bundle),
     }
   }
 
-  fn selection_entry<'a>(
-    &self,
-    state: &'a catalog::State,
-    name: &str,
-  ) -> io::Result<Option<&'a CatalogEntry>> {
-    let Some(id) = filesystem::selection_id(self, name)? else {
-      return Ok(None);
-    };
-    if name == "current" && state.hides_selection(&id) {
-      return Ok(None);
-    }
-    catalog_entry(state, &id)
-      .filter(|entry| crate::bundles::local_target(&entry.target_triple))
-      .map(Some)
-      .ok_or_else(|| filesystem::invalid("installation selection has no record in the catalog"))
+  fn selection_entry(state: &catalog::State) -> Option<&CatalogEntry> {
+    state
+      .active_runtime
+      .as_ref()
+      .and_then(|selection| catalog_entry(state, &selection.bundle_id))
   }
 
-  fn load_selection(
-    &self,
-    state: &catalog::State,
-    name: &str,
-  ) -> io::Result<(Option<String>, Option<Bundle>)> {
-    let Some(entry) = self.selection_entry(state, name)? else {
+  fn load_selection(&self, state: &catalog::State) -> io::Result<(Option<String>, Option<Bundle>)> {
+    let Some(entry) = Self::selection_entry(state) else {
       return Ok((None, None));
     };
     let bundle = self.load_entry(entry)?;
@@ -208,7 +296,7 @@ impl Installations {
         "installation store is absent",
       ));
     }
-    self.migrate_once_if_needed()?;
+    let _lock = filesystem::Lock::acquire(self)?;
     self.get_recorded(bundle_id)
   }
 
@@ -233,7 +321,6 @@ impl Installations {
     if !filesystem::root_exists(self)? {
       return Ok(None);
     }
-    self.migrate_once_if_needed()?;
     let _lock = filesystem::Lock::acquire(self)?;
     let state = catalog::read_index(self)?;
     let Some(entry) = catalog_entry(&state, bundle_id) else {
@@ -263,7 +350,7 @@ impl Installations {
     if !filesystem::root_exists(self)? {
       return Ok(Vec::new());
     }
-    self.migrate_once_if_needed()?;
+    let _lock = filesystem::Lock::acquire(self)?;
     self.list_recorded()
   }
 
@@ -303,10 +390,8 @@ impl Installations {
     if !filesystem::root_exists(self)? {
       return operation(&[], &[]);
     }
-    self.migrate_once_if_needed()?;
     let _lock = filesystem::Lock::acquire(self)?;
-    catalog::recover(self)?;
-    let state = catalog::read_development_index(self)?;
+    let state = catalog::read_index(self)?;
     let (bundles, missing) = state.inspect_payloads(self)?;
     let manifests = bundles
       .into_iter()
@@ -328,7 +413,7 @@ impl Installations {
     if !filesystem::root_exists(self)? {
       return Ok(Vec::new());
     }
-    self.migrate_once_if_needed()?;
+    let _lock = filesystem::Lock::acquire(self)?;
     catalog::inventory(self)
   }
 
@@ -340,7 +425,6 @@ impl Installations {
     if !filesystem::root_exists(self)? {
       return Ok(Vec::new());
     }
-    self.migrate_once_if_needed()?;
     let _lock = filesystem::Lock::acquire(self)?;
     Ok(catalog::read_index(self)?.entries)
   }
@@ -365,31 +449,17 @@ impl Installations {
     if !filesystem::root_exists(self)? {
       return Ok(Inspection::default());
     }
-    self.migrate_once_if_needed()?;
     let _lock = filesystem::Lock::acquire(self)?;
-    let state = catalog::read_development_index(self)?;
-    let active = self.selection_entry(&state, "current")?;
-    let previous = self.selection_entry(&state, "previous")?;
-    if let Some(previous) = previous {
-      let active =
-        active.ok_or_else(|| filesystem::invalid("previous installation has no active build"))?;
-      if active.bundle_id == previous.bundle_id {
-        return Err(filesystem::invalid(
-          "active and previous installations share an identity",
-        ));
-      }
-    }
+    let state = catalog::read_index(self)?;
+    let active = Self::selection_entry(&state);
     let (bundles, missing) = if full {
       state.inspect_payloads(self)?
     } else {
-      let bundles = [active, previous]
-        .into_iter()
-        .flatten()
+      let bundle = active
         .map(|entry| self.load_entry(entry))
-        .collect::<io::Result<Vec<_>>>()?
-        .into_iter()
-        .flatten()
-        .collect();
+        .transpose()?
+        .flatten();
+      let bundles = bundle.into_iter().collect();
       let ids: BTreeSet<_> = state.entries.iter().map(|entry| &entry.bundle_id).collect();
       let mut missing = Vec::new();
       for id in ids {
@@ -401,7 +471,11 @@ impl Installations {
     };
     Ok(Inspection {
       active: active.map(|entry| entry.bundle_id.clone()),
-      previous: previous.map(|entry| entry.bundle_id.clone()),
+      previous: None,
+      active_origin: state
+        .active_runtime
+        .as_ref()
+        .map(|selected| selected.origin.clone()),
       entries: state.entries,
       bundles,
       missing,
@@ -417,44 +491,40 @@ impl Installations {
     if !filesystem::root_exists(self)? {
       return Ok(None);
     }
-    self.migrate_once_if_needed()?;
     let _lock = filesystem::Lock::acquire(self)?;
-    Ok(
-      catalog::read_development_index(self)?
-        .development
-        .remove(checkout_id),
-    )
+    let state = catalog::read_index(self)?;
+    let target = crate::paths::native_target();
+    if let Some(exact) = state.development.get(&format!("{checkout_id}/{target}")) {
+      return Ok(Some(exact.clone()));
+    }
+    Ok(state.development.iter().find_map(|(key, id)| {
+      let (checkout, target) = key.split_once('/')?;
+      (checkout == checkout_id && crate::bundles::local_target(target)).then(|| id.clone())
+    }))
   }
 
-  /// Prepares an update by adopting a complete older installation and adding
-  /// the readable layout. Existing catalogs and committed transactions remain
-  /// authoritative. Fresh stores require no migration.
+  /// Checks the registry before transfer, allowing missing payloads for repair.
   ///
   /// # Errors
-  /// Reports unsafe storage, corrupt metadata or incomplete older builds.
-  pub fn migrate_catalog_if_missing(&self) -> io::Result<Vec<CatalogEntry>> {
-    migration::migrate_if_missing(self)
+  /// Reports unsafe metadata or damaged present payloads.
+  pub fn prepare_installation(&self) -> io::Result<()> {
+    if filesystem::root_exists(self)? {
+      let _lock = filesystem::Lock::acquire(self)?;
+      catalog::read(self)?;
+    }
+    Ok(())
   }
 
-  /// Reports whether updater replacement must preserve development registrations.
+  /// Checks whether a checkout build is retained by the registry.
   ///
   /// # Errors
-  /// Reports unsafe storage or a damaged catalog.
+  /// Reports unsafe or unreadable metadata.
   pub fn has_development_heads(&self) -> io::Result<bool> {
     if !filesystem::root_exists(self)? {
       return Ok(false);
     }
     let _lock = filesystem::Lock::acquire(self)?;
-    catalog::has_development_heads(self)
-  }
-
-  /// Migrates an existing store before its first use by this updater.
-  /// Fresh stores require no migration.
-  ///
-  /// # Errors
-  /// Reports unsafe storage, incompatible old builds or failed migration.
-  pub fn migrate_once_if_needed(&self) -> io::Result<()> {
-    migration::migrate_once_if_needed(self)
+    Ok(!catalog::read_index(self)?.development.is_empty())
   }
 
   /// Opens the retained current component for a channel and target.
@@ -565,26 +635,23 @@ impl Installations {
         "the channel requires one unambiguous locally runnable target",
       ));
     };
-    self.migrate_once_if_needed()?;
     filesystem::ensure_root(self)?;
     let _lock = filesystem::Lock::acquire(self)?;
-    catalog::recover(self)?;
     let mut state = catalog::read(self)?;
     if let Some(expected_heads) = expected_heads {
       verify_channel_heads(&state, &origin.channel, expected_heads)?;
     }
     catalog::initialize(self, &state)?;
-    if native.is_some() {
-      self.selection_entry(&state, "current")?;
-      self.selection_entry(&state, "previous")?;
-    }
     let installed = bundles
       .iter()
       .map(|bundle| filesystem::publish(self, bundle, None))
       .collect::<io::Result<Vec<_>>>()?;
     state.register(&installed, origin, false);
-    let activation = native.map(|index| (&installed[index], None));
-    catalog::commit(self, &state, activation)?;
+    if let Some(index) = native {
+      filesystem::prepare_activation(self)?;
+      state.select_runtime(&installed[index], Some(origin))?;
+    }
+    catalog::commit(self, &state)?;
     Ok(installed)
   }
 
@@ -600,9 +667,7 @@ impl Installations {
     if !filesystem::root_exists(self)? {
       return Ok(false);
     }
-    self.migrate_once_if_needed()?;
     let _lock = filesystem::Lock::acquire(self)?;
-    catalog::recover(self)?;
     let mut state = catalog::read(self)?;
     let mut removed = false;
     for entry in &mut state.entries {
@@ -633,7 +698,7 @@ impl Installations {
     if !removed {
       return Ok(false);
     }
-    catalog::commit(self, &state, None)?;
+    catalog::commit(self, &state)?;
     Ok(true)
   }
 
@@ -736,12 +801,13 @@ impl Installations {
         "development checkout requires a local build",
       ));
     }
+    let checkout_key = format!("{checkout_id}/{}", bundle.manifest.target_triple);
     self.activate_with(
       bundle,
       Some(origin),
       None,
       |state| {
-        if state.development.get(checkout_id).map(String::as_str) != expected_head {
+        if state.development.get(&checkout_key).map(String::as_str) != expected_head {
           return Err(io::Error::new(
             io::ErrorKind::WouldBlock,
             "development checkout was updated during preparation; retry the build",
@@ -750,7 +816,7 @@ impl Installations {
         self.verify_development_siblings(state, bundle, origin)?;
         state
           .development
-          .insert(checkout_id.into(), bundle.manifest.bundle_id.clone());
+          .insert(checkout_key, bundle.manifest.bundle_id.clone());
         Ok(())
       },
       |installed| leases::acquire_locked(self, installed),
@@ -810,11 +876,9 @@ impl Installations {
     if !filesystem::root_exists(self)? {
       return Err(helper_selection_changed());
     }
-    self.migrate_once_if_needed()?;
     let _lock = filesystem::Lock::acquire(self)?;
-    catalog::recover(self)?;
     let active = self
-      .recorded_selection("current")?
+      .recorded_selection()?
       .filter(|active| active.manifest.bundle_id == expected_active)
       .ok_or_else(helper_selection_changed)?;
     validate_helper_renewal(&active.manifest, &bundle.manifest)?;
@@ -827,7 +891,11 @@ impl Installations {
     state.replace_helper_memberships(expected_active, &bundle.manifest.bundle_id)?;
     let installed = filesystem::publish(self, bundle, Some(&files))?;
     let lease = leases::acquire_locked(self, &installed)?;
-    catalog::commit(self, &state, Some((&installed, None)))?;
+    if let Some(selected) = &mut state.active_runtime {
+      selected.bundle_id.clone_from(&installed.manifest.bundle_id);
+    }
+    filesystem::prepare_activation(self)?;
+    catalog::commit(self, &state)?;
     Ok((installed, lease))
   }
 
@@ -844,10 +912,8 @@ impl Installations {
       origin.validate()?;
     }
     let files = bundle.read_files()?;
-    self.migrate_once_if_needed()?;
     filesystem::ensure_root(self)?;
     let _lock = filesystem::Lock::acquire(self)?;
-    catalog::recover(self)?;
     let mut state = catalog::read(self)?;
     if let (Some(origin), Some(expected_heads)) = (origin, expected_heads) {
       verify_channel_heads(&state, &origin.channel, expected_heads)?;
@@ -862,20 +928,18 @@ impl Installations {
     } else {
       None
     };
-    self.selection_entry(&state, "current")?;
-    self.selection_entry(&state, "previous")?;
-    // Initialize using the persisted state, since the checkout update below
-    // may refer to a bundle that has yet to be published and recorded.
     catalog::initialize(self, &state)?;
     update(&mut state)?;
     let installed = filesystem::publish(self, bundle, Some(&files))?;
     let retained = prepare(&installed)?;
     if let Some(origin) = origin {
       state.register(std::slice::from_ref(&installed), origin, true);
-    } else if let Some(origin) = inferred_origin {
-      state.register(std::slice::from_ref(&installed), &origin, true);
+    } else if let Some(origin) = &inferred_origin {
+      state.register(std::slice::from_ref(&installed), origin, true);
     }
-    catalog::commit(self, &state, Some((&installed, None)))?;
+    filesystem::prepare_activation(self)?;
+    state.select_runtime(&installed, origin.or(inferred_origin.as_ref()))?;
+    catalog::commit(self, &state)?;
     Ok((installed, retained))
   }
 
@@ -926,7 +990,7 @@ impl Installations {
   /// Unsafe entries or unreadable leases stop pruning without guessing whether
   /// a process is alive. No PID or time-based ownership heuristic is used.
   pub fn prune(&self) -> io::Result<PruneResult> {
-    self.prune_with_missing(true)
+    self.prune_all(true)
   }
 
   /// Removes unused present builds while retaining repairable missing records.
@@ -934,32 +998,37 @@ impl Installations {
   /// # Errors
   /// Reports unsafe storage, damaged existing payloads or unreadable leases.
   pub fn prune_unused(&self) -> io::Result<PruneResult> {
-    self.prune_with_missing(false)
+    self.prune_with_options(false, false)
   }
 
-  fn prune_with_missing(&self, forget_missing: bool) -> io::Result<PruneResult> {
+  /// Prunes all package stores while respecting active selections and leases.
+  /// The caller must serialize desktop launch-entry refresh with this operation.
+  ///
+  /// # Errors
+  /// Reports unsafe storage, damaged existing payloads or unreadable leases.
+  pub fn prune_all(&self, forget_missing: bool) -> io::Result<PruneResult> {
+    self.prune_with_options(forget_missing, true)
+  }
+
+  fn prune_with_options(&self, forget_missing: bool, desktop: bool) -> io::Result<PruneResult> {
     if !filesystem::root_exists(self)? {
       return Ok(PruneResult::default());
     }
-    self.migrate_once_if_needed()?;
     let _lock = filesystem::Lock::acquire(self)?;
-    catalog::recover(self)?;
-    self.prune_locked(forget_missing)
+    self.prune_locked(forget_missing, desktop)
   }
 
-  fn prune_locked(&self, forget_missing: bool) -> io::Result<PruneResult> {
-    let mut state = catalog::read_development_index(self)?;
+  fn prune_locked(&self, forget_missing: bool, desktop: bool) -> io::Result<PruneResult> {
+    let mut state = catalog::read_index(self)?;
     let (_, missing_builds) = state.inspect_payloads(self)?;
     let mut retained = BTreeSet::new();
-    let active_id = self
-      .selection_entry(&state, "current")?
-      .map(|entry| entry.bundle_id.clone());
+    let active_id = Self::selection_entry(&state).map(|entry| entry.bundle_id.clone());
     retained.extend(active_id.iter().cloned());
-    self.selection_entry(&state, "previous")?;
     filesystem::clean_staging(self)?;
-    #[cfg(windows)]
-    filesystem::prune_managers(self)?;
-    filesystem::clear_previous(self)?;
+    filesystem::prune_managers(self, &state)?;
+    if desktop {
+      filesystem::prune_desktops(self, &state)?;
+    }
     retained.extend(state.development.values().cloned());
     for entry in &state.entries {
       if entry.current {
@@ -967,15 +1036,33 @@ impl Installations {
       }
     }
     let mut result = PruneResult::default();
-    let mut clear_active = None;
+    if desktop
+      && let Some(selection) = &state.desktop
+      && !filesystem::desktop_available(self, &selection.content_id)?
+    {
+      if forget_missing {
+        result
+          .forgotten_missing_builds
+          .push(selection.content_id.clone());
+        state.desktop = None;
+      } else {
+        result.missing_builds.push(selection.content_id.clone());
+      }
+    }
     if forget_missing {
       let missing = |id: &String| missing_builds.binary_search(id).is_ok();
-      clear_active = active_id.as_ref().filter(|id| missing(id));
+      if active_id.as_ref().is_some_and(missing) {
+        state.active_runtime = None;
+      }
       state.entries.retain(|entry| !missing(&entry.bundle_id));
       state.development.retain(|_, id| !missing(id));
-      result.forgotten_missing_builds = missing_builds;
+      result.forgotten_missing_builds.extend(missing_builds);
+      result.forgotten_missing_builds.sort();
+      result.forgotten_missing_builds.dedup();
     } else {
-      result.missing_builds = missing_builds;
+      result.missing_builds.extend(missing_builds);
+      result.missing_builds.sort();
+      result.missing_builds.dedup();
     }
     let mut removable = Vec::new();
     for (id, path) in filesystem::entries(self)? {
@@ -998,7 +1085,7 @@ impl Installations {
     {
       // Remove metadata first: a crash may leave an unregistered payload, but
       // never a catalog entry pointing at bytes already deleted by GC.
-      catalog::commit_prune(self, &state, clear_active.map(String::as_str))?;
+      catalog::commit(self, &state)?;
     } else if catalog::exists(self)? {
       layout::refresh(self, &state);
     }

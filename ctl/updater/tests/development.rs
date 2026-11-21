@@ -123,7 +123,7 @@ fn development_rejects_nested_and_unrelated_directories_before_building() {
     for options in [
       [].as_slice(),
       &["--app"],
-      &["--renew-signing"],
+      &["sign"],
       &["--workspace", nested.to_str().unwrap()],
     ] {
       let output = fixture
@@ -155,7 +155,12 @@ fn failed_development_preparation_exits_while_the_launcher_holds_stdin_open() {
   assert!(!output.status.success());
   assert!(String::from_utf8_lossy(&output.stderr).contains("fixture build failure"));
   assert_eq!(output.stdout, Vec::<u8>::new());
-  assert!(!fixture.0.join(".tokn/ctl/current").exists());
+  assert!(
+    !fixture
+      .0
+      .join(".tokn/ctl/ctlup/state/installations.json")
+      .exists()
+  );
   drop(writer);
 }
 
@@ -201,7 +206,12 @@ child.once("close", (code) => {
   );
   assert!(String::from_utf8_lossy(&output.stderr).contains("fixture build failure"));
   assert_eq!(output.stdout, Vec::<u8>::new());
-  assert!(!fixture.0.join(".tokn/ctl/current").exists());
+  assert!(
+    !fixture
+      .0
+      .join(".tokn/ctl/ctlup/state/installations.json")
+      .exists()
+  );
 }
 
 #[test]
@@ -227,10 +237,10 @@ fn private_development_lease_rejects_non_pipe_input_before_building() {
 #[test]
 fn remote_development_rejects_local_modes_before_building() {
   let fixture = Fixture::new();
-  for option in ["--app", "--renew-signing", "--release"] {
+  for option in ["--app", "sign", "--release"] {
     let output = fixture
       .command()
-      .args(["--destination", "fixture-host", option])
+      .args(["--ssh", "fixture-host", option])
       .output()
       .unwrap();
     assert!(!output.status.success());
@@ -283,5 +293,10 @@ exit 17
     "{diagnostics}"
   );
   assert_eq!(output.stdout, [] as [u8; 0]);
-  assert!(!fixture.0.join(".tokn/ctl/current").exists());
+  assert!(
+    !fixture
+      .0
+      .join(".tokn/ctl/ctlup/state/installations.json")
+      .exists()
+  );
 }

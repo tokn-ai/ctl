@@ -39,8 +39,9 @@ fn manifest(token: char, source: Source, dirty: bool) -> Manifest {
 
 fn snapshot(manifests: &[Manifest]) -> InstallationShow {
   InstallationShow {
-    schema_version: 1,
+    schema_version: 2,
     active: None,
+    active_origin: None,
     previous: None,
     missing_builds: Vec::new(),
     installations: manifests

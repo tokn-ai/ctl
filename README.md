@@ -188,8 +188,8 @@ version and Mac architecture. It downloads the matching `v<version>` release;
 it does not select the latest release. The full bundle lives at
 `~/.tokn/ctl/components/ctld/versions/<version>-<target>/ctld.app`. Setup updates
 the release `current` symlink and a selection for its architecture and supported
-APIs, replacing each link atomically. This is separate from the remote agent's
-existing `~/.tokn/ctl/versions/` and `current` installation.
+APIs, replacing each link atomically. `ctlup` manages complete runtime builds
+separately under `~/.tokn/ctl/ctlup/store/runtime/`.
 
 Setup checks the release checksum, Apple Developer ID signature, provisioning
 profile, notarization, and helper build/API identity against the installation's
@@ -258,7 +258,7 @@ from your checkout.
 
 `pnpm ctld:build` bootstraps `ctlup` and delegates to the same native builder.
 It builds all six runtime commands and the manager from one source identity,
-then activates the verified installation under `~/.tokn/ctl/installs/`.
+then activates the verified installation under `~/.tokn/ctl/ctlup/store/runtime/`.
 Stable commands live in `~/.tokn/ctl/bin`; add that directory to `PATH` to use
 `ctlup dev` directly. Cargo's configured target directory and custom profiles
 are respected. On macOS, the builder discovers your profile and matching
@@ -368,10 +368,10 @@ Linux x64 or ARM64 host. To prepare a bundle for a later install, run:
 pnpm bundles:build
 ```
 
-`ctlup update` resolves the configured publication channel. Choose
-`--channel nightly` or the app's **Nightly** source to download the published
-`main` build. `pnpm bundles:sync` remains available for packaging and offline
-selection. See [local bundles](docs/local-bundles.md).
+Use `ctlup install --channel nightly` or the app's **Nightly** source to select
+the published `main` build. `ctlup update` follows the recorded channel.
+`pnpm bundles:sync` remains available for packaging and offline selection.
+See [local bundles](docs/local-bundles.md).
 
 The `Desktop, control daemon, and remote-agent bundles` workflow builds static
 Linux and native macOS remote bundles and desktop packages for x86-64 and ARM64. Main-branch
@@ -567,9 +567,10 @@ locations, and forces CLI mode when invoking the app executable. Discovery does
 not install, sign in to, or reconfigure Tailscale.
 
 The app records the host's remote environment ID and installed agent/bundle version.
-The remote stores its ID in `~/.tokn/ctl/remote-id`; installed bundles live under
-`~/.tokn/ctl/installs`, with `~/.tokn/ctl/current` selecting the active build and
-`~/.tokn/ctl/bin` providing stable commands. `ctlup` manages runtime installations.
+The remote stores its ID in `~/.tokn/ctl/remote-id`. `ctlup` keeps runtime builds
+under `~/.tokn/ctl/ctlup/store/runtime/` and records the active build in
+`~/.tokn/ctl/ctlup/state/installations.json`. The account's stable commands live
+in `~/.tokn/ctl/bin`.
 Every method on a host must reach that same environment. Hosts are never merged
 automatically because their remote IDs match. Hover over a host heading to see
 its last observed version and remote ID.
@@ -844,16 +845,16 @@ The default target is local. Persistent remote shells require `ctl-agent` and
 `ctmuxd` on the destination, as with `ctl ctmux`; plain SSH operations need only
 the remote SSH service.
 
-When a Unix host needs a component update, `ctl` prints the corresponding
-`ctlup update` command. Run it from macOS, Linux, or Windows x64, then reconnect. The
+When `ctl` recognizes a missing or outdated agent on a Unix host, it prints a
+`ctlup install` command. Run it from macOS, Linux, or Windows x64, then reconnect. The
 updater verifies any saved machine ID, uses the selected SSH route, and shows
 download and installation progress. It preserves running daemons.
 `CTL_REMOTE_BUNDLES_DIR` supplies explicit build files. Use
 `ctlup dev --host NAME` to build from a checkout for a Linux x64 or ARM64 host.
-`ctlup check --channel nightly` checks metadata without
-opening SSH or downloading binaries. The current publication is resolved before
-using its verified download cache. `ctlup update` manages complete local or remote
-installations while running services keep their leased builds.
+`ctlup release show --channel nightly` reads publication metadata without
+opening SSH or downloading binaries. `ctlup update --check` checks the tracked
+installation for an available update. The updater resolves the current publication
+before using its verified download cache. Running services keep their leased builds.
 Published schema-3 bundles include `ctl` and `ctmux` alongside the four services.
 The remote account can run `ctl who` to list active ctl service connections and
 `ctmux clients` to list terminal viewers. Schema-2 and schema-3 bundles verify
@@ -1129,8 +1130,8 @@ the host or editing its connection method. The app saves the platform and uses
 your existing OpenSSH configuration and credentials.
 
 ```sh
-ctlup update --host windows-host
-ctlup update --destination windows-ssh-alias --remote-platform windows
+ctlup install --host windows-host
+ctlup install --ssh windows-ssh-alias --remote-platform windows
 ctl --host windows-host --remote-platform windows ctmux new --name development -- cmd.exe /D /Q
 ctl --host windows-host --remote-platform windows ctmux attach development
 ctl --host windows-host --remote-platform windows task list

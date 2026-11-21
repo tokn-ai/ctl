@@ -34,9 +34,36 @@ impl Home {
     command
   }
 
+  fn command_manager(&self, args: &[&str]) -> Command {
+    let binary = Path::new(env!("CARGO_BIN_EXE_ctlup"));
+    let limit = ctl_core::bundles::MAX_FILE_BYTES as u64;
+    if fs::metadata(binary).unwrap().len() <= limit {
+      return self.command_at(binary, args);
+    }
+    let stripped = self.0.join("ctlup-test-manager");
+    if !stripped.exists() {
+      fs::copy(binary, &stripped).unwrap();
+      let result = Command::new("strip").arg(&stripped).output().unwrap();
+      assert!(result.status.success(), "{result:?}");
+    }
+    self.command_at(&stripped, args)
+  }
+
+  fn updater_root(&self) -> PathBuf {
+    ctl_core::paths::updater_directory_for_account(&self.0)
+  }
+
+  fn registry(&self) -> PathBuf {
+    self.updater_root().join("state/installations.json")
+  }
+
+  fn payloads(&self) -> PathBuf {
+    self.updater_root().join("store/runtime")
+  }
+
   fn install(&self, archive: &[u8]) -> Output {
     let mut child = self
-      .command(&["install-archive"])
+      .command_manager(&["install-archive"])
       .stdin(Stdio::piped())
       .stdout(Stdio::piped())
       .stderr(Stdio::piped())
@@ -126,118 +153,70 @@ fn archive(revision: char) -> (Manifest, Vec<u8>) {
   (manifest, builder.into_inner().unwrap().finish().unwrap())
 }
 
-fn legacy_installation(root: &Path, revision: char) -> PathBuf {
-  let (manifest, bytes) = archive(revision);
-  let relative = PathBuf::from("installs").join(manifest.bundle_id);
-  let directory = root.join(&relative);
-  fs::create_dir_all(&directory).unwrap();
-  tar::Archive::new(flate2::read::GzDecoder::new(bytes.as_slice()))
-    .unpack(directory)
-    .unwrap();
-  relative
-}
-
 #[test]
-fn first_inspection_migrates_the_catalog_and_preserves_selections() {
+fn inspection_leaves_an_unrelated_legacy_installation_intact() {
   let home = Home::new();
-  let root = home.0.join(".tokn/ctl");
-  let previous = legacy_installation(&root, 'a');
-  let active = legacy_installation(&root, 'b');
-  std::os::unix::fs::symlink(&active, root.join("current")).unwrap();
-  std::os::unix::fs::symlink(&previous, root.join("previous")).unwrap();
-  assert!(!root.join("catalog.json").exists());
-
-  let output = home.command(&["catalog-json"]).output().unwrap();
-  assert!(
-    output.status.success(),
-    "{}",
-    String::from_utf8_lossy(&output.stderr)
-  );
-  let catalog: ctl_client::installation::InstallationCatalog =
-    serde_json::from_slice(&output.stdout).unwrap();
-  catalog.validate().unwrap();
-  assert_eq!(catalog.installations.len(), 2);
-  assert!(catalog.installations.iter().all(|entry| {
-    entry
-      .origin
-      .as_ref()
-      .is_some_and(|origin| origin.channel == "provided" && origin.built_at.is_none())
-  }));
-  assert_eq!(fs::read_link(root.join("current")).unwrap(), active);
-  assert_eq!(fs::read_link(root.join("previous")).unwrap(), previous);
-  let version_path = root
-    .join("installs/dev/provided/0.1.2")
-    .join(ctl_core::paths::native_target());
-  assert_eq!(
-    fs::canonicalize(version_path).unwrap(),
-    fs::canonicalize(root.join(&active)).unwrap()
-  );
-  for path in [&active, &previous] {
-    assert!(root.join(path).is_dir());
-  }
-  let marker = root.join("install-layout-migrated.json");
-  let marker_modified = fs::metadata(&marker).unwrap().modified().unwrap();
-  let recorded = fs::read(root.join("catalog.json")).unwrap();
-  let repeated = home.command(&["catalog-json"]).output().unwrap();
-  assert!(repeated.status.success());
-  assert_eq!(repeated.stdout, output.stdout);
-  assert_eq!(recorded, fs::read(root.join("catalog.json")).unwrap());
-  assert_eq!(
-    fs::metadata(&marker).unwrap().modified().unwrap(),
-    marker_modified
-  );
-
-  let output = home
-    .command(&["component", "list", "--installed"])
-    .output()
-    .unwrap();
-  assert!(output.status.success());
-  assert_eq!(
-    String::from_utf8(output.stdout).unwrap().trim(),
-    format!("bundle-{} (provided)", ctl_core::paths::native_target())
-  );
-  let pruned = home.command(&["prune", "--json"]).output().unwrap();
-  assert!(
-    pruned.status.success(),
-    "{}",
-    String::from_utf8_lossy(&pruned.stderr)
-  );
-  assert!(fs::symlink_metadata(root.join("previous")).is_err());
-  assert!(!root.join(previous).exists());
-  assert_eq!(fs::read_link(root.join("current")).unwrap(), active);
-}
-
-#[test]
-fn remote_update_preparation_adopts_complete_builds_before_installing_a_replacement() {
-  let home = Home::new();
-  let root = home.0.join(".tokn/ctl");
-  let previous = legacy_installation(&root, 'a');
-  let active = legacy_installation(&root, 'b');
-  std::os::unix::fs::symlink(&active, root.join("current")).unwrap();
-  std::os::unix::fs::symlink(&previous, root.join("previous")).unwrap();
+  let profile = home.0.join(".tokn/ctl");
+  let legacy = profile.join("installs/legacy");
+  fs::create_dir_all(&legacy).unwrap();
+  fs::write(legacy.join("payload"), b"old content").unwrap();
+  std::os::unix::fs::symlink("installs/legacy", profile.join("current")).unwrap();
 
   let preparation = home.command(&["prepare-install"]).output().unwrap();
-  assert!(
-    preparation.status.success(),
-    "{}",
-    String::from_utf8_lossy(&preparation.stderr)
-  );
+  assert!(preparation.status.success(), "{preparation:?}");
   assert_eq!(preparation.stdout, b"");
-  assert!(root.join("catalog.json").is_file());
-  assert!(root.join("install-layout-migrated.json").is_file());
-  assert_eq!(fs::read_link(root.join("current")).unwrap(), active);
-  assert_eq!(fs::read_link(root.join("previous")).unwrap(), previous);
+  let status = home.command(&["status", "--json"]).output().unwrap();
+  assert!(status.status.success(), "{status:?}");
+  let status: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+  assert!(status["active"].is_null());
+  assert_eq!(status["installations"], serde_json::json!([]));
+  assert!(!home.registry().exists());
+  assert_eq!(fs::read(legacy.join("payload")).unwrap(), b"old content");
+}
 
-  let (replacement, bytes) = archive('c');
+#[test]
+fn runtime_preflight_reads_the_registry_without_replacing_the_selection() {
+  let home = Home::new();
+  let (active, bytes) = archive('a');
   let installed = home.install(&bytes);
-  assert!(
-    installed.status.success(),
-    "{}",
-    String::from_utf8_lossy(&installed.stderr)
-  );
-  let installs = ctl_core::installations::Installations::new(&home.0);
-  assert_eq!(installs.active().unwrap().unwrap().manifest, replacement);
-  assert!(installs.previous().unwrap().is_none());
+  assert!(installed.status.success(), "{installed:?}");
+  let recorded = fs::read(home.registry()).unwrap();
+  let output = home.command(&["prepare-install"]).output().unwrap();
+  assert!(output.status.success(), "{output:?}");
+  assert_eq!(output.stdout, b"");
+  assert_eq!(fs::read(home.registry()).unwrap(), recorded);
+  let installed = ctl_core::installations::Installations::new(&home.0)
+    .active()
+    .unwrap()
+    .unwrap();
+  assert_eq!(installed.manifest, active);
+  assert_eq!(installed.directory, home.payloads().join(active.bundle_id));
+}
+
+#[test]
+fn update_checks_pinned_and_uninstalled_sources_without_resolving_a_release() {
+  let home = Home::new();
+  let check = || {
+    let output = home
+      .command(&["update", "--check", "--json"])
+      .output()
+      .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+  };
+  assert_eq!(check()[0]["check"]["state"], "uninstalled");
+  assert!(!home.registry().exists());
+  let (manifest, bytes) = archive('a');
+  let installed = home.install(&bytes);
+  assert!(installed.status.success(), "{installed:?}");
+  assert_eq!(check()[0]["check"]["state"], "pinned");
+  assert_eq!(check()[0]["check"]["active"], manifest.bundle_id);
+
+  let before = fs::read(home.registry()).unwrap();
+  let update = home.command(&["update"]).output().unwrap();
+  assert!(update.status.success(), "{update:?}");
+  assert!(String::from_utf8_lossy(&update.stdout).contains("runtime is pinned"));
+  assert_eq!(fs::read(home.registry()).unwrap(), before);
 }
 
 #[test]
@@ -255,19 +234,19 @@ fn status_reports_missing_installed_bundles_and_archive_install_restores_them() 
   let (manifest, bytes) = archive('a');
   let installed = home.install(&bytes);
   assert!(installed.status.success(), "{installed:?}");
-  let root = home.0.join(".tokn/ctl");
-  let catalog = fs::read(root.join("catalog.json")).unwrap();
-  let selection = fs::read_link(root.join("current")).unwrap();
-  fs::rename(root.join("installs"), home.0.join("saved-installs")).unwrap();
+  let catalog = fs::read(home.registry()).unwrap();
+  fs::rename(home.payloads(), home.0.join("saved-runtime")).unwrap();
 
   let output = home.command(&["status", "--json"]).output().unwrap();
   assert!(output.status.success(), "{output:?}");
   let status: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-  assert!(status["active"].is_null());
+  assert_eq!(status["active"], manifest.bundle_id);
+  assert_eq!(status["installations"][0]["bundle_id"], manifest.bundle_id);
   assert_eq!(
     status["missing_builds"],
     serde_json::json!([manifest.bundle_id])
   );
+  assert_eq!(status["builds"], serde_json::json!([]));
   let human = home.command(&["status"]).output().unwrap();
   assert!(human.status.success(), "{human:?}");
   let text = String::from_utf8(human.stdout).unwrap();
@@ -275,16 +254,17 @@ fn status_reports_missing_installed_bundles_and_archive_install_restores_them() 
     text.contains(&format!("Active: {} (missing)", &manifest.bundle_id[..12])),
     "{text}"
   );
-  let show = home.command(&["show", "--json"]).output().unwrap();
-  assert!(show.status.success(), "{show:?}");
-  let show: serde_json::Value = serde_json::from_slice(&show.stdout).unwrap();
-  assert_eq!(show["active"], manifest.bundle_id);
-  assert_eq!(show["installations"][0]["bundle_id"], manifest.bundle_id);
-  assert_eq!(show["missing_builds"], status["missing_builds"]);
-  assert_eq!(show["builds"], serde_json::json!([]));
-  assert_eq!(fs::read(root.join("catalog.json")).unwrap(), catalog);
-  assert_eq!(fs::read_link(root.join("current")).unwrap(), selection);
-  assert!(!root.join("installs").exists());
+
+  let inspection = home
+    .command(&["inspect-runtime", "--json"])
+    .output()
+    .unwrap();
+  assert!(inspection.status.success(), "{inspection:?}");
+  let inspection: serde_json::Value = serde_json::from_slice(&inspection.stdout).unwrap();
+  assert!(inspection["active"].is_null());
+  assert_eq!(inspection["missing_builds"], status["missing_builds"]);
+  assert_eq!(fs::read(home.registry()).unwrap(), catalog);
+  assert!(!home.payloads().exists());
 
   let probe = home
     .command(&["activate-installed", &manifest.bundle_id])
@@ -293,43 +273,45 @@ fn status_reports_missing_installed_bundles_and_archive_install_restores_them() 
   assert_eq!(probe.status.code(), Some(10), "{probe:?}");
   let recovered = home.install(&bytes);
   assert!(recovered.status.success(), "{recovered:?}");
-  assert!(root.join(&selection).is_dir());
+  assert!(home.payloads().join(&manifest.bundle_id).is_dir());
   let output = home.command(&["status", "--json"]).output().unwrap();
   assert!(output.status.success(), "{output:?}");
   let status: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-  assert_eq!(status["active"]["bundle_id"], manifest.bundle_id);
+  assert_eq!(status["active"], manifest.bundle_id);
   assert!(status.get("missing_builds").is_none());
 }
 
 #[test]
-fn explicit_prune_forgets_a_missing_active_build() {
+fn prune_forgets_missing_records_only_when_requested() {
   let home = Home::new();
   let (manifest, bytes) = archive('a');
-  assert!(home.install(&bytes).status.success());
-  let root = home.0.join(".tokn/ctl");
-  fs::remove_dir_all(root.join("installs")).unwrap();
-  fs::DirBuilder::new()
-    .mode(0o700)
-    .create(root.join("cache"))
-    .unwrap();
+  let installed = home.install(&bytes);
+  assert!(installed.status.success(), "{installed:?}");
+  fs::remove_dir_all(home.payloads()).unwrap();
 
-  let pruned = home.command(&["prune", "--json"]).output().unwrap();
-  assert!(pruned.status.success(), "{pruned:?}");
-  let pruned: serde_json::Value = serde_json::from_slice(&pruned.stdout).unwrap();
+  let prune = |args: &[&str]| {
+    let output = home.command(args).output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+  };
+  let pruned = prune(&["prune", "--json"]);
+  assert_eq!(
+    pruned["installations"]["missing_builds"],
+    serde_json::json!([manifest.bundle_id])
+  );
+  let pruned = prune(&["prune", "--forget-missing", "--json"]);
   assert_eq!(
     pruned["installations"]["forgotten_missing_builds"],
     serde_json::json!([manifest.bundle_id])
   );
   assert_eq!(pruned["installations"]["removed"], serde_json::json!([]));
-  assert!(fs::symlink_metadata(root.join("current")).is_err());
-  assert!(!root.join("installs").exists());
+  assert!(!home.payloads().exists());
 
   let status = home.command(&["status", "--json"]).output().unwrap();
   assert!(status.status.success(), "{status:?}");
   let status: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
   assert!(status["active"].is_null());
   assert!(status.get("missing_builds").is_none());
-  assert!(home.install(&bytes).status.success());
 }
 
 #[test]
@@ -429,7 +411,7 @@ fn full_storage_override_provisions_an_independent_installation() {
   fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
   let (manifest, bytes) = archive('a');
   let mut child = home
-    .command(&["install-archive"])
+    .command_manager(&["install-archive"])
     .env("CTL_DATA_DIR", &root)
     .stdin(Stdio::piped())
     .stdout(Stdio::piped())
@@ -439,14 +421,14 @@ fn full_storage_override_provisions_an_independent_installation() {
   child.stdin.take().unwrap().write_all(&bytes).unwrap();
   let output = child.wait_with_output().unwrap();
   assert!(output.status.success(), "{output:?}");
-  let payload = root.join("installs").join(manifest.bundle_id);
+  let updater_root = root.join("ctlup");
+  let payload = updater_root.join("store/runtime").join(&manifest.bundle_id);
   assert!(payload.is_dir());
-  let version_path = root
-    .join("installs/dev/provided/0.1.2")
-    .join(ctl_core::paths::native_target());
-  assert_eq!(
-    fs::canonicalize(&version_path).unwrap(),
-    fs::canonicalize(&payload).unwrap()
+  assert!(updater_root.join("state/installations.json").is_file());
+  assert!(
+    updater_root
+      .join("refs/runtime/dev/provided/0.1.2")
+      .is_dir()
   );
   assert!(root.join("bin/ctl").is_file());
   let output = home
@@ -463,7 +445,7 @@ fn full_storage_override_provisions_an_independent_installation() {
     .output()
     .unwrap();
   assert!(pruned.status.success(), "{pruned:?}");
-  assert!(version_path.is_dir());
+  assert!(payload.is_dir());
   assert!(!home.0.join(".tokn").exists());
 }
 
@@ -502,7 +484,7 @@ fn install_from_files_provisions_the_independent_manager_and_complete_commands()
   assert!(results[0]["error"].is_null());
   assert_eq!(results[0]["result"]["services_preserved"], true);
   let manager = root.join("bin/ctlup");
-  assert!(fs::symlink_metadata(&manager).unwrap().is_file());
+  assert!(manager.is_file());
   let output = home
     .command_at(&manager, &["status", "--json"])
     .output()
@@ -512,20 +494,21 @@ fn install_from_files_provisions_the_independent_manager_and_complete_commands()
   assert!(!status["active"].is_null());
   assert!(!root.join("components/selected").exists());
 
-  let active = fs::read_link(root.join("current")).unwrap();
-  for verb in ["update", "install"] {
-    fs::remove_dir_all(root.join("installs")).unwrap();
-    let result = home
-      .command_at(
-        &manager,
-        &[verb, "--from", provided.to_str().unwrap(), "--json"],
-      )
-      .output()
-      .unwrap();
-    assert!(result.status.success(), "{result:?}");
-    assert!(root.join(&active).is_dir());
-    assert_eq!(fs::read_link(root.join("current")).unwrap(), active);
-  }
+  let active = status["active"].as_str().unwrap();
+  let payload = home.payloads().join(active);
+  fs::remove_dir_all(&payload).unwrap();
+  let repair = home
+    .command_at(&manager, &["update", "--json"])
+    .output()
+    .unwrap();
+  assert!(repair.status.success(), "{repair:?}");
+  assert!(payload.is_dir());
+  let status = home
+    .command_at(&manager, &["status", "--json"])
+    .output()
+    .unwrap();
+  let status: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+  assert_eq!(status["active"], active);
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -542,13 +525,14 @@ fn dev_rebuilds_the_current_checkout_when_its_payload_is_missing() {
   .unwrap();
   let bin = workspace.join("bin");
   fs::create_dir(&bin).unwrap();
+  let layout_version = ctl_core::installations::DEVELOPMENT_LAYOUT_VERSION;
   let write_components = |revision| {
     let (info, _) = fixture_payload(revision);
     for name in ctl_core::bundle_layout::ALL.into_iter().chain(["ctlup"]) {
       let metadata = serde_json::to_string(&info["ctl"]).unwrap();
       let executable = bin.join(name);
       fs::write(&executable, format!(
-        "#!/bin/sh\ncase \"$1\" in\n--component-info) printf '%s\\n' '{metadata}';;\n--version) printf '%s\\n' '{name} 0.1.2';;\ninstallation-layout-version) printf '1\\n';;\n*) exit 1;;\nesac\n"
+        "#!/bin/sh\ncase \"$1\" in\n--component-info) printf '%s\\n' '{metadata}';;\n--version) printf '%s\\n' '{name} 0.1.2';;\ninstallation-layout-version) printf '%s\\n' '{layout_version}';;\n*) exit 1;;\nesac\n"
       )).unwrap();
       fs::set_permissions(executable, fs::Permissions::from_mode(0o700)).unwrap();
     }
@@ -580,19 +564,20 @@ printf '{"schema_version":1,"binary_directory":"%s/bin","manager_executable":"%s
   };
   write_components('a');
   let first = dev();
-  let root = home.0.join(".tokn/ctl");
-  fs::remove_dir_all(root.join("installs")).unwrap();
+  fs::remove_dir_all(home.payloads()).unwrap();
   write_components('b');
   let rebuilt = dev();
   assert_ne!(first["bundle_id"], rebuilt["bundle_id"]);
   assert!(Path::new(rebuilt["executables"]["ctl"].as_str().unwrap()).is_file());
-  let registrations: BTreeMap<String, String> =
-    serde_json::from_slice(&fs::read(root.join("development.json")).unwrap()).unwrap();
-  assert_eq!(registrations.len(), 1);
   assert_eq!(
-    registrations.values().next().unwrap(),
-    rebuilt["bundle_id"].as_str().unwrap()
+    ctl_core::installations::Installations::new(&home.0)
+      .active_selection()
+      .unwrap()
+      .0
+      .as_deref(),
+    rebuilt["bundle_id"].as_str(),
   );
+  assert!(home.updater_root().join("refs/runtime/dev").is_dir());
 }
 
 #[test]
@@ -607,12 +592,10 @@ fn commands_switch_complete_builds_and_prune_old_payloads_after_leases_end() {
   );
   assert!(String::from_utf8_lossy(&output.stdout).ends_with("ctl-install-v1\n"));
   let bin = home.0.join(".tokn/ctl/bin");
-  fs::copy(env!("CARGO_BIN_EXE_ctlup"), bin.join("ctlup")).unwrap();
-  fs::set_permissions(bin.join("ctlup"), fs::Permissions::from_mode(0o700)).unwrap();
   let manager_metadata = fs::metadata(bin.join("ctlup")).unwrap();
   let assert_commands = |revision: char| {
     for name in ctl_core::bundle_layout::ALL {
-      let output = Command::new(bin.join(name)).output().unwrap();
+      let output = home.command_at(&bin.join(name), &[]).output().unwrap();
       assert!(output.status.success());
       assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
@@ -634,18 +617,16 @@ fn commands_switch_complete_builds_and_prune_old_payloads_after_leases_end() {
   );
   let status = home.command(&["status", "--json"]).output().unwrap();
   let value: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
-  assert_eq!(value["active"]["bundle_id"], second.bundle_id);
+  assert_eq!(value["active"], second.bundle_id);
   assert!(value["previous"].is_null());
   assert_commands('b');
   assert_eq!(
     fs::metadata(bin.join("ctlup")).unwrap().len(),
     manager_metadata.len()
   );
-  assert!(
-    !fs::symlink_metadata(bin.join("ctlup"))
-      .unwrap()
-      .file_type()
-      .is_symlink()
+  assert_eq!(
+    fs::read_link(bin.join("ctlup")).unwrap(),
+    Path::new(".ctl-launcher")
   );
   assert!(leased.directory.is_dir());
   drop(lease);
@@ -664,13 +645,11 @@ fn failed_archive_and_missing_preflight_do_not_change_the_active_installation() 
   let home = Home::new();
   let (first, bytes) = archive('a');
   assert!(home.install(&bytes).status.success());
-  let previous = fs::read_link(home.0.join(".tokn/ctl/current")).unwrap();
+  let installations = ctl_core::installations::Installations::new(&home.0);
+  let before = installations.active_selection().unwrap().0;
   let output = home.install(b"corrupt archive");
   assert!(!output.status.success());
-  assert_eq!(
-    fs::read_link(home.0.join(".tokn/ctl/current")).unwrap(),
-    previous
-  );
+  assert_eq!(installations.active_selection().unwrap().0, before);
   let output = home
     .command(&["activate-installed", &"b".repeat(64)])
     .output()
@@ -681,10 +660,7 @@ fn failed_archive_and_missing_preflight_do_not_change_the_active_installation() 
     .output()
     .unwrap();
   assert!(output.status.success());
-  assert_eq!(
-    fs::read_link(home.0.join(".tokn/ctl/current")).unwrap(),
-    previous
-  );
+  assert_eq!(installations.active_selection().unwrap().0, before);
 }
 
 #[cfg(target_os = "macos")]
@@ -751,7 +727,7 @@ fn failed_renewal_passes_verified_signing_input_and_preserves_the_installation()
       },
     )
     .unwrap();
-  let catalog_path = installations.root().join("catalog.json");
+  let catalog_path = home.registry();
   let catalog = fs::read(&catalog_path).unwrap();
 
   let workspace = home.0.join("checkout with spaces");
@@ -777,7 +753,7 @@ exit 17
   .unwrap();
   fs::set_permissions(&signer, fs::Permissions::from_mode(0o700)).unwrap();
   let output = home
-    .command(&["dev", "--renew-signing", "--json", "--workspace"])
+    .command(&["dev", "sign", "--json", "--workspace"])
     .arg(&workspace)
     .env("CTL_NODE_PROGRAM", &signer)
     .output()

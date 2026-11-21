@@ -125,8 +125,8 @@ fn published_receiver_verifies_reuses_and_repairs_a_build() {
   );
 
   let payload = installations
-    .root()
-    .join("installs")
+    .updater_root()
+    .join("store/runtime")
     .join(&installed.bundle_id);
   fs::rename(&payload, fixture.0.join("hidden-runtime")).unwrap();
   assert_eq!(
@@ -180,9 +180,9 @@ exit 1
   let output = fixture
     .command(
       &[
+        "dev",
         "--host",
         "work",
-        "dev",
         "--workspace",
         workspace.to_str().unwrap(),
         "--json",
@@ -212,7 +212,7 @@ async fn remote_development_rejects_unrelated_cwd_before_ssh() {
   let fixture = Fixture::new(EXPECTED_ID);
   let output = fixture
     .command(
-      &["--host", "work", "dev", "--json"],
+      &["dev", "--host", "work", "--json"],
       Path::new(env!("CARGO_BIN_EXE_ctlup")),
       None,
     )
@@ -318,9 +318,9 @@ async fn update(fixture: &Fixture) -> std::process::Output {
   fixture
     .command(
       &[
+        "install",
         "-H",
         "work",
-        "update",
         "--from",
         fixture.0.join("bundles").to_str().unwrap(),
       ],
@@ -331,7 +331,7 @@ async fn update(fixture: &Fixture) -> std::process::Output {
 }
 
 fn assert_update_channels(fixture: &Fixture) {
-  fixture.assert_managed_channels(7);
+  fixture.assert_managed_channels(8);
   for (index, command) in [
     (1, "remote-id"),
     (2, "ctl-platform-v1"),
@@ -339,7 +339,8 @@ fn assert_update_channels(fixture: &Fixture) {
     (4, "ctlup-bootstrap-v1"),
     (5, "activate-installed"),
     (6, "install-archive"),
-    (7, "exec ctl-agent inspect"),
+    (7, "inspect-runtime --json"),
+    (8, "exec ctl-agent inspect"),
   ] {
     assert!(fixture.arguments(index).join("\n").contains(command));
   }
@@ -349,17 +350,20 @@ fn assert_update_channels(fixture: &Fixture) {
 
 fn assert_installed_bundle(fixture: &Fixture, bundle_id: &str) {
   let account = fixture.0.join("home/.tokn/ctl");
-  let current = account.join("current");
-  let installed = ctl_core::bundles::Bundle::open(&fs::canonicalize(&current).unwrap()).unwrap();
+  let installed = ctl_core::installations::Installations::new(&fixture.0.join("home"))
+    .active()
+    .unwrap()
+    .unwrap();
   assert_eq!(
     installed.manifest.distribution_id.as_deref(),
     Some(bundle_id)
   );
   assert_eq!(
-    fs::read_link(&current).unwrap(),
-    PathBuf::from("installs").join(&installed.manifest.bundle_id)
+    installed.directory,
+    account
+      .join("ctlup/store/runtime")
+      .join(&installed.manifest.bundle_id)
   );
-  assert!(!account.join("previous").is_symlink());
   assert_eq!(
     fs::read_to_string(account.join("remote-id")).unwrap(),
     EXPECTED_ID
@@ -375,10 +379,49 @@ fn assert_installed_bundle(fixture: &Fixture, bundle_id: &str) {
     "manifest.json",
   ] {
     assert_eq!(
-      fs::read(current.join(file)).unwrap(),
+      fs::read(installed.directory.join(file)).unwrap(),
       fs::read(payload.join(file)).unwrap()
     );
   }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn install_bootstraps_an_unsaved_ssh_address_without_reading_the_host_catalog() {
+  let _guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
+  let fixture = Fixture::new(EXPECTED_ID);
+  let bundle_id = source(&fixture);
+  fixture.prepare_updater();
+  let invalid_catalog = b"this is not a host catalog";
+  fs::write(fixture.0.join("hosts.json"), invalid_catalog).unwrap();
+  let broker = fixture.updater_broker();
+  let address = "ssh://operator@server.example:2022";
+  let output = fixture
+    .command(
+      &[
+        "install",
+        "--ssh",
+        address,
+        "--from",
+        fixture.0.join("bundles").to_str().unwrap(),
+      ],
+      Path::new(env!("CARGO_BIN_EXE_ctlup")),
+      Some(&fixture.0.join("ctlup-fixture-manager")),
+    )
+    .await;
+  assert!(output.status.success(), "{output:?}");
+  assert_eq!(broker.await.unwrap().destination, address);
+  assert!(
+    fixture
+      .arguments(1)
+      .iter()
+      .any(|argument| argument == address)
+  );
+  assert!(!fixture.0.join("account-id").exists());
+  assert_eq!(
+    fs::read(fixture.0.join("hosts.json")).unwrap(),
+    invalid_catalog
+  );
+  assert_installed_bundle(&fixture, &bundle_id);
 }
 
 #[cfg(target_os = "macos")]
@@ -394,9 +437,9 @@ async fn a_downloaded_manager_filename_can_deploy_offline_to_its_native_target()
   let output = fixture
     .command(
       &[
+        "install",
         "--host",
         "work",
-        "update",
         "--from",
         fixture.0.join("bundles").to_str().unwrap(),
       ],
@@ -411,7 +454,16 @@ async fn a_downloaded_manager_filename_can_deploy_offline_to_its_native_target()
   );
   assert_update_channels(&fixture);
   assert_eq!(
-    Sha256::digest(fs::read(fixture.0.join("home/.tokn/ctl/bin/ctlup")).unwrap()),
+    Sha256::digest(
+      fs::read(
+        ctl_core::installations::Installations::new(&fixture.0.join("home"))
+          .manager_and_lease()
+          .unwrap()
+          .unwrap()
+          .0
+      )
+      .unwrap()
+    ),
     Sha256::digest(fs::read(executable).unwrap()),
   );
   broker.await.unwrap();
@@ -484,8 +536,12 @@ async fn missing_or_changed_account_id_blocks_before_platform_source_or_upload()
     }
     assert!(!fixture.0.join("home/.tokn/ctl/components").exists());
     assert_eq!(
-      fs::canonicalize(fixture.0.join("home/.tokn/ctl/current")).unwrap(),
-      fs::canonicalize(legacy).unwrap(),
+      ctl_core::installations::Installations::new(&fixture.0.join("home"))
+        .active()
+        .unwrap()
+        .unwrap()
+        .directory,
+      legacy,
     );
     assert_eq!(
       fs::read(fixture.0.join("hosts.json")).unwrap(),
@@ -529,35 +585,30 @@ async fn newly_installed_agent_must_still_report_the_saved_account_and_exact_act
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn unmanaged_layout_blocks_update_before_ssh_and_preserves_the_old_installation() {
+async fn fresh_ssh_install_leaves_legacy_installation_data_intact() {
   let _guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = Fixture::new(EXPECTED_ID);
-  source(&fixture);
+  let bundle_id = source(&fixture);
   let legacy = legacy_installation(&fixture, Some(EXPECTED_ID));
   let account = fixture.0.join("home/.tokn/ctl");
   let current = fs::read_link(account.join("current")).unwrap();
   let old_payloads = ["ctl-agent", "ctmuxd", "ctl-taskd", "ctld"]
     .map(|name| (name, fs::read(legacy.join(name)).unwrap()));
   let original_hosts = fs::read(fixture.0.join("hosts.json")).unwrap();
-  // This fixture shares the local preparation account with its simulated SSH
-  // account. Its old local layout must be refused before opening any channel.
+  let broker = fixture.updater_broker();
+
   let output = update(&fixture).await;
-  let diagnostics = String::from_utf8_lossy(&output.stderr);
-  assert!(!output.status.success(), "{diagnostics}");
-  assert!(diagnostics.contains("complete"), "{diagnostics}");
-  for marker in ["count", "bootstrap", "preflight", "upload", "inspect"] {
-    assert!(!fixture.0.join(marker).exists(), "unexpected {marker}");
-  }
+  assert!(output.status.success(), "{output:?}");
+  assert_installed_bundle(&fixture, &bundle_id);
   assert_eq!(fs::read_link(account.join("current")).unwrap(), current);
   for (name, bytes) in old_payloads {
     assert_eq!(fs::read(legacy.join(name)).unwrap(), bytes);
   }
-  assert!(!account.join("catalog.json").exists());
-  assert!(!account.join("installs").exists());
   assert_eq!(
     fs::read(fixture.0.join("hosts.json")).unwrap(),
     original_hosts
   );
+  broker.await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -585,7 +636,12 @@ async fn malformed_provided_bundle_is_rejected_before_bootstrap_or_upload() {
   ] {
     assert!(!fixture.0.join(marker).exists(), "unexpected {marker}");
   }
-  assert!(!fixture.0.join("home/.tokn/ctl/current").exists());
+  assert!(
+    !fixture
+      .0
+      .join("home/.tokn/ctl/ctlup/state/installations.json")
+      .exists()
+  );
   assert_eq!(
     fs::read(fixture.0.join("hosts.json")).unwrap(),
     original_hosts
@@ -611,7 +667,7 @@ async fn explicit_update_preserves_older_cached_and_selected_sources() {
   assert_installed_bundle(&fixture, &bundle_id);
   assert_selection(&fixture, Some(&previous.manifest.bundle_id));
   let cache = ctl_client::remote_bundle::BundleCacheEntry::new(
-    &fixture.0.join("home/.tokn/ctl/agent-bundles"),
+    &fixture.0.join("home/.tokn/ctl/ctlup/agent-bundles"),
     fixture_target(),
     &previous.manifest.components["ctl-agent"].build,
   )

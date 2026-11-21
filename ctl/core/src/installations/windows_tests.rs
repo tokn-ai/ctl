@@ -121,7 +121,10 @@ fn a_running_manager_keeps_its_payload_when_a_new_manager_is_selected() {
 
   installs.install_manager(b"first manager").unwrap();
   let (old_path, lease) = installs.manager_and_lease().unwrap().unwrap();
-  let direct = super::leases::lease_executable(&old_path).unwrap().unwrap();
+  let executable = old_path.canonicalize().unwrap();
+  let direct = super::leases::lease_executable(&executable)
+    .unwrap()
+    .unwrap();
   installs.install_manager(b"new manager").unwrap();
   let (active_path, _active_lease) = installs.manager_and_lease().unwrap().unwrap();
   assert_eq!(fs::read(&active_path).unwrap(), b"new manager");

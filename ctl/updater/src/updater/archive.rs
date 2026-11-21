@@ -25,7 +25,9 @@ pub(super) async fn install(home: &Path, origin: Option<CatalogOrigin>) -> io::R
       received_bytes: bytes.len() as u64,
     });
   }
-  ctl_client::installation::install_archive_with_origin(home, &bytes, origin, emit).await?;
+  let manager = std::env::current_exe()?;
+  ctl_client::installation::install_archive_with_origin(home, &bytes, origin, Some(&manager), emit)
+    .await?;
   Ok(())
 }
 

@@ -106,27 +106,19 @@ fn activation_switches_stable_commands_without_keeping_a_previous_build() {
   let installs = Installations::new(&home.0);
   let first = fixture(&home.0, 1, true);
   let first = installs.activate(&first).unwrap();
-  assert!(
-    first
-      .directory
-      .starts_with(installs.root().join("installs"))
-  );
+  assert!(first.directory.starts_with(installs.runtime_root()));
   assert!(installs.previous().unwrap().is_none());
-  for name in crate::bundle_layout::ALL {
-    if name == "ctld" {
-      assert_eq!(
-        fs::read(installs.root().join("bin/ctld")).unwrap(),
-        filesystem::CTLD_PROXY
-      );
-      continue;
-    }
+  installs
+    .install_manager(b"verified fixture launcher")
+    .unwrap();
+  for name in crate::bundle_layout::ALL.into_iter().chain(["ctlup"]) {
     assert_eq!(
       fs::read_link(installs.root().join("bin").join(name)).unwrap(),
-      Path::new("../current").join(name)
+      Path::new(".ctl-launcher")
     );
     assert_eq!(
       fs::read(installs.root().join("bin").join(name)).unwrap(),
-      vec![1; 8]
+      b"verified fixture launcher"
     );
   }
   let second = installs.activate(&fixture(&home.0, 2, true)).unwrap();
@@ -139,7 +131,15 @@ fn activation_switches_stable_commands_without_keeping_a_previous_build() {
   installs.activate(&second).unwrap();
   assert!(installs.previous().unwrap().is_none());
   assert_eq!(
-    fs::read(installs.root().join("bin/ctl")).unwrap(),
+    fs::read(
+      installs
+        .active()
+        .unwrap()
+        .unwrap()
+        .executable("ctl")
+        .unwrap()
+    )
+    .unwrap(),
     vec![2; 8]
   );
   assert_eq!(
@@ -177,10 +177,7 @@ fn crashed_process_leases_are_recovered_without_pid_or_age_checks() {
   let home = Home::new();
   let installs = Installations::new(&home.0);
   let first = installs.activate(&fixture(&home.0, 1, true)).unwrap();
-  let root = installs
-    .root()
-    .join("leases")
-    .join(&first.manifest.bundle_id);
+  let root = installs.runtime_leases().join(&first.manifest.bundle_id);
   fs::DirBuilder::new()
     .recursive(true)
     .mode(0o700)
@@ -232,100 +229,10 @@ fn collisions_unsafe_pointers_and_damaged_payloads_preserve_activation() {
   assert!(installs.activate(&fixture(&home.0, 2, true)).is_err());
   assert_eq!(installs.active().unwrap().unwrap().manifest, first.manifest);
   assert_eq!(fs::read(command).unwrap(), b"user-owned command");
-  fs::remove_file(installs.root().join("current")).unwrap();
   symlink("../../outside", installs.root().join("current")).unwrap();
-  assert!(installs.active().is_err());
-  fs::remove_file(installs.root().join("current")).unwrap();
-  symlink(
-    Path::new("installs").join(&first.manifest.bundle_id),
-    installs.root().join("current"),
-  )
-  .unwrap();
+  assert_eq!(installs.active().unwrap().unwrap().manifest, first.manifest);
   fs::write(first.directory.join("ctmuxd"), b"changed").unwrap();
   assert!(installs.active().is_err());
-}
-
-#[test]
-fn interrupted_activation_journal_completes_before_next_operation() {
-  let home = Home::new();
-  let installs = Installations::new(&home.0);
-  let first = installs.activate(&fixture(&home.0, 1, true)).unwrap();
-  let second = fixture(&home.0, 2, true);
-  let second = filesystem::publish(&installs, &second, None).unwrap();
-  let mut state = catalog::read(&installs).unwrap();
-  state.register(
-    std::slice::from_ref(&second),
-    &CatalogOrigin {
-      channel: "provided".into(),
-      publication_id: Some(second.manifest.bundle_id.clone()),
-      built_at: None,
-    },
-    true,
-  );
-  catalog::commit(&installs, &state, None).unwrap();
-  let path = installs.root().join(".activation.json");
-  fs::write(
-    &path,
-    serde_json::to_vec(&serde_json::json!({
-      "active": second.manifest.bundle_id,
-      "previous": first.manifest.bundle_id,
-    }))
-    .unwrap(),
-  )
-  .unwrap();
-  fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
-  installs.prune().unwrap();
-  assert_eq!(
-    installs.active().unwrap().unwrap().manifest,
-    second.manifest
-  );
-  assert!(installs.previous().unwrap().is_none());
-  assert!(!first.directory.exists());
-  assert!(!path.exists());
-}
-
-#[test]
-fn unrecorded_activation_journals_never_rewrite_selection_or_discard_intent() {
-  let home = Home::new();
-  let installs = Installations::new(&home.0);
-  let first = installs.activate(&fixture(&home.0, 1, true)).unwrap();
-  let second = filesystem::publish(&installs, &fixture(&home.0, 2, true), None).unwrap();
-  let before = fs::read_link(installs.root.join("current")).unwrap();
-  let path = installs.root.join(".activation.json");
-  let intent = serde_json::to_vec(&serde_json::json!({
-    "active": second.manifest.bundle_id,
-    "previous": first.manifest.bundle_id,
-  }))
-  .unwrap();
-  let mut file = options().write(true).create_new(true).open(&path).unwrap();
-  std::io::Write::write_all(&mut file, &intent).unwrap();
-  file.sync_all().unwrap();
-  drop(file);
-  assert!(
-    installs
-      .prune()
-      .unwrap_err()
-      .to_string()
-      .contains("pending activation has no catalog record")
-  );
-  assert_eq!(
-    fs::read_link(installs.root.join("current")).unwrap(),
-    before
-  );
-  assert!(installs.recorded_selection("previous").unwrap().is_none());
-  assert_eq!(fs::read(&path).unwrap(), intent);
-  assert!(
-    installs
-      .migrate_once_if_needed()
-      .unwrap_err()
-      .to_string()
-      .contains("previous manager")
-  );
-  assert_eq!(
-    fs::read_link(installs.root.join("current")).unwrap(),
-    before
-  );
-  assert_eq!(fs::read(&path).unwrap(), intent);
 }
 
 #[test]
@@ -334,9 +241,8 @@ fn prune_recovers_abandoned_staging_without_following_links() {
   let installs = Installations::new(&home.0);
   installs.activate(&fixture(&home.0, 1, true)).unwrap();
   let stage = installs
-    .root()
-    .join("installs")
-    .join(format!(".partial-{}", uuid::Uuid::new_v4()));
+    .staging_root()
+    .join(format!("runtime-{}", uuid::Uuid::new_v4()));
   fs::DirBuilder::new().mode(0o700).create(&stage).unwrap();
   fs::write(stage.join("partial-download"), b"incomplete").unwrap();
   installs.prune().unwrap();
@@ -360,12 +266,12 @@ fn deployment_cache_is_passive_and_checks_each_storage_parent() {
   assert!(
     cached
       .directory
-      .starts_with(home.0.join(".tokn/ctl/cache/components/bundles"))
+      .starts_with(home.0.join(".tokn/ctl/ctlup/cache/unpacked/bundles"))
   );
   assert!(Installations::new(&home.0).active().unwrap().is_none());
   assert!(!cache.root().join("selected").exists());
 
-  let cache_path = home.0.join(".tokn/ctl/cache");
+  let cache_path = home.0.join(".tokn/ctl/ctlup/cache");
   fs::remove_dir_all(&cache_path).unwrap();
   let outside = home.0.join("unrelated-cache");
   fs::DirBuilder::new().mode(0o700).create(&outside).unwrap();
@@ -489,10 +395,7 @@ fn launching_an_active_build_sweeps_crash_records_but_keeps_live_users() {
   let installs = Installations::new(&home.0);
   let active = installs.activate(&fixture(&home.0, 1, true)).unwrap();
   let held = installs.lease(&active).unwrap();
-  let root = installs
-    .root()
-    .join("leases")
-    .join(&active.manifest.bundle_id);
+  let root = installs.runtime_leases().join(&active.manifest.bundle_id);
   let stale = root.join("previous-crash");
   options().write(true).create_new(true).open(&stale).unwrap();
   let executable = active.executable("ctld").unwrap().canonicalize().unwrap();
@@ -541,79 +444,83 @@ fn flat_remote_brokers_do_not_override_local_helpers_and_partial_apps_are_errors
   );
 }
 
-fn broker_fixture(home: &Path, signed: bool) -> Bundle {
-  let source = fixture(home, if signed { 2 } else { 1 }, true);
-  let label = if signed { "signed" } else { "flat" };
-  let bytes = format!("#!/bin/sh\nprintf '{label}\\n'\nprintf '<%s>\\n' \"$@\"\n").into_bytes();
-  let mut files = source.read_files().unwrap();
-  files.insert("ctld".into(), bytes.clone());
-  if signed {
-    files.insert("ctld.app/Contents/MacOS/ctld".into(), bytes);
-    files.insert("ctld-package.json".into(), b"fixture receipt".to_vec());
-  }
-  let manifest = Manifest::new(
-    crate::paths::native_target(),
-    Source::Ci,
-    source.manifest.components,
-    &files,
-  )
-  .unwrap();
-  Store::cache(home).publish(&manifest, &files).unwrap()
+#[test]
+fn registry_failure_never_switches_the_selected_payload() {
+  let home = Home::new();
+  let installs = Installations::new(&home.0);
+  let first = installs.activate(&fixture(&home.0, 1, true)).unwrap();
+  let next = fixture(&home.0, 2, true);
+  let registry = installs.state_root().join("installations.json");
+  let saved = installs.state_root().join("saved-installations.json");
+  fs::rename(&registry, &saved).unwrap();
+  symlink(&saved, &registry).unwrap();
+  assert!(installs.activate(&next).is_err());
+  assert!(installs.prune().is_err());
+  assert!(first.directory.exists());
+  fs::remove_file(&registry).unwrap();
+  fs::rename(saved, registry).unwrap();
+  assert_eq!(installs.active().unwrap().unwrap().manifest, first.manifest);
+  assert_eq!(installs.activate(&next).unwrap().manifest, next.manifest);
 }
 
 #[test]
-fn broker_proxy_stays_constant_across_package_shapes_and_failed_activation() {
-  use std::os::unix::fs::MetadataExt as _;
+fn desktop_and_updater_selections_share_the_registry_without_losing_each_other() {
   let home = Home::new();
   let installs = Installations::new(&home.0);
-  let flat = installs.activate(&broker_fixture(&home.0, false)).unwrap();
-  let command = installs.root().join("bin/ctld");
-  let run = || {
-    let output = Command::new(&command)
-      .args(["one", "two words"])
-      .output()
-      .unwrap();
-    assert!(
-      output.status.success(),
-      "{}",
-      String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout).unwrap()
+  let runtime = installs.activate(&fixture(&home.0, 1, true)).unwrap();
+  installs.install_manager(b"test launcher").unwrap();
+  let (updater, updater_lease) = installs.manager_and_lease().unwrap().unwrap();
+  let desktop = DesktopSelection {
+    content_id: "d".repeat(64),
+    source: DesktopSource::Channel {
+      channel: "nightly".into(),
+    },
   };
-  assert_eq!(run(), "flat\n<one>\n<two words>\n");
-  let inode = fs::metadata(&command).unwrap().ino();
-  let proxy = fs::read(&command).unwrap();
-  let signed = broker_fixture(&home.0, true);
-  let signed = filesystem::publish(&installs, &signed, None).unwrap();
-  // Fail journal publication after command preparation. The old current must
-  // still work, including the different package shape of its broker.
-  let journal = installs.root().join(".activation.json");
-  fs::DirBuilder::new().mode(0o700).create(&journal).unwrap();
-  assert!(filesystem::activate(&installs, &signed, Some(&flat)).is_err());
-  assert_eq!(run(), "flat\n<one>\n<two words>\n");
-  assert_eq!(fs::read(&command).unwrap(), proxy);
-  fs::remove_dir(journal).unwrap();
-  installs.activate(&signed).unwrap();
-  assert_eq!(run(), "signed\n<one>\n<two words>\n");
-  assert_eq!(fs::metadata(&command).unwrap().ino(), inode);
-  installs.activate(&flat).unwrap();
-  assert_eq!(run(), "flat\n<one>\n<two words>\n");
-  assert_eq!(fs::read(&command).unwrap(), proxy);
-}
-
-#[test]
-fn broker_alias_migrates_but_an_unrecognized_regular_command_is_preserved() {
-  let home = Home::new();
-  let installs = Installations::new(&home.0);
-  let source = broker_fixture(&home.0, false);
-  installs.activate(&source).unwrap();
-  let command = installs.root().join("bin/ctld");
-  fs::remove_file(&command).unwrap();
-  symlink("../current/ctld", &command).unwrap();
-  installs.activate(&source).unwrap();
-  assert_eq!(fs::read(&command).unwrap(), filesystem::CTLD_PROXY);
-  fs::write(&command, b"user command").unwrap();
-  let error = installs.activate(&source).unwrap_err();
-  assert!(error.to_string().contains("managed proxy"));
-  assert_eq!(fs::read(command).unwrap(), b"user command");
+  let payload = installs.desktop_root().join(&desktop.content_id);
+  installs
+    .publish_desktop(None, &desktop, || {
+      filesystem::ensure_directory(&payload)?;
+      let app = payload.join("app");
+      options().create_new(true).write(true).open(&app)?;
+      Ok(())
+    })
+    .unwrap();
+  let app = payload.join("app").canonicalize().unwrap();
+  let app_lease = leases::lease_executable(&app).unwrap().unwrap();
+  let next = DesktopSelection {
+    content_id: "a".repeat(64),
+    source: DesktopSource::Provided,
+  };
+  assert_eq!(
+    installs
+      .publish_desktop(None, &next, || -> io::Result<()> {
+        panic!("stale publish called")
+      })
+      .unwrap_err()
+      .kind(),
+    io::ErrorKind::WouldBlock
+  );
+  installs
+    .publish_desktop(Some(&desktop), &next, || {
+      filesystem::ensure_directory(&installs.desktop_root().join(&next.content_id))
+    })
+    .unwrap();
+  installs.install_manager(b"second updater").unwrap();
+  assert_eq!(
+    installs.active().unwrap().unwrap().manifest,
+    runtime.manifest
+  );
+  assert_eq!(installs.desktop_selection().unwrap(), Some(next));
+  assert_ne!(
+    installs.active_manager_id().unwrap(),
+    Some(crate::bundles::digest(b"test launcher"))
+  );
+  installs.prune_unused().unwrap();
+  assert!(payload.exists() && updater.exists());
+  drop(app_lease);
+  drop(updater_lease);
+  installs.prune_unused().unwrap();
+  assert!(payload.exists() && !updater.exists());
+  installs.prune_all(false).unwrap();
+  assert!(!payload.exists() && !updater.exists());
 }

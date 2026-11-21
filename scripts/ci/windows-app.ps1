@@ -76,7 +76,7 @@ try {
     $fixture = 'updater::app::tests::prebuilt_windows_archive_install_update_and_repair'
   } else {
     Remove-Item Env:CTLUP_TEST_DESKTOP_ARCHIVE -ErrorAction SilentlyContinue
-    $fixture = 'updater::app::tests::local_source_install_and_repair_preserve_the_saved_channel'
+    $fixture = 'updater::app::tests::local_source_install_pins_a_checkout_and_repairs_from_its_archive'
   }
   $available = & cargo test --locked --target $Target -p ctlup --lib $fixture -- --list
   if ($LASTEXITCODE -ne 0 -or @($available | Where-Object { $_ -ceq "${fixture}: test" }).Count -ne 1) {

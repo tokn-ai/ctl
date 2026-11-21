@@ -34,11 +34,11 @@ pub(super) fn refresh(store: &Installations, state: &State) {
 /// Projects authoritative catalog entries while the caller holds the store lock.
 /// The snapshot tracks ownership and makes an interrupted refresh retryable.
 pub(super) fn sync(store: &Installations, state: &State) -> io::Result<()> {
-  let root = store.root.join("installs");
-  if !filesystem::directory_if_present(&root)? {
-    return Ok(());
-  }
-  let desired = references(&root, state)?;
+  let refs = store.updater_root().join("refs");
+  filesystem::ensure_directory(&refs)?;
+  let root = refs.join("runtime");
+  filesystem::ensure_directory(&root)?;
+  let desired = references(&store.runtime_root(), state)?;
   let snapshot_path = root.join(SNAPSHOT);
   let snapshot = read_json::<Snapshot>(&snapshot_path, MAX_SNAPSHOT_BYTES)?.unwrap_or_default();
   validate_references(&snapshot.previous)?;
@@ -104,6 +104,7 @@ fn inspect_references(
     if let Some(id) = read_reference(root, name)? {
       if snapshot.previous.get(name) != Some(&id)
         && pending.and_then(|pending| pending.get(name)) != Some(&id)
+        && desired.get(name) != Some(&id)
       {
         return Err(invalid(
           "installation reference conflicts with an existing path",
@@ -215,10 +216,12 @@ fn validate_references(references: &References) -> io::Result<()> {
   for (name, id) in references {
     let segments: Vec<_> = name.splitn(5, '/').collect();
     let valid = match segments.as_slice() {
-      ["dev", checkout] => valid_digest(checkout),
+      ["dev", checkout, target] => {
+        valid_digest(checkout) && crate::bundles::validate_target(target).is_ok()
+      }
       ["stable" | "nightly", version, target] => valid_version_target(version, target),
       ["dev", channel, version, target] => {
-        (matches!(*channel, "provided" | "unassigned")
+        (matches!(*channel, "provided" | "unassigned" | "release")
           || (channel.starts_with("pr-") && catalog::validate_channel(channel).is_ok()))
           && valid_version_target(version, target)
       }
@@ -243,18 +246,15 @@ fn valid_version_target(version: &str, target: &str) -> bool {
 }
 
 fn reference_path(root: &Path, name: &str) -> PathBuf {
-  let path = root.join(name);
-  #[cfg(windows)]
-  let path = path.with_extension("json");
-  path
+  root.join(format!("{name}.json"))
 }
 
 fn relative_payload(name: &str, id: &str) -> PathBuf {
-  let mut relative = PathBuf::new();
+  let mut relative = PathBuf::from("../..");
   for _ in name.bytes().filter(|byte| *byte == b'/') {
     relative.push("..");
   }
-  relative.join(id)
+  relative.join("store/runtime").join(id)
 }
 
 fn safe_parents(root: &Path, path: &Path, create: bool) -> io::Result<bool> {
@@ -292,7 +292,6 @@ fn remove_empty_parents(root: &Path, mut parent: &Path) -> io::Result<()> {
   Ok(())
 }
 
-#[cfg(windows)]
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct ReferenceFile {
@@ -305,25 +304,10 @@ fn read_reference(root: &Path, name: &str) -> io::Result<Option<String>> {
   if !safe_parents(root, &path, false)? || !filesystem::path_exists(&path)? {
     return Ok(None);
   }
-  #[cfg(unix)]
-  let (id, relative) = {
-    if !fs::symlink_metadata(&path)?.is_symlink() {
-      return Err(invalid("installation reference is not a managed link"));
-    }
-    let relative = fs::read_link(&path)?;
-    let id = relative
-      .file_name()
-      .and_then(|name| name.to_str())
-      .ok_or_else(|| invalid("invalid installation reference link"))?
-      .to_owned();
-    (id, relative)
-  };
-  #[cfg(windows)]
-  let (id, relative) = {
-    let reference: ReferenceFile =
-      read_json(&path, 1024)?.ok_or_else(|| invalid("installation reference disappeared"))?;
-    (reference.bundle_id, reference.relative_path)
-  };
+  let reference: ReferenceFile =
+    read_json(&path, 1024)?.ok_or_else(|| invalid("installation reference disappeared"))?;
+  let id = reference.bundle_id;
+  let relative = reference.relative_path;
   if !valid_digest(&id) || relative.as_os_str() != relative_payload(name, &id).as_os_str() {
     return Err(invalid(
       "installation reference points outside its immutable payload",
@@ -335,15 +319,6 @@ fn read_reference(root: &Path, name: &str) -> io::Result<Option<String>> {
 fn update_reference(root: &Path, name: &str, id: &str) -> io::Result<()> {
   let path = reference_path(root, name);
   safe_parents(root, &path, true)?;
-  #[cfg(unix)]
-  {
-    let next =
-      filesystem::Temporary(path.with_file_name(format!(".layout-next-{}", uuid::Uuid::new_v4())));
-    std::os::unix::fs::symlink(relative_payload(name, id), &next.0)?;
-    fs::rename(&next.0, &path)?;
-    sync_directory(path.parent().unwrap())
-  }
-  #[cfg(windows)]
   write_json(
     &path,
     &ReferenceFile {

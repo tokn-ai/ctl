@@ -1,4 +1,5 @@
 use super::*;
+use std::fs;
 use std::os::unix::fs::DirBuilderExt as _;
 
 struct Scratch(PathBuf);
@@ -18,8 +19,8 @@ fn identical_appimage_bytes_require_matching_executable_permissions() {
     .unwrap();
   let installed = scratch.0.join("installed.AppImage");
   let staged = scratch.0.join("staged.AppImage");
-  let bytes = b"\x7fELF\x02\x01\x01\0AI\x02fixture";
-  fs::write(&installed, bytes).unwrap();
+  let bytes = fixture_bytes();
+  fs::write(&installed, &bytes).unwrap();
   fs::write(&staged, bytes).unwrap();
   let staged = prepare(staged).unwrap();
   fs::set_permissions(&installed, Permissions::from_mode(0o644)).unwrap();

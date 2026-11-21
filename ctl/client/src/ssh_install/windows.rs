@@ -236,6 +236,10 @@ fn install_script(
   preparation: &str,
 ) -> String {
   INSTALL_SCRIPT
+    .replace(
+      "__UPDATER_STAGING__",
+      super::updater_staging(RemotePlatform::Windows),
+    )
     .replace("__ACCOUNT_GUARD__", account_guard)
     .replace("__MANAGER__", MANAGER)
     .replace("__UPDATER_SIZE__", &prefix_size.to_string())

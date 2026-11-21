@@ -1,7 +1,7 @@
 //! Complete target bundles are durable channel components, not executable overlays.
 
-use super::arguments::ComponentCommand;
-use super::{TargetOptions, require_local, show};
+use super::arguments::BundleCommand;
+use super::{require_local, show};
 use ctl_client::component_update::{self, BuildSource, BundleChannel};
 use ctl_client::installation;
 use ctl_client::remote_bundle::{pr, published};
@@ -12,47 +12,55 @@ use std::path::{Path, PathBuf};
 
 mod list;
 
-pub(super) async fn run(
-  home: &Path,
-  target: TargetOptions<'_>,
-  command: ComponentCommand,
-) -> io::Result<()> {
+pub(super) async fn run(home: &Path, command: BundleCommand) -> io::Result<()> {
   match command {
-    ComponentCommand::List {
+    BundleCommand::List {
+      destination,
       channel,
       available,
-      installed,
       json,
     } => {
-      if available || !installed {
-        require_local(target)?;
+      let targets = destination.resolve()?;
+      if targets.len() > 1 {
+        return Err(io::Error::other("bundle inspection accepts one host"));
+      }
+      if available {
+        require_local(targets[0])?;
         return available_targets(home, channel.as_deref(), json).await;
       }
       if let Some(channel) = &channel {
         validate_channel(channel)?;
       }
-      let installations = recorded_installations(show::snapshot(home, target).await?)?;
+      let installations = recorded_installations(show::snapshot(home, targets[0]).await?)?;
       print_list(&list::installed(&installations, channel.as_deref())?, json)?;
     }
-    ComponentCommand::Add {
+    BundleCommand::Fetch {
       targets,
       channel,
+      release,
       pr,
       from,
       json,
     } => {
-      require_local(target)?;
-      add(home, targets, channel.map(Into::into), pr, from, json).await?;
+      fetch(
+        home,
+        targets,
+        channel.map(Into::into),
+        release.as_deref(),
+        pr,
+        from,
+        json,
+      )
+      .await?;
     }
-    ComponentCommand::Remove {
+    BundleCommand::Remove {
       targets,
       channel,
       json,
     } => {
-      require_local(target)?;
       let channel = match channel {
         Some(channel) => channel,
-        None => installation::default_channel(home)?.name().into(),
+        None => super::selected_channel(home, None)?.name().into(),
       };
       validate_channel(&channel)?;
       let targets = validated_targets(targets)?;
@@ -90,10 +98,11 @@ pub(super) async fn run(
   Ok(())
 }
 
-async fn add(
+async fn fetch(
   home: &Path,
   targets: Vec<String>,
   channel: Option<BundleChannel>,
+  release: Option<&str>,
   pull_request: Option<u64>,
   from: Option<PathBuf>,
   json: bool,
@@ -102,7 +111,9 @@ async fn add(
   let snapshot = component_update::PreparationSnapshot::capture(home)?;
   let channel = match channel {
     Some(channel) => channel,
-    None if pull_request.is_none() && from.is_none() => installation::default_channel(home)?,
+    None if release.is_none() && pull_request.is_none() && from.is_none() => {
+      super::selected_channel(home, None)?
+    }
     None => BundleChannel::default(),
   };
   let mut prepared = Vec::new();
@@ -126,6 +137,10 @@ async fn add(
         path: path.clone(),
         local_build: false,
         ctld_package: None,
+      }
+    } else if let Some(publication_id) = release {
+      BuildSource::Release {
+        publication_id: publication_id.to_owned(),
       }
     } else {
       BuildSource::Published { channel }
@@ -160,7 +175,7 @@ async fn add(
         installed.target_triple, installed.bundle_id
       );
     }
-    println!("Run `ctlup component list` to inspect installed components.");
+    println!("Run `ctlup bundle list` to inspect installed components.");
   }
   drop(pull_request_files);
   Ok(())
@@ -175,7 +190,7 @@ async fn available_targets(home: &Path, channel: Option<&str>, json: bool) -> io
         "available targets require the stable or nightly publication channel",
       ));
     }
-    None => installation::default_channel(home)?,
+    None => super::selected_channel(home, None)?,
   };
   let catalog = published::check(channel).await.map_err(io::Error::other)?;
   let installed = recorded_installations(installation::show(home)?)?;
@@ -282,8 +297,9 @@ mod tests {
   #[test]
   fn selected_remote_builds_need_recorded_channel_memberships() {
     let snapshot = installation::InstallationShow {
-      schema_version: 1,
+      schema_version: 2,
       active: Some("a".repeat(64)),
+      active_origin: None,
       previous: None,
       installations: Vec::new(),
       missing_builds: Vec::new(),
@@ -323,8 +339,9 @@ mod tests {
     };
     let installed = entry("b".repeat(64), "provided");
     let snapshot = installation::InstallationShow {
-      schema_version: 1,
+      schema_version: 2,
       active: Some(missing.clone()),
+      active_origin: None,
       previous: None,
       installations: vec![entry(missing.clone(), "stable"), installed.clone()],
       builds: Vec::new(),

@@ -1,34 +1,26 @@
-use super::Installations;
+use super::{Installations, catalog, leases};
 use crate::bundles::{Bundle, MANIFEST_FILE, local_target};
 use crate::private_fs::{self, options, sync_directory};
-use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::{self, File, Metadata};
 use std::io::{self, Read as _, Write as _};
 use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
-use std::os::unix::fs::{PermissionsExt as _, symlink};
-#[cfg(unix)]
-use std::path::Component;
+use std::os::unix::fs::symlink;
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
-pub(super) use windows::{
-  activate, clear_active, clear_previous, install_manager, lease_manager_executable,
-  manager_and_lease, prepare_activation, prune_managers, selection_id,
-};
+use windows::prepare_aliases;
 
-const JOURNAL: &str = ".activation.json";
 #[cfg(unix)]
-pub(super) const CTLD_PROXY: &[u8] = include_bytes!("ctld-proxy.sh");
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Transaction {
-  active: String,
-  previous: Option<String>,
-}
+const LAUNCHER: &str = ".ctl-launcher";
+#[cfg(windows)]
+const LAUNCHER: &str = ".ctl-launcher.exe";
+#[cfg(unix)]
+const MANAGER: &str = "ctlup";
+#[cfg(windows)]
+const MANAGER: &str = "ctlup.exe";
 
 pub(super) fn invalid(message: &str) -> io::Error {
   io::Error::new(io::ErrorKind::InvalidData, message)
@@ -61,7 +53,7 @@ fn incomplete_payload(error: io::Error, id: &str) -> io::Error {
     return io::Error::new(
       io::ErrorKind::InvalidData,
       format!(
-        "recorded runtime bundle {} has an incomplete payload under installs/{id}",
+        "recorded runtime bundle {} has an incomplete payload under ctlup/store/runtime/{id}",
         &id[..12]
       ),
     );
@@ -87,8 +79,9 @@ pub(super) fn private_file(metadata: &Metadata) -> io::Result<()> {
 }
 
 pub(super) fn root_exists(store: &Installations) -> io::Result<bool> {
-  let anchor = crate::paths::managed_storage_anchor(&store.root)?;
-  for path in storage_directories(anchor, &store.root)? {
+  let state = store.state_root();
+  let anchor = crate::paths::managed_storage_anchor(&state)?;
+  for path in storage_directories(anchor, &state)? {
     if !path_exists(path)? {
       return Ok(false);
     }
@@ -106,7 +99,19 @@ pub(super) fn ensure_root(store: &Installations) -> io::Result<()> {
   {
     ensure_directory(path)?;
   }
-  ensure_directory(&store.root.join("installs"))
+  let updater = store.updater_root();
+  let state = store.state_root();
+  for path in [
+    updater.clone(),
+    updater.join("store"),
+    store.runtime_root(),
+    store.staging_root(),
+    state.clone(),
+    state.join("leases"),
+  ] {
+    ensure_directory(&path)?;
+  }
+  Ok(())
 }
 
 fn storage_directories<'a>(anchor: &Path, root: &'a Path) -> io::Result<Vec<&'a Path>> {
@@ -139,40 +144,11 @@ pub(super) fn validate_complete(bundle: &Bundle) -> io::Result<()> {
   Ok(())
 }
 
-#[cfg(unix)]
-pub(super) fn selection_id(store: &Installations, name: &str) -> io::Result<Option<String>> {
-  let path = store.root.join(name);
-  if !path_exists(&path)? {
-    return Ok(None);
-  }
-  let link = fs::read_link(path)?;
-  if link.is_absolute()
-    || link
-      .components()
-      .any(|part| !matches!(part, Component::Normal(_)))
-  {
-    return Err(invalid(
-      "installation pointer must be a managed relative link",
-    ));
-  }
-  let parts = link.iter().collect::<Vec<_>>();
-  let [directory_name, id] = parts.as_slice() else {
-    return Err(invalid(
-      "installation pointer is not a canonical managed selection",
-    ));
-  };
-  let id = id
-    .to_str()
-    .filter(|id| *directory_name == "installs" && valid_id(id))
-    .ok_or_else(|| invalid("installation pointer is not a canonical managed selection"))?;
-  Ok(Some(id.to_owned()))
-}
-
 pub(super) fn missing_payload(id: &str) -> io::Error {
   io::Error::new(
     io::ErrorKind::NotFound,
     format!(
-      "recorded runtime bundle {} is missing under installs/{id}",
+      "recorded runtime bundle {} is missing under ctlup/store/runtime/{id}",
       &id[..12]
     ),
   )
@@ -201,9 +177,12 @@ pub(super) fn payload_dir(store: &Installations, id: &str) -> io::Result<Option<
   if !valid_id(id) {
     return Err(invalid("invalid installation identity"));
   }
-  let installs = store.root.join("installs");
+  let installs = store.runtime_root();
   let path = installs.join(id);
-  if !directory_if_present(&installs)? || !directory_if_present(&path)? {
+  if !directory_if_present(&store.updater_root().join("store"))?
+    || !directory_if_present(&installs)?
+    || !directory_if_present(&path)?
+  {
     return Ok(None);
   }
   Ok(Some(path))
@@ -226,7 +205,7 @@ pub(super) fn publish(
   files: Option<&BTreeMap<String, Vec<u8>>>,
 ) -> io::Result<Bundle> {
   validate_complete(source)?;
-  let root = store.root.join("installs");
+  let root = store.runtime_root();
   let destination = root.join(&source.manifest.bundle_id);
   if path_exists(&destination)? {
     let installed = load(store, &source.manifest.bundle_id)?;
@@ -245,7 +224,11 @@ pub(super) fn publish(
     &owned
   };
   source.manifest.verify_files(files)?;
-  let stage = Temporary(root.join(format!(".partial-{}", uuid::Uuid::new_v4())));
+  let stage = Temporary(
+    store
+      .staging_root()
+      .join(format!("runtime-{}", uuid::Uuid::new_v4())),
+  );
   ensure_directory(&stage.0)?;
   for (name, bytes) in files {
     let path = stage.0.join(name);
@@ -265,6 +248,7 @@ pub(super) fn publish(
   sync_tree(&stage.0)?;
   fs::rename(&stage.0, &destination)?;
   sync_directory(&root)?;
+  sync_directory(&store.staging_root())?;
   load(store, &source.manifest.bundle_id)
 }
 
@@ -275,18 +259,6 @@ fn write(path: &Path, bytes: &[u8], executable: bool) -> io::Result<()> {
     private_fs::set_executable(&file)?;
   }
   file.sync_all()
-}
-
-fn read(path: &Path) -> io::Result<Vec<u8>> {
-  private_file(&fs::symlink_metadata(path)?)?;
-  let file = options().read(true).open(path)?;
-  private_file(&file.metadata()?)?;
-  let mut bytes = Vec::new();
-  file.take(1025).read_to_end(&mut bytes)?;
-  if bytes.len() > 1024 {
-    return Err(invalid("installation transaction is oversized"));
-  }
-  Ok(bytes)
 }
 
 fn sync_tree(path: &Path) -> io::Result<()> {
@@ -300,196 +272,183 @@ fn sync_tree(path: &Path) -> io::Result<()> {
 }
 
 #[cfg(unix)]
-fn replace_link(path: &Path, target: &Path) -> io::Result<()> {
-  if path_exists(path)? && !fs::symlink_metadata(path)?.is_symlink() {
-    return Err(invalid("refusing to replace a non-link installation entry"));
+fn prepare_aliases(store: &Installations, updater: Option<&[u8]>) -> io::Result<()> {
+  let bin = store.root.join("bin");
+  ensure_directory(&bin)?;
+  let launcher = bin.join(LAUNCHER);
+  let has_launcher = path_exists(&launcher)?;
+  if has_launcher {
+    executable_bytes(&launcher)?;
   }
-  let next = Temporary(path.with_file_name(format!(".next-{}", uuid::Uuid::new_v4())));
-  symlink(target, &next.0)?;
-  fs::rename(&next.0, path)?;
-  File::open(path.parent().unwrap())?.sync_all()
-}
-
-#[cfg(unix)]
-fn existing_proxy(path: &Path) -> io::Result<bool> {
-  let metadata = fs::symlink_metadata(path)?;
-  if !metadata.is_file() {
-    return Ok(false);
-  }
-  private_file(&metadata)?;
-  if metadata.permissions().mode() & 0o777 != 0o700 || read(path)? != CTLD_PROXY {
-    return Err(invalid(
-      "stable ctld command differs from the managed proxy",
-    ));
-  }
-  Ok(true)
-}
-
-#[cfg(unix)]
-fn prepare_proxy(root: &Path) -> io::Result<()> {
-  let path = root.join("ctld");
-  if path_exists(&path)? && existing_proxy(&path)? {
-    return Ok(());
-  }
-  let next = Temporary(root.join(format!(".ctld-proxy-{}", uuid::Uuid::new_v4())));
-  write(&next.0, CTLD_PROXY, true)?;
-  fs::rename(&next.0, path)?;
-  File::open(root)?.sync_all()
-}
-
-#[cfg(unix)]
-fn prepare_aliases(store: &Installations) -> io::Result<()> {
-  let root = store.root.join("bin");
-  ensure_directory(&root)?;
-  for name in crate::bundle_layout::ALL {
-    let path = root.join(name);
+  let mut aliases = Vec::new();
+  for name in crate::bundle_layout::ALL.into_iter().chain(["ctlup"]) {
+    let path = bin.join(name);
     if path_exists(&path)? {
-      if name == "ctld" && existing_proxy(&path)? {
-        continue;
-      }
-      let target = fs::read_link(&path)?;
-      let expected = Path::new("../current").join(name);
-      let signed = Path::new("../current/ctld.app/Contents/MacOS/ctld");
-      if target != expected && !(name == "ctld" && target == signed) {
+      if !fs::symlink_metadata(&path)?.is_symlink() || fs::read_link(&path)? != Path::new(LAUNCHER)
+      {
         return Err(invalid(
           "stable command path already belongs to another installation",
         ));
       }
-    }
-  }
-  for name in crate::bundle_layout::ALL {
-    if name == "ctld" {
-      prepare_proxy(&root)?;
     } else {
-      replace_link(&root.join(name), &Path::new("../current").join(name))?;
+      aliases.push(path);
     }
   }
-  Ok(())
+  if let (false, Some(bytes)) = (has_launcher, updater) {
+    replace_launcher(&launcher, bytes)?;
+  }
+  for alias in aliases {
+    symlink(LAUNCHER, alias)?;
+  }
+  sync_directory(&bin)
 }
 
-#[cfg(unix)]
 pub(super) fn prepare_activation(store: &Installations) -> io::Result<()> {
-  prepare_aliases(store)
+  prepare_aliases(store, None)
 }
 
-#[cfg(unix)]
-pub(super) fn activate(
-  store: &Installations,
-  active: &Bundle,
-  previous: Option<&Bundle>,
-) -> io::Result<()> {
-  validate_native(active)?;
-  if let Some(previous) = previous {
-    validate_native(previous)?;
+pub(super) fn install_manager(store: &Installations, updater: &[u8]) -> io::Result<()> {
+  if updater.is_empty() || updater.len() > crate::bundles::MAX_FILE_BYTES {
+    return Err(invalid("invalid updater executable size"));
   }
-  prepare_aliases(store)?;
-  let previous =
-    previous.filter(|previous| previous.manifest.bundle_id != active.manifest.bundle_id);
-  let current = store.root.join("current");
-  if path_exists(&current)?
-    && fs::read_link(&current)? == Path::new("installs").join(&active.manifest.bundle_id)
-  {
-    // Re-selecting the current payload also retires legacy rollback state.
-    if previous.is_none() {
-      clear_previous(store)?;
+  ensure_root(store)?;
+  let _lock = Lock::acquire(store)?;
+  let mut state = catalog::read_index(store)?;
+  catalog::initialize(store, &state)?;
+  let root = store.manager_root();
+  ensure_directory(&root)?;
+  let id = crate::bundles::digest(updater);
+  let destination = root.join(&id);
+  if path_exists(&destination)? {
+    if verified_manager(&root, &id).is_err() {
+      return Err(invalid("stored updater failed payload verification"));
     }
-    return Ok(());
-  }
-  let transaction = Transaction {
-    active: active.manifest.bundle_id.clone(),
-    previous: previous.map(|bundle| bundle.manifest.bundle_id.clone()),
-  };
-  let next = Temporary(
-    store
-      .root
-      .join(format!(".transaction-{}", uuid::Uuid::new_v4())),
-  );
-  write(
-    &next.0,
-    &serde_json::to_vec(&transaction).map_err(io::Error::other)?,
-    false,
-  )?;
-  if path_exists(&store.root.join(JOURNAL))? {
-    return Err(invalid("installation transaction was not recovered"));
-  }
-  fs::rename(&next.0, store.root.join(JOURNAL))?;
-  File::open(&store.root)?.sync_all()?;
-  recover(store)
-}
-
-#[cfg(unix)]
-pub(super) fn recover(store: &Installations) -> io::Result<()> {
-  let path = store.root.join(JOURNAL);
-  if !path_exists(&path)? {
-    return Ok(());
-  }
-  let transaction: Transaction = serde_json::from_slice(&read(&path)?).map_err(io::Error::other)?;
-  let active = load(store, &transaction.active)?;
-  validate_native(&active)?;
-  let previous = transaction
-    .previous
-    .as_deref()
-    .map(|id| load(store, id))
-    .transpose()?;
-  if let Some(previous) = &previous {
-    validate_native(previous)?;
-    if previous.manifest.bundle_id == active.manifest.bundle_id {
-      return Err(invalid("activation and rollback identities must differ"));
-    }
-  }
-  let catalog = super::catalog::read_index(store)?;
-  for bundle in [Some(&active), previous.as_ref()].into_iter().flatten() {
-    if !catalog.entries.iter().any(|entry| {
-      entry.bundle_id == bundle.manifest.bundle_id
-        && entry.target_triple == bundle.manifest.target_triple
-    }) {
-      return Err(invalid(
-        "activation journal selects an unrecorded installation",
-      ));
-    }
-  }
-  prepare_aliases(store)?;
-  if let Some(previous) = previous {
-    replace_link(
-      &store.root.join("previous"),
-      &Path::new("installs").join(previous.manifest.bundle_id),
-    )?;
   } else {
-    clear_previous(store)?;
+    let temporary = Temporary(
+      store
+        .staging_root()
+        .join(format!("updater-{}", uuid::Uuid::new_v4())),
+    );
+    ensure_directory(&temporary.0)?;
+    write(&temporary.0.join(MANAGER), updater, true)?;
+    sync_directory(&temporary.0)?;
+    fs::rename(&temporary.0, destination)?;
+    sync_directory(&root)?;
+    sync_directory(&store.staging_root())?;
   }
-  replace_link(
-    &store.root.join("current"),
-    &Path::new("installs").join(active.manifest.bundle_id),
-  )?;
-  fs::remove_file(path)?;
-  File::open(&store.root)?.sync_all()
+  prepare_aliases(store, Some(updater))?;
+  if state.updater.as_ref() != Some(&id) {
+    state.updater = Some(id);
+    catalog::commit_metadata(store, &state)?;
+  }
+  Ok(())
 }
 
-#[cfg(unix)]
-pub(super) fn clear_active(store: &Installations) -> io::Result<()> {
-  if selection_id(store, "current")?.is_some() {
-    fs::remove_file(store.root.join("current"))?;
-    sync_directory(&store.root)?;
+pub(super) fn manager_and_lease(
+  store: &Installations,
+) -> io::Result<Option<(PathBuf, leases::Lease)>> {
+  if !root_exists(store)? {
+    return Ok(None);
+  }
+  let _lock = Lock::acquire(store)?;
+  let Some(id) = catalog::read_index(store)?.updater else {
+    return Ok(None);
+  };
+  directory(&store.updater_root().join("store"))?;
+  let path = verified_manager(&store.manager_root(), &id)?;
+  let lease = leases::retain(&store.manager_leases(), &id)?;
+  Ok(Some((path, lease)))
+}
+
+pub(super) fn verified_manager(root: &Path, id: &str) -> io::Result<PathBuf> {
+  if !valid_id(id) {
+    return Err(invalid("invalid updater identity"));
+  }
+  directory(root)?;
+  let payload = root.join(id);
+  directory(&payload)?;
+  let path = payload.join(MANAGER);
+  if crate::bundles::digest(&executable_bytes(&path)?) != id {
+    return Err(invalid("stored updater failed payload verification"));
+  }
+  Ok(path)
+}
+
+fn prune_package(root: &Path, leases_root: &Path, active: Option<&str>) -> io::Result<()> {
+  if !directory_if_present(root)? {
+    return Ok(());
+  }
+  for entry in fs::read_dir(root)? {
+    let entry = entry?;
+    let name = entry.file_name();
+    if let Some(id) = name.to_str().filter(|id| valid_id(id))
+      && active != Some(id)
+      && !leases::in_use_at(leases_root, id)?
+    {
+      remove_installation(&entry.path())?;
+    }
   }
   Ok(())
 }
 
-#[cfg(unix)]
-pub(super) fn clear_previous(store: &Installations) -> io::Result<()> {
-  let path = store.root.join("previous");
-  if let Some(id) = selection_id(store, "previous")? {
-    // Accept only our canonical relative link so cleanup cannot remove an
-    // unrelated file at this location.
-    payload_dir(store, &id)?;
-    fs::remove_file(path)?;
-    sync_directory(&store.root)?;
+pub(super) fn prune_managers(store: &Installations, state: &catalog::State) -> io::Result<()> {
+  if !directory_if_present(&store.updater_root().join("store"))? {
+    return Ok(());
   }
-  Ok(())
+  prune_package(
+    &store.manager_root(),
+    &store.manager_leases(),
+    state.updater.as_deref(),
+  )
+}
+
+pub(super) fn prune_desktops(store: &Installations, state: &catalog::State) -> io::Result<()> {
+  if !directory_if_present(&store.updater_root().join("store"))? {
+    return Ok(());
+  }
+  prune_package(
+    &store.desktop_root(),
+    &store.desktop_leases(),
+    state
+      .desktop
+      .as_ref()
+      .map(|selection| selection.content_id.as_str()),
+  )
+}
+
+pub(super) fn desktop_available(store: &Installations, id: &str) -> io::Result<bool> {
+  let desktop = store.desktop_root();
+  Ok(
+    directory_if_present(&store.updater_root().join("store"))?
+      && directory_if_present(&desktop)?
+      && directory_if_present(&desktop.join(id))?,
+  )
+}
+
+fn replace_launcher(path: &Path, bytes: &[u8]) -> io::Result<()> {
+  let next = Temporary(path.with_file_name(format!(".launcher-{}", uuid::Uuid::new_v4())));
+  write(&next.0, bytes, true)?;
+  fs::rename(&next.0, path)?;
+  sync_directory(path.parent().unwrap())
+}
+
+fn executable_bytes(path: &Path) -> io::Result<Vec<u8>> {
+  private_file(&fs::symlink_metadata(path)?)?;
+  let file = options().read(true).open(path)?;
+  private_file(&file.metadata()?)?;
+  let mut bytes = Vec::new();
+  file
+    .take(crate::bundles::MAX_FILE_BYTES as u64 + 1)
+    .read_to_end(&mut bytes)?;
+  if bytes.is_empty() || bytes.len() > crate::bundles::MAX_FILE_BYTES {
+    return Err(invalid("invalid updater or launcher executable size"));
+  }
+  Ok(bytes)
 }
 
 pub(super) fn entries(store: &Installations) -> io::Result<Vec<(String, PathBuf)>> {
-  let root = store.root.join("installs");
-  if !path_exists(&root)? {
+  let root = store.runtime_root();
+  if !directory_if_present(&store.updater_root().join("store"))? || !path_exists(&root)? {
     return Ok(Vec::new());
   }
   directory(&root)?;
@@ -510,18 +469,37 @@ pub(super) fn entries(store: &Installations) -> io::Result<Vec<(String, PathBuf)
   Ok(entries)
 }
 
+pub(super) fn has_payloads(store: &Installations) -> io::Result<bool> {
+  if !directory_if_present(&store.updater_root().join("store"))? {
+    return Ok(false);
+  }
+  for root in [
+    store.runtime_root(),
+    store.manager_root(),
+    store.desktop_root(),
+  ] {
+    if directory_if_present(&root)? && fs::read_dir(&root)?.next().transpose()?.is_some() {
+      return Ok(true);
+    }
+  }
+  Ok(false)
+}
+
 pub(super) fn clean_staging(store: &Installations) -> io::Result<()> {
-  let root = store.root.join("installs");
-  if !path_exists(&root)? {
+  let root = store.staging_root();
+  if !directory_if_present(&root)? {
     return Ok(());
   }
-  directory(&root)?;
   for entry in fs::read_dir(&root)? {
     let entry = entry?;
-    let name = entry.file_name();
-    let abandoned = name
+    let abandoned = entry
+      .file_name()
       .to_str()
-      .and_then(|name| name.strip_prefix(".partial-"))
+      .and_then(|name| {
+        name
+          .strip_prefix("runtime-")
+          .or_else(|| name.strip_prefix("updater-"))
+      })
       .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok());
     if abandoned {
       directory(&entry.path())?;
@@ -545,7 +523,7 @@ impl Lock {
       .write(true)
       .create(true)
       .truncate(false)
-      .open(store.root.join("installations.lock"))?;
+      .open(store.state_root().join("installations.lock"))?;
     private_file(&file.metadata()?)?;
     file.lock()?;
     Ok(Self(file))

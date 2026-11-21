@@ -13,9 +13,12 @@ use super::{
 };
 
 mod history;
-pub use history::{PublishedRelease, PublishedReleaseDetails, list_releases, view_release};
+pub use history::{
+  PublishedRelease, PublishedReleaseDetails, list_releases, view_release, view_retained_release,
+};
 
 mod installation;
+pub(crate) use installation::resolve_release_installation;
 pub(crate) use installation::resolve_target_installation;
 pub use installation::{InstallationPlan, resolve_installation};
 

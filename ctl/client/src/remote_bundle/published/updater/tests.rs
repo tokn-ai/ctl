@@ -12,7 +12,7 @@ impl Home {
   }
 
   fn cache(&self) -> PathBuf {
-    self.0.join(".tokn/ctl/cache/updaters")
+    self.0.join(".tokn/ctl/ctlup/cache/updaters")
   }
 }
 

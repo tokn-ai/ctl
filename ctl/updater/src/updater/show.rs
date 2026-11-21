@@ -5,21 +5,16 @@ use ctl_client::installation::{InstallationShow, InstalledBuild};
 use ctl_core::bundles::Source;
 use ctl_core::installations::CatalogEntry;
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 use std::io;
 use std::path::Path;
-
-pub(super) async fn run(home: &Path, target: TargetOptions<'_>, json: bool) -> io::Result<()> {
-  let remote = target.host.is_some() || target.destination.is_some() || target.method.is_some();
-  let data = snapshot(home, target).await?;
-  print(&data, json, !remote && status::in_checkout())
-}
 
 /// Reads a passive inventory of catalogued installations.
 pub(super) async fn snapshot(
   home: &Path,
   target: TargetOptions<'_>,
 ) -> io::Result<InstallationShow> {
-  if target.host.is_some() || target.destination.is_some() || target.method.is_some() {
+  if target.remote() {
     crate::bundled::register()?;
     let target = status::remote_target(target).await?;
     remote_snapshot(&target).await
@@ -109,11 +104,23 @@ pub(super) fn render(snapshot: &InstallationShow, development: bool) -> String {
     ],
     ordered.into_iter().map(|row| row.cells(snapshot, &ids)),
   );
-  let mut text = format!(
-    "Active: {}\nPrevious: {}\n\nInstalled builds\n{table}",
-    selection(snapshot.active.as_deref()),
-    selection(snapshot.previous.as_deref())
-  );
+  let mut text = format!("Active: {}\n", selection(snapshot.active.as_deref()));
+  if let Some(origin) = &snapshot.active_origin {
+    let source = if super::tracked_channel(Some(origin)).is_some() {
+      "Tracking"
+    } else {
+      "Pinned to"
+    };
+    let _ = write!(text, "{source} {}", origin.channel);
+    if let Some(id) = &origin.publication_id {
+      let _ = write!(text, " ({id})");
+    }
+    text.push('\n');
+  }
+  if let Some(previous) = &snapshot.previous {
+    let _ = writeln!(text, "Previous: {}", selection(Some(previous)));
+  }
+  let _ = write!(text, "\nInstalled builds\n{table}");
   if !snapshot.missing_builds.is_empty() {
     text.push_str(
       "\n\nOn the machine with the missing builds, use `ctlup update` for a release or `ctlup dev` for a checkout build. Reinstall supplied builds from their original source.",

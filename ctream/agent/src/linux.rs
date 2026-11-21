@@ -16,9 +16,9 @@ pub(super) fn run() -> Result<()> {
       serde_json::to_writer(io::stdout().lock(), &catalog::catalog())?;
       Ok(())
     }
-    Request::CaptureDrivers(Target::Windows(_))
+    Request::CaptureDrivers(Target::Windows(_) | Target::WindowsDesktop)
     | Request::CaptureWithDriver {
-      target: Target::Windows(_),
+      target: Target::Windows(_) | Target::WindowsDesktop,
       ..
     } => Err("Windows capture drivers require a native Windows agent".into()),
     Request::CaptureDrivers(target) => {
@@ -68,7 +68,9 @@ pub(super) fn run() -> Result<()> {
       Ok(())
     }
     Request::Target(target, operation) => match (target, operation) {
-      (Target::Windows(_), _) => Err("Windows displays require a native Windows agent".into()),
+      (Target::Windows(_) | Target::WindowsDesktop, _) => {
+        Err("Windows targets require a native Windows agent".into())
+      }
       (_, TargetOperation::InputWindow(_)) => Err("window input requires Windows".into()),
       (target, TargetOperation::Windows) => {
         serde_json::to_writer(

@@ -63,6 +63,9 @@ fn entries(system: CaptureSystem) -> [Selection; 2] {
 pub fn list(target: Target) -> Vec<CaptureDriverInfo> {
   descriptors(target.system())
     .into_iter()
+    .filter(|descriptor| {
+      target != Target::WindowsDesktop || descriptor.info.scopes.contains(&CaptureScope::Window)
+    })
     .map(|descriptor| descriptor.info)
     .collect()
 }
@@ -92,6 +95,9 @@ pub fn catalog() -> Vec<CaptureDriverDescriptor> {
 }
 
 pub fn select(target: Target, requested: &str, window: bool) -> Result<Selection> {
+  if target == Target::WindowsDesktop && !window {
+    return Err("Windows desktop target requires a window ID".into());
+  }
   let scope = if window {
     CaptureScope::Window
   } else {
@@ -156,5 +162,11 @@ mod tests {
       }
     }
     assert!(select(Target::X11(7), "windows.dxgi", false).is_err());
+    let desktop = Target::WindowsDesktop;
+    assert!(select(desktop, "auto", false).is_err());
+    assert_eq!(select(desktop, "auto", true).unwrap().id, "windows.wgc");
+    let catalog = list(desktop);
+    assert_eq!(catalog.len(), 1);
+    assert_eq!(catalog[0].id, "windows.wgc");
   }
 }

@@ -6,6 +6,8 @@ use std::{
   sync::mpsc::{Receiver, TryRecvError},
 };
 
+pub const PANEL_WIDTH: f32 = 230.0;
+
 enum Pending {
   Elements(Receiver<io::Result<Vec<Element>>>),
   Action(Receiver<io::Result<ActionResult>>),
@@ -94,7 +96,7 @@ impl<T: Transport + Send + Sync + 'static> Panel<T> {
     let mut action = None;
     egui::SidePanel::right("window_actions")
       .resizable(true)
-      .default_width(230.0)
+      .default_width(PANEL_WIDTH)
       .show(ctx, |ui| {
         ui.heading("Window actions");
         ui.add_enabled_ui(self.pending.is_none(), |ui| {

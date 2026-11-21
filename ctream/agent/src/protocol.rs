@@ -1,8 +1,8 @@
 use ctream_driver::{ControlOperation, Result};
 use ctream_proto::{
   BOUNDS_VERSION, CAPTURE_CATALOG_VERSION, CAPTURE_DRIVER_VERSION, DISPLAY_VERSION, Target,
-  VERSION, WAYLAND_WINDOW_VERSION, WINDOWS_DISPLAY_VERSION, WINDOWS_WINDOW_VERSION,
-  X11_WINDOW_VERSION, valid_capture_driver, valid_window_id,
+  VERSION, WAYLAND_WINDOW_VERSION, WINDOWS_DESKTOP_VERSION, WINDOWS_DISPLAY_VERSION,
+  WINDOWS_WINDOW_VERSION, X11_WINDOW_VERSION, valid_capture_driver, valid_window_id,
 };
 
 pub enum TargetOperation<'a> {
@@ -30,14 +30,16 @@ pub enum Request<'a> {
 
 fn supports_windows(version: &str, target: Target) -> bool {
   match target {
+    Target::WindowsDesktop => version == WINDOWS_DESKTOP_VERSION,
     Target::Windows(_) => matches!(
       version,
-      WINDOWS_WINDOW_VERSION | CAPTURE_DRIVER_VERSION | VERSION
+      WINDOWS_WINDOW_VERSION | CAPTURE_DRIVER_VERSION | CAPTURE_CATALOG_VERSION | VERSION
     ),
     _ => {
       matches!(
         version,
         VERSION
+          | CAPTURE_CATALOG_VERSION
           | CAPTURE_DRIVER_VERSION
           | WINDOWS_WINDOW_VERSION
           | WINDOWS_DISPLAY_VERSION
@@ -52,6 +54,7 @@ fn supports_displays(version: &str) -> bool {
   matches!(
     version,
     VERSION
+      | CAPTURE_CATALOG_VERSION
       | CAPTURE_DRIVER_VERSION
       | WINDOWS_WINDOW_VERSION
       | WINDOWS_DISPLAY_VERSION
@@ -62,17 +65,31 @@ fn supports_displays(version: &str) -> bool {
   )
 }
 
+fn supports_windows_displays(version: &str) -> bool {
+  matches!(
+    version,
+    WINDOWS_DISPLAY_VERSION
+      | WINDOWS_WINDOW_VERSION
+      | CAPTURE_DRIVER_VERSION
+      | CAPTURE_CATALOG_VERSION
+      | VERSION
+  )
+}
+
 fn parse_target(version: &str, value: &str) -> Result<Target> {
-  let target = Target::parse(value)?;
-  if matches!(target, Target::Windows(_))
-    && !matches!(
-      version,
-      WINDOWS_DISPLAY_VERSION | WINDOWS_WINDOW_VERSION | CAPTURE_DRIVER_VERSION | VERSION
-    )
-  {
-    return Err("Windows displays require ctream_agent 1.0.5".into());
+  match Target::parse(value)? {
+    Target::Windows(_) if !supports_windows_displays(version) => {
+      Err("Windows displays require ctream_agent 1.0.5".into())
+    }
+    Target::WindowsDesktop if version != WINDOWS_DESKTOP_VERSION => {
+      Err("Windows desktop-wide window selection requires ctream_agent 1.0.9".into())
+    }
+    target => Ok(target),
   }
-  Ok(target)
+}
+
+fn supports_capture_selection(version: &str, target: &str) -> bool {
+  version == CAPTURE_DRIVER_VERSION || (version == WINDOWS_DESKTOP_VERSION && target == "windows")
 }
 
 pub fn parse(args: &[String]) -> Result<Request<'_>> {
@@ -83,41 +100,42 @@ pub fn parse(args: &[String]) -> Result<Request<'_>> {
       Ok(Request::CaptureCatalog)
     }
     [version, operation, target]
-      if version == CAPTURE_DRIVER_VERSION && operation == "capture-drivers" =>
+      if operation == "capture-drivers" && supports_capture_selection(version, target) =>
     {
       Ok(Request::CaptureDrivers(parse_target(version, target)?))
     }
     [version, operation, target, driver, tail @ ..]
-      if version == CAPTURE_DRIVER_VERSION
-        && operation == "capture-with-driver"
+      if operation == "capture-with-driver"
+        && supports_capture_selection(version, target)
         && tail.len() <= 1 =>
     {
       if !valid_capture_driver(driver) {
         return Err("invalid capture driver identifier".into());
       }
+      let target = parse_target(version, target)?;
       let window = tail.first().map(String::as_str);
+      if target == Target::WindowsDesktop && window.is_none() {
+        return Err("Windows desktop target requires a window ID".into());
+      }
       if window.is_some_and(|id| !valid_window_id(id)) {
         return Err("invalid window identifier".into());
       }
       Ok(Request::CaptureWithDriver {
-        target: parse_target(version, target)?,
+        target,
         driver,
         window,
       })
     }
     [version, operation] if supports_displays(version) && operation == "discover" => {
       Ok(Request::Discover {
-        windows_displays: matches!(
-          version.as_str(),
-          WINDOWS_DISPLAY_VERSION | WINDOWS_WINDOW_VERSION | CAPTURE_DRIVER_VERSION | VERSION
-        ),
+        windows_displays: supports_windows_displays(version),
       })
     }
     [version, operation, target] if supports_displays(version) => {
       let target = parse_target(version, target)?;
       let operation = match operation.as_str() {
-        "capture" => TargetOperation::Capture,
-        "input" => TargetOperation::Input,
+        "capture" if target != Target::WindowsDesktop => TargetOperation::Capture,
+        "input" if target != Target::WindowsDesktop => TargetOperation::Input,
         "windows" if supports_windows(version, target) => TargetOperation::Windows,
         _ => return Err("unknown ctream-agent operation".into()),
       };
@@ -138,11 +156,11 @@ pub fn parse(args: &[String]) -> Result<Request<'_>> {
       }
       let request = match operation.as_str() {
         "capture-window" => Request::Target(target, TargetOperation::CaptureWindow(id)),
-        "input-window" if matches!(target, Target::Windows(_)) => {
+        "input-window" if matches!(target, Target::Windows(_) | Target::WindowsDesktop) => {
           Request::Target(target, TargetOperation::InputWindow(id))
         }
         "input-window" => return Err("window input requires a Windows window".into()),
-        _ if matches!(target, Target::Windows(_)) => {
+        _ if matches!(target, Target::Windows(_) | Target::WindowsDesktop) => {
           return Err("Windows accessibility operations are not supported".into());
         }
         "elements" => Request::Controls(
@@ -155,6 +173,7 @@ pub fn parse(args: &[String]) -> Result<Request<'_>> {
                 | WINDOWS_DISPLAY_VERSION
                 | WINDOWS_WINDOW_VERSION
                 | CAPTURE_DRIVER_VERSION
+                | CAPTURE_CATALOG_VERSION
                 | VERSION
             ),
           },
@@ -185,6 +204,7 @@ mod tests {
       WINDOWS_DISPLAY_VERSION,
       WINDOWS_WINDOW_VERSION,
       CAPTURE_DRIVER_VERSION,
+      CAPTURE_CATALOG_VERSION,
       VERSION,
     ] {
       assert!(parse(&args(&[version, "discover"])).is_ok());
@@ -213,6 +233,7 @@ mod tests {
       WINDOWS_DISPLAY_VERSION,
       WINDOWS_WINDOW_VERSION,
       CAPTURE_DRIVER_VERSION,
+      CAPTURE_CATALOG_VERSION,
       VERSION,
     ] {
       let arguments = args(&[version, "elements", "wayland-1", "window-1"]);
@@ -229,6 +250,7 @@ mod tests {
             | WINDOWS_DISPLAY_VERSION
             | WINDOWS_WINDOW_VERSION
             | CAPTURE_DRIVER_VERSION
+            | CAPTURE_CATALOG_VERSION
             | VERSION
         )
       );
@@ -247,6 +269,7 @@ mod tests {
       WINDOWS_DISPLAY_VERSION,
       WINDOWS_WINDOW_VERSION,
       CAPTURE_DRIVER_VERSION,
+      CAPTURE_CATALOG_VERSION,
       VERSION,
     ] {
       let arguments = args(&[version, "discover"]);
@@ -257,7 +280,11 @@ mod tests {
         windows_displays,
         matches!(
           version,
-          WINDOWS_DISPLAY_VERSION | WINDOWS_WINDOW_VERSION | CAPTURE_DRIVER_VERSION | VERSION
+          WINDOWS_DISPLAY_VERSION
+            | WINDOWS_WINDOW_VERSION
+            | CAPTURE_DRIVER_VERSION
+            | CAPTURE_CATALOG_VERSION
+            | VERSION
         )
       );
       for operation in ["capture", "input"] {
@@ -268,7 +295,7 @@ mod tests {
       }
       let window_operations = matches!(
         version,
-        WINDOWS_WINDOW_VERSION | CAPTURE_DRIVER_VERSION | VERSION
+        WINDOWS_WINDOW_VERSION | CAPTURE_DRIVER_VERSION | CAPTURE_CATALOG_VERSION | VERSION
       );
       assert_eq!(
         parse(&args(&[version, "windows", "windows-1"])).is_ok(),
@@ -288,6 +315,51 @@ mod tests {
   }
 
   #[test]
+  fn windows_desktop_accepts_only_window_operations_under_its_contract() {
+    let desktop = Target::WindowsDesktop;
+    let version = WINDOWS_DESKTOP_VERSION;
+    assert!(matches!(
+      parse(&args(&[version, "windows", "windows"])).unwrap(),
+      Request::Target(Target::WindowsDesktop, TargetOperation::Windows)
+    ));
+    assert!(matches!(
+      parse(&args(&[version, "capture-drivers", "windows"])).unwrap(),
+      Request::CaptureDrivers(Target::WindowsDesktop)
+    ));
+    let capture = [
+      version,
+      "capture-with-driver",
+      "windows",
+      "auto",
+      "window-1",
+    ];
+    assert!(matches!(
+      parse(&args(&capture)).unwrap(),
+      Request::CaptureWithDriver { target, window: Some("window-1"), .. } if target == desktop
+    ));
+    for operation in ["capture-window", "input-window"] {
+      assert!(parse(&args(&[version, operation, "windows", "window-1"])).is_ok());
+    }
+    for unsupported in [
+      vec![version, "capture", "windows"],
+      vec![version, "input", "windows"],
+      vec![version, "capture-with-driver", "windows", "auto"],
+      vec![version, "input-window", "windows", "invalid/id"],
+      vec![version, "elements", "windows", "window-1"],
+      vec![
+        WINDOWS_WINDOW_VERSION,
+        "capture-window",
+        "windows",
+        "window-1",
+      ],
+      vec![CAPTURE_DRIVER_VERSION, "capture-drivers", "windows"],
+      vec![CAPTURE_CATALOG_VERSION, "windows", "windows"],
+    ] {
+      assert!(parse(&args(&unsupported)).is_err(), "{unsupported:?}");
+    }
+  }
+
+  #[test]
   fn target_independent_catalog_requires_its_own_contract_and_exact_shape() {
     assert!(matches!(
       parse(&args(&[CAPTURE_CATALOG_VERSION, "capture-drivers"])).unwrap(),
@@ -301,6 +373,7 @@ mod tests {
       WINDOWS_DISPLAY_VERSION,
       WINDOWS_WINDOW_VERSION,
       CAPTURE_DRIVER_VERSION,
+      WINDOWS_DESKTOP_VERSION,
     ] {
       assert!(parse(&args(&[old, "capture-drivers"])).is_err());
     }

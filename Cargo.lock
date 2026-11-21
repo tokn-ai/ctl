@@ -958,6 +958,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ctl-bundle"
+version = "0.1.4"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokn-ctl-core",
+ "uuid",
+ "zip",
+]
+
+[[package]]
 name = "ctl-cli"
 version = "0.1.4"
 dependencies = [
@@ -1002,6 +1014,7 @@ dependencies = [
  "base64 0.22.1",
  "clap",
  "comfy-table",
+ "ctl-bundle",
  "ctl-ipc",
  "ctl-proto",
  "ctl-task-client",
@@ -1215,6 +1228,7 @@ name = "ctlup"
 version = "0.1.4"
 dependencies = [
  "clap",
+ "ctl-bundle",
  "ctl-client",
  "ctl-ipc",
  "ctl-proto",
@@ -1453,7 +1467,9 @@ dependencies = [
 name = "ctream-client"
 version = "0.1.0"
 dependencies = [
+ "ctl-bundle",
  "ctream-proto",
+ "process-wrap",
  "serde",
  "serde_json",
 ]
@@ -1500,9 +1516,14 @@ dependencies = [
 name = "ctream-preview"
 version = "0.1.0"
 dependencies = [
+ "ab_glyph",
+ "ctl-bundle",
  "ctream-client",
  "ctream-proto",
  "eframe",
+ "serde",
+ "serde_json",
+ "sha2",
  "wgpu",
 ]
 

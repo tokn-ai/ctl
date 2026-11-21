@@ -14,8 +14,9 @@ use crate::{
 use ctream_proto::{
   Action, ActionResult, BOUNDS_VERSION, CAPTURE_CATALOG_VERSION, CAPTURE_DRIVER_VERSION,
   CaptureDriverDescriptor, CaptureDriverInfo, DISPLAY_VERSION, Element, Session as DisplaySession,
-  Target, WAYLAND_WINDOW_VERSION, WINDOWS_DISPLAY_VERSION, WINDOWS_WINDOW_VERSION, Window,
-  X11_FRAME_SIZE, X11_WINDOW_VERSION, valid_capture_driver, valid_window_id,
+  Target, WAYLAND_WINDOW_VERSION, WINDOWS_DESKTOP_VERSION, WINDOWS_DISPLAY_VERSION,
+  WINDOWS_WINDOW_VERSION, Window, X11_FRAME_SIZE, X11_WINDOW_VERSION, valid_capture_driver,
+  valid_window_id,
 };
 use serde::de::DeserializeOwned;
 use std::{
@@ -76,7 +77,7 @@ impl Query for CaptureDrivers {
 
   fn arguments(&self) -> io::Result<Vec<String>> {
     Ok(vec![
-      CAPTURE_DRIVER_VERSION.into(),
+      capture_driver_version(self.0).into(),
       "capture-drivers".into(),
       self.0.to_string(),
     ])
@@ -231,6 +232,7 @@ impl<T> Clone for Session<T> {
 
 impl<T: Transport> Session<T> {
   pub fn capture_with_driver(&self, driver: &str) -> io::Result<Capture<T::Reader, T::Writer>> {
+    self.require_window_for_desktop()?;
     if !valid_capture_driver(driver) {
       return Err(io::Error::new(
         io::ErrorKind::InvalidInput,
@@ -238,7 +240,7 @@ impl<T: Transport> Session<T> {
       ));
     }
     let mut arguments = vec![
-      CAPTURE_DRIVER_VERSION.into(),
+      capture_driver_version(self.target).into(),
       "capture-with-driver".into(),
       self.target.to_string(),
       driver.into(),
@@ -256,7 +258,11 @@ impl<T: Transport> Session<T> {
   }
 
   pub fn supports_input(&self) -> bool {
-    self.window.is_none() || matches!(self.target, Target::Windows(_))
+    match self.target {
+      Target::WindowsDesktop => self.window.is_some(),
+      Target::Windows(_) => true,
+      _ => self.window.is_none(),
+    }
   }
 
   pub fn supports_semantics(&self) -> bool {
@@ -280,6 +286,7 @@ impl<T: Transport> Session<T> {
           size: X11_FRAME_SIZE,
         },
         Target::Wayland(_) | Target::Windows(_) => FrameFormat::Ppm,
+        Target::WindowsDesktop => return Err(desktop_window_required()),
       };
       (
         vec![
@@ -297,6 +304,7 @@ impl<T: Transport> Session<T> {
   }
 
   pub fn input(&self) -> io::Result<Input<T::Reader, T::Writer>> {
+    self.require_window_for_desktop()?;
     if !self.supports_input() {
       return Err(io::Error::new(
         io::ErrorKind::Unsupported,
@@ -306,11 +314,11 @@ impl<T: Transport> Session<T> {
     let format = match self.target {
       Target::X11(_) => InputFormat::X11,
       Target::Wayland(_) => InputFormat::Wayland,
-      Target::Windows(_) => InputFormat::Windows,
+      Target::Windows(_) | Target::WindowsDesktop => InputFormat::Windows,
     };
     let arguments = if let Some(window) = &self.window {
       window_arguments(
-        WINDOWS_WINDOW_VERSION,
+        window_version(self.target),
         "input-window",
         self.target,
         &window.id,
@@ -333,6 +341,13 @@ impl<T: Transport> Session<T> {
       ));
     }
     Ok(&self.window.as_ref().expect("window capability").id)
+  }
+
+  fn require_window_for_desktop(&self) -> io::Result<()> {
+    if self.target == Target::WindowsDesktop && self.window.is_none() {
+      return Err(desktop_window_required());
+    }
+    Ok(())
   }
 
   pub fn elements(&self) -> io::Result<Vec<Element>> {
@@ -373,12 +388,28 @@ fn display_version(target: Target) -> &'static str {
   }
 }
 
+fn capture_driver_version(target: Target) -> &'static str {
+  if target == Target::WindowsDesktop {
+    WINDOWS_DESKTOP_VERSION
+  } else {
+    CAPTURE_DRIVER_VERSION
+  }
+}
+
 fn window_version(target: Target) -> &'static str {
   match target {
     Target::X11(_) => X11_WINDOW_VERSION,
     Target::Wayland(_) => WAYLAND_WINDOW_VERSION,
     Target::Windows(_) => WINDOWS_WINDOW_VERSION,
+    Target::WindowsDesktop => WINDOWS_DESKTOP_VERSION,
   }
+}
+
+fn desktop_window_required() -> io::Error {
+  io::Error::new(
+    io::ErrorKind::InvalidInput,
+    "Windows desktop target requires a window ID",
+  )
 }
 
 fn window_arguments(
@@ -600,6 +631,60 @@ mod tests {
           WINDOWS_WINDOW_VERSION,
           "input-window",
           "windows-2",
+          "window_1"
+        ],
+      ]
+    );
+  }
+
+  #[test]
+  fn windows_desktop_window_uses_one_identity_without_a_monitor_for_each_channel() {
+    let (client, observed) = client(&[
+      r#"[{"id":"window_1","title":"Example","app_id":"example"}]"#,
+      r#"[{"id":"windows.wgc","name":"Windows Graphics Capture","scopes":["window"]}]"#,
+      "P6\n2 1\n255\nabcdef",
+      concat!(
+        r#"{"driver":"windows.wgc","format":{"type":"ppm"}}"#,
+        "\nP6\n2 1\n255\nabcdef"
+      ),
+      "ready\n",
+    ]);
+    let target = Target::WindowsDesktop;
+    let mut windows = client.windows(target).unwrap();
+    assert_eq!(client.capture_drivers(target).unwrap()[0].id, "windows.wgc");
+    let session = client.session(target, windows.pop());
+    assert!(session.supports_input());
+    assert!(!session.supports_semantics());
+    session.capture().unwrap();
+    session.capture_with_driver("windows.wgc").unwrap();
+    session.input().unwrap();
+    let missing = client.session(target, None);
+    assert!(!missing.supports_input());
+    assert!(missing.capture().is_err());
+    assert!(missing.capture_with_driver("auto").is_err());
+    assert!(missing.input().is_err());
+    assert_eq!(
+      *observed.requests.lock().unwrap(),
+      [
+        vec![WINDOWS_DESKTOP_VERSION, "windows", "windows"],
+        vec![WINDOWS_DESKTOP_VERSION, "capture-drivers", "windows"],
+        vec![
+          WINDOWS_DESKTOP_VERSION,
+          "capture-window",
+          "windows",
+          "window_1"
+        ],
+        vec![
+          WINDOWS_DESKTOP_VERSION,
+          "capture-with-driver",
+          "windows",
+          "windows.wgc",
+          "window_1"
+        ],
+        vec![
+          WINDOWS_DESKTOP_VERSION,
+          "input-window",
+          "windows",
           "window_1"
         ],
       ]

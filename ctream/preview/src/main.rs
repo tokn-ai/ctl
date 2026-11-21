@@ -5,13 +5,17 @@ use ctream_client::{
   transport::Transport,
 };
 use ctream_proto::{Element, Target, valid_capture_driver, valid_window_id};
+mod agent_sync;
 mod drivers;
+mod fonts;
 mod input;
 mod overlay;
 mod requests;
 mod semantic;
 mod view;
 mod welcome;
+mod workspace;
+mod workspace_hosts;
 
 use eframe::egui;
 use std::{
@@ -40,6 +44,11 @@ struct Preview<T: Transport> {
   texture: Option<egui::TextureHandle>,
   frames: u64,
   driver: Option<String>,
+}
+
+enum PreviewMode {
+  Setup,
+  Viewer { interactive: bool },
 }
 
 impl<T: Transport> Preview<T> {
@@ -118,27 +127,48 @@ impl<T: Transport> Preview<T> {
       && self.stream.lock().unwrap().error.is_none()
   }
 
+  fn image_size(&self) -> Option<[u32; 2]> {
+    self
+      .input
+      .as_ref()
+      .and_then(input::Input::desktop_size)
+      .or_else(|| {
+        self
+          .texture
+          .as_ref()
+          .map(|texture| texture.size().map(|v| v as u32))
+      })
+  }
+
   fn show(
     &mut self,
     ui: &mut egui::Ui,
     error: Option<&str>,
     elements: &[Element],
-    interactive: bool,
+    mode: PreviewMode,
   ) {
     let ctx = ui.ctx().clone();
-    if let Some(error) = error.or(self.input_error.as_deref()) {
-      ui.label(error);
-    } else if self.texture.is_none() {
-      ui.spinner();
-      ui.label("Waiting for the first frame…");
-    }
-    if let Some(texture) = &self.texture {
-      let size = self
-        .input
-        .as_ref()
-        .and_then(input::Input::desktop_size)
-        .unwrap_or_else(|| texture.size().map(|v| v as u32));
-      let Some(image) = view::fit(ui.available_rect_before_wrap(), size) else {
+    let interactive = match mode {
+      PreviewMode::Setup => {
+        if let Some(error) = error {
+          ui.label(error);
+        } else if self.texture.is_none() {
+          ui.spinner();
+          ui.label("Waiting for the first frame…");
+        }
+        false
+      }
+      PreviewMode::Viewer { interactive } => interactive,
+    };
+    if let (Some(texture), Some(size)) = (&self.texture, self.image_size()) {
+      let area = ui.available_rect_before_wrap();
+      let image = match mode {
+        PreviewMode::Setup => view::fit(area, size),
+        // Fill the video canvas while the OS applies the aspect correction or
+        // gives the window a fixed size. Keep the full frame and input mapping.
+        PreviewMode::Viewer { .. } => view::fill(area, size),
+      };
+      let Some(image) = image else {
         if interactive
           && self.forwarding
           && let Some(input) = &mut self.input
@@ -151,9 +181,9 @@ impl<T: Transport> Preview<T> {
         }
         return;
       };
-      // Painting alone does not occupy layout space. Reserve the entire pane,
-      // including letterboxing, so surrounding setup controls stay outside it.
-      ui.allocate_rect(ui.available_rect_before_wrap(), egui::Sense::hover());
+      // Painting alone does not occupy layout space. Reserve the pane so its
+      // surrounding controls stay outside it.
+      ui.allocate_rect(area, egui::Sense::hover());
       let rect = view::rect(image.viewport());
       ui.painter().image(
         texture.id(),
@@ -199,14 +229,7 @@ fn background<T: Send + 'static>(
   receiver
 }
 
-fn run<T: Transport + Send + Sync + 'static>(
-  title: &str,
-  transport: T,
-  target: Option<Target>,
-  windows: bool,
-  window: Option<String>,
-  driver: String,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn run(title: &str, create: eframe::AppCreator<'static>) -> Result<(), Box<dyn std::error::Error>> {
   let options = eframe::NativeOptions {
     renderer: eframe::Renderer::Wgpu,
     viewport: egui::ViewportBuilder::default()
@@ -218,38 +241,64 @@ fn run<T: Transport + Send + Sync + 'static>(
     title,
     options,
     Box::new(move |cc| {
-      let viewer = welcome::Viewer::new(transport, target, windows, window, driver, &cc.egui_ctx);
-      Ok(Box::new(viewer))
+      fonts::install(&cc.egui_ctx);
+      create(cc)
     }),
   )?;
   Ok(())
 }
 
 const USAGE: &str =
-  "Usage: ctream-preview [OPTIONS] [SSH_HOST|--local] [DISPLAY [--windows | --window ID]]
+  "Usage: ctream-preview [OPTIONS] [SSH_HOST|--local] [TARGET] [--windows | --window ID]
 
   --host SSH_HOST        Alternative to the positional SSH endpoint
   --agent EXECUTABLE     Agent executable; use a mounted Windows path through WSL
   --ssh-program PROGRAM  SSH-compatible launcher (default: ssh)
   --ssh-arg ARG          Launcher prefix argument; repeat as needed
+  --windows             Start with the window picker across available sessions
   --window ID           Open a window ID returned by ctream windows
   --capture-driver ID   Capture backend, or auto (default)
 
-DISPLAY is :DISPLAY, wayland-N, or windows-N. Without an endpoint, use the local agent.
+TARGET is :DISPLAY, wayland-N, windows-N, or windows for the Windows desktop window list.
+Without an endpoint, choose a workspace host.
+Use --local to open the local agent directly.
 Selections open a view-only setup preview. Start hides setup and opens a separate viewer.\nClosing the viewer releases control and restores setup.";
 
 enum Endpoint {
+  Workspace,
   Local,
   Ssh(String),
+}
+
+#[derive(Clone)]
+struct SourceOptions {
+  target: Option<Target>,
+  windows: bool,
+  window: Option<String>,
+  driver: String,
+}
+
+impl SourceOptions {
+  fn viewer<T: Transport + Send + Sync + 'static>(
+    self,
+    transport: T,
+    ctx: &egui::Context,
+  ) -> welcome::Viewer<T> {
+    welcome::Viewer::new(
+      transport,
+      self.target,
+      self.windows,
+      self.window,
+      self.driver,
+      ctx,
+    )
+  }
 }
 
 struct Options {
   endpoint: Endpoint,
   connection: ConnectionOptions,
-  target: Option<Target>,
-  windows: bool,
-  window: Option<String>,
-  driver: String,
+  source: SourceOptions,
 }
 
 fn invalid(message: &str) -> io::Error {
@@ -312,15 +361,21 @@ fn parse(arguments: impl IntoIterator<Item = OsString>) -> io::Result<Option<Opt
       _ => return Err(invalid("unexpected preview argument")),
     }
   }
-  let endpoint = endpoint.unwrap_or(Endpoint::Local);
-  if (windows || window.is_some()) && target.is_none() {
-    return Err(invalid("window selection requires a display"));
+  let endpoint = endpoint.unwrap_or_else(|| {
+    if connection.agent_is_explicit() {
+      Endpoint::Local
+    } else {
+      Endpoint::Workspace
+    }
+  });
+  if window.is_some() && target.is_none() {
+    return Err(invalid("--window requires a target"));
   }
   if windows && window.is_some() {
     return Err(invalid("choose either --windows or --window ID"));
   }
   match &endpoint {
-    Endpoint::Local => {
+    Endpoint::Workspace | Endpoint::Local => {
       connection.local()?;
     }
     Endpoint::Ssh(host) => {
@@ -330,10 +385,12 @@ fn parse(arguments: impl IntoIterator<Item = OsString>) -> io::Result<Option<Opt
   Ok(Some(Options {
     endpoint,
     connection,
-    target,
-    windows,
-    window,
-    driver: driver.unwrap_or_else(|| "auto".into()),
+    source: SourceOptions {
+      target,
+      windows,
+      window,
+      driver: driver.unwrap_or_else(|| "auto".into()),
+    },
   }))
 }
 
@@ -343,23 +400,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("{USAGE}");
     return Ok(());
   };
-  match options.endpoint {
-    Endpoint::Local => run(
-      "ctream · local",
-      options.connection.local()?,
-      options.target,
-      options.windows,
-      options.window,
-      options.driver,
+  let Options {
+    endpoint,
+    connection,
+    source,
+  } = options;
+  match endpoint {
+    Endpoint::Workspace => run(
+      "ctream",
+      Box::new(move |cc| Ok(Box::new(workspace::Preview::new(source, &cc.egui_ctx)))),
     ),
-    Endpoint::Ssh(host) => run(
-      &format!("ctream · {host}"),
-      options.connection.ssh(&host)?,
-      options.target,
-      options.windows,
-      options.window,
-      options.driver,
-    ),
+    Endpoint::Local => {
+      let transport = connection.local()?;
+      run(
+        "ctream · local",
+        Box::new(move |cc| Ok(Box::new(source.viewer(transport, &cc.egui_ctx)))),
+      )
+    }
+    Endpoint::Ssh(host) => {
+      let transport = connection.ssh(&host)?;
+      run(
+        &format!("ctream · {host}"),
+        Box::new(move |cc| Ok(Box::new(source.viewer(transport, &cc.egui_ctx)))),
+      )
+    }
   }
 }
 
@@ -531,8 +595,8 @@ mod argument_tests {
     ] {
       let options = parse(args(&arguments)).unwrap().unwrap();
       assert!(matches!(options.endpoint, Endpoint::Ssh(_)));
-      assert!(matches!(options.target, Some(Target::Windows(2))));
-      assert!(!options.windows);
+      assert!(matches!(options.source.target, Some(Target::Windows(2))));
+      assert!(!options.source.windows);
     }
     let options = parse(args(&["--local", "--agent", "agent", ":1"]))
       .unwrap()
@@ -541,14 +605,16 @@ mod argument_tests {
     let options = parse(args(&["test-host", "windows-2", "--windows"]))
       .unwrap()
       .unwrap();
-    assert!(options.windows);
+    assert!(options.source.windows);
+    let options = parse(args(&["test-host", "--windows"])).unwrap().unwrap();
+    assert!(options.source.windows && options.source.target.is_none());
     let options = parse(args(&["test-host", "windows-2", "--window", "win-123"]))
       .unwrap()
       .unwrap();
-    assert_eq!(options.window.as_deref(), Some("win-123"));
+    assert_eq!(options.source.window.as_deref(), Some("win-123"));
     let options = parse(args(&[])).unwrap().unwrap();
-    assert!(matches!(options.endpoint, Endpoint::Local));
-    assert_eq!(options.driver, "auto");
+    assert!(matches!(options.endpoint, Endpoint::Workspace));
+    assert_eq!(options.source.driver, "auto");
     let options = parse(args(&[
       "--local",
       "--capture-driver",
@@ -558,13 +624,12 @@ mod argument_tests {
     ]))
     .unwrap()
     .unwrap();
-    assert_eq!(options.driver, "windows.wgc");
+    assert_eq!(options.source.driver, "windows.wgc");
   }
 
   #[test]
   fn unsupported_and_conflicting_preview_modes_are_rejected() {
     for arguments in [
-      vec!["test-host", "--windows"],
       vec!["test-host", "--window", "win-1"],
       vec!["test-host", "windows-2", "--windows", "--window", "win-1"],
       vec!["test-host", "windows-2", "--window", "bad/id"],

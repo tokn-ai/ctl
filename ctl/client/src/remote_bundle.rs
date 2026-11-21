@@ -28,6 +28,7 @@ pub(crate) mod archive;
 pub(crate) mod build_info;
 mod cache;
 pub(crate) mod compatibility;
+pub mod ctream;
 pub mod desktop;
 mod github;
 mod host_install;

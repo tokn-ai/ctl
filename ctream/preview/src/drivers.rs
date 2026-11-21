@@ -68,9 +68,12 @@ fn tags(driver: &CaptureDriverDescriptor, displays: &[Session]) -> Vec<Tag> {
       tags.push(Tag::new(label, TagStyle::Capability));
     }
   }
-  if !displays
-    .iter()
-    .any(|display| display.selectable && driver.systems.contains(&system(&display.display)))
+  let desktop_windows = driver.systems.contains(&CaptureSystem::Windows)
+    && driver.info.scopes.contains(&CaptureScope::Window);
+  if !desktop_windows
+    && !displays
+      .iter()
+      .any(|display| display.selectable && driver.systems.contains(&system(&display.display)))
   {
     tags.push(Tag::new("No sources", TagStyle::Unavailable));
   }

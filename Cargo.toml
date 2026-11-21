@@ -9,6 +9,7 @@ members = [
   "ctl/ipc",
   "ctl/daemon",
   "ctl/keychain-client",
+  "ctl/bundle",
   "ctl/updater",
   "ctmux/client",
   "ctmux/cli",
@@ -64,6 +65,7 @@ terminput-crossterm = "0.4.11"
 avt = { package = "ctmux-avt", path = "ctmux/avt", version = "=0.1.4" }
 base64 = "0.22.1"
 ctl-client = { path = "ctl/client", version = "=0.1.4" }
+ctl-bundle = { path = "ctl/bundle", version = "=0.1.4" }
 ctl-files = { path = "ctl/files", version = "=0.1.4" }
 ctl-proto = { path = "ctl/proto", version = "=0.1.4" }
 ctl-keychain-client = { path = "ctl/keychain-client", version = "=0.1.4" }
@@ -108,6 +110,7 @@ tokio = { version = "1.53.1", features = [
 ] }
 unicode-width = "0.1.14"
 uuid = { version = "1.26.0", features = ["v4"] }
+zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 zeroize = { version = "1.8", features = ["serde"] }
 
 # Managed development binaries verify their installation before opening sockets.

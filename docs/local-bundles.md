@@ -5,7 +5,7 @@
 Run `ctlup dev` from the root of the ctl checkout you want to build, including
 its uncommitted changes. The command fails if the current directory is outside
 that root or in a subdirectory. Use `--workspace /path/to/checkout` to select a
-root explicitly. The same rule applies to `--app`, `--renew-signing`, and
+root explicitly. The same rule applies to `--app`, `--ctream`, `--renew-signing`, and
 remote development builds.
 
 The native build prepares all six runtime commands and the separate `ctlup`
@@ -61,6 +61,39 @@ channel. On macOS it uses the development helper profile for signing and can
 renew an expired profile through Xcode. If provisioning or signing fails, the
 app can bundle an unsigned helper. `ctlup dev --renew-signing` renews the
 active runtime helper's signature separately.
+
+## Install a ctream development build
+
+From the checkout root, build and activate the native preview and CLI:
+
+```sh
+ctlup dev --ctream
+ctlup ctream run
+```
+
+If your installed updater predates `--ctream`, substitute
+`cargo run --locked -p ctlup --` for `ctlup` in these commands. Build the
+remote agent you need with `--agent-target`, for example Windows via WSL from
+macOS:
+
+```sh
+ctlup dev --ctream --agent-target x86_64-pc-windows-gnu
+ctlup ctream run
+```
+
+The developer build uses the current checkout, including uncommitted changes,
+and activates it under `~/.tokn/ctl/ctream/installs`. It supports `--workspace`,
+`--profile`, `--release`, `--target-dir`, and `--json`. A native Linux or Windows
+x64 build can include its local agent. On macOS, select a remote agent target
+to use the managed host flow. Repeat `--agent-target` to build several lanes.
+
+Cross builds need the selected Rust targets, Zig, and `cargo-zigbuild`. For
+Linux agents use `x86_64-unknown-linux-musl` or `aarch64-unknown-linux-musl`.
+Native Linux builds include the Wayland helper binaries and require the system
+`libxkbcommon` development package. Linux agents built from another platform
+use Wayland helpers already installed on the remote host. The preview syncs the
+agent when you connect to a host. To return to a workflow build, use
+`ctlup ctream update` or install a bundle with `ctlup ctream install --from`.
 
 ## Build a local Linux bundle
 

@@ -1,0 +1,32 @@
+[package]
+name = "ctl-bundle"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Bundle verification and installation storage for ctl tools"
+readme = "README.md"
+categories = ["development-tools"]
+keywords = ["ctl", "bundles", "installation"]
+publish = ["crates-io"]
+
+[dependencies]
+ctl-core = { workspace = true, features = ["bundles"], optional = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true }
+zip = { workspace = true, optional = true }
+
+[features]
+default = []
+install = ["dep:ctl-core", "dep:serde", "dep:serde_json", "dep:sha2", "dep:uuid", "dep:zip"]
+pack = ["dep:zip"]
+
+[[bin]]
+name = "ctl-pack-ctream"
+required-features = ["pack"]
+
+[lints]
+workspace = true

@@ -13,6 +13,7 @@ publish = ["crates-io"]
 
 [dependencies]
 clap.workspace = true
+ctl-bundle = { workspace = true, features = ["install"] }
 ctl-client = { workspace = true, features = ["cli"] }
 ctl-core = { workspace = true, features = ["bundles"] }
 ctl-ipc.workspace = true
@@ -22,13 +23,13 @@ serde_json.workspace = true
 sha2.workspace = true
 tokio = { workspace = true, features = ["fs"] }
 uuid.workspace = true
-zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 [build-dependencies]
 ctl-core = { workspace = true, features = ["ctld-bundle-build"] }
 
 [dev-dependencies]
 ctl-core = { workspace = true, features = ["test-fixtures"] }
+zip.workspace = true
 
 [target.'cfg(unix)'.dev-dependencies]
 ctl-proto.workspace = true
@@ -40,6 +41,9 @@ tar = { version = "0.4.46", default-features = false }
 
 [target.'cfg(unix)'.dependencies]
 rustix.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+zip.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 flate2 = "1.1.9"

@@ -12,6 +12,7 @@ pub(super) async fn run(
   let remote = target.host.is_some() || target.destination.is_some() || !options.hosts.is_empty();
   if remote {
     if options.app
+      || options.ctream
       || options.renew_signing
       || options.release
       || options.profile.is_some()
@@ -22,31 +23,25 @@ pub(super) async fn run(
     {
       return Err(io::Error::new(
         io::ErrorKind::InvalidInput,
-        "Desktop, signing, and native Cargo options require a local build. Remote development accepts host options, --workspace, and --json.",
+        "Desktop, ctream, signing, and native Cargo options require a local build. Remote development accepts host options, --workspace, and --json.",
       ));
     }
   } else {
     super::require_local(target)?;
   }
-  let required: &[&str] = if remote {
-    &["scripts/dev/build-agent-bundle.mts"]
-  } else if options.app {
-    &[
-      "scripts/dev/build-desktop-app.mts",
-      "apps/desktop/src-tauri/tauri.conf.json",
-    ]
-  } else if options.renew_signing {
-    &["scripts/dev/ctld-signed.mts"]
-  } else {
-    &[NATIVE_BUILDER]
-  };
-  let workspace = checkout_root(options.workspace.as_deref(), required)?;
+  let workspace = checkout_root(
+    options.workspace.as_deref(),
+    checkout_requirements(&options, remote),
+  )?;
   if remote {
     return super::update::run_development(home, target, options.hosts, &workspace, options.json)
       .await;
   }
   if options.app {
     return install_app(home, &workspace, options.json).await;
+  }
+  if options.ctream {
+    return super::ctream::install_development(home, &workspace, &options).await;
   }
   let lease_input = options.lease.then(lease_pipe).transpose()?;
   let installation = async {
@@ -110,6 +105,27 @@ pub(super) async fn run(
 
 pub(super) fn in_native_checkout() -> bool {
   checkout_root(None, &[NATIVE_BUILDER]).is_ok()
+}
+
+fn checkout_requirements(options: &DevelopmentArguments, remote: bool) -> &'static [&'static str] {
+  if remote {
+    &["scripts/dev/build-agent-bundle.mts"]
+  } else if options.app {
+    &[
+      "scripts/dev/build-desktop-app.mts",
+      "apps/desktop/src-tauri/tauri.conf.json",
+    ]
+  } else if options.ctream {
+    &[
+      "ctream/preview/Cargo.toml",
+      "ctream/cli/Cargo.toml",
+      "ctream/agent/Cargo.toml",
+    ]
+  } else if options.renew_signing {
+    &["scripts/dev/ctld-signed.mts"]
+  } else {
+    &[NATIVE_BUILDER]
+  }
 }
 
 fn checkout_root(explicit: Option<&Path>, required: &[&str]) -> io::Result<PathBuf> {
@@ -269,6 +285,8 @@ mod tests {
       hosts: vec![],
       workspace: None,
       app: false,
+      ctream: false,
+      ctream_agent_targets: vec![],
       renew_signing: false,
       release: false,
       profile: None,

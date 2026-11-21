@@ -1,14 +1,16 @@
 use super::{
-  Preview, background, drivers, input,
+  Preview, PreviewMode, background, drivers, input,
   requests::{Requests, Scoped},
-  semantic,
+  semantic, view,
 };
 use ctream_client::{Client, transport::Transport};
 use ctream_proto::{
-  CaptureDriverDescriptor, CaptureScope, Display, Session as DisplaySession, Target, Window,
+  CaptureDriverDescriptor, CaptureScope, CaptureSystem, Display, Session as DisplaySession, Target,
+  Window,
 };
 use eframe::egui;
 use std::{
+  collections::{HashMap, hash_map::Entry},
   io,
   sync::{
     Arc,
@@ -92,6 +94,70 @@ fn display_label(session: &DisplaySession) -> String {
   }
 }
 
+struct WindowSource {
+  target: Target,
+  window: Window,
+}
+
+fn window_sources<T: Transport>(
+  client: &Client<T>,
+  targets: Vec<Target>,
+  windows_desktop: bool,
+) -> io::Result<Vec<WindowSource>> {
+  let mut sources = Vec::new();
+  let mut desktop_error = None;
+  let mut error = None;
+  let mut listed = false;
+  let mut desktop_listed = false;
+  let mut legacy_windows = HashMap::new();
+  if windows_desktop {
+    match client.windows(Target::WindowsDesktop) {
+      Ok(windows) => {
+        desktop_listed = true;
+        listed = true;
+        sources.extend(windows.into_iter().map(|window| WindowSource {
+          target: Target::WindowsDesktop,
+          window,
+        }));
+      }
+      Err(err) => desktop_error = Some(err),
+    }
+  }
+  for target in targets {
+    if desktop_listed && matches!(target, Target::Windows(_)) {
+      continue;
+    }
+    match client.windows(target) {
+      Ok(windows) => {
+        listed = true;
+        for window in windows {
+          // A legacy Windows window can move between monitor queries. Its
+          // identity is desktop-wide even when the old request needs a monitor.
+          if matches!(target, Target::Windows(_)) {
+            match legacy_windows.entry(window.id.clone()) {
+              Entry::Occupied(entry) => {
+                sources[*entry.get()] = WindowSource { target, window };
+                continue;
+              }
+              Entry::Vacant(entry) => {
+                entry.insert(sources.len());
+              }
+            }
+          }
+          sources.push(WindowSource { target, window });
+        }
+      }
+      Err(err) => {
+        error.get_or_insert(err);
+      }
+    }
+  }
+  if let Some(error) = error.or(desktop_error).filter(|_| !listed) {
+    return Err(error);
+  }
+  Ok(sources)
+}
+
 /// Setup owns the capture and a separate native viewer temporarily owns control.
 /// Request generations isolate stale queries; Start retains the preview stream.
 pub(super) struct Viewer<T: Transport> {
@@ -104,9 +170,10 @@ pub(super) struct Viewer<T: Transport> {
   window_mode: bool,
   selected_window: Option<String>,
   driver: String,
-  windows: Vec<Window>,
-  window_query: Pending<Vec<Window>>,
+  windows: Vec<WindowSource>,
+  window_query: Pending<Vec<WindowSource>>,
   window_error: Option<String>,
+  source_loaded: bool,
   drivers: Vec<CaptureDriverDescriptor>,
   driver_query: Pending<Catalog>,
   catalog_requests: Option<Requests>,
@@ -124,6 +191,7 @@ pub(super) struct Viewer<T: Transport> {
   control_requests: Option<Requests>,
   viewing: bool,
   viewer_opening: bool,
+  viewer_size: view::AspectResize,
   semantic: Option<semantic::Panel<Scoped<T>>>,
 }
 
@@ -143,12 +211,13 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
       discovery_requests: None,
       discovery_error: None,
       selected,
-      window_mode: window_mode || window.is_some(),
+      window_mode: window_mode || window.is_some() || selected == Some(Target::WindowsDesktop),
       selected_window: window,
       driver,
       windows: Vec::new(),
       window_query: None,
       window_error: None,
+      source_loaded: false,
       drivers: Vec::new(),
       driver_query: None,
       catalog_requests: None,
@@ -166,6 +235,7 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
       control_requests: None,
       viewing: false,
       viewer_opening: false,
+      viewer_size: view::AspectResize::default(),
       semantic: None,
     };
     viewer.discover(ctx);
@@ -185,14 +255,19 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
   }
 
   fn clear_source(&mut self) {
-    self.discard_preview();
+    self.reload_preview();
     self.window_query.take();
-    self.client = None;
-    // Active captures close stdin first. The catalog has its own lifetime so
-    // selecting a source cannot hide other providers or cancel their discovery.
-    self.requests = None;
     self.windows.clear();
     self.window_error = None;
+    self.source_loaded = false;
+  }
+
+  fn reload_preview(&mut self) {
+    self.discard_preview();
+    self.client = None;
+    // Close active captures before cancelling their transport scope.
+    // A pending window query shares this scope until its results arrive.
+    self.requests = None;
   }
 
   fn discover(&mut self, ctx: &egui::Context) {
@@ -231,16 +306,88 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
       return;
     }
     self.clear_source();
-    if self.discovery.is_some() {
+    if self.discovery.is_some() || !self.catalog_ready {
       return;
     }
-    let Some(target) = self.selected else { return };
+    self.source_loaded = true;
+    if !self.available_scopes().contains(&self.scope()) {
+      return;
+    }
+    if self.window_mode {
+      let targets: Vec<_> = self.available_targets().collect();
+      let windows_desktop = self.has_windows_desktop(&targets);
+      if !targets.is_empty() || windows_desktop {
+        self.make_client();
+        let query = self.client.as_ref().unwrap().clone();
+        self.window_query = Some(background(ctx, move || {
+          window_sources(&query, targets, windows_desktop)
+        }));
+      }
+    } else if self.selected.is_none() {
+      let first = self.available_targets().next();
+      self.selected = first;
+    }
+  }
+
+  fn make_client(&mut self) {
     let requests = Requests::new();
     let client = requests.client(Arc::clone(&self.transport));
-    let query = client.clone();
-    self.window_query = Some(background(ctx, move || query.windows(target)));
     self.client = Some(client);
     self.requests = Some(requests);
+  }
+
+  fn available_targets(&self) -> impl Iterator<Item = Target> + '_ {
+    self
+      .displays
+      .iter()
+      .filter(|session| session.selectable)
+      .filter_map(target)
+      .filter(|target| self.compatible(*target))
+  }
+
+  fn has_windows_desktop(&self, targets: &[Target]) -> bool {
+    targets
+      .iter()
+      .any(|target| matches!(target, Target::Windows(_)))
+      || self.drivers.iter().any(|driver| {
+        (self.driver == "auto" || self.driver == driver.info.id)
+          && driver.systems.contains(&CaptureSystem::Windows)
+          && driver.info.scopes.contains(&CaptureScope::Window)
+      })
+  }
+
+  fn use_window_sources(&mut self, windows: Vec<WindowSource>) {
+    let preferred = |source: &&WindowSource| {
+      self.selected.is_none_or(|target| {
+        source.target == target
+          || (matches!(target, Target::Windows(_)) && source.target == Target::WindowsDesktop)
+      })
+    };
+    let selection = if let Some(id) = self.selected_window.as_deref() {
+      windows.iter().find(|source| {
+        source.window.id == id
+          && (preferred(source)
+            || self.selected.is_some_and(|target| {
+              target.system() == CaptureSystem::Windows
+                && source.target.system() == CaptureSystem::Windows
+            }))
+      })
+    } else {
+      windows.iter().find(preferred).or_else(|| windows.first())
+    };
+    if let Some(source) = selection {
+      self.selected = Some(source.target);
+      self.selected_window = Some(source.window.id.clone());
+    }
+    self.windows = windows;
+  }
+
+  fn selected_window(&self) -> Option<&Window> {
+    self.windows.iter().find_map(|source| {
+      (Some(source.target) == self.selected
+        && Some(&source.window.id) == self.selected_window.as_ref())
+      .then_some(&source.window)
+    })
   }
 
   fn scope(&self) -> CaptureScope {
@@ -263,19 +410,26 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
     if self.viewing {
       return;
     }
+    let changed = self.driver != id;
+    let old_scope = self.scope();
     self.driver = id.into();
-    if let Some(driver) = self.drivers.iter().find(|driver| driver.info.id == id) {
+    self.apply_driver_scope();
+    if changed || old_scope != self.scope() {
+      self.selected = None;
+      self.selected_window = None;
+    }
+  }
+
+  fn apply_driver_scope(&mut self) {
+    if let Some(driver) = self
+      .drivers
+      .iter()
+      .find(|driver| driver.info.id == self.driver)
+    {
       match driver.info.scopes.as_slice() {
         [CaptureScope::Display] => self.window_mode = false,
         [CaptureScope::Window] => self.window_mode = true,
         _ => {}
-      }
-      if self
-        .selected
-        .is_some_and(|target| !driver.systems.contains(&target.system()))
-      {
-        self.selected = None;
-        self.selected_window = None;
       }
     }
   }
@@ -311,15 +465,33 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
         None => return Some("This agent does not offer the selected driver. Choose another driver.".into()),
       }
     }
+    if self.window_mode {
+      if let Some(error) = &self.window_error {
+        return Some(error.clone());
+      }
+      if self.window_query.is_some() {
+        return Some("Finding windows…".into());
+      }
+      if self.selected_window().is_none() {
+        return Some(
+          if self.selected_window.is_some() {
+            "The requested window is unavailable. Choose another window."
+          } else if self.windows.is_empty() {
+            if self.available_targets().next().is_none() && !self.has_windows_desktop(&[]) {
+              "No compatible sources are available for this driver."
+            } else {
+              "No capturable windows found."
+            }
+          } else {
+            "Choose a window."
+          }
+          .into(),
+        );
+      }
+    }
     let Some(selected) = self.selected else {
       return Some(
-        if self
-          .displays
-          .iter()
-          .filter(|session| session.selectable)
-          .filter_map(target)
-          .any(|target| self.compatible(target))
-        {
+        if self.available_targets().next().is_some() {
           "Choose a source for this driver."
         } else {
           "No compatible sources are available for this driver."
@@ -333,34 +505,13 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
     if self.driver != "auto" && !self.selected_catalog_supported() {
       return Some("This source cannot select an explicit driver with the current agent.".into());
     }
-    if !self
-      .displays
-      .iter()
-      .any(|session| session.selectable && target(session) == Some(selected))
+    if !self.window_mode
+      && !self
+        .displays
+        .iter()
+        .any(|session| session.selectable && target(session) == Some(selected))
     {
       return Some("This display is not available to the agent.".into());
-    }
-    if self.window_mode {
-      if let Some(error) = &self.window_error {
-        return Some(error.clone());
-      }
-      if self.window_query.is_some() {
-        return Some("Finding windows…".into());
-      }
-      if !self
-        .windows
-        .iter()
-        .any(|window| Some(&window.id) == self.selected_window.as_ref())
-      {
-        return Some(
-          if self.windows.is_empty() {
-            "No capturable windows found."
-          } else {
-            "Choose a window."
-          }
-          .into(),
-        );
-      }
     }
     None
   }
@@ -379,16 +530,13 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
       ctx.request_repaint_after(self.preview_after.saturating_duration_since(Instant::now()));
       return;
     }
-    let Some(client) = &self.client else { return };
+    if self.client.is_none() {
+      self.make_client();
+    }
+    let client = self.client.as_ref().unwrap();
     let window = self
       .window_mode
-      .then(|| {
-        self
-          .windows
-          .iter()
-          .find(|window| Some(&window.id) == self.selected_window.as_ref())
-          .cloned()
-      })
+      .then(|| self.selected_window().cloned())
       .flatten();
     let session = client.session(self.selected.expect("selected display"), window);
     // A catalog failure retains a legacy Auto path. Explicit choices
@@ -406,30 +554,13 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
     if let Some(result) = receive(&mut self.discovery) {
       self.discovery_requests = None;
       match result {
-        Ok(displays) => {
-          self.displays = displays;
-          if self.selected.is_some_and(|selected| {
-            !self
-              .displays
-              .iter()
-              .any(|session| session.selectable && target(session) == Some(selected))
-          }) {
-            self.clear_source();
-            self.selected = None;
-            self.selected_window = None;
-            self.discovery_error =
-              Some("The requested display is unavailable. Choose another display.".into());
-          }
-          if self.selected.is_some() {
-            self.load_target(ctx);
-          }
-        }
+        Ok(displays) => self.displays = displays,
         Err(error) => self.discovery_error = Some(format!("Cannot discover displays: {error}")),
       }
     }
     if let Some(result) = receive(&mut self.window_query) {
       match result {
-        Ok(windows) => self.windows = windows,
+        Ok(windows) => self.use_window_sources(windows),
         Err(error) => self.window_error = Some(format!("Cannot list windows: {error}")),
       }
     }
@@ -443,7 +574,6 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
           if !self.drivers.is_empty() {
             self.driver_error = None;
           }
-          let before = (self.selected, self.window_mode);
           // Metadata may narrow an unqualified source to a window. It must not
           // widen a requested window into whole-display capture: only an
           // explicit card click can change that intent.
@@ -452,10 +582,7 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
               driver.info.id == self.driver && driver.info.scopes.contains(&CaptureScope::Window)
             })
           {
-            self.choose_driver(&self.driver.clone());
-          }
-          if self.discovery.is_none() && before != (self.selected, self.window_mode) {
-            self.load_target(ctx);
+            self.apply_driver_scope();
           }
         }
         Err(error) => {
@@ -504,6 +631,9 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
       }
     }
     if !self.viewing {
+      if !self.source_loaded && self.catalog_ready && self.discovery.is_none() {
+        self.load_target(ctx);
+      }
       self.connect_preview(ctx);
     }
   }
@@ -521,13 +651,7 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
     let client = requests.client(Arc::clone(&self.transport));
     let window = self
       .window_mode
-      .then(|| {
-        self
-          .windows
-          .iter()
-          .find(|window| Some(&window.id) == self.selected_window.as_ref())
-          .cloned()
-      })
+      .then(|| self.selected_window().cloned())
       .flatten();
     let session = client.session(target, window);
     self.viewing = true;
@@ -563,12 +687,9 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
   }
 
   fn selectors(&mut self, ui: &mut egui::Ui) -> (bool, bool) {
-    let before_display = self.selected;
-    let before = (
-      self.window_mode,
-      self.selected_window.clone(),
-      self.driver.clone(),
-    );
+    let before_source = (self.selected, self.selected_window.clone());
+    let before_driver = self.driver.clone();
+    let before_scope = self.scope();
     ui.label(
       egui::RichText::new("CAPTURE DRIVER")
         .small()
@@ -600,19 +721,44 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
     // a second choice; selecting a single-scope provider sets it directly.
     let scopes = self.available_scopes();
     if scopes.contains(&CaptureScope::Display) && scopes.contains(&CaptureScope::Window) {
+      let previous = self.window_mode;
       ui.horizontal(|ui| {
         ui.selectable_value(&mut self.window_mode, false, "Display");
         ui.selectable_value(&mut self.window_mode, true, "Window");
       });
+      if previous != self.window_mode {
+        self.selected = None;
+        self.selected_window = None;
+      }
       ui.add_space(8.0);
     }
+    if self.window_mode {
+      self.window_picker(ui);
+    } else {
+      self.display_picker(ui);
+    }
+    let refresh = self.window_mode && {
+      ui.add_space(16.0);
+      ui.add_enabled(
+        self.discovery.is_none() && self.catalog_ready,
+        egui::Button::new("Refresh windows"),
+      )
+      .clicked()
+    };
+    (
+      refresh || before_driver != self.driver || before_scope != self.scope(),
+      before_source != (self.selected, self.selected_window.clone()),
+    )
+  }
+
+  fn display_picker(&mut self, ui: &mut egui::Ui) {
     ui.label("Display / session");
     let label = self
       .displays
       .iter()
       .find(|session| session.selectable && target(session) == self.selected)
       .map(display_label)
-      .unwrap_or_else(|| "Choose a source…".into());
+      .unwrap_or_else(|| "Choose a display…".into());
     egui::ComboBox::from_id_salt("display")
       .selected_text(label)
       .truncate()
@@ -631,55 +777,42 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
           }
         }
       });
-    if self.window_mode {
-      ui.add_space(10.0);
-      ui.label("Window");
-      let label = self
-        .windows
-        .iter()
-        .find(|window| Some(&window.id) == self.selected_window.as_ref())
-        .map(|window| {
-          if window.title.is_empty() {
-            window.app_id.clone()
-          } else {
-            window.title.clone()
-          }
-        })
-        .unwrap_or_else(|| "Choose a window…".into());
-      egui::ComboBox::from_id_salt("window")
-        .selected_text(label)
-        .truncate()
-        .width(ui.available_width())
-        .show_ui(ui, |ui| {
-          for window in &self.windows {
-            let label = if window.title.is_empty() {
-              &window.app_id
-            } else {
-              &window.title
-            };
-            ui.selectable_value(&mut self.selected_window, Some(window.id.clone()), label)
-              .on_hover_text(&window.app_id);
-          }
-        });
+  }
+
+  fn window_picker(&mut self, ui: &mut egui::Ui) {
+    fn name(window: &Window) -> &str {
+      if window.title.is_empty() {
+        &window.app_id
+      } else {
+        &window.title
+      }
     }
-    ui.add_space(16.0);
-    let refresh = ui
-      .add_enabled(
-        self.selected.is_some(),
-        egui::Button::new("Refresh source list"),
-      )
-      .clicked();
-    let display_changed = before_display != self.selected;
-    let changed = before
-      != (
-        self.window_mode,
-        self.selected_window.clone(),
-        self.driver.clone(),
-      );
-    if display_changed {
-      self.selected_window = None;
+
+    ui.label("Window");
+    let label = self.selected_window().map_or("Choose a window…", name);
+    let mut choice = None;
+    egui::ComboBox::from_id_salt("window")
+      .selected_text(label)
+      .truncate()
+      .width(ui.available_width())
+      .show_ui(ui, |ui| {
+        for source in &self.windows {
+          let active = self.selected == Some(source.target)
+            && self.selected_window.as_ref() == Some(&source.window.id);
+          if ui
+            .selectable_label(active, name(&source.window))
+            .on_hover_text(&source.window.app_id)
+            .clicked()
+            && !active
+          {
+            choice = Some((source.target, source.window.id.clone()));
+          }
+        }
+      });
+    if let Some((target, id)) = choice {
+      self.selected = Some(target);
+      self.selected_window = Some(id);
     }
-    (display_changed || refresh, changed)
   }
 
   fn show_setup(&mut self, ctx: &egui::Context) {
@@ -770,9 +903,17 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
           egui::vec2(ui.available_width(), preview_height),
           egui::Sense::hover(),
         );
-        ui.painter()
-          .rect_filled(preview_rect, 8.0, egui::Color32::from_rgb(14, 17, 23));
-        let inner = preview_rect.shrink(12.0);
+        let inner = if self
+          .preview
+          .as_ref()
+          .is_some_and(|preview| preview.texture.is_some())
+        {
+          preview_rect
+        } else {
+          ui.painter()
+            .rect_filled(preview_rect, 8.0, egui::Color32::from_rgb(14, 17, 23));
+          preview_rect.shrink(12.0)
+        };
         {
           // The parent already reserved this rectangle; a child must not move
           // its cursor back inside the pane when it finishes painting.
@@ -780,7 +921,7 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
           let ui = &mut preview_ui;
           ui.set_clip_rect(inner.intersect(ui.clip_rect()));
           if let Some(preview) = &mut self.preview {
-            preview.show(ui, self.preview_error.as_deref(), &[], false);
+            preview.show(ui, self.preview_error.as_deref(), &[], PreviewMode::Setup);
           } else {
             ui.centered_and_justified(|ui| {
               ui.vertical_centered(|ui| {
@@ -823,34 +964,52 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
     });
     if refresh {
       self.discover(ctx);
-    } else if reload || changed {
+    } else if reload {
       self.load_target(ctx);
+    } else if changed {
+      self.reload_preview();
     } else if start {
       self.start(ctx);
     }
   }
 
   fn show_viewer(&mut self, ctx: &egui::Context) {
-    egui::TopBottomPanel::top("viewer_navigation").show(ctx, |ui| {
-      ui.horizontal(|ui| {
-        ui.label(if self.control.is_some() {
-          "Enabling control…"
-        } else if self
-          .preview
-          .as_ref()
-          .is_some_and(|preview| preview.input.is_some())
-        {
-          "Control enabled"
-        } else {
-          "View only"
-        });
-        if let Some(preview) = &self.preview {
-          ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.small(preview.driver.as_deref().unwrap_or("agent default"));
+    egui::TopBottomPanel::top("viewer_navigation")
+      .exact_height(view::TOOLBAR_HEIGHT)
+      .show(ctx, |ui| {
+        ui.horizontal_centered(|ui| {
+          let input_error = self
+            .preview
+            .as_ref()
+            .and_then(|preview| preview.input_error.as_deref());
+          if let Some(error) = self.preview_error.as_deref().or(input_error) {
+            ui.add(
+              egui::Label::new(egui::RichText::new(error).color(ui.visuals().error_fg_color))
+                .truncate(),
+            )
+            .on_hover_text(error);
+            return;
+          }
+          ui.label(if self.control.is_some() {
+            "Enabling control…"
+          } else if self
+            .preview
+            .as_ref()
+            .is_some_and(|preview| preview.input.is_some())
+          {
+            "Control enabled"
+          } else {
+            "View only"
           });
-        }
+          if let Some(preview) = &self.preview {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+              let driver = preview.driver.as_deref().unwrap_or("agent default");
+              ui.add(egui::Label::new(egui::RichText::new(driver).small()).truncate())
+                .on_hover_text(driver);
+            });
+          }
+        });
       });
-    });
     let frame_size = self
       .preview
       .as_ref()
@@ -859,8 +1018,13 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
     if let Some(semantic) = &mut self.semantic {
       semantic.show(ctx, frame_size);
     }
-    egui::CentralPanel::default().show(ctx, |ui| {
-      if let Some(preview) = &mut self.preview {
+    let video = ctx.available_rect().size();
+    egui::CentralPanel::default()
+      .frame(egui::Frame::NONE)
+      .show(ctx, |ui| {
+        let Some(preview) = &mut self.preview else {
+          return;
+        };
         let elements = self
           .semantic
           .as_ref()
@@ -870,18 +1034,36 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
           ui,
           self.preview_error.as_deref(),
           elements,
-          self.control.is_none(),
+          PreviewMode::Viewer {
+            interactive: self.control.is_none(),
+          },
         );
-      }
-    });
+        if let Some(size) = preview.image_size() {
+          self.viewer_size.update(ctx, size, video);
+        }
+      });
   }
 
   fn show_viewer_window(&mut self, ctx: &egui::Context) {
-    let builder = egui::ViewportBuilder::default()
+    let mut builder = egui::ViewportBuilder::default()
       .with_title("ctream viewer")
-      .with_inner_size([1100.0, 720.0])
-      .with_min_inner_size([600.0, 400.0])
+      .with_min_inner_size(view::MIN_WINDOW)
       .with_active(true);
+    if self.viewer_opening {
+      let image = self
+        .preview
+        .as_ref()
+        .and_then(Preview::image_size)
+        .unwrap_or([16, 9]);
+      let sidebar = if self.semantic.is_some() {
+        semantic::PANEL_WIDTH
+      } else {
+        0.0
+      };
+      let monitor = ctx.input(|input| input.viewport().monitor_size);
+      builder = builder.with_inner_size(view::initial_window(image, sidebar, monitor));
+      self.viewer_size = view::AspectResize::default();
+    }
     ctx.show_viewport_immediate(viewer_id(), builder, |child, class| {
       if class == egui::ViewportClass::Embedded {
         self.close_viewer(child);
@@ -907,7 +1089,11 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
     });
   }
 
-  fn update_ui(&mut self, ctx: &egui::Context) {
+  pub(super) fn is_viewing(&self) -> bool {
+    self.viewing
+  }
+
+  pub(super) fn update_ui(&mut self, ctx: &egui::Context) {
     if ctx.input(|input| input.viewport().close_requested()) {
       self.shutdown();
       return;

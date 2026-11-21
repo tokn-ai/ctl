@@ -8,6 +8,10 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+ctl-bundle.workspace = true
 ctream-proto.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+process-wrap = { version = "10.0.0", default-features = false, features = ["std", "job-object"] }

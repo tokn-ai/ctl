@@ -160,11 +160,16 @@ sets that scope directly; only Automatic and drivers supporting both scopes
 need an additional source-type choice. A live preview shows the selection
 before control begins.
 Target arguments preselect the welcome controls; they do not bypass Start.
+Choosing a driver or changing its source type selects the first available
+source and starts a view-only preview. Window sources appear in one picker
+across the sessions supported by the driver. Titles use the viewer machine's
+installed font fallbacks.
 An incompatible window preselection stays an error until an explicit driver
 choice changes its scope; catalog discovery never widens it to display capture.
-With no arguments the welcome window uses the local agent. Existing `--host`,
-`--agent`, `--ssh-program`, and `--ssh-arg` options configure its endpoint;
-this step does not add an endpoint editor. `--capture-driver ID` preselects
+With no arguments the welcome window lists saved workspace hosts. Use `--local`
+to open a local agent directly. The `--host`, `--agent`, `--ssh-program`, and
+`--ssh-arg` options can still launch a manually installed remote agent.
+`--capture-driver ID` preselects
 an explicit provider, while omission selects **Auto**.
 
 The welcome preview opens capture only. Pointer movement, clicks, scrolling,
@@ -176,8 +181,10 @@ viewer is open. A view-only source can still open in the viewer. Input
 initialization failure is reported without discarding a usable capture stream.
 Closing the viewer with its native window close control releases input,
 restores and activates setup, and keeps the same stream available as a view-only
-preview. There is no Back button. The two windows keep their own dimensions;
-the setup window is not resized into the viewer.
+preview. The viewer opens at the source aspect ratio and adjusts its inner
+size after a source resize or a manual window resize. The video fills the
+canvas, with the toolbar and inspector outside it. The compositor can
+constrain window sizes, especially when maximized or fullscreen.
 
 Both windows use the same egui context and wgpu renderer. The native viewer is
 an immediate child viewport, so its events and repaint requests run through
@@ -214,11 +221,62 @@ Protocol changes: none. The separate-window lifecycle keeps `ctream_agent`
 at 1.0.8 (build 8); capture and input operations, handshakes, and transport
 behavior retain their existing contracts.
 
+### Workspace hosts
+
+Install and open ctream with `ctlup`:
+
+```sh
+ctlup ctream install
+ctlup ctream run
+```
+
+Install and update use the latest successful **ctream preview bundles** workflow
+on `main`. Automatic downloads require the GitHub CLI (`gh`) with an authenticated
+session. Use `--run RUN_ID` for a specific successful run from the official
+repository or `--from ctream-preview-<target>.zip` for offline installation.
+Use `ctlup ctream update` to select a newer bundle, `ctlup ctream status` to see
+the active build, and `ctlup ctream cli -- list` to invoke the CLI. Preview flags
+can be passed with `ctlup ctream run -- OPTIONS`.
+
+Local builds are installed under `~/.tokn/ctl/ctream/installs` (or
+`$CTL_DATA_DIR/ctream/installs`). The viewer and its `ctream-agents` directory
+stay together. `ctl-bundle` defines the layout used by the preview, development
+builder, CI packer, and installer. For a manual install, extract the ZIP and run
+`ctream-preview` directly. Keep `ctl` available on `PATH` or beside the preview.
+For a host that needs an interactive SSH prompt, launch the viewer from a
+terminal or connect the host in ctl first.
+
+1. Select a saved host and click **Connect**. For a Windows desktop, select its
+   WSL SSH endpoint. The viewer detects the platform, syncs a matching agent
+   over the saved route, and verifies it can launch before loading sources.
+2. Choose the capture driver and source and check its live preview. Click
+   **Start** to open the viewer and enable control for supported sources.
+3. Close the viewer to return to setup. **Change host** returns to the workspace
+   list.
+
+The archives include agents for x86-64 Windows and x86-64/ARM64 Linux. The
+workflow produces viewer packages for Apple Silicon macOS, x86-64 Linux, and
+x86-64 Windows. The
+Linux Wayland helper binaries require glibc 2.35 or later and the input helper
+uses the system `libxkbcommon`. Capture providers still need their platform
+dependencies and access to the graphical session.
+
+For development, use `ctlup dev --ctream` with `--agent-target` for each remote
+platform you need. See [ctream development builds](../local-bundles.md#install-a-ctream-development-build).
+A direct `cargo run -p ctream-preview` can also find agents built in Cargo's
+target directories. The workspace picker uses ctl's saved-host CLI. The remote
+ctream agent is a standalone process started over SSH for each operation. The preview
+saves synchronized agents under `~/.tokn/ctl/ctream/agents` on remote Linux
+hosts, honoring an absolute `CTL_DATA_DIR` in the remote environment.
+
 ### Windows through a WSL endpoint
 
-Build `ctream-agent.exe` on Windows with `cargo build --release -p ctream-agent`.
-Place it in a user-owned Windows directory that WSL can access. A Windows binary
-is required: a Linux agent running in WSL does not use the native Windows drivers.
+The workspace host flow saves `ctream-agent.exe` under `.tokn/ctl/ctream/agents`
+in the native Windows user's profile, accessed from WSL. For a manual install,
+build the executable on Windows with
+`cargo build --release -p ctream-agent` and place it in a user-owned Windows
+directory that WSL can access. A Windows binary is required for the native
+capture and input drivers.
 The WSL SSH endpoint launches the executable through interop and carries the
 same binary stdio protocol. The agent must reach the intended interactive
 Windows session. Direct Windows OpenSSH launches in session 0 did not expose
@@ -318,10 +376,10 @@ graphical session. Test consent, cancellation, and session closure.
 
 Install the window helper on the remote host with
 `cargo install --locked --path ctream/wayland-input --bin ctream-wayland-window --root ~/.local`.
-Choose a window source in the welcome window for an X11, Wayland, or Windows
-display, or launch the viewer with `HOST DISPLAY --windows` to preselect
-window selection. The separate
-window helper is only required for the Wayland backend.
+Choose a window driver in the welcome window or launch the viewer with
+`HOST --windows` to open the window picker. X11 and Wayland windows retain
+their originating session internally. The separate window helper is only
+required for the Wayland backend.
 
 From the CLI, run `ctream windows DISPLAY` on the display host, or
 `ctream --host SSH_HOST windows DISPLAY` to query through the remote agent.
@@ -350,13 +408,14 @@ covered, and the stream pauses while the window is unmapped. The X11 window
 preview is view-only. A Wayland session may also offer window selection
 through the ScreenCast portal when its backend advertises that source type.
 
-On Windows, enumerate visible top-level windows on the selected monitor and
-capture a chosen window through Windows Graphics Capture (Windows 10 1903 or
-newer). The stream follows resizing and remains bound to the window when another
-window covers it. Minimizing requires restoring and reconnecting; closing the
-window ends capture. The provider keeps the operating system's capture border.
-Discovery selects the display with greatest window overlap; an established
-window stream can follow it to another display.
+On Windows, the desktop-wide target in `ctream_agent` 1.0.9 enumerates visible
+top-level windows across monitors. Use `ctream --host SSH_HOST windows windows`
+to query that target from the CLI. Older agents use monitor-scoped queries, and
+the preview combines their results into one picker. Windows Graphics Capture
+(Windows 10 1903 or newer) follows resizing and remains bound to the window
+when it moves across monitors or another window covers it. Minimizing requires
+restoring and reconnecting, and closing the window ends capture. The provider
+keeps the operating system's capture border.
 
 Windows window input uses physical DWM frame bounds shared with capture.
 The viewer maps its fitted image into those bounds after resizing. An explicit

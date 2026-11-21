@@ -45,6 +45,7 @@ until each package is available in the registry before its dependants:
 
 ```text
 tokn-ctl-core
+ctl-bundle
 ctl-keychain-client
 ctmux-process-info
 ctl-proto

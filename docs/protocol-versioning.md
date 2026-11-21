@@ -659,6 +659,20 @@ discover providers for systems with no discovered session. Older agents still
 support Automatic through retained capture operations. Input, capture frame
 formats, other named protocols, and product release versions are unchanged.
 
+Desktop-wide Windows window selection advances `ctream_agent` from `1.0.8`
+(build 8) to `1.0.9` (build 9). The `windows` target names the current Windows
+desktop for window listing, capture, and input. `1.0.9 windows windows` returns
+the same window records as the monitor-scoped operation. Capture and input
+use the selected window ID regardless of monitor. `1.0.9 capture-drivers windows`
+lists providers for this target using the existing target-specific reply, and
+`1.0.9 capture-with-driver windows DRIVER WINDOW` uses the existing startup
+handshake. Whole-display capture/input still require `windows-N`.
+
+Contracts `1.0.1`–`1.0.8` keep their request and response shapes, including
+`1.0.8 capture-drivers` and the monitor-specific `windows-N` operations. Clients
+can still query and open per-monitor windows with older agents. Frame formats,
+input events, other named protocols, and product release versions are unchanged.
+
 Every PR description must state its protocol changes, or **None** when there
 are no changes. Include the previous and new contracts and the compatibility
 impact. Keep PR titles brief; put protocol details in the description.

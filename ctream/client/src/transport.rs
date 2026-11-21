@@ -1,8 +1,11 @@
+#[cfg(target_os = "linux")]
+use ctl_bundle::ctream::AGENT_DIRECTORY;
+use ctl_bundle::ctream::AgentTarget;
 use std::{
   ffi::OsString,
   io::{self, Read},
-  path::PathBuf,
-  process::{Child, ChildStdin, ChildStdout, Command, Stdio},
+  path::{Path, PathBuf},
+  process::{ChildStderr, ChildStdin, ChildStdout, Command, ExitStatus, Stdio},
   sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
@@ -10,6 +13,79 @@ use std::{
   thread,
   time::{Duration, Instant},
 };
+
+#[cfg(windows)]
+use process_wrap::std::{ChildWrapper, CommandWrap, JobObject};
+
+/// A subprocess whose Windows SSH descendants are owned together with its launcher.
+pub struct ChildProcess {
+  #[cfg(windows)]
+  child: Box<dyn ChildWrapper>,
+  #[cfg(not(windows))]
+  child: std::process::Child,
+}
+
+impl ChildProcess {
+  pub fn spawn(command: Command) -> io::Result<Self> {
+    #[cfg(windows)]
+    let child = CommandWrap::from(command).wrap(JobObject).spawn()?;
+    #[cfg(not(windows))]
+    let child = {
+      let mut command = command;
+      command.spawn()?
+    };
+    Ok(Self { child })
+  }
+
+  pub fn take_stdin(&mut self) -> Option<ChildStdin> {
+    #[cfg(windows)]
+    return self.child.stdin().take();
+    #[cfg(not(windows))]
+    self.child.stdin.take()
+  }
+
+  pub fn take_stdout(&mut self) -> Option<ChildStdout> {
+    #[cfg(windows)]
+    return self.child.stdout().take();
+    #[cfg(not(windows))]
+    self.child.stdout.take()
+  }
+
+  pub fn take_stderr(&mut self) -> Option<ChildStderr> {
+    #[cfg(windows)]
+    return self.child.stderr().take();
+    #[cfg(not(windows))]
+    self.child.stderr.take()
+  }
+
+  pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+    #[cfg(windows)]
+    return self.child.inner_mut().try_wait();
+    #[cfg(not(windows))]
+    self.child.try_wait()
+  }
+
+  pub fn wait(&mut self) -> io::Result<ExitStatus> {
+    #[cfg(windows)]
+    return self.child.inner_mut().wait();
+    #[cfg(not(windows))]
+    self.child.wait()
+  }
+
+  pub fn kill(&mut self) -> io::Result<()> {
+    #[cfg(windows)]
+    return self.child.start_kill();
+    #[cfg(not(windows))]
+    self.child.kill()
+  }
+}
+
+#[cfg(windows)]
+impl Drop for ChildProcess {
+  fn drop(&mut self) {
+    let _ = self.child.start_kill();
+  }
+}
 
 pub struct Channel<R, W> {
   pub reader: R,
@@ -45,7 +121,7 @@ impl Cancellation {
 }
 
 struct Process {
-  child: Mutex<Child>,
+  child: Mutex<ChildProcess>,
   closing: AtomicBool,
 }
 
@@ -113,6 +189,7 @@ pub struct Ssh(pub String);
 pub struct AgentLaunch {
   executable: String,
   search_user_bin: bool,
+  sibling_tools: bool,
 }
 
 impl Default for AgentLaunch {
@@ -120,6 +197,7 @@ impl Default for AgentLaunch {
     Self {
       executable: "ctream-agent".into(),
       search_user_bin: true,
+      sibling_tools: false,
     }
   }
 }
@@ -136,11 +214,28 @@ impl AgentLaunch {
     Ok(Self {
       executable,
       search_user_bin: false,
+      sibling_tools: false,
     })
   }
 
+  /// Prefer tools installed beside an absolute executable on the remote host.
+  pub fn with_sibling_tools(mut self) -> Self {
+    self.sibling_tools = true;
+    self
+  }
+
   fn command(&self, arguments: &[String]) -> String {
-    let mut command = if self.search_user_bin {
+    let sibling = self
+      .sibling_tools
+      .then(|| self.executable.rsplit_once('/'))
+      .flatten()
+      .filter(|(dir, _)| dir.starts_with('/'));
+    let mut command = if let Some((dir, _)) = sibling {
+      format!(
+        r#"exec env PATH={}:"$PATH:$HOME/.local/bin" "#,
+        shell_argument(dir)
+      )
+    } else if self.search_user_bin {
       r#"exec env PATH="$PATH:$HOME/.local/bin" "#.to_owned()
     } else {
       "exec ".to_owned()
@@ -154,12 +249,18 @@ impl AgentLaunch {
   }
 }
 
+enum SshLauncher {
+  OpenSsh,
+  Compatible,
+  CtlWorkspace,
+}
+
 /// SSH-compatible subprocess with an explicit executable and argument prefix.
 pub struct SshCommand {
   destination: String,
   program: PathBuf,
   prefix_arguments: Vec<OsString>,
-  standard_options: bool,
+  launcher: SshLauncher,
   agent: AgentLaunch,
 }
 
@@ -169,7 +270,7 @@ impl SshCommand {
       destination: destination.into(),
       program: PathBuf::from("ssh"),
       prefix_arguments: Vec::new(),
-      standard_options: true,
+      launcher: SshLauncher::OpenSsh,
       agent: AgentLaunch::default(),
     }
   }
@@ -178,8 +279,17 @@ impl SshCommand {
   /// authentication and connection policy remains in control of the launcher.
   pub fn with_program(mut self, program: PathBuf) -> Self {
     self.program = program;
-    self.standard_options = false;
+    self.launcher = SshLauncher::Compatible;
     self
+  }
+
+  /// Resolve the destination strictly as a saved host through ctl's workspace.
+  pub fn ctl_host(host_id: impl Into<String>, program: PathBuf) -> Self {
+    Self {
+      program,
+      launcher: SshLauncher::CtlWorkspace,
+      ..Self::new(host_id)
+    }
   }
 
   pub fn with_arguments(mut self, arguments: Vec<OsString>) -> Self {
@@ -204,13 +314,25 @@ impl SshCommand {
       ));
     }
     let mut command = Command::new(&self.program);
-    command.args(&self.prefix_arguments).arg("-T");
-    if self.standard_options {
-      command.args(["-C", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "--"]);
+    command.args(&self.prefix_arguments);
+    if matches!(self.launcher, SshLauncher::CtlWorkspace) {
+      command.args([
+        "-H",
+        &self.destination,
+        "--remote-platform",
+        "unix",
+        "exec",
+        "sh",
+        "-c",
+      ]);
+    } else {
+      command.arg("-T");
+      if matches!(self.launcher, SshLauncher::OpenSsh) {
+        command.args(["-C", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "--"]);
+      }
+      command.arg(&self.destination);
     }
-    command
-      .arg(&self.destination)
-      .arg(self.agent.command(arguments));
+    command.arg(self.agent.command(arguments));
     Ok(command)
   }
 }
@@ -223,13 +345,41 @@ pub struct Local {
 impl Default for Local {
   fn default() -> Self {
     let name = format!("ctream-agent{}", std::env::consts::EXE_SUFFIX);
-    let agent = std::env::current_exe()
-      .ok()
-      .map(|executable| executable.with_file_name(&name))
-      .filter(|agent| agent.is_file())
-      .unwrap_or_else(|| PathBuf::from(name));
+    let executable = std::env::current_exe().ok();
+    let agent = local_agent(executable.as_deref(), &name, AgentTarget::native());
     Self { agent }
   }
+}
+
+fn local_agent(
+  executable: Option<&Path>,
+  name: &str,
+  bundle_target: Option<AgentTarget>,
+) -> PathBuf {
+  if let Some(viewer_directory) = executable.and_then(Path::parent) {
+    let sibling = viewer_directory.join(name);
+    if sibling.is_file() {
+      return sibling;
+    }
+    if let Some(target) = bundle_target {
+      let bundled = target.directory(viewer_directory).join(target.agent());
+      if bundled.is_file() {
+        return bundled;
+      }
+    }
+  }
+  name.into()
+}
+
+#[cfg(target_os = "linux")]
+fn packaged_tools(agent: &Path) -> Option<&Path> {
+  let target = AgentTarget::native()?;
+  let directory = agent.parent()?;
+  (agent.is_absolute()
+    && agent.file_name()? == target.agent()
+    && directory.file_name()? == target.triple()
+    && directory.parent()?.file_name()? == AGENT_DIRECTORY)
+    .then_some(directory)
 }
 
 pub struct ProcessReader {
@@ -257,13 +407,11 @@ impl Drop for ProcessReader {
   }
 }
 
-fn spawn(command: &mut Command) -> io::Result<Channel<ProcessReader, ChildStdin>> {
-  let mut child = command
-    .stdin(Stdio::piped())
-    .stdout(Stdio::piped())
-    .spawn()?;
-  let writer = child.stdin.take().expect("piped agent input");
-  let stdout = child.stdout.take().expect("piped agent output");
+fn spawn(mut command: Command) -> io::Result<Channel<ProcessReader, ChildStdin>> {
+  command.stdin(Stdio::piped()).stdout(Stdio::piped());
+  let mut child = ChildProcess::spawn(command)?;
+  let writer = child.take_stdin().expect("piped agent input");
+  let stdout = child.take_stdout().expect("piped agent output");
   let process = Arc::new(Process {
     child: Mutex::new(child),
     closing: AtomicBool::new(false),
@@ -294,7 +442,7 @@ impl Transport for SshCommand {
   type Writer = ChildStdin;
 
   fn open(&self, arguments: &[String]) -> io::Result<Channel<Self::Reader, Self::Writer>> {
-    spawn(&mut self.command(arguments)?)
+    spawn(self.command(arguments)?)
   }
 }
 
@@ -303,7 +451,18 @@ impl Transport for Local {
   type Writer = ChildStdin;
 
   fn open(&self, arguments: &[String]) -> io::Result<Channel<Self::Reader, Self::Writer>> {
-    spawn(Command::new(&self.agent).args(arguments))
+    let mut command = Command::new(&self.agent);
+    command.args(arguments);
+    #[cfg(target_os = "linux")]
+    if let Some(tools) = packaged_tools(&self.agent) {
+      let inherited = std::env::var_os("PATH").unwrap_or_else(|| "/bin:/usr/bin".into());
+      let paths = std::iter::once(tools.to_path_buf()).chain(std::env::split_paths(&inherited));
+      command.env(
+        "PATH",
+        std::env::join_paths(paths).map_err(io::Error::other)?,
+      );
+    }
+    spawn(command)
   }
 }
 
@@ -312,6 +471,32 @@ mod tests {
   use super::*;
   #[cfg(unix)]
   use std::io::Write;
+
+  #[test]
+  fn local_agent_prefers_a_sibling_then_the_native_bundle_then_path() {
+    let dir =
+      std::env::temp_dir().join(format!("ctream-local-agent-fixture-{}", std::process::id()));
+    let executable = dir.join("ctream-preview");
+    let name = "ctream-agent.exe";
+    let target = AgentTarget::WindowsX64;
+    let bundled_dir = dir.join("ctream-agents/x86_64-pc-windows-msvc");
+    std::fs::create_dir(&dir).unwrap();
+    std::fs::create_dir_all(&bundled_dir).unwrap();
+
+    assert_eq!(
+      local_agent(Some(&executable), name, Some(target)),
+      Path::new(name)
+    );
+    let bundled = bundled_dir.join(name);
+    std::fs::write(&bundled, []).unwrap();
+    assert_eq!(local_agent(Some(&executable), name, Some(target)), bundled);
+    assert_eq!(local_agent(Some(&executable), name, None), Path::new(name));
+
+    let sibling = dir.join(name);
+    std::fs::write(&sibling, []).unwrap();
+    assert_eq!(local_agent(Some(&executable), name, Some(target)), sibling);
+    std::fs::remove_dir_all(dir).unwrap();
+  }
 
   #[test]
   fn shell_arguments_preserve_metacharacters_as_literal_text() {
@@ -365,6 +550,36 @@ mod tests {
       .unwrap();
     assert!(output.status.success());
     assert_eq!(output.stdout, b"a'b $(printf unexpected); literal");
+  }
+
+  #[test]
+  fn workspace_agent_uses_saved_host_resolution_and_sibling_tools() {
+    let command = SshCommand::ctl_host("saved-id", "ctl".into())
+      .with_agent(
+        AgentLaunch::executable("/simulated home/agent's bin/ctream-agent")
+          .unwrap()
+          .with_sibling_tools(),
+      )
+      .command(&["1.0.8".into(), "discover".into()])
+      .unwrap();
+    assert_eq!(command.get_program(), "ctl");
+    let arguments = command.get_args().collect::<Vec<_>>();
+    assert_eq!(
+      arguments[..7],
+      [
+        "-H",
+        "saved-id",
+        "--remote-platform",
+        "unix",
+        "exec",
+        "sh",
+        "-c"
+      ]
+    );
+    assert_eq!(
+      arguments[7],
+      r#"exec env PATH='/simulated home/agent'\''s bin':"$PATH:$HOME/.local/bin" '/simulated home/agent'\''s bin/ctream-agent' '1.0.8' 'discover'"#
+    );
   }
 
   #[cfg(unix)]

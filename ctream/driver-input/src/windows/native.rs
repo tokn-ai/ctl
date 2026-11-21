@@ -51,6 +51,14 @@ pub struct WindowInput {
   target: WindowTarget,
 }
 
+impl WindowInput {
+  pub fn open_desktop(id: &str) -> Result<Self> {
+    Ok(Self {
+      target: WindowTarget::open_desktop(id)?,
+    })
+  }
+}
+
 impl ctream_driver::Driver for Driver {
   type Target = u32;
   type Session = Session;
@@ -392,8 +400,7 @@ impl WindowBackend for NativeWindow {
       .target
       .bounds()
       .map_err(|error| io::Error::other(error.to_string()))?;
-    // The selected display limits which window can be opened. Once opened,
-    // its physical frame can move across the current virtual desktop.
+    // A window can move across the virtual desktop after either kind of open.
     let desktop = query_monitors(Vec::new())?.desktop.ok_or_else(|| {
       io::Error::new(
         io::ErrorKind::NotFound,

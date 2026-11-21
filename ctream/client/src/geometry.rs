@@ -82,7 +82,7 @@ impl<F, T> Transform<F, T> {
   }
 }
 
-/// The fitted image transform shared by rendering, overlays, and pointer input.
+/// The image transform shared by rendering, overlays, and pointer input.
 #[derive(Clone, Copy, Debug)]
 pub struct ImageGeometry {
   size: [u32; 2],
@@ -92,7 +92,9 @@ pub struct ImageGeometry {
 impl ImageGeometry {
   pub fn fit(area: Rect<ViewportSpace>, size: [u32; 2]) -> Option<Self> {
     let [width, height] = size.map(f64::from);
-    let frame = Rect::new(Point::new(0.0, 0.0), Point::new(width, height))?;
+    if width == 0.0 || height == 0.0 {
+      return None;
+    }
     let scale = ((area.max.x - area.min.x) / width).min((area.max.y - area.min.y) / height);
     let left = area.min.x + ((area.max.x - area.min.x) - width * scale) / 2.0;
     let top = area.min.y + ((area.max.y - area.min.y) - height * scale) / 2.0;
@@ -100,6 +102,13 @@ impl ImageGeometry {
       Point::new(left, top),
       Point::new(left + width * scale, top + height * scale),
     )?;
+    Self::fill(viewport, size)
+  }
+
+  /// Maps the complete frame onto the given viewport, even during native resize.
+  pub fn fill(viewport: Rect<ViewportSpace>, size: [u32; 2]) -> Option<Self> {
+    let [width, height] = size.map(f64::from);
+    let frame = Rect::new(Point::new(0.0, 0.0), Point::new(width, height))?;
     Some(Self {
       size,
       transform: Transform::new(frame, viewport),

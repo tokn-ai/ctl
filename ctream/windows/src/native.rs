@@ -102,7 +102,8 @@ fn display_of(hwnd: HWND) -> Result<u32> {
 }
 
 /// A window bound to its HWND, process generation, and observed lifetime.
-/// Display membership is checked at open; moves and resizes preserve this target.
+/// A monitor-scoped target checks membership at open. Moves and resizes preserve
+/// the target for both monitor and desktop scopes.
 /// IDs are not lifetime capabilities: a same-process HWND replacement between
 /// discovery and opening can share an ID, and destroy notifications are asynchronous.
 pub struct WindowTarget {
@@ -114,6 +115,15 @@ pub struct WindowTarget {
 
 impl WindowTarget {
   pub fn open(display: u32, id: &str) -> Result<Self> {
+    Self::open_in(Some(display), id)
+  }
+
+  /// Bind a window by identity anywhere on the current interactive desktop.
+  pub fn open_desktop(id: &str) -> Result<Self> {
+    Self::open_in(None, id)
+  }
+
+  fn open_in(display: Option<u32>, id: &str) -> Result<Self> {
     let _physical = PhysicalPixels::enter()?;
     let identity: Identity = id.parse()?;
     let hwnd = HWND(identity.handle as *mut _);
@@ -134,7 +144,9 @@ impl WindowTarget {
       watch,
     };
     target.validate()?;
-    if display_of(hwnd)? != display {
+    if let Some(display) = display
+      && display_of(hwnd)? != display
+    {
       return Err("Windows window is not on the selected display; query windows again".into());
     }
     if unsafe { GetAncestor(hwnd, GA_ROOT) } != hwnd || hwnd == unsafe { GetShellWindow() } {
@@ -192,6 +204,15 @@ unsafe extern "system" fn collect(hwnd: HWND, state: LPARAM) -> BOOL {
 /// Visible application windows assigned once to the monitor with their largest overlap.
 pub fn list_windows(display: u32) -> Result<Vec<Window>> {
   crate::display(display)?;
+  list_windows_in(Some(display))
+}
+
+/// Enumerate visible application windows on the current interactive desktop.
+pub fn list_desktop_windows() -> Result<Vec<Window>> {
+  list_windows_in(None)
+}
+
+fn list_windows_in(display: Option<u32>) -> Result<Vec<Window>> {
   let _physical = PhysicalPixels::enter()?;
   let mut handles = Vec::<HWND>::new();
   unsafe {
@@ -203,7 +224,7 @@ pub fn list_windows(display: u32) -> Result<Vec<Window>> {
   let mut result = Vec::new();
   for hwnd in handles {
     if visible(hwnd).is_err()
-      || display_of(hwnd).ok() != Some(display)
+      || display.is_some_and(|display| display_of(hwnd).ok() != Some(display))
       || unsafe { GetAncestor(hwnd, GA_ROOT) } != hwnd
       || hwnd == unsafe { GetShellWindow() }
     {

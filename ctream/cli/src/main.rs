@@ -4,7 +4,7 @@ use ctream_proto::{Display, Session, Target, Window};
 use std::{env, ffi::OsString, io, process::ExitCode};
 
 const USAGE: &str = "Usage: ctream [OPTIONS] list [--json]
-       ctream [OPTIONS] windows DISPLAY [--json]
+       ctream [OPTIONS] windows TARGET [--json]
 
 Options (before list/windows):
   --host SSH_HOST       Remote SSH endpoint
@@ -12,7 +12,8 @@ Options (before list/windows):
   --ssh-program PROGRAM  SSH-compatible launcher (default: ssh)
   --ssh-arg ARG         Launcher prefix argument; repeat as needed
 
-Use :DISPLAY for X11, wayland-N for Wayland, or windows-N for a Windows display.";
+Use :DISPLAY for X11, wayland-N for Wayland, windows-N for one Windows display,
+or windows for all windows on the current Windows desktop.";
 
 enum Operation {
   List,
@@ -78,7 +79,7 @@ fn parse(arguments: impl IntoIterator<Item = OsString>) -> io::Result<Option<Opt
   let operation = if command == "list" {
     Operation::List
   } else {
-    Operation::Windows(target.ok_or_else(|| invalid("windows needs a display"))?)
+    Operation::Windows(target.ok_or_else(|| invalid("windows needs a target"))?)
   };
   if host.is_none() {
     connection.local()?;

@@ -10,6 +10,7 @@ mod app;
 mod archive;
 mod arguments;
 mod component;
+mod ctream;
 mod development;
 #[cfg(windows)]
 mod launcher;
@@ -102,6 +103,10 @@ async fn run(arguments: Arguments) -> io::Result<i32> {
       }
     }
     Command::Component { command } => component::run(&home, target, command).await?,
+    Command::Ctream { command } => {
+      require_local(target)?;
+      return ctream::run(&home, command).await;
+    }
     Command::Show { json } => show::run(&home, target, json).await?,
     Command::Migrate { json } => {
       require_local(target)?;

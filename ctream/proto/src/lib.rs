@@ -3,7 +3,8 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-pub const VERSION: &str = "1.0.8";
+pub const VERSION: &str = WINDOWS_DESKTOP_VERSION;
+pub const WINDOWS_DESKTOP_VERSION: &str = "1.0.9";
 pub const CAPTURE_CATALOG_VERSION: &str = "1.0.8";
 pub const CAPTURE_DRIVER_VERSION: &str = "1.0.7";
 pub const WINDOWS_WINDOW_VERSION: &str = "1.0.6";
@@ -89,6 +90,8 @@ pub enum Target {
   X11(u32),
   Wayland(u32),
   Windows(u32),
+  /// Desktop-wide window selection. Display capture still uses a monitor.
+  WindowsDesktop,
 }
 
 impl Target {
@@ -96,11 +99,14 @@ impl Target {
     match self {
       Self::X11(_) => CaptureSystem::X11,
       Self::Wayland(_) => CaptureSystem::Wayland,
-      Self::Windows(_) => CaptureSystem::Windows,
+      Self::Windows(_) | Self::WindowsDesktop => CaptureSystem::Windows,
     }
   }
 
   pub fn parse(name: &str) -> Result<Self, &'static str> {
+    if name == "windows" {
+      return Ok(Self::WindowsDesktop);
+    }
     let (digits, constructor): (_, fn(u32) -> Self) = if let Some(digits) = name.strip_prefix(':') {
       (digits, Self::X11)
     } else if let Some(digits) = name.strip_prefix("wayland-") {
@@ -108,7 +114,7 @@ impl Target {
     } else if let Some(digits) = name.strip_prefix("windows-") {
       (digits, Self::Windows)
     } else {
-      return Err("expected :DISPLAY, wayland-N, or windows-N");
+      return Err("expected :DISPLAY, wayland-N, windows-N, or windows");
     };
     if !digits.bytes().all(|b| b.is_ascii_digit()) {
       return Err("invalid display number");
@@ -128,6 +134,7 @@ impl fmt::Display for Target {
       Self::X11(number) => write!(f, ":{number}"),
       Self::Wayland(number) => write!(f, "wayland-{number}"),
       Self::Windows(number) => write!(f, "windows-{number}"),
+      Self::WindowsDesktop => f.write_str("windows"),
     }
   }
 }
@@ -206,6 +213,7 @@ mod tests {
       (Target::X11(0), CaptureSystem::X11),
       (Target::Wayland(1), CaptureSystem::Wayland),
       (Target::Windows(2), CaptureSystem::Windows),
+      (Target::WindowsDesktop, CaptureSystem::Windows),
     ] {
       assert_eq!(Target::parse(&target.to_string()).unwrap(), target);
       assert_eq!(target.system(), system);

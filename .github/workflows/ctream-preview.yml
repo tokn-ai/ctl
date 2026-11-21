@@ -1,0 +1,164 @@
+name: ctream preview bundles
+
+on:
+  pull_request:
+    paths:
+      - 'ctream/**'
+      - 'ctl/bundle/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/ctream-preview.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'ctream/**'
+      - 'ctl/bundle/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/ctream-preview.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ctream-preview-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux-agent:
+    name: ctream Linux agent (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            helper_target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            helper_target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
+    # The helpers use the system xkbcommon. Build them against an older glibc
+    # while keeping the main agent independent of the host's glibc version.
+    container: ubuntu:22.04
+    timeout-minutes: 30
+    steps:
+      - name: Install build tools
+        run: |
+          apt-get update
+          apt-get install --yes --no-install-recommends build-essential ca-certificates curl git libxkbcommon-dev musl-tools
+
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@1.99.0
+        with:
+          targets: ${{ matrix.target }},${{ matrix.helper_target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ctream-agent-${{ matrix.target }}
+
+      - name: Build and stage Linux agent and Wayland helpers
+        env:
+          AGENT_TARGET: ${{ matrix.target }}
+          HELPER_TARGET: ${{ matrix.helper_target }}
+        run: |
+          cargo build --locked --release --target "$AGENT_TARGET" -p ctream-agent
+          cargo build --locked --release --target "$HELPER_TARGET" -p ctream-wayland-input --bins
+          install -Dm755 "target/$AGENT_TARGET/release/ctream-agent" agent-files/ctream-agent
+          install -Dm755 "target/$HELPER_TARGET/release/ctream-wayland-input" agent-files/ctream-wayland-input
+          install -Dm755 "target/$HELPER_TARGET/release/ctream-wayland-window" agent-files/ctream-wayland-window
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ctream-agent-files-${{ matrix.target }}
+          path: agent-files/
+          if-no-files-found: error
+          retention-days: 7
+
+  windows-agent:
+    name: ctream Windows agent
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@1.99.0
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ctream-agent-x86_64-pc-windows-msvc
+
+      - name: Build Windows agent
+        run: cargo build --locked --release --target x86_64-pc-windows-msvc -p ctream-agent
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ctream-agent-files-x86_64-pc-windows-msvc
+          path: target/x86_64-pc-windows-msvc/release/ctream-agent.exe
+          if-no-files-found: error
+          retention-days: 7
+
+  preview:
+    name: ctream preview bundle (${{ matrix.target }})
+    needs: [linux-agent, windows-agent]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest
+            target: aarch64-apple-darwin
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    env:
+      PREVIEW_TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends libxkbcommon-dev
+
+      - uses: dtolnay/rust-toolchain@1.99.0
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ctream-preview-${{ matrix.target }}
+
+      - name: Build native preview and CLI
+        shell: bash
+        run: cargo build --locked --release --target "$PREVIEW_TARGET" -p ctream-preview -p ctream-cli
+
+      - name: Download agent binaries
+        uses: actions/download-artifact@v5
+        with:
+          pattern: ctream-agent-files-*
+          path: agent-builds
+
+      - name: Archive preview and its agents
+        shell: bash
+        run: |
+          cargo run --locked --release -p ctl-bundle --features pack --bin ctl-pack-ctream -- \
+            "$PREVIEW_TARGET" "target/$PREVIEW_TARGET/release" agent-builds .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ctream-preview-${{ matrix.target }}
+          path: ctream-preview-${{ matrix.target }}.zip
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30

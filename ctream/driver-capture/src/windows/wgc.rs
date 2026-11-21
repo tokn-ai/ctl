@@ -177,6 +177,14 @@ pub struct WgcCapture {
   target: WindowTarget,
 }
 
+impl WgcCapture {
+  pub fn open_desktop(id: &str) -> Result<Self> {
+    Ok(Self {
+      target: WindowTarget::open_desktop(id)?,
+    })
+  }
+}
+
 impl CaptureSource for WgcCapture {
   fn run<W: Write + Send>(self, output: &mut W, lifetime: &CaptureLifetime) -> Result<()> {
     let _physical = PhysicalPixels::enter()?;

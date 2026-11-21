@@ -1,6 +1,6 @@
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use ctl_client::cli::Channel;
-use std::path::PathBuf;
+use std::{ffi::OsString, path::PathBuf};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -37,6 +37,11 @@ pub(super) enum Command {
   App {
     #[command(subcommand)]
     command: AppCommand,
+  },
+  /// Install, update, or launch the standalone ctream tools.
+  Ctream {
+    #[command(subcommand)]
+    command: CtreamCommand,
   },
   /// Manage complete runtime bundles for individual targets and channels.
   Component {
@@ -174,6 +179,43 @@ pub(super) struct AppArguments {
   pub channel: Option<Channel>,
 }
 
+#[derive(Debug, Subcommand)]
+pub(super) enum CtreamCommand {
+  /// Install ctream and select the new build.
+  Install(CtreamInstallArguments),
+  /// Update the selected ctream installation.
+  Update(CtreamInstallArguments),
+  /// Show the selected local ctream build and executable paths.
+  Status {
+    #[arg(long)]
+    json: bool,
+  },
+  /// Open the installed ctream preview.
+  Run {
+    /// Arguments for ctream-preview, after --.
+    #[arg(last = true)]
+    args: Vec<OsString>,
+  },
+  /// Run the installed ctream CLI.
+  Cli {
+    /// Arguments for ctream, after --.
+    #[arg(last = true)]
+    args: Vec<OsString>,
+  },
+}
+
+#[derive(Debug, Args)]
+pub(super) struct CtreamInstallArguments {
+  /// A ctream preview ZIP from the bundle workflow, for offline installation.
+  #[arg(long, conflicts_with = "run")]
+  pub from: Option<PathBuf>,
+  /// Use a specific successful ctream preview workflow run from this repository.
+  #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+  pub run: Option<u64>,
+  #[arg(long)]
+  pub json: bool,
+}
+
 #[derive(Debug, Args)]
 pub(super) struct ReleaseArguments {
   /// Output the result as JSON.
@@ -259,6 +301,12 @@ pub(super) struct DevelopmentArguments {
   /// Build and install the native desktop app in the development profile.
   #[arg(long, conflicts_with_all = ["renew_signing", "release", "profile", "target_dir", "target", "cargo_args_json", "lease"])]
   pub app: bool,
+  /// Build and activate ctream from this checkout.
+  #[arg(long, conflicts_with_all = ["app", "renew_signing", "hosts", "cargo_args_json", "lease"])]
+  pub ctream: bool,
+  /// Additional ctream agent Rust target to build. Repeat for multiple targets.
+  #[arg(long = "agent-target", requires = "ctream", value_name = "TRIPLE")]
+  pub ctream_agent_targets: Vec<String>,
   /// Renew the active macOS development helper's signature without recompiling.
   #[arg(long, conflicts_with_all = ["release", "profile", "target_dir", "target", "cargo_args_json"])]
   pub renew_signing: bool,
@@ -314,6 +362,32 @@ mod tests {
         .is_ok()
       );
     }
+  }
+
+  #[test]
+  fn ctream_dev_accepts_agent_targets_and_native_build_options() {
+    let arguments = Arguments::try_parse_from([
+      "ctlup",
+      "dev",
+      "--ctream",
+      "--agent-target",
+      "x86_64-pc-windows-gnu",
+      "--agent-target",
+      "aarch64-unknown-linux-musl",
+      "--release",
+      "--json",
+    ])
+    .unwrap();
+    assert!(
+      matches!(arguments.command, Command::Dev(DevelopmentArguments {
+      ctream: true, release: true, json: true, ctream_agent_targets, ..
+    }) if ctream_agent_targets == ["x86_64-pc-windows-gnu", "aarch64-unknown-linux-musl"])
+    );
+    assert!(Arguments::try_parse_from(["ctlup", "dev", "--ctream", "--app"]).is_err());
+    assert!(
+      Arguments::try_parse_from(["ctlup", "dev", "--agent-target", "x86_64-pc-windows-gnu"])
+        .is_err()
+    );
   }
 
   #[test]

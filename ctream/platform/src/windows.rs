@@ -9,7 +9,9 @@ pub fn list(target: Target) -> Result<Vec<Window>> {
   match target {
     Target::X11(display) => x11::composite::Driver.open(&display)?.windows(),
     Target::Wayland(display) => wayland::image_copy::Driver.open(&display)?.windows(),
-    Target::Windows(_) => Err("Windows windows require a native Windows agent".into()),
+    Target::Windows(_) | Target::WindowsDesktop => {
+      Err("Windows windows require a native Windows agent".into())
+    }
   }
 }
 
@@ -17,6 +19,7 @@ pub fn list(target: Target) -> Result<Vec<Window>> {
 pub fn list(target: Target) -> Result<Vec<Window>> {
   match target {
     Target::Windows(display) => ctream_windows::list_windows(display),
+    Target::WindowsDesktop => ctream_windows::list_desktop_windows(),
     _ => Err("Linux windows require a Linux agent".into()),
   }
 }

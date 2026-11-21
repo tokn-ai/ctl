@@ -110,6 +110,10 @@ impl CaptureItem {
       closed,
     })
   }
+
+  fn is_closed(&self) -> bool {
+    self.closed.load(Ordering::Acquire)
+  }
 }
 
 impl Drop for CaptureItem {
@@ -172,6 +176,62 @@ fn dimensions(size: SizeInt32) -> Result<[usize; 2]> {
   )?)
 }
 
+enum FrameUpdate<'a> {
+  Empty,
+  Resized,
+  Clipped {
+    texture: [usize; 2],
+    content: [usize; 2],
+  },
+  Ready {
+    extent: [usize; 2],
+    pixels: &'a [u8],
+  },
+}
+
+fn poll_frame<'a>(
+  pool: &Direct3D11CaptureFramePool,
+  device: &IDirect3DDevice,
+  size: &mut SizeInt32,
+  reader: &'a mut TextureReader,
+) -> Result<FrameUpdate<'a>> {
+  let Some(mut frame) = next_frame(pool)? else {
+    return Ok(FrameUpdate::Empty);
+  };
+  // Prefer the newest queued frame without an unbounded drain under animation.
+  if let Some(newer) = next_frame(pool)? {
+    frame.close()?;
+    frame = newer;
+  }
+  let content = frame.get().ContentSize()?;
+  let extent = dimensions(content)?;
+  if content != *size {
+    // The old texture may clip growing content or contain undefined pixels
+    // after shrink. Return it before replacing the pool and emit neither case.
+    frame.close()?;
+    pool.Recreate(device, FORMAT, 2, content)?;
+    *size = content;
+    return Ok(FrameUpdate::Resized);
+  }
+  let surface = frame.get().Surface()?;
+  let texture: ID3D11Texture2D = unsafe {
+    surface
+      .cast::<IDirect3DDxgiInterfaceAccess>()?
+      .GetInterface()
+  }?;
+  let update = match reader.read_window(&texture, extent)? {
+    WindowReadback::Complete(pixels) => FrameUpdate::Ready { extent, pixels },
+    WindowReadback::Clipped(texture) => FrameUpdate::Clipped {
+      texture,
+      content: extent,
+    },
+  };
+  drop(texture);
+  drop(surface);
+  frame.close()?;
+  Ok(update)
+}
+
 /// Captures a selected window's compositor surface, independent of its occlusion.
 pub struct WgcCapture {
   target: WindowTarget,
@@ -214,77 +274,52 @@ impl CaptureSource for WgcCapture {
     let mut complete_deadline = Some(Instant::now() + FRAME_RECOVERY);
     let mut clipped_geometry = None;
     let mut delay = Duration::ZERO;
-    while !lifetime.cancelled(delay) {
-      if item.closed.load(Ordering::Acquire) {
-        break;
-      }
-      self.target.validate()?;
-      if complete_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-        let details = clipped_geometry
-          .map(|(texture, content): ([usize; 2], [usize; 2])| {
-            format!(
-              ": texture {}x{}, content {}x{}",
-              texture[0], texture[1], content[0], content[1]
-            )
-          })
-          .unwrap_or_default();
-        return Err(format!("Windows window capture produced no complete frame after startup or resize{details}; content may be protected or unavailable").into());
-      }
-      let Some(mut frame) = next_frame(&pool.0)? else {
-        delay = POLL_INTERVAL;
-        continue;
-      };
-      // Prefer the newest queued frame without an unbounded drain under animation.
-      if let Some(newer) = next_frame(&pool.0)? {
-        frame.close()?;
-        frame = newer;
-      }
-      let content = frame.get().ContentSize()?;
-      let extent = dimensions(content)?;
-      if content != size {
-        // The old texture may clip growing content or contain undefined pixels
-        // after shrink. Return it before replacing the pool and emit neither case.
-        frame.close()?;
-        pool.0.Recreate(&device, FORMAT, 2, content)?;
-        size = content;
-        complete_deadline = Some(Instant::now() + FRAME_RECOVERY);
-        clipped_geometry = None;
-        delay = POLL_INTERVAL;
-        continue;
-      }
-      let surface = frame.get().Surface()?;
-      let texture: ID3D11Texture2D = unsafe {
-        surface
-          .cast::<IDirect3DDxgiInterfaceAccess>()?
-          .GetInterface()
-      }?;
-      let pixels = match reader.read_window(&texture, extent)? {
-        WindowReadback::Complete(pixels) => pixels,
-        WindowReadback::Clipped(texture_size) => {
+    while !lifetime.cancelled(delay) && !item.is_closed() {
+      let update = self.target.validate().and_then(|()| {
+        if complete_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+          let details = clipped_geometry
+            .map(|(texture, content): ([usize; 2], [usize; 2])| {
+              format!(
+                ": texture {}x{}, content {}x{}",
+                texture[0], texture[1], content[0], content[1]
+              )
+            })
+            .unwrap_or_default();
+          return Err(format!("Windows window capture produced no complete frame after startup or resize{details}; content may be protected or unavailable").into());
+        }
+        poll_frame(&pool.0, &device, &mut size, &mut reader)
+      });
+      delay = POLL_INTERVAL;
+      match update {
+        // Win32 and WGC can observe destruction before the Closed callback.
+        Err(_) if item.is_closed() || self.target.is_gone().unwrap_or(false) => break,
+        Err(error) => return Err(error),
+        Ok(FrameUpdate::Empty) => {}
+        Ok(FrameUpdate::Resized) => {
+          complete_deadline = Some(Instant::now() + FRAME_RECOVERY);
+          clipped_geometry = None;
+        }
+        Ok(FrameUpdate::Clipped { texture, content }) => {
           // Producer frames can overlap recreation. Await a sufficiently large
           // buffer rather than emitting a clipped frame or failing the session.
           complete_deadline.get_or_insert_with(|| Instant::now() + FRAME_RECOVERY);
-          clipped_geometry = Some((texture_size, extent));
-          drop(texture);
-          drop(surface);
-          frame.close()?;
-          delay = POLL_INTERVAL;
-          continue;
+          clipped_geometry = Some((texture, content));
         }
-      };
-      drop(texture);
-      drop(surface);
-      frame.close()?;
-      if lifetime.cancelled(Duration::ZERO) || item.closed.load(Ordering::Acquire) {
-        break;
+        Ok(FrameUpdate::Ready {
+          extent: [width, height],
+          pixels,
+        }) => {
+          if lifetime.cancelled(Duration::ZERO) || item.is_closed() {
+            break;
+          }
+          write!(output, "P6\n{width} {height}\n255\n")?;
+          output.write_all(pixels)?;
+          output.flush()?;
+          complete_deadline = None;
+          clipped_geometry = None;
+          delay = FRAME_INTERVAL;
+        }
       }
-      let [width, height] = extent;
-      write!(output, "P6\n{width} {height}\n255\n")?;
-      output.write_all(pixels)?;
-      output.flush()?;
-      complete_deadline = None;
-      clipped_geometry = None;
-      delay = FRAME_INTERVAL;
     }
     Ok(())
   }

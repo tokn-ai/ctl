@@ -1,8 +1,9 @@
 use ctream_driver::{ControlOperation, Result};
 use ctream_proto::{
-  BOUNDS_VERSION, CAPTURE_CATALOG_VERSION, CAPTURE_DRIVER_VERSION, DISPLAY_VERSION, Target,
-  VERSION, WAYLAND_WINDOW_VERSION, WINDOWS_DESKTOP_VERSION, WINDOWS_DISPLAY_VERSION,
-  WINDOWS_WINDOW_VERSION, X11_WINDOW_VERSION, valid_capture_driver, valid_window_id,
+  BOUNDS_VERSION, CAPTURE_CATALOG_VERSION, CAPTURE_DRIVER_VERSION, DISPLAY_VERSION,
+  LATENCY_VERSION, Target, WAYLAND_WINDOW_VERSION, WINDOWS_DESKTOP_VERSION,
+  WINDOWS_DISPLAY_VERSION, WINDOWS_WINDOW_VERSION, X11_WINDOW_VERSION, valid_capture_driver,
+  valid_window_id,
 };
 
 pub enum TargetOperation<'a> {
@@ -14,6 +15,7 @@ pub enum TargetOperation<'a> {
 }
 
 pub enum Request<'a> {
+  Ping,
   Discover {
     windows_displays: bool,
   },
@@ -33,12 +35,15 @@ fn supports_windows(version: &str, target: Target) -> bool {
     Target::WindowsDesktop => version == WINDOWS_DESKTOP_VERSION,
     Target::Windows(_) => matches!(
       version,
-      WINDOWS_WINDOW_VERSION | CAPTURE_DRIVER_VERSION | CAPTURE_CATALOG_VERSION | VERSION
+      WINDOWS_WINDOW_VERSION
+        | CAPTURE_DRIVER_VERSION
+        | CAPTURE_CATALOG_VERSION
+        | WINDOWS_DESKTOP_VERSION
     ),
     _ => {
       matches!(
         version,
-        VERSION
+        WINDOWS_DESKTOP_VERSION
           | CAPTURE_CATALOG_VERSION
           | CAPTURE_DRIVER_VERSION
           | WINDOWS_WINDOW_VERSION
@@ -53,7 +58,7 @@ fn supports_windows(version: &str, target: Target) -> bool {
 fn supports_displays(version: &str) -> bool {
   matches!(
     version,
-    VERSION
+    WINDOWS_DESKTOP_VERSION
       | CAPTURE_CATALOG_VERSION
       | CAPTURE_DRIVER_VERSION
       | WINDOWS_WINDOW_VERSION
@@ -72,7 +77,7 @@ fn supports_windows_displays(version: &str) -> bool {
       | WINDOWS_WINDOW_VERSION
       | CAPTURE_DRIVER_VERSION
       | CAPTURE_CATALOG_VERSION
-      | VERSION
+      | WINDOWS_DESKTOP_VERSION
   )
 }
 
@@ -94,6 +99,7 @@ fn supports_capture_selection(version: &str, target: &str) -> bool {
 
 pub fn parse(args: &[String]) -> Result<Request<'_>> {
   match args {
+    [version, operation] if version == LATENCY_VERSION && operation == "ping" => Ok(Request::Ping),
     [version, operation]
       if version == CAPTURE_CATALOG_VERSION && operation == "capture-drivers" =>
     {
@@ -174,7 +180,7 @@ pub fn parse(args: &[String]) -> Result<Request<'_>> {
                 | WINDOWS_WINDOW_VERSION
                 | CAPTURE_DRIVER_VERSION
                 | CAPTURE_CATALOG_VERSION
-                | VERSION
+                | WINDOWS_DESKTOP_VERSION
             ),
           },
         ),
@@ -205,7 +211,7 @@ mod tests {
       WINDOWS_WINDOW_VERSION,
       CAPTURE_DRIVER_VERSION,
       CAPTURE_CATALOG_VERSION,
-      VERSION,
+      WINDOWS_DESKTOP_VERSION,
     ] {
       assert!(parse(&args(&[version, "discover"])).is_ok());
       for target in [":7", "wayland-1"] {
@@ -234,7 +240,7 @@ mod tests {
       WINDOWS_WINDOW_VERSION,
       CAPTURE_DRIVER_VERSION,
       CAPTURE_CATALOG_VERSION,
-      VERSION,
+      WINDOWS_DESKTOP_VERSION,
     ] {
       let arguments = args(&[version, "elements", "wayland-1", "window-1"]);
       let Request::Controls(_, _, ControlOperation::Inspect { bounds }) =
@@ -251,11 +257,19 @@ mod tests {
             | WINDOWS_WINDOW_VERSION
             | CAPTURE_DRIVER_VERSION
             | CAPTURE_CATALOG_VERSION
-            | VERSION
+            | WINDOWS_DESKTOP_VERSION
         )
       );
     }
-    assert!(parse(&args(&[VERSION, "capture-window", ":7", "invalid/id"])).is_err());
+    assert!(
+      parse(&args(&[
+        WINDOWS_DESKTOP_VERSION,
+        "capture-window",
+        ":7",
+        "invalid/id"
+      ]))
+      .is_err()
+    );
     assert!(parse(&args(&["9.0.9", "capture", ":7"])).is_err());
   }
 
@@ -270,7 +284,7 @@ mod tests {
       WINDOWS_WINDOW_VERSION,
       CAPTURE_DRIVER_VERSION,
       CAPTURE_CATALOG_VERSION,
-      VERSION,
+      WINDOWS_DESKTOP_VERSION,
     ] {
       let arguments = args(&[version, "discover"]);
       let Request::Discover { windows_displays } = parse(&arguments).unwrap() else {
@@ -284,7 +298,7 @@ mod tests {
             | WINDOWS_WINDOW_VERSION
             | CAPTURE_DRIVER_VERSION
             | CAPTURE_CATALOG_VERSION
-            | VERSION
+            | WINDOWS_DESKTOP_VERSION
         )
       );
       for operation in ["capture", "input"] {
@@ -295,7 +309,10 @@ mod tests {
       }
       let window_operations = matches!(
         version,
-        WINDOWS_WINDOW_VERSION | CAPTURE_DRIVER_VERSION | CAPTURE_CATALOG_VERSION | VERSION
+        WINDOWS_WINDOW_VERSION
+          | CAPTURE_DRIVER_VERSION
+          | CAPTURE_CATALOG_VERSION
+          | WINDOWS_DESKTOP_VERSION
       );
       assert_eq!(
         parse(&args(&[version, "windows", "windows-1"])).is_ok(),
@@ -311,7 +328,25 @@ mod tests {
         assert!(parse(&args(&[version, operation, "windows-1", "window-1"])).is_err());
       }
     }
-    assert!(parse(&args(&[VERSION, "input-window", "windows-1", "invalid/id"])).is_err());
+    assert!(
+      parse(&args(&[
+        WINDOWS_DESKTOP_VERSION,
+        "input-window",
+        "windows-1",
+        "invalid/id"
+      ]))
+      .is_err()
+    );
+  }
+
+  #[test]
+  fn ping_requires_its_own_version_and_no_target() {
+    assert!(matches!(
+      parse(&args(&[LATENCY_VERSION, "ping"])).unwrap(),
+      Request::Ping
+    ));
+    assert!(parse(&args(&[WINDOWS_DESKTOP_VERSION, "ping"])).is_err());
+    assert!(parse(&args(&[LATENCY_VERSION, "ping", "windows"])).is_err());
   }
 
   #[test]

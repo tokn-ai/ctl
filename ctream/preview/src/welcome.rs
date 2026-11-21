@@ -1,7 +1,9 @@
 use super::{
-  Preview, PreviewMode, background, chrome, drivers, input,
-  requests::{Requests, Scoped},
-  semantic, view,
+  CaptureEnd, Preview, PreviewMode, background, chrome, drivers, input, latency,
+  requests::{Requests, Scoped, Traffic},
+  semantic,
+  stats::Stats,
+  view,
 };
 use ctream_client::{Client, transport::Transport};
 use ctream_proto::{
@@ -20,7 +22,8 @@ use std::{
 };
 
 type Pending<V> = Option<Receiver<io::Result<V>>>;
-type Control<T> = ctream_client::input::Input<<T as Transport>::Reader, <T as Transport>::Writer>;
+type Control<T> =
+  ctream_client::input::Input<<Scoped<T> as Transport>::Reader, <Scoped<T> as Transport>::Writer>;
 
 fn viewer_id() -> egui::ViewportId {
   egui::ViewportId::from_hash_of("ctream_viewer")
@@ -183,6 +186,7 @@ pub(super) struct Viewer<T: Transport> {
   catalog_ready: bool,
   client: Option<Client<Scoped<T>>>,
   requests: Option<Requests>,
+  traffic: Traffic,
   connecting: Pending<Preview<Scoped<T>>>,
   preview: Option<Preview<Scoped<T>>>,
   preview_error: Option<String>,
@@ -194,6 +198,8 @@ pub(super) struct Viewer<T: Transport> {
   viewer_size: view::AspectResize,
   chrome: chrome::Chrome,
   semantic: Option<semantic::Panel<Scoped<T>>>,
+  show_stats: bool,
+  stats: Option<Stats>,
 }
 
 impl<T: Transport + Send + Sync + 'static> Viewer<T> {
@@ -228,6 +234,7 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
       catalog_ready: false,
       client: None,
       requests: None,
+      traffic: Traffic::default(),
       connecting: None,
       preview: None,
       preview_error: None,
@@ -239,12 +246,15 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
       viewer_size: view::AspectResize::default(),
       chrome: chrome::Chrome::default(),
       semantic: None,
+      show_stats: false,
+      stats: None,
     };
     viewer.discover(ctx);
     viewer
   }
 
   fn discard_preview(&mut self) {
+    self.stats = None;
     self.control.take();
     self.connecting.take();
     self.semantic = None;
@@ -270,6 +280,7 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
     // Close active captures before cancelling their transport scope.
     // A pending window query shares this scope until its results arrive.
     self.requests = None;
+    self.traffic = Traffic::default();
   }
 
   fn discover(&mut self, ctx: &egui::Context) {
@@ -332,7 +343,7 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
   }
 
   fn make_client(&mut self) {
-    let requests = Requests::new();
+    let requests = Requests::metered(self.traffic.clone());
     let client = requests.client(Arc::clone(&self.transport));
     self.client = Some(client);
     self.requests = Some(requests);
@@ -613,13 +624,21 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
       }
     }
     if let Some(preview) = &mut self.preview
-      && let Some(error) = preview.update_texture(ctx)
+      && let Some(end) = preview.update_texture(ctx)
     {
-      self.preview_error = Some(error);
-      self.control = None;
-      self.semantic = None;
-      self.control_requests = None;
-      self.requests = None;
+      if self.viewing && self.window_mode && matches!(end, CaptureEnd::Finished) {
+        self.close_viewer(ctx);
+        self.load_target(ctx);
+      } else {
+        self.preview_error = Some(match end {
+          CaptureEnd::Finished => "Capture ended.".into(),
+          CaptureEnd::Failed(error) => error,
+        });
+        self.control = None;
+        self.semantic = None;
+        self.control_requests = None;
+        self.requests = None;
+      }
     }
     if let Some(result) = receive(&mut self.control)
       && let Some(preview) = &mut self.preview
@@ -649,7 +668,7 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
       return;
     }
     let Some(target) = self.selected else { return };
-    let requests = Requests::new();
+    let requests = Requests::metered(self.traffic.clone());
     let client = requests.client(Arc::clone(&self.transport));
     let window = self
       .window_mode
@@ -658,6 +677,12 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
     let session = client.session(target, window);
     self.viewing = true;
     self.viewer_opening = true;
+    self.stats = self.show_stats.then(|| {
+      Stats::new(
+        self.traffic.clone(),
+        latency::Latency::start(Arc::clone(&self.transport), ctx),
+      )
+    });
     if session.supports_input() {
       let control = session.clone();
       self.control = Some(background(ctx, move || control.input()));
@@ -671,6 +696,7 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
 
   fn close_viewer(&mut self, ctx: &egui::Context) {
     self.chrome.dismiss();
+    self.stats = None;
     self.control = None;
     if let Some(preview) = &mut self.preview {
       preview.stop_control();
@@ -853,6 +879,7 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
               egui::Button::new("Start").min_size(egui::vec2(110.0, 36.0)),
             )
             .clicked();
+          ui.checkbox(&mut self.show_stats, "Debug overlay");
         });
       });
       ui.add_space(6.0);
@@ -924,7 +951,7 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
           let ui = &mut preview_ui;
           ui.set_clip_rect(inner.intersect(ui.clip_rect()));
           if let Some(preview) = &mut self.preview {
-            preview.show(ui, self.preview_error.as_deref(), &[], PreviewMode::Setup);
+            let _ = preview.show(ui, self.preview_error.as_deref(), &[], PreviewMode::Setup);
           } else {
             ui.centered_and_justified(|ui| {
               ui.vertical_centered(|ui| {
@@ -1021,7 +1048,7 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
           .as_ref()
           .map(semantic::Panel::overlay_elements)
           .unwrap_or(&[]);
-        preview.show(
+        let image = preview.show(
           ui,
           self.preview_error.as_deref(),
           elements,
@@ -1030,6 +1057,9 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
             pointer_regions: &chrome.pointer_regions,
           },
         );
+        if let (Some(image), Some(frame_size), Some(stats)) = (image, frame_size, &mut self.stats) {
+          stats.paint(ui.painter(), image, preview.frames, frame_size);
+        }
         if !chrome.resizing
           && let Some(size) = preview.image_size()
         {
@@ -1119,6 +1149,7 @@ impl<T: Transport + Send + Sync + 'static> eframe::App for Viewer<T> {
 impl<T: Transport> Viewer<T> {
   fn shutdown(&mut self) {
     self.chrome.dismiss();
+    self.stats = None;
     // Close active stdin streams before cancelling any outstanding requests.
     self.preview = None;
     self.semantic = None;

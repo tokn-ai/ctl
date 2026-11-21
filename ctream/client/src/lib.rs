@@ -2,6 +2,7 @@
 
 pub mod geometry;
 pub mod input;
+mod latency;
 pub mod media;
 pub mod options;
 pub mod transport;
@@ -13,11 +14,12 @@ use crate::{
 };
 use ctream_proto::{
   Action, ActionResult, BOUNDS_VERSION, CAPTURE_CATALOG_VERSION, CAPTURE_DRIVER_VERSION,
-  CaptureDriverDescriptor, CaptureDriverInfo, DISPLAY_VERSION, Element, Session as DisplaySession,
-  Target, WAYLAND_WINDOW_VERSION, WINDOWS_DESKTOP_VERSION, WINDOWS_DISPLAY_VERSION,
-  WINDOWS_WINDOW_VERSION, Window, X11_FRAME_SIZE, X11_WINDOW_VERSION, valid_capture_driver,
-  valid_window_id,
+  CaptureDriverDescriptor, CaptureDriverInfo, DISPLAY_VERSION, Element, LATENCY_VERSION,
+  Session as DisplaySession, Target, WAYLAND_WINDOW_VERSION, WINDOWS_DESKTOP_VERSION,
+  WINDOWS_DISPLAY_VERSION, WINDOWS_WINDOW_VERSION, Window, X11_FRAME_SIZE, X11_WINDOW_VERSION,
+  valid_capture_driver, valid_window_id,
 };
+pub use latency::LatencyProbe;
 use serde::de::DeserializeOwned;
 use std::{
   io::{self, Read, Write},
@@ -201,6 +203,15 @@ impl<T: Transport> Client<T> {
   /// List compiled providers without selecting or opening a display session.
   pub fn capture_catalog(&self) -> io::Result<Vec<CaptureDriverDescriptor>> {
     self.query(CaptureCatalog)
+  }
+
+  /// Open a dedicated round-trip probe. The first sample waits for the agent's
+  /// handshake so the measured duration excludes channel startup.
+  pub fn latency_probe(&self) -> io::Result<LatencyProbe<T::Reader, T::Writer>> {
+    let channel = self
+      .transport
+      .open(&[LATENCY_VERSION.into(), "ping".into()])?;
+    Ok(LatencyProbe::new(channel))
   }
 
   pub fn session(&self, target: Target, window: Option<Window>) -> Session<T> {
@@ -509,6 +520,33 @@ mod tests {
       title: "Example".into(),
       app_id: "example".into(),
     }
+  }
+
+  #[test]
+  fn latency_probe_reuses_one_channel_and_requires_the_handshake() {
+    let (client, observed) = client(&["!??", "", "!x"]);
+    let mut probe = client.latency_probe().unwrap();
+    probe.sample().unwrap();
+    probe.sample().unwrap();
+    assert_eq!(*observed.requests.lock().unwrap(), [["1.0.10", "ping"]]);
+    assert_eq!(*observed.payloads.lock().unwrap(), b"??");
+
+    let mut old_agent = client.latency_probe().unwrap();
+    assert_eq!(
+      old_agent.sample().unwrap_err().kind(),
+      io::ErrorKind::UnexpectedEof,
+    );
+    assert_eq!(*observed.payloads.lock().unwrap(), b"??");
+
+    let mut broken = client.latency_probe().unwrap();
+    assert_eq!(
+      broken.sample().unwrap_err().kind(),
+      io::ErrorKind::InvalidData,
+    );
+    assert_eq!(
+      broken.sample().unwrap_err().kind(),
+      io::ErrorKind::NotConnected,
+    );
   }
 
   #[test]

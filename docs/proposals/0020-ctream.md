@@ -198,6 +198,13 @@ the native resize edges on macOS or the bottom-right resize grip on Linux and
 Windows. The inspector keeps its own panel. The compositor can constrain
 window sizes, especially when maximized or fullscreen.
 
+Enable **Debug overlay** in setup before selecting **Start** to show diagnostics
+in the viewer. Download and upload show ctream application bytes per second for
+the active source, excluding SSH and TCP framing. Latency is round-trip time to
+the agent over a dedicated channel on the same transport. Agents older than
+`ctream_agent` 1.0.10 show `N/A` for latency. FPS counts fresh frames drawn in
+the viewer. **Frame** shows the dimensions of the received capture in pixels.
+
 Both windows use the same egui context and wgpu renderer. The native viewer is
 an immediate child viewport, so its events and repaint requests run through
 the root setup viewport even while setup is hidden. Only the viewer viewport
@@ -218,8 +225,10 @@ A late result must not replace a newer choice or keep a discarded capture
 alive. Start remains unavailable until the current capture has produced a
 live frame. Closing setup or quitting the application cancels capture, input,
 and pending requests. Closing the viewer cancels its input initialization and
-releases held keys/buttons while retaining capture for setup. A terminal
-capture failure closes input; after closing the viewer, setup can retry capture.
+releases held keys/buttons while retaining capture for setup. When a remote
+window capture ends cleanly, the viewer closes and setup refreshes the window
+list. If capture fails, the viewer keeps the last frame and ends input so you
+can check the capture error and retry from setup.
 
 The target-independent catalog uses `ctream_agent` 1.0.8 (build 8), with
 explicit system metadata so custom driver IDs need no platform naming

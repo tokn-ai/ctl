@@ -1,5 +1,5 @@
 use super::{
-  Preview, PreviewMode, background, drivers, input,
+  Preview, PreviewMode, background, chrome, drivers, input,
   requests::{Requests, Scoped},
   semantic, view,
 };
@@ -192,6 +192,7 @@ pub(super) struct Viewer<T: Transport> {
   viewing: bool,
   viewer_opening: bool,
   viewer_size: view::AspectResize,
+  chrome: chrome::Chrome,
   semantic: Option<semantic::Panel<Scoped<T>>>,
 }
 
@@ -236,6 +237,7 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
       viewing: false,
       viewer_opening: false,
       viewer_size: view::AspectResize::default(),
+      chrome: chrome::Chrome::default(),
       semantic: None,
     };
     viewer.discover(ctx);
@@ -668,6 +670,7 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
   }
 
   fn close_viewer(&mut self, ctx: &egui::Context) {
+    self.chrome.dismiss();
     self.control = None;
     if let Some(preview) = &mut self.preview {
       preview.stop_control();
@@ -974,42 +977,30 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
   }
 
   fn show_viewer(&mut self, ctx: &egui::Context) {
-    egui::TopBottomPanel::top("viewer_navigation")
-      .exact_height(view::TOOLBAR_HEIGHT)
-      .show(ctx, |ui| {
-        ui.horizontal_centered(|ui| {
-          let input_error = self
-            .preview
-            .as_ref()
-            .and_then(|preview| preview.input_error.as_deref());
-          if let Some(error) = self.preview_error.as_deref().or(input_error) {
-            ui.add(
-              egui::Label::new(egui::RichText::new(error).color(ui.visuals().error_fg_color))
-                .truncate(),
-            )
-            .on_hover_text(error);
-            return;
-          }
-          ui.label(if self.control.is_some() {
-            "Enabling control…"
-          } else if self
-            .preview
-            .as_ref()
-            .is_some_and(|preview| preview.input.is_some())
-          {
-            "Control enabled"
-          } else {
-            "View only"
-          });
-          if let Some(preview) = &self.preview {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-              let driver = preview.driver.as_deref().unwrap_or("agent default");
-              ui.add(egui::Label::new(egui::RichText::new(driver).small()).truncate())
-                .on_hover_text(driver);
-            });
-          }
-        });
-      });
+    let preview = self.preview.as_ref();
+    let error = self
+      .preview_error
+      .as_deref()
+      .or_else(|| preview.and_then(|preview| preview.input_error.as_deref()));
+    let status = if self.control.is_some() {
+      "Enabling control…"
+    } else if preview.is_some_and(|preview| preview.input.is_some()) {
+      "Control enabled"
+    } else {
+      "View only"
+    };
+    let chrome = self.chrome.show(
+      ctx,
+      chrome::Status {
+        text: error.unwrap_or(status),
+        error: error.is_some(),
+        driver: preview.map(|preview| preview.driver.as_deref().unwrap_or("agent default")),
+      },
+    );
+    if chrome.close {
+      self.close_viewer(ctx);
+      return;
+    }
     let frame_size = self
       .preview
       .as_ref()
@@ -1036,9 +1027,12 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
           elements,
           PreviewMode::Viewer {
             interactive: self.control.is_none(),
+            pointer_regions: &chrome.pointer_regions,
           },
         );
-        if let Some(size) = preview.image_size() {
+        if !chrome.resizing
+          && let Some(size) = preview.image_size()
+        {
           self.viewer_size.update(ctx, size, video);
         }
       });
@@ -1046,7 +1040,8 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
 
   fn show_viewer_window(&mut self, ctx: &egui::Context) {
     let mut builder = egui::ViewportBuilder::default()
-      .with_title("ctream viewer")
+      .with_title(chrome::VIEWER_TITLE)
+      .with_decorations(false)
       .with_min_inner_size(view::MIN_WINDOW)
       .with_active(true);
     if self.viewer_opening {
@@ -1063,6 +1058,7 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
       let monitor = ctx.input(|input| input.viewport().monitor_size);
       builder = builder.with_inner_size(view::initial_window(image, sidebar, monitor));
       self.viewer_size = view::AspectResize::default();
+      self.chrome = chrome::Chrome::default();
     }
     ctx.show_viewport_immediate(viewer_id(), builder, |child, class| {
       if class == egui::ViewportClass::Embedded {
@@ -1122,6 +1118,7 @@ impl<T: Transport + Send + Sync + 'static> eframe::App for Viewer<T> {
 
 impl<T: Transport> Viewer<T> {
   fn shutdown(&mut self) {
+    self.chrome.dismiss();
     // Close active stdin streams before cancelling any outstanding requests.
     self.preview = None;
     self.semantic = None;

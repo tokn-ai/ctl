@@ -2,7 +2,7 @@ use super::*;
 use ctream_client::transport::{Cancellation, Channel};
 use std::{
   cell::RefCell,
-  collections::VecDeque,
+  collections::{HashMap, VecDeque},
   io::{Read, Write},
   rc::Rc,
   sync::{Condvar, Mutex},
@@ -434,11 +434,17 @@ impl NativeFrame {
   }
 
   fn child(&self) -> &egui::FullOutput {
-    &self
-      .children
-      .last()
+    self
+      .viewport(viewer_id())
       .expect("native viewer must be rendered")
-      .1
+  }
+
+  fn viewport(&self, id: egui::ViewportId) -> Option<&egui::FullOutput> {
+    self
+      .children
+      .iter()
+      .rev()
+      .find_map(|(viewport, output)| (*viewport == id).then_some(output))
   }
 }
 
@@ -450,12 +456,25 @@ fn native_frame(
   root_input: egui::RawInput,
   child_input: egui::RawInput,
 ) -> NativeFrame {
+  native_frame_with_inputs(viewer, ctx, root_input, [(viewer_id(), child_input)])
+}
+
+fn native_frame_with_inputs<const N: usize>(
+  viewer: &mut Viewer<Mock>,
+  ctx: &egui::Context,
+  root_input: egui::RawInput,
+  inputs: [(egui::ViewportId, egui::RawInput); N],
+) -> NativeFrame {
   ctx.set_embed_viewports(false);
-  let input = Rc::new(RefCell::new(child_input));
+  let inputs = RefCell::new(HashMap::from(inputs));
   let children = Rc::new(RefCell::new(Vec::new()));
   let recorded = Rc::clone(&children);
   egui::Context::set_immediate_viewport_renderer(move |ctx, mut viewport| {
-    let mut input = input.borrow_mut().take();
+    let mut input = inputs
+      .borrow_mut()
+      .entry(viewport.ids.this)
+      .or_insert_with(|| raw(Vec::new()))
+      .take();
     input.viewport_id = viewport.ids.this;
     input.viewports.entry(viewport.ids.this).or_default().parent = Some(viewport.ids.parent);
     let output = ctx.run(input, |ctx| (viewport.viewport_ui_cb)(ctx));
@@ -608,7 +627,7 @@ fn native_viewer_hides_setup_and_close_restores_it_without_reopening_capture() {
   );
   assert_eq!(
     opened.root.viewport_output[&viewer_id()].builder.inner_size,
-    Some(egui::vec2(1100.0, 550.0 + view::TOOLBAR_HEIGHT))
+    Some(egui::vec2(1100.0, 550.0))
   );
   assert!(
     opened
@@ -718,6 +737,418 @@ fn native_viewer_hides_setup_and_close_restores_it_without_reopening_capture() {
   );
 }
 
+fn viewer_input(size: egui::Vec2, events: Vec<egui::Event>) -> egui::RawInput {
+  egui::RawInput {
+    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+    ..raw(events)
+  }
+}
+
+fn viewer_requests_size(frame: &NativeFrame, size: egui::Vec2) -> bool {
+  frame
+    .commands(viewer_id())
+    .any(|command| *command == egui::ViewportCommand::InnerSize(size))
+}
+
+#[test]
+fn viewer_controls_reveal_in_a_separate_row_and_keep_the_video_size() {
+  let mock = Mock::default();
+  let ctx = egui::Context::default();
+  let mut viewer = create(&mock, &ctx, false, "auto");
+  poll_until(&mut viewer, &ctx, ready);
+  let mut pixels = b"P6\n40 20\n255\n".to_vec();
+  pixels.extend([0; 40 * 20 * 3]);
+  mock.captures()[0].push_frame_bytes(&pixels);
+  poll_until(&mut viewer, &ctx, |viewer| {
+    viewer.preview.as_ref().unwrap().image_size() == Some([40, 20])
+  });
+  viewer.start(&ctx);
+  poll_until(&mut viewer, &ctx, |viewer| {
+    viewer.preview.as_ref().unwrap().input.is_some()
+  });
+  let input = mock.inputs().pop().unwrap();
+  let texture = viewer
+    .preview
+    .as_ref()
+    .unwrap()
+    .texture
+    .as_ref()
+    .unwrap()
+    .id();
+  let video_size = egui::vec2(400.0, 200.0);
+  let title_size = egui::vec2(0.0, crate::chrome::BAR_HEIGHT);
+  let expanded = video_size + title_size;
+  let video_at = |offset| egui::Rect::from_min_size(egui::Pos2::ZERO + offset, video_size);
+  let mut frame = |size, events| {
+    native_frame(
+      &mut viewer,
+      &ctx,
+      raw(Vec::new()),
+      viewer_input(size, events),
+    )
+  };
+  let has_controls = |frame: &NativeFrame| {
+    frame.child().shapes.iter().any(|shape| {
+      matches!(&shape.shape, egui::epaint::Shape::Text(text) if text.galley.text() == "ctream viewer")
+    })
+  };
+  let opened = frame(video_size, Vec::new());
+  assert_eq!(
+    opened.root.viewport_output[&viewer_id()]
+      .builder
+      .decorations,
+    Some(false)
+  );
+  assert!(!has_controls(&opened));
+  assert_eq!(
+    rendered_image(opened.child(), texture),
+    video_at(egui::Vec2::ZERO)
+  );
+
+  let edge = egui::pos2(100.0, crate::chrome::REVEAL_HEIGHT * 0.5);
+  let grow = frame(video_size, vec![egui::Event::PointerMoved(edge)]);
+  assert!(viewer_requests_size(&grow, expanded));
+  assert!(!has_controls(&grow));
+  assert_eq!(
+    rendered_image(grow.child(), texture),
+    video_at(egui::Vec2::ZERO)
+  );
+
+  frame(expanded, Vec::new());
+  let shown = frame(expanded, Vec::new());
+  assert!(has_controls(&shown));
+  assert_eq!(rendered_image(shown.child(), texture), video_at(title_size));
+  assert!(label_center(shown.child(), "ctream viewer").y < crate::chrome::BAR_HEIGHT);
+  assert!(!viewer_requests_size(&shown, expanded));
+
+  let click = egui::pos2(320.0, crate::chrome::BAR_HEIGHT + edge.y);
+  let before = input.sent().len();
+  frame(
+    expanded,
+    vec![
+      egui::Event::PointerMoved(click),
+      primary_button(click, true),
+      primary_button(click, false),
+    ],
+  );
+  let wire = input.sent();
+  // The click lands on row zero of the video, even though its window Y
+  // coordinate includes the title row.
+  assert!(wire[before..].contains("move 32 0 40 20\nbutton 1 1\n"));
+  assert!(wire[before..].contains("button 1 0\n"));
+
+  let shrink = frame(expanded, vec![egui::Event::PointerGone]);
+  assert!(viewer_requests_size(&shrink, video_size));
+  assert!(has_controls(&shrink));
+  assert_eq!(
+    rendered_image(shrink.child(), texture),
+    video_at(title_size)
+  );
+  let hidden = frame(video_size, Vec::new());
+  assert!(!has_controls(&hidden));
+  assert_eq!(
+    rendered_image(hidden.child(), texture),
+    video_at(egui::Vec2::ZERO)
+  );
+  assert!(!viewer_requests_size(&hidden, video_size));
+}
+
+#[test]
+fn viewer_collapses_only_the_height_added_by_a_constrained_resize() {
+  let mock = Mock::default();
+  let ctx = egui::Context::default();
+  let mut viewer = create(&mock, &ctx, false, "auto");
+  poll_until(&mut viewer, &ctx, ready);
+  viewer.start(&ctx);
+
+  let original = egui::vec2(400.0, 200.0);
+  let expanded = original + egui::vec2(0.0, crate::chrome::BAR_HEIGHT);
+  let partial = (original + expanded) * 0.5;
+  let mut frame = |size, time, events| {
+    let mut child = viewer_input(size, events);
+    child.time = Some(time);
+    native_frame(&mut viewer, &ctx, raw(Vec::new()), child)
+  };
+  frame(original, 1.0, Vec::new());
+  let grow = frame(
+    original,
+    1.01,
+    vec![egui::Event::PointerMoved(egui::pos2(100.0, 3.0))],
+  );
+  assert!(viewer_requests_size(&grow, expanded));
+
+  frame(partial, 1.05, Vec::new());
+  let shown = frame(partial, 1.2, Vec::new());
+  assert!(label_center(shown.child(), "ctream viewer").y < crate::chrome::BAR_HEIGHT);
+
+  let shrink = frame(partial, 1.21, vec![egui::Event::PointerGone]);
+  assert!(viewer_requests_size(&shrink, original));
+}
+
+fn primary_button(pos: egui::Pos2, pressed: bool) -> egui::Event {
+  egui::Event::PointerButton {
+    pos,
+    button: egui::PointerButton::Primary,
+    pressed,
+    modifiers: egui::Modifiers::NONE,
+  }
+}
+
+#[test]
+fn attached_controls_leave_the_video_fixed_and_handle_only_local_input() {
+  use egui::ViewportCommand;
+
+  let mock = Mock::default();
+  let ctx = egui::Context::default();
+  let mut viewer = create(&mock, &ctx, false, "auto");
+  poll_until(&mut viewer, &ctx, ready);
+  let mut pixels = b"P6\n40 20\n255\n".to_vec();
+  pixels.extend([0; 40 * 20 * 3]);
+  let capture = mock.captures().pop().unwrap();
+  capture.push_frame_bytes(&pixels);
+  poll_until(&mut viewer, &ctx, |viewer| {
+    viewer.preview.as_ref().unwrap().image_size() == Some([40, 20])
+  });
+  viewer.start(&ctx);
+  poll_until(&mut viewer, &ctx, |viewer| {
+    viewer.preview.as_ref().unwrap().input.is_some()
+  });
+  let remote = mock.inputs().pop().unwrap();
+  let texture = viewer
+    .preview
+    .as_ref()
+    .unwrap()
+    .texture
+    .as_ref()
+    .unwrap()
+    .id();
+  let size = egui::vec2(400.0, 200.0);
+  let screen_rect = egui::Rect::from_min_size(egui::pos2(300.0, 240.0), size);
+  let controls = crate::chrome::controls_id();
+  let mut frame = |hovered, video_events, panel_events| {
+    viewer.chrome.test_attached_hover = hovered;
+    let mut video = viewer_input(size, video_events);
+    let info = video.viewports.entry(viewer_id()).or_default();
+    info.inner_rect = Some(screen_rect);
+    info.outer_rect = Some(screen_rect);
+    let panel = viewer_input(egui::vec2(size.x, crate::chrome::BAR_HEIGHT), panel_events);
+    native_frame_with_inputs(
+      &mut viewer,
+      &ctx,
+      raw(Vec::new()),
+      [(viewer_id(), video), (controls, panel)],
+    )
+  };
+  let check_geometry = |frame: &NativeFrame| {
+    assert_eq!(
+      rendered_image(frame.child(), texture).translate(screen_rect.min.to_vec2()),
+      screen_rect
+    );
+    assert!(!frame.commands(viewer_id()).any(|command| matches!(
+      command,
+      ViewportCommand::InnerSize(_) | ViewportCommand::OuterPosition(_)
+    )));
+  };
+
+  let opened = frame(None, Vec::new(), Vec::new());
+  check_geometry(&opened);
+  assert!(opened.viewport(controls).is_none());
+  let shown = frame(Some(true), Vec::new(), Vec::new());
+  check_geometry(&shown);
+  let panel = shown
+    .viewport(controls)
+    .expect("attached controls were drawn");
+  let close = label_center(panel, "×");
+
+  let top_pixel = egui::pos2(320.0, 3.0);
+  let before = remote.sent().len();
+  let clicked = frame(
+    Some(true),
+    vec![
+      egui::Event::PointerMoved(top_pixel),
+      primary_button(top_pixel, true),
+      primary_button(top_pixel, false),
+    ],
+    Vec::new(),
+  );
+  check_geometry(&clicked);
+  assert!(remote.sent()[before..].contains("move 32 0 40 20\nbutton 1 1\n"));
+
+  let hidden = frame(Some(false), Vec::new(), Vec::new());
+  check_geometry(&hidden);
+  assert!(hidden.viewport(controls).is_none());
+
+  let before_close = remote.sent();
+  frame(
+    Some(true),
+    Vec::new(),
+    vec![egui::Event::PointerMoved(close)],
+  );
+  frame(Some(true), Vec::new(), vec![primary_button(close, true)]);
+  let closed = frame(Some(true), Vec::new(), vec![primary_button(close, false)]);
+  assert!(!viewer.viewing);
+  assert!(remote.closed() && remote.cancelled());
+  assert_eq!(remote.sent(), before_close, "panel clicks must stay local");
+  assert!(!capture.closed() && !capture.cancelled());
+  assert!(
+    closed
+      .commands(egui::ViewportId::ROOT)
+      .any(|command| *command == ViewportCommand::Visible(true))
+  );
+  label_center(&closed.root, "CAPTURE DRIVER");
+}
+
+#[test]
+fn viewer_controls_stay_local_and_closing_restores_setup() {
+  use egui::ViewportCommand;
+
+  let mock = Mock::default();
+  let ctx = egui::Context::default();
+  let mut viewer = create(&mock, &ctx, false, "auto");
+  poll_until(&mut viewer, &ctx, ready);
+  viewer.start(&ctx);
+  poll_until(&mut viewer, &ctx, |viewer| {
+    viewer.preview.as_ref().unwrap().input.is_some()
+  });
+  let input = mock.inputs().pop().unwrap();
+  let capture = mock.captures().pop().unwrap();
+  let size = raw(Vec::new()).screen_rect.unwrap().size();
+  let expanded = size + egui::vec2(0.0, crate::chrome::BAR_HEIGHT);
+  let y = crate::chrome::BAR_HEIGHT * 0.5;
+  let closed = {
+    let mut frame = |size, events| {
+      native_frame(
+        &mut viewer,
+        &ctx,
+        raw(Vec::new()),
+        viewer_input(size, events),
+      )
+    };
+    frame(size, Vec::new());
+    frame(
+      size,
+      vec![egui::Event::PointerMoved(egui::pos2(
+        100.0,
+        crate::chrome::REVEAL_HEIGHT * 0.5,
+      ))],
+    );
+    let mut frame = |events| frame(expanded, events);
+    frame(Vec::new());
+
+    let drag = egui::pos2(100.0, y);
+    let dragging = frame(vec![
+      egui::Event::PointerMoved(drag),
+      primary_button(drag, true),
+    ]);
+    assert!(
+      dragging
+        .commands(viewer_id())
+        .any(|command| *command == ViewportCommand::StartDrag)
+    );
+    frame(vec![primary_button(drag, false)]);
+
+    let mut click = |from_right| {
+      let at = egui::pos2(size.x - crate::chrome::BUTTON_WIDTH * from_right, y);
+      frame(vec![egui::Event::PointerMoved(at)]);
+      frame(vec![primary_button(at, true)]);
+      frame(vec![primary_button(at, false)])
+    };
+    let minimized = click(2.5);
+    assert!(
+      minimized
+        .commands(viewer_id())
+        .any(|command| *command == ViewportCommand::Minimized(true))
+    );
+    let maximized = click(1.5);
+    assert!(
+      maximized
+        .commands(viewer_id())
+        .any(|command| *command == ViewportCommand::Maximized(true))
+    );
+    click(0.5)
+  };
+  assert!(!viewer.viewing);
+  assert!(input.closed() && input.cancelled());
+  assert!(!input.sent().contains("button 1"));
+  assert!(!capture.closed() && !capture.cancelled());
+  assert!(
+    closed
+      .commands(egui::ViewportId::ROOT)
+      .any(|command| *command == ViewportCommand::Visible(true))
+  );
+  label_center(&closed.root, "CAPTURE DRIVER");
+}
+
+#[test]
+fn viewer_keeps_remote_drag_owned_by_video_across_the_top_edge() {
+  let mock = Mock::default();
+  let ctx = egui::Context::default();
+  let mut viewer = create(&mock, &ctx, false, "auto");
+  poll_until(&mut viewer, &ctx, ready);
+  viewer.start(&ctx);
+  poll_until(&mut viewer, &ctx, |viewer| {
+    viewer.preview.as_ref().unwrap().input.is_some()
+  });
+  let input = mock.inputs().pop().unwrap();
+  let mut frame = |events| native_frame(&mut viewer, &ctx, raw(Vec::new()), raw(events));
+  let start = egui::pos2(250.0, 250.0);
+  let end = egui::pos2(250.0, crate::chrome::REVEAL_HEIGHT * 0.5);
+  frame(Vec::new());
+  frame(vec![
+    egui::Event::PointerMoved(start),
+    primary_button(start, true),
+  ]);
+  let across_edge = frame(vec![egui::Event::PointerMoved(end)]);
+  assert!(
+    !across_edge
+      .commands(viewer_id())
+      .any(|command| matches!(command, egui::ViewportCommand::InnerSize(_))),
+    "a drag from the video must not resize the viewer"
+  );
+  let released = frame(vec![primary_button(end, false)]);
+  assert!(!released.commands(viewer_id()).any(|command| matches!(
+    command,
+    egui::ViewportCommand::StartDrag | egui::ViewportCommand::BeginResize(_)
+  )));
+  let wire = input.sent();
+  assert_eq!(
+    wire
+      .lines()
+      .filter(|line| line.starts_with("button 1 "))
+      .collect::<Vec<_>>(),
+    ["button 1 1", "button 1 0"]
+  );
+}
+
+#[cfg(any(target_os = "linux", windows))]
+#[test]
+fn viewer_resize_grip_does_not_forward_clicks() {
+  use egui::ViewportCommand;
+
+  let mock = Mock::default();
+  let ctx = egui::Context::default();
+  let mut viewer = create(&mock, &ctx, false, "auto");
+  poll_until(&mut viewer, &ctx, ready);
+  viewer.start(&ctx);
+  poll_until(&mut viewer, &ctx, |viewer| {
+    viewer.preview.as_ref().unwrap().input.is_some()
+  });
+  let input = mock.inputs().pop().unwrap();
+  let edge = raw(Vec::new()).screen_rect.unwrap().max;
+  let at = edge - egui::Vec2::splat(crate::chrome::RESIZE_GRIP * 0.5);
+  let mut frame = |events| native_frame(&mut viewer, &ctx, raw(Vec::new()), raw(events));
+  frame(Vec::new());
+  frame(vec![egui::Event::PointerMoved(at)]);
+  let resizing = frame(vec![primary_button(at, true)]);
+  frame(vec![primary_button(at, false)]);
+  assert!(
+    resizing.commands(viewer_id()).any(|command| {
+      *command == ViewportCommand::BeginResize(egui::ResizeDirection::SouthEast)
+    })
+  );
+  assert!(!input.sent().contains("button 1"));
+}
+
 #[test]
 fn viewer_input_isolated_from_setup_and_focus_loss_releases_held_state() {
   let mock = Mock::default();
@@ -819,7 +1250,7 @@ fn resized_native_viewer_maps_clicks_using_its_own_image_rectangle() {
     child.screen_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size));
     let output = native_frame(&mut viewer, &ctx, raw(Vec::new()), child.clone());
     let rect = rendered_image(output.child(), texture);
-    assert_eq!(rect.min, egui::pos2(0.0, view::TOOLBAR_HEIGHT));
+    assert_eq!(rect.min, egui::Pos2::ZERO);
     assert_eq!(rect.max, egui::Pos2::ZERO + size);
     let at = rect.min + rect.size() * egui::vec2(0.75, 0.5);
     let before = input.sent().len();
@@ -865,25 +1296,24 @@ fn native_viewer_restores_the_aspect_after_local_and_source_resizes() {
     time: Some(time),
     ..raw(Vec::new())
   };
-  let toolbar = view::TOOLBAR_HEIGHT;
   let initial = native_frame(
     &mut viewer,
     &ctx,
     raw(Vec::new()),
-    child(1100.0, 550.0 + toolbar, 1.0),
+    child(1100.0, 550.0, 1.0),
   );
   assert_eq!(
     initial.root.viewport_output[&viewer_id()]
       .builder
       .inner_size,
-    Some(egui::vec2(1100.0, 550.0 + toolbar))
+    Some(egui::vec2(1100.0, 550.0))
   );
 
   let dragging = native_frame(
     &mut viewer,
     &ctx,
     raw(Vec::new()),
-    child(800.0, 550.0 + toolbar, 1.05),
+    child(800.0, 550.0, 1.05),
   );
   assert!(
     !dragging
@@ -894,14 +1324,14 @@ fn native_viewer_restores_the_aspect_after_local_and_source_resizes() {
     &mut viewer,
     &ctx,
     raw(Vec::new()),
-    child(800.0, 550.0 + toolbar, 1.25),
+    child(800.0, 550.0, 1.25),
   );
-  assert!(settled.commands(viewer_id()).any(|command| matches!(command, egui::ViewportCommand::InnerSize(size) if *size == egui::vec2(800.0, 400.0 + toolbar))));
+  assert!(settled.commands(viewer_id()).any(|command| matches!(command, egui::ViewportCommand::InnerSize(size) if *size == egui::vec2(800.0, 400.0))));
   let unchanged = native_frame(
     &mut viewer,
     &ctx,
     raw(Vec::new()),
-    child(800.0, 550.0 + toolbar, 1.40),
+    child(800.0, 550.0, 1.40),
   );
   assert!(
     !unchanged
@@ -912,7 +1342,7 @@ fn native_viewer_restores_the_aspect_after_local_and_source_resizes() {
     &mut viewer,
     &ctx,
     raw(Vec::new()),
-    child(800.0, 400.0 + toolbar, 1.45),
+    child(800.0, 400.0, 1.45),
   );
 
   mock.captures()[0].push_frame_bytes(b"P6\n2 2\n255\nabcdefghijkl");
@@ -923,15 +1353,15 @@ fn native_viewer_restores_the_aspect_after_local_and_source_resizes() {
     &mut viewer,
     &ctx,
     raw(Vec::new()),
-    child(800.0, 400.0 + toolbar, 1.50),
+    child(800.0, 400.0, 1.50),
   );
   let source_resized = native_frame(
     &mut viewer,
     &ctx,
     raw(Vec::new()),
-    child(800.0, 400.0 + toolbar, 1.70),
+    child(800.0, 400.0, 1.70),
   );
-  assert!(source_resized.commands(viewer_id()).any(|command| matches!(command, egui::ViewportCommand::InnerSize(size) if *size == egui::vec2(800.0, 800.0 + toolbar))));
+  assert!(source_resized.commands(viewer_id()).any(|command| matches!(command, egui::ViewportCommand::InnerSize(size) if *size == egui::vec2(800.0, 800.0))));
 }
 
 #[test]

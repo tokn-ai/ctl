@@ -1,6 +1,6 @@
 use rustix::fs::{Mode, OFlags};
 use sha2::{Digest as _, Sha256};
-use std::fs::{self, File, Permissions};
+use std::fs::{File, Permissions};
 use std::io::{self, Read as _, Seek as _};
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};

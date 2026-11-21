@@ -1,4 +1,5 @@
 use super::*;
+use std::fs;
 use std::os::unix::fs::DirBuilderExt as _;
 
 struct Scratch(PathBuf);

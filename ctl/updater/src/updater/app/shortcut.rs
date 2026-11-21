@@ -8,9 +8,15 @@ use std::process::{Command, Stdio};
 pub(super) fn create(destination: &Path, target: &Path) -> io::Result<()> {
   let script = r"
 $ErrorActionPreference = 'Stop'
-$link = (New-Object -ComObject WScript.Shell).CreateShortcut($env:CTLUP_DESKTOP_SHORTCUT_PATH)
-$link.TargetPath = $env:CTLUP_DESKTOP_SHORTCUT_TARGET
-$link.WorkingDirectory = [IO.Path]::GetDirectoryName($env:CTLUP_DESKTOP_SHORTCUT_TARGET)
+$destination = [IO.Path]::GetFullPath($env:CTLUP_DESKTOP_SHORTCUT_PATH)
+$target = [IO.Path]::GetFullPath($env:CTLUP_DESKTOP_SHORTCUT_TARGET)
+if (![IO.Directory]::Exists([IO.Path]::GetDirectoryName($destination))) {
+  throw 'The staged shortcut directory does not exist.'
+}
+if (![IO.File]::Exists($target)) { throw 'The desktop executable does not exist.' }
+$link = (New-Object -ComObject WScript.Shell).CreateShortcut($destination)
+$link.TargetPath = $target
+$link.WorkingDirectory = [IO.Path]::GetDirectoryName($target)
 $link.Save()
 ";
   run(script, destination, target)?;
@@ -24,7 +30,8 @@ $link.Save()
 pub(super) fn managed(shortcut: &Path, store: &Path) -> io::Result<bool> {
   let script = r"
 $ErrorActionPreference = 'Stop'
-$link = (New-Object -ComObject WScript.Shell).CreateShortcut($env:CTLUP_DESKTOP_SHORTCUT_PATH)
+$destination = [IO.Path]::GetFullPath($env:CTLUP_DESKTOP_SHORTCUT_PATH)
+$link = (New-Object -ComObject WScript.Shell).CreateShortcut($destination)
 if (!$link.TargetPath) { exit }
 $target = [IO.Path]::GetFullPath($link.TargetPath)
 $prefix = [IO.Path]::GetFullPath($env:CTLUP_DESKTOP_SHORTCUT_TARGET).TrimEnd('\') + '\'

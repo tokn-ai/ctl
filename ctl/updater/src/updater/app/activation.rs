@@ -255,14 +255,12 @@ impl Workspace {
   fn prepare_launch_entry(&self, payload: &Path) -> io::Result<LaunchEntry> {
     let destination = self.destination();
     self.managed_entry()?;
-    let temp = self.staging.join(format!(
-      ".ctmux-{}{}",
-      uuid::Uuid::new_v4(),
-      launch_extension()
-    ));
+    let name = destination
+      .file_name()
+      .ok_or_else(|| invalid("desktop launch path must have a filename"))?;
     let entry = LaunchEntry {
       destination: destination.to_owned(),
-      staged: temp,
+      staged: self.staging.join(name),
     };
     #[cfg(unix)]
     {
@@ -322,10 +320,6 @@ impl Drop for Workspace {
   fn drop(&mut self) {
     let _ = fs::remove_dir_all(&self.staging);
   }
-}
-
-fn launch_extension() -> &'static str {
-  if cfg!(windows) { ".lnk" } else { "" }
 }
 
 fn metadata(path: &Path) -> io::Result<Option<Metadata>> {

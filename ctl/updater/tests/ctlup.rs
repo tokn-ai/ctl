@@ -525,13 +525,14 @@ fn dev_rebuilds_the_current_checkout_when_its_payload_is_missing() {
   .unwrap();
   let bin = workspace.join("bin");
   fs::create_dir(&bin).unwrap();
+  let layout_version = ctl_core::installations::DEVELOPMENT_LAYOUT_VERSION;
   let write_components = |revision| {
     let (info, _) = fixture_payload(revision);
     for name in ctl_core::bundle_layout::ALL.into_iter().chain(["ctlup"]) {
       let metadata = serde_json::to_string(&info["ctl"]).unwrap();
       let executable = bin.join(name);
       fs::write(&executable, format!(
-        "#!/bin/sh\ncase \"$1\" in\n--component-info) printf '%s\\n' '{metadata}';;\n--version) printf '%s\\n' '{name} 0.1.2';;\ninstallation-layout-version) printf '1\\n';;\n*) exit 1;;\nesac\n"
+        "#!/bin/sh\ncase \"$1\" in\n--component-info) printf '%s\\n' '{metadata}';;\n--version) printf '%s\\n' '{name} 0.1.2';;\ninstallation-layout-version) printf '%s\\n' '{layout_version}';;\n*) exit 1;;\nesac\n"
       )).unwrap();
       fs::set_permissions(executable, fs::Permissions::from_mode(0o700)).unwrap();
     }

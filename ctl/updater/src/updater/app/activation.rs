@@ -255,12 +255,17 @@ impl Workspace {
   fn prepare_launch_entry(&self, payload: &Path) -> io::Result<LaunchEntry> {
     let destination = self.destination();
     self.managed_entry()?;
-    let name = destination
-      .file_name()
-      .ok_or_else(|| invalid("desktop launch path must have a filename"))?;
+    let staged = if cfg!(windows) {
+      self.staging.join("ctmux.lnk")
+    } else {
+      // The archive may still contain the named desktop payload in staging.
+      self
+        .staging
+        .join(format!(".ctmux-{}", uuid::Uuid::new_v4()))
+    };
     let entry = LaunchEntry {
       destination: destination.to_owned(),
-      staged: self.staging.join(name),
+      staged,
     };
     #[cfg(unix)]
     {

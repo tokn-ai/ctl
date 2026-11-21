@@ -4,8 +4,39 @@ use ctream_driver::{
   CaptureDisplay, CaptureLifetime, CaptureSource, CaptureWindow, Driver, ForwardInput,
   ForwardWindowInput, InputSource, Result,
 };
-use ctream_proto::{CAPTURE_STARTED_LIMIT, CaptureFormat, CaptureStarted, valid_capture_driver};
-use std::io::{self, Write};
+use ctream_proto::{
+  CAPTURE_STARTED_LIMIT, CaptureFormat, CaptureStarted, PING_HELLO, PING_TOKEN,
+  valid_capture_driver,
+};
+use std::io::{self, Read, Write};
+
+/// Reply to latency probes over stdio until the client closes the channel.
+pub fn ping() -> Result<()> {
+  echo_ping(io::stdin().lock(), io::stdout().lock())?;
+  Ok(())
+}
+
+fn echo_ping(mut input: impl Read, mut output: impl Write) -> io::Result<()> {
+  output.write_all(&[PING_HELLO])?;
+  output.flush()?;
+  let mut token = [0];
+  loop {
+    match input.read_exact(&mut token) {
+      Ok(()) if token == [PING_TOKEN] => {
+        output.write_all(&token)?;
+        output.flush()?;
+      }
+      Ok(()) => {
+        return Err(io::Error::new(
+          io::ErrorKind::InvalidData,
+          "invalid ping token",
+        ));
+      }
+      Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),
+      Err(error) => return Err(error),
+    }
+  }
+}
 
 /// Announce an initialized capture before its first frame bytes. Sources may
 /// acquire platform resources lazily in `run`, so constructor success alone is
@@ -103,6 +134,19 @@ where
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn ping_announces_startup_and_echoes_only_valid_tokens() {
+    let mut output = Vec::new();
+    echo_ping(&b"??"[..], &mut output).unwrap();
+    assert_eq!(output, b"!??");
+
+    let mut output = Vec::new();
+    let error = echo_ping(&b"?x?"[..], &mut output).unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    assert_eq!(output, b"!?");
+  }
+
   struct Source {
     fail: bool,
   }

@@ -687,6 +687,15 @@ Contracts `1.0.1`–`1.0.8` keep their request and response shapes, including
 can still query and open per-monitor windows with older agents. Frame formats,
 input events, other named protocols, and product release versions are unchanged.
 
+The latency probe advances `ctream_agent` from `1.0.9` (build 9) to `1.0.10`
+(build 10). `1.0.10 ping` opens a target-independent stream on Linux and
+Windows. The agent writes and flushes a single `!` byte on startup. It then
+echoes and flushes each `?` byte on the same channel until EOF. The client
+excludes startup from the round-trip measurement. Contracts `1.0.1`–`1.0.9`
+retain their request and response shapes. Older agents leave the latency
+measurement unavailable while continuing to serve the existing operations.
+Other named protocols and product release versions are unchanged.
+
 Every PR description must state its protocol changes, or **None** when there
 are no changes. Include the previous and new contracts and the compatibility
 impact. Keep PR titles brief; put protocol details in the description.

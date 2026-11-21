@@ -1,7 +1,7 @@
 use ctream_agent::protocol::{Request, TargetOperation, parse};
 use ctream_agent::{
   capture as catalog,
-  runtime::{capture_display, capture_window, capture_with_metadata, forward_input},
+  runtime::{capture_display, capture_window, capture_with_metadata, forward_input, ping},
 };
 use ctream_driver::{CaptureDisplay, CaptureWindow, ControlSource, Driver, Result};
 use ctream_driver_capture::linux as capture;
@@ -12,6 +12,7 @@ use std::{env, io};
 pub(super) fn run() -> Result<()> {
   let args: Vec<_> = env::args().skip(1).collect();
   match parse(&args)? {
+    Request::Ping => ping(),
     Request::CaptureCatalog => {
       serde_json::to_writer(io::stdout().lock(), &catalog::catalog())?;
       Ok(())

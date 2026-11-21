@@ -4,6 +4,7 @@ use std::time::Duration;
 pub(super) const REVEAL_HEIGHT: f32 = 8.0;
 pub(super) const BAR_HEIGHT: f32 = 34.0;
 pub(super) const BUTTON_WIDTH: f32 = 40.0;
+pub(super) const BUTTON_STRIP_WIDTH: f32 = 3.0 * BUTTON_WIDTH;
 pub(super) const VIEWER_TITLE: &str = "ctream viewer";
 #[cfg(any(target_os = "macos", test))]
 pub(super) const CONTROLS_TITLE: &str = "ctream viewer controls";
@@ -275,9 +276,11 @@ fn show_controls(
     .with_resizable(false)
     .with_active(false)
     .with_visible(false);
-  // AppKit owns placement once attached, including the clipped panel width.
+  // AppKit owns placement and size once the panel is attached.
   if let Some(width) = initial_width {
-    builder = builder.with_inner_size([width, BAR_HEIGHT]);
+    builder = builder
+      .with_clamp_size_to_monitor_size(false)
+      .with_inner_size([width, BAR_HEIGHT]);
   }
   ctx.show_viewport_immediate(controls_id(), builder, |panel, class| {
     if class == egui::ViewportClass::Embedded {
@@ -297,7 +300,7 @@ fn title_bar(
   maximized: bool,
   draggable: bool,
 ) -> Option<Action> {
-  let buttons_left = bounds.right() - button_strip_width(bounds.width());
+  let buttons_left = bounds.right() - BUTTON_STRIP_WIDTH;
   let title = Rect::from_min_max(bounds.min, egui::pos2(buttons_left, bounds.bottom()));
   let dragging = draggable && primary_press_in(ctx, title);
   egui::TopBottomPanel::top("ctream_title_bar")
@@ -312,14 +315,12 @@ fn title_bar(
         bounds.bottom(),
         ui.visuals().widgets.noninteractive.bg_stroke,
       );
-      if title.width() > 20.0 {
-        ui.scope_builder(
-          egui::UiBuilder::new()
-            .max_rect(title.shrink2(egui::vec2(10.0, 0.0)))
-            .layout(egui::Layout::left_to_right(Align::Center)),
-          |ui| show_status(ui, status),
-        );
-      }
+      ui.scope_builder(
+        egui::UiBuilder::new()
+          .max_rect(title.shrink2(egui::vec2(10.0, 0.0)))
+          .layout(egui::Layout::left_to_right(Align::Center)),
+        |ui| show_status(ui, status),
+      );
       if control(ui, bounds, 2, "−", "Minimize") {
         return Some(Action::Minimize);
       }
@@ -358,24 +359,15 @@ fn show_status(ui: &mut egui::Ui, status: Status<'_>) {
   }
 }
 
-fn button_width(width: f32) -> f32 {
-  BUTTON_WIDTH.min(width * 0.25)
-}
-
-pub(super) fn button_strip_width(width: f32) -> f32 {
-  3.0 * button_width(width)
-}
-
 fn control(ui: &mut egui::Ui, bounds: Rect, index: u8, icon: &str, label: &str) -> bool {
-  let width = button_width(bounds.width());
-  let right = bounds.right() - f32::from(index) * width;
+  let right = bounds.right() - f32::from(index) * BUTTON_WIDTH;
   let slot = Rect::from_min_size(
-    egui::pos2(right - width, bounds.top()),
-    egui::vec2(width, BAR_HEIGHT),
+    egui::pos2(right - BUTTON_WIDTH, bounds.top()),
+    egui::vec2(BUTTON_WIDTH, BAR_HEIGHT),
   );
   ui.put(
-    slot.shrink2(egui::vec2(2.0_f32.min(width * 0.10), 3.0)),
-    egui::Button::new(egui::RichText::new(icon).size(17.0_f32.min(width * 0.7))).truncate(),
+    slot.shrink2(egui::vec2(2.0, 3.0)),
+    egui::Button::new(egui::RichText::new(icon).size(17.0)),
   )
   .on_hover_text(label)
   .clicked()

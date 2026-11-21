@@ -185,8 +185,9 @@ maximize, and close buttons. Closing the viewer releases input, activates
 setup, and keeps the same stream available as a view-only preview. On macOS
 the controls appear in an attached panel flush with the top of the viewer, or
 with the bottom when there is only room below. The panel stays visible while
-you drag it to move the viewer and follows the visible width of the video at
-the screen edges. The video keeps its screen position and size
+you drag it to move the viewer. It keeps the same horizontal position and
+width as the video, including when the viewer extends past a screen edge or
+across displays. The video keeps its screen position and size
 as the controls appear and hide. Windows, Linux, and macOS windows without room
 for the panel use a separate strip inside the viewer, above the video.
 A resizable viewer grows to make room for that strip.

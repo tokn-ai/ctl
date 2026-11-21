@@ -1,4 +1,4 @@
-use super::chrome::{CONTROLS_TITLE, VIEWER_TITLE, button_strip_width};
+use super::chrome::{BUTTON_STRIP_WIDTH, CONTROLS_TITLE, VIEWER_TITLE};
 use block2::RcBlock;
 use eframe::egui;
 use objc2::{MainThreadMarker, rc::Retained, runtime::AnyObject};
@@ -66,38 +66,23 @@ pub(super) fn viewer() -> Option<ViewerWindow> {
   })
 }
 
-fn horizontal_panel_frame(
-  video: NSRect,
-  y: f64,
-  height: f64,
-  work_areas: impl Iterator<Item = NSRect>,
-) -> Option<NSRect> {
-  let mut left = f64::INFINITY;
-  let mut right = f64::NEG_INFINITY;
-  for area in work_areas.filter(|area| y >= area.min().y && y + height <= area.max().y) {
-    let visible_left = video.min().x.max(area.min().x);
-    let visible_right = video.max().x.min(area.max().x);
-    if visible_left < visible_right {
-      left = left.min(visible_left);
-      right = right.max(visible_right);
-    }
-  }
-  (left < right).then(|| NSRect::new(NSPoint::new(left, y), NSSize::new(right - left, height)))
+fn panel_at(video: NSRect, y: f64, height: f64) -> NSRect {
+  // Use the viewer's full horizontal span in desktop coordinates. The window
+  // server composites whichever portion of each window a display can show.
+  NSRect::new(
+    NSPoint::new(video.min().x, y),
+    NSSize::new(video.size.width, height),
+  )
 }
 
-fn panel_frame(
-  video: NSRect,
-  work_area: NSRect,
-  height: f64,
-  work_areas: impl Iterator<Item = NSRect> + Clone,
-) -> Option<NSRect> {
+fn panel_frame(video: NSRect, work_area: NSRect, height: f64) -> Option<NSRect> {
   if video.is_empty() || work_area.is_empty() || height <= 0.0 {
     return None;
   }
   [video.max().y, video.min().y - height]
     .into_iter()
-    .filter(|&y| y >= work_area.min().y && y + height <= work_area.max().y)
-    .find_map(|y| horizontal_panel_frame(video, y, height, work_areas.clone()))
+    .find(|&y| y >= work_area.min().y && y + height <= work_area.max().y)
+    .map(|y| panel_at(video, y, height))
 }
 
 impl ViewerWindow {
@@ -106,12 +91,10 @@ impl ViewerWindow {
   }
 
   fn panel_frame(&self, height: f32) -> Option<NSRect> {
-    let screens = NSScreen::screens(MainThreadMarker::new()?).to_vec();
     panel_frame(
       self.window.frame(),
       self.window.screen()?.visibleFrame(),
       f64::from(height),
-      screens.iter().map(|screen| screen.visibleFrame()),
     )
   }
 
@@ -186,12 +169,11 @@ fn monitor_drag(
       NSEventType::LeftMouseDown => {
         drag.set(None);
         let panel_frame = panel.frame();
-        let zoom = ctx.zoom_factor();
         if report.windowNumber() != panel.windowNumber()
           || !drag_hit(
             location,
             panel_frame.size,
-            button_strip_width(panel_frame.size.width as f32 / zoom) * zoom,
+            BUTTON_STRIP_WIDTH * ctx.zoom_factor(),
           )
         {
           return event.as_ptr();
@@ -216,11 +198,10 @@ fn monitor_drag(
         // panel's previous origin. Sample the pointer in screen coordinates.
         let pointer = NSEvent::mouseLocation();
         let origin = tracked.viewer_at(pointer);
-        let screens = NSScreen::screens(mtm).to_vec();
-        let screen = screens
-          .iter()
+        let screen = NSScreen::screens(mtm)
+          .to_vec()
+          .into_iter()
           .find(|screen| NSPointInRect(pointer, screen.frame()))
-          .cloned()
           .or_else(|| viewer.screen());
         // Reserve room vertically for the grabbed strip. AppKit would
         // otherwise constrain the child independently at the menu bar or Dock.
@@ -232,13 +213,8 @@ fn monitor_drag(
           viewer.setFrameOrigin(origin);
         }
         let video = viewer.frame();
-        if let Some(frame) = horizontal_panel_frame(
-          video,
-          video.min().y + tracked.panel_offset_y,
-          height,
-          screens.iter().map(|screen| screen.visibleFrame()),
-        ) && frame != panel.frame()
-        {
+        let frame = panel_at(video, video.min().y + tracked.panel_offset_y, height);
+        if frame != panel.frame() {
           panel.setFrame_display(frame, false);
         }
       }
@@ -319,7 +295,7 @@ mod tests {
     let desktop = rect(-800.0, 24.0, 800.0, 580.0);
     let video = rect(-720.0, 180.0, 640.0, 360.0);
     assert_eq!(
-      panel_frame(video, desktop, 34.0, [desktop].into_iter()),
+      panel_frame(video, desktop, 34.0),
       Some(rect(-720.0, 540.0, 640.0, 34.0))
     );
   }
@@ -329,44 +305,40 @@ mod tests {
     let desktop = rect(0.0, 40.0, 800.0, 560.0);
     let video = rect(100.0, 200.0, 640.0, 400.0);
     assert_eq!(
-      panel_frame(video, desktop, 34.0, [desktop].into_iter()),
+      panel_frame(video, desktop, 34.0),
       Some(rect(100.0, 166.0, 640.0, 34.0))
     );
-    assert_eq!(
-      panel_frame(desktop, desktop, 34.0, [desktop].into_iter()),
-      None
-    );
+    assert_eq!(panel_frame(desktop, desktop, 34.0), None);
   }
 
   #[test]
-  fn title_panel_ends_at_the_visible_video_edges() {
+  fn title_panel_keeps_the_viewers_full_width_at_either_edge() {
     let desktop = rect(0.0, 40.0, 1440.0, 820.0);
     for (video, expected) in [
       (
         rect(-180.0, 100.0, 620.0, 360.0),
-        rect(0.0, 460.0, 440.0, 34.0),
+        rect(-180.0, 460.0, 620.0, 34.0),
       ),
       (
         rect(1040.0, 100.0, 620.0, 360.0),
-        rect(1040.0, 460.0, 400.0, 34.0),
+        rect(1040.0, 460.0, 620.0, 34.0),
       ),
     ] {
-      assert_eq!(
-        panel_frame(video, desktop, 34.0, [desktop].into_iter()),
-        Some(expected)
-      );
+      assert_eq!(panel_frame(video, desktop, 34.0), Some(expected));
     }
   }
 
   #[test]
-  fn title_panel_can_span_an_adjacent_display() {
+  fn title_panel_spans_displays_regardless_of_which_owns_the_viewer() {
     let left = rect(-800.0, 40.0, 800.0, 820.0);
     let right = rect(0.0, 40.0, 1440.0, 820.0);
-    let video = rect(-180.0, 100.0, 620.0, 360.0);
-    assert_eq!(
-      panel_frame(video, right, 34.0, [left, right].into_iter()),
-      Some(rect(-180.0, 460.0, 620.0, 34.0))
-    );
+    let video = rect(-540.0, 100.0, 1740.0, 360.0);
+    for desktop in [left, right] {
+      assert_eq!(
+        panel_frame(video, desktop, 34.0),
+        Some(rect(-540.0, 460.0, 1740.0, 34.0))
+      );
+    }
   }
 
   #[test]

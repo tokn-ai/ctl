@@ -1,6 +1,6 @@
 use ctream_client::{
   Session,
-  media::{CaptureLifetime, Frame, VideoSource},
+  media::{CaptureLifetime, Frame},
   options::ConnectionOptions,
   transport::Transport,
 };
@@ -10,11 +10,13 @@ mod chrome;
 mod drivers;
 mod fonts;
 mod input;
+mod latency;
 #[cfg(target_os = "macos")]
 mod macos_chrome;
 mod overlay;
 mod requests;
 mod semantic;
+mod stats;
 mod view;
 mod welcome;
 mod workspace;
@@ -35,7 +37,13 @@ use std::{
 #[derive(Default)]
 struct Stream {
   frame: Option<egui::ColorImage>,
-  error: Option<String>,
+  end: Option<CaptureEnd>,
+}
+
+#[derive(Clone)]
+enum CaptureEnd {
+  Finished,
+  Failed(String),
 }
 
 struct Preview<T: Transport> {
@@ -70,18 +78,23 @@ impl<T: Transport> Preview<T> {
     let reader = Arc::clone(&stream);
     thread::spawn(move || {
       let mut frame = Frame::default();
-      loop {
-        if let Err(error) = source.read_frame(&mut frame) {
-          reader.lock().unwrap().error = Some(format!(
-            "Capture ended ({error}). See terminal for remote diagnostics."
-          ));
-          ctx.request_repaint_of(egui::ViewportId::ROOT);
-          break;
+      let end = loop {
+        match source.try_read_frame(&mut frame) {
+          Ok(true) => {
+            let image = egui::ColorImage::from_rgb(frame.size, &frame.pixels);
+            reader.lock().unwrap().frame = Some(image);
+            ctx.request_repaint_of(egui::ViewportId::ROOT);
+          }
+          Ok(false) => break CaptureEnd::Finished,
+          Err(error) => {
+            break CaptureEnd::Failed(format!(
+              "Capture ended ({error}). See terminal for remote diagnostics."
+            ));
+          }
         }
-        let image = egui::ColorImage::from_rgb(frame.size, &frame.pixels);
-        reader.lock().unwrap().frame = Some(image);
-        ctx.request_repaint_of(egui::ViewportId::ROOT);
-      }
+      };
+      reader.lock().unwrap().end = Some(end);
+      ctx.request_repaint_of(egui::ViewportId::ROOT);
     });
     Ok(Self {
       input: None,
@@ -95,10 +108,10 @@ impl<T: Transport> Preview<T> {
     })
   }
 
-  fn update_texture(&mut self, ctx: &egui::Context) -> Option<String> {
-    let (frame, error) = {
+  fn update_texture(&mut self, ctx: &egui::Context) -> Option<CaptureEnd> {
+    let (frame, end) = {
       let mut stream = self.stream.lock().unwrap();
-      (stream.frame.take(), stream.error.clone())
+      (stream.frame.take(), stream.end.clone())
     };
     if let Some(image) = frame {
       if let Some(texture) = &mut self.texture {
@@ -111,14 +124,14 @@ impl<T: Transport> Preview<T> {
         eprintln!("Live preview received two frames on the wgpu renderer.");
       }
     }
-    if error.is_some() {
-      // Capture and input use independent channels. A failed capture must not
-      // leave an input agent alive behind a frozen preview.
+    if end.is_some() {
+      // Capture and input use independent channels. End control as soon as
+      // capture stops, even if the viewer still has a texture to show.
       self.input.take();
       self.capture_lifetime.take();
       self.forwarding = false;
     }
-    error
+    end
   }
 
   fn stop_control(&mut self) {
@@ -130,7 +143,7 @@ impl<T: Transport> Preview<T> {
   fn ready(&self) -> bool {
     self.texture.is_some()
       && self.capture_lifetime.is_some()
-      && self.stream.lock().unwrap().error.is_none()
+      && self.stream.lock().unwrap().end.is_none()
   }
 
   fn image_size(&self) -> Option<[u32; 2]> {
@@ -152,7 +165,7 @@ impl<T: Transport> Preview<T> {
     error: Option<&str>,
     elements: &[Element],
     mode: PreviewMode<'_>,
-  ) {
+  ) -> Option<egui::Rect> {
     let ctx = ui.ctx().clone();
     let (interactive, pointer_regions) = match mode {
       PreviewMode::Setup => {
@@ -188,7 +201,7 @@ impl<T: Transport> Preview<T> {
             .err()
             .map(|error| format!("Input disconnected ({error})"));
         }
-        return;
+        return None;
       };
       // Painting alone does not occupy layout space. Reserve the pane so its
       // surrounding controls stay outside it.
@@ -221,7 +234,9 @@ impl<T: Transport> Preview<T> {
           self.input_error = Some(format!("Input disconnected ({err})"));
         }
       }
+      return Some(rect);
     }
+    None
   }
 }
 
@@ -538,7 +553,7 @@ mod lifecycle_tests {
   use std::time::{Duration, Instant};
 
   #[test]
-  fn terminal_capture_error_closes_both_channels_before_preview_is_dropped() {
+  fn capture_end_closes_both_channels_before_preview_is_dropped() {
     for bytes in [&b"P6\n1 1\n255\nabc"[..], &b""[..]] {
       let (session, observed) = test_support::session(bytes);
       let context = egui::Context::default();
@@ -547,17 +562,15 @@ mod lifecycle_tests {
       preview.input = Some(input::Input::new(control));
       preview.forwarding = true;
       let deadline = Instant::now() + Duration::from_secs(2);
-      while preview.stream.lock().unwrap().error.is_none() {
+      while preview.stream.lock().unwrap().end.is_none() {
         assert!(Instant::now() < deadline, "capture worker did not finish");
         thread::sleep(Duration::from_millis(1));
       }
       assert!(observed.lifecycle.lock().unwrap().is_empty());
-      assert!(
-        preview
-          .update_texture(&context)
-          .unwrap()
-          .contains("Capture ended")
-      );
+      assert!(matches!(
+        preview.update_texture(&context),
+        Some(CaptureEnd::Finished)
+      ));
       assert!(preview.input.is_none());
       assert!(preview.capture_lifetime.is_none());
       assert!(!preview.forwarding);

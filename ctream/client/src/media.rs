@@ -153,13 +153,32 @@ fn pixel_count([width, height]: [usize; 2]) -> io::Result<usize> {
   Ok(width * height)
 }
 
-impl<R: Read> VideoSource for FrameReader<R> {
-  type Buffer = Vec<u8>;
+impl<R: Read> FrameReader<R> {
+  fn at_eof(&mut self) -> io::Result<bool> {
+    loop {
+      match self.reader.fill_buf() {
+        Ok(bytes) => return Ok(bytes.is_empty()),
+        Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+        Err(error) => return Err(error),
+      }
+    }
+  }
 
-  fn read_frame(&mut self, frame: &mut Frame<Self::Buffer>) -> io::Result<()> {
-    let size = match self.format {
-      FrameFormat::FixedRgb { size } => size,
+  /// Reads the next frame, returning false for clean EOF between frames.
+  /// An incomplete header or pixel buffer is still an error.
+  pub fn try_read_frame(&mut self, frame: &mut Frame) -> io::Result<bool> {
+    let (size, count) = match self.format {
+      FrameFormat::FixedRgb { size } => {
+        let count = pixel_count(size)?;
+        if self.at_eof()? {
+          return Ok(false);
+        }
+        (size, count)
+      }
       FrameFormat::Ppm => {
+        if self.at_eof()? {
+          return Ok(false);
+        }
         if header_line(&mut self.reader)?.trim_end() != "P6" {
           return Err(io::Error::other("expected a P6 RGB frame"));
         }
@@ -175,13 +194,29 @@ impl<R: Read> VideoSource for FrameReader<R> {
         if parts.next().is_some() || header_line(&mut self.reader)?.trim_end() != "255" {
           return Err(io::Error::other("unsupported PPM frame"));
         }
-        size
+        (size, pixel_count(size)?)
       }
     };
-    frame.pixels.resize(pixel_count(size)? * 3, 0);
+    frame.pixels.resize(count * 3, 0);
     self.reader.read_exact(&mut frame.pixels)?;
     frame.size = size;
-    Ok(())
+    Ok(true)
+  }
+}
+
+impl<R: Read> VideoSource for FrameReader<R> {
+  type Buffer = Vec<u8>;
+
+  fn read_frame(&mut self, frame: &mut Frame<Self::Buffer>) -> io::Result<()> {
+    if self.try_read_frame(frame)? {
+      return Ok(());
+    }
+    Err(match self.format {
+      FrameFormat::FixedRgb { .. } => {
+        io::Error::new(io::ErrorKind::UnexpectedEof, "failed to fill whole buffer")
+      }
+      FrameFormat::Ppm => io::Error::other("missing or incomplete PPM frame header"),
+    })
   }
 }
 
@@ -310,6 +345,41 @@ mod tests {
     assert_eq!(frame.size, [2, 1]);
     assert_eq!(frame.pixels, b"abcdef");
     assert!(source.read_frame(&mut frame).is_err());
+  }
+
+  #[test]
+  fn distinguishes_clean_end_from_incomplete_frame() {
+    for (format, complete, incomplete) in [
+      (
+        FrameFormat::Ppm,
+        &b"P6\n1 1\n255\nabc"[..],
+        &b"P6\n1 1\n255\nab"[..],
+      ),
+      (
+        FrameFormat::FixedRgb { size: [1, 1] },
+        &b"abc"[..],
+        &b"ab"[..],
+      ),
+    ] {
+      let mut stream = FrameReader::new(complete, format);
+      let mut frame = Frame::default();
+      assert!(stream.try_read_frame(&mut frame).unwrap());
+      assert!(!stream.try_read_frame(&mut frame).unwrap());
+      assert_eq!(frame.size, [1, 1]);
+      assert_eq!(frame.pixels, b"abc");
+
+      let mut stream = FrameReader::new(incomplete, format);
+      assert_eq!(
+        stream.try_read_frame(&mut frame).unwrap_err().kind(),
+        io::ErrorKind::UnexpectedEof
+      );
+    }
+    for malformed in [&b"P6"[..], &b"P5\n1 1\n255\nabc"[..]] {
+      let mut stream = FrameReader::new(malformed, FrameFormat::Ppm);
+      assert!(stream.try_read_frame(&mut Frame::default()).is_err());
+    }
+    let mut stream = FrameReader::new(io::empty(), FrameFormat::FixedRgb { size: [0, 1] });
+    assert!(stream.try_read_frame(&mut Frame::default()).is_err());
   }
 
   #[test]

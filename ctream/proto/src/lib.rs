@@ -3,7 +3,8 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-pub const VERSION: &str = WINDOWS_DESKTOP_VERSION;
+pub const VERSION: &str = LATENCY_VERSION;
+pub const LATENCY_VERSION: &str = "1.0.10";
 pub const WINDOWS_DESKTOP_VERSION: &str = "1.0.9";
 pub const CAPTURE_CATALOG_VERSION: &str = "1.0.8";
 pub const CAPTURE_DRIVER_VERSION: &str = "1.0.7";
@@ -13,6 +14,9 @@ pub const BOUNDS_VERSION: &str = "1.0.4";
 pub const X11_WINDOW_VERSION: &str = "1.0.3";
 pub const WAYLAND_WINDOW_VERSION: &str = "1.0.2";
 pub const X11_FRAME_SIZE: [usize; 2] = [960, 540];
+
+pub const PING_HELLO: u8 = b'!';
+pub const PING_TOKEN: u8 = b'?';
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

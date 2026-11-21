@@ -3,6 +3,8 @@ use lnks::Shortcut;
 use std::ffi::OsString;
 use std::io::Write as _;
 use std::os::windows::ffi::{OsStrExt as _, OsStringExt as _};
+use std::os::windows::process::CommandExt as _;
+use std::process::{Command, Stdio};
 use std::{
   fs, io,
   path::{Path, PathBuf},
@@ -17,9 +19,13 @@ pub(super) fn create(destination: &Path, target: &Path) -> io::Result<()> {
   let working_dir = target
     .parent()
     .ok_or_else(|| io::Error::other("desktop executable needs a parent directory"))?;
+  let staging = destination
+    .parent()
+    .ok_or_else(|| io::Error::other("desktop shortcut needs a staging directory"))?;
+  let id_list = shell_item(&target, staging)?;
   let target_path = target.as_os_str().encode_wide().collect::<Vec<_>>();
   let working_dir = working_dir.as_os_str().encode_wide().collect::<Vec<_>>();
-  let bytes = encode(&target_path, &working_dir)?;
+  let bytes = encode(&id_list, &target_path, &working_dir)?;
   let mut file = private_fs::options()
     .write(true)
     .create_new(true)
@@ -50,6 +56,36 @@ pub(super) fn managed(path: &Path, store: &Path) -> io::Result<bool> {
   Ok(valid_digest && components.as_path() == Path::new(r"ctmux\ctmux-app.exe"))
 }
 
+fn shell_item(target: &Path, staging: &Path) -> io::Result<Vec<u8>> {
+  const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+  let system_root = std::env::var_os("SystemRoot")
+    .ok_or_else(|| io::Error::other("Windows system directory is unavailable"))?;
+  let powershell = Path::new(&system_root).join("System32/WindowsPowerShell/v1.0/powershell.exe");
+  let output = Command::new(powershell)
+    .creation_flags(CREATE_NO_WINDOW)
+    .args([
+      "-NoLogo",
+      "-NoProfile",
+      "-NonInteractive",
+      "-STA",
+      "-Command",
+      "& ([ScriptBlock]::Create($env:CTLUP_SHORTCUT_SCRIPT))",
+    ])
+    .env("CTLUP_SHORTCUT_SCRIPT", include_str!("shortcut_pidl.ps1"))
+    .env("CTLUP_SHORTCUT_TARGET", target)
+    .env("TEMP", staging)
+    .env("TMP", staging)
+    .stdin(Stdio::null())
+    .output()?;
+  if !output.status.success() {
+    return Err(io::Error::other(format!(
+      "could not identify the desktop executable in Windows Shell: {}",
+      String::from_utf8_lossy(&output.stderr).trim()
+    )));
+  }
+  Ok(output.stdout)
+}
+
 fn shell_path(path: PathBuf) -> PathBuf {
   let mut units = path.as_os_str().encode_wide().collect::<Vec<_>>();
   let extended_unc: Vec<_> = r"\\?\UNC\".encode_utf16().collect();
@@ -61,13 +97,15 @@ fn shell_path(path: PathBuf) -> PathBuf {
   path
 }
 
-// Explorer reads the absolute executable from LinkInfo without a namespace ID list.
+// Explorer identifies the executable using the native item ID list. LinkInfo retains
+// its absolute filesystem path for resolution when the executable moves or is missing.
 // https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-shllink/6813269d-0cc8-4be2-933f-e96e8e3412dc
-fn encode(target: &[u16], working_dir: &[u16]) -> io::Result<Vec<u8>> {
+fn encode(id_list: &[u8], target: &[u16], working_dir: &[u16]) -> io::Result<Vec<u8>> {
   const HEADER_SIZE: u32 = 0x4c;
   const SHELL_LINK_CLSID: [u8; 16] = [
     0x01, 0x14, 0x02, 0x00, 0, 0, 0, 0, 0xc0, 0, 0, 0, 0, 0, 0, 0x46,
   ];
+  const HAS_ID_LIST: u32 = 0x01;
   const LINK_INFO: u32 = 0x02;
   const WORKING_DIR: u32 = 0x10;
   const UNICODE: u32 = 0x80;
@@ -78,13 +116,19 @@ fn encode(target: &[u16], working_dir: &[u16]) -> io::Result<Vec<u8>> {
       "desktop path exceeds Windows shortcut limits",
     ));
   }
+  let id_list_size = u16::try_from(id_list.len())
+    .ok()
+    .filter(|size| *size >= 4 && id_list.ends_with(&[0, 0]))
+    .ok_or_else(|| io::Error::other("invalid Windows Shell item ID list"))?;
   let mut link = HEADER_SIZE.to_le_bytes().to_vec();
   link.extend_from_slice(&SHELL_LINK_CLSID);
-  append_u32(&mut link, [LINK_INFO | WORKING_DIR | UNICODE]);
+  append_u32(&mut link, [HAS_ID_LIST | LINK_INFO | WORKING_DIR | UNICODE]);
   link.resize(0x3c, 0);
   append_u32(&mut link, [SW_SHOWNORMAL]);
   link.resize(HEADER_SIZE as usize, 0);
 
+  link.extend_from_slice(&id_list_size.to_le_bytes());
+  link.extend_from_slice(id_list);
   link.extend(link_info(target)?);
   let length = u16::try_from(working_dir.len()).expect("bounded Windows working directory");
   link.extend_from_slice(&length.to_le_bytes());

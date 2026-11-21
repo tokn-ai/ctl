@@ -16,6 +16,8 @@ use crate::{
 const UNIX_INSTALL_COMMAND: &str =
   include_str!("ssh_install/test_fixtures/legacy_bundle_install.sh");
 const UPDATER_BOOTSTRAP_COMMAND: &str = include_str!("ssh_updater_bootstrap.sh");
+const UNIX_CHECKOUT_LAYOUT_GUARD: &str = include_str!("ssh_install/checkout_layout.sh");
+const WINDOWS_CHECKOUT_LAYOUT_GUARD: &str = include_str!("ssh_install/checkout_layout.ps1");
 #[cfg(all(test, unix))]
 const AGENT_INSTALL_COMMAND: &str =
   include_str!("ssh_install/test_fixtures/legacy_agent_install.sh");
@@ -219,8 +221,11 @@ fn unix_updater_invocation(
   operation: &str,
   origin: Option<&ctl_core::installations::CatalogOrigin>,
 ) -> Result<String, CoreError> {
+  let checkout_guard = checkout_layout_guard(RemotePlatform::Unix);
   let mut script = format!(
-    r#"manager="$HOME/.tokn/ctl/bin/ctlup"
+    r#"{checkout_guard}
+manager="$HOME/.tokn/ctl/bin/ctlup"
+require_checkout_layout "$manager"
 if preparation=$("$manager" prepare-install </dev/null 2>&1); then
   :
 else
@@ -288,6 +293,10 @@ fn updater_bootstrap_script(updater: &[u8], check_only: bool) -> Result<String, 
   }
   Ok(
     UPDATER_BOOTSTRAP_COMMAND
+      .replace(
+        "__CHECKOUT_LAYOUT_GUARD__",
+        &checkout_layout_guard(RemotePlatform::Unix),
+      )
       .replace("__CHECK_ONLY__", if check_only { "yes" } else { "no" })
       .replace("__TOKEN__", &uuid::Uuid::new_v4().to_string())
       .replace("__UPDATER_BYTES__", &updater.len().to_string())
@@ -295,6 +304,17 @@ fn updater_bootstrap_script(updater: &[u8], check_only: bool) -> Result<String, 
         "__UPDATER_SHA256__",
         &format!("{:x}", Sha256::digest(updater)),
       ),
+  )
+}
+
+fn checkout_layout_guard(platform: RemotePlatform) -> String {
+  let template = match platform {
+    RemotePlatform::Unix => UNIX_CHECKOUT_LAYOUT_GUARD,
+    RemotePlatform::Windows => WINDOWS_CHECKOUT_LAYOUT_GUARD,
+  };
+  template.replace(
+    "__LAYOUT_VERSION__",
+    &ctl_core::installations::DEVELOPMENT_LAYOUT_VERSION.to_string(),
   )
 }
 

@@ -1,6 +1,6 @@
 use super::{
-  UpdaterUpload, managed_installation, require_updater_success, run_package_install_with_prefix,
-  run_updater_command,
+  UpdaterUpload, checkout_layout_guard, managed_installation, require_updater_success,
+  run_package_install_with_prefix, run_updater_command,
 };
 use crate::{
   CoreError, RemoteInstallEvent, RemotePlatform, SSH_PROGRAM, SshConnectionOptions, SshInteraction,
@@ -197,17 +197,22 @@ exit $code"#,
 fn updater_preparation(
   origin: Option<&ctl_core::installations::CatalogOrigin>,
 ) -> Result<String, CoreError> {
-  let preparation = r#"$originArgs = @()
+  let checkout_guard = checkout_layout_guard(RemotePlatform::Windows);
+  let preparation = format!(
+    r#"{checkout_guard}
+Assert-CheckoutLayout $manager
+$originArgs = @()
 $savedPreference = $ErrorActionPreference
 $ErrorActionPreference = 'Continue'
 $preparation = & $manager prepare-install 2>&1
 $preparationCode = $LASTEXITCODE
 $ErrorActionPreference = $savedPreference
-if ($preparationCode -ne 0 -and $preparationCode -ne 2) {
+if ($preparationCode -ne 0 -and $preparationCode -ne 2) {{
   throw ('ctlup installation preparation failed: ' + ($preparation -join "`n"))
-}"#;
+}}"#
+  );
   let Some(origin) = origin else {
-    return Ok(preparation.into());
+    return Ok(preparation);
   };
   let encoded = crate::installation::encode_catalog_origin(origin)
     .map_err(|error| CoreError::InvalidComponentBundle(error.to_string()))?;

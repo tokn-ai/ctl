@@ -14,7 +14,6 @@ mod ctream;
 mod development;
 #[cfg(windows)]
 mod launcher;
-mod migration;
 mod release;
 mod remote;
 mod show;
@@ -43,6 +42,10 @@ pub(crate) fn main() {
     }
   }
   let arguments = Arguments::parse();
+  if matches!(arguments.command, Command::InstallationLayoutVersion) {
+    println!("{}", ctl_core::installations::DEVELOPMENT_LAYOUT_VERSION);
+    return;
+  }
   if matches!(arguments.command, Command::ComponentInfo) {
     if let Err(error) = crate::component_info::print() {
       eprintln!("ctlup: {error}");
@@ -86,7 +89,7 @@ async fn run(arguments: Arguments) -> io::Result<i32> {
   };
   validate_target_options(target)?;
   match arguments.command {
-    Command::ComponentInfo => unreachable!(),
+    Command::ComponentInfo | Command::InstallationLayoutVersion => unreachable!(),
     Command::Install(options) | Command::Update(options) => {
       update::run(&home, options, target).await?;
     }
@@ -108,10 +111,6 @@ async fn run(arguments: Arguments) -> io::Result<i32> {
       return ctream::run(&home, command).await;
     }
     Command::Show { json } => show::run(&home, target, json).await?,
-    Command::Migrate { json } => {
-      require_local(target)?;
-      migration::run(home, json).await?;
-    }
     Command::CatalogJson => {
       require_local(target)?;
       print_catalog(&home)?;
@@ -124,9 +123,8 @@ async fn run(arguments: Arguments) -> io::Result<i32> {
       .await
       .map_err(io::Error::other)??;
     }
-    Command::Status { json } => status::run(&home, target, false, json).await?,
+    Command::Status { json } => status::run(&home, target, json).await?,
     Command::Dev(options) => development::run(&home, options, target).await?,
-    Command::Rollback { json } => status::run(&home, target, true, json).await?,
     Command::Check { channel, json } => {
       require_local(target)?;
       check(&home, channel, json).await?;
@@ -195,22 +193,32 @@ fn updater_digest() -> io::Result<()> {
 }
 
 async fn prune(home: PathBuf, json: bool) -> io::Result<()> {
-  let result = tokio::task::spawn_blocking(move || {
+  let (installations, cache) = tokio::task::spawn_blocking(move || {
     let installations = ctl_core::installations::Installations::new(&home).prune()?;
-    let cache = ctl_client::installation::prune_caches(&home)?;
-    Ok::<_, io::Error>(serde_json::json!({ "installations": installations, "cache": cache }))
+    let cache = ctl_client::installation::prune_caches(&home).map_err(|error| {
+      io::Error::new(
+        error.kind(),
+        format!("installation cleanup completed, but cache cleanup failed: {error}"),
+      )
+    })?;
+    Ok::<_, io::Error>((installations, cache))
   })
   .await
   .map_err(io::Error::other)??;
   if json {
+    let result = serde_json::json!({ "installations": installations, "cache": cache });
     println!(
       "{}",
       serde_json::to_string(&result).map_err(io::Error::other)?
     );
   } else {
-    println!(
-      "Removed unused installations; channel targets, active, previous and running builds were kept."
-    );
+    println!("Removed {} unused builds.", installations.removed.len());
+    if !installations.forgotten_missing_builds.is_empty() {
+      println!(
+        "Removed {} missing builds from the catalog.",
+        installations.forgotten_missing_builds.len()
+      );
+    }
   }
   Ok(())
 }

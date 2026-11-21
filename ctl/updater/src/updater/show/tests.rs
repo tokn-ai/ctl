@@ -1,5 +1,5 @@
 use super::*;
-use ctl_client::installation::InstallationCatalog;
+use ctl_client::installation::{InstallationCatalog, InstallationStatus};
 use ctl_core::bundle_layout::{ALL, required_protocols};
 use ctl_core::bundles::Manifest;
 use ctl_core::component::{ComponentBuildInfo, ComponentInfo, ProtocolInfo};
@@ -42,6 +42,7 @@ fn snapshot(manifests: &[Manifest]) -> InstallationShow {
     schema_version: 1,
     active: None,
     previous: None,
+    missing_builds: Vec::new(),
     installations: manifests
       .iter()
       .map(|manifest| entry(manifest, "provided", false))
@@ -166,6 +167,7 @@ fn older_remote_metadata_keeps_unknown_builds_in_the_fallback_catalog() {
     InstallationStatus {
       active: Some(active.clone()),
       previous: None,
+      missing_builds: Vec::new(),
     },
     Some(catalog),
   )
@@ -182,6 +184,34 @@ fn older_remote_metadata_keeps_unknown_builds_in_the_fallback_catalog() {
   assert_eq!(unknown[7], "retained");
   assert!(render(&snapshot, false).contains("0.1.3 (dirty)"));
   assert_eq!(rows[&active.bundle_id].channels(), "unknown");
+}
+
+#[test]
+fn missing_builds_show_recorded_memberships_and_selection() {
+  let active = manifest('a', Source::Release, false);
+  let retained = manifest('b', Source::Local, false);
+  let mut snapshot = snapshot(&[active.clone(), retained.clone()]);
+  snapshot.active = Some(active.bundle_id.clone());
+  snapshot.installations[0] = entry(&active, "stable", true);
+  snapshot.installations[1] = entry(&retained, "local", false);
+  snapshot.builds.clear();
+  snapshot.missing_builds = vec![active.bundle_id.clone(), retained.bundle_id.clone()];
+  snapshot.validate().unwrap();
+
+  let rows = build_rows(&snapshot);
+  assert_eq!(
+    rows[&active.bundle_id].states(&snapshot),
+    ["active", "current", "missing"]
+  );
+  assert_eq!(
+    rows[&retained.bundle_id].states(&snapshot),
+    ["retained", "missing"]
+  );
+  let text = render(&snapshot, false);
+  assert!(text.contains(&format!("Active: {} (missing)", &active.bundle_id[..12])));
+  assert!(text.contains("stable (current)"));
+  assert!(text.contains("bundle-x86_64-unknown-linux-musl"));
+  assert!(text.contains("ctlup update"));
 }
 
 #[test]

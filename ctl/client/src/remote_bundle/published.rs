@@ -20,10 +20,12 @@ pub(crate) use installation::resolve_target_installation;
 pub use installation::{InstallationPlan, resolve_installation};
 
 mod updater;
+#[cfg(all(test, unix))]
+pub(crate) use updater::prune_updater_cache;
 pub use updater::{UpdaterInfo, VerifiedUpdater, download_updater_cached, read_updater};
 pub(crate) use updater::{
-  cache_verified_for_manifest, prune_updater_cache, prune_updater_cache_with_pins,
-  read_cached_updater, validate_updater_for_manifest,
+  cache_verified_for_manifest, prune_updater_cache_with_pins, read_cached_updater,
+  validate_updater_for_manifest,
 };
 
 pub const ROOT: &str = "https://tokn-ai.dev/ctl/bundles/";

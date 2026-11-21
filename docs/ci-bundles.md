@@ -247,13 +247,14 @@ and ctl SSH gateway launches add it automatically. `ctlup` is a separate executa
 at `~/.tokn/ctl/bin/ctlup`, while runtime command aliases resolve through `current`.
 The installer leaves login shell configuration to the account owner.
 
-Clients obtain and verify the target updater locally. When it is absent or its
-checksum differs on the receiving account, they bootstrap it over authenticated
-SSH without requiring remote internet access. The updater verifies a retained
-runtime before deciding whether an archive upload is needed, then applies the
-same installation transaction as a local `ctlup install`. The previous complete
-build is retained for rollback, and process-held leases preserve builds still
-used by running clients or daemons. Updates never restart those processes.
+For published updates, clients pin a publication and check their verified
+cache separately for the updater and runtime. The target can fetch either
+missing artifact with `curl` or `wget` and verify it before use. Clients can
+also fetch the pinned archives locally and send them over authenticated SSH.
+Provided and development builds use SSH upload. The target updater verifies
+retained installations and applies the same transaction as a local
+`ctlup install`. Process-held leases preserve builds still used by running
+clients or daemons.
 
 Component metadata probes execute the packaged bytes, including Intel macOS
 executables through Rosetta on ARM runners. The bundle workflow sets

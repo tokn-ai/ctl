@@ -64,17 +64,10 @@ pub async fn install_prepared_components(
     if targets.contains(&head.target_triple) {
       continue;
     }
-    let existing = store.get(&head.bundle_id)?;
-    let component = if head
-      .origin
-      .as_ref()
-      .and_then(|origin| origin.publication_id.as_ref())
-      == origin.publication_id.as_ref()
-      && existing.manifest.components["ctl-agent"].build == source_build
-    {
-      retained_component(home, existing, head.origin.clone(), source.clone()).await?
-    } else {
-      prepare_sibling(home, &head.target_triple, &origin.channel, &source).await?
+    let existing = matching_sibling(home, &store, head, &origin, &source_build)?;
+    let component = match existing {
+      Some(bundle) => retained_component(home, bundle, head.origin.clone(), source.clone()).await?,
+      None => prepare_sibling(home, &head.target_triple, &origin.channel, &source).await?,
     };
     verify_component(&component, &source_build, actual_origin.as_ref())?;
     targets.insert(component.bundle.manifest.target_triple.clone());
@@ -113,7 +106,7 @@ pub async fn install_prepared_components(
       )))?;
     }
   }
-  if let Err(error) = store.prune() {
+  if let Err(error) = store.prune_unused() {
     eprintln!("ctlup: installed successfully; cleanup deferred: {error}");
   }
   super::prune_after_update(home).await;
@@ -130,7 +123,7 @@ fn check_preparation_heads(
   channel: &str,
   expected: &[CatalogEntry],
 ) -> io::Result<()> {
-  if channel_heads(&store.catalog()?, channel) != expected {
+  if channel_heads(&store.inspect()?.entries, channel) != expected {
     return Err(io::Error::new(
       io::ErrorKind::WouldBlock,
       "the channel's installed targets changed while preparing the source; retry the update",
@@ -171,7 +164,16 @@ async fn provision_native(
     return Ok(());
   };
   let component = &prepared[index];
-  crate::components::verify_local(home, &component.bundle).await?;
+  if let Err(error) = crate::components::verify_local(home, &component.bundle).await {
+    return if cfg!(target_os = "macos") && matches!(component.source, BuildSource::Automatic) {
+      Err(io::Error::new(
+        error.kind(),
+        format!("{error}. {}", super::SIGNED_MAC_RUNTIME_REBUILD),
+      ))
+    } else {
+      Err(error)
+    };
+  }
   if let Some(bytes) = &component.updater {
     crate::installation::provision_manager_bytes(home, bytes.clone()).await
   } else {
@@ -306,6 +308,28 @@ async fn retained_component(
     remote_archive: None,
     snapshot,
   })
+}
+
+fn matching_sibling(
+  home: &Path,
+  store: &Installations,
+  head: &CatalogEntry,
+  origin: &CatalogOrigin,
+  source_build: &ComponentBuildInfo,
+) -> io::Result<Option<Bundle>> {
+  if head
+    .origin
+    .as_ref()
+    .and_then(|origin| origin.publication_id.as_ref())
+    != origin.publication_id.as_ref()
+  {
+    return Ok(None);
+  }
+  let candidate = match store.get_available(&head.bundle_id)? {
+    Some(bundle) => Some(bundle),
+    None => super::cached_exact(home, head)?,
+  };
+  Ok(candidate.filter(|bundle| &bundle.manifest.components["ctl-agent"].build == source_build))
 }
 
 async fn prepare_sibling(

@@ -311,7 +311,8 @@ provisions the same account. SSH prefers the managed agent and also supports an
 existing agent and companion executables on the server's `PATH`. The Windows CI
 fixtures exercise the desktop installer against an SSH account without a
 managed installation, then reconnect and verify the installed bundle identity.
-They also cover updater replacement and runtime rollback.
+They also cover local and SSH installation, updater replacement, retained
+runtime selection, and mixed cached transfers of the updater and runtime.
 
 `ctl-agent` uses the shared IPC stream and only the data endpoint. Its installed
 companion is `ctmuxd.exe` on Windows. Startup requests both `DETACHED_PROCESS`

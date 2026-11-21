@@ -6417,6 +6417,7 @@ dependencies = [
  "dirs 6.0.0",
  "rusqlite",
  "rustix 1.1.4",
+ "semver",
  "serde",
  "serde_json",
  "sha2",

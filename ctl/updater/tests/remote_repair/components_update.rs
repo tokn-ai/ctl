@@ -57,7 +57,7 @@ fn run_published_receiver(
 }
 
 #[test]
-fn published_receiver_checks_the_download_then_reuses_the_installed_build() {
+fn published_receiver_verifies_reuses_and_repairs_a_build() {
   let fixture = Fixture::new(EXPECTED_ID);
   fixture.prepare_updater();
   let build = ctl_core::component::ComponentBuildInfo {
@@ -123,6 +123,28 @@ fn published_receiver_checks_the_download_then_reuses_the_installed_build() {
       .stdout
       .starts_with(b"ctl-published-reused-v1\nctl-published-install-v1\n")
   );
+
+  let payload = installations
+    .root()
+    .join("installs")
+    .join(&installed.bundle_id);
+  fs::rename(&payload, fixture.0.join("hidden-runtime")).unwrap();
+  assert_eq!(
+    installations.inspect().unwrap().missing,
+    std::slice::from_ref(&installed.bundle_id)
+  );
+  // The target's verified archive can restore the payload without curl or wget.
+  let repaired = run(None);
+  assert!(repaired.status.success(), "{repaired:?}");
+  let manifest = repaired
+    .stdout
+    .strip_prefix(b"ctl-published-install-v1\n")
+    .unwrap();
+  assert_eq!(
+    serde_json::from_slice::<ctl_core::bundles::Manifest>(manifest).unwrap(),
+    installed
+  );
+  assert_eq!(installations.active().unwrap().unwrap().manifest, installed);
 }
 
 const OTHER_ID: &str = "0c9247af-580a-4e90-9a88-45a4f76c0ca7";
@@ -337,6 +359,7 @@ fn assert_installed_bundle(fixture: &Fixture, bundle_id: &str) {
     fs::read_link(&current).unwrap(),
     PathBuf::from("installs").join(&installed.manifest.bundle_id)
   );
+  assert!(!account.join("previous").is_symlink());
   assert_eq!(
     fs::read_to_string(account.join("remote-id")).unwrap(),
     EXPECTED_ID
@@ -521,7 +544,7 @@ async fn unmanaged_layout_blocks_update_before_ssh_and_preserves_the_old_install
   let output = update(&fixture).await;
   let diagnostics = String::from_utf8_lossy(&output.stderr);
   assert!(!output.status.success(), "{diagnostics}");
-  assert!(diagnostics.contains("run ctlup migrate"), "{diagnostics}");
+  assert!(diagnostics.contains("complete"), "{diagnostics}");
   for marker in ["count", "bootstrap", "preflight", "upload", "inspect"] {
     assert!(!fixture.0.join(marker).exists(), "unexpected {marker}");
   }

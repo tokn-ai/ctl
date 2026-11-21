@@ -11,7 +11,7 @@
   "about.build_archive": "构建目录或归档文件",
   "about.build_automatic": "自动",
   "about.build_automatic_help": "远程更新使用配置的发布渠道。",
-  "about.build_automatic_macos_help": "此 Mac 使用已启用的组件构建。若没有已启用的构建，则使用应用内置的离线构建。安装需要已签名的辅助程序。",
+  "about.build_automatic_macos_help": "此 Mac 使用当前启用的已签名组件构建，或该构建经过验证的缓存副本。要安装新的已签名构建，请运行 ctlup dev，或提供包含已签名辅助程序的本机构建文件。",
   "about.build_channel_help": "使用此渠道为各个所选平台提供的完整构建。",
   "about.build_checkout": "从当前检出版本构建",
   "about.build_checkout_help": "使用构建此应用时的本地源码目录构建 ctlup 和组件，再通过 SSH 上传到 Linux x64 或 ARM64 主机。",

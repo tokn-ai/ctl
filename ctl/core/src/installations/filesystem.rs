@@ -15,8 +15,8 @@ use std::path::Component;
 mod windows;
 #[cfg(windows)]
 pub(super) use windows::{
-  activate, install_manager, lease_manager_executable, manager_and_lease, pointer,
-  prepare_activation, prune_managers,
+  activate, clear_active, clear_previous, install_manager, lease_manager_executable,
+  manager_and_lease, prepare_activation, prune_managers, selection_id,
 };
 
 const JOURNAL: &str = ".activation.json";
@@ -54,6 +54,19 @@ pub(super) fn directory(path: &Path) -> io::Result<()> {
     ));
   }
   Ok(())
+}
+
+fn incomplete_payload(error: io::Error, id: &str) -> io::Error {
+  if error.kind() == io::ErrorKind::NotFound {
+    return io::Error::new(
+      io::ErrorKind::InvalidData,
+      format!(
+        "recorded runtime bundle {} has an incomplete payload under installs/{id}",
+        &id[..12]
+      ),
+    );
+  }
+  error
 }
 
 pub(super) fn ensure_directory(path: &Path) -> io::Result<()> {
@@ -127,7 +140,7 @@ pub(super) fn validate_complete(bundle: &Bundle) -> io::Result<()> {
 }
 
 #[cfg(unix)]
-fn pointer_path(store: &Installations, name: &str) -> io::Result<Option<PathBuf>> {
+pub(super) fn selection_id(store: &Installations, name: &str) -> io::Result<Option<String>> {
   let path = store.root.join(name);
   if !path_exists(&path)? {
     return Ok(None);
@@ -143,42 +156,61 @@ fn pointer_path(store: &Installations, name: &str) -> io::Result<Option<PathBuf>
     ));
   }
   let parts = link.iter().collect::<Vec<_>>();
-  let managed =
-    parts.len() == 2 && parts[0] == "installs" && parts[1].to_str().is_some_and(valid_id);
-  if !managed {
+  let [directory_name, id] = parts.as_slice() else {
     return Err(invalid(
-      "installation pointer is not a canonical managed selection; run ctlup migrate",
+      "installation pointer is not a canonical managed selection",
     ));
-  }
-  let mut parent = store.root.clone();
-  for part in parts {
-    parent.push(part);
-    directory(&parent)?;
-  }
-  Ok(Some(parent))
+  };
+  let id = id
+    .to_str()
+    .filter(|id| *directory_name == "installs" && valid_id(id))
+    .ok_or_else(|| invalid("installation pointer is not a canonical managed selection"))?;
+  Ok(Some(id.to_owned()))
 }
 
-#[cfg(unix)]
-pub(super) fn pointer(store: &Installations, name: &str) -> io::Result<Option<Bundle>> {
-  let Some(path) = pointer_path(store, name)? else {
-    return Ok(None);
-  };
-  let bundle = Bundle::open(&path)?;
-  validate_native(&bundle)?;
-  if path.file_name().and_then(|name| name.to_str()) != Some(&bundle.manifest.bundle_id) {
-    return Err(invalid(
-      "installation payload identity differs from its path",
-    ));
-  }
-  Ok(Some(bundle))
+pub(super) fn missing_payload(id: &str) -> io::Error {
+  io::Error::new(
+    io::ErrorKind::NotFound,
+    format!(
+      "recorded runtime bundle {} is missing under installs/{id}",
+      &id[..12]
+    ),
+  )
 }
 
 pub(super) fn load(store: &Installations, id: &str) -> io::Result<Bundle> {
+  load_available(store, id)?.ok_or_else(|| missing_payload(id))
+}
+
+pub(super) fn directory_if_present(path: &Path) -> io::Result<bool> {
+  match directory(path) {
+    Ok(()) => Ok(true),
+    Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+    Err(error) => Err(error),
+  }
+}
+
+pub(super) fn load_available(store: &Installations, id: &str) -> io::Result<Option<Bundle>> {
+  let Some(path) = payload_dir(store, id)? else {
+    return Ok(None);
+  };
+  open_payload(&path, id).map(Some)
+}
+
+pub(super) fn payload_dir(store: &Installations, id: &str) -> io::Result<Option<PathBuf>> {
   if !valid_id(id) {
     return Err(invalid("invalid installation identity"));
   }
-  directory(&store.root.join("installs"))?;
-  let bundle = Bundle::open(&store.root.join("installs").join(id))?;
+  let installs = store.root.join("installs");
+  let path = installs.join(id);
+  if !directory_if_present(&installs)? || !directory_if_present(&path)? {
+    return Ok(None);
+  }
+  Ok(Some(path))
+}
+
+fn open_payload(path: &Path, id: &str) -> io::Result<Bundle> {
+  let bundle = Bundle::open(path).map_err(|error| incomplete_payload(error, id))?;
   validate_complete(&bundle)?;
   if bundle.manifest.bundle_id != id {
     return Err(invalid(
@@ -357,6 +389,10 @@ pub(super) fn activate(
   if path_exists(&current)?
     && fs::read_link(&current)? == Path::new("installs").join(&active.manifest.bundle_id)
   {
+    // Re-selecting the current payload also retires legacy rollback state.
+    if previous.is_none() {
+      clear_previous(store)?;
+    }
     return Ok(());
   }
   let transaction = Transaction {
@@ -408,7 +444,7 @@ pub(super) fn recover(store: &Installations) -> io::Result<()> {
         && entry.target_triple == bundle.manifest.target_triple
     }) {
       return Err(invalid(
-        "activation journal selects an unrecorded installation; run ctlup migrate",
+        "activation journal selects an unrecorded installation",
       ));
     }
   }
@@ -418,9 +454,8 @@ pub(super) fn recover(store: &Installations) -> io::Result<()> {
       &store.root.join("previous"),
       &Path::new("installs").join(previous.manifest.bundle_id),
     )?;
-  } else if path_exists(&store.root.join("previous"))? {
-    fs::read_link(store.root.join("previous"))?;
-    fs::remove_file(store.root.join("previous"))?;
+  } else {
+    clear_previous(store)?;
   }
   replace_link(
     &store.root.join("current"),
@@ -428,6 +463,28 @@ pub(super) fn recover(store: &Installations) -> io::Result<()> {
   )?;
   fs::remove_file(path)?;
   File::open(&store.root)?.sync_all()
+}
+
+#[cfg(unix)]
+pub(super) fn clear_active(store: &Installations) -> io::Result<()> {
+  if selection_id(store, "current")?.is_some() {
+    fs::remove_file(store.root.join("current"))?;
+    sync_directory(&store.root)?;
+  }
+  Ok(())
+}
+
+#[cfg(unix)]
+pub(super) fn clear_previous(store: &Installations) -> io::Result<()> {
+  let path = store.root.join("previous");
+  if let Some(id) = selection_id(store, "previous")? {
+    // Accept only our canonical relative link so cleanup cannot remove an
+    // unrelated file at this location.
+    payload_dir(store, &id)?;
+    fs::remove_file(path)?;
+    sync_directory(&store.root)?;
+  }
+  Ok(())
 }
 
 pub(super) fn entries(store: &Installations) -> io::Result<Vec<(String, PathBuf)>> {

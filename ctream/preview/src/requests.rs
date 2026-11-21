@@ -3,9 +3,32 @@ use ctream_client::{
   transport::{Cancellation, Channel, Transport},
 };
 use std::{
-  io,
-  sync::{Arc, Mutex},
+  io::{self, IoSlice, IoSliceMut, Read, Write},
+  sync::{
+    Arc, Mutex,
+    atomic::{AtomicU64, Ordering},
+  },
 };
+
+#[derive(Default)]
+struct TrafficCounters {
+  download: AtomicU64,
+  upload: AtomicU64,
+}
+
+/// Counts protocol bytes passed through the selected channels.
+#[derive(Clone, Default)]
+pub(super) struct Traffic(Arc<TrafficCounters>);
+
+impl Traffic {
+  /// Returns cumulative download and upload bytes, in that order.
+  pub(super) fn totals(&self) -> [u64; 2] {
+    [
+      self.0.download.load(Ordering::Relaxed),
+      self.0.upload.load(Ordering::Relaxed),
+    ]
+  }
+}
 
 #[derive(Default)]
 struct State {
@@ -18,6 +41,7 @@ struct State {
 #[derive(Default)]
 pub(super) struct Requests {
   state: Arc<Mutex<State>>,
+  traffic: Option<Traffic>,
 }
 
 impl Requests {
@@ -25,10 +49,18 @@ impl Requests {
     Self::default()
   }
 
+  pub(super) fn metered(traffic: Traffic) -> Self {
+    Self {
+      state: Arc::default(),
+      traffic: Some(traffic),
+    }
+  }
+
   pub(super) fn client<T: Transport>(&self, transport: Arc<T>) -> Client<Scoped<T>> {
     Client::new(Scoped {
       transport,
       state: Arc::clone(&self.state),
+      traffic: self.traffic.clone(),
     })
   }
 }
@@ -53,6 +85,65 @@ impl Drop for Requests {
 pub(super) struct Scoped<T> {
   transport: Arc<T>,
   state: Arc<Mutex<State>>,
+  traffic: Option<Traffic>,
+}
+
+pub(super) struct Metered<T> {
+  inner: T,
+  traffic: Option<Traffic>,
+}
+
+impl<T> Metered<T> {
+  fn record_download(&self, count: usize) {
+    if let Some(traffic) = &self.traffic {
+      traffic
+        .0
+        .download
+        .fetch_add(count as u64, Ordering::Relaxed);
+    }
+  }
+
+  fn record_upload(&self, count: usize) {
+    if let Some(traffic) = &self.traffic {
+      traffic.0.upload.fetch_add(count as u64, Ordering::Relaxed);
+    }
+  }
+}
+
+impl<T: Read> Read for Metered<T> {
+  fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+    self
+      .inner
+      .read(bytes)
+      .inspect(|&count| self.record_download(count))
+  }
+
+  fn read_vectored(&mut self, bytes: &mut [IoSliceMut<'_>]) -> io::Result<usize> {
+    self
+      .inner
+      .read_vectored(bytes)
+      .inspect(|&count| self.record_download(count))
+  }
+}
+
+impl<T: Write> Write for Metered<T> {
+  fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+    self
+      .inner
+      .write(bytes)
+      .inspect(|&count| self.record_upload(count))
+  }
+
+  fn write_vectored(&mut self, bytes: &[IoSlice<'_>]) -> io::Result<usize> {
+    self
+      .inner
+      .write_vectored(bytes)
+      .inspect(|&count| self.record_upload(count))
+  }
+
+  fn flush(&mut self) -> io::Result<()> {
+    self.inner.flush()
+  }
 }
 
 fn interrupted() -> io::Error {
@@ -60,8 +151,8 @@ fn interrupted() -> io::Error {
 }
 
 impl<T: Transport> Transport for Scoped<T> {
-  type Reader = T::Reader;
-  type Writer = T::Writer;
+  type Reader = Metered<T::Reader>;
+  type Writer = Metered<T::Writer>;
 
   fn open(&self, arguments: &[String]) -> io::Result<Channel<Self::Reader, Self::Writer>> {
     if self
@@ -80,7 +171,17 @@ impl<T: Transport> Transport for Scoped<T> {
       let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
       if !state.ended {
         state.channels.push(channel.cancellation.clone());
-        return Ok(channel);
+        return Ok(Channel {
+          reader: Metered {
+            inner: channel.reader,
+            traffic: self.traffic.clone(),
+          },
+          writer: Metered {
+            inner: channel.writer,
+            traffic: self.traffic.clone(),
+          },
+          cancellation: channel.cancellation,
+        });
       }
     }
 
@@ -102,7 +203,7 @@ impl<T: Transport> Transport for Scoped<T> {
 mod tests {
   use super::*;
   use std::{
-    io::{Read, Write},
+    io::Cursor,
     sync::{
       Condvar,
       atomic::{AtomicUsize, Ordering},
@@ -233,6 +334,46 @@ mod tests {
         }),
       })
     }
+  }
+
+  #[test]
+  fn metered_requests_count_transferred_bytes_across_channels() {
+    struct Echo;
+
+    impl Transport for Echo {
+      type Reader = &'static [u8];
+      type Writer = Cursor<[u8; 2]>;
+
+      fn open(&self, _: &[String]) -> io::Result<Channel<Self::Reader, Self::Writer>> {
+        Ok(Channel {
+          reader: b"[]",
+          writer: Cursor::new([0; 2]),
+          cancellation: Cancellation::default(),
+        })
+      }
+    }
+
+    struct Payload(&'static [u8]);
+
+    impl ctream_client::Query for Payload {
+      type Reply = Vec<String>;
+
+      fn arguments(&self) -> io::Result<Vec<String>> {
+        Ok(Vec::new())
+      }
+
+      fn payload(&self) -> io::Result<Option<Vec<u8>>> {
+        Ok(Some(self.0.to_vec()))
+      }
+    }
+
+    let traffic = Traffic::default();
+    let requests = Requests::metered(traffic.clone());
+    let client = requests.client(Arc::new(Echo));
+    assert!(client.query(Payload(b"abc")).is_err());
+    assert_eq!(traffic.totals(), [0, 2]);
+    assert_eq!(client.query(Payload(b"x")).unwrap(), Vec::<String>::new());
+    assert_eq!(traffic.totals(), [2, 3]);
   }
 
   #[test]

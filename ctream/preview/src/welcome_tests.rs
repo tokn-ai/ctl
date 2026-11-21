@@ -67,6 +67,11 @@ impl Record {
     wire.incoming.extend(frame);
     self.wake.notify_all();
   }
+
+  fn finish(&self) {
+    self.wire.lock().unwrap().eof = true;
+    self.wake.notify_all();
+  }
 }
 
 struct Reader(Arc<Record>);
@@ -156,6 +161,7 @@ struct Config {
   catalog: Option<String>,
   displays: Option<String>,
   capture_failure: bool,
+  first_window_closed: bool,
   wait_input: bool,
   gates: Vec<(String, String, Arc<Gate>)>,
 }
@@ -250,6 +256,7 @@ impl Transport for Mock {
         },
         true,
       ),
+      "windows" if target == "windows-1" && config.first_window_closed => (b"[]".to_vec(), true),
       "windows" => (
         format!(
           r#"[{{"id":"window-{}","title":"Owned fixture","app_id":"fixture"}}]"#,
@@ -744,10 +751,186 @@ fn viewer_input(size: egui::Vec2, events: Vec<egui::Event>) -> egui::RawInput {
   }
 }
 
+fn wait_for_capture_end(viewer: &Viewer<Mock>) {
+  let deadline = Instant::now() + DEADLINE;
+  let stream = &viewer.preview.as_ref().unwrap().stream;
+  while stream.lock().unwrap().end.is_none() {
+    assert!(Instant::now() < deadline, "capture worker did not finish");
+    thread::sleep(Duration::from_millis(2));
+  }
+}
+
+#[test]
+fn closed_remote_window_closes_the_viewer_and_refreshes_setup() {
+  let mock = Mock::default();
+  let ctx = egui::Context::default();
+  let mut viewer = create(&mock, &ctx, true, "auto");
+  poll_until(&mut viewer, &ctx, ready);
+  let capture = mock.captures().pop().unwrap();
+  viewer.show_stats = true;
+  viewer.start(&ctx);
+  poll_until(&mut viewer, &ctx, |viewer| {
+    viewer.preview.as_ref().unwrap().input.is_some()
+  });
+  let input = mock.inputs().pop().unwrap();
+  native_frame(&mut viewer, &ctx, raw(Vec::new()), raw(Vec::new()));
+
+  let queries = mock.records("windows").len();
+  mock.0.config.lock().unwrap().first_window_closed = true;
+  capture.finish();
+  wait_for_capture_end(&viewer);
+  let closed = native_frame(&mut viewer, &ctx, raw(Vec::new()), raw(Vec::new()));
+  assert!(!viewer.viewing && viewer.stats.is_none() && viewer.preview.is_none());
+  assert!(closed.viewport(viewer_id()).is_none());
+  for expected in [
+    egui::ViewportCommand::Visible(true),
+    egui::ViewportCommand::Focus,
+  ] {
+    assert!(
+      closed
+        .commands(egui::ViewportId::ROOT)
+        .any(|cmd| *cmd == expected)
+    );
+  }
+  label_center(&closed.root, "CAPTURE DRIVER");
+  assert!(capture.closed() && capture.cancelled());
+  assert!(input.closed() && input.cancelled());
+
+  poll_until(&mut viewer, &ctx, |viewer| viewer.window_query.is_none());
+  assert!(mock.records("windows").len() > queries);
+  assert_eq!(viewer.selected_window.as_deref(), Some("window-1"));
+  assert!(viewer.selected_window().is_none());
+  assert!(
+    viewer
+      .windows
+      .iter()
+      .any(|source| source.window.id == "window-2")
+  );
+  assert_eq!(mock.captures().len(), 1);
+}
+
+#[test]
+fn display_end_and_truncated_window_frames_keep_the_viewer_open() {
+  for (window, tail, message) in [
+    (false, &b""[..], "Capture ended."),
+    (
+      true,
+      &b"P6\n8 8\n255\na"[..],
+      "See terminal for remote diagnostics.",
+    ),
+  ] {
+    let mock = Mock::default();
+    let ctx = egui::Context::default();
+    let mut viewer = create(&mock, &ctx, window, "auto");
+    poll_until(&mut viewer, &ctx, ready);
+    let capture = mock.captures().pop().unwrap();
+    viewer.start(&ctx);
+    poll_until(&mut viewer, &ctx, |viewer| {
+      viewer.preview.as_ref().unwrap().input.is_some()
+    });
+    let input = mock.inputs().pop().unwrap();
+    native_frame(&mut viewer, &ctx, raw(Vec::new()), raw(Vec::new()));
+    capture.push_frame_bytes(tail);
+    capture.finish();
+    wait_for_capture_end(&viewer);
+    let frame = native_frame(&mut viewer, &ctx, raw(Vec::new()), raw(Vec::new()));
+    assert!(viewer.viewing && frame.viewport(viewer_id()).is_some());
+    assert!(viewer.preview_error.as_deref().unwrap().contains(message));
+    assert!(input.closed() && input.cancelled());
+  }
+}
+
 fn viewer_requests_size(frame: &NativeFrame, size: egui::Vec2) -> bool {
   frame
     .commands(viewer_id())
     .any(|command| *command == egui::ViewportCommand::InnerSize(size))
+}
+
+#[test]
+fn debug_overlay_reports_stream_pixels_and_leaves_video_input_active() {
+  let mock = Mock::default();
+  let ctx = egui::Context::default();
+  let mut viewer = create(&mock, &ctx, false, "auto");
+  poll_until(&mut viewer, &ctx, ready);
+  let setup = render(&mut viewer, &ctx, Vec::new());
+  let checkbox = label_center(&setup, "Debug overlay");
+  render(
+    &mut viewer,
+    &ctx,
+    vec![
+      egui::Event::PointerMoved(checkbox),
+      primary_button(checkbox, true),
+      primary_button(checkbox, false),
+    ],
+  );
+  assert!(viewer.show_stats);
+  viewer.start(&ctx);
+  poll_until(&mut viewer, &ctx, |viewer| {
+    viewer.preview.as_ref().unwrap().input.is_some()
+  });
+  let remote = mock.inputs().pop().unwrap();
+  let child = |size, events| {
+    let mut input = viewer_input(size, events);
+    input
+      .viewports
+      .entry(viewer_id())
+      .or_default()
+      .native_pixels_per_point = Some(2.0);
+    input
+  };
+  let frame = |viewer: &mut Viewer<Mock>, size, events| {
+    native_frame(viewer, &ctx, raw(Vec::new()), child(size, events))
+  };
+  let initial = frame(&mut viewer, egui::vec2(400.0, 200.0), Vec::new());
+  let metrics = |frame: &NativeFrame, size: &str| {
+    let text = frame
+      .child()
+      .shapes
+      .iter()
+      .find_map(|shape| match &shape.shape {
+        egui::epaint::Shape::Text(text) if text.galley.text().starts_with("Download") => {
+          assert!(
+            shape
+              .clip_rect
+              .contains_rect(text.galley.rect.translate(text.pos.to_vec2()))
+          );
+          Some(text)
+        }
+        _ => None,
+      })
+      .expect("debug overlay must be drawn in the viewer");
+    assert!(text.galley.text().contains(size));
+    text.pos + egui::vec2(20.0, 6.0)
+  };
+  metrics(&initial, "Frame     2×1 px");
+  let size = egui::vec2(320.0, 160.0);
+  let resized = frame(&mut viewer, size, Vec::new());
+  let at = metrics(&resized, "Frame     2×1 px");
+  frame(&mut viewer, size, interactions(at, false));
+  let wire = remote.sent();
+  let buttons: Vec<_> = wire
+    .lines()
+    .filter(|line| line.starts_with("button 1 "))
+    .collect();
+  assert_eq!(buttons, ["button 1 1", "button 1 0"]);
+
+  let capture = mock.captures().pop().unwrap();
+  capture.push_frame_bytes(b"P6\n3 2\n255\nabcdefghijklmnopqr");
+  poll_until(&mut viewer, &ctx, |viewer| {
+    viewer
+      .preview
+      .as_ref()
+      .unwrap()
+      .texture
+      .as_ref()
+      .unwrap()
+      .size()
+      == [3, 2]
+  });
+  let new_frame = frame(&mut viewer, size, Vec::new());
+  metrics(&new_frame, "Frame     3×2 px");
+  let narrow = frame(&mut viewer, egui::vec2(125.0, 250.0), Vec::new());
+  metrics(&narrow, "Frame     3×2 px");
 }
 
 #[test]

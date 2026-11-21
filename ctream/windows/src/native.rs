@@ -53,15 +53,23 @@ impl Process {
   }
 
   fn creation(&self) -> Result<u64> {
+    self
+      .live_creation()?
+      .ok_or_else(|| "Windows window process exited".into())
+  }
+
+  fn live_creation(&self) -> Result<Option<u64>> {
     let mut created = FILETIME::default();
     let mut exited = FILETIME::default();
     let mut kernel = FILETIME::default();
     let mut user = FILETIME::default();
     unsafe { GetProcessTimes(self.0, &mut created, &mut exited, &mut kernel, &mut user) }?;
     if exited.dwHighDateTime != 0 || exited.dwLowDateTime != 0 {
-      return Err("Windows window process exited".into());
+      return Ok(None);
     }
-    Ok((u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime))
+    Ok(Some(
+      (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime),
+    ))
   }
 }
 
@@ -159,14 +167,22 @@ impl WindowTarget {
     HWND(self.identity.handle as *mut _)
   }
 
-  pub fn validate(&self) -> Result<()> {
+  /// Checks whether the bound window was destroyed or replaced.
+  pub fn is_gone(&self) -> Result<bool> {
+    if self.watch.dead() {
+      return Ok(true);
+    }
     let mut pid = 0;
     let thread = unsafe { GetWindowThreadProcessId(self.hwnd(), Some(&mut pid)) };
-    if self.watch.dead()
-      || thread != self.window_thread
-      || pid != self.identity.process
-      || self.process.creation()? != self.identity.created
-    {
+    Ok(
+      thread != self.window_thread
+        || pid != self.identity.process
+        || self.process.live_creation()? != Some(self.identity.created),
+    )
+  }
+
+  pub fn validate(&self) -> Result<()> {
+    if self.is_gone()? {
       return Err("Windows window closed or its identity changed; query windows again".into());
     }
     visible(self.hwnd())

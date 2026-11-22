@@ -364,11 +364,46 @@ On macOS 14 or later, open the viewer and select **Capture a local window**.
 permission, the **Window** list works like the remote window list. Selecting a
 window opens its preview, and **Refresh windows** updates the list. **Use macOS
 picker…** grants ScreenCaptureKit access to one window for the capture session.
-**Start** opens the separate view-only viewer. Closing the viewer returns to
-setup, where you can stop capture or choose another window. The ScreenCaptureKit
-driver runs inside the viewer process. For windows chosen with the macOS picker,
-automatic source-close detection uses the window identity available on macOS
-15.2 and later.
+The setup preview is view-only. **Start** opens the separate viewer and enables
+mouse and keyboard control when the viewer has macOS Accessibility permission
+and ScreenCaptureKit provides the selected window's identity. For windows chosen
+with the macOS picker, this identity is available on macOS 15.2 and later.
+Closing the viewer releases held input and returns to setup. The ScreenCaptureKit
+and input drivers run inside the viewer process.
+
+Input targets the selected app and checks that its focused window matches the
+capture. AppKit views can decline clicks while their app is inactive. Selecting
+a window for capture leaves the Mac desktop's focus and pointer in place.
+
+### macOS over SSH
+
+Install a native `ctream-agent` on the Mac with
+`cargo install --locked --path ctream/agent --root ~/.local`.
+From a terminal in that Mac's logged-in desktop session, start the agent with
+`~/.local/bin/ctream-agent serve` and leave it running. The host process needs
+Screen Recording permission to list and capture windows. Grant it Accessibility
+permission to control the selected window. Set those permissions in macOS
+System Settings and restart the host process after changing them.
+
+From the viewer machine, connect over SSH as the same macOS user. Substitute
+your SSH destination and the absolute path to the installed agent.
+
+```sh
+ctream --host MAC_HOST --agent /path/to/ctream-agent list --json
+ctream --host MAC_HOST --agent /path/to/ctream-agent windows macos
+ctream-preview --host MAC_HOST --agent /path/to/ctream-agent
+```
+
+Select **ScreenCaptureKit** and choose a window. **Start** enables control
+when the agent has Accessibility permission. The macOS agent supports one
+active capture and accepts input through a separate stream. Closing the capture
+ends control. The remote agent is installed and started manually.
+
+| Component | Runs where |
+| --- | --- |
+| CLI, wgpu viewer, and overlays | Viewer machine |
+| SSH server and per-operation stdio relay | SSH login on the Mac |
+| ScreenCaptureKit and window-scoped input | `ctream-agent serve` in the Mac's logged-in desktop session |
 
 For a display on a Linux or Windows viewer machine, build with
 `cargo build -p ctream-agent -p ctream-preview` and run
@@ -376,12 +411,12 @@ For a display on a Linux or Windows viewer machine, build with
 beside the viewer executable, falling back to `PATH`, and launches it over
 stdio IPC. It uses the same operation contracts as SSH.
 
-The viewer opens a transport channel for each agent operation. The SSH
-transport starts a standalone `ctream-agent` process per channel under the
-remote account. Discovery returns structured display metadata. Capture streams
-frames on a separate channel, and input uses its own duplex channel. Closing
-the capture channel cancels its backend process. Closing the input channel
-releases held inputs.
+The viewer opens a transport channel for each agent operation. SSH launches
+`ctream-agent` under the remote account. On macOS this process relays requests
+to the desktop agent. Discovery returns structured session metadata. Capture
+streams frames on one channel, and input uses its own duplex channel. Closing
+the capture channel stops the stream, and closing the input channel releases
+held inputs.
 
 The agent uses FFmpeg with x11grab for X11 display capture and reads display
 geometry through x11rb. X11 input needs Python 3, libX11, libXtst, XTEST, and

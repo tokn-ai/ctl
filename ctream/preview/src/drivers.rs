@@ -39,6 +39,7 @@ fn system(display: &Display) -> CaptureSystem {
     Display::X11(_) => CaptureSystem::X11,
     Display::Wayland { .. } => CaptureSystem::Wayland,
     Display::Windows { .. } => CaptureSystem::Windows,
+    Display::MacosDesktop => CaptureSystem::Macos,
   }
 }
 
@@ -55,6 +56,7 @@ fn tags(driver: &CaptureDriverDescriptor, displays: &[Session]) -> Vec<Tag> {
     (CaptureSystem::X11, "X11"),
     (CaptureSystem::Wayland, "Wayland"),
     (CaptureSystem::Windows, "Windows"),
+    (CaptureSystem::Macos, "macOS"),
   ] {
     if driver.systems.contains(&system) {
       tags.push(Tag::new(label, TagStyle::System));

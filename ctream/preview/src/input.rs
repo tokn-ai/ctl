@@ -5,8 +5,42 @@ use ctream_client::{
 use eframe::egui::{self, Event, Key, Modifiers, Pos2, Vec2};
 use std::io::{self, Read, Write};
 
-pub struct Input<R: Read + Send + 'static, W: Write + Send + 'static> {
-  control: RemoteInput<R, W>,
+pub(super) trait Sink {
+  fn dimensions(&self) -> Option<[u32; 2]> {
+    None
+  }
+
+  fn move_pointer(&mut self, x: u32, y: u32, size: [u32; 2]) -> io::Result<()>;
+  fn button(&mut self, code: u8, pressed: bool) -> io::Result<()>;
+  fn key(&mut self, name: &str, pressed: bool) -> io::Result<()>;
+  fn reset(&mut self) -> io::Result<()>;
+}
+
+impl<R: Read + Send + 'static, W: Write + Send + 'static> Sink for RemoteInput<R, W> {
+  fn dimensions(&self) -> Option<[u32; 2]> {
+    Self::dimensions(self)
+  }
+
+  fn move_pointer(&mut self, x: u32, y: u32, size: [u32; 2]) -> io::Result<()> {
+    Self::move_pointer(self, x, y, size)
+  }
+
+  fn button(&mut self, code: u8, pressed: bool) -> io::Result<()> {
+    Self::button(self, code, pressed)
+  }
+
+  fn key(&mut self, name: &str, pressed: bool) -> io::Result<()> {
+    Self::key(self, name, pressed)
+  }
+
+  fn reset(&mut self) -> io::Result<()> {
+    Self::reset(self)
+  }
+}
+
+pub(super) struct Input<S: Sink> {
+  control: S,
+  forwarding: bool,
   modifiers: Modifiers,
   pointer: Option<Pos2>,
   buttons: [bool; egui::NUM_POINTER_BUTTONS],
@@ -53,10 +87,11 @@ fn keysym(key: Key) -> String {
   .into()
 }
 
-impl<R: Read + Send + 'static, W: Write + Send + 'static> Input<R, W> {
-  pub fn new(control: RemoteInput<R, W>) -> Self {
+impl<S: Sink> Input<S> {
+  pub fn new(control: S) -> Self {
     Self {
       control,
+      forwarding: false,
       modifiers: Modifiers::NONE,
       pointer: None,
       buttons: [false; egui::NUM_POINTER_BUTTONS],
@@ -66,6 +101,34 @@ impl<R: Read + Send + 'static, W: Write + Send + 'static> Input<R, W> {
 
   pub fn desktop_size(&self) -> Option<[u32; 2]> {
     self.control.dimensions()
+  }
+
+  #[cfg(test)]
+  pub fn is_forwarding(&self) -> bool {
+    self.forwarding
+  }
+
+  pub fn update(
+    &mut self,
+    ctx: &egui::Context,
+    image: Option<&ImageGeometry>,
+    pointer_regions: &[egui::Rect],
+  ) -> io::Result<()> {
+    if ctx.current_pass_index() != 0 {
+      return Ok(());
+    }
+    if let Some(image) = image
+      && ctx.input(|input| input.focused)
+      && !ctx.wants_keyboard_input()
+    {
+      self.forwarding = true;
+      return ctx
+        .input(|input| self.forward(image, &input.raw.events, input.modifiers, pointer_regions));
+    }
+    if std::mem::take(&mut self.forwarding) {
+      self.reset()?;
+    }
+    Ok(())
   }
 
   fn sync_modifiers(&mut self, now: Modifiers) -> io::Result<()> {
@@ -84,7 +147,7 @@ impl<R: Read + Send + 'static, W: Write + Send + 'static> Input<R, W> {
     Ok(())
   }
 
-  pub fn reset(&mut self) -> io::Result<()> {
+  fn reset(&mut self) -> io::Result<()> {
     self.modifiers = Modifiers::NONE;
     self.pointer = None;
     self.buttons.fill(false);
@@ -129,7 +192,7 @@ impl<R: Read + Send + 'static, W: Write + Send + 'static> Input<R, W> {
     self.control.button(code, pressed)
   }
 
-  pub fn forward(
+  fn forward(
     &mut self,
     image: &ImageGeometry,
     events: &[Event],

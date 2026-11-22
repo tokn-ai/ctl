@@ -17,6 +17,13 @@ ctream-driver-capture.workspace = true
 ctream-driver-input.workspace = true
 ctream-platform.workspace = true
 
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.10.1"
+ctream-driver-capture.workspace = true
+ctream-driver-input.workspace = true
+dispatch2 = "0.3.1"
+libc = "0.2"
+
 [dev-dependencies]
 ctream-client.workspace = true
 

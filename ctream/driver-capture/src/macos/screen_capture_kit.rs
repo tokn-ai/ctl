@@ -22,6 +22,7 @@ struct Callback(Box<dyn Fn(Event) + Send + Sync>);
 /// A window from one discovery snapshot. Capture starts with this retained window.
 pub struct Window {
   pub id: u32,
+  pub pid: i32,
   pub title: String,
   pub application: String,
   native: NativeWindow,
@@ -95,6 +96,14 @@ impl Capture {
     Self::start_source(window.native.0.as_ptr(), callback)
   }
 
+  /// Returns the selected window ID and owning process on the main thread.
+  /// Older system pickers may grant capture without exposing that identity.
+  pub fn window_identity(&self) -> Option<(u32, i32)> {
+    let (mut id, mut pid) = (0, 0);
+    let status = unsafe { ctream_sck_window_identity(self.native.as_ptr(), &mut id, &mut pid) };
+    (status != 0).then_some((id, pid))
+  }
+
   fn start_source(
     window: *mut c_void,
     callback: impl Fn(Event) + Send + Sync + 'static,
@@ -142,6 +151,7 @@ unsafe extern "C" fn listed_window(
   context: *mut c_void,
   handle: *mut c_void,
   id: u32,
+  pid: i32,
   title: *const c_char,
   application: *const c_char,
 ) {
@@ -159,6 +169,7 @@ unsafe extern "C" fn listed_window(
     .into_owned();
   list.windows.push(Window {
     id,
+    pid,
     title,
     application,
     native,
@@ -256,7 +267,7 @@ unsafe extern "C" {
   fn ctream_sck_has_screen_recording_access() -> i32;
   fn ctream_sck_list_windows(
     context: *mut c_void,
-    window: unsafe extern "C" fn(*mut c_void, *mut c_void, u32, *const c_char, *const c_char),
+    window: unsafe extern "C" fn(*mut c_void, *mut c_void, u32, i32, *const c_char, *const c_char),
     completion: unsafe extern "C" fn(*mut c_void, *const c_char),
   ) -> i32;
   fn ctream_sck_release_window(window: *mut c_void);
@@ -268,6 +279,7 @@ unsafe extern "C" {
     release: unsafe extern "C" fn(*mut c_void),
     status: *mut i32,
   ) -> *mut c_void;
+  fn ctream_sck_window_identity(native: *mut c_void, id: *mut u32, owner: *mut i32) -> i32;
   fn ctream_sck_stop(native: *mut c_void);
 }
 

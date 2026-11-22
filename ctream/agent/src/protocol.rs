@@ -1,9 +1,9 @@
 use ctream_driver::{ControlOperation, Result};
 use ctream_proto::{
   BOUNDS_VERSION, CAPTURE_CATALOG_VERSION, CAPTURE_DRIVER_VERSION, DISPLAY_VERSION,
-  LATENCY_VERSION, Target, WAYLAND_WINDOW_VERSION, WINDOWS_DESKTOP_VERSION,
-  WINDOWS_DISPLAY_VERSION, WINDOWS_WINDOW_VERSION, X11_WINDOW_VERSION, valid_capture_driver,
-  valid_window_id,
+  LATENCY_VERSION, MACOS_WINDOW_VERSION, Target, WAYLAND_WINDOW_VERSION, WINDOWS_DESKTOP_VERSION,
+  WINDOWS_DISPLAY_VERSION, WINDOWS_WINDOW_VERSION, WindowId, X11_WINDOW_VERSION,
+  valid_capture_driver, valid_window_id,
 };
 
 pub enum TargetOperation<'a> {
@@ -18,8 +18,11 @@ pub enum Request<'a> {
   Ping,
   Discover {
     windows_displays: bool,
+    macos: bool,
   },
-  CaptureCatalog,
+  CaptureCatalog {
+    macos: bool,
+  },
   CaptureDrivers(Target),
   CaptureWithDriver {
     target: Target,
@@ -89,6 +92,7 @@ fn parse_target(version: &str, value: &str) -> Result<Target> {
     Target::WindowsDesktop if version != WINDOWS_DESKTOP_VERSION => {
       Err("Windows desktop-wide window selection requires ctream_agent 1.0.9".into())
     }
+    Target::MacosDesktop => Err("macOS window selection requires ctream_agent 1.0.11".into()),
     target => Ok(target),
   }
 }
@@ -99,11 +103,14 @@ fn supports_capture_selection(version: &str, target: &str) -> bool {
 
 pub fn parse(args: &[String]) -> Result<Request<'_>> {
   match args {
+    [version, operation, tail @ ..] if version == MACOS_WINDOW_VERSION => {
+      parse_macos_version(operation, tail)
+    }
     [version, operation] if version == LATENCY_VERSION && operation == "ping" => Ok(Request::Ping),
     [version, operation]
       if version == CAPTURE_CATALOG_VERSION && operation == "capture-drivers" =>
     {
-      Ok(Request::CaptureCatalog)
+      Ok(Request::CaptureCatalog { macos: false })
     }
     [version, operation, target]
       if operation == "capture-drivers" && supports_capture_selection(version, target) =>
@@ -135,6 +142,7 @@ pub fn parse(args: &[String]) -> Result<Request<'_>> {
     [version, operation] if supports_displays(version) && operation == "discover" => {
       Ok(Request::Discover {
         windows_displays: supports_windows_displays(version),
+        macos: false,
       })
     }
     [version, operation, target] if supports_displays(version) => {
@@ -190,6 +198,44 @@ pub fn parse(args: &[String]) -> Result<Request<'_>> {
     }
     _ => Err("usage: ctream-agent VERSION OPERATION [DISPLAY [WINDOW]]".into()),
   }
+}
+
+fn parse_macos_version<'a>(operation: &str, tail: &'a [String]) -> Result<Request<'a>> {
+  let target = Target::MacosDesktop;
+  match (operation, tail) {
+    ("discover", []) => Ok(Request::Discover {
+      windows_displays: true,
+      macos: true,
+    }),
+    ("capture-drivers", []) => Ok(Request::CaptureCatalog { macos: true }),
+    ("capture-drivers", [name]) if name == "macos" => Ok(Request::CaptureDrivers(target)),
+    ("windows", [name]) if name == "macos" => Ok(Request::Target(target, TargetOperation::Windows)),
+    ("capture-window" | "input-window", [name, id]) if name == "macos" => {
+      validate_macos_window(id)?;
+      let operation = match operation {
+        "capture-window" => TargetOperation::CaptureWindow(id),
+        _ => TargetOperation::InputWindow(id),
+      };
+      Ok(Request::Target(target, operation))
+    }
+    ("capture-with-driver", [name, driver, id]) if name == "macos" => {
+      if !valid_capture_driver(driver) {
+        return Err("invalid capture driver identifier".into());
+      }
+      validate_macos_window(id)?;
+      Ok(Request::CaptureWithDriver {
+        target,
+        driver,
+        window: Some(id),
+      })
+    }
+    _ => Err("unknown ctream-agent 1.0.11 operation".into()),
+  }
+}
+
+fn validate_macos_window(id: &str) -> Result<()> {
+  WindowId::macos_parts(id).ok_or("invalid macOS window identifier")?;
+  Ok(())
 }
 
 #[cfg(test)]
@@ -287,7 +333,11 @@ mod tests {
       WINDOWS_DESKTOP_VERSION,
     ] {
       let arguments = args(&[version, "discover"]);
-      let Request::Discover { windows_displays } = parse(&arguments).unwrap() else {
+      let Request::Discover {
+        windows_displays,
+        macos: false,
+      } = parse(&arguments).unwrap()
+      else {
         panic!("expected discovery");
       };
       assert_eq!(
@@ -398,7 +448,7 @@ mod tests {
   fn target_independent_catalog_requires_its_own_contract_and_exact_shape() {
     assert!(matches!(
       parse(&args(&[CAPTURE_CATALOG_VERSION, "capture-drivers"])).unwrap(),
-      Request::CaptureCatalog
+      Request::CaptureCatalog { macos: false }
     ));
     for old in [
       DISPLAY_VERSION,
@@ -418,6 +468,80 @@ mod tests {
         parse(&args(&[CAPTURE_DRIVER_VERSION, "capture-drivers", target])).unwrap(),
         Request::CaptureDrivers(_)
       ));
+    }
+  }
+
+  #[test]
+  fn macos_discovery_and_window_operations_require_the_new_contract() {
+    let version = MACOS_WINDOW_VERSION;
+    let name = "macos";
+    let window = "macos-123-42";
+    assert!(matches!(
+      parse(&args(&[version, "discover"])).unwrap(),
+      Request::Discover { macos: true, .. }
+    ));
+    assert!(matches!(
+      parse(&args(&[version, "capture-drivers"])).unwrap(),
+      Request::CaptureCatalog { macos: true }
+    ));
+    assert!(matches!(
+      parse(&args(&[version, "capture-drivers", name])).unwrap(),
+      Request::CaptureDrivers(Target::MacosDesktop)
+    ));
+    assert!(matches!(
+      parse(&args(&[version, "windows", name])).unwrap(),
+      Request::Target(Target::MacosDesktop, TargetOperation::Windows)
+    ));
+    assert!(matches!(
+      parse(&args(&[
+        version,
+        "capture-with-driver",
+        name,
+        "auto",
+        window
+      ]))
+      .unwrap(),
+      Request::CaptureWithDriver {
+        target: Target::MacosDesktop,
+        window: Some("macos-123-42"),
+        ..
+      }
+    ));
+    assert!(matches!(
+      parse(&args(&[version, "capture-window", name, window])).unwrap(),
+      Request::Target(
+        Target::MacosDesktop,
+        TargetOperation::CaptureWindow("macos-123-42")
+      )
+    ));
+    assert!(matches!(
+      parse(&args(&[version, "input-window", name, window])).unwrap(),
+      Request::Target(
+        Target::MacosDesktop,
+        TargetOperation::InputWindow("macos-123-42")
+      )
+    ));
+    for unsupported in [
+      vec![LATENCY_VERSION, "discover"],
+      vec![WINDOWS_DESKTOP_VERSION, "windows", name],
+      vec![
+        CAPTURE_DRIVER_VERSION,
+        "capture-with-driver",
+        name,
+        "auto",
+        window,
+      ],
+      vec![WINDOWS_DESKTOP_VERSION, "input-window", name, window],
+      vec![version, "input", name],
+      vec![version, "capture", name],
+      vec![version, "capture-with-driver", name, "auto"],
+      vec![version, "capture-with-driver", name, "bad/driver", window],
+      vec![version, "input-window", name, "window_1"],
+      vec![version, "capture-window", name, "macos-0-42"],
+      vec![version, "elements", name, window],
+      vec![version, "action", name, window],
+    ] {
+      assert!(parse(&args(&unsupported)).is_err(), "{unsupported:?}");
     }
   }
 

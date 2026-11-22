@@ -696,6 +696,29 @@ retain their request and response shapes. Older agents leave the latency
 measurement unavailable while continuing to serve the existing operations.
 Other named protocols and product release versions are unchanged.
 
+macOS window support advances `ctream_agent` from `1.0.10` (build 10) to
+`1.0.11` (build 11). The new `discover` request can report the `macos_desktop`
+session on a macOS agent. The target-independent `capture-drivers` reply adds
+`macos` as a supported system and advertises `macos.screencapturekit` with
+window scope. `capture-drivers macos` returns the target-specific provider
+list. `windows macos` returns existing window records with IDs of the form
+`macos-PID-WINDOWID`. The PID binds the selection to its owning process.
+
+`capture-window macos WINDOW` and `capture-with-driver macos DRIVER WINDOW`
+stream PPM frames. Explicit driver selection uses the existing capture-start
+metadata. `input-window macos WINDOW` uses the existing `ready` handshake and
+dimension-aware input messages. Input requires a capture already active for
+the same window and ends when the capture closes. The macOS operations require
+a graphical agent session with Screen Recording permission for window capture
+and Accessibility permission for input. Linux and Windows retain their
+existing targets and discovery and catalog responses under `1.0.11`.
+
+`1.0.1`–`1.0.10` retain their request and response shapes. In particular,
+retained discovery and catalog requests omit macOS-specific values, and
+`1.0.10 ping` keeps its byte protocol. Clients try `1.0.11` discovery and
+catalog requests first and fall back to the existing versions against older
+agents. Other named protocols and product release versions are unchanged.
+
 Every PR description must state its protocol changes, or **None** when there
 are no changes. Include the previous and new contracts and the compatibility
 impact. Keep PR titles brief; put protocol details in the description.

@@ -1,6 +1,7 @@
-use super::{chrome, drivers, setup, view};
+use super::{chrome, drivers, input, setup, view};
 use ctream_client::media::Frame;
 use ctream_driver_capture::macos::screen_capture_kit::{Capture, Event, Window, list_windows};
+use ctream_driver_input::macos::{WindowIdentity, WindowInput};
 use eframe::egui;
 use std::{
   io,
@@ -24,6 +25,24 @@ enum End {
   Failed(String),
 }
 
+impl input::Sink for WindowInput {
+  fn move_pointer(&mut self, x: u32, y: u32, size: [u32; 2]) -> io::Result<()> {
+    Self::move_pointer(self, x, y, size)
+  }
+
+  fn button(&mut self, code: u8, pressed: bool) -> io::Result<()> {
+    Self::button(self, code, pressed)
+  }
+
+  fn key(&mut self, name: &str, pressed: bool) -> io::Result<()> {
+    Self::key(self, name, pressed)
+  }
+
+  fn reset(&mut self) -> io::Result<()> {
+    Self::reset(self)
+  }
+}
+
 #[derive(Default)]
 pub(super) struct Viewer {
   windows: Vec<Window>,
@@ -33,6 +52,8 @@ pub(super) struct Viewer {
   capture: Option<Capture>,
   update: Arc<Mutex<Update>>,
   texture: Option<egui::TextureHandle>,
+  input: Option<input::Input<WindowInput>>,
+  input_error: Option<String>,
   status: Option<(String, bool)>,
   viewing: bool,
   opening: bool,
@@ -65,6 +86,8 @@ impl Viewer {
   }
 
   fn clear_capture(&mut self) {
+    self.input = None;
+    self.input_error = None;
     self.selected_window = None;
     self.capture = None;
     self.texture = None;
@@ -152,6 +175,8 @@ impl Viewer {
   }
 
   fn close_viewer(&mut self, ctx: &egui::Context) {
+    self.input = None;
+    self.input_error = None;
     self.chrome.dismiss();
     self.viewing = false;
     self.opening = false;
@@ -274,6 +299,16 @@ impl Viewer {
     } else if refresh {
       self.refresh_windows(ctx);
     } else if start {
+      self.input_error = match self.capture.as_ref().and_then(Capture::window_identity) {
+        Some((id, pid)) => match WindowInput::open(WindowIdentity { id, pid }) {
+          Ok(input) => {
+            self.input = Some(input::Input::new(input));
+            None
+          }
+          Err(error) => Some(format!("View only: {error}")),
+        },
+        None => Some("View only: the picker did not provide a window identity".into()),
+      };
       self.viewing = true;
       self.opening = true;
       self.size = view::AspectResize::default();
@@ -312,8 +347,8 @@ impl Viewer {
       let controls = self.chrome.show(
         child,
         chrome::Status {
-          text: "View only",
-          error: false,
+          text: self.input_error.as_deref().unwrap_or("Control enabled"),
+          error: self.input_error.is_some(),
           driver: Some(DRIVER),
         },
       );
@@ -326,8 +361,15 @@ impl Viewer {
         .frame(egui::Frame::NONE)
         .show(child, |ui| {
           let area = ui.available_rect_before_wrap();
-          if let (Some(texture), Some(image)) = (&self.texture, view::fill(area, image_size)) {
-            view::paint(ui, texture, area, &image);
+          let image = view::fill(area, image_size);
+          if let (Some(texture), Some(image)) = (&self.texture, &image) {
+            view::paint(ui, texture, area, image);
+          }
+          if let Some(input) = &mut self.input
+            && let Err(error) = input.update(child, image.as_ref(), &controls.pointer_regions)
+          {
+            self.input = None;
+            self.input_error = Some(format!("View only: {error}"));
           }
           if !controls.resizing {
             self.size.update(child, image_size, video);

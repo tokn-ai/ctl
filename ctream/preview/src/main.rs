@@ -50,8 +50,7 @@ enum CaptureEnd {
 }
 
 struct Preview<T: Transport> {
-  input: Option<input::Input<T::Reader, T::Writer>>,
-  forwarding: bool,
+  input: Option<input::Input<ctream_client::input::Input<T::Reader, T::Writer>>>,
   input_error: Option<String>,
   capture_lifetime: Option<CaptureLifetime<T::Writer>>,
   stream: Arc<Mutex<Stream>>,
@@ -101,7 +100,6 @@ impl<T: Transport> Preview<T> {
     });
     Ok(Self {
       input: None,
-      forwarding: false,
       input_error: None,
       capture_lifetime: Some(lifetime),
       stream,
@@ -128,14 +126,12 @@ impl<T: Transport> Preview<T> {
       // capture stops, even if the viewer still has a texture to show.
       self.input.take();
       self.capture_lifetime.take();
-      self.forwarding = false;
     }
     end
   }
 
   fn stop_control(&mut self) {
     self.input.take();
-    self.forwarding = false;
     self.input_error = None;
   }
 
@@ -189,42 +185,24 @@ impl<T: Transport> Preview<T> {
         // gives the window a fixed size. Keep the full frame and input mapping.
         PreviewMode::Viewer { .. } => view::fill(area, size),
       };
-      let Some(image) = image else {
-        if interactive
-          && self.forwarding
-          && let Some(input) = &mut self.input
-        {
-          self.forwarding = false;
-          self.input_error = input
-            .reset()
-            .err()
-            .map(|error| format!("Input disconnected ({error})"));
-        }
-        return None;
-      };
-      let rect = view::paint(ui, texture, area, &image);
-      if error.is_none() {
-        overlay::paint(ui.painter(), &image, elements);
-      }
       if interactive
         && let Some(input) = &mut self.input
-        && ctx.current_pass_index() == 0
-        && self.input_error.is_none()
+        && let Err(err) = input.update(
+          &ctx,
+          image.as_ref().filter(|_| error.is_none()),
+          pointer_regions,
+        )
       {
-        let active = error.is_none() && ctx.input(|i| i.focused) && !ctx.wants_keyboard_input();
-        let result = if active {
-          ctx.input(|i| input.forward(&image, &i.raw.events, i.modifiers, pointer_regions))
-        } else if self.forwarding {
-          input.reset()
-        } else {
-          Ok(())
-        };
-        self.forwarding = active;
-        if let Err(err) = result {
-          self.input_error = Some(format!("Input disconnected ({err})"));
-        }
+        self.input = None;
+        self.input_error = Some(format!("Input disconnected ({err})"));
       }
-      return Some(rect);
+      return image.map(|image| {
+        let rect = view::paint(ui, texture, area, &image);
+        if error.is_none() {
+          overlay::paint(ui.painter(), &image, elements);
+        }
+        rect
+      });
     }
     None
   }
@@ -273,7 +251,7 @@ const USAGE: &str =
   --window ID           Open a window ID returned by ctream windows
   --capture-driver ID   Capture backend, or auto (default)
 
-TARGET is :DISPLAY, wayland-N, windows-N, or windows for the Windows desktop window list.
+TARGET is :DISPLAY, wayland-N, windows-N, or the desktop window lists windows and macos.
 Without an endpoint, choose a workspace host.
 Use --local for local capture.
 Selections open a view-only setup preview. Start hides setup and opens a separate viewer.
@@ -562,7 +540,6 @@ mod lifecycle_tests {
       let control = session.input().unwrap();
       let mut preview = Preview::connect(session, None, context.clone()).unwrap();
       preview.input = Some(input::Input::new(control));
-      preview.forwarding = true;
       let deadline = Instant::now() + Duration::from_secs(2);
       while preview.stream.lock().unwrap().end.is_none() {
         assert!(Instant::now() < deadline, "capture worker did not finish");
@@ -575,7 +552,6 @@ mod lifecycle_tests {
       ));
       assert!(preview.input.is_none());
       assert!(preview.capture_lifetime.is_none());
-      assert!(!preview.forwarding);
       assert_eq!(preview.texture.is_some(), !bytes.is_empty());
       let expected = [
         "close input-window",

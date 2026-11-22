@@ -35,7 +35,7 @@ pub fn discover_sessions() -> ctream_driver::Result<Vec<ctream_proto::Session>> 
       .into_iter()
       .map(|(display, class)| {
         let selectable = match &display {
-          Display::X11(_) | Display::Windows { .. } => true,
+          Display::X11(_) | Display::Windows { .. } | Display::MacosDesktop => true,
           Display::Wayland { uid, .. } => runtime_uid == Some(*uid),
         };
         Session {

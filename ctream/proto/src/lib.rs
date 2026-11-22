@@ -3,7 +3,8 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-pub const VERSION: &str = LATENCY_VERSION;
+pub const VERSION: &str = MACOS_WINDOW_VERSION;
+pub const MACOS_WINDOW_VERSION: &str = "1.0.11";
 pub const LATENCY_VERSION: &str = "1.0.10";
 pub const WINDOWS_DESKTOP_VERSION: &str = "1.0.9";
 pub const CAPTURE_CATALOG_VERSION: &str = "1.0.8";
@@ -38,6 +39,7 @@ pub enum CaptureSystem {
   X11,
   Wayland,
   Windows,
+  Macos,
 }
 
 /// A compiled provider's capabilities, independent of any running session.
@@ -87,6 +89,7 @@ pub enum Display {
     /// Physical desktop coordinates: left, top, right, bottom.
     bounds: [i32; 4],
   },
+  MacosDesktop,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -96,6 +99,8 @@ pub enum Target {
   Windows(u32),
   /// Desktop-wide window selection. Display capture still uses a monitor.
   WindowsDesktop,
+  /// Desktop-wide window selection. Full display capture is unavailable.
+  MacosDesktop,
 }
 
 impl Target {
@@ -104,12 +109,19 @@ impl Target {
       Self::X11(_) => CaptureSystem::X11,
       Self::Wayland(_) => CaptureSystem::Wayland,
       Self::Windows(_) | Self::WindowsDesktop => CaptureSystem::Windows,
+      Self::MacosDesktop => CaptureSystem::Macos,
     }
   }
 
+  pub const fn window_only(self) -> bool {
+    matches!(self, Self::WindowsDesktop | Self::MacosDesktop)
+  }
+
   pub fn parse(name: &str) -> Result<Self, &'static str> {
-    if name == "windows" {
-      return Ok(Self::WindowsDesktop);
+    match name {
+      "windows" => return Ok(Self::WindowsDesktop),
+      "macos" => return Ok(Self::MacosDesktop),
+      _ => {}
     }
     let (digits, constructor): (_, fn(u32) -> Self) = if let Some(digits) = name.strip_prefix(':') {
       (digits, Self::X11)
@@ -118,7 +130,7 @@ impl Target {
     } else if let Some(digits) = name.strip_prefix("windows-") {
       (digits, Self::Windows)
     } else {
-      return Err("expected :DISPLAY, wayland-N, windows-N, or windows");
+      return Err("expected :DISPLAY, wayland-N, windows-N, windows, or macos");
     };
     if !digits.bytes().all(|b| b.is_ascii_digit()) {
       return Err("invalid display number");
@@ -139,6 +151,7 @@ impl fmt::Display for Target {
       Self::Wayland(number) => write!(f, "wayland-{number}"),
       Self::Windows(number) => write!(f, "windows-{number}"),
       Self::WindowsDesktop => f.write_str("windows"),
+      Self::MacosDesktop => f.write_str("macos"),
     }
   }
 }
@@ -157,6 +170,45 @@ pub struct Window {
   pub id: String,
   pub title: String,
   pub app_id: String,
+}
+
+/// An opaque identity for a discovered window.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WindowId(String);
+
+impl WindowId {
+  /// Bind the WindowServer ID to the selected process.
+  pub fn macos(id: u32, pid: i32) -> Option<Self> {
+    (id != 0 && pid > 0).then(|| Self(format!("macos-{pid}-{id}")))
+  }
+
+  pub fn as_macos(&self) -> Option<(u32, i32)> {
+    Self::macos_parts(&self.0)
+  }
+
+  pub fn macos_parts(value: &str) -> Option<(u32, i32)> {
+    let (pid, id) = value.strip_prefix("macos-")?.split_once('-')?;
+    fn decimal<T: std::str::FromStr>(value: &str) -> Option<T> {
+      let first = *value.as_bytes().first()?;
+      if first == b'0' || !value.bytes().all(|c| c.is_ascii_digit()) {
+        return None;
+      }
+      value.parse().ok()
+    }
+    Some((decimal(id)?, decimal(pid)?))
+  }
+}
+
+impl fmt::Display for WindowId {
+  fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
+    out.write_str(&self.0)
+  }
+}
+
+impl From<WindowId> for String {
+  fn from(id: WindowId) -> Self {
+    id.0
+  }
 }
 
 pub fn valid_window_id(id: &str) -> bool {
@@ -218,6 +270,7 @@ mod tests {
       (Target::Wayland(1), CaptureSystem::Wayland),
       (Target::Windows(2), CaptureSystem::Windows),
       (Target::WindowsDesktop, CaptureSystem::Windows),
+      (Target::MacosDesktop, CaptureSystem::Macos),
     ] {
       assert_eq!(Target::parse(&target.to_string()).unwrap(), target);
       assert_eq!(target.system(), system);
@@ -231,6 +284,34 @@ mod tests {
     ] {
       assert!(Target::parse(invalid).is_err(), "{invalid}");
     }
+  }
+
+  #[test]
+  fn macos_window_identity_binds_window_to_its_process() {
+    let id = WindowId::macos(42, 123).unwrap();
+    assert_eq!(id.to_string(), "macos-123-42");
+    assert_eq!(id.as_macos(), Some((42, 123)));
+    assert_eq!(
+      WindowId::macos_parts("macos-2147483647-4294967295"),
+      Some((u32::MAX, i32::MAX))
+    );
+    assert!(WindowId::macos(0, 123).is_none());
+    assert!(WindowId::macos(42, -1).is_none());
+    for invalid in [
+      "macos-0-42",
+      "macos-123-0",
+      "macos-0123-42",
+      "macos-+123-42",
+      "macos-123-42-1",
+      "macos-2147483648-42",
+      "macos-123-4294967296",
+    ] {
+      assert_eq!(WindowId::macos_parts(invalid), None, "{invalid}");
+    }
+    assert_eq!(
+      serde_json::to_string(&Display::MacosDesktop).unwrap(),
+      r#""macos_desktop""#
+    );
   }
 
   #[test]

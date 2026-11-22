@@ -92,7 +92,7 @@ pub fn discover() -> io::Result<Vec<(Display, Option<String>)>> {
             .entry(*uid)
             .or_insert_with(|| wayland_class(*uid))
             .clone(),
-          Display::X11(_) | Display::Windows { .. } => None,
+          Display::X11(_) | Display::Windows { .. } | Display::MacosDesktop => None,
         };
         (display, class)
       })

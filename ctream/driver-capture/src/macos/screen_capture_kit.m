@@ -12,7 +12,7 @@
 typedef void (*FrameCallback)(void *, const uint8_t *, size_t, size_t, size_t, size_t);
 typedef void (*EndCallback)(void *, int32_t, const char *);
 typedef void (*ReleaseCallback)(void *);
-typedef void (*WindowCallback)(void *, void *, uint32_t, const char *, const char *);
+typedef void (*WindowCallback)(void *, void *, uint32_t, int32_t, const char *, const char *);
 typedef void (*WindowListCallback)(void *, const char *);
 
 typedef NS_ENUM(int32_t, CaptureStatus) {
@@ -133,7 +133,7 @@ static int32_t listWindows(void *context, WindowCallback addWindow, WindowListCa
         if (!application.length) {
           application = owner.bundleIdentifier;
         }
-        addWindow(context, (__bridge_retained void *)window, window.windowID,
+        addWindow(context, (__bridge_retained void *)window, window.windowID, owner.processID,
                   title.UTF8String ?: "", application.UTF8String ?: "");
       }
       completion(context, NULL);
@@ -165,6 +165,7 @@ API_AVAILABLE(macos(14.0))
                         release:(ReleaseCallback)release;
 - (void)present;
 - (void)startWithFilter:(SCContentFilter *)filter window:(SCWindow *)selected;
+- (int32_t)windowIdentity:(uint32_t *)id owner:(int32_t *)owner;
 - (void)finish:(CaptureEnd)end message:(NSString *)message;
 @end
 
@@ -264,6 +265,15 @@ static SCStreamConfiguration *configuration(uint32_t extent) {
 
 - (void)dealloc {
   _release(_context);
+}
+
+- (int32_t)windowIdentity:(uint32_t *)id owner:(int32_t *)owner {
+  if (!NSThread.isMainThread || _windowID == kCGNullWindowID || _windowOwner <= 0) {
+    return 0;
+  }
+  *id = _windowID;
+  *owner = _windowOwner;
+  return 1;
 }
 
 - (void)present {
@@ -519,6 +529,14 @@ void *ctream_sck_start(void *window, void *context, FrameCallback frame, EndCall
   }
   *status = CaptureStatusUnsupported;
   return NULL;
+}
+
+int32_t ctream_sck_window_identity(void *handle, uint32_t *id, int32_t *owner) {
+  if (@available(macOS 14.0, *)) {
+    CtreamScreenCapture *capture = (__bridge CtreamScreenCapture *)handle;
+    return [capture windowIdentity:id owner:owner];
+  }
+  return 0;
 }
 
 void ctream_sck_stop(void *handle) {

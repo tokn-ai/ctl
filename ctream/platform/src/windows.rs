@@ -12,6 +12,7 @@ pub fn list(target: Target) -> Result<Vec<Window>> {
     Target::Windows(_) | Target::WindowsDesktop => {
       Err("Windows windows require a native Windows agent".into())
     }
+    Target::MacosDesktop => Err("macOS window discovery requires a native macOS agent".into()),
   }
 }
 
@@ -20,6 +21,7 @@ pub fn list(target: Target) -> Result<Vec<Window>> {
   match target {
     Target::Windows(display) => ctream_windows::list_windows(display),
     Target::WindowsDesktop => ctream_windows::list_desktop_windows(),
+    Target::MacosDesktop => Err("macOS window discovery requires a native macOS agent".into()),
     _ => Err("Linux windows require a Linux agent".into()),
   }
 }

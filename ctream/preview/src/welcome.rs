@@ -79,6 +79,7 @@ fn target(session: &DisplaySession) -> Option<Target> {
     Display::X11(number) => Some(Target::X11(*number)),
     Display::Wayland { socket, .. } => Target::parse(socket).ok(),
     Display::Windows { number, .. } => Some(Target::Windows(*number)),
+    Display::MacosDesktop => Some(Target::MacosDesktop),
   }
 }
 
@@ -91,6 +92,7 @@ fn display_label(session: &DisplaySession) -> String {
       i64::from(bounds[2]) - i64::from(bounds[0]),
       i64::from(bounds[3]) - i64::from(bounds[1])
     ),
+    Display::MacosDesktop => "macOS desktop".into(),
   }
 }
 
@@ -208,6 +210,7 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
     driver: String,
     ctx: &egui::Context,
   ) -> Self {
+    let window_mode = window_mode || window.is_some() || selected.is_some_and(Target::window_only);
     let mut viewer = Self {
       transport: Arc::new(transport),
       displays: Vec::new(),
@@ -215,7 +218,7 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
       discovery_requests: None,
       discovery_error: None,
       selected,
-      window_mode: window_mode || window.is_some() || selected == Some(Target::WindowsDesktop),
+      window_mode,
       selected_window: window,
       driver,
       windows: Vec::new(),
@@ -352,6 +355,7 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
       .iter()
       .filter(|session| session.selectable)
       .filter_map(target)
+      .filter(|target| self.window_mode || !target.window_only())
       .filter(|target| self.compatible(*target))
   }
 
@@ -431,21 +435,24 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
   }
 
   fn apply_driver_scope(&mut self) {
-    if let Some(driver) = self
-      .drivers
-      .iter()
-      .find(|driver| driver.info.id == self.driver)
-    {
-      match driver.info.scopes.as_slice() {
-        [CaptureScope::Display] => self.window_mode = false,
-        [CaptureScope::Window] => self.window_mode = true,
-        _ => {}
-      }
+    match self.available_scopes().as_slice() {
+      [CaptureScope::Display] => self.window_mode = false,
+      [CaptureScope::Window] => self.window_mode = true,
+      _ => {}
     }
   }
 
   fn available_scopes(&self) -> Vec<CaptureScope> {
     if self.driver == "auto" {
+      // macOS hosts offer a window catalog in place of monitor sources.
+      if !self.drivers.is_empty()
+        && self.drivers.iter().all(|driver| {
+          driver.systems.as_slice() == [CaptureSystem::Macos]
+            && driver.info.scopes.as_slice() == [CaptureScope::Window]
+        })
+      {
+        return vec![CaptureScope::Window];
+      }
       return vec![CaptureScope::Display, CaptureScope::Window];
     }
     self
@@ -772,7 +779,9 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
       .width(ui.available_width())
       .show_ui(ui, |ui| {
         for session in &self.displays {
-          if let Some(candidate) = target(session).filter(|candidate| self.compatible(*candidate)) {
+          if let Some(candidate) = target(session)
+            .filter(|candidate| !candidate.window_only() && self.compatible(*candidate))
+          {
             ui.add_enabled_ui(session.selectable, |ui| {
               ui.selectable_value(&mut self.selected, Some(candidate), display_label(session))
                 .on_hover_text(if session.selectable {

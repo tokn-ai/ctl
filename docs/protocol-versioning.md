@@ -403,10 +403,19 @@ and retained runtime registrations. Storage layout 3 adds the runtime path
 index. Layout 4 adds an updater path index for readable updater directories.
 Layout 5 groups runtime and updater payloads by build label, then target.
 Layout 6 puts the locally executable updater directly under its build label.
+Layout 7 does the same for desktop packages that support named-path leases,
+with a schema-1 `desktop-object-paths.json` index for exact lookup.
 Path indexes coexist with the earlier indexes so retained executables can
-lease their original paths. A verified manager advertises layout 6 through
-`installation-layout-version`. SSH provisioning requires a layout-6 target
+lease their original paths. A verified manager advertises layout 7 through
+`installation-layout-version`. SSH provisioning requires a layout-7 target
 updater. This capability has no separate internal build.
+
+The schema-1 published desktop manifest adds an optional
+`installation_layout_version` field. A value of 7 or later declares support for
+leasing the desktop from a build-labeled path. Checkout builds advertise the
+same capability next to their existing build result. Packages without the
+field or checkout marker use digest paths. Prior manifest readers accept the
+additional field.
 
 Inventory uses schema 2 and the private `ctlup-show-v2` marker. The previous
 `ctlup-show-v1` schema did not carry the exact active origin. New inventory

@@ -43,6 +43,8 @@ pub(super) async fn resolve(
     app_version: publication.app_version,
     bundle_id: publication.bundle_id,
     publication_id: Some(publication.publication_id),
+    source_revision: publication.git_revision,
+    built_at: publication.built_at,
     asset,
     signing,
     source: PackageSource::Workflow(directory),
@@ -116,7 +118,7 @@ pub(super) async fn pull_request(
 ) -> io::Result<DesktopRelease> {
   let name = format!("ctmux-desktop-{}", target.triple());
   let directory = DownloadedArtifact::new(staging)?;
-  let revision = pr::download_named_artifact(number, &name, &directory.0)
+  let (revision, built_at) = pr::download_named_artifact(number, &name, &directory.0)
     .await
     .map_err(io::Error::other)?;
   let (version, bundle_id) = artifact_identity(&directory.0, target)?;
@@ -130,6 +132,8 @@ pub(super) async fn pull_request(
     app_version: version,
     bundle_id,
     publication_id: None,
+    source_revision: revision,
+    built_at: Some(built_at),
     asset,
     signing,
     source: PackageSource::Workflow(directory),
@@ -186,7 +190,7 @@ fn artifact_manifest(
   {
     return Err(invalid("unexpected Nightly desktop signing mode"));
   }
-  let asset = select_asset(manifest.assets, target, bundle_id, suffix)?;
+  let asset = select_asset(manifest, target, bundle_id, suffix)?;
   Ok((signing, asset))
 }
 

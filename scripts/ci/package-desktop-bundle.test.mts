@@ -137,13 +137,14 @@ test("stages every Linux installer with target-specific names and matching check
   // Tauri leaves build intermediates under these directories; only final files
   // in the format's immediate output directory are release installers.
   await file(join(options.input_directory, "deb", "intermediate", "ignored.deb"), "not an installer");
-  const manifest = await packageDesktopBundle(options);
+  const manifest = await packageDesktopBundle({ ...options, installation_layout_version: 7 });
   assert.deepEqual(manifest, {
     schema_version: 1,
     target: options.target,
     bundle_id: options.bundle_id,
     git_revision: options.git_revision,
     signing_mode: "not_applicable",
+    installation_layout_version: 7,
     assets: manifest.assets,
   });
   assert.deepEqual(manifest.assets.map((asset) => asset.name), [".deb", ".rpm", ".AppImage"].map(

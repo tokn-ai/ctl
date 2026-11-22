@@ -482,16 +482,22 @@ fn desktop_and_updater_selections_share_the_registry_without_losing_each_other()
       channel: "nightly".into(),
     },
   };
-  let payload = installs.desktop_root().join(&desktop.content_id);
+  let label = "nightly-20261121T081525Z-v0.1.4-abcdef0";
+  let payload = installs.desktop_root().join(label);
   installs
-    .publish_desktop(None, &desktop, || {
-      filesystem::ensure_directory(&payload)?;
-      let app = payload.join("app");
+    .publish_desktop(None, &desktop, Some(label), |path| {
+      assert_eq!(path, payload);
+      filesystem::ensure_directory(path)?;
+      let app = path.join("ctmux.AppImage");
       options().create_new(true).write(true).open(&app)?;
       Ok(())
     })
     .unwrap();
-  let app = payload.join("app").canonicalize().unwrap();
+  assert_eq!(
+    installs.desktop_object_path(&desktop.content_id).unwrap(),
+    payload
+  );
+  let app = payload.join("ctmux.AppImage").canonicalize().unwrap();
   let app_lease = leases::lease_executable(&app).unwrap().unwrap();
   let next = DesktopSelection {
     content_id: "a".repeat(64),
@@ -499,7 +505,7 @@ fn desktop_and_updater_selections_share_the_registry_without_losing_each_other()
   };
   assert_eq!(
     installs
-      .publish_desktop(None, &next, || -> io::Result<()> {
+      .publish_desktop(None, &next, None, |_| -> io::Result<()> {
         panic!("stale publish called")
       })
       .unwrap_err()
@@ -507,8 +513,9 @@ fn desktop_and_updater_selections_share_the_registry_without_losing_each_other()
     io::ErrorKind::WouldBlock
   );
   installs
-    .publish_desktop(Some(&desktop), &next, || {
-      filesystem::ensure_directory(&installs.desktop_root().join(&next.content_id))
+    .publish_desktop(Some(&desktop), &next, None, |path| {
+      assert_eq!(path, installs.desktop_root().join(&next.content_id));
+      filesystem::ensure_directory(path)
     })
     .unwrap();
   installs
@@ -531,4 +538,5 @@ fn desktop_and_updater_selections_share_the_registry_without_losing_each_other()
   assert!(payload.exists() && !updater.exists());
   installs.prune_all(false).unwrap();
   assert!(!payload.exists() && !updater.exists());
+  assert!(!installs.is_desktop_object_name(label).unwrap());
 }

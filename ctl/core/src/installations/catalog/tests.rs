@@ -25,6 +25,104 @@ impl Drop for Home {
   }
 }
 
+#[test]
+fn desktop_label_reservations_are_stable_and_prevent_collisions() {
+  let home = Home::new();
+  let store = home.store();
+  let root = store.desktop_root();
+  let label = "stable-v0.1.4-abcdef0";
+  let first = DesktopSelection {
+    content_id: "a".repeat(64),
+    source: DesktopSource::Provided,
+  };
+  let second = DesktopSelection {
+    content_id: "b".repeat(64),
+    source: DesktopSource::Provided,
+  };
+  assert!(!store.is_desktop_object_name(label).unwrap());
+  assert!(!store.is_desktop_object_name(&"A".repeat(64)).unwrap());
+  assert!(store.desktop_object_path("../foreign").is_err());
+  store
+    .publish_desktop(None, &first, Some("stable-v0.1.4/foreign"), |_| Ok(()))
+    .unwrap_err();
+  store
+    .publish_desktop(None, &first, Some(label), |path| {
+      assert_eq!(path, root.join(label));
+      Err::<(), _>(io::Error::other("interrupted publication"))
+    })
+    .unwrap_err();
+  assert_eq!(store.desktop_selection().unwrap(), None);
+  assert!(store.is_desktop_object_name(label).unwrap());
+  assert!(!root.join(label).exists());
+  store
+    .publish_desktop(None, &second, Some(label), |path| {
+      assert_eq!(path, root.join(format!("{label}-bbbbbbbbbbbb")));
+      filesystem::ensure_directory(path)
+    })
+    .unwrap();
+  store
+    .publish_desktop(
+      Some(&second),
+      &first,
+      Some("stable-v0.1.4-dedcafe"),
+      |path| {
+        assert_eq!(path, root.join(label));
+        filesystem::ensure_directory(path)
+      },
+    )
+    .unwrap();
+  assert_eq!(
+    store.desktop_object_path(&first.content_id).unwrap(),
+    root.join(label)
+  );
+  assert_eq!(store.desktop_selection().unwrap().as_ref(), Some(&first));
+  fs::remove_dir(root.join(label)).unwrap();
+  let pending = store.prune_all(false).unwrap();
+  assert_eq!(
+    pending.missing_builds,
+    std::slice::from_ref(&first.content_id)
+  );
+  assert!(store.is_desktop_object_name(label).unwrap());
+  let forgotten = store.prune().unwrap();
+  assert_eq!(forgotten.forgotten_missing_builds, [first.content_id]);
+  assert_eq!(store.desktop_selection().unwrap(), None);
+  assert!(!store.is_desktop_object_name(label).unwrap());
+}
+
+#[test]
+fn desktop_repair_preserves_legacy_digest_path() {
+  let home = Home::new();
+  let store = home.store();
+  let first = DesktopSelection {
+    content_id: "a".repeat(64),
+    source: DesktopSource::Provided,
+  };
+  let legacy = store.desktop_root().join(&first.content_id);
+  store
+    .publish_desktop(None, &first, None, |path| {
+      assert_eq!(path, legacy);
+      filesystem::ensure_directory(path)
+    })
+    .unwrap();
+  fs::remove_dir(&legacy).unwrap();
+  store
+    .publish_desktop(
+      Some(&first),
+      &first,
+      Some("stable-v0.1.4-abcdef0"),
+      |path| {
+        assert_eq!(path, legacy);
+        filesystem::ensure_directory(path)
+      },
+    )
+    .unwrap();
+  assert!(!store.state_root().join(DESKTOP_OBJECT_PATHS).exists());
+  assert_eq!(
+    store.desktop_object_path(&first.content_id).unwrap(),
+    legacy
+  );
+}
+
 fn fixture(home: &Home, target: &str, byte: u8) -> Bundle {
   fixture_with_source(home, target, byte, Source::Ci)
 }
@@ -417,7 +515,7 @@ fn provisioning_refreshes_legacy_launchers_and_preserves_hash_payloads() {
       .updater_paths
       .object
       .launcher_layout,
-    Some(super::super::DEVELOPMENT_LAYOUT_VERSION)
+    Some(super::super::UPDATER_OBJECT_PATH_LAYOUT_VERSION)
   );
   let launcher = store
     .root()

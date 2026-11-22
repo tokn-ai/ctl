@@ -9,6 +9,9 @@ pub struct DesktopBuild {
   pub app_version: String,
   pub bundle_id: String,
   pub archive: PathBuf,
+  pub source_revision: Option<String>,
+  pub built_at: Option<String>,
+  pub installation_layout_version: Option<u16>,
 }
 
 #[derive(Deserialize)]
@@ -25,6 +28,7 @@ struct BuildResult {
 /// Reports a missing checkout, build failures, or invalid output metadata.
 pub async fn build_desktop(workspace: &Path, output: &Path) -> io::Result<DesktopBuild> {
   let workspace = checkout(workspace)?;
+  let source_revision = checkout_revision(&workspace).await;
   private_fs::create_directory(output)?;
   let output = output.canonicalize()?;
   let mut command = tokio::process::Command::new(
@@ -46,7 +50,28 @@ pub async fn build_desktop(workspace: &Path, output: &Path) -> io::Result<Deskto
     .env_remove("CTMUX_DEV_CTLD_EXECUTABLE")
     .env_remove("CTMUX_DEV_APP_FAILURE_MARKER");
   run_recipe(command, "desktop development build").await?;
-  read_output(&output, archive_name())
+  let mut built = read_output(&output, archive_name())?;
+  built.source_revision = source_revision;
+  built.built_at = time::OffsetDateTime::now_utc()
+    .format(&time::format_description::well_known::Rfc3339)
+    .ok();
+  Ok(built)
+}
+
+async fn checkout_revision(workspace: &Path) -> Option<String> {
+  if !workspace.join(".git").exists() {
+    return None;
+  }
+  let result = tokio::process::Command::new("git")
+    .args(["rev-parse", "--verify", "HEAD"])
+    .current_dir(workspace)
+    .stdin(std::process::Stdio::null())
+    .output()
+    .await
+    .ok()?;
+  let text = std::str::from_utf8(&result.stdout).ok()?.trim();
+  (result.status.success() && text.len() == 40 && text.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    .then(|| text.to_owned())
 }
 
 fn archive_name() -> &'static str {
@@ -82,10 +107,24 @@ fn read_output(output: &Path, name: &str) -> io::Result<DesktopBuild> {
   {
     return Err(io::Error::other("invalid local desktop package"));
   }
+  let installation_layout_version =
+    match crate::components::read_input(&output.join("installation-layout-version"), 8) {
+      Ok(bytes) => Some(
+        std::str::from_utf8(&bytes)
+          .ok()
+          .and_then(|value| value.trim().parse().ok())
+          .ok_or_else(|| io::Error::other("invalid desktop installation layout version"))?,
+      ),
+      Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+      Err(error) => return Err(error),
+    };
   Ok(DesktopBuild {
     app_version: result.app_version,
     bundle_id: result.bundle_id,
     archive,
+    source_revision: None,
+    built_at: None,
+    installation_layout_version,
   })
 }
 

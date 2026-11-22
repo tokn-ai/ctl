@@ -28,14 +28,14 @@ async fn local_source_install_pins_a_checkout_and_repairs_from_its_archive() {
   let store = Installations::new(&home.0);
   let selection = store.desktop_selection().unwrap().unwrap();
   assert_eq!(selection.source, DesktopSource::Checkout);
-  let object = store
-    .updater_root()
-    .join("store/desktop")
-    .join(&selection.content_id);
+  let object = store.desktop_object_path(&selection.content_id).unwrap();
+  let name = object.file_name().unwrap().to_str().unwrap();
+  assert!(name.starts_with("dev-") && name.ends_with("-local"));
   assert!(object.join(payload_name()).exists());
-  fs::remove_dir_all(object).unwrap();
+  fs::remove_dir_all(&object).unwrap();
   update(&home.0, false, false).await.unwrap();
   assert_eq!(store.desktop_selection().unwrap(), Some(selection));
+  assert!(object.join(payload_name()).exists());
   assert!(
     !app_status(&home.0, store.desktop_selection().unwrap())
       .unwrap()
@@ -50,29 +50,38 @@ async fn prebuilt_windows_archive_install_update_and_repair() {
   let archive = PathBuf::from(
     std::env::var_os("CTLUP_TEST_DESKTOP_ARCHIVE").expect("native portable archive fixture"),
   );
-  verify_install_update_and_repair(&archive).await;
+  verify_install_update_and_repair(&archive, false).await;
 }
 
 #[tokio::test]
 async fn managed_desktop_launch_entry_and_exact_repair_use_the_registry() {
   let source = Home::new();
-  #[cfg(windows)]
-  let archive = {
-    let target = DesktopTarget::native().unwrap().triple();
-    portable::fixtures::package(&source.0, target, portable::fixtures::files(target))
-  };
-  #[cfg(target_os = "linux")]
-  let archive = {
-    let path = source.0.join("ctmux.AppImage");
-    fs::write(&path, linux::fixture_bytes()).unwrap();
-    path
-  };
-  #[cfg(target_os = "macos")]
-  let archive = fixture_macos_archive(&source.0);
-  verify_install_update_and_repair(&archive).await;
+  verify_install_update_and_repair(&fixture_archive(&source.0), true).await;
 }
 
-async fn verify_install_update_and_repair(archive: &Path) {
+#[tokio::test]
+async fn legacy_desktop_launch_entry_and_exact_repair_keep_the_digest_path() {
+  let source = Home::new();
+  verify_install_update_and_repair(&fixture_archive(&source.0), false).await;
+}
+
+fn fixture_archive(directory: &Path) -> PathBuf {
+  #[cfg(windows)]
+  {
+    let target = DesktopTarget::native().unwrap().triple();
+    portable::fixtures::package(directory, target, portable::fixtures::files(target))
+  }
+  #[cfg(target_os = "linux")]
+  {
+    let path = directory.join("ctmux.AppImage");
+    fs::write(&path, linux::fixture_bytes()).unwrap();
+    path
+  }
+  #[cfg(target_os = "macos")]
+  fixture_macos_archive(directory)
+}
+
+async fn verify_install_update_and_repair(archive: &Path, supports_named_leases: bool) {
   #[cfg(not(windows))]
   let home = Home::new();
   #[cfg(windows)]
@@ -82,16 +91,27 @@ async fn verify_install_update_and_repair(archive: &Path) {
     Home(path)
   };
   let store = Installations::new(&home.0);
-  install(&home.0, None, None, None, Some(archive), false)
-    .await
-    .unwrap();
+  if supports_named_leases {
+    let work = activation::Workspace::begin(&home.0).unwrap();
+    let metadata = DesktopMetadata::provided(DesktopTarget::native().unwrap());
+    let mut package = prepare_supplied(&work, archive, metadata).unwrap();
+    package.naming.installation_layout_version = Some(DESKTOP_OBJECT_PATH_LAYOUT_VERSION);
+    activate(&work, None, &package, DesktopSource::Provided, false).unwrap();
+  } else {
+    install(&home.0, None, None, None, Some(archive), false)
+      .await
+      .unwrap();
+  }
   let selected = store.desktop_selection().unwrap().unwrap();
   assert_eq!(selected.source, DesktopSource::Provided);
   assert_eq!(selected.content_id, package_digest(archive).unwrap().0);
-  let object = store
-    .updater_root()
-    .join("store/desktop")
-    .join(&selected.content_id);
+  let object = store.desktop_object_path(&selected.content_id).unwrap();
+  let name = object.file_name().unwrap().to_str().unwrap();
+  if supports_named_leases {
+    assert!(name.starts_with("provided-"));
+  } else {
+    assert_eq!(name, selected.content_id);
+  }
   let status = app_status(&home.0, Some(selected.clone())).unwrap();
   assert!(!status.missing);
   assert_eq!(

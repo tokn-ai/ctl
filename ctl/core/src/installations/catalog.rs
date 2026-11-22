@@ -16,6 +16,7 @@ const UPDATER_PATHS: &str = "updater-paths.json";
 const RUNTIME_BUILD_PATHS: &str = "runtime-build-paths.json";
 const UPDATER_BUILD_PATHS: &str = "updater-build-paths.json";
 const UPDATER_OBJECT_PATHS: &str = "updater-object-paths.json";
+const DESKTOP_OBJECT_PATHS: &str = "desktop-object-paths.json";
 const MAX_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_ENTRIES: usize = 4096;
 
@@ -93,6 +94,8 @@ pub(super) struct State {
   pub(super) runtime_paths: PayloadPaths,
   #[serde(skip)]
   pub(super) updater_paths: PayloadPaths,
+  #[serde(skip)]
+  pub(super) desktop_paths: PathIndex,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -216,6 +219,17 @@ enum Order {
 }
 
 impl PathIndex {
+  pub(super) fn location(&self, id: &str) -> Option<&str> {
+    self.locations.get(id).map(String::as_str)
+  }
+
+  pub(super) fn id_for_object(&self, name: &str) -> Option<&str> {
+    self
+      .locations
+      .iter()
+      .find_map(|(id, location)| (location == name).then_some(id.as_str()))
+  }
+
   fn validate(&self, layout: Option<u16>, order: Order) -> io::Result<()> {
     if self.schema_version != 1
       || self.locations.len() > MAX_ENTRIES
@@ -241,29 +255,35 @@ impl PathIndex {
         crate::bundles::validate_target(target)?;
         name
       };
-      if !filesystem::valid_id(id)
-        || !(1..=240).contains(&name.len())
-        || ![
-          "stable-",
-          "nightly-",
-          "dev-",
-          "release-",
-          "provided-",
-          "untracked-",
-        ]
-        .iter()
-        .any(|prefix| name.starts_with(prefix))
-        || name.ends_with('.')
-        || !name
-          .bytes()
-          .all(|byte| byte.is_ascii_alphanumeric() || b"-_.+".contains(&byte))
-        || !occupied.insert(location.to_ascii_lowercase())
-      {
+      validate_payload_label(name)?;
+      if !filesystem::valid_id(id) || !occupied.insert(location.to_ascii_lowercase()) {
         return Err(invalid("invalid installed payload location"));
       }
     }
     Ok(())
   }
+}
+
+pub(super) fn validate_payload_label(name: &str) -> io::Result<()> {
+  if !(1..=240).contains(&name.len())
+    || ![
+      "stable-",
+      "nightly-",
+      "dev-",
+      "release-",
+      "provided-",
+      "untracked-",
+    ]
+    .iter()
+    .any(|prefix| name.starts_with(prefix))
+    || name.ends_with('.')
+    || !name
+      .bytes()
+      .all(|byte| byte.is_ascii_alphanumeric() || b"-_.+".contains(&byte))
+  {
+    return Err(invalid("invalid installed payload location"));
+  }
+  Ok(())
 }
 
 impl Default for State {
@@ -277,6 +297,7 @@ impl Default for State {
       updater: None,
       runtime_paths: PayloadPaths::default(),
       updater_paths: PayloadPaths::default(),
+      desktop_paths: PathIndex::default(),
     }
   }
 }
@@ -337,8 +358,9 @@ impl State {
     self.updater_paths.validate(
       super::UPDATER_PATH_LAYOUT_VERSION,
       Some(super::UPDATER_BUILD_PATH_LAYOUT_VERSION),
-      Some(super::DEVELOPMENT_LAYOUT_VERSION),
+      Some(super::UPDATER_OBJECT_PATH_LAYOUT_VERSION),
     )?;
+    self.desktop_paths.validate(None, Order::Object)?;
     if self.schema_version != 2
       || self.entries.len() > MAX_ENTRIES
       || self.development.len() > MAX_ENTRIES
@@ -664,6 +686,7 @@ pub(super) fn read_index(store: &Installations) -> io::Result<State> {
   state.updater_paths.target_first = read_file(&root.join(UPDATER_PATHS))?.unwrap_or_default();
   state.updater_paths.build_first = read_file(&root.join(UPDATER_BUILD_PATHS))?.unwrap_or_default();
   state.updater_paths.object = read_file(&root.join(UPDATER_OBJECT_PATHS))?.unwrap_or_default();
+  state.desktop_paths = read_file(&root.join(DESKTOP_OBJECT_PATHS))?.unwrap_or_default();
   state.validate_index()?;
   Ok(state)
 }
@@ -701,8 +724,16 @@ pub(super) fn commit_updater_object_paths(
   store: &Installations,
   paths: &PathIndex,
 ) -> io::Result<()> {
-  paths.validate(Some(super::DEVELOPMENT_LAYOUT_VERSION), Order::Object)?;
+  paths.validate(
+    Some(super::UPDATER_OBJECT_PATH_LAYOUT_VERSION),
+    Order::Object,
+  )?;
   replace(&store.state_root().join(UPDATER_OBJECT_PATHS), paths)
+}
+
+pub(super) fn commit_desktop_paths(store: &Installations, paths: &PathIndex) -> io::Result<()> {
+  paths.validate(None, Order::Object)?;
+  replace(&store.state_root().join(DESKTOP_OBJECT_PATHS), paths)
 }
 
 pub(super) fn initialize(store: &Installations, state: &State) -> io::Result<()> {

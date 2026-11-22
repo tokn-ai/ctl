@@ -22,6 +22,7 @@ export interface DesktopBundleOptions {
   input_directory: string;
   output_directory: string;
   resources_directory?: string;
+  installation_layout_version?: number;
 }
 
 export interface DesktopBundleManifest {
@@ -30,6 +31,7 @@ export interface DesktopBundleManifest {
   bundle_id: string;
   git_revision: string;
   signing_mode: SigningMode;
+  installation_layout_version?: number;
   assets: { name: string; sha256: string }[];
 }
 
@@ -73,6 +75,11 @@ async function checksum(path: string): Promise<string> {
 }
 
 export async function packageDesktopBundle(options: DesktopBundleOptions): Promise<DesktopBundleManifest> {
+  const { installation_layout_version } = options;
+  if (installation_layout_version !== undefined &&
+    (!Number.isInteger(installation_layout_version) || installation_layout_version < 1 || installation_layout_version > 65535)) {
+    throw new Error("invalid desktop installation layout version");
+  }
   const isMac = macTargets.has(options.target);
   const isWindows = isWindowsDesktopTarget(options.target);
   if (!isMac && !isWindows && !linuxTargets.has(options.target)) {
@@ -164,6 +171,7 @@ export async function packageDesktopBundle(options: DesktopBundleOptions): Promi
     bundle_id: options.bundle_id,
     git_revision: options.git_revision,
     signing_mode: options.signing_mode,
+    ...(installation_layout_version === undefined ? {} : { installation_layout_version }),
     assets,
   };
   await writeFile(
@@ -179,9 +187,11 @@ async function main(): Promise<void> {
     throw new Error("usage: package-desktop-bundle.mts TARGET APP_VERSION BUNDLE_ID GIT_REVISION SIGNING_MODE INPUT_DIRECTORY OUTPUT_DIRECTORY [RESOURCES_DIRECTORY]");
   }
   const [target, app_version, bundle_id, git_revision, signing_mode, input_directory, output_directory, resources_directory] = args;
+  const layout = process.env.CTL_DESKTOP_INSTALLATION_LAYOUT_VERSION;
   const manifest = await packageDesktopBundle({
     target, app_version, bundle_id, git_revision, signing_mode: signing_mode as SigningMode, input_directory, output_directory,
     resources_directory,
+    installation_layout_version: layout === undefined ? undefined : Number(layout),
   });
   console.log(`Packaged ${manifest.assets.length} desktop assets for ${target} in ${output_directory}`);
 }

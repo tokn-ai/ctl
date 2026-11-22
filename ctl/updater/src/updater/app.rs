@@ -2,7 +2,10 @@ use ctl_client::cli::Channel;
 use ctl_client::remote_bundle::desktop::{self, DesktopRelease, DesktopSigning, DesktopTarget};
 use ctl_client::remote_bundle::published;
 use ctl_core::component_update::BundleChannel;
-use ctl_core::installations::{DesktopSelection, DesktopSource, Installations};
+use ctl_core::installations::{
+  CatalogOrigin, DESKTOP_OBJECT_PATH_LAYOUT_VERSION, DesktopSelection, DesktopSource, Installations,
+};
+use ctl_core::installed_build_name;
 use ctl_core::private_fs;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -164,7 +167,12 @@ pub(super) async fn install_development(
   let mut metadata = DesktopMetadata::provided(DesktopTarget::native()?);
   metadata.app_version = Some(built.app_version);
   metadata.bundle_id = Some(built.bundle_id);
-  let package = prepare_supplied(&work, &built.archive, metadata)?;
+  let mut package = prepare_supplied(&work, &built.archive, metadata)?;
+  package.naming = DesktopNaming {
+    installation_layout_version: built.installation_layout_version,
+    source_revision: built.source_revision,
+    built_at: built.built_at,
+  };
   activate(
     &work,
     current.as_ref(),
@@ -222,15 +230,17 @@ fn activate(
     ));
   }
   let prepared = prepare_payload(work.staging(), package)?;
+  let label = package.naming.label(&source, &prepared.metadata);
   work.cache(&CachedPackage {
     metadata: prepared.metadata.clone(),
     archive: package.archive.clone(),
+    naming: DesktopNaming::default(),
   })?;
   let selected = DesktopSelection {
     content_id: package.metadata.content_id.0.clone(),
     source,
   };
-  let reused = work.activate(&prepared, current, &selected)?;
+  let reused = work.activate(&prepared, current, &selected, label.as_deref())?;
   let action = match current {
     Some(current) if current == &selected && reused => Action::AlreadyInstalled,
     Some(_) => Action::Updated,
@@ -338,7 +348,7 @@ fn app_status(home: &Path, selected: Option<DesktopSelection>) -> io::Result<App
   let digest = Digest::parse(&selected.content_id)?;
   let paths = Installations::new(home);
   let store = paths.updater_root();
-  let payload = activation::status_payload(&store, &digest)?;
+  let payload = activation::status_payload(&paths, &digest)?;
   let missing = payload.is_none();
   let metadata = if let Some(payload) = payload.as_ref() {
     let object = payload
@@ -473,6 +483,40 @@ impl From<DesktopSigning> for Signing {
 struct CachedPackage {
   archive: PathBuf,
   metadata: DesktopMetadata,
+  naming: DesktopNaming,
+}
+
+#[derive(Default)]
+struct DesktopNaming {
+  installation_layout_version: Option<u16>,
+  source_revision: Option<String>,
+  built_at: Option<String>,
+}
+
+impl DesktopNaming {
+  fn label(&self, source: &DesktopSource, metadata: &DesktopMetadata) -> Option<String> {
+    if self.installation_layout_version? < DESKTOP_OBJECT_PATH_LAYOUT_VERSION {
+      return None;
+    }
+    let channel = match source {
+      DesktopSource::Channel { channel } => channel.clone(),
+      DesktopSource::Release { .. } => "release".to_owned(),
+      DesktopSource::PullRequest { number } => format!("pr-{number}"),
+      DesktopSource::Provided => "provided".to_owned(),
+      DesktopSource::Checkout => "local".to_owned(),
+    };
+    let origin = CatalogOrigin {
+      channel,
+      publication_id: metadata.publication_id.clone(),
+      built_at: self.built_at.clone(),
+    };
+    Some(installed_build_name::label_from_version(
+      metadata.app_version.as_deref().unwrap_or("unknown"),
+      self.source_revision.as_deref(),
+      Some(&origin),
+      metadata.content_id.as_str(),
+    ))
+  }
 }
 
 struct DesktopPayload {
@@ -512,6 +556,11 @@ async fn prepare_published(
   };
   Ok(CachedPackage {
     archive,
+    naming: DesktopNaming {
+      installation_layout_version: release.installation_layout_version(),
+      source_revision: Some(release.source_revision),
+      built_at: release.built_at,
+    },
     metadata: DesktopMetadata {
       content_id: digest,
       app_version: Some(release.app_version),
@@ -531,7 +580,11 @@ fn prepare_supplied(
   let archive = work.staging().join("provided-package");
   copy_package(path, &archive)?;
   metadata.content_id = package_digest(&archive)?;
-  Ok(CachedPackage { archive, metadata })
+  Ok(CachedPackage {
+    archive,
+    metadata,
+    naming: DesktopNaming::default(),
+  })
 }
 
 fn prepare_payload(staging: &Path, package: &CachedPackage) -> io::Result<DesktopPayload> {

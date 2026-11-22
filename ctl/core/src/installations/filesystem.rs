@@ -183,14 +183,19 @@ pub(super) fn payload_dir(
   state: &catalog::State,
   id: &str,
 ) -> io::Result<Option<PathBuf>> {
-  mapped_payload_dir(store, &store.runtime_root(), &state.runtime_paths, id)
+  mapped_payload_dir(
+    store,
+    &store.runtime_root(),
+    id,
+    state.runtime_paths.location(id),
+  )
 }
 
 fn mapped_payload_dir(
   store: &Installations,
   root: &Path,
-  paths: &catalog::PayloadPaths,
   id: &str,
+  location: Option<&str>,
 ) -> io::Result<Option<PathBuf>> {
   if !valid_id(id) {
     return Err(invalid("invalid installation identity"));
@@ -198,7 +203,7 @@ fn mapped_payload_dir(
   if !directory_if_present(&store.updater_root().join("store"))? || !directory_if_present(root)? {
     return Ok(None);
   }
-  let location = paths.location(id).unwrap_or(id);
+  let location = location.unwrap_or(id);
   if let Some((group, _)) = location.split_once('/')
     && !directory_if_present(&root.join(group))?
   {
@@ -237,7 +242,7 @@ pub(super) fn publish(
     return Ok(installed);
   }
   if state.updater.is_some()
-    && state.updater_paths.object.launcher_layout != Some(super::DEVELOPMENT_LAYOUT_VERSION)
+    && state.updater_paths.object.launcher_layout != Some(super::UPDATER_OBJECT_PATH_LAYOUT_VERSION)
   {
     return Err(invalid(
       "provision the current ctlup before adding runtime builds to this profile",
@@ -246,16 +251,17 @@ pub(super) fn publish(
   let target = &source.manifest.target_triple;
   let root = store.runtime_root();
   let known_location = state.runtime_paths.location(id);
-  let location = match known_location {
-    Some(location) => location.to_owned(),
-    None => available_location(
-      &state.runtime_paths,
+  let location = if let Some(location) = known_location {
+    location.to_owned()
+  } else {
+    let label = crate::installed_build_name::label(
       &source.manifest.components["ctl-agent"].build,
       origin,
       id,
-      Some(target),
-      &root,
-    )?,
+    );
+    available_location(&label, id, Some(target), &root, |location| {
+      state.runtime_paths.reserves(location)
+    })?
   };
   let destination = root.join(&location);
   let owned;
@@ -311,24 +317,25 @@ pub(super) fn publish(
 }
 
 fn available_location(
-  paths: &catalog::PayloadPaths,
-  build: &ComponentBuildInfo,
-  origin: Option<&catalog::CatalogOrigin>,
+  label: &str,
   id: &str,
   target: Option<&str>,
   root: &Path,
+  reserves: impl Fn(&str) -> bool,
 ) -> io::Result<String> {
-  let label = crate::installed_build_name::label(build, origin, id);
   for name in [
-    label.clone(),
-    format!("{label}-{}", &id[..12]),
-    format!("{label}-{id}"),
+    label,
+    &format!("{label}-{}", &id[..12]),
+    &format!("{label}-{id}"),
   ] {
+    if catalog::validate_payload_label(name).is_err() {
+      continue;
+    }
     let location = match target {
       Some(target) => format!("{name}/{target}"),
-      None => name.clone(),
+      None => name.to_owned(),
     };
-    if paths.reserves(&location) {
+    if reserves(&location) {
       continue;
     }
     let group = root.join(name);
@@ -421,9 +428,13 @@ pub(super) fn install_manager(
   let id = crate::bundles::digest(updater);
   if read_manager(store, &state.updater_paths, &id)?.is_none() {
     let known_location = state.updater_paths.location(&id);
-    let location = match known_location {
-      Some(location) => location.to_owned(),
-      None => available_location(&state.updater_paths, build, origin, &id, None, &root)?,
+    let location = if let Some(location) = known_location {
+      location.to_owned()
+    } else {
+      let label = crate::installed_build_name::label(build, origin, &id);
+      available_location(&label, &id, None, &root, |location| {
+        state.updater_paths.reserves(location)
+      })?
     };
     let destination = root.join(&location);
     let destination_parent = destination.parent().unwrap();
@@ -453,10 +464,10 @@ pub(super) fn install_manager(
     sync_directory(&store.staging_root())?;
   }
   let refresh =
-    state.updater_paths.object.launcher_layout != Some(super::DEVELOPMENT_LAYOUT_VERSION);
+    state.updater_paths.object.launcher_layout != Some(super::UPDATER_OBJECT_PATH_LAYOUT_VERSION);
   prepare_aliases(store, Some(updater), refresh)?;
   if refresh {
-    state.updater_paths.object.launcher_layout = Some(super::DEVELOPMENT_LAYOUT_VERSION);
+    state.updater_paths.object.launcher_layout = Some(super::UPDATER_OBJECT_PATH_LAYOUT_VERSION);
     catalog::commit_updater_object_paths(store, &state.updater_paths.object)?;
   }
   if state.updater.as_ref() != Some(&id) {
@@ -492,7 +503,8 @@ pub(super) fn read_manager(
   paths: &catalog::PayloadPaths,
   id: &str,
 ) -> io::Result<Option<(PathBuf, Vec<u8>)>> {
-  let Some(payload) = mapped_payload_dir(store, &store.manager_root(), paths, id)? else {
+  let Some(payload) = mapped_payload_dir(store, &store.manager_root(), id, paths.location(id))?
+  else {
     return Ok(None);
   };
   let path = payload.join(MANAGER);
@@ -509,30 +521,17 @@ pub(super) fn read_manager(
   Ok(Some((path, bytes)))
 }
 
-fn prune_package(root: &Path, leases_root: &Path, active: Option<&str>) -> io::Result<()> {
-  if !directory_if_present(root)? {
-    return Ok(());
-  }
-  for entry in fs::read_dir(root)? {
-    let entry = entry?;
-    let name = entry.file_name();
-    if let Some(id) = name.to_str().filter(|id| valid_id(id))
-      && active != Some(id)
-      && !leases::in_use_at(leases_root, id)?
-    {
-      remove_installation(&entry.path())?;
-    }
-  }
-  Ok(())
-}
-
 pub(super) fn prune_managers(store: &Installations, state: &mut catalog::State) -> io::Result<()> {
   let active = state.updater.as_deref();
   let leases_root = store.manager_leases();
   let transitioned =
-    state.updater_paths.object.launcher_layout == Some(super::DEVELOPMENT_LAYOUT_VERSION);
+    state.updater_paths.object.launcher_layout == Some(super::UPDATER_OBJECT_PATH_LAYOUT_VERSION);
   let mut retained = BTreeSet::new();
-  for (id, path) in mapped_payloads(store, &store.manager_root(), &state.updater_paths)? {
+  for (id, path) in mapped_payloads(
+    store,
+    &store.manager_root(),
+    state.updater_paths.locations(),
+  )? {
     // A failed Windows refresh may have already copied some aliases from an
     // installed candidate. Retain this candidate until the transition resumes.
     if active == Some(id.as_str())
@@ -558,27 +557,106 @@ pub(super) fn prune_managers(store: &Installations, state: &mut catalog::State) 
   Ok(())
 }
 
-pub(super) fn prune_desktops(store: &Installations, state: &catalog::State) -> io::Result<()> {
-  if !directory_if_present(&store.updater_root().join("store"))? {
-    return Ok(());
-  }
-  prune_package(
-    &store.desktop_root(),
-    &store.desktop_leases(),
-    state
-      .desktop
-      .as_ref()
-      .map(|selection| selection.content_id.as_str()),
-  )
+pub(super) fn desktop_object_path(
+  store: &Installations,
+  paths: &catalog::PathIndex,
+  id: &str,
+) -> io::Result<PathBuf> {
+  let root = store.desktop_root();
+  let location = paths.location(id);
+  let existing = mapped_payload_dir(store, &root, id, location)?;
+  Ok(existing.unwrap_or_else(|| root.join(location.unwrap_or(id))))
 }
 
-pub(super) fn desktop_available(store: &Installations, id: &str) -> io::Result<bool> {
-  let desktop = store.desktop_root();
-  Ok(
-    directory_if_present(&store.updater_root().join("store"))?
-      && directory_if_present(&desktop)?
-      && directory_if_present(&desktop.join(id))?,
-  )
+pub(super) fn reserve_desktop_object(
+  store: &Installations,
+  state: &mut catalog::State,
+  id: &str,
+  label: Option<&str>,
+) -> io::Result<PathBuf> {
+  let path = desktop_object_path(store, &state.desktop_paths, id)?;
+  let Some(label) = label else {
+    return Ok(path);
+  };
+  if state.desktop_paths.location(id).is_some()
+    || state
+      .desktop
+      .as_ref()
+      .is_some_and(|active| active.content_id == id)
+    || path_exists(&path)?
+  {
+    return Ok(path);
+  }
+  let root = store.desktop_root();
+  let location = available_location(label, id, None, &root, |candidate| {
+    state
+      .desktop_paths
+      .locations
+      .values()
+      .any(|location| location.eq_ignore_ascii_case(candidate))
+  })?;
+  let path = root.join(&location);
+  state
+    .desktop_paths
+    .locations
+    .insert(id.to_owned(), location);
+  // Keep a durable path reservation before a callback can publish bytes.
+  catalog::commit_desktop_paths(store, &state.desktop_paths)?;
+  Ok(path)
+}
+
+pub(super) fn desktop_available(
+  store: &Installations,
+  paths: &catalog::PathIndex,
+  id: &str,
+) -> io::Result<bool> {
+  Ok(mapped_payload_dir(store, &store.desktop_root(), id, paths.location(id))?.is_some())
+}
+
+pub(super) fn prune_desktops(store: &Installations, state: &catalog::State) -> io::Result<()> {
+  let active = state
+    .desktop
+    .as_ref()
+    .map(|selection| selection.content_id.as_str());
+  let leases_root = store.desktop_leases();
+  for (id, path) in mapped_payloads(
+    store,
+    &store.desktop_root(),
+    state.desktop_paths.locations.iter(),
+  )? {
+    if active != Some(id.as_str()) && !leases::in_use_at(&leases_root, &id)? {
+      remove_installation(&path)?;
+    }
+  }
+  Ok(())
+}
+
+pub(super) fn release_desktop_paths(
+  store: &Installations,
+  state: &mut catalog::State,
+) -> io::Result<()> {
+  let active = state
+    .desktop
+    .as_ref()
+    .map(|selection| selection.content_id.as_str());
+  let leases_root = store.desktop_leases();
+  let mut unused = BTreeSet::new();
+  for id in state.desktop_paths.locations.keys() {
+    if active != Some(id.as_str())
+      && !desktop_available(store, &state.desktop_paths, id)?
+      && !leases::in_use_at(&leases_root, id)?
+    {
+      unused.insert(id.clone());
+    }
+  }
+  if !unused.is_empty() {
+    state
+      .desktop_paths
+      .locations
+      .retain(|id, _| !unused.contains(id));
+    catalog::commit_desktop_paths(store, &state.desktop_paths)?;
+  }
+  Ok(())
 }
 
 fn replace_launcher(path: &Path, bytes: &[u8]) -> io::Result<()> {
@@ -606,17 +684,24 @@ pub(super) fn entries(
   store: &Installations,
   state: &catalog::State,
 ) -> io::Result<Vec<(String, PathBuf)>> {
-  mapped_payloads(store, &store.runtime_root(), &state.runtime_paths)
+  mapped_payloads(
+    store,
+    &store.runtime_root(),
+    state.runtime_paths.locations(),
+  )
 }
 
-fn mapped_payloads(
+fn mapped_payloads<'a>(
   store: &Installations,
   root: &Path,
-  paths: &catalog::PayloadPaths,
+  locations: impl Iterator<Item = (&'a String, &'a String)>,
 ) -> io::Result<Vec<(String, PathBuf)>> {
   if !directory_if_present(&store.updater_root().join("store"))? || !directory_if_present(root)? {
     return Ok(Vec::new());
   }
+  let locations: BTreeMap<_, _> = locations
+    .map(|(id, location)| (id.as_str(), location.as_str()))
+    .collect();
   let mut entries = Vec::new();
   for entry in fs::read_dir(root)? {
     let entry = entry?;
@@ -625,14 +710,14 @@ fn mapped_payloads(
       .to_str()
       .map(str::to_owned)
       .unwrap_or_default();
-    if valid_id(&id) && paths.location(&id).is_none() {
+    if valid_id(&id) && !locations.contains_key(id.as_str()) {
       directory(&entry.path())?;
       entries.push((id, entry.path()));
     }
   }
-  for (id, _) in paths.locations() {
-    if let Some(path) = mapped_payload_dir(store, root, paths, id)? {
-      entries.push((id.clone(), path));
+  for (id, location) in locations {
+    if let Some(path) = mapped_payload_dir(store, root, id, Some(location))? {
+      entries.push((id.to_owned(), path));
     }
   }
   entries.sort_by(|left, right| left.0.cmp(&right.0));

@@ -18,8 +18,8 @@ fn is_pull_request(channel: &str) -> bool {
   })
 }
 
-fn version(build: &ComponentBuildInfo) -> Option<Version> {
-  let version = build.version.strip_prefix('v').unwrap_or(&build.version);
+fn version(version: &str) -> Option<Version> {
+  let version = version.strip_prefix('v').unwrap_or(version);
   Version::parse(version).ok()
 }
 
@@ -37,17 +37,31 @@ pub fn label(
   origin: Option<&CatalogOrigin>,
   bundle_id: &str,
 ) -> String {
-  let version = version(build)
+  label_from_version(
+    &build.version,
+    build.source_revision.as_deref(),
+    origin,
+    bundle_id,
+  )
+}
+
+/// Formats a build label from package version and available provenance.
+#[must_use]
+pub fn label_from_version(
+  app_version: &str,
+  source_revision: Option<&str>,
+  origin: Option<&CatalogOrigin>,
+  content_id: &str,
+) -> String {
+  let version = version(app_version)
     .map(|version| version.to_string())
     .filter(|version| version.len() <= 72)
     .unwrap_or_else(|| "unknown".into());
-  let revision = build
-    .source_revision
-    .as_deref()
+  let revision = source_revision
     .and_then(|revision| revision.get(..7))
     .filter(|revision| revision.bytes().all(|byte| byte.is_ascii_hexdigit()))
     .or_else(|| {
-      bundle_id
+      content_id
         .get(..12)
         .filter(|id| id.bytes().all(|byte| byte.is_ascii_hexdigit()))
     })
@@ -106,7 +120,7 @@ pub fn compare(
     .cmp(&right_group)
     .then_with(|| {
       if left_group == 0 {
-        match (version(right), version(left)) {
+        match (version(&right.version), version(&left.version)) {
           (Some(right), Some(left)) => right.cmp_precedence(&left),
           (right, left) => right.is_some().cmp(&left.is_some()),
         }

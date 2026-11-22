@@ -1,3 +1,4 @@
+use ctl_core::installations::Installations;
 use ctl_core::private_fs;
 use lnks::Shortcut;
 use std::ffi::OsString;
@@ -31,7 +32,11 @@ pub(super) fn create(destination: &Path, target: &Path) -> io::Result<()> {
   file.sync_all()
 }
 
-pub(super) fn managed(path: &Path, store: &Path) -> io::Result<bool> {
+pub(super) fn managed(
+  path: &Path,
+  store: &Path,
+  installations: &Installations,
+) -> io::Result<bool> {
   let shortcut = Shortcut::load(path).map_err(io::Error::other)?;
   let Some(target) = shortcut.target_path.as_deref() else {
     return Ok(false);
@@ -46,11 +51,16 @@ pub(super) fn managed(path: &Path, store: &Path) -> io::Result<bool> {
     return Ok(false);
   };
   let mut components = relative.components();
-  let valid_digest = components
+  let Some(name) = components
     .next()
     .and_then(|component| component.as_os_str().to_str())
-    .is_some_and(|digest| super::Digest::parse(digest).is_ok());
-  Ok(valid_digest && components.as_path() == Path::new(r"ctmux\ctmux-app.exe"))
+  else {
+    return Ok(false);
+  };
+  Ok(
+    components.as_path() == Path::new(r"ctmux\ctmux-app.exe")
+      && installations.is_desktop_object_name(name)?,
+  )
 }
 
 fn shell_item(target: &Path) -> io::Result<Vec<u8>> {

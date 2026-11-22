@@ -802,6 +802,7 @@ jobs:
       - name: Stage desktop release assets
         env:
           APPLE_SIGNING_ENABLED: ${{ steps.signing.outputs.enabled }}
+          CTL_DESKTOP_INSTALLATION_LAYOUT_VERSION: '7'
         shell: bash
         run: |
           signing_mode=not_applicable
@@ -902,6 +903,8 @@ jobs:
         run: pnpm --workspace-root desktop:build --target '${{ matrix.target }}' --no-bundle --config src-tauri/tauri.bundle.conf.json --config src-tauri/bundle.windows.conf.json
 
       - name: Package portable desktop and standalone updater
+        env:
+          CTL_DESKTOP_INSTALLATION_LAYOUT_VERSION: '7'
         run: |
           node scripts/ci/package-desktop-bundle.mts '${{ matrix.target }}' '${{ needs.metadata.outputs.app_version }}' '${{ needs.metadata.outputs.bundle_id }}' '${{ needs.metadata.outputs.git_revision }}' not_applicable 'target/${{ matrix.target }}/release' target/desktop-assets apps/desktop/src-tauri/resources/agent-bundles
           if ($LASTEXITCODE -ne 0) { throw 'Portable desktop packaging failed.' }

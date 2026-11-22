@@ -1,4 +1,4 @@
-use super::Installations;
+use super::{DesktopSelection, DesktopSource, Installations, leases};
 use crate::bundle_layout::{ALL, executable_name, required_protocols};
 use crate::bundles::{Bundle, Manifest, Source, Store};
 use crate::component::{ComponentBuildInfo, ComponentInfo, ProtocolInfo};
@@ -53,6 +53,42 @@ fn bundle(home: &Path, byte: u8) -> Bundle {
     .collect();
   let manifest = Manifest::new(target, Source::Ci, components, &files).unwrap();
   Store::cache(home).publish(&manifest, &files).unwrap()
+}
+
+#[test]
+fn portable_desktop_retains_a_named_object_while_running() {
+  let home = Home::new();
+  let installs = Installations::new(&home.0);
+  let portable = DesktopSelection {
+    content_id: "a".repeat(64),
+    source: DesktopSource::Provided,
+  };
+  let executable = installs
+    .publish_desktop(None, &portable, Some("stable-v0.1.4-abcdef0"), |path| {
+      crate::private_fs::create_directory(path)?;
+      let executable = path.join("ctmux.exe");
+      fs::write(&executable, b"portable desktop app")?;
+      executable.canonicalize()
+    })
+    .unwrap();
+  let lease = leases::lease_executable(&executable).unwrap().unwrap();
+  let next = DesktopSelection {
+    content_id: "b".repeat(64),
+    source: DesktopSource::Provided,
+  };
+  installs
+    .publish_desktop(
+      Some(&portable),
+      &next,
+      Some("stable-v0.1.5-abcdef1"),
+      crate::private_fs::create_directory,
+    )
+    .unwrap();
+  installs.prune_all(false).unwrap();
+  assert!(executable.exists());
+  drop(lease);
+  installs.prune_all(false).unwrap();
+  assert!(!executable.exists());
 }
 
 #[test]

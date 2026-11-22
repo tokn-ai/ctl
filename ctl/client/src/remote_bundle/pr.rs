@@ -121,7 +121,7 @@ pub(super) async fn download_named_artifact(
   number: u64,
   name: &str,
   directory: &Path,
-) -> Result<String, Error> {
+) -> Result<(String, String), Error> {
   let github = Github::new()?;
   let selection = github.view(number, name).await?;
   let build = selection.build.ok_or_else(|| {
@@ -136,7 +136,7 @@ pub(super) async fn download_named_artifact(
       "PR #{number} changed while downloading its desktop build"
     )));
   }
-  Ok(selection.head_sha)
+  Ok((selection.head_sha, build.created_at))
 }
 
 /// Request the bundle workflow on a PR branch through the authenticated GitHub CLI.

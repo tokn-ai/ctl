@@ -1,4 +1,6 @@
-use super::{CachedPackage, DesktopMetadata, DesktopPayload, Digest, app_destination, invalid};
+use super::{
+  CachedPackage, DesktopMetadata, DesktopNaming, DesktopPayload, Digest, app_destination, invalid,
+};
 use ctl_core::installations::{DesktopSelection, Installations};
 use ctl_core::private_fs;
 use std::{
@@ -72,17 +74,7 @@ impl Workspace {
   }
 
   pub(super) fn existing(&self, digest: &Digest) -> io::Result<Option<PathBuf>> {
-    let object = self.store.join(digest.as_str());
-    if let Some(metadata) = metadata(&object)? {
-      if !private_fs::is_directory(&metadata) {
-        return Err(invalid("unsafe desktop payload directory"));
-      }
-      let payload = object.join(super::payload_name());
-      if metadata_for_payload(&payload)?.is_some() {
-        return Ok(Some(payload));
-      }
-    }
-    Ok(None)
+    status_payload(&self.installations, digest)
   }
 
   pub(super) fn cached(&self, digest: &Digest) -> io::Result<Option<CachedPackage>> {
@@ -122,23 +114,31 @@ impl Workspace {
     prepared: &DesktopPayload,
     expected: Option<&DesktopSelection>,
     selected: &DesktopSelection,
+    label: Option<&str>,
   ) -> io::Result<bool> {
-    let (launch, reused) = self
-      .installations
-      .publish_desktop(expected, selected, || self.publish_payload(prepared))?;
+    // The desktop lock serializes launch entry updates. Resolve the existing
+    // target before publish_desktop takes the installation registry lock.
+    self.managed_entry()?;
+    let (launch, reused) =
+      self
+        .installations
+        .publish_desktop(expected, selected, label, |object| {
+          self.publish_payload(prepared, object)
+        })?;
     launch.publish()?;
     Ok(reused)
   }
 
-  fn publish_payload(&self, prepared: &DesktopPayload) -> io::Result<(LaunchEntry, bool)> {
-    let object = self.store.join(prepared.metadata.content_id.as_str());
+  fn publish_payload(
+    &self,
+    prepared: &DesktopPayload,
+    object: &Path,
+  ) -> io::Result<(LaunchEntry, bool)> {
     let payload = object.join(super::payload_name());
     let previous = self.staging.join("replaced-payload");
-    if self.existing(&prepared.metadata.content_id)?.is_some()
-      && super::payload_matches(&payload, &prepared.path)?
-    {
-      let metadata = read_metadata(&object, &prepared.metadata.content_id)?;
-      self.refresh_metadata(&object, &prepared.metadata, &metadata)?;
+    if object_payload(object)?.is_some() && super::payload_matches(&payload, &prepared.path)? {
+      let metadata = read_metadata(object, &prepared.metadata.content_id)?;
+      self.refresh_metadata(object, &prepared.metadata, &metadata)?;
       return Ok((self.prepare_launch_entry(&payload)?, true));
     }
     // Prepare the complete object privately. A damaged object may be repaired
@@ -149,7 +149,7 @@ impl Workspace {
     fs::rename(&prepared.path, staged.join(super::payload_name()))?;
     write_metadata(&staged, &prepared.metadata)?;
     private_fs::sync_directory(&staged)?;
-    let replaced = if let Some(info) = metadata(&object)? {
+    let replaced = if let Some(info) = metadata(object)? {
       if !private_fs::is_directory(&info) {
         return Err(invalid("unsafe desktop payload directory"));
       }
@@ -159,12 +159,12 @@ impl Workspace {
           "Quit the ctmux desktop app before repairing its current build.",
         ));
       }
-      fs::rename(&object, &previous)?;
+      fs::rename(object, &previous)?;
       true
     } else {
       false
     };
-    if let Err(error) = fs::rename(&staged, &object) {
+    if let Err(error) = fs::rename(&staged, object) {
       if replaced {
         fs::rename(previous, object)?;
       }
@@ -177,6 +177,7 @@ impl Workspace {
   pub(super) fn refresh(&self, selected: &DesktopSelection) -> io::Result<()> {
     let digest = Digest::parse(&selected.content_id)?;
     if let Some(payload) = self.existing(&digest)? {
+      self.managed_entry()?;
       self.prepare_launch_entry(&payload)?.publish()?;
     } else {
       self.clear_launch_entry()?;
@@ -218,15 +219,18 @@ impl Workspace {
       return Ok(false);
     };
     #[cfg(unix)]
-    let managed = info.file_type().is_symlink()
-      && managed_relative_link(
-        &fs::read_link(destination)?,
-        &self.store,
-        self.installations.root(),
-      );
+    let managed = if info.file_type().is_symlink() {
+      let target = fs::read_link(destination)?;
+      match relative_link_object(&target, &self.store, self.installations.root()) {
+        Some(name) => self.installations.is_desktop_object_name(name)?,
+        None => false,
+      }
+    } else {
+      false
+    };
     #[cfg(windows)]
-    let managed =
-      private_fs::is_owned_file(&info) && super::shortcut::managed(destination, &self.store)?;
+    let managed = private_fs::is_owned_file(&info)
+      && super::shortcut::managed(destination, &self.store, &self.installations)?;
     if !managed {
       return Err(invalid(
         "desktop launch path is occupied by an unmanaged file or app",
@@ -254,7 +258,6 @@ impl Workspace {
 
   fn prepare_launch_entry(&self, payload: &Path) -> io::Result<LaunchEntry> {
     let destination = self.destination();
-    self.managed_entry()?;
     let staged = if cfg!(windows) {
       self.staging.join("ctmux.lnk")
     } else {
@@ -283,21 +286,14 @@ impl Workspace {
 }
 
 #[cfg(unix)]
-fn managed_relative_link(link: &Path, store: &Path, profile: &Path) -> bool {
-  let Ok(relative_store) = store.strip_prefix(profile) else {
-    return false;
-  };
+fn relative_link_object<'a>(link: &'a Path, store: &Path, profile: &Path) -> Option<&'a str> {
+  let relative_store = store.strip_prefix(profile).ok()?;
   let prefix = Path::new("..").join(relative_store);
-  let Ok(tail) = link.strip_prefix(prefix) else {
-    return false;
-  };
-  let Some((directory, name)) = tail.parent().zip(tail.file_name()) else {
-    return false;
-  };
-  let Some(digest) = directory.to_str() else {
-    return false;
-  };
-  Digest::parse(digest).is_ok() && name == super::payload_name()
+  let tail = link.strip_prefix(prefix).ok()?;
+  if tail.file_name()? != super::payload_name() {
+    return None;
+  }
+  tail.parent()?.to_str()
 }
 
 struct LaunchEntry {
@@ -412,11 +408,20 @@ pub(super) fn read_metadata(path: &Path, digest: &Digest) -> io::Result<DesktopM
   Ok(metadata)
 }
 
-pub(super) fn status_payload(root: &Path, digest: &Digest) -> io::Result<Option<PathBuf>> {
-  let names = ["store", "desktop", digest.as_str()];
-  let Some(object) = existing_subdirectories(root, &names)? else {
+pub(super) fn status_payload(
+  installations: &Installations,
+  digest: &Digest,
+) -> io::Result<Option<PathBuf>> {
+  object_payload(&installations.desktop_object_path(digest.as_str())?)
+}
+
+fn object_payload(object: &Path) -> io::Result<Option<PathBuf>> {
+  let Some(info) = metadata(object)? else {
     return Ok(None);
   };
+  if !private_fs::is_directory(&info) {
+    return Err(invalid("unsafe desktop payload directory"));
+  }
   let payload = object.join(super::payload_name());
   Ok(metadata_for_payload(&payload)?.map(|_| payload))
 }
@@ -467,5 +472,6 @@ fn cache_package(directory: &Path, digest: &Digest) -> io::Result<Option<CachedP
   Ok(Some(CachedPackage {
     metadata: read_metadata(directory, digest)?,
     archive: directory.join("package"),
+    naming: DesktopNaming::default(),
   }))
 }

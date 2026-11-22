@@ -96,6 +96,8 @@ pub struct DesktopRelease {
   pub app_version: String,
   pub bundle_id: String,
   pub publication_id: Option<String>,
+  pub source_revision: String,
+  pub built_at: Option<String>,
   source: PackageSource,
   asset: Asset,
   signing: DesktopSigning,
@@ -107,6 +109,11 @@ enum PackageSource {
 }
 
 impl DesktopRelease {
+  #[must_use]
+  pub const fn installation_layout_version(&self) -> Option<u16> {
+    self.asset.installation_layout_version
+  }
+
   #[must_use]
   pub fn content_id(&self) -> &str {
     &self.asset.sha256
@@ -235,6 +242,8 @@ pub async fn stable_descriptor(
     app_version: publication.app_version,
     bundle_id: publication.bundle_id,
     publication_id: Some(publication.publication_id),
+    source_revision: publication.git_revision,
+    built_at: publication.built_at,
     source: PackageSource::Release {
       url: format!("{root}/{}", asset.name),
       client,
@@ -303,6 +312,7 @@ struct Manifest {
   bundle_id: String,
   git_revision: String,
   signing_mode: DesktopSigning,
+  installation_layout_version: Option<u16>,
   assets: Vec<Asset>,
 }
 
@@ -310,6 +320,8 @@ struct Manifest {
 struct Asset {
   name: String,
   sha256: String,
+  #[serde(skip)]
+  installation_layout_version: Option<u16>,
 }
 
 impl Asset {
@@ -329,7 +341,7 @@ fn verified_asset(
   if manifest.signing_mode != signing {
     return Err(invalid("unexpected desktop release signing mode"));
   }
-  select_asset(manifest.assets, target, bundle_id, signing.suffix())
+  select_asset(manifest, target, bundle_id, signing.suffix())
 }
 
 fn parse_manifest(
@@ -353,7 +365,7 @@ fn parse_manifest(
 }
 
 fn select_asset(
-  assets: Vec<Asset>,
+  manifest: Manifest,
   target: DesktopTarget,
   bundle_id: &str,
   suffix: &str,
@@ -363,10 +375,11 @@ fn select_asset(
     target.triple(),
     target.package_format()
   );
-  let mut matching = assets
+  let mut matching = manifest
+    .assets
     .into_iter()
     .filter(|asset| asset.name == expected_name);
-  let asset = matching
+  let mut asset = matching
     .next()
     .ok_or_else(|| invalid("desktop manifest is missing the installable package"))?;
   if matching.next().is_some() {
@@ -382,6 +395,7 @@ fn select_asset(
       "desktop manifest contains an invalid package checksum",
     ));
   }
+  asset.installation_layout_version = manifest.installation_layout_version;
   Ok(asset)
 }
 
@@ -527,11 +541,18 @@ mod tests {
       ),
     ];
     for &(target, formats, signing_mode, extension) in cases {
-      let value = manifest(target, formats, signing_mode);
+      let mut value = manifest(target, formats, signing_mode);
       assert_eq!(
-        verify(&value, target).unwrap().name,
+        verify(&value, target).unwrap().installation_layout_version,
+        None
+      );
+      value["installation_layout_version"] = json!(7);
+      let asset = verify(&value, target).unwrap();
+      assert_eq!(
+        asset.name,
         format!("ctmux-{VERSION}-{}.{extension}", target.triple()),
       );
+      assert_eq!(asset.installation_layout_version, Some(7));
     }
   }
 

@@ -142,6 +142,9 @@ pub(super) fn lease_executable(executable: &Path) -> io::Result<Option<Lease>> {
         .expect("installed updater descendant");
       return lease_manager(executable, parent, relative);
     }
+    if parent.ends_with("ctlup/store/desktop") {
+      return lease_desktop(executable, directory, parent);
+    }
     if let Some(package_root) = parent.parent()
       && (ends_in_target(directory) || ends_in_target(parent))
     {
@@ -155,50 +158,14 @@ pub(super) fn lease_executable(executable: &Path) -> io::Result<Option<Lease>> {
         return lease_manager(executable, package_root, relative);
       }
     }
-    let Some(id) = directory
-      .file_name()
-      .and_then(|name| name.to_str())
-      .filter(|id| filesystem::valid_id(id))
-    else {
-      continue;
-    };
-    let package_root = parent;
-    let Some(package) = package_root
-      .file_name()
-      .and_then(|name| name.to_str())
-      .filter(|name| matches!(*name, "runtime" | "desktop"))
-    else {
-      continue;
-    };
-    let Some(updater_root) = package_root
-      .parent()
-      .filter(|root| root.ends_with("ctlup/store"))
-      .and_then(Path::parent)
-    else {
-      continue;
-    };
-    let Some(store) = updater_root
-      .parent()
-      .and_then(Installations::from_executable_root)
-    else {
-      continue;
-    };
-    if package == "runtime" {
-      return lease_runtime(directory, package_root, Path::new(id));
+    if parent.ends_with("ctlup/store/runtime")
+      && let Some(id) = directory
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|id| filesystem::valid_id(id))
+    {
+      return lease_runtime(directory, parent, Path::new(id));
     }
-    if !filesystem::root_exists(&store)? {
-      return Err(filesystem::invalid(
-        "managed executable has no installation registry",
-      ));
-    }
-    filesystem::directory(&updater_root.join("store"))?;
-    let _lock = Lock::acquire(&store)?;
-    filesystem::directory(package_root)?;
-    filesystem::directory(directory)?;
-    if !crate::private_fs::is_owned_file(&fs::symlink_metadata(executable)?) {
-      return Err(filesystem::invalid("unsafe executable in desktop payload"));
-    }
-    return retain(&store.desktop_leases(), id).map(Some);
   }
   Ok(None)
 }
@@ -273,6 +240,43 @@ fn lease_manager(
     ));
   }
   retain(&store.manager_leases(), id).map(Some)
+}
+
+fn lease_desktop(
+  executable: &Path,
+  directory: &Path,
+  desktop_root: &Path,
+) -> io::Result<Option<Lease>> {
+  let Some(store) = desktop_root
+    .ancestors()
+    .nth(3)
+    .and_then(Installations::from_executable_root)
+  else {
+    return Ok(None);
+  };
+  if !filesystem::root_exists(&store)? {
+    return Err(filesystem::invalid(
+      "managed executable has no installation registry",
+    ));
+  }
+  let _lock = Lock::acquire(&store)?;
+  let state = catalog::read_index(&store)?;
+  let id = directory
+    .file_name()
+    .and_then(|name| name.to_str())
+    .and_then(|name| {
+      filesystem::valid_id(name)
+        .then_some(name)
+        .or_else(|| state.desktop_paths.id_for_object(name))
+    })
+    .ok_or_else(|| filesystem::invalid("managed desktop path has no installation registration"))?;
+  let path = filesystem::desktop_object_path(&store, &state.desktop_paths, id)?;
+  if path.canonicalize()? != directory
+    || !crate::private_fs::is_owned_file(&fs::symlink_metadata(executable)?)
+  {
+    return Err(filesystem::invalid("unsafe executable in desktop payload"));
+  }
+  retain(&store.desktop_leases(), id).map(Some)
 }
 
 fn payload_id<'a>(paths: &'a catalog::PayloadPaths, relative: &'a Path) -> Option<&'a str> {

@@ -57,9 +57,10 @@ root is `$CTL_DATA_DIR/ctlup`.
     state/installations.json        # active selections, sources, and retained builds
     state/runtime-build-paths.json  # maps exact runtime IDs to installed paths
     state/updater-object-paths.json # maps exact updater IDs to installed paths
+    state/desktop-object-paths.json # maps exact desktop IDs to installed paths
     state/leases/                   # builds used by running processes
     store/runtime/<build>/<target>/ # verified complete runtime
-    store/desktop/<content-id>/     # verified native desktop package
+    store/desktop/<build>/          # verified native desktop package
     store/updater/<build>/          # independent ctlup executable for this machine
     cache/downloads/                # verified publication archives
     cache/unpacked/                 # verified extracted runtime bundles
@@ -72,10 +73,11 @@ profile. Launchers resolve selected payloads through the registry.
 Development registrations pin the latest build for each canonical checkout and
 target.
 
-Runtime and updater directories show the installation's source, version, and
-short revision. The full build label groups the targets of each runtime build.
-The installed updater runs on this machine, so its executable lives directly
-in the build directory. Updaters downloaded for other targets use the cache.
+Runtime, updater, and desktop directories show the installation's source,
+version, and short revision. The full build label groups the targets of each
+runtime build. Desktop and updater installations are native to this machine,
+so their payloads live directly in the build directory. Updaters downloaded
+for other targets use the cache.
 Stable build names omit the timestamp. Nightly and development names use UTC
 build time, with a source suffix for local and PR development builds.
 
@@ -102,7 +104,10 @@ available through `~/.tokn/ctl/bin` or the selected profile's `bin`.
 
 The new store starts on first install. Earlier digest-named and target-specific
 updater objects and target-first runtime objects keep their original paths
-while they are retained.
+while they are retained. Desktop packages that support layout 7 use build
+labels. Older desktop packages and raw archives supplied with `ctlup install
+app --from` use digest directories, which lets older running applications hold
+their leases. Previously installed desktops retain their original paths.
 
 ## Install and update
 
@@ -251,7 +256,7 @@ build explicitly.
 To bootstrap from a published bundle set, use its standalone `ctlup` for this
 computer. Verify its checksum against the sidecar and run
 `install --channel nightly`. SSH installation requires a publication or
-supplied bundle whose target updater supports storage layout 6.
+supplied bundle whose target updater supports storage layout 7.
 
 Within `ctlup/`, cached archives use a publication hash under
 `cache/downloads`, extracted deployment builds use `cache/unpacked`, and

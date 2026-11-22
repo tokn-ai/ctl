@@ -22,10 +22,13 @@ pub use catalog::{CatalogEntry, CatalogOrigin, DesktopSelection, DesktopSource};
 pub use leases::{Lease, lease_current_executable};
 
 /// Local updater capability for the installed payload layout.
-pub const DEVELOPMENT_LAYOUT_VERSION: u16 = 6;
+pub const DEVELOPMENT_LAYOUT_VERSION: u16 = DESKTOP_OBJECT_PATH_LAYOUT_VERSION;
+/// First layout that leases desktop payloads stored under a readable label.
+pub const DESKTOP_OBJECT_PATH_LAYOUT_VERSION: u16 = 7;
 const RUNTIME_PATH_LAYOUT_VERSION: u16 = 3;
 const UPDATER_PATH_LAYOUT_VERSION: u16 = 4;
 const UPDATER_BUILD_PATH_LAYOUT_VERSION: u16 = 5;
+const UPDATER_OBJECT_PATH_LAYOUT_VERSION: u16 = 6;
 
 #[cfg(test)]
 fn manager_build_fixture() -> ComponentBuildInfo {
@@ -159,7 +162,43 @@ impl Installations {
     Ok(catalog::read_index(self)?.desktop)
   }
 
+  /// Resolves a desktop package's immutable object path, even if it is absent.
+  /// Legacy packages that have no path record use their original digest path.
+  /// # Errors
+  /// Reports an invalid identity, unsafe storage or invalid registry metadata.
+  pub fn desktop_object_path(&self, id: &str) -> io::Result<PathBuf> {
+    if !filesystem::root_exists(self)? {
+      return filesystem::desktop_object_path(self, &catalog::PathIndex::default(), id);
+    }
+    let _lock = filesystem::Lock::acquire(self)?;
+    let state = catalog::read_index(self)?;
+    filesystem::desktop_object_path(self, &state.desktop_paths, id)
+  }
+
+  /// Checks whether a desktop launch entry names a registered or legacy object.
+  /// The object's bytes may be absent during repair.
+  /// # Errors
+  /// Reports unsafe storage or invalid registry metadata.
+  pub fn is_desktop_object_name(&self, name: &str) -> io::Result<bool> {
+    if crate::bundles::valid_digest(name) {
+      return Ok(true);
+    }
+    if !filesystem::root_exists(self)? {
+      return Ok(false);
+    }
+    let _lock = filesystem::Lock::acquire(self)?;
+    Ok(
+      catalog::read_index(self)?
+        .desktop_paths
+        .id_for_object(name)
+        .is_some(),
+    )
+  }
+
   /// Publishes a staged desktop bundle and its selection under the registry lock.
+  /// The callback receives the reserved path and must publish the object before
+  /// returning. It cannot call operations that reacquire the same registry lock.
+  /// Packages with no verified support for readable paths use a digest path.
   ///
   /// # Errors
   /// Reports an invalid selection, a concurrent update, unsafe directories,
@@ -168,9 +207,13 @@ impl Installations {
     &self,
     expected: Option<&DesktopSelection>,
     selection: &DesktopSelection,
-    publish: impl FnOnce() -> io::Result<T>,
+    label: Option<&str>,
+    publish: impl FnOnce(&Path) -> io::Result<T>,
   ) -> io::Result<T> {
     selection.validate()?;
+    if let Some(label) = label {
+      catalog::validate_payload_label(label)?;
+    }
     filesystem::ensure_root(self)?;
     let _lock = filesystem::Lock::acquire(self)?;
     let mut state = catalog::read_index(self)?;
@@ -182,8 +225,9 @@ impl Installations {
     }
     catalog::initialize(self, &state)?;
     filesystem::ensure_directory(&self.desktop_root())?;
-    let published = publish()?;
-    filesystem::directory(&self.desktop_root().join(&selection.content_id))?;
+    let path = filesystem::reserve_desktop_object(self, &mut state, &selection.content_id, label)?;
+    let published = publish(&path)?;
+    filesystem::directory(&path)?;
     state.desktop = Some(selection.clone());
     catalog::commit_metadata(self, &state)?;
     Ok(published)
@@ -1092,7 +1136,7 @@ impl Installations {
     let mut result = PruneResult::default();
     if desktop
       && let Some(selection) = &state.desktop
-      && !filesystem::desktop_available(self, &selection.content_id)?
+      && !filesystem::desktop_available(self, &state.desktop_paths, &selection.content_id)?
     {
       if forget_missing {
         result
@@ -1146,6 +1190,9 @@ impl Installations {
       result.removed.push(id);
     }
     self.release_runtime_paths(&mut state)?;
+    if desktop {
+      filesystem::release_desktop_paths(self, &mut state)?;
+    }
     Ok(result)
   }
 

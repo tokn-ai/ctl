@@ -594,6 +594,7 @@ async fn flat_local_macos_update_is_rejected_before_manager_provisioning_or_acti
 
 #[tokio::test]
 async fn development_builder_errors_include_bounded_diagnostics_without_docker() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let mut command = tokio::process::Command::new("/bin/sh");
   command.args([
     "-c",

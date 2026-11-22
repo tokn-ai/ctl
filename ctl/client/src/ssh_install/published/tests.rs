@@ -203,6 +203,7 @@ cat "$HOME/managed-manifest"
 
   #[tokio::test]
   async fn remote_fetch_uses_curl_then_wget_preserving_exact_input_and_arguments() {
+    let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
     for use_wget in [true, false] {
       let host = Host::new();
       if use_wget {
@@ -242,6 +243,7 @@ cat "$HOME/managed-manifest"
 
   #[tokio::test]
   async fn only_pre_activation_availability_or_old_capability_permit_fallback() {
+    let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
     let host = Host::new();
     host.downloader("curl", 60);
     assert!(host.install(None, None).await.0.is_err());
@@ -274,6 +276,7 @@ cat "$HOME/managed-manifest"
   async fn cached_bytes_cross_ssh_only_for_the_requested_artifact() {
     use PublishedInstallStage as Stage;
     use sha2::{Digest as _, Sha256};
+    let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
 
     let host = Host::new();
     let helper = helper();
@@ -326,6 +329,7 @@ cat "$HOME/managed-manifest"
   async fn retained_updater_export_verifies_bytes_without_reading_ssh_input() {
     use PublishedInstallStage as Stage;
     use std::os::unix::fs::symlink;
+    let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
 
     let host = Host::new();
     let helper = helper();
@@ -403,6 +407,7 @@ cat "$HOME/.tokn/ctl/ctlup/store/updater/dev-20261121T081525Z-v0.1.4-abcdef0-loc
   async fn missing_legacy_updater_allows_verified_published_recovery() {
     use PublishedInstallStage as Stage;
     use std::os::unix::fs::symlink;
+    let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
 
     let host = Host::new();
     let bin = host.0.join(".tokn/ctl/bin");
@@ -435,6 +440,7 @@ cat "$HOME/.tokn/ctl/ctlup/store/updater/dev-20261121T081525Z-v0.1.4-abcdef0-loc
   #[tokio::test]
   async fn published_lookup_refuses_foreign_updater_entry_points() {
     use std::os::unix::fs::symlink;
+    let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
 
     let host = Host::new();
     let bin = host.0.join(".tokn/ctl/bin");

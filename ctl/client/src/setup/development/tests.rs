@@ -141,6 +141,7 @@ fn ordinary_target_permissions_allow_private_verified_build_discovery() {
 
 #[test]
 fn cached_checkout_executable_survives_target_cleanup_without_changing_shared_selection() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire_blocking();
   let fixture = Fixture::new();
   let source = fixture.directory.join("ctld.app/Contents/MacOS/ctld");
   // A self-contained executable proves the result remains callable without

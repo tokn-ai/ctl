@@ -13,7 +13,7 @@ Options (before list/windows):
   --ssh-arg ARG         Launcher prefix argument; repeat as needed
 
 Use :DISPLAY for X11, wayland-N for Wayland, windows-N for one Windows display,
-or windows for all windows on the current Windows desktop.";
+windows for the Windows desktop, or macos for windows in a macOS session.";
 
 enum Operation {
   List,
@@ -124,6 +124,7 @@ fn print_displays(sessions: Vec<Session>, json: bool) -> io::Result<()> {
         bounds[0],
         bounds[1],
       ),
+      Display::MacosDesktop => println!("macOS\tmacos\t-\t{class}\tWindows"),
     }
   }
   Ok(())
@@ -151,7 +152,7 @@ fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
     Operation::List => {
       let sessions = if let Some(host) = &options.host {
         Client::new(options.connection.ssh(host)?).discover()?
-      } else if options.connection.agent_is_explicit() {
+      } else if options.connection.agent_is_explicit() || cfg!(target_os = "macos") {
         Client::new(options.connection.local()?).discover()?
       } else {
         discover_sessions()?
@@ -161,7 +162,7 @@ fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
     Operation::Windows(target) => {
       let windows = if let Some(host) = &options.host {
         Client::new(options.connection.ssh(host)?).windows(target)?
-      } else if options.connection.agent_is_explicit() {
+      } else if options.connection.agent_is_explicit() || cfg!(target_os = "macos") {
         Client::new(options.connection.local()?).windows(target)?
       } else {
         windows::list(target)?

@@ -256,6 +256,10 @@ impl Transport for Mock {
         },
         true,
       ),
+      "windows" if target == "macos" => (
+        br#"[{"id":"macos-31-42","title":"Mac fixture","app_id":"fixture"}]"#.to_vec(),
+        true,
+      ),
       "windows" if target == "windows-1" && config.first_window_closed => (b"[]".to_vec(), true),
       "windows" => (
         format!(
@@ -291,7 +295,9 @@ impl Transport for Mock {
       "capture-with-driver" if config.capture_failure => (b"backend unavailable\n".to_vec(), true),
       "capture-with-driver" => {
         let driver = if arguments[3] == "auto" {
-          if arguments.len() == 5 {
+          if target == "macos" {
+            "macos.screencapturekit"
+          } else if arguments.len() == 5 {
             "windows.wgc"
           } else {
             "windows.dxgi"
@@ -1372,7 +1378,16 @@ fn viewer_input_isolated_from_setup_and_focus_loss_releases_held_state() {
     raw(interactions(at, true)),
   );
   assert!(input.sent().contains("key F8 1\n"));
-  assert!(viewer.preview.as_ref().unwrap().forwarding);
+  assert!(
+    viewer
+      .preview
+      .as_ref()
+      .unwrap()
+      .input
+      .as_ref()
+      .unwrap()
+      .is_forwarding()
+  );
 
   // Painting another view of the shared texture must not reset the viewer's
   // held input, including when the read-only pane cannot fit an image.
@@ -1390,13 +1405,31 @@ fn viewer_input_isolated_from_setup_and_focus_loss_releases_held_state() {
       });
     });
     assert_eq!(input.sent(), held);
-    assert!(viewer.preview.as_ref().unwrap().forwarding);
+    assert!(
+      viewer
+        .preview
+        .as_ref()
+        .unwrap()
+        .input
+        .as_ref()
+        .unwrap()
+        .is_forwarding()
+    );
   }
   let mut unfocused = raw(vec![egui::Event::WindowFocused(false)]);
   unfocused.focused = false;
   native_frame(&mut viewer, &ctx, raw(Vec::new()), unfocused.clone());
   assert!(input.sent().ends_with("reset\n"));
-  assert!(!viewer.preview.as_ref().unwrap().forwarding);
+  assert!(
+    !viewer
+      .preview
+      .as_ref()
+      .unwrap()
+      .input
+      .as_ref()
+      .unwrap()
+      .is_forwarding()
+  );
   let released = input.sent();
   native_frame(&mut viewer, &ctx, raw(Vec::new()), unfocused);
   assert_eq!(
@@ -2029,6 +2062,53 @@ fn desktop_window_selection_uses_one_query_and_its_target_for_capture_and_input(
 }
 
 #[test]
+fn macos_catalog_defaults_to_a_window_and_enables_input_only_on_start() {
+  for driver in ["auto", "macos.screencapturekit"] {
+    let mock = Mock::default();
+    {
+      let mut config = mock.0.config.lock().unwrap();
+      config.displays =
+        Some(r#"[{"display":"macos_desktop","class":null,"selectable":true}]"#.into());
+      config.catalog = Some(
+        r#"[{"id":"macos.screencapturekit","name":"ScreenCaptureKit","scopes":["window"],"systems":["macos"]}]"#
+          .into(),
+      );
+    }
+    let ctx = egui::Context::default();
+    let mut viewer = Viewer::new(mock.clone(), None, false, None, driver.into(), &ctx);
+    poll_until(&mut viewer, &ctx, ready);
+    assert_eq!(viewer.available_scopes(), [CaptureScope::Window]);
+    assert_eq!(viewer.selected, Some(Target::MacosDesktop));
+    assert_eq!(
+      mock.records("windows")[0].arguments,
+      ["1.0.11", "windows", "macos"]
+    );
+    assert_eq!(
+      mock.captures()[0].arguments,
+      [
+        "1.0.11",
+        "capture-with-driver",
+        "macos",
+        driver,
+        "macos-31-42"
+      ]
+    );
+    assert!(mock.inputs().is_empty());
+    viewer.start(&ctx);
+    poll_until(&mut viewer, &ctx, |viewer| {
+      viewer.preview.as_ref().unwrap().input.is_some()
+    });
+    let input = mock.inputs().pop().unwrap();
+    assert_eq!(
+      input.arguments,
+      ["1.0.11", "input-window", "macos", "macos-31-42"]
+    );
+    viewer.close_viewer(&ctx);
+    assert!(input.closed() && input.cancelled());
+  }
+}
+
+#[test]
 fn display_driver_automatically_skips_an_unavailable_first_display() {
   let mock = Mock::default();
   mock.0.config.lock().unwrap().displays = Some(concat!(
@@ -2118,8 +2198,9 @@ fn targeted_catalog_fallback_merges_discovered_sources_before_selection() {
   assert_eq!(viewer.selected, Some(Target::Windows(1)));
   assert!(mock.captures().is_empty());
   let catalogs = mock.records("capture-drivers");
-  assert_eq!(catalogs.len(), 3);
-  assert_eq!(catalogs[0].arguments, ["1.0.8", "capture-drivers"]);
+  assert_eq!(catalogs.len(), 4);
+  assert_eq!(catalogs[0].arguments, ["1.0.11", "capture-drivers"]);
+  assert_eq!(catalogs[1].arguments, ["1.0.8", "capture-drivers"]);
   for target in ["windows-1", "windows-2"] {
     assert!(
       catalogs
@@ -2147,6 +2228,6 @@ fn targeted_catalog_fallback_merges_discovered_sources_before_selection() {
     viewer.preview.as_ref().unwrap().driver.as_deref(),
     Some("windows.wgc")
   );
-  assert_eq!(mock.records("capture-drivers").len(), 3);
+  assert_eq!(mock.records("capture-drivers").len(), 4);
   assert!(mock.inputs().is_empty());
 }

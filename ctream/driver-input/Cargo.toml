@@ -10,6 +10,9 @@ publish = false
 [dependencies]
 ctream-driver.workspace = true
 
+[build-dependencies]
+cc = "1"
+
 [target.'cfg(windows)'.dependencies]
 ctream-windows.workspace = true
 windows = { version = "0.62.2", features = [

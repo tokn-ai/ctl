@@ -13,7 +13,7 @@ pub(super) fn run() -> Result<()> {
   let args: Vec<_> = env::args().skip(1).collect();
   match parse(&args)? {
     Request::Ping => ping(),
-    Request::CaptureCatalog => {
+    Request::CaptureCatalog { .. } => {
       serde_json::to_writer(io::stdout().lock(), &catalog::catalog())?;
       Ok(())
     }
@@ -22,6 +22,11 @@ pub(super) fn run() -> Result<()> {
       target: Target::Windows(_) | Target::WindowsDesktop,
       ..
     } => Err("Windows capture drivers require a native Windows agent".into()),
+    Request::CaptureDrivers(Target::MacosDesktop)
+    | Request::CaptureWithDriver {
+      target: Target::MacosDesktop,
+      ..
+    } => Err("macOS capture drivers require a native macOS agent".into()),
     Request::CaptureDrivers(target) => {
       serde_json::to_writer(io::stdout().lock(), &catalog::list(target))?;
       Ok(())
@@ -72,6 +77,7 @@ pub(super) fn run() -> Result<()> {
       (Target::Windows(_) | Target::WindowsDesktop, _) => {
         Err("Windows targets require a native Windows agent".into())
       }
+      (Target::MacosDesktop, _) => Err("macOS targets require a native macOS agent".into()),
       (_, TargetOperation::InputWindow(_)) => Err("window input requires Windows".into()),
       (target, TargetOperation::Windows) => {
         serde_json::to_writer(

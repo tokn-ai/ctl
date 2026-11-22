@@ -1,7 +1,8 @@
+use super::view::viewer_id;
 use super::{
   CaptureEnd, Preview, PreviewMode, background, chrome, drivers, input, latency,
   requests::{Requests, Scoped, Traffic},
-  semantic,
+  semantic, setup,
   stats::Stats,
   view,
 };
@@ -24,10 +25,6 @@ use std::{
 type Pending<V> = Option<Receiver<io::Result<V>>>;
 type Control<T> =
   ctream_client::input::Input<<Scoped<T> as Transport>::Reader, <Scoped<T> as Transport>::Writer>;
-
-fn viewer_id() -> egui::ViewportId {
-  egui::ViewportId::from_hash_of("ctream_viewer")
-}
 
 struct Catalog {
   drivers: Vec<CaptureDriverDescriptor>,
@@ -82,6 +79,7 @@ fn target(session: &DisplaySession) -> Option<Target> {
     Display::X11(number) => Some(Target::X11(*number)),
     Display::Wayland { socket, .. } => Target::parse(socket).ok(),
     Display::Windows { number, .. } => Some(Target::Windows(*number)),
+    Display::MacosDesktop => Some(Target::MacosDesktop),
   }
 }
 
@@ -94,6 +92,7 @@ fn display_label(session: &DisplaySession) -> String {
       i64::from(bounds[2]) - i64::from(bounds[0]),
       i64::from(bounds[3]) - i64::from(bounds[1])
     ),
+    Display::MacosDesktop => "macOS desktop".into(),
   }
 }
 
@@ -211,6 +210,7 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
     driver: String,
     ctx: &egui::Context,
   ) -> Self {
+    let window_mode = window_mode || window.is_some() || selected.is_some_and(Target::window_only);
     let mut viewer = Self {
       transport: Arc::new(transport),
       displays: Vec::new(),
@@ -218,7 +218,7 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
       discovery_requests: None,
       discovery_error: None,
       selected,
-      window_mode: window_mode || window.is_some() || selected == Some(Target::WindowsDesktop),
+      window_mode,
       selected_window: window,
       driver,
       windows: Vec::new(),
@@ -355,6 +355,7 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
       .iter()
       .filter(|session| session.selectable)
       .filter_map(target)
+      .filter(|target| self.window_mode || !target.window_only())
       .filter(|target| self.compatible(*target))
   }
 
@@ -434,21 +435,24 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
   }
 
   fn apply_driver_scope(&mut self) {
-    if let Some(driver) = self
-      .drivers
-      .iter()
-      .find(|driver| driver.info.id == self.driver)
-    {
-      match driver.info.scopes.as_slice() {
-        [CaptureScope::Display] => self.window_mode = false,
-        [CaptureScope::Window] => self.window_mode = true,
-        _ => {}
-      }
+    match self.available_scopes().as_slice() {
+      [CaptureScope::Display] => self.window_mode = false,
+      [CaptureScope::Window] => self.window_mode = true,
+      _ => {}
     }
   }
 
   fn available_scopes(&self) -> Vec<CaptureScope> {
     if self.driver == "auto" {
+      // macOS hosts offer a window catalog in place of monitor sources.
+      if !self.drivers.is_empty()
+        && self.drivers.iter().all(|driver| {
+          driver.systems.as_slice() == [CaptureSystem::Macos]
+            && driver.info.scopes.as_slice() == [CaptureScope::Window]
+        })
+      {
+        return vec![CaptureScope::Window];
+      }
       return vec![CaptureScope::Display, CaptureScope::Window];
     }
     self
@@ -705,27 +709,14 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
     self.control_requests = None;
     self.viewing = false;
     self.viewer_opening = false;
-    ctx.send_viewport_cmd_to(viewer_id(), egui::ViewportCommand::Visible(false));
-    ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Visible(true));
-    ctx.send_viewport_cmd_to(
-      egui::ViewportId::ROOT,
-      egui::ViewportCommand::Minimized(false),
-    );
-    ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
-    ctx.request_repaint_of(egui::ViewportId::ROOT);
+    view::restore_setup(ctx);
   }
 
   fn selectors(&mut self, ui: &mut egui::Ui) -> (bool, bool) {
     let before_source = (self.selected, self.selected_window.clone());
     let before_driver = self.driver.clone();
     let before_scope = self.scope();
-    ui.label(
-      egui::RichText::new("CAPTURE DRIVER")
-        .small()
-        .strong()
-        .color(ui.visuals().weak_text_color()),
-    );
-    ui.add_space(8.0);
+    setup::heading(ui, "CAPTURE DRIVER");
     if let Some(id) = drivers::chooser(ui, &self.drivers, &self.driver, &self.displays) {
       self.choose_driver(&id);
     }
@@ -739,13 +730,7 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
         .on_hover_text(error);
     }
     ui.add_space(18.0);
-    ui.label(
-      egui::RichText::new("SOURCE")
-        .small()
-        .strong()
-        .color(ui.visuals().weak_text_color()),
-    );
-    ui.add_space(8.0);
+    setup::heading(ui, "SOURCE");
     // Scope is a property of a provider. Only a provider supporting both needs
     // a second choice; selecting a single-scope provider sets it directly.
     let scopes = self.available_scopes();
@@ -794,7 +779,9 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
       .width(ui.available_width())
       .show_ui(ui, |ui| {
         for session in &self.displays {
-          if let Some(candidate) = target(session).filter(|candidate| self.compatible(*candidate)) {
+          if let Some(candidate) = target(session)
+            .filter(|candidate| !candidate.window_only() && self.compatible(*candidate))
+          {
             ui.add_enabled_ui(session.selectable, |ui| {
               ui.selectable_value(&mut self.selected, Some(candidate), display_label(session))
                 .on_hover_text(if session.selectable {
@@ -809,38 +796,22 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
   }
 
   fn window_picker(&mut self, ui: &mut egui::Ui) {
-    fn name(window: &Window) -> &str {
-      if window.title.is_empty() {
-        &window.app_id
-      } else {
-        &window.title
-      }
-    }
-
-    ui.label("Window");
-    let label = self.selected_window().map_or("Choose a window…", name);
-    let mut choice = None;
-    egui::ComboBox::from_id_salt("window")
-      .selected_text(label)
-      .truncate()
-      .width(ui.available_width())
-      .show_ui(ui, |ui| {
-        for source in &self.windows {
-          let active = self.selected == Some(source.target)
-            && self.selected_window.as_ref() == Some(&source.window.id);
-          if ui
-            .selectable_label(active, name(&source.window))
-            .on_hover_text(&source.window.app_id)
-            .clicked()
-            && !active
-          {
-            choice = Some((source.target, source.window.id.clone()));
-          }
-        }
-      });
+    let label = self
+      .selected_window()
+      .map(|window| setup::window_name(&window.title, &window.app_id));
+    let choices = self.windows.iter().map(|source| {
+      let window = &source.window;
+      (
+        (source.target, &window.id),
+        self.selected == Some(source.target) && self.selected_window.as_ref() == Some(&window.id),
+        window.title.as_str(),
+        window.app_id.as_str(),
+      )
+    });
+    let choice = setup::window_picker(ui, label, choices);
     if let Some((target, id)) = choice {
       self.selected = Some(target);
-      self.selected_window = Some(id);
+      self.selected_window = Some(id.clone());
     }
   }
 
@@ -894,20 +865,7 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
           ui.label("Finding displays…");
         });
       }
-      let (body, _) = ui.allocate_exact_size(ui.available_size(), egui::Sense::hover());
-      let selector_width = (body.width() * 0.36).clamp(180.0, 235.0);
-      let selectors =
-        egui::Rect::from_min_size(body.min, egui::vec2(selector_width, body.height()));
-      let pane =
-        egui::Rect::from_min_max(egui::pos2(selectors.right() + 22.0, body.top()), body.max);
-      let separator_x = selectors.right() + 11.0;
-      ui.painter().line_segment(
-        [
-          egui::pos2(separator_x, body.top()),
-          egui::pos2(separator_x, body.bottom()),
-        ],
-        ui.visuals().widgets.noninteractive.bg_stroke,
-      );
+      let (selectors, pane) = setup::panes(ui);
       ui.scope_builder(egui::UiBuilder::new().max_rect(selectors), |ui| {
         ui.set_clip_rect(selectors.intersect(ui.clip_rect()));
         egui::ScrollArea::vertical()
@@ -921,13 +879,7 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
       });
       ui.scope_builder(egui::UiBuilder::new().max_rect(pane), |ui| {
         ui.set_clip_rect(pane.intersect(ui.clip_rect()));
-        ui.label(
-          egui::RichText::new("LIVE PREVIEW")
-            .small()
-            .strong()
-            .color(ui.visuals().weak_text_color()),
-        );
-        ui.add_space(8.0);
+        setup::heading(ui, "LIVE PREVIEW");
         let preview_height = (ui.available_height() - 68.0).max(80.0);
         let (preview_rect, _) = ui.allocate_exact_size(
           egui::vec2(ui.available_width(), preview_height),
@@ -1069,12 +1021,7 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
   }
 
   fn show_viewer_window(&mut self, ctx: &egui::Context) {
-    let mut builder = egui::ViewportBuilder::default()
-      .with_title(chrome::VIEWER_TITLE)
-      .with_decorations(false)
-      .with_min_inner_size(view::MIN_WINDOW)
-      .with_active(true);
-    if self.viewer_opening {
+    let initial = self.viewer_opening.then(|| {
       let image = self
         .preview
         .as_ref()
@@ -1085,11 +1032,11 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
       } else {
         0.0
       };
-      let monitor = ctx.input(|input| input.viewport().monitor_size);
-      builder = builder.with_inner_size(view::initial_window(image, sidebar, monitor));
       self.viewer_size = view::AspectResize::default();
       self.chrome = chrome::Chrome::default();
-    }
+      (image, sidebar)
+    });
+    let builder = view::viewer_builder(ctx, initial);
     ctx.show_viewport_immediate(viewer_id(), builder, |child, class| {
       if class == egui::ViewportClass::Embedded {
         self.close_viewer(child);
@@ -1104,11 +1051,7 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
       if self.viewer_opening {
         // Wait until the native child exists before hiding its parent. Scope
         // every command explicitly so a child event cannot close the app.
-        child.send_viewport_cmd_to(
-          egui::ViewportId::ROOT,
-          egui::ViewportCommand::Visible(false),
-        );
-        child.send_viewport_cmd_to(viewer_id(), egui::ViewportCommand::Focus);
+        view::hide_setup(child);
         self.viewer_opening = false;
       }
       self.show_viewer(child);

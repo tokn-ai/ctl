@@ -9,6 +9,7 @@ use ctream_proto::{
   X11_FRAME_SIZE,
 };
 
+#[derive(Clone, Copy)]
 pub struct Selection {
   pub id: &'static str,
   pub name: &'static str,
@@ -16,69 +17,85 @@ pub struct Selection {
   pub format: CaptureFormat,
 }
 
-fn entries(system: CaptureSystem) -> [Selection; 2] {
-  let (display, display_name, window, window_name, format) = match system {
-    CaptureSystem::X11 => (
-      "linux.x11.ffmpeg",
-      "FFmpeg X11",
-      "linux.x11.composite",
-      "X11 Composite",
-      CaptureFormat::FixedRgb {
-        size: X11_FRAME_SIZE,
+pub const MACOS_CAPTURE_DRIVER: &str = "macos.screencapturekit";
+
+fn entries(system: CaptureSystem) -> &'static [Selection] {
+  match system {
+    CaptureSystem::X11 => &[
+      Selection {
+        id: "linux.x11.ffmpeg",
+        name: "FFmpeg X11",
+        scope: CaptureScope::Display,
+        format: CaptureFormat::FixedRgb {
+          size: X11_FRAME_SIZE,
+        },
       },
-    ),
-    CaptureSystem::Wayland => (
-      "linux.wayland.grim",
-      "Grim",
-      "linux.wayland.image_copy",
-      "Wayland image copy",
-      CaptureFormat::Ppm,
-    ),
-    CaptureSystem::Windows => (
-      "windows.dxgi",
-      "DXGI Desktop Duplication",
-      "windows.wgc",
-      "Windows Graphics Capture",
-      CaptureFormat::Ppm,
-    ),
-  };
-  [
-    Selection {
-      id: display,
-      name: display_name,
-      scope: CaptureScope::Display,
-      format,
-    },
-    Selection {
-      id: window,
-      name: window_name,
+      Selection {
+        id: "linux.x11.composite",
+        name: "X11 Composite",
+        scope: CaptureScope::Window,
+        format: CaptureFormat::Ppm,
+      },
+    ],
+    CaptureSystem::Wayland => &[
+      Selection {
+        id: "linux.wayland.grim",
+        name: "Grim",
+        scope: CaptureScope::Display,
+        format: CaptureFormat::Ppm,
+      },
+      Selection {
+        id: "linux.wayland.image_copy",
+        name: "Wayland image copy",
+        scope: CaptureScope::Window,
+        format: CaptureFormat::Ppm,
+      },
+    ],
+    CaptureSystem::Windows => &[
+      Selection {
+        id: "windows.dxgi",
+        name: "DXGI Desktop Duplication",
+        scope: CaptureScope::Display,
+        format: CaptureFormat::Ppm,
+      },
+      Selection {
+        id: "windows.wgc",
+        name: "Windows Graphics Capture",
+        scope: CaptureScope::Window,
+        format: CaptureFormat::Ppm,
+      },
+    ],
+    CaptureSystem::Macos => &[Selection {
+      id: MACOS_CAPTURE_DRIVER,
+      name: "ScreenCaptureKit",
       scope: CaptureScope::Window,
       format: CaptureFormat::Ppm,
-    },
-  ]
+    }],
+  }
 }
 
 /// The platform host must validate its target platform before returning this
 /// compile-supplied catalog. Runtime permissions are checked when capture opens.
 pub fn list(target: Target) -> Vec<CaptureDriverInfo> {
   descriptors(target.system())
-    .into_iter()
     .filter(|descriptor| {
-      target != Target::WindowsDesktop || descriptor.info.scopes.contains(&CaptureScope::Window)
+      !target.window_only() || descriptor.info.scopes.contains(&CaptureScope::Window)
     })
     .map(|descriptor| descriptor.info)
     .collect()
 }
 
-fn descriptors(system: CaptureSystem) -> [CaptureDriverDescriptor; 2] {
-  entries(system).map(|entry| CaptureDriverDescriptor {
-    info: CaptureDriverInfo {
-      id: entry.id.into(),
-      name: entry.name.into(),
-      scopes: vec![entry.scope],
-    },
-    systems: vec![system],
-  })
+fn descriptors(system: CaptureSystem) -> impl Iterator<Item = CaptureDriverDescriptor> {
+  entries(system)
+    .iter()
+    .map(move |entry| CaptureDriverDescriptor {
+      info: CaptureDriverInfo {
+        id: entry.id.into(),
+        name: entry.name.into(),
+        scopes: vec![entry.scope],
+      },
+      systems: vec![system],
+    })
 }
 
 /// Every provider compiled into the stock platform agent, even with no running
@@ -88,6 +105,8 @@ pub fn catalog() -> Vec<CaptureDriverDescriptor> {
     &[CaptureSystem::X11, CaptureSystem::Wayland]
   } else if cfg!(windows) {
     &[CaptureSystem::Windows]
+  } else if cfg!(target_os = "macos") {
+    &[CaptureSystem::Macos]
   } else {
     &[]
   };
@@ -98,13 +117,17 @@ pub fn select(target: Target, requested: &str, window: bool) -> Result<Selection
   if target == Target::WindowsDesktop && !window {
     return Err("Windows desktop target requires a window ID".into());
   }
+  if target == Target::MacosDesktop && !window {
+    return Err("macOS desktop target requires a window ID".into());
+  }
   let scope = if window {
     CaptureScope::Window
   } else {
     CaptureScope::Display
   };
   entries(target.system())
-    .into_iter()
+    .iter()
+    .copied()
     .find(|entry| entry.scope == scope && (requested == "auto" || requested == entry.id))
     .ok_or_else(|| {
       "capture driver is unknown or does not support the selected target and scope".into()
@@ -127,6 +150,8 @@ mod tests {
       ]
     } else if cfg!(windows) {
       vec!["windows.dxgi", "windows.wgc"]
+    } else if cfg!(target_os = "macos") {
+      vec![MACOS_CAPTURE_DRIVER]
     } else {
       vec![]
     };
@@ -142,11 +167,15 @@ mod tests {
       CaptureSystem::Wayland,
       CaptureSystem::Windows,
     ] {
-      let descriptors = descriptors(system);
+      let descriptors: Vec<_> = descriptors(system).collect();
       assert!(descriptors.iter().all(|driver| driver.systems == [system]));
       assert_eq!(descriptors[0].info.scopes, [CaptureScope::Display]);
       assert_eq!(descriptors[1].info.scopes, [CaptureScope::Window]);
     }
+    let macos = descriptors(CaptureSystem::Macos).collect::<Vec<_>>();
+    assert_eq!(macos.len(), 1);
+    assert_eq!(macos[0].systems, [CaptureSystem::Macos]);
+    assert_eq!(macos[0].info.scopes, [CaptureScope::Window]);
   }
 
   #[test]
@@ -168,5 +197,12 @@ mod tests {
     let catalog = list(desktop);
     assert_eq!(catalog.len(), 1);
     assert_eq!(catalog[0].id, "windows.wgc");
+    let macos = Target::MacosDesktop;
+    assert_eq!(list(macos).len(), 1);
+    assert_eq!(
+      select(macos, "auto", true).unwrap().id,
+      MACOS_CAPTURE_DRIVER
+    );
+    assert!(select(macos, "auto", false).is_err());
   }
 }

@@ -143,6 +143,10 @@ jobs:
         shell: bash
         run: cargo build --locked --release --target "$PREVIEW_TARGET" -p ctream-preview -p ctream-cli
 
+      - name: Test the macOS desktop agent
+        if: runner.os == 'macOS'
+        run: cargo test --locked --target "$PREVIEW_TARGET" -p ctream-agent
+
       - name: Download agent binaries
         uses: actions/download-artifact@v5
         with:

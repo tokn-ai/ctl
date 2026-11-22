@@ -15,9 +15,9 @@ use crate::{
 use ctream_proto::{
   Action, ActionResult, BOUNDS_VERSION, CAPTURE_CATALOG_VERSION, CAPTURE_DRIVER_VERSION,
   CaptureDriverDescriptor, CaptureDriverInfo, DISPLAY_VERSION, Element, LATENCY_VERSION,
-  Session as DisplaySession, Target, WAYLAND_WINDOW_VERSION, WINDOWS_DESKTOP_VERSION,
-  WINDOWS_DISPLAY_VERSION, WINDOWS_WINDOW_VERSION, Window, X11_FRAME_SIZE, X11_WINDOW_VERSION,
-  valid_capture_driver, valid_window_id,
+  MACOS_WINDOW_VERSION, Session as DisplaySession, Target, WAYLAND_WINDOW_VERSION,
+  WINDOWS_DESKTOP_VERSION, WINDOWS_DISPLAY_VERSION, WINDOWS_WINDOW_VERSION, Window, WindowId,
+  X11_FRAME_SIZE, X11_WINDOW_VERSION, valid_capture_driver, valid_window_id,
 };
 pub use latency::LatencyProbe;
 use serde::de::DeserializeOwned;
@@ -43,17 +43,17 @@ impl Query for Discover {
   type Reply = Vec<DisplaySession>;
 
   fn arguments(&self) -> io::Result<Vec<String>> {
-    Ok(vec![WINDOWS_DISPLAY_VERSION.into(), "discover".into()])
+    DiscoverWithVersion(WINDOWS_DISPLAY_VERSION).arguments()
   }
 }
 
-struct LegacyDiscover;
+struct DiscoverWithVersion(&'static str);
 
-impl Query for LegacyDiscover {
+impl Query for DiscoverWithVersion {
   type Reply = Vec<DisplaySession>;
 
   fn arguments(&self) -> io::Result<Vec<String>> {
-    Ok(vec![DISPLAY_VERSION.into(), "discover".into()])
+    Ok(vec![self.0.into(), "discover".into()])
   }
 }
 
@@ -67,10 +67,17 @@ impl Query for CaptureCatalog {
   type Reply = Vec<CaptureDriverDescriptor>;
 
   fn arguments(&self) -> io::Result<Vec<String>> {
-    Ok(vec![
-      CAPTURE_CATALOG_VERSION.into(),
-      "capture-drivers".into(),
-    ])
+    CaptureCatalogWithVersion(CAPTURE_CATALOG_VERSION).arguments()
+  }
+}
+
+struct CaptureCatalogWithVersion(&'static str);
+
+impl Query for CaptureCatalogWithVersion {
+  type Reply = Vec<CaptureDriverDescriptor>;
+
+  fn arguments(&self) -> io::Result<Vec<String>> {
+    Ok(vec![self.0.into(), "capture-drivers".into()])
   }
 }
 
@@ -188,8 +195,13 @@ impl<T: Transport> Client<T> {
 
   pub fn discover(&self) -> io::Result<Vec<DisplaySession>> {
     self
-      .query(Discover)
-      .or_else(|error| self.query(LegacyDiscover).map_err(|_| error))
+      .query(DiscoverWithVersion(MACOS_WINDOW_VERSION))
+      .or_else(|error| {
+        self
+          .query(Discover)
+          .or_else(|_| self.query(DiscoverWithVersion(DISPLAY_VERSION)))
+          .map_err(|_| error)
+      })
   }
 
   pub fn windows(&self, target: Target) -> io::Result<Vec<Window>> {
@@ -202,7 +214,9 @@ impl<T: Transport> Client<T> {
 
   /// List compiled providers without selecting or opening a display session.
   pub fn capture_catalog(&self) -> io::Result<Vec<CaptureDriverDescriptor>> {
-    self.query(CaptureCatalog)
+    self
+      .query(CaptureCatalogWithVersion(MACOS_WINDOW_VERSION))
+      .or_else(|error| self.query(CaptureCatalog).map_err(|_| error))
   }
 
   /// Open a dedicated round-trip probe. The first sample waits for the agent's
@@ -257,12 +271,7 @@ impl<T: Transport> Session<T> {
       driver.into(),
     ];
     if let Some(window) = &self.window {
-      if !valid_window_id(&window.id) {
-        return Err(io::Error::new(
-          io::ErrorKind::InvalidInput,
-          "invalid window identifier",
-        ));
-      }
+      validate_window_id(self.target, &window.id)?;
       arguments.push(window.id.clone());
     }
     Capture::started(self.client.transport.open(&arguments)?, driver)
@@ -270,7 +279,7 @@ impl<T: Transport> Session<T> {
 
   pub fn supports_input(&self) -> bool {
     match self.target {
-      Target::WindowsDesktop => self.window.is_some(),
+      Target::WindowsDesktop | Target::MacosDesktop => self.window.is_some(),
       Target::Windows(_) => true,
       _ => self.window.is_none(),
     }
@@ -297,7 +306,9 @@ impl<T: Transport> Session<T> {
           size: X11_FRAME_SIZE,
         },
         Target::Wayland(_) | Target::Windows(_) => FrameFormat::Ppm,
-        Target::WindowsDesktop => return Err(desktop_window_required()),
+        Target::WindowsDesktop | Target::MacosDesktop => {
+          return Err(desktop_window_required(self.target));
+        }
       };
       (
         vec![
@@ -319,13 +330,14 @@ impl<T: Transport> Session<T> {
     if !self.supports_input() {
       return Err(io::Error::new(
         io::ErrorKind::Unsupported,
-        "pointer and keyboard input require a display or Windows window session",
+        "pointer and keyboard input require a display, Windows window, or macOS window",
       ));
     }
     let format = match self.target {
       Target::X11(_) => InputFormat::X11,
       Target::Wayland(_) => InputFormat::Wayland,
       Target::Windows(_) | Target::WindowsDesktop => InputFormat::Windows,
+      Target::MacosDesktop => InputFormat::Macos,
     };
     let arguments = if let Some(window) = &self.window {
       window_arguments(
@@ -355,8 +367,8 @@ impl<T: Transport> Session<T> {
   }
 
   fn require_window_for_desktop(&self) -> io::Result<()> {
-    if self.target == Target::WindowsDesktop && self.window.is_none() {
-      return Err(desktop_window_required());
+    if self.target.window_only() && self.window.is_none() {
+      return Err(desktop_window_required(self.target));
     }
     Ok(())
   }
@@ -400,10 +412,10 @@ fn display_version(target: Target) -> &'static str {
 }
 
 fn capture_driver_version(target: Target) -> &'static str {
-  if target == Target::WindowsDesktop {
-    WINDOWS_DESKTOP_VERSION
-  } else {
-    CAPTURE_DRIVER_VERSION
+  match target {
+    Target::WindowsDesktop => WINDOWS_DESKTOP_VERSION,
+    Target::MacosDesktop => MACOS_WINDOW_VERSION,
+    _ => CAPTURE_DRIVER_VERSION,
   }
 }
 
@@ -413,13 +425,18 @@ fn window_version(target: Target) -> &'static str {
     Target::Wayland(_) => WAYLAND_WINDOW_VERSION,
     Target::Windows(_) => WINDOWS_WINDOW_VERSION,
     Target::WindowsDesktop => WINDOWS_DESKTOP_VERSION,
+    Target::MacosDesktop => MACOS_WINDOW_VERSION,
   }
 }
 
-fn desktop_window_required() -> io::Error {
+fn desktop_window_required(target: Target) -> io::Error {
   io::Error::new(
     io::ErrorKind::InvalidInput,
-    "Windows desktop target requires a window ID",
+    if target == Target::MacosDesktop {
+      "macOS desktop target requires a window ID"
+    } else {
+      "Windows desktop target requires a window ID"
+    },
   )
 }
 
@@ -429,18 +446,28 @@ fn window_arguments(
   target: Target,
   id: &str,
 ) -> io::Result<Vec<String>> {
-  if !valid_window_id(id) {
-    return Err(io::Error::new(
-      io::ErrorKind::InvalidInput,
-      "invalid window identifier",
-    ));
-  }
+  validate_window_id(target, id)?;
   Ok(vec![
     version.into(),
     operation.into(),
     target.to_string(),
     id.into(),
   ])
+}
+
+fn validate_window_id(target: Target, id: &str) -> io::Result<()> {
+  let valid = if target == Target::MacosDesktop {
+    WindowId::macos_parts(id).is_some()
+  } else {
+    valid_window_id(id)
+  };
+  if !valid {
+    return Err(io::Error::new(
+      io::ErrorKind::InvalidInput,
+      "invalid window identifier",
+    ));
+  }
+  Ok(())
 }
 
 #[cfg(test)]
@@ -577,11 +604,12 @@ mod tests {
 
   #[test]
   fn discovery_falls_back_to_the_original_linux_contract() {
-    let (client, observed) = client(&["unsupported contract", "[]"]);
+    let (client, observed) = client(&["unsupported contract", "unsupported contract", "[]"]);
     assert!(client.discover().unwrap().is_empty());
     assert_eq!(
       *observed.requests.lock().unwrap(),
       [
+        vec![MACOS_WINDOW_VERSION, "discover"],
         vec![WINDOWS_DISPLAY_VERSION, "discover"],
         vec![DISPLAY_VERSION, "discover"],
       ]
@@ -748,7 +776,86 @@ mod tests {
     );
     assert_eq!(
       *observed.requests.lock().unwrap(),
-      [vec![CAPTURE_CATALOG_VERSION, "capture-drivers"]]
+      [vec![MACOS_WINDOW_VERSION, "capture-drivers"]]
+    );
+  }
+
+  #[test]
+  fn macos_discovers_window_identity_and_opens_normalized_input() {
+    use crate::media::{Frame, VideoSource};
+    use ctream_proto::{CaptureSystem, Display};
+
+    let (client, observed) = client(&[
+      r#"[{"display":"macos_desktop","class":"interactive","selectable":true}]"#,
+      r#"[{"id":"macos.screencapturekit","name":"ScreenCaptureKit","scopes":["window"],"systems":["macos"]}]"#,
+      r#"[{"id":"macos-123-42","title":"Example","app_id":"example"}]"#,
+      "{\"driver\":\"macos.screencapturekit\",\"format\":{\"type\":\"ppm\"}}\nP6\n2 1\n255\nabcdefP6\n1 2\n255\nabcdef",
+      "ready\n",
+    ]);
+    assert_eq!(client.discover().unwrap()[0].display, Display::MacosDesktop);
+    assert_eq!(
+      client.capture_catalog().unwrap()[0].systems,
+      [CaptureSystem::Macos]
+    );
+    let target = Target::MacosDesktop;
+    let mut windows = client.windows(target).unwrap();
+    let session = client.session(target, windows.pop());
+    assert!(session.supports_input());
+    assert!(!session.supports_semantics());
+    let mut capture = session
+      .capture_with_driver("macos.screencapturekit")
+      .unwrap();
+    let mut frame = Frame::default();
+    capture.read_frame(&mut frame).unwrap();
+    assert_eq!(frame.size, [2, 1]);
+    capture.read_frame(&mut frame).unwrap();
+    assert_eq!(frame.size, [1, 2]);
+    let mut input = session.input().unwrap();
+    input.move_pointer(0, 1, [1, 2]).unwrap();
+    assert_eq!(*observed.payloads.lock().unwrap(), b"move 0 1 1 2\n");
+
+    let missing = client.session(target, None);
+    assert!(!missing.supports_input());
+    assert!(missing.capture().is_err());
+    assert!(missing.capture_with_driver("auto").is_err());
+    assert!(missing.input().is_err());
+    let invalid_id = client.session(target, Some(window()));
+    assert!(invalid_id.capture().is_err());
+    assert!(invalid_id.capture_with_driver("auto").is_err());
+    assert!(invalid_id.input().is_err());
+    assert_eq!(
+      *observed.requests.lock().unwrap(),
+      [
+        vec![MACOS_WINDOW_VERSION, "discover"],
+        vec![MACOS_WINDOW_VERSION, "capture-drivers"],
+        vec![MACOS_WINDOW_VERSION, "windows", "macos"],
+        vec![
+          MACOS_WINDOW_VERSION,
+          "capture-with-driver",
+          "macos",
+          "macos.screencapturekit",
+          "macos-123-42"
+        ],
+        vec![
+          MACOS_WINDOW_VERSION,
+          "input-window",
+          "macos",
+          "macos-123-42"
+        ],
+      ]
+    );
+  }
+
+  #[test]
+  fn capture_catalog_falls_back_to_its_original_contract() {
+    let (client, observed) = client(&["unsupported contract", "[]"]);
+    assert!(client.capture_catalog().unwrap().is_empty());
+    assert_eq!(
+      *observed.requests.lock().unwrap(),
+      [
+        vec![MACOS_WINDOW_VERSION, "capture-drivers"],
+        vec![CAPTURE_CATALOG_VERSION, "capture-drivers"],
+      ]
     );
   }
 

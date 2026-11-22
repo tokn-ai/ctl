@@ -56,6 +56,30 @@ pub fn active(root: &Path) -> io::Result<Option<Installation>> {
   installed(&path, &build_id, id).map(Some)
 }
 
+/// Find the currently selected preview in the same store as a running managed preview.
+/// # Errors
+/// Returns an error if the store or its selection cannot be verified.
+pub fn active_managed_preview(executable: &Path) -> io::Result<Option<PathBuf>> {
+  let Some(generation) = executable.parent() else {
+    return Ok(None);
+  };
+  let Some(root) = generation
+    .parent()
+    .filter(|root| root.ends_with("ctlup/store/ctream"))
+  else {
+    return Ok(None);
+  };
+  if !generation
+    .file_name()
+    .and_then(|name| name.to_str())
+    .is_some_and(valid_build_id)
+    || executable.file_name() != Some(binary_names()[0].as_ref())
+  {
+    return Ok(None);
+  }
+  Ok(active(root)?.map(|installation| installation.preview))
+}
+
 /// Verify a release ZIP, install its payload, and select the generation.
 ///
 /// # Errors
@@ -392,10 +416,14 @@ fn read_current(root: &Path) -> io::Result<Option<String>> {
     Err(error) => return Err(error),
   };
   let name = read_marker(file, installed_build_name::MAX_LABEL_BYTES)?;
-  if !valid_id(&name) && !installed_build_name::valid_label(&name) {
+  if !valid_build_id(&name) {
     return Err(invalid("invalid ctream installation selection"));
   }
   Ok(Some(name))
+}
+
+fn valid_build_id(name: &str) -> bool {
+  valid_id(name) || installed_build_name::valid_label(name)
 }
 
 fn installed_content_id(path: &Path, build_id: &str) -> io::Result<String> {

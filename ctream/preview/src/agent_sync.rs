@@ -1,11 +1,11 @@
 use crate::workspace_hosts::{Host, Workspace};
-use ctl_bundle::ctream::{AgentTarget as Target, MAX_AGENT_BYTES};
+use ctl_bundle::ctream::{AgentTarget as Target, MAX_AGENT_BYTES, active_managed_preview};
 use ctream_client::transport::{ChildProcess, SshCommand};
 use ctream_proto::{CAPTURE_CATALOG_VERSION, CaptureDriverDescriptor, CaptureSystem};
 use sha2::{Digest, Sha256};
 use std::{
   cmp::Reverse,
-  fmt::Write as _,
+  fmt::{self, Write as _},
   fs::{self, File},
   io::{self, IsTerminal, Read, Write},
   path::{Path, PathBuf},
@@ -231,29 +231,65 @@ fn artifacts(executable: &Path, target: Target) -> io::Result<(PathBuf, Vec<Arti
     });
   }
   for root in roots {
-    if let Some(agent) = Artifact::read(&root, target.agent())? {
-      let mut files = vec![agent];
-      for name in target.companions() {
-        if let Some(file) = Artifact::read(&root, name)? {
-          files.push(file);
-        }
-      }
-      return Ok((root.join(target.agent()), files));
+    if let Some(artifacts) = artifacts_in(&root, target)? {
+      return Ok(artifacts);
     }
   }
-  let dev_target = if target.is_windows() && !cfg!(windows) {
-    "x86_64-pc-windows-gnu"
-  } else {
-    target.triple()
+  // A development install can activate a new build while setup still runs
+  // from the previous generation. Look up the current selection on each try.
+  if let Some(active) = active_managed_preview(executable)?
+    && active != executable
+    && let Some(parent) = active.parent()
+    && let Some(artifacts) = artifacts_in(&target.directory(parent), target)?
+  {
+    return Ok(artifacts);
+  }
+  Err(missing_agent_error(target))
+}
+
+fn artifacts_in(root: &Path, target: Target) -> io::Result<Option<(PathBuf, Vec<Artifact>)>> {
+  let Some(agent) = Artifact::read(root, target.agent())? else {
+    return Ok(None);
   };
-  Err(io::Error::new(
-    io::ErrorKind::NotFound,
-    format!(
-      "No agent build for {}. For a development install, run ctlup dev --ctream --agent-target {dev_target}. The bundle should contain {} beside ctream-preview.",
+  let mut files = vec![agent];
+  for name in target.companions() {
+    if let Some(file) = Artifact::read(root, name)? {
+      files.push(file);
+    }
+  }
+  Ok(Some((root.join(target.agent()), files)))
+}
+
+#[derive(Debug)]
+struct MissingAgent(Target);
+
+impl fmt::Display for MissingAgent {
+  fn fmt(&self, message: &mut fmt::Formatter<'_>) -> fmt::Result {
+    let target = self.0;
+    let dev_target = if target.is_windows() && !cfg!(windows) {
+      "x86_64-pc-windows-gnu"
+    } else {
+      target.triple()
+    };
+    write!(
+      message,
+      "No agent build for {}. For a development install, run ctlup dev --ctream --agent-target {dev_target}, then click Refresh. The bundle should contain {} beside ctream-preview.",
       target.triple(),
       target.relative_path(target.agent()),
-    ),
-  ))
+    )
+  }
+}
+
+impl std::error::Error for MissingAgent {}
+
+pub(super) fn missing_agent_error(target: Target) -> io::Error {
+  io::Error::new(io::ErrorKind::NotFound, MissingAgent(target))
+}
+
+pub(super) fn is_missing_agent(error: &io::Error) -> bool {
+  error
+    .get_ref()
+    .is_some_and(|error| error.is::<MissingAgent>())
 }
 
 fn catalog_error(agent: &Path, error: io::Error) -> io::Error {
@@ -657,6 +693,67 @@ mod tests {
     fs::create_dir_all(packaged.parent().unwrap()).unwrap();
     fs::write(&packaged, b"same revision bundle").unwrap();
     assert_eq!(artifacts(&preview, Target::WindowsX64).unwrap().0, packaged);
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn managed_preview_rechecks_the_active_build_for_a_missing_agent() {
+    use ctl_bundle::ctream::{
+      BuildMetadata, install_development, native_target, viewer_executables,
+    };
+    use std::collections::BTreeMap;
+
+    let scratch = Scratch::new();
+    let root = scratch.0.join(".tokn/ctl/ctlup/store/ctream");
+    let mut inputs: BTreeMap<_, _> = viewer_executables(native_target().unwrap())
+      .into_iter()
+      .map(|name| {
+        let path = scratch.0.join(name);
+        fs::write(&path, name).unwrap();
+        (name.to_owned(), path)
+      })
+      .collect();
+    let build = BuildMetadata {
+      version: None,
+      revision: None,
+      built_at: None,
+      channel: "local".into(),
+    };
+    let target = Target::LinuxX64;
+    let original = install_development(&root, &inputs, &build).unwrap();
+    let error = artifacts(&original.preview, target).err().unwrap();
+    assert!(is_missing_agent(&error));
+
+    let agent = scratch.0.join(target.agent());
+    let helper = scratch.0.join("ctream-wayland-input");
+    fs::write(&agent, b"new agent").unwrap();
+    fs::write(&helper, b"matching helper").unwrap();
+    inputs.insert(target.relative_path(target.agent()), agent.clone());
+    inputs.insert(target.relative_path("ctream-wayland-input"), helper);
+    let current = install_development(&root, &inputs, &build).unwrap();
+
+    let (path, files) = artifacts(&original.preview, target).unwrap();
+    assert_eq!(
+      path,
+      target.directory(&current.directory).join(target.agent())
+    );
+    assert_eq!(&*files[0].bytes, b"new agent");
+    assert_eq!(&*files[1].bytes, b"matching helper");
+    assert!(
+      !target
+        .directory(&original.directory)
+        .join(target.agent())
+        .exists()
+    );
+
+    fs::write(agent, b"another build").unwrap();
+    install_development(&root, &inputs, &build).unwrap();
+    // A viewer with its own agent keeps using that agent.
+    let (path, _) = artifacts(&current.preview, target).unwrap();
+    assert_eq!(
+      path,
+      target.directory(&current.directory).join(target.agent())
+    );
   }
 
   #[test]

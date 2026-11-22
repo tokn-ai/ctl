@@ -11,7 +11,9 @@ pub use build::BuildMetadata;
 #[cfg(all(feature = "install", any(unix, windows)))]
 mod install;
 #[cfg(all(feature = "install", any(unix, windows)))]
-pub use install::{Installation, active, install, install_development, root_for_account};
+pub use install::{
+  Installation, active, active_managed_preview, install, install_development, root_for_account,
+};
 
 /// Directory containing the bundled agents beside a ctream viewer.
 pub const AGENT_DIRECTORY: &str = "ctream-agents";

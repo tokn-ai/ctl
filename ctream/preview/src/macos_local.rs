@@ -354,6 +354,7 @@ impl Viewer {
           text: self.input_error.as_deref().unwrap_or("Control enabled"),
           error: self.input_error.is_some(),
           driver: Some(DRIVER),
+          debug: None,
         },
       );
       if controls.close {

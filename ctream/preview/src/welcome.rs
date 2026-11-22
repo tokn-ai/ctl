@@ -3,7 +3,7 @@ use super::{
   CaptureEnd, Preview, PreviewMode, background, chrome, drivers, input, latency,
   requests::{Requests, Scoped, Traffic},
   semantic, setup,
-  stats::Stats,
+  stats::{CaptureDetails, Connection, Stats},
   view,
 };
 use ctream_client::{Client, transport::Transport};
@@ -164,6 +164,7 @@ fn window_sources<T: Transport>(
 /// Request generations isolate stale queries; Start retains the preview stream.
 pub(super) struct Viewer<T: Transport> {
   transport: Arc<T>,
+  connection: Option<Connection>,
   displays: Vec<DisplaySession>,
   discovery: Pending<Vec<DisplaySession>>,
   discovery_requests: Option<Requests>,
@@ -213,6 +214,7 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
     let window_mode = window_mode || window.is_some() || selected.is_some_and(Target::window_only);
     let mut viewer = Self {
       transport: Arc::new(transport),
+      connection: None,
       displays: Vec::new(),
       discovery: None,
       discovery_requests: None,
@@ -251,6 +253,11 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
     };
     viewer.discover(ctx);
     viewer
+  }
+
+  pub(super) fn with_connection(mut self, connection: Connection) -> Self {
+    self.connection = Some(connection);
+    self
   }
 
   fn discard_preview(&mut self) {
@@ -678,15 +685,10 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
       .window_mode
       .then(|| self.selected_window().cloned())
       .flatten();
+    self.update_stats(ctx);
     let session = client.session(target, window);
     self.viewing = true;
     self.viewer_opening = true;
-    self.stats = self.show_stats.then(|| {
-      Stats::new(
-        self.traffic.clone(),
-        latency::Latency::start(Arc::clone(&self.transport), ctx),
-      )
-    });
     if session.supports_input() {
       let control = session.clone();
       self.control = Some(background(ctx, move || control.input()));
@@ -696,6 +698,28 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
     }
     self.control_requests = Some(requests);
     ctx.request_repaint_of(egui::ViewportId::ROOT);
+  }
+
+  fn update_stats(&mut self, ctx: &egui::Context) {
+    self.stats = if self.show_stats
+      && let Some((preview, target)) = self.preview.as_ref().zip(self.selected)
+    {
+      let window = self.selected_window().filter(|_| self.window_mode);
+      Some(Stats::new(
+        self.traffic.clone(),
+        latency::Latency::start(Arc::clone(&self.transport), ctx),
+        CaptureDetails {
+          connection: self.connection.clone(),
+          target: target.to_string(),
+          window: window.map(|window| setup::window_name(&window.title, &window.app_id).to_owned()),
+          driver: preview.driver.clone(),
+          format: preview.format,
+        },
+        preview.frame_counts(),
+      ))
+    } else {
+      None
+    };
   }
 
   fn close_viewer(&mut self, ctx: &egui::Context) {
@@ -974,11 +998,17 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
         text: error.unwrap_or(status),
         error: error.is_some(),
         driver: preview.map(|preview| preview.driver.as_deref().unwrap_or("agent default")),
+        debug: Some(self.show_stats),
       },
     );
     if chrome.close {
       self.close_viewer(ctx);
       return;
+    }
+    if chrome.toggle_debug {
+      self.show_stats = !self.show_stats;
+      self.update_stats(ctx);
+      ctx.request_repaint();
     }
     let frame_size = self
       .preview
@@ -1004,13 +1034,26 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
           ui,
           self.preview_error.as_deref(),
           elements,
-          PreviewMode::Viewer {
-            interactive: self.control.is_none(),
-            pointer_regions: &chrome.pointer_regions,
-          },
+          PreviewMode::Viewer,
         );
-        if let (Some(image), Some(frame_size), Some(stats)) = (image, frame_size, &mut self.stats) {
-          stats.paint(ui.painter(), image, preview.frames, frame_size);
+        let (diagnostics_open, diagnostics_link) = match (&image, frame_size, &mut self.stats) {
+          (Some(image), Some(frame_size), Some(stats)) => stats.show(
+            ui,
+            view::rect(image.viewport()),
+            preview.frame_counts(),
+            frame_size,
+          ),
+          _ => (false, egui::Rect::NOTHING),
+        };
+        if self.control.is_none() {
+          let [title, resize] = chrome.pointer_regions;
+          preview.forward_input(
+            ctx,
+            image.as_ref().filter(|_| {
+              self.preview_error.is_none() && !diagnostics_open && !chrome.toggle_debug
+            }),
+            &[title, resize, diagnostics_link],
+          );
         }
         if !chrome.resizing
           && let Some(size) = preview.image_size()

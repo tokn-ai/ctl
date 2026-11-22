@@ -136,9 +136,18 @@ impl Preview {
   }
 
   fn open(&mut self, name: String, connection: Connection, ctx: &egui::Context) {
+    let diagnostics = match &connection {
+      #[cfg(not(target_os = "macos"))]
+      Connection::Local(_) => super::stats::Connection::Local,
+      Connection::Remote(_) => super::stats::Connection::Ssh(name.clone()),
+    };
     self.connected = Some((
       name,
-      Connected::Agent(Box::new(self.source.clone().viewer(connection, ctx))),
+      Connected::Agent(Box::new(self.source.clone().viewer(
+        connection,
+        diagnostics,
+        ctx,
+      ))),
     ));
   }
 

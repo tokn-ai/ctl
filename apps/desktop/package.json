@@ -11,28 +11,28 @@
     "tauri": "tauri"
   },
   "dependencies": {
-    "@tauri-apps/api": "^2.12.3",
+    "@tauri-apps/api": "^2.12.5",
     "@xterm/addon-fit": "0.11.0",
     "@xterm/addon-web-links": "0.12.0",
     "@xterm/xterm": "6.0.0",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
-    "react-intl": "^12.1.7",
+    "react-intl": "^12.2.0",
     "react-markdown": "^10.1.0"
   },
   "devDependencies": {
-    "@formatjs/cli": "^6.19.0",
-    "@tauri-apps/cli": "^2",
+    "@formatjs/cli": "^6.20.0",
+    "@tauri-apps/cli": "^2.12.6",
     "@testing-library/react": "^16.3.3",
-    "@testing-library/user-event": "^14.6.7",
-    "@types/node": "^24.13.6",
+    "@testing-library/user-event": "^14.6.13",
+    "@types/node": "^24.19.2",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
-    "@vitejs/plugin-react": "^4.6.0",
+    "@vitejs/plugin-react": "^6.3.0",
     "@xterm/headless": "6.0.0",
-    "jsdom": "^30.0.1",
-    "typescript": "~5.8.3",
-    "vite": "^7.0.4",
-    "vitest": "4.1.11"
+    "jsdom": "^31.0.1",
+    "typescript": "~7.0.2",
+    "vite": "^8.3.8",
+    "vitest": "5.1.1"
   }
 }

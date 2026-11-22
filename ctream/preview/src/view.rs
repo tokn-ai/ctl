@@ -1,6 +1,23 @@
 use ctream_client::geometry::{ImageGeometry, Point, Rect, ViewportSpace};
 use eframe::egui;
-use std::time::Duration;
+use std::{
+  sync::mpsc::{self, SyncSender},
+  thread,
+  time::Duration,
+};
+
+/// Capture can keep running while egui holds its context lock. A single
+/// pending wake is enough because the viewer consumes only the latest frame.
+pub(super) fn capture_repaint(ctx: &egui::Context) -> SyncSender<()> {
+  let (wake, pending) = mpsc::sync_channel(1);
+  let ctx = ctx.clone();
+  thread::spawn(move || {
+    while pending.recv().is_ok() {
+      ctx.request_repaint_of(egui::ViewportId::ROOT);
+    }
+  });
+  wake
+}
 
 fn viewport(area: egui::Rect) -> Option<Rect<ViewportSpace>> {
   Rect::new(

@@ -53,6 +53,10 @@ impl CaptureDisplay for Session {
       &format!("scale={w}:{h}"),
       "-pix_fmt",
       "rgb24",
+      // Keep each captured frame once. The rawvideo muxer's default sync
+      // can synthesize duplicates at a higher rate than x11grab.
+      "-vsync",
+      "passthrough",
       "-f",
       "rawvideo",
       "pipe:1",

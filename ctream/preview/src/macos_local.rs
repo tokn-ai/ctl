@@ -98,9 +98,10 @@ impl Viewer {
   fn choose(&mut self, ctx: &egui::Context, window_index: Option<usize>) {
     self.clear_capture();
     let update = Arc::clone(&self.update);
-    let ctx = ctx.clone();
+    let repaint = view::capture_repaint(ctx);
     let callback = move |event| {
       let mut update = update.lock().unwrap();
+      let frame_pending = update.frame.is_some();
       match event {
         Event::Frame { size, pixels } => {
           update.frame = Some(Frame { size, pixels });
@@ -109,8 +110,11 @@ impl Viewer {
         Event::Finished => update.end = Some(End::Finished),
         Event::Failed(error) => update.end = Some(End::Failed(error)),
       }
+      let wake = !frame_pending || update.end.is_some();
       drop(update);
-      ctx.request_repaint_of(egui::ViewportId::ROOT);
+      if wake {
+        let _ = repaint.try_send(());
+      }
     };
     let window = window_index.map(|index| &self.windows[index]);
     let result = if let Some(window) = window {

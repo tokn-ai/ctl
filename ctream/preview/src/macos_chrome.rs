@@ -1,4 +1,4 @@
-use super::chrome::{BUTTON_STRIP_WIDTH, CONTROLS_TITLE, VIEWER_TITLE};
+use super::chrome::{CONTROLS_TITLE, VIEWER_TITLE};
 use block2::RcBlock;
 use eframe::egui;
 use objc2::{MainThreadMarker, rc::Retained, runtime::AnyObject};
@@ -102,11 +102,16 @@ impl ViewerWindow {
     Some(self.panel_frame(height)?.size.width)
   }
 
-  pub(super) fn attach_controls(&self, height: f32, ctx: &egui::Context) -> Option<AttachedPanel> {
+  pub(super) fn attach_controls(
+    &self,
+    height: f32,
+    button_strip_width: f32,
+    ctx: &egui::Context,
+  ) -> Option<AttachedPanel> {
     let frame = self.panel_frame(height)?;
     let panel = own_window(&self.application, CONTROLS_TITLE)?;
     let drag = Rc::new(Cell::new(None));
-    let monitor = monitor_drag(&self.window, &panel, &drag, ctx)?;
+    let monitor = monitor_drag(&self.window, &panel, &drag, button_strip_width, ctx)?;
     panel.setFrame_display(frame, false);
     panel.setHasShadow(false);
     panel.setExcludedFromWindowsMenu(true);
@@ -149,6 +154,7 @@ fn monitor_drag(
   viewer: &Retained<NSWindow>,
   panel: &Retained<NSWindow>,
   drag: &Rc<Cell<Option<Drag>>>,
+  button_strip_width: f32,
   ctx: &egui::Context,
 ) -> Option<Retained<AnyObject>> {
   let mtm = MainThreadMarker::new()?;
@@ -173,7 +179,7 @@ fn monitor_drag(
           || !drag_hit(
             location,
             panel_frame.size,
-            BUTTON_STRIP_WIDTH * ctx.zoom_factor(),
+            button_strip_width * ctx.zoom_factor(),
           )
         {
           return event.as_ptr();
@@ -357,9 +363,13 @@ mod tests {
   #[test]
   fn native_drag_area_excludes_the_window_buttons() {
     let size = NSSize::new(400.0, 34.0);
-    assert!(drag_hit(NSPoint::new(279.0, 17.0), size, 120.0));
-    assert!(!drag_hit(NSPoint::new(280.0, 17.0), size, 120.0));
-    assert!(!drag_hit(NSPoint::new(300.0, 17.0), size, 120.0));
+    for width in [120.0_f32, 172.0] {
+      let buttons_left = size.width - f64::from(width);
+      let hits_title = |x| drag_hit(NSPoint::new(x, 17.0), size, width);
+      assert!(hits_title(buttons_left - 1.0));
+      assert!(!hits_title(buttons_left));
+      assert!(!hits_title(buttons_left + 20.0));
+    }
   }
 
   #[test]

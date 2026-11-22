@@ -1,6 +1,7 @@
 use ctream_client::{
   Session,
-  media::{CaptureLifetime, Frame},
+  geometry::ImageGeometry,
+  media::{CaptureLifetime, Frame, FrameFormat},
   options::ConnectionOptions,
   transport::Transport,
 };
@@ -42,6 +43,15 @@ struct Stream {
   frame: Option<Frame>,
   spare: Frame,
   end: Option<CaptureEnd>,
+  received: u64,
+  superseded: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct FrameCounts {
+  pub received: u64,
+  pub superseded: u64,
+  pub uploaded: u64,
 }
 
 #[derive(Clone)]
@@ -58,14 +68,12 @@ struct Preview<T: Transport> {
   texture: Option<egui::TextureHandle>,
   frames: u64,
   driver: Option<String>,
+  format: FrameFormat,
 }
 
-enum PreviewMode<'a> {
+enum PreviewMode {
   Setup,
-  Viewer {
-    interactive: bool,
-    pointer_regions: &'a [egui::Rect],
-  },
+  Viewer,
 }
 
 impl<T: Transport> Preview<T> {
@@ -76,6 +84,7 @@ impl<T: Transport> Preview<T> {
       session.capture()?
     };
     let driver = capture.driver().map(str::to_owned);
+    let format = capture.format();
     let (mut source, lifetime) = capture.split();
     let stream = Arc::new(Mutex::new(Stream::default()));
     let reader = Arc::clone(&stream);
@@ -87,6 +96,8 @@ impl<T: Transport> Preview<T> {
           Ok(true) => {
             let mut stream = reader.lock().unwrap();
             let previous = stream.frame.replace(frame);
+            stream.received += 1;
+            stream.superseded += u64::from(previous.is_some());
             let wake = previous.is_none();
             frame = previous.unwrap_or_else(|| std::mem::take(&mut stream.spare));
             drop(stream);
@@ -113,7 +124,17 @@ impl<T: Transport> Preview<T> {
       texture: None,
       frames: 0,
       driver,
+      format,
     })
+  }
+
+  fn frame_counts(&self) -> FrameCounts {
+    let stream = self.stream.lock().unwrap();
+    FrameCounts {
+      received: stream.received,
+      superseded: stream.superseded,
+      uploaded: self.frames,
+    }
   }
 
   fn update_texture(&mut self, ctx: &egui::Context) -> Option<CaptureEnd> {
@@ -166,56 +187,47 @@ impl<T: Transport> Preview<T> {
   }
 
   fn show(
-    &mut self,
+    &self,
     ui: &mut egui::Ui,
     error: Option<&str>,
     elements: &[Element],
-    mode: PreviewMode<'_>,
-  ) -> Option<egui::Rect> {
-    let ctx = ui.ctx().clone();
-    let (interactive, pointer_regions) = match mode {
-      PreviewMode::Setup => {
-        if let Some(error) = error {
-          ui.label(error);
-        } else if self.texture.is_none() {
-          ui.spinner();
-          ui.label("Waiting for the first frame…");
-        }
-        (false, &[][..])
+    mode: PreviewMode,
+  ) -> Option<ImageGeometry> {
+    if matches!(mode, PreviewMode::Setup) {
+      if let Some(error) = error {
+        ui.label(error);
+      } else if self.texture.is_none() {
+        ui.spinner();
+        ui.label("Waiting for the first frame…");
       }
-      PreviewMode::Viewer {
-        interactive,
-        pointer_regions,
-      } => (interactive, pointer_regions),
-    };
-    if let (Some(texture), Some(size)) = (&self.texture, self.image_size()) {
-      let area = ui.available_rect_before_wrap();
-      let image = match mode {
-        PreviewMode::Setup => view::fit(area, size),
-        // Fill the video canvas while the OS applies the aspect correction or
-        // gives the window a fixed size. Keep the full frame and input mapping.
-        PreviewMode::Viewer { .. } => view::fill(area, size),
-      };
-      if interactive
-        && let Some(input) = &mut self.input
-        && let Err(err) = input.update(
-          &ctx,
-          image.as_ref().filter(|_| error.is_none()),
-          pointer_regions,
-        )
-      {
-        self.input = None;
-        self.input_error = Some(format!("Input disconnected ({err})"));
-      }
-      return image.map(|image| {
-        let rect = view::paint(ui, texture, area, &image);
-        if error.is_none() {
-          overlay::paint(ui.painter(), &image, elements);
-        }
-        rect
-      });
     }
-    None
+    let (texture, size) = (self.texture.as_ref()?, self.image_size()?);
+    let area = ui.available_rect_before_wrap();
+    let image = match mode {
+      PreviewMode::Setup => view::fit(area, size),
+      // Fill the canvas while the OS applies the aspect correction. Keep
+      // the full frame and its corresponding input mapping.
+      PreviewMode::Viewer => view::fill(area, size),
+    }?;
+    view::paint(ui, texture, area, &image);
+    if error.is_none() {
+      overlay::paint(ui.painter(), &image, elements);
+    }
+    Some(image)
+  }
+
+  fn forward_input(
+    &mut self,
+    ctx: &egui::Context,
+    image: Option<&ImageGeometry>,
+    pointer_regions: &[egui::Rect],
+  ) {
+    if let Some(input) = &mut self.input
+      && let Err(error) = input.update(ctx, image, pointer_regions)
+    {
+      self.input = None;
+      self.input_error = Some(format!("Input disconnected ({error})"));
+    }
   }
 }
 
@@ -286,6 +298,7 @@ impl SourceOptions {
   fn viewer<T: Transport + Send + Sync + 'static>(
     self,
     transport: T,
+    connection: stats::Connection,
     ctx: &egui::Context,
   ) -> welcome::Viewer<T> {
     welcome::Viewer::new(
@@ -296,6 +309,7 @@ impl SourceOptions {
       self.driver,
       ctx,
     )
+    .with_connection(connection)
   }
 }
 
@@ -430,14 +444,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
       let transport = connection.local()?;
       run(
         "ctream · local",
-        Box::new(move |cc| Ok(Box::new(source.viewer(transport, &cc.egui_ctx)))),
+        Box::new(move |cc| {
+          Ok(Box::new(source.viewer(
+            transport,
+            stats::Connection::Local,
+            &cc.egui_ctx,
+          )))
+        }),
       )
     }
     Endpoint::Ssh(host) => {
       let transport = connection.ssh(&host)?;
       run(
         &format!("ctream · {host}"),
-        Box::new(move |cc| Ok(Box::new(source.viewer(transport, &cc.egui_ctx)))),
+        Box::new(move |cc| {
+          Ok(Box::new(source.viewer(
+            transport,
+            stats::Connection::Ssh(host),
+            &cc.egui_ctx,
+          )))
+        }),
       )
     }
   }

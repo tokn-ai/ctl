@@ -3,7 +3,10 @@ use ctream_client::{
   input::Input as RemoteInput,
 };
 use eframe::egui::{self, Event, Key, Modifiers, Pos2, Vec2};
-use std::io::{self, Read, Write};
+use std::{
+  collections::BTreeSet,
+  io::{self, Read, Write},
+};
 
 pub(super) trait Sink {
   fn dimensions(&self) -> Option<[u32; 2]> {
@@ -44,6 +47,7 @@ pub(super) struct Input<S: Sink> {
   modifiers: Modifiers,
   pointer: Option<Pos2>,
   buttons: [bool; egui::NUM_POINTER_BUTTONS],
+  keys: BTreeSet<Key>,
   scroll: Vec2,
 }
 
@@ -95,6 +99,7 @@ impl<S: Sink> Input<S> {
       modifiers: Modifiers::NONE,
       pointer: None,
       buttons: [false; egui::NUM_POINTER_BUTTONS],
+      keys: BTreeSet::new(),
       scroll: Vec2::ZERO,
     }
   }
@@ -151,6 +156,7 @@ impl<S: Sink> Input<S> {
     self.modifiers = Modifiers::NONE;
     self.pointer = None;
     self.buttons.fill(false);
+    self.keys.clear();
     self.scroll = Vec2::ZERO;
     self.control.reset()
   }
@@ -256,9 +262,18 @@ impl<S: Sink> Input<S> {
           modifiers,
         } => {
           self.sync_modifiers(modifiers)?;
-          self
-            .control
-            .key(&keysym(physical_key.unwrap_or(key)), pressed)?;
+          let key = physical_key.unwrap_or(key);
+          // Local controls can consume a press, or a reset can release it
+          // before its physical key-up arrives.
+          let forward = if pressed {
+            self.keys.insert(key);
+            true
+          } else {
+            self.keys.remove(&key)
+          };
+          if forward {
+            self.control.key(&keysym(key), pressed)?;
+          }
         }
         Event::Copy | Event::Cut | Event::Paste(_) => {
           self.sync_modifiers(modifiers)?;

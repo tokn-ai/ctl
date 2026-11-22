@@ -4,7 +4,8 @@ use std::time::Duration;
 pub(super) const REVEAL_HEIGHT: f32 = 8.0;
 pub(super) const BAR_HEIGHT: f32 = 34.0;
 pub(super) const BUTTON_WIDTH: f32 = 40.0;
-pub(super) const BUTTON_STRIP_WIDTH: f32 = 3.0 * BUTTON_WIDTH;
+const BUTTON_STRIP_WIDTH: f32 = 3.0 * BUTTON_WIDTH;
+const DEBUG_BUTTON_WIDTH: f32 = 52.0;
 pub(super) const VIEWER_TITLE: &str = "ctream viewer";
 #[cfg(any(target_os = "macos", test))]
 pub(super) const CONTROLS_TITLE: &str = "ctream viewer controls";
@@ -17,22 +18,42 @@ pub(super) struct Status<'a> {
   pub text: &'a str,
   pub error: bool,
   pub driver: Option<&'a str>,
+  pub debug: Option<bool>,
+}
+
+impl Status<'_> {
+  fn button_strip_width(self) -> f32 {
+    BUTTON_STRIP_WIDTH
+      + if self.debug.is_some() {
+        DEBUG_BUTTON_WIDTH
+      } else {
+        0.0
+      }
+  }
 }
 
 pub(super) struct Frame {
   pub pointer_regions: [Rect; 2],
   pub close: bool,
+  pub toggle_debug: bool,
   pub resizing: bool,
 }
 
 impl Frame {
   #[cfg(any(target_os = "macos", test))]
-  fn attached(close: bool) -> Self {
+  fn attached() -> Self {
     Self {
       pointer_regions: [Rect::NOTHING; 2],
-      close,
+      close: false,
+      toggle_debug: false,
       resizing: false,
     }
+  }
+
+  fn apply(mut self, ctx: &egui::Context, action: Option<Action>) -> Self {
+    self.close = action.is_some_and(|action| action.apply(ctx));
+    self.toggle_debug = matches!(action, Some(Action::ToggleDebug));
+    self
   }
 }
 
@@ -121,7 +142,7 @@ impl Chrome {
       let action = hovered
         .then(|| show_controls(&ctx, status, true, Some(ctx.content_rect().width())))
         .flatten();
-      return Frame::attached(action.is_some_and(|action| action.apply(&ctx)));
+      return Frame::attached().apply(&ctx, action);
     }
     #[cfg(target_os = "macos")]
     {
@@ -139,17 +160,21 @@ impl Chrome {
     self.update(&ctx, window, hovered);
     let reveal = Rect::from_min_size(window.min, egui::vec2(window.width(), REVEAL_HEIGHT));
     let bar = Rect::from_min_size(window.min, egui::vec2(window.width(), BAR_HEIGHT));
+    let action = self
+      .shown
+      .then(|| title_bar(ui, bar, status, maximized(&ctx), true))
+      .flatten();
 
     Frame {
       pointer_regions: [
         if self.shown { bar } else { reveal },
         resize_grip(&ctx, window, hovered),
       ],
-      close: self.shown
-        && title_bar(ui, bar, status, maximized(&ctx), true)
-          .is_some_and(|action| action.apply(&ctx)),
+      close: false,
+      toggle_debug: false,
       resizing: self.resize.is_some(),
     }
+    .apply(&ctx, action)
   }
 
   pub fn dismiss(&mut self) {
@@ -164,7 +189,7 @@ impl Chrome {
     let reveal = REVEAL_HEIGHT * ctx.zoom_factor();
     if !viewer.active() {
       self.dismiss();
-      return Some(Frame::attached(false));
+      return Some(Frame::attached());
     }
     let initial_width = if let Some(panel) = &self.attached {
       // AppKit moves the child with its parent. Keep the same attachment even
@@ -172,7 +197,7 @@ impl Chrome {
       if !panel.dragging() {
         if !panel.hovering(reveal) {
           self.dismiss();
-          return Some(Frame::attached(false));
+          return Some(Frame::attached());
         }
         if !panel.place(height) {
           return None;
@@ -191,17 +216,17 @@ impl Chrome {
             .is_some_and(|pos| top.contains(pos))
       });
       if !enter {
-        return Some(Frame::attached(false));
+        return Some(Frame::attached());
       }
       Some(width as f32 / ctx.zoom_factor())
     };
 
     let action = show_controls(ctx, status, false, initial_width);
     if self.attached.is_none() {
-      self.attached = Some(viewer.attach_controls(height, ctx)?);
+      self.attached = Some(viewer.attach_controls(height, status.button_strip_width(), ctx)?);
     }
-    let close = action.is_some_and(|action| action.apply(ctx));
-    if close || matches!(action, Some(Action::Minimize)) {
+    let frame = Frame::attached().apply(ctx, action);
+    if frame.close || matches!(action, Some(Action::Minimize)) {
       self.dismiss();
     } else {
       if action.is_some()
@@ -212,7 +237,7 @@ impl Chrome {
       // Leaving both native windows may produce no further pointer events.
       ctx.request_repaint_after_for(Duration::from_millis(33), egui::ViewportId::ROOT);
     }
-    Some(Frame::attached(close))
+    Some(frame)
   }
 }
 
@@ -238,6 +263,7 @@ enum Action {
   Drag,
   Minimize,
   Maximize(bool),
+  ToggleDebug,
   Close,
 }
 
@@ -247,6 +273,7 @@ impl Action {
       Self::Drag => ViewportCommand::StartDrag,
       Self::Minimize => ViewportCommand::Minimized(true),
       Self::Maximize(maximized) => ViewportCommand::Maximized(maximized),
+      Self::ToggleDebug => return false,
       Self::Close => return true,
     };
     ctx.send_viewport_cmd(command);
@@ -302,7 +329,7 @@ fn title_bar(
   maximized: bool,
   draggable: bool,
 ) -> Option<Action> {
-  let buttons_left = bounds.right() - BUTTON_STRIP_WIDTH;
+  let buttons_left = bounds.right() - status.button_strip_width();
   let title = Rect::from_min_max(bounds.min, egui::pos2(buttons_left, bounds.bottom()));
   let dragging = draggable && primary_press_in(ui.ctx(), title);
   egui::Panel::top("ctream_title_bar")
@@ -335,10 +362,29 @@ fn title_bar(
         return Some(Action::Maximize(!maximized));
       }
       if control(ui, bounds, 0, "×", "Close viewer") {
-        Some(Action::Close)
-      } else {
-        dragging.then_some(Action::Drag)
+        return Some(Action::Close);
       }
+      if let Some(enabled) = status.debug {
+        let debug = ui
+          .put(
+            button_slot(
+              bounds,
+              bounds.right() - BUTTON_STRIP_WIDTH,
+              DEBUG_BUTTON_WIDTH,
+            ),
+            egui::Button::new("Debug").selected(enabled),
+          )
+          .on_hover_text(if enabled {
+            "Hide debug overlay"
+          } else {
+            "Show debug overlay"
+          });
+        if debug.clicked() {
+          debug.surrender_focus();
+          return Some(Action::ToggleDebug);
+        }
+      }
+      dragging.then_some(Action::Drag)
     })
     .inner
 }
@@ -361,14 +407,18 @@ fn show_status(ui: &mut egui::Ui, status: Status<'_>) {
   }
 }
 
+fn button_slot(bounds: Rect, right: f32, width: f32) -> Rect {
+  Rect::from_min_size(
+    egui::pos2(right - width, bounds.top()),
+    egui::vec2(width, BAR_HEIGHT),
+  )
+  .shrink2(egui::vec2(2.0, 3.0))
+}
+
 fn control(ui: &mut egui::Ui, bounds: Rect, index: u8, icon: &str, label: &str) -> bool {
   let right = bounds.right() - f32::from(index) * BUTTON_WIDTH;
-  let slot = Rect::from_min_size(
-    egui::pos2(right - BUTTON_WIDTH, bounds.top()),
-    egui::vec2(BUTTON_WIDTH, BAR_HEIGHT),
-  );
   ui.put(
-    slot.shrink2(egui::vec2(2.0, 3.0)),
+    button_slot(bounds, right, BUTTON_WIDTH),
     egui::Button::new(egui::RichText::new(icon).size(17.0)),
   )
   .on_hover_text(label)

@@ -57,6 +57,10 @@ impl<R: Read, W: Write> Capture<R, W> {
     self.driver.as_deref()
   }
 
+  pub fn format(&self) -> FrameFormat {
+    self.frames.format
+  }
+
   /// Keep the handshake reader for frames: its buffer may already contain the
   /// first image. Failed negotiation closes stdin before requesting cancellation.
   pub(crate) fn started(channel: Channel<R, W>, requested: &str) -> io::Result<Self> {

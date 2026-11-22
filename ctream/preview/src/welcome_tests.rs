@@ -953,6 +953,211 @@ fn debug_overlay_reports_stream_pixels_and_leaves_video_input_active() {
 }
 
 #[test]
+fn expanded_diagnostics_copy_and_collapse_without_forwarding_input() {
+  let mock = Mock::default();
+  let ctx = egui::Context::default();
+  let mut viewer = create(&mock, &ctx, false, "auto");
+  poll_until(&mut viewer, &ctx, ready);
+  viewer.show_stats = true;
+  viewer.start(&ctx);
+  poll_until(&mut viewer, &ctx, |viewer| {
+    viewer.preview.as_ref().unwrap().input.is_some()
+  });
+  let remote = mock.inputs().pop().unwrap();
+  let capture = mock.captures().pop().unwrap();
+  let texture = viewer
+    .preview
+    .as_ref()
+    .unwrap()
+    .texture
+    .as_ref()
+    .unwrap()
+    .id();
+  let frame_at_size = |viewer: &mut Viewer<Mock>, size, events| {
+    native_frame(viewer, &ctx, raw(Vec::new()), viewer_input(size, events))
+  };
+  let frame =
+    |viewer: &mut Viewer<Mock>, events| frame_at_size(viewer, egui::vec2(640.0, 400.0), events);
+  let click = |viewer: &mut Viewer<Mock>, at| {
+    frame(
+      viewer,
+      vec![egui::Event::PointerMoved(at), primary_button(at, true)],
+    );
+    frame(viewer, vec![primary_button(at, false)])
+  };
+  let floating_panel = |frame: &NativeFrame| {
+    let video = rendered_image(frame.child(), texture);
+    let panel = frame
+      .child()
+      .shapes
+      .iter()
+      .find_map(|shape| match &shape.shape {
+        egui::epaint::Shape::Rect(rect)
+          if rect.fill == egui::Color32::from_rgba_unmultiplied(12, 17, 25, 234) =>
+        {
+          Some(rect.rect)
+        }
+        _ => None,
+      })
+      .expect("the expanded diagnostics background must be drawn");
+    assert!(video.contains_rect(panel));
+    assert!(panel.left() - video.left() < video.right() - panel.right());
+    assert!(video.bottom() - panel.bottom() < panel.top() - video.top());
+    for label in ["Copy", "Collapse"] {
+      assert!(panel.contains(label_center(frame.child(), label)));
+    }
+    panel
+  };
+
+  let initial = frame(&mut viewer, Vec::new());
+  let video_point = rendered_image(initial.child(), texture).center();
+  let held = frame(&mut viewer, interactions(video_point, true));
+  let before_expand = remote.sent();
+  assert!(before_expand.contains("key F8 1\n"));
+  let expand = label_center(held.child(), "[expand]");
+  click(&mut viewer, expand);
+  let expanded = frame(&mut viewer, Vec::new());
+  label_center(expanded.child(), "Diagnostics");
+  let expanded_panel = floating_panel(&expanded);
+  let wide_size = egui::vec2(1200.0, 700.0);
+  frame_at_size(&mut viewer, wide_size, Vec::new());
+  let wide = frame_at_size(&mut viewer, wide_size, Vec::new());
+  let wide_panel = floating_panel(&wide);
+  assert_eq!(
+    rendered_image(wide.child(), texture),
+    egui::Rect::from_min_size(egui::Pos2::ZERO, wide_size)
+  );
+  let details = label_center(wide.child(), "Capture driver");
+  let charts = label_center(wide.child(), "Download");
+  assert!(charts.x > details.x && (charts.y - details.y).abs() < 8.0);
+  assert!(
+    wide_panel.height() < 420.0,
+    "the wide panel should fit its contents below the height limit: {wide_panel:?}"
+  );
+  let chart_bottom = wide
+    .child()
+    .shapes
+    .iter()
+    .filter_map(|shape| match &shape.shape {
+      egui::epaint::Shape::Rect(rect) if rect.fill == egui::Color32::from_black_alpha(52) => {
+        Some(rect.rect.bottom())
+      }
+      _ => None,
+    })
+    .max_by(f32::total_cmp)
+    .expect("diagnostics charts must be drawn");
+  assert!(
+    (0.0..24.0).contains(&(wide_panel.bottom() - chart_bottom)),
+    "the wide panel should leave only padding below its charts"
+  );
+
+  let narrow_size = egui::vec2(320.0, 200.0);
+  frame_at_size(&mut viewer, narrow_size, Vec::new());
+  let resized = frame_at_size(&mut viewer, narrow_size, Vec::new());
+  let resized_panel = floating_panel(&resized);
+  assert!(resized_panel.width() < expanded_panel.width());
+  assert!(resized_panel.height() < expanded_panel.height());
+  let detail = label_center(resized.child(), "Capture driver");
+  assert!(resized_panel.contains(detail));
+  let pointer = resized_panel.center();
+  frame_at_size(
+    &mut viewer,
+    narrow_size,
+    vec![egui::Event::PointerMoved(pointer)],
+  );
+  frame_at_size(
+    &mut viewer,
+    narrow_size,
+    vec![egui::Event::MouseWheel {
+      unit: egui::MouseWheelUnit::Point,
+      delta: egui::vec2(0.0, -70.0),
+      modifiers: egui::Modifiers::NONE,
+      phase: egui::TouchPhase::Move,
+      source: egui::MouseWheelSource::Wheel,
+    }],
+  );
+  let scrolled = frame_at_size(&mut viewer, narrow_size, Vec::new());
+  assert_eq!(floating_panel(&scrolled), resized_panel);
+  assert!(
+    !scrolled.child().shapes.iter().any(|shape| {
+      matches!(&shape.shape, egui::epaint::Shape::Text(text)
+        if text.galley.text() == "Capture driver"
+          && text.pos.y + text.galley.rect.center().y >= detail.y)
+    }),
+    "diagnostics body should scroll inside the panel"
+  );
+  assert_eq!(&remote.sent()[before_expand.len()..], "reset\n");
+
+  frame(&mut viewer, interactions(video_point, false));
+  capture.push_frame_bytes(b"P6\n3 2\n255\nabcdefghijklmnopqr");
+  poll_until(&mut viewer, &ctx, |viewer| {
+    viewer.preview.as_ref().unwrap().image_size() == Some([3, 2])
+  });
+  let local = frame(&mut viewer, Vec::new());
+  let copy = label_center(local.child(), "Copy");
+  let copied = click(&mut viewer, copy);
+  let copied_text = copied
+    .child()
+    .platform_output
+    .commands
+    .iter()
+    .find_map(|command| match command {
+      egui::OutputCommand::CopyText(text) => Some(text),
+      _ => None,
+    })
+    .expect("Copy must export the diagnostics through the viewer");
+  assert!(copied_text.contains("Capture driver: windows.dxgi"));
+  assert!(copied_text.contains("Resolution: 3 × 2 px"));
+  for label in [
+    "Frame format:",
+    "Frames received:",
+    "Preview frames:",
+    "Superseded frames:",
+    "Payload received:",
+    "Payload sent:",
+    "Download:",
+    "Upload:",
+    "Latency:",
+    "Preview FPS:",
+  ] {
+    assert!(copied_text.contains(label), "diagnostics omitted {label}");
+  }
+
+  let collapse = label_center(copied.child(), "Collapse");
+  click(&mut viewer, collapse);
+  let compact = frame(&mut viewer, Vec::new());
+  let expand = label_center(compact.child(), "[expand]");
+  assert_eq!(&remote.sent()[before_expand.len()..], "reset\n");
+
+  click(&mut viewer, expand);
+  let expanded = frame(&mut viewer, Vec::new());
+  label_center(expanded.child(), "Diagnostics");
+  let key = |key, pressed| egui::Event::Key {
+    key,
+    physical_key: Some(key),
+    pressed,
+    repeat: false,
+    modifiers: egui::Modifiers::NONE,
+  };
+  let before_escape = remote.sent();
+  frame(
+    &mut viewer,
+    vec![key(egui::Key::F9, true), key(egui::Key::Escape, true)],
+  );
+  let escaped = frame(
+    &mut viewer,
+    vec![key(egui::Key::Escape, false), key(egui::Key::F9, false)],
+  );
+  label_center(escaped.child(), "[expand]");
+  assert_eq!(remote.sent(), before_escape);
+
+  frame(&mut viewer, interactions(video_point, false));
+  assert!(remote.sent()[before_escape.len()..].contains("button 1 1\n"));
+  assert!(!remote.closed() && !capture.closed());
+  assert_eq!(mock.captures().len(), 1);
+}
+
+#[test]
 fn viewer_controls_reveal_in_a_separate_row_and_keep_the_video_size() {
   let mock = Mock::default();
   let ctx = egui::Context::default();
@@ -1093,6 +1298,111 @@ fn primary_button(pos: egui::Pos2, pressed: bool) -> egui::Event {
     button: egui::PointerButton::Primary,
     pressed,
     modifiers: egui::Modifiers::NONE,
+  }
+}
+
+#[test]
+fn title_bar_debug_button_toggles_the_live_overlay_without_forwarding_clicks() {
+  for attached in [false, true] {
+    let mock = Mock::default();
+    let ctx = egui::Context::default();
+    let mut viewer = create(&mock, &ctx, false, "auto");
+    poll_until(&mut viewer, &ctx, ready);
+    viewer.start(&ctx);
+    poll_until(&mut viewer, &ctx, |viewer| {
+      viewer.preview.as_ref().unwrap().input.is_some()
+    });
+    let capture = mock.captures().pop().unwrap();
+    let remote = mock.inputs().pop().unwrap();
+    let controls = crate::chrome::controls_id();
+    native_frame(&mut viewer, &ctx, raw(Vec::new()), raw(Vec::new()));
+
+    let frame = |viewer: &mut Viewer<Mock>, title_events| {
+      let size = egui::vec2(640.0, 400.0);
+      let (video_events, panel_events) = if attached {
+        viewer.chrome.test_attached_hover = Some(true);
+        (Vec::new(), title_events)
+      } else {
+        (title_events, Vec::new())
+      };
+      let mut video = viewer_input(size, video_events);
+      // Exercise the in-window bar without waiting for the compositor resize.
+      video.viewports.entry(viewer_id()).or_default().maximized = Some(true);
+      let panel = viewer_input(egui::vec2(size.x, crate::chrome::BAR_HEIGHT), panel_events);
+      native_frame_with_inputs(
+        viewer,
+        &ctx,
+        raw(Vec::new()),
+        [(viewer_id(), video), (controls, panel)],
+      )
+    };
+    let has_overlay = |frame: &NativeFrame| {
+      frame.child().shapes.iter().any(|shape| {
+        matches!(&shape.shape, egui::epaint::Shape::Text(text)
+          if text.galley.text().starts_with("Download"))
+      })
+    };
+
+    let reveal = egui::pos2(100.0, crate::chrome::REVEAL_HEIGHT * 0.5);
+    let initial = frame(&mut viewer, vec![egui::Event::PointerMoved(reveal)]);
+    let toolbar = initial
+      .viewport(if attached { controls } else { viewer_id() })
+      .expect("the title bar must be rendered");
+    let debug = label_center(toolbar, "Debug");
+    assert!(!has_overlay(&initial));
+    assert!(viewer.stats.is_none());
+    let before = remote.sent().len();
+
+    for enabled in [true, false] {
+      frame(&mut viewer, vec![egui::Event::PointerMoved(debug)]);
+      let pressed = frame(&mut viewer, vec![primary_button(debug, true)]);
+      assert!(
+        !pressed
+          .commands(viewer_id())
+          .any(|command| *command == egui::ViewportCommand::StartDrag)
+      );
+      frame(&mut viewer, vec![primary_button(debug, false)]);
+      let updated = frame(&mut viewer, Vec::new());
+      assert_eq!(has_overlay(&updated), enabled);
+      assert_eq!(viewer.stats.is_some(), enabled);
+      assert!(viewer.viewing);
+    }
+
+    if !attached {
+      let key_event = |key, pressed| egui::Event::Key {
+        key,
+        physical_key: Some(key),
+        pressed,
+        repeat: false,
+        modifiers: egui::Modifiers::NONE,
+      };
+      for (key, enabled) in [(egui::Key::Enter, true), (egui::Key::Space, false)] {
+        // Focus the fourth title-bar button without clicking it.
+        for _ in 0..4 {
+          frame(
+            &mut viewer,
+            vec![
+              key_event(egui::Key::Tab, true),
+              key_event(egui::Key::Tab, false),
+            ],
+          );
+        }
+        let before_key = remote.sent().len();
+        frame(&mut viewer, vec![key_event(key, true)]);
+        let updated = frame(&mut viewer, vec![key_event(key, false)]);
+        assert_eq!(has_overlay(&updated), enabled);
+        assert!(
+          !remote.sent()[before_key..].contains("key "),
+          "the Debug button must keep its activation keys local"
+        );
+      }
+    }
+
+    assert!(!remote.sent()[before..].contains("button "));
+    assert!(!remote.closed() && !remote.cancelled());
+    assert!(!capture.closed() && !capture.cancelled());
+    assert_eq!(mock.inputs().len(), 1);
+    assert_eq!(mock.captures().len(), 1);
   }
 }
 

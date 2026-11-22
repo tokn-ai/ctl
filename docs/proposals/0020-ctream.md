@@ -198,14 +198,20 @@ the native resize edges on macOS or the bottom-right resize grip on Linux and
 Windows. The inspector keeps its own panel. The compositor can constrain
 window sizes, especially when maximized or fullscreen.
 
-In agent-backed setup, enable **Debug overlay** before selecting **Start** to show
-diagnostics in the viewer. Download and upload measure ctream application
+In an agent-backed viewer, hover at the top edge and select **Debug** in the
+title bar to toggle diagnostics. The **Debug overlay** checkbox in setup can
+enable it before **Start**. Download and upload measure ctream application
 bytes per second, before SSH compression and framing. Latency is round-trip
 time to the agent over a dedicated channel on the same transport. Agents older
 than `ctream_agent` 1.0.10 show `N/A` for latency. FPS counts fresh frames the
 viewer submits for rendering. After a long gap between paints, the overlay
 waits for a fresh sample. **Frame** shows the received capture dimensions in
-pixels.
+pixels. Select **[expand]** to open a floating panel over the lower-left corner
+of the video. It fits its capture and connection details, frame counts, and
+recent graphs for traffic, latency, and preview FPS, with scrolling when
+space is limited. Superseded frames were replaced by newer frames before
+upload. **Copy** copies the current readings. The expanded panel pauses
+remote input while it is open.
 
 Both windows use the same egui context and wgpu renderer. The native viewer is
 an immediate child viewport, so its events and repaint requests run through

@@ -622,7 +622,7 @@ mod tests {
       let info = serde_json::json!({
         "schema_version": 1, "app_version": "0.1.0", "bundle_id": format!("0.1.0-dev.{}", "a".repeat(12)),
         "git_revision": "a".repeat(40), "target_triple": target, "binary": binary,
-        "sha256": format!("{:x}", Sha256::digest(script.as_bytes())), "size": script.len(),
+        "sha256": hex::encode(Sha256::digest(script.as_bytes())), "size": script.len(),
       });
       std::fs::write(
         provided.join(format!("ctlup-{target}.json")),

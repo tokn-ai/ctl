@@ -296,7 +296,7 @@ impl BundleSet {
         "remote component archive exceeds its size limit".into(),
       ));
     }
-    let actual = format!("{:x}", Sha256::digest(archive));
+    let actual = hex::encode(Sha256::digest(archive));
     if !actual.eq_ignore_ascii_case(&entry.sha256) {
       return Err(Error::Invalid(
         "remote component archive failed checksum verification".into(),

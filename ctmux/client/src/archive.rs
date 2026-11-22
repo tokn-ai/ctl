@@ -66,10 +66,10 @@ impl ArchiveStore {
     }
     archive.archived_at_ms = now_ms();
     archive.expires_at_ms = 0;
-    let key = format!(
-      "{:x}",
-      Sha256::digest(format!("{}\0{}", archive.host_key, archive.session_id))
-    );
+    let key = hex::encode(Sha256::digest(format!(
+      "{}\0{}",
+      archive.host_key, archive.session_id
+    )));
     let path = self.directory.join(format!("{key}.json"));
     if let Ok(file) = fs::File::open(&path)
       && let Ok(previous) = serde_json::from_reader::<_, SessionArchive>(file)
@@ -115,7 +115,7 @@ impl ArchiveStore {
   /// # Errors
   /// Returns a filesystem error.
   pub fn delete(&self, host_key: &str, session_id: &str) -> io::Result<()> {
-    let key = format!("{:x}", Sha256::digest(format!("{host_key}\0{session_id}")));
+    let key = hex::encode(Sha256::digest(format!("{host_key}\0{session_id}")));
     match fs::remove_file(self.directory.join(format!("{key}.json"))) {
       Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
       result => result,

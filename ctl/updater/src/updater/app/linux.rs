@@ -1,5 +1,4 @@
 use rustix::fs::{Mode, OFlags};
-use sha2::{Digest as _, Sha256};
 use std::fs::{File, Permissions};
 use std::io::{self, Read as _, Seek as _};
 use std::os::unix::fs::PermissionsExt as _;
@@ -27,11 +26,9 @@ pub(super) fn matches(installed: &Path, staged: &Path) -> io::Result<bool> {
   }
   installed.rewind()?;
   staged.rewind()?;
-  let mut expected = Sha256::new();
-  let mut actual = Sha256::new();
-  let expected_size = io::copy(&mut staged.take(size + 1), &mut expected)?;
-  let actual_size = io::copy(&mut installed.take(size + 1), &mut actual)?;
-  Ok(expected_size == size && actual_size == size && actual.finalize() == expected.finalize())
+  let (expected_size, expected) = ctl_core::bundles::sha256_reader(staged.take(size + 1))?;
+  let (actual_size, actual) = ctl_core::bundles::sha256_reader(installed.take(size + 1))?;
+  Ok(expected_size == size && actual_size == size && actual == expected)
 }
 
 fn open_image(path: &Path) -> io::Result<File> {

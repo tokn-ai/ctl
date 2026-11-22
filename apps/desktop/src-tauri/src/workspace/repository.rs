@@ -391,5 +391,5 @@ fn io_error(error: io::Error) -> CommandErrorDto {
 /// Content revisions detect external edits that leave the stored token intact.
 pub(super) fn content_revision(value: &impl serde::Serialize) -> CommandResult<String> {
   let bytes = serde_json::to_vec(value).map_err(CommandErrorDto::backend)?;
-  Ok(format!("sha256:{:x}", Sha256::digest(bytes)))
+  Ok(format!("sha256:{}", hex::encode(Sha256::digest(bytes))))
 }

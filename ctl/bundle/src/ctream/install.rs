@@ -59,7 +59,7 @@ pub fn active(root: &Path) -> io::Result<Option<Installation>> {
 pub fn install(root: &Path, archive: &Path) -> io::Result<Installation> {
   let target = native_target()?;
   let bytes = archive_bytes(archive)?;
-  let id = format!("{:x}", Sha256::digest(&bytes));
+  let id = hex::encode(Sha256::digest(&bytes));
   let mut bundle = zip::ZipArchive::new(Cursor::new(bytes)).map_err(invalid)?;
 
   let store = Store::open(root)?;
@@ -218,7 +218,7 @@ impl DevelopmentReceipt {
       hash.update(digest.as_bytes());
       hash.update([0]);
     }
-    format!("{:x}", hash.finalize())
+    hex::encode(hash.finalize())
   }
 
   fn read(path: &Path, id: &str) -> io::Result<Option<Self>> {
@@ -475,7 +475,7 @@ fn snapshot_file(source: &Path, destination: &Path, remaining: u64) -> io::Resul
   }
   private_fs::set_executable(&output)?;
   output.sync_all()?;
-  Ok((size, format!("{:x}", hash.finalize())))
+  Ok((size, hex::encode(hash.finalize())))
 }
 
 fn extract(

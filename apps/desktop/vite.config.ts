@@ -1,7 +1,7 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
-import { refreshInstalledDependencies } from "./dev/installed-dependencies";
-import { chooseDesktopDevPort } from "./dev/server-options";
+import { refreshInstalledDependencies } from "./dev/installed-dependencies.ts";
+import { chooseDesktopDevPort } from "./dev/server-options.ts";
 
 const host = process.env.TAURI_DEV_HOST;
 const dynamicPort = process.env.CTL_DESKTOP_DYNAMIC_PORT === "1";
@@ -9,6 +9,10 @@ const dynamicPort = process.env.CTL_DESKTOP_DYNAMIC_PORT === "1";
 // https://vite.dev/config/
 export default defineConfig(async () => ({
   plugins: [react(), refreshInstalledDependencies()],
+  build: {
+    // Preserve the WebView targets supported by the Vite 7 build.
+    target: ["chrome107", "edge107", "firefox104", "safari16.0"],
+  },
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //

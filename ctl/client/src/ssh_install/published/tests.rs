@@ -156,7 +156,7 @@ cat "$HOME/managed-manifest"
       let helper = helper();
       let args: [&str; 9] = [
         &helper.len().to_string(),
-        &format!("{:x}", Sha256::digest(&helper)),
+        &hex::encode(Sha256::digest(&helper)),
         URL,
         "abcd",
         ARCHIVE,
@@ -285,7 +285,7 @@ cat "$HOME/managed-manifest"
     assert!(phases.contains(&Stage::UploadingUpdaterBytes { sent: total, total }));
     assert!(!host.0.join("curl-args").exists());
     assert_eq!(fs::read(host.0.join("received")).unwrap(), MANIFEST);
-    let hash = format!("{:x}", Sha256::digest(&helper));
+    let hash = hex::encode(Sha256::digest(&helper));
     let managed = host
       .0
       .join(".tokn/ctl/ctlup/store/updater")
@@ -329,7 +329,7 @@ cat "$HOME/managed-manifest"
 
     let host = Host::new();
     let helper = helper();
-    let hash = format!("{:x}", Sha256::digest(&helper));
+    let hash = hex::encode(Sha256::digest(&helper));
     let bin = host.0.join(".tokn/ctl/bin");
     fs::create_dir_all(&bin).unwrap();
     let launcher = bin.join(".ctl-launcher");
@@ -489,7 +489,7 @@ async fn windows_openssh_streams_each_cached_publication_artifact() {
     }
     let args: [&str; 9] = [
       &updater.bytes.len().to_string(),
-      &format!("{:x}", Sha256::digest(&updater.bytes)),
+      &hex::encode(Sha256::digest(&updater.bytes)),
       &format!("{base}{}", updater.info.binary),
       &origin,
       &format!("{base}{archive_name}"),

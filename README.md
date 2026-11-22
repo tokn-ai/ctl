@@ -128,7 +128,8 @@ standard installation unless that account configures its own environment.
 
 ## Repository commands
 
-Use Node 24 or newer and the pinned pnpm version from `package.json`.
+Use Node 24 LTS (24.15 or later) or Node 26 or newer. Use the pnpm version
+pinned in `package.json`.
 Run `pnpm install` at the repository root. The pnpm workspace includes
 `apps/desktop` and uses one root lockfile; repository scripts are checked and
 run from the root. The desktop package keeps the standard Tauri/Vite scripts

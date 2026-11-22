@@ -76,7 +76,7 @@ fn insert(
   hash.update(observation.host_id.as_deref().unwrap_or("").as_bytes());
   hash.update([0]);
   hash.update(serde_json::to_vec(&running).expect("version metadata serializes"));
-  let id = format!("remote:{component}:{:x}", hash.finalize());
+  let id = format!("remote:{component}:{}", hex::encode(hash.finalize()));
   rows.entry(id.clone()).or_insert_with(|| {
     let restart_supported = component == "ctmuxd"
       && observation.remote_platform == ctl_client::RemotePlatform::Unix

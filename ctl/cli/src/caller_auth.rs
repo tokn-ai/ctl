@@ -8,12 +8,65 @@ use ctl_client::{
 use std::{io, sync::Arc};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
-pub fn claim(arguments: &mut Arguments) -> io::Result<()> {
+pub(super) fn claim_at_startup(arguments: &mut Arguments) -> io::Result<()> {
   validate(arguments)?;
   if let Some(fd) = arguments.password_fd {
-    arguments.password_input = Some(channel::claim(fd)?);
+    arguments.password_input = Some(claim_password_fd(fd)?);
   }
   Ok(())
+}
+
+#[cfg(unix)]
+fn claim_password_fd(fd: std::os::fd::RawFd) -> io::Result<std::fs::File> {
+  use filedescriptor::{Error, FileDescriptor};
+  use nix::fcntl::{FcntlArg, FdFlag, OFlag, fcntl};
+  use std::{os::fd::AsRawFd, os::unix::fs::FileTypeExt as _};
+
+  struct StartupDescriptor(std::os::fd::RawFd);
+  impl AsRawFd for StartupDescriptor {
+    fn as_raw_fd(&self) -> std::os::fd::RawFd {
+      self.0
+    }
+  }
+
+  if fd < 3 {
+    return Err(channel::invalid("Password descriptors must be at least 3"));
+  }
+  // Only CLI startup owns this handoff. No threads or subprocesses can run
+  // between duplicating the password descriptor and closing the original.
+  let duplicate = FileDescriptor::dup(&StartupDescriptor(fd));
+  if let Err(Error::Dup { source, .. }) = &duplicate
+    && source.raw_os_error() == Some(nix::errno::Errno::EBADF as i32)
+  {
+    return Err(channel::invalid("Password descriptor is not open"));
+  }
+  nix::unistd::close(fd)
+    .map_err(|_| channel::invalid("Could not close the password descriptor"))?;
+  let file = duplicate
+    .map_err(|_| channel::invalid("Could not duplicate the password descriptor"))?
+    .as_file()
+    .map_err(|_| channel::invalid("Could not open the password descriptor"))?;
+  let kind = file.metadata()?.file_type();
+  if !kind.is_fifo() && !kind.is_socket() {
+    return Err(channel::invalid(
+      "Password descriptor must be a pipe or socket, not a credential file",
+    ));
+  }
+  let flags = fcntl(&file, FcntlArg::F_GETFL).map_err(io::Error::from)?;
+  fcntl(
+    &file,
+    FcntlArg::F_SETFL(OFlag::from_bits_truncate(flags) | OFlag::O_NONBLOCK),
+  )
+  .map_err(io::Error::from)?;
+  fcntl(&file, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC)).map_err(io::Error::from)?;
+  Ok(file)
+}
+
+#[cfg(not(unix))]
+fn claim_password_fd(_fd: i32) -> io::Result<std::fs::File> {
+  Err(channel::invalid(
+    "--password-fd is Unix-only; use --password-pipe on Windows",
+  ))
 }
 
 pub struct CallerAuth {

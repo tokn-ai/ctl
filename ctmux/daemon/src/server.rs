@@ -3533,7 +3533,7 @@ mod tests {
     assert!(pinned.complete());
     assert_eq!(data.len() as u64, pinned.manifest.total_bytes);
     assert_eq!(
-      format!("{:x}", Sha256::digest(&data)),
+      hex::encode(Sha256::digest(&data)),
       pinned.manifest.content_hash
     );
     let decoded: Vec<TerminalHistoryRow> = data

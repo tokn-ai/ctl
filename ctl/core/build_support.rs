@@ -90,7 +90,7 @@ fn fingerprint(root: &Path, files: &mut [PathBuf], packaged: bool) -> String {
     hash.update(u64::try_from(contents.len()).unwrap().to_le_bytes());
     hash.update(contents.as_bytes());
   }
-  format!("{:x}", hash.finalize())
+  hex::encode(hash.finalize())
 }
 
 fn package_provenance(manifest_dir: &Path) -> (Option<String>, bool) {

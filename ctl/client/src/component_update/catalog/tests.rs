@@ -40,7 +40,7 @@ fn prepared(home: &Home, target: &str, revision: char, publication: &str) -> Pre
     git_revision: revision,
     target_triple: target.into(),
     binary: format!("ctlup-{distribution}-{target}"),
-    sha256: format!("{:x}", Sha256::digest(&bytes)),
+    sha256: hex::encode(Sha256::digest(&bytes)),
     size: bytes.len() as u64,
   };
   let source = BuildSource::Provided {

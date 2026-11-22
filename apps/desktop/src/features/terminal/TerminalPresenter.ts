@@ -149,7 +149,7 @@ export class TerminalPresenter {
       this.checkpointSequence = this.sequence;
       this.snapshotId = generation === this.generation ? snapshot_id : null;
       const recent = recentHistory(historyLines);
-      const chunks = [reset];
+      const chunks: Uint8Array[] = [reset];
       if (recent.length) {
         chunks.push(encoder.encode(`${recent.map(literalRow).join("\r\n")}\r\n${"\r\n".repeat(Math.max(0, terminalSize.rows - 1))}`));
       }

@@ -1,6 +1,5 @@
 use super::{Result, Screen, TestDaemon, screen::Capture};
 use filedescriptor::{AsRawFileDescriptor, FileDescriptor, RawFileDescriptor};
-use nix::fcntl::{FcntlArg, OFlag, fcntl};
 use portable_pty::{Child, CommandBuilder, ExitStatus, MasterPty, PtySize, native_pty_system};
 use std::{
   io::{self, Read, Write},
@@ -91,18 +90,16 @@ impl Tui {
     let pair = native_pty_system().openpty(pty_size(columns, rows))?;
     // The reader must be interruptible: leaving a cloned master open would
     // prevent disconnect() from actually revoking the child's host terminal.
-    let fd = pair
+    // portable-pty's take_writer sends newline + EOF on drop. A plain duplicate
+    // must only close, otherwise disconnect could send input to the remote shell.
+    pair
       .master
       .as_raw_fd()
       .ok_or("PTY has no native descriptor")?;
-    let flags = OFlag::from_bits_truncate(fcntl(fd, FcntlArg::F_GETFL)?);
-    fcntl(fd, FcntlArg::F_SETFL(flags | OFlag::O_NONBLOCK))?;
+    let mut writer = FileDescriptor::dup(&MasterDescriptor(pair.master.as_ref()))?;
+    writer.set_non_blocking(true)?;
     let reader = pair.master.try_clone_reader()?;
-    // portable-pty's take_writer sends newline + EOF on drop. A plain duplicate
-    // must only close, otherwise disconnect could send input to the remote shell.
-    let writer = Box::new(FileDescriptor::dup(&MasterDescriptor(
-      pair.master.as_ref(),
-    ))?);
+    let writer = Box::new(writer);
     let child = pair.slave.spawn_command(command)?;
     drop(pair.slave);
     let capture = Arc::new(Mutex::new(Capture::new(columns, rows)));

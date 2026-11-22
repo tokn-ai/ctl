@@ -14,7 +14,7 @@ publish = ["crates-io"]
 exclude = ["tests/forced_command.rs"]
 
 [features]
-cli = ["dep:clap", "dep:comfy-table", "dep:filedescriptor", "dep:nix", "dep:rpassword"]
+cli = ["dep:clap", "dep:comfy-table", "dep:rpassword"]
 
 [dependencies]
 base64.workspace = true
@@ -26,6 +26,7 @@ dirs.workspace = true
 glob.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+hex.workspace = true
 sha2.workspace = true
 uuid.workspace = true
 ctl-proto.workspace = true
@@ -39,9 +40,9 @@ thiserror.workspace = true
 time.workspace = true
 tokio.workspace = true
 zeroize.workspace = true
-reqwest = { version = "0.13.4", default-features = false, features = ["native-tls", "system-proxy"] }
+reqwest = { version = "0.13.5", default-features = false, features = ["native-tls", "system-proxy"] }
 
-flate2 = "1.1.9"
+flate2 = "1.1.11"
 tar = { version = "0.4.46", default-features = false }
 
 [dev-dependencies]
@@ -51,16 +52,14 @@ unicode-width.workspace = true
 
 [target.'cfg(all(target_os = "linux", target_env = "musl"))'.dependencies]
 # Portable remote clients link OpenSSL for the target and load the account's system CA store at runtime.
-reqwest = { version = "0.13.4", default-features = false, features = ["native-tls-vendored"] }
+reqwest = { version = "0.13.5", default-features = false, features = ["native-tls-vendored"] }
 
 [target.'cfg(unix)'.dependencies]
-filedescriptor = { version = "0.8.3", optional = true }
-nix = { workspace = true, optional = true }
 rpassword = { workspace = true, optional = true }
 rustix.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-process-wrap = { version = "10.0.0", default-features = false, features = ["tokio1", "job-object", "kill-on-drop"] }
+process-wrap = { version = "10.0.1", default-features = false, features = ["tokio1", "job-object", "kill-on-drop"] }
 
 [lints]
 workspace = true

@@ -20,6 +20,7 @@ rusqlite = { workspace = true, optional = true }
 semver = { version = "1", optional = true }
 serde.workspace = true
 serde_json = { workspace = true, optional = true }
+hex = { workspace = true, optional = true }
 sha2 = { workspace = true, optional = true }
 time = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
@@ -30,20 +31,22 @@ rustix = { workspace = true, optional = true }
 
 [features]
 presence = ["dep:uuid", "dep:rustix", "dep:serde_json", "rustix/system"]
-development = ["dep:sha2"]
+development = ["dep:hex", "dep:sha2"]
 ctld-bundle-build = ["development", "dep:serde_json", "dep:rustix"]
-observability = ["dep:time", "dep:rusqlite", "dep:serde_json", "dep:sha2", "dep:uuid", "uuid/serde", "dep:rustix"]
+observability = ["dep:time", "dep:rusqlite", "dep:serde_json", "dep:hex", "dep:sha2", "dep:uuid", "uuid/serde", "dep:rustix"]
 test-fixtures = ["dep:tokio", "dep:uuid"]
-executable = ["dep:serde_json", "dep:sha2", "dep:tokio", "bundles"]
-bundles = ["dep:semver", "dep:serde_json", "dep:sha2", "dep:uuid", "dep:rustix", "dep:time"]
+executable = ["dep:serde_json", "dep:hex", "dep:sha2", "dep:tokio", "bundles"]
+bundles = ["dep:semver", "dep:serde_json", "dep:hex", "dep:sha2", "dep:uuid", "dep:rustix", "dep:time"]
 
 [build-dependencies]
+hex.workspace = true
 sha2.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true
 uuid.workspace = true
+hex.workspace = true
 sha2.workspace = true
 serde_json.workspace = true
 

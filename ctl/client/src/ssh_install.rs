@@ -92,10 +92,7 @@ fn agent_script(archive: &[u8], companions: Option<&std::path::Path>) -> Result<
       .replace("__BUNDLE_TARGET__", &source.source_bundle.target_triple)
       .replace("__STORE_ID__", &source.source_bundle.bundle_id)
       .replace("__ARCHIVE_BYTES__", &archive.len().to_string())
-      .replace(
-        "__ARCHIVE_SHA256__",
-        &format!("{:x}", Sha256::digest(archive)),
-      )
+      .replace("__ARCHIVE_SHA256__", &hex::encode(Sha256::digest(archive)))
       .replace("__COMPANION_DIRECTORY__", &quoted),
   )
 }
@@ -301,10 +298,7 @@ fn updater_bootstrap_script(updater: &[u8], check_only: bool) -> Result<String, 
       .replace("__CHECK_ONLY__", if check_only { "yes" } else { "no" })
       .replace("__TOKEN__", &uuid::Uuid::new_v4().to_string())
       .replace("__UPDATER_BYTES__", &updater.len().to_string())
-      .replace(
-        "__UPDATER_SHA256__",
-        &format!("{:x}", Sha256::digest(updater)),
-      ),
+      .replace("__UPDATER_SHA256__", &hex::encode(Sha256::digest(updater))),
   )
 }
 
@@ -508,7 +502,7 @@ fn installation_script(bundle_id: &str, archive: &[u8]) -> Result<(String, Layou
     if expected != bundle_id {
       return Err(CoreError::InvalidAgentBundleId(bundle_id.into()));
     }
-    let digest = format!("{:x}", Sha256::digest(archive));
+    let digest = hex::encode(Sha256::digest(archive));
     let layout = Layout::managed(manifest.schema_version).expect("validated managed schema");
     let script = build_install_script(
       bundle_id,

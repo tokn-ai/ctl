@@ -462,7 +462,7 @@ async fn exact_publication_cache_avoids_archive_redownload_but_not_fresh_discove
     );
   }
   let cached = root
-    .join(format!("{:x}", Sha256::digest(&first.manifest)))
+    .join(hex::encode(Sha256::digest(&first.manifest)))
     .join(target)
     .join(&first.file_name);
   std::fs::write(cached, b"corrupt cached archive").unwrap();
@@ -531,7 +531,7 @@ fn installation_routes(
     git_revision: revision.into(),
     target_triple: target.into(),
     binary: binary.clone(),
-    sha256: format!("{:x}", Sha256::digest(&updater)),
+    sha256: hex::encode(Sha256::digest(&updater)),
     size: updater.len() as u64,
   };
   let windows_manifest = (target == WINDOWS_TARGET).then(|| fixture.bind_archive(&archive));
@@ -722,7 +722,7 @@ async fn pinned_local_cache_probes_are_independent_and_never_fetch_damaged_files
   assert!(plan.cached_runtime(&downloads).await.unwrap().is_some());
   assert!(plan.cached_updater(&updaters).await.unwrap().is_none());
   let archive = downloads
-    .join(format!("{:x}", Sha256::digest(plan.manifest_bytes())))
+    .join(hex::encode(Sha256::digest(plan.manifest_bytes())))
     .join(target)
     .join(runtime.file_name);
   std::fs::write(archive, b"damaged archive").unwrap();

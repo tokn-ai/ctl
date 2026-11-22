@@ -27,7 +27,7 @@ fn write_included(directory: &Path) {
     fixture.inner["target_triple"] = serde_json::json!(target);
     let archive = fixture.archive();
     fixture.outer["targets"][&target]["sha256"] =
-      serde_json::json!(format!("{:x}", Sha256::digest(&archive)));
+      serde_json::json!(hex::encode(Sha256::digest(&archive)));
     let name = fixture.outer["targets"][&target]["archive"]
       .as_str()
       .unwrap();

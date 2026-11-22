@@ -12,8 +12,8 @@ keywords = ["ctmux", "process", "terminal"]
 publish = ["crates-io"]
 
 [target.'cfg(target_os = "macos")'.dependencies]
-libc = "0.2.189"
-libproc = "0.14.11"
+libc = "0.2.191"
+libproc = "0.15.0"
 
 [dev-dependencies]
 portable-pty.workspace = true

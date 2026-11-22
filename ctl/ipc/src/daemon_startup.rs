@@ -274,7 +274,7 @@ fn endpoint_key(endpoint: &Path) -> io::Result<String> {
       .flat_map(u16::to_le_bytes)
       .collect::<Vec<_>>()
   };
-  Ok(format!("{:x}.lock", Sha256::digest(&endpoint)))
+  Ok(format!("{}.lock", hex::encode(Sha256::digest(&endpoint))))
 }
 
 fn prepare_directory(directory: &Path) -> io::Result<()> {

@@ -17,6 +17,8 @@ Use `ctlup ctream install` and `ctlup ctream run` for the separate ctream
 viewer. `ctlup ctream update` replaces the active selection, and
 `ctlup ctream status` shows the installed paths under
 `$CTL_DATA_DIR/ctlup/store/ctream/` (`~/.tokn/ctl/ctlup/store/ctream/` by default).
+With `--json`, `build_id` gives the directory name and `id` gives the full
+content identifier.
 Run a fresh install after upgrading from the old `ctream/installs/` layout.
 Pass `--from` with a ctream workflow ZIP for an offline install or update.
 Run `ctlup dev --ctream` from a checkout to build and activate development tools.

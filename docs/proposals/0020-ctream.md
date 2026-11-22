@@ -264,6 +264,9 @@ can be passed with `ctlup ctream run -- OPTIONS`.
 
 `ctlup` keeps the active selection and installed generations in
 `$CTL_DATA_DIR/ctlup/store/ctream/` (`~/.tokn/ctl/ctlup/store/ctream/` by default).
+Each new generation uses a readable build ID based on its source, version, and
+short revision when available. `ctlup ctream status --json` reports the
+directory name as `build_id` and the full content identifier as `id`.
 Install or build a fresh generation after upgrading from `ctream/installs/`.
 The local `$CTL_DATA_DIR/ctream/` directory is reserved for configuration.
 The viewer and its `ctream-agents` directory stay together in each generation.

@@ -1,16 +1,18 @@
 //! Assemble the official ctream viewer ZIP from CI build outputs.
 
 use ctl_bundle::ctream::{
-  AgentTarget, MAX_AGENT_BYTES, MAX_ARCHIVE_BYTES, MAX_PAYLOAD_BYTES, archive_name,
+  AgentTarget, BuildMetadata, MAX_AGENT_BYTES, MAX_ARCHIVE_BYTES, MAX_PAYLOAD_BYTES, archive_name,
   has_workflow_bundle, viewer_executables,
 };
+use serde::Deserialize;
 use std::{
   env,
   fs::{self, File},
   io::{self, Read as _},
   path::{Path, PathBuf},
-  process::ExitCode,
+  process::{Command, ExitCode},
 };
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
 
 fn main() -> ExitCode {
@@ -45,14 +47,90 @@ fn pack() -> io::Result<PathBuf> {
     })?;
   let inputs = bundle_inputs(target, Path::new(viewer_dir), Path::new(agent_artifacts));
   let name = archive_name(target);
+  let comment = build_metadata()?.archive_comment()?;
   fs::create_dir_all(output_dir)?;
   let path = Path::new(output_dir).join(format!("{name}.zip"));
   let file = File::create_new(&path)?;
-  if let Err(error) = write_archive(file, &name, &inputs) {
+  if let Err(error) = write_archive(file, &name, &inputs, comment) {
     let _ = fs::remove_file(&path);
     return Err(error);
   }
   Ok(path)
+}
+
+#[derive(Deserialize)]
+struct Workspace {
+  packages: Vec<Package>,
+}
+
+#[derive(Deserialize)]
+struct Package {
+  name: String,
+  version: String,
+}
+
+fn preview_version() -> io::Result<String> {
+  let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+  let output = Command::new(cargo)
+    .args(["metadata", "--locked", "--no-deps", "--format-version", "1"])
+    .output()?;
+  if !output.status.success() {
+    return Err(io::Error::other(
+      "could not read ctream preview metadata from Cargo",
+    ));
+  }
+  let workspace: Workspace = serde_json::from_slice(&output.stdout).map_err(io::Error::other)?;
+  workspace
+    .packages
+    .into_iter()
+    .find(|package| package.name == "ctream-preview")
+    .map(|package| package.version)
+    .ok_or_else(|| io::Error::other("Cargo workspace does not contain ctream-preview"))
+}
+
+fn build_metadata() -> io::Result<BuildMetadata> {
+  let official = env::var_os("GITHUB_ACTIONS").is_some_and(|value| value == "true");
+  let version = match preview_version() {
+    Ok(version) => Some(version),
+    Err(_) if !official => None,
+    Err(error) => return Err(error),
+  };
+  if !official {
+    return Ok(BuildMetadata {
+      version,
+      revision: None,
+      built_at: None,
+      channel: "provided".into(),
+    });
+  }
+  let event = env::var("GITHUB_EVENT_NAME").unwrap_or_default();
+  let reference = env::var("GITHUB_REF").unwrap_or_default();
+  let channel = workflow_channel(&event, &reference);
+  Ok(BuildMetadata {
+    version,
+    revision: Some(env::var("GITHUB_SHA").map_err(io::Error::other)?),
+    built_at: Some(
+      OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .map_err(io::Error::other)?,
+    ),
+    channel,
+  })
+}
+
+fn workflow_channel(event: &str, reference: &str) -> String {
+  if reference == "refs/heads/main" && matches!(event, "push" | "workflow_dispatch") {
+    return "nightly".into();
+  }
+  if event == "pull_request"
+    && let Some(reference) = reference.strip_prefix("refs/pull/")
+    && let Some((number, "merge" | "head")) = reference.split_once('/')
+    && let Ok(number) = number.parse::<u64>()
+    && number != 0
+  {
+    return format!("pr-{number}");
+  }
+  "provided".into()
 }
 
 fn bundle_inputs(
@@ -72,8 +150,14 @@ fn bundle_inputs(
   viewer_inputs.chain(agent_inputs).collect()
 }
 
-fn write_archive(file: File, name: &str, inputs: &[(String, PathBuf)]) -> io::Result<()> {
+fn write_archive(
+  file: File,
+  name: &str,
+  inputs: &[(String, PathBuf)],
+  comment: String,
+) -> io::Result<()> {
   let mut archive = ZipWriter::new(file);
+  archive.set_comment(comment)?;
   let options = SimpleFileOptions::default()
     .compression_method(CompressionMethod::Deflated)
     .unix_permissions(0o755);

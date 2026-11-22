@@ -82,8 +82,10 @@ ctlup ctream run
 ```
 
 The developer build uses the current checkout, including uncommitted changes,
-and activates it in `$CTL_DATA_DIR/ctlup/store/ctream/`. Run a fresh build after
-upgrading from the old `ctream/installs/` layout. `ctlup dev` supports
+and activates it in `$CTL_DATA_DIR/ctlup/store/ctream/<build-id>/`. The build ID
+uses the latest artifact modification time in UTC, the checkout's short
+revision, and the ctream package version. Run a fresh build after upgrading
+from the old `ctream/installs/` layout. `ctlup dev` supports
 `--workspace`, `--profile`, `--release`, `--target-dir`, and `--json`. A native
 Linux or Windows x64 build can include its local agent. On macOS, select a
 remote agent target to use the managed host flow. Repeat `--agent-target` to

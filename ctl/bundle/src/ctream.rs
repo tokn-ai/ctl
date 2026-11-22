@@ -3,6 +3,11 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
+#[cfg(feature = "build-metadata")]
+mod build;
+#[cfg(feature = "build-metadata")]
+pub use build::BuildMetadata;
+
 #[cfg(all(feature = "install", any(unix, windows)))]
 mod install;
 #[cfg(all(feature = "install", any(unix, windows)))]

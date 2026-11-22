@@ -1,13 +1,15 @@
 //! Build a preview and only the agent lanes needed by this development setup.
 
-use ctl_bundle::ctream::{AgentTarget, viewer_executables};
+use ctl_bundle::ctream::{AgentTarget, BuildMetadata, viewer_executables};
 use serde::Deserialize;
 use std::{
   collections::BTreeMap,
-  io,
+  fs, io,
   path::{Path, PathBuf},
   process::Stdio,
+  time::SystemTime,
 };
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use tokio::{
   io::{AsyncBufReadExt as _, BufReader},
   process::Command,
@@ -16,8 +18,9 @@ use tokio::{
 const LINUX_X64: &str = AgentTarget::LinuxX64.triple();
 const LINUX_ARM64: &str = AgentTarget::LinuxArm64.triple();
 const WINDOWS_X64: &str = AgentTarget::WindowsX64.triple();
-const VIEWER_PACKAGES: &[&str] = &["ctream-preview", "ctream-cli"];
-const VIEWER_EXECUTABLES: &[&str] = &["ctream-preview", "ctream"];
+const PREVIEW: &str = "ctream-preview";
+const VIEWER_PACKAGES: &[&str] = &[PREVIEW, "ctream-cli"];
+const VIEWER_EXECUTABLES: &[&str] = &[PREVIEW, "ctream"];
 const AGENT_PACKAGE: &[&str] = &["ctream-agent"];
 const WAYLAND_PACKAGES: &[&str] = &["ctream-agent", "ctream-wayland-input"];
 
@@ -123,6 +126,11 @@ fn plan(native: &str, requested: &[String]) -> io::Result<BTreeMap<&'static str,
   Ok(lanes)
 }
 
+pub(super) struct DevelopmentBuild {
+  pub(super) files: BTreeMap<String, PathBuf>,
+  pub(super) metadata: BuildMetadata,
+}
+
 pub(super) async fn build(
   workspace: &Path,
   native_target: &str,
@@ -130,8 +138,10 @@ pub(super) async fn build(
   release: bool,
   target_dir: Option<&Path>,
   requested: &[String],
-) -> io::Result<BTreeMap<String, PathBuf>> {
+) -> io::Result<DevelopmentBuild> {
   let lanes = plan(native_target, requested)?;
+  let version = preview_version(workspace).await?;
+  let revision = checkout_revision(workspace).await;
   let settings = Settings {
     workspace,
     profile,
@@ -177,7 +187,86 @@ pub(super) async fn build(
       payloads.insert(lane.bundle_target.relative_path(filename), path);
     }
   }
-  Ok(payloads)
+  Ok(DevelopmentBuild {
+    metadata: BuildMetadata {
+      version: Some(version),
+      revision,
+      built_at: newest_artifact_time(&payloads),
+      channel: "local".into(),
+    },
+    files: payloads,
+  })
+}
+
+#[derive(Deserialize)]
+struct WorkspaceMetadata {
+  packages: Vec<PackageMetadata>,
+}
+
+#[derive(Deserialize)]
+struct PackageMetadata {
+  name: String,
+  version: String,
+}
+
+async fn preview_version(workspace: &Path) -> io::Result<String> {
+  let result = Command::new("cargo")
+    .args(["metadata", "--locked", "--no-deps", "--format-version", "1"])
+    .current_dir(workspace)
+    .stdin(Stdio::null())
+    .stderr(Stdio::inherit())
+    .kill_on_drop(true)
+    .output()
+    .await?;
+  if !result.status.success() {
+    return Err(io::Error::other(format!(
+      "cargo metadata failed for the ctream checkout ({})",
+      result.status
+    )));
+  }
+  let metadata: WorkspaceMetadata =
+    serde_json::from_slice(&result.stdout).map_err(io::Error::other)?;
+  metadata
+    .packages
+    .into_iter()
+    .find(|package| package.name == PREVIEW)
+    .map(|package| package.version)
+    .ok_or_else(|| invalid("cargo metadata did not include ctream-preview"))
+}
+
+async fn checkout_revision(workspace: &Path) -> Option<String> {
+  if !workspace.join(".git").exists() {
+    return None;
+  }
+  let result = Command::new("git")
+    .args(["rev-parse", "--verify", "HEAD"])
+    .current_dir(workspace)
+    .stdin(Stdio::null())
+    .kill_on_drop(true)
+    .output()
+    .await
+    .ok()?;
+  let revision = std::str::from_utf8(&result.stdout).ok()?.trim();
+  (result.status.success()
+    && matches!(revision.len(), 40 | 64)
+    && revision.bytes().all(|byte| byte.is_ascii_hexdigit()))
+  .then(|| revision.to_owned())
+}
+
+fn newest_artifact_time(payloads: &BTreeMap<String, PathBuf>) -> Option<String> {
+  // Cargo can reuse the same artifacts across repeated installs.
+  let newest = payloads
+    .values()
+    .filter_map(|path| fs::metadata(path).ok()?.modified().ok())
+    .max()?;
+  let timestamp = newest
+    .duration_since(SystemTime::UNIX_EPOCH)
+    .ok()?
+    .as_secs();
+  OffsetDateTime::from_unix_timestamp(timestamp.try_into().ok()?)
+    .ok()?
+    .format(&Rfc3339)
+    .ok()
 }
 
 struct Settings<'a> {

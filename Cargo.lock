@@ -961,9 +961,11 @@ dependencies = [
 name = "ctl-bundle"
 version = "0.1.4"
 dependencies = [
+ "semver",
  "serde",
  "serde_json",
  "sha2",
+ "time",
  "tokn-ctl-core",
  "uuid",
  "zip",
@@ -1245,6 +1247,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tar",
+ "time",
  "tokio",
  "tokn-ctl-core",
  "uuid",

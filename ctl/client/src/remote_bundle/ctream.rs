@@ -1,7 +1,7 @@
 //! Fetch the independent ctream tool bundle from the official workflow.
 
 use super::github::{Github, download_artifact};
-use ctl_bundle::ctream::{archive_name, has_workflow_bundle};
+use ctl_bundle::ctream::{BuildMetadata, archive_name, has_workflow_bundle};
 use serde::Deserialize;
 use std::{
   io,
@@ -12,8 +12,17 @@ const WORKFLOW_FILE: &str = "ctream-preview.yml";
 const WORKFLOW_PATH: &str = ".github/workflows/ctream-preview.yml";
 const REPOSITORY: &str = "tokn-ai/ctl";
 
-#[derive(Deserialize, PartialEq, Eq)]
+#[derive(Deserialize)]
 struct WorkflowRun {
+  #[serde(flatten)]
+  identity: WorkflowRunIdentity,
+  created_at: Option<String>,
+  run_started_at: Option<String>,
+  pull_requests: Option<Vec<PullRequest>>,
+}
+
+#[derive(Deserialize, PartialEq, Eq)]
+struct WorkflowRunIdentity {
   id: u64,
   run_attempt: u64,
   path: String,
@@ -24,6 +33,11 @@ struct WorkflowRun {
   head_sha: String,
   repository: Repository,
   head_repository: Option<Repository>,
+}
+
+#[derive(Deserialize)]
+struct PullRequest {
+  number: u64,
 }
 
 #[derive(Deserialize, PartialEq, Eq)]
@@ -37,7 +51,15 @@ struct Runs {
   workflow_runs: Vec<WorkflowRun>,
 }
 
-impl WorkflowRun {
+/// A downloaded ctream ZIP and the official workflow's build provenance.
+pub struct DownloadedBundle {
+  /// Path to the ZIP in the caller's staging directory.
+  pub archive: PathBuf,
+  /// Provenance for archives created before the packer embedded it.
+  pub build: BuildMetadata,
+}
+
+impl WorkflowRunIdentity {
   fn eligible(&self, requested: Option<u64>) -> bool {
     self.id != 0
       && self.run_attempt != 0
@@ -56,6 +78,25 @@ impl WorkflowRun {
   }
 }
 
+impl WorkflowRun {
+  fn build(self) -> io::Result<BuildMetadata> {
+    let pull_requests = self.pull_requests.as_deref().unwrap_or_default();
+    let channel = match (self.identity.event.as_str(), pull_requests) {
+      ("push" | "workflow_dispatch", _) if self.identity.head_branch == "main" => "nightly".into(),
+      ("pull_request", [pr]) if pr.number != 0 => format!("pr-{}", pr.number),
+      _ => "provided".into(),
+    };
+    let build = BuildMetadata {
+      version: None,
+      revision: Some(self.identity.head_sha),
+      built_at: self.run_started_at.or(self.created_at),
+      channel,
+    };
+    build.validate()?;
+    Ok(build)
+  }
+}
+
 /// Download the requested official workflow run or the latest successful main build.
 ///
 /// The caller provides a private staging directory. `gh` downloads the outer
@@ -63,7 +104,11 @@ impl WorkflowRun {
 ///
 /// # Errors
 /// Returns an error if metadata, authentication, or artifact retrieval fails.
-pub async fn download(requested: Option<u64>, target: &str, staging: &Path) -> io::Result<PathBuf> {
+pub async fn download(
+  requested: Option<u64>,
+  target: &str,
+  staging: &Path,
+) -> io::Result<DownloadedBundle> {
   if !has_workflow_bundle(target) {
     return Err(io::Error::new(
       io::ErrorKind::Unsupported,
@@ -91,7 +136,7 @@ pub async fn download(requested: Option<u64>, target: &str, staging: &Path) -> i
     runs
       .workflow_runs
       .into_iter()
-      .find(|run| run.eligible(None))
+      .find(|run| run.identity.eligible(None))
       .ok_or_else(|| {
         io::Error::new(
           io::ErrorKind::NotFound,
@@ -99,26 +144,29 @@ pub async fn download(requested: Option<u64>, target: &str, staging: &Path) -> i
         )
       })?
   };
-  if !run.eligible(requested) {
+  if !run.identity.eligible(requested) {
     return Err(io::Error::new(
       io::ErrorKind::InvalidData,
       "The run is not a successful ctream bundle build from the official repository",
     ));
   }
   let name = archive_name(target);
-  download_artifact(run.id, &name, staging)
+  download_artifact(run.identity.id, &name, staging)
     .await
     .map_err(io::Error::other)?;
   let observed: WorkflowRun = github
-    .get(&format!("actions/runs/{}", run.id), &[])
+    .get(&format!("actions/runs/{}", run.identity.id), &[])
     .await
     .map_err(io::Error::other)?;
-  if observed != run {
+  if observed.identity != run.identity {
     return Err(io::Error::other(
       "The ctream workflow changed during download. Retry the install.",
     ));
   }
-  Ok(staging.join(format!("{name}.zip")))
+  Ok(DownloadedBundle {
+    archive: staging.join(format!("{name}.zip")),
+    build: observed.build()?,
+  })
 }
 
 #[cfg(test)]
@@ -127,9 +175,9 @@ mod tests {
 
   #[test]
   fn default_ctream_download_only_accepts_successful_official_main_runs() {
-    let mut run: WorkflowRun = serde_json::from_value(serde_json::json!({
+    let mut run: WorkflowRunIdentity = serde_json::from_value(serde_json::json!({
       "id": 42, "run_attempt": 1, "path": WORKFLOW_PATH, "status": "completed",
-      "conclusion": "success", "event": "push", "head_branch": "main", "head_sha": "fixture",
+      "conclusion": "success", "event": "push", "head_branch": "main", "head_sha": "e".repeat(40),
       "repository": {"id": 1, "full_name": REPOSITORY},
       "head_repository": {"id": 1, "full_name": REPOSITORY}
     }))
@@ -144,5 +192,22 @@ mod tests {
     run.path = WORKFLOW_PATH.into();
     run.head_repository.as_mut().unwrap().id = 2;
     assert!(!run.eligible(Some(42)));
+  }
+
+  #[test]
+  fn workflow_build_uses_run_time_and_channel_for_old_archives() {
+    let run: WorkflowRun = serde_json::from_value(serde_json::json!({
+      "id": 42, "run_attempt": 2, "path": WORKFLOW_PATH, "status": "completed",
+      "conclusion": "success", "event": "pull_request", "head_branch": "feature",
+      "head_sha": "e".repeat(40), "pull_requests": [{"number": 198}],
+      "created_at": "2026-11-21T08:15:25Z", "run_started_at": "2026-11-22T08:15:25Z",
+      "repository": {"id": 1, "full_name": REPOSITORY},
+      "head_repository": {"id": 1, "full_name": REPOSITORY}
+    }))
+    .unwrap();
+    let build = run.build().unwrap();
+    assert_eq!(build.channel, "pr-198");
+    assert_eq!(build.built_at.as_deref(), Some("2026-11-22T08:15:25Z"));
+    assert_eq!(build.revision, Some("e".repeat(40)));
   }
 }

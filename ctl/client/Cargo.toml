@@ -20,7 +20,7 @@ cli = ["dep:clap", "dep:comfy-table", "dep:rpassword"]
 base64.workspace = true
 clap = { workspace = true, optional = true }
 comfy-table = { workspace = true, optional = true }
-ctl-bundle.workspace = true
+ctl-bundle = { workspace = true, features = ["build-metadata"] }
 ctl-core = { workspace = true, features = ["executable", "presence"] }
 dirs.workspace = true
 glob.workspace = true

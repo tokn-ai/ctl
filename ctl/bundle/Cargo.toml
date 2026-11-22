@@ -13,17 +13,20 @@ publish = ["crates-io"]
 
 [dependencies]
 ctl-core = { workspace = true, features = ["bundles"], optional = true }
+semver = { version = "1.0", optional = true }
 serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 hex = { workspace = true, optional = true }
 sha2 = { workspace = true, optional = true }
+time = { workspace = true, optional = true }
 uuid = { workspace = true, optional = true }
 zip = { workspace = true, optional = true }
 
 [features]
 default = []
-install = ["dep:ctl-core", "dep:hex", "dep:serde", "dep:serde_json", "dep:sha2", "dep:uuid", "dep:zip"]
-pack = ["dep:zip"]
+build-metadata = ["dep:semver", "dep:serde", "dep:serde_json", "dep:time"]
+install = ["build-metadata", "dep:ctl-core", "dep:hex", "dep:sha2", "dep:uuid", "dep:zip"]
+pack = ["build-metadata", "dep:zip"]
 
 [[bin]]
 name = "ctl-pack-ctream"

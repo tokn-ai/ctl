@@ -56,16 +56,17 @@ pub(super) async fn install_development(
     options.target_dir.as_deref(),
     &options.ctream_agent_targets,
   );
-  let files = tokio::select! {
+  let build = tokio::select! {
     result = build => result?,
     _ = tokio::signal::ctrl_c() => return Err(io::Error::new(io::ErrorKind::Interrupted, "ctream development build cancelled.")),
   };
   let root = bundle::root_for_account(home);
   let install_root = root.clone();
-  let result =
-    tokio::task::spawn_blocking(move || bundle::install_development(&install_root, &files))
-      .await
-      .map_err(io::Error::other)??;
+  let result = tokio::task::spawn_blocking(move || {
+    bundle::install_development(&install_root, &build.files, &build.metadata)
+  })
+  .await
+  .map_err(io::Error::other)??;
   report(&root, Some(&result), options.json)
 }
 
@@ -75,19 +76,19 @@ async fn install(root: PathBuf, options: CtreamInstallArguments, update: bool) -
   }
   let target = bundle::native_target()?;
   let mut download = None;
-  let archive = if let Some(path) = options.from {
-    path
+  let (archive, build) = if let Some(path) = options.from {
+    (path, None)
   } else {
     let staging = Download::new()?;
-    let archive =
+    let bundle =
       ctl_client::remote_bundle::ctream::download(options.run, target, &staging.0).await?;
     download = Some(staging);
-    archive
+    (bundle.archive, Some(bundle.build))
   };
   let install_root = root.clone();
   let result = tokio::task::spawn_blocking(move || {
     let _download = download;
-    bundle::install(&install_root, &archive)
+    bundle::install(&install_root, &archive, build.as_ref())
   })
   .await
   .map_err(io::Error::other)??;

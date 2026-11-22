@@ -265,22 +265,7 @@ impl PathIndex {
 }
 
 pub(super) fn validate_payload_label(name: &str) -> io::Result<()> {
-  if !(1..=240).contains(&name.len())
-    || ![
-      "stable-",
-      "nightly-",
-      "dev-",
-      "release-",
-      "provided-",
-      "untracked-",
-    ]
-    .iter()
-    .any(|prefix| name.starts_with(prefix))
-    || name.ends_with('.')
-    || !name
-      .bytes()
-      .all(|byte| byte.is_ascii_alphanumeric() || b"-_.+".contains(&byte))
-  {
+  if !crate::installed_build_name::valid_label(name) {
     return Err(invalid("invalid installed payload location"));
   }
   Ok(())

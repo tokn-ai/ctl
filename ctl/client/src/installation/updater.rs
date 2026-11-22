@@ -570,6 +570,7 @@ mod tests {
 
   #[tokio::test]
   async fn shared_local_provisioning_checks_the_staged_manager_before_replacing_it() {
+    let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
     let home = super::super::TemporaryDirectory::new("updater-provision").unwrap();
     let root = home.0.clone();
     let target = match (std::env::consts::OS, std::env::consts::ARCH) {

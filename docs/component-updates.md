@@ -53,6 +53,7 @@ root is `$CTL_DATA_DIR/ctlup`.
 ~/.tokn/ctl/
   bin/                              # public ctl, ctmux, and ctlup launchers
   apps/                             # public desktop launch entries
+  ctream/                           # reserved for local ctream configuration
   ctlup/
     state/installations.json        # active selections, sources, and retained builds
     state/runtime-build-paths.json  # maps exact runtime IDs to installed paths
@@ -62,6 +63,8 @@ root is `$CTL_DATA_DIR/ctlup`.
     store/runtime/<build>/<target>/ # verified complete runtime
     store/desktop/<build>/          # verified native desktop package
     store/updater/<build>/          # independent ctlup executable for this machine
+    store/ctream/current            # active ctream generation
+    store/ctream/<build-id>/        # installed ctream viewer, CLI, and bundled agents
     cache/downloads/                # verified publication archives
     cache/unpacked/                 # verified extracted runtime bundles
     cache/updaters/                 # verified downloaded updater bytes and metadata
@@ -72,6 +75,18 @@ The registry records one active native runtime, desktop, and updater per
 profile. Launchers resolve selected payloads through the registry.
 Development registrations pin the latest build for each canonical checkout and
 target.
+
+`ctlup` keeps release and development builds of ctream in `store/ctream/`.
+Directory names follow the runtime build format, such as
+`dev-20261122T081525Z-v0.1.0-ba16876-local`. Local labels use the latest artifact
+modification time and the checkout's short revision. Workflow bundles use the
+metadata in the archive or from the workflow run. Older offline archives
+without that metadata use a `provided-` label with a short digest. The store
+tracks the full content identifier to reuse identical builds. An active
+hash-named build in this store remains usable until the next install, update,
+or development build selects a new directory.
+To start fresh after upgrading from `ctream/installs/`, run
+`ctlup ctream install` or `ctlup dev --ctream`.
 
 Runtime, updater, and desktop directories show the installation's source,
 version, and short revision. The full build label groups the targets of each

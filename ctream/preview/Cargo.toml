@@ -9,20 +9,21 @@ publish = false
 
 [dependencies]
 ab_glyph = "0.2"
-ctl-bundle.workspace = true
+ctl-bundle = { workspace = true, features = ["install"] }
 ctream-client.workspace = true
 ctream-proto.workspace = true
-eframe = { version = "0.33", default-features = false, features = ["default_fonts", "wgpu", "x11", "wayland"] }
+eframe = { version = "0.37.0", default-features = false, features = ["default_fonts", "clipboard", "links", "wgpu_no_default_features", "x11", "wayland"] }
 serde.workspace = true
 serde_json.workspace = true
+hex.workspace = true
 sha2.workspace = true
 # Enable native GPU backends when eframe's default features are disabled.
-wgpu = { version = "27", default-features = false, features = ["metal", "vulkan", "dx12"] }
+wgpu = { version = "30.0.2", default-features = false, features = ["metal", "vulkan", "dx12"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6.2"
 ctream-driver-capture.workspace = true
 ctream-driver-input.workspace = true
-objc2 = "0.6.4"
+objc2 = "0.6.5"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["block2", "NSApplication", "NSEvent", "NSGraphics", "NSResponder", "NSScreen", "NSWindow"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSGeometry", "NSString"] }

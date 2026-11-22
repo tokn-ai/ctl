@@ -56,8 +56,8 @@ fn deduplicate_owners(mut ssh: Owner, mut vpn: Owner) -> Vec<Owner> {
   vpn.socket = normalized_endpoint(&vpn.socket);
   for owner in [&mut ssh, &mut vpn] {
     owner.id = format!(
-      "ctld:{:x}",
-      Sha256::digest(owner.socket.as_os_str().as_encoded_bytes())
+      "ctld:{}",
+      hex::encode(Sha256::digest(owner.socket.as_os_str().as_encoded_bytes()))
     );
   }
   if ssh.socket == vpn.socket {

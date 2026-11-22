@@ -187,14 +187,14 @@ impl Viewer {
     view::restore_setup(ctx);
   }
 
-  fn show_setup(&mut self, ctx: &egui::Context) {
+  fn show_setup(&mut self, ui: &mut egui::Ui) {
     let supported = Capture::is_supported();
     let mut choose_system = false;
     let mut choose_window = None;
     let mut refresh = false;
     let mut stop = false;
     let mut start = false;
-    egui::TopBottomPanel::top("local_window_heading").show(ctx, |ui| {
+    egui::Panel::top("local_window_heading").show(ui, |ui| {
       ui.horizontal(|ui| {
         ui.heading("Local window");
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -205,7 +205,7 @@ impl Viewer {
       });
       ui.label("Choose a window, then start.");
     });
-    egui::TopBottomPanel::bottom("local_window_actions").show(ctx, |ui| {
+    egui::Panel::bottom("local_window_actions").show(ui, |ui| {
       ui.horizontal(|ui| {
         ui.label("View only");
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -218,7 +218,7 @@ impl Viewer {
         });
       });
     });
-    egui::CentralPanel::default().show(ctx, |ui| {
+    egui::CentralPanel::default_margins().show(ui, |ui| {
       let (selectors, pane) = setup::panes(ui);
       ui.scope_builder(egui::UiBuilder::new().max_rect(selectors), |ui| {
         ui.set_clip_rect(selectors.intersect(ui.clip_rect()));
@@ -296,6 +296,7 @@ impl Viewer {
         }
       });
     });
+    let ctx = ui.ctx();
     if choose_system || choose_window.is_some() {
       self.choose(ctx, choose_window);
     } else if stop {
@@ -331,8 +332,8 @@ impl Viewer {
     };
     let builder = view::viewer_builder(ctx, self.opening.then_some((image_size, 0.0)));
     ctx.show_viewport_immediate(view::viewer_id(), builder, |child, class| {
-      if class == egui::ViewportClass::Embedded {
-        self.close_viewer(child);
+      if class == egui::ViewportClass::EmbeddedWindow {
+        self.close_viewer(child.ctx());
         self.clear_capture();
         self.status = Some((
           "This backend cannot open a native viewer window.".into(),
@@ -341,11 +342,11 @@ impl Viewer {
         return;
       }
       if child.input(|input| input.viewport().close_requested()) {
-        self.close_viewer(child);
+        self.close_viewer(child.ctx());
         return;
       }
       if self.opening {
-        view::hide_setup(child);
+        view::hide_setup(child.ctx());
         self.opening = false;
       }
       let controls = self.chrome.show(
@@ -358,50 +359,49 @@ impl Viewer {
         },
       );
       if controls.close {
-        self.close_viewer(child);
+        self.close_viewer(child.ctx());
         return;
       }
-      let video = child.available_rect().size();
-      egui::CentralPanel::default()
-        .frame(egui::Frame::NONE)
-        .show(child, |ui| {
-          let area = ui.available_rect_before_wrap();
-          let image = view::fill(area, image_size);
-          if let (Some(texture), Some(image)) = (&self.texture, &image) {
-            view::paint(ui, texture, area, image);
-          }
-          if let Some(input) = &mut self.input
-            && let Err(error) = input.update(child, image.as_ref(), &controls.pointer_regions)
-          {
-            self.input = None;
-            self.input_error = Some(format!("View only: {error}"));
-          }
-          if !controls.resizing {
-            self.size.update(child, image_size, video);
-          }
-        });
+      let video = child.available_size();
+      egui::CentralPanel::no_frame().show(child, |ui| {
+        let area = ui.available_rect_before_wrap();
+        let image = view::fill(area, image_size);
+        if let (Some(texture), Some(image)) = (&self.texture, &image) {
+          view::paint(ui, texture, area, image);
+        }
+        if let Some(input) = &mut self.input
+          && let Err(error) = input.update(ui.ctx(), image.as_ref(), &controls.pointer_regions)
+        {
+          self.input = None;
+          self.input_error = Some(format!("View only: {error}"));
+        }
+        if !controls.resizing {
+          self.size.update(ui.ctx(), image_size, video);
+        }
+      });
     });
   }
 
-  pub(super) fn update_ui(&mut self, ctx: &egui::Context) {
+  pub(super) fn update_ui(&mut self, ui: &mut egui::Ui) {
+    let ctx = ui.ctx().clone();
     if ctx.input(|input| input.viewport().close_requested()) {
       self.chrome.dismiss();
       self.clear_capture();
       return;
     }
-    self.poll(ctx);
+    self.poll(&ctx);
     if self.viewing {
-      self.show_viewer(ctx);
+      self.show_viewer(&ctx);
     }
     if !self.viewing {
-      self.show_setup(ctx);
+      self.show_setup(ui);
     }
   }
 }
 
 impl eframe::App for Viewer {
-  fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
-    self.update_ui(ctx);
+  fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
+    self.update_ui(ui);
   }
 }
 
@@ -418,7 +418,8 @@ mod tests {
     };
     let retired = Arc::clone(&viewer.update);
     retired.lock().unwrap().end = Some(End::Finished);
-    let output = ctx.run(egui::RawInput::default(), |ctx| viewer.poll(ctx));
+    let mut output = ctx.run_ui(egui::RawInput::default(), |ui| viewer.poll(ui.ctx()));
+    output.textures_delta.clear();
     assert!(!viewer.is_viewing());
     assert!(
       output.viewport_output[&egui::ViewportId::ROOT]
@@ -429,8 +430,10 @@ mod tests {
       size: [1, 1],
       pixels: vec![255, 0, 0],
     });
-    let output = ctx.run(egui::RawInput::default(), |ctx| viewer.poll(ctx));
-    assert!(output.textures_delta.set.is_empty());
+    let mut output = ctx.run_ui(egui::RawInput::default(), |ui| viewer.poll(ui.ctx()));
+    let texture_unchanged = output.textures_delta.set.is_empty();
+    output.textures_delta.clear();
+    assert!(texture_unchanged);
     assert!(viewer.texture.is_none());
   }
 }

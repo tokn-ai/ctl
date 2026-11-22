@@ -369,6 +369,17 @@ fn raw(events: Vec<egui::Event>) -> egui::RawInput {
   }
 }
 
+fn run_headless(
+  ctx: &egui::Context,
+  input: egui::RawInput,
+  draw: impl FnMut(&mut egui::Ui),
+) -> egui::FullOutput {
+  let mut output = ctx.run_ui(input, draw);
+  // These tests inspect geometry and viewport commands without a GPU renderer.
+  output.textures_delta.clear();
+  output
+}
+
 fn poll_until(
   viewer: &mut Viewer<Mock>,
   ctx: &egui::Context,
@@ -376,7 +387,7 @@ fn poll_until(
 ) {
   let deadline = Instant::now() + DEADLINE;
   loop {
-    let _ = ctx.run(raw(Vec::new()), |ctx| viewer.poll(ctx));
+    let _ = run_headless(ctx, raw(Vec::new()), |ui| viewer.poll(ui.ctx()));
     if done(viewer) {
       return;
     }
@@ -423,12 +434,12 @@ fn render(
       },
     );
   }
-  ctx.run(input, |ctx| {
-    viewer.poll(ctx);
+  run_headless(ctx, input, |ui| {
+    viewer.poll(ui.ctx());
     if viewer.viewing {
-      viewer.show_viewer(ctx);
+      viewer.show_viewer(ui);
     } else {
-      viewer.show_setup(ctx);
+      viewer.show_setup(ui);
     }
   })
 }
@@ -490,10 +501,10 @@ fn native_frame_with_inputs<const N: usize>(
       .take();
     input.viewport_id = viewport.ids.this;
     input.viewports.entry(viewport.ids.this).or_default().parent = Some(viewport.ids.parent);
-    let output = ctx.run(input, |ctx| (viewport.viewport_ui_cb)(ctx));
+    let output = run_headless(ctx, input, viewport.viewport_ui_cb.as_mut());
     recorded.borrow_mut().push((viewport.ids.this, output));
   });
-  let root = ctx.run(root_input, |ctx| viewer.update_ui(ctx));
+  let root = run_headless(ctx, root_input, |ui| viewer.update_ui(ui));
   NativeFrame {
     root,
     children: std::mem::take(&mut *children.borrow_mut()),
@@ -598,6 +609,8 @@ fn interactions(at: egui::Pos2, hold_key: bool) -> Vec<egui::Event> {
       unit: egui::MouseWheelUnit::Line,
       delta: egui::vec2(0.0, 1.0),
       modifiers: egui::Modifiers::NONE,
+      phase: egui::TouchPhase::Move,
+      source: egui::MouseWheelSource::Wheel,
     },
     egui::Event::Key {
       key: egui::Key::F8,
@@ -1059,6 +1072,8 @@ fn expanded_diagnostics_copy_and_collapse_without_forwarding_input() {
       unit: egui::MouseWheelUnit::Point,
       delta: egui::vec2(0.0, -70.0),
       modifiers: egui::Modifiers::NONE,
+      phase: egui::TouchPhase::Move,
+      source: egui::MouseWheelSource::Wheel,
     }],
   );
   let scrolled = frame_at_size(&mut viewer, narrow_size, Vec::new());
@@ -1703,8 +1718,8 @@ fn viewer_input_isolated_from_setup_and_focus_loss_releases_held_state() {
   for size in [egui::vec2(860.0, 620.0), egui::vec2(1.0, 1.0)] {
     let mut source_input = raw(interactions(at, false));
     source_input.screen_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size));
-    let _ = ctx.run(source_input, |ctx| {
-      egui::CentralPanel::default().show(ctx, |ui| {
+    let _ = run_headless(&ctx, source_input, |ui| {
+      egui::CentralPanel::default_margins().show(ui, |ui| {
         viewer
           .preview
           .as_mut()
@@ -2249,6 +2264,8 @@ fn complete_driver_catalog_and_tags_are_shown_before_selecting_a_source() {
   assert_eq!(viewer.drivers.len(), 2);
   assert_eq!(viewer.selected, Some(Target::Windows(1)));
   assert!(mock.captures().is_empty() && mock.inputs().is_empty());
+  // Inspect the available drivers before the automatic display preview starts.
+  viewer.preview_after = Instant::now() + DEADLINE;
   let output = render(&mut viewer, &ctx, Vec::new());
   for label in [
     "Custom desktop",

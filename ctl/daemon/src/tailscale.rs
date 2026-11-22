@@ -67,7 +67,7 @@ fn container_name(owner: &Path, connection_id: &str) -> String {
   digest.update(owner.as_os_str().as_encoded_bytes());
   digest.update([0]);
   digest.update(connection_id.as_bytes());
-  format!("ctld-tailscale-{:x}", digest.finalize())
+  format!("ctld-tailscale-{}", hex::encode(digest.finalize()))
 }
 
 pub(super) struct ManagedVpn {

@@ -93,8 +93,7 @@ impl HistoryTransfer {
   }
 
   pub(crate) fn finish(mut self) -> Result<AttachmentEvent, ClientError> {
-    if !self.is_complete()
-      || format!("{:x}", Sha256::digest(&self.bytes)) != self.manifest.content_hash
+    if !self.is_complete() || hex::encode(Sha256::digest(&self.bytes)) != self.manifest.content_hash
     {
       return Err(invalid("history snapshot checksum does not match"));
     }
@@ -185,7 +184,7 @@ pub(crate) mod tests {
       total_lines: history.lines.len() as u64,
       first_line: 0,
       truncated: false,
-      content_hash: format!("{:x}", Sha256::digest(&bytes)),
+      content_hash: hex::encode(Sha256::digest(&bytes)),
       scrollback_limit: 10_000,
     };
     (manifest, checkpoint, history, bytes)

@@ -98,49 +98,6 @@ pub fn socket(_path: &Path) -> impl std::future::Future<Output = io::Result<Zero
 }
 
 #[cfg(unix)]
-/// Takes ownership of an inherited password descriptor.
-///
-/// # Errors
-/// Returns an error if the descriptor is invalid, cannot be claimed, or is neither a socket nor a pipe.
-pub fn claim(fd: i32) -> io::Result<std::fs::File> {
-  use nix::fcntl::{FcntlArg, FdFlag, OFlag, fcntl};
-  use std::{os::fd::AsRawFd, os::unix::fs::FileTypeExt as _};
-  // This adapter only lends the caller-supplied descriptor to a safe dup API.
-  struct Descriptor(i32);
-  impl AsRawFd for Descriptor {
-    fn as_raw_fd(&self) -> i32 {
-      self.0
-    }
-  }
-  if fd < 3 {
-    return Err(invalid("Password descriptors must be at least 3"));
-  }
-  fcntl(fd, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC))
-    .map_err(|_| invalid("Password descriptor is not open"))?;
-  let duplicate = filedescriptor::FileDescriptor::dup(&Descriptor(fd));
-  // Close the inherited descriptor before any SSH/config/helper subprocess.
-  nix::unistd::close(fd).map_err(|_| invalid("Could not close the password descriptor"))?;
-  let file = duplicate
-    .map_err(|_| invalid("Could not duplicate the password descriptor"))?
-    .as_file()
-    .map_err(|_| invalid("Could not open the password descriptor"))?;
-  let kind = file.metadata()?.file_type();
-  if !kind.is_fifo() && !kind.is_socket() {
-    return Err(invalid(
-      "Password descriptor must be a pipe or socket, not a credential file",
-    ));
-  }
-  let flags = fcntl(file.as_raw_fd(), FcntlArg::F_GETFL).map_err(io::Error::from)?;
-  fcntl(
-    file.as_raw_fd(),
-    FcntlArg::F_SETFL(OFlag::from_bits_truncate(flags) | OFlag::O_NONBLOCK),
-  )
-  .map_err(io::Error::from)?;
-  fcntl(file.as_raw_fd(), FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC)).map_err(io::Error::from)?;
-  Ok(file)
-}
-
-#[cfg(unix)]
 struct Inherited(tokio::io::unix::AsyncFd<std::fs::File>);
 #[cfg(unix)]
 impl AsyncRead for Inherited {
@@ -164,22 +121,15 @@ impl AsyncRead for Inherited {
   }
 }
 
-#[cfg(not(unix))]
-/// # Errors
-/// Always returns an error because inherited password descriptors require Unix.
-pub fn claim(_fd: i32) -> io::Result<std::fs::File> {
-  Err(invalid(
-    "--password-fd is Unix-only; use --password-pipe on Windows",
-  ))
-}
-
 #[cfg(unix)]
 /// Reads a password from a claimed descriptor.
 ///
 /// # Errors
 /// Returns an error for an I/O failure, a timeout, or invalid input.
 pub async fn inherited(file: std::fs::File) -> io::Result<Zeroizing<Vec<u8>>> {
-  password(Inherited(tokio::io::unix::AsyncFd::new(file)?)).await
+  #[expect(deprecated, reason = "AsyncFd owns a File with a stable descriptor")]
+  let descriptor = tokio::io::unix::AsyncFd::new(file)?;
+  password(Inherited(descriptor)).await
 }
 
 #[cfg(not(unix))]

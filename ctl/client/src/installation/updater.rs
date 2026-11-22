@@ -570,6 +570,7 @@ mod tests {
 
   #[tokio::test]
   async fn shared_local_provisioning_checks_the_staged_manager_before_replacing_it() {
+    let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
     let home = super::super::TemporaryDirectory::new("updater-provision").unwrap();
     let root = home.0.clone();
     let target = match (std::env::consts::OS, std::env::consts::ARCH) {
@@ -622,7 +623,7 @@ mod tests {
       let info = serde_json::json!({
         "schema_version": 1, "app_version": "0.1.0", "bundle_id": format!("0.1.0-dev.{}", "a".repeat(12)),
         "git_revision": "a".repeat(40), "target_triple": target, "binary": binary,
-        "sha256": format!("{:x}", Sha256::digest(script.as_bytes())), "size": script.len(),
+        "sha256": hex::encode(Sha256::digest(script.as_bytes())), "size": script.len(),
       });
       std::fs::write(
         provided.join(format!("ctlup-{target}.json")),

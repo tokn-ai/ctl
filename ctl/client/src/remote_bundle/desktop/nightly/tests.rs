@@ -180,7 +180,7 @@ fn hashes_the_selected_artifact_when_copying_it_to_staging() {
   let payload = b"nightly desktop package";
   let asset = Asset {
     name: "ctmux-0.1.3-nightly.20261112+g0123456789ab-aarch64-apple-darwin.app.tar.gz".into(),
-    sha256: format!("{:x}", Sha256::digest(payload)),
+    sha256: hex::encode(Sha256::digest(payload)),
     installation_layout_version: None,
   };
   fs::write(directory.0.join(&asset.name), payload).unwrap();

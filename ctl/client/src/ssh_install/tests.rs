@@ -25,6 +25,7 @@ esac
 #[tokio::test]
 async fn updater_preparation_preserves_archive_input_and_only_falls_back_for_old_clap() {
   use std::os::unix::fs::PermissionsExt as _;
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = BundleFixture::new();
   let home = fixture.directory.join("origin-home");
   let manager = home.join(".tokn/ctl/bin/ctlup");
@@ -283,6 +284,7 @@ async fn bootstrap_protects_checkout_metadata_from_an_older_updater() {
 #[tokio::test]
 async fn updater_upload_reports_partial_input_before_checking() {
   use std::sync::Mutex;
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
 
   let mut command = Command::new("sh");
   command.args(["-c", "cat >/dev/null"]);

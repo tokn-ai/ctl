@@ -175,7 +175,9 @@ fn read_inline<'a>(
       // Changes to trust must prevent adoption of an already-running tunnel.
       if matches!(tag, "ca" | "peer-fingerprint" | "extra-certs") {
         let digest = Sha256::digest(&profile.output.as_bytes()[trust_start..]);
-        profile.settings.push(format!("<{tag}> {digest:x}"));
+        profile
+          .settings
+          .push(format!("<{tag}> {}", hex::encode(digest)));
       } else {
         profile.settings.push(format!("<{tag}>"));
       }

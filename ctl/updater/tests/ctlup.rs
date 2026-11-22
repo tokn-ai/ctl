@@ -813,10 +813,9 @@ exit 17
   let artifact = PathBuf::from(request["artifact"].as_str().unwrap());
   assert_ne!(artifact, installed.directory.join(helper));
   assert_eq!(
-    format!(
-      "{:x}",
-      Sha256::digest(fs::read(home.0.join("staged-ctld")).unwrap())
-    ),
+    hex::encode(Sha256::digest(
+      fs::read(home.0.join("staged-ctld")).unwrap()
+    )),
     manifest.files[helper].sha256
   );
   assert!(!home.0.join("helper-executed").exists());

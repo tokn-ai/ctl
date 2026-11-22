@@ -154,7 +154,7 @@ fn parsed_gateway(value: &str) -> io::Result<url::Url> {
 }
 
 fn digest(value: &[u8]) -> String {
-  format!("{:x}", Sha256::digest(value))
+  hex::encode(Sha256::digest(value))
 }
 fn invalid(message: impl Into<String>) -> io::Error {
   io::Error::new(io::ErrorKind::InvalidInput, message.into())

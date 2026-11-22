@@ -839,7 +839,7 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
     }
   }
 
-  fn show_setup(&mut self, ctx: &egui::Context) {
+  fn show_setup(&mut self, ui: &mut egui::Ui) {
     if self.viewing {
       return;
     }
@@ -847,7 +847,7 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
     let mut refresh = false;
     let mut reload = false;
     let mut changed = false;
-    egui::TopBottomPanel::top("setup_heading").show(ctx, |ui| {
+    egui::Panel::top("setup_heading").show(ui, |ui| {
       ui.add_space(6.0);
       ui.horizontal(|ui| {
         ui.heading("ctream");
@@ -858,7 +858,7 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
       ui.label("Choose a capture driver, select its source, then start.");
       ui.add_space(8.0);
     });
-    egui::TopBottomPanel::bottom("setup_actions").show(ctx, |ui| {
+    egui::Panel::bottom("setup_actions").show(ui, |ui| {
       ui.add_space(6.0);
       ui.horizontal(|ui| {
         if self.preview_error.is_some() && ui.button("Retry preview").clicked() {
@@ -879,7 +879,7 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
       });
       ui.add_space(6.0);
     });
-    egui::CentralPanel::default().show(ctx, |ui| {
+    egui::CentralPanel::default_margins().show(ui, |ui| {
       if let Some(error) = &self.discovery_error {
         ui.colored_label(ui.visuals().error_fg_color, error);
       }
@@ -968,6 +968,7 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
         }
       });
     });
+    let ctx = ui.ctx();
     if refresh {
       self.discover(ctx);
     } else if reload {
@@ -979,7 +980,7 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
     }
   }
 
-  fn show_viewer(&mut self, ctx: &egui::Context) {
+  fn show_viewer(&mut self, ui: &mut egui::Ui) {
     let preview = self.preview.as_ref();
     let error = self
       .preview_error
@@ -993,7 +994,7 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
       "View only"
     };
     let chrome = self.chrome.show(
-      ctx,
+      ui,
       chrome::Status {
         text: error.unwrap_or(status),
         error: error.is_some(),
@@ -1002,13 +1003,13 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
       },
     );
     if chrome.close {
-      self.close_viewer(ctx);
+      self.close_viewer(ui.ctx());
       return;
     }
     if chrome.toggle_debug {
       self.show_stats = !self.show_stats;
-      self.update_stats(ctx);
-      ctx.request_repaint();
+      self.update_stats(ui.ctx());
+      ui.ctx().request_repaint();
     }
     let frame_size = self
       .preview
@@ -1016,51 +1017,49 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
       .and_then(|preview| preview.texture.as_ref())
       .map(egui::TextureHandle::size);
     if let Some(semantic) = &mut self.semantic {
-      semantic.show(ctx, frame_size);
+      semantic.show(ui, frame_size);
     }
-    let video = ctx.available_rect().size();
-    egui::CentralPanel::default()
-      .frame(egui::Frame::NONE)
-      .show(ctx, |ui| {
-        let Some(preview) = &mut self.preview else {
-          return;
-        };
-        let elements = self
-          .semantic
-          .as_ref()
-          .map(semantic::Panel::overlay_elements)
-          .unwrap_or(&[]);
-        let image = preview.show(
+    let video = ui.available_size();
+    egui::CentralPanel::no_frame().show(ui, |ui| {
+      let Some(preview) = &mut self.preview else {
+        return;
+      };
+      let elements = self
+        .semantic
+        .as_ref()
+        .map(semantic::Panel::overlay_elements)
+        .unwrap_or(&[]);
+      let image = preview.show(
+        ui,
+        self.preview_error.as_deref(),
+        elements,
+        PreviewMode::Viewer,
+      );
+      let (diagnostics_open, diagnostics_link) = match (&image, frame_size, &mut self.stats) {
+        (Some(image), Some(frame_size), Some(stats)) => stats.show(
           ui,
-          self.preview_error.as_deref(),
-          elements,
-          PreviewMode::Viewer,
+          view::rect(image.viewport()),
+          preview.frame_counts(),
+          frame_size,
+        ),
+        _ => (false, egui::Rect::NOTHING),
+      };
+      if self.control.is_none() {
+        let [title, resize] = chrome.pointer_regions;
+        preview.forward_input(
+          ui.ctx(),
+          image
+            .as_ref()
+            .filter(|_| self.preview_error.is_none() && !diagnostics_open && !chrome.toggle_debug),
+          &[title, resize, diagnostics_link],
         );
-        let (diagnostics_open, diagnostics_link) = match (&image, frame_size, &mut self.stats) {
-          (Some(image), Some(frame_size), Some(stats)) => stats.show(
-            ui,
-            view::rect(image.viewport()),
-            preview.frame_counts(),
-            frame_size,
-          ),
-          _ => (false, egui::Rect::NOTHING),
-        };
-        if self.control.is_none() {
-          let [title, resize] = chrome.pointer_regions;
-          preview.forward_input(
-            ctx,
-            image.as_ref().filter(|_| {
-              self.preview_error.is_none() && !diagnostics_open && !chrome.toggle_debug
-            }),
-            &[title, resize, diagnostics_link],
-          );
-        }
-        if !chrome.resizing
-          && let Some(size) = preview.image_size()
-        {
-          self.viewer_size.update(ctx, size, video);
-        }
-      });
+      }
+      if !chrome.resizing
+        && let Some(size) = preview.image_size()
+      {
+        self.viewer_size.update(ui.ctx(), size, video);
+      }
+    });
   }
 
   fn show_viewer_window(&mut self, ctx: &egui::Context) {
@@ -1081,20 +1080,20 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
     });
     let builder = view::viewer_builder(ctx, initial);
     ctx.show_viewport_immediate(viewer_id(), builder, |child, class| {
-      if class == egui::ViewportClass::Embedded {
-        self.close_viewer(child);
+      if class == egui::ViewportClass::EmbeddedWindow {
+        self.close_viewer(child.ctx());
         self.preview_error =
           Some("This backend cannot open a separate native viewer window.".into());
         return;
       }
       if child.input(|input| input.viewport().close_requested()) {
-        self.close_viewer(child);
+        self.close_viewer(child.ctx());
         return;
       }
       if self.viewer_opening {
         // Wait until the native child exists before hiding its parent. Scope
         // every command explicitly so a child event cannot close the app.
-        view::hide_setup(child);
+        view::hide_setup(child.ctx());
         self.viewer_opening = false;
       }
       self.show_viewer(child);
@@ -1105,30 +1104,31 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
     self.viewing
   }
 
-  pub(super) fn update_ui(&mut self, ctx: &egui::Context) {
+  pub(super) fn update_ui(&mut self, ui: &mut egui::Ui) {
+    let ctx = ui.ctx().clone();
     if ctx.input(|input| input.viewport().close_requested()) {
       self.shutdown();
       return;
     }
-    self.poll(ctx);
+    self.poll(&ctx);
     let setup_shown = !self.viewing;
     if setup_shown {
-      self.show_setup(ctx);
+      self.show_setup(ui);
     }
     if self.viewing {
-      self.show_viewer_window(ctx);
+      self.show_viewer_window(&ctx);
     }
     if !setup_shown && !self.viewing {
       // Paint the retained setup in the same pass that makes ROOT visible,
       // rather than briefly restoring an empty hidden-window frame.
-      self.show_setup(ctx);
+      self.show_setup(ui);
     }
   }
 }
 
 impl<T: Transport + Send + Sync + 'static> eframe::App for Viewer<T> {
-  fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
-    self.update_ui(ctx);
+  fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
+    self.update_ui(ui);
   }
 }
 

@@ -49,7 +49,7 @@ pub(super) fn build() -> ComponentBuildInfo {
 }
 
 pub(super) fn manifest(archive: &[u8]) -> Value {
-  let digest = format!("{:x}", Sha256::digest(archive));
+  let digest = hex::encode(Sha256::digest(archive));
   let targets = SUPPORTED_TARGETS
     .into_iter()
     .map(|target| {

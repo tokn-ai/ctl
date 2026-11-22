@@ -39,10 +39,7 @@ impl Drop for Fixture {
 }
 
 fn checkpoint(target: &Path, repository: &Path) -> PathBuf {
-  let digest = format!(
-    "{:x}",
-    Sha256::digest(repository.to_str().unwrap().as_bytes())
-  );
+  let digest = hex::encode(Sha256::digest(repository.to_str().unwrap().as_bytes()));
   target.join("ctl-dev/helpers").join(&digest[..20])
 }
 

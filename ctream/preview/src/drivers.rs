@@ -127,7 +127,7 @@ fn card(ui: &mut egui::Ui, name: &str, tags: &[Tag], selected: bool) -> egui::Re
     egui::Button::new("").selected(selected).corner_radius(6.0),
   );
   response.widget_info(|| {
-    egui::WidgetInfo::selected(egui::WidgetType::Button, ui.is_enabled(), selected, name)
+    egui::WidgetInfo::selected(egui::Role::Button, ui.is_enabled(), selected, name)
   });
   let origin = response.rect.min + egui::vec2(padding, padding);
   ui.painter().galley(origin, title, color);

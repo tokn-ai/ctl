@@ -37,10 +37,7 @@ impl Registry {
   pub(super) fn for_socket(socket: &Path) -> Self {
     Self {
       directory: Some(super::control_directory().with_file_name("endpoints")),
-      namespace: format!(
-        "{:x}",
-        Sha256::digest(socket.as_os_str().as_encoded_bytes())
-      ),
+      namespace: hex::encode(Sha256::digest(socket.as_os_str().as_encoded_bytes())),
     }
   }
 

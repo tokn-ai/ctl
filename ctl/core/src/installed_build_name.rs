@@ -1,10 +1,33 @@
-//! Readable names and ordering for installed runtime builds.
+//! Readable names and ordering for installed builds.
 
 use crate::component::ComponentBuildInfo;
 use crate::installations::CatalogOrigin;
 use semver::Version;
 use std::cmp::Ordering;
 use time::{OffsetDateTime, UtcOffset, format_description::well_known::Rfc3339};
+
+/// Maximum length of a build label used as a directory name.
+pub const MAX_LABEL_BYTES: usize = 240;
+
+/// Whether the label is a portable directory component in a managed build store.
+#[must_use]
+pub fn valid_label(name: &str) -> bool {
+  (1..=MAX_LABEL_BYTES).contains(&name.len())
+    && [
+      "stable-",
+      "nightly-",
+      "dev-",
+      "release-",
+      "provided-",
+      "untracked-",
+    ]
+    .iter()
+    .any(|prefix| name.starts_with(prefix))
+    && !name.ends_with('.')
+    && name
+      .bytes()
+      .all(|byte| byte.is_ascii_alphanumeric() || b"-_.+".contains(&byte))
+}
 
 fn channel(origin: Option<&CatalogOrigin>) -> &str {
   origin.map_or("untracked", |origin| origin.channel.as_str())

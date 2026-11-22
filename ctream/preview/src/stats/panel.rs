@@ -39,7 +39,7 @@ pub(super) fn show(
     return escape;
   }
   let bounds = panel_bounds(video);
-  let height_id = ui.id().with("expanded_diagnostics_height");
+  let height_id = ui.scope_id().with("expanded_diagnostics_height");
   let height = ui
     .data(|data| data.get_temp::<f32>(height_id))
     .unwrap_or(bounds.height())

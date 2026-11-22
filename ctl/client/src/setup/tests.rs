@@ -106,7 +106,7 @@ pub(super) fn contents(extra: Option<(&str, tar::EntryType)>) -> Vec<u8> {
 pub(super) fn release(bytes: &[u8]) -> Manifest {
   let mut manifest = manifest::fixture();
   manifest.archive_size = bytes.len() as u64;
-  manifest.sha256 = format!("{:x}", Sha256::digest(bytes));
+  manifest.sha256 = hex::encode(Sha256::digest(bytes));
   manifest
 }
 

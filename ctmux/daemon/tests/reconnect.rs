@@ -640,10 +640,7 @@ fn assert_colored_numbered_history(
   use sha2::{Digest as _, Sha256};
 
   assert_eq!(bytes.len() as u64, manifest.total_bytes);
-  assert_eq!(
-    format!("{:x}", Sha256::digest(bytes)),
-    manifest.content_hash
-  );
+  assert_eq!(hex::encode(Sha256::digest(bytes)), manifest.content_hash);
   let rows: Vec<ctmux_proto::TerminalHistoryRow> = bytes
     .split(|byte| *byte == b'\n')
     .filter(|row| !row.is_empty())

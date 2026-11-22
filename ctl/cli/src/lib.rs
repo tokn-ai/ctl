@@ -188,6 +188,7 @@ enum TaskdCommand {
 }
 
 /// Runs the runtime CLI entry point.
+/// Call it before starting other threads or subprocesses.
 pub fn run() {
   if let Some(code) = openssh::run_transport_helper(bundled::register) {
     std::process::exit(code);
@@ -202,7 +203,7 @@ pub fn run() {
   }
   // Claim caller descriptors before Tokio allocates internal descriptors. An
   // invalid inherited FD must never accidentally select a runtime-owned socket.
-  if let Err(error) = caller_auth::claim(&mut arguments) {
+  if let Err(error) = caller_auth::claim_at_startup(&mut arguments) {
     eprintln!("ctl: {error}");
     std::process::exit(1);
   }

@@ -20,7 +20,9 @@ ctl-ipc.workspace = true
 dirs.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+hex.workspace = true
 sha2.workspace = true
+time.workspace = true
 tokio = { workspace = true, features = ["fs"] }
 uuid.workspace = true
 
@@ -36,7 +38,7 @@ ctl-proto.workspace = true
 ctl-task-proto.workspace = true
 ctmux-ipc.workspace = true
 ctmux-proto.workspace = true
-flate2 = "1.1.9"
+flate2 = "1.1.11"
 tar = { version = "0.4.46", default-features = false }
 
 [target.'cfg(unix)'.dependencies]
@@ -48,8 +50,8 @@ lnks = { version = "0.2", default-features = false }
 zip.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
-flate2 = "1.1.9"
-libproc = "0.14.11"
+flate2 = "1.1.11"
+libproc = "0.15.0"
 tar = { version = "0.4.46", default-features = false }
 
 [lints]

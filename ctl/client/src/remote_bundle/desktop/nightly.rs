@@ -220,7 +220,7 @@ impl DownloadedArtifact {
       digest.update(&buffer[..count]);
       destination.write_all(&buffer[..count])?;
     }
-    if size == 0 || !asset.matches(digest) {
+    if size == 0 || !asset.matches(digest.finalize().into()) {
       return Err(invalid("desktop package SHA-256 checksum mismatch"));
     }
     Ok(())

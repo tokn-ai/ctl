@@ -391,7 +391,7 @@ fn provided_development_directory_resolves_its_sibling_updater_after_relocation(
     let metadata = serde_json::json!({
       "schema_version": 1, "app_version": version, "bundle_id": id, "git_revision": revision,
       "target_triple": target, "binary": name, "size": binary.len(),
-      "sha256": format!("{:x}", Sha256::digest(binary)),
+      "sha256": hex::encode(Sha256::digest(binary)),
     });
     std::fs::write(
       sidecars.join(format!("ctlup-{target}.json")),
@@ -594,6 +594,7 @@ async fn flat_local_macos_update_is_rejected_before_manager_provisioning_or_acti
 
 #[tokio::test]
 async fn development_builder_errors_include_bounded_diagnostics_without_docker() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let mut command = tokio::process::Command::new("/bin/sh");
   command.args([
     "-c",

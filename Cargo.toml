@@ -57,23 +57,24 @@ ctream-driver-input = { path = "ctream/driver-input" }
 ctream-windows = { path = "ctream/windows" }
 ctream-platform = { path = "ctream/platform" }
 ctl-core = { package = "tokn-ctl-core", path = "ctl/core", version = "=0.1.4" }
-clap = { version = "4.6.6", features = ["derive"] }
+clap = { version = "4.6.9", features = ["derive"] }
 comfy-table = "8.0.1"
 crossterm = "0.29.0"
-terminput = "0.5.15"
-terminput-crossterm = "0.4.11"
+terminput = "0.5.16"
+terminput-crossterm = "0.4.12"
 avt = { package = "ctmux-avt", path = "ctmux/avt", version = "=0.1.4" }
-base64 = "0.22.1"
+base64 = "0.23.1"
 ctl-client = { path = "ctl/client", version = "=0.1.4" }
 ctl-bundle = { path = "ctl/bundle", version = "=0.1.4" }
 ctl-files = { path = "ctl/files", version = "=0.1.4" }
 ctl-proto = { path = "ctl/proto", version = "=0.1.4" }
 ctl-keychain-client = { path = "ctl/keychain-client", version = "=0.1.4" }
 ctl-ipc = { path = "ctl/ipc", version = "=0.1.4" }
-dirs = "6.0.0"
+dirs = "7.0.0"
 glob = "0.3.4"
-mio = { version = "1.2.4", default-features = false }
-nix = { version = "0.29.0", default-features = false, features = ["fs"] }
+hex = "0.4.3"
+mio = { version = "1.2.5", default-features = false }
+nix = { version = "0.32.0", default-features = false, features = ["fs"] }
 portable-pty = "0.9.0"
 ctmux-process-info = { path = "ctmux/process-info", version = "=0.1.4" }
 ctmux-core = { path = "ctmux/core", version = "=0.1.4" }
@@ -83,21 +84,21 @@ ctmux-cli = { path = "ctmux/cli", version = "=0.1.4" }
 ctmux-ipc = { path = "ctmux/ipc", version = "=0.1.4" }
 ctmux-tui = { path = "apps/tui", version = "=0.1.4" }
 ctmux-proto = { path = "ctmux/proto", version = "=0.1.4" }
-rusqlite = { version = "0.40.2", features = ["bundled"] }
-rpassword = "7.5.4"
-rustix = { version = "1.1.4", features = ["fs", "process"] }
+rusqlite = { version = "0.43.0", features = ["bundled"] }
+rpassword = "7.5.5"
+rustix = { version = "1.1.6", features = ["fs", "process"] }
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.151"
-sha2 = "0.10.9"
+serde_json = "1.0.154"
+sha2 = "0.11.1"
 time = { version = "0.3.55", features = ["formatting", "parsing"] }
-thiserror = "2.0.20"
+thiserror = "2.0.21"
 ctl-task-ipc = { path = "task/ipc", version = "=0.1.4" }
 ctl-task-proto = { path = "task/proto", version = "=0.1.4" }
 ctl-task-cli = { path = "task/cli", version = "=0.1.4" }
 ctl-task-client = { path = "task/client", version = "=0.1.4" }
 ctl-taskd = { path = "task/daemon", version = "=0.1.4" }
 ctl-task-store = { path = "task/store", version = "=0.1.4" }
-tokio = { version = "1.53.1", features = [
+tokio = { version = "1.54.1", features = [
   "io-std",
   "io-util",
   "macros",
@@ -108,10 +109,10 @@ tokio = { version = "1.53.1", features = [
   "sync",
   "time",
 ] }
-unicode-width = "0.1.14"
-uuid = { version = "1.26.0", features = ["v4"] }
-zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
-zeroize = { version = "1.8", features = ["serde"] }
+unicode-width = "0.2.3"
+uuid = { version = "1.29.3", features = ["v4"] }
+zip = { version = "9.8.1", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+zeroize = { version = "1.9.2", features = ["serde"] }
 
 # Managed development binaries verify their installation before opening sockets.
 [profile.dev.package.sha2]

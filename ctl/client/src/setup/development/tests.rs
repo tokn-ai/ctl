@@ -37,10 +37,7 @@ impl Fixture {
       .create(&repository)
       .unwrap();
     let repository = repository.canonicalize().unwrap();
-    let digest = format!(
-      "{:x}",
-      Sha256::digest(repository.to_str().unwrap().as_bytes())
-    );
+    let digest = hex::encode(Sha256::digest(repository.to_str().unwrap().as_bytes()));
     let target = home.0.join("target");
     let checkpoint = target.join("ctl-dev/helpers").join(&digest[..20]);
     let directory = checkpoint.join(format!("build-{}", manifest.sha256));
@@ -144,6 +141,7 @@ fn ordinary_target_permissions_allow_private_verified_build_discovery() {
 
 #[test]
 fn cached_checkout_executable_survives_target_cleanup_without_changing_shared_selection() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire_blocking();
   let fixture = Fixture::new();
   let source = fixture.directory.join("ctld.app/Contents/MacOS/ctld");
   // A self-contained executable proves the result remains callable without

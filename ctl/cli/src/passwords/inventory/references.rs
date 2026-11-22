@@ -11,7 +11,7 @@ pub(super) fn key(id: &str, source: Source) -> String {
     Source::Credential => "p",
     Source::Identity => "k",
   };
-  format!("{prefix}-{:x}", Sha256::digest(id.as_bytes()))
+  format!("{prefix}-{}", hex::encode(Sha256::digest(id.as_bytes())))
 }
 
 /// Use the shortest unambiguous digest prefix, including conflicts with names.

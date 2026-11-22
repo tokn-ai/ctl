@@ -47,7 +47,12 @@ fn descriptor(fd: impl std::os::fd::AsFd) -> io::Result<AsyncFd<OwnedFd>> {
   let owned = rustix::io::fcntl_dupfd_cloexec(fd, 3)?;
   let flags = rustix::fs::fcntl_getfl(&owned)?;
   rustix::fs::fcntl_setfl(&owned, flags | rustix::fs::OFlags::NONBLOCK)?;
-  AsyncFd::new(owned)
+  #[expect(
+    deprecated,
+    reason = "AsyncFd owns an OwnedFd with a stable descriptor"
+  )]
+  let descriptor = AsyncFd::new(owned)?;
+  Ok(descriptor)
 }
 
 impl AsyncRead for Input {

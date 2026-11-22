@@ -215,7 +215,7 @@ fn example(name: &str) -> PathBuf {
 }
 
 fn fingerprint(path: &Path) -> String {
-  format!("{:x}", Sha256::digest(fs::read(path).unwrap()))
+  hex::encode(Sha256::digest(fs::read(path).unwrap()))
 }
 
 fn check_images(reports: &[Value], image_a: &Path, image_b: &Path, rounds: u32) {

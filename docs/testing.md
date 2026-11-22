@@ -1,6 +1,7 @@
 # Tests and CI
 
-Use Node 24, pnpm 10, and the Rust toolchain pinned in `rust-toolchain.toml`.
+Use Node 24 LTS (24.15 or later) or Node 26 or newer. Use pnpm 10 and the
+Rust toolchain pinned in `rust-toolchain.toml`.
 On Linux, install the system dependencies listed in `.github/workflows/ci.yml`,
 including `libxkbcommon-dev` for the ctream Wayland helpers.
 

@@ -71,7 +71,7 @@ fn manifest() -> Value {
     "signing_mode": "signed",
     "notarized": true,
     "archive": format!("ctld-{VERSION}-{TARGET}.app.tar.gz"),
-    "sha256": format!("{:x}", Sha256::digest(ARCHIVE)),
+    "sha256": hex::encode(Sha256::digest(ARCHIVE)),
     "archive_size": ARCHIVE.len(),
     "protocols": [
       {"name":"ctld", "build":12, "version":"1.0.12", "supported_versions":["1.0.12"]},

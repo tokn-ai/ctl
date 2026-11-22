@@ -231,9 +231,9 @@ intact. `ctlup status` then reports that development installation.
 `ctlup dev --app` builds and installs the native desktop app, including its
 frontend and bundled daemons. It preserves the saved publication channel.
 Install the checkout's frontend dependencies with `pnpm install --frozen-lockfile`
-before building. On Windows, development app builds also require Node 24,
-pnpm, the matching Rust MSVC toolchain, the Visual Studio C++ build tools,
-and the Windows SDK.
+using the Node and pnpm versions in [Tests and CI](testing.md). Windows app
+builds also require the matching Rust MSVC toolchain, Visual Studio C++ build
+tools, and the Windows SDK.
 
 On macOS, both development paths look for an unexpired helper provisioning
 profile and can renew it through Xcode when the project has a configured team.

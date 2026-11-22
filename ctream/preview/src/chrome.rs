@@ -114,20 +114,21 @@ impl Chrome {
     ctx.request_repaint_after(RESIZE_WAIT);
   }
 
-  pub fn show(&mut self, ctx: &egui::Context, status: Status<'_>) -> Frame {
+  pub fn show(&mut self, ui: &mut egui::Ui, status: Status<'_>) -> Frame {
+    let ctx = ui.ctx().clone();
     #[cfg(test)]
     if let Some(hovered) = self.test_attached_hover {
       let action = hovered
-        .then(|| show_controls(ctx, status, true, Some(ctx.content_rect().width())))
+        .then(|| show_controls(&ctx, status, true, Some(ctx.content_rect().width())))
         .flatten();
-      return Frame::attached(action.is_some_and(|action| action.apply(ctx)));
+      return Frame::attached(action.is_some_and(|action| action.apply(&ctx)));
     }
     #[cfg(target_os = "macos")]
     {
       if !self.shown
         && self.resize.is_none()
         && self.allocated <= 1.0
-        && let Some(frame) = self.show_macos(ctx, status)
+        && let Some(frame) = self.show_macos(&ctx, status)
       {
         return frame;
       }
@@ -135,18 +136,18 @@ impl Chrome {
     }
     let window = ctx.content_rect();
     let hovered = ctx.input(|input| input.pointer.hover_pos());
-    self.update(ctx, window, hovered);
+    self.update(&ctx, window, hovered);
     let reveal = Rect::from_min_size(window.min, egui::vec2(window.width(), REVEAL_HEIGHT));
     let bar = Rect::from_min_size(window.min, egui::vec2(window.width(), BAR_HEIGHT));
 
     Frame {
       pointer_regions: [
         if self.shown { bar } else { reveal },
-        resize_grip(ctx, window, hovered),
+        resize_grip(&ctx, window, hovered),
       ],
       close: self.shown
-        && title_bar(ctx, bar, status, maximized(ctx), true)
-          .is_some_and(|action| action.apply(ctx)),
+        && title_bar(ui, bar, status, maximized(&ctx), true)
+          .is_some_and(|action| action.apply(&ctx)),
       resizing: self.resize.is_some(),
     }
   }
@@ -283,18 +284,19 @@ fn show_controls(
       .with_inner_size([width, BAR_HEIGHT]);
   }
   ctx.show_viewport_immediate(controls_id(), builder, |panel, class| {
-    if class == egui::ViewportClass::Embedded {
+    if class == egui::ViewportClass::EmbeddedWindow {
       return None;
     }
     if panel.input(|input| input.viewport().close_requested()) {
       return Some(Action::Close);
     }
-    title_bar(panel, panel.content_rect(), status, maximized, draggable)
+    let bounds = panel.ctx().content_rect();
+    title_bar(panel, bounds, status, maximized, draggable)
   })
 }
 
 fn title_bar(
-  ctx: &egui::Context,
+  ui: &mut egui::Ui,
   bounds: Rect,
   status: Status<'_>,
   maximized: bool,
@@ -302,12 +304,12 @@ fn title_bar(
 ) -> Option<Action> {
   let buttons_left = bounds.right() - BUTTON_STRIP_WIDTH;
   let title = Rect::from_min_max(bounds.min, egui::pos2(buttons_left, bounds.bottom()));
-  let dragging = draggable && primary_press_in(ctx, title);
-  egui::TopBottomPanel::top("ctream_title_bar")
-    .exact_height(BAR_HEIGHT)
-    .frame(egui::Frame::NONE.fill(ctx.style().visuals.panel_fill))
+  let dragging = draggable && primary_press_in(ui.ctx(), title);
+  egui::Panel::top("ctream_title_bar")
+    .exact_size(BAR_HEIGHT)
+    .frame(egui::Frame::NONE.fill(ui.visuals().panel_fill))
     .show_separator_line(false)
-    .show(ctx, |ui| {
+    .show(ui, |ui| {
       ui.set_min_size(bounds.size());
       ui.set_clip_rect(bounds);
       ui.painter().hline(
@@ -387,9 +389,9 @@ fn resize_grip(ctx: &egui::Context, window: Rect, hovered: Option<Pos2>) -> Rect
     ctx.set_cursor_icon(egui::CursorIcon::ResizeNwSe);
     let painter = ctx.layer_painter(egui::LayerId::new(
       egui::Order::Foreground,
-      egui::Id::new("ctream_resize_grip"),
+      egui::Id::unique("ctream_resize_grip"),
     ));
-    painter.rect_filled(grip, 0.0, ctx.style().visuals.panel_fill);
+    painter.rect_filled(grip, 0.0, ctx.global_style().visuals.panel_fill);
     for inset in [6.0, 10.0] {
       let corner = grip.max - egui::Vec2::splat(3.0);
       painter.line_segment(
@@ -397,7 +399,7 @@ fn resize_grip(ctx: &egui::Context, window: Rect, hovered: Option<Pos2>) -> Rect
           corner - egui::vec2(inset, 0.0),
           corner - egui::vec2(0.0, inset),
         ],
-        egui::Stroke::new(1.0_f32, ctx.style().visuals.text_color()),
+        egui::Stroke::new(1.0_f32, ctx.global_style().visuals.text_color()),
       );
     }
   }

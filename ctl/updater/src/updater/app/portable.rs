@@ -2,7 +2,6 @@
 
 use ctl_core::private_fs;
 use serde::{Deserialize, Deserializer};
-use sha2::{Digest as _, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, Metadata};
 use std::io::{self, Read as _, Seek as _, SeekFrom};
@@ -68,7 +67,8 @@ pub(super) fn stage_package(
   // when this validator runs on a Unix build/test host.
   for index in 0..zip.len() {
     let entry = zip.by_index(index).map_err(io::Error::other)?;
-    let name = entry.name().trim_end_matches('/');
+    let name = entry.name().map_err(io::Error::other)?;
+    let name = name.trim_end_matches('/');
     safe_path(name)?;
     if name != "ctmux" && !name.starts_with("ctmux/") {
       return Err(invalid(
@@ -95,7 +95,8 @@ pub(super) fn stage_package(
   private_fs::create_directory(&root)?;
   for index in 0..zip.len() {
     let entry = zip.by_index(index).map_err(io::Error::other)?;
-    let path = staging.join(entry.name().trim_end_matches('/'));
+    let name = entry.name().map_err(io::Error::other)?;
+    let path = staging.join(name.trim_end_matches('/'));
     if entry.is_dir() {
       ensure_directories(&root, &path)?;
     } else {
@@ -229,9 +230,8 @@ fn inventory(root: &Path) -> io::Result<BTreeMap<String, String>> {
         if files.len() >= MAX_FILES || *bytes > MAX_BYTES {
           return Err(invalid("portable app exceeds inventory limits"));
         }
-        let mut hash = Sha256::new();
-        io::copy(&mut open_regular(&path)?, &mut hash)?;
-        files.insert(name, format!("{:x}", hash.finalize()));
+        let (_, digest) = ctl_core::bundles::sha256_reader(open_regular(&path)?)?;
+        files.insert(name, hex::encode(digest));
       }
     }
     Ok(())

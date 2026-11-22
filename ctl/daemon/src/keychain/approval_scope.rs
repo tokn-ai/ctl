@@ -66,7 +66,7 @@ async fn snapshot_using<F: std::future::Future<Output = Option<Vec<u8>>>>(
       hash_part(&mut hash, &fingerprint);
     }
   }
-  Some(format!("{:x}", hash.finalize()))
+  Some(hex::encode(hash.finalize()))
 }
 
 fn route_targets(target: &SshTarget) -> Vec<SshTarget> {

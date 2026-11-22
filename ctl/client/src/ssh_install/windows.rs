@@ -156,7 +156,7 @@ pub(super) async fn install(
       "expected a complete Windows bundle and updater".into(),
     ));
   }
-  let digest = format!("{:x}", Sha256::digest(updater));
+  let digest = hex::encode(Sha256::digest(updater));
   let account_guard = account_guard(expected_account)?;
   let preparation = updater_preparation(origin)?;
   let updater_staging = super::updater_staging(RemotePlatform::Windows);

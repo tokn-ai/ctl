@@ -118,7 +118,7 @@ fn credential_history_links_host_without_replacing_credential_identity() {
   assert_eq!(record.correlation_id, Some(connection.correlation_id));
   assert_eq!(
     record.subject_id.as_deref(),
-    Some(format!("{:x}", Sha256::digest(b"credential-identity")).as_str())
+    Some(hex::encode(Sha256::digest(b"credential-identity")).as_str())
   );
   assert!(record.message().contains("retained approval; UI forbidden"));
   assert!(!record.message().contains("Touch ID succeeded"));

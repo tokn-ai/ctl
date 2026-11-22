@@ -391,7 +391,7 @@ fn provided_development_directory_resolves_its_sibling_updater_after_relocation(
     let metadata = serde_json::json!({
       "schema_version": 1, "app_version": version, "bundle_id": id, "git_revision": revision,
       "target_triple": target, "binary": name, "size": binary.len(),
-      "sha256": format!("{:x}", Sha256::digest(binary)),
+      "sha256": hex::encode(Sha256::digest(binary)),
     });
     std::fs::write(
       sidecars.join(format!("ctlup-{target}.json")),

@@ -424,7 +424,7 @@ fn regular_or_absent(path: &Path) -> CommandResult<()> {
 }
 
 fn revision(bytes: &[u8]) -> String {
-  format!("sha256:{:x}", Sha256::digest(bytes))
+  format!("sha256:{}", hex::encode(Sha256::digest(bytes)))
 }
 
 fn check_revision(current: Option<&str>, expected: Option<&str>) -> CommandResult<()> {

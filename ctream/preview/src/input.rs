@@ -119,7 +119,7 @@ impl<S: Sink> Input<S> {
     }
     if let Some(image) = image
       && ctx.input(|input| input.focused)
-      && !ctx.wants_keyboard_input()
+      && !ctx.egui_wants_keyboard_input()
     {
       self.forwarding = true;
       let (events, modifiers) = ctx.input(|input| (input.raw.events.clone(), input.modifiers));
@@ -222,6 +222,7 @@ impl<S: Sink> Input<S> {
           unit,
           delta,
           modifiers,
+          ..
         } if self
           .pointer
           .is_some_and(|pos| !is_local(pos, pointer_regions) && pixel(image, pos).is_some()) =>
@@ -305,6 +306,8 @@ mod tests {
       unit: egui::MouseWheelUnit::Line,
       delta: egui::vec2(0.0, 1.0),
       modifiers: Modifiers::NONE,
+      phase: egui::TouchPhase::Move,
+      source: egui::MouseWheelSource::Wheel,
     };
     for (image, expected) in [
       (

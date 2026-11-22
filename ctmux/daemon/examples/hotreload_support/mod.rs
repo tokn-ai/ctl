@@ -6,17 +6,19 @@
 //! daemons need a complete resource manifest and state codec instead.
 
 use ctmux_process_info::Inspector;
+use filedescriptor::FileDescriptor;
 use nix::errno::Errno;
 use nix::fcntl::{FcntlArg, FdFlag, OFlag, fcntl};
 use nix::sys::stat::fstat;
 use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
-use nix::unistd::{Pid, dup2, read, write};
+use nix::unistd::{Pid, dup2_stdin, dup2_stdout, read, write};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest as _, Sha256};
 use std::error::Error;
 use std::io::{self, Write as _};
+use std::os::fd::{AsFd, AsRawFd};
 use std::os::unix::process::CommandExt as _;
 use std::path::PathBuf;
 use std::process::{self, Command};
@@ -159,10 +161,10 @@ fn initialize(arguments: &[String]) -> ProofResult<(RuntimeState, TerminalRuntim
     .ok_or("PTY master has no terminal name")?
     .to_string_lossy()
     .into_owned();
-  dup2(master, 0)?;
-  dup2(master, 1)?;
-  let flags = OFlag::from_bits_retain(fcntl(0, FcntlArg::F_GETFL)?);
-  fcntl(0, FcntlArg::F_SETFL(flags | OFlag::O_NONBLOCK))?;
+  let mut master = FileDescriptor::dup(&RawDescriptor(master))?;
+  master.set_non_blocking(true)?;
+  dup2_stdin(&master)?;
+  dup2_stdout(master)?;
   // Never take portable-pty's writer: dropping it sends EOF to the shell.
   // These original handles are unnecessary once descriptors 0/1 own the master.
   drop(pair.master);
@@ -181,7 +183,7 @@ fn initialize(arguments: &[String]) -> ProofResult<(RuntimeState, TerminalRuntim
     view_id: Uuid::new_v4().to_string(),
     terminal_id: Uuid::new_v4().to_string(),
     tty_name,
-    fd_identity: descriptor_identity(0)?,
+    fd_identity: descriptor_identity(io::stdin())?,
     generation: 0,
     replacements,
     history: Vec::new(),
@@ -228,7 +230,9 @@ fn validate_restore(image: &str, state: &RuntimeState) -> ProofResult {
 }
 
 fn verify_descriptors(state: &RuntimeState) -> ProofResult {
-  for descriptor in [0, 1] {
+  let input = io::stdin();
+  let output = io::stdout();
+  for descriptor in [input.as_fd(), output.as_fd()] {
     if descriptor_identity(descriptor)? != state.fd_identity {
       return Err("inherited PTY identity changed".into());
     }
@@ -244,11 +248,11 @@ fn verify_descriptors(state: &RuntimeState) -> ProofResult {
 
 fn update_executable_identity(state: &mut RuntimeState) -> ProofResult {
   state.executable = std::env::current_exe()?;
-  state.executable_sha256 = format!("{:x}", Sha256::digest(std::fs::read(&state.executable)?));
+  state.executable_sha256 = hex::encode(Sha256::digest(std::fs::read(&state.executable)?));
   Ok(())
 }
 
-fn descriptor_identity(descriptor: i32) -> ProofResult<[String; 3]> {
+fn descriptor_identity(descriptor: impl AsFd) -> ProofResult<[String; 3]> {
   let stat = fstat(descriptor)?;
   Ok([
     stat.st_dev.to_string(),
@@ -466,7 +470,7 @@ fn receive_byte(deadline: Instant) -> ProofResult<u8> {
     if Instant::now() >= deadline {
       return Err("timed out waiting for PTY output".into());
     }
-    match read(0, &mut byte) {
+    match read(io::stdin(), &mut byte) {
       Ok(1) => return Ok(byte[0]),
       Ok(_) => return Err("PTY closed before the expected output".into()),
       Err(Errno::EINTR) => {}
@@ -507,7 +511,9 @@ fn report(image: &str, event: &str, state: &RuntimeState, extra: serde_json::Val
   object.insert("fd_count".into(), open_descriptor_count()?.into());
   let mut nonblocking = true;
   let mut close_on_exec = false;
-  for descriptor in [0, 1] {
+  let input = io::stdin();
+  let stdout = io::stdout();
+  for descriptor in [input.as_fd(), stdout.as_fd()] {
     nonblocking &=
       OFlag::from_bits_retain(fcntl(descriptor, FcntlArg::F_GETFL)?).contains(OFlag::O_NONBLOCK);
     close_on_exec |=
@@ -541,7 +547,15 @@ fn open_descriptor_count() -> ProofResult<u32> {
   Ok(u32::try_from(
     descriptors
       .into_iter()
-      .filter(|descriptor| fcntl(*descriptor, FcntlArg::F_GETFD).is_ok())
+      .filter(|descriptor| FileDescriptor::dup(&RawDescriptor(*descriptor)).is_ok())
       .count(),
   )?)
+}
+
+struct RawDescriptor(i32);
+
+impl AsRawFd for RawDescriptor {
+  fn as_raw_fd(&self) -> i32 {
+    self.0
+  }
 }

@@ -37,10 +37,7 @@ impl Fixture {
       .create(&repository)
       .unwrap();
     let repository = repository.canonicalize().unwrap();
-    let digest = format!(
-      "{:x}",
-      Sha256::digest(repository.to_str().unwrap().as_bytes())
-    );
+    let digest = hex::encode(Sha256::digest(repository.to_str().unwrap().as_bytes()));
     let target = home.0.join("target");
     let checkpoint = target.join("ctl-dev/helpers").join(&digest[..20]);
     let directory = checkpoint.join(format!("build-{}", manifest.sha256));

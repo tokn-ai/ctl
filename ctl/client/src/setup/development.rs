@@ -195,7 +195,7 @@ fn validate_checkpoint_path<'a>(
   let repository = repository_root.to_str().ok_or_else(|| {
     invalid("repository path is not UTF-8 and cannot identify its development helper")
   })?;
-  let digest = format!("{:x}", Sha256::digest(repository.as_bytes()));
+  let digest = hex::encode(Sha256::digest(repository.as_bytes()));
   let helpers = checkpoint
     .parent()
     .ok_or_else(|| invalid("checkpoint has no helper cache parent"))?;

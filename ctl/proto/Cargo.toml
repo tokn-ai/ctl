@@ -16,9 +16,9 @@ ctl-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
-tokio-util = { version = "0.7.18", features = ["compat"] }
+tokio-util = { version = "0.7.20", features = ["compat"] }
 uuid.workspace = true
-yamux = "0.13.8"
+yamux = "0.14.1"
 
 [lints]
 workspace = true

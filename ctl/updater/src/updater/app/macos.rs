@@ -2,7 +2,6 @@ use ctl_client::remote_bundle::desktop::DesktopSigning;
 use flate2::read::MultiGzDecoder;
 use libproc::proc_pid::pidpath;
 use libproc::processes::{ProcFilter, pids_by_type};
-use sha2::{Digest as _, Sha256};
 use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fs::{self, File};
@@ -207,9 +206,8 @@ fn file_digest(path: &Path, expected_bytes: u64) -> io::Result<Option<[u8; 32]>>
   if !metadata.is_file() || metadata.len() != expected_bytes {
     return Ok(None);
   }
-  let mut digest = Sha256::new();
-  let bytes = io::copy(&mut file.take(expected_bytes + 1), &mut digest)?;
-  Ok((bytes == expected_bytes).then(|| digest.finalize().into()))
+  let (bytes, digest) = ctl_core::bundles::sha256_reader(file.take(expected_bytes + 1))?;
+  Ok((bytes == expected_bytes).then_some(digest))
 }
 
 pub(super) fn is_running(app: &Path) -> io::Result<bool> {

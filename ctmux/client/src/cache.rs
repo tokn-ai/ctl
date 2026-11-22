@@ -100,7 +100,7 @@ fn invalid(message: &str) -> io::Error {
   io::Error::new(io::ErrorKind::InvalidData, message)
 }
 fn key(value: &str) -> String {
-  format!("{:x}", Sha256::digest(value))
+  hex::encode(Sha256::digest(value))
 }
 fn now_ms() -> u64 {
   u64::try_from(
@@ -1030,9 +1030,9 @@ impl CacheStore {
       digest.update(fs::read(path.join("current.json"))?);
     }
     let archive_id = format!(
-      "{ARCHIVE_ID_PREFIX}{}:{:x}",
+      "{ARCHIVE_ID_PREFIX}{}:{}",
       identity.session_id,
-      digest.finalize()
+      hex::encode(digest.finalize())
     );
     let archived = self.session_path(&identity.host_key, &archive_id, true);
     let parent = archived

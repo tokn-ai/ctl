@@ -34,7 +34,7 @@ fn fixture() -> VerifiedUpdater {
       git_revision: "a".repeat(40),
       target_triple: target.into(),
       binary: format!("ctlup-{bundle_id}-{target}"),
-      sha256: format!("{:x}", Sha256::digest(&bytes)),
+      sha256: hex::encode(Sha256::digest(&bytes)),
       size: bytes.len() as u64,
     },
     bytes,
@@ -153,7 +153,7 @@ fn updater_cache_budget_evicts_old_blobs_and_their_records_but_keeps_newer_conte
   let old = fixture();
   let mut new = fixture();
   new.bytes = b"new updater fixture".to_vec();
-  new.info.sha256 = format!("{:x}", Sha256::digest(&new.bytes));
+  new.info.sha256 = hex::encode(Sha256::digest(&new.bytes));
   new.info.size = new.bytes.len() as u64;
   let root = home.cache();
   cache_verified(&root, &old).unwrap();
@@ -222,11 +222,11 @@ fn missing_component_pins_keep_only_the_exact_target_and_content_record() {
   let expected = fixture();
   let mut wrong_id = fixture();
   wrong_id.bytes = b"separate cached updater".to_vec();
-  wrong_id.info.sha256 = format!("{:x}", Sha256::digest(&wrong_id.bytes));
+  wrong_id.info.sha256 = hex::encode(Sha256::digest(&wrong_id.bytes));
   wrong_id.info.size = wrong_id.bytes.len() as u64;
   let mut wrong_target = wrong_id.clone();
   wrong_target.bytes = b"cached updater for another target".to_vec();
-  wrong_target.info.sha256 = format!("{:x}", Sha256::digest(&wrong_target.bytes));
+  wrong_target.info.sha256 = hex::encode(Sha256::digest(&wrong_target.bytes));
   wrong_target.info.size = wrong_target.bytes.len() as u64;
   wrong_target.info.target_triple = "aarch64-unknown-linux-musl".into();
   wrong_target.info.binary = format!(

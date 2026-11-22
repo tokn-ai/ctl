@@ -50,7 +50,7 @@ impl<T: Transport + Send + Sync + 'static> Panel<T> {
     }
   }
 
-  pub fn show(&mut self, ctx: &egui::Context, frame_size: Option<[usize; 2]>) {
+  pub fn show(&mut self, ui: &mut egui::Ui, frame_size: Option<[usize; 2]>) {
     // The control geometry is a snapshot of the remote layout. Local panel and
     // window resizes keep the same frame size and can reuse the snapshot.
     if self.inspected_size != frame_size {
@@ -94,10 +94,10 @@ impl<T: Transport + Send + Sync + 'static> Panel<T> {
     }
     let mut refresh = false;
     let mut action = None;
-    egui::SidePanel::right("window_actions")
+    egui::Panel::right("window_actions")
       .resizable(true)
-      .default_width(PANEL_WIDTH)
-      .show(ctx, |ui| {
+      .default_size(PANEL_WIDTH)
+      .show(ui, |ui| {
         ui.heading("Window actions");
         ui.add_enabled_ui(self.pending.is_none(), |ui| {
           refresh = ui.button("Inspect controls").clicked();
@@ -140,6 +140,7 @@ impl<T: Transport + Send + Sync + 'static> Panel<T> {
           ui.label(status);
         }
       });
+    let ctx = ui.ctx();
     if refresh {
       self.inspected_size = frame_size;
       let session = self.session.clone();

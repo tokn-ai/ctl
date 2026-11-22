@@ -28,7 +28,7 @@ describe("HostColorPicker", () => {
     const trigger = screen.getByRole("button", { name: "Change color for Build" });
     const dot = trigger.querySelector<HTMLElement>(".host-color-dot")!;
     const original_color = dot.style.color;
-    expect(dot.style.background).toBe("currentcolor");
+    expect(dot.style.backgroundColor).toBe("currentcolor");
     expect(trigger.getAttribute("aria-description")).toBe("Connected");
 
     await user.click(trigger);
@@ -42,13 +42,13 @@ describe("HostColorPicker", () => {
     expect(trigger.querySelector(".host-color-dot")).toBe(dot);
     expect(trigger.getAttribute("data-connected")).toBe("false");
     expect(trigger.getAttribute("aria-description")).toBe("Not connected");
-    expect(dot.style.background).toBe("transparent");
+    expect(dot.style.backgroundColor).toBe("transparent");
     expect(dot.style.color).toBe(original_color);
     expect(reset_dot.style.background).toBe(reset_background);
 
     rerender(picker({ on_change, connected: true }));
     expect(trigger.getAttribute("data-connected")).toBe("true");
-    expect(dot.style.background).toBe("currentcolor");
+    expect(dot.style.backgroundColor).toBe("currentcolor");
     expect(dot.style.color).toBe(original_color);
     await user.click(screen.getByRole("button", { name: "Blue" }));
     expect(on_change).toHaveBeenCalledExactlyOnceWith(HOST_COLOR_PALETTE.find(({ label_id }) => label_id === "host_color.preset_blue")?.color);

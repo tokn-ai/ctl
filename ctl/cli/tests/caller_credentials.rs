@@ -140,6 +140,40 @@ fn bun_password_handoff_preserves_stdin_and_does_not_disclose_or_persist_secrets
 
 #[cfg(unix)]
 #[test]
+fn inherited_descriptor_rejects_closed_descriptors_and_regular_files() {
+  let _guard = ctl_core::test_fixtures::ProcessGuard::acquire_blocking();
+  let fixture = Fixture::new();
+  for (script, expected) in [
+    ("exec 3<&-\nexec \"$@\"", "Password descriptor is not open"),
+    (
+      "exec 3<\"$CTL_TEST_PASSWORD_FILE\"\nexec \"$@\"",
+      "Password descriptor must be a pipe or socket",
+    ),
+  ] {
+    let output = fixture
+      .command("/bin/sh")
+      .env("CTL_TEST_PASSWORD_FILE", fixture.0.join("key"))
+      .args(["-c", script, "ctl-fixture", env!("CARGO_BIN_EXE_ctl")])
+      .args([
+        "--destination",
+        "caller@[::1]",
+        "--password-fd",
+        "3",
+        "exec",
+        "--",
+        "true",
+      ])
+      .output()
+      .unwrap();
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(expected), "{stderr}");
+  }
+  assert!(!fixture.0.join("never-start.sock").exists());
+}
+
+#[cfg(unix)]
+#[test]
 #[ignore = "requires Node; explicitly exercised in Unix CI"]
 fn inherited_descriptor_handoff_preserves_stdin_and_rejects_missing_eof() {
   let _guard = ctl_core::test_fixtures::ProcessGuard::acquire_blocking();

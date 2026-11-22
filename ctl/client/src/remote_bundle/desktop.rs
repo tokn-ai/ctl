@@ -139,8 +139,7 @@ impl DesktopRelease {
     if metadata.len() > MAX_PACKAGE_BYTES {
       return Ok(false);
     }
-    let mut digest = Sha256::new();
-    let size = io::copy(&mut file.take(MAX_PACKAGE_BYTES + 1), &mut digest)?;
+    let (size, digest) = ctl_core::bundles::sha256_reader(file.take(MAX_PACKAGE_BYTES + 1))?;
     Ok(size > 0 && size <= MAX_PACKAGE_BYTES && self.asset.matches(digest))
   }
 
@@ -325,8 +324,8 @@ struct Asset {
 }
 
 impl Asset {
-  fn matches(&self, digest: Sha256) -> bool {
-    format!("{:x}", digest.finalize()) == self.sha256
+  fn matches(&self, digest: [u8; 32]) -> bool {
+    hex::encode(digest) == self.sha256
   }
 }
 
@@ -423,7 +422,7 @@ async fn write_verified(mut response: Response, file: &mut File, asset: &Asset) 
   if received == 0 || length.is_some_and(|length| length != received) {
     return Err(invalid("incomplete desktop package download"));
   }
-  if !asset.matches(digest) {
+  if !asset.matches(digest.finalize().into()) {
     return Err(invalid("desktop package SHA-256 checksum mismatch"));
   }
   Ok(())

@@ -17,11 +17,12 @@ dirs.workspace = true
 ctl-proto.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+hex.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 zeroize.workspace = true
-url = "2.5.8"
+url = "2.5.9"
 
 [target.'cfg(unix)'.dependencies]
 rustix = { workspace = true, features = ["net", "stdio"] }
@@ -30,7 +31,7 @@ rustix = { workspace = true, features = ["net", "stdio"] }
 # Require the pipe lifetime fix from https://github.com/tokio-rs/mio/pull/2014.
 mio.workspace = true
 windows-spawn = "0.1.0"
-interprocess = { version = "2.4.4", features = ["tokio"] }
+interprocess = { version = "2.4.9", features = ["tokio"] }
 widestring = "1.2.1"
 uuid = { workspace = true, features = ["v5"] }
 

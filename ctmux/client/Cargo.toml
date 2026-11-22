@@ -17,6 +17,7 @@ avt.workspace = true
 crossterm.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+hex.workspace = true
 sha2.workspace = true
 uuid.workspace = true
 ctmux-proto.workspace = true

@@ -32,7 +32,7 @@ viewer uses the same client for discovery, capture, input, and semantic actions.
 | `ctream-proto` | `ctream/proto` | Client and display host processes | None | Shared display, window, capture-driver catalog, control, and wire contract types |
 | `ctream-client` | `ctream/client` | CLI or viewer process | `ctream-proto` | Typed sessions, SSH/local transports, frame decoding, input forwarding, and coordinate transforms |
 | `ctream-driver` | `ctream/driver` | Display host process | `ctream-proto` | Platform-neutral driver and capability traits, with capture cancellation |
-| `ctream-driver-capture` | `ctream/driver-capture` | Linux or Windows display host | `ctream-driver`, `ctream-proto`, `ctream-windows` (Windows) | Official capture drivers and capturable-window enumeration |
+| `ctream-driver-capture` | `ctream/driver-capture` | Linux or Windows display host, or the local macOS viewer process | `ctream-driver`, `ctream-proto`, `ctream-windows` (Windows) | Official capture drivers, window enumeration, and macOS system picker capture |
 | `ctream-driver-input` | `ctream/driver-input` | Linux or Windows display host | `ctream-driver`, `ctream-windows` (Windows) | Official input drivers |
 | `ctream-windows` | `ctream/windows` | Windows interactive session | `ctream-proto` | Shared window identity, enumeration, and physical geometry for native drivers |
 | `ctream-platform` | `ctream/platform` | Agent or local CLI on the display host | `ctream-driver`, `ctream-proto`, `ctream-driver-capture` (Linux/Windows) | Display discovery, window-query dispatch, and AT-SPI controls |
@@ -167,7 +167,7 @@ installed font fallbacks.
 An incompatible window preselection stays an error until an explicit driver
 choice changes its scope; catalog discovery never widens it to display capture.
 With no arguments the welcome window lists saved workspace hosts. Use `--local`
-to open a local agent directly. The `--host`, `--agent`, `--ssh-program`, and
+to capture on the viewer machine. The `--host`, `--agent`, `--ssh-program`, and
 `--ssh-arg` options can still launch a manually installed remote agent.
 `--capture-driver ID` preselects
 an explicit provider, while omission selects **Auto**.
@@ -198,8 +198,8 @@ the native resize edges on macOS or the bottom-right resize grip on Linux and
 Windows. The inspector keeps its own panel. The compositor can constrain
 window sizes, especially when maximized or fullscreen.
 
-Enable **Debug overlay** in setup before selecting **Start** to show diagnostics
-in the viewer. Download and upload show ctream application bytes per second for
+In agent-backed setup, enable **Debug overlay** before selecting **Start** to show
+diagnostics in the viewer. Download and upload show ctream application bytes per second for
 the active source, excluding SSH and TCP framing. Latency is round-trip time to
 the agent over a dedicated channel on the same transport. Agents older than
 `ctream_agent` 1.0.10 show `N/A` for latency. FPS counts fresh frames drawn in
@@ -359,7 +359,18 @@ From the repository root on the viewer machine, run
 one in the welcome window. Append `:DISPLAY` or `wayland-N` to preselect a
 target, verify its live preview, and choose **Start**.
 
-For a display on the viewer machine, build with
+On macOS 14 or later, open the viewer and select **Capture a local window**.
+`ctream-preview --local` opens the same setup directly. With Screen Recording
+permission, the **Window** list works like the remote window list. Selecting a
+window opens its preview, and **Refresh windows** updates the list. **Use macOS
+picker…** grants ScreenCaptureKit access to one window for the capture session.
+**Start** opens the separate view-only viewer. Closing the viewer returns to
+setup, where you can stop capture or choose another window. The ScreenCaptureKit
+driver runs inside the viewer process. For windows chosen with the macOS picker,
+automatic source-close detection uses the window identity available on macOS
+15.2 and later.
+
+For a display on a Linux or Windows viewer machine, build with
 `cargo build -p ctream-agent -p ctream-preview` and run
 `cargo run -p ctream-preview -- --local`. The local transport finds the agent
 beside the viewer executable, falling back to `PATH`, and launches it over

@@ -1485,6 +1485,7 @@ dependencies = [
 name = "ctream-driver-capture"
 version = "0.1.0"
 dependencies = [
+ "cc",
  "ctream-driver",
  "ctream-proto",
  "ctream-windows",
@@ -1520,6 +1521,7 @@ dependencies = [
  "block2 0.6.2",
  "ctl-bundle",
  "ctream-client",
+ "ctream-driver-capture",
  "ctream-proto",
  "eframe",
  "objc2 0.6.4",

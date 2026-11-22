@@ -138,6 +138,19 @@ fn card(ui: &mut egui::Ui, name: &str, tags: &[Tag], selected: bool) -> egui::Re
   response
 }
 
+#[cfg(target_os = "macos")]
+pub(super) fn screen_capture_kit(ui: &mut egui::Ui) {
+  card(
+    ui,
+    "ScreenCaptureKit",
+    &[
+      Tag::new("macOS", TagStyle::System),
+      Tag::new("Window", TagStyle::Capability),
+    ],
+    true,
+  );
+}
+
 /// All advertised drivers remain visible regardless of the current source.
 /// Metadata supplies their tags, including for drivers compiled into custom agents.
 pub(super) fn chooser(

@@ -24,9 +24,79 @@ pub fn rect(rect: Rect<ViewportSpace>) -> egui::Rect {
   )
 }
 
+pub(super) fn upload(
+  ctx: &egui::Context,
+  texture: &mut Option<egui::TextureHandle>,
+  image: egui::ColorImage,
+) {
+  if let Some(texture) = texture {
+    texture.set(image, egui::TextureOptions::LINEAR);
+  } else {
+    *texture = Some(ctx.load_texture("capture", image, egui::TextureOptions::LINEAR));
+  }
+}
+
+pub(super) fn paint(
+  ui: &mut egui::Ui,
+  texture: &egui::TextureHandle,
+  area: egui::Rect,
+  image: &ImageGeometry,
+) -> egui::Rect {
+  // Painting alone does not occupy layout space.
+  ui.allocate_rect(area, egui::Sense::hover());
+  let rect = rect(image.viewport());
+  ui.painter().image(
+    texture.id(),
+    rect,
+    egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+    egui::Color32::WHITE,
+  );
+  rect
+}
+
 pub const MIN_WINDOW: egui::Vec2 = egui::vec2(200.0, 140.0);
 const PREFERRED_WINDOW: egui::Vec2 = egui::vec2(1100.0, 720.0);
 const RESIZE_SETTLE: Duration = Duration::from_millis(120);
+
+pub(super) fn viewer_id() -> egui::ViewportId {
+  egui::ViewportId::from_hash_of("ctream_viewer")
+}
+
+pub(super) fn viewer_builder(
+  ctx: &egui::Context,
+  initial: Option<([u32; 2], f32)>,
+) -> egui::ViewportBuilder {
+  let builder = egui::ViewportBuilder::default()
+    .with_title(super::chrome::VIEWER_TITLE)
+    .with_decorations(false)
+    .with_min_inner_size(MIN_WINDOW)
+    .with_active(true);
+  if let Some((image, sidebar)) = initial {
+    let monitor = ctx.input(|input| input.viewport().monitor_size);
+    builder.with_inner_size(initial_window(image, sidebar, monitor))
+  } else {
+    builder
+  }
+}
+
+pub(super) fn hide_setup(ctx: &egui::Context) {
+  ctx.send_viewport_cmd_to(
+    egui::ViewportId::ROOT,
+    egui::ViewportCommand::Visible(false),
+  );
+  ctx.send_viewport_cmd_to(viewer_id(), egui::ViewportCommand::Focus);
+}
+
+pub(super) fn restore_setup(ctx: &egui::Context) {
+  ctx.send_viewport_cmd_to(viewer_id(), egui::ViewportCommand::Visible(false));
+  ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Visible(true));
+  ctx.send_viewport_cmd_to(
+    egui::ViewportId::ROOT,
+    egui::ViewportCommand::Minimized(false),
+  );
+  ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
+  ctx.request_repaint_of(egui::ViewportId::ROOT);
+}
 
 fn aspect([width, height]: [u32; 2]) -> Option<f32> {
   (width > 0 && height > 0).then(|| width as f32 / height as f32)

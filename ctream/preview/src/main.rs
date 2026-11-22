@@ -13,9 +13,12 @@ mod input;
 mod latency;
 #[cfg(target_os = "macos")]
 mod macos_chrome;
+#[cfg(target_os = "macos")]
+mod macos_local;
 mod overlay;
 mod requests;
 mod semantic;
+mod setup;
 mod stats;
 mod view;
 mod welcome;
@@ -114,11 +117,7 @@ impl<T: Transport> Preview<T> {
       (stream.frame.take(), stream.end.clone())
     };
     if let Some(image) = frame {
-      if let Some(texture) = &mut self.texture {
-        texture.set(image, egui::TextureOptions::LINEAR);
-      } else {
-        self.texture = Some(ctx.load_texture("desktop", image, egui::TextureOptions::LINEAR));
-      }
+      view::upload(ctx, &mut self.texture, image);
       self.frames += 1;
       if self.frames == 2 {
         eprintln!("Live preview received two frames on the wgpu renderer.");
@@ -203,16 +202,7 @@ impl<T: Transport> Preview<T> {
         }
         return None;
       };
-      // Painting alone does not occupy layout space. Reserve the pane so its
-      // surrounding controls stay outside it.
-      ui.allocate_rect(area, egui::Sense::hover());
-      let rect = view::rect(image.viewport());
-      ui.painter().image(
-        texture.id(),
-        rect,
-        egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
-        egui::Color32::WHITE,
-      );
+      let rect = view::paint(ui, texture, area, &image);
       if error.is_none() {
         overlay::paint(ui.painter(), &image, elements);
       }
@@ -285,7 +275,7 @@ const USAGE: &str =
 
 TARGET is :DISPLAY, wayland-N, windows-N, or windows for the Windows desktop window list.
 Without an endpoint, choose a workspace host.
-Use --local to open the local agent directly.
+Use --local for local capture.
 Selections open a view-only setup preview. Start hides setup and opens a separate viewer.
 Hover over the viewer's top edge for window controls. Closing it releases control and restores setup.";
 
@@ -436,6 +426,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
       Box::new(move |cc| Ok(Box::new(workspace::Preview::new(source, &cc.egui_ctx)))),
     ),
     Endpoint::Local => {
+      #[cfg(target_os = "macos")]
+      if !connection.agent_is_explicit() {
+        if source.target.is_some()
+          || !matches!(source.driver.as_str(), "auto" | macos_local::DRIVER)
+        {
+          return Err(invalid("Use the system picker to select a local macOS window, or specify --agent for a custom local agent.").into());
+        }
+        return run(
+          "ctream · local",
+          Box::new(|cc| Ok(Box::new(macos_local::Viewer::new(&cc.egui_ctx)))),
+        );
+      }
       let transport = connection.local()?;
       run(
         "ctream · local",

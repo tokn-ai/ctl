@@ -3,7 +3,9 @@ use super::{
   welcome::Viewer,
   workspace_hosts::{Host, Workspace},
 };
-use ctream_client::transport::{Channel, Local, ProcessReader, SshCommand, Transport};
+#[cfg(not(target_os = "macos"))]
+use ctream_client::transport::Local;
+use ctream_client::transport::{Channel, ProcessReader, SshCommand, Transport};
 use eframe::egui;
 use std::{
   io,
@@ -17,6 +19,7 @@ use std::{
 };
 
 enum Connection {
+  #[cfg(not(target_os = "macos"))]
   Local(Local),
   Remote(SshCommand),
 }
@@ -27,8 +30,33 @@ impl Transport for Connection {
 
   fn open(&self, arguments: &[String]) -> io::Result<Channel<Self::Reader, Self::Writer>> {
     match self {
+      #[cfg(not(target_os = "macos"))]
       Self::Local(local) => local.open(arguments),
       Self::Remote(remote) => remote.open(arguments),
+    }
+  }
+}
+
+enum Connected {
+  Agent(Box<Viewer<Connection>>),
+  #[cfg(target_os = "macos")]
+  Macos(Box<super::macos_local::Viewer>),
+}
+
+impl Connected {
+  fn is_viewing(&self) -> bool {
+    match self {
+      Self::Agent(viewer) => viewer.is_viewing(),
+      #[cfg(target_os = "macos")]
+      Self::Macos(viewer) => viewer.is_viewing(),
+    }
+  }
+
+  fn update_ui(&mut self, ctx: &egui::Context) {
+    match self {
+      Self::Agent(viewer) => viewer.update_ui(ctx),
+      #[cfg(target_os = "macos")]
+      Self::Macos(viewer) => viewer.update_ui(ctx),
     }
   }
 }
@@ -56,7 +84,7 @@ pub(super) struct Preview {
   host_error: Option<String>,
   connecting: Option<Connecting>,
   connect_error: Option<String>,
-  connected: Option<(String, Viewer<Connection>)>,
+  connected: Option<(String, Connected)>,
 }
 
 impl Preview {
@@ -108,7 +136,10 @@ impl Preview {
   }
 
   fn open(&mut self, name: String, connection: Connection, ctx: &egui::Context) {
-    self.connected = Some((name, self.source.clone().viewer(connection, ctx)));
+    self.connected = Some((
+      name,
+      Connected::Agent(Box::new(self.source.clone().viewer(connection, ctx))),
+    ));
   }
 
   fn poll(&mut self, ctx: &egui::Context) {
@@ -165,8 +196,14 @@ impl Preview {
     if self.connecting.is_none() {
       egui::TopBottomPanel::bottom("workspace_actions").show(ctx, |ui| {
         ui.horizontal(|ui| {
+          #[cfg(not(target_os = "macos"))]
           if ui.button("Use local agent").clicked() {
             self.open("Local".into(), Connection::Local(Local::default()), ctx);
+          }
+          #[cfg(target_os = "macos")]
+          if ui.button("Capture a local window").clicked() {
+            let viewer = Box::new(super::macos_local::Viewer::new(ctx));
+            self.connected = Some(("Local".into(), Connected::Macos(viewer)));
           }
           let selected = self
             .hosts

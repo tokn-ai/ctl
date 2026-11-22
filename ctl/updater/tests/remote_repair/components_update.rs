@@ -124,10 +124,7 @@ fn published_receiver_verifies_reuses_and_repairs_a_build() {
       .starts_with(b"ctl-published-reused-v1\nctl-published-install-v1\n")
   );
 
-  let payload = installations
-    .updater_root()
-    .join("store/runtime")
-    .join(&installed.bundle_id);
+  let payload = installations.get(&installed.bundle_id).unwrap().directory;
   fs::rename(&payload, fixture.0.join("hidden-runtime")).unwrap();
   assert_eq!(
     installations.inspect().unwrap().missing,
@@ -144,6 +141,7 @@ fn published_receiver_verifies_reuses_and_repairs_a_build() {
     serde_json::from_slice::<ctl_core::bundles::Manifest>(manifest).unwrap(),
     installed
   );
+  assert!(payload.is_dir());
   assert_eq!(installations.active().unwrap().unwrap().manifest, installed);
 }
 
@@ -359,11 +357,14 @@ fn assert_installed_bundle(fixture: &Fixture, bundle_id: &str) {
     Some(bundle_id)
   );
   assert_eq!(
-    installed.directory,
-    account
-      .join("ctlup/store/runtime")
-      .join(&installed.manifest.bundle_id)
+    installed.directory.file_name().unwrap(),
+    installed.manifest.target_triple.as_str()
   );
+  let build = installed.directory.parent().unwrap();
+  assert_eq!(build.parent().unwrap(), account.join("ctlup/store/runtime"));
+  let name = build.file_name().unwrap().to_str().unwrap();
+  assert!(name.starts_with("provided-"), "{name}");
+  assert!(name.contains("-v0.0.9-"), "{name}");
   assert_eq!(
     fs::read_to_string(account.join("remote-id")).unwrap(),
     EXPECTED_ID

@@ -28,6 +28,14 @@ pub(super) fn dispatch() -> io::Result<Option<i32>> {
   if executable.parent() != Some(bin.as_path()) {
     return Ok(None);
   }
+  if name == "ctlup"
+    && env::args_os()
+      .nth(1)
+      .is_some_and(|arg| arg == "export-manager")
+  {
+    // Bootstrap can read a retained updater even when the selected one is missing.
+    return Ok(None);
+  }
   let (path, _lease) = if name == "ctlup" {
     installations
       .manager_and_lease()?

@@ -3,8 +3,8 @@ use super::*;
 const VALID_PROGRESS: &[u8] = b"ctl-install-progress-v1 receiving 0\nctl-install-progress-v1 receiving 5\nctl-install-progress-v1 receiving 10\nctl-install-progress-v1 extracting\nctl-install-progress-v1 checking ctl-agent\nctl-install-progress-v1 checking ctmuxd\nctl-install-progress-v1 checking ctl-taskd\nctl-install-progress-v1 checking ctld\nctl-install-progress-v1 activating\nctl-install-v1\n";
 
 #[cfg(unix)]
-const PREPARATION_UPDATER_FIXTURE: &[u8] = br#"#!/bin/sh
-if [ "$1" = installation-layout-version ]; then printf '2\n'; exit 0; fi
+const PREPARATION_UPDATER_FIXTURE: &str = r#"#!/bin/sh
+if [ "$1" = installation-layout-version ]; then printf '__LAYOUT_VERSION__\n'; exit 0; fi
 printf '%s\n' "$1" >> "$HOME/calls"
 case "$1" in
   prepare-install)
@@ -29,7 +29,11 @@ async fn updater_preparation_preserves_archive_input_and_only_falls_back_for_old
   let home = fixture.directory.join("origin-home");
   let manager = home.join(".tokn/ctl/bin/ctlup");
   std::fs::create_dir_all(manager.parent().unwrap()).unwrap();
-  std::fs::write(&manager, PREPARATION_UPDATER_FIXTURE).unwrap();
+  let fixture_script = PREPARATION_UPDATER_FIXTURE.replace(
+    "__LAYOUT_VERSION__",
+    &ctl_core::installations::DEVELOPMENT_LAYOUT_VERSION.to_string(),
+  );
+  std::fs::write(&manager, fixture_script).unwrap();
   std::fs::set_permissions(&manager, std::fs::Permissions::from_mode(0o700)).unwrap();
   let origin = ctl_core::installations::CatalogOrigin {
     channel: "nightly".into(),
@@ -117,11 +121,11 @@ async fn updater_bootstrap_verifies_bytes_and_executable_before_replacing_the_ma
   let home = fixture.directory.join("home");
   let binary = home.join(".tokn/ctl/bin/ctlup");
   let launcher = binary.with_file_name(".ctl-launcher");
-  let updater = br#"#!/bin/sh
+  let updater = r#"#!/bin/sh
 case "$1" in
   --component-info) exit 0;;
   --version) printf 'ctlup 0.0.0\n';;
-  installation-layout-version) printf '2\n';;
+  installation-layout-version) printf '__LAYOUT_VERSION__\n';;
   updater-digest)
     touch "$HOME/probed"
     if command -v sha256sum >/dev/null 2>&1; then hash=$(sha256sum "$0"); else hash=$(shasum -a 256 "$0"); fi
@@ -134,7 +138,12 @@ case "$1" in
     if [ ! -L "$destination" ]; then ln -s .ctl-launcher "$destination"; fi;;
   *) exit 1;;
 esac
-"#;
+"#
+  .replace(
+    "__LAYOUT_VERSION__",
+    &ctl_core::installations::DEVELOPMENT_LAYOUT_VERSION.to_string(),
+  );
+  let updater = updater.as_bytes();
   let run = |script: String| {
     let mut command = Command::new("sh");
     command.args(["-c", &script]).env("HOME", &home);

@@ -399,10 +399,14 @@ SSH framing and daemon negotiation remain unchanged.
 
 The updater state under `ctlup/state/installations.json` has storage schema 2.
 It contains active runtime, desktop, and updater selections, source metadata,
-and retained runtime registrations. A verified manager advertises storage
-layout 2 through `installation-layout-version`. SSH installations require
-a target updater that can write the new layout. This is a breaking change
-for older updater binaries.
+and retained runtime registrations. Storage layout 3 adds the runtime path
+index. Layout 4 adds an updater path index for readable updater directories.
+Layout 5 groups runtime and updater payloads by build label, then target.
+Layout 6 puts the locally executable updater directly under its build label.
+Path indexes coexist with the earlier indexes so retained executables can
+lease their original paths. A verified manager advertises layout 6 through
+`installation-layout-version`. SSH provisioning requires a layout-6 target
+updater. This capability has no separate internal build.
 
 Inventory uses schema 2 and the private `ctlup-show-v2` marker. The previous
 `ctlup-show-v1` schema did not carry the exact active origin. New inventory
@@ -415,6 +419,9 @@ the destination's tracked channel. The private `catalog-json` response
 continues to use `ctlup-catalog-v1`.
 
 The private `prepare-install` operation validates the registry before transfer.
+The private `export-manager --sha256` operation writes the exact verified
+updater bytes when they are retained, or exits with code 10 when they are
+absent. The receiver verifies the transferred size and digest again.
 For direct published installs, the client sends the exact bundle-set metadata
 and can supply cached bytes. The target verifies the archive and replies with
 `ctl-published-install-v1`. Pre-install download unavailability uses

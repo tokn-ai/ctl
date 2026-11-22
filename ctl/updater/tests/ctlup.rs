@@ -61,6 +61,13 @@ impl Home {
     self.updater_root().join("store/runtime")
   }
 
+  fn payload(&self, bundle_id: &str) -> PathBuf {
+    ctl_core::installations::Installations::new(&self.0)
+      .get(bundle_id)
+      .unwrap()
+      .directory
+  }
+
   fn install(&self, archive: &[u8]) -> Output {
     let mut child = self
       .command_manager(&["install-archive"])
@@ -190,7 +197,15 @@ fn runtime_preflight_reads_the_registry_without_replacing_the_selection() {
     .unwrap()
     .unwrap();
   assert_eq!(installed.manifest, active);
-  assert_eq!(installed.directory, home.payloads().join(active.bundle_id));
+  assert_eq!(
+    installed.directory.file_name().unwrap(),
+    active.target_triple.as_str()
+  );
+  assert_eq!(
+    installed.directory.ancestors().nth(2).unwrap(),
+    home.payloads()
+  );
+  assert_eq!(installed.directory, home.payload(&active.bundle_id));
 }
 
 #[test]
@@ -235,6 +250,7 @@ fn status_reports_missing_installed_bundles_and_archive_install_restores_them() 
   let installed = home.install(&bytes);
   assert!(installed.status.success(), "{installed:?}");
   let catalog = fs::read(home.registry()).unwrap();
+  let payload = home.payload(&manifest.bundle_id);
   fs::rename(home.payloads(), home.0.join("saved-runtime")).unwrap();
 
   let output = home.command(&["status", "--json"]).output().unwrap();
@@ -273,7 +289,7 @@ fn status_reports_missing_installed_bundles_and_archive_install_restores_them() 
   assert_eq!(probe.status.code(), Some(10), "{probe:?}");
   let recovered = home.install(&bytes);
   assert!(recovered.status.success(), "{recovered:?}");
-  assert!(home.payloads().join(&manifest.bundle_id).is_dir());
+  assert!(payload.is_dir());
   let output = home.command(&["status", "--json"]).output().unwrap();
   assert!(output.status.success(), "{output:?}");
   let status: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
@@ -422,14 +438,19 @@ fn full_storage_override_provisions_an_independent_installation() {
   let output = child.wait_with_output().unwrap();
   assert!(output.status.success(), "{output:?}");
   let updater_root = root.join("ctlup");
-  let payload = updater_root.join("store/runtime").join(&manifest.bundle_id);
-  assert!(payload.is_dir());
-  assert!(updater_root.join("state/installations.json").is_file());
-  assert!(
-    updater_root
-      .join("refs/runtime/dev/provided/0.1.2")
-      .is_dir()
+  let mut builds = fs::read_dir(updater_root.join("store/runtime")).unwrap();
+  let build = builds.next().unwrap().unwrap().path();
+  assert!(builds.next().is_none());
+  let name = build.file_name().unwrap().to_str().unwrap();
+  assert!(name.starts_with("provided-"), "{name}");
+  assert!(name.contains("-v0.1.2-"), "{name}");
+  let payload = build.join(&manifest.target_triple);
+  assert_eq!(
+    serde_json::from_slice::<Manifest>(&fs::read(payload.join(MANIFEST_FILE)).unwrap()).unwrap(),
+    manifest
   );
+  assert!(updater_root.join("state/installations.json").is_file());
+  assert!(!updater_root.join("refs").exists());
   assert!(root.join("bin/ctl").is_file());
   let output = home
     .command(&["status", "--json"])
@@ -495,7 +516,7 @@ fn install_from_files_provisions_the_independent_manager_and_complete_commands()
   assert!(!root.join("components/selected").exists());
 
   let active = status["active"].as_str().unwrap();
-  let payload = home.payloads().join(active);
+  let payload = home.payload(active);
   fs::remove_dir_all(&payload).unwrap();
   let repair = home
     .command_at(&manager, &["update", "--json"])
@@ -577,7 +598,22 @@ printf '{"schema_version":1,"binary_directory":"%s/bin","manager_executable":"%s
       .as_deref(),
     rebuilt["bundle_id"].as_str(),
   );
-  assert!(home.updater_root().join("refs/runtime/dev").is_dir());
+  let payload = home.payload(rebuilt["bundle_id"].as_str().unwrap());
+  assert_eq!(
+    payload.file_name().unwrap(),
+    ctl_core::paths::native_target()
+  );
+  let name = payload
+    .parent()
+    .unwrap()
+    .file_name()
+    .unwrap()
+    .to_str()
+    .unwrap();
+  assert!(name.starts_with("dev-"), "{name}");
+  assert!(name.contains("-v0.1.2-"), "{name}");
+  assert!(name.ends_with("-local"), "{name}");
+  assert!(!home.updater_root().join("refs").exists());
 }
 
 #[test]

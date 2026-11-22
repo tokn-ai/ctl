@@ -63,7 +63,9 @@ fn stable_launchers_follow_selection_while_a_lease_pins_a_superseded_payload() {
   assert!(installs.previous().unwrap().is_none());
   assert!(!installs.root().exists());
 
-  installs.install_manager(b"launcher").unwrap();
+  installs
+    .install_manager(b"launcher", &super::manager_build_fixture(), None)
+    .unwrap();
   let launcher = installs.root().join("bin/ctl.exe");
   let first = installs.activate(&bundle(&home.0, 1)).unwrap();
   let (selected, lease) = installs.active_and_lease().unwrap().unwrap();
@@ -92,7 +94,9 @@ fn stable_launchers_follow_selection_while_a_lease_pins_a_superseded_payload() {
   );
   assert!(!first.directory.exists());
 
-  installs.install_manager(b"new updater").unwrap();
+  installs
+    .install_manager(b"new updater", &super::manager_build_fixture(), None)
+    .unwrap();
   assert_eq!(fs::read(launcher).unwrap(), b"launcher");
 }
 
@@ -100,7 +104,9 @@ fn stable_launchers_follow_selection_while_a_lease_pins_a_superseded_payload() {
 fn command_collision_cannot_change_active_selection() {
   let home = Home::new();
   let installs = Installations::new(&home.0);
-  installs.install_manager(b"launcher").unwrap();
+  installs
+    .install_manager(b"launcher", &super::manager_build_fixture(), None)
+    .unwrap();
   let first = installs.activate(&bundle(&home.0, 1)).unwrap();
   let command = installs.root().join("bin/ctmux.exe");
   fs::write(&command, b"other command").unwrap();
@@ -119,13 +125,17 @@ fn a_running_manager_keeps_its_payload_when_a_new_manager_is_selected() {
   assert!(installs.manager_and_lease().unwrap().is_none());
   assert!(!installs.root().exists());
 
-  installs.install_manager(b"first manager").unwrap();
+  installs
+    .install_manager(b"first manager", &super::manager_build_fixture(), None)
+    .unwrap();
   let (old_path, lease) = installs.manager_and_lease().unwrap().unwrap();
   let executable = old_path.canonicalize().unwrap();
   let direct = super::leases::lease_executable(&executable)
     .unwrap()
     .unwrap();
-  installs.install_manager(b"new manager").unwrap();
+  installs
+    .install_manager(b"new manager", &super::manager_build_fixture(), None)
+    .unwrap();
   let (active_path, _active_lease) = installs.manager_and_lease().unwrap().unwrap();
   assert_eq!(fs::read(&active_path).unwrap(), b"new manager");
   assert_eq!(

@@ -95,7 +95,13 @@ pub async fn install_host_publication(
   })
   .await
   .map_err(io::Error::other)??;
-  crate::installation::provision_manager_from(&home, &std::env::current_exe()?).await?;
+  crate::installation::provision_manager_from_for_build(
+    &home,
+    &std::env::current_exe()?,
+    Some(&origin),
+    &bundle.manifest.components["ctl-agent"].build,
+  )
+  .await?;
   let activated = tokio::task::spawn_blocking(move || {
     let (installed, _lease) =
       crate::installation::activate_uploaded(&home, &bundle, Some(&origin))?;

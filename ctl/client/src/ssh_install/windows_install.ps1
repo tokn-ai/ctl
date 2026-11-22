@@ -1,6 +1,5 @@
 $ErrorActionPreference = 'Stop'
 __ACCOUNT_GUARD__
-__MANAGER__
 __UPDATER_STAGING__
 # ConsoleStream blocks on OpenSSH pipes; keep raw stdin open for the child.
 Add-Type -TypeDefinition @'
@@ -13,13 +12,16 @@ public static class CtlStdin {
 '@
 $handle = [Microsoft.Win32.SafeHandles.SafeFileHandle]::new([CtlStdin]::GetStdHandle(-10), $false)
 $inputStream = [IO.FileStream]::new($handle, [IO.FileAccess]::Read, 1)
-$remaining = __UPDATER_SIZE__
+$remaining = __UPDATER_PREFIX_BYTES__
+$size = __UPDATER_SIZE__
+$sha = '__UPDATER_SHA256__'
+$dir = $null
 $stage = $null
 try {
+  $dir = New-UpdaterStaging
+  $stage = Join-Path $dir 'ctlup.exe'
   if ($remaining) {
-    $path = Join-Path (Get-UpdaterStaging) ('ctlup-' + [Guid]::NewGuid().ToString('N') + '.exe')
-    $file = [IO.File]::Open($path, 'CreateNew', 'Write', 'None')
-    $stage = $path
+    $file = [IO.File]::Open($stage, 'CreateNew', 'Write', 'None')
     try {
       $buffer = [byte[]]::new(65536)
       while ($remaining -gt 0) {
@@ -29,16 +31,13 @@ try {
         $remaining -= $count
       }
     } finally { $file.Dispose() }
-    if ((Get-FileHash -LiteralPath $stage -Algorithm SHA256).Hash -ne '__UPDATER_SHA256__') {
+    if (!(Test-StagedUpdater $stage $size $sha)) {
       throw 'ctlup executable failed checksum verification.'
     }
-    $manager = $stage
-  } else {
-    $manager = Join-Path $env:USERPROFILE '.tokn\ctl\ctlup\store\updater\__UPDATER_SHA256__\ctlup.exe'
-    if ((Get-FileHash -LiteralPath $manager -Algorithm SHA256).Hash -ne '__UPDATER_SHA256__') {
-      throw 'The selected ctlup changed during the update.'
-    }
+  } elseif (!(Copy-RetainedUpdater $stage $size $sha)) {
+    throw 'The selected ctlup changed during the update.'
   }
+  $manager = $stage
   __UPDATE_PREPARATION__
   $start = New-Object Diagnostics.ProcessStartInfo
   $start.FileName = $manager
@@ -57,4 +56,5 @@ try {
 } finally {
   $inputStream.Dispose()
   if ($stage) { Remove-Item -LiteralPath $stage -Force -ErrorAction SilentlyContinue }
+  if ($dir) { [IO.Directory]::Delete($dir) }
 }

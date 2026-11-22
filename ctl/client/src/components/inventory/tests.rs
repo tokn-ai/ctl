@@ -154,7 +154,13 @@ fn active_catalog_installation_is_visible_once_alongside_its_cached_copy() {
   let cached = cache.publish(&manifest, &fixture.files).unwrap();
   let installs = Installations::new(&home);
   #[cfg(windows)]
-  installs.install_manager(b"fixture manager").unwrap();
+  installs
+    .install_manager(
+      b"fixture manager",
+      &manifest.components["ctl-agent"].build,
+      None,
+    )
+    .unwrap();
   installs.activate(&cached).unwrap();
   let listed = snapshot(&home, None, &[]);
   assert!(listed.errors.is_empty(), "{:?}", listed.errors);

@@ -109,7 +109,11 @@ fn activation_switches_stable_commands_without_keeping_a_previous_build() {
   assert!(first.directory.starts_with(installs.runtime_root()));
   assert!(installs.previous().unwrap().is_none());
   installs
-    .install_manager(b"verified fixture launcher")
+    .install_manager(
+      b"verified fixture launcher",
+      &super::manager_build_fixture(),
+      None,
+    )
     .unwrap();
   for name in crate::bundle_layout::ALL.into_iter().chain(["ctlup"]) {
     assert_eq!(
@@ -468,7 +472,9 @@ fn desktop_and_updater_selections_share_the_registry_without_losing_each_other()
   let home = Home::new();
   let installs = Installations::new(&home.0);
   let runtime = installs.activate(&fixture(&home.0, 1, true)).unwrap();
-  installs.install_manager(b"test launcher").unwrap();
+  installs
+    .install_manager(b"test launcher", &super::manager_build_fixture(), None)
+    .unwrap();
   let (updater, updater_lease) = installs.manager_and_lease().unwrap().unwrap();
   let desktop = DesktopSelection {
     content_id: "d".repeat(64),
@@ -505,7 +511,9 @@ fn desktop_and_updater_selections_share_the_registry_without_losing_each_other()
       filesystem::ensure_directory(&installs.desktop_root().join(&next.content_id))
     })
     .unwrap();
-  installs.install_manager(b"second updater").unwrap();
+  installs
+    .install_manager(b"second updater", &super::manager_build_fixture(), None)
+    .unwrap();
   assert_eq!(
     installs.active().unwrap().unwrap().manifest,
     runtime.manifest

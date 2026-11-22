@@ -240,7 +240,7 @@ Managed schema 2 identifies a complete six-executable build, and managed schema 
 continues to identify its four-executable predecessors.
 
 A full installation uses one immutable payload under
-`~/.tokn/ctl/ctlup/store/runtime/<content-id>` and atomically updates the active
+`~/.tokn/ctl/ctlup/store/runtime/<build>/<target>` and atomically updates the active
 selection in `~/.tokn/ctl/ctlup/state/installations.json`. Stable commands live in
 `~/.tokn/ctl/bin`, including the launcher for the independently selected `ctlup`
 executable. Managed terminal sessions and ctl SSH launches add that directory

@@ -149,7 +149,13 @@ pub async fn install(home: &Path, options: DevelopmentOptions) -> io::Result<Pre
       "the checkout's installed build changed while preparing the source; retry the build",
     ));
   }
-  crate::installation::provision_manager_from(home, &descriptor.manager_executable).await?;
+  crate::installation::provision_manager_from_for_build(
+    home,
+    &descriptor.manager_executable,
+    Some(&origin),
+    &runtime.build,
+  )
+  .await?;
   let (installed, lease) = tokio::task::spawn_blocking(move || {
     // Keep the verified snapshot alive even if the caller drops its future
     // while the installation transaction is running.

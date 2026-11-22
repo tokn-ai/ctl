@@ -3,7 +3,9 @@
 use super::{TargetOptions, remote::Target, status};
 use ctl_client::installation::{InstallationShow, InstalledBuild};
 use ctl_core::bundles::Source;
-use ctl_core::installations::CatalogEntry;
+use ctl_core::installations::{CatalogEntry, CatalogOrigin};
+use ctl_core::installed_build_name;
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::io;
@@ -78,19 +80,47 @@ pub(super) fn render(snapshot: &InstallationShow, development: bool) -> String {
     return format!("No managed ctl installation.\n{next}");
   }
   let ids = rows.keys().map(String::as_str).collect::<Vec<_>>();
+  let labels = rows
+    .values()
+    .map(|row| (row.id, row.label(snapshot, &ids)))
+    .collect::<BTreeMap<_, _>>();
+  let mut label_counts = BTreeMap::<_, usize>::new();
+  for (id, label) in &labels {
+    *label_counts
+      .entry((rows[*id].target(), label.as_str()))
+      .or_default() += 1;
+  }
+  let label = |row: &BuildRow<'_>| {
+    let name = &labels[row.id];
+    if label_counts[&(row.target(), name.as_str())] > 1 {
+      format!("{name}-{}", short_id(row.id, &ids))
+    } else {
+      name.clone()
+    }
+  };
   let selection = |id: Option<&str>| {
     let Some(id) = id else {
       return "none".into();
     };
-    let short = short_id(id, &ids);
-    if rows.get(id).is_some_and(|row| row.missing) {
-      format!("{short} (missing)")
-    } else {
-      short
-    }
+    rows.get(id).map_or_else(
+      || short_id(id, &ids),
+      |row| {
+        let name = label(row);
+        if row.missing {
+          format!("{name} (missing)")
+        } else {
+          name
+        }
+      },
+    )
   };
   let mut ordered = rows.values().collect::<Vec<_>>();
-  ordered.sort_by_key(|row| (row.rank(snapshot), row.target(), row.id));
+  ordered.sort_by(|left, right| {
+    (left.rank(snapshot), left.target())
+      .cmp(&(right.rank(snapshot), right.target()))
+      .then_with(|| left.compare_build(right, snapshot))
+      .then_with(|| left.id.cmp(right.id))
+  });
   let table = crate::table::format(
     [
       "BUILD",
@@ -102,7 +132,9 @@ pub(super) fn render(snapshot: &InstallationShow, development: bool) -> String {
       "BUILD DATE",
       "STATE",
     ],
-    ordered.into_iter().map(|row| row.cells(snapshot, &ids)),
+    ordered
+      .into_iter()
+      .map(|row| row.cells(snapshot, label(row))),
   );
   let mut text = format!("Active: {}\n", selection(snapshot.active.as_deref()));
   if let Some(origin) = &snapshot.active_origin {
@@ -112,7 +144,9 @@ pub(super) fn render(snapshot: &InstallationShow, development: bool) -> String {
       "Pinned to"
     };
     let _ = write!(text, "{source} {}", origin.channel);
-    if let Some(id) = &origin.publication_id {
+    if let Some(id) = &origin.publication_id
+      && (origin.channel != "local" || !id.starts_with("local."))
+    {
       let _ = write!(text, " ({id})");
     }
     text.push('\n');
@@ -136,7 +170,7 @@ struct BuildRow<'a> {
   missing: bool,
 }
 
-impl BuildRow<'_> {
+impl<'a> BuildRow<'a> {
   fn target(&self) -> &str {
     self
       .build
@@ -216,7 +250,7 @@ impl BuildRow<'_> {
     }
   }
 
-  fn cells(&self, snapshot: &InstallationShow, ids: &[&str]) -> [String; 8] {
+  fn cells(&self, snapshot: &InstallationShow, label: String) -> [String; 8] {
     let (version, revision, source) = self.build.map_or_else(
       || ("unknown".into(), "unknown".into(), "unknown"),
       |summary| {
@@ -243,7 +277,7 @@ impl BuildRow<'_> {
       format!("bundle-{}", self.target())
     };
     [
-      short_id(self.id, ids),
+      label,
       version,
       revision,
       source.into(),
@@ -252,6 +286,39 @@ impl BuildRow<'_> {
       self.build_date(),
       self.states(snapshot).join(", "),
     ]
+  }
+
+  fn origin(&self, snapshot: &'a InstallationShow) -> Option<&'a CatalogOrigin> {
+    if snapshot.active.as_deref() == Some(self.id)
+      && let Some(origin) = &snapshot.active_origin
+    {
+      return Some(origin);
+    }
+    self
+      .entries
+      .iter()
+      .filter_map(|entry| entry.origin.as_ref().map(|origin| (entry.current, origin)))
+      .max_by_key(|(current, origin)| (*current, origin.built_at.as_deref()))
+      .map(|(_, origin)| origin)
+  }
+
+  fn label(&self, snapshot: &'a InstallationShow, ids: &[&str]) -> String {
+    self.build.map_or_else(
+      || short_id(self.id, ids),
+      |build| installed_build_name::label(&build.build, self.origin(snapshot), self.id),
+    )
+  }
+
+  fn compare_build(&self, other: &Self, snapshot: &'a InstallationShow) -> Ordering {
+    match (self.build, other.build) {
+      (Some(left), Some(right)) => installed_build_name::compare(
+        (&left.build, self.origin(snapshot)),
+        (&right.build, other.origin(snapshot)),
+      ),
+      (Some(_), None) => Ordering::Less,
+      (None, Some(_)) => Ordering::Greater,
+      (None, None) => Ordering::Equal,
+    }
   }
 }
 

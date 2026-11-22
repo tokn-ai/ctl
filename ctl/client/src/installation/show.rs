@@ -282,10 +282,12 @@ mod tests {
     files: &BTreeMap<String, Vec<u8>>,
   ) -> PathBuf {
     use std::io::Write as _;
-    let directory = store
+    let build = store
       .updater_root()
       .join("store/runtime")
-      .join(&manifest.bundle_id);
+      .join("dev-20260102T030405Z-v0.1.3-bbbbbbb-local");
+    ctl_core::private_fs::create_directory(&build).unwrap();
+    let directory = build.join(&manifest.target_triple);
     ctl_core::private_fs::create_directory(&directory).unwrap();
     for (name, bytes) in files {
       let mut file = ctl_core::private_fs::options()
@@ -519,7 +521,7 @@ mod tests {
       )
       .unwrap();
     let (older, older_files) = fixture(target, 'b');
-    write_orphan(&store, &older, &older_files);
+    let orphan_directory = write_orphan(&store, &older, &older_files);
     let before = show(&home.0).unwrap();
     assert_eq!(before.builds.len(), 1);
     assert!(
@@ -529,10 +531,6 @@ mod tests {
         .all(|entry| entry.bundle_id != older.bundle_id)
     );
 
-    let orphan_directory = store
-      .updater_root()
-      .join("store/runtime")
-      .join(&older.bundle_id);
     assert_eq!(
       store.get(&older.bundle_id).unwrap_err().kind(),
       io::ErrorKind::NotFound

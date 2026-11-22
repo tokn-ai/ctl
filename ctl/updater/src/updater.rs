@@ -116,6 +116,23 @@ async fn run(arguments: Arguments) -> io::Result<i32> {
     Command::InstallManager => {
       ctl_client::installation::provision_manager_from(&home, &std::env::current_exe()?).await?;
     }
+    Command::ExportManager { sha256 } => {
+      return tokio::task::spawn_blocking(move || {
+        use std::io::Write as _;
+
+        let Some(bytes) =
+          ctl_core::installations::Installations::new(&home).manager_bytes(&sha256)?
+        else {
+          return Ok(10);
+        };
+        let mut output = io::stdout().lock();
+        output.write_all(&bytes)?;
+        output.flush()?;
+        Ok(0)
+      })
+      .await
+      .map_err(io::Error::other)?;
+    }
     Command::Dev(options) => development::run(&home, options).await?,
     Command::Release(options) => {
       release::run(&home, options).await?;

@@ -1,5 +1,6 @@
 use ctl_core::bundles::Bundle;
-use ctl_core::installations::{DEVELOPMENT_LAYOUT_VERSION, Installations};
+use ctl_core::component::ComponentBuildInfo;
+use ctl_core::installations::{CatalogOrigin, DEVELOPMENT_LAYOUT_VERSION, Installations};
 use ctl_core::private_fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -21,6 +22,14 @@ pub async fn updater_for_bundle(home: &Path, bundle: &Bundle) -> io::Result<Vec<
 /// Rejects foreign installs, unavailable managers, unsafe storage or an invalid
 /// executable. A failed probe leaves the existing manager untouched.
 pub async fn provision_manager(home: &Path, bundle: &Bundle) -> io::Result<()> {
+  provision_manager_with_origin(home, bundle, None).await
+}
+
+pub(crate) async fn provision_manager_with_origin(
+  home: &Path,
+  bundle: &Bundle,
+  origin: Option<&CatalogOrigin>,
+) -> io::Result<()> {
   bundle.manifest.validate()?;
   if !ctl_core::bundles::local_target(&bundle.manifest.target_triple) {
     return Err(io::Error::other(
@@ -35,7 +44,12 @@ pub async fn provision_manager(home: &Path, bundle: &Bundle) -> io::Result<()> {
   } else {
     updater_for_bundle(home, bundle).await?
   };
-  provision_manager_bytes(home, bytes).await
+  provision_manager_bytes(
+    home,
+    bytes,
+    origin.map(|origin| (origin, &bundle.manifest.components["ctl-agent"].build)),
+  )
+  .await
 }
 
 /// Provision a verified native manager from a development build or bootstrap.
@@ -44,13 +58,34 @@ pub async fn provision_manager(home: &Path, bundle: &Bundle) -> io::Result<()> {
 /// # Errors
 /// Rejects invalid executables or unsafe manager storage before activation.
 pub async fn provision_manager_from(home: &Path, executable: &Path) -> io::Result<()> {
-  provision_manager_bytes(home, native_updater(executable).await?).await
+  provision_manager_bytes(home, native_updater(executable).await?, None).await
 }
 
-pub(crate) async fn provision_manager_bytes(home: &Path, bytes: Vec<u8>) -> io::Result<()> {
+pub(crate) async fn provision_manager_from_for_build(
+  home: &Path,
+  executable: &Path,
+  origin: Option<&CatalogOrigin>,
+  expected_build: &ComponentBuildInfo,
+) -> io::Result<()> {
+  provision_manager_bytes(
+    home,
+    native_updater(executable).await?,
+    origin.map(|origin| (origin, expected_build)),
+  )
+  .await
+}
+
+pub(crate) async fn provision_manager_bytes(
+  home: &Path,
+  bytes: Vec<u8>,
+  mut provenance: Option<(&CatalogOrigin, &ComponentBuildInfo)>,
+) -> io::Result<()> {
+  if let Some((origin, _)) = provenance {
+    origin.validate()?;
+  }
   let mut stage = stage_manager(home, bytes).await?;
   // Probe the exact staged bytes, including architecture and command identity.
-  let mut verified = native_updater(&stage.0).await?;
+  let (mut verified, mut build) = verified_native_updater(&stage.0).await?;
   let capable = supports_development_layout(&stage.0).await;
   let lock = lock_manager_provisioning(home).await?;
   if !capable {
@@ -59,22 +94,36 @@ pub(crate) async fn provision_manager_bytes(home: &Path, bytes: Vec<u8>) -> io::
     }
     let executable = std::env::current_exe()?;
     if !updater_path(&executable) || !supports_development_layout(&executable).await {
-      return Err(io::Error::other(
-        "this publication requires a compatible ctlup; install an updater that supports storage layout 2",
-      ));
+      return Err(io::Error::other(format!(
+        "this publication requires a compatible ctlup; install an updater that supports storage layout {DEVELOPMENT_LAYOUT_VERSION}"
+      )));
     }
     stage = stage_manager(home, native_updater(&executable).await?).await?;
-    verified = native_updater(&stage.0).await?;
+    (verified, build) = verified_native_updater(&stage.0).await?;
     if !supports_development_layout(&stage.0).await {
       return Err(io::Error::other(
         "the running updater changed during provisioning",
       ));
     }
+    provenance = None;
   }
+  let origin = provenance.and_then(|(origin, expected)| (expected == &build).then_some(origin));
+  let origin = match origin {
+    Some(origin) => origin.clone(),
+    None => CatalogOrigin {
+      channel: "provided".into(),
+      publication_id: None,
+      built_at: Some(
+        time::OffsetDateTime::now_utc()
+          .format(&time::format_description::well_known::Rfc3339)
+          .map_err(io::Error::other)?,
+      ),
+    },
+  };
   let home = home.to_owned();
   tokio::task::spawn_blocking(move || {
     let _lock = lock;
-    Installations::new(&home).install_manager(&verified)
+    Installations::new(&home).install_manager(&verified, &build, Some(&origin))
   })
   .await
   .map_err(io::Error::other)?
@@ -355,6 +404,10 @@ fn verify_supplied_identity(
 }
 
 async fn native_updater(path: &Path) -> io::Result<Vec<u8>> {
+  verified_native_updater(path).await.map(|(bytes, _)| bytes)
+}
+
+async fn verified_native_updater(path: &Path) -> io::Result<(Vec<u8>, ComponentBuildInfo)> {
   let before = crate::components::read_input(path, ctl_core::bundles::MAX_FILE_BYTES)?;
   let info = ctl_core::executable::inspect(path).await?;
   if !info.is_valid() {
@@ -364,7 +417,7 @@ async fn native_updater(path: &Path) -> io::Result<Vec<u8>> {
   if before != crate::components::read_input(path, ctl_core::bundles::MAX_FILE_BYTES)? {
     return Err(io::Error::other("ctlup changed while preparing deployment"));
   }
-  Ok(before)
+  Ok((before, info.build))
 }
 
 async fn verify_updater_name(path: &Path) -> io::Result<()> {
@@ -507,7 +560,7 @@ mod tests {
     let next = manager(Some(DEVELOPMENT_LAYOUT_VERSION), "new publication");
     let store = Installations::new(&home.0);
     for (candidate, expected) in [(&capable, &capable), (&old, &capable), (&next, &next)] {
-      provision_manager_bytes(&home.0, candidate.clone())
+      provision_manager_bytes(&home.0, candidate.clone(), None)
         .await
         .unwrap();
       let (installed, _lease) = store.manager_and_lease().unwrap().unwrap();
@@ -517,11 +570,8 @@ mod tests {
 
   #[tokio::test]
   async fn shared_local_provisioning_checks_the_staged_manager_before_replacing_it() {
-    let root = std::env::temp_dir().join(format!("ctlup-provision-test-{}", uuid::Uuid::new_v4()));
-    std::fs::DirBuilder::new()
-      .mode(0o700)
-      .create(&root)
-      .unwrap();
+    let home = super::super::TemporaryDirectory::new("updater-provision").unwrap();
+    let root = home.0.clone();
     let target = match (std::env::consts::OS, std::env::consts::ARCH) {
       ("macos", "aarch64") => "aarch64-apple-darwin",
       ("macos", _) => "x86_64-apple-darwin",
@@ -550,10 +600,23 @@ mod tests {
       .unwrap();
     let metadata = &fixture.outer["targets"][target]["components"]["ctl"];
     let binary = format!("ctlup-0.1.0-dev.{}-{target}", "a".repeat(12));
+    let origin = CatalogOrigin {
+      channel: "nightly".into(),
+      publication_id: Some(format!("0.1.0-dev.{}", "a".repeat(12))),
+      built_at: Some("2026-11-21T08:15:25Z".into()),
+    };
     let mut previous = Vec::new();
-    for name in ["ctlup", "ctl"] {
+    for (name, fingerprint, label) in [
+      ("ctlup", None, "nightly-20261121T081525Z-v0.1.0-aaaaaaa"),
+      ("ctlup", Some("b".repeat(64)), "provided-"),
+      ("ctl", None, ""),
+    ] {
+      let mut reported = metadata.clone();
+      if let Some(fingerprint) = fingerprint {
+        reported["build"]["source_fingerprint"] = fingerprint.into();
+      }
       let script = format!(
-        "#!/bin/sh\ncase \"$1\" in --component-info) cat <<'METADATA'\n{metadata}\nMETADATA\n;; --version) printf '{name} 0.1.0\\n';; installation-layout-version) printf '{DEVELOPMENT_LAYOUT_VERSION}\\n';; *) exit 1;; esac\n"
+        "#!/bin/sh\ncase \"$1\" in --component-info) cat <<'METADATA'\n{reported}\nMETADATA\n;; --version) printf '{name} 0.1.0\\n';; installation-layout-version) printf '{DEVELOPMENT_LAYOUT_VERSION}\\n';; *) exit 1;; esac\n"
       );
       std::fs::write(provided.join(&binary), &script).unwrap();
       let info = serde_json::json!({
@@ -567,13 +630,22 @@ mod tests {
       )
       .unwrap();
       let _ = remember_supplied_updater(&root, &bundle, &provided).unwrap();
-      let outcome = provision_manager(&root, &bundle).await;
+      let outcome = provision_manager_with_origin(&root, &bundle, Some(&origin)).await;
       if name == "ctlup" {
         outcome.unwrap();
         let (installed, _lease) = Installations::new(&root)
           .manager_and_lease()
           .unwrap()
           .unwrap();
+        let installed_build = installed.parent().unwrap();
+        assert_eq!(
+          installed_build.parent().unwrap(),
+          Installations::new(&root)
+            .updater_root()
+            .join("store/updater")
+        );
+        let installed_name = installed_build.file_name().unwrap().to_str().unwrap();
+        assert!(installed_name.starts_with(label), "{installed_name}");
         previous = std::fs::read(&installed).unwrap();
         assert_eq!(previous, script.as_bytes());
         assert!(
@@ -591,6 +663,5 @@ mod tests {
         assert_eq!(std::fs::read(installed).unwrap(), previous);
       }
     }
-    std::fs::remove_dir_all(root).unwrap();
   }
 }

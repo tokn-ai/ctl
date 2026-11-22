@@ -11,6 +11,11 @@ use std::io::{self, Read as _, Write as _};
 use std::path::Path;
 
 const CATALOG: &str = "installations.json";
+const RUNTIME_PATHS: &str = "runtime-paths.json";
+const UPDATER_PATHS: &str = "updater-paths.json";
+const RUNTIME_BUILD_PATHS: &str = "runtime-build-paths.json";
+const UPDATER_BUILD_PATHS: &str = "updater-build-paths.json";
+const UPDATER_OBJECT_PATHS: &str = "updater-object-paths.json";
 const MAX_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_ENTRIES: usize = 4096;
 
@@ -84,6 +89,181 @@ pub(super) struct State {
   pub(super) active_runtime: Option<RuntimeSelection>,
   pub(super) desktop: Option<DesktopSelection>,
   pub(super) updater: Option<String>,
+  #[serde(skip)]
+  pub(super) runtime_paths: PayloadPaths,
+  #[serde(skip)]
+  pub(super) updater_paths: PayloadPaths,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(super) struct PayloadPaths {
+  pub(super) target_first: PathIndex,
+  pub(super) build_first: PathIndex,
+  pub(super) object: PathIndex,
+}
+
+impl PayloadPaths {
+  pub(super) fn location(&self, id: &str) -> Option<&str> {
+    self
+      .object
+      .locations
+      .get(id)
+      .or_else(|| self.build_first.locations.get(id))
+      .or_else(|| self.target_first.locations.get(id))
+      .map(String::as_str)
+  }
+
+  pub(super) fn locations(&self) -> impl Iterator<Item = (&String, &String)> {
+    self
+      .target_first
+      .locations
+      .iter()
+      .chain(&self.build_first.locations)
+      .chain(&self.object.locations)
+  }
+
+  pub(super) fn reserves(&self, location: &str) -> bool {
+    self.locations().any(|(_, existing)| {
+      existing.eq_ignore_ascii_case(location)
+        || existing
+          .split_once('/')
+          .is_some_and(|(parent, _)| parent.eq_ignore_ascii_case(location))
+        || location
+          .split_once('/')
+          .is_some_and(|(parent, _)| existing.eq_ignore_ascii_case(parent))
+    })
+  }
+
+  fn target(&self, id: &str) -> Option<&str> {
+    if let Some(path) = self.build_first.locations.get(id) {
+      return path.split_once('/').map(|(_, target)| target);
+    }
+    self
+      .target_first
+      .locations
+      .get(id)?
+      .split_once('/')
+      .map(|(target, _)| target)
+  }
+
+  fn validate(
+    &self,
+    target_first: u16,
+    build_first: Option<u16>,
+    object: Option<u16>,
+  ) -> io::Result<()> {
+    self
+      .target_first
+      .validate(Some(target_first), Order::TargetFirst)?;
+    self.build_first.validate(build_first, Order::BuildFirst)?;
+    self.object.validate(object, Order::Object)?;
+    let mut identities = BTreeSet::new();
+    if self.locations().any(|(id, _)| !identities.insert(id)) {
+      return Err(invalid(
+        "duplicate installed payload identity across path indexes",
+      ));
+    }
+    if !self.object.locations.is_empty() {
+      let reserved: BTreeSet<_> = self
+        .target_first
+        .locations
+        .values()
+        .chain(self.build_first.locations.values())
+        .filter_map(|location| {
+          location
+            .split_once('/')
+            .map(|(parent, _)| parent.to_ascii_lowercase())
+        })
+        .collect();
+      if self
+        .object
+        .locations
+        .values()
+        .any(|location| reserved.contains(&location.to_ascii_lowercase()))
+      {
+        return Err(invalid("updater object overlaps a legacy payload group"));
+      }
+    }
+    Ok(())
+  }
+}
+
+/// Preserve the original schema and path order for older executables that
+/// acquire their own leases, while reserving new paths before publication.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct PathIndex {
+  schema_version: u16,
+  pub(super) launcher_layout: Option<u16>,
+  pub(super) locations: BTreeMap<String, String>,
+}
+
+impl Default for PathIndex {
+  fn default() -> Self {
+    Self {
+      schema_version: 1,
+      launcher_layout: None,
+      locations: BTreeMap::new(),
+    }
+  }
+}
+
+#[derive(Clone, Copy)]
+enum Order {
+  TargetFirst,
+  BuildFirst,
+  Object,
+}
+
+impl PathIndex {
+  fn validate(&self, layout: Option<u16>, order: Order) -> io::Result<()> {
+    if self.schema_version != 1
+      || self.locations.len() > MAX_ENTRIES
+      || self
+        .launcher_layout
+        .is_some_and(|version| Some(version) != layout)
+    {
+      return Err(invalid("unsupported or oversized payload path index"));
+    }
+    let mut occupied = BTreeSet::new();
+    for (id, location) in &self.locations {
+      let name = if matches!(order, Order::Object) {
+        location.as_str()
+      } else {
+        let (first, second) = location
+          .split_once('/')
+          .ok_or_else(|| invalid("invalid installed payload location"))?;
+        let (target, name) = if matches!(order, Order::TargetFirst) {
+          (first, second)
+        } else {
+          (second, first)
+        };
+        crate::bundles::validate_target(target)?;
+        name
+      };
+      if !filesystem::valid_id(id)
+        || !(1..=240).contains(&name.len())
+        || ![
+          "stable-",
+          "nightly-",
+          "dev-",
+          "release-",
+          "provided-",
+          "untracked-",
+        ]
+        .iter()
+        .any(|prefix| name.starts_with(prefix))
+        || name.ends_with('.')
+        || !name
+          .bytes()
+          .all(|byte| byte.is_ascii_alphanumeric() || b"-_.+".contains(&byte))
+        || !occupied.insert(location.to_ascii_lowercase())
+      {
+        return Err(invalid("invalid installed payload location"));
+      }
+    }
+    Ok(())
+  }
 }
 
 impl Default for State {
@@ -95,6 +275,8 @@ impl Default for State {
       active_runtime: None,
       desktop: None,
       updater: None,
+      runtime_paths: PayloadPaths::default(),
+      updater_paths: PayloadPaths::default(),
     }
   }
 }
@@ -130,7 +312,7 @@ impl State {
       .map(|entry| (&entry.bundle_id, &entry.target_triple))
       .collect::<BTreeMap<_, _>>()
     {
-      let Some(bundle) = filesystem::load_available(store, id)? else {
+      let Some(bundle) = filesystem::load_available(store, self, id)? else {
         if !allow_missing {
           return Err(filesystem::missing_payload(id));
         }
@@ -149,6 +331,14 @@ impl State {
   }
 
   fn validate_index(&self) -> io::Result<()> {
+    self
+      .runtime_paths
+      .validate(super::RUNTIME_PATH_LAYOUT_VERSION, None, None)?;
+    self.updater_paths.validate(
+      super::UPDATER_PATH_LAYOUT_VERSION,
+      Some(super::UPDATER_BUILD_PATH_LAYOUT_VERSION),
+      Some(super::DEVELOPMENT_LAYOUT_VERSION),
+    )?;
     if self.schema_version != 2
       || self.entries.len() > MAX_ENTRIES
       || self.development.len() > MAX_ENTRIES
@@ -174,6 +364,15 @@ impl State {
           .is_some_and(|target| target != &entry.target_triple)
       {
         return Err(invalid("duplicate installation catalog entries"));
+      }
+      if self
+        .runtime_paths
+        .target(&entry.bundle_id)
+        .is_some_and(|target| target != entry.target_triple)
+      {
+        return Err(invalid(
+          "catalog target differs from its runtime payload location",
+        ));
       }
       if entry.current
         && publications
@@ -451,7 +650,7 @@ pub(super) fn read(store: &Installations) -> io::Result<State> {
 }
 
 pub(super) fn read_index(store: &Installations) -> io::Result<State> {
-  let state: State = if let Some(state) = read_file(&store.state_root().join(CATALOG))? {
+  let mut state: State = if let Some(state) = read_file(&store.state_root().join(CATALOG))? {
     state
   } else {
     if filesystem::has_payloads(store)? {
@@ -459,8 +658,51 @@ pub(super) fn read_index(store: &Installations) -> io::Result<State> {
     }
     State::default()
   };
+  let root = store.state_root();
+  state.runtime_paths.target_first = read_file(&root.join(RUNTIME_PATHS))?.unwrap_or_default();
+  state.runtime_paths.build_first = read_file(&root.join(RUNTIME_BUILD_PATHS))?.unwrap_or_default();
+  state.updater_paths.target_first = read_file(&root.join(UPDATER_PATHS))?.unwrap_or_default();
+  state.updater_paths.build_first = read_file(&root.join(UPDATER_BUILD_PATHS))?.unwrap_or_default();
+  state.updater_paths.object = read_file(&root.join(UPDATER_OBJECT_PATHS))?.unwrap_or_default();
   state.validate_index()?;
   Ok(state)
+}
+
+pub(super) fn commit_runtime_paths(store: &Installations, paths: &PathIndex) -> io::Result<()> {
+  paths.validate(Some(super::RUNTIME_PATH_LAYOUT_VERSION), Order::TargetFirst)?;
+  replace(&store.state_root().join(RUNTIME_PATHS), paths)
+}
+
+pub(super) fn commit_updater_paths(store: &Installations, paths: &PathIndex) -> io::Result<()> {
+  paths.validate(Some(super::UPDATER_PATH_LAYOUT_VERSION), Order::TargetFirst)?;
+  replace(&store.state_root().join(UPDATER_PATHS), paths)
+}
+
+pub(super) fn commit_runtime_build_paths(
+  store: &Installations,
+  paths: &PathIndex,
+) -> io::Result<()> {
+  paths.validate(None, Order::BuildFirst)?;
+  replace(&store.state_root().join(RUNTIME_BUILD_PATHS), paths)
+}
+
+pub(super) fn commit_updater_build_paths(
+  store: &Installations,
+  paths: &PathIndex,
+) -> io::Result<()> {
+  paths.validate(
+    Some(super::UPDATER_BUILD_PATH_LAYOUT_VERSION),
+    Order::BuildFirst,
+  )?;
+  replace(&store.state_root().join(UPDATER_BUILD_PATHS), paths)
+}
+
+pub(super) fn commit_updater_object_paths(
+  store: &Installations,
+  paths: &PathIndex,
+) -> io::Result<()> {
+  paths.validate(Some(super::DEVELOPMENT_LAYOUT_VERSION), Order::Object)?;
+  replace(&store.state_root().join(UPDATER_OBJECT_PATHS), paths)
 }
 
 pub(super) fn initialize(store: &Installations, state: &State) -> io::Result<()> {
@@ -476,13 +718,10 @@ pub(super) fn inventory(store: &Installations) -> io::Result<Vec<CatalogEntry>> 
   Ok(state.entries)
 }
 
-/// The locked writer publishes one snapshot only after new immutable bytes are durable.
-/// Projection can be rebuilt from the committed registry after interruption.
+/// The locked writer publishes one snapshot after new immutable bytes are durable.
 pub(super) fn commit(store: &Installations, state: &State) -> io::Result<()> {
   state.validate_present_payloads(store)?;
-  commit_metadata(store, state)?;
-  super::layout::refresh(store, state);
-  Ok(())
+  commit_metadata(store, state)
 }
 
 /// The desktop and manager only change their own selection; they do not acquire

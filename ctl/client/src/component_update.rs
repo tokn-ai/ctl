@@ -1061,7 +1061,7 @@ pub async fn install_local(
     catalog::known_origin(&inventory, bundle).unwrap_or_else(|| catalog::unknown_origin(bundle));
   let expected_heads = crate::installation::single_target_heads(home, bundle, &origin)?;
   crate::components::verify_local(home, bundle).await?;
-  crate::installation::provision_manager(home, bundle).await?;
+  crate::installation::provision_manager_with_origin(home, bundle, Some(&origin)).await?;
   let _installation = activate_local(home, bundle, origin, expected_heads).await?;
   Ok(result(bundle, package))
 }

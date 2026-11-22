@@ -55,11 +55,12 @@ root is `$CTL_DATA_DIR/ctlup`.
   apps/                             # public desktop launch entries
   ctlup/
     state/installations.json        # active selections, sources, and retained builds
+    state/runtime-build-paths.json  # maps exact runtime IDs to installed paths
+    state/updater-object-paths.json # maps exact updater IDs to installed paths
     state/leases/                   # builds used by running processes
-    store/runtime/<content-id>/     # verified complete runtime
+    store/runtime/<build>/<target>/ # verified complete runtime
     store/desktop/<content-id>/     # verified native desktop package
-    store/updater/<content-id>/     # independent ctlup executable
-    refs/runtime/                   # readable channel and checkout references
+    store/updater/<build>/          # independent ctlup executable for this machine
     cache/downloads/                # verified publication archives
     cache/unpacked/                 # verified extracted runtime bundles
     cache/updaters/                 # verified downloaded updater bytes and metadata
@@ -67,17 +68,41 @@ root is `$CTL_DATA_DIR/ctlup`.
 ```
 
 The registry records one active native runtime, desktop, and updater per
-profile. Launchers resolve selected payloads through the registry. Channel and
-checkout references are generated views of that state. Stable and Nightly
-references use the version and target. Development references pin the latest
-build for each canonical checkout and target.
+profile. Launchers resolve selected payloads through the registry.
+Development registrations pin the latest build for each canonical checkout and
+target.
 
-Installations verify immutable bytes before committing a selection. Running
+Runtime and updater directories show the installation's source, version, and
+short revision. The full build label groups the targets of each runtime build.
+The installed updater runs on this machine, so its executable lives directly
+in the build directory. Updaters downloaded for other targets use the cache.
+Stable build names omit the timestamp. Nightly and development names use UTC
+build time, with a source suffix for local and PR development builds.
+
+```text
+stable-v0.1.4-ba16876
+nightly-20261121T081525Z-v0.1.4-ba16876
+dev-20261121T081525Z-v0.1.4-ba16876-local
+dev-20261121T081525Z-v0.1.4-ba16876-pr-192
+```
+
+Exact release pins and files supplied by the caller use `release-` and
+`provided-` prefixes. Standalone updaters use `provided-` and their install
+time when publication provenance is unavailable. A short digest distinguishes
+different builds with the same name. The full digest identifies and verifies
+the build for transfers and cache reuse. The directory name remains stable
+while the build is registered.
+`ctlup status` orders stable builds by SemVer and nightly and development builds
+by build time within their groups.
+
+Installations assemble and verify payloads in `staging/`, then publish the
+complete directories before committing a selection. Running
 processes keep their original builds through leases. Public commands are
 available through `~/.tokn/ctl/bin` or the selected profile's `bin`.
 
-The new store starts on first install. Existing files outside `ctlup/` stay
-on disk and are outside the updater's cleanup boundary.
+The new store starts on first install. Earlier digest-named and target-specific
+updater objects and target-first runtime objects keep their original paths
+while they are retained.
 
 ## Install and update
 
@@ -226,7 +251,7 @@ build explicitly.
 To bootstrap from a published bundle set, use its standalone `ctlup` for this
 computer. Verify its checksum against the sidecar and run
 `install --channel nightly`. SSH installation requires a publication or
-supplied bundle whose target updater supports storage layout 2.
+supplied bundle whose target updater supports storage layout 6.
 
 Within `ctlup/`, cached archives use a publication hash under
 `cache/downloads`, extracted deployment builds use `cache/unpacked`, and

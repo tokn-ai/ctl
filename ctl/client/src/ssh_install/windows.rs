@@ -12,7 +12,6 @@ use std::io::{self, Write as _};
 use std::time::Duration;
 use tokio::process::Command;
 
-const MANAGER: &str = r"$manager = Join-Path $env:USERPROFILE '.tokn\ctl\bin\ctlup.exe'";
 const INSTALL_SCRIPT: &str = include_str!("windows_install.ps1");
 const MARKER: &[u8] = b"ctl-command-v1\n";
 const READ_ACCOUNT_ID: &str = r"
@@ -160,11 +159,13 @@ pub(super) async fn install(
   let digest = format!("{:x}", Sha256::digest(updater));
   let account_guard = account_guard(expected_account)?;
   let preparation = updater_preparation(origin)?;
+  let updater_staging = super::updater_staging(RemotePlatform::Windows);
   let preflight = format!(
     r#"$ErrorActionPreference = 'Stop'
 {account_guard}
-{MANAGER}
-if (![IO.File]::Exists($manager)) {{ exit 11 }}
+{updater_staging}
+$manager = Find-InstalledUpdater
+if (!$manager) {{ exit 11 }}
 if ((& $manager updater-digest) -ne '{digest}') {{ exit 11 }}
 {preparation}
 $confirmation = & $manager activate-installed '{}' @originArgs
@@ -189,7 +190,13 @@ exit $code"#,
     Some(11) => updater,
     _ => return require_updater_success(status, &stdout, &stderr, b"ctl-install-v1\n"),
   };
-  let script = install_script(&digest, prefix.len(), &account_guard, &preparation);
+  let script = install_script(
+    &digest,
+    prefix.len(),
+    updater.len(),
+    &account_guard,
+    &preparation,
+  );
   let command = windows_ssh_command(destination, options, interaction, &script).await?;
   run_package_install_with_prefix(command, prefix, archive, layout.names(), on_progress).await
 }
@@ -232,6 +239,7 @@ elseif ($probeCode -ne 2) {{ throw ('ctlup catalog probe failed: ' + ($probe -jo
 fn install_script(
   digest: &str,
   prefix_size: usize,
+  updater_size: usize,
   account_guard: &str,
   preparation: &str,
 ) -> String {
@@ -241,8 +249,8 @@ fn install_script(
       super::updater_staging(RemotePlatform::Windows),
     )
     .replace("__ACCOUNT_GUARD__", account_guard)
-    .replace("__MANAGER__", MANAGER)
-    .replace("__UPDATER_SIZE__", &prefix_size.to_string())
+    .replace("__UPDATER_PREFIX_BYTES__", &prefix_size.to_string())
+    .replace("__UPDATER_SIZE__", &updater_size.to_string())
     .replace("__UPDATER_SHA256__", digest)
     .replace("__UPDATE_PREPARATION__", preparation)
 }
@@ -257,6 +265,7 @@ mod tests {
     let guard = account_guard(Some("aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa")).unwrap();
     let script = install_script(
       &"a".repeat(64),
+      ctl_core::bundle_layout::MAX_FILE_BYTES,
       ctl_core::bundle_layout::MAX_FILE_BYTES,
       &guard,
       &updater_preparation(None).unwrap(),
@@ -276,11 +285,14 @@ mod tests {
     let guard = account_guard(Some("aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa")).unwrap();
     let script = install_script(
       &"a".repeat(64),
+      0,
       ctl_core::bundle_layout::MAX_FILE_BYTES,
       &guard,
       &updater_preparation(Some(&origin)).unwrap(),
     );
     assert!(encoded_powershell_command(&script).len() >= 8000);
+    assert!(script.contains("$remaining = 0"));
+    assert!(script.contains("Copy-RetainedUpdater $stage $size $sha"));
     let command = powershell_command(&script).unwrap();
     assert!(command.len() < 8000);
     let compressed = command

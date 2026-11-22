@@ -71,6 +71,11 @@ pub(super) enum Command {
   #[command(hide = true)]
   InstallManager,
   #[command(hide = true)]
+  ExportManager {
+    #[arg(long)]
+    sha256: String,
+  },
+  #[command(hide = true)]
   InstallArchive {
     #[arg(long, hide = true)]
     origin_hex: Option<String>,
@@ -415,6 +420,7 @@ mod tests {
       vec!["catalog-json"],
       vec!["install-archive"],
       vec!["install-manager"],
+      vec!["export-manager", "--sha256", "digest"],
       vec!["prepare-install"],
       vec!["activate-installed", "id"],
       vec!["release", "show", "publication-1"],

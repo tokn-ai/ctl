@@ -26,8 +26,8 @@ pub use updater::{
   provision_manager, provision_manager_from, updater_for_bundle, updater_for_manifest,
 };
 pub(crate) use updater::{
-  provision_manager_bytes, remember_supplied_updater, remember_verified_updater,
-  supplied_updater_info,
+  provision_manager_bytes, provision_manager_from_for_build, provision_manager_with_origin,
+  remember_supplied_updater, remember_verified_updater, supplied_updater_info,
 };
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -267,7 +267,7 @@ pub async fn install_archive_with_origin(
   let home = home.to_owned();
   let staging_home = home.clone();
   let bytes = bytes.to_vec();
-  let (stage, on_progress) = tokio::task::spawn_blocking(move || {
+  let (stage, on_progress, build) = tokio::task::spawn_blocking(move || {
     on_progress(crate::RemoteInstallEvent::Extracting);
     let (manifest, files) = unpack_archive(&bytes)?;
     if !ctl_core::bundles::local_target(&manifest.target_triple) {
@@ -278,12 +278,17 @@ pub async fn install_archive_with_origin(
     for &file_name in layout.names() {
       on_progress(crate::RemoteInstallEvent::Checking { file_name });
     }
-    Ok((stage_bundle(&staging_home, &manifest, &files)?, on_progress))
+    let build = manifest.components["ctl-agent"].build.clone();
+    Ok((
+      stage_bundle(&staging_home, &manifest, &files)?,
+      on_progress,
+      build,
+    ))
   })
   .await
   .map_err(io::Error::other)??;
   if let Some(manager) = manager {
-    provision_manager_from(&home, manager).await?;
+    provision_manager_from_for_build(&home, manager, origin.as_ref(), &build).await?;
   }
   tokio::task::spawn_blocking(move || {
     on_progress(crate::RemoteInstallEvent::Activating);

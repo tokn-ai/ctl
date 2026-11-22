@@ -199,17 +199,20 @@ Windows. The inspector keeps its own panel. The compositor can constrain
 window sizes, especially when maximized or fullscreen.
 
 In agent-backed setup, enable **Debug overlay** before selecting **Start** to show
-diagnostics in the viewer. Download and upload show ctream application bytes per second for
-the active source, excluding SSH and TCP framing. Latency is round-trip time to
-the agent over a dedicated channel on the same transport. Agents older than
-`ctream_agent` 1.0.10 show `N/A` for latency. FPS counts fresh frames drawn in
-the viewer. **Frame** shows the dimensions of the received capture in pixels.
+diagnostics in the viewer. Download and upload measure ctream application
+bytes per second, before SSH compression and framing. Latency is round-trip
+time to the agent over a dedicated channel on the same transport. Agents older
+than `ctream_agent` 1.0.10 show `N/A` for latency. FPS counts fresh frames the
+viewer submits for rendering. After a long gap between paints, the overlay
+waits for a fresh sample. **Frame** shows the received capture dimensions in
+pixels.
 
 Both windows use the same egui context and wgpu renderer. The native viewer is
 an immediate child viewport, so its events and repaint requests run through
 the root setup viewport even while setup is hidden. Only the viewer viewport
 forwards input; painting a view-only preview must not reset viewer-held keys
-or buttons. Capture workers explicitly request root repaints.
+or buttons. Capture keeps the newest frame and signals a root repaint without
+waiting for the renderer.
 
 On a **local native Wayland viewer**, winit 0.30.13 implements window visibility
 and focus requests as no-ops. Automatic setup hiding and activation therefore
@@ -419,9 +422,11 @@ the capture channel stops the stream, and closing the input channel releases
 held inputs.
 
 The agent uses FFmpeg with x11grab for X11 display capture and reads display
-geometry through x11rb. X11 input needs Python 3, libX11, libXtst, XTEST, and
-access to the selected display. The local wgpu viewer uses the same rectangle
-for drawing the desktop and mapping clicks to display pixels.
+geometry through x11rb. The X11 display driver keeps only the newest pending
+frame when transport writes stall. It waits at least 125 ms after each completed
+frame write before sending another. X11 input needs Python 3, libX11, libXtst,
+XTEST, and access to the selected display. The local wgpu viewer uses the same
+rectangle for drawing the desktop and mapping clicks to display pixels.
 
 For a user-owned Sway session, select `wayland-N` in the same command. Capture
 uses `grim`. To enable input, install the helper on the Linux host with

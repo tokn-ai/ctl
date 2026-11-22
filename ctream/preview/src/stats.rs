@@ -3,6 +3,7 @@ use eframe::egui;
 use std::time::{Duration, Instant};
 
 const SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
+const MAX_PAINT_GAP: Duration = SAMPLE_INTERVAL.saturating_mul(2);
 
 pub(super) struct Stats {
   traffic: Traffic,
@@ -39,11 +40,16 @@ impl Stats {
       latency::Reading::Measured(rtt) => format!("{:.1} ms", rtt.as_secs_f64() * 1000.0),
       latency::Reading::Unavailable => "N/A".into(),
     };
+    let [download, upload, fps] = match &self.sampler.sample {
+      Some(sample) => [
+        rate(sample.rates[0]),
+        rate(sample.rates[1]),
+        format!("{:.1}", sample.fps),
+      ],
+      None => std::array::from_fn(|_| "…".into()),
+    };
     let text = format!(
-      "Download  {}\nUpload    {}\nLatency   {latency}\nFPS       {:.1}\nFrame     {width}×{height} px",
-      rate(self.sampler.rates[0]),
-      rate(self.sampler.rates[1]),
-      self.sampler.fps,
+      "Download  {download}\nUpload    {upload}\nLatency   {latency}\nFPS       {fps}\nFrame     {width}×{height} px",
     );
     let painter = painter.with_clip_rect(video);
     let margin = 8.0;
@@ -81,10 +87,16 @@ fn rate(bytes_per_second: f64) -> String {
 }
 
 struct Sampler {
+  last_paint: Instant,
   last_sample: Instant,
   last_totals: [u64; 2],
   last_frame: Option<u64>,
   fresh_frames: u64,
+  sample: Option<Sample>,
+}
+
+#[derive(Debug, PartialEq)]
+struct Sample {
   rates: [f64; 2],
   fps: f64,
 }
@@ -92,16 +104,26 @@ struct Sampler {
 impl Sampler {
   fn new(now: Instant, totals: [u64; 2]) -> Self {
     Self {
+      last_paint: now,
       last_sample: now,
       last_totals: totals,
       last_frame: None,
       fresh_frames: 0,
-      rates: [0.0; 2],
-      fps: 0.0,
+      sample: None,
     }
   }
 
   fn update(&mut self, now: Instant, totals: [u64; 2], frame: u64) {
+    if now.duration_since(self.last_paint) > MAX_PAINT_GAP {
+      // The reader may have kept draining traffic while painting was paused.
+      // Start a new observation interval from this paint and its byte totals.
+      self.last_sample = now;
+      self.last_totals = totals;
+      self.last_frame = Some(frame);
+      self.fresh_frames = 0;
+      self.sample = None;
+    }
+    self.last_paint = now;
     if self.last_frame != Some(frame) {
       self.last_frame = Some(frame);
       self.fresh_frames += 1;
@@ -112,10 +134,12 @@ impl Sampler {
     }
 
     let seconds = elapsed.as_secs_f64();
-    self.rates = std::array::from_fn(|index| {
-      totals[index].saturating_sub(self.last_totals[index]) as f64 / seconds
+    self.sample = Some(Sample {
+      rates: std::array::from_fn(|index| {
+        totals[index].saturating_sub(self.last_totals[index]) as f64 / seconds
+      }),
+      fps: self.fresh_frames as f64 / seconds,
     });
-    self.fps = self.fresh_frames as f64 / seconds;
     self.last_sample = now;
     self.last_totals = totals;
     self.fresh_frames = 0;
@@ -133,11 +157,45 @@ mod tests {
     sampler.update(start, [900, 95], 1);
     sampler.update(start + Duration::from_millis(700), [1500, 115], 1);
     sampler.update(start + Duration::from_secs(2), [2900, 495], 6);
-    assert_eq!(sampler.rates, [1000.0, 200.0]);
-    assert_eq!(sampler.fps, 1.0);
+    assert_eq!(
+      sampler.sample,
+      Some(Sample {
+        rates: [1000.0, 200.0],
+        fps: 1.0,
+      })
+    );
 
     sampler.update(start + Duration::from_secs(3), [2900, 495], 6);
-    assert_eq!(sampler.rates, [0.0; 2]);
-    assert_eq!(sampler.fps, 0.0);
+    assert_eq!(
+      sampler.sample,
+      Some(Sample {
+        rates: [0.0; 2],
+        fps: 0.0,
+      })
+    );
+  }
+
+  #[test]
+  fn resume_starts_a_fresh_sample_without_background_traffic() {
+    let start = Instant::now();
+    let mut sampler = Sampler::new(start, [0, 0]);
+    sampler.update(start, [0, 0], 1);
+    sampler.update(start + SAMPLE_INTERVAL, [100, 50], 2);
+    assert!(sampler.sample.is_some());
+
+    let resumed = start + Duration::from_secs(10);
+    sampler.update(resumed, [10_000, 500], 90);
+    assert!(sampler.sample.is_none());
+    sampler.update(resumed + Duration::from_millis(900), [10_450, 520], 90);
+    assert!(sampler.sample.is_none());
+
+    sampler.update(resumed + SAMPLE_INTERVAL, [10_500, 525], 91);
+    assert_eq!(
+      sampler.sample,
+      Some(Sample {
+        rates: [500.0, 25.0],
+        fps: 1.0,
+      })
+    );
   }
 }

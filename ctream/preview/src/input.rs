@@ -122,8 +122,8 @@ impl<S: Sink> Input<S> {
       && !ctx.wants_keyboard_input()
     {
       self.forwarding = true;
-      return ctx
-        .input(|input| self.forward(image, &input.raw.events, input.modifiers, pointer_regions));
+      let (events, modifiers) = ctx.input(|input| (input.raw.events.clone(), input.modifiers));
+      return self.forward(image, &events, modifiers, pointer_regions);
     }
     if std::mem::take(&mut self.forwarding) {
       self.reset()?;

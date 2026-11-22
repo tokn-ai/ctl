@@ -39,7 +39,8 @@ use std::{
 
 #[derive(Default)]
 struct Stream {
-  frame: Option<egui::ColorImage>,
+  frame: Option<Frame>,
+  spare: Frame,
   end: Option<CaptureEnd>,
 }
 
@@ -78,14 +79,20 @@ impl<T: Transport> Preview<T> {
     let (mut source, lifetime) = capture.split();
     let stream = Arc::new(Mutex::new(Stream::default()));
     let reader = Arc::clone(&stream);
+    let repaint = view::capture_repaint(&ctx);
     thread::spawn(move || {
       let mut frame = Frame::default();
       let end = loop {
         match source.try_read_frame(&mut frame) {
           Ok(true) => {
-            let image = egui::ColorImage::from_rgb(frame.size, &frame.pixels);
-            reader.lock().unwrap().frame = Some(image);
-            ctx.request_repaint_of(egui::ViewportId::ROOT);
+            let mut stream = reader.lock().unwrap();
+            let previous = stream.frame.replace(frame);
+            let wake = previous.is_none();
+            frame = previous.unwrap_or_else(|| std::mem::take(&mut stream.spare));
+            drop(stream);
+            if wake {
+              let _ = repaint.try_send(());
+            }
           }
           Ok(false) => break CaptureEnd::Finished,
           Err(error) => {
@@ -96,7 +103,7 @@ impl<T: Transport> Preview<T> {
         }
       };
       reader.lock().unwrap().end = Some(end);
-      ctx.request_repaint_of(egui::ViewportId::ROOT);
+      let _ = repaint.try_send(());
     });
     Ok(Self {
       input: None,
@@ -114,7 +121,11 @@ impl<T: Transport> Preview<T> {
       let mut stream = self.stream.lock().unwrap();
       (stream.frame.take(), stream.end.clone())
     };
-    if let Some(image) = frame {
+    if let Some(frame) = frame {
+      let image = egui::ColorImage::from_rgb(frame.size, &frame.pixels);
+      if end.is_none() {
+        self.stream.lock().unwrap().spare = frame;
+      }
       view::upload(ctx, &mut self.texture, image);
       self.frames += 1;
       if self.frames == 2 {
@@ -531,6 +542,29 @@ mod test_support {
 mod lifecycle_tests {
   use super::*;
   use std::time::{Duration, Instant};
+
+  #[test]
+  fn capture_drains_to_the_latest_frame_while_repaint_is_blocked() {
+    let (session, _) = test_support::session(b"P6\n1 1\n255\nabcP6\n2 1\n255\ndefghi");
+    let ctx = egui::Context::default();
+    let mut preview = ctx.input(|_| {
+      // Hold egui's context lock while the capture reader reaches EOF.
+      // Waiting for a repaint in the reader would stop it at the first frame.
+      let preview = Preview::connect(session, None, ctx.clone()).unwrap();
+      let deadline = Instant::now() + Duration::from_secs(2);
+      while preview.stream.lock().unwrap().end.is_none() {
+        assert!(Instant::now() < deadline, "capture waited for the UI lock");
+        thread::sleep(Duration::from_millis(1));
+      }
+      preview
+    });
+    assert!(matches!(
+      preview.update_texture(&ctx),
+      Some(CaptureEnd::Finished)
+    ));
+    assert_eq!(preview.texture.as_ref().unwrap().size(), [2, 1]);
+    assert_eq!(preview.frames, 1);
+  }
 
   #[test]
   fn capture_end_closes_both_channels_before_preview_is_dropped() {

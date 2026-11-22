@@ -422,9 +422,11 @@ the capture channel stops the stream, and closing the input channel releases
 held inputs.
 
 The agent uses FFmpeg with x11grab for X11 display capture and reads display
-geometry through x11rb. X11 input needs Python 3, libX11, libXtst, XTEST, and
-access to the selected display. The local wgpu viewer uses the same rectangle
-for drawing the desktop and mapping clicks to display pixels.
+geometry through x11rb. The X11 display driver keeps only the newest pending
+frame when transport writes stall. It waits at least 125 ms after each completed
+frame write before sending another. X11 input needs Python 3, libX11, libXtst,
+XTEST, and access to the selected display. The local wgpu viewer uses the same
+rectangle for drawing the desktop and mapping clicks to display pixels.
 
 For a user-owned Sway session, select `wayland-N` in the same command. Capture
 uses `grim`. To enable input, install the helper on the Linux host with

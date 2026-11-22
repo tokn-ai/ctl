@@ -3,8 +3,10 @@
 use crate::process::ProcessCapture;
 use ctream_driver::{CaptureDisplay, Result};
 use ctream_proto::X11_FRAME_SIZE;
-use std::{io, process::Command};
+use std::{io, num::NonZeroUsize, process::Command, time::Duration};
 use x11rb::{connection::Connection, protocol::xproto::ConnectionExt};
+
+const FRAME_RATE: u32 = 8;
 
 pub struct Driver;
 
@@ -44,7 +46,7 @@ impl CaptureDisplay for Session {
       "-f",
       "x11grab",
       "-framerate",
-      "8",
+      &FRAME_RATE.to_string(),
       "-video_size",
       &format!("{width}x{height}"),
       "-i",
@@ -61,6 +63,10 @@ impl CaptureDisplay for Session {
       "rawvideo",
       "pipe:1",
     ]);
-    Ok(ProcessCapture::stream(command))
+    Ok(ProcessCapture::paced(
+      command,
+      NonZeroUsize::new(w * h * 3).expect("X11 RGB frames are nonempty"),
+      Duration::from_secs(1) / FRAME_RATE,
+    ))
   }
 }

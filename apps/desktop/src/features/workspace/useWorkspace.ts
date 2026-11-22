@@ -8,7 +8,7 @@ import {
 } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { closeAttachmentWindow, loadHosts, loadWorkspace, listSshConfigHosts, listTailscaleDevices, updateHosts, updateWorkspace } from "../../lib/tauri";
-import type { HostCatalogDocument, SessionSummary, SshConfigHost, TailscaleDeviceCatalog } from "../../lib/types";
+import type { HostCatalogDocument, SessionSummary, SshConfigHost, TailscaleDeviceCatalog, WorkspaceDocument } from "../../lib/types";
 import { errorMessage, localizedErrorText } from "../../lib/errors";
 import {
   browserStorage,
@@ -30,6 +30,13 @@ import {
   workspaceTabKey,
   type WorkspaceView,
 } from "./workspaceModel";
+
+function withoutLastSeen(document: WorkspaceDocument) {
+  return {
+    ...document,
+    sessions: document.sessions.map(({ last_seen_at_ms: _, ...session }) => session),
+  };
+}
 
 export function useWorkspace() {
   const [view, setView] = useState(emptyWorkspaceView);
@@ -121,7 +128,7 @@ export function useWorkspace() {
     };
   }, [load_attempt]);
 
-  const queueOperation = useCallback((run: (writer: WorkspaceWriter) => Promise<void>, mode: "write" | "read" = "write"): Promise<void> => {
+  const queueOperation = useCallback((run: (writer: WorkspaceWriter) => Promise<void>, mode: "write" | "background" | "read" = "write"): Promise<void> => {
     const writer = writerRef.current;
     if (!writer) return Promise.reject(new LocalizedError("workspace.not_loaded"));
     if (mode === "write") {
@@ -133,10 +140,10 @@ export function useWorkspace() {
       .then(() => run(writer))
       .then(
         () => {
-          if (mode === "write" && mounted.current) setSaveError(null);
+          if (mode !== "read" && mounted.current) setSaveError(null);
         },
         (failure: unknown) => {
-          if (mode === "write" && mounted.current) setSaveError(localizedErrorText(failure));
+          if (mode !== "read" && mounted.current) setSaveError(localizedErrorText(failure));
           throw failure;
         },
       )
@@ -160,11 +167,11 @@ export function useWorkspace() {
     return true;
   }, []);
 
-  const persist = useCallback((retry = false): Promise<void> =>
+  const persist = useCallback((retry = false, mode: "write" | "background" = "write"): Promise<void> =>
     queueOperation(async (writer) => {
       await persistCatalog(viewRef.current, retry);
       await writer.write(workspaceDocument(viewRef.current, workspaceIdRef.current), retry);
-    }), [queueOperation, persistCatalog]);
+    }, mode), [queueOperation, persistCatalog]);
 
   const openSessionTab = useCallback((session: SessionSummary, after_tab_key?: string): boolean => {
     if (!mounted.current || !writerRef.current || closingRef.current) return false;
@@ -267,8 +274,23 @@ export function useWorkspace() {
         ];
       }
       viewRef.current = next;
-      setView(viewRef.current);
-      void persist().catch(() => undefined);
+      setView(next);
+
+      const catalogChanged = (next.hosts !== previous.hosts ||
+        next.host_colors !== previous.host_colors ||
+        next.ssh_gateways !== previous.ssh_gateways) &&
+        JSON.stringify(hostCatalogDocument(next)) !== JSON.stringify(hostCatalogDocument(previous));
+      let mode: "write" | "background" = "write";
+      if (!catalogChanged) {
+        const before = workspaceDocument(previous, workspaceIdRef.current);
+        const after = workspaceDocument(next, workspaceIdRef.current);
+        if (JSON.stringify(before) === JSON.stringify(after)) return;
+        // Idle attachment heartbeats advance last-seen time without a workspace edit.
+        if (key === "sessions" && JSON.stringify(withoutLastSeen(before)) === JSON.stringify(withoutLastSeen(after))) {
+          mode = "background";
+        }
+      }
+      void persist(false, mode).catch(() => undefined);
     },
     [persist],
   );

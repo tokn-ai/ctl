@@ -572,7 +572,28 @@ pub fn selected_executable_at(
 }
 
 pub(super) fn digest(bytes: &[u8]) -> String {
-  format!("{:x}", Sha256::digest(bytes))
+  hex::encode(Sha256::digest(bytes))
+}
+
+/// Streams SHA-256 over a reader and returns the byte count and raw digest.
+///
+/// # Errors
+/// Returns any read failure other than an interruption, which is retried.
+pub fn sha256_reader(mut reader: impl io::Read) -> io::Result<(u64, [u8; 32])> {
+  let mut digest = Sha256::new();
+  let mut buffer = [0; 16 * 1024];
+  let mut bytes = 0;
+  loop {
+    match reader.read(&mut buffer) {
+      Ok(0) => return Ok((bytes, digest.finalize().into())),
+      Ok(count) => {
+        bytes += count as u64;
+        digest.update(&buffer[..count]);
+      }
+      Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+      Err(error) => return Err(error),
+    }
+  }
 }
 pub(super) fn valid_digest(value: &str) -> bool {
   value.len() == 64

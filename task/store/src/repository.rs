@@ -222,7 +222,7 @@ impl Repository {
 
   fn revision(&self, definition: &TaskDefinition) -> Result<String, StoreError> {
     let bytes = serde_json::to_vec(definition).map_err(|source| self.json_error(source))?;
-    Ok(format!("sha256:{:x}", Sha256::digest(bytes)))
+    Ok(format!("sha256:{}", hex::encode(Sha256::digest(bytes))))
   }
 
   fn lock(&self) -> Result<File, StoreError> {

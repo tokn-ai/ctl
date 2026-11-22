@@ -250,11 +250,9 @@ fn print_json(value: &impl serde::Serialize) -> io::Result<()> {
 }
 
 fn print_updater_digest(executable: &Path) -> io::Result<()> {
-  use sha2::{Digest as _, Sha256};
-  let mut file = std::fs::File::open(executable)?;
-  let mut digest = Sha256::new();
-  io::copy(&mut file, &mut digest)?;
-  println!("{:x}", digest.finalize());
+  let file = std::fs::File::open(executable)?;
+  let (_, digest) = ctl_core::bundles::sha256_reader(file)?;
+  println!("{}", hex::encode(digest));
   Ok(())
 }
 

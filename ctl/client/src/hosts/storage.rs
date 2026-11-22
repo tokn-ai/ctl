@@ -175,8 +175,10 @@ pub fn persist_under_lock(path: &Path, snapshot: &HostCatalogSnapshot) -> Result
 /// Returns a serialization error if the document cannot be encoded.
 pub fn revision(document: &HostCatalogDocument) -> Result<String, HostError> {
   Ok(format!(
-    "sha256:{:x}",
-    Sha256::digest(serde_json::to_vec(document).map_err(json_error)?)
+    "sha256:{}",
+    hex::encode(Sha256::digest(
+      serde_json::to_vec(document).map_err(json_error)?
+    ))
   ))
 }
 

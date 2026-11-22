@@ -172,7 +172,7 @@ fn stage(source: &Path, output: &Path, version: &str, target: &str, mode: Mode) 
   println!("cargo:rerun-if-changed={}", archive_path.display());
   let archive = read_bounded(&archive_path, 128 * 1024 * 1024)?;
   if archive.len() as u64 != manifest.archive_size
-    || format!("{:x}", Sha256::digest(&archive)) != manifest.sha256
+    || hex::encode(Sha256::digest(&archive)) != manifest.sha256
   {
     return Err(invalid("bundled ctld archive size or checksum mismatch"));
   }

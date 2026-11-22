@@ -66,7 +66,7 @@ impl BundleCacheEntry {
   ) -> Result<Self, Error> {
     use sha2::{Digest as _, Sha256};
     let mut entry = Self::new(root, target, expected)?;
-    entry.revision_directory = entry.root.join(format!("{:x}", Sha256::digest(manifest)));
+    entry.revision_directory = entry.root.join(hex::encode(Sha256::digest(manifest)));
     entry.directory = entry.revision_directory.join(target);
     Ok(entry)
   }

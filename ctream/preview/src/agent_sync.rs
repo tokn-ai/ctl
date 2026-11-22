@@ -142,7 +142,7 @@ struct Artifact {
 impl Artifact {
   fn new(name: &'static str, bytes: impl Into<Arc<[u8]>>) -> Self {
     let bytes = bytes.into();
-    let hash = format!("{:x}", Sha256::digest(&bytes));
+    let hash = hex::encode(Sha256::digest(&bytes));
     Self { name, bytes, hash }
   }
 
@@ -284,7 +284,7 @@ fn release_key(files: &[Artifact]) -> String {
     hash.update(&artifact.hash);
     hash.update([0]);
   }
-  format!("{:x}", hash.finalize())
+  hex::encode(hash.finalize())
 }
 
 fn shell(value: &str) -> String {

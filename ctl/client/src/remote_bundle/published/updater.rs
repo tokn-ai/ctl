@@ -74,7 +74,7 @@ impl UpdaterInfo {
   }
 
   fn verify_bytes(&self, bytes: &[u8]) -> Result<(), Error> {
-    if bytes.len() as u64 != self.size || format!("{:x}", Sha256::digest(bytes)) != self.sha256 {
+    if bytes.len() as u64 != self.size || hex::encode(Sha256::digest(bytes)) != self.sha256 {
       return Err(Error::Invalid("updater size or checksum mismatch".into()));
     }
     Ok(())
@@ -462,7 +462,7 @@ fn cache_blobs(root: &Path) -> io::Result<(Vec<CacheBlob>, Vec<std::path::PathBu
       let metadata = std::fs::symlink_metadata(&binary)?;
       require_owned_file(&metadata)?;
       let bytes = crate::components::read_input(&binary, super::MAX_BUNDLE_BYTES)?;
-      if format!("{:x}", Sha256::digest(&bytes)) != name {
+      if hex::encode(Sha256::digest(&bytes)) != name {
         return Err(io::Error::new(
           io::ErrorKind::InvalidData,
           "updater cache content differs from its digest",

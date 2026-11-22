@@ -223,7 +223,7 @@ fn unknown_id(record: &Record) -> String {
   // Include sorted attributes so the fallback is stable across scan ordering.
   let attributes: BTreeMap<_, _> = record.attributes.iter().collect();
   let bytes = serde_json::to_vec(&attributes).expect("string attributes always serialize");
-  format!("unknown:{:x}", Sha256::digest(bytes))
+  format!("unknown:{}", hex::encode(Sha256::digest(bytes)))
 }
 
 fn display_path(path: &str) -> String {

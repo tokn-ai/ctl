@@ -45,7 +45,7 @@ pub fn context(
   let Some(repository_name) = repository_root.to_str() else {
     return Ok(None);
   };
-  let identity = format!("{:x}", Sha256::digest(repository_name.as_bytes()));
+  let identity = hex::encode(Sha256::digest(repository_name.as_bytes()));
   let output = output.canonicalize()?;
   let Some(profile) = output
     .parent()

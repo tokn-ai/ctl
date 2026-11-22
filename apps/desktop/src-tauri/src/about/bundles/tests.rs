@@ -140,7 +140,7 @@ fn write_included(
   let build = &manifest.components["ctl-agent"].build;
   let hashes: BTreeMap<_, _> = files
     .iter()
-    .map(|(name, bytes)| (name, format!("{:x}", Sha256::digest(bytes))))
+    .map(|(name, bytes)| (name, hex::encode(Sha256::digest(bytes))))
     .collect();
   let mut targets = BTreeMap::new();
   for target in [
@@ -178,7 +178,7 @@ fn write_included(
     let name = format!("ctl-agent-bundle-{}-{target}.tar.gz", build.version);
     std::fs::write(directory.join(&name), &bytes).unwrap();
     targets.insert(target, serde_json::json!({
-      "archive": name, "sha256": format!("{:x}", Sha256::digest(bytes)), "components": manifest.components,
+      "archive": name, "sha256": hex::encode(Sha256::digest(bytes)), "components": manifest.components,
     }));
   }
   std::fs::write(

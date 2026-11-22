@@ -209,7 +209,7 @@ fn malformed_owned_source_keeps_import_incomplete_without_inventing_key_binding(
 #[test]
 fn identity_sidecar_requires_canonical_path_digest_and_exact_file_binding() {
   let path = "/synthetic/identity";
-  let identity_id = format!("{:x}", Sha256::digest(path.as_bytes()));
+  let identity_id = hex::encode(Sha256::digest(path.as_bytes()));
   let metadata = SavedIdentity {
     version: 1,
     path: path.into(),

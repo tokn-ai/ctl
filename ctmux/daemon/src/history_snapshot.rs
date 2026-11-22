@@ -110,7 +110,7 @@ impl PhysicalHistory {
       data.extend(record);
     }
     Ok(EncodedHistory {
-      content_hash: format!("{:x}", Sha256::digest(&data)),
+      content_hash: hex::encode(Sha256::digest(&data)),
       data: Arc::new(data),
       first_row,
     })
@@ -192,10 +192,7 @@ mod tests {
       std::thread::spawn(move || Arc::clone(&concurrent.encoded(true).unwrap().data));
     let encoded = history.encoded(true).unwrap();
     assert_eq!(&*encoded.data, &expected);
-    assert_eq!(
-      encoded.content_hash,
-      format!("{:x}", Sha256::digest(&expected))
-    );
+    assert_eq!(encoded.content_hash, hex::encode(Sha256::digest(&expected)));
     assert!(Arc::ptr_eq(&encoded.data, &background.join().unwrap()));
   }
 

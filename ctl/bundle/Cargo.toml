@@ -15,13 +15,14 @@ publish = ["crates-io"]
 ctl-core = { workspace = true, features = ["bundles"], optional = true }
 serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
+hex = { workspace = true, optional = true }
 sha2 = { workspace = true, optional = true }
 uuid = { workspace = true, optional = true }
 zip = { workspace = true, optional = true }
 
 [features]
 default = []
-install = ["dep:ctl-core", "dep:serde", "dep:serde_json", "dep:sha2", "dep:uuid", "dep:zip"]
+install = ["dep:ctl-core", "dep:hex", "dep:serde", "dep:serde_json", "dep:sha2", "dep:uuid", "dep:zip"]
 pack = ["dep:zip"]
 
 [[bin]]

@@ -308,7 +308,7 @@ fn read_archive_payload(
       }
       hashes.insert(
         binary_names[name.as_str()].to_owned(),
-        format!("{:x}", digest.finalize()),
+        hex::encode(digest.finalize()),
       );
     }
   }

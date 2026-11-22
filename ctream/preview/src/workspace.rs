@@ -52,11 +52,11 @@ impl Connected {
     }
   }
 
-  fn update_ui(&mut self, ctx: &egui::Context) {
+  fn update_ui(&mut self, ui: &mut egui::Ui) {
     match self {
-      Self::Agent(viewer) => viewer.update_ui(ctx),
+      Self::Agent(viewer) => viewer.update_ui(ui),
       #[cfg(target_os = "macos")]
-      Self::Macos(viewer) => viewer.update_ui(ctx),
+      Self::Macos(viewer) => viewer.update_ui(ui),
     }
   }
 }
@@ -176,8 +176,8 @@ impl Preview {
     }
   }
 
-  fn pick_host(&mut self, ctx: &egui::Context) {
-    egui::TopBottomPanel::top("workspace_heading").show(ctx, |ui| {
+  fn pick_host(&mut self, ui: &mut egui::Ui) {
+    egui::Panel::top("workspace_heading").show(ui, |ui| {
       ui.horizontal(|ui| {
         ui.heading("Workspace hosts");
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -188,21 +188,25 @@ impl Preview {
             )
             .clicked()
           {
-            self.refresh(ctx);
+            self.refresh(ui.ctx());
           }
         });
       });
     });
     if self.connecting.is_none() {
-      egui::TopBottomPanel::bottom("workspace_actions").show(ctx, |ui| {
+      egui::Panel::bottom("workspace_actions").show(ui, |ui| {
         ui.horizontal(|ui| {
           #[cfg(not(target_os = "macos"))]
           if ui.button("Use local agent").clicked() {
-            self.open("Local".into(), Connection::Local(Local::default()), ctx);
+            self.open(
+              "Local".into(),
+              Connection::Local(Local::default()),
+              ui.ctx(),
+            );
           }
           #[cfg(target_os = "macos")]
           if ui.button("Capture a local window").clicked() {
-            let viewer = Box::new(super::macos_local::Viewer::new(ctx));
+            let viewer = Box::new(super::macos_local::Viewer::new(ui.ctx()));
             self.connected = Some(("Local".into(), Connected::Macos(viewer)));
           }
           let selected = self
@@ -220,13 +224,13 @@ impl Preview {
               .clicked()
               && let Some(host) = selected
             {
-              self.connect(host, ctx);
+              self.connect(host, ui.ctx());
             }
           });
         });
       });
     }
-    egui::CentralPanel::default().show(ctx, |ui| {
+    egui::CentralPanel::default_margins().show(ui, |ui| {
       if let Some(connecting) = &self.connecting {
         let stopping = connecting.cancelled.load(Ordering::Acquire);
         ui.horizontal(|ui| {
@@ -278,8 +282,8 @@ impl Preview {
 }
 
 impl eframe::App for Preview {
-  fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
-    if ctx.input(|input| input.viewport().close_requested()) {
+  fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
+    if ui.input(|input| input.viewport().close_requested()) {
       if let Some(connecting) = self.connecting.take() {
         connecting.cancelled.store(true, Ordering::Release);
         let _ = connecting.finished.recv_timeout(Duration::from_millis(100));
@@ -287,11 +291,11 @@ impl eframe::App for Preview {
       self.connected = None;
       return;
     }
-    self.poll(ctx);
+    self.poll(ui.ctx());
     let mut change_host = false;
     if let Some((host, viewer)) = &mut self.connected {
       if !viewer.is_viewing() {
-        egui::TopBottomPanel::top("workspace_connection").show(ctx, |ui| {
+        egui::Panel::top("workspace_connection").show(ui, |ui| {
           ui.horizontal(|ui| {
             ui.strong(host.as_str());
             change_host = ui.button("Change host").clicked();
@@ -299,17 +303,17 @@ impl eframe::App for Preview {
         });
       }
       if !change_host {
-        viewer.update_ui(ctx);
+        viewer.update_ui(ui);
         return;
       }
     }
     self.connected = None;
     if change_host {
-      self.refresh(ctx);
-      ctx.request_repaint();
+      self.refresh(ui.ctx());
+      ui.ctx().request_repaint();
       return;
     }
-    self.pick_host(ctx);
+    self.pick_host(ui);
   }
 }
 

@@ -41,7 +41,7 @@ pub(in crate::updater::app) fn package(
 ) -> PathBuf {
   let hashes: BTreeMap<_, _> = files
     .iter()
-    .map(|(name, bytes)| (name, format!("{:x}", Sha256::digest(bytes))))
+    .map(|(name, bytes)| (name, hex::encode(Sha256::digest(bytes))))
     .collect();
   let manifest = serde_json::to_vec(&serde_json::json!({
     "schema_version": 1, "app_version": "0.1.3", "target_triple": target, "files": hashes,

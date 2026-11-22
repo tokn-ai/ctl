@@ -38,7 +38,7 @@ pub(super) fn extract(bytes: &[u8], manifest: &Manifest, destination: &Path) -> 
 
 fn verify_checksum(bytes: &[u8], manifest: &Manifest) -> Result<(), Error> {
   if bytes.len() as u64 != manifest.archive_size
-    || format!("{:x}", Sha256::digest(bytes)) != manifest.sha256
+    || hex::encode(Sha256::digest(bytes)) != manifest.sha256
   {
     return Err(Error::InvalidRelease(
       "archive length or SHA-256 checksum does not match".into(),

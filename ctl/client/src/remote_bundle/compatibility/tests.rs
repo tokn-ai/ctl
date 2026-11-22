@@ -85,7 +85,7 @@ impl Fixture {
       .collect();
     let hashes: BTreeMap<_, _> = files
       .iter()
-      .map(|(name, bytes)| (name, format!("{:x}", Sha256::digest(bytes))))
+      .map(|(name, bytes)| (name, hex::encode(Sha256::digest(bytes))))
       .collect();
     let inner = json!({"schema_version":2,"app_version":version,"bundle_id":version,"git_revision":revision,"target_triple":TARGET,"files":hashes,"components":components});
     let targets: BTreeMap<_, _> = SUPPORTED_TARGETS.iter().map(|target| (*target, json!({"archive":format!("ctl-agent-bundle-{version}-{target}.tar.gz"),"sha256":"a".repeat(64),"components":components}))).collect();
@@ -116,7 +116,7 @@ impl Fixture {
     }
     for name in ["ctl", "ctmux"] {
       let bytes = format!("binary fixture {name}").into_bytes();
-      self.inner["files"][name] = json!(format!("{:x}", Sha256::digest(&bytes)));
+      self.inner["files"][name] = json!(hex::encode(Sha256::digest(&bytes)));
       self.files.insert(name.into(), bytes);
     }
     self
@@ -179,7 +179,7 @@ impl Fixture {
   pub(crate) fn bind_archive(&self, archive: &[u8]) -> Vec<u8> {
     let mut outer = self.outer.clone();
     for target in outer["targets"].as_object_mut().unwrap().values_mut() {
-      target["sha256"] = json!(format!("{:x}", Sha256::digest(archive)));
+      target["sha256"] = json!(hex::encode(Sha256::digest(archive)));
     }
     serde_json::to_vec(&outer).unwrap()
   }

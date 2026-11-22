@@ -362,7 +362,7 @@ mod tests {
 
   fn manifest(archive: &[u8]) -> serde_json::Value {
     let bundle_id = format!("{}-dev.{}", env!("CARGO_PKG_VERSION"), &REVISION[..12]);
-    let sha256 = format!("{:x}", Sha256::digest(archive));
+    let sha256 = hex::encode(Sha256::digest(archive));
     let targets = [
       "x86_64-unknown-linux-musl",
       "aarch64-unknown-linux-musl",

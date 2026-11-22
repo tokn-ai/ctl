@@ -165,8 +165,8 @@ mod tests {
     }
     let ctx = egui::Context::default();
     install(&ctx);
-    let _ = ctx.run(egui::RawInput::default(), |ctx| {
-      ctx.fonts_mut(|fonts| {
+    let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+      ui.ctx().fonts_mut(|fonts| {
         for font in [
           egui::FontId::proportional(16.0),
           egui::FontId::monospace(16.0),
@@ -175,5 +175,6 @@ mod tests {
         }
       });
     });
+    output.textures_delta.clear();
   }
 }

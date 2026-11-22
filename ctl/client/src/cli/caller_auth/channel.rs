@@ -179,7 +179,9 @@ pub fn claim(_fd: i32) -> io::Result<std::fs::File> {
 /// # Errors
 /// Returns an error for an I/O failure, a timeout, or invalid input.
 pub async fn inherited(file: std::fs::File) -> io::Result<Zeroizing<Vec<u8>>> {
-  password(Inherited(tokio::io::unix::AsyncFd::new(file)?)).await
+  #[expect(deprecated, reason = "AsyncFd owns a File with a stable descriptor")]
+  let descriptor = tokio::io::unix::AsyncFd::new(file)?;
+  password(Inherited(descriptor)).await
 }
 
 #[cfg(not(unix))]

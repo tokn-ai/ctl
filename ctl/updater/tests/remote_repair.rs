@@ -246,10 +246,9 @@ esac
       fs::set_permissions(payload.join(binary), fs::Permissions::from_mode(0o700)).unwrap();
       files.insert(
         binary.into(),
-        json!(format!(
-          "{:x}",
-          Sha256::digest(fs::read(payload.join(binary)).unwrap())
-        )),
+        json!(hex::encode(Sha256::digest(
+          fs::read(payload.join(binary)).unwrap()
+        ))),
       );
     }
     fs::write(
@@ -313,7 +312,7 @@ esac
       .output()
       .unwrap();
     assert!(output.status.success(), "{output:?}");
-    format!("{:x}", Sha256::digest(fs::read(&archive).unwrap()))
+    hex::encode(Sha256::digest(fs::read(&archive).unwrap()))
   }
 
   fn write_agent_identity(

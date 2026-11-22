@@ -471,7 +471,7 @@ fn new_record(
     event,
     outcome: Outcome::Started,
     connection_endpoint: None,
-    subject_id: subject.map(|value| format!("{:x}", Sha256::digest(value.as_bytes()))),
+    subject_id: subject.map(|value| hex::encode(Sha256::digest(value.as_bytes()))),
     elapsed_ms: 0,
     error_code: None,
     os_error: None,

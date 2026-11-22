@@ -89,10 +89,7 @@ pub async fn install(home: &Path, options: DevelopmentOptions) -> io::Result<Pre
   {
     return Err(invalid("development Cargo arguments exceed their limit"));
   }
-  let checkout_id = format!(
-    "{:x}",
-    Sha256::digest(workspace.as_os_str().as_encoded_bytes())
-  );
+  let checkout_id = hex::encode(Sha256::digest(workspace.as_os_str().as_encoded_bytes()));
   let installations = Installations::new(home);
   let expected_head = installations.development_head(&checkout_id)?;
   let output = Arc::new(OutputDirectory::new()?);

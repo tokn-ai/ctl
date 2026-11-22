@@ -8,7 +8,6 @@ use ctl_core::installations::{
 use ctl_core::installed_build_name;
 use ctl_core::private_fs;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest as _, Sha256};
 use std::{
   fs::File,
   io::{self, Read as _, Write as _},
@@ -670,12 +669,12 @@ fn copy_package(source: &Path, destination: &Path) -> io::Result<()> {
 }
 
 fn package_digest(path: &Path) -> io::Result<Digest> {
-  let mut file = open_package(path)?.take(MAX_PACKAGE_BYTES + 1);
-  let mut digest = Sha256::new();
-  if !(1..=MAX_PACKAGE_BYTES).contains(&io::copy(&mut file, &mut digest)?) {
+  let file = open_package(path)?.take(MAX_PACKAGE_BYTES + 1);
+  let (bytes, digest) = ctl_core::bundles::sha256_reader(file)?;
+  if !(1..=MAX_PACKAGE_BYTES).contains(&bytes) {
     return Err(invalid("desktop package exceeds the size limit"));
   }
-  Ok(Digest(format!("{:x}", digest.finalize())))
+  Ok(Digest(hex::encode(digest)))
 }
 
 fn payload_name() -> &'static str {

@@ -52,6 +52,7 @@ portable-pty.workspace = true
 unicode-width.workspace = true
 
 [target.'cfg(unix)'.dependencies]
+filedescriptor = "0.8.3"
 rustix.workspace = true
 nix = { workspace = true, features = ["signal"] }
 
@@ -59,7 +60,6 @@ nix = { workspace = true, features = ["signal"] }
 avt.workspace = true
 ctmux-client.workspace = true
 ctmuxd.workspace = true
-filedescriptor = "0.8.3"
 nix = { workspace = true, features = ["signal"] }
 rustix = { workspace = true, features = ["termios"] }
 

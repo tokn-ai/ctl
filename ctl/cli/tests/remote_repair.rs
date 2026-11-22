@@ -175,13 +175,13 @@ async fn missing_or_incompatible_agent_exits_with_a_targeted_update_command() {
       "ctl_agent_not_found",
       &["-H", "work", "shell"][..],
       "The remote ctl-agent is missing.",
-      "ctlup update --host='work'",
+      "ctlup install --host='work'",
     ),
     (
       "ctl_agent_update_required",
       &["-H", "work", "--method", "direct", "ctmux", "list"][..],
       "The remote ctl-agent needs an update for shared SSH services.",
-      "ctlup update --host='work' --method='direct'",
+      "ctlup install --host='work' --method='direct'",
     ),
   ] {
     let fixture = Fixture::new();

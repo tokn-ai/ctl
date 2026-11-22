@@ -225,8 +225,9 @@ different account/environment requires a separate host; matching addresses or
 display names are not evidence of shared session ownership.
 
 The identity is `~/.tokn/ctl/remote-id` under the remote user's home directory
-on all platforms. Unix component bundles use `~/.tokn/ctl/versions` and the
-`~/.tokn/ctl/current` symlink; upgrades leave the identity file in place.
+on all platforms. `ctlup` keeps runtime bundles under `~/.tokn/ctl/ctlup/store/runtime/`
+and records the active bundle in the updater registry. Upgrades leave the
+identity file in place.
 Concurrent first connections publish one complete UUID file without
 overwriting a competing creator; upgrades do not replace it. Corrupt identity files
 fail discovery instead of silently generating a new identity. The ID identifies a

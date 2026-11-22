@@ -58,6 +58,18 @@ pub fn directory_for_account(account: &Path) -> PathBuf {
   data_override().unwrap_or_else(|| account.join(".tokn/ctl"))
 }
 
+/// Resolves updater-owned storage inside the selected account profile.
+#[must_use]
+pub fn updater_directory_for_account(account: &Path) -> PathBuf {
+  updater_directory_for_profile(&directory_for_account(account))
+}
+
+/// Resolves updater-owned storage from an already selected profile.
+#[must_use]
+pub fn updater_directory_for_profile(profile: &Path) -> PathBuf {
+  profile.join("ctlup")
+}
+
 /// Identifies the installation directory that must be checked before walking
 /// a managed storage path.
 ///

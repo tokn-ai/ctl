@@ -66,6 +66,8 @@ fn windows_bootstrap_keeps_pinned_metadata_off_the_command_line_and_fits_cmd() {
   assert!(command.len() < 8000);
   assert!(!script.contains("__"));
   assert!(script.contains("SetAccessRuleProtection($true, $false)"));
+  assert!(script.contains("Copy-UpdaterOutput $manager ('export-manager --sha256 ' + $sha)"));
+  assert!(script.contains("Assert-PlainUpdaterPath $path"));
   assert!(script.contains("Get-FileHash -LiteralPath $file"));
   assert!(script.contains("--manifest-bytes"));
 }
@@ -75,19 +77,15 @@ mod unix {
   use super::*;
   use crate::remote_bundle::compatibility::tests::Fixture;
   use sha2::{Digest, Sha256};
-  use std::{
-    fs,
-    os::unix::fs::PermissionsExt,
-    path::{Path, PathBuf},
-    sync::Mutex,
-  };
+  use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf, sync::Mutex};
 
   const TARGET: &str = "aarch64-unknown-linux-musl";
   const URL: &str = "https://assets.test/pinned/ctl'up";
   const ARCHIVE: &str = "https://assets.test/pinned/bundle?a=1&b=2";
   const MANIFEST: &[u8] = br#"{"original": true}"#;
-  const HELPER: &[u8] = br#"#!/bin/sh
+  const HELPER: &str = r#"#!/bin/sh
 set -eu
+if [ "$1" = installation-layout-version ]; then printf '__LAYOUT_VERSION__\n'; exit 0; fi
 if [ "$2" = --help ]; then
   if [ -f "$HOME/old" ]; then echo "error: unrecognized subcommand 'install-publication'" >&2; exit 2; fi
   if [ -f "$HOME/broken" ]; then echo 'failed to inspect executable' >&2; exit 2; fi
@@ -102,6 +100,13 @@ printf 'ctl-published-install-v1\n'
 cat "$HOME/managed-manifest"
 "#;
 
+  fn helper() -> String {
+    HELPER.replace(
+      "__LAYOUT_VERSION__",
+      &ctl_core::installations::DEVELOPMENT_LAYOUT_VERSION.to_string(),
+    )
+  }
+
   struct Host(PathBuf);
 
   impl Host {
@@ -109,7 +114,7 @@ cat "$HOME/managed-manifest"
       let home = std::env::temp_dir().join(format!("ctl-published-{}", uuid::Uuid::new_v4()));
       fs::create_dir(&home).unwrap();
       fs::set_permissions(&home, fs::Permissions::from_mode(0o700)).unwrap();
-      fs::write(home.join("manager"), HELPER).unwrap();
+      fs::write(home.join("manager"), helper()).unwrap();
       let fixture = Fixture::new("0.1.0", &"b".repeat(40)).with_clients();
       let components = serde_json::from_value(fixture.inner["components"].clone()).unwrap();
       let manifest = Manifest::new(
@@ -148,9 +153,10 @@ cat "$HOME/managed-manifest"
       Result<Option<Manifest>, CoreError>,
       Vec<PublishedInstallStage>,
     ) {
+      let helper = helper();
       let args: [&str; 9] = [
-        &HELPER.len().to_string(),
-        &format!("{:x}", Sha256::digest(HELPER)),
+        &helper.len().to_string(),
+        &format!("{:x}", Sha256::digest(&helper)),
         URL,
         "abcd",
         ARCHIVE,
@@ -175,13 +181,16 @@ cat "$HOME/managed-manifest"
       )
       .await
       .unwrap();
-      assert!(!fs::read_dir(&self.0).unwrap().any(|entry| {
-        entry
-          .unwrap()
-          .file_name()
-          .to_string_lossy()
-          .starts_with(".ctlup-fetch.")
-      }));
+      let staging = self.0.join(".tokn/ctl/ctlup/staging");
+      if staging.is_dir() {
+        assert!(!fs::read_dir(staging).unwrap().any(|entry| {
+          entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".ctlup-fetch.")
+        }));
+      }
       (result, events.into_inner().unwrap())
     }
   }
@@ -256,7 +265,7 @@ cat "$HOME/managed-manifest"
     assert!(host.install(None, None).await.0.unwrap().is_none());
     assert!(host.install(None, Some(b"archive")).await.0.is_err());
     fs::remove_file(host.0.join("missing-runtime")).unwrap();
-    fs::write(host.0.join("manager"), vec![b'!'; HELPER.len()]).unwrap();
+    fs::write(host.0.join("manager"), vec![b'!'; helper().len()]).unwrap();
     let error = host.install(None, None).await.0.unwrap_err();
     assert!(error.to_string().contains("checksum"));
   }
@@ -264,21 +273,28 @@ cat "$HOME/managed-manifest"
   #[tokio::test]
   async fn cached_bytes_cross_ssh_only_for_the_requested_artifact() {
     use PublishedInstallStage as Stage;
+    use sha2::{Digest as _, Sha256};
 
     let host = Host::new();
-    let (result, phases) = host.install(Some(HELPER), None).await;
+    let helper = helper();
+    let (result, phases) = host.install(Some(helper.as_bytes()), None).await;
     assert!(result.unwrap().is_some());
     assert!(phases.contains(&PublishedInstallStage::UploadingUpdater));
-    let total = HELPER.len() as u64;
+    let total = helper.len() as u64;
     assert!(phases.contains(&Stage::UploadingUpdaterBytes { sent: 0, total }));
     assert!(phases.contains(&Stage::UploadingUpdaterBytes { sent: total, total }));
     assert!(!host.0.join("curl-args").exists());
     assert_eq!(fs::read(host.0.join("received")).unwrap(), MANIFEST);
-    let managed = host.0.join(Path::new(".tokn/ctl/bin/ctlup"));
+    let hash = format!("{:x}", Sha256::digest(&helper));
+    let managed = host
+      .0
+      .join(".tokn/ctl/ctlup/store/updater")
+      .join(hash)
+      .join("ctlup");
     fs::create_dir_all(managed.parent().unwrap()).unwrap();
-    fs::write(managed, HELPER).unwrap();
+    fs::write(managed, &helper).unwrap();
     fs::write(host.0.join("reused"), b"").unwrap();
-    let (result, phases) = host.install(Some(HELPER), None).await;
+    let (result, phases) = host.install(Some(helper.as_bytes()), None).await;
     assert!(result.unwrap().is_some());
     assert!(phases.contains(&PublishedInstallStage::UsingInstalledUpdater));
     assert!(phases.contains(&PublishedInstallStage::ReusedRuntime));
@@ -304,6 +320,132 @@ cat "$HOME/managed-manifest"
       fs::read(host.0.join("received")).unwrap(),
       [MANIFEST, bytes].concat()
     );
+  }
+
+  #[tokio::test]
+  async fn retained_updater_export_verifies_bytes_without_reading_ssh_input() {
+    use PublishedInstallStage as Stage;
+    use std::os::unix::fs::symlink;
+
+    let host = Host::new();
+    let helper = helper();
+    let hash = format!("{:x}", Sha256::digest(&helper));
+    let bin = host.0.join(".tokn/ctl/bin");
+    fs::create_dir_all(&bin).unwrap();
+    let launcher = bin.join(".ctl-launcher");
+    fs::write(
+      &launcher,
+      r#"#!/bin/sh
+set -eu
+[ "$1" = export-manager ]
+if [ "$2" = --help ]; then
+  if [ -f "$HOME/legacy-manager" ]; then
+    echo "error: unrecognized subcommand 'export-manager'" >&2
+    exit 2
+  fi
+  exit 0
+fi
+[ "$2" = --sha256 ]
+printf '%s\n' "$3" > "$HOME/exported-digest"
+if IFS= read -r ignored; then exit 1; fi
+if [ -f "$HOME/absent-updater" ]; then exit 10; fi
+cat "$HOME/.tokn/ctl/ctlup/store/updater/dev-20261121T081525Z-v0.1.4-abcdef0-local/ctlup"
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&launcher, fs::Permissions::from_mode(0o700)).unwrap();
+    symlink(".ctl-launcher", bin.join("ctlup")).unwrap();
+    let managed = host
+      .0
+      .join(".tokn/ctl/ctlup/store/updater/dev-20261121T081525Z-v0.1.4-abcdef0-local")
+      .join("ctlup");
+    fs::create_dir_all(managed.parent().unwrap()).unwrap();
+    fs::write(&managed, &helper).unwrap();
+
+    let (result, phases) = host.install(None, None).await;
+    assert!(result.unwrap().is_some());
+    assert!(phases.contains(&Stage::UsingInstalledUpdater));
+    assert!(!host.0.join("curl-args").exists());
+    assert_eq!(
+      fs::read_to_string(host.0.join("exported-digest")).unwrap(),
+      format!("{hash}\n")
+    );
+    assert_eq!(fs::read(host.0.join("received")).unwrap(), MANIFEST);
+
+    fs::write(managed, vec![b'!'; helper.len()]).unwrap();
+    let error = host
+      .install(Some(helper.as_bytes()), None)
+      .await
+      .0
+      .unwrap_err();
+    assert!(error.to_string().contains("checksum mismatch"));
+
+    let legacy = host
+      .0
+      .join(".tokn/ctl/ctlup/store/updater")
+      .join(hash)
+      .join("ctlup");
+    fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+    fs::write(&legacy, b"corrupt legacy updater").unwrap();
+    fs::write(host.0.join("absent-updater"), b"").unwrap();
+    let (result, phases) = host.install(Some(helper.as_bytes()), None).await;
+    assert!(result.unwrap().is_some());
+    assert!(phases.contains(&Stage::UploadingUpdater));
+
+    fs::write(legacy, helper).unwrap();
+    fs::write(host.0.join("legacy-manager"), b"").unwrap();
+    let (result, phases) = host.install(None, None).await;
+    assert!(result.unwrap().is_some());
+    assert!(phases.contains(&Stage::UsingInstalledUpdater));
+  }
+
+  #[tokio::test]
+  async fn missing_legacy_updater_allows_verified_published_recovery() {
+    use PublishedInstallStage as Stage;
+    use std::os::unix::fs::symlink;
+
+    let host = Host::new();
+    let bin = host.0.join(".tokn/ctl/bin");
+    fs::create_dir_all(&bin).unwrap();
+    let launcher = bin.join(".ctl-launcher");
+    let set_probe_error = |message| {
+      fs::write(
+        &launcher,
+        format!("#!/bin/sh\n[ \"$1:$2\" = export-manager:--help ] || exit 2\nprintf '%s\\n' '{message}' >&2\nexit 1\n"),
+      )
+      .unwrap();
+    };
+    set_probe_error("ctlup: No such file or directory (os error 2)");
+    fs::set_permissions(&launcher, fs::Permissions::from_mode(0o700)).unwrap();
+    symlink(".ctl-launcher", bin.join("ctlup")).unwrap();
+
+    let helper = helper();
+    let (result, phases) = host.install(Some(helper.as_bytes()), None).await;
+    assert!(result.unwrap().is_some());
+    assert!(phases.contains(&Stage::UploadingUpdater));
+    let (result, phases) = host.install(None, None).await;
+    assert!(result.unwrap().is_some());
+    assert!(phases.contains(&Stage::DownloadingUpdater));
+
+    set_probe_error("ctlup: stored updater failed payload verification");
+    let error = host.install(None, None).await.0.unwrap_err();
+    assert!(error.to_string().contains("export capability check failed"));
+  }
+
+  #[tokio::test]
+  async fn published_lookup_refuses_foreign_updater_entry_points() {
+    use std::os::unix::fs::symlink;
+
+    let host = Host::new();
+    let bin = host.0.join(".tokn/ctl/bin");
+    fs::create_dir_all(&bin).unwrap();
+    let outside = host.0.join("foreign-manager");
+    fs::write(&outside, "#!/bin/sh\ntouch \"$HOME/foreign-ran\"\n").unwrap();
+    fs::set_permissions(&outside, fs::Permissions::from_mode(0o700)).unwrap();
+    symlink(outside, bin.join("ctlup")).unwrap();
+    let error = host.install(None, None).await.0.unwrap_err();
+    assert!(error.to_string().contains("unexpected link target"));
+    assert!(!host.0.join("foreign-ran").exists());
   }
 }
 

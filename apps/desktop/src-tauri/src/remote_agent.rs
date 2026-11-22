@@ -180,21 +180,31 @@ async fn prepare_deployment(
   updates: &watch::Sender<Progress>,
 ) -> CommandResult<component_update::PublicationDeployment> {
   let report = |next| progress::publish(updates, preparation_progress(next));
-  let channel = match source {
-    BuildSource::Automatic => {
-      Some(ctl_client::installation::default_channel(home).map_err(CommandErrorDto::backend)?)
-    }
-    BuildSource::Published { channel } => Some(*channel),
-    _ => None,
+  let report_stage = |stage| progress::publish(updates, progress::publication_progress(stage));
+  let resolved;
+  let source = if matches!(source, BuildSource::Automatic) {
+    resolved = automatic_remote_source(remote).await?;
+    &resolved
+  } else {
+    source
   };
-  if let Some(channel) = channel {
+  if let BuildSource::Published { channel } = source {
     return component_update::deploy_remote_publication(
       home,
       remote,
-      channel,
-      |stage| {
-        progress::publish(updates, progress::publication_progress(stage));
-      },
+      *channel,
+      report_stage,
+      report,
+    )
+    .await
+    .map_err(CommandErrorDto::backend);
+  }
+  if let BuildSource::Release { publication_id } = source {
+    return component_update::deploy_remote_release(
+      home,
+      remote,
+      publication_id,
+      report_stage,
       report,
     )
     .await
@@ -226,6 +236,31 @@ async fn prepare_deployment(
   Ok(component_update::PublicationDeployment::Upload(Box::new(
     prepared,
   )))
+}
+
+async fn automatic_remote_source(
+  remote: &component_update::PublicationTarget<'_>,
+) -> CommandResult<BuildSource> {
+  use component_update::BundleChannel;
+  let source = ctl_client::installation::remote_runtime_source(
+    remote.destination,
+    remote.options,
+    remote.interaction,
+    remote.expected_account,
+  )
+  .await
+  .map_err(CommandErrorDto::backend)?;
+  let channel = match source.origin.as_ref().map(|origin| origin.channel.as_str()) {
+    Some("stable") => BundleChannel::Stable,
+    Some("nightly") => BundleChannel::Nightly,
+    None if source.active.is_none() => BundleChannel::default(),
+    _ => {
+      return Err(CommandErrorDto::backend(
+        "The runtime is pinned to a build. Select a publication channel or provide the build files.",
+      ));
+    }
+  };
+  Ok(BuildSource::Published { channel })
 }
 
 fn parse_platform(output: &str) -> CommandResult<Platform> {

@@ -24,7 +24,7 @@ On Windows x64, bootstrap from the MSVC checkout with
 uses the configured native Rust toolchain. It writes `.exe` files into the
 same managed installation store.
 
-The active build lives under `~/.tokn/ctl/installs/`; stable commands are exposed
+The active build lives under `~/.tokn/ctl/ctlup/store/runtime/`; stable commands are exposed
 through `~/.tokn/ctl/bin`. Add that directory to `PATH`. Development installation
 updates the same active selection as `ctlup update`, so status reports the new
 build immediately. Existing daemons and sessions retain their running build;
@@ -59,7 +59,7 @@ ctlup dev --app --workspace /path/to/checkout --json
 and installs it on this computer. It preserves the selected publication
 channel. On macOS it uses the development helper profile for signing and can
 renew an expired profile through Xcode. If provisioning or signing fails, the
-app can bundle an unsigned helper. `ctlup dev --renew-signing` renews the
+app can bundle an unsigned helper. `ctlup dev sign` renews the
 active runtime helper's signature separately.
 
 ## Install a ctream development build
@@ -108,8 +108,8 @@ pnpm bundles:build --target aarch64-unknown-linux-musl
 ```
 
 To build for a Linux host and install in one step, run
-`ctlup dev --host NAME` for a saved host or `ctlup dev --destination ALIAS`
-for an OpenSSH alias. Use `ctlup dev --hosts work,lab` for multiple saved hosts
+`ctlup dev --host NAME` for a saved host or `ctlup dev --ssh ALIAS`
+for an OpenSSH alias. Use `ctlup dev --host work --host lab` for multiple saved hosts
 and `--workspace` to select a checkout. To install on this computer, run
 `ctlup dev` separately. In a desktop app installed with `ctlup dev --app`,
 select a Linux x64 or ARM64 SSH host and choose **Build from checkout**.
@@ -152,7 +152,7 @@ target/development-bundles/updaters/<target>/
 
 In the component update dialog, choose **Provided build files** and enter the
 path to `<target>/`. Leave **Native local build** unchecked for this packaged
-Linux build. From the CLI, run `ctlup update --host NAME --from DIRECTORY`
+Linux build. From the CLI, run `ctlup install --host NAME --from DIRECTORY`
 with the same directory.
 
 To use a copied build, keep `<target>/` and `updaters/<target>/` under the same

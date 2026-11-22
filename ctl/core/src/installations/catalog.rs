@@ -10,11 +10,14 @@ use std::fs;
 use std::io::{self, Read as _, Write as _};
 use std::path::Path;
 
-const CATALOG: &str = "catalog.json";
-const JOURNAL: &str = ".catalog-transaction.json";
-const DEVELOPMENT: &str = "development.json";
-const DEVELOPMENT_JOURNAL: &str = ".development-transaction.json";
-const MAX_BYTES: u64 = 1024 * 1024;
+const CATALOG: &str = "installations.json";
+const RUNTIME_PATHS: &str = "runtime-paths.json";
+const UPDATER_PATHS: &str = "updater-paths.json";
+const RUNTIME_BUILD_PATHS: &str = "runtime-build-paths.json";
+const UPDATER_BUILD_PATHS: &str = "updater-build-paths.json";
+const UPDATER_OBJECT_PATHS: &str = "updater-object-paths.json";
+const DESKTOP_OBJECT_PATHS: &str = "desktop-object-paths.json";
+const MAX_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_ENTRIES: usize = 4096;
 
 /// The publication or explicit source that supplied installed target bundles.
@@ -83,21 +86,218 @@ impl CatalogEntry {
 pub(super) struct State {
   schema_version: u16,
   pub(super) entries: Vec<CatalogEntry>,
-  // Older runtime binaries read the catalog while acquiring process leases.
-  // Keep checkout registrations in a sidecar so those readers remain usable.
-  #[serde(skip)]
   pub(super) development: BTreeMap<String, String>,
+  pub(super) active_runtime: Option<RuntimeSelection>,
+  pub(super) desktop: Option<DesktopSelection>,
+  pub(super) updater: Option<String>,
   #[serde(skip)]
-  clear_active: Option<String>,
+  pub(super) runtime_paths: PayloadPaths,
+  #[serde(skip)]
+  pub(super) updater_paths: PayloadPaths,
+  #[serde(skip)]
+  pub(super) desktop_paths: PathIndex,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(super) struct PayloadPaths {
+  pub(super) target_first: PathIndex,
+  pub(super) build_first: PathIndex,
+  pub(super) object: PathIndex,
+}
+
+impl PayloadPaths {
+  pub(super) fn location(&self, id: &str) -> Option<&str> {
+    self
+      .object
+      .locations
+      .get(id)
+      .or_else(|| self.build_first.locations.get(id))
+      .or_else(|| self.target_first.locations.get(id))
+      .map(String::as_str)
+  }
+
+  pub(super) fn locations(&self) -> impl Iterator<Item = (&String, &String)> {
+    self
+      .target_first
+      .locations
+      .iter()
+      .chain(&self.build_first.locations)
+      .chain(&self.object.locations)
+  }
+
+  pub(super) fn reserves(&self, location: &str) -> bool {
+    self.locations().any(|(_, existing)| {
+      existing.eq_ignore_ascii_case(location)
+        || existing
+          .split_once('/')
+          .is_some_and(|(parent, _)| parent.eq_ignore_ascii_case(location))
+        || location
+          .split_once('/')
+          .is_some_and(|(parent, _)| existing.eq_ignore_ascii_case(parent))
+    })
+  }
+
+  fn target(&self, id: &str) -> Option<&str> {
+    if let Some(path) = self.build_first.locations.get(id) {
+      return path.split_once('/').map(|(_, target)| target);
+    }
+    self
+      .target_first
+      .locations
+      .get(id)?
+      .split_once('/')
+      .map(|(target, _)| target)
+  }
+
+  fn validate(
+    &self,
+    target_first: u16,
+    build_first: Option<u16>,
+    object: Option<u16>,
+  ) -> io::Result<()> {
+    self
+      .target_first
+      .validate(Some(target_first), Order::TargetFirst)?;
+    self.build_first.validate(build_first, Order::BuildFirst)?;
+    self.object.validate(object, Order::Object)?;
+    let mut identities = BTreeSet::new();
+    if self.locations().any(|(id, _)| !identities.insert(id)) {
+      return Err(invalid(
+        "duplicate installed payload identity across path indexes",
+      ));
+    }
+    if !self.object.locations.is_empty() {
+      let reserved: BTreeSet<_> = self
+        .target_first
+        .locations
+        .values()
+        .chain(self.build_first.locations.values())
+        .filter_map(|location| {
+          location
+            .split_once('/')
+            .map(|(parent, _)| parent.to_ascii_lowercase())
+        })
+        .collect();
+      if self
+        .object
+        .locations
+        .values()
+        .any(|location| reserved.contains(&location.to_ascii_lowercase()))
+      {
+        return Err(invalid("updater object overlaps a legacy payload group"));
+      }
+    }
+    Ok(())
+  }
+}
+
+/// Preserve the original schema and path order for older executables that
+/// acquire their own leases, while reserving new paths before publication.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct PathIndex {
+  schema_version: u16,
+  pub(super) launcher_layout: Option<u16>,
+  pub(super) locations: BTreeMap<String, String>,
+}
+
+impl Default for PathIndex {
+  fn default() -> Self {
+    Self {
+      schema_version: 1,
+      launcher_layout: None,
+      locations: BTreeMap::new(),
+    }
+  }
+}
+
+#[derive(Clone, Copy)]
+enum Order {
+  TargetFirst,
+  BuildFirst,
+  Object,
+}
+
+impl PathIndex {
+  pub(super) fn location(&self, id: &str) -> Option<&str> {
+    self.locations.get(id).map(String::as_str)
+  }
+
+  pub(super) fn id_for_object(&self, name: &str) -> Option<&str> {
+    self
+      .locations
+      .iter()
+      .find_map(|(id, location)| (location == name).then_some(id.as_str()))
+  }
+
+  fn validate(&self, layout: Option<u16>, order: Order) -> io::Result<()> {
+    if self.schema_version != 1
+      || self.locations.len() > MAX_ENTRIES
+      || self
+        .launcher_layout
+        .is_some_and(|version| Some(version) != layout)
+    {
+      return Err(invalid("unsupported or oversized payload path index"));
+    }
+    let mut occupied = BTreeSet::new();
+    for (id, location) in &self.locations {
+      let name = if matches!(order, Order::Object) {
+        location.as_str()
+      } else {
+        let (first, second) = location
+          .split_once('/')
+          .ok_or_else(|| invalid("invalid installed payload location"))?;
+        let (target, name) = if matches!(order, Order::TargetFirst) {
+          (first, second)
+        } else {
+          (second, first)
+        };
+        crate::bundles::validate_target(target)?;
+        name
+      };
+      validate_payload_label(name)?;
+      if !filesystem::valid_id(id) || !occupied.insert(location.to_ascii_lowercase()) {
+        return Err(invalid("invalid installed payload location"));
+      }
+    }
+    Ok(())
+  }
+}
+
+pub(super) fn validate_payload_label(name: &str) -> io::Result<()> {
+  if !(1..=240).contains(&name.len())
+    || ![
+      "stable-",
+      "nightly-",
+      "dev-",
+      "release-",
+      "provided-",
+      "untracked-",
+    ]
+    .iter()
+    .any(|prefix| name.starts_with(prefix))
+    || name.ends_with('.')
+    || !name
+      .bytes()
+      .all(|byte| byte.is_ascii_alphanumeric() || b"-_.+".contains(&byte))
+  {
+    return Err(invalid("invalid installed payload location"));
+  }
+  Ok(())
 }
 
 impl Default for State {
   fn default() -> Self {
     Self {
-      schema_version: 1,
+      schema_version: 2,
       entries: Vec::new(),
       development: BTreeMap::new(),
-      clear_active: None,
+      active_runtime: None,
+      desktop: None,
+      updater: None,
+      runtime_paths: PayloadPaths::default(),
+      updater_paths: PayloadPaths::default(),
+      desktop_paths: PathIndex::default(),
     }
   }
 }
@@ -112,10 +312,6 @@ impl State {
     store: &Installations,
   ) -> io::Result<(Vec<Bundle>, Vec<String>)> {
     self.load_payloads(store, true)
-  }
-
-  pub(super) fn hides_selection(&self, id: &str) -> bool {
-    self.clear_active.as_deref() == Some(id)
   }
 
   fn validate_present_payloads(&self, store: &Installations) -> io::Result<()> {
@@ -137,7 +333,7 @@ impl State {
       .map(|entry| (&entry.bundle_id, &entry.target_triple))
       .collect::<BTreeMap<_, _>>()
     {
-      let Some(bundle) = filesystem::load_available(store, id)? else {
+      let Some(bundle) = filesystem::load_available(store, self, id)? else {
         if !allow_missing {
           return Err(filesystem::missing_payload(id));
         }
@@ -156,7 +352,16 @@ impl State {
   }
 
   fn validate_index(&self) -> io::Result<()> {
-    if self.schema_version != 1
+    self
+      .runtime_paths
+      .validate(super::RUNTIME_PATH_LAYOUT_VERSION, None, None)?;
+    self.updater_paths.validate(
+      super::UPDATER_PATH_LAYOUT_VERSION,
+      Some(super::UPDATER_BUILD_PATH_LAYOUT_VERSION),
+      Some(super::UPDATER_OBJECT_PATH_LAYOUT_VERSION),
+    )?;
+    self.desktop_paths.validate(None, Order::Object)?;
+    if self.schema_version != 2
       || self.entries.len() > MAX_ENTRIES
       || self.development.len() > MAX_ENTRIES
     {
@@ -182,6 +387,15 @@ impl State {
       {
         return Err(invalid("duplicate installation catalog entries"));
       }
+      if self
+        .runtime_paths
+        .target(&entry.bundle_id)
+        .is_some_and(|target| target != entry.target_triple)
+      {
+        return Err(invalid(
+          "catalog target differs from its runtime payload location",
+        ));
+      }
       if entry.current
         && publications
           .insert(&origin.channel, &origin.publication_id)
@@ -196,13 +410,70 @@ impl State {
       }
     }
     for (checkout, id) in &self.development {
+      let (checkout, target) = checkout
+        .split_once('/')
+        .ok_or_else(|| invalid("invalid development checkout registration"))?;
       validate_checkout_id(checkout)?;
-      if !dev_bundles.contains(id.as_str()) {
+      crate::bundles::validate_target(target)?;
+      if !dev_bundles.contains(id.as_str())
+        || targets
+          .get(id)
+          .is_none_or(|recorded| recorded.as_str() != target)
+      {
         return Err(invalid(
           "development checkout has no recorded local native build",
         ));
       }
     }
+    if let Some(active) = &self.active_runtime {
+      active.origin.validate()?;
+      if !targets
+        .get(&active.bundle_id)
+        .is_some_and(|target| crate::bundles::local_target(target))
+      {
+        return Err(invalid("runtime selection has no recorded native build"));
+      }
+    }
+    if let Some(desktop) = &self.desktop {
+      desktop.validate()?;
+    }
+    if self
+      .updater
+      .as_deref()
+      .is_some_and(|id| !crate::bundles::valid_digest(id))
+    {
+      return Err(invalid("invalid updater selection"));
+    }
+    Ok(())
+  }
+
+  pub(super) fn select_runtime(
+    &mut self,
+    bundle: &Bundle,
+    origin: Option<&CatalogOrigin>,
+  ) -> io::Result<()> {
+    let bundle_id = &bundle.manifest.bundle_id;
+    let origin = origin
+      .or_else(|| {
+        self
+          .active_runtime
+          .as_ref()
+          .filter(|selected| &selected.bundle_id == bundle_id)
+          .map(|selected| &selected.origin)
+      })
+      .or_else(|| {
+        self
+          .entries
+          .iter()
+          .filter(|entry| &entry.bundle_id == bundle_id)
+          .max_by_key(|entry| entry.current)
+          .and_then(|entry| entry.origin.as_ref())
+      })
+      .ok_or_else(|| invalid("runtime selection lacks installation provenance"))?;
+    self.active_runtime = Some(RuntimeSelection {
+      bundle_id: bundle_id.clone(),
+      origin: origin.clone(),
+    });
     Ok(())
   }
 
@@ -309,68 +580,52 @@ impl State {
   }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Transaction {
-  catalog: State,
-  active: Option<String>,
-  previous: Option<String>,
+pub(super) struct RuntimeSelection {
+  pub(super) bundle_id: String,
+  pub(super) origin: CatalogOrigin,
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct DevelopmentIntent {
-  catalog_digest: String,
-  development: BTreeMap<String, String>,
-  #[serde(default, skip_serializing_if = "Option::is_none")]
-  clear_active: Option<String>,
+/// The source recorded by a desktop activation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
+pub enum DesktopSource {
+  Channel { channel: String },
+  Release { publication_id: String },
+  PullRequest { number: u64 },
+  Provided,
+  Checkout,
 }
 
-impl Transaction {
-  fn validate(&self, store: &Installations) -> io::Result<()> {
-    self.validate_index()?;
-    self.catalog.validate_present_payloads(store)?;
-    for id in [self.active.as_deref(), self.previous.as_deref()]
-      .into_iter()
-      .flatten()
-    {
-      filesystem::validate_native(&filesystem::load(store, id)?)?;
-    }
-    Ok(())
-  }
+/// A selected desktop payload and its source.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DesktopSelection {
+  pub content_id: String,
+  pub source: DesktopSource,
+}
 
-  fn validate_index(&self) -> io::Result<()> {
-    self.catalog.validate_index()?;
-    let Some(id) = &self.active else {
-      return if self.previous.is_none() {
-        Ok(())
-      } else {
-        Err(invalid(
-          "catalog transaction has rollback without activation",
-        ))
-      };
-    };
-    if self.previous.as_ref() == Some(id) {
-      return Err(invalid(
-        "catalog activation and rollback identities must differ",
-      ));
+impl DesktopSelection {
+  pub(super) fn validate(&self) -> io::Result<()> {
+    if !crate::bundles::valid_digest(&self.content_id) {
+      return Err(invalid("invalid desktop content identity"));
     }
-    for id in [self.active.as_deref(), self.previous.as_deref()]
-      .into_iter()
-      .flatten()
-    {
-      if !self
-        .catalog
-        .entries
-        .iter()
-        .any(|entry| entry.bundle_id == id && crate::bundles::local_target(&entry.target_triple))
-      {
-        return Err(invalid(
-          "catalog transaction selection must name a recorded native build",
-        ));
+    match &self.source {
+      DesktopSource::Channel { channel } if !matches!(channel.as_str(), "stable" | "nightly") => {
+        Err(invalid("invalid desktop channel"))
       }
+      DesktopSource::Release { publication_id } => CatalogOrigin {
+        channel: "release".into(),
+        publication_id: Some(publication_id.clone()),
+        built_at: None,
+      }
+      .validate(),
+      DesktopSource::PullRequest { number: 0 } => {
+        Err(invalid("invalid desktop pull request number"))
+      }
+      _ => Ok(()),
     }
-    Ok(())
   }
 }
 
@@ -382,7 +637,11 @@ pub(super) fn validate_channel(channel: &str) -> io::Result<()> {
       && number.bytes().all(|byte| byte.is_ascii_digit())
       && number.parse::<u64>().is_ok()
   });
-  if !matches!(channel, "stable" | "nightly" | "local" | "provided") && !pr {
+  if !matches!(
+    channel,
+    "stable" | "nightly" | "local" | "provided" | "release"
+  ) && !pr
+  {
     return Err(invalid("invalid installation catalog channel"));
   }
   Ok(())
@@ -403,135 +662,85 @@ fn utc_timestamp(date: &str) -> bool {
 }
 
 pub(super) fn exists(store: &Installations) -> io::Result<bool> {
-  filesystem::path_exists(&store.root.join(CATALOG))
-}
-
-pub(super) fn has_transaction(store: &Installations) -> io::Result<bool> {
-  filesystem::path_exists(&store.root.join(JOURNAL))
+  filesystem::path_exists(&store.state_root().join(CATALOG))
 }
 
 pub(super) fn read(store: &Installations) -> io::Result<State> {
-  let state = read_development_index(store)?;
+  let state = read_index(store)?;
   state.validate_present_payloads(store)?;
   Ok(state)
 }
 
-pub(super) fn read_development_index(store: &Installations) -> io::Result<State> {
-  let transaction = read_file::<Transaction>(&store.root.join(JOURNAL))?;
-  let mut state = if let Some(transaction) = &transaction {
-    transaction.validate_index()?;
-    transaction.catalog.clone()
-  } else {
-    read_committed(store)?
-  };
-  if let Some(transaction) = transaction
-    && let Some(intent) = read_intent(store, Some(&transaction))?
-  {
-    if let Some(id) = intent.clear_active.as_deref() {
-      validate_cleared_selection(store, &transaction, id)?;
-    }
-    state.development = intent.development;
-    state.clear_active = intent.clear_active;
-  } else {
-    state.development = read_development(store, None)?;
-  }
-  state.validate_index()?;
-  Ok(state)
-}
-
-pub(super) fn has_development_heads(store: &Installations) -> io::Result<bool> {
-  let transaction = read_file::<Transaction>(&store.root.join(JOURNAL))?;
-  Ok(!read_development(store, transaction.as_ref())?.is_empty())
-}
-
 pub(super) fn read_index(store: &Installations) -> io::Result<State> {
-  let state = if let Some(transaction) = read_file::<Transaction>(&store.root.join(JOURNAL))? {
-    // A durable journal is the committed intent after interruption.
-    transaction.validate_index()?;
-    transaction.catalog
+  let mut state: State = if let Some(state) = read_file(&store.state_root().join(CATALOG))? {
+    state
   } else {
-    read_committed(store)?
+    if filesystem::has_payloads(store)? {
+      return Err(invalid("managed payloads have no installation registry"));
+    }
+    State::default()
   };
+  let root = store.state_root();
+  state.runtime_paths.target_first = read_file(&root.join(RUNTIME_PATHS))?.unwrap_or_default();
+  state.runtime_paths.build_first = read_file(&root.join(RUNTIME_BUILD_PATHS))?.unwrap_or_default();
+  state.updater_paths.target_first = read_file(&root.join(UPDATER_PATHS))?.unwrap_or_default();
+  state.updater_paths.build_first = read_file(&root.join(UPDATER_BUILD_PATHS))?.unwrap_or_default();
+  state.updater_paths.object = read_file(&root.join(UPDATER_OBJECT_PATHS))?.unwrap_or_default();
+  state.desktop_paths = read_file(&root.join(DESKTOP_OBJECT_PATHS))?.unwrap_or_default();
   state.validate_index()?;
   Ok(state)
 }
 
-pub(super) fn read_for_migration(store: &Installations) -> io::Result<State> {
-  let transaction = read_file::<Transaction>(&store.root.join(JOURNAL))?;
-  let mut state = if let Some(transaction) = &transaction {
-    transaction.validate_index()?;
-    transaction.catalog.clone()
-  } else {
-    read_file(&store.root.join(CATALOG))?.unwrap_or_default()
-  };
-  state.development = read_development(store, transaction.as_ref())?;
-  state.validate(store)?;
-  Ok(state)
+pub(super) fn commit_runtime_paths(store: &Installations, paths: &PathIndex) -> io::Result<()> {
+  paths.validate(Some(super::RUNTIME_PATH_LAYOUT_VERSION), Order::TargetFirst)?;
+  replace(&store.state_root().join(RUNTIME_PATHS), paths)
 }
 
-fn read_committed(store: &Installations) -> io::Result<State> {
-  let state = read_file(&store.root.join(CATALOG))?;
-  if state.is_none() && has_installation_data(store)? {
-    return Err(invalid(
-      "existing installations have no authoritative catalog",
-    ));
-  }
-  Ok(state.unwrap_or_default())
+pub(super) fn commit_updater_paths(store: &Installations, paths: &PathIndex) -> io::Result<()> {
+  paths.validate(Some(super::UPDATER_PATH_LAYOUT_VERSION), Order::TargetFirst)?;
+  replace(&store.state_root().join(UPDATER_PATHS), paths)
 }
 
-fn transaction_digest(transaction: &Transaction) -> io::Result<String> {
-  Ok(crate::bundles::digest(
-    &serde_json::to_vec(transaction).map_err(io::Error::other)?,
-  ))
-}
-
-fn read_development(
+pub(super) fn commit_runtime_build_paths(
   store: &Installations,
-  transaction: Option<&Transaction>,
-) -> io::Result<BTreeMap<String, String>> {
-  if let Some(intent) = read_intent(store, transaction)? {
-    return Ok(intent.development);
-  }
-  Ok(read_file(&store.root.join(DEVELOPMENT))?.unwrap_or_default())
+  paths: &PathIndex,
+) -> io::Result<()> {
+  paths.validate(None, Order::BuildFirst)?;
+  replace(&store.state_root().join(RUNTIME_BUILD_PATHS), paths)
 }
 
-fn read_intent(
+pub(super) fn commit_updater_build_paths(
   store: &Installations,
-  transaction: Option<&Transaction>,
-) -> io::Result<Option<DevelopmentIntent>> {
-  if let Some(transaction) = transaction
-    && let Some(intent) = read_file::<DevelopmentIntent>(&store.root.join(DEVELOPMENT_JOURNAL))?
-  {
-    if intent.catalog_digest != transaction_digest(transaction)? {
-      return Err(invalid(
-        "installation journal differs from the catalog transaction",
-      ));
-    }
-    return Ok(Some(intent));
-  }
-  Ok(None)
+  paths: &PathIndex,
+) -> io::Result<()> {
+  paths.validate(
+    Some(super::UPDATER_BUILD_PATH_LAYOUT_VERSION),
+    Order::BuildFirst,
+  )?;
+  replace(&store.state_root().join(UPDATER_BUILD_PATHS), paths)
 }
 
-pub(super) fn has_installation_data(store: &Installations) -> io::Result<bool> {
-  for name in ["current", "previous", ".activation.json"] {
-    if filesystem::path_exists(&store.root.join(name))? {
-      return Ok(true);
-    }
+pub(super) fn commit_updater_object_paths(
+  store: &Installations,
+  paths: &PathIndex,
+) -> io::Result<()> {
+  paths.validate(
+    Some(super::UPDATER_OBJECT_PATH_LAYOUT_VERSION),
+    Order::Object,
+  )?;
+  replace(&store.state_root().join(UPDATER_OBJECT_PATHS), paths)
+}
+
+pub(super) fn commit_desktop_paths(store: &Installations, paths: &PathIndex) -> io::Result<()> {
+  paths.validate(None, Order::Object)?;
+  replace(&store.state_root().join(DESKTOP_OBJECT_PATHS), paths)
+}
+
+pub(super) fn initialize(store: &Installations, state: &State) -> io::Result<()> {
+  if !exists(store)? {
+    commit_metadata(store, state)?;
   }
-  let target = match crate::paths::native_target() {
-    "x86_64-unknown-linux-gnu" => "x86_64-unknown-linux-musl",
-    "aarch64-unknown-linux-gnu" => "aarch64-unknown-linux-musl",
-    target => target,
-  };
-  if filesystem::path_exists(
-    &store
-      .root
-      .join("components/selected")
-      .join(format!("local-{target}.json")),
-  )? {
-    return Ok(true);
-  }
-  Ok(!filesystem::entries(store)?.is_empty())
+  Ok(())
 }
 
 pub(super) fn inventory(store: &Installations) -> io::Result<Vec<CatalogEntry>> {
@@ -540,181 +749,17 @@ pub(super) fn inventory(store: &Installations) -> io::Result<Vec<CatalogEntry>> 
   Ok(state.entries)
 }
 
-pub(super) fn initialize(store: &Installations, state: &State) -> io::Result<()> {
-  if !exists(store)? {
-    if !state.entries.is_empty() {
-      return Err(invalid(
-        "catalog initialization requires a verified empty state",
-      ));
-    }
-    // The caller holds the installation lock and has already rejected existing
-    // uncatalogued installations. Interrupted first writes may now leave only
-    // ordinary unregistered payloads, rather than an ambiguous old store.
-    commit(store, state, None)?;
-  }
-  Ok(())
-}
-
-pub(super) fn commit(
-  store: &Installations,
-  state: &State,
-  activation: Option<(&Bundle, Option<&Bundle>)>,
-) -> io::Result<()> {
-  commit_with_selection(store, state, activation, None)
-}
-
-pub(super) fn commit_prune(
-  store: &Installations,
-  state: &State,
-  clear_active: Option<&str>,
-) -> io::Result<()> {
-  commit_with_selection(store, state, None, clear_active)
-}
-
-fn commit_with_selection(
-  store: &Installations,
-  state: &State,
-  activation: Option<(&Bundle, Option<&Bundle>)>,
-  clear_active: Option<&str>,
-) -> io::Result<()> {
+/// The locked writer publishes one snapshot after new immutable bytes are durable.
+pub(super) fn commit(store: &Installations, state: &State) -> io::Result<()> {
   state.validate_present_payloads(store)?;
-  if let Some((active, previous)) = activation {
-    filesystem::validate_native(active)?;
-    if let Some(previous) = previous {
-      filesystem::validate_native(previous)?;
-    }
-    // Detect command collisions before recording durable activation intent.
-    // Otherwise a fixable collision could leave every later operation trying
-    // to replay an activation that could never have started successfully.
-    filesystem::prepare_activation(store)?;
-  }
-  let transaction = Transaction {
-    catalog: state.clone(),
-    active: activation.map(|(bundle, _)| bundle.manifest.bundle_id.clone()),
-    previous: activation.and_then(|(active, previous)| {
-      previous
-        .filter(|previous| previous.manifest.bundle_id != active.manifest.bundle_id)
-        .map(|bundle| bundle.manifest.bundle_id.clone())
-    }),
-  };
-  if filesystem::path_exists(&store.root.join(JOURNAL))? {
-    return Err(invalid(
-      "installation catalog transaction was not recovered",
-    ));
-  }
-  let persisted = read_development(store, None)?;
-  if let Some(id) = clear_active {
-    validate_cleared_selection(store, &transaction, id)?;
-  }
-  if transaction.catalog.development == persisted && clear_active.is_none() {
-    clear_development_intent(store)?;
-  } else {
-    replace(
-      &store.root.join(DEVELOPMENT_JOURNAL),
-      &DevelopmentIntent {
-        catalog_digest: transaction_digest(&transaction)?,
-        development: transaction.catalog.development.clone(),
-        clear_active: clear_active.map(str::to_owned),
-      },
-    )?;
-  }
-  // The ordinary journal is the commit point for both files. Existing runtime
-  // binaries can still read its version-1 schema and acquire leases.
-  replace(&store.root.join(JOURNAL), &transaction)?;
-  recover(store)
+  commit_metadata(store, state)
 }
 
-pub(super) fn recover(store: &Installations) -> io::Result<()> {
-  let mut transaction = read_file::<Transaction>(&store.root.join(JOURNAL))?;
-  let intent = read_intent(store, transaction.as_ref())?;
-  let (development, clear_active) = if let Some(intent) = intent {
-    (intent.development, intent.clear_active)
-  } else {
-    (read_development(store, None)?, None)
-  };
-  if let Some(transaction) = &mut transaction {
-    transaction.catalog.development = development;
-    transaction.validate(store)?;
-    if let Some(id) = &clear_active {
-      validate_cleared_selection(store, transaction, id)?;
-    }
-    validate_destination(&store.root.join(CATALOG))?;
-    if filesystem::path_exists(&store.root.join(DEVELOPMENT_JOURNAL))? {
-      validate_destination(&store.root.join(DEVELOPMENT))?;
-    }
-  }
-  #[cfg(unix)]
-  {
-    if transaction.is_none() && filesystem::path_exists(&store.root.join(".activation.json"))? {
-      // A standalone native activation still belongs to this authoritative
-      // catalog. Reject damaged recorded payloads before changing selection.
-      read(store)?;
-    }
-    filesystem::recover(store)?;
-  }
-  let Some(transaction) = transaction else {
-    return clear_development_intent(store);
-  };
-  if clear_active.is_some() {
-    filesystem::clear_active(store)?;
-  }
-  if let Some(id) = &transaction.active {
-    let active = filesystem::load(store, id)?;
-    filesystem::validate_native(&active)?;
-    let previous = transaction
-      .previous
-      .as_deref()
-      .map(|id| filesystem::load(store, id))
-      .transpose()?;
-    if let Some(previous) = &previous {
-      filesystem::validate_native(previous)?;
-    }
-    filesystem::activate(store, &active, previous.as_ref())?;
-  }
-  replace(&store.root.join(CATALOG), &transaction.catalog)?;
-  if filesystem::path_exists(&store.root.join(DEVELOPMENT_JOURNAL))? {
-    replace(
-      &store.root.join(DEVELOPMENT),
-      &transaction.catalog.development,
-    )?;
-  }
-  fs::remove_file(store.root.join(JOURNAL))?;
-  sync_directory(&store.root)?;
-  clear_development_intent(store)?;
-  super::layout::refresh(store, &transaction.catalog);
-  Ok(())
-}
-
-fn validate_cleared_selection(
-  store: &Installations,
-  transaction: &Transaction,
-  id: &str,
-) -> io::Result<()> {
-  if transaction.active.is_some()
-    || transaction
-      .catalog
-      .entries
-      .iter()
-      .any(|entry| entry.bundle_id == id)
-    || filesystem::payload_dir(store, id)?.is_some()
-    || filesystem::selection_id(store, "current")?.is_some_and(|selected| selected != id)
-    || filesystem::selection_id(store, "previous")?.is_some()
-  {
-    return Err(invalid(
-      "prune transaction cannot clear the active selection",
-    ));
-  }
-  Ok(())
-}
-
-fn clear_development_intent(store: &Installations) -> io::Result<()> {
-  let path = store.root.join(DEVELOPMENT_JOURNAL);
-  if filesystem::path_exists(&path)? {
-    filesystem::private_file(&fs::symlink_metadata(&path)?)?;
-    fs::remove_file(path)?;
-    sync_directory(&store.root)?;
-  }
-  Ok(())
+/// The desktop and manager only change their own selection; they do not acquire
+/// or alter runtime payloads. Callers hold the same profile-wide registry lock.
+pub(super) fn commit_metadata(store: &Installations, state: &State) -> io::Result<()> {
+  state.validate_index()?;
+  replace(&store.state_root().join(CATALOG), state)
 }
 
 fn read_file<T: for<'de> Deserialize<'de>>(path: &Path) -> io::Result<Option<T>> {
@@ -725,8 +770,6 @@ fn read_file<T: for<'de> Deserialize<'de>>(path: &Path) -> io::Result<Option<T>>
   }
   let file = match options().read(true).open(path) {
     Ok(file) => file,
-    // Lock-free readers can race removal of a completed journal. Its catalog
-    // replacement is already visible by the time this removal occurs.
     Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
     Err(error) => return Err(error),
   };

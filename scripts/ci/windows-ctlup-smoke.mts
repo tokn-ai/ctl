@@ -69,11 +69,27 @@ export async function json(program: string, args: string[], options: { timeout_m
 }
 
 async function status(program: string, target: string[]): Promise<Status> {
-  return await json(program, [...target, "status", "--json"]) as Status;
+  const inventory = await json(program, ["status", ...target, "--json"]) as {
+    active: string | null;
+    active_origin?: { publication_id?: string };
+    builds: { bundle_id: string; target_triple: string }[];
+    previous: string | null;
+  };
+  assert.equal(inventory.previous, null);
+  if (!inventory.active) return { active: null, previous: null };
+  const build = inventory.builds.find(({ bundle_id }) => bundle_id === inventory.active);
+  assert.ok(build);
+  const publication_id = inventory.active_origin?.publication_id;
+  assert.ok(publication_id);
+  return { active: { distribution_id: publication_id, target_triple: build.target_triple }, previous: null };
 }
 
 async function bootstrapFiles(home: string): Promise<string[]> {
-  return (await readdir(home)).filter((name) => /^(ctlup-[0-9a-f]{32}\.exe|\.ctlup-fetch-[0-9a-f]{32})$/i.test(name)).sort();
+  const names = await readdir(join(home, ".tokn", "ctl", "ctlup", "staging")).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return [];
+    throw error;
+  });
+  return names.filter((name) => /^(ctlup-[0-9a-f]{32}\.exe|\.ctlup-fetch-[0-9a-f]{32})$/i.test(name)).sort();
 }
 
 async function verifyDesktopSetup(destination: string, bundle: string, bundle_id: string): Promise<void> {
@@ -107,14 +123,10 @@ async function main(): Promise<void> {
   const build = parseComponent(await json(manager, ["--component-info"])).build;
   assert.ok(build.source_revision);
   const base_identity = { app_version: build.version, git_revision: build.source_revision };
-  const target = destination ? ["--destination", destination, "--remote-platform", "windows"] : [];
+  const target = destination ? ["--ssh", destination, "--remote-platform", "windows"] : [];
   const home = homedir();
   const root = join(home, ".tokn", "ctl");
-  const managed_entries = [
-    "bin", "installs", "leases", "updaters", "catalog.json", ".activation.json",
-    ".catalog-transaction.json", "development.json", ".development-transaction.json",
-    "catalog-migrated.json", "install-layout-migrated.json", "installations.lock",
-  ];
+  const managed_entries = ["bin", "ctlup"];
   const clear_managed_entries = async (): Promise<void> => {
     for (const entry of managed_entries) await rm(join(root, entry), { recursive: true, force: true, maxRetries: 3 });
   };
@@ -162,14 +174,14 @@ async function main(): Promise<void> {
       assert.equal(stdout.trim(), expected);
     };
     const before_bootstrap = await bootstrapFiles(home);
-    const list_sessions = [...target, "ctmux", "list"];
+    const list_sessions = destination ? ["--destination", destination, "--remote-platform", "windows", "ctmux", "list"] : ["ctmux", "list"];
 
     assert.deepEqual(await status(bootstrap, target), { active: null, previous: null });
     if (destination) {
       await assert.rejects(execute(join(binary_directory, "ctl.exe"), list_sessions, { timeout: 30_000 }));
       await verifyDesktopSetup(destination, first_bundle, first.bundle_id);
     }
-    await json(bootstrap, [...target, "install", "--from", first_bundle, "--json"]);
+    await json(bootstrap, ["install", ...target, "--from", first_bundle, "--json"]);
     await assert_digest(initial_digest);
     assert.deepEqual(await bootstrapFiles(home), before_bootstrap);
     const initial = await status(installed, target);
@@ -199,7 +211,7 @@ async function main(): Promise<void> {
       pinned_target = ["--host", saved_host];
     }
 
-    const update = [...pinned_target, "update", "--from", second_bundle, "--json"];
+    const update = ["install", ...pinned_target, "--from", second_bundle, "--json"];
     await json(installed, update);
     await assert_digest(alternate.sha256);
     const updated = await status(installed, pinned_target);

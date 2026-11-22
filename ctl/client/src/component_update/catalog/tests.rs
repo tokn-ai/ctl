@@ -246,7 +246,7 @@ async fn prepared_updater_identity_survives_cache_eviction_before_installation()
     info: candidate.updater_info.clone().unwrap(),
     bytes: candidate.updater.clone().unwrap(),
   };
-  let root = home.0.join(".tokn/ctl/cache/updaters");
+  let root = home.0.join(".tokn/ctl/ctlup/cache/updaters");
   crate::remote_bundle::published::cache_verified_for_manifest(
     &root,
     &candidate.bundle.manifest,
@@ -312,7 +312,7 @@ async fn offline_source_keeps_its_verified_updater_when_the_import_cache_is_evic
   .unwrap();
   assert_eq!(updater.as_deref(), Some(bytes.as_slice()));
   assert!(updater_info.is_some());
-  let cache = home.0.join(".tokn/ctl/cache/updaters");
+  let cache = home.0.join(".tokn/ctl/ctlup/cache/updaters");
   crate::remote_bundle::published::prune_updater_cache(&cache, 0).unwrap();
   let component = PreparedUpdate {
     bundle,

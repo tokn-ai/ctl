@@ -1,7 +1,8 @@
 //! Run one pinned publication on the SSH host, with an explicit availability fallback.
 
 use super::{
-  checkout_layout_guard, require_updater_success, unix_account_guard, updater_ssh_command, windows,
+  checkout_layout_guard, require_updater_success, unix_account_guard, updater_ssh_command,
+  updater_staging, windows,
 };
 use crate::remote_bundle::published::InstallationPlan;
 use crate::{CoreError, RemotePlatform, SshConnectionOptions, SshInteraction, validate_ssh_target};
@@ -167,6 +168,7 @@ fn script(
   };
   Ok(
     template
+      .replace("__UPDATER_STAGING__", updater_staging(platform))
       .replace(
         "__CHECKOUT_LAYOUT_GUARD__",
         &checkout_layout_guard(platform),

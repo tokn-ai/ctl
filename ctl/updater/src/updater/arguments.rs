@@ -1,4 +1,4 @@
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 use ctl_client::cli::Channel;
 use std::{ffi::OsString, path::PathBuf};
 
@@ -9,72 +9,71 @@ use std::{ffi::OsString, path::PathBuf};
   about = "Install and update ctl without restarting running services"
 )]
 pub(super) struct Arguments {
-  /// Select a saved ctl host by name or ID.
-  #[arg(long, short = 'H', global = true)]
-  pub host: Option<String>,
-  /// Use a temporary SSH destination or configuration alias.
-  #[arg(long, global = true, conflicts_with_all = ["host", "method"])]
-  pub destination: Option<String>,
-  /// Select one saved host's connection method.
-  #[arg(long, global = true)]
-  pub method: Option<String>,
-  /// Override the SSH host platform for this invocation.
-  #[arg(long, global = true, value_enum)]
-  pub remote_platform: Option<crate::RemotePlatform>,
   #[command(subcommand)]
   pub command: Command,
+}
+
+#[derive(Debug, Default, Args)]
+pub(super) struct DestinationArguments {
+  /// Select a saved ctl host by name or ID. Repeat for multiple hosts.
+  #[arg(long, short = 'H')]
+  pub host: Vec<String>,
+  /// Use an SSH URI, address or OpenSSH alias without saving a host.
+  #[arg(long, conflicts_with_all = ["host", "method"])]
+  pub ssh: Option<String>,
+  /// Select one saved host's connection method.
+  #[arg(long, requires = "host")]
+  pub method: Option<String>,
+  /// Override the SSH host platform for this invocation.
+  #[arg(long, value_enum)]
+  pub remote_platform: Option<crate::RemotePlatform>,
 }
 
 #[derive(Debug, Subcommand)]
 pub(super) enum Command {
   #[command(long_flag = "component-info", hide = true)]
   ComponentInfo,
-  /// Install a complete build and expose commands in the storage root's bin directory.
-  Install(UpdateArguments),
-  /// Update a complete installation; running sessions keep their current owner.
+  /// Select a source and install the runtime or desktop app.
+  Install(InstallArguments),
+  /// Update the selected package from its tracked channel.
   Update(UpdateArguments),
-  /// Install or update the ctmux desktop app on this computer.
-  App {
-    #[command(subcommand)]
-    command: AppCommand,
-  },
   /// Install, update, or launch the standalone ctream tools.
   Ctream {
     #[command(subcommand)]
     command: CtreamCommand,
   },
-  /// Manage complete runtime bundles for individual targets and channels.
-  Component {
+  /// Fetch, inspect or remove retained runtime bundles by target.
+  Bundle {
     #[command(subcommand)]
-    command: ComponentCommand,
+    command: BundleCommand,
   },
-  /// Build and install from a checkout, or renew macOS development helper signing.
-  ///
-  /// Use --host, --hosts, or --destination to build and deploy to Linux x64 or ARM64.
+  /// Build and install from the current checkout. Use 'dev sign' to renew signing.
   Dev(DevelopmentArguments),
-  /// Show installed builds, channels and the active runtime without starting services.
-  Show {
-    #[arg(long)]
-    json: bool,
-  },
-  /// Show the active installation and installed builds without starting services.
-  Status {
-    #[arg(long)]
-    json: bool,
-  },
-  /// Check publication metadata without downloading archives or installing anything.
-  Check {
-    #[arg(long, value_enum)]
-    channel: Option<Channel>,
-    #[arg(long)]
-    json: bool,
-  },
-  /// Browse published releases and manage pull request builds.
+  /// Show installed builds, their sources and missing payloads.
+  Status(StatusArguments),
+  /// Browse available releases and pull request builds.
   Release(ReleaseArguments),
-  /// Remove unused builds and forget missing installations.
+  /// Remove unused builds and cached files.
   Prune {
+    /// Forget recorded builds whose payloads are missing.
+    #[arg(long)]
+    forget_missing: bool,
     #[arg(long)]
     json: bool,
+  },
+  #[command(hide = true)]
+  InspectRuntime {
+    #[arg(long)]
+    json: bool,
+  },
+  #[command(hide = true)]
+  RuntimeSource,
+  #[command(hide = true)]
+  InstallManager,
+  #[command(hide = true)]
+  ExportManager {
+    #[arg(long)]
+    sha256: String,
   },
   #[command(hide = true)]
   InstallArchive {
@@ -95,7 +94,6 @@ pub(super) enum Command {
   PrepareInstall,
   #[command(hide = true)]
   InstallationLayoutVersion,
-  #[cfg(windows)]
   #[command(hide = true)]
   UpdaterDigest,
 }
@@ -115,27 +113,28 @@ pub(super) struct PublicationArguments {
 }
 
 #[derive(Debug, Subcommand)]
-pub(super) enum ComponentCommand {
-  /// List available target components with installed markers.
+pub(super) enum BundleCommand {
+  /// List retained target bundles.
   List {
+    #[command(flatten)]
+    destination: DestinationArguments,
     /// Filter installed provenance; stable and nightly also support --available.
     #[arg(long)]
     channel: Option<String>,
-    /// Show only installed targets without accessing the network.
-    #[arg(long, conflicts_with = "available")]
-    installed: bool,
-    /// Check the channel's current publication (the default).
+    /// Include targets in the current publication.
     #[arg(long)]
     available: bool,
     #[arg(long)]
     json: bool,
   },
-  /// Install bundle-<target> components without changing active commands.
-  Add {
-    #[arg(required = true, num_args = 1.., value_delimiter = ',')]
+  /// Retain verified target bundles for offline use.
+  Fetch {
+    #[arg(long = "target", required = true, value_name = "TRIPLE")]
     targets: Vec<String>,
-    #[arg(long, value_enum, conflicts_with_all = ["pr", "from"])]
+    #[arg(long, value_enum, conflicts_with_all = ["pr", "from", "release"])]
     channel: Option<Channel>,
+    #[arg(long, value_name = "PUBLICATION_ID", conflicts_with_all = ["pr", "from"])]
+    release: Option<String>,
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..), conflicts_with = "from")]
     pr: Option<u64>,
     /// An explicit offline bundle set or complete build directory.
@@ -146,7 +145,7 @@ pub(super) enum ComponentCommand {
   },
   /// Remove target registrations while preserving active and running builds.
   Remove {
-    #[arg(required = true, num_args = 1.., value_delimiter = ',')]
+    #[arg(long = "target", required = true, value_name = "TRIPLE")]
     targets: Vec<String>,
     /// Installed provenance, such as stable, nightly, local, provided, or pr-123.
     #[arg(long)]
@@ -154,21 +153,6 @@ pub(super) enum ComponentCommand {
     #[arg(long)]
     json: bool,
   },
-}
-
-#[derive(Debug, Subcommand)]
-pub(super) enum AppCommand {
-  /// Install the desktop app from a publication channel.
-  Install(AppArguments),
-  /// Update the desktop app from a publication channel.
-  Update(AppArguments),
-}
-
-#[derive(Debug, Args)]
-pub(super) struct AppArguments {
-  /// Publication channel; remembered after a successful install or update.
-  #[arg(long, value_enum)]
-  pub channel: Option<Channel>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -226,7 +210,7 @@ pub(super) enum ReleaseCommand {
     channel: Option<ReleaseListChannel>,
   },
   /// Show metadata for a release or the current build of a pull request.
-  View {
+  Show {
     /// Publication ID from `ctlup release list`; defaults to the current release.
     publication_id: Option<String>,
     /// Published channel; defaults to the configured channel.
@@ -235,12 +219,6 @@ pub(super) enum ReleaseCommand {
     /// Pull request number.
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..), conflicts_with_all = ["channel", "publication_id"])]
     pr: Option<u64>,
-  },
-  /// Request a bundle build for the current commit of a pull request.
-  Build {
-    /// Pull request number.
-    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
-    pr: u64,
   },
 }
 
@@ -251,22 +229,31 @@ pub(super) enum ReleaseListChannel {
   Stable,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+pub(super) enum PackageSelection {
+  #[default]
+  Runtime,
+  App,
+}
+
 #[derive(Debug, Args)]
-pub(super) struct UpdateArguments {
-  /// Saved host names or IDs; repeat or separate with commas.
-  #[arg(long, value_delimiter = ',', num_args = 1..)]
-  pub hosts: Vec<String>,
-  /// Include this computer; the default when no host is supplied.
-  #[arg(long)]
-  pub local: bool,
-  /// Publication channel; remembered after a successful update.
-  #[arg(long, value_enum, conflicts_with = "from")]
+#[command(group(ArgGroup::new("source").args(["channel", "release", "pr", "from"])))]
+pub(super) struct InstallArguments {
+  #[command(flatten)]
+  pub destination: DestinationArguments,
+  #[arg(value_enum, default_value = "runtime")]
+  pub package: PackageSelection,
+  /// Track the selected publication channel.
+  #[arg(long, value_enum)]
   pub channel: Option<Channel>,
-  /// Complete build directory or archive for an explicit offline installation.
-  #[arg(long)]
+  /// Pin an immutable publication ID from 'ctlup release list'.
+  #[arg(long, value_name = "PUBLICATION_ID")]
+  pub release: Option<String>,
+  /// Install a verified local bundle or app archive.
+  #[arg(long, value_name = "PATH")]
   pub from: Option<PathBuf>,
-  /// Install the current build of a pull request.
-  #[arg(long, value_parser = clap::value_parser!(u64).range(1..), conflicts_with_all = ["channel", "from"])]
+  /// Pin the current build of a pull request.
+  #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
   pub pr: Option<u64>,
   /// Inspect and snapshot native binaries from --from.
   #[arg(long, requires = "from")]
@@ -279,29 +266,56 @@ pub(super) struct UpdateArguments {
 }
 
 #[derive(Debug, Args)]
+pub(super) struct UpdateArguments {
+  #[command(flatten)]
+  pub destination: DestinationArguments,
+  #[arg(value_enum, default_value = "runtime")]
+  pub package: PackageSelection,
+  /// Check the recorded source without installing anything.
+  #[arg(long)]
+  pub check: bool,
+  #[arg(long)]
+  pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub(super) struct StatusArguments {
+  #[command(flatten)]
+  pub destination: DestinationArguments,
+  #[arg(value_enum, default_value = "runtime")]
+  pub package: PackageSelection,
+  #[arg(long)]
+  pub json: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(super) enum DevAction {
+  /// Renew the active macOS helper's signature without recompiling.
+  Sign,
+}
+
+#[derive(Debug, Args)]
 #[expect(
   clippy::struct_excessive_bools,
   reason = "clap parses independent command-line flags"
 )]
 pub(super) struct DevelopmentArguments {
-  /// Build and deploy to these saved Linux hosts; repeat or separate with commas.
-  #[arg(long, value_delimiter = ',', num_args = 1..)]
-  pub hosts: Vec<String>,
+  #[command(flatten)]
+  pub destination: DestinationArguments,
   /// Path to a ctl checkout root. Defaults to the current directory.
   #[arg(long)]
   pub workspace: Option<PathBuf>,
   /// Build and install the native desktop app in the development profile.
-  #[arg(long, conflicts_with_all = ["renew_signing", "release", "profile", "target_dir", "target", "cargo_args_json", "lease"])]
+  #[arg(long, conflicts_with_all = ["action", "release", "profile", "target_dir", "target", "cargo_args_json", "lease"])]
   pub app: bool,
   /// Build and activate ctream from this checkout.
-  #[arg(long, conflicts_with_all = ["app", "renew_signing", "hosts", "cargo_args_json", "lease"])]
+  #[arg(long, conflicts_with_all = ["app", "action", "host", "ssh", "cargo_args_json", "lease"])]
   pub ctream: bool,
   /// Additional ctream agent Rust target to build. Repeat for multiple targets.
   #[arg(long = "agent-target", requires = "ctream", value_name = "TRIPLE")]
   pub ctream_agent_targets: Vec<String>,
-  /// Renew the active macOS development helper's signature without recompiling.
-  #[arg(long, conflicts_with_all = ["release", "profile", "target_dir", "target", "cargo_args_json"])]
-  pub renew_signing: bool,
+  #[arg(value_enum, conflicts_with_all = ["release", "profile", "target_dir", "target", "cargo_args_json"])]
+  pub action: Option<DevAction>,
   #[arg(long, conflicts_with_all = ["profile", "cargo_args_json"])]
   pub release: bool,
   #[arg(long, conflicts_with = "cargo_args_json")]
@@ -326,510 +340,143 @@ mod tests {
   use super::*;
 
   #[test]
-  fn show_and_logical_component_names_have_separate_commands() {
-    let show = Arguments::try_parse_from(["ctlup", "--host", "work", "show", "--json"]).unwrap();
-    assert_eq!(show.host.as_deref(), Some("work"));
-    assert!(matches!(show.command, Command::Show { json: true }));
-    let components = Arguments::try_parse_from(["ctlup", "component", "list"]).unwrap();
-    assert!(matches!(
-      components.command,
-      Command::Component {
-        command: ComponentCommand::List {
-          installed: false,
-          available: false,
-          ..
-        }
-      }
-    ));
-    for operation in ["add", "remove"] {
-      assert!(
-        Arguments::try_parse_from([
-          "ctlup",
-          "component",
-          operation,
-          "bundle-aarch64-apple-darwin",
-          "--channel",
-          "nightly",
-        ])
-        .is_ok()
-      );
-    }
-  }
-
-  #[test]
-  fn ctream_dev_accepts_agent_targets_and_native_build_options() {
-    let arguments = Arguments::try_parse_from([
-      "ctlup",
-      "dev",
-      "--ctream",
-      "--agent-target",
-      "x86_64-pc-windows-gnu",
-      "--agent-target",
-      "aarch64-unknown-linux-musl",
-      "--release",
-      "--json",
-    ])
-    .unwrap();
-    assert!(
-      matches!(arguments.command, Command::Dev(DevelopmentArguments {
-      ctream: true, release: true, json: true, ctream_agent_targets, ..
-    }) if ctream_agent_targets == ["x86_64-pc-windows-gnu", "aarch64-unknown-linux-musl"])
-    );
-    assert!(Arguments::try_parse_from(["ctlup", "dev", "--ctream", "--app"]).is_err());
-    assert!(
-      Arguments::try_parse_from(["ctlup", "dev", "--agent-target", "x86_64-pc-windows-gnu"])
-        .is_err()
-    );
-  }
-
-  #[test]
-  fn catalog_migration_has_no_manual_command() {
-    let error = Arguments::try_parse_from(["ctlup", "migrate"]).unwrap_err();
-    assert_eq!(error.kind(), clap::error::ErrorKind::InvalidSubcommand);
-  }
-
-  #[test]
-  fn complete_target_components_accept_channels_and_explicit_pr_sources() {
+  fn install_and_update_distinguish_source_selection_from_tracking() {
     let args = Arguments::try_parse_from([
       "ctlup",
-      "component",
-      "add",
-      "x86_64-unknown-linux-musl,aarch64-unknown-linux-musl",
+      "install",
+      "--ssh",
+      "ssh://operator@windows.example:2022",
+      "--remote-platform",
+      "windows",
       "--channel",
       "stable",
-      "--json",
-    ])
-    .unwrap();
-    assert!(
-      matches!(args.command, Command::Component { command: ComponentCommand::Add {
-      targets, channel: Some(Channel::Stable), pr: None, from: None, json: true,
-    }} if targets == ["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"])
-    );
-    let args = Arguments::try_parse_from([
-      "ctlup",
-      "component",
-      "add",
-      "x86_64-pc-windows-msvc",
-      "--pr",
-      "123",
     ])
     .unwrap();
     assert!(matches!(
       args.command,
-      Command::Component {
-        command: ComponentCommand::Add { pr: Some(123), .. }
-      }
-    ));
-    for flags in [
-      vec!["component", "add"],
-      vec![
-        "component",
-        "add",
-        "x86_64-unknown-linux-musl",
-        "--pr",
-        "1",
-        "--channel",
-        "stable",
-      ],
-      vec![
-        "component",
-        "add",
-        "x86_64-unknown-linux-musl",
-        "--from",
-        "/bundle",
-        "--channel",
-        "nightly",
-      ],
-      vec!["component", "list", "--available", "--installed"],
-    ] {
-      assert!(Arguments::try_parse_from([vec!["ctlup"], flags].concat()).is_err());
-    }
-  }
-
-  #[test]
-  fn catalog_inspection_is_read_only_and_origin_flags_are_opt_in() {
-    let args = Arguments::try_parse_from(["ctlup", "catalog-json"]).unwrap();
-    assert!(matches!(args.command, Command::CatalogJson));
-    let args = Arguments::try_parse_from(["ctlup", "install-archive"]).unwrap();
-    assert!(matches!(
-      args.command,
-      Command::InstallArchive { origin_hex: None }
-    ));
-    let args = Arguments::try_parse_from([
-      "ctlup",
-      "activate-installed",
-      "build",
-      "--origin-hex",
-      "7b7d",
-    ])
-    .unwrap();
-    assert!(matches!(
-      args.command,
-      Command::ActivateInstalled {
-        origin_hex: Some(_),
-        ..
-      }
-    ));
-    let args = Arguments::try_parse_from([
-      "ctlup",
-      "component",
-      "list",
-      "--channel",
-      "pr-123",
-      "--installed",
-      "--json",
-    ])
-    .unwrap();
-    assert!(
-      matches!(args.command, Command::Component { command: ComponentCommand::List {
-      channel: Some(channel), installed: true, available: false, json: true,
-    }} if channel == "pr-123")
-    );
-  }
-
-  #[test]
-  fn app_install_and_update_accept_a_publication_channel() {
-    for operation in ["install", "update"] {
-      for (flags, channel) in [
-        (&[][..], None),
-        (&["--channel", "nightly"][..], Some("nightly")),
-        (&["--channel", "stable"][..], Some("stable")),
-      ] {
-        let command_line = [&["ctlup", "app", operation][..], flags].concat();
-        let args = Arguments::try_parse_from(command_line).unwrap();
-        let Command::App { command } = args.command else {
-          panic!("expected the desktop app command");
-        };
-        let options = match command {
-          AppCommand::Install(options) => {
-            assert_eq!(operation, "install");
-            options
-          }
-          AppCommand::Update(options) => {
-            assert_eq!(operation, "update");
-            options
-          }
-        };
-        assert_eq!(
-          options
-            .channel
-            .map(|value| value.to_possible_value().unwrap().get_name().to_owned())
-            .as_deref(),
-          channel
-        );
-      }
-    }
-  }
-
-  #[test]
-  fn app_commands_reject_unsupported_channels_and_keep_global_host_options() {
-    for operation in ["install", "update"] {
-      for flags in [
-        &["--channel", "dev"][..],
-        &["--channel", "unknown"],
-        &["--local"],
-        &["--hosts", "fixture-host"],
-        &["--pr", "1"],
-      ] {
-        assert!(
-          Arguments::try_parse_from([&["ctlup", "app", operation][..], flags].concat()).is_err()
-        );
-      }
-      for option in ["--host", "--destination", "--method"] {
-        let args =
-          Arguments::try_parse_from(["ctlup", "app", operation, option, "fixture-host"]).unwrap();
-        let selected = match option {
-          "--host" => args.host,
-          "--destination" => args.destination,
-          "--method" => args.method,
-          _ => unreachable!(),
-        };
-        assert_eq!(selected.as_deref(), Some("fixture-host"));
-        assert!(matches!(args.command, Command::App { .. }));
-      }
-    }
-  }
-
-  #[test]
-  fn release_commands_accept_a_channel_and_an_optional_publication_id() {
-    let args =
-      Arguments::try_parse_from(["ctlup", "release", "list", "--channel", "stable", "--json"])
-        .unwrap();
-    assert!(matches!(
-      args.command,
-      Command::Release(ReleaseArguments {
-        command: ReleaseCommand::List {
-          channel: Some(ReleaseListChannel::Stable)
-        },
-        json: true,
-      })
-    ));
-
-    let args = Arguments::try_parse_from(["ctlup", "release", "view"]).unwrap();
-    assert!(matches!(
-      args.command,
-      Command::Release(ReleaseArguments {
-        command: ReleaseCommand::View {
-          publication_id: None,
-          channel: None,
-          pr: None,
-        },
-        json: false,
-      })
-    ));
-
-    let args = Arguments::try_parse_from([
-      "ctlup",
-      "release",
-      "view",
-      "0.1.2-123-1",
-      "--channel",
-      "nightly",
-    ])
-    .unwrap();
-    assert!(matches!(
-      args.command,
-      Command::Release(ReleaseArguments {
-        command: ReleaseCommand::View {
-          publication_id: Some(id),
-          channel: Some(Channel::Nightly),
-          pr: None,
+      Command::Install(InstallArguments {
+        package: PackageSelection::Runtime,
+        channel: Some(Channel::Stable),
+        destination: DestinationArguments {
+          ssh: Some(ssh),
+          remote_platform: Some(crate::RemotePlatform::Windows),
+          ..
         },
         ..
-      }) if id == "0.1.2-123-1"
+      }) if ssh == "ssh://operator@windows.example:2022"
     ));
-  }
 
-  #[test]
-  fn dev_listing_and_pr_view_use_explicit_preview_selectors() {
-    let args = Arguments::try_parse_from(["ctlup", "release", "list", "--channel", "dev"]).unwrap();
-    assert!(matches!(
-      args.command,
-      Command::Release(ReleaseArguments {
-        command: ReleaseCommand::List {
-          channel: Some(ReleaseListChannel::Dev)
-        },
-        ..
-      })
-    ));
-    let args = Arguments::try_parse_from(["ctlup", "release", "view", "--pr", "155"]).unwrap();
-    assert!(matches!(
-      args.command,
-      Command::Release(ReleaseArguments {
-        command: ReleaseCommand::View { pr: Some(155), .. },
-        ..
-      })
-    ));
-    for args in [
-      &["release", "list", "--pr", "155"][..],
-      &["release", "view", "--pr", "155", "--channel", "nightly"],
-      &["release", "view", "--pr", "155", "0.1.2-123-1"],
-      &["release", "view", "--pr", "0"],
-      &["release", "view", "--channel", "dev"],
-      &["check", "--channel", "dev"],
-    ] {
-      assert!(Arguments::try_parse_from([&["ctlup"][..], args].concat()).is_err());
-    }
-  }
-
-  #[test]
-  fn release_build_requires_a_positive_pr_number_and_accepts_json() {
-    let args =
-      Arguments::try_parse_from(["ctlup", "release", "build", "--pr", "155", "--json"]).unwrap();
-    assert!(matches!(
-      args.command,
-      Command::Release(ReleaseArguments {
-        command: ReleaseCommand::Build { pr: 155 },
-        json: true,
-      })
-    ));
-    assert!(Arguments::try_parse_from(["ctlup", "release", "build"]).is_err());
-    assert!(Arguments::try_parse_from(["ctlup", "release", "build", "--pr", "0"]).is_err());
-  }
-
-  #[test]
-  fn install_and_update_share_one_explicit_source_and_target_surface() {
-    for command in ["install", "update"] {
-      for channel in ["nightly", "stable"] {
-        assert!(
-          Arguments::try_parse_from([
-            "ctlup",
-            command,
-            "--host",
-            "work",
-            "--channel",
-            channel,
-            "--json"
-          ])
-          .is_ok()
-        );
-      }
-      assert!(
-        Arguments::try_parse_from(["ctlup", command, "--channel", "nightly", "--from", "/build"])
-          .is_err()
-      );
-      assert!(Arguments::try_parse_from(["ctlup", command, "--working-tree"]).is_err());
-      assert!(Arguments::try_parse_from(["ctlup", command, "--package", "ctl-agent"]).is_err());
-      assert!(Arguments::try_parse_from(["ctlup", command, "--selected"]).is_err());
-    }
-  }
-
-  #[test]
-  fn update_can_select_a_pr_and_keep_the_target_options() {
-    let args = Arguments::try_parse_from([
-      "ctlup", "update", "--pr", "155", "--host", "work", "--local", "--json",
-    ])
-    .unwrap();
-    assert_eq!(args.host.as_deref(), Some("work"));
+    let args = Arguments::try_parse_from(["ctlup", "update", "app", "--check", "--json"]).unwrap();
     assert!(matches!(
       args.command,
       Command::Update(UpdateArguments {
-        pr: Some(155),
-        local: true,
+        package: PackageSelection::App,
+        check: true,
         json: true,
         ..
       })
     ));
-    for flags in [
-      &["--pr", "155", "--channel", "stable"][..],
-      &["--pr", "155", "--from", "/build"],
-      &["--pr", "155", "--working-tree"],
-      &["--pr", "0"],
-      &["--channel", "dev"],
-    ] {
-      assert!(Arguments::try_parse_from([&["ctlup", "update"][..], flags].concat()).is_err());
-    }
-  }
-
-  #[test]
-  fn remote_status_accepts_saved_host_options() {
-    let args = Arguments::try_parse_from(["ctlup", "--host", "work", "status", "--json"]).unwrap();
-    assert_eq!(args.host.as_deref(), Some("work"));
-    assert!(matches!(args.command, Command::Status { json: true }));
-    assert!(
-      Arguments::try_parse_from([
-        "ctlup",
-        "--host",
-        "work",
-        "--destination",
-        "server",
-        "status"
-      ])
-      .is_err()
-    );
-  }
-
-  #[test]
-  fn rollback_is_no_longer_a_command() {
-    let error = Arguments::try_parse_from(["ctlup", "rollback"]).unwrap_err();
-    assert_eq!(error.kind(), clap::error::ErrorKind::InvalidSubcommand);
-  }
-
-  #[test]
-  fn native_development_builds_accept_one_cargo_configuration() {
-    let args = Arguments::try_parse_from([
-      "ctlup",
-      "dev",
-      "--workspace",
-      "/checkout",
-      "--profile",
-      "custom",
-      "--target-dir",
-      "/build-output",
-      "--json",
-    ])
-    .unwrap();
-    assert!(matches!(
-      args.command,
-      Command::Dev(DevelopmentArguments {
-        release: false,
-        profile: Some(_),
-        ..
-      })
-    ));
-    for flags in [
-      vec!["--release", "--profile", "custom"],
-      vec!["--release", "--cargo-args-json", "[]"],
-      vec!["--target-dir", "/output", "--cargo-args-json", "[]"],
-    ] {
-      assert!(Arguments::try_parse_from([vec!["ctlup", "dev"], flags].concat()).is_err());
-    }
-    assert!(Arguments::try_parse_from(["ctlup", "dev", "--lease"]).is_err());
-    assert!(Arguments::try_parse_from(["ctlup", "dev", "--lease", "--json"]).is_ok());
-  }
-
-  #[test]
-  fn desktop_development_uses_its_own_build_profile() {
     let args =
-      Arguments::try_parse_from(["ctlup", "dev", "--app", "--workspace", "checkout", "--json"])
-        .unwrap();
-    assert!(matches!(
-      args.command,
-      Command::Dev(DevelopmentArguments { app: true, workspace: Some(workspace), json: true, .. })
-        if workspace.as_os_str() == "checkout"
-    ));
-    for flags in [
-      &["--renew-signing"][..],
-      &["--release"],
-      &["--profile", "custom"],
-      &["--target-dir", "output"],
-      &["--target", "aarch64-apple-darwin"],
-      &["--cargo-args-json", "[]"],
-      &["--lease", "--json"],
+      Arguments::try_parse_from(["ctlup", "install", "app", "--release", "publication-1"]).unwrap();
+    assert!(matches!(args.command, Command::Install(InstallArguments {
+      package: PackageSelection::App, release: Some(id), ..
+    }) if id == "publication-1"));
+
+    for pair in [
+      ["--channel", "nightly", "--from", "build"],
+      ["--channel", "nightly", "--release", "release"],
+      ["--pr", "42", "--release", "release"],
+      ["--pr", "42", "--from", "build"],
     ] {
-      let command_line = [&["ctlup", "dev", "--app"][..], flags].concat();
-      assert_eq!(
-        Arguments::try_parse_from(command_line).unwrap_err().kind(),
-        clap::error::ErrorKind::ArgumentConflict
-      );
+      assert!(Arguments::try_parse_from([&["ctlup", "install"][..], &pair].concat()).is_err());
+    }
+    assert!(Arguments::try_parse_from(["ctlup", "update", "--channel", "stable"]).is_err());
+  }
+
+  #[test]
+  fn targets_use_one_address_or_repeated_saved_hosts() {
+    let args =
+      Arguments::try_parse_from(["ctlup", "update", "--host", "work", "--host", "lab"]).unwrap();
+    assert!(matches!(args.command, Command::Update(UpdateArguments {
+      destination: DestinationArguments { host, .. }, ..
+    }) if host == ["work", "lab"]));
+    assert!(Arguments::try_parse_from(["ctlup", "--host", "work", "update"]).is_err());
+    assert!(
+      Arguments::try_parse_from(["ctlup", "install", "--ssh", "work", "--host", "lab",]).is_err()
+    );
+    assert!(Arguments::try_parse_from(["ctlup", "update", "--method", "work"]).is_err());
+    for old in ["--hosts", "--destination", "--local"] {
+      assert!(Arguments::try_parse_from(["ctlup", "update", old]).is_err());
     }
   }
 
   #[test]
-  fn remote_development_accepts_saved_hosts_and_a_checkout() {
-    let args = Arguments::try_parse_from([
-      "ctlup",
-      "dev",
-      "--hosts",
-      "work,lab",
-      "--workspace",
-      "checkout",
-    ])
-    .unwrap();
-    assert!(matches!(
-      args.command,
-      Command::Dev(DevelopmentArguments { hosts, workspace: Some(workspace), .. })
-        if hosts == ["work", "lab"] && workspace.as_os_str() == "checkout"
-    ));
+  fn inspection_names_and_private_ssh_commands_parse() {
+    for command in [
+      vec!["status", "--json"],
+      vec!["status", "app", "--json"],
+      vec!["inspect-runtime", "--json"],
+      vec!["runtime-source"],
+      vec!["catalog-json"],
+      vec!["install-archive"],
+      vec!["install-manager"],
+      vec!["export-manager", "--sha256", "digest"],
+      vec!["prepare-install"],
+      vec!["activate-installed", "id"],
+      vec!["release", "show", "publication-1"],
+      vec!["release", "list", "--channel", "nightly"],
+      vec!["bundle", "fetch", "--target", "aarch64-unknown-linux-musl"],
+      vec!["bundle", "list"],
+      vec!["prune", "--forget-missing"],
+    ] {
+      assert!(Arguments::try_parse_from([vec!["ctlup"], command].concat()).is_ok());
+    }
+
+    for obsolete in [
+      vec!["show"],
+      vec!["check"],
+      vec!["app", "install"],
+      vec!["component", "list"],
+      vec!["release", "view"],
+      vec!["release", "build", "--pr", "42"],
+      vec!["migrate"],
+      vec!["rollback"],
+    ] {
+      assert!(Arguments::try_parse_from([vec!["ctlup"], obsolete].concat()).is_err());
+    }
   }
 
   #[test]
-  fn signing_renewal_accepts_workspace_and_output_flags_but_rejects_cargo_options() {
-    let args = Arguments::try_parse_from([
-      "ctlup",
-      "dev",
-      "--renew-signing",
-      "--workspace",
-      "checkout",
-      "--json",
-      "--lease",
-    ])
-    .unwrap();
-    assert!(matches!(args.command, Command::Dev(DevelopmentArguments {
-      renew_signing: true, workspace: Some(workspace), json: true, lease: true, ..
-    }) if workspace.as_os_str() == "checkout"));
-    for flags in [
-      &["--release"][..],
-      &["--profile", "custom"],
-      &["--target-dir", "output"],
-      &["--target", "aarch64-apple-darwin"],
-      &["--cargo-args-json", "[]"],
+  fn source_builds_use_dev_and_signing_is_its_own_action() {
+    let sign =
+      Arguments::try_parse_from(["ctlup", "dev", "sign", "--workspace", "checkout", "--json"])
+        .unwrap();
+    assert!(matches!(sign.command, Command::Dev(DevelopmentArguments {
+      action: Some(DevAction::Sign), workspace: Some(workspace), json: true, ..
+    }) if workspace == std::path::Path::new("checkout")));
+    for command in [
+      vec!["dev"],
+      vec!["dev", "--app"],
+      vec!["dev", "--ssh", "lab"],
+      vec!["dev", "--host", "lab", "--host", "work"],
+      vec!["dev", "--lease", "--json"],
+      vec!["dev", "--ctream", "--agent-target", "x86_64-pc-windows-gnu"],
+      vec!["ctream", "install", "--run", "42"],
+      vec!["ctream", "status"],
+      vec!["ctream", "run", "--", "--title", "desktop"],
     ] {
-      let command_line = [&["ctlup", "dev", "--renew-signing"][..], flags].concat();
-      assert_eq!(
-        Arguments::try_parse_from(command_line).unwrap_err().kind(),
-        clap::error::ErrorKind::ArgumentConflict
-      );
+      assert!(Arguments::try_parse_from([vec!["ctlup"], command].concat()).is_ok());
+    }
+    for invalid in [
+      vec!["dev", "--renew-signing"],
+      vec!["dev", "sign", "--app"],
+      vec!["dev", "sign", "--release"],
+      vec!["dev", "--app", "--target", "x"],
+      vec!["dev", "--lease"],
+      vec!["dev", "--ctream", "--ssh", "lab"],
+      vec!["install", "--working-tree"],
+    ] {
+      assert!(Arguments::try_parse_from([vec!["ctlup"], invalid].concat()).is_err());
     }
   }
 }

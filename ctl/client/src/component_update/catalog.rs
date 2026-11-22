@@ -75,7 +75,7 @@ pub async fn install_prepared_components(
   }
 
   verify_updaters(&prepared)?;
-  provision_native(home, &prepared, activate_native).await?;
+  provision_native(home, &prepared, &origin, activate_native).await?;
   let bundles = prepared
     .iter()
     .map(|component| component.bundle.clone())
@@ -158,6 +158,7 @@ fn verify_updaters(prepared: &[PreparedUpdate]) -> io::Result<()> {
 async fn provision_native(
   home: &Path,
   prepared: &[PreparedUpdate],
+  origin: &CatalogOrigin,
   activate: bool,
 ) -> io::Result<()> {
   let Some(index) = native_component(prepared, activate)? else {
@@ -175,9 +176,17 @@ async fn provision_native(
     };
   }
   if let Some(bytes) = &component.updater {
-    crate::installation::provision_manager_bytes(home, bytes.clone()).await
+    crate::installation::provision_manager_bytes(
+      home,
+      bytes.clone(),
+      Some((
+        origin,
+        &component.bundle.manifest.components["ctl-agent"].build,
+      )),
+    )
+    .await
   } else {
-    crate::installation::provision_manager(home, &component.bundle).await
+    crate::installation::provision_manager_with_origin(home, &component.bundle, Some(origin)).await
   }
 }
 

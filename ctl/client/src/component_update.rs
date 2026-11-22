@@ -9,7 +9,9 @@ use std::path::{Path, PathBuf};
 mod catalog;
 pub use catalog::install_prepared_components;
 mod remote_publication;
-pub use remote_publication::{PublicationDeployment, PublicationTarget, deploy_remote_publication};
+pub use remote_publication::{
+  PublicationDeployment, PublicationTarget, deploy_remote_publication, deploy_remote_release,
+};
 
 pub use ctl_core::component_update::{
   BuildSource, BundleChannel, Package, UpdateOptions, UpdateResult,
@@ -352,6 +354,16 @@ async fn prepare_source(
   if let BuildSource::Published { channel } = source {
     return published_build(home, published_target.as_ref(), *channel, on_progress).await;
   }
+  if let BuildSource::Release { publication_id } = source {
+    let plan = crate::remote_bundle::published::resolve_release_installation(
+      publication_id,
+      published_target.as_ref(),
+      purpose == Purpose::Upload,
+    )
+    .await
+    .map_err(io::Error::other)?;
+    return published_plan_source(home, &plan, None, None, on_progress).await;
+  }
   if let BuildSource::Provided {
     path,
     local_build: true,
@@ -390,7 +402,10 @@ async fn prepare_source(
     let (bundle, updater) = match &source {
       BuildSource::Selected => included_build(&home, &included, &target, purpose)?,
       BuildSource::Provided { path, .. } => provided_build(&home, path, &target, purpose)?,
-      BuildSource::Automatic | BuildSource::Published { .. } | BuildSource::WorkingTree => {
+      BuildSource::Automatic
+      | BuildSource::Published { .. }
+      | BuildSource::Release { .. }
+      | BuildSource::WorkingTree => {
         unreachable!(
           "automatic, published and working-tree sources resolved before filesystem preparation"
         )
@@ -430,19 +445,26 @@ async fn automatic_native(
   let target = target.to_owned();
   let candidate = tokio::task::spawn_blocking(move || {
     let installations = Installations::new(&account);
-    let (active_id, active) = installations.active_selection()?;
-    if let Some(bundle) = active {
-      if !target.ends_with("-apple-darwin") {
-        return Ok(None);
-      }
-      let origin = catalog::known_origin(&installations.catalog_index()?, &bundle);
-      return Ok(Some((bundle, origin, false)));
-    }
-    let Some(id) = active_id else {
+    let inspection = installations.inspect_status()?;
+    let Some(id) = inspection.active else {
       return Ok(None);
     };
-    let entries = installations.catalog_index()?;
-    let entry = entries
+    let origin = inspection.active_origin;
+    let pinned = origin
+      .as_ref()
+      .is_some_and(|origin| !matches!(origin.channel.as_str(), "stable" | "nightly"));
+    let active = inspection
+      .bundles
+      .into_iter()
+      .find(|bundle| bundle.manifest.bundle_id == id);
+    if let Some(bundle) = active {
+      if !pinned && !target.ends_with("-apple-darwin") {
+        return Ok(None);
+      }
+      return Ok(Some((bundle, origin, false)));
+    }
+    let entry = inspection
+      .entries
       .iter()
       .find(|entry| entry.bundle_id == id)
       .ok_or_else(|| {
@@ -452,6 +474,12 @@ async fn automatic_native(
         )
       })?;
     let Some(bundle) = cached_exact(&account, entry)? else {
+      if pinned {
+        return Err(io::Error::new(
+          io::ErrorKind::NotFound,
+          "The pinned runtime and its verified cache are missing. Select a source to install.",
+        ));
+      }
       return Ok(None);
     };
     if bundle.manifest.schema_version != 2
@@ -460,7 +488,6 @@ async fn automatic_native(
     {
       return Ok(None);
     }
-    let origin = catalog::known_origin(&entries, &bundle);
     Ok::<_, io::Error>(Some((bundle, origin, true)))
   })
   .await
@@ -707,14 +734,25 @@ pub(crate) async fn prepare_published_upload_with_cached(
   on_progress: impl Fn(PreparationProgress) + Send + Sync,
 ) -> io::Result<PreparedUpdate> {
   let snapshot = PreparationSnapshot::capture(home)?;
+  let source = if plan.origin().channel == "release" {
+    BuildSource::Release {
+      publication_id: plan
+        .origin()
+        .publication_id
+        .clone()
+        .expect("pinned release ID"),
+    }
+  } else {
+    BuildSource::Published {
+      channel: plan.channel(),
+    }
+  };
   let prepared = published_plan_source(home, plan, runtime, updater, &on_progress).await?;
   prepare_resolved_update(
     home,
     plan.target(),
     Purpose::Upload,
-    &BuildSource::Published {
-      channel: plan.channel(),
-    },
+    &source,
     prepared,
     snapshot,
     &on_progress,
@@ -743,7 +781,7 @@ async fn published_plan_source(
       total_bytes: progress.total_bytes,
     });
   };
-  let cache = ctl_core::paths::directory_for_account(home).join("cache");
+  let cache = ctl_core::paths::updater_directory_for_account(home).join("cache");
   let updater = if let Some(cached) = updater {
     let info = plan.updater_info().clone();
     tokio::task::spawn_blocking(move || info.verify(cached.bytes))
@@ -1023,7 +1061,7 @@ pub async fn install_local(
     catalog::known_origin(&inventory, bundle).unwrap_or_else(|| catalog::unknown_origin(bundle));
   let expected_heads = crate::installation::single_target_heads(home, bundle, &origin)?;
   crate::components::verify_local(home, bundle).await?;
-  crate::installation::provision_manager(home, bundle).await?;
+  crate::installation::provision_manager_with_origin(home, bundle, Some(&origin)).await?;
   let _installation = activate_local(home, bundle, origin, expected_heads).await?;
   Ok(result(bundle, package))
 }

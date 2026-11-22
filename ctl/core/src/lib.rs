@@ -15,6 +15,8 @@ pub mod development;
 pub mod executable;
 #[cfg(all(feature = "bundles", any(unix, windows)))]
 pub mod installations;
+#[cfg(all(feature = "bundles", any(unix, windows)))]
+pub mod installed_build_name;
 pub mod paths;
 pub mod presence;
 #[cfg(all(feature = "bundles", any(unix, windows)))]

@@ -14,15 +14,11 @@ local_runtime=$9
 fail() { printf '%s\n' "$1" >&2; exit 1; }
 unavailable() { printf 'ctl-published-unavailable-v1\n'; exit 12; }
 __ACCOUNT_GUARD__
+__UPDATER_STAGING__
 printf 'ctl-published-stage-v1 checking-updater\n'
 # A mode-0700 directory prevents a verified executable being replaced before use.
-case "$(uname -s)" in
-  Linux) home_stat=$(stat -c '%u %a' "$HOME");;
-  Darwin) home_stat=$(stat -f '%u %Lp' "$HOME");;
-  *) fail 'Unsupported updater bootstrap platform.';;
-esac
-test ! -L "$HOME" && test "${home_stat%% *}" = "$(id -u)" && test $((0${home_stat#* } & 022)) -eq 0 || fail 'Unsafe account home for ctlup staging.'
-stage=$(mktemp -d "$HOME/.ctlup-fetch.XXXXXXXX")
+prepare_updater_staging
+stage=$(mktemp -d "$updater_staging/.ctlup-fetch.XXXXXXXX")
 file="$stage/ctlup"
 download_pid=''
 timer_pid=''
@@ -44,9 +40,44 @@ verified() {
 }
 # File-size limits bound writes even for chunked responses or older clients.
 blocks=$(( (size + 511) / 512 ))
-managed="$HOME/.tokn/ctl/bin/ctlup"
-if [ -f "$managed" ] && [ ! -L "$managed" ] && [ "$(length "$managed")" -eq "$size" ] &&
-   (ulimit -f "$blocks" && cp "$managed" "$file") && verified; then
+copy_retained_updater() {
+  if existing_updater_launcher; then
+    code=0
+    help=$("$updater_entrypoint" export-manager --help </dev/null 2>&1) || code=$?
+    if [ "$code" -eq 0 ]; then
+      (ulimit -f "$blocks" && exec "$updater_entrypoint" export-manager --sha256 "$sha") </dev/null >"$file" || code=$?
+      case "$code" in
+        0) verified || fail 'Installed ctlup size or checksum mismatch.'; return 0;;
+        10) return 1;;
+        *) fail 'Could not export the retained ctlup.';;
+      esac
+    fi
+    # Older launchers dispatch before parsing and can fail on a missing selection.
+    case "$code:$help" in
+      2:*"unrecognized subcommand 'export-manager'"*) :;;
+      1:"ctlup: no managed updater is installed" | \
+      1:"ctlup: selected updater payload is missing" | \
+      1:ctlup:*" (os error 2)") :;;
+      *) fail 'Remote ctlup export capability check failed.';;
+    esac
+  fi
+  # Older managers retained the digest in the object path.
+  store="$HOME/.tokn/ctl/ctlup/store"
+  for directory in "$store" "$store/updater" "$store/updater/$sha"; do
+    test ! -L "$directory" || fail 'installed updater directory is a symbolic link'
+    test -e "$directory" || return 1
+    test -d "$directory" || fail 'installed updater path is not a directory'
+    require_private_owner_mode "$directory"
+  done
+  managed="$store/updater/$sha/ctlup"
+  test ! -L "$managed" || fail 'installed updater is a symbolic link'
+  test -e "$managed" || return 1
+  test -f "$managed" || fail 'installed updater is not a regular file'
+  require_private_owner_mode "$managed"
+  [ "$(length "$managed")" -eq "$size" ] || fail 'Installed ctlup size or checksum mismatch.'
+  (ulimit -f "$blocks" && cp "$managed" "$file") && verified || fail 'Installed ctlup size or checksum mismatch.'
+}
+if copy_retained_updater; then
   printf 'ctl-published-stage-v1 using-installed-updater\n'
 elif [ "$local_updater" = 1 ]; then
   printf 'ctl-published-stage-v1 uploading-updater\n'

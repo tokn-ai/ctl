@@ -25,6 +25,104 @@ impl Drop for Home {
   }
 }
 
+#[test]
+fn desktop_label_reservations_are_stable_and_prevent_collisions() {
+  let home = Home::new();
+  let store = home.store();
+  let root = store.desktop_root();
+  let label = "stable-v0.1.4-abcdef0";
+  let first = DesktopSelection {
+    content_id: "a".repeat(64),
+    source: DesktopSource::Provided,
+  };
+  let second = DesktopSelection {
+    content_id: "b".repeat(64),
+    source: DesktopSource::Provided,
+  };
+  assert!(!store.is_desktop_object_name(label).unwrap());
+  assert!(!store.is_desktop_object_name(&"A".repeat(64)).unwrap());
+  assert!(store.desktop_object_path("../foreign").is_err());
+  store
+    .publish_desktop(None, &first, Some("stable-v0.1.4/foreign"), |_| Ok(()))
+    .unwrap_err();
+  store
+    .publish_desktop(None, &first, Some(label), |path| {
+      assert_eq!(path, root.join(label));
+      Err::<(), _>(io::Error::other("interrupted publication"))
+    })
+    .unwrap_err();
+  assert_eq!(store.desktop_selection().unwrap(), None);
+  assert!(store.is_desktop_object_name(label).unwrap());
+  assert!(!root.join(label).exists());
+  store
+    .publish_desktop(None, &second, Some(label), |path| {
+      assert_eq!(path, root.join(format!("{label}-bbbbbbbbbbbb")));
+      filesystem::ensure_directory(path)
+    })
+    .unwrap();
+  store
+    .publish_desktop(
+      Some(&second),
+      &first,
+      Some("stable-v0.1.4-dedcafe"),
+      |path| {
+        assert_eq!(path, root.join(label));
+        filesystem::ensure_directory(path)
+      },
+    )
+    .unwrap();
+  assert_eq!(
+    store.desktop_object_path(&first.content_id).unwrap(),
+    root.join(label)
+  );
+  assert_eq!(store.desktop_selection().unwrap().as_ref(), Some(&first));
+  fs::remove_dir(root.join(label)).unwrap();
+  let pending = store.prune_all(false).unwrap();
+  assert_eq!(
+    pending.missing_builds,
+    std::slice::from_ref(&first.content_id)
+  );
+  assert!(store.is_desktop_object_name(label).unwrap());
+  let forgotten = store.prune().unwrap();
+  assert_eq!(forgotten.forgotten_missing_builds, [first.content_id]);
+  assert_eq!(store.desktop_selection().unwrap(), None);
+  assert!(!store.is_desktop_object_name(label).unwrap());
+}
+
+#[test]
+fn desktop_repair_preserves_legacy_digest_path() {
+  let home = Home::new();
+  let store = home.store();
+  let first = DesktopSelection {
+    content_id: "a".repeat(64),
+    source: DesktopSource::Provided,
+  };
+  let legacy = store.desktop_root().join(&first.content_id);
+  store
+    .publish_desktop(None, &first, None, |path| {
+      assert_eq!(path, legacy);
+      filesystem::ensure_directory(path)
+    })
+    .unwrap();
+  fs::remove_dir(&legacy).unwrap();
+  store
+    .publish_desktop(
+      Some(&first),
+      &first,
+      Some("stable-v0.1.4-abcdef0"),
+      |path| {
+        assert_eq!(path, legacy);
+        filesystem::ensure_directory(path)
+      },
+    )
+    .unwrap();
+  assert!(!store.state_root().join(DESKTOP_OBJECT_PATHS).exists());
+  assert_eq!(
+    store.desktop_object_path(&first.content_id).unwrap(),
+    legacy
+  );
+}
+
 fn fixture(home: &Home, target: &str, byte: u8) -> Bundle {
   fixture_with_source(home, target, byte, Source::Ci)
 }
@@ -32,7 +130,10 @@ fn fixture(home: &Home, target: &str, byte: u8) -> Bundle {
 fn fixture_with_source(home: &Home, target: &str, byte: u8, source: Source) -> Bundle {
   #[cfg(windows)]
   if target == crate::paths::native_target() {
-    home.store().install_manager(b"launcher").unwrap();
+    home
+      .store()
+      .install_manager(b"launcher", &super::super::manager_build_fixture(), None)
+      .unwrap();
   }
   let build = ComponentBuildInfo {
     version: "0.1.2".into(),
@@ -111,7 +212,8 @@ fn helper_fixture(home: &Home, source: &Bundle, signature: u8) -> Bundle {
 fn renewing_a_helper_preserves_catalog_and_checkout_heads_across_retries() {
   let home = Home::new();
   let store = home.store();
-  let native = fixture(&home, crate::paths::native_target(), 1);
+  let target = crate::paths::native_target();
+  let native = fixture(&home, target, 1);
   let original = helper_fixture(&home, &native, 1);
   let renewed = helper_fixture(&home, &native, 2);
   let remote = fixture(&home, foreign(), 1);
@@ -155,8 +257,8 @@ fn renewing_a_helper_preserves_catalog_and_checkout_heads_across_retries() {
   let mut expected_state = State {
     entries: expected,
     development: [
-      (checkout_one.clone(), renewed_id.clone()),
-      (checkout_two.clone(), renewed_id.clone()),
+      (format!("{checkout_one}/{target}"), renewed_id.clone()),
+      (format!("{checkout_two}/{target}"), renewed_id.clone()),
     ]
     .into(),
     ..State::default()
@@ -246,7 +348,7 @@ fn inspection_is_passive_and_first_activation_records_provided_provenance() {
 }
 
 #[test]
-fn unselected_bundles_helper_cache_and_upload_pins_do_not_require_migration() {
+fn unselected_bundles_helper_cache_and_upload_pins_do_not_create_a_registry() {
   let home = Home::new();
   let store = home.store();
   let source = fixture(&home, crate::paths::native_target(), 1);
@@ -277,8 +379,7 @@ fn native_lookup_verifies_its_payload_without_reading_foreign_payload_bytes() {
   let native = fixture(&home, crate::paths::native_target(), 2);
   store.activate(&native).unwrap();
   // A native lookup must stay independent of foreign payload bytes even when
-  // it is the first operation to open a catalog from an older manager.
-  fs::remove_file(store.root.join("install-layout-migrated.json")).unwrap();
+
   let name = installed[0].manifest.files.keys().next().unwrap();
   fs::write(
     installed[0].directory.join(name),
@@ -317,24 +418,323 @@ fn failed_initial_activation_leaves_an_authoritative_empty_catalog_and_collectib
   assert_eq!(store.catalog().unwrap(), Vec::<CatalogEntry>::new());
   assert!(store.list().unwrap().is_empty());
   assert!(store.active().unwrap().is_none());
-  assert_eq!(filesystem::entries(&store).unwrap().len(), 1);
+  assert_eq!(
+    filesystem::entries(&store, &read_index(&store).unwrap())
+      .unwrap()
+      .len(),
+    1
+  );
   assert_eq!(store.prune().unwrap().removed, [source.manifest.bundle_id]);
+  assert!(
+    read_index(&store)
+      .unwrap()
+      .runtime_paths
+      .locations()
+      .next()
+      .is_none()
+  );
 }
 
 #[test]
-fn activation_migrates_an_uncatalogued_store_first() {
-  let old_home = Home::new();
-  let old_store = old_home.store();
-  let old = fixture(&old_home, crate::paths::native_target(), 2);
-  filesystem::ensure_root(&old_store).unwrap();
-  filesystem::publish(&old_store, &old, None).unwrap();
-  let new = fixture(&old_home, crate::paths::native_target(), 3);
-  assert_eq!(old_store.activate(&new).unwrap().manifest, new.manifest);
-  assert_eq!(old_store.active().unwrap().unwrap().manifest, new.manifest);
+fn readable_runtime_paths_disambiguate_builds_and_keep_the_original_source_name() {
+  let home = Home::new();
+  let store = home.store();
+  let target = crate::paths::native_target();
+  let first = fixture(&home, target, 1);
+  let second = fixture(&home, target, 2);
+  let first = store
+    .activate_with_origin(&first, &origin("stable", "one"))
+    .unwrap();
+  let second = store
+    .activate_with_origin(&second, &origin("stable", "two"))
+    .unwrap();
+  let root = store.runtime_root();
+  let expected = "stable-v0.1.2-aaaaaaa";
+  assert_eq!(first.directory, root.join(expected).join(target));
   assert_eq!(
-    old_store.get(&old.manifest.bundle_id).unwrap().manifest,
-    old.manifest
+    second.directory,
+    root
+      .join(format!("{expected}-{}", &second.manifest.bundle_id[..12]))
+      .join(target)
   );
+  let selected = store
+    .activate_with_origin(&first, &origin("nightly", "one"))
+    .unwrap();
+  assert_eq!(selected.directory, first.directory);
+  assert_eq!(
+    store.active_origin().unwrap(),
+    Some(origin("nightly", "one"))
+  );
+  assert!(!store.updater_root().join("refs").exists());
+}
+
+#[test]
+fn provisioning_refreshes_legacy_launchers_and_preserves_hash_payloads() {
+  let home = Home::new();
+  let store = home.store();
+  let target = crate::paths::native_target();
+  let first = fixture(&home, target, 1);
+  let second = fixture(&home, target, 2);
+  store
+    .install_manager(
+      b"old launcher",
+      &super::super::manager_build_fixture(),
+      None,
+    )
+    .unwrap();
+  let first = store.activate(&first).unwrap();
+  let legacy = store.runtime_root().join(&first.manifest.bundle_id);
+  fs::rename(&first.directory, &legacy).unwrap();
+  let (updater, updater_lease) = store.manager_and_lease().unwrap().unwrap();
+  drop(updater_lease);
+  let legacy_updater = store
+    .manager_root()
+    .join(store.active_manager_id().unwrap().unwrap());
+  fs::rename(updater.parent().unwrap(), legacy_updater).unwrap();
+  fs::remove_file(store.state_root().join(RUNTIME_BUILD_PATHS)).unwrap();
+  fs::remove_file(store.state_root().join(UPDATER_OBJECT_PATHS)).unwrap();
+  assert_eq!(store.active().unwrap().unwrap().directory, legacy);
+  let legacy_executable = legacy
+    .join(executable_name(target, "ctl").as_ref())
+    .canonicalize()
+    .unwrap();
+  let old_lease = super::super::leases::lease_executable(&legacy_executable)
+    .unwrap()
+    .unwrap();
+
+  store
+    .install_manager(
+      b"layout 6 launcher",
+      &super::super::manager_build_fixture(),
+      None,
+    )
+    .unwrap();
+  assert_eq!(
+    read_index(&store)
+      .unwrap()
+      .updater_paths
+      .object
+      .launcher_layout,
+    Some(super::super::UPDATER_OBJECT_PATH_LAYOUT_VERSION)
+  );
+  let launcher = store
+    .root()
+    .join("bin")
+    .join(executable_name(target, "ctlup").as_ref());
+  assert_eq!(fs::read(launcher).unwrap(), b"layout 6 launcher");
+  assert_eq!(store.active().unwrap().unwrap().directory, legacy);
+  let second = store.activate(&second).unwrap();
+  assert_eq!(
+    second
+      .directory
+      .file_name()
+      .and_then(std::ffi::OsStr::to_str),
+    Some(target)
+  );
+  let new_executable = second.executable("ctl").unwrap().canonicalize().unwrap();
+  let _new_lease = super::super::leases::lease_executable(&new_executable)
+    .unwrap()
+    .unwrap();
+  assert_eq!(
+    store.prune().unwrap().retained_in_use,
+    std::slice::from_ref(&first.manifest.bundle_id)
+  );
+  drop(old_lease);
+  assert_eq!(store.prune().unwrap().removed, [first.manifest.bundle_id]);
+  let registry: serde_json::Value =
+    serde_json::from_slice(&fs::read(store.state_root().join(CATALOG)).unwrap()).unwrap();
+  assert_eq!(registry["schema_version"], 2);
+  assert!(registry.get("runtime_paths").is_none());
+}
+
+#[test]
+fn readable_updaters_preserve_previous_layouts_and_keep_leased_exact_bytes() {
+  let home = Home::new();
+  let store = home.store();
+  let target = crate::paths::native_target();
+  let bundle = fixture(&home, target, 1);
+  let build = super::super::manager_build_fixture();
+  let origin = origin("stable", "fixture-release");
+  let old = b"layout 4 executable";
+  store.install_manager(old, &build, Some(&origin)).unwrap();
+  let runtime = store.activate(&bundle).unwrap();
+  let old_runtime = register_legacy_runtime(&store, &runtime);
+  let original_runtime_paths = fs::read(store.state_root().join(RUNTIME_PATHS)).unwrap();
+  let old_id = crate::bundles::digest(old);
+  let (original_path, starting_lease) = store.manager_and_lease().unwrap().unwrap();
+  drop(starting_lease);
+  let old_payload = original_path.parent().unwrap();
+  let label = "stable-v0.1.2-aaaaaaa";
+  let legacy_group = store.manager_root().join(target);
+  filesystem::ensure_directory(&legacy_group).unwrap();
+  let legacy = legacy_group.join(label);
+  fs::rename(old_payload, &legacy).unwrap();
+  let paths = PathIndex {
+    launcher_layout: Some(super::super::UPDATER_PATH_LAYOUT_VERSION),
+    locations: [(old_id.clone(), format!("{target}/{label}"))].into(),
+    ..PathIndex::default()
+  };
+  commit_updater_paths(&store, &paths).unwrap();
+  fs::remove_file(store.state_root().join(UPDATER_OBJECT_PATHS)).unwrap();
+  assert_eq!(
+    store.manager_bytes(&old_id).unwrap().as_deref(),
+    Some(old.as_slice())
+  );
+  let old_path = legacy
+    .join(executable_name(target, "ctlup").as_ref())
+    .canonicalize()
+    .unwrap();
+  let old_lease = super::super::leases::lease_executable(&old_path)
+    .unwrap()
+    .unwrap();
+
+  let first = b"first layout 6 executable";
+  let next = b"second layout 6 executable";
+  store.install_manager(first, &build, Some(&origin)).unwrap();
+  let first_id = crate::bundles::digest(first);
+  let (path, first_lease) = store.manager_and_lease().unwrap().unwrap();
+  let root = store.manager_root();
+  assert_eq!(path.parent().unwrap(), root.join(label));
+  store.install_manager(next, &build, Some(&origin)).unwrap();
+  let next_id = crate::bundles::digest(next);
+  let (next_path, _lease) = store.manager_and_lease().unwrap().unwrap();
+  assert_eq!(
+    next_path.parent().unwrap(),
+    root.join(format!("{label}-{}", &next_id[..12]))
+  );
+  assert_eq!(store.active().unwrap().unwrap().directory, old_runtime);
+  assert_eq!(
+    fs::read(store.state_root().join(RUNTIME_PATHS)).unwrap(),
+    original_runtime_paths
+  );
+  store.prune_unused().unwrap();
+  assert_eq!(
+    store.manager_bytes(&old_id).unwrap().as_deref(),
+    Some(old.as_slice())
+  );
+  assert_eq!(
+    store.manager_bytes(&first_id).unwrap().as_deref(),
+    Some(first.as_slice())
+  );
+  drop((old_lease, first_lease));
+  store.prune_unused().unwrap();
+  assert!(store.manager_bytes(&old_id).unwrap().is_none());
+  assert!(store.manager_bytes(&first_id).unwrap().is_none());
+  assert!(!root.join(target).exists());
+  assert!(!root.join(label).exists());
+  assert_eq!(
+    store.manager_bytes(&next_id).unwrap().as_deref(),
+    Some(next.as_slice())
+  );
+  let named_direct = next_path.canonicalize().unwrap();
+  assert!(
+    super::super::leases::lease_executable(&named_direct)
+      .unwrap()
+      .is_some()
+  );
+  fs::write(&next_path, b"damaged bytes").unwrap();
+  assert_eq!(
+    store.manager_bytes(&next_id).unwrap_err().kind(),
+    io::ErrorKind::InvalidData
+  );
+}
+
+#[test]
+fn flat_update_paths_respect_pending_and_leased_layout_five_reservations() {
+  let home = Home::new();
+  let store = home.store();
+  filesystem::ensure_root(&store).unwrap();
+  let target = crate::paths::native_target();
+  let label = "stable-v0.1.2-aaaaaaa";
+  let previous = b"layout 5 executable";
+  let previous_id = crate::bundles::digest(previous);
+  let paths = PathIndex {
+    launcher_layout: Some(super::super::UPDATER_BUILD_PATH_LAYOUT_VERSION),
+    locations: [(previous_id.clone(), format!("{label}/{target}"))].into(),
+    ..PathIndex::default()
+  };
+  commit_updater_build_paths(&store, &paths).unwrap();
+  let root = store.manager_root();
+  let group = root.join(label);
+  assert!(!group.exists());
+
+  let next = b"layout 6 executable";
+  let next_id = crate::bundles::digest(next);
+  store
+    .install_manager(
+      next,
+      &super::super::manager_build_fixture(),
+      Some(&origin("stable", "fixture")),
+    )
+    .unwrap();
+  let (path, _lease) = store.manager_and_lease().unwrap().unwrap();
+  assert_eq!(
+    path.parent().unwrap(),
+    root.join(format!("{label}-{}", &next_id[..12]))
+  );
+
+  let previous_payload = group.join(target);
+  filesystem::ensure_directory(&group).unwrap();
+  filesystem::ensure_directory(&previous_payload).unwrap();
+  let previous_path = previous_payload.join(executable_name(target, "ctlup").as_ref());
+  let mut file = options()
+    .write(true)
+    .create_new(true)
+    .open(&previous_path)
+    .unwrap();
+  file.write_all(previous).unwrap();
+  drop(file);
+  let direct = previous_path.canonicalize().unwrap();
+  let legacy_lease = super::super::leases::lease_executable(&direct)
+    .unwrap()
+    .unwrap();
+  store.prune_unused().unwrap();
+  assert_eq!(
+    store.manager_bytes(&previous_id).unwrap().as_deref(),
+    Some(previous.as_slice())
+  );
+  drop(legacy_lease);
+  store.prune_unused().unwrap();
+  assert!(!group.exists());
+  assert_eq!(
+    store.manager_bytes(&next_id).unwrap().as_deref(),
+    Some(next.as_slice())
+  );
+  assert_eq!(
+    read_index(&store)
+      .unwrap()
+      .updater_paths
+      .build_first
+      .launcher_layout,
+    Some(super::super::UPDATER_BUILD_PATH_LAYOUT_VERSION)
+  );
+}
+
+fn register_legacy_runtime(store: &Installations, runtime: &Bundle) -> PathBuf {
+  let legacy = target_first(&store.runtime_root(), &runtime.directory);
+  let label = legacy.file_name().unwrap().to_str().unwrap();
+  let paths = PathIndex {
+    launcher_layout: Some(super::super::RUNTIME_PATH_LAYOUT_VERSION),
+    locations: [(
+      runtime.manifest.bundle_id.clone(),
+      format!("{}/{label}", runtime.manifest.target_triple),
+    )]
+    .into(),
+    ..PathIndex::default()
+  };
+  commit_runtime_paths(store, &paths).unwrap();
+  fs::remove_file(store.state_root().join(RUNTIME_BUILD_PATHS)).unwrap();
+  legacy
+}
+
+fn target_first(root: &Path, path: &Path) -> PathBuf {
+  let build = path.parent().unwrap();
+  let group = root.join(path.file_name().unwrap());
+  filesystem::ensure_directory(&group).unwrap();
+  let old_location = group.join(build.file_name().unwrap());
+  fs::rename(path, &old_location).unwrap();
+  fs::remove_dir(build).unwrap();
+  old_location
 }
 
 #[test]
@@ -356,11 +756,11 @@ fn inferred_provided_origin_cannot_replace_a_foreign_channel_head() {
   assert_eq!(store.catalog().unwrap(), before);
   assert!(store.active().unwrap().is_none());
   assert!(
-    !store
-      .root
-      .join("installs")
-      .join(&native.manifest.bundle_id)
-      .exists()
+    read_index(&store)
+      .unwrap()
+      .runtime_paths
+      .location(&native.manifest.bundle_id)
+      .is_none()
   );
 }
 
@@ -395,7 +795,7 @@ fn manifest_maintenance_holds_the_installation_lock_until_its_callback_returns()
       let independent_lock = options()
         .read(true)
         .write(true)
-        .open(store.root.join("installations.lock"))?;
+        .open(store.state_root().join("installations.lock"))?;
       assert!(matches!(
         independent_lock.try_lock(),
         Err(fs::TryLockError::WouldBlock)
@@ -409,7 +809,7 @@ fn manifest_maintenance_holds_the_installation_lock_until_its_callback_returns()
       ready.recv_timeout(Duration::from_secs(10)).unwrap();
       assert!(matches!(result.try_recv(), Err(mpsc::TryRecvError::Empty)));
       assert_eq!(
-        store.get(&second_id).unwrap_err().kind(),
+        store.get_recorded(&second_id).unwrap_err().kind(),
         io::ErrorKind::NotFound
       );
       Ok(manifests[0].bundle_id.clone())
@@ -708,18 +1108,18 @@ fn development_checkouts_keep_one_build_each_until_unregistered() {
   store
     .activate_development(&second, &origin, &checkout_two, None)
     .unwrap();
-  let before = fs::read(store.root.join(DEVELOPMENT)).unwrap();
+  let before = fs::read(store.state_root().join(CATALOG)).unwrap();
   let error = store
     .activate_development(&stale, &origin, &checkout_one, None)
     .unwrap_err();
   assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
-  assert_eq!(fs::read(store.root.join(DEVELOPMENT)).unwrap(), before);
+  assert_eq!(fs::read(store.state_root().join(CATALOG)).unwrap(), before);
   assert!(
-    !store
-      .root
-      .join("installs")
-      .join(stale.manifest.bundle_id)
-      .exists()
+    read_index(&store)
+      .unwrap()
+      .runtime_paths
+      .location(&stale.manifest.bundle_id)
+      .is_none()
   );
   assert_eq!(store.active().unwrap().unwrap().manifest, second.manifest);
   store
@@ -740,8 +1140,11 @@ fn development_checkouts_keep_one_build_each_until_unregistered() {
   );
   assert!(store.previous().unwrap().is_none());
   let catalog: serde_json::Value =
-    serde_json::from_slice(&fs::read(store.root.join(CATALOG)).unwrap()).unwrap();
-  assert!(catalog.get("development").is_none());
+    serde_json::from_slice(&fs::read(store.state_root().join(CATALOG)).unwrap()).unwrap();
+  assert_eq!(
+    catalog["development"][format!("{checkout_one}/{target}")],
+    third.manifest.bundle_id
+  );
   assert_eq!(
     store.prune().unwrap().retained_in_use,
     std::slice::from_ref(&first.manifest.bundle_id)
@@ -755,98 +1158,6 @@ fn development_checkouts_keep_one_build_each_until_unregistered() {
   assert!(store.development_head(&checkout_two).unwrap().is_none());
   assert_eq!(store.prune().unwrap().removed, [second.manifest.bundle_id]);
   assert_eq!(store.active().unwrap().unwrap().manifest, third.manifest);
-}
-
-#[test]
-fn development_recovery_commits_only_intents_with_a_catalog_journal() {
-  let home = Home::new();
-  let store = home.store();
-  let target = crate::paths::native_target();
-  let orig = origin("local", "development");
-  let checkout = "a".repeat(64);
-  let first = fixture_with_source(&home, target, 1, Source::Local);
-  let second = fixture_with_source(&home, target, 2, Source::Local);
-  store
-    .activate_development(&first, &orig, &checkout, None)
-    .unwrap();
-  let lock = filesystem::Lock::acquire(&store).unwrap();
-  let second = filesystem::publish(&store, &second, None).unwrap();
-  let mut state = read(&store).unwrap();
-  state.register(std::slice::from_ref(&second), &orig, true);
-  state
-    .development
-    .insert(checkout.clone(), second.manifest.bundle_id.clone());
-  let transaction = Transaction {
-    catalog: state,
-    active: Some(second.manifest.bundle_id.clone()),
-    previous: None,
-  };
-  let intent = DevelopmentIntent {
-    catalog_digest: transaction_digest(&transaction).unwrap(),
-    development: transaction.catalog.development.clone(),
-    clear_active: None,
-  };
-  let intent_path = store.root.join(DEVELOPMENT_JOURNAL);
-  replace(&intent_path, &intent).unwrap();
-  assert_eq!(
-    read(&store).unwrap().development[&checkout],
-    first.manifest.bundle_id
-  );
-  recover(&store).unwrap();
-  assert!(!intent_path.exists());
-  assert_eq!(
-    read(&store).unwrap().development[&checkout],
-    first.manifest.bundle_id
-  );
-
-  replace(&intent_path, &intent).unwrap();
-  replace(&store.root.join(JOURNAL), &transaction).unwrap();
-  assert_eq!(
-    read(&store).unwrap().development[&checkout],
-    second.manifest.bundle_id
-  );
-  let committed_catalog = fs::read(store.root.join(CATALOG)).unwrap();
-  let development_path = store.root.join(DEVELOPMENT);
-  let backup = store.root.join("development-test-backup");
-  fs::rename(&development_path, &backup).unwrap();
-  fs::create_dir(&development_path).unwrap();
-  // Existing launchers can still read the ordinary catalog and pin their
-  // current payload while recovery awaits a safe destination for the sidecar.
-  assert!(store.get_recorded(&first.manifest.bundle_id).is_ok());
-  assert!(read_index(&store).unwrap().development.is_empty());
-  assert!(recover(&store).is_err());
-  assert!(intent_path.exists());
-  assert!(store.root.join(JOURNAL).exists());
-  assert_eq!(
-    fs::read(store.root.join(CATALOG)).unwrap(),
-    committed_catalog
-  );
-  assert_eq!(
-    store
-      .recorded_selection("current")
-      .unwrap()
-      .unwrap()
-      .manifest,
-    first.manifest
-  );
-  fs::remove_dir(&development_path).unwrap();
-  fs::rename(&backup, &development_path).unwrap();
-  recover(&store).unwrap();
-  assert!(!intent_path.exists());
-  assert!(!store.root.join(JOURNAL).exists());
-  assert_eq!(
-    read(&store).unwrap().development[&checkout],
-    second.manifest.bundle_id
-  );
-  assert_eq!(
-    store
-      .recorded_selection("current")
-      .unwrap()
-      .unwrap()
-      .manifest,
-    second.manifest
-  );
-  drop(lock);
 }
 
 #[test]
@@ -939,9 +1250,8 @@ fn removal_reports_committed_registration_changes_before_deferred_cleanup() {
     .install_channel(&[bundle], &origin("nightly", "one"), false)
     .unwrap();
   let abandoned = store
-    .root()
-    .join("installs")
-    .join(format!(".partial-{}", uuid::Uuid::new_v4()));
+    .staging_root()
+    .join(format!("runtime-{}", uuid::Uuid::new_v4()));
   options()
     .write(true)
     .create_new(true)
@@ -984,117 +1294,7 @@ fn singleton_activation_merges_targets_only_for_the_same_publication() {
   assert!(store.prune().unwrap().removed.contains(&remote_id));
 }
 
-#[test]
-fn interrupted_catalog_and_activation_recover_together_before_pruning() {
-  let home = Home::new();
-  let store = home.store();
-  let old = fixture(&home, crate::paths::native_target(), 1);
-  let old = store
-    .activate_with_origin(&old, &origin("stable", "old"))
-    .unwrap();
-  let fresh = fixture(&home, crate::paths::native_target(), 2);
-  let lock = filesystem::Lock::acquire(&store).unwrap();
-  let fresh = filesystem::publish(&store, &fresh, None).unwrap();
-  let mut state = read(&store).unwrap();
-  state.register(
-    std::slice::from_ref(&fresh),
-    &origin("stable", "new"),
-    false,
-  );
-  replace(
-    &store.root.join(JOURNAL),
-    &Transaction {
-      catalog: state,
-      active: Some(fresh.manifest.bundle_id.clone()),
-      previous: Some(old.manifest.bundle_id.clone()),
-    },
-  )
-  .unwrap();
-  drop(lock);
-  assert_eq!(
-    store
-      .component("stable", crate::paths::native_target())
-      .unwrap()
-      .unwrap()
-      .manifest,
-    fresh.manifest
-  );
-  store.prune().unwrap();
-  assert_eq!(store.active().unwrap().unwrap().manifest, fresh.manifest);
-  assert!(store.previous().unwrap().is_none());
-  assert!(!store.root.join(JOURNAL).exists());
-}
-
 #[cfg(unix)]
-#[test]
-fn interrupted_activation_validates_all_recorded_payloads_before_changing_selection() {
-  for pending_catalog in [false, true] {
-    let home = Home::new();
-    let store = home.store();
-    let old = fixture(&home, crate::paths::native_target(), 1);
-    let old = store
-      .activate_with_origin(&old, &origin("stable", "old"))
-      .unwrap();
-    let fresh = fixture(&home, crate::paths::native_target(), 2);
-    let remote = fixture(&home, foreign(), 2);
-    let lock = filesystem::Lock::acquire(&store).unwrap();
-    let fresh = filesystem::publish(&store, &fresh, None).unwrap();
-    let remote = filesystem::publish(&store, &remote, None).unwrap();
-    let mut state = read(&store).unwrap();
-    state.register(
-      &[fresh.clone(), remote.clone()],
-      &origin("stable", "new"),
-      false,
-    );
-    if pending_catalog {
-      replace(
-        &store.root.join(JOURNAL),
-        &Transaction {
-          catalog: state,
-          active: Some(fresh.manifest.bundle_id.clone()),
-          previous: Some(old.manifest.bundle_id.clone()),
-        },
-      )
-      .unwrap();
-    } else {
-      commit(&store, &state, None).unwrap();
-    }
-    let native_journal = store.root.join(".activation.json");
-    replace(
-      &native_journal,
-      &serde_json::json!({
-        "active": fresh.manifest.bundle_id,
-        "previous": old.manifest.bundle_id,
-      }),
-    )
-    .unwrap();
-    let catalog_path = store
-      .root
-      .join(if pending_catalog { JOURNAL } else { CATALOG });
-    let catalog_intent = fs::read(&catalog_path).unwrap();
-    let native_intent = fs::read(&native_journal).unwrap();
-    let current = fs::read_link(store.root.join("current")).unwrap();
-    let remote_file = remote
-      .directory
-      .join(remote.manifest.files.keys().next().unwrap());
-    let original = fs::read(&remote_file).unwrap();
-    fs::write(&remote_file, b"damaged foreign payload").unwrap();
-    drop(lock);
-
-    assert!(store.prune().is_err());
-    assert_eq!(fs::read_link(store.root.join("current")).unwrap(), current);
-    assert!(!store.root.join("previous").exists());
-    assert_eq!(fs::read(&catalog_path).unwrap(), catalog_intent);
-    assert_eq!(fs::read(&native_journal).unwrap(), native_intent);
-    fs::write(remote_file, original).unwrap();
-    store.prune().unwrap();
-    assert_eq!(store.active().unwrap().unwrap().manifest, fresh.manifest);
-    assert!(store.previous().unwrap().is_none());
-    assert!(!native_journal.exists());
-    assert!(!store.root.join(JOURNAL).exists());
-  }
-}
-
 #[test]
 fn invalid_provenance_and_duplicate_targets_fail_before_catalog_publication() {
   for channel in [
@@ -1240,7 +1440,7 @@ fn a_missing_checkout_can_be_replaced_but_an_incomplete_payload_cannot() {
     store.inspect().unwrap_err().kind(),
     io::ErrorKind::InvalidData
   );
-  fs::remove_dir_all(store.root.join("installs")).unwrap();
+  fs::remove_dir_all(store.runtime_root()).unwrap();
   assert_eq!(
     store.development_head(&checkout).unwrap().as_ref(),
     Some(&first.manifest.bundle_id)
@@ -1249,7 +1449,7 @@ fn a_missing_checkout_can_be_replaced_but_an_incomplete_payload_cannot() {
     store.inspect().unwrap().missing,
     std::slice::from_ref(&first.manifest.bundle_id)
   );
-  assert!(!store.root.join("installs").exists());
+  assert!(!store.runtime_root().exists());
   let (installed, _lease) = store
     .activate_development(&next, &origin, &checkout, Some(&first.manifest.bundle_id))
     .unwrap();
@@ -1304,7 +1504,7 @@ fn automatic_prune_reports_missing_builds_and_removes_only_unused_present_payloa
     })
     .unwrap();
 
-  let installs = store.root.join("installs");
+  let installs = store.runtime_root();
   fs::remove_dir_all(&installs).unwrap();
   let result = store.prune_unused().unwrap();
   let mut expected = vec![missing.manifest.bundle_id, active.manifest.bundle_id];
@@ -1351,58 +1551,6 @@ fn explicit_prune_forgets_missing_selections_and_checkout_pins() {
 }
 
 #[test]
-fn replay_clears_a_missing_selection_before_publishing_the_pruned_catalog() {
-  let home = Home::new();
-  let store = home.store();
-  let source = fixture(&home, crate::paths::native_target(), 1);
-  let installed = store.activate(&source).unwrap();
-  store.migrate_once_if_needed().unwrap();
-  fs::remove_dir_all(&installed.directory).unwrap();
-  let lock = filesystem::Lock::acquire(&store).unwrap();
-  let transaction = Transaction {
-    catalog: State::default(),
-    active: None,
-    previous: None,
-  };
-  let intent = DevelopmentIntent {
-    catalog_digest: transaction_digest(&transaction).unwrap(),
-    development: transaction.catalog.development.clone(),
-    clear_active: Some(source.manifest.bundle_id.clone()),
-  };
-  replace(&store.root.join(DEVELOPMENT_JOURNAL), &intent).unwrap();
-  replace(&store.root.join(JOURNAL), &transaction).unwrap();
-  drop(lock);
-  let inspection = store.inspect().unwrap();
-  assert!(inspection.active.is_none());
-  assert_eq!(inspection.entries, Vec::<CatalogEntry>::new());
-  assert!(store.root.join(JOURNAL).exists());
-  let lock = filesystem::Lock::acquire(&store).unwrap();
-  // If the exact payload was restored before recovery, keep both intents and
-  // require an operator to resolve the conflicting change.
-  let restored = filesystem::publish(&store, &source, None).unwrap();
-  assert!(recover(&store).is_err());
-  assert!(store.root.join(DEVELOPMENT_JOURNAL).exists());
-  assert!(store.root.join(JOURNAL).exists());
-  assert_eq!(
-    filesystem::selection_id(&store, "current")
-      .unwrap()
-      .as_ref(),
-    Some(&source.manifest.bundle_id)
-  );
-  fs::remove_dir_all(&restored.directory).unwrap();
-  recover(&store).unwrap();
-  assert!(
-    filesystem::selection_id(&store, "current")
-      .unwrap()
-      .is_none()
-  );
-  assert!(!store.root.join(DEVELOPMENT_JOURNAL).exists());
-  assert!(!store.root.join(JOURNAL).exists());
-  drop(lock);
-  assert_eq!(store.catalog().unwrap(), Vec::<CatalogEntry>::new());
-}
-
-#[test]
 fn catalog_corruption_stops_inspection_and_pruning_without_deleting_payloads() {
   let home = Home::new();
   let store = home.store();
@@ -1412,8 +1560,39 @@ fn catalog_corruption_stops_inspection_and_pruning_without_deleting_payloads() {
     .unwrap();
   let mut state = read(&store).unwrap();
   state.entries[0].target_triple = "aarch64-apple-darwin".into();
-  replace(&store.root.join(CATALOG), &state).unwrap();
+  replace(&store.state_root().join(CATALOG), &state).unwrap();
   assert!(store.catalog().is_err());
   assert!(store.prune().is_err());
   assert!(installed[0].directory.exists());
+}
+
+#[test]
+fn recorded_source_is_exact_for_shared_content_and_survives_a_missing_payload() {
+  let home = Home::new();
+  let store = home.store();
+  let bundle = fixture(&home, crate::paths::native_target(), 1);
+  let stable = origin("stable", "0.1.2");
+  let nightly = origin("nightly", "same-build");
+  let installed = store.activate_with_origin(&bundle, &stable).unwrap();
+  store.activate_with_origin(&bundle, &nightly).unwrap();
+  assert_eq!(store.active_origin().unwrap(), Some(nightly.clone()));
+  store.activate_with_origin(&bundle, &stable).unwrap();
+  fs::remove_dir_all(installed.directory).unwrap();
+  let inspection = store.inspect_status().unwrap();
+  assert_eq!(inspection.active_origin, Some(stable));
+  assert_eq!(inspection.missing, [bundle.manifest.bundle_id]);
+  store.prune().unwrap();
+  assert!(store.active_origin().unwrap().is_none());
+}
+
+#[test]
+fn a_missing_registry_cannot_be_reconstructed_from_unregistered_payloads() {
+  let home = Home::new();
+  let store = home.store();
+  let old = fixture(&home, crate::paths::native_target(), 1);
+  let installed = store.activate(&old).unwrap();
+  fs::remove_file(store.state_root().join(CATALOG)).unwrap();
+  assert!(store.prepare_installation().is_err());
+  assert!(store.prune().is_err());
+  assert!(installed.directory.exists());
 }

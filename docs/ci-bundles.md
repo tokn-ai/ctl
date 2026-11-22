@@ -68,15 +68,15 @@ produces a bundle for the PR's current commit, use `ctlup` to view or install it
 
 ```sh
 ctlup release list --channel dev
-ctlup release build --pr PR_NUMBER
-ctlup release view --pr PR_NUMBER
-ctlup update --pr PR_NUMBER --host HOST
+gh workflow run bundles.yml --ref BRANCH
+ctlup release show --pr PR_NUMBER
+ctlup install --pr PR_NUMBER --host HOST
 ```
 
 The artifact expires after 30 days. The download includes the runtime archive
 and updater for each target. To use a specific retained run, download it with
 `gh run download RUN_ID -n ctl-agent-bundle-set -D ./bundle-set` and use
-`ctlup update --from ./bundle-set`.
+`ctlup install --from ./bundle-set`.
 For Windows, download `ctl-agent-windows-bundle-set` into that directory instead.
 
 ## Component channels and GitHub Pages
@@ -174,7 +174,7 @@ each containing its available target bundles. If those publications exceed the
 900 MiB site budget, publication fails without changing the deployed site.
 Restoration accepts older catalogs before applying the current retention rule.
 Retention changes occur only in a complete replacement site; historical tagged
-archives remain in GitHub Releases. `ctlup release list` and `ctlup release view`
+archives remain in GitHub Releases. `ctlup release list` and `ctlup release show`
 show the current publication for each normal channel. PR artifacts keep their
 separate Actions lifecycle.
 
@@ -240,12 +240,11 @@ Managed schema 2 identifies a complete six-executable build, and managed schema 
 continues to identify its four-executable predecessors.
 
 A full installation uses one immutable payload under
-`~/.tokn/ctl/installs/<content-id>` and atomically switches
-`~/.tokn/ctl/current`. Stable command entry points live in `~/.tokn/ctl/bin`;
-add that directory to `PATH` for an ordinary SSH login. Managed terminal sessions
-and ctl SSH gateway launches add it automatically. `ctlup` is a separate executable
-at `~/.tokn/ctl/bin/ctlup`, while runtime command aliases resolve through `current`.
-The installer leaves login shell configuration to the account owner.
+`~/.tokn/ctl/ctlup/store/runtime/<build>/<target>` and atomically updates the active
+selection in `~/.tokn/ctl/ctlup/state/installations.json`. Stable commands live in
+`~/.tokn/ctl/bin`, including the launcher for the independently selected `ctlup`
+executable. Managed terminal sessions and ctl SSH launches add that directory
+to `PATH`. For ordinary SSH logins, add it to your shell configuration.
 
 For published updates, clients pin a publication and check their verified
 cache separately for the updater and runtime. The target can fetch either
@@ -348,12 +347,12 @@ binds its revision, source fingerprint, dirty flag, and protocol metadata.
 The CLI and GUI can remain unsigned; no notarization credentials are needed.
 
 Successful preparation installs one immutable build under
-`~/.tokn/ctl/installs/` and activates it through the same selection used by
+`~/.tokn/ctl/ctlup/store/runtime/` and activates it through the same selection used by
 `ctlup update`. Stable commands live in `~/.tokn/ctl/bin`. Cargo profiles and
 configured target directories are preserved; compilation caches under
 `<target-dir>/ctl-dev/<checkout-id>/cargo` keep worktrees separate. Launchers
 hold an installation lease while using its exact executable paths. Active,
-previous, and running builds remain available after Cargo outputs are cleaned.
+registered, and running builds remain available after Cargo outputs are cleaned.
 
 The runtime checks signature, provisioning expiry, certificate identity, source
 metadata, and API compatibility. Rebuild after a profile expires. Preparation
@@ -454,8 +453,8 @@ The full signed bundle is installed without `sudo`:
   selected/<target>-ctld1-lifecycle1-helper1 -> ../versions/<version>-<target>
 ```
 
-The runtime installation's `~/.tokn/ctl/current` pointer remains independent of
-this signed-helper package store. A complete local installation containing a
+The runtime selection in `~/.tokn/ctl/ctlup/state/installations.json` is
+independent of this signed-helper package store. A complete local installation containing a
 verified helper takes precedence; otherwise existing signed-helper discovery
 continues. An existing
 matching installation is verified and reused; setup does not overwrite a

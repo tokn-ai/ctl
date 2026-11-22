@@ -133,10 +133,10 @@ preserved.
   host/account/route. Do not erase a pinned identity as routine recovery.
 - **Missing remote helper or protocol mismatch:** `ctl` prints an update
   command for a missing or recognized outdated Unix agent. Use
-  `ctlup --host HOST update` from macOS or Linux for an explicit complete-build
-  update or `ctlup --destination DESTINATION update` for an SSH alias. Updates
+  `ctlup install --host HOST` from macOS or Linux for an explicit complete-build
+  update or `ctlup install --ssh DESTINATION` for an SSH alias. Updates
   resolve the configured publication channel. Use `ctlup dev --host HOST` or
-  `ctlup dev --destination DESTINATION` to build and deploy a development
+  `ctlup dev --ssh DESTINATION` to build and deploy a development
   checkout to Linux x64 or ARM64. `--channel stable` or `--channel nightly`
   chooses a published update source. `--from DIRECTORY_OR_ARCHIVE` supplies
   an offline verified build. Network failures never silently choose an older

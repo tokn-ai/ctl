@@ -7,8 +7,12 @@ use ctl_core::installations::CatalogOrigin;
 use ctl_core::protocol::ProtocolVersion;
 
 fn manifest(token: char, source: Source, dirty: bool) -> Manifest {
+  manifest_version(token, source, dirty, "0.1.3")
+}
+
+fn manifest_version(token: char, source: Source, dirty: bool, version: &str) -> Manifest {
   let build = ComponentBuildInfo {
-    version: "0.1.3".into(),
+    version: version.into(),
     source_revision: Some(token.to_string().repeat(40)),
     source_fingerprint: token.to_string().repeat(64),
     dirty,
@@ -39,8 +43,9 @@ fn manifest(token: char, source: Source, dirty: bool) -> Manifest {
 
 fn snapshot(manifests: &[Manifest]) -> InstallationShow {
   InstallationShow {
-    schema_version: 1,
+    schema_version: 2,
     active: None,
+    active_origin: None,
     previous: None,
     missing_builds: Vec::new(),
     installations: manifests
@@ -82,22 +87,20 @@ fn each_physical_build_has_a_row_with_its_source_for_one_logical_component() {
   ];
   let snapshot = snapshot(&manifests);
   let text = render(&snapshot, false);
-  assert_eq!(build_rows(&snapshot).len(), 4);
-  for manifest in &manifests {
-    assert!(text.contains(&manifest.bundle_id[..12]));
-    assert!(!text.contains(&manifest.bundle_id));
-  }
+  let rows = build_rows(&snapshot);
+  assert_eq!(rows.len(), 4);
   assert_eq!(text.matches("bundle-x86_64-unknown-linux-musl").count(), 4);
   assert_eq!(text.matches("provided (retained)").count(), 4);
-  assert_eq!(text.matches("unknown").count(), 8); // Target suffix plus missing date.
   assert!(text.contains("0.1.3 (dirty)"));
   assert!(text.contains("dddddddddddd"));
-  let rows = build_rows(&snapshot);
   for (manifest, source) in manifests.iter().zip(["ci", "release", "local", "local"]) {
-    assert_eq!(
-      rows[&manifest.bundle_id].cells(&snapshot, &[&manifest.bundle_id])[3],
-      source
-    );
+    let row = &rows[&manifest.bundle_id];
+    let label = row.label(&snapshot, &[&manifest.bundle_id]);
+    assert!(text.contains(&label));
+    assert!(!text.contains(&manifest.bundle_id));
+    let cells = row.cells(&snapshot, label);
+    assert_eq!(cells[3], source);
+    assert_eq!(cells[6], "unknown");
   }
 }
 
@@ -126,8 +129,11 @@ fn activation_rollback_and_channel_heads_have_independent_precise_markers() {
     ["retained"]
   );
   let text = render(&snapshot, false);
-  assert!(text.contains(&format!("Active: {}", &manifests[0].bundle_id[..12])));
-  assert!(text.contains(&format!("Previous: {}", &manifests[1].bundle_id[..12])));
+  let ids = rows.keys().map(String::as_str).collect::<Vec<_>>();
+  let active = rows[&manifests[0].bundle_id].label(&snapshot, &ids);
+  let previous = rows[&manifests[1].bundle_id].label(&snapshot, &ids);
+  assert!(text.starts_with(&format!("Active: {active}\n")));
+  assert!(text.contains(&format!("\nPrevious: {previous}\n")));
   assert!(text.contains("nightly (current)"));
   assert!(text.contains("provided (retained)"));
 }
@@ -143,16 +149,16 @@ fn a_shared_payload_appears_once_with_its_source_and_each_recorded_channel() {
   let rows = build_rows(&snapshot);
   assert_eq!(rows.len(), 1);
   let row = &rows[&manifest.bundle_id];
-  let cells = row.cells(&snapshot, &[&manifest.bundle_id]);
+  let label = row.label(&snapshot, &[&manifest.bundle_id]);
+  let cells = row.cells(&snapshot, label.clone());
   assert_eq!(cells[3], "ci");
   assert_eq!(cells[4], "nightly (current), stable (retained)");
   assert_eq!(cells[6], "2026-01-02T03:04:05Z");
   assert_eq!(cells[7], "active, current");
-  let prefix = &manifest.bundle_id[..12];
   assert_eq!(
     render(&snapshot, false)
       .lines()
-      .filter(|line| line.split_whitespace().next() == Some(prefix))
+      .filter(|line| line.split_whitespace().next() == Some(label.as_str()))
       .count(),
     1
   );
@@ -174,8 +180,7 @@ fn older_remote_metadata_keeps_unknown_builds_in_the_fallback_catalog() {
   .unwrap();
   let rows = build_rows(&snapshot);
   assert_eq!(rows.len(), 2);
-  let unknown =
-    rows[&retained.bundle_id].cells(&snapshot, &[&active.bundle_id, &retained.bundle_id]);
+  let unknown = rows[&retained.bundle_id].cells(&snapshot, retained.bundle_id[..12].into());
   assert_eq!(unknown[1], "unknown");
   assert_eq!(unknown[2], "unknown");
   assert_eq!(unknown[3], "unknown");
@@ -221,4 +226,51 @@ fn short_content_ids_expand_when_prefixes_collide() {
   let ids = [first.as_str(), second.as_str()];
   assert_eq!(short_id(&first, &ids), format!("{}b", "a".repeat(12)));
   assert_eq!(short_id(&second, &ids), format!("{}c", "a".repeat(12)));
+}
+
+#[test]
+fn known_builds_use_channel_labels_and_sort_by_version_or_build_time() {
+  let manifests = [
+    manifest_version('a', Source::Release, false, "0.1.9"),
+    manifest_version('b', Source::Release, false, "0.1.10"),
+    manifest('c', Source::Ci, false),
+    manifest('d', Source::Ci, false),
+    manifest('e', Source::Local, false),
+    manifest('f', Source::Ci, false),
+  ];
+  let mut snapshot = snapshot(&manifests);
+  for (index, (channel, date)) in [
+    ("stable", "2026-01-08T00:00:00Z"),
+    ("stable", "2026-01-02T00:00:00Z"),
+    ("nightly", "2026-01-03T00:00:00Z"),
+    ("nightly", "2026-01-04T00:00:00Z"),
+    ("local", "2026-01-05T00:00:00Z"),
+    ("pr-192", "2026-01-06T00:00:00Z"),
+  ]
+  .into_iter()
+  .enumerate()
+  {
+    let mut entry = entry(&manifests[index], channel, false);
+    entry.origin.as_mut().unwrap().built_at = Some(date.into());
+    snapshot.installations[index] = entry;
+  }
+
+  let text = render(&snapshot, false);
+  let labels = text
+    .lines()
+    .skip_while(|line| !line.starts_with("BUILD"))
+    .skip(1)
+    .map(|line| line.split_whitespace().next().unwrap())
+    .collect::<Vec<_>>();
+  assert_eq!(
+    labels,
+    [
+      "stable-v0.1.10-bbbbbbb",
+      "stable-v0.1.9-aaaaaaa",
+      "nightly-20260104T000000Z-v0.1.3-ddddddd",
+      "nightly-20260103T000000Z-v0.1.3-ccccccc",
+      "dev-20260106T000000Z-v0.1.3-fffffff-pr-192",
+      "dev-20260105T000000Z-v0.1.3-eeeeeee-local",
+    ]
+  );
 }

@@ -1,21 +1,12 @@
 use super::*;
 use std::fs;
-#[cfg(unix)]
-use std::os::unix::fs::DirBuilderExt as _;
 
 struct Home(PathBuf);
 
 impl Home {
   fn new() -> Self {
     let path = std::env::temp_dir().join(format!("ctlup-local-app-{}", uuid::Uuid::new_v4()));
-    let builder = fs::DirBuilder::new();
-    #[cfg(unix)]
-    let builder = {
-      let mut builder = builder;
-      builder.mode(0o700);
-      builder
-    };
-    builder.create(&path).unwrap();
+    private_fs::create_directory(&path).unwrap();
     Self(path)
   }
 }
@@ -28,113 +19,173 @@ impl Drop for Home {
 
 #[tokio::test]
 #[ignore = "builds the full desktop from the current checkout with native dependencies"]
-async fn local_source_install_and_repair_preserve_the_saved_channel() {
+async fn local_source_install_pins_a_checkout_and_repairs_from_its_archive() {
   let home = Home::new();
-  ctl_client::desktop_storage::set_channel(&home.0, BundleChannel::Stable).unwrap();
   let checkout = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
   install_development(&home.0, &checkout, false)
     .await
     .unwrap();
-  let directory = app_directory(&home.0, false).unwrap();
-  #[cfg(target_os = "macos")]
-  let app = directory.join("ctmux.app");
-  #[cfg(target_os = "linux")]
-  let app = directory.join("ctmux.AppImage");
-  #[cfg(windows)]
-  let app = directory.join("ctmux");
-  assert!(app.exists());
-  #[cfg(target_os = "macos")]
-  let changed = app.join("Contents/Resources/local-build-fixture");
-  #[cfg(target_os = "macos")]
-  fs::write(&changed, b"extra local file").unwrap();
-  #[cfg(windows)]
-  let changed = app.join("extra-local-file");
-  #[cfg(windows)]
-  fs::write(&changed, b"extra local file").unwrap();
-  #[cfg(target_os = "linux")]
-  {
-    use std::io::Write as _;
-    fs::OpenOptions::new()
-      .append(true)
-      .open(&app)
+  let store = Installations::new(&home.0);
+  let selection = store.desktop_selection().unwrap().unwrap();
+  assert_eq!(selection.source, DesktopSource::Checkout);
+  let object = store.desktop_object_path(&selection.content_id).unwrap();
+  let name = object.file_name().unwrap().to_str().unwrap();
+  assert!(name.starts_with("dev-") && name.ends_with("-local"));
+  assert!(object.join(payload_name()).exists());
+  fs::remove_dir_all(&object).unwrap();
+  update(&home.0, false, false).await.unwrap();
+  assert_eq!(store.desktop_selection().unwrap(), Some(selection));
+  assert!(object.join(payload_name()).exists());
+  assert!(
+    !app_status(&home.0, store.desktop_selection().unwrap())
       .unwrap()
-      .write_all(b"extra local bytes")
-      .unwrap();
-  }
-  install_development(&home.0, &checkout, false)
-    .await
-    .unwrap();
-  #[cfg(any(target_os = "macos", windows))]
-  assert!(!changed.exists());
-  assert_eq!(
-    ctl_client::desktop_storage::default_channel(&home.0).unwrap(),
-    BundleChannel::Stable
+      .missing
   );
-  assert!(!home.0.join(".tokn/ctl/current").exists());
-}
-
-#[test]
-fn portable_archive_install_update_and_repair() {
-  for target in [portable::fixtures::X64, portable::fixtures::ARM64] {
-    let source = Home::new();
-    let archive = portable::fixtures::package(&source.0, target, portable::fixtures::files(target));
-    verify_portable_archive_install_update_and_repair(&archive, target);
-  }
 }
 
 #[cfg(windows)]
-#[test]
+#[tokio::test]
 #[ignore = "requires CTLUP_TEST_DESKTOP_ARCHIVE pointing at a native Windows portable ZIP"]
-fn prebuilt_windows_archive_install_update_and_repair() {
+async fn prebuilt_windows_archive_install_update_and_repair() {
   let archive = PathBuf::from(
     std::env::var_os("CTLUP_TEST_DESKTOP_ARCHIVE").expect("native portable archive fixture"),
   );
-  verify_portable_archive_install_update_and_repair(
-    &archive,
-    DesktopTarget::native().unwrap().triple(),
-  );
+  verify_install_update_and_repair(&archive, false).await;
 }
 
-fn verify_portable_archive_install_update_and_repair(archive: &Path, target: &str) {
-  let home = Home::new();
-  ctl_client::desktop_storage::set_channel(&home.0, BundleChannel::Stable).unwrap();
-  let destination = app_directory(&home.0, true).unwrap().join("ctmux");
-  let mut version = String::new();
-  // This caller-provided package still passes the production target, PE and
-  // inventory checks; the archive manifest supplies only its product version.
+#[tokio::test]
+async fn managed_desktop_launch_entry_and_exact_repair_use_the_registry() {
+  let source = Home::new();
+  verify_install_update_and_repair(&fixture_archive(&source.0), true).await;
+}
+
+#[tokio::test]
+async fn legacy_desktop_launch_entry_and_exact_repair_keep_the_digest_path() {
+  let source = Home::new();
+  verify_install_update_and_repair(&fixture_archive(&source.0), false).await;
+}
+
+fn fixture_archive(directory: &Path) -> PathBuf {
+  #[cfg(windows)]
   {
-    use std::io::Read as _;
-    let mut zip = zip::ZipArchive::new(fs::File::open(archive).unwrap()).unwrap();
-    zip
-      .by_name("ctmux/portable.json")
-      .unwrap()
-      .take(4 * 1024 * 1024)
-      .read_to_string(&mut version)
+    let target = DesktopTarget::native().unwrap().triple();
+    portable::fixtures::package(directory, target, portable::fixtures::files(target))
+  }
+  #[cfg(target_os = "linux")]
+  {
+    let path = directory.join("ctmux.AppImage");
+    fs::write(&path, linux::fixture_bytes()).unwrap();
+    path
+  }
+  #[cfg(target_os = "macos")]
+  fixture_macos_archive(directory)
+}
+
+async fn verify_install_update_and_repair(archive: &Path, supports_named_leases: bool) {
+  #[cfg(not(windows))]
+  let home = Home::new();
+  #[cfg(windows)]
+  let home = {
+    let path = std::env::temp_dir().join(format!("ctlup app 彩-{}", uuid::Uuid::new_v4()));
+    private_fs::create_directory(&path).unwrap();
+    Home(path)
+  };
+  let store = Installations::new(&home.0);
+  if supports_named_leases {
+    let work = activation::Workspace::begin(&home.0).unwrap();
+    let metadata = DesktopMetadata::provided(DesktopTarget::native().unwrap());
+    let mut package = prepare_supplied(&work, archive, metadata).unwrap();
+    package.naming.installation_layout_version = Some(DESKTOP_OBJECT_PATH_LAYOUT_VERSION);
+    activate(&work, None, &package, DesktopSource::Provided, false).unwrap();
+  } else {
+    install(&home.0, None, None, None, Some(archive), false)
+      .await
       .unwrap();
   }
-  let metadata: serde_json::Value = serde_json::from_str(&version).unwrap();
-  let version = metadata["app_version"].as_str().unwrap();
-  for iteration in 0..3 {
-    let mut work = activation::Workspace::begin(&destination).unwrap();
-    let payload = portable::stage(archive, work.staging(), version, target).unwrap();
-    if iteration == 1 {
-      assert!(portable::matches(&destination, &payload).unwrap());
-      fs::write(destination.join("repair-fixture"), b"changed").unwrap();
-    }
-    if iteration == 2 {
-      fs::write(destination.join("ctld.exe"), b"damaged").unwrap();
-    }
-    // Repair starts from the deliberately damaged app. Changes after this
-    // snapshot must still be rejected by activation's concurrency check.
-    let installed = activation::existing(&destination).unwrap();
-    let previous = work.activate(&payload, installed.as_ref()).unwrap();
-    portable::verify(&destination, version, target).unwrap();
-    assert_eq!(previous.is_some(), iteration > 0);
-    assert!(!destination.join("repair-fixture").exists());
+  let selected = store.desktop_selection().unwrap().unwrap();
+  assert_eq!(selected.source, DesktopSource::Provided);
+  assert_eq!(selected.content_id, package_digest(archive).unwrap().0);
+  let object = store.desktop_object_path(&selected.content_id).unwrap();
+  let name = object.file_name().unwrap().to_str().unwrap();
+  if supports_named_leases {
+    assert!(name.starts_with("provided-"));
+  } else {
+    assert_eq!(name, selected.content_id);
   }
+  let status = app_status(&home.0, Some(selected.clone())).unwrap();
+  assert!(!status.missing);
   assert_eq!(
-    ctl_client::desktop_storage::default_channel(&home.0).unwrap(),
-    BundleChannel::Stable
+    status.payload.as_deref(),
+    Some(object.join(payload_name()).as_path())
   );
-  assert!(!home.0.join(".tokn/ctl/current").exists());
+  assert!(status.launch_entry.exists());
+  assert!(object.join("desktop.json").is_file());
+  let cache = store
+    .updater_root()
+    .join("cache/downloads/desktop")
+    .join(&selected.content_id);
+  assert!(cache.join("package").is_file());
+
+  #[cfg(unix)]
+  assert_eq!(
+    fs::canonicalize(&status.launch_entry).unwrap(),
+    fs::canonicalize(object.join(payload_name())).unwrap()
+  );
+  #[cfg(windows)]
+  {
+    let target = dunce::canonicalize(object.join(payload_name()).join("ctmux-app.exe")).unwrap();
+    let link = lnks::Shortcut::load(&status.launch_entry).unwrap();
+    assert_eq!(link.target_path.as_deref(), Some(target.as_path()));
+    assert_eq!(link.working_dir.as_deref(), target.parent());
+    assert!(link.arguments.is_none());
+    assert_eq!(link.window_state, lnks::WindowState::Normal);
+  }
+  fs::remove_dir_all(&object).unwrap();
+  assert!(app_status(&home.0, Some(selected.clone())).unwrap().missing);
+  update(&home.0, false, false).await.unwrap();
+  assert_eq!(store.desktop_selection().unwrap(), Some(selected));
+  assert!(object.join(payload_name()).exists());
+  assert!(
+    !app_status(&home.0, store.desktop_selection().unwrap())
+      .unwrap()
+      .missing
+  );
+  assert!(!store.root().join("current").exists());
+  assert!(!store.root().join("cache").exists());
+
+  fs::remove_dir_all(&object).unwrap();
+  with_current_launch_entry(&home.0, || store.prune_all(true)).unwrap();
+  assert!(store.desktop_selection().unwrap().is_none());
+  assert!(fs::symlink_metadata(status.launch_entry).is_err());
+  assert!(!cache.exists());
+}
+
+#[cfg(target_os = "macos")]
+fn fixture_macos_archive(directory: &Path) -> PathBuf {
+  let app = directory.join("ctmux.app");
+  let contents = app.join("Contents");
+  let executable = contents.join("MacOS/ctmux-app");
+  fs::create_dir_all(executable.parent().unwrap()).unwrap();
+  fs::copy("/usr/bin/true", executable).unwrap();
+  fs::write(
+    contents.join("Info.plist"),
+    br#"<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>dev.tokn-ai.ctl.ctmux</string>
+<key>CFBundleExecutable</key><string>ctmux-app</string>
+<key>CFBundleShortVersionString</key><string>0.1.4</string>
+</dict></plist>"#,
+  )
+  .unwrap();
+  let archive = directory.join("fixture.tar.gz");
+  let status = std::process::Command::new("/usr/bin/tar")
+    .args(["-czf"])
+    .arg(&archive)
+    .arg("-C")
+    .arg(directory)
+    .arg("ctmux.app")
+    .status()
+    .unwrap();
+  assert!(status.success());
+  archive
 }

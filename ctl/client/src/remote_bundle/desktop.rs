@@ -95,6 +95,9 @@ impl DesktopSigning {
 pub struct DesktopRelease {
   pub app_version: String,
   pub bundle_id: String,
+  pub publication_id: Option<String>,
+  pub source_revision: String,
+  pub built_at: Option<String>,
   source: PackageSource,
   asset: Asset,
   signing: DesktopSigning,
@@ -106,6 +109,16 @@ enum PackageSource {
 }
 
 impl DesktopRelease {
+  #[must_use]
+  pub const fn installation_layout_version(&self) -> Option<u16> {
+    self.asset.installation_layout_version
+  }
+
+  #[must_use]
+  pub fn content_id(&self) -> &str {
+    &self.asset.sha256
+  }
+
   #[must_use]
   pub fn asset_name(&self) -> &str {
     &self.asset.name
@@ -178,23 +191,59 @@ fn open_package(path: &Path) -> io::Result<File> {
 ///
 /// # Errors
 /// Reports unavailable desktop assets and metadata that fails verification.
-pub async fn latest(channel: BundleChannel, target: DesktopTarget) -> io::Result<DesktopRelease> {
-  if channel == BundleChannel::Nightly {
-    return nightly::latest(target).await;
+pub async fn latest(
+  channel: BundleChannel,
+  target: DesktopTarget,
+  staging: &Path,
+) -> io::Result<DesktopRelease> {
+  let publication = published::view_release(channel, None)
+    .await
+    .map_err(io::Error::other)?
+    .release;
+  resolve(publication, target, staging).await
+}
+
+/// Resolves a desktop package belonging to a verified published release.
+///
+/// # Errors
+/// Reports unavailable desktop assets or package metadata that fails verification.
+pub async fn resolve(
+  publication: published::PublishedRelease,
+  target: DesktopTarget,
+  staging: &Path,
+) -> io::Result<DesktopRelease> {
+  if publication.channel == BundleChannel::Nightly {
+    return nightly::resolve(publication, target, staging).await;
   }
-  let stable = published::check(channel).await.map_err(io::Error::other)?;
-  let root = format!("{RELEASE_ROOT}/v{}", stable.app_version);
+  stable_descriptor(publication, target).await
+}
+
+/// Resolves Stable desktop metadata without writing a package archive.
+///
+/// # Errors
+/// Reports invalid publication metadata, missing assets, or a non-Stable release.
+pub async fn stable_descriptor(
+  publication: published::PublishedRelease,
+  target: DesktopTarget,
+) -> io::Result<DesktopRelease> {
+  if publication.channel != BundleChannel::Stable {
+    return Err(invalid("expected a Stable desktop publication"));
+  }
+  let root = format!("{RELEASE_ROOT}/v{}", publication.app_version);
   let client = release_http_client().map_err(io::Error::other)?;
   let (signing, asset) = discover_asset(
     target,
-    &stable.bundle_id,
-    &stable.git_revision,
+    &publication.bundle_id,
+    &publication.git_revision,
     async |name| super::download(&client, &format!("{root}/{name}"), MAX_BUNDLE_SET_BYTES).await,
   )
   .await?;
   Ok(DesktopRelease {
-    app_version: stable.app_version,
-    bundle_id: stable.bundle_id,
+    app_version: publication.app_version,
+    bundle_id: publication.bundle_id,
+    publication_id: Some(publication.publication_id),
+    source_revision: publication.git_revision,
+    built_at: publication.built_at,
     source: PackageSource::Release {
       url: format!("{root}/{}", asset.name),
       client,
@@ -202,6 +251,32 @@ pub async fn latest(channel: BundleChannel, target: DesktopTarget) -> io::Result
     asset,
     signing,
   })
+}
+
+/// Checks metadata for an exact Nightly desktop artifact without downloading it.
+///
+/// # Errors
+/// Reports discovery failures, invalid metadata, or a non-Nightly publication.
+pub async fn nightly_available(
+  publication: &published::PublishedRelease,
+  target: DesktopTarget,
+) -> io::Result<bool> {
+  if publication.channel != BundleChannel::Nightly {
+    return Err(invalid("expected a Nightly desktop publication"));
+  }
+  nightly::available(publication, target).await
+}
+
+/// Resolves the desktop artifact for the current head of a pull request.
+///
+/// # Errors
+/// Reports missing artifacts, revised pull requests and invalid package metadata.
+pub async fn pull_request(
+  number: u64,
+  target: DesktopTarget,
+  staging: &Path,
+) -> io::Result<DesktopRelease> {
+  nightly::pull_request(number, target, staging).await
 }
 
 async fn discover_asset(
@@ -237,6 +312,7 @@ struct Manifest {
   bundle_id: String,
   git_revision: String,
   signing_mode: DesktopSigning,
+  installation_layout_version: Option<u16>,
   assets: Vec<Asset>,
 }
 
@@ -244,6 +320,8 @@ struct Manifest {
 struct Asset {
   name: String,
   sha256: String,
+  #[serde(skip)]
+  installation_layout_version: Option<u16>,
 }
 
 impl Asset {
@@ -263,7 +341,7 @@ fn verified_asset(
   if manifest.signing_mode != signing {
     return Err(invalid("unexpected desktop release signing mode"));
   }
-  select_asset(manifest.assets, target, bundle_id, signing.suffix())
+  select_asset(manifest, target, bundle_id, signing.suffix())
 }
 
 fn parse_manifest(
@@ -287,7 +365,7 @@ fn parse_manifest(
 }
 
 fn select_asset(
-  assets: Vec<Asset>,
+  manifest: Manifest,
   target: DesktopTarget,
   bundle_id: &str,
   suffix: &str,
@@ -297,10 +375,11 @@ fn select_asset(
     target.triple(),
     target.package_format()
   );
-  let mut matching = assets
+  let mut matching = manifest
+    .assets
     .into_iter()
     .filter(|asset| asset.name == expected_name);
-  let asset = matching
+  let mut asset = matching
     .next()
     .ok_or_else(|| invalid("desktop manifest is missing the installable package"))?;
   if matching.next().is_some() {
@@ -316,6 +395,7 @@ fn select_asset(
       "desktop manifest contains an invalid package checksum",
     ));
   }
+  asset.installation_layout_version = manifest.installation_layout_version;
   Ok(asset)
 }
 
@@ -461,11 +541,18 @@ mod tests {
       ),
     ];
     for &(target, formats, signing_mode, extension) in cases {
-      let value = manifest(target, formats, signing_mode);
+      let mut value = manifest(target, formats, signing_mode);
       assert_eq!(
-        verify(&value, target).unwrap().name,
+        verify(&value, target).unwrap().installation_layout_version,
+        None
+      );
+      value["installation_layout_version"] = json!(7);
+      let asset = verify(&value, target).unwrap();
+      assert_eq!(
+        asset.name,
         format!("ctmux-{VERSION}-{}.{extension}", target.triple()),
       );
+      assert_eq!(asset.installation_layout_version, Some(7));
     }
   }
 

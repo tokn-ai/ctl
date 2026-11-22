@@ -10,8 +10,5 @@ pub use component_info::CONTRACTS as COMPONENT_CONTRACTS;
 
 /// Runs the installation manager entry point.
 pub fn run() {
-  if let Some(code) = ctl_client::cli::openssh::run_transport_helper(bundled::register) {
-    std::process::exit(code);
-  }
   updater::main();
 }

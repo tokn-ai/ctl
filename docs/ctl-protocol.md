@@ -11,8 +11,9 @@ request this framing with `--identity`; brokered logical streams retain the same
 identity contract. Raw direct connections without identity retain the fixed
 `ctl-ssh-v1` framing marker and negotiate the service directly.
 Startup output cannot be mistaken for protocol frames. See
-[published protocol contracts](protocol-versioning.md). The remote generates its UUID in `~/.tokn/ctl/remote-id`; Unix bundles
-live in `~/.tokn/ctl/versions` and are selected by `~/.tokn/ctl/current`. See
+[published protocol contracts](protocol-versioning.md). The remote generates its
+UUID in `~/.tokn/ctl/remote-id`. Stable commands under `~/.tokn/ctl/bin` use the
+runtime selected in `~/.tokn/ctl/ctlup/state/installations.json`. See
 [remote identity and recovery](ctmux-workspace.md#remote-identity-and-address-recovery).
 
 ## Connection command
@@ -33,7 +34,7 @@ ssh -T \
   -o PermitLocalCommand=no \
   -o RemoteCommand=none \
   -- <destination> \
-  'PATH="$HOME/.tokn/ctl/current:$PATH"; export PATH; command -v ctl-agent >/dev/null 2>&1 || { printf "ctl-ssh-nf\n"; exit 127; }; exec ctl-agent connect --identity'
+  'PATH="$HOME/.tokn/ctl/bin:$PATH"; export PATH; command -v ctl-agent >/dev/null 2>&1 || { printf "ctl-ssh-nf\n"; exit 127; }; exec ctl-agent connect --identity'
 ```
 
 With `--remote-platform windows`, the suffix is `ctl-agent.exe connect --identity` instead

@@ -171,6 +171,7 @@ export async function buildDesktopApp(
   const digest = createHash("sha256");
   for await (const chunk of createReadStream(payload)) digest.update(chunk);
   const result: DesktopBuildResult = { schema_version: 1, app_version, bundle_id: `local.${digest.digest("hex")}`, archive };
+  await writeFile(join(output, "installation-layout-version"), "7\n", { mode: 0o600, flag: "wx" });
   await writeFile(join(output, "result.json"), `${JSON.stringify(result, null, 2)}\n`, { mode: 0o600, flag: "wx" });
   return result;
 }

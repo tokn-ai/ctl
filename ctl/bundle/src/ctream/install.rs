@@ -33,7 +33,7 @@ pub struct Installation {
 /// Resolve ctream's installation root for an account.
 #[must_use]
 pub fn root_for_account(home: &Path) -> PathBuf {
-  paths::directory_for_account(home).join("ctream")
+  paths::updater_directory_for_account(home).join("store/ctream")
 }
 
 /// Read the active ctream generation, if one is selected.
@@ -47,9 +47,7 @@ pub fn active(root: &Path) -> io::Result<Option<Installation>> {
   let Some(id) = read_current(root)? else {
     return Ok(None);
   };
-  let installs = root.join("installs");
-  directory(&installs)?;
-  installed(&installs.join(&id), &id).map(Some)
+  installed(&root.join(&id), &id).map(Some)
 }
 
 /// Verify a release ZIP, install its payload, and select the generation.
@@ -111,7 +109,6 @@ pub fn install_development(
 
 struct Store<'a> {
   root: &'a Path,
-  installs: PathBuf,
   current: Option<String>,
   _lock: File,
 }
@@ -121,20 +118,15 @@ impl<'a> Store<'a> {
     storage(root, true)?;
     let lock = lock(root)?;
     let current = read_current(root)?;
-    let installs = root.join("installs");
-    ensure_directory(&installs)?;
     Ok(Self {
       root,
-      installs,
       current,
       _lock: lock,
     })
   }
 
   fn stage(&self) -> io::Result<Temporary> {
-    let path = self
-      .installs
-      .join(format!(".partial-{}", uuid::Uuid::new_v4()));
+    let path = self.root.join(format!(".partial-{}", uuid::Uuid::new_v4()));
     private_fs::create_directory(&path)?;
     let temporary = Temporary(path);
     for name in directories().skip(1) {
@@ -144,7 +136,7 @@ impl<'a> Store<'a> {
   }
 
   fn find(&self, id: &str) -> io::Result<Option<Installation>> {
-    let path = self.installs.join(id);
+    let path = self.root.join(id);
     match fs::symlink_metadata(&path) {
       Ok(_) => installed(&path, id).map(Some),
       Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
@@ -157,9 +149,9 @@ impl<'a> Store<'a> {
     for name in directories().rev() {
       private_fs::sync_directory(&staging.0.join(name))?;
     }
-    let destination = self.installs.join(id);
+    let destination = self.root.join(id);
     fs::rename(&staging.0, &destination)?;
-    private_fs::sync_directory(&self.installs)?;
+    private_fs::sync_directory(self.root)?;
     installed(&destination, id)
   }
 
@@ -616,10 +608,42 @@ mod tests {
       .collect()
   }
 
+  fn assert_only_generation(root: &Path, installation: &Installation) {
+    let directories: Vec<_> = fs::read_dir(root)
+      .unwrap()
+      .map(Result::unwrap)
+      .filter(|entry| entry.file_type().unwrap().is_dir())
+      .map(|entry| entry.path())
+      .collect();
+    assert_eq!(directories, [root.join(&installation.id)]);
+  }
+
+  #[test]
+  fn new_store_starts_without_a_legacy_selection() {
+    let home = workspace();
+    let profile = home.0.join(".tokn/ctl");
+    let root = profile.join("ctlup/store/ctream");
+    let legacy = profile.join("ctream");
+    let inputs = development_inputs(&home.0);
+    let old = install_development(&legacy.join("installs"), &inputs).unwrap();
+    fs::rename(legacy.join("installs/current"), legacy.join("current")).unwrap();
+    let config = legacy.join("config.toml");
+    fs::write(&config, b"# config fixture\n").unwrap();
+
+    assert!(active(&root).unwrap().is_none());
+    assert!(!root.exists());
+
+    let fresh = install_development(&root, &inputs).unwrap();
+    assert_eq!(fresh.id, old.id);
+    assert_eq!(fresh.directory, root.join(&fresh.id));
+    assert_eq!(active(&root).unwrap().unwrap().directory, fresh.directory);
+    assert_eq!(fs::read(config).unwrap(), b"# config fixture\n");
+  }
+
   #[test]
   fn development_can_reuse_a_partial_generation_across_release_switches() {
     let home = workspace();
-    let root = home.0.join(".tokn/ctl/ctream");
+    let root = home.0.join(".tokn/ctl/ctlup/store/ctream");
     let mut inputs = development_inputs(&home.0);
     let agent = home.0.join("built-agent");
     let bundled_agent = AgentTarget::LinuxX64.relative_path("ctream-agent");
@@ -672,7 +696,7 @@ mod tests {
   #[test]
   fn development_requires_coherent_agent_lanes_and_preserves_active_on_copy_error() {
     let home = workspace();
-    let root = home.0.join(".tokn/ctl/ctream");
+    let root = home.0.join(".tokn/ctl/ctlup/store/ctream");
     let mut inputs = development_inputs(&home.0);
     let first = install_development(&root, &inputs).unwrap();
     let helper = home.0.join("input-helper");
@@ -690,7 +714,7 @@ mod tests {
       io::ErrorKind::NotFound
     );
     assert_eq!(active(&root).unwrap().unwrap().id, first.id);
-    assert_eq!(fs::read_dir(root.join("installs")).unwrap().count(), 1);
+    assert_only_generation(&root, &first);
 
     fs::write(&inputs[&bundled_agent], b"agent").unwrap();
     let next = install_development(&root, &inputs).unwrap();
@@ -703,7 +727,7 @@ mod tests {
   #[test]
   fn installs_updates_and_reuses_an_existing_generation() {
     let home = workspace();
-    let root = home.0.join(".tokn/ctl/ctream");
+    let root = home.0.join(".tokn/ctl/ctlup/store/ctream");
     let archive = home.0.join("ctream.zip");
     let platform = native_target().unwrap();
     assert!(active(&root).unwrap().is_none());
@@ -729,7 +753,7 @@ mod tests {
   #[test]
   fn unsafe_or_foreign_update_preserves_the_active_payload() {
     let home = workspace();
-    let root = home.0.join(".tokn/ctl/ctream");
+    let root = home.0.join(".tokn/ctl/ctlup/store/ctream");
     let archive = home.0.join("ctream.zip");
     let platform = native_target().unwrap();
     fixture(&archive, platform, b"first", None, None);
@@ -748,7 +772,7 @@ mod tests {
       );
       assert_eq!(active(&root).unwrap().unwrap().id, first.id);
       assert_eq!(fs::read(&first.preview).unwrap(), b"first");
-      assert_eq!(fs::read_dir(root.join("installs")).unwrap().count(), 1);
+      assert_only_generation(&root, &first);
       assert!(!root.join("escaped").exists());
     }
   }
@@ -757,16 +781,16 @@ mod tests {
   #[test]
   fn refuses_a_symlink_in_the_store_path() {
     let home = workspace();
-    let ctream = home.0.join(".tokn/ctl/ctream");
+    let store = home.0.join(".tokn/ctl/ctlup/store");
     let unrelated = home.0.join("existing");
     let archive = home.0.join("ctream.zip");
-    fs::create_dir_all(ctream.parent().unwrap()).unwrap();
+    fs::create_dir_all(store.parent().unwrap()).unwrap();
     private_fs::create_directory(&unrelated).unwrap();
-    std::os::unix::fs::symlink(&unrelated, &ctream).unwrap();
+    std::os::unix::fs::symlink(&unrelated, &store).unwrap();
     fixture(&archive, native_target().unwrap(), b"bundle", None, None);
 
     assert_eq!(
-      install(&ctream, &archive).unwrap_err().kind(),
+      install(&store.join("ctream"), &archive).unwrap_err().kind(),
       io::ErrorKind::InvalidData
     );
     assert_eq!(fs::read_dir(&unrelated).unwrap().count(), 0);

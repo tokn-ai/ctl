@@ -82,10 +82,12 @@ ctlup ctream run
 ```
 
 The developer build uses the current checkout, including uncommitted changes,
-and activates it under `~/.tokn/ctl/ctream/installs`. It supports `--workspace`,
-`--profile`, `--release`, `--target-dir`, and `--json`. A native Linux or Windows
-x64 build can include its local agent. On macOS, select a remote agent target
-to use the managed host flow. Repeat `--agent-target` to build several lanes.
+and activates it in `$CTL_DATA_DIR/ctlup/store/ctream/`. Run a fresh build after
+upgrading from the old `ctream/installs/` layout. `ctlup dev` supports
+`--workspace`, `--profile`, `--release`, `--target-dir`, and `--json`. A native
+Linux or Windows x64 build can include its local agent. On macOS, select a
+remote agent target to use the managed host flow. Repeat `--agent-target` to
+build several lanes.
 
 Cross builds need the selected Rust targets, Zig, and `cargo-zigbuild`. For
 Linux agents use `x86_64-unknown-linux-musl` or `aarch64-unknown-linux-musl`.

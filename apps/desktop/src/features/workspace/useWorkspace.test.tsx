@@ -418,6 +418,76 @@ describe("workspace lifecycle", () => {
     expect(result.current.sessions).toEqual([]);
   });
 
+  it("saves observations quietly and queues edits behind them before closing", async () => {
+    (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
+    const { result } = renderHook(() => useWorkspace());
+    await waitFor(() => expect(nativeWindow.onCloseRequested).toHaveBeenCalledOnce());
+    let completeObservation!: (snapshot: WorkspaceSnapshot) => void;
+    api.updateWorkspace.mockImplementationOnce(() => new Promise<WorkspaceSnapshot>((resolve) => {
+      completeObservation = resolve;
+    }));
+
+    act(() => result.current.setSessions((sessions) => sessions.map((session) => ({
+      ...session, last_seen_at_ms: 1_000,
+    }))));
+    await waitFor(() => expect(api.updateWorkspace).toHaveBeenCalledOnce());
+    const observation = api.updateWorkspace.mock.calls[0][1];
+    expect(observation.sessions[0].last_seen_at_ms).toBe(1_000);
+    expect(result.current.saving).toBe(false);
+
+    act(() => result.current.update("sidebar_view", "tasks"));
+    expect(result.current.saving).toBe(true);
+    let closed!: Promise<void>;
+    await act(async () => {
+      closed = nativeWindow.onCloseRequested.mock.calls[0][0]({ preventDefault: vi.fn() });
+    });
+    expect(api.updateWorkspace).toHaveBeenCalledOnce();
+    expect(api.closeAttachmentWindow).not.toHaveBeenCalled();
+    await act(async () => {
+      completeObservation({ revision: "observed", document: observation });
+      await closed;
+    });
+
+    expect(api.updateWorkspace).toHaveBeenCalledTimes(2);
+    expect(api.updateWorkspace).toHaveBeenLastCalledWith("observed", expect.objectContaining({
+      sidebar_view: "tasks",
+      sessions: [expect.objectContaining({ last_seen_at_ms: 1_000 })],
+    }));
+    expect(api.closeAttachmentWindow).toHaveBeenCalledOnce();
+    expect(result.current.saving).toBe(false);
+  });
+
+  it("updates live state without saving when the persisted workspace stays the same", async () => {
+    const { result } = renderHook(() => useWorkspace());
+    await waitFor(() => expect(result.current.ready).toBe(true));
+    act(() => {
+      result.current.setSessions((sessions) => sessions.map((session) => ({ ...session, status: "running" })));
+      result.current.setTabs((tabs) => [...tabs]);
+      result.current.setShellStates((states) => new Map(states));
+    });
+    expect(result.current.sessions[0].status).toBe("running");
+    expect(result.current.saving).toBe(false);
+    await act(async () => { await result.current.refreshHostDiscovery(); });
+    expect(api.updateWorkspace).not.toHaveBeenCalled();
+    expect(api.updateHosts).not.toHaveBeenCalled();
+  });
+
+  it("reports an observation save failure and allows an explicit retry", async () => {
+    const { result } = renderHook(() => useWorkspace());
+    await waitFor(() => expect(result.current.ready).toBe(true));
+    api.updateWorkspace.mockRejectedValueOnce(new Error("disk full"));
+    act(() => result.current.setSessions((sessions) => sessions.map((session) => ({
+      ...session, last_seen_at_ms: 1_000,
+    }))));
+    await waitFor(() => expect(result.current.save_error).toBe("disk full"));
+    expect(result.current.saving).toBe(false);
+
+    await act(async () => { await result.current.persist(true); });
+    expect(result.current.save_error).toBeNull();
+    expect(api.updateWorkspace).toHaveBeenCalledTimes(2);
+    expect(api.updateWorkspace.mock.calls[1][1].sessions[0].last_seen_at_ms).toBe(1_000);
+  });
+
   it("keeps a failed save visible through read-only SSH discovery until a write succeeds", async () => {
     const { result } = renderHook(() => useWorkspace());
     await waitFor(() => expect(result.current.ready).toBe(true));

@@ -28,15 +28,19 @@ Cancel removes the draft and never touches a real container or account.
 The Tasks variant also selects the sample web-development task and its output.
 The normal `index.html` entry and production build do not import these fixtures.
 
-Open **About ctmux** from the rail’s **Settings** menu or command palette to inspect
-sample component versions. Each daemon has its own **Restart** action, while
+Open **About ctmux** from the rail’s **Settings** menu or command palette.
+Under **Machines**, the local development build stays pinned on **Sync**.
+Use **Check installation** on Development server to see an older stable build, then **Sync**
+to follow its channel. Staging server starts without an active runtime. Use
+**Install from…** to choose a source, then check the installed build in its row.
+
+Expand service details to inspect sample versions. Each daemon has its own **Restart** action, while
 remote ctl-agent rows offer **Reconnect**. These confirmations and completion
 states only change memory. Restarting ctl-taskd is refused while sample tasks are
 running; stop the task in the Tasks view to try a successful restart.
-Bundles includes fictional app archives and a stored local build, with separate
-local-service and upload choices. Selecting one updates only the sample state.
-Add `?about=partial` to show one
-unavailable component while other versions remain visible, or
+**Stored and included builds** lists fictional app archives and a stored local build.
+Local installations update the sample inventory. Add `?about=partial` to
+show one unavailable component and a failed SSH check on Staging server, or
 `?about=restart-error` to exercise a failed restart and subsequent refresh.
 Use `?vpn=multiple` to include active VPNs in the ctld restart confirmation.
 Use `?about=legacy` to compare **Build not reported** and **Build unverified**.

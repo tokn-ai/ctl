@@ -152,7 +152,7 @@
   "palette.no_matches": "没有匹配的命令。",
   "palette.placeholder": "输入命令",
   "palette.search": "搜索命令",
-  "shell.about_detail": "查看应用、守护进程和已连接主机的版本。",
+  "shell.about_detail": "管理本机和已保存主机的运行时，查看服务状态。",
   "shell.authenticate_first": "需要进行身份验证。请选择“连接主机”进行验证后重试。",
   "shell.change_forwarding_failed": "无法更改端口转发",
   "shell.choose_host": "请选择已保存的主机或已发现的 SSH/Tailscale 设备。",

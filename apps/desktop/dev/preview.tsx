@@ -7,9 +7,12 @@ import type {
   AttachmentInputRequest,
   AttachmentLeaseRequest,
   AttachmentResizeRequest,
+  BundleChannel,
   ConnectionTarget,
   ComponentBundleSelection,
   ComponentBundlePhase,
+  ComponentUpdateProgress,
+  ComponentUpdateRequest,
   CreateSessionRequest,
   HostCatalogDocument,
   HostCatalogSnapshot,
@@ -44,6 +47,7 @@ import {
   previewWorkspace,
 } from "./fixtures";
 import { previewComponentVersions, previewComponentBundles } from "./aboutFixtures";
+import { previewRuntime, previewUpdateCatalog } from "./runtimeFixtures";
 import { previewCredentials, previewIdentityFiles } from "./credentialsFixtures";
 
 // This entry is intentionally absent from index.html and the production build.
@@ -79,7 +83,8 @@ if (credentials_param === "import") {
   });
 }
 let component_versions = previewComponentVersions();
-let component_bundles = previewComponentBundles();
+const component_bundles = previewComponentBundles();
+const runtime = previewRuntime(component_bundles, about_param === "partial");
 if (about_param === "partial") {
   const daemon = component_versions.components.find((row) => row.component === "ctmuxd")!;
   daemon.running = null;
@@ -239,6 +244,20 @@ mockIPC((command, payload) => {
     }
     case "get_component_bundles":
       return structuredClone(component_bundles);
+    case "about_runtime_status":
+      return runtime.status((payload as { host_id: string | null }).host_id);
+    case "sync_about_runtime": {
+      const { host_id, attempt_id } = payload as { host_id: string | null; attempt_id: string };
+      return runtime.sync(host_id, attempt_id);
+    }
+    case "cancel_component_update":
+      return runtime.cancel(request<{ attempt_id: string }>(payload).attempt_id);
+    case "check_component_updates":
+      return previewUpdateCatalog(request<{ channel: BundleChannel | null }>(payload).channel ?? "stable");
+    case "component_update_checkout_available":
+      return true;
+    case "update_components":
+      return runtime.install(request<ComponentUpdateRequest>(payload), (event) => channel<ComponentUpdateProgress>(payload, "on_progress").onmessage(event));
     case "select_component_bundle": {
       const selection = request<ComponentBundleSelection>(payload);
       const bundle = component_bundles.bundles.find((item) => item.bundle_id === selection.bundle_id && item.target_triple === selection.target_triple);
@@ -246,10 +265,11 @@ mockIPC((command, payload) => {
       if (!bundle || bundle[field] === "unavailable") throw new Error("This build cannot be selected for that use.");
       channel<ComponentBundlePhase>(payload, "on_progress").onmessage("verifying");
       channel<ComponentBundlePhase>(payload, "on_progress").onmessage("selecting");
-      component_bundles = { ...component_bundles, bundles: component_bundles.bundles.map((item) => {
+      component_bundles.bundles = component_bundles.bundles.map((item) => {
         const same_profile = selection.purpose === "local" ? item.local_use !== "unavailable" : item.target_triple === selection.target_triple;
         return same_profile ? { ...item, [field]: item.bundle_id === bundle.bundle_id ? "selected" : item[field] === "selected" ? "available" : item[field] } : item;
-      }) };
+      });
+      if (selection.purpose === "local") runtime.selectLocal(bundle);
       return { ...selection, services_preserved: true };
     }
     case "get_component_versions":
@@ -403,6 +423,7 @@ mockIPC((command, payload) => {
       keybindings = request<{ document: KeybindingsDocument }>(payload).document;
       return { path: "Sample workspace", revision: String(++revision), document: keybindings };
     case "sync_command_menu":
+      return { rejected: [] };
     case "acknowledge_attachment_event":
     case "cancel_attachment_open":
     case "acknowledge_task_log":

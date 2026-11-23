@@ -1,6 +1,9 @@
 import { Channel, invoke as nativeInvoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { LocalizedError } from "../features/i18n/messages";
 import type {
+  AboutRuntimeStatus,
+  AboutRuntimeSyncResult,
   AttachmentAckRequest,
   AttachmentEvent,
   AttachmentDividerResizeRequest,
@@ -127,6 +130,21 @@ export async function closePreviewWindow(): Promise<void> {
 
 export async function getComponentVersions(host_id?: string): Promise<ComponentVersionsSnapshot> {
   return invoke("get_component_versions", host_id ? { host_id } : undefined);
+}
+
+function runtimeTarget(target: ConnectionTarget) {
+  if (target.kind === "local") return { host_id: null, method_id: null };
+  if (target.unavailable) throw new Error(target.unavailable);
+  if (!target.host_id) throw new LocalizedError("about.runtime_saved_required");
+  return { host_id: target.host_id, method_id: target.method_id ?? null };
+}
+
+export async function getAboutRuntimeStatus(target: ConnectionTarget): Promise<AboutRuntimeStatus> {
+  return invoke("about_runtime_status", runtimeTarget(target));
+}
+
+export async function syncAboutRuntime(target: ConnectionTarget, attempt_id: string): Promise<AboutRuntimeSyncResult> {
+  return invoke("sync_about_runtime", { ...runtimeTarget(target), attempt_id });
 }
 
 export async function getComponentBundles(): Promise<ComponentBundlesSnapshot> {

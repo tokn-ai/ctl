@@ -1,18 +1,21 @@
 # Components and updates
 
-Open **About ctmux** to inspect components on this computer and saved remote
-hosts. **Running** identifies the existing process; **On disk** identifies the
-selected executable. Build IDs distinguish development binaries that share a
-product version. Different builds do not establish which one is newer.
+Open **About ctmux** to manage the runtime on this computer and saved SSH hosts.
+The local row shows the active build and its source. Choose **Check installation**
+on a saved host to read its installation through the selected SSH method.
+Remote checks and sync use noninteractive SSH. Connect to the saved host first
+to verify the account identity and complete any interactive authentication.
 
-Local components stay expanded. Remote hosts start as a compact table with
-summaries of outdated builds, protocol mismatches, and required restarts.
-Expand one remote host at a time to see its components. Matching reported
-running and installed builds share one row; different builds show separate
-**Running** and **On disk** rows. Unknown or stopped running builds are hidden,
-leaving the on-disk build and component status. Active-connection metadata
-remains labeled **Last observed**. Shared SSH inspection failures appear once
-on the host with a short message; hover it for the full diagnostic.
+**Sync** follows that machine’s recorded source, like `ctlup update`. Stable
+and Nightly follow their own channels. A healthy pinned build stays selected.
+A missing pinned build can be restored when its exact verified cache is
+available. Use **Install from…** to provision a machine or choose another source.
+
+Expand **Components** on a machine to inspect its running services, installed
+binaries, and supported protocols. **Running** identifies the existing process
+and **On disk** identifies the selected executable. Matching builds share one
+row. Active-connection metadata is labeled **Last observed**. Restart and
+reconnect actions show their impact before they run.
 
 Each protocol has its own line and status: a green tick for the app's current
 contract, a yellow tick for a different contract that shares an explicitly
@@ -316,7 +319,8 @@ the local desktop app commands above; ARM64 whole-runtime bundles are unavailabl
 
 ## Desktop component updates
 
-Use **Update components…** in the command palette, About, or host settings.
+Use **Install from…** on a machine in About, or **Update components…** in the
+command palette or host settings.
 Choose hosts and a channel, provided files, or an included offline build.
 In a development app, select a Linux x64 or ARM64 SSH host and choose
 **Build from checkout** to compile on this computer from the checkout used to
@@ -325,7 +329,7 @@ build the app and upload the result. Choose **Provided build files** to upload a
 When installing from the connection prompt, the dialog targets the SSH route
 that needs the components. Progress identifies which computer is downloading,
 which files travel over SSH, and when the remote host activates the build. Every
-update installs a complete build. About’s bundle list shows the active native
+update installs a complete build. **Stored and included builds** shows the active native
 build and offers local installation of another usable build. Explicitly installed
 target components have durable channel registrations; other downloaded foreign
 artifacts remain deployment cache entries.

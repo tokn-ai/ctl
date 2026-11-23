@@ -8,6 +8,7 @@ import { InlineFeedback } from "../feedback/InlineFeedback";
 
 interface Props {
   visible: boolean;
+  refresh_revision?: number;
   on_selected(): void;
 }
 
@@ -40,7 +41,7 @@ function BundleUse({ bundle, disabled, on_select }: {
 }
 
 /** Installation changes future launches; running services stay in place. */
-export function ComponentBundlePanel({ visible, on_selected }: Props) {
+export function ComponentBundlePanel({ visible, refresh_revision, on_selected }: Props) {
   const { t, locale } = useLocale();
   const [snapshot, setSnapshot] = useState<ComponentBundlesSnapshot | null>(null);
   const [loading, setLoading] = useState(false);
@@ -70,7 +71,7 @@ export function ComponentBundlePanel({ visible, on_selected }: Props) {
     mounted.current = true;
     return () => { mounted.current = false; generation.current++; };
   }, []);
-  useEffect(() => { if (visible && !selecting.current) void refresh(); }, [visible]);
+  useEffect(() => { if (visible && !selecting.current) void refresh(); }, [visible, refresh_revision]);
 
   async function select(bundle: ComponentBundle) {
     if (selecting.current) return;

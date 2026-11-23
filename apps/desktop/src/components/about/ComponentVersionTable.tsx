@@ -1,9 +1,7 @@
 import { translate, type DisplayText, type Locale } from "../../features/i18n/messages";
 import { useLocale } from "../../features/i18n/LocaleContext";
-import { useId, useState } from "react";
-import { componentBuildViews, componentHostFailure, componentHostStatuses, groupComponentHosts, type ComponentHostGroup } from "../../features/about/componentVersions";
-import type { ComponentVersionInfo, ComponentVersionRow, ComponentVersionStatus, SshConnectionTarget } from "../../lib/types";
-import { Icon } from "../ui/Icon";
+import { componentBuildViews, componentHostFailure, componentHostStatuses, type ComponentHostGroup } from "../../features/about/componentVersions";
+import type { ComponentVersionInfo, ComponentVersionRow, ComponentVersionStatus } from "../../lib/types";
 import { ComponentProtocols } from "./ComponentProtocols";
 import { InlineFeedback } from "../feedback/InlineFeedback";
 
@@ -52,19 +50,14 @@ function statusLabel(row: ComponentVersionRow, locale: Locale): string {
   return !row.running.source_revision && !row.running.source_fingerprint ? translate(locale, "about.build_not_reported") : translate(locale, "about.build_unverified");
 }
 
-interface Props {
-  rows: readonly ComponentVersionRow[];
+export interface ComponentDiagnosticActions {
   busy_id: string | null;
   restarting: boolean;
   action_error: { component_id: string; message: DisplayText } | null;
   on_restart(component_id: string): void;
-  targets?: readonly SshConnectionTarget[];
-  on_manage_host?(target: SshConnectionTarget, mode: "inspect" | "update"): void;
 }
 
-type ActionProps = Pick<Props, "busy_id" | "restarting" | "action_error" | "on_restart">;
-
-function ComponentRows({ row, busy_id, restarting, action_error, on_restart, hide_probe_error }: ActionProps & { row: ComponentVersionRow; hide_probe_error: boolean }) {
+function ComponentRows({ row, busy_id, restarting, action_error, on_restart, hide_probe_error }: ComponentDiagnosticActions & { row: ComponentVersionRow; hide_probe_error: boolean }) {
   const { t, locale, formatText } = useLocale();
   const action = row.action;
   const action_label = action === "reconnect" ? t("about.reconnect") : t("about.restart");
@@ -92,7 +85,7 @@ function ComponentRows({ row, busy_id, restarting, action_error, on_restart, hid
   </tr>)}</tbody>;
 }
 
-function ComponentDetails({ group, ...actions }: ActionProps & { group: ComponentHostGroup }) {
+export function ComponentVersionTable({ group, ...actions }: ComponentDiagnosticActions & { group: ComponentHostGroup }) {
   const { t, locale } = useLocale();
   const failure = componentHostFailure(group.rows, locale);
   return <table className="about-version-table" aria-label={t("about.host_component_versions", { host: group.label })}>
@@ -102,53 +95,14 @@ function ComponentDetails({ group, ...actions }: ActionProps & { group: Componen
   </table>;
 }
 
-function HostStatus({ group, action_error }: Pick<Props, "action_error"> & { group: ComponentHostGroup }) {
+export function HostStatus({ group, action_error }: Pick<ComponentDiagnosticActions, "action_error"> & { group: ComponentHostGroup }) {
   const { t, locale } = useLocale();
   const statuses = componentHostStatuses(group.rows, locale);
   const failure = componentHostFailure(group.rows, locale);
   const maintenance_unsupported = group.rows.some((row) => row.error_code === "remote_windows_maintenance_unsupported");
   const has_action_error = action_error && group.rows.some((row) => row.component_id === action_error.component_id);
   return <>
-    <div className="about-host-summary">{statuses.map((status) => <span className={`about-version-status about-status-${status.status}`} key={status.label}>{status.label}</span>)}{has_action_error ? <span className="about-version-status about-status-incompatible">{t("about.action_failed")}</span> : null}</div>
+    <div className="about-host-summary" role="group" aria-label={t("about.status")}>{statuses.map((status) => <span className={`about-version-status about-status-${status.status}`} key={status.label}>{status.label}</span>)}{has_action_error ? <span className="about-version-status about-status-incompatible">{t("about.action_failed")}</span> : null}</div>
     {failure ? <div title={failure.detail}><InlineFeedback severity={maintenance_unsupported ? "info" : "error"} className="about-row-feedback">{failure.message}</InlineFeedback></div> : null}
-  </>;
-}
-
-export function ComponentVersionTable({ rows, busy_id, restarting, action_error, on_restart, targets = [], on_manage_host }: Props) {
-  const { t, locale } = useLocale();
-  const [expanded, setExpanded] = useState<string | null>(null);
-  const id = useId();
-  const groups = groupComponentHosts(rows, locale);
-  const local = groups.filter((group) => group.key === "local");
-  const remote = groups.filter((group) => group.key !== "local");
-  const actions = { busy_id, restarting, action_error, on_restart };
-  return <>
-    {local.map((group) => <section key={group.key} aria-label={t("about.host_components", { host: group.label })}>
-      <div className="about-table-scroll"><ComponentDetails group={group} {...actions} /></div>
-    </section>)}
-    {remote.length ? <div className="about-table-scroll"><table className="about-host-table" aria-label={t("about.remote_component_hosts")}>
-      <colgroup><col className="about-host-name-column" /><col className="about-host-status-column" /><col className="about-host-action-column" /></colgroup>
-      <thead><tr><th scope="col">{t("about.host")}</th><th scope="col">{t("about.status")}</th><th scope="col">{t("about.actions")}</th></tr></thead>
-      {remote.map((group) => {
-        const open = expanded === group.key;
-        const table_id = `${id}-${encodeURIComponent(group.key)}`;
-        const target = group.host_id && targets.find((target) => target.host_id === group.host_id);
-        const can_inspect = target && target.remote_platform !== "windows" && !group.rows.some((row) => row.error_code === "remote_windows_maintenance_unsupported");
-        return <tbody key={group.key}>
-          <tr className="about-host-row">
-            <th scope="row"><button type="button" className="about-host-toggle" onClick={() => setExpanded((previous) => previous === group.key ? null : group.key)} aria-expanded={open} aria-controls={table_id} aria-label={t(open ? "about.hide_host_components" : "about.show_host_components", { host: group.label })}>
-              <Icon name={open ? "chevron_down" : "chevron_right"} />
-              <strong>{group.label}</strong>
-            </button></th>
-            <td><HostStatus group={group} action_error={action_error} /></td>
-            <td>{target && on_manage_host ? <div className="about-host-actions">
-              {can_inspect ? <button type="button" disabled={busy_id !== null || !!target.unavailable} onClick={() => on_manage_host(target, "inspect")} aria-label={t("about.check_named_host", { host: group.label })}>{t("about.check_host")}</button> : null}
-              <button type="button" disabled={busy_id !== null || !!target.unavailable} onClick={() => on_manage_host(target, "update")} aria-label={t("about.update_named_host", { host: group.label })}>{t("about.update_short")}</button>
-            </div> : <span className="about-muted">—</span>}</td>
-          </tr>
-          <tr hidden={!open} className="about-host-details"><td colSpan={3}><div id={table_id}><ComponentDetails group={group} {...actions} /></div></td></tr>
-        </tbody>;
-      })}
-    </table></div> : null}
   </>;
 }

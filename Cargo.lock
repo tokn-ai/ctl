@@ -1423,6 +1423,7 @@ dependencies = [
  "hex",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
+ "process-wrap",
  "rustix 1.1.6",
  "semver",
  "serde",
@@ -1431,10 +1432,12 @@ dependencies = [
  "tar",
  "tauri",
  "tauri-build",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tokn-ctl-core",
  "uuid",
+ "windows",
  "zeroize",
 ]
 

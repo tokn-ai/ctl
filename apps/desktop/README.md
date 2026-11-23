@@ -21,7 +21,10 @@ Keep the same message IDs and ICU argument names in both. Run
 ## About and component versions
 
 Open **About ctmux** from the info button, command palette, or macOS app menu.
-The page shows the app version, local `ctld`, `ctmuxd`, and `ctl-taskd` versions and
+The page shows the app version and one row for this computer and each saved
+SSH host. **Check installation** reads the selected runtime. **Sync** follows
+that machine's recorded source. **Install from…** lets you choose a source.
+Expand **Components** for the local `ctld`, `ctmuxd`, and `ctl-taskd` versions and
 protocols, and `ctl-agent`/`ctmuxd` metadata observed on active remote terminal
 connections. Separate SSH and VPN ctld owners appear separately when configured.
 Running versions are compared with this app's component build. Each component

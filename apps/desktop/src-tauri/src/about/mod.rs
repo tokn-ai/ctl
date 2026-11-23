@@ -7,6 +7,7 @@ mod models;
 pub(crate) mod observations;
 pub(crate) mod remote_actions;
 pub(crate) mod restart;
+pub(crate) mod runtime;
 
 pub use models::ComponentVersionsSnapshot;
 

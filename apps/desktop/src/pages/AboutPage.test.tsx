@@ -9,8 +9,23 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ComponentVersionInfo, ComponentVersionsSnapshot, ComponentActionPreflight } from "../lib/types";
 import { AboutPage } from "./AboutPage";
 
-const api = vi.hoisted(() => ({ versions: vi.fn(), preflight: vi.fn(), restart: vi.fn(), bundles: vi.fn(), select: vi.fn(), published: vi.fn(), update: vi.fn(), cancel_update: vi.fn() }));
-vi.mock("../lib/tauri", () => ({ getComponentVersions: api.versions, preflightComponentAction: api.preflight, executeComponentAction: api.restart, getComponentBundles: api.bundles, selectComponentBundle: api.select, checkComponentUpdates: api.published, componentUpdateCheckoutAvailable: vi.fn(async () => false), updateComponents: api.update, cancelComponentUpdate: api.cancel_update }));
+const api = vi.hoisted(() => ({
+  runtime: vi.fn(), sync: vi.fn(), versions: vi.fn(), preflight: vi.fn(), restart: vi.fn(),
+  bundles: vi.fn(), select: vi.fn(), published: vi.fn(), update: vi.fn(), cancel_update: vi.fn(),
+}));
+vi.mock("../lib/tauri", () => ({
+  getAboutRuntimeStatus: api.runtime,
+  syncAboutRuntime: api.sync,
+  getComponentVersions: api.versions,
+  preflightComponentAction: api.preflight,
+  executeComponentAction: api.restart,
+  getComponentBundles: api.bundles,
+  selectComponentBundle: api.select,
+  checkComponentUpdates: api.published,
+  componentUpdateCheckoutAvailable: vi.fn(async () => false),
+  updateComponents: api.update,
+  cancelComponentUpdate: api.cancel_update,
+}));
 
 const current: ComponentVersionInfo = { version: "0.1.0", source_revision: "abcdef123456", source_fingerprint: "current", dirty: false, protocols: [{ name: "ctld", build: 12, version: "1.0.12", supported_versions: ["1.0.12"] }] };
 const snapshot: ComponentVersionsSnapshot = { components: [
@@ -20,11 +35,13 @@ const snapshot: ComponentVersionsSnapshot = { components: [
 ] };
 const preflight: ComponentActionPreflight = { action_token: "native-owner-token", component_id: "owner-1", component: "ctld", location: "local", host_id: null, action: "restart", label: "ctld (SSH)", running: snapshot.components[1].running, available: current, impact: { ssh_connections: null, port_forwards: null, vpn_connections: 2, terminal_sessions: null, description: "Stops 2 managed VPN connections and may interrupt SSH connections and port forwards." } };
 async function expandGroups() {
-  await screen.findByRole("table", { name: "This computer component versions" });
+  await screen.findByRole("button", { name: "Show components for This computer" });
   for (const toggle of screen.getAllByRole("button", { name: /^Show components for / })) fireEvent.click(toggle);
+  await screen.findByRole("table", { name: "This computer component versions" });
 }
 
-const props = () => ({ visible: true, on_close: vi.fn(), on_restarted: vi.fn(), on_dialog_change: vi.fn() });
+const saved_target = { kind: "ssh" as const, host_id: "dev", host_name: "Development", destination: "dev" };
+const props = () => ({ visible: true, remote_targets: [saved_target], on_close: vi.fn(), on_restarted: vi.fn(), on_dialog_change: vi.fn() });
 
 let notifications: NotificationStore;
 
@@ -39,6 +56,8 @@ function renderPage(ui: ReactElement) {
 beforeEach(() => {
   notifications = new NotificationStore();
   vi.clearAllMocks();
+  api.runtime.mockResolvedValue({ active: null, build_label: null, missing: false, origin: null });
+  api.sync.mockResolvedValue({ state: "installed" });
   api.bundles.mockResolvedValue({ bundles: [], errors: [] });
   api.published.mockResolvedValue({ default_channel: "nightly", local_development: false, catalog: null, error: null });
   api.versions.mockResolvedValue(structuredClone(snapshot));
@@ -46,9 +65,115 @@ beforeEach(() => {
   api.restart.mockResolvedValue({ component_id: "owner-1", running: current });
   api.cancel_update.mockResolvedValue(undefined);
 });
-afterEach(() => { cleanup(); localStorage.removeItem("ctmux.desktop.language"); });
+afterEach(() => { cleanup(); vi.restoreAllMocks(); localStorage.removeItem("ctmux.desktop.language"); });
 
 describe("About page", () => {
+  it("shows the Windows x64 install command only for a confirmed empty local runtime", async () => {
+    vi.spyOn(navigator, "platform", "get").mockReturnValue("Win32");
+    api.runtime.mockRejectedValueOnce(new Error("Cannot read the local runtime."));
+    renderPage(<AboutPage {...props()} />);
+    const local = within(await screen.findByRole("region", { name: "This computer" }));
+    const command = "ctlup install --channel stable";
+    await local.findByText("Cannot read the local runtime.");
+    expect(local.queryByText(command)).toBeNull();
+    expect(local.queryByRole("button", { name: "Install from…" })).toBeNull();
+
+    fireEvent.click(local.getByRole("button", { name: "Check installation" }));
+    await local.findByText(command);
+    expect(local.getByText(/On Windows x64/)).toBeTruthy();
+    const remote = within(screen.getByRole("region", { name: "Development" }));
+    fireEvent.click(remote.getByRole("button", { name: "Check installation" }));
+    await remote.findByText("No runtime installed");
+    expect(remote.queryByText(command)).toBeNull();
+
+    api.runtime.mockResolvedValueOnce({ active: "stable-id", build_label: "installed-build", missing: false, origin: { channel: "stable" } });
+    fireEvent.click(local.getByRole("button", { name: "Check installation" }));
+    await local.findByText("installed-build");
+    expect(local.queryByText(command)).toBeNull();
+  });
+
+  it("inspects a saved SSH installation on demand and syncs its selected route", async () => {
+    const route = { ...saved_target, method_id: "gateway", remote_info: { remote_id: "account", agent_version: "test" } };
+    const local = { kind: "local" };
+    const installed = { active: "old-id", build_label: "stable-v0.1.4-build", missing: false, origin: { channel: "stable", publication_id: "0.1.4" } };
+    api.runtime.mockResolvedValueOnce({ ...installed, build_label: "dev-local-build", origin: { channel: "dev" } })
+      .mockResolvedValueOnce(installed)
+      .mockResolvedValue({ ...installed, active: "new-id", build_label: "stable-v0.1.5-build", origin: { channel: "stable", publication_id: "0.1.5" } });
+    renderPage(<AboutPage {...props()} remote_targets={[route]} />);
+    const remote = within(await screen.findByRole("region", { name: "Development" }));
+    await screen.findByText("dev-local-build");
+    expect(api.runtime).toHaveBeenCalledExactlyOnceWith(local);
+    expect(api.published).not.toHaveBeenCalled();
+    fireEvent.click(remote.getByRole("button", { name: "Check installation" }));
+    await remote.findByText("stable-v0.1.4-build");
+    expect(api.runtime).toHaveBeenLastCalledWith(route);
+
+    fireEvent.click(remote.getByRole("button", { name: "Sync" }));
+    await remote.findByText("stable-v0.1.5-build");
+    expect(api.sync).toHaveBeenCalledExactlyOnceWith(route, expect.any(String));
+    expect(api.runtime).toHaveBeenLastCalledWith(route);
+    expect(api.update).not.toHaveBeenCalled();
+    expect(api.restart).not.toHaveBeenCalled();
+  });
+
+  it("discards a pending inspection when the selected saved route changes", async () => {
+    const first = { ...saved_target, method_id: "one", destination: "first-alias" };
+    const second = { ...saved_target, method_id: "two", destination: "second-alias" };
+    const record = { active: "runtime", origin: { channel: "stable" }, missing: false };
+    const options = props();
+    const page = renderPage(<AboutPage {...options} remote_targets={[first]} />);
+    await waitFor(() => expect(api.runtime).toHaveBeenCalledExactlyOnceWith({ kind: "local" }));
+    let finish!: (value: unknown) => void;
+    api.runtime.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    const remote = () => within(screen.getByRole("region", { name: "Development" }));
+    fireEvent.click(remote().getByRole("button", { name: "Check installation" }));
+    await waitFor(() => expect(api.runtime).toHaveBeenLastCalledWith(first));
+    page.rerender(<AboutPage {...options} remote_targets={[second]} />);
+    api.runtime.mockResolvedValueOnce({ ...record, build_label: "second-route-build" });
+    fireEvent.click(remote().getByRole("button", { name: "Check installation" }));
+    await remote().findByText("second-route-build");
+    expect(api.runtime).toHaveBeenLastCalledWith(second);
+    await act(async () => { finish({ ...record, build_label: "first-route-build" }); });
+    expect(remote().queryByText("first-route-build")).toBeNull();
+    expect(remote().getByText("second-route-build")).toBeTruthy();
+  });
+
+  it("keeps a failed sync scoped to the machine without installing another source", async () => {
+    api.runtime.mockResolvedValue({
+      active: "pinned-id", build_label: "dev-pinned-build",
+      origin: { channel: "dev" }, missing: true,
+    });
+    api.sync.mockRejectedValueOnce(new Error("Exact build missing from cache."));
+    renderPage(<AboutPage {...props()} />);
+    const local = within(await screen.findByRole("region", { name: "This computer" }));
+    await local.findByText("dev-pinned-build");
+    fireEvent.click(local.getByRole("button", { name: "Sync" }));
+    expect(await local.findByText(/Exact build missing from cache/)).toBeTruthy();
+    expect(local.getByRole("button", { name: "Install from…" })).toBeTruthy();
+    expect(api.sync).toHaveBeenCalledExactlyOnceWith({ kind: "local" }, expect.any(String));
+    expect(api.update).not.toHaveBeenCalled();
+  });
+
+  it("stops only the selected machine's sync and checks its final installation", async () => {
+    api.runtime.mockResolvedValue({ active: "active", build_label: "installed-build", missing: false, origin: { channel: "stable" } });
+    let interrupt!: (error: Error) => void;
+    api.sync.mockImplementationOnce(() => new Promise((_resolve, reject) => { interrupt = reject; }));
+    renderPage(<AboutPage {...props()} />);
+    const local = within(await screen.findByRole("region", { name: "This computer" }));
+    await local.findByText("installed-build");
+    fireEvent.click(local.getByRole("button", { name: "Sync" }));
+    const id = api.sync.mock.calls[0][1];
+    expect(id).toEqual(expect.any(String));
+    fireEvent.click(await local.findByRole("button", { name: "Stop update" }));
+    expect(api.cancel_update).toHaveBeenCalledExactlyOnceWith(id);
+    expect(local.getByRole("button", { name: "Stopping update…" })).toHaveProperty("disabled", true);
+    await act(async () => { interrupt(new Error("Sync cancelled.")); });
+    expect(await local.findByText("Sync cancelled.")).toBeTruthy();
+    expect(local.getByRole("button", { name: "Sync" })).toHaveProperty("disabled", false);
+    expect(api.runtime).toHaveBeenCalledTimes(2);
+    expect(api.runtime).toHaveBeenLastCalledWith({ kind: "local" });
+  });
+
   it("renders native maintenance details and result counts in the selected language", async () => {
     localStorage.setItem("ctmux.desktop.language", "zh-Hans");
     const component = { ...snapshot.components[1], component_id: "ctmuxd", component: "ctmuxd", label: "ctmuxd" };
@@ -61,6 +186,7 @@ describe("About page", () => {
       summary: { kind: "local_terminal_restart", ended_sessions: 2 },
     });
     renderPage(<LocaleProvider><AboutPage {...props()} /></LocaleProvider>);
+    fireEvent.click(await screen.findByRole("button", { name: "显示 本机 的组件" }));
     fireEvent.click(await screen.findByRole("button", { name: "重启 ctmuxd" }));
     const dialog = await screen.findByRole("dialog", { name: "重启 ctmuxd" });
     expect(within(dialog).getByText(/结束所有本地终端会话/)).toBeTruthy();
@@ -91,7 +217,8 @@ describe("About page", () => {
     api.versions.mockResolvedValue(next);
     renderPage(<AboutPage {...props()} remote_targets={[{ kind: "ssh", host_id: "dev", destination: "dev" }]} />);
     await expandGroups();
-    expect(await screen.findByRole("button", { name: "Update components Development" })).toBeTruthy();
+    const machine = within(screen.getByRole("region", { name: "Development" }));
+    expect(machine.getByRole("button", { name: "Install from…" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Check host Development" })).toBeTruthy();
     expect(screen.getAllByText("Not checked").length).toBeGreaterThan(0);
     expect(api.preflight).not.toHaveBeenCalled();
@@ -104,11 +231,11 @@ describe("About page", () => {
       remote_info: { remote_id: "saved-account", agent_version: "test" } };
     api.update.mockResolvedValueOnce([{ host_index: 0, state: "failed", result: null, error: "SSH account identity changed." }]);
     renderPage(<AboutPage {...props()} remote_targets={[target]} />);
-    fireEvent.click(await screen.findByRole("button", { name: "Update components Development" }));
+    fireEvent.click(within(await screen.findByRole("region", { name: "Development" })).getByRole("button", { name: "Install from…" }));
     expect(screen.queryByRole("button", { name: "Check host Development" })).toBeNull();
-    const dialog = await screen.findByRole("dialog", { name: "Update components" });
+    const dialog = await screen.findByRole("dialog", { name: "Install runtime" });
     expect(within(dialog).getByRole("checkbox", { name: "Development" })).toHaveProperty("checked", true);
-    fireEvent.click(within(dialog).getByRole("button", { name: "Update" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Install" }));
     await within(dialog).findByText("SSH account identity changed.");
     expect(api.update).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ targets: [target] }), expect.any(Function), expect.any(Function));
     expect(api.restart).not.toHaveBeenCalled();
@@ -148,7 +275,7 @@ describe("About page", () => {
     expect(within(legacy_row).getByText("Build not reported")).toBeTruthy();
     expect(screen.getByText("Build unverified")).toBeTruthy();
     legacy.components[1].status = "incompatible";
-    fireEvent.click(screen.getByRole("button", { name: "Refresh versions" }));
+    fireEvent.click(screen.getByRole("button", { name: "Refresh service status" }));
     expect(await screen.findAllByText("Protocol mismatch")).toBeTruthy();
   });
 
@@ -237,7 +364,7 @@ describe("About page", () => {
     await expandGroups();
     await screen.findAllByText("Different build");
     api.versions.mockRejectedValue({ message: "Version service unavailable." });
-    fireEvent.click(screen.getByRole("button", { name: "Refresh versions" }));
+    fireEvent.click(screen.getByRole("button", { name: "Refresh service status" }));
     expect(await screen.findByText(/Showing the last successful check/)).toBeTruthy();
     expect(screen.getAllByText("Different build").length).toBeGreaterThan(0);
   });
@@ -279,6 +406,7 @@ describe("About page", () => {
     await waitFor(() => expect(api.versions).toHaveBeenCalledOnce());
     page.rerender(<AboutPage {...options} visible={false} />);
     page.rerender(<AboutPage {...options} />);
+    await expandGroups();
     await screen.findAllByText("Different build");
     const old = structuredClone(snapshot);
     old.components[1].status = "outdated";
@@ -351,16 +479,20 @@ describe("About page", () => {
   });
 
   it("keeps component update results in the dialog without duplicating its summary on About or in notifications", async () => {
+    api.runtime.mockResolvedValueOnce({ active: null, build_label: null, origin: null, missing: false })
+      .mockResolvedValue({ active: "verified-build", build_label: "stable-v0.1.5-installed", origin: { channel: "stable" }, missing: false });
     api.update.mockResolvedValue([{ host_index: 0, state: "complete", error: null, result: { package: "full_bundle", bundle_id: "verified-build", target_triple: "test-platform", services_preserved: true } }]);
     renderPage(<AboutPage {...props()} />);
-    fireEvent.click(await screen.findByRole("button", { name: "Update components…" }));
-    const dialog = screen.getByRole("dialog", { name: "Update components" });
-    fireEvent.click(within(dialog).getByRole("button", { name: "Update" }));
+    fireEvent.click(within(await screen.findByRole("region", { name: "This computer" })).getByRole("button", { name: "Install from…" }));
+    const dialog = screen.getByRole("dialog", { name: "Install runtime" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Install" }));
     expect(await within(dialog).findByText("1 of 1 hosts updated. Running services were preserved.")).toBeTruthy();
     expect(screen.queryByText("1 hosts updated. Running services were preserved; restart separately where required.")).toBeNull();
     expect(notifications.snapshot().entries).toHaveLength(0);
     fireEvent.click(within(dialog).getByRole("button", { name: "Done" }));
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(screen.queryByText(/hosts updated/)).toBeNull();
+    expect(await screen.findByText("stable-v0.1.5-installed")).toBeTruthy();
+    expect(api.runtime).toHaveBeenLastCalledWith({ kind: "local" });
   });
 });

@@ -104,11 +104,21 @@ fn registry() -> &'static Mutex<Registry> {
   REGISTRY.get_or_init(Mutex::default)
 }
 
-struct Guard(Key);
-impl Drop for Guard {
+pub(crate) struct OperationGuard(Key);
+impl Drop for OperationGuard {
   fn drop(&mut self) {
     registry().lock().unwrap().active.remove(&self.0);
   }
+}
+
+pub(crate) fn register_operation(
+  window: &str,
+  id: &str,
+) -> CommandResult<(OperationGuard, watch::Receiver<bool>)> {
+  let key = (window.to_owned(), id.to_owned());
+  let (cancel, cancelled) = watch::channel(false);
+  registry().lock().unwrap().register(key.clone(), cancel)?;
+  Ok((OperationGuard(key), cancelled))
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -129,10 +139,7 @@ pub async fn update_components(
       "Choose between one and 64 hosts.",
     ));
   }
-  let key = (window.label().to_owned(), request.attempt_id.clone());
-  let (cancel, mut cancelled) = watch::channel(false);
-  registry().lock().unwrap().register(key.clone(), cancel)?;
-  let _guard = Guard(key);
+  let (_guard, mut cancelled) = register_operation(window.label(), &request.attempt_id)?;
   #[cfg(not(unix))]
   let _ = on_prompt;
   let context = Context {

@@ -17,8 +17,8 @@ export function previewComponentVersions(): ComponentVersionsSnapshot {
     { ...row("ctld-local", "ctld", "ctld (SSH, VPN)", { ...info("ctld", "1.1.13"), version: "0.0.9", source_revision: "123456abcdef", source_fingerprint: "older-build-preview" }, "outdated"), available: info("ctld", "1.1.13"), installed: info("ctld", "1.1.13"), restart_required: true, detail: "Connection broker for SSH, port forwards, and VPNs." },
     { ...row("ctmuxd-local", "ctmuxd", "ctmuxd", { ...info("ctmux", "1.0.13"), source_fingerprint: "changed-build-preview", dirty: true }, "different_build"), available: info("ctmux", "1.0.13"), installed: info("ctmux", "1.0.13"), restart_required: true, detail: "Terminal sessions" },
     { ...row("ctl-taskd-local", "ctl-taskd", "ctl-taskd", info("task", "1.0.3")), detail: "Task execution" },
-    { ...row("remote-agent", "ctl_agent", "ctl-agent — Development", { ...agent, source_revision: "112233445566", source_fingerprint: "remote-build-preview" }, "different_build"), location: "remote", host_id: "dev-server", host_key: "saved:dev-server", host_name: "Development", connected: true, observation: "last_observed", available: agent, installed: agent, detail: "Connected SSH environment" },
-    { ...row("remote-ctmux", "ctmuxd", "ctmuxd — Development", info("ctmux", "1.0.13")), location: "remote", host_id: "dev-server", host_key: "saved:dev-server", host_name: "Development", connected: true, observation: "last_observed" },
+    { ...row("remote-agent", "ctl_agent", "ctl-agent — Development", { ...agent, source_revision: "112233445566", source_fingerprint: "remote-build-preview" }, "different_build"), location: "remote", host_id: "preview-dev", host_key: "saved:preview-dev", host_name: "Development server", connected: true, observation: "last_observed", available: agent, installed: agent, detail: "Connected SSH environment" },
+    { ...row("remote-ctmux", "ctmuxd", "ctmuxd — Development", info("ctmux", "1.0.13")), location: "remote", host_id: "preview-dev", host_key: "saved:preview-dev", host_name: "Development server", connected: true, observation: "last_observed" },
   ] };
 }
 

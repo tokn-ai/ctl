@@ -13,34 +13,20 @@ const available: ComponentUpdateCatalog = {
 beforeEach(() => { vi.resetAllMocks(); vi.mocked(checkComponentUpdates).mockResolvedValue(available); });
 afterEach(cleanup);
 
-it("checks only when visible and refreshes publication metadata explicitly", async () => {
-  const on_update = vi.fn();
-  const page = render(<PublishedBundleStatus visible={false} on_update={on_update} />);
-  expect(checkComponentUpdates).not.toHaveBeenCalled();
-  page.rerender(<PublishedBundleStatus visible on_update={on_update} />);
+it("checks the selected channel and refreshes its metadata explicitly", async () => {
+  render(<PublishedBundleStatus channel="nightly" />);
   expect(await screen.findByText("0.1.0-dev.abcdef123456")).toBeTruthy();
-  expect(checkComponentUpdates).toHaveBeenCalledWith(undefined, false);
+  expect(screen.getByRole("status").textContent).toContain("Published nightly bundle");
+  expect(checkComponentUpdates).toHaveBeenCalledWith("nightly", false);
   fireEvent.click(screen.getByRole("button", { name: "Check for bundle updates" }));
-  await waitFor(() => expect(checkComponentUpdates).toHaveBeenLastCalledWith(undefined, true));
-  fireEvent.click(await screen.findByRole("button", { name: "Install published bundle…" }));
-  expect(on_update).toHaveBeenCalledWith("nightly");
+  await waitFor(() => expect(checkComponentUpdates).toHaveBeenLastCalledWith("nightly", true));
 });
 
 it("keeps a failed check distinct from an available publication", async () => {
   vi.mocked(checkComponentUpdates).mockResolvedValue({ ...available, catalog: null, error: "Publication is unavailable." });
-  render(<PublishedBundleStatus on_update={vi.fn()} />);
+  render(<PublishedBundleStatus channel="nightly" />);
   expect((await screen.findByRole("alert")).textContent).toContain("Publication is unavailable.");
-  expect(screen.queryByRole("button", { name: "Install published bundle…" })).toBeNull();
   expect(screen.queryByText("0.1.0-dev.abcdef123456")).toBeNull();
-});
-
-it("labels a Nightly publication and preserves that channel when opening installation", async () => {
-  const on_update = vi.fn();
-  render(<PublishedBundleStatus channel="nightly" on_update={on_update} />);
-  expect((await screen.findByRole("status")).textContent).toContain("Published nightly bundle");
-  expect(checkComponentUpdates).toHaveBeenCalledWith("nightly", false);
-  fireEvent.click(screen.getByRole("button", { name: "Install published bundle…" }));
-  expect(on_update).toHaveBeenCalledExactlyOnceWith("nightly");
 });
 
 it("ignores an old channel response after the channel changes", async () => {
@@ -56,9 +42,8 @@ it("ignores an old channel response after the channel changes", async () => {
   expect(screen.getByText("0.2.0")).toBeTruthy();
 });
 
-it("points to the explicit checkout build and reports published incompatibility", async () => {
+it("reports published incompatibility for the selected channel", async () => {
   vi.mocked(checkComponentUpdates).mockResolvedValue({ ...available, local_development: true, catalog: { ...available.catalog!, targets: [{ ...available.catalog!.targets[0], compatible: false }] } });
-  render(<PublishedBundleStatus on_update={vi.fn()} />);
-  expect(await screen.findByText("Choose Build from checkout in Update components to build for Linux x64 or ARM64.")).toBeTruthy();
-  expect(screen.getByText(/Some published targets require a newer client/)).toBeTruthy();
+  render(<PublishedBundleStatus channel="nightly" />);
+  expect(await screen.findByText(/Some published targets require a newer client/)).toBeTruthy();
 });

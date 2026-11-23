@@ -60,6 +60,17 @@ export interface ComponentUpdateContext {
   source?: ComponentUpdateSource;
 }
 
+export interface AboutRuntimeStatus {
+  active: string | null;
+  build_label: string | null;
+  origin: { channel: string; publication_id?: string | null } | null;
+  missing: boolean;
+}
+
+export interface AboutRuntimeSyncResult {
+  state: "installed" | "pinned" | "current";
+}
+
 export interface CredentialTarget {
   name: string;
   target: SshConnectionTarget;

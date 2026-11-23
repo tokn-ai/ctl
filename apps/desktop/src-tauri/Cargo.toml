@@ -29,6 +29,8 @@ ctl-files.workspace = true
 ctl-ipc.workspace = true
 dirs.workspace = true
 glob.workspace = true
+process-wrap = { version = "10.0.1", default-features = false, features = ["tokio1", "process-session", "job-object", "creation-flags", "kill-on-drop"] }
+tempfile = "3.27.0"
 ctmux-client.workspace = true
 ctmux-ipc.workspace = true
 ctmux-proto.workspace = true
@@ -51,6 +53,9 @@ tokio = { workspace = true, features = ["test-util"] }
 
 [target.'cfg(unix)'.dependencies]
 rustix.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", features = ["Win32_System_Threading"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"

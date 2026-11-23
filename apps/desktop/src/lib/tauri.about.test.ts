@@ -1,9 +1,23 @@
 import { beforeEach, expect, it, vi } from "vitest";
-import { getComponentVersions, preflightComponentAction, executeComponentAction, acknowledgeComponentReconnect, probeSshHost, getComponentBundles, selectComponentBundle, updateComponents, cancelComponentUpdate } from "./tauri";
+import { getAboutRuntimeStatus, syncAboutRuntime, getComponentVersions, preflightComponentAction, executeComponentAction, acknowledgeComponentReconnect, probeSshHost, getComponentBundles, selectComponentBundle, updateComponents, cancelComponentUpdate } from "./tauri";
 
 const ipc = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: ipc.invoke, Channel: class {} }));
 beforeEach(() => vi.resetAllMocks());
+
+it("scopes runtime status and sync to the selected saved method", async () => {
+  await getAboutRuntimeStatus({ kind: "local" });
+  expect(ipc.invoke).toHaveBeenLastCalledWith("about_runtime_status", { host_id: null, method_id: null });
+  const target = { kind: "ssh" as const, destination: "alias", host_id: "saved", method_id: "alternate" };
+  await getAboutRuntimeStatus(target);
+  expect(ipc.invoke).toHaveBeenLastCalledWith("about_runtime_status", { host_id: "saved", method_id: "alternate" });
+  await syncAboutRuntime(target, "attempt");
+  expect(ipc.invoke).toHaveBeenLastCalledWith("sync_about_runtime", { host_id: "saved", method_id: "alternate", attempt_id: "attempt" });
+  ipc.invoke.mockClear();
+  await expect(syncAboutRuntime({ kind: "ssh", destination: "alias" }, "attempt")).rejects.toThrow();
+  await expect(syncAboutRuntime({ ...target, unavailable: "Route unavailable" }, "attempt")).rejects.toThrow("Route unavailable");
+  expect(ipc.invoke).not.toHaveBeenCalled();
+});
 
 it("uses snake_case update requests and forwards authentication and progress channels", async () => {
   const request = { targets: [{ kind: "local" as const }, { kind: "ssh" as const, destination: "builder" }], attempt_id: "batch", options: { package: "ctl_agent" as const, source: { kind: "provided" as const, path: "/tmp/build", local_build: false, ctld_package: null } } };

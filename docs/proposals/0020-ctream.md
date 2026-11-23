@@ -267,6 +267,8 @@ repository or `--from ctream-preview-<target>.zip` for offline installation.
 Use `ctlup ctream update` to select a newer bundle, `ctlup ctream status` to see
 the active build, and `ctlup ctream cli -- list` to invoke the CLI. Preview flags
 can be passed with `ctlup ctream run -- OPTIONS`.
+The launched preview searches the selected ctl profile’s bin directory first
+when it looks up `ctl` on `PATH`.
 
 `ctlup` keeps the active selection and installed generations in
 `$CTL_DATA_DIR/ctlup/store/ctream/` (`~/.tokn/ctl/ctlup/store/ctream/` by default).

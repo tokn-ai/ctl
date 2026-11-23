@@ -18,6 +18,14 @@ labeled **Last observed**. Select a component name to compare full build
 fingerprints, revisions, and protocols. Restart and reconnect actions show
 their impact before they run.
 
+**Build and channel** shows the channels recorded in that machine’s `ctlup`
+catalog for each running and on-disk build. The match uses the version, full
+revision, source fingerprint, and modified-source flag. Nightly and local
+builds always show the short Git commit SHA beside the version. Expand the
+component for the full SHA. A build can appear in several channels.
+**Channel unknown** means the catalog could not identify
+that build. Use **Check installation** to load a saved host’s catalog.
+
 Each protocol has its own line and status: a green tick for the app's current
 contract, a yellow tick for a different contract that shares an explicitly
 supported version, and a red cross for no shared contract. Unreported protocols

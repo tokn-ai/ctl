@@ -4,9 +4,14 @@ use self::manager::run_manager;
 use crate::error::{CommandErrorDto, CommandResult};
 use ctl_client::hosts::HostCatalogSnapshot;
 use ctl_client::installation::InstallationShow;
+use ctl_core::component::ComponentBuildInfo;
 use ctl_core::installations::CatalogOrigin;
 use serde::{Deserialize, Serialize};
-use std::{io, time::Duration};
+use std::{
+  collections::{BTreeMap, BTreeSet},
+  io,
+  time::Duration,
+};
 use tokio::sync::watch;
 
 mod manager;
@@ -17,10 +22,17 @@ pub(crate) struct AboutRuntimeStatus {
   build_label: Option<String>,
   origin: Option<CatalogOrigin>,
   missing: bool,
+  build_channels: Vec<BuildChannels>,
+}
+
+#[derive(Serialize)]
+struct BuildChannels {
+  build: ComponentBuildInfo,
+  channels: BTreeSet<String>,
 }
 
 impl AboutRuntimeStatus {
-  fn from_inventory(inventory: InstallationShow) -> io::Result<Self> {
+  fn from_inventory(inventory: InstallationShow, native_target: Option<&str>) -> io::Result<Self> {
     inventory.validate()?;
     let active = inventory.active.as_ref();
     let build_label = inventory
@@ -34,13 +46,82 @@ impl AboutRuntimeStatus {
           &build.bundle_id,
         )
       });
+    let targets = native_target.map_or_else(|| selected_targets(&inventory), |target| vec![target]);
+    let build_channels = channels_for_targets(&inventory, &targets);
     Ok(Self {
       missing: active.is_some_and(|id| inventory.missing_builds.contains(id)),
       active: inventory.active,
       build_label,
       origin: inventory.active_origin,
+      build_channels,
     })
   }
+}
+
+// A remote catalog can contain builds for many targets. Only its active or
+// previous local selections establish which bundle targets run on that host.
+// A missing selection can still have a target recorded in its catalog entry.
+fn selected_targets(inventory: &InstallationShow) -> Vec<&str> {
+  inventory
+    .active
+    .iter()
+    .chain(&inventory.previous)
+    .filter_map(|id| {
+      inventory
+        .builds
+        .iter()
+        .find(|build| build.bundle_id == *id)
+        .map(|build| build.target_triple.as_str())
+        .or_else(|| {
+          inventory
+            .installations
+            .iter()
+            .find(|entry| entry.bundle_id == *id)
+            .map(|entry| entry.target_triple.as_str())
+        })
+    })
+    .collect()
+}
+
+fn channels_for_targets(inventory: &InstallationShow, targets: &[&str]) -> Vec<BuildChannels> {
+  let builds: BTreeMap<_, _> = inventory
+    .builds
+    .iter()
+    .filter(|build| {
+      targets
+        .iter()
+        .any(|target| ctl_core::bundles::runnable_on(&build.target_triple, target))
+    })
+    .map(|build| (&build.bundle_id, &build.build))
+    .collect();
+  let memberships = inventory
+    .installations
+    .iter()
+    .filter_map(|entry| Some((&entry.bundle_id, entry.origin.as_ref()?)));
+  let active = inventory
+    .active
+    .as_ref()
+    .zip(inventory.active_origin.as_ref());
+  let mut grouped = BTreeMap::new();
+  for (id, origin) in memberships.chain(active) {
+    let Some(&build) = builds.get(id) else {
+      continue;
+    };
+    // Complete bundle manifests enforce one version, revision, fingerprint,
+    // and dirty flag across their components. Distinct bundles can share all four.
+    let key = (
+      &build.version,
+      &build.source_revision,
+      &build.source_fingerprint,
+      build.dirty,
+    );
+    let record = grouped.entry(key).or_insert_with(|| BuildChannels {
+      build: build.clone(),
+      channels: BTreeSet::new(),
+    });
+    record.channels.insert(origin.channel.clone());
+  }
+  grouped.into_values().collect()
 }
 
 #[derive(Serialize)]
@@ -214,7 +295,8 @@ pub(crate) async fn about_runtime_status(
       () = tokio::time::sleep(Duration::from_secs(30)) => return Err(CommandErrorDto::backend("Timed out reading the local runtime inventory.")),
     }
   };
-  AboutRuntimeStatus::from_inventory(inventory).map_err(CommandErrorDto::backend)
+  let native_target = target.is_none().then(ctl_core::paths::native_target);
+  AboutRuntimeStatus::from_inventory(inventory, native_target).map_err(CommandErrorDto::backend)
 }
 
 #[tauri::command(rename_all = "snake_case")]

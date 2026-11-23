@@ -1,31 +1,54 @@
 import type {
   AboutRuntimeStatus, AboutRuntimeSyncResult, BundleChannel, ComponentBundle, ComponentBundlesSnapshot,
   ComponentUpdateCatalog, ComponentUpdateHostResult, ComponentUpdateProgress, ComponentUpdateRequest,
-  ComponentUpdateSource,
+  ComponentUpdateSource, ComponentVersionsSnapshot,
 } from "../src/lib/types";
 
 const local_target = "aarch64-apple-darwin";
 const remote_target = "x86_64-unknown-linux-musl";
-const local_build = { id: "c".repeat(64), label: "dev-20261120T120000Z-v0.1.0-abcdef1-local", version: "0.1.0", revision: "abcdef1", channel: "local" };
+
+function identity(version: string, revision: string, fingerprint: string) {
+  return { version, source_revision: revision.repeat(5), source_fingerprint: fingerprint.repeat(8), dirty: false };
+}
+
+// Both the inventory and service probes report these complete fictional identities.
+export const sample_builds = {
+  current: identity("0.1.0", "abcdef12", "9d314f08"),
+  older_stable: identity("0.0.9", "123456ab", "37ce621a"),
+  older_nightly: identity("0.1.0", "abcdef12", "c5891e4a"),
+};
+const local_build = { id: "c".repeat(64), label: "dev-20261120T120000Z-v0.1.0-abcdef1-local", identity: sample_builds.current, channel: "local" };
+const remote_build = { id: "f".repeat(64), label: "stable-v0.1.0-abcdef1", identity: sample_builds.current, channel: "stable" };
 const published = {
-  stable: { id: "d".repeat(64), label: "stable-v0.1.1-fedcba0", version: "0.1.1", revision: "fedcba0", channel: "stable" },
-  nightly: { id: "e".repeat(64), label: "nightly-20261122T120000Z-v0.1.1-abc1234", version: "0.1.1", revision: "abc1234", channel: "nightly" },
+  stable: { id: "d".repeat(64), label: "stable-v0.1.1-fedcba0", identity: identity("0.1.1", "fedcba01", "dedcba01"), channel: "stable" },
+  nightly: { id: "e".repeat(64), label: "nightly-20261122T120000Z-v0.1.1-abc1234", identity: identity("0.1.1", "abc12345", "abcd1234"), channel: "nightly" },
 };
 type Build = typeof local_build;
 
 export function previewUpdateCatalog(channel: BundleChannel = "stable"): ComponentUpdateCatalog {
   const build = published[channel];
   return { default_channel: "stable", local_development: true, error: null, catalog: {
-    channel, bundle_id: build.label, app_version: build.version, git_revision: build.revision,
+    channel, bundle_id: build.label, app_version: build.identity.version, git_revision: build.identity.source_revision,
     targets: [local_target, remote_target].map((target_triple) => ({ target_triple, compatible: true, components: {} })),
   } };
 }
 
 /** All changes to the preview's runtime inventory live only for this page load. */
-export function previewRuntime(bundles: ComponentBundlesSnapshot, partial: boolean) {
+export function previewRuntime(bundles: ComponentBundlesSnapshot, observations: ComponentVersionsSnapshot, partial: boolean) {
   const active = new Map<string | null, Build>([
     [null, local_build],
-    ["preview-dev", { id: "f".repeat(64), label: "stable-v0.1.0-123456a", version: "0.1.0", revision: "123456a", channel: "stable" }],
+    ["preview-dev", remote_build],
+  ]);
+  const retained = new Map<string | null, { build: Build["identity"]; channels: string[] }[]>([
+    [null, [
+      { build: sample_builds.current, channels: ["local"] },
+      { build: sample_builds.older_stable, channels: ["stable"] },
+      { build: sample_builds.older_nightly, channels: ["nightly"] },
+    ]],
+    ["preview-dev", [
+      { build: sample_builds.current, channels: ["stable"] },
+      { build: sample_builds.older_nightly, channels: ["nightly"] },
+    ]],
   ]);
   const known = new Map<string, Build>([local_build, ...Object.values(published)].map((build) => [build.id, build]));
   const pending = new Map<string, () => void>();
@@ -45,6 +68,17 @@ export function previewRuntime(bundles: ComponentBundlesSnapshot, partial: boole
   function activate(host_id: string | null, build: Build) {
     active.set(host_id, build);
     known.set(build.id, build);
+    const inventory = retained.get(host_id) ?? [];
+    const membership = inventory.find((entry) => entry.build === build.identity);
+    if (!membership) inventory.push({ build: build.identity, channels: [build.channel] });
+    else if (!membership.channels.includes(build.channel)) membership.channels.push(build.channel);
+    retained.set(host_id, inventory);
+    for (const row of observations.components) {
+      if (row.host_id !== host_id || row.component === "ctmux" || !row.installed) continue;
+      row.installed = { ...row.installed, ...build.identity };
+      if (row.location === "local") row.available = row.installed;
+      if (row.running?.source_fingerprint) row.restart_required = row.running.source_fingerprint !== build.identity.source_fingerprint;
+    }
     if (host_id !== null) return;
     for (const bundle of bundles.bundles) {
       if (bundle.local_use === "selected") bundle.local_use = "available";
@@ -53,7 +87,7 @@ export function previewRuntime(bundles: ComponentBundlesSnapshot, partial: boole
     if (installed) installed.local_use = "selected";
     else bundles.bundles.push({
       bundle_id: build.id, target_triple: local_target, source: build.channel === "local" ? "local" : "release",
-      app_version: build.version, git_revision: build.revision, dirty: build.channel === "local", compatible: true,
+      app_version: build.identity.version, git_revision: build.identity.source_revision, dirty: build.identity.dirty, compatible: true,
       included: false, local_use: "selected", local_unavailable_reason: null, upload_use: "available", upload_unavailable_reason: null,
     });
   }
@@ -74,7 +108,10 @@ export function previewRuntime(bundles: ComponentBundlesSnapshot, partial: boole
   return {
     status(host_id: string | null): AboutRuntimeStatus {
       const build = read(host_id);
-      return { active: build?.id ?? null, build_label: build?.label ?? null, origin: build ? { channel: build.channel } : null, missing: false };
+      return {
+        active: build?.id ?? null, build_label: build?.label ?? null, origin: build ? { channel: build.channel } : null,
+        missing: false, build_channels: structuredClone(retained.get(host_id) ?? []),
+      };
     },
     selectLocal(bundle: ComponentBundle) {
       const build = known.get(bundle.bundle_id);

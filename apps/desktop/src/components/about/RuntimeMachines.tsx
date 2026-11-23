@@ -179,7 +179,12 @@ function RuntimeMachine({ visible, group, target, revision, on_synced, on_instal
       {group.rows.length > 0 && <HostStatus group={group} action_error={actions.action_error} />}
       <div id={detailsId} hidden={!expanded} className="runtime-machine-details">
         {canInspect && <button type="button" disabled={disabled} className="runtime-check-host" aria-label={t("about.check_named_host", { host: group.label })} onClick={() => on_inspect(target)}>{t("about.check_host")}</button>}
-        {expanded && group.rows.length > 0 && <div className="about-table-scroll"><ComponentVersionTable group={group} {...actions} /></div>}
+        {expanded && group.rows.length > 0 && <div className="about-table-scroll"><ComponentVersionTable
+          group={group}
+          build_channels={status?.build_channels}
+          channel_unchecked={!!canManage && !status && !readError}
+          {...actions}
+        /></div>}
       </div>
     </div>}
   </section>;

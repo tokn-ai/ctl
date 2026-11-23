@@ -73,6 +73,96 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.restoreAllMocks(); localStorage.removeItem("ctmux.desktop.language"); });
 
 describe("About page", () => {
+  it("shows the recorded channels of the running and on-disk builds independently", async () => {
+    const identity = { version: "0.1.5", source_revision: "a".repeat(40), source_fingerprint: "b".repeat(64), dirty: false };
+    const replacement = { ...identity, source_fingerprint: "b".repeat(8) + "c".repeat(56) };
+    const observations = structuredClone(snapshot);
+    observations.components[1].running = { ...current, ...identity };
+    observations.components[1].installed = { ...current, ...replacement };
+    api.versions.mockResolvedValue(observations);
+    api.runtime.mockResolvedValue({
+      active: "selected", build_label: "selected-build", origin: { channel: "local" }, missing: false,
+      build_channels: [
+        { build: { ...identity, dirty: true }, channels: ["pr-123"] },
+        { build: identity, channels: ["nightly", "stable"] },
+        { build: replacement, channels: ["local"] },
+      ],
+    });
+    renderPage(<AboutPage {...props()} />);
+    await screen.findByText("selected-build");
+    await expandGroups();
+    const table = within(screen.getByRole("table", { name: "This computer component versions" }));
+    const owner = table.getByText("Running").parentElement!;
+    const disk = table.getByText("On disk").parentElement!;
+    expect(owner.textContent).toContain(identity.source_revision.slice(0, 7));
+    expect(disk.textContent).toContain(replacement.source_revision.slice(0, 7));
+    expect(owner.textContent).toContain(identity.source_fingerprint.slice(0, 9));
+    expect(disk.textContent).toContain(replacement.source_fingerprint.slice(0, 9));
+    expect(owner.textContent).toMatch(/nightly/i);
+    expect(owner.textContent).toMatch(/stable/i);
+    expect(owner.textContent).not.toMatch(/local|pr-123/i);
+    expect(disk.textContent).toMatch(/local/i);
+    expect(disk.textContent).not.toMatch(/nightly|stable|pr-123/i);
+    const details = openDetails(table.getByRole("button", { name: "Show details for ctld (SSH)" }));
+    const running = within(details.getByRole("region", { name: "Running" }));
+    const installed = within(details.getByRole("region", { name: "On disk" }));
+    expect(running.getByText(identity.source_revision)).toBeTruthy();
+    expect(installed.getByText(replacement.source_revision)).toBeTruthy();
+    expect(running.getByText("Channel").parentElement!.textContent).toMatch(/nightly/i);
+    expect(installed.getByText("Channel").parentElement!.textContent).toMatch(/local/i);
+  });
+
+  it.each(["nightly", "local", "stable"])("summarizes matching %s builds with the appropriate commit detail", async (channel) => {
+    const identity = { version: "0.1.5", source_revision: "0123456789abcdef".repeat(2) + "01234567", source_fingerprint: "f".repeat(64), dirty: false };
+    const observations = structuredClone(snapshot);
+    observations.components[1].running = { ...current, ...identity };
+    observations.components[1].installed = { ...current, ...identity };
+    observations.components[1].status = "current";
+    api.versions.mockResolvedValue(observations);
+    api.runtime.mockResolvedValue({
+      active: "selected", build_label: "selected-build", origin: { channel }, missing: false,
+      build_channels: [{ build: identity, channels: [channel] }],
+    });
+    renderPage(<AboutPage {...props()} />);
+    await screen.findByText("selected-build");
+    await expandGroups();
+    const table = within(screen.getByRole("table", { name: "This computer component versions" }));
+    const summary = table.getByText("Running + on disk").parentElement!;
+    expect(summary.textContent).toContain(identity.version);
+    expect(summary.textContent).toContain(channel);
+    const short_sha = identity.source_revision.slice(0, 7);
+    if (channel === "stable") expect(summary.textContent).not.toContain(short_sha);
+    else expect(summary.textContent).toContain(short_sha);
+    const details = openDetails(table.getByRole("button", { name: "Show details for ctld (SSH)" }));
+    expect(details.getByText(identity.source_revision)).toBeTruthy();
+  });
+
+  it("checks the remote inventory on demand and leaves an unrecognized owner's channel unknown", async () => {
+    const identity = { version: "0.1.5", source_revision: "a".repeat(40), source_fingerprint: "b".repeat(64), dirty: false };
+    const observations = structuredClone(snapshot);
+    observations.components[2].running = { ...current, ...identity, source_fingerprint: null };
+    observations.components[2].installed = { ...current, ...identity };
+    api.versions.mockResolvedValue(observations);
+    const inventory = { active: "selected", missing: false, build_label: "runtime", origin: { channel: "stable" } };
+    api.runtime.mockResolvedValueOnce({ ...inventory, build_channels: [{ build: identity, channels: ["local"] }] })
+      .mockResolvedValueOnce({ ...inventory, build_channels: [{ build: identity, channels: ["nightly"] }] });
+    renderPage(<AboutPage {...props()} />);
+    await expandGroups();
+    const host = within(screen.getByRole("region", { name: "Development" }));
+    const table = within(host.getByRole("table"));
+    const details = openDetails(table.getByRole("button", { name: "Show details for ctl-agent — Development" }));
+    const running = within(details.getByRole("region", { name: "Running · last observed" }));
+    const installed = within(details.getByRole("region", { name: "On disk" }));
+    expect(installed.getByText("Channel").parentElement!.textContent).toMatch(/not checked/i);
+    expect(api.runtime).toHaveBeenCalledExactlyOnceWith({ kind: "local" });
+    fireEvent.click(host.getByRole("button", { name: "Check installation" }));
+    await waitFor(() => expect(installed.getByText("Channel").parentElement!.textContent).toMatch(/nightly/i));
+    const owner_channel = running.getByText("Channel").parentElement!.textContent;
+    expect(owner_channel).toMatch(/unknown/i);
+    expect(owner_channel).not.toMatch(/stable|nightly|local/i);
+    expect(api.runtime).toHaveBeenLastCalledWith(saved_target);
+  });
+
   it("shows the Windows x64 install command only for a confirmed empty local runtime", async () => {
     vi.spyOn(navigator, "platform", "get").mockReturnValue("Win32");
     api.runtime.mockRejectedValueOnce(new Error("Cannot read the local runtime."));

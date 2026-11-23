@@ -1,5 +1,5 @@
 import { formatter, translate, type Locale } from "../i18n/messages";
-import type { ComponentProtocolVersion, ComponentVersionInfo, ComponentVersionRow } from "../../lib/types";
+import type { AboutRuntimeStatus, ComponentProtocolVersion, ComponentVersionInfo, ComponentVersionRow } from "../../lib/types";
 
 export interface ComponentHostGroup {
   key: string;
@@ -21,6 +21,13 @@ export interface ComponentBuildView {
   label: string;
   info: ComponentVersionInfo | null;
   legacy: boolean;
+}
+
+/** Look up the channels that contain this exact native build on the inspected machine. */
+export function componentBuildChannels(info: ComponentVersionInfo | null, catalog: AboutRuntimeStatus["build_channels"]): string[] {
+  if (!catalog || !info?.version || !info.source_revision || !info.source_fingerprint || info.dirty == null) return [];
+  return catalog.find(({ build }) => build.version === info.version && build.source_revision === info.source_revision &&
+    build.source_fingerprint === info.source_fingerprint && build.dirty === info.dirty)?.channels ?? [];
 }
 
 export function groupComponentHosts(rows: readonly ComponentVersionRow[], locale: Locale = "en"): ComponentHostGroup[] {

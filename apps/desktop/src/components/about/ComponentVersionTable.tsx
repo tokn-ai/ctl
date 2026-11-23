@@ -1,8 +1,8 @@
 import { useId, useState } from "react";
 import { translate, type DisplayText, type Locale } from "../../features/i18n/messages";
 import { useLocale } from "../../features/i18n/LocaleContext";
-import { componentBuildViews, componentHostFailure, componentHostStatuses, componentProtocolLines, type ComponentBuildView, type ComponentHostGroup } from "../../features/about/componentVersions";
-import type { ComponentVersionInfo, ComponentVersionRow, ComponentVersionStatus } from "../../lib/types";
+import { componentBuildChannels, componentBuildViews, componentHostFailure, componentHostStatuses, componentProtocolLines, type ComponentBuildView, type ComponentHostGroup } from "../../features/about/componentVersions";
+import type { AboutRuntimeStatus, ComponentVersionInfo, ComponentVersionRow, ComponentVersionStatus } from "../../lib/types";
 import { ComponentProtocols } from "./ComponentProtocols";
 import { InlineFeedback } from "../feedback/InlineFeedback";
 import { Icon } from "../ui/Icon";
@@ -38,9 +38,15 @@ export interface ComponentDiagnosticActions {
   on_restart(component_id: string): void;
 }
 
-// When equal versions conceal a rebuild, keep the distinguishing part of the ID.
-function buildReferences([owner, disk]: ComponentBuildView[]): string[] {
-  if (!owner.info || !disk?.info || owner.info.version !== disk.info.version) return [];
+interface ChannelInventory {
+  build_channels: AboutRuntimeStatus["build_channels"];
+  channel_unchecked: boolean;
+}
+
+// Keep Git revisions usable as commit prefixes. Long fingerprint comparisons
+// can show the distinguishing digits directly because they aren't Git refs.
+function differingBuildIds([owner, disk]: ComponentBuildView[]) {
+  if (!owner.info || !disk?.info || owner.info.version !== disk.info.version) return;
   for (const field of ["source_revision", "source_fingerprint"] as const) {
     const left = owner.info[field];
     const right = disk.info[field];
@@ -48,25 +54,35 @@ function buildReferences([owner, disk]: ComponentBuildView[]): string[] {
     let difference = 0;
     while (left[difference] === right[difference]) difference++;
     const length = Math.max(8, difference + 1);
-    return [left, right].map((id) => length <= 12 ? id.slice(0, length) : `${id.slice(0, 7)}…${id.slice(difference - 1, difference + 2)}`);
+    const values = [left, right].map((id) => field === "source_revision" || length <= 12
+      ? id.slice(0, length) : `${id.slice(0, 7)}…${id.slice(difference - 1, difference + 2)}`);
+    return { field, values };
   }
-  return [];
 }
 
-function ComponentRows({ row, busy_id, restarting, action_error, on_restart, hide_probe_error }: ComponentDiagnosticActions & { row: ComponentVersionRow; hide_probe_error: boolean }) {
-  const { t, locale, formatText } = useLocale();
+function ComponentRows({ row, busy_id, restarting, action_error, on_restart, hide_probe_error, build_channels, channel_unchecked }: ComponentDiagnosticActions & ChannelInventory & { row: ComponentVersionRow; hide_probe_error: boolean }) {
+  const { t, locale, intl, formatText } = useLocale();
   const [expanded, setExpanded] = useState(false);
   const details_id = useId();
   const action = row.action;
   const action_label = action === "reconnect" ? t("about.reconnect") : t("about.restart");
   const probe_error = hide_probe_error ? null : row.error;
   const action_message = action_error?.component_id === row.component_id ? formatText(action_error.message) : null;
-  const views = componentBuildViews(row, locale);
+  const builds = componentBuildViews(row, locale);
+  const difference = differingBuildIds(builds);
+  const views = builds.map((view, index) => {
+    const channels = componentBuildChannels(view.info, build_channels);
+    const names = channels.map((channel) => channel === "stable" || channel === "nightly" ? t(`about.channel_${channel}`) : channel);
+    const show_sha = channels.includes("nightly") || channels.includes("local");
+    const revision = difference?.field === "source_revision" ? difference.values[index]
+      : show_sha ? view.info?.source_revision?.slice(0, 8) : undefined;
+    const fingerprint = difference?.field === "source_fingerprint" ? difference.values[index] : undefined;
+    return { ...view, revision, fingerprint, channels: intl.formatList(names, { type: "unit" }) };
+  });
   const mismatch = row.status === "incompatible" || views.some((view) =>
     componentProtocolLines(row, view, locale).some((line) => line.status === "incompatible"));
   const label = row.location === "local" ? row.label : row.component === "ctl_agent" ? "ctl-agent" : row.component;
   const status = row.observation === "not_checked" || row.observation === "installed" ? "unknown" : row.status;
-  const references = buildReferences(views);
   const show_details = t(expanded ? "about.hide_component_details" : "about.show_component_details", { name: row.label });
 
   return <tbody role="rowgroup">
@@ -81,9 +97,13 @@ function ComponentRows({ row, busy_id, restarting, action_error, on_restart, hid
         {probe_error && <div title={probe_error}><InlineFeedback className="about-row-feedback">{row.location === "remote" ? t("about.check_component_failed") : probe_error}</InlineFeedback></div>}
         {action_message && <InlineFeedback className="about-row-feedback">{action_message}</InlineFeedback>}
       </th>
-      <td role="cell" className="about-service-build">{views.map((view, index) => <div className="about-build-summary" key={view.label}>
+      <td role="cell" className="about-service-build">{views.map((view) => <div className="about-build-summary" key={view.label}>
         <span>{view.label}</span>
-        <code>{view.info?.version ?? t("about.unknown")}{references[index] && <> · {references[index]}</>}</code>
+        <code>{view.info?.version ?? t("about.unknown")}{view.revision && <> · <span title={view.info?.source_revision ?? undefined}>{view.revision}</span></>}</code>
+        {view.info && (view.channels
+          ? <span className="about-build-channel" title={t("about.catalog_channel")}>{view.channels}</span>
+          : <span>{t(channel_unchecked ? "about.channel_not_checked" : "about.channel_unknown")}</span>)}
+        {view.fingerprint && <span title={view.info?.source_fingerprint ?? undefined}>{t("about.build_compact", { build: view.fingerprint })}</span>}
         {view.info?.dirty && <span>{t("about.modified")}</span>}
       </div>)}</td>
       <td role="cell" className="about-service-status"><div>
@@ -103,6 +123,7 @@ function ComponentRows({ row, busy_id, restarting, action_error, on_restart, hid
         <h4>{view.label}</h4>
         <dl>
           <div><dt>{t("about.service_version")}</dt><dd>{view.info?.version ?? t("about.not_reported")}</dd></div>
+          <div><dt title={t("about.catalog_channel")}>{t("about.service_channel")}</dt><dd>{view.channels || t(channel_unchecked ? "about.not_checked" : "about.unknown")}</dd></div>
           <div><dt>{t("about.service_revision")}</dt><dd>{view.info?.source_revision ?? t("about.not_reported")}</dd></div>
           <div><dt>{t("about.service_fingerprint")}</dt><dd>{view.info?.source_fingerprint ?? t("about.not_reported")}</dd></div>
         </dl>
@@ -113,13 +134,13 @@ function ComponentRows({ row, busy_id, restarting, action_error, on_restart, hid
   </tbody>;
 }
 
-export function ComponentVersionTable({ group, ...actions }: ComponentDiagnosticActions & { group: ComponentHostGroup }) {
+export function ComponentVersionTable({ group, ...actions }: ComponentDiagnosticActions & ChannelInventory & { group: ComponentHostGroup }) {
   const { t, locale } = useLocale();
   const failure = componentHostFailure(group.rows, locale);
   // Preserve native table navigation when the narrow layout stacks its cells.
   return <table role="table" className="about-version-table" aria-label={t("about.host_component_versions", { host: group.label })}>
     <thead role="rowgroup"><tr role="row">
-      <th role="columnheader" scope="col">{t("about.component")}</th><th role="columnheader" scope="col">{t("about.bundle_build")}</th>
+      <th role="columnheader" scope="col">{t("about.component")}</th><th role="columnheader" scope="col">{t("about.build_and_channel")}</th>
       <th role="columnheader" scope="col">{t("about.status")}</th><th role="columnheader" scope="col">{t("about.actions")}</th>
     </tr></thead>
     {group.rows.map((row) => <ComponentRows key={row.component_id} row={row} {...actions} hide_probe_error={failure?.component_ids.has(row.component_id) ?? false} />)}

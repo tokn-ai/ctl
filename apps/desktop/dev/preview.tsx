@@ -46,7 +46,7 @@ import {
   previewTargets,
   previewWorkspace,
 } from "./fixtures";
-import { previewComponentVersions, previewComponentBundles } from "./aboutFixtures";
+import { previewComponentVersions, previewComponentBundles, previewReplacementStatus } from "./aboutFixtures";
 import { previewRuntime, previewUpdateCatalog } from "./runtimeFixtures";
 import { previewCredentials, previewIdentityFiles } from "./credentialsFixtures";
 
@@ -84,7 +84,7 @@ if (credentials_param === "import") {
 }
 const component_versions = previewComponentVersions();
 const component_bundles = previewComponentBundles();
-const runtime = previewRuntime(component_bundles, about_param === "partial");
+const runtime = previewRuntime(component_bundles, component_versions, about_param === "partial");
 if (about_param === "partial") {
   const daemon = component_versions.components.find((row) => row.component === "ctmuxd")!;
   daemon.running = null;
@@ -298,7 +298,7 @@ mockIPC((command, payload) => {
       return new Promise((resolve, reject) => setTimeout(() => {
         if (about_param === "restart-error") { reject(new Error("The replacement did not become ready. Refresh versions to check its state.")); return; }
         row.running = replacement;
-        row.status = "current";
+        row.status = previewReplacementStatus(replacement);
         row.restart_required = false;
         row.legacy_protocols = [];
         if (row.component === "ctld") vpn_snapshot.connections = [];

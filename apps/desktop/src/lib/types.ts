@@ -4,6 +4,12 @@ export type Sequence = string;
 
 export type ComponentUpdatePackage = "ctl_agent" | "full_bundle";
 export type BundleChannel = "nightly" | "stable";
+export interface ComponentBuildInfo {
+  version: string;
+  source_revision: string | null;
+  source_fingerprint: string;
+  dirty: boolean;
+}
 export interface PublishedBundleCatalog {
   channel: BundleChannel;
   bundle_id: string;
@@ -12,7 +18,7 @@ export interface PublishedBundleCatalog {
   targets: {
     target_triple: string;
     compatible: boolean;
-    components: Record<string, { build: { version: string; source_revision: string | null; source_fingerprint: string; dirty: boolean }; protocols: ComponentProtocolVersion[] }>;
+    components: Record<string, { build: ComponentBuildInfo; protocols: ComponentProtocolVersion[] }>;
   }[];
 }
 export interface ComponentUpdateCatalog {
@@ -65,6 +71,8 @@ export interface AboutRuntimeStatus {
   build_label: string | null;
   origin: { channel: string; publication_id?: string | null } | null;
   missing: boolean;
+  /** One entry per complete native build identity, including its retained catalog memberships. */
+  build_channels?: { build: ComponentBuildInfo; channels: string[] }[];
 }
 
 export interface AboutRuntimeSyncResult {

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { runtimeChannelShowsRevision, runtimeTargetLabel, storedRuntimeBuilds, type StoredRuntimeBuild } from "../../features/about/runtimeTargets";
 import { useLocale } from "../../features/i18n/LocaleContext";
 import type { DisplayText } from "../../features/i18n/messages";
@@ -32,37 +32,38 @@ function shortId(id: string, related: (string | null)[], minimumLength = 8) {
   return id.slice(0, length);
 }
 
-function BuildRow({ row, legacyIds }: { row: StoredRuntimeBuild; legacyIds: string[] }) {
+function BuildGroup({ stored, legacyIds }: { stored: StoredRuntimeBuild; legacyIds: string[] }) {
   const { t, locale } = useLocale();
-  const targets = [...row.targets].sort(([a], [b]) => a.localeCompare(b));
+  const headingId = useId();
+  const targets = [...stored.targets].sort(([a], [b]) => a.localeCompare(b));
   const revisions = targets.map(([, record]) => record.build.source_revision);
   const fingerprints = targets.map(([, record]) => record.build.source_fingerprint);
   const differentRevision = new Set(revisions).size > 1;
   const differentFingerprint = new Set(fingerprints).size > 1;
-  return <tr>
-    <th scope="row">
-      <code>{row.label ?? row.version}</code>
-      {row.legacy_id && <small title={row.legacy_id}>{t("about.build_compact", { build: shortId(row.legacy_id, legacyIds, 12) })}</small>}
-    </th>
-    <td>{targets.map(([triple, { build, channels, current }]) => {
+  return <li className="runtime-build-group" aria-labelledby={headingId}>
+    <h3 id={headingId}>
+      <code>{stored.label ?? stored.version}</code>
+      {stored.legacy_id && <> <small title={stored.legacy_id}>{t("about.build_compact", { build: shortId(stored.legacy_id, legacyIds, 12) })}</small></>}
+    </h3>
+    <ul className="runtime-build-targets" role="list">{targets.map(([triple, { build, channels, current }]) => {
       const targetLabel = runtimeTargetLabel(triple, locale);
       const revision = build.source_revision;
       // Modern store labels include the Git prefix. Show revision separately
       // when a legacy snapshot omits the label or a shared prefix is ambiguous.
       const showRevision = differentRevision || (channels.some(runtimeChannelShowsRevision) &&
-        (!revision || !row.label?.includes(revision.slice(0, 7))));
-      return <div className="runtime-build-target" key={triple}>
+        (!revision || !stored.label?.includes(revision.slice(0, 7))));
+      return <li className="runtime-build-target" key={triple}>
         {targetLabel !== triple && <span>{targetLabel}</span>}
         <code className="runtime-target-triple">{triple}</code>
         <Channels channels={channels} />
-        {row.label?.includes("-vunknown-") && build.version !== "unknown" && <small>{build.version}</small>}
+        {stored.label?.includes("-vunknown-") && build.version !== "unknown" && <small>{build.version}</small>}
         {showRevision && <code title={revision ?? undefined}>{revision ? shortId(revision, revisions) : t("about.desktop_sha_unavailable")}</code>}
         {differentFingerprint && <small title={build.source_fingerprint}>{t("about.build_compact", { build: shortId(build.source_fingerprint, fingerprints) })}</small>}
         {build.dirty && <small>{t("about.modified")}</small>}
         {current === false && <small>{t("about.targets_retained")}</small>}
-      </div>;
-    })}</td>
-  </tr>;
+      </li>;
+    })}</ul>
+  </li>;
 }
 
 function fetchableTargets(catalog: PublishedBundleCatalog, installed: InstalledRuntimeTarget[]) {
@@ -190,10 +191,9 @@ export function RuntimeTargets({ inventory, loading, error, default_channel = "s
       <h2>{t("about.targets_title")}</h2>
       {!open && <button type="button" onClick={() => { setAdded(null); setOpen(true); }}><Icon name="plus" size={14} />{t("about.targets_add")}</button>}
     </div>
-    {builds.length ? <table className="runtime-build-table" aria-label={t("about.targets_title")}>
-      <thead><tr><th scope="col">{t("about.bundle_build")}</th><th scope="col">{t("about.bundle_target")}</th></tr></thead>
-      <tbody>{builds.map((row) => <BuildRow key={row.key} row={row} legacyIds={legacyIds} />)}</tbody>
-    </table>
+    {builds.length ? <ul className="runtime-build-groups" role="list">
+      {builds.map((stored) => <BuildGroup key={stored.key} stored={stored} legacyIds={legacyIds} />)}
+    </ul>
       : !error && <p className="about-muted" role="status">{t(loading ? "about.checking_builds" : targets ? "about.targets_none" : "about.not_checked")}</p>}
     {error && <InlineFeedback action={{ label: t("about.refresh_builds"), on_click: on_refresh, disabled: loading }}>{formatText(error)}</InlineFeedback>}
     {open && <AddTarget installed={targets ?? []} default_channel={default_channel} on_refresh={on_refresh} on_close={() => setOpen(false)}

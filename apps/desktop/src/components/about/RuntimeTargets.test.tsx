@@ -36,7 +36,7 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 
-it("shows every stored build label in a separate visible row, including retained builds with the same version", () => {
+it("gives every stored build its own heading, including retained builds with the same version", () => {
   const stable = "stable-v0.10.0-aaaaaaa";
   const nightly = "nightly-20261123T080000Z-v0.10.0-aaaaaaa";
   const local = "dev-20261122T180000Z-v0.10.0-aaaaaaa-local";
@@ -58,14 +58,14 @@ it("shows every stored build label in a separate visible row, including retained
   }));
   render(<RuntimeTargets inventory={{ ...inventory, installed_targets: [{ target_triple: linux, builds }] }}
     loading={false} error={null} on_refresh={on_refresh} />);
-  const table = within(screen.getByRole("table", { name: "Runtime targets on this computer" }));
-  expect(table.getAllByRole("rowheader").map((header) => header.textContent)).toEqual([
+  const section = within(screen.getByRole("region", { name: "Runtime targets on this computer" }));
+  expect(section.getAllByRole("heading", { level: 3 }).map((header) => header.textContent)).toEqual([
     pullRequest, nightly, local, collision, stable, rc10, rc2, previous, imported,
   ]);
-  const retained = within(table.getByRole("rowheader", { name: local }).closest("tr")!);
+  const retained = within(section.getByRole("listitem", { name: local }));
   expect(retained.getByText("Retained")).toBeTruthy();
   expect(retained.getByText(linux)).toBeTruthy();
-  expect(within(table.getByRole("rowheader", { name: imported }).closest("tr")!).getByText("snapshot")).toBeTruthy();
+  expect(within(section.getByRole("listitem", { name: imported })).getByText("snapshot")).toBeTruthy();
   expect(screen.queryByRole("heading", { name: "0.10.0" })).toBeNull();
 });
 
@@ -76,9 +76,13 @@ it("lists all targets for the same stored label with their own channels, retenti
     { target_triple: windows, builds: [{ build_label: label, build, channels: ["local"] }] },
     { target_triple: linux, builds: [{ build_label: label, build: other, channels: ["nightly", "stable"], current: false }] },
   ] }} />);
-  expect(screen.getAllByRole("rowheader")).toHaveLength(1);
-  const windowsEntry = within(screen.getByText(windows).parentElement!);
-  const linuxEntry = within(screen.getByText(linux).parentElement!);
+  const group = within(screen.getByRole("listitem", { name: label }));
+  expect(group.getByRole("heading", { level: 3, name: label })).toBeTruthy();
+  const targets = within(group.getByRole("list")).getAllByRole("listitem");
+  expect(targets).toHaveLength(2);
+  const [linuxEntry, windowsEntry] = targets.map((target) => within(target));
+  expect(windowsEntry.getByText(windows)).toBeTruthy();
+  expect(linuxEntry.getByText(linux)).toBeTruthy();
   expect(windowsEntry.getByText("local")).toBeTruthy();
   expect(windowsEntry.queryByText("Retained")).toBeNull();
   expect(linuxEntry.getByText("Retained")).toBeTruthy();
@@ -99,11 +103,11 @@ it("keeps legacy records without store labels visible as separate target builds"
     ] },
     { target_triple: linux, builds: [{ build, channels: ["stable"] }, { build: older, channels: ["nightly"], current: false }] },
   ] }} />);
-  expect(screen.getAllByRole("rowheader")).toHaveLength(4);
+  expect(screen.getAllByRole("heading", { level: 3 })).toHaveLength(4);
   expect(screen.getByTitle(firstId).textContent).toBe("build " + firstId.slice(0, 13));
   expect(screen.getByTitle(secondId).textContent).toBe("build " + secondId.slice(0, 13));
-  const retained = within(screen.getByText("Retained").closest("tr")!);
-  expect(retained.getByTitle(older.source_fingerprint).textContent).toContain("cccccccccccc");
+  const retained = within(screen.getByRole("listitem", { name: /0\.1\.5 build cccccccccccc/ }));
+  expect(retained.getByText("Retained")).toBeTruthy();
   expect(retained.getByText("aaaaaaaa")).toBeTruthy();
   expect(retained.getByText(linux)).toBeTruthy();
 });

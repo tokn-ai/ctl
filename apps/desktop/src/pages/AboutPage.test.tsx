@@ -84,9 +84,13 @@ describe("About page", () => {
     const target_triple = "aarch64-unknown-linux-musl";
     const build = { version: "0.1.4", source_revision: "abcd0123".repeat(5), source_fingerprint: "a".repeat(64), dirty: false };
     const build_label = "stable-v0.1.4-abcd012";
-    const local = { active: "local", build_label: "local build", origin: { channel: "local" }, missing: false, installed_targets: [] };
+    const native = {
+      target_triple: "aarch64-apple-darwin", current_publications: { stable: "v0.1.4" },
+      builds: [{ build, build_label, bundle_id: "e".repeat(64), channels: ["stable"] }],
+    };
+    const local = { active: native.builds[0].bundle_id, build_label, origin: { channel: "stable" }, missing: false, installed_targets: [native] };
     api.runtime.mockResolvedValueOnce(local).mockResolvedValue({
-      ...local, installed_targets: [{ target_triple, builds: [{ build, build_label, bundle_id: "d".repeat(64), channels: ["stable"] }] }],
+      ...local, installed_targets: [native, { target_triple, builds: [{ build, build_label, bundle_id: "d".repeat(64), channels: ["stable"] }] }],
     });
     api.published.mockResolvedValue({ default_channel: "stable", catalog: {
       channel: "stable", publication_id: "v0.1.4", app_version: build.version, git_revision: build.source_revision,
@@ -98,12 +102,18 @@ describe("About page", () => {
     const updater = await screen.findByText(/\b0\.1\.3\b/);
     expect(updater.compareDocumentPosition(inventory) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     const store = within(inventory);
+    const initialBuild = within(await store.findByRole("listitem", { name: build_label }));
+    expect(initialBuild.getByText(native.target_triple)).toBeTruthy();
     expect(api.published).not.toHaveBeenCalled();
     fireEvent.click(store.getByRole("button", { name: "Add target" }));
     await waitFor(() => expect(store.getByLabelText("Target")).toHaveProperty("value", target_triple));
     fireEvent.click(store.getByRole("button", { name: "Fetch target" }));
-    const installed = await store.findByRole("rowheader", { name: build_label });
-    expect(installed.closest("tr")?.textContent).toContain(target_triple);
+    await waitFor(() => {
+      const updatedBuild = within(store.getByRole("listitem", { name: build_label }));
+      expect(updatedBuild.getByText(target_triple)).toBeTruthy();
+      expect(updatedBuild.getByText(native.target_triple)).toBeTruthy();
+    });
+    expect(store.getAllByRole("heading", { level: 3 })).toHaveLength(1);
     expect(api.fetch).toHaveBeenCalledExactlyOnceWith(target_triple, "stable", expect.any(String));
     expect(api.runtime.mock.calls).toEqual([[{ kind: "local" }], [{ kind: "local" }]]);
     expect(api.sync).not.toHaveBeenCalled();

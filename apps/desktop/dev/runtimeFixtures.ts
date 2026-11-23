@@ -19,7 +19,7 @@ export const sample_builds = {
   older_nightly: identity("0.1.0", "abcdef12", "c5891e4a"),
 };
 const local_build = { id: "c".repeat(64), label: "dev-20261120T120000Z-v0.1.0-abcdef1-local", identity: sample_builds.current, channel: "local" };
-const remote_build = { id: "f".repeat(64), label: "stable-v0.1.0-abcdef1", identity: sample_builds.current, channel: "stable" };
+const stable_build = { id: "f".repeat(64), label: "stable-v0.1.0-abcdef1", identity: sample_builds.current, channel: "stable" };
 const older_stable = { id: "2".repeat(64), label: "stable-v0.0.9-123456a", identity: sample_builds.older_stable, channel: "stable" };
 const older_nightly = { id: "3".repeat(64), label: "nightly-20261119T120000Z-v0.1.0-abcdef1", identity: sample_builds.older_nightly, channel: "nightly" };
 const published = {
@@ -66,12 +66,13 @@ export function previewUpdateCatalog(channel: BundleChannel = "stable"): Compone
 
 /** All changes to the preview's runtime inventory live only for this page load. */
 export function previewRuntime(bundles: ComponentBundlesSnapshot, observations: ComponentVersionsSnapshot, partial: boolean) {
+  const remote_build = forTarget(stable_build, remote_target);
   const active = new Map<string | null, Build>([
     [null, local_build],
     ["preview-dev", remote_build],
   ]);
   const retained = new Map<string | null, InstalledRuntimeBuild[]>([
-    [null, [local_build, older_stable, older_nightly].map(installed)],
+    [null, [local_build, stable_build, older_stable, older_nightly].map(installed)],
     ["preview-dev", [remote_build, forTarget(older_nightly, remote_target)].map(installed)],
   ]);
   const local_store = new Map<string, InstalledRuntimeBuild[]>([
@@ -79,7 +80,7 @@ export function previewRuntime(bundles: ComponentBundlesSnapshot, observations: 
     [remote_target, [installed(remote_build)]],
   ]);
   const local_publications = new Map<string, Record<string, string>>([
-    [local_target, { stable: older_stable.label, nightly: older_nightly.label }],
+    [local_target, { stable: stable_build.label, nightly: older_nightly.label }],
     [remote_target, { stable: remote_build.label }],
   ]);
   const known = new Map<string, Build>([local_build, ...Object.values(published)].map((build) => [build.id, build]));
@@ -165,7 +166,7 @@ export function previewRuntime(bundles: ComponentBundlesSnapshot, observations: 
       if (!await wait(attempt_id)) throw { code: "runtime_operation_cancelled", message: "Target download stopped." };
       if (!local_store.has(target_triple)) local_store.set(target_triple, []);
       for (const [target, entries] of local_store) {
-        if (target === target_triple || entries.some((entry) => entry.channels.includes(channel))) {
+        if (target === target_triple || local_publications.get(target)?.[channel]) {
           retain(entries, forTarget(published[channel], target));
           local_publications.set(target, { ...local_publications.get(target), [channel]: published[channel].label });
         }

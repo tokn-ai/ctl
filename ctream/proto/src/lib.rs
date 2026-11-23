@@ -3,7 +3,8 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-pub const VERSION: &str = MACOS_WINDOW_VERSION;
+pub const VERSION: &str = X11_WINDOW_INPUT_VERSION;
+pub const X11_WINDOW_INPUT_VERSION: &str = "1.1.12";
 pub const MACOS_WINDOW_VERSION: &str = "1.0.11";
 pub const LATENCY_VERSION: &str = "1.0.10";
 pub const WINDOWS_DESKTOP_VERSION: &str = "1.0.9";
@@ -177,6 +178,14 @@ pub struct Window {
 pub struct WindowId(String);
 
 impl WindowId {
+  pub fn x11_xid(value: &str) -> Option<u32> {
+    let hex = value.strip_prefix("x11-")?;
+    if hex.is_empty() || hex.len() > 8 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+      return None;
+    }
+    u32::from_str_radix(hex, 16).ok().filter(|&id| id != 0)
+  }
+
   /// Bind the WindowServer ID to the selected process.
   pub fn macos(id: u32, pid: i32) -> Option<Self> {
     (id != 0 && pid > 0).then(|| Self(format!("macos-{pid}-{id}")))

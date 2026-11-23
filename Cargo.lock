@@ -1613,6 +1613,7 @@ dependencies = [
  "libc",
  "serde_json",
  "windows",
+ "x11rb 0.14.0",
 ]
 
 [[package]]
@@ -1663,8 +1664,11 @@ version = "0.1.0"
 dependencies = [
  "cc",
  "ctream-driver",
+ "ctream-proto",
  "ctream-windows",
  "windows",
+ "x11rb 0.14.0",
+ "xkeysym",
 ]
 
 [[package]]

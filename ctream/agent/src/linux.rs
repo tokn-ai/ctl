@@ -1,7 +1,10 @@
 use ctream_agent::protocol::{Request, TargetOperation, parse};
 use ctream_agent::{
   capture as catalog,
-  runtime::{capture_display, capture_window, capture_with_metadata, forward_input, ping},
+  runtime::{
+    capture_display, capture_window, capture_with_metadata, forward_input, forward_window_input,
+    ping,
+  },
 };
 use ctream_driver::{CaptureDisplay, CaptureWindow, ControlSource, Driver, Result};
 use ctream_driver_capture::linux as capture;
@@ -78,7 +81,12 @@ pub(super) fn run() -> Result<()> {
         Err("Windows targets require a native Windows agent".into())
       }
       (Target::MacosDesktop, _) => Err("macOS targets require a native macOS agent".into()),
-      (_, TargetOperation::InputWindow(_)) => Err("window input requires Windows".into()),
+      (Target::X11(display), TargetOperation::InputWindow(id)) => {
+        forward_window_input(input::x11::Driver, &display, id)
+      }
+      (Target::Wayland(_), TargetOperation::InputWindow(_)) => {
+        Err("pointer and keyboard input are unavailable for Wayland windows".into())
+      }
       (target, TargetOperation::Windows) => {
         serde_json::to_writer(
           io::stdout().lock(),

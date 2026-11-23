@@ -160,6 +160,7 @@ void ctream_sck_release_window(void *window) {
 API_AVAILABLE(macos(14.0))
 @interface CtreamScreenCapture : NSObject <SCContentSharingPickerObserver, SCStreamOutput, SCStreamDelegate>
 - (instancetype)initWithContext:(void *)context
+                         maxFPS:(int32_t)maxFPS
                           frame:(FrameCallback)frame
                             end:(EndCallback)end
                         release:(ReleaseCallback)release;
@@ -208,14 +209,14 @@ static CGRect cropToContent(CGRect surface, CGRect content, double scale) {
   return CGRectMake(x, y, right - x, bottom - y);
 }
 
-static SCStreamConfiguration *configuration(uint32_t extent) API_AVAILABLE(macos(14.0));
+static SCStreamConfiguration *configuration(uint32_t extent, int32_t maxFPS) API_AVAILABLE(macos(14.0));
 
-static SCStreamConfiguration *configuration(uint32_t extent) {
+static SCStreamConfiguration *configuration(uint32_t extent, int32_t maxFPS) {
   SCStreamConfiguration *config = [NSClassFromString(@"SCStreamConfiguration") new];
   config.width = extent >> 16;
   config.height = extent & UINT16_MAX;
   config.pixelFormat = kCVPixelFormatType_32BGRA;
-  config.minimumFrameInterval = CMTimeMake(1, 30);
+  config.minimumFrameInterval = CMTimeMake(1, maxFPS);
   config.queueDepth = 3;
   config.showsCursor = NO;
   config.ignoreShadowsSingleWindow = YES;
@@ -227,6 +228,7 @@ static SCStreamConfiguration *configuration(uint32_t extent) {
 
 @implementation CtreamScreenCapture {
   void *_context;
+  int32_t _maxFPS;
   FrameCallback _frame;
   EndCallback _end;
   ReleaseCallback _release;
@@ -247,12 +249,14 @@ static SCStreamConfiguration *configuration(uint32_t extent) {
 }
 
 - (instancetype)initWithContext:(void *)context
+                         maxFPS:(int32_t)maxFPS
                           frame:(FrameCallback)frame
                             end:(EndCallback)end
                         release:(ReleaseCallback)release {
   self = [super init];
   if (self) {
     _context = context;
+    _maxFPS = maxFPS;
     _frame = frame;
     _end = end;
     _release = release;
@@ -350,7 +354,7 @@ static SCStreamConfiguration *configuration(uint32_t extent) {
 
   _resizeInProgress = YES;
   __weak CtreamScreenCapture *weakSelf = self;
-  [_stream updateConfiguration:configuration(desired) completionHandler:^(NSError *error) {
+  [_stream updateConfiguration:configuration(desired, _maxFPS) completionHandler:^(NSError *error) {
     dispatch_async(dispatch_get_main_queue(), ^{
       CtreamScreenCapture *capture = weakSelf;
       if (capture) {
@@ -386,7 +390,7 @@ static SCStreamConfiguration *configuration(uint32_t extent) {
     _windowID = selected.windowID;
     _windowOwner = selected.owningApplication.processID;
   }
-  _stream = [[NSClassFromString(@"SCStream") alloc] initWithFilter:filter configuration:configuration(_configuredExtent) delegate:self];
+  _stream = [[NSClassFromString(@"SCStream") alloc] initWithFilter:filter configuration:configuration(_configuredExtent, _maxFPS) delegate:self];
   NSError *error = nil;
   if (![_stream addStreamOutput:self type:SCStreamOutputTypeScreen sampleHandlerQueue:_frameQueue error:&error]) {
     [self finish:CaptureEndFailed message:error.localizedDescription];
@@ -496,7 +500,7 @@ static SCStreamConfiguration *configuration(uint32_t extent) {
 
 @end
 
-void *ctream_sck_start(void *window, void *context, FrameCallback frame, EndCallback end, ReleaseCallback release, int32_t *status) {
+void *ctream_sck_start(void *window, int32_t maxFPS, void *context, FrameCallback frame, EndCallback end, ReleaseCallback release, int32_t *status) {
   if (@available(macOS 14.0, *)) {
     if (!NSThread.isMainThread) {
       *status = CaptureStatusWrongThread;
@@ -516,7 +520,7 @@ void *ctream_sck_start(void *window, void *context, FrameCallback frame, EndCall
         *status = CaptureStatusWindowUnavailable;
         return NULL;
       }
-      CtreamScreenCapture *capture = [[CtreamScreenCapture alloc] initWithContext:context frame:frame end:end release:release];
+      CtreamScreenCapture *capture = [[CtreamScreenCapture alloc] initWithContext:context maxFPS:maxFPS frame:frame end:end release:release];
       activeCapture = capture;
       if (selected) {
         SCContentFilter *filter = [[NSClassFromString(@"SCContentFilter") alloc] initWithDesktopIndependentWindow:selected];

@@ -1,6 +1,6 @@
 use super::{Latest, coded_size, command, process};
 use crate::raw::FrameReader;
-use ctream_driver::{CaptureCancellation, CaptureLifetime, Frame, Result};
+use ctream_driver::{CaptureCancellation, CaptureLifetime, Frame, FramePacer, Result};
 use ctream_proto::{CaptureFormat, VideoCodec, VideoInfo, VideoOptions, video};
 use std::{
   io::{self, PipeWriter, Read, Write},
@@ -146,11 +146,13 @@ impl Encoder {
         (status, early)
       });
       let feed = scope.spawn(|| {
+        let mut pacer = FramePacer::new(interval);
         let stopped = || cancellation.is_cancelled() || exited.load(Ordering::Acquire);
         let result = (|| {
           while !stopped() {
-            let ready_at = Instant::now() + interval;
+            let started = Instant::now();
             input.write_all(&frame.pixels)?;
+            let ready_at = pacer.finish_frame(started, Instant::now());
             if !frames.next(frame, Some(ready_at), stopped)? {
               return Ok(false);
             }

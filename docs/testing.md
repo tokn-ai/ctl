@@ -244,6 +244,14 @@ used by the Wayland helper. The test covers display discovery, display and
 window frames, input initialization, and capture cancellation. Geometry unit
 tests cover the common overlay and pointer transform when the preview resizes.
 
+The AV1 frame-rate regression requests 30 FPS and then 8 FPS through the normal
+client for both X11 display and window capture. An animated fixture paints frame
+IDs, and five-second samples report delivered frames and fresh marker changes
+separately. Delivery must reach 27–33 FPS at 30 and 5–9 FPS at 8. At least 80% of
+delivered frames must show a new marker in each mode. That allows for AV1
+distortion of some markers and still detects an 8 FPS source repeating frames
+to fill a 30 FPS stream.
+
 ## Ctream Windows capture experiment
 
 Build the diagnostic on Windows with

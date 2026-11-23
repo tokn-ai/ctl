@@ -734,8 +734,12 @@ opens, and the viewer offers codecs it can decode.
 explicit capture driver. `OPTIONS_JSON` is a JSON argument bounded at 4096 bytes.
 Its `options` object specifies `codec` (`auto`, `av1`, or `h264`), `quality`
 (`low`, `balanced`, or `high`), and `max_fps` (an integer from 1 to 120). The
-`codecs` list contains one or two distinct concrete codecs (`av1` or `h264`)
-the viewer accepts. An explicit `h264` preference accepts only `h264`.
+agent applies `max_fps` to configurable capture sources as well as encoded
+delivery. Event-driven sources may produce fewer frames when content is idle.
+This uses the existing `1.1.13` field and preserves retained raw operation
+defaults. The `codecs` list contains one or two distinct concrete codecs
+(`av1` or `h264`) the viewer accepts. An explicit `h264` preference accepts only
+`h264`.
 
 Once the first segment starts, the agent writes a JSON line bounded at 4096
 bytes with the actual `driver` and a `video` object containing the selected

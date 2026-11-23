@@ -1,17 +1,14 @@
 //! X11 display capture through ffmpeg, using the fixed RGB wire format.
 
 use crate::process::ProcessCapture;
-use ctream_driver::{CaptureDisplay, Result};
+use ctream_driver::{CaptureDisplay, CaptureOptions, Result};
 use ctream_proto::X11_FRAME_SIZE;
 use std::{
   io,
   num::NonZeroUsize,
   process::{Command, Stdio},
-  time::Duration,
 };
 use x11rb::{connection::Connection, protocol::xproto::ConnectionExt};
-
-const FRAME_RATE: u32 = 8;
 
 fn frame_sync_option(
   mut accepts: impl FnMut(&str) -> io::Result<bool>,
@@ -48,6 +45,10 @@ impl CaptureDisplay for Session {
   type Source = ProcessCapture;
 
   fn capture_display(&self) -> Result<ProcessCapture> {
+    self.capture_display_with_options(CaptureOptions::default())
+  }
+
+  fn capture_display_with_options(&self, options: CaptureOptions) -> Result<ProcessCapture> {
     let (connection, screen) = x11rb::connect(Some(&self.display))?;
     let root = connection.setup().roots[screen].root;
     let geometry = connection.get_geometry(root)?.reply()?;
@@ -76,7 +77,7 @@ impl CaptureDisplay for Session {
       "-f",
       "x11grab",
       "-framerate",
-      &FRAME_RATE.to_string(),
+      &options.max_fps().to_string(),
       "-video_size",
       &format!("{width}x{height}"),
       "-i",
@@ -96,7 +97,7 @@ impl CaptureDisplay for Session {
     Ok(ProcessCapture::paced(
       command,
       NonZeroUsize::new(w * h * 3).expect("X11 RGB frames are nonempty"),
-      Duration::from_secs(1) / FRAME_RATE,
+      options.interval(),
     ))
   }
 }

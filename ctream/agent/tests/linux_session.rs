@@ -193,6 +193,219 @@ fn native_sessions_stream_through_local_ipc() -> io::Result<()> {
 
 #[test]
 #[ignore = "requires the disposable X11 session and FFmpeg in docker/ctream"]
+fn compressed_x11_display_and_window_honor_requested_frame_rate() -> Result<(), Box<dyn Error>> {
+  use ctream_proto::{VideoCodec, VideoOptions, WindowId};
+  use std::sync::mpsc;
+  use x11rb::{
+    COPY_DEPTH_FROM_PARENT, COPY_FROM_PARENT,
+    connection::Connection as _,
+    protocol::xproto::{ConnectionExt as _, CreateGCAux, CreateWindowAux, Rectangle, WindowClass},
+  };
+
+  const BAND_WIDTH: u16 = 32;
+  const BANDS: usize = 10;
+  const SIZE: [u16; 2] = [BANDS as u16 * BAND_WIDTH, 128];
+  const WARMUP: Duration = Duration::from_millis(750);
+  const OBSERVATION: Duration = Duration::from_secs(5);
+  const PAINT_INTERVAL: Duration = Duration::from_nanos(1_000_000_000 / 120);
+
+  let client = Client::new(Local {
+    agent: PathBuf::from(env!("CARGO_BIN_EXE_ctream-agent")),
+  });
+  let display = env::var("CTREAM_TEST_X11").unwrap_or_else(|_| ":98".into());
+  let target = Target::parse(&display)?;
+  let (conn, screen) = x11rb::connect(Some(&display))?;
+  let screen = &conn.setup().roots[screen];
+  let window = conn.generate_id()?;
+  let pixmap = conn.generate_id()?;
+  let black = conn.generate_id()?;
+  let white = conn.generate_id()?;
+  let [width, height] = SIZE;
+  conn
+    .create_window(
+      COPY_DEPTH_FROM_PARENT,
+      window,
+      screen.root,
+      200,
+      90,
+      width,
+      height,
+      0,
+      WindowClass::INPUT_OUTPUT,
+      COPY_FROM_PARENT,
+      &CreateWindowAux::new().background_pixel(screen.black_pixel),
+    )?
+    .check()?;
+  conn
+    .create_pixmap(screen.root_depth, pixmap, window, width, height)?
+    .check()?;
+  conn
+    .create_gc(
+      black,
+      window,
+      &CreateGCAux::new()
+        .foreground(screen.black_pixel)
+        .graphics_exposures(0),
+    )?
+    .check()?;
+  conn
+    .create_gc(
+      white,
+      window,
+      &CreateGCAux::new().foreground(screen.white_pixel),
+    )?
+    .check()?;
+  conn.map_window(window)?.check()?;
+  let fixture = wait_for("animated X11 fixture discovery", || {
+    Ok(
+      client
+        .windows(target)?
+        .into_iter()
+        .find(|item| WindowId::x11_xid(&item.id) == Some(window)),
+    )
+  })?;
+  let location = conn
+    .translate_coordinates(window, screen.root, 0, 0)?
+    .reply()?;
+  let display_origin = [
+    usize::try_from(location.dst_x)?,
+    usize::try_from(location.dst_y)?,
+  ];
+  let display_size = [screen.width_in_pixels, screen.height_in_pixels].map(usize::from);
+  let bands: [Rectangle; BANDS] = std::array::from_fn(|index| Rectangle {
+    x: index as i16 * BAND_WIDTH as i16,
+    y: 0,
+    width: BAND_WIDTH,
+    height,
+  });
+  let canvas = Rectangle {
+    x: 0,
+    y: 0,
+    width,
+    height,
+  };
+
+  let measured = thread::scope(|scope| -> Result<_, Box<dyn Error>> {
+    let (stop_animation, stop) = mpsc::channel::<()>();
+    let animator = scope.spawn(move || -> Result<_, Box<dyn Error + Send + Sync>> {
+      let started = Instant::now();
+      let mut painted = 0;
+      let mut counter = 0u8;
+      let mut lit = Vec::with_capacity(BANDS - 1);
+      loop {
+        let paint_started = Instant::now();
+        lit.clear();
+        // First and last bands identify the marker. The middle bands encode
+        // a fresh value for every paint, before the complete image is copied.
+        lit.push(bands[0]);
+        for (bit, &band) in bands[1..BANDS - 1].iter().enumerate() {
+          if counter & (1 << bit) != 0 {
+            lit.push(band);
+          }
+        }
+        conn.poly_fill_rectangle(pixmap, black, &[canvas])?;
+        conn.poly_fill_rectangle(pixmap, white, &lit)?;
+        conn.copy_area(pixmap, window, black, 0, 0, 0, 0, width, height)?;
+        conn.flush()?;
+        painted += 1;
+        counter = counter.wrapping_add(1);
+        let delay = PAINT_INTERVAL.saturating_sub(paint_started.elapsed());
+        if stop.recv_timeout(delay) != Err(mpsc::RecvTimeoutError::Timeout) {
+          return Ok(f64::from(painted) / started.elapsed().as_secs_f64());
+        }
+      }
+    });
+    let mut measured = Vec::new();
+    for (driver, window, origin, size) in [
+      ("linux.x11.ffmpeg", None, display_origin, display_size),
+      (
+        "linux.x11.composite",
+        Some(fixture),
+        [0, 0],
+        SIZE.map(usize::from),
+      ),
+    ] {
+      let session = client.session(target, window);
+      let marker = |frame: &Frame| {
+        let y = (origin[1] + usize::from(height / 2)) * frame.size[1] / size[1];
+        let mut code = 0u16;
+        for band in 0..BANDS {
+          let x = origin[0] + band * usize::from(BAND_WIDTH) + usize::from(BAND_WIDTH / 2);
+          let x = x * frame.size[0] / size[0];
+          code = code << 1 | u16::from(frame.pixels[(y * frame.size[0] + x) * 3] > 128);
+        }
+        (code & 0b10_0000_0001 == 0b10_0000_0000).then_some(code)
+      };
+      let mut rates = [[0.0; 2]; 2];
+      for (rate, max_fps) in rates.iter_mut().zip([30, 8]) {
+        let mut capture = session.capture_with_options(
+          driver,
+          VideoOptions {
+            max_fps,
+            ..VideoOptions::default()
+          },
+        )?;
+        let video = capture.video().expect("compressed X11 stream");
+        assert_eq!(video.codec, VideoCodec::Av1, "{}", video.encoder);
+        let mut frame = Frame::default();
+        let warming = Instant::now();
+        while warming.elapsed() < WARMUP {
+          capture.read_frame(&mut frame)?;
+        }
+        let mut previous = marker(&frame);
+        let started = Instant::now();
+        let mut fresh = 0;
+        let mut delivered = 0;
+        loop {
+          capture.read_frame(&mut frame)?;
+          if started.elapsed() >= OBSERVATION {
+            break;
+          }
+          delivered += 1;
+          // The counter wraps, so compare adjacent valid markers.
+          if let Some(code) = marker(&frame)
+            && previous.replace(code).is_some_and(|last| last != code)
+          {
+            fresh += 1;
+          }
+        }
+        let seconds = OBSERVATION.as_secs_f64();
+        let fresh_rate = f64::from(fresh) / seconds;
+        let delivered_rate = f64::from(delivered) / seconds;
+        *rate = [fresh_rate, delivered_rate];
+        eprintln!(
+          "{driver} at {max_fps} FPS: {fresh}/{delivered} fresh frames, {fresh_rate:.1} fresh and {delivered_rate:.1} delivered FPS"
+        );
+      }
+      measured.push((driver, rates));
+    }
+    drop(stop_animation);
+    let paint_rate = animator
+      .join()
+      .expect("animated X11 fixture thread")
+      .map_err(|error| -> Box<dyn Error> { error })?;
+    eprintln!("X11 fixture submitted {paint_rate:.1} paints/s");
+    Ok(measured)
+  })?;
+  for (driver, [fast, slow]) in measured {
+    for (max_fps, [fresh, delivered], expected) in [(30, fast, 27.0..=33.0), (8, slow, 5.0..=9.0)] {
+      assert!(
+        expected.contains(&delivered),
+        "{driver} at {max_fps} FPS delivered {delivered:.1}"
+      );
+      // Lossy AV1 can distort marker IDs. Check enough real changes to catch a
+      // source that still samples at 8 FPS and repeats frames at 30 FPS.
+      assert!(
+        fresh >= delivered * 0.8,
+        "{driver} at {max_fps} FPS delivered {fresh:.1} fresh of {delivered:.1} total FPS"
+      );
+    }
+  }
+  Ok(())
+}
+
+#[test]
+#[ignore = "requires the disposable X11 session and FFmpeg in docker/ctream"]
 fn compressed_x11_window_streams_live_and_preserves_resized_input() -> Result<(), Box<dyn Error>> {
   use ctream_proto::{VideoCodec, VideoOptions, WindowId};
   use x11rb::{

@@ -4,7 +4,9 @@ use super::{
   pixels::{self, Rotation},
   readback::{TextureReader, WindowReadback},
 };
-use ctream_driver::{CaptureLifetime, CaptureSource, CaptureWindow, Result};
+use ctream_driver::{
+  CaptureLifetime, CaptureOptions, CaptureSource, CaptureWindow, FramePacer, Result,
+};
 use ctream_windows::{PhysicalPixels, WindowTarget};
 use std::{
   io::Write,
@@ -38,7 +40,6 @@ use windows::{
 };
 
 const FORMAT: DirectXPixelFormat = DirectXPixelFormat::B8G8R8A8UIntNormalized;
-const FRAME_INTERVAL: Duration = Duration::from_millis(125);
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 const FRAME_RECOVERY: Duration = Duration::from_secs(10);
 
@@ -63,8 +64,13 @@ impl CaptureWindow for Session {
   type Source = WgcCapture;
 
   fn capture_window(&self, id: &str) -> Result<WgcCapture> {
+    self.capture_window_with_options(id, CaptureOptions::default())
+  }
+
+  fn capture_window_with_options(&self, id: &str, options: CaptureOptions) -> Result<WgcCapture> {
     Ok(WgcCapture {
       target: WindowTarget::open(self.display, id)?,
+      frame_interval: options.interval(),
     })
   }
 }
@@ -235,12 +241,18 @@ fn poll_frame<'a>(
 /// Captures a selected window's compositor surface, independent of its occlusion.
 pub struct WgcCapture {
   target: WindowTarget,
+  frame_interval: Duration,
 }
 
 impl WgcCapture {
   pub fn open_desktop(id: &str) -> Result<Self> {
+    Self::open_desktop_with_options(id, CaptureOptions::default())
+  }
+
+  pub fn open_desktop_with_options(id: &str, options: CaptureOptions) -> Result<Self> {
     Ok(Self {
       target: WindowTarget::open_desktop(id)?,
+      frame_interval: options.interval(),
     })
   }
 }
@@ -274,7 +286,9 @@ impl CaptureSource for WgcCapture {
     let mut complete_deadline = Some(Instant::now() + FRAME_RECOVERY);
     let mut clipped_geometry = None;
     let mut delay = Duration::ZERO;
+    let mut pacer = FramePacer::new(self.frame_interval);
     while !lifetime.cancelled(delay) && !item.is_closed() {
+      let started = Instant::now();
       let update = self.target.validate().and_then(|()| {
         if complete_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
           let details = clipped_geometry
@@ -289,7 +303,7 @@ impl CaptureSource for WgcCapture {
         }
         poll_frame(&pool.0, &device, &mut size, &mut reader)
       });
-      delay = POLL_INTERVAL;
+      delay = POLL_INTERVAL.min(self.frame_interval);
       match update {
         // Win32 and WGC can observe destruction before the Closed callback.
         Err(_) if item.is_closed() || self.target.is_gone().unwrap_or(false) => break,
@@ -317,7 +331,8 @@ impl CaptureSource for WgcCapture {
           output.flush()?;
           complete_deadline = None;
           clipped_geometry = None;
-          delay = FRAME_INTERVAL;
+          let next = pacer.finish_frame(started, Instant::now());
+          delay = next.saturating_duration_since(Instant::now());
         }
       }
     }

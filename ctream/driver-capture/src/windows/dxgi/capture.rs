@@ -3,7 +3,7 @@ use super::super::{
   readback::TextureReader,
 };
 use super::Output;
-use ctream_driver::{CaptureLifetime, CaptureSource, Result};
+use ctream_driver::{CaptureLifetime, CaptureSource, FramePacer, Result};
 use ctream_windows::PhysicalPixels;
 use std::{
   io::Write,
@@ -24,7 +24,6 @@ use windows::{
   core::Interface,
 };
 
-const FRAME_INTERVAL: Duration = Duration::from_millis(125);
 const FRAME_WAIT_MS: u32 = 100;
 
 struct AcquiredFrame<'a>(Option<&'a IDXGIOutputDuplication>);
@@ -49,10 +48,11 @@ pub struct DxgiCapture {
   duplication: IDXGIOutputDuplication,
   rotation: Rotation,
   size: [usize; 2],
+  frame_interval: Duration,
 }
 
 impl DxgiCapture {
-  pub(super) fn new(output: &Output) -> Result<Self> {
+  pub(super) fn new(output: &Output, frame_interval: Duration) -> Result<Self> {
     let _physical = PhysicalPixels::enter()?;
     let reader = TextureReader::new(Some(&output.adapter))?;
     let duplication = unsafe {
@@ -80,6 +80,7 @@ impl DxgiCapture {
       duplication,
       rotation,
       size,
+      frame_interval,
     })
   }
 }
@@ -88,7 +89,9 @@ impl CaptureSource for DxgiCapture {
   fn run<W: Write + Send>(mut self, output: &mut W, lifetime: &CaptureLifetime) -> Result<()> {
     let _physical = PhysicalPixels::enter()?;
     let mut next_frame = Instant::now();
+    let mut pacer = FramePacer::new(self.frame_interval);
     while !lifetime.cancelled(next_frame.saturating_duration_since(Instant::now())) {
+      let started = Instant::now();
       let mut information = DXGI_OUTDUPL_FRAME_INFO::default();
       let mut resource = None;
       match unsafe {
@@ -103,7 +106,6 @@ impl CaptureSource for DxgiCapture {
         }
         Err(error) => return Err(error.into()),
       }
-      next_frame = Instant::now() + FRAME_INTERVAL;
       let duplication = self.duplication.clone();
       let frame = AcquiredFrame(Some(&duplication));
       let texture = resource
@@ -118,6 +120,7 @@ impl CaptureSource for DxgiCapture {
       write!(output, "P6\n{width} {height}\n255\n")?;
       output.write_all(pixels)?;
       output.flush()?;
+      next_frame = pacer.finish_frame(started, Instant::now());
     }
     Ok(())
   }

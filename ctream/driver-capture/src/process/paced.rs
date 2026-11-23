@@ -1,3 +1,4 @@
+use ctream_driver::FramePacer;
 use std::{
   io::{self, BufRead, BufReader, Read, Write},
   num::NonZeroUsize,
@@ -96,13 +97,13 @@ impl LatestFrames {
   }
 
   pub(super) fn write_to(&self, output: &mut impl Write, interval: Duration) -> io::Result<()> {
+    let mut pacer = FramePacer::new(interval);
     let mut not_before = Instant::now();
     while let Some(frame) = self.next(not_before)? {
+      let started = Instant::now();
       output.write_all(&frame)?;
       output.flush()?;
-      // A blocked write can finish long after it began. Start the next
-      // interval here so sending never catches up to an old deadline.
-      not_before = Instant::now() + interval;
+      not_before = pacer.finish_frame(started, Instant::now());
       self.state.lock().unwrap().spare = frame;
     }
     Ok(())
@@ -151,6 +152,7 @@ mod tests {
       scope.spawn(|| frames.write_to(&mut output, interval).unwrap());
       blocked.recv_timeout(Duration::from_secs(2)).unwrap();
       frames.read_from(&b"222333444"[..], NonZeroUsize::new(3).unwrap());
+      thread::sleep(interval);
       release.send(()).unwrap();
     });
     let [(first, a), (next, b)] = output.writes.as_slice() else {

@@ -13,7 +13,9 @@ use ctream_agent::{
   protocol::{Request, TargetOperation, parse},
   runtime::{capture_started, capture_video_started, video_capabilities},
 };
-use ctream_driver::{CaptureCancellation, CaptureLifetime, CaptureSource, Frame, Result};
+use ctream_driver::{
+  CaptureCancellation, CaptureLifetime, CaptureOptions, CaptureSource, Frame, Result,
+};
 use ctream_driver_capture::macos::screen_capture_kit::{self, Capture, Event};
 use ctream_driver_input::macos::{WindowIdentity, WindowInput, has_access};
 use ctream_proto::{
@@ -364,6 +366,10 @@ fn stream_window(
   output: &mut Response,
 ) -> Result<()> {
   let identity = window_identity(id)?;
+  let capture_options = match &stream {
+    WindowStream::Video(_, request) => Some(CaptureOptions::new(request.options.max_fps)?),
+    _ => None,
+  };
   let window = list_windows()?
     .into_iter()
     .find(|window| window.id == identity.id && window.pid == identity.pid)
@@ -374,12 +380,16 @@ fn stream_window(
   let session = Arc::new(CaptureSession::new(identity));
   let lifecycle = Arc::clone(&session);
   let capture = run_on_main(move |main_thread| {
-    Capture::start_window(&window, move |event| {
+    let callback = move |event| {
       if !matches!(event, Event::Frame { .. }) {
         lifecycle.end();
       }
       publishing.publish(event);
-    })
+    };
+    match capture_options {
+      Some(options) => Capture::start_window_with_options(&window, options, callback),
+      None => Capture::start_window(&window, callback),
+    }
     .map(|capture| MainThreadBound::new(capture, main_thread))
   })?;
   let _lease = CaptureLease::start(Arc::clone(&session))?;

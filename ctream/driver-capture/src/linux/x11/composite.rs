@@ -1,7 +1,9 @@
 //! X11 window discovery and capture through the Composite extension.
 
 use super::windows;
-use ctream_driver::{CaptureLifetime, CaptureSource, CaptureWindow, DiscoverWindows, Result};
+use ctream_driver::{
+  CaptureLifetime, CaptureOptions, CaptureSource, CaptureWindow, DiscoverWindows, Result,
+};
 use ctream_proto::{Window, valid_window_id};
 use std::io::Write;
 
@@ -31,11 +33,12 @@ impl DiscoverWindows for Session {
 pub struct CompositeCapture {
   display: String,
   window: String,
+  options: CaptureOptions,
 }
 
 impl CaptureSource for CompositeCapture {
   fn run<W: Write + Send>(self, output: &mut W, lifetime: &CaptureLifetime) -> Result<()> {
-    windows::capture_to(&self.display, &self.window, output, |delay| {
+    windows::capture_to(&self.display, &self.window, self.options, output, |delay| {
       lifetime.cancelled(delay)
     })
   }
@@ -45,12 +48,21 @@ impl CaptureWindow for Session {
   type Source = CompositeCapture;
 
   fn capture_window(&self, id: &str) -> Result<CompositeCapture> {
+    self.capture_window_with_options(id, CaptureOptions::default())
+  }
+
+  fn capture_window_with_options(
+    &self,
+    id: &str,
+    options: CaptureOptions,
+  ) -> Result<CompositeCapture> {
     if !valid_window_id(id) {
       return Err("invalid window identifier".into());
     }
     Ok(CompositeCapture {
       display: self.display.clone(),
       window: id.to_owned(),
+      options,
     })
   }
 }

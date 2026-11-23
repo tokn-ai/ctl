@@ -1,3 +1,4 @@
+use ctream_driver::{CaptureOptions, FramePacer};
 use ctream_proto::Window;
 use std::{
   error::Error,
@@ -7,13 +8,13 @@ use std::{
 use x11rb::{
   connection::Connection,
   errors::ReplyError,
-  image::{Image, PixelLayout},
+  image::{BitsPerPixel, Image, ImageOrder, PixelLayout},
   protocol::{
     ErrorKind, Event,
     composite::{ConnectionExt as _, Redirect},
     xproto::{
       Atom, AtomEnum, ChangeWindowAttributesAux, ConnectionExt as _, EventMask, MapState,
-      VisualClass, WindowClass,
+      VisualClass, Visualtype, WindowClass,
     },
   },
 };
@@ -118,6 +119,7 @@ pub fn list(display: &str) -> Result<Vec<Window>, Box<dyn Error>> {
 pub fn capture_to(
   display: &str,
   id: &str,
+  options: CaptureOptions,
   out: &mut impl Write,
   mut closed: impl FnMut(Duration) -> bool,
 ) -> Result<(), Box<dyn Error>> {
@@ -142,6 +144,7 @@ pub fn capture_to(
     .find(|visual| visual.visual_id == attrs.visual && visual.class == VisualClass::TRUE_COLOR)
     .ok_or("X11 window capture requires a TrueColor visual")?;
   let layout = PixelLayout::from_visual_type(*visual)?;
+  let rgb32 = rgb32_channels(visual);
 
   conn
     .change_window_attributes(
@@ -154,7 +157,7 @@ pub fn capture_to(
     .check()?;
 
   let mut rgb = Vec::new();
-  let interval = Duration::from_millis(125);
+  let mut pacer = FramePacer::new(options.interval());
   let mut viewable = attrs.map_state == MapState::VIEWABLE;
   loop {
     let started = Instant::now();
@@ -182,14 +185,7 @@ pub fn capture_to(
           }
           let (image, _) = Image::get(&conn, pixmap, 0, 0, width, height)?;
           conn.free_pixmap(pixmap)?.check()?;
-          rgb.clear();
-          rgb.reserve(usize::from(width) * usize::from(height) * 3);
-          for y in 0..height {
-            for x in 0..width {
-              let (r, g, b) = layout.decode(image.get_pixel(x, y));
-              rgb.extend_from_slice(&[(r >> 8) as u8, (g >> 8) as u8, (b >> 8) as u8]);
-            }
-          }
+          convert_rgb(&image, layout, rgb32, &mut rgb);
           write!(out, "P6\n{width} {height}\n255\n")?;
           out.write_all(&rgb)?;
           out.flush()?;
@@ -200,8 +196,149 @@ pub fn capture_to(
         Err(error) => return Err(error.into()),
       }
     }
-    if closed(interval.saturating_sub(started.elapsed())) {
+    let next = pacer.finish_frame(started, Instant::now());
+    if closed(next.saturating_duration_since(Instant::now())) {
       return Ok(());
     }
+  }
+}
+
+fn rgb32_channels(visual: &Visualtype) -> Option<[usize; 3]> {
+  let byte = |mask| match mask {
+    0x0000_00ff => Some(0),
+    0x0000_ff00 => Some(1),
+    0x00ff_0000 => Some(2),
+    0xff00_0000 => Some(3),
+    _ => None,
+  };
+  Some([
+    byte(visual.red_mask)?,
+    byte(visual.green_mask)?,
+    byte(visual.blue_mask)?,
+  ])
+}
+
+fn convert_rgb(
+  image: &Image<'_>,
+  layout: PixelLayout,
+  rgb32: Option<[usize; 3]>,
+  rgb: &mut Vec<u8>,
+) {
+  let pixels = usize::from(image.width()) * usize::from(image.height());
+  let data = image.data();
+  if let Some(channels) = rgb32
+    && image.bits_per_pixel() == BitsPerPixel::B32
+    && data.len() == pixels * 4
+  {
+    // With exactly four bytes per pixel there is no row padding to skip.
+    let [r, g, b] = match image.byte_order() {
+      ImageOrder::LsbFirst => channels,
+      ImageOrder::MsbFirst => channels.map(|byte| 3 - byte),
+    };
+    rgb.resize(pixels * 3, 0);
+    for (source, target) in data
+      .as_chunks::<4>()
+      .0
+      .iter()
+      .zip(rgb.as_chunks_mut::<3>().0)
+    {
+      *target = [source[r], source[g], source[b]];
+    }
+    return;
+  }
+
+  rgb.clear();
+  rgb.reserve(pixels * 3);
+  for y in 0..image.height() {
+    for x in 0..image.width() {
+      let (r, g, b) = layout.decode(image.get_pixel(x, y));
+      rgb.extend_from_slice(&[(r >> 8) as u8, (g >> 8) as u8, (b >> 8) as u8]);
+    }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use x11rb::image::ScanlinePad;
+
+  fn visual([red_mask, green_mask, blue_mask]: [u32; 3]) -> Visualtype {
+    Visualtype {
+      visual_id: 1,
+      class: VisualClass::TRUE_COLOR,
+      bits_per_rgb_value: 8,
+      colormap_entries: 256,
+      red_mask,
+      green_mask,
+      blue_mask,
+    }
+  }
+
+  fn paint(image: &mut Image<'_>) {
+    for y in 0..image.height() {
+      for x in 0..image.width() {
+        let pixel = 0x0012_3456 + (u32::from(y) << 12) + (u32::from(x) << 4);
+        image.put_pixel(x, y, pixel);
+      }
+    }
+  }
+
+  #[test]
+  fn byte_aligned_pixels_match_x11rb_in_both_byte_orders() {
+    for order in [ImageOrder::LsbFirst, ImageOrder::MsbFirst] {
+      let mut image = Image::allocate(3, 2, ScanlinePad::Pad32, 24, BitsPerPixel::B32, order);
+      paint(&mut image);
+      for masks in [
+        [0x00ff_0000, 0x0000_ff00, 0x0000_00ff],
+        [0x0000_00ff, 0x0000_ff00, 0x00ff_0000],
+      ] {
+        let visual = visual(masks);
+        let layout = PixelLayout::from_visual_type(visual).unwrap();
+        let rgb32 = rgb32_channels(&visual);
+        assert!(rgb32.is_some());
+        let (mut fast, mut generic) = (Vec::new(), Vec::new());
+        convert_rgb(&image, layout, rgb32, &mut fast);
+        convert_rgb(&image, layout, None, &mut generic);
+        assert_eq!(fast, generic);
+      }
+    }
+  }
+
+  #[test]
+  fn padded_packed_rows_and_ten_bit_masks_use_generic_conversion() {
+    let visual24 = visual([0x00ff_0000, 0x0000_ff00, 0x0000_00ff]);
+    let layout = PixelLayout::from_visual_type(visual24).unwrap();
+    let mut image = Image::allocate(
+      3,
+      2,
+      ScanlinePad::Pad32,
+      24,
+      BitsPerPixel::B24,
+      ImageOrder::LsbFirst,
+    );
+    image.data_mut().fill(0xff);
+    paint(&mut image);
+    // The padded 24-bit data has the same total length as six 32-bit pixels.
+    assert_eq!(image.data().len(), 24);
+    let (mut rgb, mut generic) = (Vec::new(), Vec::new());
+    convert_rgb(&image, layout, rgb32_channels(&visual24), &mut rgb);
+    convert_rgb(&image, layout, None, &mut generic);
+    assert_eq!(rgb, generic);
+
+    let visual30 = visual([0x3ff0_0000, 0x000f_fc00, 0x0000_03ff]);
+    let layout = PixelLayout::from_visual_type(visual30).unwrap();
+    let mut image = Image::allocate(
+      1,
+      1,
+      ScanlinePad::Pad32,
+      30,
+      BitsPerPixel::B32,
+      ImageOrder::MsbFirst,
+    );
+    image.put_pixel(0, 0, (512 << 20) | (291 << 10) | 1023);
+    let rgb32 = rgb32_channels(&visual30);
+    assert!(rgb32.is_none());
+    convert_rgb(&image, layout, rgb32, &mut rgb);
+    assert_eq!(rgb, [128, 72, 255]);
   }
 }

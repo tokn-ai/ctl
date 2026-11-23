@@ -157,15 +157,27 @@ a 30 FPS limit. Use `--video-codec auto|av1|h264`,
 settings. Changing them restarts the setup preview for the same driver and
 source. The settings remain locked while the viewer is open.
 
+The driver API accepts `CaptureOptions` through
+`capture_display_with_options` and `capture_window_with_options`. Their provided
+implementations retain custom drivers that implement only the original capture
+methods. Official timed providers override them to configure source cadence.
+Older raw operations keep their existing defaults, including 8 FPS for the
+previously capped sources and 30 FPS for ScreenCaptureKit.
+The shared `FramePacer` retains nominal frame deadlines across ordinary
+scheduler delays, bounds phase correction, and resets its schedule after stalls.
+
 | Quality | Maximum long edge | Target bitrate |
 | --- | ---: | ---: |
 | Low | 1280 px | 1.5 Mbps |
 | Balanced | 1920 px | 4 Mbps |
 | High | 3840 px | 12 Mbps |
 
-The FPS setting caps encoding. The actual frame rate also depends on how
-quickly the selected capture provider produces frames. FFmpeg scales larger
-frames to fit the selected quality while keeping the source aspect ratio.
+The FPS setting configures both timed capture sources and the encoder cap.
+X11 display/window, Grim, DXGI, WGC, and agent-backed ScreenCaptureKit receive
+the selected rate before capture starts. Wayland window capture follows
+compositor updates and the encoder caps delivery. Actual FPS still depends on
+source changes and capture, encoding, and transport throughput. FFmpeg scales
+larger frames to fit the selected quality while keeping the source aspect ratio.
 
 `Auto` and `AV1` prefer `libsvtav1` and then `libaom-av1`. If neither is usable,
 the agent tries `libx264` and then `h264_videotoolbox` when the viewer supports
@@ -479,8 +491,9 @@ held inputs.
 
 The agent uses FFmpeg with x11grab for X11 display capture and reads display
 geometry through x11rb. The X11 display driver keeps only the newest pending
-frame when transport writes stall. It waits at least 125 ms after each completed
-frame write before sending another. X11 display input needs Python 3, libX11,
+frame when transport writes stall. It paces capture and raw frame delivery at
+the selected rate for compressed streams, with an 8 FPS default on retained raw
+operations. X11 display input needs Python 3, libX11,
 libXtst, XTEST, and access to the selected display. The local wgpu viewer
 uses the same rectangle for drawing the desktop and mapping clicks to display
 pixels.

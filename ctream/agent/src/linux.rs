@@ -5,7 +5,7 @@ use ctream_agent::{
     capture_display, capture_window, forward_input, forward_window_input, ping, video_capabilities,
   },
 };
-use ctream_driver::{CaptureDisplay, CaptureWindow, ControlSource, Driver, Result};
+use ctream_driver::{ControlSource, Driver, Result};
 use ctream_driver_capture::linux as capture;
 use ctream_driver_input::linux as input;
 use ctream_proto::{Target, VideoRequest};
@@ -100,28 +100,18 @@ fn capture_selected(
   check_capture_target(target)?;
   let selected = catalog::select(target, driver, window.is_some())?;
   match (target, selected.id, window) {
-    (Target::X11(display), "linux.x11.ffmpeg", None) => selected.stream(
-      capture::x11::ffmpeg::Driver
-        .open(&display)?
-        .capture_display()?,
-      video,
-    ),
-    (Target::X11(display), "linux.x11.composite", Some(id)) => selected.stream(
-      capture::x11::composite::Driver
-        .open(&display)?
-        .capture_window(id)?,
-      video,
-    ),
-    (Target::Wayland(display), "linux.wayland.grim", None) => selected.stream(
-      capture::wayland::grim::Driver
-        .open(&display)?
-        .capture_display()?,
-      video,
-    ),
-    (Target::Wayland(display), "linux.wayland.image_copy", Some(id)) => selected.stream(
-      capture::wayland::image_copy::Driver
-        .open(&display)?
-        .capture_window(id)?,
+    (Target::X11(display), "linux.x11.ffmpeg", None) => {
+      selected.capture_display(capture::x11::ffmpeg::Driver.open(&display)?, video)
+    }
+    (Target::X11(display), "linux.x11.composite", Some(id)) => {
+      selected.capture_window(capture::x11::composite::Driver.open(&display)?, id, video)
+    }
+    (Target::Wayland(display), "linux.wayland.grim", None) => {
+      selected.capture_display(capture::wayland::grim::Driver.open(&display)?, video)
+    }
+    (Target::Wayland(display), "linux.wayland.image_copy", Some(id)) => selected.capture_window(
+      capture::wayland::image_copy::Driver.open(&display)?,
+      id,
       video,
     ),
     _ => Err("capture driver is unavailable for this target".into()),

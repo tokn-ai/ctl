@@ -8,7 +8,7 @@ use std::{
   process::{Child, Command, Stdio},
   sync::mpsc,
   thread,
-  time::Duration,
+  time::{Duration, Instant},
 };
 
 struct RunningProcess(Child);
@@ -30,6 +30,7 @@ pub struct ProcessCapture {
 enum Delivery {
   Stream,
   Sampled(Duration),
+  SampledAtRate(Duration),
   Paced {
     frame_bytes: NonZeroUsize,
     interval: Duration,
@@ -48,6 +49,14 @@ impl ProcessCapture {
     Self {
       command,
       delivery: Delivery::Sampled(interval),
+    }
+  }
+
+  /// Schedule each snapshot from its start, including helper execution time.
+  pub fn sampled_at_rate(command: Command, interval: Duration) -> Self {
+    Self {
+      command,
+      delivery: Delivery::SampledAtRate(interval),
     }
   }
 
@@ -93,7 +102,7 @@ fn run_child<W: Write + Send>(
           let _ = copied.send(frames.write_to(output, interval));
         });
       }
-      Delivery::Stream | Delivery::Sampled(_) => {
+      Delivery::Stream | Delivery::Sampled(_) | Delivery::SampledAtRate(_) => {
         scope.spawn(move || {
           let mut reader = reader;
           let _ = copied.send(io::copy(&mut reader, output).map(|_| ()));
@@ -122,7 +131,12 @@ fn run_child<W: Write + Send>(
         Ok(_) => {}
         Err(error) => break Err(error),
       }
-      if lifetime.cancelled(Duration::from_millis(20)) {
+      let poll_interval = if matches!(delivery, Delivery::SampledAtRate(_)) {
+        Duration::from_millis(2)
+      } else {
+        Duration::from_millis(20)
+      };
+      if lifetime.cancelled(poll_interval) {
         break Ok(false);
       }
     };
@@ -137,11 +151,22 @@ fn run_child<W: Write + Send>(
 
 impl CaptureSource for ProcessCapture {
   fn run<W: Write + Send>(mut self, output: &mut W, lifetime: &CaptureLifetime) -> Result<()> {
-    while run_child(&mut self.command, output, lifetime, self.delivery)? {
-      let Delivery::Sampled(interval) = self.delivery else {
+    let mut next_capture = Instant::now();
+    loop {
+      if !run_child(&mut self.command, output, lifetime, self.delivery)? {
         break;
+      }
+      let wait = match self.delivery {
+        Delivery::Sampled(interval) => interval,
+        Delivery::SampledAtRate(interval) => {
+          // Snapshots are fresh work, so missed capture periods are skipped.
+          // Retain the phase across ordinary scheduler wake-up delays.
+          next_capture = (next_capture + interval).max(Instant::now());
+          next_capture.saturating_duration_since(Instant::now())
+        }
+        _ => break,
       };
-      if lifetime.cancelled(interval) {
+      if lifetime.cancelled(wait) {
         break;
       }
     }

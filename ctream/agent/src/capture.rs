@@ -4,7 +4,7 @@
 //! `runtime::capture_with_metadata` or `runtime::capture_video_with_metadata`.
 
 use crate::runtime::{capture_video_with_metadata, capture_with_metadata};
-use ctream_driver::{CaptureSource, Result};
+use ctream_driver::{CaptureDisplay, CaptureOptions, CaptureSource, CaptureWindow, Result};
 use ctream_proto::{
   CaptureDriverDescriptor, CaptureDriverInfo, CaptureFormat, CaptureScope, CaptureSystem, Target,
   VideoRequest, X11_FRAME_SIZE,
@@ -19,6 +19,31 @@ pub struct Selection {
 }
 
 impl Selection {
+  pub fn capture_display(
+    self,
+    session: impl CaptureDisplay,
+    video: Option<VideoRequest>,
+  ) -> Result<()> {
+    let source = match options(video.as_ref())? {
+      Some(options) => session.capture_display_with_options(options)?,
+      None => session.capture_display()?,
+    };
+    self.stream(source, video)
+  }
+
+  pub fn capture_window(
+    self,
+    session: impl CaptureWindow,
+    id: &str,
+    video: Option<VideoRequest>,
+  ) -> Result<()> {
+    let source = match options(video.as_ref())? {
+      Some(options) => session.capture_window_with_options(id, options)?,
+      None => session.capture_window(id)?,
+    };
+    self.stream(source, video)
+  }
+
   pub fn stream(self, source: impl CaptureSource, video: Option<VideoRequest>) -> Result<()> {
     match video {
       Some(request) => capture_video_with_metadata(source, self.id, self.format, request),
@@ -28,6 +53,14 @@ impl Selection {
 }
 
 pub const MACOS_CAPTURE_DRIVER: &str = "macos.screencapturekit";
+
+/// Convert stream settings before opening a source. Raw requests keep their
+/// existing provider defaults.
+pub fn options(video: Option<&VideoRequest>) -> Result<Option<CaptureOptions>> {
+  video
+    .map(|request| CaptureOptions::new(request.options.max_fps))
+    .transpose()
+}
 
 fn entries(system: CaptureSystem) -> &'static [Selection] {
   match system {

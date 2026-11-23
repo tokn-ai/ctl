@@ -17,7 +17,9 @@ export const previewTargets: ConnectionTarget[] = [
     host_id: "preview-dev",
     host_name: "Development server",
     destination: "dev-server",
-    remote_info: { remote_id: "sample-dev", agent_version: "0.1.0" },
+    remote_info: { remote_id: "sample-dev", agent_version: "0.1.0", bundle: {
+      app_version: "0.1.0", bundle_id: "f".repeat(64), git_revision: "abcdef12".repeat(5), target_triple: "x86_64-unknown-linux-musl",
+    } },
   },
   {
     kind: "ssh",

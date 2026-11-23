@@ -494,11 +494,17 @@ impl Store {
 /// static musl target; a musl host cannot assume GNU dynamic libraries exist.
 #[must_use]
 pub fn local_target(target: &str) -> bool {
-  let native = crate::paths::native_target();
-  target == native
-    || native
+  runnable_on(target, crate::paths::native_target())
+}
+
+/// Whether a bundle target can run on a host with the given native target.
+/// Linux GNU hosts can also run this project's static musl bundles of the same architecture.
+#[must_use]
+pub fn runnable_on(target: &str, host_target: &str) -> bool {
+  target == host_target
+    || host_target
       .strip_suffix("-unknown-linux-gnu")
-      .is_some_and(|arch| target == format!("{arch}-unknown-linux-musl"))
+      .is_some_and(|arch| target.strip_suffix("-unknown-linux-musl") == Some(arch))
 }
 
 /// Resolves a component from the native local selection and checks its contracts.

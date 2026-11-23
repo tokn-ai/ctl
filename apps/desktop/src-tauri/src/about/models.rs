@@ -2,6 +2,24 @@ use ctl_core::component::{ComponentBuildInfo, LegacyProtocolInfo, ProtocolInfo};
 use ctl_core::protocol::ProtocolVersion as ContractVersion;
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Serialize)]
+pub struct DesktopBuildInfo {
+  pub version: &'static str,
+  pub channel: &'static str,
+  pub source_revision: Option<&'static str>,
+}
+
+impl DesktopBuildInfo {
+  pub fn current() -> Self {
+    let revision = env!("CTMUX_SOURCE_REVISION");
+    Self {
+      version: env!("CARGO_PKG_VERSION"),
+      channel: env!("CTMUX_DESKTOP_BUILD_CHANNEL"),
+      source_revision: (!revision.is_empty()).then_some(revision),
+    }
+  }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ProtocolVersion {
   pub name: String,
@@ -109,6 +127,8 @@ pub struct ComponentVersionRow {
   pub host_id: Option<String>,
   pub host_key: Option<String>,
   pub host_name: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub observed_agent_target: Option<String>,
   pub observation: &'static str,
   pub status: VersionStatus,
   pub running: Option<ComponentVersionInfo>,
@@ -135,6 +155,7 @@ impl ComponentVersionRow {
       host_id: None,
       host_key: None,
       host_name: None,
+      observed_agent_target: None,
       observation: "running",
       status: VersionStatus::Unknown,
       running: None,

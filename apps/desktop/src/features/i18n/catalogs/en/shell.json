@@ -152,7 +152,7 @@
   "palette.no_matches": "No matching commands.",
   "palette.placeholder": "Type a command",
   "palette.search": "Search commands",
-  "shell.about_detail": "Check app, daemon, and connected host versions.",
+  "shell.about_detail": "Manage runtimes on this computer and saved hosts, and inspect running services.",
   "shell.authenticate_first": "Authentication is required. Use Connect host to authenticate, then try again.",
   "shell.change_forwarding_failed": "Could not change port forwarding",
   "shell.choose_host": "Choose a saved host or a discovered SSH/Tailscale device.",

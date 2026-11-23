@@ -1,6 +1,9 @@
 import { Channel, invoke as nativeInvoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { LocalizedError } from "../features/i18n/messages";
 import type {
+  AboutRuntimeStatus,
+  AboutRuntimeSyncResult,
   AttachmentAckRequest,
   AttachmentEvent,
   AttachmentDividerResizeRequest,
@@ -61,6 +64,7 @@ import type {
   VpnStatus,
   VpnSnapshot,
   ComponentVersionsSnapshot,
+  DesktopBuildInfo,
   ComponentBundlesSnapshot,
   ComponentBundleSelection,
   ComponentBundleSelectionResult,
@@ -125,8 +129,35 @@ export async function closePreviewWindow(): Promise<void> {
   await getCurrentWindow().destroy();
 }
 
+export function getDesktopBuild(): Promise<DesktopBuildInfo> {
+  return invoke("get_desktop_build");
+}
+
+export function getUpdaterVersion(): Promise<string> {
+  return invoke("get_updater_version");
+}
+
 export async function getComponentVersions(host_id?: string): Promise<ComponentVersionsSnapshot> {
   return invoke("get_component_versions", host_id ? { host_id } : undefined);
+}
+
+function runtimeTarget(target: ConnectionTarget) {
+  if (target.kind === "local") return { host_id: null, method_id: null };
+  if (target.unavailable) throw new Error(target.unavailable);
+  if (!target.host_id) throw new LocalizedError("about.runtime_saved_required");
+  return { host_id: target.host_id, method_id: target.method_id ?? null };
+}
+
+export async function getAboutRuntimeStatus(target: ConnectionTarget): Promise<AboutRuntimeStatus> {
+  return invoke("about_runtime_status", runtimeTarget(target));
+}
+
+export async function fetchAboutRuntimeTarget(target_triple: string, channel: BundleChannel, attempt_id: string): Promise<void> {
+  return invoke("fetch_about_runtime_target", { target_triple, channel, attempt_id });
+}
+
+export async function syncAboutRuntime(target: ConnectionTarget, attempt_id: string): Promise<AboutRuntimeSyncResult> {
+  return invoke("sync_about_runtime", { ...runtimeTarget(target), attempt_id });
 }
 
 export async function getComponentBundles(): Promise<ComponentBundlesSnapshot> {

@@ -1,4 +1,5 @@
-import { translate, type DisplayText, type Locale } from "../../features/i18n/messages";
+import type { DisplayText } from "../../features/i18n/messages";
+import { runtimeTargetLabel } from "../../features/about/runtimeTargets";
 import { useLocale } from "../../features/i18n/LocaleContext";
 import { useEffect, useRef, useState } from "react";
 import { localizedErrorText } from "../../lib/errors";
@@ -8,19 +9,8 @@ import { InlineFeedback } from "../feedback/InlineFeedback";
 
 interface Props {
   visible: boolean;
+  refresh_revision?: number;
   on_selected(): void;
-}
-
-function targetLabel(target: string, locale: Locale): string {
-  const labels: Record<string, string> = {
-    "aarch64-apple-darwin": translate(locale, "about.bundle_macos_arm"),
-    "x86_64-apple-darwin": "macOS · Intel",
-    "aarch64-unknown-linux-musl": "Linux · ARM64 · musl",
-    "x86_64-unknown-linux-musl": "Linux · x86_64 · musl",
-    "aarch64-unknown-linux-gnu": "Linux · ARM64 · glibc",
-    "x86_64-unknown-linux-gnu": "Linux · x86_64 · glibc",
-  };
-  return labels[target] ?? target;
 }
 
 function BundleUse({ bundle, disabled, on_select }: {
@@ -40,7 +30,7 @@ function BundleUse({ bundle, disabled, on_select }: {
 }
 
 /** Installation changes future launches; running services stay in place. */
-export function ComponentBundlePanel({ visible, on_selected }: Props) {
+export function ComponentBundlePanel({ visible, refresh_revision, on_selected }: Props) {
   const { t, locale } = useLocale();
   const [snapshot, setSnapshot] = useState<ComponentBundlesSnapshot | null>(null);
   const [loading, setLoading] = useState(false);
@@ -70,7 +60,7 @@ export function ComponentBundlePanel({ visible, on_selected }: Props) {
     mounted.current = true;
     return () => { mounted.current = false; generation.current++; };
   }, []);
-  useEffect(() => { if (visible && !selecting.current) void refresh(); }, [visible]);
+  useEffect(() => { if (visible && !selecting.current) void refresh(); }, [visible, refresh_revision]);
 
   async function select(bundle: ComponentBundle) {
     if (selecting.current) return;
@@ -111,7 +101,7 @@ export function ComponentBundlePanel({ visible, on_selected }: Props) {
           <div className="about-bundle-origin"><span>{bundle.source === "ci" ? "CI" : bundle.source === "release" ? t("about.bundle_release") : t("about.bundle_local")}</span>{bundle.included ? <span>{t("about.bundle_included")}</span> : null}</div>
           <small title={bundle.git_revision ?? undefined}>{t("about.revision_named", { revision: bundle.git_revision?.slice(0, 12) ?? t("about.bundle_revision_unknown") })}</small><small title={bundle.bundle_id}>{t("about.bundle_named", { bundle: bundle.bundle_id.slice(0, 12) })}</small>
         </th>
-        <td><span title={bundle.target_triple}>{targetLabel(bundle.target_triple, locale)}</span>{!bundle.compatible ? <small className="about-error-text">{t("about.bundle_incompatible")}</small> : null}</td>
+        <td><span title={bundle.target_triple}>{runtimeTargetLabel(bundle.target_triple, locale)}</span>{!bundle.compatible ? <small className="about-error-text">{t("about.bundle_incompatible")}</small> : null}</td>
         <td><BundleUse bundle={bundle} disabled={busy !== null || loading} on_select={() => void select(bundle)} /></td>
       </tr>)}</tbody></table></div> : loading && !snapshot ? <p role="status">{t("about.bundle_checking_stored")}</p> : error && !snapshot ? <p className="about-muted">{t("about.bundle_availability_failed")}</p> : <p className="about-empty">{t("about.bundle_empty")}</p>}
   </section>;

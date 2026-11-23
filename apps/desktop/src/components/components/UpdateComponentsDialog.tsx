@@ -19,6 +19,7 @@ interface Props {
   targets: readonly ConnectionTarget[];
   context?: ComponentUpdateContext;
   connection_install?: boolean;
+  install_from?: boolean;
   on_updated?(results: ComponentUpdateHostResult[], targets: readonly ConnectionTarget[]): void;
   on_close(): void;
 }
@@ -36,8 +37,9 @@ function supportsCheckoutBuild(target: ConnectionTarget): boolean {
   return !triple || /^(x86_64|aarch64)-unknown-linux-(gnu|musl)$/.test(triple);
 }
 
-export function UpdateComponentsDialog({ targets, context, connection_install = false, on_updated, on_close }: Props) {
+export function UpdateComponentsDialog({ targets, context, connection_install = false, install_from = false, on_updated, on_close }: Props) {
   const { t, locale, formatText } = useLocale();
+  const title = t(install_from ? "about.runtime_install_title" : "about.update_title");
   const context_targets = context?.targets ?? [];
   const host_choices = connection_install ? context_targets.filter((target) => target.kind === "ssh") : [LOCAL_TARGET, ...targets, ...context_targets];
   // An explicitly selected route takes precedence even when it cannot be used.
@@ -150,7 +152,7 @@ export function UpdateComponentsDialog({ targets, context, connection_install = 
 
   useCommandScope({ commands: [
     { id: QUICK_INPUT_IDS.cancel, category: t("about.update_dialog_category"), title: t("about.update_cancel"), enabled: !stopping, run: dismiss },
-    { id: QUICK_INPUT_IDS.accept, category: t("about.update_dialog_category"), title: t("about.update_title"), enabled: !running && results === null && !blocked_checkout, run: start },
+    { id: QUICK_INPUT_IDS.accept, category: t("about.update_dialog_category"), title, enabled: !running && results === null && !blocked_checkout, run: start },
   ] });
 
   if (prompt && running) return <QuickInput key={prompt.prompt_id} title={promptTitle(prompt, locale)} description={prompt.message} warning={prompt.warning} mode={promptMode(prompt, locale)} error={error ? formatText(error) : null} cancel_disabled={stopping} onCancel={dismiss} onSubmit={async (response) => {
@@ -161,8 +163,8 @@ export function UpdateComponentsDialog({ targets, context, connection_install = 
   }} />;
 
   const install_progress = progress?.progress ? remoteInstallProgressMode(progress.progress, locale) : null;
-  return <QuickInputFrame title={t("about.update_title")} className="component-update-dialog" onDismiss={dismiss}>
-    <header><h2>{t("about.update_title")}</h2><p>{t("about.update_intro")}</p></header>
+  return <QuickInputFrame title={title} className="component-update-dialog" onDismiss={dismiss}>
+    <header><h2>{title}</h2><p>{t("about.update_intro")}</p></header>
     {running ? <div role="status" className="component-update-progress">
       <strong>{stopping ? t("about.update_stopping") : t("about.updating_host", { host: targetLabel(submitted_targets[progress?.host_index ?? 0], locale) })}</strong>
       <p>{install_progress?.message ?? t("about.update_preparing")}</p>
@@ -210,14 +212,14 @@ export function UpdateComponentsDialog({ targets, context, connection_install = 
         {local_macos_automatic ? <p className="component-update-hint">{t("about.build_automatic_macos_help")}</p> : null}
         {source_choice === "working_tree" ? <p className="component-update-hint">{t(!checkout_targets ? "about.build_checkout_hosts" : checkout_available === false ? "about.build_checkout_unavailable" : "about.build_checkout_help")}</p> : null}
         {source_choice !== "working_tree" && (source_choice !== "automatic" || automatic_publication) ? <p className="component-update-hint">{source_choice === "selected" ? t("about.build_offline_help") : source_choice === "automatic" ? t("about.build_automatic_help") : t("about.build_channel_help")}</p> : null}
-        {published || automatic_publication ? <PublishedBundleStatus channel={published ? source_choice : undefined} /> : null}
+        {published ? <PublishedBundleStatus channel={source_choice} /> : null}
       </>}
     </form>}
     {error ? <InlineFeedback>{formatText(error)}</InlineFeedback> : null}
     <footer>
       {results?.some((result) => result.state === "failed") ? <button type="button" onClick={() => { setSelected(new Set(results.filter((result) => result.state === "failed").map((result) => targetKey(submitted_targets[result.host_index])))); setResults(null); setError(null); }}>{t("about.update_retry")}</button> : null}
       <button type="button" onClick={dismiss} disabled={stopping}>{running ? t("about.update_stop") : results ? t("about.update_done") : t("about.update_cancel")}</button>
-      {!running && !results ? <button type="submit" form="component-update-form" disabled={!selected.size || blocked_checkout}>{t("about.update_confirm")}</button> : null}
+      {!running && !results ? <button type="submit" form="component-update-form" disabled={!selected.size || blocked_checkout}>{t(install_from ? "about.install" : "about.update_confirm")}</button> : null}
     </footer>
   </QuickInputFrame>;
 }

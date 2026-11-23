@@ -4,15 +4,27 @@ export type Sequence = string;
 
 export type ComponentUpdatePackage = "ctl_agent" | "full_bundle";
 export type BundleChannel = "nightly" | "stable";
+export interface DesktopBuildInfo {
+  channel: BundleChannel | "local" | "dev" | "prerelease";
+  version: string;
+  source_revision: string | null;
+}
+export interface ComponentBuildInfo {
+  version: string;
+  source_revision: string | null;
+  source_fingerprint: string;
+  dirty: boolean;
+}
 export interface PublishedBundleCatalog {
   channel: BundleChannel;
   bundle_id: string;
+  publication_id?: string | null;
   app_version: string;
   git_revision: string;
   targets: {
     target_triple: string;
     compatible: boolean;
-    components: Record<string, { build: { version: string; source_revision: string | null; source_fingerprint: string; dirty: boolean }; protocols: ComponentProtocolVersion[] }>;
+    components: Record<string, { build: ComponentBuildInfo; protocols: ComponentProtocolVersion[] }>;
   }[];
 }
 export interface ComponentUpdateCatalog {
@@ -58,6 +70,41 @@ export interface ComponentUpdateContext {
   targets?: readonly ConnectionTarget[];
   package?: ComponentUpdatePackage;
   source?: ComponentUpdateSource;
+}
+
+export interface RuntimeTargetBuild {
+  build: ComponentBuildInfo;
+  channels: string[];
+  current?: boolean;
+}
+
+export interface InstalledRuntimeTarget {
+  target_triple: string;
+  builds: InstalledRuntimeBuild[];
+  /** Published channel heads that still have a verified local payload. */
+  current_publications?: Record<string, string>;
+}
+
+export interface InstalledRuntimeBuild extends RuntimeTargetBuild {
+  build_label?: string | null;
+  bundle_id?: string;
+}
+
+export interface AboutRuntimeStatus {
+  active: string | null;
+  build_label: string | null;
+  origin: { channel: string; publication_id?: string | null } | null;
+  missing: boolean;
+  /** One entry per complete native build identity, including its retained catalog memberships. */
+  build_channels?: RuntimeTargetBuild[];
+  target_triple?: string | null;
+  active_build?: ComponentBuildInfo | null;
+  /** Complete runtime builds retained on this computer, including other architectures. */
+  installed_targets?: InstalledRuntimeTarget[];
+}
+
+export interface AboutRuntimeSyncResult {
+  state: "installed" | "pinned" | "current";
 }
 
 export interface CredentialTarget {
@@ -149,6 +196,8 @@ export interface ComponentVersionRow {
   /** Stable host grouping, including authenticated accounts without a saved host. */
   host_key?: string | null;
   host_name?: string | null;
+  /** Bundle target reported by an inspected or attached agent. */
+  observed_agent_target?: string | null;
   observation: "running" | "bundled" | "last_observed" | "installed" | "not_checked" | "legacy";
   status: ComponentVersionStatus;
   running: ComponentVersionInfo | null;

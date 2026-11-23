@@ -127,6 +127,7 @@ async function fixture(t: TestContext, settings: {
     if (command === "env" || command === "tar") return execute(command, args, { cwd: context.cwd, env: context.env });
     if (command === "pnpm") {
       assert.equal(context.env.CARGO_TARGET_DIR, cache);
+      assert.equal(context.env.CTL_DESKTOP_BUILD_CHANNEL, "local");
       assert.ok(args.includes("--debug"));
       assert.equal(args[args.indexOf("--target") + 1], native);
       if (windows) {
@@ -162,7 +163,7 @@ async function fixture(t: TestContext, settings: {
     throw new Error(`unexpected command ${command}`);
   };
   const options: DesktopBuildOptions = { workspace, output, home_directory: home,
-    env: { ...process.env, RUSTC: "fixture-rustc", CARGO_TARGET_DIR: target_directory,
+    env: { ...process.env, RUSTC: "fixture-rustc", CARGO_TARGET_DIR: target_directory, CTL_DESKTOP_BUILD_CHANNEL: "nightly",
       CTLD_PROVISIONING_PROFILE: settings.profile_from_home ? undefined : profile } };
   return { options, run, build, calls };
 }

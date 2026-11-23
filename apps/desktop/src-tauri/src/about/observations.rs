@@ -76,6 +76,16 @@ fn insert(
   hash.update(observation.host_id.as_deref().unwrap_or("").as_bytes());
   hash.update([0]);
   hash.update(serde_json::to_vec(&running).expect("version metadata serializes"));
+  let agent_target = observation
+    .identity
+    .bundle
+    .as_ref()
+    .filter(|_| component == "ctl_agent")
+    .map(|bundle| bundle.target_triple.as_str());
+  if let Some(target) = agent_target {
+    hash.update([0]);
+    hash.update(target.as_bytes());
+  }
   let id = format!("remote:{component}:{}", hex::encode(hash.finalize()));
   rows.entry(id.clone()).or_insert_with(|| {
     let restart_supported = component == "ctmuxd"
@@ -92,6 +102,7 @@ fn insert(
         None => format!("account:{}", observation.identity.remote_id),
       }),
       host_name: Some(observation.label.clone()),
+      observed_agent_target: agent_target.map(str::to_owned),
       observation: "running",
       status: super::models::VersionStatus::Unknown,
       running: Some(running),
@@ -180,6 +191,37 @@ mod tests {
       result
         .iter()
         .all(|row| row.host_name.as_deref() == Some("Test environment"))
+    );
+  }
+
+  #[test]
+  fn different_agent_targets_remain_distinct_observations() {
+    let mut first = observation();
+    first.identity.bundle = Some(Box::new(ctl_proto::BundleVersion {
+      app_version: first.identity.agent_version.clone(),
+      bundle_id: "bundle".into(),
+      git_revision: "a".repeat(40),
+      target_triple: "x86_64-unknown-linux-musl".into(),
+    }));
+    let mut second = first.clone();
+    second.identity.bundle.as_mut().unwrap().target_triple = "x86_64-unknown-linux-gnu".into();
+    let observed = rows(vec![first, second]);
+    let targets: std::collections::BTreeSet<_> = observed
+      .iter()
+      .filter_map(|row| row.observed_agent_target.as_deref())
+      .collect();
+    assert_eq!(
+      targets,
+      ["x86_64-unknown-linux-gnu", "x86_64-unknown-linux-musl"]
+        .into_iter()
+        .collect()
+    );
+    assert_eq!(
+      observed
+        .iter()
+        .filter(|row| row.component == "ctmuxd")
+        .count(),
+      1
     );
   }
 

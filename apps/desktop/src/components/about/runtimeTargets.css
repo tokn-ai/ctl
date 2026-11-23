@@ -1,0 +1,22 @@
+.runtime-target-heading,
+.runtime-target-fields,
+.runtime-build-target { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 7px; }
+.runtime-target-heading { justify-content: space-between; margin-bottom: 12px; }
+.runtime-target-heading h2 { margin: 0; }
+.runtime-build-groups, .runtime-build-targets { margin: 0; padding: 0; list-style: none; }
+.runtime-build-groups { font-size: 12px; overflow-wrap: anywhere; }
+.runtime-build-group { padding-block: 9px; border-top: 1px solid var(--border); }
+.runtime-build-group h3 { display: flex; flex-wrap: wrap; align-items: baseline; gap: 3px 7px; margin: 0; font-size: 13px; font-weight: 600; user-select: text; }
+.runtime-build-group small, .runtime-build-target code { color: var(--muted); font-size: 11px; font-weight: 400; }
+.runtime-build-targets { margin-block-start: 4px; margin-inline-start: 6px; }
+.runtime-build-target { position: relative; padding-block: 2px; padding-inline-start: 16px; }
+.runtime-build-target::before, .runtime-build-target::after { content: ""; position: absolute; inset-inline-start: 0; }
+.runtime-build-target::before { inset-block: 0; border-inline-start: 1px solid var(--border); }
+.runtime-build-target:last-child::before { inset-block-end: auto; height: 10px; }
+.runtime-build-target::after { inset-block-start: 10px; width: 10px; border-block-start: 1px solid var(--border); }
+.runtime-target-triple { display: block; margin-top: 3px; font-size: 11px; color: var(--muted); overflow-wrap: anywhere; }
+.runtime-build-target .runtime-target-triple { margin-top: 0; }
+.runtime-target-picker { padding: 12px; margin-top: 12px; border: 1px solid var(--border); border-radius: 5px; background: var(--surface-1); font-size: 12px; }
+.runtime-target-fields { align-items: end; margin-block: 8px; }
+.runtime-target-fields label { display: grid; gap: 4px; min-width: 0; color: var(--muted); }
+.runtime-target-fields select { min-height: 28px; max-width: 100%; padding: 3px 7px; color: var(--text); background: var(--surface-2); border: 1px solid var(--border); border-radius: 4px; }

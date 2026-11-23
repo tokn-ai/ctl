@@ -91,7 +91,7 @@ it("offers Nightly as the main build choice and sends it to discovery and instal
   const user = userEvent.setup();
   const select = screen.getByRole("combobox", { name: "Build source" }) as HTMLSelectElement;
   expect(select.value).toBe("automatic");
-  expect(screen.getByText("Remote updates use the configured publication channel.")).toBeTruthy();
+  expect(checkComponentUpdates).not.toHaveBeenCalled();
   expect(Array.from(select.options, (option) => option.value)).not.toContain("dev");
   await user.selectOptions(select, screen.getByRole("option", { name: "Nightly (latest published main build)" }));
   await waitFor(() => expect(checkComponentUpdates).toHaveBeenLastCalledWith("nightly", false));
@@ -100,22 +100,19 @@ it("offers Nightly as the main build choice and sends it to discovery and instal
   expect(vi.mocked(updateComponents).mock.calls[0][0].options.source).toEqual({ kind: "published", channel: "nightly" });
 });
 
-it("checks the publication for selected remote hosts while explaining the local macOS source", async () => {
+it("avoids a single channel preview when automatic sources depend on each machine", async () => {
   vi.spyOn(navigator, "platform", "get").mockReturnValue("MacIntel");
   render(<UpdateComponentsDialog targets={[host]} on_close={vi.fn()} />);
   const user = userEvent.setup();
   const mac_hint = /This Mac uses its active signed component build or a verified cached copy of that build/;
-  const remote_hint = "Remote updates use the configured publication channel.";
   expect(screen.getByText(mac_hint)).toBeTruthy();
-  expect(screen.queryByText(remote_hint)).toBeNull();
   expect(screen.queryByRole("region", { name: "Published component bundles" })).toBeNull();
   expect(checkComponentUpdates).not.toHaveBeenCalled();
 
   await user.click(screen.getByRole("checkbox", { name: "Builder" }));
   expect(screen.getByText(mac_hint)).toBeTruthy();
-  expect(screen.getByText(remote_hint)).toBeTruthy();
-  expect(await screen.findByRole("button", { name: "Check for bundle updates" })).toBeTruthy();
-  expect(checkComponentUpdates).toHaveBeenCalledExactlyOnceWith(undefined, false);
+  expect(screen.queryByRole("region", { name: "Published component bundles" })).toBeNull();
+  expect(checkComponentUpdates).not.toHaveBeenCalled();
 
   await user.click(screen.getByRole("checkbox", { name: "Builder" }));
   expect(screen.queryByRole("region", { name: "Published component bundles" })).toBeNull();

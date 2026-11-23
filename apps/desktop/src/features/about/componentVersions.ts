@@ -1,5 +1,5 @@
 import { formatter, translate, type Locale } from "../i18n/messages";
-import type { ComponentProtocolVersion, ComponentVersionInfo, ComponentVersionRow } from "../../lib/types";
+import type { AboutRuntimeStatus, ComponentProtocolVersion, ComponentVersionInfo, ComponentVersionRow } from "../../lib/types";
 
 export interface ComponentHostGroup {
   key: string;
@@ -21,6 +21,13 @@ export interface ComponentBuildView {
   label: string;
   info: ComponentVersionInfo | null;
   legacy: boolean;
+}
+
+/** Look up the channels that contain this exact native build on the inspected machine. */
+export function componentBuildChannels(info: ComponentVersionInfo | null, catalog: AboutRuntimeStatus["build_channels"]): string[] {
+  if (!catalog || !info?.version || !info.source_revision || !info.source_fingerprint || info.dirty == null) return [];
+  return catalog.find(({ build }) => build.version === info.version && build.source_revision === info.source_revision &&
+    build.source_fingerprint === info.source_fingerprint && build.dirty === info.dirty)?.channels ?? [];
 }
 
 export function groupComponentHosts(rows: readonly ComponentVersionRow[], locale: Locale = "en"): ComponentHostGroup[] {
@@ -50,18 +57,14 @@ function buildsMatch(running: ComponentVersionInfo, installed: ComponentVersionI
     && protocolsMatch(running.protocols, installed.protocols);
 }
 
-function buildsDiffer(running: ComponentVersionInfo, installed: ComponentVersionInfo): boolean {
-  const fields = ["version", "source_revision", "source_fingerprint", "dirty"] as const;
-  return fields.some((field) => running[field] !== null && installed[field] !== null && running[field] !== installed[field])
-    || running.protocols.some((protocol) => installed.protocols.some((candidate) => candidate.name === protocol.name && !protocolsMatch([protocol], [candidate])));
-}
-
 export function componentBuildViews(row: ComponentVersionRow, locale: Locale = "en"): ComponentBuildView[] {
-  // Older local snapshots use available as the installed executable. Remote
-  // available may instead describe this app, so it must never become translate(locale, "about.build_on_disk").
+  // Older local snapshots use available as the installed executable. For remote
+  // observations that field can describe the desktop's reference build.
   const installed = row.installed === undefined && row.location === "local" ? row.available : row.installed ?? null;
   if (row.observation === "installed") return [{ label: translate(locale, "about.build_on_disk_on_demand"), info: installed, legacy: false }];
-  if (!row.running?.version || row.status === "not_running" || row.observation === "not_checked") {
+  const reported_owner = row.running?.version || row.running?.source_revision || row.running?.source_fingerprint ||
+    row.running?.protocols.length || row.legacy_protocols?.length;
+  if (!reported_owner || row.status === "not_running" || row.observation === "not_checked") {
     return [{ label: translate(locale, "about.build_on_disk"), info: installed, legacy: false }];
   }
   if (row.running && installed && buildsMatch(row.running, installed) && !row.legacy_protocols?.length) {
@@ -80,9 +83,7 @@ export interface ComponentHostFailure {
   component_ids: ReadonlySet<string>;
 }
 
-const inspection_prerequisites = new Set(["remote_component_inspection_unsupported", "ssh_authentication_required", "ssh_host_disconnected", "remote_identity_unverified", "remote_windows_maintenance_unsupported"]);
-
-function hostConnected(rows: readonly ComponentVersionRow[]): boolean | null {
+export function hostConnected(rows: readonly ComponentVersionRow[]): boolean | null {
   if (rows.some((row) => row.connected === true || row.observation === "last_observed")) return true;
   return rows.some((row) => row.connected === false) ? false : null;
 }
@@ -123,29 +124,4 @@ export function componentProtocolLines(row: ComponentVersionRow, view: Component
     const status = !expected ? "unknown" : !compatible ? "incompatible" : protocol.version === expected.version ? "current" : "compatible";
     return { name, version: protocol.version, status, detail: translate(locale, "about.protocol_advertised", { version: protocol.version, build: protocol.build, versions: formatter(locale).formatList(protocol.supported_versions), requirement }) };
   });
-}
-
-export function componentHostStatuses(rows: readonly ComponentVersionRow[], locale: Locale = "en"): { label: string; status: string }[] {
-  const statuses: { label: string; status: string }[] = [];
-  const builds = rows.map((row) => ({ row, views: componentBuildViews(row, locale) }));
-  const separate = builds.filter(({ views }) => views.length === 2 && views[0].info && views[1].info);
-  const protocols = builds.flatMap(({ row, views }) => views.filter((view) => view.info || view.legacy && row.legacy_protocols?.length).flatMap((view) => componentProtocolLines(row, view, locale)));
-  if (rows.some((row) => row.status === "incompatible") || protocols.some((protocol) => protocol.status === "incompatible")) statuses.push({ label: translate(locale, "about.protocol_mismatch"), status: "incompatible" });
-  if (rows.some((row) => row.status === "outdated")) statuses.push({ label: translate(locale, "about.outdated"), status: "outdated" });
-  if (rows.some((row) => row.status === "different_build")) statuses.push({ label: translate(locale, "about.different_build"), status: "different_build" });
-  if (rows.some((row) => row.restart_required)) statuses.push({ label: translate(locale, "about.restart_required"), status: "different_build" });
-  else if (separate.some(({ views }) => buildsDiffer(views[0].info!, views[1].info!))) statuses.push({ label: translate(locale, "about.running_differs"), status: "different_build" });
-  if (rows.some((row) => row.error_code === "remote_component_inspection_unsupported")) statuses.push({ label: translate(locale, "about.update_agent"), status: "outdated" });
-  if (rows.some((row) => row.error_code === "remote_identity_unverified")) statuses.push({ label: translate(locale, "about.verify_account"), status: "unknown" });
-  if (rows.some((row) => row.observation === "not_checked" && row.error && !inspection_prerequisites.has(row.error_code ?? ""))) statuses.push({ label: translate(locale, "about.inspection_failed"), status: "unavailable" });
-  if (rows.some((row) => row.observation !== "not_checked" && (row.error || row.status === "unavailable"))) statuses.push({ label: translate(locale, "about.unavailable"), status: "unavailable" });
-  if (rows.some((row) => row.observation === "not_checked")) statuses.push({ label: translate(locale, "about.not_checked"), status: "unknown" });
-  const connected = hostConnected(rows);
-  const withConnection = (summary: typeof statuses) => connected === null ? summary
-    : [{ label: connected ? translate(locale, "about.connected") : translate(locale, "about.not_connected"), status: connected ? "current" : "unknown" }, ...summary];
-  if (statuses.length) return withConnection(statuses);
-  if (rows.some((row) => row.status === "newer")) return withConnection([{ label: translate(locale, "about.newer_build"), status: "newer" }]);
-  if (rows.some((row) => row.status === "not_running")) return withConnection([{ label: translate(locale, "about.not_running"), status: "not_running" }]);
-  if (separate.length || builds.some(({ views }) => views.some((view) => !view.info)) || rows.some((row) => row.status === "unknown" && row.observation !== "installed") || !protocols.length || protocols.some((protocol) => protocol.status === "unknown")) return withConnection([{ label: translate(locale, "about.unverified"), status: "unknown" }]);
-  return withConnection(protocols.some((protocol) => protocol.status === "compatible") ? [{ label: translate(locale, "about.compatible_protocols"), status: "outdated" }] : [{ label: translate(locale, "about.current"), status: "current" }]);
 }

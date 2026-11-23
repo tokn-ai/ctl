@@ -1,18 +1,21 @@
-import { translate, type Locale } from "../features/i18n/messages";
+import { translate, type DisplayText, type Locale } from "../features/i18n/messages";
 import { useLocale } from "../features/i18n/LocaleContext";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { ComponentBundlePanel } from "../components/about/ComponentBundlePanel";
-import { ComponentVersionTable, versionLabel } from "../components/about/ComponentVersionTable";
+import { versionLabel } from "../components/about/ComponentVersionTable";
 import { QuickInput } from "../components/commands/QuickInput";
 import { Icon } from "../components/ui/Icon";
 import { InlineFeedback } from "../components/feedback/InlineFeedback";
 import { UpdateComponentsDialog } from "../components/components/UpdateComponentsDialog";
-import { PublishedBundleStatus } from "../components/components/PublishedBundleStatus";
+import { RuntimeMachines } from "../components/about/RuntimeMachines";
+import { RunningDesktopBuild } from "../components/about/RunningDesktopBuild";
+import { UpdaterVersion } from "../components/about/UpdaterVersion";
+import { RuntimeTargets } from "../components/about/RuntimeTargets";
 import { SshHostFlow } from "../components/sessions/SshHostFlow";
 import { useComponentVersions } from "../features/about/useComponentVersions";
-import { supportsComponentUpdate } from "../features/targets/targets";
-import type { ComponentActionPreflight, ComponentActionResult, ComponentUpdateContext, ConnectionTarget, SshConnectionTarget } from "../lib/types";
+import { LOCAL_TARGET, supportsComponentUpdate, targetKey } from "../features/targets/targets";
+import type { AboutRuntimeStatus, ComponentActionPreflight, ComponentActionResult, ComponentUpdateContext, ConnectionTarget, SshConnectionTarget } from "../lib/types";
 import "../components/about/about.css";
 
 interface Props {
@@ -40,54 +43,127 @@ function actionDescription(preflight: ComponentActionPreflight, locale: Locale):
 export function AboutPage({ visible, on_close, on_restarted, on_dialog_change, execute_action, remote_targets = [] }: Props) {
   const { t, locale, intl, formatText } = useLocale();
   const model = useComponentVersions(visible, on_restarted, execute_action);
-  const [component_flow, setComponentFlow] = useState<{ target: ConnectionTarget; mode: "inspect" | "update" } | null>(null);
+  const [inspect_target, setInspectTarget] = useState<SshConnectionTarget | null>(null);
+  const [builds_revision, setBuildsRevision] = useState(0);
+  const [builds_open, setBuildsOpen] = useState(false);
+  const [revisions, setRevisions] = useState<ReadonlyMap<string, number>>(() => new Map());
+  const [local, setLocal] = useState<{ inventory: AboutRuntimeStatus | null; loading: boolean; error: DisplayText | null }>({
+    inventory: null, loading: true, error: null,
+  });
+  const observeLocal = useCallback((inventory: AboutRuntimeStatus | null, loading: boolean, error: DisplayText | null) => {
+    setLocal({ inventory, loading, error });
+  }, []);
   const [update_context, setUpdateContext] = useState<ComponentUpdateContext | null>(null);
   const heading = useRef<HTMLHeadingElement>(null);
   useEffect(() => { if (visible) heading.current?.focus(); }, [visible]);
-  const has_dialog = model.preflight !== null || component_flow !== null || update_context !== null;
+  const preflight = model.preflight;
+  const action_title = preflight?.action === "reconnect" ? "about.reconnect_component" : "about.restart_component";
+  const has_dialog = preflight !== null || inspect_target !== null || update_context !== null;
   useEffect(() => { on_dialog_change(has_dialog); }, [has_dialog, on_dialog_change]);
   const app = model.snapshot?.components.find((row) => row.component === "ctmux");
-  const local = model.snapshot?.components.filter((row) => row.location === "local" && row.component !== "ctmux") ?? [];
-  const remote = model.snapshot?.components.filter((row) => row.location === "remote") ?? [];
-  const manageable_targets = remote_targets.filter((target): target is SshConnectionTarget =>
-    target.kind === "ssh" && supportsComponentUpdate(target));
-  const table_props = { busy_id: model.busy_id, restarting: model.restarting, action_error: model.action_error, on_restart: (id: string) => void model.requestRestart(id) };
+  const rows = model.snapshot?.components ?? [];
+
+  function refreshInstallations(targets: readonly ConnectionTarget[]) {
+    setRevisions((previous) => {
+      const next = new Map(previous);
+      for (const target of targets) {
+        const key = targetKey(target);
+        next.set(key, (next.get(key) ?? 0) + 1);
+      }
+      return next;
+    });
+  }
 
   return <>
     <section className="about-page" aria-label={t("about.title")} hidden={!visible}>
       <header className="about-page-header">
-        <div><p className="about-eyebrow">CTMUX</p><h1 ref={heading} tabIndex={-1}>{t("about.title")}</h1><p className="about-muted">{t("about.intro")}</p></div>
+        <div>
+          <h1 ref={heading} tabIndex={-1}>{t("about.title")}</h1>
+          <RunningDesktopBuild visible={visible} fallback={app?.running} />
+          <UpdaterVersion visible={visible} refresh_revision={builds_revision} />
+        </div>
         <button type="button" onClick={on_close} className="about-back"><Icon name="close" />{t("about.back")}</button>
       </header>
       <div className="about-content">
-        <div className="about-app-card"><Icon name="terminal" size={36} /><div><strong>ctmux</strong><p>{app ? versionLabel(app.running, locale) : model.loading ? t("about.checking_app") : t("about.unknown_version")}</p><small>{t("about.desktop")}</small></div></div>
+        <RuntimeTargets
+          inventory={local.inventory}
+          loading={local.loading}
+          error={local.error}
+          on_refresh={() => {
+            refreshInstallations([LOCAL_TARGET]);
+            setBuildsRevision((value) => value + 1);
+          }}
+        />
+        <RuntimeMachines
+          visible={visible}
+          rows={rows}
+          targets={remote_targets}
+          refresh_revision={revisions}
+          on_local_status={observeLocal}
+          local_builds={supportsComponentUpdate(LOCAL_TARGET) && <details className="about-stored-builds" onToggle={(event) => setBuildsOpen(event.currentTarget.open)}>
+            <summary>{t("about.runtime_stored_builds")}</summary>
+            <ComponentBundlePanel visible={visible && builds_open} refresh_revision={builds_revision} on_selected={() => {
+              refreshInstallations([LOCAL_TARGET]);
+              void model.refresh();
+            }} />
+          </details>}
+          service_refresh={<div className="about-refresh-row">
+            <span>{model.checked_at === null ? t("about.unchecked") : t("about.last_checked", { time: intl.formatTime(model.checked_at, { hour: "2-digit", minute: "2-digit", second: "2-digit" }) })}</span>
+            <button type="button" onClick={() => void model.refresh()} disabled={model.loading || model.busy_id !== null}>
+              <Icon name="refresh" />{t(model.loading ? "about.checking" : "about.refresh_versions")}
+            </button>
+          </div>}
+          busy_id={model.busy_id}
+          restarting={model.restarting}
+          action_error={model.action_error}
+          on_restart={(id) => void model.requestRestart(id)}
+          on_inspect={setInspectTarget}
+          on_install={(target) => setUpdateContext({ targets: [target] })}
+          on_synced={(target) => {
+            void model.refresh(target.kind === "ssh" ? target.host_id : undefined);
+            if (target.kind === "local") setBuildsRevision((value) => value + 1);
+          }}
+        />
         <section aria-label={t("about.version_checks")}>
-          <div className="about-refresh-row"><button type="button" onClick={() => setUpdateContext({})}>{t("about.action_update")}</button><p>{model.checked_at === null ? t("about.unchecked") : t("about.last_checked", { time: intl.formatTime(model.checked_at, { hour: "2-digit", minute: "2-digit", second: "2-digit" }) })}</p><button type="button" onClick={() => void model.refresh()} disabled={model.loading || model.busy_id !== null}><Icon name="refresh" />{model.loading ? t("about.checking") : t("about.refresh_versions")}</button></div>
           {model.error ? <InlineFeedback>{t(model.snapshot ? "about.refresh_failed_cached" : "about.refresh_failed", { detail: model.error })}</InlineFeedback> : null}
-          {model.action_error && !model.snapshot?.components.some((row) => row.component_id === model.action_error!.component_id) ? <InlineFeedback>{formatText(model.action_error.message)}</InlineFeedback> : null}
+          {model.action_error && !rows.some((row) => row.component_id === model.action_error?.component_id) ? <InlineFeedback>{formatText(model.action_error.message)}</InlineFeedback> : null}
           {model.loading && !model.snapshot ? <p role="status">{t("about.checking_local_remote")}</p> : null}
         </section>
-        <PublishedBundleStatus visible={visible} on_update={(channel) => setUpdateContext({ source: { kind: "published", channel } })} />
-        <ComponentBundlePanel visible={visible} on_selected={() => void model.refresh()} />
-        <section className="about-section" aria-labelledby="about-local"><h2 id="about-local">{t("about.local_components")}</h2><p className="about-muted">{t("about.local_help")}</p>{local.length ? <ComponentVersionTable rows={local} {...table_props} /> : !model.loading ? <p className="about-muted">{t("about.no_local_components")}</p> : null}</section>
-        <section className="about-section" aria-labelledby="about-remote"><h2 id="about-remote">{t("about.remote_hosts")}</h2><p className="about-muted">{t("about.remote_help")}</p>{remote.length ? <ComponentVersionTable rows={remote} {...table_props} targets={manageable_targets} on_manage_host={(target, mode) => {
-          if (mode === "update") setUpdateContext({ targets: [target] }); else setComponentFlow({ target, mode });
-        }} /> : !model.loading ? <p className="about-empty">{t("about.no_remote_hosts")}</p> : null}</section>
-        <div className="about-protocol-legend" aria-label={t("about.protocol_legend")}>
-          <span className="about-protocol-current"><Icon name="check" size={14} />{t("about.current_protocol")}</span>
-          <span className="about-protocol-compatible"><Icon name="check" size={14} />{t("about.compatible_protocol")}</span>
-          <span className="about-protocol-incompatible"><Icon name="close" size={14} />{t("about.incompatible_protocol")}</span>
-          <span className="about-muted">{t("about.unverified_protocol")}</span>
-        </div>
-        <p className="about-footnote">{t("about.comparison_footnote")}</p>
       </div>
     </section>
-    {model.preflight ? createPortal(<QuickInput title={t(model.preflight.action === "reconnect" ? "about.reconnect_component" : "about.restart_component", { name: model.preflight.label })} description={actionDescription(model.preflight, locale)} mode={{ kind: "confirm", confirm_label: t(model.preflight.action === "reconnect" ? "about.reconnect_component" : "about.restart_component", { name: model.preflight.component === "ctl_agent" ? "ctl-agent" : model.preflight.component }), destructive: model.preflight.action === "restart" }} onCancel={model.cancelRestart} onSubmit={model.confirmRestart} />, document.body) : null}
-    {update_context ? createPortal(<UpdateComponentsDialog targets={remote_targets} context={update_context} on_updated={() => {
-      void model.refresh();
-    }} on_close={() => setUpdateContext(null)} />, document.body) : null}
-    {component_flow ? <SshHostFlow suggestions={[]} warning={null} target={component_flow.target} component_mode={component_flow.mode} autoConnect={component_flow.mode === "inspect"} updateRequired={component_flow.mode === "update"} on_components_complete={() => {
-      void model.refresh(component_flow.target.kind === "ssh" ? component_flow.target.host_id : undefined);
-    }} onClose={() => setComponentFlow(null)} /> : null}
+    {preflight && createPortal(<QuickInput
+      title={t(action_title, { name: preflight.label })}
+      description={actionDescription(preflight, locale)}
+      mode={{
+        kind: "confirm",
+        confirm_label: t(action_title, { name: preflight.component === "ctl_agent" ? "ctl-agent" : preflight.component }),
+        destructive: preflight.action === "restart",
+      }}
+      onCancel={model.cancelRestart}
+      onSubmit={model.confirmRestart}
+    />, document.body)}
+    {update_context && createPortal(<UpdateComponentsDialog
+      targets={remote_targets}
+      context={update_context}
+      install_from
+      on_updated={(results, targets) => {
+        const completed = results.filter((result) => result.state === "complete").map((result) => targets[result.host_index]);
+        if (completed.some((target) => target.kind === "local")) setBuildsRevision((value) => value + 1);
+        if (completed.length) {
+          refreshInstallations(completed);
+          void model.refresh();
+        }
+      }}
+      on_close={() => setUpdateContext(null)}
+    />, document.body)}
+    {inspect_target && <SshHostFlow
+      suggestions={[]}
+      warning={null}
+      target={inspect_target}
+      component_mode="inspect"
+      autoConnect
+      on_components_complete={() => void model.refresh(inspect_target.host_id)}
+      onClose={() => setInspectTarget(null)}
+    />}
   </>;
 }

@@ -1,25 +1,46 @@
 # Components and updates
 
-Open **About ctmux** to inspect components on this computer and saved remote
-hosts. **Running** identifies the existing process; **On disk** identifies the
-selected executable. Build IDs distinguish development binaries that share a
-product version. Different builds do not establish which one is newer.
+Open **About ctmux** to see the version and build channel of the running
+desktop application. Nightly and local builds also show their Git revision.
+The next line shows the version of the local `ctlup` executable the app uses.
+The desktop and each machine’s runtime can come from different channels.
 
-Local components stay expanded. Remote hosts start as a compact table with
-summaries of outdated builds, protocol mismatches, and required restarts.
-Expand one remote host at a time to see its components. Matching reported
-running and installed builds share one row; different builds show separate
-**Running** and **On disk** rows. Unknown or stopped running builds are hidden,
-leaving the on-disk build and component status. Active-connection metadata
-remains labeled **Last observed**. Shared SSH inspection failures appear once
-on the host with a short message; hover it for the full diagnostic.
+**Runtime targets on this computer** shows each full build label once, with
+its installed targets listed underneath. For example, a copy of
+`stable-v0.1.4-ba16876` for macOS and another for Linux appear under the
+same build. A local build of that revision has its own heading. Each target
+shows its recorded channels.
+Older stores that only recorded a bundle ID show the version and a short ID.
+Use **Add target** to fetch a platform from a stable or nightly
+publication. Like `ctlup bundle fetch`, this brings registered targets on
+that channel to the same publication and leaves the active runtime selection
+in place. A stored Linux build, for example, is available for deployment to
+a compatible SSH host.
+
+Select a machine to see its runtime target, installed bundle, and services.
+Use **Check installation** on a saved host to read its selection through the
+chosen SSH method. Remote checks and sync use noninteractive SSH. Connect to
+the saved host first to verify the account and complete interactive authentication.
+
+**Sync** follows that machine’s recorded source, like `ctlup update`. Stable
+and Nightly follow their own channels. A healthy pinned build stays selected.
+A missing pinned build can be restored when its exact verified cache is
+available. Use **Install from…** to provision a machine or choose another source.
+
+The bundle supplies the same build of `ctld`, `ctmuxd`, and `ctl-taskd`.
+After a sync, a service can still be running its previous build. Select
+a service to compare the observed process and the binary on disk, including
+their revisions, fingerprints, catalog channels, and protocols. Restart
+and reconnect actions show their impact before they run. On Windows SSH
+hosts the app can show observations from attached sessions. A full service
+inspection is currently available on local machines and supported Unix SSH hosts.
 
 Each protocol has its own line and status: a green tick for the app's current
 contract, a yellow tick for a different contract that shares an explicitly
 supported version, and a red cross for no shared contract. Unreported protocols
-and historical numeric protocols have a neutral question mark. The tooltip
-shows the supported and required contracts; matching major versions alone do
-not imply compatibility.
+and historical numeric protocols have a neutral question mark. The component
+details show which contract versions each build advertises and which the app
+requires.
 
 Refresh reuses existing authenticated SSH connections and checks service owners
 without attaching a terminal, starting a daemon or VPN, or installing files.
@@ -316,7 +337,8 @@ the local desktop app commands above; ARM64 whole-runtime bundles are unavailabl
 
 ## Desktop component updates
 
-Use **Update components…** in the command palette, About, or host settings.
+Use **Install from…** on a machine in About, or **Update components…** in the
+command palette or host settings.
 Choose hosts and a channel, provided files, or an included offline build.
 In a development app, select a Linux x64 or ARM64 SSH host and choose
 **Build from checkout** to compile on this computer from the checkout used to
@@ -325,7 +347,7 @@ build the app and upload the result. Choose **Provided build files** to upload a
 When installing from the connection prompt, the dialog targets the SSH route
 that needs the components. Progress identifies which computer is downloading,
 which files travel over SSH, and when the remote host activates the build. Every
-update installs a complete build. About’s bundle list shows the active native
+update installs a complete build. **Stored and included builds** shows the active native
 build and offers local installation of another usable build. Explicitly installed
 target components have durable channel registrations; other downloaded foreign
 artifacts remain deployment cache entries.

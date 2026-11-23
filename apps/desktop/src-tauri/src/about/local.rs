@@ -321,7 +321,10 @@ async fn read_binary(executable: PathBuf, component: &str) -> Result<ComponentVe
     return Ok(info);
   }
   let output = binary_output(&executable, "--version").await?;
-  legacy_binary_version(&output, component)
+  Ok(ComponentVersionInfo {
+    version: Some(reported_binary_version(&output, component)?),
+    ..ComponentVersionInfo::default()
+  })
 }
 
 fn parse_binary_info(output: &[u8], component: &str) -> Result<ComponentVersionInfo, String> {
@@ -353,7 +356,7 @@ fn parse_binary_info(output: &[u8], component: &str) -> Result<ComponentVersionI
   ))
 }
 
-fn legacy_binary_version(output: &[u8], component: &str) -> Result<ComponentVersionInfo, String> {
+pub(super) fn reported_binary_version(output: &[u8], component: &str) -> Result<String, String> {
   let text = std::str::from_utf8(output).map_err(|_| "Invalid helper version text")?;
   let mut fields = text.split_whitespace();
   let name = fields.next();
@@ -362,10 +365,7 @@ fn legacy_binary_version(output: &[u8], component: &str) -> Result<ComponentVers
   {
     return Err("The selected helper returned an unrecognized version".into());
   }
-  Ok(ComponentVersionInfo {
-    version: Some(version.into()),
-    ..ComponentVersionInfo::default()
-  })
+  Ok(version.into())
 }
 
 async fn binary_output(executable: &Path, argument: &str) -> Result<Vec<u8>, String> {
@@ -515,18 +515,15 @@ mod tests {
   #[test]
   fn legacy_versions_are_only_accepted_for_the_expected_component() {
     assert_eq!(
-      legacy_binary_version(b"ctmuxd 0.1.0\n", "ctmuxd")
-        .unwrap()
-        .version
-        .as_deref(),
-      Some("0.1.0")
+      reported_binary_version(b"ctmuxd 0.1.0\n", "ctmuxd").unwrap(),
+      "0.1.0"
     );
     for output in [
       b"ctld 0.1.0".as_slice(),
       b"ctmuxd invalid",
       b"ctmuxd 0.1.0 trailing",
     ] {
-      assert!(legacy_binary_version(output, "ctmuxd").is_err());
+      assert!(reported_binary_version(output, "ctmuxd").is_err());
     }
   }
 

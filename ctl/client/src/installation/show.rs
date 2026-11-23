@@ -5,7 +5,7 @@ use super::{
 };
 use ctl_core::bundles::{Manifest, Source};
 use ctl_core::component::ComponentBuildInfo;
-use ctl_core::installations::{CatalogEntry, Installations};
+use ctl_core::installations::{CatalogEntry, Inspection, Installations};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io;
@@ -210,23 +210,30 @@ impl InstallationShow {
 /// # Errors
 /// Reports unsafe storage, modified builds or invalid catalog selections.
 pub fn show(home: &Path) -> io::Result<InstallationShow> {
-  let inspection = Installations::new(home).inspect()?;
-  let builds = inspection
-    .bundles
-    .iter()
-    .map(|bundle| InstalledBuild::from_manifest(&bundle.manifest))
-    .collect::<io::Result<Vec<_>>>()?;
-  let result = InstallationShow {
-    schema_version: 2,
-    active: inspection.active,
-    active_origin: inspection.active_origin,
-    previous: inspection.previous,
-    installations: inspection.entries,
-    builds,
-    missing_builds: inspection.missing,
-  };
-  result.validate()?;
-  Ok(result)
+  Installations::new(home).inspect()?.try_into()
+}
+
+impl TryFrom<Inspection> for InstallationShow {
+  type Error = io::Error;
+
+  fn try_from(inspection: Inspection) -> io::Result<Self> {
+    let builds = inspection
+      .bundles
+      .iter()
+      .map(|bundle| InstalledBuild::from_manifest(&bundle.manifest))
+      .collect::<io::Result<Vec<_>>>()?;
+    let result = Self {
+      schema_version: 2,
+      active: inspection.active,
+      active_origin: inspection.active_origin,
+      previous: inspection.previous,
+      installations: inspection.entries,
+      builds,
+      missing_builds: inspection.missing,
+    };
+    result.validate()?;
+    Ok(result)
+  }
 }
 
 fn insert_build(

@@ -46,6 +46,7 @@ jobs:
       app_version: ${{ steps.metadata.outputs.app_version }}
       bundle_id: ${{ steps.metadata.outputs.bundle_id }}
       git_revision: ${{ steps.metadata.outputs.git_revision }}
+      desktop_build_channel: ${{ steps.metadata.outputs.desktop_build_channel }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
@@ -75,15 +76,20 @@ jobs:
               exit 1
             fi
             bundle_id=$app_version
+            desktop_build_channel=stable
+            if [[ "${app_version%%+*}" == *-* ]]; then desktop_build_channel=prerelease; fi
           elif [[ "$GITHUB_REF" == refs/heads/main ]]; then
             commit_date=$(TZ=UTC git show -s --format=%cd --date=format-local:%Y%m%d HEAD)
             bundle_id="$app_version-nightly.$commit_date+g${GITHUB_SHA:0:12}"
+            desktop_build_channel=nightly
           else
             bundle_id="$app_version-dev.${GITHUB_SHA:0:12}"
+            desktop_build_channel=dev
           fi
           echo "app_version=$app_version" >> "$GITHUB_OUTPUT"
           echo "bundle_id=$bundle_id" >> "$GITHUB_OUTPUT"
           echo "git_revision=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+          echo "desktop_build_channel=$desktop_build_channel" >> "$GITHUB_OUTPUT"
 
   remote-agent:
     name: Remote agent (${{ matrix.target }})
@@ -747,6 +753,7 @@ jobs:
         working-directory: apps/desktop
         env:
           APPLE_SIGNING_ENABLED: ${{ steps.signing.outputs.enabled }}
+          CTL_DESKTOP_BUILD_CHANNEL: ${{ needs.metadata.outputs.desktop_build_channel }}
         shell: bash
         run: |
           signing_args=()
@@ -900,6 +907,8 @@ jobs:
 
       - name: Build the native desktop executable
         working-directory: apps/desktop
+        env:
+          CTL_DESKTOP_BUILD_CHANNEL: ${{ needs.metadata.outputs.desktop_build_channel }}
         run: pnpm --workspace-root desktop:build --target '${{ matrix.target }}' --no-bundle --config src-tauri/tauri.bundle.conf.json --config src-tauri/bundle.windows.conf.json
 
       - name: Package portable desktop and standalone updater

@@ -7,9 +7,12 @@ import type {
   AttachmentInputRequest,
   AttachmentLeaseRequest,
   AttachmentResizeRequest,
+  BundleChannel,
   ConnectionTarget,
   ComponentBundleSelection,
   ComponentBundlePhase,
+  ComponentUpdateProgress,
+  ComponentUpdateRequest,
   CreateSessionRequest,
   HostCatalogDocument,
   HostCatalogSnapshot,
@@ -43,7 +46,8 @@ import {
   previewTargets,
   previewWorkspace,
 } from "./fixtures";
-import { previewComponentVersions, previewComponentBundles } from "./aboutFixtures";
+import { previewComponentVersions, previewComponentBundles, previewReplacementStatus } from "./aboutFixtures";
+import { previewRuntime, previewUpdateCatalog, sample_builds } from "./runtimeFixtures";
 import { previewCredentials, previewIdentityFiles } from "./credentialsFixtures";
 
 // This entry is intentionally absent from index.html and the production build.
@@ -78,12 +82,16 @@ if (credentials_param === "import") {
     file.fingerprint = null;
   });
 }
-let component_versions = previewComponentVersions();
-let component_bundles = previewComponentBundles();
+const component_versions = previewComponentVersions();
+const component_bundles = previewComponentBundles();
+const runtime = previewRuntime(component_bundles, component_versions, about_param === "partial");
 if (about_param === "partial") {
   const daemon = component_versions.components.find((row) => row.component === "ctmuxd")!;
   daemon.running = null;
   daemon.status = "unavailable";
+  daemon.restart_required = false;
+  daemon.restart_supported = false;
+  daemon.action = null;
   daemon.error = "The running ctmuxd did not respond before the check timed out.";
 }
 if (about_param === "legacy") {
@@ -91,11 +99,10 @@ if (about_param === "legacy") {
   daemon.running = { version: null, source_revision: null, source_fingerprint: null, dirty: null, protocols: [] };
   daemon.status = "unknown";
   daemon.legacy_protocols = [{ name: "task", version: 3 }];
-  daemon.detail = "The running daemon reports its historical protocol but no build identity.";
   const agent = component_versions.components.find((row) => row.component === "ctl_agent")!;
-  agent.running = { ...agent.running!, source_fingerprint: null };
+  agent.running = { ...agent.installed!, source_fingerprint: null, dirty: null };
   agent.status = "unknown";
-  agent.detail = "The observed revision does not provide enough evidence to verify this build.";
+  agent.restart_required = false;
 }
 let workspace: WorkspaceSnapshot = { revision: "preview-1", document: previewWorkspace(initial_view) };
 const connectedHosts = new Set(["dev-server"]);
@@ -239,6 +246,24 @@ mockIPC((command, payload) => {
     }
     case "get_component_bundles":
       return structuredClone(component_bundles);
+    case "about_runtime_status":
+      return runtime.status((payload as { host_id: string | null }).host_id);
+    case "fetch_about_runtime_target": {
+      const { target_triple, channel, attempt_id } = payload as { target_triple: string; channel: BundleChannel; attempt_id: string };
+      return runtime.fetch(target_triple, channel, attempt_id);
+    }
+    case "sync_about_runtime": {
+      const { host_id, attempt_id } = payload as { host_id: string | null; attempt_id: string };
+      return runtime.sync(host_id, attempt_id);
+    }
+    case "cancel_component_update":
+      return runtime.cancel(request<{ attempt_id: string }>(payload).attempt_id);
+    case "check_component_updates":
+      return previewUpdateCatalog(request<{ channel: BundleChannel | null }>(payload).channel ?? "stable");
+    case "component_update_checkout_available":
+      return true;
+    case "update_components":
+      return runtime.install(request<ComponentUpdateRequest>(payload), (event) => channel<ComponentUpdateProgress>(payload, "on_progress").onmessage(event));
     case "select_component_bundle": {
       const selection = request<ComponentBundleSelection>(payload);
       const bundle = component_bundles.bundles.find((item) => item.bundle_id === selection.bundle_id && item.target_triple === selection.target_triple);
@@ -246,18 +271,23 @@ mockIPC((command, payload) => {
       if (!bundle || bundle[field] === "unavailable") throw new Error("This build cannot be selected for that use.");
       channel<ComponentBundlePhase>(payload, "on_progress").onmessage("verifying");
       channel<ComponentBundlePhase>(payload, "on_progress").onmessage("selecting");
-      component_bundles = { ...component_bundles, bundles: component_bundles.bundles.map((item) => {
+      component_bundles.bundles = component_bundles.bundles.map((item) => {
         const same_profile = selection.purpose === "local" ? item.local_use !== "unavailable" : item.target_triple === selection.target_triple;
         return same_profile ? { ...item, [field]: item.bundle_id === bundle.bundle_id ? "selected" : item[field] === "selected" ? "available" : item[field] } : item;
-      }) };
+      });
+      if (selection.purpose === "local") runtime.selectLocal(bundle);
       return { ...selection, services_preserved: true };
     }
+    case "get_desktop_build":
+      return { channel: "nightly", version: sample_builds.current.version, source_revision: sample_builds.current.source_revision };
+    case "get_updater_version":
+      return "0.1.5";
     case "get_component_versions":
       return structuredClone(component_versions);
     case "preflight_component_action": {
       const { component_id } = request<{ component_id: string }>(payload);
       const row = component_versions.components.find((item) => item.component_id === component_id);
-      if (!row?.action) throw new Error("This component does not support a managed action.");
+      if (!row?.action || !row.installed) throw new Error("This component does not support a managed action.");
       if (row.component === "ctl-taskd" && tasks.some((task) => task.active_run)) throw new Error("Stop active tasks before restarting ctl-taskd.");
       const terminal_sessions = row.component === "ctmuxd" ? sessions.filter((session) => (session.target.kind === "local") === (row.location === "local")).length : null;
       const description = row.component === "ctld" ? `Stops ${vpn_snapshot.connections.length} managed VPN connections and may interrupt SSH connections and port forwards.`
@@ -265,18 +295,22 @@ mockIPC((command, payload) => {
         : row.component === "ctl-taskd" ? "Restarts ctl-taskd. Saved task definitions and drafts are retained."
         : row.location === "local" ? "Terminates every local ctmux session, including sessions opened by other apps. This cannot be undone."
         : "Terminates every ctmux session for this remote environment, including sessions opened by other clients. This cannot be undone.";
-      return { action_token: `preview-action-${component_id}`, component_id, component: row.component, location: row.location, host_id: row.host_id, label: row.label, action: row.action, running: row.running, available: row.available,
+      return { action_token: `preview-action-${component_id}`, component_id, component: row.component, location: row.location, host_id: row.host_id, label: row.label, action: row.action, running: row.running, available: row.installed,
         impact: { ssh_connections: null, port_forwards: null, vpn_connections: row.component === "ctld" ? vpn_snapshot.connections.length : null, terminal_sessions, description } };
     }
     case "execute_component_action": {
       const { action_token } = request<{ action_token: string }>(payload);
       const row = component_versions.components.find((item) => `preview-action-${item.component_id}` === action_token);
-      if (!row?.action) throw new Error("Check the component again before continuing.");
+      const replacement = row?.installed;
+      if (!row?.action || !replacement) throw new Error("Check the component again before continuing.");
       return new Promise((resolve, reject) => setTimeout(() => {
         if (about_param === "restart-error") { reject(new Error("The replacement did not become ready. Refresh versions to check its state.")); return; }
-        component_versions = { components: component_versions.components.map((item) => item.component_id === row.component_id ? { ...item, running: item.available, status: "current" } : item) };
+        row.running = replacement;
+        row.status = previewReplacementStatus(replacement);
+        row.restart_required = false;
+        row.legacy_protocols = [];
         if (row.component === "ctld") vpn_snapshot.connections = [];
-        resolve({ component_id: row.component_id, component: row.component, location: row.location, host_id: row.host_id, action: row.action, running: row.available, detail: null });
+        resolve({ component_id: row.component_id, component: row.component, location: row.location, host_id: row.host_id, action: row.action, running: row.running, detail: null });
       }, 1200));
     }
     case "ack_component_reconnect":
@@ -403,6 +437,7 @@ mockIPC((command, payload) => {
       keybindings = request<{ document: KeybindingsDocument }>(payload).document;
       return { path: "Sample workspace", revision: String(++revision), document: keybindings };
     case "sync_command_menu":
+      return { rejected: [] };
     case "acknowledge_attachment_event":
     case "cancel_attachment_open":
     case "acknowledge_task_log":

@@ -15,9 +15,10 @@ export function ComponentProtocols({ row, view }: { row: ComponentVersionRow; vi
   return lines.length ? <ul className="about-protocol-list" aria-label={t("about.protocols_for_build", { build: view.label })}>{lines.map((protocol) => {
     const label = protocol_labels[protocol.name] ? t(protocol_labels[protocol.name]) : protocol.name;
     const status = t(status_labels[protocol.status]);
-    return <li key={protocol.name} className={`about-protocol-line about-protocol-${protocol.status}`} title={protocol.detail} aria-label={t("about.protocol_info", { label, version: protocol.version, status })}>
+    return <li key={protocol.name} className={`about-protocol-line about-protocol-${protocol.status}`} title={protocol.detail} aria-description={protocol.detail} aria-label={t("about.protocol_info", { label, version: protocol.version, status })}>
       <span className="about-protocol-marker" aria-hidden="true">{protocol.status === "unknown" ? "?" : <Icon name={protocol.status === "incompatible" ? "close" : "check"} size={14} />}</span>
       <span className="about-protocol-name">{label}</span><code>{protocol.version}</code><span className="about-protocol-state">{status}</span>
+      <small className="about-protocol-detail">{protocol.detail}</small>
     </li>;
   })}</ul> : <span className="about-muted">{t("about.protocols_not_reported")}</span>;
 }

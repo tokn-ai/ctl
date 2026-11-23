@@ -28,9 +28,10 @@ Expand **Components** for the local `ctld`, `ctmuxd`, and `ctl-taskd` versions a
 protocols, and `ctl-agent`/`ctmuxd` metadata observed on active remote terminal
 connections. Separate SSH and VPN ctld owners appear separately when configured.
 Running versions are compared with this app's component build. Each component
-uses one compact row with its version, protocol, status, and action. Hover over
-the component, version, or protocol for explanations and full build metadata.
-Local rows also show the selected helper version.
+uses one row with its version, status, and available action. Select the
+component name to inspect full build identities and protocol contracts. When
+the running service and selected executable differ, their builds appear
+separately.
 
 **Outdated** means a lower comparable release version. **Different build** marks
 different source fingerprints without claiming which is newer. **Protocol

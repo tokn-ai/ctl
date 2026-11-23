@@ -34,6 +34,11 @@ const snapshot: ComponentVersionsSnapshot = { components: [
   { component_id: "remote-1", component: "ctl_agent", label: "ctl-agent — Development", location: "remote", host_id: "dev", host_name: "Development", observation: "last_observed", status: "unknown", running: { ...current, source_revision: null, source_fingerprint: null }, available: current, restart_supported: false, action: null, detail: null, error: null },
 ] };
 const preflight: ComponentActionPreflight = { action_token: "native-owner-token", component_id: "owner-1", component: "ctld", location: "local", host_id: null, action: "restart", label: "ctld (SSH)", running: snapshot.components[1].running, available: current, impact: { ssh_connections: null, port_forwards: null, vpn_connections: 2, terminal_sessions: null, description: "Stops 2 managed VPN connections and may interrupt SSH connections and port forwards." } };
+function openDetails(toggle: HTMLElement) {
+  fireEvent.click(toggle);
+  return within(document.getElementById(toggle.getAttribute("aria-controls")!)!);
+}
+
 async function expandGroups() {
   await screen.findByRole("button", { name: "Show components for This computer" });
   for (const toggle of screen.getAllByRole("button", { name: /^Show components for / })) fireEvent.click(toggle);
@@ -202,13 +207,18 @@ describe("About page", () => {
     api.versions.mockResolvedValue(next);
     renderPage(<AboutPage {...props()} />);
     await expandGroups();
-    const row = (await screen.findByTitle(/ctmuxd — Saved host/)).closest("tbody")!;
-    expect(screen.getAllByRole("columnheader", { name: "State / build" })).toHaveLength(2);
-    expect(within(row).getByText("Restart required")).toBeTruthy();
-    expect(within(row).queryByRole("list", { name: "Running protocols" })).toBeNull();
-    expect(within(row).getByRole("list", { name: "On disk protocols" })).toBeTruthy();
-    expect(within(row).getByTitle(/Build: current/).textContent).toContain("abcdef12");
-    expect(within(row).queryByText(/1\.0\.13/)).toBeNull();
+    const toggle = await screen.findByRole("button", { name: "Show details for ctmuxd — Saved host" });
+    const row = within(toggle.closest("tr")!);
+    expect(row.getByText("Restart required")).toBeTruthy();
+    expect(row.getByText("Protocol mismatch")).toBeTruthy();
+    const details = openDetails(toggle);
+    const observed = within(details.getByRole("region", { name: "Running · last observed" }));
+    expect(observed.getByLabelText("Session legacy 13: Unverified")).toBeTruthy();
+    expect(observed.queryByText(current.source_revision!)).toBeNull();
+    const installed = within(details.getByRole("region", { name: "On disk" }));
+    expect(installed.getByRole("list", { name: "On disk protocols" })).toBeTruthy();
+    expect(installed.getByText(current.source_revision!)).toBeTruthy();
+    expect(details.queryByText(/1\.0\.13/)).toBeNull();
   });
 
   it("keeps failed saved hosts manageable without an active terminal transport", async () => {
@@ -286,8 +296,10 @@ describe("About page", () => {
     page.rerender(<AboutPage {...options} />);
     await expandGroups();
     expect(await screen.findAllByText("Different build")).toBeTruthy();
-    expect(screen.getByTitle(/Last observed/).textContent).toBe("ctl-agent");
-    expect(screen.getByText("Build not reported")).toBeTruthy();
+    const service = screen.getByRole("button", { name: "Show details for ctl-agent — Development" });
+    const observed = within(service.closest("tr")!);
+    expect(observed.getByText("Running · last observed")).toBeTruthy();
+    expect(observed.getByText("Build not reported")).toBeTruthy();
     expect(screen.queryByText("Outdated")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Back to workspace" }));
     expect(options.on_close).toHaveBeenCalledOnce();
@@ -302,7 +314,7 @@ describe("About page", () => {
     renderPage(<AboutPage {...props()} />);
     await expandGroups();
     expect(await screen.findByText("ctld timed out.")).toBeTruthy();
-    expect(screen.getByTitle(/ctl-agent — Development/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Show details for ctl-agent — Development" })).toBeTruthy();
     expect(screen.getAllByText("Unavailable").length).toBeGreaterThan(0);
   });
 
@@ -375,11 +387,11 @@ describe("About page", () => {
     api.versions.mockResolvedValue(partial);
     renderPage(<AboutPage {...props()} />);
     await expandGroups();
-    const row = (await screen.findByText("ctld (SSH)")).closest("tbody")!;
-    expect(within(row).getByTitle(/SSH and VPN broker/)).toBeTruthy();
-    expect(within(row).getByLabelText("ctld IPC Not reported: Unverified").title).toContain("Requires 1.0.12");
-    expect(within(row).getByTitle(/Build: running-build/).textContent).toContain("Build running-bu");
-    expect(within(row).getByTitle(/Build: current/).textContent).toContain("Build current");
+    const toggle = await screen.findByRole("button", { name: "Show details for ctld (SSH)" });
+    const details = openDetails(toggle);
+    expect(details.getByLabelText("ctld IPC Not reported: Unverified").title).toContain("Requires 1.0.12");
+    expect(details.getByText("running-build")).toBeTruthy();
+    expect(details.getByText(current.source_fingerprint!)).toBeTruthy();
   });
 
   it("compares running protocols with app requirements even when the available binary is also stale", async () => {
@@ -391,11 +403,11 @@ describe("About page", () => {
     api.versions.mockResolvedValue(stale);
     renderPage(<AboutPage {...props()} />);
     await expandGroups();
-    const row = (await screen.findByText("ctld (SSH)")).closest("tbody")!;
-    const protocols = within(row).getByRole("list", { name: "Running + on disk protocols" });
+    const toggle = await screen.findByRole("button", { name: "Show details for ctld (SSH)" });
+    expect(within(toggle.closest("tr")!).getByText("Protocol mismatch")).toBeTruthy();
+    const protocols = openDetails(toggle).getByRole("list", { name: "Running + on disk protocols" });
     expect(within(protocols).getByLabelText("ctld IPC 1.0.11: Incompatible").title).toContain("Requires 1.0.12");
     expect(within(protocols).getByLabelText("Lifecycle Not reported: Unverified").title).toContain("Requires 1.0.1");
-    expect(within(row).getByText("Protocol mismatch")).toBeTruthy();
   });
 
   it("rejects a late observation from before About was reopened", async () => {

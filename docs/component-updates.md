@@ -11,18 +11,19 @@ and Nightly follow their own channels. A healthy pinned build stays selected.
 A missing pinned build can be restored when its exact verified cache is
 available. Use **Install from…** to provision a machine or choose another source.
 
-Expand **Components** on a machine to inspect its running services, installed
-binaries, and supported protocols. **Running** identifies the existing process
-and **On disk** identifies the selected executable. Matching builds share one
-row. Active-connection metadata is labeled **Last observed**. Restart and
-reconnect actions show their impact before they run.
+Expand **Components** on a machine to see one row per service. **Running**
+identifies the existing process and **On disk** identifies the selected
+executable. Matching reports share one version. Active-connection metadata is
+labeled **Last observed**. Select a component name to compare full build
+fingerprints, revisions, and protocols. Restart and reconnect actions show
+their impact before they run.
 
 Each protocol has its own line and status: a green tick for the app's current
 contract, a yellow tick for a different contract that shares an explicitly
 supported version, and a red cross for no shared contract. Unreported protocols
-and historical numeric protocols have a neutral question mark. The tooltip
-shows the supported and required contracts; matching major versions alone do
-not imply compatibility.
+and historical numeric protocols have a neutral question mark. The component
+details show which contract versions each build advertises and which the app
+requires.
 
 Refresh reuses existing authenticated SSH connections and checks service owners
 without attaching a terminal, starting a daemon or VPN, or installing files.

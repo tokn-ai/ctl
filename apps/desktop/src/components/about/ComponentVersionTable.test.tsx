@@ -18,12 +18,18 @@ const row: ComponentVersionRow = {
 const props = () => ({ visible: true, targets: [], refresh_revision: new Map(), on_synced: vi.fn(), on_install: vi.fn(), on_inspect: vi.fn(), busy_id: null, restarting: false, action_error: null, on_restart: vi.fn() });
 const remote = () => within(screen.getByRole("region", { name: "Development — SSH" }));
 const expand = () => fireEvent.click(screen.getByRole("button", { name: "Show components for Development — SSH" }));
+function showDetails(label = row.label) {
+  const toggle = screen.getByRole("button", { name: `Show details for ${label}` });
+  fireEvent.click(toggle);
+  return within(document.getElementById(toggle.getAttribute("aria-controls")!)!);
+}
 afterEach(cleanup);
 
 it("starts collapsed, summarizes outdated hosts, and exposes host actions once for the whole group", () => {
   const manage = vi.fn();
   const install = vi.fn();
-  render(<RuntimeMachines {...props()} rows={[{ ...row, status: "outdated" }, { ...row, component_id: "agent", component: "ctl_agent", action: null }]} targets={[target]} on_inspect={manage} on_install={install} />);
+  const agent = { ...row, component_id: "agent", component: "ctl_agent" as const, label: "ctl-agent — Development", action: null };
+  render(<RuntimeMachines {...props()} rows={[{ ...row, status: "outdated" }, agent]} targets={[target]} on_inspect={manage} on_install={install} />);
   expect(screen.getByRole("button", { name: "Show components for Development — SSH" }).getAttribute("aria-expanded")).toBe("false");
   expect(screen.queryByRole("table", { name: "Development — SSH component versions" })).toBeNull();
   expect(remote().getByText("Outdated")).toBeTruthy();
@@ -33,8 +39,9 @@ it("starts collapsed, summarizes outdated hosts, and exposes host actions once f
   fireEvent.click(remote().getByRole("button", { name: "Install from…" }));
   expect(install).toHaveBeenCalledWith(target);
   const table = screen.getByRole("table", { name: "Development — SSH component versions" });
-  expect(within(table).getByRole("rowheader", { name: "ctld" })).toBeTruthy();
-  expect(within(table).getByRole("rowheader", { name: "ctl-agent" })).toBeTruthy();
+  expect(within(table).getAllByRole("row")).toHaveLength(3);
+  expect(within(table).getByRole("button", { name: `Show details for ${row.label}` }).getAttribute("aria-expanded")).toBe("false");
+  expect(within(table).getByRole("button", { name: `Show details for ${agent.label}` }).getAttribute("aria-expanded")).toBe("false");
   expect(remote().getAllByRole("button", { name: "Install from…" })).toHaveLength(1);
 });
 
@@ -43,7 +50,7 @@ it("checks each protocol independently against explicit app contracts, including
   const required = [protocol("ctld", "1.0.12"), protocol("ctld_lifecycle", "1.0.1"), protocol("ctld_helper", "1.0.1"), protocol("task", "1.0.1")];
   render(<RuntimeMachines {...props()} rows={[{ ...row, running: { ...info, protocols: actual }, installed: { ...info, protocols: actual }, required_protocols: required }]} />);
   expand();
-  const protocols = within(screen.getByRole("list", { name: "Running + on disk protocols" }));
+  const protocols = within(showDetails().getByRole("list", { name: "Running + on disk protocols" }));
   expect(protocols.getAllByRole("listitem")).toHaveLength(4);
   expect(protocols.getByLabelText("ctld IPC 1.0.12: Current").className).toContain("about-protocol-current");
   expect(protocols.getByLabelText("Lifecycle 1.1.3: Compatible").className).toContain("about-protocol-compatible");
@@ -53,15 +60,21 @@ it("checks each protocol independently against explicit app contracts, including
 });
 
 it("shows both disk and running when fingerprints differ even with the same version and revision", () => {
-  render(<RuntimeMachines {...props()} rows={[{ ...row, restart_required: true, running: { ...info, source_fingerprint: "old-build" }, installed: { ...info, source_fingerprint: "new-build" } }]} />);
+  const running = { ...info, source_fingerprint: "abcdef12345611111111" };
+  const installed = { ...info, source_fingerprint: "abcdef12345622222222" };
+  render(<RuntimeMachines {...props()} rows={[{ ...row, restart_required: true, running, installed }]} />);
   expand();
   const table = within(screen.getByRole("table", { name: "Development — SSH component versions" }));
   expect(table.getByText("Running")).toBeTruthy();
   expect(table.getByText("On disk")).toBeTruthy();
-  expect(table.getByText("Build old-build")).toBeTruthy();
-  expect(table.getByText("Build new-build")).toBeTruthy();
-  expect(table.getAllByRole("row")).toHaveLength(3);
+  expect(table.getAllByRole("row")).toHaveLength(2);
+  expect(table.getByText("Restart required").classList.contains("about-status-outdated")).toBe(true);
   expect(table.getAllByRole("button", { name: "Restart ctld — Development — SSH" })).toHaveLength(1);
+  const details = showDetails();
+  expect(details.getByText(running.source_fingerprint)).toBeTruthy();
+  expect(details.getByText(installed.source_fingerprint)).toBeTruthy();
+  expect(details.getAllByText(info.source_revision!)).toHaveLength(2);
+  expect(table.getByRole("button", { name: `Hide details for ${row.label}` }).getAttribute("aria-expanded")).toBe("true");
 });
 
 it("collapses matching verified builds regardless of protocol ordering", () => {
@@ -73,12 +86,29 @@ it("collapses matching verified builds regardless of protocol ordering", () => {
   expect(table.getAllByRole("row")).toHaveLength(2);
 });
 
+it("shows a reconnect warning on the agent while its protocol and action remain independent", () => {
+  const options = props();
+  const agent = { ...row, component: "ctl_agent" as const, label: "ctl-agent — Development", action: "reconnect" as const,
+    restart_required: true, observation: "last_observed" as const, installed: { ...info, version: "0.1.1" } };
+  render(<RuntimeMachines {...options} rows={[agent]} />);
+  const summary = within(remote().getByRole("group", { name: "Status" }));
+  expect(summary.getByText("Reconnect to apply")).toBeTruthy();
+  expect(summary.queryByText("Restart required")).toBeNull();
+  expand();
+  const table = within(remote().getByRole("table"));
+  expect(table.getByText("Reconnect to apply").classList.contains("about-status-outdated")).toBe(true);
+  fireEvent.click(table.getByRole("button", { name: `Reconnect ${agent.label}` }));
+  expect(options.on_restart).toHaveBeenCalledWith(agent.component_id);
+  expect(showDetails(agent.label).getByRole("list", { name: "Running · last observed protocols" })).toBeTruthy();
+});
+
 it("does not use a remote app reference as an installation, and shows identical reported builds once", () => {
   const unknown = { ...info, source_revision: null, source_fingerprint: null };
   const view = render(<RuntimeMachines {...props()} rows={[{ ...row, status: "unknown", running: unknown, installed: undefined }]} />);
   expand();
-  expect(within(screen.getByRole("table", { name: "Development — SSH component versions" })).queryByTitle(/Build: same-build/)).toBeNull();
   expect(within(screen.getByRole("table", { name: "Development — SSH component versions" })).getByText("Unknown")).toBeTruthy();
+  expect(showDetails().queryByText(info.source_fingerprint!)).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: `Hide details for ${row.label}` }));
   expect(within(remote().getByRole("group", { name: "Status" })).getByText("Unverified")).toBeTruthy();
   view.rerender(<RuntimeMachines {...props()} rows={[{ ...row, status: "unknown", running: unknown, installed: unknown }]} />);
   expect(within(screen.getByRole("table", { name: "Development — SSH component versions" })).getByText("Running + on disk")).toBeTruthy();
@@ -98,11 +128,20 @@ it("retains expansion on refresh and keeps identically named unsaved accounts se
   expect(screen.queryByRole("table", { name: "Development — SSH component versions" })).toBeNull();
 });
 
-it("shows only installed contracts when a legacy running build is unknown", () => {
+it("keeps a legacy owner's numeric protocol separate from the installed contract and build", () => {
   render(<RuntimeMachines {...props()} rows={[{ ...row, running: null, observation: "legacy", status: "incompatible", legacy_protocols: [{ name: "ctld", version: 12 }], restart_required: true }]} />);
   expand();
-  expect(screen.queryByRole("list", { name: "Running protocols" })).toBeNull();
-  expect(within(screen.getByRole("list", { name: "On disk protocols" })).getByLabelText("ctld IPC 1.0.12: Current")).toBeTruthy();
+  const table = within(remote().getByRole("table"));
+  expect(table.getByText("Protocol mismatch").classList.contains("about-status-incompatible")).toBe(true);
+  expect(table.getByText("Restart required").classList.contains("about-status-outdated")).toBe(true);
+  const details = showDetails();
+  const running = within(details.getByRole("region", { name: "Running" }));
+  expect(running.getByLabelText("ctld IPC legacy 12: Unverified")).toBeTruthy();
+  expect(running.queryByText(info.source_fingerprint!)).toBeNull();
+  expect(running.queryByText(info.version!)).toBeNull();
+  const installed = within(details.getByRole("region", { name: "On disk" }));
+  expect(installed.getByLabelText("ctld IPC 1.0.12: Current")).toBeTruthy();
+  expect(installed.getByText(info.source_fingerprint!)).toBeTruthy();
 });
 
 it("keeps owner-specific restart actions and disables management during an action", () => {
@@ -182,7 +221,7 @@ it("keeps active connections visible when a separate inspection fails", () => {
 });
 
 it("distinguishes an old agent from failed SSH and retains its checked installation", () => {
-  const agent = { ...row, component_id: "agent", component: "ctl_agent" as const, observation: "installed" as const, running: null, action: null, connected: true };
+  const agent = { ...row, component_id: "agent", component: "ctl_agent" as const, label: "ctl-agent — Development", observation: "installed" as const, running: null, action: null, connected: true };
   const unchecked = { ...row, running: null, installed: null, observation: "not_checked" as const, status: "unavailable" as const, action: null, connected: true, error_code: "remote_component_inspection_unsupported", error: "Maintenance 1.1.3 is required." };
   render(<RuntimeMachines {...props()} rows={[agent, unchecked]} />);
   expect(screen.getByText("Connected")).toBeTruthy();
@@ -192,7 +231,7 @@ it("distinguishes an old agent from failed SSH and retains its checked installat
   expand();
   const table = within(screen.getByRole("table", { name: "Development — SSH component versions" }));
   expect(table.getByText("On disk · on demand")).toBeTruthy();
-  expect(table.getByText("Build same-build")).toBeTruthy();
+  expect(showDetails(agent.label).getByText(info.source_fingerprint!)).toBeTruthy();
   expect(screen.getAllByRole("alert")).toHaveLength(1);
 });
 
@@ -217,6 +256,6 @@ it.each([
   const table = within(screen.getByRole("table", { name: "Development — SSH component versions" }));
   expect(table.queryByText(/^Running/)).toBeNull();
   expect(table.getByText("On disk")).toBeTruthy();
-  expect(table.getByText("Build same-build")).toBeTruthy();
   expect(table.getAllByRole("row")).toHaveLength(2);
+  expect(showDetails().getByText(info.source_fingerprint!)).toBeTruthy();
 });

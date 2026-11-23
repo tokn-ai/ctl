@@ -57,11 +57,13 @@ function buildsDiffer(running: ComponentVersionInfo, installed: ComponentVersion
 }
 
 export function componentBuildViews(row: ComponentVersionRow, locale: Locale = "en"): ComponentBuildView[] {
-  // Older local snapshots use available as the installed executable. Remote
-  // available may instead describe this app, so it must never become translate(locale, "about.build_on_disk").
+  // Older local snapshots use available as the installed executable. For remote
+  // observations that field can describe the desktop's reference build.
   const installed = row.installed === undefined && row.location === "local" ? row.available : row.installed ?? null;
   if (row.observation === "installed") return [{ label: translate(locale, "about.build_on_disk_on_demand"), info: installed, legacy: false }];
-  if (!row.running?.version || row.status === "not_running" || row.observation === "not_checked") {
+  const reported_owner = row.running?.version || row.running?.source_revision || row.running?.source_fingerprint ||
+    row.running?.protocols.length || row.legacy_protocols?.length;
+  if (!reported_owner || row.status === "not_running" || row.observation === "not_checked") {
     return [{ label: translate(locale, "about.build_on_disk"), info: installed, legacy: false }];
   }
   if (row.running && installed && buildsMatch(row.running, installed) && !row.legacy_protocols?.length) {
@@ -133,8 +135,10 @@ export function componentHostStatuses(rows: readonly ComponentVersionRow[], loca
   if (rows.some((row) => row.status === "incompatible") || protocols.some((protocol) => protocol.status === "incompatible")) statuses.push({ label: translate(locale, "about.protocol_mismatch"), status: "incompatible" });
   if (rows.some((row) => row.status === "outdated")) statuses.push({ label: translate(locale, "about.outdated"), status: "outdated" });
   if (rows.some((row) => row.status === "different_build")) statuses.push({ label: translate(locale, "about.different_build"), status: "different_build" });
-  if (rows.some((row) => row.restart_required)) statuses.push({ label: translate(locale, "about.restart_required"), status: "different_build" });
-  else if (separate.some(({ views }) => buildsDiffer(views[0].info!, views[1].info!))) statuses.push({ label: translate(locale, "about.running_differs"), status: "different_build" });
+  const pending = rows.filter((row) => row.restart_required);
+  if (pending.some((row) => row.component !== "ctl_agent")) statuses.push({ label: translate(locale, "about.restart_required"), status: "different_build" });
+  if (pending.some((row) => row.component === "ctl_agent")) statuses.push({ label: translate(locale, "about.reconnect_to_apply"), status: "different_build" });
+  if (!pending.length && separate.some(({ views }) => buildsDiffer(views[0].info!, views[1].info!))) statuses.push({ label: translate(locale, "about.running_differs"), status: "different_build" });
   if (rows.some((row) => row.error_code === "remote_component_inspection_unsupported")) statuses.push({ label: translate(locale, "about.update_agent"), status: "outdated" });
   if (rows.some((row) => row.error_code === "remote_identity_unverified")) statuses.push({ label: translate(locale, "about.verify_account"), status: "unknown" });
   if (rows.some((row) => row.observation === "not_checked" && row.error && !inspection_prerequisites.has(row.error_code ?? ""))) statuses.push({ label: translate(locale, "about.inspection_failed"), status: "unavailable" });

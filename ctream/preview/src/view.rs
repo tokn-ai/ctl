@@ -1,19 +1,153 @@
 use ctream_client::geometry::{ImageGeometry, Point, Rect, ViewportSpace};
 use eframe::egui;
 use std::{
-  sync::mpsc::{self, SyncSender},
+  sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+    mpsc::{self, RecvTimeoutError, SyncSender},
+  },
   thread,
   time::Duration,
 };
 
-/// Capture can keep running while egui holds its context lock. A single
-/// pending wake is enough because the viewer consumes only the latest frame.
-pub(super) fn capture_repaint(ctx: &egui::Context) -> SyncSender<()> {
+pub(super) trait WindowState {
+  fn is_viewing(&self) -> bool;
+  fn logic(&mut self, ctx: &egui::Context);
+  fn setup(&mut self, ui: &mut egui::Ui) -> Option<egui::ViewportBuilder>;
+  fn viewer(&mut self, ui: &mut egui::Ui, class: egui::ViewportClass);
+}
+
+pub(super) struct App<V> {
+  state: Arc<Mutex<V>>,
+}
+
+impl<V: WindowState + Send + 'static> App<V> {
+  pub(super) fn new(state: V) -> Self {
+    Self {
+      state: Arc::new(Mutex::new(state)),
+    }
+  }
+
+  pub(super) fn is_viewing(&self) -> bool {
+    self.state.lock().unwrap().is_viewing()
+  }
+
+  pub(super) fn logic(&mut self, ctx: &egui::Context) {
+    self.state.lock().unwrap().logic(ctx);
+  }
+
+  pub(super) fn update_ui(&mut self, ui: &mut egui::Ui) {
+    let builder = self.state.lock().unwrap().setup(ui);
+    if let Some(builder) = builder {
+      // The viewer needs its own redraws while its setup window is hidden.
+      // The app owns the session so a retained viewport callback cannot keep it alive.
+      let state = Arc::downgrade(&self.state);
+      ui.ctx()
+        .show_viewport_deferred(viewer_id(), builder, move |ui, class| {
+          if let Some(state) = state.upgrade() {
+            state.lock().unwrap().viewer(ui, class);
+          }
+        });
+    }
+  }
+}
+
+impl<V: WindowState + Send + 'static> eframe::App for App<V> {
+  fn logic(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+    self.logic(ctx);
+  }
+
+  fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
+    self.update_ui(ui);
+  }
+}
+
+#[derive(Clone, Default)]
+pub(super) struct Repaint(Arc<AtomicBool>);
+
+impl Repaint {
+  pub(super) fn set_viewing(&self, viewing: bool) {
+    self.0.store(viewing, Ordering::Relaxed);
+  }
+
+  fn viewport(&self) -> egui::ViewportId {
+    if self.0.load(Ordering::Relaxed) {
+      viewer_id()
+    } else {
+      egui::ViewportId::ROOT
+    }
+  }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(super) enum PendingCapture {
+  Idle,
+  Frame,
+  Ended,
+}
+
+impl PendingCapture {
+  pub(super) fn new(has_frame: bool, ended: bool) -> Self {
+    if ended {
+      Self::Ended
+    } else if has_frame {
+      Self::Frame
+    } else {
+      Self::Idle
+    }
+  }
+}
+
+/// Keep the capture reader independent of the egui context lock. One pending
+/// wake is enough because the current viewport consumes only the latest frame.
+pub(super) fn capture_repaint(
+  ctx: &egui::Context,
+  repaint: Repaint,
+  capture: impl Fn() -> PendingCapture + Send + 'static,
+) -> SyncSender<()> {
   let (wake, pending) = mpsc::sync_channel(1);
   let ctx = ctx.clone();
   thread::spawn(move || {
-    while pending.recv().is_ok() {
-      ctx.request_repaint_of(egui::ViewportId::ROOT);
+    let mut retry = false;
+    #[cfg(target_os = "macos")]
+    let native_redraw_queued = Arc::new(AtomicBool::new(false));
+    loop {
+      let notified = if retry {
+        pending.recv_timeout(Duration::from_millis(250))
+      } else {
+        pending.recv().map_err(|_| RecvTimeoutError::Disconnected)
+      };
+      let viewport = repaint.viewport();
+      match notified {
+        Ok(()) => {
+          ctx.request_repaint_of(viewport);
+          let capture = capture();
+          // Setup can handle capture end even if the viewer is minimized.
+          if viewport != egui::ViewportId::ROOT && capture == PendingCapture::Ended {
+            ctx.request_repaint_of(egui::ViewportId::ROOT);
+          }
+          retry = cfg!(target_os = "macos")
+            && viewport == viewer_id()
+            && capture == PendingCapture::Frame;
+        }
+        Err(RecvTimeoutError::Timeout) => {
+          retry = viewport == viewer_id() && capture() == PendingCapture::Frame;
+          #[cfg(target_os = "macos")]
+          if retry && !native_redraw_queued.swap(true, Ordering::Relaxed) {
+            // A missed native redraw can leave egui coalescing later requests
+            // into one already consumed by eframe. Rearm the visible window.
+            let queued = Arc::clone(&native_redraw_queued);
+            let repaint = repaint.clone();
+            dispatch2::DispatchQueue::main().exec_async(move || {
+              if repaint.viewport() == viewer_id() {
+                super::macos_chrome::redraw_visible_viewer();
+              }
+              queued.store(false, Ordering::Relaxed);
+            });
+          }
+        }
+        Err(RecvTimeoutError::Disconnected) => break,
+      }
     }
   });
   wake

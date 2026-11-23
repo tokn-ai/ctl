@@ -77,7 +77,12 @@ enum PreviewMode {
 }
 
 impl<T: Transport> Preview<T> {
-  fn connect(session: Session<T>, driver: Option<&str>, ctx: egui::Context) -> io::Result<Self> {
+  fn connect(
+    session: Session<T>,
+    driver: Option<&str>,
+    ctx: egui::Context,
+    target: view::Repaint,
+  ) -> io::Result<Self> {
     let capture = if let Some(driver) = driver {
       session.capture_with_driver(driver)?
     } else {
@@ -88,7 +93,11 @@ impl<T: Transport> Preview<T> {
     let (mut source, lifetime) = capture.split();
     let stream = Arc::new(Mutex::new(Stream::default()));
     let reader = Arc::clone(&stream);
-    let repaint = view::capture_repaint(&ctx);
+    let watched = Arc::clone(&stream);
+    let repaint = view::capture_repaint(&ctx, target, move || {
+      let stream = watched.lock().unwrap();
+      view::PendingCapture::new(stream.frame.is_some(), stream.end.is_some())
+    });
     thread::spawn(move || {
       let mut frame = Frame::default();
       let end = loop {
@@ -167,6 +176,10 @@ impl<T: Transport> Preview<T> {
     self.input_error = None;
   }
 
+  fn ended(&self) -> bool {
+    self.capture_lifetime.is_some() && self.stream.lock().unwrap().end.is_some()
+  }
+
   fn ready(&self) -> bool {
     self.texture.is_some()
       && self.capture_lifetime.is_some()
@@ -235,11 +248,19 @@ fn background<T: Send + 'static>(
   ctx: &egui::Context,
   task: impl FnOnce() -> io::Result<T> + Send + 'static,
 ) -> Receiver<io::Result<T>> {
+  background_for(ctx, egui::ViewportId::ROOT, task)
+}
+
+fn background_for<T: Send + 'static>(
+  ctx: &egui::Context,
+  viewport: egui::ViewportId,
+  task: impl FnOnce() -> io::Result<T> + Send + 'static,
+) -> Receiver<io::Result<T>> {
   let ctx = ctx.clone();
   let (sender, receiver) = mpsc::channel();
   thread::spawn(move || {
     let _ = sender.send(task());
-    ctx.request_repaint_of(egui::ViewportId::ROOT);
+    ctx.request_repaint_of(viewport);
   });
   receiver
 }
@@ -300,16 +321,18 @@ impl SourceOptions {
     transport: T,
     connection: stats::Connection,
     ctx: &egui::Context,
-  ) -> welcome::Viewer<T> {
-    welcome::Viewer::new(
-      transport,
-      self.target,
-      self.windows,
-      self.window,
-      self.driver,
-      ctx,
+  ) -> view::App<welcome::Viewer<T>> {
+    view::App::new(
+      welcome::Viewer::new(
+        transport,
+        self.target,
+        self.windows,
+        self.window,
+        self.driver,
+        ctx,
+      )
+      .with_connection(connection),
     )
-    .with_connection(connection)
   }
 }
 
@@ -438,7 +461,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         return run(
           "ctream · local",
-          Box::new(|cc| Ok(Box::new(macos_local::Viewer::new(&cc.egui_ctx)))),
+          Box::new(|cc| {
+            Ok(Box::new(view::App::new(macos_local::Viewer::new(
+              &cc.egui_ctx,
+            ))))
+          }),
         );
       }
       let transport = connection.local()?;
@@ -576,7 +603,7 @@ mod lifecycle_tests {
     let mut preview = ctx.input(|_| {
       // Hold egui's context lock while the capture reader reaches EOF.
       // Waiting for a repaint in the reader would stop it at the first frame.
-      let preview = Preview::connect(session, None, ctx.clone()).unwrap();
+      let preview = Preview::connect(session, None, ctx.clone(), view::Repaint::default()).unwrap();
       let deadline = Instant::now() + Duration::from_secs(2);
       while preview.stream.lock().unwrap().end.is_none() {
         assert!(Instant::now() < deadline, "capture waited for the UI lock");
@@ -598,7 +625,8 @@ mod lifecycle_tests {
       let (session, observed) = test_support::session(bytes);
       let context = egui::Context::default();
       let control = session.input().unwrap();
-      let mut preview = Preview::connect(session, None, context.clone()).unwrap();
+      let mut preview =
+        Preview::connect(session, None, context.clone(), view::Repaint::default()).unwrap();
       preview.input = Some(input::Input::new(control));
       let deadline = Instant::now() + Duration::from_secs(2);
       while preview.stream.lock().unwrap().end.is_none() {

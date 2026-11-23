@@ -1,8 +1,10 @@
-use super::{chrome, drivers, input, setup, view};
+use super::{chrome, drivers, input, setup, view, view::WindowState};
 use ctream_client::media::Frame;
 use ctream_driver_capture::macos::screen_capture_kit::{Capture, Event, Window, list_windows};
 use ctream_driver_input::macos::{WindowIdentity, WindowInput};
+use dispatch2::MainThreadBound;
 use eframe::egui;
+use objc2::MainThreadMarker;
 use std::{
   io,
   sync::{
@@ -49,8 +51,9 @@ pub(super) struct Viewer {
   window_query: Option<Receiver<io::Result<Vec<Window>>>>,
   window_error: Option<io::Error>,
   selected_window: Option<u32>,
-  capture: Option<Capture>,
+  capture: Option<MainThreadBound<Capture>>,
   update: Arc<Mutex<Update>>,
+  repaint: view::Repaint,
   texture: Option<egui::TextureHandle>,
   input: Option<input::Input<WindowInput>>,
   input_error: Option<String>,
@@ -98,7 +101,11 @@ impl Viewer {
   fn choose(&mut self, ctx: &egui::Context, window_index: Option<usize>) {
     self.clear_capture();
     let update = Arc::clone(&self.update);
-    let repaint = view::capture_repaint(ctx);
+    let pending = Arc::clone(&update);
+    let repaint = view::capture_repaint(ctx, self.repaint.clone(), move || {
+      let update = pending.lock().unwrap();
+      view::PendingCapture::new(update.frame.is_some(), update.end.is_some())
+    });
     let callback = move |event| {
       let mut update = update.lock().unwrap();
       let frame_pending = update.frame.is_some();
@@ -125,7 +132,9 @@ impl Viewer {
     match result {
       Ok(capture) => {
         self.selected_window = window.map(|window| window.id);
-        self.capture = Some(capture);
+        let main =
+          MainThreadMarker::new().expect("ScreenCaptureKit viewer runs on the main thread");
+        self.capture = Some(MainThreadBound::new(capture, main));
       }
       Err(error) => self.status = Some((error.to_string(), true)),
     }
@@ -174,16 +183,13 @@ impl Viewer {
     }
   }
 
-  pub(super) fn is_viewing(&self) -> bool {
-    self.viewing
-  }
-
   fn close_viewer(&mut self, ctx: &egui::Context) {
     self.input = None;
     self.input_error = None;
     self.chrome.dismiss();
     self.viewing = false;
     self.opening = false;
+    self.repaint.set_viewing(false);
     view::restore_setup(ctx);
   }
 
@@ -304,7 +310,12 @@ impl Viewer {
     } else if refresh {
       self.refresh_windows(ctx);
     } else if start {
-      self.input_error = match self.capture.as_ref().and_then(Capture::window_identity) {
+      let main = MainThreadMarker::new().expect("ScreenCaptureKit viewer runs on the main thread");
+      let identity = self
+        .capture
+        .as_ref()
+        .and_then(|capture| capture.get(main).window_identity());
+      self.input_error = match identity {
         Some((id, pid)) => match WindowInput::open(WindowIdentity { id, pid }) {
           Ok(input) => {
             self.input = Some(input::Input::new(input));
@@ -321,8 +332,72 @@ impl Viewer {
       ctx.request_repaint();
     }
   }
+}
 
-  fn show_viewer(&mut self, ctx: &egui::Context) {
+impl WindowState for Viewer {
+  fn is_viewing(&self) -> bool {
+    self.viewing
+  }
+
+  fn logic(&mut self, ctx: &egui::Context) {
+    if ctx.input(|input| input.viewport().close_requested()) {
+      self.chrome.dismiss();
+      self.clear_capture();
+      self.viewing = false;
+      self.opening = false;
+      self.repaint.set_viewing(false);
+      return;
+    }
+    let ended = self.update.lock().unwrap().end.is_some();
+    if ended {
+      self.poll(ctx);
+    }
+  }
+
+  fn setup(&mut self, ui: &mut egui::Ui) -> Option<egui::ViewportBuilder> {
+    if !self.viewing {
+      self.poll(ui.ctx());
+      self.show_setup(ui);
+    }
+    if !self.viewing {
+      return None;
+    }
+    let image_size = self.texture.as_ref()?.size().map(|v| v as u32);
+    Some(view::viewer_builder(
+      ui.ctx(),
+      self.opening.then_some((image_size, 0.0)),
+    ))
+  }
+
+  fn viewer(&mut self, ui: &mut egui::Ui, class: egui::ViewportClass) {
+    if !self.viewing {
+      return;
+    }
+    let ctx = ui.ctx().clone();
+    if class == egui::ViewportClass::EmbeddedWindow {
+      self.close_viewer(&ctx);
+      self.clear_capture();
+      self.status = Some((
+        "This backend cannot open a native viewer window.".into(),
+        true,
+      ));
+      return;
+    }
+    if ui.input(|input| input.viewport().close_requested()) {
+      self.close_viewer(&ctx);
+      return;
+    }
+    if self.opening {
+      self.repaint.set_viewing(true);
+    }
+    self.poll(&ctx);
+    if !self.viewing {
+      return;
+    }
+    if self.opening {
+      view::hide_setup(&ctx);
+      self.opening = false;
+    }
     let Some(image_size) = self
       .texture
       .as_ref()
@@ -330,78 +405,36 @@ impl Viewer {
     else {
       return;
     };
-    let builder = view::viewer_builder(ctx, self.opening.then_some((image_size, 0.0)));
-    ctx.show_viewport_immediate(view::viewer_id(), builder, |child, class| {
-      if class == egui::ViewportClass::EmbeddedWindow {
-        self.close_viewer(child.ctx());
-        self.clear_capture();
-        self.status = Some((
-          "This backend cannot open a native viewer window.".into(),
-          true,
-        ));
-        return;
-      }
-      if child.input(|input| input.viewport().close_requested()) {
-        self.close_viewer(child.ctx());
-        return;
-      }
-      if self.opening {
-        view::hide_setup(child.ctx());
-        self.opening = false;
-      }
-      let controls = self.chrome.show(
-        child,
-        chrome::Status {
-          text: self.input_error.as_deref().unwrap_or("Control enabled"),
-          error: self.input_error.is_some(),
-          driver: Some(DRIVER),
-          debug: None,
-        },
-      );
-      if controls.close {
-        self.close_viewer(child.ctx());
-        return;
-      }
-      let video = child.available_size();
-      egui::CentralPanel::no_frame().show(child, |ui| {
-        let area = ui.available_rect_before_wrap();
-        let image = view::fill(area, image_size);
-        if let (Some(texture), Some(image)) = (&self.texture, &image) {
-          view::paint(ui, texture, area, image);
-        }
-        if let Some(input) = &mut self.input
-          && let Err(error) = input.update(ui.ctx(), image.as_ref(), &controls.pointer_regions)
-        {
-          self.input = None;
-          self.input_error = Some(format!("View only: {error}"));
-        }
-        if !controls.resizing {
-          self.size.update(ui.ctx(), image_size, video);
-        }
-      });
-    });
-  }
-
-  pub(super) fn update_ui(&mut self, ui: &mut egui::Ui) {
-    let ctx = ui.ctx().clone();
-    if ctx.input(|input| input.viewport().close_requested()) {
-      self.chrome.dismiss();
-      self.clear_capture();
+    let controls = self.chrome.show(
+      ui,
+      chrome::Status {
+        text: self.input_error.as_deref().unwrap_or("Control enabled"),
+        error: self.input_error.is_some(),
+        driver: Some(DRIVER),
+        debug: None,
+      },
+    );
+    if controls.close {
+      self.close_viewer(&ctx);
       return;
     }
-    self.poll(&ctx);
-    if self.viewing {
-      self.show_viewer(&ctx);
-    }
-    if !self.viewing {
-      self.show_setup(ui);
-    }
-  }
-}
-
-impl eframe::App for Viewer {
-  fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
-    self.update_ui(ui);
+    let video = ui.available_size();
+    egui::CentralPanel::no_frame().show(ui, |ui| {
+      let area = ui.available_rect_before_wrap();
+      let image = view::fill(area, image_size);
+      if let (Some(texture), Some(image)) = (&self.texture, &image) {
+        view::paint(ui, texture, area, image);
+      }
+      if let Some(input) = &mut self.input
+        && let Err(error) = input.update(ui.ctx(), image.as_ref(), &controls.pointer_regions)
+      {
+        self.input = None;
+        self.input_error = Some(format!("View only: {error}"));
+      }
+      if !controls.resizing {
+        self.size.update(ui.ctx(), image_size, video);
+      }
+    });
   }
 }
 
@@ -410,20 +443,63 @@ mod tests {
   use super::*;
 
   #[test]
+  fn hidden_setup_leaves_frame_for_viewer_pass() {
+    let ctx = egui::Context::default();
+    let mut viewer = Viewer {
+      viewing: true,
+      ..Default::default()
+    };
+    viewer.update.lock().unwrap().frame = Some(Frame {
+      size: [1, 1],
+      pixels: vec![255, 0, 0],
+    });
+    let mut input = egui::RawInput::default();
+    input
+      .viewports
+      .get_mut(&egui::ViewportId::ROOT)
+      .unwrap()
+      .occluded = Some(true);
+    let output = ctx.run_logic(&input, |ctx| viewer.logic(ctx));
+    assert!(output.viewport_commands.is_empty());
+    assert!(viewer.texture.is_none());
+    assert!(viewer.update.lock().unwrap().frame.is_some());
+
+    input.viewport_id = view::viewer_id();
+    input
+      .viewports
+      .insert(view::viewer_id(), egui::ViewportInfo::default());
+    let mut output = ctx.run_ui(input, |ui| viewer.viewer(ui, egui::ViewportClass::Deferred));
+    let uploaded = viewer.texture.as_ref().is_some_and(|texture| {
+      output
+        .textures_delta
+        .set
+        .iter()
+        .any(|(id, _)| *id == texture.id())
+    });
+    output.textures_delta.clear();
+    assert!(uploaded);
+    assert_eq!(viewer.texture.as_ref().unwrap().size(), [1, 1]);
+    assert!(viewer.update.lock().unwrap().frame.is_none());
+  }
+
+  #[test]
   fn ended_capture_returns_to_setup_and_discards_late_frames() {
     let ctx = egui::Context::default();
+    // Consume egui’s initial font texture before checking capture output.
+    ctx
+      .run_ui(egui::RawInput::default(), |_| {})
+      .textures_delta
+      .clear();
     let mut viewer = Viewer {
       viewing: true,
       ..Default::default()
     };
     let retired = Arc::clone(&viewer.update);
     retired.lock().unwrap().end = Some(End::Finished);
-    let mut output = ctx.run_ui(egui::RawInput::default(), |ui| viewer.poll(ui.ctx()));
-    output.textures_delta.clear();
+    let output = ctx.run_logic(&egui::RawInput::default(), |ctx| viewer.logic(ctx));
     assert!(!viewer.is_viewing());
     assert!(
-      output.viewport_output[&egui::ViewportId::ROOT]
-        .commands
+      output.viewport_commands[&egui::ViewportId::ROOT]
         .contains(&egui::ViewportCommand::Visible(true))
     );
     retired.lock().unwrap().frame = Some(Frame {

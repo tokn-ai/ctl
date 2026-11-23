@@ -101,7 +101,7 @@ fn monitor(
       Ok(Event::Close) | Err(RecvTimeoutError::Disconnected) => return,
     };
     *reading.lock().unwrap() = sample;
-    ctx.request_repaint_of(egui::ViewportId::ROOT);
+    ctx.request_repaint_of(super::view::viewer_id());
     if sample == Reading::Unavailable
       || !matches!(
         incoming.recv_timeout(SAMPLE_PERIOD),

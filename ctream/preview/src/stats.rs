@@ -86,10 +86,8 @@ impl Stats {
         history.push_back(value);
       }
     }
-    ui.ctx().request_repaint_after_for(
-      SAMPLE_INTERVAL.saturating_sub(now - self.sampler.last_sample),
-      egui::ViewportId::ROOT,
-    );
+    ui.ctx()
+      .request_repaint_after(SAMPLE_INTERVAL.saturating_sub(now - self.sampler.last_sample));
 
     let values = ReadingLabels::new(self.sampler.sample.as_ref(), latency);
     if self.expanded {

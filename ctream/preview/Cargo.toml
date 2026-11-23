@@ -25,6 +25,7 @@ wgpu = { version = "30.0.2", default-features = false, features = ["metal", "vul
 block2 = "0.6.2"
 ctream-driver-capture.workspace = true
 ctream-driver-input.workspace = true
+dispatch2 = "0.3.1"
 objc2 = "0.6.5"
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["block2", "NSApplication", "NSEvent", "NSGraphics", "NSResponder", "NSScreen", "NSWindow"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["block2", "NSApplication", "NSEvent", "NSGraphics", "NSResponder", "NSScreen", "NSView", "NSWindow"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSGeometry", "NSString"] }

@@ -2,12 +2,13 @@
 use ctl_bundle::ctream::AGENT_DIRECTORY;
 use ctl_bundle::ctream::AgentTarget;
 use std::{
+  collections::VecDeque,
   ffi::OsString,
-  io::{self, Read},
+  io::{self, Read, Write},
   path::{Path, PathBuf},
   process::{ChildStderr, ChildStdin, ChildStdout, Command, ExitStatus, Stdio},
   sync::{
-    Arc, Mutex,
+    Arc, Condvar, Mutex,
     atomic::{AtomicBool, Ordering},
   },
   thread,
@@ -16,6 +17,9 @@ use std::{
 
 #[cfg(windows)]
 use process_wrap::std::{ChildWrapper, CommandWrap, JobObject};
+
+const STDERR_LIMIT: usize = 4 * 1024;
+const STDERR_GRACE: Duration = Duration::from_millis(100);
 
 /// A subprocess whose Windows SSH descendants are owned together with its launcher.
 pub struct ChildProcess {
@@ -123,12 +127,113 @@ impl Cancellation {
 struct Process {
   child: Mutex<ChildProcess>,
   closing: AtomicBool,
+  diagnostics: Arc<Diagnostics>,
+}
+
+#[derive(Default)]
+struct Diagnostics {
+  state: Mutex<DiagnosticState>,
+  finished: Condvar,
+  #[cfg(unix)]
+  stop: Mutex<Option<io::PipeWriter>>,
+}
+
+#[derive(Default)]
+struct DiagnosticState {
+  tail: VecDeque<u8>,
+  done: bool,
+}
+
+impl Diagnostics {
+  fn drain(
+    &self,
+    mut pipe: ChildStderr,
+    mut stderr: impl Write,
+    #[cfg(unix)] stop: io::PipeReader,
+  ) {
+    let mut buffer = [0; STDERR_LIMIT];
+    #[cfg(unix)]
+    let mut deadline: Option<Instant> = None;
+    loop {
+      #[cfg(unix)]
+      {
+        use rustix::event::{PollFd, PollFlags, poll};
+        use rustix::io::Errno;
+
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+          break;
+        }
+        let mut fds = [
+          PollFd::new(&pipe, PollFlags::IN),
+          PollFd::new(&stop, PollFlags::IN),
+        ];
+        match poll(&mut fds, None) {
+          Ok(_) => {}
+          Err(Errno::INTR) => continue,
+          Err(_) => break,
+        }
+        // Descendants can keep the stderr pipe open after the launcher exits.
+        // Drain pending output without waiting for those descendants.
+        if !fds[1].revents().is_empty() {
+          deadline.get_or_insert_with(|| Instant::now() + STDERR_GRACE);
+        }
+        if fds[0].revents().is_empty() {
+          break;
+        }
+      }
+      let count = match pipe.read(&mut buffer) {
+        Ok(0) => break,
+        Ok(count) => count,
+        Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+        Err(_) => break,
+      };
+      {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let excess = (state.tail.len() + count).saturating_sub(STDERR_LIMIT);
+        state.tail.drain(..excess);
+        state.tail.extend(&buffer[..count]);
+      }
+      // A ctl SSH trust prompt may wait for /dev/tty without ending its line.
+      let _ = stderr.write_all(&buffer[..count]);
+      let _ = stderr.flush();
+    }
+    self
+      .state
+      .lock()
+      .unwrap_or_else(|error| error.into_inner())
+      .done = true;
+    self.finished.notify_all();
+  }
+
+  fn launcher_exited(&self) {
+    #[cfg(unix)]
+    self
+      .stop
+      .lock()
+      .unwrap_or_else(|error| error.into_inner())
+      .take();
+  }
+
+  fn message(&self) -> Option<String> {
+    let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+    // The launcher may exit while a descendant still owns the stderr pipe.
+    let (mut state, _) = self
+      .finished
+      .wait_timeout_while(state, STDERR_GRACE, |state| !state.done)
+      .unwrap_or_else(|error| error.into_inner());
+    let message: String = String::from_utf8_lossy(state.tail.make_contiguous())
+      .chars()
+      .filter(|&character| character == '\n' || !character.is_control())
+      .collect();
+    let message = message.trim();
+    (!message.is_empty()).then(|| message.to_owned())
+  }
 }
 
 impl Process {
-  fn close(self: &Arc<Self>) {
+  fn close(self: &Arc<Self>) -> bool {
     if self.closing.swap(true, Ordering::AcqRel) {
-      return;
+      return false;
     }
     let process = Arc::clone(self);
     thread::spawn(move || {
@@ -139,20 +244,22 @@ impl Process {
           .lock()
           .unwrap_or_else(|error| error.into_inner());
         if matches!(child.try_wait(), Ok(Some(_))) {
-          return;
+          break;
         }
         if Instant::now() >= deadline {
           let _ = child.kill();
           let _ = child.wait();
-          return;
+          break;
         }
         drop(child);
         thread::sleep(Duration::from_millis(10));
       }
+      process.diagnostics.launcher_exited();
     });
+    true
   }
 
-  fn wait(&self) -> io::Result<()> {
+  fn wait(&self, report_diagnostics: bool) -> io::Result<()> {
     loop {
       let status = self
         .child
@@ -160,13 +267,16 @@ impl Process {
         .unwrap_or_else(|error| error.into_inner())
         .try_wait()?;
       if let Some(status) = status {
-        return if status.success() {
-          Ok(())
-        } else {
-          Err(io::Error::other(format!(
-            "agent channel exited with {status}"
-          )))
-        };
+        self.diagnostics.launcher_exited();
+        if status.success() {
+          return Ok(());
+        }
+        let mut message = format!("agent channel exited with {status}");
+        if report_diagnostics && let Some(diagnostic) = self.diagnostics.message() {
+          message.push('\n');
+          message.push_str(&diagnostic);
+        }
+        return Err(io::Error::other(message));
       }
       thread::sleep(Duration::from_millis(10));
     }
@@ -394,8 +504,8 @@ impl Read for ProcessReader {
     }
     let count = self.stdout.read(buffer)?;
     if count == 0 {
-      self.process.close();
-      self.process.wait()?;
+      let report_diagnostics = self.process.close();
+      self.process.wait(report_diagnostics)?;
     }
     Ok(count)
   }
@@ -407,20 +517,50 @@ impl Drop for ProcessReader {
   }
 }
 
-fn spawn(mut command: Command) -> io::Result<Channel<ProcessReader, ChildStdin>> {
-  command.stdin(Stdio::piped()).stdout(Stdio::piped());
+fn spawn(command: Command) -> io::Result<Channel<ProcessReader, ChildStdin>> {
+  spawn_with_stderr(command, io::stderr())
+}
+
+fn spawn_with_stderr(
+  mut command: Command,
+  stderr: impl Write + Send + 'static,
+) -> io::Result<Channel<ProcessReader, ChildStdin>> {
+  #[cfg(unix)]
+  let (stop, signal) = io::pipe()?;
+  command
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
   let mut child = ChildProcess::spawn(command)?;
   let writer = child.take_stdin().expect("piped agent input");
   let stdout = child.take_stdout().expect("piped agent output");
+  let pipe = child.take_stderr().expect("piped agent diagnostics");
+  let diagnostics = Arc::new(Diagnostics {
+    #[cfg(unix)]
+    stop: Mutex::new(Some(signal)),
+    ..Diagnostics::default()
+  });
+  let drain = Arc::clone(&diagnostics);
+  thread::spawn(move || {
+    drain.drain(
+      pipe,
+      stderr,
+      #[cfg(unix)]
+      stop,
+    );
+  });
   let process = Arc::new(Process {
     child: Mutex::new(child),
     closing: AtomicBool::new(false),
+    diagnostics,
   });
   let cleanup = Arc::clone(&process);
   Ok(Channel {
     reader: ProcessReader { process, stdout },
     writer,
-    cancellation: Cancellation::new(move || cleanup.close()),
+    cancellation: Cancellation::new(move || {
+      cleanup.close();
+    }),
   })
 }
 
@@ -605,6 +745,76 @@ mod tests {
     } = local.open(&["-c".into(), "exit 9".into()]).unwrap();
     drop(writer);
     assert!(reader.read_to_string(&mut String::new()).is_err());
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn subprocess_diagnostics_are_bounded_and_separate_from_stdout() {
+    let mut command = Command::new("/bin/sh");
+    command.args([
+      "-c",
+      r#"printf 'discarded prefix\n' >&2
+        head -c 131072 /dev/zero >&2
+        printf '\033Invalid capture backend option\n' >&2
+        printf '\001\377'
+        exit 9"#,
+    ]);
+    let Channel {
+      mut reader, writer, ..
+    } = spawn_with_stderr(command, io::sink()).unwrap();
+    drop(writer);
+    let mut frame = [0; 2];
+    reader.read_exact(&mut frame).unwrap();
+    assert_eq!(frame, [1, 255]);
+    let error = reader.read(&mut frame).unwrap_err().to_string();
+    assert!(error.contains("exit status: 9"));
+    assert!(error.contains("Invalid capture backend option"));
+    assert!(!error.contains("discarded prefix"));
+    assert!(!error.contains('\u{1b}'));
+    assert!(error.len() <= STDERR_LIMIT);
+  }
+
+  #[test]
+  fn buffered_diagnostics_are_available_without_stderr_eof() {
+    let diagnostics = Diagnostics::default();
+    diagnostics
+      .state
+      .lock()
+      .unwrap()
+      .tail
+      .extend(b"capture helper failed\n");
+    let (send, receive) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+      let _ = send.send(diagnostics.message());
+    });
+    assert_eq!(
+      receive
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap()
+        .as_deref(),
+      Some("capture helper failed")
+    );
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn stderr_reader_stops_when_a_descendant_keeps_the_pipe_open() {
+    let mut command = Command::new("/bin/sh");
+    command.args([
+      "-c",
+      "sleep 4 </dev/null >/dev/null & printf 'launcher failed\\n' >&2; exit 9",
+    ]);
+    let Channel { mut reader, .. } = spawn_with_stderr(command, io::sink()).unwrap();
+    let error = reader.read(&mut [0]).unwrap_err().to_string();
+    assert!(error.contains("launcher failed"));
+
+    let diagnostics = &reader.process.diagnostics;
+    let state = diagnostics.state.lock().unwrap();
+    let (state, _) = diagnostics
+      .finished
+      .wait_timeout_while(state, Duration::from_secs(2), |state| !state.done)
+      .unwrap();
+    assert!(state.done);
   }
 
   #[cfg(unix)]

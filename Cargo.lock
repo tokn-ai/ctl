@@ -1632,6 +1632,7 @@ dependencies = [
  "ctl-bundle",
  "ctream-proto",
  "process-wrap",
+ "rustix 1.1.6",
  "serde",
  "serde_json",
 ]

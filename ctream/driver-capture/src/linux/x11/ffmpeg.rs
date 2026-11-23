@@ -3,10 +3,29 @@
 use crate::process::ProcessCapture;
 use ctream_driver::{CaptureDisplay, Result};
 use ctream_proto::X11_FRAME_SIZE;
-use std::{io, num::NonZeroUsize, process::Command, time::Duration};
+use std::{
+  io,
+  num::NonZeroUsize,
+  process::{Command, Stdio},
+  time::Duration,
+};
 use x11rb::{connection::Connection, protocol::xproto::ConnectionExt};
 
 const FRAME_RATE: u32 = 8;
+
+fn frame_sync_option(
+  mut accepts: impl FnMut(&str) -> io::Result<bool>,
+) -> io::Result<&'static str> {
+  for option in ["-fps_mode", "-vsync"] {
+    if accepts(option)? {
+      return Ok(option);
+    }
+  }
+  Err(io::Error::new(
+    io::ErrorKind::Unsupported,
+    "FFmpeg does not accept a passthrough frame sync option",
+  ))
+}
 
 pub struct Driver;
 
@@ -37,6 +56,17 @@ impl CaptureDisplay for Session {
       return Err(io::Error::other("invalid X11 geometry").into());
     }
     let [w, h] = X11_FRAME_SIZE;
+    // FFmpeg checks whether it recognizes the flag before -version exits,
+    // without opening an input or output.
+    let frame_sync = frame_sync_option(|option| {
+      Command::new("ffmpeg")
+        .args(["-hide_banner", option, "passthrough", "-version"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+    })?;
     let mut command = Command::new("ffmpeg");
     command.args([
       "-nostdin",
@@ -57,7 +87,7 @@ impl CaptureDisplay for Session {
       "rgb24",
       // Keep each captured frame once. The rawvideo muxer's default sync
       // can synthesize duplicates at a higher rate than x11grab.
-      "-vsync",
+      frame_sync,
       "passthrough",
       "-f",
       "rawvideo",
@@ -68,5 +98,29 @@ impl CaptureDisplay for Session {
       NonZeroUsize::new(w * h * 3).expect("X11 RGB frames are nonempty"),
       Duration::from_secs(1) / FRAME_RATE,
     ))
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn selects_modern_frame_sync_and_falls_back_for_older_ffmpeg() {
+    let mut tried = Vec::new();
+    let modern = frame_sync_option(|option| {
+      tried.push(option.to_owned());
+      Ok(option == "-fps_mode")
+    })
+    .unwrap();
+    assert_eq!(modern, "-fps_mode");
+    assert_eq!(tried, ["-fps_mode"]);
+
+    let legacy = frame_sync_option(|option| Ok(option == "-vsync")).unwrap();
+    assert_eq!(legacy, "-vsync");
+    assert_eq!(
+      frame_sync_option(|_| Ok(false)).unwrap_err().kind(),
+      io::ErrorKind::Unsupported
+    );
   }
 }

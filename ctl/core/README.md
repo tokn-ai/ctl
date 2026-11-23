@@ -5,7 +5,7 @@ Use the `ctl-core` dependency alias to keep existing imports:
 
 ```toml
 [dependencies]
-ctl-core = { package = "tokn-ctl-core", version = "=0.1.4" }
+ctl-core = { package = "tokn-ctl-core", version = "=0.1.5" }
 ```
 
 Shared foundations for ctl and ctmux components:

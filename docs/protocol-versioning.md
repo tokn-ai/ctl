@@ -703,6 +703,12 @@ retained discovery and catalog requests omit macOS-specific values, and
 catalog requests first and fall back to the existing versions against older
 agents. Other named protocols and product release versions are unchanged.
 
+Product release `v0.1.5` retains the desktop and runtime service contracts and
+internal builds from `v0.1.4`. The updater uses installation layout 7 and
+inventory schema 2. The separate ctream preview uses `ctream_agent` `1.0.11`
+(build 11) and retains `1.0.1` through `1.0.10`. See the
+[v0.1.5 protocol map](releases/v0.1.5.md#protocol-contracts).
+
 Every PR description must state its protocol changes, or **None** when there
 are no changes. Include the previous and new contracts and the compatibility
 impact. Keep PR titles brief; put protocol details in the description.

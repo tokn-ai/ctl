@@ -49,6 +49,7 @@ ctl-bundle
 ctl-keychain-client
 ctmux-process-info
 ctl-proto
+ctl-files
 ctl-task-proto
 ctmux-proto
 ctmux-avt

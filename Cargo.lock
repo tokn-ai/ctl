@@ -1075,7 +1075,7 @@ dependencies = [
 
 [[package]]
 name = "ctl-agent"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "clap",
  "ctl-client",
@@ -1101,7 +1101,7 @@ dependencies = [
 
 [[package]]
 name = "ctl-bundle"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "hex",
  "semver",
@@ -1116,7 +1116,7 @@ dependencies = [
 
 [[package]]
 name = "ctl-cli"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "clap",
  "cliclack",
@@ -1155,7 +1155,7 @@ dependencies = [
 
 [[package]]
 name = "ctl-client"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "base64 0.23.1",
  "clap",
@@ -1191,7 +1191,7 @@ dependencies = [
 
 [[package]]
 name = "ctl-files"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "base64 0.23.1",
  "ctl-proto",
@@ -1202,7 +1202,7 @@ dependencies = [
 
 [[package]]
 name = "ctl-ipc"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "ctl-proto",
  "dirs",
@@ -1225,7 +1225,7 @@ dependencies = [
 
 [[package]]
 name = "ctl-keychain-client"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "block2 0.6.2",
  "core-foundation 0.10.1",
@@ -1238,7 +1238,7 @@ dependencies = [
 
 [[package]]
 name = "ctl-proto"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "serde",
  "serde_json",
@@ -1251,7 +1251,7 @@ dependencies = [
 
 [[package]]
 name = "ctl-task-cli"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "clap",
  "ctl-task-client",
@@ -1269,7 +1269,7 @@ dependencies = [
 
 [[package]]
 name = "ctl-task-client"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "ctl-task-ipc",
  "ctl-task-proto",
@@ -1282,7 +1282,7 @@ dependencies = [
 
 [[package]]
 name = "ctl-task-ipc"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "ctl-task-proto",
  "dirs",
@@ -1297,7 +1297,7 @@ dependencies = [
 
 [[package]]
 name = "ctl-task-proto"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "serde",
  "serde_json",
@@ -1308,7 +1308,7 @@ dependencies = [
 
 [[package]]
 name = "ctl-task-store"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "ctl-task-proto",
  "hex",
@@ -1322,7 +1322,7 @@ dependencies = [
 
 [[package]]
 name = "ctl-taskd"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "clap",
  "ctl-task-ipc",
@@ -1345,7 +1345,7 @@ dependencies = [
 
 [[package]]
 name = "ctld"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "base64 0.23.1",
  "clap",
@@ -1373,7 +1373,7 @@ dependencies = [
 
 [[package]]
 name = "ctlup"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "clap",
  "ctl-bundle",
@@ -1403,7 +1403,7 @@ dependencies = [
 
 [[package]]
 name = "ctmux-app"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "base64 0.23.1",
  "ctl-client",
@@ -1440,7 +1440,7 @@ dependencies = [
 
 [[package]]
 name = "ctmux-avt"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "pretty_assertions",
  "proptest",
@@ -1454,7 +1454,7 @@ dependencies = [
 
 [[package]]
 name = "ctmux-cli"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "clap",
  "ctmux-client",
@@ -1472,7 +1472,7 @@ dependencies = [
 
 [[package]]
 name = "ctmux-client"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "crossterm",
  "ctmux-avt",
@@ -1490,7 +1490,7 @@ dependencies = [
 
 [[package]]
 name = "ctmux-core"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "ctmux-avt",
  "ctmux-proto",
@@ -1501,7 +1501,7 @@ dependencies = [
 
 [[package]]
 name = "ctmux-ipc"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "ctmux-proto",
  "dirs",
@@ -1520,7 +1520,7 @@ dependencies = [
 
 [[package]]
 name = "ctmux-process-info"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "libc",
  "libproc",
@@ -1529,7 +1529,7 @@ dependencies = [
 
 [[package]]
 name = "ctmux-proto"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "serde",
  "serde_json",
@@ -1540,7 +1540,7 @@ dependencies = [
 
 [[package]]
 name = "ctmux-tui"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "base64 0.23.1",
  "clap",
@@ -1567,7 +1567,7 @@ dependencies = [
 
 [[package]]
 name = "ctmuxd"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "clap",
  "ctmux-avt",
@@ -6856,7 +6856,7 @@ dependencies = [
 
 [[package]]
 name = "tokn-ctl-core"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "dirs",
  "hex",

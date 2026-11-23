@@ -1,6 +1,6 @@
 use ctream_client::transport::{AgentLaunch, SshCommand};
 use serde::Deserialize;
-use std::{io, path::PathBuf, process::Command};
+use std::{env, ffi::OsString, io, path::PathBuf, process::Command};
 
 #[derive(Clone)]
 pub(super) struct Workspace {
@@ -21,14 +21,36 @@ struct HostView {
 
 impl Default for Workspace {
   fn default() -> Self {
-    let name = format!("ctl{}", std::env::consts::EXE_SUFFIX);
-    let ctl = std::env::current_exe()
-      .ok()
-      .map(|executable| executable.with_file_name(&name))
-      .filter(|program| program.is_file())
-      .unwrap_or_else(|| name.into());
-    Self { ctl }
+    Self {
+      ctl: ctl_program(
+        env::var_os("CTREAM_CTL_BIN"),
+        env::current_exe().ok(),
+        ctl_core::paths::directory().ok(),
+      ),
+    }
   }
+}
+
+fn ctl_program(
+  configured: Option<OsString>,
+  executable: Option<PathBuf>,
+  profile: Option<PathBuf>,
+) -> PathBuf {
+  if let Some(program) = configured.filter(|program| !program.is_empty()) {
+    return program.into();
+  }
+  let name = format!("ctl{}", env::consts::EXE_SUFFIX);
+  let sibling = executable.map(|executable| executable.with_file_name(&name));
+  let managed = profile.map(|profile| profile.join("bin").join(&name));
+  [sibling, managed]
+    .into_iter()
+    .flatten()
+    .find(|program| {
+      program
+        .metadata()
+        .is_ok_and(|metadata| metadata.is_file() && ctl_core::private_fs::is_executable(&metadata))
+    })
+    .unwrap_or_else(|| name.into())
 }
 
 impl Workspace {
@@ -44,7 +66,7 @@ impl Workspace {
       .map_err(|error| {
         io::Error::new(
           error.kind(),
-          format!("Could not run ctl host list: {error}"),
+          format!("Could not run {} host list: {error}", self.ctl.display()),
         )
       })?;
     if !output.status.success() {
@@ -107,6 +129,65 @@ fn parse_hosts(bytes: &[u8]) -> io::Result<Vec<Host>> {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use std::{fs, time::SystemTime};
+
+  struct Directory(PathBuf);
+
+  impl Directory {
+    fn new() -> Self {
+      let time = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+      let directory =
+        Self(env::temp_dir().join(format!("ctream-ctl-{}-{time}", std::process::id())));
+      fs::create_dir(&directory.0).unwrap();
+      directory
+    }
+  }
+
+  impl Drop for Directory {
+    fn drop(&mut self) {
+      fs::remove_dir_all(&self.0).unwrap();
+    }
+  }
+
+  #[test]
+  fn ctl_lookup_prioritizes_override_then_sibling_then_profile_then_path() {
+    let root = Directory::new();
+    let name = format!("ctl{}", env::consts::EXE_SUFFIX);
+    let executable = root.0.join("build profile").join("ctream-preview");
+    let profile = root.0.join("selected profile");
+    let resolve =
+      |configured| ctl_program(configured, Some(executable.clone()), Some(profile.clone()));
+    assert_eq!(resolve(None), PathBuf::from(&name));
+
+    let managed = profile.join("bin").join(&name);
+    fs::create_dir_all(managed.parent().unwrap()).unwrap();
+    fs::write(&managed, []).unwrap();
+    #[cfg(unix)]
+    assert_eq!(resolve(None), PathBuf::from(&name));
+    ctl_core::private_fs::set_executable(&fs::File::open(&managed).unwrap()).unwrap();
+    assert_eq!(resolve(None), managed);
+
+    let sibling = executable.with_file_name(&name);
+    fs::create_dir_all(sibling.parent().unwrap()).unwrap();
+    fs::write(&sibling, []).unwrap();
+    #[cfg(unix)]
+    assert_eq!(resolve(None), managed);
+    ctl_core::private_fs::set_executable(&fs::File::open(&sibling).unwrap()).unwrap();
+    assert_eq!(resolve(None), sibling);
+    assert_eq!(resolve(Some(OsString::new())), sibling);
+
+    let configured = root.0.join("explicit ctl");
+    assert_eq!(resolve(Some(configured.clone().into())), configured);
+    let workspace = Workspace {
+      ctl: resolve(Some(configured.clone().into())),
+    };
+    let error = workspace.hosts().unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::NotFound);
+    assert!(error.to_string().contains(&*configured.to_string_lossy()));
+  }
 
   #[test]
   fn saved_ids_are_used_for_hosts_with_the_same_label() {

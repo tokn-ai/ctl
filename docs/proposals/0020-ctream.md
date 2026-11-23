@@ -267,8 +267,21 @@ repository or `--from ctream-preview-<target>.zip` for offline installation.
 Use `ctlup ctream update` to select a newer bundle, `ctlup ctream status` to see
 the active build, and `ctlup ctream cli -- list` to invoke the CLI. Preview flags
 can be passed with `ctlup ctream run -- OPTIONS`.
-The launched preview searches the selected ctl profile’s bin directory first
-when it looks up `ctl` on `PATH`.
+
+The workspace picker uses the same `ctl` lookup when you launch the preview
+directly or through `ctlup`. It checks these locations in order.
+
+1. The executable specified by `CTREAM_CTL_BIN`. An invalid nonempty override
+   stops lookup with an error. An empty value is treated as unset.
+2. A sibling `ctl` beside `ctream-preview`, such as one built in the same Cargo
+   profile.
+3. `bin/ctl` under the selected data directory, using a nonempty `CTL_DATA_DIR`
+   and defaulting to `~/.tokn/ctl/`.
+4. `ctl` on `PATH`.
+
+To select a specific executable, run `CTREAM_CTL_BIN=/path/to/ctl ctlup ctream run`.
+`ctlup ctream run` still prepends the selected ctl profile’s `bin` directory to
+`PATH` for compatibility with older installed previews.
 
 `ctlup` keeps the active selection and installed generations in
 `$CTL_DATA_DIR/ctlup/store/ctream/` (`~/.tokn/ctl/ctlup/store/ctream/` by default).
@@ -280,7 +293,7 @@ The local `$CTL_DATA_DIR/ctream/` directory is reserved for configuration.
 The viewer and its `ctream-agents` directory stay together in each generation.
 `ctl-bundle` defines the layout used by the preview, development builder, CI
 packer, and installer. For a manual install, extract the ZIP and run
-`ctream-preview` directly. Keep `ctl` available on `PATH` or beside the preview.
+`ctream-preview` directly.
 For a host that needs an interactive SSH prompt, launch the viewer from a
 terminal or connect the host in ctl first.
 

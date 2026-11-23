@@ -2,8 +2,8 @@ use ctream_driver::{ControlOperation, Result};
 use ctream_proto::{
   BOUNDS_VERSION, CAPTURE_CATALOG_VERSION, CAPTURE_DRIVER_VERSION, DISPLAY_VERSION,
   LATENCY_VERSION, MACOS_WINDOW_VERSION, Target, WAYLAND_WINDOW_VERSION, WINDOWS_DESKTOP_VERSION,
-  WINDOWS_DISPLAY_VERSION, WINDOWS_WINDOW_VERSION, WindowId, X11_WINDOW_VERSION,
-  valid_capture_driver, valid_window_id,
+  WINDOWS_DISPLAY_VERSION, WINDOWS_WINDOW_VERSION, WindowId, X11_WINDOW_INPUT_VERSION,
+  X11_WINDOW_VERSION, valid_capture_driver, valid_window_id,
 };
 
 pub enum TargetOperation<'a> {
@@ -103,6 +103,16 @@ fn supports_capture_selection(version: &str, target: &str) -> bool {
 
 pub fn parse(args: &[String]) -> Result<Request<'_>> {
   match args {
+    [version, operation, target, id]
+      if version == X11_WINDOW_INPUT_VERSION && operation == "input-window" =>
+    {
+      let target = Target::parse(target)?;
+      if !matches!(target, Target::X11(_)) {
+        return Err(format!("ctream_agent {version} input-window requires an X11 display").into());
+      }
+      WindowId::x11_xid(id).ok_or("invalid X11 window identifier")?;
+      Ok(Request::Target(target, TargetOperation::InputWindow(id)))
+    }
     [version, operation, tail @ ..] if version == MACOS_WINDOW_VERSION => {
       parse_macos_version(operation, tail)
     }
@@ -273,6 +283,42 @@ mod tests {
         );
         assert!(parse(&args(&[version, "input-window", target, "window-1"])).is_err());
       }
+    }
+  }
+
+  #[test]
+  fn x11_window_input_requires_its_own_contract_and_an_x11_window_id() {
+    let version = X11_WINDOW_INPUT_VERSION;
+    let target = ":7";
+    let window = "x11-123abc";
+    assert!(matches!(
+      parse(&args(&[version, "input-window", target, window])).unwrap(),
+      Request::Target(Target::X11(7), TargetOperation::InputWindow("x11-123abc"))
+    ));
+    for version in [X11_WINDOW_VERSION, MACOS_WINDOW_VERSION] {
+      assert!(parse(&args(&[version, "input-window", target, window])).is_err());
+    }
+    for bad_target in ["wayland-1", "windows", "windows-2", "macos", ":"] {
+      assert!(parse(&args(&[version, "input-window", bad_target, window])).is_err());
+    }
+    for bad_id in [
+      "window-1",
+      "x11-",
+      "x11-0",
+      "x11-+1",
+      "x11-12g",
+      "x11-100000000",
+    ] {
+      assert!(parse(&args(&[version, "input-window", target, bad_id])).is_err());
+    }
+    for unsupported in [
+      vec![version, "discover"],
+      vec![version, "input", target],
+      vec![version, "capture-window", target, window],
+      vec![version, "input-window", target],
+      vec![version, "input-window", target, window, "extra"],
+    ] {
+      assert!(parse(&args(&unsupported)).is_err(), "{unsupported:?}");
     }
   }
 

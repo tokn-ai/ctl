@@ -7,8 +7,11 @@ use ctream_client::{
 };
 use ctream_proto::{Action, CaptureScope, CaptureSystem, Display, Target};
 use std::{
-  env, io,
+  env,
+  error::Error,
+  io,
   path::PathBuf,
+  thread,
   time::{Duration, Instant},
 };
 
@@ -186,4 +189,260 @@ fn native_sessions_stream_through_local_ipc() -> io::Result<()> {
     }
   }
   Ok(())
+}
+
+#[test]
+#[ignore = "requires the disposable X11 session in docker/ctream"]
+fn covered_x11_window_receives_input_without_changing_desktop_state() -> Result<(), Box<dyn Error>>
+{
+  use ctream_proto::WindowId;
+  use x11rb::{
+    COPY_DEPTH_FROM_PARENT, COPY_FROM_PARENT,
+    connection::Connection as _,
+    properties::{WmHints, WmSizeHints, WmSizeHintsSpecification},
+    protocol::{
+      Event,
+      xproto::{
+        AtomEnum, ConnectionExt as _, CreateWindowAux, EventMask, PropMode, Visibility, WindowClass,
+      },
+    },
+    wrapper::ConnectionExt as _,
+  };
+
+  let client = Client::new(Local {
+    agent: PathBuf::from(env!("CARGO_BIN_EXE_ctream-agent")),
+  });
+  let display = env::var("CTREAM_TEST_X11").unwrap_or_else(|_| ":98".into());
+  let target = Target::parse(&display).expect("fixture X11 display");
+  let (conn, screen) = x11rb::connect(Some(&display))?;
+  let (cover_conn, _) = x11rb::connect(Some(&display))?;
+  let screen = &conn.setup().roots[screen];
+  let root = screen.root;
+  let snapshot = || -> Result<_, Box<dyn Error>> {
+    let pointer = conn.query_pointer(root)?.reply()?;
+    let focus = conn.get_input_focus()?.reply()?;
+    let keys = conn.query_keymap()?.reply()?.keys;
+    Ok((
+      pointer.root_x,
+      pointer.root_y,
+      pointer.mask,
+      focus.focus,
+      focus.revert_to,
+      keys,
+    ))
+  };
+  let before = snapshot()?;
+  let x = if before.0 < screen.width_in_pixels as i16 / 2 {
+    screen.width_in_pixels as i16 - 216
+  } else {
+    36
+  };
+  let fixture = conn.generate_id()?;
+  let input_mask = EventMask::BUTTON_PRESS
+    | EventMask::BUTTON_RELEASE
+    | EventMask::KEY_PRESS
+    | EventMask::KEY_RELEASE;
+  conn
+    .create_window(
+      COPY_DEPTH_FROM_PARENT,
+      fixture,
+      root,
+      x,
+      45,
+      180,
+      120,
+      0,
+      WindowClass::INPUT_OUTPUT,
+      COPY_FROM_PARENT,
+      &CreateWindowAux::new()
+        .background_pixel(screen.white_pixel)
+        .event_mask(input_mask | EventMask::VISIBILITY_CHANGE),
+    )?
+    .check()?;
+  WmHints {
+    input: Some(false),
+    ..WmHints::default()
+  }
+  .set(&conn, fixture)?
+  .check()?;
+  WmSizeHints {
+    position: Some((WmSizeHintsSpecification::UserSpecified, x.into(), 45)),
+    ..WmSizeHints::default()
+  }
+  .set_normal_hints(&conn, fixture)?
+  .check()?;
+  let user_time = conn.intern_atom(false, b"_NET_WM_USER_TIME")?.reply()?.atom;
+  conn
+    .change_property32(
+      PropMode::REPLACE,
+      fixture,
+      user_time,
+      AtomEnum::CARDINAL,
+      &[0],
+    )?
+    .check()?;
+  conn
+    .change_property8(
+      PropMode::REPLACE,
+      fixture,
+      AtomEnum::WM_NAME,
+      AtomEnum::STRING,
+      b"Ctream X11 input fixture",
+    )?
+    .check()?;
+  conn.map_window(fixture)?.check()?;
+
+  let window = wait_for("X11 fixture discovery", || {
+    Ok(
+      client
+        .windows(target)?
+        .into_iter()
+        .find(|window| WindowId::x11_xid(&window.id) == Some(fixture)),
+    )
+  })?;
+  wait_for("unobscured fixture", || {
+    while let Some(event) = conn.poll_for_event()? {
+      if matches!(event, Event::VisibilityNotify(event) if event.state == Visibility::UNOBSCURED) {
+        return Ok(Some(()));
+      }
+    }
+    Ok(None)
+  })?;
+  let geometry = conn.get_geometry(fixture)?.reply()?;
+  let origin = conn.translate_coordinates(fixture, root, 0, 0)?.reply()?;
+  let cover = cover_conn.generate_id()?;
+  cover_conn
+    .create_window(
+      COPY_DEPTH_FROM_PARENT,
+      cover,
+      root,
+      origin.dst_x,
+      origin.dst_y,
+      geometry.width,
+      geometry.height,
+      0,
+      WindowClass::INPUT_OUTPUT,
+      COPY_FROM_PARENT,
+      &CreateWindowAux::new()
+        .background_pixel(screen.black_pixel)
+        .event_mask(input_mask)
+        .override_redirect(1),
+    )?
+    .check()?;
+  cover_conn.map_window(cover)?.check()?;
+  wait_for("fully covered fixture", || {
+    while let Some(event) = conn.poll_for_event()? {
+      if matches!(event, Event::VisibilityNotify(event) if event.state == Visibility::FULLY_OBSCURED)
+      {
+        return Ok(Some(()));
+      }
+    }
+    Ok(None)
+  })?;
+  assert_ne!(before.3, fixture);
+  assert_eq!(snapshot()?, before);
+
+  let session = client.session(target, Some(window));
+  let mut input = session.input()?;
+  assert_eq!(input.dimensions(), None);
+  input.move_pointer(52, 37, [geometry.width.into(), geometry.height.into()])?;
+  input.button(1, true)?;
+  input.key("h", true)?;
+  let next_input = || {
+    wait_for("directed X11 input event", || {
+      while let Some(event) = conn.poll_for_event()? {
+        if matches!(
+          event,
+          Event::ButtonPress(_)
+            | Event::ButtonRelease(_)
+            | Event::KeyPress(_)
+            | Event::KeyRelease(_)
+        ) {
+          return Ok(Some(event));
+        }
+      }
+      Ok(None)
+    })
+  };
+  let Event::ButtonPress(click) = next_input()? else {
+    panic!("expected a button press");
+  };
+  assert_eq!(click.response_type & 0x80, 0x80, "SendEvent marker");
+  assert_eq!(
+    (click.event, click.detail, click.event_x, click.event_y),
+    (fixture, 1, 52, 37)
+  );
+  let Event::KeyPress(h) = next_input()? else {
+    panic!("expected a key press");
+  };
+  assert_eq!(
+    snapshot()?,
+    before,
+    "pointer, focus and physical input state while pressed"
+  );
+
+  input.key("h", false)?;
+  input.button(1, false)?;
+  input.key("i", true)?;
+  input.key("i", false)?;
+  let Event::KeyRelease(release_h) = next_input()? else {
+    panic!("expected first key release");
+  };
+  let Event::ButtonRelease(release_click) = next_input()? else {
+    panic!("expected button release");
+  };
+  let Event::KeyPress(i) = next_input()? else {
+    panic!("expected second key press");
+  };
+  let Event::KeyRelease(release_i) = next_input()? else {
+    panic!("expected second key release");
+  };
+  assert_eq!(release_click.response_type & 0x80, 0x80);
+  assert_eq!(
+    (
+      release_click.event,
+      release_click.detail,
+      release_click.event_x,
+      release_click.event_y
+    ),
+    (fixture, 1, 52, 37)
+  );
+  for (press, release, expected) in [(h, release_h, 'h'), (i, release_i, 'i')] {
+    for event in [press, release] {
+      assert_eq!(event.event, fixture);
+      assert_eq!(event.response_type & 0x80, 0x80);
+    }
+    assert_eq!(release.detail, press.detail);
+    let mapping = conn.get_keyboard_mapping(press.detail, 1)?.reply()?;
+    assert_eq!(mapping.keysyms.first().copied(), Some(u32::from(expected)));
+  }
+  assert!(
+    cover_conn.poll_for_event()?.is_none(),
+    "cover received directed input"
+  );
+  drop(input);
+  drop(cover_conn);
+  conn.destroy_window(fixture)?.check()?;
+  assert_eq!(
+    snapshot()?,
+    before,
+    "pointer, focus and physical input state after cleanup"
+  );
+  Ok(())
+}
+
+fn wait_for<T>(
+  description: &str,
+  mut check: impl FnMut() -> Result<Option<T>, Box<dyn Error>>,
+) -> Result<T, Box<dyn Error>> {
+  let deadline = Instant::now() + Duration::from_secs(5);
+  loop {
+    if let Some(value) = check()? {
+      return Ok(value);
+    }
+    if Instant::now() >= deadline {
+      return Err(io::Error::new(io::ErrorKind::TimedOut, description).into());
+    }
+    thread::sleep(Duration::from_millis(20));
+  }
 }

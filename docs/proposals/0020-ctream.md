@@ -451,9 +451,10 @@ held inputs.
 The agent uses FFmpeg with x11grab for X11 display capture and reads display
 geometry through x11rb. The X11 display driver keeps only the newest pending
 frame when transport writes stall. It waits at least 125 ms after each completed
-frame write before sending another. X11 input needs Python 3, libX11, libXtst,
-XTEST, and access to the selected display. The local wgpu viewer uses the same
-rectangle for drawing the desktop and mapping clicks to display pixels.
+frame write before sending another. X11 display input needs Python 3, libX11,
+libXtst, XTEST, and access to the selected display. The local wgpu viewer
+uses the same rectangle for drawing the desktop and mapping clicks to display
+pixels.
 
 For a user-owned Sway session, select `wayland-N` in the same command. Capture
 uses `grim`. To enable input, install the helper on the Linux host with
@@ -503,9 +504,13 @@ Start with the user-owned nested Sway session. Discover windows through
 interfaces. On X11, the agent enumerates top-level windows and reads the
 selected window's offscreen backing pixmap through X Composite. Each frame
 carries its current dimensions. A mapped window can be captured while
-covered, and the stream pauses while the window is unmapped. The X11 window
-preview is view-only. A Wayland session may also offer window selection
-through the ScreenCast portal when its backend advertises that source type.
+covered, and the stream pauses while the window is unmapped. With a 1.1.12
+agent, **Start** opens a separate input channel for the selected X11 window.
+The agent sends synthetic X11 events to the window hierarchy using the current
+window geometry. This leaves the desktop pointer and keyboard focus alone.
+Application support varies because X11 marks these events as synthetic.
+A Wayland session may also offer window selection through the ScreenCast portal
+when its backend advertises that source type.
 
 On Windows, the desktop-wide target in `ctream_agent` 1.0.9 enumerates visible
 top-level windows across monitors. Use `ctream --host SSH_HOST windows windows`
@@ -652,3 +657,9 @@ succeed before the handshake reports a driver. Earlier contracts 1.0.1 through
 input behavior. Welcome-window staging and the Rust module split do not add
 input operations or change input permissions. Other named contracts and
 product release versions remain unchanged.
+
+X11 window input advances `ctream_agent` from 1.0.11 (build 11) to 1.1.12
+(build 12). It adds `input-window :DISPLAY WINDOW` for a selected X11 window
+with a `ready` handshake and frame-sized pointer coordinates. Earlier
+contracts retain their existing operations, including display XTEST input
+and X11 window capture.

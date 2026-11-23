@@ -4,6 +4,7 @@ use std::io::{self, BufRead, BufReader, Read, Write};
 #[derive(Clone, Copy)]
 pub enum InputFormat {
   X11,
+  X11Window,
   Wayland,
   Windows,
   Macos,
@@ -44,7 +45,7 @@ impl<R: Read + Send + 'static, W: Write + Send + 'static> Input<R, W> {
       return Err(io::Error::other("incomplete remote input handshake"));
     }
     match format {
-      InputFormat::Wayland | InputFormat::Windows | InputFormat::Macos
+      InputFormat::X11Window | InputFormat::Wayland | InputFormat::Windows | InputFormat::Macos
         if header.trim_end() == "ready" =>
       {
         Ok(None)
@@ -148,6 +149,7 @@ mod tests {
   fn input_encodes_each_backend_and_rejects_out_of_bounds_or_injected_commands() {
     for (format, header, expected) in [
       (InputFormat::X11, "800 600\n", "move 400 300\n"),
+      (InputFormat::X11Window, "ready\n", "move 400 300 800 600\n"),
       (InputFormat::Wayland, "ready\n", "move 400 300 800 600\n"),
       (InputFormat::Windows, "ready\n", "move 400 300 800 600\n"),
     ] {

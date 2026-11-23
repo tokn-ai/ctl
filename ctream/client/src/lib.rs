@@ -17,7 +17,8 @@ use ctream_proto::{
   CaptureDriverDescriptor, CaptureDriverInfo, DISPLAY_VERSION, Element, LATENCY_VERSION,
   MACOS_WINDOW_VERSION, Session as DisplaySession, Target, WAYLAND_WINDOW_VERSION,
   WINDOWS_DESKTOP_VERSION, WINDOWS_DISPLAY_VERSION, WINDOWS_WINDOW_VERSION, Window, WindowId,
-  X11_FRAME_SIZE, X11_WINDOW_VERSION, valid_capture_driver, valid_window_id,
+  X11_FRAME_SIZE, X11_WINDOW_INPUT_VERSION, X11_WINDOW_VERSION, valid_capture_driver,
+  valid_window_id,
 };
 pub use latency::LatencyProbe;
 use serde::de::DeserializeOwned;
@@ -280,8 +281,8 @@ impl<T: Transport> Session<T> {
   pub fn supports_input(&self) -> bool {
     match self.target {
       Target::WindowsDesktop | Target::MacosDesktop => self.window.is_some(),
-      Target::Windows(_) => true,
-      _ => self.window.is_none(),
+      Target::X11(_) | Target::Windows(_) => true,
+      Target::Wayland(_) => self.window.is_none(),
     }
   }
 
@@ -330,22 +331,26 @@ impl<T: Transport> Session<T> {
     if !self.supports_input() {
       return Err(io::Error::new(
         io::ErrorKind::Unsupported,
-        "pointer and keyboard input require a display, Windows window, or macOS window",
+        "pointer and keyboard input require a display or a supported window",
       ));
     }
     let format = match self.target {
+      Target::X11(_) if self.window.is_some() => InputFormat::X11Window,
       Target::X11(_) => InputFormat::X11,
       Target::Wayland(_) => InputFormat::Wayland,
       Target::Windows(_) | Target::WindowsDesktop => InputFormat::Windows,
       Target::MacosDesktop => InputFormat::Macos,
     };
     let arguments = if let Some(window) = &self.window {
-      window_arguments(
-        window_version(self.target),
-        "input-window",
-        self.target,
-        &window.id,
-      )?
+      let version = if matches!(format, InputFormat::X11Window) {
+        WindowId::x11_xid(&window.id).ok_or_else(|| {
+          io::Error::new(io::ErrorKind::InvalidInput, "invalid X11 window identifier")
+        })?;
+        X11_WINDOW_INPUT_VERSION
+      } else {
+        window_version(self.target)
+      };
+      window_arguments(version, "input-window", self.target, &window.id)?
     } else {
       vec![
         display_version(self.target).into(),
@@ -613,6 +618,63 @@ mod tests {
         vec![WINDOWS_DISPLAY_VERSION, "discover"],
         vec![DISPLAY_VERSION, "discover"],
       ]
+    );
+  }
+
+  #[test]
+  fn x11_window_input_has_an_independent_handshake_and_version() {
+    use crate::media::{Frame, VideoSource};
+
+    let (client, observed) = client(&[
+      r#"[{"id":"x11-abc","title":"Example","app_id":"example"}]"#,
+      "P6\n2 1\n255\nabcdefP6\n1 2\n255\nghijkl",
+      "ready\n",
+      "800 600\n",
+    ]);
+    let target = Target::X11(7);
+    let session = client.session(target, client.windows(target).unwrap().pop());
+    assert!(session.supports_input());
+    assert!(!session.supports_semantics());
+
+    let mut capture = session.capture().unwrap();
+    let mut frame = Frame::default();
+    capture.read_frame(&mut frame).unwrap();
+    capture.read_frame(&mut frame).unwrap();
+    assert_eq!(frame.size, [1, 2]);
+    let mut input = session.input().unwrap();
+    assert_eq!(input.dimensions(), None);
+    input.move_pointer(0, 1, [1, 2]).unwrap();
+    let display_input = client.session(target, None).input().unwrap();
+    assert_eq!(display_input.dimensions(), Some([800, 600]));
+    assert_eq!(*observed.payloads.lock().unwrap(), b"move 0 1 1 2\n");
+    assert_eq!(
+      *observed.requests.lock().unwrap(),
+      [
+        vec![X11_WINDOW_VERSION, "windows", ":7"],
+        vec![X11_WINDOW_VERSION, "capture-window", ":7", "x11-abc"],
+        vec![X11_WINDOW_INPUT_VERSION, "input-window", ":7", "x11-abc"],
+        vec![DISPLAY_VERSION, "input", ":7"],
+      ]
+    );
+  }
+
+  #[test]
+  fn x11_window_input_failure_does_not_open_display_input() {
+    let (client, observed) = client(&["", "800 600\n"]);
+    let target = Target::X11(7);
+    let invalid = client.session(target, Some(window()));
+    assert!(matches!(invalid.input(), Err(error) if error.kind() == io::ErrorKind::InvalidInput));
+    let session = client.session(
+      target,
+      Some(Window {
+        id: "x11-1".into(),
+        ..window()
+      }),
+    );
+    assert!(session.input().is_err());
+    assert_eq!(
+      *observed.requests.lock().unwrap(),
+      [[X11_WINDOW_INPUT_VERSION, "input-window", ":7", "x11-1"]]
     );
   }
 

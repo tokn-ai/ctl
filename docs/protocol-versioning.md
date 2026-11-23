@@ -709,6 +709,21 @@ inventory schema 2. The separate ctream preview uses `ctream_agent` `1.0.11`
 (build 11) and retains `1.0.1` through `1.0.10`. See the
 [v0.1.5 protocol map](releases/v0.1.5.md#protocol-contracts).
 
+X11 window input starts the next cycle after `v0.1.5`, advancing `ctream_agent`
+from `1.0.11` (build 11) to `1.1.12` (build 12). The new contract accepts
+`input-window :DISPLAY x11-ID`, where `ID` is the selected window's nonzero
+hexadecimal XID. The agent writes and
+flushes `ready\n` when the target is available. It then accepts
+`move X Y WIDTH HEIGHT` using captured frame coordinates, `button CODE 0|1`,
+`key NAME 0|1`, and `reset`. Reset and EOF release held inputs. The agent
+delivers synthetic X11 events to the selected window using SendEvent.
+
+Contracts `1.0.1`–`1.0.11` retain their request and response shapes. X11
+listing and capture continue to use the existing contracts. Full-display
+input still uses XTEST under `1.0.1`. X11 window input requires an updated
+agent and a successful window handshake. Other named protocols and product
+release versions are unchanged.
+
 Every PR description must state its protocol changes, or **None** when there
 are no changes. Include the previous and new contracts and the compatibility
 impact. Keep PR titles brief; put protocol details in the description.

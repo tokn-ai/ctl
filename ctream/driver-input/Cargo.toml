@@ -13,6 +13,11 @@ ctream-driver.workspace = true
 [build-dependencies]
 cc = "1"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+ctream-proto.workspace = true
+x11rb = "0.14.0"
+xkeysym = "0.2"
+
 [target.'cfg(windows)'.dependencies]
 ctream-windows.workspace = true
 windows = { version = "0.62.2", features = [

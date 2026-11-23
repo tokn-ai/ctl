@@ -470,6 +470,81 @@ fn full_storage_override_provisions_an_independent_installation() {
   assert!(!home.0.join(".tokn").exists());
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn ctream_preview_uses_the_selected_profiles_managed_ctl() {
+  use ctl_bundle::ctream::{agent_paths, archive_name, native_target, viewer_executables};
+
+  let home = Home::new();
+  let profile = home.0.join("alternate profile");
+  fs::DirBuilder::new().mode(0o700).create(&profile).unwrap();
+  let (_, bytes) = archive('a');
+  let mut child = home
+    .command_manager(&["install-archive"])
+    .env("CTL_DATA_DIR", &profile)
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .spawn()
+    .unwrap();
+  child.stdin.take().unwrap().write_all(&bytes).unwrap();
+  let runtime = child.wait_with_output().unwrap();
+  assert!(runtime.status.success(), "{runtime:?}");
+
+  let bundle = home.0.join("fixture.zip");
+  let target = native_target().unwrap();
+  let folder = archive_name(target);
+  let viewers = viewer_executables(target);
+  let mut writer = zip::ZipWriter::new(fs::File::create(&bundle).unwrap());
+  for name in viewers.into_iter().map(str::to_owned).chain(agent_paths()) {
+    writer
+      .start_file(
+        format!("{folder}/{name}"),
+        zip::write::SimpleFileOptions::default(),
+      )
+      .unwrap();
+    let payload: &[u8] = if name == viewers[0] {
+      b"#!/bin/sh\nset -e\n\"$@\"\nexec ctl host list --json\n"
+    } else {
+      b"#!/bin/sh\nexit 0\n"
+    };
+    writer.write_all(payload).unwrap();
+  }
+  writer.finish().unwrap();
+  let installed = home
+    .command(&["ctream", "install", "--from"])
+    .arg(bundle)
+    .env("CTL_DATA_DIR", &profile)
+    .output()
+    .unwrap();
+  assert!(installed.status.success(), "{installed:?}");
+
+  let inherited = home.0.join("inherited tools");
+  fs::create_dir(&inherited).unwrap();
+  let add_tool = |name, script: &[u8]| {
+    let path = inherited.join(name);
+    fs::write(&path, script).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+  };
+  add_tool("ctream-test-tool", b"#!/bin/sh\nprintf '%s\\n' inherited\n");
+  let run_preview = |search_path: Option<&Path>, args: &[&str], tool_output: &str| {
+    let mut command = home.command_at(&profile.join("bin/ctlup"), &["ctream", "run", "--"]);
+    command.args(args).env("CTL_DATA_DIR", &profile);
+    if let Some(search_path) = search_path {
+      command.env("PATH", search_path);
+    } else {
+      command.env_remove("PATH");
+    }
+    let output = command.output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, format!("{tool_output}\na-ctl\n").as_bytes());
+  };
+  run_preview(Some(&inherited), &["ctream-test-tool"], "inherited");
+  add_tool("ctl", b"#!/bin/sh\nprintf '%s\\n' unmanaged-ctl\n");
+  run_preview(Some(&inherited), &["ctream-test-tool"], "inherited");
+  run_preview(None, &["sh", "-c", "printf '%s\\n' system"], "system");
+}
+
 #[cfg(not(target_os = "macos"))]
 #[test]
 fn install_from_files_provisions_the_independent_manager_and_complete_commands() {

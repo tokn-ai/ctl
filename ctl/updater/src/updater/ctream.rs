@@ -2,8 +2,9 @@
 
 use super::arguments::{CtreamCommand, CtreamInstallArguments, DevelopmentArguments};
 use ctl_bundle::ctream as bundle;
-use ctl_core::private_fs;
+use ctl_core::{installations::Installations, private_fs};
 use std::{
+  env,
   ffi::OsString,
   fs, io,
   path::{Path, PathBuf},
@@ -18,8 +19,28 @@ pub(super) async fn run(home: &Path, command: CtreamCommand) -> io::Result<i32> 
     CtreamCommand::Install(options) => install(root, options, false).await?,
     CtreamCommand::Update(options) => install(root, options, true).await?,
     CtreamCommand::Status { json } => report(&root, bundle::active(&root)?.as_ref(), json)?,
-    CtreamCommand::Run { args } => return launch(&installed(&root)?.preview, args),
-    CtreamCommand::Cli { args } => return launch(&installed(&root)?.cli, args),
+    CtreamCommand::Run { args } => {
+      let mut command = Command::new(installed(&root)?.preview);
+      let bin = Installations::new(home).root().join("bin");
+      let inherited = env::var_os("PATH");
+      #[cfg(unix)]
+      let inherited = inherited.or_else(|| {
+        // Preserve the platform’s usual system tools when PATH is unset.
+        let default = if cfg!(target_os = "macos") {
+          "/usr/bin:/bin:/usr/sbin:/sbin"
+        } else {
+          "/bin:/usr/bin"
+        };
+        Some(default.into())
+      });
+      let directories = std::iter::once(bin).chain(inherited.iter().flat_map(env::split_paths));
+      // The preview uses the managed ctl launcher for workspace hosts.
+      if let Ok(path) = env::join_paths(directories) {
+        command.env("PATH", path);
+      }
+      return launch(command, args);
+    }
+    CtreamCommand::Cli { args } => return launch(Command::new(installed(&root)?.cli), args),
   }
   Ok(0)
 }
@@ -116,8 +137,7 @@ fn report(root: &Path, install: Option<&bundle::Installation>, json: bool) -> io
   Ok(())
 }
 
-fn launch(path: &Path, args: Vec<OsString>) -> io::Result<i32> {
-  let mut command = Command::new(path);
+fn launch(mut command: Command, args: Vec<OsString>) -> io::Result<i32> {
   command.args(args);
   ctl_client::cli::connection::run_process(command).map_err(io::Error::other)
 }

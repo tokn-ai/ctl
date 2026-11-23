@@ -1,0 +1,15 @@
+[package]
+name = "ctream-driver-codec"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+ctream-driver.workspace = true
+ctream-proto.workspace = true
+
+[lints]
+workspace = true

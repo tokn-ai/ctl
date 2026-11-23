@@ -572,7 +572,7 @@ fn label_center(output: &egui::FullOutput, label: &str) -> egui::Pos2 {
     .unwrap_or_else(|| panic!("expected rendered label {label:?}"))
 }
 
-fn click_driver(viewer: &mut Viewer<Mock>, ctx: &egui::Context, name: &str) {
+fn click_setup_label(viewer: &mut Viewer<Mock>, ctx: &egui::Context, name: &str) {
   let at = label_center(&render(viewer, ctx, Vec::new()), name);
   render(
     viewer,
@@ -2208,6 +2208,58 @@ fn switching_sources_cancels_capture_and_ignores_late_connections_and_queries() 
 }
 
 #[test]
+fn video_setting_restarts_only_setup_capture_and_keeps_the_selected_window() {
+  use ctream_proto::VideoCodec;
+
+  let mock = Mock::default();
+  let ctx = egui::Context::default();
+  let mut viewer = create(&mock, &ctx, true, "windows.wgc");
+  poll_until(&mut viewer, &ctx, ready);
+  let original = mock.captures().pop().unwrap();
+  let discovery_queries = mock.records("discover").len();
+  let catalog_queries = mock.records("capture-drivers").len();
+  let window_queries = mock.records("windows").len();
+  let image_size = viewer.preview.as_ref().unwrap().image_size();
+
+  let output = render(&mut viewer, &ctx, Vec::new());
+  for label in [
+    "VIDEO STREAM",
+    "AV1",
+    "Balanced",
+    "Max FPS",
+    "Video: Raw RGB24",
+  ] {
+    label_center(&output, label);
+  }
+  click_setup_label(&mut viewer, &ctx, "AV1");
+  click_setup_label(&mut viewer, &ctx, "H.264");
+  assert_eq!(viewer.video.codec, VideoCodec::H264);
+  assert!(original.closed() && original.cancelled());
+  assert!(!viewer.viewing && mock.inputs().is_empty());
+
+  poll_until(&mut viewer, &ctx, ready);
+  let captures = mock.captures();
+  assert_eq!(captures.len(), 2);
+  assert_eq!(captures[1].arguments, original.arguments);
+  assert_eq!(viewer.driver, "windows.wgc");
+  assert_eq!(viewer.selected, Some(Target::Windows(1)));
+  assert_eq!(viewer.selected_window.as_deref(), Some("window-1"));
+  assert_eq!(viewer.preview.as_ref().unwrap().image_size(), image_size);
+  assert_eq!(mock.records("discover").len(), discovery_queries);
+  assert_eq!(mock.records("capture-drivers").len(), catalog_queries);
+  assert_eq!(mock.records("windows").len(), window_queries);
+
+  viewer.start(&ctx);
+  poll_until(&mut viewer, &ctx, |viewer| {
+    viewer.preview.as_ref().unwrap().input.is_some()
+  });
+  assert!(!viewer.set_video_options(VideoOptions::default()));
+  assert_eq!(viewer.video.codec, VideoCodec::H264);
+  assert!(!captures[1].closed() && !captures[1].cancelled());
+  assert_eq!(mock.inputs().len(), 1);
+}
+
+#[test]
 fn close_during_input_handshake_cancels_control_without_stopping_capture() {
   let mock = Mock::default();
   mock.0.config.lock().unwrap().wait_input = true;
@@ -2285,7 +2337,7 @@ fn requested_window_is_never_broadened_by_display_driver_metadata() {
 
     // Selecting this same card is an explicit change of scope, unlike merely
     // receiving its catalog metadata after a command-line window selection.
-    click_driver(&mut viewer, &ctx, "DXGI");
+    click_setup_label(&mut viewer, &ctx, "DXGI");
     assert!(!viewer.window_mode);
     poll_until(&mut viewer, &ctx, ready);
     assert_eq!(mock.captures().len(), 1);
@@ -2317,13 +2369,13 @@ fn catalog_and_card_choices_wait_for_display_discovery_before_opening_sources() 
 
   // The driver list remains usable while discovery is pending, but choosing a
   // card must not start queries against an unvalidated, preselected display.
-  click_driver(&mut viewer, &ctx, "DXGI");
+  click_setup_label(&mut viewer, &ctx, "DXGI");
   assert_eq!(viewer.driver, "windows.dxgi");
   assert!(!viewer.window_mode);
   assert!(viewer.client.is_none() && viewer.requests.is_none());
   assert!(viewer.window_query.is_none());
   assert!(mock.records("windows").is_empty() && mock.captures().is_empty());
-  click_driver(&mut viewer, &ctx, "WGC");
+  click_setup_label(&mut viewer, &ctx, "WGC");
   assert_eq!(viewer.driver, "windows.wgc");
   assert!(viewer.window_mode);
 
@@ -2409,7 +2461,7 @@ fn complete_driver_catalog_and_tags_are_shown_before_selecting_a_source() {
   ] {
     label_center(&output, label);
   }
-  click_driver(&mut viewer, &ctx, "Custom surface");
+  click_setup_label(&mut viewer, &ctx, "Custom surface");
   assert_eq!(viewer.driver, "custom.surface");
   assert!(viewer.window_mode && viewer.selected.is_none());
   assert!(
@@ -2460,7 +2512,7 @@ fn driver_cards_set_the_scope_and_keep_the_complete_catalog() {
   poll_until(&mut viewer, &ctx, ready);
   let original = mock.captures().pop().unwrap();
   let catalog_queries = mock.records("capture-drivers").len();
-  click_driver(&mut viewer, &ctx, "WGC");
+  click_setup_label(&mut viewer, &ctx, "WGC");
   assert_eq!(viewer.driver, "windows.wgc");
   assert!(viewer.window_mode);
   assert!(original.closed() && original.cancelled());
@@ -2470,7 +2522,7 @@ fn driver_cards_set_the_scope_and_keep_the_complete_catalog() {
   assert_eq!(viewer.selected_window.as_deref(), Some("window-1"));
   let window_capture = mock.captures().pop().unwrap();
   assert_eq!(window_capture.arguments[3..], ["windows.wgc", "window-1"]);
-  click_driver(&mut viewer, &ctx, "DXGI");
+  click_setup_label(&mut viewer, &ctx, "DXGI");
   assert_eq!(viewer.driver, "windows.dxgi");
   assert!(!viewer.window_mode);
   assert!(window_capture.closed() && window_capture.cancelled());

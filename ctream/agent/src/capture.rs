@@ -1,12 +1,13 @@
 //! Metadata and selection for the bundled agent's capture providers.
 //!
 //! Custom agents can supply their own catalog and host their typed sources with
-//! `runtime::capture_with_metadata`; no global registry is required.
+//! `runtime::capture_with_metadata` or `runtime::capture_video_with_metadata`.
 
-use ctream_driver::Result;
+use crate::runtime::{capture_video_with_metadata, capture_with_metadata};
+use ctream_driver::{CaptureSource, Result};
 use ctream_proto::{
   CaptureDriverDescriptor, CaptureDriverInfo, CaptureFormat, CaptureScope, CaptureSystem, Target,
-  X11_FRAME_SIZE,
+  VideoRequest, X11_FRAME_SIZE,
 };
 
 #[derive(Clone, Copy)]
@@ -15,6 +16,15 @@ pub struct Selection {
   pub name: &'static str,
   pub scope: CaptureScope,
   pub format: CaptureFormat,
+}
+
+impl Selection {
+  pub fn stream(self, source: impl CaptureSource, video: Option<VideoRequest>) -> Result<()> {
+    match video {
+      Some(request) => capture_video_with_metadata(source, self.id, self.format, request),
+      None => capture_with_metadata(source, self.id, self.format),
+    }
+  }
 }
 
 pub const MACOS_CAPTURE_DRIVER: &str = "macos.screencapturekit";

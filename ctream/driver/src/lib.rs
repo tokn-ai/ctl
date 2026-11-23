@@ -10,7 +10,13 @@
 
 mod lifetime;
 
-pub use lifetime::CaptureLifetime;
+pub use lifetime::{CaptureCancellation, CaptureLifetime};
+
+#[derive(Default)]
+pub struct Frame<B = Vec<u8>> {
+  pub size: [usize; 2],
+  pub pixels: B,
+}
 
 use ctream_proto::Window;
 use std::io::Write;

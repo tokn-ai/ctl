@@ -15,10 +15,10 @@ use crate::{
 use ctream_proto::{
   Action, ActionResult, BOUNDS_VERSION, CAPTURE_CATALOG_VERSION, CAPTURE_DRIVER_VERSION,
   CaptureDriverDescriptor, CaptureDriverInfo, DISPLAY_VERSION, Element, LATENCY_VERSION,
-  MACOS_WINDOW_VERSION, Session as DisplaySession, Target, WAYLAND_WINDOW_VERSION,
-  WINDOWS_DESKTOP_VERSION, WINDOWS_DISPLAY_VERSION, WINDOWS_WINDOW_VERSION, Window, WindowId,
-  X11_FRAME_SIZE, X11_WINDOW_INPUT_VERSION, X11_WINDOW_VERSION, valid_capture_driver,
-  valid_window_id,
+  MACOS_WINDOW_VERSION, Session as DisplaySession, Target, VIDEO_STREAM_VERSION, VideoCapabilities,
+  VideoCodec, VideoOptions, VideoRequest, WAYLAND_WINDOW_VERSION, WINDOWS_DESKTOP_VERSION,
+  WINDOWS_DISPLAY_VERSION, WINDOWS_WINDOW_VERSION, Window, WindowId, X11_FRAME_SIZE,
+  X11_WINDOW_INPUT_VERSION, X11_WINDOW_VERSION, valid_capture_driver, valid_window_id,
 };
 pub use latency::LatencyProbe;
 use serde::de::DeserializeOwned;
@@ -63,6 +63,16 @@ pub struct Windows(pub Target);
 pub struct CaptureDrivers(pub Target);
 
 pub struct CaptureCatalog;
+
+pub struct VideoCodecs;
+
+impl Query for VideoCodecs {
+  type Reply = VideoCapabilities;
+
+  fn arguments(&self) -> io::Result<Vec<String>> {
+    Ok(vec![VIDEO_STREAM_VERSION.into(), "video-codecs".into()])
+  }
+}
 
 impl Query for CaptureCatalog {
   type Reply = Vec<CaptureDriverDescriptor>;
@@ -220,6 +230,10 @@ impl<T: Transport> Client<T> {
       .or_else(|error| self.query(CaptureCatalog).map_err(|_| error))
   }
 
+  pub fn video_capabilities(&self) -> io::Result<VideoCapabilities> {
+    self.query(VideoCodecs)
+  }
+
   /// Open a dedicated round-trip probe. The first sample waits for the agent's
   /// handshake so the measured duration excludes channel startup.
   pub fn latency_probe(&self) -> io::Result<LatencyProbe<T::Reader, T::Writer>> {
@@ -257,6 +271,66 @@ impl<T> Clone for Session<T> {
 }
 
 impl<T: Transport> Session<T> {
+  /// Negotiate compressed video, retaining raw capture for agents supporting
+  /// the earlier driver-selection contract. Pre-selection peers use `capture`.
+  pub fn capture_with_options(
+    &self,
+    driver: &str,
+    options: VideoOptions,
+  ) -> io::Result<Capture<T::Reader, T::Writer>> {
+    self.require_window_for_desktop()?;
+    if !valid_capture_driver(driver) {
+      return Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "invalid capture driver identifier",
+      ));
+    }
+    options
+      .validate()
+      .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    if let Some(window) = &self.window {
+      validate_window_id(self.target, &window.id)?;
+    }
+    let capabilities = match self.client.video_capabilities() {
+      Ok(capabilities) => capabilities,
+      Err(_) => return self.capture_with_driver(driver),
+    };
+    if capabilities.codecs.len() > 2
+      || capabilities.codecs.contains(&VideoCodec::Auto)
+      || (capabilities.codecs.len() == 2 && capabilities.codecs[0] == capabilities.codecs[1])
+    {
+      return Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "agent reported invalid video codecs",
+      ));
+    }
+    let local = ctream_driver_codec::ffmpeg::available_decoders()?;
+    let request = VideoRequest {
+      options,
+      codecs: common_video_codecs(options.codec, &capabilities.codecs, &local),
+    };
+    if request.codecs.is_empty() {
+      return Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "capture host and viewer have no compatible video codec",
+      ));
+    }
+    request
+      .validate()
+      .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    let mut arguments = vec![
+      VIDEO_STREAM_VERSION.into(),
+      "capture-stream".into(),
+      self.target.to_string(),
+      driver.into(),
+      serde_json::to_string(&request)?,
+    ];
+    if let Some(window) = &self.window {
+      arguments.push(window.id.clone());
+    }
+    Capture::started_video(self.client.transport.open(&arguments)?, driver, &request)
+  }
+
   pub fn capture_with_driver(&self, driver: &str) -> io::Result<Capture<T::Reader, T::Writer>> {
     self.require_window_for_desktop()?;
     if !valid_capture_driver(driver) {
@@ -406,6 +480,22 @@ impl<T: Transport> Session<T> {
       action,
     })
   }
+}
+
+fn common_video_codecs(
+  preferred: VideoCodec,
+  remote: &[VideoCodec],
+  local: &[VideoCodec],
+) -> Vec<VideoCodec> {
+  let preferences: &[VideoCodec] = match preferred {
+    VideoCodec::Auto | VideoCodec::Av1 => &[VideoCodec::Av1, VideoCodec::H264],
+    VideoCodec::H264 => &[VideoCodec::H264],
+  };
+  preferences
+    .iter()
+    .copied()
+    .filter(|codec| remote.contains(codec) && local.contains(codec))
+    .collect()
 }
 
 fn display_version(target: Target) -> &'static str {
@@ -619,6 +709,121 @@ mod tests {
         vec![DISPLAY_VERSION, "discover"],
       ]
     );
+  }
+
+  #[test]
+  fn codec_negotiation_prefers_av1_and_only_falls_back_to_a_shared_decoder() {
+    use VideoCodec::{Auto, Av1, H264};
+    for preference in [Auto, Av1] {
+      assert_eq!(
+        common_video_codecs(preference, &[H264, Av1], &[H264, Av1]),
+        [Av1, H264]
+      );
+      assert_eq!(
+        common_video_codecs(preference, &[Av1, H264], &[H264]),
+        [H264]
+      );
+      assert_eq!(
+        common_video_codecs(preference, &[H264], &[Av1, H264]),
+        [H264]
+      );
+      assert!(common_video_codecs(preference, &[Av1], &[H264]).is_empty());
+    }
+    assert_eq!(
+      common_video_codecs(H264, &[Av1, H264], &[Av1, H264]),
+      [H264]
+    );
+    assert!(common_video_codecs(H264, &[Av1], &[Av1, H264]).is_empty());
+  }
+
+  #[test]
+  fn old_agents_keep_negotiated_raw_capture_and_selected_driver() {
+    use crate::media::{Frame, VideoSource};
+    for driver in ["auto", "linux.x11.ffmpeg"] {
+      let (client, observed) = client(&[
+        "unsupported contract",
+        concat!(
+          r#"{"driver":"linux.x11.ffmpeg","format":{"type":"fixed_rgb","size":[1,1]}}"#,
+          "\nxyz"
+        ),
+      ]);
+      let mut capture = client
+        .session(Target::X11(7), None)
+        .capture_with_options(driver, VideoOptions::default())
+        .unwrap();
+      assert_eq!(capture.driver(), Some("linux.x11.ffmpeg"));
+      assert_eq!(capture.video(), None);
+      let mut frame = Frame::default();
+      capture.read_frame(&mut frame).unwrap();
+      assert_eq!(frame.pixels, b"xyz");
+      assert_eq!(
+        *observed.requests.lock().unwrap(),
+        [
+          vec![VIDEO_STREAM_VERSION, "video-codecs"],
+          vec![CAPTURE_DRIVER_VERSION, "capture-with-driver", ":7", driver],
+        ]
+      );
+    }
+  }
+
+  #[test]
+  fn invalid_video_requests_fail_before_opening_a_channel() {
+    let (client, observed) = client(&[]);
+    let session = client.session(Target::X11(7), None);
+    assert!(
+      session
+        .capture_with_options("bad driver", VideoOptions::default())
+        .is_err()
+    );
+    assert!(
+      session
+        .capture_with_options(
+          "auto",
+          VideoOptions {
+            max_fps: 0,
+            ..VideoOptions::default()
+          }
+        )
+        .is_err()
+    );
+    assert!(
+      client
+        .session(Target::WindowsDesktop, None)
+        .capture_with_options("auto", VideoOptions::default())
+        .is_err()
+    );
+    assert!(
+      client
+        .session(
+          Target::X11(7),
+          Some(Window {
+            id: "bad/window".into(),
+            ..window()
+          })
+        )
+        .capture_with_options("auto", VideoOptions::default())
+        .is_err()
+    );
+    assert!(observed.requests.lock().unwrap().is_empty());
+  }
+
+  #[test]
+  fn invalid_video_capabilities_do_not_retry_raw_capture() {
+    for capabilities in [r#"{"codecs":["auto"]}"#, r#"{"codecs":["av1","av1"]}"#] {
+      let (client, observed) = client(&[capabilities]);
+      let error = match client
+        .session(Target::X11(7), None)
+        .capture_with_options("auto", VideoOptions::default())
+      {
+        Ok(_) => panic!("invalid capabilities accepted"),
+        Err(error) => error,
+      };
+      assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+      assert_eq!(
+        *observed.requests.lock().unwrap(),
+        [[VIDEO_STREAM_VERSION, "video-codecs"]]
+      );
+    }
   }
 
   #[test]

@@ -26,6 +26,7 @@ members = [
   "ctream/driver",
   "ctream/driver-capture",
   "ctream/driver-input",
+  "ctream/driver-codec",
   "ctream/windows",
   "ctream/platform",
   "ctream/cli",
@@ -54,6 +55,7 @@ ctream-client = { path = "ctream/client" }
 ctream-driver = { path = "ctream/driver" }
 ctream-driver-capture = { path = "ctream/driver-capture" }
 ctream-driver-input = { path = "ctream/driver-input" }
+ctream-driver-codec = { path = "ctream/driver-codec" }
 ctream-windows = { path = "ctream/windows" }
 ctream-platform = { path = "ctream/platform" }
 ctl-core = { package = "tokn-ctl-core", path = "ctl/core", version = "=0.1.5" }

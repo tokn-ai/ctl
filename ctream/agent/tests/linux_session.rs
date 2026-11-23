@@ -192,6 +192,119 @@ fn native_sessions_stream_through_local_ipc() -> io::Result<()> {
 }
 
 #[test]
+#[ignore = "requires the disposable X11 session and FFmpeg in docker/ctream"]
+fn compressed_x11_window_streams_live_and_preserves_resized_input() -> Result<(), Box<dyn Error>> {
+  use ctream_proto::{VideoCodec, VideoOptions, WindowId};
+  use x11rb::{
+    COPY_DEPTH_FROM_PARENT, COPY_FROM_PARENT,
+    connection::Connection as _,
+    protocol::{
+      Event,
+      xproto::{ConfigureWindowAux, ConnectionExt as _, CreateWindowAux, EventMask, WindowClass},
+    },
+  };
+
+  let client = Client::new(Local {
+    agent: PathBuf::from(env!("CARGO_BIN_EXE_ctream-agent")),
+  });
+  let display = env::var("CTREAM_TEST_X11").unwrap_or_else(|_| ":98".into());
+  let target = Target::parse(&display)?;
+  let (conn, screen) = x11rb::connect(Some(&display))?;
+  let screen = &conn.setup().roots[screen];
+  let tint: [u8; 3] = [32, 167, 214];
+  let [red, green, blue] = tint.map(|channel| u16::from(channel) * 257);
+  let pixel = conn
+    .alloc_color(screen.default_colormap, red, green, blue)?
+    .reply()?
+    .pixel;
+  let fixture = conn.generate_id()?;
+  let initial = [185, 111];
+  let resized = [277u16, 159];
+  conn
+    .create_window(
+      COPY_DEPTH_FROM_PARENT,
+      fixture,
+      screen.root,
+      200,
+      90,
+      initial[0],
+      initial[1],
+      0,
+      WindowClass::INPUT_OUTPUT,
+      COPY_FROM_PARENT,
+      &CreateWindowAux::new()
+        .background_pixel(pixel)
+        .event_mask(EventMask::BUTTON_PRESS | EventMask::BUTTON_RELEASE),
+    )?
+    .check()?;
+  conn.map_window(fixture)?.check()?;
+  let window = wait_for("compressed X11 fixture discovery", || {
+    Ok(
+      client
+        .windows(target)?
+        .into_iter()
+        .find(|window| WindowId::x11_xid(&window.id) == Some(fixture)),
+    )
+  })?;
+  let session = client.session(target, Some(window));
+  let capture = session.capture_with_options("linux.x11.composite", VideoOptions::default())?;
+  assert_eq!(capture.driver(), Some("linux.x11.composite"));
+  let video = capture.video().expect("compressed window stream");
+  assert_eq!(video.codec, VideoCodec::Av1, "{}", video.encoder);
+  let (mut capture, _lifetime) = capture.split();
+  let mut frame = Frame::default();
+  capture.read_frame(&mut frame)?;
+  assert_eq!(frame.size, initial.map(usize::from));
+
+  conn
+    .configure_window(
+      fixture,
+      &ConfigureWindowAux::new()
+        .width(u32::from(resized[0]))
+        .height(u32::from(resized[1])),
+    )?
+    .check()?;
+  let resized = resized.map(usize::from);
+  wait_for("resized X11 video frame", || {
+    capture.read_frame(&mut frame)?;
+    Ok((frame.size == resized).then_some(()))
+  })?;
+  assert_eq!(frame.pixels.len(), resized[0] * resized[1] * 3);
+  let sample = (64 * resized[0] + 96) * 3;
+  for (actual, expected) in frame.pixels[sample..sample + 3].iter().zip(tint) {
+    assert!(
+      actual.abs_diff(expected) < 25,
+      "resized frame fixture color"
+    );
+  }
+
+  let mut input = session.input()?;
+  input.move_pointer(96, 64, frame.size.map(|dimension| dimension as u32))?;
+  input.button(1, true)?;
+  input.button(1, false)?;
+  let click = wait_for("click at resized video position", || {
+    while let Some(event) = conn.poll_for_event()? {
+      if let Event::ButtonPress(click) = event {
+        return Ok(Some(click));
+      }
+    }
+    Ok(None)
+  })?;
+  assert_eq!(
+    (click.event, click.detail, click.event_x, click.event_y),
+    (fixture, 1, 96, 64)
+  );
+  drop(input);
+  conn.destroy_window(fixture)?.check()?;
+  let closed = Instant::now();
+  while capture.try_read_frame(&mut frame)? {
+    assert!(closed.elapsed() < Duration::from_secs(5));
+  }
+  assert!(closed.elapsed() < Duration::from_secs(5));
+  Ok(())
+}
+
+#[test]
 #[ignore = "requires the disposable X11 session in docker/ctream"]
 fn covered_x11_window_receives_input_without_changing_desktop_state() -> Result<(), Box<dyn Error>>
 {

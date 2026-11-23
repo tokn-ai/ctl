@@ -376,6 +376,7 @@ mod tests {
           windows: false,
           window: None,
           driver: "auto".into(),
+          video: ctream_proto::VideoOptions::default(),
         },
         hosts: vec![Host {
           id: "selected-id".into(),

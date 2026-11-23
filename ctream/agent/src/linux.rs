@@ -2,35 +2,26 @@ use ctream_agent::protocol::{Request, TargetOperation, parse};
 use ctream_agent::{
   capture as catalog,
   runtime::{
-    capture_display, capture_window, capture_with_metadata, forward_input, forward_window_input,
-    ping,
+    capture_display, capture_window, forward_input, forward_window_input, ping, video_capabilities,
   },
 };
 use ctream_driver::{CaptureDisplay, CaptureWindow, ControlSource, Driver, Result};
 use ctream_driver_capture::linux as capture;
 use ctream_driver_input::linux as input;
-use ctream_proto::Target;
+use ctream_proto::{Target, VideoRequest};
 use std::{env, io};
 
 pub(super) fn run() -> Result<()> {
   let args: Vec<_> = env::args().skip(1).collect();
   match parse(&args)? {
     Request::Ping => ping(),
+    Request::VideoCapabilities => video_capabilities(io::stdout().lock()),
     Request::CaptureCatalog { .. } => {
       serde_json::to_writer(io::stdout().lock(), &catalog::catalog())?;
       Ok(())
     }
-    Request::CaptureDrivers(Target::Windows(_) | Target::WindowsDesktop)
-    | Request::CaptureWithDriver {
-      target: Target::Windows(_) | Target::WindowsDesktop,
-      ..
-    } => Err("Windows capture drivers require a native Windows agent".into()),
-    Request::CaptureDrivers(Target::MacosDesktop)
-    | Request::CaptureWithDriver {
-      target: Target::MacosDesktop,
-      ..
-    } => Err("macOS capture drivers require a native macOS agent".into()),
     Request::CaptureDrivers(target) => {
+      check_capture_target(target)?;
       serde_json::to_writer(io::stdout().lock(), &catalog::list(target))?;
       Ok(())
     }
@@ -38,40 +29,13 @@ pub(super) fn run() -> Result<()> {
       target,
       driver,
       window,
-    } => {
-      let selected = catalog::select(target, driver, window.is_some())?;
-      match (target, selected.id, window) {
-        (Target::X11(display), "linux.x11.ffmpeg", None) => capture_with_metadata(
-          capture::x11::ffmpeg::Driver
-            .open(&display)?
-            .capture_display()?,
-          selected.id,
-          selected.format,
-        ),
-        (Target::X11(display), "linux.x11.composite", Some(id)) => capture_with_metadata(
-          capture::x11::composite::Driver
-            .open(&display)?
-            .capture_window(id)?,
-          selected.id,
-          selected.format,
-        ),
-        (Target::Wayland(display), "linux.wayland.grim", None) => capture_with_metadata(
-          capture::wayland::grim::Driver
-            .open(&display)?
-            .capture_display()?,
-          selected.id,
-          selected.format,
-        ),
-        (Target::Wayland(display), "linux.wayland.image_copy", Some(id)) => capture_with_metadata(
-          capture::wayland::image_copy::Driver
-            .open(&display)?
-            .capture_window(id)?,
-          selected.id,
-          selected.format,
-        ),
-        _ => Err("capture driver is unavailable for this target".into()),
-      }
-    }
+    } => capture_selected(target, driver, window, None),
+    Request::CaptureVideo {
+      target,
+      driver,
+      window,
+      request,
+    } => capture_selected(target, driver, window, Some(request)),
     Request::Discover { .. } => {
       serde_json::to_writer(io::stdout().lock(), &ctream_platform::discover_sessions()?)?;
       Ok(())
@@ -114,5 +78,52 @@ pub(super) fn run() -> Result<()> {
     Request::Controls(target, id, operation) => {
       ctream_platform::controls::resolve(target, id)?.run(operation)
     }
+  }
+}
+
+fn check_capture_target(target: Target) -> Result<()> {
+  match target {
+    Target::Windows(_) | Target::WindowsDesktop => {
+      Err("Windows capture drivers require a native Windows agent".into())
+    }
+    Target::MacosDesktop => Err("macOS capture drivers require a native macOS agent".into()),
+    _ => Ok(()),
+  }
+}
+
+fn capture_selected(
+  target: Target,
+  driver: &str,
+  window: Option<&str>,
+  video: Option<VideoRequest>,
+) -> Result<()> {
+  check_capture_target(target)?;
+  let selected = catalog::select(target, driver, window.is_some())?;
+  match (target, selected.id, window) {
+    (Target::X11(display), "linux.x11.ffmpeg", None) => selected.stream(
+      capture::x11::ffmpeg::Driver
+        .open(&display)?
+        .capture_display()?,
+      video,
+    ),
+    (Target::X11(display), "linux.x11.composite", Some(id)) => selected.stream(
+      capture::x11::composite::Driver
+        .open(&display)?
+        .capture_window(id)?,
+      video,
+    ),
+    (Target::Wayland(display), "linux.wayland.grim", None) => selected.stream(
+      capture::wayland::grim::Driver
+        .open(&display)?
+        .capture_display()?,
+      video,
+    ),
+    (Target::Wayland(display), "linux.wayland.image_copy", Some(id)) => selected.stream(
+      capture::wayland::image_copy::Driver
+        .open(&display)?
+        .capture_window(id)?,
+      video,
+    ),
+    _ => Err("capture driver is unavailable for this target".into()),
   }
 }

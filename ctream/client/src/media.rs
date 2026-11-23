@@ -1,5 +1,11 @@
 use crate::transport::{Cancellation, Channel};
-use ctream_proto::{CAPTURE_STARTED_LIMIT, CaptureFormat, CaptureStarted, valid_capture_driver};
+pub use ctream_driver::Frame;
+use ctream_driver_codec::{ffmpeg::Decoder, raw};
+use ctream_proto::{
+  CAPTURE_STARTED_LIMIT, CaptureFormat, CaptureStarted, VideoCodec, VideoInfo, VideoRequest,
+  VideoStarted, valid_capture_driver,
+};
+use serde::de::DeserializeOwned;
 use std::io::{self, BufRead, BufReader, Read, Write};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -8,10 +14,13 @@ pub enum FrameFormat {
   Ppm,
 }
 
-#[derive(Default)]
-pub struct Frame<B = Vec<u8>> {
-  pub size: [usize; 2],
-  pub pixels: B,
+impl FrameFormat {
+  fn raw(self) -> CaptureFormat {
+    match self {
+      Self::FixedRgb { size } => CaptureFormat::FixedRgb { size },
+      Self::Ppm => CaptureFormat::Ppm,
+    }
+  }
 }
 
 pub trait VideoSource {
@@ -27,6 +36,7 @@ pub struct Capture<R: Read, W: Write> {
   lifetime: CaptureLifetime<W>,
   frames: FrameReader<R>,
   driver: Option<String>,
+  video: Option<VideoInfo>,
 }
 
 pub struct CaptureLifetime<W: Write> {
@@ -50,6 +60,7 @@ impl<R: Read, W: Write> Capture<R, W> {
       },
       frames: FrameReader::new(channel.reader, format),
       driver: None,
+      video: None,
     }
   }
 
@@ -59,6 +70,10 @@ impl<R: Read, W: Write> Capture<R, W> {
 
   pub fn format(&self) -> FrameFormat {
     self.frames.format
+  }
+
+  pub fn video(&self) -> Option<&VideoInfo> {
+    self.video.as_ref()
   }
 
   /// Keep the handshake reader for frames: its buffer may already contain the
@@ -76,17 +91,7 @@ impl<R: Read, W: Write> Capture<R, W> {
       writer: Some(writer),
       cancellation,
     };
-    let mut header = String::new();
-    reader
-      .by_ref()
-      .take((CAPTURE_STARTED_LIMIT + 1) as u64)
-      .read_line(&mut header)?;
-    if header.len() > CAPTURE_STARTED_LIMIT || !header.ends_with('\n') {
-      return Err(io::Error::other(
-        "invalid or oversized capture startup handshake",
-      ));
-    }
-    let started: CaptureStarted = serde_json::from_str(&header).map_err(io::Error::other)?;
+    let started: CaptureStarted = read_start(&mut reader)?;
     if !valid_capture_driver(&started.driver)
       || started.driver == "auto"
       || (requested != "auto" && started.driver != requested)
@@ -98,14 +103,18 @@ impl<R: Read, W: Write> Capture<R, W> {
     let format = match started.format {
       CaptureFormat::Ppm => FrameFormat::Ppm,
       CaptureFormat::FixedRgb { size } => {
-        pixel_count(size)?;
+        raw::pixel_count(size)?;
         FrameFormat::FixedRgb { size }
       }
     };
     Ok(Self {
       lifetime,
-      frames: FrameReader { reader, format },
+      frames: FrameReader {
+        reader: Reader::Raw(raw::FrameReader::from_buffered(reader, format.raw())),
+        format,
+      },
       driver: Some(started.driver),
+      video: None,
     })
   }
 
@@ -113,6 +122,63 @@ impl<R: Read, W: Write> Capture<R, W> {
   /// and close the frame stream, allowing the reader worker to finish.
   pub fn split(self) -> (FrameReader<R>, CaptureLifetime<W>) {
     (self.frames, self.lifetime)
+  }
+}
+
+fn read_start<H: DeserializeOwned>(reader: &mut impl BufRead) -> io::Result<H> {
+  let mut header = String::new();
+  reader
+    .by_ref()
+    .take((CAPTURE_STARTED_LIMIT + 1) as u64)
+    .read_line(&mut header)?;
+  if header.len() > CAPTURE_STARTED_LIMIT || !header.ends_with('\n') {
+    return Err(io::Error::other(
+      "invalid or oversized capture startup handshake",
+    ));
+  }
+  serde_json::from_str(&header).map_err(io::Error::other)
+}
+
+impl<R: Read + Send + 'static, W: Write> Capture<R, W> {
+  pub(crate) fn started_video(
+    channel: Channel<R, W>,
+    requested: &str,
+    request: &VideoRequest,
+  ) -> io::Result<Self> {
+    let Channel {
+      reader,
+      writer,
+      cancellation,
+    } = channel;
+    let mut reader = BufReader::new(reader);
+    let lifetime = CaptureLifetime {
+      writer: Some(writer),
+      cancellation,
+    };
+    let started: VideoStarted = read_start(&mut reader)?;
+    if !valid_capture_driver(&started.driver)
+      || started.driver == "auto"
+      || (requested != "auto" && started.driver != requested)
+      || started.video.codec == VideoCodec::Auto
+      || !request.codecs.contains(&started.video.codec)
+      || !valid_capture_driver(&started.video.encoder)
+      || started.video.quality != request.options.quality
+      || started.video.max_fps == 0
+      || started.video.max_fps > request.options.max_fps
+    {
+      return Err(io::Error::other("agent reported unexpected video settings"));
+    }
+    let cancellation = lifetime.cancellation.clone();
+    let decoder = Decoder::open(reader, move || cancellation.cancel())?;
+    Ok(Self {
+      lifetime,
+      frames: FrameReader {
+        reader: Reader::Video(decoder),
+        format: FrameFormat::Ppm,
+      },
+      driver: Some(started.driver),
+      video: Some(started.video),
+    })
   }
 }
 
@@ -125,86 +191,32 @@ impl<R: Read, W: Write> VideoSource for Capture<R, W> {
 }
 
 pub struct FrameReader<R: Read> {
-  reader: BufReader<R>,
+  reader: Reader<R>,
   format: FrameFormat,
+}
+
+enum Reader<R: Read> {
+  Raw(raw::FrameReader<R>),
+  Video(Decoder),
 }
 
 impl<R: Read> FrameReader<R> {
   pub fn new(reader: R, format: FrameFormat) -> Self {
     Self {
-      reader: BufReader::new(reader),
+      reader: Reader::Raw(raw::FrameReader::new(reader, format.raw())),
       format,
     }
   }
 }
 
-fn header_line(reader: &mut impl BufRead) -> io::Result<String> {
-  let mut line = String::new();
-  reader.take(64).read_line(&mut line)?;
-  if !line.ends_with('\n') {
-    return Err(io::Error::other("missing or incomplete PPM frame header"));
-  }
-  Ok(line)
-}
-
-fn pixel_count([width, height]: [usize; 2]) -> io::Result<usize> {
-  if !(1..=16384).contains(&width)
-    || !(1..=16384).contains(&height)
-    || width * height > 32 * 1024 * 1024
-  {
-    return Err(io::Error::other("invalid frame size"));
-  }
-  Ok(width * height)
-}
-
 impl<R: Read> FrameReader<R> {
-  fn at_eof(&mut self) -> io::Result<bool> {
-    loop {
-      match self.reader.fill_buf() {
-        Ok(bytes) => return Ok(bytes.is_empty()),
-        Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-        Err(error) => return Err(error),
-      }
-    }
-  }
-
   /// Reads the next frame, returning false for clean EOF between frames.
   /// An incomplete header or pixel buffer is still an error.
   pub fn try_read_frame(&mut self, frame: &mut Frame) -> io::Result<bool> {
-    let (size, count) = match self.format {
-      FrameFormat::FixedRgb { size } => {
-        let count = pixel_count(size)?;
-        if self.at_eof()? {
-          return Ok(false);
-        }
-        (size, count)
-      }
-      FrameFormat::Ppm => {
-        if self.at_eof()? {
-          return Ok(false);
-        }
-        if header_line(&mut self.reader)?.trim_end() != "P6" {
-          return Err(io::Error::other("expected a P6 RGB frame"));
-        }
-        let dimensions = header_line(&mut self.reader)?;
-        let mut parts = dimensions.split_ascii_whitespace();
-        let mut dimension = || {
-          parts
-            .next()
-            .and_then(|value| value.parse::<usize>().ok())
-            .ok_or_else(|| io::Error::other("invalid PPM frame size"))
-        };
-        let size = [dimension()?, dimension()?];
-        if parts.next().is_some() || header_line(&mut self.reader)?.trim_end() != "255" {
-          return Err(io::Error::other("unsupported PPM frame"));
-        }
-        (size, pixel_count(size)?)
-      }
-    };
-    frame.pixels.resize(count * 3, 0);
-    self.reader.read_exact(&mut frame.pixels)?;
-    frame.size = size;
-    Ok(true)
+    match &mut self.reader {
+      Reader::Raw(reader) => reader.try_read_frame(frame),
+      Reader::Video(decoder) => decoder.try_read_frame(frame),
+    }
   }
 }
 
@@ -310,6 +322,66 @@ mod tests {
     let (mut channel, events) = recording_channel(Vec::new());
     channel.reader.fail = true;
     assert!(Capture::started(channel, "provider").is_err());
+    assert_eq!(*events.lock().unwrap(), ["writer", "cancel", "reader"]);
+  }
+
+  #[test]
+  fn invalid_video_startup_closes_writer_before_cancellation_and_reader() {
+    let request = VideoRequest {
+      options: ctream_proto::VideoOptions::default(),
+      codecs: vec![VideoCodec::Av1, VideoCodec::H264],
+    };
+    let valid = VideoStarted {
+      driver: "provider".into(),
+      video: VideoInfo {
+        codec: VideoCodec::Av1,
+        encoder: "libsvtav1".into(),
+        quality: request.options.quality,
+        max_fps: request.options.max_fps,
+      },
+    };
+    let mut invalid = Vec::new();
+    for driver in ["auto", "other", "bad driver"] {
+      invalid.push(VideoStarted {
+        driver: driver.into(),
+        ..valid.clone()
+      });
+    }
+    for video in [
+      VideoInfo {
+        codec: VideoCodec::Auto,
+        ..valid.video.clone()
+      },
+      VideoInfo {
+        encoder: "bad encoder".into(),
+        ..valid.video.clone()
+      },
+      VideoInfo {
+        quality: ctream_proto::VideoQuality::Low,
+        ..valid.video.clone()
+      },
+      VideoInfo {
+        max_fps: 0,
+        ..valid.video.clone()
+      },
+      VideoInfo {
+        max_fps: 31,
+        ..valid.video.clone()
+      },
+    ] {
+      invalid.push(VideoStarted {
+        video,
+        ..valid.clone()
+      });
+    }
+    for started in invalid {
+      let bytes = format!("{}\n", serde_json::to_string(&started).unwrap()).into_bytes();
+      let (channel, events) = recording_channel(bytes);
+      assert!(Capture::started_video(channel, "provider", &request).is_err());
+      assert_eq!(*events.lock().unwrap(), ["writer", "cancel", "reader"]);
+    }
+    let (channel, events) = recording_channel(b"{}\n".to_vec());
+    assert!(Capture::started_video(channel, "provider", &request).is_err());
     assert_eq!(*events.lock().unwrap(), ["writer", "cancel", "reader"]);
   }
 

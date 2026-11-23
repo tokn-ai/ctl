@@ -4,7 +4,7 @@ set -euo pipefail
 # The checkout is mounted read-only. Cargo artifacts stay in the build volume.
 cargo build --locked -p ctream-cli -p ctream-agent -p ctream-wayland-input --bins
 cargo test --locked -p ctream-driver -p ctream-driver-capture -p ctream-driver-input \
-  -p ctream-platform -p ctream-client -p ctream-agent
+  -p ctream-driver-codec -p ctream-platform -p ctream-client -p ctream-agent
 test_binary=$(cargo test --locked -p ctream-agent --test linux_session --no-run --message-format=json |
   python3 -c '
 import json, sys

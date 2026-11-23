@@ -11,12 +11,13 @@ use core_foundation::{
 use ctream_agent::{
   capture,
   protocol::{Request, TargetOperation, parse},
+  runtime::{capture_started, capture_video_started, video_capabilities},
 };
-use ctream_driver::Result;
+use ctream_driver::{CaptureCancellation, CaptureLifetime, CaptureSource, Frame, Result};
 use ctream_driver_capture::macos::screen_capture_kit::{self, Capture, Event};
 use ctream_driver_input::macos::{WindowIdentity, WindowInput, has_access};
 use ctream_proto::{
-  CaptureFormat, CaptureStarted, Display, PING_HELLO, PING_TOKEN, Session, Target, Window, WindowId,
+  CaptureFormat, Display, PING_HELLO, PING_TOKEN, Session, Target, VideoRequest, Window, WindowId,
 };
 use dispatch2::{DispatchQueue, MainThreadBound, run_on_main};
 use std::{
@@ -102,6 +103,7 @@ fn handle(
 ) -> Result<()> {
   match parse(arguments)? {
     Request::Ping => ping(input, output),
+    Request::VideoCapabilities => video_capabilities(output),
     Request::Discover { macos, .. } => {
       let sessions = if macos {
         vec![Session {
@@ -148,10 +150,24 @@ fn handle(
       window: Some(id),
     } => {
       let selection = capture::select(Target::MacosDesktop, driver, true)?;
-      stream_window(id, Some(selection.id), input, output)
+      stream_window(id, WindowStream::WithMetadata(selection.id), input, output)
+    }
+    Request::CaptureVideo {
+      target: Target::MacosDesktop,
+      driver,
+      window: Some(id),
+      request,
+    } => {
+      let selection = capture::select(Target::MacosDesktop, driver, true)?;
+      stream_window(
+        id,
+        WindowStream::Video(selection.id, request),
+        input,
+        output,
+      )
     }
     Request::Target(Target::MacosDesktop, TargetOperation::CaptureWindow(id)) => {
-      stream_window(id, None, input, output)
+      stream_window(id, WindowStream::Raw, input, output)
     }
     Request::Target(Target::MacosDesktop, TargetOperation::InputWindow(id)) => {
       forward_input(id, input, output)
@@ -272,11 +288,6 @@ impl Drop for InputLease {
   }
 }
 
-struct Frame {
-  size: [usize; 2],
-  pixels: Vec<u8>,
-}
-
 #[derive(Default)]
 struct CaptureEvents {
   latest: Option<Frame>,
@@ -303,23 +314,52 @@ impl Frames {
     self.ready.notify_one();
   }
 
-  fn next(&self) -> io::Result<Option<Frame>> {
+  fn next(&self, cancellation: &CaptureCancellation) -> io::Result<Option<Frame>> {
     let mut events = self.events.lock().unwrap();
     loop {
       if let Some(finished) = events.finished.take() {
         return finished.map(|()| None);
       }
+      if cancellation.is_cancelled() {
+        return Ok(None);
+      }
       if let Some(frame) = events.latest.take() {
         return Ok(Some(frame));
       }
-      events = self.ready.wait(events).unwrap();
+      // Encoder failure can cancel capture without a ScreenCaptureKit callback.
+      (events, _) = self
+        .ready
+        .wait_timeout(events, Duration::from_millis(50))
+        .unwrap();
     }
   }
 }
 
+impl CaptureSource for &Frames {
+  fn run<W: Write + Send>(self, output: &mut W, lifetime: &CaptureLifetime) -> Result<()> {
+    let cancellation = lifetime.cancellation();
+    while let Some(Frame {
+      size: [width, height],
+      pixels,
+    }) = self.next(&cancellation)?
+    {
+      write!(output, "P6\n{width} {height}\n255\n")?;
+      output.write_all(&pixels)?;
+      output.flush()?;
+    }
+    Ok(())
+  }
+}
+
+enum WindowStream<'a> {
+  Raw,
+  WithMetadata(&'a str),
+  Video(&'a str, VideoRequest),
+}
+
 fn stream_window(
   id: &str,
-  mut driver: Option<&str>,
+  stream: WindowStream<'_>,
   input: &mut BufReader<UnixStream>,
   output: &mut Response,
 ) -> Result<()> {
@@ -343,41 +383,42 @@ fn stream_window(
     .map(|capture| MainThreadBound::new(capture, main_thread))
   })?;
   let _lease = CaptureLease::start(Arc::clone(&session))?;
-  let cancellation = input.get_ref().try_clone()?;
+  let capture_input = input.get_ref().try_clone()?;
+  let (notify, closed) = mpsc::channel();
+  let lifetime = CaptureLifetime::from_receiver(closed);
   let result = thread::scope(|scope| {
     let disconnected = Arc::clone(&frames);
     let lifecycle = Arc::clone(&session);
+    let cancellation = lifetime.cancellation();
     scope.spawn(move || {
       // A capture channel carries no input. EOF closes it even if the
       // selected window is idle and ScreenCaptureKit has no frames to send.
       let _ = input.read_exact(&mut [0]);
       lifecycle.end();
+      cancellation.cancel();
       disconnected.publish(Event::Cancelled);
+      drop(notify);
     });
-    let result = (|| {
-      while let Some(Frame {
-        size: [width, height],
-        pixels,
-      }) = frames.next()?
-      {
-        if let Some(id) = driver.take() {
-          serde_json::to_writer(
-            &mut *output,
-            &CaptureStarted {
-              driver: id.into(),
-              format: CaptureFormat::Ppm,
-            },
-          )?;
-          output.write_all(b"\n")?;
-        }
-        write!(output, "P6\n{width} {height}\n255\n")?;
-        output.write_all(&pixels)?;
-        output.flush()?;
-      }
-      Ok(())
-    })();
+    let result = match stream {
+      WindowStream::Raw => frames.as_ref().run(output, &lifetime),
+      WindowStream::WithMetadata(driver) => capture_started(
+        frames.as_ref(),
+        driver,
+        CaptureFormat::Ppm,
+        output,
+        &lifetime,
+      ),
+      WindowStream::Video(driver, request) => capture_video_started(
+        frames.as_ref(),
+        driver,
+        CaptureFormat::Ppm,
+        request,
+        output,
+        &lifetime,
+      ),
+    };
     session.end();
-    let _ = cancellation.shutdown(Shutdown::Read);
+    let _ = capture_input.shutdown(Shutdown::Read);
     result
   });
   drop(capture);

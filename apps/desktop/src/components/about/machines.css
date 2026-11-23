@@ -1,0 +1,83 @@
+.machine-section-heading,
+.machine-inspector-heading,
+.machine-services-heading,
+.machine-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+}
+.machine-section-heading { margin-bottom: 12px; }
+.machine-section-heading h2, .machine-section-heading .about-refresh-row { margin: 0; }
+.machine-workbench {
+  display: grid;
+  grid-template-columns: minmax(155px, 23%) minmax(0, 1fr);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.machine-selector { list-style: none; padding: 6px; margin: 0; border-inline-end: 1px solid var(--border); background: var(--surface-0); }
+.about-page .machine-choice {
+  display: flex;
+  width: 100%;
+  gap: 9px;
+  align-items: flex-start;
+  justify-content: flex-start;
+  padding: 10px;
+  text-align: start;
+  white-space: normal;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid transparent;
+}
+.about-page .machine-choice[aria-pressed="true"] { background: var(--surface-2); color: var(--text); border-color: var(--border); }
+.machine-choice > svg { flex: none; margin-top: 2px; }
+.machine-choice-text { display: grid; gap: 3px; min-width: 0; overflow-wrap: anywhere; }
+.machine-choice-text strong { color: var(--text); font-size: 13px; font-weight: 600; }
+.machine-choice-text > span { color: var(--muted); font-size: 11px; }
+.machine-inspector, .machine-inspector-heading > div { min-width: 0; }
+.machine-local-builds { margin-top: 16px; }
+.machine-inspector { background: var(--surface-1); padding: 18px; }
+.machine-inspector-heading { align-items: flex-start; }
+.machine-inspector h3 { margin: 0 0 5px; font-size: 16px; overflow-wrap: anywhere; }
+.machine-platform { margin-inline-end: 8px; font-size: 12px; }
+.machine-triple { font-size: 11px; color: var(--muted); overflow-wrap: anywhere; }
+.machine-actions { max-width: 100%; justify-content: flex-start; gap: 5px; }
+.machine-installed { margin-top: 16px; font-size: 12px; }
+.machine-installed dl { display: flex; flex-wrap: wrap; gap: 10px 28px; margin: 0 0 5px; }
+.machine-installed dl > div { display: grid; gap: 4px; min-width: 0; }
+.machine-installed dt { color: var(--muted); }
+.machine-installed dd { margin: 0; overflow-wrap: anywhere; user-select: text; }
+.machine-services-heading { margin: 18px 0 8px; padding-top: 14px; border-top: 1px solid var(--border); }
+.machine-services-heading h4 { font-size: 13px; margin: 0; }
+.machine-inspector .about-host-summary { color: var(--muted); font-size: 11px; margin-bottom: 6px; }
+.machine-inspector .inline-feedback { margin: 8px 0; }
+.machine-services { container-type: inline-size; }
+.machine-services .about-service-status { width: 55%; }
+.machine-service-state { display: inline-flex; align-items: center; gap: 6px; font-weight: 500; }
+.machine-service-state::before { content: ""; background: var(--muted); width: 6px; height: 6px; border-radius: 50%; flex: none; }
+.machine-service-state[data-running="true"]::before { background: var(--success); }
+.machine-services .about-build-summary { margin-top: 4px; }
+@container (max-width: 540px) {
+  .machine-services .about-service-status { width: auto; }
+}
+@media (max-width: 720px) {
+  .machine-workbench { display: block; }
+  .machine-selector { display: flex; overflow-x: auto; border-inline-end: 0; border-bottom: 1px solid var(--border); }
+  .machine-selector li { min-width: min(13em, 75%); flex: none; max-width: 75%; }
+  .machine-inspector { padding: 12px; }
+}
+.machine-revision-unknown { display: block; color: var(--muted); }
+@container (max-width: 250px) {
+  .machine-services .about-service-row { grid-template-columns: minmax(0, 1fr); }
+  .machine-services .about-service-row > th { grid-area: 1 / 1; }
+  .machine-services .about-service-status { grid-area: 2 / 1; }
+  .machine-services .about-service-action { grid-area: 3 / 1; text-align: start; }
+  .machine-services .about-version-status { white-space: normal; }
+  .machine-services .about-build-details dl > div { display: block; }
+}
+
+@media (max-width: 480px) {
+  .machine-actions button { max-width: 100%; white-space: normal; }
+}

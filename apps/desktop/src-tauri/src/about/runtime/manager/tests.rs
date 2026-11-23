@@ -35,8 +35,7 @@ async fn an_incompatible_updater_never_receives_the_update_command() {
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
     let result = run_compatible_manager(
       &path,
-      "update",
-      None,
+      ManagerAction::Update(None),
       Duration::from_secs(5),
       cancelled.clone(),
     )
@@ -44,6 +43,35 @@ async fn an_incompatible_updater_never_receives_the_update_command() {
     assert_eq!(result.is_ok(), layout == MIN_TRACKED_UPDATE_LAYOUT);
     assert_eq!(marker.exists(), layout == MIN_TRACKED_UPDATE_LAYOUT);
   }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn fetch_retains_the_selected_target_and_channel_locally() {
+  use std::os::unix::fs::PermissionsExt as _;
+  let root = tempfile::tempdir().unwrap();
+  let path = root.path().join("ctlup");
+  let (_stop, cancelled) = watch::channel(false);
+  let script = format!(
+    "#!/bin/sh\ncase \"$1\" in\n--version) echo 'ctlup fixture';;\ninstallation-layout-version) echo {MIN_TRACKED_UPDATE_LAYOUT};;\n*) printf '%s\\n' \"$@\";;\nesac\n"
+  );
+  std::fs::write(&path, script).unwrap();
+  std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+  let output = run_compatible_manager(
+    &path,
+    ManagerAction::Fetch {
+      target_triple: "x86_64-pc-windows-msvc",
+      channel: BundleChannel::Nightly,
+    },
+    Duration::from_secs(5),
+    cancelled,
+  )
+  .await
+  .unwrap();
+  assert_eq!(
+    output,
+    b"bundle\nfetch\n--target\nx86_64-pc-windows-msvc\n--channel\nnightly\n--json\n"
+  );
 }
 
 #[cfg(unix)]

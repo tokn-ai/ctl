@@ -2,6 +2,7 @@
 
 use super::SavedTarget;
 use crate::error::{CommandErrorDto, CommandResult};
+use ctl_core::component_update::BundleChannel;
 use ctl_core::installations::{Installations, Lease};
 use process_wrap::tokio::{CommandWrap, KillOnDrop};
 use std::{
@@ -20,11 +21,20 @@ use tokio::{
 const MIN_TRACKED_UPDATE_LAYOUT: u16 = 7;
 const MAX_DIAGNOSTIC_BYTES: usize = 8 * 1024;
 
+#[derive(Clone, Copy)]
+pub(super) enum ManagerAction<'a> {
+  Status(&'a SavedTarget),
+  Update(Option<&'a SavedTarget>),
+  Fetch {
+    target_triple: &'a str,
+    channel: BundleChannel,
+  },
+}
+
 pub(super) async fn run_manager(
   home: &Path,
   mut cancelled: watch::Receiver<bool>,
-  action: &str,
-  target: Option<&SavedTarget>,
+  action: ManagerAction<'_>,
   deadline: Duration,
 ) -> CommandResult<Vec<u8>> {
   let root = std::env::var_os("CARGO_INSTALL_ROOT")
@@ -35,31 +45,61 @@ pub(super) async fn run_manager(
   let manager = tokio::task::spawn_blocking(move || resolve_manager(&home, explicit, &root));
   let (path, _lease) = tokio::select! {
     result = manager => result.map_err(CommandErrorDto::backend)??,
-    _ = cancelled.wait_for(|stop| *stop) => return Err(CommandErrorDto::backend("The runtime operation was cancelled.")),
+    _ = cancelled.wait_for(|stop| *stop) => return Err(CommandErrorDto::new("runtime_operation_cancelled", "The runtime operation was cancelled.")),
     () = tokio::time::sleep(deadline) => return Err(CommandErrorDto::backend("Timed out waiting for the local ctlup installation.")),
   };
-  run_compatible_manager(&path, action, target, deadline, cancelled)
+  run_compatible_manager(&path, action, deadline, cancelled)
     .await
-    .map_err(CommandErrorDto::backend)
+    .map_err(|error| {
+      if error.kind() == io::ErrorKind::Interrupted {
+        CommandErrorDto::new("runtime_operation_cancelled", error.to_string())
+      } else {
+        CommandErrorDto::backend(error)
+      }
+    })
 }
 
 async fn run_compatible_manager(
   path: &Path,
-  action: &str,
-  target: Option<&SavedTarget>,
+  action: ManagerAction<'_>,
   deadline: Duration,
   cancelled: watch::Receiver<bool>,
 ) -> io::Result<Vec<u8>> {
   inspect_manager(path, &cancelled).await?;
   let mut command = Command::new(path);
-  command.arg(action).arg("--json");
+  let target = match action {
+    ManagerAction::Status(target) => {
+      command.arg("status");
+      Some(target)
+    }
+    ManagerAction::Update(target) => {
+      command.arg("update");
+      target
+    }
+    ManagerAction::Fetch {
+      target_triple,
+      channel,
+    } => {
+      command.args([
+        "bundle",
+        "fetch",
+        "--target",
+        target_triple,
+        "--channel",
+        channel.name(),
+      ]);
+      None
+    }
+  };
+  command.arg("--json");
   if let Some(target) = target {
     command
       .arg(format!("--host={}", target.host))
       .arg(format!("--method={}", target.method))
       .env("CTL_HOSTS_PATH", target.catalog.path());
   }
-  let update_host = (action == "update").then(|| target.map_or("local", |t| t.host.as_str()));
+  let update_host =
+    matches!(action, ManagerAction::Update(_)).then(|| target.map_or("local", |t| t.host.as_str()));
   run(command, deadline, cancelled, update_host).await
 }
 
@@ -163,7 +203,10 @@ async fn run(
     ))
     .wrap(process_wrap::tokio::JobObject);
   if *cancelled.borrow() {
-    return Err(io::Error::other("The runtime operation was cancelled."));
+    return Err(io::Error::new(
+      io::ErrorKind::Interrupted,
+      "The runtime operation was cancelled.",
+    ));
   }
   let mut child = wrapped.spawn()?;
   let stdout = child.stdout().take().expect("piped stdout");
@@ -178,7 +221,7 @@ async fn run(
   let result = tokio::select! {
     result = output => result,
     () = tokio::time::sleep(deadline) => Err(io::Error::new(io::ErrorKind::TimedOut, "ctlup timed out. Refresh runtime status before retrying.")),
-    _ = cancelled.changed() => Err(io::Error::other("The runtime operation was cancelled. Refresh status before retrying.")),
+    _ = cancelled.changed() => Err(io::Error::new(io::ErrorKind::Interrupted, "The runtime operation was cancelled. Refresh status before retrying.")),
   };
   let (stdout, stderr, status) = match result {
     Ok(output) => output,

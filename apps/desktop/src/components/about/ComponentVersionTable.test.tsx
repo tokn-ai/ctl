@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
+import { getAboutRuntimeStatus } from "../../lib/tauri";
 import type { ComponentProtocolVersion, ComponentVersionInfo, ComponentVersionRow } from "../../lib/types";
 import { RuntimeMachines } from "./RuntimeMachines";
 
-vi.mock("../../lib/tauri", () => ({ getAboutRuntimeStatus: () => new Promise(() => {}) }));
+vi.mock("../../lib/tauri", () => ({ getAboutRuntimeStatus: vi.fn(() => new Promise(() => {})) }));
 
 const protocol = (name: string, version: string, supported_versions = [version]): ComponentProtocolVersion => ({ name, version, build: Number(version.split(".")[2]), supported_versions });
 const info: ComponentVersionInfo = { version: "0.1.0", source_revision: "abcdef123456", source_fingerprint: "same-build", dirty: false, protocols: [protocol("ctld", "1.0.12")] };
@@ -17,23 +18,22 @@ const row: ComponentVersionRow = {
 };
 const props = () => ({ visible: true, targets: [], refresh_revision: new Map(), on_synced: vi.fn(), on_install: vi.fn(), on_inspect: vi.fn(), busy_id: null, restarting: false, action_error: null, on_restart: vi.fn() });
 const remote = () => within(screen.getByRole("region", { name: "Development — SSH" }));
-const expand = () => fireEvent.click(screen.getByRole("button", { name: "Show components for Development — SSH" }));
+const selectRemote = () => fireEvent.click(screen.getByRole("button", { name: "Development — SSH" }));
 function showDetails(label = row.label) {
   const toggle = screen.getByRole("button", { name: `Show details for ${label}` });
   fireEvent.click(toggle);
   return within(document.getElementById(toggle.getAttribute("aria-controls")!)!);
 }
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.clearAllMocks(); });
 
-it("starts collapsed, summarizes outdated hosts, and exposes host actions once for the whole group", () => {
+it("selects this computer first and exposes management actions once for the selected host", () => {
   const manage = vi.fn();
   const install = vi.fn();
   const agent = { ...row, component_id: "agent", component: "ctl_agent" as const, label: "ctl-agent — Development", action: null };
   render(<RuntimeMachines {...props()} rows={[{ ...row, status: "outdated" }, agent]} targets={[target]} on_inspect={manage} on_install={install} />);
-  expect(screen.getByRole("button", { name: "Show components for Development — SSH" }).getAttribute("aria-expanded")).toBe("false");
+  expect(screen.getByRole("button", { name: "Development — SSH" }).getAttribute("aria-pressed")).toBe("false");
   expect(screen.queryByRole("table", { name: "Development — SSH component versions" })).toBeNull();
-  expect(remote().getByText("Outdated")).toBeTruthy();
-  expand();
+  selectRemote();
   fireEvent.click(screen.getByRole("button", { name: "Check host Development — SSH" }));
   expect(manage).toHaveBeenCalledWith(target);
   fireEvent.click(remote().getByRole("button", { name: "Install from…" }));
@@ -49,7 +49,7 @@ it("checks each protocol independently against explicit app contracts, including
   const actual = [protocol("ctld", "1.0.12"), protocol("ctld_lifecycle", "1.1.3", ["1.0.1", "1.1.3"]), protocol("ctld_helper", "1.1.2")];
   const required = [protocol("ctld", "1.0.12"), protocol("ctld_lifecycle", "1.0.1"), protocol("ctld_helper", "1.0.1"), protocol("task", "1.0.1")];
   render(<RuntimeMachines {...props()} rows={[{ ...row, running: { ...info, protocols: actual }, installed: { ...info, protocols: actual }, required_protocols: required }]} />);
-  expand();
+  selectRemote();
   const protocols = within(showDetails().getByRole("list", { name: "Running + on disk protocols" }));
   expect(protocols.getAllByRole("listitem")).toHaveLength(4);
   expect(protocols.getByLabelText("ctld IPC 1.0.12: Current").className).toContain("about-protocol-current");
@@ -63,9 +63,9 @@ it("shows both disk and running when fingerprints differ even with the same vers
   const running = { ...info, source_fingerprint: "abcdef12345611111111" };
   const installed = { ...info, source_fingerprint: "abcdef12345622222222" };
   render(<RuntimeMachines {...props()} rows={[{ ...row, restart_required: true, running, installed }]} />);
-  expand();
+  selectRemote();
   const table = within(screen.getByRole("table", { name: "Development — SSH component versions" }));
-  expect(table.getByText("Running")).toBeTruthy();
+  expect(table.getAllByText("Running").length).toBeGreaterThan(0);
   expect(table.getByText("On disk")).toBeTruthy();
   expect(table.getAllByRole("row")).toHaveLength(2);
   expect(table.getByText("Restart required").classList.contains("about-status-outdated")).toBe(true);
@@ -80,7 +80,7 @@ it("shows both disk and running when fingerprints differ even with the same vers
 it("collapses matching verified builds regardless of protocol ordering", () => {
   const protocols = [protocol("ctld", "1.1.13", ["1.0.12", "1.1.13"]), protocol("ctld_lifecycle", "1.0.1")];
   render(<RuntimeMachines {...props()} rows={[{ ...row, running: { ...info, protocols }, installed: { ...info, protocols: [...protocols].reverse().map((entry) => ({ ...entry, supported_versions: [...entry.supported_versions].reverse() })) } }]} />);
-  expand();
+  selectRemote();
   const table = within(screen.getByRole("table", { name: "Development — SSH component versions" }));
   expect(table.getByText("Running + on disk")).toBeTruthy();
   expect(table.getAllByRole("row")).toHaveLength(2);
@@ -91,10 +91,7 @@ it("shows a reconnect warning on the agent while its protocol and action remain 
   const agent = { ...row, component: "ctl_agent" as const, label: "ctl-agent — Development", action: "reconnect" as const,
     restart_required: true, observation: "last_observed" as const, installed: { ...info, version: "0.1.1" } };
   render(<RuntimeMachines {...options} rows={[agent]} />);
-  const summary = within(remote().getByRole("group", { name: "Status" }));
-  expect(summary.getByText("Reconnect to apply")).toBeTruthy();
-  expect(summary.queryByText("Restart required")).toBeNull();
-  expand();
+  selectRemote();
   const table = within(remote().getByRole("table"));
   expect(table.getByText("Reconnect to apply").classList.contains("about-status-outdated")).toBe(true);
   fireEvent.click(table.getByRole("button", { name: `Reconnect ${agent.label}` }));
@@ -105,32 +102,29 @@ it("shows a reconnect warning on the agent while its protocol and action remain 
 it("does not use a remote app reference as an installation, and shows identical reported builds once", () => {
   const unknown = { ...info, source_revision: null, source_fingerprint: null };
   const view = render(<RuntimeMachines {...props()} rows={[{ ...row, status: "unknown", running: unknown, installed: undefined }]} />);
-  expand();
-  expect(within(screen.getByRole("table", { name: "Development — SSH component versions" })).getByText("Unknown")).toBeTruthy();
+  selectRemote();
+  expect(within(screen.getByRole("table", { name: "Development — SSH component versions" })).queryByText("On disk")).toBeNull();
   expect(showDetails().queryByText(info.source_fingerprint!)).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: `Hide details for ${row.label}` }));
-  expect(within(remote().getByRole("group", { name: "Status" })).getByText("Unverified")).toBeTruthy();
   view.rerender(<RuntimeMachines {...props()} rows={[{ ...row, status: "unknown", running: unknown, installed: unknown }]} />);
   expect(within(screen.getByRole("table", { name: "Development — SSH component versions" })).getByText("Running + on disk")).toBeTruthy();
   expect(within(screen.getByRole("table", { name: "Development — SSH component versions" })).getAllByText("0.1.0")).toHaveLength(1);
-  const summary = within(remote().getByRole("group", { name: "Status" }));
-  expect(summary.getByText("Unverified")).toBeTruthy();
-  expect(summary.queryByText("Running differs")).toBeNull();
+  expect(remote().queryByText("Differs from installed bundle")).toBeNull();
 });
 
 it("retains expansion on refresh and keeps identically named unsaved accounts separate", () => {
   const view = render(<RuntimeMachines {...props()} rows={[row]} />);
-  expand();
+  selectRemote();
   view.rerender(<RuntimeMachines {...props()} rows={[{ ...row, status: "outdated" }]} />);
-  expect(screen.getByRole("button", { name: "Hide components for Development — SSH" }).getAttribute("aria-expanded")).toBe("true");
+  expect(screen.getByRole("button", { name: "Development — SSH" }).getAttribute("aria-pressed")).toBe("true");
   view.rerender(<RuntimeMachines {...props()} rows={[{ ...row, host_id: null, host_key: "account:first" }, { ...row, component_id: "second", host_id: null, host_key: "account:second" }]} />);
-  expect(screen.getAllByRole("button", { name: "Show components for Development — SSH" })).toHaveLength(2);
+  expect(screen.getAllByRole("button", { name: "Development — SSH" })).toHaveLength(2);
   expect(screen.queryByRole("table", { name: "Development — SSH component versions" })).toBeNull();
 });
 
 it("keeps a legacy owner's numeric protocol separate from the installed contract and build", () => {
   render(<RuntimeMachines {...props()} rows={[{ ...row, running: null, observation: "legacy", status: "incompatible", legacy_protocols: [{ name: "ctld", version: 12 }], restart_required: true }]} />);
-  expand();
+  selectRemote();
   const table = within(remote().getByRole("table"));
   expect(table.getByText("Protocol mismatch").classList.contains("about-status-incompatible")).toBe(true);
   expect(table.getByText("Restart required").classList.contains("about-status-outdated")).toBe(true);
@@ -149,7 +143,7 @@ it("keeps owner-specific restart actions and disables management during an actio
   const manage = vi.fn();
   const install = vi.fn();
   const view = render(<RuntimeMachines {...options} rows={[row]} targets={[target]} on_inspect={manage} on_install={install} />);
-  expand();
+  selectRemote();
   fireEvent.click(screen.getByRole("button", { name: "Restart ctld — Development — SSH" }));
   expect(options.on_restart).toHaveBeenCalledWith(row.component_id);
   view.rerender(<RuntimeMachines {...options} busy_id={row.component_id} restarting rows={[row]} targets={[target]} on_inspect={manage} on_install={install} />);
@@ -158,20 +152,17 @@ it("keeps owner-specific restart actions and disables management during an actio
   expect(screen.getByText("Restarting…")).toBeTruthy();
 });
 
-it("lets each machine expand its own component diagnostics", () => {
+it("shows only the selected machine’s services and switches back to this computer", () => {
   const local = { ...row, component_id: "local", location: "local" as const, host_id: null, host_key: null, host_name: null, label: "ctld (SSH)" };
   const second = { ...row, component_id: "second", host_id: "second", host_key: "saved:second", host_name: "Second host" };
   render(<RuntimeMachines {...props()} rows={[local, row, second]} />);
-  expect(screen.queryByRole("table", { name: "This computer component versions" })).toBeNull();
-  fireEvent.click(screen.getByRole("button", { name: "Show components for This computer" }));
-  expand();
-  expect(screen.getByRole("table", { name: "Development — SSH component versions" })).toBeTruthy();
-  fireEvent.click(screen.getByRole("button", { name: "Show components for Second host" }));
-  expect(screen.getByRole("table", { name: "Development — SSH component versions" })).toBeTruthy();
-  expect(screen.getByRole("table", { name: "Second host component versions" })).toBeTruthy();
   expect(screen.getByRole("table", { name: "This computer component versions" })).toBeTruthy();
-  fireEvent.click(screen.getByRole("button", { name: "Hide components for Second host" }));
-  expect(screen.queryByRole("table", { name: "Second host component versions" })).toBeNull();
+  selectRemote();
+  expect(screen.getByRole("table", { name: "Development — SSH component versions" })).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "Second host" }));
+  expect(screen.queryByRole("table", { name: "Development — SSH component versions" })).toBeNull();
+  expect(screen.getByRole("table", { name: "Second host component versions" })).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "This computer" }));
   expect(screen.getByRole("table", { name: "This computer component versions" })).toBeTruthy();
 });
 
@@ -179,10 +170,10 @@ it("shows shared SSH failures once per host with a short message and retained di
   const error = "Could not inspect companions or running owners. Check the connection and component inspection support before updating. unexpected end of file";
   const rows = ["ctl_agent", "ctmuxd", "ctl-taskd"].map((component) => ({ ...row, component_id: component, component: component as ComponentVersionRow["component"], observation: "not_checked" as const, status: "unavailable" as const, running: null, installed: null, action: null, error }));
   render(<RuntimeMachines {...props()} rows={rows} targets={[target]} />);
+  selectRemote();
   expect(screen.getAllByRole("alert")).toHaveLength(1);
   expect(screen.getByRole("alert").textContent).toBe("Could not check components. Try Check host.");
   expect(screen.getByRole("alert").closest("[title]")?.getAttribute("title")).toBe(error);
-  expand();
   expect(screen.getAllByRole("alert")).toHaveLength(1);
   expect(screen.getAllByTitle(error)).toHaveLength(1);
   expect(screen.queryByText(error)).toBeNull();
@@ -196,13 +187,13 @@ it("keeps Windows maintenance limitations informational at the host", () => {
     running: null, installed: null, action: null, error_code: "remote_windows_maintenance_unsupported", error,
   }));
   render(<RuntimeMachines {...props()} rows={rows} targets={[{ ...target, remote_platform: "windows" }]} />);
+  selectRemote();
   expect(screen.getByRole("status").textContent).toBe(error);
   expect(screen.getByRole("status").className).toContain("inline-feedback-info");
   expect(screen.getByRole("status").closest("[title]")?.getAttribute("title")).toBe(error);
   expect(screen.queryByRole("alert")).toBeNull();
   expect(screen.queryByRole("button", { name: "Check host Development — SSH" })).toBeNull();
   expect(remote().getByRole("button", { name: "Install from…" })).toBeTruthy();
-  expand();
   expect(screen.getAllByRole("status")).toHaveLength(1);
   expect(screen.queryByRole("alert")).toBeNull();
 });
@@ -210,12 +201,12 @@ it("keeps Windows maintenance limitations informational at the host", () => {
 it("keeps active connections visible when a separate inspection fails", () => {
   const unchecked = { ...row, component_id: "saved", running: null, installed: null, observation: "not_checked" as const, status: "unavailable" as const, error: "unexpected end of file", action: null };
   render(<RuntimeMachines {...props()} rows={[unchecked, { ...row, component_id: "active", observation: "last_observed" }]} />);
+  selectRemote();
   const summary = remote();
   expect(summary.getByText("Connected")).toBeTruthy();
-  expect(summary.getByText("Inspection failed")).toBeTruthy();
+  expect(summary.getByRole("table").textContent).toContain("Not checked");
   expect(summary.queryByText("Unavailable")).toBeNull();
   expect(summary.getByRole("alert").textContent).not.toContain("Reconnect");
-  expand();
   expect(screen.getByText("Active connection")).toBeTruthy();
   expect(screen.getByText("Last observed + on disk")).toBeTruthy();
 });
@@ -224,11 +215,10 @@ it("distinguishes an old agent from failed SSH and retains its checked installat
   const agent = { ...row, component_id: "agent", component: "ctl_agent" as const, label: "ctl-agent — Development", observation: "installed" as const, running: null, action: null, connected: true };
   const unchecked = { ...row, running: null, installed: null, observation: "not_checked" as const, status: "unavailable" as const, action: null, connected: true, error_code: "remote_component_inspection_unsupported", error: "Maintenance 1.1.3 is required." };
   render(<RuntimeMachines {...props()} rows={[agent, unchecked]} />);
+  selectRemote();
   expect(screen.getByText("Connected")).toBeTruthy();
-  expect(screen.getByText("Update agent")).toBeTruthy();
   expect(screen.queryByText("Unavailable")).toBeNull();
   expect(screen.getByRole("alert").textContent).toBe("Update the agent to check components.");
-  expand();
   const table = within(screen.getByRole("table", { name: "Development — SSH component versions" }));
   expect(table.getByText("On disk · on demand")).toBeTruthy();
   expect(showDetails(agent.label).getByText(info.source_fingerprint!)).toBeTruthy();
@@ -240,6 +230,7 @@ it.each([
   ["remote_identity_unverified", true, "Connected", "Check host to verify its account."],
 ] as const)("reports %s without blaming a working transport", (error_code, connected, label, message) => {
   render(<RuntimeMachines {...props()} rows={[{ ...row, running: null, installed: null, observation: "not_checked", status: "unavailable", action: null, error: "Inspection prerequisite missing", error_code, connected }]} />);
+  selectRemote();
   expect(screen.getByText(label)).toBeTruthy();
   expect(screen.getByRole("alert").textContent).toBe(message);
   expect(screen.queryByText("Unavailable")).toBeNull();
@@ -252,10 +243,68 @@ it.each([
   ["stopped", info, "not_running"],
 ] as const)("hides the %s running entry and keeps the on-disk build", (_label, running, status) => {
   render(<RuntimeMachines {...props()} rows={[{ ...row, running, status }]} />);
-  expand();
+  selectRemote();
   const table = within(screen.getByRole("table", { name: "Development — SSH component versions" }));
-  expect(table.queryByText(/^Running/)).toBeNull();
+  expect(table.queryByText("Running + on disk")).toBeNull();
+  if (status === "not_running") expect(table.getByText("Not running")).toBeTruthy();
+  else {
+    expect(table.getByText("Running")).toBeTruthy();
+    expect(table.getByText("Build not reported")).toBeTruthy();
+  }
   expect(table.getByText("On disk")).toBeTruthy();
   expect(table.getAllByRole("row")).toHaveLength(2);
   expect(showDetails().getByText(info.source_fingerprint!)).toBeTruthy();
+});
+
+it("shows one bundle for the machine and reports build differences only on the affected services", async () => {
+  const active = { version: "0.1.5", source_revision: "a".repeat(40), source_fingerprint: "b".repeat(64), dirty: false };
+  const previous = { ...active, version: "0.1.4", source_revision: "c".repeat(40) };
+  const matched = { ...info, ...active };
+  const local = { ...row, component_id: "local-ctld", location: "local" as const, host_id: null, host_key: null, host_name: null, label: "ctld", running: matched, installed: matched };
+  const old = { ...local, component: "ctmuxd" as const, component_id: "local-terminal", label: "ctmuxd", running: { ...matched, ...previous }, restart_required: true };
+  vi.mocked(getAboutRuntimeStatus).mockResolvedValueOnce({
+    active: "selected", build_label: null, origin: { channel: "nightly" }, missing: false,
+    active_build: active, target_triple: "aarch64-apple-darwin",
+    build_channels: [{ build: previous, channels: ["local"] }, { build: active, channels: ["nightly"] }],
+  });
+  render(<RuntimeMachines {...props()} rows={[local, old]} />);
+  const machine = within(screen.getByRole("region", { name: "This computer" }));
+  expect(await machine.findByText("0.1.5 · aaaaaaaa")).toBeTruthy();
+  expect(machine.getByText("aarch64-apple-darwin")).toBeTruthy();
+  const services = within(machine.getByRole("table"));
+  expect(services.queryByText("0.1.5")).toBeNull();
+  expect(services.getByText("0.1.4", { exact: false })).toBeTruthy();
+  expect(services.getByText("cccccccc")).toBeTruthy();
+  expect(services.getByText("Restart required")).toBeTruthy();
+  expect(services.getAllByText("Running", { selector: ".machine-service-state" })).toHaveLength(2);
+  const details = showDetails("ctld");
+  expect(details.getByText(active.version)).toBeTruthy();
+  expect(details.getByText(active.source_revision)).toBeTruthy();
+});
+
+it("distinguishes a saved target from a checked runtime without contacting a host on select", async () => {
+  const recorded = { app_version: "0.1.4", bundle_id: "older", git_revision: "a".repeat(40), target_triple: "x86_64-unknown-linux-musl" };
+  const ssh = { ...target, remote_info: { remote_id: "verified-account", agent_version: "0.1.4", bundle: recorded } };
+  vi.mocked(getAboutRuntimeStatus).mockResolvedValueOnce({ active: null, build_label: null, origin: null, missing: false })
+    .mockResolvedValueOnce({ active: "current", build_label: "0.1.5", origin: { channel: "stable" }, missing: false, target_triple: recorded.target_triple });
+  render(<RuntimeMachines {...props()} targets={[ssh]} rows={[row]} />);
+  selectRemote();
+  expect(remote().getByText("Last seen · Linux · x86_64 · musl")).toBeTruthy();
+  expect(remote().getByText("Not checked")).toBeTruthy();
+  expect(getAboutRuntimeStatus).toHaveBeenCalledTimes(1);
+  fireEvent.click(remote().getByRole("button", { name: "Check installation" }));
+  await waitFor(() => expect(remote().getByText("0.1.5")).toBeTruthy());
+  expect(remote().getByText("Linux · x86_64 · musl")).toBeTruthy();
+  expect(remote().queryByText(/Last seen/)).toBeNull();
+  expect(getAboutRuntimeStatus).toHaveBeenLastCalledWith(ssh);
+});
+
+it("reports a target observed on an unsaved transport and leaves conflicting observations unresolved", () => {
+  const attached = { ...row, component: "ctl_agent" as const, observation: "last_observed" as const, host_id: null, host_key: "account:observed", observed_agent_target: "x86_64-unknown-linux-musl" };
+  const view = render(<RuntimeMachines {...props()} rows={[attached]} />);
+  selectRemote();
+  expect(remote().getByText("Last seen · Linux · x86_64 · musl")).toBeTruthy();
+  view.rerender(<RuntimeMachines {...props()} rows={[attached, { ...attached, component_id: "other", observed_agent_target: "x86_64-unknown-linux-gnu" }]} />);
+  expect(remote().getByText("Target unknown")).toBeTruthy();
+  expect(remote().queryByText(/Last seen/)).toBeNull();
 });

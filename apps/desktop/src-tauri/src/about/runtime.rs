@@ -1,10 +1,11 @@
 //! Inspect the selected runtime and let the managed ctlup follow its tracked source.
 
-use self::manager::run_manager;
+use self::manager::{ManagerAction, run_manager};
 use crate::error::{CommandErrorDto, CommandResult};
 use ctl_client::hosts::HostCatalogSnapshot;
 use ctl_client::installation::InstallationShow;
 use ctl_core::component::ComponentBuildInfo;
+use ctl_core::component_update::{BundleChannel, Package, UpdateResult};
 use ctl_core::installations::CatalogOrigin;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -23,37 +24,68 @@ pub(crate) struct AboutRuntimeStatus {
   origin: Option<CatalogOrigin>,
   missing: bool,
   build_channels: Vec<BuildChannels>,
+  target_triple: Option<String>,
+  active_build: Option<ComponentBuildInfo>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  installed_targets: Option<Vec<InstalledTarget>>,
+}
+
+#[derive(Serialize)]
+struct InstalledTarget {
+  target_triple: String,
+  builds: Vec<BuildChannels>,
+  current_publications: BTreeMap<String, String>,
 }
 
 #[derive(Serialize)]
 struct BuildChannels {
   build: ComponentBuildInfo,
   channels: BTreeSet<String>,
+  current: bool,
 }
 
 impl AboutRuntimeStatus {
   fn from_inventory(inventory: InstallationShow, native_target: Option<&str>) -> io::Result<Self> {
     inventory.validate()?;
     let active = inventory.active.as_ref();
-    let build_label = inventory
+    let active_build = inventory
       .builds
       .iter()
-      .find(|build| Some(&build.bundle_id) == active)
-      .map(|build| {
-        ctl_core::installed_build_name::label(
-          &build.build,
-          inventory.active_origin.as_ref(),
-          &build.bundle_id,
-        )
-      });
-    let targets = native_target.map_or_else(|| selected_targets(&inventory), |target| vec![target]);
+      .find(|build| Some(&build.bundle_id) == active);
+    let build_label = active_build.map(|build| {
+      ctl_core::installed_build_name::label(
+        &build.build,
+        inventory.active_origin.as_ref(),
+        &build.bundle_id,
+      )
+    });
+    let active_build = active_build.map(|build| build.build.clone());
+    let target_triple = active
+      .and_then(|id| selected_target(&inventory, id))
+      .or(native_target)
+      .map(str::to_owned);
+    let targets = native_target.map_or_else(
+      || {
+        inventory
+          .active
+          .iter()
+          .chain(&inventory.previous)
+          .filter_map(|id| selected_target(&inventory, id))
+          .collect()
+      },
+      |target| vec![target],
+    );
     let build_channels = channels_for_targets(&inventory, &targets);
+    let installed_targets = native_target.map(|_| installed_targets(&inventory));
     Ok(Self {
       missing: active.is_some_and(|id| inventory.missing_builds.contains(id)),
       active: inventory.active,
       build_label,
       origin: inventory.active_origin,
       build_channels,
+      target_triple,
+      active_build,
+      installed_targets,
     })
   }
 }
@@ -61,39 +93,64 @@ impl AboutRuntimeStatus {
 // A remote catalog can contain builds for many targets. Only its active or
 // previous local selections establish which bundle targets run on that host.
 // A missing selection can still have a target recorded in its catalog entry.
-fn selected_targets(inventory: &InstallationShow) -> Vec<&str> {
+fn selected_target<'a>(inventory: &'a InstallationShow, id: &str) -> Option<&'a str> {
   inventory
-    .active
+    .builds
     .iter()
-    .chain(&inventory.previous)
-    .filter_map(|id| {
+    .find(|build| build.bundle_id == id)
+    .map(|build| build.target_triple.as_str())
+    .or_else(|| {
       inventory
-        .builds
+        .installations
         .iter()
-        .find(|build| build.bundle_id == *id)
-        .map(|build| build.target_triple.as_str())
-        .or_else(|| {
-          inventory
-            .installations
-            .iter()
-            .find(|entry| entry.bundle_id == *id)
-            .map(|entry| entry.target_triple.as_str())
+        .find(|entry| entry.bundle_id == id)
+        .map(|entry| entry.target_triple.as_str())
+    })
+}
+
+fn channels_for_targets(inventory: &InstallationShow, targets: &[&str]) -> Vec<BuildChannels> {
+  build_channels(inventory, |triple| {
+    targets
+      .iter()
+      .any(|target| ctl_core::bundles::runnable_on(triple, target))
+  })
+}
+
+fn installed_targets(inventory: &InstallationShow) -> Vec<InstalledTarget> {
+  let present: BTreeSet<_> = inventory
+    .builds
+    .iter()
+    .map(|build| &build.bundle_id)
+    .collect();
+  let targets = inventory
+    .builds
+    .iter()
+    .map(|build| &build.target_triple)
+    .collect::<BTreeSet<_>>();
+  targets
+    .into_iter()
+    .map(|target| InstalledTarget {
+      target_triple: target.clone(),
+      builds: build_channels(inventory, |triple| triple == target),
+      current_publications: inventory
+        .installations
+        .iter()
+        .filter(|entry| {
+          entry.current && &entry.target_triple == target && present.contains(&entry.bundle_id)
         })
+        .filter_map(|entry| {
+          let origin = entry.origin.as_ref()?;
+          Some((origin.channel.clone(), origin.publication_id.clone()?))
+        })
+        .collect(),
     })
     .collect()
 }
 
-fn channels_for_targets(inventory: &InstallationShow, targets: &[&str]) -> Vec<BuildChannels> {
-  let builds: BTreeMap<_, _> = inventory
-    .builds
-    .iter()
-    .filter(|build| {
-      targets
-        .iter()
-        .any(|target| ctl_core::bundles::runnable_on(&build.target_triple, target))
-    })
-    .map(|build| (&build.bundle_id, &build.build))
-    .collect();
+fn build_channels(
+  inventory: &InstallationShow,
+  include_target: impl Fn(&str) -> bool,
+) -> Vec<BuildChannels> {
   let memberships = inventory
     .installations
     .iter()
@@ -102,11 +159,27 @@ fn channels_for_targets(inventory: &InstallationShow, targets: &[&str]) -> Vec<B
     .active
     .as_ref()
     .zip(inventory.active_origin.as_ref());
-  let mut grouped = BTreeMap::new();
+  let mut channels_by_id = BTreeMap::<_, BTreeSet<_>>::new();
   for (id, origin) in memberships.chain(active) {
-    let Some(&build) = builds.get(id) else {
-      continue;
-    };
+    channels_by_id
+      .entry(id)
+      .or_default()
+      .insert(&origin.channel);
+  }
+  let mut grouped = BTreeMap::new();
+  let current: BTreeSet<_> = inventory
+    .installations
+    .iter()
+    .filter(|entry| entry.current)
+    .map(|entry| &entry.bundle_id)
+    .chain(inventory.active.as_ref())
+    .collect();
+  for installed in inventory
+    .builds
+    .iter()
+    .filter(|build| include_target(&build.target_triple))
+  {
+    let build = &installed.build;
     // Complete bundle manifests enforce one version, revision, fingerprint,
     // and dirty flag across their components. Distinct bundles can share all four.
     let key = (
@@ -118,8 +191,12 @@ fn channels_for_targets(inventory: &InstallationShow, targets: &[&str]) -> Vec<B
     let record = grouped.entry(key).or_insert_with(|| BuildChannels {
       build: build.clone(),
       channels: BTreeSet::new(),
+      current: false,
     });
-    record.channels.insert(origin.channel.clone());
+    record.current |= current.contains(&installed.bundle_id);
+    if let Some(channels) = channels_by_id.get(&installed.bundle_id) {
+      record.channels.extend(channels.iter().copied().cloned());
+    }
   }
   grouped.into_values().collect()
 }
@@ -137,7 +214,7 @@ struct Checked {
 #[derive(Deserialize)]
 struct HostResult {
   host: String,
-  result: Option<ctl_core::component_update::UpdateResult>,
+  result: Option<UpdateResult>,
   check: Option<Checked>,
   error: Option<String>,
 }
@@ -278,12 +355,11 @@ pub(crate) async fn about_runtime_status(
   let home = home()?;
   let (_guard, mut cancelled) = start_operation(window.label(), attempt_id)?;
   let target = saved_target(app, host_id, method_id, &mut cancelled).await?;
-  let inventory = if target.is_some() {
+  let inventory = if let Some(target) = target.as_ref() {
     let output = run_manager(
       &home,
       cancelled,
-      "status",
-      target.as_ref(),
+      ManagerAction::Status(target),
       Duration::from_secs(30),
     )
     .await?;
@@ -312,8 +388,7 @@ pub(crate) async fn sync_about_runtime(
   let output = run_manager(
     &home()?,
     cancelled,
-    "update",
-    target.as_ref(),
+    ManagerAction::Update(target.as_ref()),
     Duration::from_mins(15),
   )
   .await?;
@@ -322,6 +397,60 @@ pub(crate) async fn sync_about_runtime(
     target.as_ref().map_or("local", |t| t.host.as_str()),
   )
   .map_err(CommandErrorDto::backend)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub(crate) async fn fetch_about_runtime_target(
+  window: tauri::WebviewWindow,
+  attempt_id: String,
+  target_triple: String,
+  channel: String,
+) -> CommandResult<()> {
+  ctl_core::bundles::validate_target(&target_triple).map_err(CommandErrorDto::backend)?;
+  let channel = match channel.as_str() {
+    "stable" => BundleChannel::Stable,
+    "nightly" => BundleChannel::Nightly,
+    _ => {
+      return Err(CommandErrorDto::backend(
+        "Choose a stable or nightly publication.",
+      ));
+    }
+  };
+  let (_guard, cancelled) = start_operation(window.label(), Some(attempt_id))?;
+  let receipt = run_manager(
+    &home()?,
+    cancelled,
+    ManagerAction::Fetch {
+      target_triple: &target_triple,
+      channel,
+    },
+    Duration::from_mins(15),
+  )
+  .await?;
+  verify_fetch(&receipt, &target_triple).map_err(CommandErrorDto::backend)
+}
+
+// A fetch can also advance sibling targets in the same publication cohort.
+fn verify_fetch(output: &[u8], requested_target: &str) -> io::Result<()> {
+  let rows: Vec<UpdateResult> = serde_json::from_slice(output)?;
+  let mut targets = BTreeSet::new();
+  for row in rows {
+    if row.package != Package::FullBundle
+      || !row.services_preserved
+      || row.bundle_id.len() != 64
+      || !row.bundle_id.bytes().all(|byte| byte.is_ascii_hexdigit())
+      || !targets.insert(row.target_triple.clone())
+    {
+      return Err(io::Error::other("Invalid ctlup bundle fetch result."));
+    }
+    ctl_core::bundles::validate_target(&row.target_triple)?;
+  }
+  if !targets.contains(requested_target) {
+    return Err(io::Error::other(
+      "ctlup did not report storing the requested runtime target.",
+    ));
+  }
+  Ok(())
 }
 
 #[cfg(test)]

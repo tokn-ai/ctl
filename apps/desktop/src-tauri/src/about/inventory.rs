@@ -241,6 +241,7 @@ fn apply_agent(
         .supported_versions
         .contains(&ctl_proto::maintenance::CONTRACT_V1_1_3)
   });
+  row.observed_agent_target = identity.bundle.map(|bundle| bundle.target_triple);
   row.installed = Some(ComponentVersionInfo::observed(
     identity.agent_version,
     identity.build,

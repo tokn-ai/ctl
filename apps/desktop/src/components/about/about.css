@@ -5,6 +5,10 @@
 .about-page h1:focus { outline: none; }
 .about-page p { margin: 0; line-height: 1.5; }
 .about-muted { color: var(--muted); }
+.about-desktop-build { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 9px; color: var(--muted); font-size: 12px; }
+.about-desktop-build strong { color: var(--text); font-size: 14px; font-weight: 600; }
+.about-desktop-channel { border: 1px solid var(--border); border-radius: 4px; padding: 1px 6px; }
+.about-desktop-build code { font-size: 11px; }
 .about-page button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; padding: 6px 10px; border: 1px solid #454545; border-radius: 4px; background: var(--surface-2); cursor: pointer; white-space: nowrap; }
 .about-page button:hover:not(:disabled) { background: var(--surface-3); border-color: #666; }
 .about-page button:disabled { opacity: .5; cursor: default; }
@@ -13,6 +17,7 @@
 .about-section { margin-top: 28px; }
 .about-section h2 { margin: 0 0 6px; color: #e5e5e5; font-size: 15px; font-weight: 600; }
 .about-section > p { margin-bottom: 14px; }
+.about-content > .runtime-targets { margin-top: 0; margin-bottom: 25px; }
 .about-stored-builds { border-top: 1px solid var(--border); }
 .about-stored-builds > summary { padding: 14px 0; font-size: 13px; font-weight: 600; cursor: pointer; }
 .about-stored-builds .about-section { margin-top: 0; }
@@ -85,35 +90,7 @@
 
 .runtime-machines { margin-top: 0; }
 .runtime-machines .runtime-no-hosts { margin: 10px 0 0; font-size: 12px; }
-.runtime-machine-list { margin-top: 12px; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
-.runtime-machine { min-width: 0; padding: 16px 18px 10px; background: var(--surface-1); }
-.runtime-machine + .runtime-machine { border-top: 1px solid var(--border); }
-.runtime-machine-main { display: grid; grid-template-columns: minmax(130px, 1fr) minmax(160px, 1.6fr) auto; gap: 16px; align-items: center; padding-bottom: 9px; }
-.runtime-machine-identity { display: flex; align-items: center; gap: 10px; min-width: 0; }
-.runtime-machine-identity svg { flex: none; color: var(--muted); }
-.runtime-machine-identity h3 { margin: 0; font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
-.runtime-machine-installation { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; font-size: 12px; }
-.runtime-machine-installation dl { margin: 0; }
-.runtime-machine-installation dl > div { display: flex; align-items: baseline; gap: 7px; line-height: 1.55; }
-.runtime-machine-installation dt { color: var(--muted); flex: none; }
-.runtime-machine-installation dd { margin: 0; overflow-wrap: anywhere; }
-.runtime-machine-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
 .about-page .runtime-sync { border-color: var(--accent-strong); }
-.runtime-machine-diagnostics { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; }
-.about-page .runtime-details-toggle { border: 0; padding: 4px 0; background: transparent; color: var(--muted); }
-.runtime-machine-diagnostics .about-host-summary { gap: 5px; font-size: 11px; }
-.runtime-machine-diagnostics .about-row-feedback { margin: 0; }
-.runtime-machine-details { width: 100%; min-width: 0; padding: 8px 0; container-type: inline-size; }
-.runtime-check-host { margin-bottom: 8px; }
-@media (max-width: 920px) {
-  .runtime-machine-main { grid-template-columns: minmax(110px, 1fr) minmax(150px, 2fr); gap: 10px; }
-  .runtime-machine-actions { grid-column: 1 / -1; }
-}
-@media (max-width: 580px) {
-  .runtime-machine { padding: 12px; }
-  .runtime-machine-main { grid-template-columns: minmax(0, 1fr); }
-  .runtime-machine-identity h3 { font-size: 13px; }
-}
 
 @container (max-width: 540px) {
   .about-version-table { display: block; }
@@ -123,6 +100,5 @@
   .about-version-table .about-service-row > * { padding: 0; }
   .about-service-row > th { grid-area: 1 / 1; }
   .about-service-action { grid-area: 1 / 2; }
-  .about-service-build { grid-area: 2 / 1 / 3 / -1; }
-  .about-service-status { grid-area: 3 / 1 / 4 / -1; }
+  .about-service-status { grid-area: 2 / 1 / 3 / -1; }
 }

@@ -1,6 +1,6 @@
-import { translate, type Locale } from "../features/i18n/messages";
+import { translate, type DisplayText, type Locale } from "../features/i18n/messages";
 import { useLocale } from "../features/i18n/LocaleContext";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { ComponentBundlePanel } from "../components/about/ComponentBundlePanel";
 import { versionLabel } from "../components/about/ComponentVersionTable";
@@ -9,10 +9,12 @@ import { Icon } from "../components/ui/Icon";
 import { InlineFeedback } from "../components/feedback/InlineFeedback";
 import { UpdateComponentsDialog } from "../components/components/UpdateComponentsDialog";
 import { RuntimeMachines } from "../components/about/RuntimeMachines";
+import { RunningDesktopBuild } from "../components/about/RunningDesktopBuild";
+import { RuntimeTargets } from "../components/about/RuntimeTargets";
 import { SshHostFlow } from "../components/sessions/SshHostFlow";
 import { useComponentVersions } from "../features/about/useComponentVersions";
 import { LOCAL_TARGET, supportsComponentUpdate, targetKey } from "../features/targets/targets";
-import type { ComponentActionPreflight, ComponentActionResult, ComponentUpdateContext, ConnectionTarget, SshConnectionTarget } from "../lib/types";
+import type { AboutRuntimeStatus, ComponentActionPreflight, ComponentActionResult, ComponentUpdateContext, ConnectionTarget, SshConnectionTarget } from "../lib/types";
 import "../components/about/about.css";
 
 interface Props {
@@ -44,6 +46,12 @@ export function AboutPage({ visible, on_close, on_restarted, on_dialog_change, e
   const [builds_revision, setBuildsRevision] = useState(0);
   const [builds_open, setBuildsOpen] = useState(false);
   const [revisions, setRevisions] = useState<ReadonlyMap<string, number>>(() => new Map());
+  const [local, setLocal] = useState<{ inventory: AboutRuntimeStatus | null; loading: boolean; error: DisplayText | null }>({
+    inventory: null, loading: true, error: null,
+  });
+  const observeLocal = useCallback((inventory: AboutRuntimeStatus | null, loading: boolean, error: DisplayText | null) => {
+    setLocal({ inventory, loading, error });
+  }, []);
   const [update_context, setUpdateContext] = useState<ComponentUpdateContext | null>(null);
   const heading = useRef<HTMLHeadingElement>(null);
   useEffect(() => { if (visible) heading.current?.focus(); }, [visible]);
@@ -63,7 +71,6 @@ export function AboutPage({ visible, on_close, on_restarted, on_dialog_change, e
       }
       return next;
     });
-    void model.refresh();
   }
 
   return <>
@@ -71,16 +78,39 @@ export function AboutPage({ visible, on_close, on_restarted, on_dialog_change, e
       <header className="about-page-header">
         <div>
           <h1 ref={heading} tabIndex={-1}>{t("about.title")}</h1>
-          <p className="about-muted">{app ? versionLabel(app.running, locale) : model.loading ? t("about.checking_app") : t("about.unknown_version")}</p>
+          <RunningDesktopBuild visible={visible} fallback={app?.running} />
         </div>
         <button type="button" onClick={on_close} className="about-back"><Icon name="close" />{t("about.back")}</button>
       </header>
       <div className="about-content">
+        <RuntimeTargets
+          inventory={local.inventory}
+          loading={local.loading}
+          error={local.error}
+          on_refresh={() => {
+            refreshInstallations([LOCAL_TARGET]);
+            setBuildsRevision((value) => value + 1);
+          }}
+        />
         <RuntimeMachines
           visible={visible}
           rows={rows}
           targets={remote_targets}
           refresh_revision={revisions}
+          on_local_status={observeLocal}
+          local_builds={supportsComponentUpdate(LOCAL_TARGET) && <details className="about-stored-builds" onToggle={(event) => setBuildsOpen(event.currentTarget.open)}>
+            <summary>{t("about.runtime_stored_builds")}</summary>
+            <ComponentBundlePanel visible={visible && builds_open} refresh_revision={builds_revision} on_selected={() => {
+              refreshInstallations([LOCAL_TARGET]);
+              void model.refresh();
+            }} />
+          </details>}
+          service_refresh={<div className="about-refresh-row">
+            <span>{model.checked_at === null ? t("about.unchecked") : t("about.last_checked", { time: intl.formatTime(model.checked_at, { hour: "2-digit", minute: "2-digit", second: "2-digit" }) })}</span>
+            <button type="button" onClick={() => void model.refresh()} disabled={model.loading || model.busy_id !== null}>
+              <Icon name="refresh" />{t(model.loading ? "about.checking" : "about.refresh_versions")}
+            </button>
+          </div>}
           busy_id={model.busy_id}
           restarting={model.restarting}
           action_error={model.action_error}
@@ -93,20 +123,10 @@ export function AboutPage({ visible, on_close, on_restarted, on_dialog_change, e
           }}
         />
         <section aria-label={t("about.version_checks")}>
-          <div className="about-refresh-row">
-            <p>{model.checked_at === null ? t("about.unchecked") : t("about.last_checked", { time: intl.formatTime(model.checked_at, { hour: "2-digit", minute: "2-digit", second: "2-digit" }) })}</p>
-            <button type="button" onClick={() => void model.refresh()} disabled={model.loading || model.busy_id !== null}>
-              <Icon name="refresh" />{t(model.loading ? "about.checking" : "about.refresh_versions")}
-            </button>
-          </div>
           {model.error ? <InlineFeedback>{t(model.snapshot ? "about.refresh_failed_cached" : "about.refresh_failed", { detail: model.error })}</InlineFeedback> : null}
           {model.action_error && !rows.some((row) => row.component_id === model.action_error?.component_id) ? <InlineFeedback>{formatText(model.action_error.message)}</InlineFeedback> : null}
           {model.loading && !model.snapshot ? <p role="status">{t("about.checking_local_remote")}</p> : null}
         </section>
-        {supportsComponentUpdate(LOCAL_TARGET) ? <details className="about-stored-builds" onToggle={(event) => setBuildsOpen(event.currentTarget.open)}>
-          <summary>{t("about.runtime_stored_builds")}</summary>
-          <ComponentBundlePanel visible={visible && builds_open} refresh_revision={builds_revision} on_selected={() => refreshInstallations([LOCAL_TARGET])} />
-        </details> : null}
       </div>
     </section>
     {preflight && createPortal(<QuickInput
@@ -127,7 +147,10 @@ export function AboutPage({ visible, on_close, on_restarted, on_dialog_change, e
       on_updated={(results, targets) => {
         const completed = results.filter((result) => result.state === "complete").map((result) => targets[result.host_index]);
         if (completed.some((target) => target.kind === "local")) setBuildsRevision((value) => value + 1);
-        if (completed.length) refreshInstallations(completed);
+        if (completed.length) {
+          refreshInstallations(completed);
+          void model.refresh();
+        }
       }}
       on_close={() => setUpdateContext(null)}
     />, document.body)}

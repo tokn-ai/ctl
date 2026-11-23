@@ -47,7 +47,7 @@ import {
   previewWorkspace,
 } from "./fixtures";
 import { previewComponentVersions, previewComponentBundles, previewReplacementStatus } from "./aboutFixtures";
-import { previewRuntime, previewUpdateCatalog } from "./runtimeFixtures";
+import { previewRuntime, previewUpdateCatalog, sample_builds } from "./runtimeFixtures";
 import { previewCredentials, previewIdentityFiles } from "./credentialsFixtures";
 
 // This entry is intentionally absent from index.html and the production build.
@@ -248,6 +248,10 @@ mockIPC((command, payload) => {
       return structuredClone(component_bundles);
     case "about_runtime_status":
       return runtime.status((payload as { host_id: string | null }).host_id);
+    case "fetch_about_runtime_target": {
+      const { target_triple, channel, attempt_id } = payload as { target_triple: string; channel: BundleChannel; attempt_id: string };
+      return runtime.fetch(target_triple, channel, attempt_id);
+    }
     case "sync_about_runtime": {
       const { host_id, attempt_id } = payload as { host_id: string | null; attempt_id: string };
       return runtime.sync(host_id, attempt_id);
@@ -274,6 +278,8 @@ mockIPC((command, payload) => {
       if (selection.purpose === "local") runtime.selectLocal(bundle);
       return { ...selection, services_preserved: true };
     }
+    case "get_desktop_build":
+      return { channel: "nightly", version: sample_builds.current.version, source_revision: sample_builds.current.source_revision };
     case "get_component_versions":
       return structuredClone(component_versions);
     case "preflight_component_action": {

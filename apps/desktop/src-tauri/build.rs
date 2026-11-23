@@ -9,6 +9,18 @@ fn git(args: &[&str]) -> Option<String> {
 }
 
 fn main() {
+  println!("cargo:rerun-if-env-changed=CTL_DESKTOP_BUILD_CHANNEL");
+  // A locally compiled app can follow the nightly update feed. Record how the
+  // executable was built independently of that default and of ctlup selection.
+  let channel = std::env::var("CTL_DESKTOP_BUILD_CHANNEL").unwrap_or_else(|_| "local".into());
+  assert!(
+    matches!(
+      channel.as_str(),
+      "local" | "dev" | "nightly" | "stable" | "prerelease"
+    ),
+    "invalid CTL_DESKTOP_BUILD_CHANNEL"
+  );
+  println!("cargo:rustc-env=CTMUX_DESKTOP_BUILD_CHANNEL={channel}");
   // HEAD can be a worktree-local file while its branch ref lives in the common
   // git directory. Track both so switching/committing refreshes bundle identity.
   for name in [

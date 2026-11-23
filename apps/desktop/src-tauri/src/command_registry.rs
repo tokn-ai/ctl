@@ -8,8 +8,10 @@ use crate::{
 
 pub fn register(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wry> {
   builder.invoke_handler(tauri::generate_handler![
+    about::get_desktop_build,
     about::get_component_versions,
     about::runtime::about_runtime_status,
+    about::runtime::fetch_about_runtime_target,
     about::runtime::sync_about_runtime,
     browser::open_external_url,
     files::file_request,

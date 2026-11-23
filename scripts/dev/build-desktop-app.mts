@@ -145,7 +145,7 @@ export async function buildDesktopApp(
     "--workspace-root", "desktop:build", "--debug", "--target", native,
     ...(windows ? ["--no-bundle"] : ["--bundles", format]),
     "--config", tauri_config, ...(macos ? ["--no-sign"] : []),
-  ], { CARGO_TARGET_DIR: cache });
+  ], { CARGO_TARGET_DIR: cache, CTL_DESKTOP_BUILD_CHANNEL: "local" });
 
   const archive = windows ? "ctmux.zip" : macos ? "ctmux.app.tar.gz" : "ctmux.AppImage";
   const payload = join(output, archive);

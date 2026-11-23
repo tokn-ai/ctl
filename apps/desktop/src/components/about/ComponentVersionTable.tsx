@@ -1,22 +1,12 @@
 import { useId, useState } from "react";
 import { translate, type DisplayText, type Locale } from "../../features/i18n/messages";
 import { useLocale } from "../../features/i18n/LocaleContext";
-import { componentBuildChannels, componentBuildViews, componentHostFailure, componentHostStatuses, componentProtocolLines, type ComponentBuildView, type ComponentHostGroup } from "../../features/about/componentVersions";
-import type { AboutRuntimeStatus, ComponentVersionInfo, ComponentVersionRow, ComponentVersionStatus } from "../../lib/types";
+import { componentBuildChannels, componentBuildViews, componentHostFailure, hostConnected, componentProtocolLines, type ComponentBuildView, type ComponentHostGroup } from "../../features/about/componentVersions";
+import type { AboutRuntimeStatus, ComponentVersionInfo, ComponentVersionRow, ComponentBuildInfo } from "../../lib/types";
+import { runtimeChannelShowsRevision } from "../../features/about/runtimeTargets";
 import { ComponentProtocols } from "./ComponentProtocols";
 import { InlineFeedback } from "../feedback/InlineFeedback";
 import { Icon } from "../ui/Icon";
-
-const status_labels: Record<ComponentVersionStatus, string> = {
-  current: "about.current",
-  outdated: "about.outdated",
-  newer: "about.newer",
-  different_build: "about.different_build",
-  incompatible: "about.protocol_mismatch",
-  unknown: "about.unknown",
-  not_running: "about.not_running",
-  unavailable: "about.unavailable",
-};
 
 export function versionLabel(info: ComponentVersionInfo | null, locale: Locale = "en"): string {
   if (!info) return translate(locale, "about.unknown");
@@ -24,11 +14,20 @@ export function versionLabel(info: ComponentVersionInfo | null, locale: Locale =
   return [info.version ?? translate(locale, "about.unknown_build_version"), revision, info.source_fingerprint ? translate(locale, "about.build_compact", { build: info.source_fingerprint.slice(0, 10) }) : null, info.dirty ? translate(locale, "about.modified") : null].filter(Boolean).join(" · ");
 }
 
-function statusLabel(row: ComponentVersionRow, locale: Locale): string {
-  if (row.observation === "not_checked") return translate(locale, "about.not_checked");
-  if (row.observation === "installed") return translate(locale, "about.on_demand");
-  if (row.status !== "unknown" || !row.running) return translate(locale, status_labels[row.status]);
-  return !row.running.source_revision && !row.running.source_fingerprint ? translate(locale, "about.build_not_reported") : translate(locale, "about.build_unverified");
+function serviceState(row: ComponentVersionRow) {
+  if (row.observation === "not_checked") return "about.not_checked";
+  if (row.observation === "installed") return "about.on_demand";
+  if (row.observation === "last_observed") return "about.machine_last_observed";
+  if (row.status === "not_running") return "about.not_running";
+  if (row.status === "unavailable") return "about.unavailable";
+  if (row.observation === "running" || row.observation === "legacy") return "about.build_running";
+  return "about.unknown";
+}
+
+function compareSelected(info: ComponentVersionInfo, build: ComponentBuildInfo): "same" | "different" | "unknown" {
+  const identity = ["version", "source_revision", "source_fingerprint", "dirty"] as const;
+  if (identity.some((field) => info[field] != null && build[field] != null && info[field] !== build[field])) return "different";
+  return identity.every((field) => info[field] != null && build[field] != null) ? "same" : "unknown";
 }
 
 export interface ComponentDiagnosticActions {
@@ -39,6 +38,7 @@ export interface ComponentDiagnosticActions {
 }
 
 interface ChannelInventory {
+  active_build?: ComponentBuildInfo | null;
   build_channels: AboutRuntimeStatus["build_channels"];
   channel_unchecked: boolean;
 }
@@ -60,7 +60,7 @@ function differingBuildIds([owner, disk]: ComponentBuildView[]) {
   }
 }
 
-function ComponentRows({ row, busy_id, restarting, action_error, on_restart, hide_probe_error, build_channels, channel_unchecked }: ComponentDiagnosticActions & ChannelInventory & { row: ComponentVersionRow; hide_probe_error: boolean }) {
+function ComponentRows({ row, busy_id, restarting, action_error, on_restart, hide_probe_error, active_build, build_channels, channel_unchecked }: ComponentDiagnosticActions & ChannelInventory & { row: ComponentVersionRow; hide_probe_error: boolean }) {
   const { t, locale, intl, formatText } = useLocale();
   const [expanded, setExpanded] = useState(false);
   const details_id = useId();
@@ -73,7 +73,7 @@ function ComponentRows({ row, busy_id, restarting, action_error, on_restart, hid
   const views = builds.map((view, index) => {
     const channels = componentBuildChannels(view.info, build_channels);
     const names = channels.map((channel) => channel === "stable" || channel === "nightly" ? t(`about.channel_${channel}`) : channel);
-    const show_sha = channels.includes("nightly") || channels.includes("local");
+    const show_sha = channels.some(runtimeChannelShowsRevision);
     const revision = difference?.field === "source_revision" ? difference.values[index]
       : show_sha ? view.info?.source_revision?.slice(0, 8) : undefined;
     const fingerprint = difference?.field === "source_fingerprint" ? difference.values[index] : undefined;
@@ -82,7 +82,14 @@ function ComponentRows({ row, busy_id, restarting, action_error, on_restart, hid
   const mismatch = row.status === "incompatible" || views.some((view) =>
     componentProtocolLines(row, view, locale).some((line) => line.status === "incompatible"));
   const label = row.location === "local" ? row.label : row.component === "ctl_agent" ? "ctl-agent" : row.component;
-  const status = row.observation === "not_checked" || row.observation === "installed" ? "unknown" : row.status;
+  const state = serviceState(row);
+  const needsBuildIdentity = (state === "about.build_running" || state === "about.machine_last_observed") &&
+    (!row.running?.source_revision || !row.running.source_fingerprint);
+  const buildNotice = row.running?.source_revision || row.running?.source_fingerprint ? "about.build_unverified" : "about.build_not_reported";
+  const differingViews = views.filter(({ info }) => info &&
+    (info.version || info.source_revision || info.source_fingerprint) && (!active_build || compareSelected(info, active_build) !== "same"));
+  const verifiedMismatch = !!active_build && !!row.running && compareSelected(row.running, active_build) === "different" &&
+    row.observation !== "not_checked" && row.status !== "not_running";
   const show_details = t(expanded ? "about.hide_component_details" : "about.show_component_details", { name: row.label });
 
   return <tbody role="rowgroup">
@@ -97,7 +104,13 @@ function ComponentRows({ row, busy_id, restarting, action_error, on_restart, hid
         {probe_error && <div title={probe_error}><InlineFeedback className="about-row-feedback">{row.location === "remote" ? t("about.check_component_failed") : probe_error}</InlineFeedback></div>}
         {action_message && <InlineFeedback className="about-row-feedback">{action_message}</InlineFeedback>}
       </th>
-      <td role="cell" className="about-service-build">{views.map((view) => <div className="about-build-summary" key={view.label}>
+      <td role="cell" className="about-service-status"><div>
+        <span className="machine-service-state" data-running={state === "about.build_running"}>{t(state)}</span>
+        {needsBuildIdentity && <span className="about-muted">{t(buildNotice)}</span>}
+        {mismatch && <span className="about-version-status about-status-incompatible">{t("about.protocol_mismatch")}</span>}
+        {row.restart_required && <span className="about-version-status about-status-outdated">{t(row.component === "ctl_agent" ? "about.reconnect_to_apply" : "about.restart_required")}</span>}
+        {verifiedMismatch && !row.restart_required && <span className="about-version-status about-status-outdated">{t("about.machine_different_bundle")}</span>}
+      </div>{differingViews.map((view) => <div className="about-build-summary" key={view.label}>
         <span>{view.label}</span>
         <code>{view.info?.version ?? t("about.unknown")}{view.revision && <> · <span title={view.info?.source_revision ?? undefined}>{view.revision}</span></>}</code>
         {view.info && (view.channels
@@ -106,17 +119,12 @@ function ComponentRows({ row, busy_id, restarting, action_error, on_restart, hid
         {view.fingerprint && <span title={view.info?.source_fingerprint ?? undefined}>{t("about.build_compact", { build: view.fingerprint })}</span>}
         {view.info?.dirty && <span>{t("about.modified")}</span>}
       </div>)}</td>
-      <td role="cell" className="about-service-status"><div>
-        {mismatch && <span className="about-version-status about-status-incompatible">{t("about.protocol_mismatch")}</span>}
-        {row.restart_required && <span className="about-version-status about-status-outdated">{t(row.component === "ctl_agent" ? "about.reconnect_to_apply" : "about.restart_required")}</span>}
-        {!mismatch && !row.restart_required && <span className={`about-version-status about-status-${status}`}>{statusLabel(row, locale)}</span>}
-      </div></td>
       <td role="cell" className="about-service-action">{action && <button type="button" onClick={() => on_restart(row.component_id)} disabled={busy_id !== null}
         aria-label={t(action === "reconnect" ? "about.reconnect_component" : "about.restart_component", { name: row.label })}>
         {busy_id === row.component_id ? restarting ? action === "reconnect" ? t("about.reconnecting") : t("about.restarting") : t("about.checking") : action_label}
       </button>}</td>
     </tr>
-    <tr role="row" id={details_id} hidden={!expanded} className="about-service-details"><td role="cell" colSpan={4}>{expanded && <>
+    <tr role="row" id={details_id} hidden={!expanded} className="about-service-details"><td role="cell" colSpan={3}>{expanded && <>
       {row.detail && <p>{row.detail}</p>}
       {probe_error && row.location === "remote" && <p>{probe_error}</p>}
       <div className="about-build-details">{views.map((view) => <section key={view.label} aria-label={view.label}>
@@ -140,7 +148,7 @@ export function ComponentVersionTable({ group, ...actions }: ComponentDiagnostic
   // Preserve native table navigation when the narrow layout stacks its cells.
   return <table role="table" className="about-version-table" aria-label={t("about.host_component_versions", { host: group.label })}>
     <thead role="rowgroup"><tr role="row">
-      <th role="columnheader" scope="col">{t("about.component")}</th><th role="columnheader" scope="col">{t("about.build_and_channel")}</th>
+      <th role="columnheader" scope="col">{t("about.machine_service")}</th>
       <th role="columnheader" scope="col">{t("about.status")}</th><th role="columnheader" scope="col">{t("about.actions")}</th>
     </tr></thead>
     {group.rows.map((row) => <ComponentRows key={row.component_id} row={row} {...actions} hide_probe_error={failure?.component_ids.has(row.component_id) ?? false} />)}
@@ -149,12 +157,15 @@ export function ComponentVersionTable({ group, ...actions }: ComponentDiagnostic
 
 export function HostStatus({ group, action_error }: Pick<ComponentDiagnosticActions, "action_error"> & { group: ComponentHostGroup }) {
   const { t, locale } = useLocale();
-  const statuses = componentHostStatuses(group.rows, locale);
+  const connected = hostConnected(group.rows);
   const failure = componentHostFailure(group.rows, locale);
   const maintenance_unsupported = group.rows.some((row) => row.error_code === "remote_windows_maintenance_unsupported");
   const has_action_error = action_error && group.rows.some((row) => row.component_id === action_error.component_id);
   return <>
-    <div className="about-host-summary" role="group" aria-label={t("about.status")}>{statuses.map((status) => <span className={`about-version-status about-status-${status.status}`} key={status.label}>{status.label}</span>)}{has_action_error ? <span className="about-version-status about-status-incompatible">{t("about.action_failed")}</span> : null}</div>
+    {(connected !== null || has_action_error) && <div className="about-host-summary" role="group" aria-label={t("about.status")}>
+      {connected !== null && <span>{t(connected ? "about.connected" : "about.not_connected")}</span>}
+      {has_action_error && <span className="about-version-status about-status-incompatible">{t("about.action_failed")}</span>}
+    </div>}
     {failure ? <div title={failure.detail}><InlineFeedback severity={maintenance_unsupported ? "info" : "error"} className="about-row-feedback">{failure.message}</InlineFeedback></div> : null}
   </>;
 }

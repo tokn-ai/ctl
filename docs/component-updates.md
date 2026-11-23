@@ -1,30 +1,33 @@
 # Components and updates
 
-Open **About ctmux** to manage the runtime on this computer and saved SSH hosts.
-The local row shows the active build and its source. Choose **Check installation**
-on a saved host to read its installation through the selected SSH method.
-Remote checks and sync use noninteractive SSH. Connect to the saved host first
-to verify the account identity and complete any interactive authentication.
+Open **About ctmux** to see the version and build channel of the running
+desktop application. Nightly and local builds also show their Git revision.
+The desktop and each machine’s runtime can come from different channels.
+
+**Runtime targets** lists the verified builds stored on this computer by
+platform. Use **Add target** to fetch a platform from a stable or nightly
+publication. Like `ctlup bundle fetch`, this brings registered targets on
+that channel to the same publication and leaves the active runtime selection
+in place. A stored Linux build, for example, is available for deployment to
+a compatible SSH host.
+
+Select a machine to see its runtime target, installed bundle, and services.
+Use **Check installation** on a saved host to read its selection through the
+chosen SSH method. Remote checks and sync use noninteractive SSH. Connect to
+the saved host first to verify the account and complete interactive authentication.
 
 **Sync** follows that machine’s recorded source, like `ctlup update`. Stable
 and Nightly follow their own channels. A healthy pinned build stays selected.
 A missing pinned build can be restored when its exact verified cache is
 available. Use **Install from…** to provision a machine or choose another source.
 
-Expand **Components** on a machine to see one row per service. **Running**
-identifies the existing process and **On disk** identifies the selected
-executable. Matching reports share one version. Active-connection metadata is
-labeled **Last observed**. Select a component name to compare full build
-fingerprints, revisions, and protocols. Restart and reconnect actions show
-their impact before they run.
-
-**Build and channel** shows the channels recorded in that machine’s `ctlup`
-catalog for each running and on-disk build. The match uses the version, full
-revision, source fingerprint, and modified-source flag. Nightly and local
-builds always show the short Git commit SHA beside the version. Expand the
-component for the full SHA. A build can appear in several channels.
-**Channel unknown** means the catalog could not identify
-that build. Use **Check installation** to load a saved host’s catalog.
+The bundle supplies the same build of `ctld`, `ctmuxd`, and `ctl-taskd`.
+After a sync, a service can still be running its previous build. Select
+a service to compare the observed process and the binary on disk, including
+their revisions, fingerprints, catalog channels, and protocols. Restart
+and reconnect actions show their impact before they run. On Windows SSH
+hosts the app can show observations from attached sessions. A full service
+inspection is currently available on local machines and supported Unix SSH hosts.
 
 Each protocol has its own line and status: a green tick for the app's current
 contract, a yellow tick for a different contract that shares an explicitly

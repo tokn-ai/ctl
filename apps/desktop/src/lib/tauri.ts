@@ -64,6 +64,7 @@ import type {
   VpnStatus,
   VpnSnapshot,
   ComponentVersionsSnapshot,
+  DesktopBuildInfo,
   ComponentBundlesSnapshot,
   ComponentBundleSelection,
   ComponentBundleSelectionResult,
@@ -128,6 +129,10 @@ export async function closePreviewWindow(): Promise<void> {
   await getCurrentWindow().destroy();
 }
 
+export function getDesktopBuild(): Promise<DesktopBuildInfo> {
+  return invoke("get_desktop_build");
+}
+
 export async function getComponentVersions(host_id?: string): Promise<ComponentVersionsSnapshot> {
   return invoke("get_component_versions", host_id ? { host_id } : undefined);
 }
@@ -141,6 +146,10 @@ function runtimeTarget(target: ConnectionTarget) {
 
 export async function getAboutRuntimeStatus(target: ConnectionTarget): Promise<AboutRuntimeStatus> {
   return invoke("about_runtime_status", runtimeTarget(target));
+}
+
+export async function fetchAboutRuntimeTarget(target_triple: string, channel: BundleChannel, attempt_id: string): Promise<void> {
+  return invoke("fetch_about_runtime_target", { target_triple, channel, attempt_id });
 }
 
 export async function syncAboutRuntime(target: ConnectionTarget, attempt_id: string): Promise<AboutRuntimeSyncResult> {

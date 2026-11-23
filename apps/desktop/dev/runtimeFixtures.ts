@@ -6,6 +6,7 @@ import type {
 
 const local_target = "aarch64-apple-darwin";
 const remote_target = "x86_64-unknown-linux-musl";
+const published_targets = [local_target, remote_target, "aarch64-unknown-linux-musl", "x86_64-pc-windows-msvc"];
 
 function identity(version: string, revision: string, fingerprint: string) {
   return { version, source_revision: revision.repeat(5), source_fingerprint: fingerprint.repeat(8), dirty: false };
@@ -24,12 +25,19 @@ const published = {
   nightly: { id: "e".repeat(64), label: "nightly-20261122T120000Z-v0.1.1-abc1234", identity: identity("0.1.1", "abc12345", "abcd1234"), channel: "nightly" },
 };
 type Build = typeof local_build;
+type RetainedBuild = { build: Build["identity"]; channels: string[] };
+
+function retain(entries: RetainedBuild[], build: Build) {
+  const record = entries.find((entry) => entry.build === build.identity);
+  if (!record) entries.push({ build: build.identity, channels: [build.channel] });
+  else if (!record.channels.includes(build.channel)) record.channels.push(build.channel);
+}
 
 export function previewUpdateCatalog(channel: BundleChannel = "stable"): ComponentUpdateCatalog {
   const build = published[channel];
   return { default_channel: "stable", local_development: true, error: null, catalog: {
-    channel, bundle_id: build.label, app_version: build.identity.version, git_revision: build.identity.source_revision,
-    targets: [local_target, remote_target].map((target_triple) => ({ target_triple, compatible: true, components: {} })),
+    channel, publication_id: build.label, bundle_id: build.label, app_version: build.identity.version, git_revision: build.identity.source_revision,
+    targets: published_targets.map((target_triple) => ({ target_triple, compatible: true, components: {} })),
   } };
 }
 
@@ -39,7 +47,7 @@ export function previewRuntime(bundles: ComponentBundlesSnapshot, observations: 
     [null, local_build],
     ["preview-dev", remote_build],
   ]);
-  const retained = new Map<string | null, { build: Build["identity"]; channels: string[] }[]>([
+  const retained = new Map<string | null, RetainedBuild[]>([
     [null, [
       { build: sample_builds.current, channels: ["local"] },
       { build: sample_builds.older_stable, channels: ["stable"] },
@@ -49,6 +57,13 @@ export function previewRuntime(bundles: ComponentBundlesSnapshot, observations: 
       { build: sample_builds.current, channels: ["stable"] },
       { build: sample_builds.older_nightly, channels: ["nightly"] },
     ]],
+  ]);
+  const local_store = new Map<string, RetainedBuild[]>([
+    [local_target, retained.get(null)!],
+    [remote_target, [{ build: sample_builds.current, channels: ["stable"] }]],
+  ]);
+  const local_publications = new Map<string, Record<string, string>>([
+    [remote_target, { stable: remote_build.label }],
   ]);
   const known = new Map<string, Build>([local_build, ...Object.values(published)].map((build) => [build.id, build]));
   const pending = new Map<string, () => void>();
@@ -69,9 +84,7 @@ export function previewRuntime(bundles: ComponentBundlesSnapshot, observations: 
     active.set(host_id, build);
     known.set(build.id, build);
     const inventory = retained.get(host_id) ?? [];
-    const membership = inventory.find((entry) => entry.build === build.identity);
-    if (!membership) inventory.push({ build: build.identity, channels: [build.channel] });
-    else if (!membership.channels.includes(build.channel)) membership.channels.push(build.channel);
+    retain(inventory, build);
     retained.set(host_id, inventory);
     for (const row of observations.components) {
       if (row.host_id !== host_id || row.component === "ctmux" || !row.installed) continue;
@@ -80,6 +93,9 @@ export function previewRuntime(bundles: ComponentBundlesSnapshot, observations: 
       if (row.running?.source_fingerprint) row.restart_required = row.running.source_fingerprint !== build.identity.source_fingerprint;
     }
     if (host_id !== null) return;
+    if (build.channel === "stable" || build.channel === "nightly") {
+      local_publications.set(local_target, { ...local_publications.get(local_target), [build.channel]: build.label });
+    }
     for (const bundle of bundles.bundles) {
       if (bundle.local_use === "selected") bundle.local_use = "available";
     }
@@ -111,7 +127,22 @@ export function previewRuntime(bundles: ComponentBundlesSnapshot, observations: 
       return {
         active: build?.id ?? null, build_label: build?.label ?? null, origin: build ? { channel: build.channel } : null,
         missing: false, build_channels: structuredClone(retained.get(host_id) ?? []),
+        target_triple: host_id === null ? local_target : build ? remote_target : null, active_build: build?.identity ?? null,
+        installed_targets: host_id === null ? Array.from(local_store, ([target_triple, builds]) => ({
+          target_triple, builds: structuredClone(builds), current_publications: { ...local_publications.get(target_triple) },
+        })) : undefined,
       };
+    },
+    async fetch(target_triple: string, channel: BundleChannel, attempt_id: string) {
+      if (!published_targets.includes(target_triple)) throw new Error("This target is absent from the sample publication.");
+      if (!await wait(attempt_id)) throw { code: "runtime_operation_cancelled", message: "Target download stopped." };
+      if (!local_store.has(target_triple)) local_store.set(target_triple, []);
+      for (const [target, entries] of local_store) {
+        if (target === target_triple || entries.some((entry) => entry.channels.includes(channel))) {
+          retain(entries, published[channel]);
+          local_publications.set(target, { ...local_publications.get(target), [channel]: published[channel].label });
+        }
+      }
     },
     selectLocal(bundle: ComponentBundle) {
       const build = known.get(bundle.bundle_id);

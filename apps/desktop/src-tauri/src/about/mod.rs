@@ -9,9 +9,14 @@ pub(crate) mod remote_actions;
 pub(crate) mod restart;
 pub(crate) mod runtime;
 
-pub use models::ComponentVersionsSnapshot;
+pub use models::{ComponentVersionsSnapshot, DesktopBuildInfo};
 
 use models::{ComponentVersionInfo, ComponentVersionRow, ProtocolVersion, VersionStatus};
+
+#[tauri::command]
+pub fn get_desktop_build() -> DesktopBuildInfo {
+  DesktopBuildInfo::current()
+}
 
 #[tauri::command(rename_all = "snake_case")]
 pub async fn get_component_versions(
@@ -79,10 +84,10 @@ pub async fn get_component_versions(
   let mut app = ComponentVersionRow::local("ctmux", "ctmux");
   app.observation = "bundled";
   app.status = VersionStatus::Current;
+  let build = DesktopBuildInfo::current();
   app.running = Some(ComponentVersionInfo {
-    version: Some(env!("CARGO_PKG_VERSION").into()),
-    source_revision: (!env!("CTMUX_SOURCE_REVISION").is_empty())
-      .then(|| env!("CTMUX_SOURCE_REVISION").into()),
+    version: Some(build.version.into()),
+    source_revision: build.source_revision.map(str::to_owned),
     source_fingerprint: None,
     dirty: None,
     protocols: app_protocols

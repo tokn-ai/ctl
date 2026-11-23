@@ -20,14 +20,17 @@ const row = (component_id: string, component: ComponentVersionRow["component"], 
 
 /** These observations are fictional; preview never queries or restarts a daemon. */
 export function previewComponentVersions(): ComponentVersionsSnapshot {
+  const remote = { location: "remote" as const, host_id: "preview-dev", host_key: "saved:preview-dev", host_name: "Development server", connected: true };
   const agent = { ...sample_builds.current, protocols: [protocol("ctl_identity", "1.0.3"), protocol("ctl_maintenance", "1.1.3", ["1.0.2", "1.1.3"])] };
   return { components: [
     { ...row("app", "ctmux", "ctmux", { ...current, source_fingerprint: null, dirty: null }), observation: "bundled" },
     { ...row("ctld-local", "ctld", "ctld (SSH, VPN)", { ...info("ctld", "1.1.13"), ...sample_builds.older_stable }, "outdated"), available: info("ctld", "1.1.13"), installed: info("ctld", "1.1.13"), restart_required: true, detail: "Connection broker for SSH, port forwards, and VPNs." },
     { ...row("ctmuxd-local", "ctmuxd", "ctmuxd", { ...info("ctmux", "1.0.13"), ...sample_builds.older_nightly }, "different_build"), available: info("ctmux", "1.0.13"), installed: info("ctmux", "1.0.13"), restart_required: true, detail: "Terminal sessions" },
     { ...row("ctl-taskd-local", "ctl-taskd", "ctl-taskd", info("task", "1.0.3")), detail: "Task execution" },
-    { ...row("remote-agent", "ctl_agent", "ctl-agent — Development", { ...agent, ...sample_builds.older_nightly }, "different_build"), location: "remote", host_id: "preview-dev", host_key: "saved:preview-dev", host_name: "Development server", connected: true, observation: "last_observed", available: agent, installed: agent, restart_required: true, detail: "Connected SSH environment" },
-    { ...row("remote-ctmux", "ctmuxd", "ctmuxd — Development", info("ctmux", "1.0.13")), location: "remote", host_id: "preview-dev", host_key: "saved:preview-dev", host_name: "Development server", connected: true, observation: "last_observed" },
+    { ...row("remote-agent", "ctl_agent", "ctl-agent — Development", { ...agent, ...sample_builds.older_nightly }, "different_build"), ...remote, observation: "last_observed", available: agent, installed: agent, restart_required: true, detail: "Connected SSH environment" },
+    { ...row("remote-ctmux", "ctmuxd", "ctmuxd — Development", info("ctmux", "1.0.13")), ...remote },
+    { ...row("remote-task", "ctl-taskd", "ctl-taskd — Development", info("task", "1.0.3")), ...remote, action: null, restart_supported: false },
+    { ...row("remote-broker", "ctld", "ctld — Development", info("ctld", "1.1.13")), ...remote, running: null, status: "not_running", restart_supported: false, action: null },
   ] };
 }
 

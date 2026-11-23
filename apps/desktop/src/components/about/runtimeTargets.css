@@ -1,0 +1,20 @@
+.runtime-target-heading,
+.runtime-target-fields,
+.runtime-target-build { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
+.runtime-target-heading { justify-content: space-between; margin-bottom: 12px; }
+.runtime-target-heading h2 { margin: 0; }
+.runtime-target-list { margin: 0; padding: 0; list-style: none; border-block: 1px solid var(--border); }
+.runtime-target-list > li { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr); align-items: center; gap: 6px 16px; padding: 10px 2px; font-size: 12px; }
+.runtime-target-list > li + li { border-top: 1px solid var(--border); }
+.runtime-target-list strong { font-weight: 600; }
+.runtime-target-triple { display: block; margin-top: 3px; font-size: 11px; color: var(--muted); overflow-wrap: anywhere; }
+.runtime-target-build + .runtime-target-build, .runtime-target-list details { margin-top: 4px; }
+.runtime-target-build code, .runtime-target-build small, .runtime-target-list summary { font-size: 11px; color: var(--muted); }
+.runtime-target-list summary { cursor: pointer; }
+.runtime-target-picker { padding: 12px; margin-top: 12px; border: 1px solid var(--border); border-radius: 5px; background: var(--surface-1); font-size: 12px; }
+.runtime-target-fields { align-items: end; margin-block: 8px; }
+.runtime-target-fields label { display: grid; gap: 4px; min-width: 0; color: var(--muted); }
+.runtime-target-fields select { min-height: 28px; max-width: 100%; padding: 3px 7px; color: var(--text); background: var(--surface-2); border: 1px solid var(--border); border-radius: 4px; }
+@media (max-width: 580px) {
+  .runtime-target-list > li { grid-template-columns: 1fr; }
+}

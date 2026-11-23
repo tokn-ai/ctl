@@ -104,7 +104,9 @@ pub(super) fn encoder(
     "0:v:0",
   ]);
   if source != display || coded != display {
-    let scale = format!("scale={display_width}:{display_height}:flags=fast_bilinear");
+    // FFmpeg 7's fast_bilinear scaler can discolor the last pixel when
+    // downscaling odd-sized RGB frames.
+    let scale = format!("scale={display_width}:{display_height}:flags=bilinear");
     let mut filters = vec![scale];
     if coded != display {
       // The border filter can fill up to half of each input dimension.

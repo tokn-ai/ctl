@@ -21,6 +21,9 @@ use process_wrap::std::{ChildWrapper, CommandWrap, JobObject};
 const STDERR_LIMIT: usize = 4 * 1024;
 const STDERR_GRACE: Duration = Duration::from_millis(100);
 
+#[cfg(all(test, windows))]
+mod windows_tests;
+
 /// A subprocess whose Windows SSH descendants are owned together with its launcher.
 pub struct ChildProcess {
   #[cfg(windows)]
@@ -244,6 +247,9 @@ impl Process {
           .lock()
           .unwrap_or_else(|error| error.into_inner());
         if matches!(child.try_wait(), Ok(Some(_))) {
+          // A Windows launcher may leave descendants holding the stderr pipe.
+          #[cfg(windows)]
+          let _ = child.kill();
           break;
         }
         if Instant::now() >= deadline {

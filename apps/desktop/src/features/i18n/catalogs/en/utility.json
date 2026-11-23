@@ -229,7 +229,6 @@
   "about.targets_installing": "Fetching…",
   "about.targets_installed": "Stored {target} on this computer.",
   "about.targets_retained": "Retained",
-  "about.targets_retained_versions": "{count, plural, one {# earlier build} other {# earlier builds}}",
   "about.title": "About ctmux",
   "about.unavailable": "Unavailable",
   "about.unchecked": "Component versions have not been checked.",

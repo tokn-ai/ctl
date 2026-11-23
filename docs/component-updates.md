@@ -5,9 +5,12 @@ desktop application. Nightly and local builds also show their Git revision.
 The next line shows the version of the local `ctlup` executable the app uses.
 The desktop and each machine’s runtime can come from different channels.
 
-**Runtime targets on this computer** groups stored builds by version, newest
-first. Under each version, you can see the installed platforms and the channel
-of each build. Use **Add target** to fetch a platform from a stable or nightly
+**Runtime targets on this computer** lists one row per full build label.
+For example, `stable-v0.1.4-ba16876` and
+`dev-20261122T081525Z-v0.1.4-ba16876-local` have separate rows. Each row
+shows the platforms installed for that build and their recorded channels.
+Older stores that only recorded a bundle ID show the version and a short ID.
+Use **Add target** to fetch a platform from a stable or nightly
 publication. Like `ctlup bundle fetch`, this brings registered targets on
 that channel to the same publication and leaves the active runtime selection
 in place. A stored Linux build, for example, is available for deployment to

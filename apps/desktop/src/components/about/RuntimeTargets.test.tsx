@@ -36,45 +36,76 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 
-it("groups exact versions newest first, including prereleases and retained imported builds", () => {
-  const versions = ["0.9.0", "local-snapshot", "0.10.0-rc.2", "0.10.0", "0.10.0-rc.10"];
-  const installed_targets = [linux, windows].map((target_triple) => ({
-    target_triple, builds: versions.map((version) => ({
-      channels: ["stable"], build: { ...build, version }, current: version !== "local-snapshot",
-    })),
+it("shows every stored build label in a separate visible row, including retained builds with the same version", () => {
+  const stable = "stable-v0.10.0-aaaaaaa";
+  const nightly = "nightly-20261123T080000Z-v0.10.0-aaaaaaa";
+  const local = "dev-20261122T180000Z-v0.10.0-aaaaaaa-local";
+  const pullRequest = "dev-20261123T100000Z-v0.10.0-aaaaaaa-pr-12";
+  const collision = local + "-123456789abc";
+  const previous = "stable-v0.9.0-aaaaaaa";
+  const rc2 = "release-undated-v0.10.0-rc.2-aaaaaaa";
+  const rc10 = "release-undated-v0.10.0-rc.10-aaaaaaa";
+  const imported = "provided-undated-vunknown-aaaaaaa";
+  const entries = [
+    [previous, "0.9.0", "stable"],
+    [local, "0.10.0", "local"], [stable, "0.10.0", "stable"], [collision, "0.10.0", "local"],
+    [nightly, "0.10.0", "nightly"], [rc2, "0.10.0-rc.2", "release"],
+    [rc10, "0.10.0-rc.10", "release"], [imported, "snapshot", "provided"],
+    [pullRequest, "0.10.0", "pr-12"],
+  ];
+  const builds = entries.map(([build_label, version, channel]) => ({
+    build_label, channels: [channel], build: { ...build, version }, current: build_label !== local,
   }));
-  render(<RuntimeTargets inventory={{ ...inventory, installed_targets }} loading={false} error={null} on_refresh={on_refresh} />);
-  const headings = screen.getAllByRole("heading", { level: 3 });
-  expect(headings.map((item) => item.textContent)).toEqual(["0.10.0", "0.10.0-rc.10", "0.10.0-rc.2", "0.9.0", "local-snapshot"]);
-  for (const heading of headings) {
-    const version = within(heading.closest("li")!);
-    expect(version.getByText(linux)).toBeTruthy();
-    expect(version.getByText(windows)).toBeTruthy();
-    expect(version.getAllByText("stable")).toHaveLength(1);
-    expect(!!version.queryByText("Retained")).toBe(heading.textContent === "local-snapshot");
-  }
+  render(<RuntimeTargets inventory={{ ...inventory, installed_targets: [{ target_triple: linux, builds }] }}
+    loading={false} error={null} on_refresh={on_refresh} />);
+  const table = within(screen.getByRole("table", { name: "Runtime targets on this computer" }));
+  expect(table.getAllByRole("rowheader").map((header) => header.textContent)).toEqual([
+    pullRequest, nightly, local, collision, stable, rc10, rc2, previous, imported,
+  ]);
+  const retained = within(table.getByRole("rowheader", { name: local }).closest("tr")!);
+  expect(retained.getByText("Retained")).toBeTruthy();
+  expect(retained.getByText(linux)).toBeTruthy();
+  expect(within(table.getByRole("rowheader", { name: imported }).closest("tr")!).getByText("snapshot")).toBeTruthy();
+  expect(screen.queryByRole("heading", { name: "0.10.0" })).toBeNull();
 });
 
-it("retains per-target channels and distinguishes rebuilds from the same commit", () => {
-  const other = { ...build, source_fingerprint: build.source_fingerprint.slice(0, 8) + "c".repeat(56) };
+it("lists all targets for the same stored label with their own channels, retention and build identities", () => {
+  const label = "dev-20261123T183000Z-v0.1.5-aaaaaaa-local";
+  const other = { ...build, source_revision: "a".repeat(9) + "c".repeat(31), source_fingerprint: "b".repeat(9) + "c".repeat(55) };
   render(<RuntimeTargets loading={false} error={null} on_refresh={on_refresh} inventory={{ ...inventory, installed_targets: [
-    { target_triple: windows, builds: [{ build, channels: ["local"] }, { build, channels: ["local"] }] },
-    { target_triple: linux, builds: [
-      { build, channels: ["nightly"], current: false },
-      { build: other, channels: ["nightly"], current: false },
-    ] },
+    { target_triple: windows, builds: [{ build_label: label, build, channels: ["local"] }] },
+    { target_triple: linux, builds: [{ build_label: label, build: other, channels: ["nightly", "stable"], current: false }] },
   ] }} />);
-  expect(screen.getAllByRole("heading", { level: 3 })).toHaveLength(1);
-  const platform = screen.getByText(windows).parentElement!;
-  expect(within(platform).getByText("local")).toBeTruthy();
-  expect(within(platform).queryByText("nightly")).toBeNull();
-  expect(within(platform).queryByText("Retained")).toBeNull();
-  const retained = screen.getByText("Retained").parentElement!;
-  expect(within(retained).getByText(linux)).toBeTruthy();
-  expect(within(retained).getByText("nightly")).toBeTruthy();
-  expect(screen.getByText("1 earlier build")).toBeTruthy();
-  expect(screen.getAllByTitle(build.source_revision).map((sha) => sha.textContent)).toEqual(["aaaaaaaa", "aaaaaaaa"]);
-  expect(screen.getByTitle(build.source_fingerprint).textContent).not.toBe(screen.getByTitle(other.source_fingerprint).textContent);
+  expect(screen.getAllByRole("rowheader")).toHaveLength(1);
+  const windowsEntry = within(screen.getByText(windows).parentElement!);
+  const linuxEntry = within(screen.getByText(linux).parentElement!);
+  expect(windowsEntry.getByText("local")).toBeTruthy();
+  expect(windowsEntry.queryByText("Retained")).toBeNull();
+  expect(linuxEntry.getByText("Retained")).toBeTruthy();
+  expect(linuxEntry.getByText("nightly")).toBeTruthy();
+  expect(linuxEntry.getByText("stable")).toBeTruthy();
+  expect(windowsEntry.getByTitle(build.source_revision).textContent).not.toBe(linuxEntry.getByTitle(other.source_revision).textContent);
+  expect(windowsEntry.getByTitle(build.source_fingerprint).textContent).not.toBe(linuxEntry.getByTitle(other.source_fingerprint).textContent);
+});
+
+it("keeps legacy records without store labels visible as separate target builds", () => {
+  const older = { ...build, source_fingerprint: "c".repeat(64) };
+  const firstId = "d".repeat(64);
+  const secondId = "d".repeat(12) + "e".repeat(52);
+  render(<RuntimeTargets loading={false} error={null} on_refresh={on_refresh} inventory={{ ...inventory, installed_targets: [
+    { target_triple: windows, builds: [
+      { build, build_label: null, bundle_id: firstId, channels: ["local"] },
+      { build, build_label: null, bundle_id: secondId, channels: ["local"] },
+    ] },
+    { target_triple: linux, builds: [{ build, channels: ["stable"] }, { build: older, channels: ["nightly"], current: false }] },
+  ] }} />);
+  expect(screen.getAllByRole("rowheader")).toHaveLength(4);
+  expect(screen.getByTitle(firstId).textContent).toBe("build " + firstId.slice(0, 13));
+  expect(screen.getByTitle(secondId).textContent).toBe("build " + secondId.slice(0, 13));
+  const retained = within(screen.getByText("Retained").closest("tr")!);
+  expect(retained.getByTitle(older.source_fingerprint).textContent).toContain("cccccccccccc");
+  expect(retained.getByText("aaaaaaaa")).toBeTruthy();
+  expect(retained.getByText(linux)).toBeTruthy();
 });
 
 it("lists installed builds offline and fetches only a compatible published target on the chosen channel", async () => {

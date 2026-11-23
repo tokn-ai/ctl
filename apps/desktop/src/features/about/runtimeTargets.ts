@@ -1,36 +1,42 @@
 import { translate, type Locale } from "../i18n/messages";
-import type { ComponentBuildInfo, InstalledRuntimeTarget } from "../../lib/types";
+import type { InstalledRuntimeBuild, InstalledRuntimeTarget } from "../../lib/types";
 import { compareParsedVersions, parseVersion } from "../../../../../scripts/shared/semver.mts";
 
-export interface RuntimeBuildTargets {
+export interface StoredRuntimeBuild {
   key: string;
-  build: ComponentBuildInfo;
-  targets: Map<string, { channels: string[]; current: boolean }>;
+  label: string | null;
+  legacy_id: string | null;
+  version: string;
+  targets: Map<string, InstalledRuntimeBuild>;
 }
 
-export function runtimeVersions(targets: InstalledRuntimeTarget[]) {
-  const versions = new Map<string, Map<string, RuntimeBuildTargets>>();
+export function storedRuntimeBuilds(targets: InstalledRuntimeTarget[]): StoredRuntimeBuild[] {
+  const rows = new Map<string, StoredRuntimeBuild>();
   for (const { target_triple, builds } of targets) {
-    for (const { build, channels, current } of builds) {
-      const variants = versions.get(build.version) ?? new Map<string, RuntimeBuildTargets>();
-      versions.set(build.version, variants);
-      const key = JSON.stringify([build.source_revision, build.source_fingerprint, build.dirty]);
-      const variant: RuntimeBuildTargets = variants.get(key) ?? { key, build, targets: new Map() };
-      variants.set(key, variant);
-      const previous = variant.targets.get(target_triple);
-      variant.targets.set(target_triple, {
-        channels: [...new Set([...(previous?.channels ?? []), ...channels])].sort(),
-        current: current !== false || previous?.current === true,
-      });
+    for (const record of builds) {
+      const { build, build_label, bundle_id } = record;
+      // A readable store path is <build label>/<target>. Older snapshots only
+      // identify a payload within a target, so keep those records target-scoped.
+      const key = build_label ?? JSON.stringify([
+        target_triple, bundle_id, build.version, build.source_revision, build.source_fingerprint, build.dirty,
+      ]);
+      const row: StoredRuntimeBuild = rows.get(key) ?? {
+        key, label: build_label ?? null, legacy_id: build_label ? null : bundle_id ?? build.source_fingerprint,
+        version: build.version, targets: new Map(),
+      };
+      rows.set(key, row);
+      row.targets.set(target_triple, record);
     }
   }
-  return Array.from(versions, ([version, builds]) => ({
-    version, parsed: parseVersion(version), builds: [...builds.values()],
-  })).sort((a, b) => {
-    // Imported runtimes can have an arbitrary printable product version.
-    if (a.parsed && b.parsed) return compareParsedVersions(b.parsed, a.parsed) || a.version.localeCompare(b.version);
-    return Number(!!b.parsed) - Number(!!a.parsed) || a.version.localeCompare(b.version);
+  const versioned = Array.from(rows.values(), (row) => ({
+    row, version: parseVersion(row.version),
+    timestamp: row.label?.match(/^[^-]+-(\d{8}T\d{6}Z)-/)?.[1] ?? "",
+  }));
+  versioned.sort((a, b) => {
+    const order = a.version && b.version ? compareParsedVersions(b.version, a.version) : Number(!!b.version) - Number(!!a.version);
+    return order || a.row.version.localeCompare(b.row.version) || b.timestamp.localeCompare(a.timestamp) || a.row.key.localeCompare(b.row.key);
   });
+  return versioned.map(({ row }) => row);
 }
 
 export function runtimeChannelShowsRevision(channel: string): boolean {

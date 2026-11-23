@@ -80,9 +80,14 @@ export interface RuntimeTargetBuild {
 
 export interface InstalledRuntimeTarget {
   target_triple: string;
-  builds: RuntimeTargetBuild[];
+  builds: InstalledRuntimeBuild[];
   /** Published channel heads that still have a verified local payload. */
   current_publications?: Record<string, string>;
+}
+
+export interface InstalledRuntimeBuild extends RuntimeTargetBuild {
+  build_label?: string | null;
+  bundle_id?: string;
 }
 
 export interface AboutRuntimeStatus {

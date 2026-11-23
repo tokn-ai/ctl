@@ -1,7 +1,7 @@
 import type {
   AboutRuntimeStatus, AboutRuntimeSyncResult, BundleChannel, ComponentBundle, ComponentBundlesSnapshot,
   ComponentUpdateCatalog, ComponentUpdateHostResult, ComponentUpdateProgress, ComponentUpdateRequest,
-  ComponentUpdateSource, ComponentVersionsSnapshot,
+  ComponentUpdateSource, ComponentVersionsSnapshot, InstalledRuntimeBuild, RuntimeTargetBuild,
 } from "../src/lib/types";
 
 const local_target = "aarch64-apple-darwin";
@@ -20,17 +20,40 @@ export const sample_builds = {
 };
 const local_build = { id: "c".repeat(64), label: "dev-20261120T120000Z-v0.1.0-abcdef1-local", identity: sample_builds.current, channel: "local" };
 const remote_build = { id: "f".repeat(64), label: "stable-v0.1.0-abcdef1", identity: sample_builds.current, channel: "stable" };
+const older_stable = { id: "2".repeat(64), label: "stable-v0.0.9-123456a", identity: sample_builds.older_stable, channel: "stable" };
+const older_nightly = { id: "3".repeat(64), label: "nightly-20261119T120000Z-v0.1.0-abcdef1", identity: sample_builds.older_nightly, channel: "nightly" };
 const published = {
   stable: { id: "d".repeat(64), label: "stable-v0.1.1-fedcba0", identity: identity("0.1.1", "fedcba01", "dedcba01"), channel: "stable" },
   nightly: { id: "e".repeat(64), label: "nightly-20261122T120000Z-v0.1.1-abc1234", identity: identity("0.1.1", "abc12345", "abcd1234"), channel: "nightly" },
 };
 type Build = typeof local_build;
-type RetainedBuild = { build: Build["identity"]; channels: string[] };
 
-function retain(entries: RetainedBuild[], build: Build) {
-  const record = entries.find((entry) => entry.build === build.identity);
-  if (!record) entries.push({ build: build.identity, channels: [build.channel] });
+// A publication shares its label across platforms, but every target has its own payload.
+function forTarget(build: Build, target: string): Build {
+  if (target === local_target) return build;
+  const platform = published_targets.indexOf(target);
+  if (platform < 0) throw new Error("Unknown sample target.");
+  return { ...build, id: build.id.slice(0, 62) + platform.toString(16).padStart(2, "0") };
+}
+
+function installed(build: Build): InstalledRuntimeBuild {
+  return { bundle_id: build.id, build_label: build.label, build: build.identity, channels: [build.channel] };
+}
+
+function retain(entries: InstalledRuntimeBuild[], build: Build) {
+  const record = entries.find((entry) => entry.bundle_id === build.id);
+  if (!record) entries.push(installed(build));
   else if (!record.channels.includes(build.channel)) record.channels.push(build.channel);
+}
+
+function serviceBuildChannels(entries: InstalledRuntimeBuild[]): RuntimeTargetBuild[] {
+  const channels = new Map<RuntimeTargetBuild["build"], Set<string>>();
+  for (const entry of entries) {
+    const recorded = channels.get(entry.build) ?? new Set<string>();
+    for (const channel of entry.channels) recorded.add(channel);
+    channels.set(entry.build, recorded);
+  }
+  return Array.from(channels, ([build, memberships]) => ({ build, channels: [...memberships] }));
 }
 
 export function previewUpdateCatalog(channel: BundleChannel = "stable"): ComponentUpdateCatalog {
@@ -47,22 +70,16 @@ export function previewRuntime(bundles: ComponentBundlesSnapshot, observations: 
     [null, local_build],
     ["preview-dev", remote_build],
   ]);
-  const retained = new Map<string | null, RetainedBuild[]>([
-    [null, [
-      { build: sample_builds.current, channels: ["local"] },
-      { build: sample_builds.older_stable, channels: ["stable"] },
-      { build: sample_builds.older_nightly, channels: ["nightly"] },
-    ]],
-    ["preview-dev", [
-      { build: sample_builds.current, channels: ["stable"] },
-      { build: sample_builds.older_nightly, channels: ["nightly"] },
-    ]],
+  const retained = new Map<string | null, InstalledRuntimeBuild[]>([
+    [null, [local_build, older_stable, older_nightly].map(installed)],
+    ["preview-dev", [remote_build, forTarget(older_nightly, remote_target)].map(installed)],
   ]);
-  const local_store = new Map<string, RetainedBuild[]>([
+  const local_store = new Map<string, InstalledRuntimeBuild[]>([
     [local_target, retained.get(null)!],
-    [remote_target, [{ build: sample_builds.current, channels: ["stable"] }]],
+    [remote_target, [installed(remote_build)]],
   ]);
   const local_publications = new Map<string, Record<string, string>>([
+    [local_target, { stable: older_stable.label, nightly: older_nightly.label }],
     [remote_target, { stable: remote_build.label }],
   ]);
   const known = new Map<string, Build>([local_build, ...Object.values(published)].map((build) => [build.id, build]));
@@ -109,16 +126,28 @@ export function previewRuntime(bundles: ComponentBundlesSnapshot, observations: 
   }
 
   function chosenBuild(source: ComponentUpdateSource, host_id: string | null): Build {
-    if (source.kind === "published") return published[source.channel];
-    if (source.kind === "working_tree" || source.kind === "provided" && source.local_build) return local_build;
-    if (source.kind === "provided") return { ...local_build, id: "1".repeat(64), channel: "provided", label: "provided-undated-v0.1.0-abcdef1" };
+    const target = host_id === null ? local_target : remote_target;
+    if (source.kind === "published") return forTarget(published[source.channel], target);
+    if (source.kind === "working_tree" || source.kind === "provided" && source.local_build) return forTarget(local_build, target);
+    if (source.kind === "provided") return forTarget({ ...local_build, id: "1".repeat(64), channel: "provided", label: "provided-undated-v0.1.0-abcdef1" }, target);
     if (source.kind === "selected") {
-      const included = bundles.bundles.find((bundle) => bundle.included && bundle.target_triple === (host_id === null ? local_target : remote_target));
+      const included = bundles.bundles.find((bundle) => bundle.included && bundle.target_triple === target);
       if (!included) throw new Error("No sample build is included for this platform.");
       if (host_id === null && included.local_use === "unavailable") throw new Error(included.local_unavailable_reason ?? "This build is unavailable.");
       return { ...local_build, id: included.bundle_id, channel: "provided", label: "provided-undated-v0.1.0-abcdef1" };
     }
-    return host_id === null ? active.get(null) ?? published.stable : published.stable;
+    return host_id === null ? active.get(null) ?? published.stable : forTarget(published.stable, target);
+  }
+
+  function storedTarget(target_triple: string, entries: InstalledRuntimeBuild[]) {
+    const current_publications = { ...local_publications.get(target_triple) };
+    const selected = target_triple === local_target ? active.get(null)?.id : null;
+    const builds = entries.map((entry) => {
+      const current = entry.bundle_id === selected || entry.channels.some((channel) =>
+        !(channel in current_publications) || current_publications[channel] === entry.build_label);
+      return { ...entry, current };
+    });
+    return { target_triple, builds, current_publications };
   }
 
   return {
@@ -126,11 +155,9 @@ export function previewRuntime(bundles: ComponentBundlesSnapshot, observations: 
       const build = read(host_id);
       return {
         active: build?.id ?? null, build_label: build?.label ?? null, origin: build ? { channel: build.channel } : null,
-        missing: false, build_channels: structuredClone(retained.get(host_id) ?? []),
+        missing: false, build_channels: serviceBuildChannels(retained.get(host_id) ?? []),
         target_triple: host_id === null ? local_target : build ? remote_target : null, active_build: build?.identity ?? null,
-        installed_targets: host_id === null ? Array.from(local_store, ([target_triple, builds]) => ({
-          target_triple, builds: structuredClone(builds), current_publications: { ...local_publications.get(target_triple) },
-        })) : undefined,
+        installed_targets: host_id === null ? Array.from(local_store, ([target, entries]) => storedTarget(target, entries)) : undefined,
       };
     },
     async fetch(target_triple: string, channel: BundleChannel, attempt_id: string) {
@@ -139,7 +166,7 @@ export function previewRuntime(bundles: ComponentBundlesSnapshot, observations: 
       if (!local_store.has(target_triple)) local_store.set(target_triple, []);
       for (const [target, entries] of local_store) {
         if (target === target_triple || entries.some((entry) => entry.channels.includes(channel))) {
-          retain(entries, published[channel]);
+          retain(entries, forTarget(published[channel], target));
           local_publications.set(target, { ...local_publications.get(target), [channel]: published[channel].label });
         }
       }
@@ -154,7 +181,7 @@ export function previewRuntime(bundles: ComponentBundlesSnapshot, observations: 
       const build = read(host_id);
       if (!build) throw new Error("Install a runtime to choose its source first.");
       if (build.channel !== "stable" && build.channel !== "nightly") return { state: "pinned" };
-      const latest = published[build.channel];
+      const latest = forTarget(published[build.channel], host_id === null ? local_target : remote_target);
       if (build.id === latest.id) return { state: "current" };
       activate(host_id, latest);
       return { state: "installed" };

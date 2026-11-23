@@ -83,9 +83,10 @@ describe("About page", () => {
   it("fetches a target locally while viewing a host and keeps that host's deployment separate", async () => {
     const target_triple = "aarch64-unknown-linux-musl";
     const build = { version: "0.1.4", source_revision: "abcd0123".repeat(5), source_fingerprint: "a".repeat(64), dirty: false };
+    const build_label = "stable-v0.1.4-abcd012";
     const local = { active: "local", build_label: "local build", origin: { channel: "local" }, missing: false, installed_targets: [] };
     api.runtime.mockResolvedValueOnce(local).mockResolvedValue({
-      ...local, installed_targets: [{ target_triple, builds: [{ build, channels: ["stable"] }] }],
+      ...local, installed_targets: [{ target_triple, builds: [{ build, build_label, bundle_id: "d".repeat(64), channels: ["stable"] }] }],
     });
     api.published.mockResolvedValue({ default_channel: "stable", catalog: {
       channel: "stable", publication_id: "v0.1.4", app_version: build.version, git_revision: build.source_revision,
@@ -101,8 +102,8 @@ describe("About page", () => {
     fireEvent.click(store.getByRole("button", { name: "Add target" }));
     await waitFor(() => expect(store.getByLabelText("Target")).toHaveProperty("value", target_triple));
     fireEvent.click(store.getByRole("button", { name: "Fetch target" }));
-    const version = await store.findByRole("heading", { name: build.version });
-    expect(version.closest("li")?.textContent).toContain(target_triple);
+    const installed = await store.findByRole("rowheader", { name: build_label });
+    expect(installed.closest("tr")?.textContent).toContain(target_triple);
     expect(api.fetch).toHaveBeenCalledExactlyOnceWith(target_triple, "stable", expect.any(String));
     expect(api.runtime.mock.calls).toEqual([[{ kind: "local" }], [{ kind: "local" }]]);
     expect(api.sync).not.toHaveBeenCalled();

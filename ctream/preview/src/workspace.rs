@@ -1,5 +1,5 @@
 use super::{
-  SourceOptions, agent_sync, background,
+  SourceOptions, agent_sync, background, view,
   welcome::Viewer,
   workspace_hosts::{Host, Workspace},
 };
@@ -38,9 +38,9 @@ impl Transport for Connection {
 }
 
 enum Connected {
-  Agent(Box<Viewer<Connection>>),
+  Agent(view::App<Viewer<Connection>>),
   #[cfg(target_os = "macos")]
-  Macos(Box<super::macos_local::Viewer>),
+  Macos(view::App<super::macos_local::Viewer>),
 }
 
 impl Connected {
@@ -49,6 +49,14 @@ impl Connected {
       Self::Agent(viewer) => viewer.is_viewing(),
       #[cfg(target_os = "macos")]
       Self::Macos(viewer) => viewer.is_viewing(),
+    }
+  }
+
+  fn logic(&mut self, ctx: &egui::Context) {
+    match self {
+      Self::Agent(viewer) => viewer.logic(ctx),
+      #[cfg(target_os = "macos")]
+      Self::Macos(viewer) => viewer.logic(ctx),
     }
   }
 
@@ -147,11 +155,7 @@ impl Preview {
     };
     self.connected = Some((
       name,
-      Connected::Agent(Box::new(self.source.clone().viewer(
-        connection,
-        diagnostics,
-        ctx,
-      ))),
+      Connected::Agent(self.source.clone().viewer(connection, diagnostics, ctx)),
     ));
   }
 
@@ -222,7 +226,7 @@ impl Preview {
           }
           #[cfg(target_os = "macos")]
           if ui.button("Capture a local window").clicked() {
-            let viewer = Box::new(super::macos_local::Viewer::new(ui.ctx()));
+            let viewer = view::App::new(super::macos_local::Viewer::new(ui.ctx()));
             self.connected = Some(("Local".into(), Connected::Macos(viewer)));
           }
           let selected = self.selected_host().cloned();
@@ -296,6 +300,12 @@ impl Preview {
 }
 
 impl eframe::App for Preview {
+  fn logic(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+    if let Some((_, connected)) = &mut self.connected {
+      connected.logic(ctx);
+    }
+  }
+
   fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
     if ui.input(|input| input.viewport().close_requested()) {
       if let Some(connecting) = self.connecting.take() {

@@ -4,7 +4,7 @@ use eframe::egui;
 use objc2::{MainThreadMarker, rc::Retained, runtime::AnyObject};
 use objc2_app_kit::{
   NSApplication, NSEvent, NSEventMask, NSEventType, NSScreen, NSWindow, NSWindowCollectionBehavior,
-  NSWindowOrderingMode,
+  NSWindowOcclusionState, NSWindowOrderingMode,
 };
 use objc2_foundation::{NSPoint, NSPointInRect, NSRect, NSSize, NSString};
 use std::{cell::Cell, ptr::NonNull, rc::Rc};
@@ -64,6 +64,20 @@ pub(super) fn viewer() -> Option<ViewerWindow> {
     application,
     window,
   })
+}
+
+pub(super) fn redraw_visible_viewer() {
+  let Some(viewer) = viewer() else { return };
+  let window = &viewer.window;
+  if window.isVisible()
+    && !window.isMiniaturized()
+    && window
+      .occlusionState()
+      .contains(NSWindowOcclusionState::Visible)
+    && let Some(content) = window.contentView()
+  {
+    content.setNeedsDisplay(true);
+  }
 }
 
 fn panel_at(video: NSRect, y: f64, height: f64) -> NSRect {
@@ -161,6 +175,7 @@ fn monitor_drag(
   let viewer = viewer.clone();
   let panel = panel.clone();
   let drag = Rc::clone(drag);
+  let viewport = ctx.viewport_id();
   let ctx = ctx.clone();
   let handler = RcBlock::new(move |event: NonNull<NSEvent>| {
     // AppKit supplies a live event on the main thread for this call.
@@ -226,7 +241,7 @@ fn monitor_drag(
       }
       _ => return event.as_ptr(),
     }
-    ctx.request_repaint_of(egui::ViewportId::ROOT);
+    ctx.request_repaint_of(viewport);
     std::ptr::null_mut()
   });
   // Return the provided event unchanged, or null to consume a tracked drag.

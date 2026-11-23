@@ -144,14 +144,18 @@ impl<T: Transport + Send + Sync + 'static> Panel<T> {
     if refresh {
       self.inspected_size = frame_size;
       let session = self.session.clone();
-      self.pending = Some(Pending::Elements(super::background(ctx, move || {
-        session.elements()
-      })));
+      self.pending = Some(Pending::Elements(super::background_for(
+        ctx,
+        ctx.viewport_id(),
+        move || session.elements(),
+      )));
     } else if let Some(action) = action {
       let session = self.session.clone();
-      self.pending = Some(Pending::Action(super::background(ctx, move || {
-        session.action(action)
-      })));
+      self.pending = Some(Pending::Action(super::background_for(
+        ctx,
+        ctx.viewport_id(),
+        move || session.action(action),
+      )));
     }
   }
 }

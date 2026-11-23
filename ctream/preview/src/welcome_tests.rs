@@ -1,4 +1,5 @@
 use super::*;
+use crate::view::WindowState;
 use ctream_client::transport::{Cancellation, Channel};
 use std::{
   cell::RefCell,
@@ -472,8 +473,8 @@ impl NativeFrame {
   }
 }
 
-/// Exercise the production immediate-viewport path while replacing just the OS
-/// renderer. Child input and output retain their own viewport identities.
+/// Run setup and the deferred viewer in separate passes. The viewer’s
+/// attached controls still use an immediate viewport.
 fn native_frame(
   viewer: &mut Viewer<Mock>,
   ctx: &egui::Context,
@@ -490,7 +491,11 @@ fn native_frame_with_inputs<const N: usize>(
   inputs: [(egui::ViewportId, egui::RawInput); N],
 ) -> NativeFrame {
   ctx.set_embed_viewports(false);
-  let inputs = RefCell::new(HashMap::from(inputs));
+  let mut inputs = HashMap::from(inputs);
+  let child_input = inputs
+    .remove(&viewer_id())
+    .unwrap_or_else(|| raw(Vec::new()));
+  let inputs = RefCell::new(inputs);
   let children = Rc::new(RefCell::new(Vec::new()));
   let recorded = Rc::clone(&children);
   egui::Context::set_immediate_viewport_renderer(move |ctx, mut viewport| {
@@ -504,11 +509,32 @@ fn native_frame_with_inputs<const N: usize>(
     let output = run_headless(ctx, input, viewport.viewport_ui_cb.as_mut());
     recorded.borrow_mut().push((viewport.ids.this, output));
   });
-  let root = run_headless(ctx, root_input, |ui| viewer.update_ui(ui));
+  let mut has_viewer = false;
+  let root = run_headless(ctx, root_input, |ui| {
+    viewer.logic(ui.ctx());
+    let builder = viewer.setup(ui);
+    has_viewer = builder.is_some();
+    if let Some(builder) = builder {
+      ui.ctx()
+        .show_viewport_deferred(viewer_id(), builder, |_, _| {});
+    }
+  });
+  if has_viewer {
+    let child = run_headless(ctx, in_viewer_viewport(child_input), |ui| {
+      viewer.viewer(ui, egui::ViewportClass::Deferred);
+    });
+    children.borrow_mut().push((viewer_id(), child));
+  }
   NativeFrame {
     root,
     children: std::mem::take(&mut *children.borrow_mut()),
   }
+}
+
+fn in_viewer_viewport(mut input: egui::RawInput) -> egui::RawInput {
+  input.viewport_id = viewer_id();
+  input.viewports.entry(viewer_id()).or_default().parent = Some(egui::ViewportId::ROOT);
+  input
 }
 
 fn close_input(id: egui::ViewportId) -> egui::RawInput {
@@ -630,6 +656,106 @@ fn interactions(at: egui::Pos2, hold_key: bool) -> Vec<egui::Event> {
     });
   }
   events
+}
+
+#[test]
+fn deferred_viewer_uploads_new_frames_without_another_setup_pass() {
+  let mock = Mock::default();
+  let ctx = egui::Context::default();
+  ctx.set_embed_viewports(false);
+  let mut viewer = create(&mock, &ctx, true, "auto");
+  poll_until(&mut viewer, &ctx, ready);
+  let capture = mock.captures().pop().unwrap();
+  let stream = Arc::clone(&viewer.preview.as_ref().unwrap().stream);
+  let texture = viewer
+    .preview
+    .as_ref()
+    .unwrap()
+    .texture
+    .as_ref()
+    .unwrap()
+    .id();
+  viewer.start(&ctx);
+  poll_until(&mut viewer, &ctx, |viewer| {
+    viewer.preview.as_ref().unwrap().input.is_some()
+  });
+  let input = mock.inputs().pop().unwrap();
+  let mut app = view::App::new(viewer);
+  let root = run_headless(&ctx, raw(Vec::new()), |ui| {
+    app.logic(ui.ctx());
+    app.update_ui(ui);
+  });
+  let viewport = &root.viewport_output[&viewer_id()];
+  assert!(viewport.class == egui::ViewportClass::Deferred);
+  let draw = viewport.viewport_ui_cb.as_ref().unwrap();
+  let opening = run_headless(&ctx, in_viewer_viewport(raw(Vec::new())), |ui| draw(ui));
+  assert!(
+    opening.viewport_output[&egui::ViewportId::ROOT]
+      .commands
+      .contains(&egui::ViewportCommand::Visible(false))
+  );
+  assert!(rendered_image(&opening, texture).is_positive());
+  let sent = input.sent();
+
+  let (wake, repaints) = std::sync::mpsc::channel();
+  ctx.set_repaint_observer(move |request| {
+    let _ = wake.send(request.viewport_id);
+  });
+  let wait_for_repaint = |id, ready: &dyn Fn() -> bool| {
+    let deadline = Instant::now() + DEADLINE;
+    loop {
+      let requested = repaints
+        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        .expect("capture must wake the intended viewport");
+      if requested == id && ready() {
+        break;
+      }
+    }
+  };
+  for shade in [47, 93, 156] {
+    while repaints.try_recv().is_ok() {}
+    let before = stream.lock().unwrap().received;
+    let mut frame = b"P6\n2 1\n255\n".to_vec();
+    frame.extend([shade; 6]);
+    capture.push_frame_bytes(&frame);
+    wait_for_repaint(viewer_id(), &|| stream.lock().unwrap().received > before);
+    let mut raw = in_viewer_viewport(raw(Vec::new()));
+    raw
+      .viewports
+      .entry(egui::ViewportId::ROOT)
+      .or_default()
+      .occluded = Some(true);
+    let mut output = ctx.run_ui(raw, |ui| draw(ui));
+    let delta = output.textures_delta.set[&texture]
+      .last()
+      .expect("viewer must upload the new frame");
+    let egui::ImageData::Color(image) = &delta.image;
+    assert_eq!(image.pixels, [egui::Color32::from_gray(shade); 2]);
+    assert!(rendered_image(&output, texture).is_positive());
+    output.textures_delta.clear();
+  }
+  assert_eq!(input.sent(), sent);
+  assert_eq!(mock.captures().len(), 1);
+
+  // A closed source must also restore setup if the viewer gets no paint pass.
+  while repaints.try_recv().is_ok() {}
+  capture.finish();
+  wait_for_repaint(egui::ViewportId::ROOT, &|| {
+    stream.lock().unwrap().end.is_some()
+  });
+  let mut setup = raw(Vec::new());
+  setup
+    .viewports
+    .entry(egui::ViewportId::ROOT)
+    .or_default()
+    .occluded = Some(true);
+  let logic = ctx.run_logic(&setup, |ctx| app.logic(ctx));
+  assert!(
+    logic.viewport_commands[&egui::ViewportId::ROOT]
+      .contains(&egui::ViewportCommand::Visible(true))
+  );
+  assert!(!app.is_viewing());
+  assert!(input.closed() && input.cancelled());
 }
 
 #[test]
@@ -1507,7 +1633,9 @@ fn attached_controls_leave_the_video_fixed_and_handle_only_local_input() {
       .commands(egui::ViewportId::ROOT)
       .any(|command| *command == ViewportCommand::Visible(true))
   );
-  label_center(&closed.root, "CAPTURE DRIVER");
+  let setup = native_frame(&mut viewer, &ctx, raw(Vec::new()), raw(Vec::new()));
+  assert!(setup.children.is_empty());
+  label_center(&setup.root, "CAPTURE DRIVER");
 }
 
 #[test]
@@ -1588,7 +1716,9 @@ fn viewer_controls_stay_local_and_closing_restores_setup() {
       .commands(egui::ViewportId::ROOT)
       .any(|command| *command == ViewportCommand::Visible(true))
   );
-  label_center(&closed.root, "CAPTURE DRIVER");
+  let setup = native_frame(&mut viewer, &ctx, raw(Vec::new()), raw(Vec::new()));
+  assert!(setup.children.is_empty());
+  label_center(&setup.root, "CAPTURE DRIVER");
 }
 
 #[test]

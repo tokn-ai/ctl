@@ -1687,6 +1687,7 @@ dependencies = [
  "ctream-driver-capture",
  "ctream-driver-input",
  "ctream-proto",
+ "dispatch2",
  "eframe",
  "hex",
  "objc2 0.6.5",

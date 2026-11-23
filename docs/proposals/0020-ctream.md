@@ -213,12 +213,12 @@ space is limited. Superseded frames were replaced by newer frames before
 upload. **Copy** copies the current readings. The expanded panel pauses
 remote input while it is open.
 
-Both windows use the same egui context and wgpu renderer. The native viewer is
-an immediate child viewport, so its events and repaint requests run through
-the root setup viewport even while setup is hidden. Only the viewer viewport
-forwards input; painting a view-only preview must not reset viewer-held keys
-or buttons. Capture keeps the newest frame and signals a root repaint without
-waiting for the renderer.
+Both windows share the egui context and wgpu renderer. The native viewer uses
+a deferred viewport that can redraw while its setup window is hidden. Capture
+keeps the newest frame and signals the viewport currently displaying it.
+On macOS, a frame that stays pending can request a redraw directly from the
+visible viewer window. Capture termination also wakes setup so it can handle a viewer that is
+minimized. The viewer viewport owns input forwarding and held input state.
 
 On a **local native Wayland viewer**, winit 0.30.13 implements window visibility
 and focus requests as no-ops. Automatic setup hiding and activation therefore

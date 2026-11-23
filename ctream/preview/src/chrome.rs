@@ -1,4 +1,8 @@
+#[cfg(target_os = "macos")]
+use dispatch2::MainThreadBound;
 use eframe::egui::{self, Align, Pos2, Rect, ViewportCommand};
+#[cfg(target_os = "macos")]
+use objc2::MainThreadMarker;
 use std::time::Duration;
 
 pub(super) const REVEAL_HEIGHT: f32 = 8.0;
@@ -71,7 +75,7 @@ pub(super) struct Chrome {
   fixed: bool,
   resize: Option<Resize>,
   #[cfg(target_os = "macos")]
-  attached: Option<super::macos_chrome::AttachedPanel>,
+  attached: Option<MainThreadBound<super::macos_chrome::AttachedPanel>>,
   #[cfg(test)]
   pub test_attached_hover: Option<bool>,
 }
@@ -184,6 +188,7 @@ impl Chrome {
 
   #[cfg(target_os = "macos")]
   fn show_macos(&mut self, ctx: &egui::Context, status: Status<'_>) -> Option<Frame> {
+    let main = MainThreadMarker::new()?;
     let viewer = super::macos_chrome::viewer()?;
     let height = BAR_HEIGHT * ctx.zoom_factor();
     let reveal = REVEAL_HEIGHT * ctx.zoom_factor();
@@ -192,6 +197,7 @@ impl Chrome {
       return Some(Frame::attached());
     }
     let initial_width = if let Some(panel) = &self.attached {
+      let panel = panel.get(main);
       // AppKit moves the child with its parent. Keep the same attachment even
       // when the pointer leaves the strip or the viewer reaches a screen edge.
       if !panel.dragging() {
@@ -223,7 +229,8 @@ impl Chrome {
 
     let action = show_controls(ctx, status, false, initial_width);
     if self.attached.is_none() {
-      self.attached = Some(viewer.attach_controls(height, status.button_strip_width(), ctx)?);
+      let panel = viewer.attach_controls(height, status.button_strip_width(), ctx)?;
+      self.attached = Some(MainThreadBound::new(panel, main));
     }
     let frame = Frame::attached().apply(ctx, action);
     if frame.close || matches!(action, Some(Action::Minimize)) {
@@ -232,10 +239,10 @@ impl Chrome {
       if action.is_some()
         && let Some(panel) = &self.attached
       {
-        panel.restore_focus();
+        panel.get(main).restore_focus();
       }
       // Leaving both native windows may produce no further pointer events.
-      ctx.request_repaint_after_for(Duration::from_millis(33), egui::ViewportId::ROOT);
+      ctx.request_repaint_after(Duration::from_millis(33));
     }
     Some(frame)
   }

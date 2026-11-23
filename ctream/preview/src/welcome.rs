@@ -1,6 +1,6 @@
 use super::view::viewer_id;
 use super::{
-  CaptureEnd, Preview, PreviewMode, background, chrome, drivers, input, latency,
+  CaptureEnd, Preview, PreviewMode, background, background_for, chrome, drivers, input, latency,
   requests::{Requests, Scoped, Traffic},
   semantic, setup,
   stats::{CaptureDetails, Connection, Stats},
@@ -191,6 +191,7 @@ pub(super) struct Viewer<T: Transport> {
   preview: Option<Preview<Scoped<T>>>,
   preview_error: Option<String>,
   preview_after: Instant,
+  repaint: view::Repaint,
   control: Pending<Control<T>>,
   control_requests: Option<Requests>,
   viewing: bool,
@@ -241,6 +242,7 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
       preview: None,
       preview_error: None,
       preview_after: Instant::now(),
+      repaint: view::Repaint::default(),
       control: None,
       control_requests: None,
       viewing: false,
@@ -270,6 +272,7 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
     self.preview_error = None;
     self.viewing = false;
     self.viewer_opening = false;
+    self.repaint.set_viewing(false);
     self.preview_after = Instant::now() + Duration::from_millis(180);
   }
 
@@ -569,8 +572,9 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
       .selected_catalog_supported()
       .then(|| self.driver.clone());
     let render = ctx.clone();
+    let repaint = self.repaint.clone();
     self.connecting = Some(background(ctx, move || {
-      Preview::connect(session, driver.as_deref(), render)
+      Preview::connect(session, driver.as_deref(), render, repaint)
     }));
   }
 
@@ -689,9 +693,11 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
     let session = client.session(target, window);
     self.viewing = true;
     self.viewer_opening = true;
+    self.viewer_size = view::AspectResize::default();
+    self.chrome = chrome::Chrome::default();
     if session.supports_input() {
       let control = session.clone();
-      self.control = Some(background(ctx, move || control.input()));
+      self.control = Some(background_for(ctx, viewer_id(), move || control.input()));
     }
     if session.supports_semantics() {
       self.semantic = Some(semantic::Panel::new(session));
@@ -733,6 +739,7 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
     self.control_requests = None;
     self.viewing = false;
     self.viewer_opening = false;
+    self.repaint.set_viewing(false);
     view::restore_setup(ctx);
   }
 
@@ -1061,74 +1068,76 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
       }
     });
   }
+}
 
-  fn show_viewer_window(&mut self, ctx: &egui::Context) {
-    let initial = self.viewer_opening.then(|| {
-      let image = self
-        .preview
-        .as_ref()
-        .and_then(Preview::image_size)
-        .unwrap_or([16, 9]);
-      let sidebar = if self.semantic.is_some() {
-        semantic::PANEL_WIDTH
-      } else {
-        0.0
-      };
-      self.viewer_size = view::AspectResize::default();
-      self.chrome = chrome::Chrome::default();
-      (image, sidebar)
-    });
-    let builder = view::viewer_builder(ctx, initial);
-    ctx.show_viewport_immediate(viewer_id(), builder, |child, class| {
-      if class == egui::ViewportClass::EmbeddedWindow {
-        self.close_viewer(child.ctx());
-        self.preview_error =
-          Some("This backend cannot open a separate native viewer window.".into());
-        return;
-      }
-      if child.input(|input| input.viewport().close_requested()) {
-        self.close_viewer(child.ctx());
-        return;
-      }
-      if self.viewer_opening {
-        // Wait until the native child exists before hiding its parent. Scope
-        // every command explicitly so a child event cannot close the app.
-        view::hide_setup(child.ctx());
-        self.viewer_opening = false;
-      }
-      self.show_viewer(child);
-    });
-  }
-
-  pub(super) fn is_viewing(&self) -> bool {
+impl<T: Transport + Send + Sync + 'static> view::WindowState for Viewer<T> {
+  fn is_viewing(&self) -> bool {
     self.viewing
   }
 
-  pub(super) fn update_ui(&mut self, ui: &mut egui::Ui) {
-    let ctx = ui.ctx().clone();
+  fn logic(&mut self, ctx: &egui::Context) {
     if ctx.input(|input| input.viewport().close_requested()) {
       self.shutdown();
-      return;
-    }
-    self.poll(&ctx);
-    let setup_shown = !self.viewing;
-    if setup_shown {
-      self.show_setup(ui);
-    }
-    if self.viewing {
-      self.show_viewer_window(&ctx);
-    }
-    if !setup_shown && !self.viewing {
-      // Paint the retained setup in the same pass that makes ROOT visible,
-      // rather than briefly restoring an empty hidden-window frame.
-      self.show_setup(ui);
+    } else if self.viewing && self.preview.as_ref().is_some_and(Preview::ended) {
+      // Capture end can arrive while the viewer is minimized and does not draw.
+      self.poll(ctx);
+      if self.viewing {
+        ctx.request_repaint_of(viewer_id());
+      }
     }
   }
-}
 
-impl<T: Transport + Send + Sync + 'static> eframe::App for Viewer<T> {
-  fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
-    self.update_ui(ui);
+  fn setup(&mut self, ui: &mut egui::Ui) -> Option<egui::ViewportBuilder> {
+    let ctx = ui.ctx().clone();
+    if ctx.input(|input| input.viewport().close_requested()) {
+      return None;
+    }
+    if !self.viewing {
+      self.poll(&ctx);
+      self.show_setup(ui);
+    }
+    self.viewing.then(|| {
+      let initial = self.viewer_opening.then(|| {
+        let image = self
+          .preview
+          .as_ref()
+          .and_then(Preview::image_size)
+          .unwrap_or([16, 9]);
+        let sidebar = if self.semantic.is_some() {
+          semantic::PANEL_WIDTH
+        } else {
+          0.0
+        };
+        (image, sidebar)
+      });
+      view::viewer_builder(&ctx, initial)
+    })
+  }
+
+  fn viewer(&mut self, ui: &mut egui::Ui, class: egui::ViewportClass) {
+    if !self.viewing {
+      return;
+    }
+    let ctx = ui.ctx().clone();
+    if class == egui::ViewportClass::EmbeddedWindow {
+      self.close_viewer(&ctx);
+      self.preview_error = Some("This backend cannot open a separate native viewer window.".into());
+      return;
+    }
+    if ctx.input(|input| input.viewport().close_requested()) {
+      self.close_viewer(&ctx);
+      return;
+    }
+    if self.viewer_opening {
+      // Route the next frame to this viewport before draining the pending one.
+      self.repaint.set_viewing(true);
+      self.viewer_opening = false;
+      view::hide_setup(&ctx);
+    }
+    self.poll(&ctx);
+    if self.viewing {
+      self.show_viewer(ui);
+    }
   }
 }
 
@@ -1149,6 +1158,7 @@ impl<T: Transport> Viewer<T> {
     self.catalog_requests = None;
     self.viewing = false;
     self.viewer_opening = false;
+    self.repaint.set_viewing(false);
   }
 }
 

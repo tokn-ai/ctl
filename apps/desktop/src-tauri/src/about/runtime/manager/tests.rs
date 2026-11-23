@@ -29,10 +29,14 @@ async fn an_incompatible_updater_never_receives_the_update_command() {
   let (_stop, cancelled) = watch::channel(false);
   for layout in [MIN_TRACKED_UPDATE_LAYOUT - 1, MIN_TRACKED_UPDATE_LAYOUT] {
     let script = format!(
-      "#!/bin/sh\ncase \"$1\" in\n--version) echo 'ctlup 0.1.4';;\ninstallation-layout-version) echo {layout};;\nupdate) touch \"$0.ran\";;\n*) exit 1;;\nesac\n"
+      "#!/bin/sh\ncase \"$1\" in\n--version) echo 'ctlup 0.1.4-rc.1+test';;\ninstallation-layout-version) echo {layout};;\nupdate) touch \"$0.ran\";;\n*) exit 1;;\nesac\n"
     );
     std::fs::write(&path, script).unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(
+      read_version(&path, &cancelled).await.unwrap(),
+      "0.1.4-rc.1+test"
+    );
     let result = run_compatible_manager(
       &path,
       ManagerAction::Update(None),

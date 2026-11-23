@@ -9,6 +9,7 @@
 .about-desktop-build strong { color: var(--text); font-size: 14px; font-weight: 600; }
 .about-desktop-channel { border: 1px solid var(--border); border-radius: 4px; padding: 1px 6px; }
 .about-desktop-build code { font-size: 11px; }
+.about-updater-version { margin-top: 5px; }
 .about-page button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; padding: 6px 10px; border: 1px solid #454545; border-radius: 4px; background: var(--surface-2); cursor: pointer; white-space: nowrap; }
 .about-page button:hover:not(:disabled) { background: var(--surface-3); border-color: #666; }
 .about-page button:disabled { opacity: .5; cursor: default; }

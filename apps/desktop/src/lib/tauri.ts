@@ -133,6 +133,10 @@ export function getDesktopBuild(): Promise<DesktopBuildInfo> {
   return invoke("get_desktop_build");
 }
 
+export function getUpdaterVersion(): Promise<string> {
+  return invoke("get_updater_version");
+}
+
 export async function getComponentVersions(host_id?: string): Promise<ComponentVersionsSnapshot> {
   return invoke("get_component_versions", host_id ? { host_id } : undefined);
 }

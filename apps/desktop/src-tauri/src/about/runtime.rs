@@ -327,6 +327,11 @@ fn home() -> CommandResult<std::path::PathBuf> {
   dirs::home_dir().ok_or_else(|| CommandErrorDto::backend("Home directory is unavailable."))
 }
 
+#[tauri::command]
+pub(crate) async fn get_updater_version() -> CommandResult<String> {
+  manager::selected_version(&home()?).await
+}
+
 fn start_operation(
   window: &str,
   attempt_id: Option<String>,

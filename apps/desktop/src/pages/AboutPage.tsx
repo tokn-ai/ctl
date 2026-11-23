@@ -10,6 +10,7 @@ import { InlineFeedback } from "../components/feedback/InlineFeedback";
 import { UpdateComponentsDialog } from "../components/components/UpdateComponentsDialog";
 import { RuntimeMachines } from "../components/about/RuntimeMachines";
 import { RunningDesktopBuild } from "../components/about/RunningDesktopBuild";
+import { UpdaterVersion } from "../components/about/UpdaterVersion";
 import { RuntimeTargets } from "../components/about/RuntimeTargets";
 import { SshHostFlow } from "../components/sessions/SshHostFlow";
 import { useComponentVersions } from "../features/about/useComponentVersions";
@@ -79,6 +80,7 @@ export function AboutPage({ visible, on_close, on_restarted, on_dialog_change, e
         <div>
           <h1 ref={heading} tabIndex={-1}>{t("about.title")}</h1>
           <RunningDesktopBuild visible={visible} fallback={app?.running} />
+          <UpdaterVersion visible={visible} refresh_revision={builds_revision} />
         </div>
         <button type="button" onClick={on_close} className="about-back"><Icon name="close" />{t("about.back")}</button>
       </header>

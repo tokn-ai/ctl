@@ -2,10 +2,12 @@
 
 Open **About ctmux** to see the version and build channel of the running
 desktop application. Nightly and local builds also show their Git revision.
+The next line shows the version of the local `ctlup` executable the app uses.
 The desktop and each machine’s runtime can come from different channels.
 
-**Runtime targets** lists the verified builds stored on this computer by
-platform. Use **Add target** to fetch a platform from a stable or nightly
+**Runtime targets on this computer** groups stored builds by version, newest
+first. Under each version, you can see the installed platforms and the channel
+of each build. Use **Add target** to fetch a platform from a stable or nightly
 publication. Like `ctlup bundle fetch`, this brings registered targets on
 that channel to the same publication and leaves the active runtime selection
 in place. A stored Linux build, for example, is available for deployment to

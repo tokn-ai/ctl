@@ -3,6 +3,7 @@ import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { bundleRoot, validatedComponentSet, type BundleChannel } from "./bundle-publication.mts";
 import { readAgentFile, validateAgentIdentity, type AgentBundleIdentity } from "../shared/agent-bundle.mts";
+import { compareParsedVersions, parseVersion } from "../shared/semver.mts";
 
 export const siteMarker = "ctl-bundle-pages";
 export const nightlyRetention = 1;
@@ -87,28 +88,14 @@ export function verifyChannelPointer(bytes: Buffer, channel: CatalogChannel, pub
   }
 }
 
-function semver(value: string): { core: bigint[]; prerelease: string[] } {
-  const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.exec(value);
-  if (!match) throw new Error(`Invalid release version: ${value}`);
-  const prerelease = match[4]?.split(".") ?? [];
-  if (prerelease.some((part) => /^0\d+$/.test(part))) throw new Error(`Invalid release version: ${value}`);
-  return { core: match.slice(1, 4).map(BigInt), prerelease };
+function semver(value: string) {
+  const version = parseVersion(value);
+  if (!version) throw new Error(`Invalid release version: ${value}`);
+  return version;
 }
 
 export function compareVersions(left: string, right: string): number {
-  const a = semver(left), b = semver(right);
-  for (let index = 0; index < 3; index += 1) if (a.core[index] !== b.core[index]) return a.core[index] > b.core[index] ? 1 : -1;
-  if (!a.prerelease.length || !b.prerelease.length) return Number(!a.prerelease.length) - Number(!b.prerelease.length);
-  for (let index = 0; index < Math.max(a.prerelease.length, b.prerelease.length); index += 1) {
-    const x = a.prerelease[index], y = b.prerelease[index];
-    if (x === undefined || y === undefined) return Number(x !== undefined) - Number(y !== undefined);
-    if (x === y) continue;
-    const xn = /^\d+$/.test(x), yn = /^\d+$/.test(y);
-    if (xn && yn) return BigInt(x) > BigInt(y) ? 1 : -1;
-    if (xn !== yn) return xn ? -1 : 1;
-    return x > y ? 1 : -1;
-  }
-  return 0;
+  return compareParsedVersions(semver(left), semver(right));
 }
 
 function newer(left: CatalogPublication, right: CatalogPublication): number {

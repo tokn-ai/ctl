@@ -33,21 +33,11 @@ pub(super) enum ManagerAction<'a> {
 
 pub(super) async fn run_manager(
   home: &Path,
-  mut cancelled: watch::Receiver<bool>,
+  cancelled: watch::Receiver<bool>,
   action: ManagerAction<'_>,
   deadline: Duration,
 ) -> CommandResult<Vec<u8>> {
-  let root = std::env::var_os("CARGO_INSTALL_ROOT")
-    .or_else(|| std::env::var_os("CARGO_HOME"))
-    .map_or_else(|| home.join(".cargo"), PathBuf::from);
-  let explicit = std::env::var_os("CTLUP_BIN").map(PathBuf::from);
-  let home = home.to_owned();
-  let manager = tokio::task::spawn_blocking(move || resolve_manager(&home, explicit, &root));
-  let (path, _lease) = tokio::select! {
-    result = manager => result.map_err(CommandErrorDto::backend)??,
-    _ = cancelled.wait_for(|stop| *stop) => return Err(CommandErrorDto::new("runtime_operation_cancelled", "The runtime operation was cancelled.")),
-    () = tokio::time::sleep(deadline) => return Err(CommandErrorDto::backend("Timed out waiting for the local ctlup installation.")),
-  };
+  let (path, _lease) = selected_manager(home, cancelled.clone(), deadline).await?;
   run_compatible_manager(&path, action, deadline, cancelled)
     .await
     .map_err(|error| {
@@ -57,6 +47,24 @@ pub(super) async fn run_manager(
         CommandErrorDto::backend(error)
       }
     })
+}
+
+async fn selected_manager(
+  home: &Path,
+  mut cancelled: watch::Receiver<bool>,
+  deadline: Duration,
+) -> CommandResult<(PathBuf, Option<Lease>)> {
+  let root = std::env::var_os("CARGO_INSTALL_ROOT")
+    .or_else(|| std::env::var_os("CARGO_HOME"))
+    .map_or_else(|| home.join(".cargo"), PathBuf::from);
+  let explicit = std::env::var_os("CTLUP_BIN").map(PathBuf::from);
+  let home = home.to_owned();
+  let manager = tokio::task::spawn_blocking(move || resolve_manager(&home, explicit, &root));
+  tokio::select! {
+    result = manager => result.map_err(CommandErrorDto::backend)?,
+    _ = cancelled.wait_for(|stop| *stop) => Err(CommandErrorDto::new("runtime_operation_cancelled", "The runtime operation was cancelled.")),
+    () = tokio::time::sleep(deadline) => Err(CommandErrorDto::backend("Timed out waiting for the local ctlup installation.")),
+  }
 }
 
 async fn run_compatible_manager(
@@ -142,13 +150,27 @@ fn resolve_manager(
   Ok((path, None))
 }
 
+async fn probe(path: &Path, flag: &str, cancelled: &watch::Receiver<bool>) -> io::Result<Vec<u8>> {
+  let mut command = Command::new(path);
+  command.arg(flag);
+  run(command, Duration::from_secs(5), cancelled.clone(), None).await
+}
+
+pub(super) async fn selected_version(home: &Path) -> CommandResult<String> {
+  let (_stop, cancelled) = watch::channel(false);
+  let (path, _lease) = selected_manager(home, cancelled.clone(), Duration::from_secs(5)).await?;
+  read_version(&path, &cancelled)
+    .await
+    .map_err(CommandErrorDto::backend)
+}
+
+async fn read_version(path: &Path, cancelled: &watch::Receiver<bool>) -> io::Result<String> {
+  let output = probe(path, "--version", cancelled).await?;
+  crate::about::local::reported_binary_version(&output, "ctlup").map_err(io::Error::other)
+}
+
 async fn inspect_manager(path: &Path, cancelled: &watch::Receiver<bool>) -> io::Result<()> {
-  let probe = |flag| {
-    let mut command = Command::new(path);
-    command.arg(flag);
-    run(command, Duration::from_secs(5), cancelled.clone(), None)
-  };
-  let version = probe("--version").await?;
+  let version = probe(path, "--version", cancelled).await?;
   if !version.starts_with(b"ctlup ") {
     return Err(io::Error::other(
       "The selected executable does not identify as ctlup.",
@@ -159,7 +181,7 @@ async fn inspect_manager(path: &Path, cancelled: &watch::Receiver<bool>) -> io::
       "This operation requires ctlup storage layout {MIN_TRACKED_UPDATE_LAYOUT} or later. Upgrade the managed ctlup, or set CTLUP_BIN to the absolute path of a compatible ctlup and reopen the app."
     ))
   };
-  let output = probe("installation-layout-version")
+  let output = probe(path, "installation-layout-version", cancelled)
     .await
     .map_err(|error| {
       if error.kind() == io::ErrorKind::TimedOut || *cancelled.borrow() {

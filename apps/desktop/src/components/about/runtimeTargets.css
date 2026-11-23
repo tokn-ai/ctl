@@ -1,20 +1,27 @@
 .runtime-target-heading,
 .runtime-target-fields,
-.runtime-target-build { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
+.runtime-version-heading,
+.runtime-build-identity,
+.runtime-build-platforms > div { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 7px; }
 .runtime-target-heading { justify-content: space-between; margin-bottom: 12px; }
 .runtime-target-heading h2 { margin: 0; }
 .runtime-target-list { margin: 0; padding: 0; list-style: none; border-block: 1px solid var(--border); }
-.runtime-target-list > li { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr); align-items: center; gap: 6px 16px; padding: 10px 2px; font-size: 12px; }
+.runtime-target-list > li { padding: 10px 2px; font-size: 12px; }
 .runtime-target-list > li + li { border-top: 1px solid var(--border); }
-.runtime-target-list strong { font-weight: 600; }
+.runtime-version-heading { margin-bottom: 6px; }
+.runtime-version-heading h3 { margin: 0; font-weight: 600; font-size: 14px; overflow-wrap: anywhere; }
+.runtime-version-build { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); gap: 6px 16px; align-items: baseline; margin-inline-start: 12px; overflow-wrap: anywhere; }
+.runtime-build-platforms { display: grid; gap: 6px; }
+.runtime-build-platforms strong { font-weight: 500; }
 .runtime-target-triple { display: block; margin-top: 3px; font-size: 11px; color: var(--muted); overflow-wrap: anywhere; }
-.runtime-target-build + .runtime-target-build, .runtime-target-list details { margin-top: 4px; }
-.runtime-target-build code, .runtime-target-build small, .runtime-target-list summary { font-size: 11px; color: var(--muted); }
+.runtime-build-platforms .runtime-target-triple { margin-top: 0; }
+.runtime-version-build + .runtime-version-build, .runtime-target-list details { margin-top: 8px; }
+.runtime-target-list small, .runtime-build-identity code, .runtime-target-list summary { font-size: 11px; color: var(--muted); }
 .runtime-target-list summary { cursor: pointer; }
 .runtime-target-picker { padding: 12px; margin-top: 12px; border: 1px solid var(--border); border-radius: 5px; background: var(--surface-1); font-size: 12px; }
 .runtime-target-fields { align-items: end; margin-block: 8px; }
 .runtime-target-fields label { display: grid; gap: 4px; min-width: 0; color: var(--muted); }
 .runtime-target-fields select { min-height: 28px; max-width: 100%; padding: 3px 7px; color: var(--text); background: var(--surface-2); border: 1px solid var(--border); border-radius: 4px; }
 @media (max-width: 580px) {
-  .runtime-target-list > li { grid-template-columns: 1fr; }
+  .runtime-version-build { grid-template-columns: 1fr; gap: 3px; }
 }

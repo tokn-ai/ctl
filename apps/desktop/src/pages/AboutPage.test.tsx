@@ -10,11 +10,12 @@ import type { ComponentVersionInfo, ComponentVersionsSnapshot, ComponentActionPr
 import { AboutPage } from "./AboutPage";
 
 const api = vi.hoisted(() => ({
-  desktop: vi.fn(), fetch: vi.fn(), runtime: vi.fn(), sync: vi.fn(), versions: vi.fn(), preflight: vi.fn(), restart: vi.fn(),
+  desktop: vi.fn(), updater: vi.fn(), fetch: vi.fn(), runtime: vi.fn(), sync: vi.fn(), versions: vi.fn(), preflight: vi.fn(), restart: vi.fn(),
   bundles: vi.fn(), select: vi.fn(), published: vi.fn(), update: vi.fn(), cancel_update: vi.fn(),
 }));
 vi.mock("../lib/tauri", () => ({
   getDesktopBuild: api.desktop,
+  getUpdaterVersion: api.updater,
   fetchAboutRuntimeTarget: api.fetch,
   getAboutRuntimeStatus: api.runtime,
   syncAboutRuntime: api.sync,
@@ -66,6 +67,7 @@ beforeEach(() => {
   notifications = new NotificationStore();
   vi.resetAllMocks();
   api.desktop.mockResolvedValue({ version: "0.1.5", channel: "local", source_revision: "12121212".repeat(5) });
+  api.updater.mockResolvedValue("0.1.3");
   api.runtime.mockResolvedValue({ active: null, build_label: null, missing: false, origin: null });
   api.sync.mockResolvedValue({ state: "installed" });
   api.bundles.mockResolvedValue({ bundles: [], errors: [] });
@@ -91,13 +93,16 @@ describe("About page", () => {
     } });
     renderPage(<AboutPage {...props()} />);
     const remote = await selectMachine("Development");
-    const store = within(screen.getByRole("region", { name: /runtime targets/i }));
+    const inventory = screen.getByRole("region", { name: /runtime targets/i });
+    const updater = await screen.findByText(/\b0\.1\.3\b/);
+    expect(updater.compareDocumentPosition(inventory) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    const store = within(inventory);
     expect(api.published).not.toHaveBeenCalled();
     fireEvent.click(store.getByRole("button", { name: "Add target" }));
     await waitFor(() => expect(store.getByLabelText("Target")).toHaveProperty("value", target_triple));
     fireEvent.click(store.getByRole("button", { name: "Fetch target" }));
-    await waitFor(() => expect(store.getByRole("listitem").textContent).toContain(target_triple));
-    expect(store.getByRole("listitem").textContent).toContain(build.version);
+    const version = await store.findByRole("heading", { name: build.version });
+    expect(version.closest("li")?.textContent).toContain(target_triple);
     expect(api.fetch).toHaveBeenCalledExactlyOnceWith(target_triple, "stable", expect.any(String));
     expect(api.runtime.mock.calls).toEqual([[{ kind: "local" }], [{ kind: "local" }]]);
     expect(api.sync).not.toHaveBeenCalled();

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { cancelComponentUpdate, checkComponentUpdates, fetchAboutRuntimeTarget } from "../../lib/tauri";
 import type { AboutRuntimeStatus, BundleChannel, ComponentUpdateCatalog } from "../../lib/types";
@@ -35,6 +35,47 @@ beforeEach(() => {
   vi.mocked(cancelComponentUpdate).mockResolvedValue(undefined);
 });
 afterEach(cleanup);
+
+it("groups exact versions newest first, including prereleases and retained imported builds", () => {
+  const versions = ["0.9.0", "local-snapshot", "0.10.0-rc.2", "0.10.0", "0.10.0-rc.10"];
+  const installed_targets = [linux, windows].map((target_triple) => ({
+    target_triple, builds: versions.map((version) => ({
+      channels: ["stable"], build: { ...build, version }, current: version !== "local-snapshot",
+    })),
+  }));
+  render(<RuntimeTargets inventory={{ ...inventory, installed_targets }} loading={false} error={null} on_refresh={on_refresh} />);
+  const headings = screen.getAllByRole("heading", { level: 3 });
+  expect(headings.map((item) => item.textContent)).toEqual(["0.10.0", "0.10.0-rc.10", "0.10.0-rc.2", "0.9.0", "local-snapshot"]);
+  for (const heading of headings) {
+    const version = within(heading.closest("li")!);
+    expect(version.getByText(linux)).toBeTruthy();
+    expect(version.getByText(windows)).toBeTruthy();
+    expect(version.getAllByText("stable")).toHaveLength(1);
+    expect(!!version.queryByText("Retained")).toBe(heading.textContent === "local-snapshot");
+  }
+});
+
+it("retains per-target channels and distinguishes rebuilds from the same commit", () => {
+  const other = { ...build, source_fingerprint: build.source_fingerprint.slice(0, 8) + "c".repeat(56) };
+  render(<RuntimeTargets loading={false} error={null} on_refresh={on_refresh} inventory={{ ...inventory, installed_targets: [
+    { target_triple: windows, builds: [{ build, channels: ["local"] }, { build, channels: ["local"] }] },
+    { target_triple: linux, builds: [
+      { build, channels: ["nightly"], current: false },
+      { build: other, channels: ["nightly"], current: false },
+    ] },
+  ] }} />);
+  expect(screen.getAllByRole("heading", { level: 3 })).toHaveLength(1);
+  const platform = screen.getByText(windows).parentElement!;
+  expect(within(platform).getByText("local")).toBeTruthy();
+  expect(within(platform).queryByText("nightly")).toBeNull();
+  expect(within(platform).queryByText("Retained")).toBeNull();
+  const retained = screen.getByText("Retained").parentElement!;
+  expect(within(retained).getByText(linux)).toBeTruthy();
+  expect(within(retained).getByText("nightly")).toBeTruthy();
+  expect(screen.getByText("1 earlier build")).toBeTruthy();
+  expect(screen.getAllByTitle(build.source_revision).map((sha) => sha.textContent)).toEqual(["aaaaaaaa", "aaaaaaaa"]);
+  expect(screen.getByTitle(build.source_fingerprint).textContent).not.toBe(screen.getByTitle(other.source_fingerprint).textContent);
+});
 
 it("lists installed builds offline and fetches only a compatible published target on the chosen channel", async () => {
   show();

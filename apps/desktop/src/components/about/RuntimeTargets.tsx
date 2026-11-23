@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { runtimeChannelShowsRevision, runtimeTargetLabel } from "../../features/about/runtimeTargets";
+import { runtimeChannelShowsRevision, runtimeTargetLabel, runtimeVersions, type RuntimeBuildTargets } from "../../features/about/runtimeTargets";
 import { useLocale } from "../../features/i18n/LocaleContext";
 import type { DisplayText } from "../../features/i18n/messages";
 import { errorCode, localizedErrorText } from "../../lib/errors";
 import { cancelComponentUpdate, checkComponentUpdates, fetchAboutRuntimeTarget } from "../../lib/tauri";
-import type { AboutRuntimeStatus, BundleChannel, InstalledRuntimeTarget, PublishedBundleCatalog, RuntimeTargetBuild } from "../../lib/types";
+import type { AboutRuntimeStatus, BundleChannel, InstalledRuntimeTarget, PublishedBundleCatalog } from "../../lib/types";
 import { InlineFeedback } from "../feedback/InlineFeedback";
 import { Icon } from "../ui/Icon";
 import "./runtimeTargets.css";
@@ -17,30 +17,66 @@ interface Props {
   on_refresh(): void;
 }
 
-function TargetBuild({ record }: { record: RuntimeTargetBuild }) {
+function Channels({ channels }: { channels: string[] }) {
   const { t } = useLocale();
-  const { build, channels } = record;
-  const showRevision = channels.some(runtimeChannelShowsRevision);
-  return <div className="runtime-target-build">
-    <strong>{build.version}</strong>
-    {channels.map((channel) => <span className="about-build-channel" key={channel}>{channel}</span>)}
-    {channels.length === 0 && <span className="about-muted">{t("about.channel_unknown")}</span>}
-    {showRevision && <code title={build.source_revision ?? undefined}>{build.source_revision?.slice(0, 8) ?? t("about.bundle_revision_unknown")}</code>}
-    {build.dirty && <small>{t("about.modified")}</small>}
+  return channels.length ? channels.map((channel) => <span className="about-build-channel" key={channel}>{channel}</span>)
+    : <span className="about-muted">{t("about.channel_unknown")}</span>;
+}
+
+function shortId(id: string, related: (string | null)[]) {
+  let length = 8;
+  for (const other of related) {
+    if (!other || other === id) continue;
+    while (length < id.length && other.startsWith(id.slice(0, length))) length++;
+  }
+  return id.slice(0, length);
+}
+
+function BuildRow({ variant, siblings }: { variant: RuntimeBuildTargets; siblings: RuntimeBuildTargets[] }) {
+  const { t, locale } = useLocale();
+  const targets = [...variant.targets.entries()].sort(([a], [b]) => a.localeCompare(b));
+  const { build } = variant;
+  // Channels and catalog heads belong to individual targets. Only place the
+  // channel next to the shared build when every listed target agrees.
+  const channels = targets[0][1].channels;
+  const shared = targets.every(([, target]) => target.channels.length === channels.length &&
+    target.channels.every((channel, index) => channel === channels[index]));
+  const hasCurrent = targets.some(([, target]) => target.current);
+  const showRevision = siblings.length > 1 || !shared || channels.some(runtimeChannelShowsRevision);
+  const revisions = siblings.map((peer) => peer.build.source_revision);
+  const fingerprints = siblings.filter((peer) => peer.build.source_revision === build.source_revision)
+    .map((peer) => peer.build.source_fingerprint);
+  return <div className="runtime-version-build">
+    <div className="runtime-build-identity">
+      {shared && <Channels channels={channels} />}
+      {showRevision && <code title={build.source_revision ?? undefined}>
+        {build.source_revision ? shortId(build.source_revision, revisions) : t("about.bundle_revision_unknown")}
+      </code>}
+      {fingerprints.some((fingerprint) => fingerprint !== build.source_fingerprint) && <small title={build.source_fingerprint}>
+        {t("about.build_compact", { build: shortId(build.source_fingerprint, fingerprints) })}
+      </small>}
+      {build.dirty && <small>{t("about.modified")}</small>}
+    </div>
+    <div className="runtime-build-platforms">{targets.map(([triple, target]) => <div key={triple}>
+      <strong>{runtimeTargetLabel(triple, locale)}</strong>
+      {!shared && <Channels channels={target.channels} />}
+      {hasCurrent && !target.current && <small>{t("about.targets_retained")}</small>}
+      <code className="runtime-target-triple">{triple}</code>
+    </div>)}</div>
   </div>;
 }
 
-function TargetRow({ target }: { target: InstalledRuntimeTarget }) {
-  const { t, locale } = useLocale();
-  const builds = (rows: RuntimeTargetBuild[]) => rows.map((row) =>
-    <TargetBuild key={JSON.stringify([row.build.version, row.build.source_revision, row.build.source_fingerprint, row.build.dirty])} record={row} />);
-  const heads = target.builds.filter((record) => record.current !== false);
-  const previous = target.builds.filter((record) => record.current === false);
+function VersionRow({ version, builds }: { version: string; builds: RuntimeBuildTargets[] }) {
+  const { t } = useLocale();
+  const current = builds.filter((build) => [...build.targets.values()].some((target) => target.current));
+  const retained = builds.filter((build) => !current.includes(build));
+  const rows = (items: RuntimeBuildTargets[]) => items.map((variant) => <BuildRow key={variant.key} variant={variant} siblings={builds} />);
   return <li>
-    <div><strong>{runtimeTargetLabel(target.target_triple, locale)}</strong><code className="runtime-target-triple">{target.target_triple}</code></div>
-    <div>{builds(heads)}
-      {previous.length > 0 && <details><summary>{t("about.targets_retained_versions", { count: previous.length })}</summary>{builds(previous)}</details>}
-    </div>
+    <div className="runtime-version-heading"><h3>{version}</h3>{current.length === 0 && <small>{t("about.targets_retained")}</small>}</div>
+    {rows(current.length ? current : retained)}
+    {current.length > 0 && retained.length > 0 && <details>
+      <summary>{t("about.targets_retained_versions", { count: retained.length })}</summary>{rows(retained)}
+    </details>}
   </li>;
 }
 
@@ -162,12 +198,13 @@ export function RuntimeTargets({ inventory, loading, error, default_channel = "s
   const [open, setOpen] = useState(false);
   const [added, setAdded] = useState<string | null>(null);
   const targets = inventory?.installed_targets;
+  const versions = runtimeVersions(targets ?? []);
   return <section className="about-section runtime-targets" aria-label={t("about.targets_title")}>
     <div className="runtime-target-heading">
       <h2>{t("about.targets_title")}</h2>
       {!open && <button type="button" onClick={() => { setAdded(null); setOpen(true); }}><Icon name="plus" size={14} />{t("about.targets_add")}</button>}
     </div>
-    {targets?.length ? <ul className="runtime-target-list">{targets.map((target) => <TargetRow key={target.target_triple} target={target} />)}</ul>
+    {versions.length ? <ul className="runtime-target-list">{versions.map(({ version, builds }) => <VersionRow key={version} version={version} builds={builds} />)}</ul>
       : !error && <p className="about-muted" role="status">{t(loading ? "about.checking_builds" : targets ? "about.targets_none" : "about.not_checked")}</p>}
     {error && <InlineFeedback action={{ label: t("about.refresh_builds"), on_click: on_refresh, disabled: loading }}>{formatText(error)}</InlineFeedback>}
     {open && <AddTarget installed={targets ?? []} default_channel={default_channel} on_refresh={on_refresh} on_close={() => setOpen(false)}

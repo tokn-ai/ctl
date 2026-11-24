@@ -199,7 +199,9 @@ fn compressed_x11_display_and_window_honor_requested_frame_rate() -> Result<(), 
   use x11rb::{
     COPY_DEPTH_FROM_PARENT, COPY_FROM_PARENT,
     connection::Connection as _,
-    protocol::xproto::{ConnectionExt as _, CreateGCAux, CreateWindowAux, Rectangle, WindowClass},
+    protocol::xproto::{
+      AtomEnum, ConnectionExt as _, CreateGCAux, CreateWindowAux, Rectangle, WindowClass,
+    },
   };
 
   const BAND_WIDTH: u16 = 32;
@@ -287,6 +289,7 @@ fn compressed_x11_display_and_window_honor_requested_frame_rate() -> Result<(), 
 
   let measured = thread::scope(|scope| -> Result<_, Box<dyn Error>> {
     let (stop_animation, stop) = mpsc::channel::<()>();
+    let painter = &conn;
     let animator = scope.spawn(move || -> Result<_, Box<dyn Error + Send + Sync>> {
       let started = Instant::now();
       let mut painted = 0;
@@ -303,10 +306,10 @@ fn compressed_x11_display_and_window_honor_requested_frame_rate() -> Result<(), 
             lit.push(band);
           }
         }
-        conn.poly_fill_rectangle(pixmap, black, &[canvas])?;
-        conn.poly_fill_rectangle(pixmap, white, &lit)?;
-        conn.copy_area(pixmap, window, black, 0, 0, 0, 0, width, height)?;
-        conn.flush()?;
+        painter.poly_fill_rectangle(pixmap, black, &[canvas])?;
+        painter.poly_fill_rectangle(pixmap, white, &lit)?;
+        painter.copy_area(pixmap, window, black, 0, 0, 0, 0, width, height)?;
+        painter.flush()?;
         painted += 1;
         counter = counter.wrapping_add(1);
         let delay = PAINT_INTERVAL.saturating_sub(paint_started.elapsed());
@@ -387,6 +390,23 @@ fn compressed_x11_display_and_window_honor_requested_frame_rate() -> Result<(), 
     eprintln!("X11 fixture submitted {paint_rate:.1} paints/s");
     Ok(measured)
   })?;
+  conn.destroy_window(window)?.check()?;
+  conn.free_pixmap(pixmap)?.check()?;
+  conn.free_gc(black)?.check()?;
+  conn.free_gc(white)?.check()?;
+  // Let the window manager remove the client before another test can reuse its XID.
+  let clients = conn.intern_atom(true, b"_NET_CLIENT_LIST")?.reply()?.atom;
+  if clients != 0 {
+    wait_for("animated X11 fixture removal", || {
+      let listed = conn
+        .get_property(false, screen.root, clients, AtomEnum::WINDOW, 0, 1024)?
+        .reply()?;
+      let gone = listed
+        .value32()
+        .is_none_or(|mut ids| !ids.any(|id| id == window));
+      Ok(gone.then_some(()))
+    })?;
+  }
   for (driver, [fast, slow]) in measured {
     for (max_fps, [fresh, delivered], expected) in [(30, fast, 27.0..=33.0), (8, slow, 5.0..=9.0)] {
       assert!(

@@ -235,6 +235,9 @@ Hover at the top edge, move the window across display edges, and resize it. The
 checkerboard and its size label make any unexpected canvas shift visible. The
 Debug button shows whether the pointer is over the in-view controls. Press
 Escape to close the fixture.
+Maximize the viewer and drag its title bar: it should return to its previous
+size under the pointer and continue moving. A title-bar click should leave
+it maximized.
 
 ## Ctream Linux sessions
 

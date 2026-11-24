@@ -232,6 +232,9 @@ when the viewer crosses a display edge. The content keeps its screen position,
 size, and input transform as controls appear, move, and hide. Dragging moves
 the viewer from the original pointer anchor without snapping it to another
 display's work area. The controls remain visible throughout the drag.
+Dragging the maximized viewer's controls restores its normal size before
+continuing the move, keeping the pointer anchored to the bar. Clicking the
+bar without dragging leaves it maximized.
 Windows, Linux, and the macOS fallback draw controls over the content without
 reserving a row or changing the viewport. Only the covered control region
 handles local pointer actions; uncovered video keeps its existing input mapping.

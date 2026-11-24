@@ -162,6 +162,7 @@ impl Chrome {
     let opening = self.attached.is_none();
     let width = if let Some(panel) = &self.attached {
       let panel = panel.get(main);
+      panel.sync_drag(maximized(ctx));
       if !panel.dragging() && !gesture_active {
         if !panel.hovering(reveal) {
           self.dismiss();
@@ -189,7 +190,11 @@ impl Chrome {
       self.attached = Some(MainThreadBound::new(panel, main));
     }
     let panel = self.attached.as_ref()?.get(main);
-    panel.set_drag_limit(f64::from(controls.drag_limit) * f64::from(zoom));
+    panel.sync_drag(maximized(ctx));
+    panel.set_drag_bounds(
+      f64::from(controls.drag_limit) * f64::from(zoom),
+      f64::from(button_width) * f64::from(zoom),
+    );
     let action = controls.action;
     let frame =
       Frame::new(panel.overlay_rect(ctx.content_rect()), Rect::NOTHING).apply(ctx, action);

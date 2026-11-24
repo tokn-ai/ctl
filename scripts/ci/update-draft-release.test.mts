@@ -156,6 +156,7 @@ function isMutation(args: string[]): boolean {
 
 function mockGithub(options: {
   release?: MockRelease | null;
+  older_releases?: MockRelease[];
   assets?: { id: number; name: string; label: string | null }[];
   upload_error?: boolean;
   latest_body?: string;
@@ -185,7 +186,7 @@ function mockGithub(options: {
       if (created) {
         throw new Error("The newly created draft is not yet visible in the release list");
       }
-      return JSON.stringify([[{ id: 1, tag_name: "v0.0.1", draft: false }], release ? [release] : []]);
+      return JSON.stringify([[{ id: 1, tag_name: "v0.0.1", draft: false }, ...(options.older_releases ?? [])], release ? [release] : []]);
     }
     if (args[0] === "api" && args[1] === "repos/tokn-ai/ctl/git/matching-refs/tags/v0.1.0") {
       return JSON.stringify([
@@ -809,6 +810,35 @@ test("leaves a published release unchanged", async () => {
   } });
   assert.equal((await updateDraftRelease("tokn-ai/ctl", exampleBundle, github.gh)).status, "published");
   assert.equal(github.calls.length, 1);
+});
+
+test("skips the nightly draft refresh when a release was published separately", async () => {
+  const published: MockRelease = {
+    id: 42, tag_name: "v0.1.0", draft: false, body: "Published notes",
+    html_url: "https://github.com/tokn-ai/ctl/releases/tag/v0.1.0",
+  };
+  const github = mockGithub({
+    release: published,
+    older_releases: [{
+      ...published, id: 41, draft: true,
+      html_url: "https://github.com/tokn-ai/ctl/releases/tag/untagged-fixture",
+    }],
+  });
+  assert.deepEqual(await updateDraftRelease("tokn-ai/ctl", exampleBundle, github.gh),
+    { status: "published", html_url: published.html_url });
+  assert.equal(github.calls.length, 1);
+});
+
+test("rejects competing drafts or competing published releases before mutating", async () => {
+  for (const draft of [true, false]) {
+    const first: MockRelease = {
+      id: 41, tag_name: "v0.1.0", draft, body: null,
+      html_url: "https://github.com/tokn-ai/ctl/releases/tag/v0.1.0",
+    };
+    const github = mockGithub({ release: { ...first, id: 42 }, older_releases: [first] });
+    await assert.rejects(updateDraftRelease("tokn-ai/ctl", exampleBundle, github.gh), /Multiple releases use v0.1.0/);
+    assert.equal(github.calls.length, 1);
+  }
 });
 
 test("accepts an existing lightweight tag at the build commit", async () => {

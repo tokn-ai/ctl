@@ -431,9 +431,7 @@ impl WindowState for Viewer {
         self.input = None;
         self.input_error = Some(format!("View only: {error}"));
       }
-      if !controls.resizing {
-        self.size.update(ui.ctx(), image_size, video);
-      }
+      self.size.update(ui.ctx(), image_size, video);
     });
   }
 }
@@ -441,6 +439,76 @@ impl WindowState for Viewer {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn local_controls_overlap_without_changing_the_capture_viewport() {
+    let ctx = egui::Context::default();
+    let texture = ctx.load_texture(
+      "local capture fixture",
+      egui::ColorImage::from_rgb([40, 20], &[0; 40 * 20 * 3]),
+      egui::TextureOptions::LINEAR,
+    );
+    let texture_id = texture.id();
+    let mut viewer = Viewer {
+      viewing: true,
+      texture: Some(texture),
+      ..Default::default()
+    };
+    let bounds = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 200.0));
+    for (events, visible) in [
+      (Vec::new(), Some(false)),
+      (vec![egui::Event::PointerMoved(egui::pos2(80.0, 3.0))], None),
+      (Vec::new(), Some(true)),
+      (vec![egui::Event::PointerGone], Some(false)),
+    ] {
+      let mut input = egui::RawInput {
+        viewport_id: view::viewer_id(),
+        screen_rect: Some(bounds),
+        focused: true,
+        events,
+        ..Default::default()
+      };
+      input.viewports.insert(
+        view::viewer_id(),
+        egui::ViewportInfo {
+          inner_rect: Some(bounds),
+          outer_rect: Some(bounds),
+          focused: Some(true),
+          ..Default::default()
+        },
+      );
+      let mut output = ctx.run_ui(input, |ui| viewer.viewer(ui, egui::ViewportClass::Deferred));
+      output.textures_delta.clear();
+      let video = output
+        .shapes
+        .iter()
+        .find_map(|shape| match &shape.shape {
+          egui::epaint::Shape::Mesh(mesh) if mesh.texture_id == texture_id => {
+            Some(mesh.calc_bounds())
+          }
+          _ => None,
+        })
+        .expect("local video must remain drawn");
+      assert_eq!(video, bounds);
+      let controls = output.shapes.iter().any(|shape| {
+        matches!(&shape.shape,
+        egui::epaint::Shape::Text(text) if text.galley.text() == chrome::VIEWER_TITLE)
+      });
+      if let Some(visible) = visible {
+        assert_eq!(controls, visible);
+      }
+      assert!(
+        !output
+          .viewport_output
+          .values()
+          .flat_map(|viewport| &viewport.commands)
+          .any(|command| matches!(
+            command,
+            egui::ViewportCommand::InnerSize(_) | egui::ViewportCommand::OuterPosition(_)
+          ))
+      );
+    }
+  }
 
   #[test]
   fn hidden_setup_leaves_frame_for_viewer_pass() {

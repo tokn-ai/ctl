@@ -3,6 +3,7 @@ use dispatch2::MainThreadBound;
 use eframe::egui::{self, Align, Pos2, Rect, ViewportCommand};
 #[cfg(target_os = "macos")]
 use objc2::MainThreadMarker;
+#[cfg(target_os = "macos")]
 use std::time::Duration;
 
 pub(super) const REVEAL_HEIGHT: f32 = 8.0;
@@ -10,10 +11,11 @@ pub(super) const BAR_HEIGHT: f32 = 34.0;
 pub(super) const BUTTON_WIDTH: f32 = 40.0;
 const BUTTON_STRIP_WIDTH: f32 = 3.0 * BUTTON_WIDTH;
 const DEBUG_BUTTON_WIDTH: f32 = 52.0;
+#[cfg(target_os = "macos")]
+const MIN_DRAG_WIDTH: f32 = 28.0;
 pub(super) const VIEWER_TITLE: &str = "ctream viewer";
 #[cfg(any(target_os = "macos", test))]
 pub(super) const CONTROLS_TITLE: &str = "ctream viewer controls";
-const RESIZE_WAIT: Duration = Duration::from_millis(120);
 #[cfg(any(target_os = "linux", windows))]
 pub(super) const RESIZE_GRIP: f32 = 14.0;
 
@@ -40,17 +42,14 @@ pub(super) struct Frame {
   pub pointer_regions: [Rect; 2],
   pub close: bool,
   pub toggle_debug: bool,
-  pub resizing: bool,
 }
 
 impl Frame {
-  #[cfg(any(target_os = "macos", test))]
-  fn attached() -> Self {
+  fn new(toolbar: Rect, resize: Rect) -> Self {
     Self {
-      pointer_regions: [Rect::NOTHING; 2],
+      pointer_regions: [toolbar, resize],
       close: false,
       toggle_debug: false,
-      resizing: false,
     }
   }
 
@@ -61,185 +60,144 @@ impl Frame {
   }
 }
 
-struct Resize {
-  shown: bool,
-  before: f32,
-  target: f32,
-  deadline: f64,
-}
-
 #[derive(Default)]
 pub(super) struct Chrome {
-  shown: bool,
-  allocated: f32,
-  fixed: bool,
-  resize: Option<Resize>,
+  overlay_shown: bool,
   #[cfg(target_os = "macos")]
   attached: Option<MainThreadBound<super::macos_chrome::AttachedPanel>>,
   #[cfg(test)]
   pub test_attached_hover: Option<bool>,
+  #[cfg(test)]
+  pub test_attached_overlap: Option<Rect>,
 }
 
 impl Chrome {
-  fn update(&mut self, ctx: &egui::Context, window: Rect, hovered: Option<Pos2>) {
-    let (now, fixed, pointer_down) = ctx.input(|input| {
-      let viewport = input.viewport();
-      let fixed =
-        [viewport.maximized, viewport.fullscreen, viewport.minimized].contains(&Some(true));
-      (input.time, fixed, input.pointer.any_down())
-    });
-    let restored = std::mem::replace(&mut self.fixed, fixed) && !fixed;
-    if let Some(resize) = &self.resize {
-      let accepted = (window.height() - resize.target).abs() <= 1.0;
-      if !accepted && !fixed && now < resize.deadline {
-        ctx.request_repaint_after(Duration::from_secs_f64(resize.deadline - now));
-        return;
-      }
-      self.shown = resize.shown;
-      if !fixed {
-        // A compositor can clamp or reject a request. Collapse only the
-        // height actually added, even when the window could grow partway.
-        self.allocated = (self.allocated + window.height() - resize.before).clamp(0.0, BAR_HEIGHT);
-      }
-      self.resize = None;
-      // The window may have moved underneath the pointer during the resize.
-      ctx.request_repaint();
-      return;
-    }
-
-    let reach = if self.shown { BAR_HEIGHT } else { 0.0 } + REVEAL_HEIGHT;
-    let hover_zone = Rect::from_min_size(window.min, egui::vec2(window.width(), reach));
-    // Leave the canvas in place while an existing gesture crosses the edge.
-    let show = hovered.is_some_and(|pos| {
-      if pointer_down {
-        self.shown
-      } else {
-        hover_zone.contains(pos)
-      }
-    });
-    if show == self.shown && !restored {
-      return;
-    }
-    let extra = if show { BAR_HEIGHT } else { 0.0 };
-    let height = (window.height() + extra - self.allocated).max(super::view::MIN_WINDOW.y);
-    if fixed || (height - window.height()).abs() <= 1.0 {
-      self.shown = show;
-      return;
-    }
-    self.resize = Some(Resize {
-      shown: show,
-      before: window.height(),
-      target: height,
-      deadline: now + RESIZE_WAIT.as_secs_f64(),
-    });
-    ctx.send_viewport_cmd(ViewportCommand::InnerSize(egui::vec2(
-      window.width(),
-      height,
-    )));
-    ctx.request_repaint_after(RESIZE_WAIT);
-  }
-
   pub fn show(&mut self, ui: &mut egui::Ui, status: Status<'_>) -> Frame {
     let ctx = ui.ctx().clone();
+    let window = ctx.content_rect();
     #[cfg(test)]
     if let Some(hovered) = self.test_attached_hover {
       let action = hovered
-        .then(|| show_controls(&ctx, status, true, Some(ctx.content_rect().width())))
+        .then(|| show_controls(&ctx, status, true, window.width(), true).action)
         .flatten();
-      return Frame::attached().apply(&ctx, action);
+      let overlap = if hovered {
+        self
+          .test_attached_overlap
+          .unwrap_or(Rect::NOTHING)
+          .intersect(window)
+      } else {
+        Rect::NOTHING
+      };
+      return Frame::new(overlap, Rect::NOTHING).apply(&ctx, action);
+    }
+    let (hovered, pointer_down, released) = ctx.input(|input| {
+      (
+        input.pointer.hover_pos(),
+        input.pointer.any_down(),
+        input.pointer.any_released(),
+      )
+    });
+    // Keep the same hit regions until release, including input batches that
+    // contain both a press and its release.
+    let gesture_active = pointer_down || released;
+    if released {
+      ctx.request_repaint();
     }
     #[cfg(target_os = "macos")]
     {
-      if !self.shown
-        && self.resize.is_none()
-        && self.allocated <= 1.0
-        && let Some(frame) = self.show_macos(&ctx, status)
+      if !self.overlay_shown
+        && let Some(frame) = self.show_macos(&ctx, status, hovered, gesture_active)
       {
         return frame;
       }
-      self.dismiss();
+      self.attached.take();
     }
-    let window = ctx.content_rect();
-    let hovered = ctx.input(|input| input.pointer.hover_pos());
-    self.update(&ctx, window, hovered);
     let reveal = Rect::from_min_size(window.min, egui::vec2(window.width(), REVEAL_HEIGHT));
     let bar = Rect::from_min_size(window.min, egui::vec2(window.width(), BAR_HEIGHT));
-    let action = self
-      .shown
-      .then(|| title_bar(ui, bar, status, maximized(&ctx), true))
-      .flatten();
-
-    Frame {
-      pointer_regions: [
-        if self.shown { bar } else { reveal },
-        resize_grip(&ctx, window, hovered),
-      ],
-      close: false,
-      toggle_debug: false,
-      resizing: self.resize.is_some(),
+    if !gesture_active {
+      let hover_zone = if self.overlay_shown { bar } else { reveal };
+      self.overlay_shown = hovered.is_some_and(|pos| hover_zone.contains(pos));
     }
-    .apply(&ctx, action)
+    let resize = resize_grip(&ctx, window, hovered);
+    if !self.overlay_shown {
+      return Frame::new(Rect::NOTHING, resize);
+    }
+    let bar = bar.intersect(window);
+    let action = egui::Area::new(egui::Id::unique("ctream_title_overlay"))
+      .order(egui::Order::Foreground)
+      .fixed_pos(bar.min)
+      .default_size(bar.size())
+      .constrain(false)
+      .fade_in(false)
+      .show(&ctx, |ui| title_bar(ui, bar, status, maximized(&ctx), true))
+      .inner;
+    Frame::new(bar, resize).apply(&ctx, action)
   }
 
   pub fn dismiss(&mut self) {
+    self.overlay_shown = false;
     #[cfg(target_os = "macos")]
     self.attached.take();
   }
 
   #[cfg(target_os = "macos")]
-  fn show_macos(&mut self, ctx: &egui::Context, status: Status<'_>) -> Option<Frame> {
+  fn show_macos(
+    &mut self,
+    ctx: &egui::Context,
+    status: Status<'_>,
+    hovered: Option<Pos2>,
+    gesture_active: bool,
+  ) -> Option<Frame> {
     let main = MainThreadMarker::new()?;
     let viewer = super::macos_chrome::viewer()?;
-    let height = BAR_HEIGHT * ctx.zoom_factor();
-    let reveal = REVEAL_HEIGHT * ctx.zoom_factor();
+    let zoom = ctx.zoom_factor();
+    let height = BAR_HEIGHT * zoom;
+    let reveal = REVEAL_HEIGHT * zoom;
+    let button_width = status.button_strip_width();
+    let min_width = (button_width + MIN_DRAG_WIDTH) * zoom;
     if !viewer.active() {
       self.dismiss();
-      return Some(Frame::attached());
+      return Some(Frame::new(Rect::NOTHING, Rect::NOTHING));
     }
-    let initial_width = if let Some(panel) = &self.attached {
+    let opening = self.attached.is_none();
+    let width = if let Some(panel) = &self.attached {
       let panel = panel.get(main);
-      // AppKit moves the child with its parent. Keep the same attachment even
-      // when the pointer leaves the strip or the viewer reaches a screen edge.
-      if !panel.dragging() {
+      if !panel.dragging() && !gesture_active {
         if !panel.hovering(reveal) {
           self.dismiss();
-          return Some(Frame::attached());
+          return Some(Frame::new(Rect::NOTHING, Rect::NOTHING));
         }
-        if !panel.place(height) {
+        if !panel.place(height, min_width) {
           return None;
         }
       }
-      None
+      panel.width()
     } else {
-      let width = viewer.panel_width(height)?;
-      let window = ctx.content_rect();
-      let top = Rect::from_min_size(window.min, egui::vec2(window.width(), REVEAL_HEIGHT));
-      let enter = ctx.input(|input| {
-        !input.pointer.any_down()
-          && input
-            .pointer
-            .hover_pos()
-            .is_some_and(|pos| top.contains(pos))
-      });
-      if !enter {
-        return Some(Frame::attached());
+      if gesture_active || hovered.is_none() {
+        return Some(Frame::new(Rect::NOTHING, Rect::NOTHING));
       }
-      Some(width as f32 / ctx.zoom_factor())
+      let width = viewer.panel_width(height, min_width)?;
+      if !viewer.reveal_hovering(height, min_width, reveal) {
+        return Some(Frame::new(Rect::NOTHING, Rect::NOTHING));
+      }
+      width
     };
 
-    let action = show_controls(ctx, status, false, initial_width);
-    if self.attached.is_none() {
-      let panel = viewer.attach_controls(height, status.button_strip_width(), ctx)?;
+    let controls = show_controls(ctx, status, false, width as f32 / zoom, opening);
+    if opening {
+      let panel = viewer.attach_controls(height, min_width, ctx)?;
       self.attached = Some(MainThreadBound::new(panel, main));
     }
-    let frame = Frame::attached().apply(ctx, action);
+    let panel = self.attached.as_ref()?.get(main);
+    panel.set_drag_limit(f64::from(controls.drag_limit) * f64::from(zoom));
+    let action = controls.action;
+    let frame =
+      Frame::new(panel.overlay_rect(ctx.content_rect()), Rect::NOTHING).apply(ctx, action);
     if frame.close || matches!(action, Some(Action::Minimize)) {
       self.dismiss();
     } else {
-      if action.is_some()
-        && let Some(panel) = &self.attached
-      {
-        panel.get(main).restore_focus();
+      if action.is_some() {
+        panel.restore_focus();
       }
       // Leaving both native windows may produce no further pointer events.
       ctx.request_repaint_after(Duration::from_millis(33));
@@ -298,12 +256,21 @@ pub(super) fn controls_id() -> egui::ViewportId {
 }
 
 #[cfg(any(target_os = "macos", test))]
+#[derive(Default)]
+struct ControlsFrame {
+  action: Option<Action>,
+  #[cfg(target_os = "macos")]
+  drag_limit: f32,
+}
+
+#[cfg(any(target_os = "macos", test))]
 fn show_controls(
   ctx: &egui::Context,
   status: Status<'_>,
   draggable: bool,
-  initial_width: Option<f32>,
-) -> Option<Action> {
+  width: f32,
+  opening: bool,
+) -> ControlsFrame {
   let maximized = maximized(ctx);
   let mut builder = egui::ViewportBuilder::default()
     .with_title(CONTROLS_TITLE)
@@ -312,21 +279,41 @@ fn show_controls(
     .with_active(false)
     .with_visible(false);
   // AppKit owns placement and size once the panel is attached.
-  if let Some(width) = initial_width {
+  if opening {
     builder = builder
       .with_clamp_size_to_monitor_size(false)
       .with_inner_size([width, BAR_HEIGHT]);
   }
   ctx.show_viewport_immediate(controls_id(), builder, |panel, class| {
     if class == egui::ViewportClass::EmbeddedWindow {
-      return None;
+      return ControlsFrame::default();
     }
     if panel.input(|input| input.viewport().close_requested()) {
-      return Some(Action::Close);
+      return ControlsFrame {
+        action: Some(Action::Close),
+        #[cfg(target_os = "macos")]
+        drag_limit: 0.0,
+      };
     }
-    let bounds = panel.ctx().content_rect();
-    title_bar(panel, bounds, status, maximized, draggable)
+    let mut bounds = panel.ctx().content_rect();
+    let window_left = panel.ctx().viewport_rect().left();
+    // AppKit changes the panel synchronously. The child viewport's next
+    // layout may still reflect its previous width during a drag.
+    bounds.max.x = bounds.max.x.min(window_left + width);
+    if bounds.width() < status.button_strip_width() {
+      return ControlsFrame::default();
+    }
+    ControlsFrame {
+      action: title_bar(panel, bounds, status, maximized, draggable),
+      // Use the rendered button edge for native mouse events as well.
+      #[cfg(target_os = "macos")]
+      drag_limit: buttons_left(bounds, status) - window_left,
+    }
   })
+}
+
+fn buttons_left(bounds: Rect, status: Status<'_>) -> f32 {
+  bounds.right() - status.button_strip_width()
 }
 
 fn title_bar(
@@ -336,64 +323,59 @@ fn title_bar(
   maximized: bool,
   draggable: bool,
 ) -> Option<Action> {
-  let buttons_left = bounds.right() - status.button_strip_width();
+  let buttons_left = buttons_left(bounds, status);
   let title = Rect::from_min_max(bounds.min, egui::pos2(buttons_left, bounds.bottom()));
   let dragging = draggable && primary_press_in(ui.ctx(), title);
-  egui::Panel::top("ctream_title_bar")
-    .exact_size(BAR_HEIGHT)
-    .frame(egui::Frame::NONE.fill(ui.visuals().panel_fill))
-    .show_separator_line(false)
-    .show(ui, |ui| {
-      ui.set_min_size(bounds.size());
-      ui.set_clip_rect(bounds);
-      ui.painter().hline(
-        bounds.x_range(),
-        bounds.bottom(),
-        ui.visuals().widgets.noninteractive.bg_stroke,
-      );
-      ui.scope_builder(
-        egui::UiBuilder::new()
-          .max_rect(title.shrink2(egui::vec2(10.0, 0.0)))
-          .layout(egui::Layout::left_to_right(Align::Center)),
-        |ui| show_status(ui, status),
-      );
-      if control(ui, bounds, 2, "−", "Minimize") {
-        return Some(Action::Minimize);
-      }
-      let (icon, label) = if maximized {
-        ("▣", "Restore")
+  ui.set_min_size(bounds.size());
+  ui.set_clip_rect(bounds.intersect(ui.clip_rect()));
+  ui.painter()
+    .rect_filled(bounds, 0.0, ui.visuals().panel_fill);
+  ui.painter().hline(
+    bounds.x_range(),
+    bounds.bottom(),
+    ui.visuals().widgets.noninteractive.bg_stroke,
+  );
+  ui.scope_builder(
+    egui::UiBuilder::new()
+      .max_rect(title.shrink2(egui::vec2(10.0, 0.0)))
+      .layout(egui::Layout::left_to_right(Align::Center)),
+    |ui| show_status(ui, status),
+  );
+  if control(ui, bounds, 2, "−", "Minimize") {
+    return Some(Action::Minimize);
+  }
+  let (icon, label) = if maximized {
+    ("▣", "Restore")
+  } else {
+    ("□", "Maximize")
+  };
+  if control(ui, bounds, 1, icon, label) {
+    return Some(Action::Maximize(!maximized));
+  }
+  if control(ui, bounds, 0, "×", "Close viewer") {
+    return Some(Action::Close);
+  }
+  if let Some(enabled) = status.debug {
+    let debug = ui
+      .put(
+        button_slot(
+          bounds,
+          bounds.right() - BUTTON_STRIP_WIDTH,
+          DEBUG_BUTTON_WIDTH,
+        ),
+        egui::Button::new("Debug").selected(enabled),
+      )
+      .on_hover_text(if enabled {
+        "Hide debug overlay"
       } else {
-        ("□", "Maximize")
-      };
-      if control(ui, bounds, 1, icon, label) {
-        return Some(Action::Maximize(!maximized));
-      }
-      if control(ui, bounds, 0, "×", "Close viewer") {
-        return Some(Action::Close);
-      }
-      if let Some(enabled) = status.debug {
-        let debug = ui
-          .put(
-            button_slot(
-              bounds,
-              bounds.right() - BUTTON_STRIP_WIDTH,
-              DEBUG_BUTTON_WIDTH,
-            ),
-            egui::Button::new("Debug").selected(enabled),
-          )
-          .on_hover_text(if enabled {
-            "Hide debug overlay"
-          } else {
-            "Show debug overlay"
-          });
-        if debug.clicked() {
-          debug.surrender_focus();
-          return Some(Action::ToggleDebug);
-        }
-      }
-      dragging.then_some(Action::Drag)
-    })
-    .inner
+        "Show debug overlay"
+      });
+    if debug.clicked() {
+      debug.surrender_focus();
+      return Some(Action::ToggleDebug);
+    }
+  }
+  dragging.then_some(Action::Drag)
 }
 
 fn show_status(ui: &mut egui::Ui, status: Status<'_>) {

@@ -33,10 +33,10 @@ impl Runner {
     let _ = self.0.clone().wait_for(|stop| *stop).await;
   }
 
-  async fn download<T>(&self, download: impl Future<Output = io::Result<T>>) -> io::Result<T> {
+  async fn cancellable<T>(&self, operation: impl Future<Output = io::Result<T>>) -> io::Result<T> {
     self.check()?;
     tokio::select! {
-      result = download => result,
+      result = operation => result,
       () = self.cancelled() => Err(interrupted()),
     }
   }
@@ -397,7 +397,7 @@ async fn stage_signed_app(
   private_fs::create_directory(&unpacked)?;
   let archive = stage.join(release.asset_name());
   eprintln!("Downloading {}…", release.asset_name());
-  runner.download(release.download(&archive)).await?;
+  runner.cancellable(release.download(&archive)).await?;
   let app = tokio::task::spawn_blocking({
     let version = release.app_version.clone();
     move || input::prepare(&archive, &unpacked, &version)
@@ -487,7 +487,7 @@ async fn finish_signing(
   json: bool,
 ) -> io::Result<()> {
   let release = runner
-    .download(desktop::unsigned_macos_release(version, target))
+    .cancellable(desktop::unsigned_macos_release(version, target))
     .await?;
   let arch = if target == DesktopTarget::MacArm64 {
     "arm64"
@@ -575,14 +575,26 @@ async fn finish_signing(
   Ok(())
 }
 
-pub(super) async fn run(home: &Path, options: SignArguments) -> io::Result<()> {
-  use tokio::signal::unix::{SignalKind, signal};
+async fn renew_development(home: &Path, workspace: Option<PathBuf>, json: bool) -> io::Result<()> {
+  let workspace = workspace.map_or_else(std::env::current_dir, Ok)?;
+  let prepared = ctl_client::development::renew_signing(home, &workspace).await?;
+  let result = &prepared.result;
+  if json {
+    crate::updater::print_json(result)?;
+  } else {
+    println!(
+      "Re-signed ctld for development build {} ({}). Restart ctld to use the renewed helper.",
+      result.bundle_id, result.target_triple
+    );
+  }
+  Ok(())
+}
 
-  let version = match options.version {
-    Some(version) => version,
-    None => crate::updater::app::active_stable_version(home)?.ok_or_else(|| {
-      io::Error::new(io::ErrorKind::NotFound, "No active stable desktop release. Choose a published version with ctlup sign --version <VERSION>.")
-    })?,
+async fn sign(runner: &Runner, home: &Path, options: SignArguments) -> io::Result<()> {
+  let Some(version) = options.version else {
+    return runner
+      .cancellable(renew_development(home, options.workspace, options.json))
+      .await;
   };
   let version = version.strip_prefix('v').unwrap_or(&version);
   desktop::validate_macos_release_version(version)?;
@@ -598,11 +610,17 @@ pub(super) async fn run(home: &Path, options: SignArguments) -> io::Result<()> {
     }
   };
   let credentials = SigningCredentials::load()?;
+  finish_signing(runner, home, version, target, &credentials, options.json).await
+}
+
+pub(super) async fn run(home: &Path, options: SignArguments) -> io::Result<()> {
+  use tokio::signal::unix::{SignalKind, signal};
+
   let mut interrupt = signal(SignalKind::interrupt())?;
   let mut terminate = signal(SignalKind::terminate())?;
   let (stop, cancelled) = watch::channel(false);
   let runner = Runner(cancelled);
-  let signing = finish_signing(&runner, home, version, target, &credentials, options.json);
+  let signing = sign(&runner, home, options);
   tokio::pin!(signing);
   tokio::select! {
     result = &mut signing => return result,

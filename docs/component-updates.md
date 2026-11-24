@@ -264,9 +264,13 @@ profile and can renew it through Xcode when the project has a configured team.
 Runtime activation requires a signed helper. The desktop build can bundle an
 unsigned helper if provisioning or signing fails.
 
-Run `ctlup dev` again after renewing a development profile, then restart
-`ctld` to use the new helper. For CI-built desktop packages, see
-[signing a macOS release with ctlup](ci-bundles.md#sign-a-ci-built-macos-desktop-release-locally).
+Run `ctlup sign` from the checkout to renew the active development runtime's
+`ctld` signature using the installed executable. Use `--workspace` to name
+the checkout root explicitly. Restart `ctld` separately to use the renewed helper.
+[Development signing](local-bundles.md#renew-the-active-development-helpers-signature)
+
+Use `ctlup sign --version VERSION` to sign and notarize a tagged CI desktop
+release. [Release signing](ci-bundles.md#sign-a-ci-built-macos-desktop-release-locally)
 
 The desktop development launcher bootstraps a private native `ctlup` executable
 with Cargo, then delegates preparation to `ctlup dev`. It passes Cargo's original

@@ -49,7 +49,7 @@ pub(super) enum Command {
   },
   /// Build and install from the current checkout.
   Dev(DevelopmentArguments),
-  /// Sign and notarize downloaded macOS desktop build artifacts locally.
+  /// Renew local macOS development signing or sign a CI release.
   Sign(SignArguments),
   /// Show installed builds, their sources and missing payloads.
   Status(StatusArguments),
@@ -292,12 +292,15 @@ pub(super) struct StatusArguments {
 
 #[derive(Debug, Args)]
 pub(super) struct SignArguments {
-  /// Tagged release version. Defaults to the active stable desktop version.
+  /// Sign and notarize the CI build for a tagged release.
   #[arg(long)]
   pub version: Option<String>,
-  /// macOS Rust target. Defaults to the current architecture.
-  #[arg(long, value_parser = ["aarch64-apple-darwin", "x86_64-apple-darwin"], value_name = "TRIPLE")]
+  /// macOS Rust target for the CI build. Defaults to the current architecture.
+  #[arg(long, requires = "version", value_parser = ["aarch64-apple-darwin", "x86_64-apple-darwin"], value_name = "TRIPLE")]
   pub target: Option<String>,
+  /// Checkout containing the development signer. Defaults to the current directory.
+  #[arg(long, conflicts_with = "version")]
+  pub workspace: Option<PathBuf>,
   /// Output the result as JSON.
   #[arg(long)]
   pub json: bool,
@@ -481,13 +484,14 @@ mod tests {
   }
 
   #[test]
-  fn signing_is_a_top_level_command_for_downloaded_macos_builds() {
+  fn signing_distinguishes_development_from_tagged_releases() {
     let args = Arguments::try_parse_from(["ctlup", "sign"]).unwrap();
     assert!(matches!(
       args.command,
       Command::Sign(SignArguments {
         version: None,
         target: None,
+        workspace: None,
         json: false,
       })
     ));
@@ -496,14 +500,27 @@ mod tests {
       matches!(args.command, Command::Sign(SignArguments { version: Some(version), .. }) if version == "v0.1.5")
     );
     for target in ["aarch64-apple-darwin", "x86_64-apple-darwin"] {
-      let args =
-        Arguments::try_parse_from(["ctlup", "sign", "--target", target, "--json"]).unwrap();
+      let args = Arguments::try_parse_from([
+        "ctlup",
+        "sign",
+        "--version",
+        "0.1.5",
+        "--target",
+        target,
+        "--json",
+      ])
+      .unwrap();
       assert!(
         matches!(args.command, Command::Sign(SignArguments { target: Some(selected), json: true, .. }) if selected == target)
       );
     }
-    assert!(
-      Arguments::try_parse_from(["ctlup", "sign", "--target", "x86_64-unknown-linux-gnu"]).is_err()
-    );
+    assert!(Arguments::try_parse_from(["ctlup", "sign", "--workspace", "checkout"]).is_ok());
+    for options in [
+      &["--target", "aarch64-apple-darwin"][..],
+      &["--version", "0.1.5", "--target", "x86_64-unknown-linux-gnu"],
+      &["--version", "0.1.5", "--workspace", "checkout"],
+    ] {
+      assert!(Arguments::try_parse_from([&["ctlup", "sign"], options].concat()).is_err());
+    }
   }
 }

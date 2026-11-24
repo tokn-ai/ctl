@@ -309,14 +309,12 @@ Set `CTLD_PROVISIONING_PROFILE`, `APPLE_API_KEY_PATH`, `APPLE_API_KEY`, and
 access to those credentials.
 
 ```sh
-ctlup sign
 ctlup sign --version VERSION
 ```
 
-`ctlup sign` uses the active stable desktop version. Pass `--version` to pick
-a different tagged release or when there is no active stable desktop. The
-target defaults to the Mac's architecture. To sign the Intel build from an
-Apple Silicon Mac, add `--target x86_64-apple-darwin`.
+Select the tagged release with `--version`. The target defaults to the Mac's
+architecture. To sign the Intel build from an Apple Silicon Mac, add
+`--target x86_64-apple-darwin`.
 
 The command downloads and verifies the unsigned build from the exact GitHub
 release, then signs, notarizes, and staples the app and a new DMG. It prints
@@ -383,10 +381,10 @@ hold an installation lease while using its exact executable paths. Active,
 registered, and running builds remain available after Cargo outputs are cleaned.
 
 The runtime checks signature, provisioning expiry, certificate identity, source
-metadata, and API compatibility. Rebuild after a profile expires. Preparation
-preserves existing daemons and sessions; restarting an owner is a separate
-action. See [local development builds](local-bundles.md) for direct `ctlup dev`
-usage and custom Cargo profiles.
+metadata, and API compatibility. Run `ctlup sign` from the checkout to renew
+the active development runtime's `ctld` signature when the profile expires.
+Restart `ctld` separately to use the renewed helper.
+[Local development builds](local-bundles.md#renew-the-active-development-helpers-signature)
 
 Local component signing explicitly uses `--timestamp=none`,
 so an unavailable Apple timestamp service does not block development. Release

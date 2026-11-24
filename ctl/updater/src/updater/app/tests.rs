@@ -161,41 +161,6 @@ async fn verify_install_update_and_repair(archive: &Path, supports_named_leases:
 }
 
 #[cfg(target_os = "macos")]
-#[test]
-fn signing_defaults_to_the_selected_tagged_desktop_version() {
-  let stable = DesktopSource::Channel {
-    channel: "stable".into(),
-  };
-  let pinned = DesktopSource::Release {
-    publication_id: "0.1.4-42-1".into(),
-  };
-  let mut metadata = DesktopMetadata {
-    app_version: Some("0.1.4".into()),
-    bundle_id: Some("0.1.4".into()),
-    publication_id: Some("0.1.4-42-1".into()),
-    signing: Signing::Unsigned,
-    ..DesktopMetadata::provided(DesktopTarget::native().unwrap())
-  };
-  assert_eq!(metadata.stable_version(&stable), Some("0.1.4"));
-  assert_eq!(metadata.stable_version(&pinned), Some("0.1.4"));
-  for source in [
-    DesktopSource::Channel {
-      channel: "nightly".into(),
-    },
-    DesktopSource::Release {
-      publication_id: "0.1.4-44-1".into(),
-    },
-    DesktopSource::Checkout,
-    DesktopSource::PullRequest { number: 42 },
-    DesktopSource::Provided,
-  ] {
-    assert_eq!(metadata.stable_version(&source), None);
-  }
-  metadata.bundle_id = Some("0.1.4-abcdef0".into());
-  assert_eq!(metadata.stable_version(&pinned), None);
-}
-
-#[cfg(target_os = "macos")]
 fn fixture_macos_archive(directory: &Path) -> PathBuf {
   let app = directory.join("ctmux.app");
   let contents = app.join("Contents");

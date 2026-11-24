@@ -1092,9 +1092,7 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
           &[title, resize, diagnostics_link],
         );
       }
-      if !chrome.resizing
-        && let Some(size) = preview.image_size()
-      {
+      if let Some(size) = preview.image_size() {
         self.viewer_size.update(ui.ctx(), size, video);
       }
     });

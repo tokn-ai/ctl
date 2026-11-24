@@ -559,17 +559,17 @@ fn rendered_image(output: &egui::FullOutput, texture: egui::TextureId) -> egui::
     .expect("preview image must be drawn")
 }
 
+fn rendered_label(output: &egui::FullOutput, label: &str) -> Option<egui::Pos2> {
+  output.shapes.iter().find_map(|shape| match &shape.shape {
+    egui::epaint::Shape::Text(text) if text.galley.text() == label => {
+      Some(text.pos + text.galley.rect.center().to_vec2())
+    }
+    _ => None,
+  })
+}
+
 fn label_center(output: &egui::FullOutput, label: &str) -> egui::Pos2 {
-  output
-    .shapes
-    .iter()
-    .find_map(|shape| match &shape.shape {
-      egui::epaint::Shape::Text(text) if text.galley.text() == label => {
-        Some(text.pos + text.galley.rect.center().to_vec2())
-      }
-      _ => None,
-    })
-    .unwrap_or_else(|| panic!("expected rendered label {label:?}"))
+  rendered_label(output, label).unwrap_or_else(|| panic!("expected rendered label {label:?}"))
 }
 
 fn click_setup_label(viewer: &mut Viewer<Mock>, ctx: &egui::Context, name: &str) {
@@ -985,12 +985,6 @@ fn display_end_and_truncated_window_frames_keep_the_viewer_open() {
   }
 }
 
-fn viewer_requests_size(frame: &NativeFrame, size: egui::Vec2) -> bool {
-  frame
-    .commands(viewer_id())
-    .any(|command| *command == egui::ViewportCommand::InnerSize(size))
-}
-
 #[test]
 fn debug_overlay_reports_stream_pixels_and_leaves_video_input_active() {
   let mock = Mock::default();
@@ -1284,7 +1278,9 @@ fn expanded_diagnostics_copy_and_collapse_without_forwarding_input() {
 }
 
 #[test]
-fn viewer_controls_reveal_in_a_separate_row_and_keep_the_video_size() {
+fn viewer_controls_overlay_keeps_full_video_through_reveal_resize_and_hide() {
+  use egui::ViewportCommand;
+
   let mock = Mock::default();
   let ctx = egui::Context::default();
   let mut viewer = create(&mock, &ctx, false, "auto");
@@ -1309,9 +1305,7 @@ fn viewer_controls_reveal_in_a_separate_row_and_keep_the_video_size() {
     .unwrap()
     .id();
   let video_size = egui::vec2(400.0, 200.0);
-  let title_size = egui::vec2(0.0, crate::chrome::BAR_HEIGHT);
-  let expanded = video_size + title_size;
-  let video_at = |offset| egui::Rect::from_min_size(egui::Pos2::ZERO + offset, video_size);
+  let resized = egui::vec2(640.0, 320.0);
   let mut frame = |size, events| {
     native_frame(
       &mut viewer,
@@ -1320,10 +1314,15 @@ fn viewer_controls_reveal_in_a_separate_row_and_keep_the_video_size() {
       viewer_input(size, events),
     )
   };
-  let has_controls = |frame: &NativeFrame| {
-    frame.child().shapes.iter().any(|shape| {
-      matches!(&shape.shape, egui::epaint::Shape::Text(text) if text.galley.text() == "ctream viewer")
-    })
+  let check_video = |frame: &NativeFrame, size| {
+    assert_eq!(
+      rendered_image(frame.child(), texture),
+      egui::Rect::from_min_size(egui::Pos2::ZERO, size)
+    );
+    assert!(!frame.commands(viewer_id()).any(|command| matches!(
+      command,
+      ViewportCommand::InnerSize(_) | ViewportCommand::OuterPosition(_)
+    )));
   };
   let opened = frame(video_size, Vec::new());
   assert_eq!(
@@ -1332,32 +1331,40 @@ fn viewer_controls_reveal_in_a_separate_row_and_keep_the_video_size() {
       .decorations,
     Some(false)
   );
-  assert!(!has_controls(&opened));
-  assert_eq!(
-    rendered_image(opened.child(), texture),
-    video_at(egui::Vec2::ZERO)
-  );
+  assert!(rendered_label(opened.child(), "ctream viewer").is_none());
+  check_video(&opened, video_size);
 
   let edge = egui::pos2(100.0, crate::chrome::REVEAL_HEIGHT * 0.5);
-  let grow = frame(video_size, vec![egui::Event::PointerMoved(edge)]);
-  assert!(viewer_requests_size(&grow, expanded));
-  assert!(!has_controls(&grow));
-  assert_eq!(
-    rendered_image(grow.child(), texture),
-    video_at(egui::Vec2::ZERO)
-  );
-
-  frame(expanded, Vec::new());
-  let shown = frame(expanded, Vec::new());
-  assert!(has_controls(&shown));
-  assert_eq!(rendered_image(shown.child(), texture), video_at(title_size));
+  let revealing = frame(video_size, vec![egui::Event::PointerMoved(edge)]);
+  check_video(&revealing, video_size);
+  let shown = frame(video_size, Vec::new());
+  check_video(&shown, video_size);
   assert!(label_center(shown.child(), "ctream viewer").y < crate::chrome::BAR_HEIGHT);
-  assert!(!viewer_requests_size(&shown, expanded));
+  let after_resize = frame(resized, Vec::new());
+  check_video(&after_resize, resized);
+  let close = label_center(after_resize.child(), "×");
+  assert!(close.x > video_size.x && close.x < resized.x);
 
-  let click = egui::pos2(320.0, crate::chrome::BAR_HEIGHT + edge.y);
+  let before_overlay = input.sent();
+  frame(
+    resized,
+    vec![
+      egui::Event::PointerMoved(close),
+      egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Line,
+        delta: egui::vec2(0.0, 1.0),
+        modifiers: egui::Modifiers::NONE,
+        phase: egui::TouchPhase::Move,
+        source: egui::MouseWheelSource::Wheel,
+      },
+    ],
+  );
+  assert_eq!(input.sent(), before_overlay, "overlay input stays local");
+
+  let click = egui::pos2(resized.x * 0.8, resized.y * 0.4);
   let before = input.sent().len();
   frame(
-    expanded,
+    resized,
     vec![
       egui::Event::PointerMoved(click),
       primary_button(click, true),
@@ -1365,57 +1372,12 @@ fn viewer_controls_reveal_in_a_separate_row_and_keep_the_video_size() {
     ],
   );
   let wire = input.sent();
-  // The click lands on row zero of the video, even though its window Y
-  // coordinate includes the title row.
-  assert!(wire[before..].contains("move 32 0 40 20\nbutton 1 1\n"));
+  assert!(wire[before..].contains("move 32 8 40 20\nbutton 1 1\n"));
   assert!(wire[before..].contains("button 1 0\n"));
 
-  let shrink = frame(expanded, vec![egui::Event::PointerGone]);
-  assert!(viewer_requests_size(&shrink, video_size));
-  assert!(has_controls(&shrink));
-  assert_eq!(
-    rendered_image(shrink.child(), texture),
-    video_at(title_size)
-  );
-  let hidden = frame(video_size, Vec::new());
-  assert!(!has_controls(&hidden));
-  assert_eq!(
-    rendered_image(hidden.child(), texture),
-    video_at(egui::Vec2::ZERO)
-  );
-  assert!(!viewer_requests_size(&hidden, video_size));
-}
-
-#[test]
-fn viewer_collapses_only_the_height_added_by_a_constrained_resize() {
-  let mock = Mock::default();
-  let ctx = egui::Context::default();
-  let mut viewer = create(&mock, &ctx, false, "auto");
-  poll_until(&mut viewer, &ctx, ready);
-  viewer.start(&ctx);
-
-  let original = egui::vec2(400.0, 200.0);
-  let expanded = original + egui::vec2(0.0, crate::chrome::BAR_HEIGHT);
-  let partial = (original + expanded) * 0.5;
-  let mut frame = |size, time, events| {
-    let mut child = viewer_input(size, events);
-    child.time = Some(time);
-    native_frame(&mut viewer, &ctx, raw(Vec::new()), child)
-  };
-  frame(original, 1.0, Vec::new());
-  let grow = frame(
-    original,
-    1.01,
-    vec![egui::Event::PointerMoved(egui::pos2(100.0, 3.0))],
-  );
-  assert!(viewer_requests_size(&grow, expanded));
-
-  frame(partial, 1.05, Vec::new());
-  let shown = frame(partial, 1.2, Vec::new());
-  assert!(label_center(shown.child(), "ctream viewer").y < crate::chrome::BAR_HEIGHT);
-
-  let shrink = frame(partial, 1.21, vec![egui::Event::PointerGone]);
-  assert!(viewer_requests_size(&shrink, original));
+  let hidden = frame(resized, vec![egui::Event::PointerGone]);
+  check_video(&hidden, resized);
+  assert!(rendered_label(hidden.child(), "ctream viewer").is_none());
 }
 
 fn primary_button(pos: egui::Pos2, pressed: bool) -> egui::Event {
@@ -1444,7 +1406,7 @@ fn title_bar_debug_button_toggles_the_live_overlay_without_forwarding_clicks() {
     native_frame(&mut viewer, &ctx, raw(Vec::new()), raw(Vec::new()));
 
     let frame = |viewer: &mut Viewer<Mock>, title_events| {
-      let size = egui::vec2(640.0, 400.0);
+      let size = egui::vec2(crate::view::MIN_WINDOW.x, 400.0);
       let (video_events, panel_events) = if attached {
         viewer.chrome.test_attached_hover = Some(true);
         (Vec::new(), title_events)
@@ -1452,7 +1414,7 @@ fn title_bar_debug_button_toggles_the_live_overlay_without_forwarding_clicks() {
         (title_events, Vec::new())
       };
       let mut video = viewer_input(size, video_events);
-      // Exercise the in-window bar without waiting for the compositor resize.
+      // Keep controls available in a maximized viewer as well.
       video.viewports.entry(viewer_id()).or_default().maximized = Some(true);
       let panel = viewer_input(egui::vec2(size.x, crate::chrome::BAR_HEIGHT), panel_events);
       native_frame_with_inputs(
@@ -1470,11 +1432,15 @@ fn title_bar_debug_button_toggles_the_live_overlay_without_forwarding_clicks() {
     };
 
     let reveal = egui::pos2(100.0, crate::chrome::REVEAL_HEIGHT * 0.5);
-    let initial = frame(&mut viewer, vec![egui::Event::PointerMoved(reveal)]);
+    frame(&mut viewer, vec![egui::Event::PointerMoved(reveal)]);
+    let initial = frame(&mut viewer, Vec::new());
+    let toolbar_id = if attached { controls } else { viewer_id() };
     let toolbar = initial
-      .viewport(if attached { controls } else { viewer_id() })
+      .viewport(toolbar_id)
       .expect("the title bar must be rendered");
-    let debug = label_center(toolbar, "Debug");
+    // The icon sits one button width and a 12-point separator left of Minimize.
+    let debug = label_center(toolbar, "−") - egui::vec2(crate::chrome::BUTTON_WIDTH + 12.0, 0.0);
+    assert!(rendered_label(toolbar, "Debug").is_none());
     assert!(!has_overlay(&initial));
     assert!(viewer.stats.is_none());
     let before = remote.sent().len();
@@ -1487,7 +1453,19 @@ fn title_bar_debug_button_toggles_the_live_overlay_without_forwarding_clicks() {
           .commands(viewer_id())
           .any(|command| *command == egui::ViewportCommand::StartDrag)
       );
-      frame(&mut viewer, vec![primary_button(debug, false)]);
+      let clicked = frame(&mut viewer, vec![primary_button(debug, false)]);
+      assert!(
+        clicked
+          .viewport(toolbar_id)
+          .unwrap()
+          .platform_output
+          .events
+          .iter()
+          .any(|event| {
+            matches!(event, egui::output::OutputEvent::Clicked(info)
+          if info.label.as_deref() == Some("Debug overlay"))
+          })
+      );
       let updated = frame(&mut viewer, Vec::new());
       assert_eq!(has_overlay(&updated), enabled);
       assert_eq!(viewer.stats.is_some(), enabled);
@@ -1563,8 +1541,9 @@ fn attached_controls_leave_the_video_fixed_and_handle_only_local_input() {
   let size = egui::vec2(400.0, 200.0);
   let screen_rect = egui::Rect::from_min_size(egui::pos2(300.0, 240.0), size);
   let controls = crate::chrome::controls_id();
-  let mut frame = |hovered, video_events, panel_events| {
+  let mut frame = |hovered, overlap, video_events, panel_events| {
     viewer.chrome.test_attached_hover = hovered;
+    viewer.chrome.test_attached_overlap = overlap;
     let mut video = viewer_input(size, video_events);
     let info = video.viewports.entry(viewer_id()).or_default();
     info.inner_rect = Some(screen_rect);
@@ -1588,10 +1567,10 @@ fn attached_controls_leave_the_video_fixed_and_handle_only_local_input() {
     )));
   };
 
-  let opened = frame(None, Vec::new(), Vec::new());
+  let opened = frame(None, None, Vec::new(), Vec::new());
   check_geometry(&opened);
   assert!(opened.viewport(controls).is_none());
-  let shown = frame(Some(true), Vec::new(), Vec::new());
+  let shown = frame(Some(true), None, Vec::new(), Vec::new());
   check_geometry(&shown);
   let panel = shown
     .viewport(controls)
@@ -1602,6 +1581,7 @@ fn attached_controls_leave_the_video_fixed_and_handle_only_local_input() {
   let before = remote.sent().len();
   let clicked = frame(
     Some(true),
+    None,
     vec![
       egui::Event::PointerMoved(top_pixel),
       primary_button(top_pixel, true),
@@ -1612,18 +1592,66 @@ fn attached_controls_leave_the_video_fixed_and_handle_only_local_input() {
   check_geometry(&clicked);
   assert!(remote.sent()[before..].contains("move 32 0 40 20\nbutton 1 1\n"));
 
-  let hidden = frame(Some(false), Vec::new(), Vec::new());
+  let overlap = egui::Rect::from_min_max(
+    egui::pos2(150.0, 0.0),
+    egui::pos2(size.x, crate::chrome::BAR_HEIGHT),
+  );
+  let before_overlap = remote.sent();
+  let overlapped = frame(
+    Some(true),
+    Some(overlap),
+    vec![
+      egui::Event::PointerMoved(top_pixel),
+      primary_button(top_pixel, true),
+      primary_button(top_pixel, false),
+    ],
+    Vec::new(),
+  );
+  check_geometry(&overlapped);
+  assert!(overlapped.viewport(controls).is_some());
+  assert_eq!(
+    remote.sent(),
+    before_overlap,
+    "native overlay input stays local"
+  );
+
+  let outside = egui::pos2(80.0, 3.0);
+  let clicked_outside = frame(
+    Some(true),
+    Some(overlap),
+    vec![
+      egui::Event::PointerMoved(outside),
+      primary_button(outside, true),
+      primary_button(outside, false),
+    ],
+    Vec::new(),
+  );
+  check_geometry(&clicked_outside);
+  assert!(remote.sent()[before_overlap.len()..].contains("move 8 0 40 20\nbutton 1 1\n"));
+
+  let hidden = frame(Some(false), Some(overlap), Vec::new(), Vec::new());
   check_geometry(&hidden);
   assert!(hidden.viewport(controls).is_none());
 
   let before_close = remote.sent();
   frame(
     Some(true),
+    Some(overlap),
     Vec::new(),
     vec![egui::Event::PointerMoved(close)],
   );
-  frame(Some(true), Vec::new(), vec![primary_button(close, true)]);
-  let closed = frame(Some(true), Vec::new(), vec![primary_button(close, false)]);
+  frame(
+    Some(true),
+    Some(overlap),
+    Vec::new(),
+    vec![primary_button(close, true)],
+  );
+  let closed = frame(
+    Some(true),
+    Some(overlap),
+    Vec::new(),
+    vec![primary_button(close, false)],
+  );
   assert!(!viewer.viewing);
   assert!(remote.closed() && remote.cancelled());
   assert_eq!(remote.sent(), before_close, "panel clicks must stay local");
@@ -1653,10 +1681,9 @@ fn viewer_controls_stay_local_and_closing_restores_setup() {
   let input = mock.inputs().pop().unwrap();
   let capture = mock.captures().pop().unwrap();
   let size = raw(Vec::new()).screen_rect.unwrap().size();
-  let expanded = size + egui::vec2(0.0, crate::chrome::BAR_HEIGHT);
   let y = crate::chrome::BAR_HEIGHT * 0.5;
   let closed = {
-    let mut frame = |size, events| {
+    let mut frame = |events| {
       native_frame(
         &mut viewer,
         &ctx,
@@ -1664,16 +1691,12 @@ fn viewer_controls_stay_local_and_closing_restores_setup() {
         viewer_input(size, events),
       )
     };
-    frame(size, Vec::new());
-    frame(
-      size,
-      vec![egui::Event::PointerMoved(egui::pos2(
-        100.0,
-        crate::chrome::REVEAL_HEIGHT * 0.5,
-      ))],
-    );
-    let mut frame = |events| frame(expanded, events);
     frame(Vec::new());
+    frame(vec![egui::Event::PointerMoved(egui::pos2(
+      100.0,
+      crate::chrome::REVEAL_HEIGHT * 0.5,
+    ))]);
+    let toolbar = frame(Vec::new());
 
     let drag = egui::pos2(100.0, y);
     let dragging = frame(vec![
@@ -1687,25 +1710,25 @@ fn viewer_controls_stay_local_and_closing_restores_setup() {
     );
     frame(vec![primary_button(drag, false)]);
 
-    let mut click = |from_right| {
-      let at = egui::pos2(size.x - crate::chrome::BUTTON_WIDTH * from_right, y);
+    let mut click = |label| {
+      let at = label_center(toolbar.child(), label);
       frame(vec![egui::Event::PointerMoved(at)]);
       frame(vec![primary_button(at, true)]);
       frame(vec![primary_button(at, false)])
     };
-    let minimized = click(2.5);
+    let minimized = click("−");
     assert!(
       minimized
         .commands(viewer_id())
         .any(|command| *command == ViewportCommand::Minimized(true))
     );
-    let maximized = click(1.5);
+    let maximized = click("□");
     assert!(
       maximized
         .commands(viewer_id())
         .any(|command| *command == ViewportCommand::Maximized(true))
     );
-    click(0.5)
+    click("×")
   };
   assert!(!viewer.viewing);
   assert!(input.closed() && input.cancelled());
@@ -1741,6 +1764,7 @@ fn viewer_keeps_remote_drag_owned_by_video_across_the_top_edge() {
     primary_button(start, true),
   ]);
   let across_edge = frame(vec![egui::Event::PointerMoved(end)]);
+  assert!(rendered_label(across_edge.child(), "ctream viewer").is_none());
   assert!(
     !across_edge
       .commands(viewer_id())

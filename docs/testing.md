@@ -225,6 +225,22 @@ wgpu checks also verified the Windows and Linux driver lists at 860×620 and
 600×460, including No sources tags, scrollable source controls, and unchanged
 view-only setup and Start/Back input lifecycles.
 
+Use this command to open the native viewer controls over a synthetic frame.
+
+```sh
+cargo run --locked -p ctream-preview --example controls_fixture
+```
+
+Hover at the top edge, move the window across display edges, and resize it. The
+checkerboard and its size label make any unexpected canvas shift visible. The
+Debug button shows whether the pointer is over the in-view controls. Press
+Escape to close the fixture.
+Add `-- --overlay` to exercise the in-view fallback toolbar on macOS, without
+depending on native application activation or global pointer tracking.
+Maximize the viewer and drag its title bar: it should return to its previous
+size under the pointer and continue moving. A title-bar click should leave
+it maximized.
+
 ## Ctream Linux sessions
 
 Run `bash docker/ctream/run.sh` from the repository checkout to test the

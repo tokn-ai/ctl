@@ -7,7 +7,17 @@ use objc2_app_kit::{
   NSWindowOcclusionState, NSWindowOrderingMode,
 };
 use objc2_foundation::{NSPoint, NSPointInRect, NSRect, NSSize, NSString};
-use std::{cell::Cell, ptr::NonNull, rc::Rc};
+use std::{
+  cell::Cell,
+  ptr::NonNull,
+  rc::Rc,
+  time::{Duration, Instant},
+};
+
+#[path = "macos_chrome/placement.rs"]
+mod placement;
+
+use placement::{keep_panel_visible, panel_frame, reveal_at};
 
 #[derive(Clone)]
 pub(super) struct ViewerWindow {
@@ -19,14 +29,32 @@ pub(super) struct AttachedPanel {
   viewer: ViewerWindow,
   panel: Retained<NSWindow>,
   monitor: Retained<AnyObject>,
-  drag: Rc<Cell<Option<Drag>>>,
+  drag: Rc<DragState>,
+}
+
+const RESTORE_DRAG_DISTANCE: f64 = 4.0;
+const RESTORE_TIMEOUT: Duration = Duration::from_secs(1);
+
+#[derive(Default)]
+struct DragState {
+  gesture: Cell<Option<Gesture>>,
+  maximized: Cell<bool>,
+  drag_limit: Cell<f64>,
+  button_width: Cell<f64>,
+  minimum_width: Cell<f64>,
+}
+
+#[derive(Clone, Copy)]
+enum Gesture {
+  Moving(Drag),
+  Maximized(RestoreAnchor),
+  Restoring(RestoreDrag),
 }
 
 #[derive(Clone, Copy)]
 struct Drag {
   press: NSPoint,
   viewer_origin: NSPoint,
-  panel_offset_y: f64,
 }
 
 impl Drag {
@@ -36,15 +64,67 @@ impl Drag {
       self.viewer_origin.y + (pointer.y - self.press.y),
     )
   }
+}
 
-  fn keep_panel_in_work_area(self, mut viewer: NSPoint, height: f64, area: NSRect) -> NSPoint {
-    let bottom = area.min().y;
-    let top = area.max().y - height;
-    if bottom <= top {
-      let y = viewer.y + self.panel_offset_y;
-      viewer.y += y.clamp(bottom, top) - y;
+#[derive(Clone, Copy)]
+struct RestoreAnchor {
+  press: NSPoint,
+  maximized_size: NSSize,
+  horizontal_fraction: f64,
+  button_width: f64,
+  title_offset: f64,
+}
+
+impl RestoreAnchor {
+  fn new(press: NSPoint, video: NSRect, panel: NSRect, drag_limit: f64, button_width: f64) -> Self {
+    // Match the rectangle the eye can grab. A shrinking normal window
+    // should not move that anchor into the fixed-width button strip.
+    let title_width = drag_limit.min(panel.size.width);
+    Self {
+      press,
+      maximized_size: video.size,
+      horizontal_fraction: ((press.x - panel.min().x) / title_width).clamp(0.0, 1.0),
+      button_width,
+      title_offset: press.y - panel.min().y,
     }
-    viewer
+  }
+
+  fn begin_restore(self, pointer: NSPoint, released: bool) -> Option<RestoreDrag> {
+    let moved = (pointer.x - self.press.x).hypot(pointer.y - self.press.y) >= RESTORE_DRAG_DISTANCE;
+    (!released && moved).then(|| RestoreDrag {
+      anchor: self,
+      pointer,
+      released: false,
+      requested: Instant::now(),
+    })
+  }
+
+  fn reanchor(self, pointer: NSPoint, size: NSSize) -> Drag {
+    let title_width = (size.width - self.button_width).max(0.0);
+    Drag {
+      press: pointer,
+      viewer_origin: NSPoint::new(
+        pointer.x - title_width * self.horizontal_fraction,
+        pointer.y - self.title_offset - size.height,
+      ),
+    }
+  }
+}
+
+#[derive(Clone, Copy)]
+struct RestoreDrag {
+  anchor: RestoreAnchor,
+  pointer: NSPoint,
+  released: bool,
+  requested: Instant,
+}
+
+impl RestoreDrag {
+  fn restored(self, frame: NSRect, maximized: bool) -> Option<Drag> {
+    // egui updates the viewport flag when it sends the AppKit zoom command.
+    // Wait for native geometry as well before using the restored dimensions.
+    (!maximized && frame.size != self.anchor.maximized_size && !frame.is_empty())
+      .then(|| self.anchor.reanchor(self.pointer, frame.size))
   }
 }
 
@@ -80,23 +160,61 @@ pub(super) fn redraw_visible_viewer() {
   }
 }
 
-fn panel_at(video: NSRect, y: f64, height: f64) -> NSRect {
-  // Use the viewer's full horizontal span in desktop coordinates. The window
-  // server composites whichever portion of each window a display can show.
-  NSRect::new(
-    NSPoint::new(video.min().x, y),
-    NSSize::new(video.size.width, height),
-  )
+fn work_areas(main: MainThreadMarker) -> Vec<NSRect> {
+  NSScreen::screens(main)
+    .to_vec()
+    .iter()
+    .map(|screen| screen.visibleFrame())
+    .collect()
 }
 
-fn panel_frame(video: NSRect, work_area: NSRect, height: f64) -> Option<NSRect> {
-  if video.is_empty() || work_area.is_empty() || height <= 0.0 {
-    return None;
+fn place_panel(panel: &NSWindow, frame: NSRect) {
+  if panel.frame() != frame {
+    panel.setFrame_display(frame, false);
   }
-  [video.max().y, video.min().y - height]
-    .into_iter()
-    .find(|&y| y >= work_area.min().y && y + height <= work_area.max().y)
-    .map(|y| panel_at(video, y, height))
+}
+
+fn move_viewer_and_panel(
+  viewer: &NSWindow,
+  panel: &NSWindow,
+  origin: NSPoint,
+  min_width: f64,
+  main: MainThreadMarker,
+) {
+  let previous = panel.frame();
+  if origin != viewer.frame().origin {
+    viewer.setFrameOrigin(origin);
+  }
+  // AppKit moves a child along with its parent. If the viewer has no
+  // attachment point, hold the controls in their last reachable place.
+  let areas = work_areas(main);
+  let frame = panel_frame(viewer.frame(), &areas, previous.size.height, min_width)
+    .or_else(|| keep_panel_visible(previous, &areas, min_width))
+    .unwrap_or(previous);
+  place_panel(panel, frame);
+}
+
+fn panel_overlap(panel: NSRect, video: NSRect, content: egui::Rect) -> egui::Rect {
+  if video.is_empty() || !content.is_positive() {
+    return egui::Rect::NOTHING;
+  }
+  let left = panel.min().x.max(video.min().x);
+  let right = panel.max().x.min(video.max().x);
+  let bottom = panel.min().y.max(video.min().y);
+  let top = panel.max().y.min(video.max().y);
+  if left >= right || bottom >= top {
+    return egui::Rect::NOTHING;
+  }
+  let scale_x = f64::from(content.width()) / video.size.width;
+  let scale_y = f64::from(content.height()) / video.size.height;
+  let to_point = |x, y| {
+    content.min
+      + egui::vec2(
+        ((x - video.min().x) * scale_x) as f32,
+        ((video.max().y - y) * scale_y) as f32,
+      )
+  };
+  egui::Rect::from_min_max(to_point(left, top), to_point(right, bottom))
 }
 
 impl ViewerWindow {
@@ -104,29 +222,52 @@ impl ViewerWindow {
     self.application.isActive() && self.window.isVisible() && !self.window.isMiniaturized()
   }
 
-  fn panel_frame(&self, height: f32) -> Option<NSRect> {
+  fn panel_frame(&self, height: f32, min_width: f32) -> Option<NSRect> {
     panel_frame(
       self.window.frame(),
-      self.window.screen()?.visibleFrame(),
+      &work_areas(MainThreadMarker::new()?),
       f64::from(height),
+      f64::from(min_width),
     )
   }
 
-  pub(super) fn panel_width(&self, height: f32) -> Option<f64> {
-    Some(self.panel_frame(height)?.size.width)
+  pub(super) fn panel_width(&self, height: f32, min_width: f32) -> Option<f64> {
+    Some(self.panel_frame(height, min_width)?.size.width)
+  }
+
+  pub(super) fn reveal_hovering(&self, height: f32, min_width: f32, reveal: f32) -> bool {
+    let Some(main) = MainThreadMarker::new() else {
+      return false;
+    };
+    let video = self.window.frame();
+    let areas = work_areas(main);
+    let Some(panel) = panel_frame(video, &areas, f64::from(height), f64::from(min_width)) else {
+      return false;
+    };
+    reveal_at(
+      video,
+      &areas,
+      panel,
+      NSEvent::mouseLocation(),
+      f64::from(reveal),
+      false,
+    )
   }
 
   pub(super) fn attach_controls(
     &self,
     height: f32,
-    button_strip_width: f32,
+    min_width: f32,
     ctx: &egui::Context,
   ) -> Option<AttachedPanel> {
-    let frame = self.panel_frame(height)?;
+    let frame = self.panel_frame(height, min_width)?;
     let panel = own_window(&self.application, CONTROLS_TITLE)?;
-    let drag = Rc::new(Cell::new(None));
-    let monitor = monitor_drag(&self.window, &panel, &drag, button_strip_width, ctx)?;
-    panel.setFrame_display(frame, false);
+    let drag = Rc::new(DragState {
+      minimum_width: Cell::new(f64::from(min_width)),
+      ..Default::default()
+    });
+    let monitor = monitor_drag(&self.window, &panel, &drag, ctx)?;
+    place_panel(&panel, frame);
     panel.setHasShadow(false);
     panel.setExcludedFromWindowsMenu(true);
     panel.setCollectionBehavior(
@@ -151,15 +292,12 @@ impl ViewerWindow {
   }
 }
 
-fn drag_hit(point: NSPoint, size: NSSize, button_strip_width: f32) -> bool {
+fn drag_hit(point: NSPoint, size: NSSize, right_edge: f64) -> bool {
   NSPointInRect(
     point,
     NSRect::new(
       NSPoint::ZERO,
-      NSSize::new(
-        (size.width - f64::from(button_strip_width)).max(0.0),
-        size.height,
-      ),
+      NSSize::new(right_edge.min(size.width).max(0.0), size.height),
     ),
   )
 }
@@ -167,8 +305,7 @@ fn drag_hit(point: NSPoint, size: NSSize, button_strip_width: f32) -> bool {
 fn monitor_drag(
   viewer: &Retained<NSWindow>,
   panel: &Retained<NSWindow>,
-  drag: &Rc<Cell<Option<Drag>>>,
-  button_strip_width: f32,
+  drag: &Rc<DragState>,
   ctx: &egui::Context,
 ) -> Option<Retained<AnyObject>> {
   let mtm = MainThreadMarker::new()?;
@@ -188,55 +325,65 @@ fn monitor_drag(
     };
     match report.r#type() {
       NSEventType::LeftMouseDown => {
-        drag.set(None);
+        drag.gesture.set(None);
         let panel_frame = panel.frame();
         if report.windowNumber() != panel.windowNumber()
-          || !drag_hit(
-            location,
-            panel_frame.size,
-            button_strip_width * ctx.zoom_factor(),
-          )
+          || !drag_hit(location, panel_frame.size, drag.drag_limit.get())
         {
           return event.as_ptr();
         }
-        let viewer_origin = viewer.frame().origin;
-        drag.set(Some(Drag {
-          press: screen_point(),
-          viewer_origin,
-          panel_offset_y: panel_frame.origin.y - viewer_origin.y,
-        }));
+        let press = screen_point();
+        let video = viewer.frame();
+        let gesture = if drag.maximized.get() {
+          Gesture::Maximized(RestoreAnchor::new(
+            press,
+            video,
+            panel_frame,
+            drag.drag_limit.get(),
+            drag.button_width.get(),
+          ))
+        } else {
+          Gesture::Moving(Drag {
+            press,
+            viewer_origin: video.origin,
+          })
+        };
+        drag.gesture.set(Some(gesture));
       }
       NSEventType::LeftMouseDragged | NSEventType::LeftMouseUp => {
-        let tracked = if report.r#type() == NSEventType::LeftMouseUp {
-          drag.take()
-        } else {
-          drag.get()
-        };
-        let Some(tracked) = tracked else {
+        let Some(gesture) = drag.gesture.get() else {
           return event.as_ptr();
         };
+        let released = report.r#type() == NSEventType::LeftMouseUp;
         // Queued mouse events can still carry coordinates relative to the
         // panel's previous origin. Sample the pointer in screen coordinates.
         let pointer = NSEvent::mouseLocation();
-        let origin = tracked.viewer_at(pointer);
-        let screen = NSScreen::screens(mtm)
-          .to_vec()
-          .into_iter()
-          .find(|screen| NSPointInRect(pointer, screen.frame()))
-          .or_else(|| viewer.screen());
-        // Reserve room vertically for the grabbed strip. AppKit would
-        // otherwise constrain the child independently at the menu bar or Dock.
-        let height = panel.frame().size.height;
-        let origin = screen.map_or(origin, |screen| {
-          tracked.keep_panel_in_work_area(origin, height, screen.visibleFrame())
-        });
-        if origin != viewer.frame().origin {
-          viewer.setFrameOrigin(origin);
-        }
-        let video = viewer.frame();
-        let frame = panel_at(video, video.min().y + tracked.panel_offset_y, height);
-        if frame != panel.frame() {
-          panel.setFrame_display(frame, false);
+        match gesture {
+          Gesture::Moving(tracked) => {
+            if released {
+              drag.gesture.set(None);
+            }
+            move_viewer_and_panel(
+              &viewer,
+              &panel,
+              tracked.viewer_at(pointer),
+              drag.minimum_width.get(),
+              mtm,
+            );
+          }
+          Gesture::Maximized(anchor) => {
+            if let Some(restoring) = anchor.begin_restore(pointer, released) {
+              drag.gesture.set(Some(Gesture::Restoring(restoring)));
+              ctx.send_viewport_cmd_to(viewport, egui::ViewportCommand::Maximized(false));
+            } else if released {
+              drag.gesture.set(None);
+            }
+          }
+          Gesture::Restoring(mut restoring) => {
+            restoring.pointer = pointer;
+            restoring.released |= released;
+            drag.gesture.set(Some(Gesture::Restoring(restoring)));
+          }
         }
       }
       _ => return event.as_ptr(),
@@ -255,29 +402,87 @@ fn monitor_drag(
 
 impl AttachedPanel {
   pub(super) fn dragging(&self) -> bool {
-    self.drag.get().is_some()
+    self.drag.gesture.get().is_some()
+  }
+
+  pub(super) fn sync_drag(&self, maximized: bool) {
+    self.drag.maximized.set(maximized);
+    let Some(Gesture::Restoring(restoring)) = self.drag.gesture.get() else {
+      return;
+    };
+    let window = &self.viewer.window;
+    if let Some(tracked) = restoring.restored(window.frame(), maximized)
+      && let Some(main) = MainThreadMarker::new()
+    {
+      self
+        .drag
+        .gesture
+        .set((!restoring.released).then_some(Gesture::Moving(tracked)));
+      move_viewer_and_panel(
+        window,
+        &self.panel,
+        tracked.viewer_origin,
+        self.drag.minimum_width.get(),
+        main,
+      );
+    } else if restoring.requested.elapsed() >= RESTORE_TIMEOUT {
+      // An acknowledged zoom may leave an already work-area-sized normal
+      // frame unchanged. Rebase without moving it or holding the bar open.
+      self
+        .drag
+        .gesture
+        .set((!maximized && !restoring.released).then(|| {
+          Gesture::Moving(Drag {
+            press: restoring.pointer,
+            viewer_origin: window.frame().origin,
+          })
+        }));
+    }
+  }
+
+  pub(super) fn width(&self) -> f64 {
+    self.panel.frame().size.width
+  }
+
+  /// The latest painted title divider and button-strip width in native points.
+  pub(super) fn set_drag_bounds(&self, right_edge: f64, button_width: f64) {
+    self.drag.drag_limit.set(right_edge);
+    self.drag.button_width.set(button_width);
   }
 
   pub(super) fn hovering(&self, reveal: f32) -> bool {
-    let pointer = NSEvent::mouseLocation();
-    let video = self.viewer.window.frame();
-    let panel = self.panel.frame();
-    // A panel below the viewer needs to stay open while the pointer crosses
-    // the video from the top-edge reveal strip.
-    let below = panel.max().y <= video.min().y;
-    NSPointInRect(pointer, panel)
-      || (NSPointInRect(pointer, video)
-        && (below || pointer.y >= video.max().y - f64::from(reveal)))
-  }
-
-  pub(super) fn place(&self, height: f32) -> bool {
-    let Some(frame) = self.viewer.panel_frame(height) else {
+    let Some(main) = MainThreadMarker::new() else {
       return false;
     };
-    if self.panel.frame() != frame {
-      self.panel.setFrame_display(frame, false);
-    }
+    let pointer = NSEvent::mouseLocation();
+    let panel = self.panel.frame();
+    let areas = work_areas(main);
+    (NSPointInRect(pointer, panel) && areas.iter().any(|&area| NSPointInRect(pointer, area)))
+      || reveal_at(
+        self.viewer.window.frame(),
+        &areas,
+        panel,
+        pointer,
+        f64::from(reveal),
+        true,
+      )
+  }
+
+  pub(super) fn place(&self, height: f32, min_width: f32) -> bool {
+    let Some(frame) = self.viewer.panel_frame(height, min_width) else {
+      return false;
+    };
+    self.drag.minimum_width.set(f64::from(min_width));
+    place_panel(&self.panel, frame);
     true
+  }
+
+  pub(super) fn overlay_rect(&self, content: egui::Rect) -> egui::Rect {
+    let video = self
+      .viewer
+      .window
+      .contentRectForFrameRect(self.viewer.window.frame());
+    panel_overlap(self.panel.frame(), video, content)
   }
 
   pub(super) fn restore_focus(&self) {
@@ -312,75 +517,98 @@ mod tests {
   }
 
   #[test]
-  fn title_panel_prefers_the_space_above_the_viewer() {
-    let desktop = rect(-800.0, 24.0, 800.0, 580.0);
-    let video = rect(-720.0, 180.0, 640.0, 360.0);
-    assert_eq!(
-      panel_frame(video, desktop, 34.0),
-      Some(rect(-720.0, 540.0, 640.0, 34.0))
-    );
-  }
-
-  #[test]
-  fn title_panel_uses_visible_space_below_when_the_top_is_blocked() {
-    let desktop = rect(0.0, 40.0, 800.0, 560.0);
-    let video = rect(100.0, 200.0, 640.0, 400.0);
-    assert_eq!(
-      panel_frame(video, desktop, 34.0),
-      Some(rect(100.0, 166.0, 640.0, 34.0))
-    );
-    assert_eq!(panel_frame(desktop, desktop, 34.0), None);
-  }
-
-  #[test]
-  fn title_panel_keeps_the_viewers_full_width_at_either_edge() {
-    let desktop = rect(0.0, 40.0, 1440.0, 820.0);
-    for (video, expected) in [
-      (
-        rect(-180.0, 100.0, 620.0, 360.0),
-        rect(-180.0, 460.0, 620.0, 34.0),
-      ),
-      (
-        rect(1040.0, 100.0, 620.0, 360.0),
-        rect(1040.0, 460.0, 620.0, 34.0),
-      ),
-    ] {
-      assert_eq!(panel_frame(video, desktop, 34.0), Some(expected));
-    }
-  }
-
-  #[test]
-  fn title_panel_spans_displays_regardless_of_which_owns_the_viewer() {
-    let left = rect(-800.0, 40.0, 800.0, 820.0);
-    let right = rect(0.0, 40.0, 1440.0, 820.0);
-    let video = rect(-540.0, 100.0, 1740.0, 360.0);
-    for desktop in [left, right] {
-      assert_eq!(
-        panel_frame(video, desktop, 34.0),
-        Some(rect(-540.0, 460.0, 1740.0, 34.0))
-      );
-    }
-  }
-
-  #[test]
   fn viewer_moves_from_the_original_screen_anchor() {
     let drag = Drag {
       press: NSPoint::new(-402.0, 420.0),
       viewer_origin: NSPoint::new(-550.0, 205.0),
-      panel_offset_y: 360.0,
     };
     assert_eq!(drag.viewer_at(drag.press), drag.viewer_origin);
     let moved = drag.viewer_at(NSPoint::new(101.0, 380.0));
     assert_eq!(moved, NSPoint::new(-47.0, 165.0));
-    assert_eq!(moved.y + drag.panel_offset_y, 525.0);
+  }
+
+  #[test]
+  fn clicking_a_maximized_title_does_not_request_restore() {
+    let video = rect(0.0, 0.0, 1200.0, 800.0);
+    let panel = rect(0.0, 766.0, 1200.0, 34.0);
+    let anchor = RestoreAnchor::new(NSPoint::new(250.0, 783.0), video, panel, 1028.0, 172.0);
+    assert!(anchor.begin_restore(anchor.press, true).is_none());
+    assert!(
+      anchor
+        .begin_restore(NSPoint::new(252.0, 781.0), false)
+        .is_none()
+    );
+    assert!(
+      anchor
+        .begin_restore(NSPoint::new(250.0, 760.0), true)
+        .is_none()
+    );
+    assert!(
+      anchor
+        .begin_restore(NSPoint::new(250.0, 778.0), false)
+        .is_some()
+    );
+  }
+
+  #[test]
+  fn restored_drag_waits_for_normal_geometry_and_uses_the_title_anchor() {
+    let video = rect(-800.0, 40.0, 1720.0, 820.0);
+    let panel = rect(-800.0, 826.0, 1720.0, 34.0);
+    let anchor = RestoreAnchor::new(NSPoint::new(740.0, 844.0), video, panel, 1548.0, 172.0);
+    let pointer = NSPoint::new(708.0, 802.0);
+    let restoring = anchor.begin_restore(pointer, false).unwrap();
+    let normal = rect(120.0, 200.0, 640.0, 360.0);
+    assert!(restoring.restored(video, false).is_none());
+    assert!(
+      restoring
+        .restored(NSRect::new(NSPoint::ZERO, video.size), false)
+        .is_none()
+    );
+    assert!(restoring.restored(normal, true).is_none());
+
+    let track = restoring.restored(normal, false).unwrap();
+    let offset = pointer.x - track.viewer_origin.x;
+    assert!(offset > 460.0 && offset < 468.0);
+    assert_eq!(track.viewer_origin.y + normal.size.height, pointer.y - 18.0);
+    let later = track.viewer_at(NSPoint::new(pointer.x - 13.0, pointer.y - 21.0));
+    assert_eq!(later.x - track.viewer_origin.x, -13.0);
+    assert_eq!(later.y - track.viewer_origin.y, -21.0);
+  }
+
+  #[test]
+  fn restoring_during_native_widening_uses_the_painted_button_width() {
+    let window = rect(0.0, 0.0, 1200.0, 800.0);
+    let panel = rect(0.0, 766.0, 1200.0, 34.0);
+    // The panel is already maximized, but its last paint still covered only
+    // 640 points. The 560 unpainted points are not part of the button strip.
+    let anchor = RestoreAnchor::new(NSPoint::new(351.0, 783.0), window, panel, 468.0, 172.0);
+    let pointer = NSPoint::new(500.0, 750.0);
+    let drag = anchor.reanchor(pointer, NSSize::new(640.0, 360.0));
+    assert_eq!(pointer.x - drag.viewer_origin.x, 351.0);
+  }
+
+  #[test]
+  fn dragging_to_the_top_moves_the_viewer_and_overlaps_only_the_panel() {
+    let drag = Drag {
+      press: NSPoint::new(200.0, 550.0),
+      viewer_origin: NSPoint::new(100.0, 180.0),
+    };
+    let origin = drag.viewer_at(NSPoint::new(220.0, 610.0));
+    assert_eq!(origin, NSPoint::new(120.0, 240.0));
+    let video = NSRect::new(origin, NSSize::new(640.0, 360.0));
+    let area = rect(0.0, 40.0, 800.0, 560.0);
+    assert_eq!(
+      panel_frame(video, &[area], 34.0, 200.0),
+      Some(rect(120.0, 566.0, 640.0, 34.0))
+    );
   }
 
   #[test]
   fn native_drag_area_excludes_the_window_buttons() {
     let size = NSSize::new(400.0, 34.0);
-    for width in [120.0_f32, 172.0] {
-      let buttons_left = size.width - f64::from(width);
-      let hits_title = |x| drag_hit(NSPoint::new(x, 17.0), size, width);
+    for width in [120.0, 172.0] {
+      let buttons_left = size.width - width;
+      let hits_title = |x| drag_hit(NSPoint::new(x, 17.0), size, buttons_left);
       assert!(hits_title(buttons_left - 1.0));
       assert!(!hits_title(buttons_left));
       assert!(!hits_title(buttons_left + 20.0));
@@ -388,24 +616,27 @@ mod tests {
   }
 
   #[test]
-  fn dragging_keeps_the_grabbed_edge_inside_the_work_area() {
-    let area = rect(0.0, 40.0, 800.0, 560.0);
-    let above = Drag {
-      press: NSPoint::ZERO,
-      viewer_origin: NSPoint::new(100.0, 100.0),
-      panel_offset_y: 360.0,
-    };
-    let desired = NSPoint::new(200.0, 300.0);
-    let moved = above.keep_panel_in_work_area(desired, 34.0, area);
-    assert_eq!(moved, NSPoint::new(200.0, 206.0));
-    assert_eq!(moved.y + above.panel_offset_y, 566.0);
+  fn native_drag_respects_the_rendered_divider_while_the_panel_widens() {
+    let size = NSSize::new(560.0, 34.0);
+    let stale = 400.0 - 172.0;
+    let current = size.width - 172.0;
+    let former_button = NSPoint::new(285.0, 17.0);
+    assert!(!drag_hit(former_button, size, 0.0));
+    assert!(!drag_hit(former_button, size, stale));
+    assert!(drag_hit(former_button, size, current));
+    assert!(!drag_hit(NSPoint::new(580.0, 17.0), size, 600.0));
+  }
 
-    let below = Drag {
-      panel_offset_y: -34.0,
-      ..above
-    };
-    let moved = below.keep_panel_in_work_area(NSPoint::new(200.0, 0.0), 34.0, area);
-    assert_eq!(moved, NSPoint::new(200.0, 74.0));
-    assert_eq!(moved.y + below.panel_offset_y, 40.0);
+  #[test]
+  fn overlap_excludes_only_the_covered_video_pixels_in_viewer_coordinates() {
+    let video = rect(-100.0, 140.0, 400.0, 240.0);
+    let content = egui::Rect::from_min_size(egui::pos2(2.0, 3.0), egui::vec2(200.0, 120.0));
+    let panel = rect(-80.0, 350.0, 220.0, 34.0);
+    assert_eq!(
+      panel_overlap(panel, video, content),
+      egui::Rect::from_min_max(egui::pos2(12.0, 3.0), egui::pos2(122.0, 18.0))
+    );
+    let above = rect(-80.0, 380.0, 220.0, 34.0);
+    assert_eq!(panel_overlap(above, video, content), egui::Rect::NOTHING);
   }
 }

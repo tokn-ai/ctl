@@ -224,15 +224,21 @@ The viewer opens without a title bar. Hover at its top edge to reveal the
 window controls. Drag the bar to move the viewer, or use its minimize,
 maximize, and close buttons. Closing the viewer releases input, activates
 setup, and keeps the same stream available as a view-only preview. On macOS
-the controls appear in an attached panel flush with the top of the viewer, or
-with the bottom when there is only room below. The panel stays visible while
-you drag it to move the viewer. It keeps the same horizontal position and
-width as the video, including when the viewer extends past a screen edge or
-across displays. The video keeps its screen position and size
-as the controls appear and hide. Windows, Linux, and macOS windows without room
-for the panel use a separate strip inside the viewer, above the video.
-A resizable viewer grows to make room for that strip.
-Video clicks use the image rectangle in either layout. The viewer opens at the
+the controls use the widest fully visible span above the viewer across the
+available displays. The bar uses any available headroom before overlapping
+the top of the content, and stays inside when there is no room above. It can
+narrow or shift horizontally to keep its buttons and drag handle accessible
+when the viewer crosses a display edge. The content keeps its screen position,
+size, and input transform as controls appear, move, and hide. Dragging moves
+the viewer from the original pointer anchor without snapping it to another
+display's work area. The controls remain visible throughout the drag.
+Dragging the maximized viewer's controls restores its normal size before
+continuing the move, keeping the pointer anchored to the bar. Clicking the
+bar without dragging leaves it maximized.
+Windows, Linux, and the macOS fallback draw controls over the content without
+reserving a row or changing the viewport. Only the covered control region
+handles local pointer actions; uncovered video keeps its existing input mapping.
+The viewer opens at the
 source aspect ratio and adjusts its inner size after a source resize or a
 manual window resize. Use
 the native resize edges on macOS or the bottom-right resize grip on Linux and

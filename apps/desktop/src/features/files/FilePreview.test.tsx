@@ -79,9 +79,10 @@ describe("file preview", () => {
     api.loadPreviewWindow.mockResolvedValue({ ...snapshot, scroll_top: 240, truncated: true });
     const view = render(<PreviewWindowPage />);
     await screen.findByRole("heading", { name: "Read me" });
+    const content = view.container.querySelector<HTMLDivElement>(".file-preview-content")!;
+    await waitFor(() => expect(content.scrollTop).toBe(240));
     expect(api.loadPreviewWindow).toHaveBeenCalledOnce();
     expect(api.loadFilePreview).not.toHaveBeenCalled();
-    expect(view.container.querySelector<HTMLDivElement>(".file-preview-content")!.scrollTop).toBe(240);
     expect(screen.getByRole("status").textContent).toContain("first 1 MiB");
     fireEvent.keyDown(screen.getByRole("region"), { key: "w", code: "KeyW", ctrlKey: true });
     expect(api.closePreviewWindow).toHaveBeenCalledOnce();

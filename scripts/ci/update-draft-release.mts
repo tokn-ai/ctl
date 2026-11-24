@@ -368,10 +368,13 @@ export async function pages<T>(gh: GhRunner, endpoint: string): Promise<T[]> {
 export async function findRelease(gh: GhRunner, repository: string, tag: string): Promise<Release | undefined> {
   const releases = await pages<Release>(gh, `repos/${repository}/releases?per_page=100`);
   const matches = releases.filter((release) => release.tag_name === tag);
-  if (matches.length > 1) {
+  // GitHub can keep an earlier draft if the version was published separately.
+  const published = matches.filter((release) => !release.draft);
+  const candidates = published.length ? published : matches;
+  if (candidates.length > 1) {
     throw new Error(`Multiple releases use ${tag}; resolve the ambiguity before retrying`);
   }
-  return matches[0];
+  return candidates[0];
 }
 
 /** An existing tag takes precedence over target_commitish, even on a draft. */

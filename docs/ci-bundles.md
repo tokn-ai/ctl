@@ -34,6 +34,8 @@ Manually maintained release notes and attachments are preserved.
 
 Main-branch draft refreshes still require complete desktop builds and all
 requested helpers. Remote-only or failed refreshes leave that draft unchanged.
+Once the version has a published release, the nightly workflow skips its draft
+refresh, including when GitHub still lists an older draft with the same tag.
 
 Release bundle IDs are the version. Nightly uses
 `<version>-nightly.<YYYYMMDD>+g<revision>` with the UTC commit date and the

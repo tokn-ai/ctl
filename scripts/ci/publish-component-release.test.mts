@@ -23,7 +23,7 @@ async function fixture(t: TestContext) {
   return root;
 }
 
-function github(options: { release?: Release | null; assets?: Asset[]; canonical_directory?: string; tag?: string; bad_tag?: boolean; missing_tag?: boolean; fail_upload?: boolean; fail_after_upload?: number; bad_digest?: boolean } = {}) {
+function github(options: { release?: Release | null; older_draft?: Release; assets?: Asset[]; canonical_directory?: string; tag?: string; bad_tag?: boolean; missing_tag?: boolean; fail_upload?: boolean; fail_after_upload?: number; bad_digest?: boolean } = {}) {
   let release: Release | null = options.release ?? null;
   let uploaded = 0;
   const assets = [...(options.assets ?? [])];
@@ -39,7 +39,9 @@ function github(options: { release?: Release | null; assets?: Asset[]; canonical
     }
     const endpoint = args[1]!, method = args[args.indexOf("--method") + 1];
     if (endpoint.includes("git/matching-refs")) return JSON.stringify(options.missing_tag ? [] : [{ ref: `refs/tags/${options.tag ?? `v${identity.app_version}`}`, object: { type: "commit", sha: options.bad_tag ? "b".repeat(40) : identity.git_revision } }]);
-    if (endpoint.endsWith("releases?per_page=100")) return JSON.stringify([release ? [release] : []]);
+    if (endpoint.endsWith("releases?per_page=100")) {
+      return JSON.stringify([options.older_draft ? [options.older_draft] : [], release ? [release] : []]);
+    }
     if (endpoint.endsWith("/releases") && method === "POST") {
       const payload = JSON.parse(await readFile(args[args.indexOf("--input") + 1]!, "utf8"));
       release = { id: 42, tag_name: payload.tag_name, draft: payload.draft, body: payload.body, html_url: "https://github.com/tokn-ai/ctl/releases/tag/v0.1.0" };
@@ -159,15 +161,19 @@ test("publishes verified components without desktop artifacts and preserves manu
   assert.ok(uploads.indexOf(updaterManifestName(windowsAgentTarget)) < uploads.indexOf(windowsAgentManifestName));
 });
 
-test("an empty published release receives components without canonical downloads", async (t) => {
+test("an empty published release receives components even with an older draft for the same tag", async (t) => {
   const directory = await componentSetFixture(await fixture(t), identity);
-  const api = github({ release: published });
+  const api = github({
+    release: published,
+    older_draft: { ...published, id: 41, draft: true, html_url: "https://github.com/tokn-ai/ctl/releases/tag/untagged-fixture" },
+  });
   await publishComponentRelease("tokn-ai/ctl", identity, directory, "components", api.gh);
   assert.equal(api.release()?.draft, false);
   assert.equal(api.assets.length, 9);
   assert.ok(api.release()?.body?.startsWith("Maintainer notes"));
   assert.ok(api.release()?.body?.includes("verified Linux and macOS component bundles"));
   assert.ok(!api.calls.some((args) => args[0] === "release" || args.includes("DELETE")));
+  assert.ok(!api.calls.some((args) => args[1]?.includes("/releases/41")));
   assert.equal(uploadNames(api.calls).length, 9);
   assert.equal(api.patches.length, 1);
   assert.ok(!("draft" in api.patches[0]!));

@@ -23,6 +23,8 @@ const EXPECTED_ID: &str = "fa5f874a-bd3c-4a41-9d8f-d584bd9c9a14";
 
 #[path = "remote_repair/components_update.rs"]
 mod components_update;
+#[path = "remote_repair/legacy_status.rs"]
+mod legacy_status;
 
 struct Fixture(PathBuf);
 
@@ -86,7 +88,7 @@ case "$last" in
     touch "$CTL_TEST_DIR/bootstrap"
     exec /bin/sh -c "$last"
     ;;
-  *ctlup-command-v1*|*ctlup-runtime-source-v1*)
+  *ctlup-command-v1*|*ctlup-runtime-source-v1*|*ctlup-show-v2*|*ctlup-catalog-v1*)
     exec /bin/sh -c "$last"
     ;;
   *activate-installed*)

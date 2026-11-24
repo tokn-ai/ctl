@@ -1406,7 +1406,7 @@ fn title_bar_debug_button_toggles_the_live_overlay_without_forwarding_clicks() {
     native_frame(&mut viewer, &ctx, raw(Vec::new()), raw(Vec::new()));
 
     let frame = |viewer: &mut Viewer<Mock>, title_events| {
-      let size = egui::vec2(640.0, 400.0);
+      let size = egui::vec2(crate::view::MIN_WINDOW.x, 400.0);
       let (video_events, panel_events) = if attached {
         viewer.chrome.test_attached_hover = Some(true);
         (Vec::new(), title_events)
@@ -1434,10 +1434,13 @@ fn title_bar_debug_button_toggles_the_live_overlay_without_forwarding_clicks() {
     let reveal = egui::pos2(100.0, crate::chrome::REVEAL_HEIGHT * 0.5);
     frame(&mut viewer, vec![egui::Event::PointerMoved(reveal)]);
     let initial = frame(&mut viewer, Vec::new());
+    let toolbar_id = if attached { controls } else { viewer_id() };
     let toolbar = initial
-      .viewport(if attached { controls } else { viewer_id() })
+      .viewport(toolbar_id)
       .expect("the title bar must be rendered");
-    let debug = label_center(toolbar, "Debug");
+    // The icon sits one button width and a 12-point separator left of Minimize.
+    let debug = label_center(toolbar, "−") - egui::vec2(crate::chrome::BUTTON_WIDTH + 12.0, 0.0);
+    assert!(rendered_label(toolbar, "Debug").is_none());
     assert!(!has_overlay(&initial));
     assert!(viewer.stats.is_none());
     let before = remote.sent().len();
@@ -1450,7 +1453,19 @@ fn title_bar_debug_button_toggles_the_live_overlay_without_forwarding_clicks() {
           .commands(viewer_id())
           .any(|command| *command == egui::ViewportCommand::StartDrag)
       );
-      frame(&mut viewer, vec![primary_button(debug, false)]);
+      let clicked = frame(&mut viewer, vec![primary_button(debug, false)]);
+      assert!(
+        clicked
+          .viewport(toolbar_id)
+          .unwrap()
+          .platform_output
+          .events
+          .iter()
+          .any(|event| {
+            matches!(event, egui::output::OutputEvent::Clicked(info)
+          if info.label.as_deref() == Some("Debug overlay"))
+          })
+      );
       let updated = frame(&mut viewer, Vec::new());
       assert_eq!(has_overlay(&updated), enabled);
       assert_eq!(viewer.stats.is_some(), enabled);

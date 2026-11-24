@@ -37,6 +37,9 @@ impl Fixture {
 
 impl eframe::App for Fixture {
   fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
+    // Mirror capture-driven redraws while testing hover on a static frame.
+    ui.ctx()
+      .request_repaint_after(std::time::Duration::from_millis(33));
     let escape = ui.input(|input| input.key_pressed(egui::Key::Escape));
     let controls = self.chrome.show(
       ui,
@@ -89,10 +92,15 @@ impl eframe::App for Fixture {
 }
 
 fn main() -> eframe::Result<()> {
+  let title = if std::env::args().any(|arg| arg == "--overlay") {
+    "ctream overlay fixture"
+  } else {
+    chrome::VIEWER_TITLE
+  };
   let options = eframe::NativeOptions {
     renderer: eframe::Renderer::Wgpu,
     viewport: egui::ViewportBuilder::default()
-      .with_title(chrome::VIEWER_TITLE)
+      .with_title(title)
       .with_decorations(false)
       .with_inner_size([640.0, 360.0])
       .with_min_inner_size([200.0, 140.0])
@@ -100,7 +108,7 @@ fn main() -> eframe::Result<()> {
     ..Default::default()
   };
   eframe::run_native(
-    chrome::VIEWER_TITLE,
+    title,
     options,
     Box::new(|cc| Ok(Box::new(Fixture::new(&cc.egui_ctx)))),
   )

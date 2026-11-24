@@ -10,7 +10,8 @@ pub(super) const REVEAL_HEIGHT: f32 = 8.0;
 pub(super) const BAR_HEIGHT: f32 = 34.0;
 pub(super) const BUTTON_WIDTH: f32 = 40.0;
 const BUTTON_STRIP_WIDTH: f32 = 3.0 * BUTTON_WIDTH;
-const DEBUG_BUTTON_WIDTH: f32 = 52.0;
+const DEBUG_BUTTON_WIDTH: f32 = BUTTON_WIDTH;
+const CONTROL_SEPARATOR_WIDTH: f32 = 12.0;
 #[cfg(target_os = "macos")]
 const MIN_DRAG_WIDTH: f32 = 28.0;
 pub(super) const VIEWER_TITLE: &str = "ctream viewer";
@@ -31,7 +32,7 @@ impl Status<'_> {
   fn button_strip_width(self) -> f32 {
     BUTTON_STRIP_WIDTH
       + if self.debug.is_some() {
-        DEBUG_BUTTON_WIDTH
+        DEBUG_BUTTON_WIDTH + CONTROL_SEPARATOR_WIDTH
       } else {
         0.0
       }
@@ -360,27 +361,66 @@ fn title_bar(
   if control(ui, bounds, 0, "×", "Close viewer") {
     return Some(Action::Close);
   }
-  if let Some(enabled) = status.debug {
-    let debug = ui
-      .put(
-        button_slot(
-          bounds,
-          bounds.right() - BUTTON_STRIP_WIDTH,
-          DEBUG_BUTTON_WIDTH,
-        ),
-        egui::Button::new("Debug").selected(enabled),
-      )
-      .on_hover_text(if enabled {
-        "Hide debug overlay"
-      } else {
-        "Show debug overlay"
-      });
-    if debug.clicked() {
-      debug.surrender_focus();
-      return Some(Action::ToggleDebug);
-    }
+  if let Some(enabled) = status.debug
+    && debug_button(ui, bounds, enabled)
+  {
+    return Some(Action::ToggleDebug);
   }
   dragging.then_some(Action::Drag)
+}
+
+fn debug_button(ui: &mut egui::Ui, bounds: Rect, enabled: bool) -> bool {
+  let right = bounds.right() - BUTTON_STRIP_WIDTH;
+  ui.painter().vline(
+    right - CONTROL_SEPARATOR_WIDTH * 0.5,
+    bounds.top() + 8.0..=bounds.bottom() - 8.0,
+    ui.visuals().widgets.noninteractive.bg_stroke,
+  );
+  let debug = ui
+    .put(
+      button_slot(bounds, right - CONTROL_SEPARATOR_WIDTH, DEBUG_BUTTON_WIDTH),
+      egui::Button::new("").selected(enabled),
+    )
+    .on_hover_text(if enabled {
+      "Hide debug overlay"
+    } else {
+      "Show debug overlay"
+    });
+  debug.widget_info(|| {
+    egui::WidgetInfo::selected(
+      egui::Role::Button,
+      ui.is_enabled(),
+      enabled,
+      "Debug overlay",
+    )
+  });
+
+  // Draw a diagnostics chart without depending on an icon font or glyph fallback.
+  let icon = Rect::from_center_size(debug.rect.center(), egui::vec2(16.0, 16.0));
+  let color = ui
+    .style()
+    .interact_selectable(&debug, enabled)
+    .fg_stroke
+    .color;
+  for (x, height) in [(2.0, 5.0), (6.0, 11.0), (10.0, 8.0)] {
+    let bar = Rect::from_min_size(
+      egui::pos2(icon.left() + x, icon.bottom() - 3.0 - height),
+      egui::vec2(2.5, height),
+    );
+    ui.painter().rect_filled(bar, 0.5, color);
+  }
+  ui.painter().line_segment(
+    [
+      icon.left_bottom() + egui::vec2(1.0, -1.0),
+      icon.right_bottom() - egui::vec2(1.0, 1.0),
+    ],
+    egui::Stroke::new(1.0, color),
+  );
+  if debug.clicked() {
+    debug.surrender_focus();
+    return true;
+  }
+  false
 }
 
 fn show_status(ui: &mut egui::Ui, status: Status<'_>) {

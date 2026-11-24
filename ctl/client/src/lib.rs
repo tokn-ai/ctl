@@ -988,6 +988,7 @@ pub fn is_retryable_connection_error(error: &CoreError) -> bool {
     | CoreError::InvalidSshCommandOutput
     | CoreError::InvalidAgentBundleId(_)
     | CoreError::InvalidComponentBundle(_)
+    | CoreError::InvalidInstallationResponse(_)
     | CoreError::InvalidSshPreface(_)
     | CoreError::AgentNotFound
     | CoreError::IdentityUnsupported
@@ -1338,6 +1339,8 @@ pub enum CoreError {
   InvalidAgentBundleId(String),
   #[error("invalid complete component bundle: {0}")]
   InvalidComponentBundle(String),
+  #[error("{0}")]
+  InvalidInstallationResponse(String),
   #[error("could not read the ctl-agent transport marker from SSH: {0}")]
   ReadSshPreface(#[source] io::Error),
   #[error("SSH connection failed before ctl-agent was ready: {0}")]

@@ -33,7 +33,9 @@ pub(crate) use updater::{
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InstallationStatus {
+  #[serde(deserialize_with = "Deserialize::deserialize")]
   pub active: Option<Manifest>,
+  #[serde(deserialize_with = "Deserialize::deserialize")]
   pub previous: Option<Manifest>,
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub missing_builds: Vec<String>,

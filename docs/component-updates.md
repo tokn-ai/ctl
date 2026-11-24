@@ -21,6 +21,10 @@ Select a machine to see its runtime target, installed bundle, and services.
 Use **Check installation** on a saved host to read its selection through the
 chosen SSH method. Remote checks and sync use noninteractive SSH. Connect to
 the saved host first to verify the account and complete interactive authentication.
+On hosts with an older ctlup, About reads the selected build and catalog
+through the older status command. If the catalog lists exactly one source
+for that build, **Sync** can use it. Otherwise, use **Install from…** to set
+the host's source explicitly.
 
 **Sync** follows that machine’s recorded source, like `ctlup update`. Stable
 and Nightly follow their own channels. A healthy pinned build stays selected.

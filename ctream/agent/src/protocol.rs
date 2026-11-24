@@ -1,10 +1,12 @@
 use ctream_driver::{ControlOperation, Result};
 use ctream_proto::{
   BOUNDS_VERSION, CAPTURE_CATALOG_VERSION, CAPTURE_DRIVER_VERSION, DISPLAY_VERSION,
-  LATENCY_VERSION, MACOS_WINDOW_VERSION, Target, WAYLAND_WINDOW_VERSION, WINDOWS_DESKTOP_VERSION,
-  WINDOWS_DISPLAY_VERSION, WINDOWS_WINDOW_VERSION, WindowId, X11_WINDOW_INPUT_VERSION,
-  X11_WINDOW_VERSION, valid_capture_driver, valid_window_id,
+  LATENCY_VERSION, MACOS_WINDOW_VERSION, Target, VIDEO_STREAM_VERSION, VideoRequest,
+  WAYLAND_WINDOW_VERSION, WINDOWS_DESKTOP_VERSION, WINDOWS_DISPLAY_VERSION, WINDOWS_WINDOW_VERSION,
+  WindowId, X11_WINDOW_INPUT_VERSION, X11_WINDOW_VERSION, valid_capture_driver, valid_window_id,
 };
+
+const VIDEO_REQUEST_LIMIT: usize = 4096;
 
 pub enum TargetOperation<'a> {
   Capture,
@@ -28,6 +30,13 @@ pub enum Request<'a> {
     target: Target,
     driver: &'a str,
     window: Option<&'a str>,
+  },
+  VideoCapabilities,
+  CaptureVideo {
+    target: Target,
+    driver: &'a str,
+    window: Option<&'a str>,
+    request: VideoRequest,
   },
   Target(Target, TargetOperation<'a>),
   Controls(Target, &'a str, ControlOperation),
@@ -103,6 +112,9 @@ fn supports_capture_selection(version: &str, target: &str) -> bool {
 
 pub fn parse(args: &[String]) -> Result<Request<'_>> {
   match args {
+    [version, operation, tail @ ..] if version == VIDEO_STREAM_VERSION => {
+      parse_video_version(operation, tail)
+    }
     [version, operation, target, id]
       if version == X11_WINDOW_INPUT_VERSION && operation == "input-window" =>
     {
@@ -210,6 +222,44 @@ pub fn parse(args: &[String]) -> Result<Request<'_>> {
   }
 }
 
+fn parse_video_version<'a>(operation: &str, tail: &'a [String]) -> Result<Request<'a>> {
+  match (operation, tail) {
+    ("video-codecs", []) => Ok(Request::VideoCapabilities),
+    ("capture-stream", [target, driver, options, window @ ..]) if window.len() <= 1 => {
+      if !valid_capture_driver(driver) {
+        return Err("invalid capture driver identifier".into());
+      }
+      let target = Target::parse(target)?;
+      let window = window.first().map(String::as_str);
+      match (target, window) {
+        (Target::WindowsDesktop, None) => {
+          return Err("Windows desktop target requires a window ID".into());
+        }
+        (Target::MacosDesktop, None) => {
+          return Err("macOS desktop target requires a window ID".into());
+        }
+        (Target::MacosDesktop, Some(id)) => validate_macos_window(id)?,
+        (_, Some(id)) if !valid_window_id(id) => {
+          return Err("invalid window identifier".into());
+        }
+        _ => {}
+      }
+      if options.len() > VIDEO_REQUEST_LIMIT {
+        return Err("video request exceeds 4096 bytes".into());
+      }
+      let request: VideoRequest = serde_json::from_str(options)?;
+      request.validate()?;
+      Ok(Request::CaptureVideo {
+        target,
+        driver,
+        window,
+        request,
+      })
+    }
+    _ => Err("unknown ctream-agent video operation".into()),
+  }
+}
+
 fn parse_macos_version<'a>(operation: &str, tail: &'a [String]) -> Result<Request<'a>> {
   let target = Target::MacosDesktop;
   match (operation, tail) {
@@ -254,6 +304,121 @@ mod tests {
 
   fn args(values: &[&str]) -> Vec<String> {
     values.iter().map(|value| (*value).to_owned()).collect()
+  }
+
+  const VIDEO_REQUEST: &str =
+    r#"{"options":{"codec":"av1","quality":"low","max_fps":45},"codecs":["av1","h264"]}"#;
+
+  #[test]
+  fn video_operations_require_their_own_contract() {
+    assert!(matches!(
+      parse(&args(&[VIDEO_STREAM_VERSION, "video-codecs"])).unwrap(),
+      Request::VideoCapabilities
+    ));
+    for old in [
+      DISPLAY_VERSION,
+      CAPTURE_DRIVER_VERSION,
+      WINDOWS_DESKTOP_VERSION,
+      MACOS_WINDOW_VERSION,
+      X11_WINDOW_INPUT_VERSION,
+    ] {
+      assert!(parse(&args(&[old, "video-codecs"])).is_err());
+      assert!(parse(&args(&[old, "capture-stream", ":7", "auto", VIDEO_REQUEST])).is_err());
+    }
+    for operation in ["discover", "capture-drivers", "ping", "input", "capture"] {
+      assert!(parse(&args(&[VIDEO_STREAM_VERSION, operation])).is_err());
+    }
+    assert!(parse(&args(&[VIDEO_STREAM_VERSION, "video-codecs", ":7"])).is_err());
+    assert!(
+      parse(&args(&[
+        VIDEO_STREAM_VERSION,
+        "input-window",
+        ":7",
+        "x11-ab"
+      ]))
+      .is_err()
+    );
+  }
+
+  #[test]
+  fn video_capture_preserves_source_and_negotiation_options() {
+    use ctream_proto::{VideoCodec, VideoQuality};
+
+    for (target, expected, window) in [
+      (":7", Target::X11(7), None),
+      (":7", Target::X11(7), Some("x11-ab")),
+      ("wayland-1", Target::Wayland(1), None),
+      ("wayland-1", Target::Wayland(1), Some("window-1")),
+      ("windows-2", Target::Windows(2), None),
+      ("windows-2", Target::Windows(2), Some("win-1-2-3")),
+      ("windows", Target::WindowsDesktop, Some("win-1-2-3")),
+      ("macos", Target::MacosDesktop, Some("macos-123-42")),
+    ] {
+      let mut arguments = args(&[
+        VIDEO_STREAM_VERSION,
+        "capture-stream",
+        target,
+        "example.capture",
+        VIDEO_REQUEST,
+      ]);
+      arguments.extend(window.map(str::to_owned));
+      let Request::CaptureVideo {
+        target,
+        driver,
+        window: selected,
+        request,
+      } = parse(&arguments).unwrap()
+      else {
+        panic!("expected video capture");
+      };
+      assert_eq!(target, expected);
+      assert_eq!(driver, "example.capture");
+      assert_eq!(selected, window);
+      assert_eq!(request.options.codec, VideoCodec::Av1);
+      assert_eq!(request.options.quality, VideoQuality::Low);
+      assert_eq!(request.options.max_fps, 45);
+      assert_eq!(request.codecs, [VideoCodec::Av1, VideoCodec::H264]);
+    }
+  }
+
+  #[test]
+  fn video_capture_rejects_invalid_options_and_source_arguments() {
+    for options in [
+      "{}",
+      r#"{"options":{},"codecs":[]}"#,
+      r#"{"options":{},"codecs":["auto"]}"#,
+      r#"{"options":{},"codecs":["av1","av1"]}"#,
+      r#"{"options":{},"codecs":["av1","h264","av1"]}"#,
+      r#"{"options":{"codec":"h264"},"codecs":["av1"]}"#,
+      r#"{"options":{"quality":"invalid"},"codecs":["av1"]}"#,
+      r#"{"options":{"max_fps":0},"codecs":["av1"]}"#,
+      r#"{"options":{"max_fps":121},"codecs":["av1"]}"#,
+      &format!("{VIDEO_REQUEST:>4097}"),
+    ] {
+      assert!(
+        parse(&args(&[
+          VIDEO_STREAM_VERSION,
+          "capture-stream",
+          ":7",
+          "auto",
+          options
+        ]))
+        .is_err()
+      );
+    }
+    for tail in [
+      vec!["windows-0", "auto", VIDEO_REQUEST],
+      vec![":7", "invalid;driver", VIDEO_REQUEST],
+      vec![":7", "auto", VIDEO_REQUEST, "bad/id"],
+      vec![":7", "auto", VIDEO_REQUEST, "x11-ab", "extra"],
+      vec!["windows", "auto", VIDEO_REQUEST],
+      vec!["macos", "auto", VIDEO_REQUEST],
+      vec!["macos", "auto", VIDEO_REQUEST, "macos-0-42"],
+    ] {
+      let mut arguments = args(&[VIDEO_STREAM_VERSION, "capture-stream"]);
+      arguments.extend(args(&tail));
+      assert!(parse(&arguments).is_err(), "{arguments:?}");
+    }
   }
 
   #[test]

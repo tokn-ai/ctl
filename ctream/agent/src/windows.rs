@@ -2,20 +2,20 @@ use ctream_agent::{
   capture as catalog,
   protocol::{Request, TargetOperation, parse},
   runtime::{
-    capture_display, capture_with_metadata, forward_input, forward_window_input, ping,
-    stream_capture,
+    capture_display, forward_input, forward_window_input, ping, stream_capture, video_capabilities,
   },
 };
-use ctream_driver::{CaptureDisplay, CaptureWindow, Driver, InputSource, Result};
+use ctream_driver::{CaptureOptions, CaptureWindow, Driver, InputSource, Result};
 use ctream_driver_capture::windows as capture;
 use ctream_driver_input::windows as input;
-use ctream_proto::Target;
+use ctream_proto::{Target, VideoRequest};
 use std::{env, io};
 
 pub(super) fn run() -> Result<()> {
   let args: Vec<_> = env::args().skip(1).collect();
   match parse(&args)? {
     Request::Ping => ping(),
+    Request::VideoCapabilities => video_capabilities(io::stdout().lock()),
     Request::CaptureCatalog { .. } => {
       serde_json::to_writer(io::stdout().lock(), &catalog::catalog())?;
       Ok(())
@@ -28,20 +28,13 @@ pub(super) fn run() -> Result<()> {
       target: target @ (Target::Windows(_) | Target::WindowsDesktop),
       driver,
       window,
-    } => {
-      let selected = catalog::select(target, driver, window.is_some())?;
-      match (target, selected.id, window) {
-        (Target::Windows(display), "windows.dxgi", None) => capture_with_metadata(
-          capture::dxgi::Driver.open(&display)?.capture_display()?,
-          selected.id,
-          selected.format,
-        ),
-        (_, "windows.wgc", Some(id)) => {
-          capture_with_metadata(open_window(target, id)?, selected.id, selected.format)
-        }
-        _ => Err("capture driver is unavailable for this target".into()),
-      }
-    }
+    } => capture_selected(target, driver, window, None),
+    Request::CaptureVideo {
+      target: target @ (Target::Windows(_) | Target::WindowsDesktop),
+      driver,
+      window,
+      request,
+    } => capture_selected(target, driver, window, Some(request)),
     Request::Discover {
       windows_displays: true,
       ..
@@ -72,7 +65,7 @@ pub(super) fn run() -> Result<()> {
     Request::Target(
       target @ (Target::Windows(_) | Target::WindowsDesktop),
       TargetOperation::CaptureWindow(id),
-    ) => stream_capture(open_window(target, id)?),
+    ) => stream_capture(open_window(target, id, None)?),
     Request::Target(Target::Windows(display), TargetOperation::InputWindow(id)) => {
       forward_window_input(input::Driver, &display, id)
     }
@@ -83,10 +76,40 @@ pub(super) fn run() -> Result<()> {
   }
 }
 
-fn open_window(target: Target, id: &str) -> Result<capture::wgc::WgcCapture> {
+fn capture_selected(
+  target: Target,
+  driver: &str,
+  window: Option<&str>,
+  video: Option<VideoRequest>,
+) -> Result<()> {
+  let selected = catalog::select(target, driver, window.is_some())?;
+  let options = catalog::options(video.as_ref())?;
+  match (target, selected.id, window) {
+    (Target::Windows(display), "windows.dxgi", None) => {
+      selected.capture_display(capture::dxgi::Driver.open(&display)?, video)
+    }
+    (_, "windows.wgc", Some(id)) => selected.stream(open_window(target, id, options)?, video),
+    _ => Err("capture driver is unavailable for this target".into()),
+  }
+}
+
+fn open_window(
+  target: Target,
+  id: &str,
+  options: Option<CaptureOptions>,
+) -> Result<capture::wgc::WgcCapture> {
   match target {
-    Target::Windows(display) => capture::wgc::Driver.open(&display)?.capture_window(id),
-    Target::WindowsDesktop => capture::wgc::WgcCapture::open_desktop(id),
+    Target::Windows(display) => {
+      let session = capture::wgc::Driver.open(&display)?;
+      match options {
+        Some(options) => session.capture_window_with_options(id, options),
+        None => session.capture_window(id),
+      }
+    }
+    Target::WindowsDesktop => match options {
+      Some(options) => capture::wgc::WgcCapture::open_desktop_with_options(id, options),
+      None => capture::wgc::WgcCapture::open_desktop(id),
+    },
     _ => Err("Windows Graphics Capture requires a Windows window".into()),
   }
 }

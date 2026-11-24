@@ -5,7 +5,10 @@ use ctream_client::{
   options::ConnectionOptions,
   transport::Transport,
 };
-use ctream_proto::{Element, Target, valid_capture_driver, valid_window_id};
+use ctream_proto::{
+  Element, Target, VideoCodec, VideoInfo, VideoOptions, VideoQuality, valid_capture_driver,
+  valid_window_id,
+};
 mod agent_sync;
 mod chrome;
 mod drivers;
@@ -69,6 +72,7 @@ struct Preview<T: Transport> {
   frames: u64,
   driver: Option<String>,
   format: FrameFormat,
+  video: Option<VideoInfo>,
 }
 
 enum PreviewMode {
@@ -80,16 +84,18 @@ impl<T: Transport> Preview<T> {
   fn connect(
     session: Session<T>,
     driver: Option<&str>,
+    options: VideoOptions,
     ctx: egui::Context,
     target: view::Repaint,
   ) -> io::Result<Self> {
     let capture = if let Some(driver) = driver {
-      session.capture_with_driver(driver)?
+      session.capture_with_options(driver, options)?
     } else {
       session.capture()?
     };
     let driver = capture.driver().map(str::to_owned);
     let format = capture.format();
+    let video = capture.video().cloned();
     let (mut source, lifetime) = capture.split();
     let stream = Arc::new(Mutex::new(Stream::default()));
     let reader = Arc::clone(&stream);
@@ -134,6 +140,7 @@ impl<T: Transport> Preview<T> {
       frames: 0,
       driver,
       format,
+      video,
     })
   }
 
@@ -294,10 +301,14 @@ const USAGE: &str =
   --windows             Start with the window picker across available sessions
   --window ID           Open a window ID returned by ctream windows
   --capture-driver ID   Capture backend, or auto (default)
+  --video-codec CODEC   Video codec: auto, av1 (default), or h264
+  --quality QUALITY     Video quality: low, balanced (default), or high
+  --max-fps FPS         Video frame rate limit: 1–120 (default: 30)
 
 TARGET is :DISPLAY, wayland-N, windows-N, or the desktop window lists windows and macos.
 Without an endpoint, choose a workspace host.
 Use --local for local capture.
+Video options apply to agent-backed captures.
 Selections open a view-only setup preview. Start hides setup and opens a separate viewer.
 Hover over the viewer's top edge for window controls. Closing it releases control and restores setup.";
 
@@ -313,6 +324,7 @@ struct SourceOptions {
   windows: bool,
   window: Option<String>,
   driver: String,
+  video: VideoOptions,
 }
 
 impl SourceOptions {
@@ -331,6 +343,7 @@ impl SourceOptions {
         self.driver,
         ctx,
       )
+      .with_video_options(self.video)
       .with_connection(connection),
     )
   }
@@ -353,6 +366,9 @@ fn parse(arguments: impl IntoIterator<Item = OsString>) -> io::Result<Option<Opt
   let mut windows = false;
   let mut window = None;
   let mut driver = None;
+  let mut codec = None;
+  let mut quality = None;
+  let mut max_fps = None;
   let mut connection = ConnectionOptions::default();
   while let Some(argument) = arguments.next() {
     let argument = argument
@@ -381,6 +397,35 @@ fn parse(arguments: impl IntoIterator<Item = OsString>) -> io::Result<Option<Opt
           .filter(|id| valid_capture_driver(id))
           .ok_or_else(|| invalid("invalid capture driver ID"))?;
         driver = Some(value.to_owned());
+      }
+      "--video-codec" if codec.is_none() => {
+        let value = arguments
+          .next()
+          .ok_or_else(|| invalid("--video-codec needs a value"))?;
+        let value = value
+          .to_str()
+          .ok_or_else(|| invalid("invalid video codec"))?;
+        codec = Some(VideoCodec::parse(value).map_err(invalid)?);
+      }
+      "--quality" if quality.is_none() => {
+        let value = arguments
+          .next()
+          .ok_or_else(|| invalid("--quality needs a value"))?;
+        let value = value
+          .to_str()
+          .ok_or_else(|| invalid("invalid video quality"))?;
+        quality = Some(VideoQuality::parse(value).map_err(invalid)?);
+      }
+      "--max-fps" if max_fps.is_none() => {
+        let value = arguments
+          .next()
+          .ok_or_else(|| invalid("--max-fps needs a value"))?;
+        max_fps = Some(
+          value
+            .to_str()
+            .and_then(|value| value.parse().ok())
+            .ok_or_else(|| invalid("video frame rate must be between 1 and 120 FPS"))?,
+        );
       }
       "--window" if window.is_none() => {
         let id = arguments
@@ -423,6 +468,13 @@ fn parse(arguments: impl IntoIterator<Item = OsString>) -> io::Result<Option<Opt
       connection.ssh(host)?;
     }
   }
+  let default = VideoOptions::default();
+  let video = VideoOptions {
+    codec: codec.unwrap_or(default.codec),
+    quality: quality.unwrap_or(default.quality),
+    max_fps: max_fps.unwrap_or(default.max_fps),
+  };
+  video.validate().map_err(invalid)?;
   Ok(Some(Options {
     endpoint,
     connection,
@@ -431,6 +483,7 @@ fn parse(arguments: impl IntoIterator<Item = OsString>) -> io::Result<Option<Opt
       windows,
       window,
       driver: driver.unwrap_or_else(|| "auto".into()),
+      video,
     },
   }))
 }
@@ -603,7 +656,14 @@ mod lifecycle_tests {
     let mut preview = ctx.input(|_| {
       // Hold egui's context lock while the capture reader reaches EOF.
       // Waiting for a repaint in the reader would stop it at the first frame.
-      let preview = Preview::connect(session, None, ctx.clone(), view::Repaint::default()).unwrap();
+      let preview = Preview::connect(
+        session,
+        None,
+        VideoOptions::default(),
+        ctx.clone(),
+        view::Repaint::default(),
+      )
+      .unwrap();
       let deadline = Instant::now() + Duration::from_secs(2);
       while preview.stream.lock().unwrap().end.is_none() {
         assert!(Instant::now() < deadline, "capture waited for the UI lock");
@@ -625,8 +685,14 @@ mod lifecycle_tests {
       let (session, observed) = test_support::session(bytes);
       let context = egui::Context::default();
       let control = session.input().unwrap();
-      let mut preview =
-        Preview::connect(session, None, context.clone(), view::Repaint::default()).unwrap();
+      let mut preview = Preview::connect(
+        session,
+        None,
+        VideoOptions::default(),
+        context.clone(),
+        view::Repaint::default(),
+      )
+      .unwrap();
       preview.input = Some(input::Input::new(control));
       let deadline = Instant::now() + Duration::from_secs(2);
       while preview.stream.lock().unwrap().end.is_none() {
@@ -736,6 +802,48 @@ mod argument_tests {
       ],
     ] {
       assert!(parse(args(&arguments)).is_err(), "{arguments:?}");
+    }
+  }
+
+  #[test]
+  fn video_options_default_to_av1_and_accept_agent_backed_overrides() {
+    let default = parse(args(&[])).unwrap().unwrap().source.video;
+    assert_eq!(default.codec, VideoCodec::Av1);
+    assert_eq!(default.quality, VideoQuality::Balanced);
+    assert_eq!(default.max_fps, 30);
+
+    for (fps, expected) in [("1", 1), ("120", 120)] {
+      let options = parse(args(&[
+        "test-host",
+        "--video-codec",
+        "h264",
+        "--quality",
+        "high",
+        "--max-fps",
+        fps,
+      ]))
+      .unwrap()
+      .unwrap();
+      assert_eq!(
+        options.source.video,
+        VideoOptions {
+          codec: VideoCodec::H264,
+          quality: VideoQuality::High,
+          max_fps: expected,
+        }
+      );
+    }
+
+    for invalid in [
+      &["--video-codec", "vp9"][..],
+      &["--quality", "ultra"],
+      &["--max-fps", "0"],
+      &["--max-fps", "121"],
+      &["--max-fps", "30.5"],
+      &["--max-fps"],
+      &["--video-codec", "av1", "--video-codec", "auto"],
+    ] {
+      assert!(parse(args(invalid)).is_err(), "{invalid:?}");
     }
   }
 }

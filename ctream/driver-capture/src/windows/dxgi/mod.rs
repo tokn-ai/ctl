@@ -7,7 +7,7 @@ mod capture;
 
 pub use capture::DxgiCapture;
 
-use ctream_driver::{CaptureDisplay, Result};
+use ctream_driver::{CaptureDisplay, CaptureOptions, Result};
 use ctream_windows::{DisplayInfo, PhysicalPixels, display_number};
 use std::collections::BTreeMap;
 use windows::Win32::Graphics::Dxgi::{
@@ -106,6 +106,10 @@ impl CaptureDisplay for Session {
   type Source = DxgiCapture;
 
   fn capture_display(&self) -> Result<DxgiCapture> {
-    DxgiCapture::new(&self.output)
+    self.capture_display_with_options(CaptureOptions::default())
+  }
+
+  fn capture_display_with_options(&self, options: CaptureOptions) -> Result<DxgiCapture> {
+    DxgiCapture::new(&self.output, options.interval())
   }
 }

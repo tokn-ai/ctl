@@ -9,7 +9,7 @@ use super::{
 use ctream_client::{Client, transport::Transport};
 use ctream_proto::{
   CaptureDriverDescriptor, CaptureScope, CaptureSystem, Display, Session as DisplaySession, Target,
-  Window,
+  VideoOptions, Window,
 };
 use eframe::egui;
 use std::{
@@ -173,6 +173,7 @@ pub(super) struct Viewer<T: Transport> {
   window_mode: bool,
   selected_window: Option<String>,
   driver: String,
+  video: VideoOptions,
   windows: Vec<WindowSource>,
   window_query: Pending<Vec<WindowSource>>,
   window_error: Option<String>,
@@ -224,6 +225,7 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
       window_mode,
       selected_window: window,
       driver,
+      video: VideoOptions::default(),
       windows: Vec::new(),
       window_query: None,
       window_error: None,
@@ -260,6 +262,24 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
   pub(super) fn with_connection(mut self, connection: Connection) -> Self {
     self.connection = Some(connection);
     self
+  }
+
+  pub(super) fn with_video_options(mut self, video: VideoOptions) -> Self {
+    self.video = video;
+    self
+  }
+
+  fn set_video_options(&mut self, video: VideoOptions) -> bool {
+    if self.viewing || self.video == video {
+      return false;
+    }
+    self.video = video;
+    // A source query can still be loading before a capture exists. Leave its
+    // request scope intact so stream settings do not interrupt discovery.
+    if self.preview.is_some() || self.connecting.is_some() || self.preview_error.is_some() {
+      self.reload_preview();
+    }
+    true
   }
 
   fn discard_preview(&mut self) {
@@ -571,10 +591,11 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
     let driver = self
       .selected_catalog_supported()
       .then(|| self.driver.clone());
+    let video = self.video;
     let render = ctx.clone();
     let repaint = self.repaint.clone();
     self.connecting = Some(background(ctx, move || {
-      Preview::connect(session, driver.as_deref(), render, repaint)
+      Preview::connect(session, driver.as_deref(), video, render, repaint)
     }));
   }
 
@@ -720,6 +741,7 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
           window: window.map(|window| setup::window_name(&window.title, &window.app_id).to_owned()),
           driver: preview.driver.clone(),
           format: preview.format,
+          video: preview.video.clone(),
         },
         preview.frame_counts(),
       ))
@@ -854,6 +876,7 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
     let mut refresh = false;
     let mut reload = false;
     let mut changed = false;
+    let mut video = self.video;
     egui::Panel::top("setup_heading").show(ui, |ui| {
       ui.add_space(6.0);
       ui.horizontal(|ui| {
@@ -906,6 +929,8 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
             let selected = self.selectors(ui);
             reload |= selected.0;
             changed |= selected.1;
+            ui.add_space(18.0);
+            setup::video_picker(ui, &mut video);
           });
       });
       ui.scope_builder(egui::UiBuilder::new().max_rect(pane), |ui| {
@@ -972,17 +997,23 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
           );
           ui.add(egui::Label::new(egui::RichText::new(&label).small()).truncate())
             .on_hover_text(label);
+          let codec = preview
+            .video
+            .as_ref()
+            .map_or("Raw RGB24", |video| video.codec.label());
+          ui.small(format!("Video: {codec}"));
         }
       });
     });
     let ctx = ui.ctx();
+    let video_changed = self.set_video_options(video);
     if refresh {
       self.discover(ctx);
     } else if reload {
       self.load_target(ctx);
     } else if changed {
       self.reload_preview();
-    } else if start {
+    } else if start && !video_changed {
       self.start(ctx);
     }
   }

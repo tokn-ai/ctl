@@ -29,24 +29,25 @@ viewer uses the same client for discovery, capture, input, and semantic actions.
 
 | Crate | Directory | Runs in | Ctream dependencies | Responsibility |
 | --- | --- | --- | --- | --- |
-| `ctream-proto` | `ctream/proto` | Client and display host processes | None | Shared display, window, capture-driver catalog, control, and wire contract types |
-| `ctream-client` | `ctream/client` | CLI or viewer process | `ctream-proto` | Typed sessions, SSH/local transports, frame decoding, input forwarding, and coordinate transforms |
-| `ctream-driver` | `ctream/driver` | Display host process | `ctream-proto` | Platform-neutral driver and capability traits, with capture cancellation |
-| `ctream-driver-capture` | `ctream/driver-capture` | Linux or Windows display host, or the local macOS viewer process | `ctream-driver`, `ctream-proto`, `ctream-windows` (Windows) | Official capture drivers, window enumeration, and macOS system picker capture |
-| `ctream-driver-input` | `ctream/driver-input` | Linux or Windows display host | `ctream-driver`, `ctream-windows` (Windows) | Official input drivers |
+| `ctream-proto` | `ctream/proto` | Client and display host processes | None | Shared display, window, capture-driver catalog, video framing, control, and wire contract types |
+| `ctream-client` | `ctream/client` | CLI or viewer process | `ctream-driver`, `ctream-driver-codec`, `ctream-proto` | Typed sessions, SSH/local transports, frame decoding, input forwarding, and coordinate transforms |
+| `ctream-driver` | `ctream/driver` | Client and display host processes | `ctream-proto` | Platform-neutral driver and capability traits, with shared RGB frames and capture cancellation |
+| `ctream-driver-capture` | `ctream/driver-capture` | Display host, or the local macOS viewer process | `ctream-driver`, `ctream-proto`, `ctream-windows` (Windows) | Official capture drivers, window enumeration, and macOS system picker capture |
+| `ctream-driver-codec` | `ctream/driver-codec` | Agent and viewer processes | `ctream-driver`, `ctream-proto` | Bounded raw frame reading and FFmpeg video encoding and decoding |
+| `ctream-driver-input` | `ctream/driver-input` | Display host | `ctream-driver`, `ctream-windows` (Windows) | Official input drivers |
 | `ctream-windows` | `ctream/windows` | Windows interactive session | `ctream-proto` | Shared window identity, enumeration, and physical geometry for native drivers |
 | `ctream-platform` | `ctream/platform` | Agent or local CLI on the display host | `ctream-driver`, `ctream-proto`, `ctream-driver-capture` (Linux/Windows) | Display discovery, window-query dispatch, and AT-SPI controls |
 | `ctream-cli` | `ctream/cli` | Display host for local queries; client machine for SSH queries | `ctream-client`, `ctream-platform`, `ctream-proto` | The `ctream` command |
-| `ctream-agent` | `ctream/agent` | Linux display host or Windows interactive session | `ctream-driver`, `ctream-proto`; `ctream-driver-capture`, `ctream-driver-input`, `ctream-platform` (Linux/Windows) | Reusable request validation, stdio hosting, and stock-agent operation routing |
+| `ctream-agent` | `ctream/agent` | Linux or macOS display host, or Windows interactive session | `ctream-driver`, `ctream-driver-codec`, `ctream-proto`, `ctream-driver-capture`, `ctream-driver-input`, `ctream-platform` (Linux/Windows) | Reusable request validation, stdio hosting, and stock-agent operation routing |
 | `ctream-preview` | `ctream/preview` | Viewer machine | `ctream-client`, `ctream-proto` | Native wgpu setup and viewer windows, view-only source preview, controls, and overlays |
 | `ctream-wayland-input` | `ctream/wayland-input` | Linux display host | `ctream-proto` (Linux) | Wayland input and window capture helper binaries |
 
 The dependency direction keeps native drivers out of the client library and
 viewer. `Client<T>` selects wire contracts, validates requests, and decodes typed
 replies. `Session<T>` binds operations to a selected display or window. The
-client's `media` module decodes bounded RGB frames, while `geometry` supplies
-the shared transform used by the preview image, control outlines, and pointer
-mapping.
+client's `media` module reads bounded raw frames or decodes compressed video,
+while `geometry` supplies the shared transform used by the preview image,
+control outlines, and pointer mapping.
 
 ### Driver composition
 
@@ -113,11 +114,10 @@ its own compiled providers using the same source scopes and frame contracts.
 Those wire IDs do not replace the concrete Rust `Driver`, associated target,
 session, and capability types behind each routing adapter.
 
-Capture sources currently write encoded frame bytes into a caller-supplied
-output and observe a cancellation lifetime. The existing raw RGB and PPM
-formats remain selected by the protocol adapter. Input and accessibility helper
-adapters retain their standard-IO endpoints. The driver interfaces do not yet
-provide typed frame or input-event APIs.
+Capture sources write raw RGB or PPM frames into a caller-supplied output and
+observe a cancellation lifetime. The protocol adapter can wrap that output in
+a compressed video stream through `ctream-driver-codec`. Input and accessibility
+helpers keep their standard-IO endpoints.
 
 ### Client sessions
 
@@ -148,6 +148,47 @@ lifetime guard held by the viewer. Dropping the guard closes the control pipe
 so the agent can stop capture. Process transports allow a bounded cleanup
 period before terminating a stalled child. Input closure lets the helper
 release held keys and buttons.
+
+### Video streaming
+
+In agent-backed setup, **Video stream** defaults to AV1, Balanced quality, and
+a 30 FPS limit. Use `--video-codec auto|av1|h264`,
+`--quality low|balanced|high`, and `--max-fps FPS` (1–120) to preselect these
+settings. Changing them restarts the setup preview for the same driver and
+source. The settings remain locked while the viewer is open.
+
+The driver API accepts `CaptureOptions` through
+`capture_display_with_options` and `capture_window_with_options`. Their provided
+implementations retain custom drivers that implement only the original capture
+methods. Official timed providers override them to configure source cadence.
+Older raw operations keep their existing defaults, including 8 FPS for the
+previously capped sources and 30 FPS for ScreenCaptureKit.
+The shared `FramePacer` retains nominal frame deadlines across ordinary
+scheduler delays, bounds phase correction, and resets its schedule after stalls.
+
+| Quality | Maximum long edge | Target bitrate |
+| --- | ---: | ---: |
+| Low | 1280 px | 1.5 Mbps |
+| Balanced | 1920 px | 4 Mbps |
+| High | 3840 px | 12 Mbps |
+
+The FPS setting configures both timed capture sources and the encoder cap.
+X11 display/window, Grim, DXGI, WGC, and agent-backed ScreenCaptureKit receive
+the selected rate before capture starts. Wayland window capture follows
+compositor updates and the encoder caps delivery. Actual FPS still depends on
+source changes and capture, encoding, and transport throughput. FFmpeg scales
+larger frames to fit the selected quality while keeping the source aspect ratio.
+
+`Auto` and `AV1` prefer `libsvtav1` and then `libaom-av1`. If neither is usable,
+the agent tries `libx264` and then `h264_videotoolbox` when the viewer supports
+H.264. Selecting `H.264` limits negotiation to that codec. Setup reports the
+actual codec, and expanded **Debug** diagnostics show the encoder, quality,
+and FPS limit.
+
+Encoded streams require `ffmpeg` on `PATH` on both the agent host and the
+viewer machine. The bundles rely on the system binaries for FFmpeg. Older
+agents continue using their raw capture contracts. The direct macOS picker
+keeps frames in the local viewer and renders them without video compression.
 
 ### Welcome window and viewer lifecycle
 
@@ -353,7 +394,7 @@ ctream still has no dependency on ctld or its lifecycle.
 
 Display names use the number in the Windows GDI device name (`windows-1` for
 `DISPLAY1`), rather than the order in which GPUs are enumerated. Discovery
-includes physical desktop bounds. Capture returns full-resolution RGB PPM
+includes physical desktop bounds. Raw capture returns full-resolution RGB PPM
 frames in the display's visible orientation, with a ceiling of eight frames
 per second. Input maps the preview's fitted image into that selected display
 and the virtual desktop, including negative origins and mixed DPI settings.
@@ -361,14 +402,14 @@ Physical key events use the Windows keyboard layout. Closing or resetting the
 input channel releases keys and buttons injected by that channel.
 
 Windows supports displays and individual windows. Accessibility actions, audio,
-and hardware video encoding remain future work. A separately rendered hardware
-cursor is not composited into the DXGI display image. Windows integrity restrictions still apply to elevated apps
+and Windows hardware video encoding remain future work. The DXGI display image
+omits the separately rendered hardware cursor. Windows integrity restrictions still apply to elevated apps
 and secure desktops. Display reconfiguration or desktop access loss requires
 reconnecting; input rejects a changed display layout before sending new events.
 WSL restart, Windows sign-out, and session switching require further live checks.
 
-This step implements the existing display and window capabilities. Audio,
-encoding, broader capability negotiation, and a shared remote session runtime are
+The current implementation covers display and window capabilities. Audio,
+broader capability negotiation, and a shared remote session runtime are
 future additions. The current client session groups a target selection across
 independent agent operations. The existing protocol adapter supports deployed
 agents during development.
@@ -450,8 +491,9 @@ held inputs.
 
 The agent uses FFmpeg with x11grab for X11 display capture and reads display
 geometry through x11rb. The X11 display driver keeps only the newest pending
-frame when transport writes stall. It waits at least 125 ms after each completed
-frame write before sending another. X11 display input needs Python 3, libX11,
+frame when transport writes stall. It paces capture and raw frame delivery at
+the selected rate for compressed streams, with an 8 FPS default on retained raw
+operations. X11 display input needs Python 3, libX11,
 libXtst, XTEST, and access to the selected display. The local wgpu viewer
 uses the same rectangle for drawing the desktop and mapping clicks to display
 pixels.
@@ -663,3 +705,12 @@ X11 window input advances `ctream_agent` from 1.0.11 (build 11) to 1.1.12
 with a `ready` handshake and frame-sized pointer coordinates. Earlier
 contracts retain their existing operations, including display XTEST input
 and X11 window capture.
+
+Compressed video advances `ctream_agent` from 1.1.12 (build 12) to 1.1.13
+(build 13). `video-codecs` advertises supported codec negotiation without
+starting capture or launching FFmpeg. `capture-stream TARGET DRIVER OPTIONS_JSON
+[WINDOW]` negotiates a video stream and announces the actual driver and video
+settings before sending framed NUT segments. Resizing starts a new segment
+and the viewer crops encoder padding before display and input mapping. The
+agent retains `1.0.1` through `1.0.11` and `1.1.12` for existing raw capture,
+discovery, and input operations. See [protocol versioning](../protocol-versioning.md).

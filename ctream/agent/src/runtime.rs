@@ -4,9 +4,10 @@ use ctream_driver::{
   CaptureDisplay, CaptureLifetime, CaptureSource, CaptureWindow, Driver, ForwardInput,
   ForwardWindowInput, InputSource, Result,
 };
+use ctream_driver_codec::ffmpeg::Encoder;
 use ctream_proto::{
-  CAPTURE_STARTED_LIMIT, CaptureFormat, CaptureStarted, PING_HELLO, PING_TOKEN,
-  valid_capture_driver,
+  CAPTURE_STARTED_LIMIT, CaptureFormat, CaptureStarted, PING_HELLO, PING_TOKEN, VideoCapabilities,
+  VideoCodec, VideoRequest, VideoStarted, valid_capture_driver,
 };
 use std::io::{self, Read, Write};
 
@@ -50,36 +51,99 @@ pub fn capture_with_metadata<S: CaptureSource>(
   capture_started(source, driver, format, &mut io::stdout(), &lifetime)
 }
 
-fn capture_started<S: CaptureSource, W: Write + Send>(
+pub fn capture_started<S: CaptureSource, W: Write + Send>(
   source: S,
   driver: &str,
   format: CaptureFormat,
   output: &mut W,
   lifetime: &CaptureLifetime,
 ) -> Result<()> {
-  if driver == "auto" || !valid_capture_driver(driver) {
-    return Err("invalid actual capture driver identifier".into());
-  }
-  let mut header = serde_json::to_vec(&CaptureStarted {
+  validate_actual_driver(driver)?;
+  let header = serde_json::to_vec(&CaptureStarted {
     driver: driver.into(),
     format,
   })?;
-  header.push(b'\n');
-  if header.len() > CAPTURE_STARTED_LIMIT {
-    return Err("capture startup metadata exceeds the limit".into());
-  }
-  source.run(
-    &mut StartedWriter {
-      output,
-      header: Some(header),
+  source.run(&mut StartedWriter::new(output, header)?, lifetime)
+}
+
+/// Advertise supported codec negotiation. Encoder availability is checked when
+/// a capture opens because FFmpeg and its encoders are platform dependencies.
+pub fn video_capabilities(output: impl Write) -> Result<()> {
+  serde_json::to_writer(
+    output,
+    &VideoCapabilities {
+      codecs: vec![VideoCodec::Av1, VideoCodec::H264],
     },
-    lifetime,
+  )?;
+  Ok(())
+}
+
+pub fn capture_video_with_metadata<S: CaptureSource>(
+  source: S,
+  driver: &str,
+  format: CaptureFormat,
+  request: VideoRequest,
+) -> Result<()> {
+  let lifetime = CaptureLifetime::from_reader(io::stdin());
+  capture_video_started(
+    source,
+    driver,
+    format,
+    request,
+    &mut io::stdout(),
+    &lifetime,
   )
+}
+
+/// Encode a capture source and announce the actual encoder and settings when
+/// its first segment starts.
+pub fn capture_video_started<S: CaptureSource, W: Write + Send>(
+  source: S,
+  driver: &str,
+  format: CaptureFormat,
+  request: VideoRequest,
+  output: &mut W,
+  lifetime: &CaptureLifetime,
+) -> Result<()> {
+  validate_actual_driver(driver)?;
+  request.validate()?;
+  let encoder =
+    Encoder::open_cancellable(request.options, &request.codecs, &lifetime.cancellation())?;
+  let header = serde_json::to_vec(&VideoStarted {
+    driver: driver.into(),
+    video: encoder.info(),
+  })?;
+  encoder.run(
+    format,
+    &mut StartedWriter::new(output, header)?,
+    lifetime,
+    |pipe| source.run(pipe, lifetime),
+  )
+}
+
+fn validate_actual_driver(driver: &str) -> Result<()> {
+  if driver == "auto" || !valid_capture_driver(driver) {
+    return Err("invalid actual capture driver identifier".into());
+  }
+  Ok(())
 }
 
 struct StartedWriter<'a, W> {
   output: &'a mut W,
   header: Option<Vec<u8>>,
+}
+
+impl<'a, W> StartedWriter<'a, W> {
+  fn new(output: &'a mut W, mut header: Vec<u8>) -> Result<Self> {
+    header.push(b'\n');
+    if header.len() > CAPTURE_STARTED_LIMIT {
+      return Err("capture startup metadata exceeds the limit".into());
+    }
+    Ok(Self {
+      output,
+      header: Some(header),
+    })
+  }
 }
 
 impl<W: Write> Write for StartedWriter<'_, W> {
@@ -190,5 +254,37 @@ mod tests {
     assert_eq!(started.driver, "user.capture");
     assert_eq!(started.format, CaptureFormat::Ppm);
     assert_eq!(&output[newline + 1..], b"P6\n1 1\n255\nabc");
+  }
+
+  #[test]
+  fn video_capabilities_report_concrete_codecs() {
+    let mut output = Vec::new();
+    video_capabilities(&mut output).unwrap();
+    let capabilities: VideoCapabilities = serde_json::from_slice(&output).unwrap();
+    assert_eq!(capabilities.codecs, [VideoCodec::Av1, VideoCodec::H264]);
+  }
+
+  #[test]
+  fn invalid_video_options_have_no_startup_metadata() {
+    let (_sender, receiver) = std::sync::mpsc::channel();
+    let lifetime = CaptureLifetime::from_receiver(receiver);
+    let mut output = Vec::new();
+    let error = capture_video_started(
+      Source { fail: false },
+      "user.capture",
+      CaptureFormat::Ppm,
+      VideoRequest {
+        options: ctream_proto::VideoOptions {
+          max_fps: 0,
+          ..Default::default()
+        },
+        codecs: vec![VideoCodec::H264],
+      },
+      &mut output,
+      &lifetime,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("frame rate"));
+    assert!(output.is_empty());
   }
 }

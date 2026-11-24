@@ -955,7 +955,16 @@ mod tests {
     };
     assert_eq!(request_id, "divider-1");
     assert_eq!(view.panes[0].columns, divider.position);
-    assert_eq!(pane.view_update.as_ref(), Some(view.as_ref()));
+    let mut queued_view = pane
+      .view_update
+      .clone()
+      .ok_or("expected queued view update")?;
+    // The acknowledgement and broadcast can snapshot terminal output at
+    // different times while describing the same layout revision.
+    for (queued, acknowledged) in queued_view.terminals.iter_mut().zip(&view.terminals) {
+      queued.next_sequence = acknowledged.next_sequence;
+    }
+    assert_eq!(queued_view, *view);
     assert!(pane.pending_resizes.is_empty());
 
     assert_resize_command_limits(&mut pane, &transport, terminal_id, divider).await?;

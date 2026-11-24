@@ -9,13 +9,60 @@
 //! and adapts their capabilities to its transport and supported wire targets.
 
 mod lifetime;
+mod pacing;
 
-pub use lifetime::CaptureLifetime;
+pub use lifetime::{CaptureCancellation, CaptureLifetime};
+pub use pacing::FramePacer;
+
+#[derive(Default)]
+pub struct Frame<B = Vec<u8>> {
+  pub size: [usize; 2],
+  pub pixels: B,
+}
 
 use ctream_proto::Window;
-use std::io::Write;
+use std::{
+  io::{self, Write},
+  time::Duration,
+};
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+/// Source-side capture cadence. Timed providers default to their legacy 8 FPS;
+/// native event-driven sources may use a different default.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CaptureOptions {
+  max_fps: u16,
+}
+
+impl CaptureOptions {
+  pub fn new(max_fps: u16) -> Result<Self> {
+    if !(1..=120).contains(&max_fps) {
+      return Err(
+        io::Error::new(
+          io::ErrorKind::InvalidInput,
+          "capture frame rate must be between 1 and 120 FPS",
+        )
+        .into(),
+      );
+    }
+    Ok(Self { max_fps })
+  }
+
+  pub fn max_fps(self) -> u16 {
+    self.max_fps
+  }
+
+  pub fn interval(self) -> Duration {
+    Duration::from_secs(1) / u32::from(self.max_fps)
+  }
+}
+
+impl Default for CaptureOptions {
+  fn default() -> Self {
+    Self { max_fps: 8 }
+  }
+}
 
 /// Opens a session without imposing capabilities or a platform-specific target.
 ///
@@ -41,12 +88,26 @@ pub trait CaptureDisplay {
   type Source: CaptureSource;
 
   fn capture_display(&self) -> Result<Self::Source>;
+
+  /// Override to configure source cadence. Event-driven and custom sources may
+  /// retain their native rate; the host also caps encoded frame delivery.
+  fn capture_display_with_options(&self, _options: CaptureOptions) -> Result<Self::Source> {
+    self.capture_display()
+  }
 }
 
 pub trait CaptureWindow {
   type Source: CaptureSource;
 
   fn capture_window(&self, id: &str) -> Result<Self::Source>;
+
+  fn capture_window_with_options(
+    &self,
+    id: &str,
+    _options: CaptureOptions,
+  ) -> Result<Self::Source> {
+    self.capture_window(id)
+  }
 }
 
 /// An input endpoint. Current helper adapters inherit the host's standard IO.

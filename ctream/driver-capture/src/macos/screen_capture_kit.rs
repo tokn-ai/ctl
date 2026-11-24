@@ -1,5 +1,6 @@
 //! Window capture from the macOS content-sharing picker or window catalog.
 
+use ctream_driver::CaptureOptions;
 use std::{
   ffi::{CStr, c_char, c_void},
   io,
@@ -9,6 +10,8 @@ use std::{
   rc::Rc,
   slice,
 };
+
+const DEFAULT_MAX_FPS: i32 = 30;
 
 pub enum Event {
   Frame { size: [usize; 2], pixels: Vec<u8> },
@@ -85,7 +88,7 @@ impl Capture {
   /// Opens the native picker on the main thread. Frame events may arrive on
   /// the capture queue, so the callback must be thread-safe and nonblocking.
   pub fn start(callback: impl Fn(Event) + Send + Sync + 'static) -> io::Result<Self> {
-    Self::start_source(ptr::null_mut(), callback)
+    Self::start_source(ptr::null_mut(), DEFAULT_MAX_FPS, callback)
   }
 
   /// Captures the selected window from a discovery snapshot on the main thread.
@@ -93,7 +96,23 @@ impl Capture {
     window: &Window,
     callback: impl Fn(Event) + Send + Sync + 'static,
   ) -> io::Result<Self> {
-    Self::start_source(window.native.0.as_ptr(), callback)
+    Self::start_source(window.native.0.as_ptr(), DEFAULT_MAX_FPS, callback)
+  }
+
+  /// Captures a listed window on the main thread with a selected frame-rate cap.
+  ///
+  /// # Errors
+  /// Returns an error if the window is unavailable or capture cannot start.
+  pub fn start_window_with_options(
+    window: &Window,
+    options: CaptureOptions,
+    callback: impl Fn(Event) + Send + Sync + 'static,
+  ) -> io::Result<Self> {
+    Self::start_source(
+      window.native.0.as_ptr(),
+      i32::from(options.max_fps()),
+      callback,
+    )
   }
 
   /// Returns the selected window ID and owning process on the main thread.
@@ -106,12 +125,22 @@ impl Capture {
 
   fn start_source(
     window: *mut c_void,
+    max_fps: i32,
     callback: impl Fn(Event) + Send + Sync + 'static,
   ) -> io::Result<Self> {
     let context = Box::into_raw(Box::new(Callback(Box::new(callback))));
     let mut status = 0;
-    let native =
-      unsafe { ctream_sck_start(window, context.cast(), frame, end, release, &mut status) };
+    let native = unsafe {
+      ctream_sck_start(
+        window,
+        max_fps,
+        context.cast(),
+        frame,
+        end,
+        release,
+        &mut status,
+      )
+    };
     if let Some(native) = NonNull::new(native) {
       return Ok(Self {
         native,
@@ -273,6 +302,7 @@ unsafe extern "C" {
   fn ctream_sck_release_window(window: *mut c_void);
   fn ctream_sck_start(
     window: *mut c_void,
+    max_fps: i32,
     context: *mut c_void,
     frame: unsafe extern "C" fn(*mut c_void, *const u8, usize, usize, usize, usize),
     end: unsafe extern "C" fn(*mut c_void, i32, *const c_char),

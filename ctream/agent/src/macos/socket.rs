@@ -14,7 +14,9 @@ use std::{
   time::Duration,
 };
 
-const MAX_REQUEST: u64 = 4096;
+// The broker reserializes the CLI arguments, including a 4096-byte options
+// JSON argument whose characters can expand during JSON escaping.
+const MAX_REQUEST: u64 = 32 * 1024;
 const MAX_CHUNK: usize = 64 * 1024;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 const DATA: u8 = 0;

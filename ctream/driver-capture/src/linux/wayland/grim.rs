@@ -2,8 +2,8 @@
 
 use super::helper;
 use crate::process::ProcessCapture;
-use ctream_driver::{CaptureDisplay, Result};
-use std::time::Duration;
+use ctream_driver::{CaptureDisplay, CaptureOptions, Result};
+use std::{process::Command, time::Duration};
 
 pub struct Driver;
 
@@ -20,12 +20,28 @@ impl ctream_driver::Driver for Driver {
   }
 }
 
+impl Session {
+  fn screenshot_command(&self) -> Command {
+    let mut command = helper(self.display, "grim");
+    command.args(["-t", "ppm", "-"]);
+    command
+  }
+}
+
 impl CaptureDisplay for Session {
   type Source = ProcessCapture;
 
   fn capture_display(&self) -> Result<ProcessCapture> {
-    let mut command = helper(self.display, "grim");
-    command.args(["-t", "ppm", "-"]);
-    Ok(ProcessCapture::sampled(command, Duration::from_millis(125)))
+    Ok(ProcessCapture::sampled(
+      self.screenshot_command(),
+      Duration::from_millis(125),
+    ))
+  }
+
+  fn capture_display_with_options(&self, options: CaptureOptions) -> Result<ProcessCapture> {
+    Ok(ProcessCapture::sampled_at_rate(
+      self.screenshot_command(),
+      options.interval(),
+    ))
   }
 }

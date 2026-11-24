@@ -1,6 +1,8 @@
 //! Synthetic user drivers exercise the public API without official backends.
 
-use ctream_driver::{CaptureDisplay, CaptureLifetime, CaptureSource, Driver, Result};
+use ctream_driver::{
+  CaptureDisplay, CaptureLifetime, CaptureOptions, CaptureSource, Driver, Result,
+};
 use std::{
   io::Write,
   sync::{Arc, Mutex, mpsc},
@@ -99,7 +101,9 @@ where
   let mut output = Vec::new();
   driver
     .open(target)?
-    .capture_display()?
+    // A custom driver implementing the original capability keeps compiling
+    // when a host supplies capture options through the provided method.
+    .capture_display_with_options(CaptureOptions::new(30)?)?
     .run(&mut output, lifetime)?;
   Ok(output)
 }

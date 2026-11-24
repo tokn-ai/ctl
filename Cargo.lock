@@ -1609,6 +1609,7 @@ dependencies = [
  "ctream-client",
  "ctream-driver",
  "ctream-driver-capture",
+ "ctream-driver-codec",
  "ctream-driver-input",
  "ctream-platform",
  "ctream-proto",
@@ -1634,6 +1635,8 @@ name = "ctream-client"
 version = "0.1.0"
 dependencies = [
  "ctl-bundle",
+ "ctream-driver",
+ "ctream-driver-codec",
  "ctream-proto",
  "process-wrap",
  "rustix 1.1.6",
@@ -1659,6 +1662,14 @@ dependencies = [
  "serde_json",
  "windows",
  "x11rb 0.14.0",
+]
+
+[[package]]
+name = "ctream-driver-codec"
+version = "0.1.0"
+dependencies = [
+ "ctream-driver",
+ "ctream-proto",
 ]
 
 [[package]]

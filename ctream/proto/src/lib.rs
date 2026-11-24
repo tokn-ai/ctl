@@ -3,7 +3,13 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-pub const VERSION: &str = X11_WINDOW_INPUT_VERSION;
+pub mod video;
+pub use video::{
+  VideoCapabilities, VideoCodec, VideoInfo, VideoOptions, VideoQuality, VideoRequest, VideoStarted,
+};
+
+pub const VERSION: &str = VIDEO_STREAM_VERSION;
+pub const VIDEO_STREAM_VERSION: &str = "1.1.13";
 pub const X11_WINDOW_INPUT_VERSION: &str = "1.1.12";
 pub const MACOS_WINDOW_VERSION: &str = "1.0.11";
 pub const LATENCY_VERSION: &str = "1.0.10";

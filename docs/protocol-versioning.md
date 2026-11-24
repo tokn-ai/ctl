@@ -724,6 +724,42 @@ input still uses XTEST under `1.0.1`. X11 window input requires an updated
 agent and a successful window handshake. Other named protocols and product
 release versions are unchanged.
 
+Compressed video advances `ctream_agent` from `1.1.12` (build 12) to `1.1.13`
+(build 13). `1.1.13 video-codecs` takes no arguments and returns a JSON object
+with a `codecs` list of compiled codec options. It does not launch FFmpeg or
+check display permissions. The agent checks encoder availability when capture
+opens, and the viewer offers codecs it can decode.
+
+`1.1.13 capture-stream TARGET DRIVER OPTIONS_JSON [WINDOW]` accepts `auto` or an
+explicit capture driver. `OPTIONS_JSON` is a JSON argument bounded at 4096 bytes.
+Its `options` object specifies `codec` (`auto`, `av1`, or `h264`), `quality`
+(`low`, `balanced`, or `high`), and `max_fps` (an integer from 1 to 120). The
+agent applies `max_fps` to configurable capture sources as well as encoded
+delivery. Event-driven sources may produce fewer frames when content is idle.
+This uses the existing `1.1.13` field and preserves retained raw operation
+defaults. The `codecs` list contains one or two distinct concrete codecs
+(`av1` or `h264`) the viewer accepts. An explicit `h264` preference accepts only
+`h264`.
+
+Once the first segment starts, the agent writes a JSON line bounded at 4096
+bytes with the actual `driver` and a `video` object containing the selected
+`codec`, `encoder`, `quality`, and `max_fps`. The following binary stream uses
+one-byte tags and little-endian `u32` fields.
+
+| Tag | Fields after the tag |
+| --- | --- |
+| `1` | Cropped width and height in pixels, followed by a new NUT stream carried in subsequent data records |
+| `2` | Data length from 1 to 65,536 bytes, followed by that many NUT bytes |
+| `3` | No fields. Marks clean completion of a stream that produced video |
+
+Each dimension is 1–16,384 pixels, with up to 33,554,432 pixels per frame. A
+capture resize starts a new NUT segment, resetting the decoder. The viewer
+crops encoder padding to the announced dimensions before fitting the image and
+mapping input. Contracts `1.0.1`–`1.0.11` and `1.1.12` retain their existing
+requests and responses. Older agents continue serving raw frames through the
+retained capture operations. Input, other named protocols, and product release
+versions are unchanged.
+
 Every PR description must state its protocol changes, or **None** when there
 are no changes. Include the previous and new contracts and the compatibility
 impact. Keep PR titles brief; put protocol details in the description.

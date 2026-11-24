@@ -1,3 +1,4 @@
+use ctream_proto::{VideoCodec, VideoOptions, VideoQuality};
 use eframe::egui;
 
 pub(super) fn heading(ui: &mut egui::Ui, text: &str) {
@@ -34,6 +35,32 @@ pub(super) fn window_name<'a>(title: &'a str, application: &'a str) -> &'a str {
   } else {
     "Untitled window"
   }
+}
+
+pub(super) fn video_picker(ui: &mut egui::Ui, options: &mut VideoOptions) {
+  heading(ui, "VIDEO STREAM");
+  ui.label("Video codec");
+  egui::ComboBox::from_id_salt("video_codec")
+    .selected_text(options.codec.label())
+    .width(ui.available_width())
+    .show_ui(ui, |ui| {
+      for codec in VideoCodec::ALL {
+        ui.selectable_value(&mut options.codec, codec, codec.label());
+      }
+    });
+  ui.label("Quality");
+  egui::ComboBox::from_id_salt("video_quality")
+    .selected_text(options.quality.label())
+    .width(ui.available_width())
+    .show_ui(ui, |ui| {
+      for quality in VideoQuality::ALL {
+        ui.selectable_value(&mut options.quality, quality, quality.label());
+      }
+    });
+  ui.horizontal(|ui| {
+    ui.label("Max FPS");
+    ui.add(egui::DragValue::new(&mut options.max_fps).range(1..=120));
+  });
 }
 
 pub(super) fn window_picker<'a, K>(

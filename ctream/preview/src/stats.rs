@@ -2,6 +2,7 @@ mod panel;
 
 use super::{FrameCounts, latency, requests::Traffic};
 use ctream_client::media::FrameFormat;
+use ctream_proto::VideoInfo;
 use eframe::egui;
 use std::{
   collections::VecDeque,
@@ -25,6 +26,7 @@ pub(super) struct CaptureDetails {
   pub window: Option<String>,
   pub driver: Option<String>,
   pub format: FrameFormat,
+  pub video: Option<VideoInfo>,
 }
 
 pub(super) struct Stats {
@@ -122,10 +124,6 @@ impl Stats {
     let superseded = frames.superseded.to_string();
     let downloaded = bytes(totals[0] as f64);
     let uploaded = bytes(totals[1] as f64);
-    let frame_format = match self.details.format {
-      FrameFormat::FixedRgb { .. } => "RGB24 (fixed size)",
-      FrameFormat::Ppm => "RGB24 (PPM / P6)",
-    };
     let mut rows = vec![
       (
         "Capture driver",
@@ -141,15 +139,30 @@ impl Stats {
       Some(Connection::Ssh(host)) => rows.extend([("Transport", "SSH"), ("Host", host.as_str())]),
       None => {}
     }
+    let max_fps;
+    if let Some(video) = &self.details.video {
+      max_fps = video.max_fps.to_string();
+      rows.extend([
+        ("Video codec", video.codec.label()),
+        ("Encoder", video.encoder.as_str()),
+        ("Quality", video.quality.label()),
+        ("Max FPS", max_fps.as_str()),
+      ]);
+    } else {
+      let format = match self.details.format {
+        FrameFormat::FixedRgb { .. } => "RGB24 (fixed size)",
+        FrameFormat::Ppm => "RGB24 (PPM / P6)",
+      };
+      rows.push(("Frame format", format));
+    }
     rows.extend([
-      ("Frame format", frame_format),
-      ("Resolution", &resolution),
-      ("Received FPS", &values.received_fps),
-      ("Frames received", &received),
-      ("Preview frames", &preview),
-      ("Superseded frames", &superseded),
-      ("Payload received", &downloaded),
-      ("Payload sent", &uploaded),
+      ("Resolution", resolution.as_str()),
+      ("Received FPS", values.received_fps.as_str()),
+      ("Frames received", received.as_str()),
+      ("Preview frames", preview.as_str()),
+      ("Superseded frames", superseded.as_str()),
+      ("Payload received", downloaded.as_str()),
+      ("Payload sent", uploaded.as_str()),
     ]);
     let [download, upload, latency, fps] = self
       .history

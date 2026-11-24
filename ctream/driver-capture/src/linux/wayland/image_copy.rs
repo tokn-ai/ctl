@@ -1,4 +1,7 @@
 //! Foreign-toplevel discovery and window capture through image-copy capture.
+//!
+//! The compositor completes one frame request at a time and can wait for the
+//! contents to change. The encoder enforces the outgoing stream's frame cap.
 
 use super::helper;
 use crate::process::ProcessCapture;

@@ -58,9 +58,10 @@ successful signing run can append the signed desktop packages under their usual
 filenames. Each published package retains its original checksum.
 
 The standalone macOS helper and bundled CLI require distribution signing and
-notarization. Missing Apple credentials fail those jobs while the successful
-packages still publish. Adding a successful signed helper makes it available to
-`ctl setup` for that exact CLI version and architecture.
+notarization. Version tags defer those jobs when Apple credentials are missing.
+An explicit signed-helper workflow request requires the credentials. Adding a
+successful signed helper makes it available to `ctl setup` for that exact CLI
+version and architecture.
 
 ### Install a temporary PR build
 
@@ -297,6 +298,31 @@ Repository script tests use fake signing/notarization operations and real tar
 archives. On macOS, native checks also exercise plist parsing and requirement
 compilation. They do not import signing secrets or submit software to Apple.
 Signed release assets require a successful signing and notarization run.
+
+## Sign a CI-built macOS desktop release locally
+
+Use a Mac with Xcode's `notarytool` and `stapler`, a Developer ID Application
+certificate and its private key in the Keychain, the matching distribution
+profile for `ctld`, and an Apple notary API key.
+Set `CTLD_PROVISIONING_PROFILE`, `APPLE_API_KEY_PATH`, `APPLE_API_KEY`, and
+`APPLE_API_ISSUER` locally. The build job can publish the unsigned files without
+access to those credentials.
+
+```sh
+ctlup sign
+ctlup sign --version VERSION
+```
+
+`ctlup sign` uses the active stable desktop version. Pass `--version` to pick
+a different tagged release or when there is no active stable desktop. The
+target defaults to the Mac's architecture. To sign the Intel build from an
+Apple Silicon Mac, add `--target x86_64-apple-darwin`.
+
+The command downloads and verifies the unsigned build from the exact GitHub
+release, then signs, notarizes, and staples the app and a new DMG. It prints
+the output path under `~/.tokn/ctl/ctlup/signed/v<VERSION>/<TARGET>/`, or under
+the selected `CTL_DATA_DIR` profile. The signed packages, checksums, and release
+manifest are ready to attach to the GitHub release. Existing output is preserved.
 
 ## Standalone helper release assets
 

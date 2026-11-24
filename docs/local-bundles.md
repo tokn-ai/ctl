@@ -5,8 +5,8 @@
 Run `ctlup dev` from the root of the ctl checkout you want to build, including
 its uncommitted changes. The command fails if the current directory is outside
 that root or in a subdirectory. Use `--workspace /path/to/checkout` to select a
-root explicitly. The same rule applies to `--app`, `--ctream`, `--renew-signing`, and
-remote development builds.
+root explicitly. The same rule applies to `--app`, `--ctream`, and remote
+development builds.
 
 The native build prepares all six runtime commands and the separate `ctlup`
 manager together. On macOS it signs the complete `ctld.app` using the shared
@@ -59,8 +59,9 @@ ctlup dev --app --workspace /path/to/checkout --json
 and installs it on this computer. It preserves the selected publication
 channel. On macOS it uses the development helper profile for signing and can
 renew an expired profile through Xcode. If provisioning or signing fails, the
-app can bundle an unsigned helper. `ctlup dev sign` renews the
-active runtime helper's signature separately.
+app can bundle an unsigned helper. See
+[release signing](ci-bundles.md#sign-a-ci-built-macos-desktop-release-locally)
+to sign and notarize a CI-built desktop package without rebuilding.
 
 ## Install a ctream development build
 

@@ -88,7 +88,7 @@ pub(super) fn verify_existing(
   Ok(())
 }
 
-pub(super) fn stage(
+pub(in crate::updater) fn stage(
   archive: &Path,
   staging: &Path,
   version: &str,
@@ -406,7 +406,7 @@ fn exists(path: &Path) -> io::Result<bool> {
   }
 }
 
-fn plist_string(plist: &Path, key: &str) -> io::Result<String> {
+pub(in crate::updater) fn plist_string(plist: &Path, key: &str) -> io::Result<String> {
   let output = require_success(
     Command::new("/usr/bin/plutil")
       .args([

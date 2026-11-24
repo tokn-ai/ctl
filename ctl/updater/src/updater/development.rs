@@ -1,4 +1,4 @@
-use super::arguments::{DevAction, DevelopmentArguments};
+use super::arguments::DevelopmentArguments;
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 
@@ -7,11 +7,9 @@ const NATIVE_BUILDER: &str = "scripts/dev/build-local-development.mts";
 pub(super) async fn run(home: &Path, options: DevelopmentArguments) -> io::Result<()> {
   let targets = options.destination.resolve()?;
   let remote = targets[0].remote();
-  let signing = options.action == Some(DevAction::Sign);
   if remote
     && (options.app
       || options.ctream
-      || signing
       || options.release
       || options.profile.is_some()
       || options.target_dir.is_some()
@@ -21,7 +19,7 @@ pub(super) async fn run(home: &Path, options: DevelopmentArguments) -> io::Resul
   {
     return Err(io::Error::new(
       io::ErrorKind::InvalidInput,
-      "Desktop, ctream, signing, and native Cargo options require a local build. Remote development accepts host options, --workspace, and --json.",
+      "Desktop, ctream, and native Cargo options require a local build. Remote development accepts host options, --workspace, and --json.",
     ));
   }
   let workspace = checkout_root(
@@ -38,20 +36,13 @@ pub(super) async fn run(home: &Path, options: DevelopmentArguments) -> io::Resul
     return super::ctream::install_development(home, &workspace, &options).await;
   }
   let lease_input = options.lease.then(lease_pipe).transpose()?;
-  let installation = async {
-    if signing {
-      ctl_client::development::renew_signing(home, &workspace).await
-    } else {
-      ctl_client::development::install(
-        home,
-        ctl_client::development::DevelopmentOptions {
-          workspace,
-          cargo_args: cargo_arguments(&options)?,
-        },
-      )
-      .await
-    }
-  };
+  let installation = ctl_client::development::install(
+    home,
+    ctl_client::development::DevelopmentOptions {
+      workspace,
+      cargo_args: cargo_arguments(&options)?,
+    },
+  );
   let input = async {
     if let Some(input) = lease_input {
       read_lease_input(input).await
@@ -76,11 +67,6 @@ pub(super) async fn run(home: &Path, options: DevelopmentArguments) -> io::Resul
     serde_json::to_writer(&mut output, result).map_err(io::Error::other)?;
     writeln!(output)?;
     output.flush()?;
-  } else if signing {
-    println!(
-      "Renewed ctld signing in development build {} ({}). Running services were preserved; restart separately.",
-      result.bundle_id, result.target_triple
-    );
   } else {
     println!(
       "Installed development build {} ({}). Running services were preserved; restart separately.",
@@ -115,8 +101,6 @@ fn checkout_requirements(options: &DevelopmentArguments, remote: bool) -> &'stat
       "ctream/cli/Cargo.toml",
       "ctream/agent/Cargo.toml",
     ]
-  } else if options.action == Some(DevAction::Sign) {
-    &["scripts/dev/ctld-signed.mts"]
   } else {
     &[NATIVE_BUILDER]
   }
@@ -280,7 +264,6 @@ mod tests {
       app: false,
       ctream: false,
       ctream_agent_targets: vec![],
-      action: None,
       destination: crate::updater::arguments::DestinationArguments::default(),
       release: false,
       profile: None,

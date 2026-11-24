@@ -13,6 +13,10 @@ ctlup --help
 For installation layouts and release channels, see the
 [component update guide](https://github.com/tokn-ai/ctl/blob/main/docs/component-updates.md).
 
+On macOS, `ctlup sign` signs and notarizes downloaded CI desktop packages using
+the local Mac's Developer ID identity. See the
+[release signing guide](https://github.com/tokn-ai/ctl/blob/main/docs/ci-bundles.md#sign-a-ci-built-macos-desktop-release-locally).
+
 Use `ctlup ctream install` and `ctlup ctream run` for the separate ctream
 viewer. `ctlup ctream update` replaces the active selection, and
 `ctlup ctream status` shows the installed paths under

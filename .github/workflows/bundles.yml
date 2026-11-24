@@ -47,6 +47,7 @@ jobs:
       bundle_id: ${{ steps.metadata.outputs.bundle_id }}
       git_revision: ${{ steps.metadata.outputs.git_revision }}
       desktop_build_channel: ${{ steps.metadata.outputs.desktop_build_channel }}
+      apple_signing_enabled: ${{ steps.apple_signing.outputs.enabled }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
@@ -90,6 +91,34 @@ jobs:
           echo "bundle_id=$bundle_id" >> "$GITHUB_OUTPUT"
           echo "git_revision=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
           echo "desktop_build_channel=$desktop_build_channel" >> "$GITHUB_OUTPUT"
+
+      - name: Detect Apple signing configuration
+        id: apple_signing
+        env:
+          HAS_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE != '' }}
+          HAS_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD != '' }}
+          HAS_NOTARY_ISSUER: ${{ vars.APPLE_API_ISSUER != '' }}
+          HAS_NOTARY_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_CONTENT != '' }}
+          HAS_NOTARY_KEY_ID: ${{ vars.APPLE_API_KEY != '' }}
+          HAS_PROFILE: ${{ secrets.APPLE_CTLD_PROVISIONING_PROFILE != '' }}
+        shell: bash
+        run: |
+          missing=()
+          [[ "$HAS_CERTIFICATE" == true ]] || missing+=(APPLE_CERTIFICATE)
+          [[ "$HAS_CERTIFICATE_PASSWORD" == true ]] || missing+=(APPLE_CERTIFICATE_PASSWORD)
+          [[ "$HAS_NOTARY_ISSUER" == true ]] || missing+=(APPLE_API_ISSUER)
+          [[ "$HAS_NOTARY_KEY_CONTENT" == true ]] || missing+=(APPLE_API_KEY_CONTENT)
+          [[ "$HAS_NOTARY_KEY_ID" == true ]] || missing+=(APPLE_API_KEY)
+          [[ "$HAS_PROFILE" == true ]] || missing+=(APPLE_CTLD_PROVISIONING_PROFILE)
+          if (( ${#missing[@]} > 0 )); then
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            printf '::notice::Missing Apple signing configuration: %s\n' "${missing[*]}"
+            if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+              echo 'Standalone signed ctld and the bundled ctl CLI are deferred until Apple signing is configured.' >> "$GITHUB_STEP_SUMMARY"
+            fi
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
 
   remote-agent:
     name: Remote agent (${{ matrix.target }})
@@ -460,7 +489,9 @@ jobs:
 
   ctld:
     name: Signed standalone ctld (${{ matrix.target }})
-    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.build_ctld)
+    if: >-
+      (startsWith(github.ref, 'refs/tags/v') && needs.metadata.outputs.apple_signing_enabled == 'true') ||
+      (github.event_name == 'workflow_dispatch' && inputs.build_ctld)
     needs: metadata
     strategy:
       fail-fast: false
@@ -469,30 +500,15 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 45
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v6
-
       - name: Require Apple distribution signing configuration
-        env:
-          CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE }}
-          CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          NOTARY_ISSUER: ${{ vars.APPLE_API_ISSUER }}
-          NOTARY_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_CONTENT }}
-          NOTARY_KEY_ID: ${{ vars.APPLE_API_KEY }}
-          PROFILE_BASE64: ${{ secrets.APPLE_CTLD_PROVISIONING_PROFILE }}
+        if: needs.metadata.outputs.apple_signing_enabled != 'true'
         shell: bash
         run: |
-          missing=()
-          [[ -n "$CERTIFICATE_BASE64" ]] || missing+=(APPLE_CERTIFICATE)
-          [[ -n "$CERTIFICATE_PASSWORD" ]] || missing+=(APPLE_CERTIFICATE_PASSWORD)
-          [[ -n "$NOTARY_ISSUER" ]] || missing+=(APPLE_API_ISSUER)
-          [[ -n "$NOTARY_KEY_CONTENT" ]] || missing+=(APPLE_API_KEY_CONTENT)
-          [[ -n "$NOTARY_KEY_ID" ]] || missing+=(APPLE_API_KEY)
-          [[ -n "$PROFILE_BASE64" ]] || missing+=(APPLE_CTLD_PROVISIONING_PROFILE)
-          if (( ${#missing[@]} > 0 )); then
-            printf '::error::Standalone ctld releases require Apple distribution signing; missing: %s\n' "${missing[*]}"
-            exit 1
-          fi
+          echo '::error::The requested standalone ctld build needs Apple distribution signing. See the Bundle metadata job for missing settings.'
+          exit 1
+
+      - name: Check out repository
+        uses: actions/checkout@v6
 
       - name: Import Apple signing certificate
         uses: apple-actions/import-codesign-certs@v7
@@ -669,42 +685,19 @@ jobs:
           path: apps/desktop/src-tauri/resources/agent-bundles
           merge-multiple: true
 
-      - name: Detect Apple signing configuration
-        id: signing
-        if: runner.os == 'macOS'
-        env:
-          CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE }}
-          CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          NOTARY_ISSUER: ${{ vars.APPLE_API_ISSUER }}
-          NOTARY_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_CONTENT }}
-          NOTARY_KEY_ID: ${{ vars.APPLE_API_KEY }}
-          PROFILE_BASE64: ${{ secrets.APPLE_CTLD_PROVISIONING_PROFILE }}
-        shell: bash
-        run: |
-          missing=()
-          [[ -n "$CERTIFICATE_BASE64" ]] || missing+=(APPLE_CERTIFICATE)
-          [[ -n "$CERTIFICATE_PASSWORD" ]] || missing+=(APPLE_CERTIFICATE_PASSWORD)
-          [[ -n "$NOTARY_ISSUER" ]] || missing+=(APPLE_API_ISSUER)
-          [[ -n "$NOTARY_KEY_CONTENT" ]] || missing+=(APPLE_API_KEY_CONTENT)
-          [[ -n "$NOTARY_KEY_ID" ]] || missing+=(APPLE_API_KEY)
-          [[ -n "$PROFILE_BASE64" ]] || missing+=(APPLE_CTLD_PROVISIONING_PROFILE)
-          if (( ${#missing[@]} > 0 )); then
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
-            printf '::notice::Building unsigned macOS packages; missing Apple signing configuration: %s\n' "${missing[*]}"
-            echo 'macOS packages are unsigned and not notarized. Touch ID-protected credential storage requires a signed build.' >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "enabled=true" >> "$GITHUB_OUTPUT"
-          fi
+      - name: Report the unsigned macOS build
+        if: runner.os == 'macOS' && needs.metadata.outputs.apple_signing_enabled != 'true'
+        run: echo 'macOS packages are unsigned and not notarized. Touch ID-protected credential storage requires a signed build.' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Import Apple signing certificate
-        if: runner.os == 'macOS' && steps.signing.outputs.enabled == 'true'
+        if: runner.os == 'macOS' && needs.metadata.outputs.apple_signing_enabled == 'true'
         uses: apple-actions/import-codesign-certs@v7
         with:
           p12-file-base64: ${{ secrets.APPLE_CERTIFICATE }}
           p12-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
 
       - name: Prepare Apple signing assets
-        if: runner.os == 'macOS' && steps.signing.outputs.enabled == 'true'
+        if: runner.os == 'macOS' && needs.metadata.outputs.apple_signing_enabled == 'true'
         env:
           APPLE_API_ISSUER_VALUE: ${{ vars.APPLE_API_ISSUER }}
           APPLE_API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_CONTENT }}
@@ -725,8 +718,8 @@ jobs:
       - name: Build and stage native daemons
         env:
           CTLD_SIGNING_IDENTITY_OUTPUT: ${{ runner.temp }}/ctld-signing-identity
-          APPLE_SIGNING_ENABLED: ${{ steps.signing.outputs.enabled }}
-          CTLD_REQUIRE_DISTRIBUTION_SIGNING: ${{ github.ref_type == 'tag' && steps.signing.outputs.enabled == 'true' }}
+          APPLE_SIGNING_ENABLED: ${{ needs.metadata.outputs.apple_signing_enabled }}
+          CTLD_REQUIRE_DISTRIBUTION_SIGNING: ${{ github.ref_type == 'tag' && needs.metadata.outputs.apple_signing_enabled == 'true' }}
         shell: bash
         run: |
           cargo build --locked --release --target "${{ matrix.target }}" -p ctld -p ctmuxd -p ctl-taskd
@@ -752,7 +745,7 @@ jobs:
       - name: Build desktop bundles
         working-directory: apps/desktop
         env:
-          APPLE_SIGNING_ENABLED: ${{ steps.signing.outputs.enabled }}
+          APPLE_SIGNING_ENABLED: ${{ needs.metadata.outputs.apple_signing_enabled }}
           CTL_DESKTOP_BUILD_CHANNEL: ${{ needs.metadata.outputs.desktop_build_channel }}
         shell: bash
         run: |
@@ -778,7 +771,7 @@ jobs:
           test -f "$app/Contents/Resources/resources/agent-bundles/bundle-set.json"
 
       - name: Verify signed ctld bundle
-        if: runner.os == 'macOS' && steps.signing.outputs.enabled == 'true'
+        if: runner.os == 'macOS' && needs.metadata.outputs.apple_signing_enabled == 'true'
         shell: bash
         run: |
           app="target/${{ matrix.target }}/release/bundle/macos/ctmux.app"
@@ -808,7 +801,7 @@ jobs:
 
       - name: Stage desktop release assets
         env:
-          APPLE_SIGNING_ENABLED: ${{ steps.signing.outputs.enabled }}
+          APPLE_SIGNING_ENABLED: ${{ needs.metadata.outputs.apple_signing_enabled }}
           CTL_DESKTOP_INSTALLATION_LAYOUT_VERSION: '7'
         shell: bash
         run: |
@@ -833,7 +826,7 @@ jobs:
         with:
           name: >-
             ctmux-desktop-${{ matrix.target }}${{ needs.metadata.outputs.bundle_id == needs.metadata.outputs.app_version &&
-            steps.signing.outputs.enabled == 'false' && '-unsigned' || '' }}
+            runner.os == 'macOS' && needs.metadata.outputs.apple_signing_enabled != 'true' && '-unsigned' || '' }}
           path: target/desktop-assets/*
           if-no-files-found: error
           retention-days: 30

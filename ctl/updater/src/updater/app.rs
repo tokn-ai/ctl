@@ -18,7 +18,7 @@ mod activation;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]
-mod macos;
+pub(super) mod macos;
 #[cfg(any(windows, test))]
 mod portable;
 #[cfg(windows)]
@@ -130,6 +130,16 @@ pub(super) fn status(home: &Path, json: bool) -> io::Result<()> {
     app_status(home, Installations::new(home).desktop_selection()?)?,
     json,
   )
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn active_stable_version(home: &Path) -> io::Result<Option<String>> {
+  let installations = Installations::new(home);
+  let Some(selected) = installations.desktop_selection()? else {
+    return Ok(None);
+  };
+  let (_, metadata) = read_selection(&installations, &selected)?;
+  Ok(metadata.and_then(|metadata| metadata.stable_version(&selected.source).map(str::to_owned)))
 }
 
 pub(super) fn with_current_launch_entry<T>(
@@ -344,19 +354,8 @@ fn app_status(home: &Path, selected: Option<DesktopSelection>) -> io::Result<App
       missing: false,
     });
   };
-  let digest = Digest::parse(&selected.content_id)?;
-  let paths = Installations::new(home);
-  let store = paths.updater_root();
-  let payload = activation::status_payload(&paths, &digest)?;
+  let (payload, metadata) = read_selection(&Installations::new(home), &selected)?;
   let missing = payload.is_none();
-  let metadata = if let Some(payload) = payload.as_ref() {
-    let object = payload
-      .parent()
-      .ok_or_else(|| invalid("managed desktop payload has no parent"))?;
-    Some(activation::read_metadata(object, &digest)?)
-  } else {
-    activation::cached_metadata(&store, &digest)?
-  };
   let (bundle_id, publication_id) = metadata
     .map(|metadata| (metadata.bundle_id, metadata.publication_id))
     .unwrap_or_default();
@@ -369,6 +368,23 @@ fn app_status(home: &Path, selected: Option<DesktopSelection>) -> io::Result<App
     launch_entry,
     missing,
   })
+}
+
+fn read_selection(
+  installations: &Installations,
+  selected: &DesktopSelection,
+) -> io::Result<(Option<PathBuf>, Option<DesktopMetadata>)> {
+  let digest = Digest::parse(&selected.content_id)?;
+  let payload = activation::status_payload(installations, &digest)?;
+  let metadata = if let Some(payload) = payload.as_ref() {
+    let object = payload
+      .parent()
+      .ok_or_else(|| invalid("managed desktop payload has no parent"))?;
+    Some(activation::read_metadata(object, &digest)?)
+  } else {
+    activation::cached_metadata(&installations.updater_root(), &digest)?
+  };
+  Ok((payload, metadata))
 }
 
 fn report_status(status: AppStatus, json: bool) -> io::Result<()> {
@@ -457,6 +473,22 @@ impl DesktopMetadata {
       ));
     }
     Ok(())
+  }
+
+  #[cfg(target_os = "macos")]
+  fn stable_version(&self, source: &DesktopSource) -> Option<&str> {
+    let version = self.app_version.as_deref()?;
+    let publication = self.publication_id.as_deref()?;
+    if self.bundle_id.as_deref() != Some(version)
+      || !matches!(self.signing, Signing::Signed | Signing::Unsigned)
+    {
+      return None;
+    }
+    match source {
+      DesktopSource::Channel { channel } if channel == "stable" => Some(version),
+      DesktopSource::Release { publication_id } if publication_id == publication => Some(version),
+      _ => None,
+    }
   }
 }
 

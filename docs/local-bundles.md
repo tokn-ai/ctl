@@ -5,8 +5,8 @@
 Run `ctlup dev` from the root of the ctl checkout you want to build, including
 its uncommitted changes. The command fails if the current directory is outside
 that root or in a subdirectory. Use `--workspace /path/to/checkout` to select a
-root explicitly. The same rule applies to `--app`, `--ctream`, `--renew-signing`, and
-remote development builds.
+root explicitly. The same rule applies to `--app`, `--ctream`, and remote
+development builds.
 
 The native build prepares all six runtime commands and the separate `ctlup`
 manager together. On macOS it signs the complete `ctld.app` using the shared
@@ -47,6 +47,19 @@ manager are accepted; cross-platform remote bundles use the separate path below.
 Build and signing failures leave the active installation unchanged. Cancellation
 stops owned build processes; completed activations preserve running services.
 
+## Renew the active development helper's signature
+
+On macOS, run `ctlup sign` from the checkout root after activating a local
+runtime with `ctlup dev`. To select the checkout explicitly, run
+`ctlup sign --workspace /path/to/checkout`.
+
+Renewal reuses the installed `ctld` executable without compiling. It uses an
+unexpired development provisioning profile for the helper's Apple Team or
+asks Xcode to renew the profile for that team. If `CTLD_PROVISIONING_PROFILE`
+points to an expired file, replace it with a current profile or unset the
+variable to let Xcode renew it. Restart `ctld` separately to use the renewed
+helper.
+
 ## Install a desktop development build
 
 ```sh
@@ -59,8 +72,9 @@ ctlup dev --app --workspace /path/to/checkout --json
 and installs it on this computer. It preserves the selected publication
 channel. On macOS it uses the development helper profile for signing and can
 renew an expired profile through Xcode. If provisioning or signing fails, the
-app can bundle an unsigned helper. `ctlup dev sign` renews the
-active runtime helper's signature separately.
+app can bundle an unsigned helper. Use `ctlup sign --version VERSION` to sign
+and notarize a tagged CI desktop package without rebuilding.
+[Release signing](ci-bundles.md#sign-a-ci-built-macos-desktop-release-locally)
 
 ## Install a ctream development build
 

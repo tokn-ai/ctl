@@ -47,8 +47,10 @@ pub(super) enum Command {
     #[command(subcommand)]
     command: BundleCommand,
   },
-  /// Build and install from the current checkout. Use 'dev sign' to renew signing.
+  /// Build and install from the current checkout.
   Dev(DevelopmentArguments),
+  /// Renew local macOS development signing or sign a CI release.
+  Sign(SignArguments),
   /// Show installed builds, their sources and missing payloads.
   Status(StatusArguments),
   /// Browse available releases and pull request builds.
@@ -288,10 +290,20 @@ pub(super) struct StatusArguments {
   pub json: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub(super) enum DevAction {
-  /// Renew the active macOS helper's signature without recompiling.
-  Sign,
+#[derive(Debug, Args)]
+pub(super) struct SignArguments {
+  /// Sign and notarize the CI build for a tagged release.
+  #[arg(long)]
+  pub version: Option<String>,
+  /// macOS Rust target for the CI build. Defaults to the current architecture.
+  #[arg(long, requires = "version", value_parser = ["aarch64-apple-darwin", "x86_64-apple-darwin"], value_name = "TRIPLE")]
+  pub target: Option<String>,
+  /// Checkout containing the development signer. Defaults to the current directory.
+  #[arg(long, conflicts_with = "version")]
+  pub workspace: Option<PathBuf>,
+  /// Output the result as JSON.
+  #[arg(long)]
+  pub json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -306,16 +318,14 @@ pub(super) struct DevelopmentArguments {
   #[arg(long)]
   pub workspace: Option<PathBuf>,
   /// Build and install the native desktop app in the development profile.
-  #[arg(long, conflicts_with_all = ["action", "release", "profile", "target_dir", "target", "cargo_args_json", "lease"])]
+  #[arg(long, conflicts_with_all = ["release", "profile", "target_dir", "target", "cargo_args_json", "lease"])]
   pub app: bool,
   /// Build and activate ctream from this checkout.
-  #[arg(long, conflicts_with_all = ["app", "action", "host", "ssh", "cargo_args_json", "lease"])]
+  #[arg(long, conflicts_with_all = ["app", "host", "ssh", "cargo_args_json", "lease"])]
   pub ctream: bool,
   /// Additional ctream agent Rust target to build. Repeat for multiple targets.
   #[arg(long = "agent-target", requires = "ctream", value_name = "TRIPLE")]
   pub ctream_agent_targets: Vec<String>,
-  #[arg(value_enum, conflicts_with_all = ["release", "profile", "target_dir", "target", "cargo_args_json"])]
-  pub action: Option<DevAction>,
   #[arg(long, conflicts_with_all = ["profile", "cargo_args_json"])]
   pub release: bool,
   #[arg(long, conflicts_with = "cargo_args_json")]
@@ -447,13 +457,7 @@ mod tests {
   }
 
   #[test]
-  fn source_builds_use_dev_and_signing_is_its_own_action() {
-    let sign =
-      Arguments::try_parse_from(["ctlup", "dev", "sign", "--workspace", "checkout", "--json"])
-        .unwrap();
-    assert!(matches!(sign.command, Command::Dev(DevelopmentArguments {
-      action: Some(DevAction::Sign), workspace: Some(workspace), json: true, ..
-    }) if workspace == std::path::Path::new("checkout")));
+  fn source_builds_use_dev() {
     for command in [
       vec!["dev"],
       vec!["dev", "--app"],
@@ -469,14 +473,54 @@ mod tests {
     }
     for invalid in [
       vec!["dev", "--renew-signing"],
-      vec!["dev", "sign", "--app"],
-      vec!["dev", "sign", "--release"],
+      vec!["dev", "sign"],
       vec!["dev", "--app", "--target", "x"],
       vec!["dev", "--lease"],
       vec!["dev", "--ctream", "--ssh", "lab"],
       vec!["install", "--working-tree"],
     ] {
       assert!(Arguments::try_parse_from([vec!["ctlup"], invalid].concat()).is_err());
+    }
+  }
+
+  #[test]
+  fn signing_distinguishes_development_from_tagged_releases() {
+    let args = Arguments::try_parse_from(["ctlup", "sign"]).unwrap();
+    assert!(matches!(
+      args.command,
+      Command::Sign(SignArguments {
+        version: None,
+        target: None,
+        workspace: None,
+        json: false,
+      })
+    ));
+    let args = Arguments::try_parse_from(["ctlup", "sign", "--version", "v0.1.5"]).unwrap();
+    assert!(
+      matches!(args.command, Command::Sign(SignArguments { version: Some(version), .. }) if version == "v0.1.5")
+    );
+    for target in ["aarch64-apple-darwin", "x86_64-apple-darwin"] {
+      let args = Arguments::try_parse_from([
+        "ctlup",
+        "sign",
+        "--version",
+        "0.1.5",
+        "--target",
+        target,
+        "--json",
+      ])
+      .unwrap();
+      assert!(
+        matches!(args.command, Command::Sign(SignArguments { target: Some(selected), json: true, .. }) if selected == target)
+      );
+    }
+    assert!(Arguments::try_parse_from(["ctlup", "sign", "--workspace", "checkout"]).is_ok());
+    for options in [
+      &["--target", "aarch64-apple-darwin"][..],
+      &["--version", "0.1.5", "--target", "x86_64-unknown-linux-gnu"],
+      &["--version", "0.1.5", "--workspace", "checkout"],
+    ] {
+      assert!(Arguments::try_parse_from([&["ctlup", "sign"], options].concat()).is_err());
     }
   }
 }

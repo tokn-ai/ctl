@@ -123,7 +123,6 @@ fn development_rejects_nested_and_unrelated_directories_before_building() {
     for options in [
       [].as_slice(),
       &["--app"],
-      &["sign"],
       &["--workspace", nested.to_str().unwrap()],
     ] {
       let output = fixture
@@ -237,7 +236,7 @@ fn private_development_lease_rejects_non_pipe_input_before_building() {
 #[test]
 fn remote_development_rejects_local_modes_before_building() {
   let fixture = Fixture::new();
-  for option in ["--app", "sign", "--release"] {
+  for option in ["--app", "--release"] {
     let output = fixture
       .command()
       .args(["--ssh", "fixture-host", option])

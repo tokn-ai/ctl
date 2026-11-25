@@ -18,6 +18,7 @@ mod launcher;
 mod release;
 mod remote;
 mod show;
+mod sign;
 mod status;
 pub(crate) mod update;
 
@@ -134,6 +135,7 @@ async fn run(arguments: Arguments) -> io::Result<i32> {
       .map_err(io::Error::other)?;
     }
     Command::Dev(options) => development::run(&home, options).await?,
+    Command::Sign(options) => sign::run(&home, options).await?,
     Command::Release(options) => {
       release::run(&home, options).await?;
     }

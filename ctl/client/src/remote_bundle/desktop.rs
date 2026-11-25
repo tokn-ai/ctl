@@ -1,6 +1,9 @@
 //! Resolve and verify desktop packages from a published component channel.
 
-use super::{Error, MAX_BUNDLE_SET_BYTES, RELEASE_ROOT, published, release_http_client};
+use super::{
+  BUNDLE_SET_FILE, BundleSet, Error, MAX_BUNDLE_SET_BYTES, RELEASE_ROOT, published,
+  release_http_client, safe_id,
+};
 use ctl_core::component_update::BundleChannel;
 use ctl_core::private_fs;
 use reqwest::{Client, Response, StatusCode};
@@ -252,6 +255,61 @@ pub async fn stable_descriptor(
   })
 }
 
+/// Checks that a version can name an exact macOS release.
+/// # Errors
+/// Rejects empty or unsafe unprefixed versions.
+pub fn validate_macos_release_version(version: &str) -> io::Result<()> {
+  if !safe_id(version) || !version.as_bytes().first().is_some_and(u8::is_ascii_digit) {
+    return Err(io::Error::new(
+      io::ErrorKind::InvalidInput,
+      "specify a release version such as 0.1.4",
+    ));
+  }
+  Ok(())
+}
+
+/// Locates the unsigned macOS archive for an exact tagged release.
+/// # Errors
+/// Reports a missing release, unsupported target, or a desktop manifest or
+/// checksum that disagrees with the published release.
+pub async fn unsigned_macos_release(
+  version: &str,
+  target: DesktopTarget,
+) -> io::Result<DesktopRelease> {
+  validate_macos_release_version(version)?;
+  if !target.is_macos() {
+    return Err(invalid("expected a macOS release target"));
+  }
+
+  let root = format!("{RELEASE_ROOT}/v{version}");
+  let client = release_http_client().map_err(io::Error::other)?;
+  let (source_revision, asset) = unsigned_macos_asset(version, target, async |name, maximum| {
+    super::download(&client, &format!("{root}/{name}"), maximum)
+      .await
+      .map_err(|error| match error {
+        Error::NotAvailable(_) => io::Error::new(
+          io::ErrorKind::NotFound,
+          format!("release v{version} has no {name} asset"),
+        ),
+        error => io::Error::other(error),
+      })
+  })
+  .await?;
+  Ok(DesktopRelease {
+    app_version: version.to_owned(),
+    bundle_id: version.to_owned(),
+    publication_id: None,
+    source_revision,
+    built_at: None,
+    source: PackageSource::Release {
+      url: format!("{root}/{}", asset.name),
+      client,
+    },
+    asset,
+    signing: DesktopSigning::Unsigned,
+  })
+}
+
 /// Checks metadata for an exact Nightly desktop artifact without downloading it.
 ///
 /// # Errors
@@ -327,6 +385,62 @@ impl Asset {
   fn matches(&self, digest: [u8; 32]) -> bool {
     hex::encode(digest) == self.sha256
   }
+
+  fn valid_checksum(&self) -> bool {
+    self.sha256.len() == 64
+      && self
+        .sha256
+        .bytes()
+        .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+  }
+}
+
+async fn unsigned_macos_asset(
+  version: &str,
+  target: DesktopTarget,
+  mut fetch: impl AsyncFnMut(&str, usize) -> io::Result<Vec<u8>>,
+) -> io::Result<(String, Asset)> {
+  let release = BundleSet::parse_set(
+    &fetch(BUNDLE_SET_FILE, MAX_BUNDLE_SET_BYTES).await?,
+    BUNDLE_SET_FILE,
+  )
+  .map_err(io::Error::other)?;
+  release.verify_version(version).map_err(io::Error::other)?;
+  if release.bundle_id != version
+    || !release
+      .git_revision
+      .bytes()
+      .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+  {
+    return Err(invalid("invalid tagged macOS release identity"));
+  }
+  let signing = DesktopSigning::Unsigned;
+  let suffix = signing.suffix();
+  let manifest_name = format!("desktop-{}{suffix}.json", target.triple());
+  let bytes = fetch(&manifest_name, MAX_BUNDLE_SET_BYTES).await?;
+  let manifest = parse_manifest(&bytes, target, version, &release.git_revision)?;
+  let dmg = format!("ctmux-{version}-{}{suffix}.dmg", target.triple());
+  if manifest.signing_mode != signing
+    || manifest.installation_layout_version == Some(0)
+    || manifest.assets.len() != 2
+    || !manifest
+      .assets
+      .iter()
+      .any(|asset| asset.name == dmg && asset.valid_checksum())
+  {
+    return Err(invalid(
+      "expected the unsigned macOS release manifest with both desktop packages",
+    ));
+  }
+  let asset = select_asset(manifest, target, version, suffix)?;
+  let checksum = fetch(&format!("{}.sha256", asset.name), 512).await?;
+  if checksum != format!("{}  {}\n", asset.sha256, asset.name).as_bytes() {
+    return Err(invalid(
+      "desktop archive checksum sidecar differs from its release manifest",
+    ));
+  }
+
+  Ok((release.git_revision, asset))
 }
 
 fn verified_asset(
@@ -384,12 +498,7 @@ fn select_asset(
   if matching.next().is_some() {
     return Err(invalid("desktop manifest contains duplicate package names"));
   }
-  if asset.sha256.len() != 64
-    || !asset
-      .sha256
-      .bytes()
-      .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
-  {
+  if !asset.valid_checksum() {
     return Err(invalid(
       "desktop manifest contains an invalid package checksum",
     ));
@@ -458,6 +567,7 @@ fn network_error(error: reqwest::Error) -> io::Error {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::remote_bundle::compatibility::tests::Fixture;
   use serde_json::{Value, json};
   use std::collections::VecDeque;
 
@@ -497,6 +607,131 @@ mod tests {
       VERSION,
       REVISION,
     )
+  }
+
+  #[test]
+  fn signing_version_must_be_safe_for_an_exact_release_path() {
+    for version in ["0.1.4", "0.1.4-rc.1", "0.1.4+build"] {
+      assert!(validate_macos_release_version(version).is_ok(), "{version}");
+    }
+    for version in [
+      "",
+      "latest",
+      "v0.1.4",
+      "../0.1.4",
+      "0.1.4#fragment",
+      "0.1.4\n",
+    ] {
+      assert!(
+        matches!(validate_macos_release_version(version), Err(error) if error.kind() == io::ErrorKind::InvalidInput),
+        "{version:?}"
+      );
+    }
+  }
+
+  #[tokio::test]
+  async fn signing_download_reads_only_exact_unsigned_release_metadata() {
+    for target in [DesktopTarget::MacArm64, DesktopTarget::MacX64] {
+      let set = Fixture::new(VERSION, REVISION).with_clients().outer;
+      let mut desktop = manifest(target, &["dmg", "app.tar.gz"], "unsigned");
+      desktop["installation_layout_version"] = json!(7);
+      let archive = format!("ctmux-{VERSION}-{}-unsigned.app.tar.gz", target.triple());
+      let mut responses = [
+        serde_json::to_vec(&set).unwrap(),
+        serde_json::to_vec(&desktop).unwrap(),
+        format!("{}  {archive}\n", "a".repeat(64)).into_bytes(),
+      ]
+      .into_iter();
+      let mut requests = Vec::new();
+      let (revision, asset) = unsigned_macos_asset(VERSION, target, async |name, maximum| {
+        requests.push((name.to_owned(), maximum));
+        Ok(responses.next().unwrap())
+      })
+      .await
+      .unwrap();
+      assert_eq!(revision, REVISION);
+      assert_eq!(asset.name, archive);
+      assert_eq!(asset.installation_layout_version, Some(7));
+      assert_eq!(
+        requests,
+        [
+          ("bundle-set.json".into(), MAX_BUNDLE_SET_BYTES),
+          (
+            format!("desktop-{}-unsigned.json", target.triple()),
+            MAX_BUNDLE_SET_BYTES,
+          ),
+          (format!("{archive}.sha256"), 512),
+        ]
+      );
+    }
+  }
+
+  #[tokio::test]
+  async fn signing_download_rejects_conflicting_release_identity_or_checksum() {
+    let target = DesktopTarget::MacArm64;
+    let set = Fixture::new(VERSION, REVISION).with_clients().outer;
+    let desktop = manifest(target, &["dmg", "app.tar.gz"], "unsigned");
+    let checksum = format!(
+      "{}  {}\n",
+      "a".repeat(64),
+      desktop["assets"][1]["name"].as_str().unwrap()
+    );
+    let mut dev_set = set.clone();
+    let dev_id = format!("{VERSION}-dev.{}", &REVISION[..12]);
+    dev_set["bundle_id"] = json!(dev_id);
+    for (target, metadata) in dev_set["targets"].as_object_mut().unwrap() {
+      metadata["archive"] = json!(format!("ctl-agent-bundle-{dev_id}-{target}.tar.gz"));
+    }
+    let mut wrong_revision = desktop.clone();
+    wrong_revision["git_revision"] = json!("b".repeat(40));
+    let mut bad_layout = desktop.clone();
+    bad_layout["installation_layout_version"] = json!(0);
+    let mut missing_dmg = desktop.clone();
+    missing_dmg["assets"].as_array_mut().unwrap().remove(0);
+    let signed = manifest(target, &["dmg", "app.tar.gz"], "signed");
+    for (bundle, desktop, checksum, expected) in [
+      (
+        &dev_set,
+        &desktop,
+        checksum.as_str(),
+        "invalid tagged macOS release identity",
+      ),
+      (
+        &set,
+        &wrong_revision,
+        checksum.as_str(),
+        "does not match the selected published build",
+      ),
+      (
+        &set,
+        &bad_layout,
+        checksum.as_str(),
+        "expected the unsigned macOS release manifest",
+      ),
+      (
+        &set,
+        &missing_dmg,
+        checksum.as_str(),
+        "expected the unsigned macOS release manifest",
+      ),
+      (
+        &set,
+        &signed,
+        checksum.as_str(),
+        "expected the unsigned macOS release manifest",
+      ),
+      (&set, &desktop, "other checksum", "checksum sidecar differs"),
+    ] {
+      let mut responses = [
+        serde_json::to_vec(bundle).unwrap(),
+        serde_json::to_vec(desktop).unwrap(),
+        checksum.as_bytes().to_vec(),
+      ]
+      .into_iter();
+      let result =
+        unsigned_macos_asset(VERSION, target, async |_, _| Ok(responses.next().unwrap())).await;
+      assert!(matches!(result, Err(error) if error.to_string().contains(expected)));
+    }
   }
 
   #[test]

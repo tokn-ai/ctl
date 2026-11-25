@@ -58,9 +58,10 @@ successful signing run can append the signed desktop packages under their usual
 filenames. Each published package retains its original checksum.
 
 The standalone macOS helper and bundled CLI require distribution signing and
-notarization. Missing Apple credentials fail those jobs while the successful
-packages still publish. Adding a successful signed helper makes it available to
-`ctl setup` for that exact CLI version and architecture.
+notarization. Version tags defer those jobs when Apple credentials are missing.
+An explicit signed-helper workflow request requires the credentials. Adding a
+successful signed helper makes it available to `ctl setup` for that exact CLI
+version and architecture.
 
 ### Install a temporary PR build
 
@@ -298,6 +299,29 @@ archives. On macOS, native checks also exercise plist parsing and requirement
 compilation. They do not import signing secrets or submit software to Apple.
 Signed release assets require a successful signing and notarization run.
 
+## Sign a CI-built macOS desktop release locally
+
+Use a Mac with Xcode's `notarytool` and `stapler`, a Developer ID Application
+certificate and its private key in the Keychain, the matching distribution
+profile for `ctld`, and an Apple notary API key.
+Set `CTLD_PROVISIONING_PROFILE`, `APPLE_API_KEY_PATH`, `APPLE_API_KEY`, and
+`APPLE_API_ISSUER` locally. The build job can publish the unsigned files without
+access to those credentials.
+
+```sh
+ctlup sign --version VERSION
+```
+
+Select the tagged release with `--version`. The target defaults to the Mac's
+architecture. To sign the Intel build from an Apple Silicon Mac, add
+`--target x86_64-apple-darwin`.
+
+The command downloads and verifies the unsigned build from the exact GitHub
+release, then signs, notarizes, and staples the app and a new DMG. It prints
+the output path under `~/.tokn/ctl/ctlup/signed/v<VERSION>/<TARGET>/`, or under
+the selected `CTL_DATA_DIR` profile. The signed packages, checksums, and release
+manifest are ready to attach to the GitHub release. Existing output is preserved.
+
 ## Standalone helper release assets
 
 Each macOS target produces these assets:
@@ -357,10 +381,10 @@ hold an installation lease while using its exact executable paths. Active,
 registered, and running builds remain available after Cargo outputs are cleaned.
 
 The runtime checks signature, provisioning expiry, certificate identity, source
-metadata, and API compatibility. Rebuild after a profile expires. Preparation
-preserves existing daemons and sessions; restarting an owner is a separate
-action. See [local development builds](local-bundles.md) for direct `ctlup dev`
-usage and custom Cargo profiles.
+metadata, and API compatibility. Run `ctlup sign` from the checkout to renew
+the active development runtime's `ctld` signature when the profile expires.
+Restart `ctld` separately to use the renewed helper.
+[Local development builds](local-bundles.md#renew-the-active-development-helpers-signature)
 
 Local component signing explicitly uses `--timestamp=none`,
 so an unavailable Apple timestamp service does not block development. Release

@@ -31,24 +31,29 @@ struct SigningInput<'a> {
 /// Reports missing or modified installations, signing or verification errors,
 /// and concurrent activation of a different build.
 pub async fn renew_signing(home: &Path, workspace: &Path) -> io::Result<PreparedDevelopment> {
-  let workspace = workspace.canonicalize()?;
-  let recipe = workspace.join("scripts/dev/ctld-signed.mts");
-  if !recipe.is_file() {
-    return Err(invalid(
-      "choose a ctl checkout containing the macOS helper signer with --workspace",
-    ));
-  }
   let installations = Installations::new(home);
   let active = installations.active()?.ok_or_else(|| {
     io::Error::new(
       io::ErrorKind::NotFound,
-      "no active development installation; first run ctlup dev",
+      "No active local development build. Run ctlup dev to install one, or use ctlup sign --version <VERSION> for a CI release.",
     )
   })?;
   let manifest = &active.manifest;
   if manifest.source != Source::Local {
     return Err(invalid(
-      "signing renewal requires an installed local development build",
+      "The active runtime is not a local development build. Use ctlup sign --version <VERSION> for a CI release.",
+    ));
+  }
+  let workspace = workspace.canonicalize().map_err(|error| {
+    io::Error::new(
+      error.kind(),
+      format!("could not open the ctl checkout root: {error}"),
+    )
+  })?;
+  let recipe = workspace.join("scripts/dev/ctld-signed.mts");
+  if !recipe.is_file() {
+    return Err(invalid(
+      "Run ctlup sign from a ctl checkout root or pass its path with --workspace.",
     ));
   }
   let mut files = active.read_files()?;
@@ -85,7 +90,10 @@ pub async fn renew_signing(home: &Path, workspace: &Path) -> io::Result<Prepared
   }
   write_private(&input, &descriptor, false)?;
   let mut command = recipe_command(&recipe, &workspace);
-  command.arg("--renew-signing").arg(&input);
+  command
+    .arg("--renew-signing")
+    .arg(&input)
+    .env("TMPDIR", &output.0);
   run_recipe(command, "ctld signing renewal").await?;
 
   let receipt =

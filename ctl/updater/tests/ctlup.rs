@@ -774,6 +774,77 @@ fn failed_archive_and_missing_preflight_do_not_change_the_active_installation() 
   assert_eq!(installations.active_selection().unwrap().0, before);
 }
 
+#[test]
+fn standalone_signing_replaces_the_development_subcommand() {
+  let home = Home::new();
+  let help = home.command(&["sign", "--help"]).output().unwrap();
+  assert!(help.status.success());
+  let help = String::from_utf8(help.stdout).unwrap();
+  assert!(help.contains("Usage: ctlup sign [OPTIONS]"));
+  assert!(help.contains("--version <VERSION>"));
+
+  let obsolete = home.command(&["dev", "sign"]).output().unwrap();
+  assert!(!obsolete.status.success());
+  assert!(String::from_utf8_lossy(&obsolete.stderr).contains("unexpected argument 'sign'"));
+  assert!(!home.registry().exists());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn signing_without_an_active_development_build_explains_both_modes() {
+  let home = Home::new();
+  let output = home.command(&["sign"]).output().unwrap();
+  assert!(!output.status.success());
+  let message = String::from_utf8(output.stderr).unwrap();
+  assert!(
+    message.contains("No active local development build"),
+    "{message}"
+  );
+  assert!(message.contains("ctlup dev"), "{message}");
+  assert!(
+    message.contains("ctlup sign --version <VERSION>"),
+    "{message}"
+  );
+  assert!(!home.registry().exists());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn signing_a_release_installation_requires_an_explicit_version() {
+  let home = Home::new();
+  let (_, bytes) = archive('a');
+  let output = home.install(&bytes);
+  assert!(output.status.success(), "{output:?}");
+  let recorded = fs::read(home.registry()).unwrap();
+  let output = home.command(&["sign"]).output().unwrap();
+  assert!(!output.status.success());
+  let message = String::from_utf8(output.stderr).unwrap();
+  assert!(message.contains("local development build"), "{message}");
+  assert!(
+    message.contains("ctlup sign --version <VERSION>"),
+    "{message}"
+  );
+  assert_eq!(fs::read(home.registry()).unwrap(), recorded);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn signing_an_explicit_ci_version_checks_credentials_without_an_active_build() {
+  let home = Home::new();
+  let output = home
+    .command(&["sign", "--version", "v0.1.4"])
+    .env_remove("CTLD_PROVISIONING_PROFILE")
+    .output()
+    .unwrap();
+  assert!(!output.status.success());
+  let message = String::from_utf8(output.stderr).unwrap();
+  assert!(
+    message.contains("Set CTLD_PROVISIONING_PROFILE"),
+    "{message}"
+  );
+  assert!(!home.registry().exists());
+}
+
 #[cfg(target_os = "macos")]
 fn development_payload() -> (Manifest, BTreeMap<String, Vec<u8>>) {
   let (components, mut files) = fixture_payload('b');
@@ -814,7 +885,7 @@ fn development_payload() -> (Manifest, BTreeMap<String, Vec<u8>>) {
 
 #[cfg(target_os = "macos")]
 #[test]
-fn failed_renewal_passes_verified_signing_input_and_preserves_the_installation() {
+fn failed_development_signing_passes_verified_input_and_preserves_the_installation() {
   use ctl_core::bundles::Store;
   use ctl_core::installations::{CatalogOrigin, Installations};
   use sha2::{Digest as _, Sha256};
@@ -853,6 +924,8 @@ set -eu
 test "$#" -eq 5
 test "$3" = "$(pwd -P)/scripts/dev/ctld-signed.mts"
 test "$4" = --renew-signing
+test "$TMPDIR" = "$(dirname "$5")"
+mkdir "$TMPDIR/fixture-signing-scratch"
 artifact=$(/usr/bin/plutil -extract artifact raw -o - "$5")
 test -x "$artifact"
 cp "$5" "$HOME/signing-input.json"
@@ -864,9 +937,13 @@ exit 17
   .unwrap();
   fs::set_permissions(&signer, fs::Permissions::from_mode(0o700)).unwrap();
   let output = home
-    .command(&["dev", "sign", "--json", "--workspace"])
-    .arg(&workspace)
+    .command(&["sign", "--json"])
+    .current_dir(&workspace)
     .env("CTL_NODE_PROGRAM", &signer)
+    .env_remove("CTLD_PROVISIONING_PROFILE")
+    .env_remove("APPLE_API_KEY_PATH")
+    .env_remove("APPLE_API_KEY")
+    .env_remove("APPLE_API_ISSUER")
     .output()
     .unwrap();
   let diagnostics = String::from_utf8_lossy(&output.stderr);
@@ -887,6 +964,7 @@ exit 17
   let helper = "ctld.app/Contents/MacOS/ctld";
   let artifact = PathBuf::from(request["artifact"].as_str().unwrap());
   assert_ne!(artifact, installed.directory.join(helper));
+  assert!(!artifact.parent().unwrap().exists());
   assert_eq!(
     hex::encode(Sha256::digest(
       fs::read(home.0.join("staged-ctld")).unwrap()

@@ -18,7 +18,7 @@ mod activation;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]
-mod macos;
+pub(super) mod macos;
 #[cfg(any(windows, test))]
 mod portable;
 #[cfg(windows)]

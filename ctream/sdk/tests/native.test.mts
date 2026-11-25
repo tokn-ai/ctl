@@ -1,33 +1,46 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test, { type TestContext } from "node:test";
+import test, { before, type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 import { Ctream } from "@tokn-ai/ctream-sdk";
 import { isScreenshot } from "../src/model.ts";
 import { SessionTransport, type Request } from "../src/session-transport.ts";
 
+const requestTimeoutMs = 10_000;
+let executable: string;
+
+before(() => {
+  const manifest = fileURLToPath(new URL("../../cli/Cargo.toml", import.meta.url));
+  const output = execFileSync("cargo", [
+    "build", "--locked", "--manifest-path", manifest, "--bin", "ctream", "--message-format=json-render-diagnostics",
+  ], {encoding: "utf8", stdio: ["ignore", "pipe", "inherit"]});
+  const artifact = output.trim().split("\n").map(line => JSON.parse(line))
+    .find(message => message.reason === "compiler-artifact" && message.target.name === "ctream" && message.executable);
+  assert.ok(artifact, "Cargo must report the ctream executable");
+  executable = artifact.executable;
+});
+
 function fixture(t: TestContext, profile: "current" | "legacy" | "denied") {
   const dir = mkdtempSync(join(tmpdir(), "ctream-native-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const manifest = fileURLToPath(new URL("../../cli/Cargo.toml", import.meta.url));
   const launcher = fileURLToPath(new URL("./ssh-fixture.mts", import.meta.url));
-  const cargoArgs = ["run", "--quiet", "--locked", "--manifest-path", manifest, "--"];
   const sshArgs = [launcher, dir, profile];
   const client = new Ctream({
-    executable: ["cargo", ...cargoArgs],
+    executable,
     host: "fixture",
     agent: "ctream-agent",
     ssh_program: process.execPath,
     ssh_args: sshArgs,
+    timeout_ms: requestTimeoutMs,
   });
   const read = (name: string) => readFileSync(join(dir, name), "utf8");
   function legacySession() {
-    const args = [...cargoArgs, "--host", "fixture", "--agent", "ctream-agent", "--ssh-program", process.execPath,
+    const args = ["--host", "fixture", "--agent", "ctream-agent", "--ssh-program", process.execPath,
       ...sshArgs.flatMap(arg => ["--ssh-arg", arg]), "session", ":2", "--window", "x11-7", "--protocol", "1.0.2"];
-    const transport = new SessionTransport(() => spawn("cargo", args), 0);
+    const transport = new SessionTransport(() => spawn(executable, args), requestTimeoutMs);
     return {
       screenshot: () => transport.request({operation: "screenshot"}, value => {
         assert.ok(isScreenshot(value));
@@ -65,8 +78,8 @@ test("the SDK sends its generated ID to the display host across sessions", async
 test("a host that rejects a generated ID receives no fallback input", async (t) => {
   const { client, read } = fixture(t, "legacy");
   const window = client.session(":2", "x11-7");
-  await assert.rejects(window.pressKeys("Tab"));
-  await assert.rejects(window.close());
+  await assert.rejects(window.pressKeys("Tab"), /unsupported attributed-session version/);
+  await assert.rejects(window.close(), /unsupported attributed-session version/);
   assert.match(read("lifecycle"), /^\d+ attributed open\n$/);
 });
 

@@ -1,6 +1,27 @@
 use ctream_client::transport::{Channel, Transport};
 use ctream_proto::{Target, agent_id_version};
-use std::{io, sync::mpsc, thread};
+use std::{
+  io::{self, Read, Write},
+  sync::mpsc,
+  thread,
+};
+
+fn forward_requests(input: &mut impl Read, output: &mut impl Write) -> io::Result<()> {
+  // Linux io::copy can splice a Unix socket into the child pipe and block a
+  // short request until EOF. Forward each available chunk before the next read.
+  let mut buffer = [0; 8192];
+  loop {
+    match input.read(&mut buffer) {
+      Ok(0) => return Ok(()),
+      Ok(len) => {
+        output.write_all(&buffer[..len])?;
+        output.flush()?;
+      }
+      Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+      Err(error) => return Err(error),
+    }
+  }
+}
 
 /// A named session executes on the agent that owns the display and journal.
 /// Forward stdin independently so either the peer's exit or local EOF can end it.
@@ -28,7 +49,7 @@ pub(super) fn named<T: Transport>(
   thread::Builder::new()
     .name("ctream-session-stdin".into())
     .spawn(move || {
-      let result = io::copy(&mut io::stdin().lock(), &mut writer);
+      let result = forward_requests(&mut io::stdin().lock(), &mut writer);
       // Publish the result before closing the pipe that lets the host exit.
       let _ = finished.send(result);
       drop(writer);

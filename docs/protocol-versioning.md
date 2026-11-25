@@ -48,6 +48,17 @@ unpublished wire formats.
 | `ctl_transport` | 1 | `1.0.1` |
 | `ctl_files` | 1 | `1.0.1` |
 | `ctream_agent` | 1 | `1.0.1` |
+| `ctream_sdk` | 1 | `1.0.1` |
+
+`ctream_sdk` starts at 1.0.1 (build 1) for local automation clients invoking
+the `ctream` executable. The SDK selects `do TARGET --protocol 1.0.1` and
+optionally `--window ID`. The CLI reads one JSON operation from stdin and
+returns its JSON result on stdout. It supports target capabilities, PNG
+screenshots, pointer and keyboard input, and window accessibility actions.
+An unknown contract fails before dispatch. Display and window lists continue
+to use the existing CLI JSON output. The remote `ctream_agent` contract stays
+at 1.1.13 (build 13) with its earlier operations retained.
+See the [TypeScript SDK and CLI operation reference](../ctream/sdk/README.md).
 
 The remote VPN addition starts the next development cycle with ctld `1.1.13`
 (build 13) and helper `1.1.2` (build 2), retaining their frozen initial contracts.

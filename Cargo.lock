@@ -1624,9 +1624,12 @@ dependencies = [
 name = "ctream-cli"
 version = "0.1.0"
 dependencies = [
+ "base64 0.23.1",
  "ctream-client",
  "ctream-platform",
  "ctream-proto",
+ "png",
+ "serde",
  "serde_json",
 ]
 

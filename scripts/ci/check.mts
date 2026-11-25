@@ -53,6 +53,7 @@ function check(scope: Scope): void {
     case "frontend": {
       for (const args of [
         ["install", "--frozen-lockfile"], ["check"], ["desktop:test"],
+        ["--filter", "@tokn-ai/ctream-sdk", "test"],
         ["--filter", "ctmux-app", "build"],
       ]) {
         run("pnpm", args);

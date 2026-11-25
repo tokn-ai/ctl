@@ -82,6 +82,15 @@ importers:
         specifier: 5.1.1
         version: 5.1.1(@types/node@24.19.2)(jsdom@31.0.1)(vite@8.3.8(@types/node@24.19.2)(esbuild@0.28.2))
 
+  ctream/sdk:
+    devDependencies:
+      '@types/node':
+        specifier: ^24.19.2
+        version: 24.19.2
+      typescript:
+        specifier: ~7.0.2
+        version: 7.0.2
+
 packages:
 
   '@babel/code-frame@7.29.7':

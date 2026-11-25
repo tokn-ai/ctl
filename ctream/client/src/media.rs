@@ -44,9 +44,17 @@ pub struct CaptureLifetime<W: Write> {
   cancellation: Cancellation,
 }
 
+impl<W: Write> CaptureLifetime<W> {
+  /// Signal the end of capture while its reader drains to EOF. This lets a
+  /// caller wait for the remote target to be released before opening it again.
+  pub(crate) fn close_writer(&mut self) {
+    drop(self.writer.take());
+  }
+}
+
 impl<W: Write> Drop for CaptureLifetime<W> {
   fn drop(&mut self) {
-    drop(self.writer.take());
+    self.close_writer();
     self.cancellation.cancel();
   }
 }

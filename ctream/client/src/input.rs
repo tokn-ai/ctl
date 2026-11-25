@@ -10,6 +10,15 @@ pub enum InputFormat {
   Macos,
 }
 
+pub(crate) fn valid_key_name(name: &str) -> bool {
+  // "key NAME 1\n" must fit the retained 128-byte input command limit.
+  !name.is_empty()
+    && name.len() <= 121
+    && name
+      .bytes()
+      .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
 /// An opened input capability. Dropping its writer asks the agent to release held input.
 pub struct Input<R: Read + Send + 'static, W: Write + Send + 'static> {
   channel: Option<Channel<R, W>>,
@@ -92,11 +101,7 @@ impl<R: Read + Send + 'static, W: Write + Send + 'static> Input<R, W> {
   }
 
   pub fn key(&mut self, name: &str, pressed: bool) -> io::Result<()> {
-    if name.is_empty()
-      || !name
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-    {
+    if !valid_key_name(name) {
       return Err(io::Error::new(
         io::ErrorKind::InvalidInput,
         "invalid key name",
@@ -108,18 +113,28 @@ impl<R: Read + Send + 'static, W: Write + Send + 'static> Input<R, W> {
   pub fn reset(&mut self) -> io::Result<()> {
     self.send(format_args!("reset\n"))
   }
-}
 
-impl<R: Read + Send + 'static, W: Write + Send + 'static> Drop for Input<R, W> {
-  fn drop(&mut self) {
+  /// Close stdin and wait for the agent to process the queued events and release
+  /// held input. Process transports propagate the agent's exit status at EOF.
+  pub fn finish(mut self) -> io::Result<()> {
     let Channel {
-      reader,
+      mut reader,
       writer,
       cancellation,
     } = self.channel.take().expect("open input channel");
     drop(writer);
+    let result = io::copy(&mut reader, &mut io::sink());
     cancellation.cancel();
-    drop(reader);
+    result.map(|_| ())
+  }
+}
+
+impl<R: Read + Send + 'static, W: Write + Send + 'static> Drop for Input<R, W> {
+  fn drop(&mut self) {
+    if let Some(channel) = self.channel.take() {
+      drop(channel.writer);
+      channel.cancellation.cancel();
+    }
   }
 }
 
@@ -164,6 +179,7 @@ mod tests {
       assert_eq!(*bytes.lock().unwrap(), expected.as_bytes());
       assert!(input.move_pointer(800, 300, [800, 600]).is_err());
       assert!(input.key("Return\nreset", true).is_err());
+      assert!(input.key(&"a".repeat(122), true).is_err());
       if input.dimensions().is_some() {
         assert!(input.move_pointer(1000, 300, [2000, 600]).is_err());
       }

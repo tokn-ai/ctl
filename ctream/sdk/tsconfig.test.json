@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "noEmit": true,
+    "paths": {"@tokn-ai/ctream-sdk": ["./src/index.ts"]}
+  },
+  "include": ["src/**/*.ts", "tests/**/*.mts"]
+}

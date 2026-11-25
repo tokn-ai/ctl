@@ -1,3 +1,5 @@
+mod operation;
+
 use ctream_client::{Client, options::ConnectionOptions};
 use ctream_platform::{discover_sessions, windows};
 use ctream_proto::{Display, Session, Target, Window};
@@ -5,19 +7,27 @@ use std::{env, ffi::OsString, io, process::ExitCode};
 
 const USAGE: &str = "Usage: ctream [OPTIONS] list [--json]
        ctream [OPTIONS] windows TARGET [--json]
+       ctream [OPTIONS] do TARGET [--window ID] [--protocol 1.0.1]
 
-Options (before list/windows):
+Connection options (before the command):
   --host SSH_HOST       Remote SSH endpoint
   --agent EXECUTABLE    Agent executable; use a mounted Windows path through WSL
   --ssh-program PROGRAM  SSH-compatible launcher (default: ssh)
   --ssh-arg ARG         Launcher prefix argument; repeat as needed
 
+do reads one JSON operation from stdin and writes its JSON result to stdout.
+Operations: capabilities, screenshot, move, click, drag, scroll, press_keys,
+            type_text, elements, invoke, set_text.
+
 Use :DISPLAY for X11, wayland-N for Wayland, windows-N for one Windows display,
 windows for the Windows desktop, or macos for windows in a macOS session.";
+
+const SDK_PROTOCOL: &str = "1.0.1";
 
 enum Operation {
   List,
   Windows(Target),
+  Do(Target, Option<String>),
 }
 
 struct Options {
@@ -38,7 +48,7 @@ fn parse(arguments: impl IntoIterator<Item = OsString>) -> io::Result<Option<Opt
   let command = loop {
     let argument = arguments
       .next()
-      .ok_or_else(|| invalid("expected list or windows"))?;
+      .ok_or_else(|| invalid("expected list, windows, or do"))?;
     let argument = argument
       .to_str()
       .ok_or_else(|| invalid("invalid command argument"))?;
@@ -54,32 +64,48 @@ fn parse(arguments: impl IntoIterator<Item = OsString>) -> io::Result<Option<Opt
           .ok_or_else(|| invalid("--host needs an SSH destination"))?;
         host = Some(value.to_owned());
       }
-      "list" | "windows" => break argument.to_owned(),
+      "list" | "windows" | "do" => break argument.to_owned(),
       argument if connection.parse_option(argument, &mut arguments)? => {}
       _ => return Err(invalid("unexpected global option")),
     }
   };
   let mut json = false;
   let mut target = None;
-  for argument in arguments {
+  let mut window = None;
+  let mut protocol_selected = false;
+  while let Some(argument) = arguments.next() {
     match argument.to_str() {
       Some("--help" | "-h") => return Ok(None),
-      Some("--json") if !json => json = true,
-      Some("--host" | "--agent" | "--ssh-program" | "--ssh-arg") => {
-        return Err(invalid(
-          "connection options must appear before list/windows",
-        ));
+      Some("--json") if command != "do" && !json => json = true,
+      Some("--window") if command == "do" && window.is_none() => {
+        let id = arguments
+          .next()
+          .and_then(|value| value.into_string().ok())
+          .filter(|value| ctream_proto::valid_window_id(value))
+          .ok_or_else(|| invalid("--window needs a window ID"))?;
+        window = Some(id);
       }
-      Some(value) if command == "windows" && target.is_none() && !value.starts_with('-') => {
+      Some("--protocol") if command == "do" && !protocol_selected => {
+        if arguments.next().as_deref() != Some(SDK_PROTOCOL.as_ref()) {
+          return Err(invalid(&format!(
+            "supported ctream_sdk protocol is {SDK_PROTOCOL}"
+          )));
+        }
+        protocol_selected = true;
+      }
+      Some("--host" | "--agent" | "--ssh-program" | "--ssh-arg") => {
+        return Err(invalid("connection options must appear before the command"));
+      }
+      Some(value) if command != "list" && target.is_none() && !value.starts_with('-') => {
         target = Some(Target::parse(value).map_err(invalid)?);
       }
       _ => return Err(invalid("unexpected command argument")),
     }
   }
-  let operation = if command == "list" {
-    Operation::List
-  } else {
-    Operation::Windows(target.ok_or_else(|| invalid("windows needs a target"))?)
+  let operation = match command.as_str() {
+    "list" => Operation::List,
+    "windows" => Operation::Windows(target.ok_or_else(|| invalid("windows needs a target"))?),
+    _ => Operation::Do(target.ok_or_else(|| invalid("do needs a target"))?, window),
   };
   if host.is_none() {
     connection.local()?;
@@ -169,6 +195,27 @@ fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
       };
       print_windows(windows, options.json)?;
     }
+    Operation::Do(target, window) => {
+      let input = io::stdin().lock();
+      let output = io::stdout().lock();
+      if let Some(host) = &options.host {
+        operation::run(
+          &Client::new(options.connection.ssh(host)?),
+          target,
+          window,
+          input,
+          output,
+        )?;
+      } else {
+        operation::run(
+          &Client::new(options.connection.local()?),
+          target,
+          window,
+          input,
+          output,
+        )?;
+      }
+    }
   }
   Ok(())
 }
@@ -233,8 +280,35 @@ mod tests {
       vec!["--host", "test-host", "--host", "another", "list"],
       vec!["list", "windows-1"],
       vec!["windows"],
+      vec!["do", ":3", "--protocol", "9.0.1"],
+      vec!["do", ":3", "--protocol"],
+      vec!["do", ":3", "--window"],
+      vec!["do", ":3", "--window", "x11-4", "--window", "x11-5"],
+      vec!["do", ":3", "--json"],
+      vec!["do", ":3", ":4"],
+      vec!["windows", ":3", "--window", "x11-4"],
     ] {
       assert!(parse(args(&arguments)).is_err(), "{arguments:?}");
     }
+  }
+
+  #[test]
+  fn sdk_selects_an_explicit_window_and_local_contract() {
+    let options = parse(args(&[
+      "--host",
+      "fixture",
+      "do",
+      ":3",
+      "--protocol",
+      SDK_PROTOCOL,
+      "--window",
+      "x11-4",
+    ]))
+    .unwrap()
+    .unwrap();
+    assert!(matches!(
+      options.operation,
+      Operation::Do(Target::X11(3), Some(id)) if id == "x11-4"
+    ));
   }
 }

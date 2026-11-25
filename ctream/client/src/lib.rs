@@ -1,5 +1,6 @@
 //! Typed session operations, transports, and media handling for ctream clients.
 
+pub mod automation;
 pub mod geometry;
 pub mod input;
 mod latency;

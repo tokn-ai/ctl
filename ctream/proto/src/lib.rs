@@ -8,7 +8,37 @@ pub use video::{
   VideoCapabilities, VideoCodec, VideoInfo, VideoOptions, VideoQuality, VideoRequest, VideoStarted,
 };
 
-pub const VERSION: &str = VIDEO_STREAM_VERSION;
+pub const VERSION: &str = TAGGED_AGENT_ID_VERSION;
+pub const TAGGED_AGENT_ID_VERSION: &str = "1.1.16";
+pub const ATTRIBUTED_SESSION_VERSION: &str = "1.1.15";
+
+/// The earliest attributed-session contract that accepts this agent label.
+pub fn agent_id_version(id: &str) -> Option<&'static str> {
+  if !(1..=64).contains(&id.len()) {
+    return None;
+  }
+  if let Some((word, tag)) = id.split_once('#') {
+    return (!word.is_empty()
+      && word.bytes().all(|b| b.is_ascii_lowercase())
+      && tag.len() == 4
+      && tag
+        .bytes()
+        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+    .then_some(TAGGED_AGENT_ID_VERSION);
+  }
+  (id.as_bytes()[0].is_ascii_alphanumeric()
+    && id
+      .bytes()
+      .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.')))
+  .then_some(ATTRIBUTED_SESSION_VERSION)
+}
+
+/// IDs accepted by the current agent and its activity journal.
+pub fn valid_agent_id(id: &str) -> bool {
+  agent_id_version(id).is_some()
+}
+
+pub const INPUT_SYNC_VERSION: &str = "1.1.14";
 pub const VIDEO_STREAM_VERSION: &str = "1.1.13";
 pub const X11_WINDOW_INPUT_VERSION: &str = "1.1.12";
 pub const MACOS_WINDOW_VERSION: &str = "1.0.11";
@@ -25,6 +55,11 @@ pub const X11_FRAME_SIZE: [usize; 2] = [960, 540];
 
 pub const PING_HELLO: u8 = b'!';
 pub const PING_TOKEN: u8 = b'?';
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+pub struct InputCapabilities {
+  pub sync: bool,
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -277,6 +312,40 @@ pub struct ActionResult {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn agent_ids_select_the_earliest_matching_wire_contract() {
+    for id in ["Worker", "7.qa_1-x", &"x".repeat(64)] {
+      assert_eq!(agent_id_version(id), Some(ATTRIBUTED_SESSION_VERSION));
+      assert!(valid_agent_id(id));
+    }
+    for id in ["w#0000", "custom#12af", &format!("{}#ffff", "a".repeat(59))] {
+      assert_eq!(agent_id_version(id), Some(TAGGED_AGENT_ID_VERSION));
+      assert!(valid_agent_id(id));
+    }
+    for id in [
+      "",
+      "-abc",
+      "a/b",
+      "w #1234",
+      "#1234",
+      "W#1234",
+      "w1#1234",
+      "foo-bar#0123",
+      "w#123",
+      "w#12345",
+      "w#Abcd",
+      "w#xy00",
+      "w##1234",
+      "é#0123",
+      "w#1234\n",
+      &"x".repeat(65),
+      &format!("{}#0000", "a".repeat(60)),
+    ] {
+      assert_eq!(agent_id_version(id), None, "{id:?}");
+      assert!(!valid_agent_id(id));
+    }
+  }
 
   #[test]
   fn target_names_round_trip_and_reject_shell_text() {

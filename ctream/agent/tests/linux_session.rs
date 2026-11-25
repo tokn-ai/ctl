@@ -1,5 +1,8 @@
 #![cfg(target_os = "linux")]
 
+#[path = "linux_session/attribution.rs"]
+mod attribution;
+
 use ctream_client::{
   Client,
   media::{Frame, VideoSource},
@@ -14,6 +17,67 @@ use std::{
   thread,
   time::{Duration, Instant},
 };
+
+#[test]
+#[ignore = "requires the disposable X11 and Wayland sessions in docker/ctream"]
+fn native_input_sync_acknowledges_each_barrier_and_preserves_legacy_wayland() -> io::Result<()> {
+  use ctream_proto::{DISPLAY_VERSION, INPUT_SYNC_VERSION};
+  use std::{
+    io::Write,
+    process::{Command, Stdio},
+  };
+
+  let agent = env!("CARGO_BIN_EXE_ctream-agent");
+  let invoke = |args: &[&str], commands: &[u8]| -> io::Result<_> {
+    let mut child = Command::new(agent)
+      .args(args)
+      .stdin(Stdio::piped())
+      .stdout(Stdio::piped())
+      .stderr(Stdio::piped())
+      .spawn()?;
+    child.stdin.take().unwrap().write_all(commands)?;
+    child.wait_with_output()
+  };
+  let x11 = env::var("CTREAM_TEST_X11").unwrap_or_else(|_| ":98".into());
+  let wayland = env::var("WAYLAND_DISPLAY").expect("fixture Wayland display");
+  let client = Client::new(Local {
+    agent: PathBuf::from(agent),
+  });
+  let window = client
+    .windows(Target::parse(&x11).unwrap())?
+    .into_iter()
+    .find(|window| window.title == "Ctream X11 fixture")
+    .expect("fixture window");
+  for args in [
+    vec![INPUT_SYNC_VERSION, "input-sync", &x11],
+    vec![INPUT_SYNC_VERSION, "input-sync", &x11, &window.id],
+    vec![INPUT_SYNC_VERSION, "input-sync", &wayland],
+  ] {
+    let result = invoke(&args, b"sync\nreset\nsync\n")?;
+    assert!(
+      result.status.success(),
+      "{}",
+      String::from_utf8_lossy(&result.stderr)
+    );
+    let lines: Vec<_> = std::str::from_utf8(&result.stdout)
+      .unwrap()
+      .lines()
+      .collect();
+    assert_eq!(&lines[1..], ["ok", "ok"]);
+    let invalid = invoke(&args, b"sync\nkey Shift_L 1\nkey NoSuchCtreamKey 1\nsync\n")?;
+    assert!(!invalid.status.success());
+    let lines: Vec<_> = std::str::from_utf8(&invalid.stdout)
+      .unwrap()
+      .lines()
+      .collect();
+    assert_eq!(&lines[1..], ["ok"]);
+  }
+  let legacy = invoke(&[DISPLAY_VERSION, "input", &wayland], b"sync\n")?;
+  assert!(!legacy.status.success());
+  assert_eq!(&legacy.stdout, b"ready\n");
+  assert!(String::from_utf8_lossy(&legacy.stderr).contains("unknown input event"));
+  Ok(())
+}
 
 #[test]
 #[ignore = "requires the disposable X11 and Wayland sessions in docker/ctream"]

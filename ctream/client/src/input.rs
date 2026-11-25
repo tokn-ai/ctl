@@ -1,4 +1,4 @@
-use crate::transport::Channel;
+use crate::transport::{Cancellation, Channel};
 use std::io::{self, BufRead, BufReader, Read, Write};
 
 #[derive(Clone, Copy)]
@@ -21,12 +21,17 @@ pub(crate) fn valid_key_name(name: &str) -> bool {
 
 /// An opened input capability. Dropping its writer asks the agent to release held input.
 pub struct Input<R: Read + Send + 'static, W: Write + Send + 'static> {
-  channel: Option<Channel<R, W>>,
+  channel: Option<Channel<BufReader<R>, W>>,
   dimensions: Option<[u32; 2]>,
 }
 
 impl<R: Read + Send + 'static, W: Write + Send + 'static> Input<R, W> {
-  pub(crate) fn open(mut channel: Channel<R, W>, format: InputFormat) -> io::Result<Self> {
+  pub(crate) fn open(channel: Channel<R, W>, format: InputFormat) -> io::Result<Self> {
+    let mut channel = Channel {
+      reader: BufReader::new(channel.reader),
+      writer: channel.writer,
+      cancellation: channel.cancellation,
+    };
     let dimensions = Self::read_handshake(&mut channel.reader, format);
     match dimensions {
       Ok(dimensions) => Ok(Self {
@@ -47,9 +52,12 @@ impl<R: Read + Send + 'static, W: Write + Send + 'static> Input<R, W> {
     }
   }
 
-  fn read_handshake(reader: &mut R, format: InputFormat) -> io::Result<Option<[u32; 2]>> {
+  fn read_handshake(
+    reader: &mut impl BufRead,
+    format: InputFormat,
+  ) -> io::Result<Option<[u32; 2]>> {
     let mut header = String::new();
-    BufReader::new(reader).take(128).read_line(&mut header)?;
+    reader.take(128).read_line(&mut header)?;
     if !header.ends_with('\n') {
       return Err(io::Error::other("incomplete remote input handshake"));
     }
@@ -108,6 +116,33 @@ impl<R: Read + Send + 'static, W: Write + Send + 'static> Input<R, W> {
       ));
     }
     self.send(format_args!("key {name} {}\n", u8::from(pressed)))
+  }
+
+  pub(crate) fn cancellation(&self) -> Cancellation {
+    self
+      .channel
+      .as_ref()
+      .expect("open input channel")
+      .cancellation
+      .clone()
+  }
+
+  pub(crate) fn synchronize(&mut self) -> io::Result<()> {
+    self.send(format_args!("sync\n"))?;
+    let mut response = [0; 3];
+    self
+      .channel
+      .as_mut()
+      .expect("open input channel")
+      .reader
+      .read_exact(&mut response)?;
+    if &response != b"ok\n" {
+      return Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "invalid input acknowledgement",
+      ));
+    }
+    Ok(())
   }
 
   pub fn reset(&mut self) -> io::Result<()> {
@@ -187,6 +222,31 @@ mod tests {
       input.button(1, false).unwrap();
       input.reset().unwrap();
     }
+  }
+
+  #[test]
+  fn synchronization_consumes_one_acknowledgement_per_request() {
+    let bytes = Arc::new(Mutex::new(Vec::new()));
+    let mut input = Input::open(
+      Channel {
+        reader: Cursor::new(b"ready\nok\nok\nbad"),
+        writer: Writer(Arc::clone(&bytes)),
+        cancellation: Cancellation::default(),
+      },
+      InputFormat::X11Window,
+    )
+    .unwrap();
+    input.synchronize().unwrap();
+    input.synchronize().unwrap();
+    assert_eq!(
+      input.synchronize().unwrap_err().kind(),
+      io::ErrorKind::InvalidData
+    );
+    assert_eq!(
+      input.synchronize().unwrap_err().kind(),
+      io::ErrorKind::UnexpectedEof
+    );
+    assert_eq!(*bytes.lock().unwrap(), b"sync\nsync\nsync\nsync\n");
   }
 
   #[test]

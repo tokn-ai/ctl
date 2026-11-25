@@ -500,13 +500,16 @@ static SCStreamConfiguration *configuration(uint32_t extent, int32_t maxFPS) {
 
 @end
 
-void *ctream_sck_start(void *window, int32_t maxFPS, void *context, FrameCallback frame, EndCallback end, ReleaseCallback release, int32_t *status) {
+void *ctream_sck_start(void *window, int32_t maxFPS, int32_t independent, void *context, FrameCallback frame, EndCallback end, ReleaseCallback release, int32_t *status) {
   if (@available(macOS 14.0, *)) {
     if (!NSThread.isMainThread) {
       *status = CaptureStatusWrongThread;
       return NULL;
     }
-    if (activeCapture) {
+    // The picker and retained callers share one slot. An explicitly selected
+    // leased window owns a separate SCStream and never registers a picker.
+    BOOL leasedWindow = window != NULL && independent;
+    if (!leasedWindow && activeCapture) {
       *status = CaptureStatusOccupied;
       return NULL;
     }
@@ -521,7 +524,9 @@ void *ctream_sck_start(void *window, int32_t maxFPS, void *context, FrameCallbac
         return NULL;
       }
       CtreamScreenCapture *capture = [[CtreamScreenCapture alloc] initWithContext:context maxFPS:maxFPS frame:frame end:end release:release];
-      activeCapture = capture;
+      if (!leasedWindow) {
+        activeCapture = capture;
+      }
       if (selected) {
         SCContentFilter *filter = [[NSClassFromString(@"SCContentFilter") alloc] initWithDesktopIndependentWindow:selected];
         [capture startWithFilter:filter window:selected];

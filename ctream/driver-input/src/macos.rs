@@ -101,6 +101,7 @@ struct Click {
 
 pub struct WindowInput {
   target: Target,
+  require_delivery: bool,
   pointer: Option<FramePoint>,
   buttons: [Option<ButtonPress>; 5],
   keys: BTreeSet<u16>,
@@ -116,6 +117,11 @@ pub fn has_access() -> bool {
 
 impl WindowInput {
   pub fn open(identity: WindowIdentity) -> io::Result<Self> {
+    Self::open_with_delivery(identity, false)
+  }
+
+  /// Acknowledged input reports errors for unknown keys or rejected window routing.
+  pub fn open_with_delivery(identity: WindowIdentity, require_delivery: bool) -> io::Result<Self> {
     if !has_access() {
       return Err(io::Error::new(
         io::ErrorKind::PermissionDenied,
@@ -137,6 +143,7 @@ impl WindowInput {
     }
     Ok(Self {
       target,
+      require_delivery,
       pointer: None,
       buttons: [None; 5],
       keys: BTreeSet::new(),
@@ -167,6 +174,12 @@ impl WindowInput {
   }
 
   pub fn button(&mut self, code: u8, pressed: bool) -> io::Result<()> {
+    if self.require_delivery && pressed && self.pointer.is_none() {
+      return Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "set a pointer position before clicking or scrolling",
+      ));
+    }
     let button = match code {
       1 => 0,
       2 => 2,
@@ -230,6 +243,11 @@ impl WindowInput {
   pub fn key(&mut self, name: &str, pressed: bool) -> io::Result<()> {
     if let Some(code) = keys::code(name) {
       self.set_key(code, pressed)?;
+    } else if self.require_delivery {
+      return Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "unsupported macOS key",
+      ));
     }
     Ok(())
   }
@@ -266,17 +284,20 @@ impl WindowInput {
   ) -> io::Result<bool> {
     // The native call only borrows the initialized data for this call. It
     // validates the target again and records the last delivered point.
-    posted(unsafe {
-      ctream_macos_input_pointer(
-        &self.target,
-        event,
-        button,
-        &fraction,
-        &mut press.position,
-        self.modifier_flags(),
-        press.click_count,
-      )
-    })
+    posted(
+      unsafe {
+        ctream_macos_input_pointer(
+          &self.target,
+          event,
+          button,
+          &fraction,
+          &mut press.position,
+          self.modifier_flags(),
+          press.click_count,
+        )
+      },
+      self.require_delivery,
+    )
   }
 
   fn set_key(&mut self, code: u16, pressed: bool) -> io::Result<()> {
@@ -288,8 +309,10 @@ impl WindowInput {
     let flags =
       held.fold(0, |flags, key| flags | keys::modifier(key)) | if pressed { modifier } else { 0 };
     // Target matches the native structure and stays borrowed for this call.
-    let sent =
-      posted(unsafe { ctream_macos_input_key(&self.target, code, pressed, modifier != 0, flags) })?;
+    let sent = posted(
+      unsafe { ctream_macos_input_key(&self.target, code, pressed, modifier != 0, flags) },
+      self.require_delivery,
+    )?;
     if !pressed {
       self.keys.remove(&code);
     } else if sent {
@@ -312,9 +335,12 @@ impl Drop for WindowInput {
   }
 }
 
-fn posted(status: i32) -> io::Result<bool> {
+fn posted(status: i32, require_delivery: bool) -> io::Result<bool> {
   match status {
     1 => Ok(true),
+    0 if require_delivery => Err(io::Error::other(
+      "macOS input could not be posted to the selected window",
+    )),
     0 => Ok(false),
     _ => Err(io::Error::other("cannot create a macOS input event")),
   }

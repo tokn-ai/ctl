@@ -354,7 +354,15 @@ mod tests {
     let (window, state) = setup();
     state.borrow_mut().foreground = true;
     state.borrow_mut().focus = true;
-    assert!(state::run(window, &mut &b"key F8 1\nbutton 1 1\n"[..], &mut Vec::new(),).is_err());
+    assert!(
+      state::run(
+        false,
+        window,
+        &mut &b"key F8 1\nbutton 1 1\n"[..],
+        &mut Vec::new(),
+      )
+      .is_err()
+    );
     assert_eq!(state.borrow().events, ["key_down", "key_up"]);
   }
 }

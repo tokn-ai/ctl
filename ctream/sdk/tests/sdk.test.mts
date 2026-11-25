@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { execFile, spawn } from "node:child_process";
+import { promisify } from "node:util";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, {type TestContext} from "node:test";
@@ -13,7 +15,8 @@ function setup(t: TestContext, mode = "ok", options: CtreamOptions = {}) {
   t.after(() => rmSync(dir, {recursive: true, force: true}));
   const client = new Ctream({executable: [process.execPath, fixture, log, mode], ...options});
   const calls = () => readFileSync(log, "utf8").trimEnd().split("\n").map((line) => JSON.parse(line));
-  return {client, calls};
+  const lifecycle = () => existsSync(log + ".lifecycle") ? readFileSync(log + ".lifecycle", "utf8").trim().split("\n") : [];
+  return {client, calls, lifecycle, log};
 }
 
 test("lists displays and windows and preserves launcher arguments", async (t) => {
@@ -36,6 +39,73 @@ test("lists displays and windows and preserves launcher arguments", async (t) =>
   ]);
 });
 
+test("two independent clients keep their own named identities on the same target", async (t) => {
+  const {calls, lifecycle, log} = setup(t);
+  const options: CtreamOptions = {
+    executable: [process.execPath, fixture, log, "ok"],
+    agent: "display-agent", agent_id: "probe.A-1",
+  };
+  const first = new Ctream(options);
+  options.agent_id = "probe_B";
+  const second = new Ctream(options);
+  options.agent_id = "changed.after.construction";
+  assert.equal(first.agent_id, "probe.A-1");
+  assert.equal(second.agent_id, "probe_B");
+  const a = first.session(":3", "x11-1a");
+  const b = await second.resolveWindow(":3", {title: "Document"});
+  try {
+    await Promise.all([a.screenshot(), b.capabilities()]);
+    await Promise.all([a.click({x: 0, y: 0}), b.pressKeys("Tab")]);
+  } finally {
+    await Promise.all([a.close(), b.close()]);
+  }
+  const recorded = calls();
+  assert.deepEqual(recorded[0].args, ["--agent", "display-agent", "windows", ":3", "--json"]);
+  assert.equal(recorded.length, 5);
+  for (const {args, request} of recorded.slice(1)) {
+    const id = ["screenshot", "click"].includes(request.operation) ? "probe.A-1" : "probe_B";
+    assert.deepEqual(args, ["--agent", "display-agent", "session", ":3", "--protocol", "1.0.3", "--agent-id", id, "--window", "x11-1a"]);
+  }
+  assert.equal(new Set(lifecycle().filter((event) => event.startsWith("start"))).size, 2);
+});
+
+test("agent identity is validated at construction", () => {
+  for (const agent_id of [
+    "", " leading", "trailing\n", "-cli", "_a", "a/b", "a b", "é", "a".repeat(65),
+    "Otter#7c2a", "otter#7C2A", "o2#7c2a", "otter#123", "otter#12345", "otter#123g",
+    "#1234", "otter#1234\n", "a".repeat(60) + "#1234",
+  ]) {
+    assert.throws(() => new Ctream({agent_id}), /agent_id/);
+  }
+  assert.throws(() => Reflect.construct(Ctream, [{agent_id: null}]), /agent_id/);
+  for (const agent_id of ["7", "a".repeat(64), "unknownword#bad0", "a".repeat(59) + "#0000"]) {
+    assert.equal(new Ctream({agent_id}).agent_id, agent_id);
+  }
+});
+
+test("generated identity is readable and remains stable across sessions and retries", async (t) => {
+  const words: string[] = JSON.parse(readFileSync(new URL("../dist/agent-words.json", import.meta.url), "utf8"));
+  for (const [agent_id, protocol] of [[undefined, "1.0.4"], ["otter#7c2a", "1.0.4"], ["tester", "1.0.3"]] as const) {
+    const {client, calls} = setup(t, "identity_unsupported", {agent_id});
+    const id = client.agent_id;
+    if (agent_id === undefined) {
+      assert.match(id, /^[a-z]+#[a-f0-9]{4}$/);
+      assert.ok(words.includes(id.split("#")[0]));
+    } else {
+      assert.equal(id, agent_id);
+    }
+    assert.equal(Reflect.set(client, "agent_id", "replacement"), false);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const session = client.session(":3");
+      await assert.rejects(session.pressKeys("Tab"), /named sessions are unsupported/);
+      await assert.rejects(session.screenshot(), /named sessions are unsupported/);
+      await assert.rejects(session.close(), /named sessions are unsupported/);
+    }
+    const expected = {args: ["session", ":3", "--protocol", protocol, "--agent-id", id], request: null};
+    assert.deepEqual(calls(), [expected, expected]);
+  }
+});
+
 test("uses only the selected window's image dimensions and preserves explicit sizes", async (t) => {
   const {client, calls} = setup(t);
   const session = client.session(":3", "x11-1a");
@@ -53,8 +123,9 @@ test("uses only the selected window's image dimensions and preserves explicit si
   await assert.rejects(other.click(point), /screenshot/);
   await other.click(point, {size: [4, 5]});
 
+  await Promise.all([session.close(), other.close()]);
   const recorded = calls();
-  const args = ["do", ":3", "--protocol", "1.0.1", "--window"];
+  const args = ["session", ":3", "--protocol", "1.0.4", "--agent-id", client.agent_id, "--window"];
   assert.deepEqual(recorded.slice(0, -1).map((entry) => entry.args),
     Array(6).fill([...args, "x11-1a"]));
   assert.deepEqual(recorded.at(-1).args, [...args, "x11-2b"]);
@@ -78,6 +149,7 @@ test("sends keyboard and semantic actions in JSON and returns structured control
   await session.setText(element.path, text);
   await session.pressKeys(["Control_L", "a"]);
   await session.typeText(text);
+  await session.close();
   const recorded = calls();
   assert.deepEqual(recorded.map((entry) => entry.request), [
     {operation: "elements"}, {operation: "invoke", path: "0/1", index: 0, name: "press"},
@@ -97,24 +169,130 @@ test("resolves an exact window and translates shortcuts while keeping native key
   await session.pressKeys("cmd++");
   await session.pressKeys(["Shift_R", "plus"]);
   await assert.rejects(session.pressKeys("cmd+"), /nonempty/);
+  await session.close();
   const chords = [["Super_L", "a"], ["Control_R", "Return"], ["Super_L", "Shift_L", "equal"], ["Shift_R", "equal"]];
   assert.deepEqual(calls().slice(-4), chords.map((keys) => ({
-    args: ["do", ":3", "--protocol", "1.0.1", "--window", "x11-2b"],
+    args: ["session", ":3", "--protocol", "1.0.4", "--agent-id", client.agent_id, "--window", "x11-2b"],
     request: {operation: "press_keys", keys},
   })));
 });
 
 test("reports CLI failure, malformed output and excessive request size", async (t) => {
-  await assert.rejects(setup(t, "failure").client.session(":0").invoke("0", 0, "click"), /element is stale/);
+  const recoverable = setup(t, "failure").client.session(":0");
+  await assert.rejects(recoverable.invoke("0", 0, "click"), /element is stale/);
+  assert.equal((await recoverable.capabilities()).input, true);
+  await recoverable.close();
   await assert.rejects(setup(t, "invalid_json").client.displays(), /invalid JSON/);
   const session = setup(t, "bad_shape").client.session(":0");
-  await assert.rejects(session.typeText("hello"), /expected null/);
-  await assert.rejects(session.screenshot(), /expected PNG/);
   await assert.rejects(session.typeText("水".repeat(22_000)), /64 KiB/);
+  await assert.rejects(session.typeText("hello"), /expected null/);
+  await assert.rejects(session.screenshot(), /expected null/);
+  await assert.rejects(session.close(), /expected null/);
   await assert.rejects(new Ctream({executable: join(tmpdir(), "missing-ctream-executable")}).displays(), /ENOENT/);
 });
 
 test("accepts screenshots exceeding the default subprocess buffer", async (t) => {
-  const frame = await setup(t, "large").client.session(":0").screenshot();
-  assert.ok(frame.data.length > 1024 * 1024);
+  const session = setup(t, "large").client.session(":0");
+  assert.ok((await session.screenshot()).data.length > 1024 * 1024);
+  await session[Symbol.asyncDispose]();
+});
+
+test("opens lazily, orders concurrent requests, and drains admitted work on close", async (t) => {
+  const {client, calls, lifecycle} = setup(t);
+  const unused = client.session(":0");
+  await unused.close();
+  await assert.rejects(unused.capabilities(), /closed/);
+  assert.deepEqual(lifecycle(), []);
+
+  const session = client.session(":0");
+  const shot = session.screenshot();
+  const click = session.click({x: 0, y: 0});
+  const close = session.close();
+  assert.equal(close, session.close());
+  await assert.rejects(session.typeText("late"), /closed/);
+  await Promise.all([shot, click, close]);
+  assert.deepEqual(calls().map(({request}) => request.operation), ["screenshot", "click"]);
+  const [start] = lifecycle();
+  assert.match(start, /^start \d+$/);
+  assert.deepEqual(lifecycle(), [start, start.replace("start", "eof")]);
+});
+
+test("close propagates CLI cleanup errors at EOF", async (t) => {
+  const session = setup(t, "cleanup_error").client.session(":0");
+  await session.capabilities();
+  await assert.rejects(session.close(), /remote input cleanup failed/);
+  await assert.rejects(session.close(), /remote input cleanup failed/);
+});
+
+test("closing preserves an admitted request's configured deadline", async (t) => {
+  const entry = new URL("../dist/session-transport.js", import.meta.url);
+  const {SessionTransport} = await import(entry.href) as typeof import("../src/session-transport.js");
+  const {log} = setup(t);
+  const transport = new SessionTransport(
+    () => spawn(process.execPath, [fixture, log, "slow", "session", ":0"]),
+    2000, 75,
+  );
+  const request = transport.request({operation: "capabilities"}, (reply) => reply);
+  const close = transport.close();
+  assert.deepEqual(await request, {capture: true, input: true, semantics: false});
+  await close;
+});
+
+test("a peer exiting after one reply cannot respawn for an already queued request", async (t) => {
+  const {client, calls, lifecycle} = setup(t, "exit_after_reply");
+  const session = client.session(":0");
+  const results = await Promise.allSettled([session.capabilities(), session.typeText("queued")]);
+  assert.equal(results[0].status, "fulfilled");
+  assert.equal(results[1].status, "rejected");
+  await assert.rejects(session.close());
+  assert.deepEqual(calls().map(({request}) => request.operation), ["capabilities"]);
+  assert.equal(lifecycle().filter((event) => event.startsWith("start")).length, 1);
+});
+
+test("reads split UTF-8 and rejects oversized or malformed session records", async (t) => {
+  const session = setup(t, "chunked").client.session(":0");
+  assert.equal((await session.elements())[0].name, "保存");
+  await session.close();
+  for (const [mode, error] of [["overflow", /byte limit/], ["invalid_json", /invalid ctream session reply/]] as const) {
+    const bad = setup(t, mode).client.session(":0");
+    await assert.rejects(bad.capabilities(), error);
+    await assert.rejects(bad.close(), error);
+  }
+});
+
+test("a dead or stalled session rejects queued actions without replay", async (t) => {
+  for (const mode of ["exit", "hang"]) {
+    const {client, calls, lifecycle} = setup(t, mode, {timeout_ms: mode === "hang" ? 800 : 0});
+    const session = client.session(":0");
+    const results = await Promise.allSettled([session.typeText("one"), session.typeText("two")]);
+    const diagnostic = mode === "hang" ? /timed out/ : /window disappeared/;
+    for (const result of results) {
+      assert.equal(result.status, "rejected");
+      assert.match(result.reason.message, diagnostic);
+    }
+    await assert.rejects(session.typeText("three"), diagnostic);
+    await assert.rejects(session.close(), diagnostic);
+    assert.deepEqual(calls().map(({request}) => request.text), ["one"]);
+    assert.equal(lifecycle().filter((event) => event.startsWith("start")).length, 1);
+  }
+});
+
+test("an idle session permits natural caller exit without an explicit close", async (t) => {
+  const {log, lifecycle} = setup(t);
+  const entry = new URL("../dist/index.js", import.meta.url).href;
+  const program = `
+    import {Ctream} from ${JSON.stringify(entry)};
+    const client = new Ctream({executable: [process.execPath, ...process.argv.slice(1), "ok"]});
+    const session = client.session(":0");
+    await session.capabilities();
+    await session.screenshot();
+    console.log("finished");
+  `;
+  const {stdout} = await promisify(execFile)(process.execPath, ["--input-type=module", "-e", program, "--", fixture, log], {timeout: 5000});
+  assert.match(stdout, /finished/);
+  const deadline = Date.now() + 2000;
+  while (lifecycle().length < 2 && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.match(lifecycle()[1], /^eof \d+$/);
 });

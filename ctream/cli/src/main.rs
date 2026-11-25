@@ -1,6 +1,6 @@
-mod operation;
+mod relay;
 
-use ctream_client::{Client, options::ConnectionOptions};
+use ctream_client::{Client, options::ConnectionOptions, sdk, transport::Transport};
 use ctream_platform::{discover_sessions, windows};
 use ctream_proto::{Display, Session, Target, Window};
 use std::{env, ffi::OsString, io, process::ExitCode};
@@ -8,6 +8,9 @@ use std::{env, ffi::OsString, io, process::ExitCode};
 const USAGE: &str = "Usage: ctream [OPTIONS] list [--json]
        ctream [OPTIONS] windows TARGET [--json]
        ctream [OPTIONS] do TARGET [--window ID] [--protocol 1.0.1]
+       ctream [OPTIONS] session TARGET [--agent-id ID] [--window ID] [--protocol 1.0.4]
+       ctream [OPTIONS] session TARGET [--window ID] --protocol 1.0.2
+       ctream [OPTIONS] session TARGET --agent-id ID [--window ID] [--protocol 1.0.3]
 
 Connection options (before the command):
   --host SSH_HOST       Remote SSH endpoint
@@ -16,6 +19,9 @@ Connection options (before the command):
   --ssh-arg ARG         Launcher prefix argument; repeat as needed
 
 do reads one JSON operation from stdin and writes its JSON result to stdout.
+session serves one JSON operation per line and flushes one reply per operation.
+By default, session assigns a word#hhhh agent ID when --agent-id is omitted.
+Select 1.0.2 explicitly for an anonymous session.
 Operations: capabilities, screenshot, move, click, drag, scroll, press_keys,
             type_text, elements, invoke, set_text.
 
@@ -23,11 +29,20 @@ Use :DISPLAY for X11, wayland-N for Wayland, windows-N for one Windows display,
 windows for the Windows desktop, or macos for windows in a macOS session.";
 
 const SDK_PROTOCOL: &str = "1.0.1";
+const SESSION_PROTOCOL: &str = "1.0.2";
+const NAMED_PROTOCOL: &str = "1.0.3";
+const GENERATED_ID_PROTOCOL: &str = "1.0.4";
+
+enum Mode {
+  Once,
+  Session,
+  Named(String),
+}
 
 enum Operation {
   List,
   Windows(Target),
-  Do(Target, Option<String>),
+  Sdk(Mode, Target, Option<String>),
 }
 
 struct Options {
@@ -41,6 +56,39 @@ fn invalid(message: &str) -> io::Error {
   io::Error::new(io::ErrorKind::InvalidInput, message)
 }
 
+fn generate_agent_id() -> String {
+  // The same fixed-size word list is shipped with the TypeScript SDK.
+  let words: [&str; 32] = serde_json::from_str(include_str!("../../sdk/src/agent-words.json"))
+    .expect("invalid bundled agent word list");
+  let [index, high, low, ..] = *uuid::Uuid::new_v4().as_bytes();
+  let word = words[usize::from(index) % words.len()];
+  format!("{word}#{high:02x}{low:02x}")
+}
+
+fn sdk_mode(command: &str, protocol: Option<&str>, agent_id: Option<String>) -> io::Result<Mode> {
+  match (command, protocol, agent_id) {
+    ("do", None | Some(SDK_PROTOCOL), None) => Ok(Mode::Once),
+    ("session", Some(SESSION_PROTOCOL), None) => Ok(Mode::Session),
+    ("session", Some(NAMED_PROTOCOL), Some(id))
+      if ctream_proto::agent_id_version(&id) == Some(ctream_proto::ATTRIBUTED_SESSION_VERSION) =>
+    {
+      Ok(Mode::Named(id))
+    }
+    ("session", None | Some(GENERATED_ID_PROTOCOL), id) => {
+      Ok(Mode::Named(id.unwrap_or_else(generate_agent_id)))
+    }
+    ("session", Some(SESSION_PROTOCOL), _) => {
+      Err(invalid("ctream_sdk 1.0.2 requires an anonymous session"))
+    }
+    ("session", Some(NAMED_PROTOCOL), _) => {
+      Err(invalid("ctream_sdk 1.0.3 requires a plain --agent-id"))
+    }
+    _ => Err(invalid(&format!(
+      "unsupported ctream_sdk protocol for {command}"
+    ))),
+  }
+}
+
 fn parse(arguments: impl IntoIterator<Item = OsString>) -> io::Result<Option<Options>> {
   let mut arguments = arguments.into_iter();
   let mut connection = ConnectionOptions::default();
@@ -48,7 +96,7 @@ fn parse(arguments: impl IntoIterator<Item = OsString>) -> io::Result<Option<Opt
   let command = loop {
     let argument = arguments
       .next()
-      .ok_or_else(|| invalid("expected list, windows, or do"))?;
+      .ok_or_else(|| invalid("expected list, windows, do, or session"))?;
     let argument = argument
       .to_str()
       .ok_or_else(|| invalid("invalid command argument"))?;
@@ -64,7 +112,7 @@ fn parse(arguments: impl IntoIterator<Item = OsString>) -> io::Result<Option<Opt
           .ok_or_else(|| invalid("--host needs an SSH destination"))?;
         host = Some(value.to_owned());
       }
-      "list" | "windows" | "do" => break argument.to_owned(),
+      "list" | "windows" | "do" | "session" => break argument.to_owned(),
       argument if connection.parse_option(argument, &mut arguments)? => {}
       _ => return Err(invalid("unexpected global option")),
     }
@@ -72,12 +120,14 @@ fn parse(arguments: impl IntoIterator<Item = OsString>) -> io::Result<Option<Opt
   let mut json = false;
   let mut target = None;
   let mut window = None;
-  let mut protocol_selected = false;
+  let is_sdk = matches!(command.as_str(), "do" | "session");
+  let mut selected_protocol = None;
+  let mut agent_id = None;
   while let Some(argument) = arguments.next() {
     match argument.to_str() {
       Some("--help" | "-h") => return Ok(None),
-      Some("--json") if command != "do" && !json => json = true,
-      Some("--window") if command == "do" && window.is_none() => {
+      Some("--json") if !is_sdk && !json => json = true,
+      Some("--window") if is_sdk && window.is_none() => {
         let id = arguments
           .next()
           .and_then(|value| value.into_string().ok())
@@ -85,13 +135,22 @@ fn parse(arguments: impl IntoIterator<Item = OsString>) -> io::Result<Option<Opt
           .ok_or_else(|| invalid("--window needs a window ID"))?;
         window = Some(id);
       }
-      Some("--protocol") if command == "do" && !protocol_selected => {
-        if arguments.next().as_deref() != Some(SDK_PROTOCOL.as_ref()) {
-          return Err(invalid(&format!(
-            "supported ctream_sdk protocol is {SDK_PROTOCOL}"
-          )));
-        }
-        protocol_selected = true;
+      Some("--protocol") if is_sdk && selected_protocol.is_none() => {
+        selected_protocol = Some(
+          arguments
+            .next()
+            .and_then(|value| value.into_string().ok())
+            .ok_or_else(|| invalid("--protocol needs a version"))?,
+        );
+      }
+      Some("--agent-id") if command == "session" && agent_id.is_none() => {
+        agent_id = Some(
+          arguments
+            .next()
+            .and_then(|value| value.into_string().ok())
+            .filter(|value| ctream_proto::valid_agent_id(value))
+            .ok_or_else(|| invalid("--agent-id needs a valid agent ID"))?,
+        );
       }
       Some("--host" | "--agent" | "--ssh-program" | "--ssh-arg") => {
         return Err(invalid("connection options must appear before the command"));
@@ -105,7 +164,14 @@ fn parse(arguments: impl IntoIterator<Item = OsString>) -> io::Result<Option<Opt
   let operation = match command.as_str() {
     "list" => Operation::List,
     "windows" => Operation::Windows(target.ok_or_else(|| invalid("windows needs a target"))?),
-    _ => Operation::Do(target.ok_or_else(|| invalid("do needs a target"))?, window),
+    _ => {
+      let target = target.ok_or_else(|| invalid(&format!("{command} needs a target")))?;
+      Operation::Sdk(
+        sdk_mode(&command, selected_protocol.as_deref(), agent_id)?,
+        target,
+        window,
+      )
+    }
   };
   if host.is_none() {
     connection.local()?;
@@ -195,29 +261,40 @@ fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
       };
       print_windows(windows, options.json)?;
     }
-    Operation::Do(target, window) => {
-      let input = io::stdin().lock();
-      let output = io::stdout().lock();
+    Operation::Sdk(mode, target, window) => {
       if let Some(host) = &options.host {
-        operation::run(
-          &Client::new(options.connection.ssh(host)?),
-          target,
-          window,
-          input,
-          output,
-        )?;
+        run_sdk(options.connection.ssh(host)?, mode, target, window)?;
       } else {
-        operation::run(
-          &Client::new(options.connection.local()?),
-          target,
-          window,
-          input,
-          output,
-        )?;
+        run_sdk(options.connection.local()?, mode, target, window)?;
       }
     }
   }
   Ok(())
+}
+
+fn run_sdk<T: Transport>(
+  transport: T,
+  mode: Mode,
+  target: Target,
+  window: Option<String>,
+) -> io::Result<()> {
+  match mode {
+    Mode::Named(agent_id) => relay::named(transport, target, &agent_id, window),
+    Mode::Once => sdk::run(
+      &Client::new(transport),
+      target,
+      window,
+      io::stdin().lock(),
+      io::stdout().lock(),
+    ),
+    Mode::Session => sdk::run_session(
+      &Client::new(transport),
+      target,
+      window,
+      io::stdin().lock(),
+      io::stdout().lock(),
+    ),
+  }
 }
 
 fn main() -> ExitCode {
@@ -285,11 +362,93 @@ mod tests {
       vec!["do", ":3", "--window"],
       vec!["do", ":3", "--window", "x11-4", "--window", "x11-5"],
       vec!["do", ":3", "--json"],
+      vec!["session", ":3", "--json"],
+      vec!["session", ":3", "--protocol", NAMED_PROTOCOL],
+      vec![
+        "session",
+        ":3",
+        "--protocol",
+        NAMED_PROTOCOL,
+        "--agent-id",
+        "fern#abcd",
+      ],
+      vec![
+        "session",
+        ":3",
+        "--protocol",
+        GENERATED_ID_PROTOCOL,
+        "--agent-id",
+        "Fern#abcd",
+      ],
+      vec!["session", ":3", "--agent-id", "fern#ABCD"],
+      vec![
+        "session",
+        ":3",
+        "--agent-id",
+        "worker",
+        "--protocol",
+        SESSION_PROTOCOL,
+      ],
+      vec!["session", ":3", "--agent-id", "bad\nlabel"],
+      vec!["session", ":3", "--agent-id", "one", "--agent-id", "two"],
+      vec!["do", ":3", "--agent-id", "worker"],
+      vec!["do", ":3", "--protocol", SESSION_PROTOCOL],
+      vec!["session", ":3", "--protocol", SDK_PROTOCOL],
       vec!["do", ":3", ":4"],
       vec!["windows", ":3", "--window", "x11-4"],
     ] {
       assert!(parse(args(&arguments)).is_err(), "{arguments:?}");
     }
+  }
+
+  #[test]
+  fn unversioned_and_current_sessions_generate_a_tag_or_preserve_the_explicit_id() {
+    for flags in [&[][..], &["--protocol", GENERATED_ID_PROTOCOL][..]] {
+      let mut command = vec!["session", ":1"];
+      command.extend_from_slice(flags);
+      let options = parse(args(&command)).unwrap().unwrap();
+      let Operation::Sdk(Mode::Named(id), Target::X11(1), None) = options.operation else {
+        panic!("expected a named session");
+      };
+      let words: [&str; 32] =
+        serde_json::from_str(include_str!("../../sdk/src/agent-words.json")).unwrap();
+      assert!(words.contains(&id.split_once('#').unwrap().0));
+      assert_eq!(
+        ctream_proto::agent_id_version(&id),
+        Some(ctream_proto::TAGGED_AGENT_ID_VERSION)
+      );
+
+      for explicit in ["Worker.xyz", "custom#000a"] {
+        let mut named = command.clone();
+        named.extend_from_slice(&["--agent-id", explicit]);
+        let options = parse(args(&named)).unwrap().unwrap();
+        assert!(matches!(options.operation, Operation::Sdk(Mode::Named(id), ..) if id == explicit));
+      }
+    }
+  }
+
+  #[test]
+  fn explicit_retained_contracts_keep_their_anonymous_or_caller_named_semantics() {
+    let anonymous = parse(args(&["session", ":1", "--protocol", SESSION_PROTOCOL]))
+      .unwrap()
+      .unwrap();
+    assert!(matches!(
+      anonymous.operation,
+      Operation::Sdk(Mode::Session, ..)
+    ));
+    let named = parse(args(&[
+      "session",
+      ":1",
+      "--protocol",
+      NAMED_PROTOCOL,
+      "--agent-id",
+      "Worker_1",
+    ]))
+    .unwrap()
+    .unwrap();
+    assert!(matches!(named.operation, Operation::Sdk(Mode::Named(id), ..) if id == "Worker_1"));
+    let once = parse(args(&["do", ":1"])).unwrap().unwrap();
+    assert!(matches!(once.operation, Operation::Sdk(Mode::Once, ..)));
   }
 
   #[test]
@@ -308,7 +467,7 @@ mod tests {
     .unwrap();
     assert!(matches!(
       options.operation,
-      Operation::Do(Target::X11(3), Some(id)) if id == "x11-4"
+      Operation::Sdk(Mode::Once, Target::X11(3), Some(id)) if id == "x11-4"
     ));
   }
 }

@@ -1,9 +1,11 @@
 use ctream_driver::{ControlOperation, Result};
 use ctream_proto::{
-  BOUNDS_VERSION, CAPTURE_CATALOG_VERSION, CAPTURE_DRIVER_VERSION, DISPLAY_VERSION,
-  LATENCY_VERSION, MACOS_WINDOW_VERSION, Target, VIDEO_STREAM_VERSION, VideoRequest,
-  WAYLAND_WINDOW_VERSION, WINDOWS_DESKTOP_VERSION, WINDOWS_DISPLAY_VERSION, WINDOWS_WINDOW_VERSION,
-  WindowId, X11_WINDOW_INPUT_VERSION, X11_WINDOW_VERSION, valid_capture_driver, valid_window_id,
+  ATTRIBUTED_SESSION_VERSION, BOUNDS_VERSION, CAPTURE_CATALOG_VERSION, CAPTURE_DRIVER_VERSION,
+  DISPLAY_VERSION, INPUT_SYNC_VERSION, LATENCY_VERSION, MACOS_WINDOW_VERSION,
+  TAGGED_AGENT_ID_VERSION, Target, VIDEO_STREAM_VERSION, VideoRequest, WAYLAND_WINDOW_VERSION,
+  WINDOWS_DESKTOP_VERSION, WINDOWS_DISPLAY_VERSION, WINDOWS_WINDOW_VERSION, WindowId,
+  X11_WINDOW_INPUT_VERSION, X11_WINDOW_VERSION, agent_id_version, valid_capture_driver,
+  valid_window_id,
 };
 
 const VIDEO_REQUEST_LIMIT: usize = 4096;
@@ -17,7 +19,22 @@ pub enum TargetOperation<'a> {
 }
 
 pub enum Request<'a> {
+  AttributedSession {
+    target: Target,
+    agent_id: &'a str,
+    window: Option<&'a str>,
+  },
+  SessionCapture {
+    window: &'a str,
+    lease: &'a str,
+  },
+  SessionInput {
+    window: &'a str,
+    lease: &'a str,
+  },
   Ping,
+  InputCapabilities,
+  InputSync(Target, Option<&'a str>),
   Discover {
     windows_displays: bool,
     macos: bool,
@@ -112,6 +129,82 @@ fn supports_capture_selection(version: &str, target: &str) -> bool {
 
 pub fn parse(args: &[String]) -> Result<Request<'_>> {
   match args {
+    [version, operation, target, agent_id, windows @ ..]
+      if matches!(
+        version.as_str(),
+        ATTRIBUTED_SESSION_VERSION | TAGGED_AGENT_ID_VERSION
+      ) && operation == "attributed-session"
+        && windows.len() <= 1 =>
+    {
+      let required = agent_id_version(agent_id).ok_or("invalid agent ID")?;
+      if required == TAGGED_AGENT_ID_VERSION && version != required {
+        return Err("invalid agent ID".into());
+      }
+      let target = Target::parse(target)?;
+      let window = windows.first().map(String::as_str);
+      if target.window_only() && window.is_none() {
+        return Err("desktop target requires a window ID".into());
+      }
+      if let Some(window) = window {
+        if !valid_window_id(window) {
+          return Err("invalid window identifier".into());
+        }
+        if target == Target::MacosDesktop {
+          validate_macos_window(window)?;
+        }
+        if matches!(target, Target::X11(_)) && WindowId::x11_xid(window).is_none() {
+          return Err("invalid X11 window identifier".into());
+        }
+      }
+      Ok(Request::AttributedSession {
+        target,
+        agent_id,
+        window,
+      })
+    }
+    [version, operation, target, window, lease]
+      if version == ATTRIBUTED_SESSION_VERSION
+        && target == "macos"
+        && matches!(operation.as_str(), "session-capture" | "session-input") =>
+    {
+      validate_macos_window(window)?;
+      if lease.len() != 32
+        || !lease
+          .bytes()
+          .all(|b| b.is_ascii_digit() || matches!(b, b'a'..=b'f'))
+      {
+        return Err("invalid macOS capture lease".into());
+      }
+      Ok(if operation == "session-capture" {
+        Request::SessionCapture { window, lease }
+      } else {
+        Request::SessionInput { window, lease }
+      })
+    }
+    [version, operation] if version == INPUT_SYNC_VERSION && operation == "input-capabilities" => {
+      Ok(Request::InputCapabilities)
+    }
+    [version, operation, target, window @ ..]
+      if version == INPUT_SYNC_VERSION && operation == "input-sync" && window.len() <= 1 =>
+    {
+      let target = Target::parse(target)?;
+      let window = window.first().map(String::as_str);
+      match (target, window) {
+        (target, None) if target.window_only() => {
+          return Err("desktop target requires a window ID".into());
+        }
+        (Target::Wayland(_), Some(_)) => {
+          return Err("physical input is unavailable for Wayland windows".into());
+        }
+        (Target::MacosDesktop, Some(id)) => validate_macos_window(id)?,
+        (Target::X11(_), Some(id)) if WindowId::x11_xid(id).is_none() => {
+          return Err("invalid X11 window identifier".into());
+        }
+        (_, Some(id)) if !valid_window_id(id) => return Err("invalid window identifier".into()),
+        _ => {}
+      }
+      Ok(Request::InputSync(target, window))
+    }
     [version, operation, tail @ ..] if version == VIDEO_STREAM_VERSION => {
       parse_video_version(operation, tail)
     }
@@ -308,6 +401,122 @@ mod tests {
 
   const VIDEO_REQUEST: &str =
     r#"{"options":{"codec":"av1","quality":"low","max_fps":45},"codecs":["av1","h264"]}"#;
+
+  #[test]
+  fn named_sessions_bind_one_label_and_target_under_their_contract() {
+    assert!(matches!(
+      parse(&args(&[
+        ATTRIBUTED_SESSION_VERSION,
+        "attributed-session",
+        ":2",
+        "qa.1",
+        "x11-7"
+      ]))
+      .unwrap(),
+      Request::AttributedSession {
+        target: Target::X11(2),
+        agent_id: "qa.1",
+        window: Some("x11-7")
+      }
+    ));
+    for invalid in [
+      vec![INPUT_SYNC_VERSION, "attributed-session", ":2", "qa"],
+      vec![
+        ATTRIBUTED_SESSION_VERSION,
+        "attributed-session",
+        ":2",
+        "bad id",
+      ],
+      vec![
+        ATTRIBUTED_SESSION_VERSION,
+        "attributed-session",
+        "macos",
+        "qa",
+      ],
+      vec![
+        ATTRIBUTED_SESSION_VERSION,
+        "attributed-session",
+        ":2",
+        "qa",
+        "x11-0",
+      ],
+      vec![
+        ATTRIBUTED_SESSION_VERSION,
+        "session-input",
+        "macos",
+        "macos-1-2",
+        "bad",
+      ],
+      vec![
+        ATTRIBUTED_SESSION_VERSION,
+        "session-input",
+        ":2",
+        "x11-7",
+        "abcd",
+      ],
+    ] {
+      assert!(parse(&args(&invalid)).is_err(), "{invalid:?}");
+    }
+  }
+
+  #[test]
+  fn tagged_session_contract_retains_plain_labels_and_rejects_downgrades() {
+    for (version, id, accepted) in [
+      (ATTRIBUTED_SESSION_VERSION, "Agent_7", true),
+      (ATTRIBUTED_SESSION_VERSION, "finch#0a1f", false),
+      (TAGGED_AGENT_ID_VERSION, "Agent_7", true),
+      (TAGGED_AGENT_ID_VERSION, "finch#0a1f", true),
+      (TAGGED_AGENT_ID_VERSION, "Finch#0a1f", false),
+      (TAGGED_AGENT_ID_VERSION, "finch#a1f", false),
+      (INPUT_SYNC_VERSION, "finch#0a1f", false),
+    ] {
+      let arguments = args(&[version, "attributed-session", ":1", id]);
+      assert_eq!(
+        matches!(parse(&arguments), Ok(Request::AttributedSession { agent_id, .. }) if id == agent_id),
+        accepted,
+        "{version} {id}"
+      );
+    }
+  }
+
+  #[test]
+  fn synchronized_input_preserves_target_scope_and_contract() {
+    assert!(matches!(
+      parse(&args(&[INPUT_SYNC_VERSION, "input-capabilities"])).unwrap(),
+      Request::InputCapabilities
+    ));
+    for (target, window) in [
+      (":0", None),
+      (":0", Some("x11-a")),
+      ("wayland-0", None),
+      ("windows-2", None),
+      ("windows-2", Some("win-a")),
+      ("windows", Some("win-b")),
+      ("macos", Some("macos-1-2")),
+    ] {
+      let mut argv = args(&[INPUT_SYNC_VERSION, "input-sync", target]);
+      argv.extend(window.map(String::from));
+      assert!(
+        matches!(parse(&argv).unwrap(), Request::InputSync(actual, id)
+        if actual == Target::parse(target).unwrap() && id == window)
+      );
+    }
+    for argv in [
+      vec![VIDEO_STREAM_VERSION, "input-capabilities"],
+      vec![X11_WINDOW_INPUT_VERSION, "input-sync", ":0", "x11-1"],
+      vec![INPUT_SYNC_VERSION, "input", ":0"],
+      vec![INPUT_SYNC_VERSION, "input-capabilities", "windows"],
+      vec![INPUT_SYNC_VERSION, "input-sync", "macos"],
+      vec![INPUT_SYNC_VERSION, "input-sync", "windows"],
+      vec![INPUT_SYNC_VERSION, "input-sync", "wayland-0", "window"],
+      vec![INPUT_SYNC_VERSION, "input-sync", ":0", "x11-0"],
+      vec![INPUT_SYNC_VERSION, "input-sync", "macos", "bad"],
+      vec![INPUT_SYNC_VERSION, "input-sync", "windows", "bad/id"],
+      vec![INPUT_SYNC_VERSION, "input-sync", ":0", "x11-1", "extra"],
+    ] {
+      assert!(parse(&args(&argv)).is_err(), "{argv:?}");
+    }
+  }
 
   #[test]
   fn video_operations_require_their_own_contract() {

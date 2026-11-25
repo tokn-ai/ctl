@@ -92,9 +92,20 @@ impl ForwardWindowInput for Session {
 
 impl InputSource for WindowInput {
   fn run(self) -> Result<()> {
+    self.run_channel(false)
+  }
+
+  fn run_synchronized(self) -> Result<()> {
+    self.run_channel(true)
+  }
+}
+
+impl WindowInput {
+  fn run_channel(self, synchronized: bool) -> Result<()> {
     let _dpi = Dpi::enter()?;
     self.target.validate()?;
     state::run_monitored(
+      synchronized,
       window::Window::new(NativeWindow {
         target: self.target,
       }),
@@ -107,10 +118,21 @@ impl InputSource for WindowInput {
 
 impl InputSource for Input {
   fn run(self) -> Result<()> {
+    self.run_channel(false)
+  }
+
+  fn run_synchronized(self) -> Result<()> {
+    self.run_channel(true)
+  }
+}
+
+impl Input {
+  fn run_channel(self, synchronized: bool) -> Result<()> {
     // Keep the DPI guard on this execution thread throughout monitor queries.
     let _dpi = Dpi::enter()?;
     let topology = monitors(self.display)?;
     state::run(
+      synchronized,
       Native {
         display: self.display,
         topology,

@@ -6,6 +6,7 @@ pub mod input;
 mod latency;
 pub mod media;
 pub mod options;
+pub mod sdk;
 pub mod transport;
 
 use crate::{
@@ -15,11 +16,12 @@ use crate::{
 };
 use ctream_proto::{
   Action, ActionResult, BOUNDS_VERSION, CAPTURE_CATALOG_VERSION, CAPTURE_DRIVER_VERSION,
-  CaptureDriverDescriptor, CaptureDriverInfo, DISPLAY_VERSION, Element, LATENCY_VERSION,
-  MACOS_WINDOW_VERSION, Session as DisplaySession, Target, VIDEO_STREAM_VERSION, VideoCapabilities,
-  VideoCodec, VideoOptions, VideoRequest, WAYLAND_WINDOW_VERSION, WINDOWS_DESKTOP_VERSION,
-  WINDOWS_DISPLAY_VERSION, WINDOWS_WINDOW_VERSION, Window, WindowId, X11_FRAME_SIZE,
-  X11_WINDOW_INPUT_VERSION, X11_WINDOW_VERSION, valid_capture_driver, valid_window_id,
+  CaptureDriverDescriptor, CaptureDriverInfo, DISPLAY_VERSION, Element, INPUT_SYNC_VERSION,
+  InputCapabilities, LATENCY_VERSION, MACOS_WINDOW_VERSION, Session as DisplaySession, Target,
+  VIDEO_STREAM_VERSION, VideoCapabilities, VideoCodec, VideoOptions, VideoRequest,
+  WAYLAND_WINDOW_VERSION, WINDOWS_DESKTOP_VERSION, WINDOWS_DISPLAY_VERSION, WINDOWS_WINDOW_VERSION,
+  Window, WindowId, X11_FRAME_SIZE, X11_WINDOW_INPUT_VERSION, X11_WINDOW_VERSION,
+  valid_capture_driver, valid_window_id,
 };
 pub use latency::LatencyProbe;
 use serde::de::DeserializeOwned;
@@ -64,6 +66,16 @@ pub struct Windows(pub Target);
 pub struct CaptureDrivers(pub Target);
 
 pub struct CaptureCatalog;
+
+struct InputSupport;
+
+impl Query for InputSupport {
+  type Reply = InputCapabilities;
+
+  fn arguments(&self) -> io::Result<Vec<String>> {
+    Ok(vec![INPUT_SYNC_VERSION.into(), "input-capabilities".into()])
+  }
+}
 
 pub struct VideoCodecs;
 
@@ -402,6 +414,32 @@ impl<T: Transport> Session<T> {
   }
 
   pub fn input(&self) -> io::Result<Input<T::Reader, T::Writer>> {
+    self.open_input(false)
+  }
+
+  fn supports_input_sync(&self) -> io::Result<bool> {
+    match self.client.query(InputSupport) {
+      Ok(capabilities) => Ok(capabilities.sync),
+      // Earlier agents reject unknown requests with this parser diagnostic.
+      Err(error)
+        if error
+          .to_string()
+          .contains("usage: ctream-agent VERSION OPERATION") =>
+      {
+        Ok(false)
+      }
+      Err(error) => Err(error),
+    }
+  }
+
+  fn synchronized_input(&self) -> io::Result<Input<T::Reader, T::Writer>> {
+    let mut input = self.open_input(true)?;
+    // Verify the installed input driver before sending the first mutation.
+    input.synchronize()?;
+    Ok(input)
+  }
+
+  fn open_input(&self, sync: bool) -> io::Result<Input<T::Reader, T::Writer>> {
     self.require_window_for_desktop()?;
     if !self.supports_input() {
       return Err(io::Error::new(
@@ -425,13 +463,19 @@ impl<T: Transport> Session<T> {
       } else {
         window_version(self.target)
       };
-      window_arguments(version, "input-window", self.target, &window.id)?
+      let (version, operation) = if sync {
+        (INPUT_SYNC_VERSION, "input-sync")
+      } else {
+        (version, "input-window")
+      };
+      window_arguments(version, operation, self.target, &window.id)?
     } else {
-      vec![
-        display_version(self.target).into(),
-        "input".into(),
-        self.target.to_string(),
-      ]
+      let (version, operation) = if sync {
+        (INPUT_SYNC_VERSION, "input-sync")
+      } else {
+        (display_version(self.target), "input")
+      };
+      vec![version.into(), operation.into(), self.target.to_string()]
     };
     Input::open(self.client.transport.open(&arguments)?, format)
   }

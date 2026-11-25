@@ -11,6 +11,11 @@ impl InputSource for InputProcess {
   fn run(self) -> Result<()> {
     run_operation(self.0)
   }
+
+  fn run_synchronized(mut self) -> Result<()> {
+    self.0.arg("--sync");
+    run_operation(self.0)
+  }
 }
 
 struct RunningProcess(Child);

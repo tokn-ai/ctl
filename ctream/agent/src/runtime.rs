@@ -66,6 +66,12 @@ pub fn capture_started<S: CaptureSource, W: Write + Send>(
   source.run(&mut StartedWriter::new(output, header)?, lifetime)
 }
 
+/// Advertise input synchronization without opening a target or injecting input.
+pub fn input_capabilities(output: impl Write) -> Result<()> {
+  serde_json::to_writer(output, &ctream_proto::InputCapabilities { sync: true })?;
+  Ok(())
+}
+
 /// Advertise supported codec negotiation. Encoder availability is checked when
 /// a capture opens because FFmpeg and its encoders are platform dependencies.
 pub fn video_capabilities(output: impl Write) -> Result<()> {

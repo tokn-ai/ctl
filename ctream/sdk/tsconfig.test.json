@@ -3,6 +3,7 @@
   "compilerOptions": {
     "rootDir": ".",
     "noEmit": true,
+    "allowImportingTsExtensions": true,
     "paths": {"@tokn-ai/ctream-sdk": ["./src/index.ts"]}
   },
   "include": ["src/**/*.ts", "tests/**/*.mts"]

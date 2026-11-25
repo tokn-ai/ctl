@@ -113,6 +113,20 @@ pub trait CaptureWindow {
 /// An input endpoint. Current helper adapters inherit the host's standard IO.
 pub trait InputSource {
   fn run(self) -> Result<()>;
+
+  /// Run the 1.1.14 input endpoint, including driver acknowledgements.
+  fn run_synchronized(self) -> Result<()>
+  where
+    Self: Sized,
+  {
+    Err(
+      io::Error::new(
+        io::ErrorKind::Unsupported,
+        "input synchronization is unavailable",
+      )
+      .into(),
+    )
+  }
 }
 
 pub trait ForwardInput {

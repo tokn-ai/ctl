@@ -2,19 +2,40 @@ use ctream_agent::{
   capture as catalog,
   protocol::{Request, TargetOperation, parse},
   runtime::{
-    capture_display, forward_input, forward_window_input, ping, stream_capture, video_capabilities,
+    capture_display, forward_input, forward_window_input, input_capabilities, ping, stream_capture,
+    video_capabilities,
   },
 };
-use ctream_driver::{CaptureOptions, CaptureWindow, Driver, InputSource, Result};
+use ctream_driver::{
+  CaptureOptions, CaptureWindow, Driver, ForwardInput, ForwardWindowInput, InputSource, Result,
+};
 use ctream_driver_capture::windows as capture;
 use ctream_driver_input::windows as input;
 use ctream_proto::{Target, VideoRequest};
-use std::{env, io};
+use std::io;
 
-pub(super) fn run() -> Result<()> {
-  let args: Vec<_> = env::args().skip(1).collect();
-  match parse(&args)? {
+pub(super) fn run(args: &[String]) -> Result<()> {
+  match parse(args)? {
+    Request::AttributedSession {
+      target,
+      agent_id,
+      window,
+    } => crate::attributed::run(target, agent_id, window),
+    Request::SessionCapture { .. } | Request::SessionInput { .. } => {
+      Err("window capture leases require a macOS agent".into())
+    }
     Request::Ping => ping(),
+    Request::InputCapabilities => input_capabilities(io::stdout().lock()),
+    Request::InputSync(Target::Windows(display), None) => {
+      input::Driver.open(&display)?.input()?.run_synchronized()
+    }
+    Request::InputSync(Target::Windows(display), Some(id)) => input::Driver
+      .open(&display)?
+      .input_window(id)?
+      .run_synchronized(),
+    Request::InputSync(Target::WindowsDesktop, Some(id)) => {
+      input::WindowInput::open_desktop(id)?.run_synchronized()
+    }
     Request::VideoCapabilities => video_capabilities(io::stdout().lock()),
     Request::CaptureCatalog { .. } => {
       serde_json::to_writer(io::stdout().lock(), &catalog::catalog())?;

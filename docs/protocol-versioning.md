@@ -771,6 +771,64 @@ requests and responses. Older agents continue serving raw frames through the
 retained capture operations. Input, other named protocols, and product release
 versions are unchanged.
 
+Reusable automation sessions advance `ctream_sdk` from `1.0.1` (build 1) to
+`1.0.2` (build 2). The new local command `ctream session TARGET [--window ID]
+--protocol 1.0.2` reads newline-delimited JSON operations and writes one flushed
+reply per line, in order. The request fields and successful result types match
+`do`. A successful reply contains `ok: true` and `result`. A failed operation
+returns `ok: false` and an `error` string. The limit is 64 KiB per request,
+excluding the newline. Partial and oversized records terminate the session.
+EOF between records closes its input and capture channels. The CLI continues
+to serve the original one-request `do --protocol 1.0.1` contract.
+
+Acknowledged input advances `ctream_agent` from `1.1.13` (build 13) to
+`1.1.14` (build 14). The read-only `input-capabilities` request takes no
+target and returns `{"sync":true}` on updated stock agents. The new
+`input-sync TARGET [WINDOW]` operation uses the selected backend's existing
+input handshake and event syntax. After each `sync\n`, the driver flushes
+`ok\n` once it has dispatched preceding events. An input failure ends the
+channel. The acknowledgement covers input dispatch. The application may
+update its rendered or accessible state later. EOF releases held input.
+
+Contracts `1.0.1` through `1.1.13` retain their input handshakes and events,
+capture formats, and other operations. On older agents the client can keep
+capture open and use EOF to confirm each physical input batch on a separate
+channel. Wayland accessibility remains per request. Other named protocols
+keep their existing versions and builds.
+
+Host attribution advances `ctream_sdk` from `1.0.2` (build 2) to `1.0.3`
+(build 3) and `ctream_agent` from `1.1.14` (build 14) to `1.1.15` (build 15).
+The local `session TARGET --agent-id ID [--window ID] --protocol 1.0.3` opens
+one remote `1.1.15 attributed-session TARGET ID [WINDOW]` channel. The host
+validates the label and target, executes the same bounded newline-delimited
+operations, and returns the same success/error envelopes as SDK build 2.
+The session label stays fixed for its lifetime. Named sessions require the
+new contract on both ends. Older agents reject the request before acting.
+
+The host assigns session and action IDs, serializes mutations for named
+sessions under its OS account, and records operation metadata and outcomes.
+Operators can read that account's recent history with `ctream-agent activity`.
+On macOS, `1.1.15 session-capture macos WINDOW LEASE` and
+`1.1.15 session-input macos WINDOW LEASE` bind the raw capture and acknowledged
+input to the same private 32-hex-digit lease for one named session. The capture
+streams PPM frames and input retains the `ready` and `sync`/`ok` messages.
+
+CLI SDK contracts `1.0.1` and `1.0.2` and agent contracts through `1.1.14`
+retain their operations. Unnamed sessions keep their earlier behavior. The
+TypeScript package version for these changes is `0.1.1`.
+
+Generated agent IDs advance `ctream_sdk` from `1.0.3` (build 3) to `1.0.4`
+(build 4) and `ctream_agent` from `1.1.15` (build 15) to `1.1.16` (build 16).
+The new default CLI session contract generates an ID when `--agent-id` is
+omitted. The TypeScript SDK generates one per client and passes it to every
+session. A tagged ID consists of a lowercase ASCII word, a literal `#`, and
+four lowercase hexadecimal characters. The existing 64-character limit applies.
+The host accepts these IDs on `1.1.16 attributed-session TARGET ID [WINDOW]`.
+Journal entries and request and reply envelopes retain their existing shapes.
+Classic explicit labels can still use SDK build 3 and agent build 15. An
+explicitly selected SDK build 2 continues to open an anonymous session.
+The package version is `0.1.1`.
+
 Every PR description must state its protocol changes, or **None** when there
 are no changes. Include the previous and new contracts and the compatibility
 impact. Keep PR titles brief; put protocol details in the description.

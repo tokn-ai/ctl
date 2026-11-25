@@ -98,6 +98,7 @@ pub(super) enum Event {
   Key(Key, bool),
   Button(u8, bool),
   Reset,
+  Sync,
 }
 
 fn invalid(message: &str) -> io::Error {
@@ -119,6 +120,7 @@ pub(super) fn read_event(reader: &mut impl BufRead) -> io::Result<Option<Event>>
 fn parse(line: &str) -> io::Result<Event> {
   let fields: Vec<_> = line.split_ascii_whitespace().collect();
   match fields.as_slice() {
+    ["sync"] => Ok(Event::Sync),
     ["reset"] => Ok(Event::Reset),
     ["move", x, y, width, height] => {
       let number = |text: &str| {

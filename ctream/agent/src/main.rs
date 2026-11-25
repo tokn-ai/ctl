@@ -1,25 +1,42 @@
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
+mod attributed;
 #[cfg(target_os = "linux")]
 mod linux;
-
 #[cfg(target_os = "macos")]
 mod macos;
-
 #[cfg(windows)]
 mod windows;
 
-#[cfg(target_os = "linux")]
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-  linux::run()
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
+fn run() -> ctream_driver::Result<()> {
+  use ctream_agent::activity;
+  let args: Vec<String> = std::env::args().skip(1).collect();
+  if args.first().is_some_and(|arg| arg == "activity") {
+    let limit = match &args[1..] {
+      [] => 50,
+      [option, value] if option == "--limit" => value.parse()?,
+      _ => return Err("usage: ctream-agent activity [--limit COUNT]".into()),
+    };
+    activity::write_recent(std::io::stdout().lock(), limit)?;
+    return Ok(());
+  }
+  #[cfg(target_os = "macos")]
+  {
+    macos::run(&args)
+  }
+  #[cfg(target_os = "linux")]
+  {
+    linux::run(&args)
+  }
+  #[cfg(windows)]
+  {
+    windows::run(&args)
+  }
 }
 
-#[cfg(windows)]
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-  windows::run()
-}
-
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 fn main() -> std::process::ExitCode {
-  match macos::run() {
+  match run() {
     Ok(()) => std::process::ExitCode::SUCCESS,
     Err(error) => {
       eprintln!("ctream-agent: {error}");

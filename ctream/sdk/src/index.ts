@@ -1,3 +1,4 @@
+import type { Request, SessionTransport } from "./session-transport.js";
 import { cli, type CtreamOptions } from "./command.js";
 import {
   displaySession, expectShape, isCapabilities, isElement, isScreenshot, isWindow,
@@ -12,20 +13,25 @@ export type {
 } from "./model.js";
 
 export class Ctream {
-  readonly #run: ReturnType<typeof cli>;
+  readonly #cli: ReturnType<typeof cli>;
 
   constructor(options: CtreamOptions = {}) {
-    this.#run = cli(options);
+    this.#cli = cli(options);
+  }
+
+  /** Stable identity used by every session opened by this client. */
+  get agent_id(): string {
+    return this.#cli.agent_id;
   }
 
   async displays(): Promise<DisplaySession[]> {
-    const reply = await this.#run(["list", "--json"]);
+    const reply = await this.#cli.query(["list", "--json"]);
     expectShape(Array.isArray(reply), "display list");
     return reply.map(displaySession);
   }
 
   async windows(target: string): Promise<Window[]> {
-    const reply = await this.#run(["windows", target, "--json"]);
+    const reply = await this.#cli.query(["windows", target, "--json"]);
     expectShape(Array.isArray(reply) && reply.every(isWindow), "window list");
     return reply;
   }
@@ -45,13 +51,10 @@ export class Ctream {
 
   /** Bind observation and input to a single display or a discovered window ID. */
   session(target: string, window_id?: string): CtreamSession {
-    const args = ["do", target, "--protocol", "1.0.1"];
-    if (window_id !== undefined) args.push("--window", window_id);
-    return new CtreamSession((request) => this.#run(args, request));
+    return new CtreamSession(this.#cli.session(target, window_id));
   }
 }
 
-type Request = {operation: string} & Record<string, unknown>;
 type PointerOptions = {button?: Button; size?: Size};
 
 // OCR matches and other structurally compatible points may carry additional data.
@@ -91,53 +94,66 @@ function chordKeys(keys: string | readonly string[]): string[] {
 }
 
 class CtreamSession {
-  readonly #request: (request: Request) => Promise<unknown>;
+  readonly #transport: SessionTransport;
   #last_size?: Size;
 
-  constructor(request: (request: Request) => Promise<unknown>) {
-    this.#request = request;
+  constructor(transport: SessionTransport) {
+    this.#transport = transport;
+  }
+
+  /** Drain admitted requests and release this session's capture and input resources. */
+  close(): Promise<void> {
+    return this.#transport.close();
+  }
+
+  [Symbol.asyncDispose](): Promise<void> {
+    return this.close();
   }
 
   async capabilities(): Promise<Capabilities> {
-    const reply = await this.#request({operation: "capabilities"});
-    expectShape(isCapabilities(reply), "session capabilities");
-    return reply;
+    return this.#transport.request({operation: "capabilities"}, (reply) => {
+      expectShape(isCapabilities(reply), "session capabilities");
+      return reply;
+    });
   }
 
   async screenshot(): Promise<Screenshot> {
-    const reply = await this.#request({operation: "screenshot"});
-    expectShape(isScreenshot(reply), "PNG screenshot");
-    this.#last_size = [reply.width, reply.height];
-    return reply;
+    return this.#transport.request({operation: "screenshot"}, (reply) => {
+      expectShape(isScreenshot(reply), "PNG screenshot");
+      this.#last_size = [reply.width, reply.height];
+      return reply;
+    });
   }
 
-  #size(size?: Size): Size {
-    const dimensions = size ?? this.#last_size;
-    if (!dimensions) {
-      throw new Error("call screenshot() on this session first or supply its image size");
-    }
-    return dimensions;
+  #act(request: Request | (() => Request)): Promise<void> {
+    return this.#transport.request(request, (reply) => {
+      expectShape(reply === null, "null after applying the action");
+    });
   }
 
-  async #act(request: Request): Promise<void> {
-    const reply = await this.#request(request);
-    expectShape(reply === null, "null after applying the action");
+  #pointer(action: Request, size?: Size): Promise<void> {
+    const explicit: Size | undefined = size && [size[0], size[1]];
+    return this.#act(() => {
+      const dimensions = explicit ?? this.#last_size;
+      if (!dimensions) throw new Error("call screenshot() on this session first or supply its image size");
+      return {...action, size: dimensions};
+    });
   }
 
   async move(point: Point, size?: Size): Promise<void> {
-    await this.#act({operation: "move", point: coordinates(point), size: this.#size(size)});
+    await this.#pointer({operation: "move", point: coordinates(point)}, size);
   }
 
   async click(point: Point, {button = "left", size}: PointerOptions = {}): Promise<void> {
-    await this.#act({operation: "click", point: coordinates(point), button, size: this.#size(size)});
+    await this.#pointer({operation: "click", point: coordinates(point), button}, size);
   }
 
   async drag(from: Point, to: Point, {button = "left", size}: PointerOptions = {}): Promise<void> {
-    await this.#act({operation: "drag", from: coordinates(from), to: coordinates(to), button, size: this.#size(size)});
+    await this.#pointer({operation: "drag", from: coordinates(from), to: coordinates(to), button}, size);
   }
 
   async scroll(point: Point, direction: Direction, {steps = 1, size}: {steps?: number; size?: Size} = {}): Promise<void> {
-    await this.#act({operation: "scroll", point: coordinates(point), direction, steps, size: this.#size(size)});
+    await this.#pointer({operation: "scroll", point: coordinates(point), direction, steps}, size);
   }
 
   /** A simultaneous chord such as "cmd+a" or "cmd++" (US physical keys). */
@@ -150,9 +166,10 @@ class CtreamSession {
   }
 
   async elements(): Promise<Element[]> {
-    const reply = await this.#request({operation: "elements"});
-    expectShape(Array.isArray(reply) && reply.every(isElement), "element list");
-    return reply;
+    return this.#transport.request({operation: "elements"}, (reply) => {
+      expectShape(Array.isArray(reply) && reply.every(isElement), "element list");
+      return reply;
+    });
   }
 
   async invoke(path: string, index: number, name: string): Promise<void> {

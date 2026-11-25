@@ -109,7 +109,7 @@ impl Devices {
     }
   }
 
-  fn event(&mut self, line: &str) -> Result<(), Box<dyn Error>> {
+  fn event(&mut self, line: &str, synchronized: bool) -> Result<(), Box<dyn Error>> {
     let fields: Vec<_> = line.split_ascii_whitespace().collect();
     match fields.as_slice() {
       ["reset"] => self.reset(),
@@ -123,8 +123,10 @@ impl Devices {
       }
       ["key", name, state @ ("0" | "1")] => {
         let symbol = xkb::keysym_from_name(name, xkb::KEYSYM_NO_FLAGS);
-        if let Some(&code) = self.keycodes.get(&symbol) {
-          self.key(code, *state == "1");
+        match self.keycodes.get(&symbol) {
+          Some(&code) if !synchronized || symbol.raw() != 0 => self.key(code, *state == "1"),
+          _ if synchronized => return Err("unsupported Wayland key".into()),
+          _ => {}
         }
       }
       ["button", button, state @ ("0" | "1")] => {
@@ -159,6 +161,7 @@ impl Devices {
 }
 
 pub(super) fn run() -> Result<(), Box<dyn Error>> {
+  let synchronized = std::env::args().skip(1).eq(["--sync"]);
   let conn = Connection::connect_to_env()?;
   let (globals, mut queue) = registry_queue_init::<Client>(&conn)?;
   let qh = queue.handle();
@@ -209,14 +212,25 @@ pub(super) fn run() -> Result<(), Box<dyn Error>> {
   };
   queue.roundtrip(&mut Client)?;
   println!("ready");
-  for line in io::stdin().lock().lines() {
-    devices.event(&line?)?;
-    conn.flush()?;
-    queue.dispatch_pending(&mut Client)?;
-  }
+  let result = (|| {
+    for line in io::stdin().lock().lines() {
+      let line = line?;
+      if synchronized && line == "sync" {
+        queue.roundtrip(&mut Client)?;
+        let mut output = io::stdout().lock();
+        output.write_all(b"ok\n")?;
+        output.flush()?;
+        continue;
+      }
+      devices.event(&line, synchronized)?;
+      conn.flush()?;
+      queue.dispatch_pending(&mut Client)?;
+    }
+    Ok(())
+  })();
   devices.reset();
   devices.pointer.destroy();
   devices.keyboard.destroy();
   queue.roundtrip(&mut Client)?;
-  Ok(())
+  result
 }

@@ -88,7 +88,7 @@ impl Capture {
   /// Opens the native picker on the main thread. Frame events may arrive on
   /// the capture queue, so the callback must be thread-safe and nonblocking.
   pub fn start(callback: impl Fn(Event) + Send + Sync + 'static) -> io::Result<Self> {
-    Self::start_source(ptr::null_mut(), DEFAULT_MAX_FPS, callback)
+    Self::start_source(ptr::null_mut(), DEFAULT_MAX_FPS, false, callback)
   }
 
   /// Captures the selected window from a discovery snapshot on the main thread.
@@ -96,7 +96,16 @@ impl Capture {
     window: &Window,
     callback: impl Fn(Event) + Send + Sync + 'static,
   ) -> io::Result<Self> {
-    Self::start_source(window.native.0.as_ptr(), DEFAULT_MAX_FPS, callback)
+    Self::start_source(window.native.0.as_ptr(), DEFAULT_MAX_FPS, false, callback)
+  }
+
+  /// Capture a directly selected window for an independently leased session.
+  /// Each handle owns its own stream, including when both select the same window.
+  pub fn start_session_window(
+    window: &Window,
+    callback: impl Fn(Event) + Send + Sync + 'static,
+  ) -> io::Result<Self> {
+    Self::start_source(window.native.0.as_ptr(), DEFAULT_MAX_FPS, true, callback)
   }
 
   /// Captures a listed window on the main thread with a selected frame-rate cap.
@@ -111,6 +120,7 @@ impl Capture {
     Self::start_source(
       window.native.0.as_ptr(),
       i32::from(options.max_fps()),
+      false,
       callback,
     )
   }
@@ -126,6 +136,7 @@ impl Capture {
   fn start_source(
     window: *mut c_void,
     max_fps: i32,
+    independent: bool,
     callback: impl Fn(Event) + Send + Sync + 'static,
   ) -> io::Result<Self> {
     let context = Box::into_raw(Box::new(Callback(Box::new(callback))));
@@ -134,6 +145,7 @@ impl Capture {
       ctream_sck_start(
         window,
         max_fps,
+        i32::from(independent),
         context.cast(),
         frame,
         end,
@@ -303,6 +315,7 @@ unsafe extern "C" {
   fn ctream_sck_start(
     window: *mut c_void,
     max_fps: i32,
+    independent: i32,
     context: *mut c_void,
     frame: unsafe extern "C" fn(*mut c_void, *const u8, usize, usize, usize, usize),
     end: unsafe extern "C" fn(*mut c_void, i32, *const c_char),

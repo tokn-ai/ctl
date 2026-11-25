@@ -107,7 +107,7 @@ impl WindowInput {
     Ok(geometry)
   }
 
-  fn dispatch(&mut self, command: Command<'_>) -> Result<()> {
+  fn dispatch(&mut self, command: Command<'_>, synchronized: bool) -> Result<()> {
     let geometry = self.geometry()?;
     let size = [geometry.width, geometry.height];
 
@@ -143,6 +143,9 @@ impl WindowInput {
       Command::Key(name, pressed) => {
         // Some layouts do not have all keys the preview can name.
         let Some(&code) = self.keyboard.codes.get(canonical_key(name)) else {
+          if synchronized {
+            return Err("unsupported X11 key".into());
+          }
           return Ok(());
         };
         let point = self.point(size)?;
@@ -329,7 +332,12 @@ impl WindowInput {
     Ok(())
   }
 
-  fn receive(&mut self, reader: &mut impl BufRead) -> Result<()> {
+  fn receive(
+    &mut self,
+    reader: &mut impl BufRead,
+    output: &mut impl Write,
+    synchronized: bool,
+  ) -> Result<()> {
     let mut line = String::new();
     loop {
       line.clear();
@@ -340,19 +348,34 @@ impl WindowInput {
       if bytes > 128 || !line.ends_with('\n') {
         return Err("X11 input command exceeds 128 bytes or is incomplete".into());
       }
-      self.dispatch(Command::parse(&line)?)?;
+      if synchronized && line == "sync\n" {
+        // Each SendEvent has already completed its checked server request.
+        self.geometry()?;
+        output.write_all(b"ok\n")?;
+        output.flush()?;
+      } else {
+        self.dispatch(Command::parse(&line)?, synchronized)?;
+      }
     }
   }
 }
 
 impl InputSource for WindowInput {
-  fn run(mut self) -> Result<()> {
-    {
-      let mut stdout = io::stdout().lock();
-      writeln!(stdout, "ready")?;
-      stdout.flush()?;
-    }
-    let result = self.receive(&mut io::stdin().lock());
+  fn run(self) -> Result<()> {
+    self.run_channel(false)
+  }
+
+  fn run_synchronized(self) -> Result<()> {
+    self.run_channel(true)
+  }
+}
+
+impl WindowInput {
+  fn run_channel(mut self, synchronized: bool) -> Result<()> {
+    let mut stdout = io::stdout().lock();
+    writeln!(stdout, "ready")?;
+    stdout.flush()?;
+    let result = self.receive(&mut io::stdin().lock(), &mut stdout, synchronized);
     if self.buttons.is_empty() && self.keys.is_empty() {
       return result;
     }

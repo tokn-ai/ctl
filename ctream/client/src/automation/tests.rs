@@ -267,3 +267,5 @@ fn bad_macos_input_handshake_still_finishes_capture() {
     ]
   );
 }
+
+mod stream;

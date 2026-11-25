@@ -29,8 +29,17 @@ impl<B: Backend> Held<B> {
     }
   }
 
-  fn apply(&mut self, event: Event) -> io::Result<()> {
+  fn apply(&mut self, event: Event, output: &mut impl Write, synchronized: bool) -> io::Result<()> {
     match event {
+      Event::Sync if synchronized => {
+        self.backend.validate_target()?;
+        output.write_all(b"ok\n")?;
+        output.flush()
+      }
+      Event::Sync => Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "unknown input command",
+      )),
       Event::Move { point, size } => {
         self.backend.validate_target()?;
         self.backend.move_pointer(point, size)
@@ -111,6 +120,7 @@ impl<B: Backend> Drop for Held<B> {
 }
 
 pub(super) fn run(
+  synchronized: bool,
   backend: impl Backend,
   input: &mut impl BufRead,
   output: &mut impl Write,
@@ -119,7 +129,7 @@ pub(super) fn run(
   output.write_all(b"ready\n")?;
   output.flush()?;
   while let Some(event) = read_event(input)? {
-    state.apply(event)?;
+    state.apply(event, output, synchronized)?;
   }
   state.reset()
 }
@@ -128,6 +138,7 @@ pub(super) fn run(
 /// release held input promptly when its target disappears. On error the agent
 /// exits; a pending stdin read cannot delay target cleanup or process shutdown.
 pub(super) fn run_monitored(
+  synchronized: bool,
   backend: impl Backend,
   mut input: impl BufRead + Send + 'static,
   output: &mut impl Write,
@@ -144,10 +155,11 @@ pub(super) fn run_monitored(
         }
       }
     })?;
-  run_received(backend, receiver, output)
+  run_received(synchronized, backend, receiver, output)
 }
 
 fn run_received(
+  synchronized: bool,
   backend: impl Backend,
   receiver: Receiver<io::Result<Option<Event>>>,
   output: &mut impl Write,
@@ -162,7 +174,7 @@ fn run_received(
       next_check = Instant::now() + Duration::from_millis(50);
     }
     match receiver.recv_timeout(next_check.saturating_duration_since(Instant::now())) {
-      Ok(Ok(Some(event))) => state.apply(event)?,
+      Ok(Ok(Some(event))) => state.apply(event, output, synchronized)?,
       Ok(Ok(None)) | Err(RecvTimeoutError::Disconnected) => break,
       Ok(Err(error)) => return Err(error),
       Err(RecvTimeoutError::Timeout) => continue,
@@ -213,6 +225,31 @@ mod tests {
   }
 
   #[test]
+  fn sync_acknowledges_dispatched_events_only_on_the_new_channel() {
+    for (synchronized, fail_key_down, expected) in [
+      (false, false, b"ready\n".as_slice()),
+      (true, false, b"ready\nok\nok\n".as_slice()),
+      (true, true, b"ready\nok\n".as_slice()),
+    ] {
+      let backend = Fake {
+        events: Rc::default(),
+        fail_key_down,
+        fail_key_up_once: false,
+        invalidate_after: None,
+      };
+      let mut output = Vec::new();
+      let result = run_monitored(
+        synchronized,
+        backend,
+        io::Cursor::new(b"sync\nkey a 1\nsync\n"),
+        &mut output,
+      );
+      assert_eq!(result.is_ok(), synchronized && !fail_key_down);
+      assert_eq!(output, expected);
+    }
+  }
+
+  #[test]
   fn eof_and_invalid_requests_release_only_successfully_injected_inputs() {
     let key = super::super::protocol::key("a").unwrap();
     for ending in ["", "bad\n"] {
@@ -228,7 +265,7 @@ mod tests {
       );
       let mut output = Vec::new();
       assert_eq!(
-        run(backend, &mut data.as_bytes(), &mut output).is_ok(),
+        run(false, backend, &mut data.as_bytes(), &mut output).is_ok(),
         ending.is_empty()
       );
       assert_eq!(output, b"ready\n");
@@ -250,7 +287,15 @@ mod tests {
       fail_key_up_once: false,
       invalidate_after: None,
     };
-    assert!(run(backend, &mut &b"button 1 1\nkey a 1\n"[..], &mut Vec::new()).is_err());
+    assert!(
+      run(
+        false,
+        backend,
+        &mut &b"button 1 1\nkey a 1\n"[..],
+        &mut Vec::new()
+      )
+      .is_err()
+    );
     assert_eq!(
       *events.borrow(),
       [Event::Button(1, true), Event::Button(1, false)]
@@ -267,6 +312,7 @@ mod tests {
       invalidate_after: None,
     };
     run(
+      false,
       backend,
       &mut &b"button 8 1\nreset\nreset\nbutton 8 1\n"[..],
       &mut Vec::new(),
@@ -295,6 +341,7 @@ mod tests {
     };
     assert!(
       run(
+        false,
         backend,
         &mut &b"key a 1\nbutton 1 1\nreset\n"[..],
         &mut Vec::new(),
@@ -329,7 +376,7 @@ mod tests {
         invalidate_after: Some(2),
       };
       let data = format!("key a 1\nbutton 1 1\n{blocked}");
-      assert!(run(backend, &mut data.as_bytes(), &mut Vec::new()).is_err());
+      assert!(run(false, backend, &mut data.as_bytes(), &mut Vec::new()).is_err());
       assert_eq!(
         *events.borrow(),
         [
@@ -349,7 +396,7 @@ mod tests {
         invalidate_after: Some(2),
       };
       let data = format!("key a 1\nbutton 1 1\n{release}");
-      run(backend, &mut data.as_bytes(), &mut Vec::new()).unwrap();
+      run(false, backend, &mut data.as_bytes(), &mut Vec::new()).unwrap();
       assert_eq!(
         *events.borrow(),
         [
@@ -375,7 +422,7 @@ mod tests {
     let (sender, receiver) = mpsc::channel();
     sender.send(Ok(Some(Event::Key(key, true)))).unwrap();
     sender.send(Ok(Some(Event::Button(1, true)))).unwrap();
-    assert!(run_received(backend, receiver, &mut Vec::new()).is_err());
+    assert!(run_received(false, backend, receiver, &mut Vec::new()).is_err());
     assert_eq!(
       *events.borrow(),
       [
@@ -398,7 +445,13 @@ mod tests {
       invalidate_after: None,
     };
     let mut output = Vec::new();
-    run_monitored(backend, io::Cursor::new(b"button 1 1\n"), &mut output).unwrap();
+    run_monitored(
+      false,
+      backend,
+      io::Cursor::new(b"button 1 1\n"),
+      &mut output,
+    )
+    .unwrap();
     assert_eq!(output, b"ready\n");
     assert_eq!(
       *events.borrow(),

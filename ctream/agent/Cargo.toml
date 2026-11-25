@@ -8,10 +8,18 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+ctream-client.workspace = true
 ctream-driver.workspace = true
 ctream-driver-codec.workspace = true
 ctream-proto.workspace = true
+dirs.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+uuid.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true
 
 [target.'cfg(any(target_os = "linux", windows))'.dependencies]
 ctream-driver-capture.workspace = true
@@ -24,9 +32,6 @@ ctream-driver-capture.workspace = true
 ctream-driver-input.workspace = true
 dispatch2 = "0.3.1"
 libc = "0.2"
-
-[dev-dependencies]
-ctream-client.workspace = true
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 x11rb = "0.14.0"

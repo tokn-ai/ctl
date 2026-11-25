@@ -2,19 +2,43 @@ use ctream_agent::protocol::{Request, TargetOperation, parse};
 use ctream_agent::{
   capture as catalog,
   runtime::{
-    capture_display, capture_window, forward_input, forward_window_input, ping, video_capabilities,
+    capture_display, capture_window, forward_input, forward_window_input, input_capabilities, ping,
+    video_capabilities,
   },
 };
-use ctream_driver::{ControlSource, Driver, Result};
+use ctream_driver::{ControlSource, Driver, ForwardInput, ForwardWindowInput, InputSource, Result};
 use ctream_driver_capture::linux as capture;
 use ctream_driver_input::linux as input;
 use ctream_proto::{Target, VideoRequest};
-use std::{env, io};
+use std::io;
 
-pub(super) fn run() -> Result<()> {
-  let args: Vec<_> = env::args().skip(1).collect();
-  match parse(&args)? {
+pub(super) fn run(args: &[String]) -> Result<()> {
+  match parse(args)? {
+    Request::AttributedSession {
+      target,
+      agent_id,
+      window,
+    } => crate::attributed::run(target, agent_id, window),
+    Request::SessionCapture { .. } | Request::SessionInput { .. } => {
+      Err("window capture leases require a macOS agent".into())
+    }
     Request::Ping => ping(),
+    Request::InputCapabilities => input_capabilities(io::stdout().lock()),
+    Request::InputSync(target, window) => match (target, window) {
+      (Target::X11(display), None) => input::x11::Driver
+        .open(&display)?
+        .input()?
+        .run_synchronized(),
+      (Target::X11(display), Some(id)) => input::x11::Driver
+        .open(&display)?
+        .input_window(id)?
+        .run_synchronized(),
+      (Target::Wayland(display), None) => input::wayland::Driver
+        .open(&display)?
+        .input()?
+        .run_synchronized(),
+      _ => Err("this agent supports Linux displays and X11 window input".into()),
+    },
     Request::VideoCapabilities => video_capabilities(io::stdout().lock()),
     Request::CaptureCatalog { .. } => {
       serde_json::to_writer(io::stdout().lock(), &catalog::catalog())?;

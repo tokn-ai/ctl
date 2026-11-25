@@ -289,8 +289,10 @@ The viewer syncs the matching agent over the saved SSH route and opens the
 capture setup. Use the WSL endpoint for a Windows desktop. See
 [ctream workspace setup](docs/proposals/0020-ctream.md#workspace-hosts).
 
-TypeScript agents can select the same displays and windows, read PNG screenshots,
-locate text, and send input through the local or SSH client. See the
+TypeScript agents can keep a display or window session open, read PNG screenshots
+from its capture stream, locate text, and send input locally or over SSH.
+Each client gets an ID such as `otter#7c2a`. Set `agent_id` to supply your own.
+Run `ctream-agent activity` on the display host to see who issued each action. See the
 [ctream TypeScript SDK and AUV migration guide](ctream/sdk/README.md).
 
 For the tmux-style terminal UI (local sessions, including when run inside SSH):

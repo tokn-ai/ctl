@@ -13,10 +13,8 @@ name = "ctream"
 path = "src/main.rs"
 
 [dependencies]
-base64.workspace = true
 ctream-client.workspace = true
 ctream-platform.workspace = true
 ctream-proto.workspace = true
-png = "0.18.1"
-serde.workspace = true
 serde_json.workspace = true
+uuid.workspace = true

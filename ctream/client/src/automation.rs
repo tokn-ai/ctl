@@ -1,22 +1,23 @@
 //! Screenshot-relative pointer actions and physical keyboard input for agents.
 
+mod capture;
 mod keyboard;
+mod session;
+pub use session::Automation;
 #[cfg(test)]
 mod tests;
 
 use crate::{
   Session,
   input::Input,
-  media::{Capture, CaptureLifetime, Frame, FrameReader, VideoSource},
+  media::{Frame, VideoSource},
   transport::Transport,
   validate_window_id,
 };
+use capture::ActiveCapture;
 use ctream_proto::{Target, WindowId};
 use serde::{Deserialize, Serialize};
-use std::{
-  io::{self, Read, Write},
-  thread::{self, JoinHandle},
-};
+use std::io::{self, Read, Write};
 
 fn invalid(message: &str) -> io::Error {
   io::Error::new(io::ErrorKind::InvalidInput, message)
@@ -88,9 +89,7 @@ impl<T: Transport> Session<T> {
     let mut frame = Frame::default();
     capture.read_frame(&mut frame)?;
     if self.target == Target::MacosDesktop {
-      let (mut reader, mut lifetime) = capture.split();
-      lifetime.close_writer();
-      drain_capture(&mut reader)?;
+      ActiveCapture::start(capture)?.finish()?;
     }
     Ok(frame)
   }
@@ -109,48 +108,6 @@ impl<T: Transport> Session<T> {
       input: Some(input),
       capture,
     })
-  }
-}
-
-fn drain_capture<R: Read>(reader: &mut FrameReader<R>) -> io::Result<()> {
-  let mut frame = Frame::default();
-  while reader.try_read_frame(&mut frame)? {}
-  Ok(())
-}
-
-// The macOS agent grants one capture at a time. Drain while controlling so
-// backpressure cannot block the server when it needs to finish the capture.
-struct ActiveCapture<W: Write> {
-  lifetime: CaptureLifetime<W>,
-  worker: Option<JoinHandle<io::Result<()>>>,
-}
-
-impl<W: Write> ActiveCapture<W> {
-  fn start<R: Read + Send + 'static>(capture: Capture<R, W>) -> io::Result<Self> {
-    let (mut reader, lifetime) = capture.split();
-    let worker = thread::Builder::new()
-      .name("ctream-control-capture".into())
-      .spawn(move || drain_capture(&mut reader))?;
-    Ok(Self {
-      lifetime,
-      worker: Some(worker),
-    })
-  }
-
-  fn finish(&mut self) -> io::Result<()> {
-    self.lifetime.close_writer();
-    if let Some(worker) = self.worker.take() {
-      worker
-        .join()
-        .map_err(|_| io::Error::other("capture reader panicked"))??;
-    }
-    Ok(())
-  }
-}
-
-impl<W: Write> Drop for ActiveCapture<W> {
-  fn drop(&mut self) {
-    let _ = self.finish();
   }
 }
 

@@ -154,6 +154,8 @@ group. It restores the complete last successful site, verifies retained componen
 sets, stages every new archive and updater, and writes channel pointers. The job
 adds the landing page to the same Pages artifact and verifies the public page,
 channel pointers, and runtime archive URLs after deployment.
+The Pages artifact name includes the run and attempt, so a rerun deploys its
+own upload.
 A separate 90-day Actions snapshot keeps the bundle catalog and assets for
 recovery. Restoration requires the exact attempt's successful Pages deployment
 step, even if a later desktop job failed or the overall workflow is still

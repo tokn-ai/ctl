@@ -244,6 +244,9 @@ test("the only Pages publisher adds the landing page after staging or restoring 
   const workflow = await readFile(new URL("bundles.yml", directory), "utf8");
   const pages = workflow.split("  bundle-pages:")[1]!.split("  ctld:")[0]!;
   assert.match(pages, /inputs\.recover_pages && github\.ref == 'refs\/heads\/main'/);
+  assert.match(pages, /PAGES_ARTIFACT_NAME: github-pages-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}/);
+  assert.match(pages, /uses: actions\/upload-pages-artifact@v\d+\s+with:\s+name: \$\{\{ env\.PAGES_ARTIFACT_NAME \}\}/);
+  assert.match(pages, /uses: actions\/deploy-pages@v\d+\s+with:\s+artifact_name: \$\{\{ env\.PAGES_ARTIFACT_NAME \}\}/);
   const stages = [
     "target/bundle-pages-site --snapshot-only",
     "Save complete site snapshot",

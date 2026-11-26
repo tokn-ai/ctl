@@ -375,6 +375,8 @@ jobs:
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
+    env:
+      PAGES_ARTIFACT_NAME: github-pages-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
@@ -445,12 +447,15 @@ jobs:
         if: steps.recovery.outcome == 'success' || steps.stage.outputs.publish == 'true'
         uses: actions/upload-pages-artifact@v4
         with:
+          name: ${{ env.PAGES_ARTIFACT_NAME }}
           path: target/bundle-pages-site
           include-hidden-files: true
       - name: Deploy bundle Pages
         if: steps.recovery.outcome == 'success' || steps.stage.outputs.publish == 'true'
         id: deployment
         uses: actions/deploy-pages@v4
+        with:
+          artifact_name: ${{ env.PAGES_ARTIFACT_NAME }}
 
       - name: Verify public landing page and bundles
         if: steps.recovery.outcome == 'success' || steps.stage.outputs.publish == 'true'

@@ -782,6 +782,7 @@ fn standalone_signing_replaces_the_development_subcommand() {
   let help = String::from_utf8(help.stdout).unwrap();
   assert!(help.contains("Usage: ctlup sign [OPTIONS]"));
   assert!(help.contains("--version <VERSION>"));
+  assert!(help.contains("--channel <CHANNEL>"));
 
   let obsolete = home.command(&["dev", "sign"]).output().unwrap();
   assert!(!obsolete.status.success());
@@ -791,26 +792,23 @@ fn standalone_signing_replaces_the_development_subcommand() {
 
 #[cfg(target_os = "macos")]
 #[test]
-fn signing_without_an_active_development_build_explains_both_modes() {
+fn signing_without_a_cached_desktop_explains_local_preparation() {
   let home = Home::new();
   let output = home.command(&["sign"]).output().unwrap();
   assert!(!output.status.success());
   let message = String::from_utf8(output.stderr).unwrap();
   assert!(
-    message.contains("No active local development build"),
+    message.contains("No active local development runtime or cached desktop build"),
     "{message}"
   );
-  assert!(message.contains("ctlup dev"), "{message}");
-  assert!(
-    message.contains("ctlup sign --version <VERSION>"),
-    "{message}"
-  );
+  assert!(message.contains("ctlup install app"), "{message}");
+  assert!(message.contains("--version"), "{message}");
   assert!(!home.registry().exists());
 }
 
 #[cfg(target_os = "macos")]
 #[test]
-fn signing_a_release_installation_requires_an_explicit_version() {
+fn signing_without_a_desktop_preserves_an_active_runtime_installation() {
   let home = Home::new();
   let (_, bytes) = archive('a');
   let output = home.install(&bytes);
@@ -819,30 +817,55 @@ fn signing_a_release_installation_requires_an_explicit_version() {
   let output = home.command(&["sign"]).output().unwrap();
   assert!(!output.status.success());
   let message = String::from_utf8(output.stderr).unwrap();
-  assert!(message.contains("local development build"), "{message}");
-  assert!(
-    message.contains("ctlup sign --version <VERSION>"),
-    "{message}"
-  );
+  assert!(message.contains("cached desktop build"), "{message}");
+  assert!(message.contains("ctlup install app"), "{message}");
   assert_eq!(fs::read(home.registry()).unwrap(), recorded);
 }
 
 #[cfg(target_os = "macos")]
 #[test]
-fn signing_an_explicit_ci_version_checks_credentials_without_an_active_build() {
-  let home = Home::new();
-  let output = home
-    .command(&["sign", "--version", "v0.1.4"])
-    .env_remove("CTLD_PROVISIONING_PROFILE")
-    .output()
-    .unwrap();
-  assert!(!output.status.success());
-  let message = String::from_utf8(output.stderr).unwrap();
-  assert!(
-    message.contains("Set CTLD_PROVISIONING_PROFILE"),
-    "{message}"
-  );
-  assert!(!home.registry().exists());
+fn signing_selectors_require_a_local_cached_package_before_credentials_or_network() {
+  for (options, expected) in [
+    (
+      &["--version", "v0.1.4"][..],
+      "No desktop package for 0.1.4 is cached",
+    ),
+    (
+      &["--channel", "nightly"][..],
+      "No nightly desktop package is cached",
+    ),
+    (
+      &["--channel", "stable"][..],
+      "No stable desktop package is cached",
+    ),
+  ] {
+    let home = Home::new();
+    let output = home
+      .command(&["sign"])
+      .args(options)
+      .env_remove("CTLD_PROVISIONING_PROFILE")
+      .env_remove("APPLE_API_KEY_PATH")
+      .env_remove("APPLE_API_KEY")
+      .env_remove("APPLE_API_ISSUER")
+      .env("HTTPS_PROXY", "http://127.0.0.1:9")
+      .env("https_proxy", "http://127.0.0.1:9")
+      .env("NO_PROXY", "")
+      .env("no_proxy", "")
+      .output()
+      .unwrap();
+    assert!(!output.status.success());
+    let message = String::from_utf8(output.stderr).unwrap();
+    assert!(message.contains(expected), "{message}");
+    assert!(message.contains("Install"), "{message}");
+    assert!(
+      !message.contains("Set CTLD_PROVISIONING_PROFILE"),
+      "{message}"
+    );
+    assert!(!message.contains("Downloading"), "{message}");
+    assert_eq!(output.stdout, [] as [u8; 0]);
+    assert!(!home.registry().exists());
+    assert!(!home.updater_root().join("signed").exists());
+  }
 }
 
 #[cfg(target_os = "macos")]

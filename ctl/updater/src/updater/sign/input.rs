@@ -8,9 +8,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 pub(super) fn prepare(archive: &Path, staged: &Path, version: &str) -> io::Result<PathBuf> {
-  let extracted = macos::stage(archive, staged, version, DesktopSigning::Unsigned);
-  fs::remove_file(archive)?;
-  let app = extracted?;
+  let app = macos::stage(archive, staged, version, DesktopSigning::Unsigned)?;
   verify_contents(&app, version)?;
   Ok(app)
 }
@@ -148,12 +146,13 @@ mod tests {
   }
 
   #[test]
-  fn extracts_and_removes_the_downloaded_archive() {
+  fn extracts_without_changing_the_local_archive() {
     let fixture = Fixture::new(|app| {
       symlink("MacOS/ctmux-app", app.join("Contents/Current")).unwrap();
     });
+    let archive = fs::read(&fixture.archive).unwrap();
     let app = fixture.prepare().unwrap();
-    assert!(!fixture.archive.exists());
+    assert_eq!(fs::read(&fixture.archive).unwrap(), archive);
     assert_eq!(
       fs::read_link(app.join("Contents/Current")).unwrap(),
       Path::new("MacOS/ctmux-app")

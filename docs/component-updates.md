@@ -222,6 +222,12 @@ release. Nightly and PR packages use the verified GitHub Actions artifact for
 the selected revision. macOS signatures and Windows portable package checks
 remain part of package verification.
 
+On macOS, an unsigned published app is signed and notarized before activation
+when the Apple signing credentials and Developer ID Application identity are
+available locally. Otherwise installation continues unsigned and prints a
+message. The verified downloaded archive stays in the cache, and the signed
+copy uses its own archive digest for installation and repair.
+
 Open the desktop from the profile's `apps/` directory. The public launch entry
 is `ctmux.app` on macOS, `ctmux.AppImage` on Linux, or `ctmux.lnk` on Windows.
 Use `ctlup dev --app` to build and install the desktop from a checkout.
@@ -269,8 +275,13 @@ Run `ctlup sign` from the checkout to renew the active development runtime's
 the checkout root explicitly. Restart `ctld` separately to use the renewed helper.
 [Development signing](local-bundles.md#renew-the-active-development-helpers-signature)
 
-Use `ctlup sign --version VERSION` to sign and notarize a tagged CI desktop
-release. [Release signing](ci-bundles.md#sign-a-ci-built-macos-desktop-release-locally)
+Use `ctlup sign --channel nightly` or `ctlup sign --version BUILD_ID` to sign
+and notarize a retained desktop archive. Install the desired build first with
+`ctlup install app`, then select it from the local cache. Signing an unsigned
+cached build exports an app archive and DMG and preserves the active app
+selection. Apple notarization contacts Apple's service, and local provisioning
+can also require network access.
+[Release signing](ci-bundles.md#sign-a-ci-built-macos-desktop-release-locally)
 
 The desktop development launcher bootstraps a private native `ctlup` executable
 with Cargo, then delegates preparation to `ctlup dev`. It passes Cargo's original

@@ -307,22 +307,36 @@ Use a Mac with Xcode's `notarytool` and `stapler`, a Developer ID Application
 certificate and its private key in the Keychain, the matching distribution
 profile for `ctld`, and an Apple notary API key.
 Set `CTLD_PROVISIONING_PROFILE`, `APPLE_API_KEY_PATH`, `APPLE_API_KEY`, and
-`APPLE_API_ISSUER` locally. The build job can publish the unsigned files without
-access to those credentials.
+`APPLE_API_ISSUER` locally. The build job can publish unsigned files. On a Mac
+with those credentials and a Developer ID identity, `ctlup install app` and
+`ctlup update app` sign and notarize an unsigned published package before
+activation. When the credentials or identity are absent, installation continues
+unsigned with a message. A signing or notarization failure preserves the
+previous active desktop selection.
 
 ```sh
-ctlup sign --version VERSION
+ctlup install app --channel nightly
+ctlup sign --channel nightly
+ctlup sign --version BUILD_ID
 ```
 
-Select the tagged release with `--version`. The target defaults to the Mac's
-architecture. To sign the Intel build from an Apple Silicon Mac, add
-`--target x86_64-apple-darwin`.
+Signing selects an archive already retained in the local desktop cache.
+`--channel` selects the last cached build for that channel. `--version` selects
+an exact build ID, including a Nightly build ID. The target defaults to the
+Mac's architecture. Add `--target x86_64-apple-darwin` when that target's archive
+is cached locally.
 
-The command downloads and verifies the unsigned build from the exact GitHub
-release, then signs, notarizes, and staples the app and a new DMG. It prints
-the output path under `~/.tokn/ctl/ctlup/signed/v<VERSION>/<TARGET>/`, or under
-the selected `CTL_DATA_DIR` profile. The signed packages, checksums, and release
-manifest are ready to attach to the GitHub release. Existing output is preserved.
+For an unsigned cached build, the command verifies the archive, signs and
+notarizes the app, and exports its archive, a new DMG, checksums, and a release
+manifest. It prints the output path under
+`~/.tokn/ctl/ctlup/signed/v<BUILD_ID>/<TARGET>/`, or under the selected
+`CTL_DATA_DIR` profile. The active app selection is preserved. An upstream
+package that is already signed reports that status. Existing output is preserved.
+
+Signing reads the app archive locally and contacts Apple for notarization.
+Profile renewal can also require network access. Automatically signed
+installations keep a separate archive digest for the signed bytes and retain
+the original publication identity for update checks and repair.
 
 ## Standalone helper release assets
 

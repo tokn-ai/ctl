@@ -14,8 +14,15 @@ For installation layouts and release channels, see the
 [component update guide](https://github.com/tokn-ai/ctl/blob/main/docs/component-updates.md).
 
 On macOS, run `ctlup sign` from a ctl checkout to renew the active development
-runtime's `ctld` signature. Run `ctlup sign --version VERSION` to download, sign,
-and notarize a tagged CI desktop release. Both reuse the existing build.
+runtime's `ctld` signature. Use `ctlup sign --channel nightly` or
+`ctlup sign --version BUILD_ID` to sign a retained desktop archive from the
+local cache. Install the desired desktop first, for example with
+`ctlup install app --channel nightly`. Without an active local development
+runtime, bare `ctlup sign` selects the active cached desktop. Signing reuses the
+cached build and contacts Apple for notarization. Desktop installs and updates
+automatically sign unsigned macOS packages when the required Apple credentials
+and Developer ID identity are available. Otherwise they continue unsigned with
+a message.
 [Release signing guide](https://github.com/tokn-ai/ctl/blob/main/docs/ci-bundles.md#sign-a-ci-built-macos-desktop-release-locally)
 
 Use `ctlup ctream install` and `ctlup ctream run` for the separate ctream

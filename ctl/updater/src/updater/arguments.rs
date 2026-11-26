@@ -49,7 +49,7 @@ pub(super) enum Command {
   },
   /// Build and install from the current checkout.
   Dev(DevelopmentArguments),
-  /// Renew local macOS development signing or sign a CI release.
+  /// Renew local macOS development signing or sign a cached desktop build.
   Sign(SignArguments),
   /// Show installed builds, their sources and missing payloads.
   Status(StatusArguments),
@@ -292,14 +292,17 @@ pub(super) struct StatusArguments {
 
 #[derive(Debug, Args)]
 pub(super) struct SignArguments {
-  /// Sign and notarize the CI build for a tagged release.
-  #[arg(long)]
+  /// Select a cached desktop build by its exact build ID.
+  #[arg(long, group = "cached_desktop")]
   pub version: Option<String>,
-  /// macOS Rust target for the CI build. Defaults to the current architecture.
-  #[arg(long, requires = "version", value_parser = ["aarch64-apple-darwin", "x86_64-apple-darwin"], value_name = "TRIPLE")]
+  /// Select the last locally cached desktop build for a channel.
+  #[arg(long, value_enum, group = "cached_desktop")]
+  pub channel: Option<Channel>,
+  /// macOS Rust target of the cached build. Defaults to the current architecture.
+  #[arg(long, requires = "cached_desktop", value_parser = ["aarch64-apple-darwin", "x86_64-apple-darwin"], value_name = "TRIPLE")]
   pub target: Option<String>,
   /// Checkout containing the development signer. Defaults to the current directory.
-  #[arg(long, conflicts_with = "version")]
+  #[arg(long, conflicts_with = "cached_desktop")]
   pub workspace: Option<PathBuf>,
   /// Output the result as JSON.
   #[arg(long)]
@@ -484,12 +487,13 @@ mod tests {
   }
 
   #[test]
-  fn signing_distinguishes_development_from_tagged_releases() {
+  fn signing_distinguishes_development_from_cached_desktop_builds() {
     let args = Arguments::try_parse_from(["ctlup", "sign"]).unwrap();
     assert!(matches!(
       args.command,
       Command::Sign(SignArguments {
         version: None,
+        channel: None,
         target: None,
         workspace: None,
         json: false,
@@ -515,10 +519,23 @@ mod tests {
       );
     }
     assert!(Arguments::try_parse_from(["ctlup", "sign", "--workspace", "checkout"]).is_ok());
+    assert!(
+      Arguments::try_parse_from([
+        "ctlup",
+        "sign",
+        "--channel",
+        "nightly",
+        "--target",
+        "aarch64-apple-darwin"
+      ])
+      .is_ok()
+    );
     for options in [
       &["--target", "aarch64-apple-darwin"][..],
       &["--version", "0.1.5", "--target", "x86_64-unknown-linux-gnu"],
       &["--version", "0.1.5", "--workspace", "checkout"],
+      &["--channel", "nightly", "--version", "0.1.5"],
+      &["--channel", "stable", "--workspace", "checkout"],
     ] {
       assert!(Arguments::try_parse_from([&["ctlup", "sign"], options].concat()).is_err());
     }

@@ -72,8 +72,8 @@ ctlup dev --app --workspace /path/to/checkout --json
 and installs it on this computer. It preserves the selected publication
 channel. On macOS it uses the development helper profile for signing and can
 renew an expired profile through Xcode. If provisioning or signing fails, the
-app can bundle an unsigned helper. Use `ctlup sign --version VERSION` to sign
-and notarize a tagged CI desktop package without rebuilding.
+app can bundle an unsigned helper. Use `ctlup sign --version BUILD_ID` to sign
+and notarize a CI desktop build already in the local install cache.
 [Release signing](ci-bundles.md#sign-a-ci-built-macos-desktop-release-locally)
 
 ## Install a ctream development build

@@ -19,6 +19,10 @@ mod activation;
 mod linux;
 #[cfg(target_os = "macos")]
 pub(super) mod macos;
+#[cfg(target_os = "macos")]
+mod signing;
+#[cfg(target_os = "macos")]
+pub(super) use signing::sign_cached;
 #[cfg(any(windows, test))]
 mod portable;
 #[cfg(windows)]
@@ -46,7 +50,7 @@ pub(super) async fn install(
   } else if let Some(number) = pr {
     let release = desktop::pull_request(number, target, work.staging()).await?;
     (
-      prepare_published(&work, release, target).await?,
+      prepare_published(&work, release, target, None).await?,
       DesktopSource::PullRequest { number },
     )
   } else if let Some(publication_id) = release {
@@ -54,9 +58,10 @@ pub(super) async fn install(
       .await
       .map_err(io::Error::other)?
       .release;
+    let channel = publication.channel;
     let release = desktop::resolve(publication, target, work.staging()).await?;
     (
-      prepare_published(&work, release, target).await?,
+      prepare_published(&work, release, target, Some(channel)).await?,
       DesktopSource::Release {
         publication_id: publication_id.to_owned(),
       },
@@ -65,7 +70,7 @@ pub(super) async fn install(
     let channel = channel.map_or_else(BundleChannel::configured_default, Into::into);
     let release = desktop::latest(channel, target, work.staging()).await?;
     (
-      prepare_published(&work, release, target).await?,
+      prepare_published(&work, release, target, Some(channel)).await?,
       DesktopSource::Channel {
         channel: channel.name().to_owned(),
       },
@@ -87,6 +92,23 @@ pub(super) async fn update(home: &Path, check: bool, json: bool) -> io::Result<(
   };
   let DesktopSource::Channel { channel } = &selected.source else {
     let installed = app_status(home, Some(selected.clone()))?;
+    #[cfg(target_os = "macos")]
+    if !check && !installed.missing && installed.signing == Some(Signing::Unsigned) {
+      let work = activation::Workspace::begin(home)?;
+      let digest = Digest::parse(&selected.content_id)?;
+      if let Some(package) = work.cached(&digest)? {
+        let signed = sign_if_unsigned(&work, package).await?;
+        if signed.metadata.signing == Signing::Signed {
+          return activate(
+            &work,
+            Some(&selected),
+            &signed,
+            selected.source.clone(),
+            json,
+          );
+        }
+      }
+    }
     if check || !installed.missing {
       let state = if installed.missing {
         CheckState::Missing
@@ -95,7 +117,7 @@ pub(super) async fn update(home: &Path, check: bool, json: bool) -> io::Result<(
       };
       return report_inactive_check(installed, state, json);
     }
-    return ensure_selected(&activation::Workspace::begin(home)?, &selected, json);
+    return ensure_selected(&activation::Workspace::begin(home)?, &selected, json).await;
   };
   let channel = parse_channel(channel)?;
   let target = DesktopTarget::native()?;
@@ -104,7 +126,7 @@ pub(super) async fn update(home: &Path, check: bool, json: bool) -> io::Result<(
   }
   let work = activation::Workspace::begin(home)?;
   let release = desktop::latest(channel, target, work.staging()).await?;
-  let package = prepare_published(&work, release, target).await?;
+  let package = prepare_published(&work, release, target, Some(channel)).await?;
   let source = selected.source.clone();
   activate(&work, Some(&selected), &package, source, json)
 }
@@ -181,7 +203,7 @@ pub(super) async fn install_development(
   )
 }
 
-fn ensure_selected(
+async fn ensure_selected(
   work: &activation::Workspace,
   selected: &DesktopSelection,
   json: bool,
@@ -213,7 +235,14 @@ fn ensure_selected(
       json,
     );
   };
-  activate(work, Some(selected), &cached, selected.source.clone(), json)
+  let package = sign_if_unsigned(work, cached).await?;
+  activate(
+    work,
+    Some(selected),
+    &package,
+    selected.source.clone(),
+    json,
+  )
 }
 
 fn activate(
@@ -273,7 +302,8 @@ async fn check_updates(
   } else {
     match desktop::stable_descriptor(publication, target).await {
       Ok(release)
-        if !current.missing && current.content_id.as_deref() == Some(release.content_id()) =>
+        if !current.missing
+          && current.source_content_id.as_deref() == Some(release.content_id()) =>
       {
         CheckState::Current
       }
@@ -323,6 +353,11 @@ enum CheckState {
 #[derive(Serialize)]
 struct AppStatus {
   content_id: Option<String>,
+  #[serde(skip)]
+  source_content_id: Option<String>,
+  #[cfg(target_os = "macos")]
+  #[serde(skip)]
+  signing: Option<Signing>,
   bundle_id: Option<String>,
   publication_id: Option<String>,
   source: Option<DesktopSource>,
@@ -336,6 +371,9 @@ fn app_status(home: &Path, selected: Option<DesktopSelection>) -> io::Result<App
   let Some(selected) = selected else {
     return Ok(AppStatus {
       content_id: None,
+      source_content_id: None,
+      #[cfg(target_os = "macos")]
+      signing: None,
       bundle_id: None,
       publication_id: None,
       source: None,
@@ -357,11 +395,20 @@ fn app_status(home: &Path, selected: Option<DesktopSelection>) -> io::Result<App
   } else {
     activation::cached_metadata(&store, &digest)?
   };
+  let source_content_id = metadata
+    .as_ref()
+    .and_then(|metadata| metadata.signed_from.as_ref())
+    .map_or_else(|| selected.content_id.clone(), |digest| digest.0.clone());
+  #[cfg(target_os = "macos")]
+  let signing = metadata.as_ref().map(|metadata| metadata.signing);
   let (bundle_id, publication_id) = metadata
     .map(|metadata| (metadata.bundle_id, metadata.publication_id))
     .unwrap_or_default();
   Ok(AppStatus {
     content_id: Some(selected.content_id),
+    source_content_id: Some(source_content_id),
+    #[cfg(target_os = "macos")]
+    signing,
     bundle_id,
     publication_id,
     source: Some(selected.source),
@@ -428,6 +475,19 @@ struct DesktopMetadata {
   publication_id: Option<String>,
   target_triple: String,
   signing: Signing,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  provenance: Option<DesktopProvenance>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  signed_from: Option<Digest>,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DesktopProvenance {
+  channel: Option<BundleChannel>,
+  source_revision: String,
+  installation_layout_version: Option<u16>,
+  built_at: Option<String>,
 }
 
 impl DesktopMetadata {
@@ -440,6 +500,8 @@ impl DesktopMetadata {
       publication_id: None,
       target_triple: target.triple().to_owned(),
       signing: Signing::Provided,
+      provenance: None,
+      signed_from: None,
     }
   }
 
@@ -454,6 +516,15 @@ impl DesktopMetadata {
     {
       return Err(invalid(
         "desktop package metadata does not match the stored object",
+      ));
+    }
+    if let Some(source) = &self.signed_from
+      && (Digest::parse(source.as_str()).is_err()
+        || source == digest
+        || !matches!(self.signing, Signing::Signed))
+    {
+      return Err(invalid(
+        "invalid unsigned source for the signed desktop package",
       ));
     }
     Ok(())
@@ -527,6 +598,7 @@ async fn prepare_published(
   work: &activation::Workspace,
   release: DesktopRelease,
   target: DesktopTarget,
+  channel: Option<BundleChannel>,
 ) -> io::Result<CachedPackage> {
   let signing = release.signing();
   let signing_note = if signing == DesktopSigning::Unsigned {
@@ -553,12 +625,19 @@ async fn prepare_published(
     release.download(&archive).await?;
     archive
   };
-  Ok(CachedPackage {
+  let installation_layout_version = release.installation_layout_version();
+  let provenance = DesktopProvenance {
+    channel,
+    source_revision: release.source_revision,
+    installation_layout_version,
+    built_at: release.built_at,
+  };
+  let package = CachedPackage {
     archive,
     naming: DesktopNaming {
-      installation_layout_version: release.installation_layout_version(),
-      source_revision: Some(release.source_revision),
-      built_at: release.built_at,
+      installation_layout_version,
+      source_revision: Some(provenance.source_revision.clone()),
+      built_at: provenance.built_at.clone(),
     },
     metadata: DesktopMetadata {
       content_id: digest,
@@ -566,9 +645,22 @@ async fn prepare_published(
       bundle_id: Some(release.bundle_id),
       publication_id: release.publication_id,
       signing: signing.into(),
+      provenance: cfg!(target_os = "macos").then_some(provenance),
       ..DesktopMetadata::provided(target)
     },
-  })
+  };
+  sign_if_unsigned(work, package).await
+}
+
+#[cfg(target_os = "macos")]
+use signing::sign_if_unsigned;
+
+#[cfg(not(target_os = "macos"))]
+fn sign_if_unsigned(
+  _: &activation::Workspace,
+  package: CachedPackage,
+) -> std::future::Ready<io::Result<CachedPackage>> {
+  std::future::ready(Ok(package))
 }
 
 fn prepare_supplied(

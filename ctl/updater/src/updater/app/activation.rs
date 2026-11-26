@@ -1,13 +1,48 @@
+#[cfg(target_os = "macos")]
+use super::Signing;
 use super::{
   CachedPackage, DesktopMetadata, DesktopNaming, DesktopPayload, Digest, app_destination, invalid,
 };
+#[cfg(target_os = "macos")]
+use ctl_client::remote_bundle::desktop::DesktopTarget;
+use ctl_core::component_update::BundleChannel;
+#[cfg(target_os = "macos")]
+use ctl_core::installations::DesktopSource;
 use ctl_core::installations::{DesktopSelection, Installations};
 use ctl_core::private_fs;
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{
-  fs::{self, File, Metadata},
-  io::{self, Write as _},
+  collections::BTreeSet,
+  fs::{self, DirEntry, File, Metadata},
+  io::{self, Read as _, Write as _},
   path::{Path, PathBuf},
 };
+
+const CACHE_REFERENCES: &str = "references.json";
+const SIGNED_REFERENCE: &str = "signed.json";
+
+#[derive(Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CacheReferences {
+  stable: Option<Digest>,
+  nightly: Option<Digest>,
+}
+
+impl CacheReferences {
+  fn channel_mut(&mut self, channel: BundleChannel) -> &mut Option<Digest> {
+    match channel {
+      BundleChannel::Stable => &mut self.stable,
+      BundleChannel::Nightly => &mut self.nightly,
+    }
+  }
+
+  fn validate(&self) -> io::Result<()> {
+    for digest in [&self.stable, &self.nightly].into_iter().flatten() {
+      Digest::parse(digest.as_str())?;
+    }
+    Ok(())
+  }
+}
 
 pub(super) struct Workspace {
   installations: Installations,
@@ -83,6 +118,11 @@ impl Workspace {
   }
 
   pub(super) fn cache(&self, package: &CachedPackage) -> io::Result<()> {
+    self.cache_package(package)?;
+    self.remember_package(&package.metadata)
+  }
+
+  fn cache_package(&self, package: &CachedPackage) -> io::Result<()> {
     let directory = self.downloads.join(package.metadata.content_id.as_str());
     let cached = self.cached(&package.metadata.content_id)?;
     if let Some(existing) = cached.as_ref() {
@@ -99,14 +139,289 @@ impl Workspace {
     private_fs::create_directory(&temporary)?;
     let archive = temporary.join("package");
     super::copy_package(&package.archive, &archive)?;
+    if super::package_digest(&archive)? != package.metadata.content_id {
+      return Err(invalid(
+        "desktop archive changed while being copied to the cache",
+      ));
+    }
     write_metadata(&temporary, &package.metadata)?;
     private_fs::sync_directory(&temporary)?;
+    let previous = self.staging.join(format!(
+      "discarded-cache-{}",
+      package.metadata.content_id.as_str()
+    ));
     if cached.is_some() {
       // Replace a damaged cache entry only once a verified copy is staged.
-      fs::rename(&directory, self.staging.join("discarded-cache-entry"))?;
+      fs::rename(&directory, &previous)?;
     }
-    fs::rename(&temporary, &directory)?;
+    if let Err(error) = fs::rename(&temporary, &directory) {
+      if cached.is_some() {
+        fs::rename(previous, &directory)?;
+      }
+      return Err(error);
+    }
     private_fs::sync_directory(&self.downloads)
+  }
+
+  fn references(&self) -> io::Result<CacheReferences> {
+    let references: CacheReferences =
+      match read_private_json(&self.downloads.join(CACHE_REFERENCES)) {
+        Ok(references) => references,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+          return Ok(CacheReferences::default());
+        }
+        Err(error) => return Err(error),
+      };
+    references.validate()?;
+    Ok(references)
+  }
+
+  fn write_reference(
+    &self,
+    directory: &Path,
+    filename: &str,
+    value: &impl Serialize,
+  ) -> io::Result<()> {
+    let staged = self.staging.join(filename);
+    write_private_json(&staged, value)?;
+    fs::rename(staged, directory.join(filename))?;
+    private_fs::sync_directory(directory)
+  }
+
+  fn signed_reference(&self, source: &Digest) -> io::Result<Option<Digest>> {
+    let directory = self.downloads.join(source.as_str());
+    let Some(info) = metadata(&directory)? else {
+      return Ok(None);
+    };
+    if !private_fs::is_directory(&info) {
+      return Err(invalid("unsafe cached desktop package directory"));
+    }
+    let signed: Digest = match read_private_json(&directory.join(SIGNED_REFERENCE)) {
+      Ok(signed) => signed,
+      Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+      Err(error) => return Err(error),
+    };
+    Digest::parse(signed.as_str())?;
+    if &signed == source {
+      return Err(invalid(
+        "desktop signing cache refers to its input as the signed output",
+      ));
+    }
+    Ok(Some(signed))
+  }
+
+  fn remember_package(&self, metadata: &DesktopMetadata) -> io::Result<()> {
+    if let Some(source) = &metadata.signed_from {
+      if self.signed_reference(source)?.as_ref() == Some(&metadata.content_id) {
+        return Ok(());
+      }
+      let directory = self.downloads.join(source.as_str());
+      if directory.is_dir() {
+        return self.write_reference(&directory, SIGNED_REFERENCE, &metadata.content_id);
+      }
+      // A signed archive is still usable for repair if its original input was removed.
+      return Ok(());
+    }
+    if let Some(channel) = metadata
+      .provenance
+      .as_ref()
+      .and_then(|provenance| provenance.channel)
+    {
+      let mut references = self.references()?;
+      let selected = references.channel_mut(channel);
+      if selected.as_ref() == Some(&metadata.content_id) {
+        return Ok(());
+      }
+      *selected = Some(metadata.content_id.clone());
+      self.write_reference(&self.downloads, CACHE_REFERENCES, &references)?;
+    }
+    Ok(())
+  }
+
+  #[cfg(target_os = "macos")]
+  pub(super) fn signing_package(
+    &self,
+    channel: Option<BundleChannel>,
+    version: Option<&str>,
+    target: DesktopTarget,
+  ) -> io::Result<CachedPackage> {
+    let selected = self.installations.desktop_selection()?;
+    let package = match (channel, version) {
+      (Some(channel), None) => self.package_for_channel(channel, selected.as_ref())?,
+      (None, Some(version)) => self.package_for_version(version, selected.as_ref())?,
+      (None, None) => self.active_signing_package(selected.as_ref())?,
+      _ => return Err(invalid("choose a desktop signing channel or version")),
+    };
+    if package.metadata.target_triple != target.triple() {
+      return Err(invalid(
+        "cached desktop package does not match the signing target",
+      ));
+    }
+    let digest = super::package_digest(&package.archive).map_err(|error| {
+      if error.kind() == io::ErrorKind::NotFound {
+        io::Error::new(
+          io::ErrorKind::NotFound,
+          "The selected desktop archive is missing. Install that build before signing.",
+        )
+      } else {
+        error
+      }
+    })?;
+    if digest != package.metadata.content_id {
+      return Err(invalid(
+        "cached desktop package checksum does not match its receipt",
+      ));
+    }
+    Ok(package)
+  }
+
+  #[cfg(target_os = "macos")]
+  fn active_signing_package(
+    &self,
+    selected: Option<&DesktopSelection>,
+  ) -> io::Result<CachedPackage> {
+    let found = selected
+      .map(|selected| Digest::parse(&selected.content_id).and_then(|digest| self.cached(&digest)))
+      .transpose()?
+      .flatten();
+    let Some(package) = found else {
+      return Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        "No active local development runtime or cached desktop build. Install the desktop with ctlup install app or select a cached build with --version.",
+      ));
+    };
+    if !matches!(
+      package.metadata.signing,
+      Signing::Signed | Signing::Unsigned
+    ) {
+      return Err(invalid("active desktop is not a published macOS build"));
+    }
+    Ok(package)
+  }
+
+  #[cfg(target_os = "macos")]
+  fn package_for_channel(
+    &self,
+    channel: BundleChannel,
+    selected: Option<&DesktopSelection>,
+  ) -> io::Result<CachedPackage> {
+    let mut references = self.references()?;
+    let indexed = references.channel_mut(channel).as_ref();
+    let legacy = selected
+      .filter(|selected| matches!(&selected.source, DesktopSource::Channel { channel: tracked } if tracked == channel.name()))
+      .map(|selected| Digest::parse(&selected.content_id))
+      .transpose()?;
+    let found = indexed
+      .or(legacy.as_ref())
+      .map(|digest| self.cached(digest))
+      .transpose()?
+      .flatten();
+    let Some(package) = found else {
+      return Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        format!(
+          "No {} desktop package is cached. Install the desktop from that channel first.",
+          channel.name()
+        ),
+      ));
+    };
+    let provenance = package.metadata.provenance.as_ref();
+    if !official_package(&package.metadata)
+      || (indexed.is_some()
+        && provenance.and_then(|provenance| provenance.channel) != Some(channel))
+      || provenance
+        .and_then(|provenance| provenance.channel)
+        .is_some_and(|recorded| recorded != channel)
+    {
+      return Err(invalid(
+        "cached desktop package does not belong to the signing channel",
+      ));
+    }
+    Ok(package)
+  }
+
+  #[cfg(target_os = "macos")]
+  fn package_for_version(
+    &self,
+    version: &str,
+    selected: Option<&DesktopSelection>,
+  ) -> io::Result<CachedPackage> {
+    let legacy = selected.filter(|selected| {
+      matches!(
+        selected.source,
+        DesktopSource::Channel { .. } | DesktopSource::Release { .. }
+      )
+    });
+    let mut found: Option<CachedPackage> = None;
+    for entry in fs::read_dir(&self.downloads)? {
+      let Some(digest) = cache_entry_digest(&entry?) else {
+        continue;
+      };
+      let Some(package) = self.cached(&digest)? else {
+        continue;
+      };
+      if package.metadata.bundle_id.as_deref() != Some(version)
+        || !official_package(&package.metadata)
+        || !(package
+          .metadata
+          .provenance
+          .as_ref()
+          .is_some_and(|provenance| provenance.channel.is_some())
+          || legacy.is_some_and(|selected| selected.content_id == digest.as_str()))
+      {
+        continue;
+      }
+      if let Some(previous) = &found {
+        if previous.metadata.publication_id != package.metadata.publication_id
+          || previous.metadata.provenance != package.metadata.provenance
+          || previous.metadata.signing == package.metadata.signing
+        {
+          return Err(invalid(
+            "multiple cached desktop packages match this version",
+          ));
+        }
+        if previous.metadata.signing == Signing::Signed {
+          continue;
+        }
+      }
+      found = Some(package);
+    }
+    found.ok_or_else(|| {
+      io::Error::new(
+        io::ErrorKind::NotFound,
+        format!("No desktop package for {version} is cached. Install that build first."),
+      )
+    })
+  }
+
+  #[cfg(target_os = "macos")]
+  pub(super) fn cached_signed_derivative(
+    &self,
+    source: &CachedPackage,
+  ) -> io::Result<Option<CachedPackage>> {
+    let Some(derived) = self.signed_reference(&source.metadata.content_id)? else {
+      return Ok(None);
+    };
+    let Some(package) = self.cached(&derived)? else {
+      return Ok(None);
+    };
+    let metadata = &package.metadata;
+    if metadata.signing != Signing::Signed
+      || metadata.signed_from.as_ref() != Some(&source.metadata.content_id)
+      || metadata.target_triple != source.metadata.target_triple
+      || metadata.app_version != source.metadata.app_version
+      || metadata.bundle_id != source.metadata.bundle_id
+      || metadata.publication_id != source.metadata.publication_id
+      || metadata.provenance != source.metadata.provenance
+    {
+      return Ok(None);
+    }
+    match super::package_digest(&package.archive) {
+      Ok(digest) if digest == derived => Ok(Some(package)),
+      Ok(_) => Ok(None),
+      Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+      Err(error) => Err(error),
+    }
   }
 
   pub(super) fn activate(
@@ -193,15 +508,35 @@ impl Workspace {
   }
 
   pub(super) fn prune_downloads(&self, selected: Option<&DesktopSelection>) -> io::Result<()> {
+    let references = self.references()?;
+    let mut retained = BTreeSet::new();
+    let mut sources = Vec::from_iter(
+      [references.stable, references.nightly]
+        .into_iter()
+        .flatten(),
+    );
+    if let Some(selected) = selected {
+      let digest = Digest::parse(&selected.content_id)?;
+      retained.insert(selected.content_id.clone());
+      if let Some(source) = self
+        .cached(&digest)?
+        .and_then(|package| package.metadata.signed_from)
+      {
+        sources.push(source);
+      }
+    }
+    for source in sources {
+      if let Some(signed) = self.signed_reference(&source)? {
+        retained.insert(signed.as_str().to_owned());
+      }
+      retained.insert(source.as_str().to_owned());
+    }
     for entry in fs::read_dir(&self.downloads)? {
       let entry = entry?;
-      let identity = entry.file_name();
-      let Some(identity) = identity.to_str() else {
+      let Some(digest) = cache_entry_digest(&entry) else {
         continue;
       };
-      if Digest::parse(identity).is_err()
-        || selected.is_some_and(|selection| selection.content_id == identity)
-      {
+      if retained.contains(digest.as_str()) {
         continue;
       }
       let path = entry.path();
@@ -251,7 +586,7 @@ impl Workspace {
     let temporary = self
       .staging
       .join(format!("receipt-{}", uuid::Uuid::new_v4()));
-    write_metadata_file(&temporary, desired)?;
+    write_private_json(&temporary, desired)?;
     fs::rename(temporary, directory.join("desktop.json"))?;
     private_fs::sync_directory(directory)
   }
@@ -391,10 +726,13 @@ fn ensure_subdirectories<const COUNT: usize>(
 }
 
 pub(super) fn read_metadata(path: &Path, digest: &Digest) -> io::Result<DesktopMetadata> {
-  use std::io::Read as _;
-  let file = private_fs::options()
-    .read(true)
-    .open(path.join("desktop.json"))?;
+  let metadata: DesktopMetadata = read_private_json(&path.join("desktop.json"))?;
+  metadata.validate(digest)?;
+  Ok(metadata)
+}
+
+fn read_private_json<T: DeserializeOwned>(path: &Path) -> io::Result<T> {
+  let file = private_fs::options().read(true).open(path)?;
   if !private_fs::is_private_file(&file.metadata()?) {
     return Err(invalid("desktop metadata must be a private owned file"));
   }
@@ -403,9 +741,7 @@ pub(super) fn read_metadata(path: &Path, digest: &Digest) -> io::Result<DesktopM
   if bytes.len() > 65536 {
     return Err(invalid("desktop metadata exceeds its size limit"));
   }
-  let metadata: DesktopMetadata = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
-  metadata.validate(digest)?;
-  Ok(metadata)
+  serde_json::from_slice(&bytes).map_err(io::Error::other)
 }
 
 pub(super) fn status_payload(
@@ -449,15 +785,15 @@ fn existing_subdirectories(root: &Path, names: &[&str]) -> io::Result<Option<Pat
 }
 
 fn write_metadata(path: &Path, metadata: &DesktopMetadata) -> io::Result<()> {
-  write_metadata_file(&path.join("desktop.json"), metadata)
+  write_private_json(&path.join("desktop.json"), metadata)
 }
 
-fn write_metadata_file(path: &Path, metadata: &DesktopMetadata) -> io::Result<()> {
+fn write_private_json(path: &Path, value: &impl Serialize) -> io::Result<()> {
   let mut output = private_fs::options()
     .create_new(true)
     .write(true)
     .open(path)?;
-  serde_json::to_writer(&mut output, metadata).map_err(io::Error::other)?;
+  serde_json::to_writer(&mut output, value).map_err(io::Error::other)?;
   writeln!(output)?;
   output.sync_all()
 }
@@ -469,9 +805,177 @@ fn cache_package(directory: &Path, digest: &Digest) -> io::Result<Option<CachedP
   if !private_fs::is_directory(&info) {
     return Err(invalid("unsafe cached desktop package directory"));
   }
+  let metadata = read_metadata(directory, digest)?;
+  let naming = metadata
+    .provenance
+    .as_ref()
+    .map_or_else(DesktopNaming::default, |provenance| DesktopNaming {
+      installation_layout_version: provenance.installation_layout_version,
+      source_revision: Some(provenance.source_revision.clone()),
+      built_at: provenance.built_at.clone(),
+    });
   Ok(Some(CachedPackage {
-    metadata: read_metadata(directory, digest)?,
+    metadata,
     archive: directory.join("package"),
-    naming: DesktopNaming::default(),
+    naming,
   }))
+}
+
+fn cache_entry_digest(entry: &DirEntry) -> Option<Digest> {
+  Digest::parse(entry.file_name().to_str()?).ok()
+}
+
+#[cfg(target_os = "macos")]
+fn official_package(metadata: &DesktopMetadata) -> bool {
+  metadata.signed_from.is_none() && matches!(metadata.signing, Signing::Signed | Signing::Unsigned)
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+  use super::*;
+  use crate::updater::app::DesktopProvenance;
+
+  struct Fixture(PathBuf);
+
+  impl Fixture {
+    fn new() -> Self {
+      let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target")
+        .join(format!(
+          "test-desktop-signing-cache-{}",
+          uuid::Uuid::new_v4()
+        ));
+      private_fs::create_directory(&root).unwrap();
+      Self(root)
+    }
+
+    fn workspace(&self) -> Workspace {
+      let [lock, store, downloads, staging, destination] =
+        ["lock", "store", "downloads", "staging", "ctmux.app"].map(|name| self.0.join(name));
+      for directory in [&store, &downloads, &staging] {
+        private_fs::create_directory(directory).unwrap();
+      }
+      Workspace {
+        installations: Installations::new(&self.0),
+        store,
+        downloads,
+        staging,
+        destination,
+        _lock: private_fs::options()
+          .write(true)
+          .create_new(true)
+          .open(lock)
+          .unwrap(),
+      }
+    }
+
+    fn package(&self, name: &str, bundle_id: &str, channel: BundleChannel) -> CachedPackage {
+      let archive = self.0.join(name);
+      fs::write(&archive, name).unwrap();
+      let metadata = DesktopMetadata {
+        content_id: super::super::package_digest(&archive).unwrap(),
+        bundle_id: Some(bundle_id.into()),
+        app_version: Some("0.1.5".into()),
+        publication_id: Some(format!("{bundle_id}-17-1")),
+        signing: Signing::Unsigned,
+        provenance: Some(DesktopProvenance {
+          channel: Some(channel),
+          source_revision: "a".repeat(40),
+          installation_layout_version: Some(7),
+          built_at: Some("2026-01-01T00:00:00Z".into()),
+        }),
+        ..DesktopMetadata::provided(DesktopTarget::native().unwrap())
+      };
+      CachedPackage {
+        archive,
+        metadata,
+        naming: DesktopNaming::default(),
+      }
+    }
+  }
+
+  impl Drop for Fixture {
+    fn drop(&mut self) {
+      fs::remove_dir_all(&self.0).unwrap();
+    }
+  }
+
+  #[test]
+  fn retains_channel_packages_and_their_signed_derivatives() {
+    let fixture = Fixture::new();
+    let work = fixture.workspace();
+    let old = fixture.package("old archive", "0.1.4", BundleChannel::Stable);
+    let stable = fixture.package("stable archive", "0.1.5", BundleChannel::Stable);
+    let nightly = fixture.package(
+      "nightly archive",
+      "0.1.5-nightly.20260101+gaaaaaaaaaaaa",
+      BundleChannel::Nightly,
+    );
+    let mut signed = fixture.package("signed archive", "0.1.5", BundleChannel::Stable);
+    signed.metadata.signing = Signing::Signed;
+    signed.metadata.signed_from = Some(stable.metadata.content_id.clone());
+    for package in [&old, &stable, &nightly, &signed] {
+      work.cache(package).unwrap();
+    }
+    work.prune_downloads(None).unwrap();
+    assert!(work.cached(&old.metadata.content_id).unwrap().is_none());
+    for (channel, expected) in [
+      (BundleChannel::Stable, &stable),
+      (BundleChannel::Nightly, &nightly),
+    ] {
+      let found = work.package_for_channel(channel, None).unwrap();
+      assert_eq!(found.metadata.content_id, expected.metadata.content_id);
+      assert_eq!(found.naming.installation_layout_version, Some(7));
+    }
+    let cached = work.cached_signed_derivative(&stable).unwrap().unwrap();
+    assert_eq!(cached.metadata.content_id, signed.metadata.content_id);
+    let selected = DesktopSelection {
+      content_id: cached.metadata.content_id.as_str().to_owned(),
+      source: DesktopSource::Channel {
+        channel: BundleChannel::Stable.name().to_owned(),
+      },
+    };
+    let active = work.active_signing_package(Some(&selected)).unwrap();
+    assert_eq!(active.metadata.content_id, cached.metadata.content_id);
+    fs::write(cached.archive, "damaged signed archive").unwrap();
+    assert!(work.cached_signed_derivative(&stable).unwrap().is_none());
+  }
+
+  #[test]
+  fn changed_bytes_do_not_publish_a_cache_entry_or_channel_reference() {
+    let fixture = Fixture::new();
+    let work = fixture.workspace();
+    let package = fixture.package("stable archive", "0.1.5", BundleChannel::Stable);
+    fs::write(&package.archive, "damaged unsigned archive").unwrap();
+    assert!(work.cache(&package).is_err());
+    assert!(work.cached(&package.metadata.content_id).unwrap().is_none());
+    assert!(work.references().unwrap().stable.is_none());
+  }
+
+  #[test]
+  fn exact_version_uses_the_bundle_id_and_rejects_conflicting_publications() {
+    let fixture = Fixture::new();
+    let work = fixture.workspace();
+    let stable = fixture.package("stable archive", "0.1.5", BundleChannel::Stable);
+    let nightly = fixture.package(
+      "nightly archive",
+      "0.1.5-nightly.20260101+gaaaaaaaaaaaa",
+      BundleChannel::Nightly,
+    );
+    work.cache(&stable).unwrap();
+    work.cache(&nightly).unwrap();
+    assert_eq!(
+      work
+        .package_for_version("0.1.5", None)
+        .unwrap()
+        .metadata
+        .content_id,
+      stable.metadata.content_id
+    );
+    let mut conflicting = fixture.package("other stable archive", "0.1.5", BundleChannel::Stable);
+    conflicting.metadata.publication_id = Some("0.1.5-18-1".into());
+    work.cache(&conflicting).unwrap();
+    let result = work.package_for_version("0.1.5", None);
+    assert!(matches!(result, Err(error) if error.to_string().contains("multiple cached")));
+  }
 }
